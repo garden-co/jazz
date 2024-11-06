@@ -50,34 +50,71 @@ export type SingleCoStreamEntry<Item> = {
   tx: CojsonInternalTypes.TransactionID;
 };
 
-/** @category CoValues */
+/**
+ * CoStreams are collaborative logs of data.
+ *
+ * They are similar to `CoList`s, but with a few key differences:
+ * - They are append-only
+ * - They have a per-session view
+ *
+ * ```ts
+ *
+ *
+ * @category CoValues
+ */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export class CoStream<Item = any> extends CoValueBase implements CoValue {
+  /**
+   * Declare a `CoStream` by subclassing `CoStream.Of(...)` and passing the item schema using `co`.
+   *
+   * @example
+   * ```ts
+   * class ColorStream extends CoStream.Of(co.string) {}
+   * class AnimalStream extends CoStream.Of(co.ref(Animal)) {}
+   * ```
+   *
+   * @category Declaration
+   */
   static Of<Item>(item: IfCo<Item, Item>): typeof CoStream<Item> {
     return class CoStreamOf extends CoStream<Item> {
       [co.items] = item;
     };
   }
 
+  /**
+   * The ID of this `CoStream`
+   * @category Content */
   declare id: ID<this>;
+  /** @category Type Helpers */
   declare _type: "CoStream";
   static {
     this.prototype._type = "CoStream";
   }
+  /** @category Internals */
   declare _raw: RawCoStream;
 
   /** @internal This is only a marker type and doesn't exist at runtime */
   [ItemsSym]!: Item;
+  /** @internal */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   static _schema: any;
+  /** @internal */
   get _schema(): {
     [ItemsSym]: SchemaFor<Item>;
   } {
     return (this.constructor as typeof CoStream)._schema;
   }
 
+  /**
+   * The per-account view of this `CoStream`
+   * @category Content
+   */
   [key: ID<Account>]: CoStreamEntry<Item>;
 
+  /**
+   * The current account's view of this `CoStream`
+   * @category Content
+   */
   get byMe(): CoStreamEntry<Item> | undefined {
     if (this._loadedAs._type === "Account") {
       return this[this._loadedAs.id];
@@ -85,9 +122,22 @@ export class CoStream<Item = any> extends CoValueBase implements CoValue {
       return undefined;
     }
   }
+
+  /**
+   * The per-session view of this `CoStream`
+   * @category Content
+   */
   perSession!: {
     [key: SessionID]: CoStreamEntry<Item>;
   };
+
+  /**
+   * The current session's view of this `CoStream`
+   *
+   * This is a shortcut for `this.perSession` where the session ID is the current session ID.
+   *
+   * @category Content
+   */
   get inCurrentSession(): CoStreamEntry<Item> | undefined {
     if (this._loadedAs._type === "Account") {
       return this.perSession[this._loadedAs.sessionID!];
@@ -116,6 +166,10 @@ export class CoStream<Item = any> extends CoValueBase implements CoValue {
     return new Proxy(this, CoStreamProxyHandler as ProxyHandler<this>);
   }
 
+  /**
+   * Create a new `CoStream`
+   * @category Creation
+   */
   static create<S extends CoStream>(
     this: CoValueClass<S>,
     init: S extends CoStream<infer Item> ? UnCo<Item>[] : never,
