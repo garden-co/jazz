@@ -273,7 +273,10 @@ export class CoStream<Item = any> extends CoValueBase implements CoValue {
     Object.assign(this._schema, def);
   }
 
-  /** @category Subscription & Loading */
+  /**
+   * Load a `CoStream`
+   * @category Subscription & Loading
+   */
   static load<S extends CoStream, Depth>(
     this: CoValueClass<S>,
     id: ID<S>,
@@ -283,7 +286,10 @@ export class CoStream<Item = any> extends CoValueBase implements CoValue {
     return loadCoValue(this, id, as, depth);
   }
 
-  /** @category Subscription & Loading */
+  /**
+   * Subscribe to a `CoStream`, when you have an ID but don't have a `CoStream` instance yet
+   * @category Subscription & Loading
+   */
   static subscribe<S extends CoStream, Depth>(
     this: CoValueClass<S>,
     id: ID<S>,
@@ -294,7 +300,10 @@ export class CoStream<Item = any> extends CoValueBase implements CoValue {
     return subscribeToCoValue<S, Depth>(this, id, as, depth, listener);
   }
 
-  /** @category Subscription & Loading */
+  /**
+   * Ensure a `CoStream` is loaded
+   * @category Subscription & Loading
+   */
   ensureLoaded<S extends CoStream, Depth>(
     this: S,
     depth: Depth & DepthsIn<S>,
@@ -302,7 +311,12 @@ export class CoStream<Item = any> extends CoValueBase implements CoValue {
     return ensureCoValueLoaded(this, depth);
   }
 
-  /** @category Subscription & Loading */
+  /**
+   * An instance method to subscribe to an existing `CoStream`
+   *
+   * No need to provide an ID or Account since they're already part of the instance.
+   * @category Subscription & Loading
+   */
   subscribe<S extends CoStream, Depth>(
     this: S,
     depth: Depth & DepthsIn<S>,
@@ -312,6 +326,10 @@ export class CoStream<Item = any> extends CoValueBase implements CoValue {
   }
 }
 
+/**
+ * Converts a raw stream entry into a formatted CoStream entry with proper typing and accessors.
+ * @internal
+ */
 function entryFromRawEntry<Item>(
   accessFrom: CoValue,
   rawEntry: {
@@ -374,6 +392,10 @@ function entryFromRawEntry<Item>(
   };
 }
 
+/**
+ * The proxy handler for `CoStream` instances
+ * @internal
+ */
 export const CoStreamProxyHandler: ProxyHandler<CoStream> = {
   get(target, key, receiver) {
     if (typeof key === "string" && key.startsWith("co_")) {
@@ -462,6 +484,10 @@ export const CoStreamProxyHandler: ProxyHandler<CoStream> = {
   },
 };
 
+/**
+ * The proxy handler for the per-session view of a `CoStream`
+ * @internal
+ */
 const CoStreamPerSessionProxyHandler = (
   innerTarget: CoStream,
   accessFrom: CoStream,
