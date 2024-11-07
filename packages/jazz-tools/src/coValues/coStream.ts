@@ -554,13 +554,30 @@ const CoStreamPerSessionProxyHandler = (
 });
 
 /**
- * A `CoStream` that contains binary data
+ * BinaryCoStreams are `CoStream`s that contain binary data, collaborative versions of `Blob`s.
+ *
+ * @categoryDescription Declaration
+ * `BinaryCoStream` can be referenced in schemas.
+ *
+ * ```ts
+ * import { co, BinaryCoStream } from "jazz-tools";
+ *
+ * class MyCoMap extends CoMap {
+ *   file = co.ref(BinaryCoStream);
+ * }
+ * ```
  *
  * @category CoValues
  */
 export class BinaryCoStream extends CoValueBase implements CoValue {
+  /**
+   * The ID of this `BinaryCoStream`
+   * @category Content
+   */
   declare id: ID<this>;
+  /** @category Type Helpers */
   declare _type: "BinaryCoStream";
+  /** @internal */
   declare _raw: RawBinaryCoStream;
 
   constructor(
@@ -639,6 +656,7 @@ export class BinaryCoStream extends CoValueBase implements CoValue {
 
   /**
    * Load a `BinaryCoStream` as a `Blob`
+   *
    * @category Content
    */
   static async loadAsBlob(
@@ -672,6 +690,14 @@ export class BinaryCoStream extends CoValueBase implements CoValue {
 
   /**
    * Create a `BinaryCoStream` from a `Blob` or `File`
+   *
+   * @example
+   * ```ts
+   * import { co, BinaryCoStream } from "jazz-tools";
+   *
+   * const binaryCoStream = await BinaryCoStream.createFromBlob(file, {owner: group})
+   * ```
+   *
    * @category Content
    */
   static async createFromBlob(
