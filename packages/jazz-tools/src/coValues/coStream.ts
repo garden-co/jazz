@@ -553,7 +553,11 @@ const CoStreamPerSessionProxyHandler = (
   },
 });
 
-/** @category CoValues */
+/**
+ * A `CoStream` that contains binary data
+ *
+ * @category CoValues
+ */
 export class BinaryCoStream extends CoValueBase implements CoValue {
   declare id: ID<this>;
   declare _type: "BinaryCoStream";
@@ -633,6 +637,10 @@ export class BinaryCoStream extends CoValueBase implements CoValue {
     return new Blob(chunks.chunks, { type: chunks.mimeType });
   }
 
+  /**
+   * Load a `BinaryCoStream` as a `Blob`
+   * @category Content
+   */
   static async loadAsBlob(
     id: ID<BinaryCoStream>,
     as: Account,
@@ -662,6 +670,10 @@ export class BinaryCoStream extends CoValueBase implements CoValue {
     });
   }
 
+  /**
+   * Create a `BinaryCoStream` from a `Blob` or `File`
+   * @category Content
+   */
   static async createFromBlob(
     blob: Blob | File,
     options: {
@@ -707,6 +719,10 @@ export class BinaryCoStream extends CoValueBase implements CoValue {
     return stream;
   }
 
+  /**
+   * Get a JSON representation of the `BinaryCoStream`
+   * @category Content
+   */
   toJSON(): {
     id: string;
     _type: "BinaryCoStream";
@@ -723,11 +739,15 @@ export class BinaryCoStream extends CoValueBase implements CoValue {
     };
   }
 
+  /** @internal */
   [inspect]() {
     return this.toJSON();
   }
 
-  /** @category Subscription & Loading */
+  /**
+   * Load a `BinaryCoStream`
+   * @category Subscription & Loading
+   */
   static load<B extends BinaryCoStream, Depth>(
     this: CoValueClass<B>,
     id: ID<B>,
@@ -737,7 +757,10 @@ export class BinaryCoStream extends CoValueBase implements CoValue {
     return loadCoValue(this, id, as, depth);
   }
 
-  /** @category Subscription & Loading */
+  /**
+   * Subscribe to a `BinaryCoStream`, when you have an ID but don't have a `BinaryCoStream` instance yet
+   * @category Subscription & Loading
+   */
   static subscribe<B extends BinaryCoStream, Depth>(
     this: CoValueClass<B>,
     id: ID<B>,
@@ -748,7 +771,10 @@ export class BinaryCoStream extends CoValueBase implements CoValue {
     return subscribeToCoValue<B, Depth>(this, id, as, depth, listener);
   }
 
-  /** @category Subscription & Loading */
+  /**
+   * Ensure a `BinaryCoStream` is loaded
+   * @category Subscription & Loading
+   */
   ensureLoaded<B extends BinaryCoStream, Depth>(
     this: B,
     depth: Depth & DepthsIn<B>,
@@ -756,7 +782,10 @@ export class BinaryCoStream extends CoValueBase implements CoValue {
     return ensureCoValueLoaded(this, depth);
   }
 
-  /** @category Subscription & Loading */
+  /**
+   * An instance method to subscribe to an existing `BinaryCoStream`
+   * @category Subscription & Loading
+   */
   subscribe<B extends BinaryCoStream, Depth>(
     this: B,
     depth: Depth & DepthsIn<B>,
