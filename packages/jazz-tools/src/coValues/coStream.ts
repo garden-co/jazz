@@ -68,7 +68,7 @@ export type SingleCoStreamEntry<Item> = {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export class CoStream<Item = any> extends CoValueBase implements CoValue {
   /**
-   * Declare a `CoStream` by subclassing `CoStream.Of(...)` and passing the item schema using `co`.
+   * Declare a `CoStream` by subclassing `CoStream.Of(...)` and passing the item schema using a `co` primitive or a `co.ref`.
    *
    * @example
    * ```ts
