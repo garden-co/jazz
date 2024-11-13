@@ -1,3 +1,4 @@
+import { RawGroup } from "cojson";
 import { describe, expect, test } from "vitest";
 import { Account, CoMap, Group, WasmCrypto, co } from "../index.web.js";
 
@@ -83,5 +84,97 @@ describe("Custom accounts and groups", async () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     expect((map._owner as any).nMembers).toBeUndefined();
     expect(map._owner.castAs(CustomGroup).nMembers).toBe(2);
+  });
+});
+
+describe("Group inheritance", () => {
+  class TestMap extends CoMap {
+    title = co.string;
+  }
+
+  test("Group inheritance", async () => {
+    const me = await Account.create({
+      creationProps: { name: "Hermes Puggington" },
+      crypto: Crypto,
+    });
+
+    const parentGroup = Group.create({ owner: me });
+    const group = Group.create({ owner: me });
+
+    group.extend(parentGroup);
+
+    console.log(
+      group.id,
+      group._raw.core.getDependedOnCoValuesUncached(),
+      parentGroup.id,
+    );
+
+    console.log(
+      (group._raw.core.getCurrentContent() as RawGroup)
+        .keys()
+        .filter((k) => k.startsWith("parent_"))
+        .map((k) => k.replace("parent_", "")),
+    );
+
+    const reader = await Account.createAs(me, {
+      creationProps: { name: "Reader" },
+    });
+
+    parentGroup.addMember(reader, "reader");
+
+    const mapInChild = TestMap.create({ title: "In Child" }, { owner: group });
+
+    const mapAsReader = await TestMap.load(mapInChild.id, reader, {});
+    expect(mapAsReader?.title).toBe("In Child");
+
+    parentGroup.removeMember(reader);
+
+    mapInChild.title = "In Child (updated)";
+
+    const mapAsReaderAfterUpdate = await TestMap.load(
+      mapInChild.id,
+      reader,
+      {},
+    );
+    expect(mapAsReaderAfterUpdate?.title).toBe("In Child");
+  });
+
+  test("Group inheritance with grand-children", async () => {
+    const me = await Account.create({
+      creationProps: { name: "Hermes Puggington" },
+      crypto: Crypto,
+    });
+
+    const grandParentGroup = Group.create({ owner: me });
+    const parentGroup = Group.create({ owner: me });
+    const group = Group.create({ owner: me });
+
+    group.extend(parentGroup);
+    parentGroup.extend(grandParentGroup);
+
+    const reader = await Account.createAs(me, {
+      creationProps: { name: "Reader" },
+    });
+
+    grandParentGroup.addMember(reader, "reader");
+
+    const mapInGrandChild = TestMap.create(
+      { title: "In Grand Child" },
+      { owner: group },
+    );
+
+    const mapAsReader = await TestMap.load(mapInGrandChild.id, reader, {});
+    expect(mapAsReader?.title).toBe("In Grand Child");
+
+    grandParentGroup.removeMember(reader);
+
+    mapInGrandChild.title = "In Grand Child (updated)";
+
+    const mapAsReaderAfterUpdate = await TestMap.load(
+      mapInGrandChild.id,
+      reader,
+      {},
+    );
+    expect(mapAsReaderAfterUpdate?.title).toBe("In Grand Child");
   });
 });

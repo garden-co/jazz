@@ -1,5 +1,5 @@
 import { Result, err, ok } from "neverthrow";
-import { AnyRawCoValue, RawCoValue } from "./coValue.js";
+import { AnyRawCoValue, CoID, RawCoValue } from "./coValue.js";
 import { ControlledAccountOrAgent, RawAccountID } from "./coValues/account.js";
 import { RawGroup } from "./coValues/group.js";
 import { coreToCoValue } from "./coreToCoValue.js";
@@ -785,6 +785,46 @@ export class CoValueCore {
         }
       }
 
+      // try to find revelation to parent group read keys
+
+      for (const co of content.keys()) {
+        if (co.startsWith("parent_")) {
+          const parentGroupID = co.slice("parent_".length) as CoID<RawGroup>;
+          const parentGroup = this.node.expectCoValueLoaded(
+            parentGroupID,
+            "Expected parent group to be loaded",
+          );
+
+          const parentKey = parentGroup.getCurrentReadKey();
+          if (!parentKey.secret) {
+            continue;
+          }
+
+          const revelationForParentKey = content.get(
+            `${keyID}_for_${parentKey.id}`,
+          );
+
+          if (revelationForParentKey) {
+            const secret = parentGroup.crypto.decryptKeySecret(
+              {
+                encryptedID: keyID,
+                encryptingID: parentKey.id,
+                encrypted: revelationForParentKey,
+              },
+              parentKey.secret,
+            );
+
+            if (secret) {
+              return secret as KeySecret;
+            } else {
+              console.error(
+                `Encrypting parent ${parentKey.id} key didn't decrypt ${keyID}`,
+              );
+            }
+          }
+        }
+      }
+
       return undefined;
     } else if (this.header.ruleset.type === "ownedByGroup") {
       return this.node
@@ -950,9 +990,15 @@ export class CoValueCore {
   /** @internal */
   getDependedOnCoValuesUncached(): RawCoID[] {
     return this.header.ruleset.type === "group"
-      ? expectGroup(this.getCurrentContent())
-          .keys()
-          .filter((k): k is RawAccountID => k.startsWith("co_"))
+      ? [
+          ...expectGroup(this.getCurrentContent())
+            .keys()
+            .filter((k): k is RawAccountID => k.startsWith("co_")),
+          ...expectGroup(this.getCurrentContent())
+            .keys()
+            .filter((k) => k.startsWith("parent_"))
+            .map((k) => k.replace("parent_", "") as RawCoID),
+        ]
       : this.header.ruleset.type === "ownedByGroup"
         ? [
             this.header.ruleset.group,
