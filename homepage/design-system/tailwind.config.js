@@ -125,6 +125,7 @@ const config = {
         md: "960px",
         lg: "1276px",
       },
+
       typography: (theme) => ({
         DEFAULT: {
           css: {
@@ -230,6 +231,7 @@ const config = {
         },
       }),
     ),
+    require("tailwindcss-animate"),
   ],
 };
 export default config;

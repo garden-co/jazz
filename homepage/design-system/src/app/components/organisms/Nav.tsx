@@ -5,29 +5,40 @@ import { MenuIcon, XIcon } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { ReactNode, useEffect, useLayoutEffect, useRef, useState } from "react";
+import {
+  NavigationMenu,
+  NavigationMenuContent,
+  NavigationMenuItem,
+  NavigationMenuLink,
+  NavigationMenuList,
+  NavigationMenuTrigger,
+} from "../../../components/ui/navigation-menu";
 import { BreadCrumb } from "../molecules/Breadcrumb";
 import { ThemeToggle } from "../molecules/ThemeToggle";
 
-export function Nav({
-  mainLogo,
-  items,
-  docNav,
-  cta,
-}: {
+type NavItemProps = {
+  href: string;
+  icon?: ReactNode;
+  title: string;
+  firstOnRight?: boolean;
+  newTab?: boolean;
+  items?: NavItemProps[];
+  description?: string;
+};
+
+type NavProps = {
   mainLogo: ReactNode;
-  items: {
-    href: string;
-    icon?: ReactNode;
-    title: string;
-    firstOnRight?: boolean;
-    newTab?: boolean;
-  }[];
+  items: NavItemProps[];
   docNav?: ReactNode;
   cta?: ReactNode;
-}) {
+};
+
+export function Nav(props: NavProps) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const searchRef = useRef<HTMLInputElement>(null);
+
+  const { mainLogo, items, docNav, cta } = props;
 
   useLayoutEffect(() => {
     searchOpen && searchRef.current?.focus();
@@ -41,46 +52,66 @@ export function Nav({
 
   return (
     <>
-      <nav
-        className={[
-          clsx(
-            "hidden md:flex sticky left-0 right-0 top-0 w-full justify-center",
-            "bg-white dark:bg-stone-950 border-b",
-            "z-50",
-          ),
-        ].join(" ")}
-      >
-        <div className="flex flex-wrap items-center max-sm:justify-between md:gap-2 container w-full">
-          <div className="flex items-center flex-shrink">
-            <NavLinkLogo prominent href="/" className="-ml-2">
-              {mainLogo}
-            </NavLinkLogo>
-          </div>
+      <NavigationMenu className="hidden md:block">
+        <NavigationMenuList>
+          <NavLinkLogo href="/">{mainLogo}</NavLinkLogo>
           {items.map((item, i) =>
-            "icon" in item ? (
-              <NavLinkLogo key={i} href={item.href} newTab={item.newTab}>
-                {item.icon}
-              </NavLinkLogo>
+            item.items?.length ? (
+              <NavigationMenuItem key={item.title}>
+                <NavigationMenuTrigger>{item.title}</NavigationMenuTrigger>
+                <NavigationMenuContent asChild>
+                  <ul>
+                    {item.items.map(({ title, description, href, icon }) => (
+                      <li className="grid gap-1.5 mt-px">
+                        <NavigationMenuLink asChild>
+                          <Link
+                            className="p-3 rounded-md flex gap-3 hover:bg-stone-100/80 dark:hover:bg-stone-900/80 transition-colors"
+                            href={href}
+                          >
+                            {icon}
+                            <div>
+                              <p className="text-sm font-medium text-stone-900 dark:text-white">
+                                {title}
+                              </p>
+                              <p className="text-sm leading-relaxed">
+                                {description}
+                              </p>
+                            </div>
+                          </Link>
+                        </NavigationMenuLink>
+                      </li>
+                    ))}
+                  </ul>
+                </NavigationMenuContent>
+              </NavigationMenuItem>
             ) : (
-              <NavLink
-                key={i}
-                href={item.href}
-                newTab={item.newTab}
+              <NavigationMenuItem
+                key={item.title}
                 className={clsx(
                   "max-sm:w-full",
                   item.firstOnRight ? "md:ml-auto" : "",
                 )}
               >
-                {item.title}
-              </NavLink>
+                <NavigationMenuLink>
+                  {"icon" in item ? (
+                    <NavLinkLogo key={i} href={item.href} newTab={item.newTab}>
+                      {item.icon}
+                    </NavLinkLogo>
+                  ) : (
+                    <NavLink key={i} href={item.href} newTab={item.newTab}>
+                      {item.title}
+                    </NavLink>
+                  )}
+                </NavigationMenuLink>
+              </NavigationMenuItem>
             ),
           )}
-
           {cta}
-        </div>
-      </nav>
+        </NavigationMenuList>
+      </NavigationMenu>
+
       <div className="md:hidden px-4 flex items-center self-stretch dark:text-white">
-        <NavLinkLogo prominent href="/" className="mr-auto">
+        <NavLinkLogo href="/" className="mr-auto">
           {mainLogo}
         </NavLinkLogo>
         <button
@@ -115,7 +146,6 @@ export function Nav({
         <div className={clsx(menuOpen ? "block" : "hidden", " px-2 pb-2")}>
           <div className="flex items-center w-full border-b">
             <NavLinkLogo
-              prominent
               href="/"
               className="mr-auto"
               onClick={() => setMenuOpen(false)}
@@ -171,28 +201,6 @@ export function Nav({
           </div>
         </div>
         <div className="flex items-center self-stretch justify-between">
-          {/* <input
-                        type="text"
-                        className={clsx(
-                            menuOpen || searchOpen ? "" : "hidden",
-                            "ml-2 border px-2 py-1 rounded w-full"
-                        )}
-                        placeholder="Search docs..."
-                        ref={searchRef}
-                    /> */}
-          {/* <button
-                        className="flex p-3 rounded-xl"
-                        onClick={() => {
-                            setSearchOpen(true);
-                        }}
-                        onBlur={(e) => {
-                            if (!e.currentTarget.value) {
-                                setSearchOpen(false);
-                            }
-                        }}
-                    >
-                        <SearchIcon className="" />
-                    </button> */}
           {(menuOpen || searchOpen) && <ThemeToggle className="p-3" />}
           <button
             className="flex gap-2 p-3 rounded-xl items-center"
@@ -236,7 +244,7 @@ function NavLink({
     <Link
       href={href}
       className={clsx(
-        "px-2 lg:px-4 py-3 text-sm",
+        "py-5 text-sm",
         className,
         path === href
           ? "font-medium text-black dark:text-white cursor-default"
@@ -261,30 +269,20 @@ function NavLinkLogo({
   href,
   className,
   children,
-  prominent,
   onClick,
   newTab,
 }: {
   href: string;
   className?: string;
   children: ReactNode;
-  prominent?: boolean;
   onClick?: () => void;
   newTab?: boolean;
 }) {
-  const path = usePathname();
-
   return (
     <Link
       href={href}
       className={clsx(
-        "max-sm:px-4 px-2 lg:px-3 py-3 transition-opacity hover:transition-none",
-        path === href
-          ? "cursor-default"
-          : prominent
-            ? "hover:opacity-50"
-            : "opacity-60 hover:opacity-100",
-        "text-black dark:text-white",
+        "py-3 hover:text-stone-900 dark:hover:text-white transition-colors",
         className,
       )}
       onClick={onClick}
