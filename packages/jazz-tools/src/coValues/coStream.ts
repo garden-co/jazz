@@ -50,34 +50,74 @@ export type SingleCoStreamEntry<Item> = {
   tx: CojsonInternalTypes.TransactionID;
 };
 
-/** @category CoValues */
+/**
+ * CoStreams are collaborative logs of data.
+ *
+ * @categoryDescription Content
+ * They are similar to `CoList`s, but with a few key differences:
+ * - They are append-only
+ * - They have a per-session view
+ *
+ * ```ts
+ * favDog.push("Poodle");
+ * favDog.push("Schnowzer");
+ * ```
+ *
+ * @category CoValues
+ */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export class CoStream<Item = any> extends CoValueBase implements CoValue {
+  /**
+   * Declare a `CoStream` by subclassing `CoStream.Of(...)` and passing the item schema using a `co` primitive or a `co.ref`.
+   *
+   * @example
+   * ```ts
+   * class ColorStream extends CoStream.Of(co.string) {}
+   * class AnimalStream extends CoStream.Of(co.ref(Animal)) {}
+   * ```
+   *
+   * @category Declaration
+   */
   static Of<Item>(item: IfCo<Item, Item>): typeof CoStream<Item> {
     return class CoStreamOf extends CoStream<Item> {
       [co.items] = item;
     };
   }
 
+  /**
+   * The ID of this `CoStream`
+   * @category Content */
   declare id: ID<this>;
+  /** @category Type Helpers */
   declare _type: "CoStream";
   static {
     this.prototype._type = "CoStream";
   }
+  /** @category Internals */
   declare _raw: RawCoStream;
 
   /** @internal This is only a marker type and doesn't exist at runtime */
   [ItemsSym]!: Item;
+  /** @internal */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   static _schema: any;
+  /** @internal */
   get _schema(): {
     [ItemsSym]: SchemaFor<Item>;
   } {
     return (this.constructor as typeof CoStream)._schema;
   }
 
+  /**
+   * The per-account view of this `CoStream`
+   * @category Content
+   */
   [key: ID<Account>]: CoStreamEntry<Item>;
 
+  /**
+   * The current account's view of this `CoStream`
+   * @category Content
+   */
   get byMe(): CoStreamEntry<Item> | undefined {
     if (this._loadedAs._type === "Account") {
       return this[this._loadedAs.id];
@@ -85,9 +125,22 @@ export class CoStream<Item = any> extends CoValueBase implements CoValue {
       return undefined;
     }
   }
+
+  /**
+   * The per-session view of this `CoStream`
+   * @category Content
+   */
   perSession!: {
     [key: SessionID]: CoStreamEntry<Item>;
   };
+
+  /**
+   * The current session's view of this `CoStream`
+   *
+   * This is a shortcut for `this.perSession` where the session ID is the current session ID.
+   *
+   * @category Content
+   */
   get inCurrentSession(): CoStreamEntry<Item> | undefined {
     if (this._loadedAs._type === "Account") {
       return this.perSession[this._loadedAs.sessionID!];
@@ -116,6 +169,10 @@ export class CoStream<Item = any> extends CoValueBase implements CoValue {
     return new Proxy(this, CoStreamProxyHandler as ProxyHandler<this>);
   }
 
+  /**
+   * Create a new `CoStream`
+   * @category Creation
+   */
   static create<S extends CoStream>(
     this: CoValueClass<S>,
     init: S extends CoStream<infer Item> ? UnCo<Item>[] : never,
@@ -138,6 +195,10 @@ export class CoStream<Item = any> extends CoValueBase implements CoValue {
     return instance;
   }
 
+  /**
+   * Push items to this `CoStream`
+   * @category Content
+   */
   push(...items: Item[]) {
     for (const item of items) {
       this.pushItem(item);
@@ -156,6 +217,10 @@ export class CoStream<Item = any> extends CoValueBase implements CoValue {
     }
   }
 
+  /**
+   * Get a JSON representation of the `CoStream`
+   * @category
+   */
   toJSON(): {
     id: string;
     _type: "CoStream";
@@ -188,6 +253,7 @@ export class CoStream<Item = any> extends CoValueBase implements CoValue {
     };
   }
 
+  /** @internal */
   [inspect](): {
     id: string;
     _type: "CoStream";
@@ -197,6 +263,7 @@ export class CoStream<Item = any> extends CoValueBase implements CoValue {
     return this.toJSON();
   }
 
+  /** @internal */
   static schema<V extends CoStream>(
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     this: { new (...args: any): V } & typeof CoStream,
@@ -206,7 +273,10 @@ export class CoStream<Item = any> extends CoValueBase implements CoValue {
     Object.assign(this._schema, def);
   }
 
-  /** @category Subscription & Loading */
+  /**
+   * Load a `CoStream`
+   * @category Subscription & Loading
+   */
   static load<S extends CoStream, Depth>(
     this: CoValueClass<S>,
     id: ID<S>,
@@ -216,7 +286,10 @@ export class CoStream<Item = any> extends CoValueBase implements CoValue {
     return loadCoValue(this, id, as, depth);
   }
 
-  /** @category Subscription & Loading */
+  /**
+   * Subscribe to a `CoStream`, when you have an ID but don't have a `CoStream` instance yet
+   * @category Subscription & Loading
+   */
   static subscribe<S extends CoStream, Depth>(
     this: CoValueClass<S>,
     id: ID<S>,
@@ -227,7 +300,10 @@ export class CoStream<Item = any> extends CoValueBase implements CoValue {
     return subscribeToCoValue<S, Depth>(this, id, as, depth, listener);
   }
 
-  /** @category Subscription & Loading */
+  /**
+   * Ensure a `CoStream` is loaded
+   * @category Subscription & Loading
+   */
   ensureLoaded<S extends CoStream, Depth>(
     this: S,
     depth: Depth & DepthsIn<S>,
@@ -235,7 +311,12 @@ export class CoStream<Item = any> extends CoValueBase implements CoValue {
     return ensureCoValueLoaded(this, depth);
   }
 
-  /** @category Subscription & Loading */
+  /**
+   * An instance method to subscribe to an existing `CoStream`
+   *
+   * No need to provide an ID or Account since they're already part of the instance.
+   * @category Subscription & Loading
+   */
   subscribe<S extends CoStream, Depth>(
     this: S,
     depth: Depth & DepthsIn<S>,
@@ -245,6 +326,10 @@ export class CoStream<Item = any> extends CoValueBase implements CoValue {
   }
 }
 
+/**
+ * Converts a raw stream entry into a formatted CoStream entry with proper typing and accessors.
+ * @internal
+ */
 function entryFromRawEntry<Item>(
   accessFrom: CoValue,
   rawEntry: {
@@ -307,6 +392,10 @@ function entryFromRawEntry<Item>(
   };
 }
 
+/**
+ * The proxy handler for `CoStream` instances
+ * @internal
+ */
 export const CoStreamProxyHandler: ProxyHandler<CoStream> = {
   get(target, key, receiver) {
     if (typeof key === "string" && key.startsWith("co_")) {
@@ -395,6 +484,10 @@ export const CoStreamProxyHandler: ProxyHandler<CoStream> = {
   },
 };
 
+/**
+ * The proxy handler for the per-session view of a `CoStream`
+ * @internal
+ */
 const CoStreamPerSessionProxyHandler = (
   innerTarget: CoStream,
   accessFrom: CoStream,
@@ -460,10 +553,31 @@ const CoStreamPerSessionProxyHandler = (
   },
 });
 
-/** @category CoValues */
+/**
+ * BinaryCoStreams are `CoStream`s that contain binary data, collaborative versions of `Blob`s.
+ *
+ * @categoryDescription Declaration
+ * `BinaryCoStream` can be referenced in schemas.
+ *
+ * ```ts
+ * import { co, BinaryCoStream } from "jazz-tools";
+ *
+ * class MyCoMap extends CoMap {
+ *   file = co.ref(BinaryCoStream);
+ * }
+ * ```
+ *
+ * @category CoValues
+ */
 export class BinaryCoStream extends CoValueBase implements CoValue {
+  /**
+   * The ID of this `BinaryCoStream`
+   * @category Content
+   */
   declare id: ID<this>;
+  /** @category Type Helpers */
   declare _type: "BinaryCoStream";
+  /** @internal */
   declare _raw: RawBinaryCoStream;
 
   constructor(
@@ -540,6 +654,11 @@ export class BinaryCoStream extends CoValueBase implements CoValue {
     return new Blob(chunks.chunks, { type: chunks.mimeType });
   }
 
+  /**
+   * Load a `BinaryCoStream` as a `Blob`
+   *
+   * @category Content
+   */
   static async loadAsBlob(
     id: ID<BinaryCoStream>,
     as: Account,
@@ -569,6 +688,18 @@ export class BinaryCoStream extends CoValueBase implements CoValue {
     });
   }
 
+  /**
+   * Create a `BinaryCoStream` from a `Blob` or `File`
+   *
+   * @example
+   * ```ts
+   * import { co, BinaryCoStream } from "jazz-tools";
+   *
+   * const binaryCoStream = await BinaryCoStream.createFromBlob(file, {owner: group})
+   * ```
+   *
+   * @category Content
+   */
   static async createFromBlob(
     blob: Blob | File,
     options: {
@@ -614,6 +745,10 @@ export class BinaryCoStream extends CoValueBase implements CoValue {
     return stream;
   }
 
+  /**
+   * Get a JSON representation of the `BinaryCoStream`
+   * @category Content
+   */
   toJSON(): {
     id: string;
     _type: "BinaryCoStream";
@@ -630,11 +765,15 @@ export class BinaryCoStream extends CoValueBase implements CoValue {
     };
   }
 
+  /** @internal */
   [inspect]() {
     return this.toJSON();
   }
 
-  /** @category Subscription & Loading */
+  /**
+   * Load a `BinaryCoStream`
+   * @category Subscription & Loading
+   */
   static load<B extends BinaryCoStream, Depth>(
     this: CoValueClass<B>,
     id: ID<B>,
@@ -644,7 +783,10 @@ export class BinaryCoStream extends CoValueBase implements CoValue {
     return loadCoValue(this, id, as, depth);
   }
 
-  /** @category Subscription & Loading */
+  /**
+   * Subscribe to a `BinaryCoStream`, when you have an ID but don't have a `BinaryCoStream` instance yet
+   * @category Subscription & Loading
+   */
   static subscribe<B extends BinaryCoStream, Depth>(
     this: CoValueClass<B>,
     id: ID<B>,
@@ -655,7 +797,10 @@ export class BinaryCoStream extends CoValueBase implements CoValue {
     return subscribeToCoValue<B, Depth>(this, id, as, depth, listener);
   }
 
-  /** @category Subscription & Loading */
+  /**
+   * Ensure a `BinaryCoStream` is loaded
+   * @category Subscription & Loading
+   */
   ensureLoaded<B extends BinaryCoStream, Depth>(
     this: B,
     depth: Depth & DepthsIn<B>,
@@ -663,7 +808,10 @@ export class BinaryCoStream extends CoValueBase implements CoValue {
     return ensureCoValueLoaded(this, depth);
   }
 
-  /** @category Subscription & Loading */
+  /**
+   * An instance method to subscribe to an existing `BinaryCoStream`
+   * @category Subscription & Loading
+   */
   subscribe<B extends BinaryCoStream, Depth>(
     this: B,
     depth: Depth & DepthsIn<B>,
