@@ -27,6 +27,15 @@ const withMDX = createMDX({
 const config = {
   ...withMDX(nextConfig),
   output: "standalone",
+  redirects: async () => {
+    return [
+      {
+        source: "/docs",
+        destination: "/docs/react",
+        permanent: true,
+      },
+    ];
+  },
 };
 
 function highlightPlugin() {
