@@ -4,12 +4,21 @@ import { TableOfContents } from "@/components/docs/TableOfContents";
 import type { Toc } from "@stefanprobst/rehype-extract-toc";
 import { Prose } from "gcmp-design-system/src/app/components/molecules/Prose";
 
-export default async function Page({ params }: { params: { slug: string[] } }) {
+export default async function Page({
+  params,
+}: { params: { slug: string[]; framework: string } }) {
   const slugPath = params.slug.join("/");
+
   try {
-    const { default: Content, tableOfContents } = await import(
-      `./${slugPath}.mdx`
-    );
+    let mdxSource;
+    try {
+      mdxSource = await import(`./${slugPath}.mdx`);
+    } catch (error) {
+      console.log("Error loading MDX file:" + slugPath, error);
+      mdxSource = await import(`./${slugPath}/${params.framework}.mdx`);
+    }
+
+    const { default: Content, tableOfContents } = mdxSource;
 
     return (
       <>
@@ -34,7 +43,7 @@ export const dynamicParams = false;
 export const dynamic = "force-static";
 
 export async function generateStaticParams() {
-  const docsDir = path.join(process.cwd(), "app/docs/[...slug]");
+  const docsDir = path.join(process.cwd(), "app/docs/[framework]/[...slug]");
   const getAllMdxPaths = (dir: string, basePath = ""): string[] => {
     const entries = fs.readdirSync(dir, { withFileTypes: true });
     const paths: string[] = [];
