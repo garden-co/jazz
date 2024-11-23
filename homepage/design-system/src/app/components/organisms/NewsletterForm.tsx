@@ -1,11 +1,11 @@
 "use client";
 
-import { subscribe } from "@/app/actions/resend";
-import { Button } from "gcmp-design-system/src/app/components/atoms/Button";
-import { Input } from "gcmp-design-system/src/app/components/molecules/Input";
 import { CheckIcon } from "lucide-react";
 import { useState } from "react";
 import { ErrorResponse } from "resend";
+import { subscribe } from "../../../actions/resend";
+import { Button } from "../atoms/Button";
+import { Input } from "../molecules/Input";
 
 export function NewsletterForm() {
   const [email, setEmail] = useState("");
@@ -38,7 +38,7 @@ export function NewsletterForm() {
   }
 
   return (
-    <form action="" onSubmit={submit} className="flex gap-x-4 w-120 max-w-xl">
+    <form action="" onSubmit={submit} className="flex gap-x-4 w-120 max-w-md">
       <Input
         id="email-address"
         name="email"
