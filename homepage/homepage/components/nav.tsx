@@ -1,5 +1,4 @@
 import { SiDiscord, SiGithub, SiX } from "@icons-pack/react-simple-icons";
-import { Button } from "gcmp-design-system/src/app/components/atoms/Button";
 import { JazzLogo } from "gcmp-design-system/src/app/components/atoms/logos/JazzLogo";
 import { Nav } from "gcmp-design-system/src/app/components/organisms/Nav";
 import { BookTextIcon, BoxIcon, CodeIcon } from "lucide-react";
