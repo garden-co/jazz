@@ -1,6 +1,5 @@
 import DocsLayout from "@/components/docs/DocsLayout";
 import { DocNav } from "@/components/docs/nav";
-import { clsx } from "clsx";
 
 export const metadata = {
   title: "Documentation",

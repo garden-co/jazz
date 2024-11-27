@@ -1,14 +1,4 @@
-import { HeroHeader } from "gcmp-design-system/src/app/components/molecules/HeroHeader";
-import { JazzLogo } from 'gcmp-design-system/src/app/components/atoms/logos/JazzLogo';
-
-<div className="not-prose">
-  <h1 className="sr-only">Getting started</h1>
-  <HeroHeader
-    title={<>Learn some <JazzLogo className="h-[1.3em] relative -top-0.5 inline-block -ml-[0.1em] -mr-[0.1em]"/></>}
-    slogan=""
-    pt={false}
-  />
-</div>
+import { ContentByFramework } from "@/components/forMdx";
 
 Welcome to the Jazz documentation!
 
@@ -18,12 +8,14 @@ The Jazz docs are currently heavily work in progress, sorry about that!
 
 To get started, set up Jazz in your project. Here's how you can do that on your framework of choice:
 
-- [React](/docs/project-setup/react)
-- [Next.js](/docs/project-setup/next)
-- [React Native](/docs/project-setup/react-native)
-- [Vue](/docs/project-setup/vue)
+- [React](/docs/react/project-setup)
+- [Next.js](/docs/react/project-setup#next)
+- [React Native](/docs/react-native/project-setup)
+- [Vue](/docs/vue/project-setup)
 
-Or you can follow this [React step-by-step guide](/docs/guide) where we walk you through building an issue tracker app.
+<ContentByFramework framework="react">
+  Or you can follow this [React step-by-step guide](/docs/react/guide) where we walk you through building an issue tracker app.
+</ContentByFramework>
 
 ## Example apps
 
