@@ -8,24 +8,26 @@ export type {
   SyncMessage,
 } from "cojson";
 
-export type { CoValue, ID } from "./internal.js";
+export type { CoValue, ID, TreeLeaf, TreeNode } from "./internal.js";
 
 export { Encoders, co } from "./internal.js";
 
 export {
   Account,
-  FileStream,
   BinaryCoStream,
+  CoFeed,
   CoList,
   CoMap,
-  CoFeed,
+  CoRichText,
   CoStream,
   CoValueBase,
+  FileStream,
   Group,
   ImageDefinition,
+  Marks,
   Profile,
-  isControlledAccount,
   SchemaUnion,
+  isControlledAccount,
   type AccountClass,
   type CoMapInit,
   type CoValueClass,
