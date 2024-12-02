@@ -18,7 +18,8 @@
     "@scure/bip39": "^1.3.0",
     "cojson": "workspace:*",
     "cojson-transport-ws": "workspace:*",
-    "jazz-tools": "workspace:*"
+    "jazz-tools": "workspace:*",
+    "react-native-quick-crypto": "file:../../../rnqc/main/packages/react-native-quick-crypto"
   },
   "peerDependencies": {
     "@react-native-community/netinfo": "*",
