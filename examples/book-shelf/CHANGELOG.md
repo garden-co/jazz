@@ -1,5 +1,13 @@
 # jazz-example-book-shelf
 
+## 0.1.27
+
+### Patch Changes
+
+- jazz-react@0.8.35
+- jazz-tools@0.8.35
+- jazz-browser-media-images@0.8.35
+
 ## 0.1.26
 
 ### Patch Changes
