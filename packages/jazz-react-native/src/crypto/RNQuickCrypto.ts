@@ -1,7 +1,11 @@
 import { base58 } from "@scure/base";
-import { JsonValue } from "cojson";
-import { PureJSCrypto } from "cojson/src/crypto/PureJSCrypto.js";
-import { Signature, SignerID, SignerSecret } from "cojson/src/crypto/crypto.js";
+import {
+  JsonValue,
+  PureJSCrypto,
+  Signature,
+  SignerID,
+  SignerSecret,
+} from "cojson/native";
 import { stableStringify } from "cojson/src/jsonStringify.js";
 import { Ed } from "react-native-quick-crypto";
 
