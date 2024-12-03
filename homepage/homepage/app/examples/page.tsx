@@ -3,11 +3,22 @@ import { NextjsLogo } from "@/components/icons/NextjsLogo";
 import { ReactLogo } from "@/components/icons/ReactLogo";
 import { ReactNativeLogo } from "@/components/icons/ReactNativeLogo";
 import { VueLogo } from "@/components/icons/VueLogo";
+import { clsx } from "clsx";
 import { Button } from "gcmp-design-system/src/app/components/atoms/Button";
 import { H2 } from "gcmp-design-system/src/app/components/atoms/Headings";
 import { GappedGrid } from "gcmp-design-system/src/app/components/molecules/GappedGrid";
 import { HeroHeader } from "gcmp-design-system/src/app/components/molecules/HeroHeader";
 import { CloudUploadIcon, FingerprintIcon, ImageIcon } from "lucide-react";
+
+import {
+  Schema_ts as ImageUploadSchema,
+  ImageUpload_tsx,
+} from "@/codeSamples/examples/image-upload/src";
+import {
+  Schema_ts as ReactionsSchema,
+  ReactionsScreen_tsx,
+} from "@/codeSamples/examples/reactions/src";
+import { CodeExampleTabs } from "@/components/CodeExampleTabs";
 
 type Example = {
   name: string;
@@ -17,6 +28,9 @@ type Example = {
   tech?: string[];
   features?: string[];
   demoUrl?: string;
+  showDemo?: boolean;
+  imageUrl?: string;
+  codeSamples?: { name: string; content: React.ReactNode }[];
 };
 
 const tech = {
@@ -206,7 +220,7 @@ const PasswordManagerIllustration = () => (
   </div>
 );
 
-const reactExamples = [
+const reactExamples: Example[] = [
   {
     name: "Chat",
     slug: "chat",
@@ -214,6 +228,27 @@ const reactExamples = [
     tech: [tech.react],
     demoUrl: "https://chat.jazz.tools",
     illustration: <ChatIllustration />,
+  },
+  {
+    name: "Rate my pet",
+    slug: "pets",
+    description:
+      "Upload a photo of your pet, and invite your friends to react to it.",
+    tech: [tech.react],
+    features: [features.imageUpload, features.inviteLink],
+    demoUrl: "https://pets-demo.jazz.tools",
+    illustration: <PetIllustration />,
+  },
+  {
+    name: "Todo list",
+    slug: "todo",
+    description: "A todo list where you can collaborate with invited guests.",
+    tech: [tech.react],
+    features: [features.inviteLink],
+    demoUrl: "https://todo-demo.jazz.tools",
+    illustration: (
+      <div className="h-full w-full bg-cover bg-[url('/todo.jpg')] bg-left-bottom"></div>
+    ),
   },
   {
     name: "Clerk",
@@ -245,45 +280,6 @@ const reactExamples = [
     ),
   },
   {
-    name: "Image upload",
-    slug: "image-upload",
-    description: "Learn how to upload and delete images",
-    tech: [tech.react],
-    features: [features.imageUpload],
-    demoUrl: "https://image-upload-demo.jazz.tools",
-    illustration: <ImageUploadIllustration />,
-  },
-  {
-    name: "Reactions",
-    slug: "reactions",
-    description: "Collect and render reactions from multiple users.",
-    tech: [tech.react],
-    features: [features.coFeed],
-    demoUrl: "https://reactions-demo.jazz.tools",
-    illustration: <ReactionsIllustration />,
-  },
-  {
-    name: "Rate my pet",
-    slug: "pets",
-    description:
-      "Upload a photo of your pet, and invite your friends to react to it.",
-    tech: [tech.react],
-    features: [features.imageUpload, features.inviteLink],
-    demoUrl: "https://pets-demo.jazz.tools",
-    illustration: <PetIllustration />,
-  },
-  {
-    name: "Todo list",
-    slug: "todo",
-    description: "A todo list where you can collaborate with invited guests.",
-    tech: [tech.react],
-    features: [features.inviteLink],
-    demoUrl: "https://todo-demo.jazz.tools",
-    illustration: (
-      <div className="h-full w-full bg-cover bg-[url('/todo.jpg')] bg-left-bottom"></div>
-    ),
-  },
-  {
     name: "Password manager",
     slug: "password-manager",
     description: "A secure password manager, using Passkey for authentication.",
@@ -304,7 +300,7 @@ const reactExamples = [
   },
 ];
 
-const nextExamples = [
+const nextExamples: Example[] = [
   {
     name: "Book shelf",
     slug: "book-shelf",
@@ -358,6 +354,49 @@ const vueExamples: Example[] = [
   },
 ];
 
+const demos = [
+  {
+    name: "Image upload",
+    slug: "image-upload",
+    description: "Learn how to upload and delete images",
+    tech: [tech.react],
+    features: [features.imageUpload],
+    demoUrl: "https://image-upload-demo.jazz.tools",
+    illustration: <ImageUploadIllustration />,
+    showDemo: true,
+    codeSamples: [
+      {
+        name: "image-upload.tsx",
+        content: <ImageUpload_tsx />,
+      },
+      {
+        name: "schema.ts",
+        content: <ImageUploadSchema />,
+      },
+    ],
+  },
+  {
+    name: "Reactions",
+    slug: "reactions",
+    description: "Collect and render reactions from multiple users.",
+    tech: [tech.react],
+    features: [features.coFeed],
+    demoUrl: "https://reactions-demo.jazz.tools",
+    illustration: <ReactionsIllustration />,
+    showDemo: true,
+    codeSamples: [
+      {
+        name: "reactions.tsx",
+        content: <ReactionsScreen_tsx />,
+      },
+      {
+        name: "schema.ts",
+        content: <ReactionsSchema />,
+      },
+    ],
+  },
+];
+
 const categories = [
   {
     name: "React",
@@ -381,16 +420,21 @@ const categories = [
   },
 ];
 
-function Example({ example }: { example: Example }) {
+function Example({
+  example,
+  className,
+}: { example: Example; className?: string }) {
   const { name, slug, tech, features, description, demoUrl, illustration } =
     example;
   const githubUrl = `https://github.com/gardencmp/jazz/tree/main/examples/${slug}`;
 
   return (
-    <div className="col-span-2 border bg-stone-50 shadow-sm p-3 flex flex-col rounded-lg dark:bg-stone-950">
-      <div className="mb-3 aspect-[16/9] overflow-hidden w-full rounded-md bg-white border dark:bg-stone-925 sm:aspect-[2/1] md:aspect-[3/2]">
-        {illustration}
-      </div>
+    <div className={clsx(className, "col-span-2 flex flex-col")}>
+      {illustration && (
+        <div className="mb-3 aspect-[16/9] overflow-hidden w-full rounded-md bg-white border dark:bg-stone-925 sm:aspect-[2/1] md:aspect-[3/2]">
+          {illustration}
+        </div>
+      )}
 
       <div className="flex-1 space-y-2 mb-2">
         <h2 className="font-medium text-stone-900 dark:text-white leading-none">
@@ -430,6 +474,31 @@ function Example({ example }: { example: Example }) {
   );
 }
 
+function ExampleDemo({ example }: { example: Example }) {
+  const { name, slug, tech, features, description, demoUrl, illustration } =
+    example;
+  const githubUrl = `https://github.com/gardencmp/jazz/tree/main/examples/${slug}`;
+
+  return (
+    <GappedGrid
+      gap="none"
+      className="col-span-full my-12 border bg-stone-50 shadow-sm rounded-lg dark:bg-stone-950 overflow-hidden"
+    >
+      <div className="p-3 col-span-full border-b">
+        <Example example={{ ...example, illustration: null }} />
+      </div>
+      <div className="h-[40rem] border-r overflow-auto col-span-3">
+        {example.codeSamples && (
+          <CodeExampleTabs tabs={example.codeSamples}></CodeExampleTabs>
+        )}
+      </div>
+      <div className="col-span-3">
+        <iframe width="100%" height="100%" src={demoUrl} title={name} />
+      </div>
+    </GappedGrid>
+  );
+}
+
 export default function Page() {
   return (
     <div className="container flex flex-col gap-6 pb-10 lg:pb-20">
@@ -439,6 +508,12 @@ export default function Page() {
       />
 
       <div className="grid gap-12 lg:gap-20">
+        <GappedGrid>
+          {demos.map(
+            (demo) =>
+              demo.showDemo && <ExampleDemo key={demo.slug} example={demo} />,
+          )}
+        </GappedGrid>
         {categories.map((category) => (
           <div key={category.name}>
             <div className="flex items-center gap-3 mb-5">
@@ -447,9 +522,17 @@ export default function Page() {
             </div>
 
             <GappedGrid>
-              {category.examples.map((example) => (
-                <Example key={example.slug} example={example} />
-              ))}
+              {category.examples.map((example) =>
+                example.showDemo ? (
+                  <ExampleDemo key={example.slug} example={example} />
+                ) : (
+                  <Example
+                    className="border bg-stone-50 shadow-sm p-3 rounded-lg dark:bg-stone-950"
+                    key={example.slug}
+                    example={example}
+                  />
+                ),
+              )}
             </GappedGrid>
           </div>
         ))}
