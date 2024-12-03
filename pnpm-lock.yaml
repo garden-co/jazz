@@ -573,6 +573,9 @@ importers:
       jazz-tools:
         specifier: workspace:*
         version: link:../../packages/jazz-tools
+      lucide-svelte:
+        specifier: ^0.463.0
+        version: 0.463.0(svelte@5.2.7)
     devDependencies:
       '@sveltejs/adapter-auto':
         specifier: ^3.0.0
@@ -627,7 +630,7 @@ importers:
         version: 5.4.11(@types/node@22.5.1)(terser@5.33.0)
       vitest:
         specifier: ^2.0.4
-        version: 2.1.7(@types/node@22.5.1)(@vitest/ui@1.5.3(vitest@1.5.3))(happy-dom@15.8.3)(jsdom@20.0.3)(terser@5.33.0)
+        version: 2.1.7(@types/node@22.5.1)(@vitest/ui@1.5.3)(happy-dom@15.8.3)(jsdom@20.0.3)(terser@5.33.0)
 
   examples/image-upload:
     dependencies:
@@ -8517,6 +8520,11 @@ packages:
     resolution: {integrity: sha512-qiWcojRXEwDiSimMX1+arnxha+ROJzZjJaVvCC0rsG6a9pUPjZePXSq7em4ZKMp0NDm1hyzPNkM7UaWC3LU2AA==}
     peerDependencies:
       react: 18.3.1
+
+  lucide-svelte@0.463.0:
+    resolution: {integrity: sha512-zKfqFlcrQ/zdcbxmuDs92hA+ksRIi3swJw1sZ73CX6ShjnbEujQlppzZSwj+fqyNGPB4s7MeRIudCQa5s8/Scw==}
+    peerDependencies:
+      svelte: ^3 || ^4 || ^5.0.0-next.42
 
   lunr@2.3.9:
     resolution: {integrity: sha512-zTU3DaZaF3Rt9rhN3uBMGQD3dD2/vFQqnvZCDv4dl5iOzq2IZQqTxu90r4E5J+nP70J3ilqVCrbho2eWaeW8Ow==}
@@ -19788,6 +19796,10 @@ snapshots:
     dependencies:
       react: 18.3.1
 
+  lucide-svelte@0.463.0(svelte@5.2.7):
+    dependencies:
+      svelte: 5.2.7
+
   lunr@2.3.9: {}
 
   magic-string@0.30.12:
@@ -22941,7 +22953,7 @@ snapshots:
       - supports-color
       - terser
 
-  vitest@2.1.7(@types/node@22.5.1)(@vitest/ui@1.5.3(vitest@1.5.3))(happy-dom@15.8.3)(jsdom@20.0.3)(terser@5.33.0):
+  vitest@2.1.7(@types/node@22.5.1)(@vitest/ui@1.5.3)(happy-dom@15.8.3)(jsdom@20.0.3)(terser@5.33.0):
     dependencies:
       '@vitest/expect': 2.1.7
       '@vitest/mocker': 2.1.7(vite@5.4.11(@types/node@22.5.1)(terser@5.33.0))
