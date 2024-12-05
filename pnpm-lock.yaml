@@ -562,7 +562,7 @@ importers:
         specifier: ^5.4.10
         version: 5.4.11(@types/node@22.5.1)(terser@5.33.0)
 
-  examples/file-share:
+  examples/file-share-svelte:
     dependencies:
       '@tailwindcss/typography':
         specifier: ^0.5.15
@@ -580,9 +580,9 @@ importers:
         specifier: ^0.3.28
         version: 0.3.28(svelte@5.2.7)
     devDependencies:
-      '@sveltejs/adapter-auto':
-        specifier: ^3.0.0
-        version: 3.3.1(@sveltejs/kit@2.8.1(@sveltejs/vite-plugin-svelte@4.0.1(svelte@5.2.7)(vite@5.4.11(@types/node@22.5.1)(terser@5.33.0)))(svelte@5.2.7)(vite@5.4.11(@types/node@22.5.1)(terser@5.33.0)))
+      '@sveltejs/adapter-vercel':
+        specifier: ^5.5.0
+        version: 5.5.0(@sveltejs/kit@2.8.1(@sveltejs/vite-plugin-svelte@4.0.1(svelte@5.2.7)(vite@5.4.11(@types/node@22.5.1)(terser@5.33.0)))(svelte@5.2.7)(vite@5.4.11(@types/node@22.5.1)(terser@5.33.0)))(rollup@4.24.0)
       '@sveltejs/kit':
         specifier: ^2.0.0
         version: 2.8.1(@sveltejs/vite-plugin-svelte@4.0.1(svelte@5.2.7)(vite@5.4.11(@types/node@22.5.1)(terser@5.33.0)))(svelte@5.2.7)(vite@5.4.11(@types/node@22.5.1)(terser@5.33.0))
@@ -13655,7 +13655,7 @@ snapshots:
       find-up: 5.0.0
       find-yarn-workspace-root: 2.0.0
       js-yaml: 3.14.1
-      micromatch: 4.0.5
+      micromatch: 4.0.8
       npm-package-arg: 7.0.0
       ora: 3.4.0
       split: 1.0.1
@@ -14009,7 +14009,7 @@ snapshots:
       jest-haste-map: 29.7.0
       jest-regex-util: 29.6.3
       jest-util: 29.7.0
-      micromatch: 4.0.5
+      micromatch: 4.0.8
       pirates: 4.0.6
       slash: 3.0.0
       write-file-atomic: 4.0.2
@@ -14231,7 +14231,7 @@ snapshots:
     dependencies:
       detect-libc: 1.0.3
       is-glob: 4.0.3
-      micromatch: 4.0.5
+      micromatch: 4.0.8
       node-addon-api: 7.1.1
     optionalDependencies:
       '@parcel/watcher-android-arm64': 2.4.1
@@ -18302,12 +18302,12 @@ snapshots:
 
   find-yarn-workspace-root2@1.2.16:
     dependencies:
-      micromatch: 4.0.5
+      micromatch: 4.0.8
       pkg-dir: 4.2.0
 
   find-yarn-workspace-root@2.0.0:
     dependencies:
-      micromatch: 4.0.5
+      micromatch: 4.0.8
 
   flat-cache@3.2.0:
     dependencies:
@@ -19131,7 +19131,7 @@ snapshots:
       jest-runner: 29.7.0
       jest-util: 29.7.0
       jest-validate: 29.7.0
-      micromatch: 4.0.5
+      micromatch: 4.0.8
       parse-json: 5.2.0
       pretty-format: 29.7.0
       slash: 3.0.0
@@ -19222,7 +19222,7 @@ snapshots:
       jest-regex-util: 29.6.3
       jest-util: 29.7.0
       jest-worker: 29.7.0
-      micromatch: 4.0.5
+      micromatch: 4.0.8
       walker: 1.0.8
     optionalDependencies:
       fsevents: 2.3.3
@@ -19246,7 +19246,7 @@ snapshots:
       '@types/stack-utils': 2.0.3
       chalk: 4.1.2
       graceful-fs: 4.2.11
-      micromatch: 4.0.5
+      micromatch: 4.0.8
       pretty-format: 29.7.0
       slash: 3.0.0
       stack-utils: 2.0.6
@@ -19480,7 +19480,7 @@ snapshots:
       chalk: 4.1.2
       flow-parser: 0.246.0
       graceful-fs: 4.2.11
-      micromatch: 4.0.5
+      micromatch: 4.0.8
       neo-async: 2.6.2
       node-dir: 0.1.17
       recast: 0.21.5
@@ -19946,7 +19946,7 @@ snapshots:
       graceful-fs: 4.2.11
       invariant: 2.2.4
       jest-worker: 29.7.0
-      micromatch: 4.0.5
+      micromatch: 4.0.8
       node-abort-controller: 3.1.1
       nullthrows: 1.1.1
       walker: 1.0.8
