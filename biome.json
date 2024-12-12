@@ -30,6 +30,18 @@
   },
   "overrides": [
     {
+      "include": ["packages/**/src/**"],
+      "linter": {
+        "enabled": true,
+        "rules": {
+          "recommended": false,
+          "correctness": {
+            "useImportExtensions": "error"
+          }
+        }
+      }
+    },
+    {
       "include": ["packages/cojson-storage-indexeddb/**"],
       "linter": {
         "enabled": true,
