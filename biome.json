@@ -30,13 +30,34 @@
   },
   "overrides": [
     {
-      "include": ["packages/cojson-storage-indexeddb/**"],
+      "include": ["packages/**/src/**"],
+      "linter": {
+        "enabled": true,
+        "rules": {
+          "recommended": false,
+          "correctness": {
+            "useImportExtensions": "error"
+          }
+        }
+      }
+    },
+    {
+      "include": ["packages/**/src/tests/**", "packages/**/src/test/**"],
       "linter": {
         "enabled": true,
         "rules": {
           "correctness": {
-            "useImportExtensions": "error"
-          },
+            "useImportExtensions": "off"
+          }
+        }
+      }
+    },
+    {
+      "include": ["packages/cojson-storage-indexeddb/**"],
+      "linter": {
+        "enabled": true,
+        "rules": {
+          "recommended": true,
           "suspicious": {
             "noExplicitAny": "info"
           }
