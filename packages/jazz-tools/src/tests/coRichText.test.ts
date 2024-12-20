@@ -1,13 +1,18 @@
+import { connectedPeers } from "cojson/src/streamUtils.ts";
 import { describe, expect, test } from "vitest";
 import { splitNode } from "../coValues/coRichText.js";
 import {
   Account,
   CoRichText,
+  createJazzContext,
+  fixedCredentialsAuth,
+  isControlledAccount,
   Marks,
   type TextPos,
   type TreeNode,
   WasmCrypto,
 } from "../index.web.js";
+import { randomSessionProvider } from "../internal.js";
 
 const Crypto = await WasmCrypto.create();
 
@@ -453,6 +458,44 @@ describe("CoRichText", async () => {
           },
         ],
       });
+    });
+  });
+
+  describe("Resolution", () => {
+    test("Loading and availability", async () => {
+      const [initialAsPeer, secondPeer] = connectedPeers("initial", "second", {
+        peer1role: "server",
+        peer2role: "client",
+      });
+      if (!isControlledAccount(me)) {
+        throw "me is not a controlled account";
+      }
+      me._raw.core.node.syncManager.addPeer(secondPeer);
+      const { account: meOnSecondPeer } = await createJazzContext({
+        auth: fixedCredentialsAuth({
+          accountID: me.id,
+          secret: me._raw.agentSecret,
+        }),
+        sessionProvider: randomSessionProvider,
+        peersToLoadFrom: [initialAsPeer],
+        crypto: Crypto,
+      });
+
+      const loadedText = await CoRichText.load(text.id, meOnSecondPeer, {
+        marks: [{}],
+        text: [],
+      });
+
+      expect(loadedText).toBeDefined();
+      expect(loadedText?.toString()).toEqual("hello world");
+
+      const loadedText2 = await CoRichText.load(text.id, meOnSecondPeer, {
+        marks: [{}],
+        text: [],
+      });
+
+      expect(loadedText2).toBeDefined();
+      expect(loadedText2?.toString()).toEqual("hello world");
     });
   });
 
