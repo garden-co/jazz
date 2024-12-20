@@ -131,7 +131,6 @@ export class RawCoPlainText<
         op: "del",
         insertion,
       });
-      console.log("deleting idx", idx);
       let nextIdx = idx + 1;
       while (!this.mapping.opIDbeforeIdx[nextIdx] && nextIdx < to) {
         nextIdx++;
