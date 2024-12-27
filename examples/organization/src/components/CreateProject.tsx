@@ -11,11 +11,14 @@ export function CreateProject({
   const onSave = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
 
-    if (!organization?.projects) return;
+    if (!organization?.content?.projects) return;
 
     if (name.length > 0) {
-      const project = Project.create({ name }, { owner: organization._owner });
-      organization.projects.push(project);
+      const project = Project.create(
+        { name },
+        { owner: organization.content._owner },
+      );
+      organization.content.projects.push(project);
       setName("");
     }
   };

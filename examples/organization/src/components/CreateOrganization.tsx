@@ -2,7 +2,7 @@ import { Group, ID } from "jazz-tools";
 import { useState } from "react";
 import { useNavigate } from "react-router";
 import { useAccount, useCoState } from "../main.tsx";
-import { DraftOrganization, ListOfProjects, Organization } from "../schema.ts";
+import { DraftOrganization, createOrganization } from "../schema.ts";
 import { Errors } from "./Errors.tsx";
 import { OrganizationForm } from "./OrganizationForm.tsx";
 
@@ -25,16 +25,17 @@ export function CreateOrganization() {
 
     const group = Group.create({ owner: me });
 
-    me.root.organizations.push(draft as Organization);
+    const organization = createOrganization(me, draft.name ?? "");
 
+    me.root.organizations.push(organization);
     me.root.draftOrganization = DraftOrganization.create(
       {
-        projects: ListOfProjects.create([], { owner: group }),
+        name: "",
       },
       { owner: group },
     );
 
-    navigate(`/organizations/${draft.id}`);
+    navigate(`/organizations/${organization.id}`);
   };
 
   return (
