@@ -85,7 +85,7 @@ const server = https.createServer(
 
 // Create WebSocket server
 const wss = new WebSocket.Server({ server });
-wss.on("connection", (ws: WebSocket) => {
+wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
     logger.debug("New Websocket connection");
 
     ws.on("message", async (message: string) => {

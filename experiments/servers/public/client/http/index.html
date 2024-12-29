@@ -107,6 +107,9 @@
             let isConnected = false;
             let reconnectTimeout;
 
+            let retryAttempts = 0;
+            const maxRetries = 5;
+
             // websocket file streaming vars
             let receivedSize = 0;
             let totalSize = 0;
@@ -137,12 +140,23 @@
                         clearTimeout(reconnectTimeout);
                     };
 
+                    // socket.onclose = (event) => {
+                    //     log(
+                    //         `Disconnected from WebSocket server at: ${new Date().toISOString()}`,
+                    //     );
+                    //     isConnected = false;
+                    //     reconnect();
+                    // };
                     socket.onclose = (event) => {
                         log(
                             `Disconnected from WebSocket server at: ${new Date().toISOString()}`,
                         );
-                        isConnected = false;
-                        reconnect();
+                        if (retryAttempts < maxRetries) {
+                            setTimeout(() => {
+                                connect();
+                                retryAttempts++;
+                            }, 1000 * retryAttempts);
+                        }
                     };
 
                     socket.onerror = (event) => {
@@ -325,13 +339,13 @@
                             const response = await fetch(SERVER_API); // Appending '?all=1' will fetch all.
                             const uuids = await response.json();
                             handleCoValueList(uuids);
+                            disconnectButton.disabled = true;
                         }
                     } catch (error) {
                         log(
                             `Error trying to load CoValue UUIDs: ${error.message}`,
                         );
                     }
-                    disconnectButton.disabled = true;
                 }
             }
 
@@ -444,13 +458,30 @@
                                 event,
                             )}`,
                         );
+                        disconnectButton.disabled = false;
                     };
 
                     source.onerror = (event) => {
-                        console.error(
-                            "Connection to the event stream raised an error: ",
-                            event,
+                        if (event.readyState === EventSource.CLOSED) {
+                            console.error("Connection to the event stream was closed");
+                        } else {
+                            console.error(
+                                "Connection to the event stream raised an error: ",
+                                event,
+                            );
+                        }
+                    };
+
+                    source.onclose = function() {
+                        log(
+                            `Disconnected from event stream server at: ${new Date().toISOString()}`,
                         );
+                        if (retryAttempts < maxRetries) {
+                            setTimeout(() => {
+                                connect();
+                                retryAttempts++;
+                            }, 1000 * retryAttempts);
+                        }
                     };
 
                     const eventType = getEventType();
@@ -483,19 +514,19 @@
                 );
             }
 
-            function reconnect() {
-                if (!isConnected && isEnabled) {
-                    log(
-                        `Attempting to reconnect in ${
-                            RECONNECT_INTERVAL / 1000
-                        } seconds...`,
-                    );
-                    reconnectTimeout = setTimeout(() => {
-                        log("Attempting to reconnect...");
-                        connect();
-                    }, RECONNECT_INTERVAL);
-                }
-            }
+            // function reconnect() {
+            //     if (!isConnected && isEnabled) {
+            //         log(
+            //             `Attempting to reconnect in ${
+            //                 RECONNECT_INTERVAL / 1000
+            //             } seconds...`,
+            //         );
+            //         reconnectTimeout = setTimeout(() => {
+            //             log("Attempting to reconnect...");
+            //             connect();
+            //         }, RECONNECT_INTERVAL);
+            //     }
+            // }
 
             async function createCoValueJSON(url = "", coValue = {}) {
                 if (isWS()) {
