@@ -410,7 +410,8 @@ export class BenchmarkStore {
     }
 
     exportToCSVFile(filename: string = 'time.csv'): void {
-        const outputPath = `public/${filename}`;
+        filename = process.env.EXPORT_FILENAME ?? filename;
+        const outputPath = `benchmarks/${filename}`;
         const outDir = path.dirname(outputPath);
         if (!fs.existsSync(outDir)) {
             fs.mkdirSync(outDir, { recursive: true });
@@ -426,11 +427,11 @@ export class BenchmarkStore {
         .join(os.EOL);
 
         if (!fs.existsSync(outputPath)) {
-            fs.writeFileSync(outputPath, csvHeaders + os.EOL + csvContent);
+            fs.writeFileSync(outputPath, csvHeaders + os.EOL + csvContent + os.EOL);
         } else {
             fs.appendFileSync(outputPath, csvContent + os.EOL);
         }
-        logger.info(`Performance data written to CSV: ${outputPath}`);
+        logger.info(`Performance log (${this.entries.length} records) written to CSV: ${outputPath}`);
 
         // Clear the store after writing to disk
         this.entries = [];

@@ -4,8 +4,9 @@ const customFormat = winston.format.printf(({ level, message, timestamp }) => {
     return `[${level}]: ${timestamp} ${message}`;
 });
 
+const level = process.env.LEVEL ?? "debug";
 const logger = winston.createLogger({
-    level: "debug",
+    level: level,
     format: winston.format.combine(
         winston.format.colorize(),
         winston.format.timestamp({

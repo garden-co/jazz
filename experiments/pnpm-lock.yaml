@@ -61,6 +61,9 @@ importers:
       '@types/finalhandler':
         specifier: ^1.2.3
         version: 1.2.3
+      '@types/k6':
+        specifier: ^0.54.2
+        version: 0.54.2
       '@types/mime-types':
         specifier: ^2.1.4
         version: 2.1.4
@@ -405,6 +408,9 @@ packages:
 
   '@types/http-errors@2.0.4':
     resolution: {integrity: sha512-D0CFMMtydbJAegzOyHjtiKPLlvnm3iTZyZRSZoLq2mRhDdmLfIWOCYPfQJ4cu2erKghU++QvjcUjp/5h7hESpA==}
+
+  '@types/k6@0.54.2':
+    resolution: {integrity: sha512-B5LPxeQm97JnUTpoKNE1UX9jFp+JiJCAXgZOa2P7aChxVoPQXKfWMzK+739xHq3lPkKj1aV+HeOxkP56g/oWBg==}
 
   '@types/mime-types@2.1.4':
     resolution: {integrity: sha512-lfU4b34HOri+kAY5UheuFMWPDOI+OPceBSHZKp69gEyTL/mmJ4cnU6Y/rlme3UL3GyOn6Y42hyIEw0/q8sWx5w==}
@@ -1402,6 +1408,8 @@ snapshots:
       '@types/node': 22.10.1
 
   '@types/http-errors@2.0.4': {}
+
+  '@types/k6@0.54.2': {}
 
   '@types/mime-types@2.1.4': {}
 
