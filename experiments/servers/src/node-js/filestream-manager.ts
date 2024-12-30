@@ -184,13 +184,14 @@ export class FileStreamManager {
         target: StreamTarget,
         fileStream: fs.ReadStream,
     ) {
-        logger.error("[GET] Error in file stream:", error);
+        logger.error("[GET] Error in file stream: ", error);
         fileStream.destroy();
 
         if (target.type === "websocket" && target.wsr) {
             target.wsr.status(500).json({ m: "Error reading file" });
         } else if (target.type === "http" && target.res) {
-            target.res.status(500).json({ m: "Error reading file" });
+            target.res.end();
+            // target.res.status(500).json({ m: "Error reading file" }); // .json() will set headers after they have already been sent
         }
     }
 
@@ -280,6 +281,9 @@ export class FileStreamManager {
                     `[GET] Sent chunk ${chunkIndex} of ${totalChunks} with size ${chunk.length}`,
                 );
             } else if (!fileStream.readableEnded) {
+                logger.debug(
+                    `[GET] Readable event emitted ...`,
+                );
                 fileStream.once("readable", sendChunk);
             }
         };

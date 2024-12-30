@@ -26,6 +26,7 @@ const fileManager = new FileStreamManager();
 
 app.use(bodyParser.json({ limit: "50mb" }));
 app.use(express.static("public/client/http"));
+
 // Allow testing from plain HTTP/1.1 (without SSL)
 app.use((req, res, next) => {
     res.header('Access-Control-Allow-Origin', 'http://localhost:3001'); // Allow requests from http://localhost:3001
@@ -39,10 +40,12 @@ app.use((req, res, next) => {
 
 const benchmarkStore = new BenchmarkStore();
 app.use((req: Request, res: Response, next: NextFunction): void => {
-    if ((req.method === 'GET' && req.path.startsWith("/covalue/")) || req.method === 'POST' || req.method === 'PATCH') {
+    if ((req.method === 'GET' && req.path.startsWith("/covalue/") && req.path.indexOf("/subscribe") === -1)
+        || req.method === 'POST' || req.method === 'PATCH') {
         const timer = new RequestTimer(benchmarkStore.requestId());
 
-        res.on('finish', () => {
+        // As per https://github.com/nodejs/node/issues/29829 use 'close' instead of 'finish' since http/2 only fires 'close'.
+        res.on('close', () => {
             timer.method(req.method).path(req.path).status(res.statusCode).end();
             benchmarkStore.addRequestLog(timer.toRequestLog());
         });
@@ -200,7 +203,7 @@ app.post("/stop", async (req: Request, res: Response) => {
             const caddyAdminUrl = "http://localhost:2019/stop";
             try {
                 await fetch(`${caddyAdminUrl}`, { method: 'POST' });
-                logger.debug("Caddy server shutdown successfully.");
+                logger.info("Caddy server shutdown successfully.");
             } catch (error) {
                 logger.error("Error shutting down Caddy server:", error);
             }

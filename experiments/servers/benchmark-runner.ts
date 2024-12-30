@@ -3,12 +3,12 @@ import * as fs from 'fs';
 
 // 6 web servers
 const commands = [
-    // { command: "node-ws", exportName: "A1_NodeServer-HTTP1-WSS" },
-    // { command: "node-http1", exportName: "A2_NodeServer-HTTP1-SSE" },
+    { command: "node-ws", exportName: "A1_NodeServer-HTTP1-WSS" },
+    { command: "node-http1", exportName: "A2_NodeServer-HTTP1-SSE" },
     { command: "node-http2", exportName: "A3_NodeServer-HTTP2-SSE" },
-    // { command: "uws-ws", exportName: "B1_uWebSocketServer-HTTP1-WSS" },
-    // { command: "uws-http1", exportName: "B2_uWebSocketServer-HTTP1-SSE" },
-    // { command: "caddy-http3", exportName: "C1_NodeCaddyServer-HTTP3-SSE" }
+    { command: "uws-ws", exportName: "B1_uWebSocketServer-HTTP1-WSS" },
+    { command: "uws-http1", exportName: "B2_uWebSocketServer-HTTP1-SSE" },
+    { command: "caddy-http3", exportName: "C1_NodeCaddyServer-HTTP3-SSE" }
 ];
 
 // Time to wait between stopping one service and starting another (in ms)
@@ -53,7 +53,7 @@ async function runCommand(command: string, exportFileName: string, port: number)
                 env: {
                     ...process.env,
                     PORT: `${port}`,
-                    LEVEL: "info",
+                    LOG_LEVEL: "info",
                     EXPORT_FILENAME: `${exportFileName}.csv`
                 }
             });
@@ -98,16 +98,20 @@ async function runCommand(command: string, exportFileName: string, port: number)
                 console.error(`[Benchmark Error ${command}] ${data.toString().trim()}`);
             });
 
+            benchmarkProcess.on('error', (err) => {
+                console.error(`[Benchmark Error (uncaught)] ${err.toString().trim()}`);
+            });
+
             await new Promise((resolve, reject) => {
                 benchmarkProcess.on('exit', (code) => {
+                    outputStream.end();
                     if (code === 0) {
                         resolve(code);
                     } else {
-                        reject(new Error(`Benchmark failed with code ${code}`));
+                        reject(new Error(`Benchmark failed with code: ${code}`));
                     }
                 });
             });
-            outputStream.end();
 
         } catch (error) {
             console.error(`Error running ${command}:`, error);
