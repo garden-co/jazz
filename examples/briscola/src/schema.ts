@@ -8,9 +8,14 @@ export const Suits = ["S", "B", "C", "D"] as const;
 
 export const Suit = co.literal(...Suits);
 
-export class Card extends CoMap {
+export class CardData extends CoMap {
   value = CardValue;
   suit = Suit;
+}
+
+export class Card extends CoMap {
+  data = co.ref(CardData);
+  order = co.optional.number;
 }
 
 export class CardList extends CoList.Of(co.ref(Card)) {}

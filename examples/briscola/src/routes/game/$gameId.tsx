@@ -26,10 +26,21 @@ export const Route = createFileRoute("/game/$gameId")({
 function RouteComponent() {
   // const { me: myAccount } = useAccount();
   const { gameId } = Route.useParams();
+
   const game = useCoState(Game, gameId as ID<Game>, {
     deck: [{}],
-    player1: { hand: [{}], scoredCards: [{}], account: {}, playIntent: {} },
-    player2: { hand: [{}], scoredCards: [{}], account: {}, playIntent: {} },
+    player1: {
+      hand: [{}],
+      scoredCards: [{}],
+      account: {},
+      playIntent: {},
+    },
+    player2: {
+      hand: [{}],
+      scoredCards: [{}],
+      account: {},
+      playIntent: {},
+    },
     activePlayer: { account: {} },
   });
 
@@ -56,7 +67,9 @@ function RouteComponent() {
     const playedCardSuit: string = playedCard?.[0];
 
     const pc = me.hand.find(
-      (card) => card.value === playedCardValue && card.suit === playedCardSuit,
+      (card) =>
+        card.data?.value === playedCardValue &&
+        card.data.suit === playedCardSuit,
     );
 
     me.playIntent.card = pc;
@@ -68,11 +81,13 @@ function RouteComponent() {
       <PlayerArea player={opponent}>
         <ul className="flex gap-2 flex-row-reverse place-content-center ">
           <AnimatePresence>
-            {opponent.hand.map((card) => (
-              <motion.li key={card.id} layout>
-                <PlayingCard card={card} faceDown />
-              </motion.li>
-            ))}
+            {opponent.hand
+              .toSorted((a, b) => (a.order ?? 0) - (b.order ?? 0))
+              .map((card) => (
+                <motion.li key={card.id} layout>
+                  <PlayingCard card={card} faceDown />
+                </motion.li>
+              ))}
           </AnimatePresence>
         </ul>
       </PlayerArea>
@@ -124,40 +139,47 @@ function RouteComponent() {
             >
               <Reorder.Group
                 axis="x"
-                values={me.hand}
-                className=""
+                values={me.hand.toSorted((a, b) => {
+                  return (a.order ?? 0) - (b.order ?? 0);
+                })}
                 onReorder={(cards) => {
-                  me.hand.sort((a, b) => cards.indexOf(a) - cards.indexOf(b));
+                  cards.forEach((card, i) => {
+                    card.order = i;
+                  });
                 }}
               >
                 <AnimatePresence>
-                  {me.hand.map((card, i, cards) => (
-                    <Reorder.Item
-                      key={card.id}
-                      value={card}
-                      animate={{
-                        rotate: i * 15 - (15 * (cards.length - 1)) / 2,
-                        ...(cards.length === 3 &&
-                          i === 1 && {
-                            marginTop: -15,
-                          }),
-                      }}
-                      whileDrag={{ scale: 1.1 }}
-                      exit={{ translateY: 400, scale: 1.1 }}
-                      layout
-                    >
-                      <RadioGroup.Item
-                        value={`${card.suit}${card.value}`}
-                        // TODO: this can have a better animation on selction by using motion
-                        className="relative data-[state=checked]:-translate-y-7 data-[state=checked]:shadow-xl transition-all"
-                        asChild
+                  {me.hand
+                    .toSorted((a, b) => {
+                      return (a.order ?? 0) - (b.order ?? 0);
+                    })
+                    .map((card, i, cards) => (
+                      <Reorder.Item
+                        key={card.id}
+                        value={card}
+                        animate={{
+                          rotate: i * 15 - (15 * (cards.length - 1)) / 2,
+                          ...(cards.length === 3 &&
+                            i === 1 && {
+                              marginTop: -15,
+                            }),
+                        }}
+                        whileDrag={{ scale: 1.1 }}
+                        exit={{ translateY: 400, scale: 1.1 }}
+                        layout
                       >
-                        <motion.button>
-                          <PlayingCard card={card} />
-                        </motion.button>
-                      </RadioGroup.Item>
-                    </Reorder.Item>
-                  ))}
+                        <RadioGroup.Item
+                          value={`${card.data?.suit}${card.data?.value}`}
+                          // TODO: this can have a better animation on selction by using motion
+                          className="relative data-[state=checked]:-translate-y-7 data-[state=checked]:shadow-xl transition-all"
+                          asChild
+                        >
+                          <motion.button>
+                            <PlayingCard card={card} />
+                          </motion.button>
+                        </RadioGroup.Item>
+                      </Reorder.Item>
+                    ))}
                 </AnimatePresence>
               </Reorder.Group>
             </RadioGroup.Root>
@@ -204,7 +226,7 @@ interface Props {
   className?: string;
 }
 function PlayingCard({ card, className, faceDown = false }: Props) {
-  const cardImage = getCardImage(card.suit);
+  const cardImage = getCardImage(card.data?.suit);
 
   return (
     <motion.div
@@ -224,7 +246,7 @@ function PlayingCard({ card, className, faceDown = false }: Props) {
         {!faceDown && (
           <>
             <div className="text-4xl font-bold text-black self-start">
-              {card.value}
+              {card.data?.value}
             </div>
             <div className="grow flex justify-center items-center">
               <img
@@ -233,7 +255,7 @@ function PlayingCard({ card, className, faceDown = false }: Props) {
               />
             </div>
             <div className="text-4xl font-bold text-black rotate-180 transform self-end">
-              {card.value}
+              {card.data?.value}
             </div>
           </>
         )}
@@ -287,7 +309,7 @@ function PlayerArea({ children, player }: PlayerAreaProps) {
 
 function getScore(cards: Card[]) {
   return cards.reduce((acc, card) => {
-    switch (card.value) {
+    switch (card.data?.value) {
       case 3:
         return acc + 10;
       case 1:

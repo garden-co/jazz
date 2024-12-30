@@ -1,11 +1,11 @@
 import {
   Card,
+  CardData,
   CardList,
   CardValues,
   Game,
   PlayIntent,
   Player,
-  type Suit,
   Suits,
 } from "@/schema";
 import { startWorker } from "jazz-nodejs";
@@ -16,8 +16,8 @@ const { worker } = await startWorker({
 });
 
 async function createGame() {
-  const everyoneWriter = Group.create({ owner: worker });
-  everyoneWriter.addMember("everyone", "writer");
+  const publicReadOnly = Group.create({ owner: worker });
+  publicReadOnly.addMember("everyone", "reader");
 
   const [acc1, acc2] = await Promise.all([
     Account.load("co_zo41be46XeAEuRjGYETaoPpZrKU" as ID<Account>, worker, {}),
@@ -28,28 +28,40 @@ async function createGame() {
     return;
   }
 
-  const player1 = createPlayer({ owner: everyoneWriter, account: acc1 });
-  const player2 = createPlayer({ owner: everyoneWriter, account: acc2 });
+  const player1 = createPlayer({ owner: publicReadOnly, account: acc1 });
+  const player2 = createPlayer({ owner: publicReadOnly, account: acc2 });
 
-  const deck = createDeck({ owner: everyoneWriter });
+  const deck = createDeck({ owner: publicReadOnly });
+
+  const player1Reader = Group.create({ owner: worker });
+  player1Reader.addMember(acc1, "reader");
+  const publicReadPlayer1Write = Group.create({ owner: worker });
+  publicReadPlayer1Write.addMember(acc1, "writer");
+  publicReadPlayer1Write.addMember("everyone", "reader");
+
+  const player2Reader = Group.create({ owner: worker });
+  player2Reader.addMember(acc2, "reader");
+  const publicReadPlayer2Write = Group.create({ owner: worker });
+  publicReadPlayer2Write.addMember(acc2, "writer");
+  publicReadPlayer2Write.addMember("everyone", "reader");
 
   while (player1.hand && player1.hand?.length < 3) {
-    drawCard(player1, deck);
+    drawCard(player1, publicReadPlayer1Write, player1Reader, deck);
   }
 
   while (player2.hand && player2.hand?.length < 3) {
-    drawCard(player2, deck);
+    drawCard(player2, publicReadPlayer2Write, player2Reader, deck);
   }
 
   const game = Game.create(
     {
       deck,
-      briscola: deck[0]?.suit!,
+      briscola: deck[0]?.data?.suit!,
       activePlayer: player1,
       player1: player1,
       player2: player2,
     },
-    { owner: everyoneWriter },
+    { owner: publicReadOnly },
   );
 
   await game.waitForSync();
@@ -62,12 +74,15 @@ interface CreatePlayerParams {
   account: Account;
 }
 function createPlayer({ owner, account }: CreatePlayerParams) {
+  const playerWrite = Group.create({ owner: worker });
+  playerWrite.addMember(account, "writer");
+
   const player = Player.create(
     {
       scoredCards: CardList.create([], {
         owner,
       }),
-      playIntent: PlayIntent.create({}, { owner }),
+      playIntent: PlayIntent.create({}, { owner: playerWrite }),
       account,
       hand: CardList.create([], { owner }),
     },
@@ -89,8 +104,14 @@ function createDeck({ owner }: CreateDeckParams) {
   shuffle(allCards);
 
   const deck = CardList.create(
-    allCards.map((card) => {
-      return Card.create(card, { owner });
+    allCards.map((card, i) => {
+      return Card.create(
+        {
+          // The first card is the briscola, visible to everyone
+          data: CardData.create(card, { owner: i === 0 ? owner : worker }),
+        },
+        { owner },
+      );
     }),
     { owner },
   );
@@ -98,11 +119,21 @@ function createDeck({ owner }: CreateDeckParams) {
   return deck;
 }
 
-function drawCard(player: Player, deck: CardList) {
+function drawCard(
+  player: Player,
+  publicReadPlayerWrite: Group,
+  playerRead: Group,
+  deck: CardList,
+) {
   const card = deck.pop();
-  if (card) {
-    // TODO: set permission of the card to read-only player1
-    player.hand?.push(card);
+  if (card && card.data) {
+    // TODO: set permission of the card to read-only player
+    player.hand?.push(
+      Card.create(
+        { data: CardData.create(card.data, { owner: playerRead }) },
+        { owner: publicReadPlayerWrite },
+      ),
+    );
   }
 }
 
@@ -121,7 +152,7 @@ function shuffle(array: unknown[]) {
   }
 }
 
-function getCardValue(card: Card) {
+function getCardValue(card: CardData) {
   switch (card.value) {
     case 1:
       return 20;
@@ -135,8 +166,18 @@ function getCardValue(card: Card) {
 async function resumeGame(gameId: ID<Game>) {
   const game = await Game.load(gameId, worker, {
     deck: [{}],
-    player1: { hand: [{}], scoredCards: [{}], account: {}, playIntent: {} },
-    player2: { hand: [{}], scoredCards: [{}], account: {}, playIntent: {} },
+    player1: {
+      hand: [{ data: {} }],
+      scoredCards: [{}],
+      account: {},
+      playIntent: {},
+    },
+    player2: {
+      hand: [{ data: {} }],
+      scoredCards: [{}],
+      account: {},
+      playIntent: {},
+    },
     activePlayer: {
       account: {},
     },
@@ -163,15 +204,15 @@ async function resumeGame(gameId: ID<Game>) {
       "player",
       player.account?.id,
       "played",
-      intent.card.value,
-      intent.card.suit,
+      intent.card.data?.value,
+      intent.card.data?.suit,
     );
 
     const cardIndex =
       player.hand?.findIndex((card) => {
         return (
-          card?.value === player.playIntent?.card?.value &&
-          card?.suit === player.playIntent?.card?.suit
+          card?.data?.value === player.playIntent?.card?.data?.value &&
+          card?.data?.suit === player.playIntent?.card?.data?.suit
         );
       }) ?? -1;
 
@@ -186,15 +227,15 @@ async function resumeGame(gameId: ID<Game>) {
       let winner: Player;
 
       // If both cards have the same suit, the one with the highest value wins
-      if (game.playedCard.suit === intent.card.suit) {
+      if (game.playedCard.data?.suit === intent.card.data?.suit) {
         winner =
-          getCardValue(intent.card) > getCardValue(game.playedCard)
+          getCardValue(intent.card.data!) > getCardValue(game.playedCard.data!)
             ? player
             : opponent;
       } else {
         // else the active player wins only if they played a briscola.
         // (we already know the other player didn't)
-        if (intent.card.suit === game.briscola) {
+        if (intent.card.data?.suit === game.briscola) {
           winner = player;
         } else {
           winner = opponent;
