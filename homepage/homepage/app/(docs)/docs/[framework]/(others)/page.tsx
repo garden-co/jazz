@@ -1,7 +1,8 @@
-import MdxSource from "@/components/docs/docs-intro.mdx";
-import { frameworks } from "@/lib/framework";
 import { JazzLogo } from "gcmp-design-system/src/app/components/atoms/logos/JazzLogo";
 import { HeroHeader } from "gcmp-design-system/src/app/components/molecules/HeroHeader";
+import { Prose } from "gcmp-design-system/src/app/components/molecules/Prose";
+import MdxSource from "../../../../../components/docs/docs-intro.mdx";
+import { frameworks } from "../../../../../lib/framework";
 
 export default function Page() {
   return (

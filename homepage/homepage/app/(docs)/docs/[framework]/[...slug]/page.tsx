@@ -1,46 +1,11 @@
-import DocsLayout from "@/app/docs/[framework]/(others)/layout";
+import DocsLayout from "@/components/docs/DocsLayout";
 import { TableOfContents } from "@/components/docs/TableOfContents";
 import ComingSoonPage from "@/components/docs/coming-soon.mdx";
+import { DocNav } from "@/components/docs/nav";
 import { docNavigationItems } from "@/lib/docNavigationItems";
 import { Framework, frameworks } from "@/lib/framework";
 import type { Toc } from "@stefanprobst/rehype-extract-toc";
 import { Prose } from "gcmp-design-system/src/app/components/molecules/Prose";
-import { Metadata } from "next";
-
-async function getMdxSource(slugPath: string, framework: string) {
-  try {
-    return await import(`./${slugPath}.mdx`);
-  } catch (error) {
-    return await import(`./${slugPath}/${framework}.mdx`);
-  }
-}
-
-export async function generateMetadata({
-  params: { slug, framework },
-}: {
-  params: { slug: string[]; framework: string };
-}): Promise<Metadata> {
-  const slugPath = slug.join("/");
-  const title = "Coming soon";
-  try {
-    const mdxSource = await getMdxSource(slugPath, framework);
-    const title = mdxSource.metadata.title;
-
-    return {
-      title,
-      openGraph: {
-        title,
-      },
-    };
-  } catch (error) {
-    return {
-      title,
-      openGraph: {
-        title,
-      },
-    };
-  }
-}
 
 export default async function Page({
   params: { slug, framework },
@@ -48,24 +13,28 @@ export default async function Page({
   const slugPath = slug.join("/");
 
   try {
-    const mdxSource = await getMdxSource(slugPath, framework);
+    let mdxSource;
+    try {
+      mdxSource = await import(`./${slugPath}.mdx`);
+    } catch (error) {
+      mdxSource = await import(`./${slugPath}/${framework}.mdx`);
+    }
+
     const { default: Content, tableOfContents } = mdxSource;
 
-    // Exclude h1 from table of contents
-    const tocItems = (tableOfContents as Toc)?.[0]?.children;
-
     return (
-      <>
+      <DocsLayout toc={tableOfContents} nav={<DocNav />}>
         <Prose className="overflow-x-hidden lg:flex-1 py-8">
           <Content />
         </Prose>
-        {tocItems && <TableOfContents items={tocItems} />}
-      </>
+      </DocsLayout>
     );
   } catch (error) {
     return (
-      <DocsLayout>
-        <ComingSoonPage />
+      <DocsLayout nav={<DocNav />}>
+        <Prose className="overflow-x-hidden lg:flex-1 py-8">
+          <ComingSoonPage className="max-w-3xl mx-auto" />
+        </Prose>
       </DocsLayout>
     );
   }
