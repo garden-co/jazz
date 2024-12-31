@@ -1,19 +1,35 @@
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import { useCoState } from "@/main";
-import { type Card, Game, type Player, type Suit } from "@/schema";
+import { type Card, Game, type Player } from "@/schema";
 import * as RadioGroup from "@radix-ui/react-radio-group";
-import { createFileRoute } from "@tanstack/react-router";
-import type { ID, co } from "jazz-tools";
-import { AnimatePresence, LayoutGroup, Reorder, m, motion } from "motion/react";
+import { createFileRoute, notFound, redirect } from "@tanstack/react-router";
+import type { ID } from "jazz-tools";
+import { AnimatePresence, LayoutGroup, Reorder, motion } from "motion/react";
 import type { FormEventHandler, ReactNode } from "react";
-import bastoni from "../../bastoni.svg?url";
-import coppe from "../../coppe.svg?url";
-import denari from "../../denari.svg?url";
-import spade from "../../spade.svg?url";
+
+import { PlayingCard } from "@/components/playing-card";
+import { useCoState } from "@/jazz";
 
 export const Route = createFileRoute("/game/$gameId")({
   component: RouteComponent,
+  loader: async ({ params: { gameId }, context: { me } }) => {
+    // !FIXME: this is useless, the layout takes care of this
+    if (!me) {
+      throw redirect({
+        to: "/",
+      });
+    }
+    // TODO: This takes a long time?
+    const game = await Game.load(gameId as ID<Game>, me, {});
+
+    if (!game) {
+      throw notFound();
+    }
+  },
+  // TODO: better loading screen
+  pendingComponent: () => <div>...</div>,
+  // TODO: better not found page
+  notFoundComponent: () => <div>Game not found</div>,
 });
 
 function RouteComponent() {
@@ -90,6 +106,7 @@ function RouteComponent() {
               <PlayingCard
                 className="rotate-[88deg] left-1/2 absolute"
                 card={game.deck[0]}
+                layoutId={`${game.deck[0]?.data?.suit}${game.deck[0]?.data?.value}`}
               />
             )}
             <CardStack cards={game.deck.slice(1)} faceDown />
@@ -101,9 +118,14 @@ function RouteComponent() {
                 <motion.div
                   className="absolute"
                   key={game.playedCard.id}
-                  layoutId={`${game.playedCard?.data?.suit}${game.playedCard?.data?.value}`}
+                  animate={{
+                    rotate: 0,
+                  }}
                 >
-                  <PlayingCard card={game.playedCard} />
+                  <PlayingCard
+                    card={game.playedCard}
+                    layoutId={`${game.playedCard?.data?.suit}${game.playedCard?.data?.value}`}
+                  />
                 </motion.div>
               )}
             </AnimatePresence>
@@ -149,10 +171,6 @@ function RouteComponent() {
                           }}
                           animate={{
                             rotate: i * 15 - (15 * (cards.length - 1)) / 2,
-                            ...(cards.length === 3 &&
-                              i === 1 && {
-                                marginTop: -15,
-                              }),
                             translateY: 0,
                           }}
                           whileDrag={{ scale: 1.1 }}
@@ -195,14 +213,7 @@ function CardStack({ cards, className, faceDown = false }: CardStackProps) {
     <div className={cn("relative p-4 w-[200px] h-[280px]", className)}>
       <AnimatePresence>
         {cards.map((card, i) => (
-          <motion.div
-            key={card?.id}
-            className="absolute"
-            style={{
-              rotate: `${(i % 3) * (i % 5) * 3}deg`,
-            }}
-            layout
-          >
+          <motion.div key={card?.id} className="absolute" animate layout>
             <PlayingCard
               card={card}
               faceDown={faceDown}
@@ -215,72 +226,6 @@ function CardStack({ cards, className, faceDown = false }: CardStackProps) {
       </AnimatePresence>
     </div>
   );
-}
-
-interface PlayingCardProps {
-  card: co<Card>;
-  faceDown?: boolean;
-  className?: string;
-  layoutId?: string;
-}
-function PlayingCard({
-  card,
-  className,
-  faceDown = false,
-  layoutId,
-}: PlayingCardProps) {
-  const cardImage = getCardImage(card.data?.suit!);
-  if (!faceDown && card.data?.value === undefined && card.data?.suit) {
-    return null;
-  }
-
-  return (
-    <motion.div
-      className={cn(
-        "block aspect-card w-[150px] bg-white touch-none rounded-lg shadow-lg transform-gpu p-2 border",
-        className,
-      )}
-      style={{
-        ...(faceDown && {
-          backgroundImage: `url(https://placecats.com/150/243)`,
-          backgroundSize: "cover",
-        }),
-      }}
-      layoutId={layoutId}
-    >
-      <div className="border-zinc-400 border rounded-lg h-full px-1 flex flex-col ">
-        {!faceDown && (
-          <>
-            <div className="text-4xl font-bold text-black self-start">
-              {card.data?.value}
-            </div>
-            <div className="grow flex justify-center items-center">
-              <img
-                src={cardImage}
-                className="pointer-events-none max-h-[140px]"
-              />
-            </div>
-            <div className="text-4xl font-bold text-black rotate-180 transform self-end">
-              {card.data?.value}
-            </div>
-          </>
-        )}
-      </div>
-    </motion.div>
-  );
-}
-
-function getCardImage(suit: typeof Suit) {
-  switch (suit) {
-    case "C":
-      return coppe;
-    case "D":
-      return denari;
-    case "S":
-      return spade;
-    case "B":
-      return bastoni;
-  }
 }
 
 interface PlayerAreaProps {

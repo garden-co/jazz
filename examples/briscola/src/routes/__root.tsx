@@ -1,7 +1,12 @@
-import { Outlet, createRootRoute } from "@tanstack/react-router";
+import type { useAccount } from "@/jazz";
+import { Outlet, createRootRouteWithContext } from "@tanstack/react-router";
 import { TanStackRouterDevtools } from "@tanstack/router-devtools";
 
-export const Route = createRootRoute({
+interface RouterContext {
+  me: ReturnType<typeof useAccount>["me"];
+}
+
+export const Route = createRootRouteWithContext<RouterContext>()({
   component: RootComponent,
 });
 
