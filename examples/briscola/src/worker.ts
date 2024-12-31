@@ -66,7 +66,7 @@ async function createGame() {
 
   await game.waitForSync();
 
-  return game.id;
+  return { gameId: game.id, publicReadOnlyGroupId: publicReadOnly.id };
 }
 
 interface CreatePlayerParams {
@@ -162,8 +162,12 @@ function getCardValue(card: CardData) {
       return card.value;
   }
 }
-
-async function resumeGame(gameId: ID<Game>) {
+interface ResumeGameParams {
+  gameId: ID<Game>;
+  publicReadOnlyGroupId: ID<Group>;
+}
+async function resumeGame({ gameId, publicReadOnlyGroupId }: ResumeGameParams) {
+  const publicReadOnly = await Group.load(publicReadOnlyGroupId, worker, {});
   const game = await Game.load(gameId, worker, {
     deck: [{}],
     player1: {
@@ -183,7 +187,8 @@ async function resumeGame(gameId: ID<Game>) {
     },
   });
 
-  if (!game) {
+  if (!game || !publicReadOnly) {
+    // TODO: Error
     return;
   }
 
@@ -196,9 +201,6 @@ async function resumeGame(gameId: ID<Game>) {
     }
 
     const opponent = game.getOpponent(player);
-    // game.player1.account?.id === player.account?.id
-    //   ? game.player2
-    //   : game.player1;
 
     console.log(
       "player",
@@ -242,12 +244,32 @@ async function resumeGame(gameId: ID<Game>) {
         }
       }
 
-      winner.scoredCards?.push(game.playedCard, intent.card);
+      winner.scoredCards?.push(
+        game.playedCard,
+        Card.create(
+          {
+            data: CardData.create(intent.card.data!, { owner: publicReadOnly }),
+          },
+          { owner: game._owner },
+        ),
+      );
 
       // the winner draws first
       if (game.deck.length > 0) {
-        drawCard(winner, game.deck);
-        drawCard(game.getOpponent(winner), game.deck);
+        drawCard(
+          winner,
+          winner.hand?.[0]?._owner.castAs(Group)!,
+          winner.hand?.[0]?.data?._owner.castAs(Group)!,
+          game.deck,
+        );
+
+        const opponent = game.getOpponent(winner);
+        drawCard(
+          opponent,
+          opponent.hand?.[0]?._owner.castAs(Group)!,
+          opponent.hand?.[0]?.data?._owner.castAs(Group)!,
+          game.deck,
+        );
       }
 
       // @ts-expect-error types are wonky
@@ -255,8 +277,12 @@ async function resumeGame(gameId: ID<Game>) {
       delete game.playedCard;
     } else {
       // else, just put the card on the table and switch active player
-      game.playedCard = intent.card;
+      game.playedCard = Card.create(
+        { data: CardData.create(intent.card.data!, { owner: publicReadOnly }) },
+        { owner: game._owner },
+      );
 
+      // TODO: if there are no more cards in the deck and both players have played all their cards, end the game
       // Switch active player
       // @ts-expect-error types are wonky
       game.activePlayer = opponent;
@@ -269,7 +295,12 @@ async function resumeGame(gameId: ID<Game>) {
 
 let gameId: ID<Game> | undefined;
 
-gameId = await createGame();
+const game = await createGame();
+gameId = game?.gameId;
 console.log("Game created with id:", gameId);
+console.log("Public group ID", game?.publicReadOnlyGroupId);
 
-resumeGame(gameId ?? ("co_znBaWhhHHfkVgE2EZiWjv4sm3hF" as ID<Game>));
+resumeGame({
+  gameId: gameId ?? ("co_znBaWhhHHfkVgE2EZiWjv4sm3hF" as ID<Game>),
+  publicReadOnlyGroupId: game?.publicReadOnlyGroupId!,
+});

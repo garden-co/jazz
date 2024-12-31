@@ -18,7 +18,11 @@ export class Card extends CoMap {
   order = co.optional.number;
 }
 
-export class CardList extends CoList.Of(co.ref(Card)) {}
+export class CardList extends CoList.Of(co.ref(Card)) {
+  getSorted() {
+    return this.toSorted((a, b) => (a?.order ?? 0) - (b?.order ?? 0));
+  }
+}
 
 export class PlayIntent extends CoMap {
   card = co.optional.ref(Card);
