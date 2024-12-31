@@ -127,7 +127,6 @@ function drawCard(
 ) {
   const card = deck.pop();
   if (card && card.data) {
-    // TODO: set permission of the card to read-only player
     player.hand?.push(
       Card.create(
         { data: CardData.create(card.data, { owner: playerRead }) },
@@ -289,8 +288,14 @@ async function resumeGame({ gameId, publicReadOnlyGroupId }: ResumeGameParams) {
     }
   };
 
-  game.player1.playIntent.subscribe({ card: {} }, onPlayIntent(game.player1));
-  game.player2.playIntent.subscribe({ card: {} }, onPlayIntent(game.player2));
+  game.player1.playIntent.subscribe(
+    { card: { data: {} } },
+    onPlayIntent(game.player1),
+  );
+  game.player2.playIntent.subscribe(
+    { card: { data: {} } },
+    onPlayIntent(game.player2),
+  );
 }
 
 let gameId: ID<Game> | undefined;

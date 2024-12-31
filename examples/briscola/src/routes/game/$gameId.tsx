@@ -24,13 +24,13 @@ function RouteComponent() {
     deck: [{}],
     playedCard: { data: {} },
     player1: {
-      hand: [{}],
+      hand: [{ data: {} }],
       scoredCards: [{ data: {} }],
       account: {},
       playIntent: {},
     },
     player2: {
-      hand: [{}],
+      hand: [{ data: {} }],
       scoredCards: [{ data: {} }],
       account: {},
       playIntent: {},
@@ -72,12 +72,11 @@ function RouteComponent() {
   return (
     <LayoutGroup>
       <div className="flex flex-col h-full p-2 bg-green-800">
-        {/* {myAccount.id} */}
         <PlayerArea player={opponent}>
           <ul className="flex gap-2 flex-row-reverse place-content-center ">
             <AnimatePresence>
               {opponent.hand.getSorted().map((card) => (
-                <motion.li key={card?.id}>
+                <motion.li key={card?.id} layout>
                   <PlayingCard card={card} faceDown />
                 </motion.li>
               ))}
@@ -99,7 +98,11 @@ function RouteComponent() {
           <div className="relative h-full items-center flex justify-center">
             <AnimatePresence>
               {game.playedCard && (
-                <motion.div className="absolute" key={game.playedCard.id}>
+                <motion.div
+                  className="absolute"
+                  key={game.playedCard.id}
+                  layoutId={`${game.playedCard?.data?.suit}${game.playedCard?.data?.value}`}
+                >
                   <PlayingCard card={game.playedCard} />
                 </motion.div>
               )}
@@ -157,14 +160,14 @@ function RouteComponent() {
                             scale: 1.1,
                           }}
                           layout
+                          layoutId={`${card?.data?.suit}${card?.data?.value}`}
                         >
                           <RadioGroup.Item
                             value={`${card?.data?.suit}${card?.data?.value}`}
-                            // TODO: this can have a better animation on selction by using motion
-                            className="relative data-[state=checked]:border transition-all"
+                            className="relative data-[state=checked]:border"
                             asChild
                           >
-                            <motion.button animate>
+                            <motion.button>
                               <PlayingCard card={card} />
                             </motion.button>
                           </RadioGroup.Item>
@@ -198,8 +201,15 @@ function CardStack({ cards, className, faceDown = false }: CardStackProps) {
             style={{
               rotate: `${(i % 3) * (i % 5) * 3}deg`,
             }}
+            layout
           >
-            <PlayingCard card={card} faceDown={faceDown} />
+            <PlayingCard
+              card={card}
+              faceDown={faceDown}
+              layoutId={
+                faceDown ? undefined : `${card?.data?.suit}${card?.data?.value}`
+              }
+            />
           </motion.div>
         ))}
       </AnimatePresence>
@@ -207,12 +217,18 @@ function CardStack({ cards, className, faceDown = false }: CardStackProps) {
   );
 }
 
-interface Props {
+interface PlayingCardProps {
   card: co<Card>;
   faceDown?: boolean;
   className?: string;
+  layoutId?: string;
 }
-function PlayingCard({ card, className, faceDown = false }: Props) {
+function PlayingCard({
+  card,
+  className,
+  faceDown = false,
+  layoutId,
+}: PlayingCardProps) {
   const cardImage = getCardImage(card.data?.suit!);
   if (!faceDown && card.data?.value === undefined && card.data?.suit) {
     return null;
@@ -230,9 +246,7 @@ function PlayingCard({ card, className, faceDown = false }: Props) {
           backgroundSize: "cover",
         }),
       }}
-      layoutId={
-        faceDown ? undefined : `${card?.data?.suit}${card?.data?.value}`
-      }
+      layoutId={layoutId}
     >
       <div className="border-zinc-400 border rounded-lg h-full px-1 flex flex-col ">
         {!faceDown && (
