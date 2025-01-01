@@ -31,7 +31,8 @@
     "test-halt": "playwright test tests/server-shutdown.spec.ts",
     "clean": "rm -vrf benchmarks && mkdir -v benchmarks",
     "bench": "npx ts-node benchmark-runner.ts",
-    "all": "clear && pnpm test-text && pnpm test-binary && pnpm test-halt && say 'Done'"
+    "playwright": "clear; pnpm test-text; pnpm test-binary; pnpm test-halt; say 'Done'",
+    "k6": "clear; k6 run tests/k6-text.js; pnpm test-halt; say 'Done'"
   },
   "keywords": [],
   "author": "",
