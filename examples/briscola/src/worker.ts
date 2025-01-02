@@ -2,7 +2,9 @@ import {
   Card,
   CardData,
   CardList,
+  CardMeta,
   CardValues,
+  DealerAccount,
   Game,
   PlayIntent,
   Player,
@@ -11,7 +13,11 @@ import {
 import { startWorker } from "jazz-nodejs";
 import { Account, Group, type ID } from "jazz-tools";
 
-const { worker } = await startWorker({
+const {
+  worker,
+  // experimental: { inbox },
+} = await startWorker({
+  AccountSchema: DealerAccount,
   syncServer: "wss://cloud.jazz.tools/?key=you@example.com",
 });
 
@@ -31,7 +37,7 @@ async function createGame() {
   const player1 = createPlayer({ owner: publicReadOnly, account: acc1 });
   const player2 = createPlayer({ owner: publicReadOnly, account: acc2 });
 
-  const deck = createDeck({ owner: publicReadOnly });
+  const deck = createDeck({ publicReadOnlyGroup: publicReadOnly });
 
   const player1Reader = Group.create({ owner: worker });
   player1Reader.addMember(acc1, "reader");
@@ -66,7 +72,7 @@ async function createGame() {
 
   await game.waitForSync();
 
-  return { gameId: game.id, publicReadOnlyGroupId: publicReadOnly.id };
+  return { game, publicReadOnlyGroupId: publicReadOnly.id };
 }
 
 interface CreatePlayerParams {
@@ -93,9 +99,9 @@ function createPlayer({ owner, account }: CreatePlayerParams) {
 }
 
 interface CreateDeckParams {
-  owner: Group;
+  publicReadOnlyGroup: Group;
 }
-function createDeck({ owner }: CreateDeckParams) {
+function createDeck({ publicReadOnlyGroup }: CreateDeckParams) {
   const allCards = Suits.flatMap((suit) => {
     return CardValues.map((value) => {
       return { value, suit };
@@ -105,15 +111,20 @@ function createDeck({ owner }: CreateDeckParams) {
 
   const deck = CardList.create(
     allCards.map((card, i) => {
+      const cardDataGroup = Group.create({ owner: worker });
+      // cardGroup.addMember("everyone", "reader");
+
       return Card.create(
         {
           // The first card is the briscola, visible to everyone
-          data: CardData.create(card, { owner: i === 0 ? owner : worker }),
+          data: CardData.create(card, {
+            owner: i === 0 ? publicReadOnlyGroup : cardDataGroup,
+          }),
         },
-        { owner },
+        { owner: publicReadOnlyGroup },
       );
     }),
-    { owner },
+    { owner: publicReadOnlyGroup },
   );
 
   return deck;
@@ -126,13 +137,13 @@ function drawCard(
   deck: CardList,
 ) {
   const card = deck.pop();
-  if (card && card.data) {
-    player.hand?.push(
-      Card.create(
-        { data: CardData.create(card.data, { owner: playerRead }) },
-        { owner: publicReadPlayerWrite },
-      ),
-    );
+
+  if (card?.data) {
+    card.meta = CardMeta.create({ index: 0 }, { owner: publicReadPlayerWrite });
+    card.data._owner.castAs(Group).extend(playerRead);
+    // TODO: This (card meta) should be in another covalue, otherwise the data can be written by others
+    // card.data._owner.castAs(Group).extend(playerRead);
+    player.hand?.push(card);
   }
 }
 
@@ -243,15 +254,8 @@ async function resumeGame({ gameId, publicReadOnlyGroupId }: ResumeGameParams) {
         }
       }
 
-      winner.scoredCards?.push(
-        game.playedCard,
-        Card.create(
-          {
-            data: CardData.create(intent.card.data!, { owner: publicReadOnly }),
-          },
-          { owner: game._owner },
-        ),
-      );
+      intent.card.data?._owner.castAs(Group).extend(publicReadOnly);
+      winner.scoredCards?.push(game.playedCard, intent.card);
 
       // the winner draws first
       if (game.deck.length > 0) {
@@ -276,10 +280,8 @@ async function resumeGame({ gameId, publicReadOnlyGroupId }: ResumeGameParams) {
       delete game.playedCard;
     } else {
       // else, just put the card on the table and switch active player
-      game.playedCard = Card.create(
-        { data: CardData.create(intent.card.data!, { owner: publicReadOnly }) },
-        { owner: game._owner },
-      );
+      intent.card.data?._owner.castAs(Group).extend(publicReadOnly);
+      game.playedCard = intent.card;
 
       // TODO: if there are no more cards in the deck and both players have played all their cards, end the game
       // Switch active player
@@ -300,12 +302,27 @@ async function resumeGame({ gameId, publicReadOnlyGroupId }: ResumeGameParams) {
 
 let gameId: ID<Game> | undefined;
 
-const game = await createGame();
-gameId = game?.gameId;
-console.log("Game created with id:", gameId);
-console.log("Public group ID", game?.publicReadOnlyGroupId);
+const { game, publicReadOnlyGroupId } = (await createGame())!;
+gameId = game?.id;
+
+if (game) {
+  console.log("Game created with id:", game?.id);
+  // await worker.root?.ensureLoaded({ activeGames: [{}] });
+  // console.log(worker.root?.activeGames);
+  // worker.root?.activeGames?.push(game);
+}
+
+// worker.root?.activeGames?.forEach((game) => {
+//   // console.log("Active game1:", game);
+//   if (!game) {
+//     return;
+//   }
+//   console.log("Active game:", game.id);
+// });
 
 resumeGame({
   gameId: gameId ?? ("co_znBaWhhHHfkVgE2EZiWjv4sm3hF" as ID<Game>),
-  publicReadOnlyGroupId: game?.publicReadOnlyGroupId!,
+  publicReadOnlyGroupId: publicReadOnlyGroupId,
 });
+
+// useInboxSender()

@@ -19,7 +19,6 @@ export const Route = createFileRoute("/game/$gameId")({
         to: "/",
       });
     }
-    // TODO: This takes a long time?
     const game = await Game.load(gameId as ID<Game>, me, {});
 
     if (!game) {
@@ -40,13 +39,13 @@ function RouteComponent() {
     deck: [{}],
     playedCard: { data: {} },
     player1: {
-      hand: [{ data: {} }],
+      hand: [{ data: {}, meta: {} }],
       scoredCards: [{ data: {} }],
       account: {},
       playIntent: {},
     },
     player2: {
-      hand: [{ data: {} }],
+      hand: [{ data: {}, meta: {} }],
       scoredCards: [{ data: {} }],
       account: {},
       playIntent: {},
@@ -93,7 +92,7 @@ function RouteComponent() {
             <AnimatePresence>
               {opponent.hand.getSorted().map((card) => (
                 <motion.li key={card?.id} layout>
-                  <PlayingCard card={card} faceDown />
+                  <PlayingCard card={card} faceDown layoutId={card?.id} />
                 </motion.li>
               ))}
             </AnimatePresence>
@@ -106,7 +105,7 @@ function RouteComponent() {
               <PlayingCard
                 className="rotate-[88deg] left-1/2 absolute"
                 card={game.deck[0]}
-                layoutId={`${game.deck[0]?.data?.suit}${game.deck[0]?.data?.value}`}
+                layoutId={`${game.deck[0]?.id}`}
               />
             )}
             <CardStack cards={game.deck.slice(1)} faceDown />
@@ -124,7 +123,7 @@ function RouteComponent() {
                 >
                   <PlayingCard
                     card={game.playedCard}
-                    layoutId={`${game.playedCard?.data?.suit}${game.playedCard?.data?.value}`}
+                    layoutId={`${game.playedCard?.id}`}
                   />
                 </motion.div>
               )}
@@ -149,8 +148,8 @@ function RouteComponent() {
                   values={me.hand.getSorted()}
                   onReorder={(cards) => {
                     cards.forEach((card, i) => {
-                      if (!card) return;
-                      card.order = i;
+                      if (!card?.meta) return;
+                      card.meta.index = i;
                     });
                   }}
                 >
@@ -178,7 +177,7 @@ function RouteComponent() {
                             scale: 1.1,
                           }}
                           layout
-                          layoutId={`${card?.data?.suit}${card?.data?.value}`}
+                          layoutId={`${card?.id}`}
                         >
                           <RadioGroup.Item
                             value={`${card?.data?.suit}${card?.data?.value}`}
@@ -214,13 +213,7 @@ function CardStack({ cards, className, faceDown = false }: CardStackProps) {
       <AnimatePresence>
         {cards.map((card, i) => (
           <motion.div key={card?.id} className="absolute" animate layout>
-            <PlayingCard
-              card={card}
-              faceDown={faceDown}
-              layoutId={
-                faceDown ? undefined : `${card?.data?.suit}${card?.data?.value}`
-              }
-            />
+            <PlayingCard card={card} faceDown={faceDown} layoutId={card?.id} />
           </motion.div>
         ))}
       </AnimatePresence>

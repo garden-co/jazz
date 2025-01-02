@@ -8,6 +8,9 @@ export const Suits = ["S", "B", "C", "D"] as const;
 
 export const Suit = co.literal(...Suits);
 
+export class CardMeta extends CoMap {
+  index = co.optional.number;
+}
 export class CardData extends CoMap {
   value = CardValue;
   suit = Suit;
@@ -15,12 +18,14 @@ export class CardData extends CoMap {
 
 export class Card extends CoMap {
   data = co.ref(CardData);
-  order = co.optional.number;
+  meta = co.optional.ref(CardMeta);
 }
 
 export class CardList extends CoList.Of(co.ref(Card)) {
   getSorted() {
-    return this.toSorted((a, b) => (a?.order ?? 0) - (b?.order ?? 0));
+    return this.toSorted(
+      (a, b) => (a?.meta?.index ?? 0) - (b?.meta?.index ?? 0),
+    );
   }
 }
 
@@ -63,6 +68,27 @@ export class Game extends CoMap {
     }
 
     return opponent;
+  }
+}
+
+export class GameList extends CoList.Of(co.ref(Game)) {}
+
+export class DealerAccountRoot extends CoMap {
+  activeGames = co.ref(GameList);
+}
+
+export class DealerAccount extends Account {
+  root = co.ref(DealerAccountRoot);
+
+  migrate() {
+    if (!this._refs.root) {
+      this.root = DealerAccountRoot.create(
+        {
+          activeGames: GameList.create([], { owner: this }),
+        },
+        { owner: this },
+      );
+    }
   }
 }
 
