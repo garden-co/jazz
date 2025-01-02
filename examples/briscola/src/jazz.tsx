@@ -1,7 +1,11 @@
 import { DemoAuthBasicUI, createJazzReactApp, useDemoAuth } from "jazz-react";
 
 const Jazz = createJazzReactApp();
-export const { useAccount, useCoState } = Jazz;
+export const {
+  useAccount,
+  useCoState,
+  experimental: { useInboxSender },
+} = Jazz;
 
 export function JazzAndAuth({ children }: { children: React.ReactNode }) {
   const [auth, authState] = useDemoAuth();

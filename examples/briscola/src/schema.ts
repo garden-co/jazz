@@ -1,4 +1,4 @@
-import { Account, CoFeed, CoList, CoMap, co } from "jazz-tools";
+import { Account, CoList, CoMap, Inbox, co } from "jazz-tools";
 
 export const CardValues = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] as const;
 
@@ -73,6 +73,12 @@ export class Game extends CoMap {
 
 export class GameList extends CoList.Of(co.ref(Game)) {}
 
+export class WaitingRoom extends CoMap {
+  account1 = co.ref(Account);
+  account2 = co.optional.ref(Account);
+  game = co.optional.ref(Game);
+}
+
 export class DealerAccountRoot extends CoMap {
   activeGames = co.ref(GameList);
 }
@@ -92,5 +98,6 @@ export class DealerAccount extends Account {
   }
 }
 
-// Env: ID e invito publico write only
-export class Inbox extends CoFeed.Of(co.ref(Game)) {}
+export class StartGameRequest extends CoMap {
+  waitingRoom = co.optional.ref(WaitingRoom);
+}

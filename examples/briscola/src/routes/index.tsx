@@ -3,38 +3,38 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
-import { createFileRoute } from "@tanstack/react-router";
+import { useAccount, useInboxSender } from "@/jazz";
+import { StartGameRequest } from "@/schema";
+import { createFileRoute, useNavigate } from "@tanstack/react-router";
+import { Account, Group } from "jazz-tools";
+
+const workerId = import.meta.env.VITE_JAZZ_WORKER_ACCOUNT;
 
 export const Route = createFileRoute("/")({
   component: HomeComponent,
 });
 
 function HomeComponent() {
-  // const { me } = useAccount();
-  // const navigate = useNavigate({ from: "/" });
+  const createGame = useInboxSender(workerId);
+  const { me } = useAccount();
+  const navigate = useNavigate({ from: "/" });
 
-  const onNewGameClick = () => {
-    // On click -> send a message to the inbox requesting a new game to be created
-    // const meP = Player.create(
-    //   {
-    //     carteAcchiappate: ListaDiCarte.create([], { owner: me }),
-    //     giocata: null,
-    //     hand: ListaDiCarte.create([], { owner: me }),
-    //   },
-    //   { owner: me },
-    // );
-    // const newGame = Game.create(
-    //   {
-    //     player1: meP,
-    //   },
-    //   { owner: me },
-    // );
-    // console.log(
-    //   createInviteLink(newGame, "writer", {
-    //     baseURL: "http://localhost:3000/",
-    //   }),
-    // );
-    // navigate({ to: `/game/${newGame.id}` });
+  const onNewGameClick = async () => {
+    const account = await Account.load(workerId, me, {});
+
+    if (!account) {
+      return;
+    }
+
+    const waitingRoomId = await createGame(
+      StartGameRequest.create({}, { owner: Group.create({ owner: me }) }),
+    );
+
+    if (!waitingRoomId) {
+      return;
+    }
+
+    navigate({ to: `/waiting-room/${waitingRoomId}` });
   };
 
   return (

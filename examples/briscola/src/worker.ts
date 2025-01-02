@@ -8,55 +8,96 @@ import {
   Game,
   PlayIntent,
   Player,
+  StartGameRequest,
   Suits,
+  WaitingRoom,
 } from "@/schema";
 import { startWorker } from "jazz-nodejs";
 import { Account, Group, type ID } from "jazz-tools";
 
 const {
   worker,
-  // experimental: { inbox },
+  experimental: { inbox },
 } = await startWorker({
   AccountSchema: DealerAccount,
+  accountID: import.meta.env.VITE_JAZZ_WORKER_ACCOUNT,
   syncServer: "wss://cloud.jazz.tools/?key=you@example.com",
 });
 
-async function createGame() {
+inbox.subscribe(
+  StartGameRequest,
+  async (message, senderID) => {
+    const playerAccount = await Account.load(senderID, worker, {});
+    if (!playerAccount) {
+      return;
+    }
+
+    // if there's already a waiting room, add the player to it and start the game.
+    if (message.waitingRoom && message.waitingRoom.account1) {
+      console.log("Join game request from", senderID);
+      message.waitingRoom.account2 = playerAccount;
+
+      const game = await createGame({
+        account1: message.waitingRoom.account1,
+        account2: message.waitingRoom.account2,
+      });
+      console.log("game created with id:", game.id);
+      await worker.ensureLoaded({ root: { activeGames: [{}] } });
+      worker.root?.activeGames?.push(game);
+      message.waitingRoom.game = game;
+      resumeGame({ gameId: game.id });
+
+      return message.waitingRoom;
+    }
+
+    console.log("Create game request from", senderID);
+    // else, create a new waiting room.
+    const waitingRoomGroup = Group.create({ owner: worker });
+    waitingRoomGroup.addMember("everyone", "reader");
+    const waitingRoom = WaitingRoom.create(
+      { account1: playerAccount },
+      { owner: waitingRoomGroup },
+    );
+
+    console.log("waiting room created with id:", waitingRoom.id);
+
+    return waitingRoom;
+  },
+  { retries: 3 },
+);
+
+interface CreateGameParams {
+  account1: Account;
+  account2: Account;
+}
+async function createGame({ account1, account2 }: CreateGameParams) {
   const publicReadOnly = Group.create({ owner: worker });
-  publicReadOnly.addMember("everyone", "reader");
+  publicReadOnly.addMember(account1, "reader");
+  publicReadOnly.addMember(account2, "reader");
 
-  const [acc1, acc2] = await Promise.all([
-    Account.load("co_zo41be46XeAEuRjGYETaoPpZrKU" as ID<Account>, worker, {}),
-    Account.load("co_zY45YcrgutxEjWCVC7aVG56yL83" as ID<Account>, worker, {}),
-  ]);
-
-  if (!acc1 || !acc2) {
-    return;
-  }
-
-  const player1 = createPlayer({ owner: publicReadOnly, account: acc1 });
-  const player2 = createPlayer({ owner: publicReadOnly, account: acc2 });
+  const player1 = createPlayer({ owner: publicReadOnly, account: account1 });
+  const player2 = createPlayer({ owner: publicReadOnly, account: account2 });
 
   const deck = createDeck({ publicReadOnlyGroup: publicReadOnly });
 
   const player1Reader = Group.create({ owner: worker });
-  player1Reader.addMember(acc1, "reader");
+  player1Reader.addMember(account1, "reader");
   const publicReadPlayer1Write = Group.create({ owner: worker });
-  publicReadPlayer1Write.addMember(acc1, "writer");
+  publicReadPlayer1Write.addMember(account1, "writer");
   publicReadPlayer1Write.addMember("everyone", "reader");
 
   const player2Reader = Group.create({ owner: worker });
-  player2Reader.addMember(acc2, "reader");
+  player2Reader.addMember(account2, "reader");
   const publicReadPlayer2Write = Group.create({ owner: worker });
-  publicReadPlayer2Write.addMember(acc2, "writer");
+  publicReadPlayer2Write.addMember(account2, "writer");
   publicReadPlayer2Write.addMember("everyone", "reader");
 
   while (player1.hand && player1.hand?.length < 3) {
-    drawCard(player1, publicReadPlayer1Write, player1Reader, deck);
+    await drawCard(player1, publicReadPlayer1Write, player1Reader, deck);
   }
 
   while (player2.hand && player2.hand?.length < 3) {
-    drawCard(player2, publicReadPlayer2Write, player2Reader, deck);
+    await drawCard(player2, publicReadPlayer2Write, player2Reader, deck);
   }
 
   const game = Game.create(
@@ -72,7 +113,7 @@ async function createGame() {
 
   await game.waitForSync();
 
-  return { game, publicReadOnlyGroupId: publicReadOnly.id };
+  return game;
 }
 
 interface CreatePlayerParams {
@@ -130,7 +171,7 @@ function createDeck({ publicReadOnlyGroup }: CreateDeckParams) {
   return deck;
 }
 
-function drawCard(
+async function drawCard(
   player: Player,
   publicReadPlayerWrite: Group,
   playerRead: Group,
@@ -138,12 +179,14 @@ function drawCard(
 ) {
   const card = deck.pop();
 
-  if (card?.data) {
+  if (card) {
     // Create the card meta. This is visible to everyone. It's used to sort the cards in the UI.
     card.meta = CardMeta.create({ index: 0 }, { owner: publicReadPlayerWrite });
     // Extends the card data group, which at creation is private to the worker,
     // with the player's read group, so the player can read the card data.
-    card.data._owner.castAs(Group).extend(playerRead);
+
+    await card.ensureLoaded({ data: {} });
+    card.data?._owner.castAs(Group).extend(playerRead);
     player.hand?.push(card);
   }
 }
@@ -175,12 +218,11 @@ function getCardValue(card: CardData) {
 }
 interface ResumeGameParams {
   gameId: ID<Game>;
-  publicReadOnlyGroupId: ID<Group>;
 }
-async function resumeGame({ gameId, publicReadOnlyGroupId }: ResumeGameParams) {
-  const publicReadOnly = await Group.load(publicReadOnlyGroupId, worker, {});
+async function resumeGame({ gameId }: ResumeGameParams) {
+  console.log("Resuming game", gameId);
   const game = await Game.load(gameId, worker, {
-    deck: [{}],
+    deck: [{ data: {} }],
     player1: {
       hand: [{ data: {} }],
       scoredCards: [{}],
@@ -197,6 +239,7 @@ async function resumeGame({ gameId, publicReadOnlyGroupId }: ResumeGameParams) {
       account: {},
     },
   });
+  const publicReadOnly = game?.deck._owner.castAs(Group);
 
   if (!game || !publicReadOnly) {
     // TODO: Error
@@ -263,6 +306,7 @@ async function resumeGame({ gameId, publicReadOnlyGroupId }: ResumeGameParams) {
       winner.scoredCards?.push(game.playedCard, intent.card);
 
       // The winner of the round always draws first.
+      console.log("deck size", game.deck.length);
       if (game.deck.length > 0) {
         drawCard(
           winner,
@@ -305,29 +349,12 @@ async function resumeGame({ gameId, publicReadOnlyGroupId }: ResumeGameParams) {
   );
 }
 
-let gameId: ID<Game> | undefined;
+await worker.ensureLoaded({ root: { activeGames: [{}] } });
 
-const { game, publicReadOnlyGroupId } = (await createGame())!;
-gameId = game?.id;
+worker.root?.activeGames?.forEach((game) => {
+  if (!game) return;
 
-if (game) {
-  console.log("Game created with id:", game?.id);
-  // await worker.root?.ensureLoaded({ activeGames: [{}] });
-  // console.log(worker.root?.activeGames);
-  // worker.root?.activeGames?.push(game);
-}
-
-// worker.root?.activeGames?.forEach((game) => {
-//   // console.log("Active game1:", game);
-//   if (!game) {
-//     return;
-//   }
-//   console.log("Active game:", game.id);
-// });
-
-resumeGame({
-  gameId: gameId ?? ("co_znBaWhhHHfkVgE2EZiWjv4sm3hF" as ID<Game>),
-  publicReadOnlyGroupId: publicReadOnlyGroupId,
+  resumeGame({
+    gameId: game.id,
+  });
 });
-
-// useInboxSender()
