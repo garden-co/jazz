@@ -1,8 +1,8 @@
+import { cn } from "@/lib/utils";
 import type { Card, Suit } from "@/schema";
 import type { co } from "jazz-tools";
 import { motion } from "motion/react";
 
-import { cn } from "@/lib/utils";
 import bastoni from "../img/bastoni.svg?url";
 import coppe from "../img/coppe.svg?url";
 import denari from "../img/denari.svg?url";

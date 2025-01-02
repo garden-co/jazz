@@ -112,11 +112,11 @@ function createDeck({ publicReadOnlyGroup }: CreateDeckParams) {
   const deck = CardList.create(
     allCards.map((card, i) => {
       const cardDataGroup = Group.create({ owner: worker });
-      // cardGroup.addMember("everyone", "reader");
 
       return Card.create(
         {
-          // The first card is the briscola, visible to everyone
+          // The first card is the briscola, it should be visible by everyone,
+          // so we make its owner the public read-only group.
           data: CardData.create(card, {
             owner: i === 0 ? publicReadOnlyGroup : cardDataGroup,
           }),
@@ -139,10 +139,11 @@ function drawCard(
   const card = deck.pop();
 
   if (card?.data) {
+    // Create the card meta. This is visible to everyone. It's used to sort the cards in the UI.
     card.meta = CardMeta.create({ index: 0 }, { owner: publicReadPlayerWrite });
+    // Extends the card data group, which at creation is private to the worker,
+    // with the player's read group, so the player can read the card data.
     card.data._owner.castAs(Group).extend(playerRead);
-    // TODO: This (card meta) should be in another covalue, otherwise the data can be written by others
-    // card.data._owner.castAs(Group).extend(playerRead);
     player.hand?.push(card);
   }
 }
@@ -234,10 +235,14 @@ async function resumeGame({ gameId, publicReadOnlyGroupId }: ResumeGameParams) {
     // remove the card from player's hand
     player.hand?.splice(cardIndex, 1);
 
-    // If there's already a card on the table, check who wins and move both cads to winner's scoredCards
-    if (game.playedCard) {
-      let winner: Player;
+    // make the newly played card's data visible to everyone by extending its group with
+    // the public read-only group so that everyone can see the card.
+    intent.card.data?._owner.castAs(Group).extend(publicReadOnly);
 
+    // If there's already a card on the table, it means both players have played.
+    if (game.playedCard) {
+      // Check who's this turn's winner
+      let winner: Player;
       // If both cards have the same suit, the one with the highest value wins
       if (game.playedCard.data?.suit === intent.card.data?.suit) {
         winner =
@@ -254,10 +259,10 @@ async function resumeGame({ gameId, publicReadOnlyGroupId }: ResumeGameParams) {
         }
       }
 
-      intent.card.data?._owner.castAs(Group).extend(publicReadOnly);
+      // Put the cards in the winner's scored cards pile.
       winner.scoredCards?.push(game.playedCard, intent.card);
 
-      // the winner draws first
+      // The winner of the round always draws first.
       if (game.deck.length > 0) {
         drawCard(
           winner,
@@ -277,14 +282,14 @@ async function resumeGame({ gameId, publicReadOnlyGroupId }: ResumeGameParams) {
 
       // @ts-expect-error types are wonky
       game.activePlayer = winner;
+      // And finally, remove the played card from the table.
       delete game.playedCard;
+
+      // TODO: if there are no more cards in the deck and both players have played all their cards, end the game.
     } else {
-      // else, just put the card on the table and switch active player
-      intent.card.data?._owner.castAs(Group).extend(publicReadOnly);
+      // else, just put the card on the table and switch the active player.
       game.playedCard = intent.card;
 
-      // TODO: if there are no more cards in the deck and both players have played all their cards, end the game
-      // Switch active player
       // @ts-expect-error types are wonky
       game.activePlayer = opponent;
     }
