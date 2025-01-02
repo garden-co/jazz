@@ -20,7 +20,7 @@ const {
   experimental: { inbox },
 } = await startWorker({
   AccountSchema: DealerAccount,
-  accountID: import.meta.env.VITE_JAZZ_WORKER_ACCOUNT,
+  accountID: process.env.VITE_JAZZ_WORKER_ACCOUNT,
   syncServer: "wss://cloud.jazz.tools/?key=you@example.com",
 });
 
