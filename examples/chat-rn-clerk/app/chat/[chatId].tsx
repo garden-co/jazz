@@ -1,9 +1,9 @@
-import { useAccount, useCoState } from "@/src/jazz";
 import { Chat, Message } from "@/src/schema";
-import { useFocusEffect, useNavigation } from "@react-navigation/native";
+import { useNavigation } from "@react-navigation/native";
 import clsx from "clsx";
 import * as Clipboard from "expo-clipboard";
 import { useLocalSearchParams } from "expo-router";
+import { useAccount, useCoState } from "jazz-react-native";
 import { Group, ID } from "jazz-tools";
 import { useEffect, useLayoutEffect, useState } from "react";
 import React, {

@@ -102,7 +102,21 @@ export class RNDemoAuth implements AuthMethod {
     },
     store?: KvStore | undefined,
   ) {
-    const kvStore = store ? store : KvStoreContext.getInstance().getStorage();
+    let kvStore = store;
+
+    if (!kvStore) {
+      const kvStoreContext = KvStoreContext.getInstance();
+
+      if (!kvStoreContext.isInitialized()) {
+        const { ExpoSecureStoreAdapter } = await import(
+          "../storage/expo-secure-store-adapter.js"
+        );
+
+        kvStoreContext.initialize(new ExpoSecureStoreAdapter());
+      }
+
+      kvStore = kvStoreContext.getStorage();
+    }
 
     await migrateExistingUsersKeys(kvStore);
 
@@ -181,8 +195,6 @@ export class RNDemoAuth implements AuthMethod {
                   this.driver.onSignedIn({ logOut });
                 },
                 onError: (error: string | Error) => {
-                  // @ts-expect-error asd
-                  console.error("onError", error.cause);
                   this.driver.onError(error);
                 },
                 logOut: async () => {

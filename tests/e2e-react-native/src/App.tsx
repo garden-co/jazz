@@ -5,11 +5,12 @@ import {
 import { createNativeStackNavigator } from "@react-navigation/native-stack";
 import React, { StrictMode, useEffect, useRef } from "react";
 
-import { useDemoAuth } from "jazz-react-native";
-import { Jazz } from "./jazz";
+import { JazzProvider, setupKvStore, useDemoAuth } from "jazz-react-native";
 import { SimpleSharing } from "./screens/SimpleSharing";
 
 const Stack = createNativeStackNavigator();
+
+setupKvStore();
 
 function App() {
   const [auth, state] = useDemoAuth();
@@ -34,17 +35,16 @@ function App() {
 
   return (
     <StrictMode>
-      <Jazz.Provider
+      <JazzProvider
         auth={auth}
         peer="wss://cloud.jazz.tools/?key=e2e-rn@garden.co"
-        storage={undefined}
       >
         <NavigationContainer ref={navigationRef}>
           <Stack.Navigator initialRouteName="SimpleSharing">
             <Stack.Screen name="SimpleSharing" component={SimpleSharing} />
           </Stack.Navigator>
         </NavigationContainer>
-      </Jazz.Provider>
+      </JazzProvider>
     </StrictMode>
   );
 }

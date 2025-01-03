@@ -14,7 +14,7 @@ import React, {
   Alert,
 } from "react-native";
 
-import { useAccount, useCoState } from "./jazz";
+import { useAccount, useCoState } from "jazz-react-native";
 import { Chat, Message } from "./schema";
 
 export default function ChatScreen({ navigation }: { navigation: any }) {

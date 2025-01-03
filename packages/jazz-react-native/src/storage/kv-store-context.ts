@@ -18,6 +18,10 @@ export class KvStoreContext {
     return KvStoreContext.instance;
   }
 
+  public isInitialized(): boolean {
+    return this.storageInstance !== null;
+  }
+
   public initialize(store: KvStore): void {
     if (!this.storageInstance) {
       this.storageInstance = store;

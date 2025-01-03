@@ -1,4 +1,5 @@
 import { useClerk, useUser } from "@clerk/clerk-expo";
+import { JazzProvider, setupKvStore } from "jazz-react-native";
 import { useJazzClerkAuth } from "jazz-react-native-auth-clerk";
 import React, {
   createContext,
@@ -8,8 +9,6 @@ import React, {
   useState,
 } from "react";
 import { Text, View } from "react-native";
-import { Jazz, kvStore } from "./jazz";
-
 const AuthContext = createContext<{
   isAuthenticated: boolean;
   isLoading: boolean;
@@ -21,6 +20,8 @@ const AuthContext = createContext<{
 export function useAuth() {
   return useContext(AuthContext);
 }
+
+const kvStore = setupKvStore();
 
 export function JazzAndAuth({ children }: PropsWithChildren) {
   const { isSignedIn, isLoaded: isClerkLoaded } = useUser();
@@ -47,13 +48,12 @@ export function JazzAndAuth({ children }: PropsWithChildren) {
           </View>
         ))}
       {auth && clerk.user ? (
-        <Jazz.Provider
+        <JazzProvider
           auth={auth}
           peer="wss://cloud.jazz.tools/?key=chat-rn-clerk-example-jazz@garden.co"
-          storage={undefined}
         >
           {children}
-        </Jazz.Provider>
+        </JazzProvider>
       ) : (
         children
       )}
