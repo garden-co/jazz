@@ -1,14 +1,14 @@
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import { type Card, Game, type Player } from "@/schema";
+import { type Card, Game, PlayIntent, type Player } from "@/schema";
 import * as RadioGroup from "@radix-ui/react-radio-group";
 import { createFileRoute, notFound, redirect } from "@tanstack/react-router";
-import type { ID } from "jazz-tools";
+import { Group, type ID } from "jazz-tools";
 import { AnimatePresence, LayoutGroup, Reorder, motion } from "motion/react";
 import type { FormEventHandler, ReactNode } from "react";
 
 import { PlayingCard } from "@/components/playing-card";
-import { useCoState } from "@/jazz";
+import { useCoState, useInboxSender } from "@/jazz";
 
 export const Route = createFileRoute("/game/$gameId")({
   component: RouteComponent,
@@ -33,6 +33,7 @@ export const Route = createFileRoute("/game/$gameId")({
 
 function RouteComponent() {
   const { gameId } = Route.useParams();
+  const playCard = useInboxSender(import.meta.env.VITE_JAZZ_WORKER_ACCOUNT);
 
   const game = useCoState(Game, gameId as ID<Game>, {
     // TODO: load intent only for current user
@@ -42,13 +43,11 @@ function RouteComponent() {
       hand: [{ data: {}, meta: {} }],
       scoredCards: [{ data: {} }],
       account: {},
-      playIntent: {},
     },
     player2: {
       hand: [{ data: {}, meta: {} }],
       scoredCards: [{ data: {} }],
       account: {},
-      playIntent: {},
     },
     activePlayer: { account: {} },
   });
@@ -80,8 +79,16 @@ function RouteComponent() {
         card.data?.value === playedCardValue &&
         card.data.suit === playedCardSuit,
     );
+    if (!pc) {
+      return;
+    }
 
-    me.playIntent.card = pc;
+    playCard(
+      PlayIntent.create(
+        { type: "play", card: pc, game },
+        { owner: Group.create({ owner: me.account }) },
+      ),
+    );
   };
 
   return (

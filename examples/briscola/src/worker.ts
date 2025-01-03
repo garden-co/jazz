@@ -4,11 +4,11 @@ import {
   CardList,
   CardMeta,
   CardValues,
-  DealerAccount,
   Game,
+  InboxMessage,
+  JoinGameRequest,
   PlayIntent,
   Player,
-  StartGameRequest,
   Suits,
   WaitingRoom,
 } from "@/schema";
@@ -19,49 +19,57 @@ const {
   worker,
   experimental: { inbox },
 } = await startWorker({
-  AccountSchema: DealerAccount,
   accountID: process.env.VITE_JAZZ_WORKER_ACCOUNT,
   syncServer: "wss://cloud.jazz.tools/?key=you@example.com",
 });
 
 inbox.subscribe(
-  StartGameRequest,
+  InboxMessage,
   async (message, senderID) => {
     const playerAccount = await Account.load(senderID, worker, {});
     if (!playerAccount) {
       return;
     }
 
-    // if there's already a waiting room, add the player to it and start the game.
-    if (message.waitingRoom && message.waitingRoom.account1) {
-      console.log("Join game request from", senderID);
-      message.waitingRoom.account2 = playerAccount;
+    switch (message.type) {
+      case "play":
+        console.log("play message from", senderID);
+        handlePlayIntent(senderID, message.castAs(PlayIntent));
+        break;
+      case "createGame":
+        console.log("create game message from", senderID);
 
-      const game = await createGame({
-        account1: message.waitingRoom.account1,
-        account2: message.waitingRoom.account2,
-      });
-      console.log("game created with id:", game.id);
-      await worker.ensureLoaded({ root: { activeGames: [{}] } });
-      worker.root?.activeGames?.push(game);
-      message.waitingRoom.game = game;
-      resumeGame({ gameId: game.id });
+        const waitingRoomGroup = Group.create({ owner: worker });
+        waitingRoomGroup.addMember("everyone", "reader");
+        const waitingRoom = WaitingRoom.create(
+          { account1: playerAccount },
+          { owner: waitingRoomGroup },
+        );
 
-      return message.waitingRoom;
+        console.log("waiting room created with id:", waitingRoom.id);
+
+        return waitingRoom;
+      case "joinGame":
+        console.log("join game message from", senderID);
+        const joinGameRequest = message.castAs(JoinGameRequest);
+        if (
+          !joinGameRequest.waitingRoom ||
+          !joinGameRequest.waitingRoom.account1
+        ) {
+          console.error("No waiting room in join game request");
+          return;
+        }
+        joinGameRequest.waitingRoom.account2 = playerAccount;
+
+        const game = await createGame({
+          account1: joinGameRequest.waitingRoom.account1,
+          account2: joinGameRequest.waitingRoom.account2,
+        });
+        console.log("game created with id:", game.id);
+
+        joinGameRequest.waitingRoom.game = game;
+        return joinGameRequest.waitingRoom;
     }
-
-    console.log("Create game request from", senderID);
-    // else, create a new waiting room.
-    const waitingRoomGroup = Group.create({ owner: worker });
-    waitingRoomGroup.addMember("everyone", "reader");
-    const waitingRoom = WaitingRoom.create(
-      { account1: playerAccount },
-      { owner: waitingRoomGroup },
-    );
-
-    console.log("waiting room created with id:", waitingRoom.id);
-
-    return waitingRoom;
   },
   { retries: 3 },
 );
@@ -75,29 +83,17 @@ async function createGame({ account1, account2 }: CreateGameParams) {
   publicReadOnly.addMember(account1, "reader");
   publicReadOnly.addMember(account2, "reader");
 
-  const player1 = createPlayer({ owner: publicReadOnly, account: account1 });
-  const player2 = createPlayer({ owner: publicReadOnly, account: account2 });
+  const player1 = createPlayer({ account: account1 });
+  const player2 = createPlayer({ account: account2 });
 
   const deck = createDeck({ publicReadOnlyGroup: publicReadOnly });
 
-  const player1Reader = Group.create({ owner: worker });
-  player1Reader.addMember(account1, "reader");
-  const publicReadPlayer1Write = Group.create({ owner: worker });
-  publicReadPlayer1Write.addMember(account1, "writer");
-  publicReadPlayer1Write.addMember("everyone", "reader");
-
-  const player2Reader = Group.create({ owner: worker });
-  player2Reader.addMember(account2, "reader");
-  const publicReadPlayer2Write = Group.create({ owner: worker });
-  publicReadPlayer2Write.addMember(account2, "writer");
-  publicReadPlayer2Write.addMember("everyone", "reader");
-
   while (player1.hand && player1.hand?.length < 3) {
-    await drawCard(player1, publicReadPlayer1Write, player1Reader, deck);
+    await drawCard(player1, deck);
   }
 
   while (player2.hand && player2.hand?.length < 3) {
-    await drawCard(player2, publicReadPlayer2Write, player2Reader, deck);
+    await drawCard(player2, deck);
   }
 
   const game = Game.create(
@@ -117,23 +113,21 @@ async function createGame({ account1, account2 }: CreateGameParams) {
 }
 
 interface CreatePlayerParams {
-  owner: Group;
   account: Account;
 }
-function createPlayer({ owner, account }: CreatePlayerParams) {
-  const playerWrite = Group.create({ owner: worker });
-  playerWrite.addMember(account, "writer");
+function createPlayer({ account }: CreatePlayerParams) {
+  const publicRead = Group.create({ owner: worker });
+  publicRead.addMember("everyone", "reader");
 
   const player = Player.create(
     {
       scoredCards: CardList.create([], {
-        owner,
+        owner: publicRead,
       }),
-      playIntent: PlayIntent.create({}, { owner: playerWrite }),
       account,
-      hand: CardList.create([], { owner }),
+      hand: CardList.create([], { owner: publicRead }),
     },
-    { owner },
+    { owner: publicRead },
   );
 
   return player;
@@ -171,22 +165,25 @@ function createDeck({ publicReadOnlyGroup }: CreateDeckParams) {
   return deck;
 }
 
-async function drawCard(
-  player: Player,
-  publicReadPlayerWrite: Group,
-  playerRead: Group,
-  deck: CardList,
-) {
+async function drawCard(player: Player, deck: CardList) {
   const card = deck.pop();
 
+  const playerAccount = (await player.ensureLoaded({ account: {} }))?.account;
+
+  if (!playerAccount) {
+    console.error("failed to load player account");
+    return;
+  }
+
   if (card) {
+    const metaGroup = Group.create({ owner: worker });
+    metaGroup.addMember("everyone", "reader");
+    metaGroup.addMember(playerAccount, "writer");
     // Create the card meta. This is visible to everyone. It's used to sort the cards in the UI.
-    card.meta = CardMeta.create({ index: 0 }, { owner: publicReadPlayerWrite });
+    card.meta = CardMeta.create({}, { owner: metaGroup });
     // Extends the card data group, which at creation is private to the worker,
     // with the player's read group, so the player can read the card data.
-
-    await card.ensureLoaded({ data: {} });
-    card.data?._owner.castAs(Group).extend(playerRead);
+    card.data?._owner.castAs(Group).addMember(playerAccount, "reader");
     player.hand?.push(card);
   }
 }
@@ -216,145 +213,118 @@ function getCardValue(card: CardData) {
       return card.value;
   }
 }
-interface ResumeGameParams {
-  gameId: ID<Game>;
-}
-async function resumeGame({ gameId }: ResumeGameParams) {
-  console.log("Resuming game", gameId);
-  const game = await Game.load(gameId, worker, {
-    deck: [{ data: {} }],
-    player1: {
-      hand: [{ data: {} }],
-      scoredCards: [{}],
-      account: {},
-      playIntent: {},
-    },
-    player2: {
-      hand: [{ data: {} }],
-      scoredCards: [{}],
-      account: {},
-      playIntent: {},
-    },
-    activePlayer: {
-      account: {},
-    },
-  });
-  const publicReadOnly = game?.deck._owner.castAs(Group);
 
-  if (!game || !publicReadOnly) {
-    // TODO: Error
+async function handlePlayIntent(senderId: ID<Account>, playIntent: PlayIntent) {
+  const playedCard = await playIntent.ensureLoaded({ card: { data: {} } });
+  if (!playedCard) {
+    console.log("No card in play intent");
     return;
   }
 
-  const onPlayIntent = (player: Player) => (intent: PlayIntent) => {
-    console.log("Got message from player", player.account?.id);
-    // Ignore play intent if it's not the player's turn.
-    if (game.activePlayer?.account?.id !== player.account?.id || !intent.card) {
-      console.log("skipping");
-      return;
-    }
-
-    const opponent = game.getOpponent(player);
-
-    console.log(
-      "player",
-      player.account?.id,
-      "played",
-      intent.card.data?.value,
-      intent.card.data?.suit,
-    );
-
-    const cardIndex =
-      player.hand?.findIndex((card) => {
-        return (
-          card?.data?.value === player.playIntent?.card?.data?.value &&
-          card?.data?.suit === player.playIntent?.card?.data?.suit
-        );
-      }) ?? -1;
-
-    if (cardIndex === -1) {
-      return;
-    }
-    // remove the card from player's hand
-    player.hand?.splice(cardIndex, 1);
-
-    // make the newly played card's data visible to everyone by extending its group with
-    // the public read-only group so that everyone can see the card.
-    intent.card.data?._owner.castAs(Group).extend(publicReadOnly);
-
-    // If there's already a card on the table, it means both players have played.
-    if (game.playedCard) {
-      // Check who's this turn's winner
-      let winner: Player;
-      // If both cards have the same suit, the one with the highest value wins
-      if (game.playedCard.data?.suit === intent.card.data?.suit) {
-        winner =
-          getCardValue(intent.card.data!) > getCardValue(game.playedCard.data!)
-            ? player
-            : opponent;
-      } else {
-        // else the active player wins only if they played a briscola.
-        // (we already know the other player didn't)
-        if (intent.card.data?.suit === game.briscola) {
-          winner = player;
-        } else {
-          winner = opponent;
-        }
-      }
-
-      // Put the cards in the winner's scored cards pile.
-      winner.scoredCards?.push(game.playedCard, intent.card);
-
-      // The winner of the round always draws first.
-      console.log("deck size", game.deck.length);
-      if (game.deck.length > 0) {
-        drawCard(
-          winner,
-          winner.hand?.[0]?._owner.castAs(Group)!,
-          winner.hand?.[0]?.data?._owner.castAs(Group)!,
-          game.deck,
-        );
-
-        const opponent = game.getOpponent(winner);
-        drawCard(
-          opponent,
-          opponent.hand?.[0]?._owner.castAs(Group)!,
-          opponent.hand?.[0]?.data?._owner.castAs(Group)!,
-          game.deck,
-        );
-      }
-
-      // @ts-expect-error types are wonky
-      game.activePlayer = winner;
-      // And finally, remove the played card from the table.
-      delete game.playedCard;
-
-      // TODO: if there are no more cards in the deck and both players have played all their cards, end the game.
-    } else {
-      // else, just put the card on the table and switch the active player.
-      game.playedCard = intent.card;
-
-      // @ts-expect-error types are wonky
-      game.activePlayer = opponent;
-    }
-  };
-
-  game.player1.playIntent.subscribe(
-    { card: { data: {} } },
-    onPlayIntent(game.player1),
-  );
-  game.player2.playIntent.subscribe(
-    { card: { data: {} } },
-    onPlayIntent(game.player2),
-  );
-}
-
-await worker.ensureLoaded({ root: { activeGames: [{}] } });
-
-worker.root?.activeGames?.forEach((game) => {
-  if (!game) return;
-
-  resumeGame({
-    gameId: game.id,
+  const state = await playIntent.ensureLoaded({
+    game: {
+      playedCard: { data: {} },
+      deck: [{ data: {} }],
+      activePlayer: { account: {} },
+      player1: { hand: [{ data: {} }], scoredCards: [{}] },
+      player2: { hand: [{ data: {} }], scoredCards: [{}] },
+    },
   });
-});
+
+  if (!state?.game) {
+    console.log("No game found");
+    return;
+  }
+
+  if (state.game.activePlayer.account.id !== senderId) {
+    console.log("Not player's turn");
+    return;
+  }
+
+  const publicReadOnly = state.game?.deck._owner.castAs(Group);
+
+  const player = state.game.activePlayer;
+  const opponent = await state.game.getOpponent(player);
+
+  if (!opponent) {
+    console.error("failed to get opponent");
+    return;
+  }
+
+  console.log(
+    "player",
+    player.account?.id,
+    "played",
+    playedCard.card.data?.value,
+    playedCard.card.data?.suit,
+  );
+
+  const cardIndex =
+    player.hand?.findIndex((card) => {
+      return card?.id === playedCard.card.id;
+    }) ?? -1;
+
+  if (cardIndex === -1) {
+    console.log("Card not found in player's hand");
+    return;
+  }
+
+  // remove the card from player's hand
+  player.hand?.splice(cardIndex, 1);
+
+  // make the newly played card's data visible to everyone by extending its group with
+  // the public read-only group so that everyone can see the card.
+  const group = await playedCard.card.data?._owner
+    .castAs(Group)
+    .ensureLoaded({});
+  group?.extend(publicReadOnly);
+
+  // If there's already a card on the table, it means both players have played.
+  if (state.game.playedCard) {
+    // Check who's this turn's winner
+    let winner: Player;
+    // If both cards have the same suit, the one with the highest value wins
+    if (state.game.playedCard.data?.suit === playedCard.card.data?.suit) {
+      winner =
+        getCardValue(playedCard.card.data) >
+        getCardValue(state.game.playedCard.data)
+          ? player
+          : opponent;
+    } else {
+      // else the active player wins only if they played a briscola.
+      // (we already know the other player didn't)
+      if (playedCard.card.data?.suit === state.game.briscola) {
+        winner = player;
+      } else {
+        winner = opponent;
+      }
+    }
+
+    // Put the cards in the winner's scored cards pile.
+    winner.scoredCards?.push(state.game.playedCard, playedCard.card);
+
+    // The winner of the round always draws first.
+    if (state.game.deck.length > 0) {
+      drawCard(winner, state.game.deck);
+
+      const opponent = await state.game.getOpponent(winner);
+      if (!opponent) {
+        console.error("failed to get opponent");
+        return;
+      }
+      drawCard(opponent, state.game.deck);
+    }
+
+    // @ts-expect-error types are wonky
+    state.game.activePlayer = winner;
+    // And finally, remove the played card from the table.
+    delete state.game.playedCard;
+
+    // TODO: if there are no more cards in the deck and both players have played all their cards, end the game.
+  } else {
+    // else, just put the card on the table and switch the active player.
+    state.game.playedCard = playedCard.card;
+
+    state.game.activePlayer = opponent;
+  }
+}

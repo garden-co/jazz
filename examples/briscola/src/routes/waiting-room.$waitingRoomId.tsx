@@ -5,7 +5,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { StartGameRequest, WaitingRoom } from "@/schema";
+import { JoinGameRequest, WaitingRoom } from "@/schema";
 import { createFileRoute, redirect } from "@tanstack/react-router";
 import { Group, type ID, InboxSender } from "jazz-tools";
 import { useEffect } from "react";
@@ -16,26 +16,29 @@ export const Route = createFileRoute("/waiting-room/$waitingRoomId")({
     if (!me) {
       throw redirect({ to: "/" });
     }
-
     const waitingRoom = await WaitingRoom.load(
       waitingRoomId as ID<WaitingRoom>,
       me,
       { account1: {}, account2: {}, game: {} },
     );
 
+    if (!waitingRoom) {
+      throw redirect({ to: "/" });
+    }
+
+    // If the waiting room already has a game, redirect to the game
     if (waitingRoom?.game) {
       throw redirect({ to: `/game/${waitingRoom.game.id}` });
     }
 
     if (!waitingRoom?.account1?.isMe) {
-      const sender = await InboxSender.load<StartGameRequest, WaitingRoom>(
+      const sender = await InboxSender.load<JoinGameRequest, WaitingRoom>(
         import.meta.env.VITE_JAZZ_WORKER_ACCOUNT,
         me,
       );
-
       sender.sendMessage(
-        StartGameRequest.create(
-          { waitingRoom },
+        JoinGameRequest.create(
+          { type: "joinGame", waitingRoom },
           { owner: Group.create({ owner: me }) },
         ),
       );

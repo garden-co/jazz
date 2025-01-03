@@ -1,4 +1,4 @@
-import { Account, CoList, CoMap, Inbox, co } from "jazz-tools";
+import { Account, CoList, CoMap, SchemaUnion, co } from "jazz-tools";
 
 export const CardValues = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] as const;
 
@@ -29,13 +29,8 @@ export class CardList extends CoList.Of(co.ref(Card)) {
   }
 }
 
-export class PlayIntent extends CoMap {
-  card = co.optional.ref(Card);
-}
-
 export class Player extends CoMap {
   account = co.ref(Account);
-  playIntent = co.ref(PlayIntent); // write Tavolo - write me - quando un giocatore gioca una carta la scrive qui, il Game la legge, la valida e la mette sul tavolo
   hand = co.ref(CardList); // write Tavolo - read me - quando il Game mi da le carte le scrive qui, quando valida la giocata la toglie da qui
   scoredCards = co.ref(CardList); // write Tavolo - read everyone -
 }
@@ -67,7 +62,11 @@ export class Game extends CoMap {
       throw new Error("Opponent not found");
     }
 
-    return opponent;
+    return opponent.ensureLoaded({
+      account: {},
+      hand: [{}],
+      scoredCards: [{}],
+    });
   }
 }
 
@@ -79,25 +78,34 @@ export class WaitingRoom extends CoMap {
   game = co.optional.ref(Game);
 }
 
-export class DealerAccountRoot extends CoMap {
-  activeGames = co.ref(GameList);
+class BaseInboxMessage extends CoMap {
+  type = co.literal("play", "createGame", "joinGame");
 }
 
-export class DealerAccount extends Account {
-  root = co.ref(DealerAccountRoot);
+export class PlayIntent extends BaseInboxMessage {
+  type = co.literal("play");
+  card = co.ref(Card);
+  game = co.ref(Game);
+}
 
-  migrate() {
-    if (!this._refs.root) {
-      this.root = DealerAccountRoot.create(
-        {
-          activeGames: GameList.create([], { owner: this }),
-        },
-        { owner: this },
-      );
-    }
+export class CreateGameRequest extends BaseInboxMessage {
+  type = co.literal("createGame");
+}
+
+export class JoinGameRequest extends BaseInboxMessage {
+  type = co.literal("joinGame");
+  waitingRoom = co.ref(WaitingRoom);
+}
+
+export const InboxMessage = SchemaUnion.Of<BaseInboxMessage>((raw) => {
+  switch (raw.get("type")) {
+    case "play":
+      return PlayIntent;
+    case "createGame":
+      return CreateGameRequest;
+    case "joinGame":
+      return JoinGameRequest;
+    default:
+      throw new Error("Unknown request type");
   }
-}
-
-export class StartGameRequest extends CoMap {
-  waitingRoom = co.optional.ref(WaitingRoom);
-}
+});

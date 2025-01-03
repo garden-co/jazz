@@ -4,7 +4,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
 import { useAccount, useInboxSender } from "@/jazz";
-import { StartGameRequest } from "@/schema";
+import { CreateGameRequest } from "@/schema";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { Account, Group } from "jazz-tools";
 
@@ -27,7 +27,12 @@ function HomeComponent() {
     }
 
     const waitingRoomId = await createGame(
-      StartGameRequest.create({}, { owner: Group.create({ owner: me }) }),
+      CreateGameRequest.create(
+        {
+          type: "createGame",
+        },
+        { owner: Group.create({ owner: me }) },
+      ),
     );
 
     if (!waitingRoomId) {
