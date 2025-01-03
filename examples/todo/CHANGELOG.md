@@ -1,5 +1,14 @@
 # jazz-example-todo
 
+## 0.0.141
+
+### Patch Changes
+
+- Updated dependencies [dc62b95]
+- Updated dependencies [1de26f8]
+  - jazz-tools@0.8.51
+  - jazz-react@0.8.51
+
 ## 0.0.140
 
 ### Patch Changes

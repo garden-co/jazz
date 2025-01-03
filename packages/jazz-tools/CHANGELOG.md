@@ -1,5 +1,12 @@
 # jazz-tools
 
+## 0.8.51
+
+### Patch Changes
+
+- dc62b95: Return field name on \_edits
+- 1de26f8: Simplify the .create calls by accepting directly "Account | Group" as second param
+
 ## 0.8.50
 
 ### Patch Changes
