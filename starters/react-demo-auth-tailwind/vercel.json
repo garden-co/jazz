@@ -1,0 +1,8 @@
+{
+  "build": {
+    "env": {
+      "APP_NAME": "react-demo-auth-tailwind"
+    }
+  },
+  "ignoreCommand": "node ../../ignore-vercel-build.js"
+}
