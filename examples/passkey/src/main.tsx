@@ -1,12 +1,9 @@
-import {
-  PasskeyAuthBasicUI,
-  createJazzReactApp,
-  usePasskeyAuth,
-} from "jazz-react";
+import { createJazzReactApp, usePasskeyAuth } from "jazz-react";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import App from "./App.tsx";
 import "./index.css";
+import { PasskeyAuth } from "./PasskeyAuth.tsx";
 
 const Jazz = createJazzReactApp();
 
@@ -25,7 +22,7 @@ function JazzAndAuth({ children }: { children: React.ReactNode }) {
       >
         {children}
       </Jazz.Provider>
-      <PasskeyAuthBasicUI state={state} />
+      <PasskeyAuth state={state} />
     </>
   );
 }
