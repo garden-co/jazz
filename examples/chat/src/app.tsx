@@ -1,9 +1,13 @@
 import { inIframe, onChatLoad } from "@/util.ts";
 import { useIframeHashRouter } from "hash-slash";
+import { useAccount } from "jazz-react";
 import { Group, ID } from "jazz-tools";
+import { StrictMode } from "react";
+import { createRoot } from "react-dom/client";
 import { ChatScreen } from "./chatScreen.tsx";
-import { useAccount } from "./main.tsx";
+import { JazzAndAuth } from "./jazz.tsx";
 import { Chat } from "./schema.ts";
+import { ThemeProvider } from "./themeProvider.tsx";
 import { AppContainer, TopBar } from "./ui.tsx";
 
 export function App() {
@@ -34,3 +38,13 @@ export function App() {
     </AppContainer>
   );
 }
+
+createRoot(document.getElementById("root")!).render(
+  <ThemeProvider>
+    <StrictMode>
+      <JazzAndAuth>
+        <App />
+      </JazzAndAuth>
+    </StrictMode>
+  </ThemeProvider>,
+);

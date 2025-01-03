@@ -1,7 +1,7 @@
 import { createImage } from "jazz-browser-media-images";
+import { useAccount, useCoState } from "jazz-react";
 import { ID } from "jazz-tools";
 import { useState } from "react";
-import { useAccount, useCoState } from "./main.tsx";
 import { Chat, Message } from "./schema.ts";
 import {
   BubbleBody,

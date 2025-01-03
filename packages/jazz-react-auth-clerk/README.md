@@ -12,11 +12,9 @@ See the full [example app](https://github.com/garden-co/jazz/tree/main/examples/
 ```tsx
 import { ClerkProvider, SignInButton, useClerk } from "@clerk/clerk-react";
 import { useJazzClerkAuth } from "jazz-react-auth-clerk";
+import { JazzProvider } from "jazz-react";
 
 const PUBLISHABLE_KEY = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY;
-
-const Jazz = createJazzReactApp();
-export const { useAccount, useCoState } = Jazz;
 
 function JazzAndAuth({ children }: { children: React.ReactNode }) {
   const clerk = useClerk();
@@ -28,12 +26,12 @@ function JazzAndAuth({ children }: { children: React.ReactNode }) {
         <div key={error}>{error}</div>
       ))}
       {clerk.user && auth ? (
-        <Jazz.Provider
+        <JazzProvider
           auth={auth}
           peer="wss://cloud.jazz.tools/?key=your-email-address"
         >
           {children}
-        </Jazz.Provider>
+        </JazzProvider>
       ) : (
         <SignInButton />
       )}

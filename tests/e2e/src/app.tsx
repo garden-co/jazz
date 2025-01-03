@@ -3,7 +3,7 @@ import ReactDOM from "react-dom/client";
 import { Link, RouterProvider, createBrowserRouter } from "react-router-dom";
 import { AuthAndJazz } from "./jazz";
 import { FileStreamTest } from "./pages/FileStream";
-import { Inbox } from "./pages/Inbox";
+import { InboxPage } from "./pages/Inbox";
 import { ResumeSyncState } from "./pages/ResumeSyncState";
 import { RetryUnavailable } from "./pages/RetryUnavailable";
 import { Sharing } from "./pages/Sharing";
@@ -65,7 +65,7 @@ const router = createBrowserRouter([
   },
   {
     path: "/inbox",
-    element: <Inbox />,
+    element: <InboxPage />,
   },
   {
     path: "/",

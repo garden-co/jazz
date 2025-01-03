@@ -1,8 +1,8 @@
+import { useCoState } from "jazz-react";
 import { ID } from "jazz-tools";
 import { LinkToHome } from "./LinkToHome.tsx";
 import { OrderForm } from "./OrderForm.tsx";
 import { OrderThumbnail } from "./OrderThumbnail.tsx";
-import { useCoState } from "./main.tsx";
 import { BubbleTeaOrder } from "./schema.ts";
 
 export function EditOrder(props: { id: ID<BubbleTeaOrder> }) {

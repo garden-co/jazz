@@ -10,6 +10,11 @@
       "types": "./src/index.web.ts",
       "default": "./dist/web/index.web.js"
     },
+    "./crypto": {
+      "react-native": "./dist/native/crypto/export.js",
+      "types": "./src/crypto/export.ts",
+      "default": "./dist/web/crypto/export.js"
+    },
     "./native": {
       "react-native": "./dist/native/index.native.js",
       "types": "./src/index.native.ts",

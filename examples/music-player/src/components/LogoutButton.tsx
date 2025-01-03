@@ -1,4 +1,4 @@
-import { useAccount } from "@/2_main";
+import { useAccount } from "jazz-react";
 import { Button } from "./ui/button";
 
 export function LogoutButton() {

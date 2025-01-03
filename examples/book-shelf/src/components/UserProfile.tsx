@@ -2,8 +2,8 @@
 
 import { BookReviewThumbnail } from "@/components/BookReviewThumbnail";
 import { Button } from "@/components/Button";
-import { useCoState } from "@/components/JazzAndAuth";
 import { JazzAccount, JazzProfile, ListOfBookReviews } from "@/schema";
+import { useCoState } from "jazz-react";
 import { Group, ID } from "jazz-tools";
 
 export default function UserProfile({ id }: { id: ID<JazzAccount> }) {

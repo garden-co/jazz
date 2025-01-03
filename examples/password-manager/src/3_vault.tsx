@@ -5,10 +5,10 @@ import InviteModal from "./components/invite-modal";
 import NewItemModal from "./components/new-item-modal";
 import Table from "./components/table";
 
+import { useAccount, useCoState } from "jazz-react";
 import { CoMapInit, Group, ID } from "jazz-tools";
 import { useNavigate, useParams } from "react-router-dom";
 import { Folder, FolderList, PasswordItem } from "./1_schema";
-import { useAccount, useCoState } from "./2_main";
 import {
   addSharedFolder,
   createFolder,

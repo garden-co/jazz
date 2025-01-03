@@ -1,5 +1,5 @@
+import { useAccount } from "jazz-react";
 import { UserIcon } from "lucide-react";
-import { useAccount } from "./main.tsx";
 
 export function Layout({ children }: { children: React.ReactNode }) {
   const { me, logOut } = useAccount({

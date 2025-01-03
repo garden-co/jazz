@@ -1,7 +1,7 @@
 import { createInviteLink } from "jazz-react";
+import { useAcceptInvite, useAccount, useCoState } from "jazz-react";
 import { CoMap, Group, ID, co } from "jazz-tools";
 import { useState } from "react";
-import { useAcceptInvite, useAccount, useCoState } from "../jazz";
 
 class SharedCoMap extends CoMap {
   value = co.string;

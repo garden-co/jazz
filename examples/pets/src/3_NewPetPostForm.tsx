@@ -4,9 +4,9 @@ import { ChangeEvent, useCallback, useState } from "react";
 import { useNavigate } from "react-router";
 
 import { ProgressiveImg } from "jazz-react";
+import { useAccount, useCoState } from "jazz-react";
 import { CoMap, Group, ID, ImageDefinition, co } from "jazz-tools";
 import { PetPost, PetReactions } from "./1_schema";
-import { useAccount, useCoState } from "./2_main";
 import { Button, Input } from "./basicComponents";
 
 /** Walkthrough: TODO

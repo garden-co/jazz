@@ -737,7 +737,7 @@ export class FileStream extends CoValueBase implements CoValue {
      */
     if (!options?.allowUnfinished && !stream?.isBinaryStreamEnded()) {
       stream = await new Promise<FileStream>((resolve) => {
-        const unsubscribe = subscribeToCoValue(this, id, as, [], (value) => {
+        subscribeToCoValue(this, id, as, [], (value, unsubscribe) => {
           if (value.isBinaryStreamEnded()) {
             unsubscribe();
             resolve(value);

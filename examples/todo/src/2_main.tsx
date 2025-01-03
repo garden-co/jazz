@@ -7,8 +7,10 @@ import {
 import "./index.css";
 
 import {
+  JazzProvider,
   PasskeyAuthBasicUI,
-  createJazzReactApp,
+  useAcceptInvite,
+  useAccount,
   usePasskeyAuth,
 } from "jazz-react";
 
@@ -23,38 +25,39 @@ import {
 } from "./basicComponents/index.ts";
 
 /**
- * Walkthrough: The top-level provider `<Jazz.Provider/>`
+ * Walkthrough: The top-level provider `<JazzProvider/>`
  *
- * This shows how to use the top-level provider `<Jazz.Provider/>`,
+ * This shows how to use the top-level provider `<JazzProvider/>`,
  * which provides the rest of the app with a controlled account (used through `useAccount` later).
  * Here we use `PasskeyAuth`, which uses Passkeys (aka WebAuthn) to store a user's account secret
  * - no backend needed.
  *
- * `<Jazz.Provider/>` also runs our account migration
+ * `<JazzProvider/>` also runs our account migration
  */
 
 const appName = "Jazz Todo List Example";
-
-const Jazz = createJazzReactApp<TodoAccount>({
-  AccountSchema: TodoAccount,
-});
-// eslint-disable-next-line react-refresh/only-export-components
-export const { useAccount, useCoState, useAcceptInvite } = Jazz;
 
 function JazzAndAuth({ children }: { children: React.ReactNode }) {
   const [passkeyAuth, passKeyState] = usePasskeyAuth({ appName });
 
   return (
     <>
-      <Jazz.Provider
+      <JazzProvider
+        AccountSchema={TodoAccount}
         auth={passkeyAuth}
         peer="wss://cloud.jazz.tools/?key=todo-example-jazz@garden.co"
       >
         {children}
-      </Jazz.Provider>
+      </JazzProvider>
       <PasskeyAuthBasicUI state={passKeyState} />
     </>
   );
+}
+
+declare module "jazz-react" {
+  interface Register {
+    Account: TodoAccount;
+  }
 }
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
@@ -79,7 +82,7 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
  * - which can also contain invite links.
  */
 export default function App() {
-  // logOut logs out the AuthProvider passed to `<Jazz.Provider/>` above.
+  // logOut logs out the AuthProvider passed to `<JazzProvider/>` above.
   const { logOut } = useAccount();
 
   const router = createHashRouter([

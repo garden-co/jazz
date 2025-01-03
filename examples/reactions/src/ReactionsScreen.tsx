@@ -1,5 +1,5 @@
+import { useCoState } from "jazz-react";
 import { ID } from "jazz-tools";
-import { useCoState } from "./main.tsx";
 import { ReactionType, ReactionTypes, Reactions } from "./schema.ts";
 
 const reactionEmojiMap: {

@@ -37,7 +37,7 @@ export class SubscriptionScope<Root extends CoValue> {
   constructor(
     root: Root,
     rootSchema: CoValueClass<Root> & CoValueFromRaw<Root>,
-    onUpdate: (newRoot: Root) => void,
+    onUpdate: (newRoot: Root, scope: SubscriptionScope<Root>) => void,
   ) {
     this.rootEntry = {
       state: "loaded" as const,
@@ -52,7 +52,7 @@ export class SubscriptionScope<Root extends CoValue> {
     this.scheduleUpdate = () => {
       const value = rootSchema.fromRaw(this.rootEntry.value) as Root;
       subscriptionsScopes.set(value, this);
-      onUpdate(value);
+      onUpdate(value, this);
     };
 
     this.rootEntry.rawUnsub = root._raw.core.subscribe(
@@ -125,7 +125,7 @@ export class SubscriptionScope<Root extends CoValue> {
     }
   }
 
-  unsubscribeAll() {
+  unsubscribeAll = () => {
     for (const entry of this.entries.values()) {
       if (entry.state === "loaded") {
         entry.rawUnsub();
@@ -134,5 +134,5 @@ export class SubscriptionScope<Root extends CoValue> {
       }
     }
     this.entries.clear();
-  }
+  };
 }

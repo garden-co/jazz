@@ -1,4 +1,4 @@
-import { useAccount } from "@/2_main";
+import { useAccount } from "jazz-react";
 import { useNavigate, useParams } from "react-router";
 
 export function SidePanel() {

@@ -1,7 +1,7 @@
+import { useAcceptInvite } from "jazz-react";
 import React from "react";
 import { Navigate, RouterProvider, createHashRouter } from "react-router-dom";
 import { Folder } from "./1_schema";
-import { useAcceptInvite } from "./2_main";
 import VaultPage from "./3_vault";
 
 const App: React.FC = () => {

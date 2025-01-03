@@ -1,7 +1,7 @@
+import { useAccount } from "jazz-react";
 import { Layout } from "./Layout.tsx";
 import { CreateOrganization } from "./components/CreateOrganization.tsx";
 import { Heading } from "./components/Heading.tsx";
-import { useAccount } from "./main.tsx";
 
 export function HomePage() {
   const { me } = useAccount({

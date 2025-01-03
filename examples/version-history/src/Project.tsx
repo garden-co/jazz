@@ -1,7 +1,7 @@
 import { createInviteLink } from "jazz-react";
+import { useCoState } from "jazz-react";
 import { ID } from "jazz-tools";
 import { IssueComponent } from "./Issue.tsx";
-import { useCoState } from "./main.tsx";
 import { Issue, Project } from "./schema.ts";
 export function ProjectComponent({ projectID }: { projectID: ID<Project> }) {
   const project = useCoState(Project, projectID, { issues: [{}] });

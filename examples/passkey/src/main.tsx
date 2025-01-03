@@ -1,16 +1,8 @@
-import {
-  PasskeyAuthBasicUI,
-  createJazzReactApp,
-  usePasskeyAuth,
-} from "jazz-react";
+import { JazzProvider, PasskeyAuthBasicUI, usePasskeyAuth } from "jazz-react";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import App from "./App.tsx";
 import "./index.css";
-
-const Jazz = createJazzReactApp();
-
-export const { useAccount, useCoState } = Jazz;
 
 function JazzAndAuth({ children }: { children: React.ReactNode }) {
   const [auth, state] = usePasskeyAuth({
@@ -19,12 +11,12 @@ function JazzAndAuth({ children }: { children: React.ReactNode }) {
 
   return (
     <>
-      <Jazz.Provider
+      <JazzProvider
         auth={auth}
         peer="wss://cloud.jazz.tools/?key=minimal-auth-passkey-example@garden.co"
       >
         {children}
-      </Jazz.Provider>
+      </JazzProvider>
       <PasskeyAuthBasicUI state={state} />
     </>
   );

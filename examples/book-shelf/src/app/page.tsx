@@ -1,9 +1,9 @@
 "use client";
 
 import { Container } from "@/components/Container";
-import { useAccount } from "@/components/JazzAndAuth";
 import UserProfile from "@/components/UserProfile";
 import { JazzAccount } from "@/schema";
+import { useAccount } from "jazz-react";
 import { ID } from "jazz-tools";
 
 export default function Home() {

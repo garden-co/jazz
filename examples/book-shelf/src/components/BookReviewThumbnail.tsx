@@ -1,8 +1,8 @@
 "use client";
 
-import { BookCover, BookCoverReadOnly } from "@/components/BookCover";
-import { useCoState } from "@/components/JazzAndAuth";
+import { BookCoverReadOnly } from "@/components/BookCover";
 import StarIcon from "@/components/icons/StarIcon";
+import { useCoState } from "jazz-react";
 import { ID } from "jazz-tools";
 import Link from "next/link";
 import { BookReview } from "../schema";

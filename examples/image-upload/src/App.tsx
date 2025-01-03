@@ -1,5 +1,5 @@
+import { useAccount } from "jazz-react";
 import ImageUpload from "./ImageUpload.tsx";
-import { useAccount } from "./main";
 
 function App() {
   const { me, logOut } = useAccount();

@@ -247,9 +247,32 @@ Let's not forget to update the `AccountSchema`.
 
 <CodeGroup>
 ```ts
-const Jazz = createJazzReactApp({ // old
-  AccountSchema: JazzAccount,
-}); // old
+import { JazzProvider } from "jazz-react"; // old
+import { JazzAccount } from "./schema";
+
+function JazzAndAuth({ children }: { children: React.ReactNode }) { // old
+    const [passkeyAuth, passKeyState] = usePasskeyAuth({ appName }); // old
+
+    return ( // old
+        <> // old
+            <JazzProvider // old
+                auth={passkeyAuth} // old
+                peer="wss://cloud.jazz.tools/?key=you@example.com" // old
+                AccountSchema={JazzAccount}
+            >// old
+                {children} // old
+            </JazzProvider> // old
+            <PasskeyAuthBasicUI state={passKeyState} /> // old
+        </> // old
+    ); // old
+} // old
+
+// Register the Account schema so `useAccount` returns our custom `JazzAccount`
+declare module "jazz-react" {
+    interface Register {
+        Account: JazzAccount;
+    }
+}
   ```
 </CodeGroup>
 

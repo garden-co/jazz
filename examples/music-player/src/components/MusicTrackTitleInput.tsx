@@ -1,6 +1,6 @@
 import { MusicTrack } from "@/1_schema";
-import { useCoState } from "@/2_main";
 import { updateMusicTrackTitle } from "@/4_actions";
+import { useCoState } from "jazz-react";
 import { ID } from "jazz-tools";
 import { ChangeEvent, useState } from "react";
 

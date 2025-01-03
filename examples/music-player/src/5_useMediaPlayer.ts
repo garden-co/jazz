@@ -1,9 +1,9 @@
 import { MusicTrack, Playlist } from "@/1_schema";
 import { usePlayMedia } from "@/lib/audio/usePlayMedia";
 import { usePlayState } from "@/lib/audio/usePlayState";
+import { useAccount } from "jazz-react";
 import { FileStream, ID } from "jazz-tools";
 import { useRef, useState } from "react";
-import { useAccount } from "./2_main";
 import { updateActivePlaylist, updateActiveTrack } from "./4_actions";
 import { getNextTrack, getPrevTrack } from "./lib/getters";
 

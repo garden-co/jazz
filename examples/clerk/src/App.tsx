@@ -1,4 +1,4 @@
-import { useAccount } from "./main";
+import { useAccount } from "jazz-react";
 
 function App() {
   const { me, logOut } = useAccount();

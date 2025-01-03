@@ -55,6 +55,23 @@ export class Ref<out V extends CoValue> {
     }
   }
 
+  syncLoad(): V | undefined {
+    const node =
+      "node" in this.controlledAccount
+        ? this.controlledAccount.node
+        : this.controlledAccount._raw.core.node;
+
+    const entry = node.coValuesStore.get(
+      this.id as unknown as CoID<RawCoValue>,
+    );
+
+    if (entry.state.type === "available") {
+      return new Ref(this.id, this.controlledAccount, this.schema).value!;
+    }
+
+    return undefined;
+  }
+
   async load(): Promise<V | undefined> {
     const result = await this.loadHelper();
     if (result === "unavailable") {

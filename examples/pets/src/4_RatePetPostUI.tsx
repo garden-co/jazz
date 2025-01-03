@@ -3,9 +3,9 @@ import { useParams } from "react-router";
 import { PetPost, PetReactions, ReactionTypes } from "./1_schema";
 
 import { ProgressiveImg } from "jazz-react";
+import { useCoState } from "jazz-react";
 import { ID } from "jazz-tools";
 import uniqolor from "uniqolor";
-import { useCoState } from "./2_main";
 import { Button, Skeleton } from "./basicComponents";
 import { ShareButton } from "./components/ShareButton";
 

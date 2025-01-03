@@ -51,26 +51,24 @@ Collaborative Values (CoValues), build a UI and subscribe to changes, set permis
     import App from "./App.tsx"; // old
     import "./index.css"; // old
     import {
-        createJazzReactApp,
+        JazzProvider,
         useDemoAuth,
         DemoAuthBasicUI,
     } from "jazz-react";
      // old
-    const Jazz = createJazzReactApp();
-    export const { useAccount, useCoState } = Jazz;
 
     function JazzAndAuth({ children }: { children: React.ReactNode }) {
         const [auth, authState] = useDemoAuth();
 
         return (
             <>
-                <Jazz.Provider
+                <JazzProvider
                     auth={auth}
                     // replace `you@example.com` with your email as a temporary API key
                     peer="wss://cloud.jazz.tools/?key=you@example.com"
                 >
                     {children}
-                </Jazz.Provider>
+                </JazzProvider>
                 <DemoAuthBasicUI appName="Circular" state={authState} />
             </>
         );
@@ -87,7 +85,7 @@ Collaborative Values (CoValues), build a UI and subscribe to changes, set permis
     ```
 </CodeGroup>
 
-This sets Jazz up, extracts app-specific hooks for later, and wraps our app in the provider.
+This sets Jazz up and wraps our app in the provider.
 
 {/* TODO: explain Auth */}
 
@@ -188,7 +186,7 @@ Now, finally, let's implement creating an issue:
 import { useState } from "react"; // old
 import { Issue } from "./schema"; // old
 import { IssueComponent } from "./components/Issue.tsx"; // old
-import { useAccount } from "./main";
+import { useAccount } from "jazz-react";
 // old
 function App() {// old
     const { me } = useAccount();
@@ -262,7 +260,7 @@ Let's modify `src/App.tsx`:
 import { useState } from "react"; // old
 import { Issue } from "./schema"; // old
 import { IssueComponent } from "./components/Issue.tsx"; // old
-import { useAccount, useCoState } from "./main";
+import { useAccount, useCoState } from "jazz-react";
 import { ID } from "jazz-tools"
 // old
 function App() { // old
@@ -411,7 +409,7 @@ So let's store the ID in the browser's URL and make sure our useState is in sync
 import { useState } from "react"; // old
 import { Issue } from "./schema"; // old
 import { IssueComponent } from "./components/Issue.tsx"; // old
-import { useAccount, useCoState } from "./main"; // old
+import { useAccount, useCoState } from "jazz-react"; // old
 import { ID } from "jazz-tools" // old
 // old
 function App() { // old
@@ -472,7 +470,7 @@ All we have to do is create a new group to own each new issue and add "everyone"
 import { useState } from "react"; // old
 import { Issue } from "./schema"; // old
 import { IssueComponent } from "./components/Issue.tsx"; // old
-import { useAccount, useCoState } from "./main"; // old
+import { useAccount, useCoState } from "jazz-react"; // old
 import { ID, Group } from "jazz-tools"
 // old
 function App() { // old
@@ -566,7 +564,7 @@ First, we'll change `App.tsx` to create and render `Project`s instead of `Issue`
 import { useState } from "react"; // old
 import { Project, ListOfIssues } from "./schema";
 import { ProjectComponent } from "./components/Project.tsx";
-import { useAccount } from "./main";
+import { useAccount } from "jazz-react";
 import { ID, Group } from "jazz-tools"
 // old
 function App() { // old
@@ -613,7 +611,7 @@ Create a new file `src/components/Project.tsx` and add the following:
 import { ID } from "jazz-tools";
 import { Project, Issue } from "../schema";
 import { IssueComponent } from "./Issue.tsx";
-import { useCoState } from "../main";
+import { useCoState } from "jazz-react";
 
 export function ProjectComponent({ projectID }: { projectID: ID<Project> }) {
     const project = useCoState(Project, projectID);
@@ -664,7 +662,7 @@ But you can also take more precise control over loading by defining a minimum-de
 import { ID } from "jazz-tools";// old
 import { Project, Issue } from "../schema"; // old
 import { IssueComponent } from "./Issue.tsx"; // old
-import { useCoState } from "../main"; // old
+import { useCoState } from "jazz-react"; // old
 // old
 export function ProjectComponent({ projectID }: { projectID: ID<Project> }) {// old
     const project = useCoState(Project, projectID, { issues: [{}] });
@@ -733,7 +731,7 @@ Turns out, we're already mostly there! First, let's remove making the Project pu
 import { useState } from "react"; // old
 import { Project, ListOfIssues } from "./schema"; // old
 import { ProjectComponent } from "./components/Project.tsx"; // old
-import { useAccount } from "./main"; // old
+import { useAccount } from "jazz-react"; // old
 import { ID, Group } from "jazz-tools" // old
 // old
 function App() { // old
@@ -776,7 +774,7 @@ Now, inside ProjectComponent, let's add a button to invite guests (read-only) or
 import { ID } from "jazz-tools"; // old
 import { Project, Issue } from "../schema"; // old
 import { IssueComponent } from "./Issue.tsx"; // old
-import { useCoState } from "../main"; // old
+import { useCoState } from "jazz-react"; // old
 import { createInviteLink } from "jazz-react";
 // old
 

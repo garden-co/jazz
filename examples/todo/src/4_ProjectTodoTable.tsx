@@ -14,10 +14,10 @@ import {
   TableRow,
 } from "./basicComponents";
 
+import { useCoState } from "jazz-react";
 import { ID } from "jazz-tools";
 import { useParams } from "react-router";
 import uniqolor from "uniqolor";
-import { useCoState } from "./2_main";
 import { InviteButton } from "./components/InviteButton";
 
 /** Walkthrough: Reactively rendering a todo project as a table,

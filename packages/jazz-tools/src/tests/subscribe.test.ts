@@ -1,9 +1,15 @@
 import { describe, expect, it, onTestFinished, vi } from "vitest";
-import { Account, CoFeed, CoList, CoMap, co } from "../index.web.js";
 import {
-  type DepthsIn,
+  Account,
+  CoFeed,
+  CoList,
+  CoMap,
   FileStream,
   Group,
+  co,
+} from "../index.web.js";
+import {
+  type DepthsIn,
   createCoValueObservable,
   subscribeToCoValue,
 } from "../internal.js";
@@ -64,6 +70,7 @@ describe("subscribeToCoValue", () => {
         messages: null,
         name: "General",
       }),
+      expect.any(Function),
     );
 
     updateFn.mockClear();
@@ -78,6 +85,7 @@ describe("subscribeToCoValue", () => {
         name: "General",
         messages: expect.any(Array),
       }),
+      expect.any(Function),
     );
 
     updateFn.mockClear();
@@ -93,6 +101,7 @@ describe("subscribeToCoValue", () => {
         name: "Lounge",
         messages: expect.any(Array),
       }),
+      expect.any(Function),
     );
   });
 
@@ -125,6 +134,7 @@ describe("subscribeToCoValue", () => {
         name: "General",
         messages: expect.any(Array),
       }),
+      expect.any(Function),
     );
   });
 

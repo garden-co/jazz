@@ -99,6 +99,7 @@ describe("SchemaUnion", () => {
       { type: "button", label: "Submit" },
       { owner: me },
     );
+    let currentValue = "Submit";
     const unsubscribe = subscribeToCoValue(
       WidgetUnion,
       buttonWidget.id,
@@ -106,13 +107,16 @@ describe("SchemaUnion", () => {
       {},
       (value: BaseWidget) => {
         if (value instanceof ButtonWidget) {
-          expect(value.label).toBe("Changed");
-          unsubscribe();
+          expect(value.label).toBe(currentValue);
         } else {
           throw new Error("Unexpected widget type");
         }
       },
+      () => {},
+      true,
     );
+    currentValue = "Changed";
     buttonWidget.label = "Changed";
+    unsubscribe();
   });
 });

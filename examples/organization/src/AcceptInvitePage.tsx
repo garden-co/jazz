@@ -1,6 +1,6 @@
+import { useAcceptInvite, useAccount } from "jazz-react";
 import { ID } from "jazz-tools";
 import { useNavigate } from "react-router";
-import { useAcceptInvite, useAccount } from "./main.tsx";
 import { Organization } from "./schema.ts";
 
 export function AcceptInvitePage() {

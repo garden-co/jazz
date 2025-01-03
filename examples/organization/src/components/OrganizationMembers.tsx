@@ -1,5 +1,5 @@
+import { useCoState } from "jazz-react";
 import { Account, Group, ID } from "jazz-tools";
-import { useCoState } from "../main.tsx";
 import { Organization } from "../schema.ts";
 
 export function OrganizationMembers({

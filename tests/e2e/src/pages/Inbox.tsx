@@ -1,6 +1,9 @@
-import { Account, CoMap, Group, ID, co } from "jazz-tools";
+import {
+  useAccount,
+  experimental_useInboxSender as useInboxSender,
+} from "jazz-react";
+import { Account, CoMap, Group, ID, Inbox, co } from "jazz-tools";
 import { useEffect, useRef, useState } from "react";
-import { useAccount, useInboxListener, useInboxSender } from "../jazz";
 import { createCredentiallessIframe } from "../lib/createCredentiallessIframe";
 
 export class PingPong extends CoMap {
@@ -13,19 +16,37 @@ function getIdParam() {
   return (url.searchParams.get("id") as ID<Account> | undefined) ?? undefined;
 }
 
-export function Inbox() {
+export function InboxPage() {
   const [id] = useState(getIdParam);
   const { me } = useAccount();
   const [pingPong, setPingPong] = useState<PingPong | null>(null);
   const iframeRef = useRef<HTMLIFrameElement>();
 
-  useInboxListener(async (message) => {
-    const pingPong = PingPong.create(
-      { ping: message.ping, pong: Date.now() },
-      { owner: message._owner },
-    );
-    setPingPong(pingPong);
-  });
+  useEffect(() => {
+    let unsubscribe = () => {};
+    let unmounted = false;
+
+    async function load() {
+      const inbox = await Inbox.load(me);
+
+      if (unmounted) return;
+
+      unsubscribe = inbox.subscribe(PingPong, async (message) => {
+        const pingPong = PingPong.create(
+          { ping: message.ping, pong: Date.now() },
+          { owner: message._owner },
+        );
+        setPingPong(pingPong);
+      });
+    }
+
+    load();
+
+    return () => {
+      unmounted = true;
+      unsubscribe();
+    };
+  }, [me]);
 
   const sendPingPong = useInboxSender(id);
 

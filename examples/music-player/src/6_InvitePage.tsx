@@ -1,8 +1,8 @@
+import { useAcceptInvite, useAccount } from "jazz-react";
 import { ID } from "jazz-tools";
 import { useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import { Playlist } from "./1_schema";
-import { useAcceptInvite, useAccount } from "./2_main";
 
 export function InvitePage() {
   const navigate = useNavigate();

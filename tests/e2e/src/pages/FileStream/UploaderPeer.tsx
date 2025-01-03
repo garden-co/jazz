@@ -1,6 +1,6 @@
+import { useAccount, useCoState } from "jazz-react";
 import { ID } from "jazz-tools";
 import { useEffect, useState } from "react";
-import { useAccount, useCoState } from "../../jazz";
 import { createCredentiallessIframe } from "../../lib/createCredentiallessIframe";
 import { waitForCoValue } from "../../lib/waitForCoValue";
 import { BytesRadioGroup } from "./lib/BytesRadioGroup";
@@ -8,7 +8,6 @@ import { generateTestFile } from "./lib/generateTestFile";
 import { getDownloaderPeerUrl } from "./lib/getDownloaderPeerUrl";
 import { getDefaultFileSize, getIsAutoUpload } from "./lib/searchParams";
 import { UploadedFile } from "./schema";
-
 export function UploaderPeer() {
   const account = useAccount();
   const [uploadedFileId, setUploadedFileId] = useState<

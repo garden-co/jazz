@@ -1,12 +1,11 @@
 import { Button } from "@/components/Button";
-import { useAccount } from "@/components/JazzAndAuth";
 import PlusIcon from "@/components/icons/PlusIcon";
 import { BookReview } from "@/schema";
 import clsx from "clsx";
 import { createImage } from "jazz-browser-media-images";
+import { useAccount } from "jazz-react";
 import { ProgressiveImg } from "jazz-react";
-import { Group, ImageDefinition } from "jazz-tools";
-import { ChangeEvent, useRef, useState } from "react";
+import { ChangeEvent, useRef } from "react";
 
 const BookCoverContainer = ({
   children,

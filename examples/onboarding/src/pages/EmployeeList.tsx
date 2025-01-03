@@ -1,8 +1,8 @@
 import { NavLink } from "@/components/NavLink.tsx";
 import { NavigateButton } from "@/components/NavigateBack.tsx";
 import { Stack } from "@/components/Stack.tsx";
-import { useCoState } from "@/main.tsx";
 import { CoEmployee, EmployeeCoList } from "@/schema.ts";
+import { useCoState } from "jazz-react";
 import { ID } from "jazz-tools";
 
 export function EmployeeList({

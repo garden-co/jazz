@@ -1,9 +1,9 @@
 import { MusicTrack } from "@/1_schema";
-import { useAccount, useCoState } from "@/2_main";
 import { MediaPlayer } from "@/5_useMediaPlayer";
 import { useMediaEndListener } from "@/lib/audio/useMediaEndListener";
 import { usePlayState } from "@/lib/audio/usePlayState";
 import { useKeyboardListener } from "@/lib/useKeyboardListener";
+import { useAccount, useCoState } from "jazz-react";
 import { Pause, Play, SkipBack, SkipForward } from "lucide-react";
 import { Waveform } from "./Waveform";
 

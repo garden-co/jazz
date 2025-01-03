@@ -1,6 +1,6 @@
+import { useCoState } from "jazz-react";
 import { ID } from "jazz-tools";
 import { useEffect, useMemo, useState } from "react";
-import { useCoState } from "./main.tsx";
 import { Issue } from "./schema.ts";
 
 function DescriptionVersionHistory({ id }: { id: ID<Issue> }) {

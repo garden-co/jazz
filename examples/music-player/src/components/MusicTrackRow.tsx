@@ -1,5 +1,4 @@
 import { MusicTrack, Playlist } from "@/1_schema";
-import { useAccount, useCoState } from "@/2_main";
 import { addTrackToPlaylist } from "@/4_actions";
 import {
   DropdownMenu,
@@ -8,6 +7,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { cn } from "@/lib/utils";
+import { useAccount, useCoState } from "jazz-react";
 import { ID } from "jazz-tools";
 import { MoreHorizontal } from "lucide-react";
 import { MusicTrackTitleInput } from "./MusicTrackTitleInput";

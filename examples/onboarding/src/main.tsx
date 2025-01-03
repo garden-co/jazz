@@ -1,14 +1,9 @@
 import App from "@/App.tsx";
 import "@/index.css";
 import { HRAccount } from "@/schema.ts";
-import { DemoAuthBasicUI, createJazzReactApp, useDemoAuth } from "jazz-react";
+import { DemoAuthBasicUI, JazzProvider, useDemoAuth } from "jazz-react";
 import React from "react";
 import ReactDOM from "react-dom/client";
-
-const Jazz = createJazzReactApp({
-  AccountSchema: HRAccount,
-});
-export const { useAccount, useCoState, useAcceptInvite } = Jazz;
 
 const peer =
   (new URL(window.location.href).searchParams.get(
@@ -20,14 +15,20 @@ function JazzAndAuth({ children }: { children: React.ReactNode }) {
   const [auth, authState] = useDemoAuth();
   return (
     <>
-      <Jazz.Provider auth={auth} peer={peer}>
+      <JazzProvider AccountSchema={HRAccount} auth={auth} peer={peer}>
         {children}
-      </Jazz.Provider>
+      </JazzProvider>
       {authState.state !== "signedIn" && (
         <DemoAuthBasicUI appName="Jazz Onboarding" state={authState} />
       )}
     </>
   );
+}
+
+declare module "jazz-react" {
+  interface Register {
+    Account: HRAccount;
+  }
 }
 
 ReactDOM.createRoot(document.getElementById("root")!).render(

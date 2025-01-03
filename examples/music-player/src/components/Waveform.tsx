@@ -1,7 +1,7 @@
 import { MusicTrack, MusicTrackWaveform } from "@/1_schema";
-import { useCoState } from "@/2_main";
 import { usePlayerCurrentTime } from "@/lib/audio/usePlayerCurrentTime";
 import { cn } from "@/lib/utils";
+import { useCoState } from "jazz-react";
 
 export function Waveform(props: { track: MusicTrack; height: number }) {
   const { track, height } = props;

@@ -1,8 +1,8 @@
+import { useAccount, useCoState } from "jazz-react";
 import { Group, ID } from "jazz-tools";
 import { useState } from "react";
 import { IssueComponent } from "./Issue.tsx";
 import { IssueVersionHistory } from "./IssueVersionHistory.tsx";
-import { useAccount, useCoState } from "./main";
 import { Issue } from "./schema";
 function App() {
   const { me, logOut } = useAccount();

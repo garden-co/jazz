@@ -1,9 +1,9 @@
 import { useIframeHashRouter } from "hash-slash";
+import { useAccount } from "jazz-react";
 import { ID } from "jazz-tools";
 import { CreateOrder } from "./CreateOrder.tsx";
 import { EditOrder } from "./EditOrder.tsx";
 import { Orders } from "./Orders.tsx";
-import { useAccount } from "./main";
 import { BubbleTeaOrder } from "./schema.ts";
 
 function App() {

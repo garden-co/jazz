@@ -1,8 +1,7 @@
 import { createImage } from "jazz-browser-media-images";
-import { ProgressiveImg } from "jazz-react";
+import { ProgressiveImg, useAccount } from "jazz-react";
 import { ImageDefinition } from "jazz-tools";
 import { ChangeEvent, useRef } from "react";
-import { useAccount } from "./main.tsx";
 
 function Image({ image }: { image: ImageDefinition }) {
   return (

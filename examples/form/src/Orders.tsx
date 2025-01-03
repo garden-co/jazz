@@ -1,6 +1,6 @@
+import { useAccount } from "jazz-react";
 import { DraftIndicator } from "./DraftIndicator.tsx";
 import { OrderThumbnail } from "./OrderThumbnail.tsx";
-import { useAccount } from "./main.tsx";
 
 export function Orders() {
   const { me } = useAccount({

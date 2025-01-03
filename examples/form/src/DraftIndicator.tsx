@@ -1,4 +1,4 @@
-import { useAccount } from "./main.tsx";
+import { useAccount } from "jazz-react";
 
 export function DraftIndicator() {
   const { me } = useAccount({

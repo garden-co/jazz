@@ -2,7 +2,7 @@ import { Button } from "@/components/Button.tsx";
 import { NavigateBack } from "@/components/NavigateBack.tsx";
 import { Stack } from "@/components/Stack.tsx";
 import { TextInput } from "@/components/TextInput.tsx";
-import { useAccount, useCoState } from "@/main.tsx";
+import { useAccount, useCoState } from "jazz-react";
 import { Group, ID } from "jazz-tools";
 import { useCallback, useState } from "react";
 import { useNavigate } from "react-router-dom";

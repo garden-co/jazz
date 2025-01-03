@@ -1,10 +1,10 @@
 import { ClerkProvider, SignInButton, useClerk } from "@clerk/clerk-react";
-import { createJazzReactApp } from "jazz-react";
 import { useJazzClerkAuth } from "jazz-react-auth-clerk";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import App from "./App.tsx";
 import "./index.css";
+import { JazzProvider } from "jazz-react";
 
 // Import your publishable key
 const PUBLISHABLE_KEY = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY;
@@ -12,9 +12,6 @@ const PUBLISHABLE_KEY = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY;
 if (!PUBLISHABLE_KEY) {
   throw new Error("Add your Clerk publishable key to the .env.local file");
 }
-
-const Jazz = createJazzReactApp();
-export const { useAccount, useCoState } = Jazz;
 
 function JazzAndAuth({ children }: { children: React.ReactNode }) {
   const clerk = useClerk();
@@ -26,12 +23,12 @@ function JazzAndAuth({ children }: { children: React.ReactNode }) {
         <div key={error}>{error}</div>
       ))}
       {clerk.user && auth ? (
-        <Jazz.Provider
+        <JazzProvider
           auth={auth}
           peer="wss://cloud.jazz.tools/?key=minimal-auth-clerk-example@garden.co"
         >
           {children}
-        </Jazz.Provider>
+        </JazzProvider>
       ) : (
         <SignInButton />
       )}

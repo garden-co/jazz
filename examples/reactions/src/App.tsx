@@ -1,7 +1,7 @@
 import { useIframeHashRouter } from "hash-slash";
+import { useAccount } from "jazz-react";
 import { Group, ID } from "jazz-tools";
 import { ReactionsScreen } from "./ReactionsScreen.tsx";
-import { useAccount } from "./main";
 import { Reactions } from "./schema.ts";
 
 function App() {

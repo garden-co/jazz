@@ -10,25 +10,19 @@ import { PlayerControls } from "./components/PlayerControls";
 import "./index.css";
 
 import { MusicaAccount } from "@/1_schema";
-import { DemoAuthBasicUI, createJazzReactApp, useDemoAuth } from "jazz-react";
+import { DemoAuthBasicUI, JazzProvider, useDemoAuth } from "jazz-react";
 import { useUploadExampleData } from "./lib/useUploadExampleData";
 
 /**
- * Walkthrough: The top-level provider `<Jazz.Provider/>`
+ * Walkthrough: The top-level provider `<JazzProvider/>`
  *
- * This shows how to use the top-level provider `<Jazz.Provider/>`,
+ * This shows how to use the top-level provider `<JazzProvider/>`,
  * which provides the rest of the app with a controlled account (used through `useAccount` later).
  * Here we use `DemoAuth` which is great for prototyping you app without wasting time on figuring out
  * the best way to do auth.
  *
- * `<Jazz.Provider/>` also runs our account migration
+ * `<JazzProvider/>` also runs our account migration
  */
-
-const Jazz = createJazzReactApp({
-  AccountSchema: MusicaAccount,
-});
-
-export const { useAccount, useCoState, useAcceptInvite } = Jazz;
 
 function Main() {
   const mediaPlayer = useMediaPlayer();
@@ -70,16 +64,23 @@ function JazzAndAuth({ children }: { children: React.ReactNode }) {
 
   return (
     <>
-      <Jazz.Provider
+      <JazzProvider
         storage={["singleTabOPFS", "indexedDB"]}
         auth={auth}
         peer={peer}
+        AccountSchema={MusicaAccount}
       >
         {children}
-      </Jazz.Provider>
+      </JazzProvider>
       <DemoAuthBasicUI appName="Jazz Music Player" state={state} />
     </>
   );
+}
+
+declare module "jazz-react" {
+  interface Register {
+    Account: MusicaAccount;
+  }
 }
 
 ReactDOM.createRoot(document.getElementById("root")!).render(

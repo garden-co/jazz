@@ -1,9 +1,9 @@
 import { Button } from "@/components/Button.tsx";
-import { useAcceptInvite, useAccount, useCoState } from "@/main.tsx";
 import { EmployeeList } from "@/pages/EmployeeList.tsx";
 import { EmployeeOnboading } from "@/pages/EmployeeOnboarding.tsx";
 import { NewEmployee } from "@/pages/NewEmployee.tsx";
 import { CoEmployee, EmployeeCoList } from "@/schema.ts";
+import { useAcceptInvite, useAccount, useCoState } from "jazz-react";
 import { ID } from "jazz-tools";
 import { useEffect } from "react";
 import {

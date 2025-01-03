@@ -2,11 +2,11 @@
 
 import { BookCover } from "@/components/BookCover";
 import { Container } from "@/components/Container";
-import { useCoState } from "@/components/JazzAndAuth";
 import Rating from "@/components/Rating";
 import RatingInput from "@/components/RatingInput";
 import { BookReview } from "@/schema";
 import clsx from "clsx";
+import { useCoState } from "jazz-react";
 import { Group, ID } from "jazz-tools";
 
 const BookReviewTitle = ({

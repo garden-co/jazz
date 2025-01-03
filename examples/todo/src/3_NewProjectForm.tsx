@@ -4,9 +4,9 @@ import { ListOfTasks, TodoProject } from "./1_schema";
 
 import { SubmittableInput } from "./basicComponents";
 
+import { useAccount } from "jazz-react";
 import { Group } from "jazz-tools";
 import { useNavigate } from "react-router";
-import { useAccount } from "./2_main";
 
 export function NewProjectForm() {
   // `me` represents the current user account, which will determine

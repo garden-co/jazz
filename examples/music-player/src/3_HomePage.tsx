@@ -1,9 +1,8 @@
 import { useToast } from "@/hooks/use-toast";
-import { createInviteLink } from "jazz-react";
+import { createInviteLink, useAccount, useCoState } from "jazz-react";
 import { ID } from "jazz-tools";
 import { useNavigate, useParams } from "react-router";
 import { Playlist } from "./1_schema";
-import { useAccount, useCoState } from "./2_main";
 import { createNewPlaylist, uploadMusicTracks } from "./4_actions";
 import { MediaPlayer } from "./5_useMediaPlayer";
 import { FileUploadButton } from "./components/FileUploadButton";

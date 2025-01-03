@@ -1,8 +1,7 @@
+import { useAccount, useCoState } from "jazz-react";
 import { Account, FileStream, ID } from "jazz-tools";
 import { useEffect, useState } from "react";
-import { useAccount, useCoState } from "../../jazz";
 import { UploadedFile } from "./schema";
-
 export function DownloaderPeer(props: { testCoMapId: ID<UploadedFile> }) {
   const account = useAccount();
   const testCoMap = useCoState(UploadedFile, props.testCoMapId, {});
