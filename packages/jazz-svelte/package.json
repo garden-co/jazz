@@ -32,6 +32,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "svelte": "./dist/index.js"
+    },
+    "./testing": {
+      "types": "./dist/testing.d.ts",
+      "svelte": "./dist/testing.js"
     }
   },
   "peerDependencies": {
@@ -62,6 +66,7 @@
     "vitest": "1.5.3"
   },
   "dependencies": {
+    "cojson": "workspace:*",
     "jazz-browser": "workspace:*",
     "jazz-tools": "workspace:*"
   }

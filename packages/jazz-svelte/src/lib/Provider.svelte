@@ -4,7 +4,7 @@
     auth: AuthMethod | 'guest';
     peer: `wss://${string}` | `ws://${string}`;
     storage?: 'indexedDB' | 'singleTabOPFS';
-    schema: AccountClass<Acc>;
+    AccountSchema?: AccountClass<Acc>;
   };
 </script>
 
@@ -15,7 +15,7 @@
   import { type Snippet, setContext, untrack } from 'svelte';
   import { JAZZ_CTX, type JazzContext } from './jazz.svelte.js';
 
-  let { children, auth, peer, storage, schema }: Props<Acc> = $props();
+  let { children, auth, peer, storage, AccountSchema }: Props<Acc> = $props();
 
   const ctx = $state<JazzContext<Acc>>({ current: undefined });
   setContext<JazzContext<Acc>>(JAZZ_CTX, ctx);
@@ -36,7 +36,7 @@
               storage
             }
           : {
-              AccountSchema: schema,
+              AccountSchema: AccountSchema ?? Account as unknown as AccountClass<Acc>,
               auth,
               peer,
               storage

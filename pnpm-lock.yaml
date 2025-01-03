@@ -1889,6 +1889,9 @@ importers:
 
   packages/jazz-svelte:
     dependencies:
+      cojson:
+        specifier: workspace:*
+        version: link:../cojson
       jazz-browser:
         specifier: workspace:*
         version: link:../jazz-browser

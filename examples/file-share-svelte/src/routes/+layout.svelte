@@ -1,8 +1,17 @@
+<script lang="ts" module>
+  declare module 'jazz-svelte' {
+    interface Register {
+      Account: FileShareAccount;
+    }
+  }
+</script>
+
 <script lang="ts">
-  import { Provider } from '$lib/jazz';
+  import { JazzProvider } from 'jazz-svelte';
   import { PasskeyAuthBasicUI, usePasskeyAuth } from 'jazz-svelte';
   import { Toaster } from 'svelte-sonner';
   import '../app.css';
+  import { FileShareAccount } from '$lib/schema';
 
   let { children } = $props();
   const auth = usePasskeyAuth({
@@ -24,9 +33,13 @@
   </div>
 {/if}
 {#if auth.current}
-  <Provider auth={auth.current} peer="wss://cloud.jazz.tools/?key=file-share-svelte@garden.co">
+  <JazzProvider
+    AccountSchema={FileShareAccount}
+    auth={auth.current}
+    peer="wss://cloud.jazz.tools/?key=file-share-svelte@garden.co"
+  >
     <div class="min-h-screen bg-gray-100">
       {@render children()}
     </div>
-  </Provider>
+  </JazzProvider>
 {/if}

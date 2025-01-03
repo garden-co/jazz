@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { useAccount, useCoState } from '$lib/jazz';
+  import { useAccount, useCoState } from 'jazz-svelte';
   import { SharedFile, ListOfSharedFiles } from '$lib/schema';
   import { createInviteLink } from 'jazz-svelte';
   import { FileStream } from 'jazz-tools';

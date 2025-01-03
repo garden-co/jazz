@@ -3,7 +3,7 @@
   import { SharedFile } from '$lib/schema';
   import { FileStream } from 'jazz-tools';
   import { File, FileDown, Trash2, Link2 } from 'lucide-svelte';
-  import { useAccount } from '$lib/jazz';
+  import { useAccount } from 'jazz-svelte';
   import { toast } from 'svelte-sonner';
   import { formatFileSize } from '$lib/utils';
 
