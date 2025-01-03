@@ -1591,6 +1591,22 @@ importers:
         specifier: ~5.6.2
         version: 5.6.3
 
+  packages/jazz-bridge:
+    dependencies:
+      cojson:
+        specifier: workspace:0.8.44
+        version: link:../cojson
+      jazz-tools:
+        specifier: workspace:0.8.44
+        version: link:../jazz-tools
+    devDependencies:
+      jazz-run:
+        specifier: workspace:*
+        version: link:../jazz-run
+      typescript:
+        specifier: ~5.6.2
+        version: 5.6.3
+
   packages/jazz-browser:
     dependencies:
       '@scure/bip39':
