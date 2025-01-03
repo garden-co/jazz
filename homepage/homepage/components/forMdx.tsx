@@ -10,6 +10,10 @@ import {
 import { CodeGroup as CodeGroupClient } from "gcmp-design-system/src/app/components/molecules/CodeGroup";
 import { ComingSoon as ComingSoonClient } from "./docs/ComingSoon";
 import { IssueTrackerPreview as IssueTrackerPreviewClient } from "./docs/IssueTrackerPreview";
+import {
+  PackageUpgrade as PackageUpgradeClient,
+  PackageUpgradeProps,
+} from "./docs/PackageUpgrade";
 
 export function CodeExampleTabs(props: CodeExampleTabsProps) {
   return <CodeExampleTabsClient {...props} />;
@@ -29,4 +33,8 @@ export function ContentByFramework(props: ContentByFrameworkProps) {
 
 export function IssueTrackerPreview() {
   return <IssueTrackerPreviewClient />;
+}
+
+export function PackageUpgrade(props: PackageUpgradeProps) {
+  return <PackageUpgradeClient {...props} />;
 }

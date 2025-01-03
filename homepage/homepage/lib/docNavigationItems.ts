@@ -50,6 +50,11 @@ export const docNavigationItems = [
         href: "/docs/project-setup/server-side",
         done: 80,
       },
+      {
+        name: "Upgrade guides",
+        href: "/docs/upgrading",
+        done: 100,
+      },
     ],
   },
   {

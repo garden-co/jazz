@@ -56,6 +56,7 @@ const config = {
       fontFamily: {
         display: ["var(--font-manrope)"],
         mono: ["var(--font-commit-mono)"],
+        sans: ["var(--font-inter)"],
       },
       fontSize: {
         "2xs": ["0.75rem", { lineHeight: "1.25rem" }],

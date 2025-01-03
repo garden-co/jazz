@@ -5,5 +5,9 @@ export default function DocsLayout({
 }: {
   children: React.ReactNode;
 }) {
-  return <Prose className="overflow-x-hidden lg:flex-1 py-8">{children}</Prose>;
+  return (
+    <Prose className="max-w-3xl mx-auto overflow-x-hidden lg:flex-1 py-8">
+      {children}
+    </Prose>
+  );
 }
