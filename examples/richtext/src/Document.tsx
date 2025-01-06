@@ -12,12 +12,37 @@ import {
   Transaction as ProsemirrorTransaction,
   TextSelection,
 } from "prosemirror-state";
-import { AddMarkStep, ReplaceStep } from "prosemirror-transform";
+import {
+  AddMarkStep,
+  RemoveMarkStep,
+  ReplaceStep,
+} from "prosemirror-transform";
 import { EditorView } from "prosemirror-view";
 import "prosemirror-view/style/prosemirror.css";
 import { useEffect, useState } from "react";
 import { useAccount } from "./main";
 import { Document } from "./schema";
+
+const MARK_TYPE_LOOKUP = {
+  strong: {
+    mark: Marks.Strong,
+    tag: "strong",
+  },
+  em: {
+    mark: Marks.Em,
+    tag: "em",
+  },
+} as const;
+
+const NODE_TYPE_LOOKUP = {
+  paragraph: {
+    mark: Marks.Paragraph,
+    tag: "paragraph",
+  },
+} as const;
+
+type MarkType = keyof typeof MARK_TYPE_LOOKUP;
+type NodeType = keyof typeof NODE_TYPE_LOOKUP;
 
 /**
  * Component that integrates CoRichText with ProseMirror editor.
@@ -136,24 +161,28 @@ export function DocumentComponent({ docID }: { docID: ID<Document> }) {
 function richTextToProsemirrorDoc(
   text: CoRichText,
 ): ProsemirrorNode | undefined {
+  if (!text) {
+    return;
+  }
+
   const asString = text.toString();
-  return schema.node("doc", undefined, [
+
+  return schema.node("doc", {}, [
     schema.node(
       "paragraph",
-      { start: 0, end: asString.length },
+      {},
       asString.length === 0
-        ? undefined
-        : text.toTree(["strong", "em"]).children.map((child) => {
-            if (
-              child.type === "leaf" ||
-              child.tag === "strong" ||
-              child.tag === "em"
-            ) {
+        ? []
+        : text
+            .toTree(Object.keys(MARK_TYPE_LOOKUP) as MarkType[])
+            .children.map((child) => {
+              if (child.type === "node" && child.tag in NODE_TYPE_LOOKUP) {
+                // Nodes are treated differently, passing their children directly
+                return collectInlineMarks(asString, child.children[0], []);
+              }
+              // Marks are collected recursively, leaf nodes are plain text
               return collectInlineMarks(asString, child, []);
-            } else {
-              throw new Error("Unsupported tag " + child.tag);
-            }
-          }),
+            }),
     ),
   ]);
 }
@@ -171,25 +200,19 @@ function collectInlineMarks(
   fullString: string,
   node: TreeNode | TreeLeaf,
   currentMarks: ProsemirrorMark[],
-) {
+): ProsemirrorNode {
   if (node.type === "leaf") {
     return schema.text(fullString.slice(node.start, node.end), currentMarks);
   } else {
-    if (node.tag === "strong") {
-      return collectInlineMarks(
-        fullString,
-        node.children[0],
-        currentMarks.concat(schema.mark("strong")),
-      );
-    } else if (node.tag === "em") {
-      return collectInlineMarks(
-        fullString,
-        node.children[0],
-        currentMarks.concat(schema.mark("em")),
-      );
-    } else {
-      throw new Error("Unsupported tag " + node.tag);
+    if (!(node.tag in MARK_TYPE_LOOKUP)) {
+      throw new Error(`Unsupported tag '${node.tag}'`);
     }
+    const schemaMark = schema.mark(node.tag);
+    return collectInlineMarks(
+      fullString,
+      node.children[0],
+      currentMarks.concat(schemaMark),
+    );
   }
 }
 
@@ -203,10 +226,12 @@ function collectInlineMarks(
  * Supported operations:
  * - ReplaceStep: Text insertions and deletions
  * - AddMarkStep: Adding strong (bold) and em (italic) marks
+ * - RemoveMarkStep: Removing strong (bold) and em (italic) marks
  * - Paragraph splits: Creating new paragraph marks when Enter is pressed
+ *
+ * Prosemirror uses before from and before to for it's mark ranges
  */
 function applyTxToPlainText(text: CoRichText, tr: ProsemirrorTransaction) {
-  console.log("transaction", tr);
   for (const step of tr.steps) {
     if (step instanceof ReplaceStep) {
       const resolvedStart = tr.before.resolve(step.from);
@@ -281,15 +306,22 @@ function applyTxToPlainText(text: CoRichText, tr: ProsemirrorTransaction) {
         text.deleteRange({ from: start, to: end });
       }
     } else if (step instanceof AddMarkStep) {
-      console.log("step", step);
-      if (step.mark.type.name === "strong") {
-        text.insertMark(step.from, step.to - 1, Marks.Strong, {
-          tag: "strong",
+      const markType = step.mark.type.name as MarkType;
+      const { mark, tag } = MARK_TYPE_LOOKUP[markType];
+
+      if (mark) {
+        text.insertMark(step.from - 1, step.to - 2, mark, {
+          tag,
         });
-      } else if (step.mark.type.name === "em") {
-        text.insertMark(step.from, step.to - 1, Marks.Em, {
-          tag: "em",
-        });
+      } else {
+        console.warn("Unsupported mark type", step.mark);
+      }
+    } else if (step instanceof RemoveMarkStep) {
+      const markType = step.mark.type.name as MarkType;
+      const { mark } = MARK_TYPE_LOOKUP[markType];
+
+      if (mark) {
+        text.removeMark(step.from, step.to, mark, { tag: markType });
       } else {
         console.warn("Unsupported mark type", step.mark);
       }
