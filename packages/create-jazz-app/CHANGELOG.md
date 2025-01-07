@@ -1,5 +1,11 @@
 # create-jazz-app
 
+## 0.1.4
+
+### Patch Changes
+
+- 09d32ee: Remove nextjs starter
+
 ## 0.1.3
 
 ### Patch Changes
