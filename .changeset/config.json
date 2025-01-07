@@ -10,19 +10,21 @@
       "cojson-storage-indexeddb",
       "cojson-storage-sqlite",
       "cojson-transport-ws",
+      "create-jazz-app",
       "jazz-browser",
       "jazz-browser-auth-clerk",
       "jazz-browser-media-images",
-      "jazz-nodejs",
       "jazz-react",
       "jazz-react-auth-clerk",
+      "jazz-react-core",
       "jazz-react-native",
       "jazz-react-native-auth-clerk",
       "jazz-react-native-media-images",
       "jazz-run",
       "jazz-svelte",
       "jazz-tools",
-      "jazz-vue"
+      "jazz-vue",
+      "jazz-worker"
     ]
   ],
   "access": "public",

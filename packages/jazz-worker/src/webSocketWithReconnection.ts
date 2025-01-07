@@ -1,6 +1,5 @@
 import { Peer } from "cojson";
 import { createWebSocketPeer } from "cojson-transport-ws";
-import { WebSocket } from "ws";
 
 export function webSocketWithReconnection(
   peer: string,

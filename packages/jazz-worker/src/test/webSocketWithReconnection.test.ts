@@ -1,6 +1,5 @@
 import { createWebSocketPeer } from "cojson-transport-ws";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import { WebSocket } from "ws";
 import { webSocketWithReconnection } from "../webSocketWithReconnection";
 
 // Mock dependencies
@@ -13,14 +12,15 @@ vi.mock("cojson-transport-ws", () => ({
   })),
 }));
 
-vi.mock("ws", () => ({
-  WebSocket: vi.fn().mockImplementation(() => ({
+vi.stubGlobal(
+  "WebSocket",
+  vi.fn().mockImplementation(() => ({
     addEventListener: vi.fn(),
     removeEventListener: vi.fn(),
     close: vi.fn(),
     readyState: 1,
   })),
-}));
+);
 
 describe("webSocketWithReconnection", () => {
   beforeEach(() => {

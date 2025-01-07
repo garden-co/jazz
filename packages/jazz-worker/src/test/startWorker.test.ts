@@ -3,7 +3,6 @@ import { startSyncServer } from "jazz-run/startSyncServer";
 import { CoMap, Group, InboxSender, co } from "jazz-tools";
 import { describe, expect, onTestFinished, test } from "vitest";
 import { startWorker } from "../index";
-import { waitFor } from "./utils";
 
 async function setup() {
   const { server, port } = await setupSyncServer();

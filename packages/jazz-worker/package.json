@@ -1,5 +1,5 @@
 {
-  "name": "jazz-nodejs",
+  "name": "jazz-worker",
   "module": "dist/index.js",
   "main": "dist/index.js",
   "types": "src/index.ts",
@@ -7,13 +7,11 @@
   "license": "MIT",
   "version": "0.8.50",
   "dependencies": {
-    "cojson": "workspace:0.8.50",
-    "cojson-transport-ws": "workspace:0.8.50",
-    "jazz-tools": "workspace:0.8.50",
-    "ws": "^8.14.2"
+    "cojson": "workspace:*",
+    "cojson-transport-ws": "workspace:*",
+    "jazz-tools": "workspace:*"
   },
   "devDependencies": {
-    "@types/ws": "8.5.10",
     "jazz-run": "workspace:*",
     "typescript": "~5.6.2"
   },
