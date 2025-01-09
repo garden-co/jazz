@@ -1,4 +1,4 @@
-import { expect, test, vi, afterEach } from "vitest";
+import { afterEach, expect, test, vi } from "vitest";
 import { expectPlainText } from "../coValue.js";
 import { WasmCrypto } from "../crypto/WasmCrypto.js";
 import { LocalNode } from "../localNode.js";
