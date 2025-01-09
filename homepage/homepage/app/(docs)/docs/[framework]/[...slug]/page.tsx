@@ -22,8 +22,11 @@ export default async function Page({
 
     const { default: Content, tableOfContents } = mdxSource;
 
+    // Exclude h1 from table of contents
+    const tocItems = (tableOfContents as Toc)?.[0]?.children;
+
     return (
-      <DocsLayout toc={tableOfContents} nav={<DocNav />}>
+      <DocsLayout toc={tocItems} nav={<DocNav />}>
         <Prose className="overflow-x-hidden lg:flex-1 py-8">
           <Content />
         </Prose>

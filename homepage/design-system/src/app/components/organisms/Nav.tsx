@@ -10,14 +10,7 @@ import {
 import clsx from "clsx";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import {
-  ComponentType,
-  ReactNode,
-  useEffect,
-  useLayoutEffect,
-  useRef,
-  useState,
-} from "react";
+import { ComponentType, ReactNode, useEffect, useState } from "react";
 import { Icon } from "../atoms/Icon";
 import { BreadCrumb } from "../molecules/Breadcrumb";
 import { SocialLinks, SocialLinksProps } from "./SocialLinks";
@@ -74,7 +67,7 @@ function NavItem({
           className,
           "text-sm px-2 lg:px-4 py-3 ",
           firstOnRight && "ml-auto",
-          path === href ? "text-black dark:text-white" : "",
+          path === href ? "text-stone-900 dark:text-white" : "",
         )}
         {...item}
       >
@@ -87,8 +80,8 @@ function NavItem({
     <Popover className={clsx("relative", className, firstOnRight && "ml-auto")}>
       <PopoverButton
         className={clsx(
-          "flex items-center gap-1.5 text-sm px-2 lg:px-4 py-3 max-sm:w-full text-stone-600 dark:text-stone-400 hover:text-black dark:hover:text-white transition-colors hover:transition-none focus-visible:outline-none",
-          path === href ? "text-black dark:text-white" : "",
+          "flex items-center gap-1.5 text-sm px-2 lg:px-4 py-3 max-sm:w-full hover:text-stone-900 dark:hover:text-white transition-colors hover:transition-none focus-visible:outline-none",
+          path === href ? "text-stone-900 dark:text-white" : "",
         )}
       >
         <span>{title}</span>
@@ -145,16 +138,20 @@ export function MobileNav({
     content: (
       <>
         <div className="flex items-center justify-between border-b p-3">
-          <SocialLinks {...socials} />
+          <Link href="/" className="flex items-center">
+            {mainLogo}
+          </Link>
 
-          <ThemeToggle />
+          <SocialLinks {...socials} className="ml-auto" />
+
+          <ThemeToggle className="ml-4 mr-1" />
         </div>
         <div className="flex flex-col gap-2 p-3">
-          {[{ title: "Home", href: "/" }, ...items]
+          {items
             .filter((item) => !("icon" in item))
             .map((item, i) => (
               <NavLink
-                className="p-1 text-sm"
+                className="p-1"
                 key={i}
                 href={item.href}
                 onClick={() => setActive(null)}
@@ -211,13 +208,14 @@ export function MobileNav({
 
       <div
         className={clsx(
-          "md:hidden bg-white border bottom-5 fixed z-50 text-stone-900 dark:text-white",
+          "md:hidden bg-white border fixed z-50",
           "dark:bg-stone-925",
 
           {
-            "rounded-lg right-5 left-5 sm:max-w-lg sm:w-full shadow-md sm:left-1/2 sm:-translate-x-1/2 ":
+            "rounded-lg right-6 left-6 bottom-6 sm:max-w-lg sm:w-full shadow-md sm:left-1/2 sm:-translate-x-1/2 ":
               !!active,
-            "rounded-full shadow-sm left-1/2 -translate-x-1/2 ": !active,
+            "rounded-full shadow-sm left-1/2 -translate-x-1/2  bottom-7":
+              !active,
           },
         )}
       >
@@ -236,7 +234,7 @@ export function MobileNav({
 
         <div
           className={clsx("flex justify-center py-1 px-1.5", {
-            "border-t": !!active,
+            "border-t py-2": !!active,
           })}
         >
           {navSections.map(
@@ -246,6 +244,7 @@ export function MobileNav({
                   type="button"
                   className={clsx(
                     "flex items-center gap-1 px-2 py-1 text-sm rounded-md whitespace-nowrap",
+                    "text-stone-900 dark:text-white",
                     {
                       "bg-stone-100 dark:bg-stone-900": active === section.name,
                     },
@@ -283,7 +282,7 @@ function NavLink({
     <Link
       href={href}
       className={clsx(
-        "text-stone-600 dark:text-stone-400 hover:text-black dark:hover:text-white transition-colors hover:transition-none",
+        "hover:text-stone-900 dark:hover:text-white transition-colors hover:transition-none",
         className,
       )}
       onClick={onClick}

@@ -51,16 +51,14 @@ export default function DocsLayout({
               "col-span-12 md:col-span-8 lg:col-span-9 flex gap-3",
             )}
           >
-            {toc ? (
+            {children}
+            {toc && (
               <>
-                {children}
                 <TableOfContents
                   className="pl-3 py-6 shrink-0 text-sm sticky align-start top-[65px] w-[16rem] h-[calc(100vh-65px)] overflow-y-auto overflow-x-hidden hidden lg:block"
                   items={toc as Toc}
                 />
               </>
-            ) : (
-              <div className="max-w-3xl mx-auto">{children}</div>
             )}
           </div>
         </div>
