@@ -25,15 +25,10 @@ export function DocumentComponent({ docID }: { docID: ID<Document> }) {
   const { me } = useAccount();
   const [mount, setMount] = useState<HTMLElement | null>(null);
 
-  console.log("rerendering");
-
   useEffect(() => {
     if (!mount) return;
 
-    console.log("Creating EditorView");
-
     const setupPlugins = exampleSetup({ schema, history: false });
-    // console.log("setupPlugins", setupPlugins, schema);
 
     // Create a new editor view
     const editorView = new EditorView(mount, {
@@ -44,16 +39,10 @@ export function DocumentComponent({ docID }: { docID: ID<Document> }) {
         schema: schema,
         plugins: setupPlugins,
       }),
-      dispatchTransaction(tr) {
-        const expectedNewState = editorView.state.apply(tr);
+      dispatchTransaction(transaction) {
+        const expectedNewState = editorView.state.apply(transaction);
 
-        console.log("Applying transaction", lastDoc);
-        if (lastDoc) {
-          console.log("Applying transaction to plain text");
-          applyTxToPlainText(lastDoc, tr);
-        }
-
-        console.log("Setting view state to normal new state", expectedNewState);
+        if (lastDoc) { applyTxToPlainText(lastDoc, transaction); }
 
         editorView.updateState(expectedNewState);
       },
@@ -61,30 +50,18 @@ export function DocumentComponent({ docID }: { docID: ID<Document> }) {
 
     let lastDoc: Document | undefined;
 
-    console.log("About to subscribe to document:", docID, "with user:", me.id);
+    // Subscribe to document updates
     const unsub = Document.subscribe(
       docID,
       me,
       { marks: [{}], text: [] },
       async (doc) => {
-        console.log("doc", JSON.parse(JSON.stringify(doc)));
-
-        console.log("doc loaded");
-
         lastDoc = doc;
-        console.log("doc marks", JSON.parse(JSON.stringify(doc.marks)));
-        console.log("doc text", JSON.parse(JSON.stringify(doc.text)));
 
-        console.log("Applying doc update");
-        console.log(
-          "marks",
-          doc.toString(),
-          doc.resolveAndDiffuseAndFocusMarks(),
-        );
-        console.log("tree", doc.toTree(["strong", "em"]));
-
+        // Check if the editor is currently focused
         const focusedBefore = editorView.hasFocus();
 
+        // Update the editor state
         editorView.updateState(
           EditorState.create({
             doc: richTextToProsemirrorDoc(doc),
@@ -103,10 +80,9 @@ export function DocumentComponent({ docID }: { docID: ID<Document> }) {
         }
       },
     );
-    console.log("Subscription created successfully");
 
+    // Clean up on unmount
     return () => {
-      console.log("Destroying");
       editorView.destroy();
       unsub();
     };

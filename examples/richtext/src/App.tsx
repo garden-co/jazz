@@ -12,8 +12,11 @@ function App() {
   const { me, logOut } = useAccount();
 
   const createDocument = () => {
+    // Create a new group to own the document
     const group = Group.create({ owner: me });
     group.addMember("everyone", "writer");
+
+    // Create a new document
     const Doc = Document.createFromPlainTextAndMark(
       "",
       Marks.Paragraph,
