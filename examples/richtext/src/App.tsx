@@ -1,7 +1,7 @@
 import { useIframeHashRouter } from "hash-slash";
+import { useAccount } from "jazz-react";
 import { Group, ID, Marks } from "jazz-tools";
 import { DocumentComponent } from "./Document";
-import { useAccount } from "./main";
 import { Document } from "./schema";
 
 /**
