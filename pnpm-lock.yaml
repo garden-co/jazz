@@ -1236,6 +1236,9 @@ importers:
       jazz-react:
         specifier: workspace:*
         version: link:../../packages/jazz-react
+      jazz-richtext-prosemirror:
+        specifier: workspace:*
+        version: link:../../packages/jazz-richtext-prosemirror
       jazz-tools:
         specifier: workspace:*
         version: link:../../packages/jazz-tools
@@ -1930,6 +1933,37 @@ importers:
         version: 0.76.3(@babel/core@7.25.2)(@babel/preset-env@7.25.4(@babel/core@7.25.2))(@react-native-community/cli-server-api@13.6.9)(@types/react@18.3.12)(react@18.3.1)
       typescript:
         specifier: ~5.6.2
+        version: 5.6.3
+
+  packages/jazz-richtext-prosemirror:
+    dependencies:
+      jazz-tools:
+        specifier: workspace:*
+        version: link:../jazz-tools
+      prosemirror-example-setup:
+        specifier: ^1.2.2
+        version: 1.2.3
+      prosemirror-menu:
+        specifier: ^1.2.4
+        version: 1.2.4
+      prosemirror-model:
+        specifier: ^1.21.1
+        version: 1.24.1
+      prosemirror-schema-basic:
+        specifier: ^1.2.2
+        version: 1.2.3
+      prosemirror-state:
+        specifier: ^1.4.3
+        version: 1.4.3
+      prosemirror-transform:
+        specifier: ^1.9.0
+        version: 1.10.2
+      prosemirror-view:
+        specifier: ^1.33.7
+        version: 1.37.1
+    devDependencies:
+      typescript:
+        specifier: ^5.0.2
         version: 5.6.3
 
   packages/jazz-run:
