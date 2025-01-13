@@ -14,6 +14,7 @@ import {
   ReplaceStep,
 } from "prosemirror-transform";
 
+// Supported mark types
 const MARK_TYPE_LOOKUP = {
   strong: {
     mark: Marks.Strong,
@@ -25,6 +26,7 @@ const MARK_TYPE_LOOKUP = {
   },
 } as const;
 
+// Supported node types
 const NODE_TYPE_LOOKUP = {
   paragraph: {
     mark: Marks.Paragraph,
@@ -150,16 +152,6 @@ export function applyTxToPlainText(
         .content()
         .content.textBetween(0, selectionToEnd.content().content.size).length;
 
-      console.log(
-        "step",
-        step,
-        resolvedStart,
-        resolvedEnd,
-        selectionToStart,
-        start,
-        end,
-      );
-
       if (start === end) {
         if (step.slice.content.firstChild?.text) {
           text.insertAfter(start, step.slice.content.firstChild.text);
@@ -178,8 +170,6 @@ export function applyTxToPlainText(
                     start,
               ) || [];
 
-            console.log("split before", start, matchingMarks);
-
             let lastSeenEnd = start;
             for (const matchingMark of matchingMarks) {
               const originalEnd = text.idxAfter(matchingMark.endAfter)!; // TODO: non-tight case
@@ -189,8 +179,6 @@ export function applyTxToPlainText(
               matchingMark.endBefore = text.posBefore(start + 1)!;
               matchingMark.endAfter = text.posAfter(start)!;
             }
-
-            console.log("split after", matchingMarks, lastSeenEnd);
 
             text.insertMark(start, lastSeenEnd, Marks.Paragraph, {
               tag: "paragraph",
