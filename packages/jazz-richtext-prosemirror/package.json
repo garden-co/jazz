@@ -6,8 +6,8 @@
   "types": "src/index.ts",
   "scripts": {
     "build": "rm -rf ./dist && tsc --sourceMap --outDir dist",
-    "test": "vitest",
-    "test:watch": "vitest --watch",
+    "test": "vitest --run --root ../../ --project jazz-richtext-prosemirror",
+    "test:watch": "vitest --watch --root ../../ --project jazz-richtext-prosemirror",
     "format-and-lint": "biome check .",
     "format-and-lint:fix": "biome check . --write"
   },
