@@ -10,14 +10,7 @@ import {
 import clsx from "clsx";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import {
-  ComponentType,
-  ReactNode,
-  useEffect,
-  useLayoutEffect,
-  useRef,
-  useState,
-} from "react";
+import { ComponentType, ReactNode, useEffect, useState } from "react";
 import { Icon } from "../atoms/Icon";
 import { BreadCrumb } from "../molecules/Breadcrumb";
 import { SocialLinks, SocialLinksProps } from "./SocialLinks";
@@ -35,10 +28,16 @@ type NavItemProps = {
 type NavProps = {
   mainLogo: ReactNode;
   items: NavItemProps[];
-  docNav?: ReactNode;
   cta?: ReactNode;
   socials?: SocialLinksProps;
   themeToggle: ComponentType<{ className?: string }>;
+  sections?: NavSection[];
+};
+
+export type NavSection = {
+  name: string;
+  content: ReactNode;
+  icon: string;
 };
 
 function NavItem({
@@ -68,7 +67,7 @@ function NavItem({
           className,
           "text-sm px-2 lg:px-4 py-3 ",
           firstOnRight && "ml-auto",
-          path === href ? "text-black dark:text-white" : "",
+          path === href ? "text-stone-900 dark:text-white" : "",
         )}
         {...item}
       >
@@ -81,8 +80,8 @@ function NavItem({
     <Popover className={clsx("relative", className, firstOnRight && "ml-auto")}>
       <PopoverButton
         className={clsx(
-          "flex items-center gap-1.5 text-sm px-2 lg:px-4 py-3 max-sm:w-full text-stone-600 dark:text-stone-400 hover:text-black dark:hover:text-white transition-colors hover:transition-none focus-visible:outline-none",
-          path === href ? "text-black dark:text-white" : "",
+          "flex items-center gap-1.5 text-sm px-2 lg:px-4 py-3 max-sm:w-full hover:text-stone-900 dark:hover:text-white transition-colors hover:transition-none focus-visible:outline-none",
+          path === href ? "text-stone-900 dark:text-white" : "",
         )}
       >
         <span>{title}</span>
@@ -128,25 +127,57 @@ function NavItem({
 export function MobileNav({
   mainLogo,
   items,
-  docNav,
   cta,
   socials,
+  sections,
   themeToggle: ThemeToggle,
 }: NavProps) {
-  const [menuOpen, setMenuOpen] = useState(false);
-  const [searchOpen, setSearchOpen] = useState(false);
-  const searchRef = useRef<HTMLInputElement>(null);
+  const primarySection = {
+    name: "Menu",
+    icon: "menu",
+    content: (
+      <>
+        <div className="flex items-center justify-between border-b p-3">
+          <Link href="/" className="flex items-center">
+            {mainLogo}
+          </Link>
 
-  useLayoutEffect(() => {
-    searchOpen && searchRef.current?.focus();
-  }, [searchOpen]);
+          <SocialLinks {...socials} className="ml-auto" />
+
+          <ThemeToggle className="ml-4 mr-1" />
+        </div>
+        <div className="flex flex-col gap-2 p-3">
+          {items
+            .filter((item) => !("icon" in item))
+            .map((item, i) => (
+              <NavLink
+                className="p-1"
+                key={i}
+                href={item.href}
+                onClick={() => setActive(null)}
+                newTab={item.newTab}
+              >
+                {item.title}
+              </NavLink>
+            ))}
+        </div>
+      </>
+    ),
+  };
+
+  const [active, setActive] = useState<string | null>();
 
   const pathname = usePathname();
 
   useEffect(() => {
-    setMenuOpen(false);
+    setActive(null);
   }, [pathname]);
 
+  const toggle = (type: string) => {
+    setActive(active == type ? null : type);
+  };
+
+  const navSections = [primarySection, ...(sections || [])];
   return (
     <>
       <div className="md:hidden px-4 flex items-center self-stretch dark:text-white">
@@ -155,9 +186,8 @@ export function MobileNav({
         </NavLinkLogo>
         <button
           className="flex gap-2 p-3 rounded-xl items-center"
-          onMouseDown={() => {
-            setMenuOpen((o) => !o);
-            setSearchOpen(false);
+          onClick={() => {
+            setActive("Menu");
           }}
           aria-label="Open menu"
         >
@@ -165,80 +195,70 @@ export function MobileNav({
           <BreadCrumb items={items} />
         </button>
       </div>
+
       <div
         onClick={() => {
-          setMenuOpen(false);
-          setSearchOpen(false);
+          setActive(null);
         }}
         className={clsx(
-          menuOpen || searchOpen ? "block" : "hidden",
-          "fixed top-0 bottom-0 left-0 right-0 bg-stone-200/80 dark:bg-black/80 w-full h-full z-20",
+          !!active ? "block" : "hidden",
+          "md:hidden fixed backdrop-blur-sm top-0 bottom-0 left-0 right-0 bg-stone-200/80 dark:bg-black/80 w-full h-full z-20",
         )}
       ></div>
-      <nav
+
+      <div
         className={clsx(
-          "md:hidden fixed flex flex-col bottom-4 right-4 z-50",
-          "bg-stone-50 dark:bg-stone-925 border rounded-lg shadow-lg",
-          menuOpen || searchOpen ? "left-4" : "",
+          "md:hidden bg-white border fixed z-50",
+          "dark:bg-stone-925",
+
+          {
+            "rounded-lg right-6 left-6 bottom-6 sm:max-w-lg sm:w-full shadow-md sm:left-1/2 sm:-translate-x-1/2 ":
+              !!active,
+            "rounded-full shadow-sm left-1/2 -translate-x-1/2  bottom-7":
+              !active,
+          },
         )}
       >
-        <div className={clsx(menuOpen ? "block" : "hidden", " px-2 pb-2")}>
-          <div className="flex items-center w-full border-b">
-            <NavLinkLogo
-              prominent
-              href="/"
-              className="mr-auto"
-              onClick={() => setMenuOpen(false)}
-            >
-              {mainLogo}
-            </NavLinkLogo>
-
-            <SocialLinks className="px-2 gap-2" {...socials} />
-          </div>
-
-          {pathname.startsWith("/docs") && docNav && (
-            <div className="max-h-[calc(100dvh-15rem)] p-4 border-b overflow-x-auto">
-              {docNav}
-            </div>
-          )}
-
-          <div className="flex flex-wrap justify-end py-2 gap-x-3 gap-y-1 border-b">
-            {[{ title: "Home", href: "/" }, ...items]
-              .filter((item) => !("icon" in item))
-              .map((item, i) => (
-                <NavLink
-                  className="p-1 text-sm"
-                  key={i}
-                  href={item.href}
-                  onClick={() => setMenuOpen(false)}
-                  newTab={item.newTab}
-                >
-                  {item.title}
-                </NavLink>
-              ))}
-          </div>
-        </div>
-        <div className="flex items-center self-stretch justify-between">
-          {(menuOpen || searchOpen) && <ThemeToggle className="p-3" />}
-          <button
-            className="flex gap-2 p-3 rounded-xl items-center"
-            onMouseDown={() => {
-              setMenuOpen((o) => !o);
-              setSearchOpen(false);
-            }}
-            aria-label="Close menu"
-          >
-            {menuOpen || searchOpen ? (
-              <Icon name="close" />
-            ) : (
-              <>
-                <Icon name="menu" />
-                <BreadCrumb items={items} />
-              </>
+        {active && (
+          <div
+            className={clsx(
+              "max-h-[calc(100vh-16rem)] overflow-y-auto",
+              active === "Menu" ? "" : "p-3 pb-10",
             )}
-          </button>
+          >
+            {navSections.map((section) =>
+              section.name == active ? section.content : null,
+            )}
+          </div>
+        )}
+
+        <div
+          className={clsx("flex justify-center py-1 px-1.5", {
+            "border-t py-2": !!active,
+          })}
+        >
+          {navSections.map(
+            (section) =>
+              section.content && (
+                <button
+                  type="button"
+                  className={clsx(
+                    "flex items-center gap-1 px-2 py-1 text-sm rounded-md whitespace-nowrap",
+                    "text-stone-900 dark:text-white",
+                    {
+                      "bg-stone-100 dark:bg-stone-900": active === section.name,
+                    },
+                  )}
+                  onClick={() => toggle(section.name)}
+                  key={section.name}
+                >
+                  <Icon name={section.icon} size="xs" />
+                  {section.name}
+                </button>
+              ),
+          )}
         </div>
-      </nav>
+      </div>
     </>
   );
 }
@@ -262,7 +282,7 @@ function NavLink({
     <Link
       href={href}
       className={clsx(
-        "text-stone-600 dark:text-stone-400 hover:text-black dark:hover:text-white transition-colors hover:transition-none",
+        "hover:text-stone-900 dark:hover:text-white transition-colors hover:transition-none",
         className,
       )}
       onClick={onClick}
@@ -310,7 +330,7 @@ function NavLinkLogo({
 }
 
 export function Nav(props: NavProps) {
-  const { mainLogo, items, docNav, cta } = props;
+  const { mainLogo, items, cta } = props;
   return (
     <>
       <div className="w-full border-b py-2 sticky top-0 z-50 bg-white dark:bg-stone-950 hidden md:block">

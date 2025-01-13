@@ -1,13 +1,6 @@
 import DocsLayout from "@/components/docs/DocsLayout";
 import { DocNav } from "@/components/docs/nav";
-
-export const metadata = {
-  title: {
-    default: "Documentation",
-    template: "%s | Jazz",
-  },
-  description: "Jazz guide and documentation.",
-};
+import { Prose } from "gcmp-design-system/src/app/components/molecules/Prose";
 
 export default function Layout({
   children,
@@ -16,7 +9,7 @@ export default function Layout({
 }) {
   return (
     <DocsLayout nav={<DocNav />}>
-      <div className="flex justify-center lg:gap-5">{children}</div>
+      <Prose className="max-w-3xl mx-auto lg:flex-1 py-8">{children}</Prose>
     </DocsLayout>
   );
 }

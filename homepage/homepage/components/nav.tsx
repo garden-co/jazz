@@ -2,13 +2,16 @@ import { ThemeToggle } from "@/components/ThemeToggle";
 import { socials } from "@/lib/socials";
 import { useFramework } from "@/lib/use-framework";
 import { JazzLogo } from "gcmp-design-system/src/app/components/atoms/logos/JazzLogo";
-import { Nav } from "gcmp-design-system/src/app/components/organisms/Nav";
-import { DocNav } from "./docs/nav";
+import {
+  Nav,
+  type NavSection,
+} from "gcmp-design-system/src/app/components/organisms/Nav";
 
-export function JazzNav() {
+export function JazzNav({ sections }: { sections?: NavSection[] }) {
   return (
     <Nav
-      mainLogo={<JazzLogo className="w-24" />}
+      sections={sections}
+      mainLogo={<JazzLogo className="w-20 md:w-24" />}
       themeToggle={ThemeToggle}
       items={[
         { title: "Jazz Cloud", href: "/cloud" },
@@ -46,7 +49,6 @@ export function JazzNav() {
         },
       ]}
       socials={socials}
-      docNav={<DocNav className="block h-auto" />}
     />
   );
 }
