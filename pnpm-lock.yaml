@@ -516,7 +516,7 @@ importers:
         version: 3.0.4
       autoprefixer:
         specifier: ^10.4.20
-        version: 10.4.20(postcss@8.4.49)
+        version: 10.4.20(postcss@8.4.47)
       eslint:
         specifier: ^9.7.0
         version: 9.15.0(jiti@1.21.6)
@@ -1962,9 +1962,15 @@ importers:
         specifier: ^1.33.7
         version: 1.37.1
     devDependencies:
+      '@biomejs/biome':
+        specifier: 1.9.4
+        version: 1.9.4
       typescript:
         specifier: ^5.0.2
         version: 5.6.3
+      vitest:
+        specifier: 1.5.3
+        version: 1.5.3(@types/node@22.5.1)(@vitest/browser@0.34.6)(@vitest/ui@1.5.3)(happy-dom@15.8.3)(jsdom@25.0.1)(lightningcss@1.27.0)(terser@5.33.0)
 
   packages/jazz-run:
     dependencies:
