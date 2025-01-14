@@ -1,5 +1,6 @@
 import {
   applyTrToRichText,
+  Document,
   richTextToProsemirrorDoc,
 } from "jazz-browser-prosemirror";
 import { useAccount } from "jazz-react";
@@ -9,7 +10,6 @@ import { schema } from "prosemirror-schema-basic";
 import { EditorState } from "prosemirror-state";
 import { EditorView } from "prosemirror-view";
 import { useEffect, useState } from "react";
-import { Document } from "./schema.js";
 
 import "prosemirror-example-setup/style/style.css";
 import "prosemirror-menu/style/menu.css";
