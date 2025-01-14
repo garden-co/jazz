@@ -21,7 +21,7 @@
     "hash-slash": "workspace:*",
     "jazz-react": "workspace:*",
     "jazz-tools": "workspace:*",
-    "jazz-richtext-prosemirror": "workspace:*",
+    "jazz-react-prosemirror": "workspace:*",
     "lucide-react": "^0.274.0",
     "prosemirror-example-setup": "^1.2.2",
     "prosemirror-menu": "^1.2.4",
