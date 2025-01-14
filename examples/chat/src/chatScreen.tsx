@@ -35,7 +35,7 @@ export function ChatScreen(props: { chatID: ID<Chat> }) {
       return;
     }
 
-    createImage(file).then((image) => {
+    createImage(file, { owner: chat._owner }).then((image) => {
       chat.push(Message.create({ text: file.name, image: image }, chat._owner));
     });
   };

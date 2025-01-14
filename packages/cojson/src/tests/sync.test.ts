@@ -12,8 +12,10 @@ import { connectedPeers, newQueuePair } from "../streamUtils.js";
 import type { SyncMessage } from "../sync.js";
 import {
   blockMessageTypeOnOutgoingPeer,
+  connectTwoPeers,
   createTestMetricReader,
   createTestNode,
+  loadCoValueOrFail,
   randomAnonymousAccountAndSessionID,
   tearDownTestMetricReader,
   waitFor,
@@ -1644,6 +1646,28 @@ function createTwoConnectedNodes() {
     jazzCloudConnectionAsPeer,
   };
 }
+
+test("a value created on one node can be loaded on anotehr node even if not directly connected", async () => {
+  const userA = createTestNode();
+  const userB = createTestNode();
+  const serverA = createTestNode();
+  const serverB = createTestNode();
+  const core = createTestNode();
+
+  connectTwoPeers(userA, serverA, "client", "server");
+  connectTwoPeers(userB, serverB, "client", "server");
+  connectTwoPeers(serverA, core, "client", "server");
+  connectTwoPeers(serverB, core, "client", "server");
+
+  const group = userA.createGroup();
+  const map = group.createMap();
+  map.set("key1", "value1", "trusting");
+
+  await map.core.waitForSync();
+
+  const mapOnUserB = await loadCoValueOrFail(userB, map.id);
+  expect(mapOnUserB.get("key1")).toBe("value1");
+});
 
 describe("SyncManager - knownStates vs optimisticKnownStates", () => {
   test("knownStates and optimisticKnownStates are the same when the coValue is fully synced", async () => {

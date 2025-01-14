@@ -1,28 +1,58 @@
 # Chat example with Jazz and Vue
 
-## Installing & running the example locally
+## Getting started
 
-(This requires `pnpm` to be installed, see [https://pnpm.io/installation](https://pnpm.io/installation))
+You can either
+1. Clone the jazz repository, and run the app within the monorepo.
+2. Or create a new Jazz project using this example as a template.
 
-Start by downloading the [jazz repository](https://github.com/garden-co/jazz):
+
+### Using the example as a template
+
+Create a new Jazz project, and use this example as a template.
 ```bash
-npx degit gardencmp/jazz jazz
+npm create jazz-app@latest --example chat-vue --project-name chat-vue
+```
+or
+```bash
+npx create-jazz-app@latest --example chat-vue --project-name chat-vue
 ```
 
-Go to the todo-vue example directory:
+Go to the new project directory.
 ```bash
-cd jazz/examples/chat-vue
+cd chat-vue
 ```
 
-Install and build dependencies:
+Run the dev server.
+```bash
+npm run dev
+```
+
+### Using the monorepo
+
+This requires `pnpm` to be installed, see [https://pnpm.io/installation](https://pnpm.io/installation).
+
+Clone the jazz repository.
+```bash
+git clone https://github.com/garden-co/jazz.git
+```
+
+Install and build dependencies.
 ```bash
 pnpm i && npx turbo build
 ```
 
-Start the dev server:
+Go to the example directory.
+```bash
+cd jazz/examples/chat-vue/
+```
+
+Start the dev server.
 ```bash
 pnpm dev
 ```
+
+Open [http://localhost:5173](http://localhost:5173) with your browser to see the result.
 
 ## Questions / problems / feedback
 

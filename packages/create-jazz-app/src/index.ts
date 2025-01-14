@@ -15,10 +15,19 @@ const program = new Command();
 
 const jazzGradient = gradient(["#FF4D4D", "#FF9900", "#FFD700"]);
 
+type PackageManager = "npm" | "yarn" | "pnpm" | "bun" | "deno";
+
 type ScaffoldOptions = {
-  starter: FrameworkAuthPair;
+  template: FrameworkAuthPair | string;
   projectName: string;
-  packageManager: "npm" | "yarn" | "pnpm" | "bun" | "deno";
+  packageManager: PackageManager;
+};
+
+type PromptOptions = {
+  starter?: FrameworkAuthPair;
+  example?: string;
+  projectName?: string;
+  packageManager?: PackageManager;
 };
 
 async function getLatestPackageVersions(
@@ -66,18 +75,21 @@ async function getLatestPackageVersions(
 }
 
 async function scaffoldProject({
-  starter,
+  template,
   projectName,
   packageManager,
 }: ScaffoldOptions): Promise<void> {
   console.log("\n" + jazzGradient.multiline("Jazz App Creator\n"));
 
-  const starterConfig = frameworkToAuthExamples[starter];
+  const starterConfig = frameworkToAuthExamples[
+    template as FrameworkAuthPair
+  ] || { name: template, repo: "garden-co/jazz/examples/" + template };
   if (!starterConfig) {
-    throw new Error(`Invalid starter: ${starter}`);
+    throw new Error(`Invalid template: ${template}`);
   }
 
-  const devCommand = starter === "react-native-expo-clerk-auth" ? "ios" : "dev";
+  const devCommand =
+    template === "react-native-expo-clerk-auth" ? "ios" : "dev";
 
   if (!starterConfig.repo) {
     throw new Error(
@@ -87,7 +99,7 @@ async function scaffoldProject({
 
   // Step 2: Clone starter
   const cloneSpinner = ora({
-    text: chalk.blue(`Cloning starter: ${chalk.bold(starterConfig.name)}`),
+    text: chalk.blue(`Cloning template: ${chalk.bold(starterConfig.name)}`),
     spinner: "dots",
   }).start();
 
@@ -154,7 +166,7 @@ async function scaffoldProject({
   }
 
   // Additional setup for React Native
-  if (starter === "react-native-expo-clerk-auth") {
+  if (template === "react-native-expo-clerk-auth") {
     const rnSpinner = ora({
       text: chalk.blue("Setting up React Native project..."),
       spinner: "dots",
@@ -194,12 +206,20 @@ module.exports = withNativeWind(config, { input: "./src/global.css" });
   );
 }
 
-async function promptUser(): Promise<ScaffoldOptions> {
+async function promptUser(
+  partialOptions: PromptOptions,
+): Promise<ScaffoldOptions> {
   console.log("\n" + jazzGradient.multiline("Jazz App Creator\n"));
   console.log(chalk.blue.bold("Let's create your Jazz app! 🎷\n"));
 
-  const answers = (await inquirer.prompt([
-    {
+  const questions = [];
+
+  if (partialOptions.starter && partialOptions.example) {
+    throw new Error("Please specify either a starter or an example, not both.");
+  }
+
+  if (!partialOptions.example && !partialOptions.starter) {
+    questions.push({
       type: "list",
       name: "starter",
       message: chalk.cyan("Choose a starter:"),
@@ -209,8 +229,11 @@ async function promptUser(): Promise<ScaffoldOptions> {
           name: chalk.white(value.name),
           value: key,
         })),
-    },
-    {
+    });
+  }
+
+  if (!partialOptions.packageManager) {
+    questions.push({
       type: "list",
       name: "packageManager",
       message: chalk.cyan("Choose a package manager:"),
@@ -222,26 +245,33 @@ async function promptUser(): Promise<ScaffoldOptions> {
         { name: chalk.white("deno"), value: "deno" },
       ],
       default: "npm",
-    },
-    {
+    });
+  }
+
+  if (!partialOptions.projectName) {
+    questions.push({
       type: "input",
       name: "projectName",
       message: chalk.cyan("Enter your project name:"),
       validate: (input: string) =>
         input ? true : chalk.red("Project name cannot be empty"),
-    },
-  ])) as ScaffoldOptions;
+    });
+  }
 
-  return answers;
+  const answers = await inquirer.prompt(questions);
+
+  return {
+    ...answers,
+    ...partialOptions,
+    template: partialOptions.starter || partialOptions.example,
+  } as ScaffoldOptions;
 }
 
-function validateOptions(
-  options: Partial<ScaffoldOptions>,
-): options is ScaffoldOptions {
+function validateOptions(options: PromptOptions): options is ScaffoldOptions {
   const errors: string[] = [];
 
-  if (!options.starter) {
-    errors.push("Starter template is required");
+  if (!options.starter && !options.example) {
+    errors.push("Starter or example template is required");
   }
   if (!options.projectName) {
     errors.push("Project name is required");
@@ -271,6 +301,7 @@ function validateOptions(
 program
   .description(chalk.blue("CLI to generate Jazz starter projects"))
   .option("-s, --starter <starter>", chalk.cyan("Starter template to use"))
+  .option("-e, --example <name>", chalk.cyan("Example project to use"))
   .option("-n, --project-name <name>", chalk.cyan("Name of the project"))
   .option(
     "-p, --package-manager <manager>",
@@ -278,23 +309,30 @@ program
   )
   .action(async (options) => {
     try {
-      // If all required options are provided, use them directly
-      if (options.starter && options.projectName && options.packageManager) {
-        const nonInteractiveOptions = {
-          starter: options.starter as FrameworkAuthPair,
-          projectName: options.projectName,
-          packageManager:
-            options.packageManager as ScaffoldOptions["packageManager"],
-        };
+      const partialOptions: PromptOptions = {};
 
-        // Validate will throw if invalid
-        validateOptions(nonInteractiveOptions);
-        await scaffoldProject(nonInteractiveOptions);
-      } else {
-        // Otherwise, fall back to interactive mode
-        const scaffoldOptions = await promptUser();
-        await scaffoldProject(scaffoldOptions);
+      if (options.starter && options.example) {
+        throw new Error(
+          chalk.red(
+            "Cannot specify both starter and example. Please choose one.",
+          ),
+        );
       }
+
+      if (options.starter)
+        partialOptions.starter = options.starter as FrameworkAuthPair;
+      if (options.example) partialOptions.example = options.example;
+      if (options.projectName) partialOptions.projectName = options.projectName;
+      if (options.packageManager)
+        partialOptions.packageManager =
+          options.packageManager as ScaffoldOptions["packageManager"];
+
+      // Get missing options through prompts
+      const scaffoldOptions = await promptUser(partialOptions);
+
+      // Validate will throw if invalid
+      validateOptions(scaffoldOptions);
+      await scaffoldProject(scaffoldOptions);
     } catch (error: any) {
       if (error instanceof Error && error.name === "ExitPromptError") {
         console.log(chalk.yellow("\n👋 Until next time!\n"));

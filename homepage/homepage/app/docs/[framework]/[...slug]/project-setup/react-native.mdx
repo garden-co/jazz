@@ -240,24 +240,77 @@ In the demos, you'll find details on:
 
 ### Working with Images
 
-To work with images in Jazz, import the `createImage` function from [`jazz-react-native-media-images`](https://github.com/garden-co/jazz/tree/main/packages/jazz-react-native-media-images).
+Jazz provides a complete solution for handling images in React Native, including uploading, processing, and displaying them. Here's how to work with images:
+
+#### Uploading Images
+
+To upload images, use the `createImage` function from `jazz-react-native-media-images`. This function handles image processing and creates an `ImageDefinition` that can be stored in your Jazz covalues:
 
 <CodeGroup>
   ```tsx
   import { createImage } from "jazz-react-native-media-images";
+  import * as ImagePicker from 'expo-image-picker';
 
-  const base64ImageDataURI = "data:image/png;base64,...";
+  // Example: Image upload from device library
+  const handleImageUpload = async () => {
+    try {
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        base64: true,  // Important: We need base64 data
+        quality: 0.7,
+      });
 
-  const image = await createImage(base64ImageDataURI, {
-    owner: newPetPost._owner,
-    maxSize: 2048, // optional: specify maximum image size
-  });
+      if (!result.canceled && result.assets[0].base64) {
+        const base64Uri = `data:image/jpeg;base64,${result.assets[0].base64}`;
 
-  someCovalue.image = image;
+        const image = await createImage(base64Uri, {
+          owner: someCovalue._owner,  // Set appropriate owner
+          maxSize: 2048,  // Optional: limit maximum image size
+        });
+
+        // Store the image in your covalue
+        someCovalue.image = image;
+      }
+    } catch (error) {
+      console.error('Failed to upload image:', error);
+    }
+  };
   ```
 </CodeGroup>
 
-For a complete implementation, please refer to [this](https://github.com/garden-co/jazz/blob/main/examples/pets/src/3_NewPetPostForm.tsx) demo.
+#### Displaying Images
+
+To display images, use the `ProgressiveImg` component from `jazz-react-native`. This component handles both images uploaded from React Native and desktop browsers:
+
+<CodeGroup>
+  ```tsx
+  import { ProgressiveImg } from "jazz-react-native";
+  import { Image } from "react-native";
+
+  // Inside your render function:
+  <ProgressiveImg image={someCovalue.image} maxWidth={1024}>
+    {({ src, res, originalSize }) => (
+      <Image
+        source={{ uri: src }}
+        style={{
+          width: 300,  // Adjust size as needed
+          height: 300,
+          borderRadius: 8,
+        }}
+        resizeMode="cover"
+      />
+    )}
+  </ProgressiveImg>
+  ```
+</CodeGroup>
+
+The `ProgressiveImg` component:
+- Automatically handles different image formats
+- Provides progressive loading with placeholder images
+- Supports different resolutions based on the `maxWidth` prop
+- Works seamlessly with React Native's `Image` component
+
+For a complete implementation example, see the [Chat Example](https://github.com/garden-co/jazz/blob/main/examples/chat-rn-clerk/app/chat/[chatId].tsx).
 
 ### Running your app
 

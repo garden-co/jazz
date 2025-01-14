@@ -1,5 +1,13 @@
 # jazz-tailwind-demo-auth-starter
 
+## 0.0.24
+
+### Patch Changes
+
+- Updated dependencies [8eb9247]
+  - jazz-tools@0.9.9
+  - jazz-react@0.9.9
+
 ## 0.0.23
 
 ### Patch Changes

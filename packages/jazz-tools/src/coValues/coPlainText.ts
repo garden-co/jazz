@@ -117,22 +117,6 @@ export class CoPlainText extends String implements CoValue {
   /**
    * Load a `CoPlainText` with a given ID, as a given account.
    *
-   * `depth` specifies which (if any) fields that reference other CoValues to load as well before resolving.
-   * The `DeeplyLoaded` return type guarantees that corresponding referenced CoValues are loaded to the specified depth.
-   *
-   * You can pass `[]` or `{}` for shallowly loading only this CoPlainText, or `{ fieldA: depthA, fieldB: depthB }` for recursively loading referenced CoValues.
-   *
-   * Check out the `load` methods on `CoMap`/`CoList`/`CoStream`/`Group`/`Account` to see which depth structures are valid to nest.
-   *
-   * @example
-   * ```ts
-   * const person = await Person.load(
-   *   "co_zdsMhHtfG6VNKt7RqPUPvUtN2Ax",
-   *   me,
-   *   { pet: {} }
-   * );
-   * ```
-   *
    * @category Subscription & Loading
    */
   static load<T extends CoPlainText>(
@@ -162,26 +146,11 @@ export class CoPlainText extends String implements CoValue {
    *
    * Automatically also subscribes to updates to all referenced/nested CoValues as soon as they are accessed in the listener.
    *
-   * `depth` specifies which (if any) fields that reference other CoValues to load as well before calling `listener` for the first time.
-   * The `DeeplyLoaded` return type guarantees that corresponding referenced CoValues are loaded to the specified depth.
-   *
-   * You can pass `[]` or `{}` for shallowly loading only this CoMap, or `{ fieldA: depthA, fieldB: depthB }` for recursively loading referenced CoValues.
-   *
    * Check out the `load` methods on `CoMap`/`CoList`/`CoStream`/`Group`/`Account` to see which depth structures are valid to nest.
    *
    * Returns an unsubscribe function that you should call when you no longer need updates.
    *
    * Also see the `useCoState` hook to reactively subscribe to a CoValue in a React component.
-   *
-   * @example
-   * ```ts
-   * const unsub = Person.subscribe(
-   *   "co_zdsMhHtfG6VNKt7RqPUPvUtN2Ax",
-   *   me,
-   *   { pet: {} },
-   *   (person) => console.log(person)
-   * );
-   * ```
    *
    * @category Subscription & Loading
    */

@@ -1,5 +1,11 @@
 # cojson
 
+## 0.9.9
+
+### Patch Changes
+
+- 8eb9247: Add CoPlainText and CoRichText covalues
+
 ## 0.9.0
 
 ### Patch Changes

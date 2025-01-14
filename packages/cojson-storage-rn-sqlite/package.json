@@ -1,7 +1,7 @@
 {
   "name": "cojson-storage-rn-sqlite",
   "type": "module",
-  "version": "0.8.51",
+  "version": "0.8.52",
   "main": "dist/index.js",
   "types": "src/index.ts",
   "license": "MIT",

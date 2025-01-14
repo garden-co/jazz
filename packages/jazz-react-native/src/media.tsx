@@ -18,19 +18,40 @@ export function useProgressiveImg({
     if (!image) return;
     const unsub = image.subscribe({}, (update) => {
       const highestRes = update?.highestResAvailable({ maxWidth });
-      if (highestRes) {
-        if (highestRes.res !== lastHighestRes) {
-          lastHighestRes = highestRes.res;
-          const blob = highestRes.stream.toBlob();
-          if (blob) {
-            const blobURI = URL.createObjectURL(blob);
-            setCurrent({ src: blobURI, res: highestRes.res });
-            return () => {
-              setTimeout(() => URL.revokeObjectURL(blobURI), 200);
-            };
-          }
+      if (highestRes && highestRes.res !== lastHighestRes) {
+        lastHighestRes = highestRes.res;
+        // use the base64 data directly
+        const chunks = highestRes.stream.getChunks();
+        if (chunks?.chunks && chunks.chunks.length > 0) {
+          // convert chunks to base64
+          const totalLength = chunks.chunks.reduce(
+            (acc, chunk) => acc + chunk.length,
+            0,
+          );
+          const combinedArray = new Uint8Array(totalLength);
+          let offset = 0;
+          chunks.chunks.forEach((chunk) => {
+            combinedArray.set(chunk, offset);
+            offset += chunk.length;
+          });
+
+          // Create data URL
+          const base64 = Buffer.from(combinedArray).toString("base64");
+          const dataUrl = `data:${chunks.mimeType};base64,${base64}`;
+
+          setCurrent({
+            src: dataUrl,
+            res: highestRes.res,
+          });
+        } else {
+          // Fallback to placeholder if chunks aren't available
+          console.warn("No chunks available for image", image.id);
+          setCurrent({
+            src: update?.placeholderDataURL,
+            res: "placeholder",
+          });
         }
-      } else {
+      } else if (!highestRes) {
         setCurrent({
           src: update?.placeholderDataURL,
           res: "placeholder",

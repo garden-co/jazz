@@ -10,34 +10,59 @@ This example showcases how to:
 - Manage authentication state
 - Implement secure login/logout flows
 
-## Getting Started
+## Getting started
 
-1. Clone the repository:
+You can either
+1. Clone the jazz repository, and run the app within the monorepo.
+2. Or create a new Jazz project using this example as a template.
 
-```sh
+
+### Using the example as a template
+
+Create a new Jazz project, and use this example as a template.
+```bash
+npm create jazz-app@latest --example passkey-svelte --project-name passkey-svelte
+```
+or
+```bash
+npx create-jazz-app@latest --example passkey-svelte --project-name passkey-svelte
+```
+
+Go to the new project directory.
+```bash
+cd passkey-svelte
+```
+
+Run the dev server.
+```bash
+npm run dev
+```
+
+### Using the monorepo
+
+This requires `pnpm` to be installed, see [https://pnpm.io/installation](https://pnpm.io/installation).
+
+Clone the jazz repository.
+```bash
 git clone https://github.com/garden-co/jazz.git
 ```
 
-2. Navigate to the example directory:
-
-```sh
-cd examples/passkey-svelte
+Install and build dependencies.
+```bash
+pnpm i && npx turbo build
 ```
 
-3. Install dependencies:
-
-```sh
-pnpm install
+Go to the example directory.
+```bash
+cd jazz/examples/passkey-svelte/
 ```
 
-4. Start the development server:
-
-```sh
+Start the dev server.
+```bash
 pnpm dev
 ```
 
-5. Open your browser and visit [http://localhost:5173](http://localhost:5173)
-
+Open [http://localhost:5173](http://localhost:5173) with your browser to see the result.
 
 ## Learn More
 

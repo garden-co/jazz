@@ -1,5 +1,13 @@
 # cojson-storage-sqlite
 
+## 0.8.52
+
+### Patch Changes
+
+- Updated dependencies [8eb9247]
+  - cojson@0.9.9
+  - cojson-storage@0.9.9
+
 ## 0.8.51
 
 ### Patch Changes

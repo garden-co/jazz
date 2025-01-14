@@ -1,5 +1,11 @@
 # create-jazz-app
 
+## 0.1.7
+
+### Patch Changes
+
+- 3a9797c: Add example param to create-jazz-app
+
 ## 0.1.6
 
 ### Patch Changes

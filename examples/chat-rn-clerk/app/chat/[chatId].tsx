@@ -2,8 +2,11 @@ import { Chat, Message } from "@/src/schema";
 import { useNavigation } from "@react-navigation/native";
 import clsx from "clsx";
 import * as Clipboard from "expo-clipboard";
+import * as ImagePicker from "expo-image-picker";
 import { useLocalSearchParams } from "expo-router";
 import { useAccount, useCoState } from "jazz-react-native";
+import { ProgressiveImg } from "jazz-react-native";
+import { createImage } from "jazz-react-native-media-images";
 import { Group, ID } from "jazz-tools";
 import { useEffect, useLayoutEffect, useState } from "react";
 import React, {
@@ -16,6 +19,8 @@ import React, {
   KeyboardAvoidingView,
   TextInput,
   Button,
+  Image,
+  ActivityIndicator,
 } from "react-native";
 
 export default function Conversation() {
@@ -25,6 +30,7 @@ export default function Conversation() {
   const [message, setMessage] = useState("");
   const loadedChat = useCoState(Chat, chat?.id, [{}]);
   const navigation = useNavigation();
+  const [isUploading, setIsUploading] = useState(false);
 
   useEffect(() => {
     if (chat) return;
@@ -81,6 +87,32 @@ export default function Conversation() {
     }
   };
 
+  const handleImageUpload = async () => {
+    try {
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        base64: true,
+        quality: 0.7,
+      });
+
+      if (!result.canceled && result.assets[0].base64 && chat) {
+        setIsUploading(true);
+        const base64Uri = `data:image/jpeg;base64,${result.assets[0].base64}`;
+
+        const image = await createImage(base64Uri, {
+          owner: chat._owner,
+          maxSize: 2048,
+        });
+
+        chat.push(Message.create({ text: "", image }, { owner: chat._owner }));
+      }
+    } catch (error) {
+      Alert.alert("Error", "Failed to upload image");
+    } finally {
+      setIsUploading(false);
+    }
+  };
+
   const renderMessageItem = ({ item }: { item: Message }) => {
     const isMe = item._edits.text.by?.isMe;
     return (
@@ -106,14 +138,27 @@ export default function Conversation() {
             isMe ? "flex-row" : "flex-row",
           )}
         >
-          <Text
-            className={clsx(
-              !isMe ? "text-black" : "text-gray-200",
-              `text-md max-w-[85%]`,
-            )}
-          >
-            {item.text}
-          </Text>
+          {item.image && (
+            <ProgressiveImg image={item.image} maxWidth={1024}>
+              {({ src, res, originalSize }) => (
+                <Image
+                  source={{ uri: src }}
+                  className="w-48 h-48 rounded-lg mb-2"
+                  resizeMode="cover"
+                />
+              )}
+            </ProgressiveImg>
+          )}
+          {item.text && (
+            <Text
+              className={clsx(
+                !isMe ? "text-black" : "text-gray-200",
+                `text-md max-w-[85%]`,
+              )}
+            >
+              {item.text}
+            </Text>
+          )}
           <Text
             className={clsx(
               "text-[10px] text-right ml-2",
@@ -147,6 +192,17 @@ export default function Conversation() {
         className="p-3 bg-white border-t border-gray-300"
       >
         <SafeAreaView className="flex-row items-center gap-2">
+          <TouchableOpacity
+            onPress={handleImageUpload}
+            disabled={isUploading}
+            className="h-10 w-10 items-center justify-center"
+          >
+            {isUploading ? (
+              <ActivityIndicator size="small" color="#0000ff" />
+            ) : (
+              <Text className="text-2xl">🖼️</Text>
+            )}
+          </TouchableOpacity>
           <TextInput
             className="flex-1 rounded-full h-10 px-4 bg-gray-100 border border-gray-300 focus:border-blue-500 focus:bg-white"
             value={message}

@@ -426,7 +426,6 @@ export class CoMap extends CoValueBase implements CoValue {
    * ```ts
    * const person = await Person.load(
    *   "co_zdsMhHtfG6VNKt7RqPUPvUtN2Ax",
-   *   me,
    *   { pet: {} }
    * );
    * ```
@@ -473,7 +472,6 @@ export class CoMap extends CoValueBase implements CoValue {
    * ```ts
    * const unsub = Person.subscribe(
    *   "co_zdsMhHtfG6VNKt7RqPUPvUtN2Ax",
-   *   me,
    *   { pet: {} },
    *   (person) => console.log(person)
    * );

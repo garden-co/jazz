@@ -33,6 +33,25 @@ export function createTestNode() {
   return new LocalNode(admin, session, Crypto);
 }
 
+export function connectTwoPeers(
+  a: LocalNode,
+  b: LocalNode,
+  aRole: "client" | "server",
+  bRole: "client" | "server",
+) {
+  const [aAsPeer, bAsPeer] = connectedPeers(
+    "peer:" + a.account.id,
+    "peer:" + b.account.id,
+    {
+      peer1role: aRole,
+      peer2role: bRole,
+    },
+  );
+
+  a.syncManager.addPeer(bAsPeer);
+  b.syncManager.addPeer(aAsPeer);
+}
+
 export async function createTwoConnectedNodes(
   node1Role: Peer["role"],
   node2Role: Peer["role"],
