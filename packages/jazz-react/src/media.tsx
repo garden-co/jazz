@@ -1,3 +1,5 @@
+"use client";
+
 import { ImageDefinition } from "jazz-tools";
 import React, { useEffect, useState } from "react";
 

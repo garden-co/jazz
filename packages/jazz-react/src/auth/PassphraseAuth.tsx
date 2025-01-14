@@ -1,3 +1,5 @@
+"use client";
+
 import { generateMnemonic } from "@scure/bip39";
 import { cojsonInternals } from "cojson";
 import { BrowserPassphraseAuth } from "jazz-browser";

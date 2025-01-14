@@ -12,7 +12,7 @@ export class OPFSFilesystem
   nextRequestId = 0;
 
   constructor(public crypto: CryptoProvider) {
-    this.opfsWorker = new Worker(
+    this.opfsWorker = new window.Worker(
       URL.createObjectURL(
         new Blob([opfsWorkerJSSrc], { type: "text/javascript" }),
       ),

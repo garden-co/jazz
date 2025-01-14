@@ -1,3 +1,5 @@
+"use client";
+
 import React from "react";
 
 import { Account, AccountClass, AnonymousJazzAgent } from "jazz-tools";

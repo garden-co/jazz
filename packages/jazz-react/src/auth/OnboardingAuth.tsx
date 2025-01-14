@@ -1,3 +1,5 @@
+"use client";
+
 import { BrowserOnboardingAuth } from "jazz-browser";
 import { useMemo, useState } from "react";
 

@@ -1,3 +1,5 @@
+"use client";
+
 import { AgentSecret } from "cojson";
 import { BrowserDemoAuth } from "jazz-browser";
 import { Account, ID } from "jazz-tools";
