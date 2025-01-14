@@ -98,7 +98,7 @@ function handleAddMark(text: CoRichText, step: AddMarkStep) {
 
   if (markInfo) {
     const { mark, tag } = markInfo;
-    text.insertMark(step.from - 1, step.to - 2, mark, {
+    text.insertMark(step.from - 1, step.to - 1, mark, {
       tag,
     });
   } else {
