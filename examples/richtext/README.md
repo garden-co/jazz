@@ -1,41 +1,49 @@
 # Jazz Rich Text Example
 
-This example demonstrates how to use the `jazz-richtext-prosemirror` package to create a rich text editor with ProseMirror.
+A complete example of collaborative rich text editing using Jazz and ProseMirror.
 
 ## Features
 
-- Rich text editor with ProseMirror
-- Collaborative editing
+- Real-time collaborative editing
+- Rich text formatting (bold, italic, etc.)
+- Automatic synchronization between clients
 
 ## Getting Started
 
+### Installation
+
 1. Clone the repository:
-
-```sh
-git clone https://github.com/garden-co/jazz.git
+```bash
+git clone https://github.com/gardencmp/jazz
+cd jazz/examples/richtext
 ```
 
-2. Navigate to the example directory:
-
-```sh
-cd examples/richtext
-```
-
-3. Install dependencies:
-
-```sh
+2. Install dependencies:
+```bash
 pnpm install
 ```
 
-4. Start the development server:
-
-```sh
+3. Start the development server:
+```bash
 pnpm dev
 ```
 
-5. Open your browser and visit [http://localhost:5173](http://localhost:5173)
+4. Open [http://localhost:5173](http://localhost:5173) in your browser.
+
+## How It Works
+
+This example demonstrates:
+
+1. Creating and managing rich text documents
+2. Integrating ProseMirror with Jazz for collaborative editing
+3. Handling real-time updates and conflict resolution
 
 ## Learn More
 
-- [Jazz Documentation](https://jazz.tools/docs/react)
-- [ProseMirror Documentation](https://prosemirror.net/docs/)
+- [Jazz Documentation](https://jazz.tools/docs)
+- [ProseMirror Guide](https://prosemirror.net/docs/guide/)
+- [Tailwind CSS](https://tailwindcss.com/docs)
+
+## License
+
+MIT
