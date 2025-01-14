@@ -1,6 +1,6 @@
 import {
-  applyTrToRichText,
   Document,
+  applyTrToRichText,
   richTextToProsemirrorDoc,
 } from "jazz-browser-prosemirror";
 import { useAccount } from "jazz-react";
@@ -20,8 +20,15 @@ import "prosemirror-view/style/prosemirror.css";
  * Handles bidirectional synchronization between Jazz and ProseMirror states.
  *
  * @param docID - The ID of the document to edit
+ * @param onReady - Optional callback that fires when the editor is fully initialized
  */
-export function DocumentComponent({ docID }: { docID: ID<Document> }) {
+export function DocumentComponent({
+  docID,
+  onReady,
+}: {
+  docID: ID<Document>;
+  onReady?: () => void;
+}) {
   const { me } = useAccount();
   const [mount, setMount] = useState<HTMLElement | null>(null);
 
@@ -80,6 +87,9 @@ export function DocumentComponent({ docID }: { docID: ID<Document> }) {
             editorView.focus();
           }, 0);
         }
+
+        // Fire onReady callback after first document update
+        onReady?.();
       },
     );
 
@@ -88,7 +98,7 @@ export function DocumentComponent({ docID }: { docID: ID<Document> }) {
       editorView.destroy();
       unsub();
     };
-  }, [mount, docID, !!me]);
+  }, [mount, docID, !!me, onReady]);
 
   return <div data-testid="editor" ref={setMount} className="border" />;
 }
