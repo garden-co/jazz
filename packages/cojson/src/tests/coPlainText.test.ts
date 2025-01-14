@@ -131,3 +131,47 @@ test("Items inserted at start appear with latest first", () => {
   // because newer items should appear before older items
   expect(content.toString()).toEqual("thirdsecondfirst");
 });
+
+test("Handles different locales correctly", () => {
+  const node = new LocalNode(...randomAnonymousAccountAndSessionID(), Crypto);
+
+  // Test with explicit locale in meta
+  const coValueJa = node.createCoValue({
+    type: "coplaintext",
+    ruleset: { type: "unsafeAllowAll" },
+    meta: { locale: "ja-JP" },
+    ...Crypto.createdNowUnique(),
+  });
+
+  const contentJa = expectPlainText(coValueJa.getCurrentContent());
+  contentJa.insertAfter(0, "こんにちは", "trusting");
+  expect(contentJa.toString()).toEqual("こんにちは");
+
+  // Test browser locale fallback
+  vi.stubGlobal("navigator", { language: "fr-FR" });
+
+  const coValueBrowser = node.createCoValue({
+    type: "coplaintext",
+    ruleset: { type: "unsafeAllowAll" },
+    meta: null,
+    ...Crypto.createdNowUnique(),
+  });
+
+  const contentBrowser = expectPlainText(coValueBrowser.getCurrentContent());
+  contentBrowser.insertAfter(0, "bonjour", "trusting");
+  expect(contentBrowser.toString()).toEqual("bonjour");
+
+  // Test fallback to 'en' when no navigator
+  vi.stubGlobal("navigator", undefined);
+
+  const coValueFallback = node.createCoValue({
+    type: "coplaintext",
+    ruleset: { type: "unsafeAllowAll" },
+    meta: null,
+    ...Crypto.createdNowUnique(),
+  });
+
+  const contentFallback = expectPlainText(coValueFallback.getCurrentContent());
+  contentFallback.insertAfter(0, "hello", "trusting");
+  expect(contentFallback.toString()).toEqual("hello");
+});

@@ -15,6 +15,33 @@ type PlaintextIdxMapping = {
   idxBeforeOpID: { [opID: StringifiedOpID]: number };
 };
 
+/**
+ * A collaborative plain text implementation that supports grapheme-accurate editing.
+ *
+ * Locale support:
+ * - Locale can be specified in the meta field when creating the text: `{ meta: { locale: "ja-JP" } }`
+ * - If no locale is specified, falls back to browser's locale (`navigator.language`)
+ * - If browser locale is not available, defaults to 'en'
+ *
+ * @example
+ * ```typescript
+ * // With specific locale
+ * const textJa = node.createCoValue({
+ *   type: "coplaintext",
+ *   ruleset: { type: "unsafeAllowAll" },
+ *   meta: { locale: "ja-JP" },
+ *   ...Crypto.createdNowUnique(),
+ * });
+ *
+ * // Using browser locale
+ * const text = node.createCoValue({
+ *   type: "coplaintext",
+ *   ruleset: { type: "unsafeAllowAll" },
+ *   meta: null,
+ *   ...Crypto.createdNowUnique(),
+ * });
+ * ```
+ */
 export class RawCoPlainText<
   Meta extends JsonObject | null = JsonObject | null,
 > extends RawCoList<string, Meta> {
@@ -36,7 +63,17 @@ export class RawCoPlainText<
         "Intl.Segmenter is not supported. Use a polyfill to get coPlainText support in Jazz. (eg. https://formatjs.github.io/docs/polyfills/intl-segmenter/)",
       );
     }
-    this._segmenter = new Intl.Segmenter("en", {
+
+    // Use locale from meta if provided, fallback to browser locale, or 'en' as last resort
+    const effectiveLocale =
+      (core.header.meta &&
+      typeof core.header.meta === "object" &&
+      "locale" in core.header.meta
+        ? (core.header.meta.locale as string)
+        : undefined) ||
+      (typeof navigator !== "undefined" ? navigator.language : "en");
+
+    this._segmenter = new Intl.Segmenter(effectiveLocale, {
       granularity: "grapheme",
     });
   }
