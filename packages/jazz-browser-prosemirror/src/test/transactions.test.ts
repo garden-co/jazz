@@ -1,5 +1,5 @@
 import { CoRichText, Group, Marks, ResolvedMark } from "jazz-tools";
-import { createJazzTestAccount } from "jazz-tools/src/testing.js";
+import { createJazzTestAccount } from "jazz-tools/testing";
 import { schema } from "prosemirror-schema-basic";
 import { EditorState } from "prosemirror-state";
 import { describe, expect, it, vi } from "vitest";

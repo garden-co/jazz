@@ -8,8 +8,7 @@
     "strict": true,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
-    "noUncheckedIndexedAccess": true,
-    "esModuleInterop": true
+    "noUncheckedIndexedAccess": true
   },
   "include": ["./src/**/*.ts"]
 }

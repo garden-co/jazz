@@ -1,5 +1,5 @@
 import { CoRichText, Group, Marks } from "jazz-tools";
-import { createJazzTestAccount } from "jazz-tools/src/testing.js";
+import { createJazzTestAccount } from "jazz-tools/testing";
 import { describe, expect, it } from "vitest";
 import { richTextToProsemirrorDoc } from "../index.js";
 

@@ -1,13 +1,13 @@
 {
-  "name": "jazz-richtext-prosemirror",
+  "name": "jazz-browser-prosemirror",
   "version": "0.0.0",
-  "description": "",
+  "description": "Jazz ProseMirror integration for browsers",
   "main": "dist/index.js",
   "types": "src/index.ts",
   "scripts": {
     "build": "rm -rf ./dist && tsc --sourceMap --outDir dist",
-    "test": "vitest --run --root ../../ --project jazz-richtext-prosemirror",
-    "test:watch": "vitest --watch --root ../../ --project jazz-richtext-prosemirror",
+    "test": "vitest --run --root ../../ --project jazz-browser-prosemirror",
+    "test:watch": "vitest --watch --root ../../ --project jazz-browser-prosemirror",
     "format-and-lint": "biome check .",
     "format-and-lint:fix": "biome check . --write"
   },
@@ -15,14 +15,14 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "jazz-browser": "workspace:*",
     "jazz-tools": "workspace:*",
     "prosemirror-example-setup": "^1.2.2",
     "prosemirror-menu": "^1.2.4",
     "prosemirror-model": "^1.21.1",
     "prosemirror-schema-basic": "^1.2.2",
     "prosemirror-state": "^1.4.3",
-    "prosemirror-transform": "^1.9.0",
-    "prosemirror-view": "^1.33.7"
+    "prosemirror-transform": "^1.9.0"
   },
   "devDependencies": {
     "@biomejs/biome": "1.9.4",
