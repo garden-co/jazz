@@ -127,7 +127,7 @@ export function collectInlineMarks(
  *
  * Prosemirror uses before from and before to for it's mark ranges
  */
-export function applyTxToPlainText(
+export function applyTrToRichText(
   text: CoRichText,
   tr: ProsemirrorTransaction,
 ) {

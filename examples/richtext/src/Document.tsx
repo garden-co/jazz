@@ -1,6 +1,6 @@
 import { useAccount } from "jazz-react";
 import {
-  applyTxToPlainText,
+  applyTrToRichText,
   richTextToProsemirrorDoc,
 } from "jazz-richtext-prosemirror";
 import { ID } from "jazz-tools";
@@ -42,7 +42,9 @@ export function DocumentComponent({ docID }: { docID: ID<Document> }) {
       dispatchTransaction(transaction) {
         const expectedNewState = editorView.state.apply(transaction);
 
-        if (lastDoc) { applyTxToPlainText(lastDoc, transaction); }
+        if (lastDoc) {
+          applyTrToRichText(lastDoc, transaction);
+        }
 
         editorView.updateState(expectedNewState);
       },
