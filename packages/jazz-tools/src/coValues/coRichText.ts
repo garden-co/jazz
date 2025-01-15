@@ -177,7 +177,7 @@ export class CoRichText extends CoMap {
   }
 
   /**
-   * Insert text at a specific index.
+   * Insert text after a specific index.
    */
   insertAfter(idx: number, text: string) {
     if (!this.text)

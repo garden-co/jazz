@@ -83,6 +83,10 @@ export class CoPlainText extends String implements CoValue {
     return this.toJSON();
   }
 
+  insertBefore(idx: number, text: string) {
+    this._raw.insertBefore(idx, text);
+  }
+
   insertAfter(idx: number, text: string) {
     this._raw.insertAfter(idx, text);
   }
