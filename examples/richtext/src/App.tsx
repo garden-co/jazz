@@ -1,7 +1,7 @@
 import { useIframeHashRouter } from "hash-slash";
 import { useAccount } from "jazz-react";
-import { Document, DocumentComponent } from "jazz-react-prosemirror";
-import { ID } from "jazz-tools";
+import { DocumentComponent } from "jazz-react-prosemirror";
+import { CoRichText, ID } from "jazz-tools";
 
 export function App() {
   const { me, logOut } = useAccount();
@@ -10,7 +10,7 @@ export function App() {
     if (!me) return;
 
     // Create a new document
-    const doc = Document.createFromPlainText("", { owner: me });
+    const doc = CoRichText.createFromPlainText("", { owner: me });
 
     // Update URL after document is created
     setTimeout(() => {
@@ -29,7 +29,7 @@ export function App() {
         "/": () => createDocument(),
         "/doc/:id": (id) => (
           <div className="border">
-            <DocumentComponent docID={id as ID<Document>} />
+            <DocumentComponent docID={id as ID<CoRichText>} />
           </div>
         ),
       })}

@@ -1,10 +1,9 @@
 import {
-  Document,
   applyTrToRichText,
   richTextToProsemirrorDoc,
 } from "jazz-browser-prosemirror";
 import { useAccount } from "jazz-react";
-import { ID } from "jazz-tools";
+import { CoRichText, ID } from "jazz-tools";
 import { exampleSetup } from "prosemirror-example-setup";
 import { schema } from "prosemirror-schema-basic";
 import { EditorState } from "prosemirror-state";
@@ -26,7 +25,7 @@ export function DocumentComponent({
   docID,
   onReady,
 }: {
-  docID: ID<Document>;
+  docID: ID<CoRichText>;
   onReady?: () => void;
 }) {
   const { me } = useAccount();
@@ -57,10 +56,10 @@ export function DocumentComponent({
       },
     });
 
-    let lastDoc: Document | undefined;
+    let lastDoc: CoRichText | undefined;
 
     // Subscribe to document updates
-    const unsub = Document.subscribe(
+    const unsub = CoRichText.subscribe(
       docID,
       me,
       { marks: [{}], text: [] },
