@@ -71,25 +71,23 @@ test("Can insert and delete in CoPlainText", () => {
   content.insertAfter(0, "hello", "trusting");
   expect(content.toString()).toEqual("hello");
 
-  content.insertAfter(5, " world", "trusting");
+  content.insertAfter(4, " world", "trusting");
   expect(content.toString()).toEqual("hello world");
 
-  content.insertAfter(0, "Hello, ", "trusting");
+  content.insertBefore(0, "Hello, ", "trusting");
   expect(content.toString()).toEqual("Hello, hello world");
 
-  console.log("first delete");
   content.deleteRange({ from: 6, to: 12 }, "trusting");
   expect(content.toString()).toEqual("Hello, world");
 
-  content.insertAfter(2, "😍", "trusting");
+  content.insertBefore(2, "😍", "trusting");
   expect(content.toString()).toEqual("He😍llo, world");
 
-  console.log("second delete");
   content.deleteRange({ from: 2, to: 4 }, "trusting");
   expect(content.toString()).toEqual("Hello, world");
 });
 
-test("Multiple items appended after start appear in correct order", () => {
+test("Multiple items inserted appear in correct order", () => {
   const node = new LocalNode(...randomAnonymousAccountAndSessionID(), Crypto);
 
   const coValue = node.createCoValue({
@@ -101,12 +99,11 @@ test("Multiple items appended after start appear in correct order", () => {
 
   const content = expectPlainText(coValue.getCurrentContent());
 
-  // Add multiple items in a single transaction, all after start
-  content.insertAfter(0, "h", "trusting");
-  content.insertAfter(1, "e", "trusting");
-  content.insertAfter(2, "y", "trusting");
+  // Add multiple items in sequence
+  content.insertAfter(0, "h", "trusting"); // "h"
+  content.insertAfter(0, "e", "trusting"); // "he"
+  content.insertAfter(1, "y", "trusting"); // "hey"
 
-  // They should appear in insertion order (hey), not reversed (yeh)
   expect(content.toString()).toEqual("hey");
 });
 
@@ -124,8 +121,8 @@ test("Items inserted at start appear with latest first", () => {
 
   // Insert multiple items at the start
   content.insertAfter(0, "first", "trusting");
-  content.insertAfter(0, "second", "trusting");
-  content.insertAfter(0, "third", "trusting");
+  content.insertBefore(0, "second", "trusting");
+  content.insertBefore(0, "third", "trusting");
 
   // They should appear in reverse chronological order
   // because newer items should appear before older items
@@ -174,4 +171,32 @@ test("Handles different locales correctly", () => {
   const contentFallback = expectPlainText(coValueFallback.getCurrentContent());
   contentFallback.insertAfter(0, "hello", "trusting");
   expect(contentFallback.toString()).toEqual("hello");
+});
+
+test("insertBefore and insertAfter work as expected", () => {
+  const node = new LocalNode(...randomAnonymousAccountAndSessionID(), Crypto);
+  const coValue = node.createCoValue({
+    type: "coplaintext",
+    ruleset: { type: "unsafeAllowAll" },
+    meta: null,
+    ...Crypto.createdNowUnique(),
+  });
+
+  const content = expectPlainText(coValue.getCurrentContent());
+
+  // Insert 'h' at start
+  content.insertBefore(0, "h", "trusting"); // "h"
+  expect(content.toString()).toEqual("h");
+
+  // Insert 'e' after 'h'
+  content.insertAfter(0, "e", "trusting"); // "he"
+  expect(content.toString()).toEqual("he");
+
+  // Insert 'y' after 'e'
+  content.insertAfter(1, "y", "trusting"); // "hey"
+  expect(content.toString()).toEqual("hey");
+
+  // Insert '!' at start
+  content.insertBefore(0, "!", "trusting"); // "!hey"
+  expect(content.toString()).toEqual("!hey");
 });

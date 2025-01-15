@@ -115,7 +115,16 @@ export class RawCoPlainText<
       .join("");
   }
 
-  insertAfter(
+  /**
+   * Inserts `text` before the character at index `idx`.
+   * If idx is 0, inserts at the start of the text.
+   *
+   * @param idx - The index of the character to insert before
+   * @param text - The text to insert
+   * @param privacy - Whether the operation should be private or trusting
+   * @category 2. Editing
+   */
+  insertBefore(
     idx: number,
     text: string,
     privacy: "private" | "trusting" = "private",
@@ -123,19 +132,31 @@ export class RawCoPlainText<
     const graphemes = [...this._segmenter.segment(text)].map((g) => g.segment);
 
     if (idx === 0) {
-      // For insertions at start, just prepend each character, in reverse
+      // For insertions at start, prepend each character in reverse
       for (const grapheme of graphemes.reverse()) {
         this.prepend(grapheme, 0, privacy);
       }
     } else {
-      // For other insertions, use append after the specified index
-      // We append in forward order to maintain the text order
-      let after = idx - 1;
-      for (const grapheme of graphemes) {
-        this.append(grapheme, after, privacy);
-        after++; // Move the insertion point forward for each grapheme
-      }
+      // For other insertions, append after the previous character
+      this.appendItems(graphemes, idx - 1, privacy);
     }
+  }
+
+  /**
+   * Inserts `text` after the character at index `idx`.
+   *
+   * @param idx - The index of the character to insert after
+   * @param text - The text to insert
+   * @param privacy - Whether the operation should be private or trusting
+   * @category 2. Editing
+   */
+  insertAfter(
+    idx: number,
+    text: string,
+    privacy: "private" | "trusting" = "private",
+  ) {
+    const graphemes = [...this._segmenter.segment(text)].map((g) => g.segment);
+    this.appendItems(graphemes, idx, privacy);
   }
 
   deleteRange(
