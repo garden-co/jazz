@@ -56,138 +56,153 @@ function handleParagraphSplit(text: CoRichText, start: number) {
 }
 
 /**
- * Handles text insertion operations from a ReplaceStep.
- * This includes regular insertions and paragraph splits.
+ * Handles text insertion in the document.
+ * @param text The CoRichText instance to modify
+ * @param pos The position to insert at (Jazz coordinates)
+ * @param content The text content to insert
  */
-function handleTextInsertion(
+export function handleTextInsertion(
   text: CoRichText,
-  step: ReplaceStep,
-  doc: ProsemirrorNode,
-  start: number,
+  pos: number,
+  content: string,
 ) {
-  // Handle text insertions at the start of the document
-  if (step.from === 0) {
-    text.insertAfter(0, step.slice.content.firstChild?.firstChild?.text || "");
-  } else if (step.slice.content.firstChild?.text) {
-    // ProseMirror positions include nodes and are 1-based
-    // We need to convert to our text-only 0-based positions
-    const resolvedPos = doc.resolve(step.from);
-    const parentOffset = resolvedPos.parentOffset;
-
-    // When no explicit position is provided, ProseMirror sets from=1
-    // In this case, we should insert at the current selection
-    const insertPos = step.from === 1 ? text.length : parentOffset;
-    text.insertAfter(insertPos, step.slice.content.firstChild.text);
+  // For position 0, insert before. For all other positions, insert after the previous position
+  if (pos === 0) {
+    text.insertBefore(0, content);
+  } else if (pos === text.length) {
+    text.insertAfter(text.length - 1, content);
   } else {
-    // this is a split operation
-    const splitNodeType = step.slice.content.firstChild?.type.name;
-    if (splitNodeType === "paragraph") {
-      handleParagraphSplit(text, start);
-    } else {
-      console.warn("Unknown node type to split", splitNodeType);
-    }
+    text.insertAfter(pos, content);
   }
+
+  // Handle paragraph marks after insertion
+  handleParagraphMerge(text, pos);
 }
 
 /**
- * Handles mark addition operations from an AddMarkStep.
+ * Handles text deletion in the document.
+ * @param text The CoRichText instance to modify
+ * @param from The start position (Jazz coordinates)
+ * @param to The end position (Jazz coordinates)
  */
-function handleAddMark(text: CoRichText, step: AddMarkStep) {
-  const markType = step.mark.type.name as MarkType;
-  const markInfo = MARK_TYPE_LOOKUP[markType];
+export function handleTextDeletion(text: CoRichText, from: number, to: number) {
+  // Delete the range
+  text.deleteRange({
+    from: Math.max(0, from),
+    to,
+  });
 
-  if (markInfo) {
-    const { mark, tag } = markInfo;
-    text.insertMark(step.from - 1, step.to - 1, mark, {
-      tag,
+  // Handle paragraph merging after deletion
+  handleParagraphMerge(text, from);
+}
+
+/**
+ * Handles adding a mark to a range of text.
+ * @param text The CoRichText instance to modify
+ * @param from The start position (Jazz coordinates)
+ * @param to The end position (Jazz coordinates)
+ * @param markType The type of mark to add
+ */
+function handleAddMark(
+  text: CoRichText,
+  from: number,
+  to: number,
+  markType: string,
+) {
+  if (markType === "strong") {
+    text.insertMark(from, to, Marks.Strong, { tag: "strong" });
+  } else if (markType === "em") {
+    text.insertMark(from, to, Marks.Em, { tag: "em" });
+  } else if (markType === "paragraph") {
+    text.insertMark(from, to, Marks.Paragraph, {
+      tag: "paragraph",
     });
   } else {
-    console.warn("Unsupported mark type", step.mark);
+    console.warn("Unsupported mark type", markType);
   }
 }
 
 /**
- * Handles mark removal operations from a RemoveMarkStep.
+ * Handles removing a mark from a range of text.
+ * @param text The CoRichText instance to modify
+ * @param from The start position (Jazz coordinates)
+ * @param to The end position (Jazz coordinates)
+ * @param markType The type of mark to remove
  */
 function handleRemoveMark(
   text: CoRichText,
-  step: RemoveMarkStep,
-  tr: ProsemirrorTransaction,
+  from: number,
+  to: number,
+  markType: string,
 ) {
-  const markType = step.mark.type.name as MarkType;
-  const markInfo = MARK_TYPE_LOOKUP[markType];
-
-  if (markInfo) {
-    const { mark } = markInfo;
-    // Calculate positions using the document state
-    const doc = getDocumentStateForStep(tr, step);
-    if (!doc) return;
-
-    const fromPos = doc.resolve(step.from);
-    const toPos = doc.resolve(step.to);
-    const from = fromPos.parentOffset;
-    const to = toPos.parentOffset;
-    text.removeMark(from, to, mark, { tag: markType });
-  } else {
-    console.warn("Unsupported mark type", step.mark);
+  if (markType === "strong") {
+    text.removeMark(from, to, Marks.Strong, { tag: "strong" });
+  } else if (markType === "em") {
+    text.removeMark(from, to, Marks.Em, { tag: "em" });
+  } else if (markType === "paragraph") {
+    text.removeMark(from, to, Marks.Paragraph, {
+      tag: "paragraph",
+    });
   }
 }
 
 /**
- * Applies ProseMirror transactions to the underlying CoRichText document.
- * Handles text operations (insert, delete) and mark operations (add).
- *
- * @param text - The CoRichText document to modify
- * @param tr - The ProseMirror transaction to apply
- *
- * Supported operations:
- * - ReplaceStep: Text insertions and deletions
- * - AddMarkStep: Adding strong (bold) and em (italic) marks
- * - RemoveMarkStep: Removing strong (bold) and em (italic) marks
- * - Paragraph splits: Creating new paragraph marks when Enter is pressed
- *
- * Prosemirror uses before from and before to for it's mark ranges
+ * Converts a ProseMirror position to a Jazz position.
+ * @param doc The ProseMirror document
+ * @param pos The ProseMirror position
+ * @returns The Jazz position (0-based)
  */
-export function applyTrToRichText(
-  text: CoRichText,
-  tr: ProsemirrorTransaction,
-) {
-  for (const step of tr.steps) {
+function pmPosToJazzPos(doc: Node, pos: number): number {
+  return doc.textBetween(0, pos, "\n", " ").length;
+}
+
+/**
+ * Applies a ProseMirror transaction to a CoRichText instance.
+ * Handles text insertion, deletion, and mark changes.
+ * @param text The CoRichText instance to modify
+ * @param tr The ProseMirror transaction to apply
+ */
+export function applyTrToRichText(text: CoRichText, tr: Transaction) {
+  tr.steps.forEach((step) => {
     if (step instanceof ReplaceStep) {
-      const doc = getDocumentStateForStep(tr, step);
-      if (!doc) continue;
-
-      const resolvedStart = doc.resolve(step.from);
-      const resolvedEnd = doc.resolve(step.to);
-
-      // Calculate text positions by measuring content between start of doc
-      // and our target position. This handles nested node structures.
-      const selectionToStart = TextSelection.between(
-        doc.resolve(0),
-        resolvedStart,
+      const { from, to } = step;
+      const content = step.slice.content.textBetween(
+        0,
+        step.slice.content.size,
+        "\n", // Use newline as block separator
+        " ", // Use space as leaf node separator
       );
 
-      const start = selectionToStart
-        .content()
-        .content.textBetween(0, selectionToStart.content().content.size).length;
+      // Convert ProseMirror positions to Jazz positions
+      const jazzFrom = pmPosToJazzPos(tr.before, from);
+      const jazzTo = pmPosToJazzPos(tr.before, to);
 
-      const selectionToEnd = TextSelection.between(doc.resolve(0), resolvedEnd);
-      const end = selectionToEnd
-        .content()
-        .content.textBetween(0, selectionToEnd.content().content.size).length;
+      // Handle deletion if needed
+      if (to > from) {
+        handleTextDeletion(text, jazzFrom, jazzTo);
+      }
 
-      // Text insertions
-      if (start === end) {
-        handleTextInsertion(text, step, doc, start);
-      } else {
-        text.deleteRange({ from: start, to: end });
+      // Handle insertion
+      if (content) {
+        handleTextInsertion(text, jazzFrom, content);
+      }
+
+      // Handle paragraph split if needed
+      if (step.slice?.content?.firstChild?.type.name === "paragraph") {
+        handleParagraphSplit(text, jazzFrom - 1);
       }
     } else if (step instanceof AddMarkStep) {
-      handleAddMark(text, step);
+      const { from, to, mark } = step;
+      // Convert ProseMirror positions to Jazz positions
+      const jazzFrom = pmPosToJazzPos(tr.before, from);
+      const jazzTo = pmPosToJazzPos(tr.before, to);
+      handleAddMark(text, jazzFrom, jazzTo, mark.type.name);
     } else if (step instanceof RemoveMarkStep) {
-      handleRemoveMark(text, step, tr);
-    } else {
-      console.warn("Unsupported step type", step);
+      const { from, to, mark } = step;
+      // Convert ProseMirror positions to Jazz positions
+      const jazzFrom = pmPosToJazzPos(tr.before, from);
+      const jazzTo = pmPosToJazzPos(tr.before, to);
+      handleRemoveMark(text, jazzFrom, jazzTo, mark.type.name);
     }
-  }
+  });
 }

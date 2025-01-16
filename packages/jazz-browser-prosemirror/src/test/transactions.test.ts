@@ -4,6 +4,12 @@ import { schema } from "prosemirror-schema-basic";
 import { EditorState } from "prosemirror-state";
 import { describe, expect, it, vi } from "vitest";
 import { applyTrToRichText, richTextToProsemirrorDoc } from "../index.js";
+import {
+  handleParagraphMerge,
+  handleParagraphSplit,
+  handleTextDeletion,
+  handleTextInsertion,
+} from "../lib/transactions.js";
 
 describe("applyTrToRichText", async () => {
   const account = await createJazzTestAccount();
@@ -18,7 +24,7 @@ describe("applyTrToRichText", async () => {
     const doc = richTextToProsemirrorDoc(text)!;
     const state = EditorState.create({ doc, schema });
     const tr = state.tr;
-    tr.insertText(" test");
+    tr.insertText(" test", text.length);
 
     applyTrToRichText(text, tr);
     expect(text.toString()).toBe("Hello world test");
@@ -103,9 +109,9 @@ describe("applyTrToRichText", async () => {
     const tr = state.tr;
 
     // Multiple operations: insert text, add mark, remove text
-    tr.insertText(" test");
+    tr.insertText(" test", text.length);
     tr.addMark(0, 5, schema.marks.strong.create());
-    tr.delete(7, 13); // Delete "world"
+    tr.delete(6, 12); // Delete " world"
 
     applyTrToRichText(text, tr);
     expect(text.toString()).toBe("Hello test");
@@ -120,15 +126,26 @@ describe("applyTrToRichText", async () => {
     const text = CoRichText.createFromPlainText("world", {
       owner: group,
     });
-    text.insertMark(0, text.length, Marks.Paragraph, { tag: "paragraph" });
+    text.insertMark(0, text.length - 1, Marks.Paragraph, { tag: "paragraph" });
 
     const doc = richTextToProsemirrorDoc(text)!;
     const state = EditorState.create({ doc, schema });
     const tr = state.tr;
-    tr.insertText("Hello ", 0);
 
+    // Insert "Hello " at the start (position 1 in ProseMirror)
+    tr.insertText("Hello ", 1);
     applyTrToRichText(text, tr);
+
+    // Verify content
     expect(text.toString()).toBe("Hello world");
+
+    // Verify paragraph mark is preserved and spans the entire content
+    const paragraphMarks = text
+      .resolveMarks()
+      .filter((m) => m.sourceMark.tag === "paragraph");
+    expect(paragraphMarks).toHaveLength(1);
+    expect(paragraphMarks[0]!.startAfter).toBe(0);
+    expect(paragraphMarks[0]!.endBefore).toBe(text.length);
   });
 
   it("should warn on unsupported mark type", () => {
@@ -193,5 +210,181 @@ describe("applyTrToRichText", async () => {
 
     // Strong mark should now end at position 4 (0-based index) (covering "Hell")
     expect(resolvedStrongMarks[0]!.endAfter).toBe(3);
+  });
+
+  it("should handle paragraph splits correctly", () => {
+    const text = CoRichText.createFromPlainText("Hello world", {
+      owner: group,
+    });
+    // Add initial paragraph mark
+    text.insertMark(0, text.length - 1, Marks.Paragraph, { tag: "paragraph" });
+    // Add a strong mark to part of the text
+    text.insertMark(0, 4, Marks.Strong, { tag: "strong" });
+
+    const doc = richTextToProsemirrorDoc(text)!;
+    const state = EditorState.create({ doc, schema });
+    const tr = state.tr;
+
+    // Split at position 6 (after "Hello ")
+    tr.split(6);
+    applyTrToRichText(text, tr);
+
+    // Verify content is unchanged
+    expect(text.toString()).toBe("Hello world");
+
+    // Verify paragraph marks
+    const paragraphMarks = text
+      .resolveMarks()
+      .filter((m) => m.sourceMark.tag === "paragraph");
+    expect(paragraphMarks).toHaveLength(2);
+    expect(paragraphMarks[0]!.endAfter).toBe(5); // First paragraph ends after "Hello"
+    expect(paragraphMarks[1]!.startBefore).toBe(6); // Second paragraph starts before "world"
+
+    // Verify strong mark is preserved
+    const strongMarks = text
+      .resolveMarks()
+      .filter((m) => m.sourceMark.tag === "strong");
+    expect(strongMarks).toHaveLength(1);
+    expect(strongMarks[0]!.startBefore).toBe(0);
+    expect(strongMarks[0]!.endAfter).toBe(4);
+  });
+});
+
+describe("Helper Functions", async () => {
+  const account = await createJazzTestAccount();
+  const group = Group.create({ owner: account });
+
+  describe("handleTextInsertion", () => {
+    it("should insert text at document start", () => {
+      const text = CoRichText.createFromPlainText("world", { owner: group });
+      handleTextInsertion(text, 0, "Hello ");
+      expect(text.toString()).toBe("Hello world");
+    });
+
+    it("should insert text in middle of document", () => {
+      const text = CoRichText.createFromPlainText("Hello world", {
+        owner: group,
+      });
+      handleTextInsertion(text, 4, " beautiful");
+      expect(text.toString()).toBe("Hello beautiful world");
+    });
+
+    it("should insert text at document end", () => {
+      const text = CoRichText.createFromPlainText("Hello", { owner: group });
+      handleTextInsertion(text, 5, " world");
+      expect(text.toString()).toBe("Hello world");
+    });
+  });
+
+  describe("handleTextDeletion", () => {
+    it("should delete text from middle of document", () => {
+      const text = CoRichText.createFromPlainText("Hello, hello world", {
+        owner: group,
+      });
+      handleTextDeletion(text, 5, 12); // Delete ", hello"
+      expect(text.toString()).toBe("Hello world");
+    });
+
+    it("should delete text from start of document", () => {
+      const text = CoRichText.createFromPlainText("Hello world", {
+        owner: group,
+      });
+      handleTextDeletion(text, 0, 5); // Delete "Hello"
+      expect(text.toString()).toBe(" world");
+    });
+
+    it("should delete text from end of document", () => {
+      const text = CoRichText.createFromPlainText("Hello world", {
+        owner: group,
+      });
+      handleTextDeletion(text, 6, 11); // Delete "world"
+      expect(text.toString()).toBe("Hello ");
+    });
+  });
+
+  describe("handleParagraphSplit", () => {
+    it("should split single paragraph into two", () => {
+      const text = CoRichText.createFromPlainText("Hello world", {
+        owner: group,
+      });
+      text.insertMark(0, text.length - 1, Marks.Paragraph, {
+        tag: "paragraph",
+      });
+
+      handleParagraphSplit(text, 5); // Split after "Hello"
+
+      const marks = text
+        .resolveMarks()
+        .filter((m) => m.sourceMark.tag === "paragraph");
+      expect(marks).toHaveLength(2);
+      expect(marks[0]!.endAfter).toBe(5); // First paragraph ends after "Hello"
+      expect(marks[1]!.startBefore).toBe(6); // Second paragraph starts before "world"
+    });
+
+    it("should preserve other marks when splitting", () => {
+      const text = CoRichText.createFromPlainText("Hello world", {
+        owner: group,
+      });
+      text.insertMark(0, text.length - 1, Marks.Paragraph, {
+        tag: "paragraph",
+      });
+      text.insertMark(0, 4, Marks.Strong, { tag: "strong" }); // "Hell" is strong
+
+      handleParagraphSplit(text, 5); // Split after "Hello"
+
+      const strongMarks = text
+        .resolveMarks()
+        .filter((m) => m.sourceMark.tag === "strong");
+      expect(strongMarks).toHaveLength(1);
+      expect(strongMarks[0]!.startBefore).toBe(0);
+      expect(strongMarks[0]!.endAfter).toBe(4);
+    });
+  });
+
+  describe("handleParagraphMerge", () => {
+    it("should merge two paragraphs into one", () => {
+      const text = CoRichText.createFromPlainText("Hello\nworld", {
+        owner: group,
+      });
+      text.insertMark(0, 4, Marks.Paragraph, { tag: "paragraph" });
+      text.insertMark(6, 10, Marks.Paragraph, { tag: "paragraph" });
+
+      handleParagraphMerge(text, 4); // Merge at newline
+
+      const marks = text
+        .resolveMarks()
+        .filter((m) => m.sourceMark.tag === "paragraph");
+      expect(marks).toHaveLength(1);
+      expect(marks[0]!.startBefore).toBe(0);
+      expect(marks[0]!.endAfter).toBe(9); // "Helloworld".length - 1
+    });
+
+    it("should preserve other marks when merging", () => {
+      const text = CoRichText.createFromPlainText("Hello\nworld", {
+        owner: group,
+      });
+      text.insertMark(0, 4, Marks.Paragraph, { tag: "paragraph" });
+      text.insertMark(6, 10, Marks.Paragraph, { tag: "paragraph" });
+      text.insertMark(0, 4, Marks.Strong, { tag: "strong" }); // "Hell" is strong
+      text.insertMark(6, 10, Marks.Em, { tag: "em" }); // "world" is em
+
+      handleParagraphMerge(text, 4); // Merge at newline
+
+      const strongMarks = text
+        .resolveMarks()
+        .filter((m) => m.sourceMark.tag === "strong");
+      const emMarks = text
+        .resolveMarks()
+        .filter((m) => m.sourceMark.tag === "em");
+
+      expect(strongMarks).toHaveLength(1);
+      console.log(strongMarks);
+      expect(strongMarks[0]!.startAfter).toBe(0);
+      expect(strongMarks[0]!.endBefore).toBe(5);
+
+      expect(emMarks).toHaveLength(1);
+      expect(emMarks[0]!.startAfter).toBe(5);
+      expect(emMarks[0]!.endBefore).toBe(11);
+    });
   });
 });
