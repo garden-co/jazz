@@ -1,5 +1,4 @@
 import { act, render, screen } from "@testing-library/react";
-import { Document } from "jazz-browser-prosemirror";
 import { JazzTestProvider, createJazzTestAccount } from "jazz-react/testing";
 import { CoRichText, Group, ID, Marks } from "jazz-tools";
 import { schema } from "prosemirror-schema-basic";
@@ -14,15 +13,15 @@ vi.mock("prosemirror-state");
 vi.mock("prosemirror-example-setup");
 
 // Only mock the subscribe method
-const originalSubscribe = Document.subscribe;
-Document.subscribe = vi.fn((id, as, depth, listener) => {
+const originalSubscribe = CoRichText.subscribe;
+CoRichText.subscribe = vi.fn((id, as, depth, listener) => {
   if (listener) {
     setTimeout(() => {
       listener(CoRichText.createFromPlainText("test", { owner: as }));
     }, 0);
   }
   return () => {};
-}) as unknown as typeof Document.subscribe;
+}) as unknown as typeof CoRichText.subscribe;
 
 async function setupEditorMock(
   options: {
@@ -62,7 +61,7 @@ async function setupEditorMock(
 }
 
 async function setupDocumentMock(group: Group) {
-  vi.mocked(Document.subscribe).mockImplementation(
+  vi.mocked(CoRichText.subscribe).mockImplementation(
     (id, as, depth, listener) => {
       if (listener) {
         setTimeout(() => {
@@ -87,7 +86,7 @@ describe("Document", () => {
 
   afterAll(() => {
     // Restore original subscribe method
-    Document.subscribe = originalSubscribe;
+    CoRichText.subscribe = originalSubscribe;
   });
 
   it("renders without crashing", async () => {
@@ -103,7 +102,7 @@ describe("Document", () => {
 
   it("subscribes to document updates", async () => {
     await setupEditorMock();
-    const subscribeSpy = vi.mocked(Document.subscribe);
+    const subscribeSpy = vi.mocked(CoRichText.subscribe);
 
     render(
       <JazzTestProvider account={account}>
