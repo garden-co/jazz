@@ -46,6 +46,7 @@ export class Mark extends CoMap {
   /**
    * Validates and clamps mark positions to ensure they are in the correct order
    * @returns Normalized positions or null if invalid
+   * 0 ≤ startAfter ≤ startBefore < endAfter ≤ endBefore ≤ textLength
    */
   validatePositions(
     textLength: number,
@@ -60,22 +61,30 @@ export class Mark extends CoMap {
     // Get positions with fallbacks
     const positions = {
       startAfter: this.startAfter ? (idxBefore(this.startAfter) ?? 0) : 0,
-      startBefore: this.startBefore ? (idxAfter(this.startBefore) ?? 0) : 0,
+      startBefore: this.startBefore ? (idxAfter(this.startBefore) ?? 1) : 1,
       endAfter: this.endAfter
-        ? (idxBefore(this.endAfter) ?? textLength)
-        : textLength,
+        ? (idxBefore(this.endAfter) ?? textLength - 1)
+        : textLength - 1,
       endBefore: this.endBefore
         ? (idxAfter(this.endBefore) ?? textLength)
         : textLength,
     };
 
-    // Clamp and ensure proper ordering in one step
-    return {
-      startAfter: Math.max(0, positions.startAfter),
-      startBefore: Math.max(positions.startAfter + 1, positions.startBefore),
-      endAfter: Math.min(textLength - 1, positions.endAfter),
-      endBefore: Math.min(textLength, positions.endBefore),
-    };
+    // Then ensure proper ordering relative to each other
+    const startAfter = positions.startAfter;
+    const startBefore = Math.max(startAfter + 1, positions.startBefore);
+
+    // Clamp endBefore to text length
+    const endBefore = Math.min(positions.endBefore, textLength);
+
+    // - Clamp endAfter to text length
+    // - Ensure it's at least endBefore - 1
+    const endAfter = Math.min(
+      Math.min(positions.endAfter, endBefore - 1),
+      textLength - 1,
+    );
+
+    return { startAfter, startBefore, endAfter, endBefore };
   }
 }
 
@@ -174,6 +183,15 @@ export class CoRichText extends CoMap {
     richtext.insertMark(0, text.length, WrapIn, extraArgs);
 
     return richtext;
+  }
+
+  /**
+   * Insert text before a specific index.
+   */
+  insertBefore(idx: number, text: string) {
+    if (!this.text)
+      throw new Error("Cannot insert into a CoRichText without loaded text");
+    this.text.insertBefore(idx, text);
   }
 
   /**
