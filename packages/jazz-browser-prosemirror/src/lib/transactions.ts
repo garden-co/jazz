@@ -1,58 +1,64 @@
 import { CoRichText, Marks } from "jazz-tools";
-import { Node as ProsemirrorNode } from "prosemirror-model";
-import {
-  Transaction as ProsemirrorTransaction,
-  TextSelection,
-} from "prosemirror-state";
+import { Node } from "prosemirror-model";
+import { Transaction } from "prosemirror-state";
 import {
   AddMarkStep,
   RemoveMarkStep,
   ReplaceStep,
 } from "prosemirror-transform";
-import { MARK_TYPE_LOOKUP, MarkType } from "./types.js";
 
 /**
- * Helper function to safely get the document state for a step.
- * Returns undefined if the document state is not found.
+ * Handles merging paragraphs after text deletion.
+ * @param text The CoRichText instance to modify
+ * @param pos The 0-based position where text was deleted (Jazz coordinates)
  */
-function getDocumentStateForStep(
-  tr: ProsemirrorTransaction,
-  step: ReplaceStep | AddMarkStep | RemoveMarkStep,
-) {
-  const doc = tr.docs[tr.steps.indexOf(step)];
-  if (!doc) {
-    console.warn("Document state not found for step", step);
-    return undefined;
+export function handleParagraphMerge(text: CoRichText, pos: number) {
+  // Remove all existing paragraph marks first to prevent duplicates
+  const existingMarks = text
+    .resolveMarks()
+    .filter((m) => m.sourceMark.tag === "paragraph");
+
+  for (const mark of existingMarks) {
+    text.removeMark(mark.startBefore, mark.endAfter, Marks.Paragraph, {
+      tag: "paragraph",
+    });
   }
-  return doc;
+
+  // Create a single paragraph mark spanning the entire content
+  if (text.length > 0) {
+    text.insertMark(0, text.length - 1, Marks.Paragraph, { tag: "paragraph" });
+  }
 }
 
 /**
- * Handles paragraph split operations, creating new paragraph marks.
+ * Handles splitting a paragraph at a specific position.
+ * @param text The CoRichText instance to modify
+ * @param pos The position to split at (Jazz coordinates)
  */
-function handleParagraphSplit(text: CoRichText, start: number) {
-  const matchingMarks =
-    text.marks?.filter(
-      (m): m is Exclude<typeof m, null> =>
-        !!m &&
-        m.tag === "paragraph" &&
-        ((m.startAfter && text.idxAfter(m.startAfter)) || 0) < start &&
-        ((m.endBefore && text.idxBefore(m.endBefore)) || Infinity) > start,
-    ) || [];
+export function handleParagraphSplit(text: CoRichText, pos: number) {
+  // Remove all existing paragraph marks first to prevent duplicates
+  const existingMarks = text
+    .resolveMarks()
+    .filter((m) => m.sourceMark.tag === "paragraph");
 
-  let lastSeenEnd = start;
-  for (const matchingMark of matchingMarks) {
-    const originalEnd = text.idxAfter(matchingMark.endAfter)!; // TODO: non-tight case
-    if (originalEnd > lastSeenEnd) {
-      lastSeenEnd = originalEnd;
-    }
-    matchingMark.endBefore = text.posBefore(start + 1)!;
-    matchingMark.endAfter = text.posAfter(start)!;
+  for (const mark of existingMarks) {
+    text.removeMark(mark.startBefore, mark.endAfter, Marks.Paragraph, {
+      tag: "paragraph",
+    });
   }
 
-  text.insertMark(start, lastSeenEnd, Marks.Paragraph, {
-    tag: "paragraph",
-  });
+  // Create two new paragraph marks
+  // First paragraph: from start to split position
+  if (pos > 0) {
+    text.insertMark(0, pos - 1, Marks.Paragraph, { tag: "paragraph" });
+  }
+
+  // Second paragraph: from split position to end
+  if (pos < text.length) {
+    text.insertMark(pos, text.length - 1, Marks.Paragraph, {
+      tag: "paragraph",
+    });
+  }
 }
 
 /**
@@ -72,11 +78,24 @@ export function handleTextInsertion(
   } else if (pos === text.length) {
     text.insertAfter(text.length - 1, content);
   } else {
-    text.insertAfter(pos, content);
+    text.insertAfter(pos - 1, content);
   }
 
-  // Handle paragraph marks after insertion
-  handleParagraphMerge(text, pos);
+  // If the content contains newlines, we need to split paragraphs
+  if (content.includes("\n")) {
+    handleParagraphSplit(text, pos);
+  } else {
+    // Otherwise just ensure the content is within a paragraph
+    const paragraphMarks = text
+      .resolveMarks()
+      .filter((m) => m.sourceMark.tag === "paragraph");
+
+    if (paragraphMarks.length === 0 && text.length > 0) {
+      text.insertMark(0, text.length - 1, Marks.Paragraph, {
+        tag: "paragraph",
+      });
+    }
+  }
 }
 
 /**
@@ -153,7 +172,8 @@ function handleRemoveMark(
  * @returns The Jazz position (0-based)
  */
 function pmPosToJazzPos(doc: Node, pos: number): number {
-  return doc.textBetween(0, pos, "\n", " ").length;
+  // Get the text up to this position, preserving newlines
+  return doc.textBetween(0, pos + 1, "\n", " ").length;
 }
 
 /**
@@ -166,13 +186,6 @@ export function applyTrToRichText(text: CoRichText, tr: Transaction) {
   tr.steps.forEach((step) => {
     if (step instanceof ReplaceStep) {
       const { from, to } = step;
-      const content = step.slice.content.textBetween(
-        0,
-        step.slice.content.size,
-        "\n", // Use newline as block separator
-        " ", // Use space as leaf node separator
-      );
-
       // Convert ProseMirror positions to Jazz positions
       const jazzFrom = pmPosToJazzPos(tr.before, from);
       const jazzTo = pmPosToJazzPos(tr.before, to);
@@ -181,6 +194,14 @@ export function applyTrToRichText(text: CoRichText, tr: Transaction) {
       if (to > from) {
         handleTextDeletion(text, jazzFrom, jazzTo);
       }
+
+      // Get any content to insert
+      const content = step.slice.content.textBetween(
+        0,
+        step.slice.content.size,
+        "\n", // Use newline as block separator
+        " ", // Use space as leaf node separator
+      );
 
       // Handle insertion
       if (content) {

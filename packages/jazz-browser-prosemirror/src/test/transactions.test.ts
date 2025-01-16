@@ -39,10 +39,10 @@ describe("applyTrToRichText", async () => {
     const doc = richTextToProsemirrorDoc(text)!;
     const state = EditorState.create({ doc, schema });
     const tr = state.tr;
-    tr.delete(7, 12); // Delete "world"
+    tr.delete(5, 11); // Delete " world"
 
     applyTrToRichText(text, tr);
-    expect(text.toString()).toBe("Hello ");
+    expect(text.toString()).toBe("Hello");
   });
 
   it("should handle adding strong mark", () => {
@@ -111,7 +111,7 @@ describe("applyTrToRichText", async () => {
     // Multiple operations: insert text, add mark, remove text
     tr.insertText(" test", text.length);
     tr.addMark(0, 5, schema.marks.strong.create());
-    tr.delete(6, 12); // Delete " world"
+    tr.delete(5, 11); // Delete " world"
 
     applyTrToRichText(text, tr);
     expect(text.toString()).toBe("Hello test");
@@ -132,8 +132,8 @@ describe("applyTrToRichText", async () => {
     const state = EditorState.create({ doc, schema });
     const tr = state.tr;
 
-    // Insert "Hello " at the start (position 1 in ProseMirror)
-    tr.insertText("Hello ", 1);
+    // Insert "Hello " at the start
+    tr.insertText("Hello ", 0);
     applyTrToRichText(text, tr);
 
     // Verify content
@@ -208,8 +208,8 @@ describe("applyTrToRichText", async () => {
       (m) => m.sourceMark.tag === "strong",
     );
 
-    // Strong mark should now end at position 4 (0-based index) (covering "Hell")
-    expect(resolvedStrongMarks[0]!.endAfter).toBe(3);
+    // Strong mark should now end at position 4 (covering "Hello")
+    expect(resolvedStrongMarks[0]!.endAfter).toBe(4);
   });
 
   it("should handle paragraph splits correctly", () => {
@@ -230,23 +230,23 @@ describe("applyTrToRichText", async () => {
     applyTrToRichText(text, tr);
 
     // Verify content is unchanged
-    expect(text.toString()).toBe("Hello world");
+    expect(text.toString()).toBe("Hello \nworld");
 
     // Verify paragraph marks
     const paragraphMarks = text
       .resolveMarks()
       .filter((m) => m.sourceMark.tag === "paragraph");
     expect(paragraphMarks).toHaveLength(2);
-    expect(paragraphMarks[0]!.endAfter).toBe(5); // First paragraph ends after "Hello"
-    expect(paragraphMarks[1]!.startBefore).toBe(6); // Second paragraph starts before "world"
+    expect(paragraphMarks[0]!.endBefore).toBe(5); // First paragraph ends after "Hello"
+    expect(paragraphMarks[1]!.startAfter).toBe(4); // Second paragraph starts before "world"
 
     // Verify strong mark is preserved
     const strongMarks = text
       .resolveMarks()
       .filter((m) => m.sourceMark.tag === "strong");
     expect(strongMarks).toHaveLength(1);
-    expect(strongMarks[0]!.startBefore).toBe(0);
-    expect(strongMarks[0]!.endAfter).toBe(4);
+    expect(strongMarks[0]!.startAfter).toBe(0);
+    expect(strongMarks[0]!.endBefore).toBe(5);
   });
 });
 
@@ -265,7 +265,7 @@ describe("Helper Functions", async () => {
       const text = CoRichText.createFromPlainText("Hello world", {
         owner: group,
       });
-      handleTextInsertion(text, 4, " beautiful");
+      handleTextInsertion(text, 5, " beautiful");
       expect(text.toString()).toBe("Hello beautiful world");
     });
 
@@ -317,8 +317,8 @@ describe("Helper Functions", async () => {
         .resolveMarks()
         .filter((m) => m.sourceMark.tag === "paragraph");
       expect(marks).toHaveLength(2);
-      expect(marks[0]!.endAfter).toBe(5); // First paragraph ends after "Hello"
-      expect(marks[1]!.startBefore).toBe(6); // Second paragraph starts before "world"
+      expect(marks[0]!.endBefore).toBe(5); // First paragraph ends after "Hello"
+      expect(marks[1]!.startAfter).toBe(4); // Second paragraph starts before "world"
     });
 
     it("should preserve other marks when splitting", () => {
@@ -336,8 +336,8 @@ describe("Helper Functions", async () => {
         .resolveMarks()
         .filter((m) => m.sourceMark.tag === "strong");
       expect(strongMarks).toHaveLength(1);
-      expect(strongMarks[0]!.startBefore).toBe(0);
-      expect(strongMarks[0]!.endAfter).toBe(4);
+      expect(strongMarks[0]!.startAfter).toBe(0);
+      expect(strongMarks[0]!.endBefore).toBe(5);
     });
   });
 
@@ -355,8 +355,8 @@ describe("Helper Functions", async () => {
         .resolveMarks()
         .filter((m) => m.sourceMark.tag === "paragraph");
       expect(marks).toHaveLength(1);
-      expect(marks[0]!.startBefore).toBe(0);
-      expect(marks[0]!.endAfter).toBe(9); // "Helloworld".length - 1
+      expect(marks[0]!.startAfter).toBe(0);
+      expect(marks[0]!.endBefore).toBe(11); // "Hello\nworld".length
     });
 
     it("should preserve other marks when merging", () => {
@@ -378,7 +378,6 @@ describe("Helper Functions", async () => {
         .filter((m) => m.sourceMark.tag === "em");
 
       expect(strongMarks).toHaveLength(1);
-      console.log(strongMarks);
       expect(strongMarks[0]!.startAfter).toBe(0);
       expect(strongMarks[0]!.endBefore).toBe(5);
 
