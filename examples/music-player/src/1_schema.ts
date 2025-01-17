@@ -85,7 +85,7 @@ export class MusicaAccount extends Account {
    *  The account migration is run on account creation and on every log-in.
    *  You can use it to set up the account root and any other initial CoValues you need.
    */
-  migrate() {
+  migrate(this: MusicaAccount) {
     if (!this._refs.root) {
       const ownership = { owner: this };
 

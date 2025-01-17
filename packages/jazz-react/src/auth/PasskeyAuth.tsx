@@ -1,5 +1,6 @@
 import { BrowserPasskeyAuth } from "jazz-browser";
 import { useMemo, useState } from "react";
+import { AuthChangeProps, useInJazzAuth } from "./useInJazzAuth.js";
 
 export type PasskeyAuthState = (
   | { state: "uninitialized" }
@@ -27,9 +28,11 @@ export type PasskeyAuthState = (
 export function usePasskeyAuth({
   appName,
   appHostname,
+  onAnonymousUserUpgrade,
 }: {
   appName: string;
   appHostname?: string;
+  onAnonymousUserUpgrade?: (props: AuthChangeProps) => void;
 }) {
   const [state, setState] = useState<PasskeyAuthState>({
     state: "loading",
@@ -40,12 +43,12 @@ export function usePasskeyAuth({
     return new BrowserPasskeyAuth(
       {
         onReady(next) {
-          setState({
+          setState((state) => ({
             state: "ready",
             logIn: next.logIn,
             signUp: next.signUp,
-            errors: [],
-          });
+            errors: state.errors,
+          }));
         },
         onSignedIn(next) {
           setState({
@@ -60,7 +63,7 @@ export function usePasskeyAuth({
         onError(error) {
           setState((state) => ({
             ...state,
-            errors: [...state.errors, error.toString()],
+            errors: [error.toString()],
           }));
         },
       },
@@ -68,6 +71,13 @@ export function usePasskeyAuth({
       appHostname,
     );
   }, [appName, appHostname]);
+
+  useInJazzAuth({
+    auth: authMethod,
+    onAuthChange: (props) => {
+      onAnonymousUserUpgrade?.(props);
+    },
+  });
 
   return [authMethod, state] as const;
 }

@@ -1,14 +1,17 @@
 // @vitest-environment happy-dom
 import { act, renderHook } from "@testing-library/react";
+import { PureJSCrypto } from "cojson/crypto";
 import { Account, ID } from "jazz-tools";
 import { beforeEach, describe, expect, it } from "vitest";
-import { useOnboardingAuth } from "../auth/OnboardingAuth";
+import { useOnboardingAuth } from "../auth/AnonymousAuth";
 
 const STORAGE_KEY = "jazz-logged-in-secret";
 
 beforeEach(() => {
   localStorage.removeItem(STORAGE_KEY);
 });
+
+const crypto = await PureJSCrypto.create();
 
 describe("useOnboardingAuth", () => {
   it("should initialize with loading state", () => {
@@ -40,7 +43,7 @@ describe("useOnboardingAuth", () => {
 
     // Start the auth process
     await act(async () => {
-      const authResult = await result.current[0].start();
+      const authResult = await result.current[0].start(crypto);
       authResult.onSuccess();
     });
 
@@ -53,7 +56,7 @@ describe("useOnboardingAuth", () => {
 
     // Sign in first
     await act(async () => {
-      const authResult = await result.current[0].start();
+      const authResult = await result.current[0].start(crypto);
       if (authResult.type === "new") {
         await authResult.saveCredentials({
           accountID: "test-account-id" as ID<Account>,
@@ -74,7 +77,7 @@ describe("useOnboardingAuth", () => {
     const { result: result2 } = renderHook(() => useOnboardingAuth());
 
     await act(async () => {
-      const authResult = await result2.current[0].start();
+      const authResult = await result2.current[0].start(crypto);
       expect(authResult.type).toBe("new");
     });
   });
@@ -84,7 +87,7 @@ describe("useOnboardingAuth", () => {
 
     // Sign in
     await act(async () => {
-      const authResult = await result.current[0].start();
+      const authResult = await result.current[0].start(crypto);
       if (authResult.type === "new") {
         await authResult.saveCredentials({
           accountID: "test-account-id" as ID<Account>,
@@ -106,7 +109,7 @@ describe("useOnboardingAuth", () => {
 
     // Sign in
     await act(async () => {
-      const authResult = await result.current[0].start();
+      const authResult = await result.current[0].start(crypto);
       if (authResult.type === "new") {
         await authResult.saveCredentials({
           accountID: "test-account-id" as ID<Account>,
@@ -121,7 +124,7 @@ describe("useOnboardingAuth", () => {
     const { result: result2 } = renderHook(() => useOnboardingAuth());
 
     await act(async () => {
-      const authResult = await result2.current[0].start();
+      const authResult = await result2.current[0].start(crypto);
       expect(authResult.type).toBe("existing");
       authResult.onSuccess();
     });
@@ -134,7 +137,7 @@ describe("useOnboardingAuth", () => {
     const { result } = renderHook(() => useOnboardingAuth());
 
     await act(async () => {
-      const authResult = await result.current[0].start();
+      const authResult = await result.current[0].start(crypto);
       authResult.onError("test-error");
     });
 

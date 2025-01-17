@@ -3,7 +3,9 @@ import { Account } from "jazz-tools/src/coValues/account.js";
 import { ID } from "jazz-tools/src/coValues/interfaces.js";
 
 function exportAccountToInspector(localStorageKey = "jazz-logged-in-secret") {
-  const localStorageData = JSON.parse(localStorage[localStorageKey]) as {
+  const localStorageData = JSON.parse(
+    localStorage.getItem(localStorageKey) ?? "{}",
+  ) as {
     accountID: ID<Account>;
     accountSecret: AgentSecret;
   };

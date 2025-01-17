@@ -1,13 +1,7 @@
 import * as bip39 from "@scure/bip39";
-import { AgentSecret, CryptoProvider, cojsonInternals } from "cojson";
+import { CryptoProvider, cojsonInternals } from "cojson";
 import { Account, AuthMethod, AuthResult, ID } from "jazz-tools";
-
-type LocalStorageData = {
-  accountID: ID<Account>;
-  accountSecret: AgentSecret;
-};
-
-const localStorageKey = "jazz-logged-in-secret";
+import { AuthSecretStorage } from "./AuthSecretStorage.js";
 
 /**
  * `BrowserPassphraseAuth` provides a `JazzAuth` object for passphrase authentication.
@@ -15,7 +9,7 @@ const localStorageKey = "jazz-logged-in-secret";
  * ```ts
  * import { BrowserPassphraseAuth } from "jazz-browser";
  *
- * const auth = new BrowserPassphraseAuth(driver, wordlist, appName);
+ * const auth = new BrowserPassphraseAuth(driver, wordlist);
  * ```
  *
  * @category Auth Providers
@@ -24,22 +18,19 @@ export class BrowserPassphraseAuth implements AuthMethod {
   constructor(
     public driver: BrowserPassphraseAuth.Driver,
     public wordlist: string[],
-    public appName: string,
-    // TODO: is this a safe default?
-    public appHostname: string = window.location.hostname,
   ) {}
 
   /**
    * @returns A `JazzAuth` object
    */
   async start(crypto: CryptoProvider): Promise<AuthResult> {
-    if (localStorage[localStorageKey]) {
-      const localStorageData = JSON.parse(
-        localStorage[localStorageKey],
-      ) as LocalStorageData;
+    AuthSecretStorage.migrate();
 
-      const accountID = localStorageData.accountID as ID<Account>;
-      const secret = localStorageData.accountSecret;
+    const credentials = AuthSecretStorage.get();
+
+    if (credentials && !credentials.isAnonymous) {
+      const accountID = credentials.accountID;
+      const secret = credentials.accountSecret;
 
       return {
         type: "existing",
@@ -51,13 +42,19 @@ export class BrowserPassphraseAuth implements AuthMethod {
           this.driver.onError(error);
         },
         logOut: () => {
-          delete localStorage[localStorageKey];
+          AuthSecretStorage.clear();
         },
       } satisfies AuthResult;
     } else {
       return new Promise<AuthResult>((resolve) => {
         this.driver.onReady({
           signUp: async (username, passphrase) => {
+            if (credentials?.isAnonymous) {
+              console.warn(
+                "Anonymous user upgrade is currently not supported on passphrase auth",
+              );
+            }
+
             const secretSeed = bip39.mnemonicToEntropy(
               passphrase,
               this.wordlist,
@@ -73,10 +70,11 @@ export class BrowserPassphraseAuth implements AuthMethod {
               creationProps: { name: username },
               initialSecret: accountSecret,
               saveCredentials: async (credentials) => {
-                localStorage[localStorageKey] = JSON.stringify({
+                AuthSecretStorage.set({
                   accountID: credentials.accountID,
-                  accountSecret: credentials.secret,
-                } satisfies LocalStorageData);
+                  secretSeed,
+                  accountSecret,
+                });
               },
               onSuccess: () => {
                 this.driver.onSignedIn({ logOut });
@@ -85,7 +83,7 @@ export class BrowserPassphraseAuth implements AuthMethod {
                 this.driver.onError(error);
               },
               logOut: () => {
-                delete localStorage[localStorageKey];
+                AuthSecretStorage.clear();
               },
             });
           },
@@ -112,11 +110,12 @@ export class BrowserPassphraseAuth implements AuthMethod {
             resolve({
               type: "existing",
               credentials: { accountID, secret: accountSecret },
-              saveCredentials: async ({ accountID, secret }) => {
-                localStorage[localStorageKey] = JSON.stringify({
+              saveCredentials: async ({ accountID }) => {
+                AuthSecretStorage.set({
                   accountID,
-                  accountSecret: secret,
-                } satisfies LocalStorageData);
+                  secretSeed,
+                  accountSecret,
+                });
               },
               onSuccess: () => {
                 this.driver.onSignedIn({ logOut });
@@ -125,7 +124,7 @@ export class BrowserPassphraseAuth implements AuthMethod {
                 this.driver.onError(error);
               },
               logOut: () => {
-                delete localStorage[localStorageKey];
+                AuthSecretStorage.clear();
               },
             });
           },
@@ -148,5 +147,5 @@ export namespace BrowserPassphraseAuth {
 }
 
 function logOut() {
-  delete localStorage[localStorageKey];
+  AuthSecretStorage.clear();
 }

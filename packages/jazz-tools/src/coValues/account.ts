@@ -42,6 +42,11 @@ import { createInboxRoot } from "./inbox.js";
 import { Profile } from "./profile.js";
 import { RegisteredSchemas } from "./registeredSchemas.js";
 
+export type AccountCreationProps = {
+  name: string;
+  onboarding?: boolean;
+};
+
 /** @category Identity & Permissions */
 export class Account extends CoValueBase implements CoValue {
   declare id: ID<this>;
@@ -242,7 +247,7 @@ export class Account extends CoValueBase implements CoValue {
     return this.toJSON();
   }
 
-  async applyMigration(creationProps?: { name: string; onboarding?: boolean }) {
+  async applyMigration(creationProps?: AccountCreationProps) {
     if (creationProps) {
       const profileGroup = RegisteredSchemas["Group"].create({ owner: this });
       profileGroup.addMember("everyone", "reader");
@@ -267,7 +272,7 @@ export class Account extends CoValueBase implements CoValue {
   }
 
   // Placeholder method for subclasses to override
-  migrate(creationProps?: { name: string }) {
+  migrate(creationProps?: AccountCreationProps) {
     creationProps; // To avoid unused parameter warning
   }
 

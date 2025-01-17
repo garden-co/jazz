@@ -10,7 +10,7 @@ import { PlayerControls } from "./components/PlayerControls";
 import "./index.css";
 
 import { MusicaAccount } from "@/1_schema";
-import { DemoAuthBasicUI, JazzProvider, useDemoAuth } from "jazz-react";
+import { JazzProvider, useIsAnonymousUser } from "jazz-react";
 import { useUploadExampleData } from "./lib/useUploadExampleData";
 
 /**
@@ -54,26 +54,23 @@ function Main() {
 }
 
 function JazzAndAuth({ children }: { children: React.ReactNode }) {
-  const [auth, state] = useDemoAuth();
-
   const peer =
     (new URL(window.location.href).searchParams.get(
       "peer",
     ) as `ws://${string}`) ??
     "wss://cloud.jazz.tools/?key=music-player-example-jazz@garden.co";
 
+  const isAnonymous = useIsAnonymousUser();
+
   return (
-    <>
-      <JazzProvider
-        storage="indexedDB"
-        auth={auth}
-        peer={peer}
-        AccountSchema={MusicaAccount}
-      >
-        {children}
-      </JazzProvider>
-      <DemoAuthBasicUI appName="Jazz Music Player" state={state} />
-    </>
+    <JazzProvider
+      storage="indexedDB"
+      peer={peer}
+      localOnly={isAnonymous}
+      AccountSchema={MusicaAccount}
+    >
+      {children}
+    </JazzProvider>
   );
 }
 

@@ -1,44 +1,81 @@
-import { test } from "@playwright/test";
+import { BrowserContext, test } from "@playwright/test";
 import { HomePage } from "./pages/HomePage";
-import { LoginPage } from "./pages/LoginPage";
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-test("create a new playlist and share", async ({ page }) => {
-  const loginPage = new LoginPage(page);
+async function mockAuthenticator(context: BrowserContext) {
+  await context.addInitScript(() => {
+    Object.defineProperty(window.navigator, "credentials", {
+      value: {
+        ...window.navigator.credentials,
+        create: async () => ({
+          type: "public-key",
+          id: new Uint8Array([1, 2, 3, 4]),
+          rawId: new Uint8Array([1, 2, 3, 4]),
+          response: {
+            clientDataJSON: new Uint8Array([1]),
+            attestationObject: new Uint8Array([2]),
+          },
+        }),
+        get: async () => ({
+          type: "public-key",
+          id: new Uint8Array([1, 2, 3, 4]),
+          rawId: new Uint8Array([1, 2, 3, 4]),
+          response: {
+            authenticatorData: new Uint8Array([1]),
+            clientDataJSON: new Uint8Array([2]),
+            signature: new Uint8Array([3]),
+          },
+        }),
+      },
+      configurable: true,
+    });
+  });
+}
 
-  await loginPage.goto();
-  await loginPage.fillUsername("S. Mario");
-  await loginPage.signup();
+// Configure the authenticator
+test.beforeEach(async ({ context }) => {
+  // Enable virtual authenticator environment
+  await mockAuthenticator(context);
+});
 
-  const homePage = new HomePage(page);
+test("create a new playlist and share", async ({
+  page: marioPage,
+  browser,
+}) => {
+  await marioPage.goto("/");
+
+  const marioHome = new HomePage(marioPage);
 
   // The example song should be loaded
-  await homePage.expectMusicTrack("Example song");
-  await homePage.editTrackTitle("Example song", "Super Mario World");
+  await marioHome.expectMusicTrack("Example song");
+  await marioHome.editTrackTitle("Example song", "Super Mario World");
 
-  await homePage.createPlaylist();
-  await homePage.editPlaylistTitle("Save the princess");
+  await marioHome.createPlaylist();
+  await marioHome.editPlaylistTitle("Save the princess");
 
-  await homePage.navigateToPlaylist("All tracks");
-  await homePage.addTrackToPlaylist("Super Mario World", "Save the princess");
+  await marioHome.navigateToPlaylist("All tracks");
+  await marioHome.addTrackToPlaylist("Super Mario World", "Save the princess");
 
-  await homePage.navigateToPlaylist("Save the princess");
-  await homePage.expectMusicTrack("Super Mario World");
+  await marioHome.navigateToPlaylist("Save the princess");
+  await marioHome.expectMusicTrack("Super Mario World");
 
-  const url = await homePage.getShareLink();
+  await marioHome.signUp("Mario");
+
+  const url = await marioHome.getShareLink();
 
   await sleep(4000); // Wait for the sync to complete
 
-  await homePage.logout();
+  const luigiPage = await (await browser.newContext()).newPage();
+  await luigiPage.goto("/");
 
-  await loginPage.goto();
-  await loginPage.fillUsername("Luigi");
-  await loginPage.signup();
+  const luigiHome = new HomePage(luigiPage);
 
-  await page.goto(url);
+  await luigiHome.signUp("Luigi");
 
-  await homePage.expectMusicTrack("Super Mario World");
-  await homePage.playMusicTrack("Super Mario World");
-  await homePage.expectActiveTrackPlaying();
+  await luigiPage.goto(url);
+
+  await luigiHome.expectMusicTrack("Super Mario World");
+  await luigiHome.playMusicTrack("Super Mario World");
+  await luigiHome.expectActiveTrackPlaying();
 });

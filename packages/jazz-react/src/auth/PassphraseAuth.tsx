@@ -1,7 +1,8 @@
 import { generateMnemonic } from "@scure/bip39";
 import { cojsonInternals } from "cojson";
 import { BrowserPassphraseAuth } from "jazz-browser";
-import { useMemo, useState } from "react";
+import { JazzContext } from "jazz-react-core";
+import { useContext, useMemo, useState } from "react";
 
 export type PassphraseAuthState = (
   | { state: "uninitialized" }
@@ -28,12 +29,8 @@ export type PassphraseAuthState = (
  * @category Auth Providers
  */
 export function usePassphraseAuth({
-  appName,
-  appHostname,
   wordlist,
 }: {
-  appName: string;
-  appHostname?: string;
   wordlist: string[];
 }) {
   const [state, setState] = useState<PassphraseAuthState>({
@@ -70,15 +67,21 @@ export function usePassphraseAuth({
         onError(error) {
           setState((state) => ({
             ...state,
-            errors: [...state.errors, error.toString()],
+            errors: [error.toString()],
           }));
         },
       },
       wordlist,
-      appName,
-      appHostname,
     );
-  }, [appName, appHostname, wordlist]);
+  }, [wordlist]);
+
+  const context = useContext(JazzContext);
+
+  if (context) {
+    throw new Error(
+      "PassphraseAuth can't be used inside a JazzContext or to upgrade anonymous users.",
+    );
+  }
 
   return [authMethod, state] as const;
 }

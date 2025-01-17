@@ -9,15 +9,15 @@ export function Form() {
     <div className="grid gap-4 border p-8">
       <div className="flex items-center gap-3">
         <label htmlFor="firstName" className="sm:w-32">
-          First name
+          Name
         </label>
         <input
           type="text"
           id="firstName"
-          placeholder="Enter your first name here..."
+          placeholder="Enter your name here..."
           className="border border-stone-300 rounded shadow-sm py-1 px-2 flex-1"
-          value={me.profile.firstName || ""}
-          onChange={(e) => (me.profile.firstName = e.target.value)}
+          value={me.profile.name || ""}
+          onChange={(e) => (me.profile.name = e.target.value)}
         />
       </div>
 

@@ -1,33 +1,32 @@
-import { useAccount } from "jazz-react";
+import { useAccount, useIsAnonymousUser } from "jazz-react";
+import { AuthButton } from "./AuthButton.tsx";
 import { Form } from "./Form.tsx";
 import { Logo } from "./Logo.tsx";
 
 function App() {
-  const { me, logOut } = useAccount({ profile: {}, root: {} });
+  const { me } = useAccount({ profile: {}, root: {} });
+
+  const isAnonymousUser = useIsAnonymousUser();
 
   return (
     <>
       <header>
         <nav className="container flex justify-between items-center py-3">
-          <span>
-            You're logged in as <strong>{me?.profile?.name}</strong>
-          </span>
-          <button
-            className="bg-stone-100 py-1.5 px-3 text-sm rounded-md"
-            onClick={() => logOut()}
-          >
-            Log out
-          </button>
+          {isAnonymousUser ? (
+            <span>Authenticate to share the data with another device.</span>
+          ) : (
+            <span>
+              You're logged in as <strong>{me?.profile?.name}</strong>
+            </span>
+          )}
+          <AuthButton />
         </nav>
       </header>
       <main className="container mt-16 flex flex-col gap-8">
         <Logo />
 
         <div className="text-center">
-          <h1>
-            Welcome{me?.profile.firstName ? <>, {me?.profile.firstName}</> : ""}
-            !
-          </h1>
+          <h1>Welcome{me?.profile.name ? <>, {me?.profile.name}</> : ""}!</h1>
           {!!me?.root.age && (
             <p>As of today, you are {me.root.age} years old.</p>
           )}

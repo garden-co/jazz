@@ -95,6 +95,14 @@ export class HomePage {
       .click();
   }
 
+  async signUp(name: string) {
+    await this.page.getByRole("button", { name: "Sign up" }).click();
+    await this.page.getByRole("textbox", { name: "Username" }).fill(name);
+    await this.page
+      .getByRole("button", { name: "Sign up with passkey" })
+      .click();
+  }
+
   async logout() {
     await this.logoutButton.click();
   }

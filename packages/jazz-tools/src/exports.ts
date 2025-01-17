@@ -18,6 +18,7 @@ export {
   Account,
   isControlledAccount,
   type AccountClass,
+  type AccountCreationProps,
 } from "./coValues/account.js";
 export {
   BinaryCoStream,

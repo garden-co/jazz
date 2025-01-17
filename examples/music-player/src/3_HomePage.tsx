@@ -1,12 +1,17 @@
 import { useToast } from "@/hooks/use-toast";
-import { createInviteLink, useAccount, useCoState } from "jazz-react";
+import {
+  createInviteLink,
+  useAccount,
+  useCoState,
+  useIsAnonymousUser,
+} from "jazz-react";
 import { ID } from "jazz-tools";
 import { useNavigate, useParams } from "react-router";
 import { Playlist } from "./1_schema";
 import { createNewPlaylist, uploadMusicTracks } from "./4_actions";
 import { MediaPlayer } from "./5_useMediaPlayer";
+import { AuthButton } from "./components/AuthButton";
 import { FileUploadButton } from "./components/FileUploadButton";
-import { LogoutButton } from "./components/LogoutButton";
 import { MusicTrackRow } from "./components/MusicTrackRow";
 import { PlaylistTitleInput } from "./components/PlaylistTitleInput";
 import { SidePanel } from "./components/SidePanel";
@@ -66,6 +71,8 @@ export function HomePage({ mediaPlayer }: { mediaPlayer: MediaPlayer }) {
     });
   };
 
+  const isAnonymousUser = useIsAnonymousUser();
+
   return (
     <div className="flex flex-col h-screen text-gray-800 bg-blue-50">
       <div className="flex flex-1 overflow-hidden">
@@ -86,12 +93,12 @@ export function HomePage({ mediaPlayer }: { mediaPlayer: MediaPlayer }) {
                   <Button onClick={handleCreatePlaylist}>New playlist</Button>
                 </>
               )}
-              {!isRootPlaylist && (
+              {!isRootPlaylist && !isAnonymousUser && (
                 <Button onClick={handlePlaylistShareClick}>
                   Share playlist
                 </Button>
               )}
-              <LogoutButton />
+              <AuthButton />
             </div>
           </div>
           <ul className="flex flex-col">

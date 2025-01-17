@@ -18,10 +18,12 @@ import {
 import { OPFSFilesystem } from "./OPFSFilesystem.js";
 import { createWebSocketPeerWithReconnection } from "./createWebSocketPeerWithReconnection.js";
 import { StorageConfig, getStorageOptions } from "./storageOptions.js";
+export { AuthSecretStorage } from "./auth/AuthSecretStorage.js";
 export { BrowserDemoAuth } from "./auth/DemoAuth.js";
 export { BrowserPasskeyAuth } from "./auth/PasskeyAuth.js";
 export { BrowserPassphraseAuth } from "./auth/PassphraseAuth.js";
-export { BrowserOnboardingAuth } from "./auth/OnboardingAuth.js";
+export { BrowserAnonymousAuth } from "./auth/AnonymousAuth.js";
+import { BrowserAnonymousAuth } from "./auth/AnonymousAuth.js";
 import { setupInspector } from "./utils/export-account-inspector.js";
 
 setupInspector();
@@ -29,6 +31,7 @@ setupInspector();
 /** @category Context Creation */
 export type BrowserContext<Acc extends Account> = {
   me: Acc;
+  toggleNetwork: (enabled: boolean) => void;
   logOut: () => void;
   // TODO: Symbol.dispose?
   done: () => void;
@@ -36,15 +39,21 @@ export type BrowserContext<Acc extends Account> = {
 
 export type BrowserGuestContext = {
   guest: AnonymousJazzAgent;
+  toggleNetwork: (enabled: boolean) => void;
   logOut: () => void;
   done: () => void;
 };
 
 export type BrowserContextOptions<Acc extends Account> = {
-  auth: AuthMethod;
-  AccountSchema: CoValueClass<Acc> & {
+  auth?: AuthMethod;
+  AccountSchema?: CoValueClass<Acc> & {
     fromNode: (typeof Account)["fromNode"];
   };
+  guest: false;
+} & BaseBrowserContextOptions;
+
+export type BrowserGuestContextOptions = {
+  guest: true;
 } & BaseBrowserContextOptions;
 
 export type BaseBrowserContextOptions = {
@@ -52,33 +61,28 @@ export type BaseBrowserContextOptions = {
   reconnectionTimeout?: number;
   storage?: StorageConfig;
   crypto?: CryptoProvider;
+  localOnly?: boolean;
 };
+
+function getAnonymousUserAuth() {
+  const auth = new BrowserAnonymousAuth("Anonymous user", {
+    onSignedIn: () => {},
+    onError: () => {},
+  });
+
+  return auth;
+}
 
 /** @category Context Creation */
 export async function createJazzBrowserContext<Acc extends Account>(
-  options: BrowserContextOptions<Acc>,
-): Promise<BrowserContext<Acc>>;
-export async function createJazzBrowserContext(
-  options: BaseBrowserContextOptions,
-): Promise<BrowserGuestContext>;
-export async function createJazzBrowserContext<Acc extends Account>(
-  options: BrowserContextOptions<Acc> | BaseBrowserContextOptions,
-): Promise<BrowserContext<Acc> | BrowserGuestContext>;
-export async function createJazzBrowserContext<Acc extends Account>(
-  options: BrowserContextOptions<Acc> | BaseBrowserContextOptions,
+  options: BrowserContextOptions<Acc> | BrowserGuestContextOptions,
 ): Promise<BrowserContext<Acc> | BrowserGuestContext> {
   const crypto = options.crypto || (await WasmCrypto.create());
   let node: LocalNode | undefined = undefined;
 
-  const wsPeer = createWebSocketPeerWithReconnection(
-    options.peer,
-    options.reconnectionTimeout,
-    (peer) => {
-      if (node) {
-        node.syncManager.addPeer(peer);
-      }
-    },
-  );
+  let wsPeer:
+    | ReturnType<typeof createWebSocketPeerWithReconnection>
+    | undefined = undefined;
 
   const { useSingleTabOPFS, useIndexedDB } = getStorageOptions(options.storage);
 
@@ -97,13 +101,45 @@ export async function createJazzBrowserContext<Acc extends Account>(
     peersToLoadFrom.push(await IDBStorage.asPeer());
   }
 
-  peersToLoadFrom.push(wsPeer.peer);
+  function toggleNetwork(enabled: boolean) {
+    if (enabled) {
+      if (wsPeer) {
+        return;
+      }
+
+      wsPeer = createWebSocketPeerWithReconnection(
+        options.peer,
+        options.reconnectionTimeout,
+        (peer) => {
+          if (node) {
+            node.syncManager.addPeer(peer);
+          }
+        },
+      );
+
+      if (node) {
+        node.syncManager.addPeer(wsPeer.peer);
+      } else {
+        peersToLoadFrom.push(wsPeer.peer);
+      }
+    } else {
+      if (!wsPeer) {
+        return;
+      }
+
+      wsPeer.done();
+      wsPeer = undefined;
+    }
+  }
+
+  toggleNetwork(!options.localOnly);
 
   const context =
-    "auth" in options
+    options.guest !== true
       ? await createJazzContext({
-          AccountSchema: options.AccountSchema,
-          auth: options.auth,
+          AccountSchema:
+            "AccountSchema" in options ? options.AccountSchema : undefined,
+          auth: options.auth ?? getAnonymousUserAuth(),
           crypto,
           peersToLoadFrom,
           sessionProvider: provideBrowserLockSession,
@@ -119,8 +155,9 @@ export async function createJazzBrowserContext<Acc extends Account>(
   return "account" in context
     ? {
         me: context.account,
+        toggleNetwork,
         done: () => {
-          wsPeer.done();
+          wsPeer?.done();
           context.done();
         },
         logOut: () => {
@@ -129,8 +166,9 @@ export async function createJazzBrowserContext<Acc extends Account>(
       }
     : {
         guest: context.agent,
+        toggleNetwork,
         done: () => {
-          wsPeer.done();
+          wsPeer?.done();
           context.done();
         },
         logOut: () => {
@@ -170,9 +208,9 @@ export function provideBrowserLockSession(
             if (!lock) return "noLock";
 
             const sessionID =
-              localStorage[accountID + "_" + idx] ||
+              localStorage.getItem(accountID + "_" + idx) ||
               crypto.newRandomSessionID(accountID as RawAccountID | AgentID);
-            localStorage[accountID + "_" + idx] = sessionID;
+            localStorage.setItem(accountID + "_" + idx, sessionID);
 
             // console.debug(
             //     "Got lock",
@@ -180,7 +218,7 @@ export function provideBrowserLockSession(
             //     sessionID
             // );
 
-            resolveSession(sessionID);
+            resolveSession(sessionID as SessionID);
 
             await donePromise;
             console.log("Done with lock", accountID + "_" + idx, sessionID);

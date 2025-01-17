@@ -1,43 +1,37 @@
-import { AgentSecret } from "cojson";
+import { AgentSecret, CryptoProvider } from "cojson";
 import { Account, AuthMethod, AuthResult, ID } from "jazz-tools";
-
-type StorageData = {
-  accountID: ID<Account>;
-  accountSecret: AgentSecret;
-};
-
-const STORAGE_KEY = "jazz-logged-in-secret";
+import { AuthSecretStorage } from "./AuthSecretStorage.js";
 
 /**
- * `BrowserOnboardingAuth` provides a `JazzAuth` object for demo authentication.
+ * `BrowserAnonymousAuth` provides a `JazzAuth` object for demo authentication.
  *
  * Demo authentication is useful for quickly testing your app, as it allows you to create new accounts and log in as existing ones. The authentication persists across page reloads, with the credentials stored in `localStorage`.
  *
  * ```
- * import { BrowserOnboardingAuth } from "jazz-browser";
+ * import { BrowserAnonymousAuth } from "jazz-browser";
  *
- * const auth = new BrowserOnboardingAuth(driver);
+ * const auth = new BrowserAnonymousAuth(driver);
  * ```
  *
  * @category Auth Providers
  */
-export class BrowserOnboardingAuth implements AuthMethod {
+export class BrowserAnonymousAuth implements AuthMethod {
   constructor(
     public defaultUserName: string,
-    public driver: BrowserOnboardingAuth.Driver,
+    public driver: BrowserAnonymousAuth.Driver,
   ) {}
 
   /**
    * @returns A `JazzAuth` object
    */
-  async start() {
-    const existingUser = localStorage[STORAGE_KEY];
+  async start(crypto: CryptoProvider) {
+    AuthSecretStorage.migrate();
+
+    const existingUser = AuthSecretStorage.get();
 
     if (existingUser) {
-      const existingUserData = JSON.parse(existingUser) as StorageData;
-
-      const accountID = existingUserData.accountID as ID<Account>;
-      const secret = existingUserData.accountSecret;
+      const accountID = existingUser.accountID;
+      const secret = existingUser.accountSecret;
 
       return {
         type: "existing",
@@ -51,19 +45,22 @@ export class BrowserOnboardingAuth implements AuthMethod {
         logOut,
       } satisfies AuthResult;
     } else {
+      const secretSeed = crypto.newRandomSecretSeed();
+
       return {
         type: "new",
         creationProps: { name: this.defaultUserName, anonymous: true },
+        initialSecret: crypto.agentSecretFromSecretSeed(secretSeed),
         saveCredentials: async (credentials: {
           accountID: ID<Account>;
           secret: AgentSecret;
         }) => {
-          const storageData = JSON.stringify({
+          AuthSecretStorage.set({
             accountID: credentials.accountID,
+            secretSeed,
             accountSecret: credentials.secret,
-          } satisfies StorageData);
-
-          localStorage[STORAGE_KEY] = storageData;
+            isAnonymous: true,
+          });
         },
         onSuccess: () => {
           this.driver.onSignedIn({ logOut });
@@ -79,7 +76,7 @@ export class BrowserOnboardingAuth implements AuthMethod {
 
 /** @internal */
 // eslint-disable-next-line @typescript-eslint/no-namespace
-export namespace BrowserOnboardingAuth {
+export namespace BrowserAnonymousAuth {
   export interface Driver {
     onSignedIn: (next: { logOut: () => void }) => void;
     onError: (error: string | Error) => void;
@@ -87,5 +84,5 @@ export namespace BrowserOnboardingAuth {
 }
 
 function logOut() {
-  delete localStorage[STORAGE_KEY];
+  AuthSecretStorage.clear();
 }

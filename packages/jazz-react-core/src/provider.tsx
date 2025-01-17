@@ -5,12 +5,16 @@ import { Account, AccountClass, AnonymousJazzAgent } from "jazz-tools";
 /** @category Context Creation */
 export type JazzAuthContext<Acc extends Account> = {
   me: Acc;
+  toggleNetwork?: (enabled: boolean) => void;
+  refreshContext?: () => void;
   logOut: () => void;
   done: () => void;
 };
 
 export type JazzGuestContext = {
   guest: AnonymousJazzAgent;
+  toggleNetwork?: (enabled: boolean) => void;
+  refreshContext?: () => void;
   logOut: () => void;
   done: () => void;
 };

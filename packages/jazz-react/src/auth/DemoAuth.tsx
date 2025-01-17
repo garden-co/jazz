@@ -1,7 +1,8 @@
 import { AgentSecret } from "cojson";
 import { BrowserDemoAuth } from "jazz-browser";
+import { JazzContext } from "jazz-react-core";
 import { Account, ID } from "jazz-tools";
-import { useEffect, useMemo, useState } from "react";
+import { useContext, useEffect, useMemo, useState } from "react";
 
 type DemoAuthState = (
   | {
@@ -64,13 +65,21 @@ export function useDemoAuth({
         onError: (error) => {
           setState((current) => ({
             ...current,
-            errors: [...current.errors, error.toString()],
+            errors: [error.toString()],
           }));
         },
       },
       seedAccounts,
     );
   }, [seedAccounts]);
+
+  const context = useContext(JazzContext);
+
+  if (context) {
+    throw new Error(
+      "DemoAuth can't be used inside a JazzContext or to upgrade anonymous users.",
+    );
+  }
 
   return [authMethod, state] as const;
 }

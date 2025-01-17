@@ -1,7 +1,6 @@
-import { AgentSecret } from "cojson";
+import { AgentSecret, CryptoProvider } from "cojson";
+import { AuthSecretStorage } from "jazz-browser";
 import { Account, AuthMethod, AuthResult, Credentials, ID } from "jazz-tools";
-
-const localStorageKey = "jazz-clerk-auth";
 
 export type MinimalClerkClient = {
   user:
@@ -21,15 +20,11 @@ export type MinimalClerkClient = {
   signOut: () => Promise<void>;
 };
 
-function saveCredentialsToLocalStorage(credentials: Credentials) {
-  localStorage.setItem(
-    localStorageKey,
-    JSON.stringify({
-      accountID: credentials.accountID,
-      secret: credentials.secret,
-    }),
-  );
-}
+type ClerkCredentials = {
+  jazzAccountID: ID<Account>;
+  jazzAccountSecret: AgentSecret;
+  jazzAccountSeed?: number[];
+};
 
 export class BrowserClerkAuth implements AuthMethod {
   constructor(
@@ -37,23 +32,27 @@ export class BrowserClerkAuth implements AuthMethod {
     private readonly clerkClient: MinimalClerkClient,
   ) {}
 
-  async start(): Promise<AuthResult> {
-    // Check local storage for credentials
-    const locallyStoredCredentials = localStorage.getItem(localStorageKey);
+  async start(crypto: CryptoProvider): Promise<AuthResult> {
+    AuthSecretStorage.migrate();
 
-    if (locallyStoredCredentials) {
+    // Check local storage for credentials
+    const credentials = AuthSecretStorage.get();
+
+    if (credentials && !credentials.isAnonymous) {
       try {
-        const credentials = JSON.parse(locallyStoredCredentials) as Credentials;
         return {
           type: "existing",
-          credentials,
+          credentials: {
+            accountID: credentials.accountID,
+            secret: credentials.accountSecret,
+          },
           saveCredentials: async () => {}, // No need to save credentials when recovering from local storage
           onSuccess: () => {},
           onError: (error: string | Error) => {
             this.driver.onError(error);
           },
           logOut: () => {
-            localStorage.removeItem(localStorageKey);
+            AuthSecretStorage.clear();
             void this.clerkClient.signOut();
           },
         };
@@ -63,22 +62,61 @@ export class BrowserClerkAuth implements AuthMethod {
     }
 
     if (this.clerkClient.user) {
+      const username =
+        this.clerkClient.user.fullName ||
+        this.clerkClient.user.username ||
+        this.clerkClient.user.id;
       // Check clerk user metadata for credentials
-      const storedCredentials = this.clerkClient.user.unsafeMetadata;
-      if (storedCredentials.jazzAccountID) {
-        if (!storedCredentials.jazzAccountSecret) {
+      const clerkCredentials = this.clerkClient.user
+        .unsafeMetadata as ClerkCredentials;
+      if (clerkCredentials.jazzAccountID) {
+        if (!clerkCredentials.jazzAccountSecret) {
+          this.driver.onError("No secret for existing user");
           throw new Error("No secret for existing user");
         }
         return {
           type: "existing",
           credentials: {
-            accountID: storedCredentials.jazzAccountID as ID<Account>,
-            secret: storedCredentials.jazzAccountSecret as AgentSecret,
+            accountID: clerkCredentials.jazzAccountID as ID<Account>,
+            secret: clerkCredentials.jazzAccountSecret as AgentSecret,
           },
           saveCredentials: async ({ accountID, secret }: Credentials) => {
-            saveCredentialsToLocalStorage({
+            AuthSecretStorage.set({
               accountID,
-              secret,
+              accountSecret: secret,
+              secretSeed: clerkCredentials.jazzAccountSeed
+                ? Uint8Array.from(clerkCredentials.jazzAccountSeed)
+                : undefined,
+            });
+          },
+          onSuccess: () => {},
+          onError: (error: string | Error) => {
+            this.driver.onError(error);
+          },
+          logOut: () => {
+            void this.clerkClient.signOut();
+          },
+        };
+      } else if (credentials?.isAnonymous) {
+        return {
+          type: "existing",
+          username,
+          credentials: {
+            accountID: credentials.accountID,
+            secret: credentials.accountSecret,
+          },
+          saveCredentials: async ({ accountID, secret }: Credentials) => {
+            AuthSecretStorage.set({
+              accountID,
+              accountSecret: secret,
+              secretSeed: credentials.secretSeed,
+            });
+            await this.clerkClient.user?.update({
+              unsafeMetadata: {
+                jazzAccountID: accountID,
+                jazzAccountSecret: secret,
+                jazzAccountSeed: Array.from(credentials.secretSeed),
+              } satisfies ClerkCredentials,
             });
           },
           onSuccess: () => {},
@@ -90,25 +128,26 @@ export class BrowserClerkAuth implements AuthMethod {
           },
         };
       } else {
+        const secretSeed = crypto.newRandomSecretSeed();
         // No credentials found, so we need to create new credentials
         return {
           type: "new",
           creationProps: {
-            name:
-              this.clerkClient.user.fullName ||
-              this.clerkClient.user.username ||
-              this.clerkClient.user.id,
+            name: username,
           },
+          initialSecret: crypto.agentSecretFromSecretSeed(secretSeed),
           saveCredentials: async ({ accountID, secret }: Credentials) => {
-            saveCredentialsToLocalStorage({
+            AuthSecretStorage.set({
               accountID,
-              secret,
+              secretSeed,
+              accountSecret: secret,
             });
             await this.clerkClient.user?.update({
               unsafeMetadata: {
                 jazzAccountID: accountID,
                 jazzAccountSecret: secret,
-              },
+                jazzAccountSeed: Array.from(secretSeed),
+              } satisfies ClerkCredentials,
             });
           },
           onSuccess: () => {},

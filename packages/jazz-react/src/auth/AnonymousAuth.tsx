@@ -1,7 +1,7 @@
-import { BrowserOnboardingAuth } from "jazz-browser";
-import { useMemo, useState } from "react";
+import { AuthSecretStorage, BrowserAnonymousAuth } from "jazz-browser";
+import { useEffect, useMemo, useState } from "react";
 
-type OnboardingAuthState = (
+type AnonymousAuthState = (
   | {
       state: "uninitialized";
     }
@@ -38,24 +38,40 @@ export function useOnboardingAuth(
     defaultUserName: "Anonymous user",
   },
 ) {
-  const [state, setState] = useState<OnboardingAuthState>({
+  const [state, setState] = useState<AnonymousAuthState>({
     state: "loading",
     errors: [],
   });
 
   const authMethod = useMemo(() => {
-    return new BrowserOnboardingAuth(defaultUserName, {
+    return new BrowserAnonymousAuth(defaultUserName, {
       onSignedIn: ({ logOut }) => {
         setState({ state: "signedIn", logOut, errors: [] });
       },
       onError: (error) => {
         setState((current) => ({
           ...current,
-          errors: [...current.errors, error.toString()],
+          errors: [error.toString()],
         }));
       },
     });
   }, [defaultUserName]);
 
   return [authMethod, state] as const;
+}
+
+export function useIsAnonymousUser() {
+  const [isAnonymous, setIsAnonymous] = useState(() =>
+    AuthSecretStorage.isAnonymous(),
+  );
+
+  useEffect(() => {
+    function handleUpdate() {
+      setIsAnonymous(AuthSecretStorage.isAnonymous());
+    }
+
+    return AuthSecretStorage.onUpdate(handleUpdate);
+  }, []);
+
+  return isAnonymous;
 }

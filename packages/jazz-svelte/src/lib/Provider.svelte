@@ -33,13 +33,15 @@
         auth === 'guest'
           ? {
               peer,
-              storage
+              storage,
+              guest: true,
             }
           : {
               AccountSchema: AccountSchema ?? Account as unknown as AccountClass<Acc>,
               auth,
               peer,
-              storage
+              storage,
+              guest: false,
             }
       ).then((context) => {
         ctx.current = {

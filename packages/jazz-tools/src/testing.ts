@@ -19,7 +19,7 @@ type TestAccountSchema<Acc extends Account> = CoValueClass<Acc> & {
   }) => Promise<Acc>;
 };
 
-class TestJSCrypto extends PureJSCrypto {
+export class TestJSCrypto extends PureJSCrypto {
   static async create() {
     if ("navigator" in globalThis && navigator.userAgent.includes("jsdom")) {
       // Mocking crypto seal & encrypt to make it work with JSDom. Getting "Error: Uint8Array expected" there

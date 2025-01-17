@@ -64,12 +64,13 @@ export const JazzProvider = defineComponent({
       try {
         const context = await createJazzBrowserContext<RegisteredAccount>(
           props.auth === "guest"
-            ? { peer: props.peer, storage: props.storage }
+            ? { peer: props.peer, storage: props.storage, guest: true }
             : {
                 AccountSchema: props.AccountSchema,
                 auth: props.auth,
                 peer: props.peer,
                 storage: props.storage,
+                guest: false,
               },
         );
 
@@ -77,7 +78,7 @@ export const JazzProvider = defineComponent({
           ...context,
           logOut: () => {
             logoutHandler.value?.();
-            // context.logOut();
+            context.logOut();
             key.value += 1;
           },
         };

@@ -1,5 +1,6 @@
 import { useAccount } from "jazz-react";
 import { useNavigate, useParams } from "react-router";
+import { LocalOnlyTag } from "./LocalOnlyTag";
 
 export function SidePanel() {
   const { playlistId } = useParams();
@@ -25,7 +26,7 @@ export function SidePanel() {
 
   return (
     <aside className="w-64 p-6 bg-white overflow-y-auto">
-      <div className="flex items-center mb-6">
+      <div className="flex items-center mb-1">
         <svg
           className="w-8 h-8 mr-2"
           viewBox="0 0 24 24"
@@ -45,6 +46,9 @@ export function SidePanel() {
           />
         </svg>
         <span className="text-xl font-bold text-blue-600">Music Player</span>
+      </div>
+      <div className="mb-6">
+        <LocalOnlyTag />
       </div>
       <nav>
         <h2 className="mb-2 text-sm font-semibold text-gray-600">Playlists</h2>
