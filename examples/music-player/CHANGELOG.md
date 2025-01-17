@@ -1,5 +1,13 @@
 # jazz-example-musicplayer
 
+## 0.0.51-jazz-bridge-preview.0
+
+### Patch Changes
+
+- Updated dependencies [5f43fbf]
+  - jazz-tools@0.9.10-jazz-bridge-preview.0
+  - jazz-react@0.9.10-jazz-bridge-preview.0
+
 ## 0.0.50
 
 ### Patch Changes

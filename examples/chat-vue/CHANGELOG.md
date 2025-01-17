@@ -1,5 +1,14 @@
 # chat-vue
 
+## 0.0.35-jazz-bridge-preview.0
+
+### Patch Changes
+
+- Updated dependencies [5f43fbf]
+  - jazz-tools@0.9.10-jazz-bridge-preview.0
+  - jazz-browser@0.9.10-jazz-bridge-preview.0
+  - jazz-vue@0.9.10-jazz-bridge-preview.0
+
 ## 0.0.34
 
 ### Patch Changes

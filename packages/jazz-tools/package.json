@@ -23,9 +23,10 @@
   },
   "type": "module",
   "license": "MIT",
-  "version": "0.9.9",
+  "version": "0.9.10-jazz-bridge-preview.0",
   "dependencies": {
-    "cojson": "workspace:*"
+    "cojson": "workspace:*",
+    "fast-myers-diff": "^3.2.0"
   },
   "scripts": {
     "format-and-lint": "biome check .",

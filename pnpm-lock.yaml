@@ -1525,8 +1525,6 @@ importers:
         specifier: 8.5.10
         version: 8.5.10
 
-  packages/coverage: {}
-
   packages/create-jazz-app:
     dependencies:
       chalk:
@@ -1569,6 +1567,22 @@ importers:
       react:
         specifier: 18.3.1
         version: 18.3.1
+      typescript:
+        specifier: ~5.6.2
+        version: 5.6.3
+
+  packages/jazz-bridge:
+    dependencies:
+      cojson:
+        specifier: workspace:0.9.9
+        version: link:../cojson
+      jazz-tools:
+        specifier: workspace:0.9.9
+        version: link:../jazz-tools
+    devDependencies:
+      jazz-run:
+        specifier: workspace:*
+        version: link:../jazz-run
       typescript:
         specifier: ~5.6.2
         version: 5.6.3
@@ -1958,6 +1972,9 @@ importers:
       cojson:
         specifier: workspace:*
         version: link:../cojson
+      fast-myers-diff:
+        specifier: ^3.2.0
+        version: 3.2.0
     devDependencies:
       tsup:
         specifier: 8.3.5
@@ -6959,6 +6976,9 @@ packages:
 
   fast-loops@1.1.4:
     resolution: {integrity: sha512-8dbd3XWoKCTms18ize6JmQF1SFnnfj5s0B7rRry22EofgMu7B6LKHVh+XfFqFGsqnbH54xgeO83PzpKI+ODhlg==}
+
+  fast-myers-diff@3.2.0:
+    resolution: {integrity: sha512-DxNm4a3gnV35AluvqjeAV3Zx3CAySs0tsaDjnex5JhnJAa2rxEUVCwmaL2gpz42ea1B+IJorlo7XLThXUaTQog==}
 
   fast-shallow-equal@1.0.0:
     resolution: {integrity: sha512-HPtaa38cPgWvaCFmRNhlc6NG7pv6NUHqjPgVAkWGoB9mQMwYB27/K0CvOM5Czy+qpT3e8XJ6Q4aPAnzpNpzNaw==}
@@ -17033,6 +17053,8 @@ snapshots:
   fast-list@1.0.3: {}
 
   fast-loops@1.1.4: {}
+
+  fast-myers-diff@3.2.0: {}
 
   fast-shallow-equal@1.0.0: {}
 

@@ -1,6 +1,6 @@
 {
   "name": "jazz-react-core",
-  "version": "0.8.50",
+  "version": "0.8.51-jazz-bridge-preview.0",
   "type": "module",
   "main": "dist/index.js",
   "types": "src/index.ts",

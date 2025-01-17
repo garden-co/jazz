@@ -1,6 +1,6 @@
 {
   "name": "jazz-react-native",
-  "version": "0.9.9",
+  "version": "0.9.10-jazz-bridge-preview.0",
   "type": "module",
   "main": "./dist/index.js",
   "module": "./dist/index.js",

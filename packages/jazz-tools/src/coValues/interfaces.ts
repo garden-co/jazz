@@ -27,6 +27,16 @@ export interface CoValueClass<Value extends CoValue = CoValue> {
   new (...args: any[]): Value;
 }
 
+export interface CoValueClassWithLoad<V extends CoValue>
+  extends CoValueClass<V> {
+  load<D extends DepthsIn<V>>(id: ID<V>, depth: D): Promise<DeeplyLoaded<V, D>>;
+  load<D extends DepthsIn<V>>(
+    id: ID<V>,
+    as: Account,
+    depth: D,
+  ): Promise<DeeplyLoaded<V, D>>;
+}
+
 export interface CoValueFromRaw<V extends CoValue> {
   fromRaw(raw: V["_raw"]): V;
 }

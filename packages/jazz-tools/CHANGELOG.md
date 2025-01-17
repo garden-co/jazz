@@ -1,5 +1,11 @@
 # jazz-tools
 
+## 0.9.10-jazz-bridge-preview.0
+
+### Patch Changes
+
+- 5f43fbf: Implement applyDiff for CoLists
+
 ## 0.9.9
 
 ### Patch Changes

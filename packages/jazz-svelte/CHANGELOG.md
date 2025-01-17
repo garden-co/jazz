@@ -1,5 +1,13 @@
 # jazz-svelte
 
+## 0.9.10-jazz-bridge-preview.0
+
+### Patch Changes
+
+- Updated dependencies [5f43fbf]
+  - jazz-tools@0.9.10-jazz-bridge-preview.0
+  - jazz-browser@0.9.10-jazz-bridge-preview.0
+
 ## 0.9.9
 
 ### Patch Changes

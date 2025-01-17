@@ -1,5 +1,11 @@
 # passkey-svelte
 
+## 0.0.19-jazz-bridge-preview.0
+
+### Patch Changes
+
+- jazz-svelte@0.9.10-jazz-bridge-preview.0
+
 ## 0.0.18
 
 ### Patch Changes

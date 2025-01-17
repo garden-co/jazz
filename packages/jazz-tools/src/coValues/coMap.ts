@@ -1,5 +1,6 @@
 import {
   AgentID,
+  CoValueCore,
   type CoValueUniqueness,
   CojsonInternalTypes,
   type JsonValue,
@@ -530,6 +531,59 @@ export class CoMap extends CoValueBase implements CoValue {
     const crypto =
       as._type === "Anonymous" ? as.node.crypto : as._raw.core.crypto;
     return cojsonInternals.idforHeader(header, crypto) as ID<M>;
+  }
+
+  static async getUnique<M extends CoMap>(
+    this: CoValueClass<M>,
+    unique: CoValueUniqueness["uniqueness"],
+    ownerID: ID<Account> | ID<Group>,
+    as: Account,
+  ): Promise<M> {
+    // TODO: this is broken and won't load the CoMap even if it already exists on peers!!
+
+    as ||= activeAccountContext.get();
+
+    const header = {
+      type: "comap" as const,
+      ruleset: {
+        type: "ownedByGroup" as const,
+        group: ownerID,
+      },
+      meta: null,
+      uniqueness: unique,
+    };
+
+    const crypto = as._raw.core.crypto;
+    const id = cojsonInternals.idforHeader(header, crypto) as ID<M>;
+
+    const existingEntry = as._raw.core.node.coValuesStore.get(id);
+
+    if (existingEntry) {
+      if (existingEntry.state.type === "available") {
+        return (this as CoValueClass<M> & typeof CoMap).fromRaw(
+          existingEntry.state.coValue.getCurrentContent(),
+        );
+      } else if (existingEntry.state.type !== "unknown") {
+        throw new Error(
+          `Can't handle intermediate state for unique CoMap: ${existingEntry.state.type}`,
+        );
+      }
+    }
+
+    as._raw.core.node.coValuesStore.setAsAvailable(
+      id,
+      new CoValueCore(header, as._raw.core.node),
+    );
+
+    const entry = as._raw.core.node.coValuesStore.get(id);
+
+    if (entry.state.type !== "available") {
+      throw new Error("CoValue not found");
+    }
+
+    return (this as CoValueClass<M> & typeof CoMap).fromRaw(
+      entry.state.coValue.getCurrentContent(),
+    );
   }
 
   /**

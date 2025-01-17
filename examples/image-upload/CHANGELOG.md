@@ -1,5 +1,14 @@
 # image-upload
 
+## 0.0.28-jazz-bridge-preview.0
+
+### Patch Changes
+
+- Updated dependencies [5f43fbf]
+  - jazz-tools@0.9.10-jazz-bridge-preview.0
+  - jazz-browser-media-images@0.9.10-jazz-bridge-preview.0
+  - jazz-react@0.9.10-jazz-bridge-preview.0
+
 ## 0.0.27
 
 ### Patch Changes

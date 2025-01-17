@@ -1,6 +1,6 @@
 {
   "name": "jazz-svelte",
-  "version": "0.9.9",
+  "version": "0.9.10-jazz-bridge-preview.0",
   "scripts": {
     "dev": "vite dev",
     "build": "vite build && npm run package",

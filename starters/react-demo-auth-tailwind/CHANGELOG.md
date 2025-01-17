@@ -1,5 +1,13 @@
 # jazz-tailwind-demo-auth-starter
 
+## 0.0.25-jazz-bridge-preview.0
+
+### Patch Changes
+
+- Updated dependencies [5f43fbf]
+  - jazz-tools@0.9.10-jazz-bridge-preview.0
+  - jazz-react@0.9.10-jazz-bridge-preview.0
+
 ## 0.0.24
 
 ### Patch Changes

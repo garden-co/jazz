@@ -1,5 +1,14 @@
 # chat-rn
 
+## 1.0.48-jazz-bridge-preview.0
+
+### Patch Changes
+
+- Updated dependencies [f76274c]
+- Updated dependencies [5f43fbf]
+  - jazz-react-native@0.9.10-jazz-bridge-preview.0
+  - jazz-tools@0.9.10-jazz-bridge-preview.0
+
 ## 1.0.47
 
 ### Patch Changes
