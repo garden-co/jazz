@@ -69,7 +69,7 @@ export async function createJazzRNContext<Acc extends Account>(
     options.peer,
     options.reconnectionTimeout,
     (peer) => {
-      node.syncManager.addPeer(peer);
+      node.addPeer(peer);
     },
   );
 

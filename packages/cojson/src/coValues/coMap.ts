@@ -2,7 +2,7 @@ import { CoID, RawCoValue } from "../coValue.js";
 import { CoValueCore } from "../coValueCore.js";
 import { AgentID, TransactionID } from "../ids.js";
 import { JsonObject, JsonValue } from "../jsonValue.js";
-import { CoValueKnownState } from "../sync.js";
+import { CoValueKnownState } from "../sync/types.js";
 import { accountOrAgentIDfromSessionID } from "../typeUtils/accountOrAgentIDfromSessionID.js";
 import { isCoValue } from "../typeUtils/isCoValue.js";
 import { RawAccountID } from "./account.js";

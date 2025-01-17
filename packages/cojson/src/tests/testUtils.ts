@@ -6,13 +6,14 @@ import {
   MetricReader,
 } from "@opentelemetry/sdk-metrics";
 import { expect, vi } from "vitest";
+import { CoID, RawCoValue } from "../coValue.js";
 import { ControlledAgent } from "../coValues/account.js";
 import { WasmCrypto } from "../crypto/WasmCrypto.js";
-import type { CoID, RawCoValue } from "../exports.js";
-import type { SessionID } from "../ids.js";
+import { SessionID } from "../ids.js";
 import { LocalNode } from "../localNode.js";
+import { Peer } from "../peer/index.js";
 import { connectedPeers } from "../streamUtils.js";
-import type { Peer, SyncMessage } from "../sync.js";
+import { SyncMessage } from "../sync/types.js";
 import { expectGroup } from "../typeUtils/expectGroup.js";
 
 const Crypto = await WasmCrypto.create();
@@ -48,8 +49,8 @@ export function connectTwoPeers(
     },
   );
 
-  a.syncManager.addPeer(bAsPeer);
-  b.syncManager.addPeer(aAsPeer);
+  a.addPeer(bAsPeer);
+  b.addPeer(aAsPeer);
 }
 
 export async function createTwoConnectedNodes(

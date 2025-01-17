@@ -1,6 +1,6 @@
 import { ValueType, metrics } from "@opentelemetry/api";
 import type { CoValuePriority } from "./priority.js";
-import type { SyncMessage } from "./sync.js";
+import { SyncMessage } from "./sync/types.js";
 
 function promiseWithResolvers<R>() {
   let resolve = (_: R) => {};

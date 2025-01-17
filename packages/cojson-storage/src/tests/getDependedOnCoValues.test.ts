@@ -10,13 +10,14 @@ function getMockedCoValueId() {
   return `co_z${Math.random().toString(36).substring(2, 15)}` as const;
 }
 
-function generateNewContentMessage(
+function generateNewDataMessage(
   privacy: "trusting" | "private",
   changes: any[],
   accountId?: `co_z${string}`,
 ) {
   return {
-    action: "content",
+    action: "data",
+    known: true,
     id: getMockedCoValueId(),
     new: {
       [getMockedSessionID(accountId)]: {
@@ -32,7 +33,7 @@ function generateNewContentMessage(
       },
     },
     priority: 0,
-  } as CojsonInternalTypes.NewContentMessage;
+  } as CojsonInternalTypes.DataMessage;
 }
 
 describe("getDependedOnCoValues", () => {
@@ -48,8 +49,8 @@ describe("getDependedOnCoValues", () => {
 
     const result = getDependedOnCoValues({
       coValueRow,
-      newContentMessages: [
-        generateNewContentMessage("trusting", [
+      newDataMessages: [
+        generateNewDataMessage("trusting", [
           { op: "set", key: "co_zabc123", value: "test" },
           { op: "set", key: "parent_co_zdef456", value: "test" },
           { op: "set", key: "normal_key", value: "test" },
@@ -70,7 +71,7 @@ describe("getDependedOnCoValues", () => {
       },
     } as any;
 
-    const message = generateNewContentMessage("trusting", [
+    const message = generateNewDataMessage("trusting", [
       { op: "set", key: "co_zabc123", value: "test" },
     ]);
 
@@ -88,7 +89,7 @@ describe("getDependedOnCoValues", () => {
 
     const result = getDependedOnCoValues({
       coValueRow,
-      newContentMessages: [message],
+      newDataMessages: [message],
     });
 
     expect(result).toEqual(["co_zabc123"]);
@@ -107,7 +108,7 @@ describe("getDependedOnCoValues", () => {
     } as any;
 
     const accountId = getMockedCoValueId();
-    const message = generateNewContentMessage(
+    const message = generateNewDataMessage(
       "trusting",
       [
         { op: "set", key: "co_zabc123", value: "test" },
@@ -125,7 +126,7 @@ describe("getDependedOnCoValues", () => {
 
     const result = getDependedOnCoValues({
       coValueRow,
-      newContentMessages: [message],
+      newDataMessages: [message],
     });
 
     expect(result).toEqual([groupId, accountId]);
@@ -143,8 +144,8 @@ describe("getDependedOnCoValues", () => {
 
     const result = getDependedOnCoValues({
       coValueRow,
-      newContentMessages: [
-        generateNewContentMessage("trusting", [
+      newDataMessages: [
+        generateNewDataMessage("trusting", [
           { op: "set", key: "co_zabc123", value: "test" },
           { op: "set", key: "parent_co_zdef456", value: "test" },
           { op: "set", key: "normal_key", value: "test" },
@@ -167,8 +168,8 @@ describe("getDependedOnCoValues", () => {
 
     const result = getDependedOnCoValues({
       coValueRow,
-      newContentMessages: [
-        generateNewContentMessage("private", [
+      newDataMessages: [
+        generateNewDataMessage("private", [
           { op: "set", key: "co_zabc123", value: "test" },
         ]),
       ],

@@ -1,8 +1,10 @@
 import { describe, expect, test, vi } from "vitest";
 import { PeerKnownStateActions } from "../PeerKnownStates.js";
-import { PeerState } from "../PeerState.js";
+import { Peer } from "../localNode.js";
+import { PeerEntry } from "../peer/PeerEntry.js";
 import { CO_VALUE_PRIORITY } from "../priority.js";
-import { Peer, SyncMessage } from "../sync.js";
+
+import { SyncMessage } from "../sync/types.js";
 
 function setup() {
   const mockPeer: Peer = {
@@ -16,7 +18,7 @@ function setup() {
       close: vi.fn(),
     },
   };
-  const peerState = new PeerState(mockPeer, undefined);
+  const peerState = new PeerEntry(mockPeer, undefined);
   return { mockPeer, peerState };
 }
 
@@ -160,7 +162,7 @@ describe("PeerState", () => {
     };
     peerState.dispatchToKnownStates(action);
 
-    const newPeerState = new PeerState(mockPeer, peerState.knownStates);
+    const newPeerState = new PeerEntry(mockPeer, peerState.knownStates);
 
     expect(newPeerState.knownStates).toEqual(peerState.knownStates);
     expect(newPeerState.optimisticKnownStates).toEqual(peerState.knownStates);

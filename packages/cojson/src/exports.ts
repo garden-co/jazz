@@ -21,8 +21,8 @@ import {
   RawBinaryCoStream,
   RawCoStream,
 } from "./coValues/coStream.js";
-import { EVERYONE, RawGroup } from "./coValues/group.js";
 import type { Everyone } from "./coValues/group.js";
+import { EVERYONE, RawGroup } from "./coValues/group.js";
 import {
   CryptoProvider,
   StreamingHash,
@@ -37,9 +37,20 @@ import {
   rawCoIDtoBytes,
 } from "./ids.js";
 import { Stringified, parseJSON, stableStringify } from "./jsonStringify.js";
-import { LocalNode } from "./localNode.js";
+import {
+  IncomingSyncStream,
+  LocalNode,
+  OutgoingSyncQueue,
+} from "./localNode.js";
+import { emptyDataMessage, unknownDataMessage } from "./peer/PeerOperations.js";
 import type { Role } from "./permissions.js";
+import { getPriorityFromHeader } from "./priority.js";
+import { FileSystem } from "./storage/FileSystem.js";
+import { BlockFilename, LSMStorage, WalFilename } from "./storage/index.js";
 import { Channel, connectedPeers } from "./streamUtils.js";
+import { DisconnectedError, PingTimeoutError } from "./sync.js";
+import type { SyncMessage } from "./sync/types.js";
+import { emptyKnownState } from "./sync/types.js";
 import { accountOrAgentIDfromSessionID } from "./typeUtils/accountOrAgentIDfromSessionID.js";
 import { expectGroup } from "./typeUtils/expectGroup.js";
 import { isAccountID } from "./typeUtils/isAccountID.js";
@@ -59,24 +70,9 @@ import type { AgentSecret } from "./crypto/crypto.js";
 import type { AgentID, RawCoID, SessionID } from "./ids.js";
 import type { JsonValue } from "./jsonValue.js";
 import type * as Media from "./media.js";
+import type { Peer } from "./peer/index.js";
 import { disablePermissionErrors } from "./permissions.js";
-import type {
-  IncomingSyncStream,
-  OutgoingSyncQueue,
-  Peer,
-  SyncMessage,
-} from "./sync.js";
-import {
-  DisconnectedError,
-  PingTimeoutError,
-  emptyKnownState,
-} from "./sync.js";
-
 type Value = JsonValue | AnyRawCoValue;
-
-import { getPriorityFromHeader } from "./priority.js";
-import { FileSystem } from "./storage/FileSystem.js";
-import { BlockFilename, LSMStorage, WalFilename } from "./storage/index.js";
 
 /** @hidden */
 export const cojsonInternals = {
@@ -139,6 +135,8 @@ export {
   isRawCoID,
   LSMStorage,
   emptyKnownState,
+  emptyDataMessage,
+  unknownDataMessage,
   RawCoPlainText,
   stringifyOpID,
 };
@@ -160,12 +158,15 @@ export type {
 
 // eslint-disable-next-line @typescript-eslint/no-namespace
 export namespace CojsonInternalTypes {
-  export type CoValueKnownState = import("./sync.js").CoValueKnownState;
-  export type DoneMessage = import("./sync.js").DoneMessage;
-  export type KnownStateMessage = import("./sync.js").KnownStateMessage;
-  export type LoadMessage = import("./sync.js").LoadMessage;
-  export type NewContentMessage = import("./sync.js").NewContentMessage;
-  export type SessionNewContent = import("./sync.js").SessionNewContent;
+  export type KnownStateMessage = import("./sync/types.js").KnownStateMessage;
+  export type CoValueKnownState = import("./sync/types.js").CoValueKnownState;
+  export type CoValueContent = import("./sync/types.js").CoValueContent;
+  export type NewContentMessage = import("./sync/types.js").NewContentMessage;
+  export type PullMessage = import("./sync/types.js").PullMessage;
+  export type PushMessage = import("./sync/types.js").PushMessage;
+  export type DataMessage = import("./sync/types.js").DataMessage;
+  export type AckMessage = import("./sync/types.js").AckMessage;
+  export type SessionNewContent = import("./coValueCore.js").SessionNewContent;
   export type CoValueHeader = import("./coValueCore.js").CoValueHeader;
   export type Transaction = import("./coValueCore.js").Transaction;
   export type TransactionID = import("./ids.js").TransactionID;

@@ -30,7 +30,7 @@ export async function startWorker<Acc extends Account>(
 
   let node: LocalNode | undefined = undefined;
   const wsPeer = webSocketWithReconnection(syncServer, (peer) => {
-    node?.syncManager.addPeer(peer);
+    node?.addPeer(peer);
   });
 
   if (!accountID) {

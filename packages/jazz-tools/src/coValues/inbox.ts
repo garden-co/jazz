@@ -246,7 +246,7 @@ export class Inbox {
 
     const node = account._raw.core.node;
 
-    const root = await node.load(profile.inbox as CoID<InboxRoot>);
+    const root = await node.load(profile.inbox);
 
     if (root === "unavailable") {
       throw new Error("Inbox not found");
@@ -326,7 +326,9 @@ export class InboxSender<I extends CoValue, O extends CoValue | undefined> {
       throw new Error("Failed to load the inbox owner");
     }
 
-    const inboxOwnerProfileRaw = await node.load(inboxOwnerRaw.get("profile")!);
+    const inboxOwnerProfileRaw = await node.load<RawCoMap>(
+      inboxOwnerRaw.get("profile")!,
+    );
 
     if (inboxOwnerProfileRaw === "unavailable") {
       throw new Error("Failed to load the inbox owner profile");
@@ -340,7 +342,7 @@ export class InboxSender<I extends CoValue, O extends CoValue | undefined> {
 
     const id = await acceptInvite(inboxInvite as InboxInvite, currentAccount);
 
-    const messages = await node.load(id);
+    const messages = await node.load<MessagesStream>(id);
 
     if (messages === "unavailable") {
       throw new Error("Inbox not found");

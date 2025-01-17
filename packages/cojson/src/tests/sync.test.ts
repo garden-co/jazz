@@ -9,7 +9,7 @@ import { stableStringify } from "../jsonStringify.js";
 import { LocalNode } from "../localNode.js";
 import { getPriorityFromHeader } from "../priority.js";
 import { connectedPeers, newQueuePair } from "../streamUtils.js";
-import type { SyncMessage } from "../sync.js";
+import { SyncMessage } from "../sync/types.js";
 import {
   blockMessageTypeOnOutgoingPeer,
   connectTwoPeers,
@@ -37,7 +37,7 @@ test("Node replies with initial tx and header to empty subscribe", async () => {
   const [outRx, outTx] = newQueuePair();
   const outRxQ = outRx[Symbol.asyncIterator]();
 
-  node.syncManager.addPeer({
+  node.addPeer({
     id: "test",
     incoming: inRx,
     outgoing: outTx,
@@ -118,7 +118,7 @@ test("Node replies with only new tx to subscribe with some known state", async (
   const [outRx, outTx] = newQueuePair();
   const outRxQ = outRx[Symbol.asyncIterator]();
 
-  node.syncManager.addPeer({
+  node.addPeer({
     id: "test",
     incoming: inRx,
     outgoing: outTx,
@@ -193,7 +193,7 @@ test("After subscribing, node sends own known state and new txs to peer", async 
   const [outRx, outTx] = newQueuePair();
   const outRxQ = outRx[Symbol.asyncIterator]();
 
-  node.syncManager.addPeer({
+  node.addPeer({
     id: "test",
     incoming: inRx,
     outgoing: outTx,
@@ -309,7 +309,7 @@ test("Client replies with known new content to tellKnownState from server", asyn
   const [outRx, outTx] = newQueuePair();
   const outRxQ = outRx[Symbol.asyncIterator]();
 
-  node.syncManager.addPeer({
+  node.addPeer({
     id: "test",
     incoming: inRx,
     outgoing: outTx,
@@ -383,7 +383,7 @@ test("No matter the optimistic known state, node respects invalid known state me
   const [outRx, outTx] = newQueuePair();
   const outRxQ = outRx[Symbol.asyncIterator]();
 
-  node.syncManager.addPeer({
+  node.addPeer({
     id: "test",
     incoming: inRx,
     outgoing: outTx,
@@ -483,7 +483,7 @@ test("If we add a peer, but it never subscribes to a coValue, it won't get any m
   const [outRx, outTx] = newQueuePair();
   const outRxQ = outRx[Symbol.asyncIterator]();
 
-  node.syncManager.addPeer({
+  node.addPeer({
     id: "test",
     incoming: inRx,
     outgoing: outTx,
@@ -519,7 +519,7 @@ test.todo(
     const [outRx, outTx] = newQueuePair();
     const outRxQ = outRx[Symbol.asyncIterator]();
 
-    node.syncManager.addPeer({
+    node.addPeer({
       id: "test",
       incoming: inRx,
       outgoing: outTx,
@@ -592,7 +592,7 @@ test.skip("If we add a server peer, newly created coValues are auto-subscribed t
   const [outRx, outTx] = newQueuePair();
   const outRxQ = outRx[Symbol.asyncIterator]();
 
-  node.syncManager.addPeer({
+  node.addPeer({
     id: "test",
     incoming: inRx,
     outgoing: outTx,
@@ -648,7 +648,7 @@ test("When we connect a new server peer, we try to sync all existing coValues to
   const [outRx, outTx] = newQueuePair();
   const outRxQ = outRx[Symbol.asyncIterator]();
 
-  node.syncManager.addPeer({
+  node.addPeer({
     id: "test",
     incoming: inRx,
     outgoing: outTx,
@@ -684,7 +684,7 @@ test("When receiving a subscribe with a known state that is ahead of our own, pe
   const [outRx, outTx] = newQueuePair();
   const outRxQ = outRx[Symbol.asyncIterator]();
 
-  node.syncManager.addPeer({
+  node.addPeer({
     id: "test",
     incoming: inRx,
     outgoing: outTx,
@@ -723,7 +723,7 @@ test.skip("When replaying creation and transactions of a coValue as new content,
   const [outRx1, outTx1] = newQueuePair();
   const outRxQ1 = outRx1[Symbol.asyncIterator]();
 
-  node1.syncManager.addPeer({
+  node1.addPeer({
     id: "test2",
     incoming: inRx1,
     outgoing: outTx1,
@@ -741,7 +741,7 @@ test.skip("When replaying creation and transactions of a coValue as new content,
   const [outRx2, outTx2] = newQueuePair();
   const outRxQ2 = outRx2[Symbol.asyncIterator]();
 
-  node2.syncManager.addPeer({
+  node2.addPeer({
     id: "test1",
     incoming: inRx2,
     outgoing: outTx2,
@@ -884,8 +884,8 @@ test("Can sync a coValue through a server to another client", async () => {
     },
   );
 
-  client1.syncManager.addPeer(serverAsPeerForClient1);
-  server.syncManager.addPeer(client1AsPeer);
+  client1.addPeer(serverAsPeerForClient1);
+  server.addPeer(client1AsPeer);
 
   const client2 = new LocalNode(
     admin,
@@ -903,8 +903,8 @@ test("Can sync a coValue through a server to another client", async () => {
     },
   );
 
-  client2.syncManager.addPeer(serverAsPeerForClient2);
-  server.syncManager.addPeer(client2AsPeer);
+  client2.addPeer(serverAsPeerForClient2);
+  server.addPeer(client2AsPeer);
 
   const mapOnClient2 = await client2.loadCoValueCore(map.core.id);
   if (mapOnClient2 === "unavailable") {
@@ -936,8 +936,8 @@ test("Can sync a coValue with private transactions through a server to another c
     peer2role: "client",
   });
 
-  client1.syncManager.addPeer(serverAsPeer);
-  server.syncManager.addPeer(client1AsPeer);
+  client1.addPeer(serverAsPeer);
+  server.addPeer(client1AsPeer);
 
   const client2 = new LocalNode(
     admin,
@@ -955,8 +955,8 @@ test("Can sync a coValue with private transactions through a server to another c
     },
   );
 
-  client2.syncManager.addPeer(serverAsOtherPeer);
-  server.syncManager.addPeer(client2AsPeer);
+  client2.addPeer(serverAsOtherPeer);
+  server.addPeer(client2AsPeer);
 
   const mapOnClient2 = await client2.loadCoValueCore(map.core.id);
   if (mapOnClient2 === "unavailable") {
@@ -1103,13 +1103,13 @@ test("If we start loading a coValue before connecting to a peer that has it, it 
     // trace: true,
   });
 
-  node1.syncManager.addPeer(node2asPeer);
+  node1.addPeer(node2asPeer);
 
   const mapOnNode2Promise = node2.loadCoValueCore(map.core.id);
 
   expect(node2.coValuesStore.get(map.core.id).state.type).toEqual("unknown");
 
-  node2.syncManager.addPeer(node1asPeer);
+  node2.addPeer(node1asPeer);
 
   const mapOnNode2 = await mapOnNode2Promise;
   if (mapOnNode2 === "unavailable") {
@@ -1195,8 +1195,8 @@ describe("sync - extra tests", () => {
       peer2role: "client",
     });
 
-    node1.syncManager.addPeer(node2AsPeer);
-    node2.syncManager.addPeer(node1AsPeer);
+    node1.addPeer(node2AsPeer);
+    node2.addPeer(node1AsPeer);
 
     // Wait for initial sync
     await new Promise((resolve) => setTimeout(resolve, 100));
@@ -1491,12 +1491,12 @@ describe("sync - extra tests", () => {
       },
     );
 
-    node1.syncManager.addPeer(node2AsPeerFor1);
-    node1.syncManager.addPeer(node3AsPeerFor1);
-    node2.syncManager.addPeer(node1AsPeerFor2);
-    node2.syncManager.addPeer(node3AsPeerFor2);
-    node3.syncManager.addPeer(node1AsPeerFor3);
-    node3.syncManager.addPeer(node2AsPeerFor3);
+    node1.addPeer(node2AsPeerFor1);
+    node1.addPeer(node3AsPeerFor1);
+    node2.addPeer(node1AsPeerFor2);
+    node2.addPeer(node3AsPeerFor2);
+    node3.addPeer(node1AsPeerFor3);
+    node3.addPeer(node2AsPeerFor3);
 
     // Wait for initial sync
     await new Promise((resolve) => setTimeout(resolve, 100));
@@ -1592,10 +1592,10 @@ describe("sync - extra tests", () => {
       },
     );
 
-    node1.syncManager.addPeer(newNode3AsPeerFor1);
-    node2.syncManager.addPeer(newNode3AsPeerFor2);
-    node3.syncManager.addPeer(newNode1AsPeerFor3);
-    node3.syncManager.addPeer(newNode2AsPeerFor3);
+    node1.addPeer(newNode3AsPeerFor1);
+    node2.addPeer(newNode3AsPeerFor2);
+    node3.addPeer(newNode1AsPeerFor3);
+    node3.addPeer(newNode2AsPeerFor3);
 
     // Wait for re-sync
     await new Promise((resolve) => setTimeout(resolve, 200));
@@ -1806,7 +1806,7 @@ describe("SyncManager.addPeer", () => {
     });
 
     // Add new peer with different ID
-    client.syncManager.addPeer(brandNewPeer);
+    client.addPeer(brandNewPeer);
 
     // Verify that the new peer starts with empty known states
     const newPeerKnownStates =

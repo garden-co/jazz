@@ -4,7 +4,7 @@ import { WebSocketServer } from "ws";
 
 import { mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
-import { SQLiteStorage } from "cojson-storage-sqlite";
+import { SQLiteNode, SQLiteStorage } from "cojson-storage-sqlite";
 import { createWebSocketPeer } from "cojson-transport-ws";
 
 export const startSyncServer = async ({
@@ -38,9 +38,10 @@ export const startSyncServer = async ({
   if (!inMemory) {
     await mkdir(dirname(db), { recursive: true });
 
+    SQLiteNode.USE_PROTOCOL2 = true;
     const storage = await SQLiteStorage.asPeer({ filename: db });
 
-    localNode.syncManager.addPeer(storage);
+    localNode.addPeer(storage);
   }
 
   wss.on("connection", function connection(ws, req) {
@@ -66,7 +67,7 @@ export const startSyncServer = async ({
 
     const clientId = clientAddress + "@" + new Date().toISOString();
 
-    localNode.syncManager.addPeer(
+    localNode.addPeer(
       createWebSocketPeer({
         id: clientId,
         role: "client",
