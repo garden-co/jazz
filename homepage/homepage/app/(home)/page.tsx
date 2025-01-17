@@ -19,13 +19,15 @@ export default function Home() {
       <ProblemStatementSection />
 
       <div className="container flex flex-col gap-12 mt-12 lg:gap-20 lg:mt-20">
+        <LocalFirstFeaturesSection />
+
         <HowJazzWorksSection />
 
         <Testimonial name="Spreadsheet app (stealth)" role="CTO">
           <p>
             You don&apos;t have to think about deploying a database, SQL
             schemas, relations, and writing queries… Basically,{" "}
-            <span className="bg-blue-50 px-1 dark:bg-transparent">
+            <span className="bg-blue-50 px-1 dark:bg-blue-950">
               if you know TypeScript, you know Jazz
             </span>
             , and you can ship an app. It&apos;s just so nice!
@@ -33,8 +35,6 @@ export default function Home() {
         </Testimonial>
 
         <ChatDemoSection />
-
-        <LocalFirstFeaturesSection />
 
         <CollaborationFeaturesSection />
 
@@ -44,7 +44,7 @@ export default function Home() {
           We just wanted to build a single-player experience first, planning to
           add team and org features much later. But because of Jazz, we had that
           from day one.{" "}
-          <span className="bg-blue-50 px-1 dark:bg-transparent">
+          <span className="bg-blue-50 px-1 dark:bg-blue-950">
             All we needed to add was an invite button.
           </span>
         </Testimonial>
