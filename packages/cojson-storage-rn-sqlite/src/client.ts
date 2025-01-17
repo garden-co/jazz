@@ -1,4 +1,3 @@
-import { type DB as DatabaseT } from "@op-engineering/op-sqlite";
 import { CojsonInternalTypes, type OutgoingSyncQueue, RawCoID } from "cojson";
 import type {
   DBClientInterface,
@@ -10,19 +9,32 @@ import type {
 } from "cojson-storage";
 import { Transaction } from "cojson/src/coValueCore.js";
 import { Signature } from "cojson/src/crypto/crypto.js";
+import { SQLiteAdapter } from "./sqliteAdapter.js";
 
 export class SQLiteClient implements DBClientInterface {
-  private readonly db: DatabaseT;
+  private readonly adapter: SQLiteAdapter;
+  private initialized: Promise<void>;
 
-  constructor(db: DatabaseT, _: OutgoingSyncQueue) {
-    this.db = db;
+  constructor(adapter: SQLiteAdapter, _: OutgoingSyncQueue) {
+    this.adapter = adapter;
+    // Initialize adapter in constructor and store promise
+    this.initialized = this.adapter.initialize();
+  }
+
+  async ensureInitialized() {
+    console.log("[SQLiteClient] ensuring initialized");
+    await this.initialized;
+    console.log("[SQLiteClient] initialization complete");
   }
 
   async getCoValue(coValueId: RawCoID): Promise<StoredCoValueRow | undefined> {
-    const { rows } = await this.db.execute(
+    await this.ensureInitialized();
+    console.log("[SQLiteClient] getting coValue", coValueId);
+    const { rows } = await this.adapter.execute(
       "SELECT * FROM coValues WHERE id = ?",
       [coValueId],
     );
+    console.log("[SQLiteClient] coValue", rows);
 
     if (!rows || rows.length === 0) return;
 
@@ -43,10 +55,13 @@ export class SQLiteClient implements DBClientInterface {
   }
 
   async getCoValueSessions(coValueRowId: number): Promise<StoredSessionRow[]> {
-    const { rows } = await this.db.execute(
+    await this.ensureInitialized();
+    console.log("[SQLiteClient] getting coValueSessions", coValueRowId);
+    const { rows } = await this.adapter.execute(
       "SELECT * FROM sessions WHERE coValue = ?",
       [coValueRowId],
     );
+    console.log("[SQLiteClient] coValueSessions");
     return rows as StoredSessionRow[];
   }
 
@@ -54,11 +69,17 @@ export class SQLiteClient implements DBClientInterface {
     sessionRowId: number,
     firstNewTxIdx: number,
   ): Promise<TransactionRow[]> {
-    const { rows } = await this.db.execute(
+    await this.ensureInitialized();
+    console.log(
+      "[SQLiteClient] getting new transaction in session",
+      sessionRowId,
+      firstNewTxIdx,
+    );
+    const { rows } = await this.adapter.execute(
       "SELECT * FROM transactions WHERE ses = ? AND idx >= ?",
       [sessionRowId, firstNewTxIdx],
     );
-
+    console.log("[SQLiteClient] new transaction in session");
     if (!rows || rows.length === 0) return [];
 
     try {
@@ -72,25 +93,44 @@ export class SQLiteClient implements DBClientInterface {
     }
   }
 
-  getSignatures(
+  async getSignatures(
     sessionRowId: number,
     firstNewTxIdx: number,
-  ): Promise<SignatureAfterRow[]> | SignatureAfterRow[] {
-    const { rows } = this.db.executeSync(
+  ): Promise<SignatureAfterRow[]> {
+    await this.ensureInitialized();
+    console.log(
+      "[SQLiteClient] getting signatures",
+      sessionRowId,
+      firstNewTxIdx,
+    );
+    if (!this.adapter.executeSync) {
+      // If the adapter doesn't support sync execution, fall back to async
+      const { rows } = await this.adapter.execute(
+        "SELECT * FROM signatureAfter WHERE ses = ? AND idx >= ?",
+        [sessionRowId, firstNewTxIdx],
+      );
+      console.log("[SQLiteClient] signatures");
+      return rows as SignatureAfterRow[];
+    }
+
+    const { rows } = this.adapter.executeSync(
       "SELECT * FROM signatureAfter WHERE ses = ? AND idx >= ?",
       [sessionRowId, firstNewTxIdx],
     );
+    console.log("[SQLiteClient] signatures");
     return rows as SignatureAfterRow[];
   }
 
   async addCoValue(
     msg: CojsonInternalTypes.NewContentMessage,
   ): Promise<number> {
-    const { insertId } = await this.db.execute(
+    await this.ensureInitialized();
+    console.log("[SQLiteClient] adding coValue", msg.id);
+    const { insertId } = await this.adapter.execute(
       "INSERT INTO coValues (id, header) VALUES (?, ?)",
       [msg.id, JSON.stringify(msg.header)],
     );
-
+    console.log("[SQLiteClient] coValue added", msg.id);
     return insertId ?? 0;
   }
 
@@ -99,12 +139,18 @@ export class SQLiteClient implements DBClientInterface {
   }: {
     sessionUpdate: SessionRow;
   }): Promise<number> {
-    const { rows } = await this.db.execute(
+    await this.ensureInitialized();
+    console.log(
+      "[SQLiteClient] adding session update",
+      sessionUpdate.coValue,
+      sessionUpdate.sessionID,
+    );
+    const { rows } = await this.adapter.execute(
       `INSERT INTO sessions (coValue, sessionID, lastIdx, lastSignature, bytesSinceLastSignature) 
        VALUES (?, ?, ?, ?, ?)
-       ON CONFLICT(coValue, sessionID) 
-       DO UPDATE SET lastIdx=excluded.lastIdx, 
-                    lastSignature=excluded.lastSignature, 
+       ON CONFLICT(coValue, sessionID)
+       DO UPDATE SET lastIdx=excluded.lastIdx,
+                    lastSignature=excluded.lastSignature,
                     bytesSinceLastSignature=excluded.bytesSinceLastSignature
        RETURNING rowID`,
       [
@@ -115,6 +161,11 @@ export class SQLiteClient implements DBClientInterface {
         sessionUpdate.bytesSinceLastSignature!,
       ],
     );
+    console.log(
+      "[SQLiteClient] session update added",
+      sessionUpdate.coValue,
+      sessionUpdate.sessionID,
+    );
     return rows[0]?.rowID as number;
   }
 
@@ -122,11 +173,15 @@ export class SQLiteClient implements DBClientInterface {
     sessionRowID: number,
     nextIdx: number,
     newTransaction: Transaction,
-  ): Promise<void> {
-    await this.db.execute(
+  ): Promise<number> {
+    await this.ensureInitialized();
+    console.log("[SQLiteClient] adding transaction", sessionRowID, nextIdx);
+    const { rowsAffected } = await this.adapter.execute(
       "INSERT INTO transactions (ses, idx, tx) VALUES (?, ?, ?)",
       [sessionRowID, nextIdx, JSON.stringify(newTransaction)],
     );
+    console.log("[SQLiteClient] transaction added", sessionRowID, nextIdx);
+    return rowsAffected;
   }
 
   async addSignatureAfter({
@@ -137,20 +192,26 @@ export class SQLiteClient implements DBClientInterface {
     sessionRowID: number;
     idx: number;
     signature: Signature;
-  }): Promise<void> {
-    await this.db.execute(
+  }): Promise<number> {
+    await this.ensureInitialized();
+    console.log("[SQLiteClient] adding signature after", sessionRowID, idx);
+    const { rowsAffected } = await this.adapter.execute(
       "INSERT INTO signatureAfter (ses, idx, signature) VALUES (?, ?, ?)",
       [sessionRowID, idx, signature],
     );
+    return rowsAffected;
   }
 
   async unitOfWork(
     operationsCallback: () => Promise<unknown>[],
   ): Promise<void> {
+    await this.ensureInitialized();
+    console.log("[SQLiteClient] unit of work");
     try {
-      await this.db.transaction(async () => {
+      await this.adapter.transaction(async () => {
         await Promise.all(operationsCallback());
       });
+      console.log("[SQLiteClient] unit of work complete");
     } catch (e) {
       console.error("Transaction failed:", e);
       throw e;

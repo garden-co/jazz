@@ -1,4 +1,4 @@
-import { SQLiteStorage } from "cojson-storage-rn-sqlite";
+import { type SQLiteAdapter, SQLiteStorage } from "cojson-storage-rn-sqlite";
 import {
   Account,
   AgentID,
@@ -48,7 +48,7 @@ export type ReactNativeContextOptions<Acc extends Account> = {
 export type BaseReactNativeContextOptions = {
   peer: `wss://${string}` | `ws://${string}`;
   reconnectionTimeout?: number;
-  storage?: "sqlite" | "disabled";
+  storage?: (new (...args: any[]) => SQLiteAdapter) | "disabled";
   CryptoProvider?: typeof PureJSCrypto | typeof RNQuickCrypto;
 };
 
@@ -77,11 +77,12 @@ export async function createJazzRNContext<Acc extends Account>(
 
   const peersToLoadFrom = [websocketPeer.peer];
 
-  if (options.storage === "sqlite") {
+  if (options.storage && options.storage !== "disabled") {
+    const adapter = new options.storage("jazz-storage");
     const storage = await SQLiteStorage.asPeer({
-      filename: "jazz-storage",
-      trace: false,
+      adapter,
     });
+    console.log("[createJazzRNContext] storage initialized as peer", storage);
     peersToLoadFrom.push(storage);
   }
 

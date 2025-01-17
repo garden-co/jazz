@@ -52,6 +52,7 @@ async function setStorageVersion(kvStore: KvStore, version: number) {
 }
 
 async function getExistingUsers(kvStore: KvStore) {
+  // await kvStore.delete("demo-auth-existing-users");
   const existingUsers = await kvStore.get("demo-auth-existing-users");
   return existingUsers ? existingUsers.split(",") : [];
 }

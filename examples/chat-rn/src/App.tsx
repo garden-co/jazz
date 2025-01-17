@@ -10,6 +10,9 @@ import React, { StrictMode, useEffect, useState } from "react";
 import HandleInviteScreen from "./invite";
 
 import { DemoAuthBasicUI, JazzProvider, useDemoAuth } from "jazz-react-native";
+
+// import { OPSQLiteAdapter } from "cojson-storage-rn-op-sqlite-adapter";
+import { ExpoSQLiteAdapter } from "cojson-storage-rn-expo-sqlite-adapter";
 import ChatScreen from "./chat";
 
 const Stack = createNativeStackNavigator();
@@ -51,7 +54,7 @@ function App() {
     <StrictMode>
       <JazzProvider
         auth={auth}
-        storage="sqlite"
+        storage={ExpoSQLiteAdapter}
         peer="wss://cloud.jazz.tools/?key=chat-rn-example-jazz@garden.co"
       >
         <NavigationContainer linking={linking} ref={navigationRef}>

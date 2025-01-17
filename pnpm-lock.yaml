@@ -107,9 +107,6 @@ importers:
       '@azure/core-asynciterator-polyfill':
         specifier: ^1.0.2
         version: 1.0.2
-      '@op-engineering/op-sqlite':
-        specifier: ^11.2.12
-        version: 11.2.12(react-native@0.76.5(@babel/core@7.26.0)(@babel/preset-env@7.26.0(@babel/core@7.26.0))(@types/react@18.3.18)(react@18.3.1))(react@18.3.1)
       '@react-native-community/netinfo':
         specifier: ^11.4.1
         version: 11.4.1(react-native@0.76.5(@babel/core@7.26.0)(@babel/preset-env@7.26.0(@babel/core@7.26.0))(@types/react@18.3.18)(react@18.3.1))
@@ -125,8 +122,11 @@ importers:
       clsx:
         specifier: ^2.0.0
         version: 2.1.1
+      cojson-storage-rn-expo-sqlite-adapter:
+        specifier: workspace:*
+        version: link:../../packages/cojson-storage-rn-expo-sqlite-adapter
       expo:
-        specifier: ^52.0.0
+        specifier: ^52.0.21
         version: 52.0.21(@babel/core@7.26.0)(@babel/preset-env@7.26.0(@babel/core@7.26.0))(@expo/metro-runtime@4.0.0(react-native@0.76.5(@babel/core@7.26.0)(@babel/preset-env@7.26.0(@babel/core@7.26.0))(@types/react@18.3.18)(react@18.3.1)))(react-native@0.76.5(@babel/core@7.26.0)(@babel/preset-env@7.26.0(@babel/core@7.26.0))(@types/react@18.3.18)(react@18.3.1))(react@18.3.1)
       expo-build-properties:
         specifier: ~0.13.1
@@ -149,6 +149,9 @@ importers:
       expo-secure-store:
         specifier: ~14.0.0
         version: 14.0.0(expo@52.0.21(@babel/core@7.26.0)(@babel/preset-env@7.26.0(@babel/core@7.26.0))(@expo/metro-runtime@4.0.0(react-native@0.76.5(@babel/core@7.26.0)(@babel/preset-env@7.26.0(@babel/core@7.26.0))(@types/react@18.3.18)(react@18.3.1)))(react-native@0.76.5(@babel/core@7.26.0)(@babel/preset-env@7.26.0(@babel/core@7.26.0))(@types/react@18.3.18)(react@18.3.1))(react@18.3.1))
+      expo-sqlite:
+        specifier: ~15.0.3
+        version: 15.0.6(expo@52.0.21(@babel/core@7.26.0)(@babel/preset-env@7.26.0(@babel/core@7.26.0))(@expo/metro-runtime@4.0.0(react-native@0.76.5(@babel/core@7.26.0)(@babel/preset-env@7.26.0(@babel/core@7.26.0))(@types/react@18.3.18)(react@18.3.1)))(react-native@0.76.5(@babel/core@7.26.0)(@babel/preset-env@7.26.0(@babel/core@7.26.0))(@types/react@18.3.18)(react@18.3.1))(react@18.3.1))(react-native@0.76.5(@babel/core@7.26.0)(@babel/preset-env@7.26.0(@babel/core@7.26.0))(@types/react@18.3.18)(react@18.3.1))(react@18.3.1)
       expo-status-bar:
         specifier: ~2.0.0
         version: 2.0.0(react-native@0.76.5(@babel/core@7.26.0)(@babel/preset-env@7.26.0(@babel/core@7.26.0))(@types/react@18.3.18)(react@18.3.1))(react@18.3.1)
@@ -282,6 +285,9 @@ importers:
       expo-splash-screen:
         specifier: ~0.29.16
         version: 0.29.18(expo@52.0.21(@babel/core@7.26.0)(@babel/preset-env@7.26.0(@babel/core@7.26.0))(@expo/metro-runtime@4.0.0(react-native@0.76.5(@babel/core@7.26.0)(@babel/preset-env@7.26.0(@babel/core@7.26.0))(@types/react@18.3.18)(react@18.3.1)))(react-native@0.76.5(@babel/core@7.26.0)(@babel/preset-env@7.26.0(@babel/core@7.26.0))(@types/react@18.3.18)(react@18.3.1))(react@18.3.1))
+      expo-sqlite:
+        specifier: ~15.0.6
+        version: 15.0.6(expo@52.0.21(@babel/core@7.26.0)(@babel/preset-env@7.26.0(@babel/core@7.26.0))(@expo/metro-runtime@4.0.0(react-native@0.76.5(@babel/core@7.26.0)(@babel/preset-env@7.26.0(@babel/core@7.26.0))(@types/react@18.3.18)(react@18.3.1)))(react-native@0.76.5(@babel/core@7.26.0)(@babel/preset-env@7.26.0(@babel/core@7.26.0))(@types/react@18.3.18)(react@18.3.1))(react@18.3.1))(react-native@0.76.5(@babel/core@7.26.0)(@babel/preset-env@7.26.0(@babel/core@7.26.0))(@types/react@18.3.18)(react@18.3.1))(react@18.3.1)
       expo-status-bar:
         specifier: ~2.0.0
         version: 2.0.0(react-native@0.76.5(@babel/core@7.26.0)(@babel/preset-env@7.26.0(@babel/core@7.26.0))(@types/react@18.3.18)(react@18.3.1))(react@18.3.1)
@@ -1477,6 +1483,32 @@ importers:
         specifier: ^8.15.0
         version: 8.41.0
 
+  packages/cojson-storage-rn-expo-sqlite-adapter:
+    dependencies:
+      cojson-storage-rn-sqlite:
+        specifier: workspace:*
+        version: link:../cojson-storage-rn-sqlite
+    devDependencies:
+      expo-sqlite:
+        specifier: ^13.2.0
+        version: 13.4.0(expo@52.0.21(@babel/core@7.26.0)(@babel/preset-env@7.26.0(@babel/core@7.26.0))(@expo/metro-runtime@4.0.0(react-native@0.76.5(@babel/core@7.26.0)(@babel/preset-env@7.26.0(@babel/core@7.26.0))(@types/react@18.3.18)(react@18.3.1)))(react-native@0.76.5(@babel/core@7.26.0)(@babel/preset-env@7.26.0(@babel/core@7.26.0))(@types/react@18.3.18)(react@18.3.1))(react@18.3.1))
+      typescript:
+        specifier: ~5.6.2
+        version: 5.6.3
+
+  packages/cojson-storage-rn-op-sqlite-adapter:
+    dependencies:
+      cojson-storage-rn-sqlite:
+        specifier: workspace:*
+        version: link:../cojson-storage-rn-sqlite
+    devDependencies:
+      '@op-engineering/op-sqlite':
+        specifier: ^11.2.12
+        version: 11.2.12(react-native@0.76.5(@babel/core@7.26.0)(@babel/preset-env@7.26.0(@babel/core@7.26.0))(@types/react@18.3.18)(react@18.3.1))(react@18.3.1)
+      typescript:
+        specifier: ~5.6.2
+        version: 5.6.3
+
   packages/cojson-storage-rn-sqlite:
     dependencies:
       cojson:
@@ -1486,9 +1518,6 @@ importers:
         specifier: workspace:*
         version: link:../cojson-storage
     devDependencies:
-      '@op-engineering/op-sqlite':
-        specifier: ^11.2.12
-        version: 11.2.12(react-native@0.76.5(@babel/core@7.26.0)(@babel/preset-env@7.26.0(@babel/core@7.26.0))(@types/react@18.3.18)(react@18.3.1))(react@18.3.1)
       typescript:
         specifier: ~5.6.2
         version: 5.6.3
@@ -3643,6 +3672,9 @@ packages:
   '@expo/vector-icons@14.0.4':
     resolution: {integrity: sha512-+yKshcbpDfbV4zoXOgHxCwh7lkE9VVTT5T03OUlBsqfze1PLy6Hi4jp1vSb1GVbY6eskvMIivGVc9SKzIv0oEQ==}
 
+  '@expo/websql@1.0.1':
+    resolution: {integrity: sha512-H9/t1V7XXyKC343FJz/LwaVBfDhs6IqhDtSYWpt8LNSQDVjf5NvVJLc5wp+KCpRidZx8+0+YeHJN45HOXmqjFA==}
+
   '@expo/xcpretty@4.3.2':
     resolution: {integrity: sha512-ReZxZ8pdnoI3tP/dNnJdnmAk7uLT4FjsKDGW7YeDdvdOMz2XCQSmSCM9IWlrXuWtMF9zeSB6WJtEhCQ41gQOfw==}
     hasBin: true
@@ -5503,6 +5535,9 @@ packages:
   argparse@2.0.1:
     resolution: {integrity: sha512-8+9WqebbFzpX9OR+Wa6O29asIogeRMzcGtAINdpMHHyAg10f05aSFVBbcEqGf/PXw1EjAZ+q2/bEBg3DvurK3Q==}
 
+  argsarray@0.0.1:
+    resolution: {integrity: sha512-u96dg2GcAKtpTrBdDoFIM7PjcBA+6rSP0OR94MOReNRyUECL6MtQt5XXmRr4qrftYaef9+l5hcpO5te7sML1Cg==}
+
   aria-hidden@1.2.4:
     resolution: {integrity: sha512-y+CcFFwelSXpLZk/7fMB2mUbGtX9lKycf1MWJ7CaTIERyitVlyQx6C+sxcROU2BAJ24OiZyK+8wj2i8AlBoS3A==}
     engines: {node: '>=10'}
@@ -6863,6 +6898,18 @@ packages:
     peerDependencies:
       expo: '*'
 
+  expo-sqlite@13.4.0:
+    resolution: {integrity: sha512-5f7d2EDM+pgerM33KndtX4gWw2nuVaXY68nnqx7PhkiYeyEmeNfZ29bIFtpBzNb/L5l0/DTtRxuSqftxbknFtw==}
+    peerDependencies:
+      expo: '*'
+
+  expo-sqlite@15.0.6:
+    resolution: {integrity: sha512-3cW8n6Lxj9P3JhbHQhLhPXBl/UAYZgKbbs19XbtaVM81LKiaUR6W1VLIaxGcv0vRVWfmEdGCbv12gF888szOig==}
+    peerDependencies:
+      expo: '*'
+      react: 18.3.1
+      react-native: '*'
+
   expo-status-bar@2.0.0:
     resolution: {integrity: sha512-vxxdpvpNDMTEc5uTiIrbTvySKKUsOACmfl8OZuUdjNle05oGqwtq3v5YObwym/njSByjoyuZX8UpXBZnxvarwQ==}
     peerDependencies:
@@ -7455,6 +7502,9 @@ packages:
 
   immediate@3.0.6:
     resolution: {integrity: sha512-XXOFtyqDjNDAQxVfYxuF7g9Il/IbWmmlQg2MYKOH8ExIT1qg6xc4zyS3HaEEATgs1btfzxq15ciUiY7gjSXRGQ==}
+
+  immediate@3.3.0:
+    resolution: {integrity: sha512-HR7EVodfFUdQCTIeySw+WDRFJlPcLOJbXfwwZ7Oom6tjsvZ3bOkCDJHehQC3nxJrv7+f9XecwazynjU8e4Vw3Q==}
 
   import-fresh@2.0.0:
     resolution: {integrity: sha512-eZ5H8rcgYazHbKC3PG4ClHNykCSxtAhxSSEM+2mb+7evD2CKF5V7c0dNum7AdpDh0ZdICwZY9sRSn8f+KH96sg==}
@@ -8769,6 +8819,9 @@ packages:
   node-releases@2.0.19:
     resolution: {integrity: sha512-xxOWJsBKtzAq7DY0J+DTzuz58K8e7sJbdgwkbMWQe8UYB6ekmsQ45q0M/tJDsGaZmbC+l7n57UV8Hl5tHxO9uw==}
 
+  noop-fn@1.0.0:
+    resolution: {integrity: sha512-pQ8vODlgXt2e7A3mIbFDlizkr46r75V+BJxVAyat8Jl7YmI513gG5cfyRL0FedKraoZ+VAouI1h4/IWpus5pcQ==}
+
   nopt@8.0.0:
     resolution: {integrity: sha512-1L/fTJ4UmV/lUxT2Uf006pfZKTvAgCF+chz+0OgBHO8u2Z67pE7AaAUUj7CJy0lXqHmymUvGFt6NE9R3HER0yw==}
     engines: {node: ^18.17.0 || >=20.5.0}
@@ -9221,6 +9274,9 @@ packages:
   postcss@8.4.49:
     resolution: {integrity: sha512-OCVPnIObs4N29kxTjzLfUryOkvZEq+pf8jTF0lg8E7uETuWHA+v7j3c/xJmiqpX450191LlmZfUKkXxkTry7nA==}
     engines: {node: ^10 || ^12 || >=14}
+
+  pouchdb-collections@1.0.1:
+    resolution: {integrity: sha512-31db6JRg4+4D5Yzc2nqsRqsA2oOkZS8DpFav3jf/qVNBxusKa2ClkEIZ2bJNpaDbMfWtnuSq59p6Bn+CipPMdg==}
 
   preact@10.25.3:
     resolution: {integrity: sha512-dzQmIFtM970z+fP9ziQ3yG4e3ULIbwZzJ734vaMVUTaKQ2+Ru1Ou/gjshOYVHCcd1rpAelC6ngjvjDXph98unQ==}
@@ -10493,6 +10549,9 @@ packages:
 
   tiny-glob@0.2.9:
     resolution: {integrity: sha512-g/55ssRPUjShh+xkfx9UPDXqhckHEsHr4Vd9zX55oSdGZc/MD0m3sferOkwWtp98bv+kcVfEHtRJgBVJzelrzg==}
+
+  tiny-queue@0.2.1:
+    resolution: {integrity: sha512-EijGsv7kzd9I9g0ByCl6h42BWNGUZrlCSejfrb3AKeHC33SGbASu1VDf5O3rRiiUOhAC9CHdZxFPbZu0HmR70A==}
 
   tinybench@2.9.0:
     resolution: {integrity: sha512-0+DUvqWMValLmha6lr4kD8iAMK1HzV0/aKnCtWb9v9641TnP/MFb7Pc2bxoxQjTXAErryXVgUOfv2YqNllqGeg==}
@@ -13162,6 +13221,14 @@ snapshots:
     dependencies:
       prop-types: 15.8.1
 
+  '@expo/websql@1.0.1':
+    dependencies:
+      argsarray: 0.0.1
+      immediate: 3.3.0
+      noop-fn: 1.0.0
+      pouchdb-collections: 1.0.1
+      tiny-queue: 0.2.1
+
   '@expo/xcpretty@4.3.2':
     dependencies:
       '@babel/code-frame': 7.10.4
@@ -15418,6 +15485,8 @@ snapshots:
 
   argparse@2.0.1: {}
 
+  argsarray@0.0.1: {}
+
   aria-hidden@1.2.4:
     dependencies:
       tslib: 2.8.1
@@ -16922,6 +16991,17 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
+  expo-sqlite@13.4.0(expo@52.0.21(@babel/core@7.26.0)(@babel/preset-env@7.26.0(@babel/core@7.26.0))(@expo/metro-runtime@4.0.0(react-native@0.76.5(@babel/core@7.26.0)(@babel/preset-env@7.26.0(@babel/core@7.26.0))(@types/react@18.3.18)(react@18.3.1)))(react-native@0.76.5(@babel/core@7.26.0)(@babel/preset-env@7.26.0(@babel/core@7.26.0))(@types/react@18.3.18)(react@18.3.1))(react@18.3.1)):
+    dependencies:
+      '@expo/websql': 1.0.1
+      expo: 52.0.21(@babel/core@7.26.0)(@babel/preset-env@7.26.0(@babel/core@7.26.0))(@expo/metro-runtime@4.0.0(react-native@0.76.5(@babel/core@7.26.0)(@babel/preset-env@7.26.0(@babel/core@7.26.0))(@types/react@18.3.18)(react@18.3.1)))(react-native@0.76.5(@babel/core@7.26.0)(@babel/preset-env@7.26.0(@babel/core@7.26.0))(@types/react@18.3.18)(react@18.3.1))(react@18.3.1)
+
+  expo-sqlite@15.0.6(expo@52.0.21(@babel/core@7.26.0)(@babel/preset-env@7.26.0(@babel/core@7.26.0))(@expo/metro-runtime@4.0.0(react-native@0.76.5(@babel/core@7.26.0)(@babel/preset-env@7.26.0(@babel/core@7.26.0))(@types/react@18.3.18)(react@18.3.1)))(react-native@0.76.5(@babel/core@7.26.0)(@babel/preset-env@7.26.0(@babel/core@7.26.0))(@types/react@18.3.18)(react@18.3.1))(react@18.3.1))(react-native@0.76.5(@babel/core@7.26.0)(@babel/preset-env@7.26.0(@babel/core@7.26.0))(@types/react@18.3.18)(react@18.3.1))(react@18.3.1):
+    dependencies:
+      expo: 52.0.21(@babel/core@7.26.0)(@babel/preset-env@7.26.0(@babel/core@7.26.0))(@expo/metro-runtime@4.0.0(react-native@0.76.5(@babel/core@7.26.0)(@babel/preset-env@7.26.0(@babel/core@7.26.0))(@types/react@18.3.18)(react@18.3.1)))(react-native@0.76.5(@babel/core@7.26.0)(@babel/preset-env@7.26.0(@babel/core@7.26.0))(@types/react@18.3.18)(react@18.3.1))(react@18.3.1)
+      react: 18.3.1
+      react-native: 0.76.5(@babel/core@7.26.0)(@babel/preset-env@7.26.0(@babel/core@7.26.0))(@types/react@18.3.18)(react@18.3.1)
+
   expo-status-bar@2.0.0(react-native@0.76.5(@babel/core@7.26.0)(@babel/preset-env@7.26.0(@babel/core@7.26.0))(@types/react@18.3.18)(react@18.3.1))(react@18.3.1):
     dependencies:
       react: 18.3.1
@@ -17552,6 +17632,8 @@ snapshots:
       queue: 6.0.2
 
   immediate@3.0.6: {}
+
+  immediate@3.3.0: {}
 
   import-fresh@2.0.0:
     dependencies:
@@ -19086,6 +19168,8 @@ snapshots:
 
   node-releases@2.0.19: {}
 
+  noop-fn@1.0.0: {}
+
   nopt@8.0.0:
     dependencies:
       abbrev: 2.0.0
@@ -19510,6 +19594,8 @@ snapshots:
       nanoid: 3.3.8
       picocolors: 1.1.1
       source-map-js: 1.2.1
+
+  pouchdb-collections@1.0.1: {}
 
   preact@10.25.3: {}
 
@@ -20941,6 +21027,8 @@ snapshots:
     dependencies:
       globalyzer: 0.1.0
       globrex: 0.1.2
+
+  tiny-queue@0.2.1: {}
 
   tinybench@2.9.0: {}
 
