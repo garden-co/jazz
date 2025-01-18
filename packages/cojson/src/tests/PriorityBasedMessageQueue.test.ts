@@ -22,7 +22,7 @@ describe("PriorityBasedMessageQueue", () => {
     const { queue } = setup();
     expect(queue["defaultPriority"]).toBe(CO_VALUE_PRIORITY.MEDIUM);
     expect(queue["queues"].length).toBe(8);
-    expect(queue["queues"].every((q) => q.length === 0)).toBe(true);
+    expect(queue["queues"].every((q) => !q.isNonEmpty())).toBe(true);
   });
 
   test("should push message with default priority", async () => {

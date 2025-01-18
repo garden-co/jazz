@@ -92,7 +92,7 @@ export class PeerState {
 
     this.processing = true;
 
-    let entry: QueueEntry | undefined;
+    let entry: QueueEntry<SyncMessage> | undefined;
     while ((entry = this.queue.pull())) {
       // Awaiting the push to send one message at a time
       // This way when the peer is "under pressure" we can enqueue all
@@ -129,7 +129,7 @@ export class PeerState {
   }
 
   private closeQueue() {
-    let entry: QueueEntry | undefined;
+    let entry: QueueEntry<SyncMessage> | undefined;
     while ((entry = this.queue.pull())) {
       // Using resolve here to avoid unnecessary noise in the logs
       entry.resolve();

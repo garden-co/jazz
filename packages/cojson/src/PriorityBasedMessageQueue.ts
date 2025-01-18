@@ -18,11 +18,12 @@ function promiseWithResolvers<R>() {
   };
 }
 
-export type QueueEntry = {
-  msg: SyncMessage;
+export type QueueEntry<V> = {
+  msg: V;
   promise: Promise<void>;
   resolve: () => void;
   reject: (_: unknown) => void;
+  next: QueueEntry<V> | undefined;
 };
 
 /**
@@ -33,10 +34,68 @@ type Tuple<T, N extends number, A extends unknown[] = []> = A extends {
 }
   ? A
   : Tuple<T, N, [...A, T]>;
-type QueueTuple = Tuple<QueueEntry[], 8>;
+type QueueTuple = Tuple<Queue<SyncMessage>, 8>;
+
+class Queue<V> {
+  head: QueueEntry<V> | undefined = undefined;
+  tail: QueueEntry<V> | undefined = undefined;
+
+  push(msg: V) {
+    const { promise, resolve, reject } = promiseWithResolvers<void>();
+    const entry: QueueEntry<V> = {
+      msg,
+      promise,
+      resolve,
+      reject,
+      next: undefined,
+    };
+
+    if (this.head === undefined) {
+      this.head = entry;
+    } else {
+      if (this.tail === undefined) {
+        throw new Error("Tail is null but head is not");
+      }
+
+      this.tail.next = entry;
+    }
+
+    this.tail = entry;
+
+    return entry;
+  }
+
+  pull() {
+    const entry = this.head;
+
+    if (entry) {
+      this.head = entry.next;
+    }
+
+    if (this.head === undefined) {
+      this.tail = undefined;
+    }
+
+    return entry;
+  }
+
+  isNonEmpty() {
+    return this.head !== undefined;
+  }
+}
 
 export class PriorityBasedMessageQueue {
-  private queues: QueueTuple = [[], [], [], [], [], [], [], []];
+  private queues: QueueTuple = [
+    new Queue(),
+    new Queue(),
+    new Queue(),
+    new Queue(),
+    new Queue(),
+    new Queue(),
+    new Queue(),
+    new Queue(),
+  ];
+
   queueSizeCounter = metrics
     .getMeter("cojson")
     .createUpDownCounter("jazz.messagequeue.size", {
@@ -52,22 +111,19 @@ export class PriorityBasedMessageQueue {
   constructor(private defaultPriority: CoValuePriority) {}
 
   public push(msg: SyncMessage) {
-    const { promise, resolve, reject } = promiseWithResolvers<void>();
-    const entry: QueueEntry = { msg, promise, resolve, reject };
-
     const priority = "priority" in msg ? msg.priority : this.defaultPriority;
 
-    this.getQueue(priority).push(entry);
+    const entry = this.getQueue(priority).push(msg);
 
     this.queueSizeCounter.add(1, {
       priority,
     });
 
-    return promise;
+    return entry.promise;
   }
 
   public pull() {
-    const priority = this.queues.findIndex((queue) => queue.length > 0);
+    const priority = this.queues.findIndex((queue) => queue.isNonEmpty());
 
     if (priority === -1) {
       return;
@@ -77,6 +133,6 @@ export class PriorityBasedMessageQueue {
       priority,
     });
 
-    return this.queues[priority]?.shift();
+    return this.queues[priority]?.pull();
   }
 }
