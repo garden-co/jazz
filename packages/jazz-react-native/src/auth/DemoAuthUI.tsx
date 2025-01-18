@@ -7,6 +7,7 @@ import {
   TextInput,
   TouchableOpacity,
   View,
+  useColorScheme,
 } from "react-native";
 import { KvStore } from "../storage/kv-store-context.js";
 import { RNDemoAuth } from "./DemoAuthMethod.js";
@@ -104,7 +105,8 @@ export const DemoAuthBasicUI = ({
   appName: string;
   state: DemoAuthState;
 }) => {
-  const darkMode = false;
+  const colorScheme = useColorScheme();
+  const darkMode = colorScheme === "dark";
   const [username, setUsername] = useState<string>("");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
