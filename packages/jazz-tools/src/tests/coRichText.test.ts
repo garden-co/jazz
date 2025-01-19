@@ -35,7 +35,7 @@ describe("CoRichText", async () => {
         owner: me,
       });
 
-      text.insertAfter(5, " cruel");
+      text.insertAfter(4, " cruel");
       expect(text + "").toEqual("hello cruel world");
     });
 
@@ -655,7 +655,7 @@ describe("CoRichText", async () => {
       const update1 = (await queue.next()).value;
       expect(update1.toString()).toBe("hello world");
 
-      text.insertAfter(5, " beautiful");
+      text.insertAfter(4, " beautiful");
       const update2 = (await queue.next()).value;
       expect(update2.toString()).toBe("hello beautiful world");
 
@@ -824,6 +824,13 @@ describe("CoRichText", async () => {
   });
 
   describe("Mark", () => {
+    const text = CoRichText.createFromPlainText(
+      "Hello, hello you beautiful world", // 32 characters
+      {
+        owner: me,
+      },
+    );
+
     test("basic mark", () => {
       const mark = Marks.Strong.create(
         {
@@ -851,7 +858,7 @@ describe("CoRichText", async () => {
       );
 
       const result = mark.validatePositions(
-        11, // text length
+        text.length,
         (pos: TextPos) => text.idxAfter(pos),
         (pos: TextPos) => text.idxBefore(pos),
       );
@@ -870,14 +877,14 @@ describe("CoRichText", async () => {
           tag: "strong",
           startAfter: text.posAfter(-5) as TextPos, // Invalid position
           startBefore: text.posBefore(1) as TextPos,
-          endAfter: text.posAfter(4) as TextPos,
-          endBefore: text.posBefore(20) as TextPos, // Beyond text length
+          endAfter: text.posAfter(35) as TextPos,
+          endBefore: text.posBefore(36) as TextPos, // Beyond text length
         },
         { owner: me },
       );
 
       const result = mark.validatePositions(
-        11,
+        text.length,
         (pos: TextPos) => text.idxAfter(pos),
         (pos: TextPos) => text.idxBefore(pos),
       );
@@ -885,8 +892,8 @@ describe("CoRichText", async () => {
       expect(result).toMatchObject({
         startAfter: 0, // Clamped to start
         startBefore: 1,
-        endAfter: 4,
-        endBefore: 11, // Clamped to text length
+        endAfter: 31,
+        endBefore: 32, // Clamped to text length
       });
     });
 
@@ -929,6 +936,131 @@ describe("CoRichText", async () => {
       expect(emMark.tag).toBe("em");
       expect(linkMark.tag).toBe("link");
       expect(linkMark).toHaveProperty("url", "https://example.com");
+    });
+
+    describe("validatePositions", () => {
+      test("returns null for empty text", () => {
+        const mark = Marks.Strong.create(
+          {
+            tag: "strong",
+            startAfter: text.posAfter(0) as TextPos,
+            startBefore: text.posBefore(1) as TextPos,
+            endAfter: text.posAfter(4) as TextPos,
+            endBefore: text.posBefore(5) as TextPos,
+          },
+          { owner: me },
+        );
+        expect(
+          mark.validatePositions(
+            0,
+            (pos) => text.idxAfter(pos),
+            (pos) => text.idxBefore(pos),
+          ),
+        ).toBe(null);
+      });
+
+      test("enforces consistent uncertainty regions", () => {
+        const mark = Marks.Strong.create(
+          {
+            tag: "strong",
+            startAfter: text.posAfter(5) as TextPos,
+            startBefore: text.posBefore(6) as TextPos,
+            endAfter: text.posAfter(10) as TextPos,
+            endBefore: text.posBefore(11) as TextPos,
+          },
+          { owner: me },
+        );
+
+        const result = mark.validatePositions(
+          text.length,
+          (pos) => text.idxAfter(pos),
+          (pos) => text.idxBefore(pos),
+        );
+        expect(result).toEqual({
+          startAfter: 5,
+          startBefore: 6,
+          endAfter: 10,
+          endBefore: 11,
+        });
+      });
+
+      test("enforces minimum uncertainty region size", () => {
+        // Try to set positions with 0-unit uncertainty regions
+        const mark = Marks.Strong.create(
+          {
+            tag: "strong",
+            startAfter: text.posAfter(5) as TextPos,
+            startBefore: text.posBefore(5) as TextPos, // Same as startAfter
+            endAfter: text.posAfter(10) as TextPos,
+            endBefore: text.posBefore(10) as TextPos, // Same as endAfter
+          },
+          { owner: me },
+        );
+
+        const result = mark.validatePositions(
+          text.length,
+          (pos) => text.idxAfter(pos),
+          (pos) => text.idxBefore(pos),
+        );
+        expect(result).toEqual({
+          startAfter: 5,
+          startBefore: 6, // Forced to be startAfter + 1
+          endAfter: 9,
+          endBefore: 10, // Forced to be endAfter + 1
+        });
+      });
+
+      test("clamps positions to text bounds", () => {
+        // Set positions outside text bounds
+        const mark = Marks.Strong.create(
+          {
+            tag: "strong",
+            startAfter: text.posAfter(-1) as TextPos,
+            startBefore: text.posBefore(0) as TextPos,
+            endAfter: text.posAfter(35) as TextPos,
+            endBefore: text.posBefore(36) as TextPos,
+          },
+          { owner: me },
+        );
+
+        const result = mark.validatePositions(
+          text.length,
+          (pos) => text.idxAfter(pos),
+          (pos) => text.idxBefore(pos),
+        );
+        expect(result).toEqual({
+          startAfter: 0,
+          startBefore: 1,
+          endAfter: 31,
+          endBefore: 32,
+        });
+      });
+
+      test("maintains proper position ordering", () => {
+        // Set positions in wrong order
+        const mark = Marks.Strong.create(
+          {
+            tag: "strong",
+            startAfter: text.posAfter(8) as TextPos,
+            startBefore: text.posBefore(5) as TextPos,
+            endAfter: text.posAfter(15) as TextPos, //
+            endBefore: text.posBefore(14) as TextPos,
+          },
+          { owner: me },
+        );
+
+        const result = mark.validatePositions(
+          text.length,
+          (pos) => text.idxAfter(pos),
+          (pos) => text.idxBefore(pos),
+        );
+        expect(result).toEqual({
+          startAfter: 8,
+          startBefore: 9, // Forced to be after startAfter
+          endAfter: 13,
+          endBefore: 14, // Forced to be after endAfter
+        });
+      });
     });
   });
 });
