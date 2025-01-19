@@ -766,6 +766,9 @@ importers:
       clsx:
         specifier: ^2.0.0
         version: 2.1.1
+      jazz-inspector:
+        specifier: workspace:*
+        version: link:../../packages/jazz-inspector
       jazz-react:
         specifier: workspace:0.9.10
         version: link:../../packages/jazz-react
@@ -1632,6 +1635,40 @@ importers:
       '@types/pica':
         specifier: ^9.0.4
         version: 9.0.4
+
+  packages/jazz-inspector:
+    dependencies:
+      cojson:
+        specifier: workspace:0.9.10
+        version: link:../cojson
+      jazz-react-core:
+        specifier: workspace:*
+        version: link:../jazz-react-core
+      lucide-react:
+        specifier: ^0.274.0
+        version: 0.274.0(react@18.3.1)
+      react:
+        specifier: 18.3.1
+        version: 18.3.1
+    devDependencies:
+      '@types/react':
+        specifier: ^18.3.12
+        version: 18.3.18
+      '@types/react-dom':
+        specifier: ^18.3.1
+        version: 18.3.5(@types/react@18.3.18)
+      '@vitejs/plugin-react-swc':
+        specifier: ^3.3.2
+        version: 3.7.2(@swc/helpers@0.5.15)(vite@5.4.11(@types/node@22.10.2)(lightningcss@1.28.2)(terser@5.37.0))
+      rollup-plugin-node-externals:
+        specifier: ^8.0.0
+        version: 8.0.0(rollup@4.28.1)
+      typescript:
+        specifier: ~5.6.2
+        version: 5.6.3
+      vite:
+        specifier: ^5.4.10
+        version: 5.4.11(@types/node@22.10.2)(lightningcss@1.28.2)(terser@5.37.0)
 
   packages/jazz-nodejs:
     dependencies:
