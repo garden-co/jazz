@@ -81,8 +81,8 @@ async function runCommand(command: string, exportFileName: string, port: number)
 
             // Spawn the benchmark process ...
             const outputStream = fs.createWriteStream(`./benchmarks/${exportFileName}.txt`, { flags: 'a' });
-            const benchmarkProcess = spawn('pnpm', ['run', 'playwright'], {
-            // const benchmarkProcess = spawn('pnpm', ['run', 'k6'], {
+            // const benchmarkProcess = spawn('pnpm', ['run', 'playwright'], {
+            const benchmarkProcess = spawn('pnpm', ['run', 'k6'], {
                 stdio: ['ignore', 'pipe', 'pipe'],
                 env: {
                     ...process.env

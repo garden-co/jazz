@@ -12,12 +12,12 @@ const shared = new SharedArray('shared state', function() {
 });
 
 const metrics = {
-  connectionTime: new Trend('covalue_pageload_time', true),
-  loadTime: new Trend('covalue_load_time', true),
-  createTime: new Trend('covalue_create_time', true),
-  mutationTime: new Trend('covalue_mutation_time', true),
-  mutationEventsReceived: new Counter('covalue_mutations_received'),
-  mutatedEventsLost: new Counter('covalue_mutations_lost')
+  connectionTime: new Trend('_0_load_page_duration', true),
+  loadTime: new Trend('_1_load_text_duration', true),
+  createTime: new Trend('_2_create_text_duration', true),
+  mutationTime: new Trend('_3_mutate_text_duration', true),
+  mutationEventsReceived: new Counter('_3_mutate_text_events_received'),
+  mutatedEventsLost: new Counter('_3_mutate_text_events_lost')
 };
 
 export const options = {
@@ -30,8 +30,8 @@ export const options = {
         },
       },
       vus: 1,
-      iterations: 1,
-      maxDuration: '30s'
+      iterations: 2,
+      // maxDuration: '30s'
     },
     // Main browser doing the mutation
     mutator: {
@@ -42,7 +42,7 @@ export const options = {
         },
       },
       vus: 1,
-      iterations: 1,
+      iterations: 2,
       exec: 'mutatorFunction',
       startTime: '1s'
     },
@@ -55,7 +55,7 @@ export const options = {
         },
       },
       vus: 10,
-      iterations: 1,
+      iterations: 2,
       exec: 'watcherFunction',
       startTime: '1s'
     }
@@ -154,7 +154,7 @@ export async function mutatorFunction() {
 
     // FIXME: Select random CoValue
     await page.locator('#coValueSelect').selectOption( shared[1].selectedUUID );
-    // sleep(2);
+    sleep(5);
       
     // Mutate CoValue
     const mutationStart = Date.now();
