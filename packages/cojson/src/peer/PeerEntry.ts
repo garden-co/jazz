@@ -1,52 +1,33 @@
-import { PeerKnownStateActions, PeerKnownStates } from "./PeerKnownStates.js";
 import {
   PriorityBasedMessageQueue,
   QueueEntry,
-} from "./PriorityBasedMessageQueue.js";
-import { TryAddTransactionsError } from "./coValueCore.js";
-import { RawCoID } from "./ids.js";
-import { CO_VALUE_PRIORITY } from "./priority.js";
-import { Peer, SyncMessage } from "./sync.js";
+} from "../PriorityBasedMessageQueue.js";
+import { TryAddTransactionsError } from "../coValueCore.js";
+import { TRACE_SYNC_MESSAGES } from "../globals.js";
+import { RawCoID } from "../ids.js";
+import { IncomingSyncStream, OutgoingSyncQueue } from "../localNode.js";
+import { CO_VALUE_PRIORITY } from "../priority.js";
+import { SyncMessage } from "../sync/types.js";
+import { PeerOperations } from "./PeerOperations.js";
+import { transformOutgoingMessageToPeer } from "./transformers.js";
 
-export class PeerState {
-  constructor(
-    private peer: Peer,
-    knownStates: PeerKnownStates | undefined,
-  ) {
-    this.optimisticKnownStates = knownStates?.clone() ?? new PeerKnownStates();
+export type PeerID = string;
+export interface Peer {
+  id: PeerID;
+  incoming: IncomingSyncStream;
+  outgoing: OutgoingSyncQueue;
+  role: "peer" | "server" | "client" | "storage";
+  priority?: number;
+  crashOnClose: boolean;
+  deletePeerStateOnClose?: boolean;
+}
 
-    // We assume that exchanges with storage peers are always successful
-    // hence we don't need to differentiate between knownStates and optimisticKnownStates
-    if (peer.role === "storage") {
-      this.knownStates = this.optimisticKnownStates;
-    } else {
-      this.knownStates = knownStates?.clone() ?? new PeerKnownStates();
-    }
-  }
+// NOTE Renamed PeerState into PeerEntry
+export class PeerEntry {
+  private readonly ops: PeerOperations;
 
-  /**
-   * Here we to collect all the known states that a given peer has told us about.
-   *
-   * This can be used to safely track the sync state of a coValue in a given peer.
-   */
-  readonly knownStates: PeerKnownStates;
-
-  /**
-   * This one collects the known states "optimistically".
-   * We use it to keep track of the content we have sent to a given peer.
-   *
-   * The main difference with knownState is that this is updated when the content is sent to the peer without
-   * waiting for any acknowledgement from the peer.
-   */
-  readonly optimisticKnownStates: PeerKnownStates;
-  readonly toldKnownState: Set<RawCoID> = new Set();
-
-  dispatchToKnownStates(action: PeerKnownStateActions) {
-    this.knownStates.dispatch(action);
-
-    if (this.role !== "storage") {
-      this.optimisticKnownStates.dispatch(action);
-    }
+  constructor(private peer: Peer) {
+    this.ops = new PeerOperations(this);
   }
 
   readonly erroredCoValues: Map<RawCoID, TryAddTransactionsError> = new Map();
@@ -65,6 +46,10 @@ export class PeerState {
 
   get crashOnClose() {
     return this.peer.crashOnClose;
+  }
+
+  get send() {
+    return this.ops;
   }
 
   shouldRetryUnavailableCoValues() {
@@ -106,16 +91,31 @@ export class PeerState {
     this.processing = false;
   }
 
-  pushOutgoingMessage(msg: SyncMessage) {
+  async pushOutgoingMessage(msg: SyncMessage) {
     if (this.closed) {
       return Promise.resolve();
     }
 
-    const promise = this.queue.push(msg);
+    const transformedMessages = transformOutgoingMessageToPeer(msg, this.id);
+    if (TRACE_SYNC_MESSAGES) {
+      transformedMessages.map((msg) => {
+        console.log("🟢 <<<=== Sending to peer", this.id, msg);
+      });
+    }
 
-    void this.processQueue();
+    try {
+      return await Promise.all(
+        transformedMessages.map((msg_3) => {
+          const promise = this.queue.push(msg_3);
 
-    return promise;
+          void this.processQueue();
+
+          return promise;
+        }),
+      );
+    } catch (e) {
+      console.error("Error sending to peer", this.id, transformedMessages, e);
+    }
   }
 
   get incoming() {

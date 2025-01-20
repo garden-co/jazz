@@ -6,16 +6,23 @@ import {
   SyncMessage,
   cojsonInternals,
   emptyKnownState,
+  unknownDataMessage,
 } from "cojson";
 import { collectNewTxs, getDependedOnCoValues } from "./syncUtils.js";
-import { DBClientInterface, StoredSessionRow } from "./types.js";
-import NewContentMessage = CojsonInternalTypes.NewContentMessage;
-import KnownStateMessage = CojsonInternalTypes.KnownStateMessage;
+import {
+  DBClientInterface,
+  StoredCoValueRow,
+  StoredSessionRow,
+} from "./types.js";
+import DataMessage = CojsonInternalTypes.DataMessage;
+import PushMessage = CojsonInternalTypes.PushMessage;
 import RawCoID = CojsonInternalTypes.RawCoID;
 
 type OutputMessageMap = Record<
   RawCoID,
-  { knownMessage: KnownStateMessage; contentMessages?: NewContentMessage[] }
+  {
+    dataMessages: DataMessage[];
+  }
 >;
 
 export class SyncManager {
@@ -29,29 +36,25 @@ export class SyncManager {
 
   async handleSyncMessage(msg: SyncMessage) {
     switch (msg.action) {
-      case "load":
-        await this.handleLoad(msg);
-        break;
-      case "content":
-        await this.handleContent(msg);
-        break;
+      case "pull":
+        return this.handlePull(msg);
+      case "data":
+        return this.handleData(msg);
+      case "push":
+        return this.handlePush(msg);
       case "known":
-        await this.handleKnown(msg);
-        break;
-      case "done":
-        await this.handleDone(msg);
-        break;
+        return this.handleKnown(msg);
     }
   }
 
   async handleSessionUpdate({
     sessionRow,
     peerKnownState,
-    newContentMessages,
+    newDataMessages,
   }: {
     sessionRow: StoredSessionRow;
     peerKnownState: CojsonInternalTypes.CoValueKnownState;
-    newContentMessages: CojsonInternalTypes.NewContentMessage[];
+    newDataMessages: CojsonInternalTypes.DataMessage[];
   }) {
     if (
       sessionRow.lastIdx <= (peerKnownState.sessions[sessionRow.sessionID] || 0)
@@ -67,12 +70,13 @@ export class SyncManager {
 
     collectNewTxs({
       newTxsInSession,
-      newContentMessages,
+      newDataMessages,
       sessionRow,
       firstNewTxIdx,
     });
   }
 
+  // actually, it's a handlePull method
   async sendNewContent(
     coValueKnownState: CojsonInternalTypes.CoValueKnownState,
   ): Promise<void> {
@@ -81,11 +85,9 @@ export class SyncManager {
 
     // reverse it to send the top level id the last in the order
     const collectedMessages = Object.values(outputMessages).reverse();
-    collectedMessages.forEach(({ knownMessage, contentMessages }) => {
-      this.sendStateMessage(knownMessage);
-
-      contentMessages?.length &&
-        contentMessages.forEach((msg) => this.sendStateMessage(msg));
+    collectedMessages.forEach(({ dataMessages }) => {
+      dataMessages?.length &&
+        dataMessages.forEach((msg) => this.sendStateMessage(msg));
     });
   }
 
@@ -101,12 +103,9 @@ export class SyncManager {
     const coValueRow = await this.dbClient.getCoValue(peerKnownState.id);
 
     if (!coValueRow) {
-      const emptyKnownMessage: KnownStateMessage = {
-        action: "known",
-        ...emptyKnownState(peerKnownState.id),
+      messageMap[peerKnownState.id] = {
+        dataMessages: [unknownDataMessage(peerKnownState.id, asDependencyOf)],
       };
-      asDependencyOf && (emptyKnownMessage.asDependencyOf = asDependencyOf);
-      messageMap[peerKnownState.id] = { knownMessage: emptyKnownMessage };
       return messageMap;
     }
 
@@ -120,13 +119,15 @@ export class SyncManager {
       sessions: {},
     };
 
-    const newContentMessages: CojsonInternalTypes.NewContentMessage[] = [
+    const newDataMessages: CojsonInternalTypes.DataMessage[] = [
       {
-        action: "content",
+        action: "data",
+        known: true,
         id: coValueRow.id,
         header: coValueRow.header,
         new: {},
         priority: cojsonInternals.getPriorityFromHeader(coValueRow.header),
+        asDependencyOf,
       },
     ];
 
@@ -138,24 +139,18 @@ export class SyncManager {
         return this.handleSessionUpdate({
           sessionRow,
           peerKnownState,
-          newContentMessages,
+          newDataMessages,
         });
       }),
     );
 
     const dependedOnCoValuesList = getDependedOnCoValues({
       coValueRow,
-      newContentMessages,
+      newDataMessages,
     });
 
-    const knownMessage: KnownStateMessage = {
-      action: "known",
-      ...newCoValueKnownState,
-    };
-    asDependencyOf && (knownMessage.asDependencyOf = asDependencyOf);
     messageMap[newCoValueKnownState.id] = {
-      knownMessage: knownMessage,
-      contentMessages: newContentMessages,
+      dataMessages: newDataMessages,
     };
 
     await Promise.all(
@@ -175,11 +170,24 @@ export class SyncManager {
     return messageMap;
   }
 
-  handleLoad(msg: CojsonInternalTypes.LoadMessage) {
+  /**
+   * "Pull" request must be followed by "data" message response according to the protocol:
+   * - Sends new content if it exists.
+   * - Sends an empty data message otherwise.
+   * - Sends an empty data message with `{ known: false }` in the message if the `coValue` is unknown by local node.
+   *
+   * Handler initiates a new "pull" requests to load the coValue from peers if it is not known by the node.
+   */
+  handlePull(msg: CojsonInternalTypes.PullMessage) {
     return this.sendNewContent(msg);
   }
 
-  async handleContent(msg: CojsonInternalTypes.NewContentMessage) {
+  /**
+   * "Push" request
+   * - must be followed by "ack" message response according to the protocol.
+   * - may carry along new data txs to be added
+   */
+  async handlePush(msg: PushMessage) {
     const coValueRow = await this.dbClient.getCoValue(msg.id);
 
     // We have no info about coValue header
@@ -187,14 +195,64 @@ export class SyncManager {
 
     if (invalidAssumptionOnHeaderPresence) {
       return this.sendStateMessage({
-        action: "known",
-        id: msg.id,
-        header: false,
-        sessions: {},
-        isCorrection: true,
+        ...emptyKnownState(msg.id),
+        action: "pull",
       });
     }
 
+    const { isMissingTransactions, ourKnown } = await this.addTransactions(
+      coValueRow,
+      msg,
+    );
+
+    if (isMissingTransactions) {
+      return this.sendStateMessage({
+        action: "pull",
+        ...ourKnown,
+      });
+    }
+
+    return this.sendStateMessage({
+      action: "ack",
+      ...ourKnown,
+    });
+  }
+
+  /**
+   * "Data" is a response to our "pull" message. It's always some data we asked for, initially.
+   * It's a terminal message which must not be responded to.
+   * At this stage the coValue state is considered synced between the peer and the node.
+   */
+  async handleData(msg: DataMessage) {
+    const coValueRow = await this.dbClient.getCoValue(msg.id);
+
+    // We have no info about coValue header
+    const invalidAssumptionOnHeaderPresence = !msg.header && !coValueRow;
+
+    if (invalidAssumptionOnHeaderPresence) {
+      console.error(
+        'invalidAssumptionOnHeaderPresence. We should never be here. "Data" action is a response to our specific request.',
+      );
+      return;
+    }
+
+    const { isMissingTransactions } = await this.addTransactions(
+      coValueRow,
+      msg,
+    );
+
+    if (isMissingTransactions) {
+      console.error(
+        'needMissingTransactions. We should never be here. "Data" action is a response to our specific request.',
+      );
+      return;
+    }
+  }
+
+  private async addTransactions(
+    coValueRow: StoredCoValueRow | undefined,
+    msg: DataMessage | PushMessage,
+  ) {
     const storedCoValueRowID: number = coValueRow
       ? coValueRow.rowID
       : await this.dbClient.addCoValue(msg);
@@ -214,7 +272,7 @@ export class SyncManager {
       sessions: {},
     };
 
-    let invalidAssumptions = false;
+    let isMissingTransactions = false;
 
     await this.dbClient.unitOfWork(() =>
       (Object.keys(msg.new) as SessionID[]).map((sessionID) => {
@@ -224,24 +282,17 @@ export class SyncManager {
         }
 
         if ((sessionRow?.lastIdx || 0) < (msg.new[sessionID]?.after || 0)) {
-          invalidAssumptions = true;
+          isMissingTransactions = true;
         } else {
           return this.putNewTxs(msg, sessionID, sessionRow, storedCoValueRowID);
         }
       }),
     );
-
-    if (invalidAssumptions) {
-      this.sendStateMessage({
-        action: "known",
-        ...ourKnown,
-        isCorrection: invalidAssumptions,
-      });
-    }
+    return { ourKnown, isMissingTransactions };
   }
 
   private async putNewTxs(
-    msg: CojsonInternalTypes.NewContentMessage,
+    msg: DataMessage | PushMessage,
     sessionID: SessionID,
     sessionRow: StoredSessionRow | undefined,
     storedCoValueRowID: number,
@@ -307,8 +358,6 @@ export class SyncManager {
   handleKnown(_msg: CojsonInternalTypes.KnownStateMessage) {
     // We don't intend to use the storage (SQLite,IDB,etc.) itself as a synchronisation mechanism, so we can ignore the known messages
   }
-
-  handleDone(_msg: CojsonInternalTypes.DoneMessage) {}
 
   async sendStateMessage(msg: any): Promise<unknown> {
     return this.toLocalNode

@@ -107,6 +107,6 @@ export function linkAccounts(
     peer2role: bRole,
   });
 
-  a._raw.core.node.syncManager.addPeer(aPeer);
-  b._raw.core.node.syncManager.addPeer(bPeer);
+  a._raw.core.node.addPeer(aPeer);
+  b._raw.core.node.addPeer(bPeer);
 }

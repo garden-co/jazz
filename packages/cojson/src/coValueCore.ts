@@ -13,6 +13,7 @@ import {
   SignerID,
   StreamingHash,
 } from "./crypto/crypto.js";
+import { CojsonInternalTypes, cojsonInternals } from "./exports.js";
 import {
   RawCoID,
   SessionID,
@@ -30,10 +31,11 @@ import {
   isKeyForKeyField,
 } from "./permissions.js";
 import { getPriorityFromHeader } from "./priority.js";
-import { CoValueKnownState, NewContentMessage } from "./sync.js";
 import { accountOrAgentIDfromSessionID } from "./typeUtils/accountOrAgentIDfromSessionID.js";
 import { expectGroup } from "./typeUtils/expectGroup.js";
 import { isAccountID } from "./typeUtils/isAccountID.js";
+import CoValueContent = CojsonInternalTypes.CoValueContent;
+import { CoValueKnownState } from "./sync/types.js";
 
 /**
     In order to not block other concurrently syncing CoValues we introduce a maximum size of transactions,
@@ -49,6 +51,12 @@ export type CoValueHeader = {
   ruleset: RulesetDef;
   meta: JsonObject | null;
 } & CoValueUniqueness;
+
+export type SessionNewContent = {
+  after: number;
+  newTransactions: Transaction[];
+  lastSignature: Signature;
+};
 
 export type CoValueUniqueness = {
   uniqueness: JsonValue;
@@ -107,7 +115,7 @@ export class CoValueCore {
   } = {};
   _cachedKnownState?: CoValueKnownState;
   _cachedDependentOn?: RawCoID[];
-  _cachedNewContentSinceEmpty?: NewContentMessage[] | undefined;
+  _cachedNewContentSinceEmpty?: CoValueContent[] | undefined;
   _currentAsyncAddTransaction?: Promise<void>;
 
   constructor(
@@ -194,7 +202,7 @@ export class CoValueCore {
     };
   }
 
-  tryAddTransactions(
+  private tryAddTransactions(
     sessionID: SessionID,
     newTransactions: Transaction[],
     givenExpectedNewHash: Hash | undefined,
@@ -461,6 +469,8 @@ export class CoValueCore {
       expectedNewHash,
     );
 
+    const peersKnownState = { ...this.knownState() };
+
     const success = this.tryAddTransactions(
       sessionID,
       [transaction],
@@ -470,7 +480,7 @@ export class CoValueCore {
     )._unsafeUnwrap({ withStackTrace: true });
 
     if (success) {
-      void this.node.syncManager.syncCoValue(this);
+      void this.node.syncManager.syncCoValue(this, peersKnownState);
     }
 
     return success;
@@ -784,19 +794,20 @@ export class CoValueCore {
     return this.sessionLogs.get(txID.sessionID)?.transactions[txID.txIndex];
   }
 
-  newContentSince(
-    knownState: CoValueKnownState | undefined,
-  ): NewContentMessage[] | undefined {
-    const isKnownStateEmpty = !knownState?.header && !knownState?.sessions;
+  // TODO M.O. do cache addContentSince for a while?
+  newContentSince(knownState: CoValueKnownState): CoValueContent[] | undefined {
+    const isKnownStateEmpty =
+      !knownState.header ||
+      !knownState.sessions ||
+      !Object.keys(knownState.sessions).length;
 
     if (isKnownStateEmpty && this._cachedNewContentSinceEmpty) {
       return this._cachedNewContentSinceEmpty;
     }
 
-    let currentPiece: NewContentMessage = {
-      action: "content",
+    let currentPiece: CoValueContent = {
       id: this.id,
-      header: knownState?.header ? undefined : this.header,
+      header: isKnownStateEmpty ? this.header : undefined,
       priority: getPriorityFromHeader(this.header),
       new: {},
     };
@@ -858,7 +869,6 @@ export class CoValueCore {
 
         if (pieceSize >= MAX_RECOMMENDED_TX_SIZE) {
           currentPiece = {
-            action: "content",
             id: this.id,
             header: undefined,
             new: {},
@@ -944,6 +954,55 @@ export class CoValueCore {
   }) {
     return this.node.syncManager.waitForSync(this.id, options?.timeout);
   }
+
+  addNewContent(content: CoValueContent) {
+    let anyMissingTransaction = false;
+
+    for (const [sessionID, newContentForSession] of Object.entries(
+      content.new,
+    ) as [SessionID, SessionNewContent][]) {
+      const ourKnownTxIdx =
+        this.sessionLogs.get(sessionID)?.transactions.length;
+      const theirFirstNewTxIdx = newContentForSession.after;
+
+      if ((ourKnownTxIdx || 0) < theirFirstNewTxIdx) {
+        anyMissingTransaction = true;
+        continue;
+      }
+
+      const alreadyKnownOffset = ourKnownTxIdx
+        ? ourKnownTxIdx - theirFirstNewTxIdx
+        : 0;
+
+      const newTransactions =
+        newContentForSession.newTransactions.slice(alreadyKnownOffset);
+
+      if (newTransactions.length === 0) {
+        continue;
+      }
+
+      const result = this.tryAddTransactions(
+        sessionID,
+        newTransactions,
+        undefined,
+        newContentForSession.lastSignature,
+      );
+
+      if (result.isErr()) {
+        const message = `Failed to add transactions for ${content.id}: ${newTransactions.length} new transactions after: 
+        ${newContentForSession.after} our last known tx idx initially: ${ourKnownTxIdx} our last known tx idx now: 
+        ${this.sessionLogs.get(sessionID)?.transactions.length}`;
+
+        throw {
+          type: "TryAddTransactionsError",
+          error: result.error,
+          message,
+        } as TryAddTransactionsException;
+      }
+    }
+
+    return anyMissingTransaction;
+  }
 }
 
 function getNextKnownSignatureIdx(
@@ -978,3 +1037,85 @@ export type TryAddTransactionsError =
   | ResolveAccountAgentError
   | InvalidHashError
   | InvalidSignatureError;
+
+export type TryAddTransactionsException = {
+  type: "TryAddTransactionsError";
+  error: TryAddTransactionsError;
+  message: string;
+};
+export function isTryAddTransactionsException(
+  e: any,
+): e is TryAddTransactionsException {
+  return (
+    e &&
+    e.type === "TryAddTransactionsError" &&
+    typeof e.message === "string" &&
+    e.error !== undefined
+  );
+}
+
+export function getDependedOnFromContent(msg: Required<CoValueContent>) {
+  if (!msg.header) {
+    throw new Error(`Header is required for getting dependencies ${msg.id}`);
+  }
+
+  return msg.header.ruleset.type === "group"
+    ? getGroupDependedOnCoValues(msg)
+    : msg.header.ruleset.type === "ownedByGroup"
+      ? [
+          msg.header.ruleset.group,
+          ...new Set(
+            [...Object.keys(msg.new)]
+              .map((sessionID) =>
+                accountOrAgentIDfromSessionID(sessionID as SessionID),
+              )
+              .filter(
+                (session): session is RawAccountID =>
+                  isAccountID(session) && session !== msg.id,
+              ),
+          ),
+        ]
+      : [];
+}
+
+function getGroupDependedOnCoValues(content: CoValueContent) {
+  const keys: CojsonInternalTypes.RawCoID[] = [];
+
+  /**
+   * Collect all the signing keys inside the transactions to list all the
+   * dependencies required to correctly access the CoValue.
+   */
+  for (const sessionEntry of Object.values(content.new)) {
+    for (const tx of sessionEntry.newTransactions) {
+      if (tx.privacy !== "trusting") continue;
+
+      const changes = safeParseChanges(tx.changes);
+      for (const change of changes) {
+        if (
+          change &&
+          typeof change === "object" &&
+          "op" in change &&
+          change.op === "set" &&
+          "key" in change &&
+          change.key
+        ) {
+          const key = cojsonInternals.getGroupDependentKey(change.key);
+
+          if (key) {
+            keys.push(key);
+          }
+        }
+      }
+    }
+  }
+
+  return keys;
+}
+
+function safeParseChanges(changes: Stringified<JsonValue[]>) {
+  try {
+    return cojsonInternals.parseJSON(changes);
+  } catch (e) {
+    return [];
+  }
+}

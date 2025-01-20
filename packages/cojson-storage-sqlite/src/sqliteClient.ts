@@ -25,11 +25,9 @@ export type RawTransactionRow = {
 
 export class SQLiteClient implements DBClientInterface {
   private readonly db: DatabaseT;
-  private readonly toLocalNode: OutgoingSyncQueue;
 
-  constructor(db: DatabaseT, toLocalNode: OutgoingSyncQueue) {
+  constructor(db: DatabaseT) {
     this.db = db;
-    this.toLocalNode = toLocalNode;
   }
 
   getCoValue(coValueId: RawCoID): StoredCoValueRow | undefined {

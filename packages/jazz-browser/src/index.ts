@@ -75,7 +75,7 @@ export async function createJazzBrowserContext<Acc extends Account>(
     options.reconnectionTimeout,
     (peer) => {
       if (node) {
-        node.syncManager.addPeer(peer);
+        node.addPeer(peer);
       }
     },
   );

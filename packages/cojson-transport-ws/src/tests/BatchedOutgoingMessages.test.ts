@@ -1,5 +1,5 @@
 import { SyncMessage } from "cojson";
-import { CoValueKnownState } from "cojson/src/sync.js";
+import { CoValueKnownState } from "cojson/src/sync/types.js";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import {
   BatchedOutgoingMessages,

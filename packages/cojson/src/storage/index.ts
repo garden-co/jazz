@@ -2,14 +2,10 @@ import { CoID, RawCoValue } from "../coValue.js";
 import { CoValueHeader, Transaction } from "../coValueCore.js";
 import { Signature } from "../crypto/crypto.js";
 import { RawCoID } from "../ids.js";
+import { IncomingSyncStream, OutgoingSyncQueue } from "../localNode.js";
+import { Peer } from "../peer/index.js";
 import { connectedPeers } from "../streamUtils.js";
-import {
-  CoValueKnownState,
-  IncomingSyncStream,
-  NewContentMessage,
-  OutgoingSyncQueue,
-  Peer,
-} from "../sync.js";
+import { CoValueKnownState, DataMessage, PushMessage } from "../sync/types.js";
 import {
   BlockFilename,
   FileSystem,
@@ -21,11 +17,7 @@ import {
   writeBlock,
   writeToWal,
 } from "./FileSystem.js";
-import {
-  chunkToKnownState,
-  contentSinceChunk,
-  mergeChunks,
-} from "./chunksAndKnownStates.js";
+import { contentSinceChunk, mergeChunks } from "./chunksAndKnownStates.js";
 export type { BlockFilename, WalFilename } from "./FileSystem.js";
 
 const MAX_N_LEVELS = 3;
@@ -73,14 +65,19 @@ export class LSMStorage<WH, RH, FS extends FileSystem<WH, RH>> {
           if (msg === "Disconnected" || msg === "PingTimeout") {
             throw new Error("Unexpected Disconnected message");
           }
-          if (msg.action === "done") {
-            return;
-          }
 
-          if (msg.action === "content") {
-            await this.handleNewContent(msg);
-          } else if (msg.action === "load" || msg.action === "known") {
-            await this.sendNewContent(msg.id, msg, undefined);
+          switch (msg.action) {
+            case "data":
+              await this.handleNewContent(msg);
+              break;
+            case "push":
+              await this.handleNewContent(msg);
+              break;
+            case "known":
+              break;
+            case "pull":
+              await this.sendNewContent(msg.id, msg, undefined);
+              break;
           }
         } catch (e) {
           console.error(
@@ -129,10 +126,9 @@ export class LSMStorage<WH, RH, FS extends FileSystem<WH, RH>> {
       this.toLocalNode
         .push({
           id: id,
-          action: "known",
+          action: "ack",
           header: false,
           sessions: {},
-          asDependencyOf,
         })
         .catch((e) => console.error("Error while pushing known", e));
 
@@ -182,15 +178,15 @@ export class LSMStorage<WH, RH, FS extends FileSystem<WH, RH>> {
       (message) => ({ ...message, asDependencyOf }),
     );
 
-    const ourKnown: CoValueKnownState = chunkToKnownState(id, coValue);
+    // const ourKnown: CoValueKnownState = chunkToKnownState(id, coValue);
 
-    this.toLocalNode
-      .push({
-        action: "known",
-        ...ourKnown,
-        asDependencyOf,
-      })
-      .catch((e) => console.error("Error while pushing known", e));
+    // this.toLocalNode
+    //   .push({
+    //     action: "known",
+    //     ...ourKnown,
+    //     asDependencyOf,
+    //   })
+    //   .catch((e) => console.error("Error while pushing known", e));
 
     for (const message of newContentMessages) {
       if (Object.keys(message.new).length === 0) continue;
@@ -211,7 +207,7 @@ export class LSMStorage<WH, RH, FS extends FileSystem<WH, RH>> {
     await handler(this.currentWal);
   }
 
-  async handleNewContent(newContent: NewContentMessage) {
+  async handleNewContent(newContent: DataMessage | PushMessage) {
     const coValue = this.coValues[newContent.id];
 
     const newContentAsChunk: CoValueChunk = {

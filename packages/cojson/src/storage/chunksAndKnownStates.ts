@@ -1,19 +1,20 @@
 import { MAX_RECOMMENDED_TX_SIZE } from "../coValueCore.js";
 import { RawCoID, SessionID } from "../ids.js";
 import { getPriorityFromHeader } from "../priority.js";
-import { CoValueKnownState, NewContentMessage } from "../sync.js";
+import { CoValueKnownState, DataMessage } from "../sync/types.js";
 import { CoValueChunk } from "./index.js";
 
 export function contentSinceChunk(
   id: RawCoID,
   chunk: CoValueChunk,
   known?: CoValueKnownState,
-): NewContentMessage[] {
-  const newContentPieces: NewContentMessage[] = [];
+): DataMessage[] {
+  const newContentPieces: DataMessage[] = [];
 
   newContentPieces.push({
     id: id,
-    action: "content",
+    action: "data",
+    known: !!known?.header || !!chunk.header,
     header: known?.header ? undefined : chunk.header,
     new: {},
     priority: getPriorityFromHeader(chunk.header),

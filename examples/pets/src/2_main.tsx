@@ -30,6 +30,7 @@ const peer =
     "peer",
   ) as `ws://${string}`) ??
   "wss://cloud.jazz.tools/?key=pets-example-jazz@garden.co";
+// "ws://localhost:4200/?key=pets-example-jazz@gcmp.io";
 
 /** Walkthrough: The top-level provider `<JazzProvider/>`
  *

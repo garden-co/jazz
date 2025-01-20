@@ -407,7 +407,7 @@ describe("CoMap resolution", async () => {
     if (!isControlledAccount(me)) {
       throw "me is not a controlled account";
     }
-    me._raw.core.node.syncManager.addPeer(secondPeer);
+    me._raw.core.node.addPeer(secondPeer);
     const { account: meOnSecondPeer } = await createJazzContext({
       auth: fixedCredentialsAuth({
         accountID: me.id,
@@ -478,7 +478,7 @@ describe("CoMap resolution", async () => {
     if (!isControlledAccount(me)) {
       throw "me is not a controlled account";
     }
-    me._raw.core.node.syncManager.addPeer(secondAsPeer);
+    me._raw.core.node.addPeer(secondAsPeer);
     const { account: meOnSecondPeer } = await createJazzContext({
       auth: fixedCredentialsAuth({
         accountID: me.id,

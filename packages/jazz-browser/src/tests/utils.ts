@@ -84,7 +84,7 @@ export async function loadCoValueOrFail<V extends RawCoValue>(
   node: LocalNode,
   id: CoID<V>,
 ): Promise<V> {
-  const value = await node.load(id);
+  const value = await node.load<V>(id);
   if (value === "unavailable") {
     throw new Error("CoValue not found");
   }

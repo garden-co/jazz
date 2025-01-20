@@ -30,7 +30,7 @@ export async function setupAccount() {
   if (!isControlledAccount(me)) {
     throw "me is not a controlled account";
   }
-  me._raw.core.node.syncManager.addPeer(secondPeer);
+  me._raw.core.node.addPeer(secondPeer);
   const { account: meOnSecondPeer } = await createJazzContext({
     auth: fixedCredentialsAuth({
       accountID: me.id,
@@ -124,7 +124,7 @@ export async function loadCoValueOrFail<V extends RawCoValue>(
   node: LocalNode,
   id: CoID<V>,
 ): Promise<V> {
-  const value = await node.load(id);
+  const value = await node.load<V>(id);
   if (value === "unavailable") {
     throw new Error("CoValue not found");
   }
