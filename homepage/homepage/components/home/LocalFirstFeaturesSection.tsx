@@ -9,8 +9,8 @@ export function LocalFirstFeaturesSection() {
       icon: "offline",
       description: (
         <>
-          Your app works seamlessly offline or on sketchy connections. When
-          you&apos;re back online, your data is synced.
+          Your app works seamlessly offline or on sketchy networks. Whenever
+          possible, your data is synced.
         </>
       ),
     },
@@ -48,13 +48,19 @@ export function LocalFirstFeaturesSection() {
   return (
     <div>
       <SectionHeader
-        title="Why local-first?"
+        kicker="Local-first state"
+        title="What if your app&apos;s data worked like git?"
         slogan={
           <>
             <p>
-              With local-first, your data is stored locally, then synced to the
-              server.
-              <br /> This comes with the following benefits.
+              With local-first state, your data is stored locally and edited
+              directly. Diffs are synced to the server and to other
+              participants.
+            </p>
+            <p>
+              Jazz uses CRDTs, which are like super-lightweight git for
+              structured data &mdash; so we can constantly diff tiny edits and
+              sync in real-time.
             </p>
           </>
         }

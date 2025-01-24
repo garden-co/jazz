@@ -42,25 +42,31 @@ export function HeroSection() {
     <div className="container grid gap-x-8 gap-y-10 py-12 md:py-16 lg:py-24 lg:gap-0 lg:grid-cols-3">
       <div className="flex flex-col justify-center gap-4 lg:col-span-3 lg:gap-8">
         <p className="uppercase text-blue tracking-widest text-sm font-medium dark:text-stone-400">
-          Local-first development toolkit
+          Build local-first apps
         </p>
         <h1 className="font-display text-stone-950 dark:text-white text-4xl md:text-5xl lg:text-6xl font-medium tracking-tighter">
-          <span className="inline-block">Ship top-tier apps</span>{" "}
+          <span className="inline-block">Ship high-tech</span>{" "}
           <span className="inline-block">at high tempo.</span>
         </h1>
 
-        <Prose size="lg" className="text-pretty max-w-2xl dark:text-stone-200">
+        <Prose
+          size="lg"
+          className="prose-p:text-pretty max-w-2xl text-stone-800 dark:text-stone-200"
+        >
           <p>
-            Jazz is a framework for building local-first apps
-            &mdash;&nbsp;an&nbsp;architecture that lets companies like Figma and
-            Linear play in a league of their own.
+            Jazz is a toolkit for building apps with{" "}
+            <span className="bg-blue-50 px-1 dark:bg-blue-950">
+              local-first state
+            </span>{" "}
+            &mdash; a&nbsp;radically new approach powering top-tier apps like
+            Figma and Linear.
           </p>
           <p>
-            Open source. Self-host or use{" "}
-            <Link className="text-reset" href="/cloud">
-              Jazz Cloud
-            </Link>{" "}
-            for zero-config magic.
+            Taking it one step further, Jazz&apos;s unique
+            <span className="bg-blue-50 px-1 dark:bg-blue-950">
+              local-first permissions
+            </span>{" "}
+            completely distribute and abstract away the traditional backend.
           </p>
         </Prose>
 
@@ -77,6 +83,15 @@ export function HeroSection() {
             </div>
           ))}
         </div>
+        <Prose className="prose-p:max-w-4xl text-stone-800 dark:text-stone-200">
+          <p>
+            Forever open source (MIT). Self-host or use{" "}
+            <Link className="text-reset" href="/cloud">
+              Jazz Cloud
+            </Link>{" "}
+            for instant global sync&nbsp;&&nbsp;storage.
+          </p>
+        </Prose>
       </div>
     </div>
   );

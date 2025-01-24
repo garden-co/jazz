@@ -9,7 +9,7 @@ export default function ProblemStatementSection() {
     <div className="container grid gap-4 lg:gap-8">
       <SectionHeader
         className="sm:text-center sm:mx-auto"
-        title="Hard things are easy now."
+        title="Ready for a perspective shift?"
         slogan=""
       />
 
@@ -27,11 +27,11 @@ export default function ProblemStatementSection() {
           </span>
           <Prose>
             <p className="font-display text-lg md:text-xl font-semibold text-stone-900 dark:text-white">
-              The sad truth is...
+              The sad truth:
             </p>
             <p>
               <strong>
-                Every stack reinvents how users and machines share state.
+                Every stack has to reinvent how users and machines share state.
               </strong>
             </p>
           </Prose>
@@ -60,7 +60,7 @@ export default function ProblemStatementSection() {
         <div className="flex flex-col gap-3 p-4 pt-8 md:p-8 md:gap-5">
           <Prose>
             <p className="font-display text-lg md:text-xl font-semibold text-stone-900 dark:text-white">
-              The good news is...
+              The good news:
             </p>
             <p>
               <strong>
@@ -79,7 +79,7 @@ export default function ProblemStatementSection() {
             </p>
             <p>
               All that’s left is{" "}
-              <strong>building the UX that makes your app special.</strong>
+              <strong>building what makes your app special.</strong>
             </p>
           </Prose>
         </div>

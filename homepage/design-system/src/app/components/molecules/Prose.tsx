@@ -24,6 +24,7 @@ export function Prose({
         sizeClassName,
         "dark:prose-invert",
         "prose-code:dark:bg-stone-900",
+        "prose-p:leading-snug leading-snug",
       )}
     >
       {children}
