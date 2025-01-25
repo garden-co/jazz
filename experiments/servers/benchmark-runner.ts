@@ -4,11 +4,11 @@ import * as fs from 'fs';
 // 6 web servers
 const commands = [
     { command: "node-ws", exportName: "A1_NodeServer-HTTP1-WSS" },
-    { command: "node-http1", exportName: "A2_NodeServer-HTTP1-SSE" },
-    { command: "node-http2", exportName: "A3_NodeServer-HTTP2-SSE" },
-    { command: "uws-ws", exportName: "B1_uWebSocketServer-HTTP1-WSS" },
-    { command: "uws-http1", exportName: "B2_uWebSocketServer-HTTP1-SSE" },
-    { command: "caddy-http3", exportName: "C1_NodeCaddyServer-HTTP3-SSE" }
+    // { command: "node-http1", exportName: "A2_NodeServer-HTTP1-SSE" },
+    // { command: "node-http2", exportName: "A3_NodeServer-HTTP2-SSE" },
+    // { command: "uws-ws", exportName: "B1_uWebSocketServer-HTTP1-WSS" },
+    // { command: "uws-http1", exportName: "B2_uWebSocketServer-HTTP1-SSE" },
+    // { command: "caddy-http3", exportName: "C1_NodeCaddyServer-HTTP3-SSE" }
 ];
 
 // Time to wait between stopping one service and starting another (in ms)
@@ -82,10 +82,11 @@ async function runCommand(command: string, exportFileName: string, port: number)
             // Spawn the benchmark process ...
             const outputStream = fs.createWriteStream(`./benchmarks/${exportFileName}.txt`, { flags: 'a' });
             // const benchmarkProcess = spawn('pnpm', ['run', 'playwright'], {
-            const benchmarkProcess = spawn('pnpm', ['run', 'k6'], {
+            const benchmarkProcess = spawn('pnpm', ['run', 'load-tests'], {
                 stdio: ['ignore', 'pipe', 'pipe'],
                 env: {
-                    ...process.env
+                    ...process.env,
+                    OUTPUT_FILENAME: `./benchmarks/${exportFileName}.json`
                 }
             });
 

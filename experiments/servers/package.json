@@ -32,6 +32,13 @@
     "clean": "rm -vrf benchmarks && mkdir -v benchmarks",
     "bench": "npx ts-node benchmark-runner.ts",
     "playwright": "clear; pnpm test-text; pnpm test-binary; pnpm test-halt; say 'Done'",
+    "load-test-01": "npx artillery run tests/artillery-text.ts   --scenario-name '01 Load Scenario'   --quiet --output $OUTPUT_FILENAME.01",
+    "load-test-02": "npx artillery run tests/artillery-text.ts   --scenario-name '02 Create Scenario' --quiet --output $OUTPUT_FILENAME.02",
+    "load-test-03": "npx artillery run tests/artillery-text.ts   --scenario-name '03 Mutate Scenario' --quiet --output $OUTPUT_FILENAME.03",
+    "load-test-04": "npx artillery run tests/artillery-binary.ts --scenario-name '04 Load Scenario'   --quiet --output $OUTPUT_FILENAME.04",
+    "load-test-05": "npx artillery run tests/artillery-binary.ts --scenario-name '05 Create Scenario' --quiet --output $OUTPUT_FILENAME.05",
+    "load-test-06": "npx artillery run tests/artillery-binary.ts --scenario-name '06 Mutate Scenario' --quiet --output $OUTPUT_FILENAME.06",
+    "load-tests": "clear; pnpm load-test-01; pnpm load-test-02; pnpm load-test-03; pnpm load-test-04; pnpm load-test-05; pnpm load-test-06; pnpm test-halt; say 'Done'",
     "k6": "clear; k6 run tests/k6-text.js; pnpm test-halt; say 'Done'"
   },
   "keywords": [],
@@ -39,6 +46,8 @@
   "license": "ISC",
   "dependencies": {
     "@faker-js/faker": "^8.4.1",
+    "@types/artillery": "^1.7.4",
+    "artillery": "^2.0.22",
     "body-parser": "^1.20.2",
     "express": "^4.19.2",
     "finalhandler": "^1.2.0",
