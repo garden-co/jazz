@@ -1,6 +1,6 @@
 import * as Clipboard from "expo-clipboard";
 import { createInviteLink } from "jazz-react-native";
-import { useAccount, useCoState } from "jazz-react-native";
+import { useCoState } from "jazz-react-native";
 import { Group, ID } from "jazz-tools";
 import { useState } from "react";
 import { Alert, Button, Text, View } from "react-native";
@@ -10,12 +10,9 @@ export function SimpleSharing() {
   const [id, setId] = useState<ID<CoMapWithText> | undefined>();
   const [invite, setInvite] = useState<string | undefined>();
   const coMap = useCoState(CoMapWithText, id);
-  const { me } = useAccount();
 
   function handleCreateCoMap() {
-    if (!me) return;
-
-    const group = Group.create({ owner: me });
+    const group = Group.create();
 
     const coMap = CoMapWithText.create(
       { text: "Updated from React Native" },
