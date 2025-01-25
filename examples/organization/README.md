@@ -16,10 +16,6 @@ You can either
 
 Create a new Jazz project, and use this example as a template.
 ```bash
-npm create jazz-app@latest --example organization --project-name organization
-```
-or
-```bash
 npx create-jazz-app@latest --example organization --project-name organization
 ```
 

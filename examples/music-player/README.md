@@ -13,10 +13,6 @@ You can either
 
 Create a new Jazz project, and use this example as a template.
 ```bash
-npm create jazz-app@latest --example music-player --project-name music-player
-```
-or
-```bash
 npx create-jazz-app@latest --example music-player --project-name music-player
 ```
 

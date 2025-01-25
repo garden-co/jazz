@@ -28,10 +28,6 @@ You can either
 
 Create a new Jazz project, and use this example as a template.
 ```bash
-npm create jazz-app@latest --example form --project-name form
-```
-or
-```bash
 npx create-jazz-app@latest --example form --project-name form
 ```
 

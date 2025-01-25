@@ -15,10 +15,6 @@ You can either
 
 Create a new Jazz project, and use this example as a template.
 ```bash
-npm create jazz-app@latest --example image-upload --project-name image-upload
-```
-or
-```bash
 npx create-jazz-app@latest --example image-upload --project-name image-upload
 ```
 
