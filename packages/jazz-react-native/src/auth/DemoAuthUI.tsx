@@ -82,6 +82,7 @@ export function useDemoAuth({
     async function init() {
       try {
         const auth = await authMethodPromise;
+        auth.start();
         setAuthMethod(auth);
       } catch (e: unknown) {
         const err = e as Error;
