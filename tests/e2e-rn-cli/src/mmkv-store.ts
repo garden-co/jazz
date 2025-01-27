@@ -6,31 +6,19 @@ const storage = new MMKV({
 });
 
 export class MMKVStore implements KvStore {
-  get(key: string): Promise<string | null> {
-    if (!key) {
-      throw new Error("Key is required");
-    }
-    return Promise.resolve(storage.getString(key) || null);
+  async get(key: string): Promise<string | null> {
+    return storage.getString(key) ?? null;
   }
 
-  set(key: string, value: string): Promise<void> {
-    if (!key) {
-      throw new Error("Key is required");
-    }
-    storage.set(key, value);
-    return Promise.resolve();
+  async set(key: string, value: string): Promise<void> {
+    return storage.set(key, value);
   }
 
-  delete(key: string): Promise<void> {
-    if (!key) {
-      throw new Error("Key is required");
-    }
-    storage.delete(key);
-    return Promise.resolve();
+  async delete(key: string): Promise<void> {
+    return storage.delete(key);
   }
 
-  clearAll(): Promise<void> {
-    storage.clearAll();
-    return Promise.resolve();
+  async clearAll(): Promise<void> {
+    return storage.clearAll();
   }
 }
