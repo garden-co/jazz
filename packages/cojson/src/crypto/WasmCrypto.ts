@@ -11,6 +11,7 @@ import { xsalsa20, xsalsa20_poly1305 } from "@noble/ciphers/salsa";
 import { randomBytes } from "@noble/ciphers/webcrypto/utils";
 import { base58 } from "@scure/base";
 import { createBLAKE3 } from "hash-wasm";
+import { generate_nonce } from "jazz-crypto-rs";
 import { base64URLtoBytes, bytesToBase64url } from "../base64url.js";
 import { RawCoID, TransactionID } from "../ids.js";
 import { Stringified, stableStringify } from "../jsonStringify.js";
@@ -101,7 +102,7 @@ export class WasmCrypto extends CryptoProvider<Uint8Array> {
   }
 
   generateNonce(input: Uint8Array): Uint8Array {
-    return this.blake3HashOnce(input).slice(0, 24);
+    return generate_nonce(input);
   }
 
   private generateJsonNonce(material: JsonValue): Uint8Array {
