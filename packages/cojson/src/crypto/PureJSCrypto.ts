@@ -24,6 +24,14 @@ import {
 
 type Blake3State = ReturnType<typeof blake3.create>;
 
+/**
+ * Pure JavaScript implementation of the CryptoProvider interface using noble-curves and noble-ciphers libraries.
+ * This provides a fallback implementation that doesn't require WebAssembly, offering:
+ * - Signing/verifying (Ed25519)
+ * - Encryption/decryption (XSalsa20)
+ * - Sealing/unsealing (X25519 + XSalsa20-Poly1305)
+ * - Hashing (BLAKE3)
+ */
 export class PureJSCrypto extends CryptoProvider<Blake3State> {
   static async create(): Promise<PureJSCrypto> {
     return new PureJSCrypto();

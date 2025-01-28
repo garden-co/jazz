@@ -30,6 +30,14 @@ import {
   textEncoder,
 } from "./crypto.js";
 
+/**
+ * WebAssembly implementation of the CryptoProvider interface using berith and hash-wasm libraries.
+ * This provides the primary implementation using WebAssembly for optimal performance, offering:
+ * - Signing/verifying (Ed25519)
+ * - Encryption/decryption (XSalsa20)
+ * - Sealing/unsealing (X25519 + XSalsa20-Poly1305)
+ * - Hashing (BLAKE3)
+ */
 export class WasmCrypto extends CryptoProvider<Uint8Array> {
   private constructor(
     public blake3Instance: Awaited<ReturnType<typeof createBLAKE3>>,
