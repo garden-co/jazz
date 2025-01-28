@@ -3,13 +3,22 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "main": "./pkg-node/jazz_crypto_rs.js",
-  "browser": "./pkg-web/jazz_crypto_rs.js",
-  "types": "./pkg-web/jazz_crypto_rs.d.ts",
+  "main": "./dist/wrapper.js",
+  "browser": "./dist/wrapper.js",
+  "types": "./dist/wrapper.d.ts",
   "scripts": {
-    "build": "pnpm build:node && pnpm build:web",
-    "build:node": "wasm-pack build --target nodejs --out-dir pkg-node",
-    "build:web": "wasm-pack build --target web --out-dir pkg-web",
+    "clean": "rm -rf dist",
+    "build": "pnpm clean && pnpm build:node && pnpm build:web && pnpm build:wrapper",
+    "build:node": "wasm-pack build --target nodejs --out-dir dist/node",
+    "build:web": "wasm-pack build --target web --out-dir dist/web",
+    "build:wrapper": "vite build",
     "test": "cargo test"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0",
+    "vite": "^5.0.0",
+    "vite-plugin-dts": "^3.0.0",
+    "vite-plugin-top-level-await": "^1.4.1",
+    "vite-plugin-wasm": "^3.3.0"
   }
 }
