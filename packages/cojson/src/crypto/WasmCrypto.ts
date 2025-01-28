@@ -11,7 +11,11 @@ import { xsalsa20, xsalsa20_poly1305 } from "@noble/ciphers/salsa";
 import { randomBytes } from "@noble/ciphers/webcrypto/utils";
 import { base58 } from "@scure/base";
 import { createBLAKE3 } from "hash-wasm";
-import { blake3_hash_once, generate_nonce } from "jazz-crypto-rs";
+import {
+  blake3_hash_once,
+  blake3_hash_once_with_context,
+  generate_nonce,
+} from "jazz-crypto-rs";
 import { base64URLtoBytes, bytesToBase64url } from "../base64url.js";
 import { RawCoID, TransactionID } from "../ids.js";
 import { Stringified, stableStringify } from "../jsonStringify.js";
@@ -86,11 +90,7 @@ export class WasmCrypto extends CryptoProvider<Uint8Array> {
     data: Uint8Array,
     { context }: { context: Uint8Array },
   ) {
-    return this.blake3Instance
-      .init()
-      .update(context)
-      .update(data)
-      .digest("binary");
+    return blake3_hash_once_with_context(data, context);
   }
 
   blake3IncrementalUpdate(state: Uint8Array, data: Uint8Array): Uint8Array {

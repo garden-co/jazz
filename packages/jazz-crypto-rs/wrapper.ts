@@ -13,6 +13,10 @@ if ("default" in wasmModule && typeof wasmModule.default === "function") {
 interface WasmExports {
   generate_nonce: (nonce_material: Uint8Array) => Uint8Array;
   blake3_hash_once: (data: Uint8Array) => Uint8Array;
+  blake3_hash_once_with_context: (
+    data: Uint8Array,
+    context: Uint8Array,
+  ) => Uint8Array;
 }
 
 const moduleExports = (
@@ -22,3 +26,5 @@ const moduleExports = (
 // Export all functions from the module
 export const generate_nonce = moduleExports.generate_nonce;
 export const blake3_hash_once = moduleExports.blake3_hash_once;
+export const blake3_hash_once_with_context =
+  moduleExports.blake3_hash_once_with_context;
