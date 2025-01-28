@@ -1,8 +1,10 @@
+import wasm from "vite-plugin-wasm";
 // vitest.config.ts
 import { defineConfig } from "vitest/config";
 
 export default defineConfig({
   root: "./",
+  plugins: [wasm()],
   test: {
     coverage: {
       enabled: false,

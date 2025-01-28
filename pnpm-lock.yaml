@@ -1422,6 +1422,9 @@ importers:
       hash-wasm:
         specifier: ^4.9.0
         version: 4.12.0
+      jazz-crypto-rs:
+        specifier: workspace:*
+        version: link:../jazz-crypto-rs
       neverthrow:
         specifier: ^7.0.1
         version: 7.2.0
@@ -1438,6 +1441,9 @@ importers:
       typescript:
         specifier: ~5.6.2
         version: 5.6.3
+      vite-plugin-wasm:
+        specifier: ^3.4.1
+        version: 3.4.1(vite@5.4.11(@types/node@22.10.2)(lightningcss@1.28.2)(terser@5.37.0))
       vitest:
         specifier: 1.5.3
         version: 1.5.3(@types/node@22.10.2)(@vitest/browser@0.34.6)(@vitest/ui@1.5.3)(happy-dom@15.11.7)(jsdom@25.0.1)(lightningcss@1.28.2)(terser@5.37.0)
@@ -10991,6 +10997,11 @@ packages:
     resolution: {integrity: sha512-cBk172kZKTdvGpJuzCCLg8lJ909wopwsu3Ve9FsL1XsnLBiRT9U3MePcqrgGHgCX2ZgkqZmAGR8taxw+TV6s7A==}
     peerDependencies:
       vite: ^3.0.0-0 || ^4.0.0-0 || ^5.0.0-0 || ^6.0.0-0
+
+  vite-plugin-wasm@3.4.1:
+    resolution: {integrity: sha512-ja3nSo2UCkVeitltJGkS3pfQHAanHv/DqGatdI39ja6McgABlpsZ5hVgl6wuR8Qx5etY3T5qgDQhOWzc5RReZA==}
+    peerDependencies:
+      vite: ^2 || ^3 || ^4 || ^5 || ^6
 
   vite@5.4.11:
     resolution: {integrity: sha512-c7jFQRklXua0mTzneGW9QVyxFjUgwcihC4bXEtujIo2ouWCe1Ajt/amn2PCxYnhYfd5k09JX3SB7OYWFKYqj8Q==}
@@ -21454,6 +21465,10 @@ snapshots:
       vite: 5.4.11(@types/node@22.10.2)(lightningcss@1.28.2)(terser@5.37.0)
     transitivePeerDependencies:
       - supports-color
+
+  vite-plugin-wasm@3.4.1(vite@5.4.11(@types/node@22.10.2)(lightningcss@1.28.2)(terser@5.37.0)):
+    dependencies:
+      vite: 5.4.11(@types/node@22.10.2)(lightningcss@1.28.2)(terser@5.37.0)
 
   vite@5.4.11(@types/node@22.10.2)(lightningcss@1.28.2)(terser@5.37.0):
     dependencies:

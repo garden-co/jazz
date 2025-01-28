@@ -2,8 +2,14 @@
   "name": "jazz-crypto-rs",
   "version": "0.1.0",
   "private": true,
+  "type": "module",
+  "main": "./pkg-node/jazz_crypto_rs.js",
+  "browser": "./pkg-web/jazz_crypto_rs.js",
+  "types": "./pkg-web/jazz_crypto_rs.d.ts",
   "scripts": {
-    "build": "wasm-pack build --target web",
+    "build": "pnpm build:node && pnpm build:web",
+    "build:node": "wasm-pack build --target nodejs --out-dir pkg-node",
+    "build:web": "wasm-pack build --target web --out-dir pkg-web",
     "test": "cargo test"
   }
 }
