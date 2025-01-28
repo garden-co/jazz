@@ -23,6 +23,11 @@ export const textDecoder = new TextDecoder();
 export abstract class CryptoProvider<Blake3State = any> {
   abstract randomBytes(length: number): Uint8Array;
 
+  /**
+   * Generate a 24-byte nonce from input material using BLAKE3
+   */
+  abstract generateNonce(input: Uint8Array): Uint8Array;
+
   abstract newEd25519SigningKey(): Uint8Array;
 
   newRandomSigner(): SignerSecret {
