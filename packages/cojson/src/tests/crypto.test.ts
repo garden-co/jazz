@@ -7,9 +7,19 @@ import { PureJSCrypto } from "../crypto/PureJSCrypto.js";
 import { WasmCrypto } from "../crypto/WasmCrypto.js";
 import { SessionID } from "../ids.js";
 import { stableStringify } from "../jsonStringify.js";
+import { logger } from "../logger.js";
 
 const wasmCrypto = await WasmCrypto.create();
 const pureJSCrypto = await PureJSCrypto.create();
+
+// Spy on logger.error
+const originalError = logger.error;
+let lastErrorMessage = "";
+logger.error = function mockError(msg: string) {
+  lastErrorMessage = msg;
+  // Maintain the original logger's context
+  return originalError.call(this, msg);
+};
 
 [wasmCrypto, pureJSCrypto].forEach((crypto) => {
   const name = crypto.constructor.name;
@@ -185,5 +195,43 @@ const pureJSCrypto = await PureJSCrypto.create();
     );
 
     expect(decrypted).toBeUndefined();
+  });
+
+  test(`Unsealing malformed JSON logs error [${name}]`, () => {
+    const data = "not valid json";
+    const sender = crypto.newRandomSealer();
+    const sealer = crypto.newRandomSealer();
+
+    const nOnceMaterial = {
+      in: "co_zTEST",
+      tx: { sessionID: "co_zTEST_session_zTEST" as SessionID, txIndex: 0 },
+    } as const;
+
+    // Create a sealed message with invalid JSON
+    const nOnce = blake3(
+      new TextEncoder().encode(stableStringify(nOnceMaterial)),
+    ).slice(0, 24);
+
+    const senderPriv = base58.decode(sender.substring("sealerSecret_z".length));
+    const sealerPub = base58.decode(
+      crypto.getSealerID(sealer).substring("sealer_z".length),
+    );
+
+    const plaintext = new TextEncoder().encode(data);
+    const sharedSecret = x25519.getSharedSecret(senderPriv, sealerPub);
+    const sealedBytes = xsalsa20_poly1305(sharedSecret, nOnce).encrypt(
+      plaintext,
+    );
+    const sealed = `sealed_U${base64url.encode(sealedBytes)}`;
+
+    const result = crypto.unseal(
+      sealed as any,
+      sealer,
+      crypto.getSealerID(sender),
+      nOnceMaterial,
+    );
+
+    expect(result).toBeUndefined();
+    expect(lastErrorMessage).toMatch(/Failed to decrypt\/parse sealed message/);
   });
 });
