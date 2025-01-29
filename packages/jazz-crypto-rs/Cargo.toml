@@ -11,11 +11,14 @@ crate-type = ["cdylib"]
 
 [dependencies]
 wasm-bindgen = "0.2"
+js-sys = "0.3"
 getrandom = { version = "0.2", features = ["js"] }
 blake3 = "1.5"
 x25519-dalek = { version = "2.0", features = ["getrandom", "static_secrets"] }
 crypto_secretbox = { version = "0.1.1", features = ["getrandom"] }
 salsa20 = "0.10.2"
+ed25519-dalek = { version = "2.1", features = ["rand_core"] }
+rand = "0.8"
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3"

@@ -41,6 +41,22 @@ interface WasmExports {
     ciphertext: Uint8Array,
   ) => Uint8Array;
 
+  // Ed25519 functions
+  new_ed25519_signing_key: () => Uint8Array;
+  ed25519_signing_key_from_bytes: (bytes: Uint8Array) => Uint8Array;
+  ed25519_signing_key_to_public: (signing_key: Uint8Array) => Uint8Array;
+  ed25519_signing_key_sign: (
+    signing_key: Uint8Array,
+    message: Uint8Array,
+  ) => Uint8Array;
+  ed25519_verifying_key_from_bytes: (bytes: Uint8Array) => Uint8Array;
+  ed25519_signature_from_bytes: (bytes: Uint8Array) => Uint8Array;
+  ed25519_verify: (
+    verifying_key: Uint8Array,
+    message: Uint8Array,
+    signature: Uint8Array,
+  ) => boolean;
+
   // High-level seal/unseal functions
   seal: (
     message: Uint8Array,
@@ -72,6 +88,20 @@ export const {
   x25519_diffie_hellman,
   encrypt_xsalsa20,
   decrypt_xsalsa20,
+  new_ed25519_signing_key,
+  ed25519_signing_key_from_bytes,
+  ed25519_signing_key_to_public,
+  ed25519_signing_key_sign,
+  ed25519_verifying_key_from_bytes,
+  ed25519_signature_from_bytes,
+  ed25519_verify,
   seal,
   unseal,
 } = moduleExports;
+
+export class CryptoError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "CryptoError";
+  }
+}

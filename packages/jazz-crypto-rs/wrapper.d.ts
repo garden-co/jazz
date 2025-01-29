@@ -56,3 +56,16 @@ export function blake3_incremental_update(
   state: Blake3State,
   data: Uint8Array,
 ): Blake3State;
+
+// Ed25519 functions
+export function new_ed25519_signing_key(): Uint8Array;
+export function ed25519_verifying_key(signing_key: Uint8Array): Uint8Array;
+export function ed25519_sign(
+  signing_key: Uint8Array,
+  message: Uint8Array,
+): Uint8Array;
+export function ed25519_verify(
+  verifying_key: Uint8Array,
+  message: Uint8Array,
+  signature: Uint8Array,
+): boolean;

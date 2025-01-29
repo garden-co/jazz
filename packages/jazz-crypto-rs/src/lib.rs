@@ -2,10 +2,38 @@ use crypto_secretbox::{
     aead::{Aead, KeyInit},
     XSalsa20Poly1305,
 };
+use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
+use rand::rngs::OsRng;
 use salsa20::cipher::{KeyIvInit, StreamCipher};
 use salsa20::XSalsa20;
+use std::fmt;
 use wasm_bindgen::prelude::*;
 use x25519_dalek::{PublicKey, StaticSecret};
+
+#[derive(Debug)]
+pub enum CryptoError {
+    InvalidKeyLength,
+    InvalidNonceLength,
+    InvalidSignatureLength,
+    InvalidVerifyingKey(String),
+    WrongTag,
+    CipherError,
+}
+
+impl fmt::Display for CryptoError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            CryptoError::InvalidKeyLength => write!(f, "Invalid key length"),
+            CryptoError::InvalidNonceLength => write!(f, "Invalid nonce length"),
+            CryptoError::InvalidSignatureLength => write!(f, "Invalid signature length"),
+            CryptoError::InvalidVerifyingKey(e) => write!(f, "Invalid verifying key: {}", e),
+            CryptoError::WrongTag => write!(f, "Wrong tag"),
+            CryptoError::CipherError => write!(f, "Failed to create cipher"),
+        }
+    }
+}
+
+impl std::error::Error for CryptoError {}
 
 /// Generate a 24-byte nonce from input material using BLAKE3
 #[wasm_bindgen]
@@ -67,69 +95,42 @@ pub fn new_x25519_private_key() -> Vec<u8> {
     secret.to_bytes().to_vec()
 }
 
-/// Get the public key from a private key
-#[wasm_bindgen]
-pub fn x25519_public_key(private_key: &[u8]) -> Vec<u8> {
-    let bytes: [u8; 32] = private_key.try_into().expect("Invalid private key length");
+/// Internal pure Rust functions (no wasm_bindgen)
+fn x25519_public_key_internal(private_key: &[u8]) -> Result<Vec<u8>, CryptoError> {
+    let bytes: [u8; 32] = private_key
+        .try_into()
+        .map_err(|_| CryptoError::InvalidKeyLength)?;
     let secret = StaticSecret::from(bytes);
-    PublicKey::from(&secret).to_bytes().to_vec()
+    Ok(PublicKey::from(&secret).to_bytes().to_vec())
 }
 
-/// Compute the shared secret using X25519 Diffie-Hellman
 #[wasm_bindgen]
-pub fn x25519_diffie_hellman(private_key: &[u8], public_key: &[u8]) -> Vec<u8> {
-    let private_bytes: [u8; 32] = private_key.try_into().expect("Invalid private key length");
-    let public_bytes: [u8; 32] = public_key.try_into().expect("Invalid public key length");
+pub fn x25519_public_key(private_key: &[u8]) -> Result<Vec<u8>, JsError> {
+    x25519_public_key_internal(private_key).map_err(|e| JsError::new(&e.to_string()))
+}
+
+fn x25519_diffie_hellman_internal(
+    private_key: &[u8],
+    public_key: &[u8],
+) -> Result<Vec<u8>, CryptoError> {
+    let private_bytes: [u8; 32] = private_key
+        .try_into()
+        .map_err(|_| CryptoError::InvalidKeyLength)?;
+    let public_bytes: [u8; 32] = public_key
+        .try_into()
+        .map_err(|_| CryptoError::InvalidKeyLength)?;
     let secret = StaticSecret::from(private_bytes);
     let public = PublicKey::from(public_bytes);
-    secret.diffie_hellman(&public).to_bytes().to_vec()
+    Ok(secret.diffie_hellman(&public).to_bytes().to_vec())
 }
 
-/// Internal function for XSalsa20 encryption without authentication
-fn encrypt_xsalsa20_internal(
-    key: &[u8],
-    nonce: &[u8],
-    plaintext: &[u8],
-) -> Result<Vec<u8>, String> {
-    // Key must be 32 bytes
-    let key_bytes: [u8; 32] = key
-        .try_into()
-        .map_err(|_| "Invalid key length".to_string())?;
-    // Nonce must be 24 bytes
-    let nonce_bytes: [u8; 24] = nonce
-        .try_into()
-        .map_err(|_| "Invalid nonce length".to_string())?;
-
-    // Create cipher instance and encrypt
-    let mut cipher = XSalsa20::new(&key_bytes.into(), &nonce_bytes.into());
-    let mut buffer = plaintext.to_vec();
-    cipher.apply_keystream(&mut buffer);
-    Ok(buffer)
+#[wasm_bindgen]
+pub fn x25519_diffie_hellman(private_key: &[u8], public_key: &[u8]) -> Result<Vec<u8>, JsError> {
+    x25519_diffie_hellman_internal(private_key, public_key)
+        .map_err(|e| JsError::new(&e.to_string()))
 }
 
-/// Internal function for XSalsa20 decryption without authentication
-fn decrypt_xsalsa20_internal(
-    key: &[u8],
-    nonce: &[u8],
-    ciphertext: &[u8],
-) -> Result<Vec<u8>, String> {
-    // Key must be 32 bytes
-    let key_bytes: [u8; 32] = key
-        .try_into()
-        .map_err(|_| "Invalid key length".to_string())?;
-    // Nonce must be 24 bytes
-    let nonce_bytes: [u8; 24] = nonce
-        .try_into()
-        .map_err(|_| "Invalid nonce length".to_string())?;
-
-    // Create cipher instance and decrypt (XSalsa20 is symmetric)
-    let mut cipher = XSalsa20::new(&key_bytes.into(), &nonce_bytes.into());
-    let mut buffer = ciphertext.to_vec();
-    cipher.apply_keystream(&mut buffer);
-    Ok(buffer)
-}
-
-/// XSalsa20 encryption without authentication (for compatibility with existing interface)
+/// XSalsa20 encryption without authentication
 #[wasm_bindgen]
 pub fn encrypt_xsalsa20(
     key: &[u8],
@@ -137,10 +138,10 @@ pub fn encrypt_xsalsa20(
     plaintext: &[u8],
 ) -> Result<Vec<u8>, JsError> {
     let nonce = generate_nonce(nonce_material);
-    encrypt_xsalsa20_internal(key, &nonce, plaintext).map_err(|e| JsError::new(&e))
+    encrypt_xsalsa20_raw_internal(key, &nonce, plaintext).map_err(|e| JsError::new(&e.to_string()))
 }
 
-/// XSalsa20 decryption without authentication (for compatibility with existing interface)
+/// XSalsa20 decryption without authentication
 #[wasm_bindgen]
 pub fn decrypt_xsalsa20(
     key: &[u8],
@@ -148,23 +149,63 @@ pub fn decrypt_xsalsa20(
     ciphertext: &[u8],
 ) -> Result<Vec<u8>, JsError> {
     let nonce = generate_nonce(nonce_material);
-    decrypt_xsalsa20_internal(key, &nonce, ciphertext).map_err(|e| JsError::new(&e))
+    decrypt_xsalsa20_raw_internal(key, &nonce, ciphertext).map_err(|e| JsError::new(&e.to_string()))
 }
 
-/// Internal function for XSalsa20-Poly1305 encryption
-fn encrypt_xsalsa20_poly1305_internal(
+/// Internal function for raw XSalsa20 encryption without nonce generation
+fn encrypt_xsalsa20_raw_internal(
     key: &[u8],
     nonce: &[u8],
     plaintext: &[u8],
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>, CryptoError> {
     // Key must be 32 bytes
-    let key_bytes: [u8; 32] = key
-        .try_into()
-        .map_err(|_| "Invalid key length".to_string())?;
+    let key_bytes: [u8; 32] = key.try_into().map_err(|_| CryptoError::InvalidKeyLength)?;
     // Nonce must be 24 bytes
     let nonce_bytes: [u8; 24] = nonce
         .try_into()
-        .map_err(|_| "Invalid nonce length".to_string())?;
+        .map_err(|_| CryptoError::InvalidNonceLength)?;
+
+    // Create cipher instance and encrypt
+    let mut cipher = XSalsa20::new_from_slices(&key_bytes, &nonce_bytes)
+        .map_err(|_| CryptoError::CipherError)?;
+    let mut buffer = plaintext.to_vec();
+    cipher.apply_keystream(&mut buffer);
+    Ok(buffer)
+}
+
+/// Internal function for raw XSalsa20 decryption without nonce generation
+fn decrypt_xsalsa20_raw_internal(
+    key: &[u8],
+    nonce: &[u8],
+    ciphertext: &[u8],
+) -> Result<Vec<u8>, CryptoError> {
+    // Key must be 32 bytes
+    let key_bytes: [u8; 32] = key.try_into().map_err(|_| CryptoError::InvalidKeyLength)?;
+    // Nonce must be 24 bytes
+    let nonce_bytes: [u8; 24] = nonce
+        .try_into()
+        .map_err(|_| CryptoError::InvalidNonceLength)?;
+
+    // Create cipher instance and decrypt (XSalsa20 is symmetric)
+    let mut cipher = XSalsa20::new_from_slices(&key_bytes, &nonce_bytes)
+        .map_err(|_| CryptoError::CipherError)?;
+    let mut buffer = ciphertext.to_vec();
+    cipher.apply_keystream(&mut buffer);
+    Ok(buffer)
+}
+
+/// XSalsa20-Poly1305 encryption
+fn encrypt_xsalsa20_poly1305(
+    key: &[u8],
+    nonce: &[u8],
+    plaintext: &[u8],
+) -> Result<Vec<u8>, CryptoError> {
+    // Key must be 32 bytes
+    let key_bytes: [u8; 32] = key.try_into().map_err(|_| CryptoError::InvalidKeyLength)?;
+    // Nonce must be 24 bytes
+    let nonce_bytes: [u8; 24] = nonce
+        .try_into()
+        .map_err(|_| CryptoError::InvalidNonceLength)?;
 
     // Create cipher instance
     let cipher = XSalsa20Poly1305::new(&key_bytes.into());
@@ -172,23 +213,21 @@ fn encrypt_xsalsa20_poly1305_internal(
     // Encrypt the plaintext
     cipher
         .encrypt(&nonce_bytes.into(), plaintext)
-        .map_err(|_| "Wrong tag".to_string())
+        .map_err(|_| CryptoError::WrongTag)
 }
 
-/// Internal function for XSalsa20-Poly1305 decryption
-fn decrypt_xsalsa20_poly1305_internal(
+/// XSalsa20-Poly1305 decryption
+fn decrypt_xsalsa20_poly1305(
     key: &[u8],
     nonce: &[u8],
     ciphertext: &[u8],
-) -> Result<Vec<u8>, String> {
+) -> Result<Vec<u8>, CryptoError> {
     // Key must be 32 bytes
-    let key_bytes: [u8; 32] = key
-        .try_into()
-        .map_err(|_| "Invalid key length".to_string())?;
+    let key_bytes: [u8; 32] = key.try_into().map_err(|_| CryptoError::InvalidKeyLength)?;
     // Nonce must be 24 bytes
     let nonce_bytes: [u8; 24] = nonce
         .try_into()
-        .map_err(|_| "Invalid nonce length".to_string())?;
+        .map_err(|_| CryptoError::InvalidNonceLength)?;
 
     // Create cipher instance
     let cipher = XSalsa20Poly1305::new(&key_bytes.into());
@@ -196,35 +235,7 @@ fn decrypt_xsalsa20_poly1305_internal(
     // Decrypt the ciphertext
     cipher
         .decrypt(&nonce_bytes.into(), ciphertext)
-        .map_err(|_| "Wrong tag".to_string())
-}
-
-/// Internal function for sealing a message
-fn seal_internal(
-    message: &[u8],
-    sender_private_key: &[u8],
-    recipient_public_key: &[u8],
-    nonce: &[u8],
-) -> Result<Vec<u8>, String> {
-    // Generate shared secret using X25519
-    let shared_secret = x25519_diffie_hellman(sender_private_key, recipient_public_key);
-
-    // Encrypt message using XSalsa20-Poly1305
-    encrypt_xsalsa20_poly1305_internal(&shared_secret, nonce, message)
-}
-
-/// Internal function for unsealing a message
-fn unseal_internal(
-    sealed_message: &[u8],
-    recipient_private_key: &[u8],
-    sender_public_key: &[u8],
-    nonce: &[u8],
-) -> Result<Vec<u8>, String> {
-    // Generate shared secret using X25519
-    let shared_secret = x25519_diffie_hellman(recipient_private_key, sender_public_key);
-
-    // Decrypt message using XSalsa20-Poly1305
-    decrypt_xsalsa20_poly1305_internal(&shared_secret, nonce, sealed_message)
+        .map_err(|_| CryptoError::WrongTag)
 }
 
 /// WASM-exposed function for sealing a message using X25519 + XSalsa20-Poly1305
@@ -236,8 +247,14 @@ pub fn seal(
     nonce_material: &[u8],
 ) -> Result<Vec<u8>, JsError> {
     let nonce = generate_nonce(nonce_material);
-    seal_internal(message, sender_private_key, recipient_public_key, &nonce)
-        .map_err(|e| JsError::new(&e))
+
+    // Generate shared secret using X25519
+    let shared_secret = x25519_diffie_hellman_internal(sender_private_key, recipient_public_key)
+        .map_err(|e| JsError::new(&e.to_string()))?;
+
+    // Encrypt message using XSalsa20-Poly1305
+    encrypt_xsalsa20_poly1305(&shared_secret, &nonce, message)
+        .map_err(|e| JsError::new(&e.to_string()))
 }
 
 /// WASM-exposed function for unsealing a message using X25519 + XSalsa20-Poly1305
@@ -249,13 +266,111 @@ pub fn unseal(
     nonce_material: &[u8],
 ) -> Result<Vec<u8>, JsError> {
     let nonce = generate_nonce(nonce_material);
-    unseal_internal(
-        sealed_message,
-        recipient_private_key,
-        sender_public_key,
-        &nonce,
-    )
-    .map_err(|e| JsError::new(&e))
+
+    // Generate shared secret using X25519
+    let shared_secret = x25519_diffie_hellman_internal(recipient_private_key, sender_public_key)
+        .map_err(|e| JsError::new(&e.to_string()))?;
+
+    // Decrypt message using XSalsa20-Poly1305
+    decrypt_xsalsa20_poly1305(&shared_secret, &nonce, sealed_message)
+        .map_err(|e| JsError::new(&e.to_string()))
+}
+
+/// Generate a new Ed25519 signing key
+#[wasm_bindgen]
+pub fn new_ed25519_signing_key() -> Vec<u8> {
+    let mut rng = OsRng;
+    let signing_key = SigningKey::generate(&mut rng);
+    signing_key.to_bytes().to_vec()
+}
+
+fn ed25519_verifying_key_internal(signing_key: &[u8]) -> Result<Vec<u8>, CryptoError> {
+    let key_bytes: [u8; 32] = signing_key
+        .try_into()
+        .map_err(|_| CryptoError::InvalidKeyLength)?;
+    let signing_key = SigningKey::from_bytes(&key_bytes);
+    Ok(signing_key.verifying_key().to_bytes().to_vec())
+}
+
+#[wasm_bindgen]
+pub fn ed25519_verifying_key(signing_key: &[u8]) -> Result<Vec<u8>, JsError> {
+    ed25519_verifying_key_internal(signing_key).map_err(|e| JsError::new(&e.to_string()))
+}
+
+fn ed25519_sign_internal(signing_key: &[u8], message: &[u8]) -> Result<Vec<u8>, CryptoError> {
+    let key_bytes: [u8; 32] = signing_key
+        .try_into()
+        .map_err(|_| CryptoError::InvalidKeyLength)?;
+    let signing_key = SigningKey::from_bytes(&key_bytes);
+    Ok(signing_key.sign(message).to_bytes().to_vec())
+}
+
+#[wasm_bindgen]
+pub fn ed25519_sign(signing_key: &[u8], message: &[u8]) -> Result<Vec<u8>, JsError> {
+    ed25519_sign_internal(signing_key, message).map_err(|e| JsError::new(&e.to_string()))
+}
+
+fn ed25519_verify_internal(
+    verifying_key: &[u8],
+    message: &[u8],
+    signature: &[u8],
+) -> Result<bool, CryptoError> {
+    let key_bytes: [u8; 32] = verifying_key
+        .try_into()
+        .map_err(|_| CryptoError::InvalidKeyLength)?;
+    let verifying_key = VerifyingKey::from_bytes(&key_bytes)
+        .map_err(|e| CryptoError::InvalidVerifyingKey(e.to_string()))?;
+
+    let sig_bytes: [u8; 64] = signature
+        .try_into()
+        .map_err(|_| CryptoError::InvalidSignatureLength)?;
+    let signature = ed25519_dalek::Signature::from_bytes(&sig_bytes);
+
+    Ok(verifying_key.verify(message, &signature).is_ok())
+}
+
+#[wasm_bindgen]
+pub fn ed25519_verify(
+    verifying_key: &[u8],
+    message: &[u8],
+    signature: &[u8],
+) -> Result<bool, JsError> {
+    ed25519_verify_internal(verifying_key, message, signature)
+        .map_err(|e| JsError::new(&e.to_string()))
+}
+
+#[wasm_bindgen]
+pub fn ed25519_signing_key_from_bytes(bytes: &[u8]) -> Result<Vec<u8>, JsError> {
+    let key_bytes: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| JsError::new("Invalid signing key length"))?;
+    Ok(key_bytes.to_vec())
+}
+
+#[wasm_bindgen]
+pub fn ed25519_signing_key_to_public(signing_key: &[u8]) -> Result<Vec<u8>, JsError> {
+    ed25519_verifying_key_internal(signing_key).map_err(|e| JsError::new(&e.to_string()))
+}
+
+#[wasm_bindgen]
+pub fn ed25519_signing_key_sign(signing_key: &[u8], message: &[u8]) -> Result<Vec<u8>, JsError> {
+    ed25519_sign_internal(signing_key, message).map_err(|e| JsError::new(&e.to_string()))
+}
+
+#[wasm_bindgen]
+pub fn ed25519_verifying_key_from_bytes(bytes: &[u8]) -> Result<Vec<u8>, JsError> {
+    let key_bytes: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| JsError::new("Invalid verifying key length"))?;
+    Ok(key_bytes.to_vec())
+}
+
+#[wasm_bindgen]
+pub fn ed25519_signature_from_bytes(bytes: &[u8]) -> Result<Vec<u8>, JsError> {
+    let sig_bytes: [u8; 64] = bytes
+        .try_into()
+        .map_err(|_| JsError::new("Invalid signature length"))?;
+    Ok(sig_bytes.to_vec())
 }
 
 #[cfg(test)]
@@ -442,12 +557,12 @@ mod tests {
         assert_eq!(private_key.len(), 32);
 
         // Test that public key generation works and produces correct length
-        let public_key = x25519_public_key(&private_key);
+        let public_key = x25519_public_key_internal(&private_key).unwrap();
         assert_eq!(public_key.len(), 32);
 
         // Test that different private keys produce different public keys
         let private_key2 = new_x25519_private_key();
-        let public_key2 = x25519_public_key(&private_key2);
+        let public_key2 = x25519_public_key_internal(&private_key2).unwrap();
         assert_ne!(public_key, public_key2);
     }
 
@@ -455,15 +570,17 @@ mod tests {
     fn test_x25519_key_exchange() {
         // Generate sender's keypair
         let sender_private = new_x25519_private_key();
-        let sender_public = x25519_public_key(&sender_private);
+        let sender_public = x25519_public_key_internal(&sender_private).unwrap();
 
         // Generate recipient's keypair
         let recipient_private = new_x25519_private_key();
-        let recipient_public = x25519_public_key(&recipient_private);
+        let recipient_public = x25519_public_key_internal(&recipient_private).unwrap();
 
         // Test properties we expect from the shared secret
-        let shared_secret1 = x25519_diffie_hellman(&sender_private, &recipient_public);
-        let shared_secret2 = x25519_diffie_hellman(&recipient_private, &sender_public);
+        let shared_secret1 =
+            x25519_diffie_hellman_internal(&sender_private, &recipient_public).unwrap();
+        let shared_secret2 =
+            x25519_diffie_hellman_internal(&recipient_private, &sender_public).unwrap();
 
         // Both sides should arrive at the same shared secret
         assert_eq!(shared_secret1, shared_secret2);
@@ -473,9 +590,9 @@ mod tests {
 
         // Different recipient should produce different shared secret
         let other_recipient_private = new_x25519_private_key();
-        let other_recipient_public = x25519_public_key(&other_recipient_private);
+        let other_recipient_public = x25519_public_key_internal(&other_recipient_private).unwrap();
         let different_shared_secret =
-            x25519_diffie_hellman(&sender_private, &other_recipient_public);
+            x25519_diffie_hellman_internal(&sender_private, &other_recipient_public).unwrap();
         assert_ne!(shared_secret1, different_shared_secret);
     }
 
@@ -487,83 +604,83 @@ mod tests {
         let plaintext = b"Hello, World!";
 
         // Test encryption
-        let ciphertext = encrypt_xsalsa20_poly1305_internal(&key, &nonce, plaintext).unwrap();
+        let ciphertext = encrypt_xsalsa20_poly1305(&key, &nonce, plaintext).unwrap();
         assert!(ciphertext.len() > plaintext.len()); // Should include authentication tag
 
         // Test decryption
-        let decrypted = decrypt_xsalsa20_poly1305_internal(&key, &nonce, &ciphertext).unwrap();
+        let decrypted = decrypt_xsalsa20_poly1305(&key, &nonce, &ciphertext).unwrap();
         assert_eq!(decrypted, plaintext);
 
         // Test that different nonce produces different ciphertext
         let nonce2 = [1u8; 24];
-        let ciphertext2 = encrypt_xsalsa20_poly1305_internal(&key, &nonce2, plaintext).unwrap();
+        let ciphertext2 = encrypt_xsalsa20_poly1305(&key, &nonce2, plaintext).unwrap();
         assert_ne!(ciphertext, ciphertext2);
 
         // Test that different key produces different ciphertext
         let key2 = [1u8; 32];
-        let ciphertext3 = encrypt_xsalsa20_poly1305_internal(&key2, &nonce, plaintext).unwrap();
+        let ciphertext3 = encrypt_xsalsa20_poly1305(&key2, &nonce, plaintext).unwrap();
         assert_ne!(ciphertext, ciphertext3);
 
         // Test that decryption fails with wrong key
-        assert!(decrypt_xsalsa20_poly1305_internal(&key2, &nonce, &ciphertext).is_err());
+        assert!(decrypt_xsalsa20_poly1305(&key2, &nonce, &ciphertext).is_err());
 
         // Test that decryption fails with wrong nonce
-        assert!(decrypt_xsalsa20_poly1305_internal(&key, &nonce2, &ciphertext).is_err());
+        assert!(decrypt_xsalsa20_poly1305(&key, &nonce2, &ciphertext).is_err());
 
         // Test that decryption fails with tampered ciphertext
         let mut tampered = ciphertext.clone();
         tampered[0] ^= 1;
-        assert!(decrypt_xsalsa20_poly1305_internal(&key, &nonce, &tampered).is_err());
+        assert!(decrypt_xsalsa20_poly1305(&key, &nonce, &tampered).is_err());
     }
 
     #[test]
     fn test_seal_unseal() {
         // Generate keypairs
         let sender_private = new_x25519_private_key();
-        let sender_public = x25519_public_key(&sender_private);
+        let sender_public = x25519_public_key_internal(&sender_private).unwrap();
         let recipient_private = new_x25519_private_key();
-        let recipient_public = x25519_public_key(&recipient_private);
+        let recipient_public = x25519_public_key_internal(&recipient_private).unwrap();
 
         // Test message and nonce
         let message = b"Secret message";
         let nonce = generate_nonce(b"test nonce material");
         let different_nonce = generate_nonce(b"different nonce");
 
-        // Seal the message
-        let sealed = seal_internal(message, &sender_private, &recipient_public, &nonce).unwrap();
+        // Generate shared secrets
+        let shared_secret1 =
+            x25519_diffie_hellman_internal(&sender_private, &recipient_public).unwrap();
+        let shared_secret2 =
+            x25519_diffie_hellman_internal(&recipient_private, &sender_public).unwrap();
+        assert_eq!(
+            shared_secret1, shared_secret2,
+            "Shared secrets should match"
+        );
 
-        // Unseal the message
-        let unsealed =
-            unseal_internal(&sealed, &recipient_private, &sender_public, &nonce).unwrap();
+        // Seal the message (encrypt with authentication)
+        let sealed = encrypt_xsalsa20_poly1305(&shared_secret1, &nonce, message).unwrap();
+
+        // Unseal the message (decrypt with authentication)
+        let unsealed = decrypt_xsalsa20_poly1305(&shared_secret2, &nonce, &sealed).unwrap();
         assert_eq!(unsealed, message);
 
         // Test that different nonce produces different sealed message
-        let sealed2 = seal_internal(
-            message,
-            &sender_private,
-            &recipient_public,
-            &different_nonce,
-        )
-        .unwrap();
+        let sealed2 =
+            encrypt_xsalsa20_poly1305(&shared_secret1, &different_nonce, message).unwrap();
         assert_ne!(sealed, sealed2);
 
         // Test that unsealing fails with wrong keys
         let wrong_private = new_x25519_private_key();
-        assert!(unseal_internal(&sealed, &wrong_private, &sender_public, &nonce).is_err());
+        let wrong_shared_secret =
+            x25519_diffie_hellman_internal(&wrong_private, &recipient_public).unwrap();
+        assert!(decrypt_xsalsa20_poly1305(&wrong_shared_secret, &nonce, &sealed).is_err());
 
         // Test that unsealing fails with wrong nonce
-        assert!(unseal_internal(
-            &sealed,
-            &recipient_private,
-            &sender_public,
-            &different_nonce
-        )
-        .is_err());
+        assert!(decrypt_xsalsa20_poly1305(&shared_secret1, &different_nonce, &sealed).is_err());
 
         // Test that unsealing fails with tampered message
         let mut tampered = sealed.clone();
         tampered[0] ^= 1;
-        assert!(unseal_internal(&tampered, &recipient_private, &sender_public, &nonce).is_err());
+        assert!(decrypt_xsalsa20_poly1305(&shared_secret1, &nonce, &tampered).is_err());
     }
 
     #[test]
@@ -574,29 +691,217 @@ mod tests {
         let plaintext = b"Hello, World!";
 
         // Test encryption
-        let ciphertext = encrypt_xsalsa20_poly1305_internal(&key, &nonce, plaintext).unwrap();
+        let ciphertext = encrypt_xsalsa20_raw_internal(&key, &nonce, plaintext).unwrap();
         assert_ne!(ciphertext, plaintext); // Ciphertext should be different from plaintext
 
         // Test decryption
-        let decrypted = decrypt_xsalsa20_poly1305_internal(&key, &nonce, &ciphertext).unwrap();
+        let decrypted = decrypt_xsalsa20_raw_internal(&key, &nonce, &ciphertext).unwrap();
         assert_eq!(decrypted, plaintext);
 
         // Test that different nonce produces different ciphertext
         let nonce2 = [1u8; 24];
-        let ciphertext2 = encrypt_xsalsa20_poly1305_internal(&key, &nonce2, plaintext).unwrap();
+        let ciphertext2 = encrypt_xsalsa20_raw_internal(&key, &nonce2, plaintext).unwrap();
         assert_ne!(ciphertext, ciphertext2);
 
         // Test that different key produces different ciphertext
         let key2 = [1u8; 32];
-        let ciphertext3 = encrypt_xsalsa20_poly1305_internal(&key2, &nonce, plaintext).unwrap();
+        let ciphertext3 = encrypt_xsalsa20_raw_internal(&key2, &nonce, plaintext).unwrap();
         assert_ne!(ciphertext, ciphertext3);
 
         // Test invalid key length
-        assert!(encrypt_xsalsa20_poly1305_internal(&key[..31], &nonce, plaintext).is_err());
-        assert!(decrypt_xsalsa20_poly1305_internal(&key[..31], &nonce, &ciphertext).is_err());
+        assert!(encrypt_xsalsa20_raw_internal(&key[..31], &nonce, plaintext).is_err());
+        assert!(decrypt_xsalsa20_raw_internal(&key[..31], &nonce, &ciphertext).is_err());
 
         // Test invalid nonce length
-        assert!(encrypt_xsalsa20_poly1305_internal(&key, &nonce[..23], plaintext).is_err());
-        assert!(decrypt_xsalsa20_poly1305_internal(&key, &nonce[..23], &ciphertext).is_err());
+        assert!(encrypt_xsalsa20_raw_internal(&key, &nonce[..23], plaintext).is_err());
+        assert!(decrypt_xsalsa20_raw_internal(&key, &nonce[..23], &ciphertext).is_err());
+    }
+
+    #[test]
+    fn test_xsalsa20_error_handling() {
+        let key = [0u8; 32];
+        let nonce = [0u8; 24];
+        let plaintext = b"test message";
+
+        // Test encryption with invalid key length
+        let invalid_key = vec![0u8; 31]; // Too short
+        let result = encrypt_xsalsa20_raw_internal(&invalid_key, &nonce, plaintext);
+        assert!(result.is_err());
+
+        // Test with too long key
+        let too_long_key = vec![0u8; 33]; // Too long
+        let result = encrypt_xsalsa20_raw_internal(&too_long_key, &nonce, plaintext);
+        assert!(result.is_err());
+
+        // Test decryption with invalid key length
+        let ciphertext = encrypt_xsalsa20_raw_internal(&key, &nonce, plaintext).unwrap();
+        let result = decrypt_xsalsa20_raw_internal(&invalid_key, &nonce, &ciphertext);
+        assert!(result.is_err());
+
+        // Test decryption with too long key
+        let result = decrypt_xsalsa20_raw_internal(&too_long_key, &nonce, &ciphertext);
+        assert!(result.is_err());
+
+        // Test with invalid nonce length
+        let invalid_nonce = vec![0u8; 23]; // Too short
+        let result = encrypt_xsalsa20_raw_internal(&key, &invalid_nonce, plaintext);
+        assert!(result.is_err());
+        let result = decrypt_xsalsa20_raw_internal(&key, &invalid_nonce, &ciphertext);
+        assert!(result.is_err());
+
+        // Test with too long nonce
+        let too_long_nonce = vec![0u8; 25]; // Too long
+        let result = encrypt_xsalsa20_raw_internal(&key, &too_long_nonce, plaintext);
+        assert!(result.is_err());
+        let result = decrypt_xsalsa20_raw_internal(&key, &too_long_nonce, &ciphertext);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_ed25519_key_generation_and_signing() {
+        // Test key generation
+        let signing_key = new_ed25519_signing_key();
+        assert_eq!(signing_key.len(), 32, "Signing key should be 32 bytes");
+
+        // Test verifying key derivation
+        let verifying_key = ed25519_verifying_key_internal(&signing_key).unwrap();
+        assert_eq!(verifying_key.len(), 32, "Verifying key should be 32 bytes");
+
+        // Test that different signing keys produce different verifying keys
+        let signing_key2 = new_ed25519_signing_key();
+        let verifying_key2 = ed25519_verifying_key_internal(&signing_key2).unwrap();
+        assert_ne!(
+            verifying_key, verifying_key2,
+            "Different signing keys should produce different verifying keys"
+        );
+
+        // Test signing and verification
+        let message = b"Test message";
+        let signature = ed25519_sign_internal(&signing_key, message).unwrap();
+        assert_eq!(signature.len(), 64, "Signature should be 64 bytes");
+
+        // Test successful verification
+        let verification_result =
+            ed25519_verify_internal(&verifying_key, message, &signature).unwrap();
+        assert!(
+            verification_result,
+            "Valid signature should verify successfully"
+        );
+
+        // Test verification with wrong message
+        let wrong_message = b"Wrong message";
+        let wrong_verification =
+            ed25519_verify_internal(&verifying_key, wrong_message, &signature).unwrap();
+        assert!(
+            !wrong_verification,
+            "Signature should not verify with wrong message"
+        );
+
+        // Test verification with wrong key
+        let wrong_verification =
+            ed25519_verify_internal(&verifying_key2, message, &signature).unwrap();
+        assert!(
+            !wrong_verification,
+            "Signature should not verify with wrong key"
+        );
+
+        // Test verification with tampered signature
+        let mut tampered_signature = signature.clone();
+        tampered_signature[0] ^= 1;
+        let wrong_verification =
+            ed25519_verify_internal(&verifying_key, message, &tampered_signature).unwrap();
+        assert!(!wrong_verification, "Tampered signature should not verify");
+    }
+
+    #[test]
+    fn test_ed25519_error_cases() {
+        // Test invalid signing key length
+        let invalid_signing_key = vec![0u8; 31]; // Too short
+        let result = ed25519_verifying_key_internal(&invalid_signing_key);
+        assert!(result.is_err());
+        let result = ed25519_sign_internal(&invalid_signing_key, b"test");
+        assert!(result.is_err());
+
+        // Test invalid verifying key length
+        let invalid_verifying_key = vec![0u8; 31]; // Too short
+        let valid_signing_key = new_ed25519_signing_key();
+        let valid_signature = ed25519_sign_internal(&valid_signing_key, b"test").unwrap();
+        let result = ed25519_verify_internal(&invalid_verifying_key, b"test", &valid_signature);
+        assert!(result.is_err());
+
+        // Test invalid signature length
+        let valid_verifying_key = ed25519_verifying_key_internal(&valid_signing_key).unwrap();
+        let invalid_signature = vec![0u8; 63]; // Too short
+        let result = ed25519_verify_internal(&valid_verifying_key, b"test", &invalid_signature);
+        assert!(result.is_err());
+
+        // Test with too long keys
+        let too_long_key = vec![0u8; 33]; // Too long
+        let result = ed25519_verifying_key_internal(&too_long_key);
+        assert!(result.is_err());
+        let result = ed25519_sign_internal(&too_long_key, b"test");
+        assert!(result.is_err());
+
+        // Test with too long signature
+        let too_long_signature = vec![0u8; 65]; // Too long
+        let result = ed25519_verify_internal(&valid_verifying_key, b"test", &too_long_signature);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_seal_unseal_error_handling() {
+        let message = b"test message";
+        let nonce = generate_nonce(b"test nonce material");
+
+        // Generate valid keys
+        let sender_private = new_x25519_private_key();
+        let recipient_private = new_x25519_private_key();
+        let recipient_public = x25519_public_key_internal(&recipient_private).unwrap();
+
+        // Test with invalid sender private key length
+        let invalid_sender_private = vec![0u8; 31]; // Too short
+        let shared_secret =
+            x25519_diffie_hellman_internal(&invalid_sender_private, &recipient_public);
+        assert!(shared_secret.is_err());
+
+        // Test with too long sender private key
+        let too_long_sender_private = vec![0u8; 33]; // Too long
+        let shared_secret =
+            x25519_diffie_hellman_internal(&too_long_sender_private, &recipient_public);
+        assert!(shared_secret.is_err());
+
+        // Test with invalid recipient public key length
+        let invalid_recipient_public = vec![0u8; 31]; // Too short
+        let shared_secret =
+            x25519_diffie_hellman_internal(&sender_private, &invalid_recipient_public);
+        assert!(shared_secret.is_err());
+
+        // Test with too long recipient public key
+        let too_long_recipient_public = vec![0u8; 33]; // Too long
+        let shared_secret =
+            x25519_diffie_hellman_internal(&sender_private, &too_long_recipient_public);
+        assert!(shared_secret.is_err());
+
+        // Test successful encryption/decryption
+        let shared_secret =
+            x25519_diffie_hellman_internal(&sender_private, &recipient_public).unwrap();
+        let encrypted = encrypt_xsalsa20_poly1305(&shared_secret, &nonce, message).unwrap();
+        let decrypted = decrypt_xsalsa20_poly1305(&shared_secret, &nonce, &encrypted).unwrap();
+        assert_eq!(decrypted, message);
+
+        // Test decryption with wrong key
+        let wrong_shared_secret =
+            x25519_diffie_hellman_internal(&new_x25519_private_key(), &recipient_public).unwrap();
+        let result = decrypt_xsalsa20_poly1305(&wrong_shared_secret, &nonce, &encrypted);
+        assert!(result.is_err());
+
+        // Test with empty message
+        let result = encrypt_xsalsa20_poly1305(&shared_secret, &nonce, &[]);
+        assert!(result.is_ok());
+
+        // Test with empty nonce material
+        let empty_nonce = generate_nonce(&[]); // Generate a valid nonce from empty material
+        let result = encrypt_xsalsa20_poly1305(&shared_secret, &empty_nonce, message);
+        assert!(result.is_ok()); // Should work with a valid nonce generated from empty material
     }
 }

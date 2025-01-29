@@ -1,12 +1,3 @@
-import {
-  Ed25519Signature,
-  Ed25519SigningKey,
-  Ed25519VerifyingKey,
-  Memory,
-  X25519PublicKey,
-  X25519StaticSecret,
-  initBundledOnce,
-} from "@hazae41/berith";
 import { base58 } from "@scure/base";
 import {
   blake3_digest_for_state,
@@ -15,7 +6,14 @@ import {
   blake3_hash_once_with_context,
   blake3_update_state,
   decrypt_xsalsa20,
+  ed25519_signature_from_bytes,
+  ed25519_signing_key_from_bytes,
+  ed25519_signing_key_sign,
+  ed25519_signing_key_to_public,
+  ed25519_verify,
+  ed25519_verifying_key_from_bytes,
   encrypt_xsalsa20,
+  new_ed25519_signing_key,
   new_x25519_private_key,
   seal,
   unseal,
@@ -41,7 +39,7 @@ import {
 } from "./crypto.js";
 
 /**
- * WebAssembly implementation of the CryptoProvider interface using jazz-crypto-rs and berith library.
+ * WebAssembly implementation of the CryptoProvider interface using jazz-crypto-rs.
  * This provides the primary implementation using WebAssembly for optimal performance, offering:
  * - Signing/verifying (Ed25519)
  * - Encryption/decryption (XSalsa20)
@@ -55,7 +53,6 @@ export class WasmCrypto extends CryptoProvider<Uint8Array> {
 
   static async create(): Promise<WasmCrypto> {
     return Promise.all([
-      initBundledOnce(),
       new Promise<void>((resolve) => {
         if ("crypto" in globalThis) {
           resolve();
@@ -100,38 +97,39 @@ export class WasmCrypto extends CryptoProvider<Uint8Array> {
   }
 
   newEd25519SigningKey(): Uint8Array {
-    return new Ed25519SigningKey().to_bytes().copyAndDispose();
+    return new_ed25519_signing_key();
   }
 
   getSignerID(secret: SignerSecret): SignerID {
-    return `signer_z${base58.encode(
-      Ed25519SigningKey.from_bytes(
-        new Memory(base58.decode(secret.substring("signerSecret_z".length))),
-      )
-        .public()
-        .to_bytes()
-        .copyAndDispose(),
-    )}`;
+    const signingKey = ed25519_signing_key_from_bytes(
+      base58.decode(secret.substring("signerSecret_z".length)),
+    );
+    const publicKey = ed25519_signing_key_to_public(signingKey);
+    return `signer_z${base58.encode(publicKey)}`;
   }
 
   sign(secret: SignerSecret, message: JsonValue): Signature {
-    const signature = Ed25519SigningKey.from_bytes(
-      new Memory(base58.decode(secret.substring("signerSecret_z".length))),
-    )
-      .sign(new Memory(textEncoder.encode(stableStringify(message))))
-      .to_bytes()
-      .copyAndDispose();
+    const signingKey = ed25519_signing_key_from_bytes(
+      base58.decode(secret.substring("signerSecret_z".length)),
+    );
+    const signature = ed25519_signing_key_sign(
+      signingKey,
+      textEncoder.encode(stableStringify(message)),
+    );
     return `signature_z${base58.encode(signature)}`;
   }
 
   verify(signature: Signature, message: JsonValue, id: SignerID): boolean {
-    return new Ed25519VerifyingKey(
-      new Memory(base58.decode(id.substring("signer_z".length))),
-    ).verify(
-      new Memory(textEncoder.encode(stableStringify(message))),
-      new Ed25519Signature(
-        new Memory(base58.decode(signature.substring("signature_z".length))),
-      ),
+    const verifyingKey = ed25519_verifying_key_from_bytes(
+      base58.decode(id.substring("signer_z".length)),
+    );
+    const signatureBytes = ed25519_signature_from_bytes(
+      base58.decode(signature.substring("signature_z".length)),
+    );
+    return ed25519_verify(
+      verifyingKey,
+      textEncoder.encode(stableStringify(message)),
+      signatureBytes,
     );
   }
 
