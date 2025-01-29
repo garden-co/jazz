@@ -4,10 +4,7 @@
   "type": "module",
   "main": "./dist/app.js",
   "types": "./dist/app.d.ts",
-  "files": [
-    "dist/**",
-    "src"
-  ],
+  "files": ["dist/**", "src"],
   "scripts": {
     "dev": "vite build --watch",
     "build": "rm -rf ./dist && tsc --sourceMap --outDir dist",
