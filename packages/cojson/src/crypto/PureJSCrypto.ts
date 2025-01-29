@@ -45,8 +45,7 @@ export class PureJSCrypto extends CryptoProvider<Blake3State> {
     return blake3.create({});
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  cloneBlake3State(state: any): Blake3State {
+  cloneBlake3State(state: Blake3State): Blake3State {
     return state.clone();
   }
 
