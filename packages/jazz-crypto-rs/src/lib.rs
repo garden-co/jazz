@@ -185,9 +185,10 @@ pub fn seal(
     message: &[u8],
     sender_private_key: &[u8],
     recipient_public_key: &[u8],
-    nonce: &[u8],
+    nonce_material: &[u8],
 ) -> Result<Vec<u8>, JsError> {
-    seal_internal(message, sender_private_key, recipient_public_key, nonce)
+    let nonce = generate_nonce(nonce_material);
+    seal_internal(message, sender_private_key, recipient_public_key, &nonce)
         .map_err(|e| JsError::new(&e))
 }
 
@@ -197,13 +198,14 @@ pub fn unseal(
     sealed_message: &[u8],
     recipient_private_key: &[u8],
     sender_public_key: &[u8],
-    nonce: &[u8],
+    nonce_material: &[u8],
 ) -> Result<Vec<u8>, JsError> {
+    let nonce = generate_nonce(nonce_material);
     unseal_internal(
         sealed_message,
         recipient_private_key,
         sender_public_key,
-        nonce,
+        &nonce,
     )
     .map_err(|e| JsError::new(&e))
 }

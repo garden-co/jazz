@@ -17,8 +17,8 @@ import {
   blake3_update_state,
   generate_nonce,
   new_x25519_private_key,
-  seal as seal_wasm,
-  unseal as unseal_wasm,
+  seal,
+  unseal,
   x25519_public_key,
 } from "jazz-crypto-rs";
 import { base64URLtoBytes, bytesToBase64url } from "../base64url.js";
@@ -199,12 +199,12 @@ export class WasmCrypto extends CryptoProvider<Uint8Array> {
     to: SealerID;
     nOnceMaterial: { in: RawCoID; tx: TransactionID };
   }): Sealed<T> {
-    const nOnce = this.generateJsonNonce(nOnceMaterial);
     const sealerPub = base58.decode(to.substring("sealer_z".length));
     const senderPriv = base58.decode(from.substring("sealerSecret_z".length));
     const plaintext = textEncoder.encode(stableStringify(message));
+    const nonceMaterial = textEncoder.encode(stableStringify(nOnceMaterial));
 
-    const sealedBytes = seal_wasm(plaintext, senderPriv, sealerPub, nOnce);
+    const sealedBytes = seal(plaintext, senderPriv, sealerPub, nonceMaterial);
 
     return `sealed_U${bytesToBase64url(sealedBytes)}` as Sealed<T>;
   }
@@ -215,13 +215,18 @@ export class WasmCrypto extends CryptoProvider<Uint8Array> {
     from: SealerID,
     nOnceMaterial: { in: RawCoID; tx: TransactionID },
   ): T | undefined {
-    const nOnce = this.generateJsonNonce(nOnceMaterial);
     const sealerPriv = base58.decode(sealer.substring("sealerSecret_z".length));
     const senderPub = base58.decode(from.substring("sealer_z".length));
     const sealedBytes = base64URLtoBytes(sealed.substring("sealed_U".length));
+    const nonceMaterial = textEncoder.encode(stableStringify(nOnceMaterial));
 
     try {
-      const plaintext = unseal_wasm(sealedBytes, sealerPriv, senderPub, nOnce);
+      const plaintext = unseal(
+        sealedBytes,
+        sealerPriv,
+        senderPub,
+        nonceMaterial,
+      );
       try {
         return JSON.parse(textDecoder.decode(plaintext));
       } catch (e) {
