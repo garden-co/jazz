@@ -1,6 +1,33 @@
-# Jazz Crypto Rust
+# Jazz Crypto RS
 
-This is the Rust implementation of the Jazz Crypto utils library.
+A Rust implementation of cryptographic primitives for the Jazz project, compiled to WebAssembly.
+
+## Module Structure
+
+The codebase is organized into the following modules:
+
+### Crypto Module (`src/crypto/`)
+- `error.rs` - Error types for cryptographic operations
+- `ed25519.rs` - Ed25519 signing and verification
+- `x25519.rs` - X25519 key exchange
+- `xsalsa20.rs` - XSalsa20 and XSalsa20-Poly1305 encryption/decryption
+- `mod.rs` - High-level sealing/unsealing operations
+
+### Hash Module (`src/hash/`)
+- `mod.rs` - BLAKE3 hashing functionality and nonce generation
+
+## Features
+
+- Ed25519 signing and verification
+- X25519 key exchange
+- XSalsa20 and XSalsa20-Poly1305 encryption
+- BLAKE3 hashing with incremental state updates
+- Secure nonce generation
+- WebAssembly bindings for all operations
+
+## Usage
+
+The library exposes WebAssembly-compatible functions for all cryptographic operations. See the individual module files for detailed documentation of available functions.
 
 ## Installation
 
