@@ -14,3 +14,4 @@ wasm-bindgen = "0.2"
 blake3 = "1.5"
 x25519-dalek = { version = "2.0", features = ["getrandom", "static_secrets"] }
 crypto_secretbox = { version = "0.1.1", features = ["getrandom"] }
+getrandom = { version = "0.2", features = ["js"] }

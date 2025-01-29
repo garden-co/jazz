@@ -20,17 +20,58 @@ interface WasmExports {
   blake3_empty_state: () => Uint8Array;
   blake3_update_state: (state: Uint8Array, data: Uint8Array) => Uint8Array;
   blake3_digest_for_state: (state: Uint8Array) => Uint8Array;
+
+  // X25519 functions
+  new_x25519_private_key: () => Uint8Array;
+  x25519_public_key: (private_key: Uint8Array) => Uint8Array;
+  x25519_diffie_hellman: (
+    private_key: Uint8Array,
+    public_key: Uint8Array,
+  ) => Uint8Array;
+
+  // XSalsa20-Poly1305 functions
+  encrypt_xsalsa20_poly1305: (
+    key: Uint8Array,
+    nonce: Uint8Array,
+    plaintext: Uint8Array,
+  ) => Uint8Array;
+  decrypt_xsalsa20_poly1305: (
+    key: Uint8Array,
+    nonce: Uint8Array,
+    ciphertext: Uint8Array,
+  ) => Uint8Array;
+
+  // High-level seal/unseal functions
+  seal: (
+    message: Uint8Array,
+    sender_private_key: Uint8Array,
+    recipient_public_key: Uint8Array,
+    nonce_material: Uint8Array,
+  ) => Uint8Array;
+  unseal: (
+    sealed_message: Uint8Array,
+    recipient_private_key: Uint8Array,
+    sender_public_key: Uint8Array,
+    nonce_material: Uint8Array,
+  ) => Uint8Array;
 }
 
 const moduleExports = ("default" in wasmModule
   ? wasmModule.default
   : wasmModule) as unknown as WasmExports;
 
-// Export all functions from the module
-export const generate_nonce = moduleExports.generate_nonce;
-export const blake3_hash_once = moduleExports.blake3_hash_once;
-export const blake3_hash_once_with_context =
-  moduleExports.blake3_hash_once_with_context;
-export const blake3_empty_state = moduleExports.blake3_empty_state;
-export const blake3_update_state = moduleExports.blake3_update_state;
-export const blake3_digest_for_state = moduleExports.blake3_digest_for_state;
+export const {
+  generate_nonce,
+  blake3_hash_once,
+  blake3_hash_once_with_context,
+  blake3_empty_state,
+  blake3_update_state,
+  blake3_digest_for_state,
+  new_x25519_private_key,
+  x25519_public_key,
+  x25519_diffie_hellman,
+  encrypt_xsalsa20_poly1305,
+  decrypt_xsalsa20_poly1305,
+  seal,
+  unseal,
+} = moduleExports;

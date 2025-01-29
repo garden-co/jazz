@@ -104,7 +104,7 @@ fn encrypt_xsalsa20_poly1305_internal(
     // Encrypt the plaintext
     cipher
         .encrypt(&nonce_bytes.into(), plaintext)
-        .map_err(|e| format!("Encryption failed: {}", e))
+        .map_err(|_| "Wrong tag".to_string())
 }
 
 /// Internal function for XSalsa20-Poly1305 decryption
@@ -128,7 +128,7 @@ fn decrypt_xsalsa20_poly1305_internal(
     // Decrypt the ciphertext
     cipher
         .decrypt(&nonce_bytes.into(), ciphertext)
-        .map_err(|e| format!("Decryption failed: {}", e))
+        .map_err(|_| "Wrong tag".to_string())
 }
 
 /// WASM-exposed function for XSalsa20-Poly1305 encryption
@@ -149,6 +149,63 @@ pub fn decrypt_xsalsa20_poly1305(
     ciphertext: &[u8],
 ) -> Result<Vec<u8>, JsError> {
     decrypt_xsalsa20_poly1305_internal(key, nonce, ciphertext).map_err(|e| JsError::new(&e))
+}
+
+/// Internal function for sealing a message
+fn seal_internal(
+    message: &[u8],
+    sender_private_key: &[u8],
+    recipient_public_key: &[u8],
+    nonce: &[u8],
+) -> Result<Vec<u8>, String> {
+    // Generate shared secret using X25519
+    let shared_secret = x25519_diffie_hellman(sender_private_key, recipient_public_key);
+
+    // Encrypt message using XSalsa20-Poly1305
+    encrypt_xsalsa20_poly1305_internal(&shared_secret, nonce, message)
+}
+
+/// Internal function for unsealing a message
+fn unseal_internal(
+    sealed_message: &[u8],
+    recipient_private_key: &[u8],
+    sender_public_key: &[u8],
+    nonce: &[u8],
+) -> Result<Vec<u8>, String> {
+    // Generate shared secret using X25519
+    let shared_secret = x25519_diffie_hellman(recipient_private_key, sender_public_key);
+
+    // Decrypt message using XSalsa20-Poly1305
+    decrypt_xsalsa20_poly1305_internal(&shared_secret, nonce, sealed_message)
+}
+
+/// WASM-exposed function for sealing a message using X25519 + XSalsa20-Poly1305
+#[wasm_bindgen]
+pub fn seal(
+    message: &[u8],
+    sender_private_key: &[u8],
+    recipient_public_key: &[u8],
+    nonce: &[u8],
+) -> Result<Vec<u8>, JsError> {
+    seal_internal(message, sender_private_key, recipient_public_key, nonce)
+        .map_err(|e| JsError::new(&e))
+}
+
+/// WASM-exposed function for unsealing a message using X25519 + XSalsa20-Poly1305
+#[wasm_bindgen]
+pub fn unseal(
+    sealed_message: &[u8],
+    recipient_private_key: &[u8],
+    sender_public_key: &[u8],
+    nonce: &[u8],
+) -> Result<Vec<u8>, JsError> {
+    unseal_internal(
+        sealed_message,
+        recipient_private_key,
+        sender_public_key,
+        nonce,
+    )
+    .map_err(|e| JsError::new(&e))
 }
 
 #[cfg(test)]
@@ -407,5 +464,55 @@ mod tests {
         let mut tampered = ciphertext.clone();
         tampered[0] ^= 1;
         assert!(decrypt_xsalsa20_poly1305_internal(&key, &nonce, &tampered).is_err());
+    }
+
+    #[test]
+    fn test_seal_unseal() {
+        // Generate keypairs
+        let sender_private = new_x25519_private_key();
+        let sender_public = x25519_public_key(&sender_private);
+        let recipient_private = new_x25519_private_key();
+        let recipient_public = x25519_public_key(&recipient_private);
+
+        // Test message and nonce
+        let message = b"Secret message";
+        let nonce = generate_nonce(b"test nonce material");
+        let different_nonce = generate_nonce(b"different nonce");
+
+        // Seal the message
+        let sealed = seal_internal(message, &sender_private, &recipient_public, &nonce).unwrap();
+
+        // Unseal the message
+        let unsealed =
+            unseal_internal(&sealed, &recipient_private, &sender_public, &nonce).unwrap();
+        assert_eq!(unsealed, message);
+
+        // Test that different nonce produces different sealed message
+        let sealed2 = seal_internal(
+            message,
+            &sender_private,
+            &recipient_public,
+            &different_nonce,
+        )
+        .unwrap();
+        assert_ne!(sealed, sealed2);
+
+        // Test that unsealing fails with wrong keys
+        let wrong_private = new_x25519_private_key();
+        assert!(unseal_internal(&sealed, &wrong_private, &sender_public, &nonce).is_err());
+
+        // Test that unsealing fails with wrong nonce
+        assert!(unseal_internal(
+            &sealed,
+            &recipient_private,
+            &sender_public,
+            &different_nonce
+        )
+        .is_err());
+
+        // Test that unsealing fails with tampered message
+        let mut tampered = sealed.clone();
+        tampered[0] ^= 1;
+        assert!(unseal_internal(&tampered, &recipient_private, &sender_public, &nonce).is_err());
     }
 }
