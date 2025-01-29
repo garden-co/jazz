@@ -2,6 +2,8 @@ use crypto_secretbox::{
     aead::{Aead, KeyInit},
     XSalsa20Poly1305,
 };
+use salsa20::cipher::{KeyIvInit, StreamCipher};
+use salsa20::XSalsa20;
 use wasm_bindgen::prelude::*;
 use x25519_dalek::{PublicKey, StaticSecret};
 
@@ -83,6 +85,62 @@ pub fn x25519_diffie_hellman(private_key: &[u8], public_key: &[u8]) -> Vec<u8> {
     secret.diffie_hellman(&public).to_bytes().to_vec()
 }
 
+/// Internal function for XSalsa20 encryption without authentication
+fn encrypt_xsalsa20_internal(
+    key: &[u8],
+    nonce: &[u8],
+    plaintext: &[u8],
+) -> Result<Vec<u8>, String> {
+    // Key must be 32 bytes
+    let key_bytes: [u8; 32] = key
+        .try_into()
+        .map_err(|_| "Invalid key length".to_string())?;
+    // Nonce must be 24 bytes
+    let nonce_bytes: [u8; 24] = nonce
+        .try_into()
+        .map_err(|_| "Invalid nonce length".to_string())?;
+
+    // Create cipher instance and encrypt
+    let mut cipher = XSalsa20::new(&key_bytes.into(), &nonce_bytes.into());
+    let mut buffer = plaintext.to_vec();
+    cipher.apply_keystream(&mut buffer);
+    Ok(buffer)
+}
+
+/// Internal function for XSalsa20 decryption without authentication
+fn decrypt_xsalsa20_internal(
+    key: &[u8],
+    nonce: &[u8],
+    ciphertext: &[u8],
+) -> Result<Vec<u8>, String> {
+    // Key must be 32 bytes
+    let key_bytes: [u8; 32] = key
+        .try_into()
+        .map_err(|_| "Invalid key length".to_string())?;
+    // Nonce must be 24 bytes
+    let nonce_bytes: [u8; 24] = nonce
+        .try_into()
+        .map_err(|_| "Invalid nonce length".to_string())?;
+
+    // Create cipher instance and decrypt (XSalsa20 is symmetric)
+    let mut cipher = XSalsa20::new(&key_bytes.into(), &nonce_bytes.into());
+    let mut buffer = ciphertext.to_vec();
+    cipher.apply_keystream(&mut buffer);
+    Ok(buffer)
+}
+
+/// XSalsa20 encryption without authentication (for compatibility with existing interface)
+#[wasm_bindgen]
+pub fn encrypt_xsalsa20(key: &[u8], nonce: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, JsError> {
+    encrypt_xsalsa20_internal(key, nonce, plaintext).map_err(|e| JsError::new(&e))
+}
+
+/// XSalsa20 decryption without authentication (for compatibility with existing interface)
+#[wasm_bindgen]
+pub fn decrypt_xsalsa20(key: &[u8], nonce: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, JsError> {
+    decrypt_xsalsa20_internal(key, nonce, ciphertext).map_err(|e| JsError::new(&e))
+}
+
 /// Internal function for XSalsa20-Poly1305 encryption
 fn encrypt_xsalsa20_poly1305_internal(
     key: &[u8],
@@ -129,26 +187,6 @@ fn decrypt_xsalsa20_poly1305_internal(
     cipher
         .decrypt(&nonce_bytes.into(), ciphertext)
         .map_err(|_| "Wrong tag".to_string())
-}
-
-/// WASM-exposed function for XSalsa20-Poly1305 encryption
-#[wasm_bindgen]
-pub fn encrypt_xsalsa20_poly1305(
-    key: &[u8],
-    nonce: &[u8],
-    plaintext: &[u8],
-) -> Result<Vec<u8>, JsError> {
-    encrypt_xsalsa20_poly1305_internal(key, nonce, plaintext).map_err(|e| JsError::new(&e))
-}
-
-/// WASM-exposed function for XSalsa20-Poly1305 decryption
-#[wasm_bindgen]
-pub fn decrypt_xsalsa20_poly1305(
-    key: &[u8],
-    nonce: &[u8],
-    ciphertext: &[u8],
-) -> Result<Vec<u8>, JsError> {
-    decrypt_xsalsa20_poly1305_internal(key, nonce, ciphertext).map_err(|e| JsError::new(&e))
 }
 
 /// Internal function for sealing a message
@@ -516,5 +554,39 @@ mod tests {
         let mut tampered = sealed.clone();
         tampered[0] ^= 1;
         assert!(unseal_internal(&tampered, &recipient_private, &sender_public, &nonce).is_err());
+    }
+
+    #[test]
+    fn test_xsalsa20() {
+        // Test vectors
+        let key = [0u8; 32]; // All zeros key
+        let nonce = [0u8; 24]; // All zeros nonce
+        let plaintext = b"Hello, World!";
+
+        // Test encryption
+        let ciphertext = encrypt_xsalsa20_poly1305_internal(&key, &nonce, plaintext).unwrap();
+        assert_ne!(ciphertext, plaintext); // Ciphertext should be different from plaintext
+
+        // Test decryption
+        let decrypted = decrypt_xsalsa20_poly1305_internal(&key, &nonce, &ciphertext).unwrap();
+        assert_eq!(decrypted, plaintext);
+
+        // Test that different nonce produces different ciphertext
+        let nonce2 = [1u8; 24];
+        let ciphertext2 = encrypt_xsalsa20_poly1305_internal(&key, &nonce2, plaintext).unwrap();
+        assert_ne!(ciphertext, ciphertext2);
+
+        // Test that different key produces different ciphertext
+        let key2 = [1u8; 32];
+        let ciphertext3 = encrypt_xsalsa20_poly1305_internal(&key2, &nonce, plaintext).unwrap();
+        assert_ne!(ciphertext, ciphertext3);
+
+        // Test invalid key length
+        assert!(encrypt_xsalsa20_poly1305_internal(&key[..31], &nonce, plaintext).is_err());
+        assert!(decrypt_xsalsa20_poly1305_internal(&key[..31], &nonce, &ciphertext).is_err());
+
+        // Test invalid nonce length
+        assert!(encrypt_xsalsa20_poly1305_internal(&key, &nonce[..23], plaintext).is_err());
+        assert!(decrypt_xsalsa20_poly1305_internal(&key, &nonce[..23], &ciphertext).is_err());
     }
 }

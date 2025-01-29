@@ -7,7 +7,6 @@ import {
   X25519StaticSecret,
   initBundledOnce,
 } from "@hazae41/berith";
-import { xsalsa20, xsalsa20_poly1305 } from "@noble/ciphers/salsa";
 import { base58 } from "@scure/base";
 import {
   blake3_digest_for_state,
@@ -15,6 +14,8 @@ import {
   blake3_hash_once,
   blake3_hash_once_with_context,
   blake3_update_state,
+  decrypt_xsalsa20,
+  encrypt_xsalsa20,
   generate_nonce,
   new_x25519_private_key,
   seal,
@@ -166,8 +167,13 @@ export class WasmCrypto extends CryptoProvider<Uint8Array> {
     const nOnce = this.generateJsonNonce(nOnceMaterial);
 
     const plaintext = textEncoder.encode(stableStringify(value));
-    const ciphertext = xsalsa20(keySecretBytes, nOnce, plaintext);
-    return `encrypted_U${bytesToBase64url(ciphertext)}` as Encrypted<T, N>;
+    try {
+      const ciphertext = encrypt_xsalsa20(keySecretBytes, nOnce, plaintext);
+      return `encrypted_U${bytesToBase64url(ciphertext)}` as Encrypted<T, N>;
+    } catch (e) {
+      logger.error("Failed to encrypt message: " + (e as Error)?.message);
+      throw e;
+    }
   }
 
   decryptRaw<T extends JsonValue, N extends JsonValue>(
@@ -183,9 +189,13 @@ export class WasmCrypto extends CryptoProvider<Uint8Array> {
     const ciphertext = base64URLtoBytes(
       encrypted.substring("encrypted_U".length),
     );
-    const plaintext = xsalsa20(keySecretBytes, nOnce, ciphertext);
-
-    return textDecoder.decode(plaintext) as Stringified<T>;
+    try {
+      const plaintext = decrypt_xsalsa20(keySecretBytes, nOnce, ciphertext);
+      return textDecoder.decode(plaintext) as Stringified<T>;
+    } catch (e) {
+      logger.error("Failed to decrypt message: " + (e as Error)?.message);
+      throw e;
+    }
   }
 
   seal<T extends JsonValue>({

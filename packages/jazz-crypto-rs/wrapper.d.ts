@@ -19,13 +19,13 @@ export function x25519_diffie_hellman(
   public_key: Uint8Array,
 ): Uint8Array;
 
-// XSalsa20-Poly1305 functions
-export function encrypt_xsalsa20_poly1305(
+// XSalsa20 functions
+export function encrypt_xsalsa20(
   key: Uint8Array,
   nonce: Uint8Array,
   plaintext: Uint8Array,
 ): Uint8Array;
-export function decrypt_xsalsa20_poly1305(
+export function decrypt_xsalsa20(
   key: Uint8Array,
   nonce: Uint8Array,
   ciphertext: Uint8Array,
@@ -56,3 +56,5 @@ export function blake3_incremental_update(
   state: Blake3State,
   data: Uint8Array,
 ): Blake3State;
+
+export default function init(): Promise<void>;

@@ -29,13 +29,13 @@ interface WasmExports {
     public_key: Uint8Array,
   ) => Uint8Array;
 
-  // XSalsa20-Poly1305 functions
-  encrypt_xsalsa20_poly1305: (
+  // XSalsa20 functions
+  encrypt_xsalsa20: (
     key: Uint8Array,
     nonce: Uint8Array,
     plaintext: Uint8Array,
   ) => Uint8Array;
-  decrypt_xsalsa20_poly1305: (
+  decrypt_xsalsa20: (
     key: Uint8Array,
     nonce: Uint8Array,
     ciphertext: Uint8Array,
@@ -70,8 +70,10 @@ export const {
   new_x25519_private_key,
   x25519_public_key,
   x25519_diffie_hellman,
-  encrypt_xsalsa20_poly1305,
-  decrypt_xsalsa20_poly1305,
+  encrypt_xsalsa20,
+  decrypt_xsalsa20,
   seal,
   unseal,
 } = moduleExports;
+
+export default moduleExports;
