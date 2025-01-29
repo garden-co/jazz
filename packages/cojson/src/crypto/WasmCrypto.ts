@@ -10,7 +10,6 @@ import {
 import { xsalsa20, xsalsa20_poly1305 } from "@noble/ciphers/salsa";
 import { randomBytes } from "@noble/ciphers/webcrypto/utils";
 import { base58 } from "@scure/base";
-import { createBLAKE3 } from "hash-wasm";
 import {
   blake3_digest_for_state,
   blake3_empty_state,
@@ -39,7 +38,7 @@ import {
 } from "./crypto.js";
 
 /**
- * WebAssembly implementation of the CryptoProvider interface using berith and hash-wasm libraries.
+ * WebAssembly implementation of the CryptoProvider interface using jazz-crypto-rs and berith library.
  * This provides the primary implementation using WebAssembly for optimal performance, offering:
  * - Signing/verifying (Ed25519)
  * - Encryption/decryption (XSalsa20)
@@ -47,15 +46,12 @@ import {
  * - Hashing (BLAKE3)
  */
 export class WasmCrypto extends CryptoProvider<Uint8Array> {
-  private constructor(
-    public blake3Instance: Awaited<ReturnType<typeof createBLAKE3>>,
-  ) {
+  private constructor() {
     super();
   }
 
   static async create(): Promise<WasmCrypto> {
     return Promise.all([
-      createBLAKE3(),
       initBundledOnce(),
       new Promise<void>((resolve) => {
         if ("crypto" in globalThis) {
@@ -70,7 +66,7 @@ export class WasmCrypto extends CryptoProvider<Uint8Array> {
           );
         }
       }),
-    ]).then(([blake3instance]) => new WasmCrypto(blake3instance));
+    ]).then(() => new WasmCrypto());
   }
 
   randomBytes(length: number): Uint8Array {
