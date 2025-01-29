@@ -25,6 +25,34 @@ pub fn blake3_hash_once_with_context(data: &[u8], context: &[u8]) -> Vec<u8> {
     hasher.finalize().as_bytes().to_vec()
 }
 
+/// Get an empty BLAKE3 state
+#[wasm_bindgen]
+pub fn blake3_empty_state() -> Vec<u8> {
+    Vec::new()
+}
+
+/// Update a BLAKE3 state with new data
+#[wasm_bindgen]
+pub fn blake3_update_state(state: &[u8], data: &[u8]) -> Vec<u8> {
+    let mut all_data = Vec::new();
+    if !state.is_empty() {
+        all_data.extend_from_slice(state);
+    }
+    all_data.extend_from_slice(data);
+    all_data
+}
+
+/// Get the final hash from a state
+#[wasm_bindgen]
+pub fn blake3_digest_for_state(state: &[u8]) -> Vec<u8> {
+    // For empty state, return hash of empty input
+    if state.is_empty() {
+        return blake3_hash_once(&[]);
+    }
+    // For non-empty state, hash the accumulated data
+    blake3_hash_once(state)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -85,5 +113,88 @@ mod tests {
         // Hash with context should be different from hash without context
         let hash_no_context = blake3_hash_once(input);
         assert_ne!(hash, hash_no_context);
+    }
+
+    #[test]
+    fn test_blake3_incremental() {
+        // Initial state
+        let state = blake3_empty_state();
+        assert!(state.is_empty(), "Initial state should be empty");
+        
+        // First update with [1,2,3,4,5]
+        let data1 = &[1u8, 2, 3, 4, 5];
+        let state2 = blake3_update_state(&state, data1);
+        assert_eq!(state2, data1, "Updated state should contain first chunk");
+        
+        // Check that this matches a direct hash
+        let direct_hash = blake3_hash_once(data1);
+        assert_eq!(blake3_digest_for_state(&state2), direct_hash, "First update should match direct hash");
+        
+        // Verify the exact expected hash from the TypeScript test for the first update
+        let expected_first_hash = [
+            2, 79, 103, 192, 66, 90, 61, 192, 47, 186, 245, 140, 185, 61, 229, 19,
+            46, 61, 117, 197, 25, 250, 160, 186, 218, 33, 73, 29, 136, 201, 112, 87,
+        ];
+        assert_eq!(blake3_digest_for_state(&state2), expected_first_hash, "First update should match expected hash");
+        
+        // Second update with [6,7,8,9,10]
+        let data2 = &[6u8, 7, 8, 9, 10];
+        let state3 = blake3_update_state(&state2, data2);
+        
+        // Compare with a single hash of all data
+        let mut all_data = Vec::new();
+        all_data.extend_from_slice(data1);
+        all_data.extend_from_slice(data2);
+        assert_eq!(state3, all_data, "Final state should contain all data");
+        
+        let direct_hash_all = blake3_hash_once(&all_data);
+        assert_eq!(blake3_digest_for_state(&state3), direct_hash_all, "Final state should match direct hash of all data");
+        
+        // Also verify the exact expected hash from the TypeScript test for the final state
+        let expected_final_hash = [
+            165, 131, 141, 69, 2, 69, 39, 236, 196, 244, 180, 213, 147, 124, 222,
+            39, 68, 223, 54, 176, 242, 97, 200, 101, 204, 79, 21, 233, 56, 51, 1,
+            199,
+        ];
+        assert_eq!(blake3_digest_for_state(&state3), expected_final_hash, "Final state should match expected hash");
+    }
+
+    #[test]
+    fn test_blake3_digest_for_state() {
+        // Test empty state
+        let empty_state = blake3_empty_state();
+        let empty_hash = blake3_digest_for_state(&empty_state);
+        assert_eq!(empty_hash, blake3_hash_once(&[]), "Empty state should produce hash of empty input");
+        
+        // Test with some data
+        let data = &[1u8, 2, 3, 4, 5];
+        let state = blake3_update_state(&empty_state, data);
+        let hash = blake3_digest_for_state(&state);
+        assert_eq!(hash, blake3_hash_once(data), "State with data should match direct hash");
+        
+        // Test with multiple updates
+        let data2 = &[6u8, 7, 8, 9, 10];
+        let state2 = blake3_update_state(&state, data2);
+        let hash2 = blake3_digest_for_state(&state2);
+        
+        // Create combined data for comparison
+        let mut all_data = Vec::new();
+        all_data.extend_from_slice(data);
+        all_data.extend_from_slice(data2);
+        assert_eq!(hash2, blake3_hash_once(&all_data), "State with multiple updates should match direct hash of all data");
+        
+        // Verify exact hash values from TypeScript test
+        let expected_first_hash = [
+            2, 79, 103, 192, 66, 90, 61, 192, 47, 186, 245, 140, 185, 61, 229, 19,
+            46, 61, 117, 197, 25, 250, 160, 186, 218, 33, 73, 29, 136, 201, 112, 87,
+        ];
+        assert_eq!(hash, expected_first_hash, "First hash should match TypeScript test value");
+        
+        let expected_final_hash = [
+            165, 131, 141, 69, 2, 69, 39, 236, 196, 244, 180, 213, 147, 124, 222,
+            39, 68, 223, 54, 176, 242, 97, 200, 101, 204, 79, 21, 233, 56, 51, 1,
+            199,
+        ];
+        assert_eq!(hash2, expected_final_hash, "Final hash should match TypeScript test value");
     }
 }

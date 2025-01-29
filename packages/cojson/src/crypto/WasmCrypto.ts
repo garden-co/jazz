@@ -12,8 +12,11 @@ import { randomBytes } from "@noble/ciphers/webcrypto/utils";
 import { base58 } from "@scure/base";
 import { createBLAKE3 } from "hash-wasm";
 import {
+  blake3_digest_for_state,
+  blake3_empty_state,
   blake3_hash_once,
   blake3_hash_once_with_context,
+  blake3_update_state,
   generate_nonce,
 } from "jazz-crypto-rs";
 import { base64URLtoBytes, bytesToBase64url } from "../base64url.js";
@@ -75,11 +78,11 @@ export class WasmCrypto extends CryptoProvider<Uint8Array> {
   }
 
   emptyBlake3State(): Uint8Array {
-    return this.blake3Instance.init().save();
+    return blake3_empty_state();
   }
 
   cloneBlake3State(state: Uint8Array): Uint8Array {
-    return this.blake3Instance.load(state).save();
+    return new Uint8Array(state);
   }
 
   blake3HashOnce(data: Uint8Array) {
@@ -94,11 +97,11 @@ export class WasmCrypto extends CryptoProvider<Uint8Array> {
   }
 
   blake3IncrementalUpdate(state: Uint8Array, data: Uint8Array): Uint8Array {
-    return this.blake3Instance.load(state).update(data).save();
+    return blake3_update_state(state, data);
   }
 
   blake3DigestForState(state: Uint8Array): Uint8Array {
-    return this.blake3Instance.load(state).digest("binary");
+    return blake3_digest_for_state(state);
   }
 
   generateNonce(input: Uint8Array): Uint8Array {
