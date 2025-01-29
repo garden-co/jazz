@@ -1,5 +1,4 @@
 import { xsalsa20, xsalsa20_poly1305 } from "@noble/ciphers/salsa";
-import { randomBytes } from "@noble/ciphers/webcrypto/utils";
 import { ed25519, x25519 } from "@noble/curves/ed25519";
 import { blake3 } from "@noble/hashes/blake3";
 import { base58 } from "@scure/base";
@@ -35,10 +34,6 @@ type Blake3State = ReturnType<typeof blake3.create>;
 export class PureJSCrypto extends CryptoProvider<Blake3State> {
   static async create(): Promise<PureJSCrypto> {
     return new PureJSCrypto();
-  }
-
-  randomBytes(length: number): Uint8Array {
-    return randomBytes(length);
   }
 
   emptyBlake3State(): Blake3State {

@@ -8,7 +8,6 @@ import {
   initBundledOnce,
 } from "@hazae41/berith";
 import { xsalsa20, xsalsa20_poly1305 } from "@noble/ciphers/salsa";
-import { randomBytes } from "@noble/ciphers/webcrypto/utils";
 import { base58 } from "@scure/base";
 import {
   blake3_digest_for_state,
@@ -67,10 +66,6 @@ export class WasmCrypto extends CryptoProvider<Uint8Array> {
         }
       }),
     ]).then(() => new WasmCrypto());
-  }
-
-  randomBytes(length: number): Uint8Array {
-    return randomBytes(length);
   }
 
   emptyBlake3State(): Uint8Array {
