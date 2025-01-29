@@ -26,11 +26,6 @@ export abstract class CryptoProvider<Blake3State = any> {
     return randomBytes(length);
   }
 
-  /**
-   * Generate a 24-byte nonce from input material using BLAKE3
-   */
-  abstract generateNonce(input: Uint8Array): Uint8Array;
-
   abstract newEd25519SigningKey(): Uint8Array;
 
   newRandomSigner(): SignerSecret {

@@ -16,7 +16,6 @@ import {
   blake3_update_state,
   decrypt_xsalsa20,
   encrypt_xsalsa20,
-  generate_nonce,
   new_x25519_private_key,
   seal,
   unseal,
@@ -98,14 +97,6 @@ export class WasmCrypto extends CryptoProvider<Uint8Array> {
 
   blake3DigestForState(state: Uint8Array): Uint8Array {
     return blake3_digest_for_state(state);
-  }
-
-  generateNonce(input: Uint8Array): Uint8Array {
-    return generate_nonce(input);
-  }
-
-  private generateJsonNonce(material: JsonValue): Uint8Array {
-    return this.generateNonce(textEncoder.encode(stableStringify(material)));
   }
 
   newEd25519SigningKey(): Uint8Array {

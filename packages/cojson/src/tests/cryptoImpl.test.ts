@@ -210,31 +210,4 @@ describe.each([
     newHash.update({ quux: "corge" });
     expect(clonedHash.digest()).toEqual(newHash.digest());
   });
-
-  test("nonce generation", () => {
-    const input = textEncoder.encode("test input");
-    const nonce = impl.generateNonce(input);
-    expect(nonce.length).toBe(24);
-
-    // Same input should produce same nonce
-    const nonce2 = impl.generateNonce(input);
-    expect(nonce).toEqual(nonce2);
-
-    // Different input should produce different nonce
-    const nonce3 = impl.generateNonce(textEncoder.encode("different input"));
-    expect(nonce).not.toEqual(nonce3);
-
-    // Test JSON nonce generation
-    const jsonInput = { test: "value", number: 123 };
-    const jsonNonce = (impl as any).generateJsonNonce(jsonInput);
-    expect(jsonNonce.length).toBe(24);
-
-    // Same JSON input should produce same nonce
-    const jsonNonce2 = (impl as any).generateJsonNonce(jsonInput);
-    expect(jsonNonce).toEqual(jsonNonce2);
-
-    // Different JSON input should produce different nonce
-    const jsonNonce3 = (impl as any).generateJsonNonce({ different: "input" });
-    expect(jsonNonce).not.toEqual(jsonNonce3);
-  });
 });
