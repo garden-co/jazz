@@ -164,11 +164,13 @@ export class WasmCrypto extends CryptoProvider<Uint8Array> {
     const keySecretBytes = base58.decode(
       keySecret.substring("keySecret_z".length),
     );
-    const nOnce = this.generateJsonNonce(nOnceMaterial);
-
     const plaintext = textEncoder.encode(stableStringify(value));
     try {
-      const ciphertext = encrypt_xsalsa20(keySecretBytes, nOnce, plaintext);
+      const ciphertext = encrypt_xsalsa20(
+        keySecretBytes,
+        textEncoder.encode(stableStringify(nOnceMaterial)),
+        plaintext,
+      );
       return `encrypted_U${bytesToBase64url(ciphertext)}` as Encrypted<T, N>;
     } catch (e) {
       logger.error("Failed to encrypt message: " + (e as Error)?.message);
@@ -184,13 +186,16 @@ export class WasmCrypto extends CryptoProvider<Uint8Array> {
     const keySecretBytes = base58.decode(
       keySecret.substring("keySecret_z".length),
     );
-    const nOnce = this.generateJsonNonce(nOnceMaterial);
 
     const ciphertext = base64URLtoBytes(
       encrypted.substring("encrypted_U".length),
     );
     try {
-      const plaintext = decrypt_xsalsa20(keySecretBytes, nOnce, ciphertext);
+      const plaintext = decrypt_xsalsa20(
+        keySecretBytes,
+        textEncoder.encode(stableStringify(nOnceMaterial)),
+        ciphertext,
+      );
       return textDecoder.decode(plaintext) as Stringified<T>;
     } catch (e) {
       logger.error("Failed to decrypt message: " + (e as Error)?.message);

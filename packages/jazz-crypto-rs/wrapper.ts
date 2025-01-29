@@ -32,12 +32,12 @@ interface WasmExports {
   // XSalsa20 functions
   encrypt_xsalsa20: (
     key: Uint8Array,
-    nonce: Uint8Array,
+    nonce_material: Uint8Array,
     plaintext: Uint8Array,
   ) => Uint8Array;
   decrypt_xsalsa20: (
     key: Uint8Array,
-    nonce: Uint8Array,
+    nonce_material: Uint8Array,
     ciphertext: Uint8Array,
   ) => Uint8Array;
 
@@ -75,5 +75,3 @@ export const {
   seal,
   unseal,
 } = moduleExports;
-
-export default moduleExports;

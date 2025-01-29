@@ -131,14 +131,24 @@ fn decrypt_xsalsa20_internal(
 
 /// XSalsa20 encryption without authentication (for compatibility with existing interface)
 #[wasm_bindgen]
-pub fn encrypt_xsalsa20(key: &[u8], nonce: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, JsError> {
-    encrypt_xsalsa20_internal(key, nonce, plaintext).map_err(|e| JsError::new(&e))
+pub fn encrypt_xsalsa20(
+    key: &[u8],
+    nonce_material: &[u8],
+    plaintext: &[u8],
+) -> Result<Vec<u8>, JsError> {
+    let nonce = generate_nonce(nonce_material);
+    encrypt_xsalsa20_internal(key, &nonce, plaintext).map_err(|e| JsError::new(&e))
 }
 
 /// XSalsa20 decryption without authentication (for compatibility with existing interface)
 #[wasm_bindgen]
-pub fn decrypt_xsalsa20(key: &[u8], nonce: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, JsError> {
-    decrypt_xsalsa20_internal(key, nonce, ciphertext).map_err(|e| JsError::new(&e))
+pub fn decrypt_xsalsa20(
+    key: &[u8],
+    nonce_material: &[u8],
+    ciphertext: &[u8],
+) -> Result<Vec<u8>, JsError> {
+    let nonce = generate_nonce(nonce_material);
+    decrypt_xsalsa20_internal(key, &nonce, ciphertext).map_err(|e| JsError::new(&e))
 }
 
 /// Internal function for XSalsa20-Poly1305 encryption
