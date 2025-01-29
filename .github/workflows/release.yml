@@ -44,6 +44,14 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-pnpm-store-
 
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "jazz-crypto-rs"
+
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
