@@ -10,7 +10,7 @@ export function useUploadExampleData() {
 
 async function uploadOnboardingData() {
   const me = await MusicaAccount.getMe().ensureLoaded({
-    root: {},
+    resolve: { root: true },
   });
 
   if (!me) throw new Error("Me not resolved");

@@ -15,7 +15,12 @@ import {
   fixedCredentialsAuth,
   isControlledAccount,
 } from "../index.web.js";
-import { randomSessionProvider } from "../internal.js";
+import {
+  Clean,
+  DeeplyLoaded,
+  UnCo,
+  randomSessionProvider,
+} from "../internal.js";
 
 class TestMap extends CoMap {
   list = co.ref(TestList);
@@ -81,14 +86,17 @@ describe("Deep loading with depth arg", async () => {
       ownership,
     );
 
-    const map1 = await TestMap.load(map.id, meOnSecondPeer, {});
+    const map1 = await TestMap.load(map.id, { loadAs: meOnSecondPeer });
     expectTypeOf(map1).toEqualTypeOf<TestMap | undefined>();
     if (map1 === undefined) {
       throw new Error("map1 is undefined");
     }
     expect(map1.list).toBe(null);
 
-    const map2 = await TestMap.load(map.id, meOnSecondPeer, { list: [] });
+    const map2 = await TestMap.load(map.id, {
+      loadAs: meOnSecondPeer,
+      resolve: { list: true },
+    });
     expectTypeOf(map2).toEqualTypeOf<
       | (TestMap & {
           list: TestList;
@@ -101,7 +109,10 @@ describe("Deep loading with depth arg", async () => {
     expect(map2.list).not.toBe(null);
     expect(map2.list[0]).toBe(null);
 
-    const map3 = await TestMap.load(map.id, meOnSecondPeer, { list: [{}] });
+    const map3 = await TestMap.load(map.id, {
+      loadAs: meOnSecondPeer,
+      resolve: { list: { $each: true } },
+    });
     expectTypeOf(map3).toEqualTypeOf<
       | (TestMap & {
           list: TestList & InnerMap[];
@@ -114,8 +125,9 @@ describe("Deep loading with depth arg", async () => {
     expect(map3.list[0]).not.toBe(null);
     expect(map3.list[0]?.stream).toBe(null);
 
-    const map3a = await TestMap.load(map.id, meOnSecondPeer, {
-      optionalRef: {},
+    const map3a = await TestMap.load(map.id, {
+      loadAs: meOnSecondPeer,
+      resolve: { optionalRef: true } as const,
     });
     expectTypeOf(map3a).toEqualTypeOf<
       | (TestMap & {
@@ -124,8 +136,9 @@ describe("Deep loading with depth arg", async () => {
       | undefined
     >();
 
-    const map4 = await TestMap.load(map.id, meOnSecondPeer, {
-      list: [{ stream: [] }],
+    const map4 = await TestMap.load(map.id, {
+      loadAs: meOnSecondPeer,
+      resolve: { list: { $each: { stream: true } } },
     });
     expectTypeOf(map4).toEqualTypeOf<
       | (TestMap & {
@@ -140,8 +153,9 @@ describe("Deep loading with depth arg", async () => {
     expect(map4.list[0]?.stream?.[me.id]).not.toBe(null);
     expect(map4.list[0]?.stream?.byMe?.value).toBe(null);
 
-    const map5 = await TestMap.load(map.id, meOnSecondPeer, {
-      list: [{ stream: [{}] }],
+    const map5 = await TestMap.load(map.id, {
+      loadAs: meOnSecondPeer,
+      resolve: { list: { $each: { stream: { $each: true } } } },
     });
     type ExpectedMap5 =
       | (TestMap & {
@@ -198,8 +212,10 @@ class CustomAccount extends Account {
     }
 
     const thisLoaded = await this.ensureLoaded({
-      profile: { stream: [] },
-      root: { list: [] },
+      resolve: {
+        profile: { stream: true },
+        root: { list: true },
+      },
     });
     expectTypeOf(thisLoaded).toEqualTypeOf<
       | (CustomAccount & {
@@ -222,8 +238,10 @@ test("Deep loading within account", async () => {
   });
 
   const meLoaded = await me.ensureLoaded({
-    profile: { stream: [] },
-    root: { list: [] },
+    resolve: {
+      profile: { stream: true },
+      root: { list: true },
+    },
   });
   expectTypeOf(meLoaded).toEqualTypeOf<
     | (CustomAccount & {
@@ -285,9 +303,12 @@ test("Deep loading a record-like coMap", async () => {
     { owner: me },
   );
 
-  const recordLoaded = await RecordLike.load(record.id, meOnSecondPeer, [
-    { list: [{}] },
-  ]);
+  const recordLoaded = await RecordLike.load(record.id, {
+    loadAs: meOnSecondPeer,
+    resolve: {
+      $each: { list: { $each: true } },
+    },
+  });
   expectTypeOf(recordLoaded).toEqualTypeOf<
     | (RecordLike & {
         [key: string]: TestMap & {

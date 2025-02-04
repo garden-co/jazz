@@ -24,11 +24,13 @@ import {
 
 export async function uploadMusicTracks(files: Iterable<File>) {
   const me = await MusicaAccount.getMe().ensureLoaded({
-    root: {
-      rootPlaylist: {
-        tracks: [],
+    resolve: {
+      root: {
+        rootPlaylist: {
+          tracks: true,
+        },
+        playlists: true,
       },
-      playlists: [],
     },
   });
 
@@ -64,8 +66,10 @@ export async function uploadMusicTracks(files: Iterable<File>) {
 
 export async function createNewPlaylist() {
   const me = await MusicaAccount.getMe().ensureLoaded({
-    root: {
-      playlists: [],
+    resolve: {
+      root: {
+        playlists: true,
+      },
     },
   });
 
@@ -153,9 +157,11 @@ export async function updateMusicTrackTitle(track: MusicTrack, title: string) {
 
 export async function updateActivePlaylist(playlist?: Playlist) {
   const me = await MusicaAccount.getMe().ensureLoaded({
-    root: {
-      activePlaylist: {},
-      rootPlaylist: {},
+    resolve: {
+      root: {
+        activePlaylist: true,
+        rootPlaylist: true,
+      },
     },
   });
 
@@ -166,7 +172,7 @@ export async function updateActivePlaylist(playlist?: Playlist) {
 
 export async function updateActiveTrack(track: MusicTrack) {
   const me = await MusicaAccount.getMe().ensureLoaded({
-    root: {},
+    resolve: { root: true },
   });
 
   if (!me) return;

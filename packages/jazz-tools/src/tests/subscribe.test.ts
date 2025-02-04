@@ -8,11 +8,7 @@ import {
   Group,
   co,
 } from "../index.web.js";
-import {
-  type DepthsIn,
-  createCoValueObservable,
-  subscribeToCoValue,
-} from "../internal.js";
+import { createCoValueObservable, subscribeToCoValue } from "../internal.js";
 import { setupAccount, waitFor } from "./utils.js";
 
 class ChatRoom extends CoMap {
@@ -53,8 +49,7 @@ describe("subscribeToCoValue", () => {
     const unsubscribe = subscribeToCoValue(
       ChatRoom,
       chatRoom.id,
-      meOnSecondPeer,
-      {},
+      { loadAs: meOnSecondPeer },
       updateFn,
     );
 
@@ -114,9 +109,11 @@ describe("subscribeToCoValue", () => {
     const unsubscribe = subscribeToCoValue(
       ChatRoom,
       chatRoom.id,
-      meOnSecondPeer,
       {
-        messages: [],
+        loadAs: meOnSecondPeer,
+        resolve: {
+          messages: true,
+        },
       },
       updateFn,
     );
@@ -153,9 +150,13 @@ describe("subscribeToCoValue", () => {
     const unsubscribe = subscribeToCoValue(
       ChatRoom,
       chatRoom.id,
-      meOnSecondPeer,
       {
-        messages: [{}],
+        loadAs: meOnSecondPeer,
+        resolve: {
+          messages: {
+            $each: true,
+          },
+        },
       },
       updateFn,
     );
@@ -198,13 +199,15 @@ describe("subscribeToCoValue", () => {
     const unsubscribe = subscribeToCoValue(
       ChatRoom,
       chatRoom.id,
-      meOnSecondPeer,
       {
-        messages: [
-          {
-            reactions: [],
+        loadAs: meOnSecondPeer,
+        resolve: {
+          messages: {
+            $each: {
+              reactions: true,
+            },
           },
-        ],
+        },
       },
       updateFn,
     );
@@ -264,13 +267,15 @@ describe("subscribeToCoValue", () => {
     const unsubscribe = subscribeToCoValue(
       ChatRoom,
       chatRoom.id,
-      meOnSecondPeer,
       {
-        messages: [
-          {
-            reactions: [],
+        loadAs: meOnSecondPeer,
+        resolve: {
+          messages: {
+            $each: {
+              reactions: true,
+            },
           },
-        ],
+        },
       },
       updateFn,
     );
@@ -321,14 +326,15 @@ describe("createCoValueObservable", () => {
   it("should update currentValue when subscribed", async () => {
     const { me, meOnSecondPeer } = await setupAccount();
     const testMap = createTestMap(me);
-    const observable = createCoValueObservable<TestMap, DepthsIn<TestMap>>();
+    const observable = createCoValueObservable();
     const mockListener = vi.fn();
 
     const unsubscribe = observable.subscribe(
       TestMap,
       testMap.id,
-      meOnSecondPeer,
-      {},
+      {
+        loadAs: meOnSecondPeer,
+      },
       () => {
         mockListener();
       },
@@ -349,14 +355,15 @@ describe("createCoValueObservable", () => {
   it("should reset to undefined after unsubscribe", async () => {
     const { me, meOnSecondPeer } = await setupAccount();
     const testMap = createTestMap(me);
-    const observable = createCoValueObservable<TestMap, DepthsIn<TestMap>>();
+    const observable = createCoValueObservable();
     const mockListener = vi.fn();
 
     const unsubscribe = observable.subscribe(
       TestMap,
       testMap.id,
-      meOnSecondPeer,
-      {},
+      {
+        loadAs: meOnSecondPeer,
+      },
       () => {
         mockListener();
       },

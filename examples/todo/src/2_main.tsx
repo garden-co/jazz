@@ -123,7 +123,7 @@ export default function App() {
 
 function HomeScreen() {
   const { me } = useAccount({
-    root: { projects: [{}] },
+    resolve: { root: { projects: { $each: true } } },
   });
   const navigate = useNavigate();
 

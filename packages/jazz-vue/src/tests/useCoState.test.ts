@@ -81,7 +81,9 @@ describe("useCoState", () => {
     const [result] = withJazzTestSetup(
       () =>
         useCoState(TestMap, map.id, {
-          nested: {},
+          resolve: {
+            nested: true,
+          },
         }),
       {
         account,

@@ -2,9 +2,11 @@ import { MusicaAccount } from "../1_schema";
 
 export async function getNextTrack() {
   const me = await MusicaAccount.getMe().ensureLoaded({
-    root: {
-      activePlaylist: {
-        tracks: [],
+    resolve: {
+      root: {
+        activePlaylist: {
+          tracks: true,
+        },
       },
     },
   });
@@ -23,9 +25,11 @@ export async function getNextTrack() {
 
 export async function getPrevTrack() {
   const me = await MusicaAccount.getMe().ensureLoaded({
-    root: {
-      activePlaylist: {
-        tracks: [],
+    resolve: {
+      root: {
+        activePlaylist: {
+          tracks: true,
+        },
       },
     },
   });

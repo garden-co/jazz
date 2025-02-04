@@ -5,10 +5,10 @@ import {
   AnonymousJazzAgent,
   CoValue,
   CoValueClass,
-  DeeplyLoaded,
-  DepthsIn,
   ID,
   InboxSender,
+  RefsToResolve,
+  Resolved,
   createCoValueObservable,
 } from "jazz-tools";
 import { JazzContext, JazzContextType } from "./provider.js";
@@ -25,28 +25,39 @@ export function useJazzContext<Acc extends Account>() {
   return value;
 }
 
-export function useCoState<V extends CoValue, D>(
+export function useCoState<
+  V extends CoValue,
+  const R extends RefsToResolve<V> = true,
+>(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   Schema: CoValueClass<V>,
   id: ID<V> | undefined,
-  depth: D & DepthsIn<V> = [] as D & DepthsIn<V>,
-): DeeplyLoaded<V, D> | undefined {
+  options?: { resolve?: R },
+): Resolved<V, R> | undefined {
   const context = useJazzContext();
 
   const [observable] = React.useState(() =>
-    createCoValueObservable({
+    createCoValueObservable<V, R>({
       syncResolution: true,
     }),
   );
 
-  const value = React.useSyncExternalStore<DeeplyLoaded<V, D> | undefined>(
+  const value = React.useSyncExternalStore<Resolved<V, R> | undefined>(
     React.useCallback(
       (callback) => {
         if (!id) return () => {};
 
         const agent = "me" in context ? context.me : context.guest;
 
-        return observable.subscribe(Schema, id, agent, depth, callback);
+        return observable.subscribe(
+          Schema,
+          id,
+          {
+            loadAs: agent,
+            resolve: options?.resolve,
+          },
+          callback,
+        );
       },
       [Schema, id, context],
     ),
@@ -62,12 +73,12 @@ export function createUseAccountHooks<Acc extends Account>() {
     me: Acc;
     logOut: () => void;
   };
-  function useAccount<D extends DepthsIn<Acc>>(
-    depth: D,
-  ): { me: DeeplyLoaded<Acc, D> | undefined; logOut: () => void };
-  function useAccount<D extends DepthsIn<Acc>>(
-    depth?: D,
-  ): { me: Acc | DeeplyLoaded<Acc, D> | undefined; logOut: () => void } {
+  function useAccount<const R extends RefsToResolve<Acc> = true>(options?: {
+    resolve?: R;
+  }): { me: Resolved<Acc, R> | undefined; logOut: () => void };
+  function useAccount<const R extends RefsToResolve<Acc>>(options?: {
+    resolve?: R;
+  }): { me: Acc | Resolved<Acc, R> | undefined; logOut: () => void } {
     const context = useJazzContext<Acc>();
 
     if (!("me" in context)) {
@@ -76,10 +87,14 @@ export function createUseAccountHooks<Acc extends Account>() {
       );
     }
 
-    const me = useCoState<Acc, D>(context.AccountSchema, context.me.id, depth);
+    const me = useCoState<Acc, R>(
+      context.AccountSchema,
+      context.me.id,
+      options,
+    );
 
     return {
-      me: depth === undefined ? me || context.me : me,
+      me: options?.resolve === undefined ? me || context.me : me,
       logOut: context.logOut,
     };
   }
@@ -87,21 +102,27 @@ export function createUseAccountHooks<Acc extends Account>() {
   function useAccountOrGuest(): {
     me: Acc | AnonymousJazzAgent;
   };
-  function useAccountOrGuest<D extends DepthsIn<Acc>>(
-    depth: D,
-  ): { me: DeeplyLoaded<Acc, D> | undefined | AnonymousJazzAgent };
-  function useAccountOrGuest<D extends DepthsIn<Acc>>(
-    depth?: D,
-  ): { me: Acc | DeeplyLoaded<Acc, D> | undefined | AnonymousJazzAgent } {
+  function useAccountOrGuest<
+    const R extends RefsToResolve<Acc> = true,
+  >(options?: {
+    resolve?: R;
+  }): { me: Resolved<Acc, R> | undefined | AnonymousJazzAgent };
+  function useAccountOrGuest<const R extends RefsToResolve<Acc>>(options?: {
+    resolve?: R;
+  }): { me: Acc | Resolved<Acc, R> | undefined | AnonymousJazzAgent } {
     const context = useJazzContext<Acc>();
 
     const contextMe = "me" in context ? context.me : undefined;
 
-    const me = useCoState<Acc, D>(context.AccountSchema, contextMe?.id, depth);
+    const me = useCoState<Acc, R>(
+      context.AccountSchema,
+      contextMe?.id,
+      options,
+    );
 
     if ("me" in context) {
       return {
-        me: depth === undefined ? me || context.me : me,
+        me: options?.resolve === undefined ? me || context.me : me,
       };
     } else {
       return { me: context.guest };

@@ -1,8 +1,13 @@
-import { CoList, CoMap, ImageDefinition, co } from "jazz-tools";
+import { ImageDef, j } from "jazz-tools/src/implementation/schema2/schema2.ts";
 
-export class Message extends CoMap {
-  text = co.string;
-  image = co.optional.ref(ImageDefinition);
-}
+export const Message = j.CoMap({
+  /** @description The text of the message */
+  text: j.string(),
+  image: ImageDef.optional(),
+});
 
-export class Chat extends CoList.Of(co.ref(Message)) {}
+export const Chat = j.CoMap({
+  messages: j.CoList(Message),
+});
+
+const chat = await Chat.load("123");

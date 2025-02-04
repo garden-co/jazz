@@ -8,7 +8,7 @@ import { OrganizationForm } from "./OrganizationForm.tsx";
 
 export function CreateOrganization() {
   const { me } = useAccount({
-    root: { draftOrganization: {}, organizations: [] },
+    resolve: { root: { draftOrganization: true, organizations: true } },
   });
   const [errors, setErrors] = useState<string[]>([]);
   const navigate = useNavigate();

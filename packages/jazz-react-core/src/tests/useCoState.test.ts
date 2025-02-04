@@ -77,7 +77,9 @@ describe("useCoState", () => {
     const { result } = renderHook(
       () =>
         useCoState(TestMap, map.id, {
-          nested: {},
+          resolve: {
+            nested: true,
+          },
         }),
       {
         account,

@@ -418,7 +418,7 @@ describe("CoMap resolution", async () => {
       crypto: Crypto,
     });
 
-    const loadedMap = await TestMap.load(map.id, meOnSecondPeer, {});
+    const loadedMap = await TestMap.load(map.id, { loadAs: meOnSecondPeer });
 
     expect(loadedMap?.color).toEqual("red");
     expect(loadedMap?.height).toEqual(10);
@@ -426,11 +426,9 @@ describe("CoMap resolution", async () => {
     expect(loadedMap?._refs.nested?.id).toEqual(map.nested?.id);
     expect(loadedMap?._refs.nested?.value).toEqual(null);
 
-    const loadedNestedMap = await NestedMap.load(
-      map.nested!.id,
-      meOnSecondPeer,
-      {},
-    );
+    const loadedNestedMap = await NestedMap.load(map.nested!.id, {
+      loadAs: meOnSecondPeer,
+    });
 
     expect(loadedMap?.nested?.name).toEqual("nested");
     expect(loadedMap?.nested?._fancyName).toEqual("Sir nested");
@@ -439,8 +437,7 @@ describe("CoMap resolution", async () => {
 
     const loadedTwiceNestedMap = await TwiceNestedMap.load(
       map.nested!.twiceNested!.id,
-      meOnSecondPeer,
-      {},
+      { loadAs: meOnSecondPeer },
     );
 
     expect(loadedMap?.nested?.twiceNested?.taste).toEqual("sour");
@@ -491,7 +488,7 @@ describe("CoMap resolution", async () => {
 
     const queue = new cojsonInternals.Channel<TestMap>();
 
-    TestMap.subscribe(map.id, meOnSecondPeer, {}, (subscribedMap) => {
+    TestMap.subscribe(map.id, { loadAs: meOnSecondPeer }, (subscribedMap) => {
       // Read to property to trigger loading
       subscribedMap.nested?.twiceNested?.taste;
       void queue.push(subscribedMap);

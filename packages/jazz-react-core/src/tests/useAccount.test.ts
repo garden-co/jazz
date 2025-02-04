@@ -41,7 +41,9 @@ describe("useAccount", () => {
     const { result } = renderHook(
       () =>
         useAccount({
-          root: {},
+          resolve: {
+            root: true,
+          },
         }),
       {
         account,

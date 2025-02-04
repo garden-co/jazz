@@ -64,7 +64,7 @@ describe("startWorker integration", () => {
 
     await map.waitForSync();
 
-    const mapOnWorker2 = await TestMap.load(map.id, worker2.worker, {});
+    const mapOnWorker2 = await TestMap.load(map.id, worker2.worker);
 
     expect(mapOnWorker2?.value).toBe("test");
 
@@ -89,7 +89,7 @@ describe("startWorker integration", () => {
 
     const worker2 = await setupWorker(worker1.syncServer);
 
-    const mapOnWorker2 = await TestMap.load(map.id, worker2.worker, {});
+    const mapOnWorker2 = await TestMap.load(map.id, worker2.worker);
 
     expect(mapOnWorker2?.value).toBe("test");
 

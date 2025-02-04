@@ -7,9 +7,9 @@ import type {
   AnonymousJazzAgent,
   CoValue,
   CoValueClass,
-  DeeplyLoaded,
-  DepthsIn,
-  ID
+  ID,
+  RefsToResolve,
+  Resolved
 } from 'jazz-tools';
 import { Account, subscribeToCoValue } from 'jazz-tools';
 import { getContext, untrack } from 'svelte';

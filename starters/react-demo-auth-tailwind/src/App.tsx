@@ -3,7 +3,7 @@ import { Form } from "./Form.tsx";
 import { Logo } from "./Logo.tsx";
 
 function App() {
-  const { me, logOut } = useAccount({ profile: {}, root: {} });
+  const { me, logOut } = useAccount({ resolve: { profile: true, root: true } });
 
   return (
     <>

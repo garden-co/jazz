@@ -23,7 +23,9 @@ function Member({
   accountId,
   role,
 }: { accountId: ID<Account>; role?: string }) {
-  const account = useCoState(Account, accountId, { profile: {} });
+  const account = useCoState(Account, accountId, {
+    resolve: { profile: true },
+  });
 
   if (!account?.profile) return;
 

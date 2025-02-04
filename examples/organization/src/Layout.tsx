@@ -3,7 +3,7 @@ import { UserIcon } from "lucide-react";
 
 export function Layout({ children }: { children: React.ReactNode }) {
   const { me, logOut } = useAccount({
-    root: { draftOrganization: {} },
+    resolve: { root: { draftOrganization: true } },
   });
 
   return (
