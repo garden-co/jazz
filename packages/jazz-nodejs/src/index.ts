@@ -1,4 +1,4 @@
-import { AgentSecret, LocalNode, WasmCrypto } from "cojson";
+import { AgentSecret, LocalNode, Peer, WasmCrypto } from "cojson";
 import {
   Account,
   AccountClass,
@@ -14,6 +14,7 @@ type WorkerOptions<Acc extends Account> = {
   accountID?: string;
   accountSecret?: string;
   syncServer?: string;
+  storage?: Peer;
   AccountSchema?: AccountClass<Acc>;
 };
 
@@ -46,6 +47,12 @@ export async function startWorker<Acc extends Account>(
     throw new Error("Invalid accountSecret");
   }
 
+  const peersToLoadFrom = [wsPeer.peer];
+
+  if (options.storage) {
+    peersToLoadFrom.push(options.storage);
+  }
+
   const context = await createJazzContext({
     auth: fixedCredentialsAuth({
       accountID: accountID as ID<Acc>,
@@ -54,7 +61,7 @@ export async function startWorker<Acc extends Account>(
     AccountSchema,
     // TODO: locked sessions similar to browser
     sessionProvider: randomSessionProvider,
-    peersToLoadFrom: [wsPeer.peer],
+    peersToLoadFrom,
     crypto: await WasmCrypto.create(),
   });
 
@@ -69,7 +76,6 @@ export async function startWorker<Acc extends Account>(
 
   async function done() {
     await context.account.waitForAllCoValuesSync();
-
     wsPeer.done();
     context.done();
   }

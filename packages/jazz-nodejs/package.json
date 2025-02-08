@@ -14,6 +14,7 @@
   },
   "devDependencies": {
     "@types/ws": "8.5.10",
+    "cojson-storage-sqlite": "workspace:*",
     "jazz-run": "workspace:*",
     "typescript": "~5.6.2"
   },

@@ -1691,6 +1691,9 @@ importers:
       '@types/ws':
         specifier: 8.5.10
         version: 8.5.10
+      cojson-storage-sqlite:
+        specifier: workspace:*
+        version: link:../cojson-storage-sqlite
       jazz-run:
         specifier: workspace:*
         version: link:../jazz-run

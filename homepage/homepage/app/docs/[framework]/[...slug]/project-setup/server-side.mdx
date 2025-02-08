@@ -55,6 +55,22 @@ const { worker } = await startWorker({
 - load/subscribe to CoValues: `MyCoValue.subscribe(id, worker, {...})`
 - create CoValues & Groups `const val = MyCoValue.create({...}, { owner: worker })`
 
+To make the worker state survive between restarts even on spotty connections, you can pass a `storage` parameter to `startWorker`:
+
+<CodeGroup>
+{/* prettier-ignore */}
+```ts
+import { startWorker } from 'jazz-nodejs';
+import { SQLiteStorage } from 'cojson-storage-sqlite';
+
+const { worker } = await startWorker({
+    AccountSchema: MyWorkerAccount,
+    syncServer: 'wss://cloud.jazz.tools/?key=you@example.com',
+    storage: await SQLiteStorage.asPeer({ filename: dbPath }),
+});
+```
+</CodeGroup>
+
 ## Using CoValues instead of requests
 
 Just like traditional backend functions, you can use Server Workers to do useful stuff (computations, calls to third-party APIs etc.) and put the results back into CoValues, which subscribed clients automatically get notified about.

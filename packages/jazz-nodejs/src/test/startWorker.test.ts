@@ -1,13 +1,15 @@
+import { randomUUID } from "crypto";
+import { tmpdir } from "os";
+import { join } from "path";
+import { SQLiteStorage } from "cojson-storage-sqlite";
 import { createWorkerAccount } from "jazz-run/createWorkerAccount";
 import { startSyncServer } from "jazz-run/startSyncServer";
-import { CoMap, Group, InboxSender, co } from "jazz-tools";
+import { CoMap, Group, InboxSender, Peer, co } from "jazz-tools";
 import { describe, expect, onTestFinished, test } from "vitest";
 import { startWorker } from "../index";
 
 async function setup() {
-  const { server, port } = await setupSyncServer();
-
-  const syncServer = `ws://localhost:${port}`;
+  const { server, port, syncServer } = await setupSyncServer();
 
   const { worker, done } = await setupWorker(syncServer);
 
@@ -27,7 +29,9 @@ async function setupSyncServer(defaultPort = "0") {
     server.close();
   });
 
-  return { server, port };
+  const syncServer = `ws://localhost:${port}`;
+
+  return { server, port, syncServer };
 }
 
 async function setupWorker(syncServer: string) {
@@ -179,5 +183,43 @@ describe("startWorker integration", () => {
     // Cleanup
     await worker2.done();
     newServer.close();
+  });
+
+  test("can use a persistent storage", async () => {
+    // Create a temporary database file
+    const dbPath = join(tmpdir(), `test-${randomUUID()}.db`);
+
+    const { syncServer, server, port } = await setupSyncServer();
+
+    const { accountID, agentSecret } = await createWorkerAccount({
+      name: "test-worker",
+      peer: syncServer,
+    });
+
+    const { worker, done } = await startWorker({
+      accountID: accountID,
+      accountSecret: agentSecret,
+      syncServer,
+      storage: await SQLiteStorage.asPeer({ filename: dbPath }),
+    });
+
+    const map = TestMap.create({ value: "test" }, { owner: worker });
+
+    await done();
+    server.close();
+
+    const { worker: worker2, done: done2 } = await startWorker({
+      accountID: accountID,
+      accountSecret: agentSecret,
+      syncServer,
+      storage: await SQLiteStorage.asPeer({ filename: dbPath }),
+    });
+
+    const mapOnWorker2 = await TestMap.load(map.id, worker2, {});
+
+    expect(mapOnWorker2?.value).toBe("test");
+
+    await setupSyncServer(port); // Starting a new sync server on the same port so the final waitForSync will work
+    await done2();
   });
 });
