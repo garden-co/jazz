@@ -1,3 +1,5 @@
+"use client";
+
 import {
   BaseBrowserContextOptions,
   createJazzBrowserContext,
@@ -19,6 +21,7 @@ export type JazzProviderProps<Acc extends Account = RegisteredAccount> = {
   peer: `wss://${string}` | `ws://${string}`;
   storage?: BaseBrowserContextOptions["storage"];
   AccountSchema?: AccountClass<Acc>;
+  exposeCredentialsToServer?: boolean;
 };
 
 /** @category Context & Hooks */
@@ -28,6 +31,7 @@ export function JazzProvider<Acc extends Account = RegisteredAccount>({
   peer,
   storage,
   AccountSchema = Account as unknown as AccountClass<Acc>,
+  exposeCredentialsToServer = false,
 }: JazzProviderProps<Acc>) {
   const [ctx, setCtx] = useState<JazzContextType<Acc> | undefined>();
 

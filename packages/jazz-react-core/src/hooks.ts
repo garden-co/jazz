@@ -1,4 +1,6 @@
-import React, { useCallback, useContext, useRef } from "react";
+"use client";
+
+import React, { useCallback, useContext, useMemo, useRef } from "react";
 
 import {
   Account,
@@ -11,6 +13,8 @@ import {
   InboxSender,
   createCoValueObservable,
 } from "jazz-tools";
+import { serializePrefetched } from "./prefetched.js";
+import { Prefetched } from "./prefetched.js";
 import { JazzContext, JazzContextType } from "./provider.js";
 
 export function useJazzContext<Acc extends Account>() {
@@ -55,6 +59,20 @@ export function useCoState<V extends CoValue, D>(
   );
 
   return value;
+}
+
+export function useHydratedCoState<V extends CoValue, D>(
+  Schema: CoValueClass<V>,
+  depth: D & DepthsIn<V>,
+  hydrateWith: Prefetched<DeeplyLoaded<V, D>>,
+): Prefetched<DeeplyLoaded<V, D>> {
+  const locallyLoaded = useCoState(Schema, (hydrateWith as V).id, depth);
+  const locallyLoadedJSON = useMemo(
+    () => locallyLoaded && serializePrefetched(locallyLoaded),
+    [locallyLoaded],
+  );
+
+  return locallyLoadedJSON || hydrateWith;
 }
 
 export function createUseAccountHooks<Acc extends Account>() {
