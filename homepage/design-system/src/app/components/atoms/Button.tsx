@@ -48,9 +48,9 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
     ref,
   ) => {
     const sizeClasses = {
-      sm: "text-sm py-1 px-2",
-      md: "py-1.5 px-3",
-      lg: "md:text-lg  py-2 px-3 md:px-8 md:py-3",
+      sm: "text-sm gap-1 py-1.5 px-2.5",
+      md: "gap-2 py-1.5 px-3",
+      lg: "md:text-lg gap-2  py-2 px-3 md:px-8 md:py-3",
     };
 
     const variantClasses = {
@@ -68,7 +68,7 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
         ? className
         : clsx(
             className,
-            "inline-flex items-center justify-center gap-2 rounded-lg text-center transition-colors",
+            "inline-flex items-center justify-center rounded-lg text-center transition-colors",
             "disabled:pointer-events-none disabled:opacity-70",
             sizeClasses[size],
             variantClasses[variant],
