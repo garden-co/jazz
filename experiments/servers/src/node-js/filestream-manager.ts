@@ -261,7 +261,7 @@ export class FileStreamManager {
                         }
                         bytesRead += chunk.length;
                         if (bytesRead < fileSize) {
-                            setTimeout(sendChunk, 0);
+                            fileStream.once("readable", sendChunk);
                         }
                     });
                 } else if (target.type === "http" && target.res) {
@@ -272,7 +272,7 @@ export class FileStreamManager {
                         }
                         bytesRead += chunk.length;
                         if (bytesRead < fileSize) {
-                            setTimeout(sendChunk, 0);
+                            fileStream.once("readable", sendChunk);
                         }
                     });
                 }
@@ -280,7 +280,8 @@ export class FileStreamManager {
                 logger.debug(
                     `[GET] Sent chunk ${chunkIndex} of ${totalChunks} with size ${chunk.length}`,
                 );
-            } else if (!fileStream.readableEnded) {
+            } else /*if (!fileStream.readableEnded)*/ {
+                // No data available yet - wait for fileStream to refill
                 logger.debug(
                     `[GET] Readable event emitted ...`,
                 );
@@ -305,6 +306,6 @@ export class FileStreamManager {
             this.chunkFileDownloadError(error, target, fileStream);
         });
 
-        sendChunk();
+        fileStream.once("readable", sendChunk);
     }
 }

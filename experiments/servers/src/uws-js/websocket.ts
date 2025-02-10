@@ -221,7 +221,7 @@ const app = uWS.SSLApp({
     },
 
     drain: (ws: uWS.WebSocket<{}>) => {
-        logger.debug(`[Event-Drain] WebSocket backpressure: ${ws.getBufferedAmount()}`);
+        logger.debug(`[Event-Drain] WebSocket bufferedAmount: ${ws.getBufferedAmount()}`);
     },
 
     close: (ws: uWS.WebSocket<{}>, code: number, message: ArrayBuffer) => {
@@ -231,7 +231,7 @@ const app = uWS.SSLApp({
     },
 
     dropped: (ws: uWS.WebSocket<{}>, message: ArrayBuffer, isBinary: boolean) => {
-        logger.debug(`[Event-Dropped] WebSocket message dropped => isBinary: ${isBinary}, messageLength: ${message.byteLength}`);
+        logger.debug(`[Event-Dropped] WebSocket message dropped => isBinary: ${isBinary}, messageLength: ${message.byteLength}, bufferedAmount: ${ws.getBufferedAmount()}`);
     },
 });
 

@@ -611,6 +611,7 @@
                 contentLength,
                 chunks,
             ) {
+                console.assert(contentLength === receivedLength, "Some chunks were lost!");
                 let binaryData = new Uint8Array(receivedLength);
                 let position = 0;
                 for (let chunk of chunks) {
