@@ -1,5 +1,3 @@
-import { type DB, open } from "@op-engineering/op-sqlite";
-
 import {
   type IncomingSyncStream,
   type OutgoingSyncQueue,
@@ -8,23 +6,60 @@ import {
 } from "cojson";
 import { SyncManager } from "cojson-storage";
 import { SQLiteClient } from "./client.js";
+import { SQLiteAdapter } from "./sqliteAdapter.js";
+
+export interface SQLiteConfig {
+  adapter: SQLiteAdapter;
+}
 
 export class SQLiteReactNative {
-  private readonly syncManager: SyncManager;
-  private readonly dbClient: SQLiteClient;
+  private syncManager!: SyncManager;
+  private dbClient!: SQLiteClient;
+  private initialized: Promise<void>;
+  private isInitialized = false;
 
   constructor(
-    db: DB,
+    adapter: SQLiteAdapter,
     fromLocalNode: IncomingSyncStream,
     toLocalNode: OutgoingSyncQueue,
   ) {
-    this.dbClient = new SQLiteClient(db, toLocalNode);
-    this.syncManager = new SyncManager(this.dbClient, toLocalNode);
+    this.initialized = this.initialize(adapter, fromLocalNode, toLocalNode);
+  }
 
-    const processMessages = async () => {
-      let lastTimer = performance.now();
+  private async initialize(
+    adapter: SQLiteAdapter,
+    fromLocalNode: IncomingSyncStream,
+    toLocalNode: OutgoingSyncQueue,
+  ): Promise<void> {
+    try {
+      // 1. First initialize the adapter
+      await adapter.initialize();
 
+      // 2. Create and initialize the client
+      this.dbClient = new SQLiteClient(adapter, toLocalNode);
+      await this.dbClient.ensureInitialized();
+
+      // 3. Create the sync manager
+      this.syncManager = new SyncManager(this.dbClient, toLocalNode);
+
+      // 4. Start message processing
+      this.isInitialized = true;
+      this.startMessageProcessing(fromLocalNode);
+    } catch (error) {
+      console.error("[SQLiteReactNative] initialization failed:", error);
+      throw error;
+    }
+  }
+
+  private async startMessageProcessing(fromLocalNode: IncomingSyncStream) {
+    let lastTimer = performance.now();
+
+    try {
       for await (const msg of fromLocalNode) {
+        if (!this.isInitialized) {
+          await this.initialized;
+        }
+
         try {
           if (msg === "Disconnected" || msg === "PingTimeout") {
             throw new Error("Unexpected Disconnected message");
@@ -32,11 +67,6 @@ export class SQLiteReactNative {
 
           await this.syncManager.handleSyncMessage(msg);
 
-          // Since better-sqlite3 is synchronous there may be the case
-          // where a bulk of messages are processed using only microtasks
-          // which may block other peers from sending messages.
-
-          // To avoid this we schedule a timer to downgrade the priority of the storage peer work
           if (performance.now() - lastTimer > 500) {
             lastTimer = performance.now();
             await new Promise((resolve) => setTimeout(resolve, 0));
@@ -44,122 +74,49 @@ export class SQLiteReactNative {
         } catch (e) {
           console.error(
             new Error(
-              `Error reading from localNode, handling msg\n\n${JSON.stringify(
-                msg,
-                (k, v) =>
-                  k === "changes" || k === "encryptedChanges"
-                    ? `${v.slice(0, 20)}...`
-                    : v,
+              `Error processing message: ${JSON.stringify(msg, (k, v) =>
+                k === "changes" || k === "encryptedChanges"
+                  ? `${v.slice(0, 20)}...`
+                  : v,
               )}`,
               { cause: e },
             ),
           );
-          console.error(e);
         }
       }
-    };
-
-    processMessages().catch((e) =>
-      console.error("Error in processMessages in sqlite", e),
-    );
+    } catch (e) {
+      console.error("Error in message processing loop:", e);
+    }
   }
 
-  static async asPeer({
-    filename,
-    trace,
-    localNodeName = "local",
-  }: {
-    filename: string;
-    trace?: boolean;
-    localNodeName?: string;
-  }): Promise<Peer> {
+  static async asPeer(config: SQLiteConfig): Promise<Peer> {
+    if (!config.adapter) {
+      throw new Error("SQLite adapter is required");
+    }
+
+    // Initialize adapter before creating any connections
+    await config.adapter.initialize();
+
     const [localNodeAsPeer, storageAsPeer] = cojsonInternals.connectedPeers(
-      localNodeName,
+      "localNode",
       "storage",
-      { peer1role: "client", peer2role: "storage", trace, crashOnClose: true },
+      {
+        peer1role: "client",
+        peer2role: "storage",
+        trace: false,
+        crashOnClose: true,
+      },
     );
 
-    await SQLiteReactNative.open(
-      filename,
+    const storage = new SQLiteReactNative(
+      config.adapter,
       localNodeAsPeer.incoming,
       localNodeAsPeer.outgoing,
     );
 
+    // Wait for full initialization before returning peer
+    await storage.initialized;
+
     return { ...storageAsPeer, priority: 100 };
-  }
-
-  static async open(
-    filename: string,
-    fromLocalNode: IncomingSyncStream,
-    toLocalNode: OutgoingSyncQueue,
-  ) {
-    const db = open({
-      name: filename,
-    });
-
-    await db.execute("PRAGMA journal_mode = WAL;"); // or OFF
-
-    const oldVersion =
-      Number((await db.execute("PRAGMA user_version")).rows[0]?.user_version) ??
-      0;
-
-    if (oldVersion === 0) {
-      await db.execute(
-        `CREATE TABLE IF NOT EXISTS transactions (
-                    ses INTEGER,
-                    idx INTEGER,
-                    tx TEXT NOT NULL,
-                    PRIMARY KEY (ses, idx)
-                ) WITHOUT ROWID;`,
-      );
-
-      await db.execute(
-        `CREATE TABLE IF NOT EXISTS sessions (
-                    rowID INTEGER PRIMARY KEY,
-                    coValue INTEGER NOT NULL,
-                    sessionID TEXT NOT NULL,
-                    lastIdx INTEGER,
-                    lastSignature TEXT,
-                    UNIQUE (sessionID, coValue)
-                );`,
-      );
-
-      await db.execute(
-        `CREATE INDEX IF NOT EXISTS sessionsByCoValue ON sessions (coValue);`,
-      );
-
-      await db.execute(
-        `CREATE TABLE IF NOT EXISTS coValues (
-                    rowID INTEGER PRIMARY KEY,
-                    id TEXT NOT NULL UNIQUE,
-                    header TEXT NOT NULL UNIQUE
-                );`,
-      );
-
-      await db.execute(
-        `CREATE INDEX IF NOT EXISTS coValuesByID ON coValues (id);`,
-      );
-
-      await db.execute("PRAGMA user_version = 1");
-    }
-
-    if (oldVersion <= 2) {
-      await db.execute(
-        `CREATE TABLE IF NOT EXISTS signatureAfter (
-                    ses INTEGER,
-                    idx INTEGER,
-                    signature TEXT NOT NULL,
-                    PRIMARY KEY (ses, idx)
-                ) WITHOUT ROWID;`,
-      );
-
-      await db.execute(
-        `ALTER TABLE sessions ADD COLUMN bytesSinceLastSignature INTEGER;`,
-      );
-
-      await db.execute("PRAGMA user_version = 3");
-    }
-
-    return new SQLiteReactNative(db, fromLocalNode, toLocalNode);
   }
 }

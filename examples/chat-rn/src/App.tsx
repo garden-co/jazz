@@ -51,7 +51,6 @@ function App() {
     <StrictMode>
       <JazzProvider
         auth={auth}
-        storage="sqlite"
         peer="wss://cloud.jazz.tools/?key=chat-rn-example-jazz@garden.co"
       >
         <NavigationContainer linking={linking} ref={navigationRef}>

@@ -1,25 +1,14 @@
-import { OPSQLiteAdapter } from "cojson-storage-rn-op-sqlite-adapter";
-import { JazzContext, JazzContextType } from "jazz-react-core";
-import { Account, AccountClass, AuthMethod } from "jazz-tools";
+import {
+  JazzContext,
+  JazzContextType,
+  RegisteredAccount,
+} from "jazz-react-core";
+import { JazzProviderProps, createJazzRNContext } from "jazz-react-native";
+import { Account, AccountClass } from "jazz-tools";
 import React, { useState } from "react";
 import { useEffect, useRef } from "react";
-import {
-  BaseReactNativeContextOptions,
-  createJazzRNContext,
-} from "./platform.js";
-export interface Register {}
 
-export type RegisteredAccount = Register extends { Account: infer Acc }
-  ? Acc
-  : Account;
-
-export type JazzProviderProps<Acc extends Account = RegisteredAccount> = {
-  children: React.ReactNode;
-  auth: AuthMethod | "guest";
-  peer: `wss://${string}` | `ws://${string}`;
-  AccountSchema?: AccountClass<Acc>;
-  CryptoProvider?: BaseReactNativeContextOptions["CryptoProvider"];
-};
+import { ExpoSQLiteAdapter } from "cojson-storage-rn-expo-sqlite-adapter";
 
 /** @category Context & Hooks */
 export function JazzProvider<Acc extends Account = RegisteredAccount>({
@@ -61,14 +50,14 @@ export function JazzProvider<Acc extends Account = RegisteredAccount>({
           ? {
               peer,
               CryptoProvider,
-              storage: new OPSQLiteAdapter(),
+              storage: new ExpoSQLiteAdapter(),
             }
           : {
               AccountSchema,
               auth: auth,
               peer,
               CryptoProvider,
-              storage: new OPSQLiteAdapter(),
+              storage: new ExpoSQLiteAdapter(),
             },
       );
 
@@ -94,10 +83,6 @@ export function JazzProvider<Acc extends Account = RegisteredAccount>({
     }
 
     const promise = createContext();
-
-    promise.catch((e) => {
-      console.error("Error creating Jazz context", e);
-    });
 
     // In development mode we don't return a cleanup function because otherwise
     // the double effect execution would mark the context as done immediately.

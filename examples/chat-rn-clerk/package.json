@@ -47,6 +47,7 @@
     "jazz-react-native-auth-clerk": "workspace:*",
     "jazz-react-native-media-images": "workspace:*",
     "jazz-tools": "workspace:*",
+    "jazz-expo": "workspace:*",
     "nativewind": "^4.1.21",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",

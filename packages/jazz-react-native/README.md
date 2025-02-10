@@ -104,7 +104,7 @@ module.exports = config;
 
 ### Additional Monorepo Configuration (for pnpm users)
 
-- Add node-linker=hoisted to the root .npmrc (create this file if it doesn’t exist).
+- Add node-linker=hoisted to the root .npmrc (create this file if it doesn't exist).
 - Add the following to the root package.json:
 
 ```json
@@ -191,6 +191,52 @@ export const { useAccount, useCoState, useAcceptInvite } = Jazz;
 ```
 
 You can optionally pass a custom `kvStore` and `AccountSchema` to `createJazzRNApp()`, otherwise, it defaults to `ExpoSecureStoreAdapter` and `Account`.
+
+### Storage Options
+
+Jazz React Native supports two SQLite adapters for local persistence:
+- `ExpoSQLiteAdapter` using `expo-sqlite`
+- `OPSQLiteAdapter` using `@op-engineering/op-sqlite`
+
+#### Option 2: Batteries-Included Approach
+
+For a simpler setup, use one of our pre-configured providers:
+
+```bash
+# For Expo SQLite
+pnpm install jazz-expo expo-sqlite
+
+# For op-sqlite (higher performance)
+pnpm install jazz-react-native @op-engineering/op-sqlite
+```
+
+Then use the pre-configured provider:
+
+```typescript
+// For Expo SQLite
+import { JazzProvider } from 'jazz-expo';
+// OR for op-sqlite
+import { JazzProvider } from 'jazz-react-native';
+
+function App() {
+  return (
+    <JazzProvider
+      auth={auth}
+      peer="wss://cloud.jazz.tools"
+    >
+      <YourApp />
+    </JazzProvider>
+  );
+}
+```
+
+The batteries-included approach automatically:
+- Sets up the appropriate SQLite adapter
+- Handles development mode peculiarities
+- Manages session lifecycle and cleanup
+- Provides optimized database operations
+
+Choose op-sqlite for better performance or Expo SQLite for simpler setup with Expo's managed workflow.
 
 ### Choosing an Auth Method
 

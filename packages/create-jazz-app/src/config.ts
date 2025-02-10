@@ -95,7 +95,7 @@ export const frameworkToAuthExamples: Partial<
     repo: "garden-co/jazz/examples/passkey-svelte",
   },
   "react-native-expo-clerk-auth": {
-    name: "React Native Expo + Jazz + Clerk Auth",
+    name: "React Native Expo + Jazz + expo-sqlite + Clerk Auth",
     repo: "garden-co/jazz/examples/chat-rn-clerk",
   },
   "react-passphrase-auth": {
