@@ -57,10 +57,11 @@ const app = uWS.SSLApp({
     handleStaticRoutes(res, req, staticDir, benchmarkStore, "ws", "B1_uWebSocketServer-WSS.csv");
 }).ws("/*", {
     /* Options */
-    compression: uWS.DISABLED, /* uWS.SHARED_COMPRESSOR, */
-    maxPayloadLength: 16 * 1024 * 1024,
-    idleTimeout: 10,
-    /* maxBackpressure: 1024, */
+    compression: uWS.DISABLED,
+    maxPayloadLength: 202 * 1024,
+    maxBackpressure: 51 * 1024 * 1024,
+    sendPingsAutomatically: true,
+    idleTimeout: 15,
 
     // Upgrade handler - called prior to establishing a WebSocket connection
     upgrade: (res, req, context) => {

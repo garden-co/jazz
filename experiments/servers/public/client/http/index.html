@@ -169,7 +169,7 @@
                             fileBlobs.push(event.data);
                             receivedSize += event.data.size;
                             log(
-                                `WebSocket chunk received: ${receivedSize} of ${totalSize} for ${fileName}.`,
+                                `WebSocket (chunk: ${fileBlobs.length}) received: ${receivedSize} of ${totalSize} for ${fileName}.`,
                             );
                             return;
                         }
@@ -588,7 +588,7 @@
                         chunks.push(value);
                         receivedLength += value.length;
                         log(
-                            `Received ${receivedLength} of ${contentLength} bytes for: ${uuid}.`,
+                            `Received (chunk: ${chunks.length}) ${receivedLength} of ${contentLength} bytes for: ${uuid}.`,
                         );
                     }
                     handleBinaryCoValue(
