@@ -160,3 +160,5 @@ export async function setupJazzTestSync() {
 
   return account;
 }
+
+export { CoRichTextDebug } from "./coValues/coRichText.js";

@@ -1,5 +1,6 @@
 import type { JsonValue, RawCoList } from "cojson";
 import { RawAccount } from "cojson";
+import { calcPatch } from "fast-myers-diff";
 import type {
   CoValue,
   CoValueClass,
@@ -287,12 +288,24 @@ export class CoList<Item = any> extends Array<Item> implements CoValue {
 
     let appendAfter = Math.max(start - 1, 0);
     for (const item of toRawItems(items as Item[], this._schema[ItemsSym])) {
-      console.log(this._raw.asArray(), appendAfter);
       this._raw.append(item, appendAfter);
       appendAfter++;
     }
 
     return deleted;
+  }
+
+  applyDiff(other: Item[]) {
+    const current = this._raw.asArray() as Item[];
+    const cmp = isRefEncoded(this._schema[ItemsSym])
+      ? (aIdx: number, bIdx: number) =>
+          (current[aIdx] as CoValue).id === (other[bIdx] as CoValue).id
+      : undefined;
+    for (const [from, to, insert] of [
+      ...calcPatch(current, other, cmp),
+    ].reverse()) {
+      this.splice(from, to - from, ...insert);
+    }
   }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any

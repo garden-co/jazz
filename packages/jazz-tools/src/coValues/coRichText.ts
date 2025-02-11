@@ -45,6 +45,8 @@ export class Mark extends CoMap {
 
   /**
    * Validates and clamps mark positions to ensure they are in the correct order
+   * Given a zero-indexed text length, the positions must satisfy:
+   * -1 ≤ startAfter < startBefore ≤ endAfter < endBefore ≤ textLength
    * @returns Normalized positions or null if invalid
    */
   validatePositions(
@@ -52,30 +54,33 @@ export class Mark extends CoMap {
     idxAfter: (pos: TextPos) => number | undefined,
     idxBefore: (pos: TextPos) => number | undefined,
   ) {
-    if (!textLength) {
-      console.error("Cannot validate positions for empty text");
-      return null;
-    }
-
     // Get positions with fallbacks
     const positions = {
-      startAfter: this.startAfter ? (idxBefore(this.startAfter) ?? 0) : 0,
+      startAfter: this.startAfter ? (idxBefore(this.startAfter) ?? -1) : -1,
       startBefore: this.startBefore ? (idxAfter(this.startBefore) ?? 0) : 0,
       endAfter: this.endAfter
-        ? (idxBefore(this.endAfter) ?? textLength)
-        : textLength,
+        ? (idxBefore(this.endAfter) ?? textLength - 1)
+        : textLength - 1,
       endBefore: this.endBefore
         ? (idxAfter(this.endBefore) ?? textLength)
         : textLength,
     };
 
-    // Clamp and ensure proper ordering in one step
-    return {
-      startAfter: Math.max(0, positions.startAfter),
-      startBefore: Math.max(positions.startAfter + 1, positions.startBefore),
-      endAfter: Math.min(textLength - 1, positions.endAfter),
-      endBefore: Math.min(textLength, positions.endBefore),
-    };
+    // First clamp startBefore and endAfter to text bounds
+    const startBefore = Math.max(
+      0,
+      Math.min(positions.startBefore, textLength - 1),
+    );
+    const endAfter = Math.max(
+      startBefore,
+      Math.min(positions.endAfter, textLength - 1),
+    );
+
+    // Then derive startAfter and endBefore from them
+    const startAfter = Math.max(-1, startBefore - 1);
+    const endBefore = Math.min(endAfter + 1, textLength);
+
+    return { startAfter, startBefore, endAfter, endBefore };
   }
 }
 
@@ -177,7 +182,16 @@ export class CoRichText extends CoMap {
   }
 
   /**
-   * Insert text at a specific index.
+   * Insert text before a specific index.
+   */
+  insertBefore(idx: number, text: string) {
+    if (!this.text)
+      throw new Error("Cannot insert into a CoRichText without loaded text");
+    this.text.insertBefore(idx, text);
+  }
+
+  /**
+   * Insert text after a specific index.
    */
   insertAfter(idx: number, text: string) {
     if (!this.text)
@@ -239,7 +253,7 @@ export class CoRichText extends CoMap {
   }
 
   /**
-   * Insert a mark at a specific range.
+   * Insert a mark at a specific range, inclusive of the start and end positions.
    */
   insertMark<
     MarkClass extends {
@@ -274,10 +288,10 @@ export class CoRichText extends CoMap {
     const range = RangeClass.create(
       {
         ...extraArgs,
-        startAfter: this.posBefore(start),
-        startBefore: this.posAfter(start),
-        endAfter: this.posBefore(end),
-        endBefore: this.posAfter(end),
+        startAfter: this.posAfter(start - 1),
+        startBefore: this.posBefore(start),
+        endAfter: this.posAfter(end),
+        endBefore: this.posBefore(end + 1),
       },
       { owner },
     );
@@ -429,8 +443,8 @@ export class CoRichText extends CoMap {
           ]
         : []),
       {
-        start: range.startBefore - 1,
-        end: range.endAfter + 1,
+        start: range.startBefore,
+        end: range.endAfter,
         side: "certainMiddle" as const,
         sourceMark: range.sourceMark,
       },
@@ -470,11 +484,12 @@ export class CoRichText extends CoMap {
 
     const text = this.text?.toString() || "";
 
+    // Initialize with a single leaf node covering the marked text
     let currentNodes: (TreeLeaf | TreeNode)[] = [
       {
         type: "leaf",
         start: 0,
-        end: text.length,
+        end: text.length - 1,
       },
     ];
 
@@ -486,11 +501,16 @@ export class CoRichText extends CoMap {
 
     // for each range, split the current nodes where necessary (no matter if leaf or already a node), wrapping the resulting "inside" parts in a node with the range's tag
     for (const range of rangesSortedLowToHighPrecedence) {
-      // console.log("currentNodes", currentNodes);
       const newNodes = currentNodes.flatMap((node) => {
+        // Double-split approach to isolate text for marking:
+        // 1. Split at range start: divides into "before" and "inOrAfter" sections
+        // 2. Split "inOrAfter" at range end: divides into "inside" (to be marked) and "after" sections
+        // Example: marking "wo" in "Hello world"
+        // First split:  "Hello " (before) | "world" (inOrAfter)
+        // Second split: "wo" (inside) | "rld" (after)
         const [before, inOrAfter] = splitNode(node, range.start);
         const [inside, after] = inOrAfter
-          ? splitNode(inOrAfter, range.end)
+          ? splitNode(inOrAfter, range.end + 1)
           : [undefined, undefined];
 
         return [
@@ -517,7 +537,7 @@ export class CoRichText extends CoMap {
       type: "node",
       tag: "root",
       start: 0,
-      end: text.length,
+      end: text.length - 1,
       children: currentNodes,
     };
   }
@@ -571,10 +591,10 @@ export function splitNode(
         ? {
             type: "leaf",
             start: node.start,
-            end: Math.min(at, node.end),
+            end: Math.min(at - 1, node.end),
           }
         : undefined,
-      at < node.end
+      at <= node.end
         ? {
             type: "leaf",
             start: Math.max(at, node.start),
@@ -590,13 +610,13 @@ export function splitNode(
             type: "node",
             tag: node.tag,
             start: node.start,
-            end: Math.min(at, node.end),
+            end: Math.min(at - 1, node.end),
             children: children
               .map((child) => splitNode(child, at)[0])
               .filter((c): c is Exclude<typeof c, undefined> => !!c),
           }
         : undefined,
-      at < node.end
+      at <= node.end
         ? {
             type: "node",
             tag: node.tag,
@@ -632,5 +652,149 @@ export const Marks = {
   },
   Em: class Italic extends Mark {
     tag = co.literal("em");
+  },
+};
+
+/**
+ * Debug utilities for CoRichText visualization.
+ * Provides functions to visualize the structure of a CoRichText instance.
+ */
+export const CoRichTextDebug = {
+  /**
+   * Creates a visual ASCII representation of a tree structure
+   * @internal
+   */
+  _visualizeTree(
+    tree: TreeNode | TreeLeaf,
+    content: string,
+    prefix = "",
+    isLast = true,
+  ): string[] {
+    const lines: string[] = [];
+    const nodeContent = content
+      .slice(tree.start, tree.end + 1)
+      .replace(/\n/g, "↵");
+    const position = `[${tree.start}:${tree.end}]`;
+    const connector = isLast ? "└── " : "├── ";
+
+    if (tree.type === "leaf") {
+      lines.push(`${prefix}${connector}Leaf ${position}: "${nodeContent}"`);
+    } else {
+      lines.push(
+        `${prefix}${connector}${tree.tag} ${position}: "${nodeContent}"`,
+      );
+      const childPrefix = prefix + (isLast ? "    " : "│   ");
+      tree.children.forEach((child, index) => {
+        const childLines = this._visualizeTree(
+          child,
+          content,
+          childPrefix,
+          index === tree.children.length - 1,
+        );
+        lines.push(...childLines);
+      });
+    }
+    return lines;
+  },
+
+  /**
+   * Returns a string representation of a tree structure
+   * @param tree The tree to visualize
+   * @param content The text content associated with the tree
+   * @returns String containing the tree visualization
+   */
+  tree(tree: TreeNode | TreeLeaf, content: string): string {
+    return this._visualizeTree(tree, content).join("\n");
+  },
+
+  /**
+   * Returns a string representation of the CoRichText tree structure
+   * @param text The CoRichText instance to visualize
+   * @param tagPrecedence Array of tags in order of precedence
+   * @returns String containing the tree visualization
+   */
+  getTree(text: CoRichText, tagPrecedence: string[]): string {
+    const content = text.toString();
+    const tree = text.toTree(tagPrecedence);
+    return this.tree(tree, content);
+  },
+
+  /**
+   * Logs a visual representation of a CoRichText instance to the console
+   * @param text The CoRichText instance to visualize
+   * @param options Optional configuration for visualization
+   */
+  log(
+    text: CoRichText,
+    options?: {
+      label?: string;
+      showMarks?: boolean;
+      showTree?: boolean;
+      tagPrecedence?: string[];
+    },
+  ): void {
+    const content = text.toString();
+    console.group(`CoRichText${options?.label ? ` (${options.label})` : ""}`);
+    console.log(
+      `Content: "${content.replace(/\n/g, "↵")}" (length: ${text.length})`,
+    );
+
+    if (options?.showMarks !== false) {
+      console.group("Marks");
+      const marks = text.resolveMarks();
+      if (marks.length === 0) {
+        console.log("(no marks)");
+      } else {
+        marks.forEach((mark: ResolvedMark) => {
+          const markRange = content.substring(
+            mark.startBefore,
+            mark.endAfter + 1,
+          );
+          console.log(
+            `${mark.sourceMark.tag} (${mark.startBefore}:${mark.endAfter}): "${markRange.replace(/\n/g, "↵")}"`,
+          );
+        });
+
+        // Show coverage visualization
+        if (content.length > 0) {
+          console.group("Coverage");
+          let scale = "";
+          for (let i = 0; i < content.length; i++) {
+            scale += i % 10 === 0 ? String(Math.floor(i / 10)) : " ";
+          }
+          console.log(scale);
+          let positions = "";
+          for (let i = 0; i < content.length; i++) {
+            positions += i % 10;
+          }
+          console.log(positions);
+          console.log(content.replace(/\n/g, "↵"));
+
+          const markTypes = [...new Set(marks.map((m) => m.sourceMark.tag))];
+          markTypes.forEach((tag) => {
+            const relevantMarks = marks.filter((m) => m.sourceMark.tag === tag);
+            let coverageLine = "";
+            for (let i = 0; i < content.length; i++) {
+              const hasMarkAtPos = relevantMarks.some(
+                (m) => i >= m.startBefore && i <= m.endAfter,
+              );
+              coverageLine += hasMarkAtPos ? "─" : " ";
+            }
+            console.log(`${coverageLine} ${tag}`);
+          });
+          console.groupEnd();
+        }
+      }
+      console.groupEnd();
+    }
+
+    if (options?.showTree !== false && options?.tagPrecedence) {
+      console.group("Tree Structure");
+      const tree = text.toTree(options.tagPrecedence);
+      this._visualizeTree(tree, content).forEach((line) => console.log(line));
+      console.groupEnd();
+    }
+
+    console.groupEnd();
   },
 };

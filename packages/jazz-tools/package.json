@@ -25,7 +25,8 @@
   "license": "MIT",
   "version": "0.9.23",
   "dependencies": {
-    "cojson": "workspace:*"
+    "cojson": "workspace:*",
+    "fast-myers-diff": "^3.2.0"
   },
   "scripts": {
     "format-and-lint": "biome check .",

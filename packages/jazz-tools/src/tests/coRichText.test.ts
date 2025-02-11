@@ -1,6 +1,6 @@
 import { connectedPeers } from "cojson/src/streamUtils.ts";
 import { describe, expect, test } from "vitest";
-import { splitNode } from "../coValues/coRichText.js";
+import { CoRichTextDebug, splitNode } from "../coValues/coRichText.js";
 import {
   Account,
   CoRichText,
@@ -35,7 +35,7 @@ describe("CoRichText", async () => {
         owner: me,
       });
 
-      text.insertAfter(5, " cruel");
+      text.insertAfter(4, " cruel");
       expect(text + "").toEqual("hello cruel world");
     });
 
@@ -60,9 +60,9 @@ describe("CoRichText", async () => {
         const marks = text.resolveMarks();
         expect(marks).toHaveLength(1);
         expect(marks[0]).toMatchObject({
-          startAfter: 0,
-          startBefore: 1,
-          endAfter: 3,
+          startAfter: -1,
+          startBefore: 0,
+          endAfter: 4,
           endBefore: 5,
           tag: "strong",
         });
@@ -90,8 +90,8 @@ describe("CoRichText", async () => {
           owner: me,
         });
 
-        text.insertMark(0, 5, Marks.Strong, { tag: "strong" }); // "hello"
-        text.insertMark(6, 11, Marks.Em, { tag: "em" }); // "world"
+        text.insertMark(0, 4, Marks.Strong, { tag: "strong" }); // "hello"
+        text.insertMark(6, 10, Marks.Em, { tag: "em" }); // "world"
 
         const marks = text.resolveMarks();
         expect(marks).toHaveLength(2);
@@ -101,9 +101,13 @@ describe("CoRichText", async () => {
         expect(mark1!.sourceMark.tag).toBe("strong");
         expect(mark2!.sourceMark.tag).toBe("em");
 
-        expect(mark1!.startAfter).toBe(0);
-        expect(mark1!.endBefore).toBe(6);
+        expect(mark1!.startAfter).toBe(-1);
+        expect(mark1!.startBefore).toBe(0);
+        expect(mark1!.endAfter).toBe(4);
+        expect(mark1!.endBefore).toBe(5);
         expect(mark2!.startAfter).toBe(5);
+        expect(mark2!.startBefore).toBe(6);
+        expect(mark2!.endAfter).toBe(10);
         expect(mark2!.endBefore).toBe(11);
       });
 
@@ -131,12 +135,14 @@ describe("CoRichText", async () => {
         });
 
         // Mark entire text
-        text.insertMark(0, 11, Marks.Strong, { tag: "strong" });
+        text.insertMark(0, 10, Marks.Strong, { tag: "strong" });
 
         const marks = text.resolveMarks();
         expect(marks).toHaveLength(1);
-        expect(marks[0]!.startAfter).toBe(0);
+        expect(marks[0]!.startAfter).toBe(-1);
+        expect(marks[0]!.startBefore).toBe(0);
         expect(marks[0]!.endAfter).toBe(10);
+        expect(marks[0]!.endBefore).toBe(11);
       });
 
       test("inserting mark outside of text bounds", () => {
@@ -144,10 +150,12 @@ describe("CoRichText", async () => {
           owner: me,
         });
 
-        text.insertMark(-1, 12, Marks.Strong, { tag: "strong" });
+        text.insertMark(-1, 10, Marks.Strong, { tag: "strong" });
         expect(text.resolveMarks()).toHaveLength(1);
-        expect(text.resolveMarks()[0]!.startAfter).toBe(0);
+        expect(text.resolveMarks()[0]!.startAfter).toBe(-1);
+        expect(text.resolveMarks()[0]!.startBefore).toBe(0);
         expect(text.resolveMarks()[0]!.endAfter).toBe(10);
+        expect(text.resolveMarks()[0]!.endBefore).toBe(11);
       });
 
       test("maintains correct mark ordering with nested marks", () => {
@@ -155,12 +163,12 @@ describe("CoRichText", async () => {
           owner: me,
         });
 
-        text.insertMark(0, 11, Marks.Strong, { tag: "strong" });
-        text.insertMark(2, 8, Marks.Em, { tag: "em" });
+        text.insertMark(0, 10, Marks.Strong, { tag: "strong" }); // "hello world"
+        text.insertMark(2, 8, Marks.Em, { tag: "em" }); // "llo wor"
         text.insertMark(4, 6, Marks.Link, {
           tag: "link",
           url: "https://example.com",
-        });
+        }); // "o w"
 
         const tree = text.toTree(["strong", "em", "link"]);
         // Verify the nesting structure is correct
@@ -169,18 +177,18 @@ describe("CoRichText", async () => {
           type: "node",
           tag: "root",
           start: 0,
-          end: 11,
+          end: 10,
           children: [
             {
               type: "node",
               tag: "strong",
               start: 0,
-              end: 2,
+              end: 1,
               children: [
                 {
                   type: "leaf",
                   start: 0,
-                  end: 2,
+                  end: 1,
                 },
               ],
             },
@@ -188,18 +196,18 @@ describe("CoRichText", async () => {
               type: "node",
               tag: "strong",
               start: 2,
-              end: 4,
+              end: 3,
               children: [
                 {
                   type: "node",
                   tag: "em",
                   start: 2,
-                  end: 4,
+                  end: 3,
                   children: [
                     {
                       type: "leaf",
                       start: 2,
-                      end: 4,
+                      end: 3,
                     },
                   ],
                 },
@@ -237,18 +245,18 @@ describe("CoRichText", async () => {
             {
               type: "node",
               tag: "strong",
-              start: 6,
+              start: 7,
               end: 8,
               children: [
                 {
                   type: "node",
                   tag: "em",
-                  start: 6,
+                  start: 7,
                   end: 8,
                   children: [
                     {
                       type: "leaf",
-                      start: 6,
+                      start: 7,
                       end: 8,
                     },
                   ],
@@ -258,13 +266,13 @@ describe("CoRichText", async () => {
             {
               type: "node",
               tag: "strong",
-              start: 8,
-              end: 11,
+              start: 9,
+              end: 10,
               children: [
                 {
                   type: "leaf",
-                  start: 8,
-                  end: 11,
+                  start: 9,
+                  end: 10,
                 },
               ],
             },
@@ -328,8 +336,8 @@ describe("CoRichText", async () => {
 
         // Verify the remaining marks
         // First mark should be trimmed to "hell"
-        expect(remainingMarks[0]!.startAfter).toBe(0);
-        expect(remainingMarks[0]!.startBefore).toBe(1);
+        expect(remainingMarks[0]!.startAfter).toBe(-1);
+        expect(remainingMarks[0]!.startBefore).toBe(0);
         expect(remainingMarks[0]!.endAfter).toBe(3);
         expect(remainingMarks[0]!.endBefore).toBe(4);
 
@@ -378,7 +386,7 @@ describe("CoRichText", async () => {
         // Should have one mark remaining on "hello "
         const remainingMarks = text.resolveMarks();
         expect(remainingMarks).toHaveLength(1);
-        expect(remainingMarks[0]!.startAfter).toBe(0);
+        expect(remainingMarks[0]!.startBefore).toBe(0);
         expect(remainingMarks[0]!.endAfter).toBe(5);
       });
 
@@ -418,8 +426,8 @@ describe("CoRichText", async () => {
         expect(remainingMarks).toHaveLength(2);
 
         // First mark should cover "hello"
-        expect(remainingMarks[0]!.startAfter).toBe(0);
-        expect(remainingMarks[0]!.startBefore).toBe(1);
+        expect(remainingMarks[0]!.startAfter).toBe(-1);
+        expect(remainingMarks[0]!.startBefore).toBe(0);
         expect(remainingMarks[0]!.endAfter).toBe(4);
         expect(remainingMarks[0]!.endBefore).toBe(5);
 
@@ -440,12 +448,12 @@ describe("CoRichText", async () => {
         type: "node",
         tag: "root",
         start: 0,
-        end: 11,
+        end: 10,
         children: [
           {
             type: "leaf",
             start: 0,
-            end: 11,
+            end: 10,
           },
         ],
       });
@@ -466,30 +474,29 @@ describe("CoRichText", async () => {
       });
 
       // Add an outer mark spanning the whole text
-      text.insertMark(0, 11, Marks.Strong, { tag: "strong" });
+      text.insertMark(0, 10, Marks.Strong, { tag: "strong" });
 
       // Add an inner mark spanning part of the text
-      text.insertMark(6, 11, Marks.Em, { tag: "em" });
+      text.insertMark(6, 10, Marks.Em, { tag: "em" });
 
-      // Split at position 8 (between 'wo' and 'rld')
       const tree = text.toTree(["strong", "em"]);
 
       expect(tree).toEqual({
         type: "node",
         tag: "root",
         start: 0,
-        end: 11,
+        end: 10,
         children: [
           {
             type: "node",
             tag: "strong",
             start: 0,
-            end: 6,
+            end: 5,
             children: [
               {
                 type: "leaf",
                 start: 0,
-                end: 6,
+                end: 5,
               },
             ],
           },
@@ -497,18 +504,18 @@ describe("CoRichText", async () => {
             type: "node",
             tag: "strong",
             start: 6,
-            end: 11,
+            end: 10,
             children: [
               {
                 type: "node",
                 tag: "em",
                 start: 6,
-                end: 11,
+                end: 10,
                 children: [
                   {
                     type: "leaf",
                     start: 6,
-                    end: 11,
+                    end: 10,
                   },
                 ],
               },
@@ -517,7 +524,7 @@ describe("CoRichText", async () => {
         ],
       });
 
-      // Now verify splitting works by checking a specific position
+      // Now verify splitting works by checking a specific position (between 'wo' and 'rld')
       const [before, after] = splitNode(tree.children[1] as TreeNode, 8);
 
       // Verify the structure of the split nodes
@@ -525,18 +532,18 @@ describe("CoRichText", async () => {
         type: "node",
         tag: "strong",
         start: 6,
-        end: 8,
+        end: 7,
         children: [
           {
             type: "node",
             tag: "em",
             start: 6,
-            end: 8,
+            end: 7,
             children: [
               {
                 type: "leaf",
                 start: 6,
-                end: 8,
+                end: 7,
               },
             ],
           },
@@ -547,23 +554,83 @@ describe("CoRichText", async () => {
         type: "node",
         tag: "strong",
         start: 8,
-        end: 11,
+        end: 10,
         children: [
           {
             type: "node",
             tag: "em",
             start: 8,
-            end: 11,
+            end: 10,
             children: [
               {
                 type: "leaf",
                 start: 8,
-                end: 11,
+                end: 10,
               },
             ],
           },
         ],
       });
+    });
+
+    test("mark boundaries are preserved in resolveAndDiffuseAndFocusMarks", () => {
+      const text = CoRichText.createFromPlainText("Hello world", {
+        owner: me,
+      });
+
+      // Add two non-overlapping marks
+      text.insertMark(0, 4, Marks.Strong, { tag: "strong" }); // "Hello"
+      text.insertMark(6, 10, Marks.Strong, { tag: "strong" }); // "world"
+
+      const marks = text.resolveAndDiffuseAndFocusMarks();
+      expect(marks).toHaveLength(2);
+
+      // Verify we have marks before proceeding
+      expect(marks[0]).toBeDefined();
+      expect(marks[1]).toBeDefined();
+
+      if (!marks[0] || !marks[1]) return;
+
+      // Check first mark boundaries
+      expect(marks[0].start).toBe(0);
+      expect(marks[0].end).toBe(4);
+
+      // Check second mark boundaries
+      expect(marks[1].start).toBe(6);
+      expect(marks[1].end).toBe(10);
+    });
+
+    test("certainMiddle regions should not expand into uncertain territory", () => {
+      const text = CoRichText.createFromPlainText("Hello world", {
+        owner: me,
+      });
+
+      // Mark "Hello" with strong
+      text.insertMark(0, 4, Marks.Strong, { tag: "strong" }); // "Hell"
+
+      const diffusedMarks = text.resolveAndDiffuseMarks();
+
+      // Find the certainMiddle region
+      const certainMiddle = diffusedMarks.find(
+        (m) => m.side === "certainMiddle",
+      );
+      expect(certainMiddle).toBeDefined();
+
+      if (!certainMiddle) return;
+
+      // The certainMiddle region should exactly match the marked region
+      expect(certainMiddle.start).toBe(0);
+      expect(certainMiddle.end).toBe(4);
+
+      // The tree should reflect the exact marked region
+      const tree = text.toTree(["strong"]);
+      const strongNode = tree.children[0] as TreeNode;
+
+      // The tree node should include exactly "Hell"
+      const markedText = text
+        .toString()
+        .substring(strongNode.start, strongNode.end);
+      expect(markedText).toBe("Hell");
     });
   });
 
@@ -655,7 +722,7 @@ describe("CoRichText", async () => {
       const update1 = (await queue.next()).value;
       expect(update1.toString()).toBe("hello world");
 
-      text.insertAfter(5, " beautiful");
+      text.insertAfter(4, " beautiful");
       const update2 = (await queue.next()).value;
       expect(update2.toString()).toBe("hello beautiful world");
 
@@ -674,8 +741,8 @@ describe("CoRichText", async () => {
       expect(update5.toString()).toBe("hello world");
       expect(update5.resolveMarks()).toHaveLength(1);
       expect(update5.resolveMarks()[0]!.tag).toBe("strong");
-      expect(update5.resolveMarks()[0]!.startAfter).toBe(0);
-      expect(update5.resolveMarks()[0]!.startBefore).toBe(1);
+      expect(update5.resolveMarks()[0]!.startAfter).toBe(-1);
+      expect(update5.resolveMarks()[0]!.startBefore).toBe(0);
       expect(update5.resolveMarks()[0]!.endAfter).toBe(4);
       expect(update5.resolveMarks()[0]!.endBefore).toBe(5);
     });
@@ -692,8 +759,8 @@ describe("CoRichText", async () => {
       const mark = Marks.Strong.create(
         {
           tag: "strong",
-          startAfter: text.posAfter(0) as TextPos,
-          startBefore: text.posBefore(1) as TextPos,
+          startAfter: text.posAfter(-1) as TextPos,
+          startBefore: text.posBefore(0) as TextPos,
           endAfter: text.posAfter(4) as TextPos,
           endBefore: text.posBefore(5) as TextPos,
         },
@@ -706,8 +773,8 @@ describe("CoRichText", async () => {
       const marks = text.resolveMarks();
       expect(marks).toHaveLength(1);
       expect(marks[0]).toMatchObject({
-        startAfter: 0,
-        startBefore: 1,
+        startAfter: -1,
+        startBefore: 0,
         endAfter: 4,
         endBefore: 5,
         tag: "strong",
@@ -723,8 +790,8 @@ describe("CoRichText", async () => {
       const mark1 = Marks.Strong.create(
         {
           tag: "strong",
-          startAfter: text.posAfter(0) as TextPos,
-          startBefore: text.posBefore(1) as TextPos,
+          startAfter: text.posAfter(-1) as TextPos,
+          startBefore: text.posBefore(0) as TextPos,
           endAfter: text.posAfter(4) as TextPos,
           endBefore: text.posBefore(5) as TextPos,
         },
@@ -751,8 +818,8 @@ describe("CoRichText", async () => {
 
       // First mark
       expect(marks[0]).toMatchObject({
-        startAfter: 0,
-        startBefore: 1,
+        startAfter: -1,
+        startBefore: 0,
         endAfter: 4,
         endBefore: 5,
         tag: "strong",
@@ -777,8 +844,8 @@ describe("CoRichText", async () => {
       const mark1 = Marks.Strong.create(
         {
           tag: "strong",
-          startAfter: text.posAfter(0) as TextPos,
-          startBefore: text.posBefore(1) as TextPos,
+          startAfter: text.posAfter(-1) as TextPos,
+          startBefore: text.posBefore(0) as TextPos,
           endAfter: text.posAfter(4) as TextPos,
           endBefore: text.posBefore(5) as TextPos,
         },
@@ -801,12 +868,13 @@ describe("CoRichText", async () => {
       text.marks!.push(mark2);
 
       const marks = text.resolveMarks();
+
       expect(marks).toHaveLength(2);
 
       // First mark
       expect(marks[0]).toMatchObject({
-        startAfter: 0,
-        startBefore: 1,
+        startAfter: -1,
+        startBefore: 0,
         endAfter: 4,
         endBefore: 5,
         tag: "strong",
@@ -824,6 +892,13 @@ describe("CoRichText", async () => {
   });
 
   describe("Mark", () => {
+    const text = CoRichText.createFromPlainText(
+      "Hello, hello you beautiful world", // 32 characters
+      {
+        owner: me,
+      },
+    );
+
     test("basic mark", () => {
       const mark = Marks.Strong.create(
         {
@@ -842,8 +917,8 @@ describe("CoRichText", async () => {
       const mark = Marks.Strong.create(
         {
           tag: "strong",
-          startAfter: text.posAfter(0) as TextPos,
-          startBefore: text.posBefore(1) as TextPos,
+          startAfter: text.posAfter(-1) as TextPos,
+          startBefore: text.posBefore(0) as TextPos,
           endAfter: text.posAfter(4) as TextPos,
           endBefore: text.posBefore(5) as TextPos,
         },
@@ -851,14 +926,14 @@ describe("CoRichText", async () => {
       );
 
       const result = mark.validatePositions(
-        11, // text length
+        text.length,
         (pos: TextPos) => text.idxAfter(pos),
         (pos: TextPos) => text.idxBefore(pos),
       );
 
       expect(result).toEqual({
-        startAfter: 0,
-        startBefore: 1,
+        startAfter: -1,
+        startBefore: 0,
         endAfter: 4,
         endBefore: 5,
       });
@@ -870,23 +945,23 @@ describe("CoRichText", async () => {
           tag: "strong",
           startAfter: text.posAfter(-5) as TextPos, // Invalid position
           startBefore: text.posBefore(1) as TextPos,
-          endAfter: text.posAfter(4) as TextPos,
-          endBefore: text.posBefore(20) as TextPos, // Beyond text length
+          endAfter: text.posAfter(35) as TextPos,
+          endBefore: text.posBefore(36) as TextPos, // Beyond text length
         },
         { owner: me },
       );
 
       const result = mark.validatePositions(
-        11,
-        (pos: TextPos) => text.idxAfter(pos),
-        (pos: TextPos) => text.idxBefore(pos),
+        text.length,
+        (pos) => text.idxAfter(pos),
+        (pos) => text.idxBefore(pos),
       );
 
       expect(result).toMatchObject({
-        startAfter: 0, // Clamped to start
+        startAfter: 0,
         startBefore: 1,
-        endAfter: 4,
-        endBefore: 11, // Clamped to text length
+        endAfter: 31,
+        endBefore: 32,
       });
     });
 
@@ -929,6 +1004,131 @@ describe("CoRichText", async () => {
       expect(emMark.tag).toBe("em");
       expect(linkMark.tag).toBe("link");
       expect(linkMark).toHaveProperty("url", "https://example.com");
+    });
+
+    describe("validatePositions", () => {
+      test("returns null for empty text", () => {
+        const mark = Marks.Strong.create(
+          {
+            tag: "strong",
+            startAfter: text.posAfter(0) as TextPos,
+            startBefore: text.posBefore(1) as TextPos,
+            endAfter: text.posAfter(4) as TextPos,
+            endBefore: text.posBefore(5) as TextPos,
+          },
+          { owner: me },
+        );
+        expect(
+          mark.validatePositions(
+            0,
+            (pos) => text.idxAfter(pos),
+            (pos) => text.idxBefore(pos),
+          ),
+        ).toBe(null);
+      });
+
+      test("enforces consistent uncertainty regions", () => {
+        const mark = Marks.Strong.create(
+          {
+            tag: "strong",
+            startAfter: text.posAfter(5) as TextPos,
+            startBefore: text.posBefore(6) as TextPos,
+            endAfter: text.posAfter(10) as TextPos,
+            endBefore: text.posBefore(11) as TextPos,
+          },
+          { owner: me },
+        );
+
+        const result = mark.validatePositions(
+          text.length,
+          (pos) => text.idxAfter(pos),
+          (pos) => text.idxBefore(pos),
+        );
+        expect(result).toEqual({
+          startAfter: 5,
+          startBefore: 6,
+          endAfter: 10,
+          endBefore: 11,
+        });
+      });
+
+      test("enforces minimum uncertainty region size", () => {
+        // Try to set positions with 0-unit uncertainty regions
+        const mark = Marks.Strong.create(
+          {
+            tag: "strong",
+            startAfter: text.posAfter(5) as TextPos,
+            startBefore: text.posBefore(5) as TextPos, // Same as startAfter
+            endAfter: text.posAfter(10) as TextPos,
+            endBefore: text.posBefore(10) as TextPos, // Same as endAfter
+          },
+          { owner: me },
+        );
+
+        const result = mark.validatePositions(
+          text.length,
+          (pos) => text.idxAfter(pos),
+          (pos) => text.idxBefore(pos),
+        );
+        expect(result).toEqual({
+          startAfter: 4,
+          startBefore: 5,
+          endAfter: 10,
+          endBefore: 11,
+        });
+      });
+
+      test("clamps positions to text bounds", () => {
+        // Set positions outside text bounds
+        const mark = Marks.Strong.create(
+          {
+            tag: "strong",
+            startAfter: text.posAfter(-1) as TextPos,
+            startBefore: text.posBefore(0) as TextPos,
+            endAfter: text.posAfter(35) as TextPos,
+            endBefore: text.posBefore(36) as TextPos,
+          },
+          { owner: me },
+        );
+
+        const result = mark.validatePositions(
+          text.length,
+          (pos) => text.idxAfter(pos),
+          (pos) => text.idxBefore(pos),
+        );
+        expect(result).toEqual({
+          startAfter: -1,
+          startBefore: 0,
+          endAfter: 31,
+          endBefore: 32,
+        });
+      });
+
+      test("maintains proper position ordering", () => {
+        // Set positions in wrong order
+        const mark = Marks.Strong.create(
+          {
+            tag: "strong",
+            startAfter: text.posAfter(8) as TextPos,
+            startBefore: text.posBefore(5) as TextPos,
+            endAfter: text.posAfter(15) as TextPos, //
+            endBefore: text.posBefore(14) as TextPos,
+          },
+          { owner: me },
+        );
+
+        const result = mark.validatePositions(
+          text.length,
+          (pos) => text.idxAfter(pos),
+          (pos) => text.idxBefore(pos),
+        );
+        expect(result).toEqual({
+          startAfter: 4, // Forced to be before startBefore
+          startBefore: 5,
+          endAfter: 15,
+          endBefore: 16, // Forced to be after endAfter
+        });
+      });
     });
   });
 });

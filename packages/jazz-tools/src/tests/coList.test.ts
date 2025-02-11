@@ -115,6 +115,26 @@ describe("Simple CoList operations", async () => {
       expect(list.length).toBe(4);
       expect(list._raw.asArray()).toEqual(["bread", "salt", "pepper", "onion"]);
     });
+
+    test("applyDiff", () => {
+      const list = TestList.create(["bread", "butter", "onion"], {
+        owner: me,
+      });
+      // replace
+      list.applyDiff(["bread", "margarine", "onion"]);
+      expect(list._raw.asArray()).toEqual(["bread", "margarine", "onion"]);
+      // delete
+      list.applyDiff(["bread", "onion"]);
+      expect(list._raw.asArray()).toEqual(["bread", "onion"]);
+      // insert multiple
+      list.applyDiff(["bread", "margarine", "onion", "cheese"]);
+      expect(list._raw.asArray()).toEqual([
+        "bread",
+        "margarine",
+        "onion",
+        "cheese",
+      ]);
+    });
   });
 });
 
