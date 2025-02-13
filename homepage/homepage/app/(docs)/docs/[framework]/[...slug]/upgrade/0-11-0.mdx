@@ -1,0 +1,136 @@
+import { ContentByFramework, CodeGroup } from '@/components/forMdx'
+
+export const metadata = { title: "Jazz 0.11.0 - Deeply resolved data" };
+
+# Jazz 0.11.0 - Deeply resolved data
+
+<h2 className="not-prose text-sm text-stone-600 dark:text-stone-400 mb-5 pb-2 border-b">
+  15 March 2025
+</h2>
+
+<div>
+  Jazz 0.11.0 makes it easier and safer to load nested data. You can now specify exactly which nested data you want to load, and Jazz will check permissions and handle missing data gracefully. This helps catch errors earlier during development and makes your code more reliable.
+
+  <h3>What's new?</h3>
+  - New resolve API for type-safe deep loading
+  - Secure loading and null handling
+  - Improved type safety with RefsToResolve/Resolved types
+</div>
+
+<h3>New Resolve API</h3>
+<div>
+  We're introducing a new resolve API for secure deep loading, which will make it easier to load data in a type-safe way. When you specify a resolve config, it will be validated against the schema of the CoValue you're loading. The loaded data will then be of a known structure, and you can access deep properties without having to check for `undefined` at runtime.
+
+  To get started with the new resolve API, replace empty array/object parameters with structured resolve configs:
+
+<CodeGroup>
+{/* prettier-ignore */}
+```tsx
+// Before
+const playlist = useCoState(Playlist, id, [{}]);
+const account = useAccount({ root: { playlists: [{}] } });
+
+// After
+const playlist = useCoState(Playlist, id, { 
+  resolve: { $each: true } 
+});
+const account = useAccount({ 
+  resolve: { root: { playlists: true } } 
+});
+```
+</CodeGroup>
+
+The new API works across all loading methods:
+<CodeGroup>
+{/* prettier-ignore */}
+```ts
+// Before
+Playlist.load(id, account, {});
+
+// After
+Playlist.load(id, { 
+  loadAs: account,
+  resolve: { tracks: true } 
+});
+```
+</CodeGroup>
+</div>
+
+<h3>Secure Loading & Null Handling</h3>
+<div>
+  As part of the new resolve API, all loading operations now validate access permissions and return `null` for unauthorized/missing values. This should make it easier to understand the state of the data you're loading.
+
+  For example, if you try to load a `Playlist` without the necessary permissions, the `useCoState` hook will now return `null` instead of `undefined`:
+
+<CodeGroup>
+{/* prettier-ignore */}
+```tsx
+// Before (ambiguous states)
+const value = useCoState(CoValue, id, [{}]);
+if (!value) { /* Unknown if loading/unauthorized/missing */ }
+
+// After (explicit null for access issues)
+const value = useCoState(CoValue, id, { resolve: true });
+if (value === null) {
+  // Clear unauthorized/missing state
+  return <div>Not found or access denied</div>;
+}
+```
+</CodeGroup>
+
+Core APIs throw errors for unauthorized access:
+<CodeGroup>
+{/* prettier-ignore */}
+```ts
+// Before (silent failure)
+const map = await CoMap.load(id, account);
+
+// After (explicit error handling)
+try {
+  const map = await CoMap.load(id, { 
+    loadAs: account,
+    resolve: { nested: true } 
+  });
+} catch (e) {
+  // Handle unauthorized access
+}
+```
+</CodeGroup>
+
+`undefined` can still be used to indicate that a value is loading, so you can use that to conditionally render a loading state.
+
+<CodeGroup>
+{/* prettier-ignore */}
+```tsx
+const value = useCoState(CoValue, id, { resolve: true });
+if (value === undefined) {
+  return <div>Loading...</div>;
+} else if (value === null) {
+  return <div>Not found or access denied</div>;
+} else {
+  return <div>{value}</div>;
+}
+```
+</CodeGroup>
+</div>
+
+<h3>Type Safety Improvements</h3>
+<div>
+  The new `Resolved` type enforce valid property paths at compile time and guarantee loaded data matches your resolve configuration, eliminating "undefined" errors from unloaded references.
+
+  <CodeGroup>
+{/* prettier-ignore */}
+```ts
+// Before
+type PlaylistResolved = Resolved<Playlist, {
+  tracks: { $each: true }
+}>;
+
+// After
+function TrackList({ playlist }: { playlist: PlaylistResolved }) {
+  // Safe access to resolved tracks
+  return playlist.tracks.map(track => /* ... */);
+}
+```
+</CodeGroup>
+</div>

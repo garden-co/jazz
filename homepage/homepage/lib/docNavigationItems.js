@@ -57,6 +57,12 @@ export const docNavigationItems = [
     items: [
       {
         // upgrade guides
+        name: "Jazz 0.11.0 - Deeply Resolved Data",
+        href: "/docs/upgrade/0-11-0",
+        done: 100,
+      },
+      {
+        // upgrade guides
         name: "Jazz 0.10.0 - New authentication flow",
         href: "/docs/upgrade/0-10-0",
         done: 100,
