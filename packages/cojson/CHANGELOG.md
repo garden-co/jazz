@@ -1,5 +1,31 @@
 # cojson
 
+## 0.10.2
+
+### Patch Changes
+
+- cae3a9e: Add debug info to load failure end missing header errors
+
+## 0.10.1
+
+### Patch Changes
+
+- 5a63cba: Crypto packages must now be imported from cojson/crypto/WasmCrypto or cojson/crypto/PureJSCrypto
+  Removed the separated dists for React Native.
+
+## 0.10.0
+
+### Minor Changes
+
+- 498954f: Introducing the new auth system!
+
+### Patch Changes
+
+- b426342: Export the coValue loading config to reduce the timeout on tests
+- 8217981: Drop node 14 polyfill for globalThis.crypto
+- ac3d9fa: Reduce the retries on coValue not found to two
+- 610543c: Add role mapping to Group.extend
+
 ## 0.9.23
 
 ### Patch Changes

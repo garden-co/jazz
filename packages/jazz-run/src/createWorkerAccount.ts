@@ -1,5 +1,6 @@
 import { createWebSocketPeer } from "cojson-transport-ws";
-import { Account, WasmCrypto, isControlledAccount } from "jazz-tools";
+import { WasmCrypto } from "cojson/crypto/WasmCrypto";
+import { Account, isControlledAccount } from "jazz-tools";
 import { WebSocket } from "ws";
 
 export const createWorkerAccount = async ({

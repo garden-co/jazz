@@ -17,13 +17,14 @@ export const metadata = { title: "Jazz 0.10.0 is out!" };
 
   <h3>What's new?</h3>
   Here is what's changed in this release:
-  - [New authentication flow](/docs/upgrade/0-10-0#new-authentication-flow): Now with anonymous auth, redesigned to make Jazz easier to start with and be more flexible.
-  - [Local-only mode](/docs/upgrade/0-10-0#local-only-mode): Users can now explore your app in local-only mode before signing up.
-  - [Improvements on the loading APIs](/docs/upgrade/0-10-0#improved-loading-api); `ensureLoaded` now always returns a value and `useCoState` now returns `null` if the value is not found.
-  - [Jazz Workers on native WebSockets](/docs/upgrade/0-10-0#native-websocket-for-jazz-workers): Improves compatibility with a wider set of Javascript runtimes.
-  - [Group inheritance with role mapping](/docs/upgrade/0-10-0#group-inheritance): Groups can now inherit members from other groups with a fixed role.
+  - [New authentication flow](#new-authentication-flow): Now with anonymous auth, redesigned to make Jazz easier to start with and be more flexible.
+  - [Local-only mode](#local-only-mode): Users can now explore your app in local-only mode before signing up.
+  - [Improvements on the loading APIs](#improved-loading-api); `ensureLoaded` now always returns a value and `useCoState` now returns `null` if the value is not found.
+  - [Jazz Workers on native WebSockets](#native-websocket-for-jazz-workers): Improves compatibility with a wider set of Javascript runtimes.
+  - [Group inheritance with role mapping](#group-inheritance): Groups can now inherit members from other groups with a fixed role.
   - Support for Node 14 dropped on cojson.
   - Bugfix: `Group.removeMember` now returns a promise.
+  - Now `cojson` and `jazz-tools` don't export directly the crypto providers anymore. Replace the import with `cojson/crypto/WasmCrypto` or `cojson/crypto/PureJSCrypto` depending on your use case.
 </div>
 
   <h3 id="new-authentication-flow">New authentication flow</h3>

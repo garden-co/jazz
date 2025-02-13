@@ -11,6 +11,7 @@ import clsx from "clsx";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { ComponentType, ReactNode, useEffect, useState } from "react";
+import { isActive } from "../../utils/nav";
 import { Icon } from "../atoms/Icon";
 import { BreadCrumb } from "../molecules/Breadcrumb";
 import { SocialLinks, SocialLinksProps } from "./SocialLinks";
@@ -48,6 +49,7 @@ function NavItem({
   className?: string;
 }) {
   const { href, icon, title, items, firstOnRight } = item;
+  const active = isActive(href);
 
   const path = usePathname();
 
@@ -67,7 +69,7 @@ function NavItem({
           className,
           "text-sm px-2 lg:px-4 py-3 ",
           firstOnRight && "ml-auto",
-          path === href ? "text-stone-900 dark:text-white" : "",
+          active ? "text-stone-900 dark:text-white" : "",
         )}
         {...item}
       >
@@ -81,7 +83,7 @@ function NavItem({
       <PopoverButton
         className={clsx(
           "flex items-center gap-1.5 text-sm px-2 lg:px-4 py-3 max-sm:w-full hover:text-stone-900 dark:hover:text-white transition-colors hover:transition-none focus-visible:outline-none",
-          path === href ? "text-stone-900 dark:text-white" : "",
+          active ? "text-stone-900 dark:text-white" : "",
         )}
       >
         <span>{title}</span>

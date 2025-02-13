@@ -9,7 +9,9 @@ export function DownloaderPeer(props: { testCoMapId: ID<UploadedFile> }) {
 
   useEffect(() => {
     async function run(me: Account, uploadedFileId: ID<UploadedFile>) {
-      const uploadedFile = await UploadedFile.load(uploadedFileId, me, {});
+      const uploadedFile = await UploadedFile.load(uploadedFileId, {
+        loadAs: me,
+      });
 
       if (!uploadedFile) {
         throw new Error("Uploaded file not found");
@@ -21,7 +23,9 @@ export function DownloaderPeer(props: { testCoMapId: ID<UploadedFile> }) {
 
       uploadedFile.coMapDownloaded = true;
 
-      await FileStream.loadAsBlob(uploadedFile._refs.file.id, me);
+      await FileStream.loadAsBlob(uploadedFile._refs.file.id, {
+        loadAs: me,
+      });
 
       uploadedFile.syncCompleted = true;
     }

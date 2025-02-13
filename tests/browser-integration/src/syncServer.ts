@@ -1,6 +1,7 @@
 import { createServer } from "http";
-import { ControlledAgent, LocalNode, WasmCrypto } from "cojson";
+import { ControlledAgent, LocalNode } from "cojson";
 import { createWebSocketPeer } from "cojson-transport-ws";
+import { WasmCrypto } from "cojson/crypto/WasmCrypto";
 import { WebSocket, WebSocketServer } from "ws";
 
 export type TestSyncServer = Awaited<ReturnType<typeof startSyncServer>>;

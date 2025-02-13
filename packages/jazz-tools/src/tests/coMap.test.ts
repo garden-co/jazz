@@ -1,17 +1,18 @@
-import { connectedPeers } from "cojson/src/streamUtils.ts";
+import { WasmCrypto } from "cojson/crypto/WasmCrypto";
 import { describe, expect, expectTypeOf, test } from "vitest";
 import { Group, randomSessionProvider } from "../exports.js";
 import {
   Account,
   CoMap,
   Encoders,
-  WasmCrypto,
   co,
   cojsonInternals,
   createJazzContextFromExistingCredentials,
   isControlledAccount,
-} from "../index.web.js";
+} from "../index.js";
 import { setupTwoNodes } from "./utils.js";
+
+const { connectedPeers } = cojsonInternals;
 
 const Crypto = await WasmCrypto.create();
 
@@ -24,7 +25,7 @@ class TestMap extends CoMap {
     encode: (value: string | undefined) => value || null,
     decode: (value: unknown) => (value as string) || undefined,
   });
-  optionalDate = co.optional.encoded(Encoders.Date);
+  optionalDate = co.optional.Date;
 
   get roughColor() {
     return this.color + "ish";
@@ -103,6 +104,32 @@ describe("Simple CoMap operations", async () => {
 
     // @ts-expect-error
     expect(emptyMap.color).toEqual(undefined);
+  });
+
+  test("setting date as undefined should throw", () => {
+    expect(() =>
+      TestMap.create(
+        {
+          color: "red",
+          _height: 10,
+          birthday: undefined!,
+        },
+        { owner: me },
+      ),
+    ).toThrow();
+  });
+
+  test("setting optional date as undefined should not throw", () => {
+    const map = TestMap.create(
+      {
+        color: "red",
+        _height: 10,
+        birthday,
+        optionalDate: undefined,
+      },
+      { owner: me },
+    );
+    expect(map.optionalDate).toBeUndefined();
   });
 
   describe("Mutation", () => {
@@ -418,7 +445,7 @@ describe("CoMap resolution", async () => {
         crypto: Crypto,
       });
 
-    const loadedMap = await TestMap.load(map.id, meOnSecondPeer, {});
+    const loadedMap = await TestMap.load(map.id, { loadAs: meOnSecondPeer });
 
     expect(loadedMap?.color).toEqual("red");
     expect(loadedMap?.height).toEqual(10);
@@ -426,11 +453,9 @@ describe("CoMap resolution", async () => {
     expect(loadedMap?._refs.nested?.id).toEqual(map.nested?.id);
     expect(loadedMap?._refs.nested?.value).toEqual(null);
 
-    const loadedNestedMap = await NestedMap.load(
-      map.nested!.id,
-      meOnSecondPeer,
-      {},
-    );
+    const loadedNestedMap = await NestedMap.load(map.nested!.id, {
+      loadAs: meOnSecondPeer,
+    });
 
     expect(loadedMap?.nested?.name).toEqual("nested");
     expect(loadedMap?.nested?._fancyName).toEqual("Sir nested");
@@ -439,8 +464,7 @@ describe("CoMap resolution", async () => {
 
     const loadedTwiceNestedMap = await TwiceNestedMap.load(
       map.nested!.twiceNested!.id,
-      meOnSecondPeer,
-      {},
+      { loadAs: meOnSecondPeer },
     );
 
     expect(loadedMap?.nested?.twiceNested?.taste).toEqual("sour");
@@ -467,7 +491,7 @@ describe("CoMap resolution", async () => {
     expect(loadedMap?.nested?._refs.twiceNested?.value).toBeDefined();
   });
 
-  test("Subscription & auto-resolution", async () => {
+  async function setupTest() {
     const { me, map } = await initNodeAndMap();
 
     const [initialAsPeer, secondAsPeer] = connectedPeers("initial", "second", {
@@ -492,28 +516,53 @@ describe("CoMap resolution", async () => {
 
     const queue = new cojsonInternals.Channel<TestMap>();
 
-    TestMap.subscribe(map.id, meOnSecondPeer, {}, (subscribedMap) => {
+    await meOnSecondPeer.waitForAllCoValuesSync();
+
+    TestMap.subscribe(map.id, { loadAs: meOnSecondPeer }, (subscribedMap) => {
       // Read to property to trigger loading
       subscribedMap.nested?.twiceNested?.taste;
       void queue.push(subscribedMap);
     });
+
+    return { me, map, meOnSecondPeer, queue };
+  }
+
+  test("initial subscription loads nested data progressively", async () => {
+    const { queue } = await setupTest();
 
     const update1 = (await queue.next()).value;
     expect(update1.nested).toEqual(null);
 
     const update2 = (await queue.next()).value;
     expect(update2.nested?.name).toEqual("nested");
+  });
+
+  test("updates to nested properties are received", async () => {
+    const { map, queue } = await setupTest();
+
+    // Skip initial updates
+    await queue.next();
+    await queue.next();
 
     map.nested!.name = "nestedUpdated";
 
-    const _ = (await queue.next()).value;
+    await queue.next(); // Skip intermediate update
     const update3 = (await queue.next()).value;
     expect(update3.nested?.name).toEqual("nestedUpdated");
 
     const oldTwiceNested = update3.nested!.twiceNested;
     expect(oldTwiceNested?.taste).toEqual("sour");
+  });
 
-    // When assigning a new nested value, we get an update
+  test("replacing nested object triggers updates", async () => {
+    const { meOnSecondPeer, queue } = await setupTest();
+
+    // Skip initial updates
+    await queue.next();
+    await queue.next();
+
+    const update3 = (await queue.next()).value;
+
     const newTwiceNested = TwiceNestedMap.create(
       {
         taste: "sweet",
@@ -531,14 +580,40 @@ describe("CoMap resolution", async () => {
 
     update3.nested = newNested;
 
-    (await queue.next()).value;
-    // const update4 = (await queue.next()).value;
-    const update4b = (await queue.next()).value;
+    await queue.next(); // Skip intermediate update
+    const update4 = (await queue.next()).value;
 
-    expect(update4b.nested?.name).toEqual("newNested");
-    expect(update4b.nested?.twiceNested?.taste).toEqual("sweet");
+    expect(update4.nested?.name).toEqual("newNested");
+    expect(update4.nested?.twiceNested?.taste).toEqual("sweet");
+  });
 
-    // we get updates when the new nested value changes
+  test("updates to deeply nested properties are received", async () => {
+    const { queue } = await setupTest();
+
+    // Skip to the point where we have the nested object
+    await queue.next();
+    await queue.next();
+    const update3 = (await queue.next()).value;
+
+    const newTwiceNested = TwiceNestedMap.create(
+      { taste: "sweet" },
+      { owner: update3.nested!._raw.owner },
+    );
+
+    const newNested = NestedMap.create(
+      {
+        name: "newNested",
+        twiceNested: newTwiceNested,
+      },
+      { owner: update3.nested!._raw.owner },
+    );
+
+    update3.nested = newNested;
+
+    // Skip intermediate updates
+    await queue.next();
+    await queue.next();
+
     newTwiceNested.taste = "salty";
     const update5 = (await queue.next()).value;
     expect(update5.nested?.twiceNested?.taste).toEqual("salty");

@@ -1,11 +1,11 @@
 import { createServer } from "http";
-import { ControlledAgent, LocalNode, WasmCrypto } from "cojson";
-import { WebSocketServer } from "ws";
-
 import { mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
+import { ControlledAgent, LocalNode } from "cojson";
 import { SQLiteStorage } from "cojson-storage-sqlite";
 import { createWebSocketPeer } from "cojson-transport-ws";
+import { WasmCrypto } from "cojson/crypto/WasmCrypto";
+import { WebSocketServer } from "ws";
 
 export const startSyncServer = async ({
   port,

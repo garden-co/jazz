@@ -31,6 +31,7 @@ export function App() {
         <input
           type="text"
           value={me?.profile?.name ?? ""}
+          className="bg-transparent"
           onChange={(e) => {
             if (!me?.profile) return;
             me.profile.name = e.target.value;

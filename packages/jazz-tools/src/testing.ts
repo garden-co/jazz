@@ -1,6 +1,6 @@
 import { AgentSecret, CryptoProvider, LocalNode, Peer } from "cojson";
 import { cojsonInternals } from "cojson";
-import { PureJSCrypto } from "cojson/crypto";
+import { PureJSCrypto } from "cojson/dist/crypto/PureJSCrypto";
 import {
   Account,
   AccountClass,

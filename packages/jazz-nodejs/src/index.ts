@@ -1,4 +1,5 @@
-import { AgentSecret, LocalNode, WasmCrypto } from "cojson";
+import { AgentSecret, LocalNode } from "cojson";
+import { WasmCrypto } from "cojson/crypto/WasmCrypto";
 import {
   Account,
   AccountClass,

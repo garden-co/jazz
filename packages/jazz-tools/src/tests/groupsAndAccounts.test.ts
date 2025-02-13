@@ -1,4 +1,4 @@
-import { WasmCrypto } from "cojson";
+import { WasmCrypto } from "cojson/crypto/WasmCrypto";
 import { beforeEach, describe, expect, test } from "vitest";
 import { Account, CoMap, Group, Profile, co } from "../exports.js";
 import { createJazzTestAccount } from "../testing.js";
@@ -65,7 +65,7 @@ describe("Custom accounts and groups", async () => {
     expect(group.nMembers).toBe(2);
 
     await new Promise<void>((resolve) => {
-      group.subscribe({}, (update) => {
+      group.subscribe((update) => {
         const meAsMember = update.members.find((member) => {
           return member.id === me.id && member.account?.profile;
         });
@@ -119,18 +119,16 @@ describe("Group inheritance", () => {
 
     const mapInChild = TestMap.create({ title: "In Child" }, { owner: group });
 
-    const mapAsReader = await TestMap.load(mapInChild.id, reader, {});
+    const mapAsReader = await TestMap.load(mapInChild.id, { loadAs: reader });
     expect(mapAsReader?.title).toBe("In Child");
 
     await parentGroup.removeMember(reader);
 
     mapInChild.title = "In Child (updated)";
 
-    const mapAsReaderAfterUpdate = await TestMap.load(
-      mapInChild.id,
-      reader,
-      {},
-    );
+    const mapAsReaderAfterUpdate = await TestMap.load(mapInChild.id, {
+      loadAs: reader,
+    });
     expect(mapAsReaderAfterUpdate?.title).toBe("In Child");
   });
 
@@ -158,18 +156,18 @@ describe("Group inheritance", () => {
       { owner: group },
     );
 
-    const mapAsReader = await TestMap.load(mapInGrandChild.id, reader, {});
+    const mapAsReader = await TestMap.load(mapInGrandChild.id, {
+      loadAs: reader,
+    });
     expect(mapAsReader?.title).toBe("In Grand Child");
 
     await grandParentGroup.removeMember(reader);
 
     mapInGrandChild.title = "In Grand Child (updated)";
 
-    const mapAsReaderAfterUpdate = await TestMap.load(
-      mapInGrandChild.id,
-      reader,
-      {},
-    );
+    const mapAsReaderAfterUpdate = await TestMap.load(mapInGrandChild.id, {
+      loadAs: reader,
+    });
     expect(mapAsReaderAfterUpdate?.title).toBe("In Grand Child");
   });
 

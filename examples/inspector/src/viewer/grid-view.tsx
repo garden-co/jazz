@@ -1,6 +1,6 @@
 import clsx from "clsx";
 import { CoID, LocalNode, RawCoValue } from "cojson";
-import { JsonObject } from "cojson/src/jsonValue.ts";
+import { JsonObject } from "cojson";
 import { ResolveIcon } from "./type-icon";
 import { PageInfo, isCoId } from "./types";
 import { CoMapPreview, ValueRenderer } from "./value-renderer";

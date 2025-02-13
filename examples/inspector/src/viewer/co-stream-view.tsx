@@ -5,13 +5,9 @@ import {
   RawCoStream,
   RawCoValue,
 } from "cojson";
-import { base64URLtoBytes } from "cojson/src/base64url.ts";
-import {
-  BinaryStreamItem,
-  BinaryStreamStart,
-  CoStreamItem,
-} from "cojson/src/coValues/coStream.ts";
-import { JsonObject, JsonValue } from "cojson/src/jsonValue.ts";
+import { base64URLtoBytes } from "cojson";
+import { BinaryStreamItem, BinaryStreamStart, CoStreamItem } from "cojson";
+import { JsonObject, JsonValue } from "cojson";
 import { ArrowDownToLine } from "lucide-react";
 import { useEffect, useState } from "react";
 import { PageInfo } from "./types";

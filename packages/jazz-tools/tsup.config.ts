@@ -2,8 +2,7 @@ import { defineConfig } from "tsup";
 
 export default defineConfig({
   entry: {
-    "index.web": "src/index.web.ts",
-    "index.native": "src/index.native.ts",
+    index: "src/index.ts",
     testing: "src/testing.ts",
   },
   format: ["esm"],

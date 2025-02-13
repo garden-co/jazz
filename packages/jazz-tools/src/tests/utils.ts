@@ -2,12 +2,12 @@ import { isControlledAccount } from "../coValues/account";
 
 import { CoID, LocalNode, RawCoValue } from "cojson";
 import { cojsonInternals } from "cojson";
+import { WasmCrypto } from "cojson/crypto/WasmCrypto";
 import {
   Account,
-  WasmCrypto,
   createJazzContextFromExistingCredentials,
   randomSessionProvider,
-} from "../index.web";
+} from "../index";
 
 const Crypto = await WasmCrypto.create();
 

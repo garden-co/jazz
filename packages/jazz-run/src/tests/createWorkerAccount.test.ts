@@ -1,6 +1,6 @@
 import { LocalNode } from "cojson";
 import { createWebSocketPeer } from "cojson-transport-ws";
-import { WasmCrypto } from "jazz-tools";
+import { WasmCrypto } from "cojson/crypto/WasmCrypto";
 import { describe, expect, it, onTestFinished } from "vitest";
 import { WebSocket } from "ws";
 import { createWorkerAccount } from "../createWorkerAccount.js";

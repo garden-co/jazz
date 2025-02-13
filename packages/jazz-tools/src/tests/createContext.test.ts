@@ -1,4 +1,5 @@
-import { AgentSecret, WasmCrypto } from "cojson";
+import { AgentSecret } from "cojson";
+import { WasmCrypto } from "cojson/crypto/WasmCrypto";
 import { beforeEach, describe, expect, test, vi } from "vitest";
 import {
   Account,
@@ -21,7 +22,6 @@ import {
   setupJazzTestSync,
 } from "../testing";
 import { loadCoValueOrFail } from "./utils";
-
 const Crypto = await WasmCrypto.create();
 
 KvStoreContext.getInstance().initialize(new InMemoryKVStore());

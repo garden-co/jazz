@@ -1,5 +1,6 @@
 import { createServer } from "http";
-import { ControlledAgent, LocalNode, WasmCrypto } from "cojson";
+import { ControlledAgent, LocalNode } from "cojson";
+import { WasmCrypto } from "cojson/crypto/WasmCrypto";
 import { WebSocket, WebSocketServer } from "ws";
 import { createWebSocketPeer } from "../createWebSocketPeer";
 

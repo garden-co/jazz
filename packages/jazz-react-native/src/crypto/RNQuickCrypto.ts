@@ -1,6 +1,7 @@
 import { base58 } from "@scure/base";
-import { JsonValue, PureJSCrypto } from "cojson/native";
-import { CojsonInternalTypes, cojsonInternals } from "cojson/native";
+import { JsonValue } from "cojson";
+import { CojsonInternalTypes, cojsonInternals } from "cojson";
+import { PureJSCrypto } from "cojson/dist/crypto/PureJSCrypto"; // Importing from dist to not rely on the exports field
 import { Ed } from "react-native-quick-crypto";
 const { stableStringify } = cojsonInternals;
 

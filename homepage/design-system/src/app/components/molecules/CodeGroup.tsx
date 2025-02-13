@@ -1,18 +1,18 @@
 "use client";
 
 import { clsx } from "clsx";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { Icon } from "../atoms/Icon";
 
 // TODO: add tabs feature, and remove CodeExampleTabs
 
 function CopyButton({ code, size }: { code: string; size: "md" | "lg" }) {
-  let [copyCount, setCopyCount] = useState(0);
-  let copied = copyCount > 0;
+  const [copyCount, setCopyCount] = useState(0);
+  const copied = copyCount > 0;
 
   useEffect(() => {
     if (copyCount > 0) {
-      let timeout = setTimeout(() => setCopyCount(0), 1000);
+      const timeout = setTimeout(() => setCopyCount(0), 1000);
       return () => {
         clearTimeout(timeout);
       };
@@ -23,7 +23,8 @@ function CopyButton({ code, size }: { code: string; size: "md" | "lg" }) {
     <button
       type="button"
       className={clsx(
-        "group/button absolute overflow-hidden rounded text-2xs font-medium opacity-0 backdrop-blur transition focus:opacity-100 group-hover:opacity-100",
+        "group/button absolute overflow-hidden rounded text-2xs font-medium md:opacity-0 backdrop-blur transition md:focus:opacity-100 group-hover:opacity-100",
+        "right-[9px] top-[9px]",
         copied
           ? "bg-emerald-400/10 ring-1 ring-inset ring-emerald-400/20"
           : "bg-white/5 hover:bg-white/7.5 dark:bg-white/2.5 dark:hover:bg-white/5",
@@ -72,13 +73,13 @@ export function CodeGroup({
   size = "md",
   className,
 }: {
-  children: React.ReactNode;
+  children?: React.ReactNode;
+  text?: string;
   size?: "md" | "lg";
   className?: string;
 }) {
   const textRef = useRef<HTMLPreElement | null>(null);
   const [code, setCode] = useState<string>();
-
   useEffect(() => {
     if (textRef.current) {
       setCode(textRef.current.innerText);

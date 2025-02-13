@@ -1,4 +1,5 @@
-import { ControlledAgent, LocalNode, WasmCrypto } from "cojson";
+import { ControlledAgent, LocalNode } from "cojson";
+import { WasmCrypto } from "cojson/crypto/WasmCrypto";
 import { expect, test } from "vitest";
 import { IDBStorage } from "../index.js";
 

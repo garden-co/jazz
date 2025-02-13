@@ -1,6 +1,7 @@
 import { LSMStorage, LocalNode, Peer, RawAccountID } from "cojson";
 import { IDBStorage } from "cojson-storage-indexeddb";
 import { WebSocketPeerWithReconnection } from "cojson-transport-ws";
+import { WasmCrypto } from "cojson/crypto/WasmCrypto";
 import {
   Account,
   AgentID,
@@ -14,7 +15,6 @@ import {
   NewAccountProps,
   SessionID,
   SyncConfig,
-  WasmCrypto,
   cojsonInternals,
   createAnonymousJazzContext,
 } from "jazz-tools";

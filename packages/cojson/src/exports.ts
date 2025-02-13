@@ -173,6 +173,7 @@ export type {
 // eslint-disable-next-line @typescript-eslint/no-namespace
 export namespace CojsonInternalTypes {
   export type CoValueKnownState = import("./sync.js").CoValueKnownState;
+  export type CoJsonValue<T> = import("./jsonValue.js").CoJsonValue<T>;
   export type DoneMessage = import("./sync.js").DoneMessage;
   export type KnownStateMessage = import("./sync.js").KnownStateMessage;
   export type LoadMessage = import("./sync.js").LoadMessage;

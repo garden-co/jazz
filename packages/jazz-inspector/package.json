@@ -1,10 +1,13 @@
 {
   "name": "jazz-inspector",
-  "version": "0.9.23",
+  "version": "0.10.2",
   "type": "module",
   "main": "./dist/app.js",
   "types": "./dist/app.d.ts",
-  "files": ["dist/**", "src"],
+  "files": [
+    "dist/**",
+    "src"
+  ],
   "scripts": {
     "dev": "vite build --watch",
     "build": "rm -rf ./dist && tsc --sourceMap --outDir dist",

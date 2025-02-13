@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 
 import { cojsonInternals } from "cojson";
-import { CoMap, co } from "jazz-tools";
+import { CoMap, Group, co } from "jazz-tools";
 import { beforeEach, describe, expect, it } from "vitest";
 import { useCoState } from "../index.js";
 import { createJazzTestAccount, setupJazzTestSync } from "../testing.js";
@@ -91,7 +91,9 @@ describe("useCoState", () => {
     const { result } = renderHook(
       () =>
         useCoState(TestMap, map.id, {
-          nested: {},
+          resolve: {
+            nested: true,
+          },
         }),
       {
         account,
@@ -145,7 +147,7 @@ describe("useCoState", () => {
     });
 
     const { result } = renderHook(
-      () => useCoState(TestMap, (map.id + "123") as any, {}),
+      () => useCoState(TestMap, (map.id + "123") as any),
       {
         account,
       },
@@ -155,6 +157,71 @@ describe("useCoState", () => {
 
     await waitFor(() => {
       expect(result.current).toBeNull();
+    });
+  });
+
+  it("should return null if the coValue is not accessible", async () => {
+    class TestMap extends CoMap {
+      value = co.string;
+    }
+
+    const someoneElse = await createJazzTestAccount({
+      isCurrentActiveAccount: true,
+    });
+
+    const map = TestMap.create(
+      {
+        value: "123",
+      },
+      someoneElse,
+    );
+
+    const account = await createJazzTestAccount({
+      isCurrentActiveAccount: true,
+    });
+
+    const { result } = renderHook(() => useCoState(TestMap, map.id), {
+      account,
+    });
+
+    expect(result.current).toBeUndefined();
+
+    await waitFor(() => {
+      expect(result.current).toBeNull();
+    });
+  });
+
+  it("should not return null if the coValue is shared with everyone", async () => {
+    class TestMap extends CoMap {
+      value = co.string;
+    }
+
+    const someoneElse = await createJazzTestAccount({
+      isCurrentActiveAccount: true,
+    });
+
+    const group = Group.create(someoneElse);
+    group.addMember("everyone", "reader");
+
+    const map = TestMap.create(
+      {
+        value: "123",
+      },
+      group,
+    );
+
+    const account = await createJazzTestAccount({
+      isCurrentActiveAccount: true,
+    });
+
+    const { result } = renderHook(() => useCoState(TestMap, map.id), {
+      account,
+    });
+
+    expect(result.current).toBeUndefined();
+
+    await waitFor(() => {
+      expect(result.current?.value).toBe("123");
     });
   });
 });

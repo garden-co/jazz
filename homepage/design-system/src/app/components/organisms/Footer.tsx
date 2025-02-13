@@ -4,6 +4,7 @@ import clsx from "clsx";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { ComponentType, ReactNode } from "react";
+import { isActive } from "../../utils/nav";
 import { Copyright } from "../atoms/Copyright";
 import { NewsletterForm } from "./NewsletterForm";
 import { SocialLinks, SocialLinksProps } from "./SocialLinks";
@@ -100,7 +101,7 @@ function FooterLink({
       className={clsx(
         "py-0.5 px-0 text-sm",
         className,
-        path === href
+        isActive(href)
           ? "font-medium text-black dark:text-white cursor-default"
           : "text-stone-600 dark:text-stone-400 hover:text-black dark:hover:text-white transition-colors hover:transition-none",
       )}

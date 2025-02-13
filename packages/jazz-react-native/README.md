@@ -58,16 +58,9 @@ const { getDefaultConfig } = require("expo/metro-config");
 const path = require("path");
 const workspaceRoot = path.resolve(__dirname);
 const config = getDefaultConfig(projectRoot);
-config.resolver.unstable_enablePackageExports = true; // important setting
 config.resolver.sourceExts = ["mjs", "js", "json", "ts", "tsx"];
 config.resolver.requireCycleIgnorePatterns = [/(^|\/|\\)node_modules($|\/|\\)/];
 module.exports = config;
-```
-
-If you created the project using the command npx create-expo-app -e with-router-tailwind my-jazz-app, then metro.config.js is already present. In that case, simply add this setting to the existing file:
-
-```js
-config.resolver.unstable_enablePackageExports = true
 ```
 
 #### Monorepos
@@ -91,7 +84,6 @@ config.resolver.nodeModulesPaths = [
     path.resolve(workspaceRoot, "node_modules"),
 ];
 config.resolver.sourceExts = ["mjs", "js", "json", "ts", "tsx"];
-config.resolver.unstable_enablePackageExports = true;
 config.resolver.requireCycleIgnorePatterns = [/(^|\/|\\)node_modules($|\/|\\)/];
 config.cacheStores = [
     new FileStore({

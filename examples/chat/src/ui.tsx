@@ -6,7 +6,7 @@ import { useId, useRef } from "react";
 
 export function AppContainer(props: { children: React.ReactNode }) {
   return (
-    <div className="flex flex-col justify-between w-screen h-screen bg-stone-50 dark:bg-black dark:text-white">
+    <div className="flex flex-col justify-between w-screen h-screen bg-stone-50 dark:bg-stone-925 dark:text-white">
       {props.children}
     </div>
   );
@@ -14,7 +14,7 @@ export function AppContainer(props: { children: React.ReactNode }) {
 
 export function TopBar(props: { children: React.ReactNode }) {
   return (
-    <div className="p-3 bg-white w-full flex justify-between gap-2 border-b dark:bg-transparent dark:border-stone-800">
+    <div className="p-3 bg-white w-full flex justify-between gap-2 border-b dark:bg-transparent dark:border-stone-900">
       {props.children}
     </div>
   );
@@ -33,7 +33,7 @@ export function ChatBody(props: { children: React.ReactNode }) {
 
 export function EmptyChatMessage() {
   return (
-    <div className="h-full text-base text-stone-500 flex items-center justify-center px-3 text-lg md:text-2xl">
+    <div className="h-full text-base text-stone-500 flex items-center justify-center px-3 md:text-2xl">
       Start a conversation below.
     </div>
   );
@@ -61,7 +61,7 @@ export function BubbleBody(props: {
         "line-clamp-10 text-ellipsis whitespace-pre-wrap",
         "rounded-2xl overflow-hidden max-w-[calc(100%-5rem)] shadow-sm p-1",
         props.fromMe
-          ? "bg-white dark:bg-stone-700 dark:text-white"
+          ? "bg-white dark:bg-stone-900 dark:text-white"
           : "bg-blue text-white",
       )}
     >
@@ -97,7 +97,7 @@ export function BubbleInfo(props: { by: string | undefined; madeAt: Date }) {
 
 export function InputBar(props: { children: React.ReactNode }) {
   return (
-    <div className="p-3 bg-white border-t shadow-2xl mt-auto flex gap-1 dark:bg-transparent dark:border-stone-800">
+    <div className="p-3 bg-white border-t shadow-2xl mt-auto flex gap-1 dark:bg-transparent dark:border-stone-900">
       {props.children}
     </div>
   );
@@ -147,7 +147,7 @@ export function TextInput(props: { onSubmit: (text: string) => void }) {
       </label>
       <input
         id={inputId}
-        className="rounded-full py-1 px-3 border block w-full placeholder:text-stone-500 dark:bg-black dark:text-white dark:border-stone-700"
+        className="rounded-full py-1 px-3 border block w-full placeholder:text-stone-500 dark:bg-stone-925 dark:text-white dark:border-stone-900"
         placeholder="Type a message and press Enter"
         maxLength={2048}
         onKeyDown={({ key, currentTarget: input }) => {

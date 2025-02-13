@@ -12,6 +12,7 @@ import ora from "ora";
 import {
   Framework,
   type FrameworkAuthPair,
+  PLATFORM,
   frameworkToAuthExamples,
   frameworks,
 } from "./config.js";
@@ -82,6 +83,10 @@ async function getLatestPackageVersions(
   return versions;
 }
 
+function getPlatformFromTemplateName(template: string) {
+  return template.includes("-rn") ? PLATFORM.REACT_NATIVE : PLATFORM.WEB;
+}
+
 async function scaffoldProject({
   template,
   projectName,
@@ -92,12 +97,14 @@ async function scaffoldProject({
 
   const starterConfig = frameworkToAuthExamples[
     template as FrameworkAuthPair
-  ] || { name: template, repo: "garden-co/jazz/examples/" + template };
-  if (!starterConfig) {
-    throw new Error(`Invalid template: ${template}`);
-  }
+  ] || {
+    name: template,
+    repo: "garden-co/jazz/examples/" + template,
+    platform: getPlatformFromTemplateName(template),
+  };
 
-  const devCommand = template.includes("rn-clerk") ? "ios" : "dev";
+  const devCommand =
+    starterConfig.platform === PLATFORM.REACT_NATIVE ? "ios" : "dev";
 
   if (!starterConfig.repo) {
     throw new Error(
@@ -207,7 +214,7 @@ async function scaffoldProject({
   }
 
   // Additional setup for React Native
-  if (template === "react-native-expo-clerk-auth") {
+  if (starterConfig.platform === PLATFORM.REACT_NATIVE) {
     const rnSpinner = ora({
       text: chalk.blue("Setting up React Native project..."),
       spinner: "dots",
@@ -224,8 +231,6 @@ const { getDefaultConfig } = require("expo/metro-config");
 const { withNativeWind } = require("nativewind/metro");
 
 const config = getDefaultConfig(__dirname);
-
-config.resolver.unstable_enablePackageExports = true;
 
 module.exports = withNativeWind(config, { input: "./src/global.css" });
 `;

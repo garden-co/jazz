@@ -2,7 +2,7 @@ import { useAccount } from "jazz-react";
 
 export function DraftIndicator() {
   const { me } = useAccount({
-    root: { draft: {} },
+    resolve: { root: { draft: true } },
   });
 
   if (me?.root.draft?.hasChanges) {

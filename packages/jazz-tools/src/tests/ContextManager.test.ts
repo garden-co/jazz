@@ -1,4 +1,4 @@
-import { WasmCrypto } from "cojson";
+import { WasmCrypto } from "cojson/crypto/WasmCrypto";
 import { beforeEach, describe, expect, test, vi } from "vitest";
 import {
   Account,
@@ -59,8 +59,8 @@ class TestJazzContextManager<Acc extends Account> extends JazzContextManager<
       done: () => {
         context.done();
       },
-      logOut: () => {
-        context.logOut();
+      logOut: async () => {
+        await context.logOut();
       },
     });
   }
@@ -218,10 +218,16 @@ describe("ContextManager", () => {
       anonymousAccount: CustomAccount,
     ) => {
       const anonymousAccountWithRoot = await anonymousAccount.ensureLoaded({
-        root: {},
+        resolve: {
+          root: true,
+        },
       });
 
-      const meWithRoot = await CustomAccount.getMe().ensureLoaded({ root: {} });
+      const meWithRoot = await CustomAccount.getMe().ensureLoaded({
+        resolve: {
+          root: true,
+        },
+      });
 
       const rootToTransfer = anonymousAccountWithRoot.root;
 
@@ -249,7 +255,11 @@ describe("ContextManager", () => {
       provider: "test",
     });
 
-    const me = await CustomAccount.getMe().ensureLoaded({ root: {} });
+    const me = await CustomAccount.getMe().ensureLoaded({
+      resolve: {
+        root: true,
+      },
+    });
 
     expect(me.root.transferredRoot?.value).toBe("Hello");
   });

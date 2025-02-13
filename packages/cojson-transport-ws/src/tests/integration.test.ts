@@ -1,4 +1,5 @@
-import { ControlledAgent, LocalNode, WasmCrypto } from "cojson";
+import { ControlledAgent, LocalNode } from "cojson";
+import { WasmCrypto } from "cojson/crypto/WasmCrypto";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { WebSocket } from "ws";
 import { createWebSocketPeer } from "../createWebSocketPeer";

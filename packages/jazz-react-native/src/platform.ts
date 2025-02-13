@@ -1,4 +1,7 @@
+import NetInfo from "@react-native-community/netinfo";
+import { LocalNode, Peer, RawAccountID } from "cojson";
 import { SQLiteStorage } from "cojson-storage-rn-sqlite";
+import { PureJSCrypto } from "cojson/dist/crypto/PureJSCrypto"; // Importing from dist to not rely on the exports field
 import {
   Account,
   AgentID,
@@ -16,11 +19,7 @@ import {
   createJazzContext,
 } from "jazz-tools";
 
-import NetInfo from "@react-native-community/netinfo";
-import { LocalNode, Peer, RawAccountID } from "cojson";
-
 import { WebSocketPeerWithReconnection } from "cojson-transport-ws";
-import { PureJSCrypto } from "cojson/native";
 import type { RNQuickCrypto } from "./crypto/RNQuickCrypto.js";
 import { ExpoSecureStoreAdapter } from "./storage/expo-secure-store-adapter.js";
 import { KvStoreContext } from "./storage/kv-store-context.js";

@@ -38,7 +38,7 @@ function highlightPlugin() {
   return async function transformer(tree) {
     const highlighter = await getHighlighter({
       langs: ["typescript", "bash", "tsx", "json", "svelte"],
-      theme: "css-variables", // use the theme
+      theme: "css-variables", // use css variables in shiki.css
     });
 
     visit(tree, "code", visitor);
@@ -116,7 +116,7 @@ function remarkHtmlToJsx() {
     const [ast] = args;
     visit(ast, "html", (node) => {
       const escapedHtml = JSON.stringify(node.value);
-      const jsx = `<div dangerouslySetInnerHTML={{__html: ${escapedHtml} }}/>`;
+      const jsx = `<CodeWithInterpolation highlightedCode={${escapedHtml}}/>`;
       const rawHtmlNode = fromMarkdown(jsx, {
         extensions: [mdxjs()],
         mdastExtensions: [mdxFromMarkdown()],

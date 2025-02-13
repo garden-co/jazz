@@ -77,6 +77,7 @@ const icons = {
 
 // copied from tailwind line height https://tailwindcss.com/docs/font-size
 const sizes = {
+  "2xs": 14,
   xs: 16,
   sm: 20,
   md: 24,
@@ -93,6 +94,7 @@ const sizes = {
 };
 
 const strokeWidths = {
+  "2xs": 2.5,
   xs: 2,
   sm: 2,
   md: 1.5,

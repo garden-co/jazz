@@ -1,5 +1,34 @@
 # cojson-transport-nodejs-ws
 
+## 0.10.2
+
+### Patch Changes
+
+- Updated dependencies [cae3a9e]
+  - cojson@0.10.2
+
+## 0.10.1
+
+### Patch Changes
+
+- Updated dependencies [5a63cba]
+  - cojson@0.10.1
+
+## 0.10.0
+
+### Minor Changes
+
+- 498954f: Introducing the new auth system!
+
+### Patch Changes
+
+- Updated dependencies [b426342]
+- Updated dependencies [498954f]
+- Updated dependencies [8217981]
+- Updated dependencies [ac3d9fa]
+- Updated dependencies [610543c]
+  - cojson@0.10.0
+
 ## 0.9.23
 
 ### Patch Changes

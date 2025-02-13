@@ -85,7 +85,15 @@ export class RawGroup<
   roleOfInternal(
     accountID: RawAccountID | AgentID | typeof EVERYONE,
   ): { role: Role; via: CoID<RawGroup> | undefined } | undefined {
-    const roleHere = this.get(accountID);
+    let roleHere = this.get(accountID);
+
+    if (!roleHere) {
+      const everyoneRole = this.get(EVERYONE);
+
+      if (everyoneRole && everyoneRole !== "revoked") {
+        roleHere = everyoneRole;
+      }
+    }
 
     if (roleHere === "revoked") {
       return undefined;

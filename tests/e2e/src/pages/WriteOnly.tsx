@@ -1,6 +1,6 @@
 import { createInviteLink } from "jazz-react";
-import { useAcceptInvite, useAccount, useCoState } from "jazz-react";
-import { CoList, CoMap, Group, ID, co } from "jazz-tools";
+import { useAcceptInvite, useCoState } from "jazz-react";
+import { Account, CoList, CoMap, Group, ID, co } from "jazz-tools";
 import { useState } from "react";
 
 class SharedCoMap extends CoMap {
@@ -10,15 +10,14 @@ class SharedCoMap extends CoMap {
 class SharedCoList extends CoList.Of(co.ref(SharedCoMap)) {}
 
 export function WriteOnlyRole() {
-  const { me } = useAccount();
   const [id, setId] = useState<ID<SharedCoList> | undefined>(undefined);
   const [inviteLinks, setInviteLinks] = useState<Record<string, string>>({});
-  const coList = useCoState(SharedCoList, id, []);
+  const coList = useCoState(SharedCoList, id);
 
   const createCoList = async () => {
-    if (!me || id) return;
+    if (id) return;
 
-    const group = Group.create({ owner: me });
+    const group = Group.create();
 
     const coList = SharedCoList.create([], { owner: group });
 
@@ -35,7 +34,7 @@ export function WriteOnlyRole() {
   };
 
   const addNewItem = async () => {
-    if (!me || !coList) return;
+    if (!coList) return;
 
     const group = coList._owner as Group;
     const coMap = SharedCoMap.create({ value: "" }, { owner: group });
@@ -52,7 +51,7 @@ export function WriteOnlyRole() {
       if (
         member.account &&
         member.role !== "admin" &&
-        member.account.id !== me.id
+        member.account.id !== Account.getMe().id
       ) {
         coListGroup.removeMember(member.account);
       }

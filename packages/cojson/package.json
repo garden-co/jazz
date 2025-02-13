@@ -1,30 +1,31 @@
 {
   "name": "cojson",
-  "module": "dist/web/index.web.js",
-  "main": "dist/web/index.web.js",
-  "types": "src/index.web.ts",
-  "react-native": "dist/native/index.native.js",
+  "module": "dist/index.js",
+  "main": "dist/index.js",
+  "types": "src/index.ts",
   "exports": {
     ".": {
-      "react-native": "./dist/native/index.native.js",
-      "types": "./src/index.web.ts",
-      "default": "./dist/web/index.web.js"
+      "types": "./src/index.ts",
+      "default": "./dist/index.js"
     },
-    "./crypto": {
-      "react-native": "./dist/native/crypto/export.js",
-      "types": "./src/crypto/export.ts",
-      "default": "./dist/web/crypto/export.js"
+    "./dist/crypto/PureJSCrypto": {
+      "types": "./src/crypto/PureJSCrypto.ts",
+      "default": "./dist/crypto/PureJSCrypto.js"
     },
-    "./native": {
-      "react-native": "./dist/native/index.native.js",
-      "types": "./src/index.native.ts",
-      "default": "./dist/native/index.native.js"
+    "./crypto/PureJSCrypto": {
+      "types": "./src/crypto/PureJSCrypto.ts",
+      "default": "./dist/crypto/PureJSCrypto.js"
     },
+    "./crypto/WasmCrypto": {
+      "types": "./src/crypto/WasmCrypto.ts",
+      "default": "./dist/crypto/WasmCrypto.js"
+    },
+    "./dist/*": "./dist/*",
     "./src/*": "./src/*"
   },
   "type": "module",
   "license": "MIT",
-  "version": "0.9.23",
+  "version": "0.10.2",
   "devDependencies": {
     "@opentelemetry/sdk-metrics": "^1.29.0",
     "typescript": "~5.6.2",
@@ -42,15 +43,12 @@
     "queueueue": "^4.1.2"
   },
   "scripts": {
-    "dev": "tsc --watch --sourceMap --outDir dist/web -p tsconfig.web.json",
-    "dev:native": "tsc --watch --sourceMap --outDir dist/native -p tsconfig.native.json",
+    "dev": "tsc --watch --sourceMap --outDir dist",
     "test": "vitest --run --root ../../ --project cojson",
     "test:watch": "vitest --watch --root ../../ --project cojson",
     "format-and-lint": "biome check .",
     "format-and-lint:fix": "biome check . --write",
-    "build:web": "tsc --sourceMap --outDir dist/web -p tsconfig.web.json",
-    "build:native": "tsc --sourceMap --outDir dist/native -p tsconfig.native.json",
-    "build": "rm -rf ./dist && pnpm run build:native && pnpm run build:web",
+    "build": "rm -rf ./dist && tsc --sourceMap --outDir dist",
     "prepublishOnly": "npm run build"
   },
   "gitHead": "33c27053293b4801b968c61d5c4c989f93a67d13"

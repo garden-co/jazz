@@ -531,7 +531,11 @@ export class SyncManager {
 
     if (entry.state.type !== "available") {
       if (!msg.header) {
-        logger.error("Expected header to be sent in first message");
+        logger.error("Expected header to be sent in first message", {
+          coValueId: msg.id,
+          peerId: peer.id,
+          peerRole: peer.role,
+        });
         return;
       }
 

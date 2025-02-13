@@ -2,7 +2,6 @@
 
 import { mnemonicToEntropy } from "@scure/bip39";
 import { AuthSecretStorage, KvStoreContext } from "jazz-tools";
-import { testWordlist } from "jazz-tools/src/tests/fixtures.js";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { usePassphraseAuth } from "../auth/PassphraseAuth";
 import {
@@ -10,6 +9,7 @@ import {
   createJazzTestGuest,
   setupJazzTestSync,
 } from "../testing";
+import { testWordlist } from "./fixtures.js";
 import { act, renderHook, waitFor } from "./testUtils";
 
 describe("usePassphraseAuth", () => {

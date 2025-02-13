@@ -5,6 +5,7 @@ import { RawCoMap } from "../coValues/coMap.js";
 import { RawCoStream } from "../coValues/coStream.js";
 import { RawBinaryCoStream } from "../coValues/coStream.js";
 import { WasmCrypto } from "../crypto/WasmCrypto.js";
+import { RawAccountID } from "../exports.js";
 import { LocalNode } from "../localNode.js";
 import {
   createThreeConnectedNodes,
@@ -840,5 +841,100 @@ describe("extend with role mapping", () => {
 
     expect(map.get("test")).toEqual("Written from the admin");
     expect(mapOnNode2.get("test")).toEqual("Written from the admin");
+  });
+});
+
+describe("roleOf", () => {
+  test("returns direct role assignments", () => {
+    const node = new LocalNode(...randomAnonymousAccountAndSessionID(), Crypto);
+    const group = node.createGroup();
+    const account = new LocalNode(
+      ...randomAnonymousAccountAndSessionID(),
+      Crypto,
+    ).account;
+
+    group.addMember(account, "writer");
+    expect(group.roleOf(account.id as RawAccountID)).toEqual("writer");
+  });
+
+  test("returns undefined for non-members", () => {
+    const node = new LocalNode(...randomAnonymousAccountAndSessionID(), Crypto);
+    const group = node.createGroup();
+    const account = new LocalNode(
+      ...randomAnonymousAccountAndSessionID(),
+      Crypto,
+    ).account;
+
+    expect(group.roleOf(account.id as RawAccountID)).toEqual(undefined);
+  });
+
+  test("revoked roles return undefined", () => {
+    const node = new LocalNode(...randomAnonymousAccountAndSessionID(), Crypto);
+    const group = node.createGroup();
+    const account = new LocalNode(
+      ...randomAnonymousAccountAndSessionID(),
+      Crypto,
+    ).account;
+
+    group.addMember(account, "writer");
+    group.removeMemberInternal(account);
+    expect(group.roleOf(account.id as RawAccountID)).toEqual(undefined);
+  });
+
+  test("everyone role applies to all accounts", () => {
+    const node = new LocalNode(...randomAnonymousAccountAndSessionID(), Crypto);
+    const group = node.createGroup();
+    const account = new LocalNode(
+      ...randomAnonymousAccountAndSessionID(),
+      Crypto,
+    ).account;
+
+    group.addMemberInternal("everyone", "reader");
+    expect(group.roleOf(account.id as RawAccountID)).toEqual("reader");
+  });
+
+  test("account role overrides everyone role", () => {
+    const node = new LocalNode(...randomAnonymousAccountAndSessionID(), Crypto);
+    const group = node.createGroup();
+    const account = new LocalNode(
+      ...randomAnonymousAccountAndSessionID(),
+      Crypto,
+    ).account;
+
+    group.addMemberInternal("everyone", "writer");
+    group.addMember(account, "reader");
+    expect(group.roleOf(account.id as RawAccountID)).toEqual("reader");
+  });
+
+  test("Revoking access on everyone role should not affect existing members", () => {
+    const node = new LocalNode(...randomAnonymousAccountAndSessionID(), Crypto);
+    const group = node.createGroup();
+    const account = new LocalNode(
+      ...randomAnonymousAccountAndSessionID(),
+      Crypto,
+    ).account;
+
+    group.addMemberInternal("everyone", "reader");
+    group.addMember(account, "writer");
+    group.removeMemberInternal("everyone");
+    expect(group.roleOf(account.id as RawAccountID)).toEqual("writer");
+    expect(group.roleOf("123" as RawAccountID)).toEqual(undefined);
+  });
+
+  test("Everyone role is inherited following the most permissive algorithm", () => {
+    const node = new LocalNode(...randomAnonymousAccountAndSessionID(), Crypto);
+    const group = node.createGroup();
+    const account = new LocalNode(
+      ...randomAnonymousAccountAndSessionID(),
+      Crypto,
+    ).account;
+
+    const parentGroup = node.createGroup();
+    parentGroup.addMemberInternal("everyone", "writer");
+
+    group.extend(parentGroup);
+    group.addMember(account, "reader");
+
+    expect(group.roleOf(account.id as RawAccountID)).toEqual("writer");
   });
 });

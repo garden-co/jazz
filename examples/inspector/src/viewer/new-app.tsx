@@ -6,9 +6,9 @@ import {
   RawAccount,
   RawAccountID,
   RawCoValue,
-  WasmCrypto,
 } from "cojson";
 import { createWebSocketPeer } from "cojson-transport-ws";
+import { WasmCrypto } from "cojson/crypto/WasmCrypto";
 import { Trash2 } from "lucide-react";
 import React, { useState, useEffect } from "react";
 import { Breadcrumbs } from "./breadcrumbs";

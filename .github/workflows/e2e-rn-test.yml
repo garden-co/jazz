@@ -4,14 +4,16 @@ on:
   pull_request:
     types: [opened, synchronize, reopened]
     paths:
+      - ".github/actions/android-emulator/**"
+      - ".github/actions/source-code/**"
       - ".github/workflows/e2e-rn-test.yml"
       - "examples/chat-rn/**"
       - "examples/chat-rn-clerk/**"
-      - "packages/jazz-react-native*/**"
+      - "packages/**"
 
 jobs:
   e2e-tests:
-    runs-on: macos-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2204
 
     steps:
       - name: Checkout
@@ -24,15 +26,15 @@ jobs:
         run: |
           mkdir -p ~/output
 
+      - name: Setup JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: corretto
+          java-version: 22
+          cache: gradle
+
       - name: Pnpm Build
         run: pnpm turbo build --filter="./packages/*"
-
-      - name: iOS Simulator
-        id: ios-simulator
-        uses: futureware-tech/simulator-action@v4
-        with:
-          os: iOS
-          wait_for_boot: true
 
       - name: chat-rn App Pre Build
         working-directory: ./examples/chat-rn
@@ -40,39 +42,31 @@ jobs:
           pnpm build
           pnpm expo prebuild --clean
 
-      - name: chat-rn App Build
-        working-directory: ./examples/chat-rn/ios
-        run: |
-          xcodebuild -scheme "jazzchatrn" \
-            -workspace jazzchatrn.xcworkspace \
-            -archivePath $RUNNER_TEMP/jazzchatrn.xcarchive \
-            -derivedDataPath $RUNNER_TEMP/build \
-            -destination "id=${{ steps.ios-simulator.outputs.udid }}" \
-            -configuration Release \
-            -sdk iphonesimulator \
-            build
-          xcrun simctl install booted $RUNNER_TEMP/build/Build/Products/Release-iphonesimulator/jazzchatrn.app
-          xcrun simctl spawn booted log stream --level debug | tee ~/output/sim.log &
-
-
       - name: Install Maestro
         run: |
           curl -fsSL "https://get.maestro.mobile.dev" | bash
 
-      - name: chat-rn App Test
-        id: e2e_test
-        working-directory: ./examples/chat-rn
-        continue-on-error: true
-        run: |
-          export PATH="$PATH":"$HOME/.maestro/bin"
-          export MAESTRO_DRIVER_STARTUP_TIMEOUT=300000 # setting to 5 mins 👀
-          export MAESTRO_CLI_NO_ANALYTICS=1
-          maestro test test/e2e/flow.yml
+      - name: Setup Android Emulator
+        id: android-emulator
+        uses: ./.github/actions/android-emulator/
+        with:
+          api-level: 29
 
-      - name: Copy Maestro and Diagnostic Files
+      - name: Test App
+        uses: reactivecircus/android-emulator-runner@v2
+        id: e2e_test
+        continue-on-error: true
+        with:
+          api-level: 29
+          force-avd-creation: false
+          emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -no-metrics
+          disable-animations: true
+          working-directory: ./examples/chat-rn/
+          script: ./test/e2e/run.sh
+
+      - name: Copy Maestro Output
         if: steps.e2e_test.outcome != 'success'
         run: |
-          cp -r ~/Library/Logs/DiagnosticReports/* ~/output
           cp -r ~/.maestro/tests/* ~/output
 
       - name: Upload Output Files

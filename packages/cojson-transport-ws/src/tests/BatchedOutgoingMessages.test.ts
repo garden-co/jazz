@@ -1,5 +1,5 @@
 import { SyncMessage } from "cojson";
-import { CoValueKnownState } from "cojson/src/sync.js";
+import { CojsonInternalTypes } from "cojson";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import {
   BatchedOutgoingMessages,
@@ -58,7 +58,7 @@ describe("BatchedOutgoingMessages", () => {
       sessions: {
         // Add a large payload to exceed MAX_OUTGOING_MESSAGES_CHUNK_BYTES
         payload: "x".repeat(MAX_OUTGOING_MESSAGES_CHUNK_BYTES),
-      } as CoValueKnownState["sessions"],
+      } as CojsonInternalTypes.CoValueKnownState["sessions"],
     };
 
     batchedMessages.push(largeMessage);
@@ -82,7 +82,7 @@ describe("BatchedOutgoingMessages", () => {
       sessions: {
         // Add a large payload to exceed MAX_OUTGOING_MESSAGES_CHUNK_BYTES
         payload: "x".repeat(MAX_OUTGOING_MESSAGES_CHUNK_BYTES),
-      } as CoValueKnownState["sessions"],
+      } as CojsonInternalTypes.CoValueKnownState["sessions"],
     };
 
     batchedMessages.push(smallMessage);

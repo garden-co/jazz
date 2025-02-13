@@ -13,7 +13,7 @@ export function useUploadExampleData() {
 
 async function uploadOnboardingData() {
   const me = await MusicaAccount.getMe().ensureLoaded({
-    root: {},
+    resolve: { root: true },
   });
 
   if (me.root.exampleDataLoaded) return;

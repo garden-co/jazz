@@ -49,7 +49,9 @@ describe("useAccountOrGuest", () => {
     const { result } = renderHook(
       () =>
         useAccountOrGuest({
-          root: {},
+          resolve: {
+            root: true,
+          },
         }),
       {
         account,
@@ -66,7 +68,9 @@ describe("useAccountOrGuest", () => {
     const { result } = renderHook(
       () =>
         useAccountOrGuest({
-          root: {},
+          resolve: {
+            root: true,
+          },
         }),
       {
         account,

@@ -1,12 +1,12 @@
-import { CoID, ControlledAgent, LocalNode, RawCoValue } from "cojson";
-import { connectedPeers } from "cojson/src/streamUtils.js";
+import { CoID, LocalNode, RawCoValue } from "cojson";
+import { cojsonInternals } from "cojson";
 import { Account } from "jazz-tools";
 import { TestJSCrypto } from "jazz-tools/testing";
 
 const crypto = await TestJSCrypto.create();
 
 export async function setupTwoNodes() {
-  const [serverAsPeer, clientAsPeer] = connectedPeers(
+  const [serverAsPeer, clientAsPeer] = cojsonInternals.connectedPeers(
     "clientToServer",
     "serverToClient",
     {

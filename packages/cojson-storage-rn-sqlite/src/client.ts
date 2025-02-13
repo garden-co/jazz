@@ -8,8 +8,6 @@ import type {
   StoredSessionRow,
   TransactionRow,
 } from "cojson-storage";
-import { Transaction } from "cojson/src/coValueCore.js";
-import { Signature } from "cojson/src/crypto/crypto.js";
 
 export class SQLiteClient implements DBClientInterface {
   private readonly db: DatabaseT;
@@ -64,7 +62,7 @@ export class SQLiteClient implements DBClientInterface {
     try {
       return rows.map((row: any) => ({
         ...row,
-        tx: JSON.parse(row.tx) as Transaction,
+        tx: JSON.parse(row.tx) as CojsonInternalTypes.Transaction,
       }));
     } catch (e) {
       console.warn("Invalid JSON in transaction", e);
@@ -121,7 +119,7 @@ export class SQLiteClient implements DBClientInterface {
   async addTransaction(
     sessionRowID: number,
     nextIdx: number,
-    newTransaction: Transaction,
+    newTransaction: CojsonInternalTypes.Transaction,
   ): Promise<void> {
     await this.db.execute(
       "INSERT INTO transactions (ses, idx, tx) VALUES (?, ?, ?)",
@@ -136,7 +134,7 @@ export class SQLiteClient implements DBClientInterface {
   }: {
     sessionRowID: number;
     idx: number;
-    signature: Signature;
+    signature: CojsonInternalTypes.Signature;
   }): Promise<void> {
     await this.db.execute(
       "INSERT INTO signatureAfter (ses, idx, signature) VALUES (?, ?, ?)",
