@@ -132,23 +132,23 @@
                 if (!socket) {
                     socket = new WebSocket(SERVER_WSS);
                     socket.onopen = (event) => {
-                        log(
+                        info(
                             `Connected to WebSocket server at: ${new Date().toISOString()}`,
                         );
-                        log(`${JSON.stringify(event)}`);
+                        debug(`${JSON.stringify(event)}`);
                         isConnected = true;
                         clearTimeout(reconnectTimeout);
                     };
 
                     // socket.onclose = (event) => {
-                    //     log(
+                    //     debug(
                     //         `Disconnected from WebSocket server at: ${new Date().toISOString()}`,
                     //     );
                     //     isConnected = false;
                     //     reconnect();
                     // };
                     socket.onclose = (event) => {
-                        log(
+                        info(
                             `Disconnected from WebSocket server at: ${new Date().toISOString()}`,
                         );
                         if (retryAttempts < maxRetries) {
@@ -160,7 +160,7 @@
                     };
 
                     socket.onerror = (event) => {
-                        log(`WebSocket error: ${JSON.stringify(event)}`);
+                        debug(`WebSocket error: ${JSON.stringify(event)}`);
                         isConnected = false;
                     };
 
@@ -168,7 +168,7 @@
                         if (typeof event.data !== "string") {
                             fileBlobs.push(event.data);
                             receivedSize += event.data.size;
-                            log(
+                            debug(
                                 `WebSocket (chunk: ${fileBlobs.length}) received: ${receivedSize} of ${totalSize} for ${fileName}.`,
                             );
                             return;
@@ -182,7 +182,7 @@
                                         handleCoValueList(response.payload);
                                         break;
                                     case "GET":
-                                        log(
+                                        debug(
                                             `Websocket chunk streaming metadata: ${JSON.stringify(
                                                 response,
                                             )} ...`,
@@ -196,7 +196,7 @@
                                         mutateCoValueViaWS(response.payload);
                                         break;
                                     case "SUBSCRIBE":
-                                        log(
+                                        debug(
                                             `Websocket subscription started: ${JSON.stringify(
                                                 response,
                                             )}`,
@@ -209,19 +209,19 @@
                                         );
                                         break;
                                     default:
-                                        log(
+                                        debug(
                                             `Websocket method unknown: ${response.action}`,
                                         );
                                 }
                             } else {
-                                log(
+                                debug(
                                     `Websocket request failed: ${JSON.stringify(
                                         response,
                                     )}`,
                                 );
                             }
                         } catch (error) {
-                            log(`Websocket processing error: ${error.message}`);
+                            info(`Websocket processing error: ${error.message}`);
                         }
                     };
                 }
@@ -236,14 +236,14 @@
                     coValueSelect.appendChild(option);
                 });
 
-                log("CoValue UUIDs loaded successfully.");
+                info("CoValue UUIDs loaded successfully.");
             }
 
             function loadCoValueViaWS(response) {
                 if (response.code === 200) {
                     // 200 - OK: here signifies a successful response for text CoValue
                     currentCoValue = response.payload;
-                    log(`Loaded (JSON) data for: ${currentCoValue.uuid}.`);
+                    info(`Loaded (JSON) data for: ${currentCoValue.uuid}.`);
                     logCoValue(currentCoValue);
                 } else if (response.code === 202) {
                     // 202 - Accepted: here signifies the start of a binary download
@@ -268,14 +268,14 @@
             function createCoValueViaWS(response) {
                 if (response.code === 200) {
                     // 200 - OK: here means an acknowledgement of (an in progress) binary chunk
-                    log(
+                    debug(
                         `Chunked upload via websocket acknowledged for: ${currentCoValue.uuid}.`,
                     );
                 } else if (response.code === 201) {
                     // 201 - Created: here is an acknowledgement of a textual covalue / the final chunk of a binary covalue
                     appendCoValue(currentCoValue);
                     logCoValue(currentCoValue);
-                    log(
+                    info(
                         `Created (${
                             isBinary() ? "binary" : "JSON"
                         }) data for: ${currentCoValue.uuid}.`,
@@ -285,29 +285,29 @@
 
             function mutateCoValueViaWS(payload) {
                 if (isBinary()) {
-                    log(`Mutated (binary) data for: ${currentCoValue.uuid}.`);
+                    info(`Mutated (binary) data for: ${currentCoValue.uuid}.`);
                 } else {
-                    log(`Mutated (JSON) data for: ${currentCoValue.uuid}.`);
+                    info(`Mutated (JSON) data for: ${currentCoValue.uuid}.`);
                 }
             }
 
             function disconnect() {
                 if (isWS()) {
                     if (socket) {
-                        log("Closing the web socket connection.");
+                        debug("Closing the web socket connection.");
                         socket.close();
                     }
                 } else {
                     if (source) {
-                        log("Closing the event stream connection.");
+                        debug("Closing the event stream connection.");
                         source.close();
                     }
                 }
             }
 
             async function onPageLoad() {
-                console.log(`isBinary flag was set to: ${isBinary()}.`);
-                console.log(`WebSocket support flag was set to: ${isWS()}.`);
+                debug(`isBinary flag was set to: ${isBinary()}.`);
+                debug(`WebSocket support flag was set to: ${isWS()}.`);
                 const uuid = getMutationUUID();
 
                 if (uuid) {
@@ -342,7 +342,7 @@
                             disconnectButton.disabled = true;
                         }
                     } catch (error) {
-                        log(
+                        info(
                             `Error trying to load CoValue UUIDs: ${error.message}`,
                         );
                     }
@@ -385,9 +385,13 @@
                 }
             }
 
-            function log(text) {
+            function info(text) {
                 statusDiv.textContent = text;
-                console.log(text);
+                console.info(text);
+            }
+
+            function debug(text) {
+                // console.log(text);
             }
 
             function logCoValue(coValue) {
@@ -453,7 +457,7 @@
                         `${SERVER_API}/${uuid}/subscribe/${ua ?? "0"}`,
                     );
                     source.onopen = (event) => {
-                        log(
+                        info(
                             `Connection to the event stream was opened: ${JSON.stringify(
                                 event,
                             )}`,
@@ -473,7 +477,7 @@
                     };
 
                     source.onclose = function() {
-                        log(
+                        info(
                             `Disconnected from event stream server at: ${new Date().toISOString()}`,
                         );
                         if (retryAttempts < maxRetries) {
@@ -503,7 +507,7 @@
                     currentCoValue[data.field] = data.value;
                 }
                 logCoValue(currentCoValue);
-                log(
+                info(
                     `Mutation event => CoValue ${currentCoValue.uuid} '${
                         data.field
                     }' was updated to '${
@@ -516,13 +520,13 @@
 
             // function reconnect() {
             //     if (!isConnected && isEnabled) {
-            //         log(
+            //         debug(
             //             `Attempting to reconnect in ${
             //                 RECONNECT_INTERVAL / 1000
             //             } seconds...`,
             //         );
             //         reconnectTimeout = setTimeout(() => {
-            //             log("Attempting to reconnect...");
+            //             debug("Attempting to reconnect...");
             //             connect();
             //         }, RECONNECT_INTERVAL);
             //     }
@@ -551,18 +555,18 @@
                     }
                     appendCoValue(coValue);
                     logCoValue(coValue);
-                    log(`Created (JSON) data for: ${coValue.uuid}.`);
+                    info(`Created (JSON) data for: ${coValue.uuid}.`);
                 }
             }
 
             async function loadCoValueViaHTTP(uuid, isBinary) {
                 const url = getEndpoint(uuid, isBinary);
-                log(`Loading ${uuid} via ${url}...`);
+                info(`Loading ${uuid} via ${url}...`);
                 if (isBinary) {
                     const response = await fetch(url);
                     if (!response.ok) {
                         const errorData = await response.json();
-                        console.log(
+                        debug(
                             `Binary CoValue download failed: ${JSON.stringify(
                                 errorData,
                             )}`,
@@ -587,7 +591,7 @@
                         }
                         chunks.push(value);
                         receivedLength += value.length;
-                        log(
+                        debug(
                             `Received (chunk: ${chunks.length}) ${receivedLength} of ${contentLength} bytes for: ${uuid}.`,
                         );
                     }
@@ -600,7 +604,7 @@
                 } else {
                     const response = await fetch(url);
                     currentCoValue = await response.json();
-                    log(`Loaded (JSON) data for: ${uuid}.`);
+                    info(`Loaded (JSON) data for: ${uuid}.`);
                     logCoValue(currentCoValue);
                 }
             }
@@ -628,7 +632,7 @@
                     note: "** 50MB binary **",
                     bindata: binaryData,
                 };
-                log(
+                info(
                     `Loaded (binary) data for: ${uuid} (${receivedLength} bytes).`,
                 );
                 logCoValue(currentCoValue);
@@ -639,7 +643,7 @@
                 const uuid = coValueSelect.value;
 
                 if (!uuid) {
-                    log("Please, select a CoValue first.");
+                    info("Please, select a CoValue first.");
                     return;
                 }
                 setCurrentCoValue({ uuid: uuid });
@@ -655,7 +659,7 @@
                         await loadCoValueViaHTTP(uuid, isBinary);
                     }
                 } catch (error) {
-                    log(`Error loading CoValue: ${error.message}`);
+                    info(`Error loading CoValue: ${error.message}`);
                 }
             }
 
@@ -666,7 +670,7 @@
                 coValue.lastUpdated = new Date();
                 setCurrentCoValue(coValue);
 
-                log(
+                debug(
                     `Attempting to add new CoValue with UUID: ${coValue.uuid} via ${url}.`,
                 );
 
@@ -687,12 +691,12 @@
                         };
 
                         if (!isWS()) {
-                            console.log(
+                            debug(
                                 `Creating (binary) data for ${coValue.uuid} ... file upload complete.`,
                             );
                             appendCoValue(coValue);
                             logCoValue(coValue);
-                            log(`Created (binary) data for: ${coValue.uuid}.`);
+                            info(`Created (binary) data for: ${coValue.uuid}.`);
                         }
                     } else {
                         if (window.faker) {
@@ -716,7 +720,7 @@
                         await createCoValueJSON(url, coValue);
                     }
                 } catch (error) {
-                    log(
+                    info(
                         `Error creating CoValue (isBinary: ${isBinary}): ${error.message}`,
                     );
                 }
@@ -774,7 +778,7 @@
                                     `HTTP status: ${response.status}`,
                                 );
                             } else {
-                                console.log(
+                                debug(
                                     `Chunk ${
                                         chunkIndex + 1
                                     }/${totalChunks} uploaded successfully`,
@@ -798,13 +802,13 @@
                 const uuid = coValueSelect.value;
 
                 if (!uuid) {
-                    log("Please, select a CoValue first.");
+                    info("Please, select a CoValue first.");
                     return;
                 }
 
                 const url = getEndpoint(uuid, isBinary);
                 currentCoValue = { uuid: uuid };
-                log(
+                info(
                     `Mutating CoValue with UUID: ${currentCoValue.uuid} via ${url}...`,
                 );
 
@@ -842,7 +846,7 @@
                                     `HTTP error! status: ${response.status}`,
                                 );
                             }
-                            log(
+                            info(
                                 `Mutated (binary) data for: ${currentCoValue.uuid}.`,
                             );
                         }
@@ -872,14 +876,14 @@
                                     `HTTP error! status: ${response.status}`,
                                 );
                             }
-                            log(
+                            info(
                                 `Mutated (JSON) data for: ${currentCoValue.uuid}.`,
                             );
                         }
                     }
                     logCoValue(currentCoValue);
                 } catch (error) {
-                    log(`Error mutating CoValue: ${error.message}`);
+                    info(`Error mutating CoValue: ${error.message}`);
                 }
             }
 

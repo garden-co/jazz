@@ -58,7 +58,7 @@ const app = uWS.SSLApp({
 }).ws("/*", {
     /* Options */
     compression: uWS.DISABLED,
-    maxPayloadLength: 202 * 1024,
+    maxPayloadLength: 50 * 1024 * 1024,
     maxBackpressure: 51 * 1024 * 1024,
     sendPingsAutomatically: true,
     idleTimeout: 15,
