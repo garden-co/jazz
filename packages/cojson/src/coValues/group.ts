@@ -158,7 +158,7 @@ export class RawGroup<
         child.state.type === "unknown" ||
         child.state.type === "unavailable"
       ) {
-        child.loadFromPeers(peers).catch(() => {
+        child.loadCoValue(this.core.node.storageDriver, peers).catch(() => {
           logger.error(`Failed to load child group ${id}`);
         });
       }

@@ -200,7 +200,9 @@ export class CoValueCore {
     newTransactions: Transaction[],
     givenExpectedNewHash: Hash | undefined,
     newSignature: Signature,
-    skipVerify: boolean = false,
+    options: {
+      skipVerify?: boolean;
+    } = {},
   ): Result<true, TryAddTransactionsError> {
     return this.node
       .resolveAccountAgent(
@@ -225,7 +227,7 @@ export class CoValueCore {
         }
 
         if (
-          skipVerify !== true &&
+          options.skipVerify !== true &&
           !this.crypto.verify(newSignature, expectedNewHash, signerID)
         ) {
           return err({
@@ -460,7 +462,7 @@ export class CoValueCore {
       [transaction],
       expectedNewHash,
       signature,
-      true,
+      { skipVerify: true },
     )._unsafeUnwrap({ withStackTrace: true });
 
     if (success) {

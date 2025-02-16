@@ -19,6 +19,7 @@
     "format-and-lint:fix": "biome check . --write",
     "build": "rm -rf ./dist && tsc --sourceMap --outDir dist && chmod +x ./dist/index.js",
     "build-and-run": "pnpm turbo build && ./dist/index.js sync --in-memory",
+    "dev": "tsc --sourceMap --outDir dist --watch",
     "prepublishOnly": "npm run build"
   },
   "dependencies": {

@@ -28,6 +28,7 @@ import {
 import { AgentSecret, CryptoProvider } from "./crypto/crypto.js";
 import { AgentID, RawCoID, SessionID, isAgentID } from "./ids.js";
 import { logger } from "./logger.js";
+import { StorageAdapter, StorageDriver } from "./storage.js";
 import { Peer, PeerID, SyncManager } from "./sync.js";
 import { expectGroup } from "./typeUtils/expectGroup.js";
 
@@ -54,6 +55,8 @@ export class LocalNode {
   /** @category 3. Low-level */
   syncManager = new SyncManager(this);
 
+  storageDriver: StorageDriver | null;
+
   crashed: Error | undefined = undefined;
 
   /** @category 3. Low-level */
@@ -61,10 +64,14 @@ export class LocalNode {
     account: ControlledAccountOrAgent,
     currentSessionID: SessionID,
     crypto: CryptoProvider,
+    storageAdapter?: StorageAdapter,
   ) {
     this.account = account;
     this.currentSessionID = currentSessionID;
     this.crypto = crypto;
+    this.storageDriver = storageAdapter
+      ? new StorageDriver(storageAdapter, this)
+      : null;
   }
 
   /** @category 2. Node Creation */
@@ -73,12 +80,14 @@ export class LocalNode {
     peersToLoadFrom,
     migration,
     crypto,
+    storageAdapter,
     initialAgentSecret = crypto.newRandomAgentSecret(),
   }: {
     creationProps: { name: string };
     peersToLoadFrom?: Peer[];
     migration?: RawAccountMigration<Meta>;
     crypto: CryptoProvider;
+    storageAdapter?: StorageAdapter;
     initialAgentSecret?: AgentSecret;
   }): Promise<{
     node: LocalNode;
@@ -91,6 +100,7 @@ export class LocalNode {
       new ControlledAgent(throwawayAgent, crypto),
       crypto.newRandomSessionID(crypto.getAgentID(throwawayAgent)),
       crypto,
+      storageAdapter,
     );
 
     const account = setupNode.createAccount(initialAgentSecret);
@@ -98,6 +108,7 @@ export class LocalNode {
     const nodeWithAccount = account.core.node.testWithDifferentAccount(
       account,
       crypto.newRandomSessionID(account.id),
+      storageAdapter,
     );
 
     const accountOnNodeWithAccount =
@@ -167,6 +178,7 @@ export class LocalNode {
     peersToLoadFrom,
     crypto,
     migration,
+    storageAdapter,
   }: {
     accountID: RawAccountID;
     accountSecret: AgentSecret;
@@ -174,12 +186,14 @@ export class LocalNode {
     peersToLoadFrom: Peer[];
     crypto: CryptoProvider;
     migration?: RawAccountMigration<Meta>;
+    storageAdapter?: StorageAdapter;
   }): Promise<LocalNode> {
     try {
       const loadingNode = new LocalNode(
         new ControlledAgent(accountSecret, crypto),
         crypto.newRandomSessionID(accountID),
         crypto,
+        storageAdapter,
       );
 
       for (const peer of peersToLoadFrom) {
@@ -203,6 +217,7 @@ export class LocalNode {
       const node = loadingNode.testWithDifferentAccount(
         controlledAccount,
         sessionID || crypto.newRandomSessionID(accountID),
+        storageAdapter,
       );
       node.syncManager = loadingNode.syncManager;
       node.syncManager.local = node;
@@ -269,7 +284,7 @@ export class LocalNode {
       const peers =
         this.syncManager.getServerAndStoragePeers(skipLoadingFromPeer);
 
-      await entry.loadFromPeers(peers).catch((e) => {
+      await entry.loadCoValue(this.storageDriver, peers).catch((e) => {
         logger.error("Error loading from peers: " + (e as Error)?.message, {
           id,
         });
@@ -621,8 +636,14 @@ export class LocalNode {
   testWithDifferentAccount(
     account: ControlledAccountOrAgent,
     currentSessionID: SessionID,
+    storageAdapter?: StorageAdapter,
   ): LocalNode {
-    const newNode = new LocalNode(account, currentSessionID, this.crypto);
+    const newNode = new LocalNode(
+      account,
+      currentSessionID,
+      this.crypto,
+      storageAdapter,
+    );
 
     const coValuesToCopy = Array.from(this.coValuesStore.getEntries());
 

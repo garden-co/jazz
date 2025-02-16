@@ -34,11 +34,9 @@ export function getErrorMessage(error: unknown) {
 
 export class SQLiteClient implements DBClientInterface {
   private readonly db: DatabaseT;
-  private readonly toLocalNode: OutgoingSyncQueue;
 
-  constructor(db: DatabaseT, toLocalNode: OutgoingSyncQueue) {
+  constructor(db: DatabaseT) {
     this.db = db;
-    this.toLocalNode = toLocalNode;
   }
 
   getCoValue(coValueId: RawCoID): StoredCoValueRow | undefined {
@@ -103,7 +101,9 @@ export class SQLiteClient implements DBClientInterface {
       .all(sessionRowId, firstNewTxIdx) as SignatureAfterRow[];
   }
 
-  addCoValue(msg: CojsonInternalTypes.NewContentMessage): number {
+  addCoValue(
+    msg: Pick<CojsonInternalTypes.NewContentMessage, "id" | "header">,
+  ): number {
     return this.db
       .prepare<[CojsonInternalTypes.RawCoID, string]>(
         `INSERT INTO coValues (id, header) VALUES (?, ?)`,
@@ -113,10 +113,8 @@ export class SQLiteClient implements DBClientInterface {
 
   addSessionUpdate({
     sessionUpdate,
-    sessionRow,
   }: {
     sessionUpdate: SessionRow;
-    sessionRow?: StoredSessionRow;
   }): number {
     return (
       this.db

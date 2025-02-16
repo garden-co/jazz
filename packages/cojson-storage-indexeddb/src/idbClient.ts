@@ -154,7 +154,7 @@ export class IDBClient implements DBClientInterface {
   }
 
   async addCoValue(
-    msg: CojsonInternalTypes.NewContentMessage,
+    msg: Pick<CojsonInternalTypes.NewContentMessage, "id" | "header">,
   ): Promise<number> {
     if (!msg.header) {
       throw new Error(`Header is required, coId: ${msg.id}`);

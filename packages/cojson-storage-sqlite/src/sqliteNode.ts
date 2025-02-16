@@ -18,7 +18,7 @@ export class SQLiteNode {
     fromLocalNode: IncomingSyncStream,
     toLocalNode: OutgoingSyncQueue,
   ) {
-    this.dbClient = new SQLiteClient(db, toLocalNode);
+    this.dbClient = new SQLiteClient(db);
     this.syncManager = new SyncManager(this.dbClient, toLocalNode);
 
     const processMessages = async () => {
@@ -88,25 +88,31 @@ export class SQLiteNode {
     fromLocalNode: IncomingSyncStream,
     toLocalNode: OutgoingSyncQueue,
   ) {
-    const db = Database(filename);
-    db.pragma("journal_mode = WAL");
+    const db = openDatabase(filename);
+    return new SQLiteNode(db, fromLocalNode, toLocalNode);
+  }
+}
 
-    const oldVersion = (
-      db.pragma("user_version") as [{ user_version: number }]
-    )[0].user_version as number;
+export function openDatabase(filename: string) {
+  const db = Database(filename);
+  db.pragma("journal_mode = WAL");
 
-    if (oldVersion === 0) {
-      db.prepare(
-        `CREATE TABLE IF NOT EXISTS transactions (
+  const oldVersion = (
+    db.pragma("user_version") as [{ user_version: number }]
+  )[0].user_version as number;
+
+  if (oldVersion === 0) {
+    db.prepare(
+      `CREATE TABLE IF NOT EXISTS transactions (
                     ses INTEGER,
                     idx INTEGER,
                     tx TEXT NOT NULL,
                     PRIMARY KEY (ses, idx)
                 ) WITHOUT ROWID;`,
-      ).run();
+    ).run();
 
-      db.prepare(
-        `CREATE TABLE IF NOT EXISTS sessions (
+    db.prepare(
+      `CREATE TABLE IF NOT EXISTS sessions (
                     rowID INTEGER PRIMARY KEY,
                     coValue INTEGER NOT NULL,
                     sessionID TEXT NOT NULL,
@@ -114,64 +120,63 @@ export class SQLiteNode {
                     lastSignature TEXT,
                     UNIQUE (sessionID, coValue)
                 );`,
-      ).run();
+    ).run();
 
-      db.prepare(
-        `CREATE INDEX IF NOT EXISTS sessionsByCoValue ON sessions (coValue);`,
-      ).run();
+    db.prepare(
+      `CREATE INDEX IF NOT EXISTS sessionsByCoValue ON sessions (coValue);`,
+    ).run();
 
-      db.prepare(
-        `CREATE TABLE IF NOT EXISTS coValues (
+    db.prepare(
+      `CREATE TABLE IF NOT EXISTS coValues (
                     rowID INTEGER PRIMARY KEY,
                     id TEXT NOT NULL UNIQUE,
                     header TEXT NOT NULL UNIQUE
                 );`,
-      ).run();
+    ).run();
 
+    db.prepare(
+      `CREATE INDEX IF NOT EXISTS coValuesByID ON coValues (id);`,
+    ).run();
+
+    db.pragma("user_version = 1");
+  }
+
+  if (oldVersion <= 1) {
+    // fix embarrassing off-by-one error for transaction indices
+    const txs = db
+      .prepare(`SELECT * FROM transactions`)
+      .all() as TransactionRow[];
+
+    for (const tx of txs) {
+      db.prepare(`DELETE FROM transactions WHERE ses = ? AND idx = ?`).run(
+        tx.ses,
+        tx.idx,
+      );
+      tx.idx -= 1;
       db.prepare(
-        `CREATE INDEX IF NOT EXISTS coValuesByID ON coValues (id);`,
-      ).run();
-
-      db.pragma("user_version = 1");
+        `INSERT INTO transactions (ses, idx, tx) VALUES (?, ?, ?)`,
+      ).run(tx.ses, tx.idx, tx.tx);
     }
 
-    if (oldVersion <= 1) {
-      // fix embarrassing off-by-one error for transaction indices
-      const txs = db
-        .prepare(`SELECT * FROM transactions`)
-        .all() as TransactionRow[];
+    db.pragma("user_version = 2");
+  }
 
-      for (const tx of txs) {
-        db.prepare(`DELETE FROM transactions WHERE ses = ? AND idx = ?`).run(
-          tx.ses,
-          tx.idx,
-        );
-        tx.idx -= 1;
-        db.prepare(
-          `INSERT INTO transactions (ses, idx, tx) VALUES (?, ?, ?)`,
-        ).run(tx.ses, tx.idx, tx.tx);
-      }
-
-      db.pragma("user_version = 2");
-    }
-
-    if (oldVersion <= 2) {
-      db.prepare(
-        `CREATE TABLE IF NOT EXISTS signatureAfter (
+  if (oldVersion <= 2) {
+    db.prepare(
+      `CREATE TABLE IF NOT EXISTS signatureAfter (
                     ses INTEGER,
                     idx INTEGER,
                     signature TEXT NOT NULL,
                     PRIMARY KEY (ses, idx)
                 ) WITHOUT ROWID;`,
-      ).run();
+    ).run();
 
-      db.prepare(
-        `ALTER TABLE sessions ADD COLUMN bytesSinceLastSignature INTEGER;`,
-      ).run();
+    db.prepare(
+      `ALTER TABLE sessions ADD COLUMN bytesSinceLastSignature INTEGER;`,
+    ).run();
 
-      db.pragma("user_version = 3");
-    }
-
-    return new SQLiteNode(db, fromLocalNode, toLocalNode);
+    db.pragma("user_version = 3");
   }
+
+  return db;
 }

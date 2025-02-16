@@ -30,6 +30,7 @@
   },
   "scripts": {
     "dev": "turbo dev",
+    "dev:packages": "pnpm exec turbo dev --filter= \"./packages/*\" --concurrency 20",
     "build": "turbo build && cd homepage/homepage && turbo build",
     "lint": "turbo lint && cd homepage/homepage && pnpm run lint",
     "test": "vitest",

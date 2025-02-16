@@ -3,6 +3,7 @@ import { PeerState } from "../PeerState";
 import { CoValueCore } from "../coValueCore";
 import { CO_VALUE_LOADING_CONFIG, CoValueState } from "../coValueState";
 import { RawCoID } from "../ids";
+import { StorageDriver } from "../storage";
 import { Peer } from "../sync";
 
 const initialMaxRetries = CO_VALUE_LOADING_CONFIG.MAX_RETRIES;
@@ -17,7 +18,10 @@ function mockMaxRetries(maxRetries: number) {
 
 beforeEach(() => {
   mockMaxRetries(5);
+  vi.clearAllMocks();
 });
+
+const mockStorageDriver = null;
 
 describe("CoValueState", () => {
   const mockCoValueId = "co_test123" as RawCoID;
@@ -29,14 +33,6 @@ describe("CoValueState", () => {
     expect(state.state.type).toBe("unknown");
   });
 
-  test("should create loading state", () => {
-    const peerIds = ["peer1", "peer2"];
-    const state = CoValueState.Loading(mockCoValueId, peerIds);
-
-    expect(state.id).toBe(mockCoValueId);
-    expect(state.state.type).toBe("loading");
-  });
-
   test("should create available state", async () => {
     const mockCoValue = createMockCoValueCore(mockCoValueId);
     const state = CoValueState.Available(mockCoValue);
@@ -45,22 +41,6 @@ describe("CoValueState", () => {
     expect(state.state.type).toBe("available");
     expect((state.state as any).coValue).toBe(mockCoValue);
     await expect(state.getCoValue()).resolves.toEqual(mockCoValue);
-  });
-
-  test("should handle found action", async () => {
-    const mockCoValue = createMockCoValueCore(mockCoValueId);
-    const state = CoValueState.Loading(mockCoValueId, ["peer1", "peer2"]);
-
-    const stateValuePromise = state.getCoValue();
-
-    state.dispatch({
-      type: "available",
-      coValue: mockCoValue,
-    });
-
-    const result = await state.getCoValue();
-    expect(result).toBe(mockCoValue);
-    await expect(stateValuePromise).resolves.toBe(mockCoValue);
   });
 
   test("should ignore actions when not in loading state", () => {
@@ -104,7 +84,7 @@ describe("CoValueState", () => {
     const mockPeers = [peer1, peer2] as unknown as PeerState[];
 
     const state = CoValueState.Unknown(mockCoValueId);
-    const loadPromise = state.loadFromPeers(mockPeers);
+    const loadPromise = state.loadCoValue(mockStorageDriver, mockPeers);
 
     // Should attempt CO_VALUE_LOADING_CONFIG.MAX_RETRIES retries
     for (let i = 0; i < CO_VALUE_LOADING_CONFIG.MAX_RETRIES; i++) {
@@ -157,7 +137,7 @@ describe("CoValueState", () => {
     const mockPeers = [peer1, peer2] as unknown as PeerState[];
 
     const state = CoValueState.Unknown(mockCoValueId);
-    const loadPromise = state.loadFromPeers(mockPeers);
+    const loadPromise = state.loadCoValue(mockStorageDriver, mockPeers);
 
     // Should attempt CO_VALUE_LOADING_CONFIG.MAX_RETRIES retries
     for (let i = 0; i < CO_VALUE_LOADING_CONFIG.MAX_RETRIES; i++) {
@@ -206,7 +186,7 @@ describe("CoValueState", () => {
     const mockPeers = [peer1, peer2] as unknown as PeerState[];
 
     const state = CoValueState.Unknown(mockCoValueId);
-    const loadPromise = state.loadFromPeers(mockPeers);
+    const loadPromise = state.loadCoValue(mockStorageDriver, mockPeers);
 
     // Should attempt CO_VALUE_LOADING_CONFIG.MAX_RETRIES retries
     for (let i = 0; i < CO_VALUE_LOADING_CONFIG.MAX_RETRIES; i++) {
@@ -258,7 +238,7 @@ describe("CoValueState", () => {
     const mockPeers = [peer1] as unknown as PeerState[];
 
     const state = CoValueState.Unknown(mockCoValueId);
-    const loadPromise = state.loadFromPeers(mockPeers);
+    const loadPromise = state.loadCoValue(mockStorageDriver, mockPeers);
 
     // Should attempt CO_VALUE_LOADING_CONFIG.MAX_RETRIES retries
     for (let i = 0; i < CO_VALUE_LOADING_CONFIG.MAX_RETRIES + 1; i++) {
@@ -292,7 +272,7 @@ describe("CoValueState", () => {
     const mockPeers = [peer1] as unknown as PeerState[];
 
     const state = CoValueState.Unknown(mockCoValueId);
-    const loadPromise = state.loadFromPeers(mockPeers);
+    const loadPromise = state.loadCoValue(mockStorageDriver, mockPeers);
 
     // Should attempt CO_VALUE_LOADING_CONFIG.MAX_RETRIES retries
     for (let i = 0; i < CO_VALUE_LOADING_CONFIG.MAX_RETRIES; i++) {
@@ -345,7 +325,7 @@ describe("CoValueState", () => {
     const mockPeers = [peer1] as unknown as PeerState[];
 
     const state = CoValueState.Unknown(mockCoValueId);
-    const loadPromise = state.loadFromPeers(mockPeers);
+    const loadPromise = state.loadCoValue(mockStorageDriver, mockPeers);
 
     for (let i = 0; i < CO_VALUE_LOADING_CONFIG.MAX_RETRIES; i++) {
       await vi.runAllTimersAsync();
@@ -390,7 +370,7 @@ describe("CoValueState", () => {
     );
 
     const state = CoValueState.Unknown(mockCoValueId);
-    const loadPromise = state.loadFromPeers([peer1, peer2]);
+    const loadPromise = state.loadCoValue(mockStorageDriver, [peer1, peer2]);
 
     for (let i = 0; i < CO_VALUE_LOADING_CONFIG.MAX_RETRIES; i++) {
       await vi.runAllTimersAsync();
@@ -439,7 +419,7 @@ describe("CoValueState", () => {
     peer1.closed = true;
 
     const state = CoValueState.Unknown(mockCoValueId);
-    const loadPromise = state.loadFromPeers([peer1, peer2]);
+    const loadPromise = state.loadCoValue(mockStorageDriver, [peer1, peer2]);
 
     for (let i = 0; i < CO_VALUE_LOADING_CONFIG.MAX_RETRIES; i++) {
       await vi.runAllTimersAsync();
@@ -467,7 +447,7 @@ describe("CoValueState", () => {
     );
 
     const state = CoValueState.Unknown(mockCoValueId);
-    const loadPromise = state.loadFromPeers([peer1]);
+    const loadPromise = state.loadCoValue(mockStorageDriver, [peer1]);
 
     for (let i = 0; i < CO_VALUE_LOADING_CONFIG.MAX_RETRIES * 2; i++) {
       await vi.runAllTimersAsync();

@@ -2,6 +2,7 @@ import { PeerState } from "./PeerState.js";
 import { CoValueCore } from "./coValueCore.js";
 import { RawCoID } from "./ids.js";
 import { logger } from "./logger.js";
+import { StorageDriver } from "./storage.js";
 import { PeerID } from "./sync.js";
 
 export const CO_VALUE_LOADING_CONFIG = {
@@ -13,8 +14,33 @@ export class CoValueUnknownState {
   type = "unknown" as const;
 }
 
-export class CoValueLoadingState {
-  type = "loading" as const;
+export class CoValueLoadingFromStorageState {
+  type = "loading-from-storage" as const;
+  private storageDriver: StorageDriver;
+  public id: RawCoID;
+
+  constructor(storageAdapter: StorageDriver, id: RawCoID) {
+    this.storageDriver = storageAdapter;
+    this.id = id;
+  }
+
+  async loadFromStorage(): Promise<CoValueCore | null> {
+    try {
+      const core = await this.storageDriver.get(this.id);
+
+      return core;
+    } catch (err) {
+      logger.error(`Failed to load coValue ${this.id} from storage`, {
+        error: err instanceof Error ? err.message : "",
+        stack: err instanceof Error ? (err.stack ?? null) : null,
+      });
+      return null;
+    }
+  }
+}
+
+export class CoValueLoadingFromPeersState {
+  type = "loading-from-peers" as const;
   private peers = new Map<
     PeerID,
     ReturnType<typeof createResolvablePromise<void>>
@@ -99,7 +125,8 @@ type CoValueStateAction =
 
 type CoValueStateType =
   | CoValueUnknownState
-  | CoValueLoadingState
+  | CoValueLoadingFromStorageState
+  | CoValueLoadingFromPeersState
   | CoValueAvailableState
   | CoValueUnavailableState;
 
@@ -116,16 +143,15 @@ export class CoValueState {
     return new CoValueState(id, new CoValueUnknownState());
   }
 
-  static Loading(id: RawCoID, peersIds: Iterable<PeerID>) {
-    return new CoValueState(id, new CoValueLoadingState(peersIds));
-  }
-
   static Available(coValue: CoValueCore) {
     return new CoValueState(coValue.id, new CoValueAvailableState(coValue));
   }
 
-  static Unavailable(id: RawCoID) {
-    return new CoValueState(id, new CoValueUnavailableState());
+  isLoading() {
+    return (
+      this.state.type === "loading-from-storage" ||
+      this.state.type === "loading-from-peers"
+    );
   }
 
   async getCoValue() {
@@ -173,11 +199,27 @@ export class CoValueState {
     this.resolve = undefined;
   }
 
-  async loadFromPeers(peers: PeerState[]) {
+  async loadCoValue(storageDriver: StorageDriver | null, peers: PeerState[]) {
     const state = this.state;
 
     if (state.type !== "unknown" && state.type !== "unavailable") {
       return;
+    }
+
+    if (storageDriver) {
+      const loadingState = new CoValueLoadingFromStorageState(
+        storageDriver,
+        this.id,
+      );
+      this.moveToState(loadingState);
+      const coValue = await loadingState.loadFromStorage();
+      if (coValue) {
+        this.moveToState(new CoValueAvailableState(coValue));
+        await loadCoValueFromPeers(this, getPeersWithoutErrors(peers, this.id));
+        return;
+      } else {
+        this.moveToState(new CoValueUnknownState());
+      }
     }
 
     if (peers.length === 0) {
@@ -192,9 +234,12 @@ export class CoValueState {
 
       // If we are in the loading state we move to a new loading state
       // to reset all the loading promises
-      if (this.state.type === "loading" || this.state.type === "unknown") {
+      if (
+        this.state.type === "loading-from-peers" ||
+        this.state.type === "unknown"
+      ) {
         this.moveToState(
-          new CoValueLoadingState(peersWithoutErrors.map((p) => p.id)),
+          new CoValueLoadingFromPeersState(peersWithoutErrors.map((p) => p.id)),
         );
       }
 
@@ -206,7 +251,7 @@ export class CoValueState {
       //
       // We may not enter the loading state if the coValue has become available in between
       // of the retries
-      if (currentState.type === "loading") {
+      if (currentState.type === "loading-from-peers") {
         await loadCoValueFromPeers(this, peersWithoutErrors);
 
         const result = await currentState.result;
@@ -235,7 +280,7 @@ export class CoValueState {
     }
 
     // If after the retries the coValue is still loading, we consider the load failed
-    if (this.state.type === "loading") {
+    if (this.state.type === "loading-from-peers") {
       this.moveToState(new CoValueUnavailableState());
     }
   }
@@ -245,7 +290,7 @@ export class CoValueState {
 
     switch (action.type) {
       case "available":
-        if (currentState.type === "loading") {
+        if (currentState.type === "loading-from-peers") {
           currentState.resolve(action.coValue);
         }
 
@@ -254,7 +299,7 @@ export class CoValueState {
 
         break;
       case "not-found-in-peer":
-        if (currentState.type === "loading") {
+        if (currentState.type === "loading-from-peers") {
           currentState.markAsUnavailable(action.peerId);
         }
 
@@ -303,9 +348,9 @@ async function loadCoValueFromPeers(
         });
     }
 
-    if (coValueEntry.state.type === "loading") {
+    if (coValueEntry.state.type === "loading-from-peers") {
       const timeout = setTimeout(() => {
-        if (coValueEntry.state.type === "loading") {
+        if (coValueEntry.state.type === "loading-from-peers") {
           logger.warn("Failed to load coValue from peer", {
             coValueId: coValueEntry.id,
             peerId: peer.id,

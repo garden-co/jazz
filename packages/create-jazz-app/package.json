@@ -23,7 +23,7 @@
     "typescript": "~5.6.2"
   },
   "scripts": {
-    "dev": "tsc --watch",
+    "dev": "tsc --watch  --sourceMap --outDir dist",
     "format-and-lint": "biome check .",
     "format-and-lint:fix": "biome check . --write",
     "build": "rm -rf ./dist && tsc --sourceMap --outDir dist",

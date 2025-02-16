@@ -127,3 +127,49 @@ export class IDBNode {
     return new IDBNode(await dbPromise, fromLocalNode, toLocalNode);
   }
 }
+
+export async function openDatabase() {
+  const dbPromise = new Promise<IDBDatabase>((resolve, reject) => {
+    const request = indexedDB.open(DATABASE_NAME, 4);
+    request.onerror = () => {
+      reject(request.error);
+    };
+    request.onsuccess = () => {
+      resolve(request.result);
+    };
+    request.onupgradeneeded = async (ev) => {
+      const db = request.result;
+      if (ev.oldVersion === 0) {
+        const coValues = db.createObjectStore("coValues", {
+          autoIncrement: true,
+          keyPath: "rowID",
+        });
+
+        coValues.createIndex("coValuesById", "id", {
+          unique: true,
+        });
+
+        const sessions = db.createObjectStore("sessions", {
+          autoIncrement: true,
+          keyPath: "rowID",
+        });
+
+        sessions.createIndex("sessionsByCoValue", "coValue");
+        sessions.createIndex("uniqueSessions", ["coValue", "sessionID"], {
+          unique: true,
+        });
+
+        db.createObjectStore("transactions", {
+          keyPath: ["ses", "idx"],
+        });
+      }
+      if (ev.oldVersion <= 1) {
+        db.createObjectStore("signatureAfter", {
+          keyPath: ["ses", "idx"],
+        });
+      }
+    };
+  });
+
+  return dbPromise;
+}
