@@ -3,7 +3,12 @@ import { SERVER_URL } from './common';
 
 test.describe('Server Shutdown', () => {
   test('should gracefully shutdown server', async ({ request }) => {
-    const response = await request.post(`${SERVER_URL}/stop`);
+    const response = await request.post(`${SERVER_URL}/stop`, {
+      headers: {
+        'Content-Type': 'application/json'
+      }
+    });
+    console.log(`Response: ${JSON.stringify(response)}`);
     expect(response.ok()).toBeTruthy();
     
     const data = await response.json();

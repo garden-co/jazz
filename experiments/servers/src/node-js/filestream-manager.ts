@@ -1,5 +1,6 @@
 import fs from "fs";
 import { Response } from "express";
+import { RawReplyDefaultExpression } from "fastify"
 import {
     CoValue,
     WebSocketResponse,
@@ -8,6 +9,7 @@ import {
     addCoValue,
     CHUNK_SIZE,
     uWebSocketResponse,
+    FastifyResponseWrapper
 } from "../util";
 import logger from "../util/logger";
 
@@ -34,7 +36,7 @@ interface StreamOptions {
 
 interface StreamTarget {
     type: "http" | "websocket";
-    res?: Response;
+    res?: Response | RawReplyDefaultExpression;
     wsr?: WebSocketResponse | uWebSocketResponse;
 }
 
@@ -48,7 +50,7 @@ export class FileStreamManager {
     // upload methods
     async chunkFileUpload(
         payload: UploadBody,
-        res: WebSocketResponse | uWebSocketResponse | Response,
+        res: WebSocketResponse | uWebSocketResponse | Response | FastifyResponseWrapper,
     ) {
         const { uuid, filename, base64, chunk, chunks } = payload;
         const chunkIndex = parseInt(chunk, 10);
@@ -206,7 +208,14 @@ export class FileStreamManager {
             if (target.type === "websocket" && target.wsr) {
                 target.wsr.status(404).json({ m: validation.error });
             } else if (target.type === "http" && target.res) {
-                target.res.status(404).json({ m: validation.error });
+                if (target.res instanceof Response) {
+                    (target.res as Response).status(404).json({ m: validation.error });
+                } else {
+                    const r = (target.res as RawReplyDefaultExpression);
+                    r.statusCode = 404;
+                    r.setHeader('Content-Type', 'application/json');
+                    r.end(JSON.stringify({ m: validation.error }));
+                }
             }
             return;
         }

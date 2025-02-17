@@ -9,6 +9,7 @@ import { ServerResponse } from 'http';
 import { Response } from "express";
 import logger from "./logger";
 import os from "os";
+import { FastifyReply } from "fastify";
 
 export const PORT = process.env.PORT || 3000;
 export const CHUNK_SIZE = 100 * 1024; // 100KB chunk
@@ -438,6 +439,20 @@ export class BenchmarkStore {
     }
 }
 
+export class FastifyResponseWrapper {
+    constructor(protected res: FastifyReply) {}
+
+    status(code: number): this {
+        this.res.statusCode = code;
+        return this;
+    }
+
+    json(data: any): void {
+        this.res.header('Content-Type', 'application/json');
+        this.res.send(JSON.stringify(data));
+    }
+}
+
 export class WebSocketResponseWrapper {
     constructor(protected res: ServerResponse) {}
 
@@ -467,7 +482,7 @@ export class uWebSocketResponseWrapper {
     }
 }
 
-export function shutdown(res: Response | WebSocketResponseWrapper | uWebSocketResponseWrapper, benchmarkStore: BenchmarkStore, exportFileName: string, callback?: () => void) {
+export function shutdown(res: Response | FastifyResponseWrapper | WebSocketResponseWrapper | uWebSocketResponseWrapper, benchmarkStore: BenchmarkStore, exportFileName: string, callback?: () => void) {
     benchmarkStore.exportToCSVFile(exportFileName);
     res.status(200).json({ m: `Performance data written to CSV. Server shutting down.` });
 
