@@ -2,13 +2,15 @@ import { test, expect } from '@playwright/test';
 import { SERVER_URL } from './common';
 
 test.describe('Server Shutdown', () => {
-  test('should gracefully shutdown server', async ({ request }) => {
+  test('should gracefully shutdown server', async ({ context, request }) => {
+    await context.setExtraHTTPHeaders({});
+
     const response = await request.post(`${SERVER_URL}/stop`, {
       headers: {
-        'Content-Type': 'application/json'
+        'Content-Type': 'text/plain; charset=utf-8'
       }
     });
-    console.log(`Response: ${JSON.stringify(response)}`);
+
     expect(response.ok()).toBeTruthy();
     
     const data = await response.json();

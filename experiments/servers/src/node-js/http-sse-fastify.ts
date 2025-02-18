@@ -30,6 +30,7 @@ interface Client {
 }
 let clients: Client[] = [];
 let exportFileName: string;
+let isHttp2Server = false;
 
 function broadcast(uuid: string): void {
     const event = events.get(uuid) as MutationEvent;
@@ -196,13 +197,16 @@ async function routes(fastify: FastifyInstance, options = {}) {
     }
     fastify.get<{ Params: SubscribeParams }>("/covalue/:uuid/subscribe/:ua", async (request: FastifyRequest<{ Params: SubscribeParams }>, reply: FastifyReply) => {
         const { uuid, ua } = request.params;
+        const headers: Record<string, string> = {
+            "Content-Type": "text/event-stream",
+            "Cache-Control": "no-cache",
+        };
 
-        reply.hijack(); // deferring to the web server will close the connection quickly hence the hijack
-        reply.raw.writeHead(200, {
-            'Content-Type': 'text/event-stream',
-            'Cache-Control': 'no-cache',
-            'Connection': 'keep-alive',
-        });
+        if (!isHttp2Server) {
+            // Only valid for HTTP/1.1 & below. Invalid in HTTP/2 & HTTP/3. See: https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Keep-Alive
+            headers["Connection"] = "keep-alive";
+        }
+        reply.raw.writeHead(200, headers);
 
         logger.debug(`[Client-#${ua}] Opening an event stream on: ${uuid}.`);
         const client: Client = {
@@ -280,6 +284,7 @@ export async function createWebServer(isHttp2: boolean, useTLS: boolean = true) 
 
     try {
         if (isHttp2) {
+            isHttp2Server = true;
             exportFileName = "A3_NodeServer-HTTP2-SSE.csv";
             await fastify.listen({ port: +PORT, host: '0.0.0.0' });
             logger.info(
