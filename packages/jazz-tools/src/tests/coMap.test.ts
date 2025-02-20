@@ -1,5 +1,5 @@
 import { WasmCrypto } from "cojson/crypto/WasmCrypto";
-import { describe, expect, expectTypeOf, test } from "vitest";
+import { describe, expect, expectTypeOf, test, vi } from "vitest";
 import { Group, randomSessionProvider } from "../exports.js";
 import {
   Account,
@@ -10,7 +10,7 @@ import {
   createJazzContextFromExistingCredentials,
   isControlledAccount,
 } from "../index.js";
-import { setupTwoNodes } from "./utils.js";
+import { setupTwoNodes, waitFor } from "./utils.js";
 
 const connectedPeers = cojsonInternals.connectedPeers;
 
@@ -1044,5 +1044,90 @@ describe("Creating and finding unique CoMaps", async () => {
     const foundAlice = TestMap.findUnique({ name: "Alice" }, group.id, me);
 
     expect(foundAlice).toEqual(alice.id);
+  });
+
+  test("doesn't break on Map.Record key deletion when the key is referenced in the depth", async () => {
+    class JazzProfile extends CoMap {
+      firstName = co.string;
+    }
+
+    class JazzySnapStore extends CoMap.Record(co.ref(JazzProfile)) {}
+
+    const me = await Account.create({
+      creationProps: { name: "Tester McTesterson" },
+      crypto: Crypto,
+    });
+
+    const snapStore = JazzySnapStore.create(
+      {
+        profile1: JazzProfile.create({ firstName: "John" }, { owner: me }),
+        profile2: JazzProfile.create({ firstName: "John" }, { owner: me }),
+      },
+      { owner: me },
+    );
+
+    const spy = vi.fn();
+    const unsub = snapStore.subscribe({ profile1: {}, profile2: {} }, spy);
+
+    await waitFor(() => expect(spy).toHaveBeenCalled());
+
+    spy.mockClear();
+    delete snapStore.profile1;
+
+    expect(Object.keys(snapStore)).toEqual(["profile2"]);
+
+    await waitFor(() => expect(spy).toHaveBeenCalled());
+
+    unsub();
+
+    const { profile1 } = await snapStore.ensureLoaded({
+      profile1: {},
+    });
+
+    expect(profile1).toBeUndefined();
+  });
+
+  test("throw when calling ensureLoaded on a ref that's required but missing", async () => {
+    class JazzProfile extends CoMap {
+      firstName = co.string;
+    }
+
+    class JazzRoot extends CoMap {
+      profile = co.ref(JazzProfile);
+    }
+
+    const me = await Account.create({
+      creationProps: { name: "Tester McTesterson" },
+      crypto: Crypto,
+    });
+
+    const root = JazzRoot.create(
+      // @ts-expect-error missing required ref
+      {},
+      { owner: me },
+    );
+
+    await expect(
+      root.ensureLoaded({
+        profile: {},
+      }),
+    ).rejects.toThrow("Failed to deeply load CoValue " + root.id);
+  });
+
+  test("throw when calling ensureLoaded on a ref that is not defined in the schema", async () => {
+    class JazzRoot extends CoMap {}
+
+    const me = await Account.create({
+      creationProps: { name: "Tester McTesterson" },
+      crypto: Crypto,
+    });
+
+    const root = JazzRoot.create({}, { owner: me });
+
+    await expect(
+      root.ensureLoaded({
+        profile: {},
+      }),
+    ).rejects.toThrow("Failed to deeply load CoValue " + root.id);
   });
 });

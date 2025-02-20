@@ -295,6 +295,7 @@ export function subscribeToCoValue<V extends CoValue, Depth>(
       .then((value) => subscribe(value))
       .catch((e) => {
         console.error("Failed to load / subscribe to CoValue", e);
+        onUnavailable?.();
       });
   }
 
