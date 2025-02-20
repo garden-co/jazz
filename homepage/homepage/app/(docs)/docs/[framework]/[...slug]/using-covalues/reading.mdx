@@ -1,0 +1,207 @@
+import { CodeGroup, ComingSoon, ContentByFramework } from "@/components/forMdx";
+
+# Reading from CoValues
+
+Once you have a CoValue, reading its data is straightforward. Fields work just like regular JavaScript properties:
+
+```ts
+class Ship extends CoMap {
+  name = co.string;
+  crew = co.ref(ListOfCrew);
+  status = co.literal("docked", "in-transit", "lost");
+}
+
+// Reading basic fields
+console.log(ship.name);         // "Nostromo"
+console.log(ship.status);       // "in-transit"
+
+// Reading from lists
+for (const member of ship.crew) {
+  console.log(member.name);
+}
+
+// Checking if an optional field exists
+if (ship.captain) {
+  console.log(ship.captain.name);
+}
+```
+
+## Different Types of CoValues
+
+### CoMaps
+Work like JavaScript objects:
+```ts
+class CrewMember extends CoMap {
+  name = co.string;
+  role = co.string;
+  active = co.boolean;
+}
+
+console.log(member.name);          // "Ellen Ripley"
+console.log(member.role);          // "Warrant Officer"
+console.log(member.active);        // true
+```
+
+### CoLists
+Work like JavaScript arrays:
+```ts
+class CargoManifest extends CoList.Of(co.ref(CargoItem)) {}
+
+// Access items by index
+console.log(manifest[0].description);
+
+// Use array methods
+manifest.forEach(item => {
+  console.log(item.weight);
+});
+
+// Get list length
+console.log(manifest.length);
+```
+
+### CoFeeds
+Access feed items for specific users:
+```ts
+// Get latest status for each crew member
+for (const status of locationFeed.latestByUser()) {
+  console.log(status.location);
+}
+
+// Get all status updates from one crew member
+for (const status of locationFeed.byUser(ripley)) {
+  console.log(status.timestamp);
+}
+```
+
+# Type Safety with CoValues
+
+CoValues are fully typed in TypeScript, giving you the same autocomplete and error checking you'd expect from regular objects. Here's how it works:
+
+```ts
+class Colony extends CoMap {
+  name = co.string;
+  population = co.number;
+  securityLevel = co.literal("green", "yellow", "red");
+  administrator = co.optional.ref(Personnel);
+  sectors = co.ref(ListOfSectors);
+}
+
+// TypeScript knows exactly what fields exist
+const colony = await Colony.load(lv426Id, { loadAs: burke });
+
+colony.name = "Hadley's Hope";      // ✓ string
+colony.population = "lost";         // ✗ Type error: expected number
+colony.securityLevel = "maximum";   // ✗ Type error: must be green/yellow/red
+
+// Optional fields are handled safely
+if (colony.administrator) {
+  console.log(colony.administrator.name);  // TypeScript knows this is safe
+}
+
+// Lists with specific item types
+colony.sectors.forEach(sector => {
+  // TypeScript knows each sector's structure
+  console.log(`${sector.id}: ${sector.status}`);
+});
+```
+
+## Loading States
+
+When you load a CoValue, TypeScript helps you handle different states:
+
+```ts
+// Type shows this might be undefined while loading
+const colony = useCoState(Colony, lv426Id, { 
+  resolve: { sectors: true } 
+});
+
+if (!colony) {
+  return <div>Loading colony data...</div>;
+}
+
+// TypeScript now knows colony exists and has sectors loaded
+console.log(colony.sectors.length);
+```
+
+# Accessing Nested CoValues
+
+Nested CoValues need special handling for loading and access. Here's how it works in the current version:
+
+```ts
+class Colony extends CoMap {
+  name = co.string;
+  sectors = co.ref(ListOfSectors);
+  mainframe = co.optional.ref(Computer);
+}
+
+class Sector extends CoMap {
+  id = co.string;
+  status = co.literal("secure", "compromised", "unknown");
+  motionTrackers = co.ref(ListOfSensors);
+}
+```
+
+## Current Loading Pattern
+
+```ts
+// Basic load - sectors won't be loaded yet
+const colony = await Colony.load(lv426Id, burke);
+
+// Load with nested data
+const colonyWithSectors = await Colony.load(lv426Id, burke, { sectors: {} });
+
+// Deep load pattern
+const fullyLoaded = await Colony.load(lv426Id, burke, {
+  sectors: { 
+    motionTrackers: {}
+  }
+});
+```
+
+## Handling Loading States
+
+Right now, unloaded references return undefined:
+
+```ts
+// Best current practice for handling nested data
+function SectorStatus({ colony }: { colony: Colony }) {
+  if (!colony.sectors) {
+    return <div>Loading sectors...</div>;
+  }
+
+  return (
+    <div>
+      {colony.sectors.map(sector => {
+        // Handle potentially missing nested data
+        if (!sector.motionTrackers) {
+          return <div key={sector.id}>Loading sensors...</div>;
+        }
+
+        return (
+          <div key={sector.id}>
+            Sector {sector.id}: {sector.motionTrackers.length} sensors active
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+```
+
+Note: We're working on making these patterns more explicit and robust. We'll provide clearer loading states and better error handling patterns. For now, be defensive with your checks for `undefined`.
+
+```ts
+// Current safest pattern for deep access
+function getMotionReadings(colony: Colony, sectorId: string) {
+  const sector = colony.sectors?.find(s => s.id === sectorId);
+  const trackers = sector?.motionTrackers;
+  
+  if (!trackers) {
+    return null; // Could mean loading or error
+  }
+
+  return trackers.map(t => t.reading);
+}
+```
+
+Stay tuned for updates to this API - we're working on making these patterns more robust and explicit.

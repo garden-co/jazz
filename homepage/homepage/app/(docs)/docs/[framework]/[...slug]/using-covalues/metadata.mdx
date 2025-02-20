@@ -1,0 +1,181 @@
+# Metadata & time-travel
+
+# Working with Edit History Metadata
+
+CoValues track who made each change and when. Every edit has metadata attached to it:
+
+```ts
+class IncidentReport extends CoMap {
+  description = co.string;
+  severity = co.literal("low", "medium", "high");
+  location = co.string;
+}
+
+// Get the full edit history for a field
+for (const edit of report.editsAt("severity")) {
+  console.log({
+    author: edit.by,        // Account/agent that made the change
+    timestamp: edit.at,     // When the change happened 
+    value: edit.value,      // What was changed
+    txId: edit.tx           // Groups related changes
+  });
+}
+```
+
+## Finding Related Changes
+
+Transaction IDs help you find changes that were made together:
+
+```ts
+// Find all changes made in the same transaction
+const lastEdit = report.lastEditAt("severity");
+if (lastEdit) {
+  // Get all fields changed in this transaction
+  for (const field of report.fields()) {
+    const edit = report.lastEditAt(field);
+    if (edit && edit.tx === lastEdit.tx) {
+      console.log(`${field} was changed to ${edit.value}`);
+    }
+  }
+}
+```
+
+## Common Patterns
+
+Building an audit trail:
+```ts
+function getAuditLog(report: IncidentReport) {
+  const changes = [];
+  
+  for (const field of report.fields()) {
+    for (const edit of report.editsAt(field)) {
+      changes.push({
+        field,
+        ...edit,
+        timestamp: edit.at.toISOString()
+      });
+    }
+  }
+  
+  // Sort by timestamp
+  return changes.sort((a, b) => 
+    b.timestamp.localeCompare(a.timestamp)
+  );
+}
+```
+
+All changes are tracked automatically - this history is a core feature of CoValues. Use it to understand how your data evolved over time.
+
+# Edit History & Time Travel
+
+CoValues track their entire history of changes. You can see who changed what and when, or even view past states:
+
+```ts
+class Marine extends CoMap {
+  name = co.string;
+  status = co.literal("active", "inactive", "MIA");
+  lastKnownLocation = co.string;
+}
+
+// Get the last edit for a field
+const lastEdit = marine.lastEditAt("status");
+if (lastEdit) {
+  console.log({
+    value: lastEdit.value,    // What it was changed to
+    by: lastEdit.by,          // Who made the change
+    at: lastEdit.at,          // When it was changed
+    tx: lastEdit.tx           // Transaction ID
+  });
+}
+
+// See all edits for a field
+for (const edit of marine.editsAt("status")) {
+  console.log(`${edit.at}: ${edit.value} (by ${edit.by})`);
+}
+
+// Get a specific edit by index
+const previousEdit = marine.nthEditAt("status", 1); // Second most recent
+```
+
+# Time Travel
+
+Looking into the past can help you understand how things changed - perfect for audit logs, debugging, or showing user activity:
+
+```ts
+class MotionTracker extends CoMap {
+  location = co.string;
+  status = co.literal("active", "offline", "unknown");
+  lastSignal = co.Date;
+}
+
+// See when a tracker went offline
+function findFailurePoint(tracker: MotionTracker) {
+  for (const edit of tracker.editsAt("status")) {
+    if (edit.value === "offline") {
+      // What else changed around this time?
+      const contextState = tracker.atTime(edit.at);
+      console.log({
+        failureTime: edit.at,
+        lastKnownSignal: contextState.lastSignal,
+        reportedBy: edit.by
+      });
+    }
+  }
+}
+```
+
+## Common Use Cases
+
+Activity feeds:
+```ts
+function getRecentActivity(colony: Colony) {
+  const activity = [];
+  const hourAgo = new Date(Date.now() - 3600000);
+  
+  for (const field of colony.fields()) {
+    for (const edit of colony.editsAt(field)) {
+      if (edit.at > hourAgo) {
+        activity.push({
+          type: 'field_change',
+          field,
+          value: edit.value,
+          by: edit.by,
+          at: edit.at
+        });
+      }
+    }
+  }
+  
+  return activity.sort((a, b) => b.at - a.at);
+}
+```
+
+Debugging state changes:
+```ts
+// Find out when a door was last sealed
+function checkDoorHistory(airlock: Airlock) {
+  const pastStates = [];
+  
+  // Check every minute for the last hour
+  for (let mins = 0; mins < 60; mins++) {
+    const timePoint = new Date(Date.now() - mins * 60000);
+    const state = airlock.atTime(timePoint);
+    pastStates.push({
+      time: timePoint,
+      sealed: state.sealed,
+      pressure: state.pressure
+    });
+  }
+  
+  return pastStates;
+}
+```
+
+## Best Practices
+
+- Cache historical queries if you're displaying them in UI
+- Be specific about time ranges you care about
+- Remember that accessing history requires loading the CoValue
+- Consider using timestamps from your data rather than scanning all edits
+
+Time travel is great for understanding how you got here, but keep queries focused on the range of time that matters to your use case.

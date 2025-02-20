@@ -1,0 +1,72 @@
+import { CodeGroup, ComingSoon, ContentByFramework } from "@/components/forMdx";
+
+# Creation & Ownership
+
+CoValues are collaborative by nature - anything you create can be shared and synced with others. Who gets to read or change each CoValue is controlled by its owner - either an individual `account` or a shared `group`.
+
+## Creating CoValues
+
+Every CoValue starts with a schema - a class that defines what data it can hold. Here's a simple example:
+
+<CodeGroup>
+```ts
+class Marine extends CoMap {
+  name = co.string;
+  rank = co.string;
+  status = co.literal("active", "inactive", "KIA");
+}
+
+// Create a new marine
+const marine = Marine.create({ 
+  name: "Dwayne Hicks",
+  rank: "Corporal",
+  status: "active"
+});
+
+// Create another, owned by the USCM squad
+const squadLeader = Marine.create({
+  name: "Al Apone",
+  rank: "Sergeant",
+  status: "active"
+}, {
+  owner: uscmSquad
+});
+```
+</CodeGroup>
+
+When you create a CoValue, you provide its initial data and optionally specify who owns it. The data must match the schema you defined - TypeScript will help ensure you get this right.
+
+# Ownership & Access Control
+
+Every CoValue needs an owner to control who can access it. An owner can be an individual Account, but it's usually a Group since that lets you share with multiple people.
+
+## Groups & Roles
+
+Groups have members with different roles that control what they can do:
+
+```ts
+// Create a group
+const uscmSquad = Group.create();
+
+// Add squad members with different roles
+uscmSquad.addMember(lieutenant, "admin");    // Lt. Gorman thinks he's in charge
+uscmSquad.addMember(sergeant, "writer");     // Sgt. Apone actually runs things
+uscmSquad.addMember(bishop, "reader");       // Artificial persons have restricted access
+
+// Create a mission brief owned by the squad
+const missionBrief = Document.create({
+  title: "LV-426 Colony Status Report",
+  content: "Colony has gone dark. Marine unit requested for investigation.",
+  attachments: ListOfAttachments.create([])
+}, {
+  owner: uscmSquad
+});
+```
+
+Each role has specific permissions:
+- `admin`: Full control including managing members
+- `writer`: Can modify content
+- `reader`: Can only read content
+- `writerOnly`: Can only write to the CoValue, not read it
+
+For more details about groups and permissions, check out the [Groups & Permissions guide](/docs/groups/permissions).

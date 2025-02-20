@@ -108,12 +108,12 @@ export const docNavigationItems = [
       {
         name: "Creation & ownership",
         href: "/docs/using-covalues/creation",
-        done: 0,
+        done: 50,
       },
       {
         name: "Reading",
         href: "/docs/using-covalues/reading",
-        done: 0,
+        done: 50,
       },
       {
         name: "Subscribing & deep loading",
@@ -123,12 +123,12 @@ export const docNavigationItems = [
       {
         name: "Writing & deleting",
         href: "/docs/using-covalues/writing",
-        done: 0,
+        done: 50,
       },
       {
         name: "Metadata & time-travel",
         href: "/docs/using-covalues/metadata",
-        done: 0,
+        done: 50,
       },
     ],
   },

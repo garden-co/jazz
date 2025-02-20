@@ -1,0 +1,213 @@
+# Writing & deleting CoValues
+
+## Writing to CoValues
+
+Once you have a CoValue, modifying it is straightforward. You can update fields like regular JavaScript properties:
+
+```ts
+class Marine extends CoMap {
+  name = co.string;
+  status = co.literal("ready", "injured", "unknown");
+  lastKnownLocation = co.optional.string;
+}
+
+// Simple field updates
+marine.status = "injured";                 // Direct assignment
+marine.lastKnownLocation = "Sub-Level 3";  // Optional field
+
+// Multiple updates
+marine.update({
+  status: "unknown",
+  lastKnownLocation: null
+});
+```
+
+### Working with Lists
+
+CoLists support familiar array operations:
+
+```ts
+class Squad extends CoMap {
+  name = co.string;
+  members = co.ref(ListOfMarines);
+}
+
+// Add items
+squad.members.push(Marine.create({
+  name: "Vasquez",
+  status: "ready"
+}));
+
+// Remove items
+squad.members.splice(2, 1);  // Remove third marine
+
+// Update items
+squad.members[0].status = "unknown";
+
+// Bulk updates
+squad.members.forEach(marine => {
+  marine.status = "ready";
+});
+```
+
+Changes sync automatically to everyone with access. Any edits you make are immediately visible in your local view and propagate to other users as they sync.
+
+## Concurrent Edits
+
+CoValues use CRDTs to handle concurrent edits smoothly. In most cases, you don't need to think about conflicts - Jazz handles them automatically:
+
+```ts
+class MotionTracker extends CoMap {
+  location = co.string;
+  status = co.literal("active", "offline");
+  readings = co.ref(ListOfReadings);
+}
+
+// Multiple users can edit simultaneously
+// Last-write-wins for simple fields
+tracker.status = "offline";        // Local change is immediate
+tracker.location = "Sector 12B";   // Syncs automatically
+
+// Lists handle concurrent edits too
+tracker.readings.push(Reading.create({
+  timestamp: new Date(),
+  movement: "multiple signatures"
+}));
+```
+
+### Transaction Groups
+
+When you need multiple changes to happen together, you can use transactions:
+
+```ts
+// Group related changes
+CoValue.transaction(() => {
+  // These changes are atomic
+  marine.status = "unknown";
+  marine.lastKnownLocation = "Sub-Level 5";
+  incidentLog.addEntry("Lost contact with " + marine.name);
+});
+```
+
+### Error Handling
+
+Write operations can fail for several reasons:
+
+```ts
+try {
+  marine.status = "ready";
+} catch (error) {
+  if (error.message.includes("permission")) {
+    console.error("Not authorized to update marine status");
+  } else {
+    console.error("Failed to update status:", error);
+  }
+}
+
+// For multiple operations
+try {
+  CoValue.transaction(() => {
+    squad.members.push(newMarine);
+    missionLog.recordChange("Added marine to squad");
+  });
+} catch (error) {
+  // If any part fails, none of the changes are applied
+  console.error("Failed to update squad:", error);
+}
+```
+
+## Deleting CoValues
+
+There are a few ways to delete CoValues, from simple field removal to full cleanup:
+
+```ts
+class Ship extends CoMap {
+  crew = co.ref(ListOfCrew);
+  cargo = co.optional.ref(CargoManifest);
+  missionLog = co.ref(Log);
+}
+
+// Remove a reference
+ship.cargo = null;  // Removes the reference but cargo still exists
+
+// Remove from a list
+ship.crew.splice(2, 1);  // Removes third crew member from list
+
+// Delete a CoValue entirely
+await ship.missionLog.delete();  // Completely removes the log
+```
+
+### Cascading Deletes
+
+When you delete a CoValue, you probably want to clean up related data too:
+
+```ts
+// Delete everything under a colony
+async function nukeFromOrbit(colony: Colony) {
+  try {
+    await CoValue.transaction(async () => {
+      // Delete all sectors and their contents first
+      for (const sector of colony.sectors) {
+        await sector.delete();  // Will fail if sectors aren't loaded
+      }
+      // Then delete the colony itself
+      await colony.delete();
+    });
+    console.log("Site has been sterilized");
+  } catch (error) {
+    console.error("Colony deletion failed:", error);
+  }
+}
+```
+
+### Best Practices
+
+- Load everything you plan to delete
+- Use transactions for complex deletions
+- Check permissions before attempting deletes 
+- Consider soft deletes for recoverable data
+
+## Removing Data in CoValues
+
+You can delete fields from any CoMap:
+
+```ts
+class Ship extends CoMap {
+  name = co.string;
+  crew = co.ref(ListOfCrew);
+  cargo = co.optional.ref(CargoManifest);
+}
+
+// Delete fields from a regular CoMap
+delete ship.cargo;  // Removes the cargo reference
+
+// Delete from a record-type CoMap
+class Inventory extends CoMap.Record(co.ref(Item)) {}
+delete inventory["motion-tracker"];  // Removes specific item
+```
+
+For CoLists, use array methods:
+
+```ts
+// Remove from lists using splice
+ship.crew.splice(2, 1);  // Removes third crew member
+```
+
+### Restoring Data
+
+For data you might want to restore later, consider using status fields instead:
+
+```ts
+class Marine extends CoMap {
+  name = co.string;
+  deleted = co.boolean;
+}
+
+// Mark as deleted
+marine.deleted = true;
+
+// Restore
+marine.deleted = false; // Tada~!
+```
+
+Removed data remains in the edit history. If you need to handle sensitive information, plan your data model accordingly.
