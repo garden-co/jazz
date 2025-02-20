@@ -128,11 +128,17 @@ export class BrowserPasskeyAuth {
             name: username + ` (${new Date().toLocaleString()})`,
             displayName: username,
           },
-          pubKeyCredParams: [{ alg: -7, type: "public-key" }],
+          pubKeyCredParams: [
+            { alg: -7, type: "public-key" },
+            { alg: -8, type: "public-key" },
+            { alg: -37, type: "public-key" },
+            { alg: -257, type: "public-key" },
+          ],
           authenticatorSelection: {
-            authenticatorAttachment: "platform",
+            authenticatorAttachment: "cross-platform",
             requireResidentKey: true,
             residentKey: "required",
+            userVerification: "preferred",
           },
           timeout: 60000,
           attestation: "direct",
@@ -151,7 +157,9 @@ export class BrowserPasskeyAuth {
           rpId: this.appHostname,
           allowCredentials: [],
           timeout: 60000,
+          userVerification: "preferred",
         },
+        mediation: "optional",
       });
 
       return value as
