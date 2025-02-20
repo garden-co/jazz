@@ -1,0 +1,39 @@
+import { CodeGroup } from '@/components/forMdx'
+
+# Jazz Inspector
+
+[Jazz Inspector](https://inspector.jazz.tools) is a tool to visually inspect a Jazz account or other CoValues.
+
+For now, you can get your account credentials from the `jazz-logged-in-secret` local storage key from within your Jazz app.
+
+[https://inspector.jazz.tools](https://inspector.jazz.tools)
+
+## Exporting current account to Inspector from your app
+
+In development mode, you can launch the Inspector from your Jazz app to inspect your account by pressing `Cmd+J`.
+
+## Embedding the Inspector widget into your app
+
+Alternatively, you can embed the Inspector directly into your app, so you don't need to open a separate window.
+
+Install the package.
+
+<CodeGroup>
+```sh
+npm install jazz-inspector
+```
+</CodeGroup>
+
+Render the component within your `JazzProvider`.
+
+<CodeGroup>
+```sh
+import { JazzInspector } from "jazz-inspector";
+
+<JazzProvider> // old
+  <JazzInspector />
+</JazzProvider> // old
+```
+</CodeGroup>
+
+Check out the [music player app](https://github.com/garden-co/jazz/blob/main/examples/music-player/src/2_main.tsx) for a full example.

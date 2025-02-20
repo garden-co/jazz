@@ -29,6 +29,11 @@ export const docNavigationItems = [
         href: "/docs/ai-tools",
         done: 100,
       },
+      {
+        name: "Inspector",
+        href: "/docs/inspector",
+        done: 100,
+      },
     ],
   },
   {
