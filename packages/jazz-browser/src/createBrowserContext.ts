@@ -1,4 +1,4 @@
-import { LSMStorage, LocalNode, Peer, RawAccountID } from "cojson";
+import { LocalNode, Peer, RawAccountID } from "cojson";
 import { IDBStorage } from "cojson-storage-indexeddb";
 import { WebSocketPeerWithReconnection } from "cojson-transport-ws";
 import { WasmCrypto } from "cojson/crypto/WasmCrypto";
@@ -19,8 +19,6 @@ import {
   createAnonymousJazzContext,
 } from "jazz-tools";
 import { createJazzContext } from "jazz-tools";
-import { OPFSFilesystem } from "./OPFSFilesystem.js";
-import { StorageConfig, getStorageOptions } from "./storageOptions.js";
 import { setupInspector } from "./utils/export-account-inspector.js";
 
 setupInspector();
@@ -28,7 +26,7 @@ setupInspector();
 export type BaseBrowserContextOptions = {
   sync: SyncConfig;
   reconnectionTimeout?: number;
-  storage?: StorageConfig;
+  storage?: "indexedDB";
   crypto?: CryptoProvider;
   authSecretStorage: AuthSecretStorage;
 };
@@ -50,22 +48,9 @@ async function setupPeers(options: BaseBrowserContextOptions) {
   const crypto = options.crypto || (await WasmCrypto.create());
   let node: LocalNode | undefined = undefined;
 
-  const { useSingleTabOPFS, useIndexedDB } = getStorageOptions(options.storage);
-
   const peersToLoadFrom: Peer[] = [];
 
-  if (useSingleTabOPFS) {
-    peersToLoadFrom.push(
-      await LSMStorage.asPeer({
-        fs: new OPFSFilesystem(crypto),
-        // trace: true,
-      }),
-    );
-  }
-
-  if (useIndexedDB) {
-    peersToLoadFrom.push(await IDBStorage.asPeer());
-  }
+  peersToLoadFrom.push(await IDBStorage.asPeer());
 
   if (options.sync.when === "never") {
     return {

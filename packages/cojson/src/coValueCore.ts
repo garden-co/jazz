@@ -200,7 +200,11 @@ export class CoValueCore {
     newTransactions: Transaction[],
     givenExpectedNewHash: Hash | undefined,
     newSignature: Signature,
-    skipVerify: boolean = false,
+    options: {
+      skipVerify?: boolean;
+      skipStorage?: boolean;
+      // skipPeerSync?: boolean; TODO
+    } = {},
   ): Result<true, TryAddTransactionsError> {
     return this.node
       .resolveAccountAgent(
@@ -225,7 +229,7 @@ export class CoValueCore {
         }
 
         if (
-          skipVerify !== true &&
+          options.skipVerify !== true &&
           !this.crypto.verify(newSignature, expectedNewHash, signerID)
         ) {
           return err({
@@ -244,6 +248,7 @@ export class CoValueCore {
           expectedNewHash,
           newStreamingHash,
           "immediate",
+          options.skipStorage ?? false,
         );
 
         return ok(true as const);
@@ -257,6 +262,7 @@ export class CoValueCore {
     expectedNewHash: Hash,
     newStreamingHash: StreamingHash,
     notifyMode: "immediate" | "deferred",
+    skipStorage: boolean,
   ) {
     if (this.node.crashed) {
       throw new Error("Trying to add transactions after node is crashed");
@@ -297,6 +303,10 @@ export class CoValueCore {
       lastSignature: newSignature,
       signatureAfter: signatureAfter,
     });
+
+    if (!skipStorage) {
+      this.node.storageDriver?.set(this);
+    }
 
     if (
       this._cachedContent &&
@@ -460,7 +470,7 @@ export class CoValueCore {
       [transaction],
       expectedNewHash,
       signature,
-      true,
+      { skipVerify: true },
     )._unsafeUnwrap({ withStackTrace: true });
 
     if (success) {

@@ -28,6 +28,7 @@ import {
 import { AgentSecret, CryptoProvider } from "./crypto/crypto.js";
 import { AgentID, RawCoID, SessionID, isAgentID } from "./ids.js";
 import { logger } from "./logger.js";
+import { StorageAdapter, StorageDriver } from "./storage.js";
 import { Peer, PeerID, SyncManager } from "./sync.js";
 import { expectGroup } from "./typeUtils/expectGroup.js";
 
@@ -54,6 +55,8 @@ export class LocalNode {
   /** @category 3. Low-level */
   syncManager = new SyncManager(this);
 
+  storageDriver: StorageDriver | null;
+
   crashed: Error | undefined = undefined;
 
   /** @category 3. Low-level */
@@ -61,10 +64,14 @@ export class LocalNode {
     account: ControlledAccountOrAgent,
     currentSessionID: SessionID,
     crypto: CryptoProvider,
+    storageAdapter?: StorageAdapter,
   ) {
     this.account = account;
     this.currentSessionID = currentSessionID;
     this.crypto = crypto;
+    this.storageDriver = storageAdapter
+      ? new StorageDriver(storageAdapter, this)
+      : null;
   }
 
   /** @category 2. Node Creation */
@@ -269,7 +276,7 @@ export class LocalNode {
       const peers =
         this.syncManager.getServerAndStoragePeers(skipLoadingFromPeer);
 
-      await entry.loadFromPeers(peers).catch((e) => {
+      await entry.loadCoValue(this.storageDriver, peers).catch((e) => {
         logger.error("Error loading from peers: " + (e as Error)?.message, {
           id,
         });

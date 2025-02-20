@@ -186,9 +186,11 @@ export class SyncManager {
     const entry = this.local.coValuesStore.get(id);
 
     if (entry.state.type !== "available") {
-      entry.loadFromPeers([peer]).catch((e: unknown) => {
-        logger.error("Error sending load: " + getErrorMessage(e));
-      });
+      entry
+        .loadCoValue(this.local.storageDriver, [peer])
+        .catch((e: unknown) => {
+          logger.error("Error sending load: " + getErrorMessage(e));
+        });
       return;
     }
 
@@ -415,7 +417,7 @@ export class SyncManager {
         // we try to load it from the sender because it is the only place
         // where we can get informations about the coValue
         if (msg.header || Object.keys(msg.sessions).length > 0) {
-          entry.loadFromPeers([peer]).catch((e) => {
+          entry.loadCoValue(this.local.storageDriver, [peer]).catch((e) => {
             logger.error("Error loading coValue in handleLoad", e);
           });
         }
@@ -427,7 +429,7 @@ export class SyncManager {
       }
     }
 
-    if (entry.state.type === "loading") {
+    if (entry.isLoading()) {
       // We need to return from handleLoad immediately and wait for the CoValue to be loaded
       // in a new task, otherwise we might block further incoming content messages that would
       // resolve the CoValue as available. This can happen when we receive fresh
@@ -486,7 +488,7 @@ export class SyncManager {
 
         if (
           dependencyEntry.state.type === "available" ||
-          dependencyEntry.state.type === "loading"
+          dependencyEntry.isLoading()
         ) {
           this.local
             .loadCoValueCore(
@@ -776,8 +778,7 @@ export class SyncManager {
   async waitForAllCoValuesSync(timeout = 60_000) {
     const coValues = this.local.coValuesStore.getValues();
     const validCoValues = Array.from(coValues).filter(
-      (coValue) =>
-        coValue.state.type === "available" || coValue.state.type === "loading",
+      (coValue) => coValue.state.type === "available" || coValue.isLoading(),
     );
 
     return Promise.all(
