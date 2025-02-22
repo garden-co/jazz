@@ -412,7 +412,7 @@ export class BenchmarkStore {
 
     exportToCSVFile(filename: string = 'time.csv'): void {
         filename = process.env.EXPORT_FILENAME ?? filename;
-        const outputPath = `benchmarks/${filename}`;
+        const outputPath = `${filename}`;
         const outDir = path.dirname(outputPath);
         if (!fs.existsSync(outDir)) {
             fs.mkdirSync(outDir, { recursive: true });

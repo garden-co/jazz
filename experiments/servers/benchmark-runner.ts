@@ -1,5 +1,14 @@
 import { spawn } from 'child_process';
 import * as fs from 'fs';
+import { setNetworkCondition } from './src/util/network-conditioner';
+
+// Network conditions I - IV
+const networkConditions = [
+    { name: 'ideal-network', prefix: "01" },    // Ideal network, no bandwidth limits or latency
+    { name: '4g-speeds', prefix: "02" },       // 4G simulation
+    { name: '3g-speeds', prefix: "03" },       // 3G simulation
+    { name: 'high-packet-loss', prefix: "04" }, // High packet loss
+];
 
 // 6 web servers
 const commands = [
@@ -80,13 +89,13 @@ async function runCommand(command: string, exportFileName: string, port: number)
             console.log(`\n=== Running ${command} ===`);
 
             // Spawn the benchmark process ...
-            const outputStream = fs.createWriteStream(`./benchmarks/${exportFileName}.txt`, { flags: 'a' });
+            const outputStream = fs.createWriteStream(`${exportFileName}.txt`, { flags: 'a' });
             const benchmarkProcess = spawn('pnpm', ['run', 'playwright'], {
             // const benchmarkProcess = spawn('pnpm', ['run', 'load-tests'], {
                 stdio: ['ignore', 'pipe', 'pipe'],
                 env: {
                     ...process.env,
-                    OUTPUT_FILENAME: `./benchmarks/${exportFileName}.json`
+                    OUTPUT_FILENAME: `${exportFileName}.json`
                 }
             });
 
@@ -129,14 +138,25 @@ async function runBenchmarks() {
     }
 
     try {
-        for (const command of commands) {
-            await runCommand(command.command, command.exportName, 3000);
-            await cleanupCommand();
+
+        for (const condition of networkConditions) {
+            console.log(`Applying: ${condition.name}`);
+            await setNetworkCondition(condition.name);
+
+            for (const command of commands) {
+                const folder = `./benchmarks/${condition.prefix}-${condition.name}`;
+                fs.mkdirSync(folder, { recursive: true });
+                await runCommand(command.command, `${folder}/${command.exportName}`, 3000);
+                await cleanupCommand();
+            }
+            console.log(`\n=== All benchmarks completed under '${condition}' network condition. ===`);
         }
-        console.log('\n=== All benchmarks completed ===');
     } catch (error) {
         console.error('Benchmark suite failed:', error);
         process.exit(1);
+    } finally {
+        // Restore the network conditions back to normal
+        await setNetworkCondition('reset');
     }
 }
 
