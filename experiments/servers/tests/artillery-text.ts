@@ -5,16 +5,6 @@ import { SERVER_URL, getRandomCoValueIndex, spawnBrowsers } from './common';
 
 async function runTextLoadTest(page: Page, context: any, events: any, test: any) {
     const { step } = test;
-//   const oldContext = page.context;
-//   page.context = () => { 
-//     ['onLCP', 'onFCP', 'onCLS', 'onTTFB', 'onFID', 'onINP'].forEach(
-//           (hook) => {
-//             page.context().removeAllListeners(hook, {behavior: 'ignoreErrors'});
-//           }
-//     );
-//     return oldContext();
-//   };
-
     try {
         await step(`${context.scenario.name}.load_page_duration`, async () => {
             await page.goto(context.vars.target);
@@ -83,7 +73,7 @@ async function runTextMutateTest(page: Page, context: any, events: any, test: an
             // Check all spawned browsers received the mutation event
             await Promise.all(browsers.map(async ({ page: clientPage, ua }, index) => {
                 await clientPage.waitForSelector(`#status >> text=Mutation event`);
-                events.emit('counter', `${context.scenario.name}.mutate_text_event_delivered`, 1);
+                events.emit('counter', `${context.scenario.name}.mutate_text_subscriber`, 1);
                 logger.debug(`Browser ${context.vars.$uuid}-[client-${ua}] received the mutation event.`);
             }));
 
@@ -99,6 +89,10 @@ async function runTextMutateTest(page: Page, context: any, events: any, test: an
     }
 }
 
+function getPID(): number {
+    return process.env.PID ? parseInt(process.env.PID, 10) : 0;
+}
+
 export {
   runTextLoadTest,
   runTextCreateTest,
@@ -112,12 +106,50 @@ export const config = {
         playwright: { aggregateByName: true }
     },
     phases: [{
-        duration: 20,
-        arrivalRate: 1,
-        maxVusers: 1,
-        // rampTo: 1,
-        name: "CoValue initial load testing"
-    }]
+        duration: 20, // 20 seconds
+        arrivalCount: 1, // 1 vuser only
+        maxVusers: 1, // 1 vuser maximum
+        name: "Development testing"
+    }],
+    plugins: {
+        "memory-inspector": [
+          { pid: getPID(), name: "web-server-stats", unit: 'mb' }
+        ]
+    },
+    environments: {
+        simulation: {
+            phases: [
+            {
+                duration: 60, // 60 seconds
+                arrivalRate: 5, // 5 vusers/second
+                rampTo: 15, // Ramp up to 15 vusers/second
+                name: "01 Warmup - gradually increase load"
+            },
+            {
+                duration: 120, // 2 minutes
+                arrivalRate: 15, // 15 vusers/second
+                name: "02 Steady - maintain moderate load"
+            },
+            {
+                duration: 30, // 30 seconds
+                arrivalRate: 50, // Spike to 50 vusers/second
+                name: "03 Spike - simulate peak traffic"
+            },
+            {
+                duration: 180, // 3 minutes
+                arrivalRate: 20, // Start at 20 vusers/second
+                rampTo: 40, // Ramp up to 40 vusers/second
+                name: "04 Scale - stress test at high load"
+            },
+            {
+                duration: 90, // 90 seconds
+                arrivalRate: 15, // Start at 15 vusers/second
+                rampTo: 5, // Taper down to 5 vusers/second
+                name: "05 Cooldown - reduce load gracefully"
+            }
+            ]
+        }
+    }
 };
 
 export const scenarios = [

@@ -94,7 +94,7 @@ async function runBinaryMutateTest(page: Page, context: any, events: any, test: 
             // Check all spawned browsers received the mutation event
             await Promise.all(browsers.map(async ({ page: clientPage, ua }, index) => {
                 await clientPage.waitForSelector(`#status >> text=Mutation event`);
-                events.emit('counter', `${context.scenario.name}.mutate_binary_event_delivered`, 1);
+                events.emit('counter', `${context.scenario.name}.mutate_binary_subscriber`, 1);
                 logger.debug(`Browser ${context.vars.$uuid}-[client-${ua}] received the mutation event.`);
             }));
 

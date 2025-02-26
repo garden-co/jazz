@@ -1,13 +1,13 @@
 import { spawn } from 'child_process';
 import * as fs from 'fs';
-import { setNetworkCondition } from './src/util/network-conditioner';
+import { setNetworkCondition, resetNetwork } from './src/util/network-conditioner';
 
 // Network conditions I - IV
 const networkConditions = [
-    { name: 'ideal-network', prefix: "01" },    // Ideal network, no bandwidth limits or latency
-    { name: '4g-speeds', prefix: "02" },       // 4G simulation
-    { name: '3g-speeds', prefix: "03" },       // 3G simulation
-    { name: 'high-packet-loss', prefix: "04" }, // High packet loss
+    { name: 'ideal-network', prefix: "I" },    // Ideal network, no bandwidth limits or latency
+    { name: '4g-speeds', prefix: "II" },       // 4G simulation
+    { name: '3g-speeds', prefix: "III" },       // 3G simulation
+    { name: 'high-packet-loss', prefix: "IV" }, // High packet loss
 ];
 
 // 6 web servers
@@ -20,7 +20,7 @@ const commands = [
     { command: "caddy-http3", exportName: "C1_NodeCaddyServer-HTTP3-SSE" }
 ];
 
-// Time to wait between stopping one service and starting another (in ms)
+// Time to wait between stopping one web server and starting another (in ms)
 const COOLDOWN_PERIOD = 2000;
 
 // Time to wait for server to start before running benchmarks (in ms)
@@ -45,6 +45,8 @@ async function cleanupCommand() {
 async function handleShutdown() {
     console.log('\nShutdown signal received. Cleaning up...');
     await cleanupCommand();
+    console.log('\nRestoring normal network conditions ...');
+    await resetNetwork();
     process.exit(0);
 }
 
@@ -55,7 +57,7 @@ async function runCommand(command: string, exportFileName: string, port: number)
     return new Promise(async (resolve, reject) => {
         try {
             console.log(`\n=== Starting ${command} ===`);
-            
+            let terminated = false;
             const childProcess = spawn('pnpm', ['run', command], {
                 stdio: 'pipe',
                 shell: true,
@@ -81,6 +83,7 @@ async function runCommand(command: string, exportFileName: string, port: number)
             });
 
             childProcess.on('exit', (code, signal) => {
+                terminated = true;
                 console.log(`[${command}] exited with code: ${code} from signal: ${signal}`);
                 resolve();
             });
@@ -88,18 +91,19 @@ async function runCommand(command: string, exportFileName: string, port: number)
             await new Promise(resolve => setTimeout(resolve, SERVER_STARTUP_WAIT));
             console.log(`\n=== Running ${command} ===`);
 
-            // Spawn the benchmark process ...
+            // Spawn the benchmark tests ...
             const outputStream = fs.createWriteStream(`${exportFileName}.txt`, { flags: 'a' });
-            const benchmarkProcess = spawn('pnpm', ['run', 'playwright'], {
-            // const benchmarkProcess = spawn('pnpm', ['run', 'load-tests'], {
+            // const benchmarkProcess = spawn('pnpm', ['run', 'playwright'], {
+            const benchmarkProcess = spawn('pnpm', ['run', 'load-tests-demo'], {
                 stdio: ['ignore', 'pipe', 'pipe'],
                 env: {
                     ...process.env,
+                    PID: `${childProcess.pid}`,
                     OUTPUT_FILENAME: `${exportFileName}.json`
                 }
             });
 
-            // Pipe the process' output to both the console and an outfile
+            // Pipe the processes' output to both the console and an outfile
             benchmarkProcess.stdout?.pipe(outputStream);
             benchmarkProcess.stdout?.on('data', (data) => {
                 console.log(`[Benchmark ${command}] ${data.toString().trim()}`);
@@ -109,21 +113,42 @@ async function runCommand(command: string, exportFileName: string, port: number)
                 console.error(`[Benchmark Error ${command}] ${data.toString().trim()}`);
             });
 
-            benchmarkProcess.on('error', (err) => {
-                console.error(`[Benchmark Error (uncaught)] ${err.toString().trim()}`);
-            });
-
             await new Promise((resolve, reject) => {
-                benchmarkProcess.on('exit', (code) => {
+                let hasResolved = false;
+
+                // Function to ensure we only resolve/reject once
+                const finalizeProcess = (code: number) => {
+                    if (hasResolved) return;
+                    hasResolved = true;
+
+                    console.log(`Benchmark test ended with code: ${code}`);
                     outputStream.end();
+                    console.log(`Benchmark test output file closed: ${exportFileName}.txt`);
+
                     if (code === 0) {
+                        console.log(`Benchmark test succeeded`);
                         resolve(code);
                     } else {
-                        reject(new Error(`Benchmark failed with code: ${code}`));
+                        console.log(`Benchmark test failed`);
+                        reject(new Error(`Benchmark test failed with code: ${code}`));
                     }
+                };
+
+                benchmarkProcess.on('close', finalizeProcess); // artillery process fires `close`
+                benchmarkProcess.on('exit', finalizeProcess); // playwright process fires `exit`
+                benchmarkProcess.on('error', (err) => {
+                    if (hasResolved) return;
+                    hasResolved = true;
+                    outputStream.end();
+                    reject(err);
                 });
             });
 
+            if (!terminated) {
+                console.log(`[${command}] terminating forcefully`);
+                childProcess.kill();
+                resolve();
+            }
         } catch (error) {
             console.error(`Error running ${command}:`, error);
             await cleanupCommand();
@@ -137,10 +162,11 @@ async function runBenchmarks() {
         fs.mkdirSync('./benchmarks', { recursive: true });
     }
 
+    let exitCode = 0;
     try {
 
         for (const condition of networkConditions) {
-            console.log(`Applying: ${condition.name}`);
+            console.log(`Applying network condition with short name: '${condition.name}'`);
             await setNetworkCondition(condition.name);
 
             for (const command of commands) {
@@ -149,14 +175,16 @@ async function runBenchmarks() {
                 await runCommand(command.command, `${folder}/${command.exportName}`, 3000);
                 await cleanupCommand();
             }
-            console.log(`\n=== All benchmarks completed under '${condition}' network condition. ===`);
+            console.log(`\n=== All benchmarks completed under '${condition.name}' network condition. ===`);
         }
     } catch (error) {
         console.error('Benchmark suite failed:', error);
-        process.exit(1);
+        exitCode = 1;
     } finally {
-        // Restore the network conditions back to normal
-        await setNetworkCondition('reset');
+        // Restore the network conditions even when tests fail
+        console.log("Terminating the benchmarks ....");
+        await resetNetwork();
+        process.exit(exitCode);
     }
 }
 

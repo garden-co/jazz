@@ -14,17 +14,20 @@ interface NetworkCondition {
 async function resetNetwork(): Promise<void> {
   console.log('Resetting network conditions...');
   try {
-    await exec('sudo pfctl -f /etc/pf.conf 2>/dev/null');
-    
-    // await exec('sudo pfctl -d 2>/dev/null');
     try {
-        await exec('sudo pfctl -d');
-      } catch (error: any) {
-        if (error.code === 1 && error.stderr.includes('pf not enabled')) {
-          console.log('pf was already disabled, continuing...');
-        } else {
-          throw error;
-        }
+      await exec('sudo pfctl -f /etc/pf.conf');
+    } catch (error: any) {
+      console.error(error);
+    }
+    
+    try {
+      await exec('sudo pfctl -d');
+    } catch (error: any) {
+      if (error.code === 1 && error.stderr.includes('pf not enabled')) {
+        console.log('pf was already disabled, continuing...');
+      } else {
+        throw error;
+      }
     }
 
     await exec('sudo dnctl -q flush 2>/dev/null');
@@ -37,7 +40,7 @@ async function resetNetwork(): Promise<void> {
 
 // Function to apply a network condition
 async function applyCondition(condition: NetworkCondition): Promise<void> {
-  console.log(`Applying network condition: ${condition.name}`);
+  console.log(`Applying network condition: '${condition.name}'`);
 
   try {
     // Flush existing dummynet pipes
@@ -49,18 +52,26 @@ async function applyCondition(condition: NetworkCondition): Promise<void> {
       await exec(`sudo dnctl pipe 2 config bw ${condition.upBw} delay ${condition.delay} plr ${condition.plr}`);
 
       // Clear existing pf rules and load new ones
-      await exec('sudo pfctl -f /etc/pf.conf 2>/dev/null');
+      await exec('sudo pfctl -f /etc/pf.conf');
       await exec('echo "dummynet out quick proto tcp from any to any pipe 1" | sudo pfctl -a conditioning -f -');
       await exec('echo "dummynet in quick proto tcp from any to any pipe 2" | sudo pfctl -a conditioning -f -');
 
-      // Enable pf
-      await exec('sudo pfctl -e 2>/dev/null');
+      try {
+        // Enable pf
+        await exec('sudo pfctl -e');
+      } catch (error: any) {
+        if (error.code === 1 && error.stderr.includes('pf already enabled')) {
+          console.log('pf was already enabled, continuing...');
+        } else {
+          throw error;
+        }
+      }
       console.log(
         `Condition '${condition.name}' applied: Down: ${condition.downBw}, Up: ${condition.upBw}, Delay: ${condition.delay}ms, Packet Loss: ${condition.plr}`
       );
     } else {
-      // If no limits are specified (e.g., ideal), just reset
-      await resetNetwork();
+      // If no limits are specified (e.g., ideal), do nothing
+      // await resetNetwork();
       console.log(`${condition.name} applied: No bandwidth limits, 0ms latency, 0% packet loss.`);
     }
   } catch (error) {
@@ -96,10 +107,10 @@ const networkConditions: NetworkCondition[] = [
     delay: '200',
     plr: '0.5',
   },
-  {
-    name: 'Reset',
-    // No limits, just resets
-  },
+  // {
+  //   name: 'Reset',
+  //   // No limits, just resets
+  // },
 ];
 
 // Function to apply a condition by name
@@ -115,4 +126,4 @@ async function setNetworkCondition(conditionName: string): Promise<void> {
   }
 }
 
-export { setNetworkCondition, networkConditions };
+export { setNetworkCondition, resetNetwork, networkConditions };
