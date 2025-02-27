@@ -19,6 +19,7 @@ describe("Subscribing to a CoValue", () => {
       storageState: "unknown",
       peerState: {},
       listeners: { [listenerID]: "unknown" },
+      incomingMessages: {},
       dependents: [],
     });
   });
@@ -44,6 +45,7 @@ describe("Subscribing to a CoValue", () => {
         [secondListenerID]: "unknown",
       },
       dependents: [],
+      incomingMessages: {},
     });
   });
 

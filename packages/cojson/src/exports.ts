@@ -33,7 +33,6 @@ import {
   rawCoIDtoBytes,
 } from "./ids.js";
 import { Stringified, parseJSON, stableStringify } from "./jsonStringify.js";
-import { LocalNode } from "./localNode.js";
 import type { AccountRole, Role } from "./permissions.js";
 import { Channel, connectedPeers } from "./streamUtils.js";
 import { accountOrAgentIDfromSessionID } from "./typeUtils/accountOrAgentIDfromSessionID.js";
@@ -70,7 +69,6 @@ import {
 
 type Value = JsonValue | AnyRawCoValue;
 
-import { CO_VALUE_LOADING_CONFIG } from "./coValueState.js";
 import { logger } from "./logger.js";
 import { getPriorityFromHeader } from "./priority.js";
 
@@ -89,18 +87,15 @@ export const cojsonInternals = {
   accountOrAgentIDfromSessionID,
   isAccountID,
   accountHeaderForInitialAgentSecret,
-  idforHeader,
   StreamingHash,
   Channel,
   getPriorityFromHeader,
   getGroupDependentKeyList,
   getGroupDependentKey,
   disablePermissionErrors,
-  CO_VALUE_LOADING_CONFIG,
 };
 
 export {
-  LocalNode,
   RawGroup,
   Role,
   EVERYONE,
@@ -122,7 +117,6 @@ export {
   Media,
   ControlledAgent,
   RawControlledAccount,
-  MAX_RECOMMENDED_TX_SIZE,
   JsonObject,
   JsonValue,
   Peer,
@@ -148,7 +142,6 @@ export type {
   OutgoingSyncQueue,
   DisconnectedError,
   PingTimeoutError,
-  CoValueUniqueness,
   Stringified,
   CoStreamItem,
   BinaryStreamItem,

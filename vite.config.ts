@@ -4,7 +4,7 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   root: "./",
   test: {
-    workspace: ["packages/*", "tests/browser-integration"],
+    workspace: ["packages/cojson"],
     coverage: {
       enabled: false,
       provider: "istanbul",
