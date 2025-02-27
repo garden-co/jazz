@@ -30,8 +30,11 @@ importers:
         specifier: ^1.7.4
         version: 1.7.4
       artillery:
-        specifier: ^2.0.22
+        specifier: ^2.0.21
         version: 2.0.22(@types/node@22.13.1)(bufferutil@4.0.9)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(typescript@5.5.4)
+      artillery-plugin-memory-inspector:
+        specifier: ^1.1.1
+        version: 1.1.1
       body-parser:
         specifier: ^1.20.2
         version: 1.20.3
@@ -1791,6 +1794,9 @@ packages:
   artillery-plugin-fake-data@1.13.0:
     resolution: {integrity: sha512-tg0y2Q6jxSKeZ7UUfIdxK4+tpU2yxHNG8JtVyfZ/w0S/fNFHEYeGiJrRett6NhbVy4CeR8YpVyb8r7rnK+YR/A==}
 
+  artillery-plugin-memory-inspector@1.1.1:
+    resolution: {integrity: sha512-huhjCTm2GYuSWWBCUdn+m6ve2MZAS5dRPNNPq4x0BEvIDzEpVlNXjpLKQOJ+G0pULnfluVivHtd7b/zH1Op9Zw==}
+
   artillery-plugin-metrics-by-endpoint@1.16.0:
     resolution: {integrity: sha512-qNuEJi/GuqRjb753sLEdGw9h7yO1i38pAsrhEOTPfVKInIVozi7Kdh0eodNEO6oY71u7ZefLyUjJ+Kjka98yCQ==}
 
@@ -3546,6 +3552,10 @@ packages:
   picomatch@2.3.1:
     resolution: {integrity: sha512-JU3teHTNjmE2VCGFzuY8EXzCDVwEqB2a8fsIvwaStHhAWJEeVd1o1QD80CU6+ZdEXXSLbSsuLwJjkCBWqRQUVA==}
     engines: {node: '>=8.6'}
+
+  pidusage@3.0.2:
+    resolution: {integrity: sha512-g0VU+y08pKw5M8EZ2rIGiEBaB8wrQMjYGFfW2QVIfyT8V+fq8YFLkvlz4bz5ljvFDJYNFCWT3PWqcRr2FKO81w==}
+    engines: {node: '>=10'}
 
   pino-abstract-transport@2.0.0:
     resolution: {integrity: sha512-F63x5tizV6WCh4R6RHyi2Ml+M70DNRXt/+HANowMflpgGFMAym/VKm6G7ZOQRjqN7XbGxK1Lg9t6ZrtzOaivMw==}
@@ -6946,6 +6956,13 @@ snapshots:
     dependencies:
       '@ngneat/falso': 7.3.0
 
+  artillery-plugin-memory-inspector@1.1.1:
+    dependencies:
+      debug: 4.4.0(supports-color@8.1.1)
+      pidusage: 3.0.2
+    transitivePeerDependencies:
+      - supports-color
+
   artillery-plugin-metrics-by-endpoint@1.16.0:
     dependencies:
       debug: 4.4.0(supports-color@8.1.1)
@@ -7175,7 +7192,7 @@ snapshots:
   buffer@4.9.2:
     dependencies:
       base64-js: 1.5.1
-      ieee754: 1.1.13
+      ieee754: 1.2.1
       isarray: 1.0.0
 
   buffer@5.7.1:
@@ -8943,6 +8960,10 @@ snapshots:
   picocolors@1.1.1: {}
 
   picomatch@2.3.1: {}
+
+  pidusage@3.0.2:
+    dependencies:
+      safe-buffer: 5.2.1
 
   pino-abstract-transport@2.0.0:
     dependencies:
