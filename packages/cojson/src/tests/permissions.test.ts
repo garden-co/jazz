@@ -5,6 +5,7 @@ import { WasmCrypto } from "../crypto/WasmCrypto.js";
 import { expectGroup } from "../typeUtils/expectGroup.js";
 import {
   connectTwoPeers,
+  createThreeConnectedNodes,
   createTwoConnectedNodes,
   groupWithTwoAdmins,
   groupWithTwoAdminsHighLevel,
@@ -2911,6 +2912,70 @@ test("revoking access on a parent group doesn't block access to the child group 
   mapOnNode2.set("foo", "baz", "private");
 
   expect(mapOnNode2.get("foo")).toEqual("baz");
+});
+
+test("revoking access to parent group", async () => {
+  // Start with a node and a group
+  const { group, node } = newGroupHighLevel();
+
+  // Create a parent group and relate it to the existing group
+  const parentGroup = node.createGroup();
+  group.extend(parentGroup);
+
+  // Create an account (`alice`) that can write to the parent group
+  // Create an an account (`bob`) that can write to the child group
+  const alice = node.createAccount();
+  const bob = node.createAccount();
+  parentGroup.addMember(alice, "writer");
+  group.addMember(bob, "writer");
+
+  // The child group has a map that can be written to by `bob`
+  const mapCore = node.createCoValue({
+    type: "comap",
+    ruleset: { type: "ownedByGroup", group: group.id },
+    meta: null,
+    ...Crypto.createdNowUnique(),
+  });
+  const bobMap = expectMap(
+    mapCore
+      .testWithDifferentAccount(bob, Crypto.newRandomSessionID(bob.id))
+      .getCurrentContent(),
+  );
+
+  // `bob` sets `foo` to `bar`
+  bobMap.set("foo", "bar", "private");
+  // `bob`'s change is made successfully
+  expect(bobMap.get("foo")).toEqual("bar");
+
+  const aliceMap = expectMap(
+    mapCore
+      .testWithDifferentAccount(alice, Crypto.newRandomSessionID(alice.id))
+      .getCurrentContent(),
+  );
+  // `alice` sets `foo` to `baz`
+  aliceMap.set("foo", "baz", "private");
+  // `alice`'s change is made successfully
+  expect(aliceMap.get("foo")).toEqual("baz");
+
+  // The two groups are no longer related
+  group.revokeExtend(parentGroup);
+
+  // `bob` sets `foo` to `abc`
+  bobMap.set("foo", "abc", "private");
+  // `bob`'s change is made successfully
+  expect(bobMap.get("foo")).toEqual("abc");
+
+  const aliceMapAfterUnextend = expectMap(
+    mapCore
+      .testWithDifferentAccount(alice, Crypto.newRandomSessionID(alice.id))
+      .getCurrentContent(),
+  );
+  // `alice` attempts to set `foo` to `def`, but fails
+  expect(() => aliceMapAfterUnextend.set("foo", "def", "private")).toThrow(
+    "Can't make transaction without read key secret",
+  );
+  // `alice`'s change is not made successfully
+  expect(aliceMapAfterUnextend.get("foo")).not.toEqual("def");
 });
 
 test("a user should have write access if the parent group has everyone as a writer", async () => {

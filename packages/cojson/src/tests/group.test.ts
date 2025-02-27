@@ -657,6 +657,39 @@ describe("extend", () => {
   });
 });
 
+describe("unextend", () => {
+  test("should revoke roles", async () => {
+    const { node1, node2, node3 } = await createThreeConnectedNodes(
+      "server",
+      "server",
+      "server",
+    );
+
+    // `parentGroup` has `alice` as a writer
+    const parentGroup = node1.node.createGroup();
+    const alice = await loadCoValueOrFail(node1.node, node2.accountID);
+    parentGroup.addMember(alice, "writer");
+    // `alice`'s role in `parentGroup` is `"writer"`
+    expect(parentGroup.roleOf(alice.id)).toBe("writer");
+
+    // `childGroup` has `bob` as a reader
+    const childGroup = node1.node.createGroup();
+    const bob = await loadCoValueOrFail(node1.node, node3.accountID);
+    childGroup.addMember(bob, "reader");
+    // `bob`'s role in `childGroup` is `"reader"`
+    expect(childGroup.roleOf(bob.id)).toBe("reader");
+
+    // `childGroup` has `parentGroup`'s members (in this case, `alice` as a writer)
+    childGroup.extend(parentGroup);
+    expect(childGroup.roleOf(alice.id)).toBe("writer");
+
+    // `childGroup` no longer has `parentGroup`'s members
+    childGroup.revokeExtend(parentGroup);
+    expect(childGroup.roleOf(bob.id)).toBe("reader");
+    expect(childGroup.roleOf(alice.id)).toBe(undefined);
+  });
+});
+
 describe("extend with role mapping", () => {
   test("mapping to writer should add the ability to write", async () => {
     const { node1, node2 } = await createTwoConnectedNodes("server", "server");
