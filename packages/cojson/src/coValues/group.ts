@@ -133,6 +133,11 @@ export class RawGroup<
 
     for (const key of this.keys()) {
       if (isParentGroupReference(key)) {
+        // Check if the parent group reference is revoked
+        if (this.get(key) === "revoked") {
+          continue;
+        }
+
         const parent = this.core.node.expectCoValueLoaded(
           getParentGroupId(key),
           "Expected parent group to be loaded",
@@ -194,6 +199,11 @@ export class RawGroup<
 
     for (const key of this.keys()) {
       if (isChildGroupReference(key)) {
+        // Check if the child group reference is revoked
+        if (this.get(key) === "revoked") {
+          continue;
+        }
+
         const child = this.core.node.expectCoValueLoaded(
           getChildGroupId(key),
           "Expected child group to be loaded",
