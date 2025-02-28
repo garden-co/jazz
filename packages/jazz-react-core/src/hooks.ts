@@ -135,7 +135,9 @@ export function useCoState<V extends CoValue, D>(
     () => observable.getCurrentValue(),
   );
 
-  return value;
+  return React.useMemo(() => {
+    return id ? value : undefined;
+  }, [id, value]);
 }
 
 export function createUseAccountHooks<Acc extends Account>() {

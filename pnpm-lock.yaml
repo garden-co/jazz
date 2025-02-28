@@ -1507,6 +1507,8 @@ importers:
         specifier: ^8.14.2
         version: 8.18.0
 
+  packages/coverage: {}
+
   packages/create-jazz-app:
     dependencies:
       chalk:
