@@ -615,25 +615,33 @@ export function splitNode(
  * Collection of predefined mark types for common text formatting.
  * Includes marks for headings, paragraphs, links, and text styling.
  */
-export const Marks: Record<
-  "Heading" | "Paragraph" | "Link" | "Strong" | "Em",
-  typeof Mark
-> = {
-  Heading: class Heading extends Mark {
-    tag = co.literal("heading");
-    level = co.number;
-  },
-  Paragraph: class Paragraph extends Mark {
-    tag = co.literal("paragraph");
-  },
-  Link: class Link extends Mark {
-    tag = co.literal("link");
-    url = co.string;
-  },
-  Strong: class Strong extends Mark {
-    tag = co.literal("strong");
-  },
-  Em: class Italic extends Mark {
-    tag = co.literal("em");
-  },
+// Define mark classes outside the object
+class Heading extends Mark {
+  tag = co.literal("heading");
+  level = co.number;
+}
+
+class Paragraph extends Mark {
+  tag = co.literal("paragraph");
+}
+
+class Link extends Mark {
+  tag = co.literal("link");
+  url = co.string;
+}
+
+class Strong extends Mark {
+  tag = co.literal("strong");
+}
+
+class Em extends Mark {
+  tag = co.literal("em");
+}
+
+export const Marks = {
+  Heading,
+  Paragraph,
+  Link,
+  Strong,
+  Em,
 };

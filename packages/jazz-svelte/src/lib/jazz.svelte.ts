@@ -4,16 +4,17 @@ import type {
   AuthSecretStorage,
   CoValue,
   CoValueClass,
-  DeeplyLoaded,
-  DepthsIn,
   ID,
   JazzAuthContext,
   JazzContextType,
-  JazzGuestContext
+  JazzGuestContext,
+  RefsToResolve,
+  Resolved
 } from 'jazz-tools';
 import { Account, subscribeToCoValue } from 'jazz-tools';
 import { getContext, untrack } from 'svelte';
 import Provider from './Provider.svelte';
+import type { RefsToResolveStrict } from 'jazz-tools';
 
 export { Provider as JazzProvider };
 
@@ -71,21 +72,12 @@ declare module "jazz-tools" {
   }
 }
 
-export function useAccount(): { me: RegisteredAccount; logOut: () => void };
-export function useAccount<D extends DepthsIn<RegisteredAccount>>(
-  depth: D
-): { me: DeeplyLoaded<RegisteredAccount, D> | undefined | null; logOut: () => void };
-/**
- * Use the current account with a optional depth.
- * @param depth - The depth.
- * @returns The current account.
- */
-export function useAccount<D extends DepthsIn<RegisteredAccount>>(
-  depth?: D
-): {
-  me: RegisteredAccount | DeeplyLoaded<RegisteredAccount, D> | undefined | null;
-  logOut: () => void;
-} {
+  export function useAccount<const R extends RefsToResolve<RegisteredAccount>>(
+    options?: { resolve?: RefsToResolveStrict<RegisteredAccount, R> }
+  ): { me: Resolved<RegisteredAccount, R> | undefined | null; logOut: () => void };
+  export function useAccount<const R extends RefsToResolve<RegisteredAccount>>(
+    options?: { resolve?: RefsToResolveStrict<RegisteredAccount, R> }
+  ): { me: RegisteredAccount | Resolved<RegisteredAccount, R> | undefined | null; logOut: () => void } {
   const ctx = getJazzContext<RegisteredAccount>();
   if (!ctx?.current) {
     throw new Error('useAccount must be used within a JazzProvider');
@@ -97,7 +89,7 @@ export function useAccount<D extends DepthsIn<RegisteredAccount>>(
   }
 
   // If no depth is specified, return the context's me directly
-  if (depth === undefined) {
+  if (options?.resolve === undefined) {
     return {
       get me() {
         return (ctx.current as JazzAuthContext<RegisteredAccount>).me;
@@ -109,10 +101,10 @@ export function useAccount<D extends DepthsIn<RegisteredAccount>>(
   }
 
   // If depth is specified, use useCoState to get the deeply loaded version
-  const me = useCoState<RegisteredAccount, D>(
+  const me = useCoState<RegisteredAccount, R>(
     ctx.current.me.constructor as CoValueClass<RegisteredAccount>,
     (ctx.current as JazzAuthContext<RegisteredAccount>).me.id,
-    depth
+    options
   );
 
   return {
@@ -126,24 +118,12 @@ export function useAccount<D extends DepthsIn<RegisteredAccount>>(
 }
 
 export function useAccountOrGuest(): { me: RegisteredAccount | AnonymousJazzAgent };
-export function useAccountOrGuest<D extends DepthsIn<RegisteredAccount>>(
-  depth: D
-): { me: DeeplyLoaded<RegisteredAccount, D> | undefined | null | AnonymousJazzAgent };
-/**
- * Use the current account or guest with a optional depth.
- * @param depth - The depth.
- * @returns The current account or guest.
- */
-export function useAccountOrGuest<D extends DepthsIn<RegisteredAccount>>(
-  depth?: D
-): {
-  me:
-    | RegisteredAccount
-    | DeeplyLoaded<RegisteredAccount, D>
-    | undefined
-    | null
-    | AnonymousJazzAgent;
-} {
+export function useAccountOrGuest<R extends RefsToResolve<RegisteredAccount>>(
+  options?: { resolve?: RefsToResolveStrict<RegisteredAccount, R> }
+): { me: Resolved<RegisteredAccount, R> | undefined  | null| AnonymousJazzAgent };
+export function useAccountOrGuest<R extends RefsToResolve<RegisteredAccount>>(
+  options?: { resolve?: RefsToResolveStrict<RegisteredAccount, R> }
+): { me: RegisteredAccount | Resolved<RegisteredAccount, R> | undefined  | null| AnonymousJazzAgent } {
   const ctx = getJazzContext<RegisteredAccount>();
 
   if (!ctx?.current) {
@@ -152,17 +132,17 @@ export function useAccountOrGuest<D extends DepthsIn<RegisteredAccount>>(
 
   const contextMe = 'me' in ctx.current ? ctx.current.me : undefined;
 
-  const me = useCoState<RegisteredAccount, D>(
+  const me = useCoState<RegisteredAccount, R>(
     contextMe?.constructor as CoValueClass<RegisteredAccount>,
     contextMe?.id,
-    depth
+    options
   );
 
   // If the context has a me, return the account.
   if ('me' in ctx.current) {
     return {
       get me() {
-        return depth === undefined
+        return options?.resolve === undefined
           ? me.current || (ctx.current as JazzAuthContext<RegisteredAccount>)?.me
           : me.current;
       }
@@ -178,24 +158,17 @@ export function useAccountOrGuest<D extends DepthsIn<RegisteredAccount>>(
   }
 }
 
-/**
- * Use a CoValue with a optional depth.
- * @param Schema - The CoValue schema.
- * @param id - The CoValue id.
- * @param depth - The depth.
- * @returns The CoValue.
- */
-export function useCoState<V extends CoValue, D extends DepthsIn<V> = []>(
+export function useCoState<V extends CoValue, R extends RefsToResolve<V>>(
   Schema: CoValueClass<V>,
   id: ID<CoValue> | undefined,
-  depth: D = [] as D
+  options?: { resolve?: RefsToResolveStrict<V, R> }
 ): {
-  current?: DeeplyLoaded<V, D> | null;
+  current: Resolved<V, R> | undefined | null;
 } {
   const ctx = getJazzContext<RegisteredAccount>();
 
   // Create state and a stable observable
-  let state = $state.raw<DeeplyLoaded<V, D> | undefined | null>(undefined);
+  let state = $state.raw<Resolved<V, R> | undefined | null>(undefined);
 
   // Effect to handle subscription
   $effect(() => {
@@ -205,20 +178,27 @@ export function useCoState<V extends CoValue, D extends DepthsIn<V> = []>(
     // Return early if no context or id, effectively cleaning up any previous subscription
     if (!ctx?.current || !id) return;
 
+    const agent = "me" in ctx.current ? ctx.current.me : ctx.current.guest;
+
     // Setup subscription with current values
-    return subscribeToCoValue(
+    return subscribeToCoValue<V, R>(
       Schema,
       id,
-      'me' in ctx.current ? ctx.current.me : ctx.current.guest,
-      depth,
+      {
+        resolve: options?.resolve,
+        loadAs: agent,
+        onUnavailable: () => {
+          state = null;
+        },
+        onUnauthorized: () => {
+          state = null;
+        },
+        syncResolution: true,
+      },
       (value) => {
         // Get current value from our stable observable
         state = value;
       },
-      () => {
-        state = null;
-      },
-      true
     );
   });
 

@@ -602,17 +602,17 @@ describe("CoRichText", async () => {
           crypto: Crypto,
         });
 
-      const loadedText = await CoRichText.load(text.id, meOnSecondPeer, {
-        marks: [{}],
-        text: [],
+      const loadedText = await CoRichText.load(text.id, {
+        loadAs: meOnSecondPeer,
+        resolve: { marks: { $each: true }, text: true },
       });
 
       expect(loadedText).toBeDefined();
       expect(loadedText?.toString()).toEqual("hello world");
 
-      const loadedText2 = await CoRichText.load(text.id, meOnSecondPeer, {
-        marks: [{}],
-        text: [],
+      const loadedText2 = await CoRichText.load(text.id, {
+        loadAs: meOnSecondPeer,
+        resolve: { marks: { $each: true }, text: true },
       });
 
       expect(loadedText2).toBeDefined();
@@ -646,8 +646,10 @@ describe("CoRichText", async () => {
 
       CoRichText.subscribe(
         text.id,
-        meOnSecondPeer,
-        { marks: [{}], text: [] },
+        {
+          loadAs: meOnSecondPeer,
+          resolve: { marks: { $each: true }, text: true },
+        },
         (subscribedText) => {
           void queue.push(subscribedText);
         },

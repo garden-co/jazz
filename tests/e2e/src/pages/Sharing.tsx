@@ -95,14 +95,13 @@ function SharedCoMapWithChildren(props: {
   level: number;
   revealLevels: number;
 }) {
-  const coMap = useCoState(SharedCoMap, props.id, {});
-  const { me } = useAccount();
+  const coMap = useCoState(SharedCoMap, props.id);
   const nextLevel = props.level + 1;
 
   const addChild = () => {
-    if (!me || !coMap) return;
+    if (!coMap) return;
 
-    const group = Group.create({ owner: me });
+    const group = Group.create();
 
     const child = SharedCoMap.create(
       { value: "CoValue child " + nextLevel },
@@ -118,7 +117,7 @@ function SharedCoMapWithChildren(props: {
 
     while (node?._refs.child?.id) {
       const parentGroup = node._owner as Group;
-      node = await SharedCoMap.load(node._refs.child.id, me, {});
+      node = await SharedCoMap.load(node._refs.child.id);
 
       if (node) {
         const childGroup = node._owner as Group;

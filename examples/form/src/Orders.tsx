@@ -4,7 +4,7 @@ import { OrderThumbnail } from "./OrderThumbnail.tsx";
 
 export function Orders() {
   const { me } = useAccount({
-    root: { orders: [] },
+    resolve: { root: { orders: true } },
   });
 
   return (

@@ -13,7 +13,7 @@ export function OrganizationPage() {
     .organizationId;
 
   const organization = useCoState(Organization, paramOrganizationId, {
-    projects: [],
+    resolve: { projects: true },
   });
 
   if (!organization) return <p>Loading organization...</p>;

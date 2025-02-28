@@ -1,4 +1,4 @@
-import type { CoID, RawCoValue } from "cojson";
+import { type CoID, RawAccount, type RawCoValue, RawGroup } from "cojson";
 import { type Account } from "../coValues/account.js";
 import type {
   AnonymousJazzAgent,
@@ -27,12 +27,42 @@ export class Ref<out V extends CoValue> {
     }
   }
 
-  get value() {
-    const node =
-      "node" in this.controlledAccount
-        ? this.controlledAccount.node
-        : this.controlledAccount._raw.core.node;
+  private getNode() {
+    return "node" in this.controlledAccount
+      ? this.controlledAccount.node
+      : this.controlledAccount._raw.core.node;
+  }
+
+  hasReadAccess() {
+    const node = this.getNode();
+
     const raw = node.getLoaded(this.id as unknown as CoID<RawCoValue>);
+
+    if (!raw) {
+      return true;
+    }
+
+    if (raw instanceof RawAccount || raw instanceof RawGroup) {
+      return true;
+    }
+
+    const group = raw.core.getGroup();
+
+    if (group instanceof RawAccount) {
+      if (node.account.id !== group.id) {
+        return false;
+      }
+    } else if (group.myRole() === undefined) {
+      return false;
+    }
+
+    return true;
+  }
+
+  getValueWithoutAccessCheck() {
+    const node = this.getNode();
+    const raw = node.getLoaded(this.id as unknown as CoID<RawCoValue>);
+
     if (raw) {
       return coValuesCache.get(raw, () =>
         instantiateRefEncoded(this.schema, raw),
@@ -40,6 +70,14 @@ export class Ref<out V extends CoValue> {
     } else {
       return null;
     }
+  }
+
+  get value() {
+    if (!this.hasReadAccess()) {
+      return null;
+    }
+
+    return this.getValueWithoutAccessCheck();
   }
 
   private async loadHelper(): Promise<V | "unavailable"> {
@@ -100,7 +138,7 @@ export class Ref<out V extends CoValue> {
       } else if (this.value !== null) {
         const freshValueInstance = instantiateRefEncoded(
           this.schema,
-          this.value?._raw,
+          this.value._raw,
         );
         TRACE_ACCESSES && console.log("freshValueInstance", freshValueInstance);
         subScope.cachedValues[this.id] = freshValueInstance;

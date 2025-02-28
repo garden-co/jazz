@@ -9,7 +9,7 @@ import { getNextTrack, getPrevTrack } from "./lib/getters";
 
 export function useMediaPlayer() {
   const { me } = useAccount({
-    root: {},
+    resolve: { root: true },
   });
 
   const playState = usePlayState();

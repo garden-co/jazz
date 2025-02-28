@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 
 import { AgentSecret } from "cojson";
-import { PureJSCrypto } from "cojson/src/crypto/PureJSCrypto.js";
+import { PureJSCrypto } from "cojson/crypto/PureJSCrypto";
 import { assert, beforeEach, describe, expect, it, vi } from "vitest";
 import { PassphraseAuth } from "../auth/PassphraseAuth";
 import {
@@ -152,7 +152,9 @@ describe("PassphraseAuth", () => {
 
       // Verify the account name was set
       const { profile } = await account.ensureLoaded({
-        profile: {},
+        resolve: {
+          profile: true,
+        },
       });
       expect(profile.name).toBe(testName);
 
