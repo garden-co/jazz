@@ -639,7 +639,7 @@ export class RawGroup<
     );
   }
 
-  revokeExtend(parent: RawGroup) {
+  async revokeExtend(parent: RawGroup) {
     if (this.myRole() !== "admin") {
       throw new Error(
         "To unextend a group, the current account must be an admin in the child group",
@@ -662,6 +662,8 @@ export class RawGroup<
 
     // Set the child key on the parent group to `revoked`
     parent.set(`child_${this.id}`, "revoked", "trusting");
+
+    await this.loadAllChildGroups();
 
     // Rotate the keys on the child group
     this.rotateReadKey();

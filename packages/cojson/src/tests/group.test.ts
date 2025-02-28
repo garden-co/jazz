@@ -684,7 +684,7 @@ describe("unextend", () => {
     expect(childGroup.roleOf(alice.id)).toBe("writer");
 
     // `childGroup` no longer has `parentGroup`'s members
-    childGroup.revokeExtend(parentGroup);
+    await childGroup.revokeExtend(parentGroup);
     expect(childGroup.roleOf(bob.id)).toBe("reader");
     expect(childGroup.roleOf(alice.id)).toBe(undefined);
   });
