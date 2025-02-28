@@ -163,6 +163,35 @@ describe("co.json TypeScript validation", () => {
       }>();
   });
 
+  /* Special case from reported issue:
+   ** See: https://github.com/garden-co/jazz/issues/1496
+   */
+  it("should apply the same validation to optional json [JAZZ-1496]", async () => {
+    interface ValidInterface0 {
+      value: string;
+    }
+    interface ValidInterface1 {
+      value: string | undefined;
+    }
+    interface InterfaceWithOptionalTypes {
+      value?: string;
+    }
+
+    class MapWithOptionalJSON extends CoMap {
+      data1 = co.optional.json<ValidInterface0>();
+      data2 = co.optional.json<ValidInterface1>();
+      data3 = co.optional.json<InterfaceWithOptionalTypes>();
+    }
+
+    expectTypeOf(MapWithOptionalJSON.create<MapWithOptionalJSON>)
+      .parameter(0)
+      .toEqualTypeOf<{
+        data1?: valueWithCoMarker<ValidInterface0> | null;
+        data2?: valueWithCoMarker<ValidInterface1> | null;
+        data3?: valueWithCoMarker<InterfaceWithOptionalTypes> | null;
+      }>();
+  });
+
   it("should not accept functions", async () => {
     class InvalidFunctionMap extends CoMap {
       // @ts-expect-error Should not be considered valid
