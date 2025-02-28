@@ -2914,7 +2914,7 @@ test("revoking access on a parent group doesn't block access to the child group 
   expect(mapOnNode2.get("foo")).toEqual("baz");
 });
 
-test("revoking access to parent group", async () => {
+test("revoking write access to parent group", async () => {
   // Start with a node and a group
   const { group, node } = newGroupHighLevel();
 
@@ -2923,7 +2923,7 @@ test("revoking access to parent group", async () => {
   group.extend(parentGroup);
 
   // Create an account (`alice`) that can write to the parent group
-  // Create an an account (`bob`) that can write to the child group
+  // Create an account (`bob`) that can write to the child group
   const alice = node.createAccount();
   const bob = node.createAccount();
   parentGroup.addMember(alice, "writer");
@@ -2958,7 +2958,7 @@ test("revoking access to parent group", async () => {
   expect(aliceMap.get("foo")).toEqual("baz");
 
   // The two groups are no longer related
-  group.revokeExtend(parentGroup);
+  await group.revokeExtend(parentGroup);
 
   // `bob` sets `foo` to `abc`
   bobMap.set("foo", "abc", "private");
@@ -2976,6 +2976,102 @@ test("revoking access to parent group", async () => {
   );
   // `alice`'s change is not made successfully
   expect(aliceMapAfterUnextend.get("foo")).not.toEqual("def");
+});
+
+test("revoking read access to parent group", async () => {
+  // Start with two nodes
+  const { node1, node2 } = await createTwoConnectedNodes("server", "server");
+  const group = node1.node.createGroup();
+
+  // Create a parent group and relate it to the existing group
+  const parentGroup = node1.node.createGroup();
+  group.extend(parentGroup);
+
+  // Create an account (`alice`) that can read from the parent group
+  // Create an account (`bob`) that can write to the child group
+  const alice = await loadCoValueOrFail(node1.node, node2.accountID);
+  const bob = await loadCoValueOrFail(node1.node, node1.accountID);
+  parentGroup.addMember(alice, "reader");
+  group.addMember(bob, "writer");
+
+  // The child group has a map that can be written to by `bob`
+  const bobMap = group.createMap();
+
+  // `bob` sets `foo` to `bar`
+  bobMap.set("foo", "bar", "private");
+  // `bob`'s change is made successfully
+  expect(bobMap.get("foo")).toEqual("bar");
+
+  const aliceMap = await loadCoValueOrFail(node2.node, bobMap.id);
+  // `alice` reads `foo` as `bar`
+  expect(aliceMap.get("foo")).toEqual("bar");
+
+  // The two groups are no longer related
+  await group.revokeExtend(parentGroup);
+
+  // `bob` sets `foo` to `abc`
+  bobMap.set("foo", "abc", "private");
+  // `bob`'s change is made successfully
+  expect(bobMap.get("foo")).toEqual("abc");
+
+  // `alice` reads `foo` as `bar`
+  expect(aliceMap.get("foo")).toEqual("bar");
+});
+
+test("revoking read access to grandparent group", async () => {
+  // Start with two nodes
+  const { node1, node2, node3 } = await createThreeConnectedNodes(
+    "server",
+    "server",
+    "server",
+  );
+  const group = node1.node.createGroup();
+
+  // Create group hierarchy
+  const parentGroup = node1.node.createGroup();
+  const grandParentGroup = node1.node.createGroup();
+  group.extend(parentGroup);
+  parentGroup.extend(grandParentGroup);
+
+  // Create an account (`alice`) that can read from the parent group
+  // Create an account (`bob`) that can write to the child group
+  // Create an account (`charlie`) that can read from the grandparent group
+  const alice = await loadCoValueOrFail(node1.node, node2.accountID);
+  const bob = await loadCoValueOrFail(node1.node, node1.accountID);
+  const charlie = await loadCoValueOrFail(node1.node, node3.accountID);
+  parentGroup.addMember(alice, "reader");
+  group.addMember(bob, "writer");
+  grandParentGroup.addMember(charlie, "reader");
+
+  // The child group has a map that can be written to by `bob`
+  const bobMap = group.createMap();
+
+  // `bob` sets `foo` to `bar`
+  bobMap.set("foo", "bar", "private");
+  // `bob`'s change is made successfully
+  expect(bobMap.get("foo")).toEqual("bar");
+
+  const aliceMap = await loadCoValueOrFail(node2.node, bobMap.id);
+  // `alice` reads `foo` as `bar`
+  expect(aliceMap.get("foo")).toEqual("bar");
+
+  const charlieMap = await loadCoValueOrFail(node3.node, bobMap.id);
+  // `charlie` reads `foo` as `bar`
+  expect(charlieMap.get("foo")).toEqual("bar");
+
+  // The groups are no longer related
+  await parentGroup.revokeExtend(grandParentGroup);
+  await group.revokeExtend(parentGroup);
+
+  // `bob` sets `foo` to `abc`
+  bobMap.set("foo", "abc", "private");
+  // `bob`'s change is made successfully
+  expect(bobMap.get("foo")).toEqual("abc");
+
+  // `alice` reads `foo` as `bar`
+  expect(aliceMap.get("foo")).toEqual("bar");
+  // `charlie` reads `foo` as `bar`
+  expect(charlieMap.get("foo")).toEqual("bar");
 });
 
 test("a user should have write access if the parent group has everyone as a writer", async () => {

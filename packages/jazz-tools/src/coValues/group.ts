@@ -216,8 +216,8 @@ export class Group extends CoValueBase implements CoValue {
     return this;
   }
 
-  revokeExtend(parent: Group) {
-    this._raw.revokeExtend(parent._raw);
+  async revokeExtend(parent: Group) {
+    await this._raw.revokeExtend(parent._raw);
     return this;
   }
 
