@@ -40,7 +40,7 @@
     "react-native-screens": "4.1.0",
     "react-native-url-polyfill": "^2.0.0",
     "readable-stream": "4.7.0",
-    "ws": "^8.14.2"
+    "ws": "^8.18.1"
   },
   "devDependencies": {
     "@babel/core": "^7.20.0",
