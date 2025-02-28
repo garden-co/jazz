@@ -35,7 +35,7 @@
     "tsup": "8.3.5",
     "typescript": "~5.6.2",
     "vitest": "3.0.5",
-    "ws": "^8.14.2"
+    "ws": "^8.18.1"
   },
   "madge": {
     "detectiveOptions": {
