@@ -3,7 +3,7 @@
   "type": "module",
   "version": "0.10.8",
   "main": "dist/index.js",
-  "types": "src/index.ts",
+  "types": "dist/index.d.ts",
   "license": "MIT",
   "dependencies": {
     "cojson": "workspace:*",

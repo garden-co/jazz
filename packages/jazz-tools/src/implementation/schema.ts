@@ -6,7 +6,6 @@ import {
   CoValueFromRaw,
   ItemsSym,
   JazzToolsSymbol,
-  MembersSym,
   SchemaInit,
   isCoValueClass,
 } from "../internal.js";
@@ -29,7 +28,7 @@ export type CoMarker = { readonly __co: unique symbol };
 export type co<T> = T | (T & CoMarker);
 export type IfCo<C, R> = C extends infer _A | infer B
   ? B extends CoMarker
-    ? R extends JazzToolsSymbol // Exclude symbol properties like co.items or co.members from the refs/init types
+    ? R extends JazzToolsSymbol // Exclude symbol properties like co.items from the refs/init types
       ? never
       : R
     : never
@@ -100,7 +99,6 @@ export const co = {
   },
   ref,
   items: ItemsSym as ItemsSym,
-  members: MembersSym as MembersSym,
   optional,
 };
 

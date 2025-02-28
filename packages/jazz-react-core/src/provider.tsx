@@ -15,3 +15,9 @@ export const JazzContext = React.createContext<
 export const JazzContextManagerContext = React.createContext<
   JazzContextManager<Account, {}> | undefined
 >(undefined);
+
+declare module "jazz-tools" {
+  export interface Register {
+    Account: RegisteredAccount;
+  }
+}

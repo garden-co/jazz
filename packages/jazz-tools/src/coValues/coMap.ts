@@ -151,7 +151,7 @@ export class CoMap extends CoValueBase implements CoValue {
   }
 
   /** @internal */
-  private getEditFromRaw(
+  public getEditFromRaw(
     target: CoMap,
     rawEdit: {
       by: RawAccountID | AgentID;

@@ -10,7 +10,7 @@ import {
   createJazzContextFromExistingCredentials,
   isControlledAccount,
 } from "../index.js";
-import { setupTwoNodes, waitFor } from "./utils.js";
+import { setupTwoNodes } from "./utils.js";
 
 const connectedPeers = cojsonInternals.connectedPeers;
 

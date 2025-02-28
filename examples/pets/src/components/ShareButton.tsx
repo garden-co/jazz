@@ -2,7 +2,7 @@ import { useState } from "react";
 
 import { PetPost } from "../1_schema";
 
-import { createInviteLink } from "jazz-react";
+import { createInviteLink, useAccount } from "jazz-react";
 import QRCode from "qrcode";
 
 import { Button, useToast } from "../basicComponents";
@@ -10,9 +10,11 @@ import { Button, useToast } from "../basicComponents";
 export function ShareButton({ petPost }: { petPost?: PetPost | null }) {
   const [existingInviteLink, setExistingInviteLink] = useState<string>();
   const { toast } = useToast();
+  const { me } = useAccount();
 
   return (
-    petPost?._owner.myRole() === "admin" && (
+    petPost &&
+    me.canAdmin(petPost) && (
       <Button
         size="sm"
         className="py-0"

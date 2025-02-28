@@ -1,11 +1,10 @@
 // @vitest-environment happy-dom
 
-import { Account } from "jazz-tools";
-import { ID } from "jazz-tools";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthSecretStorage } from "../auth/AuthSecretStorage";
 import { InMemoryKVStore } from "../auth/InMemoryKVStore.js";
 import KvStoreContext from "../auth/KvStoreContext";
+import { Account, ID } from "../exports";
 
 const kvStore = new InMemoryKVStore();
 KvStoreContext.getInstance().initialize(kvStore);

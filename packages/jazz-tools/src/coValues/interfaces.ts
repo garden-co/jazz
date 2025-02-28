@@ -160,7 +160,7 @@ export function loadCoValueWithoutMe<V extends CoValue, Depth>(
   id: ID<CoValue>,
   asOrDepth: Account | AnonymousJazzAgent | (Depth & DepthsIn<V>),
   depth?: Depth & DepthsIn<V>,
-) {
+): Promise<DeeplyLoaded<V, Depth> | undefined> {
   if (isAccountInstance(asOrDepth) || isAnonymousAgentInstance(asOrDepth)) {
     if (!depth) {
       throw new Error(

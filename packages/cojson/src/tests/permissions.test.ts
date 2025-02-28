@@ -893,6 +893,26 @@ test("Admins can set group read key, make a private transaction in an owned obje
   expect(childContentAsReader.get("foo2")).toEqual("bar2");
 });
 
+test("only admins can add agent ids", () => {
+  const { groupCore } = newGroup();
+
+  const inviteSecret = Crypto.newRandomAgentSecret();
+  const inviteID = Crypto.getAgentID(inviteSecret);
+
+  const groupAsInvite = expectGroup(
+    groupCore
+      .testWithDifferentAccount(
+        new ControlledAgent(inviteSecret, Crypto),
+        Crypto.newRandomSessionID(inviteID),
+      )
+      .getCurrentContent(),
+  );
+
+  groupAsInvite.set(inviteID, "adminInvite", "trusting");
+
+  expect(groupAsInvite.get(inviteID)).toEqual(undefined);
+});
+
 test("Admins can set group read rey, make a private transaction in an owned object, rotate the read key, add two readers, rotate the read key again to kick out one reader, make another private transaction in the owned object, and only the remaining reader can read both transactions", () => {
   const { node, groupCore, admin } = newGroup();
 
@@ -2800,6 +2820,110 @@ test("Calling extend to create grand-child groups parent and child references an
   );
 
   expect(childContentAsReader.get("foo")).toEqual("bar");
+});
+
+test("revoking access on a child group doesn't block access to that group if a more permissive role is inheritable", async () => {
+  const { node1, node2 } = await createTwoConnectedNodes("server", "server");
+
+  const group = node1.node.createGroup();
+  const parentGroup = node1.node.createGroup();
+
+  group.extend(parentGroup);
+
+  const randomUser = await loadCoValueOrFail(node1.node, node2.accountID);
+
+  parentGroup.addMember(randomUser, "writer");
+  group.addMember(randomUser, "writer");
+  await group.removeMember(randomUser);
+
+  const childMap = group.createMap();
+
+  childMap.set("foo", "bar", "private");
+
+  const mapOnNode2 = await loadCoValueOrFail(node2.node, childMap.id);
+
+  mapOnNode2.set("foo", "baz", "private");
+
+  expect(mapOnNode2.get("foo")).toEqual("baz");
+});
+
+test("revoking access on a parent group doesn't block access to the child group if the same role is inheritable from a grand-parent group", async () => {
+  const { node1, node2 } = await createTwoConnectedNodes("server", "server");
+
+  const group = node1.node.createGroup();
+  const parentGroup = node1.node.createGroup();
+  const grandParentGroup = node1.node.createGroup();
+
+  group.extend(parentGroup);
+  parentGroup.extend(grandParentGroup);
+
+  const randomUser = await loadCoValueOrFail(node1.node, node2.accountID);
+
+  grandParentGroup.addMember(randomUser, "writer");
+  parentGroup.addMember(randomUser, "writer");
+  await parentGroup.removeMember(randomUser);
+
+  const childMap = group.createMap();
+
+  childMap.set("foo", "bar", "private");
+
+  const mapOnNode2 = await loadCoValueOrFail(node2.node, childMap.id);
+
+  mapOnNode2.set("foo", "baz", "private");
+
+  expect(mapOnNode2.get("foo")).toEqual("baz");
+});
+
+test("revoking access on a parent group doesn't block access to the child group if the same role is inheritable from another parent group", async () => {
+  const { node1, node2 } = await createTwoConnectedNodes("server", "server");
+
+  const group = node1.node.createGroup();
+  const parentGroup1 = node1.node.createGroup();
+  const parentGroup2 = node1.node.createGroup();
+
+  group.extend(parentGroup1);
+  group.extend(parentGroup2);
+
+  const randomUser = await loadCoValueOrFail(node1.node, node2.accountID);
+
+  parentGroup1.addMember(randomUser, "writer");
+  parentGroup2.addMember(randomUser, "writer");
+  await parentGroup1.removeMember(randomUser);
+
+  const childMap = group.createMap();
+
+  childMap.set("foo", "bar", "private");
+
+  const mapOnNode2 = await loadCoValueOrFail(node2.node, childMap.id);
+
+  mapOnNode2.set("foo", "baz", "private");
+
+  expect(mapOnNode2.get("foo")).toEqual("baz");
+});
+
+test("a user should have write access if the parent group has everyone as a writer", async () => {
+  const { node1, node2 } = await createTwoConnectedNodes("server", "server");
+
+  const group = node1.node.createGroup();
+  const parentGroup = node1.node.createGroup();
+
+  group.extend(parentGroup);
+
+  parentGroup.addMember("everyone", "writer");
+
+  const randomUser = await loadCoValueOrFail(node1.node, node2.accountID);
+
+  group.addMember(randomUser, "reader");
+
+  const childMap = group.createMap();
+
+  childMap.set("foo", "bar", "private");
+
+  const mapOnNode2 = await loadCoValueOrFail(node2.node, childMap.id);
+
+  mapOnNode2.set("foo", "baz", "private");
+
+  expect(mapOnNode2.get("foo")).toEqual("baz");
 });
 
 test("High-level permissions work correctly when a group is extended", async () => {

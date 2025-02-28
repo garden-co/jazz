@@ -174,5 +174,64 @@ describe("BrowserPasskeyAuth", () => {
         "Passkey creation aborted",
       );
     });
+
+    it("should leave the account profile name unchanged if username is empty", async () => {
+      const auth = new BrowserPasskeyAuth(
+        mockCrypto,
+        mockAuthenticate,
+        authSecretStorage,
+        "Test App",
+      );
+
+      mockNavigator.credentials.create.mockResolvedValue({
+        type: "public-key",
+        id: new Uint8Array([1, 2, 3, 4]),
+      });
+
+      await authSecretStorage.set({
+        accountID: "test123" as ID<Account>,
+        secretSeed: new Uint8Array([1, 2, 3]),
+        accountSecret: "mock-secret" as AgentSecret,
+        provider: "anonymous",
+      });
+
+      await auth.signUp("");
+
+      const currentAccount = await Account.getMe().ensureLoaded({
+        profile: {},
+      });
+
+      // 'Test Account' is the name provided during account creation (see: `jazz-tools/src/testing.ts`)
+      expect(currentAccount.profile.name).toEqual("Test Account");
+    });
+
+    it("should update the account profile name if username is provided", async () => {
+      const auth = new BrowserPasskeyAuth(
+        mockCrypto,
+        mockAuthenticate,
+        authSecretStorage,
+        "Test App",
+      );
+
+      mockNavigator.credentials.create.mockResolvedValue({
+        type: "public-key",
+        id: new Uint8Array([1, 2, 3, 4]),
+      });
+
+      await authSecretStorage.set({
+        accountID: "test123" as ID<Account>,
+        secretSeed: new Uint8Array([1, 2, 3]),
+        accountSecret: "mock-secret" as AgentSecret,
+        provider: "anonymous",
+      });
+
+      await auth.signUp("testuser");
+
+      const currentAccount = await Account.getMe().ensureLoaded({
+        profile: {},
+      });
+
+      expect(currentAccount.profile.name).toEqual("testuser");
+    });
   });
 });

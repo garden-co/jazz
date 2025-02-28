@@ -2,22 +2,22 @@
   "name": "cojson",
   "module": "dist/index.js",
   "main": "dist/index.js",
-  "types": "src/index.ts",
+  "types": "dist/index.d.ts",
   "exports": {
     ".": {
-      "types": "./src/index.ts",
+      "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
     },
     "./dist/crypto/PureJSCrypto": {
-      "types": "./src/crypto/PureJSCrypto.ts",
+      "types": "./dist/crypto/PureJSCrypto.d.ts",
       "default": "./dist/crypto/PureJSCrypto.js"
     },
     "./crypto/PureJSCrypto": {
-      "types": "./src/crypto/PureJSCrypto.ts",
+      "types": "./dist/crypto/PureJSCrypto.d.ts",
       "default": "./dist/crypto/PureJSCrypto.js"
     },
     "./crypto/WasmCrypto": {
-      "types": "./src/crypto/WasmCrypto.ts",
+      "types": "./dist/crypto/WasmCrypto.d.ts",
       "default": "./dist/crypto/WasmCrypto.js"
     },
     "./dist/*": "./dist/*",
