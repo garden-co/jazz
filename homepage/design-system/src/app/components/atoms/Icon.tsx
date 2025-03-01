@@ -1,4 +1,6 @@
 import {
+  AlertCircleIcon,
+  AlertTriangleIcon,
   ArrowDownIcon,
   ArrowRightIcon,
   BookTextIcon,
@@ -16,9 +18,10 @@ import {
   GlobeIcon,
   HashIcon,
   ImageIcon,
+  InfoIcon,
   LinkIcon,
   LockKeyholeIcon,
-  LucideIcon,
+  type LucideIcon,
   MailIcon,
   MenuIcon,
   MessageCircleQuestionIcon,
@@ -71,6 +74,8 @@ const icons = {
   touchId: FingerprintIcon,
   upload: UploadCloudIcon,
   zip: FolderArchiveIcon,
+  warning: AlertTriangleIcon,
+  info: InfoIcon,
 };
 
 // copied from tailwind line height https://tailwindcss.com/docs/font-size
