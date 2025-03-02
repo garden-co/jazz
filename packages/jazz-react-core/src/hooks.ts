@@ -1,6 +1,7 @@
 import React, {
   useCallback,
   useContext,
+  useEffect,
   useRef,
   useSyncExternalStore,
 } from "react";
@@ -22,10 +23,14 @@ import { JazzContext, JazzContextManagerContext } from "./provider.js";
 import { getCurrentAccountFromContextManager } from "./utils.js";
 import { subscribeToContextManager } from "./utils.js";
 
+export function isServer() {
+  return typeof window === "undefined";
+}
+
 export function useJazzContext<Acc extends Account>() {
   const value = useContext(JazzContext) as JazzContextType<Acc>;
 
-  if (!value) {
+  if (!value && !isServer()) {
     throw new Error(
       "You need to set up a JazzProvider on top of your app to use this hook.",
     );
@@ -40,7 +45,7 @@ export function useJazzContextManager<Acc extends Account>() {
     {}
   >;
 
-  if (!value) {
+  if (!value && !isServer()) {
     throw new Error(
       "You need to set up a JazzProvider on top of your app to use this hook.",
     );
@@ -122,6 +127,8 @@ export function useCoState<V extends CoValue, D>(
         return subscribeToContextManager(contextManager, () => {
           const agent = getCurrentAccountFromContextManager(contextManager);
 
+          if (!agent) return () => {};
+
           observable.reset();
 
           return observable
@@ -167,6 +174,8 @@ export function createUseAccountHooks<Acc extends Account>() {
         (callback) => {
           return subscribeToContextManager(contextManager, () => {
             const agent = getCurrentAccountFromContextManager(contextManager);
+
+            if (!agent) return () => {};
 
             if (agent._type === "Anonymous") {
               throw new Error(
@@ -225,6 +234,8 @@ export function createUseAccountHooks<Acc extends Account>() {
         (callback) => {
           return subscribeToContextManager(contextManager, () => {
             const agent = getCurrentAccountFromContextManager(contextManager);
+
+            if (!agent) return () => {};
 
             if (agent._type === "Anonymous") {
               return () => {};
