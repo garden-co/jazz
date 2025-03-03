@@ -1,5 +1,5 @@
 import { MusicTrack, Playlist } from "@/1_schema";
-import { addTrackToPlaylist } from "@/4_actions";
+import { addTrackToPlaylist, removeTrackFromPlaylist } from "@/4_actions";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -10,6 +10,7 @@ import { cn } from "@/lib/utils";
 import { useAccount, useCoState } from "jazz-react";
 import { ID } from "jazz-tools";
 import { MoreHorizontal } from "lucide-react";
+import { Fragment } from "react/jsx-runtime";
 import { MusicTrackTitleInput } from "./MusicTrackTitleInput";
 import { Button } from "./ui/button";
 
@@ -44,6 +45,11 @@ export function MusicTrackRow({
   function handleAddToPlaylist(playlist: Playlist) {
     if (!track) return;
     addTrackToPlaylist(playlist, track);
+  }
+
+  function handleRemoveFromPlaylist(playlist: Playlist) {
+    if (!track) return;
+    removeTrackFromPlaylist(playlist, track);
   }
 
   return (
@@ -85,12 +91,20 @@ export function MusicTrackRow({
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end">
               {playlists.map((playlist, index) => (
-                <DropdownMenuItem
-                  key={index}
-                  onSelect={() => handleAddToPlaylist(playlist)}
-                >
-                  Add to {playlist.title}
-                </DropdownMenuItem>
+                <Fragment key={index}>
+                  <DropdownMenuItem
+                    key={`add-${index}`}
+                    onSelect={() => handleAddToPlaylist(playlist)}
+                  >
+                    Add to {playlist.title}
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
+                    key={`remove-${index}`}
+                    onSelect={() => handleRemoveFromPlaylist(playlist)}
+                  >
+                    Remove from {playlist.title}
+                  </DropdownMenuItem>
+                </Fragment>
               ))}
             </DropdownMenuContent>
           </DropdownMenu>
