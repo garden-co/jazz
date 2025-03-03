@@ -1,5 +1,5 @@
 import { getAudioFileData } from "@/lib/audio/getAudioFileData";
-import { FileStream, Group, co } from "jazz-tools";
+import { FileStream, Group } from "jazz-tools";
 import {
   ListOfTracks,
   MusicTrack,
