@@ -3,6 +3,7 @@ import { Account, CoMap, Group } from "../exports.js";
 import {
   CoValue,
   CoValueClass,
+  ID,
   IfCo,
   ItemsSym,
   RefsToResolve,
@@ -174,6 +175,7 @@ export type CoMapInit<Map extends object> = {
 export class CoMapInstance<M extends CoMapSchema> extends CoValuePrototype {
   declare $raw: RawCoMap;
   declare $schema: M;
+  declare $id: ID<M>;
 
   private $lastUpdateTx: number;
 
@@ -182,6 +184,7 @@ export class CoMapInstance<M extends CoMapSchema> extends CoValuePrototype {
     this.$schema = schema;
     this.$raw = raw;
     this.$lastUpdateTx = raw.totalProcessedTransactions;
+    this.$id = raw.id as unknown as ID<M>;
   }
 
   static fromRaw<M extends CoMapSchema>(schema: M, raw: RawCoMap) {
