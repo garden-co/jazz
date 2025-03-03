@@ -1,5 +1,5 @@
 import { CoValueUniqueness, JsonValue, RawCoMap } from "cojson";
-import { Account, Group } from "../exports.js";
+import { Account, CoMap, Group } from "../exports.js";
 import {
   CoValue,
   CoValueClass,
@@ -171,13 +171,17 @@ export type CoMapInit<Map extends object> = {
   [Key in CoKeys<Map> as IfCo<Map[Key], Key>]?: ForceRequiredRef<Map[Key]>;
 };
 
-export class CoMapInstance extends CoValuePrototype {
+export class CoMapInstance<M extends CoMapSchema> extends CoValuePrototype {
   declare $raw: RawCoMap;
+  declare $schema: M;
 
-  constructor(schema: CoMapSchema, raw: RawCoMap) {
+  private $lastUpdateTx: number;
+
+  constructor(schema: M, raw: RawCoMap) {
     super();
     this.$schema = schema;
     this.$raw = raw;
+    this.$lastUpdateTx = raw.totalProcessedTransactions;
   }
 
   static fromRaw<M extends CoMapSchema>(schema: M, raw: RawCoMap) {
@@ -187,35 +191,27 @@ export class CoMapInstance extends CoValuePrototype {
     const fields = isRecord ? raw.keys() : Object.keys(schema);
 
     for (const key of fields) {
-      // TODO: Convert to plain object and add an $update method
       Object.defineProperty(value, key, {
-        get() {
-          const descriptor = schema.getFieldDescriptor(key);
-
-          if (descriptor && typeof key === "string") {
-            const value = raw.get(key);
-
-            if (descriptor === "json") {
-              return value;
-            } else if ("encoded" in descriptor) {
-              return value === undefined
-                ? undefined
-                : descriptor.encoded.decode(value);
-            } else if (isRefEncoded(descriptor)) {
-              throw new Error("Not implemented");
-            }
-          } else {
-            return undefined;
-          }
-        },
-        set(value) {
-          raw.set(key, value);
-        },
+        value: getValue(raw, schema, key),
+        writable: false,
         enumerable: true,
+        configurable: true,
       });
     }
 
-    return value as CoMapInstance & Simplify<CoMapInit<M>>;
+    return value as CoMapInstance<M> & Simplify<CoMapInit<M>>;
+  }
+
+  $set<K extends CoKeys<M>>(key: K, value: M[K]) {
+    setValue(this.$raw, this.$schema, key, value as JsonValue);
+  }
+
+  $updated() {
+    if (this.$lastUpdateTx === this.$raw.totalProcessedTransactions) {
+      return this;
+    }
+
+    return CoMapInstance.fromRaw(this.$schema, this.$raw);
   }
 
   /**
@@ -225,7 +221,7 @@ export class CoMapInstance extends CoValuePrototype {
    *
    * @category Subscription & Loading
    */
-  $resolve<M extends CoMapInstance, const R extends RefsToResolve<M>>(
+  $resolve<const R extends RefsToResolve<M>>(
     this: M,
     options: { resolve: RefsToResolveStrict<M, R> },
   ): Promise<Resolved<M, R>> {
@@ -246,4 +242,50 @@ export interface CoMapSchemaClass<S extends CoMapSchema> {
   /** @ignore */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   new (...args: any[]): S;
+}
+
+function getValue(raw: RawCoMap, schema: CoMapSchema, key: string) {
+  const descriptor = schema.getFieldDescriptor(key);
+
+  if (descriptor && typeof key === "string") {
+    const value = raw.get(key);
+
+    if (descriptor === "json") {
+      return value;
+    } else if ("encoded" in descriptor) {
+      return value === undefined ? undefined : descriptor.encoded.decode(value);
+    } else if (isRefEncoded(descriptor)) {
+      throw new Error("Not implemented");
+    }
+  } else {
+    return undefined;
+  }
+}
+
+function setValue(
+  raw: RawCoMap,
+  schema: CoMapSchema,
+  key: string,
+  value: JsonValue,
+) {
+  const descriptor = schema.getFieldDescriptor(key);
+
+  if (descriptor && typeof key === "string") {
+    if (descriptor === "json") {
+      raw.set(key, value);
+    } else if ("encoded" in descriptor) {
+      raw.set(key, descriptor.encoded.encode(value));
+    } else if (isRefEncoded(descriptor)) {
+      if (value === null) {
+        if (descriptor.optional) {
+          raw.set(key, null);
+        } else {
+          throw new Error(`Cannot set required reference ${key} to null`);
+        }
+      } else {
+        raw.set(key, (value as unknown as CoValue).id);
+      }
+    }
+    return true;
+  }
 }
