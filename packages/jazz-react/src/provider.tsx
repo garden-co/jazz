@@ -76,7 +76,7 @@ export function JazzProvider<Acc extends Account = RegisteredAccount>({
   return (
     <JazzContext.Provider value={value}>
       <JazzContextManagerContext.Provider value={contextManager}>
-        {value && children}
+        {children}
       </JazzContextManagerContext.Provider>
     </JazzContext.Provider>
   );
