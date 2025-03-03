@@ -1,0 +1,6 @@
+extends: existence
+message: "Consider using a list to break up complex ideas here"
+level: suggestion
+scope: paragraph
+raw:
+  - '(?:first(?:ly)?|second(?:ly)?|third(?:ly)?|next|finally|lastly|moreover|furthermore|additionally).*?(?:first(?:ly)?|second(?:ly)?|third(?:ly)?|next|finally|lastly|moreover|furthermore|additionally)'

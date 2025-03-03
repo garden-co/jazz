@@ -1,0 +1,7 @@
+extends: readability
+message: "This sentence (grade %s) might be hard to understand. Try simplifying it."
+level: suggestion
+grade: 10
+metrics:
+  - Flesch-Kincaid
+  - Gunning Fog

@@ -23,6 +23,9 @@
             # JS development
             nodejs_22
             nodePackages.pnpm
+
+            # Docs
+            vale
           ];
 
           shellHook = ''
