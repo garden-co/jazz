@@ -66,7 +66,7 @@ export class RawUnknownCoValue implements RawCoValue {
   }
 
   subscribe(listener: (value: this) => void): () => void {
-    return this.core.subscribe((content) => {
+    return this.core.subscribeToContent((content) => {
       listener(content as this);
     });
   }

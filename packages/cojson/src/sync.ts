@@ -1,6 +1,5 @@
 import { ValueType, metrics } from "@opentelemetry/api";
 import { PeerState } from "./PeerState.js";
-import { SyncStateManager } from "./SyncStateManager.js";
 import { CoValueHeader, Transaction } from "./coValueCore.js";
 import { CoValueCore } from "./coValueCore.js";
 import { Signature } from "./crypto/crypto.js";
@@ -129,10 +128,7 @@ export class SyncManager {
 
   constructor(local: LocalNode) {
     this.local = local;
-    this.syncState = new SyncStateManager(this);
   }
-
-  syncState: SyncStateManager;
 
   peersInPriorityOrder(): PeerState[] {
     return Object.values(this.peers).sort((a, b) => {
@@ -183,7 +179,7 @@ export class SyncManager {
   }
 
   async subscribeToIncludingDependencies(id: RawCoID, peer: PeerState) {
-    const entry = this.local.coValuesStore.get(id);
+    const entry = this.local.coValuesStore.getOrCreateEmpty(id);
 
     if (entry.state.type !== "available") {
       entry.loadFromPeers([peer]).catch((e: unknown) => {
@@ -392,7 +388,7 @@ export class SyncManager {
       id: msg.id,
       value: knownStateIn(msg),
     });
-    const entry = this.local.coValuesStore.get(msg.id);
+    const entry = this.local.coValuesStore.getOrCreateEmpty(msg.id);
 
     if (entry.state.type === "unknown" || entry.state.type === "unavailable") {
       const eligiblePeers = this.getServerAndStoragePeers(peer.id);
@@ -458,7 +454,7 @@ export class SyncManager {
   }
 
   async handleKnownState(msg: KnownStateMessage, peer: PeerState) {
-    const entry = this.local.coValuesStore.get(msg.id);
+    const entry = this.local.coValuesStore.getOrCreateEmpty(msg.id);
 
     peer.dispatchToKnownStates({
       type: "COMBINE_WITH",
@@ -468,7 +464,7 @@ export class SyncManager {
 
     if (entry.state.type === "unknown" || entry.state.type === "unavailable") {
       if (msg.asDependencyOf) {
-        const dependencyEntry = this.local.coValuesStore.get(
+        const dependencyEntry = this.local.coValuesStore.getOrCreateEmpty(
           msg.asDependencyOf,
         );
 
@@ -513,7 +509,7 @@ export class SyncManager {
   }
 
   async handleNewContent(msg: NewContentMessage, peer: PeerState) {
-    const entry = this.local.coValuesStore.get(msg.id);
+    const entry = this.local.coValuesStore.getOrCreateEmpty(msg.id);
 
     let coValue: CoValueCore;
 

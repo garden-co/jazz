@@ -10,10 +10,7 @@ import { CO_VALUE_PRIORITY } from "./priority.js";
 import { Peer, SyncMessage } from "./sync.js";
 
 export class PeerState {
-  constructor(
-    private peer: Peer,
-    knownStates: PeerKnownStates | undefined,
-  ) {
+  constructor(private peer: Peer) {
     this.optimisticKnownStates = knownStates?.clone() ?? new PeerKnownStates();
 
     // We assume that exchanges with storage peers are always successful

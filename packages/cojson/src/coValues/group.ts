@@ -152,7 +152,7 @@ export class RawGroup<
       }
 
       const id = getChildGroupId(key);
-      const child = store.get(id);
+      const child = store.getOrCreateEmpty(id);
 
       if (
         child.state.type === "unknown" ||

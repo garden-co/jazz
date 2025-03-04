@@ -1,5 +1,4 @@
 import { describe, expect, test } from "vitest";
-import { CoValueState } from "../coValueState.js";
 import { RawCoList } from "../coValues/coList.js";
 import { RawCoMap } from "../coValues/coMap.js";
 import { RawCoStream } from "../coValues/coStream.js";
@@ -492,9 +491,7 @@ describe("writeOnly", () => {
     group.core.waitForSync();
 
     node2.node.coValuesStore.coValues.delete(map.id);
-    expect(node2.node.coValuesStore.get(map.id)).toEqual(
-      CoValueState.Unknown(map.id),
-    );
+    expect(node2.node.coValuesStore.getIfExists(map.id)).toBeUndefined();
 
     const mapOnNode2 = await loadCoValueOrFail(node2.node, map.id);
 

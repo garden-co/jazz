@@ -61,11 +61,11 @@ export class Ref<out V extends CoValue> {
         ? this.controlledAccount.node
         : this.controlledAccount._raw.core.node;
 
-    const entry = node.coValuesStore.get(
+    const entry = node.coValuesStore.getOrCreateEmpty(
       this.id as unknown as CoID<RawCoValue>,
     );
 
-    if (entry.state.type === "available") {
+    if (entry.loadingState === "available") {
       return new Ref(this.id, this.controlledAccount, this.schema).value!;
     }
 

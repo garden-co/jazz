@@ -1,5 +1,5 @@
 import { CoID } from "./coValue.js";
-import { CoValueCore, Transaction } from "./coValueCore.js";
+import { CoValueCore, CoValueHeader, Transaction } from "./coValueCore.js";
 import { RawAccount, RawAccountID, RawProfile } from "./coValues/account.js";
 import { MapOpPayload } from "./coValues/coMap.js";
 import {
@@ -60,7 +60,7 @@ function logPermissionError(
 }
 
 export function determineValidTransactions(
-  coValue: CoValueCore,
+  coValue: CoValueCore & { header: CoValueHeader },
 ): { txID: TransactionID; tx: Transaction }[] {
   if (coValue.header.ruleset.type === "group") {
     const initialAdmin = coValue.header.ruleset.initialAdmin;
