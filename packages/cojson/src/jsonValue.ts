@@ -9,11 +9,13 @@ type AtLeastOne<T, U = { [K in keyof T]: Pick<T, K> }> = Partial<T> &
   U[keyof U];
 type ExcludeEmpty<T> = T extends AtLeastOne<T> ? T : never;
 
-export type CoJsonValue<T> =
-  | JsonValue
-  | CoJsonObjectWithIndex<T>
-  | CoJsonArray<T>;
-export type CoJsonArray<T> = CoJsonValue<T>[] | readonly CoJsonValue<T>[];
+export type CoJsonValue<T> = [T] extends [Function]
+  ? "Functions are not allowed"
+  : keyof T extends symbol
+    ? "Only string or number keys are allowed"
+    : CoJsonValueInt<T>;
+type CoJsonValueInt<T> = JsonValue | CoJsonObjectWithIndex<T> | CoJsonArray<T>;
+export type CoJsonArray<T> = CoJsonValueInt<T>[] | readonly CoJsonValueInt<T>[];
 
 /**
  * Since we are forcing Typescript to elaborate the indexes from the given type passing
@@ -25,7 +27,7 @@ export type CoJsonArray<T> = CoJsonValue<T>[] | readonly CoJsonValue<T>[];
  * Applying the ExcludeEmpty type here to make sure we don't accept functions or non-serializable values
  */
 export type CoJsonObjectWithIndex<T> = ExcludeEmpty<{
-  [K in keyof T & string]: CoJsonValue1L<T[K]> | undefined;
+  [K in keyof T]: CoJsonValue1L<T[K]> | undefined;
 }>;
 
 /**
