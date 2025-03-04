@@ -1,5 +1,11 @@
 # jazz-tools
 
+## 0.10.16
+
+### Patch Changes
+
+- a35249a: Fix CoMap.toJSON() with encoded fields
+
 ## 0.10.15
 
 ### Patch Changes
