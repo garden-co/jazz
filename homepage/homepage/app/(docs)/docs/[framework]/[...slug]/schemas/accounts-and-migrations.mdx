@@ -146,6 +146,7 @@ Jazz waits for the migration to finish before passing the account to your app's 
 ```ts
 export class MyAppAccount extends Account {
   root = co.ref(MyAppRoot);
+  profile = co.ref(MyAppProfile);
 
   async migrate(this: MyAppAccount) {
     // we specifically need to check for undefined, 
@@ -158,6 +159,16 @@ export class MyAppAccount extends Account {
         myChats: ListOfChats.create([], Group.create()),
         myContacts: ListOfAccounts.create([], Group.create())
       });
+    }
+
+    if (this.profile === undefined) {
+      const profileGroup = Group.create();
+      // Unlike the root, we want the profile to be publicly readable.
+      profileGroup.addMember("everyone", "reader");
+
+      this.profile = MyAppProfile.create({
+        name: "John Doe",
+      }, profileGroup);
     }
   }
 }
