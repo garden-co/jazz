@@ -3,7 +3,7 @@
   "type": "module",
   "version": "0.10.15",
   "main": "dist/index.js",
-  "types": "src/index.ts",
+  "types": "dist/index.d.ts",
   "license": "MIT",
   "dependencies": {
     "better-sqlite3": "^11.7.0",

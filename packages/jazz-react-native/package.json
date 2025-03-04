@@ -9,17 +9,17 @@
   "exports": {
     ".": {
       "react-native": "./dist/index.js",
-      "types": "./src/index.ts",
+      "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
     },
     "./crypto": {
       "react-native": "./dist/crypto/index.js",
-      "types": "./src/crypto/index.ts",
+      "types": "./dist/crypto/index.d.ts",
       "default": "./dist/crypto/index.js"
     },
     "./testing": {
       "react-native": "./dist/testing.js",
-      "types": "./src/testing.ts",
+      "types": "./dist/testing.d.ts",
       "default": "./dist/testing.js"
     }
   },

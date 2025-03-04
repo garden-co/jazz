@@ -1,14 +1,17 @@
 import { consumeInviteLinkFromWindowLocation } from "jazz-browser";
 import { useEffect } from "react";
 
-import { createUseAccountHooks, useJazzContext } from "jazz-react-core";
+import { useJazzContext } from "jazz-react-core";
 import { CoValue, CoValueClass, ID } from "jazz-tools";
 import { RegisteredAccount } from "./provider.js";
 
 export { useCoState, useAuthSecretStorage } from "jazz-react-core";
 
-export const { useAccount, useAccountOrGuest } =
-  createUseAccountHooks<RegisteredAccount>();
+declare module "jazz-react-core" {
+  export interface Register {
+    Account: RegisteredAccount;
+  }
+}
 
 export function useAcceptInvite<V extends CoValue>({
   invitedObjectSchema,
@@ -50,4 +53,9 @@ export function useAcceptInvite<V extends CoValue>({
   }, [onAccept]);
 }
 
-export { experimental_useInboxSender, useJazzContext } from "jazz-react-core";
+export {
+  experimental_useInboxSender,
+  useJazzContext,
+  useAccount,
+  useAccountOrGuest,
+} from "jazz-react-core";

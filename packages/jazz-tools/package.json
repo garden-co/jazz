@@ -2,14 +2,14 @@
   "name": "jazz-tools",
   "module": "dist/index.js",
   "main": "dist/index.js",
-  "types": "src/index.ts",
+  "types": "dist/index.d.ts",
   "exports": {
     ".": {
-      "types": "./src/index.ts",
+      "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
     },
     "./testing": {
-      "types": "./src/testing.ts",
+      "types": "./dist/testing.d.ts",
       "default": "./dist/testing.js"
     },
     "./dist/*": "./dist/*",
@@ -25,10 +25,11 @@
   "scripts": {
     "format-and-lint": "biome check .",
     "format-and-lint:fix": "biome check . --write",
-    "dev": "tsup --watch",
+    "dev": "tsup --watch --dts",
     "test": "vitest --run --root ../../ --project jazz-tools",
     "test:watch": "vitest --watch --root ../../ --project jazz-tools",
-    "build": "tsup",
+    "types": "tsc --outDir dist",
+    "build": "tsup && pnpm types",
     "prepublishOnly": "npm run build"
   },
   "devDependencies": {

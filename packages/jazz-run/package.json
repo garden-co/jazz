@@ -7,11 +7,11 @@
   "exports": {
     "./startSyncServer": {
       "import": "./dist/startSyncServer.js",
-      "types": "./src/startSyncServer.ts"
+      "types": "./dist/startSyncServer.d.ts"
     },
     "./createWorkerAccount": {
       "import": "./dist/createWorkerAccount.js",
-      "types": "./src/createWorkerAccount.ts"
+      "types": "./dist/createWorkerAccount.d.ts"
     }
   },
   "scripts": {

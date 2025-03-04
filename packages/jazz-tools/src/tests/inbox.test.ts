@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
+import { Account } from "../coValues/account";
 import { CoMap } from "../coValues/coMap";
 import { Group } from "../coValues/group";
 import { Inbox, InboxSender } from "../coValues/inbox";
+import { Profile } from "../exports";
 import { co } from "../internal";
 import { setupTwoNodes, waitFor } from "./utils";
 
@@ -10,6 +12,28 @@ class Message extends CoMap {
 }
 
 describe("Inbox", () => {
+  describe("Private profile", () => {
+    it("Should throw if the inbox owner profile is private", async () => {
+      class WorkerAccount extends Account {
+        migrate() {
+          this.profile = Profile.create(
+            { name: "Worker" },
+            Group.create({ owner: this }),
+          );
+        }
+      }
+
+      const { clientAccount: sender, serverAccount: receiver } =
+        await setupTwoNodes({
+          ServerAccountSchema: WorkerAccount,
+        });
+
+      await expect(() => InboxSender.load(receiver.id, sender)).rejects.toThrow(
+        "Insufficient permissions to access the inbox, make sure its user profile is publicly readable.",
+      );
+    });
+  });
+
   it("should create inbox and allow message exchange between accounts", async () => {
     const { clientAccount: sender, serverAccount: receiver } =
       await setupTwoNodes();

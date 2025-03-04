@@ -1,10 +1,10 @@
 // @vitest-environment happy-dom
 
 import { mnemonicToEntropy } from "@scure/bip39";
-import { Account, AuthSecretStorage, KvStoreContext } from "jazz-tools";
+import { AuthSecretStorage, KvStoreContext } from "jazz-tools";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { usePassphraseAuth } from "../auth/PassphraseAuth";
-import { createUseAccountHooks } from "../hooks";
+import { useAccount } from "../hooks";
 import {
   createJazzTestAccount,
   createJazzTestGuest,
@@ -12,8 +12,6 @@ import {
 } from "../testing";
 import { testWordlist } from "./fixtures.js";
 import { act, renderHook, waitFor } from "./testUtils";
-
-const { useAccount } = createUseAccountHooks<Account>();
 
 describe("usePassphraseAuth", () => {
   beforeEach(async () => {

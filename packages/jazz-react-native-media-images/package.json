@@ -3,7 +3,7 @@
   "version": "0.10.15",
   "type": "module",
   "main": "dist/index.js",
-  "types": "src/index.ts",
+  "types": "dist/index.d.ts",
   "license": "MIT",
   "dependencies": {
     "jazz-tools": "workspace:*"

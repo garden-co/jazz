@@ -18,7 +18,11 @@ import {
   JazzContextType,
   createCoValueObservable,
 } from "jazz-tools";
-import { JazzContext, JazzContextManagerContext } from "./provider.js";
+import {
+  JazzContext,
+  JazzContextManagerContext,
+  RegisteredAccount,
+} from "./provider.js";
 import { getCurrentAccountFromContextManager } from "./utils.js";
 import { subscribeToContextManager } from "./utils.js";
 
@@ -138,139 +142,130 @@ export function useCoState<V extends CoValue, D>(
   return value;
 }
 
-export function createUseAccountHooks<Acc extends Account>() {
-  function useAccount(): {
-    me: Acc;
-    logOut: () => void;
-  };
-  function useAccount<D extends DepthsIn<Acc>>(
-    depth: D,
-  ): { me: DeeplyLoaded<Acc, D> | undefined | null; logOut: () => void };
-  function useAccount<D extends DepthsIn<Acc>>(
-    depth?: D,
-  ): { me: Acc | DeeplyLoaded<Acc, D> | undefined | null; logOut: () => void } {
-    const context = useJazzContext<Acc>();
-    const contextManager = useJazzContextManager<Acc>();
+function useAccount<A extends RegisteredAccount>(): {
+  me: A;
+  logOut: () => void;
+};
+function useAccount<A extends RegisteredAccount, D extends DepthsIn<A>>(
+  depth: D,
+): { me: DeeplyLoaded<A, D> | undefined | null; logOut: () => void };
+function useAccount<A extends RegisteredAccount, D extends DepthsIn<A>>(
+  depth?: D,
+): { me: A | DeeplyLoaded<A, D> | undefined | null; logOut: () => void } {
+  const context = useJazzContext<A>();
+  const contextManager = useJazzContextManager<A>();
 
-    if (!("me" in context)) {
-      throw new Error(
-        "useAccount can't be used in a JazzProvider with auth === 'guest' - consider using useAccountOrGuest()",
-      );
-    }
-
-    const observable = useCoValueObservable<Acc, D>();
-
-    const me = React.useSyncExternalStore<
-      DeeplyLoaded<Acc, D> | undefined | null
-    >(
-      React.useCallback(
-        (callback) => {
-          return subscribeToContextManager(contextManager, () => {
-            const agent = getCurrentAccountFromContextManager(contextManager);
-
-            if (agent._type === "Anonymous") {
-              throw new Error(
-                "useAccount can't be used in a JazzProvider with auth === 'guest' - consider using useAccountOrGuest()",
-              );
-            }
-
-            observable.reset();
-
-            const Schema = agent.constructor as CoValueClass<Acc>;
-
-            return observable
-              .getCurrentObservable()
-              .subscribe(
-                Schema,
-                agent.id,
-                agent,
-                depth ?? ([] as D),
-                callback,
-                callback,
-              );
-          });
-        },
-        [contextManager],
-      ),
-      () => observable.getCurrentValue(),
-      () => observable.getCurrentValue(),
+  if (!("me" in context)) {
+    throw new Error(
+      "useAccount can't be used in a JazzProvider with auth === 'guest' - consider using useAccountOrGuest()",
     );
-
-    return {
-      me: depth === undefined ? me || context.me : me,
-      logOut: context.logOut,
-    };
   }
 
-  function useAccountOrGuest(): {
-    me: Acc | AnonymousJazzAgent;
-  };
-  function useAccountOrGuest<D extends DepthsIn<Acc>>(
-    depth: D,
-  ): { me: DeeplyLoaded<Acc, D> | undefined | null | AnonymousJazzAgent };
-  function useAccountOrGuest<D extends DepthsIn<Acc>>(
-    depth?: D,
-  ): {
-    me: Acc | DeeplyLoaded<Acc, D> | undefined | null | AnonymousJazzAgent;
-  } {
-    const context = useJazzContext<Acc>();
-    const contextManager = useJazzContextManager<Acc>();
+  const observable = useCoValueObservable<A, D>();
 
-    const observable = useCoValueObservable<Acc, D>();
+  const me = React.useSyncExternalStore<DeeplyLoaded<A, D> | undefined | null>(
+    React.useCallback(
+      (callback) => {
+        return subscribeToContextManager(contextManager, () => {
+          const agent = getCurrentAccountFromContextManager(contextManager);
 
-    const me = React.useSyncExternalStore<
-      DeeplyLoaded<Acc, D> | undefined | null
-    >(
-      React.useCallback(
-        (callback) => {
-          return subscribeToContextManager(contextManager, () => {
-            const agent = getCurrentAccountFromContextManager(contextManager);
+          if (agent._type === "Anonymous") {
+            throw new Error(
+              "useAccount can't be used in a JazzProvider with auth === 'guest' - consider using useAccountOrGuest()",
+            );
+          }
 
-            if (agent._type === "Anonymous") {
-              return () => {};
-            }
+          observable.reset();
 
-            observable.reset();
+          const Schema = agent.constructor as CoValueClass<A>;
 
-            const Schema = agent.constructor as CoValueClass<Acc>;
-
-            return observable
-              .getCurrentObservable()
-              .subscribe(
-                Schema,
-                agent.id,
-                agent,
-                depth ?? ([] as D),
-                callback,
-                callback,
-              );
-          });
-        },
-        [contextManager],
-      ),
-      () => observable.getCurrentValue(),
-      () => observable.getCurrentValue(),
-    );
-
-    if ("me" in context) {
-      return {
-        me: depth === undefined ? me || context.me : me,
-      };
-    } else {
-      return { me: context.guest };
-    }
-  }
+          return observable
+            .getCurrentObservable()
+            .subscribe(
+              Schema,
+              agent.id,
+              agent,
+              depth ?? ([] as D),
+              callback,
+              callback,
+            );
+        });
+      },
+      [contextManager],
+    ),
+    () => observable.getCurrentValue(),
+    () => observable.getCurrentValue(),
+  );
 
   return {
-    useAccount,
-    useAccountOrGuest,
+    me: depth === undefined ? me || context.me : me,
+    logOut: context.logOut,
   };
 }
+
+function useAccountOrGuest<A extends RegisteredAccount>(): {
+  me: A | AnonymousJazzAgent;
+};
+function useAccountOrGuest<A extends RegisteredAccount, D extends DepthsIn<A>>(
+  depth: D,
+): { me: DeeplyLoaded<A, D> | undefined | null | AnonymousJazzAgent };
+function useAccountOrGuest<A extends RegisteredAccount, D extends DepthsIn<A>>(
+  depth?: D,
+): {
+  me: A | DeeplyLoaded<A, D> | undefined | null | AnonymousJazzAgent;
+} {
+  const context = useJazzContext<A>();
+  const contextManager = useJazzContextManager<A>();
+
+  const observable = useCoValueObservable<A, D>();
+
+  const me = React.useSyncExternalStore<DeeplyLoaded<A, D> | undefined | null>(
+    React.useCallback(
+      (callback) => {
+        return subscribeToContextManager(contextManager, () => {
+          const agent = getCurrentAccountFromContextManager(contextManager);
+
+          if (agent._type === "Anonymous") {
+            return () => {};
+          }
+
+          observable.reset();
+
+          const Schema = agent.constructor as CoValueClass<A>;
+
+          return observable
+            .getCurrentObservable()
+            .subscribe(
+              Schema,
+              agent.id,
+              agent,
+              depth ?? ([] as D),
+              callback,
+              callback,
+            );
+        });
+      },
+      [contextManager],
+    ),
+    () => observable.getCurrentValue(),
+    () => observable.getCurrentValue(),
+  );
+
+  if ("me" in context) {
+    return {
+      me: depth === undefined ? me || context.me : me,
+    };
+  } else {
+    return { me: context.guest };
+  }
+}
+
+export { useAccount, useAccountOrGuest };
 
 export function experimental_useInboxSender<
   I extends CoValue,
   O extends CoValue | undefined,
->(inboxOwnerID: ID<Account> | undefined) {
+>(inboxOwnerID: ID<RegisteredAccount> | undefined) {
   const context = useJazzContext();
 
   if (!("me" in context)) {

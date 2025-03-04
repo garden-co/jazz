@@ -11,7 +11,8 @@
     "forceConsistentCasingInFileNames": true,
     "noUncheckedIndexedAccess": true,
     "esModuleInterop": true,
-    "declaration": true
+    "declaration": true,
+    "declarationMap": true
   },
   "include": ["./src/**/*"]
 }
