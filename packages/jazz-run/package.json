@@ -33,7 +33,7 @@
     "cojson-transport-ws": "workspace:0.10.15",
     "effect": "^3.6.5",
     "jazz-tools": "workspace:0.10.15",
-    "ws": "^8.14.2"
+    "ws": "^8.18.1"
   },
   "devDependencies": {
     "@types/ws": "8.5.10",
