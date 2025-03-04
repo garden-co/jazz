@@ -1,0 +1,15 @@
+extends: existence
+message: "Be direct: try rewriting '%s' in active voice"
+level: warning
+ignorecase: true
+tokens:
+  - it is recommended that
+  - it is suggested that
+  - it is advisable to
+  - it is worth noting that
+  - it should be noted that
+  - it is important to remember
+  - developers should
+  - users should
+  - one should
+  - you should be aware

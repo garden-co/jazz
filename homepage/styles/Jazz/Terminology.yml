@@ -1,0 +1,17 @@
+extends: substitution
+message: "Use '%s' instead of '%s' for consistent terminology"
+level: error
+ignorecase: true
+swap:
+  collaborative values: CoValues
+  collaborative value: CoValue
+  comap: CoMap
+  colist: CoList
+  cofeed: CoFeed
+  filestream: FileStream
+  "([^.])schema class": $1schema
+  "([^.])owner group": $1Group
+  "instantiate(?:d|s)?": "create$1"
+  "utilize(?:d|s)?": "use$1"
+  "functionality": "feature"
+  "implementation": "code"

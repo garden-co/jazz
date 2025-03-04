@@ -17,7 +17,7 @@ class Task extends CoMap {
   assignee = co.optional.string;
 }
 
-//...
+// …
 
 // Update fields
 task.status = "in-progress";             // Direct assignment
@@ -36,7 +36,7 @@ class Project extends CoMap {
   tasks = co.ref(ListOfTasks);
 }
 
-//...
+// …
 
 // Add items
 project.tasks.push(Task.create({
@@ -73,7 +73,7 @@ class Dashboard extends CoMap {
   notifications = co.ref(ListOfNotifications);
 }
 
-//...
+// …
 
 // Multiple users can edit simultaneously
 // Last-write-wins for simple fields
@@ -99,7 +99,7 @@ class Project extends CoMap {
   resources = co.optional.ref(ListOfResources);
 }
 
-//...
+// …
 
 // Remove a reference
 project.resources = null;  // Removes the reference but resources still exist
@@ -127,7 +127,7 @@ class Project extends CoMap {
   budget = co.optional.ref(Budget);
 }
 
-//...
+// …
 
 // Delete fields from a regular CoMap
 delete project.budget;  // Removes the budget reference

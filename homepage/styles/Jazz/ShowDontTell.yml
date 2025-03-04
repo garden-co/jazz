@@ -1,0 +1,11 @@
+extends: existence
+message: "Show this with a code example instead of explaining abstractly"
+level: suggestion
+ignorecase: true
+tokens:
+  - is defined as
+  - can be defined as
+  - refers to
+  - is a way to
+  - is a means to
+  - serves to
