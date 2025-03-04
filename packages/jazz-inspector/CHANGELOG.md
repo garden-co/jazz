@@ -1,5 +1,13 @@
 # jazz-inspector
 
+## 0.10.13
+
+### Patch Changes
+
+- Updated dependencies [a35249a]
+  - jazz-tools@0.10.16
+  - jazz-react-core@0.10.13
+
 ## 0.10.12
 
 ### Patch Changes
