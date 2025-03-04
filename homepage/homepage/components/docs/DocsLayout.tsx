@@ -1,6 +1,8 @@
+"use client";
+
 import { TableOfContents } from "@/components/docs/TableOfContents";
 import { JazzNav } from "@/components/nav";
-import { Toc } from "@stefanprobst/rehype-extract-toc";
+import { useTocItems } from "@/lib/TocContext";
 import { clsx } from "clsx";
 
 export default function DocsLayout({
@@ -8,14 +10,14 @@ export default function DocsLayout({
   nav,
   navName,
   navIcon,
-  toc,
 }: {
   children: React.ReactNode;
   nav?: React.ReactNode;
   navName?: string;
   navIcon?: string;
-  toc?: Toc;
 }) {
+  const { tocItems } = useTocItems();
+
   const navSections = [
     {
       name: navName || "Docs",
@@ -24,8 +26,8 @@ export default function DocsLayout({
     },
     {
       name: "Outline",
-      content: toc && (
-        <TableOfContents className="text-sm" items={toc as Toc} />
+      content: tocItems?.length && (
+        <TableOfContents className="text-sm" items={tocItems} />
       ),
       icon: "tableOfContents",
     },
@@ -48,11 +50,11 @@ export default function DocsLayout({
           </div>
           <div className={clsx("md:col-span-8 lg:col-span-9 flex gap-12")}>
             {children}
-            {toc && (
+            {tocItems?.length && (
               <>
                 <TableOfContents
                   className="pl-3 py-6 shrink-0 text-sm sticky align-start top-[72px] w-[16rem] h-[calc(100vh-72px)] overflow-y-auto hidden lg:block"
-                  items={toc as Toc}
+                  items={tocItems}
                 />
               </>
             )}
