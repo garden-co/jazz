@@ -104,6 +104,10 @@ export class MusicaAccount extends Account {
       });
     }
   }
+
+  onAuthChange(isAuthenticated: boolean) {
+    console.log("onAuthChange", isAuthenticated, this.id);
+  }
 }
 
 /** Walkthrough: Continue with ./2_main.tsx */

@@ -341,6 +341,10 @@ export class Account extends CoValueBase implements CoValue {
     creationProps; // To avoid unused parameter warning
   }
 
+  onAuthChange(isAuthenticated: boolean) {
+    isAuthenticated; // To avoid unused parameter warning
+  }
+
   /** @category Subscription & Loading */
   static load<A extends Account, Depth>(
     this: CoValueClass<A>,

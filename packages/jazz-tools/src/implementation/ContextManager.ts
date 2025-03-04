@@ -91,6 +91,12 @@ export class JazzContextManager<
     }
 
     this.notify();
+
+    if (this.context && "me" in this.context) {
+      await this.context.me.onAuthChange(
+        this.authSecretStorage.isAuthenticated,
+      );
+    }
   }
 
   propsChanged(props: P) {

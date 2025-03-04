@@ -1,5 +1,6 @@
 import { AgentSecret } from "cojson";
 import type { Account } from "../coValues/account.js";
+import { activeAccountContext } from "../implementation/activeAccountContext.js";
 import type { ID } from "../internal.js";
 import { AuthCredentials } from "../types.js";
 import KvStoreContext from "./KvStoreContext.js";
@@ -112,7 +113,12 @@ export class AuthSecretStorage {
     );
 
     if (this.notify) {
-      this.emitUpdate(payload);
+      const authStateChanged = this.emitUpdate(payload);
+
+      const currentAccount = activeAccountContext.maybeGet();
+      if (currentAccount && authStateChanged) {
+        await currentAccount.onAuthChange(this.isAuthenticated);
+      }
     }
   }
 
@@ -131,12 +137,14 @@ export class AuthSecretStorage {
   emitUpdate(data: AuthCredentials | null) {
     const isAuthenticated = this.getIsAuthenticated(data);
 
-    if (this.isAuthenticated === isAuthenticated) return;
+    if (this.isAuthenticated === isAuthenticated) return false;
 
     this.isAuthenticated = isAuthenticated;
     for (const listener of this.listeners) {
       listener(this.isAuthenticated);
     }
+
+    return true;
   }
 
   async clear() {
