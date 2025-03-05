@@ -120,22 +120,22 @@ export const docNavigationItems = [
       {
         name: "CoMaps",
         href: "/docs/using-covalues/comaps",
-        done: 80,
+        done: 100,
       },
       {
         name: "CoLists",
         href: "/docs/using-covalues/colists",
-        done: 80,
+        done: 100,
       },
       {
         name: "CoFeeds",
         href: "/docs/using-covalues/cofeeds",
-        done: 80,
+        done: 100,
       },
       {
         name: "FileStreams",
         href: "/docs/using-covalues/filestreams",
-        done: 0,
+        done: 80,
       },
       {
         name: "SchemaUnions",
