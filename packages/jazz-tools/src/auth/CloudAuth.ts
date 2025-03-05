@@ -6,37 +6,42 @@ import { ID } from "../internal.js";
 import { AuthCredentials, AuthenticateAccountFunction } from "../types.js";
 import { AuthSecretStorage } from "./AuthSecretStorage.js";
 
-export const authClient = createAuthClient({
-  plugins: [
-    inferAdditionalFields({
-      user: {
-        accountID: {
-          type: "string",
-          required: true,
+export const newAuthClient = (baseUrl: string) =>
+  createAuthClient({
+    baseURL: baseUrl,
+    plugins: [
+      inferAdditionalFields({
+        user: {
+          accountID: {
+            type: "string",
+            required: true,
+          },
+          secretSeed: {
+            type: "number[]",
+            required: false,
+          },
+          accountSecret: {
+            type: "string",
+            required: true,
+          },
+          provider: {
+            type: "string",
+            required: false,
+          },
         },
-        secretSeed: {
-          type: "number[]",
-          required: false,
-        },
-        accountSecret: {
-          type: "string",
-          required: true,
-        },
-        provider: {
-          type: "string",
-          required: false,
-        },
-      },
-    }),
-  ],
-});
+      }),
+    ],
+  });
+const genericClient = newAuthClient("");
 
-export type Session = typeof authClient.$Infer.Session;
+export type AuthClient = typeof genericClient;
+export type Session = typeof genericClient.$Infer.Session;
 
 export class CloudAuth {
   constructor(
     private authenticate: AuthenticateAccountFunction,
     private authSecretStorage: AuthSecretStorage,
+    private authClient: AuthClient,
   ) {}
 
   static loadAuthData(
@@ -79,7 +84,7 @@ export class CloudAuth {
     const jazzAccountSeed = credentials.secretSeed
       ? Array.from(credentials.secretSeed)
       : undefined;
-    await authClient.updateUser({
+    await this.authClient.updateUser({
       accountID: credentials.accountID,
       accountSecret: credentials.accountSecret,
       secretSeed: jazzAccountSeed,
