@@ -35,17 +35,20 @@ There are two main ways to create FileStreams: creating empty ones for manual da
 
 Create an empty FileStream when you want to manually add binary data in chunks:
 
+<CodeGroup>
 ```ts
 import { FileStream } from "jazz-tools";
 
 // Create a new empty FileStream
 const fileStream = FileStream.create();
 ```
+</CodeGroup>
 
 ### Creating from Blobs and Files
 
 For files from input elements or drag-and-drop interfaces, use `createFromBlob`:
 
+<CodeGroup>
 ```ts
 // From a file input
 const fileInput = document.querySelector('input[type="file"]');
@@ -67,6 +70,7 @@ fileInput.addEventListener('change', async () => {
   }
 });
 ```
+</CodeGroup>
 
 ## Reading from FileStreams
 
@@ -76,6 +80,7 @@ FileStreams provide several ways to access their binary content, from raw chunks
 
 To access the raw binary data and metadata:
 
+<CodeGroup>
 ```ts
 // Get all chunks and metadata
 const fileData = fileStream.getChunks();
@@ -93,18 +98,22 @@ if (fileData) {
   }
 }
 ```
+</CodeGroup>
 
 By default, `getChunks()` only returns data for completed uploads. For in-progress uploads, use the `allowUnfinished` option:
 
+<CodeGroup>
 ```ts
 // Get data even if the stream isn't complete
 const partialData = fileStream.getChunks({ allowUnfinished: true });
 ```
+</CodeGroup>
 
 ### Converting to Blobs
 
 For easier integration with web APIs, convert to a `Blob`:
 
+<CodeGroup>
 ```ts
 // Convert to a Blob
 const blob = fileStream.toBlob();
@@ -126,11 +135,13 @@ if (blob) {
   URL.revokeObjectURL(url);
 }
 ```
+</CodeGroup>
 
 ### Loading FileStreams as Blobs
 
 You can directly load a FileStream as a Blob when you only have its ID:
 
+<CodeGroup>
 ```ts
 // Load directly as a Blob when you have an ID
 const blob = await FileStream.loadAsBlob(fileStreamId);
@@ -141,11 +152,13 @@ const partialBlob = await FileStream.loadAsBlob(fileStreamId, {
   allowUnfinished: true 
 });
 ```
+</CodeGroup>
 
 ### Checking Completion Status
 
 Check if a FileStream is fully uploaded:
 
+<CodeGroup>
 ```ts
 if (fileStream.isBinaryStreamEnded()) {
   console.log('File is completely uploaded');
@@ -153,6 +166,7 @@ if (fileStream.isBinaryStreamEnded()) {
   console.log('File upload is still in progress');
 }
 ```
+</CodeGroup>
 
 ## Writing to FileStreams
 
@@ -170,6 +184,7 @@ FileStream uploads follow a three-stage process:
 
 Begin by providing metadata about the file:
 
+<CodeGroup>
 ```ts
 // Create an empty FileStream
 const fileStream = FileStream.create();
@@ -181,11 +196,13 @@ fileStream.start({
   fileName: 'photo.jpg'            // Original filename (optional)
 });
 ```
+</CodeGroup>
 
 ### Pushing Data
 
 Add binary data in chunks - this helps with large files and progress tracking:
 
+<CodeGroup>
 ```ts
 // Create a sample Uint8Array (in real apps, this would be file data)
 const data = new Uint8Array([...]);
@@ -204,17 +221,20 @@ for (let i = 0; i < data.length; i += chunkSize) {
   console.log(`Upload progress: ${progress}%`);
 }
 ```
+</CodeGroup>
 
 ### Completing the Upload
 
 Once all chunks are pushed, mark the FileStream as complete:
 
+<CodeGroup>
 ```ts
 // Finalize the upload
 fileStream.end();
 
 console.log('Upload complete!');
 ```
+</CodeGroup>
 
 ## Subscribing to FileStreams
 
@@ -224,6 +244,7 @@ Like other CoValues, you can subscribe to FileStreams to get notified of changes
 
 Load a FileStream when you have its ID:
 
+<CodeGroup>
 ```ts
 // Load a FileStream by ID
 const fileStream = await FileStream.load(fileStreamId, []);
@@ -238,11 +259,13 @@ if (fileStream) {
   }
 }
 ```
+</CodeGroup>
 
 ### Subscribing to Changes
 
 Subscribe to a FileStream to be notified when chunks are added or when the upload is complete:
 
+<CodeGroup>
 ```ts
 // Subscribe to a FileStream by ID
 const unsubscribe = FileStream.subscribe(fileStreamId, [], (fileStream) => {
@@ -269,11 +292,13 @@ const unsubscribe = FileStream.subscribe(fileStreamId, [], (fileStream) => {
   }
 });
 ```
+</CodeGroup>  
 
 ### Waiting for Upload Completion
 
 If you need to wait for a FileStream to be fully synchronized across devices:
 
+<CodeGroup>
 ```ts
 // Wait for the FileStream to be fully synced
 await fileStream.waitForSync({
@@ -282,5 +307,6 @@ await fileStream.waitForSync({
 
 console.log('FileStream is now synced to all connected devices');
 ```
+</CodeGroup>
 
 This is useful when you need to ensure that a file is available to other users before proceeding with an operation.
