@@ -6,7 +6,7 @@ export function getCurrentAccountFromContextManager<Acc extends Account>(
   const context = contextManager.getCurrentValue();
 
   if (!context) {
-    throw new Error("No context found");
+    return null;
   }
 
   return "me" in context ? context.me : context.guest;
