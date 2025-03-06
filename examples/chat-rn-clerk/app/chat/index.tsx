@@ -11,7 +11,7 @@ import React, {
 } from "react-native";
 
 import { useUser } from "@clerk/clerk-expo";
-import { useAccount } from "jazz-react-native";
+import { useAccount } from "jazz-expo";
 import { Chat } from "../../src/schema";
 
 export default function ChatScreen() {

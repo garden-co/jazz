@@ -1,5 +1,5 @@
 import { Redirect, Stack } from "expo-router";
-import { useIsAuthenticated } from "jazz-react-native";
+import { useIsAuthenticated } from "jazz-expo";
 import React from "react";
 
 export default function HomeLayout() {

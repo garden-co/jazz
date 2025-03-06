@@ -14,7 +14,7 @@ import React, {
   Alert,
 } from "react-native";
 
-import { useAccount, useCoState } from "jazz-react-native";
+import { useAccount, useCoState } from "jazz-expo";
 import { Chat, Message } from "./schema";
 
 export default function ChatScreen({ navigation }: { navigation: any }) {
@@ -91,7 +91,7 @@ export default function ChatScreen({ navigation }: { navigation: any }) {
   };
 
   const renderMessageItem = ({ item }: { item: Message }) => {
-    const isMe = item._edits.text.by?.isMe;
+    const isMe = item._edits?.text?.by?.isMe;
     return (
       <View
         className={clsx(
@@ -107,7 +107,7 @@ export default function ChatScreen({ navigation }: { navigation: any }) {
               isMe ? "text-right" : "text-left",
             )}
           >
-            {item._edits.text.by?.profile?.name}
+            {item?._edits?.text?.by?.profile?.name}
           </Text>
         ) : null}
         <View
@@ -125,8 +125,8 @@ export default function ChatScreen({ navigation }: { navigation: any }) {
               !isMe ? "mt-2" : "mt-1",
             )}
           >
-            {item._edits.text.madeAt.getHours()}:
-            {item._edits.text.madeAt.getMinutes()}
+            {item?._edits?.text?.madeAt?.getHours()}:
+            {item?._edits?.text?.madeAt?.getMinutes()}
           </Text>
         </View>
       </View>
