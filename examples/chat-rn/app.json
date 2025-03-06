@@ -23,20 +23,7 @@
       },
       "package": "com.jazz.chatrn"
     },
-    "plugins": [
-      [
-        "expo-build-properties",
-        {
-          "ios": {
-            "newArchEnabled": true
-          },
-          "android": {
-            "newArchEnabled": true
-          }
-        }
-      ],
-      "expo-secure-store"
-    ],
+    "plugins": ["expo-secure-store", "expo-sqlite"],
     "extra": {
       "eas": {
         "projectId": "e0e61872-1906-4c84-b9d8-9be77355cad0"

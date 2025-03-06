@@ -4,7 +4,7 @@ import {
   KvStore,
 } from "jazz-react-native-core";
 import React from "react";
-import { MMKVStore } from "./storage/mmkv-store-adapter.js";
+import { ExpoSecureStoreAdapter } from "./storage/expo-secure-store-adapter.js";
 
 // Create a new props type that makes kvStore optional
 type ProviderProps = Omit<JazzProviderProps, "kvStore"> & {
@@ -15,5 +15,10 @@ export function JazzProvider(props: ProviderProps) {
   // Destructure kvStore and pass everything else via rest
   const { kvStore, ...rest } = props;
 
-  return <JazzProviderCore {...rest} kvStore={kvStore ?? new MMKVStore()} />;
+  return (
+    <JazzProviderCore
+      {...rest}
+      kvStore={kvStore ?? new ExpoSecureStoreAdapter()}
+    />
+  );
 }

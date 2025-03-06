@@ -9,7 +9,7 @@ import * as Linking from "expo-linking";
 import React, { StrictMode, useEffect, useState } from "react";
 import HandleInviteScreen from "./invite";
 
-import { JazzProvider } from "jazz-react-native";
+import { JazzProvider } from "jazz-expo";
 import { apiKey } from "./apiKey";
 import ChatScreen from "./chat";
 
@@ -46,7 +46,6 @@ function App() {
   return (
     <StrictMode>
       <JazzProvider
-        storage="sqlite"
         sync={{
           peer: `wss://cloud.jazz.tools/?key=${apiKey}`,
         }}
