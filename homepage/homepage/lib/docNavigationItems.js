@@ -152,11 +152,6 @@ export const docNavigationItems = [
         href: "/docs/using-covalues/history-and-time-travel",
         done: 0,
       },
-      {
-        name: "Access control",
-        href: "/docs/using-covalues/access-control",
-        done: 0,
-      },
     ],
   },
   {
