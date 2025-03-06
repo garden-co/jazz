@@ -26,10 +26,11 @@ export class ImageDefinition extends CoMap {
           Number(key.split("x")[0]) <= options.maxWidth),
     ) as `${number}x${number}`[];
 
+    // Sort the resolutions by width, smallest to largest
     resolutions.sort((a, b) => {
       const aWidth = Number(a.split("x")[0]);
       const bWidth = Number(b.split("x")[0]);
-      return aWidth - bWidth;
+      return aWidth - bWidth; // Sort smallest to largest
     });
 
     let highestAvailableResolution: `${number}x${number}` | undefined;
@@ -37,15 +38,10 @@ export class ImageDefinition extends CoMap {
     for (const resolution of resolutions) {
       if (this[resolution] && this[resolution]?.getChunks()) {
         highestAvailableResolution = resolution;
-      } else {
-        return (
-          highestAvailableResolution && {
-            res: highestAvailableResolution,
-            stream: this[highestAvailableResolution]!,
-          }
-        );
       }
     }
+
+    // Return the highest complete resolution if we found one
     return (
       highestAvailableResolution && {
         res: highestAvailableResolution,
