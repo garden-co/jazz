@@ -1,3 +1,4 @@
+import { randomBytes } from "crypto";
 import { createAuthClient } from "better-auth/client";
 import { inferAdditionalFields } from "better-auth/client/plugins";
 import { AgentSecret } from "cojson";
@@ -32,10 +33,9 @@ export const newAuthClient = (baseUrl: string) =>
       }),
     ],
   });
-const genericClient = newAuthClient("");
 
-export type AuthClient = typeof genericClient;
-export type Session = typeof genericClient.$Infer.Session;
+export type AuthClient = ReturnType<typeof newAuthClient>;
+export type Session = AuthClient["$Infer"]["Session"];
 
 export class CloudAuth {
   constructor(
@@ -43,6 +43,17 @@ export class CloudAuth {
     private authSecretStorage: AuthSecretStorage,
     private authClient: AuthClient,
   ) {}
+
+  static splitKey(credentials: AuthCredentials): [Uint8Array, Uint8Array] {
+    const signerSecret = Crypto.getAgentSignerSecret(credentials.accountSecret);
+    const keyBytes = Crypto.signerSecretToBytes(signerSecret);
+    const k1 = randomBytes(keyBytes.length);
+    const k0 = new Uint8Array(keyBytes.length);
+    for (let i = 0; i < keyBytes.length; i++) {
+      k0[i] = keyBytes[i] ^ k1[i];
+    }
+    return [k0, k1];
+  }
 
   static loadAuthData(
     session: Pick<Session, "user">,
