@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 
-import { Account, CoMap, DepthsIn, co } from "jazz-tools";
+import { Account, CoMap, RefsToResolve, Resolved, co } from "jazz-tools";
 import { beforeEach, describe, expect, it } from "vitest";
 import { useAccount, useJazzContextManager } from "../hooks.js";
 import { useIsAuthenticated } from "../index.js";
@@ -41,8 +41,10 @@ describe("useAccount", () => {
 
     const { result } = renderHook(
       () =>
-        useAccount<AccountSchema, DepthsIn<AccountSchema>>({
-          root: {},
+        useAccount<AccountSchema, RefsToResolve<{ root: true }>>({
+          resolve: {
+            root: true,
+          },
         }),
       {
         account,

@@ -75,7 +75,7 @@ describe("startWorker integration", () => {
 
     await map.waitForSync();
 
-    const mapOnWorker2 = await TestMap.load(map.id, worker2.worker, {});
+    const mapOnWorker2 = await TestMap.load(map.id, { loadAs: worker2.worker });
 
     expect(mapOnWorker2?.value).toBe("test");
 
@@ -113,7 +113,9 @@ describe("startWorker integration", () => {
 
     const worker1 = await setup(CustomAccount);
 
-    const { root } = await worker1.worker.ensureLoaded({ root: {} });
+    const { root } = await worker1.worker.ensureLoaded({
+      resolve: { root: true },
+    });
 
     expect(root.value).toBe("test");
 
@@ -126,7 +128,9 @@ describe("startWorker integration", () => {
       AccountSchema: CustomAccount,
     });
 
-    const { root: root2 } = await worker2.worker.ensureLoaded({ root: {} });
+    const { root: root2 } = await worker2.worker.ensureLoaded({
+      resolve: { root: true },
+    });
 
     expect(root2.value).toBe("test");
 
@@ -150,7 +154,7 @@ describe("startWorker integration", () => {
 
     const worker2 = await setupWorker(worker1.syncServer);
 
-    const mapOnWorker2 = await TestMap.load(map.id, worker2.worker, {});
+    const mapOnWorker2 = await TestMap.load(map.id, { loadAs: worker2.worker });
 
     expect(mapOnWorker2?.value).toBe("test");
 
@@ -185,7 +189,7 @@ describe("startWorker integration", () => {
 
     const resultId = await sender.sendMessage(map);
 
-    const result = await TestMap.load(resultId, worker2.worker, {});
+    const result = await TestMap.load(resultId, { loadAs: worker2.worker });
 
     expect(result?.value).toEqual("Hello! Responded from the inbox");
 
@@ -231,8 +235,10 @@ describe("startWorker integration", () => {
     await map2.waitForSync();
 
     // Verify both old and new values are synced
-    const mapOnWorker2 = await TestMap.load(map.id, worker2.worker, {});
-    const map2OnWorker2 = await TestMap.load(map2.id, worker2.worker, {});
+    const mapOnWorker2 = await TestMap.load(map.id, { loadAs: worker2.worker });
+    const map2OnWorker2 = await TestMap.load(map2.id, {
+      loadAs: worker2.worker,
+    });
 
     expect(mapOnWorker2?.value).toBe("initial value");
     expect(map2OnWorker2?.value).toBe("created while offline");

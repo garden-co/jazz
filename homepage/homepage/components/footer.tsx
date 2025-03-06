@@ -14,6 +14,10 @@ export function JazzFooter() {
           title: "About",
           links: [
             {
+              href: "/status",
+              label: "Status",
+            },
+            {
               href: "https://garden.co/team",
               label: "Team",
               newTab: true,
@@ -21,11 +25,6 @@ export function JazzFooter() {
             {
               href: "https://garden.co/news",
               label: "Blog",
-              newTab: true,
-            },
-            {
-              href: "https://github.com/garden-co/jazz/releases",
-              label: "Releases",
               newTab: true,
             },
           ],

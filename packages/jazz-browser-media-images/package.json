@@ -1,6 +1,6 @@
 {
   "name": "jazz-browser-media-images",
-  "version": "0.10.15",
+  "version": "0.11.0",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -8,16 +8,15 @@
   "dependencies": {
     "@types/image-blob-reduce": "^4.1.1",
     "image-blob-reduce": "^4.1.0",
-    "jazz-browser": "workspace:0.10.15",
-    "jazz-tools": "workspace:0.10.15",
+    "jazz-browser": "workspace:0.11.0",
+    "jazz-tools": "workspace:0.11.0",
     "pica": "^9.0.1",
     "typescript": "~5.6.2"
   },
   "scripts": {
     "format-and-lint": "biome check .",
     "format-and-lint:fix": "biome check . --write",
-    "build": "rm -rf ./dist && tsc --sourceMap --outDir dist",
-    "prepublishOnly": "npm run build"
+    "build": "rm -rf ./dist && tsc --sourceMap --outDir dist"
   },
   "devDependencies": {
     "@types/pica": "^9.0.4"

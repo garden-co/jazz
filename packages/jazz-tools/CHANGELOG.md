@@ -1,5 +1,28 @@
 # jazz-tools
 
+## 0.11.0
+
+### Minor Changes
+
+- b9d194a: Make members return inherited members
+  Added getRoleOf method to Account and Group
+  Added canRead, canWrite, canAdmin methods to Account so simplify permissions checks
+- 34cbdc3: Added revokeExtend method to Group
+- f039e8f: Remove co.members and use RegisteredAccount and the configured AccountSchema to setup the members Account class. Remove everyone from Group.members results
+- e22de9f: Fix profile migrations
+
+### Patch Changes
+
+- 6a96d8b: Add getParentGroups API to Group
+- a35249a: Fix CoMap.toJSON() with encoded fields
+- a4713df: Moving to the d.ts files for the exported type definitions
+- Updated dependencies [b9d194a]
+- Updated dependencies [a4713df]
+- Updated dependencies [e22de9f]
+- Updated dependencies [34cbdc3]
+- Updated dependencies [0f67e0a]
+  - cojson@0.11.0
+
 ## 0.10.15
 
 ### Patch Changes

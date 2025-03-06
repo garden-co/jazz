@@ -152,7 +152,9 @@ describe("PassphraseAuth", () => {
 
       // Verify the account name was set
       const { profile } = await account.ensureLoaded({
-        profile: {},
+        resolve: {
+          profile: true,
+        },
       });
       expect(profile.name).toBe(testName);
 

@@ -238,7 +238,7 @@ export class RawCoMapView<
   get<K extends keyof Shape & string>(key: K): Shape[K] | undefined {
     const entry = this.getRaw(key);
 
-    if (entry === undefined) {
+    if (entry?.change === undefined) {
       return undefined;
     }
 

@@ -167,12 +167,9 @@ export class Inbox {
                   );
                 }
 
-                return loadCoValue(
-                  Schema,
-                  message.get("payload") as ID<I>,
-                  account,
-                  [],
-                );
+                return loadCoValue(Schema, message.get("payload") as ID<I>, {
+                  loadAs: account,
+                });
               })
               .then((value) => {
                 if (!value) {

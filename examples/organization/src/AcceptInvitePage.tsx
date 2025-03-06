@@ -5,11 +5,11 @@ import { Organization } from "./schema.ts";
 
 export function AcceptInvitePage() {
   const navigate = useNavigate();
-  const { me } = useAccount({ root: { organizations: [] } });
+  const { me } = useAccount({ resolve: { root: { organizations: true } } });
 
   const onAccept = (organizationId: ID<Organization>) => {
     if (me?.root?.organizations) {
-      Organization.load(organizationId, me, []).then((organization) => {
+      Organization.load(organizationId).then((organization) => {
         if (organization) {
           // avoid duplicates
           const ids = me.root.organizations.map(
