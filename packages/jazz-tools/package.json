@@ -20,6 +20,7 @@
   "version": "0.11.0",
   "dependencies": {
     "@scure/bip39": "^1.3.0",
+    "better-auth": "^1.2.2",
     "cojson": "workspace:*"
   },
   "scripts": {
