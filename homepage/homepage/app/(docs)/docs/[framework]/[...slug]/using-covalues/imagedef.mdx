@@ -96,7 +96,21 @@ const appropriateRes = image.highestResAvailable({ maxWidth });
 
 ### Fallback Behavior
 
-`highestResAvailable` sorts resolutions from smallest to largest but returns the largest that fits your constraints. If a resolution has incomplete data, it falls back to the next available lower resolution.
+`highestResAvailable` returns the largest resolution that fits your constraints. If a resolution has incomplete data, it falls back to the next available lower resolution.
+
+<CodeGroup>
+```ts
+const image = ImageDefinition.create({
+  originalSize: [1920, 1080],
+});
+
+image["1920x1080"] = FileStream.create(); // Empty image upload
+image["800x450"] = await FileStream.createFromBlob(mediumSizeBlob);
+
+const highestRes = image.highestResAvailable();
+console.log(highestRes.res); // 800x450
+```
+</CodeGroup>
 
 ## Progressive Loading Patterns
 
