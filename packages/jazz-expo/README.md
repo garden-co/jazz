@@ -1,11 +1,12 @@
 # 🎷 Jazz + React Native
 
-Jazz requires a [React Native development build](https://reactnative.dev/docs/getting-started-without-a-framework). Jazz also supports the [New Architecture](https://reactnative.dev/architecture/landing-page).
+Jazz requires an [Expo development build](https://docs.expo.dev/develop/development-builds/introduction/) using [Expo Prebuild](https://docs.expo.dev/workflow/prebuild/) for native code. It is **not compatible** with Expo Go. Jazz also supports the [New Architecture](https://docs.expo.dev/guides/new-architecture/).
 
 Tested with:
 
 ```json
-"react-native": ">=0.74.5",
+"expo": "~51.0.0",
+"react-native": "~0.74.5",
 "react": "^18.2.0",
 ```
 
@@ -18,21 +19,30 @@ Tested with:
 ```bash
 npx create-expo-app -e with-router-tailwind my-jazz-app
 cd my-jazz-app
+npx expo prebuild
 ```
 
 ### Install dependencies
 
 ```bash
-npm install @react-native-community/netinfo @bam.tech/react-native-image-resizer
+npx expo install expo-linking expo-secure-store expo-file-system @react-native-community/netinfo @bam.tech/react-native-image-resizer
 
-npm i -S @azure/core-asynciterator-polyfill react-native-url-polyfill readable-stream react-native-get-random-values @craftzdog/react-native-buffer @op-engineering/op-sqlite
+  npm i -S @azure/core-asynciterator-polyfill react-native-url-polyfill readable-stream react-native-get-random-values @craftzdog/react-native-buffer @op-engineering/op-sqlite
+
 
 npm i -D @babel/plugin-transform-class-static-block
 
 npm i -S jazz-tools jazz-react-native jazz-react-native-media-images
+
 ```
 
 > note: Hermes has added support for `atob` and `btoa` in React Native 0.74.  If you are using earlier versions, you may also need to polyfill `atob` and `btoa` in your `package.json` . Packages to try include `text-encoding` and `base-64`, and you can drop `@bacons/text-decoder`.
+
+### Fix Incompatible Dependencies
+
+```bash
+npx expo install --fix
+```
 
 ### Install Pods
 

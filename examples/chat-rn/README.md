@@ -17,7 +17,7 @@ Next, navigate to the specific example project and run the following commands:
 
 ```bash
 pnpm expo prebuild
-npx pod-install
+pnpx pod-install
 pnpm expo run:ios
 ```
 
