@@ -1,0 +1,110 @@
+import { CodeGroup } from '@/components/forMdx'
+
+export const metadata = { title: "Jazz 0.11.0 - Deeply resolved data" };
+
+# Jazz 0.11.0 - Deeply resolved data
+
+<h2 className="not-prose text-sm text-stone-600 dark:text-stone-400 mb-5 pb-2 border-b">
+  15 March 2025
+</h2>
+
+<div>
+  Jazz 0.11.0 makes it easier and safer to load nested data. You can now specify exactly which nested data you want to load, and Jazz will check permissions and handle missing data gracefully. This helps catch errors earlier during development and makes your code more reliable.
+
+  <h3>What's new?</h3>
+  - New resolve API for a more type-safe deep loading
+  - Improved permission checks on deep loading
+  - Easier type safety with the Resolved type
+</div>
+
+<h3>New Resolve API</h3>
+<div>
+  We're introducing a new resolve API for deep loading, more friendly to TypeScript, IDE autocompletion and LLMs.
+  
+  To get started with the new resolve API, replace empty array/object parameters with structured resolve configs:
+
+<CodeGroup>
+{/* prettier-ignore */}
+```tsx
+// Before
+const playlist = useCoState(Playlist, id, [{}]);
+const { me } = useAccount({ root: { playlists: [] } });
+
+// After
+const playlist = useCoState(Playlist, id, { 
+  resolve: { $each: true } 
+});
+const { me } = useAccount({ 
+  resolve: { root: { playlists: true } } 
+});
+```
+</CodeGroup>
+
+The new API works across all loading methods:
+<CodeGroup>
+{/* prettier-ignore */}
+```ts
+// Before
+Playlist.load(id, account, {
+  tracks: [],
+});
+
+// After
+Playlist.load(id, { 
+  loadAs: account,
+  resolve: { tracks: true } 
+});
+```
+</CodeGroup>
+</div>
+
+<h3>Improved permission checks on deep loading</h3>
+<div>
+  Now `useCoState` will return `null` when the current user lacks permissions to load the requested data.
+
+  Previously, `useCoState` would return `undefined` if the current user lacked permissions, making it hard to tell if the value is loading or if it's missing.
+
+  Now `undefined` means that the value is definitely loading, and `null` means that the value is temporarily missing.
+
+  We also have implemented a more granular permission checking, where if an optional coValue cannot be accessed, useCoState will return the data stripped of that coValue.
+
+<CodeGroup>
+{/* prettier-ignore */}
+```tsx
+class ListOfTracks extends CoList.Of(co.optional.ref(Track)) {}
+// Before (ambiguous states)
+const value = useCoState(ListOfTracks, id, [{}]);
+if (value === undefined) return <div>Loading or access denied</div>;
+if (value === null) return <div>Not found</div>;
+
+// After
+const value = useCoState(ListOfTracks, id, { resolve: { $each: true } });
+if (value === undefined) return <div>Loading...</div>;
+if (value === null) return <div>Not found or access denied</div>;
+
+// If the current user lacks permissions to load a Track, the ListOfTracks will be returned without that Track.
+return tracks.map(track => track && <MusicTrack track={track} />);
+```
+</CodeGroup>
+</div>
+
+<h3>Type Safety Improvements</h3>
+<div>
+  The new `Resolved` type can be used to define what kind of deeply loaded data you expect in your parameters:
+
+  <CodeGroup>
+{/* prettier-ignore */}
+```ts
+// Before
+type PlaylistResolved = Resolved<Playlist, {
+  tracks: { $each: true }
+}>;
+
+// After
+function TrackList({ playlist }: { playlist: PlaylistResolved }) {
+  // Safe access to resolved tracks
+  return playlist.tracks.map(track => /* ... */);
+}
+```
+</CodeGroup>
+</div>
