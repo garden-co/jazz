@@ -4,15 +4,16 @@ export const metadata = { title: "FileStreams" };
 
 # FileStreams
 
-FileStreams handle binary data in Jazz applications - think files, images, and other non-text content. They're essentially collaborative versions of `Blob`s that sync automatically across devices.
+FileStreams handle binary data in Jazz applications - think documents, audio files, and other non-text content. They're essentially collaborative versions of `Blob`s that sync automatically across devices.
 
 Use FileStreams when you need to:
-- Share images in collaborative apps
 - Distribute documents across devices
 - Store audio or video files
 - Sync any binary data between users
 
-FileStreams chunk large files automatically, track upload progress, and handle MIME types and metadata.
+> **Note:** For images specifically, Jazz provides the higher-level `ImageDefinition` abstraction which manages multiple image resolutions - see the [ImageDefinition documentation](/docs/using-covalues/imagedefinition) for details.
+
+FileStreams provide automatic chunking when using the `createFromBlob` method, track upload progress, and handle MIME types and metadata.
 
 In your schema, reference FileStreams like any other CoValue:
 
@@ -20,9 +21,9 @@ In your schema, reference FileStreams like any other CoValue:
 ```ts
 import { CoMap, FileStream, co } from "jazz-tools";
 
-class UserProfile extends CoMap {
-  name = co.string;
-  avatar = co.ref(FileStream);  // Store profile picture
+class Document extends CoMap {
+  title = co.string;
+  file = co.ref(FileStream);  // Store a document file
 }
 ```
 </CodeGroup>
@@ -122,13 +123,10 @@ if (blob) {
   // Use with URL.createObjectURL
   const url = URL.createObjectURL(blob);
   
-  // Set as image source
-  imageElement.src = url;
-  
-  // Or create a download link
+  // Create a download link
   const link = document.createElement('a');
   link.href = url;
-  link.download = fileData?.fileName || 'download';
+  link.download = fileData?.fileName || 'document.pdf';
   link.click();
   
   // Clean up when done
@@ -191,9 +189,9 @@ const fileStream = FileStream.create();
 
 // Initialize with metadata
 fileStream.start({
-  mimeType: 'image/jpeg',          // MIME type (required)
-  totalSizeBytes: 1024 * 1024 * 2, // Size in bytes (optional)
-  fileName: 'photo.jpg'            // Original filename (optional)
+  mimeType: 'application/pdf',      // MIME type (required)
+  totalSizeBytes: 1024 * 1024 * 2,  // Size in bytes (optional)
+  fileName: 'document.pdf'          // Original filename (optional)
 });
 ```
 </CodeGroup>
