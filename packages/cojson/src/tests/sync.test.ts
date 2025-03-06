@@ -822,7 +822,9 @@ test.skip("When replaying creation and transactions of a coValue as new content,
     sessions: {},
   } satisfies SyncMessage);
 
-  expect(node2.coValuesStore.get(map.core.id).state.type).toEqual("loading");
+  expect(node2.coValuesStore.getOrCreateEmpty(map.core.id).state.type).toEqual(
+    "loading",
+  );
 
   await inTx2.push(mapNewContentMsg);
 
@@ -968,7 +970,9 @@ test("If we start loading a coValue before connecting to a peer that has it, it 
 
   const mapOnNode2Promise = loadCoValueOrFail(node2, map.id);
 
-  expect(node2.coValuesStore.get(map.core.id).state.type).toEqual("unknown");
+  expect(node2.coValuesStore.getOrCreateEmpty(map.core.id).state.type).toEqual(
+    "unknown",
+  );
 
   connectNodeToSyncServer(node2);
 
@@ -1694,7 +1698,9 @@ describe("SyncManager.addPeer", () => {
 
     await map.core.waitForSync();
 
-    expect(jazzCloud.coValuesStore.get(map.id).state.type).toBe("available");
+    expect(jazzCloud.coValuesStore.getOrCreateEmpty(map.id).state.type).toBe(
+      "available",
+    );
   });
 });
 
