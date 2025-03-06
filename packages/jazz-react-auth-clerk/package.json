@@ -1,9 +1,9 @@
 {
   "name": "jazz-react-auth-clerk",
-  "version": "0.10.15",
+  "version": "0.11.1",
   "type": "module",
   "main": "dist/index.js",
-  "types": "src/index.tsx",
+  "types": "dist/index.d.ts",
   "license": "MIT",
   "dependencies": {
     "cojson": "workspace:*",
@@ -18,8 +18,7 @@
   "scripts": {
     "format-and-lint": "biome check .",
     "format-and-lint:fix": "biome check . --write",
-    "build": "rm -rf ./dist && tsc --sourceMap --outDir dist",
-    "prepublishOnly": "npm run build"
+    "build": "rm -rf ./dist && tsc --sourceMap --outDir dist"
   },
   "devDependencies": {
     "@testing-library/react": "^16.1.0",

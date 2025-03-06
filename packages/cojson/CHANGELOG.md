@@ -1,5 +1,19 @@
 # cojson
 
+## 0.11.0
+
+### Minor Changes
+
+- e22de9f: Fix roleOf resolution for "everyone"
+- 34cbdc3: Added revokeExtend method to Group
+
+### Patch Changes
+
+- b9d194a: Added getAllMemberKeysSet method on RawGroup
+  Add everyone to the possible inputs of Group.roleOf
+- a4713df: Moving to the d.ts files for the exported type definitions
+- 0f67e0a: Allow optional fields in types passed to co.json
+
 ## 0.10.15
 
 ### Patch Changes

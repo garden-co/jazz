@@ -1,0 +1,247 @@
+import { ContentByFramework, CodeGroup } from '@/components/forMdx'
+import { Alert } from "gcmp-design-system/src/app/components/atoms/Alert";
+
+export const metadata = { title: "Upgrade to Jazz 0.11.0" };
+
+# Jazz 0.11.0 is out!
+
+Jazz 0.11.0 brings several improvements to member handling, roles, and permissions management. This guide will help you upgrade your application to the latest version.
+
+## What's new?
+Here is what's changed in this release:
+- [New permissions check APIs](#new-permissions-check-apis): New methods like `canRead`, `canWrite`, `canAdmin`, and `getRoleOf` to simplify permission checks.
+- [Group.revokeExtend](#grouprevokeextend): New method to revoke group extension permissions.
+- [Group.getParentGroups](#accountgetparentgroups): New method to get all the parent groups of an account.
+- [Account Profile & Migrations](#account-profile--migrations): Fixed issues with custom account profile migrations for a more consistent experience
+- [Dropped support for Accounts owning Profiles](#dropped-support-for-accounts-owning-profiles): Profiles can now only be owned by Groups.
+- [Group.members now includes inherited members](#member-inheritance-changes): Updated behavior for the `members` getter method to include inherited members and have a more intuitive type definition.
+
+## New Features
+
+### New permissions check APIs
+
+New methods have been added to both `Account` and `Group` classes to improve permission handling:
+
+#### Permission checks
+
+The new `canRead`, `canWrite` and `canAdmin` methods on `Account` allow you to easily check if the account has specific permissions on a CoValue:
+
+<CodeGroup>
+{/* prettier-ignore */}
+```typescript
+const me = Account.getMe();
+
+if (me.canAdmin(value)) {
+  console.log("I can share value with others"); 
+} else if (me.canWrite(value)) {
+  console.log("I can edit value");
+} else if (me.canRead(value)) {
+  console.log("I can view value");
+} else {
+  console.log("I cannot access value");
+}
+```
+</CodeGroup>
+
+#### Getting the role of an account
+
+The `getRoleOf` method has been added to query the role of specific entities:
+
+<CodeGroup>
+```typescript
+const group = Group.create();
+group.getRoleOf(me); // admin
+group.getRoleOf(Eve); // undefined
+
+group.addMember(Eve, "writer");
+group.getRoleOf(Eve); // writer
+```
+</CodeGroup>
+
+#### Group.revokeExtend
+
+We added a new method to revoke the extend of a Group:
+<CodeGroup>
+```typescript
+function addTrackToPlaylist(playlist: Playlist, track: MusicTrack) {
+  const trackGroup = track._owner.castAs(Group);
+  trackGroup.extend(playlist._owner, "reader"); // Grant read access to the track to the playlist accounts
+
+  playlist.tracks.push(track);
+}
+
+function removeTrackFromPlaylist(playlist: Playlist, track: MusicTrack) {
+  const trackGroup = track._owner.castAs(Group);
+  trackGroup.revokeExtend(playlist._owner); // Revoke access to the track to the playlist accounts
+  
+  const index = playlist.tracks.findIndex(t => t.id === track.id);
+  if (index !== -1) {
+    playlist.tracks.splice(index, 1);
+  }
+}
+```
+</CodeGroup>
+
+### Group.getParentGroups
+
+The `getParentGroups` method has been added to `Group` to get all the parent groups of a group.
+
+<CodeGroup>
+```ts
+const childGroup = Group.create();
+const parentGroup = Group.create();
+childGroup.extend(parentGroup);
+
+console.log(childGroup.getParentGroups()); // [parentGroup]
+```
+</CodeGroup>
+
+## Breaking Changes
+
+### Account Profile & Migrations
+
+The previous way of making the `Profile` migration work was to assume that the profile was always already there:
+
+<CodeGroup>
+```ts
+export class MyAppAccount extends Account {
+  profile = co.ref(MyAppProfile);
+
+  async migrate(this: MyAppAccount, creationProps: { name: string, lastName: string }) {
+    if (creationProps) {
+      const { profile } = await this.ensureLoaded({ profile: {} });
+
+      profile.name = creationProps.name;
+      profile.bookmarks = ListOfBookmarks.create([], profileGroup);
+    }
+  }
+}
+```
+</CodeGroup>
+
+This was kind-of tricky to picture, and having different migration strategies for different CoValues was confusing.
+
+We changed the logic so the default profile is created only if you didn't provide one in your migration.
+
+This way you can use the same pattern for both `root` and `profile` migrations:
+<CodeGroup>
+```ts
+export class MyAppAccount extends Account {
+  profile = co.ref(MyAppProfile);
+
+  async migrate(this: MyAppAccount, creationProps?: { name: string }) {
+    if (this.profile === undefined) {
+      const profileGroup = Group.create();
+      profileGroup.addMember("everyone", "reader");
+
+      this.profile = MyAppProfile.create({
+        name: creationProps?.name,
+        bookmarks: ListOfBookmarks.create([], profileGroup),
+      }, profileGroup);
+    }
+  }
+}
+```
+</CodeGroup>
+
+<Alert variant="warning" title="Warning" className="mt-4">
+If you provide a custom `Profile` in your `Account` schema and migration for a Worker account, 
+make sure to also add  `everyone` as member with `reader` role to the owning group. 
+Failing to do so will prevent any account from sending messages to the Worker's Inbox.
+</Alert>
+
+### Dropped support for Accounts owning Profiles
+Starting from `0.11.0` `Profile`s can only be owned by `Group`s.
+
+<Alert variant="info" title="Note" className="mt-4">
+Existing profiles owned by `Account`s will still work, but you will get incorrect types when accessing a `Profile`'s `_owner`.
+</Alert>
+
+### Member Inheritance Changes
+
+The behavior of groups' `members` getter method has been updated to return both direct members and inherited ones from ancestor groups. 
+This might affect your application if you were relying on only direct members being returned.
+
+<CodeGroup>
+```ts
+/**
+ *  The following pseudocode only illustrates the inheritance logic, 
+ *  the actual implementation is different.
+*/
+
+const parentGroup = Group.create();
+parentGroup.addMember(John, "admin");
+
+const childGroup = Group.create();
+childGroup.addMember(Eve, "admin");
+
+childGroup.extend(parentGroup);
+
+console.log(childGroup.members);
+// Before 0.11.0
+// [Eve]
+
+// After 0.11.0
+// [Eve, John]
+```
+</CodeGroup>
+
+Additionally:
+- now `Group.members` doesn't include the `everyone` member anymore
+- the account type in `Group.members` is now the globally registered Account schema and we have removed the `co.members` way to define an AccountSchema for members
+
+If you need to explicitly check if "everyone" is a member of a group, you can use the `getRoleOf` method instead:
+<CodeGroup>
+```ts
+if (group.getRoleOf("everyone")) {
+  console.log("Everyone has access to the group");
+}
+```
+</CodeGroup>
+
+
+#### Migration Steps
+
+1. Review your member querying logic to account for inherited members.
+2. Update your permission checking code to utilize the new [`hasPermissions` and `getRoleOf`](#enhanced-permission-management) methods.
+3. Consider implementing `"everyone"` role checks where appropriate.
+
+### Removed auto-update of `profile.name` in `usePasskeyAuth`
+
+The `usePasskeyAuth` hook now doesn't update the `profile.name` if the provided username is empty.
+
+## Troubleshooting
+
+> I'm getting the following error: `Error: Profile must be owned by a Group`
+
+If you previously forced a migration of your `Account` schema to include a custom `Profile`, 
+and assigned its ownership to an `Account`, you need to recreate your profile code and assign it to a `Group` instead.
+
+<CodeGroup>
+```ts
+export class MyAppAccount extends Account {
+  profile = co.ref(MyAppProfile);
+
+  override async migrate() {
+    // ...
+
+    const me = await this.ensureLoaded({
+      profile: {},
+    });
+
+    if ((me.profile._owner as Group | Account)._type === "Account") {
+      const profileGroup = Group.create();
+      profileGroup.addMember("everyone", "reader");
+
+      // recreate your profile here...
+      me.profile = Profile.create(
+        {
+          name: me.profile.name,
+        },
+        profileGroup,
+      );
+    }
+  }
+}
+```
+</CodeGroup>

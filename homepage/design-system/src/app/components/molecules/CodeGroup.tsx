@@ -6,7 +6,11 @@ import { Icon } from "../atoms/Icon";
 
 // TODO: add tabs feature, and remove CodeExampleTabs
 
-function CopyButton({ code, size }: { code: string; size: "md" | "lg" }) {
+export function CopyButton({
+  code,
+  size,
+  className,
+}: { code: string; size: "md" | "lg"; className?: string }) {
   const [copyCount, setCopyCount] = useState(0);
   const copied = copyCount > 0;
 
@@ -23,6 +27,7 @@ function CopyButton({ code, size }: { code: string; size: "md" | "lg" }) {
     <button
       type="button"
       className={clsx(
+        className,
         "group/button absolute overflow-hidden rounded text-2xs font-medium md:opacity-0 backdrop-blur transition md:focus:opacity-100 group-hover:opacity-100",
         copied
           ? "bg-emerald-400/10 ring-1 ring-inset ring-emerald-400/20"

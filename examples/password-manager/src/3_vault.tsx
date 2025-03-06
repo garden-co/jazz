@@ -6,7 +6,7 @@ import NewItemModal from "./components/new-item-modal";
 import Table from "./components/table";
 
 import { useAccount, useCoState } from "jazz-react";
-import { CoMapInit, Group, ID } from "jazz-tools";
+import { CoMapInit, ID } from "jazz-tools";
 import { useNavigate, useParams } from "react-router-dom";
 import { Folder, FolderList, PasswordItem } from "./1_schema";
 import {
@@ -136,20 +136,14 @@ const VaultPage: React.FC = () => {
           </Button>
           <Button
             onClick={() => setEditingItem(item)}
-            disabled={
-              item._owner.castAs(Group).myRole() !== "admin" &&
-              item._owner.castAs(Group).myRole() !== "writer"
-            }
+            disabled={!me.canWrite(item)}
           >
             Edit
           </Button>
           <Button
             onClick={() => handleDeleteItem(item)}
             variant="danger"
-            disabled={
-              item._owner.castAs(Group).myRole() !== "admin" &&
-              item._owner.castAs(Group).myRole() !== "writer"
-            }
+            disabled={!me.canWrite(item)}
           >
             Delete
           </Button>
@@ -210,21 +204,13 @@ const VaultPage: React.FC = () => {
         <div className="flex gap-2">
           <Button
             onClick={() => setIsNewItemModalOpen(true)}
-            disabled={
-              !selectedFolder ||
-              (selectedFolder._owner.castAs(Group).myRole() !== "admin" &&
-                selectedFolder._owner.castAs(Group).myRole() !== "writer")
-            }
+            disabled={!selectedFolder || !me.canWrite(selectedFolder)}
           >
             New Item
           </Button>
           <Button
             onClick={() => setIsInviteModalOpen(true)}
-            disabled={
-              !selectedFolder ||
-              (selectedFolder._owner.castAs(Group).myRole() !== "admin" &&
-                selectedFolder._owner.castAs(Group).myRole() !== "writer")
-            }
+            disabled={!selectedFolder || !me.canWrite(selectedFolder)}
           >
             Share Folder
           </Button>

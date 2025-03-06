@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 
-import { createUseAccountHooks, useJazzContext } from "jazz-react-core";
+import { useJazzContext } from "jazz-react-core";
 import { CoValue, CoValueClass, ID, parseInviteLink } from "jazz-tools";
 import { Linking } from "react-native";
 import { RegisteredAccount } from "./provider.js";
@@ -13,10 +13,15 @@ export {
   useJazzContext,
   useAuthSecretStorage,
   useIsAuthenticated,
+  useAccount,
+  useAccountOrGuest,
 } from "jazz-react-core";
 
-export const { useAccount, useAccountOrGuest } =
-  createUseAccountHooks<RegisteredAccount>();
+declare module "jazz-react-core" {
+  export interface Register {
+    Account: RegisteredAccount;
+  }
+}
 
 export function useAcceptInvite<V extends CoValue>({
   invitedObjectSchema,

@@ -68,6 +68,12 @@ export const docNavigationItems = [
     items: [
       {
         // upgrade guides
+        name: "0.11.0 - Roles and permissions",
+        href: "/docs/upgrade/0-11-0",
+        done: 100,
+      },
+      {
+        // upgrade guides
         name: "0.10.0 - New authentication flow",
         href: "/docs/upgrade/0-10-0",
         done: 100,

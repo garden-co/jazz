@@ -21,6 +21,12 @@ export type RegisteredAccount = Register extends { Account: infer Acc }
   ? Acc
   : Account;
 
+declare module "jazz-tools" {
+  export interface Register {
+    Account: RegisteredAccount;
+  }
+}
+
 export const JazzContextSymbol = Symbol("JazzContext");
 export const JazzAuthContextSymbol = Symbol("JazzAuthContext");
 export const JazzProvider = defineComponent({

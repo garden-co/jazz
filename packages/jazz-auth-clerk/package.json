@@ -1,20 +1,19 @@
 {
   "name": "jazz-auth-clerk",
-  "version": "0.10.15",
+  "version": "0.11.0",
   "type": "module",
   "main": "dist/index.js",
-  "types": "src/index.ts",
+  "types": "dist/index.d.ts",
   "license": "MIT",
   "dependencies": {
-    "cojson": "workspace:0.10.15",
-    "jazz-browser": "workspace:0.10.15",
-    "jazz-tools": "workspace:0.10.15"
+    "cojson": "workspace:0.11.0",
+    "jazz-browser": "workspace:0.11.0",
+    "jazz-tools": "workspace:0.11.0"
   },
   "scripts": {
     "format-and-lint": "biome check .",
     "format-and-lint:fix": "biome check . --write",
     "build": "rm -rf ./dist && tsc --sourceMap --outDir dist",
-    "prepublishOnly": "npm run build",
     "test": "vitest --run --root ../../ --project jazz-auth-clerk",
     "test:watch": "vitest --watch --root ../../ --project jazz-auth-clerk"
   },

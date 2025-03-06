@@ -1,9 +1,9 @@
 {
   "name": "jazz-react-native-media-images",
-  "version": "0.10.15",
+  "version": "0.11.0",
   "type": "module",
   "main": "dist/index.js",
-  "types": "src/index.ts",
+  "types": "dist/index.d.ts",
   "license": "MIT",
   "dependencies": {
     "jazz-tools": "workspace:*"
@@ -23,7 +23,6 @@
     "format-and-lint": "biome check .",
     "format-and-lint:fix": "biome check . --write",
     "build": "rm -rf ./dist && tsc --sourceMap --outDir dist",
-    "dev": "tsc --watch --sourceMap --outDir dist",
-    "prepublishOnly": "npm run build"
+    "dev": "tsc --watch --sourceMap --outDir dist"
   }
 }

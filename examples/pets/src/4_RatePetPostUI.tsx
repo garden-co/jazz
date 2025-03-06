@@ -2,7 +2,7 @@ import { useParams } from "react-router";
 
 import { PetPost, PetReactions, ReactionTypes } from "./1_schema";
 
-import { ProgressiveImg } from "jazz-react";
+import { ProgressiveImg, useAccount } from "jazz-react";
 import { useCoState } from "jazz-react";
 import { ID } from "jazz-tools";
 import uniqolor from "uniqolor";
@@ -26,6 +26,7 @@ const reactionEmojiMap: {
 export function RatePetPostUI() {
   const petPostID = useParams<{ petPostId: ID<PetPost> }>().petPostId;
 
+  const { me } = useAccount();
   const petPost = useCoState(PetPost, petPostID);
 
   return (
@@ -60,7 +61,7 @@ export function RatePetPostUI() {
         ))}
       </div>
 
-      {petPost?._owner.myRole() === "admin" && petPost.reactions && (
+      {petPost && me.canAdmin(petPost) && petPost.reactions && (
         <ReactionOverview petReactions={petPost.reactions} />
       )}
     </div>

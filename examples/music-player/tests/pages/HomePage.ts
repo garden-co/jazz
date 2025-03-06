@@ -33,6 +33,14 @@ export class HomePage {
     ).toBeVisible();
   }
 
+  async notExpectMusicTrack(trackName: string) {
+    await expect(
+      this.page.getByRole("button", {
+        name: `Play ${trackName}`,
+      }),
+    ).not.toBeVisible();
+  }
+
   async playMusicTrack(trackName: string) {
     await this.page
       .getByRole("button", {
@@ -65,6 +73,14 @@ export class HomePage {
       .click();
   }
 
+  async navigateToHome() {
+    await this.page
+      .getByRole("link", {
+        name: "All tracks",
+      })
+      .click();
+  }
+
   async getShareLink() {
     await this.page
       .getByRole("button", {
@@ -91,6 +107,20 @@ export class HomePage {
     await this.page
       .getByRole("menuitem", {
         name: `Add to ${playlistTitle}`,
+      })
+      .click();
+  }
+
+  async removeTrackFromPlaylist(trackTitle: string, playlistTitle: string) {
+    await this.page
+      .getByRole("button", {
+        name: `Open ${trackTitle} menu`,
+      })
+      .click();
+
+    await this.page
+      .getByRole("menuitem", {
+        name: `Remove from ${playlistTitle}`,
       })
       .click();
   }

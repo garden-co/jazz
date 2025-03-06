@@ -1,17 +1,17 @@
 {
   "name": "jazz-react-core",
-  "version": "0.10.12",
+  "version": "0.11.1",
   "type": "module",
   "main": "dist/index.js",
-  "types": "src/index.ts",
+  "types": "dist/index.d.ts",
   "license": "MIT",
   "exports": {
     ".": {
-      "types": "./src/index.ts",
+      "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
     },
     "./testing": {
-      "types": "./src/testing.tsx",
+      "types": "./dist/testing.d.ts",
       "default": "./dist/testing.js"
     }
   },
@@ -37,8 +37,7 @@
     "dev": "tsc --watch --sourceMap --outDir dist",
     "format-and-lint": "biome check .",
     "format-and-lint:fix": "biome check . --write",
-    "build": "rm -rf ./dist && tsc --sourceMap --outDir dist --rootDir src",
-    "prepublishOnly": "npm run build"
+    "build": "rm -rf ./dist && tsc --sourceMap --outDir dist --rootDir src"
   },
   "gitHead": "33c27053293b4801b968c61d5c4c989f93a67d13"
 }

@@ -133,6 +133,36 @@ teamGroup.extend(companyGroup);
 ```
 </CodeGroup>
 
+## Revoking a group extension
+
+You can revoke a group extension by using the `revokeExtend` method:
+
+<CodeGroup>
+```typescript
+const parentGroup = Group.create();
+const childGroup = Group.create();
+
+childGroup.extend(parentGroup); 
+
+// Revoke the extension
+await childGroup.revokeExtend(parentGroup);
+```
+</CodeGroup>
+
+## Getting all parent groups
+
+You can get all the parent groups of a group by calling the `getParentGroups` method:
+
+<CodeGroup>
+```typescript
+const childGroup = Group.create();
+const parentGroup = Group.create();
+childGroup.extend(parentGroup);
+
+console.log(childGroup.getParentGroups()); // [parentGroup]
+```
+</CodeGroup>
+
 ## Example: Team Hierarchy
 
 Here's a practical example of using group inheritance for team permissions:

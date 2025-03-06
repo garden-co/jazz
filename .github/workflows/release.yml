@@ -25,6 +25,9 @@ jobs:
       - name: Setup Source Code
         uses: ./.github/actions/source-code/
 
+      - name: Build packages
+        run: pnpm exec turbo run build --filter='./packages/*'
+
       - name: Create Release Pull Request or Publish to npm
         id: changesets
         uses: changesets/action@v1

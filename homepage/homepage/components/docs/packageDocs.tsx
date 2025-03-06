@@ -18,20 +18,6 @@ import {
   PropDecl,
 } from "./tags";
 
-function isDeclarationReflection(child: any): child is DeclarationReflection {
-  return (
-    'kind' in child &&
-    'name' in child &&
-    'flags' in child &&
-    (child.kind === ReflectionKind.Class ||
-     child.kind === ReflectionKind.Interface ||
-     child.kind === ReflectionKind.TypeAlias ||
-     child.kind === ReflectionKind.Function ||
-     child.kind === ReflectionKind.Property ||
-     child.kind === ReflectionKind.Method)
-  );
-}
-
 export async function PackageDocs({
   package: packageName,
 }: {
@@ -50,7 +36,7 @@ export async function PackageDocs({
         return (
           <section key={category.title}>
             <h2>{category.title}</h2>
-            {category.children.filter(isDeclarationReflection).map((child) => (
+            {category.children.map((child) => (
               <RenderPackageChild
                 child={child}
                 key={child.id}
@@ -203,7 +189,7 @@ function RenderClassOrInterface({
               ),
             )}
           />
-          {category.children.filter(isDeclarationReflection).map((prop) => (
+          {category.children.map((prop) => (
             <RenderProp prop={prop} klass={classOrInterface} key={prop.id} />
           ))}
         </div>

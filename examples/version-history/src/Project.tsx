@@ -1,4 +1,4 @@
-import { createInviteLink } from "jazz-react";
+import { createInviteLink, useAccount } from "jazz-react";
 import { useCoState } from "jazz-react";
 import { ID } from "jazz-tools";
 import { IssueComponent } from "./Issue.tsx";
@@ -21,14 +21,15 @@ export function ProjectComponent({ projectID }: { projectID: ID<Project> }) {
           estimate: 0,
           status: "backlog",
         },
-        { owner: project._owner },
+        project._owner,
       ),
     );
   };
+  const { me } = useAccount();
   return project ? (
     <div>
       <h1>{project.name}</h1>
-      {project._owner?.myRole() === "admin" && (
+      {me.canAdmin(project) && (
         <>
           <button onClick={() => invite("reader")}>Invite Guest</button>
           <button onClick={() => invite("writer")}>Invite Member</button>

@@ -9,8 +9,6 @@ Every CoValue has an owner, which can be a `Group` or an `Account`.
 You can use a `Group` to grant access to a CoValue to multiple users. These users can
 have different roles, such as "writer", "reader" or "admin".
 
-...more docs coming soon
-
 ## Creating a Group
 
 Here's how you can create a `Group`.
@@ -19,7 +17,7 @@ Here's how you can create a `Group`.
 ```tsx
 import { Group } from "jazz-tools";
 
-const group = Group.create({ owner: me });
+const group = Group.create();
 ```
 </CodeGroup>
 
@@ -53,7 +51,6 @@ const bob = await Account.load(bobsID as ID<Account>, []);
 group.addMember(bob, "writer");
 ```
 </CodeGroup>
-...more docs coming soon
 
 ## Getting the Group of an existing CoValue
 
@@ -77,7 +74,47 @@ import { Group } from "jazz-tools";
 
 const group = existingCoValue._owner.castAs(Group);
 group.addMember(bob, "writer");
-group.myRole();
+
+const role = group.getRoleOf(bob);
 ```
 </CodeGroup>
-...more docs coming soon
+
+## Checking the permissions
+
+You can check the permissions of an account on a CoValue by using the `canRead`, `canWrite` and `canAdmin` methods.
+
+<CodeGroup>
+```tsx
+const value = await MyCoMap.load(valueID, {});
+const me = Account.getMe();
+
+if (me.canAdmin(value)) {
+  console.log("I can share value with others"); 
+} else if (me.canWrite(value)) {
+  console.log("I can edit value");
+} else if (me.canRead(value)) {
+  console.log("I can view value");
+} else {
+  console.log("I cannot access value");
+}
+```
+</CodeGroup>
+
+To check the permissions of another account, you need to load it first:
+
+<CodeGroup>
+```tsx
+const value = await MyCoMap.load(valueID, {});
+const bob = await Account.load(accountID, []);
+
+if (bob.canAdmin(value)) {
+  console.log("Bob can share value with others"); 
+} else if (bob.canWrite(value)) {
+  console.log("Bob can edit value");
+} else if (bob.canRead(value)) {
+  console.log("Bob can view value");
+} else {
+  console.log("Bob cannot access value");
+}
+```
+</CodeGroup>

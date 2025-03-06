@@ -38,13 +38,8 @@ export function JazzNav({ sections }: { sections?: NavSection[] }) {
           newTab: true,
         },
         {
-          title: "Releases",
-          href: "https://github.com/garden-co/jazz/releases",
-          newTab: true,
-        },
-        {
-          title: "Status",
           href: "/status",
+          title: "Status",
         },
       ]}
       socials={socials}

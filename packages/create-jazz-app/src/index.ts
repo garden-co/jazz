@@ -292,7 +292,10 @@ module.exports = withNativeWind(config, { input: "./src/global.css" });
   }).start();
 
   try {
-    execSync(`cd "${projectName}" && git init`, { stdio: "pipe" });
+    execSync(
+      `cd "${projectName}" && git init && git add . && git commit -m "Initial commit from create-jazz-app"`,
+      { stdio: "pipe" },
+    );
     gitSpinner.succeed(chalk.green("Git repository initialized"));
   } catch (error) {
     gitSpinner.fail(chalk.red("Failed to initialize git repository"));

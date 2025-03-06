@@ -1,5 +1,18 @@
 # cojson-storage-indexeddb
 
+## 0.11.0
+
+### Patch Changes
+
+- a4713df: Moving to the d.ts files for the exported type definitions
+- Updated dependencies [b9d194a]
+- Updated dependencies [a4713df]
+- Updated dependencies [e22de9f]
+- Updated dependencies [34cbdc3]
+- Updated dependencies [0f67e0a]
+  - cojson@0.11.0
+  - cojson-storage@0.11.0
+
 ## 0.10.15
 
 ### Patch Changes

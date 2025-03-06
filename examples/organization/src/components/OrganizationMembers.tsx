@@ -1,5 +1,4 @@
-import { useCoState } from "jazz-react";
-import { Account, Group, ID } from "jazz-tools";
+import { Group } from "jazz-tools";
 import { Organization } from "../schema.ts";
 
 export function OrganizationMembers({
@@ -10,26 +9,13 @@ export function OrganizationMembers({
   return (
     <>
       {group.members.map((member) => (
-        <Member
-          key={member.id}
-          accountId={member.id as ID<Account>}
-          role={member.role}
-        />
+        <div key={member.id} className="px-4 py-5 sm:px-6">
+          <strong className="font-medium">
+            {member.account.profile?.name}
+          </strong>{" "}
+          ({member.role})
+        </div>
       ))}
     </>
-  );
-}
-function Member({
-  accountId,
-  role,
-}: { accountId: ID<Account>; role?: string }) {
-  const account = useCoState(Account, accountId, { profile: {} });
-
-  if (!account?.profile) return;
-
-  return (
-    <div className="px-4 py-5 sm:px-6">
-      <strong className="font-medium">{account.profile.name}</strong> ({role})
-    </div>
   );
 }

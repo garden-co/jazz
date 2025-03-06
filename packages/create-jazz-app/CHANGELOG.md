@@ -1,5 +1,11 @@
 # create-jazz-app
 
+## 0.1.14
+
+### Patch Changes
+
+- 60ce483: create initial commit on create-jazz-app apps
+
 ## 0.1.13
 
 ### Patch Changes

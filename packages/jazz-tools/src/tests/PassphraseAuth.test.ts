@@ -2,15 +2,15 @@
 
 import { AgentSecret } from "cojson";
 import { PureJSCrypto } from "cojson/crypto/PureJSCrypto";
+import { assert, beforeEach, describe, expect, it, vi } from "vitest";
+import { PassphraseAuth } from "../auth/PassphraseAuth";
 import {
   Account,
   AuthSecretStorage,
   ID,
   InMemoryKVStore,
   KvStoreContext,
-} from "jazz-tools";
-import { assert, beforeEach, describe, expect, it, vi } from "vitest";
-import { PassphraseAuth } from "../auth/PassphraseAuth";
+} from "../exports";
 import {
   TestJazzContextManager,
   createJazzTestAccount,

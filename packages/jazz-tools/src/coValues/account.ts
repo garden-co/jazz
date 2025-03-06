@@ -2,6 +2,7 @@ import {
   AgentSecret,
   CoID,
   CryptoProvider,
+  Everyone,
   InviteSecret,
   LocalNode,
   Peer,
@@ -9,6 +10,7 @@ import {
   RawCoMap,
   RawCoValue,
   RawControlledAccount,
+  Role,
   SessionID,
   cojsonInternals,
 } from "cojson";
@@ -21,7 +23,6 @@ import {
   DeeplyLoaded,
   DepthsIn,
   ID,
-  MembersSym,
   Ref,
   type RefEncoded,
   RefIfCoValue,
@@ -36,6 +37,7 @@ import {
   subscriptionsScopes,
 } from "../internal.js";
 import { coValuesCache } from "../lib/cache.js";
+import { RegisteredAccount } from "../types.js";
 import { type CoMap } from "./coMap.js";
 import { type Group } from "./group.js";
 import { createInboxRoot } from "./inbox.js";
@@ -168,6 +170,57 @@ export class Account extends CoValueBase implements CoValue {
     }
   }
 
+  getRoleOf(member: Everyone | ID<Account> | "me") {
+    if (member === "me") {
+      return this.isMe ? "admin" : undefined;
+    }
+
+    if (member === this.id) {
+      return "admin";
+    }
+
+    return undefined;
+  }
+
+  getParentGroups(): Array<Group> {
+    return [];
+  }
+
+  get members(): Array<{
+    id: ID<RegisteredAccount> | "everyone";
+    role: Role;
+    ref: Ref<RegisteredAccount> | undefined;
+    account: RegisteredAccount | null | undefined;
+  }> {
+    const ref = new Ref<RegisteredAccount>(this.id, this._loadedAs, {
+      ref: () => this.constructor as typeof Account,
+      optional: false,
+    });
+
+    return [{ id: this.id, role: "admin", ref, account: this }];
+  }
+
+  canRead(value: CoValue) {
+    const role = value._owner.getRoleOf(this.id);
+
+    return (
+      role === "admin" ||
+      role === "writer" ||
+      role === "reader" ||
+      role === "writeOnly"
+    );
+  }
+
+  canWrite(value: CoValue) {
+    const role = value._owner.getRoleOf(this.id);
+
+    return role === "admin" || role === "writer" || role === "writeOnly";
+  }
+
+  canAdmin(value: CoValue) {
+    return value._owner.getRoleOf(this.id) === "admin";
+  }
+
   async acceptInvite<V extends CoValue>(
     valueID: ID<V>,
     inviteSecret: InviteSecret,
@@ -259,13 +312,20 @@ export class Account extends CoValueBase implements CoValue {
   }
 
   async applyMigration(creationProps?: AccountCreationProps) {
-    if (creationProps) {
+    await this.migrate(creationProps);
+
+    // if the user has not defined a profile themselves, we create one
+    if (this.profile === undefined && creationProps) {
       const profileGroup = RegisteredSchemas["Group"].create({ owner: this });
-      profileGroup.addMember("everyone", "reader");
-      this.profile = Profile.create(
-        { name: creationProps.name },
-        { owner: profileGroup },
-      );
+
+      this.profile = Profile.create({ name: creationProps.name }, profileGroup);
+      this.profile._owner.addMember("everyone", "reader");
+    } else if (this.profile && creationProps) {
+      if (this.profile._owner._type !== "Group") {
+        throw new Error("Profile must be owned by a Group", {
+          cause: `The profile of the account "${this.id}" was created with an Account as owner, which is not allowed.`,
+        });
+      }
     }
 
     const node = this._raw.core.node;
@@ -278,8 +338,6 @@ export class Account extends CoValueBase implements CoValue {
       profile.set("inbox", inboxRoot.id);
       profile.set("inboxInvite", inboxRoot.inviteLink);
     }
-
-    await this.migrate(creationProps);
   }
 
   // Placeholder method for subclasses to override
@@ -400,7 +458,7 @@ export const AccountAndGroupProxyHandler: ProxyHandler<Account | Group> = {
   },
   set(target, key, value, receiver) {
     if (
-      (key === "profile" || key === "root" || key === MembersSym) &&
+      (key === "profile" || key === "root") &&
       typeof value === "object" &&
       SchemaInit in value
     ) {
@@ -433,7 +491,7 @@ export const AccountAndGroupProxyHandler: ProxyHandler<Account | Group> = {
   },
   defineProperty(target, key, descriptor) {
     if (
-      (key === "profile" || key === "root" || key === MembersSym) &&
+      (key === "profile" || key === "root") &&
       typeof descriptor.value === "object" &&
       SchemaInit in descriptor.value
     ) {

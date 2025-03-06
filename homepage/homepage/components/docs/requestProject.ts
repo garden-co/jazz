@@ -1,4 +1,4 @@
-import { Deserializer, FileRegistry, JSONOutput, ProjectReflection } from "typedoc";
+import { Deserializer, JSONOutput, ProjectReflection } from "typedoc";
 
 import JazzBrowserMediaImagesDocs from "../../typedoc/jazz-browser-media-images.json";
 import JazzBrowserDocs from "../../typedoc/jazz-browser.json";
@@ -7,19 +7,17 @@ import JazzReactDocs from "../../typedoc/jazz-react.json";
 import JazzToolsDocs from "../../typedoc/jazz-tools.json";
 
 const docs = {
-  "jazz-tools": JazzToolsDocs,
-  "jazz-react": JazzReactDocs,
-  "jazz-browser": JazzBrowserDocs,
-  "jazz-browser-media-images": JazzBrowserMediaImagesDocs,
-  "jazz-nodejs": JazzNodejsDocs,
-} as const;
+  "jazz-tools": JazzToolsDocs as JSONOutput.ProjectReflection,
+  "jazz-react": JazzReactDocs as JSONOutput.ProjectReflection,
+  "jazz-browser": JazzBrowserDocs as JSONOutput.ProjectReflection,
+  "jazz-browser-media-images":
+    JazzBrowserMediaImagesDocs as JSONOutput.ProjectReflection,
+  "jazz-nodejs": JazzNodejsDocs as JSONOutput.ProjectReflection,
+};
 
 export async function requestProject(
   packageName: keyof typeof docs,
 ): Promise<ProjectReflection> {
   const deserializer = new Deserializer({} as any);
-  return deserializer.reviveProject(packageName, docs[packageName] as unknown as JSONOutput.ProjectReflection, {
-    projectRoot: ".",
-    registry: new FileRegistry(),
-  });
+  return deserializer.reviveProject(docs[packageName], packageName);
 }

@@ -10,7 +10,7 @@ import {
   createJazzContextFromExistingCredentials,
   isControlledAccount,
 } from "../index.js";
-import { setupTwoNodes, waitFor } from "./utils.js";
+import { setupTwoNodes } from "./utils.js";
 
 const connectedPeers = cojsonInternals.connectedPeers;
 
@@ -355,26 +355,6 @@ describe("Simple CoMap operations", async () => {
     expect(mapWithEnum.child?.value).toEqual(5);
     expect(mapWithEnum.child?.id).toBeDefined();
   });
-
-  class SuperClassMap extends CoMap {
-    name = co.string;
-  }
-
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  class SubClassMap extends SuperClassMap {
-    name = co.literal("specificString");
-    value = co.number;
-    extra = co.ref(TestMap);
-  }
-
-  class GenericMapWithLoose<out T extends string = string> extends CoMap {
-    name = co.json<T>();
-  }
-
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  const loose: GenericMapWithLoose<string> = {} as GenericMapWithLoose<
-    "a" | "b"
-  >;
 });
 
 describe("CoMap resolution", async () => {
