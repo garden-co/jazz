@@ -535,20 +535,16 @@ program.on("--help", () => {
   });
   console.log(chalk.blue("\nExample usage:"));
   console.log(
-    chalk.white(
-      "npx create-jazz-app@latest --project-name my-app --framework react\n",
-    ),
+    chalk.white("npx create-jazz-app@latest my-app --framework react\n"),
   );
   console.log(chalk.blue("With example app as a template:"));
   console.log(
-    chalk.white(
-      "npx create-jazz-app@latest --example chat --project-name my-chat-app\n",
-    ),
+    chalk.white("npx create-jazz-app@latest my-chat-app --example chat\n"),
   );
   console.log(chalk.blue("With API key:"));
   console.log(
     chalk.white(
-      "npx create-jazz-app@latest --project-name my-app --api-key your-api-key@garden.co\n",
+      "npx create-jazz-app@latest my-app --api-key your-api-key@garden.co\n",
     ),
   );
   console.log(chalk.blue("Create in current directory:"));
