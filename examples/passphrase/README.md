@@ -12,7 +12,7 @@ You can either
 
 Create a new Jazz project, and use this example as a template.
 ```bash
-npx create-jazz-app@latest --example passphrase --project-name passphrase
+npx create-jazz-app@latest passphrase-app --example passphrase
 ```
 
 Go to the new project directory.

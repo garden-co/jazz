@@ -16,7 +16,7 @@ You can either
 
 Create a new Jazz project, and use this example as a template.
 ```bash
-npx create-jazz-app@latest --example organization --project-name organization
+npx create-jazz-app@latest organization-app --example organization
 ```
 
 Go to the new project directory.
