@@ -1,5 +1,15 @@
 # jazz-react
 
+## 0.11.2
+
+### Patch Changes
+
+- Updated dependencies [ed0e151]
+- Updated dependencies [6892dc6]
+  - jazz-react-core@0.11.2
+  - jazz-tools@0.11.2
+  - jazz-browser@0.11.2
+
 ## 0.11.1
 
 ### Patch Changes

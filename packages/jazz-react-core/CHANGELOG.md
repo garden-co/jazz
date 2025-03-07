@@ -1,5 +1,13 @@
 # jazz-react-core
 
+## 0.11.2
+
+### Patch Changes
+
+- ed0e151: Reset the useCoState value when the id becomes undefined
+- Updated dependencies [6892dc6]
+  - jazz-tools@0.11.2
+
 ## 0.11.1
 
 ### Patch Changes

@@ -444,7 +444,7 @@ importers:
         specifier: workspace:*
         version: link:../../packages/jazz-react
       jazz-react-auth-clerk:
-        specifier: workspace:0.11.1
+        specifier: workspace:0.11.2
         version: link:../../packages/jazz-react-auth-clerk
       jazz-tools:
         specifier: workspace:*
@@ -813,10 +813,10 @@ importers:
         specifier: workspace:*
         version: link:../../packages/jazz-inspector
       jazz-react:
-        specifier: workspace:0.11.1
+        specifier: workspace:0.11.2
         version: link:../../packages/jazz-react
       jazz-tools:
-        specifier: workspace:0.11.0
+        specifier: workspace:0.11.2
         version: link:../../packages/jazz-tools
       lucide-react:
         specifier: ^0.274.0
@@ -1055,10 +1055,10 @@ importers:
   examples/password-manager:
     dependencies:
       jazz-react:
-        specifier: workspace:0.11.1
+        specifier: workspace:0.11.2
         version: link:../../packages/jazz-react
       jazz-tools:
-        specifier: workspace:0.11.0
+        specifier: workspace:0.11.2
         version: link:../../packages/jazz-tools
       react:
         specifier: 18.3.1
@@ -1119,13 +1119,13 @@ importers:
         specifier: ^2.0.0
         version: 2.1.1
       jazz-browser-media-images:
-        specifier: workspace:0.11.0
+        specifier: workspace:0.11.2
         version: link:../../packages/jazz-browser-media-images
       jazz-react:
-        specifier: workspace:0.11.1
+        specifier: workspace:0.11.2
         version: link:../../packages/jazz-react
       jazz-tools:
-        specifier: workspace:0.11.0
+        specifier: workspace:0.11.2
         version: link:../../packages/jazz-tools
       lucide-react:
         specifier: ^0.274.0
@@ -1180,7 +1180,7 @@ importers:
         specifier: ^3.0.1
         version: 3.0.1
       jazz-run:
-        specifier: workspace:0.11.0
+        specifier: workspace:0.11.2
         version: link:../../packages/jazz-run
       postcss:
         specifier: ^8.4.27
@@ -1259,10 +1259,10 @@ importers:
         specifier: ^2.0.0
         version: 2.1.1
       jazz-react:
-        specifier: workspace:0.11.1
+        specifier: workspace:0.11.2
         version: link:../../packages/jazz-react
       jazz-tools:
-        specifier: workspace:0.11.0
+        specifier: workspace:0.11.2
         version: link:../../packages/jazz-tools
       lucide-react:
         specifier: ^0.274.0
@@ -1601,10 +1601,10 @@ importers:
         specifier: workspace:0.11.0
         version: link:../cojson
       jazz-browser:
-        specifier: workspace:0.11.0
+        specifier: workspace:0.11.2
         version: link:../jazz-browser
       jazz-tools:
-        specifier: workspace:0.11.0
+        specifier: workspace:0.11.2
         version: link:../jazz-tools
     devDependencies:
       typescript:
@@ -1642,10 +1642,10 @@ importers:
         specifier: ^4.1.0
         version: 4.1.0
       jazz-browser:
-        specifier: workspace:0.11.0
+        specifier: workspace:0.11.2
         version: link:../jazz-browser
       jazz-tools:
-        specifier: workspace:0.11.0
+        specifier: workspace:0.11.2
         version: link:../jazz-tools
       pica:
         specifier: ^9.0.1
@@ -1720,13 +1720,13 @@ importers:
         specifier: workspace:0.11.0
         version: link:../cojson
       jazz-browser:
-        specifier: workspace:0.11.0
+        specifier: workspace:0.11.2
         version: link:../jazz-browser
       jazz-react-core:
         specifier: workspace:*
         version: link:../jazz-react-core
       jazz-tools:
-        specifier: workspace:0.11.0
+        specifier: workspace:0.11.2
         version: link:../jazz-tools
     devDependencies:
       '@testing-library/dom':
@@ -1927,7 +1927,7 @@ importers:
         specifier: ^3.6.5
         version: 3.11.9
       jazz-tools:
-        specifier: workspace:0.11.0
+        specifier: workspace:0.11.2
         version: link:../jazz-tools
       ws:
         specifier: ^8.14.2

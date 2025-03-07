@@ -3,7 +3,7 @@
   "bin": "./dist/index.js",
   "type": "module",
   "license": "MIT",
-  "version": "0.11.0",
+  "version": "0.11.2",
   "exports": {
     "./startSyncServer": {
       "import": "./dist/startSyncServer.js",
@@ -31,7 +31,7 @@
     "cojson-storage-sqlite": "workspace:0.11.0",
     "cojson-transport-ws": "workspace:0.11.0",
     "effect": "^3.6.5",
-    "jazz-tools": "workspace:0.11.0",
+    "jazz-tools": "workspace:0.11.2",
     "ws": "^8.14.2"
   },
   "devDependencies": {
