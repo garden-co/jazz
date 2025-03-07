@@ -61,8 +61,8 @@ export default function Cloud() {
       </div>
 
       <div className="bg-stone-100 border-y dark:bg-stone-925 py-8 lg:py-16 dark:border-y-0 dark:bg-transparent dark:py-0">
-        <div className="container">
-          <H2 className="mb-5 sm:text-center md:text-left">Pricing</H2>
+        <div className="container space-y-5">
+          <H2>Pricing</H2>
 
           <Pricing />
         </div>
