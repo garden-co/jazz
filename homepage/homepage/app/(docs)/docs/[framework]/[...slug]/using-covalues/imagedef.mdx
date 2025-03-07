@@ -85,6 +85,11 @@ if (highestRes) {
   if (blob) {
     const url = URL.createObjectURL(blob);
     imageElement.src = url;
+    
+    // Remember to revoke the URL when no longer needed
+    imageElement.onload = () => {
+      URL.revokeObjectURL(url);
+    };
   }
 }
 
@@ -114,7 +119,7 @@ console.log(highestRes.res); // 800x450
 
 ## Progressive Loading Patterns
 
-ImageDefinition supports simple progressive loading with placeholders and resolution selection:
+`ImageDefinition` supports simple progressive loading with placeholders and resolution selection:
 
 <CodeGroup>
 ```ts
@@ -132,7 +137,19 @@ if (bestRes) {
   if (blob) {
     const url = URL.createObjectURL(blob);
     imageElement.src = url;
+    
+    // Remember to revoke the URL when no longer needed
+    imageElement.onload = () => {
+      URL.revokeObjectURL(url);
+    };
   }
 }
 ```
 </CodeGroup>
+## Best Practices
+
+- **Generate resolutions server-side** when possible for optimal quality
+- **Use placeholders** (like LQIP - Low Quality Image Placeholders) for instant rendering
+- **Prioritize loading** the resolution appropriate for the current viewport
+- **Consider device pixel ratio** (window.devicePixelRatio) for high-DPI displays
+- **Always call URL.revokeObjectURL** after the image loads to prevent memory leaks
