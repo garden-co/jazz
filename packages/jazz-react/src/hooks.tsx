@@ -58,4 +58,5 @@ export {
   useJazzContext,
   useAccount,
   useAccountOrGuest,
+  useCoState2,
 } from "jazz-react-core";

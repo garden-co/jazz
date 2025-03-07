@@ -1,8 +1,8 @@
-import { useAccount, useCoState } from "jazz-react";
-import { CoMap, Group, ID, co } from "jazz-tools";
+import { useAccount, useCoState2 as useCoState } from "jazz-react";
+import { Group, ID, SchemaV2, co } from "jazz-tools";
 import { useEffect, useState } from "react";
 
-export class InputTestCoMap extends CoMap {
+export class InputTestCoMap extends SchemaV2.CoMap {
   title = co.string;
 }
 
@@ -18,7 +18,7 @@ export function TestInput() {
 
     group.addMember("everyone", "writer");
 
-    setId(InputTestCoMap.create({ title: "" }, { owner: group }).id);
+    setId(InputTestCoMap.create({ title: "" }, { owner: group }).$id);
   }, [me]);
 
   if (!coMap) return null;
@@ -28,7 +28,9 @@ export function TestInput() {
       value={coMap?.title ?? ""}
       onChange={(e) => {
         if (!coMap) return;
-        coMap.title = e.target.value;
+
+        // @ts-expect-error
+        coMap.$set("title", e.target.value);
       }}
     />
   );

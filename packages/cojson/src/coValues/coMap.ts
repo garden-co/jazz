@@ -52,6 +52,8 @@ export class RawCoMapView<
   };
   /** @internal */
   knownTransactions: CoValueKnownState["sessions"];
+  /** @internal */
+  totalProcessedTransactions: number;
 
   /** @internal */
   ignorePrivateTransactions: boolean;
@@ -75,6 +77,7 @@ export class RawCoMapView<
     this.ops = {};
     this.latest = {};
     this.knownTransactions = {};
+    this.totalProcessedTransactions = 0;
 
     this.processNewTransactions();
   }
@@ -136,6 +139,8 @@ export class RawCoMapView<
     for (const [key, entries] of changedEntries.entries()) {
       this.latest[key] = entries[entries.length - 1];
     }
+
+    this.totalProcessedTransactions += nextValidTransactions.length;
   }
 
   isTimeTravelEntity() {
