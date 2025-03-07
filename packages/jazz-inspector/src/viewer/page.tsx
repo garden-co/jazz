@@ -54,6 +54,7 @@ export function Page({
     <div
       style={{
         position: "absolute",
+        zIndex: 1,
         inset: 0,
         backgroundColor: "white",
         borderWidth: "1px",
