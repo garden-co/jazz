@@ -107,20 +107,9 @@ async function scaffoldProject({
     );
   }
 
-  // Determine target directory - use current directory if projectName is "."
-  const targetDir = projectName === "." ? "." : projectName;
-
-  // For display purposes, use current directory name if projectName is "."
-  const displayName =
-    projectName === "."
-      ? process.cwd().split("/").pop() || "current directory"
-      : projectName;
-
   // Step 2: Clone starter
   const cloneSpinner = ora({
-    text: chalk.blue(
-      `Cloning template: ${chalk.bold(starterConfig.name)} into ${chalk.bold(displayName)}`,
-    ),
+    text: chalk.blue(`Cloning template: ${chalk.bold(starterConfig.name)}`),
     spinner: "dots",
   }).start();
 
@@ -130,7 +119,7 @@ async function scaffoldProject({
       force: true,
       verbose: true,
     });
-    await emitter.clone(targetDir);
+    await emitter.clone(projectName);
     cloneSpinner.succeed(chalk.green("Template cloned successfully"));
   } catch (error) {
     cloneSpinner.fail(chalk.red("Failed to clone template"));
@@ -144,7 +133,7 @@ async function scaffoldProject({
   }).start();
 
   try {
-    const packageJsonPath = `${targetDir}/package.json`;
+    const packageJsonPath = `${projectName}/package.json`;
     const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, "utf8"));
 
     // Helper function to update workspace dependencies
@@ -187,7 +176,7 @@ async function scaffoldProject({
     }).start();
 
     try {
-      const apiKeyPath = `${targetDir}/src/apiKey.ts`;
+      const apiKeyPath = `${projectName}/src/apiKey.ts`;
       if (fs.existsSync(apiKeyPath)) {
         let content = fs.readFileSync(apiKeyPath, "utf8");
         // Replace the apiKey export value
@@ -221,7 +210,7 @@ async function scaffoldProject({
   }).start();
 
   try {
-    execSync(`cd "${targetDir}" && ${packageManager} install`, {
+    execSync(`cd "${projectName}" && ${packageManager} install`, {
       stdio: "pipe",
     });
     installSpinner.succeed(chalk.green("Dependencies installed"));
@@ -238,11 +227,11 @@ async function scaffoldProject({
     }).start();
 
     try {
-      execSync(`cd "${targetDir}" && npx expo prebuild`, { stdio: "pipe" });
-      execSync(`cd "${targetDir}" && npx pod-install`, { stdio: "pipe" });
+      execSync(`cd "${projectName}" && npx expo prebuild`, { stdio: "pipe" });
+      execSync(`cd "${projectName}" && npx pod-install`, { stdio: "pipe" });
 
       // Update metro.config.js
-      const metroConfigPath = `${targetDir}/metro.config.js`;
+      const metroConfigPath = `${projectName}/metro.config.js`;
       const metroConfig = `
 const { getDefaultConfig } = require("expo/metro-config");
 const { withNativeWind } = require("nativewind/metro");
@@ -268,7 +257,7 @@ module.exports = withNativeWind(config, { input: "./src/global.css" });
 
   try {
     // Create a temporary directory for cursor-docs
-    const tempDocsDir = `${targetDir}-cursor-docs-temp`;
+    const tempDocsDir = `${projectName}-cursor-docs-temp`;
     const emitter = degit("garden-co/jazz/packages/cursor-docs", {
       cache: false,
       force: true,
@@ -280,7 +269,7 @@ module.exports = withNativeWind(config, { input: "./src/global.css" });
 
     // Copy only the .cursor directory to project root
     const cursorDirSource = `${tempDocsDir}/.cursor`;
-    const cursorDirTarget = `${targetDir}/.cursor`;
+    const cursorDirTarget = `${projectName}/.cursor`;
 
     if (fs.existsSync(cursorDirSource)) {
       fs.cpSync(cursorDirSource, cursorDirTarget, { recursive: true });
@@ -304,7 +293,7 @@ module.exports = withNativeWind(config, { input: "./src/global.css" });
 
   try {
     execSync(
-      `cd "${targetDir}" && git init && git add . && git commit -m "Initial commit from create-jazz-app"`,
+      `cd "${projectName}" && git init && git add . && git commit -m "Initial commit from create-jazz-app"`,
       { stdio: "pipe" },
     );
     gitSpinner.succeed(chalk.green("Git repository initialized"));
@@ -319,7 +308,7 @@ module.exports = withNativeWind(config, { input: "./src/global.css" });
 
   // Skip the cd command if we're already in the project directory
   if (projectName !== ".") {
-    console.log(chalk.white(`  cd ${chalk.bold(displayName)}`));
+    console.log(chalk.white(`  cd ${chalk.bold(projectName)}`));
   }
 
   console.log(
