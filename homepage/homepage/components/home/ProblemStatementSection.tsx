@@ -9,7 +9,7 @@ export default function ProblemStatementSection() {
     <div className="container grid gap-4 lg:gap-8">
       <SectionHeader
         className="sm:text-center sm:mx-auto"
-        title="Hard things are easy now."
+        title="A perspective shift worth months of work."
         slogan=""
       />
 
@@ -27,12 +27,7 @@ export default function ProblemStatementSection() {
           </span>
           <Prose>
             <p className="font-display text-lg md:text-xl font-semibold text-stone-900 dark:text-white">
-              The sad truth is...
-            </p>
-            <p>
-              <strong>
-                Every stack reinvents how users and machines share state.
-              </strong>
+            Every &ldquo;stack&rdquo; is a re-invention of shared state.
             </p>
           </Prose>
           <div className="relative flex items-center flex-1">
@@ -60,12 +55,7 @@ export default function ProblemStatementSection() {
         <div className="flex flex-col gap-3 p-4 pt-8 md:p-8 md:gap-5">
           <Prose>
             <p className="font-display text-lg md:text-xl font-semibold text-stone-900 dark:text-white">
-              The good news is...
-            </p>
-            <p>
-              <strong>
-                There’s a single new abstraction that does the whole job.
-              </strong>
+              What if we started from shared state?
             </p>
           </Prose>
           <div className="flex items-center flex-1">
@@ -73,8 +63,8 @@ export default function ProblemStatementSection() {
           </div>
           <Prose>
             <p>
-              Jazz gives you <strong>mutable local state</strong> that’s{" "}
-              <strong>instantly synced.</strong> Including binary blobs.{" "}
+              Jazz gives you <strong>local state</strong> that’s{" "}
+              <strong>instantly synced and stored in the cloud.</strong> Including binary blobs.{" "}
               <strong>With users &amp; permissions built-in.</strong>
             </p>
             <p>

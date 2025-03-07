@@ -48,13 +48,11 @@ export function LocalFirstFeaturesSection() {
   return (
     <div>
       <SectionHeader
-        title="Why local-first?"
+        title="The best of all worlds"
         slogan={
           <>
             <p>
-              With local-first, your data is stored locally, then synced to the
-              server.
-              <br /> This comes with the following benefits.
+              With cloud-synced local state, your data is kept on-device, and synced whenever possible.
             </p>
           </>
         }

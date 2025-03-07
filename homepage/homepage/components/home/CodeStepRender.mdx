@@ -1,5 +1,5 @@
 ```tsx
-const ChatScreen = (id) => {
+const ChatScreen = ({ id }) => {
   const chat = useCoState(Chat, id)
 
   return chat.messages.map(msg => (

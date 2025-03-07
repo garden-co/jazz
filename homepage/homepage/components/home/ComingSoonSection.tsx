@@ -1,7 +1,7 @@
-import CoPlainTextDescription from "@/app/(home)/coValueDescriptions/coPlainTextDescription.mdx";
-import CursorsAndCaretsDescription from "@/app/(home)/toolkit/cursorsAndCarets.mdx";
-import TwoWaySyncDescription from "@/app/(home)/toolkit/twoWaySync.mdx";
-import VideoPresenceCallsDescription from "@/app/(home)/toolkit/videoPresenceCalls.mdx";
+import CoPlainTextDescription from "@/app/(others)/(home)/coValueDescriptions/coPlainTextDescription.mdx";
+import CursorsAndCaretsDescription from "@/app/(others)/(home)/toolkit/cursorsAndCarets.mdx";
+import TwoWaySyncDescription from "@/app/(others)/(home)/toolkit/twoWaySync.mdx";
+import VideoPresenceCallsDescription from "@/app/(others)/(home)/toolkit/videoPresenceCalls.mdx";
 import { CodeRef } from "gcmp-design-system/src/app/components/atoms/CodeRef";
 import { P } from "gcmp-design-system/src/app/components/atoms/Paragraph";
 import { FeatureCard } from "gcmp-design-system/src/app/components/molecules/FeatureCard";

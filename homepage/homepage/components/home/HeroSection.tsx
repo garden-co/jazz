@@ -46,25 +46,23 @@ export function HeroSection() {
     <div className="container grid items-center gap-x-8 gap-y-10 py-12 md:py-16 lg:py-24 lg:gap-x-10 lg:grid-cols-3">
       <div className="flex flex-col justify-center gap-5 lg:col-span-2 lg:gap-8">
         <p className="uppercase text-blue tracking-widest text-sm font-medium dark:text-stone-400">
-          Local-first development toolkit
+          Toolkit for cloud-synced local state
         </p>
         <H1>
-          <span className="inline-block">Ship top-tier apps</span>{" "}
-          <span className="inline-block">at high tempo.</span>
+          <span className="inline-block">Whip up an app.</span>
         </H1>
 
         <Prose size="lg" className="text-pretty max-w-2xl dark:text-stone-200">
           <p>
-            Jazz is a framework for building local-first apps
-            &mdash;&nbsp;an&nbsp;architecture that lets companies like Figma and
-            Linear play in a league of their own.
+            Jazz lets you build with cloud-synced local state, completely
+            replacing backends and databases. You'll ship better apps, much faster.
           </p>
           <p>
             Open source. Self-host or use{" "}
             <Link className="text-reset" href="/cloud">
               Jazz Cloud
             </Link>{" "}
-            for zero-config magic.
+            for an &ldquo;it just works&rdquo; DX.
           </p>
         </Prose>
 
