@@ -18,7 +18,7 @@ class ListOfTasks extends CoList.Of(co.ref(Task)) {}
 ```
 </CodeGroup>
 
-To instantiate a CoList:
+To create a CoList:
 
 <CodeGroup>
 ```ts
@@ -61,40 +61,69 @@ console.log(todoTasks.length); // 1
 ```
 </CodeGroup>
 
-## Writing to CoLists
+## Updating CoLists
 
-CoLists support all the standard JavaScript array mutation methods:
+Update CoLists just like you would JavaScript arrays:
 
 <CodeGroup>
 ```ts
 // Add items
-resources.push("Courgette");          // Add to end
-resources.unshift("Lettuce");         // Add to beginning
-
-console.log(resources);
-  // ["Lettuce", "Tomatoes", "Basil", "Peppers", "Courgette"]
-
-// Add complex items to lists of references
-tasks.push(Task.create({
-  title: "Install irrigation system", 
+resources.push("Tomatoes");       // Add to end
+resources.unshift("Lettuce");     // Add to beginning
+tasks.push(Task.create({          // Add complex items
+  title: "Install irrigation", 
   status: "todo"
 }));
 
 // Remove items
-resources.pop();                      // Remove last item
-resources.shift();                    // Remove first item
-resources.splice(1, 2);               // Remove items at index 1 and 2
+const lastItem = resources.pop();    // Remove and return last item
+resources.shift();                   // Remove first item
 
 // Replace items
-resources[0] = "Cucumber";            // Replace first item
-
-console.log(resources);               // ["Cucumber"]
-
-// Modify items in a list of references
-tasks[0].status = "in-progress";  // Modify a property of an item
+resources[0] = "Cucumber";           // Replace by index
 ```
 </CodeGroup>
 
+### Deleting Items
+
+Remove specific items with `splice`:
+
+<CodeGroup>
+```ts
+// Remove 2 items starting at index 1
+resources.splice(1, 2);              
+console.log(resources);              // ["Cucumber", "Peppers"]
+
+// Remove a single item at index 0
+resources.splice(0, 1);
+console.log(resources);              // ["Peppers"]
+
+// Modify nested items
+tasks[0].status = "complete";        // Update properties of references
+```
+</CodeGroup>
+
+### Array Methods
+
+CoLists support the standard JavaScript array methods you already know:
+
+<CodeGroup>
+```ts
+// Add multiple items at once
+resources.push("Tomatoes", "Basil", "Peppers");
+
+// Find items
+const basil = resources.find(r => r === "Basil");
+
+// Filter (returns regular array, not a CoList)
+const tItems = resources.filter(r => r.startsWith("T"));
+console.log(tItems); // ["Tomatoes"]
+
+// Sort (modifies the CoList in-place)
+resources.sort();
+console.log(resources); // ["Basil", "Peppers", "Tomatoes"]
+```
+</CodeGroup>
 
 ### Type Safety
 
@@ -102,42 +131,16 @@ CoLists maintain type safety for their items:
 
 <CodeGroup>
 ```ts
-// TypeScript knows each item's type
+// TypeScript catches type errors
 resources.push("Carrots");        // ✓ Valid string
 resources.push(42);               // ✗ Type error: expected string
 
-// For lists of references, TypeScript knows the referenced type
+// For lists of references
 tasks.forEach(task => {
-  console.log(task.title);     // TypeScript knows 'task' has a 'title'
+  console.log(task.title);        // TypeScript knows task has title
 });
 ```
 </CodeGroup>
-
-### Array Methods
-
-CoLists support many standard JavaScript array methods:
-
-<CodeGroup>
-```ts
-resources.push("Tomatoes", "Basil", "Peppers");
-
-// Filter
-const springResources = resources.filter(resource => resource.includes("Tomato"));
-console.log(springResources); // ["Tomatoes"]
-
-// Map (creates a regular array, not a CoList)
-const resourceNames = resources.map(resource => resource.toUpperCase());
-console.log(resourceNames); // ["TOMATOES", "BASIL", "PEPPERS"]
-
-// Find
-const basil = resources.find(resource => resource === "Basil");
-
-// Sort (modifies the CoList in-place)
-resources.sort();
-console.log(resources); // ["Basil", "Cucumber", "Peppers", "Tomatoes"]
-```
-</CodeGroup>
-
 ## Best Practices
 
 ### Common Patterns
