@@ -450,7 +450,13 @@ program
   .description(
     chalk.blue("CLI to generate Jazz projects using starter templates"),
   )
-  .option("-n, --project-name <name>", chalk.cyan("Name of your project"))
+  .option(
+    "-f, --framework <framework>",
+    chalk.cyan(`Framework to use (${frameworkOptions})`),
+  )
+  .option("-s, --starter <starter>", chalk.cyan("Starter template to use"))
+  .option("-e, --example <name>", chalk.cyan("Example project to use"))
+  .option("-n, --project-name <name>", chalk.cyan("Name of the project"))
   .option(
     "-p, --package-manager <manager>",
     chalk.cyan("Package manager to use (npm, yarn, pnpm, bun, deno)"),
