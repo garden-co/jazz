@@ -15,7 +15,7 @@ You can either
 
 Create a new Jazz project, and use this example as a template.
 ```bash
-npx create-jazz-app@latest --example password-manager --project-name password-manager
+npx create-jazz-app@latest password-manager-app --example password-manager
 ```
 
 Go to the new project directory.

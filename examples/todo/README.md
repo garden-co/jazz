@@ -13,7 +13,7 @@ You can either
 
 Create a new Jazz project, and use this example as a template.
 ```bash
-npx create-jazz-app@latest --example todo --project-name todo
+npx create-jazz-app@latest todo-app --example todo
 ```
 
 Go to the new project directory.
