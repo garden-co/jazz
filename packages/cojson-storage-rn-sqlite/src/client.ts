@@ -21,8 +21,8 @@ export class SQLiteClient implements DBClientInterface {
     this.db = db;
   }
 
-  async getCoValue(coValueId: RawCoID): Promise<StoredCoValueRow | undefined> {
-    const { rows } = await this.db.execute(
+  getCoValue(coValueId: RawCoID): StoredCoValueRow | undefined {
+    const { rows } = this.db.executeSync(
       "SELECT * FROM coValues WHERE id = ?",
       [coValueId],
     );
@@ -56,30 +56,30 @@ export class SQLiteClient implements DBClientInterface {
     }
   }
 
-  async getCoValueSessions(coValueRowId: number): Promise<StoredSessionRow[]> {
-    const { rows } = await this.db.execute(
+  getCoValueSessions(coValueRowId: number): StoredSessionRow[] {
+    const { rows } = this.db.executeSync(
       "SELECT * FROM sessions WHERE coValue = ?",
       [coValueRowId],
     );
     return rows as StoredSessionRow[];
   }
 
-  async getSingleCoValueSession(
+  getSingleCoValueSession(
     coValueRowId: number,
     sessionID: SessionID,
-  ): Promise<StoredSessionRow | undefined> {
-    const { rows } = await this.db.execute(
+  ): StoredSessionRow | undefined {
+    const { rows } = this.db.executeSync(
       "SELECT * FROM sessions WHERE coValue = ? AND sessionID = ?",
       [coValueRowId, sessionID],
     );
     return rows[0] as StoredSessionRow | undefined;
   }
 
-  async getNewTransactionInSession(
+  getNewTransactionInSession(
     sessionRowId: number,
     firstNewTxIdx: number,
-  ): Promise<TransactionRow[]> {
-    const { rows } = await this.db.execute(
+  ): TransactionRow[] {
+    const { rows } = this.db.executeSync(
       "SELECT * FROM transactions WHERE ses = ? AND idx >= ?",
       [sessionRowId, firstNewTxIdx],
     );
@@ -111,10 +111,8 @@ export class SQLiteClient implements DBClientInterface {
     return rows as SignatureAfterRow[];
   }
 
-  async addCoValue(
-    msg: CojsonInternalTypes.NewContentMessage,
-  ): Promise<number> {
-    const { insertId } = await this.db.execute(
+  addCoValue(msg: CojsonInternalTypes.NewContentMessage): number {
+    const { insertId } = this.db.executeSync(
       "INSERT INTO coValues (id, header) VALUES (?, ?)",
       [msg.id, JSON.stringify(msg.header)],
     );
@@ -122,12 +120,12 @@ export class SQLiteClient implements DBClientInterface {
     return insertId ?? 0;
   }
 
-  async addSessionUpdate({
+  addSessionUpdate({
     sessionUpdate,
   }: {
     sessionUpdate: SessionRow;
-  }): Promise<number> {
-    const { rows } = await this.db.execute(
+  }): number {
+    const { rows } = this.db.executeSync(
       `INSERT INTO sessions (coValue, sessionID, lastIdx, lastSignature, bytesSinceLastSignature) 
        VALUES (?, ?, ?, ?, ?)
        ON CONFLICT(coValue, sessionID) 
@@ -146,18 +144,18 @@ export class SQLiteClient implements DBClientInterface {
     return rows[0]?.rowID as number;
   }
 
-  async addTransaction(
+  addTransaction(
     sessionRowID: number,
     nextIdx: number,
     newTransaction: CojsonInternalTypes.Transaction,
-  ): Promise<void> {
-    await this.db.execute(
+  ) {
+    this.db.executeSync(
       "INSERT INTO transactions (ses, idx, tx) VALUES (?, ?, ?)",
       [sessionRowID, nextIdx, JSON.stringify(newTransaction)],
     );
   }
 
-  async addSignatureAfter({
+  addSignatureAfter({
     sessionRowID,
     idx,
     signature,
@@ -165,13 +163,14 @@ export class SQLiteClient implements DBClientInterface {
     sessionRowID: number;
     idx: number;
     signature: CojsonInternalTypes.Signature;
-  }): Promise<void> {
-    await this.db.execute(
+  }) {
+    this.db.executeSync(
       "INSERT INTO signatureAfter (ses, idx, signature) VALUES (?, ?, ?)",
       [sessionRowID, idx, signature],
     );
   }
 
+  // There doesn't appear to be a synchronous version of transactions
   async transaction(operationsCallback: () => unknown) {
     try {
       await this.db.transaction(async () => {
