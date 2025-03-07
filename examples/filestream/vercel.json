@@ -1,0 +1,8 @@
+{
+  "build": {
+    "env": {
+      "APP_NAME": "filestream"
+    }
+  },
+  "ignoreCommand": "node ../../ignore-vercel-build.js"
+}
