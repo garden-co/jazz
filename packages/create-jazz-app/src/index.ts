@@ -107,9 +107,20 @@ async function scaffoldProject({
     );
   }
 
+  // Determine target directory - use current directory if projectName is "."
+  const targetDir = projectName === "." ? "." : projectName;
+
+  // For display purposes, use current directory name if projectName is "."
+  const displayName =
+    projectName === "."
+      ? process.cwd().split("/").pop() || "current directory"
+      : projectName;
+
   // Step 2: Clone starter
   const cloneSpinner = ora({
-    text: chalk.blue(`Cloning template: ${chalk.bold(starterConfig.name)}`),
+    text: chalk.blue(
+      `Cloning template: ${chalk.bold(starterConfig.name)} into ${chalk.bold(displayName)}`,
+    ),
     spinner: "dots",
   }).start();
 
@@ -119,7 +130,7 @@ async function scaffoldProject({
       force: true,
       verbose: true,
     });
-    await emitter.clone(projectName);
+    await emitter.clone(targetDir);
     cloneSpinner.succeed(chalk.green("Template cloned successfully"));
   } catch (error) {
     cloneSpinner.fail(chalk.red("Failed to clone template"));
@@ -133,7 +144,7 @@ async function scaffoldProject({
   }).start();
 
   try {
-    const packageJsonPath = `${projectName}/package.json`;
+    const packageJsonPath = `${targetDir}/package.json`;
     const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, "utf8"));
 
     // Helper function to update workspace dependencies
@@ -176,7 +187,7 @@ async function scaffoldProject({
     }).start();
 
     try {
-      const apiKeyPath = `${projectName}/src/apiKey.ts`;
+      const apiKeyPath = `${targetDir}/src/apiKey.ts`;
       if (fs.existsSync(apiKeyPath)) {
         let content = fs.readFileSync(apiKeyPath, "utf8");
         // Replace the apiKey export value
@@ -210,7 +221,7 @@ async function scaffoldProject({
   }).start();
 
   try {
-    execSync(`cd "${projectName}" && ${packageManager} install`, {
+    execSync(`cd "${targetDir}" && ${packageManager} install`, {
       stdio: "pipe",
     });
     installSpinner.succeed(chalk.green("Dependencies installed"));
@@ -227,11 +238,11 @@ async function scaffoldProject({
     }).start();
 
     try {
-      execSync(`cd "${projectName}" && npx expo prebuild`, { stdio: "pipe" });
-      execSync(`cd "${projectName}" && npx pod-install`, { stdio: "pipe" });
+      execSync(`cd "${targetDir}" && npx expo prebuild`, { stdio: "pipe" });
+      execSync(`cd "${targetDir}" && npx pod-install`, { stdio: "pipe" });
 
       // Update metro.config.js
-      const metroConfigPath = `${projectName}/metro.config.js`;
+      const metroConfigPath = `${targetDir}/metro.config.js`;
       const metroConfig = `
 const { getDefaultConfig } = require("expo/metro-config");
 const { withNativeWind } = require("nativewind/metro");
@@ -257,7 +268,7 @@ module.exports = withNativeWind(config, { input: "./src/global.css" });
 
   try {
     // Create a temporary directory for cursor-docs
-    const tempDocsDir = `${projectName}-cursor-docs-temp`;
+    const tempDocsDir = `${targetDir}-cursor-docs-temp`;
     const emitter = degit("garden-co/jazz/packages/cursor-docs", {
       cache: false,
       force: true,
@@ -269,7 +280,7 @@ module.exports = withNativeWind(config, { input: "./src/global.css" });
 
     // Copy only the .cursor directory to project root
     const cursorDirSource = `${tempDocsDir}/.cursor`;
-    const cursorDirTarget = `${projectName}/.cursor`;
+    const cursorDirTarget = `${targetDir}/.cursor`;
 
     if (fs.existsSync(cursorDirSource)) {
       fs.cpSync(cursorDirSource, cursorDirTarget, { recursive: true });
@@ -293,7 +304,7 @@ module.exports = withNativeWind(config, { input: "./src/global.css" });
 
   try {
     execSync(
-      `cd "${projectName}" && git init && git add . && git commit -m "Initial commit from create-jazz-app"`,
+      `cd "${targetDir}" && git init && git add . && git commit -m "Initial commit from create-jazz-app"`,
       { stdio: "pipe" },
     );
     gitSpinner.succeed(chalk.green("Git repository initialized"));
@@ -305,7 +316,12 @@ module.exports = withNativeWind(config, { input: "./src/global.css" });
   // Final success message
   console.log("\n" + chalk.green.bold("✨ Project setup completed! ✨\n"));
   console.log(chalk.cyan("To get started:"));
-  console.log(chalk.white(`  cd ${chalk.bold(projectName)}`));
+
+  // Skip the cd command if we're already in the project directory
+  if (projectName !== ".") {
+    console.log(chalk.white(`  cd ${chalk.bold(displayName)}`));
+  }
+
   console.log(
     chalk.white(`  ${chalk.bold(`${packageManager} run ${devCommand}`)}\n`),
   );
@@ -439,19 +455,17 @@ program
   .description(
     chalk.blue("CLI to generate Jazz projects using starter templates"),
   )
-  .option(
-    "-f, --framework <framework>",
-    chalk.cyan(`Framework to use (${frameworkOptions})`),
-  )
-  .option("-s, --starter <starter>", chalk.cyan("Starter template to use"))
-  .option("-e, --example <name>", chalk.cyan("Example project to use"))
-  .option("-n, --project-name <name>", chalk.cyan("Name of the project"))
+  .option("-n, --project-name <name>", chalk.cyan("Name of your project"))
   .option(
     "-p, --package-manager <manager>",
     chalk.cyan("Package manager to use (npm, yarn, pnpm, bun, deno)"),
   )
   .option("-k, --api-key <key>", chalk.cyan("Jazz Cloud API key"))
-  .action(async (options) => {
+  .argument(
+    "[directory]",
+    "Directory to create the project in (defaults to project name)",
+  )
+  .action(async (directory, options) => {
     try {
       const partialOptions: PromptOptions = {};
 
@@ -461,6 +475,18 @@ program
             "Cannot specify both starter and example. Please choose one.",
           ),
         );
+      }
+
+      // If directory is ".", set it as the project name or use it later
+      if (directory === ".") {
+        // Use current directory name as project name if not specified
+        if (!options.projectName) {
+          const currentDir = process.cwd().split("/").pop() || "jazz-app";
+          partialOptions.projectName = currentDir;
+        }
+      } else if (directory && !options.projectName) {
+        // If directory is provided but not project name, use directory as project name
+        partialOptions.projectName = directory;
       }
 
       if (options.starter)
@@ -475,6 +501,11 @@ program
 
       // Get missing options through prompts
       const scaffoldOptions = await promptUser(partialOptions);
+
+      // If directory is ".", we'll create the project in the current directory
+      if (directory === ".") {
+        scaffoldOptions.projectName = ".";
+      }
 
       // Validate will throw if invalid
       validateOptions(scaffoldOptions);
@@ -520,6 +551,8 @@ program.on("--help", () => {
       "npx create-jazz-app@latest --project-name my-app --api-key your-api-key@garden.co\n",
     ),
   );
+  console.log(chalk.blue("Create in current directory:"));
+  console.log(chalk.white("npx create-jazz-app@latest . --framework react\n"));
 });
 
 program.parse(process.argv);
