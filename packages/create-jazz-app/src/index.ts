@@ -160,7 +160,13 @@ async function scaffoldProject({
       updateWorkspaceDependencies("devDependencies"),
     ]);
 
-    packageJson.name = projectName;
+    // If projectName is ".", use the current directory name instead
+    if (projectName === ".") {
+      const currentDir = process.cwd().split("/").pop() || "jazz-app";
+      packageJson.name = currentDir;
+    } else {
+      packageJson.name = projectName;
+    }
     fs.writeFileSync(packageJsonPath, JSON.stringify(packageJson, null, 2));
     depsSpinner.succeed(chalk.green("Dependencies updated"));
   } catch (error) {
@@ -541,7 +547,7 @@ program.on("--help", () => {
     ),
   );
   console.log(chalk.blue("Create in current directory:"));
-  console.log(chalk.white("npx create-jazz-app@latest . --framework react\n"));
+  console.log(chalk.white("npx create-jazz-app@latest .\n"));
 });
 
 program.parse(process.argv);
