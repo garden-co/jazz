@@ -5,12 +5,10 @@ import {
 import { createNativeStackNavigator } from "@react-navigation/native-stack";
 import React, { StrictMode } from "react";
 
-import { JazzProvider, setupKvStore } from "jazz-react-native";
+import { JazzProvider } from "jazz-expo";
 import { SimpleSharing } from "./screens/SimpleSharing";
 
 const Stack = createNativeStackNavigator();
-
-setupKvStore();
 
 function App() {
   const navigationRef = useNavigationContainerRef();

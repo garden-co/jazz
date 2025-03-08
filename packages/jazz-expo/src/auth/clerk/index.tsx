@@ -32,7 +32,6 @@ function RegisterClerkAuth(props: {
   children: React.ReactNode;
 }) {
   useJazzClerkAuth(props.clerk);
-
   return props.children;
 }
 

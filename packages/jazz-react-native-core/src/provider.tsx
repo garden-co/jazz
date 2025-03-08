@@ -13,7 +13,7 @@ export type RegisteredAccount = Register extends { Account: infer Acc }
 
 export type JazzProviderProps<Acc extends Account = RegisteredAccount> = {
   children: React.ReactNode;
-  kvStore: KvStore;
+  kvStore?: KvStore;
 } & JazzContextManagerProps<Acc>;
 
 /** @category Context & Hooks */

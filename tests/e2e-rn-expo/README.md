@@ -11,7 +11,7 @@ pnpm i
 pnpm run build
 ```
 
-### 2. Inside the `tests/e2e-react-native` Directory
+### 2. Inside the `tests/e2e-rn-expo` Directory
 
 Next, navigate to the specific example project and run the following commands:
 
@@ -25,7 +25,7 @@ This will set up and launch the app on iOS. For Android, you can replace the las
 
 ## 🧪 Testing
 
-To test that the crypto is compatible with the Node.js crypto, click on "Create CoMap" and then paste the command from the clipboard into the terminal having `tests/e2e-react-native` as the current directory.
+To test that the crypto is compatible with the Node.js crypto, click on "Create CoMap" and then paste the command from the clipboard into the terminal having `tests/e2e-rn-expo` as the current directory.
 
 This will create a new CoMap and then validate that the text is "Updated from React Native" and then update the text to "Updated from Node.js".
 
