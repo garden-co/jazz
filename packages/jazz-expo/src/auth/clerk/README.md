@@ -1,6 +1,6 @@
-# `jazz-expo-auth-clerk`
+# `jazz-expo/auth/clerk`
 
-This package provides a [Clerk-based](https://clerk.com/) authentication strategy for Jazz.
+This package import provides a [Clerk-based](https://clerk.com/) authentication strategy for Jazz.
 
 ## Usage
 
@@ -12,7 +12,7 @@ See the full [example app](https://github.com/garden-co/jazz/tree/main/examples/
 
 ```tsx
 import { ClerkProvider, useClerk } from "@clerk/clerk-react";
-import { JazzProviderWithClerk } from "jazz-expo-auth-clerk";
+import { JazzProviderWithClerk } from "jazz-expo/auth/clerk";
 
 const PUBLISHABLE_KEY = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY;
 

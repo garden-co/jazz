@@ -1,17 +1,8 @@
-import {
-  JazzProviderCore,
-  JazzProviderProps,
-  KvStore,
-} from "jazz-react-native-core";
+import { JazzProviderCore, JazzProviderProps } from "jazz-react-native-core";
 import React from "react";
 import { ExpoSecureStoreAdapter } from "./storage/expo-secure-store-adapter.js";
 
-// Create a new props type that makes kvStore optional
-type ProviderProps = Omit<JazzProviderProps, "kvStore"> & {
-  kvStore?: KvStore;
-};
-
-export function JazzProvider(props: ProviderProps) {
+export function JazzProvider(props: JazzProviderProps) {
   // Destructure kvStore and pass everything else via rest
   const { kvStore, ...rest } = props;
 
