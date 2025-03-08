@@ -12,7 +12,8 @@
     "noUncheckedIndexedAccess": true,
     "esModuleInterop": true,
     "declaration": true,
-    "declarationMap": true
+    "declarationMap": true,
+    "rootDir": "./src"
   },
   "include": ["./src/**/*"]
 }

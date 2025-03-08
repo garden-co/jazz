@@ -230,7 +230,12 @@ export function createInviteLink<C extends CoValue>(
   return baseCreateInviteLink(value, role, baseURL ?? "", valueHint);
 }
 
-export function setupKvStore(kvStore: KvStore) {
+export function setupKvStore(
+  kvStore: KvStore | undefined,
+): KvStore | undefined {
+  if (!kvStore) {
+    return undefined;
+  }
   KvStoreContext.getInstance().initialize(kvStore);
   return kvStore;
 }

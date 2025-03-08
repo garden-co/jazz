@@ -43,7 +43,6 @@
     "expo-web-browser": "~14.0.1",
     "expo-sqlite": "15.1.2",
     "jazz-expo": "workspace:*",
-    "jazz-expo-auth-clerk": "workspace:*",
     "jazz-react-native-media-images": "workspace:*",
     "jazz-tools": "workspace:*",
     "nativewind": "^4.1.21",

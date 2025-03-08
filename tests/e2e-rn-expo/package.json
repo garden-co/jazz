@@ -1,5 +1,5 @@
 {
-  "name": "@jazz/e2e-react-native-test-suite",
+  "name": "@jazz/e2e-rn-expo-test-suite",
   "version": "1.0.27",
   "main": "index.js",
   "scripts": {
@@ -29,9 +29,10 @@
     "expo-dev-client": "~5.0.5",
     "expo-linking": "~7.0.3",
     "expo-secure-store": "~14.0.0",
+    "expo-sqlite": "15.1.2",
     "expo-status-bar": "~2.0.0",
     "expo-web-browser": "~14.0.1",
-    "jazz-react-native": "workspace:*",
+    "jazz-expo": "workspace:*",
     "jazz-tools": "workspace:*",
     "react": "18.2.0",
     "react-native": "~0.76.3",

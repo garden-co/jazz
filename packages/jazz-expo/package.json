@@ -9,8 +9,18 @@
   "exports": {
     ".": {
       "react-native": "./dist/index.js",
-      "types": "./src/index.ts",
+      "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./dist/auth/clerk": {
+      "react-native": "./dist/auth/clerk/index.js",
+      "types": "./dist/auth/clerk/index.d.ts",
+      "default": "./dist/auth/clerk/index.js"
+    },
+    "./auth/clerk": {
+      "react-native": "./dist/auth/clerk/index.js",
+      "types": "./dist/auth/clerk/index.d.ts",
+      "default": "./dist/auth/clerk/index.js"
     }
   },
   "license": "MIT",
@@ -19,6 +29,7 @@
     "cojson": "workspace:*",
     "cojson-transport-ws": "workspace:*",
     "expo-sqlite": "^15.1.2",
+    "jazz-auth-clerk": "workspace:*",
     "jazz-react-core": "workspace:*",
     "jazz-react-native-core": "workspace:*",
     "jazz-tools": "workspace:*"
