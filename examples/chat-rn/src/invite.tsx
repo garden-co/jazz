@@ -1,4 +1,4 @@
-import { useAcceptInvite } from "jazz-react-native";
+import { useAcceptInvite } from "jazz-expo";
 import React, { Text } from "react-native";
 import { Chat } from "./schema";
 
