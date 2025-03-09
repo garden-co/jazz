@@ -245,7 +245,7 @@
 
                 } else if (response.code === 202) {
                     // 202 - Accepted: here signifies the start of a binary CoValue download
-                    console.assert(response.payload.uuid === currentCoValue.uuid, `CoValue chunks were mixed up ${response.payload.uuid} !== ${currentCoValue.uuid}`);                    
+                    console.assert(response.payload.uuid === currentCoValue.uuid, `CoValue chunks were mixed up ${response.payload.uuid} !== ${currentCoValue.uuid}`);
                     // debug(`Received metadata for file: ${response.payload.fileName} (${response.payload.fileSize}) split into ${response.payload.totalChunks} chunks of ${response.payload.chunkSize} bytes.`);
                     handleJSONChunk(response.payload);
 
