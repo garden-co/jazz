@@ -97,6 +97,7 @@ app.get("/covalue/:uuid/binary", async (req: Request, res: Response) => {
 
     await fileManager.chunkFileDownload(
         {
+            uuid,
             filePath,
             range: req.headers.range,
         },

@@ -559,6 +559,10 @@
                 }
             }
 
+            let chunks = [];
+            let fileMetadata = null;
+            let contentLength = 0;
+            let receivedLength = 0;
             async function loadCoValueViaHTTP(uuid, isBinary) {
                 const url = getEndpoint(uuid, isBinary);
                 info(`Loading ${uuid} via ${url}...`);
@@ -579,21 +583,37 @@
                     }
 
                     const reader = response.body.getReader();
-                    const contentLength =
-                        +response.headers.get("Content-Length");
-                    let receivedLength = 0;
-                    let chunks = [];
+                    contentLength = 0;
+                    receivedLength = 0;
+                    fileMetadata = null;
+                    chunks = [];
+                    const decoder = new TextDecoder();
+                    let buffer = '';
 
                     while (true) {
                         const { done, value } = await reader.read();
                         if (done) {
+                            if (buffer.trim()) {
+                                processJsonChunk(buffer);
+                            }
                             break;
                         }
-                        chunks.push(value);
-                        receivedLength += value.length;
-                        debug(
-                            `Received (chunk: ${chunks.length}) ${receivedLength} of ${contentLength} bytes for: ${uuid}.`,
-                        );
+
+                        buffer += decoder.decode(value, { stream: true });
+                        // Process complete JSON objects in the buffer
+                        let newlineIndex;
+                        while ((newlineIndex = buffer.indexOf('\n')) !== -1) {
+                            const jsonStr = buffer.slice(0, newlineIndex);
+                            buffer = buffer.slice(newlineIndex + 1);
+
+                            if (jsonStr.trim()) {
+                                handleJSONChunk(jsonStr);
+                            }
+                        }
+
+                        // debug(
+                        //     `Received (chunk: ${chunks.length}) ${receivedLength} of ${contentLength} bytes for: ${uuid}.`,
+                        // );
                     }
                     handleBinaryCoValue(
                         uuid,
@@ -609,14 +629,55 @@
                 }
             }
 
+            function handleJSONChunk(jsonStr) {
+                try {
+                    const chunk = JSON.parse(jsonStr);
+
+                    switch (chunk.type) {
+                        case "metadata":
+                            fileMetadata = chunk;
+                            // Pre-allocate a fixed array
+                            chunks = new Array(chunk.totalChunks);
+                            contentLength = chunk.fileSize;
+                            debug(`Received metadata for file: ${chunk.fileName} (${chunk.fileSize}) split into ${chunk.totalChunks} chunks of ${chunk.chunkSize} bytes.`);
+                            break;
+
+                        case "chunk":
+                            // Process a data chunk
+                            if (!fileMetadata) {
+                                throw new Error("Received file chunk before file metadata");
+                            }
+
+                            const binaryData = base64ToArrayBuffer(chunk.data);
+                            chunks[chunk.chunkIndex] = binaryData;
+                            receivedLength += binaryData.byteLength;
+
+                            debug(`Received chunk: ${chunk.chunkIndex + 1}/${chunk.totalChunks} (with chunk size: ${chunk.size})`);
+                            break;
+
+                        case "end":
+                            // End of stream
+                            debug(`File chunks received successfully.`);
+                            break;
+
+                        case "error":
+                            // Error from server
+                            throw new Error(`Server error: ${chunk.message}`);
+                    }
+                } catch (error) {
+                    console.error('Error processing chunk:', error, jsonStr);
+                    statusDiv.textContent = `Error processing stream data: ${error.message}`;
+                }
+            }
+
             function handleBinaryCoValue(
                 uuid,
                 receivedLength,
                 contentLength,
                 chunks,
             ) {
-                console.assert(contentLength === receivedLength, "Some chunks were lost!");
-                let binaryData = new Uint8Array(receivedLength);
+                console.assert(contentLength === receivedLength, `Some chunks were lost because ${contentLength} !== ${receivedLength}`);
+                let binaryData = new Uint8Array(contentLength);
                 let position = 0;
                 for (let chunk of chunks) {
                     binaryData.set(chunk, position);
@@ -633,7 +694,7 @@
                     bindata: binaryData,
                 };
                 info(
-                    `Loaded (binary) data for: ${uuid} (${receivedLength} bytes).`,
+                    `Loaded (binary) data for: ${uuid} (${contentLength} bytes).`,
                 );
                 logCoValue(currentCoValue);
             }
@@ -923,6 +984,15 @@
                     reader.onerror = reject;
                     reader.readAsDataURL(blob); // read blob as data URL, base64 encoded
                 });
+            }
+
+            function base64ToArrayBuffer(base64) {
+                const binaryString = atob(base64);
+                const bytes = new Uint8Array(binaryString.length);
+                for (let i = 0; i < binaryString.length; i++) {
+                    bytes[i] = binaryString.charCodeAt(i);
+                }
+                return bytes.buffer;
             }
 
             // Load CoValue UUIDs or subscribe to SSE on page load

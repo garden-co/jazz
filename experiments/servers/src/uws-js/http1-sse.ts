@@ -102,13 +102,24 @@ app.get("/covalue/:uuid/binary", trackRequest("GET", "/covalue/:uuid/binary", (r
         return;
     }
 
+    const fileName = `covalue-${uuid}.zip`;
+    const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+        "Content-Disposition": `attachment; filename="${fileName}"`,
+        "Accept-Ranges": "bytes",
+        "Transfer-Encoding": "chunked",
+    };
+
     // Capture range header
     const rangeHeader = req.getHeader('range');
 
     fileManager.chunkFileDownload(
         {
+            uuid,
             filePath,
             range: rangeHeader,
+            fileName,
+            headers
         },
         {
             type: "http",

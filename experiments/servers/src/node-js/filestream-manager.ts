@@ -29,9 +29,11 @@ export interface UploadState {
 }
 
 interface StreamOptions {
+    uuid: string;
     filePath: string;
     range?: string;
     fileName?: string;
+    headers?: Record<string, string>;
 }
 
 interface StreamTarget {
@@ -191,8 +193,14 @@ export class FileStreamManager {
 
         if (target.type === "websocket" && target.wsr) {
             target.wsr.status(500).json({ m: "Error reading file" });
+
         } else if (target.type === "http" && target.res) {
-            target.res.end();
+            const errorChunk = JSON.stringify({
+                type: "error",
+                message: `Error occurred while streaming the file: ${error.message}`
+            }) + '\n';
+
+            target.res.end(errorChunk);
             // target.res.status(500).json({ m: "Error reading file" }); // .json() will set headers after they have already been sent
         }
     }
@@ -201,7 +209,7 @@ export class FileStreamManager {
         options: StreamOptions,
         target: StreamTarget,
     ): Promise<void> {
-        const { filePath, range, fileName = "sample.zip" } = options;
+        const { uuid, filePath, range, fileName = "sample.zip", headers } = options;
 
         const validation = this.validateFilePath(filePath);
         if (!validation.valid) {
@@ -228,21 +236,16 @@ export class FileStreamManager {
 
         if (target.type === "websocket" && target.wsr) {
             target.wsr.status(202).json({
+                contentType: "application/json",
                 fileName,
-                contentLength,
-                contentType: "application/octet-stream",
+                // contentLength,
                 fileSize,
                 start,
                 end,
             });
         } else if (target.type === "http" && target.res) {
-            target.res.writeHead(206, {
-                "Content-Type": "application/octet-stream",
-                "Content-Length": contentLength,
-                "Content-Disposition": `attachment; filename="${fileName}"`,
-                "Accept-Ranges": "bytes",
-                "Content-Range": `bytes ${start}-${end}/${fileSize}`,
-            });
+            headers!["Content-Range"] = `bytes ${start}-${end}/${fileSize}`;
+            target.res.writeHead(206, headers);
         }
 
         logger.debug(
@@ -257,52 +260,73 @@ export class FileStreamManager {
 
         const totalChunks = Math.ceil(fileSize / CHUNK_SIZE);
         let chunkIndex = 0;
-        let bytesRead = 0;
+        let streamEnded = false;
 
-        const sendChunk = () => {
-            const chunk = fileStream.read(CHUNK_SIZE);
-            if (chunk) {
-                if (target.type === "websocket" && target.wsr) {
-                    target.wsr.send(chunk, (error) => {
-                        if (error) {
-                            this.chunkFileDownloadError(error, target, fileStream);
-                            return;
-                        }
-                        bytesRead += chunk.length;
-                        if (bytesRead < fileSize) {
-                            fileStream.once("readable", sendChunk);
-                        }
-                    });
-                } else if (target.type === "http" && target.res) {
-                    target.res.write(chunk, (error) => {
-                        if (error) {
-                            this.chunkFileDownloadError(error, target, fileStream);
-                            return;
-                        }
-                        bytesRead += chunk.length;
-                        if (bytesRead < fileSize) {
-                            fileStream.once("readable", sendChunk);
-                        }
-                    });
+        const metadataChunk = JSON.stringify({
+            type: "metadata",
+            uuid,
+            fileName,
+            fileSize,
+            chunkSize: CHUNK_SIZE,
+            totalChunks: totalChunks
+        }) + '\n';
+
+        if (target.type === "websocket" && target.wsr) {
+            // TODO:
+
+        } else if (target.type === "http" && target.res) {
+            target.res.write(metadataChunk, (error) => {
+                if (error) {
+                    this.chunkFileDownloadError(error, target, fileStream);
+                    return;
                 }
-                chunkIndex++;
-                logger.debug(
-                    `[GET] Sent chunk ${chunkIndex} of ${totalChunks} with size ${chunk.length}`,
-                );
-            } else /*if (!fileStream.readableEnded)*/ {
-                // No data available yet - wait for fileStream to refill
-                logger.debug(
-                    `[GET] Readable event emitted ...`,
-                );
-                fileStream.once("readable", sendChunk);
+            });
+        }
+
+        fileStream.on('data', (chunk) => {
+            fileStream.pause();
+
+            const base64Data = chunk.toString('base64');
+            const chunkData = JSON.stringify({
+              type: "chunk",
+              uuid,
+              chunkIndex: chunkIndex++,
+              data: base64Data
+            }) + '\n';
+
+
+            if (target.type === "websocket" && target.wsr) {
+                // TODO:
+
+            } else if (target.type === "http" && target.res) {
+                target.res.write(chunkData, (error) => {
+                    if (error) {
+                        this.chunkFileDownloadError(error, target, fileStream);
+                        return;
+                    } else {
+                        if (!streamEnded) {
+                            fileStream.resume();
+                        }
+                    }
+                });
             }
-        };
+        });
+
 
         fileStream.on("end", () => {
+            streamEnded = true;
             if (target.type === "websocket" && target.wsr) {
                 target.wsr.status(204).json({ m: "OK" });
+                // TODO:
+
             } else if (target.type === "http" && target.res) {
-                target.res.end();
+                const finalChunk = JSON.stringify({
+                  type: "end",
+                  chunkIndex,
+                  totalChunks
+                }) + '\n';
+
+                target.res.end(finalChunk);
             }
             logger.debug(
                 `[GET] Chunked download of file '${filePath}' with size ${fileSize} (${
@@ -314,7 +338,5 @@ export class FileStreamManager {
         fileStream.on("error", (error) => {
             this.chunkFileDownloadError(error, target, fileStream);
         });
-
-        fileStream.once("readable", sendChunk);
     }
 }

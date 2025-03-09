@@ -130,10 +130,25 @@ async function routes(fastify: FastifyInstance, options = {}) {
             return reply.status(404).send({ m: "CoValue binary file not found" });
         }
 
+        const fileName = `covalue-${uuid}.zip`;
+        const headers: Record<string, string> = {
+            "Content-Type": "application/json",
+            "Content-Disposition": `attachment; filename="${fileName}"`,
+            "Accept-Ranges": "bytes",
+        };
+
+        if (!isHttp2Server) {
+            // Only valid for HTTP/1.1 & below. Invalid in HTTP/2 & HTTP/3.
+            headers["Transfer-Encoding"] = "chunked";
+        }
+
         await fileManager.chunkFileDownload(
             {
+                uuid,
                 filePath,
                 range: request.headers.range,
+                fileName,
+                headers
             },
             {
                 type: "http",

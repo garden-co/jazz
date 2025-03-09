@@ -125,6 +125,7 @@ const app = uWS.SSLApp({
 
                             fileManager.chunkFileDownload(
                                 {
+                                    uuid: payload.uuid,
                                     filePath,
                                     range: payload.range,
                                 },

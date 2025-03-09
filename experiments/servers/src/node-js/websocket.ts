@@ -122,6 +122,7 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
 
                             await fileManager.chunkFileDownload(
                                 {
+                                    uuid: payload.uuid,
                                     filePath,
                                     range: payload.range,
                                 },
