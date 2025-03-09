@@ -110,11 +110,17 @@
             let retryAttempts = 0;
             const maxRetries = 5;
 
-            // websocket file streaming vars
-            let receivedSize = 0;
-            let totalSize = 0;
-            let fileName = "";
-            let fileBlobs = [];
+            let chunks = [];
+            let fileMetadata = null;
+            let contentLength = 0;
+            let receivedLength = 0;
+
+            function resetVars() {
+                contentLength = 0;
+                receivedLength = 0;
+                fileMetadata = null;
+                chunks = [];
+            }
 
             function sendWhenReady(data) {
                 const ws = getWebSocket();
@@ -165,15 +171,6 @@
                     };
 
                     socket.onmessage = (event) => {
-                        if (typeof event.data !== "string") {
-                            fileBlobs.push(event.data);
-                            receivedSize += event.data.size;
-                            debug(
-                                `WebSocket (chunk: ${fileBlobs.length}) received: ${receivedSize} of ${totalSize} for ${fileName}.`,
-                            );
-                            return;
-                        }
-
                         try {
                             const response = JSON.parse(event.data);
                             if (response.code <= 206) {
@@ -245,23 +242,26 @@
                     currentCoValue = response.payload;
                     info(`Loaded (JSON) data for: ${currentCoValue.uuid}.`);
                     logCoValue(currentCoValue);
+
                 } else if (response.code === 202) {
-                    // 202 - Accepted: here signifies the start of a binary download
-                    fileName = response.payload.fileName;
-                    totalSize = response.payload.fileSize;
+                    // 202 - Accepted: here signifies the start of a binary CoValue download
+                    console.assert(response.payload.uuid === currentCoValue.uuid, `CoValue chunks were mixed up ${response.payload.uuid} !== ${currentCoValue.uuid}`);
+                    // debug(`Received metadata for file: ${response.payload.fileName} (${response.payload.fileSize}) split into ${response.payload.totalChunks} chunks of ${response.payload.chunkSize} bytes.`);
+                    handleJSONChunk(response.payload);
+
                 } else if (response.code === 204) {
-                    // 204 - No Content: here signifies the end of a binary download
+                    // 204 - No Content: here signifies the end of a binary CoValue download
                     handleBinaryCoValue(
                         currentCoValue.uuid,
-                        receivedSize,
-                        totalSize,
-                        fileBlobs,
+                        receivedLength,
+                        contentLength,
+                        chunks,
                     );
-                    // reset for subsequent downloads
-                    fileName = "";
-                    fileBlobs = [];
-                    receivedSize = 0;
-                    totalSize = 0;
+                    resetVars();
+
+                } else if (response.code === 206) {
+                    // 206 - Partial Content: here signifies chunks from a binary CoValue download
+                    handleJSONChunk(response.payload);
                 }
             }
 
@@ -559,10 +559,6 @@
                 }
             }
 
-            let chunks = [];
-            let fileMetadata = null;
-            let contentLength = 0;
-            let receivedLength = 0;
             async function loadCoValueViaHTTP(uuid, isBinary) {
                 const url = getEndpoint(uuid, isBinary);
                 info(`Loading ${uuid} via ${url}...`);
@@ -583,12 +579,9 @@
                     }
 
                     const reader = response.body.getReader();
-                    contentLength = 0;
-                    receivedLength = 0;
-                    fileMetadata = null;
-                    chunks = [];
                     const decoder = new TextDecoder();
                     let buffer = '';
+                    resetVars();
 
                     while (true) {
                         const { done, value } = await reader.read();
@@ -607,7 +600,8 @@
                             buffer = buffer.slice(newlineIndex + 1);
 
                             if (jsonStr.trim()) {
-                                handleJSONChunk(jsonStr);
+                                const chunk = JSON.parse(jsonStr);
+                                handleJSONChunk(chunk);
                             }
                         }
 
@@ -629,14 +623,12 @@
                 }
             }
 
-            function handleJSONChunk(jsonStr) {
+            function handleJSONChunk(chunk) {
                 try {
-                    const chunk = JSON.parse(jsonStr);
-
                     switch (chunk.type) {
-                        case "metadata":
+                        case "start":
                             fileMetadata = chunk;
-                            // Pre-allocate a fixed array
+                            // Start of a stream. Allocate a fixed array.
                             chunks = new Array(chunk.totalChunks);
                             contentLength = chunk.fileSize;
                             debug(`Received metadata for file: ${chunk.fileName} (${chunk.fileSize}) split into ${chunk.totalChunks} chunks of ${chunk.chunkSize} bytes.`);
@@ -652,7 +644,7 @@
                             chunks[chunk.chunkIndex] = binaryData;
                             receivedLength += binaryData.byteLength;
 
-                            debug(`Received chunk: ${chunk.chunkIndex + 1}/${chunk.totalChunks} (with chunk size: ${chunk.size})`);
+                            debug(`Received chunk: ${chunk.chunkIndex + 1}/${fileMetadata.totalChunks} (with chunk size: ${binaryData.byteLength})`);
                             break;
 
                         case "end":
@@ -665,7 +657,7 @@
                             throw new Error(`Server error: ${chunk.message}`);
                     }
                 } catch (error) {
-                    console.error('Error processing chunk:', error, jsonStr);
+                    console.error('Error processing chunk:', error);
                     statusDiv.textContent = `Error processing stream data: ${error.message}`;
                 }
             }

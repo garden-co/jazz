@@ -123,11 +123,13 @@ const app = uWS.SSLApp({
                                 return;
                             }
 
+                            const fileName = `covalue-${payload.uuid}.zip`;
                             fileManager.chunkFileDownload(
                                 {
                                     uuid: payload.uuid,
                                     filePath,
                                     range: payload.range,
+                                    fileName
                                 },
                                 {
                                     type: "websocket",
