@@ -1,4 +1,9 @@
 const { getDefaultConfig, mergeConfig } = require("@react-native/metro-config");
+const path = require("path");
+
+// eslint-disable-next-line no-undef
+const projectRoot = __dirname;
+const workspaceRoot = path.resolve(projectRoot, "../..");
 
 /**
  * Metro configuration
@@ -6,6 +11,15 @@ const { getDefaultConfig, mergeConfig } = require("@react-native/metro-config");
  *
  * @type {import('@react-native/metro-config').MetroConfig}
  */
-const config = {};
+const config = {
+  resolver: {
+    nodeModulesPaths: [
+      path.resolve(projectRoot, "node_modules"),
+      path.resolve(workspaceRoot, "node_modules"),
+    ],
+    sourceExts: ["mjs", "js", "json", "ts", "tsx"],
+  },
+  watchFolders: [workspaceRoot],
+};
 
 module.exports = mergeConfig(getDefaultConfig(__dirname), config);
