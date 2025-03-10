@@ -397,6 +397,7 @@ export class BenchmarkStore {
         }
 
         const result = this.entries.reduce<Accumulator>((acc, entry) => {
+            // aggregate the total duration of streaming multiple chunks during a binary CoValue upload
             if (entry.method === "POST" && entry.path === "/covalue/binary") {
                 return entry.status === 200
                     ? { remaining: acc.remaining, aggregate: acc.aggregate + entry.duration }

@@ -251,13 +251,7 @@
 
                 } else if (response.code === 204) {
                     // 204 - No Content: here signifies the end of a binary CoValue download
-                    handleBinaryCoValue(
-                        currentCoValue.uuid,
-                        receivedLength,
-                        contentLength,
-                        chunks,
-                    );
-                    resetVars();
+                    handleJSONChunk(response.payload);
 
                 } else if (response.code === 206) {
                     // 206 - Partial Content: here signifies chunks from a binary CoValue download
@@ -581,19 +575,16 @@
                     const reader = response.body.getReader();
                     const decoder = new TextDecoder();
                     let buffer = '';
-                    resetVars();
 
                     while (true) {
                         const { done, value } = await reader.read();
                         if (done) {
-                            if (buffer.trim()) {
-                                processJsonChunk(buffer);
-                            }
                             break;
                         }
 
                         buffer += decoder.decode(value, { stream: true });
-                        // Process complete JSON objects in the buffer
+
+                        // Process '\n' delimited JSON chunks streamed by the server
                         let newlineIndex;
                         while ((newlineIndex = buffer.indexOf('\n')) !== -1) {
                             const jsonStr = buffer.slice(0, newlineIndex);
@@ -604,17 +595,8 @@
                                 handleJSONChunk(chunk);
                             }
                         }
-
-                        // debug(
-                        //     `Received (chunk: ${chunks.length}) ${receivedLength} of ${contentLength} bytes for: ${uuid}.`,
-                        // );
                     }
-                    handleBinaryCoValue(
-                        uuid,
-                        receivedLength,
-                        contentLength,
-                        chunks,
-                    );
+
                 } else {
                     const response = await fetch(url);
                     currentCoValue = await response.json();
@@ -644,12 +626,21 @@
                             chunks[chunk.chunkIndex] = binaryData;
                             receivedLength += binaryData.byteLength;
 
-                            debug(`Received chunk: ${chunk.chunkIndex + 1}/${fileMetadata.totalChunks} (with chunk size: ${binaryData.byteLength})`);
+                            debug(`Received chunk: ${chunk.chunkIndex + 1}/${fileMetadata.totalChunks} (with chunk size: ${binaryData.byteLength}) for ${fileMetadata.uuid}`);
                             break;
 
                         case "end":
                             // End of stream
                             debug(`File chunks received successfully.`);
+
+                            handleBinaryCoValue(
+                                currentCoValue.uuid,
+                                receivedLength,
+                                contentLength,
+                                chunks,
+                            );
+
+                            resetVars();
                             break;
 
                         case "error":
