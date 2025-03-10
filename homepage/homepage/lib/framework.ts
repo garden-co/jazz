@@ -3,6 +3,7 @@ export enum Framework {
   ReactNative = "react-native",
   Vue = "vue",
   Svelte = "svelte",
+  Vanilla = "vanilla",
 }
 
 export const frameworks = Object.values(Framework);

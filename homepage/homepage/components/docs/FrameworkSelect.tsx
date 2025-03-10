@@ -28,6 +28,10 @@ const frameworks: Record<
     label: "React Native",
     experimental: false,
   },
+  [Framework.Vanilla]: {
+    label: "VanillaJS",
+    experimental: false,
+  },
   [Framework.Svelte]: {
     label: "Svelte",
     experimental: true,
