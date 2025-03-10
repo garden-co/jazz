@@ -20,7 +20,7 @@ export function DocNav({ className }: { className?: string }) {
           if (!item.href?.startsWith("/docs")) return item;
 
           let done =
-            typeof item.done === "number" ? item.done : item.done[framework];
+            typeof item.done === "number" ? item.done : (item.done[framework] || 0);
           let href = item.href.replace("/docs", `/docs/${framework}`);
 
           return {
