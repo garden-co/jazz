@@ -2,7 +2,7 @@ import * as SecureStore from "expo-secure-store";
 import type { KvStore } from "jazz-react-native-core";
 
 export class ExpoSecureStoreAdapter implements KvStore {
-  get(key: string): Promise<string | null> {
+  async get(key: string): Promise<string | null> {
     return SecureStore.getItemAsync(key, {
       requireAuthentication: false,
       keychainAccessible: SecureStore.AFTER_FIRST_UNLOCK,
