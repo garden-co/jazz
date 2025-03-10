@@ -164,7 +164,7 @@ export class CloudAuth {
   }
 
   onUserChange = async (session: Pick<Session, "user">) => {
-    if (!session.user) return;
+    if (!session || !session.user) return;
     const isAuthenticated = this.authSecretStorage.isAuthenticated;
     if (!isAuthenticated) return;
   };

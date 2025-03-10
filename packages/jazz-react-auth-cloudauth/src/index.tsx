@@ -72,7 +72,7 @@ export const CloudAuthBasicUI = (props: {
 
   if (auth.state === "signedIn") return props.children ?? null;
 
-  const { authClient } = auth;
+  const { logIn, signIn, authClient } = auth;
 
   return (
     <div
@@ -105,9 +105,9 @@ export const CloudAuthBasicUI = (props: {
         }}
         onSubmit={async (e) => {
           const eventSubmitter =
-            (e.nativeEvent as SubmitEvent).submitter?.title ?? "";
+            (e.nativeEvent as SubmitEvent).submitter?.id ?? "";
           e.preventDefault();
-          if (eventSubmitter == "Sign up") {
+          if (eventSubmitter == "sign-up") {
             await authClient.signUp.email({
               email,
               password,
@@ -115,11 +115,15 @@ export const CloudAuthBasicUI = (props: {
               accountID: "",
               accountSecret: "",
             });
-          } else if (eventSubmitter == "Sign in") {
+            const session = (await authClient.getSession()).data;
+            if (session) await signIn(session);
+          } else if (eventSubmitter == "sign-in") {
             await authClient.signIn.email({
               email,
               password,
             });
+            const session = (await authClient.getSession()).data;
+            if (session) await signIn(session);
           }
         }}
       >
@@ -165,6 +169,7 @@ export const CloudAuthBasicUI = (props: {
         <input
           type="submit"
           value="Sign up"
+          id="sign-up"
           style={{
             padding: "13px 5px",
             border: "none",
@@ -177,6 +182,7 @@ export const CloudAuthBasicUI = (props: {
         <input
           type="submit"
           value="Sign in"
+          id="sign-in"
           style={{
             padding: "13px 5px",
             border: "none",
