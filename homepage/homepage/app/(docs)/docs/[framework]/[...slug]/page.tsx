@@ -7,10 +7,12 @@ import type { Toc } from "@stefanprobst/rehype-extract-toc";
 import { Prose } from "gcmp-design-system/src/app/components/molecules/Prose";
 
 async function getMdxSource(slugPath: string, framework: string) {
+  // Try to import the framework-specific file first
   try {
-    return await import(`./${slugPath}.mdx`);
-  } catch (error) {
     return await import(`./${slugPath}/${framework}.mdx`);
+  } catch (error) {
+    // Fallback to vanilla
+    return await import(`./${slugPath}.mdx`);
   }
 }
 
