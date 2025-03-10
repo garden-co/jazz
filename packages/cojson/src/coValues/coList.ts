@@ -381,7 +381,7 @@ export class RawCoListView<
 
   /** @category 3. Subscription */
   subscribe(listener: (coList: this) => void): () => void {
-    return this.core.subscribe((content) => {
+    return this.core.subscribeToContent((content) => {
       listener(content as this);
     });
   }

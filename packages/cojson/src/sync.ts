@@ -1,6 +1,4 @@
 import { ValueType, metrics } from "@opentelemetry/api";
-import { PeerState } from "./PeerState.js";
-import { SyncStateManager } from "./SyncStateManager.js";
 import { CoValueHeader, Transaction } from "./coValueCore.js";
 import { CoValueCore } from "./coValueCore.js";
 import { Signature } from "./crypto/crypto.js";
@@ -113,13 +111,8 @@ export function combinedKnownStates(
 }
 
 export class SyncManager {
-  peers: { [key: PeerID]: PeerState } = {};
+  peers: { [key: PeerID]: Peer } = {};
   local: LocalNode;
-  requestedSyncs: {
-    [id: RawCoID]:
-      | { done: Promise<void>; nRequestsThisTick: number }
-      | undefined;
-  } = {};
 
   peersCounter = metrics.getMeter("cojson").createUpDownCounter("jazz.peers", {
     description: "Amount of connected peers",
@@ -129,12 +122,9 @@ export class SyncManager {
 
   constructor(local: LocalNode) {
     this.local = local;
-    this.syncState = new SyncStateManager(this);
   }
 
-  syncState: SyncStateManager;
-
-  peersInPriorityOrder(): PeerState[] {
+  peersInPriorityOrder(): Peer[] {
     return Object.values(this.peers).sort((a, b) => {
       const aPriority = a.priority || 0;
       const bPriority = b.priority || 0;
@@ -143,23 +133,19 @@ export class SyncManager {
     });
   }
 
-  getPeers(): PeerState[] {
+  getPeers(): Peer[] {
     return Object.values(this.peers);
   }
 
-  getServerAndStoragePeers(excludePeerId?: PeerID): PeerState[] {
+  getServerAndStoragePeers(excludePeerId?: PeerID): Peer[] {
     return this.peersInPriorityOrder().filter(
-      (peer) => peer.isServerOrStoragePeer() && peer.id !== excludePeerId,
+      (peer) =>
+        (peer.role === "server" || peer.role === "storage") &&
+        peer.id !== excludePeerId,
     );
   }
 
-  async handleSyncMessage(msg: SyncMessage, peer: PeerState) {
-    if (peer.erroredCoValues.has(msg.id)) {
-      logger.warn(
-        `Skipping message ${msg.action} on errored coValue ${msg.id} from peer ${peer.id}`,
-      );
-      return;
-    }
+  async handleSyncMessage(msg: SyncMessage, peer: Peer) {
     // TODO: validate
     switch (msg.action) {
       case "load":
@@ -183,7 +169,7 @@ export class SyncManager {
   }
 
   async subscribeToIncludingDependencies(id: RawCoID, peer: PeerState) {
-    const entry = this.local.coValuesStore.get(id);
+    const entry = this.local.coValuesStore.getOrCreateEmpty(id);
 
     if (entry.state.type !== "available") {
       entry.loadFromPeers([peer]).catch((e: unknown) => {
@@ -392,7 +378,7 @@ export class SyncManager {
       id: msg.id,
       value: knownStateIn(msg),
     });
-    const entry = this.local.coValuesStore.get(msg.id);
+    const entry = this.local.coValuesStore.getOrCreateEmpty(msg.id);
 
     if (entry.state.type === "unknown" || entry.state.type === "unavailable") {
       const eligiblePeers = this.getServerAndStoragePeers(peer.id);
@@ -458,7 +444,7 @@ export class SyncManager {
   }
 
   async handleKnownState(msg: KnownStateMessage, peer: PeerState) {
-    const entry = this.local.coValuesStore.get(msg.id);
+    const entry = this.local.coValuesStore.getOrCreateEmpty(msg.id);
 
     peer.dispatchToKnownStates({
       type: "COMBINE_WITH",
@@ -468,7 +454,7 @@ export class SyncManager {
 
     if (entry.state.type === "unknown" || entry.state.type === "unavailable") {
       if (msg.asDependencyOf) {
-        const dependencyEntry = this.local.coValuesStore.get(
+        const dependencyEntry = this.local.coValuesStore.getOrCreateEmpty(
           msg.asDependencyOf,
         );
 
@@ -513,7 +499,7 @@ export class SyncManager {
   }
 
   async handleNewContent(msg: NewContentMessage, peer: PeerState) {
-    const entry = this.local.coValuesStore.get(msg.id);
+    const entry = this.local.coValuesStore.getOrCreateEmpty(msg.id);
 
     let coValue: CoValueCore;
 
@@ -780,7 +766,7 @@ export class SyncManager {
   }
 }
 
-function knownStateIn(msg: LoadMessage | KnownStateMessage) {
+export function knownStateIn(msg: LoadMessage | KnownStateMessage) {
   return {
     id: msg.id,
     header: msg.header,

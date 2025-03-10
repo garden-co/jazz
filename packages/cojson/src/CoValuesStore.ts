@@ -1,27 +1,35 @@
 import { CoValueCore } from "./coValueCore.js";
-import { CoValueState } from "./coValueState.js";
 import { RawCoID } from "./ids.js";
+import { LocalNode } from "./localNode.js";
 
 export class CoValuesStore {
-  coValues = new Map<RawCoID, CoValueState>();
+  node: LocalNode;
+  coValues = new Map<RawCoID, CoValueCore>();
 
-  get(id: RawCoID) {
+  constructor(node: LocalNode) {
+    this.node = node;
+  }
+
+  getIfExists(id: RawCoID) {
+    return this.coValues.get(id);
+  }
+
+  getOrCreateEmpty(id: RawCoID) {
     let entry = this.coValues.get(id);
 
     if (!entry) {
-      entry = CoValueState.Unknown(id);
+      entry = new CoValueCore(id, undefined, this.node);
       this.coValues.set(id, entry);
     }
 
     return entry;
   }
 
-  setAsAvailable(id: RawCoID, coValue: CoValueCore) {
-    const entry = this.get(id);
-    entry.dispatch({
-      type: "available",
-      coValue,
-    });
+  setExpectNonExisting(id: RawCoID, coValue: CoValueCore) {
+    if (this.coValues.has(id)) {
+      throw new Error("CoValue already exists");
+    }
+    this.coValues.set(id, coValue);
   }
 
   getEntries() {

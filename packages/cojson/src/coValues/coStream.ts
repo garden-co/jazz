@@ -258,7 +258,7 @@ export class RawCoStreamView<
   }
 
   subscribe(listener: (coStream: this) => void): () => void {
-    return this.core.subscribe((content) => {
+    return this.core.subscribeToContent((content) => {
       listener(content as this);
     });
   }
