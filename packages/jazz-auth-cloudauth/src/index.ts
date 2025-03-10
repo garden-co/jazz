@@ -124,7 +124,7 @@ export class CloudAuth {
   static async getAndMergeKey(
     k0: Uint8Array,
     authClient: AuthClient,
-    credentials: AuthCredentials,
+    accountID: ID<Account>,
     keyserver: string,
   ) {
     let jwt = "";
@@ -136,7 +136,7 @@ export class CloudAuth {
       },
     });
     const response = await fetch(
-      `${keyserver}/api/key-shard/${credentials.accountID}/${jwt}`,
+      `${keyserver}/api/key-shard/${accountID}/${jwt}`,
       {
         method: "GET",
         headers: {
@@ -150,13 +150,31 @@ export class CloudAuth {
     return await CloudAuth.combineKeyShards(k0, data);
   }
 
-  static loadAuthData(
+  // Uses Better Auth session data & keyserver to set auth data locally
+  static async loadAuthData(
     session: Pick<Session, "user">,
     storage: AuthSecretStorage,
+    authClient: AuthClient,
+    keyserver: string,
   ) {
+    const wasmCrypto = await WasmCrypto.create();
+    const accountID = session.user.accountID as ID<Account>;
+    const oldAccountSecret = session.user.accountSecret as AgentSecret;
+    const k0 = wasmCrypto.signerSecretToBytes(
+      wasmCrypto.getAgentSignerSecret(oldAccountSecret),
+    );
+    const signerSecret = await CloudAuth.getAndMergeKey(
+      k0,
+      authClient,
+      accountID,
+      keyserver,
+    );
+    const sealerSecret = wasmCrypto.getAgentSealerSecret(oldAccountSecret);
+    const accountSecret = `${sealerSecret}/${signerSecret}` as AgentSecret;
+    console.log(`Setting account secret: ${accountSecret}`);
     return storage.set({
       accountID: session.user.accountID as ID<Account>,
-      accountSecret: session.user.accountSecret as AgentSecret,
+      accountSecret: accountSecret as AgentSecret,
       secretSeed: session.user.secretSeed
         ? Uint8Array.from(base58.decode(session.user.secretSeed))
         : undefined,
@@ -172,25 +190,49 @@ export class CloudAuth {
 
   logIn = async (session: Pick<Session, "user">) => {
     if (!session.user) throw new Error("Not signed in");
+
+    // Merge Better Auth and keyserver keys, then authenticate
+    const wasmCrypto = await WasmCrypto.create();
+    const accountID = session.user.accountID as ID<Account>;
+    const oldAccountSecret = session.user.accountSecret as AgentSecret;
+    const k0 = wasmCrypto.signerSecretToBytes(
+      wasmCrypto.getAgentSignerSecret(oldAccountSecret),
+    );
+    const signerSecret = await CloudAuth.getAndMergeKey(
+      k0,
+      this.authClient,
+      accountID,
+      this.keyserver,
+    );
+    const sealerSecret = wasmCrypto.getAgentSealerSecret(oldAccountSecret);
+    const accountSecret = `${sealerSecret}/${signerSecret}` as AgentSecret;
     const credentials = {
       accountID: session.user.accountID as ID<Account>,
-      accountSecret: session.user.accountSecret as AgentSecret,
+      accountSecret: accountSecret,
       secretSeed: session.user.secretSeed
         ? Uint8Array.from(base58.decode(session.user.secretSeed))
         : undefined,
       provider: session.user.provider ? session.user.provider : "",
     } satisfies AuthCredentials;
     await this.authenticate(credentials);
-    await CloudAuth.loadAuthData(session, this.authSecretStorage);
+
+    await CloudAuth.loadAuthData(
+      session,
+      this.authSecretStorage,
+      this.authClient,
+      this.keyserver,
+    );
   };
 
   signIn = async (session: Pick<Session, "user">) => {
     const credentials = await this.authSecretStorage.get();
     if (!credentials) throw new Error("No credentials found");
+    console.log(`Sign in credentials: ${credentials}`);
     const jazzAccountSeed = credentials.secretSeed
       ? Array.from(credentials.secretSeed)
       : undefined;
 
+    // Split key, store one shard in Better Auth, other shard in keyserver
     const wasmCrypto = await WasmCrypto.create();
     const k0 = await CloudAuth.splitAndSendKey(credentials, this.keyserver);
     const signerSecret = wasmCrypto.signerSecretFromBytes(k0);
@@ -198,6 +240,7 @@ export class CloudAuth {
       credentials.accountSecret,
     );
     const accountSecret = `${sealerSecret}/${signerSecret}`;
+
     await this.authClient.updateUser({
       accountID: credentials.accountID,
       accountSecret: accountSecret,
@@ -211,6 +254,11 @@ export class CloudAuth {
       profile: {},
     });
     currentAccount.profile.name = session.user.name;
-    await CloudAuth.loadAuthData(session, this.authSecretStorage);
+    await CloudAuth.loadAuthData(
+      session,
+      this.authSecretStorage,
+      this.authClient,
+      this.keyserver,
+    );
   };
 }
