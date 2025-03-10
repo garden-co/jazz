@@ -1,10 +1,8 @@
-import { randomBytes } from "crypto";
 import { createAuthClient } from "better-auth/client";
 import { inferAdditionalFields } from "better-auth/client/plugins";
 import { AgentSecret } from "cojson";
 import { WasmCrypto } from "cojson/crypto/WasmCrypto";
 import { SignerSecret } from "cojson/src/crypto/crypto.js";
-import { JsonArray, JsonObject } from "cojson/src/jsonValue.js";
 import { Account } from "../coValues/account.js";
 import { ID } from "../internal.js";
 import { AuthCredentials, AuthenticateAccountFunction } from "../types.js";
@@ -56,7 +54,8 @@ export class CloudAuth {
       credentials.accountSecret,
     );
     const keyBytes = wasmCrypto.signerSecretToBytes(signerSecret);
-    const k1 = randomBytes(keyBytes.length);
+    const k1 = new Uint8Array(keyBytes.length);
+    window.crypto.getRandomValues(k1);
     const k0 = new Uint8Array(keyBytes.length);
     for (let i = 0; i < keyBytes.length; i++) {
       const kByte = keyBytes[i];
@@ -82,6 +81,8 @@ export class CloudAuth {
     return wasmCrypto.signerSecretFromBytes(k);
   }
 
+  // Splits key into k0 and k1
+  // k1 gets stored in the key server, k0 gets stored in Better Auth
   static async splitAndSendKey(
     credentials: AuthCredentials,
     keyserver: string,
@@ -185,12 +186,16 @@ export class CloudAuth {
     const jazzAccountSeed = credentials.secretSeed
       ? Array.from(credentials.secretSeed)
       : undefined;
+
+    const wasmCrypto = await WasmCrypto.create();
+    const k0 = await CloudAuth.splitAndSendKey(credentials, this.keyserver);
     await this.authClient.updateUser({
       accountID: credentials.accountID,
-      accountSecret: credentials.accountSecret,
+      accountSecret: wasmCrypto.signerSecretFromBytes(k0),
       secretSeed: jazzAccountSeed,
       provider: credentials.provider,
     });
+
     const currentAccount = await Account.getMe().ensureLoaded({
       profile: {},
     });

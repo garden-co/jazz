@@ -16,6 +16,7 @@
     }
   },
   "dependencies": {
+    "better-auth": "^1.2.2",
     "cojson": "workspace:*",
     "jazz-tools": "workspace:*"
   },
