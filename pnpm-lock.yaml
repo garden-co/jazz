@@ -483,6 +483,9 @@ importers:
       jazz-react:
         specifier: workspace:*
         version: link:../../packages/jazz-react
+      jazz-react-auth-cloudauth:
+        specifier: workspace:*
+        version: link:../../packages/jazz-react-auth-cloudauth
       jazz-tools:
         specifier: workspace:*
         version: link:../../packages/jazz-tools
@@ -1605,6 +1608,22 @@ importers:
         specifier: ~5.6.2
         version: 5.6.3
 
+  packages/jazz-auth-cloudauth:
+    dependencies:
+      cojson:
+        specifier: workspace:0.10.15
+        version: link:../cojson
+      jazz-browser:
+        specifier: workspace:0.10.15
+        version: link:../jazz-browser
+      jazz-tools:
+        specifier: workspace:0.10.15
+        version: link:../jazz-tools
+    devDependencies:
+      typescript:
+        specifier: ~5.6.2
+        version: 5.6.3
+
   packages/jazz-browser:
     dependencies:
       cojson:
@@ -1753,6 +1772,37 @@ importers:
       jazz-auth-clerk:
         specifier: workspace:*
         version: link:../jazz-auth-clerk
+      jazz-browser:
+        specifier: workspace:*
+        version: link:../jazz-browser
+      jazz-react:
+        specifier: workspace:*
+        version: link:../jazz-react
+      jazz-tools:
+        specifier: workspace:*
+        version: link:../jazz-tools
+      react:
+        specifier: 18.3.1
+        version: 18.3.1
+    devDependencies:
+      '@testing-library/react':
+        specifier: ^16.1.0
+        version: 16.1.0(@testing-library/dom@10.4.0)(@types/react-dom@18.3.5(@types/react@18.3.18))(@types/react@18.3.18)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
+      '@types/react':
+        specifier: ^18.3.12
+        version: 18.3.18
+      typescript:
+        specifier: ~5.6.2
+        version: 5.6.3
+
+  packages/jazz-react-auth-cloudauth:
+    dependencies:
+      cojson:
+        specifier: workspace:*
+        version: link:../cojson
+      jazz-auth-cloudauth:
+        specifier: workspace:*
+        version: link:../jazz-auth-cloudauth
       jazz-browser:
         specifier: workspace:*
         version: link:../jazz-browser
@@ -2021,15 +2071,9 @@ importers:
 
   packages/jazz-tools:
     dependencies:
-      '@better-auth/expo':
-        specifier: ^1.2.3
-        version: 1.2.3(better-auth@1.2.2(typescript@5.6.3))
       '@scure/bip39':
         specifier: ^1.3.0
         version: 1.5.0
-      better-auth:
-        specifier: ^1.2.2
-        version: 1.2.2(typescript@5.6.3)
       cojson:
         specifier: workspace:*
         version: link:../cojson
@@ -3113,11 +3157,6 @@ packages:
   '@bcoe/v8-coverage@1.0.2':
     resolution: {integrity: sha512-6zABk/ECA/QYSCQ1NGiVwwbQerUCZ+TQbp64Q3AgmfNvurHH0j8TtXa1qbShXA6qqkpAj4V5W8pP6mLe1mcMqA==}
     engines: {node: '>=18'}
-
-  '@better-auth/expo@1.2.3':
-    resolution: {integrity: sha512-zhotvNpE9uDluj0IUedcz8VfkDNqLTViAAo5iKOZe6kspJjEU5Gjg0nyT8yWuyzJBQ+vXCd7Yya/gT4lTFMrfg==}
-    peerDependencies:
-      better-auth: 1.2.3
 
   '@better-auth/utils@0.2.3':
     resolution: {integrity: sha512-Ap1GaSmo6JYhJhxJOpUB0HobkKPTNzfta+bLV89HfpyCAHN7p8ntCrmNFHNAVD0F6v0mywFVEUg1FUhNCc81Rw==}
@@ -12951,12 +12990,6 @@ snapshots:
   '@bcoe/v8-coverage@0.2.3': {}
 
   '@bcoe/v8-coverage@1.0.2': {}
-
-  '@better-auth/expo@1.2.3(better-auth@1.2.2(typescript@5.6.3))':
-    dependencies:
-      better-auth: 1.2.2(typescript@5.6.3)
-      better-call: 1.0.4
-      zod: 3.24.1
 
   '@better-auth/utils@0.2.3':
     dependencies:

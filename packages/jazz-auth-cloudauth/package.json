@@ -1,0 +1,24 @@
+{
+  "name": "jazz-auth-cloudauth",
+  "version": "0.0.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "src/index.ts",
+  "license": "MIT",
+  "dependencies": {
+    "cojson": "workspace:0.10.15",
+    "jazz-browser": "workspace:0.10.15",
+    "jazz-tools": "workspace:0.10.15"
+  },
+  "scripts": {
+    "format-and-lint": "biome check .",
+    "format-and-lint:fix": "biome check . --write",
+    "build": "rm -rf ./dist && tsc --sourceMap --outDir dist",
+    "prepublishOnly": "npm run build",
+    "test": "vitest --run --root ../../ --project jazz-auth-cloudauth",
+    "test:watch": "vitest --watch --root ../../ --project jazz-auth-cloudauth"
+  },
+  "devDependencies": {
+    "typescript": "~5.6.2"
+  }
+}

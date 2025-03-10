@@ -60,12 +60,6 @@ export { KvStoreContext, type KvStore } from "./auth/KvStoreContext.js";
 export { InMemoryKVStore } from "./auth/InMemoryKVStore.js";
 export { DemoAuth } from "./auth/DemoAuth.js";
 export { PassphraseAuth } from "./auth/PassphraseAuth.js";
-export {
-  CloudAuth,
-  type AuthClient,
-  type Session,
-  newAuthClient,
-} from "./auth/CloudAuth.js";
 
 export {
   createInviteLink,

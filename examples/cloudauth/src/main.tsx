@@ -1,4 +1,5 @@
-import { CloudAuthBasicUI, JazzProvider } from "jazz-react";
+import { JazzProvider } from "jazz-react";
+import { CloudAuthBasicUI } from "jazz-react-auth-cloudauth";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import App from "./App";

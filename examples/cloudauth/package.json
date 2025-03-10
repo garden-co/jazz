@@ -13,6 +13,7 @@
   "dependencies": {
     "jazz-react": "workspace:*",
     "jazz-tools": "workspace:*",
+    "jazz-react-auth-cloudauth": "workspace:*",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },

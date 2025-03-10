@@ -3,10 +3,13 @@ import { inferAdditionalFields } from "better-auth/client/plugins";
 import { AgentSecret } from "cojson";
 import { WasmCrypto } from "cojson/crypto/WasmCrypto";
 import { SignerSecret } from "cojson/src/crypto/crypto.js";
-import { Account } from "../coValues/account.js";
-import { ID } from "../internal.js";
-import { AuthCredentials, AuthenticateAccountFunction } from "../types.js";
-import { AuthSecretStorage } from "./AuthSecretStorage.js";
+import {
+  Account,
+  AuthCredentials,
+  AuthSecretStorage,
+  AuthenticateAccountFunction,
+  ID,
+} from "jazz-tools";
 
 export const newAuthClient = (baseUrl: string) =>
   createAuthClient({
