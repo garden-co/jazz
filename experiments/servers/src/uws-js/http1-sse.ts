@@ -102,7 +102,7 @@ app.get("/covalue/:uuid/binary", trackRequest("GET", "/covalue/:uuid/binary", (r
         return;
     }
 
-    const fileName = `covalue-${uuid}.zip`;
+    const fileName = covalue.url?.name === "sample.zip" ? `covalue-${uuid}.zip` : covalue.url?.name;
     const headers: Record<string, string> = {
         "Content-Type": "application/json",
         "Content-Disposition": `attachment; filename="${fileName}"`,

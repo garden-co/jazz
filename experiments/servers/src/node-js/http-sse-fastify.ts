@@ -130,7 +130,7 @@ async function routes(fastify: FastifyInstance, options = {}) {
             return reply.status(404).send({ m: "CoValue binary file not found" });
         }
 
-        const fileName = `covalue-${uuid}.zip`;
+        const fileName = covalue.url?.name === "sample.zip" ? `covalue-${uuid}.zip` : covalue.url?.name;
         const headers: Record<string, string> = {
             "Content-Type": "application/json",
             "Content-Disposition": `attachment; filename="${fileName}"`,

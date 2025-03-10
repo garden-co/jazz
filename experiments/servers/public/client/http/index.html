@@ -91,6 +91,7 @@
             const SERVER_WSS = `wss://${SERVER}`;
             const SERVER_WEB = `https://${SERVER}`;
             const SERVER_API = `${SERVER_WEB}/covalue`;
+            const CHUNK_SIZE = 100 * 1024; // 100 KB chunks
             const messageLog = document.getElementById("messageLog");
             const coValueSelect = document.getElementById("coValueSelect");
             const statusDiv = document.getElementById("status");
@@ -405,6 +406,24 @@
                         },
                     );
                     codeElement.innerHTML = JSON.stringify(copy, null, 5);
+
+                    const blob = new Blob([coValue.file.bindata], { type: "application/octet-stream" });
+                    const url = URL.createObjectURL(blob);
+
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = coValue.file.name;
+                    a.textContent = `Download CoValue: ${coValue.uuid} (${coValue.file.name})`;
+                    a.style.display = 'block';
+                    messageElement.appendChild(a);
+                    a.click();
+
+                    // Clean up
+                    setTimeout(() => {
+                        messageElement.removeChild(a);
+                        URL.revokeObjectURL(url);
+                    }, 7000);
+
                 } else {
                     codeElement.innerHTML = JSON.stringify(coValue, null, 5);
                 }
@@ -622,7 +641,7 @@
                                 throw new Error("Received file chunk before file metadata");
                             }
 
-                            const binaryData = base64ToArrayBuffer(chunk.data);
+                            const binaryData = base64ToUint8Array(chunk.data);
                             chunks[chunk.chunkIndex] = binaryData;
                             receivedLength += binaryData.byteLength;
 
@@ -631,6 +650,9 @@
 
                         case "end":
                             // End of stream
+                            if (chunks.some(chunk => chunk === null)) {
+                                throw new Error(`Some chunks are missing for CoValue ${fileMetadata.uuid}`);
+                            }
                             debug(`File chunks received successfully.`);
 
                             handleBinaryCoValue(
@@ -671,7 +693,7 @@
                     currentCoValue = { uuid: uuid };
                 }
                 currentCoValue.file = {
-                    name: `${currentCoValue.uuid}.bin`,
+                    name: fileMetadata.fileName,
                     size: contentLength,
                     note: "** 50MB binary **",
                     bindata: binaryData,
@@ -781,16 +803,15 @@
             }
 
             async function createCoValueBinary(url = "", coValue = {}, file) {
-                const chunkSize = 100 * 1024; // 100KB chunks
-                const totalChunks = Math.ceil(file.size / chunkSize);
+                const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
 
                 for (
                     let chunkIndex = 0;
                     chunkIndex < totalChunks;
                     chunkIndex++
                 ) {
-                    const start = chunkIndex * chunkSize;
-                    const end = Math.min(file.size, start + chunkSize);
+                    const start = chunkIndex * CHUNK_SIZE;
+                    const end = Math.min(file.size, start + CHUNK_SIZE);
                     const chunk = file.slice(start, end);
                     const base64Chunk = await base64EncodeChunk(chunk);
                     const payload = {
@@ -944,9 +965,8 @@
             }
 
             function generateBinaryData() {
-                const chunkSize = 100 * 1024; // 100 KB
-                const binaryData = new Uint8Array(chunkSize);
-                for (let i = 0; i < chunkSize; i++) {
+                const binaryData = new Uint8Array(CHUNK_SIZE);
+                for (let i = 0; i < CHUNK_SIZE; i++) {
                     binaryData[i] = Math.floor(Math.random() * 256);
                 }
                 return new Blob([binaryData], {
@@ -969,13 +989,13 @@
                 });
             }
 
-            function base64ToArrayBuffer(base64) {
+            function base64ToUint8Array(base64) {
                 const binaryString = atob(base64);
                 const bytes = new Uint8Array(binaryString.length);
                 for (let i = 0; i < binaryString.length; i++) {
                     bytes[i] = binaryString.charCodeAt(i);
                 }
-                return bytes.buffer;
+                return bytes;
             }
 
             // Load CoValue UUIDs or subscribe to SSE on page load

@@ -120,7 +120,7 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
                                 return;
                             }
 
-                            const fileName = `covalue-${payload.uuid}.zip`;
+                            const fileName = covalue.url?.name === "sample.zip" ? `covalue-${payload.uuid}.zip` : covalue.url?.name;
                             await fileManager.chunkFileDownload(
                                 {
                                     uuid: payload.uuid,

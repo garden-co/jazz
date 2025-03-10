@@ -123,7 +123,7 @@ const app = uWS.SSLApp({
                                 return;
                             }
 
-                            const fileName = `covalue-${payload.uuid}.zip`;
+                            const fileName = covalue.url?.name === "sample.zip" ? `covalue-${payload.uuid}.zip` : covalue.url?.name;
                             fileManager.chunkFileDownload(
                                 {
                                     uuid: payload.uuid,
