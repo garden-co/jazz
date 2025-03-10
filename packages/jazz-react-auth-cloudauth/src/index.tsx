@@ -123,7 +123,7 @@ export const CloudAuthBasicUI = (props: {
               password,
             });
             const session = (await authClient.getSession()).data;
-            if (session) await signIn(session);
+            if (session) await logIn(session);
           }
         }}
       >

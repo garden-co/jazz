@@ -1,3 +1,4 @@
+import { base58 } from "@scure/base";
 import { createAuthClient } from "better-auth/client";
 import { inferAdditionalFields } from "better-auth/client/plugins";
 import { AgentSecret } from "cojson";
@@ -22,7 +23,7 @@ export const newAuthClient = (baseUrl: string) =>
             required: true,
           },
           secretSeed: {
-            type: "number[]",
+            type: "string",
             required: false,
           },
           accountSecret: {
@@ -157,7 +158,7 @@ export class CloudAuth {
       accountID: session.user.accountID as ID<Account>,
       accountSecret: session.user.accountSecret as AgentSecret,
       secretSeed: session.user.secretSeed
-        ? Uint8Array.from(session.user.secretSeed)
+        ? Uint8Array.from(base58.decode(session.user.secretSeed))
         : undefined,
       provider: session.user.provider ? session.user.provider : "",
     });
@@ -175,7 +176,7 @@ export class CloudAuth {
       accountID: session.user.accountID as ID<Account>,
       accountSecret: session.user.accountSecret as AgentSecret,
       secretSeed: session.user.secretSeed
-        ? Uint8Array.from(session.user.secretSeed)
+        ? Uint8Array.from(base58.decode(session.user.secretSeed))
         : undefined,
       provider: session.user.provider ? session.user.provider : "",
     } satisfies AuthCredentials;
@@ -192,10 +193,17 @@ export class CloudAuth {
 
     const wasmCrypto = await WasmCrypto.create();
     const k0 = await CloudAuth.splitAndSendKey(credentials, this.keyserver);
+    const signerSecret = wasmCrypto.signerSecretFromBytes(k0);
+    const sealerSecret = wasmCrypto.getAgentSealerSecret(
+      credentials.accountSecret,
+    );
+    const accountSecret = `${sealerSecret}/${signerSecret}`;
     await this.authClient.updateUser({
       accountID: credentials.accountID,
-      accountSecret: wasmCrypto.signerSecretFromBytes(k0),
-      secretSeed: jazzAccountSeed,
+      accountSecret: accountSecret,
+      secretSeed: jazzAccountSeed
+        ? base58.encode(Uint8Array.from(jazzAccountSeed))
+        : undefined,
       provider: credentials.provider,
     });
 
