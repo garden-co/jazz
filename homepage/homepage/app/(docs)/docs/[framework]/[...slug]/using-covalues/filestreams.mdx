@@ -154,12 +154,12 @@ const partialBlob = await FileStream.loadAsBlob(fileStreamId, {
 
 ### Checking Completion Status
 
-Check if a `FileStream` is fully uploaded:
+Check if a `FileStream` is fully synced:
 
 <CodeGroup>
 ```ts
 if (fileStream.isBinaryStreamEnded()) {
-  console.log('File is completely uploaded');
+  console.log('File is completely synced');
 } else {
   console.log('File upload is still in progress');
 }
