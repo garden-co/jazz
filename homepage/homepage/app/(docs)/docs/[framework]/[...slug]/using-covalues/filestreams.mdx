@@ -32,19 +32,6 @@ class Document extends CoMap {
 
 There are two main ways to create FileStreams: creating empty ones for manual data population or creating directly from existing files or blobs.
 
-### Creating Empty FileStreams
-
-Create an empty FileStream when you want to manually [add binary data in chunks](/docs/using-covalues/filestreams#writing-to-filestreams):
-
-<CodeGroup>
-```ts
-import { FileStream } from "jazz-tools";
-
-// Create a new empty FileStream
-const fileStream = FileStream.create();
-```
-</CodeGroup>
-
 ### Creating from Blobs and Files
 
 For files from input elements or drag-and-drop interfaces, use `createFromBlob`:
@@ -70,6 +57,19 @@ fileInput.addEventListener('change', async () => {
     });
   }
 });
+```
+</CodeGroup>
+
+### Creating Empty FileStreams
+
+Create an empty FileStream when you want to manually [add binary data in chunks](/docs/using-covalues/filestreams#writing-to-filestreams):
+
+<CodeGroup>
+```ts
+import { FileStream } from "jazz-tools";
+
+// Create a new empty FileStream
+const fileStream = FileStream.create();
 ```
 </CodeGroup>
 
