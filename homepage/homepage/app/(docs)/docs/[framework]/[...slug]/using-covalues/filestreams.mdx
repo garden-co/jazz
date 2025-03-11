@@ -75,7 +75,7 @@ const fileStream = FileStream.create();
 
 ## Reading from FileStreams
 
-FileStreams provide several ways to access their binary content, from raw chunks to convenient Blob objects.
+`FileStream`s provide several ways to access their binary content, from raw chunks to convenient Blob objects.
 
 ### Getting Raw Data Chunks
 
@@ -101,7 +101,7 @@ if (fileData) {
 ```
 </CodeGroup>
 
-By default, `getChunks()` only returns data for completed uploads. For in-progress uploads, use the `allowUnfinished` option:
+By default, `getChunks()` only returns data for completely synced `FileStream`s. To start using chunks from a `FileStream` that's currently still being synced use the `allowUnfinished` option:
 
 <CodeGroup>
 ```ts
@@ -137,7 +137,7 @@ if (blob) {
 
 ### Loading FileStreams as Blobs
 
-You can directly load a FileStream as a Blob when you only have its ID:
+You can directly load a `FileStream` as a `Blob` when you only have its ID:
 
 <CodeGroup>
 ```ts
@@ -154,7 +154,7 @@ const partialBlob = await FileStream.loadAsBlob(fileStreamId, {
 
 ### Checking Completion Status
 
-Check if a FileStream is fully uploaded:
+Check if a `FileStream` is fully uploaded:
 
 <CodeGroup>
 ```ts
@@ -168,17 +168,17 @@ if (fileStream.isBinaryStreamEnded()) {
 
 ## Writing to FileStreams
 
-When creating a FileStream manually (not using `createFromBlob`), you need to manage the upload process yourself. This gives you more control over chunking and progress tracking.
+When creating a `FileStream` manually (not using `createFromBlob`), you need to manage the upload process yourself. This gives you more control over chunking and progress tracking.
 
 ### The Upload Lifecycle
 
-FileStream uploads follow a three-stage process:
+`FileStream` uploads follow a three-stage process:
 
 1. **Start** - Initialize with metadata
 2. **Push** - Send one or more chunks of data
 3. **End** - Mark the stream as complete
 
-### Starting a FileStream
+### Starting a `FileStream`
 
 Begin by providing metadata about the file:
 
@@ -223,7 +223,7 @@ for (let i = 0; i < data.length; i += chunkSize) {
 
 ### Completing the Upload
 
-Once all chunks are pushed, mark the FileStream as complete:
+Once all chunks are pushed, mark the `FileStream` as complete:
 
 <CodeGroup>
 ```ts
@@ -234,13 +234,13 @@ console.log('Upload complete!');
 ```
 </CodeGroup>
 
-## Subscribing to FileStreams
+## Subscribing to `FileStream`s
 
-Like other CoValues, you can subscribe to FileStreams to get notified of changes as they happen. This is especially useful for tracking upload progress when someone else is uploading a file.
+Like other CoValues, you can subscribe to `FileStream`s to get notified of changes as they happen. This is especially useful for tracking upload progress when someone else is uploading a file.
 
 ### Loading by ID
 
-Load a FileStream when you have its ID:
+Load a `FileStream` when you have its ID:
 
 <CodeGroup>
 ```ts
@@ -261,7 +261,7 @@ if (fileStream) {
 
 ### Subscribing to Changes
 
-Subscribe to a FileStream to be notified when chunks are added or when the upload is complete:
+Subscribe to a `FileStream` to be notified when chunks are added or when the upload is complete:
 
 <CodeGroup>
 ```ts
@@ -294,7 +294,7 @@ const unsubscribe = FileStream.subscribe(fileStreamId, [], (fileStream) => {
 
 ### Waiting for Upload Completion
 
-If you need to wait for a FileStream to be fully synchronized across devices:
+If you need to wait for a `FileStream` to be fully synchronized across devices:
 
 <CodeGroup>
 ```ts
