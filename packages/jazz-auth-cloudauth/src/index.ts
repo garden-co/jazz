@@ -190,7 +190,7 @@ export class CloudAuth {
       secretSeed: session.user.secretSeed
         ? Uint8Array.from(base58.decode(session.user.secretSeed))
         : undefined,
-      provider: session.user.provider ? session.user.provider : "",
+      provider: "cloudauth",
     } satisfies AuthCredentials;
   }
 
