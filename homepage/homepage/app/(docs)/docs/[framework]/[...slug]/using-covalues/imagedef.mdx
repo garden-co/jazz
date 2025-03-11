@@ -6,9 +6,43 @@ export const metadata = { title: "ImageDefinition" };
 
 `ImageDefinition` is a specialized CoValue designed specifically for managing images in Jazz applications. It extends beyond basic file storage by supporting multiple resolutions of the same image and progressive loading patterns.
 
-The [Image Upload example](https://github.com/gardencmp/jazz/tree/main/examples/image-upload) demonstrates use of `ImageDefinition`.
+We also offer [`createImage()`](#creating-images), a higher-level function to create an `ImageDefinition` from a file.
 
 If you're building with React, we recommend starting with our [React-specific image documentation](/docs/react/using-covalues/imagedef) which covers higher-level components and hooks for working with images.
+
+The [Image Upload example](https://github.com/gardencmp/jazz/tree/main/examples/image-upload) demonstrates use of `ImageDefinition`.
+
+## Creating Images
+
+The easiest way to create and use images in your Jazz application is with the `createImage()` function:
+
+<CodeGroup>
+```ts
+import { createImage } from "jazz-browser-media-images";
+
+// Create an image from a file input
+async function handleFileUpload(event) {
+  const file = event.target.files[0];
+  if (file) {
+    // Creates ImageDefinition with multiple resolutions automatically
+    const image = await createImage(file, {
+      owner: me.profile._owner,
+    });
+    
+    // Store the image in your application data
+    me.profile.image = image;
+  }
+}
+```
+</CodeGroup>
+
+> Note: `createImage()` requires a browser environment as it uses browser APIs to process images.
+
+The `createImage()` function:
+- Creates an `ImageDefinition` with the right properties
+- Generates a small placeholder for immediate display
+- Creates multiple resolution variants of your image
+- Returns the ID of the created `ImageDefinition`
 
 ## Creating ImageDefinitions
 
