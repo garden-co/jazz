@@ -58,15 +58,21 @@ export class CloudAuth {
       credentials.accountSecret,
     );
     const keyBytes = wasmCrypto.signerSecretToBytes(signerSecret);
+    console.log(`SPLITTING k: ${wasmCrypto.signerSecretFromBytes(keyBytes)}`);
     const k1 = new Uint8Array(keyBytes.length);
     window.crypto.getRandomValues(k1);
     const k0 = new Uint8Array(keyBytes.length);
     for (let i = 0; i < keyBytes.length; i++) {
-      const kByte = keyBytes[i];
-      const k1Byte = k1[i];
-      if (!kByte || !k1Byte) continue;
+      if (keyBytes[i] === undefined || k1[i] === undefined) {
+        console.log(`keyBytes[${i}]`, keyBytes[i], `k1[${i}]`, k1[i]);
+      }
+      const kByte = keyBytes[i] || 0;
+      const k1Byte = k1[i] || 0;
       k0[i] = kByte ^ k1Byte;
     }
+    console.log(
+      `SPLITTING k0: ${wasmCrypto.signerSecretFromBytes(k0)}, k1: ${wasmCrypto.signerSecretFromBytes(k1)}`,
+    );
     return [k0, k1];
   }
 
@@ -75,13 +81,19 @@ export class CloudAuth {
     k1: Uint8Array,
   ): Promise<SignerSecret> {
     const wasmCrypto = await WasmCrypto.create();
+    console.log(
+      `MERGING k0: ${wasmCrypto.signerSecretFromBytes(k0)}, k1: ${wasmCrypto.signerSecretFromBytes(k1)}`,
+    );
     const k = new Uint8Array(k0.length);
     for (let i = 0; i < k0.length; i++) {
-      const k0Byte = k0[i];
-      const k1Byte = k1[i];
-      if (!k0Byte || !k1Byte) continue;
+      if (k0[i] === undefined || k1[i] === undefined) {
+        console.log(`k0[${i}]`, k0[i], `k1[${i}]`, k1[i]);
+      }
+      const k0Byte = k0[i] || 0;
+      const k1Byte = k1[i] || 0;
       k[i] = k0Byte ^ k1Byte;
     }
+    console.log(`MERGING k: ${wasmCrypto.signerSecretFromBytes(k)}`);
     return wasmCrypto.signerSecretFromBytes(k);
   }
 
@@ -147,7 +159,39 @@ export class CloudAuth {
     );
     const data = await response.json();
     console.log("Response data:", data);
-    return await CloudAuth.combineKeyShards(k0, data);
+    return await CloudAuth.combineKeyShards(k0, Uint8Array.from(data.keyShard));
+  }
+
+  static async sessionWithMergedKey(
+    session: Pick<Session, "user">,
+    authClient: AuthClient,
+    keyserver: string,
+  ) {
+    const wasmCrypto = await WasmCrypto.create();
+    const accountID = session.user.accountID as ID<Account>;
+    const betterauthAccountSecret = session.user.accountSecret as AgentSecret;
+    const k0 = wasmCrypto.signerSecretToBytes(
+      wasmCrypto.getAgentSignerSecret(betterauthAccountSecret),
+    );
+    const signerSecret = await CloudAuth.getAndMergeKey(
+      k0,
+      authClient,
+      accountID,
+      keyserver,
+    );
+    const sealerSecret = wasmCrypto.getAgentSealerSecret(
+      betterauthAccountSecret,
+    );
+    const accountSecret = `${sealerSecret}/${signerSecret}` as AgentSecret;
+
+    return {
+      accountID: accountID,
+      accountSecret: accountSecret,
+      secretSeed: session.user.secretSeed
+        ? Uint8Array.from(base58.decode(session.user.secretSeed))
+        : undefined,
+      provider: session.user.provider ? session.user.provider : "",
+    } satisfies AuthCredentials;
   }
 
   // Uses Better Auth session data & keyserver to set auth data locally
@@ -157,29 +201,14 @@ export class CloudAuth {
     authClient: AuthClient,
     keyserver: string,
   ) {
-    const wasmCrypto = await WasmCrypto.create();
-    const accountID = session.user.accountID as ID<Account>;
-    const oldAccountSecret = session.user.accountSecret as AgentSecret;
-    const k0 = wasmCrypto.signerSecretToBytes(
-      wasmCrypto.getAgentSignerSecret(oldAccountSecret),
-    );
-    const signerSecret = await CloudAuth.getAndMergeKey(
-      k0,
+    const authSetPayload = await CloudAuth.sessionWithMergedKey(
+      session,
       authClient,
-      accountID,
       keyserver,
     );
-    const sealerSecret = wasmCrypto.getAgentSealerSecret(oldAccountSecret);
-    const accountSecret = `${sealerSecret}/${signerSecret}` as AgentSecret;
-    console.log(`Setting account secret: ${accountSecret}`);
-    return storage.set({
-      accountID: session.user.accountID as ID<Account>,
-      accountSecret: accountSecret as AgentSecret,
-      secretSeed: session.user.secretSeed
-        ? Uint8Array.from(base58.decode(session.user.secretSeed))
-        : undefined,
-      provider: session.user.provider ? session.user.provider : "",
-    });
+    // console.log(`Setting account secret: ${accountSecret}`);
+    console.log(`storage.set: ${JSON.stringify(authSetPayload)}`);
+    return storage.set(authSetPayload);
   }
 
   onUserChange = async (session: Pick<Session, "user">) => {
@@ -189,33 +218,15 @@ export class CloudAuth {
   };
 
   logIn = async (session: Pick<Session, "user">) => {
+    console.log(`Login session: ${JSON.stringify(session)}`);
     if (!session.user) throw new Error("Not signed in");
-
-    // Merge Better Auth and keyserver keys, then authenticate
-    const wasmCrypto = await WasmCrypto.create();
-    const accountID = session.user.accountID as ID<Account>;
-    const oldAccountSecret = session.user.accountSecret as AgentSecret;
-    const k0 = wasmCrypto.signerSecretToBytes(
-      wasmCrypto.getAgentSignerSecret(oldAccountSecret),
-    );
-    const signerSecret = await CloudAuth.getAndMergeKey(
-      k0,
+    const credentials = await CloudAuth.sessionWithMergedKey(
+      session,
       this.authClient,
-      accountID,
       this.keyserver,
     );
-    const sealerSecret = wasmCrypto.getAgentSealerSecret(oldAccountSecret);
-    const accountSecret = `${sealerSecret}/${signerSecret}` as AgentSecret;
-    const credentials = {
-      accountID: session.user.accountID as ID<Account>,
-      accountSecret: accountSecret,
-      secretSeed: session.user.secretSeed
-        ? Uint8Array.from(base58.decode(session.user.secretSeed))
-        : undefined,
-      provider: session.user.provider ? session.user.provider : "",
-    } satisfies AuthCredentials;
+    console.log(`this.authenticate: ${JSON.stringify(credentials)}`);
     await this.authenticate(credentials);
-
     await CloudAuth.loadAuthData(
       session,
       this.authSecretStorage,
@@ -225,9 +236,10 @@ export class CloudAuth {
   };
 
   signIn = async (session: Pick<Session, "user">) => {
+    console.log(`Sign-in session: ${JSON.stringify(session)}`);
     const credentials = await this.authSecretStorage.get();
     if (!credentials) throw new Error("No credentials found");
-    console.log(`Sign in credentials: ${credentials}`);
+    console.log(`Sign-in credentials: ${JSON.stringify(credentials)}`);
     const jazzAccountSeed = credentials.secretSeed
       ? Array.from(credentials.secretSeed)
       : undefined;
@@ -241,14 +253,16 @@ export class CloudAuth {
     );
     const accountSecret = `${sealerSecret}/${signerSecret}`;
 
-    await this.authClient.updateUser({
+    const updatedUser = {
       accountID: credentials.accountID,
       accountSecret: accountSecret,
       secretSeed: jazzAccountSeed
         ? base58.encode(Uint8Array.from(jazzAccountSeed))
         : undefined,
       provider: credentials.provider,
-    });
+    };
+    await this.authClient.updateUser(updatedUser);
+    session.user = { ...session.user, ...updatedUser };
 
     const currentAccount = await Account.getMe().ensureLoaded({
       profile: {},
