@@ -1,8 +1,8 @@
 {
   "expo": {
-    "name": "jazz-chat-rn-clerk",
-    "scheme": "jazz-chat-rn-clerk",
-    "slug": "jazz-chat-rn-clerk",
+    "name": "jazz-chat-rn-expo-clerk",
+    "scheme": "jazz-chat-rn-expo-clerk",
+    "slug": "jazz-chat-rn-expo-clerk",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",

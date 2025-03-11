@@ -1,23 +1,23 @@
-import Clipboard from "@react-native-clipboard/clipboard";
+import clsx from "clsx";
+import * as Clipboard from "expo-clipboard";
 import { Group, ID, Profile } from "jazz-tools";
 import { useEffect, useState } from "react";
-import {
-  Alert,
+import React, {
   Button,
   FlatList,
   KeyboardAvoidingView,
   SafeAreaView,
-  StyleSheet,
   Text,
   TextInput,
   TouchableOpacity,
   View,
+  Alert,
 } from "react-native";
 
 import { useAccount, useCoState } from "jazz-expo";
 import { Chat, Message } from "./schema";
 
-export function ChatScreen({ navigation }: { navigation: any }) {
+export default function ChatScreen({ navigation }: { navigation: any }) {
   const { me, logOut } = useAccount();
   const [chatId, setChatId] = useState<ID<Chat>>();
   const loadedChat = useCoState(Chat, chatId, [{}]);
@@ -37,7 +37,7 @@ export function ChatScreen({ navigation }: { navigation: any }) {
           <Button
             onPress={() => {
               if (loadedChat?.id) {
-                Clipboard.setString(
+                Clipboard.setStringAsync(
                   `https://chat.jazz.tools/#/chat/${loadedChat.id}`,
                 );
                 Alert.alert("Copied to clipboard", `Chat ID: ${loadedChat.id}`);
@@ -94,28 +94,36 @@ export function ChatScreen({ navigation }: { navigation: any }) {
     const isMe = item._edits?.text?.by?.isMe;
     return (
       <View
-        style={[
-          styles.messageContainer,
-          isMe ? styles.myMessage : styles.otherMessage,
-        ]}
+        className={clsx(
+          `rounded-lg p-1 px-1.5 max-w-[80%] `,
+
+          isMe ? `bg-gray-200 self-end text-right` : `bg-gray-300 self-start `,
+        )}
       >
         {!isMe ? (
           <Text
-            style={[
-              styles.senderName,
-              isMe ? styles.textRight : styles.textLeft,
-            ]}
+            className={clsx(
+              `text-xs text-gray-500`,
+              isMe ? "text-right" : "text-left",
+            )}
           >
             {item?._edits?.text?.by?.profile?.name}
           </Text>
         ) : null}
-        <View style={styles.messageContent}>
-          <Text style={styles.messageText}>{item.text}</Text>
+        <View
+          className={clsx(
+            "flex relative items-end justify-between",
+            isMe ? "flex-row" : "flex-row",
+          )}
+        >
+          <Text className={clsx(`text-black text-md max-w-[85%]`)}>
+            {item.text}
+          </Text>
           <Text
-            style={[
-              styles.timestamp,
-              !isMe ? styles.timestampOther : styles.timestampMy,
-            ]}
+            className={clsx(
+              "text-[10px] text-gray-500 text-right ml-2",
+              !isMe ? "mt-2" : "mt-1",
+            )}
           >
             {item?._edits?.text?.madeAt?.getHours()}:
             {item?._edits?.text?.madeAt?.getMinutes()}
@@ -126,12 +134,12 @@ export function ChatScreen({ navigation }: { navigation: any }) {
   };
 
   return (
-    <View style={styles.container}>
+    <View className="flex flex-col h-full">
       {!loadedChat ? (
-        <View style={styles.welcomeContainer}>
-          <Text style={styles.usernameLabel}>Username</Text>
+        <View className="flex flex-col h-full items-center justify-center">
+          <Text className="text-m font-bold mb-6">Username</Text>
           <TextInput
-            style={styles.usernameInput}
+            className="rounded h-12 p-2 mb-12 w-40 border border-gray-200 block"
             value={profile?.name ?? ""}
             onChangeText={(value) => {
               if (profile) {
@@ -142,11 +150,17 @@ export function ChatScreen({ navigation }: { navigation: any }) {
             onSubmitEditing={sendMessage}
             testID="username-input"
           />
-          <TouchableOpacity onPress={createChat} style={styles.newChatButton}>
-            <Text style={styles.buttonText}>Start new chat</Text>
+          <TouchableOpacity
+            onPress={createChat}
+            className="bg-blue-500 p-4 rounded-md"
+          >
+            <Text className="text-white font-semibold">Start new chat</Text>
           </TouchableOpacity>
-          <TouchableOpacity onPress={joinChat} style={styles.joinChatButton}>
-            <Text style={styles.buttonText}>Join chat</Text>
+          <TouchableOpacity
+            onPress={joinChat}
+            className="bg-green-500 p-4 rounded-md mt-4"
+          >
+            <Text className="text-white font-semibold">Join chat</Text>
           </TouchableOpacity>
         </View>
       ) : (
@@ -158,7 +172,7 @@ export function ChatScreen({ navigation }: { navigation: any }) {
               gap: 6,
               padding: 8,
             }}
-            style={styles.messageList}
+            className="flex"
             data={loadedChat}
             keyExtractor={(item) => item.id}
             renderItem={renderMessageItem}
@@ -167,11 +181,11 @@ export function ChatScreen({ navigation }: { navigation: any }) {
           <KeyboardAvoidingView
             keyboardVerticalOffset={110}
             behavior="padding"
-            style={styles.inputContainer}
+            className="p-3 bg-white border-t border-gray-300"
           >
-            <SafeAreaView style={styles.inputWrapper}>
+            <SafeAreaView className="flex flex-row items-center gap-2">
               <TextInput
-                style={styles.messageInput}
+                className="rounded-full h-8 py-0 px-2  border border-gray-200 block flex-1"
                 value={message}
                 onChangeText={setMessage}
                 placeholder="Type a message..."
@@ -181,7 +195,7 @@ export function ChatScreen({ navigation }: { navigation: any }) {
               />
               <TouchableOpacity
                 onPress={sendMessage}
-                style={styles.sendButton}
+                className="bg-gray-300 text-white rounded-full h-8 w-8 items-center justify-center"
                 testID="send-button"
               >
                 <Text>↑</Text>
@@ -193,128 +207,3 @@ export function ChatScreen({ navigation }: { navigation: any }) {
     </View>
   );
 }
-
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    flexDirection: "column",
-    height: "100%",
-  },
-  messageContainer: {
-    borderRadius: 8,
-    padding: 4,
-    paddingHorizontal: 6,
-    maxWidth: "80%",
-  },
-  myMessage: {
-    backgroundColor: "#e5e7eb", // gray-200
-    alignSelf: "flex-end",
-    textAlign: "right",
-  },
-  otherMessage: {
-    backgroundColor: "#d1d5db", // gray-300
-    alignSelf: "flex-start",
-  },
-  senderName: {
-    fontSize: 12,
-    color: "#6b7280", // gray-500
-  },
-  textRight: {
-    textAlign: "right",
-  },
-  textLeft: {
-    textAlign: "left",
-  },
-  messageContent: {
-    flex: 1,
-    position: "relative",
-    flexDirection: "row",
-    alignItems: "flex-end",
-    justifyContent: "space-between",
-  },
-  messageText: {
-    color: "#000000",
-    fontSize: 16,
-    maxWidth: "85%",
-  },
-  timestamp: {
-    fontSize: 10,
-    color: "#6b7280", // gray-500
-    textAlign: "right",
-    marginLeft: 8,
-  },
-  timestampOther: {
-    marginTop: 8,
-  },
-  timestampMy: {
-    marginTop: 4,
-  },
-  welcomeContainer: {
-    flex: 1,
-    flexDirection: "column",
-    height: "100%",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  usernameLabel: {
-    fontSize: 16,
-    fontWeight: "bold",
-    marginBottom: 24,
-  },
-  usernameInput: {
-    borderRadius: 4,
-    height: 48,
-    padding: 8,
-    marginBottom: 48,
-    width: 160,
-    borderWidth: 1,
-    borderColor: "#e5e7eb", // gray-200
-  },
-  newChatButton: {
-    backgroundColor: "#3b82f6", // blue-500
-    padding: 16,
-    borderRadius: 6,
-  },
-  joinChatButton: {
-    backgroundColor: "#10b981", // green-500
-    padding: 16,
-    borderRadius: 6,
-    marginTop: 16,
-  },
-  buttonText: {
-    color: "white",
-    fontWeight: "600",
-  },
-  messageList: {
-    flex: 1,
-  },
-  inputContainer: {
-    padding: 12,
-    backgroundColor: "white",
-    borderTopWidth: 1,
-    borderTopColor: "#d1d5db", // gray-300
-  },
-  inputWrapper: {
-    flex: 1,
-    flexDirection: "row",
-    alignItems: "center",
-    columnGap: 8,
-  },
-  messageInput: {
-    borderRadius: 20,
-    height: 32,
-    paddingVertical: 0,
-    paddingHorizontal: 8,
-    borderWidth: 1,
-    borderColor: "#e5e7eb", // gray-200
-    flex: 1,
-  },
-  sendButton: {
-    backgroundColor: "#d1d5db", // gray-300
-    borderRadius: 16,
-    height: 32,
-    width: 32,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-});

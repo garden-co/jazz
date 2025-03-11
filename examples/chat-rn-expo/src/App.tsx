@@ -1,30 +1,32 @@
+import "../global.css";
+
 import {
   NavigationContainer,
   useNavigationContainerRef,
 } from "@react-navigation/native";
 import { createNativeStackNavigator } from "@react-navigation/native-stack";
-import { JazzProvider } from "jazz-react-native";
+import * as Linking from "expo-linking";
 import React, { StrictMode, useEffect, useState } from "react";
-import { Linking } from "react-native";
+import HandleInviteScreen from "./invite";
+
+import { JazzProvider } from "jazz-expo";
 import { apiKey } from "./apiKey";
-import { ChatScreen } from "./chat";
-import { HandleInviteScreen } from "./invite";
-import { theme } from "./theme";
+import ChatScreen from "./chat";
 
 const Stack = createNativeStackNavigator();
 
-// const prefix = Linking.createURL("/");
+const prefix = Linking.createURL("/");
 
-// const linking = {
-//   prefixes: [prefix],
-//   config: {
-//     screens: {
-//       HandleInviteScreen: {
-//         path: "router/invite/:valueHint?/:valueID/:inviteSecret",
-//       },
-//     },
-//   },
-// };
+const linking = {
+  prefixes: [prefix],
+  config: {
+    screens: {
+      HandleInviteScreen: {
+        path: "router/invite/:valueHint?/:valueID/:inviteSecret",
+      },
+    },
+  },
+};
 
 function App() {
   const [initialRoute, setInitialRoute] = useState<
@@ -48,11 +50,12 @@ function App() {
           peer: `wss://cloud.jazz.tools/?key=${apiKey}`,
         }}
       >
-        <NavigationContainer ref={navigationRef} theme={theme}>
+        <NavigationContainer linking={linking} ref={navigationRef}>
           <Stack.Navigator initialRouteName={initialRoute}>
             <Stack.Screen
               options={{ title: "Jazz Chat" }}
               name="ChatScreen"
+              // @ts-ignore
               component={ChatScreen}
             />
             <Stack.Screen
