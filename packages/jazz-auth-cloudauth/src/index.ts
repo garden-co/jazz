@@ -2,8 +2,12 @@ import { base58 } from "@scure/base";
 import { createAuthClient } from "better-auth/client";
 import { inferAdditionalFields } from "better-auth/client/plugins";
 import { AgentSecret } from "cojson";
-import { WasmCrypto } from "cojson/crypto/WasmCrypto";
-import { SealerSecret, SignerSecret } from "cojson/src/crypto/crypto.js";
+import { PureJSCrypto } from "cojson/dist/crypto/PureJSCrypto";
+import {
+  CryptoProvider,
+  SealerSecret,
+  SignerSecret,
+} from "cojson/src/crypto/crypto.js";
 import {
   Account,
   AuthCredentials,
@@ -41,6 +45,7 @@ export const newAuthClient = (baseUrl: string) =>
 
 export type AuthClient = ReturnType<typeof newAuthClient>;
 export type Session = AuthClient["$Infer"]["Session"];
+const jsCrypto = new PureJSCrypto();
 
 export class CloudAuth {
   constructor(
@@ -48,6 +53,7 @@ export class CloudAuth {
     private authSecretStorage: AuthSecretStorage,
     private authClient: AuthClient,
     private keyserver: string,
+    private crypto: CryptoProvider = jsCrypto,
   ) {}
 
   static splitKeyBytes(keyBytes: Uint8Array): [Uint8Array, Uint8Array] {
@@ -62,21 +68,21 @@ export class CloudAuth {
     return [k0, k1];
   }
 
-  static async splitSignerSecret(
+  static splitSignerSecret(
     accountSecret: AgentSecret,
-  ): Promise<[Uint8Array, Uint8Array]> {
-    const wasmCrypto = await WasmCrypto.create();
-    const signerSecret = wasmCrypto.getAgentSignerSecret(accountSecret);
-    const keyBytes = wasmCrypto.signerSecretToBytes(signerSecret);
+    crypto: CryptoProvider = jsCrypto,
+  ): [Uint8Array, Uint8Array] {
+    const signerSecret = crypto.getAgentSignerSecret(accountSecret);
+    const keyBytes = crypto.signerSecretToBytes(signerSecret);
     return CloudAuth.splitKeyBytes(keyBytes);
   }
 
-  static async splitSealerSecret(
+  static splitSealerSecret(
     accountSecret: AgentSecret,
-  ): Promise<[Uint8Array, Uint8Array]> {
-    const wasmCrypto = await WasmCrypto.create();
-    const sealerSecret = wasmCrypto.getAgentSealerSecret(accountSecret);
-    const keyBytes = wasmCrypto.sealerSecretToBytes(sealerSecret);
+    crypto: CryptoProvider = jsCrypto,
+  ): [Uint8Array, Uint8Array] {
+    const sealerSecret = crypto.getAgentSealerSecret(accountSecret);
+    const keyBytes = crypto.sealerSecretToBytes(sealerSecret);
     return CloudAuth.splitKeyBytes(keyBytes);
   }
 
@@ -90,51 +96,43 @@ export class CloudAuth {
     return k;
   }
 
-  static async mergeSignerSecret(
+  static mergeSignerSecret(
     k0: Uint8Array,
     k1: Uint8Array,
-  ): Promise<SignerSecret> {
-    return (await WasmCrypto.create()).signerSecretFromBytes(
-      CloudAuth.mergeKeyShards(k0, k1),
-    );
+    crypto: CryptoProvider = jsCrypto,
+  ): SignerSecret {
+    return crypto.signerSecretFromBytes(CloudAuth.mergeKeyShards(k0, k1));
   }
 
-  static async mergeSealerSecret(
+  static mergeSealerSecret(
     k0: Uint8Array,
     k1: Uint8Array,
-  ): Promise<SealerSecret> {
-    return (await WasmCrypto.create()).sealerSecretFromBytes(
-      CloudAuth.mergeKeyShards(k0, k1),
-    );
+    crypto: CryptoProvider = jsCrypto,
+  ): SealerSecret {
+    return crypto.sealerSecretFromBytes(CloudAuth.mergeKeyShards(k0, k1));
   }
 
   // Splits keys into k0 & k1 for each key
   // k1 gets stored in the key server, k0 gets stored in Better Auth
   // Does this for two keys, being the signing key and sealer key
-  static async splitAndSendKeys(
+  static splitAndSendKeys(
     credentials: AuthCredentials,
     keyserver: string,
-  ): Promise<[Uint8Array, Uint8Array]> {
-    const [signer0, signer1] = await this.splitSignerSecret(
+    crypto: CryptoProvider = jsCrypto,
+  ): [Uint8Array, Uint8Array] {
+    const [signer0, signer1] = this.splitSignerSecret(
       credentials.accountSecret,
+      crypto,
     );
-    const [sealer0, sealer1] = await this.splitSealerSecret(
+    const [sealer0, sealer1] = this.splitSealerSecret(
       credentials.accountSecret,
+      crypto,
     );
 
-    const wasmCrypto = await WasmCrypto.create();
-    const signerSecret = wasmCrypto.getAgentSignerSecret(
-      credentials.accountSecret,
-    );
-    const signerId = wasmCrypto.getSignerID(signerSecret);
-    const signedSignerKeyShard = wasmCrypto.sign(
-      signerSecret,
-      Array.from(signer1),
-    );
-    const signedSealerKeyShard = wasmCrypto.sign(
-      signerSecret,
-      Array.from(sealer1),
-    );
+    const signerSecret = crypto.getAgentSignerSecret(credentials.accountSecret);
+    const signerId = crypto.getSignerID(signerSecret);
+    const signedSignerKeyShard = crypto.sign(signerSecret, Array.from(signer1));
+    const signedSealerKeyShard = crypto.sign(signerSecret, Array.from(sealer1));
 
     fetch(`${keyserver}/api/key-shard`, {
       method: "POST",
@@ -166,6 +164,7 @@ export class CloudAuth {
     authClient: AuthClient,
     accountID: ID<Account>,
     keyserver: string,
+    crypto: CryptoProvider = jsCrypto,
   ): Promise<[SignerSecret, SealerSecret]> {
     let jwt = "";
     await authClient.getSession({
@@ -186,13 +185,15 @@ export class CloudAuth {
       },
     );
     const data = await response.json();
-    const signerSecret = await CloudAuth.mergeSignerSecret(
+    const signerSecret = CloudAuth.mergeSignerSecret(
       signer0,
       Uint8Array.from(data.signerKeyShard),
+      crypto,
     );
-    const sealerSecret = await CloudAuth.mergeSealerSecret(
+    const sealerSecret = CloudAuth.mergeSealerSecret(
       sealer0,
       Uint8Array.from(data.sealerKeyShard),
+      crypto,
     );
     return [signerSecret, sealerSecret];
   }
@@ -201,15 +202,15 @@ export class CloudAuth {
     session: Pick<Session, "user">,
     authClient: AuthClient,
     keyserver: string,
+    crypto: CryptoProvider = jsCrypto,
   ) {
-    const wasmCrypto = await WasmCrypto.create();
     const accountID = session.user.accountID as ID<Account>;
     const betterauthAccountSecret = session.user.accountSecret as AgentSecret;
-    const signer0 = wasmCrypto.signerSecretToBytes(
-      wasmCrypto.getAgentSignerSecret(betterauthAccountSecret),
+    const signer0 = crypto.signerSecretToBytes(
+      crypto.getAgentSignerSecret(betterauthAccountSecret),
     );
-    const sealer0 = wasmCrypto.sealerSecretToBytes(
-      wasmCrypto.getAgentSealerSecret(betterauthAccountSecret),
+    const sealer0 = crypto.sealerSecretToBytes(
+      crypto.getAgentSealerSecret(betterauthAccountSecret),
     );
     const [signerSecret, sealerSecret] = await CloudAuth.getAndMergeKeys(
       signer0,
@@ -217,6 +218,7 @@ export class CloudAuth {
       authClient,
       accountID,
       keyserver,
+      crypto,
     );
     const accountSecret = `${sealerSecret}/${signerSecret}` as AgentSecret;
 
@@ -236,11 +238,13 @@ export class CloudAuth {
     storage: AuthSecretStorage,
     authClient: AuthClient,
     keyserver: string,
+    crypto: CryptoProvider = jsCrypto,
   ) {
     const authSetPayload = await CloudAuth.sessionWithMergedKey(
       session,
       authClient,
       keyserver,
+      crypto,
     );
     return storage.set(authSetPayload);
   }
@@ -257,6 +261,7 @@ export class CloudAuth {
       session,
       this.authClient,
       this.keyserver,
+      this.crypto,
     );
     await this.authenticate(credentials);
     await CloudAuth.loadAuthData(
@@ -264,6 +269,7 @@ export class CloudAuth {
       this.authSecretStorage,
       this.authClient,
       this.keyserver,
+      this.crypto,
     );
   };
 
@@ -275,13 +281,13 @@ export class CloudAuth {
       : undefined;
 
     // Split key, store one shard in Better Auth, other shard in keyserver
-    const wasmCrypto = await WasmCrypto.create();
-    const [signer0, sealer0] = await CloudAuth.splitAndSendKeys(
+    const [signer0, sealer0] = CloudAuth.splitAndSendKeys(
       credentials,
       this.keyserver,
+      this.crypto,
     );
-    const signerSecret = wasmCrypto.signerSecretFromBytes(signer0);
-    const sealerSecret = wasmCrypto.sealerSecretFromBytes(sealer0);
+    const signerSecret = this.crypto.signerSecretFromBytes(signer0);
+    const sealerSecret = this.crypto.sealerSecretFromBytes(sealer0);
     const accountSecret = `${sealerSecret}/${signerSecret}`;
 
     const updatedUser = {
@@ -304,6 +310,7 @@ export class CloudAuth {
       this.authSecretStorage,
       this.authClient,
       this.keyserver,
+      this.crypto,
     );
   };
 }
