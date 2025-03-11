@@ -14,9 +14,6 @@ export const docNavigationItems = [
         href: "/docs/guide",
         done: {
           react: 100,
-          "react-native": 0,
-          vue: 0,
-          svelte: 0,
         },
       },
       {

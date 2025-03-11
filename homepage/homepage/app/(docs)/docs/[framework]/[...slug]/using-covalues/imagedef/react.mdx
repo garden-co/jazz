@@ -1,0 +1,199 @@
+import { CodeGroup } from "@/components/forMdx";
+
+export const metadata = { title: "ImageDefinition" };
+
+# ImageDefinition
+
+`ImageDefinition` is a specialized CoValue designed specifically for managing images in Jazz applications. It extends beyond basic file storage by supporting multiple resolutions of the same image and progressive loading patterns.
+
+Beyond [`ImageDefinition`](#understanding-imagedefinition), Jazz offers higher-level functions and components that make it easier to use images:
+- [`createImage()`](#creating-images) - function to create an `ImageDefinition` from a file
+- [`ProgressiveImg`](#displaying-images-with-progressiveimg) - React component to display an image with progressive loading
+- [`useProgressiveImg`](#using-useprogressiveimg-hook) - React hook to load an image in your own component
+
+The [Image Upload example](https://github.com/gardencmp/jazz/tree/main/examples/image-upload) demonstrates use of `ProgressiveImg` and `ImageDefinition`.
+
+## Creating Images
+
+The easiest way to create and use images in your Jazz application is with the `createImage()` function:
+
+<CodeGroup>
+```ts
+import { createImage } from "jazz-browser-media-images";
+
+// Create an image from a file input
+async function handleFileUpload(event) {
+  const file = event.target.files[0];
+  if (file) {
+    // Creates ImageDefinition with multiple resolutions automatically
+    const image = await createImage(file, {
+      owner: me.profile._owner,
+    });
+    
+    // Store the image in your application data
+    me.profile.image = image;
+  }
+}
+```
+</CodeGroup>
+
+> Note: `createImage()` requires a browser environment as it uses browser APIs to process images.
+
+The `createImage()` function:
+- Creates an `ImageDefinition` with the right properties
+- Generates a small placeholder for immediate display
+- Creates multiple resolution variants of your image
+- Returns the ID of the created `ImageDefinition`
+
+## Displaying Images with `ProgressiveImg`
+
+For a complete progressive loading experience, use the `ProgressiveImg` component:
+
+<CodeGroup>
+```tsx
+import { ProgressiveImg } from "jazz-react";
+
+function GalleryView({ image }) {
+  return (
+    <div className="image-container">
+      <ProgressiveImg image={image}>
+        {({ src }) => (
+          <img 
+            src={src} 
+            alt="Gallery image" 
+            className="gallery-image"
+          />
+        )}
+      </ProgressiveImg>
+    </div>
+  );
+}
+```
+</CodeGroup>
+
+The `ProgressiveImg` component handles:
+- Showing a placeholder while loading
+- Automatically selecting the appropriate resolution
+- Progressive enhancement as higher resolutions become available
+- Cleaning up resources when unmounted
+
+### Customizing Image Display
+
+You can customize the display with the render prop pattern:
+
+<CodeGroup>
+```tsx
+<ProgressiveImg image={image}>
+  {({ src }) => (
+    <img 
+      src={src}
+      alt="Description of image" 
+      className="my-custom-class"
+      style={{ objectFit: "cover" }}
+      width={400} 
+      height={300}
+    />
+  )}
+</ProgressiveImg>
+```
+</CodeGroup>
+
+## Using `useProgressiveImg` Hook
+
+For more control over image loading, you can implement your own progressive image component:
+
+<CodeGroup>
+```tsx
+import { useProgressiveImg } from "jazz-react";
+
+function CustomImageComponent({ image }) {
+  const { src, isLoading, placeholderSrc } = useProgressiveImg(image);
+  
+  if (isLoading && placeholderSrc) {
+    return <img src={placeholderSrc} alt="Loading..." className="blur-effect" />;
+  }
+  
+  if (!src) {
+    return <div className="image-loading-fallback">Loading image...</div>;
+  }
+  
+  return (
+    <div className="custom-image-wrapper">
+      <img 
+        src={src} 
+        alt="Custom image" 
+        className="custom-image"
+      />
+      <div className="image-overlay">
+        <span className="image-caption">Custom UI elements</span>
+      </div>
+    </div>
+  );
+}
+```
+</CodeGroup>
+
+The hook returns an object with:
+- `src`: URL for the highest available resolution that fits the current screen
+- `isLoading`: Boolean indicating if a higher resolution is still loading
+- `placeholderSrc`: Base64 data URL for immediate display (if available)
+- `dimensions`: Original image dimensions as [width, height]
+- `error`: Any error that occurred during loading
+
+### Configuration Options
+
+You can configure the hook with options:
+
+<CodeGroup>
+```tsx
+const imageData = useProgressiveImg(imageId, {
+  maxWidth: 800, // Limit to resolutions up to 800px wide
+  devicePixelRatio: true, // Account for high-DPI displays
+});
+```
+</CodeGroup>
+
+## Understanding ImageDefinition
+
+Behind the scenes, `ImageDefinition` is a specialized CoValue that stores:
+
+- The original image dimensions (`originalSize`)
+- An optional placeholder (`placeholderDataURL`) for immediate display
+- Multiple resolution variants of the same image as [`FileStream`s](./using-covalues/filestream)
+
+Each resolution is stored with a key in the format `"widthxheight"` (e.g., `"1920x1080"`, `"800x450"`).
+
+<CodeGroup>
+```ts
+// Structure of an ImageDefinition
+const image = ImageDefinition.create({
+  originalSize: [1920, 1080],
+  placeholderDataURL: "data:image/jpeg;base64,/9j/4AAQSkZJRg...",
+});
+
+// Accessing the highest available resolution
+const highestRes = image.highestResAvailable();
+if (highestRes) {
+  console.log(`Found resolution: ${highestRes.res}`);
+  console.log(`Stream: ${highestRes.stream}`);
+}
+```
+</CodeGroup>
+
+### Fallback Behavior
+
+`highestResAvailable` returns the largest resolution that fits your constraints. If a resolution has incomplete data, it falls back to the next available lower resolution.
+
+<CodeGroup>
+```ts
+const image = ImageDefinition.create({
+  originalSize: [1920, 1080],
+});
+
+image["1920x1080"] = FileStream.create(); // Empty image upload
+image["800x450"] = await FileStream.createFromBlob(mediumSizeBlob);
+
+const highestRes = image.highestResAvailable();
+console.log(highestRes.res); // 800x450
+```
+</CodeGroup>
