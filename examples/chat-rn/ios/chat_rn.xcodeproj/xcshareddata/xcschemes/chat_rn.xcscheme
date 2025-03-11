@@ -15,9 +15,9 @@
             <BuildableReference
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "13B07F861A680F5B00A75B9A"
-               BuildableName = "chat_rn_cli.app"
-               BlueprintName = "chat_rn_cli"
-               ReferencedContainer = "container:chat_rn_cli.xcodeproj">
+               BuildableName = "chat_rn.app"
+               BlueprintName = "chat_rn"
+               ReferencedContainer = "container:chat_rn.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
       </BuildActionEntries>
@@ -33,9 +33,9 @@
             <BuildableReference
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "00E356ED1AD99517003FC87E"
-               BuildableName = "chat_rn_cliTests.xctest"
-               BlueprintName = "chat_rn_cliTests"
-               ReferencedContainer = "container:chat_rn_cli.xcodeproj">
+               BuildableName = "chat_rnTests.xctest"
+               BlueprintName = "chat_rnTests"
+               ReferencedContainer = "container:chat_rn.xcodeproj">
             </BuildableReference>
          </TestableReference>
       </Testables>
@@ -55,9 +55,9 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "13B07F861A680F5B00A75B9A"
-            BuildableName = "chat_rn_cli.app"
-            BlueprintName = "chat_rn_cli"
-            ReferencedContainer = "container:chat_rn_cli.xcodeproj">
+            BuildableName = "chat_rn.app"
+            BlueprintName = "chat_rn"
+            ReferencedContainer = "container:chat_rn.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
    </LaunchAction>
@@ -72,9 +72,9 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "13B07F861A680F5B00A75B9A"
-            BuildableName = "chat_rn_cli.app"
-            BlueprintName = "chat_rn_cli"
-            ReferencedContainer = "container:chat_rn_cli.xcodeproj">
+            BuildableName = "chat_rn.app"
+            BlueprintName = "chat_rn"
+            ReferencedContainer = "container:chat_rn.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
    </ProfileAction>

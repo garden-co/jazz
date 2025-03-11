@@ -10,7 +10,7 @@ First, install dependencies for the project:
 pnpm i
 ```
 
-### 2. Inside the `examples/chat-rn-cli` Directory
+### 2. Inside the `examples/chat-rn` Directory
 
 Next, navigate to the specific example project and run the following commands:
 
@@ -26,7 +26,7 @@ This will set up and launch the app on iOS. For Android, you can skip `pnpm pods
 This was created using the following command:
 
 ```bash
-bunx @react-native-community/cli init chat_rn_cli --version 0.78 --install-pods true --skip-git-init true --package-name com.jazz.chatrncli --directory chat-rn-cli
+bunx @react-native-community/cli init chat-rn --version 0.78 --install-pods true --skip-git-init true --package-name com.jazz.chatrn --directory chat-rn
 ```
 
 Then delete `bun.lock`, change package name in `package.json`, and begin build instructions above.
