@@ -28,7 +28,7 @@ const SignInWithOAuth = () => {
       const { createdSessionId, signIn, signUp, setActive } =
         await startOAuthFlow({
           redirectUrl: Linking.createURL("/", {
-            scheme: "jazz-chat-rn-clerk",
+            scheme: "jazz-chat-rn-expo-clerk",
           }),
         });
 

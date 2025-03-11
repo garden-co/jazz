@@ -8,7 +8,7 @@
       "type": "radon-ide",
       "request": "launch",
       "name": "Radon IDE panel",
-      "appRoot": "./examples/chat-rn-clerk",
+      "appRoot": "./examples/chat-rn-expo-clerk",
       "ios": {
         "configuration": "Debug"
       },

@@ -1,4 +1,4 @@
-# 🎷 Jazz + Expo + `expo-router` + Clerk Auth
+# 🎷 Jazz + Expo + `react-navigation` + Demo Auth
 
 ## 🚀 How to Run
 
@@ -11,13 +11,13 @@ pnpm i
 pnpm run build
 ```
 
-### 2. Inside the `examples/chat-rn-clerk` Directory
+### 2. Inside the `examples/chat-rn-expo` Directory
 
 Next, navigate to the specific example project and run the following commands:
 
 ```bash
 pnpm expo prebuild
-npx pod-install
+pnpx pod-install
 pnpm expo run:ios
 ```
 

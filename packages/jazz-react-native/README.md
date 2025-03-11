@@ -186,8 +186,8 @@ You can optionally pass a custom `kvStore` and `AccountSchema` to `createJazzRNA
 
 Refer to the Jazz + React Native demo projects for implementing authentication:
 
-- [DemoAuth Example](https://github.com/garden-co/jazz/tree/main/examples/chat-rn)
-- [ClerkAuth Example](https://github.com/garden-co/jazz/tree/main/examples/chat-rn-clerk)
+- [DemoAuth Example](https://github.com/garden-co/jazz/tree/main/examples/chat-rn-expo)
+- [ClerkAuth Example](https://github.com/garden-co/jazz/tree/main/examples/chat-rn-expo-clerk)
 
 In the demos, you'll find details on:
 
