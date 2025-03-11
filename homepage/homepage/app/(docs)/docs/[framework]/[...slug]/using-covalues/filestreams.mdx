@@ -190,7 +190,7 @@ const fileStream = FileStream.create();
 // Initialize with metadata
 fileStream.start({
   mimeType: 'application/pdf',      // MIME type (required)
-  totalSizeBytes: 1024 * 1024 * 2,  // Size in bytes (optional)
+  totalSizeBytes: 1024 * 1024 * 2,  // Size in bytes (if known)
   fileName: 'document.pdf'          // Original filename (optional)
 });
 ```
