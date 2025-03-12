@@ -11,7 +11,13 @@ import { ChatScreen } from "./chat";
 import { HandleInviteScreen } from "./invite";
 import { theme } from "./theme";
 
-const Stack = createNativeStackNavigator();
+type RootStackParamList = {
+  ChatScreen: undefined;
+  HandleInviteScreen: undefined;
+};
+
+// Create the stack navigator with proper typing
+const Stack = createNativeStackNavigator<RootStackParamList>();
 
 // const prefix = Linking.createURL("/");
 
@@ -49,6 +55,7 @@ function App() {
         }}
       >
         <NavigationContainer ref={navigationRef} theme={theme}>
+          {/* @ts-expect-error React 19 types not working yet */}
           <Stack.Navigator initialRouteName={initialRoute}>
             <Stack.Screen
               options={{ title: "Jazz Chat" }}

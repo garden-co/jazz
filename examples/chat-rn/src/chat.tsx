@@ -1,4 +1,5 @@
 import Clipboard from "@react-native-clipboard/clipboard";
+import { useAccount, useCoState } from "jazz-react-native";
 import { Group, ID, Profile } from "jazz-tools";
 import { useEffect, useState } from "react";
 import {
@@ -13,8 +14,6 @@ import {
   TouchableOpacity,
   View,
 } from "react-native";
-
-import { useAccount, useCoState } from "jazz-react-native";
 import { Chat, Message } from "./schema";
 
 export function ChatScreen({ navigation }: { navigation: any }) {
