@@ -102,6 +102,8 @@
             let isEnabled = true;
             let currentCoValue = null;
             let source = null;
+            let subscribedCoValue = null;
+            const covaluesUpload = new Map();
 
             const RECONNECT_INTERVAL = 5000; // 5 seconds
             let socket;
@@ -262,27 +264,29 @@
 
             function createCoValueViaWS(response) {
                 if (response.code === 200) {
-                    // 200 - OK: here means an acknowledgement of (an in progress) binary chunk
+                    // 200 - OK: here means acknowledgement of a chunk from a binary CoValue upload
                     debug(
-                        `Chunked upload via websocket acknowledged for: ${currentCoValue.uuid}.`,
+                        `Chunked upload via websocket acknowledged for: ${response.payload.uuid}.`,
                     );
                 } else if (response.code === 201) {
-                    // 201 - Created: here is an acknowledgement of a textual covalue / the final chunk of a binary covalue
-                    appendCoValue(currentCoValue);
-                    logCoValue(currentCoValue);
+                    // 201 - Created: here is acknowledgement of a textual CoValue creation or the final chunk of a binary CoValue upload
+                    // fetch covalue from Map
+                    const covalue = covaluesUpload.get(response.payload.uuid);
+                    appendCoValue(covalue);
+                    logCoValue(covalue);
                     info(
                         `Created (${
                             isBinary() ? "binary" : "JSON"
-                        }) data for: ${currentCoValue.uuid}.`,
+                        }) data for: ${response.payload.uuid}.`,
                     );
                 }
             }
 
             function mutateCoValueViaWS(payload) {
                 if (isBinary()) {
-                    info(`Mutated (binary) data for: ${currentCoValue.uuid}.`);
+                    info(`Mutated (binary) data for: ${payload.uuid}.`);
                 } else {
-                    info(`Mutated (JSON) data for: ${currentCoValue.uuid}.`);
+                    info(`Mutated (JSON) data for: ${payload.uuid}.`);
                 }
             }
 
@@ -386,7 +390,7 @@
             }
 
             function debug(text) {
-                // console.log(text);
+                console.log(text);
             }
 
             function logCoValue(coValue) {
@@ -457,7 +461,7 @@
                 }
 
                 const ua = getMutationUserAgent();
-                currentCoValue = { uuid: uuid };
+                subscribedCoValue = { uuid: uuid };
 
                 if (isWS()) {
                     sendWhenReady({
@@ -515,13 +519,13 @@
 
             function handleMutation(eventType, data) {
                 if (data.field === "file.data") {
-                    currentCoValue.file = { data: data.value };
+                    subscribedCoValue.file = { data: data.value };
                 } else {
-                    currentCoValue[data.field] = data.value;
+                    subscribedCoValue[data.field] = data.value;
                 }
-                logCoValue(currentCoValue);
+                logCoValue(subscribedCoValue);
                 info(
-                    `Mutation event => CoValue ${currentCoValue.uuid} '${
+                    `Mutation event => CoValue ${subscribedCoValue.uuid} '${
                         data.field
                     }' was updated to '${
                         eventType === "binary"
@@ -645,7 +649,7 @@
                             chunks[chunk.chunkIndex] = binaryData;
                             receivedLength += binaryData.byteLength;
 
-                            debug(`Received chunk: ${chunk.chunkIndex + 1}/${fileMetadata.totalChunks} (with chunk size: ${binaryData.byteLength}) for ${fileMetadata.uuid}`);
+                            debug(`Received chunk: ${chunk.chunkIndex + 1}/${fileMetadata.totalChunks} (with chunk size: ${binaryData.byteLength}) for ${chunk.uuid}`);
                             break;
 
                         case "end":
@@ -656,7 +660,7 @@
                             debug(`File chunks received successfully.`);
 
                             handleBinaryCoValue(
-                                currentCoValue.uuid,
+                                chunk.uuid,
                                 receivedLength,
                                 contentLength,
                                 chunks,
@@ -689,10 +693,8 @@
                     position += chunk.length;
                 }
 
-                if (!currentCoValue) {
-                    currentCoValue = { uuid: uuid };
-                }
-                currentCoValue.file = {
+                const coValue = { uuid: uuid };
+                coValue.file = {
                     name: fileMetadata.fileName,
                     size: contentLength,
                     note: "** 50MB binary **",
@@ -701,7 +703,7 @@
                 info(
                     `Loaded (binary) data for: ${uuid} (${contentLength} bytes).`,
                 );
-                logCoValue(currentCoValue);
+                logCoValue(coValue);
             }
 
             async function loadCoValue(isBinary) {
@@ -734,8 +736,7 @@
                 const url = getEndpoint(undefined, isBinary);
                 const coValue = { uuid: crypto.randomUUID() };
                 coValue.lastUpdated = new Date();
-                setCurrentCoValue(coValue);
-
+                covaluesUpload.set(coValue.uuid, coValue);
                 debug(
                     `Attempting to add new CoValue with UUID: ${coValue.uuid} via ${url}.`,
                 );
@@ -872,16 +873,16 @@
                 }
 
                 const url = getEndpoint(uuid, isBinary);
-                currentCoValue = { uuid: uuid };
+                const coValue = { uuid: uuid };
                 info(
-                    `Mutating CoValue with UUID: ${currentCoValue.uuid} via ${url}...`,
+                    `Mutating CoValue with UUID: ${coValue.uuid} via ${url}...`,
                 );
 
                 try {
                     if (isBinary) {
                         const blob = generateBinaryData(); // ~100KB CoValue mutation
                         const blobInBase64 = await blobToBase64(blob);
-                        currentCoValue.file = {
+                        coValue.file = {
                             data: blobInBase64,
                             size: blobInBase64.length,
                             note: "** 100KB binary **",
@@ -892,8 +893,8 @@
                                 action: "PATCH",
                                 binary: isBinary,
                                 payload: {
-                                    uuid: currentCoValue.uuid,
-                                    file: currentCoValue.file,
+                                    uuid: coValue.uuid,
+                                    file: coValue.file,
                                 },
                             });
                         } else {
@@ -903,7 +904,7 @@
                                     "Content-Type": "application/json",
                                 },
                                 body: JSON.stringify({
-                                    file: currentCoValue.file,
+                                    file: coValue.file,
                                 }),
                             });
                             if (!response.ok) {
@@ -912,11 +913,11 @@
                                 );
                             }
                             info(
-                                `Mutated (binary) data for: ${currentCoValue.uuid}.`,
+                                `Mutated (binary) data for: ${coValue.uuid}.`,
                             );
                         }
                     } else {
-                        currentCoValue.title = window.faker
+                        coValue.title = window.faker
                             ? faker.lorem.words({ min: 4, max: 5 }) // ~50-byte CoValue mutation
                             : generateTextData();
 
@@ -924,7 +925,7 @@
                             sendWhenReady({
                                 action: "PATCH",
                                 binary: isBinary,
-                                payload: currentCoValue,
+                                payload: coValue,
                             });
                         } else {
                             const response = await fetch(url, {
@@ -933,7 +934,7 @@
                                     "Content-Type": "application/json",
                                 },
                                 body: JSON.stringify({
-                                    title: currentCoValue.title,
+                                    title: coValue.title,
                                 }),
                             });
                             if (!response.ok) {
@@ -942,11 +943,11 @@
                                 );
                             }
                             info(
-                                `Mutated (JSON) data for: ${currentCoValue.uuid}.`,
+                                `Mutated (JSON) data for: ${coValue.uuid}.`,
                             );
                         }
                     }
-                    logCoValue(currentCoValue);
+                    logCoValue(coValue);
                 } catch (error) {
                     info(`Error mutating CoValue: ${error.message}`);
                 }
