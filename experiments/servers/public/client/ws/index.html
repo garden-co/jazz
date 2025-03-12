@@ -100,10 +100,9 @@
             const useWebSocket = true;
             let binaryFlag = false;
             let isEnabled = true;
-            let currentCoValue = null;
             let source = null;
             let subscribedCoValue = null;
-            const covaluesUpload = new Map();
+            const createCoValuesMap = new Map();
 
             const RECONNECT_INTERVAL = 5000; // 5 seconds
             let socket;
@@ -242,13 +241,12 @@
             function loadCoValueViaWS(response) {
                 if (response.code === 200) {
                     // 200 - OK: here signifies a successful response for text CoValue
-                    currentCoValue = response.payload;
-                    info(`Loaded (JSON) data for: ${currentCoValue.uuid}.`);
-                    logCoValue(currentCoValue);
+                    const coValue = response.payload;
+                    info(`Loaded (JSON) data for: ${coValue.uuid}.`);
+                    logCoValue(coValue);
 
                 } else if (response.code === 202) {
                     // 202 - Accepted: here signifies the start of a binary CoValue download
-                    console.assert(response.payload.uuid === currentCoValue.uuid, `CoValue chunks were mixed up ${response.payload.uuid} !== ${currentCoValue.uuid}`);
                     // debug(`Received metadata for file: ${response.payload.fileName} (${response.payload.fileSize}) split into ${response.payload.totalChunks} chunks of ${response.payload.chunkSize} bytes.`);
                     handleJSONChunk(response.payload);
 
@@ -270,8 +268,8 @@
                     );
                 } else if (response.code === 201) {
                     // 201 - Created: here is acknowledgement of a textual CoValue creation or the final chunk of a binary CoValue upload
-                    // fetch covalue from Map
-                    const covalue = covaluesUpload.get(response.payload.uuid);
+                    // fetch the full covalue from the Map
+                    const covalue = createCoValuesMap.get(response.payload.uuid);
                     appendCoValue(covalue);
                     logCoValue(covalue);
                     info(
@@ -447,12 +445,7 @@
                     option.text = coValue.uuid;
                     coValueSelect.appendChild(option);
                     coValueSelect.value = option.value;
-                    setCurrentCoValue(coValue);
                 }
-            }
-
-            function setCurrentCoValue(coValue) {
-                currentCoValue = coValue;
             }
 
             function connect(uuid) {
@@ -622,9 +615,9 @@
 
                 } else {
                     const response = await fetch(url);
-                    currentCoValue = await response.json();
+                    const coValue = await response.json();
                     info(`Loaded (JSON) data for: ${uuid}.`);
-                    logCoValue(currentCoValue);
+                    logCoValue(coValue);
                 }
             }
 
@@ -714,7 +707,6 @@
                     info("Please, select a CoValue first.");
                     return;
                 }
-                setCurrentCoValue({ uuid: uuid });
 
                 try {
                     if (isWS()) {
@@ -736,7 +728,7 @@
                 const url = getEndpoint(undefined, isBinary);
                 const coValue = { uuid: crypto.randomUUID() };
                 coValue.lastUpdated = new Date();
-                covaluesUpload.set(coValue.uuid, coValue);
+                createCoValuesMap.set(coValue.uuid, coValue);
                 debug(
                     `Attempting to add new CoValue with UUID: ${coValue.uuid} via ${url}.`,
                 );
