@@ -43,7 +43,7 @@ The `createImage()` function:
 - Creates an `ImageDefinition` with the right properties
 - Generates a small placeholder for immediate display
 - Creates multiple resolution variants of your image
-- Returns the ID of the created `ImageDefinition`
+- Returns the created `ImageDefinition`
 
 ## Displaying Images with `ProgressiveImg`
 
@@ -109,14 +109,17 @@ import { useProgressiveImg } from "jazz-react";
 function CustomImageComponent({ image }) {
   const { src, isLoading, placeholderSrc } = useProgressiveImg(image);
   
+  // When image is loading, show a placeholder
   if (isLoading && placeholderSrc) {
     return <img src={placeholderSrc} alt="Loading..." className="blur-effect" />;
   }
-  
+
+  // When image is not available yet
   if (!src) {
     return <div className="image-loading-fallback">Loading image...</div>;
   }
   
+  // Full image display with custom overlay
   return (
     <div className="custom-image-wrapper">
       <img 
@@ -159,7 +162,7 @@ Behind the scenes, `ImageDefinition` is a specialized CoValue that stores:
 
 - The original image dimensions (`originalSize`)
 - An optional placeholder (`placeholderDataURL`) for immediate display
-- Multiple resolution variants of the same image as [`FileStream`s](./using-covalues/filestream)
+- Multiple resolution variants of the same image as [`FileStream`s](../using-covalues/filestreams)
 
 Each resolution is stored with a key in the format `"widthxheight"` (e.g., `"1920x1080"`, `"800x450"`).
 
