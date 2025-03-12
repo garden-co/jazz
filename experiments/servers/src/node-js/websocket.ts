@@ -116,6 +116,7 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
                             if (!filePath) {
                                 res.status(404).json({
                                     m: "CoValue binary file not found",
+                                    uuid: payload.uuid
                                 });
                                 return;
                             }
@@ -138,7 +139,7 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
                             res.status(200).json(covalue);
                         }
                     } else {
-                        res.status(404).json({ m: "CoValue not found" });
+                        res.status(404).json({ m: "CoValue not found", uuid: payload.uuid });
                     }
                     break;
 
@@ -150,10 +151,10 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
                             await fileManager.chunkFileUpload(payload, res);
                         } else {
                             addCoValue(covalues, payload);
-                            res.status(201).json({ m: "OK" });
+                            res.status(201).json({ m: "OK", uuid: payload.uuid });
                         }
                     } else {
-                        res.status(400).json({ m: "CoValue cannot be blank" });
+                        res.status(400).json({ m: "CoValue cannot be blank", uuid: payload.uuid });
                     }
                     break;
 
@@ -172,7 +173,7 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
                         } else {
                             updateCoValue(existingCovalue, partialCovalue);
                         }
-                        res.status(200).json({ m: "OK" });
+                        res.status(200).json({ m: "OK", uuid: payload.uuid });
 
                         // broadcast the mutation to clients
                         const event = events.get(uuid) as MutationEvent;
@@ -184,7 +185,7 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
                         );
                         res.status(200).action("MUTATION").broadcast(event);
                     } else {
-                        res.status(404).json({ m: "CoValue not found" });
+                        res.status(404).json({ m: "CoValue not found", uuid: payload.uuid });
                     }
                     break;
 
@@ -202,13 +203,13 @@ wss.on("connection", (ws: WebSocket, req: IncomingMessage) => {
                             `[Client-#${ua}] Closed the WebSocket for: ${subscriptionUuid}.`,
                         );
                     });
-                    res.status(200).json({ m: "OK" });
+                    res.status(200).json({ m: "OK", uuid: payload.uuid });
                     break;
 
                 default:
                     res.status(400)
                         .action("ERROR")
-                        .json({ m: "Unknown action" });
+                        .json({ m: "Unknown action", uuid: payload.uuid });
             }
         } catch (error) {
             logger.error("Error processing WebSocket message:", error);
