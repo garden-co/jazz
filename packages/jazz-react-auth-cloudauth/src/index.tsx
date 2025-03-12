@@ -15,7 +15,10 @@ import { useState } from "react";
 /**
  * @category Auth Providers
  */
-export function useCloudAuth(): {
+export function useCloudAuth(
+  baseUrl: string,
+  keyserver: string,
+): {
   readonly state: "signedIn" | "anonymous";
   readonly logIn: (session: Pick<Session, "user">) => Promise<void>;
   readonly signIn: (session: Pick<Session, "user">) => Promise<void>;
@@ -23,8 +26,7 @@ export function useCloudAuth(): {
 } {
   const context = useJazzContext();
   const authSecretStorage = useAuthSecretStorage();
-  const authClient: AuthClient = newAuthClient("http://localhost:3000");
-  const keyserver = "http://localhost:6189";
+  const authClient: AuthClient = newAuthClient(baseUrl);
 
   if ("guest" in context) {
     throw new Error("Cloud auth is not supported in guest mode");
@@ -57,9 +59,11 @@ export function useCloudAuth(): {
 
 export const CloudAuthBasicUI = (props: {
   appName: string;
+  baseUrl: string;
+  keyserver: string;
   children?: React.ReactNode;
 }) => {
-  const auth = useCloudAuth();
+  const auth = useCloudAuth(props.baseUrl, props.keyserver);
 
   const [name, setName] = useState<string>("");
   const [email, setEmail] = useState<string>("");
@@ -108,22 +112,34 @@ export const CloudAuthBasicUI = (props: {
             (e.nativeEvent as SubmitEvent).submitter?.id ?? "";
           e.preventDefault();
           if (eventSubmitter == "sign-up") {
-            await authClient.signUp.email({
-              email,
-              password,
-              name,
-              accountID: "",
-              accountSecret: "",
-            });
-            const session = (await authClient.getSession()).data;
-            if (session) await signIn(session);
+            await authClient.signUp.email(
+              {
+                email,
+                password,
+                name,
+                accountID: "",
+                accountSecret: "",
+              },
+              {
+                onSuccess: async () => {
+                  const session = (await authClient.getSession()).data;
+                  if (session) await signIn(session);
+                },
+              },
+            );
           } else if (eventSubmitter == "sign-in") {
-            await authClient.signIn.email({
-              email,
-              password,
-            });
-            const session = (await authClient.getSession()).data;
-            if (session) await logIn(session);
+            await authClient.signIn.email(
+              {
+                email,
+                password,
+              },
+              {
+                onSuccess: async () => {
+                  const session = (await authClient.getSession()).data;
+                  if (session) await logIn(session);
+                },
+              },
+            );
           }
         }}
       >

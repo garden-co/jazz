@@ -13,7 +13,11 @@ function JazzAndAuth({ children }: { children: React.ReactNode }) {
         when: "signedUp",
       }}
     >
-      <CloudAuthBasicUI appName="Jazz Minimal Auth Passkey Example">
+      <CloudAuthBasicUI
+        appName="Jazz Minimal CloudAuth Example"
+        baseUrl="http://localhost:3000"
+        keyserver="http://localhost:6189"
+      >
         {children}
       </CloudAuthBasicUI>
     </JazzProvider>
