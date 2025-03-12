@@ -117,15 +117,15 @@ export class FileStreamManager {
             );
             if (uploadState.receivedChunks.size === totalChunks) {
                 await this.handleCompletedUpload(uuid, uploadState);
-                res.status(201).json({ m: "OK" });
+                res.status(201).json({ m: "OK", uuid: uuid });
             } else {
-                res.status(200).json({ m: "OK" });
+                res.status(200).json({ m: "OK", uuid: uuid });
             }
         } catch (err: unknown) {
             const msg = `[POST] Error processing chunk ${chunkIndex} for file '${uploadState.originalFilename}'`;
             if (err instanceof Error) logger.error(err.stack);
             logger.error(msg, err);
-            res.status(500).json({ m: msg });
+            res.status(500).json({ m: msg, uuid: uuid });
         }
     }
 
