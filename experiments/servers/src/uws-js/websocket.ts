@@ -58,8 +58,8 @@ const app = uWS.SSLApp({
 }).ws("/*", {
     /* Options */
     compression: uWS.DISABLED,
-    maxPayloadLength: 50 * 1024 * 1024,
-    maxBackpressure: 51 * 1024 * 1024,
+    maxPayloadLength: 70 * 1024 * 1024,
+    maxBackpressure: 71 * 1024 * 1024,
     sendPingsAutomatically: true,
     idleTimeout: 15,
 
@@ -119,6 +119,7 @@ const app = uWS.SSLApp({
                             if (!filePath) {
                                 res.status(404).json({
                                     m: "CoValue binary file not found",
+                                    uuid: payload.uuid
                                 });
                                 return;
                             }
@@ -141,7 +142,7 @@ const app = uWS.SSLApp({
                             res.status(200).json(covalue);
                         }
                     } else {
-                        res.status(404).json({ m: "CoValue not found" });
+                        res.status(404).json({ m: "CoValue not found", uuid: payload.uuid });
                     }
                     break;
 
@@ -153,10 +154,10 @@ const app = uWS.SSLApp({
                             fileManager.chunkFileUpload(payload, res);
                         } else {
                             addCoValue(covalues, payload);
-                            res.status(201).json({ m: "OK" });
+                            res.status(201).json({ m: "OK", uuid: payload.uuid });
                         }
                     } else {
-                        res.status(400).json({ m: "CoValue cannot be blank" });
+                        res.status(400).json({ m: "CoValue cannot be blank", uuid: payload.uuid });
                     }
                     break;
 
@@ -175,7 +176,7 @@ const app = uWS.SSLApp({
                         } else {
                             updateCoValue(existingCovalue, partialCovalue);
                         }
-                        res.status(200).json({ m: "OK" });
+                        res.status(200).json({ m: "OK", uuid: payload.uuid });
 
                         // broadcast the mutation to clients
                         const event = events.get(uuid) as MutationEvent;
@@ -185,7 +186,7 @@ const app = uWS.SSLApp({
                         );
                         res.status(200).action("MUTATION").broadcast(event);
                     } else {
-                        res.status(404).json({ m: "CoValue not found" });
+                        res.status(404).json({ m: "CoValue not found", uuid: payload.uuid });
                     }
                     break;
 
@@ -201,13 +202,13 @@ const app = uWS.SSLApp({
                     // ws.subscribe(subscriptionUuid);
                     // ws.subscribe() is a no-op here (i.e. inside `message:` handler). Only works in `open:` handler
 
-                    res.status(200).json({ m: "OK" });
+                    res.status(200).json({ m: "OK", uuid: payload.uuid });
                     break;
 
                 default:
                     res.status(400)
                         .action("ERROR")
-                        .json({ m: "Unknown action" });
+                        .json({ m: "Unknown action", uuid: payload.uuid });
             }
         } catch (error) {
             logger.error("Error processing WebSocket message:", error);
