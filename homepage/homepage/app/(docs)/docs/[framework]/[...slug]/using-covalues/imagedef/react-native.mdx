@@ -11,7 +11,7 @@ Jazz offers several tools to work with images in React Native:
 - [`ProgressiveImg`](#displaying-images-with-progressiveimg) - React component to display an image with progressive loading
 - [`useProgressiveImg`](#using-useprogressiveimg-hook) - React hook to load an image in your own component
 
-For a complete implementation example, see the [React Native Clerk Chat example](https://github.com/gardencmp/jazz/tree/main/examples/chat-rn-clerk) in the Jazz repository.
+For an example of use, see our [React Native Clerk Chat example](https://github.com/gardencmp/jazz/tree/main/examples/chat-rn-clerk).
 
 ## Creating Images
 
@@ -50,7 +50,7 @@ async function handleImagePicker() {
 ```
 </CodeGroup>
 
-The `createImage()` function for React Native:
+The `createImage()` function:
 - Creates an `ImageDefinition` with the right properties
 - Generates a small placeholder for immediate display
 - Creates multiple resolution variants of your image
@@ -58,14 +58,14 @@ The `createImage()` function for React Native:
 
 ### Configuration Options
 
-You can configure the function with additional options:
+You can configure `createImage()` with additional options:
 
 <CodeGroup>
 ```tsx
 // Configuration options
 const options = {
-  owner: me.profile._owner, // Owner for access control
-  maxSize: 1024             // Maximum resolution to generate (256, 1024, 2048, or undefined)
+  owner: me,                // Owner for access control
+  maxSize: 1024             // Maximum resolution to generate
 };
 
 // Setting maxSize controls which resolutions are generated:
@@ -89,7 +89,10 @@ import { Image, StyleSheet } from "react-native";
 
 function GalleryView({ image }) {
   return (
-    <ProgressiveImg image={image} maxWidth={800}>
+    <ProgressiveImg
+      image={image}  // The image definition to load
+      maxWidth={800} // Limit to resolutions up to 800px wide
+    >
       {({ src }) => (
         <Image 
           source={{ uri: src }} 
@@ -117,28 +120,6 @@ The `ProgressiveImg` component handles:
 - Progressive enhancement as higher resolutions become available
 - Cleaning up resources when unmounted
 
-### Customizing Image Display
-
-You can customize the display with the render prop pattern:
-
-<CodeGroup>
-```tsx
-<ProgressiveImg image={image} maxWidth={800}>
-  {({ src, res, originalSize }) => (
-    <Image 
-      source={{ uri: src }}
-      style={{
-        width: '100%',
-        height: 300,
-        borderRadius: 4,
-      }}
-      resizeMode="cover"
-    />
-  )}
-</ProgressiveImg>
-```
-</CodeGroup>
-
 ## Using `useProgressiveImg` Hook
 
 For more control over image loading, you can implement your own progressive image component:
@@ -150,15 +131,15 @@ import { Image, View, Text, ActivityIndicator } from "react-native";
 
 function CustomImageComponent({ image }) {
   const {
-    src, // Data URI containing the image data as a base64 string,
-         // or a placeholder image URI
-    res, // The current resolution
+    src,         // Data URI containing the image data as a base64 string,
+                 // or a placeholder image URI
+    res,         // The current resolution
     originalSize // The original size of the image
   } = useProgressiveImg({
-    image: image,
-    maxWidth: 800
+    image: image,  // The image definition to load
+    maxWidth: 800  // Limit to resolutions up to 800px wide
   });
-  
+
   // When image is not available yet
   if (!src) {
     return (
@@ -201,19 +182,6 @@ function CustomImageComponent({ image }) {
     </View>
   );
 }
-```
-</CodeGroup>
-
-### Configuration Options
-
-You can configure the hook with:
-
-<CodeGroup>
-```tsx
-const imageData = useProgressiveImg({
-  image: imageDefinition, // The image definition to load
-  maxWidth: 800, // Limit to resolutions up to 800px wide
-});
 ```
 </CodeGroup>
 

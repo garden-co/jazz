@@ -44,6 +44,28 @@ The `createImage()` function:
 - Creates multiple resolution variants of your image
 - Returns the ID of the created `ImageDefinition`
 
+### Configuration Options
+
+You can configure `createImage()` with additional options:
+
+<CodeGroup>
+```tsx
+// Configuration options
+const options = {
+  owner: me,                // Owner for access control
+  maxSize: 1024             // Maximum resolution to generate
+};
+
+// Setting maxSize controls which resolutions are generated:
+// 256: Only creates the smallest resolution (256px on longest side)
+// 1024: Creates 256px and 1024px resolutions
+// 2048: Creates 256px, 1024px, and 2048px resolutions
+// undefined: Creates all resolutions including the original size
+
+const image = await createImage(file, options);
+```
+</CodeGroup>
+
 ## Creating ImageDefinitions
 
 Create an `ImageDefinition` by specifying the original dimensions and an optional placeholder:
