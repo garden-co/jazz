@@ -49,5 +49,18 @@ export class JazzAccount extends Account {
         group,
       );
     }
+
+    if (this.profile === undefined) {
+      const group = Group.create();
+      group.addMember("everyone", "reader"); // The profile info are visible by everyone
+
+      this.profile = JazzProfile.create(
+        {
+          name: "Anonymous user",
+          firstName: "",
+        },
+        group,
+      );
+    }
   }
 }
