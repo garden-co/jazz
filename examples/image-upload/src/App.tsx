@@ -3,7 +3,7 @@ import ImageUpload from "./ImageUpload.tsx";
 function App() {
   return (
     <>
-      <main className="container">
+      <main className="container py-16">
         <ImageUpload />
       </main>
     </>

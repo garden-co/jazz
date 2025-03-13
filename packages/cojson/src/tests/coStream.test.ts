@@ -1,8 +1,14 @@
 import { describe, expect, test } from "vitest";
 import { expectStream } from "../coValue.js";
 import { MAX_RECOMMENDED_TX_SIZE } from "../coValueCore.js";
-import { RawBinaryCoStream } from "../coValues/coStream.js";
+import {
+  BinaryStreamItem,
+  CoStreamItem,
+  RawBinaryCoStream,
+  RawCoStreamView,
+} from "../coValues/coStream.js";
 import { WasmCrypto } from "../crypto/WasmCrypto.js";
+import { SessionID } from "../ids.js";
 import { LocalNode } from "../localNode.js";
 import { randomAnonymousAccountAndSessionID } from "./testUtils.js";
 
@@ -297,5 +303,116 @@ describe("isBinaryStreamEnded", () => {
     const stream = setup();
 
     expect(stream.isBinaryStreamEnded()).toBe(false);
+  });
+});
+
+describe("Binary stream order", () => {
+  class TestStreamView extends RawCoStreamView<BinaryStreamItem> {
+    public testCompareItems(
+      a: CoStreamItem<BinaryStreamItem>,
+      b: CoStreamItem<BinaryStreamItem>,
+    ): number {
+      return this.compareStreamItems(a, b);
+    }
+  }
+
+  test("sorts by madeAt timestamp first", () => {
+    const node = new LocalNode(...randomAnonymousAccountAndSessionID(), Crypto);
+    const coValue = node.createCoValue({
+      type: "costream",
+      ruleset: { type: "unsafeAllowAll" },
+      meta: { type: "binary" },
+      ...Crypto.createdNowUnique(),
+    });
+
+    const content = coValue.getCurrentContent();
+    if (!(content instanceof RawBinaryCoStream)) {
+      throw new Error("Expected binary stream");
+    }
+
+    const testView = new TestStreamView(content.core);
+
+    const itemA: CoStreamItem<BinaryStreamItem> = {
+      value: { type: "start", mimeType: "text/plain" },
+      madeAt: 100,
+      tx: { sessionID: node.currentSessionID, txIndex: 0 },
+    };
+
+    const itemB: CoStreamItem<BinaryStreamItem> = {
+      value: { type: "chunk", chunk: "binary_UAwECAQ" },
+      madeAt: 200,
+      tx: { sessionID: node.currentSessionID, txIndex: 1 },
+    };
+
+    expect(testView.testCompareItems(itemA, itemB)).toBeLessThan(0);
+    expect(testView.testCompareItems(itemB, itemA)).toBeGreaterThan(0);
+  });
+
+  test("sorts by sessionID when timestamps are equal", () => {
+    const node = new LocalNode(...randomAnonymousAccountAndSessionID(), Crypto);
+    const coValue = node.createCoValue({
+      type: "costream",
+      ruleset: { type: "unsafeAllowAll" },
+      meta: { type: "binary" },
+      ...Crypto.createdNowUnique(),
+    });
+
+    const content = coValue.getCurrentContent();
+    if (!(content instanceof RawBinaryCoStream)) {
+      throw new Error("Expected binary stream");
+    }
+
+    const testView = new TestStreamView(content.core);
+    const timestamp = Date.now();
+
+    const itemA: CoStreamItem<BinaryStreamItem> = {
+      value: { type: "start", mimeType: "text/plain" },
+      madeAt: timestamp,
+      tx: { sessionID: "a" as SessionID, txIndex: 0 },
+    };
+
+    const itemB: CoStreamItem<BinaryStreamItem> = {
+      value: { type: "chunk", chunk: "binary_UAwECAQ" },
+      madeAt: timestamp,
+      tx: { sessionID: "b" as SessionID, txIndex: 0 },
+    };
+
+    expect(testView.testCompareItems(itemA, itemB)).toBeLessThan(0);
+    expect(testView.testCompareItems(itemB, itemA)).toBeGreaterThan(0);
+  });
+
+  test("sorts by txIndex when timestamps and sessionIDs are equal", () => {
+    const node = new LocalNode(...randomAnonymousAccountAndSessionID(), Crypto);
+    const coValue = node.createCoValue({
+      type: "costream",
+      ruleset: { type: "unsafeAllowAll" },
+      meta: { type: "binary" },
+      ...Crypto.createdNowUnique(),
+    });
+
+    const content = coValue.getCurrentContent();
+    if (!(content instanceof RawBinaryCoStream)) {
+      throw new Error("Expected binary stream");
+    }
+
+    const testView = new TestStreamView(content.core);
+    const timestamp = Date.now();
+    const sessionID = node.currentSessionID;
+
+    const itemA: CoStreamItem<BinaryStreamItem> = {
+      value: { type: "start", mimeType: "text/plain" },
+      madeAt: timestamp,
+      tx: { sessionID, txIndex: 0 },
+    };
+
+    const itemB: CoStreamItem<BinaryStreamItem> = {
+      value: { type: "chunk", chunk: "binary_UAwECAQ" },
+      madeAt: timestamp,
+      tx: { sessionID, txIndex: 1 },
+    };
+
+    // Expect itemA to be before itemB
+    expect(testView.testCompareItems(itemA, itemB)).toBeLessThan(0);
+    expect(testView.testCompareItems(itemB, itemA)).toBeGreaterThan(0);
   });
 });
