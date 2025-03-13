@@ -103,6 +103,7 @@
             let source = null;
             let subscribedCoValue = null;
             const createCoValuesMap = new Map();
+            const loadCoValuesMap = new Map();
 
             const RECONNECT_INTERVAL = 5000; // 5 seconds
             let socket;
@@ -111,18 +112,6 @@
 
             let retryAttempts = 0;
             const maxRetries = 5;
-
-            let chunks = [];
-            let fileMetadata = null;
-            let contentLength = 0;
-            let receivedLength = 0;
-
-            function resetVars() {
-                contentLength = 0;
-                receivedLength = 0;
-                fileMetadata = null;
-                chunks = [];
-            }
 
             function sendWhenReady(data) {
                 const ws = getWebSocket();
@@ -622,44 +611,59 @@
             }
 
             function handleJSONChunk(chunk) {
+                let state = loadCoValuesMap.get(chunk.uuid);
                 try {
                     switch (chunk.type) {
                         case "start":
-                            fileMetadata = chunk;
-                            // Start of a stream. Allocate a fixed array.
-                            chunks = new Array(chunk.totalChunks);
-                            contentLength = chunk.fileSize;
-                            debug(`Received metadata for file: ${chunk.fileName} (${chunk.fileSize}) split into ${chunk.totalChunks} chunks of ${chunk.chunkSize} bytes.`);
+                            state = {
+                                fileMetadata: null,
+                                chunks: [],
+                                contentLength: 0,
+                                receivedLength: 0
+                            };
+                            loadCoValuesMap.set(chunk.uuid, state);
+
+                            debug(`Received file metadata for CoValue: ${chunk.uuid} => ${chunk.fileName} (${chunk.fileSize}) split into ${chunk.totalChunks} chunks of ${chunk.chunkSize} bytes.`);
+                            state.fileMetadata = { ...chunk };
+
+                            // Start of a streaming download.
+                            state.chunks = new Array(chunk.totalChunks);
+                            state.contentLength = chunk.fileSize;
                             break;
 
                         case "chunk":
-                            // Process a data chunk
-                            if (!fileMetadata) {
-                                throw new Error("Received file chunk before file metadata");
+                            if (!state) {
+                                throw new Error(`Received file chunk before file metadata for CoValue: ${chunk.uuid}`);
                             }
 
                             const binaryData = base64ToUint8Array(chunk.data);
-                            chunks[chunk.chunkIndex] = binaryData;
-                            receivedLength += binaryData.byteLength;
+                            state.chunks[chunk.chunkIndex] = binaryData;
+                            state.receivedLength += binaryData.byteLength;
 
-                            debug(`Received chunk: ${chunk.chunkIndex + 1}/${fileMetadata.totalChunks} (with chunk size: ${binaryData.byteLength}) for ${chunk.uuid}`);
+                            debug(`Received chunk: ${chunk.chunkIndex + 1}/${state.fileMetadata.totalChunks} (with chunk size: ${binaryData.byteLength}) for CoValue ${chunk.uuid}`);
                             break;
 
                         case "end":
                             // End of stream
-                            if (chunks.some(chunk => chunk === null)) {
-                                throw new Error(`Some chunks are missing for CoValue ${fileMetadata.uuid}`);
+                            if (!state) {
+                                throw new Error(`Received end chunk before file metadata for CoValue: ${chunk.uuid}`);
                             }
-                            debug(`File chunks received successfully.`);
+
+                            if (state.chunks.some(chunk => chunk === undefined || chunk === null)) {
+                                throw new Error(`Some chunks are missing for CoValue ${state.fileMetadata.uuid}`);
+                            }
+                            debug(`File chunks for CoValue: ${chunk.uuid} downloaded successfully.`);
 
                             handleBinaryCoValue(
                                 chunk.uuid,
-                                receivedLength,
-                                contentLength,
-                                chunks,
+                                state.receivedLength,
+                                state.contentLength,
+                                state.chunks,
+                                state.fileMetadata
                             );
 
-                            resetVars();
+                            // Clean up
+                            loadCoValuesMap.delete(chunk.uuid);
                             break;
 
                         case "error":
@@ -677,6 +681,7 @@
                 receivedLength,
                 contentLength,
                 chunks,
+                fileMetadata
             ) {
                 console.assert(contentLength === receivedLength, `Some chunks were lost because ${contentLength} !== ${receivedLength}`);
                 let binaryData = new Uint8Array(contentLength);
