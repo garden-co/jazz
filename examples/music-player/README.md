@@ -13,7 +13,7 @@ You can either
 
 Create a new Jazz project, and use this example as a template.
 ```bash
-npx create-jazz-app@latest --example music-player --project-name music-player
+npx create-jazz-app@latest music-player-app --example music-player
 ```
 
 Go to the new project directory.

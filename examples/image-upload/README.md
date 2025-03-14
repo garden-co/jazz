@@ -15,7 +15,7 @@ You can either
 
 Create a new Jazz project, and use this example as a template.
 ```bash
-npx create-jazz-app@latest --example image-upload --project-name image-upload
+npx create-jazz-app@latest image-upload-app --example image-upload
 ```
 
 Go to the new project directory.
