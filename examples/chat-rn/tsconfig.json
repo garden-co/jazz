@@ -1,8 +1,3 @@
 {
-  "extends": "expo/tsconfig.base",
-  "compilerOptions": {
-    "strict": true,
-    "moduleResolution": "bundler"
-  },
-  "exclude": ["src/tests"]
+  "extends": "@react-native/typescript-config/tsconfig.json"
 }

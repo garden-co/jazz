@@ -11,37 +11,24 @@
       "react-native": "./dist/index.js",
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
-    },
-    "./crypto": {
-      "react-native": "./dist/crypto/index.js",
-      "types": "./dist/crypto/index.d.ts",
-      "default": "./dist/crypto/index.js"
-    },
-    "./testing": {
-      "react-native": "./dist/testing.js",
-      "types": "./dist/testing.d.ts",
-      "default": "./dist/testing.js"
     }
   },
   "license": "MIT",
   "dependencies": {
+    "@op-engineering/op-sqlite": "^11.4.8",
     "@scure/base": "1.2.1",
     "cojson": "workspace:*",
-    "cojson-storage-rn-sqlite": "workspace:*",
-    "cojson-transport-ws": "workspace:*",
-    "jazz-react-core": "workspace:*",
+    "cojson-storage": "workspace:*",
+    "jazz-react-native-core": "workspace:*",
     "jazz-tools": "workspace:*",
-    "react-native-nitro-modules": "0.21.0",
-    "react-native-quick-crypto": "1.0.0-beta.12"
+    "react-native-mmkv": "^3.2.0"
   },
   "peerDependencies": {
     "@react-native-community/netinfo": "*",
-    "expo-secure-store": "*",
     "react-native": "*"
   },
   "devDependencies": {
     "@react-native-community/netinfo": "^11.4.1",
-    "expo-secure-store": "~14.0.0",
     "react-native": "~0.76.3",
     "typescript": "~5.6.2"
   },

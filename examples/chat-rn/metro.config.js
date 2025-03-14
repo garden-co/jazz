@@ -1,35 +1,40 @@
-// Learn more https://docs.expo.dev/guides/monorepos
-const { getDefaultConfig } = require("expo/metro-config");
-const { withNativeWind } = require("nativewind/metro");
-const { FileStore } = require("metro-cache");
+const { getDefaultConfig, mergeConfig } = require("@react-native/metro-config");
+// const blacklist = require("metro-config/src/defaults/exclusionList");
+const escape = require("escape-string-regexp");
 const path = require("path");
 
 // eslint-disable-next-line no-undef
 const projectRoot = __dirname;
 const workspaceRoot = path.resolve(projectRoot, "../..");
+// const dupeDeps = ["react", "react-native"];
 
-const config = getDefaultConfig(projectRoot, { isCSSEnabled: true });
+/**
+ * Metro configuration
+ * https://reactnative.dev/docs/metro
+ *
+ * @type {import('@react-native/metro-config').MetroConfig}
+ */
+const config = {
+  projectRoot,
+  resolver: {
+    // monorepo node_modules paths
+    nodeModulesPaths: [
+      path.resolve(projectRoot, "node_modules"),
+      path.resolve(workspaceRoot, "node_modules"),
+    ],
+    // // ensure only one version is loaded for dupeDeps (not the one in workspaceRoot)
+    // blacklistRE: blacklist(
+    //   dupeDeps.map(
+    //     (dep) =>
+    //       new RegExp(
+    //         `^${escape(path.join(workspaceRoot, "node_modules", dep))}$`,
+    //       ),
+    //   ),
+    // ),
+    // extensions
+    sourceExts: ["mjs", "js", "json", "ts", "tsx"],
+  },
+  watchFolders: [workspaceRoot],
+};
 
-// Since we are using pnpm, we have to setup the monorepo manually for Metro
-// #1 - Watch all files in the monorepo
-config.watchFolders = [workspaceRoot];
-// #2 - Try resolving with project modules first, then workspace modules
-config.resolver.nodeModulesPaths = [
-  path.resolve(projectRoot, "node_modules"),
-  path.resolve(workspaceRoot, "node_modules"),
-];
-config.resolver.sourceExts = ["mjs", "js", "json", "ts", "tsx"];
-config.resolver.requireCycleIgnorePatterns = [
-  /(^|\/|\\)node_modules($|\/|\\)/,
-  /(^|\/|\\)packages($|\/|\\)/,
-];
-
-// Use turborepo to restore the cache when possible
-config.cacheStores = [
-  new FileStore({
-    root: path.join(projectRoot, "node_modules", ".cache", "metro"),
-  }),
-];
-
-// module.exports = config;
-module.exports = withNativeWind(config, { input: "./global.css" });
+module.exports = mergeConfig(getDefaultConfig(__dirname), config);
