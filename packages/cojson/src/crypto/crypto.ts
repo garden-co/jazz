@@ -1,4 +1,3 @@
-import { randomBytes } from "@noble/ciphers/webcrypto/utils";
 import { base58 } from "@scure/base";
 import { RawAccountID } from "../coValues/account.js";
 import { AgentID, RawCoID, TransactionID } from "../ids.js";
@@ -6,6 +5,10 @@ import { SessionID } from "../ids.js";
 import { Stringified, parseJSON, stableStringify } from "../jsonStringify.js";
 import { JsonValue } from "../jsonValue.js";
 import { logger } from "../logger.js";
+
+function randomBytes(bytesLength = 32): Uint8Array {
+  return crypto.getRandomValues(new Uint8Array(bytesLength));
+}
 
 export type SignerSecret = `signerSecret_z${string}`;
 export type SignerID = `signer_z${string}`;
