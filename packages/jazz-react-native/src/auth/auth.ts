@@ -1,6 +1,7 @@
 import KvStoreContext from "../storage/kv-store-context.js";
 
 export * from "./DemoAuthUI.js";
+export * from "./SecretURLAuth.js";
 
 export function clearUserCredentials() {
   const kvStore = KvStoreContext.getInstance().getStorage();

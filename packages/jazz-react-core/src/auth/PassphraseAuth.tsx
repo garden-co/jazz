@@ -8,7 +8,7 @@ import { useIsAuthenticated } from "../hooks.js";
  *
  * @example
  * ```ts
- * const auth = usePassphraseAuth({ appName, appHostname, wordlist });
+ * const auth = usePassphraseAuth();
  * ```
  *
  * @category Auth Providers

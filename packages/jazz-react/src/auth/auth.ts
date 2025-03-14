@@ -9,3 +9,4 @@ export {
   useDemoAuth,
   usePassphraseAuth,
 } from "jazz-react-core";
+export { useSecretURLAuth, useAcceptAuthInvite } from "./SecretURLAuth.js";
