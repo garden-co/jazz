@@ -124,15 +124,16 @@ describe("CoFeed resolution", async () => {
         crypto: Crypto,
       });
 
-    const loadedStream = await TestStream.load(stream.id, meOnSecondPeer, []);
+    const loadedStream = await TestStream.load(stream.id, {
+      loadAs: meOnSecondPeer,
+    });
 
     expect(loadedStream?.[me.id]?.value).toEqual(null);
     expect(loadedStream?.[me.id]?.ref?.id).toEqual(stream[me.id]?.value?.id);
 
     const loadedNestedStream = await NestedStream.load(
       stream[me.id]!.value!.id,
-      meOnSecondPeer,
-      [],
+      { loadAs: meOnSecondPeer },
     );
 
     // expect(loadedStream?.[me.id]?.value).toEqual(loadedNestedStream);
@@ -148,8 +149,7 @@ describe("CoFeed resolution", async () => {
 
     const loadedTwiceNestedStream = await TwiceNestedStream.load(
       stream[me.id]!.value![me.id]!.value!.id,
-      meOnSecondPeer,
-      [],
+      { loadAs: meOnSecondPeer },
     );
 
     // expect(loadedStream?.[me.id]?.value?.[me.id]?.value).toEqual(
@@ -212,9 +212,13 @@ describe("CoFeed resolution", async () => {
 
     const queue = new cojsonInternals.Channel();
 
-    TestStream.subscribe(stream.id, meOnSecondPeer, [], (subscribedStream) => {
-      void queue.push(subscribedStream);
-    });
+    TestStream.subscribe(
+      stream.id,
+      { loadAs: meOnSecondPeer },
+      (subscribedStream) => {
+        void queue.push(subscribedStream);
+      },
+    );
 
     const update1 = (await queue.next()).value;
     expect(update1[me.id]?.value).toEqual(null);
@@ -330,7 +334,9 @@ describe("FileStream loading & Subscription", async () => {
         crypto: Crypto,
       });
 
-    const loadedStream = await FileStream.load(stream.id, meOnSecondPeer, []);
+    const loadedStream = await FileStream.load(stream.id, {
+      loadAs: meOnSecondPeer,
+    });
 
     expect(loadedStream?.getChunks()).toEqual({
       mimeType: "text/plain",
@@ -364,9 +370,13 @@ describe("FileStream loading & Subscription", async () => {
 
     const queue = new cojsonInternals.Channel();
 
-    FileStream.subscribe(stream.id, meOnSecondPeer, [], (subscribedStream) => {
-      void queue.push(subscribedStream);
-    });
+    FileStream.subscribe(
+      stream.id,
+      { loadAs: meOnSecondPeer },
+      (subscribedStream) => {
+        void queue.push(subscribedStream);
+      },
+    );
 
     const update1 = (await queue.next()).value;
     expect(update1.getChunks()).toBe(undefined);
@@ -435,9 +445,7 @@ describe("FileStream.loadAsBlob", async () => {
     const { stream, me } = await setup();
     stream.push(new Uint8Array([1]));
 
-    const promise = FileStream.loadAsBlob(stream.id, me);
-
-    await stream.ensureLoaded([]);
+    const promise = FileStream.loadAsBlob(stream.id, { loadAs: me });
 
     stream.push(new Uint8Array([2]));
     stream.end();
@@ -453,16 +461,15 @@ describe("FileStream.loadAsBlob", async () => {
     const { stream, me } = await setup();
     stream.push(new Uint8Array([1]));
 
-    const promise = FileStream.loadAsBlob(stream.id, me, {
+    const promise = FileStream.loadAsBlob(stream.id, {
+      loadAs: me,
       allowUnfinished: true,
     });
 
-    await stream.ensureLoaded([]);
+    const blob = await promise;
 
     stream.push(new Uint8Array([2]));
     stream.end();
-
-    const blob = await promise;
 
     // The promise resolves before the stream is ended
     // so we get a blob only with the first chunk

@@ -11,7 +11,7 @@ function getIdParam() {
 
 export function ConcurrentChanges() {
   const [id, setId] = useState(getIdParam);
-  const counter = useCoState(Counter, id, []);
+  const counter = useCoState(Counter, id);
   const { me } = useAccount();
 
   useEffect(() => {

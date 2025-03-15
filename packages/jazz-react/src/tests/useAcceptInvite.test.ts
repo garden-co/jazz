@@ -46,7 +46,9 @@ describe("useAcceptInvite", () => {
       expect(acceptedId).toBeDefined();
     });
 
-    const accepted = await TestMap.load(acceptedId!, account, {});
+    const accepted = await TestMap.load(acceptedId!, {
+      loadAs: account,
+    });
 
     expect(accepted?.value).toEqual("hello");
   });

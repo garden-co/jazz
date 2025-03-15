@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 
-import { Account, CoMap, DepthsIn, co } from "jazz-tools";
+import { Account, CoMap, RefsToResolve, co } from "jazz-tools";
 import { describe, expect, it } from "vitest";
 import { useAccountOrGuest } from "../index.js";
 import { createJazzTestAccount, createJazzTestGuest } from "../testing.js";
@@ -46,8 +46,10 @@ describe("useAccountOrGuest", () => {
 
     const { result } = renderHook(
       () =>
-        useAccountOrGuest<AccountSchema, DepthsIn<AccountSchema>>({
-          root: {},
+        useAccountOrGuest<AccountSchema, RefsToResolve<{ root: true }>>({
+          resolve: {
+            root: true,
+          },
         }),
       {
         account,
@@ -64,7 +66,9 @@ describe("useAccountOrGuest", () => {
     const { result } = renderHook(
       () =>
         useAccountOrGuest({
-          root: {},
+          resolve: {
+            root: true,
+          },
         }),
       {
         account,

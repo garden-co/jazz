@@ -66,7 +66,9 @@ export class DemoAuth {
     }
 
     const currentAccount = await Account.getMe().ensureLoaded({
-      profile: {},
+      resolve: {
+        profile: true,
+      },
     });
 
     currentAccount.profile.name = username;

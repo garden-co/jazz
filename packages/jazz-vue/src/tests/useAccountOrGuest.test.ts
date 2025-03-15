@@ -51,7 +51,9 @@ describe("useAccountOrGuest", () => {
     const [result] = withJazzTestSetup(
       () =>
         useAccountOrGuest({
-          root: {},
+          resolve: {
+            root: true,
+          },
         }),
       {
         account,
@@ -68,7 +70,9 @@ describe("useAccountOrGuest", () => {
     const [result] = withJazzTestSetup(
       () =>
         useAccountOrGuest({
-          root: {},
+          resolve: {
+            root: true,
+          },
         }),
       {
         account,
