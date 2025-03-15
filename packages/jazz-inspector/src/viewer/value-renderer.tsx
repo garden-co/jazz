@@ -17,32 +17,24 @@ export function ValueRenderer({
   compact?: boolean;
   onCoIDClick?: (childNode: CoID<RawCoValue>) => void;
 }) {
+  const [isExpanded, setIsExpanded] = useState(false);
+
   if (typeof json === "undefined" || json === undefined) {
-    return <span style={{ color: "#9CA3AF" }}>undefined</span>;
+    return <span className="text-gray-400">undefined</span>;
   }
 
   if (json === null) {
-    return <span style={{ color: "#9CA3AF" }}>null</span>;
+    return <span className="text-gray-400">null</span>;
   }
 
   if (typeof json === "string" && json.startsWith("co_")) {
-    const linkStyle = onCoIDClick
-      ? {
-          color: "#3B82F6",
-          cursor: "pointer",
-          display: "inline-flex",
-          gap: "0.25rem",
-          alignItems: "center",
-        }
-      : {
-          display: "inline-flex",
-          gap: "0.25rem",
-          alignItems: "center",
-        };
+    const linkClasses = onCoIDClick
+      ? "text-blue-500 cursor-pointer inline-flex gap-1 items-center"
+      : "inline-flex gap-1 items-center";
 
     return (
       <span
-        style={linkStyle}
+        className={linkClasses}
         onClick={() => {
           onCoIDClick?.(json as CoID<RawCoValue>);
         }}
@@ -55,33 +47,22 @@ export function ValueRenderer({
 
   if (typeof json === "string") {
     return (
-      <span style={{ color: "#064E3B", fontFamily: "monospace" }}>{json}</span>
+      <span className="text-teal-900 font-mono dark:text-teal-200">{json}</span>
     );
   }
 
   if (typeof json === "number") {
-    return <span style={{ color: "#A855F7" }}>{json}</span>;
+    return <span className="text-purple-500 dark:text-purple-200">{json}</span>;
   }
 
   if (typeof json === "boolean") {
-    const booleanStyle = {
-      color: json ? "#15803D" : "#B45309",
-      backgroundColor: json
-        ? "rgba(34, 197, 94, 0.05)"
-        : "rgba(245, 158, 11, 0.05)",
-      fontFamily: "monospace",
-      display: "inline-block",
-      padding: "0.125rem 0.25rem",
-      borderRadius: "0.25rem",
-    };
-
-    return <span style={booleanStyle}>{json.toString()}</span>;
-  }
-
-  if (Array.isArray(json)) {
     return (
-      <span title={JSON.stringify(json)}>
-        Array <span style={{ color: "#6B7280" }}>({json.length})</span>
+      <span
+        className={`inline-block py-0.5 px-1 rounded ${
+          json ? "text-green-700 bg-green-50" : "text-amber-700 bg-amber-50"
+        } font-mono`}
+      >
+        {json.toString()}
       </span>
     );
   }
@@ -90,23 +71,31 @@ export function ValueRenderer({
     return (
       <span
         title={JSON.stringify(json, null, 2)}
-        style={{
-          display: "inline-block",
-          maxWidth: "16rem",
-          overflow: "hidden",
-          textOverflow: "ellipsis",
-          whiteSpace: "nowrap",
-        }}
+        className="inline-block max-w-64"
       >
         {compact ? (
           <span>
             Object{" "}
-            <span style={{ color: "#6B7280" }}>
-              ({Object.keys(json).length})
-            </span>
+            <span className="text-gray-500">({Object.keys(json).length})</span>
+            <pre className="mt-1 text-sm whitespace-pre-wrap">
+              {isExpanded
+                ? JSON.stringify(json, null, 2)
+                : JSON.stringify(json, null, 2)
+                    .split("\n")
+                    .slice(0, 3)
+                    .join("\n") + (Object.keys(json).length > 2 ? "\n..." : "")}
+            </pre>
+            <button
+              onClick={() => setIsExpanded(!isExpanded)}
+              className="text-xs text-gray-500 hover:text-gray-700"
+            >
+              {isExpanded ? "Show less" : "Show more"}
+            </button>
           </span>
         ) : (
-          JSON.stringify(json, null, 2)
+          <pre className="whitespace-pre-wrap">
+            {JSON.stringify(json, null, 2)}
+          </pre>
         )}
       </span>
     );
@@ -131,22 +120,14 @@ export const CoMapPreview = ({
 
   if (!snapshot) {
     return (
-      <div
-        style={{
-          borderRadius: "0.25rem",
-          backgroundColor: "#F3F4F6",
-          animation: "pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite",
-          whiteSpace: "pre",
-          width: "6rem",
-        }}
-      >
+      <div className="rounded bg-gray-100 animate-pulse whitespace-pre w-24">
         {" "}
       </div>
     );
   }
 
   if (snapshot === "unavailable" && !value) {
-    return <div style={{ color: "#6B7280" }}>Unavailable</div>;
+    return <div className="text-gray-500">Unavailable</div>;
   }
 
   if (extendedType === "image" && isBrowserImage(snapshot)) {
@@ -154,16 +135,9 @@ export const CoMapPreview = ({
       <div>
         <img
           src={snapshot.placeholderDataURL}
-          style={{
-            width: "2rem",
-            height: "2rem",
-            border: "2px solid white",
-            boxShadow:
-              "0 1px 3px 0 rgb(0 0 0 / 0.1), 0 1px 2px -1px rgb(0 0 0 / 0.1)",
-            margin: "0.5rem 0",
-          }}
+          className="w-8 h-8 border-2 border-white shadow my-2"
         />
-        <span style={{ color: "#6B7280", fontSize: "0.875rem" }}>
+        <span className="text-gray-500 text-sm">
           {snapshot.originalSize[0]} x {snapshot.originalSize[1]}
         </span>
       </div>
@@ -174,9 +148,7 @@ export const CoMapPreview = ({
     return (
       <div>
         Record{" "}
-        <span style={{ color: "#6B7280" }}>
-          ({Object.keys(snapshot).length})
-        </span>
+        <span className="text-gray-500">({Object.keys(snapshot).length})</span>
       </div>
     );
   }
@@ -185,7 +157,7 @@ export const CoMapPreview = ({
     return (
       <div>
         List{" "}
-        <span style={{ color: "#6B7280" }}>
+        <span className="text-gray-500">
           ({(snapshot as unknown as []).length})
         </span>
       </div>
@@ -193,19 +165,13 @@ export const CoMapPreview = ({
   }
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns: "auto 1fr",
-          gap: "0.5rem",
-        }}
-      >
+    <div className="flex flex-col gap-2">
+      <div className="grid grid-cols-[auto_1fr] gap-2">
         {Object.entries(snapshot)
           .slice(0, limit)
           .map(([key, value]) => (
             <React.Fragment key={key}>
-              <span style={{ fontWeight: "bold" }}>{key}: </span>
+              <span className="font-bold">{key}: </span>
               <span>
                 <ValueRenderer json={value} />
               </span>
@@ -213,9 +179,7 @@ export const CoMapPreview = ({
           ))}
       </div>
       {Object.entries(snapshot).length > limit && (
-        <div
-          style={{ textAlign: "left", fontSize: "0.875rem", color: "#6B7280" }}
-        >
+        <div className="text-left text-sm text-gray-500">
           {Object.entries(snapshot).length - limit} more
         </div>
       )}
@@ -262,18 +226,13 @@ export function AccountOrGroupPreview({
   const displayName = extendedType === "account" ? name || "Account" : "Group";
   const displayText = showId ? `${displayName} (${coId})` : displayName;
 
-  const props = onClick
-    ? {
-        onClick: () => onClick(displayName),
-        style: {
-          color: "#3B82F6",
-          cursor: "pointer",
-          textDecoration: "underline",
-        },
-      }
-    : {
-        style: { color: "#6B7280" },
-      };
+  const className = onClick
+    ? "text-blue cursor-pointer underline dark:text-blue-400"
+    : "text-gray-500";
 
-  return <span {...props}>{displayText}</span>;
+  return (
+    <span className={className} onClick={() => onClick?.(displayName)}>
+      {displayText}
+    </span>
+  );
 }

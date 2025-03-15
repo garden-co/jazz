@@ -16,6 +16,7 @@ type PageProps = {
   onHeaderClick?: () => void;
   isTopLevel?: boolean;
   style: React.CSSProperties;
+  className?: string;
 };
 
 export function Page({
@@ -25,6 +26,7 @@ export function Page({
   onNavigate,
   onHeaderClick,
   style,
+  className = "",
   isTopLevel,
 }: PageProps) {
   const { value, snapshot, type, extendedType } = useResolvedCoValue(
@@ -52,31 +54,15 @@ export function Page({
 
   return (
     <div
-      style={{
-        position: "absolute",
-        zIndex: 1,
-        inset: 0,
-        backgroundColor: "white",
-        borderWidth: "1px",
-        borderColor: "rgba(0, 0, 0, 0.05)",
-        borderRadius: "0.75rem",
-        boxShadow:
-          "0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05)",
-        padding: "1.5rem",
-        width: "100%",
-        height: "100%",
-        backgroundClip: "padding-box",
-      }}
+      style={style}
+      className={
+        className +
+        " absolute z-10 inset-0 border rounded-xl shadow-lg p-6 w-full h-full bg-clip-padding"
+      }
     >
       {!isTopLevel && (
         <div
-          style={{
-            position: "absolute",
-            left: 0,
-            right: 0,
-            top: 0,
-            height: "2.5rem",
-          }}
+          className="absolute left-0 right-0 top-0 h-10"
           aria-label="Back"
           onClick={() => {
             onHeaderClick?.();
@@ -84,72 +70,30 @@ export function Page({
           aria-hidden="true"
         ></div>
       )}
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-          marginBottom: "1rem",
-        }}
-      >
-        <div
-          style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}
-        >
-          <h2
-            style={{
-              fontSize: "1.5rem",
-              fontWeight: "700",
-              display: "flex",
-              alignItems: "flex-start",
-              flexDirection: "column",
-              gap: "0.25rem",
-            }}
-          >
+      <div className="flex justify-between items-center mb-4">
+        <div className="flex flex-col gap-2">
+          <h2 className="text-2xl font-bold flex flex-col items-start gap-1">
             <span>
               {name}
               {typeof snapshot === "object" && "name" in snapshot ? (
-                <span style={{ color: "rgb(75, 85, 99)", fontWeight: "500" }}>
+                <span className="text-gray-600 font-medium">
                   {" "}
                   {(snapshot as { name: string }).name}
                 </span>
               ) : null}
             </span>
           </h2>
-          <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-            <span
-              style={{
-                fontSize: "0.75rem",
-                color: "rgb(55, 65, 81)",
-                fontWeight: "500",
-                padding: "0.125rem 0.25rem",
-                marginLeft: "-0.125rem",
-                borderRadius: "0.25rem",
-                backgroundColor: "rgba(55, 65, 81, 0.05)",
-                display: "inline-block",
-                fontFamily: "monospace",
-              }}
-            >
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-gray-700 font-medium py-0.5 px-1 -ml-0.5 rounded bg-gray-700/5 inline-block font-mono">
               {type && <TypeIcon type={type} extendedType={extendedType} />}
             </span>
-            <span
-              style={{
-                fontSize: "0.75rem",
-                color: "rgb(55, 65, 81)",
-                fontWeight: "500",
-                padding: "0.125rem 0.25rem",
-                marginLeft: "-0.125rem",
-                borderRadius: "0.25rem",
-                backgroundColor: "rgba(55, 65, 81, 0.05)",
-                display: "inline-block",
-                fontFamily: "monospace",
-              }}
-            >
+            <span className="text-xs text-gray-700 font-medium py-0.5 px-1 -ml-0.5 rounded bg-gray-700/5 inline-block font-mono">
               {coId}
             </span>
           </div>
         </div>
       </div>
-      <div style={{ overflow: "auto", maxHeight: "calc(100% - 4rem)" }}>
+      <div className="overflow-auto max-h-[calc(100%-4rem)]">
         {type === "costream" ? (
           <CoStreamView
             data={snapshot}
@@ -163,13 +107,7 @@ export function Page({
           <TableView data={snapshot} node={node} onNavigate={onNavigate} />
         )}
         {extendedType !== "account" && extendedType !== "group" && (
-          <div
-            style={{
-              fontSize: "0.75rem",
-              color: "rgb(107, 114, 128)",
-              marginTop: "1rem",
-            }}
-          >
+          <div className="text-xs text-gray-500 mt-4">
             Owned by{" "}
             <AccountOrGroupPreview
               coId={value.group.id}
