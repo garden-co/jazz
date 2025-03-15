@@ -14,9 +14,6 @@ export const docNavigationItems = [
         href: "/docs/guide",
         done: {
           react: 100,
-          "react-native": 0,
-          vue: 0,
-          svelte: 0,
         },
       },
       {
@@ -120,22 +117,31 @@ export const docNavigationItems = [
       {
         name: "CoMaps",
         href: "/docs/using-covalues/comaps",
-        done: 80,
+        done: 100,
       },
       {
         name: "CoLists",
         href: "/docs/using-covalues/colists",
-        done: 80,
+        done: 100,
       },
       {
         name: "CoFeeds",
         href: "/docs/using-covalues/cofeeds",
-        done: 80,
+        done: 100,
       },
       {
         name: "FileStreams",
         href: "/docs/using-covalues/filestreams",
-        done: 0,
+        done: 80,
+      },
+      {
+        name: "ImageDefinition",
+        href: "/docs/using-covalues/imagedef",
+        done: {
+          react: 100,
+          "react-native": 100,
+          vanilla: 100,
+        },
       },
       {
         name: "SchemaUnions",
@@ -150,11 +156,6 @@ export const docNavigationItems = [
       {
         name: "History & time travel",
         href: "/docs/using-covalues/history-and-time-travel",
-        done: 0,
-      },
-      {
-        name: "Access control",
-        href: "/docs/using-covalues/access-control",
         done: 0,
       },
     ],

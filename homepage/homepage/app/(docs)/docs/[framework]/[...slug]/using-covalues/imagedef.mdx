@@ -1,0 +1,213 @@
+import { CodeGroup } from "@/components/forMdx";
+
+export const metadata = { title: "ImageDefinition" };
+
+# ImageDefinition
+
+`ImageDefinition` is a specialized CoValue designed specifically for managing images in Jazz applications. It extends beyond basic file storage by supporting multiple resolutions of the same image and progressive loading patterns.
+
+We also offer [`createImage()`](#creating-images), a higher-level function to create an `ImageDefinition` from a file.
+
+If you're building with React, we recommend starting with our [React-specific image documentation](/docs/react/using-covalues/imagedef) which covers higher-level components and hooks for working with images.
+
+The [Image Upload example](https://github.com/gardencmp/jazz/tree/main/examples/image-upload) demonstrates use of `ImageDefinition`.
+
+## Creating Images
+
+The easiest way to create and use images in your Jazz application is with the `createImage()` function:
+
+<CodeGroup>
+```ts
+import { createImage } from "jazz-browser-media-images";
+
+// Create an image from a file input
+async function handleFileUpload(event) {
+  const file = event.target.files[0];
+  if (file) {
+    // Creates ImageDefinition with multiple resolutions automatically
+    const image = await createImage(file, {
+      owner: me.profile._owner,
+    });
+    
+    // Store the image in your application data
+    me.profile.image = image;
+  }
+}
+```
+</CodeGroup>
+
+> Note: `createImage()` requires a browser environment as it uses browser APIs to process images.
+
+The `createImage()` function:
+- Creates an `ImageDefinition` with the right properties
+- Generates a small placeholder for immediate display
+- Creates multiple resolution variants of your image
+- Returns the ID of the created `ImageDefinition`
+
+### Configuration Options
+
+You can configure `createImage()` with additional options:
+
+<CodeGroup>
+```tsx
+// Configuration options
+const options = {
+  owner: me,                // Owner for access control
+  maxSize: 1024             // Maximum resolution to generate
+};
+
+// Setting maxSize controls which resolutions are generated:
+// 256: Only creates the smallest resolution (256px on longest side)
+// 1024: Creates 256px and 1024px resolutions
+// 2048: Creates 256px, 1024px, and 2048px resolutions
+// undefined: Creates all resolutions including the original size
+
+const image = await createImage(file, options);
+```
+</CodeGroup>
+
+## Creating ImageDefinitions
+
+Create an `ImageDefinition` by specifying the original dimensions and an optional placeholder:
+
+<CodeGroup>
+```ts
+import { ImageDefinition } from "jazz-tools";
+
+// Create with original dimensions
+const image = ImageDefinition.create({
+  originalSize: [1920, 1080],
+});
+
+// With a placeholder for immediate display
+const imageWithPlaceholder = ImageDefinition.create({
+  originalSize: [1920, 1080],
+  placeholderDataURL: "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAAP...",
+});
+```
+</CodeGroup>
+
+### Structure
+
+`ImageDefinition` stores:
+- The original image dimensions (`originalSize`)
+- An optional placeholder (`placeholderDataURL`, typically a tiny base64-encoded preview)
+- Multiple resolution variants of the same image as [`FileStream`s](./using-covalues/filestream)
+
+Each resolution is stored with a key in the format `"widthxheight"` (e.g., `"1920x1080"`, `"800x450"`).
+
+<CodeGroup>
+```ts
+import { CoMap, CoList, ImageDefinition, co } from "jazz-tools";
+
+class ListOfImages extends CoList.Of(co.ref(ImageDefinition)) {}
+
+class Gallery extends CoMap {
+  title = co.string;
+  images = co.ref(ListOfImages);
+}
+```
+</CodeGroup>
+
+## Adding Image Resolutions
+
+Add multiple resolutions to an `ImageDefinition` by creating `FileStream`s for each size:
+
+<CodeGroup>
+```ts
+// Create FileStreams for different resolutions
+const fullRes = await FileStream.createFromBlob(fullSizeBlob);
+const mediumRes = await FileStream.createFromBlob(mediumSizeBlob);
+const thumbnailRes = await FileStream.createFromBlob(thumbnailBlob);
+
+// Add to the ImageDefinition with appropriate resolution keys
+image["1920x1080"] = fullRes;
+image["800x450"] = mediumRes;
+image["320x180"] = thumbnailRes;
+```
+</CodeGroup>
+
+## Retrieving Images
+
+The `highestResAvailable` method helps select the best image resolution for the current context:
+
+<CodeGroup>
+```ts
+// Get the highest resolution available
+const highestRes = image.highestResAvailable();
+if (highestRes) {
+  console.log(`Found resolution: ${highestRes.res}`);
+  
+  // Convert to a usable blob
+  const blob = highestRes.stream.toBlob();
+  if (blob) {
+    const url = URL.createObjectURL(blob);
+    imageElement.src = url;
+    
+    // Remember to revoke the URL when no longer needed
+    imageElement.onload = () => {
+      URL.revokeObjectURL(url);
+    };
+  }
+}
+
+// Or constrain by maximum width
+const maxWidth = window.innerWidth;
+const appropriateRes = image.highestResAvailable({ maxWidth });
+```
+</CodeGroup>
+
+### Fallback Behavior
+
+`highestResAvailable` returns the largest resolution that fits your constraints. If a resolution has incomplete data, it falls back to the next available lower resolution.
+
+<CodeGroup>
+```ts
+const image = ImageDefinition.create({
+  originalSize: [1920, 1080],
+});
+
+image["1920x1080"] = FileStream.create(); // Empty image upload
+image["800x450"] = await FileStream.createFromBlob(mediumSizeBlob);
+
+const highestRes = image.highestResAvailable();
+console.log(highestRes.res); // 800x450
+```
+</CodeGroup>
+
+## Progressive Loading Patterns
+
+`ImageDefinition` supports simple progressive loading with placeholders and resolution selection:
+
+<CodeGroup>
+```ts
+// Start with placeholder for immediate display
+if (image.placeholderDataURL) {
+  imageElement.src = image.placeholderDataURL;
+}
+
+// Then load the best resolution for the current display
+const screenWidth = window.innerWidth;
+const bestRes = image.highestResAvailable({ maxWidth: screenWidth });
+
+if (bestRes) {
+  const blob = bestRes.stream.toBlob();
+  if (blob) {
+    const url = URL.createObjectURL(blob);
+    imageElement.src = url;
+    
+    // Remember to revoke the URL when no longer needed
+    imageElement.onload = () => {
+      URL.revokeObjectURL(url);
+    };
+  }
+}
+```
+</CodeGroup>
+## Best Practices
+
+- **Generate resolutions server-side** when possible for optimal quality
+- **Use placeholders** (like LQIP - Low Quality Image Placeholders) for instant rendering
+- **Prioritize loading** the resolution appropriate for the current viewport
+- **Consider device pixel ratio** (window.devicePixelRatio) for high-DPI displays
+- **Always call URL.revokeObjectURL** after the image loads to prevent memory leaks
