@@ -102,8 +102,9 @@
             let isEnabled = true;
             let source = null;
             let subscribedCoValue = null;
-            const createCoValuesMap = new Map();
+
             const loadCoValuesMap = new Map();
+            const createCoValuesMap = new Map();
 
             const RECONNECT_INTERVAL = 5000; // 5 seconds
             let socket;
@@ -413,7 +414,7 @@
                     setTimeout(() => {
                         messageElement.removeChild(a);
                         URL.revokeObjectURL(url);
-                    }, 7000);
+                    }, 1000);
 
                 } else {
                     codeElement.innerHTML = JSON.stringify(coValue, null, 5);
@@ -652,6 +653,8 @@
                             if (state.chunks.some(chunk => chunk === undefined || chunk === null)) {
                                 throw new Error(`Some chunks are missing for CoValue ${state.fileMetadata.uuid}`);
                             }
+
+                            console.assert(state.contentLength === state.receivedLength, `Some chunks were lost because ${state.contentLength} !== ${state.receivedLength} for CoValue: ${chunk.uuid}`);
                             debug(`File chunks for CoValue: ${chunk.uuid} downloaded successfully.`);
 
                             handleBinaryCoValue(
@@ -683,7 +686,6 @@
                 chunks,
                 fileMetadata
             ) {
-                console.assert(contentLength === receivedLength, `Some chunks were lost because ${contentLength} !== ${receivedLength}`);
                 let binaryData = new Uint8Array(contentLength);
                 let position = 0;
                 for (let chunk of chunks) {
