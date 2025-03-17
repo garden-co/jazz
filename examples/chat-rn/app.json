@@ -1,4 +1,10 @@
 {
   "name": "chat_rn",
-  "displayName": "chat_rn"
+  "displayName": "chat_rn",
+  "android": {
+    "package": "com.anonymous.chat_rn"
+  },
+  "ios": {
+    "bundleIdentifier": "com.anonymous.chat-rn"
+  }
 }

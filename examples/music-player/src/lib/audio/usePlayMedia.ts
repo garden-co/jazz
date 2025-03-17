@@ -4,7 +4,7 @@ import { useAudioManager } from "./AudioManager";
 export function usePlayMedia() {
   const audioManager = useAudioManager();
 
-  const previousMediaLoad = useRef<Promise<unknown>>();
+  const previousMediaLoad = useRef<Promise<unknown>>(undefined);
 
   async function playMedia(file: Blob) {
     // Wait for the previous load to finish

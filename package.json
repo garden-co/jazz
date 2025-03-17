@@ -49,11 +49,6 @@
         "expo-modules-*",
         "typescript"
       ]
-    },
-    "overrides": {
-      "react": "18.3.1",
-      "react-dom": "18.3.1",
-      "esbuild": "0.24.0"
     }
   }
 }

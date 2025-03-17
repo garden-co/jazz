@@ -14,12 +14,12 @@
     "jazz-browser-media-images": "workspace:*",
     "jazz-react": "workspace:*",
     "jazz-tools": "workspace:*",
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
   },
   "devDependencies": {
     "@biomejs/biome": "1.9.4",
-    "@types/react": "^18.3.12",
+    "@types/react": "~18.3.12",
     "@types/react-dom": "^18.3.1",
     "@vitejs/plugin-react": "^4.3.3",
     "globals": "^15.11.0",

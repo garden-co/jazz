@@ -23,7 +23,7 @@
       },
       "package": "com.jazz.chatrn"
     },
-    "plugins": ["expo-secure-store", "expo-sqlite"],
+    "plugins": ["expo-secure-store", "expo-sqlite", "expo-build-properties"],
     "extra": {
       "eas": {
         "projectId": "e0e61872-1906-4c84-b9d8-9be77355cad0"

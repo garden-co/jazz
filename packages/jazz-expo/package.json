@@ -28,7 +28,7 @@
     "@scure/base": "1.2.1",
     "cojson": "workspace:*",
     "cojson-transport-ws": "workspace:*",
-    "expo-sqlite": "^15.1.2",
+    "expo-sqlite": "15.1.2",
     "jazz-auth-clerk": "workspace:*",
     "jazz-react-core": "workspace:*",
     "jazz-react-native-core": "workspace:*",
@@ -40,9 +40,9 @@
     "react-native": "*"
   },
   "devDependencies": {
-    "@react-native-community/netinfo": "^11.4.1",
-    "expo-secure-store": "~14.0.0",
-    "react-native": "~0.76.3",
+    "@react-native-community/netinfo": "11.4.1",
+    "expo-secure-store": "~14.0.1",
+    "react-native": "0.76.7",
     "typescript": "~5.6.2"
   },
   "scripts": {

@@ -2,7 +2,7 @@ import * as Clipboard from "expo-clipboard";
 import { createInviteLink } from "jazz-react-native";
 import { useAccount, useCoState } from "jazz-react-native";
 import { Group, ID } from "jazz-tools";
-import { useState } from "react";
+import React, { useState } from "react";
 import { Alert, Button, Text, View } from "react-native";
 import { CoMapWithText } from "../schema";
 
