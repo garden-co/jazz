@@ -57,28 +57,45 @@
         </div>
         <div>
             <span class="fixed-width-span">Text:</span>
+            <button id="todo" onclick="loadMultipleCoValues(false)">
+                1a. Load <strong>Multiple</strong> CoValues (Text)
+            </button>
             <button id="loadCoValueText" onclick="loadCoValue(false)">
-                1. Load CoValue (Text)
+                1b. Load <strong>Single</strong> CoValue (Text)
+            </button>
+            <button id="todo" onclick="createMultipleCoValues(false)">
+                2c. Create <strong>Multiple</strong> CoValues (Text)
             </button>
             <button id="createCoValueText" onclick="createCoValue(false)">
-                2. Create CoValue (Text)
+                2d. Create <strong>Single</strong> CoValue (Text)
             </button>
             <button id="mutateCoValueText" onclick="mutateCoValue(false)">
-                3. Mutate CoValue (Text)
+                3e. Mutate <strong>Single</strong> CoValue (Text)
             </button>
         </div>
         <div class="container">
             <span class="fixed-width-span">Binary:</span>
             <div>
+                <button id="todo" onclick="loadMultipleCoValues(true)">
+                    1a. Load <strong>Multiple</strong> CoValues (Binary)
+                </button>
                 <button id="loadCoValueBinary" onclick="loadCoValue(true)">
-                    1. Load CoValue (Binary)
+                    1b. Load <strong>Single</strong> CoValue (Binary)
+                </button>
+                <button id="todo" onclick="createMultipleCoValues(true)">
+                    2c. Create <strong>Multiple</strong> CoValues (Binary)
                 </button>
                 <button id="createCoValueBinary" onclick="createCoValue(true)">
-                    2. Create CoValue (Binary)
+                    2d. Create <strong>Single</strong> CoValue (Binary)
                 </button>
                 <button id="mutateCoValueBinary" onclick="mutateCoValue(true)">
-                    3. Mutate CoValue (Binary)
+                    3e. Mutate <strong>Single</strong> CoValue (Binary)
                 </button>
+            </div>
+        </div>
+        <div class="container">
+            <span class="fixed-width-span">Binary:</span>
+            <div>
                 <input id="fileInput" type="file" />
             </div>
         </div>
@@ -996,6 +1013,59 @@
                     bytes[i] = binaryString.charCodeAt(i);
                 }
                 return bytes;
+            }
+
+            async function loadMultipleCoValues(isBinary, count) {
+                binaryFlag = isBinary;
+                const t0 = performance.now();
+                const MAX_CONCURRENT = count || 10;
+
+                // Get all available CoValue UUIDs from the select element
+                const options = Array.from(coValueSelect.options)
+                    .filter(option => option.value) // Filter out empty values
+                    .map(option => option.value);
+
+                if (options.length === 0) {
+                    info("No CoValues available to load.");
+                    return { duration: 0, failed: MAX_CONCURRENT, coValues: [] };
+                }
+
+                // If we have fewer UUIDs than requested, use what we have
+                const targetCount = Math.min(MAX_CONCURRENT, options.length);
+                const selectedUUIDs = options.slice(0, targetCount);
+
+                info(`Attempting to load ${selectedUUIDs.length} CoValues concurrently...`);
+                try {
+                    // Load all selected CoValues concurrently
+                    const results = await Promise.allSettled(
+                        selectedUUIDs.map(uuid => loadCoValue(isBinary, uuid))
+                    );
+
+                    const duration = performance.now() - t0;
+
+                    // Count successful and failed loads
+                    const successful = results.filter(r => r.status === 'fulfilled').map(r => r.value);
+                    const failed = MAX_CONCURRENT - successful.length;
+
+                    info(`Loaded ${successful.length}/${MAX_CONCURRENT} CoValues in ${duration.toFixed(2)}ms`);
+
+                    return {
+                        duration,
+                        failed,
+                        coValues: successful
+                    };
+                } catch (error) {
+                    const duration = performance.now() - t0;
+                    info(`Error in concurrent load: ${error.message}`);
+                    return {
+                        duration,
+                        failed: MAX_CONCURRENT,
+                        coValues: []
+                    };
+                }
+            }
+
+            async function createMultipleCoValues(isBinary, count) {
             }
 
             // Load CoValue UUIDs or subscribe to SSE on page load

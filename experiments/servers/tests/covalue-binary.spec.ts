@@ -101,4 +101,19 @@ test.describe('Binary CoValue', () => {
         await Promise.all(browsers.map(({ browser }) => browser.close()));
         logger.debug('All browsers closed');    
     });
+
+    test('loadMultiple', async () => {
+        await page.goto(SERVER_URL);
+
+        // Wait for the connection to be established
+        await page.waitForSelector('#status >> text=CoValue UUIDs loaded successfully.');
+
+        logger.debug(`Concurrent load attempt .. `);
+        const result = await page.evaluate(async () => {
+            return await loadMultipleCoValues(true, 10);
+        });
+
+        logger.debug(`Multiple load test completed in ${result.duration}ms with ${result.failed} failures`);
+    });
+
 });

@@ -38,6 +38,33 @@ async function runBinaryLoadTest(page: Page, context: any, events: any, test: an
     }
 }
 
+async function runBinaryLoadMultipleTest(page: Page, context: any, events: any, test: any) {
+    const { step } = test;
+    try {
+        await step(`${context.scenario.name}.load_page_duration`, async () => {
+            await page.goto(context.vars.target);
+            await page.waitForSelector('#status >> text=CoValue UUIDs loaded successfully.');
+        });
+
+        const randomIndex = getRandomCoValueIndex();
+        await step(`${context.scenario.name}.load_binary_duration_10concurrent`, async () => {
+            const result = await page.evaluate(async () => {
+                return await loadMultipleCoValues(true, 10); // false for text CoValues
+            });
+
+            // Record the metrics
+            events.emit('histogram', 'load_binary_duration_10concurrent', result.duration);
+            events.emit('histogram', 'load_binary_failure_10concurrent', result.failed);
+
+            logger.info(`Multiple load test completed in ${result.duration}ms with ${result.failed} failures`);
+        });
+
+    } catch (error) {
+        logger.error('Load Test error:', error);
+        throw error;
+    }
+}
+
 async function runBinaryCreateTest(page: Page, context: any, events: any, test: any) {
     const { step } = test;
     try {
