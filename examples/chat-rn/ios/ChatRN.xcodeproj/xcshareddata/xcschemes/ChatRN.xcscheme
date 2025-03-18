@@ -15,9 +15,9 @@
             <BuildableReference
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "13B07F861A680F5B00A75B9A"
-               BuildableName = "chat_rn.app"
-               BlueprintName = "chat_rn"
-               ReferencedContainer = "container:chat_rn.xcodeproj">
+               BuildableName = "ChatRN.app"
+               BlueprintName = "ChatRN"
+               ReferencedContainer = "container:ChatRN.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
       </BuildActionEntries>
@@ -33,9 +33,9 @@
             <BuildableReference
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "00E356ED1AD99517003FC87E"
-               BuildableName = "chat_rnTests.xctest"
-               BlueprintName = "chat_rnTests"
-               ReferencedContainer = "container:chat_rn.xcodeproj">
+               BuildableName = "ChatRNTests.xctest"
+               BlueprintName = "ChatRNTests"
+               ReferencedContainer = "container:ChatRN.xcodeproj">
             </BuildableReference>
          </TestableReference>
       </Testables>
@@ -55,9 +55,9 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "13B07F861A680F5B00A75B9A"
-            BuildableName = "chat_rn.app"
-            BlueprintName = "chat_rn"
-            ReferencedContainer = "container:chat_rn.xcodeproj">
+            BuildableName = "ChatRN.app"
+            BlueprintName = "ChatRN"
+            ReferencedContainer = "container:ChatRN.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
    </LaunchAction>
@@ -72,9 +72,9 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "13B07F861A680F5B00A75B9A"
-            BuildableName = "chat_rn.app"
-            BlueprintName = "chat_rn"
-            ReferencedContainer = "container:chat_rn.xcodeproj">
+            BuildableName = "ChatRN.app"
+            BlueprintName = "ChatRN"
+            ReferencedContainer = "container:ChatRN.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
    </ProfileAction>

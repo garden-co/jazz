@@ -1,4 +1,4 @@
-package com.jazz.chatrncli
+package com.chatrn
 
 import android.app.Application
 import com.facebook.react.PackageList

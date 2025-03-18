@@ -1,40 +1,32 @@
-const { getDefaultConfig, mergeConfig } = require("@react-native/metro-config");
-// const blacklist = require("metro-config/src/defaults/exclusionList");
-const escape = require("escape-string-regexp");
 const path = require("path");
+const { makeMetroConfig } = require("@rnx-kit/metro-config");
+const MetroSymlinksResolver = require("@rnx-kit/metro-resolver-symlinks");
 
-// eslint-disable-next-line no-undef
+// Define workspace root
 const projectRoot = __dirname;
 const workspaceRoot = path.resolve(projectRoot, "../..");
-// const dupeDeps = ["react", "react-native"];
 
-/**
- * Metro configuration
- * https://reactnative.dev/docs/metro
- *
- * @type {import('@react-native/metro-config').MetroConfig}
- */
-const config = {
-  projectRoot,
-  resolver: {
-    // monorepo node_modules paths
-    nodeModulesPaths: [
-      path.resolve(projectRoot, "node_modules"),
-      path.resolve(workspaceRoot, "node_modules"),
-    ],
-    // // ensure only one version is loaded for dupeDeps (not the one in workspaceRoot)
-    // blacklistRE: blacklist(
-    //   dupeDeps.map(
-    //     (dep) =>
-    //       new RegExp(
-    //         `^${escape(path.join(workspaceRoot, "node_modules", dep))}$`,
-    //       ),
-    //   ),
-    // ),
-    // extensions
-    sourceExts: ["mjs", "js", "json", "ts", "tsx"],
-  },
-  watchFolders: [workspaceRoot],
+// Add packages paths
+const extraNodeModules = {
+  modules: path.resolve(workspaceRoot, "node_modules"),
 };
 
-module.exports = mergeConfig(getDefaultConfig(__dirname), config);
+const watchFolders = [
+  path.resolve(workspaceRoot, "node_modules"),
+  path.resolve(workspaceRoot, "packages"),
+];
+
+const nodeModulesPaths = [
+  path.resolve(projectRoot, "node_modules"),
+  path.resolve(workspaceRoot, "node_modules"),
+];
+
+module.exports = makeMetroConfig({
+  resolver: {
+    resolveRequest: MetroSymlinksResolver(),
+    extraNodeModules,
+    nodeModulesPaths,
+  },
+  sourceExts: ["mjs", "js", "json", "ts", "tsx"],
+  watchFolders,
+});
