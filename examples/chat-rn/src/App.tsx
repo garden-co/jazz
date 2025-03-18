@@ -55,7 +55,6 @@ function App() {
         }}
       >
         <NavigationContainer ref={navigationRef} theme={theme}>
-          {/* @ts-expect-error React 19 types not working yet */}
           <Stack.Navigator initialRouteName={initialRoute}>
             <Stack.Screen
               options={{ title: "Jazz Chat" }}
