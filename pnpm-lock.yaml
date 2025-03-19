@@ -858,6 +858,9 @@ importers:
       lucide-react:
         specifier: ^0.274.0
         version: 0.274.0(react@18.3.1)
+      qrcode:
+        specifier: ^1.5.3
+        version: 1.5.4
       react:
         specifier: 18.3.1
         version: 18.3.1
@@ -874,6 +877,9 @@ importers:
         specifier: ^17.4.0
         version: 17.6.0(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
     devDependencies:
+      '@types/qrcode':
+        specifier: ^1.5.1
+        version: 1.5.5
       '@types/react':
         specifier: ~18.3.12
         version: 18.3.18
