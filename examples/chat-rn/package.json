@@ -25,7 +25,6 @@
     "jazz-expo": "workspace:*",
     "jazz-react-native": "workspace:*",
     "jazz-tools": "workspace:*",
-    "nativewind": "^4.1.21",
     "react": "18.3.1",
     "react-native": "0.76.7",
     "react-native-get-random-values": "^1.11.0",

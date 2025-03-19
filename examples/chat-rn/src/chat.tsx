@@ -125,7 +125,7 @@ export function ChatScreen({ navigation }: { navigation: any }) {
   };
 
   return (
-    <View style={styles.container}>
+    <SafeAreaView style={styles.container}>
       {!loadedChat ? (
         <View style={styles.welcomeContainer}>
           <Text style={styles.usernameLabel}>Username</Text>
@@ -168,7 +168,7 @@ export function ChatScreen({ navigation }: { navigation: any }) {
             behavior="padding"
             style={styles.inputContainer}
           >
-            <SafeAreaView style={styles.inputWrapper}>
+            <View style={styles.inputWrapper}>
               <TextInput
                 style={styles.messageInput}
                 value={message}
@@ -185,11 +185,11 @@ export function ChatScreen({ navigation }: { navigation: any }) {
               >
                 <Text>↑</Text>
               </TouchableOpacity>
-            </SafeAreaView>
+            </View>
           </KeyboardAvoidingView>
         </>
       )}
-    </View>
+    </SafeAreaView>
   );
 }
 
@@ -201,7 +201,7 @@ const styles = StyleSheet.create({
   },
   messageContainer: {
     borderRadius: 8,
-    padding: 4,
+    paddingVertical: 4,
     paddingHorizontal: 6,
     maxWidth: "80%",
   },
@@ -225,7 +225,6 @@ const styles = StyleSheet.create({
     textAlign: "left",
   },
   messageContent: {
-    flex: 1,
     position: "relative",
     flexDirection: "row",
     alignItems: "flex-end",
@@ -288,7 +287,8 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   inputContainer: {
-    padding: 12,
+    paddingVertical: 16,
+    paddingHorizontal: 10,
     backgroundColor: "white",
     borderTopWidth: 1,
     borderTopColor: "#d1d5db", // gray-300
@@ -297,7 +297,7 @@ const styles = StyleSheet.create({
     flex: 1,
     flexDirection: "row",
     alignItems: "center",
-    columnGap: 8,
+    margin: 5,
   },
   messageInput: {
     borderRadius: 20,
@@ -309,6 +309,7 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   sendButton: {
+    marginLeft: 10,
     backgroundColor: "#d1d5db", // gray-300
     borderRadius: 16,
     height: 32,
