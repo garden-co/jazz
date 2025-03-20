@@ -286,13 +286,13 @@
                                                 response,
                                             )} ...`,
                                         );
-                                        wsLoadCoValue(response);
+                                        wsLoadCoValueResponse(response);
                                         break;
                                     case "POST":
-                                        wsCreateCoValue(response);
+                                        wsCreateCoValueResponse(response);
                                         break;
                                     case "PATCH":
-                                        wsMutateCoValue(response.payload);
+                                        wsMutateCoValueResponse(response.payload);
                                         break;
                                     case "SUBSCRIBE":
                                         debug(
@@ -313,10 +313,6 @@
                                         );
                                 }
 
-                                // Notify all listeners
-                                for (const listener of websocketListeners) {
-                                    listener(response);
-                                }
                             } else {
                                 debug(
                                     `Websocket request failed: ${JSON.stringify(
@@ -352,29 +348,39 @@
                 websocketListeners.delete(listener);
             }
 
-            function wsLoadCoValue(response) {
-                if (response.code === 200) {
-                    // 200 - OK: here signifies a successful response for text CoValue
-                    const coValue = response.payload;
-                    info(`Loaded (JSON) data for: ${coValue.uuid}.`);
-                    logCoValue(coValue);
-
-                } else if (response.code === 202) {
-                    // 202 - Accepted: here signifies the start of a binary CoValue download
-                    // debug(`Received metadata for file: ${response.payload.fileName} (${response.payload.fileSize}) split into ${response.payload.totalChunks} chunks of ${response.payload.chunkSize} bytes.`);
-                    handleJSONChunk(response.payload);
-
-                } else if (response.code === 204) {
-                    // 204 - No Content: here signifies the end of a binary CoValue download
-                    handleJSONChunk(response.payload);
-
-                } else if (response.code === 206) {
-                    // 206 - Partial Content: here signifies chunks from a binary CoValue download
-                    handleJSONChunk(response.payload);
+            function wsNotifyMessageListeners(response) {
+                for (const listener of websocketListeners) {
+                    listener(response);
                 }
             }
 
-            function wsCreateCoValue(response) {
+            function wsLoadCoValueResponse(response) {
+                switch (response.code) {
+                    case 200:
+                        // 200 - OK: here signifies a successful response for a text CoValue
+                        wsNotifyMessageListeners(response);
+                        break;
+
+                    case 202:
+                        // 202 - Accepted: here signifies the start of a binary CoValue download
+                        // debug(`Received metadata for file: ${response.payload.fileName} (${response.payload.fileSize}) split into ${response.payload.totalChunks} chunks of ${response.payload.chunkSize} bytes.`);
+                        handleJSONChunk(response.payload);
+                        break;
+
+                    case 204:
+                        // 204 - No Content: here signifies the end of a binary CoValue download
+                        handleJSONChunk(response.payload);
+                        wsNotifyMessageListeners(response);
+                        break;
+
+                    case 206:
+                        // 206 - Partial Content: here signifies chunks from a binary CoValue download
+                        handleJSONChunk(response.payload);
+                        break;
+                }
+            }
+
+            function wsCreateCoValueResponse(response) {
                 if (response.code === 200) {
                     // 200 - OK: here means acknowledgement of a chunk from a binary CoValue upload
                     debug(
@@ -394,7 +400,7 @@
                 }
             }
 
-            function wsMutateCoValue(payload) {
+            function wsMutateCoValueResponse(payload) {
                 if (isBinary()) {
                     info(`Mutated (binary) data for: ${payload.uuid}.`);
                 } else {
@@ -465,7 +471,7 @@
                 const messageElement = document.createElement("pre");
                 const codeElement = document.createElement("code");
 
-                if (Object.hasOwn(coValue, "file") && coValue.file.bindata) {
+                if (Object.hasOwn(coValue, "file") && coValue.file.blob) {
                     const copy = Object.assign(
                         {},
                         {
@@ -479,22 +485,20 @@
                     );
                     codeElement.innerHTML = JSON.stringify(copy, null, 5);
 
-                    const blob = new Blob([coValue.file.bindata], { type: "application/octet-stream" });
-                    const url = URL.createObjectURL(blob);
-
+                    const blobUrl = URL.createObjectURL(coValue.file.blob);
                     const a = document.createElement('a');
-                    a.href = url;
+                    a.href = blobUrl;
                     a.download = coValue.file.name;
                     a.textContent = `Download CoValue: ${coValue.uuid} (${coValue.file.name})`;
                     a.style.display = 'block';
                     messageElement.appendChild(a);
                     a.click();
 
-                    // Clean up
+                    // Clean up to avoid leaking memory
                     setTimeout(() => {
-                        messageElement.removeChild(a);
-                        URL.revokeObjectURL(url);
-                    }, 1000);
+                        a.remove();
+                        URL.revokeObjectURL(blobUrl);
+                    }, 5000);
 
                 } else {
                     codeElement.innerHTML = JSON.stringify(coValue, null, 5);
@@ -565,6 +569,38 @@
             //     }
             // }
 
+            async function loadCoValue(isBinary) {
+                binaryFlag = isBinary;
+                const uuid = coValueSelect.value;
+
+                if (!uuid) {
+                    info("Please, select a CoValue first.");
+                    return;
+                }
+
+                let coValue = null;
+                try {
+                    if (isWS()) {
+                        coValue = await wsLoadCoValue(uuid, isBinary);
+
+                    } else {
+                        coValue = await httpLoadCoValue(uuid, isBinary);
+                    }
+
+                    if (isBinary) {
+                        info(`Loaded (binary) data for: ${uuid} (${coValue.file.size} bytes).`);
+                        loadCoValuesMap.delete(uuid);
+
+                    } else {
+                        info(`Loaded (JSON) data for: ${uuid}.`);
+                    }
+
+                    logCoValue(coValue);
+                } catch (error) {
+                    info(`Error loading CoValue: ${error.message}`);
+                }
+            }
+
             async function createCoValueText(url = "", coValue = {}) {
                 if (isWS()) {
                     wsSendWhenReady({
@@ -592,9 +628,42 @@
                 }
             }
 
+            async function wsLoadCoValue(uuid, isBinary) {
+                return new Promise((resolve, reject) => {
+                    const socket = getWebSocket();
+
+                    const handleMessage = (response) => {
+                        if (isBinary) {
+                            if (response.payload.uuid === uuid && response.payload.type === "end") {
+                                wsRemoveMessageListener(handleMessage);
+                                const coValue = handleBinaryCoValue(uuid);
+
+                                if (!coValue) {
+                                    return reject(new Error(`Failed to download chunks for binary CoValue with uuid: ${uuid}`));
+                                }
+
+                                resolve(coValue);
+                            }
+
+                        } else {
+                            resolve(response.payload);
+                        }
+                    };
+                    wsAddMessageListener(handleMessage);
+
+                    wsSendWhenReady({
+                        action: "GET",
+                        binary: isBinary,
+                        payload: { uuid: `${uuid}` },
+                    });
+                });
+            }
+
             async function httpLoadCoValue(uuid, isBinary) {
                 const url = getEndpoint(uuid, isBinary);
                 info(`Loading ${uuid} via ${url}...`);
+                let coValue = null;
+
                 if (isBinary) {
                     const response = await fetch(url);
                     if (!response.ok) {
@@ -635,13 +704,13 @@
                             }
                         }
                     }
+                    coValue = handleBinaryCoValue(uuid);
 
                 } else {
                     const response = await fetch(url);
-                    const coValue = await response.json();
-                    info(`Loaded (JSON) data for: ${uuid}.`);
-                    logCoValue(coValue);
+                    coValue = await response.json();
                 }
+                return coValue;
             }
 
             function handleJSONChunk(chunk) {
@@ -653,7 +722,8 @@
                                 fileMetadata: null,
                                 chunks: [],
                                 contentLength: 0,
-                                receivedLength: 0
+                                receivedLength: 0,
+                                blob: null
                             };
                             loadCoValuesMap.set(chunk.uuid, state);
 
@@ -690,16 +760,13 @@
                             console.assert(state.contentLength === state.receivedLength, `Some chunks were lost because ${state.contentLength} !== ${state.receivedLength} for CoValue: ${chunk.uuid}`);
                             debug(`File chunks for CoValue: ${chunk.uuid} downloaded successfully.`);
 
-                            handleBinaryCoValue(
-                                chunk.uuid,
-                                state.receivedLength,
-                                state.contentLength,
-                                state.chunks,
-                                state.fileMetadata
-                            );
-
-                            // Clean up
-                            // loadCoValuesMap.delete(chunk.uuid);
+                            let binary = new Uint8Array(state.contentLength);
+                            let position = 0;
+                            for (let chunk of state.chunks) {
+                                binary.set(chunk, position);
+                                position += chunk.length;
+                            }
+                            state.blob = new Blob([binary], { type: "application/octet-stream" });
                             break;
 
                         case "error":
@@ -712,55 +779,27 @@
                 }
             }
 
-            function handleBinaryCoValue(
-                uuid,
-                receivedLength,
-                contentLength,
-                chunks,
-                fileMetadata
-            ) {
-                let binaryData = new Uint8Array(contentLength);
-                let position = 0;
-                for (let chunk of chunks) {
-                    binaryData.set(chunk, position);
-                    position += chunk.length;
+            function handleBinaryCoValue(uuid) {
+                const state = loadCoValuesMap.get(uuid);
+                if (!state) {
+                    return null;
                 }
 
                 const coValue = { uuid: uuid };
                 coValue.file = {
-                    name: fileMetadata.fileName,
-                    size: contentLength,
+                    name: state.fileMetadata.fileName,
+                    size: state.contentLength,
                     note: "** 50MB binary **",
-                    bindata: binaryData,
+                    blob: state.blob,
                 };
-                info(
-                    `Loaded (binary) data for: ${uuid} (${contentLength} bytes).`,
-                );
-                logCoValue(coValue);
-            }
 
-            async function loadCoValue(isBinary) {
-                binaryFlag = isBinary;
-                const uuid = coValueSelect.value;
+                // Clean up
+                state.fileMetadata = null;
+                state.chunks = null;
+                state.contentLength = -1;
+                state.receivedLength = -1;
 
-                if (!uuid) {
-                    info("Please, select a CoValue first.");
-                    return;
-                }
-
-                try {
-                    if (isWS()) {
-                        wsSendWhenReady({
-                            action: "GET",
-                            binary: isBinary,
-                            payload: { uuid: `${uuid}` },
-                        });
-                    } else {
-                        await httpLoadCoValue(uuid, isBinary);
-                    }
-                } catch (error) {
-                    info(`Error loading CoValue: ${error.message}`);
-                }
+                return coValue;
             }
 
             async function createCoValue(isBinary) {
@@ -798,7 +837,7 @@
                             info(`Created (binary) data for: ${coValue.uuid}.`);
                         }
                     } else {
-                        populateTextCoValue(coValue);
+                        createCoValueTextBody(coValue);
                         await createCoValueText(url, coValue);
                     }
                 } catch (error) {
@@ -968,7 +1007,7 @@
                 }
             }
 
-            function populateTextCoValue(coValue) {
+            function createCoValueTextBody(coValue) {
                 if (window.faker) {
                     coValue.author = faker.person.fullName();
                     coValue.title = faker.lorem.words({
@@ -1069,7 +1108,7 @@
                                 return reject(new Error(`Failed to retrieve chunks for uuid: ${uuid}`));
                             }
 
-                            const blob = new Blob(state.chunks, { type: "application/octet-stream" });
+                            const blob = new Blob(state.chunks, { type: "application/octet-stream" }); // wrong
                             resolve(blob);
                         }
                     };
