@@ -39,7 +39,9 @@ describe("useAccount", () => {
     const [result] = withJazzTestSetup(
       () =>
         useAccount({
-          root: {},
+          resolve: {
+            root: true,
+          },
         }),
       {
         account,

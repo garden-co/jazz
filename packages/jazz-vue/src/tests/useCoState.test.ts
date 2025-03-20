@@ -91,7 +91,9 @@ describe("useCoState", () => {
     const [result] = withJazzTestSetup(
       () =>
         useCoState(TestMap, map.id, {
-          nested: {},
+          resolve: {
+            nested: true,
+          },
         }),
       {
         account,
@@ -165,7 +167,9 @@ describe("useCoState", () => {
     });
 
     const [result] = withJazzTestSetup(() =>
-      useCoState(TestMap, map.id as ID<CoValue>, []),
+      useCoState(TestMap, map.id as ID<CoValue>, {
+        resolve: true,
+      }),
     );
     expectTypeOf(result).toEqualTypeOf<
       Ref<TestMap | null | undefined, TestMap | null | undefined>

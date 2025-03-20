@@ -146,7 +146,7 @@ describe("Inbox", () => {
     );
     const resultId = await inboxSender.sendMessage(message);
 
-    const result = await Message.load(resultId, receiver, {});
+    const result = await Message.load(resultId, { loadAs: receiver });
     expect(result?.text).toBe("Responded from the inbox");
 
     unsubscribe();

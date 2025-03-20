@@ -22,9 +22,13 @@ export function AuthModal({ open, onOpenChange }: AuthModalProps) {
   const [error, setError] = useState<string | null>(null);
 
   const { me } = useAccount({
-    root: {
-      rootPlaylist: {
-        tracks: [{}],
+    resolve: {
+      root: {
+        rootPlaylist: {
+          tracks: {
+            $each: true,
+          },
+        },
       },
     },
   });

@@ -1,7 +1,7 @@
 import { useAccount } from "jazz-react";
 
 export function Form() {
-  const { me } = useAccount({ profile: {}, root: {} });
+  const { me } = useAccount({ resolve: { profile: true, root: true } });
 
   if (!me) return null;
 

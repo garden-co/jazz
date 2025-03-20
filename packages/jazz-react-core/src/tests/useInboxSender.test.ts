@@ -45,7 +45,9 @@ describe("useInboxSender", () => {
 
     expect(incoming.value).toEqual("hello");
     const response = await promise;
-    const responseMap = await TestMap.load(response, account, {});
+    const responseMap = await TestMap.load(response, {
+      loadAs: account,
+    });
 
     expect(responseMap!.value).toEqual("got it");
   });

@@ -27,9 +27,11 @@ export async function uploadMusicTracks(
   isExampleTrack: boolean = false,
 ) {
   const { root } = await MusicaAccount.getMe().ensureLoaded({
-    root: {
-      rootPlaylist: {
-        tracks: [],
+    resolve: {
+      root: {
+        rootPlaylist: {
+          tracks: true,
+        },
       },
     },
   });
@@ -65,8 +67,10 @@ export async function uploadMusicTracks(
 
 export async function createNewPlaylist() {
   const { root } = await MusicaAccount.getMe().ensureLoaded({
-    root: {
-      playlists: [],
+    resolve: {
+      root: {
+        playlists: true,
+      },
     },
   });
 
@@ -149,9 +153,11 @@ export async function updateMusicTrackTitle(track: MusicTrack, title: string) {
 
 export async function updateActivePlaylist(playlist?: Playlist) {
   const { root } = await MusicaAccount.getMe().ensureLoaded({
-    root: {
-      activePlaylist: {},
-      rootPlaylist: {},
+    resolve: {
+      root: {
+        activePlaylist: true,
+        rootPlaylist: true,
+      },
     },
   });
 
@@ -160,7 +166,9 @@ export async function updateActivePlaylist(playlist?: Playlist) {
 
 export async function updateActiveTrack(track: MusicTrack) {
   const { root } = await MusicaAccount.getMe().ensureLoaded({
-    root: {},
+    resolve: {
+      root: {},
+    },
   });
 
   root.activeTrack = track;
@@ -170,17 +178,23 @@ export async function onAnonymousAccountDiscarded(
   anonymousAccount: MusicaAccount,
 ) {
   const { root: anonymousAccountRoot } = await anonymousAccount.ensureLoaded({
-    root: {
-      rootPlaylist: {
-        tracks: [{}],
+    resolve: {
+      root: {
+        rootPlaylist: {
+          tracks: {
+            $each: true,
+          },
+        },
       },
     },
   });
 
   const me = await MusicaAccount.getMe().ensureLoaded({
-    root: {
-      rootPlaylist: {
-        tracks: [],
+    resolve: {
+      root: {
+        rootPlaylist: {
+          tracks: true,
+        },
       },
     },
   });
@@ -197,8 +211,10 @@ export async function onAnonymousAccountDiscarded(
 
 export async function deletePlaylist(playlistId: string) {
   const { root } = await MusicaAccount.getMe().ensureLoaded({
-    root: {
-      playlists: [],
+    resolve: {
+      root: {
+        playlists: true,
+      },
     },
   });
 

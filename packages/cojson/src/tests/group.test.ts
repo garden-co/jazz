@@ -5,6 +5,7 @@ import { RawCoMap } from "../coValues/coMap.js";
 import { RawCoStream } from "../coValues/coStream.js";
 import { RawBinaryCoStream } from "../coValues/coStream.js";
 import { WasmCrypto } from "../crypto/WasmCrypto.js";
+import { RawAccountID } from "../exports.js";
 import { LocalNode } from "../localNode.js";
 import {
   createThreeConnectedNodes,
@@ -915,117 +916,215 @@ describe("extend with role mapping", () => {
     expect(mapOnNode2.get("test")).toEqual("Written from the admin");
   });
 });
-test("roleOf should prioritize explicit account role over everyone role in same group", async () => {
-  const { node1, node2 } = await createTwoConnectedNodes("server", "server");
 
-  const group = node1.node.createGroup();
-  const account2 = await loadCoValueOrFail(node1.node, node2.accountID);
+describe("roleOf", () => {
+  test("returns direct role assignments", () => {
+    const node = new LocalNode(...randomAnonymousAccountAndSessionID(), Crypto);
+    const group = node.createGroup();
+    const account = new LocalNode(
+      ...randomAnonymousAccountAndSessionID(),
+      Crypto,
+    ).account;
 
-  // Add both everyone and specific account
-  group.addMember("everyone", "reader");
-  group.addMember(account2, "writer");
+    group.addMember(account, "writer");
+    expect(group.roleOf(account.id as RawAccountID)).toEqual("writer");
+  });
 
-  // Should return the explicit role, not everyone's role
-  expect(group.roleOf(node2.accountID)).toEqual("writer");
+  test("returns undefined for non-members", () => {
+    const node = new LocalNode(...randomAnonymousAccountAndSessionID(), Crypto);
+    const group = node.createGroup();
+    const account = new LocalNode(
+      ...randomAnonymousAccountAndSessionID(),
+      Crypto,
+    ).account;
 
-  // Change everyone's role
-  group.addMember("everyone", "writer");
+    expect(group.roleOf(account.id as RawAccountID)).toEqual(undefined);
+  });
 
-  // Should still return the explicit role
-  expect(group.roleOf(node2.accountID)).toEqual("writer");
-});
+  test("revoked roles return undefined", () => {
+    const node = new LocalNode(...randomAnonymousAccountAndSessionID(), Crypto);
+    const group = node.createGroup();
+    const account = new LocalNode(
+      ...randomAnonymousAccountAndSessionID(),
+      Crypto,
+    ).account;
 
-test("roleOf should prioritize inherited everyone role over explicit account role", async () => {
-  const { node1, node2 } = await createTwoConnectedNodes("server", "server");
+    group.addMember(account, "writer");
+    group.removeMemberInternal(account);
+    expect(group.roleOf(account.id as RawAccountID)).toEqual(undefined);
+  });
 
-  const parentGroup = node1.node.createGroup();
-  const childGroup = node1.node.createGroup();
-  const account2 = await loadCoValueOrFail(node1.node, node2.accountID);
+  test("everyone role applies to all accounts", () => {
+    const node = new LocalNode(...randomAnonymousAccountAndSessionID(), Crypto);
+    const group = node.createGroup();
+    const account = new LocalNode(
+      ...randomAnonymousAccountAndSessionID(),
+      Crypto,
+    ).account;
 
-  // Set up inheritance
-  childGroup.extend(parentGroup);
+    group.addMemberInternal("everyone", "reader");
+    expect(group.roleOf(account.id as RawAccountID)).toEqual("reader");
+  });
 
-  // Add everyone to parent and account to child
-  parentGroup.addMember("everyone", "writer");
-  childGroup.addMember(account2, "reader");
+  test("account role overrides everyone role", () => {
+    const node = new LocalNode(...randomAnonymousAccountAndSessionID(), Crypto);
+    const group = node.createGroup();
+    const account = new LocalNode(
+      ...randomAnonymousAccountAndSessionID(),
+      Crypto,
+    ).account;
 
-  // Should return the explicit role from child, not inherited everyone role
-  expect(childGroup.roleOf(node2.accountID)).toEqual("writer");
-});
+    group.addMemberInternal("everyone", "writer");
+    group.addMember(account, "reader");
+    expect(group.roleOf(account.id as RawAccountID)).toEqual("reader");
+  });
 
-test("roleOf should use everyone role when no explicit role exists", async () => {
-  const { node1, node2 } = await createTwoConnectedNodes("server", "server");
+  test("Revoking access on everyone role should not affect existing members", () => {
+    const node = new LocalNode(...randomAnonymousAccountAndSessionID(), Crypto);
+    const group = node.createGroup();
+    const account = new LocalNode(
+      ...randomAnonymousAccountAndSessionID(),
+      Crypto,
+    ).account;
 
-  const group = node1.node.createGroup();
+    group.addMemberInternal("everyone", "reader");
+    group.addMember(account, "writer");
+    group.removeMemberInternal("everyone");
+    expect(group.roleOf(account.id as RawAccountID)).toEqual("writer");
+    expect(group.roleOf("123" as RawAccountID)).toEqual(undefined);
+  });
 
-  // Add only everyone role
-  group.addMember("everyone", "reader");
+  test("Everyone role is inherited following the most permissive algorithm", () => {
+    const node = new LocalNode(...randomAnonymousAccountAndSessionID(), Crypto);
+    const group = node.createGroup();
+    const account = new LocalNode(
+      ...randomAnonymousAccountAndSessionID(),
+      Crypto,
+    ).account;
 
-  // Should return everyone's role when no explicit role exists
-  expect(group.roleOf(node2.accountID)).toEqual("reader");
-});
+    const parentGroup = node.createGroup();
+    parentGroup.addMemberInternal("everyone", "writer");
 
-test("roleOf should inherit everyone role from parent when no explicit roles exist", async () => {
-  const { node1, node2 } = await createTwoConnectedNodes("server", "server");
+    group.extend(parentGroup);
+    group.addMember(account, "reader");
 
-  const parentGroup = node1.node.createGroup();
-  const childGroup = node1.node.createGroup();
+    expect(group.roleOf(account.id as RawAccountID)).toEqual("writer");
+  });
+  test("roleOf should prioritize explicit account role over everyone role in same group", async () => {
+    const { node1, node2 } = await createTwoConnectedNodes("server", "server");
 
-  // Set up inheritance
-  childGroup.extend(parentGroup);
+    const group = node1.node.createGroup();
+    const account2 = await loadCoValueOrFail(node1.node, node2.accountID);
 
-  // Add everyone to parent only
-  parentGroup.addMember("everyone", "reader");
+    // Add both everyone and specific account
+    group.addMember("everyone", "reader");
+    group.addMember(account2, "writer");
 
-  // Should inherit everyone's role from parent
-  expect(childGroup.roleOf(node2.accountID)).toEqual("reader");
-});
+    // Should return the explicit role, not everyone's role
+    expect(group.roleOf(node2.accountID)).toEqual("writer");
 
-test("roleOf should handle everyone role inheritance through multiple levels", async () => {
-  const { node1, node2 } = await createTwoConnectedNodes("server", "server");
+    // Change everyone's role
+    group.addMember("everyone", "writer");
 
-  const grandParentGroup = node1.node.createGroup();
-  const parentGroup = node1.node.createGroup();
-  const childGroup = node1.node.createGroup();
+    // Should still return the explicit role
+    expect(group.roleOf(node2.accountID)).toEqual("writer");
+  });
 
-  const childGroupOnNode2 = await loadCoValueOrFail(node2.node, childGroup.id);
+  test("roleOf should prioritize inherited everyone role over explicit account role", async () => {
+    const { node1, node2 } = await createTwoConnectedNodes("server", "server");
 
-  const account2 = await loadCoValueOrFail(node1.node, node2.accountID);
+    const parentGroup = node1.node.createGroup();
+    const childGroup = node1.node.createGroup();
+    const account2 = await loadCoValueOrFail(node1.node, node2.accountID);
 
-  // Set up inheritance chain
-  parentGroup.extend(grandParentGroup);
-  childGroup.extend(parentGroup);
+    // Set up inheritance
+    childGroup.extend(parentGroup);
 
-  // Add everyone to grandparent
-  grandParentGroup.addMember("everyone", "writer");
+    // Add everyone to parent and account to child
+    parentGroup.addMember("everyone", "writer");
+    childGroup.addMember(account2, "reader");
 
-  // Should inherit everyone's role from grandparent
-  expect(childGroup.roleOf(node2.accountID)).toEqual("writer");
+    // Should return the explicit role from child, not inherited everyone role
+    expect(childGroup.roleOf(node2.accountID)).toEqual("writer");
+  });
 
-  // Add explicit role in parent
-  parentGroup.addMember(account2, "reader");
+  test("roleOf should use everyone role when no explicit role exists", async () => {
+    const { node1, node2 } = await createTwoConnectedNodes("server", "server");
 
-  // Should use parent's explicit role instead of grandparent's everyone role
-  expect(childGroup.roleOf(node2.accountID)).toEqual("writer");
+    const group = node1.node.createGroup();
 
-  // Add explicit role in child
-  childGroup.addMember(account2, "admin");
-  await childGroup.core.waitForSync();
+    // Add only everyone role
+    group.addMember("everyone", "reader");
 
-  // Should use child's explicit role
-  expect(childGroup.roleOf(node2.accountID)).toEqual("admin");
+    // Should return everyone's role when no explicit role exists
+    expect(group.roleOf(node2.accountID)).toEqual("reader");
+  });
 
-  // Remove child's explicit role
-  await childGroupOnNode2.removeMember(account2);
-  await childGroupOnNode2.core.waitForSync();
+  test("roleOf should inherit everyone role from parent when no explicit roles exist", async () => {
+    const { node1, node2 } = await createTwoConnectedNodes("server", "server");
 
-  // Should fall back to parent's explicit role
-  expect(childGroup.roleOf(node2.accountID)).toEqual("writer");
+    const parentGroup = node1.node.createGroup();
+    const childGroup = node1.node.createGroup();
 
-  // Remove parent's explicit role
-  await parentGroup.removeMember(account2);
-  await childGroup.core.waitForSync();
+    // Set up inheritance
+    childGroup.extend(parentGroup);
 
-  // Should fall back to grandparent's everyone role
-  expect(childGroup.roleOf(node2.accountID)).toEqual("writer");
+    // Add everyone to parent only
+    parentGroup.addMember("everyone", "reader");
+
+    // Should inherit everyone's role from parent
+    expect(childGroup.roleOf(node2.accountID)).toEqual("reader");
+  });
+
+  test("roleOf should handle everyone role inheritance through multiple levels", async () => {
+    const { node1, node2 } = await createTwoConnectedNodes("server", "server");
+
+    const grandParentGroup = node1.node.createGroup();
+    const parentGroup = node1.node.createGroup();
+    const childGroup = node1.node.createGroup();
+
+    const childGroupOnNode2 = await loadCoValueOrFail(
+      node2.node,
+      childGroup.id,
+    );
+
+    const account2 = await loadCoValueOrFail(node1.node, node2.accountID);
+
+    // Set up inheritance chain
+    parentGroup.extend(grandParentGroup);
+    childGroup.extend(parentGroup);
+
+    // Add everyone to grandparent
+    grandParentGroup.addMember("everyone", "writer");
+
+    // Should inherit everyone's role from grandparent
+    expect(childGroup.roleOf(node2.accountID)).toEqual("writer");
+
+    // Add explicit role in parent
+    parentGroup.addMember(account2, "reader");
+
+    // Should use parent's explicit role instead of grandparent's everyone role
+    expect(childGroup.roleOf(node2.accountID)).toEqual("writer");
+
+    // Add explicit role in child
+    childGroup.addMember(account2, "admin");
+    await childGroup.core.waitForSync();
+
+    // Should use child's explicit role
+    expect(childGroup.roleOf(node2.accountID)).toEqual("admin");
+
+    // Remove child's explicit role
+    await childGroupOnNode2.removeMember(account2);
+    await childGroupOnNode2.core.waitForSync();
+
+    // Should fall back to parent's explicit role
+    expect(childGroup.roleOf(node2.accountID)).toEqual("writer");
+
+    // Remove parent's explicit role
+    await parentGroup.removeMember(account2);
+    await childGroup.core.waitForSync();
+
+    // Should fall back to grandparent's everyone role
+    expect(childGroup.roleOf(node2.accountID)).toEqual("writer");
+  });
 });

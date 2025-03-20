@@ -109,7 +109,7 @@ describe("CoPlainText", () => {
         });
 
       // Load the text on the second peer
-      const loaded = await CoPlainText.load(id, meOnSecondPeer);
+      const loaded = await CoPlainText.load(id, { loadAs: meOnSecondPeer });
       expect(loaded).toBeDefined();
       expect(loaded!.toString()).toBe("hello world");
     });
@@ -142,9 +142,13 @@ describe("CoPlainText", () => {
     const queue = new cojsonInternals.Channel();
 
     // Subscribe to text updates
-    CoPlainText.subscribe(text.id, meOnSecondPeer, (subscribedText) => {
-      void queue.push(subscribedText);
-    });
+    CoPlainText.subscribe(
+      text.id,
+      { loadAs: meOnSecondPeer },
+      (subscribedText) => {
+        void queue.push(subscribedText);
+      },
+    );
 
     // Initial subscription should give us the text
     const update1 = (await queue.next()).value;

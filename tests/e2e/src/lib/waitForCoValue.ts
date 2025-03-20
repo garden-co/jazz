@@ -2,33 +2,41 @@ import {
   Account,
   CoValue,
   CoValueClass,
-  DepthsIn,
   ID,
+  RefsToResolve,
+  RefsToResolveStrict,
   subscribeToCoValue,
 } from "jazz-tools";
 
-export function waitForCoValue<T extends CoValue>(
+export function waitForCoValue<
+  T extends CoValue,
+  const R extends RefsToResolve<T>,
+>(
   coMap: CoValueClass<T>,
   valueId: ID<T>,
-  account: Account,
   predicate: (value: T) => boolean,
-  depth: DepthsIn<T>,
+  options: { loadAs: Account; resolve?: RefsToResolveStrict<T, R> },
 ) {
-  return new Promise<T>((resolve) => {
+  return new Promise<T>((resolve, reject) => {
     function subscribe() {
       subscribeToCoValue(
         coMap,
         valueId,
-        account,
-        depth,
+        {
+          loadAs: options.loadAs,
+          resolve: options.resolve,
+          onUnavailable: () => {
+            setTimeout(subscribe, 100);
+          },
+          onUnauthorized: () => {
+            reject(new Error("Unauthorized"));
+          },
+        },
         (value, unsubscribe) => {
           if (predicate(value)) {
             resolve(value);
             unsubscribe();
           }
-        },
-        () => {
-          setTimeout(subscribe, 100);
         },
       );
     }

@@ -331,7 +331,7 @@ This works because CoValues
 
   <CodeGroup>
         ```ts
-        const unsub = issue.subscribe([], (updatedIssue) => console.log(updatedIssue));
+        const unsub = issue.subscribe({ resolve: true }, (updatedIssue) => console.log(updatedIssue));
         ```
   </CodeGroup>
 
@@ -339,7 +339,7 @@ This works because CoValues
 
   <CodeGroup>
         ```ts
-        const unsub = Issue.subscribe(issueID, me, [], (updatedIssue) => {
+        const unsub = Issue.subscribe(issueID, me, { resolve: true }, (updatedIssue) => {
             console.log(updatedIssue);
         });
         ```
@@ -358,7 +358,7 @@ This works because CoValues
             function useCoState<V extends CoValue>(Schema: CoValueClass<V>, id?: ID<V>): V | undefined {
                 const [value, setValue] = useState<V>();
 
-                useEffect(() => Schema.subscribe(id, [], setValue), [id]);
+                useEffect(() => Schema.subscribe(id, { resolve: true }, setValue), [id]);
 
                 return value;
             }
@@ -454,7 +454,7 @@ function App() { // old
     const issue = useCoState(Issue, issueID); // old
     // old
     const createIssue = () => { // old
-        const group = Group.create({ owner: me });
+        const group = Group.create();
         group.addMember("everyone", "writer");
         // old
         const newIssue = Issue.create( // old
@@ -605,6 +605,8 @@ export function ProjectComponent({ projectID }: { projectID: ID<Project> }) {
                 <button onClick={createAndAddIssue}>Create Issue</button>
             </div>
         </div>
+    ) : project === null ? (
+        <div>Project not found or access denied</div>
     ) : (
         <div>Loading project...</div>
     );
@@ -635,7 +637,7 @@ import { IssueComponent } from "./Issue.tsx"; // old
 import { useCoState } from "jazz-react"; // old
 // old
 export function ProjectComponent({ projectID }: { projectID: ID<Project> }) {// old
-    const project = useCoState(Project, projectID, { issues: [{}] });
+    const project = useCoState(Project, projectID, { resolve: { issues: { $each: true } } });
 
     const createAndAddIssue = () => {// old
         project?.issues.push(Issue.create({
@@ -663,7 +665,7 @@ export function ProjectComponent({ projectID }: { projectID: ID<Project> }) {// 
 ```
 </CodeGroup>
 
-The loading-depth spec `{ issues: [{}] }` means "in `Project`, load `issues` and load each item in `issues` shallowly". (Since an `Issue` doesn't have any further references, "shallowly" actually means all its properties will be available).
+The loading-depth spec `{ resolve: { issues: { $each: true } } }` means "in `Project`, load `issues` and load each item in `issues` deeply". (Since an `Issue` doesn't have any further references, "deeply" actually means all its properties will be available).
 
 -   Now, we can get rid of a lot of conditional accesses because we know that once `project` is loaded, `project.issues` and each `Issue` in it will be loaded as well.
 -   This also results in only one rerender and visual update when everything is loaded, which is faster (especially for long lists) and gives you more control over the loading UX.
@@ -747,7 +749,7 @@ import { createInviteLink } from "jazz-react";
 // old
 
 export function ProjectComponent({ projectID }: { projectID: ID<Project> }) {// old
-    const project = useCoState(Project, projectID, { issues: [{}] }); // old
+    const project = useCoState(Project, projectID, { resolve: { issues:  { $each: true } } }); // old
 
     const { me } = useAccount();
 

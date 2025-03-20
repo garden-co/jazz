@@ -46,9 +46,8 @@ export function UploaderPeer() {
     await waitForCoValue(
       UploadedFile,
       file.id,
-      account.me,
       (value) => value.syncCompleted,
-      {},
+      { loadAs: account.me },
     );
 
     iframe.remove();
