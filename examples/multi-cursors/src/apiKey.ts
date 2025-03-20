@@ -1,1 +1,1 @@
-export const apiKey = "react-passkey-auth@garden.co";
+export const apiKey = "jazz-multi-cursors@garden.co";

@@ -771,11 +771,11 @@ importers:
   examples/multi-cursors:
     dependencies:
       jazz-react:
-        specifier: ^0.11.5
-        version: 0.11.5(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
+        specifier: workspace:*
+        version: link:../../packages/jazz-react
       jazz-tools:
-        specifier: ^0.11.5
-        version: 0.11.5
+        specifier: workspace:*
+        version: link:../../packages/jazz-tools
       react:
         specifier: 18.3.1
         version: 18.3.1
@@ -6477,18 +6477,6 @@ packages:
     resolution: {integrity: sha512-QVb0dM5HvG+uaxitm8wONl7jltx8dqhfU33DcqtOZcLSVIKSDDLDi7+0LbAKiyI8hD9u42m2YxXSkMGWThaecQ==}
     engines: {iojs: '>= 1.0.0', node: '>= 0.12.0'}
 
-  cojson-storage-indexeddb@0.11.5:
-    resolution: {integrity: sha512-SsupRLvX9vJqQ8hlmd2lRnixGlhCKkcbo5bREN+eir7EG9z42lZn7DdgRsqIbkYAQ+1ZuDu+6+RGfU7aJNJhVg==}
-
-  cojson-storage@0.11.5:
-    resolution: {integrity: sha512-65fc7sz5I4Pl0YHO9IinW7myBr3nNrLxiBl9DE68rkvKP66QlG1UjBCCbSdqQUZAeJbb0U+RI70lJ2aHFo5Kag==}
-
-  cojson-transport-ws@0.11.5:
-    resolution: {integrity: sha512-5d5g9++Wgnv6higcWWW89n5/3VhsG94q+Um5CtAwrtusfxf+fW4QOkbh30TF24CyPNtWZSZ+Bsld+VlITThvrA==}
-
-  cojson@0.11.5:
-    resolution: {integrity: sha512-ko0l6X40GBglGylr7ztRhyzx/kcqCl5bUcgXTUBSlJF+lAcQpgPmZMutkL8snh5E/X3EmMABGF9bzGbs0ZkO6w==}
-
   collect-v8-coverage@1.0.2:
     resolution: {integrity: sha512-lHl4d5/ONEbLlJvaJNtsF/Lz+WvB07u2ycqTYbdrq7UypDXailES4valYb2eWiJFxZlVmpGekfqoxQhzyFdT4Q==}
 
@@ -8248,26 +8236,8 @@ packages:
   jackspeak@3.4.3:
     resolution: {integrity: sha512-OGlZQpz2yfahA/Rd1Y8Cd9SIEsqvXkLVoSw/cgwhnhFMDbsQFeZYoJJ7bIZBS9BcamUW96asq/npPWugM+RQBw==}
 
-  jazz-browser@0.11.5:
-    resolution: {integrity: sha512-juLYqIlj3oy2qffwN1Tj1oU/9sQ6p9eTgoQ+WVP9T+fqlFjoSQha4Qy0A4TLZdEgNPcOFolq9fORQ4LkJNL5aQ==}
-
   jazz-crypto-rs@0.0.6:
     resolution: {integrity: sha512-+hJM9hPzMjK7Jk9++sUs5mKXlFiCTMDZ2wjO8WsfNpY7RZ+kiYSwkCrKvvvDRHSXPlzoyFQFxrSrXqN0/Fr6Yw==}
-
-  jazz-react-core@0.11.5:
-    resolution: {integrity: sha512-UJFk6G1VZRZI+9s6j7a40EHi/Iv5MZlbcxcaxa2/3VenDvtlFQx/vrB2TtqZ6Hi1bDXML7Ysc+2F4PZN9DrGWA==}
-    peerDependencies:
-      react: 18.3.1
-      react-dom: 18.3.1
-
-  jazz-react@0.11.5:
-    resolution: {integrity: sha512-+3UXHyXZcltnJjTkCajQFSWYAx7uAljRqy5bClUFkIYWUqCOikWjTrD1PZ3znRxDW2CF5puskLmMCZyw042sWg==}
-    peerDependencies:
-      react: 18.3.1
-      react-dom: 18.3.1
-
-  jazz-tools@0.11.5:
-    resolution: {integrity: sha512-WdzUB3wg+T5X110uTPmIqRI90Kd12ex0iN5wcTsTuKqd0Yv2ZxzGp9zj9R+8feJojBP/+FwSCVdd+TBtjr3cOQ==}
 
   jest-changed-files@29.7.0:
     resolution: {integrity: sha512-fEArFiwf1BpQ+4bXSprcDc3/x4HSzL4al2tozwVpDFpsxALjLYdyiIK4e5Vz66GQJIbXJ82+35PtysofptNX2w==}
@@ -17018,31 +16988,6 @@ snapshots:
 
   co@4.6.0: {}
 
-  cojson-storage-indexeddb@0.11.5:
-    dependencies:
-      cojson: 0.11.5
-      cojson-storage: 0.11.5
-
-  cojson-storage@0.11.5:
-    dependencies:
-      cojson: 0.11.5
-
-  cojson-transport-ws@0.11.5:
-    dependencies:
-      cojson: 0.11.5
-      typescript: 5.6.3
-
-  cojson@0.11.5:
-    dependencies:
-      '@noble/ciphers': 0.1.4
-      '@noble/curves': 1.7.0
-      '@noble/hashes': 1.6.1
-      '@opentelemetry/api': 1.9.0
-      '@scure/base': 1.2.1
-      jazz-crypto-rs: 0.0.6
-      neverthrow: 7.2.0
-      queueueue: 4.1.2
-
   collect-v8-coverage@1.0.2: {}
 
   color-convert@1.9.3:
@@ -18851,37 +18796,7 @@ snapshots:
     optionalDependencies:
       '@pkgjs/parseargs': 0.11.0
 
-  jazz-browser@0.11.5:
-    dependencies:
-      cojson: 0.11.5
-      cojson-storage-indexeddb: 0.11.5
-      cojson-transport-ws: 0.11.5
-      jazz-tools: 0.11.5
-
   jazz-crypto-rs@0.0.6: {}
-
-  jazz-react-core@0.11.5(react-dom@18.3.1(react@18.3.1))(react@18.3.1):
-    dependencies:
-      cojson: 0.11.5
-      jazz-tools: 0.11.5
-      react: 18.3.1
-      react-dom: 18.3.1(react@18.3.1)
-
-  jazz-react@0.11.5(react-dom@18.3.1(react@18.3.1))(react@18.3.1):
-    dependencies:
-      '@scure/bip39': 1.5.0
-      cojson: 0.11.5
-      jazz-browser: 0.11.5
-      jazz-react-core: 0.11.5(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
-      jazz-tools: 0.11.5
-      react: 18.3.1
-      react-dom: 18.3.1(react@18.3.1)
-
-  jazz-tools@0.11.5:
-    dependencies:
-      '@scure/bip39': 1.5.0
-      cojson: 0.11.5
-      fast-myers-diff: 3.2.0
 
   jest-changed-files@29.7.0:
     dependencies:

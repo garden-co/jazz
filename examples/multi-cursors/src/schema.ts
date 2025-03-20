@@ -1,63 +1,59 @@
-/**
- * Learn about schemas here:
- * https://jazz.tools/docs/react/schemas/covalues
- */
+import { Account, CoFeed, CoMap, Group, Profile, co } from "jazz-tools";
 
-import { Account, CoMap, Group, Profile, co } from "jazz-tools";
-
-/** The account profile is an app-specific per-user public `CoMap`
- *  where you can store top-level objects for that user */
-export class JazzProfile extends Profile {
-  /**
-   * Learn about CoValue field/item types here:
-   * https://jazz.tools/docs/react/schemas/covalues#covalue-fielditem-types
-   */
-  firstName = co.string;
-
-  // Add public fields here
+export class Vec2 extends CoMap {
+  x = co.number;
+  y = co.number;
 }
 
-/** The account root is an app-specific per-user private `CoMap`
- *  where you can store top-level objects for that user */
-export class AccountRoot extends CoMap {
-  dateOfBirth = co.Date;
-
-  // Add private fields here
-
-  get age() {
-    if (!this.dateOfBirth) return null;
-
-    return new Date().getFullYear() - this.dateOfBirth.getFullYear();
-  }
+export class CursorProfile extends Profile {
+  name = co.string;
+  position = co.ref(Vec2);
 }
 
-export class JazzAccount extends Account {
-  profile = co.ref(JazzProfile);
-  root = co.ref(AccountRoot);
+export class Camera extends CoMap {
+  position = co.ref(Vec2);
+}
+
+export class CursorRoot extends CoMap {
+  camera = co.ref(Camera);
+}
+
+export class CursorFeed extends CoFeed.Of(co.ref(CursorProfile)) {}
+
+export class CursorAccount extends Account {
+  profile = co.ref(CursorProfile);
+  root = co.ref(CursorRoot);
 
   /** The account migration is run on account creation and on every log-in.
    *  You can use it to set up the account root and any other initial CoValues you need.
    */
-  migrate(this: JazzAccount) {
+  migrate(this: CursorAccount) {
+    console.log("migrate", this);
     if (this.root === undefined) {
-      const group = Group.create();
-
-      this.root = AccountRoot.create(
-        {
-          dateOfBirth: new Date("1/1/1990"),
-        },
-        group,
-      );
+      this.root = CursorRoot.create({
+        camera: Camera.create({
+          position: Vec2.create({
+            x: 0,
+            y: 0,
+          }),
+        }),
+      });
     }
 
     if (this.profile === undefined) {
       const group = Group.create();
       group.addMember("everyone", "reader"); // The profile info is visible to everyone
 
-      this.profile = JazzProfile.create(
+      this.profile = CursorProfile.create(
         {
           name: "Anonymous user",
-          firstName: "",
+          position: Vec2.create(
+            {
+              x: 0,
+              y: 0,
+            },
+            { owner: group },
+          ),
         },
         group,
       );
