@@ -6,7 +6,8 @@ function App() {
     <>
       <main className="h-screen">
         <Canvas
-          userCursors={[
+          onCursorMove={(_move) => {}}
+          remoteCursors={[
             {
               id: "1",
               position: { x: -40, y: 60 },

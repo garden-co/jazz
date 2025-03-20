@@ -1,6 +1,18 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { throttleTime } from "../utils/throttleTime";
 
-export function useCanvas() {
+export interface CursorMoveEvent {
+  position: { x: number; y: number };
+  isDragging: boolean;
+}
+
+export function useCanvas({
+  onCursorMove,
+  throttleMs = 100,
+}: {
+  onCursorMove: (event: CursorMoveEvent) => void;
+  throttleMs?: number;
+}) {
   const [viewBox, setViewBox] = useState({
     x: 0,
     y: 0,
@@ -11,6 +23,10 @@ export function useCanvas() {
   const [isMouseOver, setIsMouseOver] = useState(false);
   const [dragStart, setDragStart] = useState({ x: 0, y: 0 });
   const [mousePosition, setMousePosition] = useState({ x: 0, y: 0 });
+
+  const onCursorMoveThrottled = useRef(
+    throttleTime((move: CursorMoveEvent) => onCursorMove(move), throttleMs),
+  ).current;
 
   useEffect(() => {
     const handleResize = () => {
@@ -37,19 +53,36 @@ export function useCanvas() {
       x: e.clientX,
       y: e.clientY,
     });
+
+    onCursorMoveThrottled({
+      position: mousePosition,
+      isDragging: true,
+    });
   };
-  const handleMouseUp = () => setIsDragging(false);
+  const handleMouseUp = () => {
+    setIsDragging(false);
+
+    onCursorMoveThrottled({
+      position: mousePosition,
+      isDragging: false,
+    });
+  };
   const handleMouseEnter = () => setIsMouseOver(true);
   const handleMouseLeave = () => {
     setIsMouseOver(false);
     setIsDragging(false);
+
+    onCursorMoveThrottled({
+      position: mousePosition,
+      isDragging: false,
+    });
   };
 
   const handleMouseMove = (e: React.MouseEvent<SVGSVGElement>) => {
     const svg = e.currentTarget;
     const ctm = svg.getScreenCTM();
 
-    if (!ctm) return;
+    if (!ctm) throw new Error("can't get SVG screen CTM");
 
     const point = svg.createSVGPoint();
     point.x = e.clientX;
@@ -57,6 +90,11 @@ export function useCanvas() {
     const svgPoint = point.matrixTransform(ctm.inverse());
 
     setMousePosition(svgPoint);
+
+    onCursorMoveThrottled({
+      position: svgPoint,
+      isDragging,
+    });
 
     if (!isDragging) return;
 

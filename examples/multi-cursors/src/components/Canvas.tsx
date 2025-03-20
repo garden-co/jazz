@@ -1,7 +1,7 @@
 import { UserCursor } from "./UserCursor";
 import { CanvasDemoContent } from "./CanvasDemoContent";
 import { CanvasBackground } from "./CanvasBackground";
-import { useCanvas } from "../hooks/useCanvas";
+import { CursorMoveEvent, useCanvas } from "../hooks/useCanvas";
 
 interface UserCursor {
   id: string;
@@ -11,10 +11,11 @@ interface UserCursor {
 }
 
 interface CanvasProps {
-  userCursors: UserCursor[];
+  remoteCursors: UserCursor[];
+  onCursorMove: (move: CursorMoveEvent) => void;
 }
 
-function Canvas({ userCursors }: CanvasProps) {
+function Canvas({ remoteCursors, onCursorMove }: CanvasProps) {
   const {
     svgProps,
     isDragging,
@@ -22,7 +23,7 @@ function Canvas({ userCursors }: CanvasProps) {
     mousePosition,
     bgPosition,
     dottedGridSize,
-  } = useCanvas();
+  } = useCanvas({ onCursorMove });
 
   return (
     <svg width="100%" height="100%" {...svgProps}>
@@ -33,7 +34,7 @@ function Canvas({ userCursors }: CanvasProps) {
 
       <CanvasDemoContent />
 
-      {userCursors.map((cursor) => (
+      {remoteCursors.map((cursor) => (
         <UserCursor
           key={cursor.id}
           position={cursor.position}
