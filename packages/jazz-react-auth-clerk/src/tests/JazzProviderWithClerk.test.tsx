@@ -1,9 +1,9 @@
 // @vitest-environment happy-dom
 
-import { act, render, waitFor } from "@testing-library/react";
+import { act, render } from "@testing-library/react";
 import { JazzClerkAuth, type MinimalClerkClient } from "jazz-auth-clerk";
 import { AuthSecretStorage, InMemoryKVStore, KvStoreContext } from "jazz-tools";
-import { MockInstance, beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { JazzProviderWithClerk } from "../index";
 
 vi.mock("jazz-react", async (importOriginal) => {
@@ -52,9 +52,16 @@ describe("JazzProviderWithClerk", () => {
   ) => {
     let callbacks = new Set<(clerk: MinimalClerkClient) => void>();
 
-    const mockClerk = {
+    const mockClerk: MinimalClerkClient = {
       user: {
         fullName: "Test User",
+        username: "test",
+        firstName: "Test",
+        lastName: "User",
+        id: "test",
+        primaryEmailAddress: {
+          emailAddress: "test@test.com",
+        },
         unsafeMetadata: {},
         update: vi.fn(),
       },
@@ -69,19 +76,24 @@ describe("JazzProviderWithClerk", () => {
           callbacks.delete(callback);
         };
       }),
-    } as unknown as MinimalClerkClient;
+    };
 
-    const utils = render(
-      <JazzProviderWithClerk
-        clerk={mockClerk}
-        sync={{ peer: "wss://test.jazz.tools" }}
-      >
-        {children}
-      </JazzProviderWithClerk>,
-    );
+    let utils: ReturnType<typeof render>;
+    act(() => {
+      utils = render(
+        <JazzProviderWithClerk
+          clerk={mockClerk}
+          sync={{
+            peer: "wss://test.jazz.tools?key=minimal-auth-clerk-example@garden.co",
+          }}
+        >
+          {children}
+        </JazzProviderWithClerk>,
+      );
+    });
 
     return {
-      ...utils,
+      ...utils!,
       mockClerk,
       callbacks,
     };
@@ -108,33 +120,35 @@ describe("JazzProviderWithClerk", () => {
   });
 
   it("should load the clerk credentials when the user is authenticated", async () => {
-    render(
-      <JazzProviderWithClerk
-        clerk={{
-          addListener: vi.fn(),
-          signOut: vi.fn(),
-          user: {
-            update: vi.fn(),
-            unsafeMetadata: {
-              jazzAccountID: "test",
-              jazzAccountSecret: "test",
-              jazzAccountSeed: "test",
+    await act(async () => {
+      render(
+        <JazzProviderWithClerk
+          clerk={{
+            addListener: vi.fn(),
+            signOut: vi.fn(),
+            user: {
+              update: vi.fn(),
+              unsafeMetadata: {
+                jazzAccountID: "test",
+                jazzAccountSecret: "test",
+                jazzAccountSeed: "test",
+              },
+              firstName: "Test",
+              lastName: "User",
+              username: "test",
+              fullName: "Test User",
+              id: "test",
+              primaryEmailAddress: {
+                emailAddress: "test@test.com",
+              },
             },
-            firstName: "Test",
-            lastName: "User",
-            username: "test",
-            fullName: "Test User",
-            id: "test",
-            primaryEmailAddress: {
-              emailAddress: "test@test.com",
-            },
-          },
-        }}
-        sync={{ peer: "wss://test.jazz.tools" }}
-      >
-        <div data-testid="test-child">Test Content</div>
-      </JazzProviderWithClerk>,
-    );
+          }}
+          sync={{ peer: "wss://test.jazz.tools" }}
+        >
+          <div data-testid="test-child">Test Content</div>
+        </JazzProviderWithClerk>,
+      );
+    });
 
     expect(JazzClerkAuth.loadClerkAuthData).toHaveBeenCalledWith(
       {
@@ -147,18 +161,20 @@ describe("JazzProviderWithClerk", () => {
   });
 
   it("should not load the clerk credentials when the user is not authenticated", async () => {
-    render(
-      <JazzProviderWithClerk
-        clerk={{
-          addListener: vi.fn(),
-          signOut: vi.fn(),
-          user: null,
-        }}
-        sync={{ peer: "wss://test.jazz.tools" }}
-      >
-        <div data-testid="test-child">Test Content</div>
-      </JazzProviderWithClerk>,
-    );
+    await act(async () => {
+      render(
+        <JazzProviderWithClerk
+          clerk={{
+            addListener: vi.fn(),
+            signOut: vi.fn(),
+            user: null,
+          }}
+          sync={{ peer: "wss://test.jazz.tools" }}
+        >
+          <div data-testid="test-child">Test Content</div>
+        </JazzProviderWithClerk>,
+      );
+    });
 
     expect(JazzClerkAuth.loadClerkAuthData).not.toHaveBeenCalledWith();
   });
