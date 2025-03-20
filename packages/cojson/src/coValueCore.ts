@@ -573,7 +573,11 @@ export class CoValueCore {
   ) {
     return (
       a.madeAt - b.madeAt ||
-      (a.txID.sessionID < b.txID.sessionID ? -1 : 1) ||
+      (a.txID.sessionID === b.txID.sessionID
+        ? 0
+        : a.txID.sessionID < b.txID.sessionID
+          ? -1
+          : 1) ||
       a.txID.txIndex - b.txID.txIndex
     );
   }
