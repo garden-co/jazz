@@ -42,6 +42,7 @@
   "devDependencies": {
     "@react-native-community/netinfo": "11.4.1",
     "expo-secure-store": "~14.0.1",
+    "react": "18.2.0",
     "react-native": "0.76.7",
     "typescript": "~5.6.2"
   },

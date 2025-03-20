@@ -37,7 +37,7 @@ function RegisterClerkAuth(props: {
 
 export const JazzProviderWithClerk = (
   props: { clerk: MinimalClerkClient } & JazzProviderProps,
-) => {
+): JSX.Element => {
   return (
     <JazzProvider {...props} onLogOut={props.clerk.signOut}>
       <RegisterClerkAuth clerk={props.clerk}>
