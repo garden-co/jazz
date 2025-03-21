@@ -5,9 +5,12 @@ export class Vec2 extends CoMap {
   y = co.number;
 }
 
+export class Cursor extends CoMap {
+  position = co.ref(Vec2);
+}
+
 export class CursorProfile extends Profile {
   name = co.string;
-  position = co.ref(Vec2);
 }
 
 export class Camera extends CoMap {
@@ -18,7 +21,11 @@ export class CursorRoot extends CoMap {
   camera = co.ref(Camera);
 }
 
-export class CursorFeed extends CoFeed.Of(co.ref(CursorProfile)) {}
+export class CursorFeed extends CoFeed.Of(co.ref(Cursor)) {}
+
+export class CursorContainer extends CoMap {
+  cursorFeed = co.ref(CursorFeed);
+}
 
 export class CursorAccount extends Account {
   profile = co.ref(CursorProfile);
@@ -28,7 +35,6 @@ export class CursorAccount extends Account {
    *  You can use it to set up the account root and any other initial CoValues you need.
    */
   migrate(this: CursorAccount) {
-    console.log("migrate", this);
     if (this.root === undefined) {
       this.root = CursorRoot.create({
         camera: Camera.create({
