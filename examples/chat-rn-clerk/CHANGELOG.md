@@ -1,5 +1,11 @@
 # chat-rn-clerk
 
+## 1.0.87
+
+### Patch Changes
+
+- 1bfa9bb: Removed when="singedUp" from examples apps' Jazz providers. This is a really niche use-case option and can lead to broken-feeling experiences when anonymous users try to load something.
+
 ## 1.0.86
 
 ### Patch Changes

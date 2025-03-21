@@ -1,5 +1,11 @@
 # create-jazz-app
 
+## 0.1.15
+
+### Patch Changes
+
+- 7e945b5: add directory param to create-jazz-app
+
 ## 0.1.14
 
 ### Patch Changes
