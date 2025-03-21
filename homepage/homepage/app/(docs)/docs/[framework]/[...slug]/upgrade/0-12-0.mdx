@@ -25,14 +25,28 @@ We're introducing a new resolve API for deep loading, more friendly to TypeScrip
 2. Shallowly loading a collection is now done with `true` instead of `[]` or `{}`
 
 <CodeGroup>
-```tsx
+```tsx twoslash
+// @noErrors: 2451
+import { CoMap, CoList, co, Account } from "jazz-tools";
+import { useAccount } from "jazz-react";
+
+class AccountRoot extends CoMap {
+  friends = CoList.Of(co.ref(Account));
+}
+
+class AppAccount extends Account {
+  root = co.ref(AccountRoot);
+}
+
+
+// ---cut-before---
 // Before
-const { me } = useAccount({ root: { friends: [] } }); // *bin*
+const { me } = useAccount({ root: { friends: [] } }); // [!code --]
 
 // After
-const { me } = useAccount({ // *add*
-  resolve: { root: { friends: true } } // *add*
-}); // *add*
+const { me } = useAccount({ // [!code ++]
+  resolve: { root: { friends: true } } // [!code ++]
+}); // [!code ++]
 ```
 </CodeGroup>
 
@@ -45,10 +59,10 @@ For a `CoList`:
 class ListOfTasks extends CoList.Of(co.ref(Task)) {}
 
 // Before
-const tasks = useCoState(ListOfTasks, id, [{}]); // *bin*
+const tasks = useCoState(ListOfTasks, id, [{}]); // [!code --]
 
 // After
-const tasks = useCoState(ListOfTasks, id, { resolve: { $each: true } }); // *add*
+const tasks = useCoState(ListOfTasks, id, { resolve: { $each: true } }); // [!code ++]
 ```
 </CodeGroup>
 
@@ -59,12 +73,12 @@ For a `CoMap.Record`:
 class UsersByUsername extends CoMap.Record(co.ref(MyAppAccount)) {}
 
 // Before
-const usersByUsername = useCoState(UsersByUsername, id, [{}]); // *bin*
+const usersByUsername = useCoState(UsersByUsername, id, [{}]); // [!code --]
 
 // After
-const usersByUsername = useCoState(UsersByUsername, id, { // *add*
-  resolve: { $each: true } // *add*
-}); // *add*
+const usersByUsername = useCoState(UsersByUsername, id, { // [!code ++]
+  resolve: { $each: true } // [!code ++]
+}); // [!code ++]
 ```
 </CodeGroup>
 
@@ -73,20 +87,20 @@ Nested loading &mdash; note how it's now less terse, but more readable and auto-
 <CodeGroup>
 ```tsx
 // Before
-const tasksWithAssigneesAndTheirOrgs = useCoState(ListOfTasks, id, [{ // *bin*
-  assignees: [{ org: {}}]} // *bin*
-]); // *bin*
+const tasksWithAssigneesAndTheirOrgs = useCoState(ListOfTasks, id, [{ // [!code --]
+  assignees: [{ org: {}}]} // [!code --]
+]); // [!code --]
 
 // After
-const tasksWithAssigneesAndTheirOrgs = useCoState(ListOfTasks, id, { // *add*
-  resolve: { // *add*
-    $each: { // *add*
-      assignees: { // *add*
-        $each: { org: true } // *add*
-      } // *add*
-    } // *add*
-  } // *add*
-}); // *add*
+const tasksWithAssigneesAndTheirOrgs = useCoState(ListOfTasks, id, { // [!code ++]
+  resolve: { // [!code ++]
+    $each: { // [!code ++]
+      assignees: { // [!code ++]
+        $each: { org: true } // [!code ++]
+      } // [!code ++]
+    } // [!code ++]
+  } // [!code ++]
+}); // [!code ++]
 ```
 </CodeGroup>
 
@@ -98,15 +112,15 @@ other options with default values are easier to manage, for example: loading a v
 <CodeGroup>
 ```ts
 // Before
-Playlist.load(id, otherAccount, { // *bin*
-  tracks: [], // *bin*
-}); // *bin*
+Playlist.load(id, otherAccount, { // [!code --]
+  tracks: [], // [!code --]
+}); // [!code --]
 
 // After
-Playlist.load(id, { // *add*
-  loadAs: otherAccount, // *add*
-  resolve: { tracks: true } // *add*
-}); // *add*
+Playlist.load(id, { // [!code ++]
+  loadAs: otherAccount, // [!code ++]
+  resolve: { tracks: true } // [!code ++]
+}); // [!code ++]
 ```
 </CodeGroup>
 
@@ -127,14 +141,14 @@ We also have implemented a more granular permission checking, where if an *optio
 ```tsx
 class ListOfTracks extends CoList.Of(co.optional.ref(Track)) {}
 // Before (ambiguous states)
-const value = useCoState(ListOfTracks, id, [{}]); // *bin*
-if (value === undefined) return <div>Loading or access denied</div>; // *bin*
-if (value === null) return <div>Not found</div>; // *bin*
+const value = useCoState(ListOfTracks, id, [{}]); // [!code --]
+if (value === undefined) return <div>Loading or access denied</div>; // [!code --]
+if (value === null) return <div>Not found</div>; // [!code --]
 
 // After
-const value = useCoState(ListOfTracks, id, { resolve: { $each: true } }); // *add*
-if (value === undefined) return <div>Loading...</div>; // *add*
-if (value === null) return <div>Not found or access denied</div>; // *add*
+const value = useCoState(ListOfTracks, id, { resolve: { $each: true } }); // [!code ++]
+if (value === undefined) return <div>Loading...</div>; // [!code ++]
+if (value === null) return <div>Not found or access denied</div>; // [!code ++]
 
 // This will only show tracks that we have access to and that are loaded.
 return tracks.map(track => track && <MusicTrack track={track} />);

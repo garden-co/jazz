@@ -25,9 +25,9 @@ So we decided to remove `createJazzRNApp` step and to provide the types through 
       import { JazzProvider, useDemoAuth, DemoAuthBasicUI } from "jazz-react-native";
       import { MyAppAccount } from "./schema";
 
-      // Remove these lines  // *bin*
-      const Jazz = createJazzRNApp({ AccountSchema: MyAppAccount }); // *bin*
-      export const { useAccount, useCoState } = Jazz; // *bin*
+      // Remove these lines  // [!code --]
+      const Jazz = createJazzRNApp({ AccountSchema: MyAppAccount }); // [!code --]
+      export const { useAccount, useCoState } = Jazz; // [!code --]
 
       export function JazzAndAuth({ children }: { children: React.ReactNode }) {  // old
           const [auth, state] = useDemoAuth();  // old
@@ -66,8 +66,8 @@ This change improves IDE intellisense support and simplifies imports:
     {/* prettier-ignore */}
     ```tsx
     // Replace local imports with "jazz-react-native" imports
-    import { useAccount } from "./main"; // *bin*
-    import { useAccount } from "jazz-react-native"; // *add*
+    import { useAccount } from "./main"; // [!code --]
+    import { useAccount } from "jazz-react-native"; // [!code ++]
 
     export function Hello() {
         const { me } = useAccount();

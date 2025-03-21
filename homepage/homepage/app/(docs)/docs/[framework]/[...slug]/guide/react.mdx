@@ -543,7 +543,7 @@ function App() { // old
         (window.location.search?.replace("?project=", "") || undefined) as ID<Project> | undefined
     );
     // old
-    const issue = useCoState(Issue, issueID); // *bin*
+    const issue = useCoState(Issue, issueID); // [!code --]
     // old
     const createProject = () => {
         const group = Group.create();
@@ -712,7 +712,7 @@ function App() { // old
     // old
     const createProject = () => { // old
         const group = Group.create(); // old
-        group.addMember("everyone", "writer"); // *bin*
+        group.addMember("everyone", "writer"); // [!code --]
         // old
         const newProject = Project.create( // old
             { // old
