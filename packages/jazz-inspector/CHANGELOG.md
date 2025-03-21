@@ -1,5 +1,12 @@
 # jazz-inspector
 
+## 0.11.6
+
+### Patch Changes
+
+- 09f0a98: UI and JSON display improvements
+- 11da4d1: isolate class name hashing on inspector
+
 ## 0.11.5
 
 ### Patch Changes

@@ -1,5 +1,14 @@
 # jazz-example-musicplayer
 
+## 0.0.86
+
+### Patch Changes
+
+- 1bfa9bb: Removed when="singedUp" from examples apps' Jazz providers. This is a really niche use-case option and can lead to broken-feeling experiences when anonymous users try to load something.
+- Updated dependencies [09f0a98]
+- Updated dependencies [11da4d1]
+  - jazz-inspector@0.11.6
+
 ## 0.0.85
 
 ### Patch Changes

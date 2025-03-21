@@ -1,5 +1,11 @@
 # multiauth
 
+## 0.0.5
+
+### Patch Changes
+
+- 1bfa9bb: Removed when="singedUp" from examples apps' Jazz providers. This is a really niche use-case option and can lead to broken-feeling experiences when anonymous users try to load something.
+
 ## 0.0.4
 
 ### Patch Changes

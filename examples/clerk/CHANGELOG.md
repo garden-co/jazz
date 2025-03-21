@@ -1,5 +1,11 @@
 # minimal-auth-clerk
 
+## 0.0.64
+
+### Patch Changes
+
+- 1bfa9bb: Removed when="singedUp" from examples apps' Jazz providers. This is a really niche use-case option and can lead to broken-feeling experiences when anonymous users try to load something.
+
 ## 0.0.63
 
 ### Patch Changes

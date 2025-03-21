@@ -1,5 +1,13 @@
 # jazz-example-chat
 
+## 0.0.165
+
+### Patch Changes
+
+- Updated dependencies [09f0a98]
+- Updated dependencies [11da4d1]
+  - jazz-inspector@0.11.6
+
 ## 0.0.164
 
 ### Patch Changes
