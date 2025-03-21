@@ -1,7 +1,7 @@
-import { UserCursor } from "./UserCursor";
-import { CanvasDemoContent } from "./CanvasDemoContent";
-import { CanvasBackground } from "./CanvasBackground";
 import { CursorMoveEvent, useCanvas } from "../hooks/useCanvas";
+import { CanvasBackground } from "./CanvasBackground";
+import { CanvasDemoContent } from "./CanvasDemoContent";
+import { UserCursor } from "./UserCursor";
 
 interface UserCursor {
   id: string;
