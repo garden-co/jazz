@@ -1,4 +1,4 @@
-# jazz-browser-media-images
+# jazz-auth-clerk
 
 ## 0.11.5
 

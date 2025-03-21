@@ -1,23 +1,5 @@
 {
   "name": "jazz-react-native-auth-clerk",
-  "version": "0.11.5",
-  "type": "module",
-  "main": "dist/index.js",
-  "types": "dist/index.d.ts",
-  "license": "MIT",
-  "dependencies": {
-    "cojson": "workspace:*",
-    "jazz-auth-clerk": "workspace:*",
-    "jazz-react-native": "workspace:*",
-    "jazz-tools": "workspace:*"
-  },
-  "scripts": {
-    "format-and-lint": "biome check .",
-    "format-and-lint:fix": "biome check . --write",
-    "build": "rm -rf ./dist && tsc --sourceMap --outDir dist",
-    "dev": "tsc --sourceMap --outDir dist --watch"
-  },
-  "devDependencies": {
-    "typescript": "~5.6.2"
-  }
+  "version": "0.0.0",
+  "private": true
 }

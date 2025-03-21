@@ -1,14 +1,13 @@
-# 🎷 Jazz + Expo + `react-navigation` + Demo Auth
+# 🎷 Jazz + React Native + Demo Auth
 
 ## 🚀 How to Run
 
 ### 1. Inside the Workspace Root
 
-First, install dependencies and build the project:
+First, install dependencies for the project:
 
 ```bash
 pnpm i
-pnpm run build
 ```
 
 ### 2. Inside the `examples/chat-rn` Directory
@@ -16,9 +15,18 @@ pnpm run build
 Next, navigate to the specific example project and run the following commands:
 
 ```bash
-pnpm expo prebuild
-npx pod-install
-pnpm expo run:ios
+pnpm pods
+pnpm ios
 ```
 
-This will set up and launch the app on iOS. For Android, you can replace the last command with `pnpm expo run:android`.
+This will set up and launch the app on iOS. For Android, you can skip `pnpm pods` and replace the last command with `pnpm android`.
+
+## Creation
+
+This was created using the following command:
+
+```bash
+bunx @react-native-community/cli init chat-rn --version 0.78 --install-pods true --skip-git-init true --package-name com.jazz.chatrn --directory chat-rn
+```
+
+Then delete `bun.lock`, change package name in `package.json`, and begin build instructions above.

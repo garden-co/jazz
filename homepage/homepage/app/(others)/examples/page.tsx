@@ -482,7 +482,7 @@ const reactExamples: Example[] = [
 const rnExamples: Example[] = [
   {
     name: "Chat",
-    slug: "chat-rn",
+    slug: "chat-rn-expo",
     description: "A simple app that creates a chat room with a shareable link.",
     tech: [tech.reactNative],
     illustration: <ChatIllustration />,
@@ -490,7 +490,7 @@ const rnExamples: Example[] = [
 
   {
     name: "Chat",
-    slug: "chat-rn-clerk",
+    slug: "chat-rn-expo-clerk",
     description: "Exactly like the React Native chat app, with Clerk for auth.",
     tech: [tech.reactNative],
     features: [features.clerk],

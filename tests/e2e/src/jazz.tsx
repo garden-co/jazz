@@ -27,7 +27,7 @@ export function AuthAndJazz({ children }: { children: React.ReactNode }) {
         peer: `${peer}?key=${key}`,
       }}
     >
-      {children}
+      {children as any}
     </JazzProvider>
   );
 }
