@@ -1,7 +1,7 @@
 {
   "build": {
     "env": {
-      "APP_NAME": "react-passkey-auth"
+      "APP_NAME": "multi-cursors"
     }
   },
   "ignoreCommand": "node ../../ignore-vercel-build.js"
