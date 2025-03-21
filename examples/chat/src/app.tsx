@@ -1,6 +1,7 @@
 import { apiKey } from "@/apiKey.ts";
 import { getRandomUsername, inIframe, onChatLoad } from "@/util.ts";
 import { useIframeHashRouter } from "hash-slash";
+import { JazzInspector } from "jazz-inspector";
 import { JazzProvider, useAccount } from "jazz-react";
 import { Group, ID } from "jazz-tools";
 import { StrictMode } from "react";
@@ -61,6 +62,7 @@ createRoot(document.getElementById("root")!).render(
         defaultProfileName={defaultProfileName}
       >
         <App />
+        <JazzInspector />
       </JazzProvider>
     </StrictMode>
   </ThemeProvider>,

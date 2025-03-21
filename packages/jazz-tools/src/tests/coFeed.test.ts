@@ -477,6 +477,38 @@ describe("FileStream.loadAsBlob", async () => {
   });
 });
 
+describe("FileStream progress tracking", async () => {
+  test("createFromBlob should report upload progress correctly", async () => {
+    // Create 5MB test blob
+    const testData = new Uint8Array(5 * 1024 * 1024); // 5MB instead of 500KB
+    for (let i = 0; i < testData.length; i++) testData[i] = i % 256;
+    const testBlob = new Blob([testData]);
+
+    // Collect progress updates
+    const progressUpdates: number[] = [];
+    await FileStream.createFromBlob(testBlob, {
+      onProgress: (progress) => progressUpdates.push(progress),
+    });
+
+    // Verify progress reporting
+    expect(progressUpdates.length).toBeGreaterThan(1);
+
+    // Check values between 0-1, increasing, with final=1
+    progressUpdates.forEach((p) => {
+      expect(p).toBeGreaterThanOrEqual(0);
+      expect(p).toBeLessThanOrEqual(1);
+    });
+
+    for (let i = 1; i < progressUpdates.length; i++) {
+      expect(progressUpdates[i]!).toBeGreaterThanOrEqual(
+        progressUpdates[i - 1]!,
+      );
+    }
+
+    expect(progressUpdates[progressUpdates.length - 1]).toBe(1);
+  });
+});
+
 describe("waitForSync", async () => {
   test("CoFeed: should resolve when the value is uploaded", async () => {
     class TestStream extends CoFeed.Of(co.string) {}

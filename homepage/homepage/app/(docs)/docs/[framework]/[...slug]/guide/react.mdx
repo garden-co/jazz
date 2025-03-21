@@ -622,7 +622,7 @@ Two things to note here:
 -   We only need to use `useCoState` on the Project, and the nested `ListOfIssues` and each `Issue` will be **automatically loaded and subscribed to when we access them.**
 -   However, because either the `Project`, `ListOfIssues`, or each `Issue` might not be loaded yet, we have to check for them being defined.
 
-### Precise loading depths
+### Precise resolve queries
 
 The load-and-subscribe-on-access is a convenient way to have your rendering drive data loading (including in nested components!) and lets you quickly chuck UIs together without worrying too much about the shape of all data you'll need.
 
@@ -665,7 +665,7 @@ export function ProjectComponent({ projectID }: { projectID: ID<Project> }) {// 
 ```
 </CodeGroup>
 
-The loading-depth spec `{ resolve: { issues: { $each: true } } }` means "in `Project`, load `issues` and load each item in `issues` deeply". (Since an `Issue` doesn't have any further references, "deeply" actually means all its properties will be available).
+The resolve query `{ resolve: { issues: { $each: true } } }` means "in `Project`, load `issues` and load each item in `issues` deeply". (Since an `Issue` doesn't have any further references, "deeply" actually means all its properties will be available).
 
 -   Now, we can get rid of a lot of conditional accesses because we know that once `project` is loaded, `project.issues` and each `Issue` in it will be loaded as well.
 -   This also results in only one rerender and visual update when everything is loaded, which is faster (especially for long lists) and gives you more control over the loading UX.

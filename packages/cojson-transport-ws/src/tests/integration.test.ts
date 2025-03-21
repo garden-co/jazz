@@ -1,4 +1,4 @@
-import { ControlledAgent, LocalNode } from "cojson";
+import { ControlledAgent, type CryptoProvider, LocalNode } from "cojson";
 import { WasmCrypto } from "cojson/crypto/WasmCrypto";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { WebSocket } from "ws";
@@ -8,7 +8,7 @@ import { startSyncServer } from "./syncServer";
 describe("WebSocket Peer Integration", () => {
   let server: any;
   let syncServerUrl: string;
-  let crypto: WasmCrypto;
+  let crypto: CryptoProvider;
 
   beforeEach(async () => {
     crypto = await WasmCrypto.create();

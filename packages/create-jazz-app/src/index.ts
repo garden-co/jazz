@@ -160,7 +160,13 @@ async function scaffoldProject({
       updateWorkspaceDependencies("devDependencies"),
     ]);
 
-    packageJson.name = projectName;
+    // If projectName is ".", use the current directory name instead
+    if (projectName === ".") {
+      const currentDir = process.cwd().split("/").pop() || "jazz-app";
+      packageJson.name = currentDir;
+    } else {
+      packageJson.name = projectName;
+    }
     fs.writeFileSync(packageJsonPath, JSON.stringify(packageJson, null, 2));
     depsSpinner.succeed(chalk.green("Dependencies updated"));
   } catch (error) {
@@ -305,7 +311,12 @@ module.exports = withNativeWind(config, { input: "./src/global.css" });
   // Final success message
   console.log("\n" + chalk.green.bold("✨ Project setup completed! ✨\n"));
   console.log(chalk.cyan("To get started:"));
-  console.log(chalk.white(`  cd ${chalk.bold(projectName)}`));
+
+  // Skip the cd command if we're already in the project directory
+  if (projectName !== ".") {
+    console.log(chalk.white(`  cd ${chalk.bold(projectName)}`));
+  }
+
   console.log(
     chalk.white(`  ${chalk.bold(`${packageManager} run ${devCommand}`)}\n`),
   );
@@ -445,13 +456,16 @@ program
   )
   .option("-s, --starter <starter>", chalk.cyan("Starter template to use"))
   .option("-e, --example <name>", chalk.cyan("Example project to use"))
-  .option("-n, --project-name <name>", chalk.cyan("Name of the project"))
   .option(
     "-p, --package-manager <manager>",
     chalk.cyan("Package manager to use (npm, yarn, pnpm, bun, deno)"),
   )
   .option("-k, --api-key <key>", chalk.cyan("Jazz Cloud API key"))
-  .action(async (options) => {
+  .argument(
+    "[directory]",
+    "Directory to create the project in (defaults to project name)",
+  )
+  .action(async (directory, options) => {
     try {
       const partialOptions: PromptOptions = {};
 
@@ -461,6 +475,18 @@ program
             "Cannot specify both starter and example. Please choose one.",
           ),
         );
+      }
+
+      // If directory is ".", set it as the project name or use it later
+      if (directory === ".") {
+        // Use current directory name as project name if not specified
+        if (!options.projectName) {
+          const currentDir = process.cwd().split("/").pop() || "jazz-app";
+          partialOptions.projectName = currentDir;
+        }
+      } else if (directory && !options.projectName) {
+        // If directory is provided but not project name, use directory as project name
+        partialOptions.projectName = directory;
       }
 
       if (options.starter)
@@ -475,6 +501,11 @@ program
 
       // Get missing options through prompts
       const scaffoldOptions = await promptUser(partialOptions);
+
+      // If directory is ".", we'll create the project in the current directory
+      if (directory === ".") {
+        scaffoldOptions.projectName = ".";
+      }
 
       // Validate will throw if invalid
       validateOptions(scaffoldOptions);
@@ -504,22 +535,20 @@ program.on("--help", () => {
   });
   console.log(chalk.blue("\nExample usage:"));
   console.log(
-    chalk.white(
-      "npx create-jazz-app@latest --project-name my-app --framework react\n",
-    ),
+    chalk.white("npx create-jazz-app@latest my-app --framework react\n"),
   );
   console.log(chalk.blue("With example app as a template:"));
   console.log(
-    chalk.white(
-      "npx create-jazz-app@latest --example chat --project-name my-chat-app\n",
-    ),
+    chalk.white("npx create-jazz-app@latest my-chat-app --example chat\n"),
   );
   console.log(chalk.blue("With API key:"));
   console.log(
     chalk.white(
-      "npx create-jazz-app@latest --project-name my-app --api-key your-api-key@garden.co\n",
+      "npx create-jazz-app@latest my-app --api-key your-api-key@garden.co\n",
     ),
   );
+  console.log(chalk.blue("Create in current directory:"));
+  console.log(chalk.white("npx create-jazz-app@latest .\n"));
 });
 
 program.parse(process.argv);

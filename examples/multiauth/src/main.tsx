@@ -19,7 +19,6 @@ createRoot(document.getElementById("root")!).render(
       <OmniAuth
         sync={{
           peer: `wss://cloud.jazz.tools/?key=${apiKey}`,
-          when: "signedUp", // This makes the app work in local mode when the user is not authenticated
         }}
       >
         <App />

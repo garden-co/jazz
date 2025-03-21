@@ -42,7 +42,6 @@ function JazzAndAuth({ children }: { children: React.ReactNode }) {
     <JazzProvider
       sync={{
         peer: `wss://cloud.jazz.tools/?key=${apiKey}`,
-        when: "signedUp",
       }}
       AccountSchema={TodoAccount}
     >

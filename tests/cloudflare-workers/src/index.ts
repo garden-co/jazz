@@ -1,5 +1,5 @@
 import { createWebSocketPeer } from "cojson-transport-ws";
-import { PureJSCrypto } from "cojson/crypto/PureJSCrypto";
+import { WasmCrypto } from "cojson/crypto/WasmCrypto";
 import { Hono } from "hono";
 import { startWorker } from "jazz-nodejs";
 import { CoMap, co } from "jazz-tools";
@@ -25,9 +25,9 @@ class MyAccount extends Account {
 
 const syncServer = "wss://cloud.jazz.tools/?key=jazz@jazz.tools";
 
-const crypto = await PureJSCrypto.create();
-
 app.get("/", async (c) => {
+  const crypto = await WasmCrypto.create();
+
   const peer = createWebSocketPeer({
     id: "upstream",
     websocket: new WebSocket(syncServer),

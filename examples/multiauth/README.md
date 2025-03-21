@@ -13,11 +13,11 @@ To run this example, you may either:
 
 1. Create a new Jazz project, and use this example as a template.
 ```bash
-npx create-jazz-app@latest --example counter --project-name counter
+npx create-jazz-app@latest counter-app --example counter
 ```
 2. Navigate to the new project and start the development server.
 ```bash
-cd counter
+cd counter-app
 npm run dev
 ```
 

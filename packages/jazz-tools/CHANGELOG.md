@@ -1,5 +1,22 @@
 # jazz-tools
 
+## 0.11.5
+
+### Patch Changes
+
+- Updated dependencies [60f5b3f]
+  - cojson@0.11.5
+
+## 0.11.4
+
+### Patch Changes
+
+- 57a3dbe: Throw when assigning invalid values to ref fields
+- a717754: Use RegisteredAccount types for `by` props
+- a91f343: Fixes coList.splice to handle insertions at start of list
+- Updated dependencies [7f036c1]
+  - cojson@0.11.4
+
 ## 0.11.3
 
 ### Patch Changes

@@ -1,5 +1,28 @@
 # jazz-inspector
 
+## 0.11.5
+
+### Patch Changes
+
+- Updated dependencies [60f5b3f]
+  - cojson@0.11.5
+  - jazz-react-core@0.11.5
+  - jazz-tools@0.11.5
+
+## 0.11.4
+
+### Patch Changes
+
+- d133d47: add z-index of 1 to inspector
+- e902405: add position prop to JazzInspector component
+- Updated dependencies [57a3dbe]
+- Updated dependencies [a717754]
+- Updated dependencies [a91f343]
+- Updated dependencies [7f036c1]
+  - jazz-tools@0.11.4
+  - cojson@0.11.4
+  - jazz-react-core@0.11.4
+
 ## 0.11.3
 
 ### Patch Changes

@@ -11,7 +11,6 @@ createRoot(document.getElementById("root")!).render(
     <JazzProvider
       sync={{
         peer: `wss://cloud.jazz.tools/?key=${apiKey}`,
-        when: "signedUp",
       }}
     >
       <DemoAuthBasicUI appName="Jazz Version History Example">

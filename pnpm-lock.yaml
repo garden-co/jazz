@@ -67,6 +67,9 @@ importers:
       jazz-browser-media-images:
         specifier: workspace:*
         version: link:../../packages/jazz-browser-media-images
+      jazz-inspector:
+        specifier: workspace:*
+        version: link:../../packages/jazz-inspector
       jazz-react:
         specifier: workspace:*
         version: link:../../packages/jazz-react
@@ -444,7 +447,7 @@ importers:
         specifier: workspace:*
         version: link:../../packages/jazz-react
       jazz-react-auth-clerk:
-        specifier: workspace:0.11.3
+        specifier: workspace:0.11.5
         version: link:../../packages/jazz-react-auth-clerk
       jazz-tools:
         specifier: workspace:*
@@ -706,36 +709,24 @@ importers:
 
   examples/inspector:
     dependencies:
-      '@radix-ui/react-checkbox':
-        specifier: ^1.0.4
-        version: 1.1.3(@types/react-dom@18.3.5(@types/react@18.3.18))(@types/react@18.3.18)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
-      '@radix-ui/react-slot':
-        specifier: ^1.1.1
-        version: 1.1.1(@types/react@18.3.18)(react@18.3.1)
-      '@radix-ui/react-toast':
-        specifier: ^1.1.4
-        version: 1.2.4(@types/react-dom@18.3.5(@types/react@18.3.18))(@types/react@18.3.18)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
-      class-variance-authority:
-        specifier: ^0.7.0
-        version: 0.7.1
       clsx:
         specifier: ^2.0.0
         version: 2.1.1
       cojson:
-        specifier: workspace:0.11.3
+        specifier: workspace:0.11.5
         version: link:../../packages/cojson
       cojson-transport-ws:
-        specifier: workspace:0.11.3
+        specifier: workspace:0.11.5
         version: link:../../packages/cojson-transport-ws
       hash-slash:
         specifier: workspace:0.2.2
         version: link:../../packages/hash-slash
+      jazz-inspector:
+        specifier: workspace:*
+        version: link:../../packages/jazz-inspector
       lucide-react:
         specifier: ^0.274.0
         version: 0.274.0(react@18.3.1)
-      qrcode:
-        specifier: ^1.5.3
-        version: 1.5.4
       react:
         specifier: 18.3.1
         version: 18.3.1
@@ -751,19 +742,7 @@ importers:
       react-use:
         specifier: ^17.4.0
         version: 17.6.0(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
-      tailwind-merge:
-        specifier: ^1.14.0
-        version: 1.14.0
-      tailwindcss-animate:
-        specifier: ^1.0.7
-        version: 1.0.7(tailwindcss@3.4.17(ts-node@10.9.2(@swc/core@1.10.1(@swc/helpers@0.5.15))(@types/node@22.10.2)(typescript@5.6.3)))
-      uniqolor:
-        specifier: ^1.1.0
-        version: 1.1.1
     devDependencies:
-      '@types/qrcode':
-        specifier: ^1.5.1
-        version: 1.5.5
       '@types/react':
         specifier: ^18.3.12
         version: 18.3.18
@@ -862,10 +841,10 @@ importers:
         specifier: workspace:*
         version: link:../../packages/jazz-inspector
       jazz-react:
-        specifier: workspace:0.11.3
+        specifier: workspace:0.11.5
         version: link:../../packages/jazz-react
       jazz-tools:
-        specifier: workspace:0.11.3
+        specifier: workspace:0.11.5
         version: link:../../packages/jazz-tools
       lucide-react:
         specifier: ^0.274.0
@@ -1104,10 +1083,10 @@ importers:
   examples/password-manager:
     dependencies:
       jazz-react:
-        specifier: workspace:0.11.3
+        specifier: workspace:0.11.5
         version: link:../../packages/jazz-react
       jazz-tools:
-        specifier: workspace:0.11.3
+        specifier: workspace:0.11.5
         version: link:../../packages/jazz-tools
       react:
         specifier: 18.3.1
@@ -1168,13 +1147,13 @@ importers:
         specifier: ^2.0.0
         version: 2.1.1
       jazz-browser-media-images:
-        specifier: workspace:0.11.3
+        specifier: workspace:0.11.5
         version: link:../../packages/jazz-browser-media-images
       jazz-react:
-        specifier: workspace:0.11.3
+        specifier: workspace:0.11.5
         version: link:../../packages/jazz-react
       jazz-tools:
-        specifier: workspace:0.11.3
+        specifier: workspace:0.11.5
         version: link:../../packages/jazz-tools
       lucide-react:
         specifier: ^0.274.0
@@ -1229,7 +1208,7 @@ importers:
         specifier: ^3.0.1
         version: 3.0.1
       jazz-run:
-        specifier: workspace:0.11.3
+        specifier: workspace:0.11.5
         version: link:../../packages/jazz-run
       postcss:
         specifier: ^8.4.27
@@ -1308,10 +1287,10 @@ importers:
         specifier: ^2.0.0
         version: 2.1.1
       jazz-react:
-        specifier: workspace:0.11.3
+        specifier: workspace:0.11.5
         version: link:../../packages/jazz-react
       jazz-tools:
-        specifier: workspace:0.11.3
+        specifier: workspace:0.11.5
         version: link:../../packages/jazz-tools
       lucide-react:
         specifier: ^0.274.0
@@ -1573,7 +1552,7 @@ importers:
         specifier: ^11.7.0
         version: 11.7.0
       cojson:
-        specifier: workspace:0.11.3
+        specifier: workspace:0.11.5
         version: link:../cojson
       cojson-storage:
         specifier: workspace:*
@@ -1650,13 +1629,13 @@ importers:
   packages/jazz-auth-clerk:
     dependencies:
       cojson:
-        specifier: workspace:0.11.3
+        specifier: workspace:0.11.5
         version: link:../cojson
       jazz-browser:
-        specifier: workspace:0.11.3
+        specifier: workspace:0.11.5
         version: link:../jazz-browser
       jazz-tools:
-        specifier: workspace:0.11.3
+        specifier: workspace:0.11.5
         version: link:../jazz-tools
     devDependencies:
       typescript:
@@ -1694,10 +1673,10 @@ importers:
         specifier: ^4.1.0
         version: 4.1.0
       jazz-browser:
-        specifier: workspace:0.11.3
+        specifier: workspace:0.11.5
         version: link:../jazz-browser
       jazz-tools:
-        specifier: workspace:0.11.3
+        specifier: workspace:0.11.5
         version: link:../jazz-tools
       pica:
         specifier: ^9.0.1
@@ -1712,6 +1691,15 @@ importers:
 
   packages/jazz-inspector:
     dependencies:
+      '@twind/core':
+        specifier: ^1.1.3
+        version: 1.1.3(typescript@5.6.3)
+      '@twind/preset-autoprefix':
+        specifier: ^1.0.7
+        version: 1.0.7(@twind/core@1.1.3(typescript@5.6.3))(typescript@5.6.3)
+      '@twind/preset-tailwind':
+        specifier: ^1.1.4
+        version: 1.1.4(@twind/core@1.1.3(typescript@5.6.3))(typescript@5.6.3)
       cojson:
         specifier: workspace:*
         version: link:../cojson
@@ -1721,6 +1709,9 @@ importers:
       jazz-tools:
         specifier: workspace:*
         version: link:../jazz-tools
+      lucide-react:
+        specifier: ^0.274.0
+        version: 0.274.0(react@18.3.1)
       react:
         specifier: 18.3.1
         version: 18.3.1
@@ -1769,16 +1760,16 @@ importers:
         specifier: ^1.3.0
         version: 1.5.0
       cojson:
-        specifier: workspace:0.11.3
+        specifier: workspace:0.11.5
         version: link:../cojson
       jazz-browser:
-        specifier: workspace:0.11.3
+        specifier: workspace:0.11.5
         version: link:../jazz-browser
       jazz-react-core:
         specifier: workspace:*
         version: link:../jazz-react-core
       jazz-tools:
-        specifier: workspace:0.11.3
+        specifier: workspace:0.11.5
         version: link:../jazz-tools
     devDependencies:
       '@testing-library/dom':
@@ -1967,19 +1958,19 @@ importers:
         specifier: ^0.25.5
         version: 0.25.8(effect@3.11.9)
       cojson:
-        specifier: workspace:0.11.3
+        specifier: workspace:0.11.5
         version: link:../cojson
       cojson-storage-sqlite:
-        specifier: workspace:0.11.3
+        specifier: workspace:0.11.5
         version: link:../cojson-storage-sqlite
       cojson-transport-ws:
-        specifier: workspace:0.11.3
+        specifier: workspace:0.11.5
         version: link:../cojson-transport-ws
       effect:
         specifier: ^3.6.5
         version: 3.11.9
       jazz-tools:
-        specifier: workspace:0.11.3
+        specifier: workspace:0.11.5
         version: link:../jazz-tools
       ws:
         specifier: ^8.14.2
@@ -5237,6 +5228,35 @@ packages:
 
   '@tsconfig/node22@22.0.0':
     resolution: {integrity: sha512-twLQ77zevtxobBOD4ToAtVmuYrpeYUh3qh+TEp+08IWhpsrIflVHqQ1F1CiPxQGL7doCdBIOOCF+1Tm833faNg==}
+
+  '@twind/core@1.1.3':
+    resolution: {integrity: sha512-/B/aNFerMb2IeyjSJy3SJxqVxhrT77gBDknLMiZqXIRr4vNJqiuhx7KqUSRzDCwUmyGuogkamz+aOLzN6MeSLw==}
+    engines: {node: '>=14.15.0'}
+    peerDependencies:
+      typescript: ^4.8.4
+    peerDependenciesMeta:
+      typescript:
+        optional: true
+
+  '@twind/preset-autoprefix@1.0.7':
+    resolution: {integrity: sha512-3wmHO0pG/CVxYBNZUV0tWcL7CP0wD5KpyWAQE/KOalWmOVBj+nH6j3v6Y3I3pRuMFaG5DC78qbYbhA1O11uG3w==}
+    engines: {node: '>=14.15.0'}
+    peerDependencies:
+      '@twind/core': ^1.1.0
+      typescript: ^4.8.4
+    peerDependenciesMeta:
+      typescript:
+        optional: true
+
+  '@twind/preset-tailwind@1.1.4':
+    resolution: {integrity: sha512-zv85wrP/DW4AxgWrLfH7kyGn/KJF3K04FMLVl2AjoxZGYdCaoZDkL8ma3hzaKQ+WGgBFRubuB/Ku2Rtv/wjzVw==}
+    engines: {node: '>=14.15.0'}
+    peerDependencies:
+      '@twind/core': ^1.1.0
+      typescript: ^4.8.4
+    peerDependenciesMeta:
+      typescript:
+        optional: true
 
   '@types/argparse@1.0.38':
     resolution: {integrity: sha512-ebDJ9b0e702Yr7pWgB0jzm+CX4Srzz8RcXtLJDJB+BSccqMa36uyH/zUsSYao5+BD1ytv3k3rPYCq4mAE1hsXA==}
@@ -10833,6 +10853,9 @@ packages:
   structured-headers@0.4.1:
     resolution: {integrity: sha512-0MP/Cxx5SzeeZ10p/bZI0S6MpgD+yxAhi1BOQ34jgnMXsCq3j1t6tQnZu+KdlL7dvJTLT3g9xN8tl10TqgFMcg==}
 
+  style-vendorizer@2.2.3:
+    resolution: {integrity: sha512-/VDRsWvQAgspVy9eATN3z6itKTuyg+jW1q6UoTCQCFRqPDw8bi3E1hXIKnGw5LvXS2AQPuJ7Af4auTLYeBOLEg==}
+
   styleq@0.1.3:
     resolution: {integrity: sha512-3ZUifmCDCQanjeej1f6kyl/BeP/Vae5EYkQ9iJfUm/QwZvlgnZzyflqAsAWYURdtea8Vkvswu2GrC57h3qffcA==}
 
@@ -15439,6 +15462,25 @@ snapshots:
   '@tsconfig/node20@20.1.4': {}
 
   '@tsconfig/node22@22.0.0': {}
+
+  '@twind/core@1.1.3(typescript@5.6.3)':
+    dependencies:
+      csstype: 3.1.3
+    optionalDependencies:
+      typescript: 5.6.3
+
+  '@twind/preset-autoprefix@1.0.7(@twind/core@1.1.3(typescript@5.6.3))(typescript@5.6.3)':
+    dependencies:
+      '@twind/core': 1.1.3(typescript@5.6.3)
+      style-vendorizer: 2.2.3
+    optionalDependencies:
+      typescript: 5.6.3
+
+  '@twind/preset-tailwind@1.1.4(@twind/core@1.1.3(typescript@5.6.3))(typescript@5.6.3)':
+    dependencies:
+      '@twind/core': 1.1.3(typescript@5.6.3)
+    optionalDependencies:
+      typescript: 5.6.3
 
   '@types/argparse@1.0.38': {}
 
@@ -21732,6 +21774,8 @@ snapshots:
   strnum@1.0.5: {}
 
   structured-headers@0.4.1: {}
+
+  style-vendorizer@2.2.3: {}
 
   styleq@0.1.3: {}
 

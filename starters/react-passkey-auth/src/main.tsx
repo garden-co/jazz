@@ -20,7 +20,6 @@ createRoot(document.getElementById("root")!).render(
     <JazzProvider
       sync={{
         peer: `wss://cloud.jazz.tools/?key=${apiKey}`,
-        when: "signedUp", // This way when the user hasn't signed up we store the data only locally
       }}
       AccountSchema={JazzAccount}
     >

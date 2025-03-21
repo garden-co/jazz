@@ -31,7 +31,7 @@ Then follow the interactive prompts to select your:
 Or specify all options directly:
 
 ```bash
-npx create-jazz-app@latest --starter react-demo-auth --project-name my-app --package-manager npm
+npx create-jazz-app@latest my-app --starter react-demo-auth --package-manager npm
 ```
 
 ### Start with an example app

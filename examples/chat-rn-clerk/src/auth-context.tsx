@@ -12,7 +12,6 @@ export function JazzAndAuth({ children }: PropsWithChildren) {
       storage="sqlite"
       sync={{
         peer: `wss://cloud.jazz.tools/?key=${apiKey}`,
-        when: "signedUp", // This makes the app work in local mode when the user is not authenticated
       }}
     >
       {children}

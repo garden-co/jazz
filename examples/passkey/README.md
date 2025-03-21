@@ -15,12 +15,12 @@ You can either
 
 Create a new Jazz project, and use this example as a template.
 ```bash
-npx create-jazz-app@latest --example passkey --project-name passkey
+npx create-jazz-app@latest passkey-app --example passkey
 ```
 
 Go to the new project directory.
 ```bash
-cd passkey
+cd passkey-app
 ```
 
 Run the dev server.

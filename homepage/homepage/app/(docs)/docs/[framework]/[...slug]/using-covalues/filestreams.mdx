@@ -1,0 +1,310 @@
+import { CodeGroup } from "@/components/forMdx";
+
+export const metadata = { title: "FileStreams" };
+
+# FileStreams
+
+FileStreams handle binary data in Jazz applications - think documents, audio files, and other non-text content. They're essentially collaborative versions of `Blob`s that sync automatically across devices.
+
+Use FileStreams when you need to:
+- Distribute documents across devices
+- Store audio or video files
+- Sync any binary data between users
+
+**Note:** For images specifically, Jazz provides the higher-level `ImageDefinition` abstraction which manages multiple image resolutions - see the [ImageDefinition documentation](/docs/using-covalues/imagedef) for details.
+
+FileStreams provide automatic chunking when using the `createFromBlob` method, track upload progress, and handle MIME types and metadata.
+
+In your schema, reference FileStreams like any other CoValue:
+
+<CodeGroup>
+```ts
+import { CoMap, FileStream, co } from "jazz-tools";
+
+class Document extends CoMap {
+  title = co.string;
+  file = co.ref(FileStream);  // Store a document file
+}
+```
+</CodeGroup>
+
+## Creating FileStreams
+
+There are two main ways to create FileStreams: creating empty ones for manual data population or creating directly from existing files or blobs.
+
+### Creating from Blobs and Files
+
+For files from input elements or drag-and-drop interfaces, use `createFromBlob`:
+
+<CodeGroup>
+```ts
+// From a file input
+const fileInput = document.querySelector('input[type="file"]');
+fileInput.addEventListener('change', async () => {
+  const file = fileInput.files[0];
+  if (file) {
+    // Create FileStream from user-selected file
+    const fileStream = await FileStream.createFromBlob(file);
+    
+    // Or with progress tracking for better UX
+    const fileWithProgress = await FileStream.createFromBlob(file, {
+      onProgress: (progress) => {
+        // progress is a value between 0 and 1
+        const percent = Math.round(progress * 100);
+        console.log(`Upload progress: ${percent}%`);
+        progressBar.style.width = `${percent}%`;
+      }
+    });
+  }
+});
+```
+</CodeGroup>
+
+### Creating Empty FileStreams
+
+Create an empty FileStream when you want to manually [add binary data in chunks](/docs/using-covalues/filestreams#writing-to-filestreams):
+
+<CodeGroup>
+```ts
+import { FileStream } from "jazz-tools";
+
+// Create a new empty FileStream
+const fileStream = FileStream.create();
+```
+</CodeGroup>
+
+## Reading from FileStreams
+
+`FileStream`s provide several ways to access their binary content, from raw chunks to convenient Blob objects.
+
+### Getting Raw Data Chunks
+
+To access the raw binary data and metadata:
+
+<CodeGroup>
+```ts
+// Get all chunks and metadata
+const fileData = fileStream.getChunks();
+
+if (fileData) {
+  console.log(`MIME type: ${fileData.mimeType}`);
+  console.log(`Total size: ${fileData.totalSizeBytes} bytes`);
+  console.log(`File name: ${fileData.fileName}`);
+  console.log(`Is complete: ${fileData.finished}`);
+  
+  // Access raw binary chunks
+  for (const chunk of fileData.chunks) {
+    // Each chunk is a Uint8Array
+    console.log(`Chunk size: ${chunk.length} bytes`);
+  }
+}
+```
+</CodeGroup>
+
+By default, `getChunks()` only returns data for completely synced `FileStream`s. To start using chunks from a `FileStream` that's currently still being synced use the `allowUnfinished` option:
+
+<CodeGroup>
+```ts
+// Get data even if the stream isn't complete
+const partialData = fileStream.getChunks({ allowUnfinished: true });
+```
+</CodeGroup>
+
+### Converting to Blobs
+
+For easier integration with web APIs, convert to a `Blob`:
+
+<CodeGroup>
+```ts
+// Convert to a Blob
+const blob = fileStream.toBlob();
+
+if (blob) {
+  // Use with URL.createObjectURL
+  const url = URL.createObjectURL(blob);
+  
+  // Create a download link
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = fileData?.fileName || 'document.pdf';
+  link.click();
+  
+  // Clean up when done
+  URL.revokeObjectURL(url);
+}
+```
+</CodeGroup>
+
+### Loading FileStreams as Blobs
+
+You can directly load a `FileStream` as a `Blob` when you only have its ID:
+
+<CodeGroup>
+```ts
+// Load directly as a Blob when you have an ID
+const blob = await FileStream.loadAsBlob(fileStreamId);
+
+// By default, waits for complete uploads
+// For in-progress uploads:
+const partialBlob = await FileStream.loadAsBlob(fileStreamId, {
+  allowUnfinished: true 
+});
+```
+</CodeGroup>
+
+### Checking Completion Status
+
+Check if a `FileStream` is fully synced:
+
+<CodeGroup>
+```ts
+if (fileStream.isBinaryStreamEnded()) {
+  console.log('File is completely synced');
+} else {
+  console.log('File upload is still in progress');
+}
+```
+</CodeGroup>
+
+## Writing to FileStreams
+
+When creating a `FileStream` manually (not using `createFromBlob`), you need to manage the upload process yourself. This gives you more control over chunking and progress tracking.
+
+### The Upload Lifecycle
+
+`FileStream` uploads follow a three-stage process:
+
+1. **Start** - Initialize with metadata
+2. **Push** - Send one or more chunks of data
+3. **End** - Mark the stream as complete
+
+### Starting a `FileStream`
+
+Begin by providing metadata about the file:
+
+<CodeGroup>
+```ts
+// Create an empty FileStream
+const fileStream = FileStream.create();
+
+// Initialize with metadata
+fileStream.start({
+  mimeType: 'application/pdf',      // MIME type (required)
+  totalSizeBytes: 1024 * 1024 * 2,  // Size in bytes (if known)
+  fileName: 'document.pdf'          // Original filename (optional)
+});
+```
+</CodeGroup>
+
+### Pushing Data
+
+Add binary data in chunks - this helps with large files and progress tracking:
+
+<CodeGroup>
+```ts
+// Create a sample Uint8Array (in real apps, this would be file data)
+const data = new Uint8Array([...]);
+
+// For large files, break into chunks (e.g., 100KB each)
+const chunkSize = 1024 * 100;
+for (let i = 0; i < data.length; i += chunkSize) {
+  // Create a slice of the data
+  const chunk = data.slice(i, i + chunkSize);
+  
+  // Push chunk to the FileStream
+  fileStream.push(chunk);
+  
+  // Track progress
+  const progress = Math.min(100, Math.round((i + chunk.length) * 100 / data.length));
+  console.log(`Upload progress: ${progress}%`);
+}
+```
+</CodeGroup>
+
+### Completing the Upload
+
+Once all chunks are pushed, mark the `FileStream` as complete:
+
+<CodeGroup>
+```ts
+// Finalize the upload
+fileStream.end();
+
+console.log('Upload complete!');
+```
+</CodeGroup>
+
+## Subscribing to `FileStream`s
+
+Like other CoValues, you can subscribe to `FileStream`s to get notified of changes as they happen. This is especially useful for tracking upload progress when someone else is uploading a file.
+
+### Loading by ID
+
+Load a `FileStream` when you have its ID:
+
+<CodeGroup>
+```ts
+// Load a FileStream by ID
+const fileStream = await FileStream.load(fileStreamId, []);
+
+if (fileStream) {
+  console.log('FileStream loaded successfully');
+  
+  // Check if it's complete
+  if (fileStream.isBinaryStreamEnded()) {
+    // Process the completed file
+    const blob = fileStream.toBlob();
+  }
+}
+```
+</CodeGroup>
+
+### Subscribing to Changes
+
+Subscribe to a `FileStream` to be notified when chunks are added or when the upload is complete:
+
+<CodeGroup>
+```ts
+// Subscribe to a FileStream by ID
+const unsubscribe = FileStream.subscribe(fileStreamId, [], (fileStream) => {
+  // Called whenever the FileStream changes
+  console.log('FileStream updated');
+  
+  // Get current status
+  const chunks = fileStream.getChunks({ allowUnfinished: true });
+  if (chunks) {
+    const uploadedBytes = chunks.chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+    const totalBytes = chunks.totalSizeBytes || 1;
+    const progress = Math.min(100, Math.round(uploadedBytes * 100 / totalBytes));
+    
+    console.log(`Upload progress: ${progress}%`);
+    
+    if (fileStream.isBinaryStreamEnded()) {
+      console.log('Upload complete!');
+      // Now safe to use the file
+      const blob = fileStream.toBlob();
+      
+      // Clean up the subscription if we're done
+      unsubscribe();
+    }
+  }
+});
+```
+</CodeGroup>  
+
+### Waiting for Upload Completion
+
+If you need to wait for a `FileStream` to be fully synchronized across devices:
+
+<CodeGroup>
+```ts
+// Wait for the FileStream to be fully synced
+await fileStream.waitForSync({
+  timeout: 5000  // Optional timeout in ms
+});
+
+console.log('FileStream is now synced to all connected devices');
+```
+</CodeGroup>
+
+This is useful when you need to ensure that a file is available to other users before proceeding with an operation.

@@ -4,6 +4,7 @@ import { SchemaUnion } from "../coValues/schemaUnion.js";
 import {
   Account,
   CoMap,
+  CryptoProvider,
   co,
   loadCoValue,
   subscribeToCoValue,
@@ -63,7 +64,7 @@ const getWidgetSchemaFromRaw = (raw: BaseWidget["_raw"]) => {
 class WidgetUnion extends SchemaUnion.Of<BaseWidget>(getWidgetSchemaFromRaw) {}
 
 describe("SchemaUnion", () => {
-  let Crypto: WasmCrypto;
+  let Crypto: CryptoProvider;
   let me: Account;
 
   beforeAll(async () => {

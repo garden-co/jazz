@@ -1,10 +1,8 @@
-import DocsLayout from "@/components/docs/DocsLayout";
+import { TocItemsSetter } from "@/components/docs/TocItemsSetter";
 import ComingSoonPage from "@/components/docs/coming-soon.mdx";
-import { DocNav } from "@/components/docs/nav";
 import { docNavigationItems } from "@/lib/docNavigationItems.js";
 import { Framework, frameworks } from "@/lib/framework";
 import type { Toc } from "@stefanprobst/rehype-extract-toc";
-import { Prose } from "gcmp-design-system/src/app/components/molecules/Prose";
 
 async function getMdxSource(slugPath: string, framework: string) {
   // Try to import the framework-specific file first
@@ -46,7 +44,6 @@ export default async function Page({
 }: { params: Promise<{ slug: string[]; framework: string }> }) {
   const { slug, framework } = await params;
   const slugPath = slug.join("/");
-  const bodyClassName = "overflow-x-hidden lg:flex-1 py-10  max-w-3xl mx-auto";
 
   try {
     const mdxSource = await getMdxSource(slugPath, framework);
@@ -56,19 +53,17 @@ export default async function Page({
     const tocItems = (tableOfContents as Toc)?.[0]?.children;
 
     return (
-      <DocsLayout toc={tocItems} nav={<DocNav />}>
-        <Prose className={bodyClassName}>
-          <Content />
-        </Prose>
-      </DocsLayout>
+      <>
+        <TocItemsSetter items={tocItems} />
+        <Content />
+      </>
     );
   } catch (error) {
     return (
-      <DocsLayout nav={<DocNav />}>
-        <Prose className={bodyClassName}>
-          <ComingSoonPage />
-        </Prose>
-      </DocsLayout>
+      <>
+        <TocItemsSetter items={[]} />
+        <ComingSoonPage />
+      </>
     );
   }
 }

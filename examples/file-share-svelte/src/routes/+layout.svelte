@@ -27,7 +27,6 @@
   AccountSchema={FileShareAccount}
   sync={{
     peer: `wss://cloud.jazz.tools/?key=${apiKey}`,
-    when: "signedUp",
   }}
 >
   <PasskeyAuthBasicUI appName="File Share">

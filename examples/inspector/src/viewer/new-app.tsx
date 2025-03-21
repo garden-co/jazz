@@ -9,10 +9,15 @@ import {
 } from "cojson";
 import { createWebSocketPeer } from "cojson-transport-ws";
 import { WasmCrypto } from "cojson/crypto/WasmCrypto";
-import { Trash2 } from "lucide-react";
+import {
+  Breadcrumbs,
+  Button,
+  Icon,
+  Input,
+  PageStack,
+  Select,
+} from "jazz-inspector";
 import React, { useState, useEffect } from "react";
-import { Breadcrumbs } from "./breadcrumbs";
-import { PageStack } from "./page-stack";
 import { usePagePath } from "./use-page-path";
 import { resolveCoValue, useResolvedCoValue } from "./use-resolve-covalue";
 
@@ -121,15 +126,23 @@ export default function CoJsonViewerApp() {
   }
 
   return (
-    <div className="w-full h-screen bg-gray-100 p-4 overflow-hidden flex flex-col">
-      <div className="flex items-center mb-4 gap-4">
+    <div
+      className={clsx(
+        "h-screen overflow-hidden flex flex-col",
+        " text-stone-700 bg-white",
+        "dark:text-stone-300 dark:bg-stone-950",
+      )}
+    >
+      <header className="flex items-center gap-4 p-3">
         <Breadcrumbs path={path} onBreadcrumbClick={goToIndex} />
         <div className="flex-1">
           <form onSubmit={handleCoValueIdSubmit}>
             {path.length !== 0 && (
-              <input
-                className="border p-2 rounded-lg min-w-[21rem] font-mono"
+              <Input
+                className="min-w-[21rem] font-mono"
                 placeholder="co_z1234567890abcdef123456789"
+                label="CoValue ID"
+                hideLabel
                 value={coValueId}
                 onChange={(e) =>
                   setCoValueId(e.target.value as CoID<RawCoValue>)
@@ -145,7 +158,7 @@ export default function CoJsonViewerApp() {
           deleteCurrentAccount={deleteCurrentAccount}
           localNode={localNode}
         />
-      </div>
+      </header>
 
       <PageStack
         path={path}
@@ -153,49 +166,39 @@ export default function CoJsonViewerApp() {
         goBack={goBack}
         addPages={addPages}
       >
-        {!currentAccount ? (
-          <AddAccountForm addAccount={addAccount} />
-        ) : (
+        {!currentAccount && <AddAccountForm addAccount={addAccount} />}
+
+        {currentAccount && path.length <= 0 && (
           <form
             onSubmit={handleCoValueIdSubmit}
             aria-hidden={path.length !== 0}
-            className={clsx(
-              "flex flex-col justify-center items-center gap-2 h-full w-full mb-20 ",
-              "transition-all duration-150",
-              path.length > 0
-                ? "opacity-0 -translate-y-2 scale-95"
-                : "opacity-100",
-            )}
+            className="flex flex-col relative -top-6 justify-center gap-2 h-full w-full max-w-sm mx-auto"
           >
-            <fieldset className="flex flex-col gap-2 text-sm">
-              <h2 className="text-3xl font-medium text-gray-950 text-center mb-4">
-                Jazz CoValue Inspector
-              </h2>
-              <input
-                className="border p-4 rounded-lg min-w-[21rem] font-mono"
-                placeholder="co_z1234567890abcdef123456789"
-                value={coValueId}
-                onChange={(e) =>
-                  setCoValueId(e.target.value as CoID<RawCoValue>)
-                }
-              />
-              <button
-                type="submit"
-                className="bg-indigo-500 hover:bg-indigo-500/80 text-white px-4 py-2 rounded-md"
-              >
-                Inspect
-              </button>
-              <hr />
-              <button
-                type="button"
-                className="border inline-block px-2 py-1.5 text-black rounded"
-                onClick={() => {
-                  setPage(currentAccount.id);
-                }}
-              >
-                Inspect My Account
-              </button>
-            </fieldset>
+            <h1 className="text-lg text-center font-medium mb-4 text-stone-900 dark:text-white">
+              Jazz CoValue Inspector
+            </h1>
+            <Input
+              label="CoValue ID"
+              className="font-mono"
+              hideLabel
+              placeholder="co_z1234567890abcdef123456789"
+              value={coValueId}
+              onChange={(e) => setCoValueId(e.target.value as CoID<RawCoValue>)}
+            />
+            <Button type="submit" variant="primary">
+              Inspect CoValue
+            </Button>
+
+            <p className="text-center">or</p>
+
+            <Button
+              variant="secondary"
+              onClick={() => {
+                setPage(currentAccount.id);
+              }}
+            >
+              Inspect my account
+            </Button>
           </form>
         )}
       </PageStack>
@@ -217,8 +220,10 @@ function AccountSwitcher({
   localNode: LocalNode | null;
 }) {
   return (
-    <div className="relative flex items-center gap-1">
-      <select
+    <div className="relative flex items-stretch gap-1">
+      <Select
+        label="Account to inspect"
+        className="label:sr-only max-w-96"
         value={currentAccount?.id || "add-account"}
         onChange={(e) => {
           if (e.target.value === "add-account") {
@@ -228,7 +233,6 @@ function AccountSwitcher({
             setCurrentAccount(account || null);
           }
         }}
-        className="p-2 px-4 bg-gray-100/50 border border-indigo-500/10 backdrop-blur-sm rounded-md text-indigo-700 appearance-none"
       >
         {accounts.map((account) => (
           <option key={account.id} value={account.id}>
@@ -240,15 +244,16 @@ function AccountSwitcher({
           </option>
         ))}
         <option value="add-account">Add account</option>
-      </select>
+      </Select>
       {currentAccount && (
-        <button
+        <Button
+          variant="secondary"
           onClick={deleteCurrentAccount}
-          className="p-3 rounded hover:bg-gray-200 transition-colors"
-          title="Delete Account"
+          className="rounded-md p-2 ml-1"
+          aria-label="Remove account"
         >
-          <Trash2 size={16} className="text-gray-500" />
-        </button>
+          <Icon name="delete" className="text-gray-500" />
+        </Button>
       )}
     </div>
   );
@@ -272,30 +277,34 @@ function AddAccountForm({
   return (
     <form
       onSubmit={handleSubmit}
-      className="flex flex-col gap-2 max-w-md mx-auto h-full justify-center"
+      className="flex flex-col gap-3 max-w-md mx-auto h-full justify-center"
     >
-      <h2 className="text-2xl font-medium text-gray-900 mb-3">
-        Add an Account to Inspect
+      <h2 className="text-2xl font-medium text-gray-900 dark:text-white">
+        Add an account to inspect
       </h2>
-      <input
-        className="border py-2 px-3 rounded-md"
-        placeholder="Account ID"
+      <p className="leading-relaxed mb-5">
+        Use the{" "}
+        <code className="whitespace-nowrap text-stone-900 dark:text-white font-semibold">
+          jazz-logged-in-secret
+        </code>{" "}
+        local storage key from within your Jazz app for your account
+        credentials.
+      </p>
+      <Input
+        label="Account ID"
         value={id}
+        placeholder="co_z1234567890abcdef123456789"
         onChange={(e) => setId(e.target.value)}
       />
-      <input
+      <Input
+        label="Account secret"
         type="password"
-        className="border py-2 px-3 rounded-md"
-        placeholder="Account Secret"
         value={secret}
         onChange={(e) => setSecret(e.target.value)}
       />
-      <button
-        type="submit"
-        className="bg-indigo-500 text-white px-4 py-2 rounded-md"
-      >
-        Add Account
-      </button>
+      <Button className="mt-3" type="submit">
+        Add account
+      </Button>
     </form>
   );
 }

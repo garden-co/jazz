@@ -11,12 +11,12 @@ You can either
 
 Create a new Jazz project, and use this example as a template.
 ```bash
-npx create-jazz-app@latest --example chat-vue --project-name chat-vue
+npx create-jazz-app@latest chat-vue-app --example chat-vue
 ```
 
 Go to the new project directory.
 ```bash
-cd chat-vue
+cd chat-vue-app
 ```
 
 Run the dev server.

@@ -14,9 +14,6 @@ export const docNavigationItems = [
         href: "/docs/guide",
         done: {
           react: 100,
-          "react-native": 0,
-          vue: 0,
-          svelte: 0,
         },
       },
       {
@@ -24,17 +21,7 @@ export const docNavigationItems = [
         href: "/examples",
         done: 30,
       },
-      {
-        name: "AI tools",
-        href: "/docs/ai-tools",
-        done: 100,
-      },
-      {
-        name: "Inspector",
-        href: "/docs/inspector",
-        done: 100,
-      },
-      { name: "FAQ", href: "/docs/faq", done: 100 },
+      { name: "FAQs", href: "/docs/faq", done: 100 },
     ],
   },
   {
@@ -64,6 +51,21 @@ export const docNavigationItems = [
     ],
   },
   {
+    name: "Tools",
+    items: [
+      {
+        name: "AI tools",
+        href: "/docs/ai-tools",
+        done: 100,
+      },
+      {
+        name: "Inspector",
+        href: "/docs/inspector",
+        done: 100,
+      },
+    ]
+  },
+  {
     name: "Upgrade guides",
     items: [
       {
@@ -78,31 +80,31 @@ export const docNavigationItems = [
         href: "/docs/upgrade/0-11-0",
         done: 100,
       },
-      {
-        // upgrade guides
-        name: "0.10.0 - New authentication flow",
-        href: "/docs/upgrade/0-10-0",
-        done: 100,
-      },
-      {
-        // upgrade guides
-        name: "0.9.8 - Without me!",
-        href: "/docs/upgrade/0-9-8",
-        done: 100,
-      },
-      {
-        // upgrade guides
-        name: "0.9.2 - Local persistence on React Native",
-        href: "/docs/upgrade/react-native-local-persistence",
-        done: 100,
-        framework: "react-native",
-      },
-      {
-        // upgrade guides
-        name: "0.9.0 - Top level imports",
-        href: "/docs/upgrade/0-9-0",
-        done: 100,
-      },
+      // {
+      //   // upgrade guides
+      //   name: "0.10.0 - New authentication flow",
+      //   href: "/docs/upgrade/0-10-0",
+      //   done: 100,
+      // },
+      // {
+      //   // upgrade guides
+      //   name: "0.9.8 - Without me!",
+      //   href: "/docs/upgrade/0-9-8",
+      //   done: 100,
+      // },
+      // {
+      //   // upgrade guides
+      //   name: "0.9.2 - Local persistence on React Native",
+      //   href: "/docs/upgrade/react-native-local-persistence",
+      //   done: 100,
+      //   framework: "react-native",
+      // },
+      // {
+      //   // upgrade guides
+      //   name: "0.9.0 - Top level imports",
+      //   href: "/docs/upgrade/0-9-0",
+      //   done: 100,
+      // },
     ],
   },
   {
@@ -126,22 +128,31 @@ export const docNavigationItems = [
       {
         name: "CoMaps",
         href: "/docs/using-covalues/comaps",
-        done: 80,
+        done: 100,
       },
       {
         name: "CoLists",
         href: "/docs/using-covalues/colists",
-        done: 80,
+        done: 100,
       },
       {
         name: "CoFeeds",
         href: "/docs/using-covalues/cofeeds",
-        done: 80,
+        done: 100,
       },
       {
         name: "FileStreams",
         href: "/docs/using-covalues/filestreams",
-        done: 0,
+        done: 80,
+      },
+      {
+        name: "ImageDefinition",
+        href: "/docs/using-covalues/imagedef",
+        done: {
+          react: 100,
+          "react-native": 100,
+          vanilla: 100,
+        },
       },
       {
         name: "SchemaUnions",
@@ -149,19 +160,14 @@ export const docNavigationItems = [
         done: 0,
       },
       {
-        name: "Loading & subscribing",
-        href: "/docs/using-covalues/loading-and-subscribing",
-        done: 0,
+        name: "Subscriptions & Deep Loading",
+        href: "/docs/using-covalues/subscription-and-loading",
+        done: 80,
       },
       {
         name: "History & time travel",
-        href: "/docs/using-covalues/history-and-time-travel",
-        done: 0,
-      },
-      {
-        name: "Access control",
-        href: "/docs/using-covalues/access-control",
-        done: 0,
+        href: "/docs/using-covalues/history",
+        done: 80,
       },
     ],
   },

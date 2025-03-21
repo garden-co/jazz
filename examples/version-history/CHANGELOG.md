@@ -1,5 +1,26 @@
 # version-history
 
+## 0.0.58
+
+### Patch Changes
+
+- jazz-inspector@0.11.5
+- jazz-react@0.11.5
+- jazz-tools@0.11.5
+
+## 0.0.57
+
+### Patch Changes
+
+- Updated dependencies [d133d47]
+- Updated dependencies [57a3dbe]
+- Updated dependencies [a717754]
+- Updated dependencies [a91f343]
+- Updated dependencies [e902405]
+  - jazz-inspector@0.11.4
+  - jazz-tools@0.11.4
+  - jazz-react@0.11.4
+
 ## 0.0.56
 
 ### Patch Changes

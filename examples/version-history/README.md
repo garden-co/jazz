@@ -13,12 +13,12 @@ You can either
 
 Create a new Jazz project, and use this example as a template.
 ```bash
-npx create-jazz-app@latest --example version-history --project-name version-history
+npx create-jazz-app@latest version-history-app --example version-history
 ```
 
 Go to the new project directory.
 ```bash
-cd version-history
+cd version-history-app
 ```
 
 Run the dev server.

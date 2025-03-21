@@ -10,7 +10,6 @@ function JazzAndAuth({ children }: { children: React.ReactNode }) {
     <JazzProvider
       sync={{
         peer: `wss://cloud.jazz.tools/?key=${apiKey}`,
-        when: "signedUp",
       }}
     >
       <PasskeyAuthBasicUI appName="Jazz Minimal Auth Passkey Example">

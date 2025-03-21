@@ -40,9 +40,9 @@ const commitMono = localFont({
 });
 
 const metaTags = {
-  title: "Jazz - Build local-first apps",
+  title: "Jazz - Whip up an app",
   description:
-    "Jazz is an open-source framework for building local-first apps, removing 90% of the backend and infrastructure complexity.",
+    "Jazz gives you data without needing a database — plus auth, permissions, files and multiplayer without needing a backend. Do everything right from the frontend and ship better apps, faster.",
   url: "https://jazz.tools",
 };
 

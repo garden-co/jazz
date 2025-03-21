@@ -1,5 +1,24 @@
 # form
 
+## 0.1.5
+
+### Patch Changes
+
+- jazz-react@0.11.5
+- jazz-tools@0.11.5
+- jazz-browser-media-images@0.11.5
+
+## 0.1.4
+
+### Patch Changes
+
+- Updated dependencies [57a3dbe]
+- Updated dependencies [a717754]
+- Updated dependencies [a91f343]
+  - jazz-tools@0.11.4
+  - jazz-browser-media-images@0.11.4
+  - jazz-react@0.11.4
+
 ## 0.1.3
 
 ### Patch Changes

@@ -16,7 +16,7 @@ export default defineConfig({
       entry: path.resolve(__dirname, "src/app.tsx"),
       name: "JazzInspector",
       // the proper extensions will be added
-      fileName: "jazz-inspector",
+      fileName: "app",
       formats: ["es"],
     },
   },

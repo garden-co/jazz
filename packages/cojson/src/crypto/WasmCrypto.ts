@@ -20,6 +20,7 @@ import { RawCoID, TransactionID } from "../ids.js";
 import { Stringified, stableStringify } from "../jsonStringify.js";
 import { JsonValue } from "../jsonValue.js";
 import { logger } from "../logger.js";
+import { PureJSCrypto } from "./PureJSCrypto.js";
 import {
   CryptoProvider,
   Encrypted,
@@ -49,8 +50,17 @@ export class WasmCrypto extends CryptoProvider<Blake3State> {
     super();
   }
 
-  static async create(): Promise<WasmCrypto> {
-    await initialize();
+  static async create(): Promise<WasmCrypto | PureJSCrypto> {
+    try {
+      await initialize();
+    } catch (e) {
+      logger.warn(
+        "Failed to initialize WasmCrypto, falling back to PureJSCrypto",
+        { err: e },
+      );
+      return new PureJSCrypto();
+    }
+
     return new WasmCrypto();
   }
 

@@ -25,7 +25,7 @@ export const TypeIcon = ({
   const iconKey = extendedType || type;
   const icon = iconMap[iconKey as keyof typeof iconMap];
 
-  return icon ? <span style={{ fontFamily: "monospace" }}>{icon}</span> : null;
+  return icon ? <span className="font-mono">{icon}</span> : null;
 };
 
 export const ResolveIcon = ({
@@ -38,17 +38,10 @@ export const ResolveIcon = ({
   const { type, extendedType, snapshot } = useResolvedCoValue(coId, node);
 
   if (snapshot === "unavailable" && !type) {
-    return <div style={{ color: "#4B5563", fontWeight: 500 }}>Unavailable</div>;
+    return <div className="text-gray-600 font-medium">Unavailable</div>;
   }
 
-  if (!type)
-    return (
-      <div
-        style={{ whiteSpace: "pre", width: "3.5rem", fontFamily: "monospace" }}
-      >
-        {" "}
-      </div>
-    );
+  if (!type) return <div className="whitespace-pre w-14 font-mono"> </div>;
 
   return <TypeIcon type={type} extendedType={extendedType} />;
 };

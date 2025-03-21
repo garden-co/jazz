@@ -2,6 +2,7 @@ import CreateJazzApp from "@/components/home/CreateJazzApp.mdx";
 import { H1 } from "gcmp-design-system/src/app/components/atoms/Headings";
 import { Icon } from "gcmp-design-system/src/app/components/atoms/Icon";
 import { CopyButton } from "gcmp-design-system/src/app/components/molecules/CodeGroup";
+import { Kicker } from "gcmp-design-system/src/app/components/atoms/Kicker";
 import { Prose } from "gcmp-design-system/src/app/components/molecules/Prose";
 import { SectionHeader } from "gcmp-design-system/src/app/components/molecules/SectionHeader";
 import Link from "next/link";
@@ -43,26 +44,26 @@ const features = [
 
 export function HeroSection() {
   return (
-    <div className="container grid items-center gap-x-8 gap-y-10 py-12 md:py-16 lg:py-24 lg:gap-x-10 lg:grid-cols-3">
+    <div className="container grid items-center gap-x-8 gap-y-12 my-12 md:my-16 lg:my-24 lg:gap-x-10 lg:grid-cols-3">
       <div className="flex flex-col justify-center gap-5 lg:col-span-2 lg:gap-8">
-        <p className="uppercase text-blue tracking-widest text-sm font-medium dark:text-stone-400">
-          Toolkit for cloud-synced local state
-        </p>
+        <Kicker>Toolkit for backendless apps</Kicker>
         <H1>
           <span className="inline-block">Whip up an app.</span>
         </H1>
 
         <Prose size="lg" className="text-pretty max-w-2xl dark:text-stone-200">
           <p>
-            Jazz lets you build with cloud-synced local state, completely
-            replacing backends and databases. You'll ship better apps, much faster.
+            Jazz gives you data without needing a database — plus auth, permissions, files and multiplayer without needing a backend.
+          </p>
+          <p>
+            Do everything right from the frontend and ship better apps, faster.
           </p>
           <p>
             Open source. Self-host or use{" "}
             <Link className="text-reset" href="/cloud">
               Jazz Cloud
             </Link>{" "}
-            for an &ldquo;it just works&rdquo; DX.
+            for zero-config magic.
           </p>
         </Prose>
 
@@ -81,12 +82,12 @@ export function HeroSection() {
         </div>
       </div>
 
-      <div className="h-full pt-12 group grid md:grid-cols-2 items-center lg:grid-cols-1">
+      <div className="h-full group grid md:grid-cols-2 items-center lg:grid-cols-1 lg:pt-36">
         <SectionHeader
           className="md:col-span-2 lg:sr-only"
           title="Get a Jazz app running in minutes."
         />
-        <div className="  overflow-hidden sm:rounded-xl sm:border  h-full sm:px-8 sm:pt-6 bg-stone-50 dark:bg-stone-950">
+        <div className="overflow-hidden sm:rounded-xl sm:border  h-full sm:px-8 sm:pt-6 bg-stone-50 dark:bg-stone-950">
           <div className="rounded-lg bg-white dark:bg-stone-925 sm:ring-4 ring-stone-400/20 sm:shadow-xl sm:shadow-blue/20 border relative sm:top-2 h-full w-full">
             <div className="py-4 flex items-center gap-2.5 px-6 border-b">
               <span className="rounded-full size-3 bg-stone-200 dark:bg-stone-900" />

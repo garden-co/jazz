@@ -72,7 +72,6 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
     <JazzProvider
       sync={{
         peer,
-        when: "signedUp", // This makes the app work in local mode when the user is anonymous
       }}
       storage="indexedDB"
       AccountSchema={MusicaAccount}

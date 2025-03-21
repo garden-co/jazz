@@ -9,6 +9,7 @@ import { base64URLtoBytes } from "cojson";
 import { BinaryStreamItem, BinaryStreamStart, CoStreamItem } from "cojson";
 import type { JsonObject, JsonValue } from "cojson";
 import { useEffect, useState } from "react";
+import { Button } from "../ui/button.js";
 import { PageInfo } from "./types.js";
 import { AccountOrGroupPreview } from "./value-renderer.js";
 
@@ -146,10 +147,10 @@ const BinaryDownloadButton = ({
   };
 
   return (
-    <button onClick={downloadFile}>
+    <Button variant="secondary" onClick={downloadFile}>
       ⬇️ {label}
       {/* Download {mimeType === "application/pdf" ? "PDF" : "File"} */}
-    </button>
+    </Button>
   );
 };
 
@@ -161,7 +162,7 @@ const LabelContentPair = ({
   content: React.ReactNode;
 }) => {
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: "0.375rem" }}>
+    <div className="flex flex-col gap-1.5">
       <span>{label}</span>
       <span>{content}</span>
     </div>
@@ -219,34 +220,12 @@ function RenderCoBinaryStream({
   const sizeInKB = (file.totalSize || 0) / 1024;
 
   return (
-    <div
-      style={{
-        marginTop: "2rem",
-        display: "flex",
-        flexDirection: "column",
-        gap: "2rem",
-      }}
-    >
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns: "repeat(3, 1fr)",
-          gap: "0.5rem",
-          maxWidth: "48rem",
-        }}
-      >
+    <div className="mt-8 flex flex-col gap-8">
+      <div className="grid grid-cols-3 gap-2 max-w-3xl">
         <LabelContentPair
           label="Mime Type"
           content={
-            <span
-              style={{
-                fontFamily: "monospace",
-                backgroundColor: "rgb(243 244 246)",
-                borderRadius: "0.25rem",
-                padding: "0.25rem 0.5rem",
-                fontSize: "0.875rem",
-              }}
-            >
+            <span className="font-mono bg-gray-100 rounded px-2 py-1 text-sm dark:bg-stone-900">
               {mimeType || "No mime type"}
             </span>
           }
@@ -265,7 +244,7 @@ function RenderCoBinaryStream({
               label={
                 mimeType === "application/pdf"
                   ? "Download PDF"
-                  : "Download File"
+                  : "Download file"
               }
             />
           }
@@ -275,13 +254,7 @@ function RenderCoBinaryStream({
         <LabelContentPair
           label="Preview"
           content={
-            <div
-              style={{
-                backgroundColor: "rgb(249 250 251)",
-                padding: "0.75rem",
-                borderRadius: "0.125rem",
-              }}
-            >
+            <div className="bg-gray-50  dark:bg-gray-925 p-3 rounded">
               <RenderBlobImage blob={blob} />
             </div>
           }
@@ -302,30 +275,10 @@ function RenderCoStream({
   const userCoIds = streamPerUser.map((stream) => stream.split("_session")[0]);
 
   return (
-    <div
-      style={{
-        display: "grid",
-        gridTemplateColumns: "repeat(3, 1fr)",
-        gap: "0.5rem",
-      }}
-    >
+    <div className="grid grid-cols-3 gap-2">
       {userCoIds.map((id, idx) => (
         <div
-          style={{
-            padding: "0.75rem",
-            borderRadius: "0.5rem",
-            overflow: "hidden",
-            backgroundColor: "white",
-            border: "1px solid #e5e7eb",
-            cursor: "pointer",
-            boxShadow: "0 1px 2px 0 rgb(0 0 0 / 0.05)",
-            transition: "background-color 0.2s",
-          }}
-          onMouseOver={(e) =>
-            (e.currentTarget.style.backgroundColor =
-              "rgba(243, 244, 246, 0.05)")
-          }
-          onMouseOut={(e) => (e.currentTarget.style.backgroundColor = "white")}
+          className="p-3 rounded-lg overflow-hidden  border border-gray-200 cursor-pointer shadow-sm hover:bg-gray-100/5"
           key={id}
         >
           <AccountOrGroupPreview coId={id as CoID<RawCoValue>} node={node} />

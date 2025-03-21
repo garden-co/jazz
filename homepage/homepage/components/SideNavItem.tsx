@@ -17,7 +17,7 @@ export function SideNavItem({
 }) {
   const classes = clsx(
     className,
-    "py-1.5 px-2 -mx-2 group rounded-md flex items-center  transition-colors",
+    "py-1 px-2 -mx-2 group rounded-md flex items-center  transition-colors",
   );
   const path = usePathname();
 

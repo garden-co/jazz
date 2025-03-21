@@ -142,7 +142,6 @@ function JazzAndAuth({ children }: { children: React.ReactNode }) {
     <JazzProvider
       sync={{
         peer: "wss://cloud.jazz.tools/?key=minimal-auth-passphrase-example@garden.co",
-        when: "signedUp",
       }}
     >
       <PassphraseAuthBasicUI

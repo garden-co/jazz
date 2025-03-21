@@ -2,6 +2,7 @@ import { CoID, LocalNode, RawCoValue } from "cojson";
 import type { JsonObject } from "cojson";
 import { useMemo, useState } from "react";
 import { LinkIcon } from "../link-icon.js";
+import { Button } from "../ui/button.js";
 import { PageInfo } from "./types.js";
 import { useResolvedCoValues } from "./use-resolve-covalue.js";
 import { ValueRenderer } from "./value-renderer.js";
@@ -51,46 +52,25 @@ export function TableView({
 
   return (
     <div>
-      <table
-        style={{
-          minWidth: "100%",
-          borderSpacing: 0,
-          borderCollapse: "collapse",
-        }}
-      >
-        <thead
-          style={{
-            position: "sticky",
-            top: 0,
-            borderBottom: "1px solid #e5e7eb",
-          }}
-        >
+      <table className="min-w-full text-sm border-spacing-0 border-collapse">
+        <thead className="sticky top-0 border-b border-gray-200">
           <tr>
             {["", ...keys].map((key) => (
               <th
                 key={key}
-                style={{
-                  padding: "0.75rem 1rem",
-                  backgroundColor: "#f9fafb",
-                  textAlign: "left",
-                  fontSize: "0.75rem",
-                  fontWeight: 500,
-                  color: "#6b7280",
-                  borderRadius: "0.25rem",
-                }}
+                className="p-3 bg-gray-50 dark:bg-gray-925 text-left font-medium rounded"
               >
                 {key}
               </th>
             ))}
           </tr>
         </thead>
-        <tbody
-          style={{ backgroundColor: "white", borderTop: "1px solid #e5e7eb" }}
-        >
+        <tbody className=" border-t border-gray-200">
           {resolvedRows.slice(0, visibleRowsCount).map((item, index) => (
             <tr key={index}>
-              <td style={{ padding: "0.25rem 0.25rem" }}>
-                <button
+              <td className="p-1">
+                <Button
+                  variant="tertiary"
                   onClick={() =>
                     onNavigate([
                       {
@@ -99,35 +79,12 @@ export function TableView({
                       },
                     ])
                   }
-                  style={{
-                    padding: "1rem",
-                    whiteSpace: "nowrap",
-                    fontSize: "0.875rem",
-                    color: "#6b7280",
-                    borderRadius: "0.25rem",
-                  }}
-                  onMouseOver={(e) => {
-                    e.currentTarget.style.backgroundColor = "#f3f4f6";
-                    e.currentTarget.style.color = "#3b82f6";
-                  }}
-                  onMouseOut={(e) => {
-                    e.currentTarget.style.backgroundColor = "transparent";
-                    e.currentTarget.style.color = "#6b7280";
-                  }}
                 >
                   <LinkIcon />
-                </button>
+                </Button>
               </td>
               {keys.map((key) => (
-                <td
-                  key={key}
-                  style={{
-                    padding: "1rem",
-                    whiteSpace: "nowrap",
-                    fontSize: "0.875rem",
-                    color: "#6b7280",
-                  }}
-                >
+                <td key={key} className="p-4 whitespace-nowrap">
                   <ValueRenderer
                     json={(item.snapshot as JsonObject)[key]}
                     onCoIDClick={(coId) => {
@@ -153,39 +110,20 @@ export function TableView({
           ))}
         </tbody>
       </table>
-      <div
-        style={{
-          padding: "1rem 0",
-          color: "#6b7280",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          gap: "0.5rem",
-        }}
-      >
+      <div className="py-4 text-gray-500 flex items-center justify-between gap-2">
         <span>
           Showing {Math.min(visibleRowsCount, coIdArray.length)} of{" "}
           {coIdArray.length}
         </span>
         {hasMore && (
-          <div style={{ textAlign: "center" }}>
-            <button
+          <div className="text-center">
+            <Button
+              variant="plain"
               onClick={loadMore}
-              style={{
-                padding: "0.5rem 1rem",
-                backgroundColor: "#3b82f6",
-                color: "white",
-                borderRadius: "0.25rem",
-              }}
-              onMouseOver={(e) => {
-                e.currentTarget.style.backgroundColor = "#2563eb";
-              }}
-              onMouseOut={(e) => {
-                e.currentTarget.style.backgroundColor = "#3b82f6";
-              }}
+              className="px-4 py-2 bg-blue text-white rounded hover:bg-blue-800"
             >
-              Load More
-            </button>
+              Load more
+            </Button>
           </div>
         )}
       </div>

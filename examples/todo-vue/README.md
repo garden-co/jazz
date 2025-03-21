@@ -11,12 +11,12 @@ You can either
 
 Create a new Jazz project, and use this example as a template.
 ```bash
-npx create-jazz-app@latest --example todo-vue --project-name todo-vue
+npx create-jazz-app@latest todo-vue-app --example todo-vue
 ```
 
 Go to the new project directory.
 ```bash
-cd todo-vue
+cd todo-vue-app
 ```
 
 Run the dev server.

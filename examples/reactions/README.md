@@ -13,12 +13,12 @@ You can either
 
 Create a new Jazz project, and use this example as a template.
 ```bash
-npx create-jazz-app@latest --example reactions --project-name reactions
+npx create-jazz-app@latest reactions-app --example reactions
 ```
 
 Go to the new project directory.
 ```bash
-cd reactions
+cd reactions-app
 ```
 
 Run the dev server.

@@ -1,6 +1,6 @@
 import { CoID, RawCoValue } from "cojson";
+import { PageInfo } from "jazz-inspector";
 import { useCallback, useEffect, useState } from "react";
-import { PageInfo } from "./types";
 
 export function usePagePath(defaultPath?: PageInfo[]) {
   const [path, setPath] = useState<PageInfo[]>(() => {

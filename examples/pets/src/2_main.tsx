@@ -52,7 +52,6 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
         <JazzProvider
           sync={{
             peer,
-            when: "signedUp",
           }}
           AccountSchema={PetAccount}
         >
