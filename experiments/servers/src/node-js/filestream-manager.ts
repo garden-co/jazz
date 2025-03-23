@@ -94,6 +94,7 @@ export class FileStreamManager {
             if (uploadState.receivedChunks.has(chunkIndex)) {
                 res.status(202).json({
                     m: `Chunk ${chunkIndex} already received`,
+                    uuid: uuid
                 });
                 return;
             }

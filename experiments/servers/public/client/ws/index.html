@@ -76,7 +76,7 @@
         <div class="container">
             <span class="fixed-width-span">Binary:</span>
             <div>
-                <button id="loadMultipleCoValuesBinary" onclick="downloadAndSave(); "><!--loadMultipleCoValues(true)-->
+                <button id="loadMultipleCoValuesBinary" onclick="loadMultipleCoValues(true);">
                     1a. Load <strong>Multiple</strong> CoValues (Binary)
                 </button>
                 <button id="loadCoValueBinary" onclick="loadCoValue(true)">
@@ -123,7 +123,6 @@
             let subscribedCoValue = null;
 
             const loadCoValuesMap = new Map();
-            const createCoValuesMap = new Map();
             const websocketListeners = new Set();
 
             const RECONNECT_INTERVAL = 5000; // 5 seconds
@@ -381,23 +380,7 @@
             }
 
             function wsCreateCoValueResponse(response) {
-                if (response.code === 200) {
-                    // 200 - OK: here means acknowledgement of a chunk from a binary CoValue upload
-                    debug(
-                        `Chunked upload via websocket acknowledged for: ${response.payload.uuid}.`,
-                    );
-                } else if (response.code === 201) {
-                    // 201 - Created: here is acknowledgement of a textual CoValue creation or the final chunk of a binary CoValue upload
-                    // fetch the full covalue from the Map
-                    const covalue = createCoValuesMap.get(response.payload.uuid);
-                    appendCoValue(covalue);
-                    logCoValue(covalue);
-                    info(
-                        `Created (${
-                            isBinary() ? "binary" : "JSON"
-                        }) data for: ${response.payload.uuid}.`,
-                    );
-                }
+                wsNotifyMessageListeners(response);
             }
 
             function wsMutateCoValueResponse(payload) {
@@ -597,56 +580,280 @@
 
                     logCoValue(coValue);
                 } catch (error) {
-                    info(`Error loading CoValue: ${error.message}`);
+                    info(`Error loading CoValue (isBinary: ${isBinary}): ${error.message}`);
                 }
             }
 
-            async function createCoValueText(url = "", coValue = {}) {
-                if (isWS()) {
-                    wsSendWhenReady({
-                        action: "POST",
-                        binary: false,
-                        payload: coValue,
-                    });
+            async function createCoValue(isBinary) {
+                binaryFlag = isBinary;
+                const file = document.getElementById("fileInput").files[0];
+
+                if (isBinary && !file) {
+                    alert("Please, select a binary file for upload.");
+                    return;
+                }
+
+                const uuid = crypto.randomUUID();
+                let coValue = null;
+                try {
+                    if (isWS()) {
+                        coValue = await wsCreateCoValue(uuid, isBinary);
+
+                    } else {
+                        coValue = await httpCreateCoValue(uuid, isBinary);
+                    }
+
+                    if (isBinary) {
+                        info(`Created (binary) data for: ${uuid} (${coValue.file.size} bytes).`);
+
+                    } else {
+                        info(`Created (JSON) data for: ${uuid}.`);
+                    }
+
+                    appendCoValue(coValue);
+                    logCoValue(coValue);
+                } catch (error) {
+                    info(`Error creating CoValue (isBinary: ${isBinary}): ${error.message}`);
+                }
+            }
+
+            async function mutateCoValue(isBinary) {
+                binaryFlag = isBinary;
+                const uuid = coValueSelect.value;
+
+                if (!uuid) {
+                    info("Please, select a CoValue first.");
+                    return;
+                }
+
+                const url = getEndpoint(uuid, isBinary);
+                const coValue = { uuid: uuid };
+                info(
+                    `Mutating CoValue with UUID: ${coValue.uuid} via ${url}...`,
+                );
+
+                try {
+                    if (isBinary) {
+                        const blob = generateBinaryData(); // ~100KB CoValue mutation
+                        const blobInBase64 = await blobToBase64(blob);
+                        coValue.file = {
+                            data: blobInBase64,
+                            size: blobInBase64.length,
+                            note: "** 100KB binary **",
+                        };
+
+                        if (isWS()) {
+                            wsSendWhenReady({
+                                action: "PATCH",
+                                binary: isBinary,
+                                payload: {
+                                    uuid: coValue.uuid,
+                                    file: coValue.file,
+                                },
+                            });
+                        } else {
+                            const response = await fetch(url, {
+                                headers: {
+                                    "Content-Type": "application/json",
+                                },
+                                method: "PATCH",
+                                body: JSON.stringify({
+                                    file: coValue.file,
+                                }),
+                            });
+                            if (!response.ok) {
+                                throw new Error(
+                                    `HTTP error! status: ${response.status}`,
+                                );
+                            }
+                            info(
+                                `Mutated (binary) data for: ${coValue.uuid}.`,
+                            );
+                        }
+                    } else {
+                        coValue.title = window.faker
+                            ? faker.lorem.words({ min: 4, max: 5 }) // ~50-byte CoValue mutation
+                            : generateTextData();
+
+                        if (isWS()) {
+                            wsSendWhenReady({
+                                action: "PATCH",
+                                binary: isBinary,
+                                payload: coValue,
+                            });
+                        } else {
+                            const response = await fetch(url, {
+                                headers: {
+                                    "Content-Type": "application/json",
+                                },
+                                method: "PATCH",
+                                body: JSON.stringify({
+                                    title: coValue.title,
+                                }),
+                            });
+                            if (!response.ok) {
+                                throw new Error(
+                                    `HTTP error! status: ${response.status}`,
+                                );
+                            }
+                            info(
+                                `Mutated (JSON) data for: ${coValue.uuid}.`,
+                            );
+                        }
+                    }
+                    logCoValue(coValue);
+                } catch (error) {
+                    info(`Error mutating CoValue: ${error.message}`);
+                }
+            }
+
+            async function wsCreateCoValue(uuid, isBinary) {
+                const coValue = { uuid };
+                coValue.lastUpdated = new Date();
+                const file = document.getElementById("fileInput").files[0];
+
+                debug(
+                    `Attempting to add new CoValue with UUID: ${uuid} via WebSocket.`,
+                );
+
+                if (isBinary) {
+                    const { totalChunks, metadata } = getChunkedMetadata(file);
+                    coValue.file = metadata;
+
+                    for (
+                        let chunkIndex = 0;
+                        chunkIndex < totalChunks;
+                        chunkIndex++
+                    ) {
+                        const payload = await createCoValueBinaryPayload(coValue, chunkIndex, totalChunks, file);
+                        try {
+                            const response = await wsCreateCoValuePromise(uuid, payload, isBinary);
+                            if (!response) {
+                                throw new Error(
+                                    `CoValue ${uuid} binary upload error. WebSocket code: ${response.status}`,
+                                );
+                            } else {
+                                debug(
+                                    `CoValue ${uuid} chunk ${
+                                        chunkIndex + 1
+                                    }/${totalChunks} uploaded successfully`,
+                                );
+                            }
+
+                        } catch (error) {
+                            console.error(
+                                `CoValue ${uuid} upload failed at chunk: ${
+                                    chunkIndex + 1
+                                }/${totalChunks}`,
+                                error,
+                            );
+                            throw error;
+                        }
+                    }
                 } else {
+                    const payload = createCoValueTextBody(coValue);
+                    const response = await wsCreateCoValuePromise(uuid, payload, isBinary);
+
+                    if (!response) {
+                        throw new Error(
+                            `CoValue ${uuid} text upload error. WebSocket code: ${response.status}`,
+                        );
+                    }
+                }
+                return coValue;
+            }
+
+            async function httpCreateCoValue(uuid, isBinary) {
+                const coValue = { uuid };
+                coValue.lastUpdated = new Date();
+                const file = document.getElementById("fileInput").files[0];
+                const url = getEndpoint(undefined, isBinary);
+
+                debug(
+                    `Attempting to add new CoValue with UUID: ${uuid} via ${url}.`,
+                );
+
+                if (isBinary) {
+                    const { totalChunks, metadata } = getChunkedMetadata(file);
+                    coValue.file = metadata;
+
+                    for (
+                        let chunkIndex = 0;
+                        chunkIndex < totalChunks;
+                        chunkIndex++
+                    ) {
+                        const payload = await createCoValueBinaryPayload(coValue, chunkIndex, totalChunks, file);
+                        try {
+                            const response = await fetch(url, {
+                                headers: {
+                                    "Content-Type": "application/json",
+                                },
+                                method: "POST",
+                                body: JSON.stringify(payload),
+                            });
+
+                            if (!response.ok) {
+                                throw new Error(
+                                    `CoValue ${uuid} binary upload error. HTTP status: ${response.status}`,
+                                );
+                            } else {
+                                debug(
+                                    `CoValue ${uuid} chunk ${
+                                        chunkIndex + 1
+                                    }/${totalChunks} uploaded successfully`,
+                                );
+                            }
+
+                        } catch (error) {
+                            console.error(
+                                `CoValue ${uuid} upload failed at chunk: ${
+                                    chunkIndex + 1
+                                }/${totalChunks}`,
+                                error,
+                            );
+                            throw error;
+                        }
+                    }
+                } else {
+                    const payload = createCoValueTextBody(coValue);
                     const response = await fetch(url, {
-                        method: "POST",
                         headers: {
                             "Content-Type": "application/json",
                         },
-                        body: JSON.stringify(coValue),
+                        method: "POST",
+                        body: JSON.stringify(payload),
                     });
 
                     if (!response.ok) {
                         throw new Error(
-                            `HTTP error! Status: ${response.status}`,
+                            `CoValue ${uuid} text upload error. HTTP status: ${response.status}`,
                         );
                     }
-                    appendCoValue(coValue);
-                    logCoValue(coValue);
-                    info(`Created (JSON) data for: ${coValue.uuid}.`);
                 }
+                return coValue;
             }
 
             async function wsLoadCoValue(uuid, isBinary) {
                 return new Promise((resolve, reject) => {
-                    const socket = getWebSocket();
-
                     const handleMessage = (response) => {
                         if (isBinary) {
-                            if (response.payload.uuid === uuid && response.payload.type === "end") {
+                            if (response.action === "GET" && response.payload.uuid === uuid && response.payload.type === "end") {
                                 wsRemoveMessageListener(handleMessage);
                                 const coValue = handleBinaryCoValue(uuid);
 
                                 if (!coValue) {
-                                    return reject(new Error(`Failed to download chunks for binary CoValue with uuid: ${uuid}`));
+                                    return reject(new Error(`CoValue ${uuid} failed to download chunks for binary`));
                                 }
 
                                 resolve(coValue);
                             }
 
                         } else {
-                            resolve(response.payload);
+                            if (response.action === "GET" && response.payload.uuid === uuid && response.code === 200) {
+                                wsRemoveMessageListener(handleMessage);
+
+                                resolve(response.payload);
+                            }
                         }
                     };
                     wsAddMessageListener(handleMessage);
@@ -802,49 +1009,54 @@
                 return coValue;
             }
 
-            async function createCoValue(isBinary) {
-                binaryFlag = isBinary;
-                const url = getEndpoint(undefined, isBinary);
-                const coValue = { uuid: crypto.randomUUID() };
-                coValue.lastUpdated = new Date();
-                createCoValuesMap.set(coValue.uuid, coValue);
-                debug(
-                    `Attempting to add new CoValue with UUID: ${coValue.uuid} via ${url}.`,
-                );
-
-                try {
-                    if (isBinary) {
-                        const file =
-                            document.getElementById("fileInput").files[0];
-                        if (!file) {
-                            alert("Please select a binary file for upload.");
-                            return;
+            async function wsCreateCoValuePromise(uuid, payload, isBinary) {
+                return new Promise((resolve, reject) => {
+                    const handleMessage = (response) => {
+                        if (isBinary) {
+                            if (response.action === "POST" && response.payload.uuid === uuid) {
+                                wsRemoveMessageListener(handleMessage);
+                                if (response.code === 201) {
+                                    // this is the end of the chunked upload
+                                    resolve(true);
+                                } else if (response.code === 200) {
+                                    // this is an ACK for a (partial) chunked upload
+                                    resolve(true);
+                                } else {
+                                    // this is an error: response.code >= 400 || response.code === 500
+                                    resolve(false);
+                                }
+                            }
+                        } else {
+                            if (response.action === "POST" && response.payload.uuid === uuid) {
+                                wsRemoveMessageListener(handleMessage);
+                                if (response.code === 201) {
+                                    resolve(true);
+                                } else {
+                                    // this is an error
+                                    resolve(false);
+                                }
+                            }
                         }
+                    };
+                    wsAddMessageListener(handleMessage);
 
-                        await createCoValueBinary(url, coValue, file);
-                        coValue.file = {
-                            name: file.name,
-                            size: file.size,
-                            note: "** 50MB binary **",
-                        };
+                    wsSendWhenReady({
+                        action: "POST",
+                        binary: isBinary,
+                        payload: payload
+                    });
+                });
+            }
 
-                        if (!isWS()) {
-                            debug(
-                                `Creating (binary) data for ${coValue.uuid} ... file upload complete.`,
-                            );
-                            appendCoValue(coValue);
-                            logCoValue(coValue);
-                            info(`Created (binary) data for: ${coValue.uuid}.`);
-                        }
-                    } else {
-                        createCoValueTextBody(coValue);
-                        await createCoValueText(url, coValue);
-                    }
-                } catch (error) {
-                    info(
-                        `Error creating CoValue (isBinary: ${isBinary}): ${error.message}`,
-                    );
-                }
+            async function createCoValueBinaryPayload(coValue, chunkIndex, totalChunks, file) {
+                const base64Chunk = await base64EncodeChunk(getChunkedPayload(chunkIndex, file));
+                return {
+                    uuid: coValue.uuid,
+                    filename: coValue.file.name,
+                    chunk: chunkIndex,
+                    chunks: totalChunks,
+                    base64: base64Chunk
+                };
             }
 
             async function base64EncodeChunk(chunk) {
@@ -857,153 +1069,21 @@
                 }
             }
 
-            async function createCoValueBinary(url = "", coValue = {}, file) {
-                const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
-
-                for (
-                    let chunkIndex = 0;
-                    chunkIndex < totalChunks;
-                    chunkIndex++
-                ) {
-                    const start = chunkIndex * CHUNK_SIZE;
-                    const end = Math.min(file.size, start + CHUNK_SIZE);
-                    const chunk = file.slice(start, end);
-                    const base64Chunk = await base64EncodeChunk(chunk);
-                    const payload = {
-                        uuid: coValue.uuid,
-                        filename: file.name,
-                        chunk: chunkIndex,
-                        chunks: totalChunks,
-                        base64: base64Chunk,
-                    };
-
-                    try {
-                        if (isWS()) {
-                            wsSendWhenReady({
-                                action: "POST",
-                                binary: true,
-                                payload: payload,
-                            });
-                        } else {
-                            const response = await fetch(url, {
-                                headers: {
-                                    "Content-Type": "application/json",
-                                },
-                                method: "POST",
-                                body: JSON.stringify(payload),
-                            });
-
-                            if (!response.ok) {
-                                throw new Error(
-                                    `HTTP status: ${response.status}`,
-                                );
-                            } else {
-                                debug(
-                                    `Chunk ${
-                                        chunkIndex + 1
-                                    }/${totalChunks} uploaded successfully`,
-                                );
-                            }
-                        }
-                    } catch (error) {
-                        console.error(
-                            `Upload failed at chunk: ${
-                                chunkIndex + 1
-                            }/${totalChunks}`,
-                            error,
-                        );
-                        throw error;
-                    }
-                }
+            function getChunkedPayload(chunkIndex, file) {
+                const start = chunkIndex * CHUNK_SIZE;
+                const end = Math.min(file.size, start + CHUNK_SIZE);
+                const chunk = file.slice(start, end);
+                return chunk;
             }
 
-            async function mutateCoValue(isBinary) {
-                binaryFlag = isBinary;
-                const uuid = coValueSelect.value;
-
-                if (!uuid) {
-                    info("Please, select a CoValue first.");
-                    return;
-                }
-
-                const url = getEndpoint(uuid, isBinary);
-                const coValue = { uuid: uuid };
-                info(
-                    `Mutating CoValue with UUID: ${coValue.uuid} via ${url}...`,
-                );
-
-                try {
-                    if (isBinary) {
-                        const blob = generateBinaryData(); // ~100KB CoValue mutation
-                        const blobInBase64 = await blobToBase64(blob);
-                        coValue.file = {
-                            data: blobInBase64,
-                            size: blobInBase64.length,
-                            note: "** 100KB binary **",
-                        };
-
-                        if (isWS()) {
-                            wsSendWhenReady({
-                                action: "PATCH",
-                                binary: isBinary,
-                                payload: {
-                                    uuid: coValue.uuid,
-                                    file: coValue.file,
-                                },
-                            });
-                        } else {
-                            const response = await fetch(url, {
-                                method: "PATCH",
-                                headers: {
-                                    "Content-Type": "application/json",
-                                },
-                                body: JSON.stringify({
-                                    file: coValue.file,
-                                }),
-                            });
-                            if (!response.ok) {
-                                throw new Error(
-                                    `HTTP error! status: ${response.status}`,
-                                );
-                            }
-                            info(
-                                `Mutated (binary) data for: ${coValue.uuid}.`,
-                            );
-                        }
-                    } else {
-                        coValue.title = window.faker
-                            ? faker.lorem.words({ min: 4, max: 5 }) // ~50-byte CoValue mutation
-                            : generateTextData();
-
-                        if (isWS()) {
-                            wsSendWhenReady({
-                                action: "PATCH",
-                                binary: isBinary,
-                                payload: coValue,
-                            });
-                        } else {
-                            const response = await fetch(url, {
-                                method: "PATCH",
-                                headers: {
-                                    "Content-Type": "application/json",
-                                },
-                                body: JSON.stringify({
-                                    title: coValue.title,
-                                }),
-                            });
-                            if (!response.ok) {
-                                throw new Error(
-                                    `HTTP error! status: ${response.status}`,
-                                );
-                            }
-                            info(
-                                `Mutated (JSON) data for: ${coValue.uuid}.`,
-                            );
-                        }
+            function getChunkedMetadata(file) {
+                return {
+                    totalChunks: Math.ceil(file.size / CHUNK_SIZE),
+                    metadata: {
+                        name: file.name,
+                        size: file.size,
+                        note: "** 50MB binary **",
                     }
-                    logCoValue(coValue);
-                } catch (error) {
-                    info(`Error mutating CoValue: ${error.message}`);
                 }
             }
 
@@ -1025,6 +1105,7 @@
                     coValue.summary = generateTextData();
                     coValue.preview = generateTextData();
                 }
+                return coValue;
             }
 
             function generateTextData() {
@@ -1071,57 +1152,6 @@
                     bytes[i] = binaryString.charCodeAt(i);
                 }
                 return bytes;
-            }
-
-            async function downloadAndSave() {
-                try {
-                    info(`Websocket Promise test... `);
-                    const blob = await downloadFileWebSocket("b108a08f-1663-4755-b254-5bd07e5c5074", true);
-
-                    // Create a download link
-                    const blobUrl = URL.createObjectURL(blob);
-                    const a = document.createElement("a");
-                    a.href = blobUrl;
-                    a.download = "downloaded_file.zip"; // Adjust based on file metadata
-                    document.body.appendChild(a);
-                    a.click();
-                    a.remove();
-
-                    // Release memory
-                    URL.revokeObjectURL(blobUrl);
-                } catch (error) {
-                    console.error("Download failed:", error);
-                }
-            }
-            async function downloadFileWebSocket(uuid, isBinary) {
-                return new Promise((resolve, reject) => {
-                    const socket = getWebSocket();
-
-                    const handleMessage = (response) => {
-                        if (response.payload.uuid === uuid && response.payload.type === "end") {
-                            // Remove listener after completion
-                            info(`Removing event listener`);
-                            wsRemoveMessageListener(handleMessage);
-
-                            const state = loadCoValuesMap.get(uuid);
-                            if (!state) {
-                                return reject(new Error(`Failed to retrieve chunks for uuid: ${uuid}`));
-                            }
-
-                            const blob = new Blob(state.chunks, { type: "application/octet-stream" }); // wrong
-                            resolve(blob);
-                        }
-                    };
-
-                    info(`Registering event listener`);
-                    wsAddMessageListener(handleMessage);
-                    wsSendWhenReady({
-                            action: "GET",
-                            binary: isBinary,
-                            payload: { uuid: `${uuid}` },
-                    });
-
-                });
             }
 
             async function loadMultipleCoValues(isBinary, count) {
