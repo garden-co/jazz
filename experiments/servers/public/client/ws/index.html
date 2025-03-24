@@ -57,16 +57,16 @@
         </div>
         <div>
             <span class="fixed-width-span">Text:</span>
-            <button id="loadMultipleCoValuesText" onclick="loadMultipleCoValues(false)">
+            <button id="loadMultipleCoValuesText" onclick="loadMultipleCoValues(10, false)">
                 1a. Load <strong>Multiple</strong> CoValues (Text)
             </button>
-            <button id="loadCoValueText" onclick="loadCoValue(false)">
+            <button id="loadCoValueText" onclick="loadCoValue(null, false)">
                 1b. Load <strong>Single</strong> CoValue (Text)
             </button>
-            <button id="createMultipleCoValuesText" onclick="createMultipleCoValues(false)">
+            <button id="createMultipleCoValuesText" onclick="createMultipleCoValues(10, false)">
                 2c. Create <strong>Multiple</strong> CoValues (Text)
             </button>
-            <button id="createCoValueText" onclick="createCoValue(false)">
+            <button id="createCoValueText" onclick="createCoValue(null, false)">
                 2d. Create <strong>Single</strong> CoValue (Text)
             </button>
             <button id="mutateCoValueText" onclick="mutateCoValue(false)">
@@ -76,16 +76,16 @@
         <div class="container">
             <span class="fixed-width-span">Binary:</span>
             <div>
-                <button id="loadMultipleCoValuesBinary" onclick="loadMultipleCoValues(true);">
+                <button id="loadMultipleCoValuesBinary" onclick="loadMultipleCoValues(10, true)">
                     1a. Load <strong>Multiple</strong> CoValues (Binary)
                 </button>
-                <button id="loadCoValueBinary" onclick="loadCoValue(true)">
+                <button id="loadCoValueBinary" onclick="loadCoValue(null, true)">
                     1b. Load <strong>Single</strong> CoValue (Binary)
                 </button>
-                <button id="createMultipleCoValuesBinary" onclick="createMultipleCoValues(true)">
+                <button id="createMultipleCoValuesBinary" onclick="createMultipleCoValues(10, true)">
                     2c. Create <strong>Multiple</strong> CoValues (Binary)
                 </button>
-                <button id="createCoValueBinary" onclick="createCoValue(true)">
+                <button id="createCoValueBinary" onclick="createCoValue(null, true)">
                     2d. Create <strong>Single</strong> CoValue (Binary)
                 </button>
                 <button id="mutateCoValueBinary" onclick="mutateCoValue(true)">
@@ -552,13 +552,17 @@
             //     }
             // }
 
-            async function loadCoValue(isBinary) {
+            async function loadCoValue(uuid, isBinary) {
                 binaryFlag = isBinary;
-                const uuid = coValueSelect.value;
 
                 if (!uuid) {
-                    info("Please, select a CoValue first.");
-                    return;
+                    const _uuid = coValueSelect.value;
+                    if (!_uuid) {
+                        info("Please, select a CoValue first.");
+                        return;
+                    } else {
+                        uuid = _uuid;
+                    }
                 }
 
                 let coValue = null;
@@ -582,9 +586,10 @@
                 } catch (error) {
                     info(`Error loading CoValue (isBinary: ${isBinary}): ${error.message}`);
                 }
+                return coValue;
             }
 
-            async function createCoValue(isBinary) {
+            async function createCoValue(uuid, isBinary) {
                 binaryFlag = isBinary;
                 const file = document.getElementById("fileInput").files[0];
 
@@ -593,7 +598,10 @@
                     return;
                 }
 
-                const uuid = crypto.randomUUID();
+                if (!uuid) {
+                    uuid = crypto.randomUUID();
+                }
+
                 let coValue = null;
                 try {
                     if (isWS()) {
@@ -615,6 +623,7 @@
                 } catch (error) {
                     info(`Error creating CoValue (isBinary: ${isBinary}): ${error.message}`);
                 }
+                return coValue;
             }
 
             async function mutateCoValue(isBinary) {
@@ -1016,13 +1025,13 @@
                             if (response.action === "POST" && response.payload.uuid === uuid) {
                                 wsRemoveMessageListener(handleMessage);
                                 if (response.code === 201) {
-                                    // this is the end of the chunked upload
+                                    // This is the end of the chunked upload
                                     resolve(true);
                                 } else if (response.code === 200) {
-                                    // this is an ACK for a (partial) chunked upload
+                                    // This is an ACK for a (partial) chunked upload
                                     resolve(true);
                                 } else {
-                                    // this is an error: response.code >= 400 || response.code === 500
+                                    // This is an error: response.code >= 400 || response.code === 500
                                     resolve(false);
                                 }
                             }
@@ -1032,7 +1041,7 @@
                                 if (response.code === 201) {
                                     resolve(true);
                                 } else {
-                                    // this is an error
+                                    // This is an error
                                     resolve(false);
                                 }
                             }
@@ -1154,7 +1163,7 @@
                 return bytes;
             }
 
-            async function loadMultipleCoValues(isBinary, count) {
+            async function loadMultipleCoValues(count, isBinary) {
                 binaryFlag = isBinary;
                 const t0 = performance.now();
                 const MAX_CONCURRENT = count || 10;
@@ -1165,7 +1174,7 @@
                     .map(option => option.value);
 
                 if (options.length === 0) {
-                    info("No CoValues available to load.");
+                    info("There are no multiple CoValues available for load.");
                     return { duration: 0, failed: MAX_CONCURRENT, coValues: [] };
                 }
 
@@ -1175,17 +1184,16 @@
 
                 info(`Attempting to load ${selectedUUIDs.length} CoValues concurrently...`);
                 try {
-                    // Load all selected CoValues concurrently
                     const results = await Promise.allSettled(
-                        selectedUUIDs.map(uuid => loadCoValue(isBinary, uuid))
+                        selectedUUIDs.map(uuid => loadCoValue(uuid, isBinary))
                     );
 
                     const duration = performance.now() - t0;
 
-                    // Count successful and failed loads
-                    const successful = results.filter(r => r.status === 'fulfilled').map(r => r.value);
+                    const successful = results.filter(r => r.status === "fulfilled").map(r => r.value);
                     const failed = MAX_CONCURRENT - successful.length;
 
+                    info(`Results: ${results.length}, Successful: ${successful.length}`);
                     info(`Loaded ${successful.length}/${MAX_CONCURRENT} CoValues in ${duration.toFixed(2)}ms`);
 
                     return {
@@ -1195,7 +1203,7 @@
                     };
                 } catch (error) {
                     const duration = performance.now() - t0;
-                    info(`Error in concurrent load: ${error.message}`);
+                    info(`Error in multiple CoValues load: ${error.message}`);
                     return {
                         duration,
                         failed: MAX_CONCURRENT,
@@ -1204,7 +1212,40 @@
                 }
             }
 
-            async function createMultipleCoValues(isBinary, count) {
+            async function createMultipleCoValues(count, isBinary) {
+                binaryFlag = isBinary;
+                const t0 = performance.now();
+                const MAX_CONCURRENT = count || 10;
+
+                const selectedUUIDs = Array.from({ length: MAX_CONCURRENT }, () => crypto.randomUUID());
+
+                debug(`Attempting to create ${selectedUUIDs.length} CoValues concurrently...`);
+                try {
+                    const results = await Promise.allSettled(
+                        selectedUUIDs.map(uuid => createCoValue(uuid, isBinary))
+                    );
+
+                    const duration = performance.now() - t0;
+
+                    const successful = results.filter(r => r.status === "fulfilled").map(r => r.value);
+                    const failed = MAX_CONCURRENT - successful.length;
+
+                    info(`Created ${successful.length}/${MAX_CONCURRENT} CoValues in ${duration.toFixed(2)}ms`);
+
+                    return {
+                        duration,
+                        failed,
+                        coValues: successful
+                    };
+                } catch (error) {
+                    const duration = performance.now() - t0;
+                    info(`Error in multiple CoValues creation: ${error.message}`);
+                    return {
+                        duration,
+                        failed: MAX_CONCURRENT,
+                        coValues: []
+                    };
+                }
             }
 
             // Load CoValue UUIDs or subscribe to SSE on page load

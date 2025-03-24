@@ -110,10 +110,26 @@ test.describe('Binary CoValue', () => {
 
         logger.debug(`Concurrent load attempt .. `);
         const result = await page.evaluate(async () => {
-            return await loadMultipleCoValues(true, 10);
+            return await loadMultipleCoValues(10, true);
         });
 
-        logger.debug(`Multiple load test completed in ${result.duration}ms with ${result.failed} failures`);
+        logger.debug(`Load multiple CoValues load test completed in ${result.duration.toFixed(2)}ms with ${result.failed} failures`);
+        // logger.debug(`Loaded CoValues array size: ${JSON.stringify(result.coValues.length)}`);
+        // result.coValues.map(coValue => logger.debug(`Loaded CoValue ${coValue.uuid}`));
     });
 
+    test('createMultiple', async () => {
+        await page.goto(SERVER_URL);
+
+        // Wait for the connection to be established
+        await page.waitForSelector('#status >> text=CoValue UUIDs loaded successfully.');
+
+        logger.debug(`Concurrent CoValue creation attempt .. `);
+        const result = await page.evaluate(async () => {
+            return await createMultipleCoValues(10, true);
+        });
+
+        logger.debug(`Create multiple CoValues load test completed in ${result.duration.toFixed(2)}ms with ${result.failed} failures`);
+        // result.coValues.map(coValue => logger.debug(`Created CoValue ${coValue.uuid}`));
+    });
 });
