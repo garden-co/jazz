@@ -49,7 +49,7 @@ async function runBinaryLoadMultipleTest(page: Page, context: any, events: any, 
         const randomIndex = getRandomCoValueIndex();
         await step(`${context.scenario.name}.load_binary_duration_10concurrent`, async () => {
             const result = await page.evaluate(async () => {
-                return await loadMultipleCoValues(true, 10); // false for text CoValues
+                return await loadMultipleCoValues(10, true); // false for text CoValues
             });
 
             // Record the metrics

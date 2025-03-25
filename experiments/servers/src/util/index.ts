@@ -52,7 +52,7 @@ export function createRandomCoValue() {
 }
 
 const _covalues: CoValue[] = faker.helpers.multiple(createRandomCoValue, {
-    count: 5,
+    count: 10,
 });
 
 export const covalues: Record<string, CoValue> = _covalues.reduce(

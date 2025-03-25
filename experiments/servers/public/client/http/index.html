@@ -387,7 +387,7 @@
                 if (isBinary()) {
                     info(`Mutated (binary) data for: ${payload.uuid}.`);
                 } else {
-                    info(`Mutated (JSON) data for: ${payload.uuid}.`);
+                    info(`Mutated (text) data for: ${payload.uuid}.`);
                 }
             }
 
@@ -579,7 +579,7 @@
                         loadCoValuesMap.delete(uuid);
 
                     } else {
-                        info(`Loaded (JSON) data for: ${uuid}.`);
+                        info(`Loaded (text) data for: ${uuid}.`);
                     }
 
                     logCoValue(coValue);
@@ -615,7 +615,7 @@
                         info(`Created (binary) data for: ${uuid} (${coValue.file.size} bytes).`);
 
                     } else {
-                        info(`Created (JSON) data for: ${uuid}.`);
+                        info(`Created (text) data for: ${uuid}.`);
                     }
 
                     appendCoValue(coValue);
@@ -706,7 +706,7 @@
                                 );
                             }
                             info(
-                                `Mutated (JSON) data for: ${coValue.uuid}.`,
+                                `Mutated (text) data for: ${coValue.uuid}.`,
                             );
                         }
                     }

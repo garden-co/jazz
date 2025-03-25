@@ -15,7 +15,7 @@ async function runTextLoadTest(page: Page, context: any, events: any, test: any)
         await step(`${context.scenario.name}.load_text_duration`, async () => {
             await page.selectOption('select#coValueSelect', { index: randomIndex });
             await page.click('#loadCoValueText');
-            await page.waitForSelector('#status >> text=Loaded (JSON) data for:');
+            await page.waitForSelector('#status >> text=Loaded (text) data for:');
         });
 
     } catch (error) {
@@ -35,7 +35,7 @@ async function runTextCreateTest(page: Page, context: any, events: any, test: an
         const initialOptions = await page.locator('select#coValueSelect option').all();
         await step(`${context.scenario.name}.create_text_duration`, async () => {
             await page.click('#createCoValueText');
-            await page.waitForSelector('#status >> text=Created (JSON) data for:');
+            await page.waitForSelector('#status >> text=Created (text) data for:');
         });
         const newOptions = await page.locator('select#coValueSelect option').all();
         expect(newOptions.length).toEqual(initialOptions.length + 1);
@@ -67,7 +67,7 @@ async function runTextMutateTest(page: Page, context: any, events: any, test: an
             await page.click('#mutateCoValueText');
             events.emit('counter', `${context.scenario.name}.mutate_text_sent`, 1);
 
-            await page.waitForSelector('#status >> text=Mutated (JSON) data for:');
+            await page.waitForSelector('#status >> text=Mutated (text) data for:');
             events.emit('counter', `${context.scenario.name}.mutate_text_delivered`, 1);
 
             // Check all spawned browsers received the mutation event

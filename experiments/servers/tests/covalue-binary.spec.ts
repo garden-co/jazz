@@ -26,7 +26,23 @@ test.describe('Binary CoValue', () => {
         }
     });
 
-    test('load', async () => {
+    test('1a-loadMultiple', async () => {
+        await page.goto(SERVER_URL);
+
+        // Wait for the connection to be established
+        await page.waitForSelector('#status >> text=CoValue UUIDs loaded successfully.');
+
+        logger.debug(`Concurrent load attempt .. `);
+        const result = await page.evaluate(async () => {
+            return await loadMultipleCoValues(10, true);
+        });
+
+        logger.debug(`Load multiple CoValues load test completed in ${result.duration.toFixed(2)}ms with ${result.failed} failures`);
+        // logger.debug(`Loaded CoValues array size: ${JSON.stringify(result.coValues.length)}`);
+        result.coValues.map(coValue => logger.debug(`Loaded CoValue ${coValue.uuid}`));
+    });
+
+    test('1b-loadSingle', async () => {
         await page.goto(SERVER_URL);
 
         // Wait for the connection to be established
@@ -42,7 +58,26 @@ test.describe('Binary CoValue', () => {
         await page.waitForSelector('#status >> text=Loaded (binary) data for:');
     });
 
-    test('create', async () => {
+    test('2c-createMultiple', async () => {
+        await page.goto(SERVER_URL);
+
+        // Wait for the connection to be established
+        await page.waitForSelector('#status >> text=CoValue UUIDs loaded successfully.');
+
+        // Pick a binary file for upload
+        const filePath = path.resolve(__dirname, './fixtures/binary-sample.zip');
+        await page.locator('#fileInput').setInputFiles(filePath);
+
+        logger.debug(`Concurrent CoValue creation attempt .. `);
+        const result = await page.evaluate(async () => {
+            return await createMultipleCoValues(10, true);
+        });
+
+        logger.debug(`Create multiple CoValues load test completed in ${result.duration.toFixed(2)}ms with ${result.failed} failures`);
+        result.coValues.map(coValue => logger.debug(`Created CoValue ${coValue.uuid}`));
+    });
+
+    test('2d-createSingle', async () => {
         await page.goto(SERVER_URL);
 
         await page.waitForSelector('#status >> text=CoValue UUIDs loaded successfully.');
@@ -69,7 +104,7 @@ test.describe('Binary CoValue', () => {
         expect(options.length).toEqual(optionsCount + 1);
     });
 
-    test('mutate', async () => {
+    test('3e-mutateSingle', async () => {
         await page.goto(SERVER_URL);
 
         // Wait for the connection to be established
@@ -100,36 +135,5 @@ test.describe('Binary CoValue', () => {
 
         await Promise.all(browsers.map(({ browser }) => browser.close()));
         logger.debug('All browsers closed');    
-    });
-
-    test('loadMultiple', async () => {
-        await page.goto(SERVER_URL);
-
-        // Wait for the connection to be established
-        await page.waitForSelector('#status >> text=CoValue UUIDs loaded successfully.');
-
-        logger.debug(`Concurrent load attempt .. `);
-        const result = await page.evaluate(async () => {
-            return await loadMultipleCoValues(10, true);
-        });
-
-        logger.debug(`Load multiple CoValues load test completed in ${result.duration.toFixed(2)}ms with ${result.failed} failures`);
-        // logger.debug(`Loaded CoValues array size: ${JSON.stringify(result.coValues.length)}`);
-        // result.coValues.map(coValue => logger.debug(`Loaded CoValue ${coValue.uuid}`));
-    });
-
-    test('createMultiple', async () => {
-        await page.goto(SERVER_URL);
-
-        // Wait for the connection to be established
-        await page.waitForSelector('#status >> text=CoValue UUIDs loaded successfully.');
-
-        logger.debug(`Concurrent CoValue creation attempt .. `);
-        const result = await page.evaluate(async () => {
-            return await createMultipleCoValues(10, true);
-        });
-
-        logger.debug(`Create multiple CoValues load test completed in ${result.duration.toFixed(2)}ms with ${result.failed} failures`);
-        // result.coValues.map(coValue => logger.debug(`Created CoValue ${coValue.uuid}`));
     });
 });
