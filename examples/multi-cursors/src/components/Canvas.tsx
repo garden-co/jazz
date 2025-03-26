@@ -38,6 +38,7 @@ function Canvas({ remoteCursors, onCursorMove, name }: CanvasProps) {
     mousePosition,
     bgPosition,
     dottedGridSize,
+    viewBox,
   } = useCanvas({ onCursorMove });
 
   return (
@@ -59,11 +60,17 @@ function Canvas({ remoteCursors, onCursorMove, name }: CanvasProps) {
           return null;
         }
 
+        const name = getName(entry.by?.profile?.name, entry.tx.sessionID);
+        const color = getColor(entry.tx.sessionID);
+
         if (isOutOfBounds(entry.value.position, bounds)) {
           return (
             <OutOfBoundsMarker
               key={entry.tx.sessionID}
               position={entry.value.position}
+              bounds={bounds}
+              name={name}
+              color={color}
             />
           );
         }
@@ -72,10 +79,10 @@ function Canvas({ remoteCursors, onCursorMove, name }: CanvasProps) {
           <Cursor
             key={entry.tx.sessionID}
             position={entry.value.position}
-            color={getColor(entry.tx.sessionID)}
+            color={color}
             isDragging={false}
             isRemote={true}
-            name={getName(entry.by?.profile?.name, entry.tx.sessionID)}
+            name={name}
           />
         );
       })}

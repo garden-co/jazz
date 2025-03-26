@@ -135,5 +135,6 @@ export function useCanvas({
     mousePosition,
     bgPosition,
     dottedGridSize,
+    viewBox,
   };
 }
