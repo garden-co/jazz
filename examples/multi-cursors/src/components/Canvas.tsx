@@ -15,12 +15,13 @@ const OLD_CURSOR_AGE_SECONDS = Number(
   import.meta.env.VITE_OLD_CURSOR_AGE_SECONDS,
 );
 
-const bounds: ViewBox = {
-  x: -320,
-  y: -320,
-  width: 640,
-  height: 640,
-};
+// For debugging purposes, we can set a fixed bounds
+// const bounds: ViewBox = {
+//   x: -320,
+//   y: -320,
+//   width: 640,
+//   height: 640,
+// };
 
 interface CanvasProps {
   remoteCursors: CoFeedEntry<co<CursorType>>[];
@@ -38,7 +39,7 @@ function Canvas({ remoteCursors, onCursorMove, name }: CanvasProps) {
     mousePosition,
     bgPosition,
     dottedGridSize,
-    viewBox,
+    viewBox: bounds,
   } = useCanvas({ onCursorMove });
 
   return (
@@ -49,7 +50,7 @@ function Canvas({ remoteCursors, onCursorMove, name }: CanvasProps) {
       />
 
       <CanvasDemoContent />
-      <Boundary bounds={bounds} />
+      {/* <Boundary bounds={bounds} /> */}
 
       {remoteCursors.map((entry) => {
         if (

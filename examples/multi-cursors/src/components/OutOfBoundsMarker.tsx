@@ -81,6 +81,25 @@ function calculateBoundaryIntersection(
   );
 }
 
+interface TextPosition {
+  x: number;
+  y: number;
+  textAnchor: "start" | "end";
+  baseline: "baseline" | "hanging";
+}
+
+function calculateTextPosition(point: Vec2, bounds: ViewBox): TextPosition {
+  const isNearRight = point.x >= bounds.x + bounds.width - 10;
+  const isNearBottom = point.y >= bounds.y + bounds.height - 10;
+
+  return {
+    x: isNearRight ? -5 : 5,
+    y: isNearBottom ? -5 : 5,
+    textAnchor: isNearRight ? "end" : "start",
+    baseline: isNearBottom ? "baseline" : "hanging",
+  };
+}
+
 function OutOfBoundsMarker({
   position,
   bounds,
@@ -99,31 +118,34 @@ function OutOfBoundsMarker({
     bounds,
   );
 
+  const textPosition = calculateTextPosition(intersectionPoint, bounds);
+
   return (
     <>
-      <circle
-        cx={intersectionPoint.x}
-        cy={intersectionPoint.y}
-        r={4}
-        fill={color}
-      />
-      <text
-        x={intersectionPoint.x + 5}
-        y={intersectionPoint.y + 5}
-        fill={color}
-        stroke="white"
-        strokeWidth="3"
-        strokeLinejoin="round"
-        paintOrder="stroke"
-        fontSize="14"
-        dominantBaseline="hanging"
-        style={{
-          fontFamily: "Inter, Manrope, system-ui, sans-serif",
-          fontWeight: 500,
-        }}
+      <g
+        transform={`translate(${intersectionPoint.x}, ${intersectionPoint.y})`}
       >
-        {name}
-      </text>
+        <circle cx={0} cy={0} r={4} fill={color} />
+
+        {/* <text
+          x={textPosition.x}
+          y={textPosition.y}
+          fill={color}
+          stroke="white"
+          strokeWidth="3"
+          strokeLinejoin="round"
+          paintOrder="stroke"
+          fontSize="14"
+          dominantBaseline={textPosition.baseline}
+          textAnchor={textPosition.textAnchor}
+          style={{
+            fontFamily: "Inter, Manrope, system-ui, sans-serif",
+            fontWeight: 500,
+          }}
+        >
+          {name}
+        </text> */}
+      </g>
       {/* <rect x={position.x} y={position.y} width={4} height={4} fill="red" /> */}
       {/* <line
         x1={center.x}
