@@ -5,19 +5,19 @@ import { setNetworkCondition, resetNetwork } from './src/util/network-conditione
 // Network conditions I - IV
 const networkConditions = [
     { name: 'ideal-network', prefix: "I" },    // Ideal network, no bandwidth limits or latency
-    { name: '4g-speeds', prefix: "II" },       // 4G simulation
-    { name: '3g-speeds', prefix: "III" },       // 3G simulation
-    { name: 'high-packet-loss', prefix: "IV" }, // High packet loss
+    // { name: '4g-speeds', prefix: "II" },       // 4G simulation
+    // { name: '3g-speeds', prefix: "III" },       // 3G simulation
+    // { name: 'high-packet-loss', prefix: "IV" }, // High packet loss
 ];
 
 // 6 web servers
 const commands = [
     { command: "node-ws", exportName: "A1_NodeServer-HTTP1-WSS" },
-    { command: "node-http1", exportName: "A2_NodeServer-HTTP1-SSE" },
-    { command: "node-http2", exportName: "A3_NodeServer-HTTP2-SSE" },
-    { command: "uws-ws", exportName: "B1_uWebSocketServer-HTTP1-WSS" },
-    { command: "uws-http1", exportName: "B2_uWebSocketServer-HTTP1-SSE" },
-    { command: "caddy-http3", exportName: "C1_NodeCaddyServer-HTTP3-SSE" }
+    // { command: "node-http1", exportName: "A2_NodeServer-HTTP1-SSE" },
+    // { command: "node-http2", exportName: "A3_NodeServer-HTTP2-SSE" },
+    // { command: "uws-ws", exportName: "B1_uWebSocketServer-HTTP1-WSS" },
+    // { command: "uws-http1", exportName: "B2_uWebSocketServer-HTTP1-SSE" },
+    // { command: "caddy-http3", exportName: "C1_NodeCaddyServer-HTTP3-SSE" }
 ];
 
 // Time to wait between stopping one web server and starting another (in ms)
@@ -31,14 +31,21 @@ interface ProcessInfo {
     command: string;
 }
 
-let currentProcess: ProcessInfo | null = null;
+let webserverProcess: ProcessInfo | null = null;
+let webserverBenchmarkProcess: ProcessInfo | null  = null;
 
 async function cleanupCommand() {
-    if (currentProcess) {
-        console.log(`Stopping ${currentProcess.command}...`);
-        currentProcess.process.kill('SIGKILL');
+    if (webserverProcess) {
+        console.log(`Stopping ${webserverProcess.command}...`);
+        webserverProcess.process.kill('SIGKILL');
         await new Promise(resolve => setTimeout(resolve, COOLDOWN_PERIOD));
-        currentProcess = null;
+        webserverProcess = null;
+    }
+    if (webserverBenchmarkProcess) {
+        console.log(`Stopping ${webserverBenchmarkProcess.command}...`);
+        webserverBenchmarkProcess.process.kill('SIGKILL');
+        await new Promise(resolve => setTimeout(resolve, COOLDOWN_PERIOD));
+        webserverBenchmarkProcess = null;
     }
 }
 
@@ -69,7 +76,7 @@ async function runCommand(command: string, exportFileName: string, port: number)
                 }
             });
 
-            currentProcess = {
+            webserverProcess = {
                 process: childProcess,
                 command
             };
@@ -94,7 +101,8 @@ async function runCommand(command: string, exportFileName: string, port: number)
             // Spawn the benchmark tests ...
             const outputStream = fs.createWriteStream(`${exportFileName}.txt`, { flags: 'a' });
             // const benchmarkProcess = spawn('pnpm', ['run', 'playwright'], {
-            const benchmarkProcess = spawn('pnpm', ['run', 'load-tests-demo'], {
+            const benchmarkCommand = 'load-tests';
+            const benchmarkProcess = spawn('pnpm', ['run', benchmarkCommand], {
                 stdio: ['ignore', 'pipe', 'pipe'],
                 env: {
                     ...process.env,
@@ -113,10 +121,13 @@ async function runCommand(command: string, exportFileName: string, port: number)
                 console.error(`[Benchmark Error ${command}] ${data.toString().trim()}`);
             });
 
+            webserverBenchmarkProcess = {
+                process: benchmarkProcess,
+                command: benchmarkCommand
+            };
             await new Promise((resolve, reject) => {
                 let hasResolved = false;
 
-                // Function to ensure we only resolve/reject once
                 const finalizeProcess = (code: number) => {
                     if (hasResolved) return;
                     hasResolved = true;

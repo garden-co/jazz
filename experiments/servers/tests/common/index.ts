@@ -4,7 +4,7 @@ import logger from '../../src/util/logger';
 
 export const SERVER_URL = 'https://localhost:3000';
 export const NUM_BROWSERS: number = 10;
-export const concurrencyLevels = [10, 20, 50];
+export const concurrencyLevels = [10, 20, 50, 100];
 
 interface BrowserInstance {
     browser: Browser;
@@ -15,6 +15,10 @@ interface BrowserInstance {
 export function getRandomCoValueIndex(): number {
     // return Math.floor(Math.random() * 5) + 1;
     return firstCoValue.index;
+}
+
+export function getPID(): number {
+    return process.env.PID ? parseInt(process.env.PID, 10) : 0;
 }
 
 async function setupBrowser(url: string, ua: string, identifier: string = "", headless: boolean): Promise<BrowserInstance> {

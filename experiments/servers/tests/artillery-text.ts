@@ -1,26 +1,26 @@
 import { Page, expect } from '@playwright/test';
 import logger from '../src/util/logger';
-import { SERVER_URL, getRandomCoValueIndex, spawnBrowsers, concurrencyLevels } from './common';
+import { SERVER_URL, getRandomCoValueIndex, spawnBrowsers, concurrencyLevels, getPID } from './common';
 
 async function loadMultiple(page: Page, context: any, events: any, test: any) {
     const { step } = test;
     try {
         await step(`${context.scenario.name}.load_page_duration`, async () => {
-            await page.goto(context.vars.target);
+            await page.goto(context.vars.target, { timeout: 55_000 });
             await page.waitForSelector('#status >> text=CoValue UUIDs loaded successfully.');
         });
 
         for (const concurrency of concurrencyLevels) {
             await step(`${context.scenario.name}.load_text_duration_${concurrency}multiple`, async () => {
-                const result = await page.evaluate(async () => {
+                const result = await page.evaluate(async (concurrency) => {
                     return await loadMultipleCoValues(concurrency, false);
-                });
+                }, concurrency); 
 
                 // Record the metrics
                 events.emit('histogram', `load_text_duration_${concurrency}multiple`, result.duration);
                 events.emit('histogram', `load_text_failure_${concurrency}multiple`, result.failed);
 
-                logger.info(`Multiple load test completed in ${result.duration}ms with ${result.failed} failures`);
+                logger.info(`Load multiple CoValues test for 'text_${concurrency}multiple' completed in ${result.duration}ms with ${result.failed} failures`);
             });
         }
     } catch (error) {
@@ -60,15 +60,15 @@ async function createMultiple(page: Page, context: any, events: any, test: any) 
 
         for (const concurrency of concurrencyLevels) {
             await step(`${context.scenario.name}.create_text_duration_${concurrency}multiple`, async () => {
-                const result = await page.evaluate(async () => {
+                const result = await page.evaluate(async (concurrency) => {
                     return await createMultipleCoValues(concurrency, false);
-                });
+                }, concurrency); 
 
                 // Record the metrics
                 events.emit('histogram', `create_text_duration_${concurrency}multiple`, result.duration);
                 events.emit('histogram', `create_text_failure_${concurrency}multiple`, result.failed);
 
-                logger.info(`Create multiple CoValues test completed in ${result.duration}ms with ${result.failed} failures`);
+                logger.info(`Create multiple CoValues test for 'text_${concurrency}multiple' completed in ${result.duration}ms with ${result.failed} failures`);
             });
         }
     } catch (error) {
@@ -142,10 +142,6 @@ async function mutateSingle(page: Page, context: any, events: any, test: any) {
     }
 }
 
-function getPID(): number {
-    return process.env.PID ? parseInt(process.env.PID, 10) : 0;
-}
-
 export {
     loadMultiple,
     loadSingle,
@@ -158,13 +154,15 @@ export {
 export const config = {
     target: SERVER_URL,
     engines: {
-        playwright: { aggregateByName: true }
+        playwright: { 
+            aggregateByName: true,
+        }
     },
     phases: [{
         duration: 20, // 20 seconds
         arrivalCount: 1, // 1 vuser only
         maxVusers: 1, // 1 vuser maximum
-        name: "Development testing"
+        name: "Development testing (default)"
     }],
     plugins: {
         "memory-inspector": [
@@ -172,36 +170,28 @@ export const config = {
         ]
     },
     environments: {
-        simulation: {
+        multiple: {
             phases: [
             {
-                duration: 60, // 60 seconds
-                arrivalRate: 5, // 5 vusers/second
-                rampTo: 15, // Ramp up to 15 vusers/second
-                name: "01 Warmup - gradually increase load"
-            },
-            {
-                duration: 120, // 2 minutes
-                arrivalRate: 15, // 15 vusers/second
-                name: "02 Steady - maintain moderate load"
-            },
-            {
-                duration: 30, // 30 seconds
-                arrivalRate: 50, // Spike to 50 vusers/second
-                name: "03 Spike - simulate peak traffic"
-            },
-            {
                 duration: 180, // 3 minutes
-                arrivalRate: 20, // Start at 20 vusers/second
-                rampTo: 40, // Ramp up to 40 vusers/second
-                name: "04 Scale - stress test at high load"
+                arrivalCount: 1, // 1 vuser only
+                maxVusers: 1, // 1 vuser maximum
+                name: "Single user, multiple (concurrent) requests"
+            }]
+        },
+        single: {
+            phases: [
+            {
+                duration: 60, // 1 minute
+                arrivalRate: 1, // 1 vusers/second
+                name: "Multiple users, single request - warmup load (01)"
             },
             {
-                duration: 90, // 90 seconds
-                arrivalRate: 15, // Start at 15 vusers/second
-                rampTo: 5, // Taper down to 5 vusers/second
-                name: "05 Cooldown - reduce load gracefully"
-            }
+                duration: 60, // 1 minute
+                arrivalRate: 1, // 1 vusers/second
+                rampTo: 2, // Ramp up to 2 vusers/second
+                name: "Multiple users, single request - steady load (02)"
+            },
             ]
         }
     }
@@ -234,12 +224,3 @@ export const scenarios = [
         testFunction: mutateSingle
     }
 ];
-
-
-// export function $rewriteMetricName(metricName: string, metricType: string) {
-//     if (metricName.includes('/checkout?promoid=')) {
-//     return 'browser.page.checkout';
-//     } else {
-//     return metricName;
-//     }
-// }

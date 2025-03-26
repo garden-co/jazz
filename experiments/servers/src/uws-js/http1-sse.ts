@@ -334,6 +334,7 @@ app.listen(+PORT, (token) => {
         logger.info(
             `HTTP/1.1 + TLSv1.3 Server is running on: https://localhost:${PORT}`,
         );
+        logger.info(`Server Heap: ${require('v8').getHeapStatistics().heap_size_limit / 1024 ** 3}GB`);
     } else {
         logger.error(`Failed to start server on port: ${PORT}`);
     }

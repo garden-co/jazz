@@ -320,6 +320,7 @@ export async function createWebServer(isHttp2: boolean, useTLS: boolean = true) 
                 );
             }
         }
+        logger.info(`Server Heap: ${require('v8').getHeapStatistics().heap_size_limit / 1024 ** 3}GB`);
 
     } catch (err) {
         fastify.log.error(err);

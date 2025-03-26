@@ -1,6 +1,6 @@
 import { Page, expect } from '@playwright/test';
 import logger from '../src/util/logger';
-import { SERVER_URL, getRandomCoValueIndex, spawnBrowsers, concurrencyLevels } from './common';
+import { SERVER_URL, getRandomCoValueIndex, spawnBrowsers, concurrencyLevels, getPID } from './common';
 import fs from 'fs';
 import path from 'path';
 
@@ -28,15 +28,15 @@ async function loadMultiple(page: Page, context: any, events: any, test: any) {
 
         for (const concurrency of concurrencyLevels) {
             await step(`${context.scenario.name}.load_binary_duration_${concurrency}multiple`, async () => {
-                const result = await page.evaluate(async () => {
+                const result = await page.evaluate(async (concurrency) => {
                     return await loadMultipleCoValues(concurrency, true); // false for text CoValues
-                });
+                }, concurrency); 
 
                 // Record the metrics
                 events.emit('histogram', `load_binary_duration_${concurrency}multiple`, result.duration);
                 events.emit('histogram', `load_binary_failure_${concurrency}multiple`, result.failed);
 
-                logger.info(`Multiple load test completed in ${result.duration}ms with ${result.failed} failures`);
+                logger.info(`Load multiple CoValues test for 'binary_${concurrency}multiple' completed in ${result.duration}ms with ${result.failed} failures`);
             });
         }
     } catch (error) {
@@ -80,15 +80,15 @@ async function createMultiple(page: Page, context: any, events: any, test: any) 
 
         for (const concurrency of concurrencyLevels) {
             await step(`${context.scenario.name}.create_binary_duration_${concurrency}multiple`, async () => {
-                const result = await page.evaluate(async () => {
+                const result = await page.evaluate(async (concurrency) => {
                     return await createMultipleCoValues(concurrency, true); // false for text CoValues
-                });
+                }, concurrency); 
 
                 // Record the metrics
                 events.emit('histogram', `create_binary_duration_${concurrency}multiple`, result.duration);
                 events.emit('histogram', `create_binary_failure_${concurrency}multiple`, result.failed);
 
-                logger.info(`Create multiple CoValues test completed in ${result.duration}ms with ${result.failed} failures`);
+                logger.info(`Create multiple CoValues test for 'binary_${concurrency}multiple' completed in ${result.duration}ms with ${result.failed} failures`);
             });
         }
     } catch (error) {
@@ -183,15 +183,47 @@ export {
 export const config = {
     target: SERVER_URL,
     engines: {
-        playwright: { aggregateByName: true }
+        playwright: { 
+            aggregateByName: true,
+        }
     },
     phases: [{
-        duration: 30,
-        arrivalRate: 1,
-        maxVusers: 1,
-        // rampTo: 1,
-        name: "CoValue initial load testing"
-    }]
+        duration: 60, // 60 seconds
+        arrivalCount: 1, // 1 vuser only
+        maxVusers: 1, // 1 vuser maximum
+        name: "Development testing (default)"
+    }],
+    plugins: {
+        "memory-inspector": [
+          { pid: getPID(), name: "web-server-stats", unit: 'mb' }
+        ]
+    },
+    environments: {
+        multiple: {
+            phases: [
+            {
+                duration: 180, // 3 minutes
+                arrivalCount: 1, // 1 vuser only
+                maxVusers: 1, // 1 vuser maximum
+                name: "Single user, multiple (concurrent) requests"
+            }]
+        },
+        single: {
+            phases: [
+            {
+                duration: 60, // 1 minute
+                arrivalRate: 1, // 1 vusers/second
+                name: "Multiple users, single request - warmup load (01)"
+            },
+            {
+                duration: 60, // 1 minute
+                arrivalRate: 1, // 1 vusers/second
+                rampTo: 2, // Ramp up to 2 vusers/second
+                name: "Multiple users, single request - steady load (02)"
+            },
+            ]
+        }
+    }
 };
 
 export const scenarios = [

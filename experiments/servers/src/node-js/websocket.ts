@@ -235,4 +235,5 @@ server.listen(PORT, () => {
     logger.info(
         `HTTP/1.1 WebSocket Server is running on: wss://localhost:${PORT}`,
     );
+    logger.info(`Server Heap: ${require('v8').getHeapStatistics().heap_size_limit / 1024 ** 3}GB`);
 });

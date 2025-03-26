@@ -248,6 +248,7 @@ app.listen(+PORT, (token) => {
         logger.info(
             `WebSocket Server is running on: wss://localhost:${PORT}`,
         );
+        logger.info(`Server Heap: ${require('v8').getHeapStatistics().heap_size_limit / 1024 ** 3}GB`);
     } else {
         logger.error(`Failed to start server on port: ${PORT}`);
     }
