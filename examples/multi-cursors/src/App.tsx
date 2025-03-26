@@ -16,6 +16,7 @@ function App() {
   const [cursorFeedID, setCursorFeedID] = useState<ID<CursorFeed> | null>(null);
 
   useEffect(() => {
+    console.log("Loading cursor feed...", me.id);
     if (!me?.id) return;
     const loadCursorFeed = async () => {
       const id = await loadCursorContainer(
