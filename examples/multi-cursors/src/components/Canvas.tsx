@@ -1,16 +1,26 @@
 import { useAccount } from "jazz-react";
 import { CoFeedEntry, co } from "jazz-tools";
 import { CursorMoveEvent, useCanvas } from "../hooks/useCanvas";
-import { Cursor as CursorType } from "../types";
+import { Cursor as CursorType, ViewBox } from "../types";
 import { getColor } from "../utils/getColor";
 import { getName } from "../utils/getName";
+import { isOutOfBounds } from "../utils/isOutOfBounds";
+import { Boundary } from "./Boundary";
 import { CanvasBackground } from "./CanvasBackground";
 import { CanvasDemoContent } from "./CanvasDemoContent";
 import { Cursor } from "./Cursor";
+import { OutOfBoundsMarker } from "./OutOfBoundsMarker";
 
 const OLD_CURSOR_AGE_SECONDS = Number(
   import.meta.env.VITE_OLD_CURSOR_AGE_SECONDS,
 );
+
+const bounds: ViewBox = {
+  x: -320,
+  y: -320,
+  width: 640,
+  height: 640,
+};
 
 interface CanvasProps {
   remoteCursors: CoFeedEntry<co<CursorType>>[];
@@ -38,6 +48,7 @@ function Canvas({ remoteCursors, onCursorMove, name }: CanvasProps) {
       />
 
       <CanvasDemoContent />
+      <Boundary bounds={bounds} />
 
       {remoteCursors.map((entry) => {
         if (
@@ -46,6 +57,15 @@ function Canvas({ remoteCursors, onCursorMove, name }: CanvasProps) {
             entry.madeAt < new Date(Date.now() - 1000 * OLD_CURSOR_AGE_SECONDS))
         ) {
           return null;
+        }
+
+        if (isOutOfBounds(entry.value.position, bounds)) {
+          return (
+            <OutOfBoundsMarker
+              key={entry.tx.sessionID}
+              position={entry.value.position}
+            />
+          );
         }
 
         return (
