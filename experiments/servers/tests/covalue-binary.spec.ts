@@ -32,7 +32,6 @@ test.describe('Binary CoValue', () => {
         // Wait for the connection to be established
         await page.waitForSelector('#status >> text=CoValue UUIDs loaded successfully.');
 
-        logger.debug(`Concurrent load attempt .. `);
         const result = await page.evaluate(async () => {
             return await loadMultipleCoValues(10, true);
         });
@@ -68,7 +67,6 @@ test.describe('Binary CoValue', () => {
         const filePath = path.resolve(__dirname, './fixtures/binary-sample.zip');
         await page.locator('#fileInput').setInputFiles(filePath);
 
-        logger.debug(`Concurrent CoValue creation attempt .. `);
         const result = await page.evaluate(async () => {
             return await createMultipleCoValues(10, true);
         });

@@ -1,8 +1,9 @@
 import { Page, expect } from '@playwright/test';
 import logger from '../src/util/logger';
-import { SERVER_URL, getRandomCoValueIndex, spawnBrowsers } from './common';
+import { SERVER_URL, getRandomCoValueIndex, spawnBrowsers, concurrencyLevels } from './common';
 import fs from 'fs';
 import path from 'path';
+
 
  
 function cleanUp() {
@@ -17,7 +18,34 @@ function cleanUp() {
     }
 }
 
-async function runBinaryLoadTest(page: Page, context: any, events: any, test: any) {
+async function loadMultiple(page: Page, context: any, events: any, test: any) {
+    const { step } = test;
+    try {
+        await step(`${context.scenario.name}.load_page_duration`, async () => {
+            await page.goto(context.vars.target);
+            await page.waitForSelector('#status >> text=CoValue UUIDs loaded successfully.');
+        });
+
+        for (const concurrency of concurrencyLevels) {
+            await step(`${context.scenario.name}.load_binary_duration_${concurrency}multiple`, async () => {
+                const result = await page.evaluate(async () => {
+                    return await loadMultipleCoValues(concurrency, true); // false for text CoValues
+                });
+
+                // Record the metrics
+                events.emit('histogram', `load_binary_duration_${concurrency}multiple`, result.duration);
+                events.emit('histogram', `load_binary_failure_${concurrency}multiple`, result.failed);
+
+                logger.info(`Multiple load test completed in ${result.duration}ms with ${result.failed} failures`);
+            });
+        }
+    } catch (error) {
+        logger.error('Load Test error:', error);
+        throw error;
+    }
+}
+
+async function loadSingle(page: Page, context: any, events: any, test: any) {
     const { step } = test;
     try {
         await step(`${context.scenario.name}.load_page_duration`, async () => {
@@ -38,7 +66,7 @@ async function runBinaryLoadTest(page: Page, context: any, events: any, test: an
     }
 }
 
-async function runBinaryLoadMultipleTest(page: Page, context: any, events: any, test: any) {
+async function createMultiple(page: Page, context: any, events: any, test: any) {
     const { step } = test;
     try {
         await step(`${context.scenario.name}.load_page_duration`, async () => {
@@ -46,26 +74,32 @@ async function runBinaryLoadMultipleTest(page: Page, context: any, events: any, 
             await page.waitForSelector('#status >> text=CoValue UUIDs loaded successfully.');
         });
 
-        const randomIndex = getRandomCoValueIndex();
-        await step(`${context.scenario.name}.load_binary_duration_10concurrent`, async () => {
-            const result = await page.evaluate(async () => {
-                return await loadMultipleCoValues(10, true); // false for text CoValues
+        // Pick a binary file for upload
+        const filePath = path.resolve(__dirname, './fixtures/binary-sample.zip');
+        await page.locator('#fileInput').setInputFiles(filePath);
+
+        for (const concurrency of concurrencyLevels) {
+            await step(`${context.scenario.name}.create_binary_duration_${concurrency}multiple`, async () => {
+                const result = await page.evaluate(async () => {
+                    return await createMultipleCoValues(concurrency, true); // false for text CoValues
+                });
+
+                // Record the metrics
+                events.emit('histogram', `create_binary_duration_${concurrency}multiple`, result.duration);
+                events.emit('histogram', `create_binary_failure_${concurrency}multiple`, result.failed);
+
+                logger.info(`Create multiple CoValues test completed in ${result.duration}ms with ${result.failed} failures`);
             });
-
-            // Record the metrics
-            events.emit('histogram', 'load_binary_duration_10concurrent', result.duration);
-            events.emit('histogram', 'load_binary_failure_10concurrent', result.failed);
-
-            logger.info(`Multiple load test completed in ${result.duration}ms with ${result.failed} failures`);
-        });
-
+        }
     } catch (error) {
-        logger.error('Load Test error:', error);
+        logger.error('Create Test error:', error);
         throw error;
+    } finally {
+        cleanUp();
     }
 }
 
-async function runBinaryCreateTest(page: Page, context: any, events: any, test: any) {
+async function createSingle(page: Page, context: any, events: any, test: any) {
     const { step } = test;
     try {
         await step(`${context.scenario.name}.load_page_duration`, async () => {
@@ -93,7 +127,7 @@ async function runBinaryCreateTest(page: Page, context: any, events: any, test: 
     }
 }
 
-async function runBinaryMutateTest(page: Page, context: any, events: any, test: any) {
+async function mutateSingle(page: Page, context: any, events: any, test: any) {
     const { step } = test;
     try {
 
@@ -138,10 +172,12 @@ async function runBinaryMutateTest(page: Page, context: any, events: any, test: 
 }
 
 export {
-  runBinaryLoadTest,
-  runBinaryCreateTest,
-  runBinaryMutateTest,
-  spawnBrowsers
+    loadMultiple,
+    loadSingle,
+    createMultiple,
+    createSingle,
+    mutateSingle,
+    spawnBrowsers
 };
  
 export const config = {
@@ -160,18 +196,28 @@ export const config = {
 
 export const scenarios = [
     {
-        name: "04 Load Scenario",
+        name: "1a Load Multiple",
         engine: 'playwright',
-        testFunction: runBinaryLoadTest
+        testFunction: loadMultiple
     },
     {
-        name: "05 Create Scenario",
+        name: "1b Load Single",
         engine: 'playwright',
-        testFunction: runBinaryCreateTest
+        testFunction: loadSingle
     },
     {
-        name: "06 Mutate Scenario",
+        name: "2c Create Multiple",
         engine: 'playwright',
-        testFunction: runBinaryMutateTest
+        testFunction: createMultiple
+    },
+    {
+        name: "2d Create Single",
+        engine: 'playwright',
+        testFunction: createSingle
+    },
+    {
+        name: "3e Mutate Single",
+        engine: 'playwright',
+        testFunction: mutateSingle
     }
 ];

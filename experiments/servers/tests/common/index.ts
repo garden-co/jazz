@@ -4,6 +4,7 @@ import logger from '../../src/util/logger';
 
 export const SERVER_URL = 'https://localhost:3000';
 export const NUM_BROWSERS: number = 10;
+export const concurrencyLevels = [10, 20, 50];
 
 interface BrowserInstance {
     browser: Browser;

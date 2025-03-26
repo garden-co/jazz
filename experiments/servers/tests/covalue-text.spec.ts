@@ -19,7 +19,6 @@ test.describe('Structured CoValue (text)', () => {
         // Wait for the connection to be established
         await page.waitForSelector('#status >> text=CoValue UUIDs loaded successfully.');
 
-        logger.debug(`Concurrent load attempt .. `);
         const result = await page.evaluate(async () => {
             return await loadMultipleCoValues(10, false);
         });
@@ -50,7 +49,6 @@ test.describe('Structured CoValue (text)', () => {
         // Wait for the connection to be established
         await page.waitForSelector('#status >> text=CoValue UUIDs loaded successfully.');
 
-        logger.debug(`Concurrent CoValue creation attempt .. `);
         const result = await page.evaluate(async () => {
             return await createMultipleCoValues(10, false);
         });
