@@ -14,7 +14,7 @@ const OLD_CURSOR_AGE_SECONDS = Number(
   import.meta.env.VITE_OLD_CURSOR_AGE_SECONDS,
 );
 
-const DEBUG = import.meta.env.VITE_DEBUG;
+const DEBUG = import.meta.env.VITE_DEBUG === "true";
 
 // For debugging purposes, we can set a fixed bounds
 const debugBounds: ViewBox = {
