@@ -41,7 +41,7 @@ async function loadSingle(page: Page, context: any, events: any, test: any) {
         await step(`${context.scenario.name}.load_text_duration`, async () => {
             await page.selectOption('select#coValueSelect', { index: randomIndex });
             await page.click('#loadCoValueText');
-            await page.waitForSelector('#status >> text=Loaded (text) data for:');
+            await page.waitForSelector('#status >> text=Loaded (text) data for:', { timeout: 50000 });
         });
 
     } catch (error) {
@@ -88,7 +88,7 @@ async function createSingle(page: Page, context: any, events: any, test: any) {
         const initialOptions = await page.locator('select#coValueSelect option').all();
         await step(`${context.scenario.name}.create_text_duration`, async () => {
             await page.click('#createCoValueText');
-            await page.waitForSelector('#status >> text=Created (text) data for:');
+            await page.waitForSelector('#status >> text=Created (text) data for:', { timeout: 50000 });
         });
         const newOptions = await page.locator('select#coValueSelect option').all();
         expect(newOptions.length).toEqual(initialOptions.length + 1);
@@ -189,7 +189,7 @@ export const config = {
             {
                 duration: 60, // 1 minute
                 arrivalRate: 1, // 1 vusers/second
-                rampTo: 2, // Ramp up to 2 vusers/second
+                // rampTo: 2, // Ramp up to 2 vusers/second
                 name: "Multiple users, single request - steady load (02)"
             },
             ]

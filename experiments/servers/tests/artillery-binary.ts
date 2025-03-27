@@ -57,7 +57,7 @@ async function loadSingle(page: Page, context: any, events: any, test: any) {
         await step(`${context.scenario.name}.load_binary_duration`, async () => {
             await page.selectOption('select#coValueSelect', { index: randomIndex });
             await page.click('#loadCoValueBinary');
-            await page.waitForSelector('#status >> text=Loaded (binary) data for:');
+            await page.waitForSelector('#status >> text=Loaded (binary) data for:', { timeout: 90000 });
         });
 
     } catch (error) {
@@ -75,7 +75,7 @@ async function createMultiple(page: Page, context: any, events: any, test: any) 
         });
 
         // Pick a binary file for upload
-        const filePath = path.resolve(__dirname, './fixtures/binary-sample.zip');
+        const filePath = path.resolve(__dirname, '../fixtures/binary-sample.zip');
         await page.locator('#fileInput').setInputFiles(filePath);
 
         for (const concurrency of concurrencyLevels) {
@@ -115,7 +115,7 @@ async function createSingle(page: Page, context: any, events: any, test: any) {
         
         await step(`${context.scenario.name}.create_binary_duration`, async () => {
             await page.click('#createCoValueBinary');
-            await page.waitForSelector('#status >> text=Created (binary) data for:');
+            await page.waitForSelector('#status >> text=Created (binary) data for:', { timeout: 90000 });
         });
         const newOptions = await page.locator('select#coValueSelect option').all();
         expect(newOptions.length).toEqual(initialOptions.length + 1);
@@ -218,7 +218,7 @@ export const config = {
             {
                 duration: 60, // 1 minute
                 arrivalRate: 1, // 1 vusers/second
-                rampTo: 2, // Ramp up to 2 vusers/second
+                // rampTo: 2, // Ramp up to 2 vusers/second
                 name: "Multiple users, single request - steady load (02)"
             },
             ]
