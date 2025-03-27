@@ -15,6 +15,8 @@ interface CursorProps {
   bounds?: ViewBox;
 }
 
+const PADDING = 20;
+
 export function Cursor({
   position,
   color,
@@ -34,6 +36,19 @@ export function Cursor({
     centerOfBounds,
     position,
     bounds,
+  );
+
+  const labelBounds = {
+    x: bounds.x + PADDING / 2,
+    y: bounds.y + PADDING / 2,
+    width: bounds.width - PADDING,
+    height: bounds.height - PADDING,
+  };
+
+  const cursorIntersectionPoint = calculateBoundaryIntersection(
+    centerOfBounds,
+    position,
+    labelBounds,
   );
 
   const isCursorOutOfBounds = isOutOfBounds(position, bounds);
@@ -57,17 +72,10 @@ export function Cursor({
           (x: number, y: number) => `translate(${x}, ${y})`,
         )}
       >
-        {isCursorOutOfBounds && <circle cx={0} cy={0} r={4} fill={color} />}
-        {!isCursorOutOfBounds && (
-          <CursorLabel
-            name={name}
-            color={color}
-            position={{ x: 0, y: 0 }}
-            bounds={bounds}
-            isOutOfBounds={isCursorOutOfBounds}
-          />
-        )}
-        {!isOutOfBounds(position, bounds, 20) && (
+        {isCursorOutOfBounds ? (
+          <circle cx={0} cy={0} r={4} fill={color} />
+        ) : null}
+        {!isOutOfBounds(position, bounds, 20) ? (
           <polygon
             points="0,0 0,20 14.3,14.3"
             fill={
@@ -80,34 +88,23 @@ export function Cursor({
             strokeLinecap="round"
             strokeLinejoin="round"
           />
-        )}
+        ) : null}
       </animated.g>
-      {isCursorOutOfBounds && (
+      {isCursorOutOfBounds ? (
         <circle
           cx={intersectionPoint.x}
           cy={intersectionPoint.y}
           r={4}
           fill={color}
         />
-      )}
+      ) : null}
 
-      {isCursorOutOfBounds && (
-        <CursorLabel
-          name={name}
-          color={color}
-          position={intersectionPoint}
-          bounds={bounds}
-          isOutOfBounds={true}
-        />
-      )}
-
-      <line
-        x1={centerOfBounds.x}
-        y1={centerOfBounds.y}
-        x2={intersectionPoint.x}
-        y2={intersectionPoint.y}
-        stroke="red"
-        strokeWidth="1"
+      <CursorLabel
+        name={name}
+        color={color}
+        position={cursorIntersectionPoint}
+        bounds={bounds}
+        isOutOfBounds={isCursorOutOfBounds}
       />
     </>
   );

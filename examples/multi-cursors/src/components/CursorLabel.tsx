@@ -26,8 +26,6 @@ interface TextDimensions {
   height: number;
 }
 
-const OFFSET = 25;
-
 export function CursorLabel({
   name,
   color,
@@ -43,24 +41,22 @@ export function CursorLabel({
   });
 
   useEffect(() => {
-    if (textRef.current) {
-      const bbox = textRef.current.getBBox();
-      setDimensions({ width: bbox.width, height: bbox.height });
-    }
+    const bbox = textRef.current?.getBBox();
+    setDimensions({ width: bbox?.width ?? 0, height: bbox?.height ?? 0 });
   }, [name]);
 
   const getLabelPosition = (): LabelPosition => {
     if (!isOutOfBounds || !bounds) {
-      return { x: OFFSET, y: OFFSET };
+      return { x: position.x + 15, y: position.y + 25 };
     }
 
-    // Bounds: bounds.x, bounds.y, bounds.width, bounds.height
-    // Text dimensions: dimensions.width, dimensions.height
-    // Intersection point: position.x, position.y
+    // Calculate the percentage of the bounds that the intersection point is from the left
+    const percentageH = position.x / bounds.width + 0.5;
+    const percentageV = position.y / bounds.height + 0.5;
 
     return {
-      x: position.x,
-      y: position.y,
+      x: position.x - percentageH * dimensions.width,
+      y: position.y - percentageV * dimensions.height,
     };
   };
 
@@ -73,32 +69,21 @@ export function CursorLabel({
   });
 
   return (
-    <>
-      <animated.text
-        ref={textRef}
-        x={to([labelSprings.x], (x) => x)}
-        y={to([labelSprings.y], (y) => y)}
-        fill={color}
-        stroke="white"
-        strokeWidth="3"
-        strokeLinejoin="round"
-        paintOrder="stroke"
-        fontSize="14"
-        dominantBaseline="hanging"
-        textAnchor="start"
-        style={style}
-      >
-        {name}
-      </animated.text>
-      <animated.rect
-        x={to([labelSprings.x], (x) => x)}
-        y={to([labelSprings.y], (y) => y)}
-        width={dimensions.width}
-        height={dimensions.height}
-        fill="none"
-        stroke="red"
-        strokeWidth="1"
-      />
-    </>
+    <animated.text
+      ref={textRef}
+      x={to([labelSprings.x], (x) => x)}
+      y={to([labelSprings.y], (y) => y)}
+      fill={color}
+      stroke="white"
+      strokeWidth="3"
+      strokeLinejoin="round"
+      paintOrder="stroke"
+      fontSize="14"
+      dominantBaseline="hanging"
+      textAnchor="start"
+      style={style}
+    >
+      {name}
+    </animated.text>
   );
 }
