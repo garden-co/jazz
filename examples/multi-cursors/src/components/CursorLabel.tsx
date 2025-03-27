@@ -8,13 +8,7 @@ interface CursorLabelProps {
   position: Vec2;
   bounds?: ViewBox;
   isOutOfBounds?: boolean;
-  style?: React.CSSProperties;
 }
-
-const defaultStyle = {
-  fontFamily: "Inter, Manrope, system-ui, sans-serif",
-  fontWeight: 500,
-} as const;
 
 interface LabelPosition {
   x: number;
@@ -32,7 +26,6 @@ export function CursorLabel({
   position,
   bounds,
   isOutOfBounds,
-  style = defaultStyle,
 }: CursorLabelProps) {
   const textRef = useRef<SVGTextElement>(null);
   const [dimensions, setDimensions] = useState<TextDimensions>({
@@ -81,7 +74,6 @@ export function CursorLabel({
       fontSize="14"
       dominantBaseline="hanging"
       textAnchor="start"
-      style={style}
     >
       {name}
     </animated.text>

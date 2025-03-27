@@ -64,6 +64,15 @@ export function Cursor({
     },
   });
 
+  const intersectionSprings = useSpring({
+    x: intersectionPoint.x,
+    y: intersectionPoint.y,
+    config: {
+      tension: 170,
+      friction: 26,
+    },
+  });
+
   return (
     <>
       <animated.g
@@ -90,22 +99,26 @@ export function Cursor({
           />
         ) : null}
       </animated.g>
-      {isCursorOutOfBounds ? (
-        <circle
-          cx={intersectionPoint.x}
-          cy={intersectionPoint.y}
-          r={4}
-          fill={color}
-        />
-      ) : null}
 
-      <CursorLabel
-        name={name}
-        color={color}
-        position={cursorIntersectionPoint}
-        bounds={bounds}
-        isOutOfBounds={isCursorOutOfBounds}
-      />
+      {isRemote ? (
+        <>
+          <CursorLabel
+            name={name}
+            color={color}
+            position={cursorIntersectionPoint}
+            bounds={bounds}
+            isOutOfBounds={isCursorOutOfBounds}
+          />
+          {isCursorOutOfBounds ? (
+            <animated.circle
+              cx={intersectionSprings.x}
+              cy={intersectionSprings.y}
+              r={4}
+              fill={color}
+            />
+          ) : null}
+        </>
+      ) : null}
     </>
   );
 }
