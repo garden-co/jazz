@@ -2,6 +2,7 @@ import { animated, to, useSpring } from "@react-spring/web";
 import { Vec2, ViewBox } from "../types";
 import { calculateBoundaryIntersection } from "../utils/boundaryIntersection";
 import { isOutOfBounds } from "../utils/isOutOfBounds";
+import { CursorLabel } from "./CursorLabel";
 
 interface CursorProps {
   position: { x: number; y: number };
@@ -57,6 +58,15 @@ export function Cursor({
         )}
       >
         {isCursorOutOfBounds && <circle cx={0} cy={0} r={4} fill={color} />}
+        {!isCursorOutOfBounds && (
+          <CursorLabel
+            name={name}
+            color={color}
+            position={{ x: 0, y: 0 }}
+            bounds={bounds}
+            isOutOfBounds={isCursorOutOfBounds}
+          />
+        )}
         {!isOutOfBounds(position, bounds, 20) && (
           <polygon
             points="0,0 0,20 14.3,14.3"
@@ -71,57 +81,34 @@ export function Cursor({
             strokeLinejoin="round"
           />
         )}
-
-        {!isCursorOutOfBounds && (
-          <text
-            x="10"
-            y="25"
-            fill={color}
-            stroke="white"
-            strokeWidth="3"
-            strokeLinejoin="round"
-            paintOrder="stroke"
-            fontSize="14"
-            dominantBaseline="hanging"
-            style={{
-              fontFamily: "Inter, Manrope, system-ui, sans-serif",
-              fontWeight: 500,
-            }}
-          >
-            {name}
-          </text>
-        )}
       </animated.g>
       {isCursorOutOfBounds && (
-        <>
-          <circle
-            cx={intersectionPoint.x}
-            cy={intersectionPoint.y}
-            r={4}
-            fill={color}
-          />
-        </>
+        <circle
+          cx={intersectionPoint.x}
+          cy={intersectionPoint.y}
+          r={4}
+          fill={color}
+        />
       )}
 
       {isCursorOutOfBounds && (
-        <text
-          x={intersectionPoint.x + 10}
-          y={intersectionPoint.y + 25}
-          fill={color}
-          stroke="white"
-          strokeWidth="3"
-          strokeLinejoin="round"
-          paintOrder="stroke"
-          fontSize="14"
-          dominantBaseline="hanging"
-          style={{
-            fontFamily: "Inter, Manrope, system-ui, sans-serif",
-            fontWeight: 500,
-          }}
-        >
-          {name}
-        </text>
+        <CursorLabel
+          name={name}
+          color={color}
+          position={intersectionPoint}
+          bounds={bounds}
+          isOutOfBounds={true}
+        />
       )}
+
+      <line
+        x1={centerOfBounds.x}
+        y1={centerOfBounds.y}
+        x2={intersectionPoint.x}
+        y2={intersectionPoint.y}
+        stroke="red"
+        strokeWidth="1"
+      />
     </>
   );
 }
