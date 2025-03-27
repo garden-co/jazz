@@ -16,9 +16,6 @@ import logger from "../util/logger";
 import { tlsCertPath } from "../util/tls";
 import { FileStreamManager, UploadBody } from "../node-js/filestream-manager";
 
-const fileManager = new FileStreamManager();
-const benchmarkStore = new BenchmarkStore();
-
 const app = uWS.SSLApp({
     key_file_name: tlsCertPath.tlsKeyName,
     cert_file_name: tlsCertPath.tlsCertName
@@ -30,6 +27,9 @@ const staticDir =
     process.env.NODE_ENV === "production"
         ? path.join(rootDir, "dist", "public")
         : path.join(rootDir, "public");
+
+const fileManager = new FileStreamManager(staticDir);
+const benchmarkStore = new BenchmarkStore();
 
 function trackRequest(method: string, path: string, handler: (res: uWS.HttpResponse, req: uWS.HttpRequest) => void) {
     return (res: uWS.HttpResponse, req: uWS.HttpRequest) => {

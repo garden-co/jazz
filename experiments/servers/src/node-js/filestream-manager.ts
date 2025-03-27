@@ -44,8 +44,10 @@ interface StreamTarget {
 
 export class FileStreamManager {
     private uploads: Map<string, UploadState>;
+    private publicDir: string;
 
-    constructor() {
+    constructor(publicDir: string) {
+        this.publicDir = publicDir;
         this.uploads = new Map<string, UploadState>();
     }
 
@@ -75,7 +77,7 @@ export class FileStreamManager {
                 filename.lastIndexOf("."),
                 filename.length,
             );
-            const targetPath = `public/uploads/${uuid}${ext}`;
+            const targetPath = `${this.publicDir}/uploads/${uuid}${ext}`;
 
             this.uploads.set(uuid, {
                 targetPath,

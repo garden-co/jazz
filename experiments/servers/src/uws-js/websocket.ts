@@ -32,7 +32,7 @@ const staticDir =
         ? path.join(rootDir, "dist", "public")
         : path.join(rootDir, "public");
 
-const fileManager = new FileStreamManager();
+const fileManager = new FileStreamManager(staticDir);
 const benchmarkStore = new BenchmarkStore();
 
 const app = uWS.SSLApp({

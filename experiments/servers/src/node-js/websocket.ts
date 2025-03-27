@@ -59,7 +59,7 @@ function sendFile(res: ServerResponse, filePath: string) {
     }
 }
 
-const fileManager = new FileStreamManager();
+const fileManager = new FileStreamManager(staticDir);
 const benchmarkStore = new BenchmarkStore();
 
 // Create the HTTPS server
