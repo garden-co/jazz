@@ -35,6 +35,8 @@ export function Cursor({
     bounds,
   );
 
+  const isCursorOutOfBounds = isOutOfBounds(position, bounds);
+
   const springs = useSpring({
     x: position.x,
     y: position.y,
@@ -53,26 +55,58 @@ export function Cursor({
           [springs.x, springs.y],
           (x: number, y: number) => `translate(${x}, ${y})`,
         )}
-        // style={{
-        //   opacity: age > 30000 ? 0 : age > 10000 ? 0.5 : 1,
-        //   transition: "opacity 0.3s ease-in-out",
-        // }}
       >
-        <polygon
-          points="0,0 0,20 14.3,14.3"
-          fill={
-            isDragging
-              ? color
-              : `color-mix(in oklch, ${color}, transparent 56%)`
-          }
-          stroke={color}
-          strokeWidth="3"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        />
+        {isCursorOutOfBounds && <circle cx={0} cy={0} r={4} fill={color} />}
+        {!isOutOfBounds(position, bounds, 20) && (
+          <polygon
+            points="0,0 0,20 14.3,14.3"
+            fill={
+              isDragging
+                ? color
+                : `color-mix(in oklch, ${color}, transparent 56%)`
+            }
+            stroke={color}
+            strokeWidth="3"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        )}
+
+        {!isCursorOutOfBounds && (
+          <text
+            x="10"
+            y="25"
+            fill={color}
+            stroke="white"
+            strokeWidth="3"
+            strokeLinejoin="round"
+            paintOrder="stroke"
+            fontSize="14"
+            dominantBaseline="hanging"
+            style={{
+              fontFamily: "Inter, Manrope, system-ui, sans-serif",
+              fontWeight: 500,
+            }}
+          >
+            {name}
+          </text>
+        )}
+      </animated.g>
+      {isCursorOutOfBounds && (
+        <>
+          <circle
+            cx={intersectionPoint.x}
+            cy={intersectionPoint.y}
+            r={4}
+            fill={color}
+          />
+        </>
+      )}
+
+      {isCursorOutOfBounds && (
         <text
-          x="10"
-          y="25"
+          x={intersectionPoint.x + 10}
+          y={intersectionPoint.y + 25}
           fill={color}
           stroke="white"
           strokeWidth="3"
@@ -87,14 +121,6 @@ export function Cursor({
         >
           {name}
         </text>
-      </animated.g>
-      {isOutOfBounds(position, bounds) && (
-        <circle
-          cx={intersectionPoint.x}
-          cy={intersectionPoint.y}
-          r={4}
-          fill={color}
-        />
       )}
     </>
   );

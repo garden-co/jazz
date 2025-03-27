@@ -14,8 +14,10 @@ const OLD_CURSOR_AGE_SECONDS = Number(
   import.meta.env.VITE_OLD_CURSOR_AGE_SECONDS,
 );
 
+const DEBUG = import.meta.env.VITE_DEBUG;
+
 // For debugging purposes, we can set a fixed bounds
-const bounds: ViewBox = {
+const debugBounds: ViewBox = {
   x: -320,
   y: -320,
   width: 640,
@@ -38,9 +40,10 @@ function Canvas({ remoteCursors, onCursorMove, name }: CanvasProps) {
     mousePosition,
     bgPosition,
     dottedGridSize,
-    // viewBox: bounds,
+    viewBox,
   } = useCanvas({ onCursorMove });
 
+  const bounds = DEBUG ? debugBounds : viewBox;
   const center = centerOfBounds(bounds);
 
   return (
@@ -51,7 +54,7 @@ function Canvas({ remoteCursors, onCursorMove, name }: CanvasProps) {
       />
 
       <CanvasDemoContent />
-      <Boundary bounds={bounds} />
+      {DEBUG && <Boundary bounds={bounds} />}
 
       {remoteCursors.map((entry) => {
         if (
