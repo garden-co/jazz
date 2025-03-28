@@ -2,7 +2,7 @@ import { forwardRef } from "react";
 import { classNames } from "../utils.js";
 
 interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
-  variant?: "primary" | "secondary" | "tertiary" | "plain";
+  variant?: "primary" | "secondary" | "link" | "plain";
   children?: React.ReactNode;
   className?: string;
   disabled?: boolean;
@@ -22,10 +22,10 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
   ) => {
     const variantClasses = {
       primary:
-        "bg-blue border-blue text-white font-medium bg-blue hover:bg-blue-800 hover:border-blue-800",
+        "py-1.5 px-3 bg-blue border-blue text-white font-medium bg-blue hover:bg-blue-800 hover:border-blue-800",
       secondary:
-        "text-stone-900 border font-medium hover:border-stone-300 hover:dark:border-stone-700 dark:text-white",
-      tertiary: "text-blue underline underline-offset-4",
+        "py-1.5 px-3 text-stone-900 border font-medium hover:border-stone-300 hover:dark:border-stone-700 dark:text-white",
+      link: "text-blue dark:text-blue-400 hover:underline",
     };
 
     const classes =
@@ -33,7 +33,6 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
         ? className
         : classNames(
             className,
-            "py-1.5 px-3",
             "inline-flex items-center justify-center gap-2 rounded-lg text-center transition-colors",
             "disabled:pointer-events-none disabled:opacity-70",
             variantClasses[variant],

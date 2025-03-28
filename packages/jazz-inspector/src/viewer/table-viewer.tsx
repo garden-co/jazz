@@ -79,7 +79,7 @@ export function TableView({
             <tr key={index}>
               <td className={classNames("p-1")}>
                 <Button
-                  variant="tertiary"
+                  variant="link"
                   onClick={() =>
                     onNavigate([
                       {

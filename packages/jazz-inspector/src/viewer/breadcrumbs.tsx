@@ -16,8 +16,8 @@ export const Breadcrumbs: React.FC<BreadcrumbsProps> = ({
   return (
     <div className={classNames("relative z-20 flex-1 flex items-center")}>
       <Button
-        variant="plain"
-        className={classNames("text-blue px-1 dark:text-blue-400")}
+        variant="link"
+        className={classNames("px-1")}
         onClick={() => onBreadcrumbClick(-1)}
       >
         Home
@@ -34,8 +34,8 @@ export const Breadcrumbs: React.FC<BreadcrumbsProps> = ({
               /
             </span>
             <Button
-              variant="plain"
-              className={classNames("text-blue px-1 dark:text-blue-400")}
+              variant="link"
+              className={classNames("px-1")}
               onClick={() => onBreadcrumbClick(index)}
             >
               {index === 0 ? page.name || "Root" : page.name}

@@ -29,9 +29,7 @@ export function ValueRenderer({
   }
 
   if (typeof json === "string" && json.startsWith("co_")) {
-    const linkClasses = onCoIDClick
-      ? "text-blue cursor-pointer inline-flex gap-1 items-center dark:text-blue-400"
-      : "inline-flex gap-1 items-center";
+    const linkClasses = "inline-flex gap-1 items-center";
 
     const content = (
       <>
@@ -47,7 +45,7 @@ export function ValueRenderer({
           onClick={() => {
             onCoIDClick?.(json as CoID<RawCoValue>);
           }}
-          variant="plain"
+          variant="link"
         >
           {content}
         </Button>
@@ -252,14 +250,17 @@ export function AccountOrGroupPreview({
   const displayName = extendedType === "account" ? name || "Account" : "Group";
   const displayText = showId ? `${displayName} (${coId})` : displayName;
 
-  const props = onClick
-    ? {
-        onClick: () => onClick(displayName),
-        className: classNames("text-blue-500 cursor-pointer hover:underline"),
-      }
-    : {
-        className: classNames("text-gray-500"),
-      };
+  if (onClick) {
+    return (
+      <Button variant="link" onClick={() => onClick(displayName)}>
+        {displayText}
+      </Button>
+    );
+  }
 
-  return <span {...props}>{displayText}</span>;
+  return (
+    <Text muted inline>
+      {displayText}
+    </Text>
+  );
 }
