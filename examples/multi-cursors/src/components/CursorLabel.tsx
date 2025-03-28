@@ -2,6 +2,8 @@ import { animated, to, useSpring } from "@react-spring/web";
 import { useEffect, useRef, useState } from "react";
 import { Vec2, ViewBox } from "../types";
 
+const DEBUG = import.meta.env.VITE_DEBUG === "true";
+
 interface CursorLabelProps {
   name: string;
   color: string;
@@ -44,8 +46,8 @@ export function CursorLabel({
     }
 
     // Calculate the percentage of the bounds that the intersection point is from the left
-    const percentageH = position.x / bounds.width + 0.5;
-    const percentageV = position.y / bounds.height + 0.5;
+    const percentageH = (position.x - bounds.x) / bounds.width;
+    const percentageV = (position.y - bounds.y) / bounds.height;
 
     return {
       x: position.x - percentageH * dimensions.width,
@@ -62,20 +64,47 @@ export function CursorLabel({
   });
 
   return (
-    <animated.text
-      ref={textRef}
-      x={to([labelSprings.x], (x) => x)}
-      y={to([labelSprings.y], (y) => y)}
-      fill={color}
-      stroke="white"
-      strokeWidth="3"
-      strokeLinejoin="round"
-      paintOrder="stroke"
-      fontSize="14"
-      dominantBaseline="hanging"
-      textAnchor="start"
-    >
-      {name}
-    </animated.text>
+    <>
+      <animated.text
+        ref={textRef}
+        x={to([labelSprings.x], (x) => x)}
+        y={to([labelSprings.y], (y) => y)}
+        fill={color}
+        stroke="white"
+        strokeWidth="3"
+        strokeLinejoin="round"
+        paintOrder="stroke"
+        fontSize="14"
+        dominantBaseline="hanging"
+        textAnchor="start"
+      >
+        {name}
+      </animated.text>
+      {DEBUG ? (
+        <>
+          <text x={position.x} y={position.y} fill="red" fontSize="8">
+            {position.x}, {position.y}
+          </text>
+          <text
+            x={getLabelPosition().x}
+            y={getLabelPosition().y}
+            fill="red"
+            fontSize="8"
+          >
+            {bounds?.x - getLabelPosition().x},{" "}
+            {bounds?.y - getLabelPosition().y}
+          </text>
+          <line
+            x1={position.x}
+            y1={position.y}
+            x2={getLabelPosition().x}
+            y2={getLabelPosition().y}
+            stroke="red"
+            strokeWidth="1"
+            strokeLinejoin="round"
+          />
+        </>
+      ) : null}
+    </>
   );
 }
