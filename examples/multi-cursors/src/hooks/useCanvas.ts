@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import type { ViewBox } from "../types";
 import { throttleTime } from "../utils/throttleTime";
 
 export interface CursorMoveEvent {
@@ -13,7 +14,7 @@ export function useCanvas({
   onCursorMove: (event: CursorMoveEvent) => void;
   throttleMs?: number;
 }) {
-  const [viewBox, setViewBox] = useState({
+  const [viewBox, setViewBox] = useState<ViewBox>({
     x: 0,
     y: 0,
     width: window.innerWidth,
@@ -134,5 +135,6 @@ export function useCanvas({
     mousePosition,
     bgPosition,
     dottedGridSize,
+    viewBox,
   };
 }

@@ -1,9 +1,11 @@
 import { useAccount } from "jazz-react";
 import { CoFeedEntry, co } from "jazz-tools";
 import { CursorMoveEvent, useCanvas } from "../hooks/useCanvas";
-import { Cursor as CursorType } from "../types";
+import { Cursor as CursorType, ViewBox } from "../types";
+import { centerOfBounds } from "../utils/centerOfBounds";
 import { getColor } from "../utils/getColor";
 import { getName } from "../utils/getName";
+import { Boundary } from "./Boundary";
 import { CanvasBackground } from "./CanvasBackground";
 import { CanvasDemoContent } from "./CanvasDemoContent";
 import { Cursor } from "./Cursor";
@@ -11,6 +13,16 @@ import { Cursor } from "./Cursor";
 const OLD_CURSOR_AGE_SECONDS = Number(
   import.meta.env.VITE_OLD_CURSOR_AGE_SECONDS,
 );
+
+const DEBUG = import.meta.env.VITE_DEBUG === "true";
+
+// For debugging purposes, we can set a fixed bounds
+const debugBounds: ViewBox = {
+  x: 320,
+  y: 320,
+  width: 640,
+  height: 640,
+};
 
 interface CanvasProps {
   remoteCursors: CoFeedEntry<co<CursorType>>[];
@@ -28,7 +40,11 @@ function Canvas({ remoteCursors, onCursorMove, name }: CanvasProps) {
     mousePosition,
     bgPosition,
     dottedGridSize,
+    viewBox,
   } = useCanvas({ onCursorMove });
+
+  const bounds = DEBUG ? debugBounds : viewBox;
+  const center = centerOfBounds(bounds);
 
   return (
     <svg width="100%" height="100%" {...svgProps}>
@@ -38,6 +54,7 @@ function Canvas({ remoteCursors, onCursorMove, name }: CanvasProps) {
       />
 
       <CanvasDemoContent />
+      {DEBUG && <Boundary bounds={bounds} />}
 
       {remoteCursors.map((entry) => {
         if (
@@ -48,15 +65,24 @@ function Canvas({ remoteCursors, onCursorMove, name }: CanvasProps) {
           return null;
         }
 
+        const name = getName(entry.by?.profile?.name, entry.tx.sessionID);
+        const color = getColor(entry.tx.sessionID);
+        const age = new Date().getTime() - new Date(entry.madeAt).getTime();
+
         return (
-          <Cursor
-            key={entry.tx.sessionID}
-            position={entry.value.position}
-            color={getColor(entry.tx.sessionID)}
-            isDragging={false}
-            isRemote={true}
-            name={getName(entry.by?.profile?.name, entry.tx.sessionID)}
-          />
+          <>
+            <Cursor
+              key={entry.tx.sessionID}
+              position={entry.value.position}
+              color={color}
+              isDragging={false}
+              isRemote={true}
+              name={name}
+              age={age}
+              centerOfBounds={center}
+              bounds={bounds}
+            />
+          </>
         );
       })}
 
@@ -67,6 +93,8 @@ function Canvas({ remoteCursors, onCursorMove, name }: CanvasProps) {
           isDragging={isDragging}
           isRemote={false}
           name={name}
+          centerOfBounds={center}
+          bounds={bounds}
         />
       ) : null}
     </svg>

@@ -819,6 +819,9 @@ importers:
       vite:
         specifier: ^6.0.11
         version: 6.0.11(@types/node@22.10.2)(jiti@2.4.2)(lightningcss@1.29.1)(terser@5.37.0)(yaml@2.6.1)
+      vitest:
+        specifier: 3.0.5
+        version: 3.0.5(@types/node@22.10.2)(@vitest/browser@3.0.5)(@vitest/ui@3.0.5)(happy-dom@16.8.1)(jiti@2.4.2)(jsdom@25.0.1)(lightningcss@1.29.1)(msw@2.7.0(@types/node@22.10.2)(typescript@5.6.3))(terser@5.37.0)(yaml@2.6.1)
 
   examples/multiauth:
     dependencies:

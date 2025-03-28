@@ -18,3 +18,10 @@ export type RemoteCursor = Cursor & {
   isRemote: true;
   isDragging: boolean;
 };
+
+export type ViewBox = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
