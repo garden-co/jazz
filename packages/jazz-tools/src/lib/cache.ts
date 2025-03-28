@@ -13,4 +13,7 @@ export const coValuesCache = {
     weakMap.set(raw, computed);
     return computed;
   },
+  set: (raw: RawCoValue, value: CoValue) => {
+    weakMap.set(raw, value);
+  },
 };

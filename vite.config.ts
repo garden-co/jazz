@@ -24,7 +24,6 @@ export default defineConfig({
         },
       },
     },
-    include: ["packages/*/tests/**/*.test.{js,ts,svelte}"],
     maxConcurrency: 5,
   },
 });
