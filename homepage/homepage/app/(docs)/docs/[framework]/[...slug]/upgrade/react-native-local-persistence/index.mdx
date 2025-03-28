@@ -1,0 +1,32 @@
+import { ContentByFramework } from '@/components/forMdx'
+
+export const metadata = { title: "Enable local persistence" };
+
+# Enable local persistence
+
+<ContentByFramework>
+  {{
+    "react-native": "📱 For framework-less React Native, follow these steps to enable local persistence with op-sqlite and MMKV. [View implementation details →](/docs/react-native/upgrade/react-native-local-persistence/react-native)",
+    "react-native-expo": "📱 For Expo applications, follow these steps to enable local persistence with expo-sqlite. [View implementation details →](/docs/react-native-expo/upgrade/react-native-local-persistence/react-native)",
+    "default": "Version 0.9.2 introduces local persistence for React Native apps using SQLite. In version 0.11, we've separated the implementations for Expo and framework-less React Native."
+  }}
+</ContentByFramework>
+
+## Overview
+
+Version 0.9.2 introduced local persistence for React Native apps using SQLite, which allows your app data to persist across app restarts.
+
+In version 0.11 and higher, we've separated the React Native implementation into two dedicated packages:
+
+- **jazz-expo**: For Expo applications, using `expo-sqlite` and `expo-secure-store`
+- **jazz-react-native**: For framework-less React Native, using `@op-engineering/op-sqlite` and `react-native-mmkv`
+
+Local persistence is now enabled by default in both implementations in version 0.11+.
+
+<ContentByFramework>
+  {{
+    "react-native": "Please follow the [framework-less React Native guide](/docs/react-native/upgrade/react-native-local-persistence/react-native) for implementation details.",
+    "react-native-expo": "Please follow the [Expo guide](/docs/react-native-expo/upgrade/react-native-local-persistence/react-native) for implementation details.",
+    "default": "Please select your framework from the dropdown above to see specific implementation details."
+  }}
+</ContentByFramework>

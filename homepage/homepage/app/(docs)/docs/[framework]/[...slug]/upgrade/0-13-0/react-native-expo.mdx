@@ -1,0 +1,127 @@
+import { CodeGroup } from '@/components/forMdx'
+
+export const metadata = { title: "Upgrade to Jazz 0.13.0 for React Native Expo" };
+
+# Upgrade to Jazz 0.13.0 for React Native Expo
+
+Version 0.13.0 introduces a significant architectural change in how Jazz supports React Native applications. We've separated the React Native implementation into two distinct packages to better serve different React Native development approaches:
+
+1. **jazz-expo**: Dedicated package for Expo applications
+2. **jazz-react-native**: Focused package for framework-less React Native applications
+3. **jazz-react-native-core**: Shared core functionality used by both implementations (probably not imported directly)
+
+This guide focuses on upgrading **Expo applications**. If you're using framework-less React Native, please see the [React Native upgrade guide](/docs/react-native/upgrade/0-13-0).
+
+## Migration Steps for Expo
+
+1. **Update Dependencies**
+
+<CodeGroup>
+```bash
+# Remove the old package
+npm uninstall jazz-react-native
+
+# Install the new Expo-specific packages
+npx expo install expo-sqlite expo-secure-store expo-file-system @react-native-community/netinfo
+npm install jazz-expo jazz-react-native-media-images
+```
+</CodeGroup>
+
+2. **Update Imports**
+
+<CodeGroup>
+```tsx
+// Old imports
+import { JazzProvider, useAccount, useCoValue /* etc */ } from "jazz-react-native"; // *bin*
+
+// New imports
+import { JazzProvider, useAccount, useCoValue /* etc */ } from "jazz-expo"; // *add*
+```
+</CodeGroup>
+
+3. **Update Type Declarations**
+
+<CodeGroup>
+```tsx
+// Old declaration
+declare module "jazz-react-native" { // *bin*
+    interface Register {
+        Account: MyAppAccount;
+    }
+}
+
+// New declaration
+declare module "jazz-expo" { // *add*
+    interface Register {
+        Account: MyAppAccount;
+    }
+}
+```
+</CodeGroup>
+
+## Storage Adapter Changes
+
+The `jazz-expo` package now uses:
+- `ExpoSQLiteAdapter` for database storage (using `expo-sqlite`)
+- `ExpoSecureStoreAdapter` for key-value storage (using `expo-secure-store`)
+
+These are now the default storage adapters in the `JazzProvider` for Expo applications, so you don't need to specify them explicitly.
+
+## Example Provider Setup
+
+<CodeGroup>
+```tsx
+import { JazzProvider } from "jazz-expo";
+import { MyAppAccount } from "./schema";
+
+export function MyJazzProvider({ children }: { children: React.ReactNode }) {
+    return (
+        <JazzProvider
+            sync={{ peer: "wss://cloud.jazz.tools/?key=you@example.com" }}
+            AccountSchema={MyAppAccount}
+        >
+            {children}
+        </JazzProvider>
+    );
+}
+
+// Register the Account schema
+declare module "jazz-expo" {
+    interface Register {
+        Account: MyAppAccount;
+    }
+}
+```
+</CodeGroup>
+
+## New Architecture Support
+
+The `jazz-expo` implementation supports the Expo New Architecture.
+
+## Styling with NativeWind
+
+For Expo projects, remember to use NativeWind CSS for styling, which is the recommended approach for Jazz applications built with Expo:
+
+<CodeGroup>
+```tsx
+import { View, Text } from "react-native";
+import { styled } from "nativewind";
+
+const StyledView = styled(View);
+const StyledText = styled(Text);
+
+export function MyComponent() {
+    return (
+        <StyledView className="p-4 bg-white dark:bg-slate-800">
+            <StyledText className="text-black dark:text-white text-lg font-bold">
+                Hello, Jazz with Expo!
+            </StyledText>
+        </StyledView>
+    );
+}
+```
+</CodeGroup>
+
+## For More Information
+
+For detailed setup instructions, refer to the [React Native Expo Setup Guide](/docs/react-native-expo/project-setup)

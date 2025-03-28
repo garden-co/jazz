@@ -6,12 +6,17 @@ export const metadata = { title: "ImageDefinition" };
 
 `ImageDefinition` is a specialized CoValue designed specifically for managing images in Jazz. It extends beyond basic file storage by supporting multiple resolutions of the same image, optimized for mobile devices.
 
+> **Note**: This guide applies to both Expo and framework-less React Native implementations. The functionality described here is identical regardless of which implementation you're using, though you'll need to import from the appropriate package (`jazz-expo` or `jazz-react-native`).
+
 Jazz offers several tools to work with images in React Native:
 - [`createImage()`](#creating-images) - function to create an `ImageDefinition` from a base64 image data URI
 - [`ProgressiveImg`](#displaying-images-with-progressiveimg) - React component to display an image with progressive loading
 - [`useProgressiveImg`](#using-useprogressiveimg-hook) - React hook to load an image in your own component
 
-For an example of use, see our [React Native Clerk Chat example](https://github.com/gardencmp/jazz/tree/main/examples/chat-rn-clerk).
+For examples of use, see our example apps:
+- [React Native Chat](https://github.com/gardencmp/jazz/tree/main/examples/chat-rn) (Framework-less implementation)
+- [React Native Expo Chat](https://github.com/gardencmp/jazz/tree/main/examples/chat-rn-expo) (Expo implementation)
+- [React Native Expo Clerk Chat](https://github.com/gardencmp/jazz/tree/main/examples/chat-rn-expo-clerk) (Expo implementation with Clerk)
 
 ## Creating Images
 
@@ -30,16 +35,16 @@ async function handleImagePicker() {
       base64: true,
       quality: 1,
     });
-    
+
     if (!result.canceled) {
       const base64Uri = `data:image/jpeg;base64,${result.assets[0].base64}`;
-      
+
       // Creates ImageDefinition with multiple resolutions automatically
       const image = await createImage(base64Uri, {
         owner: me.profile._owner,
         maxSize: 2048, // Optional: limit maximum resolution
       });
-      
+
       // Store the image
       me.profile.image = image;
     }
@@ -94,8 +99,8 @@ function GalleryView({ image }) {
       targetWidth={800} //  Looks for the best available resolution for a 800px image
     >
       {({ src }) => (
-        <Image 
-          source={{ uri: src }} 
+        <Image
+          source={{ uri: src }}
           style={styles.galleryImage}
           resizeMode="cover"
         />
@@ -149,30 +154,30 @@ function CustomImageComponent({ image }) {
       </View>
     );
   }
-  
+
   // When using placeholder
   if (res === "placeholder") {
     return (
       <View style={{ position: 'relative' }}>
-        <Image 
-          source={{ uri: src }} 
+        <Image
+          source={{ uri: src }}
           style={{ width: '100%', height: 200, opacity: 0.7 }}
           resizeMode="cover"
         />
-        <ActivityIndicator 
-          size="large" 
-          color="#ffffff" 
+        <ActivityIndicator
+          size="large"
+          color="#ffffff"
           style={{ position: 'absolute', top: '50%', left: '50%', marginLeft: -20, marginTop: -20 }}
         />
       </View>
     );
   }
-  
+
   // Full image display with custom overlay
   return (
     <View style={{ position: 'relative', width: '100%', height: 200 }}>
-      <Image 
-        source={{ uri: src }} 
+      <Image
+        source={{ uri: src }}
         style={{ width: '100%', height: '100%' }}
         resizeMode="cover"
       />

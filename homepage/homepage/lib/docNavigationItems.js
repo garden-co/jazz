@@ -34,6 +34,7 @@ export const docNavigationItems = [
           react: 100,
           vue: 100,
           "react-native": 100,
+          "react-native-expo": 100,
           svelte: 100,
         },
       },
@@ -70,6 +71,26 @@ export const docNavigationItems = [
     collapse: true,
     prefix: "/docs/upgrade",
     items: [
+      {
+        // upgrade guides
+        name: "0.13.0 - React Native Split",
+        href: "/docs/upgrade/0-13-0",
+        done: {
+          "react-native": 100,
+          "react-native-expo": 100,
+        },
+        framework: "react-native",
+      },
+      {
+        // upgrade guides
+        name: "0.13.0 - React Native Split",
+        href: "/docs/upgrade/0-13-0",
+        done: {
+          "react-native": 100,
+          "react-native-expo": 100,
+        },
+        framework: "react-native-expo",
+      },
       {
         // upgrade guides
         name: "0.12.0 - Deeply Resolved Data",

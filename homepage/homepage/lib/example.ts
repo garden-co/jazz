@@ -14,6 +14,7 @@ export type Example = {
 export const tech = {
   react: "React",
   reactNative: "React Native",
+  expo: "Expo",
   vue: "Vue",
   svelte: "Svelte",
 };

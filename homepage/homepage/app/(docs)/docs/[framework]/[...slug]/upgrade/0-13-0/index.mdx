@@ -1,0 +1,37 @@
+import { ContentByFramework } from '@/components/forMdx'
+
+export const metadata = { title: "Upgrade to Jazz 0.13.0" };
+
+# Upgrade to Jazz 0.13.0
+
+<ContentByFramework>
+  {{
+    "react-native": "📱 React Native now has separate implementations for Expo and framework-less React Native applications. [Learn how to upgrade →](/docs/react-native/upgrade/0-13-0)",
+    "react-native-expo": "📱 React Native now has a dedicated Jazz package with optimized implementations for Expo applications. [Learn how to upgrade →](/docs/react-native-expo/upgrade/0-13-0)",
+    "react": "✅ No breaking changes for React applications in this version.",
+    "vue": "✅ No breaking changes for Vue applications in this version.",
+    "svelte": "✅ No breaking changes for Svelte applications in this version.",
+    "default": "Version 0.13.0 introduces a significant architectural change for React Native implementations. For other frameworks, there are no breaking changes in this version."
+  }}
+</ContentByFramework>
+
+## Summary of Changes
+
+### React Native Changes
+
+- **Split Implementation**: React Native support is now divided into two packages:
+  - `jazz-expo`: For Expo applications
+  - `jazz-react-native`: For framework-less React Native applications
+  - `jazz-react-native-core`: Shared core functionality used by both
+
+- **Storage Adapters**:
+  - Expo uses `expo-sqlite` and `expo-secure-store`
+  - Framework-less React Native uses `@op-engineering/op-sqlite` and `react-native-mmkv`
+
+- **Import Paths**: You'll need to update imports based on your implementation:
+  - From `jazz-react-native` to `jazz-expo` for Expo applications
+  - No changes needed for framework-less React Native applications
+
+### Other Frameworks
+
+No breaking changes for React, Vue, or Svelte applications in this version.

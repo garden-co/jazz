@@ -110,7 +110,7 @@ export const frameworkToAuthExamples: Partial<
   },
   "rn-clerk-auth": {
     name: "Clerk auth",
-    repo: "garden-co/jazz/examples/chat-rn-clerk",
+    repo: "garden-co/jazz/examples/chat-rn-expo-clerk",
     platform: PLATFORM.REACT_NATIVE,
   },
 };

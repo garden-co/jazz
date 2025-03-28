@@ -1,0 +1,252 @@
+export const metadata = { title: "React Native - Expo" };
+
+import { CodeGroup } from "@/components/forMdx";
+
+# React Native - Expo
+
+Jazz supports Expo through the dedicated `jazz-expo` package, which is specifically designed for Expo applications.
+
+Jazz requires an [Expo development build](https://docs.expo.dev/develop/development-builds/introduction/) using [Expo Prebuild](https://docs.expo.dev/workflow/prebuild/) for native code. It is **not compatible** with Expo Go. Jazz also supports the [New Architecture](https://docs.expo.dev/guides/new-architecture/).
+
+Tested with:
+
+<CodeGroup>
+  ```json 
+  "expo": "~52.0.0", 
+  "react-native": "0.76.7", 
+  "react": "18.3.1"
+  ```
+</CodeGroup>
+
+## Setup
+
+### Create a new project
+
+(skip this step if you already have one)
+
+<CodeGroup>
+  ```bash
+  npx create-expo-app -e with-router-tailwind my-jazz-app
+  cd my-jazz-app
+  npx expo prebuild
+  ```
+</CodeGroup>
+
+### Install dependencies
+
+<CodeGroup>
+  ```bash
+  npx expo install expo-linking expo-secure-store expo-file-system @react-native-community/netinfo @bam.tech/react-native-image-resizer
+
+  npm i -S @azure/core-asynciterator-polyfill react-native-url-polyfill readable-stream react-native-get-random-values @craftzdog/react-native-buffer
+
+  npm i -S jazz-tools jazz-expo jazz-react-native-media-images
+  ```
+</CodeGroup>
+
+> note: Hermes has added support for `atob` and `btoa` in React Native 0.74. If you are using earlier versions, you may also need to polyfill `atob` and `btoa` in your `package.json`. Packages to try include `text-encoding` and `base-64`, and you can drop `@bacons/text-decoder`.
+
+### Fix incompatible dependencies
+
+<CodeGroup>
+```bash
+npx expo install --fix
+```
+</CodeGroup>
+
+### Install Pods
+
+<CodeGroup>
+```bash 
+npx pod-install 
+```
+</CodeGroup>
+
+### Configure Metro
+
+#### Regular repositories
+
+If you are not working within a monorepo, create a new file metro.config.js in the root of your project with the following content:
+
+<CodeGroup>
+  ```ts 
+  const {getDefaultConfig} = require("expo/metro-config"); 
+  const config = getDefaultConfig(projectRoot); 
+  config.resolver.sourceExts = ["mjs", "js", "json", "ts", "tsx"]; 
+  config.resolver.requireCycleIgnorePatterns = [/(^|\/|\\)node_modules($|\/|\\)/]; 
+  module.exports = config; 
+  ```
+</CodeGroup>
+
+#### Monorepos
+
+For monorepos, use the following metro.config.js:
+
+<CodeGroup>
+  ```ts
+  const { getDefaultConfig } = require("expo/metro-config");
+  const { FileStore } = require("metro-cache");
+  const path = require("path");
+
+  // eslint-disable-next-line no-undef
+  const projectRoot = __dirname;
+  const workspaceRoot = path.resolve(projectRoot, "../..");
+
+  const config = getDefaultConfig(projectRoot);
+
+  config.watchFolders = [workspaceRoot];
+  config.resolver.nodeModulesPaths = [
+    path.resolve(projectRoot, "node_modules"),
+    path.resolve(workspaceRoot, "node_modules"),
+  ];
+  config.resolver.sourceExts = ["mjs", "js", "json", "ts", "tsx"];
+  config.resolver.requireCycleIgnorePatterns = [/(^|\/|\\)node_modules($|\/|\\)/];
+  config.cacheStores = [
+    new FileStore({
+      root: path.join(projectRoot, "node_modules", ".cache", "metro"),
+    }),
+  ];
+
+  module.exports = config;
+  ```
+</CodeGroup>
+
+### Additional monorepo configuration (for pnpm users)
+
+If you're using pnpm, you'll need to make sure that your expo app's package.json has this:
+
+<CodeGroup>```json "main": "index.js", ```</CodeGroup>
+
+## Setting up the provider
+
+Wrap your app components with the JazzProvider:
+
+<CodeGroup>
+```tsx
+import { JazzProvider } from "jazz-expo";
+import { MyAppAccount } from "./schema";
+
+export function MyJazzProvider({ children }: { children: React.ReactNode }) {
+    return (
+        <JazzProvider
+            sync={{ peer: "wss://cloud.jazz.tools/?key=you@example.com" }}
+            AccountSchema={MyAppAccount}
+        >
+            {children}
+        </JazzProvider>
+    );
+}
+
+// Register the Account schema so `useAccount` returns our custom `MyAppAccount`
+declare module "jazz-expo" {
+    interface Register {
+        Account: MyAppAccount;
+    }
+}
+```
+</CodeGroup>
+
+### Provider Options
+
+- `kvStore`
+  - `ExpoSecureStoreAdapter` (default)
+- `AccountSchema`
+  - `Account` (default)
+- `CryptoProvider`
+
+### Local Persistence
+
+Jazz for Expo includes built-in local persistence using SQLite. Following Expo's best practices, the Expo implementation uses:
+
+- **Database Storage**: `expo-sqlite` - Expo's official SQLite module
+- **Key-Value Storage**: `expo-secure-store` - Expo's secure storage system
+
+Local persistence is enabled by default with no additional configuration required. Your data will automatically persist across app restarts.
+
+#### Advanced Configuration
+
+You can customize the storage options in the `JazzProvider`:
+
+<CodeGroup>
+```tsx
+import { JazzProvider, ExpoSQLiteAdapter, ExpoSecureStoreAdapter } from "jazz-expo";
+
+// Default configuration - no parameters needed
+<JazzProvider
+  sync={{ peer: "wss://cloud.jazz.tools/?key=you@example.com" }}
+  AccountSchema={MyAppAccount}
+>
+  {children}
+</JazzProvider>
+
+// Or with explicit configuration
+<JazzProvider
+  storage="sqlite" // Use default ExpoSQLiteAdapter
+  // Or with custom configuration
+  // storage={{
+  //   adapter: new ExpoSQLiteAdapter({ /* custom options */ }),
+  //   kvStore: new ExpoSecureStoreAdapter({ /* custom options */ })
+  // }}
+  sync={{ peer: "wss://cloud.jazz.tools/?key=you@example.com" }}
+  AccountSchema={MyAppAccount}
+>
+  {children}
+</JazzProvider>
+```
+</CodeGroup>
+
+## Create Schema
+
+To define what database types your app uses, create `schema.ts` with a CoValue schema:
+
+<CodeGroup>
+```tsx
+import { Account, AuthSession, createCoValueClass, z } from "jazz-expo";
+
+export class Chat extends createCoValueClass("chat", {
+  name: z.string(),
+  participants: z.array(z.string()),
+  messages: z.array(
+    z.object({
+      sender: z.string(),
+      text: z.string(),
+      timestamp: z.number(),
+    })
+  ),
+}) {}
+
+export class MyAppAccount extends Account {
+  static collections = {
+    ...Account.collections,
+    chats: Chat,
+  };
+}
+```
+</CodeGroup>
+
+## Using hooks
+
+Now you can create a chat, add messages, invite collaborators, or sync data across devices:
+
+<CodeGroup>
+```tsx
+import { useAccount, useCoValue } from "jazz-expo";
+import { Chat, MyAppAccount } from "./schema";
+
+export function MyComponent() {
+  const account = useAccount<MyAppAccount>();
+
+  // Create a new chat
+  const handleNewChat = useCallback(async () => {
+    const chatRef = await account.chats.add(new Chat({
+      name: "New Chat",
+      participants: [account.id],
+      messages: [],
+    }));
+    console.log("Created chat with id: ", chatRef.id);
+  }, [account]);
+
+  // ...
+}
+```
+</CodeGroup>
