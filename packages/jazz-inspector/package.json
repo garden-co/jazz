@@ -21,6 +21,7 @@
     "@twind/preset-tailwind": "^1.1.4",
     "clsx": "^2.0.0",
     "cojson": "workspace:*",
+    "goober": "^2.1.16",
     "jazz-react-core": "workspace:*",
     "jazz-tools": "workspace:*"
   },

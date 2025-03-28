@@ -1,5 +1,4 @@
-// Import Twind setup
-import "./twind.js";
+import React from "react";
 
 export { JazzInspector } from "./viewer/new-app.js";
 export { PageStack } from "./viewer/page-stack.js";
@@ -16,3 +15,7 @@ export {
 } from "./viewer/use-resolve-covalue.js";
 
 export type { PageInfo } from "./viewer/types.js";
+
+import { setup } from "goober";
+
+setup(React.createElement);
