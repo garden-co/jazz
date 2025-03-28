@@ -68,9 +68,9 @@ export default function ProblemStatementSection() {
               <strong>With users &amp; permissions built-in.</strong>
             </p>
             <p>
-              With completely <strong>app-independent infra,</strong> you get to focus on{" "}
-              <strong>building the app your users want.</strong> You'll notice
-              that <strong>90% of the work is now the UI.</strong>
+              With completely <strong>app-independent infra,</strong> you get to
+              focus on <strong>building the app your users want.</strong> You'll
+              notice that <strong>90% of the work is now the UI.</strong>
             </p>
           </Prose>
         </div>

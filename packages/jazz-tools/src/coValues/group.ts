@@ -10,11 +10,14 @@ import { activeAccountContext } from "../implementation/activeAccountContext.js"
 import type {
   CoValue,
   CoValueClass,
-  DeeplyLoaded,
-  DepthsIn,
   ID,
   RefEncoded,
+  RefsToResolve,
+  RefsToResolveStrict,
+  Resolved,
   Schema,
+  SubscribeListenerOptions,
+  SubscribeRestArgs,
 } from "../internal.js";
 import {
   CoValueBase,
@@ -23,6 +26,7 @@ import {
   ensureCoValueLoaded,
   loadCoValueWithoutMe,
   parseGroupCreateOptions,
+  parseSubscribeRestArgs,
   subscribeToCoValueWithoutMe,
   subscribeToExistingCoValue,
 } from "../internal.js";
@@ -229,73 +233,59 @@ export class Group extends CoValueBase implements CoValue {
   }
 
   /** @category Subscription & Loading */
-  static load<C extends Group, Depth>(
-    this: CoValueClass<C>,
-    id: ID<C>,
-    depth: Depth & DepthsIn<C>,
-  ): Promise<DeeplyLoaded<C, Depth> | undefined>;
-  static load<C extends Group, Depth>(
-    this: CoValueClass<C>,
-    id: ID<C>,
-    as: Account,
-    depth: Depth & DepthsIn<C>,
-  ): Promise<DeeplyLoaded<C, Depth> | undefined>;
-  static load<C extends Group, Depth>(
-    this: CoValueClass<C>,
-    id: ID<C>,
-    asOrDepth: Account | (Depth & DepthsIn<C>),
-    depth?: Depth & DepthsIn<C>,
-  ): Promise<DeeplyLoaded<C, Depth> | undefined> {
-    return loadCoValueWithoutMe(this, id, asOrDepth, depth);
+  static load<G extends Group, const R extends RefsToResolve<G>>(
+    this: CoValueClass<G>,
+    id: ID<G>,
+    options?: { resolve?: RefsToResolveStrict<G, R>; loadAs?: Account },
+  ): Promise<Resolved<G, R> | null> {
+    return loadCoValueWithoutMe(this, id, options);
   }
 
   /** @category Subscription & Loading */
-  static subscribe<C extends Group, Depth>(
-    this: CoValueClass<C>,
-    id: ID<C>,
-    depth: Depth & DepthsIn<C>,
-    listener: (value: DeeplyLoaded<C, Depth>) => void,
+  static subscribe<G extends Group, const R extends RefsToResolve<G>>(
+    this: CoValueClass<G>,
+    id: ID<G>,
+    listener: (value: Resolved<G, R>, unsubscribe: () => void) => void,
   ): () => void;
-  static subscribe<C extends Group, Depth>(
-    this: CoValueClass<C>,
-    id: ID<C>,
-    as: Account,
-    depth: Depth & DepthsIn<C>,
-    listener: (value: DeeplyLoaded<C, Depth>) => void,
+  static subscribe<G extends Group, const R extends RefsToResolve<G>>(
+    this: CoValueClass<G>,
+    id: ID<G>,
+    options: SubscribeListenerOptions<G, R>,
+    listener: (value: Resolved<G, R>, unsubscribe: () => void) => void,
   ): () => void;
-  static subscribe<C extends Group, Depth>(
-    this: CoValueClass<C>,
-    id: ID<C>,
-    asOrDepth: Account | (Depth & DepthsIn<C>),
-    depthOrListener:
-      | (Depth & DepthsIn<C>)
-      | ((value: DeeplyLoaded<C, Depth>) => void),
-    listener?: (value: DeeplyLoaded<C, Depth>) => void,
+  static subscribe<G extends Group, const R extends RefsToResolve<G>>(
+    this: CoValueClass<G>,
+    id: ID<G>,
+    ...args: SubscribeRestArgs<G, R>
   ): () => void {
-    return subscribeToCoValueWithoutMe<C, Depth>(
-      this,
-      id,
-      asOrDepth,
-      depthOrListener,
-      listener,
-    );
+    const { options, listener } = parseSubscribeRestArgs(args);
+    return subscribeToCoValueWithoutMe<G, R>(this, id, options, listener);
   }
 
   /** @category Subscription & Loading */
-  ensureLoaded<G extends Group, Depth>(
+  ensureLoaded<G extends Group, const R extends RefsToResolve<G>>(
     this: G,
-    depth: Depth & DepthsIn<G>,
-  ): Promise<DeeplyLoaded<G, Depth>> {
-    return ensureCoValueLoaded(this, depth);
+    options?: { resolve?: RefsToResolveStrict<G, R> },
+  ): Promise<Resolved<G, R>> {
+    return ensureCoValueLoaded(this, options);
   }
 
   /** @category Subscription & Loading */
-  subscribe<G extends Group, Depth>(
+  subscribe<G extends Group, const R extends RefsToResolve<G>>(
     this: G,
-    depth: Depth & DepthsIn<G>,
-    listener: (value: DeeplyLoaded<G, Depth>) => void,
+    listener: (value: Resolved<G, R>, unsubscribe: () => void) => void,
+  ): () => void;
+  subscribe<G extends Group, const R extends RefsToResolve<G>>(
+    this: G,
+    options: { resolve?: RefsToResolveStrict<G, R> },
+    listener: (value: Resolved<G, R>, unsubscribe: () => void) => void,
+  ): () => void;
+  subscribe<G extends Group, const R extends RefsToResolve<G>>(
+    this: G,
+    ...args: SubscribeRestArgs<G, R>
   ): () => void {
-    return subscribeToExistingCoValue(this, depth, listener);
+    const { options, listener } = parseSubscribeRestArgs(args);
+    return subscribeToExistingCoValue(this, options, listener);
   }
 
   /**

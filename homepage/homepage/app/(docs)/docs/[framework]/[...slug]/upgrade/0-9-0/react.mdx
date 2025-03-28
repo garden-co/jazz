@@ -24,9 +24,9 @@ So we decided to remove `createJazzReactApp` step and to provide the types throu
       import { JazzProvider, usePasskeyAuth, PasskeyAuthBasicUI } from "jazz-react";
       import { MyAppAccount } from "./schema";
 
-      // Remove these lines  // *bin*
-      const Jazz = createJazzReactApp({ AccountSchema: MyAppAccount }); // *bin*
-      export const { useAccount, useCoState } = Jazz; // *bin*
+      // Remove these lines  // [!code --]
+      const Jazz = createJazzReactApp({ AccountSchema: MyAppAccount }); // [!code --]
+      export const { useAccount, useCoState } = Jazz; // [!code --]
 
       export function JazzAndAuth({ children }: { children: React.ReactNode }) {  // old
           const [passkeyAuth, passKeyState] = usePasskeyAuth({ appName });  // old
@@ -37,7 +37,7 @@ So we decided to remove `createJazzReactApp` step and to provide the types throu
                   <JazzProvider
                       auth={passkeyAuth} // old
                       peer="wss://cloud.jazz.tools/?key=you@example.com" // old
-                      AccountSchema={MyAppAccount} {/* The custom Account schema is passed here */} // *add*
+                      AccountSchema={MyAppAccount} {/* The custom Account schema is passed here */} // [!code ++]
                   >
                       {children} // old
                   </JazzProvider>
@@ -47,11 +47,11 @@ So we decided to remove `createJazzReactApp` step and to provide the types throu
       }
 
       // Register the Account schema so `useAccount` returns our custom `MyAppAccount`
-      declare module "jazz-react" { // *add*
-          interface Register { // *add*
-              Account: MyAppAccount; // *add*
-          } // *add*
-      } // *add*
+      declare module "jazz-react" { // [!code ++]
+          interface Register { // [!code ++]
+              Account: MyAppAccount; // [!code ++]
+          } // [!code ++]
+      } // [!code ++]
       ```
   </CodeGroup>
 
@@ -65,8 +65,8 @@ This change improves IDE intellisense support and simplifies imports:
     {/* prettier-ignore */}
     ```tsx
     // Replace local imports with "jazz-react" imports
-    import { useAccount } from "./main"; // *bin*
-    import { useAccount } from "jazz-react"; // *add*
+    import { useAccount } from "./main"; // [!code --]
+    import { useAccount } from "jazz-react"; // [!code ++]
 
     export function Hello() {
         const { me } = useAccount();

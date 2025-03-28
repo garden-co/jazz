@@ -112,7 +112,7 @@ declare module "jazz-react" {// old
 ## Resolving CoValues starting at `profile` or `root`
 
 <ContentByFramework framework="react">
-To use per-user data in your app, you typically use `useAccount` somewhere in a high-level component, specifying which references to resolve using a depth-spec (see [Subscribing & deep loading](/docs/using-covalues/subscription-and-loading)).
+To use per-user data in your app, you typically use `useAccount` somewhere in a high-level component, specifying which references to resolve using a resolve query (see [Subscribing & deep loading](/docs/using-covalues/subscription-and-loading)).
 
 <CodeGroup>
 {/* prettier-ignore */}
@@ -163,12 +163,12 @@ export class MyAppAccount extends Account {
   profile = co.ref(MyAppProfile);
 
   async migrate(this: MyAppAccount, creationProps?: { name: string }) {
-    // we specifically need to check for undefined, 
+    // we specifically need to check for undefined,
     // because the root might simply be not loaded (`null`) yet
     if (this.root === undefined) {
       this.root = MyAppRoot.create({
         // Using a group to set the owner is always a good idea.
-        // This way if in the future we want to share 
+        // This way if in the future we want to share
         // this coValue we can do so easily.
         myChats: ListOfChats.create([], Group.create()),
         myContacts: ListOfAccounts.create([], Group.create())
@@ -218,8 +218,8 @@ export class MyAppAccount extends Account {
         root: {},
       });
 
-      // we specifically need to check for undefined, 
-      // because myBookmarks might simply be not loaded (`null`) yet 
+      // we specifically need to check for undefined,
+      // because myBookmarks might simply be not loaded (`null`) yet
       if (root.myBookmarks === undefined) {
         root.myBookmarks = ListOfBookmarks.create([], Group.create());
       }
@@ -228,9 +228,9 @@ export class MyAppAccount extends Account {
 ```
 </CodeGroup>
 
-{/* 
- TODO: Add best practice: only ever add fields  
+{/*
+ TODO: Add best practice: only ever add fields
 
- Note: explain and reassure that there will be more guardrails in the future 
+ Note: explain and reassure that there will be more guardrails in the future
  https://github.com/garden-co/jazz/issues/1160
 */}

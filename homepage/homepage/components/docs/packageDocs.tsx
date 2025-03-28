@@ -17,6 +17,7 @@ import {
   PropCategory,
   PropDecl,
 } from "./tags";
+import { Fragment } from "react";
 
 export async function PackageDocs({
   package: packageName,
@@ -37,11 +38,15 @@ export async function PackageDocs({
           <section key={category.title}>
             <h2>{category.title}</h2>
             {category.children.map((child) => (
-              <RenderPackageChild
-                child={child}
-                key={child.id}
-                inPackage={packageName}
-              />
+              // Ability to link external documents has been added. Turning it off for now
+              // https://typedoc.org/documents/External_Documents.html
+              child.variant !== "document" && (
+                <RenderPackageChild
+                  child={child}
+                  key={child.id}
+                  inPackage={packageName}
+                />
+              )
             ))}
           </section>
         );
@@ -190,7 +195,9 @@ function RenderClassOrInterface({
             )}
           />
           {category.children.map((prop) => (
-            <RenderProp prop={prop} klass={classOrInterface} key={prop.id} />
+            prop.variant !== "document" && (
+              <RenderProp prop={prop} klass={classOrInterface} key={prop.id} />
+            )
           ))}
         </div>
       ))}
@@ -203,10 +210,10 @@ function renderSummary(commentSummary: CommentDisplayPart[] | undefined) {
     part.kind === "text" ? (
       <span key={idx}>
         {part.text.split("\n").map((line, i, lines) => (
-          <>
+          <Fragment key={i}>
             {line}
             {i !== lines.length - 1 && <br />}
-          </>
+          </Fragment>
         ))}
       </span>
     ) : part.kind === "inline-tag" ? (

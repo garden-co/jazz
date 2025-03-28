@@ -32,7 +32,7 @@ So we decided to remove `createJazzApp` step and to provide the types through na
         </script>
 
         <script lang="ts">
-          import { Provider } from '$lib/jazz'; // *bin*
+          import { Provider } from '$lib/jazz'; // [!code --]
           import { JazzProvider } from 'jazz-svelte';
 
           // Example configuration for authentication and peer connection
@@ -62,8 +62,8 @@ So we decided to remove `createJazzApp` step and to provide the types through na
 ```svelte
 
 <script lang="ts">
-  import { useAccount } from '$lib/jazz'; // *bin*
-  import { useAccount } from 'jazz-svelte'; // *add*
+  import { useAccount } from '$lib/jazz'; // [!code --]
+  import { useAccount } from 'jazz-svelte'; // [!code ++]
 
   const { me } = useAccount();
 </script>

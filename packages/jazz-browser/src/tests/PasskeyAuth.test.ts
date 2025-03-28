@@ -198,7 +198,9 @@ describe("BrowserPasskeyAuth", () => {
       await auth.signUp("");
 
       const currentAccount = await Account.getMe().ensureLoaded({
-        profile: {},
+        resolve: {
+          profile: true,
+        },
       });
 
       // 'Test Account' is the name provided during account creation (see: `jazz-tools/src/testing.ts`)
@@ -228,7 +230,9 @@ describe("BrowserPasskeyAuth", () => {
       await auth.signUp("testuser");
 
       const currentAccount = await Account.getMe().ensureLoaded({
-        profile: {},
+        resolve: {
+          profile: true,
+        },
       });
 
       expect(currentAccount.profile.name).toEqual("testuser");

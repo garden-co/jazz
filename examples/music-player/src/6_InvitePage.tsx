@@ -16,8 +16,10 @@ export function InvitePage() {
         const playlist = await Playlist.load(playlistId, {});
 
         const me = await MusicaAccount.getMe().ensureLoaded({
-          root: {
-            playlists: [],
+          resolve: {
+            root: {
+              playlists: true,
+            },
           },
         });
 

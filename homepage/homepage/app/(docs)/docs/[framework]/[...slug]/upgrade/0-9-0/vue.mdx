@@ -28,10 +28,10 @@ import App from "./App.vue"; // old
 import router from "./router"; // old
 import { ToDoAccount } from "./schema"; // old
 
-// Remove these lines  // *bin*
-const Jazz = createJazzVueApp<ToDoAccount>({ AccountSchema: ToDoAccount }); // *bin*
-export const { useAccount, useCoState } = Jazz; // *bin*
-const { JazzProvider } = Jazz; // *bin*
+// Remove these lines  // [!code --]
+const Jazz = createJazzVueApp<ToDoAccount>({ AccountSchema: ToDoAccount }); // [!code --]
+export const { useAccount, useCoState } = Jazz; // [!code --]
+const { JazzProvider } = Jazz; // [!code --]
 
 const RootComponent = defineComponent({ // old
   name: "RootComponent", // old
@@ -86,8 +86,8 @@ This change improves IDE intellisense support and simplifies imports:
 
 <script setup lang="ts">
   // Replace local imports with "jazz-vue" imports
-  import { useAccount } from "./main"; // *bin*
-  import { useAccount } from "jazz-vue"; // *add*
+  import { useAccount } from "./main"; // [!code --]
+  import { useAccount } from "jazz-vue"; // [!code ++]
 
   const { me, logOut } = useAccount();
 </script>

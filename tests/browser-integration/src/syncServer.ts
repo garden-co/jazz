@@ -1,12 +1,17 @@
+import { randomUUID } from "crypto";
 import { createServer } from "http";
+import { tmpdir } from "os";
+import { dirname, join } from "path";
 import { ControlledAgent, LocalNode } from "cojson";
+import { SQLiteStorage } from "cojson-storage-sqlite";
 import { createWebSocketPeer } from "cojson-transport-ws";
 import { WasmCrypto } from "cojson/crypto/WasmCrypto";
+import { mkdir, unlink } from "fs/promises";
 import { WebSocket, WebSocketServer } from "ws";
 
 export type TestSyncServer = Awaited<ReturnType<typeof startSyncServer>>;
 
-export const startSyncServer = async (port?: number) => {
+export const startSyncServer = async (port?: number, dbName?: string) => {
   const crypto = await WasmCrypto.create();
 
   const server = createServer((req, res) => {
@@ -25,6 +30,13 @@ export const startSyncServer = async (port?: number) => {
     crypto.newRandomSessionID(agentID),
     crypto,
   );
+
+  const db = join(tmpdir(), `${dbName ?? randomUUID()}.db`);
+  await mkdir(dirname(db), { recursive: true });
+
+  const storage = await SQLiteStorage.asPeer({ filename: db });
+
+  localNode.syncManager.addPeer(storage);
 
   const connections = new Set<WebSocket>();
   let isActive = true;
@@ -86,11 +98,19 @@ export const startSyncServer = async (port?: number) => {
   port = (server.address() as { port: number }).port;
   const url = `ws://localhost:${port}` as const;
 
+  let closed = false;
+
   return {
     close: () => {
+      if (closed) {
+        return;
+      }
+
+      closed = true;
       connections.forEach((ws) => ws.close());
       server.close();
     },
+    deleteDb: () => unlink(db).catch(() => {}),
     disconnectAllClients: () => {
       connections.forEach((ws) => ws.close());
     },

@@ -4,13 +4,20 @@ import {
   type RawCoPlainText,
   stringifyOpID,
 } from "cojson";
-import { activeAccountContext } from "../implementation/activeAccountContext.js";
-import type { CoValue, CoValueClass, ID } from "../internal.js";
+import type {
+  AnonymousJazzAgent,
+  CoValue,
+  CoValueClass,
+  ID,
+  Resolved,
+  SubscribeListenerOptions,
+  SubscribeRestArgs,
+} from "../internal.js";
 import {
   inspect,
-  isAccountInstance,
-  loadCoValue,
-  subscribeToCoValue,
+  loadCoValueWithoutMe,
+  parseSubscribeRestArgs,
+  subscribeToCoValueWithoutMe,
   subscribeToExistingCoValue,
 } from "../internal.js";
 import { Account } from "./account.js";
@@ -122,9 +129,9 @@ export class CoPlainText extends String implements CoValue {
   static load<T extends CoPlainText>(
     this: CoValueClass<T>,
     id: ID<T>,
-    as?: Account,
-  ): Promise<T | undefined> {
-    return loadCoValue(this, id, as ?? activeAccountContext.get(), []);
+    options?: { loadAs?: Account | AnonymousJazzAgent },
+  ): Promise<T | null> {
+    return loadCoValueWithoutMe(this, id, options);
   }
 
   //   /**
@@ -157,46 +164,22 @@ export class CoPlainText extends String implements CoValue {
   static subscribe<T extends CoPlainText>(
     this: CoValueClass<T>,
     id: ID<T>,
-    listener: (value: T) => void,
+    listener: (value: Resolved<T, true>, unsubscribe: () => void) => void,
   ): () => void;
   static subscribe<T extends CoPlainText>(
     this: CoValueClass<T>,
     id: ID<T>,
-    as: Account,
-    listener: (value: T) => void,
+    options: Omit<SubscribeListenerOptions<T, true>, "resolve">,
+    listener: (value: Resolved<T, true>, unsubscribe: () => void) => void,
   ): () => void;
   static subscribe<T extends CoPlainText>(
     this: CoValueClass<T>,
     id: ID<T>,
-    asOrListener: Account | ((value: T) => void),
-    listener?: (value: T) => void,
+    ...args: SubscribeRestArgs<T, true>
   ): () => void {
-    if (isAccountInstance(asOrListener)) {
-      return subscribeToCoValue(this, id, asOrListener, [], listener!);
-    }
-
-    return subscribeToCoValue(
-      this,
-      id,
-      activeAccountContext.get(),
-      [],
-      listener!,
-    );
+    const { options, listener } = parseSubscribeRestArgs(args);
+    return subscribeToCoValueWithoutMe<T, true>(this, id, options, listener);
   }
-
-  //   /**
-  //    * Effectful version of `CoMap.subscribe()` that returns a stream of updates.
-  //    *
-  //    * Needs to be run inside an `AccountCtx` context.
-  //    *
-  //    * @category Subscription & Loading
-  //    */
-  //   static subscribeEf<T extends CoPlainText>(
-  //     this: CoValueClass<T>,
-  //     id: ID<T>,
-  //   ): Stream.Stream<T, UnavailableError, AccountCtx> {
-  //     return subscribeToCoValueEf(this, id, []);
-  //   }
 
   /**
    * Given an already loaded `CoPlainText`, subscribe to updates to the `CoPlainText` and ensure that the specified fields are loaded to the specified depth.
@@ -209,8 +192,8 @@ export class CoPlainText extends String implements CoValue {
    **/
   subscribe<T extends CoPlainText>(
     this: T,
-    listener: (value: T) => void,
+    listener: (value: Resolved<T, true>, unsubscribe: () => void) => void,
   ): () => void {
-    return subscribeToExistingCoValue(this, [], listener);
+    return subscribeToExistingCoValue(this, {}, listener);
   }
 }

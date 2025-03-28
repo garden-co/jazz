@@ -1,7 +1,7 @@
 import { CoID, JsonValue, LocalNode, RawCoValue } from "cojson";
 import React, { useEffect, useState } from "react";
-import { LinkIcon } from "../link-icon.js";
 import { Button } from "../ui/button.js";
+import { Icon } from "../ui/icon.js";
 import { classNames } from "../utils.js";
 import {
   isBrowserImage,
@@ -35,7 +35,7 @@ export function ValueRenderer({
     const content = (
       <>
         {json}
-        {onCoIDClick && <LinkIcon />}
+        {onCoIDClick && <Icon name="link" />}
       </>
     );
 

@@ -1,3 +1,4 @@
+import { commands } from "@vitest/browser/context";
 import {
   Account,
   AuthSecretStorage,
@@ -6,7 +7,7 @@ import {
   Group,
   co,
 } from "jazz-tools";
-import { afterEach, describe, expect, test } from "vitest";
+import { afterAll, afterEach, describe, expect, test } from "vitest";
 import { createAccountContext, startSyncServer } from "./testUtils";
 
 class TestMap extends CoMap {
@@ -22,6 +23,10 @@ class CustomAccount extends Account {
     }
   }
 }
+
+afterAll(async () => {
+  await commands.cleanup();
+});
 
 describe("Browser sync on unstable connection", () => {
   afterEach(async () => {

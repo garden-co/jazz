@@ -1,6 +1,10 @@
 import { expect, test } from "vitest";
-import { Account, CoMap, co } from "../exports.js";
-import { createJazzTestAccount, setActiveAccount } from "../testing.js";
+import { Account, CoMap, Group, co } from "../exports.js";
+import {
+  createJazzTestAccount,
+  linkAccounts,
+  setActiveAccount,
+} from "../testing.js";
 import { setupTwoNodes } from "./utils.js";
 
 test("waitForAllCoValuesSync should resolve when all the values are synced", async () => {
@@ -73,4 +77,24 @@ test("Me gets updated correctly when creating a new account as active", async ()
 
   expect(newMe.isMe).toBe(true);
   expect(oldMe.isMe).toBe(false);
+});
+
+test("accounts should sync correctly", async () => {
+  const account = await createJazzTestAccount({ isCurrentActiveAccount: true });
+  account.profile!.name = "test 1";
+  const otherAccount = await createJazzTestAccount({
+    isCurrentActiveAccount: true,
+  });
+  otherAccount.profile!.name = "test 2";
+
+  await linkAccounts(account, otherAccount);
+
+  const group = Group.create({ owner: account });
+
+  group.addMember(otherAccount, "writer");
+
+  const { members } = group;
+
+  expect(members[0]?.account.profile!.name).toBe("test 1");
+  expect(members[1]?.account.profile!.name).toBe("test 2");
 });

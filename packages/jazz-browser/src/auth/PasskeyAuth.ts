@@ -83,7 +83,9 @@ export class BrowserPasskeyAuth {
     });
 
     const currentAccount = await Account.getMe().ensureLoaded({
-      profile: {},
+      resolve: {
+        profile: true,
+      },
     });
 
     if (username.trim().length !== 0) {

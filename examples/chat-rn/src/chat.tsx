@@ -19,7 +19,7 @@ import { Chat, Message } from "./schema";
 export function ChatScreen({ navigation }: { navigation: any }) {
   const { me, logOut } = useAccount();
   const [chatId, setChatId] = useState<ID<Chat>>();
-  const loadedChat = useCoState(Chat, chatId, [{}]);
+  const loadedChat = useCoState(Chat, chatId, { resolve: { $each: true } });
   const [message, setMessage] = useState("");
   const profile = useCoState(Profile, me._refs.profile?.id, {});
 

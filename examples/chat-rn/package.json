@@ -1,7 +1,7 @@
 {
   "name": "chat-rn",
   "private": true,
-  "version": "1.0.84",
+  "version": "1.0.86",
   "scripts": {
     "android": "react-native run-android",
     "ios": "react-native run-ios",

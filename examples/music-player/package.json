@@ -1,7 +1,7 @@
 {
   "name": "jazz-example-music-player",
   "private": true,
-  "version": "0.0.87",
+  "version": "0.0.89",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -22,8 +22,8 @@
     "class-variance-authority": "^0.7.0",
     "clsx": "^2.0.0",
     "jazz-inspector": "workspace:*",
-    "jazz-react": "workspace:0.11.7",
-    "jazz-tools": "workspace:0.11.7",
+    "jazz-react": "workspace:0.12.0",
+    "jazz-tools": "workspace:0.12.0",
     "lucide-react": "^0.274.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",

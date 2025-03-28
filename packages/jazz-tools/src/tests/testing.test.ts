@@ -19,7 +19,7 @@ describe("Jazz Test Sync", () => {
     map._raw.set("test", "value");
 
     // Verify account2 can see the group
-    const loadedMap = await CoMap.load(map.id, account2, {});
+    const loadedMap = await CoMap.load(map.id, { loadAs: account2 });
     expect(loadedMap).toBeDefined();
     expect(loadedMap?._raw.get("test")).toBe("value");
   });

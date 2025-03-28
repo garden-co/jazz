@@ -14,9 +14,9 @@ export const products = [
   },
   {
     name: "Hend",
-    description: "Learn languages naturally with interesting, compelling content tailored just for you.",
+    description:
+      "Learn languages naturally with interesting, compelling content tailored just for you.",
     url: "https://hendapp.com",
     imageUrl: "/hend.png",
-
-  }
+  },
 ];

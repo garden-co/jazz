@@ -10,17 +10,19 @@ import type {
   SessionID,
 } from "cojson";
 import { MAX_RECOMMENDED_TX_SIZE, cojsonInternals } from "cojson";
-import { activeAccountContext } from "../implementation/activeAccountContext.js";
 import type {
   AnonymousJazzAgent,
   CoValue,
   CoValueClass,
-  DeeplyLoaded,
-  DepthsIn,
   ID,
   IfCo,
+  RefsToResolve,
+  RefsToResolveStrict,
+  Resolved,
   Schema,
   SchemaFor,
+  SubscribeListenerOptions,
+  SubscribeRestArgs,
   UnCo,
 } from "../internal.js";
 import {
@@ -31,11 +33,10 @@ import {
   co,
   ensureCoValueLoaded,
   inspect,
-  isAccountInstance,
   isRefEncoded,
   loadCoValueWithoutMe,
   parseCoValueCreateOptions,
-  subscribeToCoValue,
+  parseSubscribeRestArgs,
   subscribeToCoValueWithoutMe,
   subscribeToExistingCoValue,
 } from "../internal.js";
@@ -327,73 +328,52 @@ export class CoFeed<Item = any> extends CoValueBase implements CoValue {
    * Load a `CoFeed`
    * @category Subscription & Loading
    */
-  static load<S extends CoFeed, Depth>(
-    this: CoValueClass<S>,
-    id: ID<S>,
-    depth: Depth & DepthsIn<S>,
-  ): Promise<DeeplyLoaded<S, Depth> | undefined>;
-  static load<S extends CoFeed, Depth>(
-    this: CoValueClass<S>,
-    id: ID<S>,
-    as: Account,
-    depth: Depth & DepthsIn<S>,
-  ): Promise<DeeplyLoaded<S, Depth> | undefined>;
-  static load<S extends CoFeed, Depth>(
-    this: CoValueClass<S>,
-    id: ID<S>,
-    asOrDepth: Account | (Depth & DepthsIn<S>),
-    depth?: Depth & DepthsIn<S>,
-  ): Promise<DeeplyLoaded<S, Depth> | undefined> {
-    return loadCoValueWithoutMe(this, id, asOrDepth, depth);
+  static load<F extends CoFeed, const R extends RefsToResolve<F> = true>(
+    this: CoValueClass<F>,
+    id: ID<F>,
+    options: {
+      resolve?: RefsToResolveStrict<F, R>;
+      loadAs?: Account | AnonymousJazzAgent;
+    },
+  ): Promise<Resolved<F, R> | null> {
+    return loadCoValueWithoutMe(this, id, options);
   }
 
   /**
    * Subscribe to a `CoFeed`, when you have an ID but don't have a `CoFeed` instance yet
    * @category Subscription & Loading
    */
-  static subscribe<S extends CoFeed, Depth>(
-    this: CoValueClass<S>,
-    id: ID<S>,
-    depth: Depth & DepthsIn<S>,
-    listener: (value: DeeplyLoaded<S, Depth>) => void,
+  static subscribe<F extends CoFeed, const R extends RefsToResolve<F> = true>(
+    this: CoValueClass<F>,
+    id: ID<F>,
+    listener: (value: Resolved<F, R>, unsubscribe: () => void) => void,
   ): () => void;
-  static subscribe<S extends CoFeed, Depth>(
-    this: CoValueClass<S>,
-    id: ID<S>,
-    as: Account,
-    depth: Depth & DepthsIn<S>,
-    listener: (value: DeeplyLoaded<S, Depth>) => void,
+  static subscribe<F extends CoFeed, const R extends RefsToResolve<F> = true>(
+    this: CoValueClass<F>,
+    id: ID<F>,
+    options: SubscribeListenerOptions<F, R>,
+    listener: (value: Resolved<F, R>, unsubscribe: () => void) => void,
   ): () => void;
-  static subscribe<S extends CoFeed, Depth>(
-    this: CoValueClass<S>,
-    id: ID<S>,
-    asOrDepth: Account | (Depth & DepthsIn<S>),
-    depthOrListener:
-      | (Depth & DepthsIn<S>)
-      | ((value: DeeplyLoaded<S, Depth>) => void),
-    listener?: (value: DeeplyLoaded<S, Depth>) => void,
+  static subscribe<F extends CoFeed, const R extends RefsToResolve<F>>(
+    this: CoValueClass<F>,
+    id: ID<F>,
+    ...args: SubscribeRestArgs<F, R>
   ): () => void {
-    return subscribeToCoValueWithoutMe<S, Depth>(
-      this,
-      id,
-      asOrDepth,
-      depthOrListener,
-      listener,
-    );
+    const { options, listener } = parseSubscribeRestArgs(args);
+    return subscribeToCoValueWithoutMe<F, R>(this, id, options, listener);
   }
 
   /**
    * Ensure a `CoFeed` is loaded to the specified depth
    *
-   * @returns A new instance of the same CoFeed that's loaded to the specified depth,
-   * or undefined if it cannot be loaded that deeply
+   * @returns A new instance of the same CoFeed that's loaded to the specified depth
    * @category Subscription & Loading
    */
-  ensureLoaded<S extends CoFeed, Depth>(
-    this: S,
-    depth: Depth & DepthsIn<S>,
-  ): Promise<DeeplyLoaded<S, Depth>> {
-    return ensureCoValueLoaded(this, depth);
+  ensureLoaded<F extends CoFeed, const R extends RefsToResolve<F>>(
+    this: F,
+    options?: { resolve?: RefsToResolveStrict<F, R> },
+  ): Promise<Resolved<F, R>> {
+    return ensureCoValueLoaded(this, options);
   }
 
   /**
@@ -402,12 +382,21 @@ export class CoFeed<Item = any> extends CoValueBase implements CoValue {
    * No need to provide an ID or Account since they're already part of the instance.
    * @category Subscription & Loading
    */
-  subscribe<S extends CoFeed, Depth>(
-    this: S,
-    depth: Depth & DepthsIn<S>,
-    listener: (value: DeeplyLoaded<S, Depth>) => void,
+  subscribe<F extends CoFeed, const R extends RefsToResolve<F>>(
+    this: F,
+    listener: (value: Resolved<F, R>, unsubscribe: () => void) => void,
+  ): () => void;
+  subscribe<F extends CoFeed, const R extends RefsToResolve<F>>(
+    this: F,
+    options: { resolve?: RefsToResolveStrict<F, R> },
+    listener: (value: Resolved<F, R>, unsubscribe: () => void) => void,
+  ): () => void;
+  subscribe<F extends CoFeed, const R extends RefsToResolve<F>>(
+    this: F,
+    ...args: SubscribeRestArgs<F, R>
   ): () => void {
-    return subscribeToExistingCoValue(this, depth, listener);
+    const { options, listener } = parseSubscribeRestArgs(args);
+    return subscribeToExistingCoValue(this, options, listener);
   }
 
   /**
@@ -785,34 +774,10 @@ export class FileStream extends CoValueBase implements CoValue {
     id: ID<FileStream>,
     options?: {
       allowUnfinished?: boolean;
-    },
-  ): Promise<Blob | undefined>;
-  static async loadAsBlob(
-    id: ID<FileStream>,
-    as: Account,
-    options?: {
-      allowUnfinished?: boolean;
-    },
-  ): Promise<Blob | undefined>;
-  static async loadAsBlob(
-    id: ID<FileStream>,
-    asOrOptions?:
-      | Account
-      | {
-          allowUnfinished?: boolean;
-        },
-    optionsOrUndefined?: {
-      allowUnfinished?: boolean;
+      loadAs?: Account | AnonymousJazzAgent;
     },
   ): Promise<Blob | undefined> {
-    const as = isAccountInstance(asOrOptions)
-      ? asOrOptions
-      : activeAccountContext.get();
-    const options = isAccountInstance(asOrOptions)
-      ? optionsOrUndefined
-      : asOrOptions;
-
-    let stream = await this.load(id, as, []);
+    let stream = await this.load(id, options);
 
     /**
      * If the user hasn't requested an incomplete blob and the
@@ -820,12 +785,17 @@ export class FileStream extends CoValueBase implements CoValue {
      */
     if (!options?.allowUnfinished && !stream?.isBinaryStreamEnded()) {
       stream = await new Promise<FileStream>((resolve) => {
-        subscribeToCoValue(this, id, as, [], (value, unsubscribe) => {
-          if (value.isBinaryStreamEnded()) {
-            unsubscribe();
-            resolve(value);
-          }
-        });
+        subscribeToCoValueWithoutMe(
+          this,
+          id,
+          options || {},
+          (value, unsubscribe) => {
+            if (value.isBinaryStreamEnded()) {
+              unsubscribe();
+              resolve(value);
+            }
+          },
+        );
       });
     }
 
@@ -924,78 +894,36 @@ export class FileStream extends CoValueBase implements CoValue {
    * Load a `FileStream`
    * @category Subscription & Loading
    */
-  static load<C extends FileStream, Depth>(
+  static load<C extends FileStream>(
     this: CoValueClass<C>,
     id: ID<C>,
-    depth: Depth & DepthsIn<C>,
-  ): Promise<DeeplyLoaded<C, Depth> | undefined>;
-  static load<C extends FileStream, Depth>(
-    this: CoValueClass<C>,
-    id: ID<C>,
-    as: Account,
-    depth: Depth & DepthsIn<C>,
-  ): Promise<DeeplyLoaded<C, Depth> | undefined>;
-  static load<C extends FileStream, Depth>(
-    this: CoValueClass<C>,
-    id: ID<C>,
-    asOrDepth: Account | (Depth & DepthsIn<C>),
-    depth?: Depth & DepthsIn<C>,
-  ): Promise<DeeplyLoaded<C, Depth> | undefined> {
-    return loadCoValueWithoutMe(this, id, asOrDepth, depth);
+    options?: { loadAs?: Account | AnonymousJazzAgent },
+  ): Promise<Resolved<C, true> | null> {
+    return loadCoValueWithoutMe(this, id, options);
   }
 
   /**
    * Subscribe to a `FileStream`, when you have an ID but don't have a `FileStream` instance yet
    * @category Subscription & Loading
    */
-  static subscribe<C extends FileStream, Depth>(
+  static subscribe<C extends FileStream>(
     this: CoValueClass<C>,
     id: ID<C>,
-    depth: Depth & DepthsIn<C>,
-    listener: (value: DeeplyLoaded<C, Depth>) => void,
-  ): () => void;
-  static subscribe<C extends FileStream, Depth>(
-    this: CoValueClass<C>,
-    id: ID<C>,
-    as: Account,
-    depth: Depth & DepthsIn<C>,
-    listener: (value: DeeplyLoaded<C, Depth>) => void,
-  ): () => void;
-  static subscribe<C extends FileStream, Depth>(
-    this: CoValueClass<C>,
-    id: ID<C>,
-    asOrDepth: Account | (Depth & DepthsIn<C>),
-    depthOrListener:
-      | (Depth & DepthsIn<C>)
-      | ((value: DeeplyLoaded<C, Depth>) => void),
-    listener?: (value: DeeplyLoaded<C, Depth>) => void,
+    options: { loadAs?: Account | AnonymousJazzAgent },
+    listener: (value: Resolved<C, true>) => void,
   ): () => void {
-    return subscribeToCoValueWithoutMe<C, Depth>(
-      this,
-      id,
-      asOrDepth,
-      depthOrListener,
-      listener,
-    );
-  }
-
-  ensureLoaded<B extends FileStream, Depth>(
-    this: B,
-    depth: Depth & DepthsIn<B>,
-  ): Promise<DeeplyLoaded<B, Depth> | undefined> {
-    return ensureCoValueLoaded(this, depth);
+    return subscribeToCoValueWithoutMe<C, true>(this, id, options, listener);
   }
 
   /**
    * An instance method to subscribe to an existing `FileStream`
    * @category Subscription & Loading
    */
-  subscribe<B extends FileStream, Depth>(
+  subscribe<B extends FileStream>(
     this: B,
-    depth: Depth & DepthsIn<B>,
-    listener: (value: DeeplyLoaded<B, Depth>) => void,
+    listener: (value: Resolved<B, true>) => void,
   ): () => void {
-    return subscribeToExistingCoValue(this, depth, listener);
+    return subscribeToExistingCoValue(this, {}, listener);
   }
 
   /**

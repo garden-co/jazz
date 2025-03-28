@@ -3,7 +3,7 @@ import { CursorContainer, CursorFeed } from "../schema";
 
 export async function loadGroup(me: Account, groupID: ID<Group>) {
   const group = await Group.load(groupID, {});
-  if (group === undefined) {
+  if (group === null) {
     const group = Group.create({
       owner: me,
     });
@@ -35,15 +35,16 @@ export async function loadCursorContainer(
     group?.id as ID<Group>,
   );
   const cursorContainer = await CursorContainer.load(cursorContainerID, {
-    cursorFeed: [],
+    resolve: {
+      cursorFeed: true,
+    },
   });
-  if (cursorContainer === undefined) {
+
+  if (cursorContainer === null) {
     console.log("Global cursors does not exist, creating...");
     const cursorContainer = CursorContainer.create(
       {
-        cursorFeed: CursorFeed.create([], {
-          owner: group,
-        }),
+        cursorFeed: CursorFeed.create([], group),
       },
       {
         owner: group,

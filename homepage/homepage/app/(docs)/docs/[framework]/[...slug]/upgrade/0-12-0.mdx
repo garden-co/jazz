@@ -1,0 +1,299 @@
+import { CodeGroup } from '@/components/forMdx'
+
+export const metadata = { title: "Jazz 0.12.0 - Deeply resolved data" };
+
+# Jazz 0.12.0 - Deeply resolved data
+
+Jazz 0.12.0 makes it easier and safer to load nested data. You can now specify exactly which nested data you want to load, and Jazz will check permissions and handle missing data gracefully. This helps catch errors earlier during development and makes your code more reliable.
+
+## What's new?
+
+- New resolve API for a more type-safe deep loading
+- A single, consistent load option for all loading methods
+- Improved permission checks on deep loading
+- Easier type safety with the `Resolved` type helper
+
+## Breaking changes
+
+### New Resolve API
+
+We're introducing a new resolve API for deep loading, more friendly to TypeScript, IDE autocompletion and LLMs.
+
+**Major changes:**
+
+1. Functions and hooks for loading now take the resolve query as an explicit nested `resolve` prop
+2. Shallowly loading a collection is now done with `true` instead of `[]` or `{}`
+
+<CodeGroup>
+```tsx twoslash
+// @noErrors: 2451
+import { CoMap, CoList, co, Account } from "jazz-tools";
+import { useAccount } from "jazz-react";
+class AccountRoot extends CoMap { friends = co.ref(ListOfAccounts); }
+class ListOfAccounts extends CoList.Of(co.ref(Account)) {}
+class MyAppAccount extends Account { root = co.ref(AccountRoot);}
+declare module "jazz-react" { interface Register { Account: MyAppAccount; } }
+// ---cut-before---
+// Before
+// @ts-expect-error
+const { me } = useAccount({ root: { friends: [] } }); // [!code --]
+
+// After
+const { me } = useAccount({ // [!code ++]
+  resolve: { root: { friends: true } } // [!code ++]
+}); // [!code ++]
+```
+</CodeGroup>
+
+3. For collections, resolving items deeply is now done with a special `$each` key.
+
+For a `CoList`:
+
+<CodeGroup>
+```tsx twoslash
+// @noErrors: 2451
+import { CoList, co, ID, CoMap } from "jazz-tools";
+import { useCoState } from "jazz-react";
+
+// ---cut-before---
+class Task extends CoMap { }
+class ListOfTasks extends CoList.Of(co.ref(Task)) {}
+
+const id = "co_123" as ID<Task>;
+
+// Before
+// @ts-expect-error
+const tasks = useCoState(ListOfTasks, id, [{}]); // [!code --]
+
+// After
+const tasks = useCoState(ListOfTasks, id, { resolve: { $each: true } }); // [!code ++]
+```
+</CodeGroup>
+
+For a `CoMap.Record`:
+
+<CodeGroup>
+```tsx twoslash
+// @noErrors: 2451
+import { CoMap, co, Account, ID } from "jazz-tools";
+import { useCoState } from "jazz-react";
+class MyAppAccount extends Account {}
+const id = "co_123" as ID<UsersByUsername>;
+
+// ---cut-before---
+class UsersByUsername extends CoMap.Record(co.ref(MyAppAccount)) {}
+
+// Before
+// @ts-expect-error
+const usersByUsername = useCoState(UsersByUsername, id, [{}]); // [!code --]
+
+// After
+const usersByUsername = useCoState(UsersByUsername, id, { // [!code ++]
+  resolve: { $each: true } // [!code ++]
+}); // [!code ++]
+```
+</CodeGroup>
+
+Nested loading &mdash; note how it's now less terse, but more readable:
+
+<CodeGroup>
+```tsx twoslash
+// @noErrors: 2451
+import { CoList, CoMap, co, Account, ID } from "jazz-tools";
+import { useCoState } from "jazz-react";
+
+const id = "co_123" as ID<ListOfTasks>;
+
+// ---cut-before---
+class Org extends CoMap {
+  name = co.string;
+}
+
+class Assignee extends CoMap {
+  name = co.string;
+  org = co.ref(Org);
+}
+class ListOfAssignees extends CoList.Of(co.ref(Assignee)) {}
+
+class Task extends CoMap {
+  content = co.string;
+  assignees = co.ref(ListOfAssignees);
+}
+class ListOfTasks extends CoList.Of(co.ref(Task)) {}
+
+// Before
+// @ts-expect-error
+const tasksWithAssigneesAndTheirOrgs = useCoState(ListOfTasks, id, [{ // [!code --]
+  assignees: [{ org: {}}]} // [!code --]
+]); // [!code --]
+
+// After
+const tasksWithAssigneesAndTheirOrgs = useCoState(ListOfTasks, id, { // [!code ++]
+  resolve: { // [!code ++]
+    $each: { // [!code ++]
+      assignees: { // [!code ++]
+        $each: { org: true } // [!code ++]
+      } // [!code ++]
+    } // [!code ++]
+  } // [!code ++]
+}); // [!code ++]
+```
+</CodeGroup>
+
+It's also a lot more auto-complete friendly:
+
+<CodeGroup>
+```tsx twoslash
+// @noErrors: 2451 2353 2581
+import { CoList, CoMap, co, ID } from "jazz-tools";
+import { useCoState } from "jazz-react";
+
+class Org extends CoMap { name = co.string; }
+class Assignee extends CoMap { org = co.ref(Org); }
+class ListOfAssignees extends CoList.Of(co.ref(Assignee)) {}
+class Task extends CoMap { assignees = co.ref(ListOfAssignees);  }
+class ListOfTasks extends CoList.Of(co.ref(Task)) {}
+const id = "co_123" as ID<ListOfTasks>;
+
+// ---cut-before---
+const tasksWithAssigneesAndTheirOrgs = useCoState(ListOfTasks, id, {
+  resolve: {
+    $each: {
+      assignees: {
+        $
+//       ^|
+      }
+    }
+  }
+});
+```
+</CodeGroup>
+
+### A single, consistent load option
+
+The new API works across all loading methods, and separating out the resolve query means
+other options with default values are easier to manage, for example: loading a value as a specific account instead of using the implicit current account:
+
+<CodeGroup>
+```ts twoslash
+// @noErrors: 2451
+import { co, Account, CoMap, CoList, ID } from "jazz-tools";
+
+class Track extends CoMap {}
+class ListOfTracks extends CoList.Of(co.ref(Track)) {}
+class Playlist extends CoMap { tracks = co.ref(ListOfTracks); }
+const id = "co_123" as ID<Playlist>;
+const otherAccount = {} as Account;
+
+// ---cut-before---
+// Before
+// @ts-expect-error
+Playlist.load(id, otherAccount, { // [!code --]
+  tracks: [], // [!code --]
+}); // [!code --]
+
+// After
+Playlist.load(id, { // [!code ++]
+  loadAs: otherAccount, // [!code ++]
+  resolve: { tracks: true } // [!code ++]
+}); // [!code ++]
+```
+</CodeGroup>
+
+### Improved permission checks on deep loading
+
+Now `useCoState` will return `null` when the current user lacks permissions to load requested data.
+
+Previously, `useCoState` would return `undefined` if the current user lacked permissions, making it hard to tell if the value is loading or if it's missing.
+
+Now `undefined` means that the value is definitely loading, and `null` means that the value is temporarily missing.
+
+We also have implemented a more granular permission checking, where if an *optional* CoValue cannot be accessed, `useCoState` will return the data stripped of that CoValue.
+
+**Note:** The state handling around loading and error states will become more detailed and easy-to-handle in future releases, so this is just a small step towards consistency.
+
+<CodeGroup>
+{/* prettier-ignore */}
+```tsx twoslash
+// @noErrors: 2451
+import React from "react";
+import { CoList, CoMap, co, ID } from "jazz-tools";
+import { useCoState } from "jazz-react";
+class Track extends CoMap {}
+function TrackComponent({ track }: { track: Track }) {return ""}
+
+// ---cut-before---
+class ListOfTracks extends CoList.Of(co.optional.ref(Track)) {}
+
+function TrackListComponent({ id }: { id: ID<ListOfTracks> }) {
+  // Before (ambiguous states)
+  // @ts-expect-error
+  const tracks = useCoState(ListOfTracks, id, [{}]); // [!code --]
+  if (tracks === undefined) return <div>Loading or access denied</div>; // [!code --]
+  if (tracks === null) return <div>Not found</div>; // [!code --]
+
+  // After
+  const tracks = useCoState(ListOfTracks, id, { resolve: { $each: true } }); // [!code ++]
+  if (tracks === undefined) return <div>Loading...</div>; // [!code ++]
+  if (tracks === null) return <div>Not found or access denied</div>; // [!code ++]
+
+  // This will only show tracks that we have access to and that are loaded.
+  return tracks.map(track => track && <TrackComponent track={track} />);
+}
+```
+</CodeGroup>
+
+The same change is applied to the load function, so now it returns `null` instead of `undefined` when the value is missing.
+
+<CodeGroup>
+```tsx twoslash
+// @noErrors: 2451
+import { CoMap, co, ID } from "jazz-tools";
+import { useAccount } from "jazz-react";
+
+class MyCoMap extends CoMap {}
+const id = "co_123" as ID<MyCoMap>;
+
+// ---cut-before---
+// Before
+// @ts-expect-error
+const map = await MyCoMap.load(id);
+if (map === undefined) {
+  throw new Error("Map not found");
+}
+
+// After
+const map = await MyCoMap.load(id);
+if (map === null) {
+  throw new Error("Map not found or access denied");
+}
+```
+</CodeGroup>
+
+## New Features
+
+### The `Resolved` type helper
+
+The new `Resolved` type can be used to define what kind of deeply loaded data you expect in your parameters, using the same resolve query syntax as the new loading APIs:
+
+<CodeGroup>
+```tsx twoslash
+// @noErrors: 2451
+import React from "react";
+import { Resolved, CoMap, CoList, co } from "jazz-tools";
+class Track extends CoMap {}
+class ListOfTracks extends CoList.Of(co.ref(Track)) {}
+class Playlist extends CoMap { tracks = co.ref(ListOfTracks); }
+function TrackComponent({ track }: { track: Track }) {return ""}
+
+// ---cut-before---
+type PlaylistResolved = Resolved<Playlist, {
+  tracks: { $each: true }
+}>;
+
+function TrackListComponent({ playlist }: { playlist: PlaylistResolved }) {
+  // Safe access to resolved tracks
+  return playlist.tracks.map(track => <TrackComponent track={track} />);
+}
+```
+</CodeGroup>

@@ -1,6 +1,6 @@
 {
   "name": "chat-vue",
-  "version": "0.0.69",
+  "version": "0.0.71",
   "private": true,
   "type": "module",
   "scripts": {

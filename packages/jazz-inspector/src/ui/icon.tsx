@@ -1,24 +1,11 @@
-import {
-  CheckIcon,
-  ChevronDown,
-  ChevronRight,
-  ClipboardIcon,
-  LinkIcon,
-  type LucideIcon,
-  TrashIcon,
-  UserIcon,
-  XIcon,
-} from "lucide-react";
 import { classNames } from "../utils.js";
+import { ChevronDownIcon } from "./icons/chevron-down-icon.js";
+import { DeleteIcon } from "./icons/delete-icon.js";
+import { LinkIcon } from "./icons/link-icon.js";
 
 const icons = {
-  auth: UserIcon,
-  check: CheckIcon,
-  chevronRight: ChevronRight,
-  chevronDown: ChevronDown,
-  close: XIcon,
-  copy: ClipboardIcon,
-  delete: TrashIcon,
+  chevronDown: ChevronDownIcon,
+  delete: DeleteIcon,
   link: LinkIcon,
 };
 
@@ -59,17 +46,15 @@ const strokeWidths = {
 
 export function Icon({
   name,
-  icon,
   size = "md",
   className,
   ...svgProps
 }: {
-  name?: string;
-  icon?: LucideIcon;
+  name?: keyof typeof icons;
   size?: keyof typeof sizes;
   className?: string;
 } & React.SVGProps<SVGSVGElement>) {
-  if (!icon && (!name || !icons.hasOwnProperty(name))) {
+  if (!name || !icons.hasOwnProperty(name)) {
     throw new Error(`Icon not found: ${name}`);
   }
 

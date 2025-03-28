@@ -11,14 +11,15 @@ import { TestSyncServer, startSyncServer } from "./syncServer";
 const syncServers = new Map<string, TestSyncServer>();
 
 const startSyncServerCommand: BrowserCommand<
-  [arg1: string, arg2: string]
-> = async () => {
-  const syncServer = await startSyncServer(0);
+  [port?: number, dbName?: string]
+> = async (ctx, port = 0, dbName) => {
+  const syncServer = await startSyncServer(port, dbName);
 
   syncServers.set(syncServer.url, syncServer);
 
   return {
     url: syncServer.url,
+    port: syncServer.port,
   };
 };
 
@@ -60,14 +61,25 @@ const closeSyncServerCommand: BrowserCommand<[url: string]> = async (
   syncServer.close();
 };
 
+const cleanupCommand: BrowserCommand<[]> = async () => {
+  for (const syncServer of syncServers.values()) {
+    await syncServer.deleteDb();
+  }
+};
+
 declare module "@vitest/browser/context" {
   interface BrowserCommands {
-    startSyncServer: () => Promise<{
+    startSyncServer: (
+      port?: number,
+      dbName?: string,
+    ) => Promise<{
       url: `ws://localhost:${number}`;
+      port: number;
     }>;
     disconnectAllClients: (url: string) => Promise<void>;
     setOffline: (url: string, active: boolean) => Promise<void>;
     closeSyncServer: (url: string) => Promise<void>;
+    cleanup: () => Promise<void>;
   }
 }
 
@@ -76,4 +88,5 @@ export const customCommands = {
   disconnectAllClients: disconnectAllClientsCommand,
   setOffline: setOfflineCommand,
   closeSyncServer: closeSyncServerCommand,
+  cleanup: cleanupCommand,
 };

@@ -1,9 +1,9 @@
-import type { Toc } from "@stefanprobst/rehype-extract-toc";
+import type { TocEntry } from "@stefanprobst/rehype-extract-toc";
 import { createContext, useContext } from "react";
 
 type TocContextType = {
-  tocItems: Toc | undefined;
-  setTocItems: (items: Toc | undefined) => void;
+  tocItems: TocEntry[] | undefined;
+  setTocItems: (items: TocEntry[] | undefined) => void;
 };
 
 export const TocContext = createContext<TocContextType | undefined>(undefined);

@@ -4,6 +4,8 @@ import { TableOfContents } from "@/components/docs/TableOfContents";
 import { JazzNav } from "@/components/nav";
 import { useTocItems } from "@/lib/TocContext";
 import { clsx } from "clsx";
+import type { IconName } from "gcmp-design-system/src/app/components/atoms/Icon";
+import type { NavSection } from "gcmp-design-system/src/app/components/organisms/Nav";
 
 export default function DocsLayout({
   children,
@@ -14,11 +16,11 @@ export default function DocsLayout({
   children: React.ReactNode;
   nav?: React.ReactNode;
   navName?: string;
-  navIcon?: string;
+  navIcon?: IconName;
 }) {
   const { tocItems } = useTocItems();
 
-  const navSections = [
+  const navSections: NavSection[] = [
     {
       name: navName || "Docs",
       content: nav,

@@ -1,6 +1,14 @@
 import { commands } from "@vitest/browser/context";
 import { Account, AuthSecretStorage, CoMap, Group, co } from "jazz-tools";
-import { afterEach, describe, expect, onTestFinished, test } from "vitest";
+import {
+  assert,
+  afterAll,
+  afterEach,
+  describe,
+  expect,
+  onTestFinished,
+  test,
+} from "vitest";
 import { createAccountContext, startSyncServer } from "./testUtils";
 
 class TestMap extends CoMap {
@@ -16,6 +24,10 @@ class CustomAccount extends Account {
     }
   }
 }
+
+afterAll(async () => {
+  await commands.cleanup();
+});
 
 describe("Browser sync", () => {
   afterEach(async () => {
@@ -170,7 +182,7 @@ describe("Browser sync", () => {
     expect(loadedMap?.value).toBe("test data");
   });
 
-  test("syncs data between accounts when the the connection is down", async () => {
+  test("syncs data between accounts through storage when the the connection is down", async () => {
     const syncServer = await startSyncServer();
 
     const { context, contextManager } = await createAccountContext({

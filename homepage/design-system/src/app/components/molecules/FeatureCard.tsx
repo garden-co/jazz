@@ -1,6 +1,6 @@
 import clsx from "clsx";
 import { Card } from "../atoms/Card";
-import { Icon } from "../atoms/Icon";
+import { Icon, IconName } from "../atoms/Icon";
 import { Prose } from "./Prose";
 
 export function FeatureCard({
@@ -11,7 +11,7 @@ export function FeatureCard({
   className,
 }: {
   label: React.ReactNode;
-  icon?: string;
+  icon?: IconName;
   explanation?: React.ReactNode;
   children?: React.ReactNode;
   className?: string;

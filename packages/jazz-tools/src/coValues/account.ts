@@ -20,18 +20,22 @@ import {
   type CoValue,
   CoValueBase,
   CoValueClass,
-  DeeplyLoaded,
-  DepthsIn,
   ID,
   Ref,
   type RefEncoded,
   RefIfCoValue,
+  RefsToResolve,
+  RefsToResolveStrict,
+  Resolved,
   type Schema,
   SchemaInit,
+  SubscribeListenerOptions,
+  SubscribeRestArgs,
   ensureCoValueLoaded,
   inspect,
   loadCoValue,
   loadCoValueWithoutMe,
+  parseSubscribeRestArgs,
   subscribeToCoValueWithoutMe,
   subscribeToExistingCoValue,
   subscriptionsScopes,
@@ -225,7 +229,7 @@ export class Account extends CoValueBase implements CoValue {
     valueID: ID<V>,
     inviteSecret: InviteSecret,
     coValueClass: CoValueClass<V>,
-  ) {
+  ): Promise<Resolved<V, true> | null> {
     if (!this.isLocalNodeOwner) {
       throw new Error("Only a controlled account can accept invites");
     }
@@ -235,8 +239,9 @@ export class Account extends CoValueBase implements CoValue {
       inviteSecret,
     );
 
-    return loadCoValue(coValueClass, valueID, this as Account, []);
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    return loadCoValue(coValueClass, valueID, {
+      loadAs: this,
+    });
   }
 
   /** @private */
@@ -346,73 +351,62 @@ export class Account extends CoValueBase implements CoValue {
   }
 
   /** @category Subscription & Loading */
-  static load<A extends Account, Depth>(
+  static load<A extends Account, const R extends RefsToResolve<A> = true>(
     this: CoValueClass<A>,
     id: ID<A>,
-    depth: Depth & DepthsIn<A>,
-  ): Promise<DeeplyLoaded<A, Depth> | undefined>;
-  static load<A extends Account, Depth>(
-    this: CoValueClass<A>,
-    id: ID<A>,
-    as: Account,
-    depth: Depth & DepthsIn<A>,
-  ): Promise<DeeplyLoaded<A, Depth> | undefined>;
-  static load<A extends Account, Depth>(
-    this: CoValueClass<A>,
-    id: ID<A>,
-    asOrDepth: Account | (Depth & DepthsIn<A>),
-    depth?: Depth & DepthsIn<A>,
-  ): Promise<DeeplyLoaded<A, Depth> | undefined> {
-    return loadCoValueWithoutMe(this, id, asOrDepth, depth);
+    options?: {
+      resolve?: RefsToResolveStrict<A, R>;
+      loadAs?: Account | AnonymousJazzAgent;
+    },
+  ): Promise<Resolved<A, R> | null> {
+    return loadCoValueWithoutMe(this, id, options);
   }
 
   /** @category Subscription & Loading */
-  static subscribe<A extends Account, Depth>(
+  static subscribe<A extends Account, const R extends RefsToResolve<A> = true>(
     this: CoValueClass<A>,
     id: ID<A>,
-    depth: Depth & DepthsIn<A>,
-    listener: (value: DeeplyLoaded<A, Depth>) => void,
+    listener: (value: Resolved<A, R>, unsubscribe: () => void) => void,
   ): () => void;
-  static subscribe<A extends Account, Depth>(
+  static subscribe<A extends Account, const R extends RefsToResolve<A> = true>(
     this: CoValueClass<A>,
     id: ID<A>,
-    as: Account,
-    depth: Depth & DepthsIn<A>,
-    listener: (value: DeeplyLoaded<A, Depth>) => void,
+    options: SubscribeListenerOptions<A, R>,
+    listener: (value: Resolved<A, R>, unsubscribe: () => void) => void,
   ): () => void;
-  static subscribe<A extends Account, Depth>(
+  static subscribe<A extends Account, const R extends RefsToResolve<A>>(
     this: CoValueClass<A>,
     id: ID<A>,
-    asOrDepth: Account | (Depth & DepthsIn<A>),
-    depthOrListener:
-      | (Depth & DepthsIn<A>)
-      | ((value: DeeplyLoaded<A, Depth>) => void),
-    listener?: (value: DeeplyLoaded<A, Depth>) => void,
+    ...args: SubscribeRestArgs<A, R>
   ): () => void {
-    return subscribeToCoValueWithoutMe<A, Depth>(
-      this,
-      id,
-      asOrDepth,
-      depthOrListener,
-      listener!,
-    );
+    const { options, listener } = parseSubscribeRestArgs(args);
+    return subscribeToCoValueWithoutMe<A, R>(this, id, options, listener);
   }
 
   /** @category Subscription & Loading */
-  ensureLoaded<A extends Account, Depth>(
+  ensureLoaded<A extends Account, const R extends RefsToResolve<A>>(
     this: A,
-    depth: Depth & DepthsIn<A>,
-  ): Promise<DeeplyLoaded<A, Depth>> {
-    return ensureCoValueLoaded(this, depth);
+    options: { resolve: RefsToResolveStrict<A, R> },
+  ): Promise<Resolved<A, R>> {
+    return ensureCoValueLoaded(this, options);
   }
 
   /** @category Subscription & Loading */
-  subscribe<A extends Account, Depth>(
+  subscribe<A extends Account, const R extends RefsToResolve<A>>(
     this: A,
-    depth: Depth & DepthsIn<A>,
-    listener: (value: DeeplyLoaded<A, Depth>) => void,
+    listener: (value: Resolved<A, R>, unsubscribe: () => void) => void,
+  ): () => void;
+  subscribe<A extends Account, const R extends RefsToResolve<A>>(
+    this: A,
+    options: { resolve?: RefsToResolveStrict<A, R> },
+    listener: (value: Resolved<A, R>, unsubscribe: () => void) => void,
+  ): () => void;
+  subscribe<A extends Account, const R extends RefsToResolve<A>>(
+    this: A,
+    ...args: SubscribeRestArgs<A, R>
   ): () => void {
-    return subscribeToExistingCoValue(this, depth, listener);
+    const { options, listener } = parseSubscribeRestArgs(args);
+    return subscribeToExistingCoValue(this, options, listener);
   }
 
   /**

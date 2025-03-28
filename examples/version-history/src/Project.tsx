@@ -4,7 +4,9 @@ import { ID } from "jazz-tools";
 import { IssueComponent } from "./Issue.tsx";
 import { Issue, Project } from "./schema.ts";
 export function ProjectComponent({ projectID }: { projectID: ID<Project> }) {
-  const project = useCoState(Project, projectID, { issues: [{}] });
+  const project = useCoState(Project, projectID, {
+    resolve: { issues: { $each: true } },
+  });
 
   if (!project) return;
 

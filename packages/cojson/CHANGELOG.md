@@ -1,5 +1,19 @@
 # cojson
 
+## 0.12.0
+
+### Minor Changes
+
+- 01523dc: Check CoValue access permissions when loading
+- 01523dc: Return the EVERYONE role if the account is not direct a member of the group
+
+## 0.11.8
+
+### Patch Changes
+
+- 6c86c4f: Fix "Expected header to be sent in first message error" on sync
+- 9d0c9dc: Update @opentelemetry/api dependency
+
 ## 0.11.7
 
 ### Patch Changes

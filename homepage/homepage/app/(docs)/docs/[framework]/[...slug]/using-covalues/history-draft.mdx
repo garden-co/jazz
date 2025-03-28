@@ -1,8 +1,8 @@
 import { CodeGroup } from "@/components/forMdx";
 
-export const metadata = { title: "Metadata & time-travel" };
+export const metadata = { title: "History & time-travel" };
 
-# Metadata & time-travel
+# History & time-travel
 
 One of Jazz's most powerful features is that every CoValue automatically tracks its complete edit history. This means you can see who changed what and when, examine the state of your data at any point in time, and build features like audit logs, activity feeds, and undo/redo functionality. This page explores how to access and work with the rich metadata that comes with every CoValue.
 
@@ -115,11 +115,11 @@ Activity feeds are a great way to see recent changes to a CoValue, helping users
 function getRecentActivity(project: Project) {
   const activity = [];
   const hourAgo = new Date(Date.now() - 3600000);
-  
+
   for (const field of Object.keys(project)) {
     // Skip if the field doesn't have edits
     if (!project._edits[field as keyof typeof project._edits]) continue;
-    
+
     for (const edit of project._edits[field as keyof typeof project._edits].all) {
       if (edit.madeAt > hourAgo) {
         activity.push({
@@ -128,10 +128,10 @@ function getRecentActivity(project: Project) {
           by: edit.by,
           at: edit.madeAt
         });
-      } 
+      }
     }
   }
-  
+
   return activity.sort((a, b) => b.at.getTime() - a.at.getTime());
 }
 
@@ -148,7 +148,7 @@ recentActivity.forEach(activity => {
 
 CoValues track their entire history of changes, creating a timeline you can explore. You can see who changed what and when, or even view past states of the data. This capability enables powerful debugging tools and user-facing features like history browsing and restoration of previous versions:
 
-<CodeGroup> 
+<CodeGroup>
 ```ts
 class Task extends CoMap {
   title = co.string;
@@ -206,7 +206,7 @@ class Project extends CoMap {
 function findStatusChange(project: Project, targetStatus: string) {
   // Get all the edits for the status field
   const statusEdits = project._edits.status.all;
-  
+
   for (const edit of statusEdits) {
     if (edit.value === targetStatus) {
       console.log({
@@ -233,7 +233,7 @@ The time travel capabilities of CoValues enable several practical use cases that
 function getTaskStatusHistory(task: Task, days: number = 7) {
   const statusHistory = [];
   const dayInMs = 86400000;
-  
+
   // Check every day for the past week
   for (let day = 0; day < days; day++) {
     const timePoint = new Date(Date.now() - day * dayInMs);
@@ -245,7 +245,7 @@ function getTaskStatusHistory(task: Task, days: number = 7) {
       priority: state.priority
     });
   }
-  
+
   return statusHistory;
 }
 

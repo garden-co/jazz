@@ -3,11 +3,7 @@ import DocsLayout from "@/components/docs/DocsLayout";
 import { DocNav } from "@/components/docs/nav";
 import { Prose } from "gcmp-design-system/src/app/components/molecules/Prose";
 
-export default function Layout({
-  children,
-}: {
-  children: React.ReactNode;
-}) {
+export default function Layout({ children }: { children: React.ReactNode }) {
   return (
     <TocProvider>
       <DocsLayout nav={<DocNav />}>

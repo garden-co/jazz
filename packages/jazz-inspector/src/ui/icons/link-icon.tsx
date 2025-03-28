@@ -1,4 +1,4 @@
-import { classNames } from "./utils.js";
+import { classNames } from "../../utils.js";
 
 export function LinkIcon() {
   return (

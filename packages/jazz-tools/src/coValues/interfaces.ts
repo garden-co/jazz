@@ -6,7 +6,6 @@ import type {
 import { RawAccount } from "cojson";
 import { activeAccountContext } from "../implementation/activeAccountContext.js";
 import { AnonymousJazzAgent } from "../implementation/anonymousJazzAgent.js";
-import type { DeeplyLoaded, DepthsIn } from "../internal.js";
 import {
   Ref,
   SubscriptionScope,
@@ -15,7 +14,12 @@ import {
 } from "../internal.js";
 import { coValuesCache } from "../lib/cache.js";
 import { type Account } from "./account.js";
-import { fulfillsDepth } from "./deepLoading.js";
+import {
+  RefsToResolve,
+  RefsToResolveStrict,
+  Resolved,
+  fulfillsDepth,
+} from "./deepLoading.js";
 import { type Group } from "./group.js";
 import { RegisteredSchemas } from "./registeredSchemas.js";
 
@@ -155,56 +159,70 @@ export class CoValueBase implements CoValue {
   }
 }
 
-export function loadCoValueWithoutMe<V extends CoValue, Depth>(
+export function loadCoValueWithoutMe<
+  V extends CoValue,
+  const R extends RefsToResolve<V>,
+>(
   cls: CoValueClass<V>,
   id: ID<CoValue>,
-  asOrDepth: Account | AnonymousJazzAgent | (Depth & DepthsIn<V>),
-  depth?: Depth & DepthsIn<V>,
-): Promise<DeeplyLoaded<V, Depth> | undefined> {
-  if (isAccountInstance(asOrDepth) || isAnonymousAgentInstance(asOrDepth)) {
-    if (!depth) {
-      throw new Error(
-        "Depth is required when loading a CoValue as an Account or AnonymousJazzAgent",
-      );
-    }
-    return loadCoValue(cls, id, asOrDepth, depth);
-  }
-
-  return loadCoValue(cls, id, activeAccountContext.get(), asOrDepth);
+  options?: {
+    resolve?: RefsToResolveStrict<V, R>;
+    loadAs?: Account | AnonymousJazzAgent;
+  },
+): Promise<Resolved<V, R> | null> {
+  return loadCoValue(cls, id, {
+    ...options,
+    loadAs: options?.loadAs ?? activeAccountContext.get(),
+  });
 }
 
-export function loadCoValue<V extends CoValue, Depth>(
+export function loadCoValue<
+  V extends CoValue,
+  const R extends RefsToResolve<V>,
+>(
   cls: CoValueClass<V>,
   id: ID<CoValue>,
-  as: Account | AnonymousJazzAgent,
-  depth: Depth & DepthsIn<V>,
-): Promise<DeeplyLoaded<V, Depth> | undefined> {
+  options: {
+    resolve?: RefsToResolveStrict<V, R>;
+    loadAs: Account | AnonymousJazzAgent;
+  },
+): Promise<Resolved<V, R> | null> {
   return new Promise((resolve) => {
-    subscribeToCoValue(
+    subscribeToCoValue<V, R>(
       cls,
       id,
-      as,
-      depth,
+      {
+        resolve: options.resolve,
+        loadAs: options.loadAs,
+        onUnavailable: () => {
+          resolve(null);
+        },
+        onUnauthorized: () => {
+          resolve(null);
+        },
+      },
       (value, unsubscribe) => {
         resolve(value);
         unsubscribe();
-      },
-      () => {
-        resolve(undefined);
       },
     );
   });
 }
 
-export async function ensureCoValueLoaded<V extends CoValue, Depth>(
+export async function ensureCoValueLoaded<
+  V extends CoValue,
+  const R extends RefsToResolve<V>,
+>(
   existing: V,
-  depth: Depth & DepthsIn<V>,
-): Promise<DeeplyLoaded<V, Depth>> {
+  options?: { resolve?: RefsToResolveStrict<V, R> } | undefined,
+): Promise<Resolved<V, R>> {
   const response = await loadCoValue(
     existing.constructor as CoValueClass<V>,
     existing.id,
-    existing._loadedAs,
-    depth,
+    {
+      loadAs: existing._loadedAs,
+      resolve: options?.resolve,
+    },
   );
 
   if (!response) {
@@ -214,81 +232,146 @@ export async function ensureCoValueLoaded<V extends CoValue, Depth>(
   return response;
 }
 
-export function subscribeToCoValueWithoutMe<V extends CoValue, Depth>(
+type SubscribeListener<V extends CoValue, R extends RefsToResolve<V>> = (
+  value: Resolved<V, R>,
+  unsubscribe: () => void,
+) => void;
+
+export type SubscribeListenerOptions<
+  V extends CoValue,
+  R extends RefsToResolve<V>,
+> = {
+  resolve?: RefsToResolveStrict<V, R>;
+  loadAs?: Account | AnonymousJazzAgent;
+  onUnauthorized?: () => void;
+  onUnavailable?: () => void;
+};
+
+export type SubscribeRestArgs<V extends CoValue, R extends RefsToResolve<V>> =
+  | [options: SubscribeListenerOptions<V, R>, listener: SubscribeListener<V, R>]
+  | [listener: SubscribeListener<V, R>];
+
+export function parseSubscribeRestArgs<
+  V extends CoValue,
+  R extends RefsToResolve<V>,
+>(
+  args: SubscribeRestArgs<V, R>,
+): {
+  options: SubscribeListenerOptions<V, R>;
+  listener: SubscribeListener<V, R>;
+} {
+  if (args.length === 2) {
+    if (
+      typeof args[0] === "object" &&
+      args[0] &&
+      typeof args[1] === "function"
+    ) {
+      return {
+        options: {
+          resolve: args[0].resolve,
+          loadAs: args[0].loadAs,
+          onUnauthorized: args[0].onUnauthorized,
+          onUnavailable: args[0].onUnavailable,
+        },
+        listener: args[1],
+      };
+    } else {
+      throw new Error("Invalid arguments");
+    }
+  } else {
+    if (typeof args[0] === "function") {
+      return { options: {}, listener: args[0] };
+    } else {
+      throw new Error("Invalid arguments");
+    }
+  }
+}
+
+export function subscribeToCoValueWithoutMe<
+  V extends CoValue,
+  const R extends RefsToResolve<V>,
+>(
   cls: CoValueClass<V>,
   id: ID<CoValue>,
-  asOrDepth: Account | AnonymousJazzAgent | (Depth & DepthsIn<V>),
-  depthOrListener:
-    | (Depth & DepthsIn<V>)
-    | ((value: DeeplyLoaded<V, Depth>) => void),
-  listener?: (value: DeeplyLoaded<V, Depth>) => void,
+  options: SubscribeListenerOptions<V, R>,
+  listener: SubscribeListener<V, R>,
 ) {
-  if (isAccountInstance(asOrDepth) || isAnonymousAgentInstance(asOrDepth)) {
-    if (typeof depthOrListener !== "function") {
-      return subscribeToCoValue<V, Depth>(
-        cls,
-        id,
-        asOrDepth,
-        depthOrListener,
-        listener!,
-      );
-    }
-    throw new Error("Invalid arguments");
-  }
-
-  if (typeof depthOrListener !== "function") {
-    throw new Error("Invalid arguments");
-  }
-
-  return subscribeToCoValue<V, Depth>(
+  return subscribeToCoValue(
     cls,
     id,
-    activeAccountContext.get(),
-    asOrDepth,
-    depthOrListener,
+    {
+      ...options,
+      loadAs: options.loadAs ?? activeAccountContext.get(),
+    },
+    listener,
   );
 }
 
-export function subscribeToCoValue<V extends CoValue, Depth>(
+export function subscribeToCoValue<
+  V extends CoValue,
+  const R extends RefsToResolve<V>,
+>(
   cls: CoValueClass<V>,
   id: ID<CoValue>,
-  as: Account | AnonymousJazzAgent,
-  depth: Depth & DepthsIn<V>,
-  listener: (value: DeeplyLoaded<V, Depth>, unsubscribe: () => void) => void,
-  onUnavailable?: () => void,
-  syncResolution?: boolean,
+  options: {
+    resolve?: RefsToResolveStrict<V, R>;
+    loadAs: Account | AnonymousJazzAgent;
+    onUnavailable?: () => void;
+    onUnauthorized?: () => void;
+    syncResolution?: boolean;
+  },
+  listener: SubscribeListener<V, R>,
 ): () => void {
-  const ref = new Ref(id, as, { ref: cls, optional: false });
+  const ref = new Ref(id, options.loadAs, { ref: cls, optional: false });
 
   let unsubscribed = false;
   let unsubscribe: (() => void) | undefined;
 
-  function subscribe(value: CoValue | undefined) {
+  function subscribe() {
+    const value = ref.getValueWithoutAccessCheck();
+
     if (!value) {
-      onUnavailable && onUnavailable();
+      options.onUnavailable?.();
       return;
     }
+
     if (unsubscribed) return;
 
     const subscription = new SubscriptionScope(
       value,
       cls as CoValueClass<V> & CoValueFromRaw<V>,
       (update, subscription) => {
-        // fullfillsDepth may trigger a syncronous update while accessing values
-        // we want to discard those to avoid invalid updates
-        if (subscription.syncResolution) return false;
+        if (subscription.syncResolution) return;
 
-        // Enabling syncResolution during fullfillsDepth access to block any
-        // unnecessery update triggers related to in-memory values
-        subscription.syncResolution = true;
-        const isLoaded = fulfillsDepth(depth, update);
-        subscription.syncResolution = false;
+        if (!ref.hasReadAccess()) {
+          options.onUnauthorized?.();
+          return;
+        }
 
-        if (isLoaded) {
-          listener(
-            update as DeeplyLoaded<V, Depth>,
-            subscription.unsubscribeAll,
+        let result;
+
+        try {
+          subscription.syncResolution = true;
+          result = fulfillsDepth(options.resolve, update);
+        } catch (e) {
+          console.error(
+            "Failed to load / subscribe to CoValue",
+            e,
+            e instanceof Error ? e.stack : undefined,
           );
+          options.onUnavailable?.();
+          return;
+        } finally {
+          subscription.syncResolution = false;
+        }
+
+        if (result === "unauthorized") {
+          options.onUnauthorized?.();
+          return;
+        }
+
+        if (result === "fulfilled") {
+          listener(update as Resolved<V, R>, subscription.unsubscribeAll);
         }
       },
     );
@@ -296,17 +379,21 @@ export function subscribeToCoValue<V extends CoValue, Depth>(
     unsubscribe = subscription.unsubscribeAll;
   }
 
-  const sync = syncResolution ? ref.syncLoad() : undefined;
+  const sync = options.syncResolution ? ref.syncLoad() : undefined;
 
   if (sync) {
-    subscribe(sync);
+    subscribe();
   } else {
     ref
       .load()
-      .then((value) => subscribe(value))
+      .then(() => subscribe())
       .catch((e) => {
-        console.error("Failed to load / subscribe to CoValue", e);
-        onUnavailable?.();
+        console.error(
+          "Failed to load / subscribe to CoValue",
+          e,
+          e instanceof Error ? e.stack : undefined,
+        );
+        options.onUnavailable?.();
       });
   }
 
@@ -316,36 +403,47 @@ export function subscribeToCoValue<V extends CoValue, Depth>(
   };
 }
 
-export function createCoValueObservable<V extends CoValue, Depth>(options?: {
-  syncResolution?: boolean;
-}) {
-  let currentValue: DeeplyLoaded<V, Depth> | undefined | null = undefined;
+export function createCoValueObservable<
+  V extends CoValue,
+  const R extends RefsToResolve<V>,
+>() {
+  let currentValue: Resolved<V, R> | undefined | null = undefined;
   let subscriberCount = 0;
 
   function subscribe(
     cls: CoValueClass<V>,
     id: ID<CoValue>,
-    as: Account | AnonymousJazzAgent,
-    depth: Depth & DepthsIn<V>,
+    options: {
+      loadAs: Account | AnonymousJazzAgent;
+      resolve?: RefsToResolveStrict<V, R>;
+      onUnavailable?: () => void;
+      onUnauthorized?: () => void;
+      syncResolution?: boolean;
+    },
     listener: () => void,
-    onUnavailable?: () => void,
   ) {
     subscriberCount++;
 
     const unsubscribe = subscribeToCoValue(
       cls,
       id,
-      as,
-      depth,
+      {
+        loadAs: options.loadAs,
+        resolve: options.resolve,
+        onUnavailable: () => {
+          currentValue = null;
+          options.onUnavailable?.();
+        },
+        onUnauthorized: () => {
+          currentValue = null;
+          options.onUnauthorized?.();
+        },
+        syncResolution: options.syncResolution,
+      },
       (value) => {
         currentValue = value;
         listener();
       },
-      () => {
-        currentValue = null;
-        onUnavailable?.();
-      },
-      options?.syncResolution,
     );
 
     return () => {
@@ -365,16 +463,29 @@ export function createCoValueObservable<V extends CoValue, Depth>(options?: {
   return observable;
 }
 
-export function subscribeToExistingCoValue<V extends CoValue, Depth>(
+export function subscribeToExistingCoValue<
+  V extends CoValue,
+  const R extends RefsToResolve<V>,
+>(
   existing: V,
-  depth: Depth & DepthsIn<V>,
-  listener: (value: DeeplyLoaded<V, Depth>) => void,
+  options:
+    | {
+        resolve?: RefsToResolveStrict<V, R>;
+        onUnavailable?: () => void;
+        onUnauthorized?: () => void;
+      }
+    | undefined,
+  listener: SubscribeListener<V, R>,
 ): () => void {
   return subscribeToCoValue(
     existing.constructor as CoValueClass<V>,
     existing.id,
-    existing._loadedAs,
-    depth,
+    {
+      loadAs: existing._loadedAs,
+      resolve: options?.resolve,
+      onUnavailable: options?.onUnavailable,
+      onUnauthorized: options?.onUnauthorized,
+    },
     listener,
   );
 }

@@ -29,9 +29,9 @@ Here is what's changed in this release:
 {/* prettier-ignore */}
 ```tsx
 <JazzProvider
-    auth={authMethod} // removed  // *bin*
-    peer="wss://cloud.jazz.tools/?key=you@example.com"  // moved into sync // *bin*
-    sync={{ peer: "wss://cloud.jazz.tools/?key=you@example.com" }}  // *add*
+    auth={authMethod} // removed  // [!code --]
+    peer="wss://cloud.jazz.tools/?key=you@example.com"  // moved into sync // [!code --]
+    sync={{ peer: "wss://cloud.jazz.tools/?key=you@example.com" }}  // [!code ++]
 >
     <App />
 </JazzProvider>

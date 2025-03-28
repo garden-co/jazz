@@ -7,7 +7,7 @@ import Canvas from "./Canvas";
 /** A higher order component that wraps the canvas. */
 function Container({ cursorFeedID }: { cursorFeedID: ID<CursorFeed> }) {
   const { me } = useAccount();
-  const cursors = useCoState(CursorFeed, cursorFeedID, []);
+  const cursors = useCoState(CursorFeed, cursorFeedID, { resolve: true });
 
   return (
     <Canvas

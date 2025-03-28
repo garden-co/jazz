@@ -1,10 +1,10 @@
 "use client";
 
 import { useTocItems } from "@/lib/TocContext";
-import type { Toc } from "@stefanprobst/rehype-extract-toc";
+import type { TocEntry } from "@stefanprobst/rehype-extract-toc";
 import { useEffect } from "react";
 
-export function TocItemsSetter({ items }: { items: Toc | undefined }) {
+export function TocItemsSetter({ items }: { items: TocEntry[] | undefined }) {
   const { setTocItems } = useTocItems();
 
   useEffect(() => {

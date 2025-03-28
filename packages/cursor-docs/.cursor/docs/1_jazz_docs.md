@@ -38,6 +38,14 @@ class Post extends CoMap {
   mainComment = co.ref(Comment);
   pinnedComment = co.optional.ref(Comment);
 }
+
+// Loading with resolve API (0.12.0+)
+const post = await Post.load(id, {
+  resolve: {
+    mainComment: true,
+    pinnedComment: true
+  }
+});
 ```
 
 ### **4. Lists with CoList**
@@ -52,6 +60,15 @@ class Project extends CoMap {
   name = co.string;
   tasks = co.ref(TaskList);
 }
+
+// Loading with resolve API (0.12.0+)
+const project = await Project.load(id, {
+  resolve: {
+    tasks: {
+      $each: true
+    }
+  }
+});
 ```
 
 ### **5. Validation & Custom Methods**
@@ -140,6 +157,9 @@ class BooleanList extends CoList.Of(co.boolean) {}
 import { CoList, CoMap, co } from "jazz-tools";
 class Task extends CoMap { title = co.string; completed = co.boolean; }
 class ListOfTasks extends CoList.Of(co.ref(Task)) {}
+
+// Loading with resolve API (0.12.0+)
+const taskList = await ListOfTasks.load(id, { resolve: { $each: true } });
 ```
 
 ### **3. CoList Operations**
@@ -161,6 +181,17 @@ class Post extends CoMap {
   comments = co.ref(ListOfComments);
 }
 class ListOfPosts extends CoList.Of(co.ref(Post)) {}
+
+// Loading with resolve API (0.12.0+)
+const posts = await ListOfPosts.load(id, {
+  resolve: {
+    $each: {
+      comments: {
+        $each: true
+      }
+    }
+  }
+});
 ```
 
 ### **Real-World Examples**
@@ -784,10 +815,43 @@ class JazzAccount extends Account {
 - Role-based sharing through invite links.
 
 ### **Common Patterns**
-- **Account Root Pattern**: store user’s top-level data.
+- **Account Root Pattern**: store user's top-level data.
 - **Shared Document Pattern**: CoMap for doc, CoList for collaborators, CoFeed for history.
 - **Draft Pattern**: CoMap with partial fields, validation.
 - **Public Sharing**: set `Group.addMember("everyone","reader")`.
+
+### **New in 0.12.0: The Resolve API**
+- Use for type-safe deep loading of nested data.
+- Consistent pattern across all loading methods.
+```typescript
+// Simple resolve
+const data = await MyClass.load(id, { resolve: true });
+
+// Deep resolve with collections
+const tasks = await ListOfTasks.load(id, {
+  resolve: {
+    $each: {
+      assignees: {
+        $each: { org: true }
+      }
+    }
+  }
+});
+
+// The Resolved type helper
+type TaskListResolved = Resolved<ListOfTasks, {
+  $each: { assignee: true }
+}>;
+
+function TaskComponent({ taskList }: { taskList: TaskListResolved }) {
+  // Type-safe access to resolved data
+  return taskList.map(task => task.assignee);
+}
+```
+
+### **Loading States in 0.12.0+**
+- `undefined`: Item is loading
+- `null`: Item is missing (not found or access denied)
 
 ---
 

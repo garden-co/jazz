@@ -2,9 +2,29 @@
 
 import { Account, CoMap, co } from "jazz-tools";
 import { describe, expect, it } from "vitest";
-import { createUseAccountComposables, useAccount } from "../composables.js";
+import { useAccount } from "../composables.js";
 import { createJazzTestAccount } from "../testing.js";
 import { withJazzTestSetup } from "./testUtils.js";
+
+class AccountRoot extends CoMap {
+  value = co.string;
+}
+
+class AccountSchema extends Account {
+  root = co.ref(AccountRoot);
+
+  migrate() {
+    if (!this._refs.root) {
+      this.root = AccountRoot.create({ value: "123" }, { owner: this });
+    }
+  }
+}
+
+declare module "../provider" {
+  interface Register {
+    Account: AccountSchema;
+  }
+}
 
 describe("useAccount", () => {
   it("should return the correct value", async () => {
@@ -18,28 +38,14 @@ describe("useAccount", () => {
   });
 
   it("should load nested values if requested", async () => {
-    class AccountRoot extends CoMap {
-      value = co.string;
-    }
-
-    class AccountSchema extends Account {
-      root = co.ref(AccountRoot);
-
-      migrate() {
-        if (!this._refs.root) {
-          this.root = AccountRoot.create({ value: "123" }, { owner: this });
-        }
-      }
-    }
-
-    const { useAccount } = createUseAccountComposables<AccountSchema>();
-
     const account = await createJazzTestAccount({ AccountSchema });
 
     const [result] = withJazzTestSetup(
       () =>
         useAccount({
-          root: {},
+          resolve: {
+            root: true,
+          },
         }),
       {
         account,

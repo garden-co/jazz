@@ -39,16 +39,59 @@
    4.2. Instead, define a CoList class (e.g. `export class SomeClassList extends CoList.Of(co.ref(SomeClass)) {}`) and reference it.
 
 5. **Schema Structure & Fields**
-   5.1. Follow the provided template patterns. **Do not** add extra entities or fields outside the user’s requirements or the template.
-   5.2. Do **not** use properties like `createdAt` or `updatedAt`; they’re implicit in CoValue.
+   5.1. Follow the provided template patterns. **Do not** add extra entities or fields outside the user's requirements or the template.
+   5.2. Do **not** use properties like `createdAt` or `updatedAt`; they're implicit in CoValue.
    5.3. If a property is optional, denote it with a question mark (`?`) in the field definition, or use `co.optional.*`.
    5.4. Keep comments from the template, especially around migration blocks, intact.
    5.5. Never set a property to "co.ref(UserProfile)".
 
 6. **Output & Formatting**
    6.1. Generate the final schema in TypeScript with no extra markdown or triple backticks.
-   6.2. Do **not** expand or alter the template’s classes beyond what is required.
+   6.2. Do **not** expand or alter the template's classes beyond what is required.
    6.3. Avoid redundant or conflicting rules from the template; these revised rules take priority.
+
+7. **Loading & Resolving Data (0.12.0+)**
+   7.1. **Always** use the new resolve API pattern when loading data:
+   ```ts
+   // Use this pattern (0.12.0+)
+   const data = await MyClass.load(id, { resolve: true });
+
+   // NOT this pattern (pre-0.12.0)
+   const data = await MyClass.load(id, []);
+   ```
+   7.2. For shallow loading of collections, use `true` instead of empty arrays or objects:
+   ```ts
+   // Correct (0.12.0+)
+   await ListClass.load(id, { resolve: true });
+
+   // Incorrect (pre-0.12.0)
+   await ListClass.load(id, []);
+   ```
+   7.3. For deep loading of collections, use the `$each` key:
+   ```ts
+   // For CoList
+   await TaskList.load(id, {
+     resolve: { $each: true }
+   });
+
+   // For nested structures
+   await Project.load(id, {
+     resolve: {
+       tasks: { $each: true }
+     }
+   });
+   ```
+   7.4. Use the `Resolved` type helper for type-safe access to loaded data:
+   ```ts
+   type TaskListResolved = Resolved<TaskList, {
+     $each: { assignee: true }
+   }>;
+
+   function Component({ tasks }: { tasks: TaskListResolved }) {
+     // Type-safe access
+     return tasks.map(task => task.assignee);
+   }
+   ```
 
 ---
 

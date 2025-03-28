@@ -113,6 +113,8 @@ const strokeWidths = {
   "9xl": 1,
 };
 
+export type IconName = keyof typeof icons;
+
 export function Icon({
   name,
   icon,
@@ -120,7 +122,7 @@ export function Icon({
   className,
   ...svgProps
 }: {
-  name?: string;
+  name?: IconName;
   icon?: LucideIcon;
   size?: keyof typeof sizes;
   className?: string;

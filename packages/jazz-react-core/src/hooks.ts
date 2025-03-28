@@ -10,12 +10,13 @@ import {
   AnonymousJazzAgent,
   CoValue,
   CoValueClass,
-  DeeplyLoaded,
-  DepthsIn,
   ID,
   InboxSender,
   JazzContextManager,
   JazzContextType,
+  RefsToResolve,
+  RefsToResolveStrict,
+  Resolved,
   createCoValueObservable,
 } from "jazz-tools";
 import {
@@ -80,12 +81,11 @@ export function useIsAuthenticated() {
   );
 }
 
-function useCoValueObservable<V extends CoValue, D>() {
-  const [initialValue] = React.useState(() =>
-    createCoValueObservable<V, D>({
-      syncResolution: true,
-    }),
-  );
+function useCoValueObservable<
+  V extends CoValue,
+  const R extends RefsToResolve<V>,
+>() {
+  const [initialValue] = React.useState(() => createCoValueObservable<V, R>());
   const ref = useRef(initialValue);
 
   return {
@@ -96,26 +96,25 @@ function useCoValueObservable<V extends CoValue, D>() {
       return ref.current;
     },
     reset() {
-      ref.current = createCoValueObservable<V, D>({
-        syncResolution: true,
-      });
+      ref.current = createCoValueObservable<V, R>();
     },
   };
 }
 
-export function useCoState<V extends CoValue, D>(
+export function useCoState<
+  V extends CoValue,
+  const R extends RefsToResolve<V> = true,
+>(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   Schema: CoValueClass<V>,
   id: ID<CoValue> | undefined,
-  depth: D & DepthsIn<V> = [] as D & DepthsIn<V>,
-): DeeplyLoaded<V, D> | undefined | null {
+  options?: { resolve?: RefsToResolveStrict<V, R> },
+): Resolved<V, R> | undefined | null {
   const contextManager = useJazzContextManager();
 
-  const observable = useCoValueObservable<V, D>();
+  const observable = useCoValueObservable<V, R>();
 
-  const value = React.useSyncExternalStore<
-    DeeplyLoaded<V, D> | undefined | null
-  >(
+  const value = React.useSyncExternalStore<Resolved<V, R> | undefined | null>(
     React.useCallback(
       (callback) => {
         observable.reset();
@@ -127,12 +126,20 @@ export function useCoState<V extends CoValue, D>(
         // up to date with the data when logging in and out.
         return subscribeToContextManager(contextManager, () => {
           const agent = getCurrentAccountFromContextManager(contextManager);
-
           observable.reset();
 
-          return observable
-            .getCurrentObservable()
-            .subscribe(Schema, id, agent, depth, callback, callback);
+          return observable.getCurrentObservable().subscribe(
+            Schema,
+            id,
+            {
+              loadAs: agent,
+              resolve: options?.resolve,
+              onUnauthorized: callback,
+              onUnavailable: callback,
+              syncResolution: true,
+            },
+            callback,
+          );
         });
       },
       [Schema, id, contextManager],
@@ -148,12 +155,18 @@ function useAccount<A extends RegisteredAccount>(): {
   me: A;
   logOut: () => void;
 };
-function useAccount<A extends RegisteredAccount, D extends DepthsIn<A>>(
-  depth: D,
-): { me: DeeplyLoaded<A, D> | undefined | null; logOut: () => void };
-function useAccount<A extends RegisteredAccount, D extends DepthsIn<A>>(
-  depth?: D,
-): { me: A | DeeplyLoaded<A, D> | undefined | null; logOut: () => void } {
+function useAccount<
+  A extends RegisteredAccount,
+  R extends RefsToResolve<A>,
+>(options?: {
+  resolve?: RefsToResolveStrict<A, R>;
+}): { me: Resolved<A, R> | undefined | null; logOut: () => void };
+function useAccount<
+  A extends RegisteredAccount,
+  R extends RefsToResolve<A>,
+>(options?: {
+  resolve?: RefsToResolveStrict<A, R>;
+}): { me: A | Resolved<A, R> | undefined | null; logOut: () => void } {
   const context = useJazzContext<A>();
   const contextManager = useJazzContextManager<A>();
 
@@ -163,9 +176,9 @@ function useAccount<A extends RegisteredAccount, D extends DepthsIn<A>>(
     );
   }
 
-  const observable = useCoValueObservable<A, D>();
+  const observable = useCoValueObservable<A, R>();
 
-  const me = React.useSyncExternalStore<DeeplyLoaded<A, D> | undefined | null>(
+  const me = React.useSyncExternalStore<Resolved<A, R> | undefined | null>(
     React.useCallback(
       (callback) => {
         return subscribeToContextManager(contextManager, () => {
@@ -181,16 +194,18 @@ function useAccount<A extends RegisteredAccount, D extends DepthsIn<A>>(
 
           const Schema = agent.constructor as CoValueClass<A>;
 
-          return observable
-            .getCurrentObservable()
-            .subscribe(
-              Schema,
-              agent.id,
-              agent,
-              depth ?? ([] as D),
-              callback,
-              callback,
-            );
+          return observable.getCurrentObservable().subscribe(
+            Schema,
+            (agent as A).id,
+            {
+              loadAs: agent,
+              resolve: options?.resolve,
+              onUnauthorized: callback,
+              onUnavailable: callback,
+              syncResolution: true,
+            },
+            callback,
+          );
         });
       },
       [contextManager],
@@ -200,28 +215,32 @@ function useAccount<A extends RegisteredAccount, D extends DepthsIn<A>>(
   );
 
   return {
-    me: depth === undefined ? me || context.me : me,
-    logOut: context.logOut,
+    me: options?.resolve === undefined ? me || context.me : me,
+    logOut: contextManager.logOut,
   };
 }
 
 function useAccountOrGuest<A extends RegisteredAccount>(): {
   me: A | AnonymousJazzAgent;
 };
-function useAccountOrGuest<A extends RegisteredAccount, D extends DepthsIn<A>>(
-  depth: D,
-): { me: DeeplyLoaded<A, D> | undefined | null | AnonymousJazzAgent };
-function useAccountOrGuest<A extends RegisteredAccount, D extends DepthsIn<A>>(
-  depth?: D,
-): {
-  me: A | DeeplyLoaded<A, D> | undefined | null | AnonymousJazzAgent;
+function useAccountOrGuest<
+  A extends RegisteredAccount,
+  R extends RefsToResolve<A>,
+>(options?: { resolve?: RefsToResolveStrict<A, R> }): {
+  me: Resolved<A, R> | undefined | null | AnonymousJazzAgent;
+};
+function useAccountOrGuest<
+  A extends RegisteredAccount,
+  R extends RefsToResolve<A>,
+>(options?: { resolve?: RefsToResolveStrict<A, R> }): {
+  me: A | Resolved<A, R> | undefined | null | AnonymousJazzAgent;
 } {
   const context = useJazzContext<A>();
   const contextManager = useJazzContextManager<A>();
 
-  const observable = useCoValueObservable<A, D>();
+  const observable = useCoValueObservable<A, R>();
 
-  const me = React.useSyncExternalStore<DeeplyLoaded<A, D> | undefined | null>(
+  const me = React.useSyncExternalStore<Resolved<A, R> | undefined | null>(
     React.useCallback(
       (callback) => {
         return subscribeToContextManager(contextManager, () => {
@@ -235,16 +254,18 @@ function useAccountOrGuest<A extends RegisteredAccount, D extends DepthsIn<A>>(
 
           const Schema = agent.constructor as CoValueClass<A>;
 
-          return observable
-            .getCurrentObservable()
-            .subscribe(
-              Schema,
-              agent.id,
-              agent,
-              depth ?? ([] as D),
-              callback,
-              callback,
-            );
+          return observable.getCurrentObservable().subscribe(
+            Schema,
+            (agent as A).id,
+            {
+              loadAs: agent,
+              resolve: options?.resolve,
+              onUnauthorized: callback,
+              onUnavailable: callback,
+              syncResolution: true,
+            },
+            callback,
+          );
         });
       },
       [contextManager],
@@ -255,7 +276,7 @@ function useAccountOrGuest<A extends RegisteredAccount, D extends DepthsIn<A>>(
 
   if ("me" in context) {
     return {
-      me: depth === undefined ? me || context.me : me,
+      me: options?.resolve === undefined ? me || context.me : me,
     };
   } else {
     return { me: context.guest };

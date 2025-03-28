@@ -1,7 +1,7 @@
 {
   "name": "jazz-inspector-app",
   "private": true,
-  "version": "0.0.116",
+  "version": "0.0.118",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -13,8 +13,8 @@
   "dependencies": {
     "jazz-inspector": "workspace:*",
     "clsx": "^2.0.0",
-    "cojson": "workspace:0.11.7",
-    "cojson-transport-ws": "workspace:0.11.7",
+    "cojson": "workspace:0.12.0",
+    "cojson-transport-ws": "workspace:0.12.0",
     "hash-slash": "workspace:0.2.2",
     "lucide-react": "^0.274.0",
     "react": "^18.3.1",

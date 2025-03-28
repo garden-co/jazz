@@ -1,9 +1,14 @@
+import type { IconName } from "gcmp-design-system/src/app/components/atoms/Icon";
 import { FeatureCard } from "gcmp-design-system/src/app/components/molecules/FeatureCard";
 import { GappedGrid } from "gcmp-design-system/src/app/components/molecules/GappedGrid";
 import { SectionHeader } from "gcmp-design-system/src/app/components/molecules/SectionHeader";
 
 export function LocalFirstFeaturesSection() {
-  const features = [
+  const features: Array<{
+    title: string;
+    icon: IconName;
+    description: React.ReactNode;
+  }> = [
     {
       title: "Offline-first",
       icon: "offline",
@@ -52,7 +57,8 @@ export function LocalFirstFeaturesSection() {
         slogan={
           <>
             <p>
-              With cloud-synced local state, your data is kept on-device, and synced whenever possible.
+              With cloud-synced local state, your data is kept on-device, and
+              synced whenever possible.
             </p>
           </>
         }

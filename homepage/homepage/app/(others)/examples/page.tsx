@@ -227,7 +227,7 @@ const FileUploadIllustration = () => (
     </div>
 
     <div className=" w-[12rem] h-2 rounded-full overflow-hidden bg-stone-200 mt-3">
-      <div className="w-3/4 h-full bg-green-500"/>
+      <div className="w-3/4 h-full bg-green-500" />
     </div>
     <div className="w-[12rem] flex justify-between text-xs mt-1.5">
       <p>Uploading...</p>
@@ -379,7 +379,8 @@ const reactExamples: Example[] = [
   {
     name: "File upload",
     slug: "filestream",
-    description: "Upload different types of files, and show upload progress, file size, and type.",
+    description:
+      "Upload different types of files, and show upload progress, file size, and type.",
     tech: [tech.react],
     features: [features.fileUpload],
     demoUrl: "https://file-upload-demo.jazz.tools",

@@ -7,8 +7,7 @@ import { Fragment } from "react";
 
 const title = "Status";
 
-export const revalidate = 300
-
+export const revalidate = 300;
 
 export const metadata: Metadata = {
   title,
@@ -39,7 +38,6 @@ interface DataRow {
   avgLatency: number;
   p99Latency: number;
 }
-
 
 const query = async () => {
   const res = await fetch("https://gcmp.grafana.net/api/ds/query", {
@@ -99,9 +97,9 @@ const query = async () => {
   }
 
   const responseData = await res.json();
-  
+
   const byProbe: Record<string, DataRow> = {};
-  
+
   for (const frame of responseData.results.up.frames) {
     const probe = startCase(frame.schema.fields[1].labels.probe);
     byProbe[probe] = {
@@ -115,7 +113,6 @@ const query = async () => {
     byProbe[probe].latencyOverTime = frame.data.values;
   }
 
-
   for (const frame of responseData.results.avg_latency.frames) {
     const probe = startCase(frame.schema.fields[1].labels.probe);
     byProbe[probe].avgLatency = frame.data.values[1];
@@ -123,7 +120,7 @@ const query = async () => {
 
   for (const frame of responseData.results.p99_latency.frames) {
     const probe = startCase(frame.schema.fields[1].labels.probe);
-    byProbe[probe].p99Latency = frame.data.values[1]; 
+    byProbe[probe].p99Latency = frame.data.values[1];
   }
 
   const byRegion = Object.entries(byProbe).reduce<

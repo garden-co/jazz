@@ -1,11 +1,13 @@
 import { Icon } from "gcmp-design-system/src/app/components/atoms/Icon";
 import Link from "next/link";
 import { ReactNode } from "react";
-import { getHighlighter } from "shiki";
+import { createHighlighter } from "shiki";
+import { jazzLight } from "../../themes/jazzLight.mjs";
+import { jazzDark } from "../../themes/jazzDark.mjs";
 
-const highlighter = getHighlighter({
-  langs: ["typescript", "bash"],
-  theme: "css-variables", // use the theme
+const highlighterPromise = createHighlighter({
+  langs: ["typescript", "bash", "tsx", "json", "svelte", "vue"],
+  themes: [jazzLight as any, jazzDark as any],
 });
 
 export function Example({ children }: { children: ReactNode }) {
@@ -30,27 +32,20 @@ export async function Highlight({
   lang?: string;
   className?: string;
 }) {
-  const lines = (await highlighter).codeToThemedTokens(
+  const html = (await highlighterPromise).codeToHtml(
     children,
-    lang,
-    "css-variables",
+    {
+      lang,
+      structure: "inline",
+      themes: {
+        light: "jazz-light",
+        dark: "jazz-dark",
+      },
+    },
   );
 
   return (
-    <code className={className}>
-      {lines
-        .filter((_, i) => !hide?.includes(i))
-        .map((line, i, all) => (
-          <>
-            {line.map((token, i) => (
-              <span key={i} style={{ color: token.color }}>
-                {token.content}
-              </span>
-            ))}
-            {i !== all.length - 1 && <br />}
-          </>
-        ))}
-    </code>
+    <code className={className} dangerouslySetInnerHTML={{ __html: html }} />
   );
 }
 

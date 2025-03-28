@@ -15,8 +15,8 @@ function setup<T extends CoValue>(options: {
       context: createJazzTestContext({ account: options.account }),
       props: {
         invitedObjectSchema: options.invitedObjectSchema,
-        onAccept: (id: ID<T>) => {
-          result.current = id;
+        onAccept: (id: ID<CoValue>) => {
+          result.current = id as ID<T>;
         },
       },
     });
@@ -33,7 +33,7 @@ describe("useAcceptInvite", () => {
     const account = await createJazzTestAccount();
     const inviteSender = await createJazzTestAccount();
 
-    linkAccounts(account, inviteSender);
+    await linkAccounts(account, inviteSender);
 
     const invitelink = createInviteLink(
       TestMap.create(
@@ -54,7 +54,9 @@ describe("useAcceptInvite", () => {
       expect(result.current).toBeDefined();
     });
 
-    const accepted = await TestMap.load(result.current!, account, {});
+    const accepted = await TestMap.load(result.current!, {
+      loadAs: account,
+    });
 
     expect(accepted?.value).toEqual("hello");
   });

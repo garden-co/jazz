@@ -9,8 +9,7 @@ import CollaborationPublic from "./CollaborationPublic.mdx";
 const data = [
   {
     title: "Private",
-    description:
-      "By default, CoValues are visible only to you.",
+    description: "By default, CoValues are visible only to you.",
     codeSample: CollaborationPrivate,
   },
   {
@@ -20,8 +19,7 @@ const data = [
   },
   {
     title: "By Invitation",
-    description:
-      "Create links that allow anyone to join.",
+    description: "Create links that allow anyone to join.",
     codeSample: CollaborationInvite,
   },
 ];
@@ -34,7 +32,8 @@ export function CollaborationFeaturesSection() {
         title="Making secure collaboration the default"
         slogan={
           <>
-            Every CoValue belongs to a <code>Group</code>, where you can assign roles to users to control access &mdash; all from the client.
+            Every CoValue belongs to a <code>Group</code>, where you can assign
+            roles to users to control access &mdash; all from the client.
           </>
         }
       ></SectionHeader>

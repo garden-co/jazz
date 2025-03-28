@@ -528,12 +528,36 @@ export class SyncManager {
 
     let coValue: CoValueCore;
 
+    /**
+     * The new content might come while the coValue is loading or is not loaded yet.
+     *
+     * This might happen when we restart the server because:
+     * - The client known state assumes that the coValue is available on the server
+     * - The server might not have loaded the coValue yet because it was not requested
+     *
+     * In this case we need to load the coValue from the storage or other peers.
+     *
+     * If this load fails we send a correction request, because the client has the wrong assumption that
+     * we have the coValue while we don't.
+     */
+    if (entry.state.type !== "available" && !msg.header) {
+      await this.local.loadCoValueCore(msg.id, peer.id);
+    }
+
     if (entry.state.type !== "available") {
       if (!msg.header) {
-        logger.error("Expected header to be sent in first message", {
-          coValueId: msg.id,
-          peerId: peer.id,
-          peerRole: peer.role,
+        this.trySendToPeer(peer, {
+          action: "known",
+          isCorrection: true,
+          id: msg.id,
+          header: false,
+          sessions: {},
+        }).catch((e) => {
+          logger.error("Error sending known state correction", {
+            peerId: peer.id,
+            peerRole: peer.role,
+            err: e,
+          });
         });
         return;
       }

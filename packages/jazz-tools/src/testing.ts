@@ -271,7 +271,7 @@ export class TestJazzContextManager<
   }
 }
 
-export function linkAccounts(
+export async function linkAccounts(
   a: Account,
   b: Account,
   aRole: "server" | "client" = "server",
@@ -284,6 +284,9 @@ export function linkAccounts(
 
   a._raw.core.node.syncManager.addPeer(aPeer);
   b._raw.core.node.syncManager.addPeer(bPeer);
+
+  await a.waitForAllCoValuesSync();
+  await b.waitForAllCoValuesSync();
 }
 
 export async function setupJazzTestSync() {

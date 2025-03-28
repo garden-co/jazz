@@ -43,7 +43,13 @@ export { CoValueBase } from "./coValues/interfaces.js";
 export { Profile } from "./coValues/profile.js";
 export { SchemaUnion } from "./coValues/schemaUnion.js";
 
-export type { CoValueClass, DeeplyLoaded, DepthsIn } from "./internal.js";
+export type {
+  CoValueClass,
+  DeeplyLoaded,
+  Resolved,
+  RefsToResolve,
+  RefsToResolveStrict,
+} from "./internal.js";
 
 export {
   createCoValueObservable,

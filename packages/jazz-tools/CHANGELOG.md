@@ -1,5 +1,28 @@
 # jazz-tools
 
+## 0.12.0
+
+### Minor Changes
+
+- 01523dc: Check CoValue access permissions when loading
+- 4ea87dc: Implement new API for deep loading
+- 1e6da19: The .load function now returns `null` on error
+
+### Patch Changes
+
+- b6c6a0a: Make the linkAccounts test utility wait for the accounts coValues to be synced
+- Updated dependencies [01523dc]
+- Updated dependencies [01523dc]
+  - cojson@0.12.0
+
+## 0.11.8
+
+### Patch Changes
+
+- Updated dependencies [6c86c4f]
+- Updated dependencies [9d0c9dc]
+  - cojson@0.11.8
+
 ## 0.11.7
 
 ### Patch Changes

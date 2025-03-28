@@ -49,7 +49,7 @@ function highlightPlugin() {
             token.content.includes("// old"),
           );
           const isBinnedLine = line.some((token) =>
-            token.content.includes("// *bin*"),
+            token.content.includes("// [!code --]"),
           );
           const isHighlighted = line.some((token) =>
             token.content.includes("// *highlight*"),
@@ -70,7 +70,7 @@ function highlightPlugin() {
             line
               .map((token) => {
                 let color = isHighlighted ? "currentColor" : token.color;
-                return `<span style="color: ${color};${isSubduedLine ? "opacity: 0.4;" : ""}">${escape(token.content.replace("// old", "").replace("// *bin*", "").replace("// *highlight*", ""))}</span>`;
+                return `<span style="color: ${color};${isSubduedLine ? "opacity: 0.4;" : ""}">${escape(token.content.replace("// old", "").replace("// [!code --]", "").replace("// *highlight*", ""))}</span>`;
               })
               .join("") +
             "</span>"

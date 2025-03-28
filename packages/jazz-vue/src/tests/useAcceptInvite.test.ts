@@ -15,7 +15,7 @@ describe("useAcceptInvite", () => {
     const account = await createJazzTestAccount();
     const inviteSender = await createJazzTestAccount();
 
-    linkAccounts(account, inviteSender);
+    await linkAccounts(account, inviteSender);
 
     let acceptedId: ID<TestMap> | undefined;
 
@@ -46,7 +46,9 @@ describe("useAcceptInvite", () => {
       expect(acceptedId).toBeDefined();
     });
 
-    const accepted = await TestMap.load(acceptedId!, account, {});
+    const accepted = await TestMap.load(acceptedId!, {
+      loadAs: account,
+    });
 
     expect(accepted?.value).toEqual("hello");
   });

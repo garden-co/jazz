@@ -88,7 +88,7 @@ export function Pricing() {
             </ul>
           </div>
 
-          <FakeGetStartedButton tier="starter"/>
+          <FakeGetStartedButton tier="starter" />
 
           <p className="text-sm">No credit card required. Takes 20s.</p>
         </div>
@@ -122,22 +122,18 @@ export function Pricing() {
               </ListItem>
               <ListItem icon={LucideDatabase}>
                 <span className="tabular-nums">100</span> GB storage incl.{" "}
-                <span className="text-sm">
-                  (then $0.02 per GB)
-                </span>
+                <span className="text-sm">(then $0.02 per GB)</span>
               </ListItem>
               <ListItem icon={LucideCloudDownload}>
                 <span className="tabular-nums">20</span> GB egress/mo incl.{" "}
-                <span className="text-sm">
-                  (then $0.1 per GB)
-                </span>
+                <span className="text-sm">(then $0.1 per GB)</span>
               </ListItem>
               <hr className="my-2 border-stone-200 dark:border-stone-800" />
               <ListItem icon={LucideChevronsUp}>High-priority sync</ListItem>
             </ul>
           </div>
 
-          <FakeGetStartedButton tier="indie"/>
+          <FakeGetStartedButton tier="indie" />
 
           <p className="text-sm">
             One month free trial. Unlimited projects. Takes 1min.
@@ -169,12 +165,8 @@ export function Pricing() {
               <ListItem icon={LucideUsers}>
                 Custom monthly active users
               </ListItem>
-              <ListItem icon={LucideDatabase}>
-                Custom storage
-              </ListItem>
-              <ListItem icon={LucideCloudDownload}>
-                Custom egress/mo
-              </ListItem>
+              <ListItem icon={LucideDatabase}>Custom storage</ListItem>
+              <ListItem icon={LucideCloudDownload}>Custom egress/mo</ListItem>
               <hr className="my-2 border-stone-200 dark:border-stone-800" />
               <ListItem icon={LucideHandshake}>
                 Rapid integration & premium onboarding

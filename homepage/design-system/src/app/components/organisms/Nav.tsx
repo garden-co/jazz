@@ -13,12 +13,13 @@ import { usePathname } from "next/navigation";
 import { ComponentType, ReactNode, useEffect, useState } from "react";
 import { isActive } from "../../utils/nav";
 import { Icon } from "../atoms/Icon";
+import type { IconName } from "../atoms/Icon";
 import { BreadCrumb } from "../molecules/Breadcrumb";
 import { SocialLinks, SocialLinksProps } from "./SocialLinks";
 
 type NavItemProps = {
   href: string;
-  icon?: string;
+  icon?: IconName;
   title: string;
   firstOnRight?: boolean;
   newTab?: boolean;
@@ -38,7 +39,7 @@ type NavProps = {
 export type NavSection = {
   name: string;
   content: ReactNode;
-  icon: string;
+  icon: IconName;
 };
 
 function NavItem({
@@ -134,7 +135,11 @@ export function MobileNav({
   sections,
   themeToggle: ThemeToggle,
 }: NavProps) {
-  const primarySection = {
+  const primarySection: {
+    name: string;
+    icon: IconName;
+    content: ReactNode;
+  } = {
     name: "Menu",
     icon: "menu",
     content: (
@@ -254,7 +259,7 @@ export function MobileNav({
                   onClick={() => toggle(section.name)}
                   key={section.name}
                 >
-                  <Icon name={section.icon} size="xs" />
+                  {section.icon && <Icon name={section.icon} size="xs" />}
                   {section.name}
                 </button>
               ),

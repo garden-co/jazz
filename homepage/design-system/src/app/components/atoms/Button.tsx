@@ -2,6 +2,7 @@ import { clsx } from "clsx";
 import Link from "next/link";
 import { forwardRef } from "react";
 import { Icon } from "./Icon";
+import type { IconName } from "./Icon";
 import { Spinner } from "./Spinner";
 
 interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
@@ -9,7 +10,7 @@ interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
   size?: "sm" | "md" | "lg";
   href?: string;
   newTab?: boolean;
-  icon?: string;
+  icon?: IconName;
   loading?: boolean;
   loadingText?: string;
   children?: React.ReactNode;

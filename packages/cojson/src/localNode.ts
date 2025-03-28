@@ -277,6 +277,7 @@ export class LocalNode {
       });
     }
 
+    // TODO: What if the loading fails because in the previous loadCoValueCore call the Peer with the covalue was skipped?
     return entry.getCoValue();
   }
 

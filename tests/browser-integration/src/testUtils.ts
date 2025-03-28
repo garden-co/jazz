@@ -60,16 +60,23 @@ export async function createAccountContext<Acc extends Account>(
   return { context: value, account: value.me, contextManager };
 }
 
-export async function startSyncServer() {
-  const { url } = await commands.startSyncServer();
+export async function startSyncServer(port?: number, dbName?: string) {
+  const { url, port: syncServerPort } = await commands.startSyncServer(
+    port,
+    dbName,
+  );
 
-  onTestFinished(async () => {
-    await commands.closeSyncServer(url);
-  });
+  function close() {
+    return commands.closeSyncServer(url);
+  }
+
+  onTestFinished(close);
 
   return {
     url,
+    port: syncServerPort,
     disconnectAllClients: () => commands.disconnectAllClients(url),
     setOffline: (active: boolean) => commands.setOffline(url, active),
+    close,
   };
 }

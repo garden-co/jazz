@@ -15,6 +15,7 @@
     "cojson": "workspace:*",
     "cojson-transport-ws": "workspace:*",
     "cojson-storage-indexeddb": "workspace:*",
+    "cojson-storage-sqlite": "workspace:*",
     "jazz-browser": "workspace:*",
     "jazz-browser-media-images": "workspace:*",
     "jazz-tools": "workspace:*"

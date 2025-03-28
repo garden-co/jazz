@@ -53,11 +53,11 @@ export function InboxPage() {
   useEffect(() => {
     async function load() {
       if (!id) return;
-      const account = await Account.load(id, me, {});
+      const account = await Account.load(id);
 
       if (!account) return;
 
-      const group = Group.create({ owner: me });
+      const group = Group.create();
       group.addMember(account, "writer");
       const pingPong = PingPong.create({ ping: Date.now() }, { owner: group });
 

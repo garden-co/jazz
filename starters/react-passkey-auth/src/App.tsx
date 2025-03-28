@@ -4,7 +4,7 @@ import { Form } from "./Form.tsx";
 import { Logo } from "./Logo.tsx";
 
 function App() {
-  const { me } = useAccount({ profile: {}, root: {} });
+  const { me } = useAccount({ resolve: { profile: true, root: true } });
 
   const isAuthenticated = useIsAuthenticated();
 

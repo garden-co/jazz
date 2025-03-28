@@ -12,13 +12,16 @@ import type {
   AnonymousJazzAgent,
   CoValue,
   CoValueClass,
-  DeeplyLoaded,
-  DepthsIn,
   ID,
   IfCo,
   RefEncoded,
   RefIfCoValue,
+  RefsToResolve,
+  RefsToResolveStrict,
+  Resolved,
   Schema,
+  SubscribeListenerOptions,
+  SubscribeRestArgs,
   co,
 } from "../internal.js";
 import {
@@ -32,6 +35,7 @@ import {
   loadCoValueWithoutMe,
   makeRefs,
   parseCoValueCreateOptions,
+  parseSubscribeRestArgs,
   subscribeToCoValueWithoutMe,
   subscribeToExistingCoValue,
   subscriptionsScopes,
@@ -433,24 +437,15 @@ export class CoMap extends CoValueBase implements CoValue {
    *
    * @category Subscription & Loading
    */
-  static load<C extends CoMap, Depth>(
-    this: CoValueClass<C>,
-    id: ID<C>,
-    depth: Depth & DepthsIn<C>,
-  ): Promise<DeeplyLoaded<C, Depth> | undefined>;
-  static load<C extends CoMap, Depth>(
-    this: CoValueClass<C>,
-    id: ID<C>,
-    as: Account,
-    depth: Depth & DepthsIn<C>,
-  ): Promise<DeeplyLoaded<C, Depth> | undefined>;
-  static load<C extends CoMap, Depth>(
-    this: CoValueClass<C>,
-    id: ID<C>,
-    asOrDepth: Account | (Depth & DepthsIn<C>),
-    depth?: Depth & DepthsIn<C>,
-  ): Promise<DeeplyLoaded<C, Depth> | undefined> {
-    return loadCoValueWithoutMe(this, id, asOrDepth, depth);
+  static load<M extends CoMap, const R extends RefsToResolve<M> = true>(
+    this: CoValueClass<M>,
+    id: ID<M>,
+    options?: {
+      resolve?: RefsToResolveStrict<M, R>;
+      loadAs?: Account | AnonymousJazzAgent;
+    },
+  ): Promise<Resolved<M, R> | null> {
+    return loadCoValueWithoutMe(this, id, options);
   }
 
   /**
@@ -480,35 +475,24 @@ export class CoMap extends CoValueBase implements CoValue {
    *
    * @category Subscription & Loading
    */
-  static subscribe<C extends CoMap, Depth>(
-    this: CoValueClass<C>,
-    id: ID<C>,
-    depth: Depth & DepthsIn<C>,
-    listener: (value: DeeplyLoaded<C, Depth>) => void,
+  static subscribe<M extends CoMap, const R extends RefsToResolve<M> = true>(
+    this: CoValueClass<M>,
+    id: ID<M>,
+    listener: (value: Resolved<M, R>, unsubscribe: () => void) => void,
   ): () => void;
-  static subscribe<C extends CoMap, Depth>(
-    this: CoValueClass<C>,
-    id: ID<C>,
-    as: Account,
-    depth: Depth & DepthsIn<C>,
-    listener: (value: DeeplyLoaded<C, Depth>) => void,
+  static subscribe<M extends CoMap, const R extends RefsToResolve<M> = true>(
+    this: CoValueClass<M>,
+    id: ID<M>,
+    options: SubscribeListenerOptions<M, R>,
+    listener: (value: Resolved<M, R>, unsubscribe: () => void) => void,
   ): () => void;
-  static subscribe<C extends CoMap, Depth>(
-    this: CoValueClass<C>,
-    id: ID<C>,
-    asOrDepth: Account | (Depth & DepthsIn<C>),
-    depthOrListener:
-      | (Depth & DepthsIn<C>)
-      | ((value: DeeplyLoaded<C, Depth>) => void),
-    listener?: (value: DeeplyLoaded<C, Depth>) => void,
+  static subscribe<M extends CoMap, const R extends RefsToResolve<M>>(
+    this: CoValueClass<M>,
+    id: ID<M>,
+    ...args: SubscribeRestArgs<M, R>
   ): () => void {
-    return subscribeToCoValueWithoutMe<C, Depth>(
-      this,
-      id,
-      asOrDepth,
-      depthOrListener,
-      listener,
-    );
+    const { options, listener } = parseSubscribeRestArgs(args);
+    return subscribeToCoValueWithoutMe<M, R>(this, id, options, listener);
   }
 
   static findUnique<M extends CoMap>(
@@ -540,11 +524,11 @@ export class CoMap extends CoValueBase implements CoValue {
    *
    * @category Subscription & Loading
    */
-  ensureLoaded<M extends CoMap, Depth>(
+  ensureLoaded<M extends CoMap, const R extends RefsToResolve<M>>(
     this: M,
-    depth: Depth & DepthsIn<M>,
-  ): Promise<DeeplyLoaded<M, Depth>> {
-    return ensureCoValueLoaded(this, depth);
+    options: { resolve: RefsToResolveStrict<M, R> },
+  ): Promise<Resolved<M, R>> {
+    return ensureCoValueLoaded(this, options);
   }
 
   /**
@@ -556,12 +540,21 @@ export class CoMap extends CoValueBase implements CoValue {
    *
    * @category Subscription & Loading
    **/
-  subscribe<M extends CoMap, Depth>(
+  subscribe<M extends CoMap, const R extends RefsToResolve<M> = true>(
     this: M,
-    depth: Depth & DepthsIn<M>,
-    listener: (value: DeeplyLoaded<M, Depth>) => void,
+    listener: (value: Resolved<M, R>, unsubscribe: () => void) => void,
+  ): () => void;
+  subscribe<M extends CoMap, const R extends RefsToResolve<M> = true>(
+    this: M,
+    options: { resolve?: RefsToResolveStrict<M, R> },
+    listener: (value: Resolved<M, R>, unsubscribe: () => void) => void,
+  ): () => void;
+  subscribe<M extends CoMap, const R extends RefsToResolve<M>>(
+    this: M,
+    ...args: SubscribeRestArgs<M, R>
   ): () => void {
-    return subscribeToExistingCoValue(this, depth, listener);
+    const { options, listener } = parseSubscribeRestArgs(args);
+    return subscribeToExistingCoValue<M, R>(this, options, listener);
   }
 
   applyDiff<N extends Partial<CoMapInit<this>>>(newValues: N) {
