@@ -1,0 +1,29 @@
+{
+  "name": "jazz-betterauth-server-plugin",
+  "version": "0.0.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "src/index.ts",
+  "license": "MIT",
+  "dependencies": {
+    "cojson": "workspace:*",
+    "jazz-browser": "workspace:*",
+    "jazz-tools": "workspace:*",
+    "argon2": "^0.41.1",
+    "better-auth": "^1.2.4",
+    "better-sqlite3": "^11.9.1",
+    "zod": "^3.24.2",
+    "@phc/format": "^1.0.0"
+  },
+  "scripts": {
+    "format-and-lint": "biome check .",
+    "format-and-lint:fix": "biome check . --write",
+    "build": "rm -rf ./dist && tsc --sourceMap --outDir dist -p tsconfig.build.json",
+    "prepublishOnly": "npm run build"
+  },
+  "devDependencies": {
+    "typescript": "~5.6.2",
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/phc__format": "^1.0.1"
+  }
+}
