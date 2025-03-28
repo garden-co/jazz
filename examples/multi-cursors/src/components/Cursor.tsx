@@ -15,7 +15,7 @@ interface CursorProps {
   bounds?: ViewBox;
 }
 
-const PADDING = 20;
+const PADDING = 32;
 
 export function Cursor({
   position,
@@ -110,12 +110,26 @@ export function Cursor({
             isOutOfBounds={isCursorOutOfBounds}
           />
           {isCursorOutOfBounds ? (
-            <animated.circle
-              cx={intersectionSprings.x}
-              cy={intersectionSprings.y}
-              r={4}
-              fill={color}
-            />
+            <animated.g
+              transform={to(
+                [intersectionSprings.x, intersectionSprings.y],
+                (x: number, y: number) => {
+                  const angle =
+                    Math.atan2(centerOfBounds.y - y, centerOfBounds.x - x) *
+                    (180 / Math.PI);
+                  return `translate(${x}, ${y}) rotate(${angle})`;
+                },
+              )}
+            >
+              <path
+                d="M 8,-4 L 2,0 L 8,4"
+                fill="none"
+                stroke={color}
+                strokeWidth="3"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </animated.g>
           ) : null}
         </>
       ) : null}
