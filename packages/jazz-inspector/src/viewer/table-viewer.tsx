@@ -8,6 +8,14 @@ import { PageInfo } from "./types.js";
 import { useResolvedCoValues } from "./use-resolve-covalue.js";
 import { ValueRenderer } from "./value-renderer.js";
 
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "../ui/table.js";
 import { Text } from "../ui/text.js";
 
 export function TableView({
@@ -55,29 +63,18 @@ export function TableView({
 
   return (
     <div>
-      <table
-        className={classNames(
-          "min-w-full text-sm border-spacing-0 border-collapse",
-        )}
-      >
-        <thead className={classNames("sticky top-0 border-b border-gray-200")}>
-          <tr>
+      <Table>
+        <TableHead>
+          <TableRow>
             {["", ...keys].map((key) => (
-              <th
-                key={key}
-                className={classNames(
-                  "p-3 bg-gray-50 dark:bg-gray-925 text-left font-medium rounded",
-                )}
-              >
-                {key}
-              </th>
+              <TableHeader key={key}>{key}</TableHeader>
             ))}
-          </tr>
-        </thead>
-        <tbody className={classNames(" border-t border-gray-200")}>
+          </TableRow>
+        </TableHead>
+        <TableBody>
           {resolvedRows.slice(0, visibleRowsCount).map((item, index) => (
-            <tr key={index}>
-              <td className={classNames("p-1")}>
+            <TableRow key={index}>
+              <TableCell>
                 <Button
                   variant="link"
                   onClick={() =>
@@ -91,9 +88,9 @@ export function TableView({
                 >
                   <Icon name="link" />
                 </Button>
-              </td>
+              </TableCell>
               {keys.map((key) => (
-                <td key={key} className={classNames("p-4 whitespace-nowrap")}>
+                <TableCell key={key}>
                   <ValueRenderer
                     json={(item.snapshot as JsonObject)[key]}
                     onCoIDClick={(coId) => {
@@ -113,12 +110,12 @@ export function TableView({
                       handleClick();
                     }}
                   />
-                </td>
+                </TableCell>
               ))}
-            </tr>
+            </TableRow>
           ))}
-        </tbody>
-      </table>
+        </TableBody>
+      </Table>
       <div
         className={classNames("py-4 flex items-center justify-between gap-2")}
       >
@@ -127,17 +124,9 @@ export function TableView({
           {coIdArray.length}
         </Text>
         {hasMore && (
-          <div className={classNames("text-center")}>
-            <Button
-              variant="plain"
-              onClick={loadMore}
-              className={classNames(
-                "px-4 py-2 bg-blue text-white rounded hover:bg-blue-800",
-              )}
-            >
-              Load more
-            </Button>
-          </div>
+          <Button variant="secondary" onClick={loadMore}>
+            Load more
+          </Button>
         )}
       </div>
     </div>
