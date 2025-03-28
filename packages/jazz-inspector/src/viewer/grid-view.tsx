@@ -5,7 +5,7 @@ import { ResolveIcon } from "./type-icon.js";
 import { PageInfo, isCoId } from "./types.js";
 import { CoMapPreview, ValueRenderer } from "./value-renderer.js";
 
-import { Badge } from "@/badge";
+import { Badge } from "../ui/badge.js";
 import { Text } from "../ui/text.js";
 import { classNames } from "../utils.js";
 

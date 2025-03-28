@@ -13,7 +13,7 @@ import { Button } from "../ui/button.js";
 import { PageInfo } from "./types.js";
 import { AccountOrGroupPreview } from "./value-renderer.js";
 
-import { Badge } from "@/badge";
+import { Badge } from "../ui/badge.js";
 import { classNames } from "../utils.js";
 
 // typeguard for BinaryStreamStart

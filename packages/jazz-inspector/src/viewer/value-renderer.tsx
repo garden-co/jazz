@@ -147,7 +147,11 @@ export const CoMapPreview = ({
   }
 
   if (snapshot === "unavailable" && !value) {
-    return <div className={classNames("text-gray-500")}>Unavailable</div>;
+    return (
+      <Text inline muted>
+        Unavailable
+      </Text>
+    );
   }
 
   if (extendedType === "image" && isBrowserImage(snapshot)) {
@@ -170,9 +174,9 @@ export const CoMapPreview = ({
     return (
       <div>
         Record{" "}
-        <span className={classNames("text-gray-500")}>
+        <Text inline muted>
           ({Object.keys(snapshot).length})
-        </span>
+        </Text>
       </div>
     );
   }
@@ -181,9 +185,9 @@ export const CoMapPreview = ({
     return (
       <div>
         List{" "}
-        <span className={classNames("text-gray-500")}>
+        <Text inline muted>
           ({(snapshot as unknown as []).length})
-        </span>
+        </Text>
       </div>
     );
   }

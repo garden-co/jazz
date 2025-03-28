@@ -7,7 +7,7 @@ import { Breadcrumbs } from "./breadcrumbs.js";
 import { PageStack } from "./page-stack.js";
 import { usePagePath } from "./use-page-path.js";
 
-import { Heading } from "@/ui/heading";
+import { Heading } from "../ui/heading.js";
 import { classNames } from "../utils.js";
 
 type Position =

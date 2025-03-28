@@ -1,7 +1,7 @@
-import { Badge } from "@/badge";
-import { Heading } from "@/ui/heading";
 import { CoID, LocalNode, RawCoStream, RawCoValue } from "cojson";
 import { useMemo } from "react";
+import { Badge } from "../ui/badge.js";
+import { Heading } from "../ui/heading.js";
 import { Text } from "../ui/text.js";
 import { classNames } from "../utils.js";
 import { CoStreamView } from "./co-stream-view.js";
