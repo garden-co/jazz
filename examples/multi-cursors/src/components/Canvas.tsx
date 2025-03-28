@@ -18,7 +18,7 @@ const DEBUG = import.meta.env.VITE_DEBUG === "true";
 
 // For debugging purposes, we can set a fixed bounds
 const debugBounds: ViewBox = {
-  x: 320, // -320,
+  x: 320,
   y: 320,
   width: 640,
   height: 640,

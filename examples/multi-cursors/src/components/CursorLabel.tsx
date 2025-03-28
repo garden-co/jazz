@@ -1,6 +1,7 @@
 import { animated, to, useSpring } from "@react-spring/web";
 import { useEffect, useRef, useState } from "react";
 import { Vec2, ViewBox } from "../types";
+import { getLabelPosition } from "../utils/getLabelPosition";
 
 const DEBUG = import.meta.env.VITE_DEBUG === "true";
 
@@ -10,11 +11,6 @@ interface CursorLabelProps {
   position: Vec2;
   bounds?: ViewBox;
   isOutOfBounds?: boolean;
-}
-
-interface LabelPosition {
-  x: number;
-  y: number;
 }
 
 interface TextDimensions {
@@ -40,23 +36,14 @@ export function CursorLabel({
     setDimensions({ width: bbox?.width ?? 0, height: bbox?.height ?? 0 });
   }, [name]);
 
-  const getLabelPosition = (): LabelPosition => {
-    if (!isOutOfBounds || !bounds) {
-      return { x: position.x + 15, y: position.y + 25 };
-    }
-
-    // Calculate the percentage of the bounds that the intersection point is from the left
-    const percentageH = (position.x - bounds.x) / bounds.width;
-    const percentageV = (position.y - bounds.y) / bounds.height;
-
-    return {
-      x: position.x - percentageH * dimensions.width,
-      y: position.y - percentageV * dimensions.height,
-    };
-  };
-
-  const labelSprings = useSpring<LabelPosition>({
-    ...getLabelPosition(),
+  const labelPosition = getLabelPosition(
+    position,
+    dimensions,
+    bounds,
+    isOutOfBounds,
+  );
+  const labelSprings = useSpring<Vec2>({
+    ...labelPosition,
     config: {
       tension: 170,
       friction: 26,
@@ -85,20 +72,16 @@ export function CursorLabel({
           <text x={position.x} y={position.y} fill="red" fontSize="8">
             {position.x}, {position.y}
           </text>
-          <text
-            x={getLabelPosition().x}
-            y={getLabelPosition().y}
-            fill="red"
-            fontSize="8"
-          >
-            {bounds?.x - getLabelPosition().x},{" "}
-            {bounds?.y - getLabelPosition().y}
+          <text x={labelPosition.x} y={labelPosition.y} fill="red" fontSize="8">
+            {bounds
+              ? `${bounds.x - labelPosition.x}, ${bounds.y - labelPosition.y}`
+              : "no bounds"}
           </text>
           <line
             x1={position.x}
             y1={position.y}
-            x2={getLabelPosition().x}
-            y2={getLabelPosition().y}
+            x2={labelPosition.x}
+            y2={labelPosition.y}
             stroke="red"
             strokeWidth="1"
             strokeLinejoin="round"

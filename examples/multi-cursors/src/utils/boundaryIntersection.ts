@@ -21,28 +21,34 @@ export function calculateBoundaryIntersection(
   let verticalIntersection: Vec2 | null = null;
 
   // Check horizontal bounds
-  if (point.x < bounds.x) {
-    const y = center.y + (dy * (bounds.x - center.x)) / dx;
-    if (y >= bounds.y && y <= bounds.y + bounds.height) {
-      horizontalIntersection = { x: bounds.x, y };
-    }
-  } else if (point.x > bounds.x + bounds.width) {
-    const y = center.y + (dy * (bounds.x + bounds.width - center.x)) / dx;
-    if (y >= bounds.y && y <= bounds.y + bounds.height) {
-      horizontalIntersection = { x: bounds.x + bounds.width, y };
+  if (dx !== 0) {
+    // Skip horizontal bounds check if line is vertical
+    if (point.x < bounds.x) {
+      const y = center.y + (dy * (bounds.x - center.x)) / dx;
+      if (y >= bounds.y && y <= bounds.y + bounds.height) {
+        horizontalIntersection = { x: bounds.x, y };
+      }
+    } else if (point.x > bounds.x + bounds.width) {
+      const y = center.y + (dy * (bounds.x + bounds.width - center.x)) / dx;
+      if (y >= bounds.y && y <= bounds.y + bounds.height) {
+        horizontalIntersection = { x: bounds.x + bounds.width, y };
+      }
     }
   }
 
   // Check vertical bounds
-  if (point.y < bounds.y) {
-    const x = center.x + (dx * (bounds.y - center.y)) / dy;
-    if (x >= bounds.x && x <= bounds.x + bounds.width) {
-      verticalIntersection = { x, y: bounds.y };
-    }
-  } else if (point.y > bounds.y + bounds.height) {
-    const x = center.x + (dx * (bounds.y + bounds.height - center.y)) / dy;
-    if (x >= bounds.x && x <= bounds.x + bounds.width) {
-      verticalIntersection = { x, y: bounds.y + bounds.height };
+  if (dy !== 0) {
+    // Skip vertical bounds check if line is horizontal
+    if (point.y < bounds.y) {
+      const x = center.x + (dx * (bounds.y - center.y)) / dy;
+      if (x >= bounds.x && x <= bounds.x + bounds.width) {
+        verticalIntersection = { x, y: bounds.y };
+      }
+    } else if (point.y > bounds.y + bounds.height) {
+      const x = center.x + (dx * (bounds.y + bounds.height - center.y)) / dy;
+      if (x >= bounds.x && x <= bounds.x + bounds.width) {
+        verticalIntersection = { x, y: bounds.y + bounds.height };
+      }
     }
   }
 
