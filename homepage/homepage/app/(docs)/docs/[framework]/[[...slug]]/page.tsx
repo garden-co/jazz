@@ -4,9 +4,12 @@ import { docNavigationItems } from "@/lib/docNavigationItems.js";
 import { Framework, frameworks } from "@/lib/framework";
 import type { Toc } from "@stefanprobst/rehype-extract-toc";
 
-async function getMdxSource(slugPath: string, framework: string) {
+async function getMdxSource(framework: string, slugPath?: string) {
   // Try to import the framework-specific file first
   try {
+    if (!slugPath) {
+      return await import("./index.mdx")
+    }
     return await import(`./${slugPath}/${framework}.mdx`);
   } catch (error) {
     // Fallback to vanilla
@@ -18,9 +21,11 @@ export async function generateMetadata({
   params,
 }: { params: Promise<{ slug: string[]; framework: string }> }) {
   const { slug, framework } = await params;
-  const slugPath = slug.join("/");
+
+  const slugPath = slug?.join("/");
+
   try {
-    const mdxSource = await getMdxSource(slugPath, framework);
+    const mdxSource = await getMdxSource(framework, slugPath);
     const title = mdxSource.tableOfContents?.[0].value || "Documentation";
 
     return {
@@ -43,10 +48,11 @@ export default async function Page({
   params,
 }: { params: Promise<{ slug: string[]; framework: string }> }) {
   const { slug, framework } = await params;
-  const slugPath = slug.join("/");
+
+  const slugPath = slug?.join("/");
 
   try {
-    const mdxSource = await getMdxSource(slugPath, framework);
+    const mdxSource = await getMdxSource(framework, slugPath);
     const { default: Content, tableOfContents } = mdxSource;
 
     // Exclude h1 from table of contents
@@ -76,6 +82,10 @@ export async function generateStaticParams() {
   const paths: Array<{ slug?: string[]; framework: Framework }> = [];
 
   for (const framework of frameworks) {
+    paths.push({
+      framework,
+      slug: [],
+    })
     for (const heading of docNavigationItems) {
       for (const item of heading?.items) {
         if (item.href && item.href.startsWith("/docs")) {
