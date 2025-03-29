@@ -1,6 +1,7 @@
 import { CoID, LocalNode, RawCoValue } from "cojson";
 import { Page } from "./page.js"; // Assuming you have a Page component
 
+import { GlobalStyles } from "../ui/global-styles.js";
 import { classNames } from "../utils.js";
 // Define the structure of a page in the path
 interface PageInfo {
@@ -28,22 +29,25 @@ export function PageStack({
   const index = path.length - 1;
 
   return (
-    <div
-      className={classNames(
-        "relative px-3 overflow-y-auto flex-1  text-stone-700 dark:text-stone-400",
-      )}
-    >
-      {children}
-      {node && page && (
-        <Page
-          coId={page.coId}
-          node={node}
-          name={page.name || page.coId}
-          onHeaderClick={goBack}
-          onNavigate={addPages}
-          isTopLevel={index === path.length - 1}
-        />
-      )}
-    </div>
+    <>
+      <GlobalStyles />
+      <div
+        className={classNames(
+          "relative px-3 overflow-y-auto flex-1  text-stone-700 dark:text-stone-400",
+        )}
+      >
+        {children}
+        {node && page && (
+          <Page
+            coId={page.coId}
+            node={node}
+            name={page.name || page.coId}
+            onHeaderClick={goBack}
+            onNavigate={addPages}
+            isTopLevel={index === path.length - 1}
+          />
+        )}
+      </div>
+    </>
   );
 }
