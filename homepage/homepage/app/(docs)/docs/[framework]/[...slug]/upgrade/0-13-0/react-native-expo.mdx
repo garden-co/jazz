@@ -96,7 +96,14 @@ declare module "jazz-expo" {
 
 ## New Architecture Support
 
-The `jazz-expo` implementation supports the Expo New Architecture.
+The `jazz-expo` implementation fully supports [the React Native New Architecture](https://reactnative.dev/docs/the-new-architecture/landing-page) when used with compatible Expo SDK versions. See [Expo's New Architecture guide](https://docs.expo.dev/guides/new-architecture/) for details on using the New Architecture with Expo. This includes compatibility with:
+
+- JavaScript Interface (JSI) for more efficient JavaScript-to-native communication
+- Fabric rendering system for improved UI performance
+- TurboModules for better native module management
+- Codegen for type-safe interfaces
+
+No additional configuration is needed to use Jazz with Expo projects that use the New Architecture.
 
 ## Styling with NativeWind
 
