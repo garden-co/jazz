@@ -101,7 +101,7 @@ async function runCommand(command: string, exportFileName: string, port: number)
             // Spawn the benchmark tests ...
             const outputStream = fs.createWriteStream(`${exportFileName}.txt`, { flags: 'a' });
             // const benchmarkProcess = spawn('pnpm', ['run', 'playwright'], {
-            const benchmarkCommand = 'load-tests';
+            const benchmarkCommand = 'load-tests-demo';
             const benchmarkProcess = spawn('pnpm', ['run', benchmarkCommand], {
                 stdio: ['ignore', 'pipe', 'pipe'],
                 env: {

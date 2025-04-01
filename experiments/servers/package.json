@@ -44,7 +44,7 @@
     "load-test-09": "LOG_LEVEL=info npx artillery run tests/artillery-binary.ts --scenario-name '2d Create Single'   -e single    --output $OUTPUT_FILENAME.09",
     "load-test-10": "LOG_LEVEL=info npx artillery run tests/artillery-binary.ts --scenario-name '3e Mutate Single'   -e single    --output $OUTPUT_FILENAME.10",
     "load-tests": "clear; pnpm load-test-01; pnpm load-test-02; pnpm load-test-03; pnpm load-test-04; pnpm load-test-05; pnpm load-test-06; pnpm load-test-07; pnpm load-test-08; pnpm load-test-09; pnpm load-test-10; pnpm test-halt; say 'Done'",
-    "load-tests-demo": "clear; pnpm load-test-01; pnpm test-halt; say 'Done'",
+    "load-tests-demo": "clear; pnpm load-test-00; pnpm load-test-06; pnpm test-halt; say 'Done'",
     "k6": "clear; k6 run tests/k6-text.js; pnpm test-halt; say 'Done'"
   },
   "keywords": [],

@@ -219,12 +219,6 @@
                         info(
                             `Disconnected from event stream server at: ${new Date().toISOString()}`,
                         );
-                        if (retryAttempts < maxRetries) {
-                            setTimeout(() => {
-                                connect();
-                                retryAttempts++;
-                            }, 1000 * retryAttempts);
-                        }
                     };
 
                     const eventType = getEventType();
@@ -236,6 +230,10 @@
             }
 
             function getWebSocket() {
+                if (socket && (socket.readyState === WebSocket.CLOSED || socket.readyState === WebSocket.CLOSING)) {
+                    socket = null;
+                }
+
                 if (!socket) {
                     socket = new WebSocket(SERVER_WSS);
                     socket.onopen = (event) => {
@@ -244,25 +242,26 @@
                         );
                         debug(`${JSON.stringify(event)}`);
                         isConnected = true;
+                        retryAttempts = 0;
                         clearTimeout(reconnectTimeout);
                     };
 
-                    // socket.onclose = (event) => {
-                    //     debug(
-                    //         `Disconnected from WebSocket server at: ${new Date().toISOString()}`,
-                    //     );
-                    //     isConnected = false;
-                    //     reconnect();
-                    // };
                     socket.onclose = (event) => {
                         info(
                             `Disconnected from WebSocket server at: ${new Date().toISOString()}`,
                         );
+
+                        isConnected = false;
+                        const reconnectDelay = Math.min(1000 * Math.pow(2, retryAttempts), 30000); // Cap at 30 seconds
+                        debug(`Attempting to reconnect in ${reconnectDelay/1000} seconds (attempt ${retryAttempts + 1}/${maxRetries})`);
+
                         if (retryAttempts < maxRetries) {
-                            setTimeout(() => {
-                                connect();
+                            reconnectTimeout = setTimeout(() => {
                                 retryAttempts++;
-                            }, 1000 * retryAttempts);
+                                getWebSocket();
+                            }, reconnectDelay);
+                        } else {
+                            info(`Maximum WebSocket reconnection attempts (${maxRetries}) reached. Please refresh the page.`);
                         }
                     };
 
@@ -472,15 +471,15 @@
                     const a = document.createElement('a');
                     a.href = blobUrl;
                     a.download = coValue.file.name;
-                    a.textContent = `Download CoValue: ${coValue.uuid} (${coValue.file.name})`;
-                    a.style.display = 'block';
-                    messageElement.appendChild(a);
+                    // a.textContent = `Download CoValue: ${coValue.uuid} (${coValue.file.name})`;
+                    // a.style.display = 'block';
+                    // messageElement.appendChild(a);
                     a.click();
 
                     // Clean up to avoid leaking memory
                     setTimeout(() => {
-                        a.remove();
                         URL.revokeObjectURL(blobUrl);
+                        a.remove();
                     }, 5000);
 
                 } else {
@@ -537,20 +536,6 @@
                     }'.`,
                 );
             }
-
-            // function reconnect() {
-            //     if (!isConnected && isEnabled) {
-            //         debug(
-            //             `Attempting to reconnect in ${
-            //                 RECONNECT_INTERVAL / 1000
-            //             } seconds...`,
-            //         );
-            //         reconnectTimeout = setTimeout(() => {
-            //             debug("Attempting to reconnect...");
-            //             connect();
-            //         }, RECONNECT_INTERVAL);
-            //     }
-            // }
 
             async function loadCoValue(uuid, isBinary) {
                 binaryFlag = isBinary;
