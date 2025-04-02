@@ -1,6 +1,7 @@
 import { ValueType, metrics } from "@opentelemetry/api";
+import { PeerState } from "./PeerState.js";
 import type { CoValuePriority } from "./priority.js";
-import type { SyncMessage } from "./sync.js";
+import type { Peer, SyncMessage } from "./sync.js";
 
 function promiseWithResolvers<R>() {
   let resolve = (_: R) => {};
@@ -118,7 +119,10 @@ export class PriorityBasedMessageQueue {
     return this.queues[priority];
   }
 
-  constructor(private defaultPriority: CoValuePriority) {}
+  constructor(
+    private defaultPriority: CoValuePriority,
+    private peerRole: Peer["role"],
+  ) {}
 
   public push(msg: SyncMessage) {
     const { promise, resolve, reject } = promiseWithResolvers<void>();
@@ -130,6 +134,7 @@ export class PriorityBasedMessageQueue {
 
     this.enqueuedCounter.add(1, {
       priority,
+      role: this.peerRole,
     });
 
     return promise;
@@ -144,6 +149,7 @@ export class PriorityBasedMessageQueue {
 
     this.dequeuedCounter.add(1, {
       priority,
+      role: this.peerRole,
     });
 
     return this.queues[priority]?.shift();
