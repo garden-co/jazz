@@ -97,10 +97,19 @@ export class PriorityBasedMessageQueue {
     new LinkedList<QueueEntry>(),
     new LinkedList<QueueEntry>(),
   ];
-  queueSizeCounter = metrics
+
+  private enqueuedCounter = metrics
     .getMeter("cojson")
-    .createUpDownCounter("jazz.messagequeue.size", {
-      description: "Size of the message queue",
+    .createCounter("jazz.messagequeue.enqueued", {
+      description: "Number of messages enqueued",
+      valueType: ValueType.INT,
+      unit: "entry",
+    });
+
+  private dequeuedCounter = metrics
+    .getMeter("cojson")
+    .createCounter("jazz.messagequeue.removed", {
+      description: "Number of messages removed from the queue",
       valueType: ValueType.INT,
       unit: "entry",
     });
@@ -119,7 +128,7 @@ export class PriorityBasedMessageQueue {
 
     this.getQueue(priority).push(entry);
 
-    this.queueSizeCounter.add(1, {
+    this.enqueuedCounter.add(1, {
       priority,
     });
 
@@ -133,7 +142,7 @@ export class PriorityBasedMessageQueue {
       return;
     }
 
-    this.queueSizeCounter.add(-1, {
+    this.dequeuedCounter.add(1, {
       priority,
     });
 
