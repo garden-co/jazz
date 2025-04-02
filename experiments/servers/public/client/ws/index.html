@@ -251,9 +251,10 @@
                             `Disconnected from WebSocket server at: ${new Date().toISOString()}`,
                         );
 
+                        info(`WebSocket connection closed: code: ${event.code}; reason: ${event.reason}`);
                         isConnected = false;
                         const reconnectDelay = Math.min(1000 * Math.pow(2, retryAttempts), 30000); // Cap at 30 seconds
-                        debug(`Attempting to reconnect in ${reconnectDelay/1000} seconds (attempt ${retryAttempts + 1}/${maxRetries})`);
+                        info(`Attempting to reconnect WebSocket in ${reconnectDelay/1000} seconds (attempt ${retryAttempts + 1}/${maxRetries})`);
 
                         if (retryAttempts < maxRetries) {
                             reconnectTimeout = setTimeout(() => {
@@ -467,20 +468,20 @@
                     );
                     codeElement.innerHTML = JSON.stringify(copy, null, 5);
 
-                    const blobUrl = URL.createObjectURL(coValue.file.blob);
-                    const a = document.createElement('a');
-                    a.href = blobUrl;
-                    a.download = coValue.file.name;
-                    a.textContent = `Download CoValue: ${coValue.uuid} (${coValue.file.name})`;
-                    a.style.display = 'block';
-                    messageElement.appendChild(a);
-                    a.click();
+                    // const blobUrl = URL.createObjectURL(coValue.file.blob);
+                    // const a = document.createElement('a');
+                    // a.href = blobUrl;
+                    // a.download = coValue.file.name;
 
-                    // Clean up to avoid leaking memory
-                    setTimeout(() => {
-                        a.remove();
-                        URL.revokeObjectURL(blobUrl);
-                    }, 5000);
+                    // a.textContent = `Download CoValue: ${coValue.uuid} (${coValue.file.name})`;
+                    // a.style.display = 'block';
+                    // messageElement.appendChild(a);
+
+                    // a.click();
+                    // setTimeout(() => {
+                    //     URL.revokeObjectURL(blobUrl); // Clean up to avoid leaking memory
+                    //     a.remove();
+                    // }, 5000);
 
                 } else {
                     codeElement.innerHTML = JSON.stringify(coValue, null, 5);

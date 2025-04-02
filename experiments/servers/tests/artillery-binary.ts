@@ -203,7 +203,8 @@ export const config = {
         multiple: {
             phases: [
             {
-                duration: 180, // 3 minutes
+                // duration: 180, // 3 minutes
+                duration: 60,
                 arrivalCount: 1, // 1 vuser only
                 maxVusers: 1, // 1 vuser maximum
                 name: "Single user, multiple (concurrent) requests"

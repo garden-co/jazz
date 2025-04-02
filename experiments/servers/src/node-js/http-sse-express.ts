@@ -22,7 +22,13 @@ import { tlsCert } from "../util/tls";
 import { FileStreamManager, UploadBody } from "./filestream-manager";
 
 const app = express();
-const fileManager = new FileStreamManager();
+const rootDir = path.resolve(__dirname, "../..");
+const staticDir =
+    process.env.NODE_ENV === "production"
+        ? path.join(rootDir, "dist", "public")
+        : path.join(rootDir, "public");
+
+const fileManager = new FileStreamManager(staticDir);
 
 app.use(bodyParser.json({ limit: "50mb" }));
 app.use(express.static("public/client/http"));

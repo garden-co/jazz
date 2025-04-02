@@ -22,7 +22,13 @@ import logger from "../util/logger";
 import { tlsCert } from "../util/tls";
 import { FileStreamManager, UploadBody } from "./filestream-manager";
 
-const fileManager = new FileStreamManager();
+const rootDir = path.resolve(__dirname, "../..");
+const staticDir =
+    process.env.NODE_ENV === "production"
+        ? path.join(rootDir, "dist", "public")
+        : path.join(rootDir, "public");
+
+const fileManager = new FileStreamManager(staticDir);
 
 interface Client {
     userAgentId: string;
@@ -42,7 +48,6 @@ function broadcast(uuid: string): void {
     clients.forEach((client) => {
         client.res.raw.write(`event: ${type}\n`);
         client.res.raw.write(`data: ${JSON.stringify(data)}\n\n`);
-        // (client.res.raw as ServerResponse).flush?.(); // For HTTP/2
     });
 }
 

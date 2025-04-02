@@ -4,7 +4,8 @@ import logger from '../../src/util/logger';
 
 export const SERVER_URL = 'https://localhost:3000';
 export const NUM_BROWSERS: number = 10;
-export const concurrencyLevels = [10, 20, 50, 100];
+// Started with `[10, 20, 50, 100]` but using the below values because at >=50, the browser's web socket closes mid-test with: 1006 code (Abnormal Closure)
+export const concurrencyLevels = [10, 20, 30];
 
 interface BrowserInstance {
     browser: Browser;
