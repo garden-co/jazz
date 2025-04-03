@@ -144,7 +144,7 @@ describe("PriorityBasedMessageQueue", () => {
   test("should initialize with correct properties", () => {
     const { queue } = setup();
     expect(queue["defaultPriority"]).toBe(CO_VALUE_PRIORITY.MEDIUM);
-    expect(queue["queues"].length).toBe(8);
+    expect(queue["queues"].length).toBe(3);
     expect(queue["queues"].every((q) => !q.length)).toBe(true);
   });
 

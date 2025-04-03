@@ -1,5 +1,5 @@
 import { Counter, ValueType, metrics } from "@opentelemetry/api";
-import type { CoValuePriority } from "./priority.js";
+import { CO_VALUE_PRIORITY, type CoValuePriority } from "./priority.js";
 import type { SyncMessage } from "./sync.js";
 
 function promiseWithResolvers<R>() {
@@ -34,7 +34,7 @@ type Tuple<T, N extends number, A extends unknown[] = []> = A extends {
   ? A
   : Tuple<T, N, [...A, T]>;
 
-type QueueTuple = Tuple<LinkedList<QueueEntry>, 8>;
+type QueueTuple = Tuple<LinkedList<QueueEntry>, 3>;
 
 type LinkedListNode<T> = {
   value: T;
@@ -130,6 +130,12 @@ function meteredList<T>(attrs?: Record<string, string | number>) {
   return new LinkedList<T>(new QueueMeter("jazz.messagequeue", attrs));
 }
 
+const PRIORITY_TO_QUEUE_INDEX = {
+  [CO_VALUE_PRIORITY.HIGH]: 0,
+  [CO_VALUE_PRIORITY.MEDIUM]: 1,
+  [CO_VALUE_PRIORITY.LOW]: 2,
+} as const;
+
 export class PriorityBasedMessageQueue {
   private queues: QueueTuple;
 
@@ -142,19 +148,14 @@ export class PriorityBasedMessageQueue {
     attrs?: Record<string, string | number>,
   ) {
     this.queues = [
-      meteredList({ priority: 0, ...attrs }),
-      meteredList({ priority: 1, ...attrs }),
-      meteredList({ priority: 2, ...attrs }),
-      meteredList({ priority: 3, ...attrs }),
-      meteredList({ priority: 4, ...attrs }),
-      meteredList({ priority: 5, ...attrs }),
-      meteredList({ priority: 6, ...attrs }),
-      meteredList({ priority: 7, ...attrs }),
+      meteredList({ priority: CO_VALUE_PRIORITY.HIGH, ...attrs }),
+      meteredList({ priority: CO_VALUE_PRIORITY.MEDIUM, ...attrs }),
+      meteredList({ priority: CO_VALUE_PRIORITY.LOW, ...attrs }),
     ];
   }
 
   private getQueue(priority: CoValuePriority) {
-    return this.queues[priority];
+    return this.queues[PRIORITY_TO_QUEUE_INDEX[priority]];
   }
 
   public push(msg: SyncMessage) {
