@@ -1,6 +1,6 @@
 import { Page, expect } from '@playwright/test';
 import logger from '../src/util/logger';
-import { SERVER_URL, getRandomCoValueIndex, spawnBrowsers, concurrencyLevels, getPID } from './common';
+import { SERVER_URL, getRandomCoValueIndex, spawnBrowsers, concurrencyLevels1 as concurrencyLevels, getPID } from './common';
 
 async function loadMultiple(page: Page, context: any, events: any, test: any) {
     const { step } = test;

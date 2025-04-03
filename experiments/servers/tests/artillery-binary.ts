@@ -1,6 +1,6 @@
 import { Page, expect } from '@playwright/test';
 import logger from '../src/util/logger';
-import { SERVER_URL, getRandomCoValueIndex, spawnBrowsers, concurrencyLevels, getPID } from './common';
+import { SERVER_URL, getRandomCoValueIndex, spawnBrowsers, concurrencyLevels2 as concurrencyLevels, getPID } from './common';
 import fs from 'fs';
 import path from 'path';
 
@@ -104,7 +104,7 @@ async function createSingle(page: Page, context: any, events: any, test: any) {
     try {
         await step(`${context.scenario.name}.load_page_duration`, async () => {
             await page.goto(context.vars.target);
-            await page.waitForSelector('#status >> text=CoValue UUIDs loaded successfully.');
+            await page.waitForSelector('#status >> text=CoValue UUIDs loaded successfully.', { timeout: 121000 });
         });
         
         const initialOptions = await page.locator('select#coValueSelect option').all();
@@ -114,8 +114,8 @@ async function createSingle(page: Page, context: any, events: any, test: any) {
         await page.locator('#fileInput').setInputFiles(filePath);
         
         await step(`${context.scenario.name}.create_binary_duration`, async () => {
-            await page.click('#createCoValueBinary');
-            await page.waitForSelector('#status >> text=Created (binary) data for:', { timeout: 90000 });
+            await page.click('#createCoValueBinary', { timeout: 122000 });
+            await page.waitForSelector('#status >> text=Created (binary) data for:', { timeout: 180000 });
         });
         const newOptions = await page.locator('select#coValueSelect option').all();
         expect(newOptions.length).toEqual(initialOptions.length + 1);

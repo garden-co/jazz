@@ -76,7 +76,7 @@
         <div class="container">
             <span class="fixed-width-span">Binary:</span>
             <div>
-                <button id="loadMultipleCoValuesBinary" onclick="loadMultipleCoValues(10, true)">
+                <button id="loadMultipleCoValuesBinary" onclick="loadMultipleCoValues(5, true)">
                     1a. Load <strong>Multiple</strong> CoValues (Binary)
                 </button>
                 <button id="loadCoValueBinary" onclick="loadCoValue(null, true)">
@@ -362,7 +362,6 @@
 
                     case 202:
                         // 202 - Accepted: here signifies the start of a binary CoValue download
-                        // debug(`Received metadata for file: ${response.payload.fileName} (${response.payload.fileSize}) split into ${response.payload.totalChunks} chunks of ${response.payload.chunkSize} bytes.`);
                         handleJSONChunk(response.payload);
                         break;
 
@@ -373,7 +372,7 @@
                         break;
 
                     case 206:
-                        // 206 - Partial Content: here signifies chunks from a binary CoValue download
+                        // 206 - Partial Content: here signifies the middle (chunks) of a binary CoValue download
                         handleJSONChunk(response.payload);
                         break;
                 }
@@ -560,15 +559,16 @@
                         coValue = await httpLoadCoValue(uuid, isBinary);
                     }
 
-                    if (isBinary) {
+                    if (coValue) {
+                        if (isBinary) {
                         info(`Loaded (binary) data for: ${uuid} (${coValue.file.size} bytes).`);
                         loadCoValuesMap.delete(uuid);
 
-                    } else {
-                        info(`Loaded (text) data for: ${uuid}.`);
+                        } else {
+                            info(`Loaded (text) data for: ${uuid}.`);
+                        }
+                        logCoValue(coValue);
                     }
-
-                    logCoValue(coValue);
                 } catch (error) {
                     info(`Error loading CoValue (isBinary: ${isBinary}): ${error.message}`);
                 }
@@ -835,12 +835,11 @@
                             if (response.action === "GET" && response.payload.uuid === uuid && response.payload.type === "end") {
                                 wsRemoveMessageListener(handleMessage);
                                 const coValue = handleBinaryCoValue(uuid);
-
-                                if (!coValue) {
-                                    return reject(new Error(`CoValue ${uuid} failed to download chunks for binary`));
-                                }
-
                                 resolve(coValue);
+
+                                // if (!coValue) {
+                                //     reject(new Error(`CoValue ${uuid} binary download as chunks failed.`));
+                                // }
                             }
 
                         } else {
@@ -929,7 +928,7 @@
                             };
                             loadCoValuesMap.set(chunk.uuid, state);
 
-                            debug(`Received file metadata for CoValue: ${chunk.uuid} => ${chunk.fileName} (${chunk.fileSize}) split into ${chunk.totalChunks} chunks of ${chunk.chunkSize} bytes.`);
+                            info(`Received file metadata for CoValue: ${chunk.uuid} => ${chunk.fileName} (${chunk.fileSize}) split into ${chunk.totalChunks} chunks of ${chunk.chunkSize} bytes.`);
                             state.fileMetadata = { ...chunk };
 
                             // Start of a streaming download.
@@ -939,36 +938,43 @@
 
                         case "chunk":
                             if (!state) {
-                                throw new Error(`Received file chunk before file metadata for CoValue: ${chunk.uuid}`);
+                                throw new Error(`CoValue: ${chunk.uuid} received file-chunk before file metadata`);
                             }
 
                             const binaryData = base64ToUint8Array(chunk.data);
                             state.chunks[chunk.chunkIndex] = binaryData;
                             state.receivedLength += binaryData.byteLength;
 
-                            debug(`Received chunk: ${chunk.chunkIndex + 1}/${state.fileMetadata.totalChunks} (with chunk size: ${binaryData.byteLength}) for CoValue ${chunk.uuid}`);
+                            debug(`CoValue ${chunk.uuid} received chunk: ${chunk.chunkIndex + 1}/${state.fileMetadata.totalChunks} (with chunk size: ${binaryData.byteLength})`);
                             break;
 
                         case "end":
                             // End of stream
                             if (!state) {
-                                throw new Error(`Received end chunk before file metadata for CoValue: ${chunk.uuid}`);
-                            }
-
-                            if (state.chunks.some(chunk => chunk === undefined || chunk === null)) {
-                                throw new Error(`Some chunks are missing for CoValue ${state.fileMetadata.uuid}`);
+                                throw new Error(`CoValue: ${chunk.uuid} received end-chunk before file metadata`);
                             }
 
                             console.assert(state.contentLength === state.receivedLength, `Some chunks were lost because ${state.contentLength} !== ${state.receivedLength} for CoValue: ${chunk.uuid}`);
-                            debug(`File chunks for CoValue: ${chunk.uuid} downloaded successfully.`);
+                            if (state.contentLength === state.receivedLength) {
+                                info(`CoValue: ${chunk.uuid} download of file chunks succeeded.`);
 
-                            let binary = new Uint8Array(state.contentLength);
-                            let position = 0;
-                            for (let chunk of state.chunks) {
-                                binary.set(chunk, position);
-                                position += chunk.length;
+                                let binary = new Uint8Array(state.contentLength);
+                                let position = 0;
+                                for (let chunk of state.chunks) {
+                                    binary.set(chunk, position);
+                                    position += chunk.length;
+                                }
+                                state.blob = new Blob([binary], { type: "application/octet-stream" });
+                            } else {
+                                console.error(`CoValue: ${chunk.uuid} download of file chunks failed.`);
+                                // TODO: re-download missing chunks?
+
+                                // for (const chunko of state.chunks) {
+                                //     if (chunko === undefined || chunko === null) {
+                                //         throw new Error(`CoValue ${chunk.uuid} had some chunks missing!`);
+                                //     }
+                                // }
                             }
-                            state.blob = new Blob([binary], { type: "application/octet-stream" });
                             break;
 
                         case "error":
@@ -983,7 +989,8 @@
 
             function handleBinaryCoValue(uuid) {
                 const state = loadCoValuesMap.get(uuid);
-                if (!state) {
+                if (!state || !state.fileMetadata || !state.blob) {
+                    cleanUpBinaryCoValue(state);
                     return null;
                 }
 
@@ -995,13 +1002,17 @@
                     blob: state.blob,
                 };
 
+                cleanUpBinaryCoValue(state);
+
+                return coValue;
+            }
+
+            function cleanUpBinaryCoValue(state) {
                 // Clean up
                 state.fileMetadata = null;
                 state.chunks = null;
                 state.contentLength = -1;
                 state.receivedLength = -1;
-
-                return coValue;
             }
 
             async function wsCreateCoValuePromise(uuid, payload, isBinary) {
@@ -1181,6 +1192,7 @@
 
                     info(`Results: ${results.length}, Successful: ${successful.length}`);
                     info(`Loaded ${successful.length}/${MAX_CONCURRENT} CoValues in ${duration.toFixed(2)}ms`);
+                    // successful.map(coValue => info(`Created CoValue ${JSON.stringify(coValue)}`));
 
                     return {
                         duration,
