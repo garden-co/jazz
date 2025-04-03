@@ -1,4 +1,5 @@
 import { ValueType, metrics } from "@opentelemetry/api";
+import { callWithTimeout } from "@opentelemetry/sdk-metrics/build/src/utils.js";
 import { PeerState } from "./PeerState.js";
 import type { CoValuePriority } from "./priority.js";
 import type { Peer, SyncMessage } from "./sync.js";
@@ -87,7 +88,51 @@ export class LinkedList<T> {
   }
 }
 
-export class PriorityBasedMessageQueue {
+interface Queue {
+  getPriority: (msg: SyncMessage) => CoValuePriority;
+  push: (msg: SyncMessage) => Promise<void>;
+  pull: () => { priority: number; entry: QueueEntry } | undefined;
+}
+
+export function meteredQueue(queue: Queue, attrs?: Record<string, string>) {
+  const pushCounter = metrics
+    .getMeter("cojson")
+    .createCounter("jazz.messagequeue.pushed", {
+      description: "Number of messages pushed to the queue",
+      valueType: ValueType.INT,
+      unit: "total",
+    });
+
+  const pullCounter = metrics
+    .getMeter("cojson")
+    .createCounter("jazz.messagequeue.pulled", {
+      description: "Number of messages pulled from the queue",
+      valueType: ValueType.INT,
+      unit: "total",
+    });
+
+  return {
+    push(msg: SyncMessage) {
+      pushCounter.add(1, {
+        priority: queue.getPriority(msg),
+        ...attrs,
+      });
+      return queue.push(msg);
+    },
+    pull() {
+      const item = queue.pull();
+      if (item) {
+        pullCounter.add(1, {
+          priority: item.priority,
+          ...attrs,
+        });
+      }
+      return item?.entry;
+    },
+  };
+}
+
+export class PriorityBasedMessageQueue implements Queue {
   private queues: QueueTuple = [
     new LinkedList<QueueEntry>(),
     new LinkedList<QueueEntry>(),
@@ -99,43 +144,21 @@ export class PriorityBasedMessageQueue {
     new LinkedList<QueueEntry>(),
   ];
 
-  private enqueuedCounter = metrics
-    .getMeter("cojson")
-    .createCounter("jazz.messagequeue.enqueued", {
-      description: "Number of messages enqueued",
-      valueType: ValueType.INT,
-      unit: "entry",
-    });
-
-  private dequeuedCounter = metrics
-    .getMeter("cojson")
-    .createCounter("jazz.messagequeue.removed", {
-      description: "Number of messages removed from the queue",
-      valueType: ValueType.INT,
-      unit: "entry",
-    });
-
   private getQueue(priority: CoValuePriority) {
     return this.queues[priority];
   }
 
-  constructor(
-    private defaultPriority: CoValuePriority,
-    private peerRole: Peer["role"],
-  ) {}
+  constructor(private defaultPriority: CoValuePriority) {}
+
+  public getPriority(msg: SyncMessage) {
+    return "priority" in msg ? msg.priority : this.defaultPriority;
+  }
 
   public push(msg: SyncMessage) {
     const { promise, resolve, reject } = promiseWithResolvers<void>();
     const entry: QueueEntry = { msg, promise, resolve, reject };
 
-    const priority = "priority" in msg ? msg.priority : this.defaultPriority;
-
-    this.getQueue(priority).push(entry);
-
-    this.enqueuedCounter.add(1, {
-      priority,
-      role: this.peerRole,
-    });
+    this.getQueue(this.getPriority(msg)).push(entry);
 
     return promise;
   }
@@ -143,15 +166,12 @@ export class PriorityBasedMessageQueue {
   public pull() {
     const priority = this.queues.findIndex((queue) => queue.length > 0);
 
-    if (priority === -1) {
+    const entry = this.queues[priority]?.shift();
+
+    if (!entry) {
       return;
     }
 
-    this.dequeuedCounter.add(1, {
-      priority,
-      role: this.peerRole,
-    });
-
-    return this.queues[priority]?.shift();
+    return { priority, entry };
   }
 }

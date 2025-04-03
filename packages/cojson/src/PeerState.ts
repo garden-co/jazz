@@ -2,6 +2,7 @@ import { PeerKnownStateActions, PeerKnownStates } from "./PeerKnownStates.js";
 import {
   PriorityBasedMessageQueue,
   QueueEntry,
+  meteredQueue,
 } from "./PriorityBasedMessageQueue.js";
 import { TryAddTransactionsError } from "./coValueCore.js";
 import { RawCoID } from "./ids.js";
@@ -82,9 +83,11 @@ export class PeerState {
    *
    * This way we consider all the non-content messsages as HIGH priority.
    */
-  private queue = new PriorityBasedMessageQueue(
-    CO_VALUE_PRIORITY.HIGH,
-    this.peer.role,
+  private queue = meteredQueue(
+    new PriorityBasedMessageQueue(CO_VALUE_PRIORITY.HIGH),
+    {
+      peerRole: this.peer.role,
+    },
   );
   private processing = false;
   public closed = false;
