@@ -1,8 +1,5 @@
 import { afterEach, describe, expect, test } from "vitest";
-import {
-  PriorityBasedMessageQueue,
-  meteredQueue,
-} from "../PriorityBasedMessageQueue.js";
+import { PriorityBasedMessageQueue } from "../PriorityBasedMessageQueue.js";
 import { CO_VALUE_PRIORITY } from "../priority.js";
 import type { SyncMessage } from "../sync.js";
 import {
@@ -10,16 +7,9 @@ import {
   tearDownTestMetricReader,
 } from "./testUtils.js";
 
-function setup() {
-  const queue = new PriorityBasedMessageQueue(CO_VALUE_PRIORITY.MEDIUM);
-  return { queue };
-}
-
-function setupMeteredQueue(attrs?: Record<string, string>) {
+function setup(attrs?: Record<string, string | number>) {
   const metricReader = createTestMetricReader();
-
-  const { queue: unmeteredQueue } = setup();
-  const queue = meteredQueue(unmeteredQueue, attrs);
+  const queue = new PriorityBasedMessageQueue(CO_VALUE_PRIORITY.MEDIUM, attrs);
   return { queue, metricReader };
 }
 
@@ -30,7 +20,7 @@ describe("PriorityBasedMessageQueue", () => {
 
   describe("meteredQueue", () => {
     test("should corretly count pushes", async () => {
-      const { queue, metricReader } = setupMeteredQueue();
+      const { queue, metricReader } = setup();
       const message: SyncMessage = {
         action: "load",
         id: "co_ztest-id",
@@ -60,7 +50,7 @@ describe("PriorityBasedMessageQueue", () => {
     });
 
     test("should corretly count pulls", async () => {
-      const { queue, metricReader } = setupMeteredQueue();
+      const { queue, metricReader } = setup();
       const message: SyncMessage = {
         action: "load",
         id: "co_ztest-id",
@@ -99,7 +89,7 @@ describe("PriorityBasedMessageQueue", () => {
     });
 
     test("should corretly set custom attributes to the metrics", async () => {
-      const { queue, metricReader } = setupMeteredQueue({ role: "server" });
+      const { queue, metricReader } = setup({ role: "server" });
       const message: SyncMessage = {
         action: "load",
         id: "co_ztest-id",
@@ -151,6 +141,13 @@ describe("PriorityBasedMessageQueue", () => {
     });
   });
 
+  test("should initialize with correct properties", () => {
+    const { queue } = setup();
+    expect(queue["defaultPriority"]).toBe(CO_VALUE_PRIORITY.MEDIUM);
+    expect(queue["queues"].length).toBe(8);
+    expect(queue["queues"].every((q) => !q.length)).toBe(true);
+  });
+
   test("should push message with default priority", async () => {
     const { queue } = setup();
     const message: SyncMessage = {
@@ -161,7 +158,7 @@ describe("PriorityBasedMessageQueue", () => {
     };
     void queue.push(message);
     const pulledEntry = queue.pull();
-    expect(pulledEntry?.entry.msg).toEqual(message);
+    expect(pulledEntry?.msg).toEqual(message);
   });
 
   test("should push message with specified priority", async () => {
@@ -174,7 +171,7 @@ describe("PriorityBasedMessageQueue", () => {
     };
     void queue.push(message);
     const pulledEntry = queue.pull();
-    expect(pulledEntry?.entry.msg).toEqual(message);
+    expect(pulledEntry?.msg).toEqual(message);
   });
 
   test("should pull messages in priority order", async () => {
@@ -202,9 +199,9 @@ describe("PriorityBasedMessageQueue", () => {
     void queue.push(mediumPriorityMsg);
     void queue.push(highPriorityMsg);
 
-    expect(queue.pull()?.entry.msg).toEqual(highPriorityMsg);
-    expect(queue.pull()?.entry.msg).toEqual(mediumPriorityMsg);
-    expect(queue.pull()?.entry.msg).toEqual(lowPriorityMsg);
+    expect(queue.pull()?.msg).toEqual(highPriorityMsg);
+    expect(queue.pull()?.msg).toEqual(mediumPriorityMsg);
+    expect(queue.pull()?.msg).toEqual(lowPriorityMsg);
   });
 
   test("should return undefined when pulling from empty queue", () => {
@@ -223,7 +220,7 @@ describe("PriorityBasedMessageQueue", () => {
     const pushPromise = queue.push(message);
 
     const pulledEntry = queue.pull();
-    pulledEntry?.entry.resolve();
+    pulledEntry?.resolve();
 
     await expect(pushPromise).resolves.toBeUndefined();
   });
@@ -239,7 +236,7 @@ describe("PriorityBasedMessageQueue", () => {
     const pushPromise = queue.push(message);
 
     const pulledEntry = queue.pull();
-    pulledEntry?.entry.reject(new Error("Test error"));
+    pulledEntry?.reject(new Error("Test error"));
 
     await expect(pushPromise).rejects.toThrow("Test error");
   });
