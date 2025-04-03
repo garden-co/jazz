@@ -113,6 +113,11 @@ class QueueMeter {
         unit: "1",
       });
 
+    /**
+     * This makes sure that those metrics are generated (and emitted) as soon as the queue is created.
+     * This is to avoid edge cases where one series reset is delayed, which would cause spikes or dips
+     * when queried - and it also more correctly represents the actual state of the queue after a restart.
+     */
     this.pullCounter.add(0, this.attrs);
     this.pushCounter.add(0, this.attrs);
   }
