@@ -112,6 +112,9 @@ class QueueMeter {
         valueType: ValueType.INT,
         unit: "1",
       });
+
+    this.pullCounter.add(0, this.attrs);
+    this.pushCounter.add(0, this.attrs);
   }
 
   public pull() {

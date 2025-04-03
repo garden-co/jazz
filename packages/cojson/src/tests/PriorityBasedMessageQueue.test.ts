@@ -32,7 +32,7 @@ describe("PriorityBasedMessageQueue", () => {
         await metricReader.getMetricValue("jazz.messagequeue.pushed", {
           priority: CO_VALUE_PRIORITY.MEDIUM,
         }),
-      ).toBeUndefined();
+      ).toBe(0);
 
       void queue.push(message);
       expect(
@@ -62,14 +62,14 @@ describe("PriorityBasedMessageQueue", () => {
         await metricReader.getMetricValue("jazz.messagequeue.pulled", {
           priority: CO_VALUE_PRIORITY.MEDIUM,
         }),
-      ).toBeUndefined();
+      ).toBe(0);
 
       void queue.push(message);
       expect(
         await metricReader.getMetricValue("jazz.messagequeue.pulled", {
           priority: CO_VALUE_PRIORITY.MEDIUM,
         }),
-      ).toBeUndefined();
+      ).toBe(0);
 
       void queue.pull();
 
@@ -102,7 +102,7 @@ describe("PriorityBasedMessageQueue", () => {
           priority: CO_VALUE_PRIORITY.MEDIUM,
           role: "server",
         }),
-      ).toBeUndefined();
+      ).toBe(0);
       expect(
         await metricReader.getMetricValue("jazz.messagequeue.pushed", {
           priority: CO_VALUE_PRIORITY.MEDIUM,
@@ -122,7 +122,7 @@ describe("PriorityBasedMessageQueue", () => {
           priority: CO_VALUE_PRIORITY.MEDIUM,
           role: "server",
         }),
-      ).toBeUndefined();
+      ).toBe(0);
 
       void queue.pull();
 
