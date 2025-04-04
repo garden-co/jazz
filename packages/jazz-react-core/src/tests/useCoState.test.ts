@@ -4,7 +4,11 @@ import { cojsonInternals } from "cojson";
 import { CoList, CoMap, CoValue, Group, ID, co } from "jazz-tools";
 import { beforeEach, describe, expect, expectTypeOf, it } from "vitest";
 import { useCoState } from "../index.js";
-import { createJazzTestAccount, setupJazzTestSync } from "../testing.js";
+import {
+  createJazzTestAccount,
+  linkAccounts,
+  setupJazzTestSync,
+} from "../testing.js";
 import { act, renderHook, waitFor } from "./testUtils.js";
 
 beforeEach(async () => {
@@ -306,6 +310,16 @@ describe("useCoState", () => {
       });
     });
     expect(result.current?.value).toBe("123");
+  });
+
+  it("should return a null value when the coValue becomes inaccessible", async () => {
+    class TestMap extends CoMap {
+      value = co.string;
+    }
+
+    const { result } = renderHook(() => useCoState(TestMap, undefined));
+
+    expect(result.current).toBeNull();
   });
 
   it("should update when an inner coValue is updated", async () => {

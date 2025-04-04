@@ -406,8 +406,8 @@ export function subscribeToCoValue<
 export function createCoValueObservable<
   V extends CoValue,
   const R extends RefsToResolve<V>,
->() {
-  let currentValue: Resolved<V, R> | undefined | null = undefined;
+>(initialValue: undefined | null = undefined) {
+  let currentValue: Resolved<V, R> | undefined | null = initialValue;
   let subscriberCount = 0;
 
   function subscribe(
