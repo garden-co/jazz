@@ -1,0 +1,76 @@
+export const metadata = {
+  title: "Create Jazz App",
+};
+
+import { CodeGroup } from "@/components/forMdx";
+
+# Create Jazz App
+
+Jazz comes with a CLI tool that helps you quickly scaffold new Jazz applications with your preferred framework and authentication method.
+
+## Quick Start
+
+Create a new Jazz app in seconds:
+
+<CodeGroup>
+```bash
+npx create-jazz-app@latest
+```
+</CodeGroup>
+
+This launches an interactive CLI that guides you through selecting:
+- Your framework (React, Vue, Svelte, Next.js, React Native)
+- Authentication method (Demo, Passkey, Clerk)
+- Package manager
+- Project name
+
+## One-liner
+
+If you know what you want, specify everything in one go:
+
+<CodeGroup>
+```bash
+npx create-jazz-app@latest my-app\
+  --starter react-passkey-auth\
+  --package-manager npm
+```
+</CodeGroup>
+
+## Start From an Example
+
+Need inspiration? Use one of our example apps as your starting point:
+
+<CodeGroup>
+```bash
+npx create-jazz-app@latest --example chat
+```
+</CodeGroup>
+
+Find all available examples in our [GitHub repository](https://github.com/garden-co/jazz/tree/main/examples).
+
+## Available Starters
+
+Choose from these ready-to-use starter templates:
+
+- `react-passkey-auth` - React with Passkey authentication (easiest to start with)
+- `react-clerk-auth` - React with Clerk authentication
+- `vue-demo-auth` - Vue with Demo authentication
+- `svelte-passkey-auth` - Svelte with Passkey authentication
+- `rn-clerk-auth` - React Native with Clerk authentication
+
+Run `npx create-jazz-app --help` to see the latest list of available starters.
+
+## What Happens Behind the Scenes
+
+When you run `create-jazz-app`, we'll:
+
+1. Ask for your preferences (or use your command line arguments)
+2. Clone the appropriate starter template
+3. Update dependencies to their latest versions
+4. Install all required packages
+5. Set up your project and show next steps
+
+## Requirements
+
+- Node.js 14.0.0 or later
+- Your preferred package manager (npm, yarn, pnpm, bun, or deno)
