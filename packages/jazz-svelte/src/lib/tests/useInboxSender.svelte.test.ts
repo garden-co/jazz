@@ -6,7 +6,7 @@ import type { ID } from 'jazz-tools';
 import { default as TestComponent } from './components/useInboxSender.svelte';
 
 // Mock dependencies
-vi.mock('./jazz.svelte', () => ({
+vi.mock('../jazz.svelte', () => ({
   getJazzContext: vi.fn()
 }));
 
