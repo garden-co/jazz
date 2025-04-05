@@ -5,6 +5,12 @@ export {
 } from "./PasskeyAuth.js";
 export { PassphraseAuthBasicUI } from "./PassphraseAuth.js";
 export {
+  useCreateMagicLinkAuthAsProvider,
+  useCreateMagicLinkAuthAsConsumer,
+  useHandleMagicLinkAuthAsConsumer,
+  useHandleMagicLinkAuthAsProvider,
+} from "./MagicLinkAuth.js";
+export {
   useIsAuthenticated,
   useDemoAuth,
   usePassphraseAuth,

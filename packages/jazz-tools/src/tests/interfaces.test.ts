@@ -1,9 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Group } from "../coValues/group";
-import { Account } from "../exports";
+import { Account, CoMap } from "../exports";
 import {
+  co,
   parseCoValueCreateOptions,
   parseGroupCreateOptions,
+  waitForCoValueCondition,
 } from "../internal";
 import { createJazzTestAccount } from "../testing";
 
@@ -86,5 +88,54 @@ describe("parseGroupCreateOptions", () => {
     const account = await createJazzTestAccount();
     const result = parseGroupCreateOptions({ owner: account });
     expect(result.owner).toBe(account);
+  });
+});
+
+describe("waitForCoValueCondition", () => {
+  class TestCoMap extends CoMap {
+    nothing = co.optional.string;
+    maybeSomething = co.optional.string;
+    something = co.optional.string;
+  }
+
+  let value: TestCoMap;
+
+  beforeEach(() => {
+    value = TestCoMap.create({ something: "world" });
+  });
+
+  it("should resolve", async () => {
+    const { something } = await waitForCoValueCondition(value, {}, (x) =>
+      Boolean(x.something),
+    );
+
+    expect(something).toBe("world");
+  });
+
+  it("should resolve after a delay", async () => {
+    setTimeout(() => {
+      value.maybeSomething = "hi there";
+    }, 50);
+
+    const { maybeSomething } = await waitForCoValueCondition(value, {}, (x) =>
+      Boolean(x.maybeSomething),
+    );
+
+    expect(maybeSomething).toBe("hi there");
+  });
+
+  it("should timeout", async () => {
+    const timeoutMs = 50;
+
+    const promise = waitForCoValueCondition(
+      value,
+      {},
+      (x) => Boolean(x.nothing),
+      timeoutMs,
+    );
+
+    await expect(promise).rejects.toThrow(
+      "Timeout waiting for CoValue condition",
+    );
   });
 });

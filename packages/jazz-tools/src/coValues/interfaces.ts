@@ -490,6 +490,54 @@ export function subscribeToExistingCoValue<
   );
 }
 
+export function waitForCoValueCondition<
+  V extends CoValue,
+  const R extends RefsToResolve<V>,
+>(
+  existing: V,
+  options: {
+    resolve?: RefsToResolveStrict<V, R>;
+    onUnavailable?: () => void;
+    onUnauthorized?: () => void;
+  },
+  conditionFn: (value: V) => boolean,
+  timeoutMs = 15000,
+): Promise<V> {
+  return new Promise((resolve, reject) => {
+    let aborted = false;
+    let unsubscribe = () => {};
+
+    const abort = () => {
+      aborted = true;
+      unsubscribe();
+      clearTimeout(timeout);
+    };
+
+    subscribeToCoValue(
+      existing.constructor as CoValueClass<V>,
+      existing.id,
+      {
+        loadAs: existing._loadedAs,
+        ...options,
+      },
+      (value, unsubscribeParam) => {
+        unsubscribe = unsubscribeParam;
+        if (aborted) return;
+
+        if (conditionFn(value)) {
+          abort();
+          resolve(value);
+        }
+      },
+    );
+
+    const timeout = setTimeout(() => {
+      abort();
+      reject(new Error("Timeout waiting for CoValue condition"));
+    }, timeoutMs);
+  });
+}
+
 export function isAccountInstance(instance: unknown): instance is Account {
   if (typeof instance !== "object" || instance === null) {
     return false;

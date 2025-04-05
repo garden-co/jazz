@@ -341,6 +341,14 @@ export function AuthButton() {
 </ContentByFramework>
 </ContentByFramework>
 
+## Magic Link authentication
+
+Magic Links can be used to transfer authentication from one device to another, for example using a QR code.
+
+We refer to the device that is already authenticated as the **provider** and the one that wants to authenticate as the **consumer**. In our examples, **desktop** is the device that displays the QR code, and **mobile** is the device that scans it.
+
+Transferring authentication is supported in both directions: the **desktop** device can act as the provider while the **mobile** device acts as the consumer and vice versa.
+
 ## Migrating data from anonymous to authenticated account
 
 You may want allow your users to use your app without authenticating (a poll response for example). When *signing up* their anonymous account is transparently upgraded using the provided auth method, keeping the data stored in the account intact.
