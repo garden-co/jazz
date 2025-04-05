@@ -9,12 +9,12 @@ import type {
   JazzContextType,
   JazzGuestContext,
   RefsToResolve,
-  Resolved
+  Resolved,
+  RefsToResolveStrict
 } from 'jazz-tools';
-import { Account, subscribeToCoValue } from 'jazz-tools';
+import { Account, subscribeToCoValue, InboxSender } from 'jazz-tools';
 import { getContext, untrack } from 'svelte';
 import Provider from './Provider.svelte';
-import type { RefsToResolveStrict } from 'jazz-tools';
 
 export { Provider as JazzProvider };
 
@@ -66,18 +66,22 @@ export interface Register {}
 
 export type RegisteredAccount = Register extends { Account: infer Acc } ? Acc : Account;
 
-declare module "jazz-tools" {
+declare module 'jazz-tools' {
   export interface Register {
     Account: RegisteredAccount;
   }
 }
 
-  export function useAccount<const R extends RefsToResolve<RegisteredAccount>>(
-    options?: { resolve?: RefsToResolveStrict<RegisteredAccount, R> }
-  ): { me: Resolved<RegisteredAccount, R> | undefined | null; logOut: () => void };
-  export function useAccount<const R extends RefsToResolve<RegisteredAccount>>(
-    options?: { resolve?: RefsToResolveStrict<RegisteredAccount, R> }
-  ): { me: RegisteredAccount | Resolved<RegisteredAccount, R> | undefined | null; logOut: () => void } {
+export function useAccount<const R extends RefsToResolve<RegisteredAccount>>(options?: {
+  resolve?: RefsToResolveStrict<RegisteredAccount, R>;
+}): { me: Resolved<RegisteredAccount, R> | undefined | null; logOut: () => void };
+
+export function useAccount<const R extends RefsToResolve<RegisteredAccount>>(options?: {
+  resolve?: RefsToResolveStrict<RegisteredAccount, R>;
+}): {
+  me: RegisteredAccount | Resolved<RegisteredAccount, R> | undefined | null;
+  logOut: () => void;
+} {
   const ctx = getJazzContext<RegisteredAccount>();
   if (!ctx?.current) {
     throw new Error('useAccount must be used within a JazzProvider');
@@ -118,12 +122,14 @@ declare module "jazz-tools" {
 }
 
 export function useAccountOrGuest(): { me: RegisteredAccount | AnonymousJazzAgent };
-export function useAccountOrGuest<R extends RefsToResolve<RegisteredAccount>>(
-  options?: { resolve?: RefsToResolveStrict<RegisteredAccount, R> }
-): { me: Resolved<RegisteredAccount, R> | undefined  | null| AnonymousJazzAgent };
-export function useAccountOrGuest<R extends RefsToResolve<RegisteredAccount>>(
-  options?: { resolve?: RefsToResolveStrict<RegisteredAccount, R> }
-): { me: RegisteredAccount | Resolved<RegisteredAccount, R> | undefined  | null| AnonymousJazzAgent } {
+export function useAccountOrGuest<R extends RefsToResolve<RegisteredAccount>>(options?: {
+  resolve?: RefsToResolveStrict<RegisteredAccount, R>;
+}): { me: Resolved<RegisteredAccount, R> | undefined | null | AnonymousJazzAgent };
+export function useAccountOrGuest<R extends RefsToResolve<RegisteredAccount>>(options?: {
+  resolve?: RefsToResolveStrict<RegisteredAccount, R>;
+}): {
+  me: RegisteredAccount | Resolved<RegisteredAccount, R> | undefined | null | AnonymousJazzAgent;
+} {
   const ctx = getJazzContext<RegisteredAccount>();
 
   if (!ctx?.current) {
@@ -178,7 +184,7 @@ export function useCoState<V extends CoValue, R extends RefsToResolve<V>>(
     // Return early if no context or id, effectively cleaning up any previous subscription
     if (!ctx?.current || !id) return;
 
-    const agent = "me" in ctx.current ? ctx.current.me : ctx.current.guest;
+    const agent = 'me' in ctx.current ? ctx.current.me : ctx.current.guest;
 
     // Setup subscription with current values
     return subscribeToCoValue<V, R>(
@@ -193,12 +199,12 @@ export function useCoState<V extends CoValue, R extends RefsToResolve<V>>(
         onUnauthorized: () => {
           state = null;
         },
-        syncResolution: true,
+        syncResolution: true
       },
       (value) => {
         // Get current value from our stable observable
         state = value;
-      },
+      }
     );
   });
 
@@ -259,3 +265,47 @@ export function useAcceptInvite<V extends CoValue>({
     });
   });
 }
+
+function useInboxSender<I extends CoValue, O extends CoValue | undefined>(
+  inboxOwnerID: ID<RegisteredAccount> | undefined
+) {
+  // Use Svelte 5's getJazzContext instead
+  const ctx = getJazzContext<RegisteredAccount>();
+
+  if (!ctx.current) {
+    throw new Error('useAcceptInvite must be used within a JazzProvider');
+  }
+
+  if (!('me' in ctx.current)) {
+    throw new Error("useAcceptInvite can't be used in a JazzProvider with auth === 'guest'.");
+  }
+  // No need for context type checking, as we're using the typed version
+  const me = (ctx.current as JazzAuthContext<RegisteredAccount>).me;
+
+  // Use $state for reactive variables instead of useRef
+  let inboxPromise = $state<Promise<InboxSender<I, O>> | undefined>(undefined);
+
+  // Create function without useCallback since Svelte handles memoization differently
+  async function sendMessage(message: I) {
+    if (!inboxOwnerID) throw new Error('Inbox owner ID is required');
+
+    if (!inboxPromise) {
+      const inbox = InboxSender.load<I, O>(inboxOwnerID, me);
+      inboxPromise = inbox;
+    }
+
+    let inbox = await inboxPromise;
+
+    // Verify the inbox is for the right recipient
+    if (inbox.owner.id !== inboxOwnerID) {
+      const req = InboxSender.load<I, O>(inboxOwnerID, me);
+      inboxPromise = req;
+      inbox = await req;
+    }
+
+    return inbox.sendMessage(message);
+  }
+
+  return sendMessage;
+}
+export const experimental = { useInboxSender };
