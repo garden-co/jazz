@@ -4,21 +4,42 @@ export const metadata = { title: "Enable local persistence" };
 
 # Enable local persistence
 
-Version 0.9.2 introduces local persistence for React Native apps using SQLite.
+Version 0.9.2 introduces local persistence for React Native apps using SQLite. In version 0.12, we've separated the implementations for Expo and framework-less React Native.
 
 If you are upgrading from a version before 0.9.2, you need to enable local persistence by following the steps below.
 
-Local persistence will become the default in 0.10.0.
+Local persistence is enabled by default in version 0.12 and higher.
+
+## Choose your implementation
+
+Depending on whether you're using Expo or framework-less React Native, you'll need to follow different steps:
+
+- For Expo applications, refer to the [React Native - Expo](/docs/react-native-expo/project-setup) guide
+- For framework-less React Native applications, refer to the [React Native](/docs/react-native/project-setup) guide
 
 ## Add the required dependencies
 
-As SQLite package we now use `@op-engineering/op-sqlite`.
+### For Expo
 
-To get local persistence working, you need to add `@op-engineering/op-sqlite` as a direct dependency to your project and run `npx pod-install`.
+As SQLite package, Expo uses `expo-sqlite`. Install it with:
 
-## Update your JazzProvider to enable local persistence
+```bash
+npx expo install expo-sqlite
+npx expo install expo-secure-store
+```
 
-Local persistence is now disabled by default.
+### For framework-less React Native
+
+As SQLite package, we use `@op-engineering/op-sqlite` and `react-native-mmkv` for key-value storage:
+
+```bash
+npm install @op-engineering/op-sqlite react-native-mmkv
+npx pod-install
+```
+
+## Update your JazzProvider
+
+In version 0.12 and higher, you need to use either the `jazz-expo` package (for Expo) or the `jazz-react-native` package (for framework-less React Native). Local persistence is enabled by default in both packages.
 
 To enable it, you need to pass the `storage` option to the `JazzProvider` component:
 

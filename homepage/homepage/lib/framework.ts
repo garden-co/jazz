@@ -1,6 +1,7 @@
 export enum Framework {
   React = "react",
   ReactNative = "react-native",
+  ReactNativeExpo = "react-native-expo",
   Vue = "vue",
   Svelte = "svelte",
   Vanilla = "vanilla",

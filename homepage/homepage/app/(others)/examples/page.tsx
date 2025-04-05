@@ -484,16 +484,24 @@ const rnExamples: Example[] = [
   {
     name: "Chat",
     slug: "chat-rn",
-    description: "A simple app that creates a chat room with a shareable link.",
+    description: "A simple React Native app that creates a chat room with a shareable link.",
     tech: [tech.reactNative],
     illustration: <ChatIllustration />,
   },
 
   {
     name: "Chat",
-    slug: "chat-rn-clerk",
-    description: "Exactly like the React Native chat app, with Clerk for auth.",
-    tech: [tech.reactNative],
+    slug: "chat-rn-expo",
+    description: "A simple Expo app that creates a chat room with a shareable link.",
+    tech: [tech.reactNative, tech.expo],
+    illustration: <ChatIllustration />,
+  },
+
+  {
+    name: "Chat",
+    slug: "chat-rn-expo-clerk",
+    description: "Exactly like the React Native Expo chat app, with Clerk for auth.",
+    tech: [tech.reactNative, tech.expo],
     features: [features.clerk],
     illustration: <ClerkIllustration />,
   },

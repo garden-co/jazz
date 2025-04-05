@@ -1,0 +1,118 @@
+export const metadata = { title: "Providers - React Native Expo" };
+
+import { CodeGroup } from "@/components/forMdx";
+
+# Providers
+
+## Introduction
+
+`<JazzProvider />` is the core component that connects your Expo application to Jazz. It handles:
+
+- **Data Synchronization**: Manages connections to peers and the Jazz cloud
+- **Local Storage**: Persists data locally between app sessions
+- **Schema Types**: Provides APIs for the [AccountSchema](/docs/schemas/accounts-and-migrations)
+- **Authentication**: Connects your authentication system to Jazz
+
+## Setting up the provider
+
+Wrap your app components with the `<JazzProvider />` component:
+
+<CodeGroup>
+```tsx twoslash
+// @noErrors: 2307 7031 2304 2686 2664
+// App.tsx
+import { JazzProvider } from "jazz-expo";
+import { MyAppAccount } from "./schema";
+
+export function MyJazzProvider({ children }: { children: React.ReactNode }) {
+  return (
+    <JazzProvider
+      sync={{ peer: "wss://cloud.jazz.tools/?key=you@example.com" }}
+      AccountSchema={MyAppAccount}
+    >
+      {children}
+    </JazzProvider>
+  );
+}
+
+// Register the Account schema so `useAccount` returns our custom `MyAppAccount`
+declare module "jazz-expo" {
+  interface Register {
+    Account: MyAppAccount;
+  }
+}
+```
+</CodeGroup>
+
+## Provider Options
+
+- `kvStore`
+  - `ExpoSecureStoreAdapter` (default)
+- `AccountSchema`
+  - `Account` (default)
+- `CryptoProvider`
+  - `PureJSCrypto` (default) - Pure JavaScript crypto provider
+  - `RNQuickCrypto` - C++ accelerated crypto provider
+
+## Authentication in the Provider
+
+`<JazzProvider />` works with various authentication methods, with PassphraseAuth being the easiest way to get started for development and testing. For authentication details, refer to our [Authentication Overview](/docs/authentication/overview) guide.
+
+The authentication hooks must always be used inside the `<JazzProvider />` component.
+
+Implementing PassphraseAuth is straightforward:
+
+1. Import the [wordlist](https://github.com/bitcoinjs/bip39/tree/a7ecbfe2e60d0214ce17163d610cad9f7b23140c/src/wordlists) for generating recovery phrases
+2. Use the `usePassphraseAuth` hook to handle authentication 
+3. Create simple registration and sign-in screens
+
+<CodeGroup>
+```tsx twoslash
+// @noErrors: 2307
+import React, { ReactNode } from "react";
+function SignInScreen({ auth }: { auth: any }) {
+  return null;
+}
+// ---cut-before---
+// Example with PassphraseAuth
+import { JazzProvider, usePassphraseAuth } from "jazz-expo";
+import { englishWordlist } from "./wordlist";
+
+function JazzAuthentication({ children }: { children: ReactNode }) {
+  const auth = usePassphraseAuth({
+    wordlist: englishWordlist,
+  });
+
+  // If the user is already signed in, render the App
+  if (auth.state === "signedIn") {
+    return children
+  }
+  
+  // Otherwise, show a sign-in screen
+  return <SignInScreen auth={auth} />;
+}
+
+function AuthenticatedProvider({ children }: { children: ReactNode }) {
+  return (
+    <JazzProvider
+      sync={{ peer: "wss://cloud.jazz.tools/?key=your-api-key" }}
+    >
+      <JazzAuthentication>
+        {children}
+      </JazzAuthentication>
+    </JazzProvider>
+  );
+}
+```
+</CodeGroup>
+
+For a complete example, see the [Expo Chat Demo](https://github.com/garden-co/jazz/tree/main/examples/chat-rn-expo).
+
+## Local Persistence
+
+Jazz for Expo includes built-in local persistence using SQLite. Following Expo's best practices, the Expo implementation uses:
+
+- **Database Storage**: `expo-sqlite` - Expo's official SQLite module
+- **Key-Value Storage**: `expo-secure-store` - Expo's secure storage system
+
+Local persistence is enabled by default with no additional configuration required. Your data will automatically persist across app restarts.

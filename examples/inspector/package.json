@@ -13,9 +13,9 @@
   "dependencies": {
     "jazz-inspector": "workspace:*",
     "clsx": "^2.0.0",
-    "cojson": "workspace:0.12.2",
-    "cojson-transport-ws": "workspace:0.12.2",
-    "hash-slash": "workspace:0.2.2",
+    "cojson": "workspace:*",
+    "cojson-transport-ws": "workspace:*",
+    "hash-slash": "workspace:*",
     "lucide-react": "^0.274.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",

@@ -54,6 +54,9 @@
       "react": "18.3.1",
       "react-dom": "18.3.1",
       "esbuild": "0.24.0"
+    },
+    "patchedDependencies": {
+      "expo-router": "patches/expo-router.patch"
     }
   }
 }

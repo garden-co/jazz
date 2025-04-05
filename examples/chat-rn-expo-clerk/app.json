@@ -1,0 +1,45 @@
+{
+  "expo": {
+    "name": "jazz-chat-rn-expo-clerk",
+    "scheme": "jazz-chat-rn-expo-clerk",
+    "slug": "jazz-chat-rn-expo-clerk",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/images/icon.png",
+    "userInterfaceStyle": "light",
+    "splash": {
+      "image": "./assets/images/splash.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#ffffff"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.jazz.chatrnclerk"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/images/adaptive-icon.png",
+        "backgroundColor": "#ffffff"
+      },
+      "package": "com.jazz.chatrnclerk"
+    },
+    "newArchEnabled": true,
+    "plugins": [
+      "expo-secure-store",
+      "expo-font",
+      "expo-router",
+      "expo-sqlite",
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "The app accesses your photos to let you share them with your friends."
+        }
+      ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "ca3d46e5-a10a-47ec-9d77-3b841e1c62d4"
+      }
+    }
+  }
+}
