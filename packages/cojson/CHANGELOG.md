@@ -1,5 +1,11 @@
 # cojson
 
+## 0.12.3
+
+### Patch Changes
+
+- a013538: Correctly load CoValues after they are marked as unavailable and improve timeout management
+
 ## 0.12.2
 
 ### Patch Changes
