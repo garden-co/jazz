@@ -1,5 +1,5 @@
-import { ValueType, metrics } from "@opentelemetry/api";
-import type { CoValuePriority } from "./priority.js";
+import { Counter, ValueType, metrics } from "@opentelemetry/api";
+import { CO_VALUE_PRIORITY, type CoValuePriority } from "./priority.js";
 import type { SyncMessage } from "./sync.js";
 
 function promiseWithResolvers<R>() {
@@ -34,7 +34,7 @@ type Tuple<T, N extends number, A extends unknown[] = []> = A extends {
   ? A
   : Tuple<T, N, [...A, T]>;
 
-type QueueTuple = Tuple<LinkedList<QueueEntry>, 8>;
+type QueueTuple = Tuple<LinkedList<QueueEntry>, 3>;
 
 type LinkedListNode<T> = {
   value: T;
@@ -46,6 +46,8 @@ type LinkedListNode<T> = {
  * as our queues can grow very large when the system is under pressure.
  */
 export class LinkedList<T> {
+  constructor(private meter?: QueueMeter) {}
+
   head: LinkedListNode<T> | undefined = undefined;
   tail: LinkedListNode<T> | undefined = undefined;
   length = 0;
@@ -64,6 +66,7 @@ export class LinkedList<T> {
     }
 
     this.length++;
+    this.meter?.push();
   }
 
   shift() {
@@ -82,34 +85,83 @@ export class LinkedList<T> {
 
     this.length--;
 
+    this.meter?.pull();
     return value;
   }
 }
 
-export class PriorityBasedMessageQueue {
-  private queues: QueueTuple = [
-    new LinkedList<QueueEntry>(),
-    new LinkedList<QueueEntry>(),
-    new LinkedList<QueueEntry>(),
-    new LinkedList<QueueEntry>(),
-    new LinkedList<QueueEntry>(),
-    new LinkedList<QueueEntry>(),
-    new LinkedList<QueueEntry>(),
-    new LinkedList<QueueEntry>(),
-  ];
-  queueSizeCounter = metrics
-    .getMeter("cojson")
-    .createUpDownCounter("jazz.messagequeue.size", {
-      description: "Size of the message queue",
-      valueType: ValueType.INT,
-      unit: "entry",
-    });
+class QueueMeter {
+  private pullCounter: Counter;
+  private pushCounter: Counter;
 
-  private getQueue(priority: CoValuePriority) {
-    return this.queues[priority];
+  constructor(
+    prefix: string,
+    private attrs?: Record<string, string | number>,
+  ) {
+    this.pullCounter = metrics
+      .getMeter("cojosn")
+      .createCounter(`${prefix}.pulled`, {
+        description: "Number of messages pulled from the queue",
+        valueType: ValueType.INT,
+        unit: "1",
+      });
+    this.pushCounter = metrics
+      .getMeter("cojosn")
+      .createCounter(`${prefix}.pushed`, {
+        description: "Number of messages pushed to the queue",
+        valueType: ValueType.INT,
+        unit: "1",
+      });
+
+    /**
+     * This makes sure that those metrics are generated (and emitted) as soon as the queue is created.
+     * This is to avoid edge cases where one series reset is delayed, which would cause spikes or dips
+     * when queried - and it also more correctly represents the actual state of the queue after a restart.
+     */
+    this.pullCounter.add(0, this.attrs);
+    this.pushCounter.add(0, this.attrs);
   }
 
-  constructor(private defaultPriority: CoValuePriority) {}
+  public pull() {
+    this.pullCounter.add(1, this.attrs);
+  }
+
+  public push() {
+    this.pushCounter.add(1, this.attrs);
+  }
+}
+
+function meteredList<T>(attrs?: Record<string, string | number>) {
+  return new LinkedList<T>(new QueueMeter("jazz.messagequeue", attrs));
+}
+
+const PRIORITY_TO_QUEUE_INDEX = {
+  [CO_VALUE_PRIORITY.HIGH]: 0,
+  [CO_VALUE_PRIORITY.MEDIUM]: 1,
+  [CO_VALUE_PRIORITY.LOW]: 2,
+} as const;
+
+export class PriorityBasedMessageQueue {
+  private queues: QueueTuple;
+
+  constructor(
+    private defaultPriority: CoValuePriority,
+    /**
+     * Optional attributes to be added to the generated metrics.
+     * By default the metrics will have the priority as an attribute.
+     */
+    attrs?: Record<string, string | number>,
+  ) {
+    this.queues = [
+      meteredList({ priority: CO_VALUE_PRIORITY.HIGH, ...attrs }),
+      meteredList({ priority: CO_VALUE_PRIORITY.MEDIUM, ...attrs }),
+      meteredList({ priority: CO_VALUE_PRIORITY.LOW, ...attrs }),
+    ];
+  }
+
+  private getQueue(priority: CoValuePriority) {
+    return this.queues[PRIORITY_TO_QUEUE_INDEX[priority]];
+  }
 
   public push(msg: SyncMessage) {
     const { promise, resolve, reject } = promiseWithResolvers<void>();
@@ -119,23 +171,11 @@ export class PriorityBasedMessageQueue {
 
     this.getQueue(priority).push(entry);
 
-    this.queueSizeCounter.add(1, {
-      priority,
-    });
-
     return promise;
   }
 
   public pull() {
     const priority = this.queues.findIndex((queue) => queue.length > 0);
-
-    if (priority === -1) {
-      return;
-    }
-
-    this.queueSizeCounter.add(-1, {
-      priority,
-    });
 
     return this.queues[priority]?.shift();
   }

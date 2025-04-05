@@ -7,9 +7,9 @@ import {
   tearDownTestMetricReader,
 } from "./testUtils.js";
 
-function setup() {
+function setup(attrs?: Record<string, string | number>) {
   const metricReader = createTestMetricReader();
-  const queue = new PriorityBasedMessageQueue(CO_VALUE_PRIORITY.MEDIUM);
+  const queue = new PriorityBasedMessageQueue(CO_VALUE_PRIORITY.MEDIUM, attrs);
   return { queue, metricReader };
 }
 
@@ -18,10 +18,133 @@ describe("PriorityBasedMessageQueue", () => {
     tearDownTestMetricReader();
   });
 
+  describe("meteredQueue", () => {
+    test("should corretly count pushes", async () => {
+      const { queue, metricReader } = setup();
+      const message: SyncMessage = {
+        action: "load",
+        id: "co_ztest-id",
+        header: false,
+        sessions: {},
+      };
+
+      expect(
+        await metricReader.getMetricValue("jazz.messagequeue.pushed", {
+          priority: CO_VALUE_PRIORITY.MEDIUM,
+        }),
+      ).toBe(0);
+
+      void queue.push(message);
+      expect(
+        await metricReader.getMetricValue("jazz.messagequeue.pushed", {
+          priority: CO_VALUE_PRIORITY.MEDIUM,
+        }),
+      ).toBe(1);
+
+      void queue.push(message);
+      expect(
+        await metricReader.getMetricValue("jazz.messagequeue.pushed", {
+          priority: CO_VALUE_PRIORITY.MEDIUM,
+        }),
+      ).toBe(2);
+    });
+
+    test("should corretly count pulls", async () => {
+      const { queue, metricReader } = setup();
+      const message: SyncMessage = {
+        action: "load",
+        id: "co_ztest-id",
+        header: false,
+        sessions: {},
+      };
+
+      expect(
+        await metricReader.getMetricValue("jazz.messagequeue.pulled", {
+          priority: CO_VALUE_PRIORITY.MEDIUM,
+        }),
+      ).toBe(0);
+
+      void queue.push(message);
+      expect(
+        await metricReader.getMetricValue("jazz.messagequeue.pulled", {
+          priority: CO_VALUE_PRIORITY.MEDIUM,
+        }),
+      ).toBe(0);
+
+      void queue.pull();
+
+      expect(
+        await metricReader.getMetricValue("jazz.messagequeue.pulled", {
+          priority: CO_VALUE_PRIORITY.MEDIUM,
+        }),
+      ).toBe(1);
+
+      // We only have one item in the queue, so this should not change the metric value
+      void queue.pull();
+      expect(
+        await metricReader.getMetricValue("jazz.messagequeue.pulled", {
+          priority: CO_VALUE_PRIORITY.MEDIUM,
+        }),
+      ).toBe(1);
+    });
+
+    test("should corretly set custom attributes to the metrics", async () => {
+      const { queue, metricReader } = setup({ role: "server" });
+      const message: SyncMessage = {
+        action: "load",
+        id: "co_ztest-id",
+        header: false,
+        sessions: {},
+      };
+
+      expect(
+        await metricReader.getMetricValue("jazz.messagequeue.pushed", {
+          priority: CO_VALUE_PRIORITY.MEDIUM,
+          role: "server",
+        }),
+      ).toBe(0);
+      expect(
+        await metricReader.getMetricValue("jazz.messagequeue.pushed", {
+          priority: CO_VALUE_PRIORITY.MEDIUM,
+          role: "client",
+        }),
+      ).toBeUndefined();
+
+      void queue.push(message);
+      expect(
+        await metricReader.getMetricValue("jazz.messagequeue.pushed", {
+          priority: CO_VALUE_PRIORITY.MEDIUM,
+          role: "server",
+        }),
+      ).toBe(1);
+      expect(
+        await metricReader.getMetricValue("jazz.messagequeue.pulled", {
+          priority: CO_VALUE_PRIORITY.MEDIUM,
+          role: "server",
+        }),
+      ).toBe(0);
+
+      void queue.pull();
+
+      expect(
+        await metricReader.getMetricValue("jazz.messagequeue.pushed", {
+          priority: CO_VALUE_PRIORITY.MEDIUM,
+          role: "server",
+        }),
+      ).toBe(1);
+      expect(
+        await metricReader.getMetricValue("jazz.messagequeue.pulled", {
+          priority: CO_VALUE_PRIORITY.MEDIUM,
+          role: "server",
+        }),
+      ).toBe(1);
+    });
+  });
+
   test("should initialize with correct properties", () => {
     const { queue } = setup();
     expect(queue["defaultPriority"]).toBe(CO_VALUE_PRIORITY.MEDIUM);
-    expect(queue["queues"].length).toBe(8);
+    expect(queue["queues"].length).toBe(3);
     expect(queue["queues"].every((q) => !q.length)).toBe(true);
   });
 
@@ -52,7 +175,7 @@ describe("PriorityBasedMessageQueue", () => {
   });
 
   test("should pull messages in priority order", async () => {
-    const { queue, metricReader } = setup();
+    const { queue } = setup();
     const lowPriorityMsg: SyncMessage = {
       action: "content",
       id: "co_zlow",
@@ -73,42 +196,12 @@ describe("PriorityBasedMessageQueue", () => {
     };
 
     void queue.push(lowPriorityMsg);
-    expect(
-      await metricReader.getMetricValue("jazz.messagequeue.size", {
-        priority: lowPriorityMsg.priority,
-      }),
-    ).toBe(1);
     void queue.push(mediumPriorityMsg);
-    expect(
-      await metricReader.getMetricValue("jazz.messagequeue.size", {
-        priority: mediumPriorityMsg.priority,
-      }),
-    ).toBe(1);
     void queue.push(highPriorityMsg);
-    expect(
-      await metricReader.getMetricValue("jazz.messagequeue.size", {
-        priority: highPriorityMsg.priority,
-      }),
-    ).toBe(1);
 
     expect(queue.pull()?.msg).toEqual(highPriorityMsg);
-    expect(
-      await metricReader.getMetricValue("jazz.messagequeue.size", {
-        priority: highPriorityMsg.priority,
-      }),
-    ).toBe(0);
     expect(queue.pull()?.msg).toEqual(mediumPriorityMsg);
-    expect(
-      await metricReader.getMetricValue("jazz.messagequeue.size", {
-        priority: mediumPriorityMsg.priority,
-      }),
-    ).toBe(0);
     expect(queue.pull()?.msg).toEqual(lowPriorityMsg);
-    expect(
-      await metricReader.getMetricValue("jazz.messagequeue.size", {
-        priority: lowPriorityMsg.priority,
-      }),
-    ).toBe(0);
   });
 
   test("should return undefined when pulling from empty queue", () => {
