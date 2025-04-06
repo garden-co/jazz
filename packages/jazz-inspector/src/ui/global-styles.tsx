@@ -4,6 +4,8 @@ export const GlobalStyles = styled("div")`
   /* Colors */
   --j-primary-color: #3313F7;
   --j-link-color: var(--j-primary-color);
+  --j-success-color: oklch(52.7% 0.154 150.069);
+  --j-destructive-color: oklch(50.5% 0.213 27.518);
   
   /* Neutral Colors */
   --j-neutral-100: #faf8f8;
@@ -47,6 +49,8 @@ export const GlobalStyles = styled("div")`
     --j-foreground: var(--j-neutral-925);
     --j-border-color-hover: var(--j-neutral-700);
     --j-text-color-strong: var(--j-neutral-100);
+    --j-success-color: oklch(72.3% 0.219 149.579);
+    --j-destructive-color: oklch(63.7% 0.237 25.331);
   }
   
   *:focus {

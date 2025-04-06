@@ -303,6 +303,7 @@ function AddAccountForm({
         type="password"
         value={secret}
         onChange={(e) => setSecret(e.target.value)}
+        placeholder="sealerSecret_ziz7NA12340abcdef123789..."
       />
       <Button className="mt-3" type="submit">
         Add account

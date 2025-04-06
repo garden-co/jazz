@@ -6,14 +6,10 @@ const StyledBadge = styled("span")<{ className?: string }>`
   padding: 0.125rem 0.25rem;
   margin-left: -0.125rem;
   border-radius: var(--j-radius-sm);
-  background-color: var(--j-neutral-200);
+  background-color: var(--j-foreground);
   display: inline-block;
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   color: var(--j-text-color-strong);
-
-  @media (prefers-color-scheme: dark) {
-    background-color: var(--j-neutral-900);
-  }
 `;
 
 export function Badge({

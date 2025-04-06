@@ -261,7 +261,51 @@ describe("useCoState", () => {
 
     await waitFor(() => {
       expect(result.current).not.toBeNull();
-      expect(result.current?.value).toBe("123");
+    });
+
+    expect(result.current?.value).toBe("123");
+  });
+
+  it("should return a null value when the coValue becomes inaccessible", async () => {
+    class TestMap extends CoMap {
+      value = co.string;
+    }
+
+    const someoneElse = await createJazzTestAccount({
+      isCurrentActiveAccount: true,
+    });
+
+    const group = Group.create(someoneElse);
+
+    const map = TestMap.create(
+      {
+        value: "123",
+      },
+      group,
+    );
+
+    const account = await createJazzTestAccount({
+      isCurrentActiveAccount: true,
+    });
+
+    await account.waitForAllCoValuesSync();
+
+    group.addMember(account, "reader");
+
+    const { result } = renderHook(() => useCoState(TestMap, map.id), {
+      account,
+    });
+
+    expect(result.current).toBeUndefined();
+
+    await waitFor(() => {
+      expect(result.current).not.toBeUndefined();
+    });
+
+    group.removeMember(account);
+
+    await waitFor(() => {
+      expect(result.current).toBeNull();
     });
   });
 

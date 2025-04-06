@@ -10,76 +10,28 @@ import {
   useResolvedCoValue,
 } from "./use-resolve-covalue.js";
 
-const UndefinedText = styled("span")`
-  color: #a8a29e;
-`;
-
-const NullText = styled("span")`
-  color: #a8a29e;
-`;
-
 const LinkContainer = styled("span")`
   display: inline-flex;
   gap: 0.25rem;
   align-items: center;
 `;
 
-const LinkButton = styled(Button)`
-  display: inline-flex;
-  gap: 0.25rem;
-  align-items: center;
-`;
-
-const StringText = styled("span")`
-  color: #166534;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  @media (prefers-color-scheme: dark) {
-    color: #4ade80;
-  }
-`;
-
-const NumberText = styled("span")`
-  color: #6b21a8;
-  @media (prefers-color-scheme: dark) {
-    color: #c084fc;
-  }
-`;
-
 const BooleanText = styled("span")<{ value: boolean }>`
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  display: inline-block;
-  padding: 0.125rem 0.25rem;
-  border-radius: 0.125rem;
   ${(props) =>
     props.value
       ? `
-    color: #166534;
-    background-color: rgba(22, 101, 52, 0.05);
+    color: var(--j-success-color);
   `
       : `
-    color: #92400e;
-    background-color: rgba(245, 158, 11, 0.05);
+    color: var(--j-destructive-color);
   `}
-`;
-
-const ObjectContainer = styled("span")`
-  display: inline-block;
-  max-width: 16rem;
-`;
-
-const ObjectType = styled("span")`
-  color: #57534e;
 `;
 
 const ObjectContent = styled("pre")`
   margin-top: 0.375rem;
   font-size: 0.875rem;
   white-space: pre-wrap;
-`;
-
-const ShowMoreButton = styled("button")`
-  margin-top: 0.375rem;
-  font-size: 0.875rem;
 `;
 
 const PreviewContainer = styled("div")`
@@ -115,11 +67,6 @@ const PreviewImage = styled("img")`
   margin: 0.5rem 0;
 `;
 
-const ImageSizeText = styled(Text)`
-  display: inline;
-  font-size: 0.875rem;
-`;
-
 const RecordText = styled("div")`
   display: flex;
   align-items: center;
@@ -136,18 +83,20 @@ const ListText = styled("div")`
 export function ValueRenderer({
   json,
   onCoIDClick,
+  compact,
 }: {
   json: JsonValue | undefined;
   onCoIDClick?: (childNode: CoID<RawCoValue>) => void;
+  compact?: boolean;
 }) {
   const [isExpanded, setIsExpanded] = useState(false);
 
   if (typeof json === "undefined" || json === undefined) {
-    return <UndefinedText>undefined</UndefinedText>;
+    return <Text muted>undefined</Text>;
   }
 
   if (json === null) {
-    return <NullText>null</NullText>;
+    return <Text muted>null</Text>;
   }
 
   if (typeof json === "string" && json.startsWith("co_")) {
@@ -160,14 +109,14 @@ export function ValueRenderer({
 
     if (onCoIDClick) {
       return (
-        <LinkButton
+        <Button
+          variant="link"
           onClick={() => {
             onCoIDClick?.(json as CoID<RawCoValue>);
           }}
-          variant="link"
         >
           {content}
-        </LinkButton>
+        </Button>
       );
     }
 
@@ -175,11 +124,11 @@ export function ValueRenderer({
   }
 
   if (typeof json === "string") {
-    return <StringText>{json}</StringText>;
+    return <Text>{json}</Text>;
   }
 
   if (typeof json === "number") {
-    return <NumberText>{json}</NumberText>;
+    return <Text mono>{json}</Text>;
   }
 
   if (typeof json === "boolean") {
@@ -188,20 +137,23 @@ export function ValueRenderer({
 
   if (typeof json === "object") {
     return (
-      <ObjectContainer title={JSON.stringify(json, null, 2)}>
-        <ObjectType>
-          {Array.isArray(json) ? <>Array ({json.length})</> : <>Object</>}
-        </ObjectType>
+      <>
+        <p>{Array.isArray(json) ? <>Array ({json.length})</> : <>Object</>}</p>
         <ObjectContent>
           {isExpanded
             ? JSON.stringify(json, null, 2)
-            : JSON.stringify(json, null, 2).split("\n").slice(0, 3).join("\n") +
-              (Object.keys(json).length > 2 ? "\n..." : "")}
+            : JSON.stringify(json, null, 2)
+                .split("\n")
+                .slice(0, compact ? 3 : 8)
+                .join("\n") + (Object.keys(json).length > 2 ? "\n..." : "")}
         </ObjectContent>
-        <ShowMoreButton onClick={() => setIsExpanded(!isExpanded)}>
-          {isExpanded ? "Show less" : "Show more"}
-        </ShowMoreButton>
-      </ObjectContainer>
+
+        {!compact && (
+          <Button variant="link" onClick={() => setIsExpanded(!isExpanded)}>
+            {isExpanded ? "Show less" : "Show more"}
+          </Button>
+        )}
+      </>
     );
   }
 
@@ -250,9 +202,9 @@ export const CoMapPreview = ({
     return (
       <ImagePreviewContainer>
         <PreviewImage src={snapshot.placeholderDataURL} />
-        <ImageSizeText inline small muted>
+        <Text inline small muted>
           {snapshot.originalSize[0]} x {snapshot.originalSize[1]}
-        </ImageSizeText>
+        </Text>
       </ImagePreviewContainer>
     );
   }
@@ -288,7 +240,7 @@ export const CoMapPreview = ({
             <React.Fragment key={key}>
               <Text strong>{key}: </Text>
               <Text inline>
-                <ValueRenderer json={value} />
+                <ValueRenderer compact json={value} />
               </Text>
             </React.Fragment>
           ))}

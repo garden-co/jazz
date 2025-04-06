@@ -1,66 +1,68 @@
 import { CoID, LocalNode, RawCoValue } from "cojson";
-import { JsonObject } from "cojson";
-import { styled } from "goober";
+import { JsonObject, JsonValue } from "cojson";
 import { ResolveIcon } from "./type-icon.js";
 import { PageInfo, isCoId } from "./types.js";
 import { CoMapPreview, ValueRenderer } from "./value-renderer.js";
 
 import { Badge } from "../ui/badge.js";
+import { Card, CardBody, CardHeader } from "../ui/card.js";
+import { Grid } from "../ui/grid.js";
 import { Text } from "../ui/text.js";
 
-const GridContainer = styled("div")`
-  display: grid;
-  grid-template-columns: repeat(1, 1fr);
-  gap: 1rem;
+function GridItem({
+  entry,
+  onNavigate,
+  node,
+}: {
+  entry: [string, JsonValue | undefined];
+  onNavigate: (pages: PageInfo[]) => void;
+  node: LocalNode;
+}) {
+  const [key, value] = entry;
+  const isCoValue = isCoId(value);
 
-  @media (min-width: 768px) {
-    grid-template-columns: repeat(2, 1fr);
-  }
+  const props = isCoValue
+    ? {
+        onClick: () =>
+          onNavigate([{ coId: value as CoID<RawCoValue>, name: key }]),
+        as: "button",
+      }
+    : {
+        style: {
+          backgroundColor: "var(--j-foreground)",
+          borderColor: "var(--j-foreground)",
+        },
+      };
 
-  @media (min-width: 1280px) {
-    grid-template-columns: repeat(3, 1fr);
-  }
-`;
-
-const GridItem = styled(
-  ({
-    isCoId,
-    ...rest
-  }: { isCoId: boolean } & React.ButtonHTMLAttributes<HTMLButtonElement>) => (
-    <button {...rest} />
-  ),
-)`
-  padding: 0.75rem;
-  text-align: left;
-  border-radius: var(--j-radius-lg);
-  overflow: hidden;
-  transition: background-color 0.2s;
-  cursor: ${(props) => (props.isCoId ? "pointer" : "default")};
-
-  ${(props) =>
-    props.isCoId
-      ? `
-    border: 1px solid var(--j-border-color);
-    box-shadow: var(--j-shadow-sm);
-  `
-      : `
-    background-color: var(--j-foreground);
-  `}
-`;
-
-const TitleContainer = styled("h3")`
-  display: flex;
-  justify-content: space-between;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--j-text-color-strong);
-`;
-
-const ContentContainer = styled("div")`
-  margin-top: 0.5rem;
-  font-size: 0.875rem;
-`;
+  return (
+    <Card {...props}>
+      <CardHeader>
+        {isCoValue ? (
+          <>
+            <Text strong>{key}</Text>
+            <Badge>
+              <ResolveIcon coId={value as CoID<RawCoValue>} node={node} />
+            </Badge>
+          </>
+        ) : (
+          <Text strong>{key}</Text>
+        )}
+      </CardHeader>
+      <CardBody style={{ wordBreak: "break-word" }}>
+        {isCoValue ? (
+          <CoMapPreview coId={value as CoID<RawCoValue>} node={node} />
+        ) : (
+          <ValueRenderer
+            json={value}
+            onCoIDClick={(coId) => {
+              onNavigate([{ coId, name: key }]);
+            }}
+          />
+        )}
+      </CardBody>
+    </Card>
+  );
+}
 
 export function GridView({
   data,
@@ -74,42 +76,15 @@ export function GridView({
   const entries = Object.entries(data);
 
   return (
-    <GridContainer>
-      {entries.map(([key, child], childIndex) => (
+    <Grid cols={entries.length === 1 ? 1 : 3}>
+      {entries.map((entry, childIndex) => (
         <GridItem
+          entry={entry}
+          onNavigate={onNavigate}
+          node={node}
           key={childIndex}
-          isCoId={isCoId(child)}
-          onClick={() =>
-            isCoId(child) &&
-            onNavigate([{ coId: child as CoID<RawCoValue>, name: key }])
-          }
-        >
-          <TitleContainer>
-            {isCoId(child) ? (
-              <>
-                <Text strong>{key}</Text>
-                <Badge>
-                  <ResolveIcon coId={child as CoID<RawCoValue>} node={node} />
-                </Badge>
-              </>
-            ) : (
-              <Text strong>{key}</Text>
-            )}
-          </TitleContainer>
-          <ContentContainer>
-            {isCoId(child) ? (
-              <CoMapPreview coId={child as CoID<RawCoValue>} node={node} />
-            ) : (
-              <ValueRenderer
-                json={child}
-                onCoIDClick={(coId) => {
-                  onNavigate([{ coId, name: key }]);
-                }}
-              />
-            )}
-          </ContentContainer>
-        </GridItem>
+        />
       ))}
-    </GridContainer>
+    </Grid>
   );
 }

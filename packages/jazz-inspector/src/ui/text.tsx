@@ -6,6 +6,7 @@ interface TextProps extends React.HTMLAttributes<HTMLParagraphElement> {
   strong?: boolean;
   small?: boolean;
   inline?: boolean;
+  mono?: boolean;
 }
 
 const BaseText = React.forwardRef<HTMLParagraphElement, TextProps>(
@@ -37,31 +38,23 @@ const StyledText = styled(BaseText)<TextProps>`
     `
     display: inline;
   `}
+
+  ${(props) =>
+    props.mono &&
+    `
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  `}
 `;
 
-export function Text({
-  children,
-  className,
-  muted,
-  strong,
-  inline,
-  small,
-}: React.PropsWithChildren<{
-  className?: string;
-  muted?: boolean;
-  strong?: boolean;
-  inline?: boolean;
-  small?: boolean;
-}>) {
-  return (
-    <StyledText
-      className={className}
-      muted={muted}
-      strong={strong}
-      inline={inline}
-      small={small}
-    >
-      {children}
-    </StyledText>
-  );
+export function Text(
+  props: React.PropsWithChildren<{
+    className?: string;
+    muted?: boolean;
+    strong?: boolean;
+    inline?: boolean;
+    small?: boolean;
+    mono?: boolean;
+  }>,
+) {
+  return <StyledText {...props} />;
 }
