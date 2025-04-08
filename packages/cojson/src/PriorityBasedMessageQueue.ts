@@ -34,7 +34,7 @@ type Tuple<T, N extends number, A extends unknown[] = []> = A extends {
   ? A
   : Tuple<T, N, [...A, T]>;
 
-type QueueTuple = Tuple<LinkedList<QueueEntry>, 3>;
+type QueueMap = Record<CoValuePriority, LinkedList<QueueEntry>>;
 
 type LinkedListNode<T> = {
   value: T;
@@ -135,14 +135,8 @@ function meteredList<T>(attrs?: Record<string, string | number>) {
   return new LinkedList<T>(new QueueMeter("jazz.messagequeue", attrs));
 }
 
-const PRIORITY_TO_QUEUE_INDEX = {
-  [CO_VALUE_PRIORITY.HIGH]: 0,
-  [CO_VALUE_PRIORITY.MEDIUM]: 1,
-  [CO_VALUE_PRIORITY.LOW]: 2,
-} as const;
-
 export class PriorityBasedMessageQueue {
-  private queues: QueueTuple;
+  private queues: QueueMap;
 
   constructor(
     private defaultPriority: CoValuePriority,
@@ -152,15 +146,24 @@ export class PriorityBasedMessageQueue {
      */
     attrs?: Record<string, string | number>,
   ) {
-    this.queues = [
-      meteredList({ priority: CO_VALUE_PRIORITY.HIGH, ...attrs }),
-      meteredList({ priority: CO_VALUE_PRIORITY.MEDIUM, ...attrs }),
-      meteredList({ priority: CO_VALUE_PRIORITY.LOW, ...attrs }),
-    ];
+    this.queues = {
+      [CO_VALUE_PRIORITY.HIGH]: meteredList({
+        priority: CO_VALUE_PRIORITY.HIGH,
+        ...attrs,
+      }),
+      [CO_VALUE_PRIORITY.MEDIUM]: meteredList({
+        priority: CO_VALUE_PRIORITY.MEDIUM,
+        ...attrs,
+      }),
+      [CO_VALUE_PRIORITY.LOW]: meteredList({
+        priority: CO_VALUE_PRIORITY.LOW,
+        ...attrs,
+      }),
+    };
   }
 
   private getQueue(priority: CoValuePriority) {
-    return this.queues[PRIORITY_TO_QUEUE_INDEX[priority]];
+    return this.queues[priority];
   }
 
   public push(msg: SyncMessage) {
@@ -175,8 +178,8 @@ export class PriorityBasedMessageQueue {
   }
 
   public pull() {
-    const priority = this.queues.findIndex((queue) => queue.length > 0);
-
-    return this.queues[priority]?.shift();
+    return Object.values(this.queues)
+      .find((queue) => queue.length > 0)
+      ?.shift();
   }
 }
