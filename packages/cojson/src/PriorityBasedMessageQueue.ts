@@ -137,7 +137,7 @@ function meteredList<T>(attrs?: Record<string, string | number>) {
 
 export class PriorityBasedMessageQueue {
   private queues: QueueMap;
-
+  private queueList: LinkedList<QueueEntry>[];
   constructor(
     private defaultPriority: CoValuePriority,
     /**
@@ -160,6 +160,8 @@ export class PriorityBasedMessageQueue {
         ...attrs,
       }),
     };
+
+    this.queueList = Object.values(this.queues);
   }
 
   private getQueue(priority: CoValuePriority) {
@@ -178,8 +180,6 @@ export class PriorityBasedMessageQueue {
   }
 
   public pull() {
-    return Object.values(this.queues)
-      .find((queue) => queue.length > 0)
-      ?.shift();
+    return this.queueList.find((queue) => queue.length > 0)?.shift();
   }
 }
