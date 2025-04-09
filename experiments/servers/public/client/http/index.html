@@ -76,7 +76,7 @@
         <div class="container">
             <span class="fixed-width-span">Binary:</span>
             <div>
-                <button id="loadMultipleCoValuesBinary" onclick="loadMultipleCoValues(5, true)">
+                <button id="loadMultipleCoValuesBinary" onclick="loadMultipleCoValues(10, true)">
                     1a. Load <strong>Multiple</strong> CoValues (Binary)
                 </button>
                 <button id="loadCoValueBinary" onclick="loadCoValue(null, true)">
@@ -561,8 +561,8 @@
 
                     if (coValue) {
                         if (isBinary) {
-                        info(`Loaded (binary) data for: ${uuid} (${coValue.file.size} bytes).`);
-                        loadCoValuesMap.delete(uuid);
+                            info(`Loaded (binary) data for: ${uuid} (${coValue.file.size} bytes).`);
+                            loadCoValuesMap.delete(uuid);
 
                         } else {
                             info(`Loaded (text) data for: ${uuid}.`);
@@ -932,7 +932,7 @@
                             state.fileMetadata = { ...chunk };
 
                             // Start of a streaming download.
-                            state.chunks = new Array(chunk.totalChunks);
+                            state.chunks = new Array(chunk.totalChunks).fill(null);
                             state.contentLength = chunk.fileSize;
                             break;
 
@@ -970,7 +970,7 @@
                                 // TODO: re-download missing chunks?
 
                                 // for (const chunko of state.chunks) {
-                                //     if (chunko === undefined || chunko === null) {
+                                //     if (chunko === null) {
                                 //         throw new Error(`CoValue ${chunk.uuid} had some chunks missing!`);
                                 //     }
                                 // }
@@ -998,7 +998,7 @@
                 coValue.file = {
                     name: state.fileMetadata.fileName,
                     size: state.contentLength,
-                    note: "** 50MB binary **",
+                    note: `** ${formatSize(state.contentLength)} binary **`,
                     blob: state.blob,
                 };
 
@@ -1088,8 +1088,18 @@
                     metadata: {
                         name: file.name,
                         size: file.size,
-                        note: "** 50MB binary **",
+                        note: `** ${formatSize(file.size)} binary **`,
                     }
+                }
+            }
+
+            function formatSize(bytes) {
+                if (bytes < 1024) {
+                    return `${bytes}B`;
+                } else if (bytes < 1024 * 1024) {
+                    return `${(bytes / 1024).toFixed(2)}KB`;
+                } else {
+                    return `${(bytes / (1024 * 1024)).toFixed(2)}MB`;
                 }
             }
 

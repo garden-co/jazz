@@ -1,5 +1,6 @@
 import uWS from "uWebSockets.js";
 import path from "path";
+import fs from "fs";
 import {
     CoValue,
     uWebSocketResponse,
@@ -12,6 +13,7 @@ import {
     updateCoValueBinary,
     parseUUIDAndUAFromCookie,
     formatClientNumber,
+    UserData,
     BenchmarkStore,
     handleStaticRoutes,
     PORT,
@@ -20,10 +22,6 @@ import logger from "../util/logger";
 import { tlsCertPath } from "../util/tls";
 import { FileStreamManager } from "../node-js/filestream-manager";
 
-interface UserData {
-    uuid?: string;
-    ua?: string;
-}
 
 // Serve up the client folder on page load
 const rootDir = path.resolve(__dirname, "../..");
@@ -57,11 +55,11 @@ const app = uWS.SSLApp({
     handleStaticRoutes(res, req, staticDir, benchmarkStore, "ws", "B1_uWebSocketServer-WSS.csv");
 }).ws("/*", {
     /* Options */
-    compression: uWS.DISABLED,
+    compression: uWS.SHARED_COMPRESSOR, // https://github.com/uNetworking/uWebSockets/blob/d437169851a21785c7c3beaaeb5cb83c88665230/misc/READMORE.md#settings
     maxPayloadLength: 70 * 1024 * 1024 * 100,
-    maxBackpressure: 71 * 1024 * 1024 * 100,
+    maxBackpressure: 71 * 1024 * 1024 * 100, // https://github.com/uNetworking/uWebSockets/blob/d437169851a21785c7c3beaaeb5cb83c88665230/misc/READMORE.md#backpressure
     sendPingsAutomatically: true,
-    idleTimeout: 15,
+    idleTimeout: 15, // https://github.com/uNetworking/uWebSockets/blob/d437169851a21785c7c3beaaeb5cb83c88665230/misc/READMORE.md#pingpongs-heartbeats
 
     // Upgrade handler - called prior to establishing a WebSocket connection
     upgrade: (res, req, context) => {
@@ -227,16 +225,23 @@ const app = uWS.SSLApp({
 
     drain: (ws: uWS.WebSocket<{}>) => {
         logger.debug(`[Event-Drain] WebSocket bufferedAmount: ${ws.getBufferedAmount()}`);
+        const userData: UserData = ws.getUserData();
+        if (userData.streams) {
+            Object.entries(userData.streams).forEach(([uuid, stream]) => {
+                stream.resume();
+                logger.debug(`[Event-Drain] CoValue ${uuid}: WebSocket's fileStream resumed`);
+            });
+        }
     },
 
     close: (ws: uWS.WebSocket<{}>, code: number, message: ArrayBuffer) => {
         const userData: UserData = ws.getUserData();
         const clientNum = formatClientNumber(userData);
-        logger.debug(`[Event-Close] [Client-#${clientNum}] WebSocket closed`);
+        logger.warn(`[Event-Close] [Client-#${clientNum}] WebSocket closed`);
     },
 
     dropped: (ws: uWS.WebSocket<{}>, message: ArrayBuffer, isBinary: boolean) => {
-        logger.debug(`[Event-Dropped] WebSocket message dropped => isBinary: ${isBinary}, messageLength: ${message.byteLength}, bufferedAmount: ${ws.getBufferedAmount()}`);
+        logger.warn(`[Event-Dropped] WebSocket message dropped => isBinary: ${isBinary}, messageLength: ${message.byteLength}, bufferedAmount: ${ws.getBufferedAmount()}`);
     },
 });
 

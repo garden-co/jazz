@@ -113,6 +113,7 @@ app.get("/covalue/:uuid/binary", trackRequest("GET", "/covalue/:uuid/binary", (r
     // Capture range header
     const rangeHeader = req.getHeader('range');
 
+    // Corking: https://github.com/uNetworking/uWebSockets/blob/d437169851a21785c7c3beaaeb5cb83c88665230/misc/READMORE.md#corking
     fileManager.chunkFileDownload(
         {
             uuid,

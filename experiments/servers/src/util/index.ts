@@ -74,6 +74,12 @@ export const firstCoValue = (() => {
 
 export const events = new Map<string, MutationEvent>();
 
+export interface UserData {
+    uuid?: string;
+    ua?: string;
+    streams?: Record<string, fs.ReadStream>;
+}
+
 export function addCoValue(
     covalues: Record<string, CoValue>,
     covalue: CoValue,
@@ -176,6 +182,11 @@ export function formatClientNumber(object:any, width: number = 2) {
     }
 }
 
+/**
+ * Parses out the UUID and UA (User Agent) from a cookie, if present
+ * @param req the request object
+ * @returns UserData
+ */
 export function parseUUIDAndUAFromCookie(req: any) {
     const cookieHeader = req.getHeader('cookie');
 
@@ -234,19 +245,34 @@ export abstract class WebSocketResponseBase<TWebSocket> {
         return this;
     }
 
-    json(data: object): void {
-        this.send(
-            JSON.stringify({
-                action: this.actionName,
-                code: this.statusCode,
-                payload: data,
-            })
-        );
-        this.timer.end();
+    json(data: object, callback?: (error?: Error) => void): void {
+        try {
+            this.send(
+                JSON.stringify({
+                    action: this.actionName,
+                    code: this.statusCode,
+                    payload: data,
+                }),
+                callback
+            );
+            this.timer.end();
+            // callback?.();
+        } catch (error) {
+            this.timer.end();
+            // callback?.(error as Error);
+        }
     }
 
     requestLog(): RequestLog {
         return this.timer.toRequestLog();
+    }
+
+    /**
+     * Returns the WebSocket instance.
+     * @returns The WebSocket instance.
+     */
+      getWS(): TWebSocket {
+        return this.ws;
     }
 
     /**
@@ -295,6 +321,16 @@ export class WebSocketResponse extends WebSocketResponseBase<WebSocket> {
 }
 
 /**
+ * WebSocket send statuses for `uWebSockets.js`
+ * See https://unetworking.github.io/uWebSockets.js/generated/interfaces/WebSocket.html#send
+ */
+enum uSendStatus {
+    BACKPRESSURE = 0,
+    SUCCESS = 1,
+    DROPPED = 2
+};
+
+/**
  * Implementation for WebSocket using `uWebSockets.js`.
  */
 export class uWebSocketResponse extends WebSocketResponseBase<uWS.WebSocket<{}>> {
@@ -307,12 +343,29 @@ export class uWebSocketResponse extends WebSocketResponseBase<uWS.WebSocket<{}>>
 
     send(data: any, callback?: (error?: Error) => void): void {
         try {
+            let status;
             if (typeof data !== "string") {
-                this.ws.send(data, true);
+                status = this.ws.send(data, true);
             } else {
-                this.ws.send(data);
+                status = this.ws.send(data);
             }
-            callback?.();
+
+            switch (status) {
+                case uSendStatus.BACKPRESSURE:
+                    // logger.warn(`Status: ${status} (uSendStatus.BACKPRESSURE)`);
+                    callback?.(new Error("Backpressure"));
+                    break;
+
+                case uSendStatus.SUCCESS:
+                    callback?.();
+                    break;
+
+                case uSendStatus.DROPPED:
+                    // logger.warn(`Status: ${status} (uSendStatus.DROPPED)`);
+                    callback?.(new Error("Dropped"));
+                    break;
+            }
+            // callback?.();
         } catch (error) {
             callback?.(error as Error);
         }

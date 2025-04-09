@@ -9,6 +9,7 @@ import {
     addCoValue,
     CHUNK_SIZE,
     uWebSocketResponse,
+    UserData,
     FastifyResponseWrapper
 } from "../util";
 import logger from "../util/logger";
@@ -64,7 +65,7 @@ export class FileStreamManager {
             !uuid ||
             !filename ||
             !base64 ||
-            chunkIndex == null ||
+            chunkIndex == null || // `chunkIndex == 0` is valid which is why an explicit null check was used instead of `!chunkIndex`
             !totalChunks
         ) {
             return res.status(400).json({
@@ -195,7 +196,7 @@ export class FileStreamManager {
         fileStream.destroy();
 
         if (target.type === "websocket" && target.wsr) {
-            target.wsr.status(500).json({ m: "Error reading file" });
+            target.wsr.status(500).json({ m: "Error occurred while streaming the file" });
 
         } else if (target.type === "http" && target.res) {
             const errorChunk = JSON.stringify({
@@ -253,13 +254,26 @@ export class FileStreamManager {
         };
 
         logger.debug(
-            `[GET] Streaming file '${filePath}' of size ${fileSize} (${
+            `[GET] CoValue ${uuid}: Streaming file '${filePath}' of size ${fileSize} (${
                 fileSize / 1_000_000
             }MB) in ${CHUNK_SIZE / 1024}KB chunks...`,
         );
 
         if (target.type === "websocket" && target.wsr) {
-            target.wsr.status(202).json(startChunk);
+            target.wsr.status(202).json(startChunk, (error) => {
+                if (error) {
+                    if (error.message === "Backpressure") {
+                        logger.warn(`CoValue ${uuid}: Backpressure event during streaming`);
+
+                    } else if (error.message === "Dropped") {
+                        logger.warn(`CoValue ${uuid}: Dropped event during streaming`);
+
+                    } else {
+                        this.chunkFileDownloadError(error, target, fileStream);
+                        return;
+                    }
+                }
+            });
 
         } else if (target.type === "http" && target.res) {
             headers!["Content-Range"] = `bytes ${start}-${end}/${fileSize}`;
@@ -284,10 +298,48 @@ export class FileStreamManager {
             };
 
             if (target.type === "websocket" && target.wsr) {
-                target.wsr.status(206).json(dataChunk);
-                if (!streamEnded) {
-                    fileStream.resume();
-                }
+                target.wsr.status(206).json(dataChunk, (error) => {
+                    if (error) {
+                        if (error.message === "Backpressure") {
+                            logger.warn(`CoValue ${uuid}: Backpressure event during streaming`);
+                            if (!streamEnded) {
+                                fileStream.pause();
+                                logger.warn(`CoValue ${uuid}: pausing fileStream ...`); // TODO: change to logger.debug()
+
+                                // See https://unetworking.github.io/uWebSockets.js/generated/interfaces/WebSocket.html#send
+                                if (target.wsr instanceof uWebSocketResponse) {
+                                    // For `uWS.js`, let the drain event drive the flow of the stream
+                                    const uwsr = target.wsr as uWebSocketResponse;
+                                    const userData: UserData = uwsr.getWS().getUserData();
+                                    if (!userData.streams) {
+                                        userData.streams = {};
+                                    }
+                                    userData.streams[uuid] = fileStream;
+
+                                } else {
+                                    // For `ws`, pause briefly before resuming
+                                    setTimeout(() => {
+                                        fileStream.resume();
+                                    }, 200);
+                                }
+                            }
+
+                        } else if (error.message === "Dropped") {
+                            logger.warn(`CoValue ${uuid}: Dropped event during streaming`);
+                            if (!streamEnded) {
+                                fileStream.pause();
+                            }
+
+                        } else {
+                            this.chunkFileDownloadError(error, target, fileStream);
+                            return;
+                        }
+                    } else {
+                        if (!streamEnded) {
+                            fileStream.resume();
+                        }
+                    }
+                });
 
             } else if (target.type === "http" && target.res) {
                 target.res.write(JSON.stringify(dataChunk) + '\n', (error) => {
@@ -320,7 +372,7 @@ export class FileStreamManager {
                 target.res.end(JSON.stringify(endChunk) + '\n');
             }
             logger.debug(
-                `[GET] Chunked download of file '${filePath}' with size ${fileSize} (${
+                `[GET] CoValue ${uuid}: Chunked download of file '${filePath}' with size ${fileSize} (${
                     fileSize / 1_000_000
                 }MB) completed successfully.`,
             );
