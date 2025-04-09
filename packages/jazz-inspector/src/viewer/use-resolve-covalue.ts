@@ -94,7 +94,6 @@ export async function resolveCoValue(
     } else if (isGroup(snapshot)) {
       extendedType = "group";
     }
-    // TODO: check for Record-like CoMaps
   }
 
   return {
@@ -131,7 +130,6 @@ function subscribeToCoValue(
         } else if (isGroup(snapshot)) {
           extendedType = "group";
         }
-        // TODO: check for Record-like CoMaps
       } else if (type === "costream") {
         const coStream = detectCoStreamType(value as RawCoStream);
 
