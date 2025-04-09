@@ -93,17 +93,8 @@ export async function resolveCoValue(
       extendedType = "account";
     } else if (isGroup(snapshot)) {
       extendedType = "group";
-    } else {
-      // This check is a bit of a hack
-      // There might be a better way to do this
-      const children = Object.values(snapshot).slice(0, 10);
-      if (
-        children.every((c) => typeof c === "string" && c.startsWith("co_")) &&
-        children.length > 3
-      ) {
-        extendedType = "record";
-      }
     }
+    // TODO: check for Record-like CoMaps
   }
 
   return {
@@ -139,17 +130,8 @@ function subscribeToCoValue(
           extendedType = "account";
         } else if (isGroup(snapshot)) {
           extendedType = "group";
-        } else {
-          const children = Object.values(snapshot).slice(0, 10);
-          if (
-            children.every(
-              (c) => typeof c === "string" && c.startsWith("co_"),
-            ) &&
-            children.length > 3
-          ) {
-            extendedType = "record";
-          }
         }
+        // TODO: check for Record-like CoMaps
       } else if (type === "costream") {
         const coStream = detectCoStreamType(value as RawCoStream);
 
