@@ -1720,7 +1720,7 @@ importers:
         specifier: ^11.7.0
         version: 11.7.0
       cojson:
-        specifier: workspace:0.13.0
+        specifier: workspace:0.13.2
         version: link:../cojson
       cojson-storage:
         specifier: workspace:*
@@ -1797,13 +1797,13 @@ importers:
   packages/jazz-auth-clerk:
     dependencies:
       cojson:
-        specifier: workspace:0.13.0
+        specifier: workspace:0.13.2
         version: link:../cojson
       jazz-browser:
-        specifier: workspace:0.13.0
+        specifier: workspace:0.13.2
         version: link:../jazz-browser
       jazz-tools:
-        specifier: workspace:0.13.0
+        specifier: workspace:0.13.2
         version: link:../jazz-tools
     devDependencies:
       typescript:
@@ -1841,10 +1841,10 @@ importers:
         specifier: ^4.1.0
         version: 4.1.0
       jazz-browser:
-        specifier: workspace:0.13.0
+        specifier: workspace:0.13.2
         version: link:../jazz-browser
       jazz-tools:
-        specifier: workspace:0.13.0
+        specifier: workspace:0.13.2
         version: link:../jazz-tools
       pica:
         specifier: ^9.0.1
@@ -1965,19 +1965,19 @@ importers:
         specifier: ^1.3.0
         version: 1.5.0
       cojson:
-        specifier: workspace:0.13.0
+        specifier: workspace:0.13.2
         version: link:../cojson
       jazz-browser:
-        specifier: workspace:0.13.0
+        specifier: workspace:0.13.2
         version: link:../jazz-browser
       jazz-browser-media-images:
-        specifier: workspace:0.13.0
+        specifier: workspace:0.13.2
         version: link:../jazz-browser-media-images
       jazz-react-core:
-        specifier: workspace:0.13.0
+        specifier: workspace:0.13.2
         version: link:../jazz-react-core
       jazz-tools:
-        specifier: workspace:0.13.0
+        specifier: workspace:0.13.2
         version: link:../jazz-tools
     devDependencies:
       '@testing-library/dom':
@@ -2184,19 +2184,19 @@ importers:
         specifier: ^0.25.5
         version: 0.25.8(effect@3.11.9)
       cojson:
-        specifier: workspace:0.13.0
+        specifier: workspace:0.13.2
         version: link:../cojson
       cojson-storage-sqlite:
-        specifier: workspace:0.13.0
+        specifier: workspace:0.13.2
         version: link:../cojson-storage-sqlite
       cojson-transport-ws:
-        specifier: workspace:0.13.0
+        specifier: workspace:0.13.2
         version: link:../cojson-transport-ws
       effect:
         specifier: ^3.6.5
         version: 3.11.9
       jazz-tools:
-        specifier: workspace:0.13.0
+        specifier: workspace:0.13.2
         version: link:../jazz-tools
       ws:
         specifier: ^8.14.2
@@ -17582,10 +17582,10 @@ snapshots:
       '@vitest/utils': 3.0.5
       magic-string: 0.30.17
       msw: 2.7.0(@types/node@22.10.2)(typescript@5.6.3)
-      sirv: 3.0.0
+      sirv: 3.0.1
       tinyrainbow: 2.0.0
       vitest: 3.0.5(@types/node@22.10.2)(@vitest/browser@3.0.5)(@vitest/ui@3.0.5)(happy-dom@17.4.4)(jiti@2.4.2)(jsdom@25.0.1)(lightningcss@1.29.1)(msw@2.7.0(@types/node@22.10.2)(typescript@5.6.3))(terser@5.37.0)(yaml@2.6.1)
-      ws: 8.18.0
+      ws: 8.18.1
     optionalDependencies:
       playwright: 1.50.1
       webdriverio: 8.41.0
@@ -17727,10 +17727,10 @@ snapshots:
     dependencies:
       '@vitest/utils': 3.0.5
       fflate: 0.8.2
-      flatted: 3.3.2
-      pathe: 2.0.2
-      sirv: 3.0.0
-      tinyglobby: 0.2.10
+      flatted: 3.3.3
+      pathe: 2.0.3
+      sirv: 3.0.1
+      tinyglobby: 0.2.12
       tinyrainbow: 2.0.0
       vitest: 3.0.5(@types/node@22.10.2)(@vitest/browser@3.0.5)(@vitest/ui@3.0.5)(happy-dom@17.4.4)(jiti@2.4.2)(jsdom@25.0.1)(lightningcss@1.29.1)(msw@2.7.0(@types/node@22.10.2)(typescript@5.6.3))(terser@5.37.0)(yaml@2.6.1)
     optional: true

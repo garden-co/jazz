@@ -1,5 +1,11 @@
 # cojson
 
+## 0.13.2
+
+### Patch Changes
+
+- c551839: Add jazz.messagequeue.pushed/pulled counters, remove jazz.messagequeue.size gauge
+
 ## 0.13.0
 
 ### Minor Changes

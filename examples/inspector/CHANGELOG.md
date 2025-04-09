@@ -1,5 +1,15 @@
 # jazz-example-inspector
 
+## 0.0.122
+
+### Patch Changes
+
+- Updated dependencies [ae4be2b]
+- Updated dependencies [c551839]
+  - jazz-inspector@0.13.2
+  - cojson@0.13.2
+  - cojson-transport-ws@0.13.2
+
 ## 0.0.121
 
 ### Patch Changes

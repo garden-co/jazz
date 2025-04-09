@@ -1,5 +1,12 @@
 # file-share-svelte
 
+## 0.0.55
+
+### Patch Changes
+
+- jazz-svelte@0.13.2
+- jazz-tools@0.13.2
+
 ## 0.0.54
 
 ### Patch Changes

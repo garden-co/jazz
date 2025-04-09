@@ -1,5 +1,15 @@
 # jazz-inspector
 
+## 0.13.2
+
+### Patch Changes
+
+- ae4be2b: fix: comaps showing in a table instead of grid
+- Updated dependencies [c551839]
+  - cojson@0.13.2
+  - jazz-react-core@0.13.2
+  - jazz-tools@0.13.2
+
 ## 0.13.0
 
 ### Patch Changes
