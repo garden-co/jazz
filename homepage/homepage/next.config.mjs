@@ -189,10 +189,7 @@ export function withTocAndFrameworkHeadingsVisibilityExport() {
                   {
                     type: "VariableDeclarator",
                     id: { type: "Identifier", name: "tableOfContents" },
-                    init: valueToEstree(
-                      // exclude h1
-                      vfile.data.toc.length ? vfile.data.toc[0].children : [],
-                    ),
+                    init: valueToEstree(vfile.data.toc),
                   },
                 ],
               },
