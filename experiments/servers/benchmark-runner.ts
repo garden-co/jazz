@@ -5,9 +5,9 @@ import { setNetworkCondition, resetNetwork } from './src/util/network-conditione
 // Network conditions I - IV
 const networkConditions = [
     { name: 'ideal-network', prefix: "I" },    // Ideal network, no bandwidth limits or latency
-    // { name: '4g-speeds', prefix: "II" },       // 4G simulation
-    // { name: '3g-speeds', prefix: "III" },       // 3G simulation
-    // { name: 'high-packet-loss', prefix: "IV" }, // High packet loss
+    { name: '4g-speeds', prefix: "II" },       // 4G simulation
+    { name: '3g-speeds', prefix: "III" },       // 3G simulation
+    { name: 'high-packet-loss', prefix: "IV" }, // High packet loss
 ];
 
 // 6 web servers

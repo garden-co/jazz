@@ -17,7 +17,7 @@
     "uws-ws": "pnpm run build && NODE_ENV=production node --max-old-space-size=8192 dist/uws-js/websocket.js",
     "uws-http1": "pnpm run build && NODE_ENV=production node --max-old-space-size=8192 dist/uws-js/http1-sse.js",
     "caddy-http1": "PORT=3001 NODE_ENV=production node --max-old-space-size=8192 dist/caddy/http1-sse.js",
-    "caddy-http3": "pnpm run build && pnpm run build:caddy && CERT_PATH=./cert/localhost+1.pem KEY_PATH=./cert/localhost+1-key.pem NODE_ENV=production caddy start --config ./dist/caddy/Caddyfile && npm run caddy-http1",
+    "caddy-http3": "pnpm run build && pnpm run build:caddy && CERT_PATH=./cert/localhost+1.pem KEY_PATH=./cert/localhost+1-key.pem NODE_ENV=production caddy start --config ./dist/caddy/Caddyfile && pnpm run caddy-http1",
     "dev:node-ws": "npx ts-node-dev --respawn src/node-js/websocket.ts",
     "dev:node-http1": "npx ts-node-dev --respawn src/node-js/http1-sse.ts",
     "dev:node-http2": "npx ts-node-dev --respawn src/node-js/http2-sse.ts",
