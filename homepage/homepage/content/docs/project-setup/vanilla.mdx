@@ -1,0 +1,53 @@
+export const metadata = { title: "Installation" };
+
+import { CodeGroup } from "@/components/forMdx";
+
+# VanillaJS Installation
+
+Jazz can be used with VanillaJS app.
+
+To add some Jazz to your VanillaJS app, you can use the following steps:
+
+1. Install Jazz dependencies
+
+<CodeGroup>
+```sh
+pnpm install jazz-browser jazz-tools
+```
+</CodeGroup>
+
+2. Write your schema
+
+See the [schema docs](/docs/schemas/covalues) for more information.
+
+3. Create a context
+
+<CodeGroup>
+```ts twoslash
+
+import { Account, AuthSecretStorage } from "jazz-tools"
+
+class YourAccountSchema extends Account {
+  // your schema
+}
+
+let authSecretStorage = new AuthSecretStorage();
+
+// ---cut---
+import { createJazzBrowserContext } from "jazz-browser"
+
+const { me, logOut } = await createJazzBrowserContext({
+    sync: { 
+        peer: "wss://cloud.jazz.tools/?key=you@example.com"
+    },
+    authSecretStorage: authSecretStorage,
+    AccountSchema: YourAccountSchema
+})
+
+declare module "jazz-tools" {
+  interface Register {
+     Account: YourAccountSchema;
+  }
+} 
+```
+</CodeGroup>
