@@ -6,7 +6,7 @@ export const SERVER_URL = 'https://localhost:3000';
 export const NUM_BROWSERS: number = 10;
 export const concurrencyLevels1 = [10, 20, 30, 50, 100];
 // For binary CoValues downloaded from a `node-ws` server, at concurrency levels > 20, the browser's web socket client closes mid test with: 1006 code (Abnormal Closure)
-export const concurrencyLevels2 = [10, 20];
+export const concurrencyLevels2 = concurrencyLevels1; // [10, 20];
 
 interface BrowserInstance {
     browser: Browser;

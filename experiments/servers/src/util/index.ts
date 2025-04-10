@@ -300,8 +300,8 @@ export class WebSocketResponse extends WebSocketResponseBase<WebSocket> {
         this.wss = wss;
     }
 
-    send(data: BufferLike, cb?: (err?: Error) => void): void {
-        this.ws.send(data, cb);
+    send(data: BufferLike, callback?: (err?: Error) => void): void {
+        this.ws.send(data, callback);
     }
 
     broadcast(data: object): void {
@@ -352,7 +352,6 @@ export class uWebSocketResponse extends WebSocketResponseBase<uWS.WebSocket<{}>>
 
             switch (status) {
                 case uSendStatus.BACKPRESSURE:
-                    // logger.warn(`Status: ${status} (uSendStatus.BACKPRESSURE)`);
                     callback?.(new Error("Backpressure"));
                     break;
 
@@ -361,7 +360,6 @@ export class uWebSocketResponse extends WebSocketResponseBase<uWS.WebSocket<{}>>
                     break;
 
                 case uSendStatus.DROPPED:
-                    // logger.warn(`Status: ${status} (uSendStatus.DROPPED)`);
                     callback?.(new Error("Dropped"));
                     break;
             }

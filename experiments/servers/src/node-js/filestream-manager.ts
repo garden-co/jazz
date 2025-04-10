@@ -301,10 +301,10 @@ export class FileStreamManager {
                 target.wsr.status(206).json(dataChunk, (error) => {
                     if (error) {
                         if (error.message === "Backpressure") {
-                            logger.warn(`CoValue ${uuid}: Backpressure event during streaming`);
+                            logger.debug(`CoValue ${uuid}: Backpressure event during streaming`);
                             if (!streamEnded) {
                                 fileStream.pause();
-                                logger.warn(`CoValue ${uuid}: pausing fileStream ...`); // TODO: change to logger.debug()
+                                logger.debug(`CoValue ${uuid}: pausing fileStream ...`);
 
                                 // See https://unetworking.github.io/uWebSockets.js/generated/interfaces/WebSocket.html#send
                                 if (target.wsr instanceof uWebSocketResponse) {
@@ -315,13 +315,13 @@ export class FileStreamManager {
                                         userData.streams = {};
                                     }
                                     userData.streams[uuid] = fileStream;
-
-                                } else {
-                                    // For `ws`, pause briefly before resuming
-                                    setTimeout(() => {
-                                        fileStream.resume();
-                                    }, 200);
                                 }
+                                // else {
+                                //     // For `ws`, pause briefly before resuming
+                                //     setTimeout(() => {
+                                //         fileStream.resume();
+                                //     }, 200);
+                                // }
                             }
 
                         } else if (error.message === "Dropped") {
