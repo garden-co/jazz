@@ -1,4 +1,4 @@
-import { products } from "@/lib/showcase";
+import { products } from "@/content/showcase";
 import { HeroHeader } from "gcmp-design-system/src/app/components/molecules/HeroHeader";
 import type { Metadata } from "next";
 import Image from "next/image";

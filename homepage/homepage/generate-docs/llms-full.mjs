@@ -208,7 +208,7 @@ async function readMdxContent(url) {
     if (url === "/docs") {
       const introPath = path.join(
         process.cwd(),
-        "app/(docs)/docs/[framework]/[[...slug]]/index.mdx",
+        "content/docs/index.mdx",
       );
       try {
         const content = await fs.readFile(introPath, "utf8");
@@ -229,7 +229,7 @@ async function readMdxContent(url) {
     // Base directory for docs
     const baseDir = path.join(
       process.cwd(),
-      "app/(docs)/docs/[framework]/[[...slug]]",
+      "content/docs",
     );
 
     // If it's a directory, try to read all framework variants

@@ -5,7 +5,7 @@ import { ReactLogo } from "@/components/icons/ReactLogo";
 import { ReactNativeLogo } from "@/components/icons/ReactNativeLogo";
 import { SvelteLogo } from "@/components/icons/SvelteLogo";
 import { VueLogo } from "@/components/icons/VueLogo";
-import { Example, features, tech } from "@/lib/example";
+import { Example, features, tech } from "@/content/example";
 import { clsx } from "clsx";
 import { H2 } from "gcmp-design-system/src/app/components/atoms/Headings";
 import { Icon } from "gcmp-design-system/src/app/components/atoms/Icon";

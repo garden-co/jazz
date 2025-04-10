@@ -1,5 +1,5 @@
 import CreateJazzApp from "@/components/home/CreateJazzApp.mdx";
-import { marketingCopy } from "@/lib/marketingCopy";
+import { marketingCopy } from "@/content/marketingCopy";
 import { H1 } from "gcmp-design-system/src/app/components/atoms/Headings";
 import {
   Icon,

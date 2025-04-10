@@ -1,5 +1,5 @@
 import { ThemeToggle } from "@/components/ThemeToggle";
-import { socials } from "@/lib/socials";
+import { socials } from "@/content/socials";
 import { GcmpLogo } from "gcmp-design-system/src/app/components/atoms/logos/GcmpLogo";
 import { Footer } from "gcmp-design-system/src/app/components/organisms/Footer";
 

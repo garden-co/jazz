@@ -1,4 +1,4 @@
-import { marketingCopy } from '@/lib/marketingCopy';
+import { marketingCopy } from '@/content/marketingCopy';
 import OpenGraphImage, { imageSize, imageContentType } from 'gcmp-design-system/src/app/components/organisms/OpenGraphImage';
 
 export const title = marketingCopy.headline;

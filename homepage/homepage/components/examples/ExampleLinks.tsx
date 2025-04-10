@@ -1,6 +1,6 @@
 "use client";
 
-import { Example } from "@/lib/example";
+import { Example } from "@/content/example";
 import { InterpolateInCode } from "@/mdx-components";
 import { DialogDescription } from "@headlessui/react";
 import { Button } from "gcmp-design-system/src/app/components/atoms/Button";

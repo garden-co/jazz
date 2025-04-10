@@ -1,6 +1,6 @@
 "use client";
 
-import { Framework } from "@/lib/framework";
+import { Framework } from "@/content/framework";
 import { useFramework } from "@/lib/use-framework";
 import { Button } from "gcmp-design-system/src/app/components/atoms/Button";
 import { Icon } from "gcmp-design-system/src/app/components/atoms/Icon";
