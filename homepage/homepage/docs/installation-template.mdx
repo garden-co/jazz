@@ -1,0 +1,79 @@
+export const metadata = { title: "Installation Template" };
+
+import { CodeGroup } from "@/components/forMdx";
+
+# [Platform] Setup
+
+Get Jazz running in your [Platform] project quickly.
+
+## Install
+
+<CodeGroup>
+```bash
+npm install jazz-tools jazz-[platform]
+```
+</CodeGroup>
+
+## Set up
+
+Create your schema:
+
+<CodeGroup>
+```typescript
+// schema.ts
+import { Account, Profile, co } from "jazz-tools";
+
+export class MyAppAccount extends Account {
+  profile = co.ref(Profile);
+}
+
+// Register the schema
+declare module "jazz-[platform]" {
+  interface Register {
+    Account: MyAppAccount;
+  }
+}
+```
+</CodeGroup>
+
+Add the provider:
+
+<CodeGroup>
+```tsx
+import { JazzProvider } from "jazz-[platform]";
+import { MyAppAccount } from "./schema";
+
+// Wrap your app
+<JazzProvider
+  sync={{ peer: "wss://cloud.jazz.tools/?key=you@example.com" }}
+  AccountSchema={MyAppAccount}
+>
+  <App />
+</JazzProvider>
+```
+</CodeGroup>
+
+## Use it
+
+<CodeGroup>
+```tsx
+// In your components
+import { useAccount, useCoState } from "jazz-[platform]";
+import { MyDataType } from "./schema";
+
+function MyComponent() {
+  const { me } = useAccount();
+  const dataId = "..."; // ID of the data you want to access
+  const data = useCoState(MyDataType, dataId);
+  
+  // Now you can use data.value
+}
+```
+</CodeGroup>
+
+## Next steps
+
+- [Define your schemas](/docs/schemas/covalues)
+- [Work with CoValues](/docs/covalues/using-covalues)
+- [Authentication options](/docs/authentication/methods)
+- [Shared data and permissions](/docs/permissions/groups-and-sharing)
