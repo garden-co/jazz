@@ -1,0 +1,8 @@
+{
+  "build": {
+    "env": {
+      "APP_NAME": "react-passkey-auth"
+    }
+  },
+  "ignoreCommand": "node ../../ignore-vercel-build.js"
+}
