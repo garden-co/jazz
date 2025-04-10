@@ -1,4 +1,3 @@
-import { docNavigationItems } from "@/content/docs/docNavigationItems.js";
 import { Framework, frameworks } from "@/content/framework";
 import { getDocMetadata, DocPage } from "@/lib/docMdxContent";
 
@@ -37,4 +36,3 @@ export async function generateStaticParams() {
 
   return paths;
 }
-

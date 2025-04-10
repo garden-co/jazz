@@ -1,6 +1,8 @@
-import { TocItemsSetter } from "@/components/docs/TocItemsSetter";
-import ComingSoonPage from "@/components/docs/coming-soon.mdx";
+import { ComingSoon } from "@/components/docs/ComingSoon";
+import DocsLayout from "@/components/docs/DocsLayout";
+import { DocNav } from "@/components/docs/nav";
 import { Toc } from "@stefanprobst/rehype-extract-toc";
+import { Prose } from "gcmp-design-system/src/app/components/molecules/Prose";
 
 export async function getMdxSource(framework: string, slugPath?: string) {
   // Try to import the framework-specific file first
@@ -38,11 +40,18 @@ export async function getDocMetadata(framework: string, slug?: string[]) {
   }
 }
 
-export async function DocPage({ framework, slug }: { framework: string; slug?: string[] }) {
+export async function DocPage({
+  framework,
+  slug,
+}: {
+  framework: string;
+  slug?: string[];
+}) {
   const slugPath = slug?.join("/");
 
   try {
     const mdxSource = await getMdxSource(framework, slugPath);
+
     const {
       default: Content,
       tableOfContents,
@@ -58,17 +67,19 @@ export async function DocPage({ framework, slug }: { framework: string; slug?: s
     );
 
     return (
-      <>
-        <TocItemsSetter items={tocItems} />
-        <Content />
-      </>
+      <DocsLayout nav={<DocNav />} tocItems={tocItems}>
+        <Prose className="overflow-x-hidden lg:flex-1 py-10  max-w-3xl mx-auto">
+          <Content />
+        </Prose>
+      </DocsLayout>
     );
   } catch (error) {
     return (
-      <>
-        <TocItemsSetter items={[]} />
-        <ComingSoonPage />
-      </>
+      <DocsLayout nav={<DocNav />} tocItems={[]}>
+        <Prose className="overflow-x-hidden lg:flex-1 py-10  max-w-3xl mx-auto">
+          <ComingSoon />
+        </Prose>
+      </DocsLayout>
     );
   }
 }

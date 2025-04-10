@@ -27,7 +27,11 @@ export const dynamicParams = false;
 export const dynamic = "force-static";
 
 export async function generateStaticParams() {
-  const paths: Array<{ topic?: string; subtopic?: string; framework: Framework }> = [];
+  const paths: Array<{
+    topic?: string;
+    subtopic?: string;
+    framework: Framework;
+  }> = [];
 
   for (const framework of frameworks) {
     for (const heading of docNavigationItems) {
