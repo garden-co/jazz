@@ -14,7 +14,7 @@ export function SideNavLayout({
 }) {
   return (
     <div className="flex-1 w-full">
-      <JazzNav sections={floatingNavSections} />
+      <JazzNav sections={floatingNavSections} hideMobileNav />
       <main>
         <div className="container relative md:grid md:grid-cols-12 md:gap-12">
           <div

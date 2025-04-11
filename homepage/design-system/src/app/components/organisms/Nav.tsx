@@ -34,6 +34,7 @@ type NavProps = {
   socials?: SocialLinksProps;
   themeToggle: ComponentType<{ className?: string }>;
   sections?: NavSection[];
+  hideMobileNav?: boolean;
 };
 
 export type NavSection = {
@@ -130,12 +131,13 @@ function NavItem({
 export function MobileNav({
   mainLogo,
   items,
-  cta,
   socials,
   sections,
   themeToggle: ThemeToggle,
-}: NavProps) {
-  console.log("mobile nav");
+  navBarClassName,
+}: NavProps & {
+  navBarClassName?: string;
+}) {
   const primarySection: {
     name: string;
     icon: IconName;
@@ -189,7 +191,12 @@ export function MobileNav({
 
   return (
     <>
-      <div className="md:hidden absolute top-0 w-full left-0 px-4 flex items-center self-stretch dark:text-white">
+      <div
+        className={clsx(
+          "md:hidden px-4 flex items-center self-stretch dark:text-white",
+          navBarClassName,
+        )}
+      >
         <NavLinkLogo prominent href="/" className="mr-auto">
           {mainLogo}
         </NavLinkLogo>
@@ -335,7 +342,7 @@ function NavLinkLogo({
 }
 
 export function Nav(props: NavProps) {
-  const { mainLogo, items, cta } = props;
+  const { mainLogo, items, cta, hideMobileNav } = props;
   return (
     <>
       <div className="w-full border-b py-2 sticky top-0 z-50 bg-white dark:bg-stone-950 hidden md:block">
@@ -362,7 +369,7 @@ export function Nav(props: NavProps) {
           {cta}
         </PopoverGroup>
       </div>
-      {/*<MobileNav {...props} />*/}
+      {!hideMobileNav && <MobileNav {...props} />}
     </>
   );
 }
