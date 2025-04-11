@@ -23,6 +23,12 @@ importers:
       clsx:
         specifier: ^2.1.1
         version: 2.1.1
+      jazz-react:
+        specifier: link:../../packages/jazz-react
+        version: link:../../packages/jazz-react
+      jazz-tools:
+        specifier: link:../../packages/jazz-tools
+        version: link:../../packages/jazz-tools
       lucide-react:
         specifier: ^0.436.0
         version: 0.436.0(react@18.3.1)
