@@ -9,8 +9,7 @@ export async function getMdxSource(framework: string, slugPath?: string) {
     if (!slugPath) {
       return await import("../content/docs/index.mdx");
     }
-    const source = await import(`../content/docs/${slugPath}/${framework}.mdx`);
-    return source;
+    return await import(`../content/docs/${slugPath}/${framework}.mdx`);
   } catch (error) {
     // Fallback to vanilla
     console.log(`Falling back to vanilla for ${slugPath}`);
@@ -41,6 +40,14 @@ export async function getDocMetadata(framework: string, slug?: string[]) {
   }
 }
 
+function DocProse({ children }: { children: React.ReactNode }) {
+  return (
+    <Prose className="overflow-x-hidden lg:flex-1 pb-8 pt-[calc(61px+2rem)] md:pt-8 md:max-w-3xl mx-auto">
+      {children}
+    </Prose>
+  );
+}
+
 export async function DocPage({
   framework,
   slug,
@@ -68,9 +75,9 @@ export async function DocPage({
 
     return (
       <DocsLayout nav={<DocNav />} tocItems={tocItems}>
-        <Prose className="overflow-x-hidden lg:flex-1 py-10  max-w-3xl mx-auto">
+        <DocProse>
           <Content />
-        </Prose>
+        </DocProse>
       </DocsLayout>
     );
   } catch (error) {
@@ -79,9 +86,9 @@ export async function DocPage({
     );
     return (
       <DocsLayout nav={<DocNav />} tocItems={[]}>
-        <Prose className="overflow-x-hidden lg:flex-1 py-10  max-w-3xl mx-auto">
+        <DocProse>
           <ComingSoon />
-        </Prose>
+        </DocProse>
       </DocsLayout>
     );
   }
