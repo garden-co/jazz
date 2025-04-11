@@ -1,3 +1,4 @@
+import { Histogram, ValueType, metrics } from "@opentelemetry/api";
 import { Result, err, ok } from "neverthrow";
 import { AnyRawCoValue, RawCoValue } from "./coValue.js";
 import { ControlledAccountOrAgent, RawAccountID } from "./coValues/account.js";
@@ -110,6 +111,7 @@ export class CoValueCore {
   _cachedDependentOn?: RawCoID[];
   _cachedNewContentSinceEmpty?: NewContentMessage[] | undefined;
   _currentAsyncAddTransaction?: Promise<void>;
+  private transactionsSizeHistogram: Histogram;
 
   constructor(
     header: CoValueHeader,
@@ -121,6 +123,13 @@ export class CoValueCore {
     this.header = header;
     this._sessionLogs = internalInitSessions;
     this.node = node;
+    this.transactionsSizeHistogram = metrics
+      .getMeter("cojson")
+      .createHistogram("transactions_size", {
+        description: "The size of transactions in a covalue",
+        unit: "bytes",
+        valueType: ValueType.INT,
+      });
 
     if (header.ruleset.type == "ownedByGroup") {
       this.node
@@ -289,14 +298,16 @@ export class CoValueCore {
 
     const sizeOfTxsSinceLastInbetweenSignature = transactions
       .slice(lastInbetweenSignatureIdx + 1)
-      .reduce(
-        (sum, tx) =>
-          sum +
-          (tx.privacy === "private"
+      .reduce((sum, tx) => {
+        const txLength =
+          tx.privacy === "private"
             ? tx.encryptedChanges.length
-            : tx.changes.length),
-        0,
-      );
+            : tx.changes.length;
+
+        this.transactionsSizeHistogram.record(txLength);
+
+        return sum + txLength;
+      }, 0);
 
     if (sizeOfTxsSinceLastInbetweenSignature > MAX_RECOMMENDED_TX_SIZE) {
       signatureAfter[transactions.length - 1] = newSignature;
