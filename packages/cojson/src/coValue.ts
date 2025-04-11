@@ -19,7 +19,7 @@ export interface RawCoValue {
   /** Specifies which kind of `CoValue` this is */
   type: string;
   /** The `CoValue`'s (precisely typed) static metadata */
-  headerMeta: JsonObject | null;
+  headerMeta: JsonObject | null | undefined;
   /** The `Group` this `CoValue` belongs to (determining permissions) */
   group: RawGroup;
   /** Returns an immutable JSON presentation of this `CoValue` */
@@ -45,11 +45,11 @@ export class RawUnknownCoValue implements RawCoValue {
   }
 
   get type() {
-    return this.core.header.type;
+    return this.core.header?.type || "unavailable";
   }
 
   get headerMeta() {
-    return this.core.header.meta as JsonObject;
+    return this.core.header?.meta as JsonObject | undefined;
   }
 
   /** @category 6. Meta */
@@ -66,7 +66,7 @@ export class RawUnknownCoValue implements RawCoValue {
   }
 
   subscribe(listener: (value: this) => void): () => void {
-    return this.core.subscribe((content) => {
+    return this.core.subscribeToContent((content) => {
       listener(content as this);
     });
   }

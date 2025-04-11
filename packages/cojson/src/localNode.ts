@@ -6,6 +6,7 @@ import {
   CoValueCore,
   CoValueHeader,
   CoValueUniqueness,
+  idforHeader,
 } from "./coValueCore.js";
 import {
   AccountMeta,
@@ -46,7 +47,7 @@ export class LocalNode {
   /** @internal */
   crypto: CryptoProvider;
   /** @internal */
-  coValuesStore = new CoValuesStore();
+  coValuesStore = new CoValuesStore(this);
   /** @category 3. Low-level */
   account: ControlledAccountOrAgent;
   /** @category 3. Low-level */
@@ -126,30 +127,16 @@ export class LocalNode {
     );
 
     nodeWithAccount.account = controlledAccount;
-    nodeWithAccount.coValuesStore.setAsAvailable(
-      controlledAccount.id,
-      controlledAccount.core,
-    );
+    // Why was this needed?
+    // nodeWithAccount.coValuesStore.setExpectNonExisting(
+    //   controlledAccount.id,
+    //   controlledAccount.core,
+    // );
     controlledAccount.core._cachedContent = undefined;
 
     if (!controlledAccount.get("profile")) {
       throw new Error("Must set account profile in initial migration");
     }
-
-    // we shouldn't need this, but it fixes account data not syncing for new accounts
-    function syncAllCoValuesAfterCreateAccount() {
-      for (const coValueEntry of nodeWithAccount.coValuesStore.getValues()) {
-        if (coValueEntry.state.type === "available") {
-          void nodeWithAccount.syncManager.syncCoValue(
-            coValueEntry.state.coValue,
-          );
-        }
-      }
-    }
-
-    syncAllCoValuesAfterCreateAccount();
-
-    setTimeout(syncAllCoValuesAfterCreateAccount, 500);
 
     return {
       node: nodeWithAccount,
@@ -208,7 +195,10 @@ export class LocalNode {
       node.syncManager.local = node;
 
       controlledAccount.core.node = node;
-      node.coValuesStore.setAsAvailable(accountID, controlledAccount.core);
+      node.coValuesStore.setExpectNonExisting(
+        accountID,
+        controlledAccount.core,
+      );
       controlledAccount.core._cachedContent = undefined;
 
       const profileID = account.get("profile");
@@ -244,41 +234,48 @@ export class LocalNode {
       });
     }
 
-    const coValue = new CoValueCore(header, this);
-    this.coValuesStore.setAsAvailable(coValue.id, coValue);
-
-    void this.syncManager.syncCoValue(coValue);
+    const coValue = new CoValueCore(
+      idforHeader(header, this.crypto),
+      header,
+      this,
+    );
+    this.coValuesStore.setExpectNonExisting(coValue.id, coValue);
 
     return coValue;
   }
 
-  /** @internal */
-  async loadCoValueCore(
+  subscribeToCoValueCore(
     id: RawCoID,
-    skipLoadingFromPeer?: PeerID,
-  ): Promise<CoValueCore | "unavailable"> {
+    callback: (update: CoValueCore, unsubscribe: () => void) => void,
+  ): () => void {
+    const core = this.coValuesStore.getOrCreateEmpty(id);
+    return core.subscribe(callback);
+  }
+
+  /** @internal */
+  async loadCoValueCore(id: RawCoID): Promise<CoValueCore> {
     if (this.crashed) {
       throw new Error("Trying to load CoValue after node has crashed", {
         cause: this.crashed,
       });
     }
 
-    const entry = this.coValuesStore.get(id);
-
-    if (entry.state.type === "unknown" || entry.state.type === "unavailable") {
-      const peers =
-        this.syncManager.getServerAndStoragePeers(skipLoadingFromPeer);
-
-      await entry.loadFromPeers(peers).catch((e) => {
-        logger.error("Error loading from peers", {
-          id,
-          err: e,
-        });
-      });
-    }
-
-    // TODO: What if the loading fails because in the previous loadCoValueCore call the Peer with the covalue was skipped?
-    return entry.getCoValue();
+    return new Promise((resolve) => {
+      const timeout = setTimeout(() => {
+        resolve(this.coValuesStore.getOrCreateEmpty(id));
+        unsubscribe();
+      }, 10_000);
+      const unsubscribe = this.subscribeToCoValueCore(
+        id,
+        (update, unsubscribe) => {
+          if (update.loadingState === "available") {
+            clearTimeout(timeout);
+            resolve(update);
+            unsubscribe();
+          }
+        },
+      );
+    });
   }
 
   /**
@@ -299,7 +296,7 @@ export class LocalNode {
 
     const core = await this.loadCoValueCore(id);
 
-    if (core === "unavailable") {
+    if (core.loadingState === "unavailable") {
       return "unavailable";
     }
 
@@ -307,10 +304,10 @@ export class LocalNode {
   }
 
   getLoaded<T extends RawCoValue>(id: CoID<T>): T | undefined {
-    const entry = this.coValuesStore.get(id);
+    const entry = this.coValuesStore.getIfExists(id);
 
-    if (entry.state.type === "available") {
-      return entry.state.coValue.getCurrentContent() as T;
+    if (entry?.loadingState === "available") {
+      return entry.getCurrentContent() as T;
     }
 
     return undefined;
@@ -321,31 +318,8 @@ export class LocalNode {
     id: CoID<T>,
     callback: (update: T | "unavailable") => void,
   ): () => void {
-    let stopped = false;
-    let unsubscribe!: () => void;
-
-    this.load(id)
-      .then((coValue) => {
-        if (stopped) {
-          return;
-        }
-        if (coValue === "unavailable") {
-          callback("unavailable");
-          return;
-        }
-        unsubscribe = coValue.subscribe(callback);
-      })
-      .catch((e) => {
-        logger.error("Subscription error", {
-          id,
-          err: e,
-        });
-      });
-
-    return () => {
-      stopped = true;
-      unsubscribe?.();
-    };
+    const core = this.coValuesStore.getOrCreateEmpty(id);
+    return core.subscribeToContent(callback);
   }
 
   /** @deprecated Use Account.acceptInvite instead */
@@ -361,12 +335,13 @@ export class LocalNode {
       );
     }
 
-    if (groupOrOwnedValue.core.header.ruleset.type === "ownedByGroup") {
+    // TODO: ugly defined assertions on header
+    if (groupOrOwnedValue.core.header!.ruleset.type === "ownedByGroup") {
       return this.acceptInvite(
-        groupOrOwnedValue.core.header.ruleset.group as CoID<RawGroup>,
+        groupOrOwnedValue.core.header!.ruleset.group as CoID<RawGroup>,
         inviteSecret,
       );
-    } else if (groupOrOwnedValue.core.header.ruleset.type !== "group") {
+    } else if (groupOrOwnedValue.core.header!.ruleset.type !== "group") {
       throw new Error("Can only accept invites to groups");
     }
 
@@ -430,21 +405,23 @@ export class LocalNode {
     group.core._sessionLogs = groupAsInvite.core.sessionLogs;
     group.core._cachedContent = undefined;
 
-    for (const groupListener of group.core.listeners) {
-      groupListener(group.core.getCurrentContent());
-    }
+    // TODO: why is this needed?
+    group.core.notifyUpdate("immediate");
   }
 
   /** @internal */
-  expectCoValueLoaded(id: RawCoID, expectation?: string): CoValueCore {
-    const entry = this.coValuesStore.get(id);
+  expectCoValueLoaded(
+    id: RawCoID,
+    expectation?: string,
+  ): CoValueCore & { header: CoValueHeader } {
+    const entry = this.coValuesStore.getIfExists(id);
 
-    if (entry.state.type !== "available") {
+    if (!entry || entry.loadingState !== "available") {
       throw new Error(
-        `${expectation ? expectation + ": " : ""}CoValue ${id} not yet loaded. Current state: ${entry.state.type}`,
+        `${expectation ? expectation + ": " : ""}CoValue ${id} not yet loaded. Current state: ${entry?.loadingState}`,
       );
     }
-    return entry.state.coValue;
+    return entry as CoValueCore & { header: CoValueHeader };
   }
 
   /** @internal */
@@ -514,7 +491,7 @@ export class LocalNode {
       return ok(id);
     }
 
-    let coValue: CoValueCore;
+    let coValue: CoValueCore & { header: CoValueHeader };
 
     try {
       coValue = this.expectCoValueLoaded(id, expectation);
@@ -542,50 +519,6 @@ export class LocalNode {
     }
 
     return ok((coValue.getCurrentContent() as RawAccount).currentAgentID());
-  }
-
-  resolveAccountAgentAsync(
-    id: RawAccountID | AgentID,
-    expectation?: string,
-  ): ResultAsync<AgentID, ResolveAccountAgentError> {
-    if (isAgentID(id)) {
-      return okAsync(id);
-    }
-
-    return ResultAsync.fromPromise(
-      this.loadCoValueCore(id),
-      (e) =>
-        ({
-          type: "ErrorLoadingCoValueCore",
-          expectation,
-          id,
-          error: e,
-        }) satisfies LoadCoValueCoreError,
-    ).andThen((coValue) => {
-      if (coValue === "unavailable") {
-        return err({
-          type: "AccountUnavailableFromAllPeers" as const,
-          expectation,
-          id,
-        } satisfies AccountUnavailableFromAllPeersError);
-      }
-
-      if (
-        coValue.header.type !== "comap" ||
-        coValue.header.ruleset.type !== "group" ||
-        !coValue.header.meta ||
-        !("type" in coValue.header.meta) ||
-        coValue.header.meta.type !== "account"
-      ) {
-        return err({
-          type: "UnexpectedlyNotAccount" as const,
-          expectation,
-          id,
-        } satisfies UnexpectedlyNotAccountError);
-      }
-
-      return ok((coValue.getCurrentContent() as RawAccount).currentAgentID());
-    });
   }
 
   /**
@@ -638,14 +571,16 @@ export class LocalNode {
     while (coValuesToCopy.length > 0) {
       const [coValueID, entry] = coValuesToCopy[coValuesToCopy.length - 1]!;
 
-      if (entry.state.type !== "available") {
+      if (entry.loadingState !== "available") {
         coValuesToCopy.pop();
         continue;
       } else {
-        const allDepsCopied = entry.state.coValue
+        const allDepsCopied = entry
           .getDependedOnCoValues()
           .every(
-            (dep) => newNode.coValuesStore.get(dep).state.type === "available",
+            (dep) =>
+              newNode.coValuesStore.getIfExists(dep)?.loadingState ===
+              "available",
           );
 
         if (!allDepsCopied) {
@@ -655,12 +590,13 @@ export class LocalNode {
         }
 
         const newCoValue = new CoValueCore(
-          entry.state.coValue.header,
+          entry.id,
+          entry.header,
           newNode,
-          new Map(entry.state.coValue.sessionLogs),
+          new Map(entry.sessionLogs),
         );
 
-        newNode.coValuesStore.setAsAvailable(coValueID, newCoValue);
+        newNode.coValuesStore.setExpectNonExisting(coValueID, newCoValue);
 
         coValuesToCopy.pop();
       }
