@@ -4,46 +4,62 @@ import { Icon } from "./Icon";
 
 interface Props {
   children: ReactNode;
-  variant?: "warning" | "info";
+  variant?: "warning" | "info" | "danger";
   title: string;
   className?: string;
 }
 
-export function Alert({
-  children,
-  variant = "warning",
-  title,
-  className,
-}: Props) {
+export function Alert({ children, variant = "info", title, className }: Props) {
   return (
     <div
       className={clsx(
-        "border-l-4 p-4 pl-6 dark:bg-red-200/5 overflow-hidden relative rounded",
+        "border-l-4 p-4 overflow-hidden relative flex gap-3 rounded ",
         {
-          "border-yellow-400 bg-yellow-50 dark:border-yellow-500 dark:bg-yellow-200/5":
+          "border-yellow-500 bg-yellow-50 dark:bg-stone-925":
             variant === "warning",
-          "border-blue-400 bg-blue-50 dark:border-blue-500 dark:bg-blue-200/5":
-            variant === "info",
+          "border-blue-500 bg-blue-50 dark:bg-stone-925": variant === "info",
+          "border-red-500 bg-red-50 dark:bg-stone-925": variant === "danger",
         },
         className,
       )}
     >
-      <span
-        className={clsx(
-          "text-sm font-bold flex items-center gap-1",
-          variant === "warning" && "text-yellow-700 dark:text-yellow-400",
-          variant === "info" && "text-blue-700 dark:text-blue-400",
-        )}
-      >
-        <Icon
-          name={variant}
-          size="7xl"
-          className="absolute -z-10 right-0 opacity-5 top-0 rotate-12 pointer-events-none"
-        />
-        <Icon name={variant} size="xs" />
-        {title}
-      </span>
-      <span className={clsx("text-sm")}>{children}</span>
+      <Icon
+        name={variant}
+        size="7xl"
+        className="absolute z-0 right-0 opacity-5 top-0 rotate-12 pointer-events-none"
+      />
+
+      <Icon
+        name={variant}
+        size="sm"
+        className={clsx("shrink-0", {
+          "text-red-500": variant === "danger",
+          "text-yellow-500": variant === "warning",
+          "text-blue-500": variant === "info",
+        })}
+      />
+
+      <div>
+        <p
+          className={clsx(
+            "not-prose text-sm font-semibold text-stone-900 dark:text-white flex items-center gap-1 mb-2",
+          )}
+        >
+          {title}
+        </p>
+        <div
+          className={clsx(
+            "prose prose-sm dark:prose-invert dark:prose-code:bg-stone-900",
+            {
+              "prose-code:bg-red-100": variant === "danger",
+              "prose-code:bg-yellow-100": variant === "warning",
+              "prose-code:bg-blue-100": variant === "info",
+            },
+          )}
+        >
+          {children}
+        </div>
+      </div>
     </div>
   );
 }

@@ -1,4 +1,5 @@
 import {
+  AlertCircleIcon,
   AlertTriangleIcon,
   ArrowDownIcon,
   ArrowRightIcon,
@@ -77,6 +78,7 @@ const icons = {
   zip: FolderArchiveIcon,
   warning: AlertTriangleIcon,
   info: InfoIcon,
+  danger: AlertCircleIcon,
 };
 
 // copied from tailwind line height https://tailwindcss.com/docs/font-size

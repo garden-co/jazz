@@ -1,4 +1,5 @@
 import { CodeGroup } from "@/components/forMdx";
+import { Alert } from "gcmp-design-system/src/app/components/atoms/Alert";
 
 export const metadata = { title: "ImageDefinition" };
 
@@ -37,7 +38,9 @@ async function handleFileUpload(event) {
 ```
 </CodeGroup>
 
-> Note: `createImage()` requires a browser environment as it uses browser APIs to process images.
+<Alert variant="info" title="Note" className="mt-4">
+`createImage()` requires a browser environment as it uses browser APIs to process images.
+</Alert>
 
 The `createImage()` function:
 - Creates an `ImageDefinition` with the right properties
