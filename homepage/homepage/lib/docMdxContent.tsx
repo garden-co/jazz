@@ -1,15 +1,7 @@
-import { ThemeToggle } from "@/components/ThemeToggle";
 import DocsLayout from "@/components/docs/DocsLayout";
-import { TableOfContents } from "@/components/docs/TableOfContents";
 import { DocNav } from "@/components/docs/nav";
-import { JazzLogo } from "@/components/forMdx";
-import { navigationItems } from "@/lib/navigation-items";
 import { Toc } from "@stefanprobst/rehype-extract-toc";
 import { Prose } from "gcmp-design-system/src/app/components/molecules/Prose";
-import {
-  MobileNav,
-  type NavSection,
-} from "gcmp-design-system/src/app/components/organisms/Nav";
 
 export async function getMdxSource(framework: string, slugPath?: string) {
   // Try to import the framework-specific file first
@@ -17,8 +9,7 @@ export async function getMdxSource(framework: string, slugPath?: string) {
     if (!slugPath) {
       return await import("../content/docs/index.mdx");
     }
-    const source = await import(`../content/docs/${slugPath}/${framework}.mdx`);
-    return source;
+    return await import(`../content/docs/${slugPath}/${framework}.mdx`);
   } catch (error) {
     // Fallback to vanilla
     console.log(`Falling back to vanilla for ${slugPath}`);
@@ -51,7 +42,7 @@ export async function getDocMetadata(framework: string, slug?: string[]) {
 
 function DocProse({ children }: { children: React.ReactNode }) {
   return (
-    <Prose className="overflow-x-hidden lg:flex-1 pb-10 pt-[calc(61px+2.5rem)] md:pt-10 md:max-w-3xl mx-auto">
+    <Prose className="overflow-x-hidden lg:flex-1 pb-8 pt-[calc(61px+2rem)] md:pt-8 md:max-w-3xl mx-auto">
       {children}
     </Prose>
   );
@@ -65,13 +56,6 @@ export async function DocPage({
   slug?: string[];
 }) {
   const slugPath = slug?.join("/");
-  const navSections: NavSection[] = [
-    {
-      name: "Docs",
-      content: <DocNav />,
-      icon: "docs",
-    },
-  ];
 
   try {
     const mdxSource = await getMdxSource(framework, slugPath);
@@ -88,12 +72,6 @@ export async function DocPage({
         ? headingsFrameworkVisibility[id]?.includes(framework)
         : true,
     );
-
-    navSections.push({
-      name: "Outline",
-      content: <TableOfContents items={tocItems} />,
-      icon: "tableOfContents",
-    });
 
     return (
       <DocsLayout nav={<DocNav />} tocItems={tocItems}>
