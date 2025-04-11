@@ -4,13 +4,20 @@ import {
   QueueEntry,
 } from "./PriorityBasedMessageQueue.js";
 import { TryAddTransactionsError } from "./coValueCore.js";
-import { RawCoID } from "./ids.js";
+import { RawCoID, SessionID } from "./ids.js";
 import { logger } from "./logger.js";
 import { CO_VALUE_PRIORITY } from "./priority.js";
-import { Peer, SyncMessage } from "./sync.js";
+import {
+  CoValueKnownState,
+  Peer,
+  SyncMessage,
+  emptyKnownState,
+} from "./sync.js";
 
 export class PeerState {
   private queue: PriorityBasedMessageQueue;
+
+  processMessages: Promise<void> | undefined;
 
   constructor(
     private peer: Peer,
@@ -89,6 +96,29 @@ export class PeerState {
 
   private processing = false;
   public closed = false;
+
+  isInSyncWith(knownState: CoValueKnownState) {
+    const optimisticKnownState =
+      this.optimisticKnownStates.get(knownState.id) ??
+      emptyKnownState(knownState.id);
+
+    const sessions = Object.entries(optimisticKnownState.sessions) as [
+      SessionID,
+      number,
+    ][];
+
+    if (sessions.length !== Object.keys(knownState.sessions).length) {
+      return false;
+    }
+
+    for (const [sessionId, counter] of sessions) {
+      if (counter !== knownState.sessions[sessionId]) {
+        return false;
+      }
+    }
+
+    return true;
+  }
 
   async processQueue() {
     if (this.processing) {

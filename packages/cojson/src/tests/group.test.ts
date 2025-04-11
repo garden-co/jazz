@@ -490,8 +490,6 @@ describe("writeOnly", () => {
       "writer",
     );
 
-    group.core.waitForSync();
-
     node2.node.coValuesStore.coValues.delete(map.id);
     expect(node2.node.coValuesStore.get(map.id)).toEqual(
       CoValueState.Unknown(map.id),

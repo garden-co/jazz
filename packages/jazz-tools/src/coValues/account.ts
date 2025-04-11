@@ -288,11 +288,15 @@ export class Account extends CoValueBase implements CoValue {
 
     as._raw.core.node.syncManager.addPeer(connectedPeers[1]);
 
-    return this.create<A>({
+    const account = await this.create<A>({
       creationProps: options.creationProps,
       crypto: as._raw.core.node.crypto,
       peersToLoadFrom: [connectedPeers[0]],
     });
+
+    await account.waitForAllCoValuesSync();
+
+    return account;
   }
 
   static fromNode<A extends Account>(
