@@ -432,6 +432,7 @@ export function connectNodeToSyncServer(node: LocalNode, connected = true) {
     {
       peer1role: "server",
       peer2role: "client",
+      deletePeerStateOnClose: false,
     },
   );
 
