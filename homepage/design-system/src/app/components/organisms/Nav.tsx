@@ -17,7 +17,7 @@ import type { IconName } from "../atoms/Icon";
 import { BreadCrumb } from "../molecules/Breadcrumb";
 import { SocialLinks, SocialLinksProps } from "./SocialLinks";
 
-type NavItemProps = {
+export type NavItemProps = {
   href: string;
   icon?: IconName;
   title: string;
@@ -135,6 +135,7 @@ export function MobileNav({
   sections,
   themeToggle: ThemeToggle,
 }: NavProps) {
+  console.log("mobile nav");
   const primarySection: {
     name: string;
     icon: IconName;
@@ -185,9 +186,10 @@ export function MobileNav({
   };
 
   const navSections = [primarySection, ...(sections || [])];
+
   return (
     <>
-      <div className="md:hidden px-4 flex items-center self-stretch dark:text-white">
+      <div className="md:hidden absolute top-0 w-full left-0 px-4 flex items-center self-stretch dark:text-white">
         <NavLinkLogo prominent href="/" className="mr-auto">
           {mainLogo}
         </NavLinkLogo>
@@ -217,13 +219,9 @@ export function MobileNav({
         className={clsx(
           "md:hidden bg-white border fixed z-50",
           "dark:bg-stone-925",
-
-          {
-            "rounded-lg right-6 left-6 bottom-6 sm:max-w-lg sm:w-full shadow-md sm:left-1/2 sm:-translate-x-1/2 ":
-              !!active,
-            "rounded-full shadow-sm left-1/2 -translate-x-1/2  bottom-7":
-              !active,
-          },
+          active
+            ? "rounded-lg right-6 left-6 bottom-6 sm:max-w-lg sm:w-full shadow-md sm:left-1/2 sm:-translate-x-1/2 "
+            : "rounded-full shadow-sm left-1/2 -translate-x-1/2  bottom-7",
         )}
       >
         {active && (
@@ -364,7 +362,7 @@ export function Nav(props: NavProps) {
           {cta}
         </PopoverGroup>
       </div>
-      <MobileNav {...props} />
+      {/*<MobileNav {...props} />*/}
     </>
   );
 }

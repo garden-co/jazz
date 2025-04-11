@@ -1,7 +1,15 @@
+import { ThemeToggle } from "@/components/ThemeToggle";
 import DocsLayout from "@/components/docs/DocsLayout";
+import { TableOfContents } from "@/components/docs/TableOfContents";
 import { DocNav } from "@/components/docs/nav";
+import { JazzLogo } from "@/components/forMdx";
+import { navigationItems } from "@/lib/navigation-items";
 import { Toc } from "@stefanprobst/rehype-extract-toc";
 import { Prose } from "gcmp-design-system/src/app/components/molecules/Prose";
+import {
+  MobileNav,
+  type NavSection,
+} from "gcmp-design-system/src/app/components/organisms/Nav";
 
 export async function getMdxSource(framework: string, slugPath?: string) {
   // Try to import the framework-specific file first
@@ -41,6 +49,14 @@ export async function getDocMetadata(framework: string, slug?: string[]) {
   }
 }
 
+function DocProse({ children }: { children: React.ReactNode }) {
+  return (
+    <Prose className="overflow-x-hidden lg:flex-1 pb-10 pt-[calc(61px+2.5rem)] md:pt-10 md:max-w-3xl mx-auto">
+      {children}
+    </Prose>
+  );
+}
+
 export async function DocPage({
   framework,
   slug,
@@ -49,6 +65,13 @@ export async function DocPage({
   slug?: string[];
 }) {
   const slugPath = slug?.join("/");
+  const navSections: NavSection[] = [
+    {
+      name: "Docs",
+      content: <DocNav />,
+      icon: "docs",
+    },
+  ];
 
   try {
     const mdxSource = await getMdxSource(framework, slugPath);
@@ -66,11 +89,17 @@ export async function DocPage({
         : true,
     );
 
+    navSections.push({
+      name: "Outline",
+      content: <TableOfContents items={tocItems} />,
+      icon: "tableOfContents",
+    });
+
     return (
       <DocsLayout nav={<DocNav />} tocItems={tocItems}>
-        <Prose className="overflow-x-hidden lg:flex-1 py-10  max-w-3xl mx-auto">
+        <DocProse>
           <Content />
-        </Prose>
+        </DocProse>
       </DocsLayout>
     );
   } catch (error) {
@@ -79,9 +108,9 @@ export async function DocPage({
     );
     return (
       <DocsLayout nav={<DocNav />} tocItems={[]}>
-        <Prose className="overflow-x-hidden lg:flex-1 py-10  max-w-3xl mx-auto">
+        <DocProse>
           <ComingSoon />
-        </Prose>
+        </DocProse>
       </DocsLayout>
     );
   }
