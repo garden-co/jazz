@@ -175,11 +175,11 @@ pnpm bench
 --- 
 
 # 4.0. Footnotes
-[^1]:  I was successful after 4 attempts with 3 different models. The conversion was done in one-shot using 
+[^1]:  I was successful after 4 attempts with 3 different models. The Express-to-Fastify conversion was done using a zero-shot prompt against: 
 (a) Claude Sonnet 3.5, 
 (b) DeepSeek, 
 (c) Claude Sonnet 3.5 again, before switching to 
 (d) Google Gemini (on February 17, 2025). 
-Gemini's 1-to-1 conversion from Express to Fastify's middleware was the closest, semantically. It also had the least amount of compilation errors from the TypeScript compiler.
+Gemini's conversion was the closest, stylistically and semantically, to the original Express code. It also had the least amount of compilation errors from the TypeScript compiler, but I still had to refine it using Claude and some manual digging to provide type hints to the 3 different calls to `Fastify()` that create HTTP/2 with TLS, HTTP/1.1 with TLS and HTTP/1.1 without TLS.
 
 [^2]: In this protocol combo, Fastify is on HTTP/1.1 behind Caddy on HTTP/3. Caddy handles the termination of all TLS connections.
