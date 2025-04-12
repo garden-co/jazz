@@ -928,7 +928,7 @@
                             };
                             loadCoValuesMap.set(chunk.uuid, state);
 
-                            info(`Received file metadata for CoValue: ${chunk.uuid} => ${chunk.fileName} (${chunk.fileSize}) split into ${chunk.totalChunks} chunks of ${chunk.chunkSize} bytes.`);
+                            debug(`Received file metadata for CoValue: ${chunk.uuid} => ${chunk.fileName} (${chunk.fileSize}) split into ${chunk.totalChunks} chunks of ${chunk.chunkSize} bytes.`);
                             state.fileMetadata = { ...chunk };
 
                             // Start of a streaming download.

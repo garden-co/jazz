@@ -185,7 +185,7 @@ export const config = {
     engines: {
         playwright: { 
             aggregateByName: true,
-            launchOptions: { headless: false }
+            launchOptions: { headless: true }
         }
     },
     phases: [{
