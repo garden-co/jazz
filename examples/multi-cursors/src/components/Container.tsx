@@ -34,29 +34,32 @@ function Container({ cursorFeedID }: { cursorFeedID: ID<CursorFeed> }) {
   const { me } = useAccount();
   const cursors = useCoState(CursorFeed, cursorFeedID, { resolve: true });
 
-  const remoteCursors = Object.values(cursors?.perSession ?? {})
-    .map((entry) => ({
-      entry,
-      position: entry.value.position,
-      color: getColor(entry.tx.sessionID),
-      name: getName(entry.by?.profile?.name, entry.tx.sessionID),
-      age: new Date().getTime() - new Date(entry.madeAt).getTime(),
-      active:
-        !OLD_CURSOR_AGE_SECONDS ||
-        entry.madeAt >= new Date(Date.now() - 1000 * OLD_CURSOR_AGE_SECONDS),
-      isMe: entry.tx.sessionID === me?.sessionID,
-    }))
-    .sort((a, b) => {
-      return b.entry.madeAt.getTime() - a.entry.madeAt.getTime();
-    });
-
-  const avatars = useMemo(() => remoteCursors.slice(0, 5), [remoteCursors]);
+  const remoteCursors = useMemo(
+    () =>
+      Object.values(cursors?.perSession ?? {})
+        .map((entry) => ({
+          entry,
+          position: entry.value.position,
+          color: getColor(entry.tx.sessionID),
+          name: getName(entry.by?.profile?.name, entry.tx.sessionID),
+          age: new Date().getTime() - new Date(entry.madeAt).getTime(),
+          active:
+            !OLD_CURSOR_AGE_SECONDS ||
+            entry.madeAt >=
+              new Date(Date.now() - 1000 * OLD_CURSOR_AGE_SECONDS),
+          isMe: entry.tx.sessionID === me?.sessionID,
+        }))
+        .sort((a, b) => {
+          return b.entry.madeAt.getTime() - a.entry.madeAt.getTime();
+        }),
+    [cursors],
+  );
 
   return (
     <>
       <div className="absolute top-4 right-4 bg-white p-2 rounded-lg shadow">
         <div className="flex items-center gap-1">
-          {avatars.map(({ name, color, entry, active }) => (
+          {remoteCursors.slice(0, 5).map(({ name, color, entry, active }) => (
             <Avatar
               key={entry.tx.sessionID}
               name={name}
