@@ -1,6 +1,5 @@
 import { useAccount, useCoState } from "jazz-react";
 import { ID } from "jazz-tools";
-import { useMemo } from "react";
 import { CursorFeed } from "../schema";
 import { getColor } from "../utils/getColor.ts";
 import { getName } from "../utils/getName";
@@ -34,26 +33,21 @@ function Container({ cursorFeedID }: { cursorFeedID: ID<CursorFeed> }) {
   const { me } = useAccount();
   const cursors = useCoState(CursorFeed, cursorFeedID, { resolve: true });
 
-  const remoteCursors = useMemo(
-    () =>
-      Object.values(cursors?.perSession ?? {})
-        .map((entry) => ({
-          entry,
-          position: entry.value.position,
-          color: getColor(entry.tx.sessionID),
-          name: getName(entry.by?.profile?.name, entry.tx.sessionID),
-          age: new Date().getTime() - new Date(entry.madeAt).getTime(),
-          active:
-            !OLD_CURSOR_AGE_SECONDS ||
-            entry.madeAt >=
-              new Date(Date.now() - 1000 * OLD_CURSOR_AGE_SECONDS),
-          isMe: entry.tx.sessionID === me?.sessionID,
-        }))
-        .sort((a, b) => {
-          return b.entry.madeAt.getTime() - a.entry.madeAt.getTime();
-        }),
-    [cursors],
-  );
+  const remoteCursors = Object.values(cursors?.perSession ?? {})
+    .map((entry) => ({
+      entry,
+      position: entry.value.position,
+      color: getColor(entry.tx.sessionID),
+      name: getName(entry.by?.profile?.name, entry.tx.sessionID),
+      age: new Date().getTime() - new Date(entry.madeAt).getTime(),
+      active:
+        !OLD_CURSOR_AGE_SECONDS ||
+        entry.madeAt >= new Date(Date.now() - 1000 * OLD_CURSOR_AGE_SECONDS),
+      isMe: entry.tx.sessionID === me?.sessionID,
+    }))
+    .sort((a, b) => {
+      return b.entry.madeAt.getTime() - a.entry.madeAt.getTime();
+    });
 
   return (
     <>

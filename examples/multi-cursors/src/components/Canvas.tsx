@@ -67,9 +67,7 @@ function Canvas({ remoteCursors, onCursorMove, name }: CanvasProps) {
             centerOfBounds={center}
             bounds={bounds}
           />
-        ) : (
-          <></>
-        ),
+        ) : null,
       )}
 
       {isMouseOver ? (
