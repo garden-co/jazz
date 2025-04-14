@@ -83,7 +83,7 @@ export function JazzInspector({ position = "right" }: { position?: Position }) {
   }
 
   return (
-    <InspectorContainer as={GlobalStyles} id="__jazz_inspector">
+    <InspectorContainer as={GlobalStyles} style={{ zIndex: 999 }}>
       <HeaderContainer>
         <Breadcrumbs path={path} onBreadcrumbClick={goToIndex} />
         <Form onSubmit={handleCoValueIdSubmit}>

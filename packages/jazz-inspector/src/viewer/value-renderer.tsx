@@ -239,9 +239,7 @@ export const CoMapPreview = ({
           .map(([key, value]) => (
             <React.Fragment key={key}>
               <Text strong>{key}: </Text>
-              <Text inline>
-                <ValueRenderer compact json={value} />
-              </Text>
+              <ValueRenderer compact json={value} />
             </React.Fragment>
           ))}
       </PreviewGrid>

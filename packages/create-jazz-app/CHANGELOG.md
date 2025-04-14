@@ -1,5 +1,11 @@
 # create-jazz-app
 
+## 0.1.16
+
+### Patch Changes
+
+- b130f46: Initialize git for a scaffolded project only if not inside a monorepo. Otherwise, ask before initializing.
+
 ## 0.1.15
 
 ### Patch Changes

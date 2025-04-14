@@ -61,10 +61,10 @@ type InboxMessage<I extends CoValue, O extends CoValue | undefined> = RawCoMap<{
   error: string | undefined;
 }>;
 
-function createInboxMessage<I extends CoValue, O extends CoValue | undefined>(
-  payload: I,
-  inboxOwner: RawAccount,
-) {
+async function createInboxMessage<
+  I extends CoValue,
+  O extends CoValue | undefined,
+>(payload: I, inboxOwner: RawAccount) {
   const group = payload._raw.group;
 
   if (group instanceof RawAccount) {
@@ -79,6 +79,9 @@ function createInboxMessage<I extends CoValue, O extends CoValue | undefined>(
     processed: false,
     error: undefined,
   });
+
+  await payload._raw.core.waitForSync();
+  await message.core.waitForSync();
 
   return message;
 }
@@ -202,14 +205,18 @@ export class Inbox {
                 const stringifiedError = String(error);
                 errors.push(stringifiedError);
 
-                const inboxMessage = node
-                  .expectCoValueLoaded(item.value)
-                  .getCurrentContent() as RawCoMap;
+                let inboxMessage: RawCoMap | undefined;
 
-                inboxMessage.set("error", stringifiedError);
+                try {
+                  inboxMessage = node
+                    .expectCoValueLoaded(item.value)
+                    .getCurrentContent() as RawCoMap;
+
+                  inboxMessage.set("error", stringifiedError);
+                } catch (error) {}
 
                 if (errors.length > retries) {
-                  inboxMessage.set("processed", true);
+                  inboxMessage?.set("processed", true);
                   this.processed.push(txKey);
                   this.failed.push({ errors, value: item.value });
                 } else {
@@ -227,7 +234,12 @@ export class Inbox {
       }
     };
 
-    return this.messages.subscribe(handleNewMessages);
+    const unsubscribe = this.messages.subscribe(handleNewMessages);
+
+    return () => {
+      unsubscribe();
+      clearFailTimer();
+    };
   }
 
   static async load(account: Account) {
@@ -286,8 +298,10 @@ export class InboxSender<I extends CoValue, O extends CoValue | undefined> {
     return this.owner;
   }
 
-  sendMessage(message: I): Promise<O extends CoValue ? ID<O> : undefined> {
-    const inboxMessage = createInboxMessage<I, O>(message, this.owner);
+  async sendMessage(
+    message: I,
+  ): Promise<O extends CoValue ? ID<O> : undefined> {
+    const inboxMessage = await createInboxMessage<I, O>(message, this.owner);
 
     this.messages.push(inboxMessage.id);
 

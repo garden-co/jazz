@@ -1,5 +1,13 @@
 # jazz-tools
 
+## 0.13.5
+
+### Patch Changes
+
+- fe6f561: Gracefully handle unavailable messages error in the Inbox
+- Updated dependencies [e090b39]
+  - cojson@0.13.5
+
 ## 0.13.4
 
 ### Patch Changes

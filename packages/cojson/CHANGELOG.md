@@ -1,5 +1,11 @@
 # cojson
 
+## 0.13.5
+
+### Patch Changes
+
+- e090b39: Bump crypto version to remove WASM init warning
+
 ## 0.13.2
 
 ### Patch Changes

@@ -1672,8 +1672,8 @@ importers:
         specifier: 1.2.1
         version: 1.2.1
       jazz-crypto-rs:
-        specifier: 0.0.6
-        version: 0.0.6
+        specifier: 0.0.7
+        version: 0.0.7
       neverthrow:
         specifier: ^7.0.1
         version: 7.2.0
@@ -1723,7 +1723,7 @@ importers:
         specifier: ^11.7.0
         version: 11.7.0
       cojson:
-        specifier: workspace:0.13.2
+        specifier: workspace:0.13.5
         version: link:../cojson
       cojson-storage:
         specifier: workspace:*
@@ -1800,13 +1800,13 @@ importers:
   packages/jazz-auth-clerk:
     dependencies:
       cojson:
-        specifier: workspace:0.13.2
+        specifier: workspace:0.13.5
         version: link:../cojson
       jazz-browser:
-        specifier: workspace:0.13.4
+        specifier: workspace:0.13.5
         version: link:../jazz-browser
       jazz-tools:
-        specifier: workspace:0.13.4
+        specifier: workspace:0.13.5
         version: link:../jazz-tools
     devDependencies:
       typescript:
@@ -1844,10 +1844,10 @@ importers:
         specifier: ^4.1.0
         version: 4.1.0
       jazz-browser:
-        specifier: workspace:0.13.4
+        specifier: workspace:0.13.5
         version: link:../jazz-browser
       jazz-tools:
-        specifier: workspace:0.13.4
+        specifier: workspace:0.13.5
         version: link:../jazz-tools
       pica:
         specifier: ^9.0.1
@@ -1968,19 +1968,19 @@ importers:
         specifier: ^1.3.0
         version: 1.5.0
       cojson:
-        specifier: workspace:0.13.2
+        specifier: workspace:0.13.5
         version: link:../cojson
       jazz-browser:
-        specifier: workspace:0.13.4
+        specifier: workspace:0.13.5
         version: link:../jazz-browser
       jazz-browser-media-images:
-        specifier: workspace:0.13.4
+        specifier: workspace:0.13.5
         version: link:../jazz-browser-media-images
       jazz-react-core:
-        specifier: workspace:0.13.4
+        specifier: workspace:0.13.5
         version: link:../jazz-react-core
       jazz-tools:
-        specifier: workspace:0.13.4
+        specifier: workspace:0.13.5
         version: link:../jazz-tools
     devDependencies:
       '@testing-library/dom':
@@ -2187,19 +2187,19 @@ importers:
         specifier: ^0.25.5
         version: 0.25.8(effect@3.11.9)
       cojson:
-        specifier: workspace:0.13.2
+        specifier: workspace:0.13.5
         version: link:../cojson
       cojson-storage-sqlite:
-        specifier: workspace:0.13.2
+        specifier: workspace:0.13.5
         version: link:../cojson-storage-sqlite
       cojson-transport-ws:
-        specifier: workspace:0.13.3
+        specifier: workspace:0.13.5
         version: link:../cojson-transport-ws
       effect:
         specifier: ^3.6.5
         version: 3.11.9
       jazz-tools:
-        specifier: workspace:0.13.4
+        specifier: workspace:0.13.5
         version: link:../jazz-tools
       ws:
         specifier: ^8.14.2
@@ -9071,8 +9071,8 @@ packages:
   jackspeak@3.4.3:
     resolution: {integrity: sha512-OGlZQpz2yfahA/Rd1Y8Cd9SIEsqvXkLVoSw/cgwhnhFMDbsQFeZYoJJ7bIZBS9BcamUW96asq/npPWugM+RQBw==}
 
-  jazz-crypto-rs@0.0.6:
-    resolution: {integrity: sha512-+hJM9hPzMjK7Jk9++sUs5mKXlFiCTMDZ2wjO8WsfNpY7RZ+kiYSwkCrKvvvDRHSXPlzoyFQFxrSrXqN0/Fr6Yw==}
+  jazz-crypto-rs@0.0.7:
+    resolution: {integrity: sha512-Pzs8Zu1zgKVURkBVvqqF1B2r78FaSZdwPbmeCWx0Nb3nibzPuB/kSKEO7LJsKnb3P5HO0v+lTIJ53mGC5H1urQ==}
 
   jest-changed-files@29.7.0:
     resolution: {integrity: sha512-fEArFiwf1BpQ+4bXSprcDc3/x4HSzL4al2tozwVpDFpsxALjLYdyiIK4e5Vz66GQJIbXJ82+35PtysofptNX2w==}
@@ -21354,7 +21354,7 @@ snapshots:
     optionalDependencies:
       '@pkgjs/parseargs': 0.11.0
 
-  jazz-crypto-rs@0.0.6: {}
+  jazz-crypto-rs@0.0.7: {}
 
   jest-changed-files@29.7.0:
     dependencies:

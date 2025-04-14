@@ -10,7 +10,9 @@ interface TextProps extends React.HTMLAttributes<HTMLParagraphElement> {
 }
 
 const BaseText = React.forwardRef<HTMLParagraphElement, TextProps>(
-  ({ muted, strong, small, inline, ...rest }, ref) => <p ref={ref} {...rest} />,
+  ({ muted, strong, small, inline, mono, ...rest }, ref) => (
+    <div ref={ref} {...rest} />
+  ),
 );
 
 const StyledText = styled(BaseText)<TextProps>`

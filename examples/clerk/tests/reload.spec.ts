@@ -27,5 +27,7 @@ test("login & reload", async ({ page }) => {
 
   await page.reload();
 
+  await page.getByText("You're logged in").waitFor({ state: "visible" });
+
   expect(page.getByText("You're logged in")).toBeVisible();
 });

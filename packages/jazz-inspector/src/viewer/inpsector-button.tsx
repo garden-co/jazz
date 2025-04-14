@@ -19,6 +19,7 @@ const StyledInspectorButton = styled("button")<{ position: Position }>`
   padding: 0.5rem !important;
   border: 1px solid #e5e3e4;
   border-radius: 0.375rem;
+  z-index: 999;
   
   ${(props) => {
     switch (props.position) {

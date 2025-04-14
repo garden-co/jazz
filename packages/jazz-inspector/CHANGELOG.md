@@ -1,5 +1,16 @@
 # jazz-inspector
 
+## 0.13.5
+
+### Patch Changes
+
+- 08ae9b2: fix: invalid html
+- Updated dependencies [e090b39]
+- Updated dependencies [fe6f561]
+  - cojson@0.13.5
+  - jazz-tools@0.13.5
+  - jazz-react-core@0.13.5
+
 ## 0.13.4
 
 ### Patch Changes

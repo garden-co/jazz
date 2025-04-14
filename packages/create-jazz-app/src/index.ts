@@ -2,6 +2,7 @@
 
 import { execSync } from "child_process";
 import fs from "fs";
+import path from "path";
 import chalk from "chalk";
 import { Command } from "commander";
 import degit from "degit";
@@ -82,6 +83,25 @@ async function getLatestPackageVersions(
 
 function getPlatformFromTemplateName(template: string) {
   return template.includes("-rn") ? PLATFORM.REACT_NATIVE : PLATFORM.WEB;
+}
+
+// Function to check if the project is inside an existing git repository (monorepo)
+function isInsideGitRepository(projectPath: string): boolean {
+  try {
+    const absolutePath = path.resolve(projectPath);
+
+    // Check if .git exists in the current or any parent directory
+    const result = execSync(`git rev-parse --is-inside-work-tree`, {
+      cwd: absolutePath,
+      stdio: "pipe",
+      encoding: "utf-8",
+    }).trim();
+
+    return result === "true";
+  } catch (error) {
+    // If command fails, we're not in a git repo
+    return false;
+  }
 }
 
 async function scaffoldProject({
@@ -291,21 +311,53 @@ module.exports = withNativeWind(config, { input: "./src/global.css" });
     throw error;
   }
 
-  // Step 6: Git init
+  // Step 6: Git init (conditionally)
   const gitSpinner = ora({
-    text: chalk.blue("Initializing git repository..."),
+    text: chalk.blue("Checking git status..."),
     spinner: "dots",
   }).start();
 
   try {
-    execSync(
-      `cd "${projectName}" && git init && git add . && git commit -m "Initial commit from create-jazz-app"`,
-      { stdio: "pipe" },
-    );
-    gitSpinner.succeed(chalk.green("Git repository initialized"));
+    const projectPath = projectName === "." ? "." : projectName;
+
+    if (isInsideGitRepository(projectPath)) {
+      gitSpinner.info(
+        chalk.yellow(
+          "Project is inside an existing git repository (likely a monorepo). Skipping git initialization.",
+        ),
+      );
+    } else {
+      gitSpinner.stop();
+
+      // Ask for confirmation
+      const { confirmGitInit } = await inquirer.prompt([
+        {
+          type: "confirm",
+          name: "confirmGitInit",
+          message: chalk.cyan("Initialize git repository?"),
+          default: true,
+        },
+      ]);
+
+      if (confirmGitInit) {
+        const initSpinner = ora({
+          text: chalk.blue("Initializing git repository..."),
+          spinner: "dots",
+        }).start();
+
+        execSync(
+          `cd "${projectName}" && git init && git add . && git commit -m "Initial commit from create-jazz-app"`,
+          { stdio: "pipe" },
+        );
+
+        initSpinner.succeed(chalk.green("Git repository initialized"));
+      } else {
+        console.log(chalk.yellow("Git initialization skipped"));
+      }
+    }
   } catch (error) {
-    gitSpinner.fail(chalk.red("Failed to initialize git repository"));
-    throw error;
+    gitSpinner.fail(chalk.red("Failed to check or initialize git repository"));
+    console.error(error);
   }
 
   // Final success message
