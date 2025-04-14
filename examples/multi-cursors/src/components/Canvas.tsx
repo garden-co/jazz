@@ -54,22 +54,22 @@ function Canvas({ remoteCursors, onCursorMove, name }: CanvasProps) {
       <CanvasDemoContent />
       {DEBUG && <Boundary bounds={bounds} />}
 
-      {remoteCursors.map(
-        (cursor) =>
-          !cursor.isMe &&
-          cursor.active && (
-            <Cursor
-              key={cursor.entry.tx.sessionID}
-              position={cursor.position}
-              color={cursor.color}
-              isDragging={false}
-              isRemote={true}
-              name={cursor.name}
-              age={cursor.age}
-              centerOfBounds={center}
-              bounds={bounds}
-            />
-          ),
+      {remoteCursors.map((cursor) =>
+        !cursor.isMe && cursor.active ? (
+          <Cursor
+            key={cursor.entry.tx.sessionID}
+            position={cursor.position}
+            color={cursor.color}
+            isDragging={false}
+            isRemote={true}
+            name={cursor.name}
+            age={cursor.age}
+            centerOfBounds={center}
+            bounds={bounds}
+          />
+        ) : (
+          <></>
+        ),
       )}
 
       {isMouseOver ? (
