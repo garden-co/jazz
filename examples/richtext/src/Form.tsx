@@ -9,30 +9,37 @@ import { useEffect, useRef } from "react";
 
 export function Form() {
   const { me } = useAccount({ resolve: { profile: true, root: true } });
-
   const editorRef = useRef<HTMLDivElement>(null);
+  const viewRef = useRef<EditorView | null>(null);
+
   useEffect(() => {
-    if (!me) return;
+    if (!me || !editorRef.current) return;
 
     const setupPlugins = exampleSetup({ schema });
-
-    const str = me.profile.bio?.toString() || "";
-    const doc = new DOMParser().parseFromString(str, "text/html");
-    const pmDoc = PMDOMParser.fromSchema(schema).parse(doc);
-
     const jazzPlugin = createJazzPlugin(me.profile.bio!);
-    const view = new EditorView(editorRef.current!, {
-      state: EditorState.create({
-        schema,
-        doc: pmDoc,
-        plugins: [...setupPlugins, jazzPlugin],
-      }),
-    });
+
+    // Only create the editor if it doesn't exist
+    if (!viewRef.current) {
+      const str = me.profile.bio?.toString() || "";
+      const doc = new DOMParser().parseFromString(str, "text/html");
+      const pmDoc = PMDOMParser.fromSchema(schema).parse(doc);
+
+      viewRef.current = new EditorView(editorRef.current, {
+        state: EditorState.create({
+          schema,
+          doc: pmDoc,
+          plugins: [...setupPlugins, jazzPlugin],
+        }),
+      });
+    }
 
     return () => {
-      view.destroy();
+      if (viewRef.current) {
+        viewRef.current.destroy();
+        viewRef.current = null;
+      }
     };
-  }, [me]);
+  }, [me?.id]); // Only recreate if the account changes
 
   if (!me) return null;
 
