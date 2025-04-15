@@ -1,4 +1,5 @@
 import { useAccount } from "jazz-react";
+import { createJazzPlugin } from "jazz-richtext-prosemirror";
 import { exampleSetup } from "prosemirror-example-setup";
 import {
   DOMParser as PMDOMParser,
@@ -8,7 +9,7 @@ import {
 import { schema } from "prosemirror-schema-basic";
 import { EditorState } from "prosemirror-state";
 import { EditorView } from "prosemirror-view";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef } from "react";
 
 export function Form() {
   const { me } = useAccount({ resolve: { profile: true, root: true } });
@@ -17,19 +18,18 @@ export function Form() {
   useEffect(() => {
     if (!me) return;
 
-    const plugins = exampleSetup({ schema });
+    const setupPlugins = exampleSetup({ schema });
 
     const str = me.profile.bio?.toString() || "";
     const doc = new DOMParser().parseFromString(str, "text/html");
     const pmDoc = PMDOMParser.fromSchema(schema).parse(doc);
 
-    console.log(str, doc, pmDoc);
-
+    const jazzPlugin = createJazzPlugin(me.profile.bio!);
     const view = new EditorView(editorRef.current!, {
       state: EditorState.create({
         schema,
         doc: pmDoc,
-        plugins,
+        plugins: [...setupPlugins, jazzPlugin],
       }),
       dispatchTransaction: (transaction) => {
         if (transaction.getMeta("fromJazz")) {
