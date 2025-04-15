@@ -1,11 +1,7 @@
 import { useAccount } from "jazz-react";
 import { createJazzPlugin } from "jazz-richtext-prosemirror";
 import { exampleSetup } from "prosemirror-example-setup";
-import {
-  DOMParser as PMDOMParser,
-  DOMSerializer as PMDOMSerializer,
-  Slice,
-} from "prosemirror-model";
+import { DOMParser as PMDOMParser } from "prosemirror-model";
 import { schema } from "prosemirror-schema-basic";
 import { EditorState } from "prosemirror-state";
 import { EditorView } from "prosemirror-view";
@@ -31,43 +27,6 @@ export function Form() {
         doc: pmDoc,
         plugins: [...setupPlugins, jazzPlugin],
       }),
-      dispatchTransaction: (transaction) => {
-        if (transaction.getMeta("fromJazz")) {
-          view.updateState(view.state.apply(transaction));
-          return;
-        }
-        console.log(transaction);
-        const doc = transaction.doc;
-        const str = new XMLSerializer()
-          .serializeToString(
-            PMDOMSerializer.fromSchema(schema).serializeFragment(doc.content),
-          )
-          .replace(/\sxmlns="[^"]+"/g, "");
-        console.log(str);
-
-        if (transaction.docChanged) {
-          me.profile.bio?.applyDiff(str);
-        } else {
-          view.updateState(view.state.apply(transaction));
-        }
-      },
-    });
-
-    me.profile.subscribe((profile) => {
-      if (profile) {
-        const doc = new DOMParser().parseFromString(
-          profile.bio?.toString() || "",
-          "text/html",
-        );
-        const pmDoc = PMDOMParser.fromSchema(schema).parse(doc);
-        const tr = view.state.tr.replace(
-          0,
-          view.state.doc.content.size,
-          new Slice(pmDoc.content, 0, 0),
-        );
-        tr.setMeta("fromJazz", true);
-        view.dispatch(tr);
-      }
     });
 
     return () => {
