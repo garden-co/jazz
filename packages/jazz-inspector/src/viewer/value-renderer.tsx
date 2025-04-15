@@ -4,6 +4,7 @@ import React, { useEffect, useState } from "react";
 import { Button } from "../ui/button.js";
 import { Icon } from "../ui/icon.js";
 import { Text } from "../ui/text.js";
+import { isCoId } from "./types.js";
 import {
   isBrowserImage,
   resolveCoValue,
@@ -99,7 +100,7 @@ export function ValueRenderer({
     return <Text muted>null</Text>;
   }
 
-  if (typeof json === "string" && json.startsWith("co_")) {
+  if (typeof json === "string" && isCoId(json)) {
     const content = (
       <>
         {json}

@@ -6,4 +6,6 @@ export type PageInfo = {
 };
 
 export const isCoId = (coId: unknown): coId is CoID<RawCoValue> =>
-  typeof coId === "string" && coId.startsWith("co_");
+  typeof coId === "string" &&
+  coId.startsWith("co_") &&
+  !coId.includes("inviteSecret");
