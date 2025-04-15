@@ -1,4 +1,5 @@
 import { styled } from "goober";
+import React from "react";
 
 const StyledTable = styled("table")`
   width: 100%;
@@ -34,26 +35,56 @@ const StyledTd = styled("td")`
   padding: 0.5rem 0.75rem;
 `;
 
-export function Table({ children }: React.PropsWithChildren<{}>) {
-  return <StyledTable>{children}</StyledTable>;
-}
+export const Table = React.forwardRef<
+  HTMLTableElement,
+  React.HTMLAttributes<HTMLTableElement>
+>(({ children, ...props }, ref) => (
+  <StyledTable ref={ref} {...props}>
+    {children}
+  </StyledTable>
+));
 
-export function TableHead({ children }: React.PropsWithChildren<{}>) {
-  return <StyledThead>{children}</StyledThead>;
-}
+export const TableHead = React.forwardRef<
+  HTMLTableSectionElement,
+  React.HTMLAttributes<HTMLTableSectionElement>
+>(({ children, ...props }, ref) => (
+  <StyledThead ref={ref} {...props}>
+    {children}
+  </StyledThead>
+));
 
-export function TableBody({ children }: React.PropsWithChildren<{}>) {
-  return <StyledTbody>{children}</StyledTbody>;
-}
+export const TableBody = React.forwardRef<
+  HTMLTableSectionElement,
+  React.HTMLAttributes<HTMLTableSectionElement>
+>(({ children, ...props }, ref) => (
+  <StyledTbody ref={ref} {...props}>
+    {children}
+  </StyledTbody>
+));
 
-export function TableRow({ children }: React.PropsWithChildren<{}>) {
-  return <tr>{children}</tr>;
-}
+export const TableRow = React.forwardRef<
+  HTMLTableRowElement,
+  React.HTMLAttributes<HTMLTableRowElement>
+>(({ children, ...props }, ref) => (
+  <tr ref={ref} {...props}>
+    {children}
+  </tr>
+));
 
-export function TableHeader({ children }: React.PropsWithChildren<{}>) {
-  return <StyledTh>{children}</StyledTh>;
-}
+export const TableHeader = React.forwardRef<
+  HTMLTableCellElement,
+  React.ThHTMLAttributes<HTMLTableCellElement>
+>(({ children, ...props }, ref) => (
+  <StyledTh ref={ref} {...props}>
+    {children}
+  </StyledTh>
+));
 
-export function TableCell({ children }: React.PropsWithChildren<{}>) {
-  return <StyledTd>{children}</StyledTd>;
-}
+export const TableCell = React.forwardRef<
+  HTMLTableCellElement,
+  React.TdHTMLAttributes<HTMLTableCellElement>
+>(({ children, ...props }, ref) => (
+  <StyledTd ref={ref} {...props}>
+    {children}
+  </StyledTd>
+));

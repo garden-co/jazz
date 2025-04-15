@@ -1,1 +1,1 @@
-export const apiKey = "chat-rn-example-jazz@garden.co";
+export const apiKey = "chat-rn-cli-example-jazz@garden.co";

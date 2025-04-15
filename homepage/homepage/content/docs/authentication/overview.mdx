@@ -1,0 +1,37 @@
+export const metadata = { title: "Authentication methods" };
+
+import { CodeGroup, ContentByFramework } from "@/components/forMdx";
+
+# Authentication in Jazz
+
+Jazz authentication is based on cryptographic keys ("Account keys"). Their public part represents a user's identity, their secret part lets you act as that user.
+
+## Authentication Flow
+
+When a user first opens your app, they'll be in one of these states:
+
+- **Anonymous Authentication**: Default starting point where Jazz automatically creates a local account on first visit. Data persists on one device and can be upgraded to a full account.
+
+- **Authenticated Account**: Full account accessible across multiple devices using [passkeys](./passkey), [passphrases](./passphrase), or third-party authentications, such as [Clerk](./clerk).
+
+- **Guest Mode**: No account, read-only access to public content. Users can browse but can't save data or sync.
+
+Learn more about these states in the [Authentication States](./authentication-states) documentation.
+
+Without authentication, users are limited to using the application on only one device.
+
+When a user logs out of an Authenticated Account, they return to the Anonymous Authentication state with a new local account.
+
+Here's what happens during registration and login:
+
+- **Register**: When a user registers with an authentication provider, their Anonymous account credentials are stored in the auth provider, and the account is marked as Authenticated. The user keeps all their existing data.
+
+- **Login**: When a user logs in with an authentication provider, their Anonymous account is discarded and the credentials are loaded from the auth provider. Data from the Anonymous account can be transferred using the [onAnonymousAccountDiscarded handler](./authentication-states#migrating-data-from-anonymous-to-authenticated-account).
+
+## Available Authentication Methods
+
+Jazz provides several ways to authenticate users:
+
+- [**Passkeys**](./passkey): Secure, biometric authentication using WebAuthn
+- [**Passphrases**](./passphrase): Bitcoin-style word phrases that users store
+- [**Clerk Integration**](./clerk): Third-party authentication service with OAuth support

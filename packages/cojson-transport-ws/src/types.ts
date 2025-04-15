@@ -25,3 +25,7 @@ export interface AnyWebSocket {
   readyState: number;
   bufferedAmount: number;
 }
+
+export interface AnyWebSocketConstructor {
+  new (url: string): AnyWebSocket;
+}

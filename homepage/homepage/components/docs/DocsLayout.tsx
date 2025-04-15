@@ -2,7 +2,7 @@
 
 import { TableOfContents } from "@/components/docs/TableOfContents";
 import { JazzNav } from "@/components/nav";
-import { useTocItems } from "@/lib/TocContext";
+import { TocEntry } from "@stefanprobst/rehype-extract-toc";
 import { clsx } from "clsx";
 import type { IconName } from "gcmp-design-system/src/app/components/atoms/Icon";
 import type { NavSection } from "gcmp-design-system/src/app/components/organisms/Nav";
@@ -12,14 +12,14 @@ export default function DocsLayout({
   nav,
   navName,
   navIcon,
+  tocItems,
 }: {
   children: React.ReactNode;
   nav?: React.ReactNode;
   navName?: string;
   navIcon?: IconName;
+  tocItems?: TocEntry[];
 }) {
-  const { tocItems } = useTocItems();
-
   const navSections: NavSection[] = [
     {
       name: navName || "Docs",
@@ -51,7 +51,7 @@ export default function DocsLayout({
           </div>
           <div className={clsx("md:col-span-8 lg:col-span-9 flex gap-12")}>
             {children}
-            {tocItems?.length && (
+            {!!tocItems?.length && (
               <>
                 <TableOfContents
                   className="pl-3 py-6 shrink-0 text-sm sticky align-start top-[61px] w-[16rem] h-[calc(100vh-61px)] overflow-y-auto hidden lg:block"

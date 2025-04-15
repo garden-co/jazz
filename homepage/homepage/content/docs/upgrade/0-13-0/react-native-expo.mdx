@@ -1,0 +1,139 @@
+import { CodeGroup } from '@/components/forMdx'
+
+export const metadata = { title: "Upgrade to Jazz 0.13.0 for React Native Expo" };
+
+# Upgrade to Jazz 0.13.0 for React Native Expo
+
+Version 0.13.0 introduces a significant architectural change in how Jazz supports React Native applications. We've separated the React Native implementation into two distinct packages to better serve different React Native development approaches:
+
+1. **jazz-expo**: Dedicated package for Expo applications
+2. **jazz-react-native**: Focused package for framework-less React Native applications
+3. **jazz-react-native-core**: Shared core functionality used by both implementations (probably not imported directly)
+
+This guide focuses on upgrading **Expo applications**. If you're using framework-less React Native, please see the [React Native upgrade guide](/docs/react-native/upgrade/0-13-0).
+
+## Migration Steps for Expo
+
+1. **Update Dependencies**
+
+Remove the old packages and install the new `jazz-expo` package.
+
+<CodeGroup>
+```bash
+# Remove the old package
+npm uninstall jazz-react-native
+
+# Install the new Expo-specific packages
+npx expo install expo-sqlite expo-secure-store expo-file-system @react-native-community/netinfo
+
+# Install the new packages
+npm install jazz-expo jazz-react-native-media-images
+```
+</CodeGroup>
+
+2. **Update Imports**
+
+Update your imports to use the new `jazz-expo` package.
+
+<CodeGroup>
+```tsx twoslash
+// @noErrors: 2300 2307
+// Before
+import { JazzProvider, useAccount, useCoState } from "jazz-react-native"; // [!code --]
+
+// After
+import { JazzProvider, useAccount, useCoState } from "jazz-expo"; // [!code ++]
+```
+</CodeGroup>
+
+3. **Update Type Declarations**
+
+Update your type declarations to use the new `jazz-expo` package.
+
+<CodeGroup>
+```tsx twoslash
+// @noErrors: 2664 2304
+// Before
+declare module "jazz-react-native" { // [!code --:5]
+  interface Register {
+    Account: MyAppAccount;
+  }
+}
+
+// After
+declare module "jazz-expo" { // [!code ++:5]
+  interface Register {
+    Account: MyAppAccount;
+  }
+}
+```
+</CodeGroup>
+
+## Clerk Authentication
+
+Clerk authentication has been moved inside the `jazz-expo` package. This is a breaking change that requires updating both your imports and providers.
+
+If you're using Clerk auth in your Expo application, you'll need to:
+
+<CodeGroup>
+```tsx twoslash
+// @noErrors: 2300 2307
+// Before
+import { JazzProviderWithClerk } from "jazz-react-native-clerk"; // [!code --]
+
+// After
+import { JazzProviderWithClerk } from "jazz-expo/auth/clerk"; // [!code ++]
+```
+</CodeGroup>
+
+Since Clerk only supports Expo applications, this consolidation makes sense and simplifies your dependency structure. You'll need to completely remove the `jazz-react-native-clerk` package from your dependencies and use the Clerk functionality that's now built into `jazz-expo`.
+
+## Storage Adapter Changes
+
+The `jazz-expo` package now uses:
+- `ExpoSQLiteAdapter` for database storage (using `expo-sqlite`)
+- `ExpoSecureStoreAdapter` for key-value storage (using `expo-secure-store`)
+
+These are now the default storage adapters in the `JazzProvider` for Expo applications, so you don't need to specify them explicitly.
+
+## Example Provider Setup
+
+<CodeGroup>
+```tsx twoslash
+// @noErrors: 2300 2307 2686 2664 2435 1005
+import { JazzProvider } from "jazz-react-native"; // [!code --]
+import { JazzProvider } from "jazz-expo"; // [!code ++]
+import { MyAppAccount } from "./schema";
+
+export function MyJazzProvider({ children }: { children: React.ReactNode }) {
+  return (
+    <JazzProvider
+      sync={{ peer: "wss://cloud.jazz.tools/?key=you@example.com" }}
+      AccountSchema={MyAppAccount}
+    >
+      {children}
+    </JazzProvider>
+  );
+}
+
+// Register the Account schema
+declare module "jazz-react-native" { // [!code --:5]
+  interface Register {
+    Account: MyAppAccount;
+  }
+}
+declare module "jazz-expo" { // [!code ++:5]
+  interface Register {
+    Account: MyAppAccount;
+  }
+}
+```
+</CodeGroup>
+
+## New Architecture Support
+
+The `jazz-expo` implementation supports the Expo New Architecture.
+
+## For More Information
+
+For detailed setup instructions, refer to the [React Native Expo Setup Guide](/docs/react-native-expo/project-setup)

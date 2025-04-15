@@ -1,5 +1,4 @@
 import {
-  AlertCircleIcon,
   AlertTriangleIcon,
   ArrowDownIcon,
   ArrowRightIcon,
@@ -27,6 +26,7 @@ import {
   MessageCircleQuestionIcon,
   MonitorSmartphoneIcon,
   MoonIcon,
+  MousePointer2Icon,
   MousePointerSquareDashedIcon,
   ScanFace,
   ScrollIcon,
@@ -50,6 +50,7 @@ const icons = {
   close: XIcon,
   code: CodeIcon,
   copy: ClipboardIcon,
+  cursor: MousePointer2Icon,
   darkTheme: MoonIcon,
   delete: TrashIcon,
   devices: MonitorSmartphoneIcon,

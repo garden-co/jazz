@@ -1,0 +1,233 @@
+export const metadata = { title: "React Native" };
+
+import { CodeGroup } from "@/components/forMdx";
+
+# React Native Installation and Setup
+
+This guide covers setting up Jazz for React Native applications from scratch. If you're using Expo, please refer to the [React Native - Expo](/docs/react-native-expo/project-setup) guide instead. If you just want to get started quickly, you can use our [React Native Chat Demo](https://github.com/garden-co/jazz/tree/main/examples/chat-rn) as a starting point.
+
+Jazz supports the [New Architecture](https://reactnative.dev/architecture/landing-page) for React Native.
+
+Tested with:
+
+<CodeGroup>
+```json 
+"react-native": "0.78.22",
+"react": "18.3.1" 
+```
+</CodeGroup>
+
+## Installation
+
+### Create a new project
+
+(Skip this step if you already have one)
+
+<CodeGroup>
+```bash
+npx @react-native-community/cli init myjazzapp
+cd myjazzapp
+```
+</CodeGroup>
+
+If you intend to build for iOS, you can accept the invitation to install CocoaPods. If you decline, or you get an error, [you can install it with `pod-install`](#install-cocoapods).
+
+### Install dependencies
+
+<CodeGroup>
+```bash
+# React Native dependencies
+npm install @react-native-community/netinfo @bam.tech/react-native-image-resizer
+
+# React Native polyfills
+npm i -S @azure/core-asynciterator-polyfill react-native-url-polyfill readable-stream react-native-get-random-values @craftzdog/react-native-buffer @op-engineering/op-sqlite react-native-mmkv
+
+# Jazz dependencies
+npm i -S jazz-tools jazz-react-native jazz-react-native-media-images
+```
+</CodeGroup>
+
+**Note**: Hermes has added support for `atob` and `btoa` in React Native 0.74. If you are using earlier versions, you may also need to polyfill `atob` and `btoa` in your `package.json`. Packages to try include `text-encoding` and `base-64`, and you can drop `@bacons/text-decoder`.
+
+### Configure Metro
+
+#### Regular repositories
+
+If you are not working within a monorepo, create a new file `metro.config.js` in the root of your project with the following content:
+
+<CodeGroup>
+```ts twoslash
+// metro.config.js
+const { getDefaultConfig, mergeConfig } = require('@react-native/metro-config');
+
+const config = {
+  resolver: {
+    sourceExts: ["mjs", "js", "json", "ts", "tsx"],
+    requireCycleIgnorePatterns: [/(^|\/|\\)node_modules($|\/|\\)/]
+  }
+};
+
+module.exports = mergeConfig(getDefaultConfig(__dirname), config);
+```
+</CodeGroup>
+
+#### Monorepos
+
+For monorepos, use the following `metro.config.js`:
+
+<CodeGroup>
+```ts twoslash
+// metro.config.js
+const path = require("path");
+const { makeMetroConfig } = require("@rnx-kit/metro-config");
+const MetroSymlinksResolver = require("@rnx-kit/metro-resolver-symlinks");
+
+// Define workspace root
+const projectRoot = __dirname;
+const workspaceRoot = path.resolve(projectRoot, "../..");
+
+// Add packages paths
+const extraNodeModules = {
+  modules: path.resolve(workspaceRoot, "node_modules"),
+};
+
+const watchFolders = [
+  path.resolve(workspaceRoot, "node_modules"),
+  path.resolve(workspaceRoot, "packages"),
+];
+
+const nodeModulesPaths = [
+  path.resolve(projectRoot, "node_modules"),
+  path.resolve(workspaceRoot, "node_modules"),
+];
+
+module.exports = makeMetroConfig({
+  resolver: {
+    resolveRequest: MetroSymlinksResolver(),
+    extraNodeModules,
+    nodeModulesPaths,
+  },
+  sourceExts: ["mjs", "js", "json", "ts", "tsx"],
+  watchFolders,
+});
+```
+</CodeGroup>
+
+### Additional monorepo configuration (for pnpm)
+
+- Add `node-linker=hoisted` to the root `.npmrc` (create this file if it doesn't exist).
+- Add the following to the root `package.json`:
+
+<CodeGroup>
+```json
+// package.json
+"pnpm": {
+  "peerDependencyRules": {
+    "ignoreMissing": [
+      "@babel/*",
+      "typescript"
+    ]
+  }
+}
+```
+</CodeGroup>
+
+### Add polyfills
+
+Create a file `polyfills.js` at the project root with the following content:
+
+<CodeGroup>
+```ts twoslash
+// @noErrors: 7016
+// polyfills.js
+import { polyfillGlobal } from 'react-native/Libraries/Utilities/PolyfillFunctions';
+import { Buffer } from "@craftzdog/react-native-buffer";
+polyfillGlobal("Buffer", () => Buffer); // polyfill Buffer
+
+import { ReadableStream } from "readable-stream";
+polyfillGlobal("ReadableStream", () => ReadableStream); // polyfill ReadableStream
+
+import "@azure/core-asynciterator-polyfill"; // polyfill Async Iterator
+import "@bacons/text-decoder/install"; // polyfill Text Decoder
+import 'react-native-get-random-values'; // polyfill getRandomValues
+```
+</CodeGroup>
+
+Update `index.js`:
+
+<CodeGroup>
+```ts twoslash
+// @noErrors: 2307
+// index.js
+import { AppRegistry } from 'react-native';
+import App from './App';
+import { name as appName } from './app.json';
+import './src/polyfills';
+
+AppRegistry.registerComponent(appName, () => App);
+```
+</CodeGroup>
+
+Lastly, ensure that the `"main"` field in your `package.json` points to `index.js`:
+
+<CodeGroup>
+```json
+// package.json
+{
+  "main": "index.js",
+  ...
+}
+```
+</CodeGroup>
+
+## Authentication
+
+Jazz provides authentication to help users access their data across multiple devices. For details on implementing authentication, check our [Authentication Overview](/docs/authentication/overview) guide and see the [React Native Chat Demo](https://github.com/garden-co/jazz/tree/main/examples/chat-rn) for a complete example.
+
+## Next Steps
+
+Now that you've set up your React Native project for Jazz, you'll need to:
+
+1. [Set up the Jazz Provider](/docs/react-native/project-setup/providers) - Configure how your app connects to Jazz
+2. [Add authentication](/docs/authentication/overview) (optional) - Enable users to access data across devices
+3. Define your schema - See the [schema docs](/docs/schemas/covalues) for more information
+4. Run your app:
+
+<CodeGroup>
+```sh
+npx react-native run-ios
+npx react-native run-android
+```
+</CodeGroup>
+
+## Verification
+
+Ready to see if everything's working? Let's fire up your app:
+
+<CodeGroup>
+```sh
+npx react-native run-ios
+# or
+npx react-native run-android
+```
+</CodeGroup>
+
+If all goes well, your app should start up without any angry red error screens. Take a quick look at the Metro console too - no Jazz-related errors there means you're all set! If you see your app's UI come up smoothly, you've nailed the installation.
+
+If you run into any issues that aren't covered in the Common Issues section, [drop by our Discord for help](https://discord.gg/utDMjHYg42).
+
+## Common Issues
+
+- **Metro bundler errors**: If you see errors about missing polyfills, ensure all polyfills are properly imported in your `polyfills.js` file.
+- **iOS build failures**: Make sure you've run `pod install` after adding the dependencies.
+- **Android build failures**: Ensure your Android SDK and NDK versions are compatible with the native modules.
+
+### Install CocoaPods
+
+If you're compiling for iOS, you'll need to install CocoaPods for your project. If you need to install it, we recommend using [`pod-install`](https://www.npmjs.com/package/pod-install):
+
+<CodeGroup>
+```bash
+npx pod-install
+```
+</CodeGroup>

@@ -1,16 +1,16 @@
 import { CoID, LocalNode, RawCoStream, RawCoValue } from "cojson";
 import { styled } from "goober";
-import { useMemo } from "react";
 import React from "react";
 import { Badge } from "../ui/badge.js";
 import { Heading } from "../ui/heading.js";
 import { Text } from "../ui/text.js";
 import { CoStreamView } from "./co-stream-view.js";
 import { GridView } from "./grid-view.js";
+import { GroupView } from "./group-view.js";
 import { TableView } from "./table-viewer.js";
 import { TypeIcon } from "./type-icon.js";
 import { PageInfo } from "./types.js";
-import { useResolvedCoValue } from "./use-resolve-covalue.js";
+import { resolveCoValue, useResolvedCoValue } from "./use-resolve-covalue.js";
 import { AccountOrGroupPreview } from "./value-renderer.js";
 
 interface PageContainerProps extends React.HTMLAttributes<HTMLDivElement> {
@@ -66,10 +66,10 @@ const BadgeContainer = styled("div")`
 
 const ContentContainer = styled("div")`
   overflow: auto;
-`;
-
-const OwnerText = styled(Text)`
-  margin-top: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  padding-bottom: 2rem;
 `;
 
 type PageProps = {
@@ -83,28 +83,51 @@ type PageProps = {
   className?: string;
 };
 
-export function Page({
-  coId,
-  node,
-  name,
-  onNavigate,
-  onHeaderClick,
-  style,
-  className = "",
-  isTopLevel,
-}: PageProps) {
-  const { value, snapshot, type, extendedType } = useResolvedCoValue(
+function View(
+  props: PageProps & { coValue: Awaited<ReturnType<typeof resolveCoValue>> },
+) {
+  const { type, extendedType } = props.coValue;
+  const { snapshot, value } = props.coValue;
+  const { node, onNavigate } = props;
+
+  if (!snapshot || snapshot === "unavailable") return;
+
+  if (type === "costream") {
+    return (
+      <CoStreamView
+        data={snapshot}
+        onNavigate={onNavigate}
+        node={node}
+        value={value as RawCoStream}
+      />
+    );
+  }
+
+  if (extendedType === "group") {
+    return <GroupView data={snapshot} node={node} onNavigate={onNavigate} />;
+  }
+
+  if (type === "colist" || extendedType === "record") {
+    return <TableView data={snapshot} node={node} onNavigate={onNavigate} />;
+  }
+
+  return <GridView data={snapshot} onNavigate={onNavigate} node={node} />;
+}
+
+export function Page(props: PageProps) {
+  const {
     coId,
     node,
-  );
+    name,
+    onNavigate,
+    onHeaderClick,
+    style,
+    className = "",
+    isTopLevel,
+  } = props;
+  const coValue = useResolvedCoValue(coId, node);
 
-  const viewMode = useMemo(() => {
-    if (type === "colist" || extendedType === "record") {
-      return "table";
-    } else {
-      return "grid";
-    }
-  }, [type, extendedType]);
+  const { value, snapshot, type, extendedType } = coValue;
 
   if (snapshot === "unavailable") {
     return <div style={style}>Data unavailable</div>;
@@ -147,20 +170,9 @@ export function Page({
         </TitleContainer>
       </HeaderContainer>
       <ContentContainer>
-        {type === "costream" ? (
-          <CoStreamView
-            data={snapshot}
-            onNavigate={onNavigate}
-            node={node}
-            value={value as RawCoStream}
-          />
-        ) : viewMode === "grid" ? (
-          <GridView data={snapshot} onNavigate={onNavigate} node={node} />
-        ) : (
-          <TableView data={snapshot} node={node} onNavigate={onNavigate} />
-        )}
+        <View {...props} coValue={coValue} />
         {extendedType !== "account" && extendedType !== "group" && (
-          <OwnerText muted>
+          <Text muted>
             Owned by{" "}
             <AccountOrGroupPreview
               coId={value.group.id}
@@ -170,7 +182,7 @@ export function Page({
                 onNavigate([{ coId: value.group.id, name: "owner" }]);
               }}
             />
-          </OwnerText>
+          </Text>
         )}
       </ContentContainer>
     </PageContainer>

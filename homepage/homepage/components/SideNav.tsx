@@ -1,6 +1,6 @@
 import { SideNavHeader } from "@/components/SideNavHeader";
 import { SideNavItem } from "@/components/SideNavItem";
-import { Framework } from "@/lib/framework";
+import { Framework } from "@/content/framework";
 import { useFramework } from "@/lib/use-framework";
 import { clsx } from "clsx";
 import { Icon } from "gcmp-design-system/src/app/components/atoms/Icon";

@@ -119,4 +119,153 @@ describe("JazzClerkAuth", () => {
       });
     });
   });
+
+  describe("registerListener", () => {
+    function setupMockClerk(user: MinimalClerkClient["user"]) {
+      const listners = new Set<
+        (clerkClient: Pick<MinimalClerkClient, "user">) => void
+      >();
+
+      return {
+        client: {
+          user,
+          addListener: vi.fn((callback) => {
+            listners.add(callback);
+            return () => {
+              listners.delete(callback);
+            };
+          }),
+        } as unknown as MinimalClerkClient,
+        triggerUserChange: (user: unknown) => {
+          for (const listener of listners) {
+            listener({ user } as Pick<MinimalClerkClient, "user">);
+          }
+        },
+      };
+    }
+
+    it("should call onClerkUserChange on the first trigger", async () => {
+      const { client, triggerUserChange } = setupMockClerk(null);
+
+      const auth = new JazzClerkAuth(mockAuthenticate, authSecretStorage);
+      const onClerkUserChangeSpy = vi.spyOn(auth, "onClerkUserChange");
+
+      auth.registerListener(client);
+
+      triggerUserChange(null);
+
+      expect(onClerkUserChangeSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it("should call onClerkUserChange when user changes", async () => {
+      const { client, triggerUserChange } = setupMockClerk(null);
+
+      const auth = new JazzClerkAuth(mockAuthenticate, authSecretStorage);
+      const onClerkUserChangeSpy = vi.spyOn(auth, "onClerkUserChange");
+
+      auth.registerListener(client);
+
+      triggerUserChange(null);
+
+      triggerUserChange({
+        unsafeMetadata: {
+          jazzAccountID: "test123",
+          jazzAccountSecret: "secret123",
+          jazzAccountSeed: [1, 2, 3],
+        },
+      });
+
+      expect(onClerkUserChangeSpy).toHaveBeenCalledTimes(2);
+    });
+
+    it("should not call onClerkUserChange when user is the same", async () => {
+      const { client, triggerUserChange } = setupMockClerk(null);
+
+      const auth = new JazzClerkAuth(mockAuthenticate, authSecretStorage);
+      const onClerkUserChangeSpy = vi.spyOn(auth, "onClerkUserChange");
+
+      auth.registerListener(client);
+
+      triggerUserChange({
+        unsafeMetadata: {
+          jazzAccountID: "test123",
+          jazzAccountSecret: "secret123",
+          jazzAccountSeed: [1, 2, 3],
+        },
+      });
+
+      triggerUserChange({
+        unsafeMetadata: {
+          jazzAccountID: "test123",
+          jazzAccountSecret: "secret123",
+          jazzAccountSeed: [1, 2, 3],
+        },
+      });
+
+      expect(onClerkUserChangeSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it("should not call onClerkUserChange when user switches from undefined to null", async () => {
+      const { client, triggerUserChange } = setupMockClerk(null);
+
+      const auth = new JazzClerkAuth(mockAuthenticate, authSecretStorage);
+      const onClerkUserChangeSpy = vi.spyOn(auth, "onClerkUserChange");
+
+      auth.registerListener(client);
+
+      triggerUserChange(null);
+      triggerUserChange(undefined);
+      triggerUserChange(null);
+
+      expect(onClerkUserChangeSpy).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe("initializeAuth", () => {
+    it("should load auth data when credentials exist", async () => {
+      const mockClerk = {
+        user: {
+          unsafeMetadata: {
+            jazzAccountID: "test123",
+            jazzAccountSecret: "secret123",
+            jazzAccountSeed: [1, 2, 3],
+          },
+        },
+      } as unknown as MinimalClerkClient;
+
+      await JazzClerkAuth.initializeAuth(mockClerk);
+
+      const storedAuth = await authSecretStorage.get();
+      expect(storedAuth).toEqual({
+        accountID: "test123",
+        accountSecret: "secret123",
+        secretSeed: new Uint8Array([1, 2, 3]),
+        provider: "clerk",
+      });
+    });
+
+    it("should do nothing when no credentials exist", async () => {
+      const mockClerk = {
+        user: {
+          unsafeMetadata: {},
+        },
+      } as unknown as MinimalClerkClient;
+
+      await JazzClerkAuth.initializeAuth(mockClerk);
+
+      const storedAuth = await authSecretStorage.get();
+      expect(storedAuth).toBeNull();
+    });
+
+    it("should do nothing when no user exists", async () => {
+      const mockClerk = {
+        user: null,
+      } as unknown as MinimalClerkClient;
+
+      await JazzClerkAuth.initializeAuth(mockClerk);
+
+      const storedAuth = await authSecretStorage.get();
+      expect(storedAuth).toBeNull();
+    });
+  });
 });

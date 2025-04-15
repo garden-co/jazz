@@ -1,0 +1,236 @@
+export const metadata = { title: "Accounts & Migrations" };
+
+import { CodeGroup, ComingSoon, ContentByFramework } from "@/components/forMdx";
+
+# Accounts & Migrations
+
+## CoValues as a graph of data rooted in accounts
+
+Compared to traditional relational databases with tables and foreign keys,
+Jazz is more like a graph database, or GraphQL APIs &mdash;
+where CoValues can arbitrarily refer to each other and you can resolve references without having to do a join.
+(See [Subscribing & deep loading](/docs/using-covalues/subscription-and-loading)).
+
+To find all data related to a user, the account acts as a root node from where you can resolve all the data they have access to.
+These root references are modeled explicitly in your schema, distinguishing between data that is typically public
+(like a user's profile) and data that is private (like their messages).
+
+### `Account.root` - private data a user cares about
+
+Every Jazz app that wants to refer to per-user data needs to define a custom root `CoMap` schema and declare it in a custom `Account` schema as the `root` field:
+
+<CodeGroup>
+{/* prettier-ignore */}
+```ts
+import { Account, CoMap } from "jazz-tools";
+
+export class MyAppAccount extends Account {
+  root = co.ref(MyAppRoot);
+}
+
+export class MyAppRoot extends CoMap {
+  myChats = co.ref(ListOfChats);
+  myContacts = co.ref(ListOfAccounts);
+}
+
+// Register the Account schema so `useAccount` returns our custom `MyAppAccount`
+declare module "jazz-react" {
+    interface Register {
+        Account: MyAppAccount;
+    }
+}
+```
+</CodeGroup>
+
+### `Account.profile` - public data associated with a user
+
+The built-in `Account` schema class comes with a default `profile` field, which is a CoMap (in a Group with `"everyone": "reader"` - so publicly readable permissions)
+that is set up for you based on the username the `AuthMethod` provides on account creation.
+
+Their pre-defined schemas roughly look like this:
+
+<CodeGroup>
+{/* prettier-ignore */}
+```ts
+// ...somehwere in jazz-tools itself...
+export class Account extends Group {
+  profile = co.ref(Profile);
+}
+
+export class Profile extends CoMap {
+  name = co.string;
+}
+```
+</CodeGroup>
+
+If you want to keep the default `Profile` schema, but customise your account's private `root`, all you have to do is define a new `root` field in your account schema:
+
+(You don't have to explicitly re-define the `profile` field, but it makes it more readable that the Account contains both `profile` and `root`)
+
+<CodeGroup>
+{/* prettier-ignore */}
+```ts
+import { Account, Profile } from "jazz-tools";
+
+export class MyAppAccount extends Account {
+  profile = co.ref(Profile);
+  root = co.ref(MyAppRoot);
+}
+```
+</CodeGroup>
+If you want to extend the `profile` to contain additional fields (such as an avatar `ImageDefinition`), you can declare your own profile schema class that extends `Profile`:
+
+<CodeGroup>
+{/* prettier-ignore */}
+```ts
+import { Account, Profile, ImageDefinition } from "jazz-tools"; // [!code ++]
+
+export class MyAppAccount extends Account {
+  profile = co.ref(MyAppProfile); // [!code ++]
+  root = co.ref(MyAppRoot);
+}
+
+export class MyAppRoot extends CoMap {
+  myChats = co.ref(ListOfChats);
+  myContacts = co.ref(ListOfAccounts);
+}
+
+export class MyAppProfile extends Profile { // [!code ++:4]
+  name = co.string; // compatible with default Profile schema
+  avatar = co.optional.ref(ImageDefinition);
+}
+
+// Register the Account schema so `useAccount` returns our custom `MyAppAccount` 
+declare module "jazz-react" {
+    interface Register {
+        Account: MyAppAccount;
+    }
+}
+```
+</CodeGroup>
+
+## Resolving CoValues starting at `profile` or `root`
+
+<ContentByFramework framework="react">
+To use per-user data in your app, you typically use `useAccount` somewhere in a high-level component, specifying which references to resolve using a resolve query (see [Subscribing & deep loading](/docs/using-covalues/subscription-and-loading)).
+
+<CodeGroup>
+{/* prettier-ignore */}
+```tsx
+import { useAccount } from "jazz-react";
+
+function DashboardPageComponent() {
+  const { me } = useAccount({ profile: {}, root: { myChats: {}, myContacts: {}}});
+
+  return <div>
+    <h1>Dashboard</h1>
+    {me ? <div>
+      <p>Logged in as {me.profile.name}</p>
+      <h2>My chats</h2>
+      {me.root.myChats.map((chat) => <ChatPreview key={chat.id} chat={chat} />)}
+      <h2>My contacts</h2>
+      {me.root.myContacts.map((contact) => <ContactPreview key={contact.id} contact={contact} />)}
+    </div> : "Loading..."}
+  </div>
+}
+
+```
+</CodeGroup>
+</ContentByFramework>
+
+
+## Populating and evolving `root` and `profile` schemas with migrations
+
+As you develop your app, you'll likely want to
+
+- initialise data in a user's `root` and `profile`
+- add more data to your `root` and `profile` schemas
+
+You can achieve both by overriding the `migrate()` method on your `Account` schema class.
+
+### When migrations run
+
+Migrations are run after account creation and every time a user logs in.
+Jazz waits for the migration to finish before passing the account to your app's context.
+
+### Initialising user data after account creation
+
+<CodeGroup>
+{/* prettier-ignore */}
+```ts
+export class MyAppAccount extends Account {
+  root = co.ref(MyAppRoot);
+  profile = co.ref(MyAppProfile);
+
+  async migrate(this: MyAppAccount, creationProps?: { name: string }) {
+    // we specifically need to check for undefined,
+    // because the root might simply be not loaded (`null`) yet
+    if (this.root === undefined) {
+      this.root = MyAppRoot.create({
+        // Using a group to set the owner is always a good idea.
+        // This way if in the future we want to share
+        // this coValue we can do so easily.
+        myChats: ListOfChats.create([], Group.create()),
+        myContacts: ListOfAccounts.create([], Group.create())
+      });
+    }
+
+    if (this.profile === undefined) {
+      const profileGroup = Group.create();
+      // Unlike the root, we want the profile to be publicly readable.
+      profileGroup.addMember("everyone", "reader");
+
+      this.profile = MyAppProfile.create({
+        name: creationProps?.name,
+        bookmarks: ListOfBookmarks.create([], profileGroup),
+      }, profileGroup);
+    }
+  }
+}
+```
+</CodeGroup>
+
+### Adding/changing fields to `root` and `profile`
+
+To add new fields to your `root` or `profile` schemas, amend their corresponding schema classes with new fields,
+and then implement a migration that will populate the new fields for existing users (by using initial data, or by using existing data from old fields).
+
+To do deeply nested migrations, you might need to use the asynchronous `ensureLoaded()` method before determining whether the field already exists, or is simply not loaded yet.
+
+Now let's say we want to add a `myBookmarks` field to the `root` schema:
+
+<CodeGroup>
+{/* prettier-ignore */}
+```ts
+export class MyAppAccount extends Account {
+    root = co.ref(MyAppRoot);
+
+    async migrate(this: MyAppAccount) {
+      if (this.root === undefined) {  
+        this.root = MyAppRoot.create({  
+          myChats: ListOfChats.create([], Group.create()),  
+          myContacts: ListOfAccounts.create([], Group.create()) 
+        }); 
+      } 
+
+      // We need to load the root field to check for the myContacts field
+      const { root } = await this.ensureLoaded({
+        resolve: { root: true }
+      });
+
+      // we specifically need to check for undefined,
+      // because myBookmarks might simply be not loaded (`null`) yet
+      if (root.myBookmarks === undefined) { // [!code ++:3]
+        root.myBookmarks = ListOfBookmarks.create([], Group.create());
+      }
+    }
+  }
+```
+</CodeGroup>
+
+{/*
+ TODO: Add best practice: only ever add fields
+
+ Note: explain and reassure that there will be more guardrails in the future
+ https://github.com/garden-co/jazz/issues/1160
+*/}

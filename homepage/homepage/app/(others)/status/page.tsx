@@ -2,12 +2,11 @@ import LatencyChart from "@/components/LatencyChart";
 import { clsx } from "clsx";
 import { HeroHeader } from "gcmp-design-system/src/app/components/molecules/HeroHeader";
 import type { Metadata } from "next";
-import dynamic from "next/dynamic";
 import { Fragment } from "react";
 
 const title = "Status";
 
-export const revalidate = 300;
+export const dynamic = "force-static";
 
 export const metadata: Metadata = {
   title,
@@ -41,6 +40,10 @@ interface DataRow {
 
 const query = async () => {
   const res = await fetch("https://gcmp.grafana.net/api/ds/query", {
+    cache: "force-cache",
+    next: {
+      revalidate: 300,
+    },
     method: "POST",
     headers: {
       "Content-Type": "application/json",

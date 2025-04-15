@@ -134,25 +134,30 @@ export function ValueRenderer({
   if (typeof json === "boolean") {
     return <BooleanText value={json}>{json.toString()}</BooleanText>;
   }
+  const longJson = JSON.stringify(json, null, 2);
+  const shortJson = longJson
+    .split("\n")
+    .slice(0, compact ? 3 : 8)
+    .join("\n");
+
+  // Check if collapsed differs from full
+  const hasDifference = longJson !== shortJson;
 
   if (typeof json === "object") {
     return (
       <>
         <p>{Array.isArray(json) ? <>Array ({json.length})</> : <>Object</>}</p>
         <ObjectContent>
-          {isExpanded
-            ? JSON.stringify(json, null, 2)
-            : JSON.stringify(json, null, 2)
-                .split("\n")
-                .slice(0, compact ? 3 : 8)
-                .join("\n") + (Object.keys(json).length > 2 ? "\n..." : "")}
+          {isExpanded ? longJson : shortJson}
+
+          {hasDifference && !isExpanded ? "\n ..." : null}
         </ObjectContent>
 
-        {!compact && (
+        {!compact && hasDifference ? (
           <Button variant="link" onClick={() => setIsExpanded(!isExpanded)}>
             {isExpanded ? "Show less" : "Show more"}
           </Button>
-        )}
+        ) : null}
       </>
     );
   }
@@ -239,9 +244,7 @@ export const CoMapPreview = ({
           .map(([key, value]) => (
             <React.Fragment key={key}>
               <Text strong>{key}: </Text>
-              <Text inline>
-                <ValueRenderer compact json={value} />
-              </Text>
+              <ValueRenderer compact json={value} />
             </React.Fragment>
           ))}
       </PreviewGrid>

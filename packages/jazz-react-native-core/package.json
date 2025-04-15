@@ -1,0 +1,50 @@
+{
+  "name": "jazz-react-native-core",
+  "type": "module",
+  "version": "0.13.5",
+  "license": "MIT",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "react-native": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "react-native": "./dist/index.js",
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./crypto": {
+      "react-native": "./dist/crypto/index.js",
+      "types": "./dist/crypto/index.d.ts",
+      "default": "./dist/crypto/index.js"
+    },
+    "./dist/testing": {
+      "react-native": "./dist/testing.js",
+      "types": "./dist/testing.d.ts",
+      "default": "./dist/testing.js"
+    },
+    "./testing": {
+      "react-native": "./dist/testing.js",
+      "types": "./dist/testing.d.ts",
+      "default": "./dist/testing.js"
+    }
+  },
+  "dependencies": {
+    "cojson": "workspace:*",
+    "cojson-storage": "workspace:*",
+    "cojson-transport-ws": "workspace:*",
+    "jazz-react-core": "workspace:*",
+    "jazz-tools": "workspace:*",
+    "react-native-nitro-modules": "0.24.1",
+    "react-native-quick-crypto": "1.0.0-beta.13"
+  },
+  "devDependencies": {
+    "typescript": "~5.6.2"
+  },
+  "scripts": {
+    "dev": "tsc --watch --sourceMap --outDir dist",
+    "format-and-lint": "biome check .",
+    "format-and-lint:fix": "biome check . --write",
+    "build": "rm -rf ./dist && tsc --sourceMap --outDir dist"
+  }
+}

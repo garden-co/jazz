@@ -1,5 +1,60 @@
 # jazz-example-inspector
 
+## 0.0.126
+
+### Patch Changes
+
+- Updated dependencies [c320615]
+  - jazz-inspector@0.13.6
+
+## 0.0.125
+
+### Patch Changes
+
+- Updated dependencies [08ae9b2]
+- Updated dependencies [e090b39]
+  - jazz-inspector@0.13.5
+  - cojson@0.13.5
+  - cojson-transport-ws@0.13.5
+
+## 0.0.124
+
+### Patch Changes
+
+- jazz-inspector@0.13.4
+
+## 0.0.123
+
+### Patch Changes
+
+- Updated dependencies [b19cab7]
+- Updated dependencies [017f6c8]
+  - cojson-transport-ws@0.13.3
+  - jazz-inspector@0.13.3
+
+## 0.0.122
+
+### Patch Changes
+
+- Updated dependencies [ae4be2b]
+- Updated dependencies [c551839]
+  - jazz-inspector@0.13.2
+  - cojson@0.13.2
+  - cojson-transport-ws@0.13.2
+
+## 0.0.121
+
+### Patch Changes
+
+- 2796689: various fixes and css refactoring
+- Updated dependencies [a013538]
+- Updated dependencies [2796689]
+- Updated dependencies [2224ed4]
+- Updated dependencies [bce3bcc]
+  - cojson@0.13.0
+  - jazz-inspector@0.13.0
+  - cojson-transport-ws@0.13.0
+
 ## 0.0.120
 
 ### Patch Changes

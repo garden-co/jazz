@@ -1,4 +1,4 @@
-import { SessionID } from "cojson";
+import { JsonValue, RawCoList, SessionID } from "cojson";
 import { ItemsSym, type Ref, RefEncoded, UnCo } from "../internal.js";
 import { type Account } from "./account.js";
 import { type CoFeed, CoFeedEntry } from "./coFeed.js";
@@ -32,12 +32,22 @@ function isOptionalField(value: CoValue, key: string): boolean {
   );
 }
 
-type FulfillsDepthResult = "unauthorized" | "fulfilled" | "unfulfilled";
+type FulfillsDepthResult =
+  | {
+      status: "fulfilled" | "unfulfilled";
+    }
+  | {
+      status: "unauthorized";
+      path: string[];
+      id: JsonValue;
+    };
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function fulfillsDepth(depth: any, value: CoValue): FulfillsDepthResult {
   if (depth === true || depth === undefined) {
-    return "fulfilled";
+    return {
+      status: "fulfilled",
+    };
   }
 
   if (
@@ -48,40 +58,52 @@ export function fulfillsDepth(depth: any, value: CoValue): FulfillsDepthResult {
     const map = value as CoMap;
 
     if ("$each" in depth) {
-      let result: FulfillsDepthResult = "fulfilled";
+      const result: FulfillsDepthResult = { status: "fulfilled" };
 
       for (const [key, item] of Object.entries(value)) {
-        if (map._raw.get(key) !== undefined) {
+        const rawValue = map._raw.get(key);
+
+        if (rawValue !== undefined) {
           if (!item) {
             if (hasReadAccess(map, key)) {
-              result = "unfulfilled";
+              result.status = "unfulfilled";
               continue;
             } else {
-              return "unauthorized";
+              return {
+                status: "unauthorized",
+                path: [key],
+                id: rawValue,
+              };
             }
           }
 
           const innerResult = fulfillsDepth(depth.$each, item);
 
-          if (innerResult === "unfulfilled") {
-            result = "unfulfilled";
+          if (innerResult.status === "unfulfilled") {
+            result.status = "unfulfilled";
           } else if (
-            innerResult === "unauthorized" &&
+            innerResult.status === "unauthorized" &&
             !isOptionalField(value, ItemsSym)
           ) {
-            return "unauthorized"; // If any item is unauthorized, the whole thing is unauthorized
+            innerResult.path.unshift(key);
+
+            return innerResult; // If any item is unauthorized, the whole thing is unauthorized
           }
         } else if (!isOptionalField(value, ItemsSym)) {
-          return "unfulfilled";
+          return {
+            status: "unfulfilled",
+          };
         }
       }
 
       return result;
     } else {
-      let result: FulfillsDepthResult = "fulfilled";
+      const result: FulfillsDepthResult = { status: "fulfilled" };
 
       for (const key of Object.keys(depth)) {
-        if (map._raw.get(key) === undefined) {
+        const rawValue = map._raw.get(key);
+
+        if (rawValue === undefined || rawValue === null) {
           if (!map._schema?.[key]) {
             // Field not defined in schema
             if (map._schema?.[ItemsSym]) {
@@ -113,22 +135,28 @@ export function fulfillsDepth(depth: any, value: CoValue): FulfillsDepthResult {
 
           if (!item) {
             if (hasReadAccess(map, key)) {
-              result = "unfulfilled";
+              result.status = "unfulfilled";
               continue;
             } else {
-              return "unauthorized";
+              return {
+                status: "unauthorized",
+                path: [key],
+                id: rawValue,
+              };
             }
           }
 
           const innerResult = fulfillsDepth(depth[key], item);
 
-          if (innerResult === "unfulfilled") {
-            result = "unfulfilled";
+          if (innerResult.status === "unfulfilled") {
+            result.status = "unfulfilled";
           } else if (
-            innerResult === "unauthorized" &&
+            innerResult.status === "unauthorized" &&
             !isOptionalField(value, key)
           ) {
-            return "unauthorized"; // If any item is unauthorized, the whole thing is unauthorized
+            innerResult.path.unshift(key);
+
+            return innerResult; // If any item is unauthorized, the whole thing is unauthorized
           }
         }
       }
@@ -137,77 +165,99 @@ export function fulfillsDepth(depth: any, value: CoValue): FulfillsDepthResult {
     }
   } else if (value._type === "CoList") {
     if ("$each" in depth) {
-      let result: FulfillsDepthResult = "fulfilled";
+      const result: FulfillsDepthResult = { status: "fulfilled" };
 
       for (const [key, item] of (value as CoList).entries()) {
         if (hasRefValue(value, key)) {
           if (!item) {
             if (hasReadAccess(value, key)) {
-              result = "unfulfilled";
+              result.status = "unfulfilled";
               continue;
             } else {
-              return "unauthorized";
+              return {
+                status: "unauthorized",
+                path: [key.toString()],
+                id: (value._raw as RawCoList).get(key) ?? "undefined",
+              };
             }
           }
 
           const innerResult = fulfillsDepth(depth.$each, item);
 
-          if (innerResult === "unfulfilled") {
-            result = "unfulfilled";
+          if (innerResult.status === "unfulfilled") {
+            result.status = "unfulfilled";
           } else if (
-            innerResult === "unauthorized" &&
+            innerResult.status === "unauthorized" &&
             !isOptionalField(value, ItemsSym)
           ) {
-            return "unauthorized"; // If any item is unauthorized, the whole thing is unauthorized
+            innerResult.path.unshift(key.toString());
+
+            return innerResult; // If any item is unauthorized, the whole thing is unauthorized
           }
         } else if (!isOptionalField(value, ItemsSym)) {
-          return "unfulfilled";
+          return {
+            status: "unfulfilled",
+          };
         }
       }
 
       return result;
     }
 
-    return "fulfilled";
+    return {
+      status: "fulfilled",
+    };
   } else if (value._type === "CoStream") {
     if ("$each" in depth) {
-      let result: FulfillsDepthResult = "fulfilled";
+      const result: FulfillsDepthResult = { status: "fulfilled" };
 
       for (const item of Object.values((value as CoFeed).perSession)) {
         if (item.ref) {
           if (!item.value) {
             if (item.ref.hasReadAccess()) {
-              result = "unfulfilled";
+              result.status = "unfulfilled";
               continue;
             } else {
-              return "unauthorized";
+              return {
+                status: "unauthorized",
+                path: [item.ref.id],
+                id: item.ref.id,
+              };
             }
           }
 
           const innerResult = fulfillsDepth(depth.$each, item.value);
 
-          if (innerResult === "unfulfilled") {
-            result = "unfulfilled";
+          if (innerResult.status === "unfulfilled") {
+            result.status = "unfulfilled";
           } else if (
-            innerResult === "unauthorized" &&
+            innerResult.status === "unauthorized" &&
             !isOptionalField(value, ItemsSym)
           ) {
-            return "unauthorized"; // If any item is unauthorized, the whole thing is unauthorized
+            innerResult.path.unshift(item.ref.id);
+
+            return innerResult; // If any item is unauthorized, the whole thing is unauthorized
           }
         } else if (!isOptionalField(value, ItemsSym)) {
-          return "unfulfilled";
+          return {
+            status: "unfulfilled",
+          };
         }
       }
 
       return result;
     }
 
-    return "fulfilled";
+    return {
+      status: "fulfilled",
+    };
   } else if (
     value._type === "BinaryCoStream" ||
     value._type === "CoPlainText"
   ) {
-    return "fulfilled";
+    return {
+      status: "fulfilled",
+    };
   } else {
     console.error(value);
     throw new Error("Unexpected value type: " + value._type);

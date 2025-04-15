@@ -208,6 +208,10 @@ export function FileWidget() {
             <span className="font-bold">Size</span>
             <span>{formatFileSize(fileData?.totalSizeBytes)}</span>
           </div>
+          <div className="flex justify-between">
+            <span className="font-bold">CoValue ID</span>
+            <span>{me.profile.file.id}</span>
+          </div>
         </div>
       </div>
 

@@ -1,4 +1,4 @@
-# `jazz-browser-auth-clerk`
+# `jazz-auth-clerk`
 
 This package provides a [Clerk-based](https://clerk.com/) authentication strategy for Jazz.
 
@@ -12,7 +12,7 @@ Looking for a React integration? Check out [`jazz-react-auth-clerk`](https://www
 From [the example app](https://github.com/garden-co/jazz/tree/main/examples/clerk):
 
 ```ts
-import { BrowserClerkAuth } from "jazz-browser-auth-clerk";
+import { BrowserClerkAuth } from "jazz-auth-clerk";
 
 // ...
 

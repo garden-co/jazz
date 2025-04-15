@@ -5,7 +5,7 @@ import { ReactLogo } from "@/components/icons/ReactLogo";
 import { ReactNativeLogo } from "@/components/icons/ReactNativeLogo";
 import { SvelteLogo } from "@/components/icons/SvelteLogo";
 import { VueLogo } from "@/components/icons/VueLogo";
-import { Example, features, tech } from "@/lib/example";
+import { Example, features, tech } from "@/content/example";
 import { clsx } from "clsx";
 import { H2 } from "gcmp-design-system/src/app/components/atoms/Headings";
 import { Icon } from "gcmp-design-system/src/app/components/atoms/Icon";
@@ -253,6 +253,38 @@ const ReactionsIllustration = () => (
   </div>
 );
 
+const MultiCursorIllustration = () => (
+  <div className="flex bg-stone-100 h-full flex-col items-center justify-center dark:bg-transparent p-4">
+    <div className=" bg-white md:aspect-[3/2] flex flex-col rounded-md shadow-xl shadow-stone-400/20 dark:shadow-none">
+      <div className="w-full py-2 flex items-center gap-1.5 px-2 border-b dark:border-b-stone-200">
+        <span className="rounded-full size-2 bg-stone-200"></span>
+        <span className="rounded-full size-2 bg-stone-200"></span>
+        <span className="rounded-full size-2 bg-stone-200"></span>
+      </div>
+
+      <div className="h-full mx-auto flex flex-col justify-center p-12 sm:p-16">
+        <div className="inline-block relative px-1 ring-1 ring-blue-400">
+          <div className="absolute size-2 bg-white border border-blue-400 -left-1 -top-1"></div>
+          <div className="absolute size-2 bg-white border border-blue-400 -right-1 -top-1"></div>
+          <div className="absolute size-2 bg-white border border-blue-400 -left-1 -bottom-1"></div>
+          <div className="absolute size-2 bg-white border border-blue-400 -right-1 -bottom-1"></div>
+
+          <span className="text-lg font-semibold md:text-2xl md:font-bold text-stone-800 ">
+            Hello, world!
+          </span>
+          <div className="absolute -top-10 right-4 text-rose-600 flex items-end gap-1">
+            <Icon name="cursor"></Icon> <span className="text-xs">Mia</span>
+          </div>
+          <div className="absolute -bottom-10 left-4 text-green-600 flex items-end gap-1">
+            <Icon name="cursor"></Icon>{" "}
+            <span className="text-xs">Sebastian</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+);
+
 const PetIllustration = () => (
   <div className="h-full p-4 bg-[url('/dog.jpg')] bg-cover bg-center p-4 flex items-end">
     <div className="inline-flex justify-center gap-1 mx-auto">
@@ -396,6 +428,16 @@ const reactExamples: Example[] = [
     illustration: <ReactionsIllustration />,
   },
   {
+    name: "Cursor presence",
+    slug: "multi-cursors",
+    description:
+      "Track user presence on a canvas with multiple cursors and out of bounds indicators.",
+    tech: [tech.react],
+    features: [features.coFeed],
+    demoUrl: "https://jazz-multi-cursors.vercel.app",
+    illustration: <MultiCursorIllustration />,
+  },
+  {
     name: "Rate my pet",
     slug: "pets",
     description:
@@ -484,16 +526,27 @@ const rnExamples: Example[] = [
   {
     name: "Chat",
     slug: "chat-rn",
-    description: "A simple app that creates a chat room with a shareable link.",
+    description:
+      "A simple React Native app that creates a chat room with a shareable link.",
     tech: [tech.reactNative],
     illustration: <ChatIllustration />,
   },
 
   {
     name: "Chat",
-    slug: "chat-rn-clerk",
-    description: "Exactly like the React Native chat app, with Clerk for auth.",
-    tech: [tech.reactNative],
+    slug: "chat-rn-expo",
+    description:
+      "A simple Expo app that creates a chat room with a shareable link.",
+    tech: [tech.reactNative, tech.expo],
+    illustration: <ChatIllustration />,
+  },
+
+  {
+    name: "Chat",
+    slug: "chat-rn-expo-clerk",
+    description:
+      "Exactly like the React Native Expo chat app, with Clerk for auth.",
+    tech: [tech.reactNative, tech.expo],
     features: [features.clerk],
     illustration: <ClerkIllustration />,
   },

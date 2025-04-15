@@ -1,0 +1,221 @@
+export const metadata = { title: "Clerk Authentication" };
+
+import { CodeGroup, ContentByFramework } from "@/components/forMdx";
+
+# Clerk Authentication
+
+Jazz can be integrated with [Clerk](https://clerk.com/) to authenticate users. This method combines Clerk's comprehensive authentication services with Jazz's local-first capabilities.
+
+## How it works
+
+When using Clerk authentication:
+1. Users sign up or sign in through Clerk's authentication system
+2. Jazz securely stores the user's account keys with Clerk
+3. When logging in, Jazz retrieves these keys from Clerk
+4. Once authenticated, users can work offline with full Jazz functionality
+
+This authentication method is not fully local-first, as login and signup need to be done online, but once authenticated, users can use all of Jazz's features without needing to be online.
+
+## Key benefits
+
+- **Rich auth options**: Email/password, social logins, multi-factor authentication
+- **User management**: Complete user administration dashboard
+- **Familiar sign-in**: Standard auth flows users already know
+- **OAuth providers**: Google, GitHub, and other popular providers
+- **Enterprise features**: SSO, SAML, and other advanced options
+
+## Implementation
+
+<ContentByFramework framework="react">
+We offer Clerk integration through our package: [`jazz-react-auth-clerk`](https://npmjs.com/package/jazz-react-auth-clerk).
+
+After installing, use `<JazzProviderWithClerk />` to wrap your app:
+
+<CodeGroup>
+```tsx twoslash
+import * as React from "react";
+import { createRoot } from "react-dom/client";
+const apiKey = "you@example.com";
+const PUBLISHABLE_KEY = "fake_key";
+function App() {
+  return <div>Hello World</div>;
+}
+// ---cut---
+import { useClerk, ClerkProvider } from '@clerk/clerk-react';
+import { JazzProviderWithClerk } from "jazz-react-auth-clerk";
+
+function JazzProvider({ children }: { children: React.ReactNode }) {
+  const clerk = useClerk();
+
+  return (
+    <JazzProviderWithClerk
+      clerk={clerk}
+      sync={{
+        peer: `wss://cloud.jazz.tools/?key=${apiKey}`,
+      }}
+    >
+      {children}
+    </JazzProviderWithClerk>
+  );
+}
+
+createRoot(document.getElementById("root")!).render(
+  <ClerkProvider publishableKey={PUBLISHABLE_KEY} afterSignOutUrl="/">
+    <JazzProvider>
+      <App />
+    </JazzProvider>
+  </ClerkProvider>
+);
+```
+</CodeGroup>
+</ContentByFramework>
+
+<ContentByFramework framework="react-native-expo">
+We offer Clerk integration through our package: [`jazz-expo`](https://npmjs.com/package/jazz-expo).
+
+After installing, use `<JazzProviderWithClerk />` to wrap your app.
+
+<CodeGroup>
+```tsx twoslash
+import * as React from "react";
+import { Slot } from "expo-router";
+const apiKey = "you@example.com";
+const tokenCache = {
+  getToken: async (key: string) => {
+    return null;
+  },
+  saveToken: async (key: string, token: string) => {},
+  clearToken: async (key: string) => {},
+};
+// ---cut---
+import { useClerk, ClerkProvider, ClerkLoaded } from '@clerk/clerk-expo';
+import { secureStore } from "@clerk/clerk-expo/secure-store";
+import { JazzProviderWithClerk } from "jazz-expo/auth/clerk";
+
+function JazzAndAuth({ children }: { children: React.ReactNode }) {
+  const clerk = useClerk();
+
+  return (
+    <JazzProviderWithClerk
+      clerk={clerk}
+      sync={{
+        peer: `wss://cloud.jazz.tools/?key=${apiKey}`,
+      }}
+    >
+      {children}
+    </JazzProviderWithClerk>
+  );
+}
+
+export default function RootLayout() {
+  const publishableKey = process.env.EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY;
+
+  if (!publishableKey) {
+    throw new Error(
+      "Missing Publishable Key. Please set EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY in your .env",
+    );
+  }
+
+  return (
+    <ClerkProvider
+      tokenCache={tokenCache}
+      publishableKey={publishableKey}
+      __experimental_resourceCache={secureStore}
+    >
+      <ClerkLoaded>
+        <JazzAndAuth>
+          <Slot />
+        </JazzAndAuth>
+      </ClerkLoaded>
+    </ClerkProvider>
+  );
+}
+```
+</CodeGroup>
+</ContentByFramework>
+
+Once set up, you can use Clerk's auth methods for login and signup:
+
+<ContentByFramework framework="react">
+<CodeGroup>
+```tsx twoslash
+import * as React from "react";
+// ---cut---
+import { SignInButton } from "@clerk/clerk-react";
+import { useAccount, useIsAuthenticated } from "jazz-react";
+
+export function AuthButton() {
+  const { logOut } = useAccount();
+
+  const isAuthenticated = useIsAuthenticated();
+
+  if (isAuthenticated) {
+    return <button onClick={() => logOut()}>Logout</button>;
+  }
+
+  return <SignInButton />;
+}
+```
+</CodeGroup>
+</ContentByFramework>
+
+<ContentByFramework framework="react-native-expo">
+<CodeGroup>
+```tsx twoslash
+import * as React from "react";
+// ---cut---
+import { useSignIn } from "@clerk/clerk-expo";
+import { useAccount, useIsAuthenticated } from "jazz-expo";
+import { Button, Text } from 'react-native';
+
+export function AuthButton() {
+  const { logOut } = useAccount();
+  const { signIn, setActive, isLoaded } = useSignIn();
+  const isAuthenticated = useIsAuthenticated();
+
+  if (isAuthenticated) {
+    return <Button title="Logout" onPress={() => logOut()} />;
+  }
+
+  const onSignInPress = async () => {
+    if (!isLoaded) return;
+    const signInAttempt = await signIn.create({
+      identifier: "you@example.com",
+      password: "password",
+    });
+    if (signInAttempt.status === "complete") {
+      await setActive({ session: signInAttempt.createdSessionId });
+    }
+  };
+
+  return <Button title="Sign In" onPress={onSignInPress} />;
+}
+```
+</CodeGroup>
+</ContentByFramework>
+
+## Examples
+
+You can explore Jazz with Clerk integration in our [example projects](/docs/examples). For more Clerk-specific demos, visit [Clerk's documentation](https://clerk.com/docs).
+
+## When to use Clerk
+
+Clerk authentication is ideal when:
+
+- You need an existing user management system
+- You want to integrate with other Clerk features (roles, permissions)
+- You require email/password authentication with verification
+- You need OAuth providers (Google, GitHub, etc.)
+- You want to avoid users having to manage passphrases
+
+## Limitations and considerations
+
+- **Online requirement**: Initial signup/login requires internet connectivity
+- **Third-party dependency**: Relies on Clerk's services for authentication
+- **Not fully local-first**: Initial authentication requires a server
+- **Platform support**: Not available on all platforms
+
+## Additional resources
+
+- [Clerk Documentation](https://clerk.com/docs)
+- [Jazz React Auth Clerk Package](https://npmjs.com/package/jazz-react-auth-clerk)

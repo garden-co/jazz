@@ -1,0 +1,116 @@
+export const metadata = { title: "Providers - React Native" };
+
+import { CodeGroup } from "@/components/forMdx";
+
+# Providers
+
+## Introduction
+
+`<JazzProvider />` is the core component that connects your React Native application to Jazz. It handles:
+
+- **Data Synchronization**: Manages connections to peers and the Jazz cloud
+- **Local Storage**: Persists data locally between app sessions
+- **Schema Types**: Provides APIs for the [AccountSchema](/docs/schemas/accounts-and-migrations)
+- **Authentication**: Connects your authentication system to Jazz
+
+## Setting up the provider
+
+Wrap your app components with the `<JazzProvider />` component:
+
+<CodeGroup>
+```tsx twoslash
+// @noErrors: 2307 2686 2664
+// App.tsx
+import { JazzProvider } from "jazz-react-native";
+import { MyAppAccount } from "./schema";
+
+export function MyJazzProvider({ children }: { children: React.ReactNode }) {
+  return (
+    <JazzProvider
+      sync={{ peer: "wss://cloud.jazz.tools/?key=you@example.com" }}
+      AccountSchema={MyAppAccount}
+    >
+      {children}
+    </JazzProvider>
+  );
+}
+
+// Register the Account schema so `useAccount` returns our custom `MyAppAccount`
+declare module "jazz-react-native" {
+  interface Register {
+    Account: MyAppAccount;
+  }
+}
+```
+</CodeGroup>
+
+## Provider Options
+
+- `kvStore`
+  - `MMKVStoreAdapter` (default)
+- `AccountSchema`
+  - `Account` (default)
+- `CryptoProvider`
+  - `PureJSCrypto` (default) - Pure JavaScript crypto provider
+  - `RNQuickCrypto` - C++ accelerated crypto provider
+
+## Authentication in the Provider
+
+`<JazzProvider />` works with various authentication methods, with PassphraseAuth being the easiest way to get started for development and testing. For authentication details, refer to our [Authentication Overview](/docs/authentication/overview) guide.
+
+The authentication hooks must always be used inside the `<JazzProvider />` component.
+
+Implementing PassphraseAuth is straightforward:
+
+1. Import the [wordlist](https://github.com/bitcoinjs/bip39/tree/a7ecbfe2e60d0214ce17163d610cad9f7b23140c/src/wordlists) for generating recovery phrases
+2. Use the `usePassphraseAuth` hook to handle authentication 
+3. Create simple registration and sign-in screens
+
+<CodeGroup>
+```tsx twoslash
+// @noErrors: 2307
+import React, { ReactNode } from "react";
+function SignInScreen({ auth }: { auth: any }) {
+  return null;
+}
+// ---cut-before---
+// Example with PassphraseAuth
+import { JazzProvider, usePassphraseAuth } from "jazz-react-native";
+import { englishWordlist } from "./wordlist";
+
+function JazzAuthentication({ children }: { children: ReactNode }) {
+  const auth = usePassphraseAuth({
+    wordlist: englishWordlist,
+  });
+
+  // If the user is already signed in, render the App
+  if (auth.state === "signedIn") {
+    return children
+  }
+  
+  // Otherwise, show a sign-in screen
+  return <SignInScreen auth={auth} />;
+}
+
+function AuthenticatedProvider({ children }: { children: ReactNode }) {
+  return (
+    <JazzProvider
+      sync={{ peer: "wss://cloud.jazz.tools/?key=your-api-key" }}
+    >
+      <JazzAuthentication>
+        {children}
+      </JazzAuthentication>
+    </JazzProvider>
+  );
+}
+```
+</CodeGroup>
+
+## Local Persistence
+
+Jazz for React Native includes built-in local persistence using SQLite. This implementation uses:
+
+- **Database Storage**: `@op-engineering/op-sqlite` - A high-performance SQLite implementation
+- **Key-Value Storage**: `react-native-mmkv` - A fast key-value storage system
+
+Local persistence is enabled by default with no additional configuration required. Your data will automatically persist across app restarts.

@@ -317,7 +317,7 @@ export function subscribeToCoValue<
     resolve?: RefsToResolveStrict<V, R>;
     loadAs: Account | AnonymousJazzAgent;
     onUnavailable?: () => void;
-    onUnauthorized?: () => void;
+    onUnauthorized?: (errorPath: string[]) => void;
     syncResolution?: boolean;
   },
   listener: SubscribeListener<V, R>,
@@ -344,7 +344,11 @@ export function subscribeToCoValue<
         if (subscription.syncResolution) return;
 
         if (!ref.hasReadAccess()) {
-          options.onUnauthorized?.();
+          console.error(
+            "Not enough permissions to load / subscribe to CoValue",
+            id,
+          );
+          options.onUnauthorized?.([]);
           return;
         }
 
@@ -365,12 +369,20 @@ export function subscribeToCoValue<
           subscription.syncResolution = false;
         }
 
-        if (result === "unauthorized") {
-          options.onUnauthorized?.();
+        if (result.status === "unauthorized") {
+          console.error(
+            "Not enough permissions to load / subscribe to CoValue",
+            id,
+            "on path",
+            result.path.join("."),
+            "unaccessible value:",
+            result.id,
+          );
+          options.onUnauthorized?.(result.path);
           return;
         }
 
-        if (result === "fulfilled") {
+        if (result.status === "fulfilled") {
           listener(update as Resolved<V, R>, subscription.unsubscribeAll);
         }
       },
@@ -406,8 +418,8 @@ export function subscribeToCoValue<
 export function createCoValueObservable<
   V extends CoValue,
   const R extends RefsToResolve<V>,
->() {
-  let currentValue: Resolved<V, R> | undefined | null = undefined;
+>(initialValue: undefined | null = undefined) {
+  let currentValue: Resolved<V, R> | undefined | null = initialValue;
   let subscriberCount = 0;
 
   function subscribe(

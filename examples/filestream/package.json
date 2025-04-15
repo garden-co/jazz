@@ -1,7 +1,7 @@
 {
   "name": "filestream",
   "private": true,
-  "version": "0.0.9",
+  "version": "0.0.15",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -13,6 +13,7 @@
   "dependencies": {
     "jazz-react": "workspace:*",
     "jazz-tools": "workspace:*",
+    "jazz-inspector": "workspace:*",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },

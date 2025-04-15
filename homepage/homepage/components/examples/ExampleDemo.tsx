@@ -1,7 +1,7 @@
 import { CodeExampleTabs } from "@/components/examples/CodeExampleTabs";
 import { ExampleLinks } from "@/components/examples/ExampleLinks";
 import { ExampleTags } from "@/components/examples/ExampleTags";
-import { Example } from "@/lib/example";
+import { Example } from "@/content/example";
 import { GappedGrid } from "gcmp-design-system/src/app/components/molecules/GappedGrid";
 
 export function ExampleDemo({ example }: { example: Example }) {

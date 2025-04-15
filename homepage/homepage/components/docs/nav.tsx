@@ -3,7 +3,7 @@
 import { SideNav } from "@/components/SideNav";
 import { SideNavHeader } from "@/components/SideNavHeader";
 import { FrameworkSelect } from "@/components/docs/FrameworkSelect";
-import { docNavigationItems } from "@/lib/docNavigationItems.js";
+import { docNavigationItems } from "@/content/docs/docNavigationItems.js";
 import { useFramework } from "@/lib/use-framework";
 import { clsx } from "clsx";
 

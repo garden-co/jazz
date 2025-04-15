@@ -7,7 +7,7 @@ import { type CoValueHeader } from "./coValueCore.js";
  * The priority value is handled as weight in the weighed round robin algorithm
  * used to determine the order in which messages are sent.
  *
- * Follows the HTTP urgency range and order:
+ * Loosely follows the HTTP urgency range and order, but limited to 3 values:
  *  - https://www.rfc-editor.org/rfc/rfc9218.html#name-urgency
  */
 export const CO_VALUE_PRIORITY = {
@@ -16,7 +16,7 @@ export const CO_VALUE_PRIORITY = {
   LOW: 6,
 } as const;
 
-export type CoValuePriority = 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7;
+export type CoValuePriority = 0 | 3 | 6;
 
 export function getPriorityFromHeader(
   header: CoValueHeader | undefined | boolean,

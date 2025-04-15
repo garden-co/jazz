@@ -1,0 +1,67 @@
+{
+  "name": "jazz-expo",
+  "version": "0.13.5",
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "react-native": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "react-native": "./dist/index.js",
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./dist/auth/clerk": {
+      "react-native": "./dist/auth/clerk/index.js",
+      "types": "./dist/auth/clerk/index.d.ts",
+      "default": "./dist/auth/clerk/index.js"
+    },
+    "./auth/clerk": {
+      "react-native": "./dist/auth/clerk/index.js",
+      "types": "./dist/auth/clerk/index.d.ts",
+      "default": "./dist/auth/clerk/index.js"
+    },
+    "./crypto": {
+      "react-native": "./crypto/index.js",
+      "types": "./crypto/index.d.ts",
+      "default": "./crypto/index.js"
+    },
+    "./testing": {
+      "react-native": "./dist/testing.js",
+      "types": "./dist/testing.d.ts",
+      "default": "./dist/testing.js"
+    }
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@scure/base": "1.2.1",
+    "cojson": "workspace:*",
+    "cojson-transport-ws": "workspace:*",
+    "expo-sqlite": "15.1.3",
+    "jazz-auth-clerk": "workspace:*",
+    "jazz-react-core": "workspace:*",
+    "jazz-react-native-core": "workspace:*",
+    "jazz-tools": "workspace:*"
+  },
+  "peerDependencies": {
+    "@react-native-community/netinfo": "*",
+    "expo-secure-store": "*",
+    "react-native": "*"
+  },
+  "devDependencies": {
+    "@react-native-community/netinfo": "11.4.1",
+    "expo-secure-store": "~14.0.1",
+    "react": "18.3.1",
+    "react-native": "0.76.7",
+    "typescript": "~5.6.2"
+  },
+  "scripts": {
+    "dev": "tsc --watch --sourceMap --outDir dist",
+    "format-and-lint": "biome check .",
+    "format-and-lint:fix": "biome check . --write",
+    "build": "rm -rf ./dist && tsc --sourceMap --outDir dist",
+    "prepublishOnly": "npm run build"
+  },
+  "gitHead": "33c27053293b4801b968c61d5c4c989f93a67d13"
+}

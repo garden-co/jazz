@@ -1,4 +1,4 @@
-import { DEFAULT_FRAMEWORK, isValidFramework } from "@/lib/framework";
+import { DEFAULT_FRAMEWORK, isValidFramework } from "@/content/framework";
 import { useParams } from "next/navigation";
 
 export const useFramework = () => {

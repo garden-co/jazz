@@ -26,13 +26,11 @@ export function InterpolateInCode(replace: { [key: string]: string }) {
     }: { highlightedCode: string }) => {
       const newHighlightedCode = Object.entries(replace).reduce(
         (acc, [key, value]) => {
-          return acc.replaceAll(
-            key.replaceAll("$", "&#36;").replaceAll("_", "&#95;"),
-            value,
-          );
+          return acc.replaceAll(key, value);
         },
         highlightedCode,
       );
+
       return <div dangerouslySetInnerHTML={{ __html: newHighlightedCode }} />;
     },
   };

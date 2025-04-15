@@ -7,8 +7,7 @@ on:
       - ".github/actions/android-emulator/**"
       - ".github/actions/source-code/**"
       - ".github/workflows/e2e-rn-test.yml"
-      - "examples/chat-rn/**"
-      - "examples/chat-rn-clerk/**"
+      - "examples/chat-rn-expo/**"
       - "packages/**"
 
 jobs:
@@ -36,8 +35,8 @@ jobs:
       - name: Pnpm Build
         run: pnpm turbo build --filter="./packages/*"
 
-      - name: chat-rn App Pre Build
-        working-directory: ./examples/chat-rn
+      - name: chat-rn-expo App Pre Build
+        working-directory: ./examples/chat-rn-expo
         run: |
           pnpm build
           pnpm expo prebuild --clean
@@ -61,7 +60,7 @@ jobs:
           force-avd-creation: false
           emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -no-metrics
           disable-animations: true
-          working-directory: ./examples/chat-rn/
+          working-directory: ./examples/chat-rn-expo/
           script: ./test/e2e/run.sh
 
       - name: Copy Maestro Output

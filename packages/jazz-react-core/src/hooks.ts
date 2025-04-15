@@ -95,8 +95,8 @@ function useCoValueObservable<
     getCurrentObservable() {
       return ref.current;
     },
-    reset() {
-      ref.current = createCoValueObservable<V, R>();
+    reset(initialValue?: undefined | null) {
+      ref.current = createCoValueObservable<V, R>(initialValue);
     },
   };
 }
@@ -117,9 +117,13 @@ export function useCoState<
   const value = React.useSyncExternalStore<Resolved<V, R> | undefined | null>(
     React.useCallback(
       (callback) => {
-        observable.reset();
+        if (!id) {
+          observable.reset(null);
 
-        if (!id) return () => {};
+          return () => {};
+        }
+
+        observable.reset();
 
         // We subscribe to the context manager to react to the account updates
         // faster than the useSyncExternalStore callback update to keep the isAuthenticated state

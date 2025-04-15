@@ -6,6 +6,7 @@ import localFont from "next/font/local";
 
 import { ThemeProvider } from "@/components/ThemeProvider";
 import { JazzFooter } from "@/components/footer";
+import { marketingCopy } from "@/content/marketingCopy";
 import { Analytics } from "@vercel/analytics/react";
 import { SpeedInsights } from "@vercel/speed-insights/next";
 
@@ -40,9 +41,8 @@ const commitMono = localFont({
 });
 
 const metaTags = {
-  title: "Jazz - Whip up an app",
-  description:
-    "Jazz gives you data without needing a database — plus auth, permissions, files and multiplayer without needing a backend. Do everything right from the frontend and ship better apps, faster.",
+  title: `Jazz - ${marketingCopy.headline}`,
+  description: marketingCopy.description,
   url: "https://jazz.tools",
 };
 
@@ -63,13 +63,6 @@ export const metadata: Metadata = {
     description: metaTags.description,
     url: metaTags.url,
     siteName: "Jazz",
-    images: [
-      {
-        url: "/social-image.png",
-        width: 1200,
-        height: 630,
-      },
-    ],
   },
 };
 

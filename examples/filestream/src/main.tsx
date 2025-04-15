@@ -1,3 +1,4 @@
+import { JazzInspector } from "jazz-inspector";
 import { JazzProvider } from "jazz-react";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
@@ -23,6 +24,7 @@ createRoot(document.getElementById("root")!).render(
       }}
       AccountSchema={JazzAccount}
     >
+      <JazzInspector />
       <App />
     </JazzProvider>
   </StrictMode>,

@@ -149,6 +149,18 @@ describe("ContextManager", () => {
     expect(onLogOut).toHaveBeenCalled();
   });
 
+  test("calls logoutReplacement callback instead of the Jazz logout when logging out", async () => {
+    const logOutReplacement = vi.fn();
+    await manager.createContext({ logOutReplacement });
+
+    const context = manager.getCurrentValue();
+
+    await manager.logOut();
+
+    expect(logOutReplacement).toHaveBeenCalled();
+    expect(manager.getCurrentValue()).toBe(context);
+  });
+
   test("notifies listeners of context changes", async () => {
     const listener = vi.fn();
     manager.subscribe(listener);

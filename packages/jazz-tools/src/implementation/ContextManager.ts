@@ -15,6 +15,7 @@ export type JazzContextManagerAuthProps = {
 export type JazzContextManagerBaseProps<Acc extends Account> = {
   onAnonymousAccountDiscarded?: (anonymousAccount: Acc) => Promise<void>;
   onLogOut?: () => void | Promise<unknown>;
+  logOutReplacement?: () => void | Promise<unknown>;
 };
 
 type PlatformSpecificAuthContext<Acc extends Account> = {
@@ -136,8 +137,13 @@ export class JazzContextManager<
     }
 
     await this.props.onLogOut?.();
-    await this.context.logOut();
-    return this.createContext(this.props);
+
+    if (this.props.logOutReplacement) {
+      await this.props.logOutReplacement();
+    } else {
+      await this.context.logOut();
+      return this.createContext(this.props);
+    }
   };
 
   done = () => {

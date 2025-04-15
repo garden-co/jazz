@@ -1,0 +1,24 @@
+import { ContentByFramework } from '@/components/forMdx'
+
+export const metadata = { title: "Jazz 0.13.0 - React Native Split" };
+
+# Jazz 0.13.0 - React Native Split
+
+Version 0.13.0 introduces a significant architectural change in how Jazz supports React Native applications. We've separated the React Native implementation into two distinct packages to better serve different React Native development approaches:
+
+1. **[jazz-react-native](https://www.npmjs.com/package/jazz-react-native)**: Focused package for framework-less React Native applications
+2. **[jazz-expo](https://www.npmjs.com/package/jazz-expo)**: Dedicated package for Expo applications
+3. **[jazz-react-native-core](https://www.npmjs.com/package/jazz-react-native-core)**: Shared core functionality used by both implementations
+
+If you're using React Native without Expo, see the [React Native Upgrade Guide](/docs/react-native/upgrade/0-13-0). If you're using Expo, please see the [Expo upgrade guide](/docs/react-native-expo/upgrade/0-13-0).
+
+## Summary of Changes
+
+- **Split Implementation**: React Native support is now divided into separate packages for Expo and framework-less React Native
+- **Clerk Authentication**: Clerk auth is now included directly in the jazz-expo package
+- **Storage Adapters**: Each implementation uses platform-optimized storage solutions
+
+For detailed migration instructions, please see the appropriate guide:
+
+- [React Native Upgrade Guide](/docs/react-native/upgrade/0-13-0)
+- [Expo Upgrade Guide](/docs/react-native-expo/upgrade/0-13-0)

@@ -1,0 +1,28 @@
+diff --git a/build/fork/getPathFromState.js b/build/fork/getPathFromState.js
+index b2c02bce068fb31615c6f1163b13bfdebe7188ac..22e4cf77eb4734d29883f23950b1ed6b9c51eaac 100644
+--- a/build/fork/getPathFromState.js
++++ b/build/fork/getPathFromState.js
+@@ -160,7 +160,7 @@ function getPathDataFromState(state, options) {
+                 const screens = currentOptions[route.name].screens;
+                 // Determine what screen the user wants to navigate to. If no screen is specified, assume there is an index screen
+                 // In the examples above, this ensures that /home/(a) navigates to /home/(a)/index
+-                const targetScreen = 
++                const targetScreen =
+                 // This is typed as unknown, so we need to add these extra assertions
+                 route.params && 'screen' in route.params && typeof route.params.screen === 'string'
+                     ? route.params.screen
+@@ -259,10 +259,10 @@ function getPathDataFromState(state, options) {
+             // START FORK
+             delete focusedParams['#'];
+             // END FORK
+-            const query = queryString.stringify(focusedParams, { sort: false });
+-            if (query) {
+-                path += `?${query}`;
+-            }
++            // const query = queryString.stringify(focusedParams, { sort: false });
++            // if (query) {
++            //     path += `?${query}`;
++            // }
+         }
+         current = route.state;
+     }

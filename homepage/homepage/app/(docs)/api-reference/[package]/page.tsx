@@ -1,5 +1,5 @@
 import { PackageDocs } from "@/components/docs/packageDocs";
-import { packages } from "@/lib/packages";
+import { packages } from "@/content/packages";
 import { notFound } from "next/navigation";
 
 interface Props {

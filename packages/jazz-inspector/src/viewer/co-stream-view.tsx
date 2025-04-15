@@ -120,7 +120,7 @@ const detectPDFMimeType = async (blob: Blob): Promise<string> => {
   if (header === "%PDF") {
     return "application/pdf";
   }
-  return "application/octet-stream";
+  return "unknown";
 };
 
 const BinaryDownloadButton = ({
@@ -160,13 +160,6 @@ const LabelContentPairContainer = styled("div")`
   display: flex;
   flex-direction: column;
   gap: 0.375rem;
-`;
-
-const BinaryStreamContainer = styled("div")`
-  margin-top: 2rem;
-  display: flex;
-  flex-direction: column;
-  gap: 2rem;
 `;
 
 const BinaryStreamGrid = styled("div")`
@@ -269,7 +262,7 @@ function RenderCoBinaryStream({
   const sizeInKB = (file.totalSize || 0) / 1024;
 
   return (
-    <BinaryStreamContainer>
+    <>
       <BinaryStreamGrid>
         <LabelContentPair
           label="Mime Type"
@@ -305,7 +298,7 @@ function RenderCoBinaryStream({
           }
         />
       ) : null}
-    </BinaryStreamContainer>
+    </>
   );
 }
 

@@ -1,0 +1,194 @@
+export const metadata = { title: "Passphrase Authentication" };
+
+import { CodeGroup, ContentByFramework } from "@/components/forMdx";
+
+# Passphrase Authentication
+
+Passphrase authentication lets users log into any device using a recovery phrase consisting of multiple words (similar to cryptocurrency wallets). Users are responsible for storing this passphrase safely.
+
+## How it works
+
+When a user creates an account with passphrase authentication:
+
+1. Jazz generates a unique recovery phrase derived from the user's cryptographic keys
+2. This phrase consists of words from a wordlist
+3. Users save this phrase and enter it when logging in on new devices
+
+You can use one of the ready-to-use wordlists from the [BIP39 repository](https://github.com/bitcoinjs/bip39/tree/a7ecbfe2e60d0214ce17163d610cad9f7b23140c/src/wordlists) or create your own.
+
+## Key benefits
+
+- **Portable**: Works across any device, even without browser or OS support
+- **User-controlled**: User manages their authentication phrase
+- **Flexible**: Works with any wordlist you choose
+- **Offline capable**: No external dependencies
+
+## Implementation
+
+<ContentByFramework framework="react">
+<CodeGroup>
+```tsx twoslash
+// @filename: wordlist.ts
+export const wordlist = ["apple", "banana", "cherry", "date", "elderberry", "fig", "grape", "honeydew", "kiwi", "lemon", "mango", "orange", "pear", "quince", "raspberry", "strawberry", "tangerine", "uva", "watermelon", "xigua", "yuzu", "zucchini"];
+// @filename: AuthModal.tsx
+import * as React from "react";
+import { useState } from "react";
+import { usePassphraseAuth } from "jazz-react";
+type AuthModalProps = {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}
+// ---cut---
+import { wordlist } from "./wordlist"
+
+export function AuthModal({ open, onOpenChange }: AuthModalProps) {
+  const [loginPassphrase, setLoginPassphrase] = useState("");
+
+  const auth = usePassphraseAuth({ // Must be inside the JazzProvider!
+    wordlist: wordlist,
+  });
+
+  if (auth.state === "signedIn") { // You can also use `useIsAuthenticated()`
+    return <div>You are already signed in</div>;
+  }
+
+  const handleSignUp = async () => {
+    await auth.signUp();
+    onOpenChange(false);
+  };
+
+  const handleLogIn = async () => {
+    await auth.logIn(loginPassphrase);
+    onOpenChange(false);
+  };
+
+  return (
+    <div>
+      <label>
+        Your current passphrase
+        <textarea
+          readOnly
+          value={auth.passphrase}
+          rows={5}
+        />
+      </label>
+      <button onClick={handleSignUp}>I have stored my passphrase</button>
+      <label>
+        Log in with your passphrase
+        <textarea
+          value={loginPassphrase}
+          onChange={(e) => setLoginPassphrase(e.target.value)}
+          placeholder="Enter your passphrase"
+          rows={5}
+          required
+        />
+      </label>
+      <button onClick={handleLogIn}>Log in</button>
+    </div>
+  );
+}
+```
+</CodeGroup>
+</ContentByFramework>
+
+<ContentByFramework framework={["react-native", "react-native-expo"]}>
+<CodeGroup>
+```tsx twoslash
+// @filename: wordlist.ts
+export const wordlist = ["apple", "banana", "cherry", "date", "elderberry", "fig", "grape", "honeydew", "kiwi", "lemon", "mango", "orange", "pear", "quince", "raspberry", "strawberry", "tangerine", "uva", "watermelon", "xigua", "yuzu", "zucchini"];
+// @filename: AuthModal.tsx
+import * as React from "react";
+import { View, TextInput, Button, Text } from 'react-native';
+import { useState } from "react";
+import { usePassphraseAuth } from "jazz-react-native";
+
+type AuthModalProps = {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}
+// ---cut---
+import { wordlist } from "./wordlist"
+
+export function AuthModal({ open, onOpenChange }: AuthModalProps) {
+  const [loginPassphrase, setLoginPassphrase] = useState("");
+
+  const auth = usePassphraseAuth({
+    wordlist: wordlist,
+  });
+
+  if (auth.state === "signedIn") {
+    return <Text>You are already signed in</Text>;
+  }
+
+  const handleSignUp = async () => {
+    await auth.signUp();
+    onOpenChange(false);
+  };
+
+  const handleLogIn = async () => {
+    await auth.logIn(loginPassphrase);
+    onOpenChange(false);
+  };
+
+  return (
+    <View>
+      <View>
+        <Text>Your current passphrase</Text>
+        <TextInput
+          editable={false}
+          value={auth.passphrase}
+          multiline
+          numberOfLines={5}
+        />
+      </View>
+
+      <Button
+        title="I have stored my passphrase"
+        onPress={handleSignUp}
+      />
+
+      <View>
+        <Text>Log in with your passphrase</Text>
+        <TextInput
+          value={loginPassphrase}
+          onChangeText={setLoginPassphrase}
+          placeholder="Enter your passphrase"
+          multiline
+          numberOfLines={5}
+        />
+      </View>
+
+      <Button
+        title="Log in"
+        onPress={handleLogIn}
+      />
+    </View>
+  );
+}
+```
+</CodeGroup>
+</ContentByFramework>
+
+## Examples
+
+You can see passphrase authentication in our [passphrase example](https://passphrase-demo.jazz.tools/) or the [todo list demo](https://todo-demo.jazz.tools/).
+
+## When to use Passphrases
+
+Passphrase authentication is ideal when:
+
+- You need to support older browsers without WebAuthn capabilities
+- Your users need to access the app on many different devices
+- You want a fallback authentication method alongside passkeys
+
+## Limitations and considerations
+
+- **User responsibility**: Users must securely store their passphrase
+- **Recovery concerns**: If a user loses their passphrase, they cannot recover their account
+- **Security risk**: Anyone with the passphrase can access the account
+- **User experience**: Requires users to enter a potentially long phrase
+
+Make sure to emphasize to your users:
+1. Store the passphrase in a secure location (password manager, written down in a safe place)
+2. The passphrase is the only way to recover their account
+3. Anyone with the passphrase can access the account

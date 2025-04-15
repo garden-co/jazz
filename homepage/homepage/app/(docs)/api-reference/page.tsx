@@ -1,4 +1,4 @@
-import { packages } from "@/lib/packages";
+import { packages } from "@/content/packages";
 import { clsx } from "clsx";
 import { Icon } from "gcmp-design-system/src/app/components/atoms/Icon";
 import type { Metadata } from "next";

@@ -1,5 +1,27 @@
 # cojson
 
+## 0.13.5
+
+### Patch Changes
+
+- e090b39: Bump crypto version to remove WASM init warning
+
+## 0.13.2
+
+### Patch Changes
+
+- c551839: Add jazz.messagequeue.pushed/pulled counters, remove jazz.messagequeue.size gauge
+
+## 0.13.0
+
+### Minor Changes
+
+- bce3bcc: Version bump. Release focused on React Native.
+
+### Patch Changes
+
+- a013538: Correctly load CoValues after they are marked as unavailable and improve timeout management
+
 ## 0.12.2
 
 ### Patch Changes

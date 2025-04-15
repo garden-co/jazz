@@ -8,6 +8,7 @@ import { getClerkUsername } from "./getClerkUsername.js";
 import {
   ClerkCredentials,
   MinimalClerkClient,
+  isClerkAuthStateEqual,
   isClerkCredentials,
 } from "./types.js";
 
@@ -37,12 +38,48 @@ export class JazzClerkAuth {
     });
   }
 
-  onClerkUserChange = async (clerkClient: Pick<MinimalClerkClient, "user">) => {
-    if (!clerkClient.user) {
+  static async initializeAuth(clerk: MinimalClerkClient) {
+    const secretStorage = new AuthSecretStorage();
+
+    if (!isClerkCredentials(clerk.user?.unsafeMetadata)) {
       return;
     }
 
+    await JazzClerkAuth.loadClerkAuthData(
+      clerk.user.unsafeMetadata,
+      secretStorage,
+    );
+  }
+
+  private isFirstCall = true;
+
+  registerListener(clerkClient: MinimalClerkClient) {
+    let previousUser: MinimalClerkClient["user"] | null =
+      clerkClient.user ?? null;
+
+    // Need to use addListener because the clerk user object is not updated when the user logs in
+    return clerkClient.addListener((event) => {
+      const user = (event as Pick<MinimalClerkClient, "user">).user ?? null;
+
+      if (!isClerkAuthStateEqual(previousUser, user) || this.isFirstCall) {
+        this.onClerkUserChange({ user });
+        previousUser = user;
+        this.isFirstCall = false;
+      }
+    });
+  }
+
+  onClerkUserChange = async (clerkClient: Pick<MinimalClerkClient, "user">) => {
     const isAuthenticated = this.authSecretStorage.isAuthenticated;
+
+    // LogOut is driven by Clerk. The framework adapters will need to pass `logOutReplacement` to the `JazzProvider`
+    // to make the logOut work correctly.
+    if (!clerkClient.user) {
+      if (isAuthenticated) {
+        this.authSecretStorage.clear();
+      }
+      return;
+    }
 
     if (isAuthenticated) return;
 

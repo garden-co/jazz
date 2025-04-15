@@ -126,7 +126,7 @@ describe("createWebSocketPeer", () => {
       action: "content",
       id: "co_zlow",
       new: {},
-      priority: 1,
+      priority: 6,
     };
 
     void peer.outgoing.push(message1);
@@ -214,7 +214,7 @@ describe("createWebSocketPeer", () => {
         action: "content",
         id: "co_zlow",
         new: {},
-        priority: 1,
+        priority: 6,
       };
 
       void peer.outgoing.push(message1);
@@ -243,7 +243,7 @@ describe("createWebSocketPeer", () => {
         action: "content",
         id: "co_zlow",
         new: {},
-        priority: 1,
+        priority: 6,
       };
 
       void peer.outgoing.push(message1);
@@ -269,7 +269,7 @@ describe("createWebSocketPeer", () => {
         action: "content",
         id: "co_zlow",
         new: {},
-        priority: 1,
+        priority: 6,
       };
 
       const stream: SyncMessage[] = [];
@@ -316,7 +316,7 @@ describe("createWebSocketPeer", () => {
         action: "content",
         id: "co_zlow",
         new: {},
-        priority: 1,
+        priority: 6,
       };
 
       const stream: SyncMessage[] = [];
@@ -365,7 +365,7 @@ describe("createWebSocketPeer", () => {
         action: "content",
         id: "co_zlow",
         new: {},
-        priority: 1,
+        priority: 6,
       };
 
       void peer.outgoing.push(message1);
@@ -411,7 +411,7 @@ describe("createWebSocketPeer", () => {
         action: "content",
         id: "co_zlow",
         new: {},
-        priority: 1,
+        priority: 6,
       };
 
       void peer.outgoing.push(message1);
@@ -450,7 +450,7 @@ describe("createWebSocketPeer", () => {
         action: "content",
         id: "co_zlow",
         new: {},
-        priority: 1,
+        priority: 6,
       };
 
       void peer.outgoing.push(message1);

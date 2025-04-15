@@ -1,5 +1,68 @@
 # jazz-browser
 
+## 0.13.5
+
+### Patch Changes
+
+- Updated dependencies [e090b39]
+- Updated dependencies [fe6f561]
+  - cojson@0.13.5
+  - jazz-tools@0.13.5
+  - cojson-storage@0.13.5
+  - jazz-react-native-core@0.13.5
+
+## 0.13.4
+
+### Patch Changes
+
+- Updated dependencies [3129982]
+  - jazz-react-native-core@0.13.4
+  - jazz-tools@0.13.4
+
+## 0.13.3
+
+### Patch Changes
+
+- Updated dependencies [12f8bfa]
+- Updated dependencies [bd57177]
+  - jazz-tools@0.13.3
+  - jazz-react-native-core@0.13.3
+
+## 0.13.2
+
+### Patch Changes
+
+- Updated dependencies [c551839]
+  - cojson@0.13.2
+  - cojson-storage@0.13.2
+  - jazz-react-native-core@0.13.2
+  - jazz-tools@0.13.2
+
+## 0.13.1
+
+### Patch Changes
+
+- 63a7aa0: Add exports for clerk and crypto to make import shortcuts work everywhere
+
+## 0.13.0
+
+### Minor Changes
+
+- bce3bcc: Introduce jazz-expo and use only vanilla deps for jazz-react-native
+
+  Upgrade guide: https://jazz.tools/docs/react/upgrade/0-13-0
+
+### Patch Changes
+
+- Updated dependencies [a013538]
+- Updated dependencies [bce3bcc]
+- Updated dependencies [afd1374]
+- Updated dependencies [bce3bcc]
+  - cojson@0.13.0
+  - jazz-react-native-core@0.13.0
+  - jazz-tools@0.13.0
+  - cojson-storage@0.13.0
+
 ## 0.12.2
 
 ### Patch Changes

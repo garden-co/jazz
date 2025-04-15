@@ -1,0 +1,238 @@
+import { CodeGroup } from "@/components/forMdx";
+
+export const metadata = { title: "ImageDefinition" };
+
+# ImageDefinition
+
+`ImageDefinition` is a specialized CoValue designed specifically for managing images in Jazz. It extends beyond basic file storage by supporting multiple resolutions of the same image, optimized for mobile devices.
+
+**Note**: This guide applies to both Expo and framework-less React Native implementations. The functionality described here is identical regardless of which implementation you're using, though you'll need to import from the appropriate package (`jazz-expo` or `jazz-react-native`).
+
+Jazz offers several tools to work with images in React Native:
+- [`createImage()`](#creating-images) - function to create an `ImageDefinition` from a base64 image data URI
+- [`ProgressiveImg`](#displaying-images-with-progressiveimg) - React component to display an image with progressive loading
+- [`useProgressiveImg`](#using-useprogressiveimg-hook) - React hook to load an image in your own component
+
+For examples of use, see our example apps:
+- [React Native Chat](https://github.com/gardencmp/jazz/tree/main/examples/chat-rn) (Framework-less implementation)
+- [React Native Expo Chat](https://github.com/gardencmp/jazz/tree/main/examples/chat-rn-expo) (Expo implementation)
+- [React Native Expo Clerk Chat](https://github.com/gardencmp/jazz/tree/main/examples/chat-rn-expo-clerk) (Expo implementation with Clerk)
+
+## Creating Images
+
+The easiest way to create and use images in your Jazz application is with the `createImage()` function:
+
+<CodeGroup>
+```tsx
+import { createImage } from "jazz-react-native-media-images";
+import * as ImagePicker from 'expo-image-picker';
+
+async function handleImagePicker() {
+  try {
+    // Launch the image picker
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ImagePicker.MediaTypeOptions.Images,
+      base64: true,
+      quality: 1,
+    });
+
+    if (!result.canceled) {
+      const base64Uri = `data:image/jpeg;base64,${result.assets[0].base64}`;
+
+      // Creates ImageDefinition with multiple resolutions automatically
+      const image = await createImage(base64Uri, {
+        owner: me.profile._owner,
+        maxSize: 2048, // Optional: limit maximum resolution
+      });
+
+      // Store the image
+      me.profile.image = image;
+    }
+  } catch (error) {
+    console.error("Error creating image:", error);
+  }
+}
+```
+</CodeGroup>
+
+The `createImage()` function:
+- Creates an `ImageDefinition` with the right properties
+- Generates a small placeholder for immediate display
+- Creates multiple resolution variants of your image
+- Returns the created `ImageDefinition`
+
+### Configuration Options
+
+You can configure `createImage()` with additional options:
+
+<CodeGroup>
+```tsx
+// Configuration options
+const options = {
+  owner: me,                // Owner for access control
+  maxSize: 1024             // Maximum resolution to generate
+};
+
+// Setting maxSize controls which resolutions are generated:
+// 256: Only creates the smallest resolution (256px on longest side)
+// 1024: Creates 256px and 1024px resolutions
+// 2048: Creates 256px, 1024px, and 2048px resolutions
+// undefined: Creates all resolutions including the original size
+
+const image = await createImage(base64Uri, options);
+```
+</CodeGroup>
+
+## Displaying Images with `ProgressiveImg`
+
+For a complete progressive loading experience, use the `ProgressiveImg` component:
+
+<CodeGroup>
+```tsx
+import { ProgressiveImg } from "jazz-react-native";
+import { Image, StyleSheet } from "react-native";
+
+function GalleryView({ image }) {
+  return (
+    <ProgressiveImg
+      image={image}  // The image definition to load
+      targetWidth={800} //  Looks for the best available resolution for a 800px image
+    >
+      {({ src }) => (
+        <Image
+          source={{ uri: src }}
+          style={styles.galleryImage}
+          resizeMode="cover"
+        />
+      )}
+    </ProgressiveImg>
+  );
+}
+
+const styles = StyleSheet.create({
+  galleryImage: {
+    width: '100%',
+    height: 200,
+    borderRadius: 8,
+  }
+});
+```
+</CodeGroup>
+
+The `ProgressiveImg` component handles:
+- Showing a placeholder while loading
+- Automatically selecting the appropriate resolution
+- Progressive enhancement as higher resolutions become available
+- Cleaning up resources when unmounted
+
+## Using `useProgressiveImg` Hook
+
+For more control over image loading, you can implement your own progressive image component:
+
+<CodeGroup>
+```tsx
+import { useProgressiveImg } from "jazz-react-native";
+import { Image, View, Text, ActivityIndicator } from "react-native";
+
+function CustomImageComponent({ image }) {
+  const {
+    src,         // Data URI containing the image data as a base64 string,
+                 // or a placeholder image URI
+    res,         // The current resolution
+    originalSize // The original size of the image
+  } = useProgressiveImg({
+    image: image,  // The image definition to load
+    targetWidth: 800  // Limit to resolutions up to 800px wide
+  });
+
+  // When image is not available yet
+  if (!src) {
+    return (
+      <View style={{ height: 200, justifyContent: 'center', alignItems: 'center', backgroundColor: '#f0f0f0' }}>
+        <ActivityIndicator size="small" color="#0000ff" />
+        <Text style={{ marginTop: 10 }}>Loading image...</Text>
+      </View>
+    );
+  }
+
+  // When using placeholder
+  if (res === "placeholder") {
+    return (
+      <View style={{ position: 'relative' }}>
+        <Image
+          source={{ uri: src }}
+          style={{ width: '100%', height: 200, opacity: 0.7 }}
+          resizeMode="cover"
+        />
+        <ActivityIndicator
+          size="large"
+          color="#ffffff"
+          style={{ position: 'absolute', top: '50%', left: '50%', marginLeft: -20, marginTop: -20 }}
+        />
+      </View>
+    );
+  }
+
+  // Full image display with custom overlay
+  return (
+    <View style={{ position: 'relative', width: '100%', height: 200 }}>
+      <Image
+        source={{ uri: src }}
+        style={{ width: '100%', height: '100%' }}
+        resizeMode="cover"
+      />
+      <View style={{ position: 'absolute', bottom: 0, left: 0, right: 0, backgroundColor: 'rgba(0,0,0,0.5)', padding: 8 }}>
+        <Text style={{ color: 'white' }}>Resolution: {res}</Text>
+      </View>
+    </View>
+  );
+}
+```
+</CodeGroup>
+
+## Understanding ImageDefinition
+
+Behind the scenes, `ImageDefinition` is a specialized CoValue that stores:
+
+- The original image dimensions (`originalSize`)
+- An optional placeholder (`placeholderDataURL`) for immediate display
+- Multiple resolution variants of the same image as [`FileStream`s](../using-covalues/filestreams)
+
+Each resolution is stored with a key in the format `"widthxheight"` (e.g., `"1920x1080"`, `"800x450"`).
+
+<CodeGroup>
+```tsx
+// Structure of an ImageDefinition
+const image = ImageDefinition.create({
+  originalSize: [1920, 1080],
+  placeholderDataURL: "data:image/jpeg;base64,/9j/4AAQSkZJRg...",
+});
+
+// Accessing the highest available resolution
+const highestRes = image.highestResAvailable();
+if (highestRes) {
+  console.log(`Found resolution: ${highestRes.res}`);
+  console.log(`Stream: ${highestRes.stream}`);
+}
+```
+</CodeGroup>
+
+For more details on using `ImageDefinition` directly, see the [VanillaJS docs](/docs/vanilla/using-covalues/imagedef).
+
+### Fallback Behavior
+
+`highestResAvailable` returns the largest resolution that fits your constraints. If a resolution has incomplete data, it falls back to the next available lower resolution.
+
+<CodeGroup>
+```tsx
+const image = ImageDefinition.create({
+  originalSize: [1920, 1080],
+});
+
+image["1920x1080"] = FileStream.create(); // Empty image upload
+image["800x450"] = await FileStream.createFromBlob(mediumSizeBlob);
+
+const highestRes = image.highestResAvailable();
+console.log(highestRes.res); // 800x450
+```
+</CodeGroup>

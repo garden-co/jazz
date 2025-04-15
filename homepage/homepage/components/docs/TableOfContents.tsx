@@ -20,7 +20,7 @@ const TocList = ({
   };
 
   return (
-    <ul className="space-y-2" style={{ paddingLeft: "1rem" }}>
+    <ul className="space-y-2" style={{ paddingLeft: level ? "1rem" : "0" }}>
       {items.map((item) => (
         <li key={item.id} className="space-y-2">
           {item.id && (

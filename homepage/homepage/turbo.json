@@ -3,7 +3,8 @@
   "tasks": {
     "build": {
       "dependsOn": ["^build", "build:generate-docs"],
-      "outputs": [".next/**", "!.next/cache/**"]
+      "outputs": [".next/**", "!.next/cache/**"],
+      "env": ["GRAFANA_SERVICE_ACCOUNT"]
     },
     "build:generate-docs": {
       "inputs": ["../../../packages/*/src/**"],

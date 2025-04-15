@@ -11,8 +11,12 @@ export class HomePage {
     name: "Playlist title",
   });
 
+  loginButton = this.page.getByRole("button", {
+    name: "Sign up",
+  });
+
   logoutButton = this.page.getByRole("button", {
-    name: "Logout",
+    name: "Sign out",
   });
 
   async expectActiveTrackPlaying() {
@@ -131,12 +135,21 @@ export class HomePage {
     await this.page
       .getByRole("button", { name: "Sign up with passkey" })
       .click();
-    await expect(
-      this.page.getByRole("button", { name: "Sign out" }),
-    ).toBeVisible();
+
+    await this.logoutButton.waitFor({
+      state: "visible",
+    });
+
+    await expect(this.logoutButton).toBeVisible();
   }
 
-  async logout() {
+  async logOut() {
     await this.logoutButton.click();
+
+    await this.loginButton.waitFor({
+      state: "visible",
+    });
+
+    await expect(this.loginButton).toBeVisible();
   }
 }

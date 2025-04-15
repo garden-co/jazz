@@ -57,7 +57,9 @@ export function Footer({
               key={index}
               className="flex flex-col gap-2 text-sm col-span-6 md:col-span-2"
             >
-              <h2 className="font-medium">{section.title}</h2>
+              <h2 className="font-medium dark:text-stone-700 cursor-default">
+                {section.title}
+              </h2>
               {section.links.map((link, linkIndex) => (
                 <FooterLink
                   key={linkIndex}

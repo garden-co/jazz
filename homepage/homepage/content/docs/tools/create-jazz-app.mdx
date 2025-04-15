@@ -1,0 +1,94 @@
+export const metadata = {
+  title: "create-jazz-app",
+};
+
+import { CodeGroup } from "@/components/forMdx";
+
+# create-jazz-app
+
+Jazz comes with a CLI tool that helps you quickly scaffold new Jazz applications. There are two main ways to get started:
+
+1. **Starter templates** - Pre-configured setups to start you off with your preferred framework
+2. **Example apps** - Extend one of our [example applications](https://jazz.tools/examples) to build your project
+
+## Quick Start with Starter Templates
+
+Create a new Jazz app from a starter template in seconds:
+
+<CodeGroup>
+```bash
+npx create-jazz-app@latest --api-key you@example.com
+```
+</CodeGroup>
+
+This launches an interactive CLI that guides you through selecting:
+- Pre-configured frameworks and authentication methods (See [Available Starters](#available-starters))
+- Package manager
+- Project name
+- Jazz Cloud API key (optional) - Provides seamless sync and storage for your app
+
+## Command Line Options
+
+If you know what you want, you can specify options directly from the command line:
+
+<CodeGroup>
+```bash
+# Basic usage with project name
+npx create-jazz-app@latest my-app --framework react --api-key you@example.com
+
+# Specify a starter template
+npx create-jazz-app@latest my-app --starter react-passkey-auth --api-key you@example.com
+
+# Specify example app
+npx create-jazz-app@latest my-app --example chat --api-key you@example.com
+```
+</CodeGroup>
+
+### Available Options
+
+- `directory` - Directory to create the project in (defaults to project name)
+- `-f, --framework` - Framework to use (React, React Native, Svelte, Vue)
+- `-s, --starter` - Starter template to use
+- `-e, --example` - Example project to use
+- `-p, --package-manager` - Package manager to use (npm, yarn, pnpm, bun, deno)
+- `-k, --api-key` - Jazz Cloud API key (during our [free public alpha](/docs/react/sync-and-storage#free-public-alpha), you can use your email as the API key)
+- `-h, --help` - Display help information
+
+## Start From an Example App
+
+Want to start from one of [our example apps](https://jazz.tools/examples)? Our example apps include specific examples of features and use cases. They demonstrate real-world patterns for building with Jazz. Use one as your starting point:
+
+<CodeGroup>
+```bash
+npx create-jazz-app@latest --example chat
+```
+</CodeGroup>
+
+## Available Starters
+
+Starter templates are minimal setups that include the basic configuration needed to get started with Jazz. They're perfect when you want a clean slate to build on.
+
+Choose from these ready-to-use starter templates:
+
+- `react-passkey-auth` - React with Passkey authentication (easiest to start with)
+- `react-clerk-auth` - React with Clerk authentication
+- `vue-demo-auth` - Vue with Demo authentication
+- `svelte-passkey-auth` - Svelte with Passkey authentication
+- `rn-clerk-auth` - React Native with Clerk authentication
+
+Run `npx create-jazz-app --help` to see the latest list of available starters.
+
+## What Happens Behind the Scenes
+
+When you run `create-jazz-app`, we'll:
+
+1. Ask for your preferences (or use your command line arguments)
+2. Clone the appropriate starter template
+3. Update dependencies to their latest versions
+4. Install all required packages
+5. Set up your project and show next steps
+
+## Requirements
+
+- Node.js 14.0.0 or later
+- Your preferred package manager (npm, yarn, pnpm, bun, or deno)

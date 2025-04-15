@@ -1,8 +1,4 @@
-import {
-  JazzClerkAuth,
-  type MinimalClerkClient,
-  isClerkCredentials,
-} from "jazz-auth-clerk";
+import { JazzClerkAuth, type MinimalClerkClient } from "jazz-auth-clerk";
 import { LocalStorageKVStore } from "jazz-browser";
 import {
   JazzProvider,
@@ -10,7 +6,7 @@ import {
   useAuthSecretStorage,
   useJazzContext,
 } from "jazz-react";
-import { AuthSecretStorage, InMemoryKVStore, KvStoreContext } from "jazz-tools";
+import { InMemoryKVStore, KvStoreContext } from "jazz-tools";
 import { useEffect, useMemo, useState } from "react";
 
 function useJazzClerkAuth(clerk: MinimalClerkClient) {
@@ -26,10 +22,7 @@ function useJazzClerkAuth(clerk: MinimalClerkClient) {
   }, []);
 
   useEffect(() => {
-    // Need to use addListener because the clerk user object is not updated when the user logs in
-    return clerk.addListener((event) => {
-      authMethod.onClerkUserChange(event as Pick<MinimalClerkClient, "user">);
-    });
+    return authMethod.registerListener(clerk);
   }, []);
 }
 
@@ -46,19 +39,16 @@ export const JazzProviderWithClerk = (
   props: { clerk: MinimalClerkClient } & JazzProviderProps,
 ) => {
   const [isLoaded, setIsLoaded] = useState(false);
-  setupKvStore();
-  const secretStorage = new AuthSecretStorage();
 
+  /**
+   * This effect ensures that a logged-in Clerk user is authenticated before the JazzProvider is mounted.
+   *
+   * This is done to optimize the initial load.
+   */
   useEffect(() => {
-    if (!isClerkCredentials(props.clerk.user?.unsafeMetadata)) {
-      setIsLoaded(true);
-      return;
-    }
+    setupKvStore();
 
-    JazzClerkAuth.loadClerkAuthData(
-      props.clerk.user.unsafeMetadata,
-      secretStorage,
-    ).then(() => {
+    JazzClerkAuth.initializeAuth(props.clerk).then(() => {
       setIsLoaded(true);
     });
   }, []);
@@ -68,7 +58,7 @@ export const JazzProviderWithClerk = (
   }
 
   return (
-    <JazzProvider {...props} onLogOut={props.clerk.signOut}>
+    <JazzProvider {...props} logOutReplacement={props.clerk.signOut}>
       <RegisterClerkAuth clerk={props.clerk}>
         {props.children}
       </RegisterClerkAuth>

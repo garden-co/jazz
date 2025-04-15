@@ -1,4 +1,5 @@
 import CreateJazzApp from "@/components/home/CreateJazzApp.mdx";
+import { marketingCopy } from "@/content/marketingCopy";
 import { H1 } from "gcmp-design-system/src/app/components/atoms/Headings";
 import {
   Icon,
@@ -54,7 +55,7 @@ export function HeroSection() {
       <div className="flex flex-col justify-center gap-5 lg:col-span-2 lg:gap-8">
         <Kicker>Toolkit for backendless apps</Kicker>
         <H1>
-          <span className="inline-block">Whip up an app.</span>
+          <span className="inline-block">{marketingCopy.headline}</span>
         </H1>
 
         <Prose size="lg" className="text-pretty max-w-2xl dark:text-stone-200">

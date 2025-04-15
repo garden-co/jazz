@@ -1,4 +1,5 @@
 import { AgentSecret, CryptoProvider, LocalNode } from "cojson";
+import { type AnyWebSocketConstructor } from "cojson-transport-ws";
 import { WasmCrypto } from "cojson/crypto/WasmCrypto";
 import {
   Account,
@@ -14,7 +15,7 @@ type WorkerOptions<Acc extends Account> = {
   accountID?: string;
   accountSecret?: string;
   syncServer?: string;
-  WebSocket?: typeof WebSocket;
+  WebSocket?: AnyWebSocketConstructor;
   AccountSchema?: AccountClass<Acc>;
   crypto?: CryptoProvider;
 };

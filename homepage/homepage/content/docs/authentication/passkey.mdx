@@ -1,0 +1,97 @@
+export const metadata = { title: "Passkey Authentication" };
+
+import { CodeGroup, ContentByFramework } from "@/components/forMdx";
+
+# Passkey Authentication
+
+Passkey authentication is fully local-first and the most secure of the auth methods that Jazz provides because keys are managed by the device/operating system itself.
+
+## How it works
+
+Passkey authentication is based on the [Web Authentication API](https://developer.mozilla.org/en-US/docs/Web/API/Web_Authentication_API) and uses familiar FaceID/TouchID flows that users already know how to use.
+
+## Key benefits
+
+- **Most secure**: Keys are managed by the device/OS
+- **User-friendly**: Uses familiar biometric verification (FaceID/TouchID)
+- **Cross-device**: Works across devices with the same biometric authentication
+- **No password management**: Users don't need to remember or store anything
+- **Wide support**: Available in most modern browsers
+
+## Implementation
+
+<ContentByFramework framework="react">
+Using passkeys in Jazz is as easy as this:
+
+<CodeGroup>
+```tsx twoslash
+import * as React from "react";
+import { useState } from "react";
+import { usePasskeyAuth } from "jazz-react";
+type AuthModalProps = {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}
+// ---cut---
+export function AuthModal({ open, onOpenChange }: AuthModalProps) {
+  const [username, setUsername] = useState("");
+
+  const auth = usePasskeyAuth({ // Must be inside the JazzProvider!
+    appName: "My super-cool web app",
+  });
+
+  if (auth.state === "signedIn") { // You can also use `useIsAuthenticated()`
+    return <div>You are already signed in</div>;
+  }
+
+  const handleSignUp = async () => {
+    await auth.signUp(username);
+    onOpenChange(false);
+  };
+
+  const handleLogIn = async () => {
+    await auth.logIn();
+    onOpenChange(false);
+  };
+
+  return (
+    <div>
+      <button onClick={handleLogIn}>Log in</button>
+      <input type="text" value={username} onChange={(e) => setUsername(e.target.value)} />
+      <button onClick={handleSignUp}>Sign up</button>
+    </div>
+  );
+}
+```
+</CodeGroup>
+</ContentByFramework>
+
+## Examples
+
+You can try passkey authentication using our [passkey example](https://passkey-demo.jazz.tools/) or the [music player demo](https://music-demo.jazz.tools/).
+
+## When to use Passkeys
+
+Passkeys are ideal when:
+- Security is a top priority
+- You want the most user-friendly authentication experience
+- You're targeting modern browsers and devices
+- You want to eliminate the risk of password-based attacks
+
+## Limitations and considerations
+
+- Requires hardware/OS support for biometric authentication
+- Not supported in older browsers (see browser support below)
+- Requires a fallback method for unsupported environments
+
+### Browser Support
+
+[Passkeys are supported in most modern browsers](https://caniuse.com/passkeys).
+
+For older browsers, we recommend using [passphrase authentication](./passphrase) as a fallback.
+
+## Additional resources
+
+For more information about the Web Authentication API and passkeys:
+- [WebAuthn.io](https://webauthn.io/)
+- [MDN Web Authentication API](https://developer.mozilla.org/en-US/docs/Web/API/Web_Authentication_API)

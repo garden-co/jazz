@@ -1,5 +1,5 @@
 import { ThemeToggle } from "@/components/ThemeToggle";
-import { socials } from "@/lib/socials";
+import { socials } from "@/content/socials";
 import { JazzLogo } from "gcmp-design-system/src/app/components/atoms/logos/JazzLogo";
 import {
   Nav,

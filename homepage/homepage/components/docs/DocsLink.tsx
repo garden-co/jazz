@@ -1,6 +1,6 @@
 "use client";
 
-import { isValidFramework } from "@/lib/framework";
+import { isValidFramework } from "@/content/framework";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { AnchorHTMLAttributes, DetailedHTMLProps } from "react";

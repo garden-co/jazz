@@ -22,8 +22,10 @@ test-results
 
 .husky
 
-.vscode/settings.json
+.vscode/*
+.idea/*
 
 .svelte-kit
 
-.idea
+.cursorrules
+.windsurfrules

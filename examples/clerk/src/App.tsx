@@ -1,8 +1,8 @@
-import { SignInButton } from "@clerk/clerk-react";
+import { SignInButton, SignOutButton } from "@clerk/clerk-react";
 import { useAccount, useIsAuthenticated } from "jazz-react";
 
 function App() {
-  const { me, logOut } = useAccount();
+  const { me } = useAccount();
 
   const isAuthenticated = useIsAuthenticated();
 
@@ -11,7 +11,7 @@ function App() {
       <div className="container">
         <h1>You're logged in</h1>
         <p>Welcome back, {me?.profile?.name}</p>
-        <button onClick={() => logOut()}>Logout</button>
+        <SignOutButton>Logout</SignOutButton>
       </div>
     );
   }
