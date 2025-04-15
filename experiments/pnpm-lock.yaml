@@ -30,7 +30,7 @@ importers:
         specifier: ^1.7.4
         version: 1.7.4
       artillery:
-        specifier: ^2.0.21
+        specifier: ^2.0.22
         version: 2.0.22(@types/node@22.13.1)(bufferutil@4.0.9)(react-dom@18.3.1(react@18.3.1))(react@18.3.1)(typescript@5.5.4)
       artillery-plugin-memory-inspector:
         specifier: ^1.1.1

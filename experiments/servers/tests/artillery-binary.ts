@@ -27,16 +27,17 @@ async function loadMultiple(page: Page, context: any, events: any, test: any) {
         });
 
         for (const concurrency of concurrencyLevels) {
-            await step(`${context.scenario.name}.load_binary_duration_${concurrency}multiple`, async () => {
+            await step(`${context.scenario.name}.load_multiple_duration`, async () => {
                 const result = await page.evaluate(async (concurrency) => {
                     return await loadMultipleCoValues(concurrency, true); // false for text CoValues
                 }, concurrency); 
 
                 // Record the metrics
-                events.emit('histogram', `load_binary_duration_${concurrency}multiple`, result.duration);
-                events.emit('histogram', `load_binary_failure_${concurrency}multiple`, result.failed);
+                const affix = `${concurrency}`.padStart(3, "0");
+                events.emit('counter', `${context.scenario.name}.load_bulk_duration_for_${affix}`, result.duration);
+                events.emit('counter', `${context.scenario.name}.load_bulk_failures_for_${affix}`, result.failed);
 
-                logger.info(`Load multiple CoValues test for 'binary_${concurrency}multiple' completed in ${result.duration}ms with ${result.failed} failures`);
+                logger.info(`Load multiple CoValues test for 'binary ... multiple_${affix}' completed in ${result.duration}ms with ${result.failed} failures`);
             });
         }
     } catch (error) {
@@ -79,16 +80,17 @@ async function createMultiple(page: Page, context: any, events: any, test: any) 
         await page.locator('#fileInput').setInputFiles(filePath);
 
         for (const concurrency of concurrencyLevels) {
-            await step(`${context.scenario.name}.create_binary_duration_${concurrency}multiple`, async () => {
+            await step(`${context.scenario.name}.create_multiple_duration`, async () => {
                 const result = await page.evaluate(async (concurrency) => {
                     return await createMultipleCoValues(concurrency, true); // false for text CoValues
                 }, concurrency); 
 
                 // Record the metrics
-                events.emit('histogram', `create_binary_duration_${concurrency}multiple`, result.duration);
-                events.emit('histogram', `create_binary_failure_${concurrency}multiple`, result.failed);
+                const affix = `${concurrency}`.padStart(3, "0");
+                events.emit('counter', `${context.scenario.name}.create_bulk_duration_for_${affix}`, result.duration);
+                events.emit('counter', `${context.scenario.name}.create_bulk_failures_for_${affix}`, result.failed);
 
-                logger.info(`Create multiple CoValues test for 'binary_${concurrency}multiple' completed in ${result.duration}ms with ${result.failed} failures`);
+                logger.info(`Create multiple CoValues test for 'binary ... multiple_${affix}' completed in ${result.duration}ms with ${result.failed} failures`);
             });
         }
     } catch (error) {
@@ -155,7 +157,7 @@ async function mutateSingle(page: Page, context: any, events: any, test: any) {
             // Check all spawned browsers received the mutation event
             await Promise.all(browsers.map(async ({ page: clientPage, ua }, index) => {
                 await clientPage.waitForSelector(`#status >> text=Mutation event`);
-                events.emit('counter', `${context.scenario.name}.mutate_binary_subscriber`, 1);
+                events.emit('counter', `${context.scenario.name}.mutate_binary_subscribers`, 1);
                 logger.debug(`Browser ${context.vars.$uuid}-[client-${ua}] received the mutation event.`);
             }));
 
@@ -230,27 +232,27 @@ export const config = {
 
 export const scenarios = [
     {
-        name: "1a Load Multiple",
+        name: "1a Binary - Load Multiple",
         engine: 'playwright',
         testFunction: loadMultiple
     },
     {
-        name: "1b Load Single",
+        name: "1b Binary - Load Single",
         engine: 'playwright',
         testFunction: loadSingle
     },
     {
-        name: "2c Create Multiple",
+        name: "2c Binary - Create Multiple",
         engine: 'playwright',
         testFunction: createMultiple
     },
     {
-        name: "2d Create Single",
+        name: "2d Binary - Create Single",
         engine: 'playwright',
         testFunction: createSingle
     },
     {
-        name: "3e Mutate Single",
+        name: "3e Binary - Mutate Single",
         engine: 'playwright',
         testFunction: mutateSingle
     }

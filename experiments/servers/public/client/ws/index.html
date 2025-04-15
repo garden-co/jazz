@@ -928,7 +928,7 @@
                             };
                             loadCoValuesMap.set(chunk.uuid, state);
 
-                            info(`Received file metadata for CoValue: ${chunk.uuid} => ${chunk.fileName} (${chunk.fileSize}) split into ${chunk.totalChunks} chunks of ${chunk.chunkSize} bytes.`);
+                            debug(`Received file metadata for CoValue: ${chunk.uuid} => ${chunk.fileName} (${chunk.fileSize}) split into ${chunk.totalChunks} chunks of ${chunk.chunkSize} bytes.`);
                             state.fileMetadata = { ...chunk };
 
                             // Start of a streaming download.
@@ -1195,13 +1195,13 @@
                         selectedUUIDs.map(uuid => loadCoValue(uuid, isBinary))
                     );
 
-                    const duration = performance.now() - t0;
+                    const duration = Math.round((performance.now() - t0) * 100) / 100;
 
                     const successful = results.filter(r => r.status === "fulfilled").map(r => r.value);
                     const failed = MAX_CONCURRENT - successful.length;
 
                     info(`Results: ${results.length}, Successful: ${successful.length}`);
-                    info(`Loaded ${successful.length}/${MAX_CONCURRENT} CoValues in ${duration.toFixed(2)}ms`);
+                    info(`Loaded ${successful.length}/${MAX_CONCURRENT} CoValues in ${duration}ms`);
                     // successful.map(coValue => info(`Created CoValue ${JSON.stringify(coValue)}`));
 
                     return {
@@ -1210,7 +1210,7 @@
                         coValues: successful
                     };
                 } catch (error) {
-                    const duration = performance.now() - t0;
+                    const duration = Math.round((performance.now() - t0) * 100) / 100;
                     info(`Error in multiple CoValues load: ${error.message}`);
                     return {
                         duration,
@@ -1233,12 +1233,12 @@
                         selectedUUIDs.map(uuid => createCoValue(uuid, isBinary))
                     );
 
-                    const duration = performance.now() - t0;
+                    const duration = Math.round((performance.now() - t0) * 100) / 100;
 
                     const successful = results.filter(r => r.status === "fulfilled").map(r => r.value);
                     const failed = MAX_CONCURRENT - successful.length;
 
-                    info(`Created ${successful.length}/${MAX_CONCURRENT} CoValues in ${duration.toFixed(2)}ms`);
+                    info(`Created ${successful.length}/${MAX_CONCURRENT} CoValues in ${duration}ms`);
 
                     return {
                         duration,
@@ -1246,7 +1246,7 @@
                         coValues: successful
                     };
                 } catch (error) {
-                    const duration = performance.now() - t0;
+                    const duration = Math.round((performance.now() - t0) * 100) / 100;
                     info(`Error in multiple CoValues creation: ${error.message}`);
                     return {
                         duration,
