@@ -80,8 +80,8 @@ test("Node replies with initial tx and header to empty subscribe", async () => {
     type: "comap",
     ruleset: { type: "ownedByGroup", group: group.id },
     meta: null,
-    createdAt: map.core.header.createdAt,
-    uniqueness: map.core.header.uniqueness,
+    createdAt: map.core.header!.createdAt,
+    uniqueness: map.core.header!.uniqueness,
   } satisfies CoValueHeader;
 
   expect(newContentMsg).toEqual({
@@ -779,9 +779,14 @@ test.skip("When replaying creation and transactions of a coValue as new content,
   const groupTellKnownStateMsg = (await outRxQ2.next()).value;
   expect(groupTellKnownStateMsg).toMatchObject(groupStateEx(group));
 
-  expect(
-    node2.syncManager.peers["test1"]!.optimisticKnownStates.has(group.core.id),
-  ).toBeDefined();
+  const peerState = node2.coValuesStore
+    .getIfExists(group.core.id)
+    ?.syncState.get("test1");
+
+  expect(peerState?.type).toEqual("syncing");
+  expect(peerState?.type === "syncing" && peerState.optimistic.header).toBe(
+    true,
+  );
 
   // await inTx1.push(adminTellKnownStateMsg);
   await inTx1.push(groupTellKnownStateMsg);
@@ -822,7 +827,9 @@ test.skip("When replaying creation and transactions of a coValue as new content,
     sessions: {},
   } satisfies SyncMessage);
 
-  expect(node2.coValuesStore.get(map.core.id).state.type).toEqual("loading");
+  expect(
+    node2.coValuesStore.getOrCreateEmpty(map.core.id).loadingState,
+  ).toEqual("loading");
 
   await inTx2.push(mapNewContentMsg);
 
@@ -1034,7 +1041,7 @@ describe("sync - extra tests", () => {
 
     // Verify that node2 has received the map
     const mapOnNode2 = await node2.loadCoValueCore(map.core.id);
-    if (mapOnNode2 === "unavailable") {
+    if (mapOnNode2.loadingState === "unavailable") {
       throw new Error("Map is unavailable on node2");
     }
 
@@ -1068,7 +1075,7 @@ describe("sync - extra tests", () => {
 
     // Verify that node2 has received the changes made during disconnection
     const updatedMapOnNode2 = await node2.loadCoValueCore(map.core.id);
-    if (updatedMapOnNode2 === "unavailable") {
+    if (updatedMapOnNode2.loadingState === "unavailable") {
       throw new Error("Updated map is unavailable on node2");
     }
 
@@ -1078,7 +1085,7 @@ describe("sync - extra tests", () => {
 
     // Make a new change on node2 to verify two-way sync
     const mapOnNode2ForEdit = await node2.loadCoValueCore(map.core.id);
-    if (mapOnNode2ForEdit === "unavailable") {
+    if (mapOnNode2ForEdit.loadingState === "unavailable") {
       throw new Error("Updated map is unavailable on node2");
     }
 
@@ -1101,7 +1108,7 @@ describe("sync - extra tests", () => {
     await new Promise((resolve) => setTimeout(resolve, 100));
 
     const mapOnNode1 = await node1.loadCoValueCore(map.core.id);
-    if (mapOnNode1 === "unavailable") {
+    if (mapOnNode1.loadingState === "unavailable") {
       throw new Error("Updated map is unavailable on node1");
     }
 
@@ -1173,9 +1180,9 @@ describe("sync - extra tests", () => {
     const mapOnNode3 = await node3.loadCoValueCore(map.core.id);
 
     if (
-      mapOnNode1 === "unavailable" ||
-      mapOnNode2 === "unavailable" ||
-      mapOnNode3 === "unavailable"
+      mapOnNode1.loadingState === "unavailable" ||
+      mapOnNode2.loadingState === "unavailable" ||
+      mapOnNode3.loadingState === "unavailable"
     ) {
       throw new Error("Map is unavailable on node2 or node3");
     }
@@ -1243,7 +1250,7 @@ describe("sync - extra tests", () => {
 
     // Load the large map on node2
     const largeMapOnNode2 = await node2.loadCoValueCore(largeMap.core.id);
-    if (largeMapOnNode2 === "unavailable") {
+    if (largeMapOnNode2.loadingState === "unavailable") {
       throw new Error("Large map is unavailable on node2");
     }
 
@@ -1338,9 +1345,9 @@ describe("sync - extra tests", () => {
     const mapOnNode3Core = await node3.loadCoValueCore(map.core.id);
 
     if (
-      mapOnNode1Core === "unavailable" ||
-      mapOnNode2Core === "unavailable" ||
-      mapOnNode3Core === "unavailable"
+      mapOnNode1Core.loadingState === "unavailable" ||
+      mapOnNode2Core.loadingState === "unavailable" ||
+      mapOnNode3Core.loadingState === "unavailable"
     ) {
       throw new Error("Map is unavailable on node2 or node3");
     }
@@ -1486,8 +1493,6 @@ describe("SyncManager - knownStates vs optimisticKnownStates", () => {
     const mapOnClient = group.createMap();
     mapOnClient.set("key1", "value1", "trusting");
 
-    await client.syncManager.actuallySyncCoValue(mapOnClient.core);
-
     // Wait for the full sync to complete
     await mapOnClient.core.waitForSync();
 
@@ -1530,8 +1535,6 @@ describe("SyncManager - knownStates vs optimisticKnownStates", () => {
 
     map.set("key2", "value2", "trusting");
 
-    await client.syncManager.actuallySyncCoValue(map.core);
-
     const peerState = client.syncManager.peers[nodeToServerPeer.id]!;
     expect(peerState.optimisticKnownStates.get(map.core.id)).not.toEqual(
       peerState.knownStates.get(map.core.id),
@@ -1559,8 +1562,6 @@ describe("SyncManager.addPeer", () => {
     const group = client.createGroup();
     const map = group.createMap();
     map.set("key1", "value1", "trusting");
-
-    await client.syncManager.actuallySyncCoValue(map.core);
 
     // Wait for initial sync
     await map.core.waitForSync();
@@ -1597,8 +1598,6 @@ describe("SyncManager.addPeer", () => {
     const group = client.createGroup();
     const map = group.createMap();
     map.set("key1", "value1", "trusting");
-
-    await client.syncManager.actuallySyncCoValue(map.core);
 
     // Wait for initial sync
     await map.core.waitForSync();
@@ -1673,7 +1672,9 @@ describe("SyncManager.addPeer", () => {
 
     await map.core.waitForSync();
 
-    expect(jazzCloud.coValuesStore.get(map.id).state.type).toBe("available");
+    expect(jazzCloud.coValuesStore.getOrCreateEmpty(map.id).state.type).toBe(
+      "available",
+    );
   });
 });
 
@@ -1755,8 +1756,6 @@ describe("waitForSyncWithPeer", () => {
     const map = group.createMap();
     map.set("key1", "value1", "trusting");
 
-    await client.syncManager.actuallySyncCoValue(map.core);
-
     const peer = client.syncManager.getPeers()[0];
 
     if (!peer) {
@@ -1785,8 +1784,6 @@ describe("waitForSyncWithPeer", () => {
     vi.spyOn(peer, "pushOutgoingMessage").mockImplementation(async () => {
       return Promise.resolve();
     });
-
-    await client.syncManager.actuallySyncCoValue(map.core);
 
     await expect(
       client.syncManager.waitForSyncWithPeer(peer.id, map.core.id, 100),

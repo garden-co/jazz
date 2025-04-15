@@ -3,7 +3,7 @@ import { RawGroup } from "../coValues/group.js";
 
 export function expectGroup(content: RawCoValue): RawGroup {
   const map = expectMap(content);
-  if (map.core.header.ruleset.type !== "group") {
+  if (map.core.header?.ruleset.type !== "group") {
     throw new Error("Expected group ruleset in group");
   }
 

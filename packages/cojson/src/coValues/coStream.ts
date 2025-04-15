@@ -66,8 +66,8 @@ export class RawCoStreamView<
     this.processNewTransactions();
   }
 
-  get headerMeta(): Meta {
-    return this.core.header.meta as Meta;
+  get headerMeta(): Meta | undefined {
+    return this.core.header?.meta as Meta | undefined;
   }
 
   get group(): RawGroup {
@@ -275,7 +275,7 @@ export class RawCoStreamView<
   }
 
   subscribe(listener: (coStream: this) => void): () => void {
-    return this.core.subscribe((content) => {
+    return this.core.subscribeToContent((content) => {
       listener(content as this);
     });
   }

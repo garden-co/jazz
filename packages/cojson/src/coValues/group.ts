@@ -174,8 +174,6 @@ export class RawGroup<
 
   loadAllChildGroups() {
     const requests: Promise<unknown>[] = [];
-    const store = this.core.node.coValuesStore;
-    const peers = this.core.node.syncManager.getServerAndStoragePeers();
 
     for (const key of this.keys()) {
       if (!isChildGroupReference(key)) {
@@ -183,21 +181,11 @@ export class RawGroup<
       }
 
       const id = getChildGroupId(key);
-      const child = store.get(id);
-
-      if (
-        child.state.type === "unknown" ||
-        child.state.type === "unavailable"
-      ) {
-        child.loadFromPeers(peers).catch(() => {
-          logger.error(`Failed to load child group ${id}`);
-        });
-      }
 
       requests.push(
-        child.getCoValue().then((coValue) => {
-          if (coValue === "unavailable") {
-            throw new Error(`Child group ${child.id} is unavailable`);
+        this.core.node.loadCoValueCore(id).then((coValue) => {
+          if (coValue.loadingState === "unavailable") {
+            throw new Error(`Child group ${id} is unavailable`);
           }
 
           // Recursively load child groups
