@@ -1,0 +1,29 @@
+{
+  "name": "jazz-react-auth-cloudauth",
+  "version": "0.0.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "src/index.tsx",
+  "license": "MIT",
+  "dependencies": {
+    "cojson": "workspace:*",
+    "jazz-auth-cloudauth": "workspace:*",
+    "jazz-browser": "workspace:*",
+    "jazz-react": "workspace:*",
+    "jazz-tools": "workspace:*"
+  },
+  "peerDependencies": {
+    "react": "^17.0.0 || ^18.0.0 || ^19.0.0"
+  },
+  "scripts": {
+    "format-and-lint": "biome check .",
+    "format-and-lint:fix": "biome check . --write",
+    "build": "rm -rf ./dist && tsc --sourceMap --outDir dist",
+    "prepublishOnly": "npm run build"
+  },
+  "devDependencies": {
+    "@testing-library/react": "^16.1.0",
+    "@types/react": "^18.3.12",
+    "typescript": "~5.6.2"
+  }
+}
