@@ -410,6 +410,15 @@ export class RawCoList<
     this.appendItems([item], after, privacy);
   }
 
+  /**
+   * Appends `items` to the list at index `after`. If `after` is negative, it is treated as `0`.
+   *
+   * If `privacy` is `"private"` **(default)**, `items` are encrypted in the transaction, only readable by other members of the group this `CoList` belongs to. Not even sync servers can see the content in plaintext.
+   *
+   * If `privacy` is `"trusting"`, `items` are stored in plaintext in the transaction, visible to everyone who gets a hold of it, including sync servers.
+   *
+   * @category 2. Editing
+   */
   appendItems(
     items: Item[],
     after?: number,
@@ -421,7 +430,7 @@ export class RawCoList<
         ? entries.length > 0
           ? entries.length - 1
           : 0
-        : after;
+        : Math.max(0, after);
     let opIDBefore: OpID | "start";
     if (entries.length > 0) {
       const entryBefore = entries[after];
