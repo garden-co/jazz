@@ -63,7 +63,9 @@ describe("Browser sync", () => {
       AccountSchema: CustomAccount,
     });
     // Load map in second account
-    const loadedMap = await TestMap.load(map.id, account2, {});
+    const loadedMap = await TestMap.load(map.id, {
+      loadAs: account2,
+    });
 
     expect(loadedMap).toBeDefined();
     expect(loadedMap?.value).toBe("test data");
@@ -135,7 +137,9 @@ describe("Browser sync", () => {
     // TODO: Wait for sync doesn't work on the IndexedDB storage peer as it just waits for the content to be pushed
     await new Promise((resolve) => setTimeout(resolve, 500));
 
-    const loadedMap = await TestMap.load(map.id, account2, {});
+    const loadedMap = await TestMap.load(map.id, {
+      loadAs: account2,
+    });
 
     expect(loadedMap).toBeDefined();
     expect(loadedMap?.value).toBe("test data");
@@ -176,7 +180,9 @@ describe("Browser sync", () => {
     // TODO: Wait for sync doesn't work on the IndexedDB storage peer as it just waits for the content to be pushed
     await new Promise((resolve) => setTimeout(resolve, 500));
 
-    const loadedMap = await TestMap.load(map.id, account2, {});
+    const loadedMap = await TestMap.load(map.id, {
+      loadAs: account2,
+    });
 
     expect(loadedMap).toBeDefined();
     expect(loadedMap?.value).toBe("test data");
@@ -218,7 +224,9 @@ describe("Browser sync", () => {
       AccountSchema: CustomAccount,
     });
 
-    const loadedMap = await TestMap.load(map.id, account2, {});
+    const loadedMap = await TestMap.load(map.id, {
+      loadAs: account2,
+    });
 
     expect(loadedMap).toBeDefined();
     expect(loadedMap?.value).toBe("test data");

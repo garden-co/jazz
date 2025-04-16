@@ -4,13 +4,16 @@ import {
   QueueEntry,
 } from "./PriorityBasedMessageQueue.js";
 import { TryAddTransactionsError } from "./coValueCore.js";
-import { RawCoID } from "./ids.js";
+import { RawCoID, SessionID } from "./ids.js";
 import { logger } from "./logger.js";
 import { CO_VALUE_PRIORITY } from "./priority.js";
 import { Peer, SyncMessage } from "./sync.js";
 
 export class PeerState {
   private queue: PriorityBasedMessageQueue;
+
+  incomingMessagesProcessingPromise: Promise<void> | undefined;
+  nextPeer: Peer | undefined;
 
   constructor(
     private peer: Peer,
@@ -149,5 +152,36 @@ export class PeerState {
     this.closeQueue();
     this.peer.outgoing.close();
     this.closed = true;
+  }
+
+  async processIncomingMessages(callback: (msg: SyncMessage) => Promise<void>) {
+    if (this.closed) {
+      throw new Error("Peer is closed");
+    }
+
+    if (this.incomingMessagesProcessingPromise) {
+      throw new Error("Incoming messages processing already in progress");
+    }
+
+    const processIncomingMessages = async () => {
+      for await (const msg of this.incoming) {
+        if (msg === "Disconnected") {
+          break;
+        }
+        if (msg === "PingTimeout") {
+          logger.error("Ping timeout from peer", {
+            peerId: this.id,
+            peerRole: this.role,
+          });
+          break;
+        }
+
+        await callback(msg);
+      }
+    };
+
+    this.incomingMessagesProcessingPromise = processIncomingMessages();
+
+    return this.incomingMessagesProcessingPromise;
   }
 }

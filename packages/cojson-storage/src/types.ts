@@ -58,7 +58,7 @@ export interface DBClientInterface {
   ): Promise<SignatureAfterRow[]> | SignatureAfterRow[];
 
   addCoValue(
-    msg: CojsonInternalTypes.NewContentMessage,
+    msg: Pick<CojsonInternalTypes.NewContentMessage, "id" | "header">,
   ): Promise<number> | number;
 
   addSessionUpdate({
@@ -86,4 +86,52 @@ export interface DBClientInterface {
   }): Promise<number> | undefined | unknown;
 
   transaction(callback: () => unknown): Promise<unknown> | undefined;
+}
+
+export interface SyncDBClientInterface {
+  getCoValue(coValueId: RawCoID): StoredCoValueRow | undefined;
+
+  getCoValueSessions(coValueRowId: number): StoredSessionRow[];
+
+  getNewTransactionInSession(
+    sessionRowId: number,
+    firstNewTxIdx: number,
+  ): TransactionRow[];
+
+  getSignatures(
+    sessionRowId: number,
+    firstNewTxIdx: number,
+  ): SignatureAfterRow[];
+
+  addCoValue(
+    msg: Pick<CojsonInternalTypes.NewContentMessage, "id" | "header">,
+  ): number;
+
+  addSessionUpdate({
+    sessionUpdate,
+    sessionRow,
+  }: {
+    sessionUpdate: SessionRow;
+    sessionRow?: StoredSessionRow;
+  }): number;
+
+  addTransaction(
+    sessionRowID: number,
+    idx: number,
+    newTransaction: Transaction,
+  ): number | undefined | unknown;
+
+  addSignatureAfter({
+    sessionRowID,
+    idx,
+    signature,
+  }: {
+    sessionRowID: number;
+    idx: number;
+    signature: Signature;
+  }): number | undefined | unknown;
+
+  transaction(
+    operationsCallback: () => unknown[],
+  ): Promise<unknown> | undefined;
 }

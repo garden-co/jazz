@@ -1,8 +1,8 @@
 import { createServer } from "http";
 import { mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
-import { ControlledAgent, LocalNode } from "cojson";
-import { SQLiteStorage } from "cojson-storage-sqlite";
+import { ControlledAgent, LocalNode, StorageAdapter } from "cojson";
+import { loadSQLiteStorageAdapter } from "cojson-storage-sqlite";
 import { createWebSocketPeer } from "cojson-transport-ws";
 import { WasmCrypto } from "cojson/crypto/WasmCrypto";
 import { WebSocketServer } from "ws";
@@ -29,19 +29,20 @@ export const startSyncServer = async ({
   const agentSecret = crypto.newRandomAgentSecret();
   const agentID = crypto.getAgentID(agentSecret);
 
-  const localNode = new LocalNode(
-    new ControlledAgent(agentSecret, crypto),
-    crypto.newRandomSessionID(agentID),
-    crypto,
-  );
+  let storage: StorageAdapter | undefined;
 
   if (!inMemory) {
     await mkdir(dirname(db), { recursive: true });
 
-    const storage = await SQLiteStorage.asPeer({ filename: db });
-
-    localNode.syncManager.addPeer(storage);
+    storage = loadSQLiteStorageAdapter(db);
   }
+
+  const localNode = new LocalNode(
+    new ControlledAgent(agentSecret, crypto),
+    crypto.newRandomSessionID(agentID),
+    crypto,
+    storage,
+  );
 
   wss.on("connection", function connection(ws, req) {
     // ping/pong for the connection liveness

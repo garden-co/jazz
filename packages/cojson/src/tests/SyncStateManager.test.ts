@@ -195,7 +195,7 @@ describe("SyncStateManager", () => {
   test("getCurrentSyncState should return the correct state", async () => {
     // Setup nodes
     const clientNode = createTestNode();
-    const serverNode = jazzCloud;
+    const serverNode = jazzCloud.node;
     const {
       nodeToServerPeer: clientToServerPeer,
       serverToNodePeer: serverToClientPeer,
