@@ -43,10 +43,10 @@ async function applyCondition(condition: NetworkCondition): Promise<void> {
   console.log(`Applying network condition: '${condition.name}'`);
 
   try {
-    // Flush existing dummynet pipes
-    await exec('sudo dnctl -q flush');
-
     if (condition.downBw && condition.upBw && condition.delay && condition.plr) {
+      // Flush existing dummynet pipes
+      await exec('sudo dnctl -q flush');
+
       // Configure pipes: pipe 1 for outbound, pipe 2 for inbound
       await exec(`sudo dnctl pipe 1 config bw ${condition.downBw} delay ${condition.delay} plr ${condition.plr}`);
       await exec(`sudo dnctl pipe 2 config bw ${condition.upBw} delay ${condition.delay} plr ${condition.plr}`);
@@ -117,7 +117,7 @@ const networkConditions: NetworkCondition[] = [
 async function setNetworkCondition(conditionName: string): Promise<void> {
   const condition = networkConditions.find((c) => c.name.toLowerCase().replace(/\s+/g, '-') === conditionName.toLowerCase());
   if (!condition) {
-    throw new Error(`Unknown condition: ${conditionName}. Available: ${networkConditions.map(c => c.name).join(', ')}`);
+    throw new Error(`Unknown network condition: ${conditionName}. Available conditions: ${networkConditions.map(c => c.name).join(', ')}`);
   }
   if (condition.name === 'Reset') {
     await resetNetwork();

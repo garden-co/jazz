@@ -118,19 +118,48 @@ async function mutateSingle(page: Page, context: any, events: any, test: any) {
             // Spawn the additional browsers for mutation events
             const browsers = await spawnBrowsers(uuid, false, context.vars.$uuid);
 
-            // Perform mutation
-            await page.click('#mutateCoValueText');
-            events.emit('counter', `${context.scenario.name}.mutate_text_sent`, 1);
+            // The code below executes much faster than identical code in `artillery-binary.ts`
+            // since 0.05kB (text) << 100KB (binary) hence the slight deviation in how RPS (rates) are computed
+            let iterations = 10;
+            while (iterations > 0) {
+                // Track the start time
+                const mutationStartTime = Date.now();
 
-            await page.waitForSelector('#status >> text=Mutated (text) data for:');
-            events.emit('counter', `${context.scenario.name}.mutate_text_delivered`, 1);
+                // Produce a mutation
+                await page.click('#mutateCoValueText');
+                events.emit('counter', `${context.scenario.name}.mutation_producer_attempts`, 1);
 
-            // Check all spawned browsers received the mutation event
-            await Promise.all(browsers.map(async ({ page: clientPage, ua }, index) => {
-                await clientPage.waitForSelector(`#status >> text=Mutation event`);
-                events.emit('counter', `${context.scenario.name}.mutate_text_subscribers`, 1);
-                logger.debug(`Browser ${context.vars.$uuid}-[client-${ua}] received the mutation event.`);
-            }));
+                await page.waitForSelector('#status >> text=Mutated (text) data for:');
+                events.emit('counter', `${context.scenario.name}.mutation_producer_sent`, 1);
+
+                // Mutation completed, calculate time taken
+                const mutationEndTime = Date.now();
+                const mutationDuration = (mutationEndTime - mutationStartTime) / 1000; // i.e. Seconds
+
+                // Emit rate metric for mutations per second (1 mutation / time taken)
+                if (mutationDuration > 0) {
+                    const rps = 1 / mutationDuration;
+                    events.emit('rate', `${context.scenario.name}.mutation_producter_rate`, rps);
+                }
+
+                // Consume the mutation by checking all spawned browsers received the mutation event
+                let subscribersReceived = 0;
+                await Promise.all(browsers.map(async ({ page: clientPage, ua }, index) => {
+                    events.emit('counter', `${context.scenario.name}.mutation_consumers`, 1);
+                    await clientPage.waitForSelector(`#status >> text=Mutation event`);
+                    subscribersReceived++;
+                    logger.debug(`Browser ${context.vars.$uuid}-[client-${ua}] received the mutation event.`);
+                }));
+
+                // Calculate subscribers per second rate
+                const totalDuration = (Date.now() - mutationStartTime) / 1000;
+                if (totalDuration > 0 && subscribersReceived > 0) {
+                    const subscribersPerSecond = subscribersReceived / totalDuration;
+                    events.emit('rate', `${context.scenario.name}.mutation_consumers_rate`, subscribersPerSecond);
+                }
+
+                iterations--;
+            }
 
             // Cleanup spawned browsers
             await Promise.all(browsers.map(async ({ browser, ua }) => {

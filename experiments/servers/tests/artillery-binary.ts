@@ -147,19 +147,27 @@ async function mutateSingle(page: Page, context: any, events: any, test: any) {
             // Spawn the additional browsers for mutation events
             const browsers = await spawnBrowsers(uuid, true, context.vars.$uuid);
 
-            // Perform mutation
-            await page.click('#mutateCoValueBinary');
-            events.emit('counter', `${context.scenario.name}.mutate_binary_sent`, 1);
+            let iterations = 10;
+            while (iterations > 0) {
+                // Produce a mutation
+                await page.click('#mutateCoValueBinary');
+                events.emit('counter', `${context.scenario.name}.mutation_producer_attempts`, 1);
 
-            await page.waitForSelector('#status >> text=Mutated (binary) data for:');
-            events.emit('counter', `${context.scenario.name}.mutate_binary_delivered`, 1);
+                await page.waitForSelector('#status >> text=Mutated (binary) data for:');
+                events.emit('counter', `${context.scenario.name}.mutation_producer_sent`, 1);
 
-            // Check all spawned browsers received the mutation event
-            await Promise.all(browsers.map(async ({ page: clientPage, ua }, index) => {
-                await clientPage.waitForSelector(`#status >> text=Mutation event`);
-                events.emit('counter', `${context.scenario.name}.mutate_binary_subscribers`, 1);
-                logger.debug(`Browser ${context.vars.$uuid}-[client-${ua}] received the mutation event.`);
-            }));
+                events.emit('rate', `${context.scenario.name}.mutation_producter_rate`);
+
+                // Consume the mutation by checking all spawned browsers received the mutation event
+                await Promise.all(browsers.map(async ({ page: clientPage, ua }, index) => {
+                    events.emit('counter', `${context.scenario.name}.mutation_consumers`, 1);
+                    await clientPage.waitForSelector(`#status >> text=Mutation event`);
+                    events.emit('rate', `${context.scenario.name}.mutation_consumers_rate`);
+                    logger.debug(`Browser ${context.vars.$uuid}-[client-${ua}] received the mutation event.`);
+                }));
+
+                iterations--;
+            }
 
             // Cleanup spawned browsers
             await Promise.all(browsers.map(async ({ browser, ua }) => {
