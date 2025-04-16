@@ -5,7 +5,7 @@ import {
   Slice,
 } from "prosemirror-model";
 import { schema } from "prosemirror-schema-basic";
-import { EditorStateConfig, Plugin, PluginKey } from "prosemirror-state";
+import { Plugin, PluginKey } from "prosemirror-state";
 import { type EditorView } from "prosemirror-view";
 
 // Create a unique key for the Jazz plugin to identify it in the ProseMirror state
