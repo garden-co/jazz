@@ -70,19 +70,16 @@ export function createJazzPlugin(coRichText: CoRichText | undefined) {
     view(editorView) {
       view = editorView;
 
-      console.log("view", view);
-      console.log("coRichText", coRichText);
-
       // Initialize the editor with the current CoRichText content
       if (coRichText && view) {
         const pmDoc = createProseMirrorDoc(coRichText.toString());
+
         const tr = editorView.state.tr.replace(
           0,
           0,
           new Slice(pmDoc.content, 0, 0),
         );
         tr.setMeta(META_KEY, true);
-        console.log("tr", tr);
         editorView.dispatch(tr);
 
         // Subscribe to CoRichText changes to keep the editor in sync
@@ -115,8 +112,6 @@ export function createJazzPlugin(coRichText: CoRichText | undefined) {
        * @returns Updated plugin state
        */
       apply(tr, value) {
-        console.log("apply", tr, value);
-
         // Skip updates that originated from Jazz to prevent infinite loops
         if (tr.getMeta(META_KEY)) {
           return value;
