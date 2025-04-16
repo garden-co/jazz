@@ -5,7 +5,7 @@ import {
   Slice,
 } from "prosemirror-model";
 import { schema } from "prosemirror-schema-basic";
-import { Plugin, PluginKey } from "prosemirror-state";
+import { EditorStateConfig, Plugin, PluginKey } from "prosemirror-state";
 import { type EditorView } from "prosemirror-view";
 
 // Create a unique key for the Jazz plugin to identify it in the ProseMirror state
@@ -65,25 +65,14 @@ export function createJazzPlugin(coRichText: CoRichText | undefined) {
     key: jazzPluginKey,
 
     /**
-     * Plugin view lifecycle method that sets up the editor view and subscriptions
+     * Plugin view management
      */
     view(editorView) {
       view = editorView;
 
-      // Initialize the editor with the current CoRichText content
-      if (coRichText && view) {
-        const pmDoc = createProseMirrorDoc(coRichText.toString());
-
-        const tr = editorView.state.tr.replace(
-          0,
-          0,
-          new Slice(pmDoc.content, 0, 0),
-        );
-        tr.setMeta(META_KEY, true);
-        editorView.dispatch(tr);
-
-        // Subscribe to CoRichText changes to keep the editor in sync
-        coRichText?.subscribe(handleCoRichTextChange);
+      // Subscribe to CoRichText changes to keep the editor in sync
+      if (coRichText) {
+        coRichText.subscribe(handleCoRichTextChange);
       }
 
       return {
@@ -99,7 +88,12 @@ export function createJazzPlugin(coRichText: CoRichText | undefined) {
      */
     state: {
       // Initialize plugin state with the CoRichText instance
-      init() {
+      init(_config, state) {
+        // Initialize the editor with the current CoRichText content
+        if (coRichText) {
+          const pmDoc = createProseMirrorDoc(coRichText.toString());
+          state.doc = pmDoc;
+        }
         return {
           coRichText,
         };
@@ -118,7 +112,7 @@ export function createJazzPlugin(coRichText: CoRichText | undefined) {
         }
 
         // If the document changed and we have a CoRichText instance, update it
-        if (tr.docChanged && coRichText) {
+        if (tr.docChanged && value.coRichText) {
           const doc = tr.doc;
           // Convert ProseMirror document to HTML string
           const str = new XMLSerializer()
@@ -127,7 +121,7 @@ export function createJazzPlugin(coRichText: CoRichText | undefined) {
             )
             .replace(/\sxmlns="[^"]+"/g, "");
           // Apply the changes to CoRichText
-          coRichText.applyDiff(str);
+          value.coRichText.applyDiff(str);
         }
 
         return value;

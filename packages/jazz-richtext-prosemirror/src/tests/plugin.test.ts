@@ -29,7 +29,4 @@ describe("createJazzPlugin", () => {
   it("initializes editor with CoRichText content", () => {
     expect(state.doc.textContent).toContain("Hello");
   });
-
-  // Additional tests can be adapted to use coRichText
-  // For example, you can simulate changes and observe plugin/editor state
 });
