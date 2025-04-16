@@ -5,57 +5,37 @@ import {
   emptyKnownState,
 } from "./sync.js";
 
-export type PeerKnownStateActions =
-  | {
-      type: "SET_AS_EMPTY";
-      id: RawCoID;
-    }
-  | {
-      type: "UPDATE_HEADER";
-      id: RawCoID;
-      header: boolean;
-    }
-  | {
-      type: "UPDATE_SESSION_COUNTER";
-      id: RawCoID;
-      sessionId: SessionID;
-      value: number;
-    }
-  | {
-      type: "SET";
-      id: RawCoID;
-      value: CoValueKnownState;
-    }
-  | {
-      type: "COMBINE_WITH";
-      id: RawCoID;
-      value: CoValueKnownState;
-    };
-
 export class PeerKnownStates {
   private coValues = new Map<RawCoID, CoValueKnownState>();
 
-  private updateHeader(id: RawCoID, header: boolean) {
+  updateHeader(id: RawCoID, header: boolean) {
     const knownState = this.coValues.get(id) ?? emptyKnownState(id);
     knownState.header = header;
     this.coValues.set(id, knownState);
+    this.triggerUpdate(id);
   }
 
-  private combineWith(id: RawCoID, value: CoValueKnownState) {
+  combineWith(id: RawCoID, value: CoValueKnownState) {
     const knownState = this.coValues.get(id) ?? emptyKnownState(id);
     this.coValues.set(id, combinedKnownStates(knownState, value));
+    this.triggerUpdate(id);
   }
 
-  private updateSessionCounter(
-    id: RawCoID,
-    sessionId: SessionID,
-    value: number,
-  ) {
+  updateSessionCounter(id: RawCoID, sessionId: SessionID, value: number) {
     const knownState = this.coValues.get(id) ?? emptyKnownState(id);
     const currentValue = knownState.sessions[sessionId] || 0;
     knownState.sessions[sessionId] = Math.max(currentValue, value);
 
     this.coValues.set(id, knownState);
+    this.triggerUpdate(id);
+  }
+
+  set(id: RawCoID, knownState: CoValueKnownState | "empty") {
+    this.coValues.set(
+      id,
+      knownState === "empty" ? emptyKnownState(id) : knownState,
+    );
+    this.triggerUpdate(id);
   }
 
   get(id: RawCoID) {
@@ -70,28 +50,6 @@ export class PeerKnownStates {
     const clone = new PeerKnownStates();
     clone.coValues = new Map(this.coValues);
     return clone;
-  }
-
-  dispatch(action: PeerKnownStateActions) {
-    switch (action.type) {
-      case "UPDATE_HEADER":
-        this.updateHeader(action.id, action.header);
-        break;
-      case "UPDATE_SESSION_COUNTER":
-        this.updateSessionCounter(action.id, action.sessionId, action.value);
-        break;
-      case "SET":
-        this.coValues.set(action.id, action.value);
-        break;
-      case "COMBINE_WITH":
-        this.combineWith(action.id, action.value);
-        break;
-      case "SET_AS_EMPTY":
-        this.coValues.set(action.id, emptyKnownState(action.id));
-        break;
-    }
-
-    this.triggerUpdate(action.id);
   }
 
   listeners = new Set<(id: RawCoID, knownState: CoValueKnownState) => void>();
@@ -114,3 +72,8 @@ export class PeerKnownStates {
     };
   }
 }
+
+export type ReadonlyPeerKnownStates = Pick<
+  PeerKnownStates,
+  "get" | "has" | "clone" | "subscribe"
+>;

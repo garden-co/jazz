@@ -9,7 +9,7 @@ describe("PeerKnownStates", () => {
     const id = "test-id" as RawCoID;
     const knownState: CoValueKnownState = emptyKnownState(id);
 
-    peerKnownStates.dispatch({ type: "SET", id, value: knownState });
+    peerKnownStates.set(id, knownState);
 
     expect(peerKnownStates.get(id)).toEqual(knownState);
     expect(peerKnownStates.has(id)).toBe(true);
@@ -19,7 +19,7 @@ describe("PeerKnownStates", () => {
     const peerKnownStates = new PeerKnownStates();
     const id = "test-id" as RawCoID;
 
-    peerKnownStates.dispatch({ type: "UPDATE_HEADER", id, header: true });
+    peerKnownStates.updateHeader(id, true);
 
     const result = peerKnownStates.get(id);
     expect(result?.header).toBe(true);
@@ -30,12 +30,7 @@ describe("PeerKnownStates", () => {
     const id = "test-id" as RawCoID;
     const sessionId = "session-1" as SessionID;
 
-    peerKnownStates.dispatch({
-      type: "UPDATE_SESSION_COUNTER",
-      id,
-      sessionId,
-      value: 5,
-    });
+    peerKnownStates.updateSessionCounter(id, sessionId, 5);
 
     const result = peerKnownStates.get(id);
     expect(result?.sessions[sessionId]).toBe(5);
@@ -55,8 +50,8 @@ describe("PeerKnownStates", () => {
       sessions: { [session2]: 10 },
     };
 
-    peerKnownStates.dispatch({ type: "SET", id, value: initialState });
-    peerKnownStates.dispatch({ type: "COMBINE_WITH", id, value: combineState });
+    peerKnownStates.set(id, initialState);
+    peerKnownStates.combineWith(id, combineState);
 
     const result = peerKnownStates.get(id);
     expect(result?.sessions).toEqual({ [session1]: 5, [session2]: 10 });
@@ -71,8 +66,8 @@ describe("PeerKnownStates", () => {
       sessions: { [sessionId]: 5 },
     };
 
-    peerKnownStates.dispatch({ type: "SET", id, value: initialState });
-    peerKnownStates.dispatch({ type: "SET_AS_EMPTY", id });
+    peerKnownStates.set(id, initialState);
+    peerKnownStates.set(id, "empty");
 
     const result = peerKnownStates.get(id);
     expect(result).toEqual(emptyKnownState(id));
@@ -84,7 +79,7 @@ describe("PeerKnownStates", () => {
     const listener = vi.fn();
 
     peerKnownStates.subscribe(listener);
-    peerKnownStates.dispatch({ type: "SET_AS_EMPTY", id });
+    peerKnownStates.set(id, "empty");
 
     expect(listener).toHaveBeenCalledWith(id, emptyKnownState(id));
   });
@@ -97,7 +92,7 @@ describe("PeerKnownStates", () => {
     const unsubscribe = peerKnownStates.subscribe(listener);
     unsubscribe();
 
-    peerKnownStates.dispatch({ type: "SET_AS_EMPTY", id });
+    peerKnownStates.set(id, "empty");
 
     expect(listener).not.toHaveBeenCalled();
   });

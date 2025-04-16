@@ -220,11 +220,7 @@ export class SyncManager {
       }
 
       peer.toldKnownState.add(id);
-      peer.optimisticKnownStates.dispatch({
-        type: "COMBINE_WITH",
-        id: id,
-        value: coValue.knownState(),
-      });
+      peer.combineOptimisticWith(id, coValue.knownState());
     } else if (!peer.toldKnownState.has(id)) {
       this.trySendToPeer(peer, {
         action: "known",
@@ -282,10 +278,7 @@ export class SyncManager {
 
       // Fill the missing known states with empty known states
       if (!peer.optimisticKnownStates.has(entry.id)) {
-        peer.optimisticKnownStates.dispatch({
-          type: "SET_AS_EMPTY",
-          id: entry.id,
-        });
+        peer.setOptimisticKnownState(entry.id, "empty");
       }
     }
 
@@ -400,11 +393,7 @@ export class SyncManager {
      * This way we can track part of the data loss that may occur when the other peer is restarted
      *
      */
-    peer.dispatchToKnownStates({
-      type: "SET",
-      id: msg.id,
-      value: knownStateIn(msg),
-    });
+    peer.setKnownState(msg.id, knownStateIn(msg));
     const entry = this.local.coValuesStore.get(msg.id);
 
     if (entry.state.type === "unknown" || entry.state.type === "unavailable") {
@@ -479,11 +468,7 @@ export class SyncManager {
   async handleKnownState(msg: KnownStateMessage, peer: PeerState) {
     const entry = this.local.coValuesStore.get(msg.id);
 
-    peer.dispatchToKnownStates({
-      type: "COMBINE_WITH",
-      id: msg.id,
-      value: knownStateIn(msg),
-    });
+    peer.combineWith(msg.id, knownStateIn(msg));
 
     // The header is a boolean value that tells us if the other peer do have information about the header.
     // If it's false in this point it means that the coValue is unavailable on the other peer.
@@ -557,11 +542,7 @@ export class SyncManager {
         return;
       }
 
-      peer.dispatchToKnownStates({
-        type: "UPDATE_HEADER",
-        id: msg.id,
-        header: true,
-      });
+      peer.updateHeader(msg.id, true);
 
       coValue = new CoValueCore(msg.header, this.local);
 
@@ -619,14 +600,12 @@ export class SyncManager {
 
       this.recordTransactionsSize(newTransactions, peer.role);
 
-      peer.dispatchToKnownStates({
-        type: "UPDATE_SESSION_COUNTER",
-        id: msg.id,
-        sessionId: sessionID,
-        value:
-          newContentForSession.after +
+      peer.updateSessionCounter(
+        msg.id,
+        sessionID,
+        newContentForSession.after +
           newContentForSession.newTransactions.length,
-      });
+      );
     }
 
     if (invalidStateAssumed) {
@@ -672,11 +651,7 @@ export class SyncManager {
   }
 
   async handleCorrection(msg: KnownStateMessage, peer: PeerState) {
-    peer.dispatchToKnownStates({
-      type: "SET",
-      id: msg.id,
-      value: knownStateIn(msg),
-    });
+    peer.setKnownState(msg.id, knownStateIn(msg));
 
     return this.sendNewContentIncludingDependencies(msg.id, peer);
   }
