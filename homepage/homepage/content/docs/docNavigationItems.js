@@ -249,6 +249,11 @@ export const docNavigationItems = [
         done: 100,
       },
       {
+        name: "Magic Link",
+        href: "/docs/authentication/magic-link",
+        done: 100,
+      },
+      {
         name: "Writing your own",
         href: "/docs/authentication/writing-your-own",
         done: 0,

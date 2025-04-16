@@ -55,6 +55,7 @@ export {
   createCoValueObservable,
   loadCoValue,
   subscribeToCoValue,
+  waitForCoValueCondition,
 } from "./internal.js";
 
 export {
@@ -67,6 +68,17 @@ export { KvStoreContext, type KvStore } from "./auth/KvStoreContext.js";
 export { InMemoryKVStore } from "./auth/InMemoryKVStore.js";
 export { DemoAuth } from "./auth/DemoAuth.js";
 export { PassphraseAuth } from "./auth/PassphraseAuth.js";
+export {
+  MagicLinkAuth,
+  MagicLinkAuthTransfer,
+  type MagicLinkAuthOptions,
+  MagicLinkAuthCreateAsProvider,
+  MagicLinkAuthCreateAsConsumer,
+  MagicLinkAuthHandleAsConsumer,
+  MagicLinkAuthHandleAsProvider,
+  type MagicLinkAuthConsumerOptions,
+  type MagicLinkAuthProviderOptions,
+} from "./auth/MagicLinkAuth/index.js";
 
 export {
   createInviteLink,
