@@ -1,7 +1,6 @@
 import { useAccount } from "jazz-react";
 import { createJazzPlugin } from "jazz-richtext-prosemirror";
 import { exampleSetup } from "prosemirror-example-setup";
-import { DOMParser as PMDOMParser } from "prosemirror-model";
 import { schema } from "prosemirror-schema-basic";
 import { EditorState } from "prosemirror-state";
 import { EditorView } from "prosemirror-view";
@@ -13,21 +12,16 @@ export function Form() {
   const viewRef = useRef<EditorView | null>(null);
 
   useEffect(() => {
-    if (!me || !editorRef.current) return;
+    if (!me || !editorRef.current || !me.profile.bio) return;
 
     const setupPlugins = exampleSetup({ schema });
-    const jazzPlugin = createJazzPlugin(me.profile.bio!);
+    const jazzPlugin = createJazzPlugin(me.profile.bio);
 
     // Only create the editor if it doesn't exist
     if (!viewRef.current) {
-      const str = me.profile.bio?.toString() || "";
-      const doc = new DOMParser().parseFromString(str, "text/html");
-      const pmDoc = PMDOMParser.fromSchema(schema).parse(doc);
-
       viewRef.current = new EditorView(editorRef.current, {
         state: EditorState.create({
           schema,
-          doc: pmDoc,
           plugins: [...setupPlugins, jazzPlugin],
         }),
       });
@@ -39,7 +33,7 @@ export function Form() {
         viewRef.current = null;
       }
     };
-  }, [me?.id]); // Only recreate if the account changes
+  }, [me?.id, me?.profile.bio?.id]); // Only recreate if the account or the bio changes
 
   if (!me) return null;
 
