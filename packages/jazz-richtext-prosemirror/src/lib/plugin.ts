@@ -73,7 +73,6 @@ export function createJazzPlugin(coRichText: CoRichText | undefined) {
     props: {
       decorations(state) {
         const selection = state.selection;
-        if (selection.empty) return DecorationSet.empty;
 
         const caret = Decoration.inline(selection.from, selection.to, {
           class: "jazz-caret",
