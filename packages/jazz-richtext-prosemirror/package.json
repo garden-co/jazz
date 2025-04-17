@@ -6,6 +6,7 @@
   "types": "src/index.ts",
   "scripts": {
     "build": "rm -rf ./dist && tsc --sourceMap --outDir dist",
+    "dev": "tsc --watch --sourceMap --outDir dist",
     "test": "vitest --run --root ../../ --project jazz-richtext-prosemirror",
     "test:watch": "vitest --watch --root ../../ --project jazz-richtext-prosemirror",
     "format-and-lint": "biome check .",

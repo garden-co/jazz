@@ -1514,7 +1514,7 @@ importers:
         version: 18.3.1(react@18.3.1)
     devDependencies:
       '@biomejs/biome':
-        specifier: 'catalog:'
+        specifier: 1.9.4
         version: 1.9.4
       '@playwright/test':
         specifier: ^1.50.1
@@ -1544,10 +1544,10 @@ importers:
         specifier: ^3.4.17
         version: 3.4.17(ts-node@10.9.2(@swc/core@1.10.1(@swc/helpers@0.5.15))(@types/node@22.10.2)(typescript@5.6.2))
       typescript:
-        specifier: 'catalog:'
+        specifier: 5.6.2
         version: 5.6.2
       vite:
-        specifier: 'catalog:'
+        specifier: 6.0.11
         version: 6.0.11(@types/node@22.10.2)(jiti@2.4.2)(lightningcss@1.29.1)(terser@5.37.0)(yaml@2.6.1)
 
   examples/todo:
