@@ -1,5 +1,6 @@
 import { CoRichText } from "jazz-tools";
 import { Plugin, PluginKey } from "prosemirror-state";
+import { Decoration, DecorationSet } from "prosemirror-view";
 import { htmlToProseMirror } from "./converter.js";
 import { createSyncHandlers } from "./sync.js";
 
@@ -66,6 +67,21 @@ export function createJazzPlugin(coRichText: CoRichText | undefined) {
       apply(tr, value) {
         handleProseMirrorChange(tr);
         return value;
+      },
+    },
+
+    props: {
+      decorations(state) {
+        const selection = state.selection;
+        if (selection.empty) return DecorationSet.empty;
+
+        const caret = Decoration.inline(selection.from, selection.to, {
+          class: "jazz-caret",
+          style:
+            "border-left: 2px solid red; margin-left: -2px; background: rgba(255,0,0,0.1);",
+        });
+
+        return DecorationSet.create(state.doc, [caret]);
       },
     },
   });
