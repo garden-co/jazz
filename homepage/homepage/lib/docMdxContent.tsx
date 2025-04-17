@@ -68,7 +68,7 @@ export async function DocPage({
 
     return (
       <DocsLayout nav={<DocNav />} tocItems={tocItems}>
-        <Prose className="overflow-x-visible lg:flex-1 py-10  max-w-3xl mx-auto">
+        <Prose className="sm:overflow-x-hidden l:overflow-x-visible lg:flex-1 py-10  max-w-3xl mx-auto">
           <Content />
         </Prose>
       </DocsLayout>
