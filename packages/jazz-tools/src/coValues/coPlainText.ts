@@ -4,6 +4,7 @@ import {
   type RawCoPlainText,
   stringifyOpID,
 } from "cojson";
+import { calcPatch } from "fast-myers-diff";
 import type {
   AnonymousJazzAgent,
   CoValue,
@@ -90,6 +91,10 @@ export class CoPlainText extends String implements CoValue {
     return this.toJSON();
   }
 
+  insertBefore(idx: number, text: string) {
+    this._raw.insertBefore(idx, text);
+  }
+
   insertAfter(idx: number, text: string) {
     this._raw.insertAfter(idx, text);
   }
@@ -119,6 +124,18 @@ export class CoPlainText extends String implements CoValue {
     raw: RawCoPlainText,
   ) {
     return new this({ fromRaw: raw });
+  }
+
+  applyDiff(other: string) {
+    const current = this._raw.toString();
+    for (const [from, to, insert] of [...calcPatch(current, other)].reverse()) {
+      if (to > from) {
+        this.deleteRange({ from, to });
+      }
+      if (insert.length > 0) {
+        this.insertBefore(from, insert);
+      }
+    }
   }
 
   /**

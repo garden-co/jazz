@@ -30,13 +30,7 @@ export {
 export { CoList } from "./coValues/coList.js";
 export { CoMap, type CoMapInit } from "./coValues/coMap.js";
 export { CoPlainText, type TextPos } from "./coValues/coPlainText.js";
-export {
-  CoRichText,
-  Marks,
-  type TreeLeaf,
-  type TreeNode,
-  type ResolvedMark,
-} from "./coValues/coRichText.js";
+export { CoRichText } from "./coValues/coRichText.js";
 export { ImageDefinition } from "./coValues/extensions/imageDef.js";
 export { Group } from "./coValues/group.js";
 export { CoValueBase } from "./coValues/interfaces.js";
