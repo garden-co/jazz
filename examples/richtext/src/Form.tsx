@@ -38,15 +38,30 @@ export function Form() {
   if (!me) return null;
 
   return (
-    <div className="grid gap-4 border p-8">
-      <input
-        type="text"
-        className="border border-stone-300 rounded shadow-sm py-1 px-2 flex-1 font-mono"
-        value={me.profile.bio?.toString()}
-        onChange={(e) => me.profile.bio?.applyDiff(e.target.value)}
-      />
+    <div className="flex flex-col">
+      <div className="flex-1 flex flex-col md:flex-row gap-4 p-8">
+        <div className="flex-1 flex flex-col gap-2">
+          <label className="text-sm font-medium text-stone-600 dark:text-stone-400">
+            Plaintext
+          </label>
+          <textarea
+            className="flex-1 border border-stone-200 dark:border-stone-700 rounded shadow-sm py-2 px-3 font-mono text-sm bg-stone-50 dark:bg-stone-900 text-stone-900 dark:text-stone-100 whitespace-pre-wrap break-words resize-none"
+            value={me.profile.bio?.toString()}
+            onChange={(e) => me.profile.bio?.applyDiff(e.target.value)}
+            rows={10}
+          />
+        </div>
 
-      <div ref={editorRef} className="mx-auto w-full max-w-2xl" />
+        <div className="flex-1 flex flex-col gap-2">
+          <label className="text-sm font-medium text-stone-600 dark:text-stone-400">
+            Richtext
+          </label>
+          <div
+            ref={editorRef}
+            className="flex-1 border border-stone-200 dark:border-stone-700 rounded shadow-sm"
+          />
+        </div>
+      </div>
     </div>
   );
 }
