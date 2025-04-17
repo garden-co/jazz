@@ -74,13 +74,30 @@ export function createJazzPlugin(coRichText: CoRichText | undefined) {
       decorations(state) {
         const selection = state.selection;
 
-        const caret = Decoration.inline(selection.from, selection.to, {
-          class: "jazz-caret",
-          style:
-            "border-left: 2px solid red; margin-left: -2px; background: rgba(255,0,0,0.1);",
-        });
+        if (selection.empty) {
+          const caret = Decoration.widget(selection.from, () => {
+            const div = document.createElement("span");
+            div.className = "jazz-caret";
+            div.style.borderLeft = "2px solid red";
+            div.style.marginLeft = "-2px";
+            div.style.backgroundColor = "rgba(255,0,0,0.1)";
+            return div;
+          });
 
-        return DecorationSet.create(state.doc, [caret]);
+          return DecorationSet.create(state.doc, [caret]);
+        }
+
+        const selectionDecoration = Decoration.inline(
+          selection.from,
+          selection.to,
+          {
+            class: "jazz-caret-selection",
+            style:
+              "border-left: 2px solid red; margin-left: -2px; background: rgba(255,0,0,0.1);",
+          },
+        );
+
+        return DecorationSet.create(state.doc, [selectionDecoration]);
       },
     },
   });
