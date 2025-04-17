@@ -1,6 +1,7 @@
 import {
   DOMParser as PMDOMParser,
   DOMSerializer as PMDOMSerializer,
+  Node as PMNode,
 } from "prosemirror-model";
 import { schema } from "prosemirror-schema-basic";
 
@@ -38,7 +39,7 @@ export function htmlToProseMirror(content: string) {
  * const html = proseMirrorToHtml(editorState.doc);
  * ```
  */
-export function proseMirrorToHtml(doc: any) {
+export function proseMirrorToHtml(doc: PMNode) {
   return new XMLSerializer()
     .serializeToString(
       PMDOMSerializer.fromSchema(schema).serializeFragment(doc.content),
