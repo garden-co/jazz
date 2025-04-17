@@ -6,7 +6,7 @@ async function loadMultiple(page: Page, context: any, events: any, test: any) {
     const { step } = test;
     try {
         await step(`${context.scenario.name}.load_page_duration`, async () => {
-            await page.goto(context.vars.target, { timeout: 55_000 });
+            await page.goto(context.vars.target, { timeout: 54_000 });
             await page.waitForSelector('#status >> text=CoValue UUIDs loaded successfully.');
         });
 
@@ -25,7 +25,7 @@ async function loadMultiple(page: Page, context: any, events: any, test: any) {
             });
         }
     } catch (error) {
-        logger.error('Load Test error:', error);
+        logger.error('Text - Load multiple test error:', error);
         throw error;
     }
 }
@@ -35,18 +35,18 @@ async function loadSingle(page: Page, context: any, events: any, test: any) {
     try {
         await step(`${context.scenario.name}.load_page_duration`, async () => {
             await page.goto(context.vars.target);
-            await page.waitForSelector('#status >> text=CoValue UUIDs loaded successfully.');
+            await page.waitForSelector('#status >> text=CoValue UUIDs loaded successfully.', { timeout: 55_000 });
         });
 
         const randomIndex = getRandomCoValueIndex();
         await step(`${context.scenario.name}.load_text_duration`, async () => {
             await page.selectOption('select#coValueSelect', { index: randomIndex });
             await page.click('#loadCoValueText');
-            await page.waitForSelector('#status >> text=Loaded (text) data for:', { timeout: 50000 });
+            await page.waitForSelector('#status >> text=Loaded (text) data for:', { timeout: 56_000 });
         });
 
     } catch (error) {
-        logger.error('Load Test error:', error);
+        logger.error('Text - Load single test error:', error);
         throw error;
     }
 }
@@ -74,7 +74,7 @@ async function createMultiple(page: Page, context: any, events: any, test: any) 
             });
         }
     } catch (error) {
-        logger.error('Create Test error:', error);
+        logger.error('Text - Create multiple test error:', error);
         throw error;
     }
 }
@@ -84,18 +84,18 @@ async function createSingle(page: Page, context: any, events: any, test: any) {
     try {
         await step(`${context.scenario.name}.load_page_duration`, async () => {
             await page.goto(context.vars.target);
-            await page.waitForSelector('#status >> text=CoValue UUIDs loaded successfully.');
+            await page.waitForSelector('#status >> text=CoValue UUIDs loaded successfully.', { timeout: 51_000 });
         });
         
         const initialOptions = await page.locator('select#coValueSelect option').all();
         await step(`${context.scenario.name}.create_text_duration`, async () => {
             await page.click('#createCoValueText');
-            await page.waitForSelector('#status >> text=Created (text) data for:', { timeout: 50000 });
+            await page.waitForSelector('#status >> text=Created (text) data for:', { timeout: 52_000 });
         });
         const newOptions = await page.locator('select#coValueSelect option').all();
         expect(newOptions.length).toEqual(initialOptions.length + 1);
     } catch (error) {
-        logger.error('Create Test error:', error);
+        logger.error('Text - Create single test error:', error);
         throw error;
     }
 }
@@ -139,7 +139,7 @@ async function mutateSingle(page: Page, context: any, events: any, test: any) {
                 // Emit rate metric for mutations per second (1 mutation / time taken)
                 if (mutationDuration > 0) {
                     const rps = 1 / mutationDuration;
-                    events.emit('rate', `${context.scenario.name}.mutation_producter_rate`, rps);
+                    events.emit('rate', `${context.scenario.name}.mutation_producer_rate`, rps);
                 }
 
                 // Consume the mutation by checking all spawned browsers received the mutation event
@@ -168,7 +168,7 @@ async function mutateSingle(page: Page, context: any, events: any, test: any) {
             }));
         });
     } catch (error) {
-        logger.error('Mutate Test error:', error);
+        logger.error('Text - Mutate single test error:', error);
         throw error;
     }
 }

@@ -3,7 +3,7 @@ import { readdirSync, statSync } from "fs";
 import { join } from "path";
 
 const VALID_SUFFIXES = new Set(
-    Array.from({ length: 10 }, (_, i) => `.json.${(i + 1).toString().padStart(2, "0")}`)
+    Array.from({ length: 10 }, (_, i) => `.json.${(i + 1).toString().padStart(2, "0")}.json`)
 );
 
 function findTargetFiles(dir: string, foundFiles: string[] = []): string[] {

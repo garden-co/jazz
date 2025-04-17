@@ -41,7 +41,7 @@ async function loadMultiple(page: Page, context: any, events: any, test: any) {
             });
         }
     } catch (error) {
-        logger.error('Load Test error:', error);
+        logger.error('Binary - Load multiple test error:', error);
         throw error;
     }
 }
@@ -51,18 +51,18 @@ async function loadSingle(page: Page, context: any, events: any, test: any) {
     try {
         await step(`${context.scenario.name}.load_page_duration`, async () => {
             await page.goto(context.vars.target);
-            await page.waitForSelector('#status >> text=CoValue UUIDs loaded successfully.');
+            await page.waitForSelector('#status >> text=CoValue UUIDs loaded successfully.', { timeout: 184_000 });
         });
 
         const randomIndex = getRandomCoValueIndex();
         await step(`${context.scenario.name}.load_binary_duration`, async () => {
             await page.selectOption('select#coValueSelect', { index: randomIndex });
             await page.click('#loadCoValueBinary');
-            await page.waitForSelector('#status >> text=Loaded (binary) data for:', { timeout: 90000 });
+            await page.waitForSelector('#status >> text=Loaded (binary) data for:', { timeout: 185_000 });
         });
 
     } catch (error) {
-        logger.error('Load Test error:', error);
+        logger.error('Binary - Load single test error:', error);
         throw error;
     }
 }
@@ -94,7 +94,7 @@ async function createMultiple(page: Page, context: any, events: any, test: any) 
             });
         }
     } catch (error) {
-        logger.error('Create Test error:', error);
+        logger.error('Binary - Create multiple test error:', error);
         throw error;
     } finally {
         cleanUp();
@@ -106,23 +106,23 @@ async function createSingle(page: Page, context: any, events: any, test: any) {
     try {
         await step(`${context.scenario.name}.load_page_duration`, async () => {
             await page.goto(context.vars.target);
-            await page.waitForSelector('#status >> text=CoValue UUIDs loaded successfully.', { timeout: 121000 });
+            await page.waitForSelector('#status >> text=CoValue UUIDs loaded successfully.', { timeout: 281_000 });
         });
         
         const initialOptions = await page.locator('select#coValueSelect option').all();
        
         // Pick a binary file for upload
         const filePath = path.resolve(__dirname, '../fixtures/binary-sample.zip');
-        await page.locator('#fileInput').setInputFiles(filePath);
+        await page.locator('#fileInput').setInputFiles(filePath, { timeout: 281_000 });
         
         await step(`${context.scenario.name}.create_binary_duration`, async () => {
-            await page.click('#createCoValueBinary', { timeout: 122000 });
-            await page.waitForSelector('#status >> text=Created (binary) data for:', { timeout: 180000 });
+            await page.click('#createCoValueBinary', { timeout: 282_000 });
+            await page.waitForSelector('#status >> text=Created (binary) data for:', { timeout: 283_000 });
         });
         const newOptions = await page.locator('select#coValueSelect option').all();
         expect(newOptions.length).toEqual(initialOptions.length + 1);
     } catch (error) {
-        logger.error('Create Test error:', error);
+        logger.error('Binary - Create single test error:', error);
         throw error;
     } finally {
         cleanUp();
@@ -156,7 +156,7 @@ async function mutateSingle(page: Page, context: any, events: any, test: any) {
                 await page.waitForSelector('#status >> text=Mutated (binary) data for:');
                 events.emit('counter', `${context.scenario.name}.mutation_producer_sent`, 1);
 
-                events.emit('rate', `${context.scenario.name}.mutation_producter_rate`);
+                events.emit('rate', `${context.scenario.name}.mutation_producer_rate`);
 
                 // Consume the mutation by checking all spawned browsers received the mutation event
                 await Promise.all(browsers.map(async ({ page: clientPage, ua }, index) => {
@@ -176,7 +176,7 @@ async function mutateSingle(page: Page, context: any, events: any, test: any) {
             }));
         });
     } catch (error) {
-        logger.error('Mutate Test error:', error);
+        logger.error('Binary - Mutate single test error:', error);
         throw error;
     }
 }

@@ -58,7 +58,7 @@ I eventually came across Shopify's [`toxiproxy`](https://github.com/Shopify/toxi
 
 I was able to achieve the desired OS-level programmatic throttling using a combination of macOS' `pfctl` (packet filter control) and `dnctl` (dummynet control) CLI tools. Note that some programmatic invocations of `pfctl` and `dnctl` by scripts used in the benchmarks will require sudo privileges.
 
-The only downside is that the benchmarks would need to be adapted to use `netem` (network emulator) and `tc` (traffic control), if there's a need to execute it on a production-class machine running Linux.
+The only downside is that the benchmarks would need to be adapted to use `netem` (network emulator) and `tc` (traffic control), if there's a need to execute it on a server-class machine running Linux.
 
 ## 1.6. Summary
 This is a high-level summary of the different components that make up the microbenchmark.
@@ -167,9 +167,13 @@ cp tests/fixtures/binary-sample.zip public/downloads/sample.zip
 # 3. install Chromium for playwright tests
 pnpm playwright install chromium
 
-# 4. start each web server on port 3000, one at a time, then each structured text and binary benchmark
-pnpm clean
-pnpm bench
+# 4. install Caddy web server
+brew install caddy
+# Use to stop the background service
+brew services stop caddy
+
+# 5. these scripts start each web server on port 3000, one at a time, and each benchmark test for structured text and binary
+pnpm clean && pnpm bench && pnpm report
 ```
 
 --- 
@@ -177,7 +181,7 @@ pnpm bench
 # 4.0. Footnotes
 [^1]:  I was successful after 4 attempts with 3 different models. The Express-to-Fastify conversion was done using a zero-shot prompt against: 
 (a) Claude Sonnet 3.5, 
-(b) DeepSeek, 
+(b) DeepSeek R1,
 (c) Claude Sonnet 3.5 again, before switching to 
 (d) Google Gemini (on February 17, 2025). 
 Gemini's conversion was the closest, stylistically and semantically, to the original Express code. It also had the least amount of compilation errors from the TypeScript compiler, but I still had to refine it using Claude and some manual digging to provide type hints to the 3 different calls to `Fastify()` that create HTTP/2 with TLS, HTTP/1.1 with TLS and HTTP/1.1 without TLS.
