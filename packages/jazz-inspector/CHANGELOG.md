@@ -1,5 +1,17 @@
 # jazz-inspector
 
+## 0.13.7
+
+### Patch Changes
+
+- 31ea2ef: show inboxInvite as string
+- Updated dependencies [4e9aae1]
+- Updated dependencies [21c935c]
+- Updated dependencies [aa1c80e]
+  - cojson@0.13.7
+  - jazz-react-core@0.13.7
+  - jazz-tools@0.13.7
+
 ## 0.13.6
 
 ### Patch Changes
