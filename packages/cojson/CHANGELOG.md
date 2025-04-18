@@ -1,5 +1,13 @@
 # cojson
 
+## 0.13.7
+
+### Patch Changes
+
+- 4e9aae1: Remove risky awaits from handleSyncMessage code path
+- 21c935c: Improved the management of peer reconnection and optimized the sync messages
+- aa1c80e: feat: add transactions size histogram & loaded covalues gauges
+
 ## 0.13.5
 
 ### Patch Changes
