@@ -1,370 +1,189 @@
 import { ValueType } from "@opentelemetry/api";
 import { UpDownCounter, metrics } from "@opentelemetry/api";
 import { PeerState } from "./PeerState.js";
-import { CoValueCore } from "./coValueCore.js";
+import { CoValueCore, TryAddTransactionsError } from "./coValueCore.js";
 import { RawCoID } from "./ids.js";
 import { logger } from "./logger.js";
-import { PeerID } from "./sync.js";
+import { PeerID, emptyKnownState } from "./sync.js";
 
 export const CO_VALUE_LOADING_CONFIG = {
   MAX_RETRIES: 2,
   TIMEOUT: 30_000,
 };
 
-export class CoValueUnknownState {
-  type = "unknown" as const;
-}
-
-export class CoValueLoadingState {
-  type = "loading" as const;
+export class CoValueState {
   private peers = new Map<
     PeerID,
-    ReturnType<typeof createResolvablePromise<void>>
+    | { type: "unknown" | "pending" | "available" | "unavailable" }
+    | { type: "errored"; error: TryAddTransactionsError }
   >();
-  private resolveResult: (value: CoValueCore | "unavailable") => void;
 
-  result: Promise<CoValueCore | "unavailable">;
+  private peersToRequestFrom = new Map<PeerID, PeerState>();
+  loading = false;
 
-  constructor(peersIds: Iterable<PeerID>) {
-    this.peers = new Map();
+  core: CoValueCore | null = null;
+  id: RawCoID;
 
-    for (const peerId of peersIds) {
-      this.peers.set(peerId, createResolvablePromise<void>());
+  listeners: Set<(state: CoValueState) => void> = new Set();
+
+  constructor(id: RawCoID) {
+    this.id = id;
+  }
+
+  addListener(listener: (state: CoValueState) => void) {
+    this.listeners.add(listener);
+    listener(this);
+  }
+
+  removeListener(listener: (state: CoValueState) => void) {
+    this.listeners.delete(listener);
+  }
+
+  private notifyListeners() {
+    this.loadFromNextPeer();
+
+    for (const listener of this.listeners) {
+      listener(this);
     }
-
-    const { resolve, promise } = createResolvablePromise<
-      CoValueCore | "unavailable"
-    >();
-
-    this.result = promise;
-    this.resolveResult = resolve;
-  }
-
-  markAsUnavailable(peerId: PeerID) {
-    const entry = this.peers.get(peerId);
-
-    if (entry) {
-      entry.resolve();
-    }
-
-    this.peers.delete(peerId);
-
-    // If none of the peers have the coValue, we resolve to unavailable
-    if (this.peers.size === 0) {
-      this.resolve("unavailable");
-    }
-  }
-
-  resolve(value: CoValueCore | "unavailable") {
-    this.resolveResult(value);
-    for (const entry of this.peers.values()) {
-      entry.resolve();
-    }
-    this.peers.clear();
-  }
-
-  // Wait for a specific peer to have a known state
-  waitForPeer(peerId: PeerID) {
-    const entry = this.peers.get(peerId);
-
-    if (!entry) {
-      return Promise.resolve();
-    }
-
-    return entry.promise;
-  }
-}
-
-export class CoValueAvailableState {
-  type = "available" as const;
-
-  constructor(public coValue: CoValueCore) {}
-}
-
-export class CoValueUnavailableState {
-  type = "unavailable" as const;
-}
-
-type CoValueStateAction =
-  | {
-      type: "load-requested";
-      peersIds: PeerID[];
-    }
-  | {
-      type: "not-found-in-peer";
-      peerId: PeerID;
-    }
-  | {
-      type: "available";
-      coValue: CoValueCore;
-    };
-
-type CoValueStateType =
-  | CoValueUnknownState
-  | CoValueLoadingState
-  | CoValueAvailableState
-  | CoValueUnavailableState;
-
-export class CoValueState {
-  promise?: Promise<CoValueCore | "unavailable">;
-  private resolve?: (value: CoValueCore | "unavailable") => void;
-  private counter: UpDownCounter;
-
-  constructor(
-    public id: RawCoID,
-    public state: CoValueStateType,
-  ) {
-    this.counter = metrics
-      .getMeter("cojson")
-      .createUpDownCounter("jazz.covalues.loaded", {
-        description: "The number of covalues in the system",
-        unit: "covalue",
-        valueType: ValueType.INT,
-      });
-
-    this.counter.add(1, {
-      state: this.state.type,
-    });
-  }
-
-  static Unknown(id: RawCoID) {
-    return new CoValueState(id, new CoValueUnknownState());
-  }
-
-  static Loading(id: RawCoID, peersIds: Iterable<PeerID>) {
-    return new CoValueState(id, new CoValueLoadingState(peersIds));
-  }
-
-  static Available(coValue: CoValueCore) {
-    return new CoValueState(coValue.id, new CoValueAvailableState(coValue));
-  }
-
-  static Unavailable(id: RawCoID) {
-    return new CoValueState(id, new CoValueUnavailableState());
   }
 
   async getCoValue() {
-    if (this.state.type === "available") {
-      return this.state.coValue;
+    if (this.core) {
+      return this.core;
     }
-    if (this.state.type === "unavailable") {
+
+    if (this.isDefinitelyUnavailable()) {
       return "unavailable";
     }
 
-    // If we don't have a resolved state we return a new promise
-    // that will be resolved when the state will move to available or unavailable
-    if (!this.promise) {
-      const { promise, resolve } = createResolvablePromise<
-        CoValueCore | "unavailable"
-      >();
+    return new Promise<CoValueCore | "unavailable">((resolve) => {
+      const listener = (state: CoValueState) => {
+        if (state.core) {
+          resolve(state.core);
+          this.removeListener(listener);
+        } else if (this.isDefinitelyUnavailable()) {
+          resolve("unavailable");
+          this.removeListener(listener);
+        }
+      };
 
-      this.promise = promise;
-      this.resolve = resolve;
-    }
-
-    return this.promise;
-  }
-
-  private moveToState(value: CoValueStateType) {
-    this.counter.add(-1, {
-      state: this.state.type,
+      this.addListener(listener);
     });
-    this.state = value;
-
-    this.counter.add(1, {
-      state: this.state.type,
-    });
-
-    if (!this.resolve) {
-      return;
-    }
-
-    // If the state is available we resolve the promise
-    // and clear it to handle the possible transition from unavailable to available
-    if (value.type === "available") {
-      this.resolve(value.coValue);
-      this.clearPromise();
-    } else if (value.type === "unavailable") {
-      this.resolve("unavailable");
-      this.clearPromise();
-    }
-  }
-
-  private clearPromise() {
-    this.promise = undefined;
-    this.resolve = undefined;
   }
 
   async loadFromPeers(peers: PeerState[]) {
-    const state = this.state;
+    for (const peer of peers) {
+      this.peersToRequestFrom.set(peer.id, peer);
+    }
 
-    if (state.type === "loading" || state.type === "available") {
+    this.loadFromNextPeer();
+  }
+
+  private loadFromNextPeer() {
+    if (this.isLoading() || this.peersToRequestFrom.size === 0) {
       return;
     }
 
-    if (peers.length === 0) {
-      this.moveToState(new CoValueUnavailableState());
+    // TODO: Load the peers with the same priority in parallel
+    let selectedPeer: PeerState | undefined;
+
+    for (const peer of this.peersToRequestFrom.values()) {
+      const currentState = this.peers.get(peer.id);
+
+      switch (currentState?.type) {
+        case "available":
+        case "errored":
+        case "pending":
+          this.peersToRequestFrom.delete(peer.id);
+          continue;
+
+        case "unavailable":
+        case "unknown":
+        default:
+          if (
+            !peer.shouldRetryUnavailableCoValues() &&
+            currentState?.type === "unavailable"
+          ) {
+            this.peersToRequestFrom.delete(peer.id);
+          } else if (
+            !selectedPeer ||
+            (peer.priority ?? 0) > (selectedPeer.priority ?? 0)
+          ) {
+            selectedPeer = peer;
+          }
+          break;
+      }
+    }
+
+    if (!selectedPeer) {
       return;
     }
 
-    const doLoad = async (peersToLoadFrom: PeerState[]) => {
-      const peersWithoutErrors = getPeersWithoutErrors(
-        peersToLoadFrom,
-        this.id,
-      );
+    this.peersToRequestFrom.delete(selectedPeer.id);
+    this.peers.set(selectedPeer.id, { type: "pending" });
 
-      // If we are in the loading state we move to a new loading state
-      // to reset all the loading promises
-      if (
-        this.state.type === "loading" ||
-        this.state.type === "unknown" ||
-        this.state.type === "unavailable"
-      ) {
-        this.moveToState(
-          new CoValueLoadingState(peersWithoutErrors.map((p) => p.id)),
-        );
-      }
+    const knownState = this.core
+      ? this.core.knownState()
+      : emptyKnownState(this.id);
 
-      // Assign the current state to a variable to not depend on the state changes
-      // that may happen while we wait for loadCoValueFromPeers to complete
-      const currentState = this.state;
+    selectedPeer
+      .pushOutgoingMessage({
+        action: "load",
+        ...knownState,
+      })
+      .catch((err) => {
+        logger.warn(`Failed to push load message to peer ${selectedPeer.id}`, {
+          err,
+        });
+      });
+  }
 
-      // If we entered successfully the loading state, we load the coValue from the peers
-      //
-      // We may not enter the loading state if the coValue has become available in between
-      // of the retries
-      if (currentState.type === "loading") {
-        await loadCoValueFromPeers(this, peersWithoutErrors);
+  markNotFoundInPeer(peerId: PeerID) {
+    this.peers.set(peerId, { type: "unavailable" });
+    this.notifyListeners();
+  }
 
-        const result = await currentState.result;
-        return result !== "unavailable";
-      }
+  markAvailable(coValue: CoValueCore) {
+    this.core = coValue;
+    this.notifyListeners();
+  }
 
-      return currentState.type === "available";
-    };
+  markErrored(peerId: PeerID, error: TryAddTransactionsError) {
+    this.peers.set(peerId, { type: "errored", error });
+    this.notifyListeners();
+  }
 
-    await doLoad(peers);
+  isErroredInPeer(peerId: PeerID) {
+    return this.peers.get(peerId)?.type === "errored";
+  }
 
-    // Retry loading from peers that have the retry flag enabled
-    const peersWithRetry = peers.filter((p) =>
-      p.shouldRetryUnavailableCoValues(),
+  isAvailable(): this is { type: "available"; core: CoValueCore } {
+    return !!this.core;
+  }
+
+  isUnknown() {
+    if (this.core) {
+      return false;
+    }
+
+    return this.peers.values().every((p) => p.type === "unknown");
+  }
+
+  isLoading() {
+    return this.peers.values().some((p) => p.type === "pending");
+  }
+
+  isDefinitelyUnavailable() {
+    if (this.core) {
+      return false;
+    }
+
+    return (
+      this.peers
+        .values()
+        .every((p) => p.type === "unavailable" || p.type === "errored") &&
+      !this.isAvailable()
     );
-
-    if (peersWithRetry.length > 0) {
-      // We want to exit early if the coValue becomes available in between the retries
-      await Promise.race([
-        this.getCoValue(),
-        runWithRetry(
-          () => doLoad(peersWithRetry),
-          CO_VALUE_LOADING_CONFIG.MAX_RETRIES,
-        ),
-      ]);
-    }
-
-    // If after the retries the coValue is still loading, we consider the load failed
-    if (this.state.type === "loading") {
-      this.moveToState(new CoValueUnavailableState());
-    }
-  }
-
-  dispatch(action: CoValueStateAction) {
-    const currentState = this.state;
-
-    switch (action.type) {
-      case "available":
-        if (currentState.type === "loading") {
-          currentState.resolve(action.coValue);
-        }
-
-        // It should be always possible to move to the available state
-        this.moveToState(new CoValueAvailableState(action.coValue));
-
-        break;
-      case "not-found-in-peer":
-        if (currentState.type === "loading") {
-          currentState.markAsUnavailable(action.peerId);
-        }
-
-        break;
-    }
-  }
-}
-
-async function loadCoValueFromPeers(
-  coValueEntry: CoValueState,
-  peers: PeerState[],
-) {
-  for (const peer of peers) {
-    if (peer.closed) {
-      continue;
-    }
-
-    if (coValueEntry.state.type === "available") {
-      /**
-       * We don't need to wait for the message to be delivered here.
-       *
-       * This way when the coValue becomes available because it's cached we don't wait for the server
-       * peer to consume the messages queue before moving forward.
-       */
-      peer
-        .pushOutgoingMessage({
-          action: "load",
-          ...coValueEntry.state.coValue.knownState(),
-        })
-        .catch((err) => {
-          logger.warn(`Failed to push load message to peer ${peer.id}`, {
-            err,
-          });
-        });
-    } else {
-      /**
-       * We only wait for the load state to be resolved.
-       */
-      peer
-        .pushOutgoingMessage({
-          action: "load",
-          id: coValueEntry.id,
-          header: false,
-          sessions: {},
-        })
-        .catch((err) => {
-          logger.warn(`Failed to push load message to peer ${peer.id}`, {
-            err,
-          });
-        });
-    }
-
-    if (coValueEntry.state.type === "loading") {
-      const { promise, resolve } = createResolvablePromise<void>();
-
-      /**
-       * Use a very long timeout for storage peers, because under pressure
-       * they may take a long time to consume the messages queue
-       *
-       * TODO: Track errors on storage and do not rely on timeout
-       */
-      const timeoutDuration =
-        peer.role === "storage"
-          ? CO_VALUE_LOADING_CONFIG.TIMEOUT * 10
-          : CO_VALUE_LOADING_CONFIG.TIMEOUT;
-
-      const timeout = setTimeout(() => {
-        if (coValueEntry.state.type === "loading") {
-          logger.warn("Failed to load coValue from peer", {
-            coValueId: coValueEntry.id,
-            peerId: peer.id,
-            peerRole: peer.role,
-          });
-          coValueEntry.dispatch({
-            type: "not-found-in-peer",
-            peerId: peer.id,
-          });
-          resolve();
-        }
-      }, timeoutDuration);
-      await Promise.race([promise, coValueEntry.state.waitForPeer(peer.id)]);
-      clearTimeout(timeout);
-    }
   }
 }
 
@@ -391,29 +210,6 @@ async function runWithRetry<T>(fn: () => Promise<T>, maxRetries: number) {
   }
 }
 
-function createResolvablePromise<T>() {
-  let resolve!: (value: T) => void;
-
-  const promise = new Promise<T>((res) => {
-    resolve = res;
-  });
-
-  return { promise, resolve };
-}
-
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function getPeersWithoutErrors(peers: PeerState[], coValueId: RawCoID) {
-  return peers.filter((p) => {
-    if (p.erroredCoValues.has(coValueId)) {
-      logger.warn(
-        `Skipping load on errored coValue ${coValueId} from peer ${p.id}`,
-      );
-      return false;
-    }
-
-    return true;
-  });
 }

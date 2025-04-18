@@ -1,4 +1,4 @@
-import { PeerKnownStateActions, PeerKnownStates } from "./PeerKnownStates.js";
+import { PeerKnownStates, ReadonlyPeerKnownStates } from "./PeerKnownStates.js";
 import {
   PriorityBasedMessageQueue,
   QueueEntry,
@@ -7,7 +7,7 @@ import { TryAddTransactionsError } from "./coValueCore.js";
 import { RawCoID, SessionID } from "./ids.js";
 import { logger } from "./logger.js";
 import { CO_VALUE_PRIORITY } from "./priority.js";
-import { Peer, SyncMessage } from "./sync.js";
+import { CoValueKnownState, Peer, SyncMessage } from "./sync.js";
 
 export class PeerState {
   private queue: PriorityBasedMessageQueue;
@@ -17,7 +17,7 @@ export class PeerState {
 
   constructor(
     private peer: Peer,
-    knownStates: PeerKnownStates | undefined,
+    knownStates: ReadonlyPeerKnownStates | undefined,
   ) {
     /**
      * We set as default priority HIGH to handle all the messages without a
@@ -28,14 +28,16 @@ export class PeerState {
     this.queue = new PriorityBasedMessageQueue(CO_VALUE_PRIORITY.HIGH, {
       peerRole: peer.role,
     });
-    this.optimisticKnownStates = knownStates?.clone() ?? new PeerKnownStates();
+
+    this._knownStates = knownStates?.clone() ?? new PeerKnownStates();
 
     // We assume that exchanges with storage peers are always successful
     // hence we don't need to differentiate between knownStates and optimisticKnownStates
     if (peer.role === "storage") {
-      this.knownStates = this.optimisticKnownStates;
+      this._optimisticKnownStates = "assumeInfallible";
     } else {
-      this.knownStates = knownStates?.clone() ?? new PeerKnownStates();
+      this._optimisticKnownStates =
+        knownStates?.clone() ?? new PeerKnownStates();
     }
   }
 
@@ -44,7 +46,11 @@ export class PeerState {
    *
    * This can be used to safely track the sync state of a coValue in a given peer.
    */
-  readonly knownStates: PeerKnownStates;
+  readonly _knownStates: PeerKnownStates;
+
+  get knownStates(): ReadonlyPeerKnownStates {
+    return this._knownStates;
+  }
 
   /**
    * This one collects the known states "optimistically".
@@ -53,18 +59,68 @@ export class PeerState {
    * The main difference with knownState is that this is updated when the content is sent to the peer without
    * waiting for any acknowledgement from the peer.
    */
-  readonly optimisticKnownStates: PeerKnownStates;
+  readonly _optimisticKnownStates: PeerKnownStates | "assumeInfallible";
+
+  get optimisticKnownStates(): ReadonlyPeerKnownStates {
+    if (this._optimisticKnownStates === "assumeInfallible") {
+      return this.knownStates;
+    }
+
+    return this._optimisticKnownStates;
+  }
+
   readonly toldKnownState: Set<RawCoID> = new Set();
 
-  dispatchToKnownStates(action: PeerKnownStateActions) {
-    this.knownStates.dispatch(action);
+  updateHeader(id: RawCoID, header: boolean) {
+    this._knownStates.updateHeader(id, header);
 
-    if (this.role !== "storage") {
-      this.optimisticKnownStates.dispatch(action);
+    if (this._optimisticKnownStates !== "assumeInfallible") {
+      this._optimisticKnownStates.updateHeader(id, header);
     }
   }
 
-  readonly erroredCoValues: Map<RawCoID, TryAddTransactionsError> = new Map();
+  combineWith(id: RawCoID, value: CoValueKnownState) {
+    this._knownStates.combineWith(id, value);
+
+    if (this._optimisticKnownStates !== "assumeInfallible") {
+      this._optimisticKnownStates.combineWith(id, value);
+    }
+  }
+
+  combineOptimisticWith(id: RawCoID, value: CoValueKnownState) {
+    if (this._optimisticKnownStates === "assumeInfallible") {
+      this._knownStates.combineWith(id, value);
+    } else {
+      this._optimisticKnownStates.combineWith(id, value);
+    }
+  }
+
+  updateSessionCounter(id: RawCoID, sessionId: SessionID, value: number) {
+    this._knownStates.updateSessionCounter(id, sessionId, value);
+
+    if (this._optimisticKnownStates !== "assumeInfallible") {
+      this._optimisticKnownStates.updateSessionCounter(id, sessionId, value);
+    }
+  }
+
+  setKnownState(id: RawCoID, knownState: CoValueKnownState | "empty") {
+    this._knownStates.set(id, knownState);
+
+    if (this._optimisticKnownStates !== "assumeInfallible") {
+      this._optimisticKnownStates.set(id, knownState);
+    }
+  }
+
+  setOptimisticKnownState(
+    id: RawCoID,
+    knownState: CoValueKnownState | "empty",
+  ) {
+    if (this._optimisticKnownStates === "assumeInfallible") {
+      this._knownStates.set(id, knownState);
+    } else {
+      this._optimisticKnownStates.set(id, knownState);
+    }
+  }
 
   get id() {
     return this.peer.id;

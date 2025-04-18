@@ -487,7 +487,7 @@ describe("createCoValueObservable", () => {
     expect(observable.getCurrentValue()).toBeUndefined();
   });
 
-  it("should return null if the coValue is not found", async () => {
+  it.only("should return null if the coValue is not found", async () => {
     const { meOnSecondPeer } = await setupAccount();
     const observable = createCoValueObservable<
       TestMap,

@@ -116,11 +116,11 @@ export class SyncStateManager {
 
     const entry = this.syncManager.local.coValuesStore.get(id);
 
-    if (entry.state.type !== "available") {
+    if (!entry.isAvailable()) {
       return undefined;
     }
 
-    const coValue = entry.state.coValue;
+    const coValue = entry.core;
     const coValueSessions = coValue.knownState().sessions;
 
     return {

@@ -245,8 +245,6 @@ describe("loading coValues from server", () => {
       [
         "client -> server | LOAD Map sessions: empty",
         "server -> client | KNOWN Map sessions: empty",
-        "client -> server | LOAD Map sessions: empty",
-        "server -> client | KNOWN Map sessions: empty",
       ]
     `);
   });

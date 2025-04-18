@@ -44,7 +44,6 @@ describe("client with storage syncs with server", () => {
         "storage -> client | KNOWN Group sessions: header/3",
         "client -> server | KNOWN Map sessions: header/1",
         "client -> storage | CONTENT Map header: true new: After: 0 New: 1",
-        "storage -> client | KNOWN Map sessions: header/1",
       ]
     `);
   });
@@ -78,11 +77,6 @@ describe("client with storage syncs with server", () => {
         "client -> server | CONTENT Group header: true new: After: 0 New: 3",
         "server -> client | KNOWN Group sessions: header/3",
         "client -> storage | KNOWN Map sessions: header/1",
-        "client -> server | LOAD Map sessions: header/1",
-        "server -> client | CONTENT Group header: true new: After: 0 New: 3",
-        "client -> server | KNOWN Group sessions: header/3",
-        "server -> client | KNOWN Map sessions: header/1",
-        "client -> server | CONTENT Map header: true new: After: 0 New: 1",
       ]
     `);
   });
@@ -126,8 +120,6 @@ describe("client with storage syncs with server", () => {
         "client -> storage | CONTENT Group header: true new: After: 0 New: 5",
         "storage -> client | KNOWN Group sessions: header/5",
         "client -> server | KNOWN Map sessions: header/1",
-        "client -> storage | CONTENT Map header: true new: After: 0 New: 1",
-        "storage -> client | KNOWN Map sessions: header/1",
       ]
     `);
   });
@@ -146,6 +138,8 @@ describe("client with storage syncs with server", () => {
     expect(mapOnClient.get("hello")).toEqual("world");
 
     client.node.syncManager.getPeers()[0]?.gracefulShutdown();
+
+    await new Promise((resolve) => setTimeout(resolve, 100));
 
     SyncMessagesLog.clear();
     map.set("hello", "updated", "trusting");
