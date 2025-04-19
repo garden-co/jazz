@@ -6,7 +6,7 @@ import { RustLogo } from "@/components/icons/RustLogo";
 import { SvelteLogo } from "@/components/icons/SvelteLogo";
 import { SwiftLogo } from "@/components/icons/SwiftLogo";
 import { VueLogo } from "@/components/icons/VueLogo";
-import { Icon } from "gcmp-design-system/src/app/components/atoms/Icon";
+import { Icon } from "@garden-co/design-system/src/components/atoms/Icon";
 import React from "react";
 
 export function SupportedEnvironmentsSection() {

@@ -1,4 +1,4 @@
-import { NavItemProps } from "gcmp-design-system/src/app/components/organisms/Nav";
+import { NavItemProps } from "@garden-co/design-system/src/components/organisms/Nav";
 
 export const navigationItems: NavItemProps[] = [
   { title: "Jazz Cloud", href: "/cloud" },

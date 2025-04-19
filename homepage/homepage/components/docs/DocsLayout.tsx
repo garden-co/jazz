@@ -3,8 +3,8 @@
 import { TableOfContents } from "@/components/docs/TableOfContents";
 import { JazzMobileNav } from "@/components/nav";
 import { TocEntry } from "@stefanprobst/rehype-extract-toc";
-import type { IconName } from "gcmp-design-system/src/app/components/atoms/Icon";
-import { NavSection } from "gcmp-design-system/src/app/components/organisms/Nav";
+import type { IconName } from "@garden-co/design-system/src/components/atoms/Icon";
+import { NavSection } from "@garden-co/design-system/src/components/organisms/Nav";
 
 export default function DocsLayout({
   children,

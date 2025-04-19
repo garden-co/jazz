@@ -1,7 +1,7 @@
-import { Button } from "gcmp-design-system/src/app/components/atoms/Button";
-import { Card } from "gcmp-design-system/src/app/components/atoms/Card";
-import { H2 } from "gcmp-design-system/src/app/components/atoms/Headings";
-import { Prose } from "gcmp-design-system/src/app/components/molecules/Prose";
+import { Button } from "@garden-co/design-system/src/components/atoms/Button";
+import { Card } from "@garden-co/design-system/src/components/atoms/Card";
+import { H2 } from "@garden-co/design-system/src/components/atoms/Headings";
+import { Prose } from "@garden-co/design-system/src/components/molecules/Prose";
 
 export function EarlyAdopterSection() {
   return (

@@ -1,7 +1,7 @@
 import { SideNav, SideNavBody, SideNavHeader } from "@/components/SideNav";
 import { SideNavItem } from "@/components/SideNavItem";
 import { packages } from "@/content/packages";
-import { Icon } from "gcmp-design-system/src/app/components/atoms/Icon";
+import { Icon } from "@garden-co/design-system/src/components/atoms/Icon";
 import Link from "next/link";
 import { requestProject } from "./requestProject";
 

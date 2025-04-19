@@ -1,11 +1,11 @@
 import { ServerWorkersDiagram } from "@/components/home/ServerWorkersDiagram";
 import { ClerkLogo } from "@/components/icons/ClerkLogo";
-import { Button } from "gcmp-design-system/src/app/components/atoms/Button";
-import { Card } from "gcmp-design-system/src/app/components/atoms/Card";
-import { H3 } from "gcmp-design-system/src/app/components/atoms/Headings";
-import { Icon } from "gcmp-design-system/src/app/components/atoms/Icon";
-import { Prose } from "gcmp-design-system/src/app/components/molecules/Prose";
-import { SectionHeader } from "gcmp-design-system/src/app/components/molecules/SectionHeader";
+import { Button } from "@garden-co/design-system/src/components/atoms/Button";
+import { Card } from "@garden-co/design-system/src/components/atoms/Card";
+import { H3 } from "@garden-co/design-system/src/components/atoms/Headings";
+import { Icon } from "@garden-co/design-system/src/components/atoms/Icon";
+import { Prose } from "@garden-co/design-system/src/components/molecules/Prose";
+import { SectionHeader } from "@garden-co/design-system/src/components/molecules/SectionHeader";
 import Link from "next/link";
 
 const features = [

@@ -1,7 +1,7 @@
-import { Card } from "gcmp-design-system/src/app/components/atoms/Card";
-import { GappedGrid } from "gcmp-design-system/src/app/components/molecules/GappedGrid";
-import { Prose } from "gcmp-design-system/src/app/components/molecules/Prose";
-import { SectionHeader } from "gcmp-design-system/src/app/components/molecules/SectionHeader";
+import { Card } from "@garden-co/design-system/src/components/atoms/Card";
+import { GappedGrid } from "@garden-co/design-system/src/components/molecules/GappedGrid";
+import { Prose } from "@garden-co/design-system/src/components/molecules/Prose";
+import { SectionHeader } from "@garden-co/design-system/src/components/molecules/SectionHeader";
 import CollaborationInvite from "./CollaborationInvite.mdx";
 import CollaborationPrivate from "./CollaborationPrivate.mdx";
 import CollaborationPublic from "./CollaborationPublic.mdx";

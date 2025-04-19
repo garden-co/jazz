@@ -6,7 +6,7 @@ import {
   SideNavSectionList,
 } from "@/components/SideNav";
 import { useFramework } from "@/lib/use-framework";
-import { Icon } from "gcmp-design-system/src/app/components/atoms/Icon";
+import { Icon } from "@garden-co/design-system/src/components/atoms/Icon";
 import { usePathname } from "next/navigation";
 import React from "react";
 

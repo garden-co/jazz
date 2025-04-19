@@ -1,7 +1,7 @@
-import type { IconName } from "gcmp-design-system/src/app/components/atoms/Icon";
-import { FeatureCard } from "gcmp-design-system/src/app/components/molecules/FeatureCard";
-import { GappedGrid } from "gcmp-design-system/src/app/components/molecules/GappedGrid";
-import { SectionHeader } from "gcmp-design-system/src/app/components/molecules/SectionHeader";
+import type { IconName } from "@garden-co/design-system/src/components/atoms/Icon";
+import { FeatureCard } from "@garden-co/design-system/src/components/molecules/FeatureCard";
+import { GappedGrid } from "@garden-co/design-system/src/components/molecules/GappedGrid";
+import { SectionHeader } from "@garden-co/design-system/src/components/molecules/SectionHeader";
 
 export function LocalFirstFeaturesSection() {
   const features: Array<{

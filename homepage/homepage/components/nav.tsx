@@ -1,12 +1,12 @@
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { navigationItems } from "@/content/navigation-items";
 import { socials } from "@/content/socials";
-import { JazzLogo } from "gcmp-design-system/src/app/components/atoms/logos/JazzLogo";
+import { JazzLogo } from "@garden-co/design-system/src/components/atoms/logos/JazzLogo";
 import {
   MobileNav,
   Nav,
   type NavSection,
-} from "gcmp-design-system/src/app/components/organisms/Nav";
+} from "@garden-co/design-system/src/components/organisms/Nav";
 
 export function JazzNav({
   sections,

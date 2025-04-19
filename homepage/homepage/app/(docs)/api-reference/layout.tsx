@@ -1,7 +1,7 @@
 import { SideNavLayout } from "@/components/SideNavLayout";
 import { ApiNav } from "@/components/docs/ApiNav";
 import { JazzMobileNav } from "@/components/nav";
-import { Prose } from "gcmp-design-system/src/app/components/molecules/Prose";
+import { Prose } from "@garden-co/design-system/src/components/molecules/Prose";
 
 export default function RootLayout({
   children,

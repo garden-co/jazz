@@ -1,8 +1,8 @@
 import { clsx } from "clsx";
-import { Card } from "gcmp-design-system/src/app/components/atoms/Card";
-import { H2 } from "gcmp-design-system/src/app/components/atoms/Headings";
-import { Kicker } from "gcmp-design-system/src/app/components/atoms/Kicker";
-import { GappedGrid } from "gcmp-design-system/src/app/components/molecules/GappedGrid";
+import { Card } from "@garden-co/design-system/src/components/atoms/Card";
+import { H2 } from "@garden-co/design-system/src/components/atoms/Headings";
+import { Kicker } from "@garden-co/design-system/src/components/atoms/Kicker";
+import { GappedGrid } from "@garden-co/design-system/src/components/molecules/GappedGrid";
 import CodeStepAction from "./CodeStepAction.mdx";
 import CodeStepCloud from "./CodeStepCloud.mdx";
 import CodeStepRender from "./CodeStepRender.mdx";

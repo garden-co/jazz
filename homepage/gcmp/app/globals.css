@@ -1,4 +1,4 @@
-@import "gcmp-design-system/src/app/globals.css";
+@import "@garden-co/design-system/src/app/globals.css";
 
 @tailwind base;
 @tailwind components;

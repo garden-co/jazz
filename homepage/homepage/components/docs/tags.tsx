@@ -1,4 +1,4 @@
-import { Icon } from "gcmp-design-system/src/app/components/atoms/Icon";
+import { Icon } from "@garden-co/design-system/src/components/atoms/Icon";
 import Link from "next/link";
 import { ReactNode } from "react";
 import { createHighlighter } from "shiki";

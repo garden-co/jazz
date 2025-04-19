@@ -17,6 +17,9 @@ importers:
       '@icons-pack/react-simple-icons':
         specifier: ^9.1.0
         version: 9.4.1(react@18.3.1)
+      '@tailwindcss/typography':
+        specifier: ^0.5.10
+        version: 0.5.13(tailwindcss@3.4.3)
       class-variance-authority:
         specifier: ^0.7.0
         version: 0.7.0
@@ -38,6 +41,9 @@ importers:
       next-themes:
         specifier: ^0.2.1
         version: 0.2.1(next@14.2.7(@opentelemetry/api@1.9.0)(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
+      postcss:
+        specifier: ^8
+        version: 8.4.38
       react:
         specifier: ^18
         version: 18.3.1
@@ -50,6 +56,9 @@ importers:
       tailwind-merge:
         specifier: ^1.14.0
         version: 1.14.0
+      tailwindcss:
+        specifier: ^3.4.1
+        version: 3.4.3
       tailwindcss-animate:
         specifier: ^1.0.7
         version: 1.0.7(tailwindcss@3.4.3)
@@ -60,9 +69,6 @@ importers:
       '@csstools/postcss-oklab-function':
         specifier: ^3.0.6
         version: 3.0.16(postcss@8.4.38)
-      '@tailwindcss/typography':
-        specifier: ^0.5.10
-        version: 0.5.13(tailwindcss@3.4.3)
       '@types/node':
         specifier: ^20
         version: 20.12.11
@@ -72,18 +78,15 @@ importers:
       '@types/react-dom':
         specifier: ^18
         version: 18.3.0
-      postcss:
-        specifier: ^8
-        version: 8.4.38
-      tailwindcss:
-        specifier: ^3.4.1
-        version: 3.4.3
       typescript:
         specifier: ^5.3.3
         version: 5.4.5
 
   gcmp:
     dependencies:
+      '@garden-co/design-system':
+        specifier: workspace:*
+        version: link:../design-system
       '@icons-pack/react-simple-icons':
         specifier: ^9.1.0
         version: 9.4.1(react@18.3.1)
@@ -111,9 +114,6 @@ importers:
       feed:
         specifier: ^4.2.2
         version: 4.2.2
-      gcmp-design-system:
-        specifier: workspace:*
-        version: link:../design-system
       lucide-react:
         specifier: ^0.436.0
         version: 0.436.0(react@18.3.1)
@@ -184,6 +184,9 @@ importers:
 
   homepage:
     dependencies:
+      '@garden-co/design-system':
+        specifier: workspace:*
+        version: link:../design-system
       '@headlessui/react':
         specifier: ^2.2.0
         version: 2.2.0(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
@@ -232,9 +235,6 @@ importers:
       estree-util-value-to-estree:
         specifier: ^3.3.2
         version: 3.3.2
-      gcmp-design-system:
-        specifier: workspace:*
-        version: link:../design-system
       github-slugger:
         specifier: ^2.0.0
         version: 2.0.0

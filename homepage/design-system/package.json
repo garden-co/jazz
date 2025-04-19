@@ -1,10 +1,10 @@
 {
-  "name": "gcmp-design-system",
-  "version": "0.1.0",
-  "private": true,
+  "name": "@garden-co/design-system",
+  "version": "0.1.2",
   "scripts": {
     "dev": "next dev",
     "build": "next build",
+    "build:dist": "tsc --project tsconfig.dist.json",
     "start": "next start",
     "format-and-lint": "biome check .",
     "format-and-lint:fix": "biome check . --write"
@@ -24,17 +24,17 @@
     "react-dom": "^18",
     "resend": "^4.0.0",
     "tailwind-merge": "^1.14.0",
-    "tailwindcss-animate": "^1.0.7"
+    "tailwindcss-animate": "^1.0.7",
+    "tailwindcss": "^3.4.1",
+    "postcss": "^8",
+    "@tailwindcss/typography": "^0.5.10"
   },
   "devDependencies": {
+    "typescript": "^5.3.3",
     "@biomejs/biome": "1.9.4",
     "@csstools/postcss-oklab-function": "^3.0.6",
-    "@tailwindcss/typography": "^0.5.10",
     "@types/node": "^20",
     "@types/react": "^18",
-    "@types/react-dom": "^18",
-    "postcss": "^8",
-    "tailwindcss": "^3.4.1",
-    "typescript": "^5.3.3"
+    "@types/react-dom": "^18"
   }
 }

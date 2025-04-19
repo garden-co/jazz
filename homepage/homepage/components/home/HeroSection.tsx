@@ -1,14 +1,14 @@
 import CreateJazzApp from "@/components/home/CreateJazzApp.mdx";
 import { marketingCopy } from "@/content/marketingCopy";
-import { H1 } from "gcmp-design-system/src/app/components/atoms/Headings";
+import { H1 } from "@garden-co/design-system/src/components/atoms/Headings";
 import {
   Icon,
   type IconName,
-} from "gcmp-design-system/src/app/components/atoms/Icon";
-import { Kicker } from "gcmp-design-system/src/app/components/atoms/Kicker";
-import { CopyButton } from "gcmp-design-system/src/app/components/molecules/CodeGroup";
-import { Prose } from "gcmp-design-system/src/app/components/molecules/Prose";
-import { SectionHeader } from "gcmp-design-system/src/app/components/molecules/SectionHeader";
+} from "@garden-co/design-system/src/components/atoms/Icon";
+import { Kicker } from "@garden-co/design-system/src/components/atoms/Kicker";
+import { CopyButton } from "@garden-co/design-system/src/components/molecules/CodeGroup";
+import { Prose } from "@garden-co/design-system/src/components/molecules/Prose";
+import { SectionHeader } from "@garden-co/design-system/src/components/molecules/SectionHeader";
 import Link from "next/link";
 
 const features: Array<{

@@ -7,10 +7,10 @@ import { SvelteLogo } from "@/components/icons/SvelteLogo";
 import { VueLogo } from "@/components/icons/VueLogo";
 import { Example, features, tech } from "@/content/example";
 import { clsx } from "clsx";
-import { H2 } from "gcmp-design-system/src/app/components/atoms/Headings";
-import { Icon } from "gcmp-design-system/src/app/components/atoms/Icon";
-import { GappedGrid } from "gcmp-design-system/src/app/components/molecules/GappedGrid";
-import { HeroHeader } from "gcmp-design-system/src/app/components/molecules/HeroHeader";
+import { H2 } from "@garden-co/design-system/src/components/atoms/Headings";
+import { Icon } from "@garden-co/design-system/src/components/atoms/Icon";
+import { GappedGrid } from "@garden-co/design-system/src/components/molecules/GappedGrid";
+import { HeroHeader } from "@garden-co/design-system/src/components/molecules/HeroHeader";
 import type { Metadata } from "next";
 
 const title = "Examples";
