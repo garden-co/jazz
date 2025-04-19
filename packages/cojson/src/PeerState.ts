@@ -144,6 +144,29 @@ export class PeerState {
     }
   }
 
+  closeListeners = new Set<() => void>();
+
+  addCloseListener(listener: () => void) {
+    if (this.closed) {
+      listener();
+      return () => {};
+    }
+
+    this.closeListeners.add(listener);
+
+    return () => {
+      this.closeListeners.delete(listener);
+    };
+  }
+
+  emitClose() {
+    for (const listener of this.closeListeners) {
+      listener();
+    }
+
+    this.closeListeners.clear();
+  }
+
   gracefulShutdown() {
     logger.debug("Gracefully closing", {
       peerId: this.id,
@@ -152,6 +175,7 @@ export class PeerState {
     this.closeQueue();
     this.peer.outgoing.close();
     this.closed = true;
+    this.emitClose();
   }
 
   async processIncomingMessages(callback: (msg: SyncMessage) => Promise<void>) {

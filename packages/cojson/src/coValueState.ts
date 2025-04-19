@@ -296,6 +296,10 @@ async function loadCoValueFromPeers(
 ) {
   for (const peer of peers) {
     if (peer.closed) {
+      coValueEntry.dispatch({
+        type: "not-found-in-peer",
+        peerId: peer.id,
+      });
       continue;
     }
 
@@ -348,7 +352,7 @@ async function loadCoValueFromPeers(
           ? CO_VALUE_LOADING_CONFIG.TIMEOUT * 10
           : CO_VALUE_LOADING_CONFIG.TIMEOUT;
 
-      const timeout = setTimeout(() => {
+      const handleTimeoutOrClose = () => {
         if (coValueEntry.state.type === "loading") {
           logger.warn("Failed to load coValue from peer", {
             coValueId: coValueEntry.id,
@@ -361,9 +365,14 @@ async function loadCoValueFromPeers(
           });
           resolve();
         }
-      }, timeoutDuration);
+      };
+
+      const timeout = setTimeout(handleTimeoutOrClose, timeoutDuration);
+      const closeListener = peer.addCloseListener(handleTimeoutOrClose);
+
       await Promise.race([promise, coValueEntry.state.waitForPeer(peer.id)]);
       clearTimeout(timeout);
+      closeListener();
     }
   }
 }

@@ -155,7 +155,10 @@ export class SyncManager {
 
   getServerAndStoragePeers(excludePeerId?: PeerID): PeerState[] {
     return this.peersInPriorityOrder().filter(
-      (peer) => peer.isServerOrStoragePeer() && peer.id !== excludePeerId,
+      (peer) =>
+        peer.isServerOrStoragePeer() &&
+        peer.id !== excludePeerId &&
+        !peer.closed,
     );
   }
 
@@ -320,7 +323,22 @@ export class SyncManager {
       }
 
       // Wait for the previous peer to finish processing the incoming messages
-      await prevPeer.incomingMessagesProcessingPromise?.catch((e) => {});
+      const result = await Promise.race([
+        prevPeer.incomingMessagesProcessingPromise,
+        new Promise((resolve) =>
+          setTimeout(() => resolve(new Error("timeout")), 60_000),
+        ), // 60 seconds timeout
+      ]);
+
+      if (result instanceof Error) {
+        logger.error(
+          "Timeout waiting for previous peer to finish processing messages",
+          {
+            peerId: prevPeer.id,
+            peerRole: prevPeer.role,
+          },
+        );
+      }
 
       // If another peer was added in the meantime, we close this peer
       if (prevPeer.nextPeer !== peer) {
@@ -536,7 +554,18 @@ export class SyncManager {
      * we have the coValue while we don't.
      */
     if (entry.state.type !== "available" && !msg.header) {
-      await this.local.loadCoValueCore(msg.id, peer.id);
+      const result = await Promise.race([
+        this.local.loadCoValueCore(msg.id, peer.id),
+        new Promise((resolve) =>
+          setTimeout(() => resolve(new Error("timeout")), 30_000),
+        ), // 60 seconds timeout
+      ]);
+
+      if (result instanceof Error) {
+        logger.error("Timeout reached loading coValue in handleNewContent", {
+          err: result,
+        });
+      }
     }
 
     if (entry.state.type !== "available") {

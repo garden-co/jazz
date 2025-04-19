@@ -322,4 +322,6 @@ describe("loading coValues from server", () => {
       ]
     `);
   });
+
+  test.todo("should mark the coValue as unavailable if the peer is closed");
 });
