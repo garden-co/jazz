@@ -235,11 +235,13 @@ export function shouldNotResolve<T>(
   });
 }
 
-export function waitFor(callback: () => boolean | void) {
+export function waitFor(
+  callback: () => boolean | void | Promise<boolean | void>,
+) {
   return new Promise<void>((resolve, reject) => {
-    const checkPassed = () => {
+    const checkPassed = async () => {
       try {
-        return { ok: callback(), error: null };
+        return { ok: await callback(), error: null };
       } catch (error) {
         return { ok: false, error };
       }
@@ -247,8 +249,8 @@ export function waitFor(callback: () => boolean | void) {
 
     let retries = 0;
 
-    const interval = setInterval(() => {
-      const { ok, error } = checkPassed();
+    const interval = setInterval(async () => {
+      const { ok, error } = await checkPassed();
 
       if (ok !== false) {
         clearInterval(interval);
