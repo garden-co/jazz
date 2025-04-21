@@ -117,17 +117,24 @@ The Fastify code can be found in `src/node-js/http-sse-fastify.ts` and it is use
 Out of all 6 web servers, this server was the most challenging to get right. By far.
 
 #### No Free Lunch
-First, the µWS project touts it high performance credentials and it is able to do this because it offers far more knobs for tuning, compared to other WebSocket libraries.
+First, the µWS project touts it high performance credentials and it is able to do this because it offers far more knobs for tuning, compared to other WebSocket libraries. Those additional knobs were a major source of footguns.
 
 For instance, if µWS.js receives a payload from a client whose size exceeds the default value of [`maxPayloadLength`](https://unetworking.github.io/uWebSockets.js/generated/interfaces/WebSocketBehavior.html#maxPayloadLength), the connection is immediately closed. 
 
-Currently, `maxPayloadLength` defaults to `16 * 1024` i.e. `16KB`, but I didn't realize this until I started experiencing WebSocket connection closures. These unexplained connection closures didn't come up at all when I first tested the code against the `ws` WebSocket library. 
+Currently, `maxPayloadLength` defaults to `16 * 1024` i.e. `16KB`, but I didn't realize this until I started experiencing WebSocket connection closures. These unexplained connection closures didn't come up at all when I load tested the Node.js server using the `ws` WebSocket library. 
 
-In retrospect, the type of head-scratching was bound to occur because the default is lower than the limit needed for these benchmarks i.e. download and upload of binary CoValues are expected to happen in chunks of `100KB`.
+In retrospect, this type of head-scratching was bound to occur because many of µWS defaults are lower than what's needed for these benchmarks e.g. download and upload of binary CoValues happen in chunks of `100KB`.
+
 
 Second, the project's backpressure [example](https://github.com/uNetworking/uWebSockets.js/blob/master/examples/Backpressure.js) is too basic to be representative of how backpressure may arise in the real-world, or how it may be handled, without ugly hacks.
 
-So, it is not suprising that all major LLMs struggle with generating realistic µWS code compared to other libraries. I had to do a lot of trial and error to avoid several foot guns that came up during development.
+So, it was not surprising that all major LLMs struggle with generating realistic µWS code compared to other libraries in widespread use. I had to do a lot of trial-and-error to solve many of the issues that came up during development.
+
+
+Third, for the CoValue mutation scenario, a WebSocket client has to first subscribe to a topic so that it can receive notifications from that topic (by the WebSocket server) when a CoValue is mutated afterwards. The problem that I encountered was that any attempts to subscribe a WebSocket client to a topic using the [`ws.subscribe()`](https://unetworking.github.io/uWebSockets.js/generated/interfaces/WebSocket.html#subscribe.subscribe-1) method didn't work reliably unless within a certain context. 
+
+Topic subscription via the `ws.subscribe()` method only works immediately after a WebSocket client is connected to the µWS server i.e. when it is first handled *inside* the server's [`ws.open()`](https://unetworking.github.io/uWebSockets.js/generated/interfaces/WebSocketBehavior.html#open) method.
+
 
 The code can be found in `src/uws-js/websocket.ts` and it is used for only 1 protocol combo:
 * WS with TLS (used by `uws-ws`).
