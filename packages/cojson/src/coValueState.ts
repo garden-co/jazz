@@ -1,10 +1,18 @@
 import { ValueType } from "@opentelemetry/api";
 import { UpDownCounter, metrics } from "@opentelemetry/api";
+import { Result } from "neverthrow";
 import { PeerState } from "./PeerState.js";
-import { CoValueCore, TryAddTransactionsError } from "./coValueCore.js";
-import { RawCoID } from "./ids.js";
+import {
+  CoValueCore,
+  Transaction,
+  TryAddTransactionsError,
+} from "./coValueCore.js";
+import { Hash, Signature, StreamingHash } from "./crypto/crypto.js";
+import { RawCoID, SessionID } from "./ids.js";
+import { LocalNode } from "./index.js";
 import { logger } from "./logger.js";
 import { PeerID, emptyKnownState } from "./sync.js";
+import { accountOrAgentIDfromSessionID } from "./typeUtils/accountOrAgentIDfromSessionID.js";
 
 export const CO_VALUE_LOADING_CONFIG = {
   MAX_RETRIES: 2,
@@ -12,6 +20,7 @@ export const CO_VALUE_LOADING_CONFIG = {
 };
 
 export class CoValueState {
+  private node: LocalNode;
   private peers = new Map<
     PeerID,
     | { type: "unknown" | "pending" | "available" | "unavailable" }
@@ -24,7 +33,10 @@ export class CoValueState {
   core: CoValueCore | null = null;
   id: RawCoID;
 
-  private listeners: Set<(state: CoValueState) => void> = new Set();
+  private listeners: Set<(state: CoValueState, unsub: () => void) => void> =
+    new Set();
+  private deferredUpdates = 0;
+  private nextDeferredNotify: Promise<void> | undefined;
   private counter: UpDownCounter;
 
   constructor(id: RawCoID) {
@@ -69,18 +81,44 @@ export class CoValueState {
     return !!this.core;
   }
 
-  addListener(listener: (state: CoValueState) => void) {
+  addListener(listener: (state: CoValueState, unsub: () => void) => void) {
+    const unsub = () => this.listeners.delete(listener);
     this.listeners.add(listener);
-    listener(this);
+    listener(this, unsub);
+
+    return unsub;
   }
 
-  removeListener(listener: (state: CoValueState) => void) {
-    this.listeners.delete(listener);
-  }
+  private notifyListeners(notifyMode: "immediate" | "deferred") {
+    if (this.listeners.size === 0) {
+      return;
+    }
 
-  private notifyListeners() {
-    for (const listener of this.listeners) {
-      listener(this);
+    if (notifyMode === "immediate") {
+      for (const listener of this.listeners) {
+        listener(this, () => this.listeners.delete(listener));
+      }
+    } else {
+      if (!this.nextDeferredNotify) {
+        this.nextDeferredNotify = new Promise((resolve) => {
+          setTimeout(() => {
+            this.nextDeferredNotify = undefined;
+            this.deferredUpdates = 0;
+            for (const listener of this.listeners) {
+              const unsub = () => this.listeners.delete(listener);
+              try {
+                listener(this, unsub);
+              } catch (e) {
+                logger.error("Error in listener for coValue " + this.id, {
+                  err: e,
+                });
+              }
+            }
+            resolve();
+          }, 0);
+        });
+      }
+      this.deferredUpdates++;
     }
   }
 
@@ -90,14 +128,12 @@ export class CoValueState {
     }
 
     return new Promise<CoValueCore>((resolve) => {
-      const listener = (state: CoValueState) => {
+      this.addListener((state: CoValueState, unsub: () => void) => {
         if (state.core) {
           resolve(state.core);
-          this.removeListener(listener);
+          unsub();
         }
-      };
-
-      this.addListener(listener);
+      });
     });
   }
 
@@ -175,7 +211,7 @@ export class CoValueState {
           const timeout = setTimeout(markNotFound, timeoutDuration);
           const removeCloseListener = peer.addCloseListener(markNotFound);
 
-          const listener = (state: CoValueState) => {
+          this.addListener((state: CoValueState, unsub) => {
             const peerState = state.peers.get(peer.id);
             if (
               state.isAvailable() || // might have become available from another peer e.g. through handleNewContent
@@ -183,14 +219,12 @@ export class CoValueState {
               peerState?.type === "errored" ||
               peerState?.type === "unavailable"
             ) {
-              state.removeListener(listener);
+              unsub();
               removeCloseListener();
               clearTimeout(timeout);
               resolve();
             }
-          };
-
-          this.addListener(listener);
+          });
         });
 
         await waitingForPeer;
@@ -210,14 +244,12 @@ export class CoValueState {
 
     if (peersWithRetry.length > 0) {
       const waitingForCoValue = new Promise<void>((resolve) => {
-        const listener = (state: CoValueState) => {
+        this.addListener((state: CoValueState, unsub) => {
           if (state.isAvailable()) {
+            unsub();
             resolve();
-            this.removeListener(listener);
           }
-        };
-
-        this.addListener(listener);
+        });
       });
 
       // We want to exit early if the coValue becomes available in between the retries
@@ -246,7 +278,7 @@ export class CoValueState {
     const previousState = this.highLevelState;
     this.peers.set(peerId, { type: "unavailable" });
     this.updateCounter(previousState);
-    this.notifyListeners();
+    this.notifyListeners("immediate");
   }
 
   // TODO: rename to "provided"
@@ -255,28 +287,67 @@ export class CoValueState {
     this.core = coValue;
     this.peers.set(fromPeerId, { type: "available" });
     this.updateCounter(previousState);
-    this.notifyListeners();
+    this.notifyListeners("immediate");
   }
 
   internalMarkMagicallyAvailable(coValue: CoValueCore) {
     const previousState = this.highLevelState;
     this.core = coValue;
     this.updateCounter(previousState);
-    this.notifyListeners();
+    this.notifyListeners("immediate");
   }
 
   markErrored(peerId: PeerID, error: TryAddTransactionsError) {
     const previousState = this.highLevelState;
     this.peers.set(peerId, { type: "errored", error });
     this.updateCounter(previousState);
-    this.notifyListeners();
+    this.notifyListeners("immediate");
   }
 
   private markPending(peerId: PeerID) {
     const previousState = this.highLevelState;
     this.peers.set(peerId, { type: "pending" });
     this.updateCounter(previousState);
-    this.notifyListeners();
+    this.notifyListeners("immediate");
+  }
+
+  tryAddTransactions(
+    sessionID: SessionID,
+    newTransactions: Transaction[],
+    givenExpectedNewHash: Hash | undefined,
+    newSignature: Signature,
+    skipVerify: boolean = false,
+    givenNewStreamingHash?: StreamingHash,
+  ): Result<true, TryAddTransactionsError> {
+    if (this.node.crashed) {
+      throw new Error("Trying to add transactions after node is crashed");
+    }
+    if (!this.isAvailable()) {
+      throw new Error("");
+    }
+
+    const result = this.node
+      .resolveAccountAgent(
+        accountOrAgentIDfromSessionID(sessionID),
+        "Expected to know signer of transaction",
+      )
+      .andThen((agentID) =>
+        this.core.int_tryAddTransactions(
+          agentID,
+          sessionID,
+          newTransactions,
+          givenExpectedNewHash,
+          newSignature,
+          skipVerify,
+          givenNewStreamingHash,
+        ),
+      );
+
+    if (result.isOk()) {
+      this.notifyListeners("immediate");
+    }
+
+    return result;
   }
 }
 
