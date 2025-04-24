@@ -79,8 +79,6 @@ type Value = JsonValue | AnyRawCoValue;
 import { CO_VALUE_LOADING_CONFIG } from "./coValueState.js";
 import { logger } from "./logger.js";
 import { getPriorityFromHeader } from "./priority.js";
-import { FileSystem } from "./storage/FileSystem.js";
-import { BlockFilename, LSMStorage, WalFilename } from "./storage/index.js";
 
 /** @hidden */
 export const cojsonInternals = {
@@ -143,7 +141,6 @@ export {
   CryptoProvider,
   SyncMessage,
   isRawCoID,
-  LSMStorage,
   emptyKnownState,
   RawCoPlainText,
   stringifyOpID,
@@ -154,9 +151,6 @@ export {
 
 export type {
   Value,
-  FileSystem,
-  BlockFilename,
-  WalFilename,
   IncomingSyncStream,
   OutgoingSyncQueue,
   DisconnectedError,

@@ -2,14 +2,14 @@
 
 import { Framework } from "@/content/framework";
 import { useFramework } from "@/lib/use-framework";
-import { Button } from "gcmp-design-system/src/app/components/atoms/Button";
-import { Icon } from "gcmp-design-system/src/app/components/atoms/Icon";
+import { Button } from "@garden-co/design-system/src/components/atoms/Button";
+import { Icon } from "@garden-co/design-system/src/components/atoms/Icon";
 import {
   Dropdown,
   DropdownButton,
   DropdownItem,
   DropdownMenu,
-} from "gcmp-design-system/src/app/components/organisms/Dropdown";
+} from "@garden-co/design-system/src/components/organisms/Dropdown";
 import { usePathname, useRouter } from "next/navigation";
 import { useState } from "react";
 
@@ -67,11 +67,7 @@ export function FrameworkSelect() {
         variant="secondary"
       >
         {frameworks[selectedFramework].label}
-        <Icon
-          name="chevronDown"
-          size="sm"
-          className="text-muted"
-        />
+        <Icon name="chevronDown" size="sm" className="text-muted" />
       </DropdownButton>
       <DropdownMenu className="w-[--button-width] z-50" anchor="bottom start">
         {Object.entries(frameworks).map(([key, framework]) => (

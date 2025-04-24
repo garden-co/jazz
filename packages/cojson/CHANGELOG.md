@@ -1,5 +1,42 @@
 # cojson
 
+## 0.13.13
+
+### Patch Changes
+
+- ec9cb40: Remove .every() call on iterator to fix compat issues with React Native
+
+## 0.13.12
+
+### Patch Changes
+
+- 65719f2: Simplified CoValue loading state management
+
+## 0.13.11
+
+### Patch Changes
+
+- 17273a6: Adds locale support to Segmenter for CoPlainText
+  Adds insertAfter to CoPlainText
+- 3396ed4: Simplify unknown value management on handleNewContent
+- 267ea4c: Fix max recursion error happening on large colists
+
+## 0.13.10
+
+### Patch Changes
+
+- f837cfe: Fix fatal errors happening when loading a CoValueCore without having the dependencies
+
+## 0.13.7
+
+### Patch Changes
+
+- bc3d7bb: Allow to assign the writeOnly role to everyone
+- 4e9aae1: Remove risky awaits from handleSyncMessage code path
+- 21c935c: Improved the management of peer reconnection and optimized the sync messages
+- aa1c80e: feat: add transactions size histogram & loaded covalues gauges
+- 13074be: Skip loading from closed peers as early as possible
+
 ## 0.13.5
 
 ### Patch Changes

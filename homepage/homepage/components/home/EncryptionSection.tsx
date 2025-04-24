@@ -1,7 +1,7 @@
-import { Card } from "gcmp-design-system/src/app/components/atoms/Card";
-import { H3 } from "gcmp-design-system/src/app/components/atoms/Headings";
-import { Icon } from "gcmp-design-system/src/app/components/atoms/Icon";
-import { Prose } from "gcmp-design-system/src/app/components/molecules/Prose";
+import { Card } from "@garden-co/design-system/src/components/atoms/Card";
+import { H3 } from "@garden-co/design-system/src/components/atoms/Headings";
+import { Icon } from "@garden-co/design-system/src/components/atoms/Icon";
+import { Prose } from "@garden-co/design-system/src/components/molecules/Prose";
 
 const randomChars = [
   "SFPOHVKNPDKETOMQLMJKX#QDI=TFFFMRJDSJ",

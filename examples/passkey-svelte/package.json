@@ -1,6 +1,6 @@
 {
   "name": "passkey-svelte",
-  "version": "0.0.62",
+  "version": "0.0.68",
   "type": "module",
   "private": true,
   "scripts": {
@@ -32,6 +32,7 @@
     "vite": "6.0.11"
   },
   "dependencies": {
-    "jazz-svelte": "workspace:*"
+    "jazz-svelte": "workspace:*",
+    "jazz-tools": "workspace:*"
   }
 }

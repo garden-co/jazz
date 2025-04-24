@@ -59,5 +59,5 @@ export const pingColorThresholds = Object.entries(pingColorMap).map(
     bgClass: `dark:bg-[${dark}] bg-[${light}]`,
     fill: light,
     darkFill: dark,
-  })
+  }),
 );

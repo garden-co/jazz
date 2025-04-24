@@ -1,4 +1,4 @@
-import { Icon404 } from "gcmp-design-system/src/app/components/atoms/icons/404";
+import { Icon404 } from "@garden-co/design-system/src/components/atoms/icons/404";
 
 export default function NotFound() {
   const text = "Don't Worry 'Bout Me";

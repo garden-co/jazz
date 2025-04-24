@@ -1,8 +1,8 @@
+import { Card } from "@garden-co/design-system/src/components/atoms/Card";
+import { H2 } from "@garden-co/design-system/src/components/atoms/Headings";
+import { Prose } from "@garden-co/design-system/src/components/molecules/Prose";
+import { NewsletterForm } from "@garden-co/design-system/src/components/organisms/NewsletterForm";
 import { SiBluesky, SiX } from "@icons-pack/react-simple-icons";
-import { Card } from "gcmp-design-system/src/app/components/atoms/Card";
-import { H2 } from "gcmp-design-system/src/app/components/atoms/Headings";
-import { Prose } from "gcmp-design-system/src/app/components/molecules/Prose";
-import { NewsletterForm } from "gcmp-design-system/src/app/components/organisms/NewsletterForm";
 import Link from "next/link";
 
 export function NewsletterCard() {

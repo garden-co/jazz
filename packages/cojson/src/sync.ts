@@ -155,12 +155,15 @@ export class SyncManager {
 
   getServerAndStoragePeers(excludePeerId?: PeerID): PeerState[] {
     return this.peersInPriorityOrder().filter(
-      (peer) => peer.isServerOrStoragePeer() && peer.id !== excludePeerId,
+      (peer) =>
+        peer.isServerOrStoragePeer() &&
+        peer.id !== excludePeerId &&
+        !peer.closed,
     );
   }
 
   async handleSyncMessage(msg: SyncMessage, peer: PeerState) {
-    if (peer.erroredCoValues.has(msg.id)) {
+    if (this.local.coValuesStore.get(msg.id).isErroredInPeer(peer.id)) {
       logger.warn(
         `Skipping message ${msg.action} on errored coValue ${msg.id} from peer ${peer.id}`,
       );
@@ -220,11 +223,7 @@ export class SyncManager {
       }
 
       peer.toldKnownState.add(id);
-      peer.optimisticKnownStates.dispatch({
-        type: "COMBINE_WITH",
-        id: id,
-        value: coValue.knownState(),
-      });
+      peer.combineOptimisticWith(id, coValue.knownState());
     } else if (!peer.toldKnownState.has(id)) {
       this.trySendToPeer(peer, {
         action: "known",
@@ -252,8 +251,8 @@ export class SyncManager {
       for (const id of coValue.getDependedOnCoValues()) {
         const entry = this.local.coValuesStore.get(id);
 
-        if (entry.state.type === "available") {
-          buildOrderedCoValueList(entry.state.coValue);
+        if (entry.isAvailable()) {
+          buildOrderedCoValueList(entry.core);
         }
       }
 
@@ -261,31 +260,25 @@ export class SyncManager {
     };
 
     for (const entry of this.local.coValuesStore.getValues()) {
-      switch (entry.state.type) {
-        case "unavailable":
-          // If the coValue is unavailable and we never tried this peer
-          // we try to load it from the peer
-          if (!peer.toldKnownState.has(entry.id)) {
-            await entry.loadFromPeers([peer]).catch((e: unknown) => {
-              logger.error("Error sending load", { err: e });
-            });
-          }
-          break;
-        case "available":
-          const coValue = entry.state.coValue;
+      if (!entry.isAvailable()) {
+        // If the coValue is unavailable and we never tried this peer
+        // we try to load it from the peer
+        if (!peer.toldKnownState.has(entry.id)) {
+          await entry.loadFromPeers([peer]).catch((e: unknown) => {
+            logger.error("Error sending load", { err: e });
+          });
+        }
+      } else {
+        const coValue = entry.core;
 
-          // Build the list of coValues ordered by dependency
-          // so we can send the load message in the correct order
-          buildOrderedCoValueList(coValue);
-          break;
+        // Build the list of coValues ordered by dependency
+        // so we can send the load message in the correct order
+        buildOrderedCoValueList(coValue);
       }
 
       // Fill the missing known states with empty known states
       if (!peer.optimisticKnownStates.has(entry.id)) {
-        peer.optimisticKnownStates.dispatch({
-          type: "SET_AS_EMPTY",
-          id: entry.id,
-        });
+        peer.setOptimisticKnownState(entry.id, "empty");
       }
     }
 
@@ -297,7 +290,7 @@ export class SyncManager {
        *   lacks some transactions
        */
       peer.toldKnownState.add(coValue.id);
-      await this.trySendToPeer(peer, {
+      this.trySendToPeer(peer, {
         action: "load",
         ...coValue.knownState(),
       }).catch((e: unknown) => {
@@ -400,14 +393,13 @@ export class SyncManager {
      * This way we can track part of the data loss that may occur when the other peer is restarted
      *
      */
-    peer.dispatchToKnownStates({
-      type: "SET",
-      id: msg.id,
-      value: knownStateIn(msg),
-    });
+    peer.setKnownState(msg.id, knownStateIn(msg));
     const entry = this.local.coValuesStore.get(msg.id);
 
-    if (entry.state.type === "unknown" || entry.state.type === "unavailable") {
+    if (
+      entry.highLevelState === "unknown" ||
+      entry.highLevelState === "unavailable"
+    ) {
       const eligiblePeers = this.getServerAndStoragePeers(peer.id);
 
       if (eligiblePeers.length === 0) {
@@ -434,7 +426,7 @@ export class SyncManager {
       }
     }
 
-    if (entry.state.type === "loading") {
+    if (entry.highLevelState === "loading") {
       // We need to return from handleLoad immediately and wait for the CoValue to be loaded
       // in a new task, otherwise we might block further incoming content messages that would
       // resolve the CoValue as available. This can happen when we receive fresh
@@ -464,7 +456,7 @@ export class SyncManager {
             err: e,
           });
         });
-    } else if (entry.state.type === "available") {
+    } else if (entry.isAvailable()) {
       await this.sendNewContentIncludingDependencies(msg.id, peer);
     } else {
       this.trySendToPeer(peer, {
@@ -479,28 +471,17 @@ export class SyncManager {
   async handleKnownState(msg: KnownStateMessage, peer: PeerState) {
     const entry = this.local.coValuesStore.get(msg.id);
 
-    peer.dispatchToKnownStates({
-      type: "COMBINE_WITH",
-      id: msg.id,
-      value: knownStateIn(msg),
-    });
+    peer.combineWith(msg.id, knownStateIn(msg));
 
     // The header is a boolean value that tells us if the other peer do have information about the header.
     // If it's false in this point it means that the coValue is unavailable on the other peer.
-    if (entry.state.type !== "available") {
-      const availableOnPeer = peer.optimisticKnownStates.get(msg.id)?.header;
+    const availableOnPeer = peer.optimisticKnownStates.get(msg.id)?.header;
 
-      if (!availableOnPeer) {
-        entry.dispatch({
-          type: "not-found-in-peer",
-          peerId: peer.id,
-        });
-      }
-
-      return;
+    if (!availableOnPeer) {
+      entry.markNotFoundInPeer(peer.id);
     }
 
-    if (entry.state.type === "available") {
+    if (entry.isAvailable()) {
       await this.sendNewContentIncludingDependencies(msg.id, peer);
     }
   }
@@ -523,23 +504,7 @@ export class SyncManager {
 
     let coValue: CoValueCore;
 
-    /**
-     * The new content might come while the coValue is loading or is not loaded yet.
-     *
-     * This might happen when we restart the server because:
-     * - The client known state assumes that the coValue is available on the server
-     * - The server might not have loaded the coValue yet because it was not requested
-     *
-     * In this case we need to load the coValue from the storage or other peers.
-     *
-     * If this load fails we send a correction request, because the client has the wrong assumption that
-     * we have the coValue while we don't.
-     */
-    if (entry.state.type !== "available" && !msg.header) {
-      await this.local.loadCoValueCore(msg.id, peer.id);
-    }
-
-    if (entry.state.type !== "available") {
+    if (!entry.isAvailable()) {
       if (!msg.header) {
         this.trySendToPeer(peer, {
           action: "known",
@@ -557,20 +522,13 @@ export class SyncManager {
         return;
       }
 
-      peer.dispatchToKnownStates({
-        type: "UPDATE_HEADER",
-        id: msg.id,
-        header: true,
-      });
+      peer.updateHeader(msg.id, true);
 
       coValue = new CoValueCore(msg.header, this.local);
 
-      entry.dispatch({
-        type: "available",
-        coValue,
-      });
+      entry.markAvailable(coValue, peer.id);
     } else {
-      coValue = entry.state.coValue;
+      coValue = entry.core;
     }
 
     let invalidStateAssumed = false;
@@ -613,20 +571,18 @@ export class SyncManager {
           id: msg.id,
           err: result.error,
         });
-        peer.erroredCoValues.set(msg.id, result.error);
+        entry.markErrored(peer.id, result.error);
         continue;
       }
 
       this.recordTransactionsSize(newTransactions, peer.role);
 
-      peer.dispatchToKnownStates({
-        type: "UPDATE_SESSION_COUNTER",
-        id: msg.id,
-        sessionId: sessionID,
-        value:
-          newContentForSession.after +
+      peer.updateSessionCounter(
+        msg.id,
+        sessionID,
+        newContentForSession.after +
           newContentForSession.newTransactions.length,
-      });
+      );
     }
 
     if (invalidStateAssumed) {
@@ -668,15 +624,11 @@ export class SyncManager {
      * response to the peers that are waiting for confirmation that a coValue is
      * fully synced
      */
-    await this.syncCoValue(coValue);
+    this.syncCoValue(coValue);
   }
 
   async handleCorrection(msg: KnownStateMessage, peer: PeerState) {
-    peer.dispatchToKnownStates({
-      type: "SET",
-      id: msg.id,
-      value: knownStateIn(msg),
-    });
+    peer.setKnownState(msg.id, knownStateIn(msg));
 
     return this.sendNewContentIncludingDependencies(msg.id, peer);
   }
@@ -709,7 +661,8 @@ export class SyncManager {
   async actuallySyncCoValue(coValue: CoValueCore) {
     for (const peer of this.peersInPriorityOrder()) {
       if (peer.closed) continue;
-      if (peer.erroredCoValues.has(coValue.id)) continue;
+      if (this.local.coValuesStore.get(coValue.id).isErroredInPeer(peer.id))
+        continue;
 
       if (peer.optimisticKnownStates.has(coValue.id)) {
         await this.sendNewContentIncludingDependencies(coValue.id, peer);
@@ -764,7 +717,8 @@ export class SyncManager {
     const coValues = this.local.coValuesStore.getValues();
     const validCoValues = Array.from(coValues).filter(
       (coValue) =>
-        coValue.state.type === "available" || coValue.state.type === "loading",
+        coValue.highLevelState === "available" ||
+        coValue.highLevelState === "loading",
     );
 
     return Promise.all(

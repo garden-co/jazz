@@ -3,7 +3,7 @@ import React from "react";
 export { JazzInspector } from "./viewer/new-app.js";
 export { PageStack } from "./viewer/page-stack.js";
 export { Breadcrumbs } from "./viewer/breadcrumbs.js";
-export { AccountNameDisplay } from "./viewer/account-name-display.js";
+export { AccountOrGroupText } from "./viewer/account-or-group-text.js";
 
 export { Button } from "./ui/button.js";
 export { Input } from "./ui/input.js";

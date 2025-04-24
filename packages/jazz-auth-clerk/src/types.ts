@@ -45,6 +45,10 @@ export function isClerkAuthStateEqual(
   previousUser: MinimalClerkClient["user"] | null | undefined,
   newUser: MinimalClerkClient["user"] | null | undefined,
 ) {
+  if (Boolean(previousUser) !== Boolean(newUser)) {
+    return false;
+  }
+
   const previousCredentials = isClerkCredentials(previousUser?.unsafeMetadata);
   const newCredentials = isClerkCredentials(newUser?.unsafeMetadata);
 

@@ -1,7 +1,7 @@
 "use client";
 
 import { clsx } from "clsx";
-import { Icon } from "gcmp-design-system/src/app/components/atoms/Icon";
+import { Icon } from "@garden-co/design-system/src/components/atoms/Icon";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { ReactNode } from "react";

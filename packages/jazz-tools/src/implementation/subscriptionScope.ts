@@ -155,8 +155,8 @@ function loadCoValue(
 ) {
   const entry = node.coValuesStore.get(id);
 
-  if (entry.state.type === "available" && syncResolution) {
-    callback(entry.state.coValue);
+  if (entry.isAvailable() && syncResolution) {
+    callback(entry.core);
   } else {
     void node.loadCoValueCore(id).then((core) => {
       callback(core);

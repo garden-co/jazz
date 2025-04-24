@@ -36,7 +36,7 @@ const config: Config = {
         blue: {
           ...colors.indigo,
           500: "#5870F1",
-          DEFAULT: "#3313F7",
+          DEFAULT: "#146AFF",
         },
       },
       container: {

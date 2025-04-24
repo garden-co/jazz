@@ -9,7 +9,7 @@ import { HowJazzWorksSection } from "@/components/home/HowJazzWorksSection";
 import { LocalFirstFeaturesSection } from "@/components/home/LocalFirstFeaturesSection";
 import ProblemStatementSection from "@/components/home/ProblemStatementSection";
 import { SupportedEnvironmentsSection } from "@/components/home/SupportedEnvironmentsSection";
-import { Testimonial } from "gcmp-design-system/src/app/components/molecules/Testimonial";
+import { Testimonial } from "@garden-co/design-system/src/components/molecules/Testimonial";
 
 export default function Home() {
   return (

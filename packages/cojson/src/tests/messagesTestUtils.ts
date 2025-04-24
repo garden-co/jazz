@@ -1,4 +1,4 @@
-import { CoValueCore } from "../exports";
+import { CoValueCore, LocalNode, RawControlledAccount } from "../exports";
 import {
   CoValueKnownState,
   NewContentMessage,
@@ -61,6 +61,17 @@ export function toSimplifiedMessages(
   }
 
   return messages.map((m) => toDebugString(m.from, m.to, m.msg));
+}
+
+export function nodeRelatedKnownCoValues(node: LocalNode, name: string) {
+  const account = node.account as RawControlledAccount;
+  const profileID = account.get("profile");
+  const profile = profileID && node.expectCoValueLoaded(profileID);
+  return {
+    [`${name}Account`]: account,
+    [`${name}Profile`]: profile,
+    [`${name}ProfileGroup`]: profile?.getGroup().core,
+  };
 }
 
 export function debugMessages(

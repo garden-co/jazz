@@ -1,11 +1,11 @@
 import { TeamMember, team } from "@/app/team/members";
+import { HeroHeader } from "@garden-co/design-system/src/components/molecules/HeroHeader";
 import {
   SiBluesky,
   SiGithub,
   SiLinkedin,
   SiX,
 } from "@icons-pack/react-simple-icons";
-import { HeroHeader } from "gcmp-design-system/src/app/components/molecules/HeroHeader";
 import { GlobeIcon, LucideIcon } from "lucide-react";
 import Link from "next/link";
 

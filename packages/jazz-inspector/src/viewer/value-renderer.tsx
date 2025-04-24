@@ -1,15 +1,11 @@
 import { CoID, JsonValue, LocalNode, RawCoValue } from "cojson";
 import { styled } from "goober";
-import React, { useEffect, useState } from "react";
+import React, { useState } from "react";
 import { Button } from "../ui/button.js";
 import { Icon } from "../ui/icon.js";
 import { Text } from "../ui/text.js";
 import { isCoId } from "./types.js";
-import {
-  isBrowserImage,
-  resolveCoValue,
-  useResolvedCoValue,
-} from "./use-resolve-covalue.js";
+import { isBrowserImage, useResolvedCoValue } from "./use-resolve-covalue.js";
 
 const LinkContainer = styled("span")`
   display: inline-flex;
@@ -237,77 +233,34 @@ export const CoMapPreview = ({
     );
   }
 
+  const properties = Object.entries(snapshot);
+  const limitedProperties =
+    extendedType === "account"
+      ? properties
+          .filter(
+            ([key]) =>
+              !key.startsWith("key_z") &&
+              !key.startsWith("sealer_z") &&
+              key !== "readKey",
+          )
+          .slice(0, limit)
+      : properties.slice(0, limit);
+
   return (
     <PreviewContainer>
       <PreviewGrid>
-        {Object.entries(snapshot)
-          .slice(0, limit)
-          .map(([key, value]) => (
-            <React.Fragment key={key}>
-              <Text strong>{key}: </Text>
-              <ValueRenderer compact json={value} />
-            </React.Fragment>
-          ))}
+        {limitedProperties.map(([key, value]) => (
+          <React.Fragment key={key}>
+            <Text strong>{key}: </Text>
+            <ValueRenderer compact json={value} />
+          </React.Fragment>
+        ))}
       </PreviewGrid>
-      {Object.entries(snapshot).length > limit && (
+      {properties.length > limit && (
         <PreviewMoreText muted small>
-          {Object.entries(snapshot).length - limit} more
+          {properties.length - limit} more
         </PreviewMoreText>
       )}
     </PreviewContainer>
   );
 };
-
-export function AccountOrGroupPreview({
-  coId,
-  node,
-  showId = false,
-  onClick,
-}: {
-  coId: CoID<RawCoValue>;
-  node: LocalNode;
-  showId?: boolean;
-  onClick?: (name?: string) => void;
-}) {
-  const { snapshot, extendedType } = useResolvedCoValue(coId, node);
-  const [name, setName] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (extendedType === "account") {
-      resolveCoValue(
-        (snapshot as unknown as { profile: CoID<RawCoValue> }).profile,
-        node,
-      ).then(({ snapshot }) => {
-        if (
-          typeof snapshot === "object" &&
-          "name" in snapshot &&
-          typeof snapshot.name === "string"
-        ) {
-          setName(snapshot.name);
-        }
-      });
-    }
-  }, [snapshot, node, extendedType]);
-
-  if (!snapshot) return <span>Loading...</span>;
-  if (extendedType !== "account" && extendedType !== "group") {
-    return <span>CoID is not an account or group</span>;
-  }
-
-  const displayName = extendedType === "account" ? name || "Account" : "Group";
-  const displayText = showId ? `${displayName} (${coId})` : displayName;
-
-  if (onClick) {
-    return (
-      <Button variant="link" onClick={() => onClick(displayName)}>
-        {displayText}
-      </Button>
-    );
-  }
-
-  return (
-    <Text muted inline>
-      {displayText}
-    </Text>
-  );
-}

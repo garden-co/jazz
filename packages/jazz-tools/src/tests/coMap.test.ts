@@ -119,6 +119,71 @@ describe("Simple CoMap operations", async () => {
     ).toThrow();
   });
 
+  test("toJSON should not fail when there is a key in the raw value not represented in the schema", () => {
+    class TestMap extends CoMap {
+      color = co.string;
+      height = co.number;
+    }
+
+    const map = TestMap.create({ color: "red", height: 10 }, { owner: me });
+
+    map._raw.set("extra", "extra");
+
+    expect(map.toJSON()).toEqual({
+      _type: "CoMap",
+      id: map.id,
+      color: "red",
+      height: 10,
+    });
+  });
+
+  test("toJSON should handle references", () => {
+    class TestMap extends CoMap {
+      color = co.string;
+      height = co.number;
+      nested = co.optional.ref(TestMap);
+    }
+
+    const map = TestMap.create({ color: "red", height: 10 }, { owner: me });
+
+    map.nested = TestMap.create({ color: "blue", height: 20 }, { owner: me });
+
+    expect(map.toJSON()).toEqual({
+      _type: "CoMap",
+      id: map.id,
+      color: "red",
+      height: 10,
+      nested: {
+        _type: "CoMap",
+        id: map.nested?.id,
+        color: "blue",
+        height: 20,
+      },
+    });
+  });
+
+  test("toJSON should handle circular references", () => {
+    class TestMap extends CoMap {
+      color = co.string;
+      height = co.number;
+      nested = co.optional.ref(TestMap);
+    }
+
+    const map = TestMap.create({ color: "red", height: 10 }, { owner: me });
+
+    map.nested = map;
+
+    expect(map.toJSON()).toEqual({
+      _type: "CoMap",
+      id: map.id,
+      color: "red",
+      height: 10,
+      nested: {
+        _circular: map.id,
+      },
+    });
+  });
+
   test("testing toJSON on a CoMap with a Date field", () => {
     const map = TestMap.create(
       {

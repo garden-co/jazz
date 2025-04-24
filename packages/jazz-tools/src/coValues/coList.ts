@@ -557,7 +557,11 @@ function toRawItems<Item>(items: Item[], itemDescriptor: Schema) {
       : "encoded" in itemDescriptor
         ? items?.map((e) => itemDescriptor.encoded.encode(e))
         : isRefEncoded(itemDescriptor)
-          ? items?.map((v) => (v as unknown as CoValue).id)
+          ? items?.map((v) => {
+              if (!v) return null;
+
+              return (v as unknown as CoValue).id;
+            })
           : (() => {
               throw new Error("Invalid element descriptor");
             })();

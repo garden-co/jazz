@@ -126,7 +126,7 @@ export class LocalNode {
     );
 
     nodeWithAccount.account = controlledAccount;
-    nodeWithAccount.coValuesStore.setAsAvailable(
+    nodeWithAccount.coValuesStore.internalMarkMagicallyAvailable(
       controlledAccount.id,
       controlledAccount.core,
     );
@@ -139,10 +139,8 @@ export class LocalNode {
     // we shouldn't need this, but it fixes account data not syncing for new accounts
     function syncAllCoValuesAfterCreateAccount() {
       for (const coValueEntry of nodeWithAccount.coValuesStore.getValues()) {
-        if (coValueEntry.state.type === "available") {
-          void nodeWithAccount.syncManager.syncCoValue(
-            coValueEntry.state.coValue,
-          );
+        if (coValueEntry.isAvailable()) {
+          void nodeWithAccount.syncManager.syncCoValue(coValueEntry.core);
         }
       }
     }
@@ -208,7 +206,10 @@ export class LocalNode {
       node.syncManager.local = node;
 
       controlledAccount.core.node = node;
-      node.coValuesStore.setAsAvailable(accountID, controlledAccount.core);
+      node.coValuesStore.internalMarkMagicallyAvailable(
+        accountID,
+        controlledAccount.core,
+      );
       controlledAccount.core._cachedContent = undefined;
 
       const profileID = account.get("profile");
@@ -245,7 +246,7 @@ export class LocalNode {
     }
 
     const coValue = new CoValueCore(header, this);
-    this.coValuesStore.setAsAvailable(coValue.id, coValue);
+    this.coValuesStore.internalMarkMagicallyAvailable(coValue.id, coValue);
 
     void this.syncManager.syncCoValue(coValue);
 
@@ -265,9 +266,16 @@ export class LocalNode {
 
     const entry = this.coValuesStore.get(id);
 
-    if (entry.state.type === "unknown" || entry.state.type === "unavailable") {
+    if (
+      entry.highLevelState === "unknown" ||
+      entry.highLevelState === "unavailable"
+    ) {
       const peers =
         this.syncManager.getServerAndStoragePeers(skipLoadingFromPeer);
+
+      if (peers.length === 0) {
+        return "unavailable";
+      }
 
       await entry.loadFromPeers(peers).catch((e) => {
         logger.error("Error loading from peers", {
@@ -309,8 +317,8 @@ export class LocalNode {
   getLoaded<T extends RawCoValue>(id: CoID<T>): T | undefined {
     const entry = this.coValuesStore.get(id);
 
-    if (entry.state.type === "available") {
-      return entry.state.coValue.getCurrentContent() as T;
+    if (entry.isAvailable()) {
+      return entry.core.getCurrentContent() as T;
     }
 
     return undefined;
@@ -439,12 +447,12 @@ export class LocalNode {
   expectCoValueLoaded(id: RawCoID, expectation?: string): CoValueCore {
     const entry = this.coValuesStore.get(id);
 
-    if (entry.state.type !== "available") {
+    if (!entry.isAvailable()) {
       throw new Error(
-        `${expectation ? expectation + ": " : ""}CoValue ${id} not yet loaded. Current state: ${entry.state.type}`,
+        `${expectation ? expectation + ": " : ""}CoValue ${id} not yet loaded. Current state: ${JSON.stringify(entry)}`,
       );
     }
-    return entry.state.coValue;
+    return entry.core;
   }
 
   /** @internal */
@@ -638,15 +646,13 @@ export class LocalNode {
     while (coValuesToCopy.length > 0) {
       const [coValueID, entry] = coValuesToCopy[coValuesToCopy.length - 1]!;
 
-      if (entry.state.type !== "available") {
+      if (!entry.isAvailable()) {
         coValuesToCopy.pop();
         continue;
       } else {
-        const allDepsCopied = entry.state.coValue
+        const allDepsCopied = entry.core
           .getDependedOnCoValues()
-          .every(
-            (dep) => newNode.coValuesStore.get(dep).state.type === "available",
-          );
+          .every((dep) => newNode.coValuesStore.get(dep).isAvailable());
 
         if (!allDepsCopied) {
           // move to end of queue
@@ -655,12 +661,15 @@ export class LocalNode {
         }
 
         const newCoValue = new CoValueCore(
-          entry.state.coValue.header,
+          entry.core.header,
           newNode,
-          new Map(entry.state.coValue.sessionLogs),
+          new Map(entry.core.sessionLogs),
         );
 
-        newNode.coValuesStore.setAsAvailable(coValueID, newCoValue);
+        newNode.coValuesStore.internalMarkMagicallyAvailable(
+          coValueID,
+          newCoValue,
+        );
 
         coValuesToCopy.pop();
       }

@@ -2,7 +2,7 @@ import { styled } from "goober";
 
 export const GlobalStyles = styled("div")`
   /* Colors */
-  --j-primary-color: #3313F7;
+  --j-primary-color: #146AFF;
   --j-link-color: var(--j-primary-color);
   --j-success-color: oklch(52.7% 0.154 150.069);
   --j-destructive-color: oklch(50.5% 0.213 27.518);

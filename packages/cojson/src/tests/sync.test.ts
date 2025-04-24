@@ -1,23 +1,11 @@
-import {
-  assert,
-  afterEach,
-  beforeEach,
-  describe,
-  expect,
-  test,
-  vi,
-} from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { expectMap } from "../coValue.js";
-import type { CoValueHeader, TryAddTransactionsError } from "../coValueCore.js";
-import type { RawAccountID } from "../coValues/account.js";
-import { type MapOpPayload, RawCoMap } from "../coValues/coMap.js";
+import { RawCoMap } from "../coValues/coMap.js";
 import type { RawGroup } from "../coValues/group.js";
 import { WasmCrypto } from "../crypto/WasmCrypto.js";
-import { stableStringify } from "../jsonStringify.js";
 import { LocalNode } from "../localNode.js";
-import { getPriorityFromHeader } from "../priority.js";
 import { connectedPeers, newQueuePair } from "../streamUtils.js";
-import type { LoadMessage, SyncMessage } from "../sync.js";
+import type { LoadMessage } from "../sync.js";
 import {
   blockMessageTypeOnOutgoingPeer,
   connectTwoPeers,
@@ -759,9 +747,7 @@ describe("SyncManager.addPeer", () => {
 
     await map.core.waitForSync();
 
-    expect(jazzCloud.node.coValuesStore.get(map.id).state.type).toBe(
-      "available",
-    );
+    expect(jazzCloud.node.coValuesStore.get(map.id).isAvailable()).toBe(true);
   });
 });
 
@@ -1083,14 +1069,13 @@ describe("SyncManager.handleSyncMessage", () => {
   test("should ignore messages for errored coValues", async () => {
     const client = await setupTestAccount();
 
-    const { peerState } = client.connectToSyncServer();
+    const { peer, peerState } = client.connectToSyncServer();
 
     // Add a coValue to the errored set
     const erroredId = "co_z123" as const;
-    peerState.erroredCoValues.set(
-      erroredId,
-      new Error("Test error") as unknown as TryAddTransactionsError,
-    );
+    client.node.coValuesStore.get(erroredId).markErrored(peer.id, {
+      message: "Test error",
+    } as any);
 
     const message = {
       action: "load" as const,

@@ -1,5 +1,5 @@
 import { products } from "@/content/showcase";
-import { HeroHeader } from "gcmp-design-system/src/app/components/molecules/HeroHeader";
+import { HeroHeader } from "@garden-co/design-system/src/components/molecules/HeroHeader";
 import type { Metadata } from "next";
 import Image from "next/image";
 import Link from "next/link";

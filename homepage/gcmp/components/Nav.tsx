@@ -1,7 +1,7 @@
 import { ThemeToggle } from "@/components/ThemeToggle";
-import { Button } from "gcmp-design-system/src/app/components/atoms/Button";
-import { GcmpLogo } from "gcmp-design-system/src/app/components/atoms/logos/GcmpLogo";
-import { Nav } from "gcmp-design-system/src/app/components/organisms/Nav";
+import { Button } from "@garden-co/design-system/src/components/atoms/Button";
+import { GcmpLogo } from "@garden-co/design-system/src/components/atoms/logos/GcmpLogo";
+import { Nav } from "@garden-co/design-system/src/components/organisms/Nav";
 export function GcmpNav() {
   const cta = (
     <Button variant="secondary" className="ml-3" href="mailto:hello@garden.co">

@@ -1,8 +1,8 @@
 import { DiagramAfterJazz } from "@/components/DiagramAfterJazz";
 import { DiagramBeforeJazz } from "@/components/DiagramBeforeJazz";
-import { Icon } from "gcmp-design-system/src/app/components/atoms/Icon";
-import { Prose } from "gcmp-design-system/src/app/components/molecules/Prose";
-import { SectionHeader } from "gcmp-design-system/src/app/components/molecules/SectionHeader";
+import { Icon } from "@garden-co/design-system/src/components/atoms/Icon";
+import { Prose } from "@garden-co/design-system/src/components/molecules/Prose";
+import { SectionHeader } from "@garden-co/design-system/src/components/molecules/SectionHeader";
 
 export default function ProblemStatementSection() {
   return (

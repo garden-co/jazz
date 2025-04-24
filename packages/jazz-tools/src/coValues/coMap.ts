@@ -308,36 +308,51 @@ export class CoMap extends CoValueBase implements CoValue {
    * @category Content
    */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  toJSON(_key?: string, seenAbove?: ID<CoValue>[]): any[] {
-    const jsonedFields = this._raw.keys().map((key) => {
+  toJSON(_key?: string, processedValues?: ID<CoValue>[]): any {
+    const result = {
+      id: this.id,
+      _type: this._type,
+    } as Record<string, any>;
+
+    for (const key of this._raw.keys()) {
       const tKey = key as CoKeys<this>;
       const descriptor = (this._schema[tKey] ||
         this._schema[ItemsSym]) as Schema;
 
-      if (descriptor == "json" || "encoded" in descriptor) {
-        return [key, this._raw.get(key)];
-      } else if (isRefEncoded(descriptor)) {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        if (seenAbove?.includes((this as any)[tKey]?.id)) {
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          return [key, { _circular: (this as any)[tKey]?.id }];
-        }
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const jsonedRef = (this as any)[tKey]?.toJSON(tKey, [
-          ...(seenAbove || []),
-          this.id,
-        ]);
-        return [key, jsonedRef];
-      } else {
-        return [key, undefined];
+      if (!descriptor) {
+        continue;
       }
-    });
 
-    return {
-      id: this.id,
-      _type: this._type,
-      ...Object.fromEntries(jsonedFields),
-    };
+      if (descriptor == "json" || "encoded" in descriptor) {
+        result[key] = this._raw.get(key);
+      } else if (isRefEncoded(descriptor)) {
+        const id = this._raw.get(key) as ID<CoValue>;
+
+        if (processedValues?.includes(id) || id === this.id) {
+          result[key] = { _circular: id };
+          continue;
+        }
+
+        const ref = this[tKey];
+
+        if (
+          ref &&
+          typeof ref === "object" &&
+          "toJSON" in ref &&
+          typeof ref.toJSON === "function"
+        ) {
+          const jsonedRef = ref.toJSON(tKey, [
+            ...(processedValues || []),
+            this.id,
+          ]);
+          result[key] = jsonedRef;
+        }
+      } else {
+        result[key] = undefined;
+      }
+    }
+
+    return result;
   }
 
   [inspect]() {

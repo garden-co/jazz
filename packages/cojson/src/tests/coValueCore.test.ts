@@ -287,10 +287,28 @@ test("creating a coValue with a group should't trigger automatically a content c
   });
 
   // It's called once for the group and never for the coValue
-  expect(getCurrentContentSpy).toHaveBeenCalledTimes(1);
-  expect(groupSpy).toHaveBeenCalledTimes(1);
+  expect(getCurrentContentSpy).toHaveBeenCalledTimes(0);
+  expect(groupSpy).toHaveBeenCalledTimes(0);
 
   getCurrentContentSpy.mockRestore();
+});
+
+test("loading a coValue core without having the owner group available doesn't crash", () => {
+  const [account, sessionID] = randomAnonymousAccountAndSessionID();
+  const node = new LocalNode(account, sessionID, Crypto);
+
+  const otherNode = createTestNode();
+
+  const group = otherNode.createGroup();
+
+  const coValue = node.createCoValue({
+    type: "costream",
+    ruleset: { type: "ownedByGroup", group: group.id },
+    meta: null,
+    ...Crypto.createdNowUnique(),
+  });
+
+  expect(coValue.id).toBeDefined();
 });
 
 test("listeners are notified even if the previous listener threw an error", async () => {

@@ -1,5 +1,57 @@
 # chat-rn-expo
 
+## 1.0.92
+
+### Patch Changes
+
+- jazz-expo@0.13.13
+- jazz-tools@0.13.13
+
+## 1.0.91
+
+### Patch Changes
+
+- Updated dependencies [4547525]
+  - jazz-tools@0.13.12
+  - jazz-expo@0.13.12
+
+## 1.0.90
+
+### Patch Changes
+
+- Updated dependencies [17273a6]
+  - jazz-tools@0.13.11
+  - jazz-expo@0.13.11
+
+## 1.0.89
+
+### Patch Changes
+
+- jazz-expo@0.13.10
+- jazz-tools@0.13.10
+
+## 1.0.88
+
+### Patch Changes
+
+- Updated dependencies [a6cf01f]
+  - jazz-tools@0.13.9
+  - jazz-expo@0.13.9
+
+## 1.0.87
+
+### Patch Changes
+
+- jazz-expo@0.13.8
+
+## 1.0.86
+
+### Patch Changes
+
+- Updated dependencies [bc3d7bb]
+  - jazz-tools@0.13.7
+  - jazz-expo@0.13.7
+
 ## 1.0.85
 
 ### Patch Changes

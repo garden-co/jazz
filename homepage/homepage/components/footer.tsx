@@ -1,7 +1,7 @@
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { socials } from "@/content/socials";
-import { GcmpLogo } from "gcmp-design-system/src/app/components/atoms/logos/GcmpLogo";
-import { Footer } from "gcmp-design-system/src/app/components/organisms/Footer";
+import { GcmpLogo } from "@garden-co/design-system/src/components/atoms/logos/GcmpLogo";
+import { Footer } from "@garden-co/design-system/src/components/organisms/Footer";
 
 export function JazzFooter() {
   return (

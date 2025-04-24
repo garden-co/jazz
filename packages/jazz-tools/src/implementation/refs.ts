@@ -103,7 +103,7 @@ export class Ref<out V extends CoValue> {
       this.id as unknown as CoID<RawCoValue>,
     );
 
-    if (entry.state.type === "available") {
+    if (entry.highLevelState === "available") {
       return new Ref(this.id, this.controlledAccount, this.schema).value!;
     }
 

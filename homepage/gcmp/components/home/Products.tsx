@@ -1,11 +1,11 @@
 import { TilescapeLogo } from "@/components/TilescapeLogo";
-import { Button } from "gcmp-design-system/src/app/components/atoms/Button";
-import { GridCard } from "gcmp-design-system/src/app/components/atoms/GridCard";
-import { H2, H3 } from "gcmp-design-system/src/app/components/atoms/Headings";
-import { P } from "gcmp-design-system/src/app/components/atoms/Paragraph";
-import { GardenLogo } from "gcmp-design-system/src/app/components/atoms/logos/GardenLogo";
-import { JazzLogo } from "gcmp-design-system/src/app/components/atoms/logos/JazzLogo";
-import { GappedGrid } from "gcmp-design-system/src/app/components/molecules/GappedGrid";
+import { Button } from "@garden-co/design-system/src/components/atoms/Button";
+import { GridCard } from "@garden-co/design-system/src/components/atoms/GridCard";
+import { H2, H3 } from "@garden-co/design-system/src/components/atoms/Headings";
+import { P } from "@garden-co/design-system/src/components/atoms/Paragraph";
+import { GardenLogo } from "@garden-co/design-system/src/components/atoms/logos/GardenLogo";
+import { JazzLogo } from "@garden-co/design-system/src/components/atoms/logos/JazzLogo";
+import { GappedGrid } from "@garden-co/design-system/src/components/molecules/GappedGrid";
 
 function ComingSoon({ children }: { children: React.ReactNode }) {
   return (

@@ -121,14 +121,35 @@ export class CoValueCore {
     this.header = header;
     this._sessionLogs = internalInitSessions;
     this.node = node;
+  }
+
+  groupInvalidationSubscription?: () => void;
+
+  subscribeToGroupInvalidation() {
+    if (this.groupInvalidationSubscription) {
+      return;
+    }
+
+    const header = this.header;
 
     if (header.ruleset.type == "ownedByGroup") {
-      this.node
-        .expectCoValueLoaded(header.ruleset.group)
-        .subscribe((_groupUpdate) => {
-          this._cachedContent = undefined;
-          this.notifyUpdate("immediate");
+      const groupId = header.ruleset.group;
+      const entry = this.node.coValuesStore.get(groupId);
+
+      if (entry.isAvailable()) {
+        this.groupInvalidationSubscription = entry.core.subscribe(
+          (_groupUpdate) => {
+            this._cachedContent = undefined;
+            this.notifyUpdate("immediate");
+          },
+          false,
+        );
+      } else {
+        logger.error("CoValueCore: Owner group not available", {
+          id: this.id,
+          groupId,
         });
+      }
     }
   }
 
@@ -368,9 +389,15 @@ export class CoValueCore {
     }
   }
 
-  subscribe(listener: (content?: RawCoValue) => void): () => void {
+  subscribe(
+    listener: (content?: RawCoValue) => void,
+    immediateInvoke = true,
+  ): () => void {
     this.listeners.add(listener);
-    listener(this.getCurrentContent());
+
+    if (immediateInvoke) {
+      listener(this.getCurrentContent());
+    }
 
     return () => {
       this.listeners.delete(listener);
@@ -473,6 +500,8 @@ export class CoValueCore {
     if (!options?.ignorePrivateTransactions && this._cachedContent) {
       return this._cachedContent;
     }
+
+    this.subscribeToGroupInvalidation();
 
     const newContent = coreToCoValue(this, options);
 

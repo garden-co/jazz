@@ -1,5 +1,5 @@
 import { clsx } from "clsx";
-import { Button } from "gcmp-design-system/src/app/components/atoms/Button";
+import { Button } from "@garden-co/design-system/src/components/atoms/Button";
 import {
   CircleCheckIcon,
   LucideBuilding2,

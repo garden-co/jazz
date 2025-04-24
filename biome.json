@@ -13,7 +13,9 @@
       "**/android/**",
       "packages/jazz-svelte/**",
       "examples/*svelte*/**",
-      "homepage/homepage/**"
+      "examples/jazz-paper-scissors/src/routeTree.gen.ts",
+      "homepage/homepage/**",
+      "**/package.json"
     ]
   },
   "formatter": {

@@ -18,7 +18,7 @@ import {
   PageStack,
   Select,
 } from "jazz-inspector";
-import { AccountNameDisplay } from "jazz-inspector";
+import { AccountOrGroupText } from "jazz-inspector";
 import React, { useState, useEffect } from "react";
 import { usePagePath } from "./use-page-path";
 
@@ -239,7 +239,7 @@ function AccountSwitcher({
         {accounts.map((account) => (
           <option key={account.id} value={account.id}>
             {localNode ? (
-              <AccountNameDisplay accountId={account.id} node={localNode} />
+              <AccountOrGroupText coId={account.id} showId node={localNode} />
             ) : (
               account.id
             )}

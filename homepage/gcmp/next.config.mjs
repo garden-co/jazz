@@ -6,7 +6,7 @@ import { SKIP, visit } from "unist-util-visit";
 const nextConfig = {
   // Configure `pageExtensions`` to include MDX files
   pageExtensions: ["js", "jsx", "mdx", "ts", "tsx"],
-  transpilePackages: ["gcmp-design-system"],
+  transpilePackages: ["@garden-co/design-system"],
 };
 
 const withMDX = createMDX({

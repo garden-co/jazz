@@ -46,7 +46,7 @@ const JazzIcon = styled("svg")`
   height: auto;
   position: relative;
   left: -1px;
-  color: #3313F7;
+  color: #146AFF;
 `;
 
 export function InspectorButton({

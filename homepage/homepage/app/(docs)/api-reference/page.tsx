@@ -1,6 +1,6 @@
 import { packages } from "@/content/packages";
 import { clsx } from "clsx";
-import { Icon } from "gcmp-design-system/src/app/components/atoms/Icon";
+import { Icon } from "@garden-co/design-system/src/components/atoms/Icon";
 import type { Metadata } from "next";
 import Link from "next/link";
 
@@ -72,10 +72,7 @@ export default function Page() {
             key={name}
           >
             <Card className="border shadow-sm">
-              <Icon
-                name="package"
-                className="text-stone-500"
-              />
+              <Icon name="package" className="text-stone-500" />
               <CardHeading className="group-hover:text-primary dark:group-hover:text-blue-600">
                 {name}
               </CardHeading>
@@ -85,11 +82,7 @@ export default function Page() {
         ))}
 
         <Card className="bg-stone-50 dark:bg-stone-925">
-          <Icon
-            name="help"
-            size="md"
-            className="text-stone-500 "
-          />
+          <Icon name="help" size="md" className="text-stone-500 " />
           <CardHeading>
             Can&apos;t find what you&apos;re looking for?
           </CardHeading>

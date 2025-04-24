@@ -1,9 +1,9 @@
 import harmonyPalette from "@evilmartians/harmony/tailwind";
 import typography from "@tailwindcss/typography";
 import tailwindCSSAnimate from "tailwindcss-animate";
-const colors = require("tailwindcss/colors");
-const plugin = require("tailwindcss/plugin");
-const { COLORS } = require("./colors/colors");
+import colors from "tailwindcss/colors";
+import plugin from "tailwindcss/plugin";
+import { COLORS } from "./colors/colors";
 
 const stonePalette = {
   50: "oklch(0.988281 0.002 75)",

@@ -1,10 +1,10 @@
 "use client";
 
-import { Card } from "gcmp-design-system/src/app/components/atoms/Card";
-import { H3 } from "gcmp-design-system/src/app/components/atoms/Headings";
-import { Icon } from "gcmp-design-system/src/app/components/atoms/Icon";
-import { GappedGrid } from "gcmp-design-system/src/app/components/molecules/GappedGrid";
-import { SectionHeader } from "gcmp-design-system/src/app/components/molecules/SectionHeader";
+import { Card } from "@garden-co/design-system/src/components/atoms/Card";
+import { H3 } from "@garden-co/design-system/src/components/atoms/Headings";
+import { Icon } from "@garden-co/design-system/src/components/atoms/Icon";
+import { GappedGrid } from "@garden-co/design-system/src/components/molecules/GappedGrid";
+import { SectionHeader } from "@garden-co/design-system/src/components/molecules/SectionHeader";
 import Link from "next/link";
 import QRCode from "qrcode";
 import {
