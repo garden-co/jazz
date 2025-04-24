@@ -42,7 +42,7 @@ export async function getDocMetadata(framework: string, slug?: string[]) {
 
 function DocProse({ children }: { children: React.ReactNode }) {
   return (
-    <Prose className="overflow-x-visible lg:flex-1 pb-8 pt-[calc(61px+2rem)] md:pt-8 md:max-w-3xl mx-auto">
+    <Prose className="overflow-x-hidden lg:overflow-x-visible lg:flex-1 pb-8 pt-[calc(61px+2rem)] md:pt-8 md:max-w-3xl mx-auto">
       {children}
     </Prose>
   );
