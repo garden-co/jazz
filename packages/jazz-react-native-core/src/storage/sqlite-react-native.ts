@@ -6,10 +6,11 @@ import {
 } from "cojson";
 import { StorageManagerAsync } from "cojson-storage";
 import { SQLiteClient } from "./client.js";
-import type { SQLiteAdapter } from "./sqlite-adapter.js";
+import type { Mode, SQLiteAdapter } from "./sqlite-adapter.js";
 
 export interface SQLiteConfig {
   adapter: SQLiteAdapter;
+  mode?: Mode;
 }
 
 export class SQLiteReactNative {
