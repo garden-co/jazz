@@ -6,13 +6,15 @@ import {
 } from "cojson";
 import { SyncManager } from "cojson-storage";
 import { SQLiteClient } from "./client.js";
-import type { SQLiteAdapter } from "./sqlite-adapter.js";
+import type { Mode, SQLiteAdapter } from "./sqlite-adapter.js";
 
 export interface SQLiteConfig {
   adapter: SQLiteAdapter;
+  mode?: Mode;
 }
 
 export class SQLiteReactNative {
+  private readonly mode: Mode;
   private syncManager!: SyncManager;
   private dbClient!: SQLiteClient;
   private initialized: Promise<void>;
@@ -22,7 +24,9 @@ export class SQLiteReactNative {
     adapter: SQLiteAdapter,
     fromLocalNode: IncomingSyncStream,
     toLocalNode: OutgoingSyncQueue,
+    mode: Mode = "async",
   ) {
+    this.mode = mode;
     this.initialized = this.initialize(adapter, fromLocalNode, toLocalNode);
   }
 
@@ -36,7 +40,7 @@ export class SQLiteReactNative {
       await adapter.initialize();
 
       // 2. Create and initialize the client
-      this.dbClient = new SQLiteClient(adapter, toLocalNode);
+      this.dbClient = new SQLiteClient(adapter, toLocalNode, this.mode);
       await this.dbClient.ensureInitialized();
 
       // 3. Create the sync manager
@@ -112,6 +116,7 @@ export class SQLiteReactNative {
       config.adapter,
       localNodeAsPeer.incoming,
       localNodeAsPeer.outgoing,
+      config.mode,
     );
 
     // Wait for full initialization before returning peer
