@@ -99,4 +99,19 @@ export class OPSQLiteAdapter extends SQLiteAdapterBase {
     }
     return Promise.resolve();
   }
+
+  protected async rawDbExecuteAsync(
+    sql: string,
+    params?: unknown[],
+  ): Promise<SQLResult> {
+    if (!this.db) {
+      throw new Error("Database not opened");
+    }
+    const result = await this.db.execute(sql, params as any[]);
+    return {
+      rows: result.rows as SQLRow[],
+      insertId: result.insertId,
+      rowsAffected: result.rowsAffected,
+    };
+  }
 }
