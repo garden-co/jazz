@@ -132,4 +132,19 @@ export class ExpoSQLiteAdapter extends SQLiteAdapterBase {
     }
     await deleteDatabaseAsync(this.dbName);
   }
+
+  protected async rawDbExecuteAsync(
+    sql: string,
+    params?: unknown[],
+  ): Promise<SQLResult> {
+    if (!this.db) {
+      throw new Error("Database not opened");
+    }
+    const result = await this.db.runAsync(sql, params as any[]);
+    return {
+      rows: [],
+      insertId: result.lastInsertRowId,
+      rowsAffected: result.changes,
+    };
+  }
 }
