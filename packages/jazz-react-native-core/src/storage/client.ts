@@ -35,16 +35,14 @@ export class SQLiteClient implements DBClientInterfaceAsync {
       await this.adapter.initialize();
       this.isInitialized = true;
     } catch (error) {
-      console.error("[SQLiteClient] initialization failed:", error);
+      console.error("[SQLiteClient] ❌ initialization failed:", error);
       this.initializationPromise = null;
       throw error;
     }
   }
 
   async ensureInitialized(): Promise<void> {
-    if (this.isInitialized) {
-      return;
-    }
+    if (this.isInitialized) return;
 
     if (!this.initializationPromise) {
       this.initializationPromise = this.initializeInternal();

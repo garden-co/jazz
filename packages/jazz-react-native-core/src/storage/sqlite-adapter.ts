@@ -75,20 +75,27 @@ export abstract class SQLiteAdapterBase implements SQLiteAdapter {
     await this.initializationPromise;
   }
 
+  /**
+   * Raw database execution, used before isInitialized becomes true
+   */
+  protected abstract rawDbExecuteAsync(
+    sql: string,
+    params?: unknown[],
+  ): Promise<SQLResult>;
+
   private async initializeInternal() {
     try {
       await this.open();
+
       // Apply pending migrations
-      const { rows } = await this.executeAsync("PRAGMA user_version");
+      const { rows } = await this.rawDbExecuteAsync("PRAGMA user_version");
       const currentVersion = Number(rows[0]?.user_version) ?? 0;
       const migrationQueries = getMigrationQueries(currentVersion);
       for (const sql of migrationQueries) {
-        await this.executeAsync(sql);
+        await this.rawDbExecuteAsync(sql);
       }
-
-      console.log("[SQLiteAdapterBase] initialization complete");
     } catch (error) {
-      console.error("[SQLiteAdapterBase] initialization failed:", error);
+      console.error("[SQLiteAdapterBase] ❌ initialization failed:", error);
       throw error;
     }
   }
