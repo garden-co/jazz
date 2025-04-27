@@ -1,6 +1,6 @@
 {
   "name": "jazz-react-auth-clerk",
-  "version": "0.13.5",
+  "version": "0.13.14",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -25,6 +25,6 @@
     "@testing-library/react": "16.2.0",
     "@types/react": "18.3.12",
     "@types/react-dom": "18.3.1",
-    "typescript": "~5.6.2"
+    "typescript": "catalog:"
   }
 }

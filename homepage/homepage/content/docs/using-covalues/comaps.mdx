@@ -52,7 +52,24 @@ const inventory = Inventory.create({
 When creating CoMaps, you can specify ownership to control access:
 
 <CodeGroup>
-```ts
+```ts twoslash
+import { Group, co, CoMap } from "jazz-tools";
+import { createJazzTestAccount } from 'jazz-tools/testing';
+const me = await createJazzTestAccount();
+const memberAccount = await createJazzTestAccount();
+
+class Member extends CoMap {
+  name = co.string;
+}
+
+class Project extends CoMap {
+  name = co.string;
+  startDate = co.Date;
+  status = co.literal("planning", "active", "completed");
+  coordinator = co.optional.ref(Member);
+}
+
+// ---cut---
 // Create with default owner (current user)
 const privateProject = Project.create({
   name: "My Herb Garden",
@@ -74,6 +91,8 @@ const communityProject = Project.create(
 );
 ```
 </CodeGroup>
+
+See [Groups as permission scopes](/docs/groups/intro) for more information on how to use groups to control access to CoMaps.
 
 ## Reading from CoMaps
 

@@ -1,13 +1,13 @@
 import { describe, expect, test, vi } from "vitest";
-import { PeerKnownStateActions } from "../PeerKnownStates.js";
 import { PeerState } from "../PeerState.js";
 import { CO_VALUE_PRIORITY } from "../priority.js";
-import { Peer, SyncMessage } from "../sync.js";
+import { CoValueKnownState, Peer, SyncMessage } from "../sync.js";
+import { waitFor } from "./testUtils.js";
 
 function setup() {
   const mockPeer: Peer = {
     id: "test-peer",
-    role: "peer",
+    role: "client",
     priority: 1,
     crashOnClose: false,
     incoming: (async function* () {})(),
@@ -63,13 +63,19 @@ describe("PeerState", () => {
       });
     });
 
-    const message1 = peerState.pushOutgoingMessage({
+    peerState.pushOutgoingMessage({
       action: "content",
       id: "co_z1",
       new: {},
       priority: CO_VALUE_PRIORITY.HIGH,
     });
-    const message2 = peerState.pushOutgoingMessage({
+    peerState.pushOutgoingMessage({
+      action: "content",
+      id: "co_z1",
+      new: {},
+      priority: CO_VALUE_PRIORITY.HIGH,
+    });
+    peerState.pushOutgoingMessage({
       action: "content",
       id: "co_z1",
       new: {},
@@ -78,14 +84,21 @@ describe("PeerState", () => {
 
     peerState.gracefulShutdown();
 
-    await Promise.allSettled([message1, message2]);
+    await waitFor(() => {
+      expect(peerState.isProcessing()).toBe(false);
+    });
 
-    await expect(message1).resolves.toBe(undefined);
-    await expect(message2).resolves.toBe(undefined);
+    expect(mockPeer.outgoing.push).toHaveBeenCalledTimes(1);
   });
 
   test("should schedule outgoing messages based on their priority", async () => {
-    const { peerState } = setup();
+    const { peerState, mockPeer } = setup();
+
+    mockPeer.outgoing.push = vi.fn().mockImplementation((message) => {
+      return new Promise<void>((resolve) => {
+        setTimeout(resolve, 0);
+      });
+    });
 
     const loadMessage: SyncMessage = {
       action: "load",
@@ -112,14 +125,14 @@ describe("PeerState", () => {
       priority: CO_VALUE_PRIORITY.LOW,
     };
 
-    const promises = [
-      peerState.pushOutgoingMessage(contentMessageLow),
-      peerState.pushOutgoingMessage(contentMessageMid),
-      peerState.pushOutgoingMessage(contentMessageHigh),
-      peerState.pushOutgoingMessage(loadMessage),
-    ];
+    peerState.pushOutgoingMessage(contentMessageLow);
+    peerState.pushOutgoingMessage(contentMessageMid);
+    peerState.pushOutgoingMessage(contentMessageHigh);
+    peerState.pushOutgoingMessage(loadMessage);
 
-    await Promise.all(promises);
+    await waitFor(() => {
+      expect(peerState.isProcessing()).toBe(false);
+    });
 
     // The first message is pushed directly, the other three are queued because are waiting
     // for the first push to be completed.
@@ -146,16 +159,11 @@ describe("PeerState", () => {
 
   test("should clone the knownStates into optimisticKnownStates and knownStates when passed as argument", () => {
     const { peerState, mockPeer } = setup();
-    const action: PeerKnownStateActions = {
-      type: "SET",
+    peerState.setKnownState("co_z1", {
       id: "co_z1",
-      value: {
-        id: "co_z1",
-        header: false,
-        sessions: {},
-      },
-    };
-    peerState.dispatchToKnownStates(action);
+      header: false,
+      sessions: {},
+    });
 
     const newPeerState = new PeerState(mockPeer, peerState.knownStates);
 
@@ -165,25 +173,26 @@ describe("PeerState", () => {
 
   test("should dispatch to both states", () => {
     const { peerState } = setup();
-    const knownStatesSpy = vi.spyOn(peerState.knownStates, "dispatch");
+    const knownStatesSpy = vi.spyOn(peerState._knownStates, "set");
+    if (peerState._optimisticKnownStates === "assumeInfallible") {
+      throw new Error("Expected normal optimisticKnownStates");
+    }
+
     const optimisticKnownStatesSpy = vi.spyOn(
-      peerState.optimisticKnownStates,
-      "dispatch",
+      peerState._optimisticKnownStates,
+      "set",
     );
 
-    const action: PeerKnownStateActions = {
-      type: "SET",
+    const state: CoValueKnownState = {
       id: "co_z1",
-      value: {
-        id: "co_z1",
-        header: false,
-        sessions: {},
-      },
+      header: false,
+      sessions: {},
     };
-    peerState.dispatchToKnownStates(action);
 
-    expect(knownStatesSpy).toHaveBeenCalledWith(action);
-    expect(optimisticKnownStatesSpy).toHaveBeenCalledWith(action);
+    peerState.setKnownState("co_z1", state);
+
+    expect(knownStatesSpy).toHaveBeenCalledWith("co_z1", state);
+    expect(optimisticKnownStatesSpy).toHaveBeenCalledWith("co_z1", state);
   });
 
   test("should use same reference for knownStates and optimisticKnownStates for storage peers", () => {
@@ -204,28 +213,20 @@ describe("PeerState", () => {
     expect(peerState.knownStates).toBe(peerState.optimisticKnownStates);
 
     // Verify that dispatching only updates one state
-    const knownStatesSpy = vi.spyOn(peerState.knownStates, "dispatch");
-    const optimisticKnownStatesSpy = vi.spyOn(
-      peerState.optimisticKnownStates,
-      "dispatch",
-    );
+    const knownStatesSpy = vi.spyOn(peerState._knownStates, "set");
+    expect(peerState._optimisticKnownStates).toBe("assumeInfallible");
 
-    const action: PeerKnownStateActions = {
-      type: "SET",
+    const state: CoValueKnownState = {
       id: "co_z1",
-      value: {
-        id: "co_z1",
-        header: false,
-        sessions: {},
-      },
+      header: false,
+      sessions: {},
     };
-    peerState.dispatchToKnownStates(action);
+
+    peerState.setKnownState("co_z1", state);
 
     // Only one dispatch should happen since they're the same reference
     expect(knownStatesSpy).toHaveBeenCalledTimes(1);
-    expect(knownStatesSpy).toHaveBeenCalledWith(action);
-    expect(optimisticKnownStatesSpy).toHaveBeenCalledTimes(1);
-    expect(optimisticKnownStatesSpy).toHaveBeenCalledWith(action);
+    expect(knownStatesSpy).toHaveBeenCalledWith("co_z1", state);
   });
 
   test("should use separate references for knownStates and optimisticKnownStates for non-storage peers", () => {

@@ -1,8 +1,8 @@
 import { clsx } from "clsx";
-import { Card } from "gcmp-design-system/src/app/components/atoms/Card";
-import { H2 } from "gcmp-design-system/src/app/components/atoms/Headings";
-import { Kicker } from "gcmp-design-system/src/app/components/atoms/Kicker";
-import { GappedGrid } from "gcmp-design-system/src/app/components/molecules/GappedGrid";
+import { Card } from "@garden-co/design-system/src/components/atoms/Card";
+import { H2 } from "@garden-co/design-system/src/components/atoms/Headings";
+import { Kicker } from "@garden-co/design-system/src/components/atoms/Kicker";
+import { GappedGrid } from "@garden-co/design-system/src/components/molecules/GappedGrid";
 import CodeStepAction from "./CodeStepAction.mdx";
 import CodeStepCloud from "./CodeStepCloud.mdx";
 import CodeStepRender from "./CodeStepRender.mdx";
@@ -22,7 +22,7 @@ function Code({
       className={clsx(
         className,
         "w-full h-full relative -right-2 -bottom-1 max-w-full lg:max-w-[480px] overflow-x-auto ml-auto overflow-hidden",
-        "shadow-xl shadow-blue/20 ",
+        "shadow-xl shadow-blue/20",
         "rounded-tl-lg border",
         "flex-1 bg-white ring ring-4 ring-stone-400/20",
         "dark:bg-stone-925",
@@ -61,7 +61,7 @@ function Step({
       <div className="flex gap-3 px-4 sm:px-6">
         <p
           className={clsx(
-            "bg-blue-50 size-6 rounded-full text-blue text-sm font-semibold font-mono",
+            "bg-highlight size-6 rounded-full text-primary text-sm font-semibold font-mono",
             "inline-flex items-center justify-center text-center shrink-0",
             "dark:bg-blue dark:text-white",
           )}

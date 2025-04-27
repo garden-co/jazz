@@ -1,4 +1,4 @@
-import { Icon } from "gcmp-design-system/src/app/components/atoms/Icon";
+import { Icon } from "@garden-co/design-system/src/components/atoms/Icon";
 import Link from "next/link";
 import { ReactNode } from "react";
 import { createHighlighter } from "shiki";
@@ -199,7 +199,7 @@ export function PropCategory({
 }) {
   return (
     <>
-      <div className="col-span-6 py-3 font-display font-semibold text-lg text-stone-900 dark:text-white">
+      <div className="col-span-6 py-3 font-display font-semibold text-lg text-highlight">
         {name}
       </div>
       {description && <PropDecl doc={description} example={example} />}

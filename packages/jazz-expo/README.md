@@ -60,9 +60,7 @@ If you are not working within a monorepo, create a new file metro.config.js in t
 
 ```js
 const { getDefaultConfig } = require("expo/metro-config");
-const path = require("path");
-const workspaceRoot = path.resolve(__dirname);
-const config = getDefaultConfig(projectRoot);
+const config = getDefaultConfig(__dirname);
 config.resolver.sourceExts = ["mjs", "js", "json", "ts", "tsx"];
 config.resolver.requireCycleIgnorePatterns = [/(^|\/|\\)node_modules($|\/|\\)/];
 module.exports = config;

@@ -1,6 +1,6 @@
 import LatencyChart from "@/components/LatencyChart";
 import { clsx } from "clsx";
-import { HeroHeader } from "gcmp-design-system/src/app/components/molecules/HeroHeader";
+import { HeroHeader } from "@garden-co/design-system/src/components/molecules/HeroHeader";
 import type { Metadata } from "next";
 import { Fragment } from "react";
 
@@ -161,7 +161,7 @@ export default async function Page() {
       <HeroHeader title="Systems status" />
 
       <table className="min-w-full">
-        <thead className="text-left text-sm font-semibold text-stone-900 dark:text-white">
+        <thead className="text-left text-sm font-semibold text-highlight">
           <tr>
             <th
               scope="col"

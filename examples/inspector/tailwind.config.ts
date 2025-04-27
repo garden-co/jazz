@@ -57,7 +57,7 @@ const config: Config = {
           800: "#2A12BE",
           900: "#12046A",
           950: "#1e1b4b",
-          DEFAULT: "#3313F7",
+          DEFAULT: "#146AFF",
         },
       },
     },

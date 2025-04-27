@@ -1,6 +1,6 @@
 {
   "name": "jazz-browser",
-  "version": "0.13.5",
+  "version": "0.13.14",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -13,7 +13,7 @@
   },
   "devDependencies": {
     "fake-indexeddb": "^6.0.0",
-    "typescript": "~5.6.2"
+    "typescript": "catalog:"
   },
   "scripts": {
     "format-and-lint": "biome check .",

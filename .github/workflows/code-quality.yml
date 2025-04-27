@@ -16,3 +16,6 @@ jobs:
           version: latest
       - name: Run Biome
         run: biome ci .
+
+      - name: Check Catalog Dependencies
+        run: node scripts/check-catalog-deps.js

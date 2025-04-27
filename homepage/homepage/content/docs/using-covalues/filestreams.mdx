@@ -73,6 +73,29 @@ const fileStream = FileStream.create();
 ```
 </CodeGroup>
 
+### Ownership
+
+Like other CoValues, you can specify ownership when creating FileStreams.
+
+<CodeGroup>
+```ts twoslash
+import { Group, FileStream } from "jazz-tools";
+import { createJazzTestAccount } from 'jazz-tools/testing';
+const me = await createJazzTestAccount();
+const colleagueAccount = await createJazzTestAccount();
+
+// ---cut---
+// Create a team group
+const teamGroup = Group.create();
+teamGroup.addMember(colleagueAccount, "writer");
+
+// Create a FileStream with shared ownership
+const teamFileStream = FileStream.create({ owner: teamGroup });
+```
+</CodeGroup>
+
+ See [Groups as permission scopes](/docs/groups/intro) for more information on how to use groups to control access to FileStreams.
+
 ## Reading from FileStreams
 
 `FileStream`s provide several ways to access their binary content, from raw chunks to convenient Blob objects.

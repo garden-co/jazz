@@ -2,17 +2,13 @@
   "name": "jazz-monorepo",
   "private": true,
   "type": "module",
-  "workspaces": [
-    "packages/*",
-    "examples/*",
-    "starters/*"
-  ],
+  "workspaces": ["packages/*", "examples/*", "starters/*"],
   "packageManager": "pnpm@9.15.0+sha512.76e2379760a4328ec4415815bcd6628dee727af3779aaa4c914e3944156c4299921a89f976381ee107d41f12cfa4b66681ca9c718f0668fa0831ed4c6d8ba56c",
   "engines": {
     "node": ">=22.0.0"
   },
   "devDependencies": {
-    "@biomejs/biome": "1.9.4",
+    "@biomejs/biome": "catalog:",
     "@changesets/cli": "^2.27.10",
     "@playwright/test": "^1.50.1",
     "@vitejs/plugin-react": "^4.3.3",
@@ -26,7 +22,7 @@
     "playwright": "^1.50.1",
     "turbo": "^2.3.1",
     "typedoc": "^0.25.13",
-    "vitest": "3.1.1"
+    "vitest": "catalog:"
   },
   "scripts": {
     "dev": "turbo dev",
@@ -40,16 +36,13 @@
     "changeset": "changeset",
     "changeset-version": "changeset version && pnpm i --no-frozen-lockfile",
     "release": "turbo run build --filter='./packages/*' && pnpm changeset publish && git push --follow-tags",
-    "clean": "rm -rf ./packages/*/dist && rm -rf ./packages/*/node_modules && rm -rf ./examples/*/node_modules && rm -rf ./examples/*/dist"
+    "clean": "rm -rf ./packages/*/dist && rm -rf ./packages/*/node_modules && rm -rf ./examples/*/node_modules && rm -rf ./examples/*/dist",
+    "check-catalog-deps": "node scripts/check-catalog-deps.js"
   },
   "version": "0.0.0",
   "pnpm": {
     "peerDependencyRules": {
-      "ignoreMissing": [
-        "@babel/*",
-        "expo-modules-*",
-        "typescript"
-      ]
+      "ignoreMissing": ["@babel/*", "expo-modules-*", "typescript"]
     },
     "overrides": {
       "react": "18.3.1",

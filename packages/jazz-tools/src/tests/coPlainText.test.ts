@@ -36,10 +36,10 @@ describe("CoPlainText", () => {
       test("insertion", () => {
         const text = CoPlainText.create("hello world", { owner: me });
 
-        text.insertAfter(5, " cruel");
+        text.insertAfter(4, " cruel");
         expect(text + "").toEqual("hello cruel world");
 
-        text.insertAfter(0, "Hello, ");
+        text.insertBefore(0, "Hello, ");
         expect(text + "").toEqual("Hello, hello cruel world");
       });
 
@@ -48,6 +48,24 @@ describe("CoPlainText", () => {
 
         text.deleteRange({ from: 3, to: 8 });
         expect(text + "").toEqual("helrld");
+      });
+
+      test("applyDiff", () => {
+        const text = CoPlainText.create("hello world", { owner: me });
+        text.applyDiff("hello cruel world");
+        expect(text.toString()).toEqual("hello cruel world");
+      });
+    });
+
+    describe("Properties", () => {
+      test("length", () => {
+        const text = CoPlainText.create("hello world", { owner: me });
+        expect(text.length).toBe(11);
+      });
+
+      test("toString", () => {
+        const text = CoPlainText.create("hello world", { owner: me });
+        expect(text.toString()).toBe("hello world");
       });
     });
 
@@ -155,7 +173,7 @@ describe("CoPlainText", () => {
     expect(update1.toString()).toBe("hello world");
 
     // When we make a change, we should get an update
-    text.insertAfter(5, " beautiful");
+    text.insertAfter(4, " beautiful");
     const update2 = (await queue.next()).value;
     expect(update2.toString()).toBe("hello beautiful world");
 

@@ -1,8 +1,8 @@
 import { DiagramAfterJazz } from "@/components/DiagramAfterJazz";
 import { DiagramBeforeJazz } from "@/components/DiagramBeforeJazz";
-import { Icon } from "gcmp-design-system/src/app/components/atoms/Icon";
-import { Prose } from "gcmp-design-system/src/app/components/molecules/Prose";
-import { SectionHeader } from "gcmp-design-system/src/app/components/molecules/SectionHeader";
+import { Icon } from "@garden-co/design-system/src/components/atoms/Icon";
+import { Prose } from "@garden-co/design-system/src/components/molecules/Prose";
+import { SectionHeader } from "@garden-co/design-system/src/components/molecules/SectionHeader";
 
 export default function ProblemStatementSection() {
   return (
@@ -13,8 +13,8 @@ export default function ProblemStatementSection() {
         slogan="A perspective shift worth 10,000 hours"
       />
 
-      <div className="grid sm:grid-cols-2 border rounded-lg shadow-sm md:rounded-xl overflow-hidden dark:border-stone-900">
-        <div className="flex flex-col bg-stone-50 relative gap-3 p-4 pb-8 md:p-8 md:gap-5 border-b sm:border-b-0 sm:border-r dark:bg-transparent dark:border-stone-900">
+      <div className="grid sm:grid-cols-2 border rounded-lg shadow-sm md:rounded-xl overflow-hidden">
+        <div className="flex flex-col bg-stone-50 relative gap-3 p-4 pb-8 md:p-8 md:gap-5 border-b sm:border-b-0 sm:border-r dark:bg-transparent">
           <span className="hidden absolute top-0 -right-4 md:-right-6 sm:flex items-center h-full">
             <span className="p-1 md:p-3 bg-stone-200 rounded-full dark:bg-stone-900 dark:text-white">
               <Icon name="arrowRight" />
@@ -26,7 +26,7 @@ export default function ProblemStatementSection() {
             </span>
           </span>
           <Prose>
-            <p className="font-display text-lg md:text-xl font-semibold text-stone-900 dark:text-white">
+            <p className="font-display text-lg md:text-xl font-semibold text-highlight">
               Every stack is a re-invention of shared state.
             </p>
           </Prose>
@@ -53,7 +53,7 @@ export default function ProblemStatementSection() {
         </div>
         <div className="flex flex-col gap-3 p-4 pt-8 md:p-8 md:gap-5">
           <Prose>
-            <p className="font-display text-lg md:text-xl font-semibold text-stone-900 dark:text-white">
+            <p className="font-display text-lg md:text-xl font-semibold text-highlight">
               What if we started from shared state?
             </p>
           </Prose>

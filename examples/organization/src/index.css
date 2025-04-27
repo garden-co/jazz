@@ -12,10 +12,6 @@
 
   [type="text"],
   select {
-    border-color: var(--gcmp-border-color);
-
-    @media (prefers-color-scheme: dark) {
-      border-color: var(--gcmp-invert-border-color);
-    }
+    border-color: theme("colors.stone.200");
   }
 }

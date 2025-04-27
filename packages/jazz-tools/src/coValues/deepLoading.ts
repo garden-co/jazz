@@ -63,7 +63,7 @@ export function fulfillsDepth(depth: any, value: CoValue): FulfillsDepthResult {
       for (const [key, item] of Object.entries(value)) {
         const rawValue = map._raw.get(key);
 
-        if (rawValue !== undefined) {
+        if (rawValue !== undefined && rawValue !== null) {
           if (!item) {
             if (hasReadAccess(map, key)) {
               result.status = "unfulfilled";
@@ -166,8 +166,22 @@ export function fulfillsDepth(depth: any, value: CoValue): FulfillsDepthResult {
   } else if (value._type === "CoList") {
     if ("$each" in depth) {
       const result: FulfillsDepthResult = { status: "fulfilled" };
+      const list = value as CoList;
 
       for (const [key, item] of (value as CoList).entries()) {
+        const rawValue = list._raw.get(key);
+
+        if (!rawValue) {
+          if (isOptionalField(value, ItemsSym)) {
+            continue;
+          }
+
+          // Throw an error and mark this as unavailable
+          throw new Error(
+            `The ref ${key} on ${list.constructor.name} is required but missing`,
+          );
+        }
+
         if (hasRefValue(value, key)) {
           if (!item) {
             if (hasReadAccess(value, key)) {

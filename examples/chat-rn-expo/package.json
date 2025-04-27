@@ -1,6 +1,6 @@
 {
   "name": "chat-rn-expo",
-  "version": "1.0.85",
+  "version": "1.0.93",
   "main": "index.js",
   "scripts": {
     "build": "expo export -p ios",
@@ -45,7 +45,7 @@
     "@babel/core": "^7.25.2",
     "@types/react": "~18.3.12",
     "tailwindcss": "^3.4.17",
-    "typescript": "~5.6.2"
+    "typescript": "5.6.2"
   },
   "private": true
 }

@@ -14,10 +14,7 @@ export function Posts() {
             slug={post.meta.slug}
             className="mb-1.5 rounded-lg"
           />
-          <Link
-            href={`/news/${post.meta.slug}`}
-            className="text-stone-900 dark:text-white"
-          >
+          <Link href={`/news/${post.meta.slug}`} className="text-highlight">
             <h1 className="text-2xl font-display font-semibold tracking-tight">
               {post.meta.title}
             </h1>

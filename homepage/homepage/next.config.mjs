@@ -15,7 +15,7 @@ import { jazzLight } from "./themes/jazzLight.mjs";
 const nextConfig = {
   // Configure `pageExtensions`` to include MDX files
   pageExtensions: ["js", "jsx", "mdx", "ts", "tsx"],
-  transpilePackages: ["gcmp-design-system"],
+  transpilePackages: ["@garden-co/design-system"],
 };
 
 const withMDX = createMDX({
@@ -189,12 +189,7 @@ export function withTocAndFrameworkHeadingsVisibilityExport() {
                   {
                     type: "VariableDeclarator",
                     id: { type: "Identifier", name: "tableOfContents" },
-                    init: valueToEstree(
-                      // exclude h1, but handle case where toc is empty or has no children
-                      vfile.data.toc.length && vfile.data.toc[0].children
-                        ? vfile.data.toc[0].children
-                        : [],
-                    ),
+                    init: valueToEstree(vfile.data.toc),
                   },
                 ],
               },

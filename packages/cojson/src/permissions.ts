@@ -225,6 +225,7 @@ function determineValidTransactionsForGroup(
   });
 
   const memberState: MemberState = {};
+  const writeOnlyKeys: Record<RawAccountID | AgentID, KeyID> = {};
   const validTransactions: ValidTransactionsResult[] = [];
 
   const keyRevelations = new Set<string>();
@@ -302,7 +303,8 @@ function determineValidTransactionsForGroup(
         memberState[transactor] !== "adminInvite" &&
         memberState[transactor] !== "writerInvite" &&
         memberState[transactor] !== "readerInvite" &&
-        memberState[transactor] !== "writeOnlyInvite"
+        memberState[transactor] !== "writeOnlyInvite" &&
+        !isOwnWriteKeyRevelation(change.key, transactor, writeOnlyKeys)
       ) {
         logPermissionError("Only admins can reveal keys");
         continue;
@@ -370,13 +372,18 @@ function determineValidTransactionsForGroup(
       validTransactions.push({ txID: { sessionID, txIndex }, tx });
       continue;
     } else if (isWriteKeyForMember(change.key)) {
+      const memberKey = getAccountOrAgentFromWriteKeyForMember(change.key);
+
       if (
         memberState[transactor] !== "admin" &&
-        memberState[transactor] !== "writeOnlyInvite"
+        memberState[transactor] !== "writeOnlyInvite" &&
+        memberKey !== transactor
       ) {
         logPermissionError("Only admins can set writeKeys");
         continue;
       }
+
+      writeOnlyKeys[memberKey] = change.value as KeyID;
 
       /**
        * writeOnlyInvite need to be able to set writeKeys because every new writeOnly
@@ -422,11 +429,12 @@ function determineValidTransactionsForGroup(
       !(
         change.value === "reader" ||
         change.value === "writer" ||
+        change.value === "writeOnly" ||
         change.value === "revoked"
       )
     ) {
       logPermissionError(
-        "Everyone can only be set to reader, writer or revoked",
+        "Everyone can only be set to reader, writer, writeOnly or revoked",
       );
       continue;
     }
@@ -499,6 +507,12 @@ export function isWriteKeyForMember(
   return co.startsWith("writeKeyFor_");
 }
 
+export function getAccountOrAgentFromWriteKeyForMember(
+  co: `writeKeyFor_${RawAccountID | AgentID}`,
+): RawAccountID | AgentID {
+  return co.slice("writeKeyFor_".length) as RawAccountID | AgentID;
+}
+
 export function isKeyForKeyField(co: string): co is `${KeyID}_for_${KeyID}` {
   return co.startsWith("key_") && co.includes("_for_key");
 }
@@ -519,4 +533,18 @@ function isParentExtension(key: string): key is `parent_${CoID<RawGroup>}` {
 
 function isChildExtension(key: string): key is `child_${CoID<RawGroup>}` {
   return key.startsWith("child_");
+}
+
+function isOwnWriteKeyRevelation(
+  key: `${KeyID}_for_${string}`,
+  memberKey: RawAccountID | AgentID,
+  writeOnlyKeys: Record<RawAccountID | AgentID, KeyID>,
+): key is `${KeyID}_for_${RawAccountID | AgentID}` {
+  if (Object.keys(writeOnlyKeys).length === 0) {
+    return false;
+  }
+
+  const keyID = key.slice(0, key.indexOf("_for_"));
+
+  return writeOnlyKeys[memberKey] === keyID;
 }

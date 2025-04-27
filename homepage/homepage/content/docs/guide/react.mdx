@@ -195,7 +195,7 @@ export default App;
 
 🏁 Now you should be able to create a new issue by clicking the button and then see it rendered!
 
-<div className="text-xs uppercase text-stone-400 dark:text-stone-600 tracking-wider -mb-3">
+<div className="text-xs uppercase text-muted tracking-wider -mb-3">
     Preview
 </div>
 <div className="p-3 md:-mx-3 rounded border border-stone-100 bg-white dark:bg-black not-prose">
@@ -307,7 +307,7 @@ export function IssueComponent({ issue }: { issue: Issue }) {
 ```
 </CodeGroup>
 
-<div className="text-xs uppercase text-stone-400 dark:text-stone-600 tracking-wider -mb-3">
+<div className="text-xs uppercase text-muted tracking-wider -mb-3">
     Preview
 </div>
 
@@ -323,8 +323,8 @@ This works because CoValues
 -   update their local view accordingly (React doesn't really care after rendering)
 -   notify subscribers of the change (who will receive a fresh, updated view of the CoValue)
 
-<aside className="text-sm border border-stone-300 dark:border-stone-700 rounded px-4 my-4 max-w-3xl [&_pre]:mx-0">
-    <h4 className="not-prose text-base py-2 mb-3 px-4 border-b border-stone-300 dark:border-stone-700">💡 A Quick Overview of Subscribing to CoValues</h4>
+<aside className="text-sm border border-muted rounded px-4 my-4 max-w-3xl [&_pre]:mx-0">
+    <h4 className="not-prose text-base py-2 mb-3 px-4 border-b border-muted">💡 A Quick Overview of Subscribing to CoValues</h4>
 
     There are three main ways to subscribe to a CoValue:
 

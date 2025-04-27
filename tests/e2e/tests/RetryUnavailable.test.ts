@@ -21,8 +21,6 @@ test.describe("Retry unavailable states", () => {
       timeout: 20_000,
     });
 
-    await setTimeout(1000);
-
     await context.setOffline(false);
 
     // Go back online, the value should be uploaded

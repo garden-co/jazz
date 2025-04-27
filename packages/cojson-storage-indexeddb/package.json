@@ -1,6 +1,6 @@
 {
   "name": "cojson-storage-indexeddb",
-  "version": "0.13.5",
+  "version": "0.13.14",
   "main": "dist/index.js",
   "type": "module",
   "types": "dist/index.d.ts",
@@ -10,7 +10,7 @@
     "cojson-storage": "workspace:*"
   },
   "devDependencies": {
-    "typescript": "~5.6.2",
+    "typescript": "catalog:",
     "webdriverio": "^8.15.0"
   },
   "scripts": {

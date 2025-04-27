@@ -1,4 +1,4 @@
-import { expect, test, vi } from "vitest";
+import { assert, afterEach, beforeEach, expect, test, vi } from "vitest";
 import { CoValueCore, Transaction } from "../coValueCore.js";
 import { MapOpPayload } from "../coValues/coMap.js";
 import { WasmCrypto } from "../crypto/WasmCrypto.js";
@@ -6,13 +6,25 @@ import { stableStringify } from "../jsonStringify.js";
 import { LocalNode } from "../localNode.js";
 import { Role } from "../permissions.js";
 import {
+  createTestMetricReader,
   createTestNode,
   createTwoConnectedNodes,
   loadCoValueOrFail,
   randomAnonymousAccountAndSessionID,
+  tearDownTestMetricReader,
 } from "./testUtils.js";
 
 const Crypto = await WasmCrypto.create();
+
+let metricReader: ReturnType<typeof createTestMetricReader>;
+
+beforeEach(() => {
+  metricReader = createTestMetricReader();
+});
+
+afterEach(() => {
+  tearDownTestMetricReader();
+});
 
 test("Can create coValue with new agent credentials and add transaction to it", () => {
   const [account, sessionID] = randomAnonymousAccountAndSessionID();
@@ -197,6 +209,63 @@ test("New transactions in a group correctly update owned values, including subsc
   expect(map.core.getValidSortedTransactions().length).toBe(0);
 });
 
+test("correctly records transactions", async () => {
+  const [account, sessionID] = randomAnonymousAccountAndSessionID();
+  const node = new LocalNode(account, sessionID, Crypto);
+
+  const changes1 = stableStringify([{ hello: "world" }]);
+  node.syncManager.recordTransactionsSize(
+    [
+      {
+        privacy: "trusting",
+        changes: changes1,
+        madeAt: Date.now(),
+      },
+    ],
+    "server",
+  );
+
+  let value = await metricReader.getMetricValue("jazz.transactions.size", {
+    source: "server",
+  });
+  assert(typeof value !== "number" && !!value?.count);
+  expect(value.count).toBe(1);
+  expect(value.sum).toBe(changes1.length);
+
+  const changes2 = stableStringify([{ foo: "bar" }]);
+  node.syncManager.recordTransactionsSize(
+    [
+      {
+        privacy: "trusting",
+        changes: changes2,
+        madeAt: Date.now(),
+      },
+    ],
+    "server",
+  );
+
+  value = await metricReader.getMetricValue("jazz.transactions.size", {
+    source: "server",
+  });
+  assert(typeof value !== "number" && !!value?.count);
+  expect(value.count).toBe(2);
+  expect(value.sum).toBe(changes1.length + changes2.length);
+});
+
+test("(smoke test) records transactions from local node", async () => {
+  const [account, sessionID] = randomAnonymousAccountAndSessionID();
+  const node = new LocalNode(account, sessionID, Crypto);
+
+  node.createGroup();
+
+  let value = await metricReader.getMetricValue("jazz.transactions.size", {
+    source: "local",
+  });
+
+  assert(typeof value !== "number" && !!value?.count);
+  expect(value.count).toBe(3);
+});
+
 test("creating a coValue with a group should't trigger automatically a content creation (performance)", () => {
   const node = createTestNode();
 
@@ -218,10 +287,28 @@ test("creating a coValue with a group should't trigger automatically a content c
   });
 
   // It's called once for the group and never for the coValue
-  expect(getCurrentContentSpy).toHaveBeenCalledTimes(1);
-  expect(groupSpy).toHaveBeenCalledTimes(1);
+  expect(getCurrentContentSpy).toHaveBeenCalledTimes(0);
+  expect(groupSpy).toHaveBeenCalledTimes(0);
 
   getCurrentContentSpy.mockRestore();
+});
+
+test("loading a coValue core without having the owner group available doesn't crash", () => {
+  const [account, sessionID] = randomAnonymousAccountAndSessionID();
+  const node = new LocalNode(account, sessionID, Crypto);
+
+  const otherNode = createTestNode();
+
+  const group = otherNode.createGroup();
+
+  const coValue = node.createCoValue({
+    type: "costream",
+    ruleset: { type: "ownedByGroup", group: group.id },
+    meta: null,
+    ...Crypto.createdNowUnique(),
+  });
+
+  expect(coValue.id).toBeDefined();
 });
 
 test("listeners are notified even if the previous listener threw an error", async () => {

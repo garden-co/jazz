@@ -33,7 +33,34 @@ const activityFeed = ActivityFeed.create([]);
 ```
 </CodeGroup>
 
-Like other CoValues, you can specify [ownership](/docs/using-covalues/ownership) when creating CoFeeds.
+### Ownership
+
+Like other CoValues, you can specify ownership when creating CoFeeds.
+
+<CodeGroup>
+```ts twoslash
+import { Group, co, CoMap, CoFeed } from "jazz-tools";
+import { createJazzTestAccount } from 'jazz-tools/testing';
+const me = await createJazzTestAccount();
+const colleagueAccount = await createJazzTestAccount();
+
+class Activity extends CoMap {
+  timestamp = co.Date;
+  action = co.literal("watering", "planting", "harvesting", "maintenance");
+  notes = co.optional.string;
+}
+
+class ActivityFeed extends CoFeed.Of(co.ref(Activity)) {}
+
+// ---cut---
+const teamGroup = Group.create();
+teamGroup.addMember(colleagueAccount, "writer");
+
+const teamFeed = ActivityFeed.create([], { owner: teamGroup });
+```
+</CodeGroup>
+
+ See [Groups as permission scopes](/docs/groups/intro) for more information on how to use groups to control access to CoFeeds.
 
 ## Reading from CoFeeds
 

@@ -2,6 +2,14 @@
 @tailwind components;
 @tailwind utilities;
 
+:root {
+  --border-default: theme("colors.stone.200");
+}
+
+.dark {
+  --border-default: theme("colors.stone.900");
+}
+
 @layer components {
   strong {
     @apply font-semibold text-stone-900 dark:text-white;

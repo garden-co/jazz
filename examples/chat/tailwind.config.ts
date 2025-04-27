@@ -36,7 +36,7 @@ const config: Config = {
         blue: {
           ...colors.indigo,
           500: "#5870F1",
-          DEFAULT: "#3313F7",
+          DEFAULT: "#146AFF",
         },
       },
       container: {
@@ -56,18 +56,6 @@ const config: Config = {
   plugins: [
     plugin(({ addBase }) =>
       addBase({
-        ":root": {
-          "--gcmp-border-color": stonePalette[200],
-          "--gcmp-invert-border-color": stonePalette[900],
-        },
-        "*": {
-          borderColor: "var(--gcmp-border-color)",
-        },
-        "@media (prefers-color-scheme: dark)": {
-          "*": {
-            borderColor: "var(--gcmp-invert-border-color)",
-          },
-        },
         "*:focus": {
           outline: "none",
         },

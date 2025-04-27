@@ -2,29 +2,6 @@ import { Counter, ValueType, metrics } from "@opentelemetry/api";
 import { CO_VALUE_PRIORITY, type CoValuePriority } from "./priority.js";
 import type { SyncMessage } from "./sync.js";
 
-function promiseWithResolvers<R>() {
-  let resolve = (_: R) => {};
-  let reject = (_: unknown) => {};
-
-  const promise = new Promise<R>((_resolve, _reject) => {
-    resolve = _resolve;
-    reject = _reject;
-  });
-
-  return {
-    promise,
-    resolve,
-    reject,
-  };
-}
-
-export type QueueEntry = {
-  msg: SyncMessage;
-  promise: Promise<void>;
-  resolve: () => void;
-  reject: (_: unknown) => void;
-};
-
 /**
  * Since we have a fixed range of priority values (0-7) we can create a fixed array of queues.
  */
@@ -34,7 +11,7 @@ type Tuple<T, N extends number, A extends unknown[] = []> = A extends {
   ? A
   : Tuple<T, N, [...A, T]>;
 
-type QueueTuple = Tuple<LinkedList<QueueEntry>, 3>;
+type QueueTuple = Tuple<LinkedList<SyncMessage>, 3>;
 
 type LinkedListNode<T> = {
   value: T;
@@ -164,14 +141,9 @@ export class PriorityBasedMessageQueue {
   }
 
   public push(msg: SyncMessage) {
-    const { promise, resolve, reject } = promiseWithResolvers<void>();
-    const entry: QueueEntry = { msg, promise, resolve, reject };
-
     const priority = "priority" in msg ? msg.priority : this.defaultPriority;
 
-    this.getQueue(priority).push(entry);
-
-    return promise;
+    this.getQueue(priority).push(msg);
   }
 
   public pull() {

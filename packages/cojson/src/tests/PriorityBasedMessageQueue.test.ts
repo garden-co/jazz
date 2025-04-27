@@ -157,8 +157,7 @@ describe("PriorityBasedMessageQueue", () => {
       sessions: {},
     };
     void queue.push(message);
-    const pulledEntry = queue.pull();
-    expect(pulledEntry?.msg).toEqual(message);
+    expect(queue.pull()).toEqual(message);
   });
 
   test("should push message with specified priority", async () => {
@@ -170,8 +169,7 @@ describe("PriorityBasedMessageQueue", () => {
       priority: CO_VALUE_PRIORITY.HIGH,
     };
     void queue.push(message);
-    const pulledEntry = queue.pull();
-    expect(pulledEntry?.msg).toEqual(message);
+    expect(queue.pull()).toEqual(message);
   });
 
   test("should pull messages in priority order", async () => {
@@ -199,45 +197,13 @@ describe("PriorityBasedMessageQueue", () => {
     void queue.push(mediumPriorityMsg);
     void queue.push(highPriorityMsg);
 
-    expect(queue.pull()?.msg).toEqual(highPriorityMsg);
-    expect(queue.pull()?.msg).toEqual(mediumPriorityMsg);
-    expect(queue.pull()?.msg).toEqual(lowPriorityMsg);
+    expect(queue.pull()).toEqual(highPriorityMsg);
+    expect(queue.pull()).toEqual(mediumPriorityMsg);
+    expect(queue.pull()).toEqual(lowPriorityMsg);
   });
 
   test("should return undefined when pulling from empty queue", () => {
     const { queue } = setup();
     expect(queue.pull()).toBeUndefined();
-  });
-
-  test("should resolve promise when message is pulled", async () => {
-    const { queue } = setup();
-    const message: SyncMessage = {
-      action: "load",
-      id: "co_ztest-id",
-      header: false,
-      sessions: {},
-    };
-    const pushPromise = queue.push(message);
-
-    const pulledEntry = queue.pull();
-    pulledEntry?.resolve();
-
-    await expect(pushPromise).resolves.toBeUndefined();
-  });
-
-  test("should reject promise when message is rejected", async () => {
-    const { queue } = setup();
-    const message: SyncMessage = {
-      action: "load",
-      id: "co_ztest-id",
-      header: false,
-      sessions: {},
-    };
-    const pushPromise = queue.push(message);
-
-    const pulledEntry = queue.pull();
-    pulledEntry?.reject(new Error("Test error"));
-
-    await expect(pushPromise).rejects.toThrow("Test error");
   });
 });

@@ -178,6 +178,19 @@ describe("JazzClerkAuth", () => {
       expect(onClerkUserChangeSpy).toHaveBeenCalledTimes(2);
     });
 
+    it("should call onClerkUserChange when user passes from null to non-null", async () => {
+      const { client, triggerUserChange } = setupMockClerk(null);
+
+      const auth = new JazzClerkAuth(mockAuthenticate, authSecretStorage);
+      const onClerkUserChangeSpy = vi.spyOn(auth, "onClerkUserChange");
+
+      auth.registerListener(client);
+
+      triggerUserChange(null);
+
+      expect(onClerkUserChangeSpy).toHaveBeenCalledTimes(1);
+    });
+
     it("should not call onClerkUserChange when user is the same", async () => {
       const { client, triggerUserChange } = setupMockClerk(null);
 

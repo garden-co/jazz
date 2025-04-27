@@ -1,7 +1,7 @@
-import { Card } from "gcmp-design-system/src/app/components/atoms/Card";
-import { H3 } from "gcmp-design-system/src/app/components/atoms/Headings";
-import { Icon } from "gcmp-design-system/src/app/components/atoms/Icon";
-import { Prose } from "gcmp-design-system/src/app/components/molecules/Prose";
+import { Card } from "@garden-co/design-system/src/components/atoms/Card";
+import { H3 } from "@garden-co/design-system/src/components/atoms/Headings";
+import { Icon } from "@garden-co/design-system/src/components/atoms/Icon";
+import { Prose } from "@garden-co/design-system/src/components/molecules/Prose";
 
 const randomChars = [
   "SFPOHVKNPDKETOMQLMJKX#QDI=TFFFMRJDSJ",
@@ -41,7 +41,7 @@ function Illustration() {
           index % 2 === 0 ? (
             <span key={index}>{char}</span>
           ) : (
-            <span key={index} className="text-stone-600 dark:text-stone-700">
+            <span key={index} className="text-stone-600 dark:text-muted">
               {char}
             </span>
           ),
@@ -51,14 +51,14 @@ function Illustration() {
       <Icon
         name="encryption"
         size="3xl"
-        className="z-30 text-blue p-1.5 rounded-lg bg-blue-50 dark:text-blue-500 dark:bg-stone-900"
+        className="z-30 text-primary p-1.5 rounded-lg bg-highlight dark:bg-stone-900"
       />
 
       {/*<LockKeyholeIcon*/}
       {/*  strokeWidth={1.5}*/}
       {/*  strokeLinecap="butt"*/}
       {/*  size={80}*/}
-      {/*  className="z-30 size-8 text-blue p-1.5 rounded-lg bg-blue-50 dark:text-blue-500 dark:bg-stone-900 md:size-10"*/}
+      {/*  className="z-30 size-8 text-primary p-1.5 rounded-lg bg-highlight dark:bg-stone-900 md:size-10"*/}
       {/*/>*/}
 
       <div className="w-20 h-full bg-gradient-to-r from-white to-transparent absolute top-0 left-0 z-10 dark:from-stone-925"></div>

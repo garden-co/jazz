@@ -1,8 +1,9 @@
 import harmonyPalette from "@evilmartians/harmony/tailwind";
 import typography from "@tailwindcss/typography";
 import tailwindCSSAnimate from "tailwindcss-animate";
-const colors = require("tailwindcss/colors");
-const plugin = require("tailwindcss/plugin");
+import colors from "tailwindcss/colors";
+import plugin from "tailwindcss/plugin";
+import { COLORS } from "./colors/colors";
 
 const stonePalette = {
   50: "oklch(0.988281 0.002 75)",
@@ -17,6 +18,16 @@ const stonePalette = {
   900: "oklch(0.302734 0.002 75)",
   925: "oklch(0.220000 0.002 75)",
   950: "oklch(0.193359 0.002 75)",
+};
+
+const jazzBlue = {
+  ...colors.indigo,
+  500: "#5870F1",
+  600: "#3651E7",
+  700: "#3313F7",
+  800: "#2A12BE",
+  900: "#12046A",
+  DEFAULT: COLORS.BLUE,
 };
 
 const stonePaletteWithAlpha = { ...stonePalette };
@@ -36,22 +47,34 @@ const config = {
     "./src/app/**/*.{js,ts,jsx,tsx,mdx}",
   ],
   theme: {
-    colors: {
-      ...harmonyPalette,
-      stone: stonePaletteWithAlpha,
-      blue: {
-        ...colors.indigo,
-        500: "#5870F1",
-        600: "#3651E7",
-        700: "#3313F7",
-        800: "#2A12BE",
-        900: "#12046A",
-        DEFAULT: "#3313F7",
-      },
-      green: colors.green,
-      red: colors.red,
-    },
     extend: {
+      colors: {
+        ...harmonyPalette,
+        stone: stonePaletteWithAlpha,
+        blue: jazzBlue,
+        primary: "var(--color-primary)",
+        secondary: "var(--color-secondary)",
+        highlight: "var(--color-transparent-primary)",
+        success: "var(--color-success)",
+        info: "var(--color-info)",
+        warning: "var(--color-warning)",
+        tip: "var(--color-tip)",
+        green: {
+          DEFAULT: "var(--color-green)",
+        },
+      },
+      textColor: {
+        default: "var(--color-default)",
+        highlight: "var(--color-highlight)",
+        muted: "var(--color-muted)",
+      },
+      borderColor: {
+        DEFAULT: "var(--color-border-default)",
+      },
+      backgroundColor: {
+        highlight: "var(--color-transparent-primary)",
+        muted: "var(--color-bg-muted)",
+      },
       fontFamily: {
         display: ["var(--font-manrope)"],
         mono: ["var(--font-commit-mono)"],
@@ -86,8 +109,8 @@ const config = {
             "--tw-prose-invert-headings": theme("colors.white"),
             "--tw-prose-code": stonePalette[900],
             "--tw-prose-invert-code": stonePalette[50],
-            "--tw-prose-links": theme("colors.blue.DEFAULT"),
-            "--tw-prose-invert-links": theme("colors.blue.500"),
+            "--tw-prose-links": theme("colors.primary"),
+            "--tw-prose-invert-links": theme("colors.primary"),
             maxWidth: null,
             strong: {
               color: "var(--tw-prose-bold)",
@@ -100,6 +123,9 @@ const config = {
             a: {
               fontWeight: theme("fontWeight.normal"),
               textUnderlineOffset: "4px",
+              "&:hover": {
+                color: "var(--color-primary-dark)",
+              },
             },
             h1: {
               fontFamily: theme("fontFamily.display"),
@@ -164,23 +190,6 @@ const config = {
         ".text-reset, .text-reset:hover, .text-reset:focus": {
           color: "inherit",
           textDecoration: "none",
-        },
-      }),
-    ),
-    plugin(({ addBase }) =>
-      addBase({
-        ":root": {
-          "--gcmp-border-color": stonePalette[200],
-          "--gcmp-invert-border-color": stonePalette[900],
-        },
-        "*": {
-          borderColor: "var(--gcmp-border-color)",
-        },
-        ".dark *": {
-          borderColor: "var(--gcmp-invert-border-color)",
-        },
-        "*:focus": {
-          outline: "none",
         },
       }),
     ),

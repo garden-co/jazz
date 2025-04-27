@@ -1,487 +1,37 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { expectMap } from "../coValue.js";
-import type { CoValueHeader, TryAddTransactionsError } from "../coValueCore.js";
-import type { RawAccountID } from "../coValues/account.js";
-import { type MapOpPayload, RawCoMap } from "../coValues/coMap.js";
+import { RawCoMap } from "../coValues/coMap.js";
 import type { RawGroup } from "../coValues/group.js";
 import { WasmCrypto } from "../crypto/WasmCrypto.js";
-import { stableStringify } from "../jsonStringify.js";
 import { LocalNode } from "../localNode.js";
-import { getPriorityFromHeader } from "../priority.js";
 import { connectedPeers, newQueuePair } from "../streamUtils.js";
-import type { LoadMessage, SyncMessage } from "../sync.js";
+import type { LoadMessage } from "../sync.js";
 import {
   blockMessageTypeOnOutgoingPeer,
-  connectNodeToSyncServer,
   connectTwoPeers,
-  createConnectedTestAgentNode,
-  createConnectedTestNode,
   createTestMetricReader,
   createTestNode,
   loadCoValueOrFail,
   randomAnonymousAccountAndSessionID,
-  setupSyncServer,
+  setupTestAccount,
+  setupTestNode,
   tearDownTestMetricReader,
   waitFor,
 } from "./testUtils.js";
 
 const Crypto = await WasmCrypto.create();
 
-let jazzCloud = setupSyncServer();
+let jazzCloud = setupTestNode({
+  isSyncServer: true,
+});
 
 beforeEach(async () => {
-  jazzCloud = setupSyncServer();
+  jazzCloud = setupTestNode({
+    isSyncServer: true,
+  });
 });
 
-test("Node replies with initial tx and header to empty subscribe", async () => {
-  const [admin, session] = randomAnonymousAccountAndSessionID();
-  const node = new LocalNode(admin, session, Crypto);
-
-  const group = node.createGroup();
-
-  const map = group.createMap();
-
-  map.set("hello", "world", "trusting");
-
-  const [inRx, inTx] = newQueuePair();
-  const [outRx, outTx] = newQueuePair();
-  const outRxQ = outRx[Symbol.asyncIterator]();
-
-  node.syncManager.addPeer({
-    id: "test",
-    incoming: inRx,
-    outgoing: outTx,
-    role: "peer",
-    crashOnClose: true,
-  });
-
-  await inTx.push({
-    action: "load",
-    id: map.core.id,
-    header: false,
-    sessions: {},
-  });
-
-  // expect((await outRxQ.next()).value).toMatchObject(admStateEx(admin.id));
-  expect((await outRxQ.next()).value).toMatchObject(groupStateEx(group));
-
-  const mapTellKnownStateMsg = (await outRxQ.next()).value;
-  expect(mapTellKnownStateMsg).toEqual({
-    action: "known",
-    ...map.core.knownState(),
-  } satisfies SyncMessage);
-
-  // expect((await outRxQ.next()).value).toMatchObject(admContEx(admin.id));
-  expect((await outRxQ.next()).value).toMatchObject(groupContentEx(group));
-
-  const newContentMsg = (await outRxQ.next()).value;
-
-  const expectedHeader = {
-    type: "comap",
-    ruleset: { type: "ownedByGroup", group: group.id },
-    meta: null,
-    createdAt: map.core.header.createdAt,
-    uniqueness: map.core.header.uniqueness,
-  } satisfies CoValueHeader;
-
-  expect(newContentMsg).toEqual({
-    action: "content",
-    id: map.core.id,
-    header: expectedHeader,
-    new: {
-      [node.currentSessionID]: {
-        after: 0,
-        newTransactions: [
-          {
-            privacy: "trusting" as const,
-            madeAt: map.core.sessionLogs.get(node.currentSessionID)!
-              .transactions[0]!.madeAt,
-            changes: stableStringify([
-              {
-                op: "set",
-                key: "hello",
-                value: "world",
-              } satisfies MapOpPayload<string, string>,
-            ]),
-          },
-        ],
-        lastSignature: map.core.sessionLogs.get(node.currentSessionID)!
-          .lastSignature!,
-      },
-    },
-    priority: getPriorityFromHeader(map.core.header),
-  } satisfies SyncMessage);
-});
-
-test("Node replies with only new tx to subscribe with some known state", async () => {
-  const [admin, session] = randomAnonymousAccountAndSessionID();
-  const node = new LocalNode(admin, session, Crypto);
-
-  const group = node.createGroup();
-
-  const map = group.createMap();
-
-  map.set("hello", "world", "trusting");
-  map.set("goodbye", "world", "trusting");
-
-  const [inRx, inTx] = newQueuePair();
-  const [outRx, outTx] = newQueuePair();
-  const outRxQ = outRx[Symbol.asyncIterator]();
-
-  node.syncManager.addPeer({
-    id: "test",
-    incoming: inRx,
-    outgoing: outTx,
-    role: "peer",
-    crashOnClose: true,
-  });
-
-  await inTx.push({
-    action: "load",
-    id: map.core.id,
-    header: true,
-    sessions: {
-      [node.currentSessionID]: 1,
-    },
-  });
-
-  // expect((await outRxQ.next()).value).toMatchObject(admStateEx(admin.id));
-  expect((await outRxQ.next()).value).toMatchObject(groupStateEx(group));
-
-  const mapTellKnownStateMsg = (await outRxQ.next()).value;
-  expect(mapTellKnownStateMsg).toEqual({
-    action: "known",
-    ...map.core.knownState(),
-  } satisfies SyncMessage);
-
-  // expect((await outRxQ.next()).value).toMatchObject(admContEx(admin.id));
-  expect((await outRxQ.next()).value).toMatchObject(groupContentEx(group));
-
-  const mapNewContentMsg = (await outRxQ.next()).value;
-
-  expect(mapNewContentMsg).toEqual({
-    action: "content",
-    id: map.core.id,
-    header: undefined,
-    new: {
-      [node.currentSessionID]: {
-        after: 1,
-        newTransactions: [
-          {
-            privacy: "trusting" as const,
-            madeAt: map.core.sessionLogs.get(node.currentSessionID)!
-              .transactions[1]!.madeAt,
-            changes: stableStringify([
-              {
-                op: "set",
-                key: "goodbye",
-                value: "world",
-              } satisfies MapOpPayload<string, string>,
-            ]),
-          },
-        ],
-        lastSignature: map.core.sessionLogs.get(node.currentSessionID)!
-          .lastSignature!,
-      },
-    },
-    priority: getPriorityFromHeader(map.core.header),
-  } satisfies SyncMessage);
-});
-test.todo(
-  "TODO: node only replies with new tx to subscribe with some known state, even in the depended on coValues",
-);
-
-test("After subscribing, node sends own known state and new txs to peer", async () => {
-  const [admin, session] = randomAnonymousAccountAndSessionID();
-  const node = new LocalNode(admin, session, Crypto);
-
-  const group = node.createGroup();
-
-  const map = group.createMap();
-
-  const [inRx, inTx] = newQueuePair();
-  const [outRx, outTx] = newQueuePair();
-  const outRxQ = outRx[Symbol.asyncIterator]();
-
-  node.syncManager.addPeer({
-    id: "test",
-    incoming: inRx,
-    outgoing: outTx,
-    role: "peer",
-    crashOnClose: true,
-  });
-
-  await inTx.push({
-    action: "load",
-    id: map.core.id,
-    header: false,
-    sessions: {
-      [node.currentSessionID]: 0,
-    },
-  });
-
-  // expect((await outRxQ.next()).value).toMatchObject(admStateEx(admin.id));
-  expect((await outRxQ.next()).value).toMatchObject(groupStateEx(group));
-
-  const mapTellKnownStateMsg = (await outRxQ.next()).value;
-  expect(mapTellKnownStateMsg).toEqual({
-    action: "known",
-    ...map.core.knownState(),
-  } satisfies SyncMessage);
-
-  // expect((await outRxQ.next()).value).toMatchObject(admContEx(admin.id));
-  expect((await outRxQ.next()).value).toMatchObject(groupContentEx(group));
-
-  const mapNewContentHeaderOnlyMsg = (await outRxQ.next()).value;
-
-  expect(mapNewContentHeaderOnlyMsg).toEqual({
-    action: "content",
-    id: map.core.id,
-    header: map.core.header,
-    new: {},
-    priority: getPriorityFromHeader(map.core.header),
-  } satisfies SyncMessage);
-
-  map.set("hello", "world", "trusting");
-
-  const mapEditMsg1 = (await outRxQ.next()).value;
-
-  expect(mapEditMsg1).toEqual({
-    action: "content",
-    id: map.core.id,
-    new: {
-      [node.currentSessionID]: {
-        after: 0,
-        newTransactions: [
-          {
-            privacy: "trusting" as const,
-            madeAt: map.core.sessionLogs.get(node.currentSessionID)!
-              .transactions[0]!.madeAt,
-            changes: stableStringify([
-              {
-                op: "set",
-                key: "hello",
-                value: "world",
-              } satisfies MapOpPayload<string, string>,
-            ]),
-          },
-        ],
-        lastSignature: map.core.sessionLogs.get(node.currentSessionID)!
-          .lastSignature!,
-      },
-    },
-    priority: getPriorityFromHeader(map.core.header),
-  } satisfies SyncMessage);
-
-  map.set("goodbye", "world", "trusting");
-
-  const mapEditMsg2 = (await outRxQ.next()).value;
-
-  expect(mapEditMsg2).toEqual({
-    action: "content",
-    id: map.core.id,
-    new: {
-      [node.currentSessionID]: {
-        after: 1,
-        newTransactions: [
-          {
-            privacy: "trusting" as const,
-            madeAt: map.core.sessionLogs.get(node.currentSessionID)!
-              .transactions[1]!.madeAt,
-            changes: stableStringify([
-              {
-                op: "set",
-                key: "goodbye",
-                value: "world",
-              } satisfies MapOpPayload<string, string>,
-            ]),
-          },
-        ],
-        lastSignature: map.core.sessionLogs.get(node.currentSessionID)!
-          .lastSignature!,
-      },
-    },
-    priority: getPriorityFromHeader(map.core.header),
-  } satisfies SyncMessage);
-});
-
-test("Client replies with known new content to tellKnownState from server", async () => {
-  const [admin, session] = randomAnonymousAccountAndSessionID();
-  const node = new LocalNode(admin, session, Crypto);
-
-  const group = node.createGroup();
-
-  const map = group.createMap();
-
-  map.set("hello", "world", "trusting");
-
-  const [inRx, inTx] = newQueuePair();
-  const [outRx, outTx] = newQueuePair();
-  const outRxQ = outRx[Symbol.asyncIterator]();
-
-  node.syncManager.addPeer({
-    id: "test",
-    incoming: inRx,
-    outgoing: outTx,
-    role: "peer",
-    crashOnClose: true,
-  });
-
-  // expect((await outRxQ.next()).value).toMatchObject(groupStateEx(group));
-
-  await inTx.push({
-    action: "known",
-    id: map.core.id,
-    header: false,
-    sessions: {
-      [node.currentSessionID]: 0,
-    },
-  });
-
-  // expect((await outRxQ.next()).value).toMatchObject(admStateEx(admin.id));
-  expect((await outRxQ.next()).value).toMatchObject(groupStateEx(group));
-
-  const mapTellKnownStateMsg = (await outRxQ.next()).value;
-  expect(mapTellKnownStateMsg).toEqual({
-    action: "known",
-    ...map.core.knownState(),
-  } satisfies SyncMessage);
-
-  // expect((await outRxQ.next()).value).toMatchObject(admContEx(admin.id));
-  expect((await outRxQ.next()).value).toMatchObject(groupContentEx(group));
-
-  const mapNewContentMsg = (await outRxQ.next()).value;
-
-  expect(mapNewContentMsg).toEqual({
-    action: "content",
-    id: map.core.id,
-    header: map.core.header,
-    new: {
-      [node.currentSessionID]: {
-        after: 0,
-        newTransactions: [
-          {
-            privacy: "trusting" as const,
-            madeAt: map.core.sessionLogs.get(node.currentSessionID)!
-              .transactions[0]!.madeAt,
-            changes: stableStringify([
-              {
-                op: "set",
-                key: "hello",
-                value: "world",
-              } satisfies MapOpPayload<string, string>,
-            ]),
-          },
-        ],
-        lastSignature: map.core.sessionLogs.get(node.currentSessionID)!
-          .lastSignature!,
-      },
-    },
-    priority: getPriorityFromHeader(map.core.header),
-  } satisfies SyncMessage);
-});
-
-test("No matter the optimistic known state, node respects invalid known state messages and resyncs", async () => {
-  const [admin, session] = randomAnonymousAccountAndSessionID();
-  const node = new LocalNode(admin, session, Crypto);
-
-  const group = node.createGroup();
-
-  const map = group.createMap();
-
-  const [inRx, inTx] = newQueuePair();
-  const [outRx, outTx] = newQueuePair();
-  const outRxQ = outRx[Symbol.asyncIterator]();
-
-  node.syncManager.addPeer({
-    id: "test",
-    incoming: inRx,
-    outgoing: outTx,
-    role: "peer",
-    crashOnClose: true,
-  });
-
-  await inTx.push({
-    action: "load",
-    id: map.core.id,
-    header: false,
-    sessions: {
-      [node.currentSessionID]: 0,
-    },
-  });
-
-  // expect((await outRxQ.next()).value).toMatchObject(admStateEx(admin.id));
-  expect((await outRxQ.next()).value).toMatchObject(groupStateEx(group));
-
-  const mapTellKnownStateMsg = (await outRxQ.next()).value;
-  expect(mapTellKnownStateMsg).toEqual({
-    action: "known",
-    ...map.core.knownState(),
-  } satisfies SyncMessage);
-
-  // expect((await outRxQ.next()).value).toMatchObject(admContEx(admin.id));
-  expect((await outRxQ.next()).value).toMatchObject(groupContentEx(group));
-
-  const mapNewContentHeaderOnlyMsg = (await outRxQ.next()).value;
-
-  expect(mapNewContentHeaderOnlyMsg).toEqual({
-    action: "content",
-    id: map.core.id,
-    header: map.core.header,
-    new: {},
-    priority: getPriorityFromHeader(map.core.header),
-  } satisfies SyncMessage);
-
-  map.set("hello", "world", "trusting");
-
-  map.set("goodbye", "world", "trusting");
-
-  const _mapEditMsgs = (await outRxQ.next()).value;
-
-  console.log("Sending correction");
-
-  await inTx.push({
-    action: "known",
-    isCorrection: true,
-    id: map.core.id,
-    header: true,
-    sessions: {
-      [node.currentSessionID]: 1,
-    },
-  } satisfies SyncMessage);
-
-  const newContentAfterWrongAssumedState = (await outRxQ.next()).value;
-
-  expect(newContentAfterWrongAssumedState).toEqual({
-    action: "content",
-    id: map.core.id,
-    header: undefined,
-    new: {
-      [node.currentSessionID]: {
-        after: 1,
-        newTransactions: [
-          {
-            privacy: "trusting" as const,
-            madeAt: map.core.sessionLogs.get(node.currentSessionID)!
-              .transactions[1]!.madeAt,
-            changes: stableStringify([
-              {
-                op: "set",
-                key: "goodbye",
-                value: "world",
-              } satisfies MapOpPayload<string, string>,
-            ]),
-          },
-        ],
-        lastSignature: map.core.sessionLogs.get(node.currentSessionID)!
-          .lastSignature!,
-      },
-    },
-    priority: getPriorityFromHeader(map.core.header),
-  } satisfies SyncMessage);
-});
-
-test("If we add a peer, but it never subscribes to a coValue, it won't get any messages", async () => {
+test("If we add a client peer, but it never subscribes to a coValue, it won't get any messages", async () => {
   const [admin, session] = randomAnonymousAccountAndSessionID();
   const node = new LocalNode(admin, session, Crypto);
 
@@ -497,7 +47,7 @@ test("If we add a peer, but it never subscribes to a coValue, it won't get any m
     id: "test",
     incoming: inRx,
     outgoing: outTx,
-    role: "peer",
+    role: "client",
     crashOnClose: true,
   });
 
@@ -515,370 +65,19 @@ test("If we add a peer, but it never subscribes to a coValue, it won't get any m
   expect(result).toEqual("neverHappened");
 });
 
-test.todo(
-  "If we add a server peer, all updates to all coValues are sent to it, even if it doesn't subscribe",
-  async () => {
-    const [admin, session] = randomAnonymousAccountAndSessionID();
-    const node = new LocalNode(admin, session, Crypto);
-
-    const group = node.createGroup();
-
-    const map = group.createMap();
-
-    const [inRx, _inTx] = newQueuePair();
-    const [outRx, outTx] = newQueuePair();
-    const outRxQ = outRx[Symbol.asyncIterator]();
-
-    node.syncManager.addPeer({
-      id: "test",
-      incoming: inRx,
-      outgoing: outTx,
-      role: "server",
-      crashOnClose: true,
-    });
-
-    // expect((await outRxQ.next()).value).toMatchObject({
-    //     action: "load",
-    //     id: adminID,
-    // });
-    expect((await outRxQ.next()).value).toMatchObject({
-      action: "load",
-      id: group.core.id,
-    });
-
-    const mapSubscribeMsg = (await outRxQ.next()).value;
-
-    expect(mapSubscribeMsg).toEqual({
-      action: "load",
-      id: map.core.id,
-      header: true,
-      sessions: {},
-    } satisfies SyncMessage);
-
-    map.set("hello", "world", "trusting");
-
-    // expect((await outRxQ.next()).value).toMatchObject(admContEx(admin.id));
-    expect((await outRxQ.next()).value).toMatchObject(groupContentEx(group));
-
-    const mapNewContentMsg = (await outRxQ.next()).value;
-
-    expect(mapNewContentMsg).toEqual({
-      action: "content",
-      id: map.core.id,
-      header: map.core.header,
-      new: {
-        [node.currentSessionID]: {
-          after: 0,
-          newTransactions: [
-            {
-              privacy: "trusting" as const,
-              madeAt: map.core.sessionLogs.get(node.currentSessionID)!
-                .transactions[0]!.madeAt,
-              changes: stableStringify([
-                {
-                  op: "set",
-                  key: "hello",
-                  value: "world",
-                } satisfies MapOpPayload<string, string>,
-              ]),
-            },
-          ],
-          lastSignature: map.core.sessionLogs.get(node.currentSessionID)!
-            .lastSignature!,
-        },
-      },
-      priority: getPriorityFromHeader(map.core.header),
-    } satisfies SyncMessage);
-  },
-);
-
-test.skip("If we add a server peer, newly created coValues are auto-subscribed to", async () => {
-  const [admin, session] = randomAnonymousAccountAndSessionID();
-  const node = new LocalNode(admin, session, Crypto);
-
-  const group = node.createGroup();
-
-  const [inRx, _inTx] = newQueuePair();
-  const [outRx, outTx] = newQueuePair();
-  const outRxQ = outRx[Symbol.asyncIterator]();
-
-  node.syncManager.addPeer({
-    id: "test",
-    incoming: inRx,
-    outgoing: outTx,
-    role: "server",
-    crashOnClose: true,
-  });
-
-  // expect((await outRxQ.next()).value).toMatchObject({
-  //     action: "load",
-  //     id: admin.id,
-  // });
-  expect((await outRxQ.next()).value).toMatchObject({
-    action: "load",
-    id: group.core.id,
-  });
-
-  const map = group.createMap();
-
-  const mapSubscribeMsg = (await outRxQ.next()).value;
-
-  expect(mapSubscribeMsg).toEqual({
-    action: "load",
-    ...map.core.knownState(),
-  } satisfies SyncMessage);
-
-  // expect((await outRxQ.next()).value).toMatchObject(admContEx(adminID));
-  expect((await outRxQ.next()).value).toMatchObject(groupContentEx(group));
-
-  const mapContentMsg = (await outRxQ.next()).value;
-
-  expect(mapContentMsg).toEqual({
-    action: "content",
-    id: map.core.id,
-    header: map.core.header,
-    new: {},
-    priority: getPriorityFromHeader(map.core.header),
-  } satisfies SyncMessage);
-});
-
-test.todo(
-  "TODO: when receiving a subscribe response that is behind our optimistic state (due to already sent content), we ignore it",
-);
-
-test("When we connect a new server peer, we try to sync all existing coValues to it", async () => {
-  const [admin, session] = randomAnonymousAccountAndSessionID();
-  const node = new LocalNode(admin, session, Crypto);
-
-  const group = node.createGroup();
-
-  const map = group.createMap();
-
-  const [inRx, _inTx] = newQueuePair();
-  const [outRx, outTx] = newQueuePair();
-  const outRxQ = outRx[Symbol.asyncIterator]();
-
-  node.syncManager.addPeer({
-    id: "test",
-    incoming: inRx,
-    outgoing: outTx,
-    role: "server",
-    crashOnClose: true,
-  });
-
-  // const _adminSubscribeMessage = await outRxQ.next();
-  const groupSubscribeMessage = (await outRxQ.next()).value;
-
-  expect(groupSubscribeMessage).toEqual({
-    action: "load",
-    ...group.core.knownState(),
-  } satisfies SyncMessage);
-
-  const secondMessage = (await outRxQ.next()).value;
-
-  expect(secondMessage).toEqual({
-    action: "load",
-    ...map.core.knownState(),
-  } satisfies SyncMessage);
-});
-
-test("When receiving a subscribe with a known state that is ahead of our own, peers should respond with a corresponding subscribe response message", async () => {
-  const [admin, session] = randomAnonymousAccountAndSessionID();
-  const node = new LocalNode(admin, session, Crypto);
-
-  const group = node.createGroup();
-
-  const map = group.createMap();
-
-  const [inRx, inTx] = newQueuePair();
-  const [outRx, outTx] = newQueuePair();
-  const outRxQ = outRx[Symbol.asyncIterator]();
-
-  node.syncManager.addPeer({
-    id: "test",
-    incoming: inRx,
-    outgoing: outTx,
-    role: "peer",
-    crashOnClose: true,
-  });
-
-  await inTx.push({
-    action: "load",
-    id: map.core.id,
-    header: true,
-    sessions: {
-      [node.currentSessionID]: 1,
-    },
-  });
-
-  // expect((await outRxQ.next()).value).toMatchObject(admStateEx(admin.id));
-  expect((await outRxQ.next()).value).toMatchObject(groupStateEx(group));
-  const mapTellKnownState = (await outRxQ.next()).value;
-
-  expect(mapTellKnownState).toEqual({
-    action: "known",
-    ...map.core.knownState(),
-  } satisfies SyncMessage);
-});
-
-test.skip("When replaying creation and transactions of a coValue as new content, the receiving peer integrates this information", async () => {
-  // TODO: this test is mostly correct but also slightly unrealistic, make sure we pass all messages back and forth as expected and then it should work
-  const [admin, session] = randomAnonymousAccountAndSessionID();
-
-  const node1 = new LocalNode(admin, session, Crypto);
-
-  const group = node1.createGroup();
-
-  const [inRx1, inTx1] = newQueuePair();
-  const [outRx1, outTx1] = newQueuePair();
-  const outRxQ1 = outRx1[Symbol.asyncIterator]();
-
-  node1.syncManager.addPeer({
-    id: "test2",
-    incoming: inRx1,
-    outgoing: outTx1,
-    role: "server",
-    crashOnClose: true,
-  });
-
-  const node2 = new LocalNode(
-    admin,
-    Crypto.newRandomSessionID(admin.id),
-    Crypto,
-  );
-
-  const [inRx2, inTx2] = newQueuePair();
-  const [outRx2, outTx2] = newQueuePair();
-  const outRxQ2 = outRx2[Symbol.asyncIterator]();
-
-  node2.syncManager.addPeer({
-    id: "test1",
-    incoming: inRx2,
-    outgoing: outTx2,
-    role: "client",
-    crashOnClose: true,
-  });
-
-  const adminSubscribeMessage = (await outRxQ1.next()).value;
-  expect(adminSubscribeMessage).toMatchObject({
-    action: "load",
-    id: admin.id,
-  });
-  const groupSubscribeMsg = (await outRxQ1.next()).value;
-  expect(groupSubscribeMsg).toMatchObject({
-    action: "load",
-    id: group.core.id,
-  });
-
-  await inTx2.push(adminSubscribeMessage);
-  await inTx2.push(groupSubscribeMsg);
-
-  // const adminTellKnownStateMsg = (await outRxQ2.next()).value;
-  // expect(adminTellKnownStateMsg).toMatchObject(admStateEx(admin.id));
-
-  const groupTellKnownStateMsg = (await outRxQ2.next()).value;
-  expect(groupTellKnownStateMsg).toMatchObject(groupStateEx(group));
-
-  expect(
-    node2.syncManager.peers["test1"]!.optimisticKnownStates.has(group.core.id),
-  ).toBeDefined();
-
-  // await inTx1.push(adminTellKnownStateMsg);
-  await inTx1.push(groupTellKnownStateMsg);
-
-  // const adminContentMsg = (await outRxQ1.next()).value;
-  // expect(adminContentMsg).toMatchObject(admContEx(admin.id));
-
-  const groupContentMsg = (await outRxQ1.next()).value;
-  expect(groupContentMsg).toMatchObject(groupContentEx(group));
-
-  // await inTx2.push(adminContentMsg);
-  await inTx2.push(groupContentMsg);
-
-  const map = group.createMap();
-
-  const mapSubscriptionMsg = (await outRxQ1.next()).value;
-  expect(mapSubscriptionMsg).toMatchObject({
-    action: "load",
-    id: map.core.id,
-  });
-
-  const mapNewContentMsg = (await outRxQ1.next()).value;
-  expect(mapNewContentMsg).toEqual({
-    action: "content",
-    id: map.core.id,
-    header: map.core.header,
-    new: {},
-    priority: getPriorityFromHeader(map.core.header),
-  } satisfies SyncMessage);
-
-  await inTx2.push(mapSubscriptionMsg);
-
-  const mapTellKnownStateMsg = (await outRxQ2.next()).value;
-  expect(mapTellKnownStateMsg).toEqual({
-    action: "known",
-    id: map.core.id,
-    header: false,
-    sessions: {},
-  } satisfies SyncMessage);
-
-  expect(node2.coValuesStore.get(map.core.id).state.type).toEqual("loading");
-
-  await inTx2.push(mapNewContentMsg);
-
-  map.set("hello", "world", "trusting");
-
-  const mapEditMsg = (await outRxQ1.next()).value;
-
-  await inTx2.push(mapEditMsg);
-
-  await new Promise((resolve) => setTimeout(resolve, 100));
-
-  expect(
-    expectMap(node2.expectCoValueLoaded(map.core.id).getCurrentContent()).get(
-      "hello",
-    ),
-  ).toEqual("world");
-});
-
-test.skip("When loading a coValue on one node, the server node it is requested from replies with all the necessary depended on coValues to make it work", async () => {
-  /*
-    // TODO: this test is mostly correct but also slightly unrealistic, make sure we pass all messages back and forth as expected and then it should work
-    const [admin, session] = randomAnonymousAccountAndSessionID();
-
-    const node1 = new LocalNode(admin, session, Crypto);
-
-    const group = node1.createGroup();
-
-    const map = group.createMap();
-    map.set("hello", "world", "trusting");
-
-    const node2 = new LocalNode(admin, newRandomSessionID(admin.id), Crypto);
-
-    const [node1asPeer, node2asPeer] = connectedPeers("peer1", "peer2");
-
-    node1.syncManager.addPeer(node2asPeer);
-    node2.syncManager.addPeer(node1asPeer);
-
-    await node2.loadCoValueCore(map.core.id);
-
-    expect(
-        expectMap(
-            node2.expectCoValueLoaded(map.core.id).getCurrentContent(),
-        ).get("hello"),
-    ).toEqual("world");
-    */
-});
-
 test("Can sync a coValue through a server to another client", async () => {
-  const { node: client1 } = await createConnectedTestNode();
+  const { node: client1 } = await setupTestAccount({
+    connected: true,
+  });
 
   const group = client1.createGroup();
 
   const map = group.createMap();
   map.set("hello", "world", "trusting");
 
-  const { node: client2 } = await createConnectedTestNode();
+  const { node: client2 } = await setupTestAccount({
+    connected: true,
+  });
 
   const mapOnClient2 = await loadCoValueOrFail(client2, map.id);
 
@@ -886,7 +85,9 @@ test("Can sync a coValue through a server to another client", async () => {
 });
 
 test("Can sync a coValue with private transactions through a server to another client", async () => {
-  const { node: client1 } = await createConnectedTestNode();
+  const { node: client1 } = await setupTestAccount({
+    connected: true,
+  });
 
   const group = client1.createGroup();
 
@@ -894,115 +95,57 @@ test("Can sync a coValue with private transactions through a server to another c
   map.set("hello", "world", "private");
   group.addMember("everyone", "reader");
 
-  const { node: client2 } = await createConnectedTestNode();
+  const { node: client2 } = await setupTestAccount({
+    connected: true,
+  });
 
   const mapOnClient2 = await loadCoValueOrFail(client2, map.id);
 
   expect(mapOnClient2.get("hello")).toEqual("world");
 });
 
-test.skip("When a peer's incoming/readable stream closes, we remove the peer", async () => {
-  /*
-    const [admin, session] = randomAnonymousAccountAndSessionID();
-    const node = new LocalNode(admin, session, Crypto);
-
-    const group = node.createGroup();
-
-    const [inRx, inTx] = await Effect.runPromise(newStreamPair());
-    const [outRx, outTx] = await Effect.runPromise(newStreamPair());
-
-    node.syncManager.addPeer({
-        id: "test",
-        incoming: inRx,
-        outgoing: outTx,
-        role: "server",
-    });
-
-    // expect(yield* Queue.take(outRxQ)).toMatchObject({
-    //     action: "load",
-    //     id: admin.id,
-    // });
-    expect(yield * Queue.take(outRxQ)).toMatchObject({
-        action: "load",
-        id: group.core.id,
-    });
-
-    const map = group.createMap();
-
-    const mapSubscribeMsg = await reader.read();
-
-    expect(mapSubscribeMsg.value).toEqual({
-        action: "load",
-        ...map.core.knownState(),
-    } satisfies SyncMessage);
-
-    // expect(yield* Queue.take(outRxQ)).toMatchObject(admContEx(admin.id));
-    expect(yield * Queue.take(outRxQ)).toMatchObject(groupContentEx(group));
-
-    const mapContentMsg = await reader.read();
-
-    expect(mapContentMsg.value).toEqual({
-        action: "content",
-        id: map.core.id,
-        header: map.core.header,
-        new: {},
-    } satisfies SyncMessage);
-
-    await inTx.abort();
-
-    await new Promise((resolve) => setTimeout(resolve, 100));
-
-    expect(node.syncManager.peers["test"]).toBeUndefined();
-    */
-});
-
 test("should keep the peer state when the peer closes", async () => {
-  const client = createTestNode();
+  const client = setupTestNode();
 
-  const { nodeToServerPeer, serverToNodePeer } =
-    connectNodeToSyncServer(client);
+  const { peer, peerState } = client.connectToSyncServer();
 
-  const group = jazzCloud.createGroup();
+  const group = jazzCloud.node.createGroup();
   const map = group.createMap();
   map.set("hello", "world", "trusting");
 
-  await client.loadCoValueCore(map.core.id);
+  await client.node.loadCoValueCore(map.core.id);
 
-  const syncManager = client.syncManager;
-  const peerState = syncManager.peers[nodeToServerPeer.id];
+  const syncManager = client.node.syncManager;
 
   // @ts-expect-error Simulating a peer closing, leveraging the direct connection between the client/server peers
-  await serverToNodePeer.outgoing.push("Disconnected");
+  await peer.outgoing.push("Disconnected");
 
   await waitFor(() => peerState?.closed);
 
-  expect(syncManager.peers[nodeToServerPeer.id]).not.toBeUndefined();
+  expect(syncManager.peers[peer.id]).not.toBeUndefined();
 });
 
 test("should delete the peer state when the peer closes if deletePeerStateOnClose is true", async () => {
-  const client = createTestNode();
+  const client = setupTestNode();
 
-  const { nodeToServerPeer, serverToNodePeer } =
-    connectNodeToSyncServer(client);
+  const { peer, peerState } = client.connectToSyncServer();
 
-  nodeToServerPeer.deletePeerStateOnClose = true;
+  peer.deletePeerStateOnClose = true;
 
-  const group = jazzCloud.createGroup();
+  const group = jazzCloud.node.createGroup();
   const map = group.createMap();
   map.set("hello", "world", "trusting");
 
-  await client.loadCoValueCore(map.core.id);
+  await client.node.loadCoValueCore(map.core.id);
 
-  const syncManager = client.syncManager;
-
-  const peerState = syncManager.peers[nodeToServerPeer.id];
+  const syncManager = client.node.syncManager;
 
   // @ts-expect-error Simulating a peer closing, leveraging the direct connection between the client/server peers
-  await serverToNodePeer.outgoing.push("Disconnected");
+  await peer.outgoing.push("Disconnected");
 
   await waitFor(() => peerState?.closed);
 
-  expect(syncManager.peers[nodeToServerPeer.id]).toBeUndefined();
+  expect(syncManager.peers[peer.id]).toBeUndefined();
 });
 
 describe("sync - extra tests", () => {
@@ -1202,76 +345,6 @@ describe("sync - extra tests", () => {
     expect(finalStateNode1.toJSON()).toEqual(expectedState);
     expect(finalStateNode2.toJSON()).toEqual(expectedState);
     expect(finalStateNode3.toJSON()).toEqual(expectedState);
-  });
-  test.skip("Large coValues are synced efficiently in chunks", async () => {
-    // Create two nodes
-    const [admin1, session1] = randomAnonymousAccountAndSessionID();
-    const node1 = new LocalNode(admin1, session1, Crypto);
-
-    const [admin2, session2] = randomAnonymousAccountAndSessionID();
-    const node2 = new LocalNode(admin2, session2, Crypto);
-
-    // Create a group and a large map on node1
-    const group = node1.createGroup();
-    group.addMember("everyone", "writer");
-    const largeMap = group.createMap();
-
-    // Generate a large amount of data (about 10MB)
-    const dataSize = 1 * 1024 * 1024;
-    const chunkSize = 1024; // 1KB chunks
-    const chunks = dataSize / chunkSize;
-
-    for (let i = 0; i < chunks; i++) {
-      const key = `key${i}`;
-      const value = Buffer.alloc(chunkSize, `value${i}`).toString("base64");
-      largeMap.set(key, value, "trusting");
-    }
-
-    // Connect the nodes
-    const [node1AsPeer, node2AsPeer] = connectedPeers("node1", "node2", {
-      peer1role: "server",
-      peer2role: "client",
-    });
-
-    node1.syncManager.addPeer(node2AsPeer);
-    node2.syncManager.addPeer(node1AsPeer);
-
-    await new Promise((resolve) => setTimeout(resolve, 4000));
-
-    // Measure sync time
-    const startSync = performance.now();
-
-    // Load the large map on node2
-    const largeMapOnNode2 = await node2.loadCoValueCore(largeMap.core.id);
-    if (largeMapOnNode2 === "unavailable") {
-      throw new Error("Large map is unavailable on node2");
-    }
-
-    const endSync = performance.now();
-    const syncTime = endSync - startSync;
-
-    // Verify that all data was synced correctly
-    const syncedMap = new RawCoMap(largeMapOnNode2);
-    expect(
-      Object.keys(largeMapOnNode2.getCurrentContent().toJSON() || {}).length,
-    ).toBe(chunks);
-
-    for (let i = 0; i < chunks; i++) {
-      const key = `key${i}`;
-      const expectedValue = Buffer.alloc(chunkSize, `value${i}`).toString(
-        "base64",
-      );
-      expect(syncedMap.get(key)).toBe(expectedValue);
-    }
-
-    // Check that sync time is reasonable (this threshold may need adjustment)
-    const reasonableSyncTime = 10; // 30 seconds
-    expect(syncTime).toBeLessThan(reasonableSyncTime);
-
-    // Check memory usage (this threshold may need adjustment)
-    const memoryUsage = process.memoryUsage().heapUsed / 1024 / 1024; // in MB
-    const reasonableMemoryUsage = 1; // 500 MB
-    expect(memoryUsage).toBeLessThan(reasonableMemoryUsage);
   });
 
   test("Node correctly handles and recovers from network partitions", async () => {
@@ -1479,20 +552,22 @@ test("a value created on one node can be loaded on anotehr node even if not dire
 
 describe("SyncManager - knownStates vs optimisticKnownStates", () => {
   test("knownStates and optimisticKnownStates are the same when the coValue is fully synced", async () => {
-    const { node: client } = await createConnectedTestNode();
+    const { node: client } = await setupTestAccount({
+      connected: true,
+    });
 
     // Create test data
     const group = client.createGroup();
     const mapOnClient = group.createMap();
     mapOnClient.set("key1", "value1", "trusting");
 
-    await client.syncManager.actuallySyncCoValue(mapOnClient.core);
+    await client.syncManager.syncCoValue(mapOnClient.core);
 
     // Wait for the full sync to complete
     await mapOnClient.core.waitForSync();
 
     const peerStateClient = client.syncManager.getPeers()[0]!;
-    const peerStateJazzCloud = jazzCloud.syncManager.getPeers()[0]!;
+    const peerStateJazzCloud = jazzCloud.node.syncManager.getPeers()[0]!;
 
     // The optimisticKnownStates should be the same as the knownStates after the full sync is complete
     expect(
@@ -1506,16 +581,18 @@ describe("SyncManager - knownStates vs optimisticKnownStates", () => {
   });
 
   test("optimisticKnownStates is updated as new transactions are sent, while knownStates only when the updates are acknowledged", async () => {
-    const { node: client, nodeToServerPeer } = await createConnectedTestNode();
+    const client = await setupTestAccount();
+
+    const { peer, peerState } = client.connectToSyncServer();
 
     // Create test data and sync the first change
     // We want that both the nodes know about the coValue so we can test
     // the content acknowledgement flow.
-    const group = client.createGroup();
+    const group = client.node.createGroup();
     const map = group.createMap();
     map.set("key1", "value1", "trusting");
 
-    await client.syncManager.actuallySyncCoValue(map.core);
+    await client.node.syncManager.syncCoValue(map.core);
     await map.core.waitForSync();
 
     // Block the content messages
@@ -1523,16 +600,12 @@ describe("SyncManager - knownStates vs optimisticKnownStates", () => {
     // optimisticKnownStates is updated when the content messages are sent,
     // while knownStates is only updated when we receive the "known" messages
     // that are acknowledging the receipt of the content messages
-    const outgoing = blockMessageTypeOnOutgoingPeer(
-      nodeToServerPeer,
-      "content",
-    );
+    const outgoing = blockMessageTypeOnOutgoingPeer(peer, "content");
 
     map.set("key2", "value2", "trusting");
 
-    await client.syncManager.actuallySyncCoValue(map.core);
+    await client.node.syncManager.syncCoValue(map.core);
 
-    const peerState = client.syncManager.peers[nodeToServerPeer.id]!;
     expect(peerState.optimisticKnownStates.get(map.core.id)).not.toEqual(
       peerState.knownStates.get(map.core.id),
     );
@@ -1553,36 +626,32 @@ describe("SyncManager - knownStates vs optimisticKnownStates", () => {
 
 describe("SyncManager.addPeer", () => {
   test("new peer gets a copy of previous peer's knownStates when replacing it", async () => {
-    const { node: client } = await createConnectedTestNode();
+    const client = await setupTestAccount();
+
+    const { peerState: firstPeerState, getCurrentPeerState } =
+      client.connectToSyncServer();
 
     // Create test data
-    const group = client.createGroup();
+    const group = client.node.createGroup();
     const map = group.createMap();
     map.set("key1", "value1", "trusting");
 
-    await client.syncManager.actuallySyncCoValue(map.core);
+    await client.node.syncManager.syncCoValue(map.core);
 
     // Wait for initial sync
     await map.core.waitForSync();
-
-    const firstPeerState = client.syncManager.getPeers()[0]!;
 
     // Store the initial known states
     const initialKnownStates = firstPeerState.knownStates;
 
     // Create new connection with same ID
-    const [secondPeer] = connectedPeers(firstPeerState.id, "unusedPeer", {
-      peer1role: "server",
-      peer2role: "client",
-    });
+    client.connectToSyncServer();
 
-    // Add new peer with same ID
-    client.syncManager.addPeer(secondPeer);
-
-    const newPeerState = client.syncManager.getPeers()[0]!;
+    // Wait for the new peer to be added
+    await waitFor(() => expect(getCurrentPeerState()).not.toBe(firstPeerState));
 
     // Verify that the new peer has a copy of the previous known states
-    const newPeerKnownStates = newPeerState.knownStates;
+    const newPeerKnownStates = getCurrentPeerState().knownStates;
 
     expect(newPeerKnownStates).not.toBe(initialKnownStates); // Should be a different instance
     expect(newPeerKnownStates.get(map.core.id)).toEqual(
@@ -1591,14 +660,16 @@ describe("SyncManager.addPeer", () => {
   });
 
   test("new peer with new ID starts with empty knownStates", async () => {
-    const { node: client } = await createConnectedTestNode();
+    const client = await setupTestAccount({
+      connected: true,
+    });
 
     // Create test data
-    const group = client.createGroup();
+    const group = client.node.createGroup();
     const map = group.createMap();
     map.set("key1", "value1", "trusting");
 
-    await client.syncManager.actuallySyncCoValue(map.core);
+    await client.node.syncManager.syncCoValue(map.core);
 
     // Wait for initial sync
     await map.core.waitForSync();
@@ -1610,97 +681,110 @@ describe("SyncManager.addPeer", () => {
     });
 
     // Add new peer with different ID
-    client.syncManager.addPeer(brandNewPeer);
+    client.node.syncManager.addPeer(brandNewPeer);
 
     // Verify that the new peer starts with empty known states
     const newPeerKnownStates =
-      client.syncManager.peers["brandNewPeer"]!.knownStates;
+      client.node.syncManager.peers["brandNewPeer"]!.knownStates;
     expect(newPeerKnownStates.get(map.core.id)).toBe(undefined);
   });
 
   test("when adding a peer with the same ID as a previous peer, the previous peer is closed", async () => {
-    const { node: client } = await createConnectedTestNode();
+    const client = await setupTestAccount({});
+
+    const { peerState: firstPeerState } = client.connectToSyncServer();
 
     // Store reference to first peer
-    const firstPeer = client.syncManager.getPeers()[0]!;
-    const closeSpy = vi.spyOn(firstPeer, "gracefulShutdown");
+    const closeSpy = vi.spyOn(firstPeerState, "gracefulShutdown");
 
     // Create and add replacement peer
-    const [secondPeer] = connectedPeers(firstPeer.id, "unusedPeer", {
+    const [secondPeer] = connectedPeers(firstPeerState.id, "unusedPeer", {
       peer1role: "server",
       peer2role: "client",
     });
 
-    client.syncManager.addPeer(secondPeer);
+    client.node.syncManager.addPeer(secondPeer);
 
     // Verify thet the first peer had ben closed correctly
     expect(closeSpy).toHaveBeenCalled();
-    expect(firstPeer.closed).toBe(true);
+    expect(firstPeerState.closed).toBe(true);
   });
 
   test("when adding a peer with the same ID as a previous peer and the previous peer is closed, do not attempt to close it again", async () => {
-    const { node: client } = await createConnectedTestNode();
+    const client = await setupTestAccount({
+      connected: true,
+    });
 
     // Store reference to first peer
-    const firstPeer = client.syncManager.getPeers()[0]!;
+    const { peerState: firstPeerState } = client.connectToSyncServer();
 
-    firstPeer.gracefulShutdown();
-    const closeSpy = vi.spyOn(firstPeer, "gracefulShutdown");
+    firstPeerState.gracefulShutdown();
+    const closeSpy = vi.spyOn(firstPeerState, "gracefulShutdown");
 
     // Create and add replacement peer
-    const [secondPeer] = connectedPeers(firstPeer.id, "unusedPeer", {
+    const [secondPeer] = connectedPeers(firstPeerState.id, "unusedPeer", {
       peer1role: "server",
       peer2role: "client",
     });
 
-    client.syncManager.addPeer(secondPeer);
+    client.node.syncManager.addPeer(secondPeer);
 
     // Verify thet the first peer had not been closed again
     expect(closeSpy).not.toHaveBeenCalled();
-    expect(firstPeer.closed).toBe(true);
+    expect(firstPeerState.closed).toBe(true);
   });
 
   test("when adding a server peer the local coValues should be sent to it", async () => {
-    const { node: client, addServerPeer } = await createConnectedTestNode({
+    const client = await setupTestAccount({
       connected: false,
     });
 
-    const group = client.createGroup();
+    const group = client.node.createGroup();
     const map = group.createMap();
     map.set("key1", "value1", "trusting");
 
-    addServerPeer();
+    client.connectToSyncServer();
 
     await map.core.waitForSync();
 
-    expect(jazzCloud.coValuesStore.get(map.id).state.type).toBe("available");
+    expect(jazzCloud.node.coValuesStore.get(map.id).isAvailable()).toBe(true);
   });
 });
 
 describe("loadCoValueCore with retry", () => {
   test("should load the value if available on the server", async () => {
-    const { node: client } = await createConnectedTestNode();
-    const { node: anotherClient } = await createConnectedTestNode();
+    const client = await setupTestAccount({
+      connected: true,
+    });
 
-    const group = anotherClient.createGroup();
+    const anotherClient = await setupTestAccount({
+      connected: true,
+    });
+
+    const group = anotherClient.node.createGroup();
     const map = group.createMap();
     map.set("key1", "value1", "trusting");
 
-    const promise = client.loadCoValueCore(map.id);
+    const promise = client.node.loadCoValueCore(map.id);
 
     await expect(promise).resolves.not.toBe("unavailable");
   });
 
   test("should handle correctly two subsequent loads", async () => {
-    const { node: client } = await createConnectedTestNode();
-    const { node: anotherClient } = await createConnectedTestNode();
+    const client = await setupTestAccount({
+      connected: true,
+    });
 
-    const group = anotherClient.createGroup();
+    const anotherClient = await setupTestAccount({
+      connected: true,
+    });
+
+    const group = anotherClient.node.createGroup();
     const map = group.createMap();
     map.set("key1", "value1", "trusting");
 
-    const promise1 = client.loadCoValueCore(map.id);
-    const promise2 = client.loadCoValueCore(map.id);
+    const promise1 = client.node.loadCoValueCore(map.id);
+    const promise2 = client.node.loadCoValueCore(map.id);
 
     await expect(promise1).resolves.not.toBe("unavailable");
     await expect(promise2).resolves.not.toBe("unavailable");
@@ -1748,56 +832,58 @@ describe("loadCoValueCore with retry", () => {
 
 describe("waitForSyncWithPeer", () => {
   test("should resolve when the coValue is fully uploaded into the peer", async () => {
-    const { node: client } = await createConnectedTestNode();
+    const client = await setupTestAccount();
+
+    const { peerState } = client.connectToSyncServer();
 
     // Create test data
-    const group = client.createGroup();
+    const group = client.node.createGroup();
     const map = group.createMap();
     map.set("key1", "value1", "trusting");
 
-    await client.syncManager.actuallySyncCoValue(map.core);
-
-    const peer = client.syncManager.getPeers()[0];
-
-    if (!peer) {
-      throw new Error("No peer found");
-    }
+    await client.node.syncManager.syncCoValue(map.core);
 
     await expect(
-      client.syncManager.waitForSyncWithPeer(peer.id, map.core.id, 100),
+      client.node.syncManager.waitForSyncWithPeer(
+        peerState.id,
+        map.core.id,
+        100,
+      ),
     ).resolves.toBe(true);
   });
 
   test("should not resolve when the coValue is not synced", async () => {
-    const { node: client } = await createConnectedTestNode();
+    const client = await setupTestAccount();
 
-    const peer = client.syncManager.getPeers()[0];
-
-    if (!peer) {
-      throw new Error("No peer found");
-    }
+    const { peerState } = client.connectToSyncServer();
 
     // Create test data
-    const group = client.createGroup();
+    const group = client.node.createGroup();
     const map = group.createMap();
     map.set("key1", "value1", "trusting");
 
-    vi.spyOn(peer, "pushOutgoingMessage").mockImplementation(async () => {
+    vi.spyOn(peerState, "pushOutgoingMessage").mockImplementation(async () => {
       return Promise.resolve();
     });
 
-    await client.syncManager.actuallySyncCoValue(map.core);
+    await client.node.syncManager.syncCoValue(map.core);
 
     await expect(
-      client.syncManager.waitForSyncWithPeer(peer.id, map.core.id, 100),
+      client.node.syncManager.waitForSyncWithPeer(
+        peerState.id,
+        map.core.id,
+        100,
+      ),
     ).rejects.toThrow("Timeout");
   });
 });
 
 test("Should not crash when syncing an unknown coValue type", async () => {
-  const { node: client } = await createConnectedTestNode();
+  const client = await setupTestAccount({
+    connected: true,
+  });
 
-  const coValue = client.createCoValue({
+  const coValue = client.node.createCoValue({
     type: "ooops" as any,
     ruleset: { type: "unsafeAllowAll" },
     meta: null,
@@ -1806,10 +892,12 @@ test("Should not crash when syncing an unknown coValue type", async () => {
 
   await coValue.waitForSync();
 
-  const { node: anotherClient } = await createConnectedTestNode();
+  const anotherClient = await setupTestAccount({
+    connected: true,
+  });
 
   const coValueOnTheOtherNode = await loadCoValueOrFail(
-    anotherClient,
+    anotherClient.node,
     coValue.getCurrentContent().id,
   );
   expect(coValueOnTheOtherNode.id).toBe(coValue.id);
@@ -1826,7 +914,7 @@ describe("metrics", () => {
     const node = new LocalNode(admin, session, Crypto);
 
     let connectedPeers = await metricReader.getMetricValue("jazz.peers", {
-      role: "peer",
+      role: "client",
     });
     expect(connectedPeers).toBeUndefined();
     let connectedServerPeers = await metricReader.getMetricValue("jazz.peers", {
@@ -1840,12 +928,12 @@ describe("metrics", () => {
       id: "peer-1",
       incoming: inPeer1,
       outgoing: outPeer1,
-      role: "peer",
+      role: "client",
       crashOnClose: false,
     });
 
     connectedPeers = await metricReader.getMetricValue("jazz.peers", {
-      role: "peer",
+      role: "client",
     });
     expect(connectedPeers).toBe(1);
 
@@ -1855,12 +943,12 @@ describe("metrics", () => {
       id: "peer-2",
       incoming: inPeer2,
       outgoing: outPeer2,
-      role: "peer",
+      role: "client",
       crashOnClose: false,
     });
 
     connectedPeers = await metricReader.getMetricValue("jazz.peers", {
-      role: "peer",
+      role: "client",
     });
     expect(connectedPeers).toBe(2);
 
@@ -1878,7 +966,7 @@ describe("metrics", () => {
     });
     expect(connectedServerPeers).toBe(1);
     connectedPeers = await metricReader.getMetricValue("jazz.peers", {
-      role: "peer",
+      role: "client",
     });
     expect(connectedPeers).toBe(2);
 
@@ -1887,7 +975,7 @@ describe("metrics", () => {
     await waitFor(() => node.syncManager.peers["peer-1"]?.closed);
 
     connectedPeers = await metricReader.getMetricValue("jazz.peers", {
-      role: "peer",
+      role: "client",
     });
     expect(connectedPeers).toBe(1);
 
@@ -1903,217 +991,21 @@ describe("metrics", () => {
   });
 });
 
-describe("sync protocol", () => {
-  test("should have the correct messages exchanged between client and server", async () => {
-    // Creating the account from agent to simplify the messages exchange
-    const { node: client, messages } = await createConnectedTestAgentNode();
-
-    const group = client.createGroup();
-    const map = group.createMap();
-    map.set("hello", "world", "trusting");
-
-    await map.core.waitForSync();
-
-    const mapOnJazzCloud = await loadCoValueOrFail(jazzCloud, map.id);
-    expect(mapOnJazzCloud.get("hello")).toEqual("world");
-
-    expect(messages).toEqual([
-      {
-        from: "client",
-        msg: {
-          action: "load",
-          header: true,
-          id: group.id,
-          sessions: {
-            [client.currentSessionID]: 3,
-          },
-        },
-      },
-      {
-        from: "server",
-        msg: {
-          action: "load",
-          header: false,
-          id: group.id,
-          sessions: {},
-        },
-      },
-      {
-        from: "client",
-        msg: {
-          action: "load",
-          header: true,
-          id: map.id,
-          sessions: {
-            [client.currentSessionID]: 1,
-          },
-        },
-      },
-      {
-        from: "server",
-        msg: {
-          action: "load",
-          header: false,
-          id: map.id,
-          sessions: {},
-        },
-      },
-      {
-        from: "client",
-        msg: {
-          action: "content",
-          header: {
-            createdAt: expect.any(String),
-            meta: null,
-            ruleset: {
-              initialAdmin: client.account.id,
-              type: "group",
-            },
-            type: "comap",
-            uniqueness: expect.any(String),
-          },
-          id: group.id,
-          new: {
-            [client.currentSessionID]: {
-              after: 0,
-              lastSignature: expect.any(String),
-              newTransactions: expect.any(Array),
-            },
-          },
-          priority: 0,
-        },
-      },
-      {
-        from: "client",
-        msg: {
-          action: "content",
-          header: {
-            createdAt: expect.any(String),
-            meta: null,
-            ruleset: {
-              group: group.id,
-              type: "ownedByGroup",
-            },
-            type: "comap",
-            uniqueness: expect.any(String),
-          },
-          id: map.id,
-          new: {
-            [client.currentSessionID]: {
-              after: 0,
-              lastSignature: expect.any(String),
-              newTransactions: expect.any(Array),
-            },
-          },
-          priority: 3,
-        },
-      },
-      {
-        from: "server",
-        msg: {
-          action: "known",
-          header: true,
-          id: group.id,
-          sessions: {
-            [client.currentSessionID]: 3,
-          },
-        },
-      },
-      {
-        // TODO: This is a redundant message, we should remove it
-        from: "client",
-        msg: {
-          action: "content",
-          header: {
-            createdAt: expect.any(String),
-            meta: null,
-            ruleset: {
-              group: group.id,
-              type: "ownedByGroup",
-            },
-            type: "comap",
-            uniqueness: expect.any(String),
-          },
-          id: map.id,
-          new: {
-            [client.currentSessionID]: {
-              after: 0,
-              lastSignature: expect.any(String),
-              newTransactions: expect.any(Array),
-            },
-          },
-          priority: 3,
-        },
-      },
-      {
-        // TODO: This is a redundant message, we should remove it
-        from: "server",
-        msg: {
-          action: "known",
-          asDependencyOf: undefined,
-          header: true,
-          id: group.id,
-          sessions: {
-            [client.currentSessionID]: 3,
-          },
-        },
-      },
-      {
-        from: "server",
-        msg: {
-          action: "known",
-          header: true,
-          id: map.id,
-          sessions: {
-            [client.currentSessionID]: 1,
-          },
-        },
-      },
-      {
-        from: "server",
-        msg: {
-          action: "known",
-          asDependencyOf: undefined,
-          header: true,
-          id: map.id,
-          sessions: {
-            [client.currentSessionID]: 1,
-          },
-        },
-      },
-    ]);
-  });
-});
-
-function groupContentEx(group: RawGroup) {
-  return {
-    action: "content",
-    id: group.core.id,
-  };
-}
-
-function groupStateEx(group: RawGroup) {
-  return {
-    action: "known",
-    id: group.core.id,
-  };
-}
-
 describe("LocalNode.load", () => {
   test("should throw error when trying to load with undefined ID", async () => {
-    const { node } = await createConnectedTestNode();
+    const client = await setupTestAccount();
 
     // @ts-expect-error Testing with undefined ID
-    await expect(node.load(undefined)).rejects.toThrow(
+    await expect(client.node.load(undefined)).rejects.toThrow(
       "Trying to load CoValue with undefined id",
     );
   });
 
   test("should throw error when trying to load with invalid ID format", async () => {
-    const { node } = await createConnectedTestNode();
+    const client = await setupTestAccount();
 
     // @ts-expect-error Testing with invalid ID format
-    await expect(node.load("invalid_id")).rejects.toThrow(
+    await expect(client.node.load("invalid_id")).rejects.toThrow(
       "Trying to load CoValue with invalid id invalid_id",
     );
   });
@@ -2121,8 +1013,9 @@ describe("LocalNode.load", () => {
 
 describe("SyncManager.handleSyncMessage", () => {
   test("should ignore messages with undefined ID", async () => {
-    const { node: client } = await createConnectedTestNode();
-    const peer = client.syncManager.getPeers()[0]!;
+    const client = await setupTestAccount();
+
+    const { peerState } = client.connectToSyncServer();
 
     // Create an invalid message with undefined ID
     const invalidMessage = {
@@ -2132,16 +1025,17 @@ describe("SyncManager.handleSyncMessage", () => {
       sessions: {},
     } as unknown as LoadMessage;
 
-    await client.syncManager.handleSyncMessage(invalidMessage, peer);
+    await client.node.syncManager.handleSyncMessage(invalidMessage, peerState);
 
     // Verify that no state changes occurred
-    expect(peer.knownStates.has(invalidMessage.id)).toBe(false);
-    expect(peer.optimisticKnownStates.has(invalidMessage.id)).toBe(false);
+    expect(peerState.knownStates.has(invalidMessage.id)).toBe(false);
+    expect(peerState.optimisticKnownStates.has(invalidMessage.id)).toBe(false);
   });
 
   test("should ignore messages with invalid ID format", async () => {
-    const { node: client } = await createConnectedTestNode();
-    const peer = client.syncManager.getPeers()[0]!;
+    const client = await setupTestAccount();
+
+    const { peerState } = client.connectToSyncServer();
 
     // Create an invalid message with wrong ID format
     const invalidMessage = {
@@ -2151,23 +1045,23 @@ describe("SyncManager.handleSyncMessage", () => {
       sessions: {},
     } as unknown as LoadMessage;
 
-    await client.syncManager.handleSyncMessage(invalidMessage, peer);
+    await client.node.syncManager.handleSyncMessage(invalidMessage, peerState);
 
     // Verify that no state changes occurred
-    expect(peer.knownStates.has(invalidMessage.id)).toBe(false);
-    expect(peer.optimisticKnownStates.has(invalidMessage.id)).toBe(false);
+    expect(peerState.knownStates.has(invalidMessage.id)).toBe(false);
+    expect(peerState.optimisticKnownStates.has(invalidMessage.id)).toBe(false);
   });
 
   test("should ignore messages for errored coValues", async () => {
-    const { node: client } = await createConnectedTestNode();
-    const peer = client.syncManager.getPeers()[0]!;
+    const client = await setupTestAccount();
+
+    const { peer, peerState } = client.connectToSyncServer();
 
     // Add a coValue to the errored set
     const erroredId = "co_z123" as const;
-    peer.erroredCoValues.set(
-      erroredId,
-      new Error("Test error") as unknown as TryAddTransactionsError,
-    );
+    client.node.coValuesStore.get(erroredId).markErrored(peer.id, {
+      message: "Test error",
+    } as any);
 
     const message = {
       action: "load" as const,
@@ -2176,17 +1070,19 @@ describe("SyncManager.handleSyncMessage", () => {
       sessions: {},
     } satisfies LoadMessage;
 
-    await client.syncManager.handleSyncMessage(message, peer);
+    await client.node.syncManager.handleSyncMessage(message, peerState);
 
     // Verify that no state changes occurred
-    expect(peer.knownStates.has(message.id)).toBe(false);
-    expect(peer.optimisticKnownStates.has(message.id)).toBe(false);
+    expect(peerState.knownStates.has(message.id)).toBe(false);
+    expect(peerState.optimisticKnownStates.has(message.id)).toBe(false);
   });
 
   test("should process valid messages", async () => {
-    const { node: client } = await createConnectedTestNode();
-    const group = client.createGroup();
-    const peer = client.syncManager.getPeers()[0]!;
+    const client = await setupTestAccount();
+
+    const { peerState } = client.connectToSyncServer();
+
+    const group = client.node.createGroup();
 
     const validMessage = {
       action: "load" as const,
@@ -2195,9 +1091,9 @@ describe("SyncManager.handleSyncMessage", () => {
       sessions: {},
     };
 
-    await client.syncManager.handleSyncMessage(validMessage, peer);
+    await client.node.syncManager.handleSyncMessage(validMessage, peerState);
 
     // Verify that the message was processed
-    expect(peer.knownStates.has(group.id)).toBe(true);
+    expect(peerState.knownStates.has(group.id)).toBe(true);
   });
 });

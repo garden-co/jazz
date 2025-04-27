@@ -186,8 +186,8 @@ export class RawGroup<
       const child = store.get(id);
 
       if (
-        child.state.type === "unknown" ||
-        child.state.type === "unavailable"
+        child.highLevelState === "unknown" ||
+        child.highLevelState === "unavailable"
       ) {
         child.loadFromPeers(peers).catch(() => {
           logger.error(`Failed to load child group ${id}`);
@@ -258,17 +258,18 @@ export class RawGroup<
     role: Role,
   ) {
     if (account === EVERYONE) {
-      if (!(role === "reader" || role === "writer")) {
+      if (!(role === "reader" || role === "writer" || role === "writeOnly")) {
         throw new Error(
-          "Can't make everyone something other than reader or writer",
+          "Can't make everyone something other than reader, writer or writeOnly",
         );
       }
-
       const currentReadKey = this.core.getCurrentReadKey();
 
       if (!currentReadKey.secret) {
         throw new Error("Can't add member without read key secret");
       }
+
+      const previousRole = this.get(account);
 
       this.set(account, role, "trusting");
 
@@ -276,11 +277,19 @@ export class RawGroup<
         throw new Error("Failed to set role");
       }
 
-      this.set(
-        `${currentReadKey.id}_for_${EVERYONE}`,
-        currentReadKey.secret,
-        "trusting",
-      );
+      if (role === "writeOnly") {
+        if (previousRole === "reader" || previousRole === "writer") {
+          this.rotateReadKey();
+        }
+
+        this.delete(`${currentReadKey.id}_for_${EVERYONE}`);
+      } else {
+        this.set(
+          `${currentReadKey.id}_for_${EVERYONE}`,
+          currentReadKey.secret,
+          "trusting",
+        );
+      }
 
       return;
     }
@@ -299,44 +308,18 @@ export class RawGroup<
      * invite.
      */
     if (role === "writeOnly" || role === "writeOnlyInvite") {
-      const writeKeyForNewMember = this.core.crypto.newRandomKeySecret();
+      const previousRole = this.get(memberKey);
+
+      if (
+        previousRole === "reader" ||
+        previousRole === "writer" ||
+        previousRole === "admin"
+      ) {
+        this.rotateReadKey();
+      }
 
       this.set(memberKey, role, "trusting");
-      this.set(`writeKeyFor_${memberKey}`, writeKeyForNewMember.id, "trusting");
-
-      this.storeKeyRevelationForMember(
-        memberKey,
-        agent,
-        writeKeyForNewMember.id,
-        writeKeyForNewMember.secret,
-      );
-
-      for (const otherMemberKey of this.getMemberKeys()) {
-        const memberRole = this.get(otherMemberKey);
-
-        if (
-          memberRole === "reader" ||
-          memberRole === "writer" ||
-          memberRole === "admin" ||
-          memberRole === "readerInvite" ||
-          memberRole === "writerInvite" ||
-          memberRole === "adminInvite"
-        ) {
-          const otherMemberAgent = this.core.node
-            .resolveAccountAgent(
-              otherMemberKey,
-              "Expected member agent to be loaded",
-            )
-            ._unsafeUnwrap({ withStackTrace: true });
-
-          this.storeKeyRevelationForMember(
-            otherMemberKey,
-            otherMemberAgent,
-            writeKeyForNewMember.id,
-            writeKeyForNewMember.secret,
-          );
-        }
-      }
+      this.internalCreateWriteOnlyKeyForMember(memberKey, agent);
     } else {
       const currentReadKey = this.core.getCurrentReadKey();
 
@@ -366,6 +349,49 @@ export class RawGroup<
         }
 
         this.storeKeyRevelationForMember(memberKey, agent, keyID, secret);
+      }
+    }
+  }
+
+  internalCreateWriteOnlyKeyForMember(
+    memberKey: RawAccountID | AgentID,
+    agent: AgentID,
+  ) {
+    const writeKeyForNewMember = this.core.crypto.newRandomKeySecret();
+
+    this.set(`writeKeyFor_${memberKey}`, writeKeyForNewMember.id, "trusting");
+
+    this.storeKeyRevelationForMember(
+      memberKey,
+      agent,
+      writeKeyForNewMember.id,
+      writeKeyForNewMember.secret,
+    );
+
+    for (const otherMemberKey of this.getMemberKeys()) {
+      const memberRole = this.get(otherMemberKey);
+
+      if (
+        memberRole === "reader" ||
+        memberRole === "writer" ||
+        memberRole === "admin" ||
+        memberRole === "readerInvite" ||
+        memberRole === "writerInvite" ||
+        memberRole === "adminInvite"
+      ) {
+        const otherMemberAgent = this.core.node
+          .resolveAccountAgent(
+            otherMemberKey,
+            "Expected member agent to be loaded",
+          )
+          ._unsafeUnwrap({ withStackTrace: true });
+
+        this.storeKeyRevelationForMember(
+          otherMemberKey,
+          otherMemberAgent,
+          writeKeyForNewMember.id,
+          writeKeyForNewMember.secret,
+        );
       }
     }
   }
@@ -409,7 +435,19 @@ export class RawGroup<
     if (this.myRole() === "writeOnly") {
       const accountId = this.core.node.account.id;
 
-      return this.get(`writeKeyFor_${accountId}`) as KeyID;
+      const key = this.get(`writeKeyFor_${accountId}`) as KeyID;
+
+      // When everyone is writeOnly, we need to create a writeOnly key for the current account if missing
+      if (!key && this.get("everyone") === "writeOnly") {
+        this.internalCreateWriteOnlyKeyForMember(
+          accountId,
+          this.core.node.account.currentAgentID(),
+        );
+
+        return this.get(`writeKeyFor_${accountId}`) as KeyID;
+      }
+
+      return key;
     }
 
     return this.get("readKey");

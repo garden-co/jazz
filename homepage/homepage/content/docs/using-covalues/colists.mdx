@@ -33,7 +33,32 @@ const tasks = ListOfTasks.create([
 ```
 </CodeGroup>
 
-Like other CoValues, you can specify [ownership](/docs/using-covalues/ownership) when creating CoLists.
+### Ownership
+
+Like other CoValues, you can specify ownership when creating CoLists.
+
+<CodeGroup>
+```ts twoslash
+import { Group, co, CoMap, CoList } from "jazz-tools";
+import { createJazzTestAccount } from 'jazz-tools/testing';
+const me = await createJazzTestAccount();
+const colleagueAccount = await createJazzTestAccount();
+class Task extends CoMap {
+  title = co.string;
+  status = co.string;
+}
+class ListOfTasks extends CoList.Of(co.ref(Task)) {}
+
+// ---cut---
+// Create with shared ownership
+const teamGroup = Group.create();
+teamGroup.addMember(colleagueAccount, "writer");
+
+const teamList = ListOfTasks.create([], { owner: teamGroup });
+```
+</CodeGroup>
+
+See [Groups as permission scopes](/docs/groups/intro) for more information on how to use groups to control access to CoLists.
 
 ## Reading from CoLists
 

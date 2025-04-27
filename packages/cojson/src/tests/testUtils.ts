@@ -8,12 +8,13 @@ import {
 import { expect, onTestFinished, vi } from "vitest";
 import { ControlledAgent } from "../coValues/account.js";
 import { WasmCrypto } from "../crypto/WasmCrypto.js";
-import type { CoID, RawCoValue } from "../exports.js";
+import type { CoID, CoValueCore, RawCoValue } from "../exports.js";
 import type { SessionID } from "../ids.js";
 import { LocalNode } from "../localNode.js";
 import { connectedPeers } from "../streamUtils.js";
 import type { Peer, SyncMessage } from "../sync.js";
 import { expectGroup } from "../typeUtils/expectGroup.js";
+import { toSimplifiedMessages } from "./messagesTestUtils.js";
 
 const Crypto = await WasmCrypto.create();
 
@@ -234,11 +235,13 @@ export function shouldNotResolve<T>(
   });
 }
 
-export function waitFor(callback: () => boolean | void) {
+export function waitFor(
+  callback: () => boolean | void | Promise<boolean | void>,
+) {
   return new Promise<void>((resolve, reject) => {
-    const checkPassed = () => {
+    const checkPassed = async () => {
       try {
-        return { ok: callback(), error: null };
+        return { ok: await callback(), error: null };
       } catch (error) {
         return { ok: false, error };
       }
@@ -246,8 +249,8 @@ export function waitFor(callback: () => boolean | void) {
 
     let retries = 0;
 
-    const interval = setInterval(() => {
-      const { ok, error } = checkPassed();
+    const interval = setInterval(async () => {
+      const { ok, error } = await checkPassed();
 
       if (ok !== false) {
         clearInterval(interval);
@@ -292,6 +295,7 @@ export function blockMessageTypeOnOutgoingPeer(
   });
 
   return {
+    blockedMessages,
     sendBlockedMessages: async () => {
       for (const msg of blockedMessages) {
         await push.call(peer.outgoing, msg);
@@ -378,89 +382,240 @@ export function tearDownTestMetricReader() {
   metrics.disable();
 }
 
-export function setupSyncServer() {
-  syncServer.current = createTestNode();
-  return syncServer.current;
-}
+export class SyncMessagesLog {
+  static messages: SyncTestMessage[] = [];
 
-export async function createConnectedTestAgentNode(opts = { connected: true }) {
-  if (!syncServer.current) {
-    throw new Error("Sync server not initialized");
+  static add(message: SyncTestMessage) {
+    this.messages.push(message);
   }
 
+  static clear() {
+    this.messages.length = 0;
+  }
+
+  static getMessages(coValueMapping: { [key: string]: CoValueCore }) {
+    return toSimplifiedMessages(coValueMapping, SyncMessagesLog.messages);
+  }
+
+  static debugMessages(coValueMapping: { [key: string]: CoValueCore }) {
+    console.log(SyncMessagesLog.getMessages(coValueMapping));
+  }
+}
+
+export function setupTestNode(
+  opts: {
+    isSyncServer?: boolean;
+    connected?: boolean;
+  } = {},
+) {
   const [admin, session] = randomAnonymousAccountAndSessionID();
-  const node = new LocalNode(admin, session, Crypto);
+  let node = new LocalNode(admin, session, Crypto);
 
-  const { nodeToServerPeer, serverToNodePeer, messages, addServerPeer } =
-    connectNodeToSyncServer(node, opts.connected);
-
-  return { node, nodeToServerPeer, serverToNodePeer, messages, addServerPeer };
-}
-
-export async function createConnectedTestNode(opts = { connected: true }) {
-  if (!syncServer.current) {
-    throw new Error("Sync server not initialized");
+  if (opts.isSyncServer) {
+    syncServer.current = node;
   }
 
+  function connectToSyncServer(opts?: {
+    syncServerName?: string;
+    ourName?: string;
+    syncServer?: LocalNode;
+  }) {
+    const currentSyncServer = opts?.syncServer ?? syncServer.current;
+
+    if (!currentSyncServer) {
+      throw new Error("Sync server not initialized");
+    }
+
+    if (currentSyncServer.account.id === node.account.id) {
+      throw new Error("Cannot connect to self");
+    }
+
+    const { peer1, peer2 } = connectedPeersWithMessagesTracking({
+      peer1: {
+        id: currentSyncServer.account.id,
+        role: "server",
+        name: opts?.syncServerName,
+      },
+      peer2: { id: node.account.id, role: "client", name: opts?.ourName },
+    });
+
+    node.syncManager.addPeer(peer1);
+    currentSyncServer.syncManager.addPeer(peer2);
+
+    return {
+      peerState: node.syncManager.peers[peer1.id]!,
+      peer: peer1,
+      peerStateOnServer: currentSyncServer.syncManager.peers[peer2.id]!,
+      peerOnServer: peer2,
+    };
+  }
+
+  function addStoragePeer(opts: { ourName?: string } = {}) {
+    const storage = createTestNode();
+
+    const { peer1, peer2 } = connectedPeersWithMessagesTracking({
+      peer1: { id: storage.account.id, role: "storage" },
+      peer2: { id: node.account.id, role: "client", name: opts.ourName },
+    });
+
+    peer1.priority = 100;
+
+    node.syncManager.addPeer(peer1);
+    storage.syncManager.addPeer(peer2);
+
+    return {
+      storage,
+      peer: node.syncManager.peers[peer1.id]!,
+    };
+  }
+
+  if (opts.connected) {
+    connectToSyncServer();
+  }
+
+  const ctx = {
+    node,
+    connectToSyncServer,
+    addStoragePeer,
+    restart: () => {
+      node.gracefulShutdown();
+      ctx.node = node = new LocalNode(admin, session, Crypto);
+
+      if (opts.isSyncServer) {
+        syncServer.current = node;
+      }
+
+      return node;
+    },
+  };
+
+  return ctx;
+}
+
+export async function setupTestAccount(
+  opts: {
+    isSyncServer?: boolean;
+    connected?: boolean;
+  } = {},
+) {
   const ctx = await LocalNode.withNewlyCreatedAccount({
     peersToLoadFrom: [],
     crypto: Crypto,
     creationProps: { name: "Client" },
   });
 
-  const { nodeToServerPeer, serverToNodePeer, messages, addServerPeer } =
-    connectNodeToSyncServer(ctx.node, opts.connected);
+  if (opts.isSyncServer) {
+    syncServer.current = ctx.node;
+  }
+
+  function connectToSyncServer(opts?: {
+    syncServerName?: string;
+    ourName?: string;
+    syncServer?: LocalNode;
+  }) {
+    const currentSyncServer = opts?.syncServer ?? syncServer.current;
+
+    if (!currentSyncServer) {
+      throw new Error("Sync server not initialized");
+    }
+
+    if (currentSyncServer.account.id === ctx.node.account.id) {
+      throw new Error("Cannot connect to self");
+    }
+
+    const { peer1, peer2 } = connectedPeersWithMessagesTracking({
+      peer1: {
+        id: currentSyncServer.account.id,
+        role: "server",
+        name: opts?.syncServerName,
+      },
+      peer2: { id: ctx.node.account.id, role: "client", name: opts?.ourName },
+    });
+
+    ctx.node.syncManager.addPeer(peer1);
+    currentSyncServer.syncManager.addPeer(peer2);
+
+    function getCurrentPeerState() {
+      return ctx.node.syncManager.peers[peer1.id]!;
+    }
+
+    return {
+      peerState: getCurrentPeerState(),
+      peer: peer1,
+      peerStateOnServer: currentSyncServer.syncManager.peers[peer2.id]!,
+      peerOnServer: peer2,
+      getCurrentPeerState,
+    };
+  }
+
+  function addStoragePeer(opts: { ourName?: string } = {}) {
+    const storage = createTestNode();
+
+    const { peer1, peer2 } = connectedPeersWithMessagesTracking({
+      peer1: { id: storage.account.id, role: "storage" },
+      peer2: { id: ctx.node.account.id, role: "client", name: opts.ourName },
+    });
+
+    peer1.priority = 100;
+
+    ctx.node.syncManager.addPeer(peer1);
+    storage.syncManager.addPeer(peer2);
+
+    return {
+      storage,
+      peer: ctx.node.syncManager.peers[peer1.id]!,
+    };
+  }
+
+  if (opts.connected) {
+    connectToSyncServer();
+  }
 
   return {
     node: ctx.node,
     accountID: ctx.accountID,
-    nodeToServerPeer,
-    serverToNodePeer,
-    messages,
-    addServerPeer,
+    connectToSyncServer,
+    addStoragePeer,
   };
 }
 
-export function connectNodeToSyncServer(node: LocalNode, connected = true) {
-  if (!syncServer.current) {
-    throw new Error("Sync server not initialized");
-  }
+export type SyncTestMessage = {
+  from: string;
+  to: string;
+  msg: SyncMessage;
+};
 
-  const [nodeToServerPeer, serverToNodePeer] = connectedPeers(
-    syncServer.current.account.id,
-    node.account.id,
-    {
-      peer1role: "server",
-      peer2role: "client",
-    },
-  );
+export function connectedPeersWithMessagesTracking(opts: {
+  peer1: { id: string; role: Peer["role"]; name?: string };
+  peer2: { id: string; role: Peer["role"]; name?: string };
+}) {
+  const [peer1, peer2] = connectedPeers(opts.peer1.id, opts.peer2.id, {
+    peer1role: opts.peer1.role,
+    peer2role: opts.peer2.role,
+  });
 
-  const messages: {
-    from: "client" | "server";
-    msg: SyncMessage;
-  }[] = [];
-
-  const serverPush = serverToNodePeer.outgoing.push;
-  serverToNodePeer.outgoing.push = (msg) => {
-    messages.push({ from: "server", msg });
-    return serverPush.call(serverToNodePeer.outgoing, msg);
+  const peer1Push = peer1.outgoing.push;
+  peer1.outgoing.push = (msg) => {
+    SyncMessagesLog.add({
+      from: opts.peer2.name ?? opts.peer2.role,
+      to: opts.peer1.name ?? opts.peer1.role,
+      msg,
+    });
+    return peer1Push.call(peer1.outgoing, msg);
   };
 
-  const clientPush = nodeToServerPeer.outgoing.push;
-  nodeToServerPeer.outgoing.push = (msg) => {
-    messages.push({ from: "client", msg });
-    return clientPush.call(nodeToServerPeer.outgoing, msg);
+  const peer2Push = peer2.outgoing.push;
+  peer2.outgoing.push = (msg) => {
+    SyncMessagesLog.add({
+      from: opts.peer1.name ?? opts.peer1.role,
+      to: opts.peer2.name ?? opts.peer2.role,
+      msg,
+    });
+    return peer2Push.call(peer2.outgoing, msg);
   };
-
-  syncServer.current.syncManager.addPeer(serverToNodePeer);
-  if (connected) {
-    node.syncManager.addPeer(nodeToServerPeer);
-  }
 
   return {
-    nodeToServerPeer,
-    serverToNodePeer,
-    messages,
-    addServerPeer: () => node.syncManager.addPeer(nodeToServerPeer),
+    peer1,
+    peer2,
   };
 }

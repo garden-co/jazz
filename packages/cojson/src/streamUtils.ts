@@ -7,8 +7,8 @@ export function connectedPeers(
   peer2id: PeerID,
   {
     trace = false,
-    peer1role = "peer",
-    peer2role = "peer",
+    peer1role = "client",
+    peer2role = "client",
     crashOnClose = false,
   }: {
     trace?: boolean;

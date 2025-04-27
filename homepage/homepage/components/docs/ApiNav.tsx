@@ -1,23 +1,26 @@
-import { SideNavHeader } from "@/components/SideNavHeader";
+import { SideNav, SideNavBody, SideNavHeader } from "@/components/SideNav";
 import { SideNavItem } from "@/components/SideNavItem";
 import { packages } from "@/content/packages";
-import { clsx } from "clsx";
-import { Icon } from "gcmp-design-system/src/app/components/atoms/Icon";
+import { Icon } from "@garden-co/design-system/src/components/atoms/Icon";
 import Link from "next/link";
 import { requestProject } from "./requestProject";
 
 export function ApiNav({ className }: { className?: string }) {
   return (
-    <div className={clsx(className, "text-sm space-y-5")}>
-      <SideNavHeader href="/api-reference">API Reference</SideNavHeader>
-      <ul className="space-y-5">
-        {packages.map(({ name }) => (
-          <li key={name}>
-            <PackageNavItem package={name} />
-          </li>
-        ))}
-      </ul>
-    </div>
+    <SideNav className={className}>
+      <SideNavBody>
+        <SideNavHeader className="mb-5" href="/api-reference">
+          API Reference
+        </SideNavHeader>
+        <ul className="space-y-5">
+          {packages.map(({ name }) => (
+            <li key={name}>
+              <PackageNavItem package={name} />
+            </li>
+          ))}
+        </ul>
+      </SideNavBody>
+    </SideNav>
   );
 }
 

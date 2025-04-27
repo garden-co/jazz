@@ -1,6 +1,7 @@
 import { CoValueCore } from "./coValueCore.js";
 import { CoValueState } from "./coValueState.js";
 import { RawCoID } from "./ids.js";
+import { PeerID } from "./sync.js";
 
 export class CoValuesStore {
   coValues = new Map<RawCoID, CoValueState>();
@@ -9,19 +10,21 @@ export class CoValuesStore {
     let entry = this.coValues.get(id);
 
     if (!entry) {
-      entry = CoValueState.Unknown(id);
+      entry = new CoValueState(id);
       this.coValues.set(id, entry);
     }
 
     return entry;
   }
 
-  setAsAvailable(id: RawCoID, coValue: CoValueCore) {
+  markAsAvailable(id: RawCoID, coValue: CoValueCore, fromPeerId: PeerID) {
     const entry = this.get(id);
-    entry.dispatch({
-      type: "available",
-      coValue,
-    });
+    entry.markAvailable(coValue, fromPeerId);
+  }
+
+  internalMarkMagicallyAvailable(id: RawCoID, coValue: CoValueCore) {
+    const entry = this.get(id);
+    entry.internalMarkMagicallyAvailable(coValue);
   }
 
   getEntries() {

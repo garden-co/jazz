@@ -1,14 +1,14 @@
 import CreateJazzApp from "@/components/home/CreateJazzApp.mdx";
 import { marketingCopy } from "@/content/marketingCopy";
-import { H1 } from "gcmp-design-system/src/app/components/atoms/Headings";
+import { H1 } from "@garden-co/design-system/src/components/atoms/Headings";
 import {
   Icon,
   type IconName,
-} from "gcmp-design-system/src/app/components/atoms/Icon";
-import { Kicker } from "gcmp-design-system/src/app/components/atoms/Kicker";
-import { CopyButton } from "gcmp-design-system/src/app/components/molecules/CodeGroup";
-import { Prose } from "gcmp-design-system/src/app/components/molecules/Prose";
-import { SectionHeader } from "gcmp-design-system/src/app/components/molecules/SectionHeader";
+} from "@garden-co/design-system/src/components/atoms/Icon";
+import { Kicker } from "@garden-co/design-system/src/components/atoms/Kicker";
+import { CopyButton } from "@garden-co/design-system/src/components/molecules/CodeGroup";
+import { Prose } from "@garden-co/design-system/src/components/molecules/Prose";
+import { SectionHeader } from "@garden-co/design-system/src/components/molecules/SectionHeader";
 import Link from "next/link";
 
 const features: Array<{
@@ -55,7 +55,9 @@ export function HeroSection() {
       <div className="flex flex-col justify-center gap-5 lg:col-span-2 lg:gap-8">
         <Kicker>Toolkit for backendless apps</Kicker>
         <H1>
-          <span className="inline-block">{marketingCopy.headline}</span>
+          <span className="inline-block text-highlight">
+            {marketingCopy.headline}
+          </span>
         </H1>
 
         <Prose size="lg" className="text-pretty max-w-2xl dark:text-stone-200">
@@ -81,7 +83,7 @@ export function HeroSection() {
               key={title}
               className="flex text-xs sm:text-sm gap-2 items-center"
             >
-              <span className="text-blue p-1.5 rounded-lg bg-blue-50 dark:text-blue-500 dark:bg-stone-900">
+              <span className="text-primary p-1.5 rounded-lg bg-highlight dark:bg-stone-900">
                 <Icon size="xs" name={icon} />
               </span>
               <p>{title}</p>
@@ -95,7 +97,7 @@ export function HeroSection() {
           className="md:col-span-2 lg:sr-only"
           title="Get a Jazz app running in minutes."
         />
-        <div className="overflow-hidden sm:rounded-xl sm:border  h-full sm:px-8 sm:pt-6 bg-stone-50 dark:bg-stone-950">
+        <div className="overflow-hidden sm:rounded-xl sm:border h-full sm:px-8 sm:pt-6 bg-stone-50 dark:bg-stone-950">
           <div className="rounded-lg bg-white dark:bg-stone-925 sm:ring-4 ring-stone-400/20 sm:shadow-xl sm:shadow-blue/20 border relative sm:top-2 h-full w-full">
             <div className="py-4 flex items-center gap-2.5 px-6 border-b">
               <span className="rounded-full size-3 bg-stone-200 dark:bg-stone-900" />

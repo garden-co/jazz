@@ -2,6 +2,12 @@ import { CoValueCore } from "../coValueCore.js";
 import { JsonObject } from "../jsonValue.js";
 import { DeletionOpPayload, OpID, RawCoList } from "./coList.js";
 
+declare const navigator:
+  | {
+      language: string;
+    }
+  | undefined;
+
 export type StringifiedOpID = string & { __stringifiedOpID: true };
 
 export function stringifyOpID(opID: OpID): StringifiedOpID {
@@ -15,6 +21,33 @@ type PlaintextIdxMapping = {
   idxBeforeOpID: { [opID: StringifiedOpID]: number };
 };
 
+/**
+ * A collaborative plain text implementation that supports grapheme-accurate editing.
+ *
+ * Locale support:
+ * - Locale can be specified in the meta field when creating the text: `{ meta: { locale: "ja-JP" } }`
+ * - If no locale is specified, falls back to browser's locale (`navigator.language`)
+ * - If browser locale is not available, defaults to 'en'
+ *
+ * @example
+ * ```typescript
+ * // With specific locale
+ * const textJa = node.createCoValue({
+ *   type: "coplaintext",
+ *   ruleset: { type: "unsafeAllowAll" },
+ *   meta: { locale: "ja-JP" },
+ *   ...Crypto.createdNowUnique(),
+ * });
+ *
+ * // Using browser locale
+ * const text = node.createCoValue({
+ *   type: "coplaintext",
+ *   ruleset: { type: "unsafeAllowAll" },
+ *   meta: null,
+ *   ...Crypto.createdNowUnique(),
+ * });
+ * ```
+ */
 export class RawCoPlainText<
   Meta extends JsonObject | null = JsonObject | null,
 > extends RawCoList<string, Meta> {
@@ -36,7 +69,17 @@ export class RawCoPlainText<
         "Intl.Segmenter is not supported. Use a polyfill to get coPlainText support in Jazz. (eg. https://formatjs.github.io/docs/polyfills/intl-segmenter/)",
       );
     }
-    this._segmenter = new Intl.Segmenter("en", {
+
+    // Use locale from meta if provided, fallback to browser locale, or 'en' as last resort
+    const effectiveLocale =
+      (core.header.meta &&
+      typeof core.header.meta === "object" &&
+      "locale" in core.header.meta
+        ? (core.header.meta.locale as string)
+        : undefined) ||
+      (typeof navigator !== "undefined" ? navigator.language : "en");
+
+    this._segmenter = new Intl.Segmenter(effectiveLocale, {
       granularity: "grapheme",
     });
   }
@@ -78,7 +121,16 @@ export class RawCoPlainText<
       .join("");
   }
 
-  insertAfter(
+  /**
+   * Inserts `text` before the character at index `idx`.
+   * If idx is 0, inserts at the start of the text.
+   *
+   * @param idx - The index of the character to insert before
+   * @param text - The text to insert
+   * @param privacy - Whether the operation should be private or trusting
+   * @category 2. Editing
+   */
+  insertBefore(
     idx: number,
     text: string,
     privacy: "private" | "trusting" = "private",
@@ -86,19 +138,31 @@ export class RawCoPlainText<
     const graphemes = [...this._segmenter.segment(text)].map((g) => g.segment);
 
     if (idx === 0) {
-      // For insertions at start, just prepend each character, in reverse
+      // For insertions at start, prepend each character in reverse
       for (const grapheme of graphemes.reverse()) {
         this.prepend(grapheme, 0, privacy);
       }
     } else {
-      // For other insertions, use append after the specified index
-      // We append in forward order to maintain the text order
-      let after = idx - 1;
-      for (const grapheme of graphemes) {
-        this.append(grapheme, after, privacy);
-        after++; // Move the insertion point forward for each grapheme
-      }
+      // For other insertions, append after the previous character
+      this.appendItems(graphemes, idx - 1, privacy);
     }
+  }
+
+  /**
+   * Inserts `text` after the character at index `idx`.
+   *
+   * @param idx - The index of the character to insert after
+   * @param text - The text to insert
+   * @param privacy - Whether the operation should be private or trusting
+   * @category 2. Editing
+   */
+  insertAfter(
+    idx: number,
+    text: string,
+    privacy: "private" | "trusting" = "private",
+  ) {
+    const graphemes = [...this._segmenter.segment(text)].map((g) => g.segment);
+    this.appendItems(graphemes, idx, privacy);
   }
 
   deleteRange(
@@ -123,6 +187,6 @@ export class RawCoPlainText<
     }
     this.core.makeTransaction(ops, privacy);
 
-    this.rebuildFromCore();
+    this.processNewTransactions();
   }
 }

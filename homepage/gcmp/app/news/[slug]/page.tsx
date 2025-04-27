@@ -4,8 +4,8 @@ import PostCoverImage from "@/components/blog/PostCoverImage";
 import { PostJsonLd } from "@/components/blog/PostJsonLd";
 import { BigGrass } from "@/components/blog/Swishes";
 import { getPostBySlug, posts } from "@/lib/posts";
-import { H1, H2 } from "gcmp-design-system/src/app/components/atoms/Headings";
-import { Prose } from "gcmp-design-system/src/app/components/molecules/Prose";
+import { H1, H2 } from "@garden-co/design-system/src/components/atoms/Headings";
+import { Prose } from "@garden-co/design-system/src/components/molecules/Prose";
 import { Metadata } from "next";
 import Image from "next/image";
 import { notFound } from "next/navigation";
@@ -46,8 +46,8 @@ export default async function Post({ params }: Params) {
               alt=""
             />
             <div>
-              <p className="text-stone-900 dark:text-white">{author.name}</p>
-              <p className="text-sm text-stone-600 dark:text-stone-400">
+              <p className="text-highlight">{author.name}</p>
+              <p className="text-sm text-stone-600 ">
                 <FormattedDate date={date} />
               </p>
             </div>

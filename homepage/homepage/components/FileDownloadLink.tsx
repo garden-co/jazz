@@ -3,8 +3,8 @@
 import Link from "next/link";
 import { AnchorHTMLAttributes, DetailedHTMLProps } from "react";
 
-import { Button } from "gcmp-design-system/src/app/components/atoms/Button";
-import { Icon } from "gcmp-design-system/src/app/components/atoms/Icon";
+import { Button } from "@garden-co/design-system/src/components/atoms/Button";
+import { Icon } from "@garden-co/design-system/src/components/atoms/Icon";
 
 export function FileDownloadLink(
   props: DetailedHTMLProps<

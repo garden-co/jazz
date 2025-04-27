@@ -1,6 +1,5 @@
 import { JsonObject, LocalNode, RawAccount } from "cojson";
 import { CoID } from "cojson";
-import { Button } from "../ui/button.js";
 import { Card, CardBody, CardHeader } from "../ui/card.js";
 import {
   Table,
@@ -11,7 +10,7 @@ import {
   TableRow,
 } from "../ui/table.js";
 import { Text } from "../ui/text.js";
-import { AccountNameDisplay } from "./account-name-display.js";
+import { AccountOrGroupText } from "./account-or-group-text.js";
 import { PageInfo, isCoId } from "./types.js";
 import { ValueRenderer } from "./value-renderer.js";
 
@@ -47,17 +46,14 @@ export function GroupView({
             isCoId(key) ? (
               <TableRow key={key}>
                 <TableCell>
-                  <Button
-                    variant="link"
+                  <AccountOrGroupText
+                    coId={key as CoID<RawAccount>}
+                    node={node}
+                    showId
                     onClick={() => {
                       onNavigate([{ coId: key, name: key }]);
                     }}
-                  >
-                    <AccountNameDisplay
-                      accountId={key as CoID<RawAccount>}
-                      node={node}
-                    />
-                  </Button>
+                  />
                 </TableCell>
                 <TableCell>{value as string}</TableCell>
               </TableRow>

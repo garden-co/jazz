@@ -2,12 +2,12 @@ import CoPlainTextDescription from "@/app/(others)/(home)/coValueDescriptions/co
 import CursorsAndCaretsDescription from "@/app/(others)/(home)/toolkit/cursorsAndCarets.mdx";
 import TwoWaySyncDescription from "@/app/(others)/(home)/toolkit/twoWaySync.mdx";
 import VideoPresenceCallsDescription from "@/app/(others)/(home)/toolkit/videoPresenceCalls.mdx";
-import { CodeRef } from "gcmp-design-system/src/app/components/atoms/CodeRef";
-import { P } from "gcmp-design-system/src/app/components/atoms/Paragraph";
-import { FeatureCard } from "gcmp-design-system/src/app/components/molecules/FeatureCard";
-import { GappedGrid } from "gcmp-design-system/src/app/components/molecules/GappedGrid";
-import { Prose } from "gcmp-design-system/src/app/components/molecules/Prose";
-import { SectionHeader } from "gcmp-design-system/src/app/components/molecules/SectionHeader";
+import { CodeRef } from "@garden-co/design-system/src/components/atoms/CodeRef";
+import { P } from "@garden-co/design-system/src/components/atoms/Paragraph";
+import { FeatureCard } from "@garden-co/design-system/src/components/molecules/FeatureCard";
+import { GappedGrid } from "@garden-co/design-system/src/components/molecules/GappedGrid";
+import { Prose } from "@garden-co/design-system/src/components/molecules/Prose";
+import { SectionHeader } from "@garden-co/design-system/src/components/molecules/SectionHeader";
 
 export function ComingSoonSection() {
   return (

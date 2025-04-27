@@ -21,7 +21,7 @@
     "@vercel/speed-insights": "^1.0.12",
     "clsx": "^2.1.1",
     "feed": "^4.2.2",
-    "gcmp-design-system": "workspace:*",
+    "@garden-co/design-system": "workspace:*",
     "lucide-react": "^0.436.0",
     "mdast-util-from-markdown": "^2.0.0",
     "mdast-util-mdx": "^3.0.0",

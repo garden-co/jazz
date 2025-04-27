@@ -33,7 +33,7 @@ describe("Images upload", () => {
 
     await userEvent.upload(
       page.getByRole("textbox"),
-      "./fixtures/jazz-logo.png",
+      "./fixtures/jazz-icon.png",
     );
 
     assert(file);
@@ -44,7 +44,7 @@ describe("Images upload", () => {
 
     assert(highestRes);
 
-    expect(highestRes.res).toBe("476x460");
+    expect(highestRes.res).toBe("512x512");
 
     const blob = highestRes.stream.toBlob();
 
@@ -64,8 +64,8 @@ describe("Images upload", () => {
 
     expect(img.src).toBe(blobURI);
 
-    expect(img.naturalWidth).toBe(476);
-    expect(img.naturalHeight).toBe(460);
+    expect(img.naturalWidth).toBe(512);
+    expect(img.naturalHeight).toBe(512);
 
     URL.revokeObjectURL(blobURI);
   });

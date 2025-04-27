@@ -5,7 +5,7 @@
   "types": "dist/index.d.ts",
   "type": "module",
   "license": "MIT",
-  "version": "0.13.5",
+  "version": "0.13.14",
   "dependencies": {
     "cojson": "workspace:*",
     "cojson-transport-ws": "workspace:*",
@@ -13,7 +13,7 @@
   },
   "devDependencies": {
     "jazz-run": "workspace:*",
-    "typescript": "~5.6.2"
+    "typescript": "catalog:"
   },
   "scripts": {
     "dev": "tsc --watch --sourceMap --outDir dist",

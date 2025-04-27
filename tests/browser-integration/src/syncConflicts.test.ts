@@ -1,15 +1,7 @@
 import { commands } from "@vitest/browser/context";
-import { Account, AuthSecretStorage, CoMap, Group, co } from "jazz-tools";
-import {
-  assert,
-  afterAll,
-  afterEach,
-  describe,
-  expect,
-  onTestFinished,
-  test,
-} from "vitest";
-import { createAccountContext, startSyncServer } from "./testUtils";
+import { AuthSecretStorage, CoMap, co } from "jazz-tools";
+import { assert, afterAll, afterEach, describe, expect, test } from "vitest";
+import { createAccountContext, startSyncServer, waitFor } from "./testUtils";
 
 class Issue extends CoMap {
   estimate = co.number;
@@ -57,7 +49,9 @@ describe("Browser sync", () => {
       },
     );
 
-    const loadedIssue = await Issue.load(issue.id, account2, {});
+    const loadedIssue = await Issue.load(issue.id, {
+      loadAs: account2,
+    });
 
     assert(loadedIssue);
 
@@ -71,12 +65,9 @@ describe("Browser sync", () => {
 
     syncServer = await startSyncServer(syncServer.port, "sync-conflicts");
 
-    await issue.waitForSync();
-
-    // Hangs up here
-    await loadedIssue.waitForSync();
-
-    expect(issue.estimate).toBe(3);
-    expect(loadedIssue.estimate).toBe(3);
+    await waitFor(() => {
+      expect(issue.estimate).toBe(3);
+      expect(loadedIssue.estimate).toBe(3);
+    });
   });
 });

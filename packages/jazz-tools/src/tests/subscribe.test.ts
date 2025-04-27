@@ -417,6 +417,211 @@ describe("subscribeToCoValue", () => {
 
     expect(updateFn).toHaveBeenCalledTimes(1);
   });
+
+  it("should emit when all the items become available", async () => {
+    class TestMap extends CoMap {
+      value = co.string;
+    }
+
+    class TestList extends CoList.Of(co.ref(TestMap)) {}
+
+    const reader = await createJazzTestAccount({
+      isCurrentActiveAccount: true,
+    });
+
+    const creator = await createJazzTestAccount({
+      isCurrentActiveAccount: true,
+    });
+
+    const everyone = Group.create(creator);
+    everyone.addMember("everyone", "reader");
+
+    const group = Group.create(creator);
+
+    const list = TestList.create(
+      [
+        TestMap.create({ value: "1" }, group),
+        TestMap.create({ value: "2" }, everyone),
+        TestMap.create({ value: "3" }, everyone),
+        TestMap.create({ value: "4" }, everyone),
+        TestMap.create({ value: "5" }, everyone),
+      ],
+      everyone,
+    );
+
+    let result = null as Resolved<TestList, { $each: true }> | null;
+
+    const updateFn = vi.fn().mockImplementation((value) => {
+      result = value;
+    });
+    const onUnauthorized = vi.fn();
+
+    const unsubscribe = subscribeToCoValue(
+      TestList,
+      list.id,
+      {
+        loadAs: reader,
+        resolve: {
+          $each: true,
+        },
+        onUnauthorized,
+      },
+      updateFn,
+    );
+
+    onTestFinished(unsubscribe);
+
+    await waitFor(() => {
+      expect(onUnauthorized).toHaveBeenCalled();
+    });
+
+    group.addMember("everyone", "reader");
+
+    await waitFor(() => {
+      expect(updateFn).toHaveBeenCalled();
+    });
+
+    assert(result);
+
+    expect(result[0]?.value).toBe("1");
+
+    expect(updateFn).toHaveBeenCalledTimes(1);
+  });
+
+  it("should handle null values in lists with required refs", async () => {
+    class TestMap extends CoMap {
+      value = co.string;
+    }
+
+    class TestList extends CoList.Of(co.ref(TestMap)) {}
+
+    const reader = await createJazzTestAccount({
+      isCurrentActiveAccount: true,
+    });
+
+    const creator = await createJazzTestAccount({
+      isCurrentActiveAccount: true,
+    });
+
+    const everyone = Group.create(creator);
+    everyone.addMember("everyone", "reader");
+
+    const list = TestList.create(
+      [
+        // TODO: This should be flagged as an error by typescript
+        null,
+        TestMap.create({ value: "2" }, everyone),
+        TestMap.create({ value: "3" }, everyone),
+        TestMap.create({ value: "4" }, everyone),
+        TestMap.create({ value: "5" }, everyone),
+      ],
+      everyone,
+    );
+
+    let result = null as Resolved<TestList, { $each: true }> | null;
+
+    const updateFn = vi.fn().mockImplementation((value) => {
+      result = value;
+    });
+    const onUnauthorized = vi.fn();
+    const onUnavailable = vi.fn();
+
+    const unsubscribe = subscribeToCoValue(
+      TestList,
+      list.id,
+      {
+        loadAs: reader,
+        resolve: {
+          $each: true,
+        },
+        onUnauthorized,
+        onUnavailable,
+      },
+      updateFn,
+    );
+
+    onTestFinished(unsubscribe);
+
+    await waitFor(() => {
+      expect(onUnavailable).toHaveBeenCalled();
+    });
+
+    list[0] = TestMap.create({ value: "1" }, everyone);
+
+    await waitFor(() => {
+      expect(updateFn).toHaveBeenCalled();
+    });
+
+    assert(result);
+
+    expect(result[0]?.value).toBe("1");
+
+    expect(updateFn).toHaveBeenCalledTimes(1);
+  });
+
+  it("should handle null values in lists with optional refs", async () => {
+    class TestMap extends CoMap {
+      value = co.string;
+    }
+
+    class TestList extends CoList.Of(co.optional.ref(TestMap)) {}
+
+    const reader = await createJazzTestAccount({
+      isCurrentActiveAccount: true,
+    });
+
+    const creator = await createJazzTestAccount({
+      isCurrentActiveAccount: true,
+    });
+
+    const everyone = Group.create(creator);
+    everyone.addMember("everyone", "reader");
+
+    const list = TestList.create(
+      [
+        null,
+        TestMap.create({ value: "2" }, everyone),
+        TestMap.create({ value: "3" }, everyone),
+        TestMap.create({ value: "4" }, everyone),
+        TestMap.create({ value: "5" }, everyone),
+      ],
+      everyone,
+    );
+
+    let result = null as Resolved<TestList, { $each: true }> | null;
+
+    const updateFn = vi.fn().mockImplementation((value) => {
+      result = value;
+    });
+    const onUnauthorized = vi.fn();
+    const onUnavailable = vi.fn();
+
+    const unsubscribe = subscribeToCoValue(
+      TestList,
+      list.id,
+      {
+        loadAs: reader,
+        resolve: {
+          $each: true,
+        },
+        onUnauthorized,
+        onUnavailable,
+      },
+      updateFn,
+    );
+
+    onTestFinished(unsubscribe);
+
+    await waitFor(() => {
+      expect(updateFn).toHaveBeenCalled();
+    });
+
+    assert(result);
+
+    expect(result[0]).toBeNull();
+
+    expect(updateFn).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("createCoValueObservable", () => {

@@ -1,5 +1,5 @@
 import { ContentByFramework, CodeGroup } from '@/components/forMdx'
-import { Alert } from "gcmp-design-system/src/app/components/atoms/Alert";
+import { Alert } from "@garden-co/design-system/src/components/atoms/Alert";
 
 export const metadata = { title: "Upgrade to Jazz 0.11.0" };
 
@@ -32,7 +32,7 @@ The new `canRead`, `canWrite` and `canAdmin` methods on `Account` allow you to e
 const me = Account.getMe();
 
 if (me.canAdmin(value)) {
-  console.log("I can share value with others"); 
+  console.log("I can share value with others");
 } else if (me.canWrite(value)) {
   console.log("I can edit value");
 } else if (me.canRead(value)) {
@@ -73,7 +73,7 @@ function addTrackToPlaylist(playlist: Playlist, track: MusicTrack) {
 function removeTrackFromPlaylist(playlist: Playlist, track: MusicTrack) {
   const trackGroup = track._owner.castAs(Group);
   trackGroup.revokeExtend(playlist._owner); // Revoke access to the track to the playlist accounts
-  
+
   const index = playlist.tracks.findIndex(t => t.id === track.id);
   if (index !== -1) {
     playlist.tracks.splice(index, 1);
@@ -145,8 +145,8 @@ export class MyAppAccount extends Account {
 </CodeGroup>
 
 <Alert variant="warning" title="Warning" className="mt-4">
-If you provide a custom `Profile` in your `Account` schema and migration for a Worker account, 
-make sure to also add  `everyone` as member with `reader` role to the owning group. 
+If you provide a custom `Profile` in your `Account` schema and migration for a Worker account,
+make sure to also add  `everyone` as member with `reader` role to the owning group.
 Failing to do so will prevent any account from sending messages to the Worker's Inbox.
 </Alert>
 
@@ -159,13 +159,13 @@ Existing profiles owned by `Account`s will still work, but you will get incorrec
 
 ### Member Inheritance Changes
 
-The behavior of groups' `members` getter method has been updated to return both direct members and inherited ones from ancestor groups. 
+The behavior of groups' `members` getter method has been updated to return both direct members and inherited ones from ancestor groups.
 This might affect your application if you were relying on only direct members being returned.
 
 <CodeGroup>
 ```ts
 /**
- *  The following pseudocode only illustrates the inheritance logic, 
+ *  The following pseudocode only illustrates the inheritance logic,
  *  the actual implementation is different.
 */
 
@@ -214,7 +214,7 @@ The `usePasskeyAuth` hook now doesn't update the `profile.name` if the provided 
 
 > I'm getting the following error: `Error: Profile must be owned by a Group`
 
-If you previously forced a migration of your `Account` schema to include a custom `Profile`, 
+If you previously forced a migration of your `Account` schema to include a custom `Profile`,
 and assigned its ownership to an `Account`, you need to recreate your profile code and assign it to a `Group` instead.
 
 <CodeGroup>

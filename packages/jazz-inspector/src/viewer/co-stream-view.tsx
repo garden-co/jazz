@@ -12,8 +12,8 @@ import { styled } from "goober";
 import { useEffect, useState } from "react";
 import { Badge } from "../ui/badge.js";
 import { Button } from "../ui/button.js";
+import { AccountOrGroupText } from "./account-or-group-text.js";
 import { PageInfo } from "./types.js";
-import { AccountOrGroupPreview } from "./value-renderer.js";
 
 // typeguard for BinaryStreamStart
 function isBinaryStreamStart(item: unknown): item is BinaryStreamStart {
@@ -316,7 +316,7 @@ function RenderCoStream({
     <CoStreamGrid>
       {userCoIds.map((id, idx) => (
         <CoStreamItemContainer key={id}>
-          <AccountOrGroupPreview coId={id as CoID<RawCoValue>} node={node} />
+          <AccountOrGroupText coId={id as CoID<RawCoValue>} node={node} />
           {/* @ts-expect-error - TODO: fix types */}
           {value.items[streamPerUser[idx]]?.map(
             (item: CoStreamItem<JsonValue>) => (

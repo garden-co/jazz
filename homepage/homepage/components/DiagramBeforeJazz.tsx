@@ -4,7 +4,7 @@ export function DiagramBeforeJazz({ className }: { className?: string }) {
   return (
     <svg
       xmlns="http://www.w3.org/2000/svg"
-      className={clsx(className, "text-stone-900 dark:text-white")}
+      className={clsx(className, "text-highlight")}
       width="308"
       height="268"
       viewBox="0 0 308 268"

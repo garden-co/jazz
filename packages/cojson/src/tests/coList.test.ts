@@ -95,6 +95,76 @@ test("appendItems add an array of items at the end of the list", () => {
   expect(content.toJSON()).toEqual(["hello", "world", "hooray", "universe"]);
 });
 
+test("appendItems at index", () => {
+  const node = new LocalNode(...randomAnonymousAccountAndSessionID(), Crypto);
+
+  const coValue = node.createCoValue({
+    type: "colist",
+    ruleset: { type: "unsafeAllowAll" },
+    meta: null,
+    ...Crypto.createdNowUnique(),
+  });
+
+  const content = expectList(coValue.getCurrentContent());
+
+  content.append("first", 0, "trusting");
+  content.append("second", 0, "trusting");
+  expect(content.toJSON()).toEqual(["first", "second"]);
+
+  content.appendItems(["third", "fourth"], 1, "trusting");
+  expect(content.toJSON()).toEqual(["first", "second", "third", "fourth"]);
+
+  content.appendItems(["hello", "world"], 0, "trusting");
+  expect(content.toJSON()).toEqual([
+    "first",
+    "hello",
+    "world",
+    "second",
+    "third",
+    "fourth",
+  ]);
+});
+
+test("appendItems at index", () => {
+  const node = new LocalNode(...randomAnonymousAccountAndSessionID(), Crypto);
+
+  const coValue = node.createCoValue({
+    type: "colist",
+    ruleset: { type: "unsafeAllowAll" },
+    meta: null,
+    ...Crypto.createdNowUnique(),
+  });
+
+  const content = expectList(coValue.getCurrentContent());
+
+  content.append("first", 0, "trusting");
+  expect(content.toJSON()).toEqual(["first"]);
+
+  content.appendItems(["second"], 0, "trusting");
+  expect(content.toJSON()).toEqual(["first", "second"]);
+
+  content.appendItems(["third"], 1, "trusting");
+  expect(content.toJSON()).toEqual(["first", "second", "third"]);
+});
+
+test("appendItems with negative index", () => {
+  const node = new LocalNode(...randomAnonymousAccountAndSessionID(), Crypto);
+
+  const coValue = node.createCoValue({
+    type: "colist",
+    ruleset: { type: "unsafeAllowAll" },
+    meta: null,
+    ...Crypto.createdNowUnique(),
+  });
+
+  const content = expectList(coValue.getCurrentContent());
+
+  content.append("hello", 0, "trusting");
+  expect(content.toJSON()).toEqual(["hello"]);
+  content.appendItems(["world", "hooray", "universe"], -1, "trusting");
+  expect(content.toJSON()).toEqual(["hello", "world", "hooray", "universe"]);
+});
+
 test("Can push into empty list", () => {
   const node = new LocalNode(...randomAnonymousAccountAndSessionID(), Crypto);
 
@@ -150,4 +220,17 @@ test("Items prepended to start appear with latest first", () => {
   content.prepend("third", 0, "trusting");
 
   expect(content.toJSON()).toEqual(["third", "second", "first"]);
+});
+
+test("should handle large lists", () => {
+  const node = new LocalNode(...randomAnonymousAccountAndSessionID(), Crypto);
+
+  const group = node.createGroup();
+  const coValue = group.createList();
+
+  for (let i = 0; i < 8_000; i++) {
+    coValue.append(`item ${i}`, undefined, "trusting");
+  }
+
+  expect(coValue.toJSON().length).toEqual(8_000);
 });

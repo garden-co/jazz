@@ -12,6 +12,7 @@ import {
   createTwoConnectedNodes,
   loadCoValueOrFail,
   randomAnonymousAccountAndSessionID,
+  waitFor,
 } from "./testUtils.js";
 
 const Crypto = await WasmCrypto.create();
@@ -490,11 +491,9 @@ describe("writeOnly", () => {
       "writer",
     );
 
-    group.core.waitForSync();
-
     node2.node.coValuesStore.coValues.delete(map.id);
-    expect(node2.node.coValuesStore.get(map.id)).toEqual(
-      CoValueState.Unknown(map.id),
+    expect(node2.node.coValuesStore.get(map.id)?.highLevelState).toBe(
+      "unknown",
     );
 
     const mapOnNode2 = await loadCoValueOrFail(node2.node, map.id);
@@ -1126,5 +1125,254 @@ describe("roleOf", () => {
 
     // Should fall back to grandparent's everyone role
     expect(childGroup.roleOf(node2.accountID)).toEqual("writer");
+  });
+
+  describe("writeOnly can be used as a role for everyone", () => {
+    test("writeOnly can be used as a role for everyone", async () => {
+      const { node1, node2 } = await createTwoConnectedNodes(
+        "server",
+        "server",
+      );
+
+      const group = node1.node.createGroup();
+
+      group.addMember("everyone", "writeOnly");
+
+      const map = group.createMap();
+
+      const groupOnNode2 = await loadCoValueOrFail(node2.node, group.id);
+
+      expect(groupOnNode2.myRole()).toEqual("writeOnly");
+
+      const mapOnNode2 = await loadCoValueOrFail(node2.node, map.id);
+
+      mapOnNode2.set("test", "Written from everyone");
+
+      await waitFor(async () => {
+        const mapOnNode1 = await loadCoValueOrFail(node1.node, map.id);
+        expect(mapOnNode1.get("test")).toEqual("Written from everyone");
+      });
+    });
+
+    test("switching from everyone reader to writeOnly", async () => {
+      const { node1, node2 } = await createTwoConnectedNodes(
+        "server",
+        "server",
+      );
+
+      const group = node1.node.createGroup();
+
+      group.addMember("everyone", "reader");
+
+      group.addMember("everyone", "writeOnly");
+
+      const map = group.createMap();
+
+      map.set("test", "Written from admin");
+
+      const groupOnNode2 = await loadCoValueOrFail(node2.node, group.id);
+
+      expect(groupOnNode2.myRole()).toEqual("writeOnly");
+
+      const mapOnNode2 = await loadCoValueOrFail(node2.node, map.id);
+
+      expect(mapOnNode2.get("test")).toEqual(undefined);
+
+      mapOnNode2.set("test", "Written from everyone");
+
+      await waitFor(async () => {
+        const mapOnNode1 = await loadCoValueOrFail(node1.node, map.id);
+        expect(mapOnNode1.get("test")).toEqual("Written from everyone");
+      });
+    });
+
+    test("switching from everyone writer to writeOnly", async () => {
+      const { node1, node2 } = await createTwoConnectedNodes(
+        "server",
+        "server",
+      );
+
+      const group = node1.node.createGroup();
+
+      group.addMember("everyone", "writer");
+
+      group.addMember("everyone", "writeOnly");
+
+      const map = group.createMap();
+
+      map.set("test", "Written from admin");
+
+      const groupOnNode2 = await loadCoValueOrFail(node2.node, group.id);
+
+      expect(groupOnNode2.myRole()).toEqual("writeOnly");
+
+      const mapOnNode2 = await loadCoValueOrFail(node2.node, map.id);
+
+      expect(mapOnNode2.get("test")).toEqual(undefined);
+
+      mapOnNode2.set("test", "Written from everyone");
+
+      await waitFor(async () => {
+        const mapOnNode1 = await loadCoValueOrFail(node1.node, map.id);
+        expect(mapOnNode1.get("test")).toEqual("Written from everyone");
+      });
+    });
+
+    test("switching from everyone writeOnly to reader", async () => {
+      const { node1, node2 } = await createTwoConnectedNodes(
+        "server",
+        "server",
+      );
+
+      const group = node1.node.createGroup();
+
+      group.addMember("everyone", "writeOnly");
+
+      const map = group.createMap();
+
+      map.set("fromAdmin", "Written from admin");
+
+      const groupOnNode2 = await loadCoValueOrFail(node2.node, group.id);
+
+      expect(groupOnNode2.myRole()).toEqual("writeOnly");
+
+      const mapOnNode2 = await loadCoValueOrFail(node2.node, map.id);
+
+      expect(mapOnNode2.get("test")).toEqual(undefined);
+
+      mapOnNode2.set("test", "Written from everyone");
+
+      await waitFor(async () => {
+        const mapOnNode1 = await loadCoValueOrFail(node1.node, map.id);
+        expect(mapOnNode1.get("test")).toEqual("Written from everyone");
+      });
+
+      group.addMember("everyone", "reader");
+
+      await group.core.waitForSync();
+
+      mapOnNode2.set("test", "Updated after the downgrade");
+
+      expect(mapOnNode2.get("test")).toEqual("Written from everyone");
+      expect(mapOnNode2.get("fromAdmin")).toEqual("Written from admin");
+    });
+
+    test("switching from everyone writeOnly to writer", async () => {
+      const { node1, node2 } = await createTwoConnectedNodes(
+        "server",
+        "server",
+      );
+
+      const group = node1.node.createGroup();
+
+      group.addMember("everyone", "writeOnly");
+
+      const map = group.createMap();
+
+      map.set("fromAdmin", "Written from admin");
+
+      const groupOnNode2 = await loadCoValueOrFail(node2.node, group.id);
+
+      expect(groupOnNode2.myRole()).toEqual("writeOnly");
+
+      const mapOnNode2 = await loadCoValueOrFail(node2.node, map.id);
+
+      expect(mapOnNode2.get("test")).toEqual(undefined);
+
+      mapOnNode2.set("test", "Written from everyone");
+
+      await waitFor(async () => {
+        const mapOnNode1 = await loadCoValueOrFail(node1.node, map.id);
+        expect(mapOnNode1.get("test")).toEqual("Written from everyone");
+      });
+
+      group.addMember("everyone", "writer");
+
+      await group.core.waitForSync();
+
+      mapOnNode2.set("test", "Updated after the upgrade");
+
+      expect(mapOnNode2.get("test")).toEqual("Updated after the upgrade");
+      expect(mapOnNode2.get("fromAdmin")).toEqual("Written from admin");
+    });
+
+    test("adding a reader member after writeOnly", async () => {
+      const { node1, node2, node3 } = await createThreeConnectedNodes(
+        "server",
+        "server",
+        "server",
+      );
+
+      const group = node1.node.createGroup();
+
+      group.addMember("everyone", "writeOnly");
+
+      const map = group.createMap();
+
+      map.set("fromAdmin", "Written from admin");
+
+      const groupOnNode2 = await loadCoValueOrFail(node2.node, group.id);
+
+      expect(groupOnNode2.myRole()).toEqual("writeOnly");
+
+      const mapOnNode2 = await loadCoValueOrFail(node2.node, map.id);
+
+      expect(mapOnNode2.get("test")).toEqual(undefined);
+
+      mapOnNode2.set("test", "Written from everyone");
+
+      await waitFor(async () => {
+        const mapOnNode1 = await loadCoValueOrFail(node1.node, map.id);
+        expect(mapOnNode1.get("test")).toEqual("Written from everyone");
+      });
+
+      const account3 = await loadCoValueOrFail(node1.node, node3.accountID);
+
+      group.addMember(account3, "reader");
+
+      await group.core.waitForSync();
+
+      const mapOnNode3 = await loadCoValueOrFail(node3.node, map.id);
+
+      expect(mapOnNode3.get("test")).toEqual("Written from everyone");
+    });
+
+    test.skip("adding a reader member while creating the writeOnly keys", async () => {
+      const { node1, node2, node3 } = await createThreeConnectedNodes(
+        "server",
+        "server",
+        "server",
+      );
+      const account3 = await loadCoValueOrFail(node1.node, node3.accountID);
+      const group = node1.node.createGroup();
+
+      group.addMember("everyone", "writeOnly");
+
+      const map = group.createMap();
+
+      map.set("fromAdmin", "Written from admin");
+
+      const groupOnNode2 = await loadCoValueOrFail(node2.node, group.id);
+
+      expect(groupOnNode2.myRole()).toEqual("writeOnly");
+
+      const mapOnNode2 = await loadCoValueOrFail(node2.node, map.id);
+      group.addMember(account3, "reader");
+
+      expect(mapOnNode2.get("test")).toEqual(undefined);
+
+      mapOnNode2.set("test", "Written from everyone");
+
+      await waitFor(async () => {
+        const mapOnNode1 = await loadCoValueOrFail(node1.node, map.id);
+        expect(mapOnNode1.get("test")).toEqual("Written from everyone");
+      });
+
+      await group.core.waitForSync();
+
+      const mapOnNode3 = await loadCoValueOrFail(node3.node, map.id);
+
+      expect(mapOnNode3.get("test")).toEqual("Written from everyone");
+    });
   });
 });

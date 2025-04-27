@@ -116,7 +116,7 @@ describe("Group inheritance", () => {
     const mapAsReaderAfterUpdate = await TestMap.load(mapInChild.id, {
       loadAs: reader,
     });
-    expect(mapAsReaderAfterUpdate?.title).toBe("In Child");
+    expect(mapAsReaderAfterUpdate).toBe(null);
   });
 
   test("Group inheritance with grand-children", async () => {
@@ -150,12 +150,14 @@ describe("Group inheritance", () => {
 
     await grandParentGroup.removeMember(reader);
 
+    await grandParentGroup.waitForSync();
+
     mapInGrandChild.title = "In Grand Child (updated)";
 
     const mapAsReaderAfterUpdate = await TestMap.load(mapInGrandChild.id, {
       loadAs: reader,
     });
-    expect(mapAsReaderAfterUpdate?.title).toBe("In Grand Child");
+    expect(mapAsReaderAfterUpdate).toBe(null);
   });
 
   test("Group.getParentGroups should return the parent groups", async () => {
@@ -209,7 +211,7 @@ describe("Group inheritance", () => {
     expect(loadedGroup).not.toBe("unavailable");
   });
 
-  test("everyone is valid only for reader and writer roles", () => {
+  test("everyone is valid only for reader, writer and writeOnly roles", () => {
     const group = Group.create();
     group.addMember("everyone", "reader");
 
@@ -224,10 +226,9 @@ describe("Group inheritance", () => {
 
     expect(group.getRoleOf("everyone")).toBe("writer");
 
-    // @ts-expect-error - writeOnly is not a valid role for everyone
-    expect(() => group.addMember("everyone", "writeOnly")).toThrow();
+    group.addMember("everyone", "writeOnly");
 
-    expect(group.getRoleOf("everyone")).toBe("writer");
+    expect(group.getRoleOf("everyone")).toBe("writeOnly");
   });
 
   test("typescript should show an error when adding a member with a non-account role", async () => {

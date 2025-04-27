@@ -1,3 +1,47 @@
+:root {
+  --color-primary: #146aff;
+  --color-primary-dark: lch(
+    from var(--color-primary) calc(l - 15) calc(c - 1) calc(h + 10)
+  );
+  --color-primary-light: lch(
+    from var(--color-primary) calc(l + 15) calc(c + 1) calc(h - 10)
+  );
+
+  --color-secondary: var(--color-primary-dark);
+  --color-highlight: #2dc9c9;
+  --color-success: #42bb69;
+  --color-info: #fbc400;
+  --color-warning: #ff601c;
+  --color-tip: #b441eb;
+  --color-success: #8bda27;
+  --color-pink: #ef478e;
+
+  --color-default: theme("colors.stone.700");
+  --color-highlight: theme("colors.stone.900");
+  --color-muted: theme("colors.stone.300");
+
+  --color-transparent-white: rgba(255, 255, 255, 0.1);
+  --color-transparent-primary: lch(from var(--color-primary-dark) l c h / 0.1);
+
+  --color-border-default: theme("colors.stone.200");
+}
+
+.dark {
+  --color-secondary: var(--color-primary-light);
+
+  --color-default: theme("colors.stone.400");
+  --color-highlight: theme("colors.white");
+  --color-muted: theme("colors.stone.700");
+
+  --color-transparent-primary: lch(from var(--color-primary-light) l c h / 0.2);
+
+  --color-border-default: theme("colors.stone.900");
+}
+
+*:focus {
+  outline: none;
+}
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;

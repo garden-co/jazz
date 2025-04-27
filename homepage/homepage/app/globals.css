@@ -1,3 +1,5 @@
+@import "@garden-co/design-system/src/app/globals.css";
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
@@ -25,6 +27,10 @@ pre.shiki {
   height: 100%;
   padding: 0.65em 0;
   background-color: transparent !important;
+}
+
+.twoslash-popup-container {
+  white-space: break-spaces;
 }
 
 .twoslash-popup-code pre.shiki {

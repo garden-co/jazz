@@ -67,6 +67,31 @@ const image = await createImage(file, options);
 ```
 </CodeGroup>
 
+### Ownership
+
+Like other CoValues, you can specify ownership when creating image definitions.
+
+<CodeGroup>
+```ts twoslash
+import { Group } from "jazz-tools";
+import { createImage } from "jazz-browser-media-images";
+import { createJazzTestAccount } from 'jazz-tools/testing';
+const me = await createJazzTestAccount();
+const colleagueAccount = await createJazzTestAccount();
+
+const file = new File([], "test.jpg", { type: "image/jpeg" });
+
+// ---cut---
+const teamGroup = Group.create();
+teamGroup.addMember(colleagueAccount, "writer");
+
+// Create an image with shared ownership
+const teamImage = await createImage(file, { owner: teamGroup });
+```
+</CodeGroup>
+
+See [Groups as permission scopes](/docs/groups/intro) for more information on how to use groups to control access to images.
+
 ## Displaying Images with `ProgressiveImg`
 
 For a complete progressive loading experience, use the `ProgressiveImg` component:

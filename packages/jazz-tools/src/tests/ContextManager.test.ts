@@ -225,7 +225,7 @@ describe("ContextManager", () => {
     expect(onAnonymousAccountDiscarded).not.toHaveBeenCalled();
   });
 
-  test("the migration should be applied correctly on existing accounts ", async () => {
+  test("the migration should be applied correctly on existing accounts", async () => {
     class AccountRoot extends CoMap {
       value = co.string;
     }

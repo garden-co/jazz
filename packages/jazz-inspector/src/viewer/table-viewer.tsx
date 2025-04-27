@@ -38,9 +38,7 @@ function CoValuesTableView({
   const [coIdArray, visibleRows] = useMemo(() => {
     const coIdArray = Array.isArray(data)
       ? data
-      : Object.values(data).every(
-            (k) => typeof k === "string" && k.startsWith("co_"),
-          )
+      : Object.values(data).every((k) => typeof k === "string" && isCoId(k))
         ? Object.values(data).map((k) => k as CoID<RawCoValue>)
         : [];
 
