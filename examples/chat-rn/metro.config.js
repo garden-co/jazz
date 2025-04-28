@@ -26,7 +26,7 @@ module.exports = makeMetroConfig({
     resolveRequest: MetroSymlinksResolver(),
     extraNodeModules,
     nodeModulesPaths,
+    sourceExts: ["mjs", "js", "json", "ts", "tsx"],
   },
-  sourceExts: ["mjs", "js", "json", "ts", "tsx"],
   watchFolders,
 });
