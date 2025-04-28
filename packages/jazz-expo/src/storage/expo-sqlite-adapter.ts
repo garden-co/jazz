@@ -140,11 +140,20 @@ export class ExpoSQLiteAdapter extends SQLiteAdapterBase {
     if (!this.db) {
       throw new Error("Database not opened");
     }
-    const result = await this.db.runAsync(sql, params as any[]);
-    return {
-      rows: [],
-      insertId: result.lastInsertRowId,
-      rowsAffected: result.changes,
-    };
+    // Use prepared statements to get rows for PRAGMA and SELECT
+    const statement = await this.db.prepareAsync(sql);
+    try {
+      const result = await statement.executeAsync(
+        params?.map((p) => p as SQLiteBindValue) ?? [],
+      );
+      const rows = await result.getAllAsync();
+      return {
+        rows: rows as SQLRow[],
+        insertId: result.lastInsertRowId,
+        rowsAffected: result.changes,
+      };
+    } finally {
+      await statement.finalizeAsync();
+    }
   }
 }
