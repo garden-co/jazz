@@ -94,20 +94,10 @@ export class ExpoSQLiteAdapter extends SQLiteAdapterBase {
 
   protected async open(): Promise<void> {
     try {
-      const db = await openDatabaseAsync(this.dbName);
-
-      // Verify connection
-      const statement = await db.prepareAsync("SELECT 1");
-      try {
-        const result = await statement.executeAsync();
-        const rows = await result.getAllAsync();
-        if (!rows || rows.length === 0) {
-          throw new Error("Database connection test failed");
-        }
-      } finally {
-        await statement.finalizeAsync();
-      }
-
+      const db = await openDatabaseAsync(this.dbName, {
+        useNewConnection: true,
+      });
+      await db.execAsync("PRAGMA journal_mode = WAL");
       this.db = db;
     } catch (e) {
       console.error("[ExpoSQLiteAdapter] open failed:", e);
