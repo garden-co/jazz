@@ -24,7 +24,7 @@ export class SQLiteReactNative {
     adapter: SQLiteAdapter,
     fromLocalNode: IncomingSyncStream,
     toLocalNode: OutgoingSyncQueue,
-    mode: Mode = "async",
+    mode: Mode = "sync",
   ) {
     this.mode = mode;
     this.initialized = this.initialize(adapter, fromLocalNode, toLocalNode);
