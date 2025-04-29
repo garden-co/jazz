@@ -221,16 +221,3 @@ test("Items prepended to start appear with latest first", () => {
 
   expect(content.toJSON()).toEqual(["third", "second", "first"]);
 });
-
-test("should handle large lists", () => {
-  const node = new LocalNode(...randomAnonymousAccountAndSessionID(), Crypto);
-
-  const group = node.createGroup();
-  const coValue = group.createList();
-
-  for (let i = 0; i < 8_000; i++) {
-    coValue.append(`item ${i}`, undefined, "trusting");
-  }
-
-  expect(coValue.toJSON().length).toEqual(8_000);
-});

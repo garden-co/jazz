@@ -187,6 +187,6 @@ export class RawCoPlainText<
     }
     this.core.makeTransaction(ops, privacy);
 
-    this.processNewTransactions();
+    this.rebuildFromCore();
   }
 }

@@ -1,13 +1,13 @@
 {
   "name": "cojson-storage-sqlite",
   "type": "module",
-  "version": "0.13.14",
+  "version": "0.13.15",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "license": "MIT",
   "dependencies": {
     "better-sqlite3": "^11.7.0",
-    "cojson": "workspace:0.13.14",
+    "cojson": "workspace:0.13.15",
     "cojson-storage": "workspace:*"
   },
   "devDependencies": {

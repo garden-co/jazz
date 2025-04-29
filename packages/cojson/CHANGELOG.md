@@ -1,5 +1,11 @@
 # cojson
 
+## 0.13.15
+
+### Patch Changes
+
+- c712ef2: Revert the RawCoList incremental processing
+
 ## 0.13.14
 
 ### Patch Changes
