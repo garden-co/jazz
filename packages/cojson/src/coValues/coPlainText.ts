@@ -186,7 +186,6 @@ export class RawCoPlainText<
       idx = nextIdx;
     }
     this.core.makeTransaction(ops, privacy);
-
-    this.rebuildFromCore();
+    this.processNewTransactions();
   }
 }

@@ -121,7 +121,6 @@ test("should sync and load data from storage", async () => {
       "storage -> KNOWN Map sessions: header/1",
       "storage -> CONTENT Map header: true new: After: 0 New: 1",
       "client -> KNOWN Group sessions: header/3",
-      "client -> KNOWN Map sessions: header/1",
     ]
   `);
 
@@ -211,7 +210,6 @@ test("should load dependencies correctly (group inheritance)", async () => {
       "storage -> KNOWN Map sessions: header/1",
       "storage -> CONTENT Map header: true new: After: 0 New: 1",
       "client -> KNOWN Group sessions: header/5",
-      "client -> KNOWN Map sessions: header/1",
     ]
   `);
 });
@@ -315,7 +313,6 @@ test("should recover from data loss", async () => {
       "storage -> KNOWN Map sessions: header/4",
       "storage -> CONTENT Map header: true new: After: 0 New: 4",
       "client -> KNOWN Group sessions: header/3",
-      "client -> KNOWN Map sessions: header/4",
     ]
   `);
 });

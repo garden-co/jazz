@@ -18,7 +18,8 @@ FileStreams provide automatic chunking when using the `createFromBlob` method, t
 In your schema, reference FileStreams like any other CoValue:
 
 <CodeGroup>
-```ts
+```ts twoslash
+// schema.ts
 import { CoMap, FileStream, co } from "jazz-tools";
 
 class Document extends CoMap {
@@ -37,25 +38,33 @@ There are two main ways to create FileStreams: creating empty ones for manual da
 For files from input elements or drag-and-drop interfaces, use `createFromBlob`:
 
 <CodeGroup>
-```ts
+```ts twoslash
+// @errors: 18047
+import { FileStream, Group } from "jazz-tools";
+const myGroup = Group.create();
+const progressBar: HTMLElement = document.querySelector('.progress-bar')!;
+
+// ---cut---
 // From a file input
-const fileInput = document.querySelector('input[type="file"]');
+const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement;
+
 fileInput.addEventListener('change', async () => {
-  const file = fileInput.files[0];
-  if (file) {
-    // Create FileStream from user-selected file
-    const fileStream = await FileStream.createFromBlob(file);
-    
-    // Or with progress tracking for better UX
-    const fileWithProgress = await FileStream.createFromBlob(file, {
-      onProgress: (progress) => {
-        // progress is a value between 0 and 1
-        const percent = Math.round(progress * 100);
-        console.log(`Upload progress: ${percent}%`);
-        progressBar.style.width = `${percent}%`;
-      }
-    });
-  }
+  const file = fileInput.files?.[0];
+  if (!file) return;
+  
+  // Create FileStream from user-selected file
+  const fileStream = await FileStream.createFromBlob(file, { owner: myGroup });
+  
+  // Or with progress tracking for better UX
+  const fileWithProgress = await FileStream.createFromBlob(file, {
+    onProgress: (progress) => {
+      // progress is a value between 0 and 1
+      const percent = Math.round(progress * 100);
+      console.log(`Upload progress: ${percent}%`);
+      progressBar.style.width = `${percent}%`;
+    },
+    owner: myGroup
+  });
 });
 ```
 </CodeGroup>
@@ -65,11 +74,12 @@ fileInput.addEventListener('change', async () => {
 Create an empty FileStream when you want to manually [add binary data in chunks](/docs/using-covalues/filestreams#writing-to-filestreams):
 
 <CodeGroup>
-```ts
-import { FileStream } from "jazz-tools";
-
+```ts twoslash
+import { Group, FileStream } from "jazz-tools";
+const myGroup = Group.create();
+// ---cut---
 // Create a new empty FileStream
-const fileStream = FileStream.create();
+const fileStream = FileStream.create({ owner: myGroup } );
 ```
 </CodeGroup>
 
@@ -105,7 +115,10 @@ const teamFileStream = FileStream.create({ owner: teamGroup });
 To access the raw binary data and metadata:
 
 <CodeGroup>
-```ts
+```ts twoslash
+import { FileStream } from "jazz-tools";
+const fileStream = FileStream.create();
+// ---cut---
 // Get all chunks and metadata
 const fileData = fileStream.getChunks();
 
@@ -127,7 +140,10 @@ if (fileData) {
 By default, `getChunks()` only returns data for completely synced `FileStream`s. To start using chunks from a `FileStream` that's currently still being synced use the `allowUnfinished` option:
 
 <CodeGroup>
-```ts
+```ts twoslash
+import { FileStream } from "jazz-tools";
+const fileStream = FileStream.create();
+// ---cut---
 // Get data even if the stream isn't complete
 const partialData = fileStream.getChunks({ allowUnfinished: true });
 ```
@@ -138,9 +154,15 @@ const partialData = fileStream.getChunks({ allowUnfinished: true });
 For easier integration with web APIs, convert to a `Blob`:
 
 <CodeGroup>
-```ts
+```ts twoslash
+import { FileStream } from "jazz-tools";
+const fileStream = FileStream.create();
+// ---cut---
 // Convert to a Blob
 const blob = fileStream.toBlob();
+
+// Get the filename from the metadata
+const filename = fileStream.getChunks()?.fileName;
 
 if (blob) {
   // Use with URL.createObjectURL
@@ -149,7 +171,7 @@ if (blob) {
   // Create a download link
   const link = document.createElement('a');
   link.href = url;
-  link.download = fileData?.fileName || 'document.pdf';
+  link.download = filename || 'document.pdf';
   link.click();
   
   // Clean up when done
@@ -163,7 +185,10 @@ if (blob) {
 You can directly load a `FileStream` as a `Blob` when you only have its ID:
 
 <CodeGroup>
-```ts
+```ts twoslash
+import { FileStream, type ID } from "jazz-tools";
+const fileStreamId = "co_z123" as ID<FileStream>;
+// ---cut---
 // Load directly as a Blob when you have an ID
 const blob = await FileStream.loadAsBlob(fileStreamId);
 
@@ -180,7 +205,10 @@ const partialBlob = await FileStream.loadAsBlob(fileStreamId, {
 Check if a `FileStream` is fully synced:
 
 <CodeGroup>
-```ts
+```ts twoslash
+import { FileStream } from "jazz-tools";
+const fileStream = FileStream.create();
+// ---cut---
 if (fileStream.isBinaryStreamEnded()) {
   console.log('File is completely synced');
 } else {
@@ -206,9 +234,12 @@ When creating a `FileStream` manually (not using `createFromBlob`), you need to 
 Begin by providing metadata about the file:
 
 <CodeGroup>
-```ts
+```ts twoslash
+import { FileStream, Group } from "jazz-tools";
+const myGroup = Group.create();
+// ---cut---
 // Create an empty FileStream
-const fileStream = FileStream.create();
+const fileStream = FileStream.create({ owner: myGroup });
 
 // Initialize with metadata
 fileStream.start({
@@ -224,9 +255,15 @@ fileStream.start({
 Add binary data in chunks - this helps with large files and progress tracking:
 
 <CodeGroup>
-```ts
-// Create a sample Uint8Array (in real apps, this would be file data)
-const data = new Uint8Array([...]);
+```ts twoslash
+import { FileStream } from "jazz-tools";
+const fileStream = FileStream.create();
+const file = [0x48, 0x65, 0x6C, 0x6C, 0x6F, 0x20, 0x57, 0x6F, 0x72, 0x6C, 0x64]; // "Hello World" in ASCII
+const bytes = new Uint8Array(file);
+const arrayBuffer = bytes.buffer;
+
+// ---cut---
+const data = new Uint8Array(arrayBuffer);
 
 // For large files, break into chunks (e.g., 100KB each)
 const chunkSize = 1024 * 100;
@@ -249,7 +286,10 @@ for (let i = 0; i < data.length; i += chunkSize) {
 Once all chunks are pushed, mark the `FileStream` as complete:
 
 <CodeGroup>
-```ts
+```ts twoslash
+import { FileStream } from "jazz-tools";
+const fileStream = FileStream.create();
+// ---cut---
 // Finalize the upload
 fileStream.end();
 
@@ -266,9 +306,12 @@ Like other CoValues, you can subscribe to `FileStream`s to get notified of chang
 Load a `FileStream` when you have its ID:
 
 <CodeGroup>
-```ts
+```ts twoslash
+import { FileStream, type ID } from "jazz-tools";
+const fileStreamId = "co_z123" as ID<FileStream>;
+// ---cut---
 // Load a FileStream by ID
-const fileStream = await FileStream.load(fileStreamId, []);
+const fileStream = await FileStream.load(fileStreamId);
 
 if (fileStream) {
   console.log('FileStream loaded successfully');
@@ -287,16 +330,20 @@ if (fileStream) {
 Subscribe to a `FileStream` to be notified when chunks are added or when the upload is complete:
 
 <CodeGroup>
-```ts
+```ts twoslash
+import { FileStream, type ID } from "jazz-tools";
+import { createJazzTestAccount } from 'jazz-tools/testing';
+const fileStreamId = "co_z123" as ID<FileStream>;
+// ---cut---
 // Subscribe to a FileStream by ID
-const unsubscribe = FileStream.subscribe(fileStreamId, [], (fileStream) => {
+const unsubscribe = FileStream.subscribe(fileStreamId, (fileStream: FileStream) => {
   // Called whenever the FileStream changes
   console.log('FileStream updated');
   
   // Get current status
   const chunks = fileStream.getChunks({ allowUnfinished: true });
   if (chunks) {
-    const uploadedBytes = chunks.chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+    const uploadedBytes = chunks.chunks.reduce((sum: number, chunk: Uint8Array) => sum + chunk.length, 0);
     const totalBytes = chunks.totalSizeBytes || 1;
     const progress = Math.min(100, Math.round(uploadedBytes * 100 / totalBytes));
     
@@ -320,7 +367,10 @@ const unsubscribe = FileStream.subscribe(fileStreamId, [], (fileStream) => {
 If you need to wait for a `FileStream` to be fully synchronized across devices:
 
 <CodeGroup>
-```ts
+```ts twoslash
+import { FileStream } from "jazz-tools";
+const fileStream = FileStream.create();
+// ---cut---
 // Wait for the FileStream to be fully synced
 await fileStream.waitForSync({
   timeout: 5000  // Optional timeout in ms

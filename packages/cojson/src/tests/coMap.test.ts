@@ -1,12 +1,22 @@
-import { expect, test } from "vitest";
+import { beforeEach, expect, test } from "vitest";
 import { expectMap } from "../coValue.js";
 import { operationToEditEntry } from "../coValues/coMap.js";
 import { WasmCrypto } from "../crypto/WasmCrypto.js";
 import { LocalNode } from "../localNode.js";
 import { accountOrAgentIDfromSessionID } from "../typeUtils/accountOrAgentIDfromSessionID.js";
-import { hotSleep, randomAnonymousAccountAndSessionID } from "./testUtils.js";
+import {
+  hotSleep,
+  loadCoValueOrFail,
+  randomAnonymousAccountAndSessionID,
+  setupTestNode,
+  waitFor,
+} from "./testUtils.js";
 
 const Crypto = await WasmCrypto.create();
+
+beforeEach(async () => {
+  setupTestNode({ isSyncServer: true });
+});
 
 test("Empty CoMap works", () => {
   const node = new LocalNode(...randomAnonymousAccountAndSessionID(), Crypto);
@@ -206,4 +216,46 @@ test("Can set items in bulk with assign", () => {
     key2: "assign2",
     key3: "assign3",
   });
+});
+
+test("totalValidTransactions should return the number of valid transactions processed", async () => {
+  const client = setupTestNode({
+    connected: true,
+  });
+  const otherClient = setupTestNode({});
+
+  const otherClientConnection = otherClient.connectToSyncServer();
+
+  const group = client.node.createGroup();
+  group.addMember("everyone", "reader");
+
+  const map = group.createMap({ fromClient: true });
+
+  const mapOnOtherClient = await loadCoValueOrFail(otherClient.node, map.id);
+
+  otherClientConnection.peerState.gracefulShutdown();
+
+  group.addMember("everyone", "writer");
+
+  await new Promise((resolve) => setTimeout(resolve, 50));
+
+  mapOnOtherClient.set("fromOtherClient", true, "trusting");
+
+  expect(mapOnOtherClient.totalValidTransactions).toEqual(1);
+  expect(mapOnOtherClient.toJSON()).toEqual({
+    fromClient: true,
+  });
+
+  otherClient.connectToSyncServer();
+
+  await waitFor(() => {
+    expect(mapOnOtherClient.core.getCurrentContent().toJSON()).toEqual({
+      fromClient: true,
+      fromOtherClient: true,
+    });
+  });
+
+  expect(
+    mapOnOtherClient.core.getCurrentContent().totalValidTransactions,
+  ).toEqual(2);
 });

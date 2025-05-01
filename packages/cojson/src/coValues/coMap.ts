@@ -60,6 +60,8 @@ export class RawCoMapView<
   /** @category 6. Meta */
   readonly _shape!: Shape;
 
+  totalValidTransactions = 0;
+
   /** @internal */
   constructor(
     core: CoValueCore,
@@ -132,6 +134,8 @@ export class RawCoMapView<
         );
       }
     }
+
+    this.totalValidTransactions += newValidTransactions.length;
 
     for (const entries of changedEntries.values()) {
       entries.sort(this.core.compareTransactions);

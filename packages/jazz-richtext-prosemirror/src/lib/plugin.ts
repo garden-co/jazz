@@ -70,7 +70,7 @@ export function createJazzPlugin(
     state: {
       init(_config, state) {
         if (coRichText) {
-          const pmDoc = htmlToProseMirror(coRichText.toString());
+          const pmDoc = htmlToProseMirror(coRichText.toString(), state.schema);
           state.doc = pmDoc;
         }
         return { coRichText };

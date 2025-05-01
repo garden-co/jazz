@@ -8,7 +8,9 @@
     "dev:worker": "tsx --watch --env-file=.env ./src/worker.ts",
     "build": "vite build && tsc",
     "serve": "vite preview",
-    "generate-env": "tsx generate-env.ts"
+    "generate-env": "tsx generate-env.ts",
+    "format-and-lint": "biome check .",
+    "format-and-lint:fix": "biome check . --write"
   },
   "dependencies": {
     "@radix-ui/react-label": "^2.1.2",

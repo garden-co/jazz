@@ -12,9 +12,9 @@
 
 import { Route as rootRoute } from "./routes/__root";
 import { Route as AuthenticatedImport } from "./routes/_authenticated";
-import { Route as IndexImport } from "./routes/index";
-import { Route as AuthenticatedWaitingRoomWaitingRoomIdImport } from "./routes/_authenticated/waiting-room.$waitingRoomId";
 import { Route as AuthenticatedGameGameIdImport } from "./routes/_authenticated/game.$gameId";
+import { Route as AuthenticatedWaitingRoomWaitingRoomIdImport } from "./routes/_authenticated/waiting-room.$waitingRoomId";
+import { Route as IndexImport } from "./routes/index";
 
 // Create/Update Routes
 

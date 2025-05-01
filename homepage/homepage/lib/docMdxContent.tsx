@@ -1,7 +1,7 @@
 import DocsLayout from "@/components/docs/DocsLayout";
 import { DocNav } from "@/components/docs/DocsNav";
-import { Toc } from "@stefanprobst/rehype-extract-toc";
 import { Prose } from "@garden-co/design-system/src/components/molecules/Prose";
+import { Toc } from "@stefanprobst/rehype-extract-toc";
 
 export async function getMdxSource(framework: string, slugPath?: string) {
   // Try to import the framework-specific file first

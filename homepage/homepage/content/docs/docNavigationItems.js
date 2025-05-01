@@ -53,6 +53,7 @@ export const docNavigationItems = [
         name: "Providers",
         href: "/docs/project-setup/providers",
         done: {
+          react: 100,
           "react-native": 100,
           "react-native-expo": 100,
         },
@@ -166,6 +167,11 @@ export const docNavigationItems = [
       {
         name: "CoFeeds",
         href: "/docs/using-covalues/cofeeds",
+        done: 100,
+      },
+      {
+        name: "CoTexts",
+        href: "/docs/using-covalues/cotexts",
         done: 100,
       },
       {

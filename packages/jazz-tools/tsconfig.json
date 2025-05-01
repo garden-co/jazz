@@ -12,7 +12,8 @@
     "esModuleInterop": true,
     "declaration": true,
     "emitDeclarationOnly": true,
-    "declarationMap": true
+    "declarationMap": true,
+    "rootDir": "./src"
   },
   "include": ["./src/**/*.ts"],
   "exclude": ["./node_modules"]

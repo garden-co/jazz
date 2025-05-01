@@ -1,5 +1,20 @@
 # jazz-richtext-prosemirror
 
+## 0.1.6
+
+### Patch Changes
+
+- 133b8ab: createJazzPlugin support custom ProseMirror schema
+  - jazz-browser@0.13.17
+  - jazz-tools@0.13.17
+
+## 0.1.5
+
+### Patch Changes
+
+- jazz-browser@0.13.16
+- jazz-tools@0.13.16
+
 ## 0.1.4
 
 ### Patch Changes

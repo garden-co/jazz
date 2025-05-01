@@ -906,13 +906,24 @@ export class FileStream extends CoValueBase implements CoValue {
    * Subscribe to a `FileStream`, when you have an ID but don't have a `FileStream` instance yet
    * @category Subscription & Loading
    */
-  static subscribe<C extends FileStream>(
-    this: CoValueClass<C>,
-    id: ID<C>,
-    options: { loadAs?: Account | AnonymousJazzAgent },
-    listener: (value: Resolved<C, true>) => void,
+  static subscribe<F extends FileStream, const R extends RefsToResolve<F>>(
+    this: CoValueClass<F>,
+    id: ID<F>,
+    listener: (value: Resolved<F, R>, unsubscribe: () => void) => void,
+  ): () => void;
+  static subscribe<F extends FileStream, const R extends RefsToResolve<F>>(
+    this: CoValueClass<F>,
+    id: ID<F>,
+    options: SubscribeListenerOptions<F, R>,
+    listener: (value: Resolved<F, R>, unsubscribe: () => void) => void,
+  ): () => void;
+  static subscribe<F extends FileStream, const R extends RefsToResolve<F>>(
+    this: CoValueClass<F>,
+    id: ID<F>,
+    ...args: SubscribeRestArgs<F, R>
   ): () => void {
-    return subscribeToCoValueWithoutMe<C, true>(this, id, options, listener);
+    const { options, listener } = parseSubscribeRestArgs(args);
+    return subscribeToCoValueWithoutMe<F, R>(this, id, options, listener);
   }
 
   /**

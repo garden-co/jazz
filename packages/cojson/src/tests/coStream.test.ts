@@ -1,4 +1,4 @@
-import { describe, expect, test } from "vitest";
+import { beforeEach, describe, expect, test } from "vitest";
 import { expectStream } from "../coValue.js";
 import { MAX_RECOMMENDED_TX_SIZE } from "../coValueCore.js";
 import {
@@ -10,9 +10,18 @@ import {
 import { WasmCrypto } from "../crypto/WasmCrypto.js";
 import { SessionID } from "../ids.js";
 import { LocalNode } from "../localNode.js";
-import { randomAnonymousAccountAndSessionID } from "./testUtils.js";
+import {
+  loadCoValueOrFail,
+  randomAnonymousAccountAndSessionID,
+  setupTestNode,
+  waitFor,
+} from "./testUtils.js";
 
 const Crypto = await WasmCrypto.create();
+
+beforeEach(async () => {
+  setupTestNode({ isSyncServer: true });
+});
 
 test("Empty CoStream works", () => {
   const node = new LocalNode(...randomAnonymousAccountAndSessionID(), Crypto);
@@ -250,6 +259,51 @@ test("When adding large transactions (bigger than MAX_RECOMMENDED_TX_SIZE), we s
   expect(newContent[4]!.new[node.currentSessionID]!.lastSignature).toEqual(
     sessionEntry.lastSignature,
   );
+});
+
+test("totalValidTransactions should return the number of valid transactions processed", async () => {
+  const client = setupTestNode({
+    connected: true,
+  });
+  const otherClient = setupTestNode({});
+
+  const otherClientConnection = otherClient.connectToSyncServer();
+
+  const group = client.node.createGroup();
+  group.addMember("everyone", "reader");
+
+  const stream = group.createStream();
+  stream.push(1, "trusting");
+
+  const streamOnOtherClient = await loadCoValueOrFail(
+    otherClient.node,
+    stream.id,
+  );
+
+  otherClientConnection.peerState.gracefulShutdown();
+
+  group.addMember("everyone", "writer");
+
+  await new Promise((resolve) => setTimeout(resolve, 50));
+
+  streamOnOtherClient.push(2, "trusting");
+
+  expect(streamOnOtherClient.totalValidTransactions).toEqual(1);
+  expect(Object.keys(streamOnOtherClient.toJSON()).length).toEqual(1);
+
+  otherClient.connectToSyncServer();
+
+  await waitFor(() => {
+    expect(
+      Object.keys(
+        streamOnOtherClient.core.getCurrentContent().toJSON() as object,
+      ).length,
+    ).toEqual(2);
+  });
+
+  expect(
+    streamOnOtherClient.core.getCurrentContent().totalValidTransactions,
+  ).toEqual(2);
 });
 
 describe("isBinaryStreamEnded", () => {

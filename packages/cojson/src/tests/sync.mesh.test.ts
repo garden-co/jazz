@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, test, vi } from "vitest";
 import { expectMap } from "../coValue";
 import {
   SyncMessagesLog,
+  blockMessageTypeOnOutgoingPeer,
   loadCoValueOrFail,
   setupTestNode,
   waitFor,
@@ -321,5 +322,71 @@ describe("multiple clients syncing with the a cloud-like server mesh", () => {
         "edge-italy -> client | KNOWN Map sessions: header/1",
       ]
     `);
+  });
+
+  test("load returns the coValue as soon as one of the peers return the content", async () => {
+    const client = setupTestNode();
+    const coreServer = setupTestNode({
+      isSyncServer: true,
+    });
+
+    const { peerOnServer } = client.connectToSyncServer({
+      syncServerName: "core",
+    });
+
+    const storage = setupTestNode();
+
+    const { peer: storagePeer } = client.connectToSyncServer({
+      syncServerName: "storage",
+      syncServer: storage.node,
+    });
+
+    storagePeer.priority = 100;
+
+    const group = coreServer.node.createGroup();
+    const map = group.createMap();
+
+    map.set("hello", "world", "trusting");
+
+    const { peerState } = storage.connectToSyncServer({
+      ourName: "storage-of-client",
+      syncServerName: "core",
+    });
+
+    await loadCoValueOrFail(storage.node, map.id);
+
+    peerState.gracefulShutdown();
+
+    SyncMessagesLog.clear();
+
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    map.set("hello", "updated", "trusting");
+
+    // Block the content message from the core peer to simulate the delay on response
+    blockMessageTypeOnOutgoingPeer(peerOnServer, "content");
+
+    const mapOnClient = await loadCoValueOrFail(client.node, map.id);
+
+    expect(
+      SyncMessagesLog.getMessages({
+        Group: group.core,
+        Map: map.core,
+      }),
+    ).toMatchInlineSnapshot(`
+      [
+        "client -> storage | LOAD Map sessions: empty",
+        "storage -> client | CONTENT Group header: true new: After: 0 New: 3",
+        "client -> storage | KNOWN Group sessions: header/3",
+        "storage -> client | CONTENT Map header: true new: After: 0 New: 1",
+        "client -> core | CONTENT Group header: true new: After: 0 New: 3",
+        "client -> storage | KNOWN Map sessions: header/1",
+        "core -> client | KNOWN Group sessions: header/3",
+        "client -> core | LOAD Map sessions: header/1",
+        "client -> core | CONTENT Map header: true new: After: 0 New: 1",
+      ]
+    `);
+
+    expect(mapOnClient.get("hello")).toEqual("world");
   });
 });

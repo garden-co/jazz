@@ -49,7 +49,10 @@ export function createSyncHandlers(coRichText: CoRichText | undefined) {
   function handleCoRichTextChange(newText: CoRichText) {
     if (!view || !newText) return;
 
-    const pmDoc = htmlToProseMirror(newText.toString());
+    const pmDoc = htmlToProseMirror(
+      newText.toString(),
+      view.state.doc.type.schema,
+    );
     const transform = recreateTransform(view.state.doc, pmDoc);
 
     // Create a new transaction

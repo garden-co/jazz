@@ -2,8 +2,8 @@ import {
   DOMParser as PMDOMParser,
   DOMSerializer as PMDOMSerializer,
   Node as PMNode,
+  Schema as PMSchema,
 } from "prosemirror-model";
-import { schema } from "prosemirror-schema-basic";
 
 /**
  * Converts HTML content to a ProseMirror document.
@@ -20,7 +20,7 @@ import { schema } from "prosemirror-schema-basic";
  * const doc = htmlToProseMirror(html);
  * ```
  */
-export function htmlToProseMirror(content: string) {
+export function htmlToProseMirror(content: string, schema: PMSchema) {
   const doc = new DOMParser().parseFromString(content, "text/html");
   return PMDOMParser.fromSchema(schema).parse(doc);
 }
@@ -42,7 +42,9 @@ export function htmlToProseMirror(content: string) {
 export function proseMirrorToHtml(doc: PMNode) {
   return new XMLSerializer()
     .serializeToString(
-      PMDOMSerializer.fromSchema(schema).serializeFragment(doc.content),
+      PMDOMSerializer.fromSchema(doc.type.schema).serializeFragment(
+        doc.content,
+      ),
     )
     .replace(/\sxmlns="[^"]+"/g, "");
 }

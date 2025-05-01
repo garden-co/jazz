@@ -266,29 +266,40 @@ export class LocalNode {
       });
     }
 
-    const entry = this.coValuesStore.get(id);
+    let retries = 0;
 
-    if (
-      entry.highLevelState === "unknown" ||
-      entry.highLevelState === "unavailable"
-    ) {
-      const peers =
-        this.syncManager.getServerAndStoragePeers(skipLoadingFromPeer);
+    while (true) {
+      const entry = this.coValuesStore.get(id);
 
-      if (peers.length === 0) {
-        return "unavailable";
+      if (
+        entry.highLevelState === "unknown" ||
+        entry.highLevelState === "unavailable"
+      ) {
+        const peers =
+          this.syncManager.getServerAndStoragePeers(skipLoadingFromPeer);
+
+        if (peers.length === 0) {
+          return "unavailable";
+        }
+
+        entry.loadFromPeers(peers).catch((e) => {
+          logger.error("Error loading from peers", {
+            id,
+            err: e,
+          });
+        });
       }
 
-      await entry.loadFromPeers(peers).catch((e) => {
-        logger.error("Error loading from peers", {
-          id,
-          err: e,
-        });
-      });
-    }
+      const result = await entry.getCoValue();
 
-    // TODO: What if the loading fails because in the previous loadCoValueCore call the Peer with the covalue was skipped?
-    return entry.getCoValue();
+      if (result !== "unavailable" || retries >= 1) {
+        return result;
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, 300));
+
+      retries++;
+    }
   }
 
   /**

@@ -1,6 +1,6 @@
 import { JazzNav } from "@/components/nav";
-import { clsx } from "clsx";
 import { NavSection } from "@garden-co/design-system/src/components/organisms/Nav";
+import { clsx } from "clsx";
 
 export function SideNavLayout({
   children,

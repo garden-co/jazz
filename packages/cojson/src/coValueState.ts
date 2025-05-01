@@ -83,14 +83,21 @@ export class CoValueState {
   }
 
   async getCoValue() {
+    if (this.core) {
+      return this.core;
+    }
+
     if (this.highLevelState === "unavailable") {
       return "unavailable";
     }
 
-    return new Promise<CoValueCore>((resolve) => {
+    return new Promise<CoValueCore | "unavailable">((resolve) => {
       const listener = (state: CoValueState) => {
         if (state.core) {
           resolve(state.core);
+          this.removeListener(listener);
+        } else if (state.highLevelState === "unavailable") {
+          resolve("unavailable");
           this.removeListener(listener);
         }
       };
@@ -104,122 +111,87 @@ export class CoValueState {
       return;
     }
 
-    const loadAttempt = async (peersToLoadFrom: PeerState[]) => {
-      const peersToActuallyLoadFrom = [];
-      for (const peer of peersToLoadFrom) {
-        const currentState = this.peers.get(peer.id);
+    const peersToActuallyLoadFrom = [];
+    for (const peer of peers) {
+      const currentState = this.peers.get(peer.id);
 
-        if (currentState?.type === "available") {
-          continue;
-        }
+      if (
+        currentState?.type === "available" ||
+        currentState?.type === "pending"
+      ) {
+        continue;
+      }
 
-        if (currentState?.type === "errored") {
-          continue;
-        }
+      if (currentState?.type === "errored") {
+        continue;
+      }
 
-        if (
-          currentState?.type === "unavailable" ||
-          currentState?.type === "pending"
-        ) {
-          if (peer.shouldRetryUnavailableCoValues()) {
-            this.markPending(peer.id);
-            peersToActuallyLoadFrom.push(peer);
-          }
-
-          continue;
-        }
-
-        if (!currentState || currentState?.type === "unknown") {
+      if (currentState?.type === "unavailable") {
+        if (peer.shouldRetryUnavailableCoValues()) {
           this.markPending(peer.id);
           peersToActuallyLoadFrom.push(peer);
         }
+
+        continue;
       }
 
-      for (const peer of peersToActuallyLoadFrom) {
-        if (peer.closed) {
-          this.markNotFoundInPeer(peer.id);
-          continue;
-        }
-
-        peer.pushOutgoingMessage({
-          action: "load",
-          ...(this.core ? this.core.knownState() : emptyKnownState(this.id)),
-        });
-
-        /**
-         * Use a very long timeout for storage peers, because under pressure
-         * they may take a long time to consume the messages queue
-         *
-         * TODO: Track errors on storage and do not rely on timeout
-         */
-        const timeoutDuration =
-          peer.role === "storage"
-            ? CO_VALUE_LOADING_CONFIG.TIMEOUT * 10
-            : CO_VALUE_LOADING_CONFIG.TIMEOUT;
-
-        const waitingForPeer = new Promise<void>((resolve) => {
-          const markNotFound = () => {
-            if (this.peers.get(peer.id)?.type === "pending") {
-              this.markNotFoundInPeer(peer.id);
-            }
-          };
-
-          const timeout = setTimeout(markNotFound, timeoutDuration);
-          const removeCloseListener = peer.addCloseListener(markNotFound);
-
-          const listener = (state: CoValueState) => {
-            const peerState = state.peers.get(peer.id);
-            if (
-              state.isAvailable() || // might have become available from another peer e.g. through handleNewContent
-              peerState?.type === "available" ||
-              peerState?.type === "errored" ||
-              peerState?.type === "unavailable"
-            ) {
-              state.removeListener(listener);
-              removeCloseListener();
-              clearTimeout(timeout);
-              resolve();
-            }
-          };
-
-          this.addListener(listener);
-        });
-
-        await waitingForPeer;
+      if (!currentState || currentState?.type === "unknown") {
+        this.markPending(peer.id);
+        peersToActuallyLoadFrom.push(peer);
       }
-    };
-
-    await loadAttempt(peers);
-
-    if (this.isAvailable()) {
-      return;
     }
 
-    // Retry loading from peers that have the retry flag enabled
-    const peersWithRetry = peers.filter((p) =>
-      p.shouldRetryUnavailableCoValues(),
-    );
+    for (const peer of peersToActuallyLoadFrom) {
+      if (peer.closed) {
+        this.markNotFoundInPeer(peer.id);
+        continue;
+      }
 
-    if (peersWithRetry.length > 0) {
-      const waitingForCoValue = new Promise<void>((resolve) => {
+      peer.pushOutgoingMessage({
+        action: "load",
+        ...(this.core ? this.core.knownState() : emptyKnownState(this.id)),
+      });
+
+      /**
+       * Use a very long timeout for storage peers, because under pressure
+       * they may take a long time to consume the messages queue
+       *
+       * TODO: Track errors on storage and do not rely on timeout
+       */
+      const timeoutDuration =
+        peer.role === "storage"
+          ? CO_VALUE_LOADING_CONFIG.TIMEOUT * 10
+          : CO_VALUE_LOADING_CONFIG.TIMEOUT;
+
+      const waitingForPeer = new Promise<void>((resolve) => {
+        const markNotFound = () => {
+          if (this.peers.get(peer.id)?.type === "pending") {
+            this.markNotFoundInPeer(peer.id);
+          }
+        };
+
+        const timeout = setTimeout(markNotFound, timeoutDuration);
+        const removeCloseListener = peer.addCloseListener(markNotFound);
+
         const listener = (state: CoValueState) => {
-          if (state.isAvailable()) {
+          const peerState = state.peers.get(peer.id);
+          if (
+            state.isAvailable() || // might have become available from another peer e.g. through handleNewContent
+            peerState?.type === "available" ||
+            peerState?.type === "errored" ||
+            peerState?.type === "unavailable"
+          ) {
+            state.removeListener(listener);
+            removeCloseListener();
+            clearTimeout(timeout);
             resolve();
-            this.removeListener(listener);
           }
         };
 
         this.addListener(listener);
       });
 
-      // We want to exit early if the coValue becomes available in between the retries
-      await Promise.race([
-        waitingForCoValue,
-        runWithRetry(
-          () => loadAttempt(peersWithRetry),
-          CO_VALUE_LOADING_CONFIG.MAX_RETRIES,
-        ),
-      ]);
+      await waitingForPeer;
     }
   }
 
@@ -270,31 +242,4 @@ export class CoValueState {
     this.updateCounter(previousState);
     this.notifyListeners();
   }
-}
-
-async function runWithRetry<T>(fn: () => Promise<T>, maxRetries: number) {
-  let retries = 1;
-
-  while (retries < maxRetries) {
-    /**
-     * With maxRetries of 5 we should wait:
-     * 300ms
-     * 900ms
-     * 2700ms
-     * 8100ms
-     */
-    await sleep(3 ** retries * 100);
-
-    const result = await fn();
-
-    if (result === true) {
-      return;
-    }
-
-    retries++;
-  }
-}
-
-function sleep(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }

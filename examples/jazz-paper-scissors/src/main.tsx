@@ -3,6 +3,7 @@ import { StrictMode } from "react";
 import ReactDOM from "react-dom/client";
 
 import "./index.css";
+import { apiKey } from "@/apiKey.ts";
 import { JazzProvider } from "jazz-react";
 import { App } from "./app";
 
@@ -13,7 +14,7 @@ if (rootElement && !rootElement.innerHTML) {
     <StrictMode>
       <JazzProvider
         sync={{
-          peer: "wss://cloud.jazz.tools/?key=jazz-paper-scissors@garden.co",
+          peer: `wss://cloud.jazz.tools/?key=${apiKey}`,
         }}
       >
         <JazzInspector />

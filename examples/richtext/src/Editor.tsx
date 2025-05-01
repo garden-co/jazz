@@ -1,7 +1,9 @@
 import { useAccount } from "jazz-react";
 import { createJazzPlugin } from "jazz-richtext-prosemirror";
 import { exampleSetup } from "prosemirror-example-setup";
-import { schema } from "prosemirror-schema-basic";
+import { Schema } from "prosemirror-model";
+import { schema as basicSchema } from "prosemirror-schema-basic";
+import { addListNodes } from "prosemirror-schema-list";
 import { EditorState } from "prosemirror-state";
 import { EditorView } from "prosemirror-view";
 import { useEffect, useRef } from "react";
@@ -13,6 +15,11 @@ export function Editor() {
 
   useEffect(() => {
     if (!me || !editorRef.current || !me.profile.bio) return;
+
+    const schema = new Schema({
+      nodes: addListNodes(basicSchema.spec.nodes, "paragraph block*", "block"),
+      marks: basicSchema.spec.marks,
+    });
 
     const setupPlugins = exampleSetup({ schema });
     const jazzPlugin = createJazzPlugin(me.profile.bio);

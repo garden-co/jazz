@@ -2,6 +2,8 @@
 
 A demonstration of collaborative rich text editing with Jazz, React, and ProseMirror.
 
+Live version: [https://richtext-demo.jazz.tools](https://richtext-demo.jazz.tools)
+
 ## Overview
 
 This example shows how to implement collaborative rich text editing using:
@@ -16,23 +18,52 @@ The example features:
 - Side-by-side plaintext and rich text editors
 - Real-time collaboration across devices
 - Persistent document storage
+## Getting started
 
-## Running locally
+You can either
+1. Clone the jazz repository, and run the app within the monorepo.
+2. Or create a new Jazz project using this example as a template.
 
-Install dependencies:
 
+### Using the example as a template
+
+Create a new Jazz project, and use this example as a template.
 ```bash
-npm i
-# or
-yarn
+npx create-jazz-app@latest richtext-app --example richtext
 ```
 
-Then, run the development server:
+Go to the new project directory.
+```bash
+cd richtext-app
+```
 
+Run the dev server.
 ```bash
 npm run dev
-# or
-yarn dev
+```
+
+### Using the monorepo
+
+This requires `pnpm` to be installed, see [https://pnpm.io/installation](https://pnpm.io/installation).
+
+Clone the jazz repository.
+```bash
+git clone https://github.com/garden-co/jazz.git
+```
+
+Install and build dependencies.
+```bash
+pnpm i && npx turbo build
+```
+
+Go to the example directory.
+```bash
+cd jazz/examples/richtext/
+```
+
+Start the dev server.
+```bash
+pnpm dev
 ```
 
 Open [http://localhost:5173](http://localhost:5173) with your browser to see the result.

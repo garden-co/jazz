@@ -134,9 +134,20 @@ export async function onAnonymousAccountDiscarded(
 
 To see how this works, try uploading a song in the [music player demo](https://music-demo.jazz.tools/) and then log in with an existing account.
 
+## Provider Configuration for Authentication
+
+You can configure how authentication states work in your app with the [JazzProvider](/docs/project-setup/providers/). The provider offers several options that impact authentication behavior:
+
+- `guestMode`: Enable/disable Guest Mode
+- `onAnonymousAccountDiscarded`: Handle data migration when switching accounts
+- `sync.when`: Control when data synchronization happens
+- `defaultProfileName`: Set default name for new user profiles
+
+For detailed information on all provider options, see [Provider Configuration options](/docs/project-setup/providers/#additional-options).
+
 ## Controlling sync for different authentication states
 
-You can control network sync with [Providers](/docs/project-setup/providers) based on authentication state:
+You can control network sync with [Providers](/docs/project-setup/providers/) based on authentication state:
 
 - `when: "always"`: Sync is enabled for both Anonymous Authentication and Authenticated Account
 - `when: "signedUp"`: Sync is enabled when the user is authenticated
@@ -197,7 +208,7 @@ function App() {
 
 ### Configuring Guest Mode Access
 
-You can configure Guest Mode access with the `guestMode` prop for [Providers](/docs/project-setup/providers).
+You can configure Guest Mode access with the `guestMode` prop for [Providers](/docs/project-setup/providers/).
 
 <ContentByFramework framework="react">
 <CodeGroup>

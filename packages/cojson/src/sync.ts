@@ -163,13 +163,13 @@ export class SyncManager {
         `Skipping message ${msg.action} on errored coValue ${msg.id} from peer ${peer.id}`,
       );
       return;
-    } else if (msg.id === undefined) {
-      logger.info("Received sync message with undefined id", {
+    } else if (msg.id === undefined || msg.id === null) {
+      logger.warn("Received sync message with undefined id", {
         msg,
       });
       return;
     } else if (!msg.id.startsWith("co_z")) {
-      logger.info("Received sync message with invalid id", {
+      logger.warn("Received sync message with invalid id", {
         msg,
       });
       return;

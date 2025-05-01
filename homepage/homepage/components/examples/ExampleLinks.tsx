@@ -2,7 +2,6 @@
 
 import { Example } from "@/content/example";
 import { InterpolateInCode } from "@/mdx-components";
-import { DialogDescription } from "@headlessui/react";
 import { Button } from "@garden-co/design-system/src/components/atoms/Button";
 import { CodeGroup } from "@garden-co/design-system/src/components/molecules/CodeGroup";
 import {
@@ -11,6 +10,7 @@ import {
   DialogBody,
   DialogTitle,
 } from "@garden-co/design-system/src/components/organisms/Dialog";
+import { DialogDescription } from "@headlessui/react";
 import { useState } from "react";
 import CreateJazzApp from "./CreateJazzApp.mdx";
 

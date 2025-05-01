@@ -1,0 +1,437 @@
+import { CodeGroup, ContentByFramework } from "@/components/forMdx";
+
+export const metadata = { title: "CoTexts" };
+
+# CoTexts
+
+Jazz provides two CoValue types for collaborative text editing, collectively referred to as "CoText" values:
+
+- **CoPlainText** for simple text editing without formatting
+- **CoRichText** for rich text with HTML-based formatting (extends CoPlainText)
+
+Both types enable real-time collaborative editing of text content while maintaining consistency across multiple users.
+
+**Note:** If you're looking for a quick way to add rich text editing to your app, check out [jazz-richtext-prosemirror](#using-rich-text-with-prosemirror).
+
+<CodeGroup>
+```ts twoslash
+import { CoPlainText } from "jazz-tools";
+import { createJazzTestAccount } from 'jazz-tools/testing';
+const me = await createJazzTestAccount();
+
+// ---cut---
+const note = CoPlainText.create("Meeting notes", { owner: me });
+
+// Update the text
+note.applyDiff("Meeting notes for Tuesday");
+
+console.log(note.toString());  // "Meeting notes for Tuesday"
+```
+</CodeGroup>
+
+For a full example of CoTexts in action, see [our Richtext example app](https://github.com/garden-co/jazz/tree/main/examples/richtext), which shows plain text and rich text editing.
+
+## CoPlainText vs co.string
+
+While `co.string` is perfect for simple text fields, `CoPlainText` is the right choice when you need:
+
+- Multiple users editing the same text simultaneously
+- Fine-grained control over text edits (inserting, deleting at specific positions)
+- Character-by-character collaboration
+- Efficient merging of concurrent changes
+
+Both support real-time updates, but `CoPlainText` provides specialized tools for collaborative editing scenarios.
+
+## Creating CoText Values
+
+CoText values are typically used as fields in your schemas:
+
+<CodeGroup>
+```ts twoslash
+import { CoMap, CoPlainText, CoRichText, co } from "jazz-tools";
+
+// ---cut---
+class Profile extends CoMap {
+  name = co.string;
+  bio = co.ref(CoPlainText);         // Plain text field
+  description = co.ref(CoRichText);  // Rich text with formatting
+}
+```
+</CodeGroup>
+
+Create a CoText value with a simple string:
+
+<CodeGroup>
+```ts twoslash
+import { CoPlainText, CoRichText, Account } from "jazz-tools";
+import { createJazzTestAccount } from 'jazz-tools/testing';
+const me = await createJazzTestAccount();
+
+// ---cut---
+// Create plaintext with default ownership (current user)
+const note = CoPlainText.create("Meeting notes", { owner: me });
+
+// Create rich text with HTML content
+const document = CoRichText.create("<p>Project <strong>overview</strong></p>",
+  { owner: me }
+);
+```
+</CodeGroup>
+
+### Ownership
+
+Like other CoValues, you can specify ownership when creating CoTexts.
+
+<CodeGroup>
+```ts twoslash
+import { CoPlainText, Group, Account } from "jazz-tools";
+import { createJazzTestAccount } from 'jazz-tools/testing';
+const me = await createJazzTestAccount();
+const colleagueAccount = await createJazzTestAccount();
+
+// ---cut---
+// Create with shared ownership
+const teamGroup = Group.create();
+teamGroup.addMember(colleagueAccount, "writer");
+
+const teamNote = CoPlainText.create("Team updates", { owner: teamGroup });
+```
+</CodeGroup>
+
+See [Groups as permission scopes](/docs/groups/intro) for more information on how to use groups to control access to CoText values.
+
+## Reading Text
+
+CoText values work like JavaScript strings:
+
+<CodeGroup>
+```ts twoslash
+import { CoPlainText, Account } from "jazz-tools";
+import { createJazzTestAccount } from 'jazz-tools/testing';
+const me = await createJazzTestAccount();
+const note = CoPlainText.create("Meeting notes", { owner: me });
+
+// ---cut---
+// Get the text content
+console.log(note.toString());  // "Meeting notes"
+
+// Check the text length
+console.log(note.length);      // 14
+```
+</CodeGroup>
+
+## Making Edits
+
+Insert and delete text with intuitive methods:
+
+<CodeGroup>
+```ts twoslash
+import { CoPlainText, Account } from "jazz-tools";
+import { createJazzTestAccount } from 'jazz-tools/testing';
+const me = await createJazzTestAccount();
+const note = CoPlainText.create("Meeting notes", { owner: me });
+
+// ---cut---
+// Insert text at a specific position
+note.insertBefore(8, "weekly ");  // "Meeting weekly notes"
+
+// Insert after a position
+note.insertAfter(21, " for Monday");  // "Meeting weekly notes for Monday"
+
+// Delete a range of text
+note.deleteRange({ from: 8, to: 15 });  // "Meeting notes for Monday"
+
+// Apply a diff to update the entire text
+note.applyDiff("Team meeting notes for Tuesday");
+```
+</CodeGroup>
+
+### Applying Diffs
+
+Use `applyDiff` to efficiently update text with minimal changes:
+
+<CodeGroup>
+```ts twoslash
+import { CoPlainText, Account } from "jazz-tools";
+import { createJazzTestAccount } from 'jazz-tools/testing';
+const me = await createJazzTestAccount();
+
+// ---cut---
+// Original text: "Team status update"
+const minutes = CoPlainText.create("Team status update", { owner: me });
+
+// Replace the entire text with a new version
+minutes.applyDiff("Weekly team status update for Project X");
+
+// Make partial changes
+let text = minutes.toString();
+text = text.replace("Weekly", "Monday");
+minutes.applyDiff(text);  // Efficiently updates only what changed
+```
+</CodeGroup>
+
+Perfect for handling user input in form controls:
+
+<ContentByFramework framework="react">
+<CodeGroup>
+```tsx twoslash
+import { CoPlainText, Account } from "jazz-tools";
+import { createJazzTestAccount } from 'jazz-tools/testing';
+import React, { useState } from "react";
+const me = await createJazzTestAccount();
+
+// ---cut---
+function TextEditor() {
+  const [note, setNote] = useState(CoPlainText.create("", { owner: me }));
+  
+  return (
+    <textarea
+      value={note.toString()}
+      onChange={(e) => {
+        // Efficiently update only what the user changed
+        note.applyDiff(e.target.value);
+      }}
+    />
+  );
+}
+```
+</CodeGroup>
+</ContentByFramework>
+
+<ContentByFramework framework="vanilla">
+<CodeGroup>
+```ts twoslash
+import { CoPlainText, Account } from "jazz-tools";
+import { createJazzTestAccount } from 'jazz-tools/testing';
+const me = await createJazzTestAccount();
+
+// ---cut---
+const note = CoPlainText.create("", { owner: me });
+
+// Create and set up the textarea
+const textarea = document.createElement('textarea');
+textarea.value = note.toString();
+
+// Add event listener for changes
+textarea.addEventListener('input', (e: Event) => {
+  const target = e.target as HTMLTextAreaElement;
+  // Efficiently update only what the user changed
+  note.applyDiff(target.value);
+});
+
+// Add the textarea to the document
+document.body.appendChild(textarea);
+```
+</CodeGroup>
+</ContentByFramework>
+
+<ContentByFramework framework="vue">
+<CodeGroup>
+```vue twoslash
+<script setup lang="ts">
+import { ref, onMounted } from 'vue';
+import { CoPlainText } from "jazz-tools";
+import { createJazzTestAccount } from 'jazz-tools/testing';
+
+const note = ref(null);
+const textContent = ref("");
+
+onMounted(async () => {
+  const me = await createJazzTestAccount();
+  note.value = CoPlainText.create("", { owner: me });
+  textContent.value = note.value.toString();
+});
+
+function updateText(e) {
+  if (note.value) {
+    note.value.applyDiff(e.target.value);
+    textContent.value = note.value.toString();
+  }
+}
+</script>
+
+<template>
+  <textarea 
+    :value="textContent"
+    @input="updateText"
+  />
+</template>
+```
+</CodeGroup>
+</ContentByFramework>
+
+<ContentByFramework framework="svelte">
+<CodeGroup>
+```svelte twoslash
+<script lang="ts">
+import { CoPlainText, Account } from "jazz-tools";
+import { createJazzTestAccount } from 'jazz-tools/testing';
+const me = await createJazzTestAccount();
+
+const note = CoPlainText.create("", { owner: me });
+</script>
+
+<textarea
+  value={note.toString()}
+  oninput={e => note.applyDiff(e.target.value)}
+/>
+```
+</CodeGroup>
+</ContentByFramework>
+
+## Using Rich Text with ProseMirror
+
+Jazz provides a dedicated plugin for integrating CoRichText with the popular ProseMirror editor. This plugin, [`jazz-richtext-prosemirror`](https://www.npmjs.com/package/jazz-richtext-prosemirror), enables bidirectional synchronization between your CoRichText instances and ProseMirror editors.
+
+### ProseMirror Plugin Features
+
+- **Bidirectional Sync**: Changes in the editor automatically update the CoRichText and vice versa
+- **Real-time Collaboration**: Multiple users can edit the same document simultaneously
+- **HTML Conversion**: Automatically converts between HTML (used by CoRichText) and ProseMirror's document model
+
+### Installation
+
+<CodeGroup>
+```bash
+pnpm add jazz-richtext-prosemirror \
+  prosemirror-view \
+  prosemirror-state \
+  prosemirror-schema-basic
+```
+</CodeGroup>
+
+### Integration
+
+<ContentByFramework framework="react-native">
+We don't currently have a React Native-specific example, but you need help you can [request one](https://github.com/garden-co/jazz/issues/new), or ask on [Discord](https://discord.gg/utDMjHYg42).
+</ContentByFramework>
+
+<ContentByFramework framework="react-native-expo">
+We don't currently have a React Native Expo-specific example, but you need help please [request one](https://github.com/garden-co/jazz/issues/new), or ask on [Discord](https://discord.gg/utDMjHYg42).
+</ContentByFramework>
+
+<ContentByFramework framework={["react", "react-native", "react-native-expo"]}>
+For use with React:
+<CodeGroup>
+```tsx twoslash
+class JazzProfile extends Profile {
+  bio = co.ref(CoRichText);
+}
+
+class JazzAccount extends Account {
+  profile = co.ref(JazzProfile);
+}
+
+declare module "jazz-react" {
+  interface Register {
+    Account: JazzAccount;
+  }
+}
+
+import { useAccount, useCoState } from "jazz-react";
+import { CoRichText, Account, Profile, co } from "jazz-tools";
+import React, { useEffect, useRef } from "react";
+// ---cut---
+// RichTextEditor.tsx
+import { createJazzPlugin } from "jazz-richtext-prosemirror";
+import { exampleSetup } from "prosemirror-example-setup";
+import { schema } from "prosemirror-schema-basic";
+import { EditorState } from "prosemirror-state";
+import { EditorView } from "prosemirror-view";
+
+function RichTextEditor() {
+  const { me } = useAccount({ resolve: { profile: true } });
+  const editorRef = useRef<HTMLDivElement>(null);
+  const viewRef = useRef<EditorView | null>(null);
+
+  useEffect(() => {
+    if (!me?.profile.bio || !editorRef.current) return;
+
+    // Create the Jazz plugin for ProseMirror
+    // Providing a CoRichText instance to the plugin to automatically sync changes
+    const jazzPlugin = createJazzPlugin(me.profile.bio); // [!code ++]
+
+    // Set up ProseMirror with the Jazz plugin
+    if (!viewRef.current) {
+      viewRef.current = new EditorView(editorRef.current, {
+        state: EditorState.create({
+          schema,
+          plugins: [
+            ...exampleSetup({ schema }),
+            jazzPlugin, // [!code ++]
+          ],
+        }),
+      });
+    }
+
+    return () => {
+      if (viewRef.current) {
+        viewRef.current.destroy();
+        viewRef.current = null;
+      }
+    };
+  }, [me?.profile.bio?.id]);
+
+  if (!me) return null;
+
+  return (
+    <div className="border rounded">
+      <div ref={editorRef} className="p-2" />
+    </div>
+  );
+}
+```
+</CodeGroup>
+</ContentByFramework>
+
+<ContentByFramework framework="svelte">
+We don't currently have a Svelte-specific example, but you need help you can [request one](https://github.com/garden-co/jazz/issues/new), or ask on [Discord](https://discord.gg/utDMjHYg42).
+</ContentByFramework>
+
+<ContentByFramework framework="vue">
+We don't currently have a Vue-specific example, but you need help you can [request one](https://github.com/garden-co/jazz/issues/new), or ask on [Discord](https://discord.gg/utDMjHYg42).
+</ContentByFramework>
+
+<ContentByFramework framework={["vanilla", "svelte", "vue", "react-native", "react-native-expo"]}>
+For use without a framework:
+<CodeGroup>
+```js twoslash
+import { CoRichText } from "jazz-tools";
+import { createJazzPlugin } from "jazz-richtext-prosemirror";
+import { exampleSetup } from "prosemirror-example-setup";
+import { schema } from "prosemirror-schema-basic";
+import { EditorState } from "prosemirror-state";
+import { EditorView } from "prosemirror-view";
+
+function setupRichTextEditor(coRichText, container) {
+  // Create the Jazz plugin for ProseMirror
+  // Providing a CoRichText instance to the plugin to automatically sync changes
+  const jazzPlugin = createJazzPlugin(coRichText); // [!code ++]
+  
+  // Set up ProseMirror with Jazz plugin
+  const view = new EditorView(container, {
+    state: EditorState.create({
+      schema,
+      plugins: [
+        ...exampleSetup({ schema }),
+        jazzPlugin, // [!code ++]
+      ],
+    }),
+  });
+  
+  // Return cleanup function
+  return () => {
+    view.destroy();
+  };
+}
+
+// Usage
+const document = CoRichText.create("<p>Initial content</p>", { owner: me });
+const editorContainer = document.getElementById("editor");
+const cleanup = setupRichTextEditor(document, editorContainer);
+
+// Later when done with the editor
+cleanup();
+```
+</CodeGroup>
+</ContentByFramework>

@@ -257,6 +257,50 @@ describe("CoFeed resolution", async () => {
     const update6 = (await queue.next()).value;
     expect(update6[me.id]?.value?.[me.id]?.value?.[me.id]?.value).toBe("jam");
   });
+
+  test("Subscription without options", async () => {
+    const { me, stream } = await initNodeAndStream();
+
+    const [initialAsPeer, secondAsPeer] = connectedPeers("initial", "second", {
+      peer1role: "server",
+      peer2role: "client",
+    });
+    if (!isControlledAccount(me)) {
+      throw "me is not a controlled account";
+    }
+    me._raw.core.node.syncManager.addPeer(secondAsPeer);
+
+    await createJazzContextFromExistingCredentials({
+      credentials: {
+        accountID: me.id,
+        secret: me._raw.agentSecret,
+      },
+      sessionProvider: randomSessionProvider,
+      peersToLoadFrom: [initialAsPeer],
+      crypto: Crypto,
+    });
+
+    const queue = new cojsonInternals.Channel();
+
+    TestStream.subscribe(stream.id, (subscribedStream) => {
+      void queue.push(subscribedStream);
+    });
+
+    const update1 = (await queue.next()).value;
+    expect(update1[me.id]?.value).toEqual(null);
+
+    const update2 = (await queue.next()).value;
+    expect(update2[me.id]?.value?.[me.id]?.value).toEqual(null);
+
+    const update3 = (await queue.next()).value;
+    expect(update3[me.id]?.value?.[me.id]?.value).toBeDefined();
+    expect(update3[me.id]?.value?.[me.id]?.value?.[me.id]?.value).toBe("milk");
+
+    update3[me.id]!.value![me.id]!.value!.push("bread");
+
+    const update4 = (await queue.next()).value;
+    expect(update4[me.id]?.value?.[me.id]?.value?.[me.id]?.value).toBe("bread");
+  });
 });
 
 describe("Simple FileStream operations", async () => {
@@ -424,6 +468,62 @@ describe("FileStream loading & Subscription", async () => {
       totalSizeBytes: undefined,
       finished: true,
     });
+  });
+
+  test("Subscription without options", async () => {
+    const { me } = await initNodeAndStream();
+    const stream = FileStream.create({ owner: me });
+
+    const [initialAsPeer, secondAsPeer] = connectedPeers("initial", "second", {
+      peer1role: "server",
+      peer2role: "client",
+    });
+    me._raw.core.node.syncManager.addPeer(secondAsPeer);
+    if (!isControlledAccount(me)) {
+      throw "me is not a controlled account";
+    }
+    await createJazzContextFromExistingCredentials({
+      credentials: {
+        accountID: me.id,
+        secret: me._raw.agentSecret,
+      },
+      sessionProvider: randomSessionProvider,
+      peersToLoadFrom: [initialAsPeer],
+      crypto: Crypto,
+    });
+
+    const queue = new cojsonInternals.Channel();
+
+    FileStream.subscribe(stream.id, (subscribedStream) => {
+      void queue.push(subscribedStream);
+    });
+
+    // Initial state
+    const update1 = (await queue.next()).value;
+    expect(update1.getChunks()).toBe(undefined);
+
+    // Start the stream
+    stream.start({ mimeType: "text/plain" });
+    const update2 = (await queue.next()).value;
+    expect(update2.getChunks({ allowUnfinished: true })).toMatchObject({
+      mimeType: "text/plain",
+      finished: false,
+    });
+
+    // Push a chunk
+    stream.push(new Uint8Array([1, 2, 3]));
+    const update3 = (await queue.next()).value;
+    expect(update3.getChunks({ allowUnfinished: true })?.chunks).toHaveLength(
+      1,
+    );
+    expect(update3.getChunks({ allowUnfinished: true })?.chunks?.[0]).toEqual(
+      new Uint8Array([1, 2, 3]),
+    );
+
+    // End the stream
+    stream.end();
+    const update4 = (await queue.next()).value;
+    expect(update4.getChunks()?.finished).toBe(true);
   });
 });
 

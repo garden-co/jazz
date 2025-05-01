@@ -1,7 +1,7 @@
 "use client";
 
-import { clsx } from "clsx";
 import { Icon } from "@garden-co/design-system/src/components/atoms/Icon";
+import { clsx } from "clsx";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { ReactNode } from "react";

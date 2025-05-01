@@ -33,11 +33,14 @@ export interface RawCoValue {
    *
    * Used internally by `useTelepathicData()` for reactive updates on changes to a `CoValue`. */
   subscribe(listener: (coValue: this) => void): () => void;
+
+  totalValidTransactions: number;
 }
 
 export class RawUnknownCoValue implements RawCoValue {
   id: CoID<this>;
   core: CoValueCore;
+  totalValidTransactions = 0;
 
   constructor(core: CoValueCore) {
     this.id = core.id as CoID<this>;

@@ -2,6 +2,7 @@ import {
   AlertTriangleIcon,
   ArrowDownIcon,
   ArrowRightIcon,
+  BoldIcon,
   BookTextIcon,
   BoxIcon,
   BracesIcon,
@@ -20,6 +21,7 @@ import {
   HashIcon,
   ImageIcon,
   InfoIcon,
+  ItalicIcon,
   LinkIcon,
   LockKeyholeIcon,
   type LucideIcon,
@@ -87,6 +89,10 @@ const icons = {
   colist: Brackets,
   user: UserIcon,
   group: UsersIcon,
+
+  // text editor icons
+  bold: BoldIcon,
+  italic: ItalicIcon,
 };
 
 // copied from tailwind line height https://tailwindcss.com/docs/font-size

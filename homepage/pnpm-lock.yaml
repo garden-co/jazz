@@ -265,6 +265,9 @@ importers:
       jazz-react-native:
         specifier: link:../../packages/jazz-react-native
         version: link:../../packages/jazz-react-native
+      jazz-richtext-prosemirror:
+        specifier: link:../../packages/jazz-richtext-prosemirror
+        version: link:../../packages/jazz-richtext-prosemirror
       jazz-tools:
         specifier: link:../../packages/jazz-tools
         version: link:../../packages/jazz-tools

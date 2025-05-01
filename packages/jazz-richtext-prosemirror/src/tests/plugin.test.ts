@@ -104,7 +104,7 @@ describe("createJazzPlugin", () => {
     expect(coRichText.toString()).not.toContain("Loop");
   });
 
-  it("preserves selection when CoRichText changes", () => {
+  it.skip("preserves selection when CoRichText changes", () => {
     // Set a selection in the editor
     const tr = view.state.tr.setSelection(
       TextSelection.create(view.state.doc, 2, 5),

@@ -26,6 +26,7 @@ type ScaffoldOptions = {
   projectName: string;
   packageManager: PackageManager;
   apiKey?: string;
+  git?: boolean;
 };
 
 type PromptOptions = {
@@ -35,6 +36,7 @@ type PromptOptions = {
   projectName?: string;
   packageManager?: PackageManager;
   apiKey?: string;
+  git?: boolean;
 };
 
 async function getLatestPackageVersions(
@@ -109,6 +111,7 @@ async function scaffoldProject({
   projectName,
   packageManager,
   apiKey,
+  git,
 }: ScaffoldOptions): Promise<void> {
   const starterConfig = frameworkToAuthExamples[
     template as FrameworkAuthPair
@@ -264,7 +267,7 @@ const { withNativeWind } = require("nativewind/metro");
 
 const config = getDefaultConfig(__dirname);
 
-module.exports = withNativeWind(config, { input: "./src/global.css" });
+module.exports = withNativeWind(config, { input: "./global.css" });
 `;
       fs.writeFileSync(metroConfigPath, metroConfig);
 
@@ -329,17 +332,23 @@ module.exports = withNativeWind(config, { input: "./src/global.css" });
     } else {
       gitSpinner.stop();
 
-      // Ask for confirmation
-      const { confirmGitInit } = await inquirer.prompt([
-        {
-          type: "confirm",
-          name: "confirmGitInit",
-          message: chalk.cyan("Initialize git repository?"),
-          default: true,
-        },
-      ]);
+      // Use git option if provided, otherwise prompt
+      let initGit = git;
 
-      if (confirmGitInit) {
+      if (initGit === undefined) {
+        // Ask for confirmation
+        const { confirmGitInit } = await inquirer.prompt([
+          {
+            type: "confirm",
+            name: "confirmGitInit",
+            message: chalk.cyan("Initialize git repository?"),
+            default: true,
+          },
+        ]);
+        initGit = confirmGitInit;
+      }
+
+      if (initGit) {
         const initSpinner = ora({
           text: chalk.blue("Initializing git repository..."),
           spinner: "dots",
@@ -513,6 +522,10 @@ program
     chalk.cyan("Package manager to use (npm, yarn, pnpm, bun, deno)"),
   )
   .option("-k, --api-key <key>", chalk.cyan("Jazz Cloud API key"))
+  .option(
+    "-g, --git <boolean>",
+    chalk.cyan("Initialize git repository (true/false)"),
+  )
   .argument(
     "[directory]",
     "Directory to create the project in (defaults to project name)",
@@ -550,6 +563,15 @@ program
           options.packageManager as ScaffoldOptions["packageManager"];
       if (options.framework) partialOptions.framework = options.framework;
       if (options.apiKey) partialOptions.apiKey = options.apiKey;
+
+      // Parse git option
+      if (options.git !== undefined) {
+        if (options.git === "true" || options.git === true) {
+          partialOptions.git = true;
+        } else if (options.git === "false" || options.git === false) {
+          partialOptions.git = false;
+        }
+      }
 
       // Get missing options through prompts
       const scaffoldOptions = await promptUser(partialOptions);
@@ -601,6 +623,9 @@ program.on("--help", () => {
   );
   console.log(chalk.blue("Create in current directory:"));
   console.log(chalk.white("npx create-jazz-app@latest .\n"));
+
+  console.log(chalk.blue("Disable git initialization:"));
+  console.log(chalk.white("npx create-jazz-app@latest my-app --git false\n"));
 });
 
 program.parse(process.argv);
