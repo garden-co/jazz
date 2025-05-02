@@ -3,7 +3,7 @@ import {
   OpenGraphImage,
   imageSize,
   imageContentType,
-} from "@garden-co/design-system/src/components/organisms/OpenGraphImage";
+} from "../components/OpenGraphImage";
 
 export const title = marketingCopy.headline;
 export const size = imageSize;

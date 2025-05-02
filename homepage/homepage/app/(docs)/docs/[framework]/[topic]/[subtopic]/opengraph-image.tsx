@@ -1,4 +1,4 @@
-import { OpenGraphImage, imageSize, imageContentType } from '@garden-co/design-system/src/components/organisms/OpenGraphImage';
+import { OpenGraphImage, imageSize, imageContentType } from '../../../../../../components/OpenGraphImage';
 import { getMdxWithToc } from '@/lib/docMdxContent';
 export const title = "Quickstart";
 export const size = imageSize;
