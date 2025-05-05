@@ -42,7 +42,7 @@ export async function getDocMetadata(framework: string, slug?: string[]) {
 
 function DocProse({ children }: { children: React.ReactNode }) {
   return (
-    <Prose className="overflow-x-hidden lg:overflow-x-visible lg:flex-1 pb-8 pt-[calc(61px+2rem)] md:pt-8 md:max-w-3xl mx-auto">
+    <Prose className="overflow-hidden pb-8 pt-[calc(61px+2rem)] md:pt-8 md:max-w-3xl mx-auto">
       {children}
     </Prose>
   );
@@ -55,23 +55,8 @@ export async function DocPage({
   framework: string;
   slug?: string[];
 }) {
-  const slugPath = slug?.join("/");
-
   try {
-    const mdxSource = await getMdxSource(framework, slugPath);
-
-    const {
-      default: Content,
-      tableOfContents = [],
-      headingsFrameworkVisibility = {},
-    } = mdxSource;
-
-    // Remove items that should not be shown for the current framework
-    const tocItems = (tableOfContents as Toc).filter(({ id }) =>
-      id && id in headingsFrameworkVisibility
-        ? headingsFrameworkVisibility[id]?.includes(framework)
-        : true,
-    );
+    const { Content, tocItems } = await getMdxWithToc(framework, slug);
 
     return (
       <DocsLayout nav={<DocNav />} tocItems={tocItems}>
@@ -92,4 +77,27 @@ export async function DocPage({
       </DocsLayout>
     );
   }
+}
+
+export async function getMdxWithToc(framework: string, slug?: string[]) {
+  const slugPath = slug?.join("/");
+  const mdxSource = await getMdxSource(framework, slugPath);
+
+  const {
+    default: Content,
+    tableOfContents,
+    headingsFrameworkVisibility,
+  } = mdxSource;
+
+  // Remove items that should not be shown for the current framework
+  const tocItems = (tableOfContents as Toc).filter(({ id }) =>
+    id && id in headingsFrameworkVisibility
+      ? headingsFrameworkVisibility[id]?.includes(framework)
+      : true,
+  );
+
+  return {
+    Content,
+    tocItems,
+  };
 }

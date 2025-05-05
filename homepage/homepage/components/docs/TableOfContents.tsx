@@ -3,13 +3,14 @@
 import type { Toc, TocEntry } from "@stefanprobst/rehype-extract-toc";
 import { clsx } from "clsx";
 import Link from "next/link";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 const TocList = ({
   items,
   level,
   currentId,
 }: { items: Toc; level: number; currentId: string }) => {
+
   const isActive = (item: TocEntry) => {
     if (!item.id) return false;
     if (item.id === currentId) return true;
@@ -20,7 +21,7 @@ const TocList = ({
   };
 
   return (
-    <ul className="space-y-2" style={{ paddingLeft: level ? "1rem" : "0" }}>
+    <ul className="space-y-2" style={{ paddingLeft: (level > 0) ? "1rem" : "0" }}>
       {items.map((item) => (
         <li key={item.id} className="space-y-2">
           {item.id && (
@@ -57,8 +58,10 @@ export function TableOfContents({
 }) {
   const [currentId, setCurrentId] = useState<string>("");
 
+  const itemsUnderH1 = useMemo(() => items[0]?.children || [], [items]);
+
   const getHeadings = useCallback(() => {
-    return items
+    return itemsUnderH1
       .flatMap((node) => {
         const headings = [node];
         if (node.children) {
@@ -78,17 +81,17 @@ export function TableOfContents({
         return { id: item.id, top };
       })
       .filter((x): x is { id: string; top: number } => x !== null);
-  }, [items]);
+  }, [itemsUnderH1]);
 
   useEffect(() => {
-    if (items.length === 0) return;
+    if (itemsUnderH1.length === 0) return;
 
     const onScroll = () => {
       const headings = getHeadings();
       if (headings.length === 0) return;
 
       const top = window.scrollY;
-      let current = headings[0].id;
+      let current = headings[0]?.id;
 
       for (const heading of headings) {
         if (top >= heading.top - 500) {
@@ -98,7 +101,7 @@ export function TableOfContents({
         }
       }
 
-      setCurrentId(current);
+      current && setCurrentId(current);
     };
 
     window.addEventListener("scroll", onScroll, { passive: true });
@@ -107,14 +110,14 @@ export function TableOfContents({
     return () => {
       window.removeEventListener("scroll", onScroll);
     };
-  }, [getHeadings, items]);
+  }, [getHeadings, itemsUnderH1]);
 
-  if (!items.length) return null;
+  if (!itemsUnderH1.length) return null;
 
   return (
     <div className={className}>
       <p className="font-medium text-highlight mb-3">On this page</p>
-      <TocList items={items} level={0} currentId={currentId} />
+      <TocList items={itemsUnderH1} level={0} currentId={currentId} />
     </div>
   );
 }

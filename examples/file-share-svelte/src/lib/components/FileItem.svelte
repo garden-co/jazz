@@ -30,7 +30,7 @@
       const fileId = file._refs.file.id;
 
       // Load the file as a blob, can take a while
-      const blob = await FileStream.loadAsBlob(fileId, me, {});
+      const blob = await FileStream.loadAsBlob(fileId);
       if (!blob) {
         toast.error('Failed to download file');
         return;

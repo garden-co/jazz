@@ -1,4 +1,12 @@
-import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import {
+  assert,
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  test,
+  vi,
+} from "vitest";
 import { expectMap } from "../coValue.js";
 import { RawCoMap } from "../coValues/coMap.js";
 import type { RawGroup } from "../coValues/group.js";
@@ -528,7 +536,7 @@ describe("sync - extra tests", () => {
   });
 });
 
-test("a value created on one node can be loaded on anotehr node even if not directly connected", async () => {
+test("a value created on one node can be loaded on another node even if not directly connected", async () => {
   const userA = createTestNode();
   const userB = createTestNode();
   const serverA = createTestNode();
@@ -548,6 +556,12 @@ test("a value created on one node can be loaded on anotehr node even if not dire
 
   const mapOnUserB = await loadCoValueOrFail(userB, map.id);
   expect(mapOnUserB.get("key1")).toBe("value1");
+
+  map.set("key2", "value2", "trusting");
+
+  await waitFor(() => {
+    expect(mapOnUserB.get("key2")).toBe("value2");
+  });
 });
 
 describe("SyncManager - knownStates vs optimisticKnownStates", () => {

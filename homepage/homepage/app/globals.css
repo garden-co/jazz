@@ -53,6 +53,7 @@ pre.shiki .line {
 .twoslash-popup-code pre.shiki .line {
   display: inline;
   padding-left: 0;
+  white-space: break-spaces;
 }
 
 html.dark .shiki {

@@ -516,7 +516,7 @@ const reactExamples: Example[] = [
     tech: [tech.react],
     features: [features.serverWorker, features.inbox],
     illustration: <JazzPaperScissorsIllustration />,
-    demoUrl: "https://jazz-paper-scissors.vercel.app"
+    demoUrl: "https://jazz-paper-scissors.vercel.app",
   },
   {
     name: "Clerk",
@@ -552,7 +552,7 @@ const reactExamples: Example[] = [
     tech: [tech.react],
     features: [features.inviteLink],
     illustration: <OrganizationIllustration />,
-    demoUrl: "https://jazz-organization.vercel.app"
+    demoUrl: "https://jazz-organization.vercel.app",
   },
   {
     name: "Version history",
@@ -561,7 +561,7 @@ const reactExamples: Example[] = [
       "Track and restore previous versions of your data, and see who made the changes.",
     tech: [tech.react],
     illustration: <VersionHistoryIllustration />,
-    demoUrl: "https://jazz-version-history.vercel.app"
+    demoUrl: "https://jazz-version-history.vercel.app",
   },
 ];
 

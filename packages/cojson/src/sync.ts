@@ -212,16 +212,15 @@ export class SyncManager {
         this.trySendToPeer(peer, piece);
       }
 
-      peer.toldKnownState.add(id);
       peer.combineOptimisticWith(id, coValue.knownState());
     } else if (!peer.toldKnownState.has(id)) {
       this.trySendToPeer(peer, {
         action: "known",
         ...coValue.knownState(),
       });
-
-      peer.toldKnownState.add(id);
     }
+
+    peer.trackToldKnownState(id);
   }
 
   startPeerReconciliation(peer: PeerState) {
@@ -251,8 +250,8 @@ export class SyncManager {
       if (!entry.isAvailable()) {
         // If the coValue is unavailable and we never tried this peer
         // we try to load it from the peer
-        if (!peer.toldKnownState.has(entry.id)) {
-          peer.toldKnownState.add(entry.id);
+        if (!peer.loadRequestSent.has(entry.id)) {
+          peer.trackLoadRequestSent(entry.id);
           this.trySendToPeer(peer, {
             action: "load",
             header: false,
@@ -281,7 +280,7 @@ export class SyncManager {
        * - Start the sync process in case we or the other peer
        *   lacks some transactions
        */
-      peer.toldKnownState.add(coValue.id);
+      peer.trackLoadRequestSent(coValue.id);
       this.trySendToPeer(peer, {
         action: "load",
         ...coValue.knownState(),
@@ -380,8 +379,7 @@ export class SyncManager {
         // We don't have any eligible peers to load the coValue from
         // so we send a known state back to the sender to let it know
         // that the coValue is unavailable
-        peer.toldKnownState.add(msg.id);
-
+        peer.trackToldKnownState(msg.id);
         this.trySendToPeer(peer, {
           action: "known",
           id: msg.id,
@@ -407,8 +405,7 @@ export class SyncManager {
         .getCoValue()
         .then(async (value) => {
           if (value === "unavailable") {
-            peer.toldKnownState.add(msg.id);
-
+            peer.trackToldKnownState(msg.id);
             this.trySendToPeer(peer, {
               action: "known",
               id: msg.id,
@@ -429,6 +426,7 @@ export class SyncManager {
     } else if (entry.isAvailable()) {
       this.sendNewContentIncludingDependencies(msg.id, peer);
     } else {
+      peer.trackToldKnownState(msg.id);
       this.trySendToPeer(peer, {
         action: "known",
         id: msg.id,
@@ -555,7 +553,7 @@ export class SyncManager {
         isCorrection: true,
         ...coValue.knownState(),
       });
-      peer.toldKnownState.add(msg.id);
+      peer.trackToldKnownState(msg.id);
     } else {
       /**
        * We are sending a known state message to the peer to acknowledge the
@@ -568,15 +566,41 @@ export class SyncManager {
         action: "known",
         ...coValue.knownState(),
       });
-      peer.toldKnownState.add(msg.id);
+      peer.trackToldKnownState(msg.id);
     }
 
-    /**
-     * We do send a correction/ack message before syncing to give an immediate
-     * response to the peers that are waiting for confirmation that a coValue is
-     * fully synced
-     */
-    this.requestCoValueSync(coValue);
+    const syncedPeers = [];
+
+    for (const peer of this.peersInPriorityOrder()) {
+      if (peer.closed) continue;
+      if (entry.isErroredInPeer(peer.id)) continue;
+
+      // We directly forward the new content to peers that have an active subscription
+      if (peer.optimisticKnownStates.has(coValue.id)) {
+        this.sendNewContentIncludingDependencies(coValue.id, peer);
+        syncedPeers.push(peer);
+      } else if (
+        peer.isServerOrStoragePeer() &&
+        !peer.loadRequestSent.has(coValue.id)
+      ) {
+        const state = entry.getStateForPeer(peer.id)?.type;
+
+        // Check if there is a inflight load operation and we
+        // are waiting for other peers to send the load request
+        if (state === "unknown" || state === undefined) {
+          this.trySendToPeer(peer, {
+            action: "load",
+            ...coValue.knownState(),
+          });
+          peer.trackLoadRequestSent(coValue.id);
+          syncedPeers.push(peer);
+        }
+      }
+    }
+
+    for (const peer of syncedPeers) {
+      this.syncState.triggerUpdate(peer.id, coValue.id);
+    }
   }
 
   handleCorrection(msg: KnownStateMessage, peer: PeerState) {

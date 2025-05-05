@@ -106,6 +106,10 @@ export class CoValueState {
     });
   }
 
+  getStateForPeer(peerId: PeerID) {
+    return this.peers.get(peerId);
+  }
+
   async loadFromPeers(peers: PeerState[]) {
     if (peers.length === 0) {
       return;
@@ -151,6 +155,7 @@ export class CoValueState {
         action: "load",
         ...(this.core ? this.core.knownState() : emptyKnownState(this.id)),
       });
+      peer.trackLoadRequestSent(this.id);
 
       /**
        * Use a very long timeout for storage peers, because under pressure

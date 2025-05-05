@@ -1,48 +1,26 @@
 <script lang="ts">
   import { useAccount, useCoState } from 'jazz-svelte';
   import { SharedFile, ListOfSharedFiles } from '$lib/schema';
-  import { createInviteLink } from 'jazz-svelte';
   import { FileStream } from 'jazz-tools';
   import FileItem from '$lib/components/FileItem.svelte';
-  import { SvelteMap } from 'svelte/reactivity';
-  import { generateTempFileId } from '$lib/utils';
   import { CloudUpload } from 'lucide-svelte';
 
   const { me, logOut } = useAccount();
 
   const mySharedFilesId = me?.root?._refs.sharedFiles.id;
-  const sharedFiles = $derived(useCoState(ListOfSharedFiles, mySharedFilesId, [{}]));
+  const sharedFiles = $derived(useCoState(ListOfSharedFiles, mySharedFilesId));
 
   let fileInput: HTMLInputElement;
-
-  type PendingSharedFile = {
-    name: string;
-    id: string;
-    createdAt: Date;
-  };
-
-  // Track files that are currently uploading
-  const uploadingFiles = new SvelteMap<string, PendingSharedFile>();
 
   async function handleFileUpload(event: Event) {
     const input = event.target as HTMLInputElement;
     const files = input.files;
 
-    if (!files || !files.length || !me.root?.sharedFiles || !me.root.publicGroup) return;
+    if (!files || !files.length || !me?.root?.sharedFiles || !me?.root?.publicGroup) return;
 
     const file = files[0];
     const fileName = file.name;
     const createdAt = new Date();
-    const fileId = generateTempFileId(fileName, createdAt);
-
-    const tempFile: PendingSharedFile = {
-      name: fileName,
-      id: fileId,
-      createdAt
-    };
-
-    // Add to uploading files
-    uploadingFiles.set(fileId, tempFile);
 
     try {
       const ownership = { owner: me.root.publicGroup };
@@ -65,15 +43,8 @@
       // Add the file to the user's files list
       me.root.sharedFiles.push(sharedFile);
     } finally {
-      uploadingFiles.delete(fileId);
       fileInput.value = ''; // reset input
     }
-  }
-
-  async function shareFile(file: SharedFile) {
-    const inviteLink = createInviteLink(file, 'reader');
-    await navigator.clipboard.writeText(inviteLink);
-    alert('Share link copied to clipboard!');
   }
 
   async function deleteFile(file: SharedFile) {
@@ -127,13 +98,11 @@
     <!-- Files List -->
     <div class="space-y-4">
       {#if sharedFiles.current}
-        {#if !(sharedFiles.current.length === 0 && uploadingFiles.size === 0)}
-          {#each [...sharedFiles.current, ...uploadingFiles.values()] as file (generateTempFileId(file?.name, file?.createdAt))}
+        {#if !(sharedFiles.current.length === 0)}
+          {#each sharedFiles.current as file}
             {#if file}
               <FileItem
                 {file}
-                loading={uploadingFiles.has(generateTempFileId(file?.name, file?.createdAt))}
-                onShare={shareFile}
                 onDelete={deleteFile}
               />
             {/if}

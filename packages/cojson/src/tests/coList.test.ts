@@ -277,7 +277,9 @@ test("syncing appends with an older timestamp", async () => {
   });
   const otherClient = setupTestNode({});
 
-  const otherClientConnection = otherClient.connectToSyncServer();
+  const otherClientConnection = otherClient.connectToSyncServer({
+    ourName: "otherClient",
+  });
 
   const coValue = client.node.createCoValue({
     type: "colist",
@@ -309,7 +311,9 @@ test("syncing appends with an older timestamp", async () => {
 
   list.append(6, undefined, "trusting");
 
-  otherClient.connectToSyncServer();
+  otherClient.connectToSyncServer({
+    ourName: "otherClient",
+  });
 
   await waitFor(() => {
     expect(list.toJSON()).toEqual([1, 2, 4, 6, 3, 5]);

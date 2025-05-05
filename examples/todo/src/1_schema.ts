@@ -41,12 +41,9 @@ export class TodoAccount extends Account {
    */
   migrate() {
     if (!this._refs.root) {
-      this.root = TodoAccountRoot.create(
-        {
-          projects: ListOfProjects.create([], { owner: this }),
-        },
-        { owner: this },
-      );
+      this.root = TodoAccountRoot.create({
+        projects: ListOfProjects.create([]),
+      });
     }
   }
 }

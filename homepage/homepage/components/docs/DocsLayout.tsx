@@ -19,8 +19,7 @@ export default function DocsLayout({
   navIcon?: IconName;
   tocItems?: TocEntry[];
 }) {
-  const tableOfContentsItems =
-    tocItems?.length && tocItems[0].children ? tocItems[0].children : [];
+  const tableOfContentsItems =  tocItems ?? [];
 
   const navSections: NavSection[] = [
     {

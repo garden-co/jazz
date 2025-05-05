@@ -1,5 +1,6 @@
 import { marketingCopy } from "@/content/marketingCopy";
-import OpenGraphImage, {
+import {
+  OpenGraphImage,
   imageSize,
   imageContentType,
 } from "@garden-co/design-system/src/components/organisms/OpenGraphImage";

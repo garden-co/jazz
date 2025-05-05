@@ -35,7 +35,11 @@ export function ProjectTodoTable() {
   // content - whether we create edits locally, load persisted data, or receive
   // sync updates from other devices or participants!
   // It also recursively resolves and subsribes to all referenced CoValues.
-  const project = useCoState(TodoProject, projectId);
+  const project = useCoState(TodoProject, projectId, {
+    resolve: {
+      tasks: true,
+    },
+  });
 
   // `createTask` is similar to `createProject` we saw earlier, creating a new CoMap
   // for a new task (in the same group as the project), and then

@@ -1,4 +1,4 @@
-import { CodeGroup } from '@/components/forMdx'
+import { CodeGroup, ContentByFramework } from '@/components/forMdx'
 import { JazzIcon } from "@garden-co/design-system/src/components/atoms/logos/JazzIcon";
 
 # Jazz Inspector
@@ -9,11 +9,14 @@ For now, you can get your account credentials from the `jazz-logged-in-secret` l
 
 [https://inspector.jazz.tools](https://inspector.jazz.tools)
 
-## Exporting current account to Inspector from your app
+<ContentByFramework framework={["react", "svelte", "vue", "vanilla"]}>
+## Exporting current account to Inspector from your app [!framework=react,svelte,vue,vanilla]
 
 In development mode, you can launch the Inspector from your Jazz app to inspect your account by pressing `Cmd+J`.
+</ContentByFramework>
 
-## Embedding the Inspector widget into your app
+<ContentByFramework framework="react">
+## Embedding the Inspector widget into your app [!framework=react]
 
 Alternatively, you can embed the Inspector directly into your app, so you don't need to open a separate window.
 
@@ -40,7 +43,7 @@ import { JazzInspector } from "jazz-inspector";
 
 This will show the Inspector launch button on the right of your page.
 
-### Positioning the Inspector button
+### Positioning the Inspector button [!framework=react]
 
 You can also customize the button position with the following options:
 
@@ -67,3 +70,4 @@ For example:
 </div>
 
 Check out the [music player app](https://github.com/garden-co/jazz/blob/main/examples/music-player/src/2_main.tsx) for a full example.
+</ContentByFramework>

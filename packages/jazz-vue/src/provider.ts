@@ -45,7 +45,7 @@ export const JazzProvider = defineComponent({
       required: false,
     },
     storage: {
-      type: String as PropType<"indexedDB" | "singleTabOPFS">,
+      type: String as PropType<"indexedDB">,
       default: undefined,
     },
     defaultProfileName: {
