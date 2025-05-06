@@ -1,0 +1,20 @@
+{
+  "name": "jazz-betterauth-client-plugin",
+  "version": "0.0.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "src/index.ts",
+  "license": "MIT",
+  "dependencies": {
+    "jazz-betterauth-server-plugin": "workspace:*"
+  },
+  "scripts": {
+    "format-and-lint": "biome check .",
+    "format-and-lint:fix": "biome check . --write",
+    "build": "rm -rf ./dist && tsc --sourceMap --outDir dist -p tsconfig.build.json",
+    "prepublishOnly": "npm run build"
+  },
+  "devDependencies": {
+    "typescript": "~5.6.2"
+  }
+}

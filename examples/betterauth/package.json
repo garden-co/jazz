@@ -1,0 +1,44 @@
+{
+	"name": "betterauth",
+	"version": "0.1.0",
+	"private": true,
+	"type": "module",
+	"scripts": {
+		"dev": "next dev --turbopack",
+		"build": "next build",
+		"start": "next start",
+		"lint": "next lint",
+		"format-and-lint": "biome check .",
+		"format-and-lint:fix": "biome check . --write",
+		"test:e2e": "playwright test",
+		"test:e2e:ui": "playwright test --ui",
+		"email": "email dev --dir src/components/emails"
+	},
+	"dependencies": {
+		"@garden-co/design-system": "workspace:../../homepage",
+		"@react-email/components": "^0.0.38",
+		"better-auth": "^1.2.4",
+		"better-sqlite3": "^11.9.1",
+		"jazz-betterauth-server-plugin": "workspace:*",
+		"jazz-betterauth-client-plugin": "workspace:*",
+		"jazz-inspector": "workspace:*",
+		"jazz-react": "workspace:*",
+		"jazz-react-auth-betterauth": "workspace:*",
+		"jazz-tools": "workspace:*",
+		"next": "15.3.1",
+		"react": "^18.0.0",
+		"react-dom": "^18.0.0"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "1.9.4",
+		"@playwright/test": "^1.50.1",
+		"@tailwindcss/postcss": "^4",
+		"@types/better-sqlite3": "^7.6.12",
+		"@types/node": "^20",
+		"@types/react": "^18",
+		"@types/react-dom": "^18",
+		"react-email": "^4.0.11",
+		"tailwindcss": "^4",
+		"typescript": "^5"
+	}
+}

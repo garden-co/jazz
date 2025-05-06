@@ -10,7 +10,14 @@ export type AuthSetPayload = {
   accountID: ID<Account>;
   secretSeed?: Uint8Array;
   accountSecret: AgentSecret;
-  provider: "anonymous" | "clerk" | "demo" | "passkey" | "passphrase" | string;
+  provider:
+    | "anonymous"
+    | "clerk"
+    | "betterauth"
+    | "demo"
+    | "passkey"
+    | "passphrase"
+    | string;
 };
 
 export class AuthSecretStorage {
