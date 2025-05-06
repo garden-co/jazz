@@ -1,0 +1,372 @@
+export const metadata = { title: "Jazz Cloud Authentication" };
+
+import { CodeGroup, ContentByFramework } from "@/components/forMdx";
+
+# Jazz Cloud Authentication
+
+The [Jazz Cloud](/cloud) platform provides a comprehensive solution for user management. This integration allows users to sign up or sign in through your Jazz application, using authentication infrastructure managed by us.
+
+## How it works
+
+Jazz Cloud Authentication works by providing a set of APIs that your application can use to authenticate users. These APIs are designed to be used in conjunction with the [Jazz Cloud Dashboard](https://dashboard.jazz.tools/), which provides a user interface for configuring managed [Better Auth](https://www.better-auth.com/) servers for your application.
+
+### Developer
+
+To integrate Jazz Cloud Authentication into your application, follow these steps:
+
+1. Register your application in the Jazz Cloud Dashboard.
+  - The application will be assigned an authentication URL for every environment; this URL must be supplied to the authentication client.
+2. Add the authentication client to your application.
+3. Implement the UI for your application's supported authentication methods.
+
+### User
+
+When using Jazz Cloud Authentication, users:
+
+1. Sign up or sign in through your Jazz application.
+2. Jazz Cloud securely stores the user's account keys and provides a seamless authentication experience.
+3. When logging in, Jazz retrieves the user's account keys from Jazz Cloud.
+4. Users can work offline with full Jazz functionality.
+
+This authentication method is not fully local-first, as it relies on a connection to Jazz Cloud to authenticate and retrieve account keys.
+
+## Key benefits
+
+- **Multi-tenancy**: Authentication separated across application environments.
+- **Developer-friendly**: Easy integration and setup.
+- **Methods supported**: Email & password and OAuth providers supported out-of-the-box.
+- **User-friendly**: Standard authentication flows users already know.
+
+## Implementation
+
+<ContentByFramework framework="vanilla">
+We offer Jazz Cloud Authentication integration through our package: [`jazz-auth-betterauth`](https://npmjs.com/package/jazz-auth-betterauth).
+
+<CodeGroup>
+```tsx twoslash
+const authUrl: string = "https://auth.jazz.tools/exampleApiKey/api/auth/";
+const userName: string = "Firstname Lastname";
+const userEmail: string = "user@example.com";
+const userPassword: string = "12345678";
+const authenticate = async () => {};
+import { AuthSecretStorage } from "jazz-tools";
+const authSecretStorage = new AuthSecretStorage();
+// ---cut---
+import { BetterAuth } from "jazz-auth-betterauth";
+import { createAuthClient } from "better-auth/client";
+import { jazzClientPlugin } from "jazz-betterauth-client-plugin";
+// @annotate: Creating the authentication client.
+
+const auth = new BetterAuth(authenticate, authSecretStorage, createAuthClient({ baseURL: authUrl, plugins: [jazzClientPlugin()] }));
+// @annotate: Signing up with email & password
+
+await auth.authClient.signUp.email({
+  name: userName,
+  email: userEmail,
+  password: userPassword,
+}, {
+  onSuccess: async () => {
+    await auth.signIn();
+  }
+});
+// @annotate: Signing in with email & password
+
+await auth.authClient.signIn.email({
+  email: userEmail,
+  password: userPassword
+}, {
+  onSuccess: async () => {
+    await auth.logIn();
+  }
+});
+```
+
+</CodeGroup>
+</ContentByFramework>
+
+<ContentByFramework framework="react">
+We offer Jazz Cloud Authentication integration through our package: [`jazz-react-auth-betterauth`](https://npmjs.com/package/jazz-react-auth-betterauth).
+
+The package provides a `useBetterAuth` hook for managing authentication state.
+
+<CodeGroup>
+```tsx twoslash
+import * as React from "react";
+const authUrl: string = "https://auth.jazz.tools/exampleApiKey/api/auth/";
+const userName: string = "Firstname Lastname";
+const userEmail: string = "user@example.com";
+const userPassword: string = "12345678";
+// ---cut---
+import { useBetterAuth } from "jazz-react-auth-betterauth";
+import { createAuthClient } from "better-auth/client";
+import { jazzClientPlugin } from "jazz-betterauth-client-plugin";
+// @annotate: Creating the authentication client.
+
+const auth = useBetterAuth(createAuthClient({ baseURL: authUrl, plugins: [jazzClientPlugin()] }));
+// @annotate: Signing up with email & password
+
+await auth.authClient.signUp.email({
+  name: userName,
+  email: userEmail,
+  password: userPassword,
+}, {
+  onSuccess: async () => {
+    await auth.signIn();
+  }
+});
+// @annotate: Signing in with email & password
+
+await auth.authClient.signIn.email({
+  email: userEmail,
+  password: userPassword
+}, {
+  onSuccess: async () => {
+    await auth.logIn();
+  }
+});
+```
+
+</CodeGroup>
+</ContentByFramework>
+
+<ContentByFramework framework="react-native-expo">
+We offer Jazz Cloud Authentication integration through our package: [`jazz-react-auth-betterauth`](https://npmjs.com/package/jazz-react-auth-betterauth).
+
+The package provides a `useBetterAuth` hook for managing authentication state.
+
+<CodeGroup>
+```tsx twoslash
+import * as React from "react";
+const authUrl: string = "https://auth.jazz.tools/exampleApiKey/api/auth/";
+const userName: string = "Firstname Lastname";
+const userEmail: string = "user@example.com";
+const userPassword: string = "12345678";
+const appScheme: string = "myapp";
+const appStoragePrefix: string = "myapp";
+// ---cut---
+import { expoClient } from "@better-auth/expo/client";
+import * as SecureStore from "expo-secure-store";
+import { useBetterAuth } from "jazz-react-auth-betterauth";
+import { createAuthClient } from "better-auth/client";
+import { jazzClientPlugin } from "jazz-betterauth-client-plugin";
+// @annotate: Creating the authentication client.
+
+const auth = useBetterAuth(createAuthClient({
+  baseURL: authUrl,
+  plugins: [
+    jazzClientPlugin(),
+    expoClient({
+        scheme: appScheme,
+        storagePrefix: appStoragePrefix,
+        storage: SecureStore,
+    })
+  ]
+}));
+// @annotate: Signing up with email & password
+
+await auth.authClient.signUp.email({
+  name: userName,
+  email: userEmail,
+  password: userPassword,
+}, {
+  onSuccess: async () => {
+    await auth.signIn();
+  }
+});
+// @annotate: Signing in with email & password
+
+await auth.authClient.signIn.email({
+  email: userEmail,
+  password: userPassword
+}, {
+  onSuccess: async () => {
+    await auth.logIn();
+  }
+});
+```
+
+</CodeGroup>
+</ContentByFramework>
+
+<ContentByFramework framework={["react", "react-native-expo"]}>
+
+### Authentication Context
+
+To share the authentication client & state across your application, you can use [React contexts](https://react.dev/learn/passing-data-deeply-with-context).
+
+<CodeGroup>
+```tsx twoslash
+import * as React from "react";
+const authUrl: string = "https://auth.jazz.tools/exampleApiKey/api/auth/";
+// ---cut---
+// @annotate: src/contexts/Auth.tsx
+
+"use client";
+
+import { createAuthClient } from "better-auth/client";
+import { jazzClientPlugin } from "jazz-betterauth-client-plugin";
+import { useBetterAuth } from "jazz-react-auth-betterauth";
+import type { AuthCredentials } from "jazz-tools";
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useState,
+} from "react";
+
+const authClient = () => {
+  const auth = useBetterAuth(
+    createAuthClient({
+      baseURL: authUrl,
+      plugins: [jazzClientPlugin()],
+    }),
+  );
+  const [user, setUser] = useState<AuthCredentials | undefined>(undefined);
+  const [account, setAccount] = useState<
+    typeof auth.authClient.$Infer.Session.user | undefined
+  >(undefined);
+  const updateUser = useCallback(() => {
+    auth.authClient.jazzPlugin
+      .decryptCredentials()
+      .then((x) => {
+        setUser(x.data === null ? undefined : x.data);
+      })
+      .catch((error) => {
+        console.error("Error decrypting credentials:", error);
+      });
+  }, [auth.authClient.jazzPlugin]);
+  useEffect(() => {
+    auth.authClient.useSession.subscribe(({ data }) => {
+      if (data?.user) setAccount(data.user);
+      if (data?.user.encryptedCredentials) {
+        updateUser();
+      } else if (data && !data.user.encryptedCredentials) {
+        auth.signIn().then(() => {
+          updateUser();
+        });
+      }
+    });
+  }, [user, account]);
+  return {
+    auth: auth,
+    user: user,
+    account: account,
+  };
+};
+
+const AuthContext = createContext<ReturnType<typeof authClient> | null>(null);
+
+export function AuthProvider({ children }: { children: React.ReactNode }) {
+  return (
+    <AuthContext.Provider value={authClient()}>{children}</AuthContext.Provider>
+  );
+}
+
+export function useAuth() {
+  const context = useContext(AuthContext);
+  if (!context) {
+    throw new Error("useAuth must be used within an AuthProvider");
+  }
+  return context;
+}
+```
+</CodeGroup>
+
+Within any component where your context is imported, you may then use `const { auth, user, account } = useAuth();`, where `auth` is the authentication client, `user` is the decrypted Jazz account credentials, and `account` is the authenticated account state.
+
+### Social Sign-On
+
+To integrate social sign-on into your application, configure the social provider's credentials in the Jazz Cloud Dashboard. Once configured, you may trigger social-sign on using the authentication client.
+
+<CodeGroup>
+```tsx twoslash
+import { useBetterAuth } from "jazz-react-auth-betterauth";
+import { createAuthClient } from "better-auth/client";
+import { jazzClientPlugin } from "jazz-betterauth-client-plugin";
+const authUrl: string = "https://auth.jazz.tools/exampleApiKey/api/auth/";
+const auth = useBetterAuth(createAuthClient({ baseURL: authUrl, plugins: [jazzClientPlugin()] }));
+const providerName = "github" as Parameters<typeof auth.authClient.signIn.social>[0]["provider"];
+// ---cut---
+// @annotate: Sign-in with SSO provider
+
+await auth.authClient.signIn.social({
+	provider: providerName,
+	callbackURL: `${window.location.origin}/social/logIn`,
+});
+// @annotate: Sign-up with SSO provider
+
+await auth.authClient.signIn.social({
+	provider: providerName,
+	callbackURL: `${window.location.origin}/social/signIn`,
+});
+```
+</CodeGroup>
+
+To complete the sign-up or sign-in, create callback routes that update the local Jazz authentication state.
+
+Here's an example with [Next.js](https://nextjs.org/):
+
+<CodeGroup>
+```tsx twoslash
+import { useBetterAuth } from "jazz-react-auth-betterauth";
+import { createAuthClient } from "better-auth/client";
+import { jazzClientPlugin } from "jazz-betterauth-client-plugin";
+const authUrl: string = "https://auth.jazz.tools/exampleApiKey/api/auth/";
+const auth = useBetterAuth(createAuthClient({ baseURL: authUrl, plugins: [jazzClientPlugin()] }));
+// ---cut---
+// @annotate: social/logIn/page.tsx
+
+"use client";
+
+import { redirect } from "next/navigation";
+
+export default function Page() {
+	auth.logIn().then(redirect("/"));
+	return null;
+}
+```
+```tsx twoslash
+import { useBetterAuth } from "jazz-react-auth-betterauth";
+import { createAuthClient } from "better-auth/client";
+import { jazzClientPlugin } from "jazz-betterauth-client-plugin";
+const authUrl = "https://auth.jazz.tools/exampleApiKey/api/auth/";
+const auth = useBetterAuth(createAuthClient({ baseURL: authUrl, plugins: [jazzClientPlugin()] }));
+// ---cut---
+// @annotate: social/signIn/page.tsx
+
+"use client";
+
+import { redirect } from "next/navigation";
+
+export default function Page() {
+	auth.signIn().then(redirect("/"));
+	return null;
+}
+```
+</CodeGroup>
+
+</ContentByFramework>
+
+## Examples
+
+You can explore Jazz applications using Jazz Cloud Authentication integration in our [example projects](/docs/examples).
+
+## When to use Jazz Cloud
+
+Jazz Cloud Authentication is appropriate when:
+
+- You want a traditional & seamless authentication experience for your users.
+- You do not want to manage user accounts yourself.
+- You want multi-tenant authentication across application environments.
+- Your application would benefit from email & password authentication, with password resets and email verification.
+- Your application would benefit from social sign-on, such as through Google or GitHub.
+- You want to avoid users managing their own account keys.
+
+## Limitations and considerations
+
+- **Online requirement**: Internet connectivity is required when authenticating.
+
+## Additional resources
+
+- [Better Auth documentation](https://www.better-auth.com/docs/introduction)
