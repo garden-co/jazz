@@ -26,7 +26,7 @@ export async function getDocMetadata(framework: string, slug?: string[]) {
     const title = mdxSource.tableOfContents?.[0].value || "Documentation";
 
     return {
-      title,
+      title: mdxSource.metadata.title || title,
       description: mdxSource.metadata.description,
       openGraph: {
         title,
