@@ -22,10 +22,12 @@ export async function getDocMetadata(framework: string, slug?: string[]) {
 
   try {
     const mdxSource = await getMdxSource(framework, slugPath);
+
     const title = mdxSource.tableOfContents?.[0].value || "Documentation";
 
     return {
       title,
+      description: mdxSource.metadata.description,
       openGraph: {
         title,
       },
