@@ -1,12 +1,14 @@
 {
   "$schema": "https://turbo.build/schema.json",
+  "globalEnv": ["APP_NAME", "JAZZ_PROJECT_NAME"],
   "remoteCache": {},
   "tasks": {
     "build": {
       "env": [
         "RESEND_API_KEY",
         "RESEND_AUDIENCE_ID",
-        "GRAFANA_SERVICE_ACCOUNT"
+        "GRAFANA_SERVICE_ACCOUNT",
+        "APP_NAME"
       ],
       "dependsOn": ["^build"],
       "outputs": ["dist/**", ".svelte-kit/output/**"]
