@@ -5,15 +5,18 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "license": "MIT",
+  "peerDependencies": {
+    "jazz-tools": "workspace:*"
+  },
   "dependencies": {
     "cojson": "workspace:*",
     "cojson-storage-indexeddb": "workspace:*",
-    "cojson-transport-ws": "workspace:*",
-    "jazz-tools": "workspace:*"
+    "cojson-transport-ws": "workspace:*"
   },
   "devDependencies": {
     "fake-indexeddb": "^6.0.0",
-    "typescript": "catalog:"
+    "typescript": "catalog:",
+    "jazz-tools": "workspace:*"
   },
   "scripts": {
     "format-and-lint": "biome check .",

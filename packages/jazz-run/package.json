@@ -27,15 +27,18 @@
     "@effect/printer-ansi": "^0.34.5",
     "@effect/schema": "^0.71.1",
     "@effect/typeclass": "^0.25.5",
-    "cojson": "workspace:0.13.23",
-    "cojson-storage-sqlite": "workspace:0.13.23",
-    "cojson-transport-ws": "workspace:0.13.23",
+    "cojson": "workspace:*",
+    "cojson-storage-sqlite": "workspace:*",
+    "cojson-transport-ws": "workspace:*",
     "effect": "^3.6.5",
-    "jazz-tools": "workspace:0.13.23",
     "ws": "^8.14.2"
+  },
+  "peerDependencies": {
+    "jazz-tools": "workspace:*"
   },
   "devDependencies": {
     "@types/ws": "8.5.10",
-    "typescript": "catalog:"
+    "typescript": "catalog:",
+    "jazz-tools": "workspace:*"
   }
 }

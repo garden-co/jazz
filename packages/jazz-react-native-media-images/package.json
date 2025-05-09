@@ -5,20 +5,19 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "license": "MIT",
-  "dependencies": {
-    "jazz-tools": "workspace:*"
-  },
   "devDependencies": {
     "@bam.tech/react-native-image-resizer": "^3.0.11",
     "expo-file-system": "^18.0.4",
     "react": "18.2.0",
     "react-native": "0.76.7",
-    "typescript": "catalog:"
+    "typescript": "catalog:",
+    "jazz-tools": "workspace:*"
   },
   "peerDependencies": {
     "@bam.tech/react-native-image-resizer": "*",
     "expo-file-system": "*",
-    "react-native": "*"
+    "react-native": "*",
+    "jazz-tools": "workspace:*"
   },
   "scripts": {
     "format-and-lint": "biome check .",
