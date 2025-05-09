@@ -38,7 +38,8 @@
     }
   },
   "peerDependencies": {
-    "svelte": "^5.0.0"
+    "svelte": "^5.0.0",
+    "jazz-tools": "workspace:*"
   },
   "devDependencies": {
     "@sveltejs/adapter-vercel": "^5.5.0",
@@ -61,11 +62,11 @@
     "svelte-check": "^4.0.0",
     "typescript": "catalog:",
     "typescript-eslint": "^8.0.0",
-    "vite": "catalog:"
+    "vite": "catalog:",
+    "jazz-tools": "workspace:*"
   },
   "dependencies": {
     "cojson": "workspace:*",
-    "jazz-browser": "workspace:*",
-    "jazz-tools": "workspace:*"
+    "jazz-browser": "workspace:*"
   }
 }

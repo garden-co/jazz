@@ -30,18 +30,19 @@
     "cojson": "workspace:*",
     "cojson-storage": "workspace:*",
     "jazz-react-native-core": "workspace:*",
-    "jazz-tools": "workspace:*",
     "react-native-mmkv": "^3.2.0"
   },
   "peerDependencies": {
     "@react-native-community/netinfo": "*",
-    "react-native": "*"
+    "react-native": "*",
+    "jazz-tools": "workspace:*"
   },
   "devDependencies": {
     "@react-native-community/netinfo": "11.4.1",
     "react": "18.3.1",
     "react-native": "0.76.7",
-    "typescript": "catalog:"
+    "typescript": "catalog:",
+    "jazz-tools": "workspace:*"
   },
   "scripts": {
     "dev": "tsc --watch --sourceMap --outDir dist",

@@ -15,10 +15,12 @@
   "keywords": [],
   "author": "Garden Computing, Inc.",
   "license": "MIT",
+  "peerDependencies": {
+    "jazz-tools": "workspace:*"
+  },
   "dependencies": {
     "@manuscripts/prosemirror-recreate-steps": "^0.1.4",
     "jazz-browser": "workspace:*",
-    "jazz-tools": "workspace:*",
     "prosemirror-example-setup": "^1.2.2",
     "prosemirror-menu": "^1.2.4",
     "prosemirror-model": "^1.21.1",
@@ -32,6 +34,7 @@
     "@testing-library/jest-dom": "^6.6.3",
     "@testing-library/user-event": "^14.5.2",
     "typescript": "catalog:",
-    "vitest": "catalog:"
+    "vitest": "catalog:",
+    "jazz-tools": "workspace:*"
   }
 }

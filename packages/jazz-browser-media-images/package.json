@@ -5,11 +5,13 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "license": "MIT",
+  "peerDependencies": {
+    "jazz-tools": "workspace:*"
+  },
   "dependencies": {
     "@types/image-blob-reduce": "^4.1.1",
     "image-blob-reduce": "^4.1.0",
-    "jazz-browser": "workspace:0.13.23",
-    "jazz-tools": "workspace:0.13.23",
+    "jazz-browser": "workspace:*",
     "pica": "^9.0.1"
   },
   "scripts": {
@@ -19,6 +21,7 @@
   },
   "devDependencies": {
     "@types/pica": "^9.0.4",
-    "typescript": "catalog:"
+    "typescript": "catalog:",
+    "jazz-tools": "workspace:*"
   }
 }

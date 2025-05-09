@@ -17,8 +17,7 @@
   },
   "dependencies": {
     "cojson": "workspace:*",
-    "jazz-browser": "workspace:*",
-    "jazz-tools": "workspace:*"
+    "jazz-browser": "workspace:*"
   },
   "devDependencies": {
     "@scure/bip39": "^1.3.0",
@@ -28,10 +27,12 @@
     "vite": "catalog:",
     "vite-plugin-dts": "^4.2.4",
     "vue": "^3.5.11",
-    "vue-tsc": "^2.1.6"
+    "vue-tsc": "^2.1.6",
+    "jazz-tools": "workspace:*"
   },
   "peerDependencies": {
-    "vue": "^3.5.11"
+    "vue": "^3.5.11",
+    "jazz-tools": "workspace:*"
   },
   "scripts": {
     "dev": "vite build --watch",
