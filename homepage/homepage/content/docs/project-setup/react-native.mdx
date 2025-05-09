@@ -11,9 +11,9 @@ Jazz supports the [New Architecture](https://reactnative.dev/architecture/landin
 Tested with:
 
 <CodeGroup>
-```json 
+```json
 "react-native": "0.78.22",
-"react": "18.3.1" 
+"react": "18.3.1"
 ```
 </CodeGroup>
 
@@ -106,8 +106,8 @@ module.exports = makeMetroConfig({
     resolveRequest: MetroSymlinksResolver(),
     extraNodeModules,
     nodeModulesPaths,
+    sourceExts: ["mjs", "js", "json", "ts", "tsx"],
   },
-  sourceExts: ["mjs", "js", "json", "ts", "tsx"],
   watchFolders,
 });
 ```
