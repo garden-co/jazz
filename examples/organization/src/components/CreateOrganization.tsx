@@ -23,15 +23,19 @@ export function CreateOrganization() {
       return;
     }
 
-    const group = Group.create();
+    if (!draft.name) return;
 
-    me.root.organizations.push(draft as Organization);
+    // Create new organization with proper group structure
+    const organization = Organization.createNew(draft.name, me);
+    me.root.organizations.push(organization);
 
+    // Reset draft with a new blank group
+    const draftGroup = Group.create({ owner: me });
     me.root.draftOrganization = DraftOrganization.create(
       {
-        projects: ListOfProjects.create([], { owner: group }),
+        projects: ListOfProjects.create([], { owner: draftGroup }),
       },
-      { owner: group },
+      { owner: draftGroup },
     );
 
     navigate(`/organizations/${draft.id}`);
