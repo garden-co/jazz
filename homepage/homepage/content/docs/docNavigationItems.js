@@ -240,6 +240,15 @@ export const docNavigationItems = [
         done: 100,
       },
       {
+        name: "Jazz Cloud",
+        href: "/docs/authentication/jazz-cloud",
+        done: {
+          react: 100,
+          vanilla: 100,
+          "react-native-expo": 100,
+        },
+      },
+      {
         name: "Passkey",
         href: "/docs/authentication/passkey",
         done: 100,

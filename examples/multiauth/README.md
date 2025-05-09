@@ -13,11 +13,11 @@ To run this example, you may either:
 
 1. Create a new Jazz project, and use this example as a template.
 ```bash
-npx create-jazz-app@latest counter-app --example counter
+npx create-jazz-app@latest multiauth-app --example multiauth
 ```
 2. Navigate to the new project and start the development server.
 ```bash
-cd counter-app
+cd multiauth-app
 npm run dev
 ```
 
@@ -36,7 +36,7 @@ pnpm install
 ```
 3. Navigate to the example and start the development server.
 ```bash
-cd examples/counter
+cd examples/multiauth
 pnpm dev
 ```
 

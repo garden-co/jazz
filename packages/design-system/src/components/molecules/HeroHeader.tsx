@@ -1,0 +1,31 @@
+import clsx from "clsx";
+import type { ReactNode } from "react";
+// biome-ignore lint/correctness/useImportExtensions: <explanation>
+import { H1 } from "../atoms/Headings";
+
+function H1Sub({ children }: { children: React.ReactNode }) {
+  return (
+    <p className="text-lg text-pretty leading-relaxed max-w-3xl dark:text-stone-200 md:text-xl">
+      {children}
+    </p>
+  );
+}
+
+export function HeroHeader({
+  title,
+  slogan,
+  pt = true,
+  className = "",
+}: {
+  title: ReactNode;
+  slogan?: ReactNode;
+  pt?: boolean;
+  className?: string;
+}) {
+  return (
+    <hgroup className={clsx(pt && "pt-12 md:pt-20", "mb-10", className)}>
+      <H1>{title}</H1>
+      {slogan && <H1Sub>{slogan}</H1Sub>}
+    </hgroup>
+  );
+}

@@ -1,1 +1,1 @@
-export const apiKey = "counter-example@garden.co";
+export const apiKey = "multiauth-example@garden.co";
