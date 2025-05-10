@@ -41,7 +41,9 @@ export class ExpoSQLiteAdapter implements SQLiteAdapter {
 
   private async initializeInternal() {
     try {
-      const db = await openDatabaseAsync(this.dbName);
+      const db = await openDatabaseAsync(this.dbName, {
+        useNewConnection: true
+      });
 
       // Verify database connection before proceeding
       const statement = await db.prepareAsync("SELECT 1");
