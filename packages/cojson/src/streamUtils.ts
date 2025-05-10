@@ -9,10 +9,12 @@ export function connectedPeers(
     peer1role = "client",
     peer2role = "client",
     crashOnClose = false,
+    deletePeerStateOnClose = true,
   }: {
     peer1role?: Peer["role"];
     peer2role?: Peer["role"];
     crashOnClose?: boolean;
+    deletePeerStateOnClose?: boolean;
   } = {},
 ): [Peer, Peer] {
   const [from1to2Rx, from1to2Tx] = newQueuePair();
@@ -24,6 +26,7 @@ export function connectedPeers(
     outgoing: from1to2Tx,
     role: peer2role,
     crashOnClose: crashOnClose,
+    deletePeerStateOnClose,
   };
 
   const peer1AsPeer: Peer = {
@@ -32,6 +35,7 @@ export function connectedPeers(
     outgoing: from2to1Tx,
     role: peer1role,
     crashOnClose: crashOnClose,
+    deletePeerStateOnClose,
   };
 
   return [peer1AsPeer, peer2AsPeer];
