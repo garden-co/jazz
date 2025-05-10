@@ -92,3 +92,90 @@ useAcceptInvite({
 });
 ```
 </CodeGroup>
+
+
+### Requesting Invites
+
+To allow a non-group member to request an invitation to a group you can use the `writeOnly` role.
+
+In your app, handle creating the queue of requests:
+
+<CodeGroup>
+```ts twoslash
+import { Group, co, CoList, CoMap, Account } from "jazz-tools";
+import { createInviteLink } from "jazz-react";
+
+class Project extends CoMap {
+  title = co.string;
+  account = co.ref(Account);
+}
+
+class Request extends CoMap {
+  project = co.ref(Project);
+}
+
+export class RequestsList extends CoMap.Record(co.ref(Request)) {}
+
+export class RequestsToJoin extends CoMap {
+  writeOnlyInvite = co.string;
+  requests = co.ref(RequestsList);
+}
+
+// ---cut-before---
+function createRequestsToJoin() {
+  const everyoneReaderGroup = Group.create();
+  everyoneReaderGroup.addMember("everyone", "reader");
+
+  const requestsGroup = Group.create();
+  const writeOnlyInvite = createInviteLink(requestsGroup, "writeOnly");
+
+  return RequestsToJoin.create({ 
+    writeOnlyInvite, 
+    requests: RequestsList.create({}, requestsGroup)
+  }, everyoneReaderGroup);
+}
+```
+</CodeGroup>
+
+Users can then send a request to join a specific organization. 
+Example is coming soon!
+
+<CodeGroup>
+```ts twoslash
+import { co, CoList, CoMap, ID } from "jazz-tools";
+import {createInviteLink, consumeInviteLink, Account } from jazz-react;
+
+class Project extends CoMap {
+  title = co.string;
+}
+
+class Request extends CoMap {
+  project = co.ref(Project);
+  account = co.ref(Account);
+}
+
+export class RequestsList extends CoMap.Record(co.ref(Request)) {}
+
+export class RequestsToJoin extends CoMap {
+  writeOnlyInvite = co.string;
+  requests = co.ref(RequestsList);
+}
+
+// ---cut-before---
+
+async function requestToJoin(projectId: ID<Project>) {
+   const requestsToJoin = await RequestsToJoin.load(projectId)
+
+   const result = await consumeInviteLink({ 
+    inviteURL: requestsToJoin.writeOnlyInvite, 
+    invitedObjectSchema: RequestsList 
+   })
+   
+   if (!result) throw new Error("Failed to accept the requests writeOnly invitation")
+
+   const requests = await RequestsList(result.valueID)
+
+   requests.push(RequestToJoin.create({ account: Account.getMe() }, requests._owner));
+}
+```
+</CodeGroup>
