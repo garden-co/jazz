@@ -1,6 +1,6 @@
 import clsx from "clsx";
 import * as Clipboard from "expo-clipboard";
-import { Group, ID, Profile } from "jazz-tools";
+import { CoPlainText, Group, ID, Profile } from "jazz-tools";
 import { useEffect, useState } from "react";
 import React, {
   Button,
@@ -21,7 +21,9 @@ export default function ChatScreen({ navigation }: { navigation: any }) {
   const { me, logOut } = useAccount();
   const [chatId, setChatId] = useState<ID<Chat>>();
   const [chatIdInput, setChatIdInput] = useState<string>();
-  const loadedChat = useCoState(Chat, chatId, { resolve: { $each: true } });
+  const loadedChat = useCoState(Chat, chatId, {
+    resolve: { $each: { text: true } },
+  });
   const [message, setMessage] = useState("");
   const profile = useCoState(Profile, me._refs.profile?.id, {});
 
@@ -69,7 +71,10 @@ export default function ChatScreen({ navigation }: { navigation: any }) {
     if (!loadedChat) return;
     if (message.trim()) {
       loadedChat.push(
-        Message.create({ text: message }, { owner: loadedChat?._owner }),
+        Message.create(
+          { text: CoPlainText.create(message, loadedChat?._owner) },
+          loadedChat?._owner,
+        ),
       );
       setMessage("");
     }
@@ -102,7 +107,7 @@ export default function ChatScreen({ navigation }: { navigation: any }) {
           )}
         >
           <Text className={clsx(`text-black text-md max-w-[85%]`)}>
-            {item.text}
+            {item.text?.toString() ?? ""}
           </Text>
           <Text
             className={clsx(
