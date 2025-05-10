@@ -1,10 +1,12 @@
-export const metadata = { title: "Installation" };
+export const metadata = {
+  description: "Learn how to set up Jazz in your React application."
+};
 
 import { CodeGroup } from "@/components/forMdx";
 
 # Installation and Setup
 
-Add Jazz to your React application in minutes. This setup covers standard React apps, Next.js, and gives an overview of experimental SSR approaches. 
+Add Jazz to your React application in minutes. This setup covers standard React apps, Next.js, and gives an overview of experimental SSR approaches.
 
 Integrating Jazz with React is straightforward. You'll define data schemas that describe your application's structure, then wrap your app with a provider that handles sync and storage. The whole process takes just three steps:
 
@@ -149,7 +151,7 @@ import { useAccount } from "jazz-react";
 
 export function Profile() {
   const { me } = useAccount();
-    
+
   return <div>Hello, {me?.name}</div>;
 }
 ```
@@ -189,11 +191,11 @@ import { MyCollection, MyItem } from "./schema";
 export default async function PublicData() {
   // Load data directly in the server component
   const items = await MyCollection.load(collectionID);
-        
+
   if (!items) {
     return <div>Loading...</div>;
   }
-    
+
   return (
     <ul>
       {items.map(item => (
@@ -285,10 +287,10 @@ export function ItemListHydrator({ initialItems }: { initialItems: MyItem[] }) {
   const items = Array.from(myCollection?.values() || []).filter(
     (item): item is MyItem => !!item
   );
-    
+
   // Use server data until client data is available
   const displayItems = items || initialItems;
-    
+
   return <ItemList items={displayItems} />;
 }
 ```
@@ -340,10 +342,10 @@ export function ItemListHydrator({ initialItems }: { initialItems: MyItem[] }) {
   const items = Array.from(myCollection?.values() || []).filter(
     (item): item is MyItem => !!item
   );
-    
+
   // Use server data until client data is available
   const displayItems = items || initialItems;
-    
+
   return <ItemList items={displayItems} />;
 }
 // @filename: ServerItemPage.tsx
@@ -362,7 +364,7 @@ export default async function ServerItemPage() {
   const items = Array.from(initialItems?.values() || []).filter(
     (item): item is MyItem => !!item
   );
-    
+
   // Pass to client hydrator
   return <ItemListHydrator initialItems={items} />;
 }
