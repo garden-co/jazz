@@ -52,6 +52,34 @@ group.addMember(bob, "writer");
 ```
 </CodeGroup>
 
+## Change a member's role
+
+To change a member's role, use the `addMember` method.
+
+<CodeGroup>
+```ts
+group.addMember(bob, "reader");
+```
+</CodeGroup>
+
+Bob just went from a writer to a reader.
+
+Note: only admins can change a member's role.
+
+## Removing a member
+
+To remove a member, use the `removeMember` method.
+
+<CodeGroup>
+```ts
+group.removeMember(bob);
+```
+</CodeGroup>
+
+This only works if you are an admin, and Bob is not an admin.
+
+Admins cannot remove other admins, but they can remove themselves, as long as there is another admin present.
+
 ## Getting the Group of an existing CoValue
 
 You can get the group of an existing CoValue by using `coValue._owner`.
