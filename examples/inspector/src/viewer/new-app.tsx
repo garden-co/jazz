@@ -44,6 +44,7 @@ export default function CoJsonViewerApp() {
   });
   const [localNode, setLocalNode] = useState<LocalNode | null>(null);
   const [coValueId, setCoValueId] = useState<CoID<RawCoValue> | "">("");
+  const [error, setError] = useState<string | null>(null);
   const { path, addPages, goToIndex, goBack, setPage } = usePagePath();
 
   useEffect(() => {
@@ -67,33 +68,53 @@ export default function CoJsonViewerApp() {
 
     if (!currentAccount) return;
 
-    WasmCrypto.create().then(async (crypto) => {
-      const wsPeer = createWebSocketPeer({
-        id: "cloud",
-        websocket: new WebSocket("wss://cloud.jazz.tools"),
-        role: "server",
-      });
-      const node = await LocalNode.withLoadedAccount({
-        accountID: currentAccount.id,
-        accountSecret: currentAccount.secret,
-        sessionID: crypto.newRandomSessionID(currentAccount.id),
-        peersToLoadFrom: [wsPeer],
-        crypto,
-        migration: async () => {
-          console.log("Not running any migration in inspector");
-        },
-      });
-      setLocalNode(node);
+    if (localNode && currentAccount.id === localNode.account.id) return;
+
+    getLocalNode(currentAccount.id, currentAccount.secret).then((node) => {
+      if (node) {
+        setLocalNode(node);
+      }
     });
   }, [currentAccount, goToIndex, path]);
 
-  const addAccount = (id: RawAccountID, secret: AgentSecret) => {
+  const addAccount = async (id: RawAccountID, secret: AgentSecret) => {
     const newAccount = { id, secret };
-    const accountExists = accounts.some((account) => account.id === id);
-    if (!accountExists) {
-      setAccounts([...accounts, newAccount]);
+
+    if (accounts.some((account) => account.id === id)) {
+      setCurrentAccount(newAccount);
+      return;
     }
-    setCurrentAccount(newAccount);
+
+    try {
+      const node = await getLocalNode(id, secret);
+
+      setLocalNode(node);
+      setAccounts([...accounts, newAccount]);
+      setCurrentAccount(newAccount);
+    } catch (err: any) {
+      setError(err.message || "Failed to add account.");
+    }
+  };
+
+  const getLocalNode = async (id: RawAccountID, secret: AgentSecret) => {
+    const crypto = await WasmCrypto.create();
+
+    const wsPeer = createWebSocketPeer({
+      id: "cloud",
+      websocket: new WebSocket("wss://cloud.jazz.tools"),
+      role: "server",
+    });
+
+    return await LocalNode.withLoadedAccount({
+      accountID: id,
+      accountSecret: secret,
+      sessionID: crypto.newRandomSessionID(id),
+      peersToLoadFrom: [wsPeer],
+      crypto,
+      migration: async () => {
+        console.log("Not running any migration in inspector");
+      },
+    });
   };
 
   const deleteCurrentAccount = () => {
@@ -122,7 +143,7 @@ export default function CoJsonViewerApp() {
     addAccount(
       path?.[1]?.coId as RawAccountID,
       atob(path?.[2]?.coId as string) as AgentSecret,
-    );
+    ).then(() => console.log("Account imported successfully"));
     goToIndex(-1);
   }
 
@@ -167,7 +188,9 @@ export default function CoJsonViewerApp() {
         goBack={goBack}
         addPages={addPages}
       >
-        {!currentAccount && <AddAccountForm addAccount={addAccount} />}
+        {!currentAccount && (
+          <AddAccountForm addAccount={addAccount} error={error} />
+        )}
 
         {currentAccount && path.length <= 0 && (
           <form
@@ -263,8 +286,10 @@ function AccountSwitcher({
 
 function AddAccountForm({
   addAccount,
+  error,
 }: {
   addAccount: (id: RawAccountID, secret: AgentSecret) => void;
+  error: string | null;
 }) {
   const [id, setId] = useState("");
   const [secret, setSecret] = useState("");
@@ -308,6 +333,8 @@ function AddAccountForm({
       <Button className="mt-3" type="submit">
         Add account
       </Button>
+
+      {error ? <p className="text-red-500 mt-2">Error: {error}</p> : null}
     </form>
   );
 }
