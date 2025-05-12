@@ -1,5 +1,3 @@
-import { COLORS } from "@garden-co/design-system/colors/colors";
-
 export const appName = "Jazz Example App";
 
 export const main = {
@@ -29,7 +27,7 @@ export const h1 = {
 };
 
 export const button = {
-  backgroundColor: COLORS.BLUE,
+  backgroundColor: "#146AFF",
   borderRadius: "4px",
   color: "#fff",
   fontFamily: "'Open Sans', 'Helvetica Neue', Arial",

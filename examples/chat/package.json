@@ -1,37 +1,37 @@
 {
-	"name": "jazz-example-chat",
-	"private": true,
-	"version": "0.0.191",
-	"type": "module",
-	"scripts": {
-		"dev": "vite",
-		"build": "tsc && vite build",
-		"format-and-lint": "biome check .",
-		"format-and-lint:fix": "biome check . --write",
-		"preview": "vite preview",
-		"test:e2e": "playwright test",
-		"test:e2e:ui": "playwright test --ui"
-	},
-	"dependencies": {
-		"clsx": "^2.0.0",
-		"hash-slash": "workspace:*",
-		"jazz-inspector": "workspace:*",
-		"jazz-react": "workspace:*",
-		"jazz-tools": "workspace:*",
-		"lucide-react": "^0.485.0",
-		"react": "^18.3.1",
-		"react-dom": "^18.3.1"
-	},
-	"devDependencies": {
-		"@playwright/test": "^1.50.1",
-		"@types/react": "^18.3.12",
-		"@types/react-dom": "^18.3.1",
-		"@vitejs/plugin-react-swc": "^3.3.2",
-		"autoprefixer": "^10.4.20",
-		"is-ci": "^3.0.1",
-		"postcss": "^8.4.27",
-		"tailwindcss": "^3.4.17",
-		"typescript": "5.6.2",
-		"vite": "6.0.11"
-	}
+  "name": "jazz-example-chat",
+  "private": true,
+  "version": "0.0.191",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "format-and-lint": "biome check .",
+    "format-and-lint:fix": "biome check . --write",
+    "preview": "vite preview",
+    "test:e2e": "playwright test",
+    "test:e2e:ui": "playwright test --ui"
+  },
+  "dependencies": {
+    "clsx": "^2.0.0",
+    "hash-slash": "workspace:*",
+    "jazz-inspector": "workspace:*",
+    "jazz-react": "workspace:*",
+    "jazz-tools": "workspace:*",
+    "lucide-react": "^0.274.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.50.1",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react-swc": "^3.3.2",
+    "autoprefixer": "^10.4.20",
+    "is-ci": "^3.0.1",
+    "postcss": "^8.4.27",
+    "tailwindcss": "^3.4.17",
+    "typescript": "5.6.2",
+    "vite": "6.0.11"
+  }
 }

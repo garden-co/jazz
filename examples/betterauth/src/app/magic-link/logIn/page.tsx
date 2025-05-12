@@ -1,5 +1,5 @@
 "use client";
 
-import { MagicLinkSignIn } from "jazz-react-auth-betterauth";
+import MagicLinkSignIn from "@/components/routes/magic-link/signIn/page";
 
-export default MagicLinkSignIn.default;
+export default MagicLinkSignIn;

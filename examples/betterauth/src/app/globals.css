@@ -1,8 +1,5 @@
 @import "tailwindcss";
 @import "tailwindcss/utilities";
-@import "@garden-co/design-system/src/app/globals.css";
-@source "../../node_modules/@garden-co/design-system/src";
-@source "../../node_modules/jazz-react-auth-betterauth/dist";
 
 :root {
   --background: #ffffff;

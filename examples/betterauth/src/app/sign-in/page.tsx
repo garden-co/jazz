@@ -1,7 +1,7 @@
 "use client";
 
-import { SignInForm } from "jazz-react-auth-betterauth";
+import SignInForm from "@/components/forms/SignIn";
 
 export default function SignInPage() {
-  return <SignInForm.default providers={["github"]} />;
+  return <SignInForm providers={["github"]} />;
 }

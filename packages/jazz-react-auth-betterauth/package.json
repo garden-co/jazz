@@ -11,8 +11,7 @@
 		"jazz-betterauth-client-plugin": "workspace:*",
 		"jazz-browser": "workspace:*",
 		"jazz-react": "workspace:*",
-		"jazz-tools": "workspace:*",
-		"@garden-co/design-system": "workspace:*"
+		"jazz-tools": "workspace:*"
 	},
 	"peerDependencies": {
 		"react": "^17 || ^18 || ^19"

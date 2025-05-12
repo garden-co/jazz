@@ -15,7 +15,6 @@
 		"email": "email dev --dir src/components/emails"
 	},
 	"dependencies": {
-		"@garden-co/design-system": "workspace:*",
 		"@react-email/components": "^0.0.38",
 		"better-auth": "^1.2.4",
 		"better-sqlite3": "^11.9.1",

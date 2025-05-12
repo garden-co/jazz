@@ -9,12 +9,7 @@
         "GRAFANA_SERVICE_ACCOUNT"
       ],
       "dependsOn": ["^build"],
-      "outputs": [
-        "dist/**",
-        ".svelte-kit/output/**",
-        ".next/**",
-        "!.next/cache/**"
-      ]
+      "outputs": ["dist/**", ".svelte-kit/output/**"]
     },
     "dev": {
       "cache": false,

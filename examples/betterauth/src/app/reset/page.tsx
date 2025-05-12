@@ -1,7 +1,7 @@
 "use client";
 
-import { ResetForm } from "jazz-react-auth-betterauth";
+import ResetForm from "@/components/forms/Reset";
 
 export default function ResetPage() {
-  return <ResetForm.default />;
+  return <ResetForm />;
 }

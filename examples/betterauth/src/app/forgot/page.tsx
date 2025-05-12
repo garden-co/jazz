@@ -1,7 +1,7 @@
 "use client";
 
-import { ForgotForm } from "jazz-react-auth-betterauth";
+import ForgotForm from "@/components/forms/Forgot";
 
 export default function ForgotPage() {
-  return <ForgotForm.default />;
+  return <ForgotForm />;
 }

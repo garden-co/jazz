@@ -1,7 +1,7 @@
 "use client";
 
-import { SettingsForm } from "jazz-react-auth-betterauth";
+import SettingsForm from "@/components/forms/Settings";
 
 export default function SettingsPage() {
-  return <SettingsForm.default providers={["github"]} />;
+  return <SettingsForm providers={["github"]} />;
 }

@@ -102,7 +102,7 @@ See [Groups as permission scopes](/docs/groups/intro) for more information on ho
 
 ## Reading Text
 
-CoText values work like JavaScript strings:
+CoText values work similarly to JavaScript strings:
 
 <CodeGroup>
 ```ts twoslash
@@ -114,11 +114,31 @@ const note = CoPlainText.create("Meeting notes", { owner: me });
 // ---cut---
 // Get the text content
 console.log(note.toString());  // "Meeting notes"
+console.log(`${note}`);    // "Meeting notes"
 
 // Check the text length
 console.log(note.length);      // 14
 ```
 </CodeGroup>
+
+<ContentByFramework framework="react">
+When using CoTexts in JSX, you can read the text directly:
+<CodeGroup>
+```tsx twoslash
+import * as React from "react";
+import { CoPlainText, Account } from "jazz-tools";
+import { createJazzTestAccount } from 'jazz-tools/testing';
+const me = await createJazzTestAccount();
+const note = CoPlainText.create("Meeting notes", { owner: me });
+
+// ---cut---
+<>
+  <p>{note.toString()}</p>
+  <p>{note}</p>
+</>
+```
+</CodeGroup>
+</ContentByFramework>
 
 ## Making Edits
 

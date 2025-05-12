@@ -1,16 +1,14 @@
-"use client";
-
 import { clsx } from "clsx";
-import Image from "next/image";
-import Link from "next/link";
+import { useAuth } from "jazz-react-auth-betterauth";
 import { forwardRef } from "react";
 
 interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
   variant?: "primary" | "secondary" | "danger";
   children?: React.ReactNode;
   className?: string;
-  src?: Parameters<typeof Image>[0]["src"];
-  alt?: Parameters<typeof Image>[0]["alt"];
+  src?: InstanceType<typeof Image>["src"];
+  alt?: InstanceType<typeof Image>["alt"];
+  imageClassName?: InstanceType<typeof Image>["className"];
   href?: string;
   newTab?: boolean;
 }
@@ -23,12 +21,14 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
       variant = "primary",
       src,
       alt,
+      imageClassName,
       href,
       newTab = false,
       ...buttonProps
     },
     ref,
   ) => {
+    const { Image, Link } = useAuth();
     const primary =
       "rounded-full border border-solid border-transparent transition-colors flex items-center justify-center bg-foreground text-background gap-2 hover:bg-[#383838] dark:hover:bg-[#ccc] font-medium text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5 sm:w-auto";
     const secondary =
@@ -56,7 +56,13 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
           rel="noopener noreferrer"
         >
           {src && alt && (
-            <Image src={src} alt={alt} width={width} height={height} />
+            <Image
+              className={imageClassName}
+              src={src}
+              alt={alt}
+              width={width}
+              height={height}
+            />
           )}
           {children}
         </Link>
@@ -70,7 +76,13 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
           rel="noopener noreferrer"
         >
           {src && alt && (
-            <Image src={src} alt={alt} width={width} height={height} />
+            <Image
+              className={imageClassName}
+              src={src}
+              alt={alt}
+              width={width}
+              height={height}
+            />
           )}
           {children}
         </button>
