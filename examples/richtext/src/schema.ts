@@ -59,9 +59,10 @@ export class JazzAccount extends Account {
         {
           name: "Anonymous user",
           firstName: "",
-          bio: CoRichText.create("<p>A <strong>hu<em>man</strong></em>.</p>", {
-            owner: group,
-          }),
+          bio: CoRichText.create(
+            "<p>A <strong>hu<em>man</strong></em>.</p>",
+            group,
+          ),
         },
         group,
       );

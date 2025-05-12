@@ -25,7 +25,7 @@
 </template>
 
 <script lang="ts">
-import type { ID } from "jazz-tools";
+import { CoPlainText, type ID } from "jazz-tools";
 import { useCoState } from "jazz-vue";
 import { type PropType, computed, defineComponent, ref } from "vue";
 import ChatBody from "../components/ChatBody.vue";
@@ -61,7 +61,12 @@ export default defineComponent({
     }
 
     function handleSubmit(text: string) {
-      chat?.value?.push(Message.create({ text }, { owner: chat.value._owner }));
+      chat?.value?.push(
+        Message.create(
+          { text: CoPlainText.create(text, chat.value._owner) },
+          chat.value._owner,
+        ),
+      );
     }
 
     return {

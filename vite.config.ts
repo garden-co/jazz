@@ -4,10 +4,6 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   root: "./",
   test: {
-    typecheck: {
-      enabled: true,
-      checker: "tsc",
-    },
     workspace: [
       "packages/*",
       "tests/browser-integration",

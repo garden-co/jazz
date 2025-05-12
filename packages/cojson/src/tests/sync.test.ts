@@ -1045,7 +1045,7 @@ describe("SyncManager.handleSyncMessage", () => {
       sessions: {},
     } as unknown as LoadMessage;
 
-    await client.node.syncManager.handleSyncMessage(invalidMessage, peerState);
+    client.node.syncManager.handleSyncMessage(invalidMessage, peerState);
 
     // Verify that no state changes occurred
     expect(peerState.knownStates.has(invalidMessage.id)).toBe(false);

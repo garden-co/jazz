@@ -1,4 +1,5 @@
 import clsx from "clsx";
+import Link from "next/link";
 
 export function Testimonial({
   children,
@@ -6,13 +7,51 @@ export function Testimonial({
   role,
   className,
   size = "md",
+  imageUrl,
+  darkImageUrl,
+  url,
 }: {
   children: React.ReactNode;
   name: string;
   role: string;
   className?: string;
   size?: "sm" | "md";
+  imageUrl?: string;
+  darkImageUrl?: string;
+  url?: string;
 }) {
+  const content = (
+    <>
+      {imageUrl && (
+        <img
+          src={imageUrl}
+          alt=""
+          className={clsx(
+            "rounded-full size-10 sm:size-12",
+            darkImageUrl && "dark:hidden",
+          )}
+        />
+      )}
+
+      {darkImageUrl && (
+        <img
+          src={darkImageUrl}
+          alt=""
+          className={clsx("rounded-full size-10 sm:size-12 hidden dark:inline")}
+        />
+      )}
+      <div className="text-sm sm:text-base">
+        <div className="font-semibold text-highlight">{name}</div>
+        <div className="text-stone-600 dark:text-stone-500">{role}</div>
+      </div>
+    </>
+  );
+
+  const authorClassName = clsx("inline-flex items-center gap-x-4", {
+    "mt-6": size === "md",
+    "mt-4": size === "sm",
+  });
+
   return (
     <figure className={clsx("max-w-2xl", className)}>
       <svg
@@ -34,19 +73,15 @@ export function Testimonial({
       >
         {children}
       </blockquote>
-      <figcaption
-        className={clsx("flex items-center gap-x-6", {
-          "mt-6": size === "md",
-          "mt-4": size === "sm",
-        })}
-      >
-        <div className="text-sm leading-6 sm:text-base">
-          <div className="font-semibold text-highlight">{name}</div>
-          <div className="mt-0.5 text-stone-600 dark:text-stone-500">
-            {role}
-          </div>
-        </div>
-      </figcaption>
+      {url ? (
+        <figcaption>
+          <Link href={url} target="_blank" className={authorClassName}>
+            {content}
+          </Link>
+        </figcaption>
+      ) : (
+        <figcaption className={authorClassName}>{content}</figcaption>
+      )}
     </figure>
   );
 }

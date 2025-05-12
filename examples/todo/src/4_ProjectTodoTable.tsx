@@ -15,7 +15,7 @@ import {
 } from "./basicComponents";
 
 import { useCoState } from "jazz-react";
-import { ID } from "jazz-tools";
+import { CoPlainText, ID } from "jazz-tools";
 import { useParams } from "react-router";
 import uniqolor from "uniqolor";
 import { InviteButton } from "./components/InviteButton";
@@ -50,9 +50,9 @@ export function ProjectTodoTable() {
       const task = Task.create(
         {
           done: false,
-          text,
+          text: CoPlainText.create(text, project._owner),
         },
-        { owner: project._owner },
+        project._owner,
       );
 
       // push will cause useCoState to rerender this component, both here and on other devices

@@ -1,3 +1,4 @@
+import { CoPlainText } from "jazz-tools";
 import { Issue } from "./schema";
 export function IssueComponent({ issue }: { issue: Issue }) {
   return (
@@ -16,9 +17,12 @@ export function IssueComponent({ issue }: { issue: Issue }) {
       <label className="flex flex-col gap-2">
         Description
         <textarea
-          value={issue.description}
+          value={`${issue.description}`}
           onChange={(event) => {
-            issue.description = event.target.value;
+            issue.description = CoPlainText.create(
+              event.target.value,
+              issue._owner,
+            );
           }}
         />
       </label>

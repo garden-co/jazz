@@ -1,6 +1,6 @@
 import clsx from "clsx";
 import { ProgressiveImg } from "jazz-react";
-import { ImageDefinition } from "jazz-tools";
+import { CoPlainText, ImageDefinition } from "jazz-tools";
 import { ImageIcon } from "lucide-react";
 import { useId, useRef } from "react";
 
@@ -70,7 +70,10 @@ export function BubbleBody(props: {
   );
 }
 
-export function BubbleText(props: { text: string; className?: string }) {
+export function BubbleText(props: {
+  text: CoPlainText | string;
+  className?: string;
+}) {
   return (
     <p className={clsx("px-2 leading-relaxed", props.className)}>
       {props.text}

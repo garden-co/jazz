@@ -1,7 +1,7 @@
-import { CoList, CoMap, ImageDefinition, co } from "jazz-tools";
+import { CoList, CoMap, CoPlainText, ImageDefinition, co } from "jazz-tools";
 
 export class Message extends CoMap {
-  text = co.string;
+  text = co.ref(CoPlainText);
   image = co.optional.ref(ImageDefinition);
 }
 

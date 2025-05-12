@@ -1,6 +1,6 @@
 import Clipboard from "@react-native-clipboard/clipboard";
 import { useAccount, useCoState } from "jazz-react-native";
-import { Group, ID, Profile } from "jazz-tools";
+import { CoPlainText, Group, ID, Profile } from "jazz-tools";
 import { useEffect, useState } from "react";
 import {
   Alert,
@@ -83,7 +83,10 @@ export function ChatScreen({ navigation }: { navigation: any }) {
     if (!loadedChat) return;
     if (message.trim()) {
       loadedChat.push(
-        Message.create({ text: message }, { owner: loadedChat?._owner }),
+        Message.create(
+          { text: CoPlainText.create(message, loadedChat?._owner) },
+          loadedChat?._owner,
+        ),
       );
       setMessage("");
     }

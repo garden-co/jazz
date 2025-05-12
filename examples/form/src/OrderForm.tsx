@@ -1,3 +1,4 @@
+import { CoPlainText } from "jazz-tools";
 import {
   BubbleTeaAddOnTypes,
   BubbleTeaBaseTeaTypes,
@@ -12,6 +13,18 @@ export function OrderForm({
   order: BubbleTeaOrder | DraftBubbleTeaOrder;
   onSave?: (e: React.FormEvent<HTMLFormElement>) => void;
 }) {
+  // Handles updates to the instructions field of the order.
+  // If instructions already exist, applyDiff updates them incrementally.
+  // Otherwise, creates a new CoPlainText instance for the instructions.
+  const handleInstructionsChange = (
+    e: React.ChangeEvent<HTMLTextAreaElement>,
+  ) => {
+    if (order.instructions) {
+      return order.instructions.applyDiff(e.target.value);
+    }
+    order.instructions = CoPlainText.create(e.target.value, order._owner);
+  };
+
   return (
     <form onSubmit={onSave} className="grid gap-5">
       <div className="flex flex-col gap-2">
@@ -88,9 +101,9 @@ export function OrderForm({
         <textarea
           name="instructions"
           id="instructions"
-          value={order.instructions}
+          value={`${order.instructions}`}
           className="dark:bg-transparent"
-          onChange={(e) => (order.instructions = e.target.value)}
+          onChange={handleInstructionsChange}
         ></textarea>
       </div>
 

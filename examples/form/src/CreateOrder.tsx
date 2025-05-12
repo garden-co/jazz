@@ -62,7 +62,7 @@ function CreateOrderForm({
   onSave: (draft: DraftBubbleTeaOrder) => void;
 }) {
   const draft = useCoState(DraftBubbleTeaOrder, id, {
-    resolve: { addOns: true },
+    resolve: { addOns: true, instructions: true },
   });
 
   if (!draft) return;

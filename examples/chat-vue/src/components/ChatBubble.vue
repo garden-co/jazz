@@ -1,9 +1,9 @@
 <template>
-    <BubbleContainer :fromMe="lastEdit.by?.isMe">
-      <BubbleBody>{{ msg.text }}</BubbleBody>
-      <BubbleInfo :by="lastEdit.by?.profile?.name" :madeAt="lastEdit.madeAt" />
-    </BubbleContainer>
-  </template>
+  <BubbleContainer :fromMe="lastEdit.by?.isMe">
+    <BubbleBody>{{ msg.text }}</BubbleBody>
+    <BubbleInfo :by="lastEdit.by?.profile?.name" :madeAt="lastEdit.madeAt" />
+  </BubbleContainer>
+</template>
   
   <script lang="ts">
 import { computed, defineComponent } from "vue";

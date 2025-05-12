@@ -268,7 +268,7 @@ export class CoPlainText extends String implements CoValue {
    *
    * The 'hint' parameter indicates the preferred type of conversion:
    * - 'string': prefer string conversion
-   * - 'number': prefer number conversion (not meaningful for text, so return NaN)
+   * - 'number': prefer number conversion (attempt to parse the text as a number)
    * - 'default': usually treat as string
    */
   [Symbol.toPrimitive](hint: string) {

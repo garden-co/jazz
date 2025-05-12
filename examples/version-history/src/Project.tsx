@@ -1,6 +1,6 @@
 import { createInviteLink, useAccount } from "jazz-react";
 import { useCoState } from "jazz-react";
-import { ID } from "jazz-tools";
+import { CoPlainText, ID } from "jazz-tools";
 import { IssueComponent } from "./Issue.tsx";
 import { Issue, Project } from "./schema.ts";
 export function ProjectComponent({ projectID }: { projectID: ID<Project> }) {
@@ -19,7 +19,7 @@ export function ProjectComponent({ projectID }: { projectID: ID<Project> }) {
       Issue.create(
         {
           title: "",
-          description: "",
+          description: CoPlainText.create("", project._owner),
           estimate: 0,
           status: "backlog",
         },

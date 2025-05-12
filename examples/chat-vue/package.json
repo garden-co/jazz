@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build-type-check": "run-p type-check \"build-only {@}\" --",
+    "build-type-check": "run-p type-check \"build {@}\" --",
     "preview": "vite preview",
     "build": "vite build",
     "type-check": "vue-tsc --build --force",

@@ -1,4 +1,4 @@
-import { Account, CoList, CoMap, co } from "jazz-tools";
+import { Account, CoList, CoMap, CoPlainText, co } from "jazz-tools";
 
 export const BubbleTeaAddOnTypes = [
   "Pearl",
@@ -28,7 +28,7 @@ export class BubbleTeaOrder extends CoMap {
   addOns = co.ref(ListOfBubbleTeaAddOns);
   deliveryDate = co.Date;
   withMilk = co.boolean;
-  instructions = co.optional.string;
+  instructions = co.optional.ref(CoPlainText);
 }
 
 export class DraftBubbleTeaOrder extends CoMap {
@@ -36,7 +36,7 @@ export class DraftBubbleTeaOrder extends CoMap {
   addOns = co.optional.ref(ListOfBubbleTeaAddOns);
   deliveryDate = co.optional.Date;
   withMilk = co.optional.boolean;
-  instructions = co.optional.string;
+  instructions = co.optional.ref(CoPlainText);
 
   get hasChanges() {
     return Object.keys(this._edits).length > 1 || this.addOns?.hasChanges;

@@ -3,11 +3,11 @@
  * https://jazz.tools/docs/react/schemas/covalues
  */
 
-import { CoList, CoMap, co } from "jazz-tools";
+import { CoList, CoMap, CoPlainText, co } from "jazz-tools";
 
 export class Issue extends CoMap {
   title = co.string;
-  description = co.string;
+  description = co.ref(CoPlainText);
   estimate = co.number;
   status? = co.literal("backlog", "in progress", "done");
 }

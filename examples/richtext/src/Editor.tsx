@@ -9,7 +9,9 @@ import { EditorView } from "prosemirror-view";
 import { useEffect, useRef } from "react";
 
 export function Editor() {
-  const { me } = useAccount({ resolve: { profile: true, root: true } });
+  const { me } = useAccount({
+    resolve: { profile: { bio: true }, root: true },
+  });
   const editorRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
 
@@ -53,7 +55,7 @@ export function Editor() {
           </label>
           <textarea
             className="flex-1 border border-stone-200 dark:border-stone-700 rounded shadow-sm py-2 px-3 font-mono text-sm bg-stone-50 dark:bg-stone-900 text-stone-900 dark:text-stone-100 whitespace-pre-wrap break-words resize-none"
-            value={me.profile.bio?.toString()}
+            value={`${me.profile.bio}`}
             onChange={(e) => me.profile.bio?.applyDiff(e.target.value)}
             rows={10}
           />

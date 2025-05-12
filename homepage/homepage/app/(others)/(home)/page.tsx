@@ -30,9 +30,9 @@ export default function Home() {
           </p>
         </Testimonial>
 
-        <ProblemStatementSection />
-
         <ChatDemoSection />
+
+        <ProblemStatementSection />
 
         <LocalFirstFeaturesSection />
 

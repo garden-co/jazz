@@ -1,5 +1,5 @@
 import { createImage, useAccount, useCoState } from "jazz-react";
-import { Account, ID } from "jazz-tools";
+import { Account, CoPlainText, ID } from "jazz-tools";
 import { useState } from "react";
 import { Chat, Message } from "./schema.ts";
 import {
@@ -36,7 +36,15 @@ export function ChatScreen(props: { chatID: ID<Chat> }) {
     }
 
     createImage(file, { owner: chat._owner }).then((image) => {
-      chat.push(Message.create({ text: file.name, image: image }, chat._owner));
+      chat.push(
+        Message.create(
+          {
+            text: CoPlainText.create(file.name, chat._owner),
+            image: image,
+          },
+          chat._owner,
+        ),
+      );
     });
   };
 
@@ -66,7 +74,12 @@ export function ChatScreen(props: { chatID: ID<Chat> }) {
 
         <TextInput
           onSubmit={(text) => {
-            chat.push(Message.create({ text }, { owner: chat._owner }));
+            chat.push(
+              Message.create(
+                { text: CoPlainText.create(text, chat._owner) },
+                chat._owner,
+              ),
+            );
           }}
         />
       </InputBar>
@@ -75,7 +88,7 @@ export function ChatScreen(props: { chatID: ID<Chat> }) {
 }
 
 function ChatBubble(props: { me: Account; msg: Message }) {
-  if (!props.me.canRead(props.msg)) {
+  if (!props.me.canRead(props.msg) || !props.msg.text?.toString()) {
     return (
       <BubbleContainer fromMe={false}>
         <BubbleBody fromMe={false}>

@@ -166,12 +166,7 @@ export class SyncManager {
   }
 
   handleSyncMessage(msg: SyncMessage, peer: PeerState) {
-    if (this.local.getCoValue(msg.id).isErroredInPeer(peer.id)) {
-      logger.warn(
-        `Skipping message ${msg.action} on errored coValue ${msg.id} from peer ${peer.id}`,
-      );
-      return;
-    } else if (msg.id === undefined || msg.id === null) {
+    if (msg.id === undefined || msg.id === null) {
       logger.warn("Received sync message with undefined id", {
         msg,
       });
@@ -180,6 +175,11 @@ export class SyncManager {
       logger.warn("Received sync message with invalid id", {
         msg,
       });
+      return;
+    } else if (this.local.getCoValue(msg.id).isErroredInPeer(peer.id)) {
+      logger.warn(
+        `Skipping message ${msg.action} on errored coValue ${msg.id} from peer ${peer.id}`,
+      );
       return;
     }
 

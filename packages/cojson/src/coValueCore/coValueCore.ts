@@ -65,8 +65,9 @@ const readKeyCache = new WeakMap<CoValueCore, { [id: KeyID]: KeySecret }>();
 export type AvailableCoValueCore = CoValueCore & { verified: VerifiedState };
 
 export const CO_VALUE_LOADING_CONFIG = {
-  MAX_RETRIES: 2,
+  MAX_RETRIES: 1,
   TIMEOUT: 30_000,
+  RETRY_DELAY: 300,
 };
 
 export class CoValueCore {
