@@ -60,7 +60,8 @@
     "tailwindcss-animate": "^1.0.7",
     "unist-util-visit": "^5.0.0",
     "jazz-react-auth-betterauth": "link:../../packages/jazz-react-auth-betterauth",
-    "jazz-auth-betterauth": "link:../../packages/jazz-auth-betterauth"
+    "jazz-auth-betterauth": "link:../../packages/jazz-auth-betterauth",
+    "@better-auth/expo": "^1.2.7"
   },
   "devDependencies": {
     "@biomejs/biome": "1.9.4",
