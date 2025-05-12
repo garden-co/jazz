@@ -6,12 +6,6 @@ import type { AuthCredentials } from "jazz-tools";
 import { createContext, useContext, useEffect, useState } from "react";
 // biome-ignore lint/correctness/useImportExtensions: <explanation>
 import { useBetterAuth } from "../index";
-// biome-ignore lint/correctness/useImportExtensions: <explanation>
-import { DefaultImage, type Image as ImageType } from "../types/image";
-// biome-ignore lint/correctness/useImportExtensions: <explanation>
-import { DefaultLink, type Link as LinkType } from "../types/link";
-// biome-ignore lint/correctness/useImportExtensions: <explanation>
-import { defaultNavigate, defaultReplace } from "../types/router";
 
 const equalCredentials = (a?: AuthCredentials, b?: AuthCredentials) => {
   if (a && b) {
@@ -73,30 +67,14 @@ const authClient = <T extends ClientOptions>(
   };
 };
 
-const AuthContext = createContext<
-  | (ReturnType<typeof authClient> & {
-      Link: LinkType;
-      Image: ImageType;
-      navigate: typeof defaultNavigate;
-      replace: typeof defaultReplace;
-    })
-  | null
->(null);
+const AuthContext = createContext<ReturnType<typeof authClient> | null>(null);
 
 export function AuthProvider({
   children,
-  Image = DefaultImage,
-  Link = DefaultLink,
-  navigate = defaultNavigate,
-  replace = defaultReplace,
   onSessionChange,
   options,
 }: {
   children: React.ReactNode;
-  Image?: ImageType;
-  Link?: LinkType;
-  navigate?: typeof defaultNavigate;
-  replace?: typeof defaultReplace;
   onSessionChange?: () => void | Promise<void>;
   options: Parameters<typeof useBetterAuth>[0];
 }) {
@@ -104,10 +82,6 @@ export function AuthProvider({
     <AuthContext.Provider
       value={{
         ...authClient(onSessionChange, options),
-        Image,
-        Link,
-        navigate,
-        replace,
       }}
     >
       {children}

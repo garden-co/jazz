@@ -1,10 +1,11 @@
 import { Button } from "@/components/Button";
 import { Loading } from "@/components/Loading";
 import { SSOButton } from "@/components/SSOButton";
-import { Alert } from "@garden-co/design-system/src/components/atoms/Alert";
-import { Input } from "@garden-co/design-system/src/components/molecules/Input";
 import { useAuth } from "jazz-react-auth-betterauth";
 import type { FullAuthClient } from "jazz-react-auth-betterauth";
+import Image from "next/image";
+import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useState } from "react";
 
 const title = "Sign In";
@@ -16,7 +17,8 @@ export default function SignInForm({
     ReturnType<typeof useAuth>["auth"]["authClient"]["signIn"]["social"]
   >[0]["provider"][];
 }) {
-  const { auth, Image, Link, navigate } = useAuth();
+  const router = useRouter();
+  const { auth } = useAuth();
   const [email, setEmail] = useState<string>("");
   const [password, setPassword] = useState<string>("");
   const [rememberMe, setRememberMe] = useState(true);
@@ -30,16 +32,10 @@ export default function SignInForm({
       <h1 className="sr-only">{title}</h1>
       <div className="max-w-md flex flex-col gap-8 w-full px-6 py-12 mx-auto">
         {otpStatus && (
-          <Alert variant="info" title={title}>
-            A one-time password has been sent to your email.
-          </Alert>
+          <div>A one-time password has been sent to your email.</div>
         )}
 
-        {error && (
-          <Alert variant="warning" title={title}>
-            {error.message}
-          </Alert>
-        )}
+        {error && <div>{error.message}</div>}
 
         {loading && <Loading />}
 
@@ -58,7 +54,7 @@ export default function SignInForm({
                 {
                   onSuccess: async () => {
                     await auth.logIn();
-                    navigate("/");
+                    router.push("/");
                   },
                   onError: (error) => {
                     setError(error.error);
@@ -87,43 +83,55 @@ export default function SignInForm({
               );
               if (data) {
                 await auth.logIn();
-                navigate("/");
+                router.push("/");
               }
             }
             setLoading(false);
           }}
         >
-          <Input
-            label="Email address"
-            disabled={loading}
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-          />
-          {!otpStatus && (
-            <Input
-              label="Password"
-              type="password"
+          <div>
+            <label htmlFor="email-address">Email address</label>
+            <input
+              id="email-address"
+              value={email}
               disabled={loading}
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
+              onChange={(e) => setEmail(e.target.value)}
             />
+          </div>
+          {!otpStatus && (
+            <div>
+              <label htmlFor="password">Password</label>
+              <input
+                id="password"
+                type="password"
+                value={password}
+                disabled={loading}
+                onChange={(e) => setPassword(e.target.value)}
+              />
+            </div>
           )}
           {otpStatus && (
-            <Input
-              label="One-time password"
-              disabled={loading}
-              value={otp}
-              onChange={(e) => setOtp(e.target.value)}
-            />
+            <div>
+              <label htmlFor="otp">One-time password</label>
+              <input
+                id="otp"
+                value={otp}
+                disabled={loading}
+                onChange={(e) => setOtp(e.target.value)}
+              />
+            </div>
           )}
           <div className="items-center">
-            <Input
-              label="Remember me"
-              type="checkbox"
-              className="text-sm truncate float-left gap-4 flex"
-              checked={rememberMe}
-              onChange={(e) => setRememberMe(e.target.checked)}
-            />
+            <div>
+              <label htmlFor="remember-me">Remember me</label>
+              <input
+                id="remember-me"
+                type="checkbox"
+                checked={rememberMe}
+                disabled={loading}
+                onChange={(e) => setRememberMe(e.target.checked)}
+              />
+            </div>
             <Link href="/forgot" className="text-sm float-right">
               Forgot password?
             </Link>

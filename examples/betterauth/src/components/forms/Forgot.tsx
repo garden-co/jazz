@@ -1,8 +1,5 @@
 import { Button } from "@/components/Button";
 import { Loading } from "@/components/Loading";
-import { Alert } from "@garden-co/design-system/src/components/atoms/Alert";
-import { Heading } from "@garden-co/design-system/src/components/atoms/Heading";
-import { Input } from "@garden-co/design-system/src/components/molecules/Input";
 import { useAuth } from "jazz-react-auth-betterauth";
 import type { FullAuthClient } from "jazz-react-auth-betterauth";
 import { useState } from "react";
@@ -25,9 +22,9 @@ export default function ForgotForm() {
     <div className="min-h-screen flex flex-col justify-center">
       <div className="max-w-md flex flex-col gap-8 w-full px-6 py-12 mx-auto">
         <div>
-          <Heading level={1} className="mb-2">
+          <h1 className="text-stone-950 dark:text-white font-display text-5xl lg:text-6xl font-medium tracking-tighter mb-2">
             {title}
-          </Heading>
+          </h1>
           <p>
             Enter your email address, and we'll send you a link to reset your
             password.
@@ -35,33 +32,32 @@ export default function ForgotForm() {
         </div>
 
         {status && !otpStatus && (
-          <Alert variant="info" title={title}>
+          <div>
             Instructions to reset your password have been sent to {email}, if an
             account with that email address exists.
-          </Alert>
+          </div>
         )}
 
         {otpStatus && (
-          <Alert variant="info" title={title}>
+          <div>
             Your password has been successfully reset. You may now log in.
-          </Alert>
+          </div>
         )}
 
-        {error && (
-          <Alert variant="warning" title={title}>
-            {error.message}
-          </Alert>
-        )}
+        {error && <div>{error.message}</div>}
 
         {loading && <Loading />}
 
         <form className="flex flex-col gap-6">
-          <Input
-            label="Email address"
-            value={email}
-            disabled={loading}
-            onChange={(e) => setEmail(e.target.value)}
-          />
+          <div>
+            <label htmlFor="email-address">Email address</label>
+            <input
+              id="email-address"
+              value={email}
+              disabled={loading}
+              onChange={(e) => setEmail(e.target.value)}
+            />
+          </div>
           <Button
             onClick={async (e) => {
               e.preventDefault();
@@ -159,26 +155,35 @@ export default function ForgotForm() {
               setLoading(false);
             }}
           >
-            <Input
-              label="One-time password"
-              value={otp}
-              disabled={loading}
-              onChange={(e) => setOtp(e.target.value)}
-            />
-            <Input
-              label="Password"
-              value={password}
-              type="password"
-              disabled={loading}
-              onChange={(e) => setPassword(e.target.value)}
-            />
-            <Input
-              label="Confirm password"
-              value={confirmPassword}
-              type="password"
-              disabled={loading}
-              onChange={(e) => setConfirmPassword(e.target.value)}
-            />
+            <div>
+              <label htmlFor="otp">One-time password</label>
+              <input
+                id="otp"
+                value={otp}
+                disabled={loading}
+                onChange={(e) => setOtp(e.target.value)}
+              />
+            </div>
+            <div>
+              <label htmlFor="password">Password</label>
+              <input
+                id="password"
+                type="password"
+                value={password}
+                disabled={loading}
+                onChange={(e) => setPassword(e.target.value)}
+              />
+            </div>
+            <div>
+              <label htmlFor="confirm-password">Confirm password</label>
+              <input
+                id="confirm-password"
+                type="password"
+                value={confirmPassword}
+                disabled={loading}
+                onChange={(e) => setConfirmPassword(e.target.value)}
+              />
+            </div>
             <Button type={"submit"} disabled={loading}>
               Submit
             </Button>

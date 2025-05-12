@@ -1,15 +1,14 @@
 import { Button } from "@/components/Button";
 import { Loading } from "@/components/Loading";
-import { Alert } from "@garden-co/design-system/src/components/atoms/Alert";
-import { Heading } from "@garden-co/design-system/src/components/atoms/Heading";
-import { Input } from "@garden-co/design-system/src/components/molecules/Input";
 import { useAuth } from "jazz-react-auth-betterauth";
+import Image from "next/image";
+import Link from "next/link";
 import { useState } from "react";
 
 const title = "Reset Password";
 
 export default function ResetForm() {
-  const { auth, Image, Link } = useAuth();
+  const { auth } = useAuth();
   const searchParams = new URLSearchParams(window.location.search);
   const token = searchParams.get("token");
   const initialError = searchParams.get("error");
@@ -30,24 +29,20 @@ export default function ResetForm() {
     <div className="min-h-screen flex flex-col justify-center">
       <div className="max-w-md flex flex-col gap-8 w-full px-6 py-12 mx-auto">
         <div>
-          <Heading level={1} className="mb-2">
+          <h1 className="text-stone-950 dark:text-white font-display text-5xl lg:text-6xl font-medium tracking-tighter mb-2">
             {title}
-          </Heading>
+          </h1>
           <p>Enter your new password.</p>
         </div>
 
         {status && (
-          <Alert variant="info" title={title}>
+          <div>
             Your password has been reset. You may now{" "}
             <Link href="/sign-in">sign in</Link>.
-          </Alert>
+          </div>
         )}
 
-        {error && (
-          <Alert variant="warning" title={title}>
-            {error.message}
-          </Alert>
-        )}
+        {error && <div>{error.message}</div>}
 
         {loading && <Loading />}
 
@@ -87,20 +82,26 @@ export default function ResetForm() {
             setLoading(false);
           }}
         >
-          <Input
-            label="Password"
-            type="password"
-            disabled={loading}
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-          />
-          <Input
-            label="Confirm password"
-            type="password"
-            disabled={loading}
-            value={confirmPassword}
-            onChange={(e) => setConfirmPassword(e.target.value)}
-          />
+          <div>
+            <label htmlFor="password">Password</label>
+            <input
+              id="password"
+              type="password"
+              value={password}
+              disabled={loading}
+              onChange={(e) => setPassword(e.target.value)}
+            />
+          </div>
+          <div>
+            <label htmlFor="confirm-password">Confirm password</label>
+            <input
+              id="confirm-password"
+              type="password"
+              value={confirmPassword}
+              disabled={loading}
+              onChange={(e) => setConfirmPassword(e.target.value)}
+            />
+          </div>
           <Button type="submit" disabled={loading}>
             Reset password
           </Button>

@@ -1,14 +1,15 @@
 import { clsx } from "clsx";
-import { useAuth } from "jazz-react-auth-betterauth";
+import Image from "next/image";
+import Link from "next/link";
 import { forwardRef } from "react";
 
 interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
   variant?: "primary" | "secondary" | "danger";
   children?: React.ReactNode;
   className?: string;
-  src?: InstanceType<typeof Image>["src"];
-  alt?: InstanceType<typeof Image>["alt"];
-  imageClassName?: InstanceType<typeof Image>["className"];
+  src?: string;
+  alt?: string;
+  imageClassName?: string;
   href?: string;
   newTab?: boolean;
 }
@@ -28,7 +29,6 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
     },
     ref,
   ) => {
-    const { Image, Link } = useAuth();
     const primary =
       "rounded-full border border-solid border-transparent transition-colors flex items-center justify-center bg-foreground text-background gap-2 hover:bg-[#383838] dark:hover:bg-[#ccc] font-medium text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5 sm:w-auto";
     const secondary =

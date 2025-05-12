@@ -1,5 +1,6 @@
 import { Button } from "@/components/Button";
 import { useAuth } from "jazz-react-auth-betterauth";
+import { useRouter } from "next/navigation";
 import { forwardRef } from "react";
 
 interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
@@ -13,7 +14,8 @@ interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
 
 export const DeleteAccountButton = forwardRef<HTMLButtonElement, ButtonProps>(
   ({ children, callbackURL, setLoading, setError, ...buttonProps }, ref) => {
-    const { auth, replace } = useAuth();
+    const router = useRouter();
+    const { auth } = useAuth();
     return (
       <Button
         variant="danger"
@@ -27,7 +29,7 @@ export const DeleteAccountButton = forwardRef<HTMLButtonElement, ButtonProps>(
             },
             {
               onSuccess: () => {
-                replace(callbackURL);
+                router.replace(callbackURL);
               },
             },
           );

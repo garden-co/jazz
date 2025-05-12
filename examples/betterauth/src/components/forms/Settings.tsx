@@ -3,12 +3,10 @@ import { Button } from "@/components/Button";
 import { DeleteAccountButton } from "@/components/DeleteAccountButton";
 import { Loading } from "@/components/Loading";
 import { SSOButton } from "@/components/SSOButton";
-import { Alert } from "@garden-co/design-system/src/components/atoms/Alert";
-import { Heading } from "@garden-co/design-system/src/components/atoms/Heading";
-import { Input } from "@garden-co/design-system/src/components/molecules/Input";
 import { useAccount, useIsAuthenticated } from "jazz-react";
 import { useAuth } from "jazz-react-auth-betterauth";
 import type { FullAuthClient } from "jazz-react-auth-betterauth";
+import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 
 const title = "Settings";
@@ -25,7 +23,8 @@ export default function SettingsForm({
     ReturnType<typeof useAuth>["auth"]["authClient"]["signIn"]["social"]
   >[0]["provider"][];
 }) {
-  const { auth, account, navigate, user } = useAuth();
+  const router = useRouter();
+  const { auth, account, user } = useAuth();
 
   const [accounts, setAccounts] = useState<AccountsType | undefined>(undefined);
   useEffect(() => {
@@ -48,7 +47,7 @@ export default function SettingsForm({
       fetchOptions: {
         onSuccess: () => {
           logOut();
-          navigate("/");
+          router.push("/");
         },
       },
     });
@@ -67,28 +66,22 @@ export default function SettingsForm({
       </header>
       <div className="min-h-screen flex flex-col justify-center font-[family-name:var(--font-geist-sans)]">
         <div className="max-w-md flex flex-col gap-8 w-full px-6 py-12 mx-auto">
-          <Heading level={1} className="mb-2">
+          <h1 className="text-stone-950 dark:text-white font-display text-5xl lg:text-6xl font-medium tracking-tighter mb-2">
             {title}
-          </Heading>
+          </h1>
 
           {status && account && !account?.emailVerified && (
-            <Alert variant="info" title="Settings">
+            <div>
               Instructions to verify your account have been sent to{" "}
               {account.email}, if an account with that email address exists.
-            </Alert>
+            </div>
           )}
 
           {(status || otpStatus) && account && account.emailVerified && (
-            <Alert variant="info" title="Settings">
-              Your account has been successfully verified.
-            </Alert>
+            <div>Your account has been successfully verified.</div>
           )}
 
-          {error && (
-            <Alert variant="warning" title="Settings">
-              {error.message}
-            </Alert>
-          )}
+          {error && <div>{error.message}</div>}
 
           {loading && <Loading />}
 
@@ -206,12 +199,15 @@ export default function SettingsForm({
                 setLoading(false);
               }}
             >
-              <Input
-                label="One-time password"
-                value={otp}
-                disabled={loading}
-                onChange={(e) => setOtp(e.target.value)}
-              />
+              <div>
+                <label htmlFor="otp">One-time password</label>
+                <input
+                  id="otp"
+                  value={otp}
+                  disabled={loading}
+                  onChange={(e) => setOtp(e.target.value)}
+                />
+              </div>
               <Button type={"submit"} disabled={loading}>
                 Submit
               </Button>
