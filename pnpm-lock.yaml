@@ -12700,8 +12700,8 @@ packages:
     engines: {node: '>=10'}
     hasBin: true
 
-  semver@7.7.1:
-    resolution: {integrity: sha512-hlq8tAfn0m/61p4BVRcPzIGr6LKiMwo4VM6dGi6pt4qcRkmNzTcWq6eCEjEh+qXjkMDvPlOFFSGwQjoEa6gyMA==}
+  semver@7.7.2:
+    resolution: {integrity: sha512-RF0Fw+rO5AMf9MAyaRXI4AV0Ulj5lMHqVxxdSgiVbixSCXoEmmX/jk0CuJw4+3SqroYO9VoUh+HcuJivvtJemA==}
     engines: {node: '>=10'}
     hasBin: true
 
@@ -15294,7 +15294,7 @@ snapshots:
       outdent: 0.5.0
       prettier: 2.8.8
       resolve-from: 5.0.0
-      semver: 7.7.1
+      semver: 7.7.2
 
   '@changesets/assemble-release-plan@6.0.8':
     dependencies:
@@ -15303,7 +15303,7 @@ snapshots:
       '@changesets/should-skip-package': 0.1.2
       '@changesets/types': 6.1.0
       '@manypkg/get-packages': 1.1.3
-      semver: 7.7.1
+      semver: 7.7.2
 
   '@changesets/changelog-git@0.2.1':
     dependencies:
@@ -15336,7 +15336,7 @@ snapshots:
       package-manager-detector: 0.2.11
       picocolors: 1.1.1
       resolve-from: 5.0.0
-      semver: 7.7.1
+      semver: 7.7.2
       spawndamnit: 3.0.1
       term-size: 2.2.1
 
@@ -15359,7 +15359,7 @@ snapshots:
       '@changesets/types': 6.1.0
       '@manypkg/get-packages': 1.1.3
       picocolors: 1.1.1
-      semver: 7.7.1
+      semver: 7.7.2
 
   '@changesets/get-release-plan@4.0.12':
     dependencies:
@@ -15908,7 +15908,7 @@ snapshots:
       resolve: 1.22.10
       resolve-from: 5.0.0
       resolve.exports: 2.0.3
-      semver: 7.7.1
+      semver: 7.7.2
       send: 0.19.1
       slugify: 1.6.6
       source-map-support: 0.5.21
@@ -15945,7 +15945,7 @@ snapshots:
       getenv: 1.0.0
       glob: 10.4.5
       resolve-from: 5.0.0
-      semver: 7.7.1
+      semver: 7.7.2
       slash: 3.0.0
       slugify: 1.6.6
       xcode: 3.0.1
@@ -15964,7 +15964,7 @@ snapshots:
       getenv: 1.0.0
       glob: 10.4.5
       resolve-from: 5.0.0
-      semver: 7.7.1
+      semver: 7.7.2
       slash: 3.0.0
       slugify: 1.6.6
       xcode: 3.0.1
@@ -15988,7 +15988,7 @@ snapshots:
       require-from-string: 2.0.2
       resolve-from: 5.0.0
       resolve-workspace-root: 2.0.0
-      semver: 7.7.1
+      semver: 7.7.2
       slugify: 1.6.6
       sucrase: 3.35.0
     transitivePeerDependencies:
@@ -16006,7 +16006,7 @@ snapshots:
       require-from-string: 2.0.2
       resolve-from: 5.0.0
       resolve-workspace-root: 2.0.0
-      semver: 7.7.1
+      semver: 7.7.2
       slugify: 1.6.6
       sucrase: 3.35.0
     transitivePeerDependencies:
@@ -16051,7 +16051,7 @@ snapshots:
       minimatch: 3.1.2
       p-limit: 3.1.0
       resolve-from: 5.0.0
-      semver: 7.7.1
+      semver: 7.7.2
     transitivePeerDependencies:
       - supports-color
 
@@ -16064,7 +16064,7 @@ snapshots:
       jimp-compact: 0.16.1
       parse-png: 2.1.0
       resolve-from: 5.0.0
-      semver: 7.7.1
+      semver: 7.7.2
       temp-dir: 2.0.0
       unique-string: 2.0.0
 
@@ -16143,7 +16143,7 @@ snapshots:
       debug: 4.4.0
       fs-extra: 9.1.0
       resolve-from: 5.0.0
-      semver: 7.7.1
+      semver: 7.7.2
       xml2js: 0.6.0
     transitivePeerDependencies:
       - supports-color
@@ -16572,7 +16572,7 @@ snapshots:
       https-proxy-agent: 7.0.6
       node-fetch: 2.7.0
       nopt: 8.1.0
-      semver: 7.7.1
+      semver: 7.7.2
       tar: 7.4.3
     transitivePeerDependencies:
       - encoding
@@ -16682,7 +16682,7 @@ snapshots:
 
   '@npmcli/fs@3.1.1':
     dependencies:
-      semver: 7.7.1
+      semver: 7.7.2
 
   '@octokit/action@6.1.0':
     dependencies:
@@ -17428,7 +17428,7 @@ snapshots:
       execa: 5.1.1
       node-stream-zip: 1.15.0
       ora: 5.4.1
-      semver: 7.7.1
+      semver: 7.7.2
       strip-ansi: 5.2.0
       wcwidth: 1.0.1
       yaml: 2.7.1
@@ -17482,7 +17482,7 @@ snapshots:
       open: 6.4.0
       ora: 5.4.1
       prompts: 2.4.2
-      semver: 7.7.1
+      semver: 7.7.2
       shell-quote: 1.8.2
       sudo-prompt: 9.2.1
 
@@ -17507,7 +17507,7 @@ snapshots:
       fs-extra: 8.1.0
       graceful-fs: 4.2.11
       prompts: 2.4.2
-      semver: 7.7.1
+      semver: 7.7.2
     transitivePeerDependencies:
       - bufferutil
       - supports-color
@@ -17676,7 +17676,7 @@ snapshots:
       metro-core: 0.81.5
       node-fetch: 2.7.0
       readline: 1.3.0
-      semver: 7.7.1
+      semver: 7.7.2
     optionalDependencies:
       '@react-native-community/cli-server-api': 15.0.1
     transitivePeerDependencies:
@@ -18159,7 +18159,7 @@ snapshots:
       chokidar: 4.0.3
       kleur: 4.1.5
       sade: 1.8.1
-      semver: 7.7.1
+      semver: 7.7.2
       svelte: 5.28.2
       svelte2tsx: 0.7.37(svelte@5.28.2)(typescript@5.6.2)
     transitivePeerDependencies:
@@ -18946,7 +18946,7 @@ snapshots:
       debug: 4.4.0
       globby: 11.1.0
       is-glob: 4.0.3
-      semver: 7.7.1
+      semver: 7.7.2
       tsutils: 3.21.0(typescript@5.6.2)
     optionalDependencies:
       typescript: 5.6.2
@@ -18961,7 +18961,7 @@ snapshots:
       globby: 11.1.0
       is-glob: 4.0.3
       minimatch: 9.0.5
-      semver: 7.7.1
+      semver: 7.7.2
       ts-api-utils: 1.4.3(typescript@5.6.2)
     optionalDependencies:
       typescript: 5.6.2
@@ -18976,7 +18976,7 @@ snapshots:
       fast-glob: 3.3.3
       is-glob: 4.0.3
       minimatch: 9.0.5
-      semver: 7.7.1
+      semver: 7.7.2
       ts-api-utils: 2.1.0(typescript@5.6.2)
       typescript: 5.6.2
     transitivePeerDependencies:
@@ -18992,7 +18992,7 @@ snapshots:
       '@typescript-eslint/typescript-estree': 5.62.0(typescript@5.6.2)
       eslint: 8.57.1
       eslint-scope: 5.1.1
-      semver: 7.7.1
+      semver: 7.7.2
     transitivePeerDependencies:
       - supports-color
       - typescript
@@ -20978,7 +20978,7 @@ snapshots:
   eslint-compat-utils@0.5.1(eslint@9.26.0(jiti@2.4.2)):
     dependencies:
       eslint: 9.26.0(jiti@2.4.2)
-      semver: 7.7.1
+      semver: 7.7.2
 
   eslint-config-prettier@8.10.0(eslint@8.57.1):
     dependencies:
@@ -21056,7 +21056,7 @@ snapshots:
       postcss-load-config: 3.1.4(postcss@8.5.3)
       postcss-safe-parser: 6.0.0(postcss@8.5.3)
       postcss-selector-parser: 6.1.2
-      semver: 7.7.1
+      semver: 7.7.2
       svelte-eslint-parser: 0.43.0(svelte@5.28.2)
     optionalDependencies:
       svelte: 5.28.2
@@ -21071,7 +21071,7 @@ snapshots:
       natural-compare: 1.4.0
       nth-check: 2.1.1
       postcss-selector-parser: 6.1.2
-      semver: 7.7.1
+      semver: 7.7.2
       vue-eslint-parser: 9.4.3(eslint@9.26.0(jiti@2.4.2))
       xml-name-validator: 4.0.0
     transitivePeerDependencies:
@@ -21320,7 +21320,7 @@ snapshots:
     dependencies:
       ajv: 8.17.1
       expo: 52.0.42(@babel/core@7.27.1)(@babel/preset-env@7.27.2(@babel/core@7.27.1))(@expo/metro-runtime@4.0.1(react-native@0.76.7(@babel/core@7.27.1)(@babel/preset-env@7.27.2(@babel/core@7.27.1))(@react-native-community/cli-server-api@15.0.1)(@types/react@18.3.12)(react@18.3.1)))(react-native@0.76.7(@babel/core@7.27.1)(@babel/preset-env@7.27.2(@babel/core@7.27.1))(@react-native-community/cli-server-api@15.0.1)(@types/react@18.3.12)(react@18.3.1))(react@18.3.1)
-      semver: 7.7.1
+      semver: 7.7.2
 
   expo-clipboard@7.0.1(expo@52.0.42(@babel/core@7.27.1)(@babel/preset-env@7.27.2(@babel/core@7.27.1))(@expo/metro-runtime@4.0.1(react-native@0.76.7(@babel/core@7.27.1)(@babel/preset-env@7.27.2(@babel/core@7.27.1))(@react-native-community/cli-server-api@15.0.1)(@types/react@18.3.12)(react@18.3.1)))(react-native@0.76.7(@babel/core@7.27.1)(@babel/preset-env@7.27.2(@babel/core@7.27.1))(@react-native-community/cli-server-api@15.0.1)(@types/react@18.3.12)(react@18.3.1))(react@18.3.1))(react-native@0.76.7(@babel/core@7.27.1)(@babel/preset-env@7.27.2(@babel/core@7.27.1))(@react-native-community/cli-server-api@15.0.1)(@types/react@18.3.12)(react@18.3.1))(react@18.3.1):
     dependencies:
@@ -22546,7 +22546,7 @@ snapshots:
       '@babel/parser': 7.27.2
       '@istanbuljs/schema': 0.1.3
       istanbul-lib-coverage: 3.2.2
-      semver: 7.7.1
+      semver: 7.7.2
     transitivePeerDependencies:
       - supports-color
 
@@ -23195,7 +23195,7 @@ snapshots:
 
   make-dir@4.0.0:
     dependencies:
-      semver: 7.7.1
+      semver: 7.7.2
 
   makeerror@1.0.12:
     dependencies:
@@ -23681,7 +23681,7 @@ snapshots:
 
   node-abi@3.75.0:
     dependencies:
-      semver: 7.7.1
+      semver: 7.7.2
 
   node-addon-api@7.1.1: {}
 
@@ -23742,7 +23742,7 @@ snapshots:
     dependencies:
       hosted-git-info: 7.0.2
       proc-log: 4.2.0
-      semver: 7.7.1
+      semver: 7.7.2
       validate-npm-package-name: 5.0.1
 
   npm-packlist@5.1.3:
@@ -24676,7 +24676,7 @@ snapshots:
       react: 18.3.1
       react-native: 0.76.7(@babel/core@7.27.1)(@babel/preset-env@7.27.2(@babel/core@7.27.1))(@react-native-community/cli-server-api@15.0.1)(@types/react@18.3.12)(react@18.3.1)
       react-native-reanimated: 3.16.7(@babel/core@7.27.1)(react-native@0.76.7(@babel/core@7.27.1)(@babel/preset-env@7.27.2(@babel/core@7.27.1))(@react-native-community/cli-server-api@15.0.1)(@types/react@18.3.12)(react@18.3.1))(react@18.3.1)
-      semver: 7.7.1
+      semver: 7.7.2
       tailwindcss: 3.4.17
     optionalDependencies:
       react-native-safe-area-context: 4.12.0(react-native@0.76.7(@babel/core@7.27.1)(@babel/preset-env@7.27.2(@babel/core@7.27.1))(@react-native-community/cli-server-api@15.0.1)(@types/react@18.3.12)(react@18.3.1))(react@18.3.1)
@@ -24693,7 +24693,7 @@ snapshots:
       react: 18.3.1
       react-native: 0.76.7(@babel/core@7.27.1)(@babel/preset-env@7.27.2(@babel/core@7.27.1))(@react-native-community/cli-server-api@15.0.1)(@types/react@18.3.12)(react@18.3.1)
       react-native-reanimated: 3.16.7(@babel/core@7.27.1)(react-native@0.76.7(@babel/core@7.27.1)(@babel/preset-env@7.27.2(@babel/core@7.27.1))(@react-native-community/cli-server-api@15.0.1)(@types/react@18.3.12)(react@18.3.1))(react@18.3.1)
-      semver: 7.7.1
+      semver: 7.7.2
       tailwindcss: 3.3.2
     optionalDependencies:
       react-native-safe-area-context: 5.3.0(react-native@0.76.7(@babel/core@7.27.1)(@babel/preset-env@7.27.2(@babel/core@7.27.1))(@react-native-community/cli-server-api@15.0.1)(@types/react@18.3.12)(react@18.3.1))(react@18.3.1)
@@ -24865,7 +24865,7 @@ snapshots:
       react-refresh: 0.14.2
       regenerator-runtime: 0.13.11
       scheduler: 0.24.0-canary-efb381bbf-20230505
-      semver: 7.7.1
+      semver: 7.7.2
       stacktrace-parser: 0.1.11
       whatwg-fetch: 3.6.20
       ws: 6.2.3
@@ -25342,7 +25342,7 @@ snapshots:
 
   semver@7.6.3: {}
 
-  semver@7.7.1: {}
+  semver@7.7.2: {}
 
   send@0.19.0:
     dependencies:
@@ -25470,7 +25470,7 @@ snapshots:
     dependencies:
       color: 4.2.3
       detect-libc: 2.0.4
-      semver: 7.7.1
+      semver: 7.7.2
     optionalDependencies:
       '@img/sharp-darwin-arm64': 0.33.5
       '@img/sharp-darwin-x64': 0.33.5
@@ -25497,7 +25497,7 @@ snapshots:
     dependencies:
       color: 4.2.3
       detect-libc: 2.0.4
-      semver: 7.7.1
+      semver: 7.7.2
     optionalDependencies:
       '@img/sharp-darwin-arm64': 0.34.1
       '@img/sharp-darwin-x64': 0.34.1
@@ -26765,7 +26765,7 @@ snapshots:
       espree: 9.6.1
       esquery: 1.6.0
       lodash: 4.17.21
-      semver: 7.7.1
+      semver: 7.7.2
     transitivePeerDependencies:
       - supports-color
 

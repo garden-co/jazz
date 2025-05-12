@@ -93,10 +93,13 @@ export class BetterAuth<T extends ClientOptions> {
   logIn = async () => {
     const session = await this.authClient.getSession();
     if (!session) throw new Error("Not authenticated");
-    const credentials = (await this.authClient.jazzPlugin.decryptCredentials())
-      .data as AuthCredentials;
-    await this.authenticate(credentials);
-    await BetterAuth.loadAuthData(this.authSecretStorage, credentials);
+    const credentials: AuthCredentials | null = (
+      await this.authClient.jazzPlugin.decryptCredentials()
+    ).data;
+    if (credentials) {
+      await this.authenticate(credentials);
+      await BetterAuth.loadAuthData(this.authSecretStorage, credentials);
+    }
   };
 
   /**

@@ -7,7 +7,7 @@ import Image from "next/image";
 import { useCallback } from "react";
 
 export default function Home() {
-  const { auth, user, account } = useAuth();
+  const { auth, account, hasCredentials } = useAuth();
   const { me, logOut } = useAccount({ resolve: { profile: {} } });
   const isAuthenticated = useIsAuthenticated();
   const signOut = useCallback(() => {
@@ -20,7 +20,7 @@ export default function Home() {
     });
   }, [logOut, auth]);
   console.log("me", me);
-  console.log("user", user);
+  console.log("hasCredentials", hasCredentials);
   console.log("account", account);
   console.log("auth.state", auth.state);
   console.log("isAuthenticated", isAuthenticated);
@@ -29,7 +29,7 @@ export default function Home() {
     <>
       <header className="absolute p-4 top-0 left-0 w-full z-10 flex items-center justify-between gap-4">
         <div className="float-start flex gap-4">
-          {me && user && isAuthenticated && (
+          {me && hasCredentials && isAuthenticated && (
             <>
               <Button onClick={signOut}>Sign out</Button>
               <Button href="/settings">Settings</Button>
@@ -37,7 +37,7 @@ export default function Home() {
           )}
         </div>
         <div className="float-end flex gap-4">
-          {!user && !isAuthenticated && (
+          {!hasCredentials && !isAuthenticated && (
             <>
               <Button href="/sign-in" variant="secondary">
                 Sign in
@@ -57,7 +57,7 @@ export default function Home() {
             priority
           />
           <p className="text-sm/6 text-center sm:text-left font-[family-name:var(--font-geist-mono)]">
-            {me && user && isAuthenticated && (
+            {me && hasCredentials && isAuthenticated && (
               <>
                 {"Signed in as "}
                 <span className="bg-black/[.05] dark:bg-white/[.06] px-1 py-0.5 rounded font-[family-name:var(--font-geist-mono)] font-semibold">
@@ -66,11 +66,11 @@ export default function Home() {
                 .
               </>
             )}
-            {!user && !isAuthenticated && <>Not signed in.</>}
-            {!user && isAuthenticated && (
+            {!hasCredentials && !isAuthenticated && <>Not signed in.</>}
+            {!hasCredentials && isAuthenticated && (
               <>Not connected to the authentication server.</>
             )}
-            {user && !isAuthenticated && (
+            {hasCredentials && !isAuthenticated && (
               <>Authenticated, but not logged in. Try refreshing.</>
             )}
           </p>

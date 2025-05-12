@@ -58,7 +58,9 @@
     "shiki": "^3.2.1",
     "tailwind-merge": "^1.14.0",
     "tailwindcss-animate": "^1.0.7",
-    "unist-util-visit": "^5.0.0"
+    "unist-util-visit": "^5.0.0",
+    "jazz-react-auth-betterauth": "link:../../packages/jazz-react-auth-betterauth",
+    "jazz-auth-betterauth": "link:../../packages/jazz-auth-betterauth"
   },
   "devDependencies": {
     "@biomejs/biome": "1.9.4",

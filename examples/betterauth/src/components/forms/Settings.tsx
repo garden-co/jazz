@@ -24,14 +24,14 @@ export default function SettingsForm({
   >[0]["provider"][];
 }) {
   const router = useRouter();
-  const { auth, account, user } = useAuth();
+  const { auth, account, hasCredentials } = useAuth();
 
   const [accounts, setAccounts] = useState<AccountsType | undefined>(undefined);
   useEffect(() => {
     auth.authClient.useSession.subscribe(() => {
       auth.authClient.listAccounts().then((x) => setAccounts(x));
     });
-  }, [user, account, accounts]);
+  }, [hasCredentials, account, accounts]);
 
   const [status, setStatus] = useState<boolean>(false);
   const [loading, setLoading] = useState<boolean>(false);
@@ -57,7 +57,7 @@ export default function SettingsForm({
     <>
       <header className="absolute p-4 top-0 left-0 w-full z-10 flex items-center justify-between gap-4">
         <div className="float-start">
-          {me && user && account && isAuthenticated && (
+          {me && hasCredentials && account && isAuthenticated && (
             <Button className="float-start" onClick={signOut}>
               Sign out
             </Button>

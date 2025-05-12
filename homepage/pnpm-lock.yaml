@@ -244,6 +244,9 @@ importers:
       hast-util-to-string:
         specifier: ^3.0.1
         version: 3.0.1
+      jazz-auth-betterauth:
+        specifier: link:../../packages/jazz-auth-betterauth
+        version: link:../../packages/jazz-auth-betterauth
       jazz-browser:
         specifier: link:../../packages/jazz-browser
         version: link:../../packages/jazz-browser
@@ -259,6 +262,9 @@ importers:
       jazz-react:
         specifier: link:../../packages/jazz-react
         version: link:../../packages/jazz-react
+      jazz-react-auth-betterauth:
+        specifier: link:../../packages/jazz-react-auth-betterauth
+        version: link:../../packages/jazz-react-auth-betterauth
       jazz-react-auth-clerk:
         specifier: link:../../packages/jazz-react-auth-clerk
         version: link:../../packages/jazz-react-auth-clerk
@@ -2903,8 +2909,8 @@ packages:
   selderee@0.11.0:
     resolution: {integrity: sha512-5TF+l7p4+OsnP8BCCvSyZiSPc4x4//p5uPwK8TCnVPJYRmU2aYKMpOXvw8zM5a5JvuuCGN1jmsMwuU2W02ukfA==}
 
-  semver@7.7.1:
-    resolution: {integrity: sha512-hlq8tAfn0m/61p4BVRcPzIGr6LKiMwo4VM6dGi6pt4qcRkmNzTcWq6eCEjEh+qXjkMDvPlOFFSGwQjoEa6gyMA==}
+  semver@7.7.2:
+    resolution: {integrity: sha512-RF0Fw+rO5AMf9MAyaRXI4AV0Ulj5lMHqVxxdSgiVbixSCXoEmmX/jk0CuJw4+3SqroYO9VoUh+HcuJivvtJemA==}
     engines: {node: '>=10'}
     hasBin: true
 
@@ -6922,7 +6928,7 @@ snapshots:
     dependencies:
       parseley: 0.12.1
 
-  semver@7.7.1:
+  semver@7.7.2:
     optional: true
 
   serialize-javascript@6.0.2:
@@ -6935,7 +6941,7 @@ snapshots:
     dependencies:
       color: 4.2.3
       detect-libc: 2.0.4
-      semver: 7.7.1
+      semver: 7.7.2
     optionalDependencies:
       '@img/sharp-darwin-arm64': 0.33.5
       '@img/sharp-darwin-x64': 0.33.5

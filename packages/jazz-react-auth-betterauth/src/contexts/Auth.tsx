@@ -24,14 +24,15 @@ const authClient = <T extends ClientOptions>(
   onSessionChange?: () => void | Promise<void>,
   options?: T,
 ) => {
-  const { me } = useAccount();
   const isAuthenticated = useIsAuthenticated();
   const auth = useBetterAuth(options);
   type Data = Awaited<
     ReturnType<typeof auth.authClient.getSession<{}>>
   >["data"];
   type User = NonNullable<Data>["user"];
-  const [user, setUser] = useState<AuthCredentials | undefined>(undefined);
+  const [jazzCredentials, setJazzCredentials] = useState<
+    AuthCredentials | undefined
+  >(undefined);
   const [account, setAccount] = useState<User | undefined>(undefined);
   function useUpdateUser() {
     auth.authClient.jazzPlugin
@@ -39,8 +40,8 @@ const authClient = <T extends ClientOptions>(
       .then((x) => {
         if (x.error) console.error("Error decrypting credentials:", x.error);
         const data = x.data ?? undefined;
-        if (!equalCredentials(user, data)) {
-          setUser(data);
+        if (!equalCredentials(jazzCredentials, data)) {
+          setJazzCredentials(data);
         }
       })
       .catch((error) => {
@@ -48,21 +49,29 @@ const authClient = <T extends ClientOptions>(
       });
   }
   useEffect(() => {
-    auth.authClient.useSession.subscribe(({ data }: { data: Data }) => {
-      if (data?.user) setAccount(data.user);
-      if (data?.user.encryptedCredentials) {
-        useUpdateUser();
-      } else if (data && !data.user.encryptedCredentials) {
-        auth.signIn().then(() => {
-          useUpdateUser();
-        });
-      }
-      if (onSessionChange) onSessionChange();
-    });
-  }, [user, account, auth.state, isAuthenticated]);
+    const unsubscribe = auth.authClient.useSession.subscribe(
+      ({ data }: { data: Data }) => {
+        if (data && !data.user.encryptedCredentials) {
+          auth.signIn().then(() => {
+            useUpdateUser();
+          });
+        } else if (
+          data?.user.encryptedCredentials &&
+          data.user.encryptedCredentials !== account?.encryptedCredentials
+        ) {
+          auth.logIn().then(() => {
+            useUpdateUser();
+          });
+        }
+        if (data?.user) setAccount(data.user);
+        if (onSessionChange) onSessionChange();
+      },
+    );
+    unsubscribe();
+  }, [jazzCredentials, account, auth.state, isAuthenticated]);
   return {
     auth: auth,
-    user: user,
+    hasCredentials: auth.state !== "anonymous",
     account: account,
   };
 };
