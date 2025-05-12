@@ -1,5 +1,11 @@
 # cojson
 
+## 0.13.25
+
+### Patch Changes
+
+- a846e07: Block load of invalid ids on a lower level and do not break sync when getting invalid ids
+
 ## 0.13.23
 
 ### Patch Changes

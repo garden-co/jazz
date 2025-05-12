@@ -1,5 +1,12 @@
 # form
 
+## 0.1.32
+
+### Patch Changes
+
+- jazz-react@0.13.25
+- jazz-tools@0.13.25
+
 ## 0.1.31
 
 ### Patch Changes

@@ -17,7 +17,7 @@
   },
   "type": "module",
   "license": "MIT",
-  "version": "0.13.23",
+  "version": "0.13.25",
   "dependencies": {
     "@scure/bip39": "^1.3.0",
     "cojson": "workspace:*",
