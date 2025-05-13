@@ -1,7 +1,7 @@
 "use client";
 
 import type { ClientOptions } from "better-auth/client";
-import { useAccount, useIsAuthenticated } from "jazz-react";
+import { useIsAuthenticated } from "jazz-react";
 import type { AuthCredentials } from "jazz-tools";
 import { createContext, useContext, useEffect, useState } from "react";
 // biome-ignore lint/correctness/useImportExtensions: <explanation>
@@ -85,7 +85,7 @@ export function AuthProvider({
 }: {
   children: React.ReactNode;
   onSessionChange?: () => void | Promise<void>;
-  options: Parameters<typeof useBetterAuth>[0];
+  options?: Parameters<typeof useBetterAuth>[0];
 }) {
   return (
     <AuthContext.Provider

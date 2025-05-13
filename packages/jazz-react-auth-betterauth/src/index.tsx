@@ -32,7 +32,7 @@ export function useBetterAuth<T extends ClientOptions>(options?: T) {
   const isAuthenticated = useIsAuthenticated();
 
   useEffect(() => {
-    authMethod.authClient.useSession.subscribe((value) => {
+    return authMethod.authClient.useSession.subscribe((value) => {
       authMethod.onUserChange(value.data ?? undefined);
     });
   }, [isAuthenticated]);
