@@ -19,7 +19,9 @@
     "format-and-lint": "biome check .",
     "format-and-lint:fix": "biome check . --write",
     "build": "rm -rf ./dist && tsc --sourceMap --outDir dist -p tsconfig.build.json",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build",
+    "test": "vitest --run --root ../../ --project jazz-betterauth-server-plugin",
+    "test:watch": "vitest --watch --root ../../ --project jazz-betterauth-server-plugin"
   },
   "devDependencies": {
     "typescript": "~5.6.2",
