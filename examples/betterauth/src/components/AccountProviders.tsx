@@ -1,10 +1,5 @@
 import { Button } from "@/components/Button";
-import { useAuth } from "jazz-react-auth-betterauth";
-
-declare const listAccounts: ReturnType<
-  typeof useAuth
->["auth"]["authClient"]["listAccounts"];
-type AccountsType = Awaited<ReturnType<typeof listAccounts<{}>>>;
+import { AccountsType, useAuth } from "jazz-react-auth-betterauth";
 
 export const AccountProviders = ({
   setLoading,

@@ -1,7 +1,6 @@
 import { Button } from "@/components/Button";
 import { Loading } from "@/components/Loading";
 import { useAuth } from "jazz-react-auth-betterauth";
-import Image from "next/image";
 import Link from "next/link";
 import { useState } from "react";
 

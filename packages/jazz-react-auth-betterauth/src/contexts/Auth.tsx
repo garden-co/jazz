@@ -1,9 +1,8 @@
 "use client";
 
 import type { ClientOptions } from "better-auth/client";
-import { useIsAuthenticated } from "jazz-react";
 import type { AuthCredentials } from "jazz-tools";
-import { createContext, useContext, useEffect, useState } from "react";
+import { createContext, useContext } from "react";
 // biome-ignore lint/correctness/useImportExtensions: <explanation>
 import { useBetterAuth } from "../index";
 
@@ -20,59 +19,12 @@ const equalCredentials = (a?: AuthCredentials, b?: AuthCredentials) => {
   }
 };
 
-const authClient = <T extends ClientOptions>(
-  onSessionChange?: () => void | Promise<void>,
-  options?: T,
-) => {
-  const isAuthenticated = useIsAuthenticated();
+const authClient = <T extends ClientOptions>(options?: T) => {
   const auth = useBetterAuth(options);
-  type Data = Awaited<
-    ReturnType<typeof auth.authClient.getSession<{}>>
-  >["data"];
-  type User = NonNullable<Data>["user"];
-  const [jazzCredentials, setJazzCredentials] = useState<
-    AuthCredentials | undefined
-  >(undefined);
-  const [account, setAccount] = useState<User | undefined>(undefined);
-  function useUpdateUser() {
-    auth.authClient.jazzPlugin
-      .decryptCredentials()
-      .then((x) => {
-        if (x.error) console.error("Error decrypting credentials:", x.error);
-        const data = x.data ?? undefined;
-        if (!equalCredentials(jazzCredentials, data)) {
-          setJazzCredentials(data);
-        }
-      })
-      .catch((error) => {
-        console.error("Error decrypting credentials:", error);
-      });
-  }
-  useEffect(() => {
-    const unsubscribe = auth.authClient.useSession.subscribe(
-      ({ data }: { data: Data }) => {
-        if (data && !data.user.encryptedCredentials) {
-          auth.signIn().then(() => {
-            useUpdateUser();
-          });
-        } else if (
-          data?.user.encryptedCredentials &&
-          data.user.encryptedCredentials !== account?.encryptedCredentials
-        ) {
-          auth.logIn().then(() => {
-            useUpdateUser();
-          });
-        }
-        if (data?.user) setAccount(data.user);
-        if (onSessionChange) onSessionChange();
-      },
-    );
-    unsubscribe();
-  }, [jazzCredentials, account, auth.state, isAuthenticated]);
   return {
     auth: auth,
     hasCredentials: auth.state !== "anonymous",
-    account: account,
+    account: auth.account,
   };
 };
 
@@ -80,17 +32,15 @@ const AuthContext = createContext<ReturnType<typeof authClient> | null>(null);
 
 export function AuthProvider({
   children,
-  onSessionChange,
   options,
 }: {
   children: React.ReactNode;
-  onSessionChange?: () => void | Promise<void>;
   options?: Parameters<typeof useBetterAuth>[0];
 }) {
   return (
     <AuthContext.Provider
       value={{
-        ...authClient(onSessionChange, options),
+        ...authClient(options),
       }}
     >
       {children}

@@ -5,33 +5,30 @@ import { Loading } from "@/components/Loading";
 import { SSOButton } from "@/components/SSOButton";
 import { useAccount, useIsAuthenticated } from "jazz-react";
 import { useAuth } from "jazz-react-auth-betterauth";
-import type { FullAuthClient } from "jazz-react-auth-betterauth";
+import type {
+  AccountsType,
+  FullAuthClient,
+  SSOProviderType,
+} from "jazz-react-auth-betterauth";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 
 const title = "Settings";
 
-declare const listAccounts: ReturnType<
-  typeof useAuth
->["auth"]["authClient"]["listAccounts"];
-type AccountsType = Awaited<ReturnType<typeof listAccounts<{}>>>;
-
 export default function SettingsForm({
   providers,
 }: {
-  providers?: Parameters<
-    ReturnType<typeof useAuth>["auth"]["authClient"]["signIn"]["social"]
-  >[0]["provider"][];
+  providers?: SSOProviderType[];
 }) {
   const router = useRouter();
   const { auth, account, hasCredentials } = useAuth();
 
   const [accounts, setAccounts] = useState<AccountsType | undefined>(undefined);
   useEffect(() => {
-    auth.authClient.useSession.subscribe(() => {
+    return auth.authClient.useSession.subscribe(() => {
       auth.authClient.listAccounts().then((x) => setAccounts(x));
     });
-  }, [hasCredentials, account, accounts]);
+  }, [auth.authClient]);
 
   const [status, setStatus] = useState<boolean>(false);
   const [loading, setLoading] = useState<boolean>(false);

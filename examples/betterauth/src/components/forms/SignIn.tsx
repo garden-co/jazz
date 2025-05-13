@@ -2,7 +2,10 @@ import { Button } from "@/components/Button";
 import { Loading } from "@/components/Loading";
 import { SSOButton } from "@/components/SSOButton";
 import { useAuth } from "jazz-react-auth-betterauth";
-import type { FullAuthClient } from "jazz-react-auth-betterauth";
+import type {
+  FullAuthClient,
+  SSOProviderType,
+} from "jazz-react-auth-betterauth";
 import Image from "next/image";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
@@ -13,9 +16,7 @@ const title = "Sign In";
 export default function SignInForm({
   providers,
 }: {
-  providers?: Parameters<
-    ReturnType<typeof useAuth>["auth"]["authClient"]["signIn"]["social"]
-  >[0]["provider"][];
+  providers?: SSOProviderType[];
 }) {
   const router = useRouter();
   const { auth } = useAuth();

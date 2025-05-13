@@ -1,5 +1,5 @@
 import { Button } from "@/components/Button";
-import { useAuth } from "jazz-react-auth-betterauth";
+import { SSOProviderType, useAuth } from "jazz-react-auth-betterauth";
 import { socialProviderNames } from "jazz-react-auth-betterauth";
 import { forwardRef } from "react";
 
@@ -7,9 +7,7 @@ interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
   children?: React.ReactNode;
   src?: InstanceType<typeof Image>["src"];
   alt?: InstanceType<typeof Image>["alt"];
-  provider: Parameters<
-    ReturnType<typeof useAuth>["auth"]["authClient"]["signIn"]["social"]
-  >[0]["provider"];
+  provider: SSOProviderType;
   link?: boolean;
   callbackURL?: string;
   setLoading: React.Dispatch<React.SetStateAction<boolean>>;

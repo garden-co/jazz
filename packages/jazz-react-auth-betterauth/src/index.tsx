@@ -5,7 +5,7 @@ import {
   useIsAuthenticated,
   useJazzContext,
 } from "jazz-react";
-import { useEffect, useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 // biome-ignore lint/correctness/useImportExtensions: <explanation>
 export * from "./contexts/Auth";
@@ -30,12 +30,31 @@ export function useBetterAuth<T extends ClientOptions>(options?: T) {
   }, [context.authenticate, authSecretStorage, options]);
 
   const isAuthenticated = useIsAuthenticated();
+  type Data = Awaited<
+    ReturnType<typeof authMethod.authClient.getSession<{}>>
+  >["data"];
+  type User = NonNullable<Data>["user"];
+  const [account, setAccount] = useState<User | undefined>(undefined);
 
   useEffect(() => {
-    return authMethod.authClient.useSession.subscribe((value) => {
-      authMethod.onUserChange(value.data ?? undefined);
-    });
-  }, [isAuthenticated]);
+    return authMethod.authClient.useSession.subscribe(
+      async ({
+        data,
+      }: {
+        data: Data;
+      }) => {
+        if (!data || !data.user) return;
+        if (data.user.encryptedCredentials === account?.encryptedCredentials)
+          return;
+        if (!data.user.encryptedCredentials) {
+          await authMethod.signIn();
+        } else {
+          await authMethod.logIn();
+        }
+        setAccount(data.user);
+      },
+    );
+  }, [authMethod.authClient, account]);
 
   return {
     state: isAuthenticated
@@ -44,5 +63,6 @@ export function useBetterAuth<T extends ClientOptions>(options?: T) {
     logIn: authMethod.logIn as () => Promise<void>,
     signIn: authMethod.signIn as () => Promise<void>,
     authClient: authMethod.authClient,
+    account: account,
   } as const;
 }

@@ -1,22 +1,5 @@
 import type { ClientOptions } from "better-auth";
 import { createAuthClient } from "better-auth/client";
-import {
-  adminClient,
-  anonymousClient,
-  apiKeyClient,
-  emailOTPClient,
-  genericOAuthClient,
-  magicLinkClient,
-  multiSessionClient,
-  oidcClient,
-  oneTapClient,
-  organizationClient,
-  passkeyClient,
-  phoneNumberClient,
-  ssoClient,
-  twoFactorClient,
-  usernameClient,
-} from "better-auth/client/plugins";
 import { jazzClientPlugin } from "jazz-betterauth-client-plugin";
 import {
   Account,
@@ -75,16 +58,6 @@ export class BetterAuth<T extends ClientOptions> {
       provider: "betterauth",
     } satisfies AuthSetPayload);
   }
-
-  /**
-   * Called when the authentication session changes.
-   * @param session The authentication session.
-   */
-  onUserChange = async (session?: AuthClient<T>["$Infer"]["Session"]) => {
-    if (!session || (session && !session["user"])) return;
-    const isAuthenticated = this.authSecretStorage.isAuthenticated;
-    if (!isAuthenticated) return;
-  };
 
   /**
    * After first authentication.\
