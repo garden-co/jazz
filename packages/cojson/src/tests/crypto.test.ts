@@ -1,4 +1,4 @@
-import { xsalsa20_poly1305 } from "@noble/ciphers/salsa";
+import { xsalsa20poly1305 } from "@noble/ciphers/salsa";
 import { x25519 } from "@noble/curves/ed25519";
 import { blake3 } from "@noble/hashes/blake3";
 import { base58, base64url } from "@scure/base";
@@ -68,7 +68,7 @@ const pureJSCrypto = await PureJSCrypto.create();
         crypto.getSealerID(sender),
         nOnceMaterial,
       ),
-    ).toThrow(/Wrong tag/);
+    ).toThrow(name === "PureJSCrypto" ? "invalid tag" : "Wrong tag");
 
     // trying with wrong sealer secret, by hand
     const nOnce = blake3(
@@ -84,8 +84,8 @@ const pureJSCrypto = await PureJSCrypto.create();
     const sharedSecret = x25519.getSharedSecret(sealer3priv, senderPub);
 
     expect(() => {
-      const _ = xsalsa20_poly1305(sharedSecret, nOnce).decrypt(sealedBytes);
-    }).toThrow("Wrong tag");
+      const _ = xsalsa20poly1305(sharedSecret, nOnce).decrypt(sealedBytes);
+    }).toThrow("invalid tag");
   });
 
   test(`Hashing is deterministic [${name}]`, () => {
@@ -211,7 +211,7 @@ const pureJSCrypto = await PureJSCrypto.create();
 
     const plaintext = new TextEncoder().encode(data);
     const sharedSecret = x25519.getSharedSecret(senderPriv, sealerPub);
-    const sealedBytes = xsalsa20_poly1305(sharedSecret, nOnce).encrypt(
+    const sealedBytes = xsalsa20poly1305(sharedSecret, nOnce).encrypt(
       plaintext,
     );
     const sealed = `sealed_U${base64url.encode(sealedBytes)}`;
