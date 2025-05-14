@@ -1,8 +1,8 @@
 import { marketingCopy } from "@/content/marketingCopy";
 import {
   OpenGraphImage,
-  imageSize,
   imageContentType,
+  imageSize,
 } from "@garden-co/design-system/src/components/organisms/OpenGraphImage";
 
 export const title = marketingCopy.headline;

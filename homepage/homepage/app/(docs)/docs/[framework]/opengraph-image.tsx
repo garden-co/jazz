@@ -1,8 +1,8 @@
 import { getMdxWithToc } from "@/lib/docMdxContent";
 import {
   OpenGraphImage,
-  imageSize,
   imageContentType,
+  imageSize,
 } from "@garden-co/design-system/src/components/organisms/OpenGraphImage";
 
 export const title = "Quickstart";
@@ -21,7 +21,9 @@ export default async function Image({
   const title = tocItems[0]?.value;
 
   if (!title) {
-    throw new Error(`No title from tocItems in opengraph-image.tsx ${framework}`);
+    throw new Error(
+      `No title from tocItems in opengraph-image.tsx ${framework}`,
+    );
   }
 
   return OpenGraphImage({
