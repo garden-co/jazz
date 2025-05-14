@@ -42,7 +42,6 @@
   "version": "0.0.0",
   "pnpm": {
     "onlyBuiltDependencies": [
-      "argon2",
       "better-sqlite3"
     ],
     "peerDependencyRules": {

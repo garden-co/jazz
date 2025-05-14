@@ -9,11 +9,9 @@
     "cojson": "workspace:*",
     "jazz-browser": "workspace:*",
     "jazz-tools": "workspace:*",
-    "argon2": "^0.41.1",
     "better-auth": "^1.2.4",
     "better-sqlite3": "^11.9.1",
-    "zod": "^3.24.2",
-    "@phc/format": "^1.0.0"
+    "zod": "^3.24.2"
   },
   "scripts": {
     "format-and-lint": "biome check .",
@@ -25,7 +23,6 @@
   },
   "devDependencies": {
     "typescript": "~5.6.2",
-    "@types/better-sqlite3": "^7.6.12",
-    "@types/phc__format": "^1.0.1"
+    "@types/better-sqlite3": "^7.6.12"
   }
 }

@@ -1,121 +1,15 @@
-import * as crypto from "node:crypto";
 import type { BetterAuthPlugin } from "better-auth";
-import {
-  APIError,
-  createAuthEndpoint,
-  sessionMiddleware,
-} from "better-auth/api";
+import { createAuthEndpoint, sessionMiddleware } from "better-auth/api";
+import { symmetricDecrypt, symmetricEncrypt } from "better-auth/crypto";
 import type { AgentSecret } from "cojson";
 import type { Account, AuthCredentials, ID } from "jazz-tools";
 import { z } from "zod";
-import { passwordDecrypt, passwordEncrypt } from "./crypto.js";
 import type { UserWithJazz } from "./types.js";
 
-const encrypt = async (
-  credentials: AuthCredentials,
-  passwordSecret: string,
-) => {
-  const credentialsString = JSON.stringify(credentials);
-  return await passwordEncrypt(credentialsString, passwordSecret);
-};
-
-const decrypt = async (
-  encryptedCredentials: string,
-  passwordSecret: string,
-  salt: string,
-): Promise<AuthCredentials> => {
-  const credentialsString = await passwordDecrypt(
-    encryptedCredentials,
-    passwordSecret,
-    salt,
-  );
-  return JSON.parse(credentialsString);
-};
-
-export const jazzPlugin = (publicKey: string, symmetricSecret?: string) => {
+export const jazzPlugin = () => {
   return {
     id: "jazz-plugin",
     endpoints: {
-      setSecret: createAuthEndpoint(
-        "/jazz-plugin/set-secret",
-        {
-          method: "POST",
-          body: z.object({
-            secret: z.string(),
-            signedSecret: z.string(),
-          }),
-          metadata: {
-            openapi: {
-              summary: "Set the symmetric encryption secret",
-              description:
-                "Sets the secret used for encryption & decryption of Jazz authentication credentials.",
-              responses: {
-                200: {
-                  description: "Successful response",
-                  content: {
-                    "application/json": {
-                      schema: {
-                        type: "object",
-                        properties: {
-                          status: {
-                            type: "boolean",
-                          },
-                        },
-                      },
-                    },
-                  },
-                },
-              },
-            },
-          },
-        },
-        async (ctx) => {
-          const verified = crypto.verify(
-            undefined,
-            Buffer.from(ctx.body.secret),
-            publicKey,
-            Buffer.from(ctx.body.signedSecret, "hex"),
-          );
-          if (verified) {
-            const oldSecret = symmetricSecret;
-            // If the old secret exists, update all users' encrypted credentials
-            if (oldSecret && symmetricSecret) {
-              const users = await ctx.context.adapter.findMany<UserWithJazz>({
-                model: "user",
-              });
-              for (const user of users) {
-                const [encryptedCredentials, salt] = await encrypt(
-                  await decrypt(
-                    user.encryptedCredentials,
-                    oldSecret,
-                    user.salt,
-                  ),
-                  symmetricSecret,
-                );
-                await ctx.context.adapter.update<UserWithJazz>({
-                  model: "user",
-                  where: [
-                    {
-                      field: "id",
-                      value: user.id,
-                    },
-                  ],
-                  update: {
-                    encryptedCredentials: encryptedCredentials,
-                    salt: salt,
-                  },
-                });
-              }
-            }
-            symmetricSecret = ctx.body.secret;
-            return ctx.json({ status: true });
-          } else {
-            throw new APIError("BAD_REQUEST", {
-              message: "Could not verify secret signature",
-            });
-          }
-        },
-      ),
       encryptCredentials: createAuthEndpoint(
         "/jazz-plugin/encrypt-credentials",
         {
@@ -153,11 +47,6 @@ export const jazzPlugin = (publicKey: string, symmetricSecret?: string) => {
         },
         async (ctx) => {
           const user = ctx.context.session.user as UserWithJazz;
-          if (!symmetricSecret) {
-            throw new APIError("BAD_REQUEST", {
-              message: "Symmetric secret is not set",
-            });
-          }
           const credentials: AuthCredentials = {
             accountID: ctx.body.accountID as ID<Account>,
             secretSeed: ctx.body.secretSeed
@@ -166,10 +55,10 @@ export const jazzPlugin = (publicKey: string, symmetricSecret?: string) => {
             accountSecret: ctx.body.accountSecret as AgentSecret,
             provider: ctx.body.provider,
           };
-          const [encryptedCredentials, salt] = await encrypt(
-            credentials,
-            symmetricSecret,
-          );
+          const encryptedCredentials = await symmetricEncrypt({
+            key: ctx.context.secret,
+            data: JSON.stringify(credentials),
+          });
           await ctx.context.adapter.update<UserWithJazz>({
             model: "user",
             where: [
@@ -180,7 +69,6 @@ export const jazzPlugin = (publicKey: string, symmetricSecret?: string) => {
             ],
             update: {
               encryptedCredentials: encryptedCredentials,
-              salt: salt,
             },
           });
           return ctx.json({ status: true });
@@ -236,18 +124,13 @@ export const jazzPlugin = (publicKey: string, symmetricSecret?: string) => {
         },
         async (ctx) => {
           const user = ctx.context.session.user as UserWithJazz;
-          if (!symmetricSecret) {
-            throw new APIError("BAD_REQUEST", {
-              message: "Symmetric secret is not set",
-            });
-          }
-          return ctx.json(
-            await decrypt(
-              user.encryptedCredentials,
-              symmetricSecret,
-              user.salt,
-            ),
+          const decrypted: AuthCredentials = JSON.parse(
+            await symmetricDecrypt({
+              key: ctx.context.secret,
+              data: user.encryptedCredentials,
+            }),
           );
+          return ctx.json(decrypted);
         },
       ),
     },
@@ -255,10 +138,6 @@ export const jazzPlugin = (publicKey: string, symmetricSecret?: string) => {
       user: {
         fields: {
           encryptedCredentials: {
-            type: "string",
-            required: false,
-          },
-          salt: {
             type: "string",
             required: false,
           },

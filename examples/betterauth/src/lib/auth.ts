@@ -1,4 +1,3 @@
-import * as crypto from "node:crypto";
 import { appName } from "@/components/emails";
 import { betterAuth } from "better-auth";
 import { getMigrations } from "better-auth/db";
@@ -15,12 +14,9 @@ import {
 import { socialProviders } from "./socialProviders";
 
 export const auth = await (async () => {
-  const generatedKeys = crypto.generateKeyPairSync("ed25519");
-
   // Configure Better Auth server
   const auth = betterAuth({
     appName: appName,
-    secret: undefined as string | undefined,
     database: new Database("sqlite.db"),
     emailAndPassword: {
       enabled: true,
@@ -43,13 +39,7 @@ export const auth = await (async () => {
     },
     plugins: [
       haveIBeenPwned(),
-      jazzPlugin(
-        generatedKeys.publicKey.export({
-          type: "spki",
-          format: "pem",
-        }) as string,
-        process.env.BETTER_AUTH_SECRET,
-      ),
+      jazzPlugin(),
       magicLink({
         sendMagicLink: sendMagicLinkCb,
       }),
@@ -67,28 +57,6 @@ export const auth = await (async () => {
   // Run database migrations
   const migrations = await getMigrations(auth.options);
   await migrations.runMigrations();
-
-  // Set database encryption secret
-  auth.options.secret = process.env.BETTER_AUTH_SECRET;
-  if (process.env.BETTER_AUTH_SECRET) {
-    const signedSecret = crypto
-      .sign(
-        undefined,
-        Buffer.from(process.env.BETTER_AUTH_SECRET),
-        generatedKeys.privateKey,
-      )
-      .toString("hex");
-    auth.api
-      .setSecret({
-        body: {
-          secret: process.env.BETTER_AUTH_SECRET,
-          signedSecret,
-        },
-      })
-      .then((response) => response)
-      .then((data) => console.log(`Set secret: ${data.status}`))
-      .catch((error) => console.error(error));
-  }
 
   return auth;
 })();
