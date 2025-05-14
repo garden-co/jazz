@@ -14,7 +14,7 @@ export function HelpLinks({ className }: { className?: string }) {
     if (typeof window !== "undefined") {
       const currentUrl = window.location.href;
       const body = encodeURIComponent(`Page: ${currentUrl}`);
-      const fullUrl = `https://github.com/garden-co/jazz/issues/new?title=Docs%3A%20&body=${body}`;
+      const fullUrl = `https://github.com/garden-co/jazz/issues/new?template=docs-request.md&body=${body}`;
       setIssueUrl(fullUrl);
     }
   }, []);
