@@ -1,4 +1,4 @@
-import { xsalsa20, xsalsa20_poly1305 } from "@noble/ciphers/salsa";
+import { xsalsa20, xsalsa20poly1305 } from "@noble/ciphers/salsa";
 import { ed25519, x25519 } from "@noble/curves/ed25519";
 import { blake3 } from "@noble/hashes/blake3";
 import { base58 } from "@scure/base";
@@ -165,7 +165,7 @@ export class PureJSCrypto extends CryptoProvider<Blake3State> {
 
     const sharedSecret = x25519.getSharedSecret(senderPriv, sealerPub);
 
-    const sealedBytes = xsalsa20_poly1305(sharedSecret, nOnce).encrypt(
+    const sealedBytes = xsalsa20poly1305(sharedSecret, nOnce).encrypt(
       plaintext,
     );
 
@@ -188,7 +188,7 @@ export class PureJSCrypto extends CryptoProvider<Blake3State> {
 
     const sharedSecret = x25519.getSharedSecret(sealerPriv, senderPub);
 
-    const plaintext = xsalsa20_poly1305(sharedSecret, nOnce).decrypt(
+    const plaintext = xsalsa20poly1305(sharedSecret, nOnce).decrypt(
       sealedBytes,
     );
 
