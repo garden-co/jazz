@@ -19,7 +19,7 @@ export default function DocsLayout({
   navIcon?: IconName;
   tocItems?: TocEntry[];
 }) {
-  const tableOfContentsItems =  tocItems ?? [];
+  const tableOfContentsItems = tocItems ?? [];
 
   const navSections: NavSection[] = [
     {
@@ -41,12 +41,10 @@ export default function DocsLayout({
       {children}
 
       {!!tocItems?.length && (
-        <>
-          <TableOfContents
-            className="pl-3 py-8 shrink-0 text-sm sticky align-start top-[61px] w-[16rem] h-[calc(100vh-61px)] overflow-y-auto hidden lg:block"
-            items={tableOfContentsItems}
-          />
-        </>
+        <TableOfContents
+          className="pl-3 py-8 shrink-0 text-sm sticky align-start top-[61px] w-[16rem] h-[calc(100vh-61px)] overflow-y-auto hidden lg:block"
+          items={tableOfContentsItems}
+        />
       )}
 
       <JazzMobileNav sections={navSections} />

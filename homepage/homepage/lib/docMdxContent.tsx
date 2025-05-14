@@ -1,5 +1,7 @@
 import DocsLayout from "@/components/docs/DocsLayout";
 import { DocNav } from "@/components/docs/DocsNav";
+import { HelpLinks } from "@/components/docs/HelpLinks";
+import { Separator } from "@garden-co/design-system/src/components/atoms/Separator";
 import { Prose } from "@garden-co/design-system/src/components/molecules/Prose";
 import { Toc } from "@stefanprobst/rehype-extract-toc";
 
@@ -62,6 +64,10 @@ export async function DocPage({
       <DocsLayout nav={<DocNav />} tocItems={tocItems}>
         <DocProse>
           <Content />
+
+          <Separator className="my-12" />
+
+          <HelpLinks />
         </DocProse>
       </DocsLayout>
     );
@@ -93,7 +99,7 @@ export async function getMdxWithToc(framework: string, slug?: string[]) {
   const tocItems = filterTocItemsForFramework(
     tableOfContents as Toc,
     framework,
-    headingsFrameworkVisibility
+    headingsFrameworkVisibility,
   );
 
   return {
@@ -104,18 +110,23 @@ export async function getMdxWithToc(framework: string, slug?: string[]) {
 function filterTocItemsForFramework(
   tocItems: Toc,
   framework: string,
-  headingsFrameworkVisibility: Record<string, string[]>
+  headingsFrameworkVisibility: Record<string, string[]>,
 ): Toc {
   return tocItems
-    .map(item => {
+    .map((item) => {
       const isVisible =
-        !item.id || !(item.id in headingsFrameworkVisibility) ||
+        !item.id ||
+        !(item.id in headingsFrameworkVisibility) ||
         headingsFrameworkVisibility[item.id]?.includes(framework);
 
       if (!isVisible) return null;
 
       const filteredChildren = item.children
-        ? filterTocItemsForFramework(item.children, framework, headingsFrameworkVisibility)
+        ? filterTocItemsForFramework(
+            item.children,
+            framework,
+            headingsFrameworkVisibility,
+          )
         : [];
 
       return {
