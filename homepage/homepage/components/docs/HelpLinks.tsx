@@ -2,9 +2,10 @@
 
 import { Button } from "@garden-co/design-system/src/components/atoms/Button";
 import { SiDiscord, SiGithub } from "@icons-pack/react-simple-icons";
+import { clsx } from "clsx";
 import { useEffect, useState } from "react";
 
-export function HelpLinks() {
+export function HelpLinks({ className }: { className?: string }) {
   const [issueUrl, setIssueUrl] = useState(
     "https://github.com/garden-co/jazz/issues/new?title=Docs%3A%20",
   );
@@ -22,7 +23,12 @@ export function HelpLinks() {
     "inline-flex items-center gap-2 text-sm text-stone-600 dark:text-stone-400 hover:text-highlight";
 
   return (
-    <div className="not-prose space-y-2">
+    <div
+      className={clsx(
+        "not-prose flex flex-wrap items-center gap-y-2 gap-x-6",
+        className,
+      )}
+    >
       <Button href={issueUrl} variant="plain" newTab className={linkClassName}>
         <SiGithub className="size-4" />
         Report an issue
