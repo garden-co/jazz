@@ -18,14 +18,12 @@ export function HelpLinks() {
     }
   }, []);
 
+  const linkClassName =
+    "inline-flex items-center gap-2 text-sm text-stone-600 dark:text-stone-400 hover:text-highlight";
+
   return (
-    <div className="flex not-prose gap-6 md:gap-12">
-      <Button
-        href={issueUrl}
-        variant="plain"
-        newTab
-        className="inline-flex items-center gap-2 text-sm hover:text-blue p-2 -m-2"
-      >
+    <div className="not-prose space-y-2">
+      <Button href={issueUrl} variant="plain" newTab className={linkClassName}>
         <SiGithub className="size-4" />
         Report an issue
       </Button>
@@ -33,7 +31,7 @@ export function HelpLinks() {
         href="https://discord.gg/utDMjHYg42"
         variant="plain"
         newTab
-        className="inline-flex items-center gap-2 text-sm hover:text-blue p-2 -m-2"
+        className={linkClassName}
       >
         <SiDiscord className="size-4" />
         Join Discord

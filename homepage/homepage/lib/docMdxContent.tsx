@@ -64,10 +64,6 @@ export async function DocPage({
       <DocsLayout nav={<DocNav />} tocItems={tocItems}>
         <DocProse>
           <Content />
-
-          <Separator className="my-12" />
-
-          <HelpLinks />
         </DocProse>
       </DocsLayout>
     );
