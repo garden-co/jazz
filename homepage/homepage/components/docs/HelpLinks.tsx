@@ -2,14 +2,21 @@
 
 import { Button } from "@garden-co/design-system/src/components/atoms/Button";
 import { SiDiscord, SiGithub } from "@icons-pack/react-simple-icons";
+import { useEffect, useState } from "react";
 
 export function HelpLinks() {
-  const issueUrl =
-    typeof window !== "undefined"
-      ? `https://github.com/garden-co/jazz/issues/new?title=Docs%3A%20&body=${encodeURIComponent(
-          `Page: ${window.location.href}`,
-        )}`
-      : "https://github.com/garden-co/jazz/issues/new?title=Docs%3A%20";
+  const [issueUrl, setIssueUrl] = useState(
+    "https://github.com/garden-co/jazz/issues/new?title=Docs%3A%20",
+  );
+
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      const currentUrl = window.location.href;
+      const body = encodeURIComponent(`Page: ${currentUrl}`);
+      const fullUrl = `https://github.com/garden-co/jazz/issues/new?title=Docs%3A%20&body=${body}`;
+      setIssueUrl(fullUrl);
+    }
+  }, []);
 
   return (
     <div className="flex not-prose gap-6 md:gap-12">
