@@ -19,7 +19,7 @@ export default function SignInForm({
   providers?: SSOProviderType[];
 }) {
   const router = useRouter();
-  const { auth } = useAuth();
+  const auth = useAuth();
   const [email, setEmail] = useState<string>("");
   const [password, setPassword] = useState<string>("");
   const [rememberMe, setRememberMe] = useState(true);

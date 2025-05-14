@@ -222,7 +222,7 @@ export function JazzAndAuth({ children }: { children: ReactNode }) {
 ```
 </CodeGroup>
 
-Within any component where your context is imported, you may then use `const { auth, account, hasCredentials } = useAuth();`, where `auth` is the authentication client, `account` is the authenticated account state, and `hasCredentials` is a boolean indicating if the Jazz context has the decrypted Jazz account credentials from the authentication server.
+Within any component where your context is imported, you may then use `const auth = useAuth();`.
 
 ### Social Sign-On
 

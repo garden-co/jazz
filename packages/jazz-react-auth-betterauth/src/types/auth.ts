@@ -19,10 +19,9 @@ import type {
   Session as GenericSession,
   User as GenericUser,
 } from "jazz-auth-betterauth";
-// biome-ignore lint/correctness/useImportExtensions: <explanation>
-import type { useAuth } from "../contexts/Auth";
+import type { useAuth } from "../contexts/Auth.js";
 
-export type AuthClient = ReturnType<typeof useAuth>["auth"]["authClient"];
+export type AuthClient = ReturnType<typeof useAuth>["authClient"];
 export type Options = AuthClient extends GenericAuthClient<
   infer R extends ClientOptions
 >

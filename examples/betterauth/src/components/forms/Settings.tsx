@@ -21,14 +21,15 @@ export default function SettingsForm({
   providers?: SSOProviderType[];
 }) {
   const router = useRouter();
-  const { auth, account, hasCredentials } = useAuth();
+  const { authClient, account, state } = useAuth();
+  const hasCredentials = state !== "anonymous";
 
   const [accounts, setAccounts] = useState<AccountsType | undefined>(undefined);
   useEffect(() => {
-    return auth.authClient.useSession.subscribe(() => {
-      auth.authClient.listAccounts().then((x) => setAccounts(x));
+    return authClient.useSession.subscribe(() => {
+      authClient.listAccounts().then((x) => setAccounts(x));
     });
-  }, [auth.authClient]);
+  }, [authClient]);
 
   const [status, setStatus] = useState<boolean>(false);
   const [loading, setLoading] = useState<boolean>(false);
@@ -40,15 +41,14 @@ export default function SettingsForm({
   const { me, logOut } = useAccount({ resolve: { profile: true } });
   const isAuthenticated = useIsAuthenticated();
   const signOut = useCallback(() => {
-    auth.authClient.signOut({
-      fetchOptions: {
-        onSuccess: () => {
-          logOut();
-          router.push("/");
-        },
-      },
-    });
-  }, [logOut, auth]);
+    authClient
+      .signOut()
+      .catch(console.error)
+      .finally(() => {
+        logOut();
+        router.push("/");
+      });
+  }, [logOut, authClient]);
 
   return (
     <>
@@ -110,7 +110,7 @@ export default function SettingsForm({
                   e.preventDefault();
                   setLoading(true);
                   const { data, error } =
-                    await auth.authClient.sendVerificationEmail({
+                    await authClient.sendVerificationEmail({
                       email: account.email,
                       callbackURL: `${window.location.origin}`,
                     });
@@ -140,7 +140,7 @@ export default function SettingsForm({
                   e.preventDefault();
                   setLoading(true);
                   const { data, error } = await (
-                    auth.authClient as FullAuthClient
+                    authClient as FullAuthClient
                   ).emailOtp.sendVerificationOtp({
                     email: account.email,
                     type: "email-verification",
@@ -174,7 +174,7 @@ export default function SettingsForm({
                 e.preventDefault();
                 setLoading(true);
                 const { data, error } = await (
-                  auth.authClient as FullAuthClient
+                  authClient as FullAuthClient
                 ).emailOtp.verifyEmail({
                   email: account.email,
                   otp: otp,

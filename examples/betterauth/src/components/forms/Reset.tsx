@@ -7,7 +7,7 @@ import { useState } from "react";
 const title = "Reset Password";
 
 export default function ResetForm() {
-  const { auth } = useAuth();
+  const auth = useAuth();
   const searchParams = new URLSearchParams(window.location.search);
   const token = searchParams.get("token");
   const initialError = searchParams.get("error");

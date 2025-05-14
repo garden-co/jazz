@@ -10,7 +10,7 @@ export const AccountProviders = ({
   setError: React.Dispatch<React.SetStateAction<Error | undefined>>;
   accounts: AccountsType | undefined;
 }) => {
-  const { auth } = useAuth();
+  const auth = useAuth();
   return (
     <table className="w-full text-sm border-full border-collapse">
       <thead className="text-xs">

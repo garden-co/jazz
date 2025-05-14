@@ -27,7 +27,7 @@ export const SSOButton = forwardRef<HTMLButtonElement, ButtonProps>(
     },
     ref,
   ) => {
-    const { auth } = useAuth();
+    const auth = useAuth();
     const providerName = socialProviderNames[provider];
     return (
       <Button

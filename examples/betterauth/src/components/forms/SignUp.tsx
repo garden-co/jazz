@@ -19,7 +19,7 @@ export default function SignUpForm({
   providers?: SSOProviderType[];
 }) {
   const router = useRouter();
-  const { auth } = useAuth();
+  const auth = useAuth();
   const [name, setName] = useState<string>("");
   const [email, setEmail] = useState<string>("");
   const [password, setPassword] = useState<string>("");

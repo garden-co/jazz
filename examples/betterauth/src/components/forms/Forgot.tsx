@@ -7,7 +7,7 @@ import { useState } from "react";
 const title = "Forgot Password";
 
 export default function ForgotForm() {
-  const { auth } = useAuth();
+  const auth = useAuth();
   const [email, setEmail] = useState<string>("");
   const [otp, setOtp] = useState<string>("");
   const [otpSentStatus, setOtpSentStatus] = useState<boolean>(false);

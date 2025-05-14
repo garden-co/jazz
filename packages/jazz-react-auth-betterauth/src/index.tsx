@@ -7,12 +7,9 @@ import {
 } from "jazz-react";
 import { useEffect, useMemo, useState } from "react";
 
-// biome-ignore lint/correctness/useImportExtensions: <explanation>
-export * from "./contexts/Auth";
-// biome-ignore lint/correctness/useImportExtensions: <explanation>
-export * from "./types/auth";
-// biome-ignore lint/correctness/useImportExtensions: <explanation>
-export * from "./lib/social";
+export * from "./contexts/Auth.js";
+export * from "./types/auth.js";
+export * from "./lib/social.js";
 
 /**
  * @category Auth Providers
@@ -48,13 +45,13 @@ export function useBetterAuth<T extends ClientOptions>(options?: T) {
           return;
         if (!data.user.encryptedCredentials) {
           await authMethod.signIn();
-        } else {
+        } else if (!isAuthenticated) {
           await authMethod.logIn();
         }
         setAccount(data.user);
       },
     );
-  }, [authMethod.authClient, account]);
+  }, [authMethod.authClient, account, isAuthenticated]);
 
   return {
     state: isAuthenticated

@@ -3,7 +3,7 @@ import { useRouter } from "next/navigation";
 
 export default function Page() {
   const router = useRouter();
-  const { auth } = useAuth();
+  const auth = useAuth();
   const searchParams = new URLSearchParams(window.location.search);
   const error = searchParams.get("error");
   if (!error) {

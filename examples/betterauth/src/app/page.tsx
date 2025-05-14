@@ -7,22 +7,17 @@ import Image from "next/image";
 import { useCallback } from "react";
 
 export default function Home() {
-  const { auth, account, hasCredentials } = useAuth();
+  const { authClient, account, state } = useAuth();
+  const hasCredentials = state !== "anonymous";
   const { me, logOut } = useAccount({ resolve: { profile: {} } });
   const isAuthenticated = useIsAuthenticated();
   const signOut = useCallback(() => {
-    auth.authClient.signOut({
-      fetchOptions: {
-        onSuccess: () => {
-          logOut();
-        },
-      },
-    });
-  }, [logOut, auth]);
+    authClient.signOut().catch(console.error).finally(logOut);
+  }, [logOut, authClient]);
   console.log("me", me);
-  console.log("hasCredentials", hasCredentials);
   console.log("account", account);
-  console.log("auth.state", auth.state);
+  console.log("state", state);
+  console.log("hasCredentials", hasCredentials);
   console.log("isAuthenticated", isAuthenticated);
 
   return (

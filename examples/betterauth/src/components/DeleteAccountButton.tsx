@@ -13,9 +13,9 @@ interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
 }
 
 export const DeleteAccountButton = forwardRef<HTMLButtonElement, ButtonProps>(
-  ({ children, callbackURL, setLoading, setError, ...buttonProps }, ref) => {
+  ({ callbackURL, setLoading, setError }) => {
     const router = useRouter();
-    const { auth } = useAuth();
+    const auth = useAuth();
     return (
       <Button
         variant="danger"
