@@ -20,12 +20,12 @@ export function HelpLinks({ className }: { className?: string }) {
   }, []);
 
   const linkClassName =
-    "inline-flex items-center gap-2 text-sm text-stone-600 dark:text-stone-400 hover:text-highlight";
+    "inline-flex items-center gap-2 py-1 text-sm text-stone-600 dark:text-stone-400 hover:text-highlight";
 
   return (
     <div
       className={clsx(
-        "not-prose flex flex-wrap items-center gap-y-2 gap-x-6",
+        "not-prose flex flex-wrap items-center gap-x-6",
         className,
       )}
     >

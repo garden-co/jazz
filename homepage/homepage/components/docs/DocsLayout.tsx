@@ -52,7 +52,7 @@ export default function DocsLayout({
         {itemsWithoutH1?.length ? (
           <>
             <TableOfContents items={tableOfContentsItems} />
-            <Separator className="my-6" />
+            <Separator className="my-5" />
           </>
         ) : null}
 

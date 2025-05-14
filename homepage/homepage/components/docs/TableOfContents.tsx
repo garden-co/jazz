@@ -20,9 +20,9 @@ const TocList = ({
   };
 
   return (
-    <ul className="space-y-2" style={{ paddingLeft: level > 0 ? "1rem" : "0" }}>
+    <ul style={{ paddingLeft: level > 0 ? "1rem" : "0" }}>
       {items.map((item) => (
-        <li key={item.id} className="space-y-2">
+        <li key={item.id}>
           {item.id && (
             <Link
               href={`#${item.id}`}
@@ -30,6 +30,7 @@ const TocList = ({
                 isActive(item)
                   ? "text-stone-900 font-medium dark:text-white"
                   : "text-stone-600 dark:text-stone-400 hover:text-highlight",
+                "py-1 inline-block",
               )}
             >
               {item.value}
