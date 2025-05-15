@@ -234,7 +234,7 @@ export class CoMap extends CoValueBase implements CoValue {
       },
     ) as {
       [Key in CoKeys<this>]: IfCo<this[Key], LastAndAllCoMapEdits<this[Key]>>;
-    };
+    } & { [key: string]: any };
   }
 
   /** @internal */

@@ -201,8 +201,8 @@ export const docNavigationItems = [
       },
       {
         name: "History & time travel",
-        href: "/docs/using-covalues/history",
-        done: 0,
+        href: "/docs/using-covalues/history-and-time-travel",
+        done: 50,
       },
     ],
   },

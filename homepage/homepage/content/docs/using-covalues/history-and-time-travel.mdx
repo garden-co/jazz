@@ -1,0 +1,363 @@
+import { CodeGroup } from "@/components/forMdx";
+
+export const metadata = { title: "History & Time-travel" };
+
+# History & Time-travel
+
+Every CoValue in Jazz automatically tracks its complete edit history. This means you can:
+
+- See who changed what and when
+- Examine your data at any point in time
+- Build audit logs, activity feeds, and undo/redo features
+
+Let's explore how to access and use this history.
+
+## Accessing Edit History
+
+Jazz provides two main ways to access history:
+
+<CodeGroup>
+```ts twoslash
+import { co, CoMap } from "jazz-tools";
+
+class Task extends CoMap {
+  title = co.string;
+  status = co.literal("todo", "in-progress", "completed");
+}
+
+const task = Task.create({ title: "New task", status: "todo" });
+// ---cut---
+// Get the latest edit for a field
+const latestEdit = task._edits.status;
+// { value: "in-progress", by: Account, madeAt: Date, ... }
+
+// Get all edits for a field as an array
+const allEdits = task._edits.status.all;
+// [{value: "todo", ...}, {value: "in-progress", ...}]
+
+// For advanced use cases, access the internal state
+const rawState = task._raw;
+// Use with caution, internal API
+```
+</CodeGroup>
+## Working with Edit Metadata
+
+Every edit tracks who made the change and when. Here's how to use it:
+
+<CodeGroup>
+```ts twoslash
+import { co, CoMap, CoList } from "jazz-tools";
+
+class Task extends CoMap {
+  title = co.string;
+  description = co.string;
+  status = co.literal("todo", "in-progress", "completed");
+  priority = co.literal("low", "medium", "high");
+  subtasks = co.optional.ref(ListOfTasks);
+}
+
+class ListOfTasks extends CoList.Of(co.ref(Task)) {}
+
+// Create a task with initial values
+const task = Task.create({
+  title: "Plant spring vegetables",
+  description: "Plant peas, carrots, and lettuce in the south garden bed",
+  status: "todo",
+  priority: "medium",
+});
+
+// Change the status
+task.status = "in-progress";
+
+// Get the latest edit
+console.log("Latest edit:", task._edits.status);
+// { value: "in-progress", by: Account, madeAt: Date, ... }
+
+// See when it was changed
+const lastEditTime = task._edits.status.madeAt;
+console.log(`Changed at: ${lastEditTime?.toLocaleString()}`);
+
+// Get all edits for the field
+for (const edit of task._edits.status.all) {
+  console.log({
+    author: edit.by,        // Who made the change
+    timestamp: edit.madeAt, // When it happened
+    value: edit.value,      // What changed
+  });
+}
+```
+</CodeGroup>
+
+## Building an Audit Log
+
+Show all changes to a CoValue in chronological order:
+
+<CodeGroup>
+```ts twoslash
+import { CoMap, co } from "jazz-tools";
+
+class Task extends CoMap {
+  title = co.string;
+  status = co.literal("todo", "in-progress", "completed");
+}
+
+// ---cut---
+function getAuditLog(task: Task) {
+  const changes = [];
+
+  // Collect edits for all fields
+  for (const field of Object.keys(task)) {
+    if (!task._edits[field]) continue; // Skip fields without edits
+
+    for (const edit of task._edits[field].all) {
+      changes.push({
+        field,
+        value: edit.value,
+        by: edit.by,
+        at: edit.madeAt,
+      });
+    }
+  }
+
+  // Sort by timestamp (newest first)
+  return changes.sort((a, b) => b.at.getTime() - a.at.getTime());
+}
+
+// Use it
+const task = Task.create({ title: "New task", status: "todo" });
+task.status = "in-progress";
+
+const auditLog = getAuditLog(task);
+auditLog.forEach((entry) => {
+  console.log(
+    `${entry.at.toLocaleString()} - ${entry.field}
+    changed to "${entry.value}" by ${entry.by?.id}`,
+  );
+  // 2025-05-14 12:00:00 - status changed to "in-progress" by co_z123
+});
+
+```
+</CodeGroup>
+
+## Creating Activity Feeds
+
+Show recent changes across your data:
+
+<CodeGroup>
+```ts twoslash
+import { co, CoMap } from "jazz-tools";
+
+class Project extends CoMap {
+  name = co.string;
+  status = co.literal("planning", "active", "completed");
+  lastUpdate = co.Date;
+}
+
+// ---cut---
+function getRecentActivity(project: Project, hourLimit = 1) {
+  const activity = [];
+  const cutoffTime = new Date(Date.now() - hourLimit * 3600000);
+
+  for (const field of Object.keys(project)) {
+    // Skip if no edits for this field
+    if (!project._edits[field]) continue;
+
+    for (const edit of project._edits[field].all) {
+      if (edit.madeAt > cutoffTime) {
+        activity.push({
+          field,
+          value: edit.value,
+          by: edit.by,
+          at: edit.madeAt,
+        });
+      }
+    }
+  }
+
+  // Sort by time (newest first)
+  return activity.sort((a, b) => b.at.getTime() - a.at.getTime());
+}
+
+// Example usage
+const gardenProject = Project.create(
+  {
+    name: "Garden Renovation",
+    status: "planning",
+    lastUpdate: new Date(),
+  }
+);
+
+gardenProject.status = "active";
+
+const recentActivity = getRecentActivity(gardenProject);
+console.log("Recent Garden Activity:");
+recentActivity.forEach((activity) => {
+  console.log(
+    `${activity.at.toLocaleString()} - ${activity.by?.id} updated ${activity.field}`,
+  );
+  // 2025-05-14 12:00:00 - co_z123 updated status
+});
+
+```
+</CodeGroup>
+
+## Viewing Past States
+
+Look back at previous values and changes:
+
+<CodeGroup>
+```ts twoslash
+import { co, CoMap } from "jazz-tools";
+
+class Task extends CoMap {
+  title = co.string;
+  status = co.literal("todo", "in-progress", "completed");
+  priority = co.literal("low", "medium", "high");
+}
+
+// ---cut---
+// Create and change a task
+const task = Task.create({
+  title: "Plant vegetables",
+  status: "todo",
+  priority: "medium",
+});
+
+task.status = "in-progress";
+task.priority = "high";
+
+// See all edits for status
+for (const edit of task._edits.status.all) {
+  console.log(
+    `${edit.madeAt.toISOString()}: Status became "${edit.value}" (by ${edit.by?.id})`,
+  );
+}
+
+// Get the original value
+const initialStatus = task._edits.status.all[0]?.value;
+console.log(`Original status: ${initialStatus}`);
+
+// Get a specific edit
+const previousEdit = task._edits.status.all[1]; // Second edit
+console.log(`Previous status: ${previousEdit?.value}`);
+
+// Who made the last change?
+const latestEdit = task._edits.status;
+console.log(`Latest change by: ${latestEdit?.by?.id}`);
+```
+</CodeGroup>
+
+## Finding When Changes Happened
+
+Identify when specific changes occurred:
+
+<CodeGroup>
+```ts twoslash
+type Status = "planning" | "active" | "completed";
+import { co, CoMap } from "jazz-tools";
+
+class Project extends CoMap {
+  name = co.string;
+  status = co.literal("planning", "active", "completed");
+}
+
+// ---cut---
+// Find when a project became active
+function findStatusChange(project: Project, targetStatus: Status) {
+  // Skip if no status edits
+  if (!project._edits.status) return null;
+  
+  // Find matching edit
+  const edit = project._edits.status.all.find(edit => 
+    edit.value === targetStatus
+  );
+  
+  if (edit) {
+    return {
+      changeTime: edit.madeAt,
+      changedBy: edit.by?.id
+    };
+  }
+  
+  return null;
+}
+
+// Example usage
+const gardenProject = Project.create({ 
+  name: "Garden Renovation", 
+  status: "planning"
+});
+gardenProject.status = "active";
+
+const change = findStatusChange(gardenProject, "active");
+if (change) {
+  console.log(`Became active on ${change.changeTime.toLocaleString()} by ${change.changedBy}`);
+  // Became active on 2025-05-14 12:00:00 by co_z123
+}
+```
+</CodeGroup>
+
+## Time Travel
+
+See how your data looked in the past using the `_raw.atTime` API:
+
+<CodeGroup>
+```ts twoslash
+import { co, CoMap } from "jazz-tools";
+
+class Task extends CoMap {
+  title = co.string;
+  status = co.literal("todo", "in-progress", "completed");
+  priority = co.literal("low", "medium", "high");
+}
+
+// ---cut---
+// Create and change a task over time
+const task = Task.create({
+  title: "Plant vegetables",
+  status: "todo",
+  priority: "low",
+});
+
+// Update it several times
+setTimeout(() => { task.status = "in-progress"; }, 1000);
+setTimeout(() => { task.priority = "medium"; }, 2000);
+setTimeout(() => { task.status = "completed"; }, 3000);
+
+// Later, track its history
+function getTaskHistory(task: Task, days = 7) {
+  const history = [];
+  const dayInMs = 86400000;
+
+  // Check state for each day
+  for (let day = 0; day < days; day++) {
+    const timePoint = new Date(Date.now() - day * dayInMs);
+    // Get state at that point in time
+    const pastState = task._raw.atTime(timePoint.getTime());
+    
+    history.push({
+      date: timePoint.toLocaleDateString(),
+      status: pastState.get("status"),
+      priority: pastState.get("priority")
+    });
+  }
+
+  return history;
+}
+
+// Example usage 
+setTimeout(() => {
+  const history = getTaskHistory(task, 3);
+  history.forEach(entry => {
+    console.log(`${entry.date}: Status was "${entry.status}" with ${entry.priority} priority`);
+  });
+}, 4000);
+```
+</CodeGroup>
+
+## Best Practices
+
+- Always check if edits exist before accessing them: `if (task._edits.fieldName)`
+- Access the latest edit directly with `_edits.fieldName`
+- Remember that accessing history requires loading the CoValue
+- If you find yourself using `_raw` often, reach out to us. We're always looking for ways to improve the API.
