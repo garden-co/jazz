@@ -1,0 +1,87 @@
+import { CodeGroup } from "@/components/forMdx";
+export const metadata = { title: "Providers" };
+
+# Providers
+
+After defining your schema, the next step is connecting your application to the Jazz network. This is where Providers come in.
+
+## What are Providers?
+
+Providers are components that connect your application to Jazz's collaborative infrastructure. They sit at the top of your application and make your schemas available throughout your component tree.
+
+In Jazz, providers handle several critical functions:
+
+- **Data Synchronization**: They manage connections to the Jazz network, ensuring data stays in sync across devices
+- **Local Storage**: They persist data between sessions, so users don't lose their work
+- **Schema Registration**: They make your schemas available to the rest of your application
+- **Authentication**: They connect user accounts to your data, enabling multi-device access
+
+## Provider Structure
+
+Here's a simple example of a provider in a React application:
+
+<CodeGroup>
+```tsx twoslash
+// @filename: schema.ts
+import { Account, co } from "jazz-tools";
+
+export class MyAppAccount extends Account {
+  name = co.string;
+}
+
+// @filename: app.tsx
+import * as React from "react";
+// ---cut---
+// App.tsx
+import { JazzProvider } from "jazz-react";
+import { MyAppAccount } from "./schema";
+
+export function AppWrapper({ children }: { children: React.ReactNode }) {
+  return (
+    <JazzProvider
+      // Connect to the Jazz network
+      sync={{ 
+        peer: "wss://cloud.jazz.tools/?key=your-api-key"
+      }}
+      // Register your account schema
+      AccountSchema={MyAppAccount}
+    >
+      {children}
+    </JazzProvider>
+  );
+}
+
+// Register your schema for TypeScript
+declare module "jazz-react" {
+  interface Register {
+    Account: MyAppAccount;
+  }
+}
+```
+</CodeGroup>
+
+This provider setup accomplishes several things:
+
+- **Network Connection**: It connects to Jazz's cloud service for data synchronization
+- **Schema Registration**: It registers your `MyAppAccount` schema with Jazz
+- **TypeScript Integration**: It ensures type safety when working with your account data
+
+## How Providers Enable Collaboration
+
+Providers are what make the "collaborative" part of Jazz possible. When you wrap your application in a provider:
+
+1. **Data flows bidirectionally**: Changes made by any user are synchronized to all connected clients
+2. **Schema consistency is enforced**: The provider ensures all clients understand your data structure
+3. **Authentication is managed**: The provider connects users' identities to their data permissions
+
+Think of providers as creating a shared, synchronized workspace for your users that's accessible from any device.
+
+## Next Steps
+
+Now that you understand how providers connect your application to Jazz, the next step is to learn about [Accounts](/docs/building-with-jazz/accounts) - the foundation of user identity and data in Jazz.
+
+## Related
+
+For more detailed information about provider configuration, see:
+- [Provider Options](/docs/project-setup/providers/react) - Complete reference for all provider options
+- [Authentication States](/docs/authentication/authentication-states) - Learn how providers handle different user states
