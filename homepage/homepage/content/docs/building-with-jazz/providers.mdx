@@ -3,7 +3,7 @@ export const metadata = { title: "Providers" };
 
 # Providers
 
-After defining your schema, the next step is connecting your application to the Jazz network. This is where Providers come in.
+After defining your [schemas](/docs/building-with-jazz/schemas), the next step is connecting your application to the Jazz network. This is where Providers come in.
 
 ## What are Providers?
 
@@ -66,6 +66,132 @@ This provider setup accomplishes several things:
 - **Schema Registration**: It registers your `MyAppAccount` schema with Jazz
 - **TypeScript Integration**: It ensures type safety when working with your account data
 
+## How Providers Enable Data Access
+
+In addition to enabling collaboration, providers are your gateway to accessing data. Once you've wrapped your application in a provider, you can:
+
+### Subscribe to Data
+
+Subscriptions are how components in your application access Jazz data.
+
+<CodeGroup>
+```tsx twoslash
+// @filename: schema.ts
+import { co, CoMap } from "jazz-tools";
+
+export class Task extends CoMap {
+  title = co.string;
+  completed = co.boolean;
+}
+// @filename: TaskComponent.tsx
+import * as React from "react";
+import { ID } from "jazz-tools";
+import { Task } from "./schema";
+// ---cut---
+import { useCoState } from "jazz-react";
+
+function TaskComponent({ taskId }: { taskId: ID<Task> }) {
+  // Subscribe to a Task by ID
+  const task = useCoState(Task, taskId);
+  
+  if (task === undefined) {
+    return <div>Loading...</div>;
+  }
+  
+  if (task === null) {
+    return <div>Access denied or task not found</div>;
+  }
+  
+  return (
+    <div>
+      <h2>{task.title}</h2>
+      <input 
+        type="checkbox" 
+        checked={task.completed}
+        onChange={() => task.completed = !task.completed}
+      />
+    </div>
+  );
+}
+```
+</CodeGroup>
+
+Subscriptions in Jazz have specific state handling to help you manage data loading and permissions:
+
+- `undefined` means the data is still loading
+- `null` means the data couldn't be accessed (wrong permissions or doesn't exist)
+- An actual object instance means the data was successfully loaded
+
+This distinction helps you build appropriate UI states for different scenarios.
+
+For more details, see the [Subscription and Loading](/docs/react/using-covalues/subscription-and-loading) documentation.
+
+### Deep Loading
+
+When working with complex data structures that reference other CoValues, you can specify which related data to load.
+
+<CodeGroup>
+```tsx twoslash
+// @filename: schema.ts
+import { co, CoMap, CoList } from "jazz-tools";
+
+export class Task extends CoMap {
+  title = co.string;
+  completed = co.boolean;
+}
+
+export class TaskList extends CoList.Of(co.ref(Task)) {}
+
+export class Project extends CoMap {
+  title = co.string;
+  tasks = co.ref(TaskList);
+}
+// @filename: ProjectComponent.tsx
+import * as React from "react";
+import { ID } from "jazz-tools";
+import { Project } from "./schema";
+// ---cut---
+import { useCoState } from "jazz-react";
+
+function ProjectComponent({ projectId }: { projectId: ID<Project> }) {
+  // Subscribe to a Project and its tasks
+  const project = useCoState(Project, projectId, {
+    // Load the tasks list and all tasks inside it
+    resolve: {
+      tasks: {
+        $each: true
+      }
+    }
+  });
+  
+  if (project === undefined) {
+    return <div>Loading...</div>;
+  }
+  
+  if (project === null) {
+    return <div>Access denied or project not found</div>;
+  }
+  
+  return (
+    <div>
+      <h1>{project.title}</h1>
+      <ul>
+        {Array.from(project.tasks || []).map(task => (
+          <li key={task?.id}>
+            {task?.title} - {task?.completed ? 'Done' : 'Pending'}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+```
+</CodeGroup>
+
+This deep loading capability lets you control exactly what data is loaded, balancing performance with data completeness.
+
+For comprehensive information, see the [Deep Loading](/docs/react/using-covalues/subscription-and-loading#deep-loading) documentation.
+
 ## How Providers Enable Collaboration
 
 Providers are what make the "collaborative" part of Jazz possible. When you wrap your application in a provider:
@@ -82,6 +208,7 @@ Now that you understand how providers connect your application to Jazz, the next
 
 ## Related
 
-For more detailed information about provider configuration, see:
+For more detailed information about providers, see:
 - [Provider Options](/docs/project-setup/providers/react) - Complete reference for all provider options
 - [Authentication States](/docs/authentication/authentication-states) - Learn how providers handle different user states
+- [Subscription and Loading](/docs/react/using-covalues/subscription-and-loading) - In-depth guide to accessing data

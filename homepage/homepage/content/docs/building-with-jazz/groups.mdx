@@ -3,7 +3,7 @@ export const metadata = { title: "Groups and Ownership" };
 
 # Groups and Ownership
 
-In Jazz, ownership and access controls are managed through a lightweight yet powerful system: Groups. This system determines who owns data, who can access it, and what they can do with it.
+In Jazz, ownership and access controls are managed through a lightweight yet powerful system: Groups. After setting up [authentication](/docs/building-with-jazz/authentication), you'll need to understand how to control who can access and modify your data.
 
 ## The Concept of Ownership
 
@@ -86,6 +86,63 @@ Jazz offers several ways to share content through Groups:
 - [**Public Sharing**](/docs/react/groups/sharing#public-sharing): Make content accessible to everyone using the special "everyone" member
 - [**Invite Links**](/docs/react/groups/sharing#invite-links): Generate shareable links for easy collaboration with new users
 
+## Accessing Shared Data
+
+Once data is shared through Groups, accessing it follows the same pattern as any other data in Jazz. The permission system ensures users can only access what they're allowed to see.
+
+Here's an example of accessing data that might be shared with you:
+
+<CodeGroup>
+```tsx twoslash
+// @filename: schema.ts
+import { co, CoMap } from "jazz-tools";
+
+export class Document extends CoMap {
+  title = co.string;
+  content = co.string;
+}
+// @filename: SharedDocumentView.tsx
+import * as React from "react";
+import { useCoState } from "jazz-react";
+import { Document } from "./schema";
+import { ID } from "jazz-tools";
+// ---cut---
+function SharedDocumentView({ documentId }: { documentId: ID<Document> }) {
+  // Access a shared document by its ID
+  const document = useCoState(Document, documentId);
+  
+  // If it's loading, document will be undefined
+  if (document === undefined) {
+    return <div>Loading document...</div>;
+  }
+  
+  // If you don't have permission, document will be null
+  if (document === null) {
+    return <div>Access denied or document not found</div>;
+  }
+  
+  return (
+    <div>
+      <h1>{document.title}</h1>
+      <div>{document.content}</div>
+    </div>
+  );
+}
+```
+</CodeGroup>
+
+Behind the scenes, Jazz:
+
+1. Returns `undefined` while data is loading
+2. Returns `null` if you don't have permission to access the document or it doesn't exist
+3. Returns the actual data object once loaded if you have access
+4. Establishes a subscription to keep the UI in sync with changes
+5. Respects the permission level (reader, writer, admin) when you attempt modifications
+
+This seamless integration of permissions and data access means you don't need to write special code to handle shared content - it just works as long as the permission system is set up correctly.
+
+For detailed information on data access, see the [Subscription and Loading](/docs/react/using-covalues/subscription-and-loading) documentation.
+
 ## Group Inheritance
 
 One of the most powerful features of Groups is inheritance. A Group can extend another Group, inheriting its members and their permissions:
@@ -118,7 +175,7 @@ See [Group Inheritance](/docs/groups/inheritance) for more information.
 
 ## Next Steps
 
-Now that you understand groups and permissions, you're ready to learn about [Subscriptions](/docs/building-with-jazz/subscriptions) - how to connect your UI to your data.
+Now that you understand groups and permissions, you're ready to learn about [Sync](/docs/building-with-jazz/sync) - how data changes are propagated between users and devices.
 
 ## Related
 
@@ -126,3 +183,4 @@ For more detailed information about groups, see:
 - [Groups as Permission Scopes](/docs/groups/intro) - Detailed explanation of group permissions
 - [Public Sharing and Invites](/docs/groups/sharing) - Implementation details for sharing
 - [Group Inheritance](/docs/groups/inheritance) - Advanced group hierarchies
+- [Subscription and Loading](/docs/react/using-covalues/subscription-and-loading) - How to access and load shared data
