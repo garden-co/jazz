@@ -1,0 +1,145 @@
+import { CodeGroup } from "@/components/forMdx";
+export const metadata = { title: "Schemas" };
+
+# Schemas
+
+Schemas are the foundation of your Jazz application. They define the structure of your data and enable collaboration between users.
+
+## What are Jazz Schemas?
+
+In Jazz, schemas define the shape of your data using **CoValues** (Collaborative Values). Think of CoValues as special data structures that multiple users can edit simultaneously, with changes syncing automatically across devices.
+
+CoValues are similar to standard data structures like objects and arrays, but with built-in collaboration capabilities:
+
+- They track the complete history of changes
+- They resolve conflicts automatically when users make simultaneous edits
+- They provide type safety through TypeScript
+
+### Built on CRDTs
+
+CoValues are Conflict-free Replicated Data Types (CRDTs).
+
+Using CRDTs provides important benefits:
+
+- **Automatic conflict resolution**: When two users make simultaneous edits, the system resolves them consistently rather than requiring manual intervention.
+
+- **Offline-first operation**: Users can make changes offline, and those changes will synchronize correctly when they reconnect.
+
+- **Distributed collaboration**: Multiple clients can collaborate without requiring constant server coordination.
+
+- **Eventual consistency**: All users will eventually see the same state, even if changes arrive in different orders.
+
+Jazz simplifies working with CRDTs by handling the complexity behind intuitive APIs, allowing you to focus on building your application logic rather than managing distributed data structures.
+
+## Why Use Schemas?
+
+Defining schemas at the start of your project offers several benefits:
+
+1. **Type Safety**: Catch errors at compile time rather than runtime
+2. **Documentation**: Clearly communicate the structure of your application's data
+3. **Migrations**: Simplify application updates when your data model evolves
+4. **Collaboration**: Enable multiple clients to work with the same data model
+
+## Creating Your First Schema
+
+Schemas in Jazz are defined as TypeScript classes that extend CoValue types. Here's a simple example:
+
+<CodeGroup>
+```ts twoslash
+import { co, CoMap, CoList } from "jazz-tools";
+
+// Define a list of tasks
+class TaskList extends CoList.Of(co.string) {}
+
+// Define a project with a title and tasks
+export class Project extends CoMap {
+  title = co.string;
+  tasks = co.ref(TaskList);
+}
+```
+</CodeGroup>
+
+This schema defines:
+- A `Project` that contains a title and a list of tasks
+- A `TaskList` that contains strings
+
+## CoValue Types
+
+Jazz provides several CoValue types to model different kinds of data. Here's a simple example using the two most common types:
+
+<CodeGroup>
+```ts twoslash
+import { co, CoMap, CoList } from "jazz-tools";
+
+// CoMap - for object-like data with named properties
+export class Task extends CoMap {
+  description = co.string;
+  completed = co.boolean;
+  dueDate = co.Date;
+}
+
+// CoList - for ordered collections of items
+export class TaskList extends CoList.Of(co.ref(Task)) {}
+```
+</CodeGroup>
+
+Jazz offers several types of CoValues:
+
+- [**CoMap**](https://jazz-tools.com/docs/using-covalues/comaps) - Object-like data with named properties (JSON objects)
+- [**CoList**](https://jazz-tools.com/docs/using-covalues/colists) - Ordered collections of items (JSON arrays)
+- [**CoFeed**](https://jazz-tools.com/docs/using-covalues/cofeeds) - Special collections where each user can add items (great for comments, reactions, etc.)
+- [**FileStream**](https://jazz-tools.com/docs/using-covalues/filestreams) - Binary data like images and documents
+
+For more information on CoValues, check out the [CoValues](/docs/schemas/covalues) documentation.
+
+## Field Types
+
+Jazz provides a range of field types through the `co` namespace. Here's an example showing various field types and relationships:
+
+<CodeGroup>
+```ts twoslash
+import { co, CoMap, CoList } from "jazz-tools";
+
+// A simple category
+class Category extends CoMap {
+  name = co.string;
+}
+
+// ---cut---
+// A product with various field types
+export class Product extends CoMap {
+  // Basic types
+  name = co.string;
+  price = co.number;
+  inStock = co.boolean;
+  createdAt = co.Date;
+  
+  // Enum/literal type
+  status = co.literal("draft", "published", "archived");
+  
+  // Optional field
+  description = co.optional.string;
+  
+  // References to other CoValues
+  category = co.ref(Category);
+  relatedProducts = co.optional.ref(CoList.Of(co.ref(Product)));
+}
+```
+</CodeGroup>
+
+The main field types include:
+
+- **Primitive types**: `co.string`, `co.number`, `co.boolean`, `co.Date`
+- **Literal values**: `co.literal("value1", "value2")` for enums
+- **Optional fields**: `co.optional.string`, `co.optional.number`, etc.
+- **References**: `co.ref(SomeCoValue)` to link to other CoValues
+
+## Next Steps
+
+Now that you understand schemas, the next step is to connect them to your application using Providers. Providers handle the connection to Jazz's sync network and make your data available to your UI components.
+
+Check out [Providers](/docs/building-with-jazz/providers) to learn how to set up your application with your schemas.
+
+## Related
+
+- [Schemas](/docs/schemas/covalues)
