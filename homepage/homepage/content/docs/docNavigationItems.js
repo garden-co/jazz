@@ -54,7 +54,7 @@ export const docNavigationItems = [
       },
       {
         name: "Groups and ownership",
-        href: "/docs/building-with-jazz/groups-and-ownership",
+        href: "/docs/building-with-jazz/groups",
         done: 100,
       },
       {
