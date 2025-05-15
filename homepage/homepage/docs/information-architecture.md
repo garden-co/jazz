@@ -5,18 +5,25 @@ This document outlines the current information architecture of the Jazz document
 ## Main Navigation Categories
 
 - **Getting started**
+
   - Introduction
   - Guide
   - Example apps
   - FAQs
 
-- **Project setup**
+- **Building with Jazz**
+
   - Installation
+  - Schemas
+  - Providers
+  - Accounts
+  - Groups and ownership
+  - Authentication
   - Sync and storage
   - Node.JS / server workers
-  - Providers
 
 - **Tools**
+
   - AI tools
   - create-jazz-app
   - Inspector
@@ -24,10 +31,12 @@ This document outlines the current information architecture of the Jazz document
 - **Upgrade guides**
 
 - **Defining schemas**
+
   - CoValues
   - Accounts & migrations
 
 - **Using CoValues**
+
   - CoMaps
   - CoLists
   - CoFeeds
@@ -39,11 +48,13 @@ This document outlines the current information architecture of the Jazz document
   - History & time travel
 
 - **Groups, permissions & sharing**
+
   - Groups as permission scopes
   - Public sharing & invites
   - Group inheritance
 
 - **Authentication**
+
   - Overview
   - Authentication States
   - Passkey
@@ -52,10 +63,12 @@ This document outlines the current information architecture of the Jazz document
   - Writing your own
 
 - **Design patterns**
+
   - Form
   - Organization/Team
 
 - **Resources**
+
   - Jazz under the hood
 
 - **API Reference**
