@@ -61,8 +61,8 @@ export const docNavigationItems = [
         done: 100,
       },
       {
-        name: "Sync and storage",
-        href: "/docs/building-with-jazz/sync-and-storage",
+        name: "Sync",
+        href: "/docs/building-with-jazz/sync",
         done: 100,
       },
       {
