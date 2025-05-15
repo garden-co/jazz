@@ -40,28 +40,34 @@ Defining schemas at the start of your project offers several benefits:
 3. **Migrations**: Simplify application updates when your data model evolves
 4. **Collaboration**: Enable multiple clients to work with the same data model
 
-## Creating Your First Schema
+## Anatomy of a Schema
 
-Schemas in Jazz are defined as TypeScript classes that extend CoValue types. Here's a simple example:
+At their core, Jazz schemas are just TypeScript classes that extend CoValue types. This class-based approach provides both type checking and runtime validation.
 
 <CodeGroup>
 ```ts twoslash
 import { co, CoMap, CoList } from "jazz-tools";
 
-// Define a list of tasks
+// Define a list of tasks (extends CoList)
 class TaskList extends CoList.Of(co.string) {}
 
-// Define a project with a title and tasks
+// Define a project (extends CoMap)
 export class Project extends CoMap {
+  // Simple field
   title = co.string;
+  
+  // Reference to another CoValue
   tasks = co.ref(TaskList);
 }
 ```
 </CodeGroup>
 
-This schema defines:
-- A `Project` that contains a title and a list of tasks
-- A `TaskList` that contains strings
+This example shows several key aspects of Jazz schemas:
+
+- **Class inheritance**: Schemas extend base CoValue types like `CoMap` and `CoList`
+- **Field declarations**: Fields use the `co` namespace to define their types
+- **Schema relationships**: Schemas can reference other schemas with `co.ref`
+- **Type inference**: TypeScript understands your schema structure automatically
 
 ## CoValue Types
 
@@ -85,10 +91,10 @@ export class TaskList extends CoList.Of(co.ref(Task)) {}
 
 Jazz offers several types of CoValues:
 
-- [**CoMap**](https://jazz-tools.com/docs/using-covalues/comaps) - Object-like data with named properties (JSON objects)
-- [**CoList**](https://jazz-tools.com/docs/using-covalues/colists) - Ordered collections of items (JSON arrays)
-- [**CoFeed**](https://jazz-tools.com/docs/using-covalues/cofeeds) - Special collections where each user can add items (great for comments, reactions, etc.)
-- [**FileStream**](https://jazz-tools.com/docs/using-covalues/filestreams) - Binary data like images and documents
+- [**CoMap**](/docs/using-covalues/comaps) - Object-like data with named properties (JSON objects)
+- [**CoList**](/docs/using-covalues/colists) - Ordered collections of items (JSON arrays)
+- [**CoFeed**](/docs/using-covalues/cofeeds) - Special collections where each user can add items (great for comments, reactions, etc.)
+- [**FileStream**](/docs/using-covalues/filestreams) - Binary data like images and documents
 
 For more information on CoValues, check out the [CoValues](/docs/schemas/covalues) documentation.
 
@@ -133,6 +139,8 @@ The main field types include:
 - **Literal values**: `co.literal("value1", "value2")` for enums
 - **Optional fields**: `co.optional.string`, `co.optional.number`, etc.
 - **References**: `co.ref(SomeCoValue)` to link to other CoValues
+
+For more information on field types, check out the [Field Types](/docs/schemas/covalues#covalue-fielditem-types) documentation.
 
 ## Next Steps
 
