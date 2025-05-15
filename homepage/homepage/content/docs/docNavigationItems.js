@@ -28,42 +28,87 @@ export const docNavigationItems = [
     ],
   },
   {
-    name: "Project setup",
+    name: "Building with Jazz",
     items: [
       {
         name: "Installation",
-        href: "/docs/project-setup",
-        done: {
-          react: 100,
-          vue: 100,
-          "react-native": 100,
-          "react-native-expo": 100,
-          svelte: 100,
-        },
-      },
-      {
-        // jazz mesh, setting api key, free plan, unlimited
-        name: "Sync and storage",
-        href: "/docs/sync-and-storage",
+        href: "/docs/building-with-jazz/installation",
         done: 100,
       },
       {
-        name: "Node.JS / server workers",
-        href: "/docs/project-setup/server-side",
-        done: 80,
+        name: "Schemas",
+        href: "/docs/building-with-jazz/schemas",
+        done: 100,
       },
       {
         name: "Providers",
-        href: "/docs/project-setup/providers",
-        done: {
-          react: 100,
-          "react-native": 100,
-          "react-native-expo": 100,
-          svelte: 100,
-        },
+        href: "/docs/building-with-jazz/providers",
+        done: 100,
+      },
+      {
+        name: "Accounts",
+        href: "/docs/building-with-jazz/accounts",
+        done: 100,
+      },
+      {
+        name: "Groups and ownership",
+        href: "/docs/building-with-jazz/groups-and-ownership",
+        done: 100,
+      },
+      {
+        name: "Authentication",
+        href: "/docs/building-with-jazz/authentication",
+        done: 100,
+      },
+      {
+        name: "Sync and storage",
+        href: "/docs/building-with-jazz/sync-and-storage",
+        done: 100,
+      },
+      {
+        name: "Server workers",
+        href: "/docs/building-with-jazz/server-workers",
+        done: 100,
       },
     ],
   },
+  // {
+  //   name: "Project setup",
+  //   items: [
+  //     {
+  //       name: "Installation",
+  //       href: "/docs/project-setup",
+  //       done: {
+  //         react: 100,
+  //         vue: 100,
+  //         "react-native": 100,
+  //         "react-native-expo": 100,
+  //         svelte: 100,
+  //       },
+  //     },
+  //     {
+  //       // jazz mesh, setting api key, free plan, unlimited
+  //       name: "Sync and storage",
+  //       href: "/docs/sync-and-storage",
+  //       done: 100,
+  //     },
+  //     {
+  //       name: "Node.JS / server workers",
+  //       href: "/docs/project-setup/server-side",
+  //       done: 80,
+  //     },
+  //     {
+  //       name: "Providers",
+  //       href: "/docs/project-setup/providers",
+  //       done: {
+  //         react: 100,
+  //         "react-native": 100,
+  //         "react-native-expo": 100,
+  //         svelte: 100,
+  //       },
+  //     },
+  //   ],
+  // },
   {
     name: "Tools",
     items: [
