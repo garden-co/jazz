@@ -1,0 +1,110 @@
+import { CodeGroup } from "@/components/forMdx";
+export const metadata = { title: "Authentication" };
+
+# Authentication
+
+Authentication is how users identify themselves to your Jazz application. It enables users to access their accounts across multiple devices and collaborate with others.
+
+## Understanding Authentication in Jazz
+
+In Jazz, authentication is based on cryptographic keys that securely identify users. These keys work like digital signatures:
+
+- The **public part** represents a user's identity and can be shared
+- The **private part** (or secret) proves ownership of that identity
+
+This approach provides strong security while enabling seamless collaboration across devices.
+
+## Authentication States
+
+When a user interacts with your Jazz application, they can be in one of three states:
+
+### Anonymous Authentication
+
+This is the default starting point for new users. Jazz automatically creates a local account when someone first visits your application. With anonymous authentication:
+
+- Data persists only on the current device
+- Users can create and edit content immediately
+- Their work can be upgraded to a full account later
+
+This approach enables a frictionless onboarding experience, allowing users to start using your application without immediately signing up.
+
+### Authenticated Account
+
+Once a user creates a full account, they enter the authenticated state. With an authenticated account:
+
+- Data synchronizes across all their devices
+- Users can collaborate with others
+- Their identity is consistent across sessions
+
+Authenticated accounts are the foundation of collaborative applications, enabling real-time data synchronization across devices and between users.
+
+### Guest Mode
+
+Applications can also offer a guest mode that provides read-only access without creating any account. In guest mode:
+
+- Users can browse public content
+- No data is saved or synchronized
+- No identity is established
+
+Guest mode is ideal for users who just want to view content without creating an account.
+
+## Authentication Flow
+
+Understanding the flow between authentication states helps you design a smooth user experience:
+
+1. **First Visit**: Users start in anonymous authentication with a new local account
+2. **Registration**: When users register, their anonymous account is upgraded to authenticated
+3. **Logout**: When users log out, they return to anonymous authentication with a new account
+4. **Login**: When users log in again, they access their authenticated account
+
+This flow preserves user data during transitions and creates a seamless experience.
+
+## Authentication Methods
+
+Jazz offers several authentication methods to suit different needs:
+
+### Passkeys
+
+Passkeys use biometric authentication (fingerprint, face recognition) and device security to provide a passwordless experience:
+
+- **Advantages**: Highly secure, easy to use, no passwords to remember
+- **Best for**: Modern applications with security-conscious users
+- **Limitations**: Requires platform support (most modern browsers and devices)
+
+### Passphrases
+
+Passphrases provide a recovery method using a sequence of words:
+
+- **Advantages**: Works across all platforms, user-controlled recovery
+- **Best for**: Applications where users may need manual account recovery
+- **Limitations**: Users must securely store their passphrase
+
+### Third-Party Authentication
+
+Jazz supports integration with authentication providers like Clerk:
+
+- **Advantages**: Offers social login options (Google, GitHub, etc.)
+- **Best for**: Applications where users expect social login options
+- **Limitations**: Depends on external service availability
+
+## Choosing Authentication Methods
+
+When designing your application, consider offering multiple authentication methods to accommodate different user preferences and scenarios:
+
+- Passkeys for primary authentication
+- Passphrases as a recovery method
+- Third-party options for ease of onboarding
+
+The right combination depends on your user base and application requirements.
+
+## Next Steps
+
+Now that you understand authentication, you're ready to learn about [Groups](/docs/building-with-jazz/groups) - Jazz's system for managing permissions and sharing content between users.
+
+## Related
+
+For more detailed information about authentication, see:
+- [Authentication States](/docs/authentication/authentication-states) - Detailed explanation of authentication states and implementation
+- [Passkey Authentication](/docs/authentication/passkey) - Implementing passkey authentication
+- [Passphrase Authentication](/docs/authentication/passphrase) - Implementing passphrase authentication
+- [Clerk Authentication](/docs/authentication/clerk) - Integrating with Clerk for third-party authentication
