@@ -51,13 +51,13 @@ export const docNavigationItems = [
         done: 100,
       },
       {
-        name: "Groups and ownership",
-        href: "/docs/building-with-jazz/groups-and-ownership",
+        name: "Authentication",
+        href: "/docs/building-with-jazz/authentication",
         done: 100,
       },
       {
-        name: "Authentication",
-        href: "/docs/building-with-jazz/authentication",
+        name: "Groups and ownership",
+        href: "/docs/building-with-jazz/groups-and-ownership",
         done: 100,
       },
       {
