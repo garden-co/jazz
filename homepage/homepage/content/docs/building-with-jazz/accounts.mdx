@@ -1,0 +1,133 @@
+import { CodeGroup } from "@/components/forMdx";
+export const metadata = { title: "Accounts" };
+
+# Accounts
+
+Accounts are the foundation of user identity in Jazz. They serve as the entry point to all user data and enable collaboration between users.
+
+## What are Accounts in Jazz?
+
+In Jazz, an Account is more than just a username and password. It's a special type of schema that:
+
+- Represents a user's identity
+- Stores their public profile
+- Provides access to their private data
+- Manages permissions for sharing and collaboration
+
+Think of an Account as the root node in a graph of data. Starting from this root, you can access everything that belongs to or is shared with a user.
+
+## Account Structure
+
+Every Jazz Account serves as a root node in a graph of data, with two fundamental components:
+
+1. **Profile**: Public information about the user (visible to everyone by default)
+2. **Root**: Private data that only the user can access by default
+
+This graph-like structure makes it easy to navigate from a user's account to all their connected data, whether it's their own private content or data shared with them.
+
+Here's a simple example of a Jazz Account:
+
+<CodeGroup>
+```ts twoslash
+import "jazz-react";
+import { Account, CoMap, Profile, co } from "jazz-tools";
+
+// Custom root structure for private user data
+export class MyAppRoot extends CoMap {
+  notes = co.string;
+  settings = co.json<{ theme: string }>();
+}
+
+// Extended profile with additional fields
+export class MyAppProfile extends Profile {
+  name = co.string;  // Inherited from base Profile
+  bio = co.string;   // Custom field
+}
+
+// Complete account definition
+export class MyAppAccount extends Account {
+  profile = co.ref(MyAppProfile);  // Public data
+  root = co.ref(MyAppRoot);        // Private data
+}
+
+// Register with TypeScript
+declare module "jazz-react" {
+  interface Register {
+    Account: MyAppAccount;
+  }
+}
+```
+</CodeGroup>
+
+For more information on how Jazz structures data as a graph rooted in accounts, see [CoValues as a graph of data rooted in accounts](/docs/schemas/accounts-and-migrations#covalues-as-a-graph-of-data-rooted-in-accounts).
+
+## How Accounts Enable Collaboration
+
+Accounts play a crucial role in collaboration by:
+
+1. **Establishing identity**: They provide a consistent identity for users across devices
+2. **Managing ownership**: They determine who owns and can modify data
+3. **Controlling access**: They serve as the basis for permission systems
+4. **Supporting sharing**: They enable users to share data with specific individuals or groups
+
+When a user creates content in a Jazz application, that content is automatically associated with their account. This association makes it possible to track ownership, manage permissions, and synchronize changes across devices.
+
+## Account Evolution with Migrations
+
+As your application evolves, you might need to update your account schema. Jazz handles this through migrations:
+
+<CodeGroup>
+```ts twoslash
+import { Account, CoMap, Profile, co, CoList, Group } from "jazz-tools";
+
+// A new feature - bookmarks
+class Bookmark extends CoMap {
+  url = co.string;
+  title = co.string;
+}
+
+class BookmarkList extends CoList.Of(co.ref(Bookmark)) {}
+
+// Root data with new bookmarks field
+class MyAppRoot extends CoMap {
+  notes = co.string;
+  bookmarks = co.optional.ref(BookmarkList);  // New field
+}
+
+// ---cut---
+// Account with migration support
+export class MyAppAccount extends Account {
+  profile = co.ref(Profile);
+  root = co.ref(MyAppRoot);
+  
+  // Migration runs when user logs in
+  async migrate() {
+    // Create root if it doesn't exist
+    if (!this.root) {
+      this.root = MyAppRoot.create({
+        notes: "Welcome to our app!",
+      });
+    }
+    
+    // Add bookmarks list if it doesn't exist
+    if (!this.root?.bookmarks) {
+      this.root.bookmarks = BookmarkList.create([], Group.create());
+    }
+  }
+}
+```
+</CodeGroup>
+
+Migrations run automatically when a user logs in. This is an opportunity to ensure their account data matches your latest schema.
+
+For more information see [Migrations](/docs/schemas/accounts-and-migrations#populating-and-evolving-root-and-profile-schemas-with-migrations).
+
+## Next Steps
+
+Now that you understand accounts, you're ready to learn about [Authentication](/docs/building-with-jazz/authentication) - the process that connects users to their accounts.
+
+## Related
+
+For more detailed information about accounts, see:
+- [Accounts & Migrations](/docs/schemas/accounts-and-migrations) - Complete reference for account capabilities
+- [Authentication States](/docs/authentication/authentication-states) - Learn how account states are managed
