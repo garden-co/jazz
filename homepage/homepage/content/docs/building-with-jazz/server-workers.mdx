@@ -1,0 +1,120 @@
+export const metadata = { title: "Server Workers" };
+
+# Server Workers
+
+Server Workers extend the Jazz collaboration model to server-side code. They enable you to add backend logic to your application while maintaining the familiar collaborative data model.
+
+## Understanding Server Workers
+
+Server Workers are server-side components that participate in your Jazz application as if they were users. In essence, a Server Worker:
+
+- Has its own Account with an identity in your system
+- Can access and modify CoValues based on permissions
+- Subscribes to data changes and responds to them
+- Runs in a server JavaScript environment (i.e. Node.js, Deno, Cloudflare Workers, etc.)
+
+The key insight is that **Server Workers are just another type of collaborator** in your application. Rather than thinking of them as a separate backend system, you can view them as automated participants in your collaborative workspace.
+
+## When to Use Server Workers
+
+Server Workers are ideal for situations where you need to:
+
+- **Perform Server-Side Operations**: Execute code that shouldn't run on clients (API calls requiring secrets, heavy computations)
+- **Integrate with External Systems**: Connect your Jazz application to databases, third-party APIs, or other services
+- **Implement Automation**: Create automated workflows that respond to data changes
+- **Enforce Business Logic**: Ensure certain rules are followed beyond what can be guaranteed on the client
+- **Process Data Asynchronously**: Handle long-running tasks without blocking the user interface
+
+Server Workers fill the role that traditional backend servers would in a conventional application, but in a way that integrates seamlessly with Jazz's collaborative model.
+
+## The Server Worker Collaboration Model
+
+The most powerful aspect of Server Workers is how they collaborate with clients through CoValues:
+
+- **Shared State Machine**: Clients and Server Workers collaborate on CoValues that represent task state
+- **Event-Driven Processing**: Server Workers respond to changes in CoValues made by clients
+- **Asynchronous Updates**: Results flow back to clients automatically through the same CoValues
+
+This model replaces traditional request-response patterns with a more collaborative approach where both clients and servers work with the same data structures.
+
+## How Server Workers Participate in Your Application
+
+Server Workers participate in your application through the following mechanisms:
+
+### Identity and Authentication
+
+Each Server Worker has its own account identity, just like a regular user:
+
+- It has a stable Account ID for identification
+- It uses a secret key for authentication
+- It appears in edit history like any other user
+
+### Data Access Through Groups
+
+Server Workers access data through the same permission system as regular users:
+
+- Add them to Groups to grant specific permissions
+- Assign reader, writer, or admin roles as needed
+- Share CoValues with them just as you would with users
+
+This approach ensures consistent access control across your entire application.
+
+### Subscription-Based Processing
+
+Server Workers use subscriptions to respond to changes in your application:
+
+1. They subscribe to specific CoValues you want them to monitor
+2. When changes occur, they perform their programmed actions
+3. They update the same or other CoValues with results
+
+This creates a seamless flow of data between clients and servers.
+
+## Common Server Worker Patterns
+
+Server Workers can implement several powerful patterns in your applications:
+
+### State Machine Pattern
+
+The most common pattern uses CoValues as state machines:
+
+1. Clients update a CoValue state (e.g., from "draft" to "ready for processing")
+2. Server Worker detects the state change
+3. Server Worker performs its work
+4. Server Worker updates the state with results (e.g., to "processed" with data)
+
+This pattern provides a clean, asynchronous workflow between clients and servers.
+
+### Integration Pattern
+
+Server Workers can bridge between Jazz and external systems:
+
+1. Server Worker subscribes to CoValues containing integration requests
+2. When a request appears, it calls the external system's API
+3. Results are written back to CoValues for clients to consume
+
+This allows your Jazz application to seamlessly interact with the outside world.
+
+## Next Steps
+
+🎉 **Congratulations!** With Server Workers, you've completed the core journey of building applications with Jazz.
+
+You now understand all the fundamental pieces:
+- **Schemas** define your data structure
+- **Providers** connect your app to Jazz
+- **Accounts** represent user identity
+- **Authentication** secures user access
+- **Groups** manage permissions and sharing
+- **Sync** keeps data consistent across devices
+- **Server Workers** extend your app with server-side logic
+
+With these building blocks, you can create sophisticated collaborative applications that work seamlessly across clients and servers.
+
+To continue learning, explore the [API Reference](/docs/api-reference) or check out the [Example Applications](/examples) to see these concepts in action.
+
+Now go build something amazing!
+
+## Related
+
+For more detailed information about Server Workers, see:
+- [Node.JS / Server Workers](/docs/project-setup/server-side) - Implementation details
+- [Jazz Paper Scissors Example](https://github.com/garden-co/jazz/tree/main/examples/jazz-paper-scissors) - A complete example using Server Workers
