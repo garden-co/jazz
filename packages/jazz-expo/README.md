@@ -8,7 +8,7 @@ Tested with:
 
 ```json
 "expo": "~52.0.0",
-"react-native": "0.76.7",
+"react-native": "0.76.9",
 "react": "18.3.1",
 ```
 

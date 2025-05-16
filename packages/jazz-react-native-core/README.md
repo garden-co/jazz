@@ -41,7 +41,7 @@ These packages will automatically include the appropriate functionality from jaz
 ## Requirements
 
 ```json
-"react-native": "0.76.7",
+"react-native": "0.76.9",
 "react": "18.3.1"
 ```
 
