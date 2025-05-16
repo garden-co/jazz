@@ -7,7 +7,7 @@
 
 <JazzProvider
   sync={{
-    peer: `wss://cloud.jazz.tools/?key={apiKey}`,
+    peer: `wss://cloud.jazz.tools/?key=${apiKey}`,
   }}
 >
   <PasskeyAuthBasicUI appName="minimal-svelte-auth-passkey">
