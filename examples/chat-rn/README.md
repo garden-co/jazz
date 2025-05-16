@@ -26,7 +26,7 @@ This will set up and launch the app on iOS. For Android, you can skip `pnpm pods
 This was created using the following command:
 
 ```bash
-pnpx @react-native-community/cli init chat-rn --version 0.76.7 --install-pods true --skip-git-init true --package-name com.chatrn --directory chat-rn
+pnpx @react-native-community/cli init chat-rn --version 0.76.9 --install-pods true --skip-git-init true --package-name com.chatrn --directory chat-rn
 ```
 
 Then change package name in `package.json`, and begin build instructions above.

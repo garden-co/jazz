@@ -17,19 +17,19 @@ describe("SQLiteClient.ensureInitialized", () => {
     client = new SQLiteClient(adapter, {} as any); // second arg is OutgoingSyncQueue stub
   });
 
-  it("calls initialize exactly once and then short-circuits", async () => {
+  it("calls initialize exactly once and then short-circuits", () => {
     // simulate successful initialize()
     adapter.initialize.mockResolvedValueOnce(undefined);
 
-    await client.ensureInitialized();
+    client.ensureInitialized();
     expect(adapter.initialize).toHaveBeenCalledTimes(1);
 
     // second call should not re-invoke adapter.initialize
-    await client.ensureInitialized();
+    client.ensureInitialized();
     expect(adapter.initialize).toHaveBeenCalledTimes(1);
   });
 
-  it("propagates errors, resets promise, and retries on next call", async () => {
+  it("propagates errors, resets promise, and retries on next call", () => {
     const err = new Error("boom");
     adapter.initialize
       .mockRejectedValueOnce(err)
@@ -39,14 +39,14 @@ describe("SQLiteClient.ensureInitialized", () => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
     // first call fails
-    await expect(client.ensureInitialized()).rejects.toThrowError("boom");
+    expect(client.ensureInitialized()).rejects.toThrowError("boom");
     expect(errorSpy).toHaveBeenCalledWith(
       "[SQLiteClient] ❌ initialization failed:",
       err,
     );
 
     // next call should attempt again
-    await client.ensureInitialized();
+    client.ensureInitialized();
     expect(adapter.initialize).toHaveBeenCalledTimes(2);
 
     errorSpy.mockRestore();
