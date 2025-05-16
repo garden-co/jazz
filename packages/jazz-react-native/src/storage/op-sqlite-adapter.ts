@@ -19,33 +19,6 @@ export class OPSQLiteAdapter extends SQLiteAdapterBase {
       Platform.OS === "ios" ? IOS_LIBRARY_PATH : ANDROID_DATABASE_PATH;
   }
 
-  public async executeAsync(
-    sql: string,
-    params?: unknown[],
-  ): Promise<SQLResult> {
-    await this.ensureInitialized();
-
-    const db = this.db;
-    if (!db) {
-      throw new Error("Database not available after initialization");
-    }
-
-    try {
-      const result = await db.execute(sql, params as any[]);
-      return {
-        rows: result.rows as SQLRow[],
-        insertId:
-          result.rowsAffected > 0
-            ? (result.rows[0]?.rowid as number)
-            : undefined,
-        rowsAffected: result.rowsAffected,
-      };
-    } catch (error) {
-      console.error("[OPSQLiteAdapter] SQL execution error:", error);
-      throw error;
-    }
-  }
-
   public executeSync(sql: string, params?: unknown[]): { rows: SQLRow[] } {
     if (!this.isInitialized || !this.db) {
       throw new Error("Database not initialized. Call initialize() first.");
@@ -56,14 +29,7 @@ export class OPSQLiteAdapter extends SQLiteAdapterBase {
     };
   }
 
-  public async transactionAsync(callback: () => Promise<void>): Promise<void> {
-    if (!this.db) {
-      await this.ensureInitialized();
-    }
-    await this.db!.transaction(callback);
-  }
-
-  protected async open() {
+  protected open() {
     try {
       // Open database first
       this.db = opSQLite.open({
@@ -74,7 +40,7 @@ export class OPSQLiteAdapter extends SQLiteAdapterBase {
       const db = this.db;
       if (!db) throw new Error("Failed to open database");
 
-      await db.execute("PRAGMA journal_mode=WAL");
+      db.execute("PRAGMA journal_mode=WAL");
     } catch (e) {
       console.error("[OPSQLiteAdapter] open failed:", e);
       throw new Error(
@@ -83,31 +49,26 @@ export class OPSQLiteAdapter extends SQLiteAdapterBase {
     }
   }
 
-  protected async close(): Promise<void> {
+  protected close(): void {
     if (this.db) {
       this.db.close();
       this.isInitialized = false;
-      this.initializationPromise = null;
+      this.initialization = undefined;
     }
-    return Promise.resolve();
   }
 
-  protected async delete(): Promise<void> {
+  protected delete(): void {
     if (this.db) {
-      await this.close();
+      this.close();
       this.db.delete();
     }
-    return Promise.resolve();
   }
 
-  protected async rawDbExecuteAsync(
-    sql: string,
-    params?: unknown[],
-  ): Promise<SQLResult> {
+  protected rawDbExecute(sql: string, params?: unknown[]): SQLResult {
     if (!this.db) {
       throw new Error("Database not opened");
     }
-    const result = await this.db.execute(sql, params as any[]);
+    const result = this.db.executeSync(sql, params as any[]);
     return {
       rows: result.rows as SQLRow[],
       insertId: result.insertId,
