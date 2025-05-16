@@ -49,6 +49,7 @@ export {
   createCoValueObservable,
   loadCoValue,
   subscribeToCoValue,
+  waitForCoValueCondition,
 } from "./internal.js";
 
 export {
@@ -61,6 +62,17 @@ export { KvStoreContext, type KvStore } from "./auth/KvStoreContext.js";
 export { InMemoryKVStore } from "./auth/InMemoryKVStore.js";
 export { DemoAuth } from "./auth/DemoAuth.js";
 export { PassphraseAuth } from "./auth/PassphraseAuth.js";
+export {
+  CrossDeviceAccountTransfer,
+  CrossDeviceAccountTransferCoMap,
+  type CrossDeviceAccountTransferOptions,
+  CrossDeviceAccountTransferCreateAsSource,
+  CrossDeviceAccountTransferCreateAsTarget,
+  CrossDeviceAccountTransferHandleAsTarget,
+  CrossDeviceAccountTransferHandleAsSource,
+  type CrossDeviceAccountTransferAsTargetOptions,
+  type CrossDeviceAccountTransferAsSourceOptions,
+} from "./auth/CrossDeviceAccountTransfer/index.js";
 
 export {
   createInviteLink,
