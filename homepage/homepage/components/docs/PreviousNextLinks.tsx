@@ -23,17 +23,17 @@ export function PreviousNextLinks({ slug, framework }: PreviousNextLinksProps) {
   }
 
   return (
-    <div className="flex justify-between gap-4 not-prose">
+    <div className="flex justify-evenly gap-3 not-prose">
       {currentItem.previous && (
         <Link
           href={currentItem.previous.href.replace(
             "/docs",
             `/docs/${framework}`,
           )}
-          className="flex-1 group py-5 pr-12"
+          className="group py-5 xl:pr-12"
         >
-          <span className="text-sm block mb-1">Previous</span>
-          <div className="text-highlight font-medium inline-flex gap-2 items-center text-lg group-hover:text-blue">
+          <span className="text-xs block md:text-sm md:mb-1">Previous</span>
+          <div className="text-highlight font-medium inline-flex gap-2 items-center group-hover:text-blue">
             {currentItem.previous.name}
           </div>
         </Link>
@@ -41,10 +41,10 @@ export function PreviousNextLinks({ slug, framework }: PreviousNextLinksProps) {
       {currentItem.next && (
         <Link
           href={currentItem.next.href.replace("/docs", `/docs/${framework}`)}
-          className="flex-1 group text-right ml-auto py-5 pl-12"
+          className="group text-right ml-auto py-5 xl:pl-12"
         >
-          <span className="text-sm block mb-1">Next</span>
-          <div className="text-highlight font-medium inline-flex gap-2 items-center text-lg group-hover:text-blue">
+          <span className="text-xs block md:text-sm md:mb-1">Next</span>
+          <div className="text-highlight font-medium inline-flex gap-2 items-center group-hover:text-blue">
             {currentItem.next.name}
           </div>
         </Link>
