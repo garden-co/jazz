@@ -17,20 +17,20 @@ export function PreviousNextLinks() {
       return path === itemPath;
     });
 
-  if (!currentItem?.next && !currentItem?.back) {
+  if (!currentItem?.next && !currentItem?.previous) {
     return null;
   }
 
   return (
     <div className="flex justify-between gap-4 not-prose">
-      {currentItem.back && (
+      {currentItem.previous && (
         <Link
-          href={currentItem.back.href.replace("/docs", `/docs/${framework}`)}
+          href={currentItem.previous.href.replace("/docs", `/docs/${framework}`)}
           className="flex-1 group py-5 pr-12"
         >
           <span className="text-sm block mb-1">Previous</span>
           <div className="text-highlight font-medium inline-flex gap-2 items-center text-lg group-hover:text-blue">
-            {currentItem.back.name}
+            {currentItem.previous.name}
           </div>
         </Link>
       )}

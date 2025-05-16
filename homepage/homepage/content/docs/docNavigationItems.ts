@@ -10,7 +10,7 @@ export type DocNavigationItem = {
   done: DoneStatus;
   framework?: Framework;
   next?: DocNavigationItem | null;
-  back?: DocNavigationItem | null;
+  previous?: DocNavigationItem | null;
 };
 
 export type DocNavigationSection = {
@@ -112,7 +112,7 @@ const items: DocNavigationSection[] = [
         href: "/docs/upgrade/0-13-0",
         done: 100,
         next: null,
-        back: null,
+        previous: null,
       },
       {
         // upgrade guides
@@ -120,7 +120,7 @@ const items: DocNavigationSection[] = [
         href: "/docs/upgrade/0-12-0",
         done: 100,
         next: null,
-        back: null,
+        previous: null,
       },
       {
         // upgrade guides
@@ -128,7 +128,7 @@ const items: DocNavigationSection[] = [
         href: "/docs/upgrade/0-11-0",
         done: 100,
         next: null,
-        back: null,
+        previous: null,
       },
       // {
       //   // upgrade guides
@@ -337,8 +337,8 @@ export const docNavigationItems = items.map((section) => ({
       ...item,
       next:
         item.next === null ? null : flatItems[currentIndex + 1] || undefined,
-      back:
-        item.back === null ? null : flatItems[currentIndex - 1] || undefined,
+      previous:
+        item.previous === null ? null : flatItems[currentIndex - 1] || undefined,
     };
   }),
 }));
