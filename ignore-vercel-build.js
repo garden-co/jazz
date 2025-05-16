@@ -1,40 +1,42 @@
 import { execSync } from "child_process";
 
-const branchName =
-  process.env.VERCEL_GIT_COMMIT_REF ||
-  execSync("git rev-parse --abbrev-ref HEAD").toString().trim();
-const currentAppName = process.env.APP_NAME;
-const homepageAppName = "jazz-homepage";
+const currentAppName =
+  process.env.JAZZ_PROJECT_NAME || process.env.APP_NAME || process.argv[2];
 
-if (
-  branchName === "main" &&
-  process.env.VERCEL_GIT_COMMIT_MESSAGE?.includes("docs")
-) {
-  // If merging a "docs" branch into "main" (commit message contains "docs"), skip all apps except "homepage"
-  if (currentAppName === homepageAppName) {
+try {
+  // In Vercel CI, we need to use the remote cache and filter for the current app
+  const previousSha = process.env.VERCEL_GIT_PREVIOUS_SHA;
+  const currentSha = process.env.VERCEL_GIT_COMMIT_SHA;
+
+  if (!previousSha || !currentSha) {
     console.log(
-      `✅ Building homepage because a "docs" branch was merged into "main".`,
+      `⚠️ Missing git SHA information. Proceeding with build for "${currentAppName}" to be safe.`,
+    );
+    process.exit(1);
+  }
+
+  // Use the previous deployment's SHA as our reference point
+  const turboCommand = `pnpm turbo run build --dry=json --filter=${currentAppName}...[${previousSha}]`;
+  const turboOutput = execSync(turboCommand).toString();
+
+  const affectedPackages = JSON.parse(turboOutput).packages;
+  const shouldBuild = affectedPackages.includes(currentAppName);
+
+  if (shouldBuild) {
+    console.log(
+      `✅ Building "${currentAppName}" as it is affected by changes since previous deployment (${previousSha}).`,
     );
     process.exit(1); // Continue with the build
   } else {
     console.log(
-      `🛑 Skipping build for ${currentAppName} after "docs" branch merged to main.`,
+      `🛑 Skipping build for "${currentAppName}" as it is not affected by changes since previous deployment (${previousSha}).`,
     );
     process.exit(0); // Skip the build
   }
-} else if (branchName.includes("docs")) {
-  // If on a "docs" branch, skip all apps except "homepage"
-  if (currentAppName === homepageAppName) {
-    console.log(`✅ Building homepage for "docs" branch.`);
-    process.exit(1); // Continue with the build
-  } else {
-    console.log(`🛑 Skipping build for ${currentAppName} on "docs" branch.`);
-    process.exit(0); // Skip the build
-  }
+} catch (error) {
+  // If we can't parse the turbo output or something goes wrong,
+  // we should build to be safe
+  console.log(`⚠️ Error determining affected packages: ${error.message}`);
+  console.log(`⚠️ Proceeding with build for "${currentAppName}" to be safe.`);
+  process.exit(1);
 }
-
-// Default behavior: build everything.
-console.log(
-  `✅ Proceeding with build for ${currentAppName} on branch ${branchName}.`,
-);
-process.exit(1);
