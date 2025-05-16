@@ -20,7 +20,7 @@ export type DocNavigationSection = {
   prefix?: string;
 };
 
-const items: DocNavigationSection[] = [
+export const docNavigationItems: DocNavigationSection[] = [
   {
     // welcome to jazz
     name: "Getting started",
@@ -325,20 +325,16 @@ const items: DocNavigationSection[] = [
   },
 ];
 
-const flatItems = items.flatMap((section) => section.items);
+const flatItems = docNavigationItems.flatMap((section) => section.items);
 
-export const docNavigationItems = items.map((section) => ({
-  ...section,
-  items: section.items.map((item) => {
-    const currentIndex = flatItems.findIndex(
-      (flatItem) => flatItem.href === item.href,
-    );
-    return {
-      ...item,
-      next:
-        item.next === null ? null : flatItems[currentIndex + 1] || undefined,
-      previous:
-        item.previous === null ? null : flatItems[currentIndex - 1] || undefined,
-    };
-  }),
-}));
+export const flatItemsWithNavLinks = flatItems.map((item) => {
+  const currentIndex = flatItems.findIndex(
+    (flatItem) => flatItem.href === item.href,
+  );
+  return {
+    ...item,
+    next: item.next === null ? null : flatItems[currentIndex + 1] || undefined,
+    previous:
+      item.previous === null ? null : flatItems[currentIndex - 1] || undefined,
+  };
+});

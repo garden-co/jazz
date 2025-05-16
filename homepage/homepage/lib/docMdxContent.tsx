@@ -73,9 +73,10 @@ export async function DocPage({
           <Content />
 
           <HelpLinks className="lg:hidden mt-12" />
+
           <Separator className="mt-4 mb-0 lg:mt-12" />
 
-          <PreviousNextLinks />
+          <PreviousNextLinks slug={slug} framework={framework} />
         </DocProse>
       </DocsLayout>
     );

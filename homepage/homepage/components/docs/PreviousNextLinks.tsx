@@ -1,21 +1,22 @@
-"use client";
-
-import { docNavigationItems } from "@/content/docs/docNavigationItems";
-import { useFramework } from "@/lib/use-framework";
+import {
+  docNavigationItems,
+  flatItemsWithNavLinks,
+} from "@/content/docs/docNavigationItems";
 import Link from "next/link";
-import { usePathname } from "next/navigation";
 
-export function PreviousNextLinks() {
-  const path = usePathname();
-  const framework = useFramework();
+interface PreviousNextLinksProps {
+  slug?: string[];
+  framework: string;
+}
 
-  // Find the current navigation item
-  const currentItem = docNavigationItems
-    .flatMap((section) => section.items)
-    .find((item) => {
-      const itemPath = item.href.replace("/docs", `/docs/${framework}`);
-      return path === itemPath;
-    });
+export function PreviousNextLinks({ slug, framework }: PreviousNextLinksProps) {
+  const currentItem = flatItemsWithNavLinks.find((item) => {
+    const itemPath = item.href.replace("/docs", `/docs/${framework}`);
+    const currentPath = slug
+      ? `/docs/${framework}/${slug.join("/")}`
+      : `/docs/${framework}`;
+    return currentPath === itemPath;
+  });
 
   if (!currentItem?.next && !currentItem?.previous) {
     return null;
@@ -25,7 +26,10 @@ export function PreviousNextLinks() {
     <div className="flex justify-between gap-4 not-prose">
       {currentItem.previous && (
         <Link
-          href={currentItem.previous.href.replace("/docs", `/docs/${framework}`)}
+          href={currentItem.previous.href.replace(
+            "/docs",
+            `/docs/${framework}`,
+          )}
           className="flex-1 group py-5 pr-12"
         >
           <span className="text-sm block mb-1">Previous</span>
