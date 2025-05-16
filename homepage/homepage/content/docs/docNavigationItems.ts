@@ -1,4 +1,26 @@
-export const docNavigationItems = [
+import { Framework } from "../framework";
+
+export type DoneStatus =
+  | number // represents percentage done
+  | Partial<Record<Framework, number>>;
+
+export type DocNavigationItem = {
+  name: string;
+  href: string;
+  done: DoneStatus;
+  framework?: Framework;
+  next?: DocNavigationItem;
+  back?: DocNavigationItem;
+};
+
+export type DocNavigationSection = {
+  name: string;
+  items: DocNavigationItem[];
+  collapse?: boolean;
+  prefix?: string;
+};
+
+export const docNavigationItems: DocNavigationSection[] = [
   {
     // welcome to jazz
     name: "Getting started",
@@ -126,7 +148,7 @@ export const docNavigationItems = [
         name: "0.9.2 - Local persistence on React Native Expo",
         href: "/docs/upgrade/react-native-local-persistence",
         done: 100,
-        framework: "react-native-expo",
+        framework: Framework.ReactNativeExpo,
       },
       // {
       //   // upgrade guides
@@ -295,4 +317,13 @@ export const docNavigationItems = [
       },
     ],
   },
-];
+].map((section) => ({
+  ...section,
+  items: section.items.map((item, index, items) => ({
+    ...item,
+    next: items[index + 1] || undefined,
+    back: items[index - 1] || undefined,
+  })),
+}));
+
+console.log(docNavigationItems);

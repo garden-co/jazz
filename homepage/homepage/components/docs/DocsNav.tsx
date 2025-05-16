@@ -3,7 +3,7 @@
 import { SideNav, SideNavBody, SideNavHeader } from "@/components/SideNav";
 import { SideNavSection } from "@/components/SideNavSection";
 import { FrameworkSelect } from "@/components/docs/FrameworkSelect";
-import { docNavigationItems } from "@/content/docs/docNavigationItems.js";
+import { docNavigationItems } from "@/content/docs/docNavigationItems";
 import { useFramework } from "@/lib/use-framework";
 import React from "react";
 
