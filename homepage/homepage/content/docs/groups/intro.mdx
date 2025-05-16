@@ -8,7 +8,7 @@ import { CodeGroup } from "@/components/forMdx";
 
 Every CoValue has an owner, which can be a `Group` or an `Account`.
 
-You can use a `Group` to grant access to a CoValue to multiple users. These users can
+You can use a `Group` to grant access to a CoValue to **multiple users**. These users can
 have different roles, such as "writer", "reader" or "admin".
 
 ## Creating a Group
@@ -43,7 +43,7 @@ group.addMember(bob, "writer");
 ```
 </CodeGroup>
 
-Note: if the account ID is of type `string`, because it comes from a URL parameter or something similar, you need to cast it to `ID<Account>` first:
+**Note:** if the account ID is of type `string`, because it comes from a URL parameter or something similar, you need to cast it to `ID<Account>` first:
 
 <CodeGroup>
 ```tsx
@@ -66,7 +66,7 @@ group.addMember(bob, "reader");
 
 Bob just went from a writer to a reader.
 
-Note: only admins can change a member's role.
+**Note:** only admins can change a member's role.
 
 ## Removing a member
 
@@ -78,9 +78,11 @@ group.removeMember(bob);
 ```
 </CodeGroup>
 
-This only works if you are an admin, and Bob is not an admin.
-
-Admins cannot remove other admins, but they can remove themselves, as long as there is another admin present.
+Rules:
+- All roles can remove themselves.
+- Only admins can remove other users.
+- An admin cannot remove other admins.
+- As an admin, you cannot remove yourself if you are the only admin in the Group, because there has to be at least one admin present.
 
 ## Getting the Group of an existing CoValue
 
