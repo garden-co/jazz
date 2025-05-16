@@ -7,21 +7,11 @@ export type SQLResult = {
   rowsAffected: number;
 };
 
-export type Mode = "sync" | "async";
-
 export interface SQLiteAdapter {
   /**
    * Initialize the adapter
    */
-  initialize(): Promise<void>;
-
-  /**
-   * Asynchronously execute an SQL statement
-   * @param sql The SQL query text
-   * @param params The parameters to bind to the SQL statement
-   * @returns A promise with rows and optional insertId
-   */
-  executeAsync(sql: string, params?: unknown[]): Promise<SQLResult>;
+  initialize(): void;
 
   /**
    * Synchronously execute an SQL statement, if supported
@@ -32,12 +22,6 @@ export interface SQLiteAdapter {
   executeSync(sql: string, params?: unknown[]): { rows: SQLRow[] };
 
   /**
-   * Asynchronously run a set of operations inside a transaction
-   * @param callback A callback that returns a void promise
-   */
-  transactionAsync(callback: () => Promise<void>): Promise<void>;
-
-  /**
    * Synchronously run a set of operations inside a transaction
    * @param callback A callback that returns a void
    */
@@ -46,53 +30,50 @@ export interface SQLiteAdapter {
 
 export abstract class SQLiteAdapterBase implements SQLiteAdapter {
   protected dbName: string;
-  protected initializationPromise: Promise<void> | null = null;
+  protected initialization: void | undefined = undefined;
   protected isInitialized = false;
 
   constructor(dbName: string) {
     this.dbName = dbName;
   }
 
-  public async initialize(): Promise<void> {
-    await this.ensureInitialized();
+  public initialize(): void {
+    this.ensureInitialized();
   }
 
-  protected async ensureInitialized() {
+  protected ensureInitialized() {
     if (this.isInitialized) return;
 
-    if (!this.initializationPromise) {
-      this.initializationPromise = (async () => {
+    if (!this.initialization) {
+      this.initialization = (() => {
         try {
-          await this.initializeInternal();
+          this.initializeInternal();
           this.isInitialized = true;
         } catch (error) {
-          this.initializationPromise = null;
+          this.initialization = undefined;
           throw error;
         }
       })();
     }
 
-    await this.initializationPromise;
+    this.initialization;
   }
 
   /**
    * Raw database execution, used before isInitialized becomes true
    */
-  protected abstract rawDbExecuteAsync(
-    sql: string,
-    params?: unknown[],
-  ): Promise<SQLResult>;
+  protected abstract rawDbExecute(sql: string, params?: unknown[]): SQLResult;
 
-  private async initializeInternal() {
+  private initializeInternal() {
     try {
-      await this.open();
+      this.open();
 
       // Apply pending migrations
-      const { rows } = await this.rawDbExecuteAsync("PRAGMA user_version");
+      const { rows } = this.rawDbExecute("PRAGMA user_version");
       const currentVersion = Number(rows[0]?.user_version) ?? 0;
       const migrationQueries = getMigrationQueries(currentVersion);
       for (const sql of migrationQueries) {
-        await this.rawDbExecuteAsync(sql);
+        this.rawDbExecute(sql);
       }
     } catch (error) {
       console.error("[SQLiteAdapterBase] ❌ initialization failed:", error);
@@ -100,18 +81,10 @@ export abstract class SQLiteAdapterBase implements SQLiteAdapter {
     }
   }
 
-  public abstract executeAsync(
-    sql: string,
-    params?: unknown[],
-  ): Promise<SQLResult>;
   public abstract executeSync(
     sql: string,
     params?: unknown[],
   ): { rows: SQLRow[] };
-
-  public abstract transactionAsync(
-    callback: () => Promise<void>,
-  ): Promise<void>;
 
   /**
    * Synchronously run a set of operations inside a transaction
@@ -130,7 +103,7 @@ export abstract class SQLiteAdapterBase implements SQLiteAdapter {
     }
   }
 
-  protected abstract open(): Promise<void>;
-  protected abstract close(): Promise<void>;
-  protected abstract delete(): Promise<void>;
+  protected abstract open(): void;
+  protected abstract close(): void;
+  protected abstract delete(): void;
 }
