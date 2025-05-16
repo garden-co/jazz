@@ -9,8 +9,8 @@ export type DocNavigationItem = {
   href: string;
   done: DoneStatus;
   framework?: Framework;
-  next?: DocNavigationItem;
-  back?: DocNavigationItem;
+  next?: DocNavigationItem | null;
+  back?: DocNavigationItem | null;
 };
 
 export type DocNavigationSection = {
@@ -111,18 +111,24 @@ const items: DocNavigationSection[] = [
         name: "0.13.0 - React Native Split",
         href: "/docs/upgrade/0-13-0",
         done: 100,
+        next: null,
+        back: null,
       },
       {
         // upgrade guides
         name: "0.12.0 - Deeply Resolved Data",
         href: "/docs/upgrade/0-12-0",
         done: 100,
+        next: null,
+        back: null,
       },
       {
         // upgrade guides
         name: "0.11.0 - Roles and permissions",
         href: "/docs/upgrade/0-11-0",
         done: 100,
+        next: null,
+        back: null,
       },
       // {
       //   // upgrade guides
@@ -324,11 +330,15 @@ const flatItems = items.flatMap((section) => section.items);
 export const docNavigationItems = items.map((section) => ({
   ...section,
   items: section.items.map((item) => {
-    const currentIndex = flatItems.findIndex((flatItem) => flatItem.href === item.href);
+    const currentIndex = flatItems.findIndex(
+      (flatItem) => flatItem.href === item.href,
+    );
     return {
       ...item,
-      next: flatItems[currentIndex + 1] || undefined,
-      back: flatItems[currentIndex - 1] || undefined,
+      next:
+        item.next === null ? null : flatItems[currentIndex + 1] || undefined,
+      back:
+        item.back === null ? null : flatItems[currentIndex - 1] || undefined,
     };
   }),
-}))
+}));

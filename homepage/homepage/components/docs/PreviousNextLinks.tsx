@@ -2,7 +2,6 @@
 
 import { docNavigationItems } from "@/content/docs/docNavigationItems";
 import { useFramework } from "@/lib/use-framework";
-import { Icon } from "@garden-co/design-system/src/components/atoms/Icon";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 
@@ -27,7 +26,7 @@ export function PreviousNextLinks() {
       {currentItem.back && (
         <Link
           href={currentItem.back.href.replace("/docs", `/docs/${framework}`)}
-          className="group py-5 pr-12"
+          className="flex-1 group py-5 pr-12"
         >
           <span className="text-sm block mb-1">Previous</span>
           <div className="text-highlight font-medium inline-flex gap-2 items-center text-lg group-hover:text-blue">
@@ -38,7 +37,7 @@ export function PreviousNextLinks() {
       {currentItem.next && (
         <Link
           href={currentItem.next.href.replace("/docs", `/docs/${framework}`)}
-          className="group text-right ml-auto py-5 pl-12"
+          className="flex-1 group text-right ml-auto py-5 pl-12"
         >
           <span className="text-sm block mb-1">Next</span>
           <div className="text-highlight font-medium inline-flex gap-2 items-center text-lg group-hover:text-blue">
