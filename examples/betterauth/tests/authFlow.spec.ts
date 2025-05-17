@@ -11,14 +11,14 @@ test("should sign up, sign in, and logout", async ({ page }) => {
   await page.goto("/");
   const homePage = new HomePage(page);
   await homePage.expectLoggedOut();
-  await homePage.signUpLinkButton.click();
+  await homePage.signUpLink.click();
   await homePage.signUpEmail(username, email, password);
   await homePage.expectLoggedIn(username);
 
   // Log out & sign in
   await homePage.logout();
   await homePage.expectLoggedOut();
-  await homePage.signInLinkButton.click();
+  await homePage.signInLink.click();
   await homePage.signInEmail(email, password);
   await homePage.expectLoggedIn(username);
 

@@ -26,24 +26,3 @@ cd betterauth-app
 pnpm install
 pnpm dev
 ```
-
-### Using the monorepo
-
-This requires `pnpm` to be installed; see [https://pnpm.io/installation](https://pnpm.io/installation).
-
-1. Clone the `jazz` repository.
-```sh
-git clone https://github.com/garden-co/jazz.git
-```
-2. Install dependencies.
-```sh
-cd jazz
-pnpm install
-```
-3. Navigate to the example and start the development server.
-```sh
-cd examples/betterauth
-pnpm dev
-```
-
-The example should be running at [http://localhost:3000](http://localhost:3000) by default.

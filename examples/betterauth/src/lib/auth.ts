@@ -1,54 +1,42 @@
-import { appName } from "@/components/emails";
 import { betterAuth } from "better-auth";
 import { getMigrations } from "better-auth/db";
-import { emailOTP, haveIBeenPwned, magicLink } from "better-auth/plugins";
 import Database from "better-sqlite3";
 import { jazzPlugin } from "jazz-betterauth-server-plugin";
-import {
-  sendEmailOtpCb,
-  sendMagicLinkCb,
-  sendResetPasswordCb,
-  sendVerificationEmailCb,
-  sendWelcomeEmailCb,
-} from "./auth-email";
 import { socialProviders } from "./socialProviders";
 
 export const auth = await (async () => {
   // Configure Better Auth server
   const auth = betterAuth({
-    appName: appName,
+    appName: "Jazz Example: Better Auth",
     database: new Database("sqlite.db"),
     emailAndPassword: {
       enabled: true,
-      sendResetPassword: sendResetPasswordCb,
-    },
-    emailVerification: {
-      sendVerificationEmail: sendVerificationEmailCb,
-    },
-    socialProviders: socialProviders,
-    account: {
-      accountLinking: {
-        allowDifferentEmails: true,
-        allowUnlinkingAll: true,
+      async sendResetPassword({ url }) {
+        // Here we can send an email to the user with the reset password link
+        console.log("****** RESET PASSWORD ******");
+        console.log("navigate to", url, "to reset your password");
+        console.log("******");
       },
     },
+    emailVerification: {
+      async sendVerificationEmail(data) {
+        console.error("Not implemented");
+      },
+    },
+    socialProviders,
     user: {
       deleteUser: {
         enabled: true,
       },
     },
-    plugins: [
-      haveIBeenPwned(),
-      jazzPlugin(),
-      magicLink({
-        sendMagicLink: sendMagicLinkCb,
-      }),
-      emailOTP({ sendVerificationOTP: sendEmailOtpCb }),
-    ],
+    plugins: [jazzPlugin()],
     databaseHooks: {
       user: {
         create: {
-          after: sendWelcomeEmailCb,
+          async after(user) {
+            // Here we can send a welcome email to the user
+            console.error("Not implemented");
+          },
         },
       },
     },

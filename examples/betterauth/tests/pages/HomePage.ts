@@ -4,11 +4,11 @@ export class HomePage {
   constructor(public page: Page) {}
 
   usernameInput = this.page.getByRole("textbox", {
-    name: "Full name",
+    name: "Name",
     exact: true,
   });
   emailInput = this.page.getByRole("textbox", {
-    name: "Email address",
+    name: "Email",
     exact: true,
   });
   passwordInput = this.page.getByRole("textbox", {
@@ -27,11 +27,11 @@ export class HomePage {
     name: "Sign in",
     exact: true,
   });
-  signUpLinkButton = this.page.getByRole("link", {
+  signUpLink = this.page.getByRole("link", {
     name: "Sign up",
     exact: true,
   });
-  signInLinkButton = this.page.getByRole("link", {
+  signInLink = this.page.getByRole("link", {
     name: "Sign in",
     exact: true,
   });
@@ -60,17 +60,17 @@ export class HomePage {
 
   async expectLoggedIn(name?: string) {
     await expect(this.logoutButton).toBeVisible();
-    await expect(this.signInLinkButton).not.toBeVisible();
-    await expect(this.signUpLinkButton).not.toBeVisible();
+    await expect(this.signInLink).not.toBeVisible();
+    await expect(this.signUpLink).not.toBeVisible();
     if (name) {
-      await expect(this.page.getByText(`Signed in as ${name}.`)).toBeVisible();
+      await expect(this.page.getByText(`Signed in as ${name}`)).toBeVisible();
     }
   }
 
   async expectLoggedOut() {
     await expect(this.logoutButton).not.toBeVisible();
-    await expect(this.signInLinkButton).toBeVisible();
-    await expect(this.signUpLinkButton).toBeVisible();
-    await expect(this.page.getByText(`Not signed in.`)).toBeVisible();
+    await expect(this.signInLink).toBeVisible();
+    await expect(this.signUpLink).toBeVisible();
+    await expect(this.page.getByText(`Anonymous user`)).toBeVisible();
   }
 }

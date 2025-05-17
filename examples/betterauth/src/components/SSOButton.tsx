@@ -1,73 +1,137 @@
-import { Button } from "@/components/Button";
-import { SSOProviderType, useAuth } from "jazz-react-auth-betterauth";
-import { socialProviderNames } from "jazz-react-auth-betterauth";
-import { forwardRef } from "react";
+import { Button } from "@/components/ui/button";
+import {
+  SiApple,
+  SiDiscord,
+  SiDropbox,
+  SiFacebook,
+  SiGithub,
+  SiGitlab,
+  SiGoogle,
+  SiKick,
+  SiReddit,
+  SiRoblox,
+  SiSpotify,
+  SiTiktok,
+  SiTwitch,
+  SiVk,
+  SiX,
+  SiZoom,
+} from "@icons-pack/react-simple-icons";
+import { type SSOProviderType, useAuth } from "jazz-react-auth-betterauth";
+import { useRouter } from "next/navigation";
+import type { ReactNode } from "react";
+import { toast } from "sonner";
 
-interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
-  children?: React.ReactNode;
-  src?: InstanceType<typeof Image>["src"];
-  alt?: InstanceType<typeof Image>["alt"];
-  provider: SSOProviderType;
-  link?: boolean;
-  callbackURL?: string;
-  setLoading: React.Dispatch<React.SetStateAction<boolean>>;
-  setError: React.Dispatch<React.SetStateAction<Error | undefined>>;
+interface SocialProvider {
+  name: string;
+  icon?: ReactNode;
 }
 
-export const SSOButton = forwardRef<HTMLButtonElement, ButtonProps>(
-  (
-    {
-      children,
-      provider,
-      link = false,
-      callbackURL,
-      setLoading,
-      setError,
-      ...buttonProps
-    },
-    ref,
-  ) => {
-    const auth = useAuth();
-    const providerName = socialProviderNames[provider];
-    return (
-      <Button
-        src={`/social/${provider}.svg`}
-        alt={`${providerName} logo`}
-        imageClassName="absolute left-3 dark:invert"
-        variant="secondary"
-        className="relative"
-        onClick={async (e) => {
-          e.preventDefault();
-          setLoading(true);
-          const { error } = await (async () => {
-            if (link) {
-              return await auth.authClient.linkSocial({
-                provider: provider,
-              });
-            } else {
-              return await auth.authClient.signIn.social({
-                provider: provider,
-                callbackURL: callbackURL,
-              });
-            }
-          })();
-          if (error) {
-            setError({
-              ...error,
-              name: error.message ?? error.statusText,
-              message: error.message ?? error.statusText,
-            });
-          }
-          setLoading(false);
-        }}
-        {...buttonProps}
-        ref={ref}
-      >
-        {link
-          ? `Link ${providerName} account`
-          : `Continue with ${providerName}`}
-        {children}
-      </Button>
-    );
+const socialProviderMap: Record<SSOProviderType, SocialProvider> = {
+  github: {
+    name: "GitHub",
+    icon: <SiGithub />,
   },
-);
+  google: {
+    name: "Google",
+    icon: <SiGoogle />,
+  },
+  apple: {
+    name: "Apple",
+    icon: <SiApple />,
+  },
+  discord: {
+    name: "Discord",
+    icon: <SiDiscord />,
+  },
+  facebook: {
+    name: "Facebook",
+    icon: <SiFacebook />,
+  },
+  microsoft: {
+    name: "Microsoft",
+  },
+  twitter: {
+    name: "X",
+    icon: <SiX />,
+  },
+  dropbox: {
+    name: "Dropbox",
+    icon: <SiDropbox />,
+  },
+  linkedin: {
+    name: "LinkedIn",
+  },
+  gitlab: {
+    name: "GitLab",
+    icon: <SiGitlab />,
+  },
+  kick: {
+    name: "Kick",
+    icon: <SiKick />,
+  },
+  tiktok: {
+    name: "TikTok",
+    icon: <SiTiktok />,
+  },
+  twitch: {
+    name: "Twitch",
+    icon: <SiTwitch />,
+  },
+  vk: {
+    name: "VK",
+    icon: <SiVk />,
+  },
+  zoom: {
+    name: "Zoom",
+    icon: <SiZoom />,
+  },
+  roblox: {
+    name: "Roblox",
+    icon: <SiRoblox />,
+  },
+  reddit: {
+    name: "Reddit",
+    icon: <SiReddit />,
+  },
+  spotify: {
+    name: "Spotify",
+    icon: <SiSpotify />,
+  },
+};
+
+interface Props {
+  provider: SSOProviderType;
+}
+
+export function SSOButton({ provider }: Props) {
+  const auth = useAuth();
+  const router = useRouter();
+
+  return (
+    <Button
+      type="button"
+      variant="outline"
+      onClick={() => {
+        auth.authClient.signIn.social(
+          {
+            provider,
+          },
+          {
+            onSuccess: () => {
+              router.push("/");
+            },
+            onError: (error) => {
+              toast.error("Error", {
+                description: error.error.message,
+              });
+            },
+          },
+        );
+      }}
+    >
+      {socialProviderMap[provider].icon}
+      Continue with {socialProviderMap[provider].name}
+    </Button>
+  );
+}

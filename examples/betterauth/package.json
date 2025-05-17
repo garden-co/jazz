@@ -15,18 +15,26 @@
 		"email": "email dev --dir src/components/emails"
 	},
 	"dependencies": {
-		"@react-email/components": "^0.0.38",
+		"@icons-pack/react-simple-icons": "^12.8.0",
+		"@radix-ui/react-label": "^2.1.6",
+		"@radix-ui/react-slot": "^1.2.2",
 		"better-auth": "^1.2.4",
 		"better-sqlite3": "^11.9.1",
-		"jazz-betterauth-server-plugin": "workspace:*",
+		"class-variance-authority": "^0.7.1",
+		"clsx": "^2.1.1",
 		"jazz-betterauth-client-plugin": "workspace:*",
+		"jazz-betterauth-server-plugin": "workspace:*",
 		"jazz-inspector": "workspace:*",
 		"jazz-react": "workspace:*",
 		"jazz-react-auth-betterauth": "workspace:*",
 		"jazz-tools": "workspace:*",
-		"next": "15.3.1",
+		"lucide-react": "^0.510.0",
+		"next": "15.3.2",
 		"react": "^18.0.0",
-		"react-dom": "^18.0.0"
+		"react-dom": "^18.0.0",
+		"sonner": "^2.0.3",
+		"tailwind-merge": "^3.3.0",
+		"tw-animate-css": "^1.2.5"
 	},
 	"devDependencies": {
 		"@biomejs/biome": "1.9.4",
