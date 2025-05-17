@@ -13,7 +13,12 @@ CoMaps are key-value objects that work like JavaScript objects. You can access p
 CoMaps are typically defined by extending the `CoMap` class and specifying primitive fields using the `co` declarer (see [Defining schemas: CoValues](/docs/schemas/covalues) for more details on primitive fields):
 
 <CodeGroup>
-```ts
+```ts twoslash
+import { co, CoMap } from "jazz-tools";
+class Member extends CoMap {
+  name = co.string;
+}
+// ---cut---
 class Project extends CoMap {
   name = co.string;
   startDate = co.Date;
@@ -26,7 +31,9 @@ class Project extends CoMap {
 You can create either struct-like CoMaps with fixed fields (as above) or record-like CoMaps for key-value pairs:
 
 <CodeGroup>
-```ts
+```ts twoslash
+import { co, CoMap } from "jazz-tools";
+// ---cut---
 class Inventory extends CoMap.Record(co.number) {}
 ```
 </CodeGroup>
@@ -34,7 +41,21 @@ class Inventory extends CoMap.Record(co.number) {}
 To instantiate a CoMap:
 
 <CodeGroup>
-```ts
+```ts twoslash
+import { co, CoMap } from "jazz-tools";
+import { createJazzTestAccount } from 'jazz-tools/testing';
+const me = await createJazzTestAccount();
+class Member extends CoMap {
+  name = co.string;
+}
+class Project extends CoMap {
+  name = co.string;
+  startDate = co.Date;
+  status = co.literal("planning", "active", "completed");
+  coordinator = co.optional.ref(Member);
+}
+class Inventory extends CoMap.Record(co.number) {}
+// ---cut---
 const project = Project.create({
   name: "Spring Planting",
   startDate: new Date("2025-03-15"),
@@ -101,7 +122,27 @@ See [Groups as permission scopes](/docs/groups/intro) for more information on ho
 CoMaps can be accessed using familiar JavaScript object notation:
 
 <CodeGroup>
-```ts
+```ts twoslash
+import { co, CoMap } from "jazz-tools";
+import { createJazzTestAccount } from 'jazz-tools/testing';
+const me = await createJazzTestAccount();
+class Member extends CoMap {
+  name = co.string;
+}
+class Project extends CoMap {
+  name = co.string;
+  startDate = co.Date;
+  status = co.literal("planning", "active", "completed");
+  coordinator = co.optional.ref(Member);
+}
+const project = Project.create(
+  {
+    name: "Spring Planting",
+    startDate: new Date("2025-03-20"),
+    status: "planning",
+  },
+);
+// ---cut---
 console.log(project.name);      // "Spring Planting"
 console.log(project.status);    // "planning"
 ```
@@ -112,7 +153,27 @@ console.log(project.status);    // "planning"
 Optional fields require checks before access:
 
 <CodeGroup>
-```ts
+```ts twoslash
+import { co, CoMap } from "jazz-tools";
+import { createJazzTestAccount } from 'jazz-tools/testing';
+const me = await createJazzTestAccount();
+class Member extends CoMap {
+  name = co.string;
+}
+class Project extends CoMap {
+  name = co.string;
+  startDate = co.Date;
+  status = co.literal("planning", "active", "completed");
+  coordinator = co.optional.ref(Member);
+}
+const project = Project.create(
+  {
+    name: "Spring Planting",
+    startDate: new Date("2025-03-20"),
+    status: "planning"
+  },
+);
+// ---cut---
 if (project.coordinator) {
   console.log(project.coordinator.name);  // Safe access
 }
@@ -124,7 +185,12 @@ if (project.coordinator) {
 For record-type CoMaps, you can access values using bracket notation:
 
 <CodeGroup>
-```ts
+```ts twoslash
+import { Group, co, CoMap } from "jazz-tools";
+import { createJazzTestAccount } from 'jazz-tools/testing';
+const me = await createJazzTestAccount();
+class Inventory extends CoMap.Record(co.number) {}
+// ---cut---
 const inventory = Inventory.create({
   tomatoes: 48,
   peppers: 24,
@@ -140,7 +206,28 @@ console.log(inventory["tomatoes"]);  // 48
 Updating CoMap properties uses standard JavaScript assignment:
 
 <CodeGroup>
-```ts
+```ts twoslash
+import { co, CoMap } from "jazz-tools";
+import { createJazzTestAccount } from 'jazz-tools/testing';
+const me = await createJazzTestAccount();
+class Member extends CoMap {
+  name = co.string;
+}
+class Project extends CoMap {
+  name = co.string;
+  startDate = co.Date;
+  status = co.literal("planning", "active", "completed");
+  coordinator = co.optional.ref(Member);
+}
+class Inventory extends CoMap.Record(co.number) {}
+const project = Project.create(
+  {
+    name: "Spring Planting",
+    startDate: new Date("2025-03-20"),
+    status: "planning"
+  },
+);
+// ---cut---
 project.name = "Spring Vegetable Garden";    // Update name
 project.startDate = new Date("2025-03-20");  // Update date
 ```
@@ -151,9 +238,31 @@ project.startDate = new Date("2025-03-20");  // Update date
 CoMaps are fully typed in TypeScript, giving you autocomplete and error checking:
 
 <CodeGroup>
-```ts
+```ts twoslash
+import { co, CoMap } from "jazz-tools";
+import { createJazzTestAccount } from 'jazz-tools/testing';
+const me = await createJazzTestAccount();
+class Member extends CoMap {
+  name = co.string;
+}
+class Project extends CoMap {
+  name = co.string;
+  startDate = co.Date;
+  status = co.literal("planning", "active", "completed");
+  coordinator = co.optional.ref(Member);
+}
+class Inventory extends CoMap.Record(co.number) {}
+const project = Project.create(
+  {
+    name: "Spring Planting",
+    startDate: new Date("2025-03-20"),
+    status: "planning"
+  },
+);
+// ---cut---
 project.name = "Spring Vegetable Planting";  // ✓ Valid string
-project.startDate = "2025-03-15";  // ✗ Type error: expected Date
+// @errors: 2322
+project.startDate = "2025-03-15"; // ✗ Type error: expected Date
 ```
 </CodeGroup>
 
@@ -163,7 +272,33 @@ project.startDate = "2025-03-15";  // ✗ Type error: expected Date
 You can delete properties from CoMaps:
 
 <CodeGroup>
-```ts
+```ts twoslash
+import { co, CoMap } from "jazz-tools";
+import { createJazzTestAccount } from 'jazz-tools/testing';
+const me = await createJazzTestAccount();
+class Member extends CoMap {
+  name = co.string;
+}
+class Project extends CoMap {
+  name = co.string;
+  startDate = co.Date;
+  status = co.literal("planning", "active", "completed");
+  coordinator = co.optional.ref(Member);
+}
+class Inventory extends CoMap.Record(co.number) {}
+const project = Project.create(
+  {
+    name: "Spring Planting",
+    startDate: new Date("2025-03-20"),
+    status: "planning"
+  },
+);
+const inventory = Inventory.create({
+  tomatoes: 48,
+  peppers: 24,
+  basil: 12
+});
+// ---cut---
 delete inventory["basil"];  // Remove a key-value pair
 
 // For optional fields in struct-like CoMaps
@@ -186,7 +321,11 @@ project.coordinator = null;  // Remove the reference
 CoMaps support computed properties and methods:
 
 <CodeGroup>
-```ts
+```ts twoslash
+import { co, CoMap } from "jazz-tools";
+import { createJazzTestAccount } from 'jazz-tools/testing';
+const me = await createJazzTestAccount();
+// ---cut---
 class ComputedProject extends CoMap {
   name = co.string;
   startDate = co.Date;
@@ -212,7 +351,11 @@ class ComputedProject extends CoMap {
   }
 }
 
-// ...
+const computedProject = ComputedProject.create({
+  name: "My project",
+  startDate: new Date("2025-04-01"),
+  endDate: new Date("2025-04-04"),
+});
 
 console.log(computedProject.isActive); // false
 console.log(computedProject.formatDuration("short")); // "3 days"
