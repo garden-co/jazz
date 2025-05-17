@@ -1,0 +1,162 @@
+export const metadata = {
+  description:
+    "Configure your JazzProvider - the core component that connects your app to Jazz, handling sync, storage, account schema, and auth.",
+};
+
+import { CodeGroup } from "@/components/forMdx";
+
+# Providers
+
+`<JazzProvider />` is the core component that connects your Svelte application to Jazz. It handles:
+
+- **Data Synchronization**: Manages connections to peers and the Jazz cloud
+- **Local Storage**: Persists data locally between app sessions
+- **Schema Types**: Provides APIs for the [AccountSchema](/docs/schemas/accounts-and-migrations)
+- **Authentication**: Connects your authentication system to Jazz
+
+Our [File Share example app](https://github.com/garden-co/jazz/blob/main/examples/file-share-svelte/src/routes/%2Blayout.svelte) provides an implementation of JazzProvider with authentication and real-time data sync.
+
+## Setting up the Provider
+
+The `<JazzProvider />` accepts several configuration options:
+
+<CodeGroup>
+```svelte
+<!-- src/routes/+layout.svelte -->
+<script lang="ts" module>
+  // Register the Account schema so `useAccount` returns our custom `MyAppAccount`
+  declare module 'jazz-svelte' {
+    interface Register {
+      Account: MyAppAccount;
+    }
+  }
+</script>
+
+<script lang="ts">
+  import { JazzProvider } from "jazz-svelte";
+  import { MyAppAccount } from "$lib/schema";
+  let { children } = $props();
+</script>
+
+<JazzProvider
+  sync={{ 
+    peer: "wss://cloud.jazz.tools/?key=your-api-key",
+    when: "always" // When to sync: "always", "never", or "signedUp"
+  }}
+  AccountSchema={MyAppAccount}
+>
+  {@render children()}
+</JazzProvider>
+```
+</CodeGroup>
+
+## Provider Options
+
+### Sync Options
+
+The `sync` property configures how your application connects to the Jazz network:
+
+
+<CodeGroup>
+```ts twoslash
+// @filename: src/routes/layout.svelte
+
+// ---cut---
+import { type SyncConfig } from "jazz-tools";
+
+const syncConfig: SyncConfig = {
+  // Connection to Jazz Cloud or your own sync server
+  peer: "wss://cloud.jazz.tools/?key=your-api-key",
+  
+  // When to sync: "always" (default), "never", or "signedUp"
+  when: "always",
+}
+```
+</CodeGroup>
+
+
+See [Authentication States](/docs/authentication/authentication-states#controlling-sync-for-different-authentication-states) for more details on how the `when` property affects synchronization based on authentication state.
+
+### Account Schema
+
+The `AccountSchema` property defines your application's account structure:
+
+<CodeGroup>
+```svelte
+<!-- src/routes/+layout.svelte -->>
+<script lang="ts" module>
+  // Register the Account schema so `useAccount` returns our custom `MyAppAccount`
+  declare module 'jazz-svelte' {
+    interface Register {
+      Account: MyAppAccount;
+    }
+  }
+</script>
+
+<script lang="ts">
+  import { JazzProvider } from "jazz-svelte";
+  import { MyAppAccount } from "$lib/schema";
+  let { children } = $props();
+</script>
+
+<JazzProvider
+  sync={syncConfig}
+  AccountSchema={MyAppAccount}
+>
+  {@render children()}
+</JazzProvider>
+```
+</CodeGroup>
+
+### Additional Options
+
+The provider accepts these additional options:
+
+<CodeGroup>
+```svelte
+<!-- src/routes/+layout.svelte -->
+<script lang="ts">
+  import { JazzProvider } from "jazz-svelte";
+  import { syncConfig } from "$lib/syncConfig";
+  let { children } = $props();
+  
+  // Enable guest mode for account-less access
+  const guestMode = false; 
+  
+  // Default name for new user profiles
+  const defaultProfileName = "New User"; 
+  
+  // Handle user logout
+  const onLogOut = () => {
+    console.log("User logged out");
+  };
+
+  // Handle anonymous account data when user logs in to existing account
+  const onAnonymousAccountDiscarded = (account) => {
+    console.log("Anonymous account discarded", account.id);
+    // Migrate data here
+    return Promise.resolve();
+  };
+</script>
+
+<JazzProvider
+  sync={syncConfig}
+  {guestMode}
+  {defaultProfileName}
+  {onLogOut}
+  {onAnonymousAccountDiscarded}
+>
+  {@render children}
+</JazzProvider>
+```
+</CodeGroup>
+
+See [Authentication States](/docs/authentication/authentication-states) for more information on authentication states, guest mode, and handling anonymous accounts.
+
+## Authentication
+
+`<JazzProvider />` works with various authentication methods to enable users to access their data across multiple devices. For a complete guide to authentication, see our [Authentication Overview](/docs/authentication/overview).
+
+## Need Help?
+
+If you have questions about configuring the Jazz Provider for your specific use case, [join our Discord community](https://discord.gg/utDMjHYg42) for help.

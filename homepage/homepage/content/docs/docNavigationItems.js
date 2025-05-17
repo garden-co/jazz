@@ -56,6 +56,7 @@ export const docNavigationItems = [
           react: 100,
           "react-native": 100,
           "react-native-expo": 100,
+          svelte: 100,
         },
       },
     ],
