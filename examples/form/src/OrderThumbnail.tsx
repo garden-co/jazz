@@ -1,6 +1,11 @@
+import { Loaded } from "jazz-tools";
 import { BubbleTeaOrder } from "./schema.ts";
 
-export function OrderThumbnail({ order }: { order: BubbleTeaOrder }) {
+export function OrderThumbnail({
+  order,
+}: {
+  order: Loaded<typeof BubbleTeaOrder>;
+}) {
   const { id, baseTea, addOns, instructions, deliveryDate, withMilk } = order;
   const date = deliveryDate.toLocaleDateString();
 

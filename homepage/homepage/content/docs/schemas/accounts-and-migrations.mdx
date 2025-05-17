@@ -32,12 +32,12 @@ import "jazz-react";
 import { Account, CoMap } from "jazz-tools";
 
 export class MyAppAccount extends Account {
-  root = co.ref(MyAppRoot);
+  root = coField.ref(MyAppRoot);
 }
 
 export class MyAppRoot extends CoMap {
-  myChats = co.ref(ListOfChats);
-  myContacts = co.ref(ListOfAccounts);
+  myChats = coField.ref(ListOfChats);
+  myContacts = coField.ref(ListOfAccounts);
 }
 
 // Register the Account schema so `useAccount` returns our custom `MyAppAccount`
@@ -63,11 +63,11 @@ import { co, Group, CoMap } from "jazz-tools";
 // ---cut---
 // ...somewhere in jazz-tools itself...
 export class Account extends Group {
-  profile = co.ref(Profile);
+  profile = coField.ref(Profile);
 }
 
 export class Profile extends CoMap {
-  name = co.string;
+  name = coField.string;
 }
 ```
 </CodeGroup>
@@ -84,8 +84,8 @@ class MyAppRoot extends CoMap {};
 import { Account, Profile } from "jazz-tools";
 
 export class MyAppAccount extends Account {
-  profile = co.ref(Profile);
-  root = co.ref(MyAppRoot);
+  profile = coField.ref(Profile);
+  root = coField.ref(MyAppRoot);
 }
 ```
 </CodeGroup>
@@ -103,21 +103,21 @@ class ListOfAccounts extends CoList.Of(Account) {};
 import { Account, Profile, ImageDefinition } from "jazz-tools"; // [!code ++]
 
 export class MyAppAccount extends Account {
-  profile = co.ref(MyAppProfile); // [!code ++]
-  root = co.ref(MyAppRoot);
+  profile = coField.ref(MyAppProfile); // [!code ++]
+  root = coField.ref(MyAppRoot);
 }
 
 export class MyAppRoot extends CoMap {
-  myChats = co.ref(ListOfChats);
-  myContacts = co.ref(ListOfAccounts);
+  myChats = coField.ref(ListOfChats);
+  myContacts = coField.ref(ListOfAccounts);
 }
 
 export class MyAppProfile extends Profile { // [!code ++:4]
-  name = co.string; // compatible with default Profile schema
-  avatar = co.optional.ref(ImageDefinition);
+  name = coField.string; // compatible with default Profile schema
+  avatar = coField.optional.ref(ImageDefinition);
 }
 
-// Register the Account schema so `useAccount` returns our custom `MyAppAccount` 
+// Register the Account schema so `useAccount` returns our custom `MyAppAccount`
 declare module "jazz-react" {
   interface Register {
     Account: MyAppAccount;
@@ -231,8 +231,8 @@ class MyAppProfile extends Profile {
 };
 // ---cut---
 export class MyAppAccount extends Account {
-  root = co.ref(MyAppRoot);
-  profile = co.ref(MyAppProfile);
+  root = coField.ref(MyAppRoot);
+  profile = coField.ref(MyAppProfile);
 
   async migrate(this: MyAppAccount, creationProps?: { name: string }) {
     // we specifically need to check for undefined,
@@ -289,15 +289,15 @@ class MyAppRoot extends CoMap {
 
 // ---cut---
 export class MyAppAccount extends Account {
-    root = co.ref(MyAppRoot);
+    root = coField.ref(MyAppRoot);
 
     async migrate(this: MyAppAccount) {
-      if (this.root === undefined) {  
-        this.root = MyAppRoot.create({  
-          myChats: ListOfChats.create([], Group.create()),  
-          myContacts: ListOfAccounts.create([], Group.create()) 
-        }); 
-      } 
+      if (this.root === undefined) {
+        this.root = MyAppRoot.create({
+          myChats: ListOfChats.create([], Group.create()),
+          myContacts: ListOfAccounts.create([], Group.create())
+        });
+      }
 
       // We need to load the root field to check for the myContacts field
       const { root } = await this.ensureLoaded({

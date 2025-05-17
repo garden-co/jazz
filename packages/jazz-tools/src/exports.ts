@@ -8,53 +8,56 @@ export type {
   SyncMessage,
 } from "cojson";
 
+export { z } from "zod";
+
 export type { CoValue, ID } from "./internal.js";
 
-export { Encoders, co } from "./internal.js";
+export { Encoders, coField } from "./internal.js";
 
-export { Inbox, InboxSender } from "./coValues/inbox.js";
+export { Inbox, InboxSender } from "./internal.js";
 
-export {
-  Account,
-  isControlledAccount,
-  type AccountClass,
-  type AccountCreationProps,
-} from "./coValues/account.js";
-export {
-  BinaryCoStream,
-  CoFeed,
-  CoStream,
-  type CoFeedEntry,
-  FileStream,
-} from "./coValues/coFeed.js";
-export { CoList } from "./coValues/coList.js";
-export { CoMap, type CoMapInit } from "./coValues/coMap.js";
-export { CoPlainText, type TextPos } from "./coValues/coPlainText.js";
-export { CoRichText } from "./coValues/coRichText.js";
-export { ImageDefinition } from "./coValues/extensions/imageDef.js";
-export { Group } from "./coValues/group.js";
-export { CoValueBase } from "./coValues/interfaces.js";
-export { Profile } from "./coValues/profile.js";
-export { SchemaUnion } from "./coValues/schemaUnion.js";
+export { Group } from "./internal.js";
+export { CoValueBase } from "./internal.js";
+export { Profile } from "./internal.js";
+export { SchemaUnion } from "./internal.js";
+
+export { co } from "./internal.js";
 
 export type {
   CoValueClass,
+  CoValueFromRaw,
   DeeplyLoaded,
   Resolved,
   RefsToResolve,
   RefsToResolveStrict,
+  CoMapInit,
+  CoFeedEntry,
+  TextPos,
+  AccountClass,
+  AccountCreationProps,
 } from "./internal.js";
 
 export {
+  CoMap,
+  CoList,
+  BinaryCoStream,
+  CoFeed,
+  CoStream,
+  FileStream,
+  CoPlainText,
+  CoRichText,
+  Account,
+  isControlledAccount,
   createCoValueObservable,
   loadCoValue,
   subscribeToCoValue,
+  ImageDefinition,
 } from "./internal.js";
 
 export {
   JazzContextManager,
   type JazzContextManagerAuthProps,
-} from "./implementation/ContextManager.js";
+} from "./internal.js";
 
 export { AuthSecretStorage } from "./auth/AuthSecretStorage.js";
 export { KvStoreContext, type KvStore } from "./auth/KvStoreContext.js";
@@ -81,3 +84,19 @@ export {
 } from "./internal.js";
 
 export type * from "./types.js";
+
+export {
+  zodSchemaToCoSchema,
+  anySchemaToCoSchema,
+  type InstanceOfSchema,
+  type InstanceOrPrimitiveOfSchema,
+  type CoValueOrZodSchema,
+  type Loaded,
+  type AccountSchema,
+  type AnyAccountSchema,
+  type CoListSchema,
+  type CoMapSchema,
+  type CoFeedSchema,
+  type PlainTextSchema,
+  type FileStreamSchema,
+} from "./internal.js";

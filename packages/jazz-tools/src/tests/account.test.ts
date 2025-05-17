@@ -1,6 +1,5 @@
-import { LocalNode } from "cojson";
 import { assert, beforeEach, expect, test } from "vitest";
-import { Account, CoMap, Group, co } from "../exports.js";
+import { Account, Group, co, z } from "../exports.js";
 import {
   createJazzTestAccount,
   linkAccounts,
@@ -14,9 +13,9 @@ beforeEach(async () => {
 });
 
 test("waitForAllCoValuesSync should resolve when all the values are synced", async () => {
-  class TestMap extends CoMap {
-    name = co.string;
-  }
+  const TestMap = co.map({
+    name: z.string(),
+  });
 
   const { clientNode, serverNode, clientAccount } = await setupTwoNodes();
 
@@ -101,8 +100,8 @@ test("accounts should sync correctly", async () => {
 
   const { members } = group;
 
-  expect(members[0]?.account.profile!.name).toBe("test 1");
-  expect(members[1]?.account.profile!.name).toBe("test 2");
+  expect(members()[0]?.account.profile!.name).toBe("test 1");
+  expect(members()[1]?.account.profile!.name).toBe("test 2");
 });
 
 test("loading accounts should work", async () => {

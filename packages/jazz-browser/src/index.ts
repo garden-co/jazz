@@ -2,6 +2,7 @@ import {
   Account,
   CoValue,
   CoValueClass,
+  CoValueOrZodSchema,
   ID,
   InviteSecret,
   createInviteLink as baseCreateInviteLink,
@@ -34,17 +35,19 @@ export function createInviteLink<C extends CoValue>(
 export { parseInviteLink } from "jazz-tools";
 
 /** @category Invite Links */
-export async function consumeInviteLinkFromWindowLocation<V extends CoValue>({
+export async function consumeInviteLinkFromWindowLocation<
+  S extends CoValueOrZodSchema,
+>({
   as,
   forValueHint,
   invitedObjectSchema,
 }: {
   as?: Account;
   forValueHint?: string;
-  invitedObjectSchema: CoValueClass<V>;
+  invitedObjectSchema: S;
 }): Promise<
   | {
-      valueID: ID<V>;
+      valueID: string;
       valueHint?: string;
       inviteSecret: InviteSecret;
     }

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { ImageDefinition } from "jazz-tools";
+import type { ImageDefinition, Loaded } from "jazz-tools";
 import { type Ref, onUnmounted, ref, toRef, watch } from "vue";
 
 interface ImageState {
@@ -9,7 +9,7 @@ interface ImageState {
 }
 
 function useProgressiveImg(
-  image: Ref<ImageDefinition | null | undefined>,
+  image: Ref<Loaded<typeof ImageDefinition> | null | undefined>,
   maxWidth?: number,
   targetWidth?: number,
 ) {
@@ -24,7 +24,7 @@ function useProgressiveImg(
       if (!image.value) return;
 
       const unsub = image.value.subscribe({}, (update) => {
-        const highestRes = update?.highestResAvailable({
+        const highestRes = ImageDefinition.highestResAvailable(update, {
           maxWidth,
           targetWidth,
         });
@@ -70,7 +70,7 @@ function useProgressiveImg(
 }
 
 const props = defineProps<{
-  image: ImageDefinition | null | undefined;
+  image: Loaded<typeof ImageDefinition> | null | undefined;
   maxWidth?: number;
 }>();
 

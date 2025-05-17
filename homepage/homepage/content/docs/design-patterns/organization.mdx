@@ -25,19 +25,19 @@ import { co, CoMap, CoList } from "jazz-tools";
 // ---cut---
 // schema.ts
 export class Project extends CoMap {
-  name = co.string;
+  name = coField.string;
 }
 
-export class ListOfProjects extends CoList.Of(co.ref(Project)) {}
+export class ListOfProjects extends CoList.Of(coField.ref(Project)) {}
 
 export class Organization extends CoMap {
-  name = co.string;
+  name = coField.string;
 
   // shared data between users of each organization
-  projects = co.ref(ListOfProjects);
+  projects = coField.ref(ListOfProjects);
 }
 
-export class ListOfOrganizations extends CoList.Of(co.ref(Organization)) {}
+export class ListOfOrganizations extends CoList.Of(coField.ref(Organization)) {}
 ```
 </CodeGroup>
 
@@ -67,11 +67,11 @@ export class ListOfOrganizations extends CoList.Of(co.ref(Organization)) {}
 // ---cut---
 // schema.ts
 export class JazzAccountRoot extends CoMap {
-  organizations = co.ref(ListOfOrganizations);
+  organizations = coField.ref(ListOfOrganizations);
 }
 
 export class JazzAccount extends Account {
-  root = co.ref(JazzAccountRoot);
+  root = coField.ref(JazzAccountRoot);
 
   async migrate() {
     if (this.root === undefined) {

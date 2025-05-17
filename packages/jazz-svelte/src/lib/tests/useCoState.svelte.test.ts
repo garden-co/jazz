@@ -2,7 +2,7 @@ import { render, waitFor } from '@testing-library/svelte';
 import {
   Account,
   CoMap,
-  co,
+  coField,
   cojsonInternals,
   type CoValue,
   type CoValueClass,
@@ -39,7 +39,7 @@ function setup<T extends CoValue>(options: { account: Account; map: T; resolve?:
 describe('useCoState', () => {
   it('should return the correct value', async () => {
     class TestMap extends CoMap {
-      value = co.string;
+      value = coField.string;
     }
 
     const account = await createJazzTestAccount();
@@ -61,7 +61,7 @@ describe('useCoState', () => {
 
   it('should update the value when the coValue changes', async () => {
     class TestMap extends CoMap {
-      value = co.string;
+      value = coField.string;
     }
 
     const account = await createJazzTestAccount();
@@ -87,12 +87,12 @@ describe('useCoState', () => {
 
   it('should load nested values if requested', async () => {
     class TestNestedMap extends CoMap {
-      value = co.string;
+      value = coField.string;
     }
 
     class TestMap extends CoMap {
-      value = co.string;
-      nested = co.ref(TestNestedMap);
+      value = coField.string;
+      nested = coField.ref(TestNestedMap);
     }
 
     const account = await createJazzTestAccount();
@@ -124,12 +124,12 @@ describe('useCoState', () => {
 
   it('should load nested values on access even if not requested', async () => {
     class TestNestedMap extends CoMap {
-      value = co.string;
+      value = coField.string;
     }
 
     class TestMap extends CoMap {
-      value = co.string;
-      nested = co.ref(TestNestedMap);
+      value = coField.string;
+      nested = coField.ref(TestNestedMap);
     }
 
     const account = await createJazzTestAccount();
@@ -161,7 +161,7 @@ describe('useCoState', () => {
 
   it('should return null if the coValue is not found', async () => {
     class TestMap extends CoMap {
-      value = co.string;
+      value = coField.string;
     }
 
     const unreachableAccount = await createJazzTestAccount({});
@@ -193,7 +193,7 @@ describe('useCoState', () => {
 
   it('should return the same type as Schema', async () => {
     class TestMap extends CoMap {
-      value = co.string;
+      value = coField.string;
     }
 
     const account = await createJazzTestAccount();

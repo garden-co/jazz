@@ -1,8 +1,8 @@
 import { useAccount, useCoState } from "jazz-react";
-import { CoFeed, Group, ID, co } from "jazz-tools";
+import { CoFeed, Group, ID, coField } from "jazz-tools";
 import { useEffect, useState } from "react";
 
-export class Counter extends CoFeed.Of(co.json<{ value: number }>()) {}
+export class Counter extends CoFeed.Of(coField.json<{ value: number }>()) {}
 
 function getIdParam() {
   const url = new URL(window.location.href);

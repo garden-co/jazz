@@ -1,6 +1,16 @@
 // @vitest-environment happy-dom
 
-import { Account, CoMap, RefsToResolve, Resolved, co } from "jazz-tools";
+import {
+  Account,
+  CoMap,
+  Loaded,
+  RefsToResolve,
+  Resolved,
+  co,
+  coField,
+  z,
+  zodSchemaToCoSchema,
+} from "jazz-tools";
 import { beforeEach, describe, expect, it } from "vitest";
 import { useAccount, useJazzContextManager } from "../hooks.js";
 import { useIsAuthenticated } from "../index.js";
@@ -23,29 +33,38 @@ describe("useAccount", () => {
   });
 
   it("should load nested values if requested", async () => {
-    class AccountRoot extends CoMap {
-      value = co.string;
-    }
+    const AccountRoot = co.map({
+      value: z.string(),
+    });
 
-    class AccountSchema extends Account {
-      root = co.ref(AccountRoot);
-
-      migrate() {
-        if (!this._refs.root) {
-          this.root = AccountRoot.create({ value: "123" }, { owner: this });
+    const AccountSchema = co
+      .account({
+        root: AccountRoot,
+        profile: co.map({ name: z.string() }),
+      })
+      .withMigration((account, creationProps) => {
+        if (!account._refs.root) {
+          account.root = AccountRoot.create(
+            { value: "123" },
+            { owner: account },
+          );
         }
-      }
-    }
+      });
 
-    const account = await createJazzTestAccount({ AccountSchema });
+    const account = await createJazzTestAccount({
+      AccountSchema: zodSchemaToCoSchema(AccountSchema),
+    });
 
     const { result } = renderHook(
       () =>
-        useAccount<AccountSchema, RefsToResolve<{ root: true }>>({
-          resolve: {
-            root: true,
+        useAccount<typeof AccountSchema, RefsToResolve<{ root: true }>>(
+          AccountSchema,
+          {
+            resolve: {
+              root: true,
+            },
           },
-        }),
+        ),
       {
         account,
       },

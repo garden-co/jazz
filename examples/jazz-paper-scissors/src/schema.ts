@@ -1,21 +1,21 @@
-import { Account, CoMap, co } from "jazz-tools";
+import { Account, CoMap, coField } from "jazz-tools";
 
 export class Game extends CoMap {
-  player1 = co.ref(Player);
-  player2? = co.ref(Player);
-  outcome? = co.literal("player1", "player2", "draw");
-  player1Score = co.number;
-  player2Score = co.number;
+  player1 = coField.ref(Player);
+  player2? = coField.ref(Player);
+  outcome? = coField.literal("player1", "player2", "draw");
+  player1Score = coField.number;
+  player2Score = coField.number;
 
   /**
    * Given a player, returns the opponent in the current game.
    */
-  getOpponent(player: Player) {
+  static getOpponent(game: Game, player: Player) {
     // TODO: player may be unrelated to this game
     const opponent =
-      player.account?.id === this.player1?.account?.id
-        ? this.player2
-        : this.player1;
+      player.account?.id === game.player1?.account?.id
+        ? game.player2
+        : game.player1;
 
     if (!opponent) {
       throw new Error("Opponent not found");
@@ -29,37 +29,37 @@ export class Game extends CoMap {
 }
 
 export class Player extends CoMap {
-  account = co.ref(Account);
-  playSelection? = co.literal("rock", "paper", "scissors");
+  account = coField.ref(Account);
+  playSelection? = coField.literal("rock", "paper", "scissors");
 }
 
 export class WaitingRoom extends CoMap {
-  account1 = co.ref(Account);
-  account2 = co.optional.ref(Account);
-  game = co.optional.ref(Game);
+  account1 = coField.ref(Account);
+  account2 = coField.optional.ref(Account);
+  game = coField.optional.ref(Game);
 }
 
 export class InboxMessage extends CoMap {
-  type = co.literal("play", "createGame", "joinGame", "newGame");
+  type = coField.literal("play", "createGame", "joinGame", "newGame");
 }
 
 export class PlayIntent extends InboxMessage {
-  type = co.literal("play");
-  gameId = co.string;
-  player = co.literal("player1", "player2");
-  playSelection = co.literal("rock", "paper", "scissors");
+  type = coField.literal("play");
+  gameId = coField.string;
+  player = coField.literal("player1", "player2");
+  playSelection = coField.literal("rock", "paper", "scissors");
 }
 
 export class NewGameIntent extends InboxMessage {
-  type = co.literal("newGame");
-  gameId = co.string;
+  type = coField.literal("newGame");
+  gameId = coField.string;
 }
 
 export class CreateGameRequest extends InboxMessage {
-  type = co.literal("createGame");
+  type = coField.literal("createGame");
 }
 
 export class JoinGameRequest extends InboxMessage {
-  type = co.literal("joinGame");
-  waitingRoom = co.ref(WaitingRoom);
+  type = coField.literal("joinGame");
+  waitingRoom = coField.ref(WaitingRoom);
 }

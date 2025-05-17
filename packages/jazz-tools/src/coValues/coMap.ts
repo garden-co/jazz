@@ -4,16 +4,18 @@ import {
   CojsonInternalTypes,
   type JsonValue,
   RawAccountID,
+  RawCoID,
   type RawCoMap,
   cojsonInternals,
 } from "cojson";
-import { activeAccountContext } from "../implementation/activeAccountContext.js";
 import type {
   AnonymousJazzAgent,
+  AnyAccountSchema,
   CoValue,
   CoValueClass,
+  Group,
   ID,
-  IfCo,
+  InstanceOfSchema,
   RefEncoded,
   RefIfCoValue,
   RefsToResolve,
@@ -22,15 +24,18 @@ import type {
   Schema,
   SubscribeListenerOptions,
   SubscribeRestArgs,
-  co,
 } from "../internal.js";
 import {
+  Account,
   CoValueBase,
   ItemsSym,
   Ref,
+  RegisteredSchemas,
   SchemaInit,
   accessChildById,
   accessChildByKey,
+  activeAccountContext,
+  anySchemaToCoSchema,
   ensureCoValueLoaded,
   inspect,
   isRefEncoded,
@@ -41,15 +46,13 @@ import {
   subscribeToCoValueWithoutMe,
   subscribeToExistingCoValue,
 } from "../internal.js";
-import { RegisteredAccount } from "../types.js";
-import { type Account } from "./account.js";
-import { type Group } from "./group.js";
-import { RegisteredSchemas } from "./registeredSchemas.js";
 
 type CoMapEdit<V> = {
   value?: V;
   ref?: RefIfCoValue<V>;
-  by?: RegisteredAccount;
+  by<A extends typeof Account | AnyAccountSchema>(
+    AccountSchema?: A,
+  ): InstanceOfSchema<A> | null;
   madeAt: Date;
   key?: string;
 };
@@ -68,16 +71,16 @@ export type Simplify<A> = {
  * @categoryDescription Declaration
  * Declare your own CoMap schemas by subclassing `CoMap` and assigning field schemas with `co`.
  *
- * Optional `co.ref(...)` fields must be marked with `{ optional: true }`.
+ * Optional `coField.ref(...)` fields must be marked with `{ optional: true }`.
  *
  * ```ts
- * import { co, CoMap } from "jazz-tools";
+ * import { coField, CoMap } from "jazz-tools";
  *
  * class Person extends CoMap {
- *   name = co.string;
- *   age = co.number;
- *   pet = co.ref(Animal);
- *   car = co.ref(Car, { optional: true });
+ *   name = coField.string;
+ *   age = coField.number;
+ *   pet = coField.ref(Animal);
+ *   car = coField.ref(Car, { optional: true });
  * }
  * ```
  *
@@ -119,7 +122,7 @@ export class CoMap extends CoValueBase implements CoValue {
   }
 
   /**
-   * If property `prop` is a `co.ref(...)`, you can use `coMaps._refs.prop` to access
+   * If property `prop` is a `coField.ref(...)`, you can use `coMaps._refs.prop` to access
    * the `Ref` instead of the potentially loaded/null value.
    *
    * This allows you to always get the ID or load the value manually.
@@ -134,9 +137,19 @@ export class CoMap extends CoValueBase implements CoValue {
    *
    * @category Content
    **/
-  get _refs(): {
-    [Key in CoKeys<this>]: IfCo<this[Key], RefIfCoValue<this[Key]>>;
-  } {
+  get _refs(): Simplify<
+    {
+      [Key in CoKeys<this> as NonNullable<this[Key]> extends CoValue
+        ? Key
+        : never]?: RefIfCoValue<this[Key]>;
+    } & {
+      [Key in CoKeys<this> as this[Key] extends undefined
+        ? never
+        : this[Key] extends CoValue
+          ? Key
+          : never]: RefIfCoValue<this[Key]>;
+    }
+  > {
     return makeRefs<CoKeys<this>>(
       this,
       (key) => this._raw.get(key as string) as unknown as ID<CoValue>,
@@ -186,12 +199,17 @@ export class CoMap extends CoValueBase implements CoValue {
               target,
             )
           : undefined,
-      by:
-        rawEdit.by &&
-        accessChildById(target, rawEdit.by, {
-          ref: RegisteredSchemas["Account"],
-          optional: false,
-        }),
+      by<A extends typeof Account | AnyAccountSchema>(
+        AccountSchema: A = Account as A,
+      ): InstanceOfSchema<A> | null {
+        return (
+          rawEdit.by &&
+          accessChildById(target, rawEdit.by, {
+            ref: anySchemaToCoSchema(AccountSchema),
+            optional: false,
+          })
+        );
+      },
       madeAt: rawEdit.at,
       key,
     };
@@ -233,7 +251,7 @@ export class CoMap extends CoValueBase implements CoValue {
         },
       },
     ) as {
-      [Key in CoKeys<this>]: IfCo<this[Key], LastAndAllCoMapEdits<this[Key]>>;
+      [Key in CoKeys<this>]?: LastAndAllCoMapEdits<this[Key]>;
     };
   }
 
@@ -413,10 +431,10 @@ export class CoMap extends CoValueBase implements CoValue {
    *
    * @example
    * ```ts
-   * import { co, CoMap } from "jazz-tools";
+   * import { coField, CoMap } from "jazz-tools";
    *
    * class ColorToFruitMap extends CoMap.Record(
-   *  co.ref(Fruit)
+   *  coField.ref(Fruit)
    * ) {}
    *
    * // assume we have map: ColorToFruitMap
@@ -426,7 +444,7 @@ export class CoMap extends CoValueBase implements CoValue {
    *
    * @category Declaration
    */
-  static Record<Value>(value: IfCo<Value, Value>) {
+  static Record<Value>(value: Value) {
     // eslint-disable-next-line @typescript-eslint/no-unsafe-declaration-merging
     class RecordLikeCoMap extends CoMap {
       [ItemsSym] = value;
@@ -527,7 +545,7 @@ export class CoMap extends CoValueBase implements CoValue {
       type: "comap" as const,
       ruleset: {
         type: "ownedByGroup" as const,
-        group: ownerID,
+        group: ownerID as RawCoID,
       },
       meta: null,
       uniqueness: unique,
@@ -625,8 +643,8 @@ export type CoKeys<Map extends object> = Exclude<
  * Force required ref fields to be non nullable
  *
  * Considering that:
- * - Optional refs are typed as co<InstanceType<CoValueClass> | null | undefined>
- * - Required refs are typed as co<InstanceType<CoValueClass> | null>
+ * - Optional refs are typed as coField<InstanceType<CoValueClass> | null | undefined>
+ * - Required refs are typed as coField<InstanceType<CoValueClass> | null>
  *
  * This type works in two steps:
  * - Remove the null from both types
@@ -646,18 +664,18 @@ export type CoKeys<Map extends object> = Exclude<
  *
  * map.requiredRef // this value is still nullable
  */
-type ForceRequiredRef<V> = V extends co<InstanceType<CoValueClass> | null>
+type ForceRequiredRef<V> = V extends InstanceType<CoValueClass> | null
   ? NonNullable<V>
-  : V extends co<InstanceType<CoValueClass> | undefined>
+  : V extends InstanceType<CoValueClass> | undefined
     ? V | null
     : V;
 
 export type CoMapInit<Map extends object> = {
   [Key in CoKeys<Map> as undefined extends Map[Key]
     ? never
-    : IfCo<Map[Key], Key>]: ForceRequiredRef<Map[Key]>;
+    : Key]: ForceRequiredRef<Map[Key]>;
 } & {
-  [Key in CoKeys<Map> as IfCo<Map[Key], Key>]?: ForceRequiredRef<Map[Key]>;
+  [Key in CoKeys<Map>]?: ForceRequiredRef<Map[Key]>;
 };
 
 // TODO: cache handlers per descriptor for performance?
@@ -685,7 +703,7 @@ const CoMapProxyHandler: ProxyHandler<CoMap> = {
       } else if ("encoded" in descriptor) {
         return raw === undefined ? undefined : descriptor.encoded.decode(raw);
       } else if (isRefEncoded(descriptor)) {
-        return raw === undefined
+        return raw === undefined || raw === null
           ? undefined
           : accessChildByKey(target, raw as string, key);
       }
@@ -713,11 +731,13 @@ const CoMapProxyHandler: ProxyHandler<CoMap> = {
       } else if ("encoded" in descriptor) {
         target._raw.set(key, descriptor.encoded.encode(value));
       } else if (isRefEncoded(descriptor)) {
-        if (value === null) {
+        if (value === undefined) {
           if (descriptor.optional) {
             target._raw.set(key, null);
           } else {
-            throw new Error(`Cannot set required reference ${key} to null`);
+            throw new Error(
+              `Cannot set required reference ${key} to undefined`,
+            );
           }
         } else if (value?.id) {
           target._raw.set(key, value.id);

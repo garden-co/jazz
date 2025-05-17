@@ -1,4 +1,4 @@
-import { CoFeedEntry, co } from "jazz-tools";
+import { CoFeedEntry } from "jazz-tools";
 import { CursorMoveEvent, useCanvas } from "../hooks/useCanvas";
 import { Cursor as CursorType, Vec2, ViewBox } from "../types";
 import { centerOfBounds } from "../utils/centerOfBounds";
@@ -18,7 +18,7 @@ const debugBounds: ViewBox = {
 
 interface CanvasProps {
   remoteCursors: {
-    entry: CoFeedEntry<co<CursorType>>;
+    entry: CoFeedEntry<CursorType>;
     position: Vec2;
     color: string;
     name: string;

@@ -4,10 +4,12 @@ import type {
   CoValue,
   ID,
   RefEncoded,
-  UnCo,
 } from "../internal.js";
-import { isRefEncoded } from "../internal.js";
-import { accessChildById, getSubscriptionScope } from "../subscribe/index.js";
+import {
+  accessChildById,
+  getSubscriptionScope,
+  isRefEncoded,
+} from "../internal.js";
 
 export class Ref<out V extends CoValue> {
   constructor(
@@ -119,5 +121,5 @@ export function makeRefs<Keys extends string | number>(
 }
 
 export type RefIfCoValue<V> = NonNullable<V> extends CoValue
-  ? Ref<UnCo<NonNullable<V>>>
+  ? Ref<NonNullable<V>>
   : never;

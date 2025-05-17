@@ -7,8 +7,8 @@ Jazz requires an [Expo development build](https://docs.expo.dev/develop/developm
 Tested with:
 
 ```json
-"expo": "~52.0.0",
-"react-native": "0.76.7",
+"expo": "~53.0.0",
+"react-native": "0.79.2",
 "react": "18.3.1",
 ```
 

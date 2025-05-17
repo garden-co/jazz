@@ -77,23 +77,23 @@ This example from our [music player example app](https://github.com/garden-co/ja
 
 <CodeGroup>
 ```ts twoslash
-import { Account, Group, CoMap, co, CoList } from "jazz-tools";
+import { Account, Group, CoMap, coField, CoList } from "jazz-tools";
 
 class MusicTrack extends CoMap {
-  title = co.string;
-  duration = co.number;
-  isExampleTrack = co.optional.boolean;
+  title = coField.string;
+  duration = coField.number;
+  isExampleTrack = coField.optional.boolean;
 }
-class ListOfTracks extends CoList.Of(co.ref(MusicTrack)) {}
+class ListOfTracks extends CoList.Of(coField.ref(MusicTrack)) {}
 class Playlist extends CoMap {
-  title = co.string;
-  tracks = co.ref(ListOfTracks);
+  title = coField.string;
+  tracks = coField.ref(ListOfTracks);
 }
 class MusicaAccountRoot extends CoMap {
-  rootPlaylist = co.ref(Playlist);
+  rootPlaylist = coField.ref(Playlist);
 }
 class MusicaAccount extends Account {
-  root = co.ref(MusicaAccountRoot);
+  root = coField.ref(MusicaAccountRoot);
 }
 
 // ---cut---

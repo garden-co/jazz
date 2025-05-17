@@ -1,6 +1,6 @@
 import { WasmCrypto } from "cojson/crypto/WasmCrypto";
 import { describe, expect, test } from "vitest";
-import { Account, FileStream, ImageDefinition, co } from "../exports.js";
+import { Account, FileStream, ImageDefinition } from "../exports.js";
 
 const Crypto = await WasmCrypto.create();
 
@@ -31,7 +31,7 @@ describe("ImageDefinition", async () => {
       { owner: me },
     );
 
-    const result = imageDef.highestResAvailable();
+    const result = ImageDefinition.highestResAvailable(imageDef);
     expect(result).toBeUndefined();
   });
 
@@ -50,7 +50,7 @@ describe("ImageDefinition", async () => {
 
     imageDef["1920x1080"] = stream;
 
-    const result = imageDef.highestResAvailable();
+    const result = ImageDefinition.highestResAvailable(imageDef);
     expect(result).toBeDefined();
     expect(result?.res).toBe("1920x1080");
     expect(result?.stream).toStrictEqual(stream);
@@ -77,7 +77,7 @@ describe("ImageDefinition", async () => {
     imageDef["1920x1080"] = stream1;
     imageDef["1280x720"] = stream2;
 
-    const result = imageDef.highestResAvailable();
+    const result = ImageDefinition.highestResAvailable(imageDef);
     expect(result).toBeDefined();
     expect(result?.res).toBe("1920x1080");
     expect(result?.stream).toStrictEqual(stream1);
@@ -104,7 +104,9 @@ describe("ImageDefinition", async () => {
     imageDef["1920x1080"] = stream1;
     imageDef["1280x720"] = stream2;
 
-    const result = imageDef.highestResAvailable({ maxWidth: 1500 });
+    const result = ImageDefinition.highestResAvailable(imageDef, {
+      maxWidth: 1500,
+    });
     expect(result).toBeDefined();
     expect(result?.res).toBe("1280x720");
     expect(result?.stream).toStrictEqual(stream2);
@@ -130,7 +132,7 @@ describe("ImageDefinition", async () => {
     imageDef["1920x1080"] = stream1;
     imageDef["1280x720"] = stream2;
 
-    const result = imageDef.highestResAvailable();
+    const result = ImageDefinition.highestResAvailable(imageDef);
     expect(result).toBeDefined();
     expect(result?.res).toBe("1920x1080");
     expect(result?.stream).toStrictEqual(stream1);
@@ -162,7 +164,7 @@ describe("ImageDefinition", async () => {
     imageDef["1280x720"] = stream2;
     imageDef["1024x576"] = stream3;
 
-    const result = imageDef.highestResAvailable();
+    const result = ImageDefinition.highestResAvailable(imageDef);
     expect(result).toBeDefined();
     expect(result?.res).toBe("1920x1080");
     expect(result?.stream).toStrictEqual(stream1);
@@ -181,10 +183,9 @@ describe("ImageDefinition", async () => {
     stream.push(new Uint8Array([1, 2, 3]));
     stream.end();
 
-    // @ts-expect-error - Testing invalid key
     imageDef["invalid-key"] = stream;
 
-    const result = imageDef.highestResAvailable();
+    const result = ImageDefinition.highestResAvailable(imageDef);
     expect(result).toBeUndefined();
   });
 
@@ -216,19 +217,25 @@ describe("ImageDefinition", async () => {
     imageDef["800x450"] = stream3;
 
     // Should return 1280x720 as it's the smallest resolution >= 1000px
-    const result1 = imageDef.highestResAvailable({ targetWidth: 1000 });
+    const result1 = ImageDefinition.highestResAvailable(imageDef, {
+      targetWidth: 1000,
+    });
     expect(result1).toBeDefined();
     expect(result1?.res).toBe("1280x720");
     expect(result1?.stream).toStrictEqual(stream2);
 
     // Should return 800x450 as it's the smallest resolution >= 700px
-    const result2 = imageDef.highestResAvailable({ targetWidth: 700 });
+    const result2 = ImageDefinition.highestResAvailable(imageDef, {
+      targetWidth: 700,
+    });
     expect(result2).toBeDefined();
     expect(result2?.res).toBe("800x450");
     expect(result2?.stream).toStrictEqual(stream3);
 
     // Should return 1920x1080 as it's the smallest resolution >= 1500px
-    const result3 = imageDef.highestResAvailable({ targetWidth: 1500 });
+    const result3 = ImageDefinition.highestResAvailable(imageDef, {
+      targetWidth: 1500,
+    });
     expect(result3).toBeDefined();
     expect(result3?.res).toBe("1920x1080");
     expect(result3?.stream).toStrictEqual(stream1);
@@ -261,7 +268,9 @@ describe("ImageDefinition", async () => {
     imageDef["800x450"] = stream3;
 
     // Should skip 1280x720 as it's incomplete and return 1920x1080
-    const result = imageDef.highestResAvailable({ targetWidth: 1000 });
+    const result = ImageDefinition.highestResAvailable(imageDef, {
+      targetWidth: 1000,
+    });
     expect(result).toBeDefined();
     expect(result?.res).toBe("800x450");
     expect(result?.stream).toStrictEqual(stream1);

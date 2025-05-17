@@ -1,6 +1,12 @@
 import ImageResizer from "@bam.tech/react-native-image-resizer";
 import * as FileSystem from "expo-file-system";
-import { Account, FileStream, Group, ImageDefinition } from "jazz-tools";
+import {
+  Account,
+  FileStream,
+  Group,
+  ImageDefinition,
+  Loaded,
+} from "jazz-tools";
 import { Image } from "react-native";
 
 function arrayBuffer(blob: Blob): Promise<ArrayBuffer> {
@@ -96,7 +102,7 @@ export async function createImage(
     owner?: Group | Account;
     maxSize?: 256 | 1024 | 2048;
   } = {},
-): Promise<ImageDefinition> {
+): Promise<Loaded<typeof ImageDefinition>> {
   try {
     const { contentType } = base64DataURIToParts(base64ImageDataURI);
     const format = contentTypeToFormat(contentType);
@@ -162,7 +168,6 @@ export async function createImage(
           { owner: options.owner },
         );
 
-        // @ts-expect-error types
         imageDefinition[label] = binaryStream;
       } catch (error) {
         console.error(`Error adding image stream for ${label}:`, error);

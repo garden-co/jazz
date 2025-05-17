@@ -1,4 +1,4 @@
-import { ImageDefinition } from "jazz-tools";
+import { ImageDefinition, Loaded } from "jazz-tools";
 import React, { useEffect, useState } from "react";
 
 /** @category Media */
@@ -7,7 +7,7 @@ export function useProgressiveImg({
   maxWidth,
   targetWidth,
 }: {
-  image: ImageDefinition | null | undefined;
+  image: Loaded<typeof ImageDefinition> | null | undefined;
   maxWidth?: number;
   targetWidth?: number;
 }) {
@@ -19,7 +19,10 @@ export function useProgressiveImg({
     let lastHighestRes: string | undefined;
     if (!image) return;
     const unsub = image.subscribe({}, (update) => {
-      const highestRes = update?.highestResAvailable({ maxWidth, targetWidth });
+      const highestRes = ImageDefinition.highestResAvailable(update, {
+        maxWidth,
+        targetWidth,
+      });
       if (highestRes) {
         if (highestRes.res !== lastHighestRes) {
           lastHighestRes = highestRes.res;
@@ -62,7 +65,7 @@ export function ProgressiveImg({
     res: `${number}x${number}` | "placeholder" | undefined;
     originalSize: readonly [number, number] | undefined;
   }) => React.ReactNode;
-  image: ImageDefinition | null | undefined;
+  image: Loaded<typeof ImageDefinition> | null | undefined;
   maxWidth?: number;
   targetWidth?: number;
 }) {

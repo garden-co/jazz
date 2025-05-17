@@ -36,7 +36,7 @@ export function RatePetPostUI() {
         <ShareButton petPost={petPost} />
       </div>
 
-      <ProgressiveImg image={petPost?.image}>
+      <ProgressiveImg image={petPost?.image as any /* TODO: fix this */}>
         {({ src }) => <img className="w-80 max-w-full rounded" src={src} />}
       </ProgressiveImg>
 

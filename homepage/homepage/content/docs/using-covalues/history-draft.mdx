@@ -23,14 +23,14 @@ CoValues track who made each change and when. Every edit has metadata attached t
 <CodeGroup>
 ```ts
 class Task extends CoMap {
-  title = co.string;
-  description = co.string;
-  status = co.literal("todo", "in-progress", "completed");
-  priority = co.literal("low", "medium", "high");
-  subtasks = co.optional.ref(ListOfTasks);
+  title = coField.string;
+  description = coField.string;
+  status = coField.literal("todo", "in-progress", "completed");
+  priority = coField.literal("low", "medium", "high");
+  subtasks = coField.optional.ref(ListOfTasks);
 }
 
-class ListOfTasks extends CoList.Of(co.ref(Task)) {}
+class ListOfTasks extends CoList.Of(coField.ref(Task)) {}
 
 const task = Task.create({
   title: "Plant spring vegetables",
@@ -149,10 +149,10 @@ CoValues track their entire history of changes, creating a timeline you can expl
 <CodeGroup>
 ```ts
 class Task extends CoMap {
-  title = co.string;
-  description = co.string;
-  status = co.literal("todo", "in-progress", "completed");
-  priority = co.literal("low", "medium", "high");
+  title = coField.string;
+  description = coField.string;
+  status = coField.literal("todo", "in-progress", "completed");
+  priority = coField.literal("low", "medium", "high");
 }
 
 // Create a new task
@@ -195,9 +195,9 @@ The ability to view a CoValue as it existed at any point in time is one of Jazz'
 <CodeGroup>
 ```ts
 class Project extends CoMap {
-  name = co.string;
-  status = co.literal("planning", "active", "completed");
-  lastUpdate = co.Date;
+  name = coField.string;
+  status = coField.literal("planning", "active", "completed");
+  lastUpdate = coField.Date;
 }
 
 // See when a project was started

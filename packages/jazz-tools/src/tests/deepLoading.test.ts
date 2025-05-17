@@ -2,41 +2,42 @@ import { cojsonInternals } from "cojson";
 import { WasmCrypto } from "cojson/crypto/WasmCrypto";
 import { assert, describe, expect, expectTypeOf, test, vi } from "vitest";
 import {
-  Account,
-  CoFeed,
-  CoList,
-  CoMap,
   Group,
   ID,
-  Profile,
   SessionID,
-  co,
   createJazzContextFromExistingCredentials,
   isControlledAccount,
+  z,
 } from "../index.js";
-import { randomSessionProvider } from "../internal.js";
+import {
+  Account,
+  CoListSchema,
+  Loaded,
+  co,
+  randomSessionProvider,
+} from "../internal.js";
 import { createJazzTestAccount, linkAccounts } from "../testing.js";
 import { waitFor } from "./utils.js";
 
 const Crypto = await WasmCrypto.create();
 const { connectedPeers } = cojsonInternals;
 
-class TestMap extends CoMap {
-  list = co.ref(TestList);
-  optionalRef = co.ref(InnermostMap, { optional: true });
-}
+const InnermostMap = co.map({
+  value: z.string(),
+});
 
-class TestList extends CoList.Of(co.ref(() => InnerMap)) {}
+const TestFeed = co.feed(InnermostMap);
 
-class InnerMap extends CoMap {
-  stream = co.ref(TestStream);
-}
+const InnerMap = co.map({
+  stream: TestFeed,
+});
 
-class TestStream extends CoFeed.Of(co.ref(() => InnermostMap)) {}
+const TestList = co.list(InnerMap);
 
-class InnermostMap extends CoMap {
-  value = co.string;
-}
+const TestMap = co.map({
+  list: TestList,
+  optionalRef: z.optional(InnermostMap),
+});
 
 describe("Deep loading with depth arg", async () => {
   const me = await Account.create({
@@ -71,7 +72,7 @@ describe("Deep loading with depth arg", async () => {
         [
           InnerMap.create(
             {
-              stream: TestStream.create(
+              stream: TestFeed.create(
                 [InnermostMap.create({ value: "hello" }, ownership)],
                 ownership,
               ),
@@ -87,7 +88,7 @@ describe("Deep loading with depth arg", async () => {
 
   test("load without resolve", async () => {
     const map1 = await TestMap.load(map.id, { loadAs: meOnSecondPeer });
-    expectTypeOf(map1).toEqualTypeOf<TestMap | null>();
+    expectTypeOf(map1).toEqualTypeOf<Loaded<typeof TestMap> | null>();
 
     assert(map1, "map1 is null");
 
@@ -100,8 +101,8 @@ describe("Deep loading with depth arg", async () => {
       resolve: { list: true },
     });
     expectTypeOf(map2).toEqualTypeOf<
-      | (TestMap & {
-          list: TestList;
+      | (Loaded<typeof TestMap> & {
+          list: Loaded<typeof TestList>;
         })
       | null
     >();
@@ -116,8 +117,8 @@ describe("Deep loading with depth arg", async () => {
       resolve: { list: { $each: true } },
     });
     expectTypeOf(map3).toEqualTypeOf<
-      | (TestMap & {
-          list: TestList & InnerMap[];
+      | (Loaded<typeof TestMap> & {
+          list: Loaded<typeof TestList> & Loaded<typeof InnerMap>[];
         })
       | null
     >();
@@ -132,8 +133,8 @@ describe("Deep loading with depth arg", async () => {
       resolve: { optionalRef: true } as const,
     });
     expectTypeOf(map3a).toEqualTypeOf<
-      | (TestMap & {
-          optionalRef: InnermostMap | undefined;
+      | (Loaded<typeof TestMap> & {
+          optionalRef: Loaded<typeof InnermostMap> | undefined;
         })
       | null
     >();
@@ -147,8 +148,9 @@ describe("Deep loading with depth arg", async () => {
       resolve: { list: { $each: { stream: true } } },
     });
     expectTypeOf(map4).toEqualTypeOf<
-      | (TestMap & {
-          list: TestList & (InnerMap & { stream: TestStream })[];
+      | (Loaded<typeof TestMap> & {
+          list: Loaded<typeof TestList> &
+            (Loaded<typeof InnerMap> & { stream: Loaded<typeof TestFeed> })[];
         })
       | null
     >();
@@ -164,19 +166,19 @@ describe("Deep loading with depth arg", async () => {
       resolve: { list: { $each: { stream: { $each: true } } } },
     });
     type ExpectedMap5 =
-      | (TestMap & {
-          list: TestList &
-            (InnerMap & {
-              stream: TestStream & {
-                byMe?: { value: InnermostMap };
-                inCurrentSession?: { value: InnermostMap };
+      | (Loaded<typeof TestMap> & {
+          list: Loaded<typeof TestList> &
+            (Loaded<typeof InnerMap> & {
+              stream: Loaded<typeof TestFeed> & {
+                byMe?: { value: Loaded<typeof InnermostMap> };
+                inCurrentSession?: { value: Loaded<typeof InnermostMap> };
                 perSession: {
                   [sessionID: SessionID]: {
-                    value: InnermostMap;
+                    value: Loaded<typeof InnermostMap>;
                   };
                 };
               } & {
-                [key: ID<Account>]: { value: InnermostMap };
+                [key: ID<Account>]: { value: Loaded<typeof InnermostMap> };
               };
             })[];
         })
@@ -189,48 +191,51 @@ describe("Deep loading with depth arg", async () => {
   });
 });
 
-class CustomProfile extends Profile {
-  stream = co.ref(TestStream);
-}
+const CustomProfile = co.map({
+  name: z.string(),
+  stream: TestFeed,
+});
 
-class CustomAccount extends Account {
-  profile = co.ref(CustomProfile);
-  root = co.ref(TestMap);
-
-  async migrate(
-    this: CustomAccount,
-    creationProps?: { name: string } | undefined,
-  ) {
+const CustomAccount = co
+  .account({
+    profile: CustomProfile,
+    root: TestMap,
+  })
+  .withMigration(async (account, creationProps) => {
     if (creationProps) {
       const profileGroup = Group.create(this);
-      this.profile = CustomProfile.create(
+      account.profile = CustomProfile.create(
         {
           name: creationProps.name,
-          stream: TestStream.create([], this),
+          stream: TestFeed.create([], account),
         },
         profileGroup,
       );
-      this.root = TestMap.create({ list: TestList.create([], this) }, this);
+      account.root = TestMap.create(
+        { list: TestList.create([], account) },
+        account,
+      );
     }
 
-    const thisLoaded = await this.ensureLoaded({
+    const accountLoaded = await account.ensureLoaded({
       resolve: {
         profile: { stream: true },
         root: { list: true },
       },
     });
-    expectTypeOf(thisLoaded).toEqualTypeOf<
-      CustomAccount & {
-        profile: CustomProfile & {
-          stream: TestStream;
+
+    // seems overly strict / spurious errors without .branded
+    expectTypeOf(accountLoaded).branded.toEqualTypeOf<
+      Loaded<typeof CustomAccount> & {
+        profile: Loaded<typeof CustomProfile> & {
+          stream: Loaded<typeof TestFeed>;
         };
-        root: TestMap & {
-          list: TestList;
+        root: Loaded<typeof TestMap> & {
+          list: Loaded<typeof TestList>;
         };
       }
     >();
-  }
-}
+  });
 
 test("Deep loading within account", async () => {
   const me = await CustomAccount.create({
@@ -244,13 +249,14 @@ test("Deep loading within account", async () => {
       root: { list: true },
     },
   });
-  expectTypeOf(meLoaded).toEqualTypeOf<
-    CustomAccount & {
-      profile: CustomProfile & {
-        stream: TestStream;
+  // seems overly strict / spurious errors without .branded
+  expectTypeOf(meLoaded).branded.toEqualTypeOf<
+    Loaded<typeof CustomAccount> & {
+      profile: Loaded<typeof CustomProfile> & {
+        stream: Loaded<typeof TestFeed>;
       };
-      root: TestMap & {
-        list: TestList;
+      root: Loaded<typeof TestMap> & {
+        list: Loaded<typeof TestList>;
       };
     }
   >();
@@ -259,7 +265,7 @@ test("Deep loading within account", async () => {
   expect(meLoaded.root.list).toBeTruthy();
 });
 
-class RecordLike extends CoMap.Record(co.ref(TestMap)) {}
+const RecordLike = co.record(z.string(), TestMap);
 
 test("Deep loading a record-like coMap", async () => {
   const me = await Account.create({
@@ -309,9 +315,9 @@ test("Deep loading a record-like coMap", async () => {
     },
   });
   expectTypeOf(recordLoaded).toEqualTypeOf<
-    | (RecordLike & {
-        [key: string]: TestMap & {
-          list: TestList & InnerMap[];
+    | (Loaded<typeof RecordLike> & {
+        [key: string]: Loaded<typeof TestMap> & {
+          list: Loaded<typeof TestList> & Loaded<typeof InnerMap>[];
         };
       })
     | null
@@ -356,14 +362,15 @@ test("The resolve type doesn't accept extra keys", async () => {
       },
     });
 
-    expectTypeOf(meLoaded).toEqualTypeOf<
-      CustomAccount & {
-        profile: CustomProfile & {
-          stream: TestStream;
+    // seems overly strict / spurious errors without .branded
+    expectTypeOf(meLoaded).branded.toEqualTypeOf<
+      Loaded<typeof CustomAccount> & {
+        profile: Loaded<typeof CustomProfile> & {
+          stream: Loaded<typeof TestFeed>;
           extraKey: never;
         };
-        root: TestMap & {
-          list: TestList;
+        root: Loaded<typeof TestMap> & {
+          list: Loaded<typeof TestList>;
           extraKey: never;
         };
       }
@@ -438,7 +445,7 @@ describe("Deep loading with unauthorized account", async () => {
           [
             InnerMap.create(
               {
-                stream: TestStream.create([], group),
+                stream: TestFeed.create([], group),
               },
               onlyBob,
             ),
@@ -524,7 +531,7 @@ describe("Deep loading with unauthorized account", async () => {
           [
             InnerMap.create(
               {
-                stream: TestStream.create([], onlyBob),
+                stream: TestFeed.create([], onlyBob),
               },
               group,
             ),
@@ -560,7 +567,7 @@ describe("Deep loading with unauthorized account", async () => {
           [
             InnerMap.create(
               {
-                stream: TestStream.create([value], group),
+                stream: TestFeed.create([value], group),
               },
               group,
             ),
@@ -585,25 +592,25 @@ describe("Deep loading with unauthorized account", async () => {
     errorSpy.mockReset();
   });
 
-  test("setting null via proxy", async () => {
-    class Lv1 extends CoMap {
-      lv2 = co.ref(Lv2);
-    }
+  test("setting undefined via proxy", async () => {
+    const Lv3 = co.map({
+      string: z.string(),
+    });
 
-    class Lv2 extends CoMap {
-      lv3 = co.optional.ref(Lv3);
-    }
+    const Lv2 = co.map({
+      lv3: z.optional(Lv3),
+    });
 
-    class Lv3 extends CoMap {
-      string = co.string;
-    }
+    const Lv1 = co.map({
+      lv2: Lv2,
+    });
 
     const map = Lv1.create(
       { lv2: Lv2.create({ lv3: Lv3.create({ string: "hello" }, bob) }, bob) },
       bob,
     );
 
-    map.lv2!.lv3 = null;
+    map.lv2!.lv3 = undefined;
 
     const loadedMap = await Lv1.load(map.id, {
       resolve: { lv2: { lv3: true } },
@@ -614,10 +621,10 @@ describe("Deep loading with unauthorized account", async () => {
   });
 
   test("unaccessible record element with $onError", async () => {
-    class Person extends CoMap {
-      name = co.string;
-    }
-    class Friends extends CoMap.Record(co.ref(Person)) {}
+    const Person = co.map({
+      name: z.string(),
+    });
+    const Friends = co.record(z.string(), Person);
 
     const map = Friends.create(
       {
@@ -639,15 +646,15 @@ describe("Deep loading with unauthorized account", async () => {
   });
 
   test("unaccessible nested record element with $onError", async () => {
-    class Person extends CoMap {
-      name = co.string;
-    }
-    class Friends extends CoMap.Record(co.ref(Person)) {}
+    const Person = co.map({
+      name: z.string(),
+    });
+    const Friends = co.record(z.string(), Person);
 
-    class User extends CoMap {
-      name = co.string;
-      friends = co.ref(Friends);
-    }
+    const User = co.map({
+      name: z.string(),
+      friends: Friends,
+    });
 
     const map = User.create(
       {
@@ -675,19 +682,21 @@ describe("Deep loading with unauthorized account", async () => {
   });
 
   test("unaccessible element down the chain with $onError on a record", async () => {
-    class Person extends CoMap {
-      name = co.string;
-      dog = co.ref(Dog);
-    }
-    class Dog extends CoMap {
-      name = co.string;
-    }
-    class Friends extends CoMap.Record(co.ref(Person)) {}
+    const Dog = co.map({
+      name: z.string(),
+    });
 
-    class User extends CoMap {
-      name = co.string;
-      friends = co.ref(Friends);
-    }
+    const Person = co.map({
+      name: z.string(),
+      dog: Dog,
+    });
+
+    const Friends = co.record(z.string(), Person);
+
+    const User = co.map({
+      name: z.string(),
+      friends: Friends,
+    });
 
     const map = User.create(
       {
@@ -724,11 +733,13 @@ describe("Deep loading with unauthorized account", async () => {
   });
 
   test("unaccessible list element with $onError and $each with depth", async () => {
-    class Person extends CoMap {
-      name = co.string;
-      friends = co.optional.ref(Friends);
-    }
-    class Friends extends CoList.Of(co.ref(Person)) {}
+    const Person = co.map({
+      name: z.string(),
+      get friends(): z.ZodOptional<typeof Friends> {
+        return z.optional(Friends);
+      },
+    });
+    const Friends: CoListSchema<typeof Person> = co.list(Person); // TODO: annoying that we have to annotate
 
     const list = Friends.create(
       [
@@ -774,10 +785,10 @@ describe("Deep loading with unauthorized account", async () => {
   });
 
   test("unaccessible record element with $onError", async () => {
-    class Person extends CoMap {
-      name = co.string;
-    }
-    class Friend extends CoMap.Record(co.ref(Person)) {}
+    const Person = co.map({
+      name: z.string(),
+    });
+    const Friend = co.record(z.string(), Person);
 
     const map = Friend.create(
       {
@@ -799,19 +810,21 @@ describe("Deep loading with unauthorized account", async () => {
   });
 
   test("unaccessible ref catched with $onError", async () => {
-    class Person extends CoMap {
-      name = co.string;
-      dog = co.ref(Dog);
-    }
-    class Dog extends CoMap {
-      name = co.string;
-    }
-    class Friends extends CoMap.Record(co.ref(Person)) {}
+    const Dog = co.map({
+      name: z.string(),
+    });
 
-    class User extends CoMap {
-      name = co.string;
-      friends = co.ref(Friends);
-    }
+    const Person = co.map({
+      name: z.string(),
+      dog: Dog,
+    });
+
+    const Friends = co.record(z.string(), Person);
+
+    const User = co.map({
+      name: z.string(),
+      friends: Friends,
+    });
 
     const map = User.create(
       {
@@ -848,9 +861,9 @@ describe("Deep loading with unauthorized account", async () => {
   });
 
   test("using $onError on the resolve root", async () => {
-    class Person extends CoMap {
-      name = co.string;
-    }
+    const Person = co.map({
+      name: z.string(),
+    });
 
     const map = Person.create({ name: "John" }, onlyBob);
     const user = await Person.load(map.id, {
@@ -863,15 +876,16 @@ describe("Deep loading with unauthorized account", async () => {
 });
 
 test("doesn't break on Map.Record key deletion when the key is referenced in the depth", async () => {
-  class JazzProfile extends CoMap {
-    firstName = co.string;
-  }
+  const JazzProfile = co.map({
+    name: z.string(),
+    firstName: z.string(),
+  });
 
-  class JazzySnapStore extends CoMap.Record(co.ref(JazzProfile)) {}
+  const JazzySnapStore = co.record(z.string(), JazzProfile);
 
   const snapStore = JazzySnapStore.create({
-    profile1: JazzProfile.create({ firstName: "John" }),
-    profile2: JazzProfile.create({ firstName: "John" }),
+    profile1: JazzProfile.create({ name: "John", firstName: "John" }),
+    profile2: JazzProfile.create({ name: "John", firstName: "John" }),
   });
 
   const spy = vi.fn();
@@ -899,13 +913,14 @@ test("doesn't break on Map.Record key deletion when the key is referenced in the
 });
 
 test("throw when calling ensureLoaded on a ref that's required but missing", async () => {
-  class JazzProfile extends CoMap {
-    firstName = co.string;
-  }
+  const JazzProfile = co.map({
+    name: z.string(),
+    firstName: z.string(),
+  });
 
-  class JazzRoot extends CoMap {
-    profile = co.ref(JazzProfile);
-  }
+  const JazzRoot = co.map({
+    profile: JazzProfile,
+  });
 
   const me = await Account.create({
     creationProps: { name: "Tester McTesterson" },
@@ -926,7 +941,7 @@ test("throw when calling ensureLoaded on a ref that's required but missing", asy
 });
 
 test("throw when calling ensureLoaded on a ref that is not defined in the schema", async () => {
-  class JazzRoot extends CoMap {}
+  const JazzRoot = co.map({});
 
   const me = await Account.create({
     creationProps: { name: "Tester McTesterson" },
@@ -944,11 +959,12 @@ test("throw when calling ensureLoaded on a ref that is not defined in the schema
 });
 
 test("should not throw when calling ensureLoaded a record with a deleted ref", async () => {
-  class JazzProfile extends CoMap {
-    firstName = co.string;
-  }
+  const JazzProfile = co.map({
+    name: z.string(),
+    firstName: z.string(),
+  });
 
-  class JazzySnapStore extends CoMap.Record(co.ref(JazzProfile)) {}
+  const JazzySnapStore = co.record(z.string(), JazzProfile);
 
   const me = await Account.create({
     creationProps: { name: "Tester McTesterson" },
@@ -957,7 +973,7 @@ test("should not throw when calling ensureLoaded a record with a deleted ref", a
 
   const root = JazzySnapStore.create(
     {
-      profile: JazzProfile.create({ firstName: "John" }, me),
+      profile: JazzProfile.create({ name: "John", firstName: "John" }, me),
     },
     me,
   );

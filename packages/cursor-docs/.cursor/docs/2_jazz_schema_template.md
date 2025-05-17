@@ -1,6 +1,6 @@
 ---
 
-import { Account, CoList, CoMap, Group, Profile, co } from "jazz-tools";
+import { Account, CoList, CoMap, Group, Profile, coField } from "jazz-tools";
 
 /**
  * Represents a main data item in the app’s domain.
@@ -13,23 +13,23 @@ import { Account, CoList, CoMap, Group, Profile, co } from "jazz-tools";
  */
 export class MainItem extends CoMap {
   /** A required, identifying name. */
-  name = co.string;
+  name = coField.string;
 
   /** An optional string field for metadata. */
-  metadata_field = co.optional.string;
+  metadata_field = coField.optional.string;
 
   /** Reference to the parent container. */
-  container = co.ref(Container);
+  container = coField.ref(Container);
 
   /** Soft-delete flag: if true, treat this item as removed. */
-  deleted = co.boolean;
+  deleted = coField.boolean;
 }
 
 /**
  * A list/array of MainItem references.
  * Provides real-time collaboration features (insertion, removal, ordering).
  */
-export class MainItemList extends CoList.Of(co.ref(MainItem)) {}
+export class MainItemList extends CoList.Of(coField.ref(MainItem)) {}
 
 /**
  * A container/organizational structure for grouping MainItem objects.
@@ -40,10 +40,10 @@ export class MainItemList extends CoList.Of(co.ref(MainItem)) {}
  */
 export class Container extends CoMap {
   /** Human-friendly name for this container. */
-  name = co.string;
+  name = coField.string;
 
   /** A list of MainItems held by this container. */
-  items = co.ref(MainItemList);
+  items = coField.ref(MainItemList);
 }
 
 /**
@@ -55,10 +55,10 @@ export class Container extends CoMap {
  */
 export class AccountRoot extends CoMap {
   /** A single container to hold or organize items. */
-  container = co.ref(Container);
+  container = coField.ref(Container);
 
   /** Tracks schema version for migrations. */
-  version = co.optional.number;
+  version = coField.optional.number;
 }
 
 /**
@@ -72,7 +72,7 @@ export class AccountRoot extends CoMap {
  */
 export class UserProfile extends Profile {
   /** Required user email. */
-  email = co.string;
+  email = coField.string;
 
   /**
    * Validate user profile data, ensuring both "name" and "email" exist and are non-empty.
@@ -96,10 +96,10 @@ export class UserProfile extends Profile {
  */
 export class JazzAccount extends Account {
   /** Reference to the user’s profile. */
-  profile = co.ref(UserProfile);
+  profile = coField.ref(UserProfile);
 
   /** Reference to the account root data (container, version, etc.). */
-  root = co.ref(AccountRoot);
+  root = coField.ref(AccountRoot);
 
   /**
    * Migrate is run on creation and each login. If there is no root, creates initial data.

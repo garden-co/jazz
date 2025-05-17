@@ -1,5 +1,14 @@
 import { commands } from "@vitest/browser/context";
-import { Account, AuthSecretStorage, CoMap, Group, co } from "jazz-tools";
+import {
+  Account,
+  AuthSecretStorage,
+  CoMap,
+  Group,
+  co,
+  coField,
+  z,
+  zodSchemaToCoSchema,
+} from "jazz-tools";
 import {
   assert,
   afterAll,
@@ -11,19 +20,18 @@ import {
 } from "vitest";
 import { createAccountContext, startSyncServer } from "./testUtils";
 
-class TestMap extends CoMap {
-  value = co.string;
-}
+const TestMap = co.map({ value: z.string() });
 
-class CustomAccount extends Account {
-  root = co.ref(TestMap);
-
-  migrate() {
-    if (!this.root) {
-      this.root = TestMap.create({ value: "initial" }, { owner: this });
+const CustomAccount = co
+  .account({
+    profile: co.map({ name: z.string() }),
+    root: TestMap,
+  })
+  .withMigration((account) => {
+    if (!account.root) {
+      account.root = TestMap.create({ value: "initial" }, { owner: account });
     }
-  }
-}
+  });
 
 afterAll(async () => {
   await commands.cleanup();
@@ -42,7 +50,7 @@ describe("Browser sync", () => {
         peer: syncServer.url,
       },
       storage: "indexedDB",
-      AccountSchema: CustomAccount,
+      AccountSchema: zodSchemaToCoSchema(CustomAccount),
     });
 
     const group = Group.create(account1);

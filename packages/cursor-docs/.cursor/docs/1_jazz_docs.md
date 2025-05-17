@@ -5,19 +5,19 @@
 
 ### **1. Basic Definition**
 ```typescript
-import { CoMap, co } from "jazz-tools";
+import { CoMap, coField } from "jazz-tools";
 class Person extends CoMap {
-  name = co.string;
-  age = co.number;
-  isActive = co.boolean;
+  name = coField.string;
+  age = coField.number;
+  isActive = coField.boolean;
 }
 ```
 
 ### **2. Field Types**
-- **Basic:** `co.string`, `co.number`, `co.boolean`
-- **Optional:** `co.optional.string`, `co.optional.number`
-- **Literals (Enums):** `co.literal("draft", "published", "archived")`
-- **Dates:** `co.Date`
+- **Basic:** `coField.string`, `coField.number`, `coField.boolean`
+- **Optional:** `coField.optional.string`, `coField.optional.number`
+- **Literals (Enums):** `coField.literal("draft", "published", "archived")`
+- **Dates:** `coField.Date`
 - **Custom Encoded:**
 ```typescript
 customField = co.encoded({
@@ -29,14 +29,14 @@ customField = co.encoded({
 ### **3. References to Other CoMaps**
 ```typescript
 class Comment extends CoMap {
-  text = co.string;
-  createdAt = co.Date;
+  text = coField.string;
+  createdAt = coField.Date;
 }
 class Post extends CoMap {
-  title = co.string;
-  content = co.string;
-  mainComment = co.ref(Comment);
-  pinnedComment = co.optional.ref(Comment);
+  title = coField.string;
+  content = coField.string;
+  mainComment = coField.ref(Comment);
+  pinnedComment = coField.optional.ref(Comment);
 }
 
 // Loading with resolve API (0.12.0+)
@@ -50,15 +50,15 @@ const post = await Post.load(id, {
 
 ### **4. Lists with CoList**
 ```typescript
-import { CoList, CoMap, co } from "jazz-tools";
+import { CoList, CoMap, coField } from "jazz-tools";
 class Task extends CoMap {
-  title = co.string;
-  completed = co.boolean;
+  title = coField.string;
+  completed = coField.boolean;
 }
-class TaskList extends CoList.Of(co.ref(Task)) {}
+class TaskList extends CoList.Of(coField.ref(Task)) {}
 class Project extends CoMap {
-  name = co.string;
-  tasks = co.ref(TaskList);
+  name = coField.string;
+  tasks = coField.ref(TaskList);
 }
 
 // Loading with resolve API (0.12.0+)
@@ -74,8 +74,8 @@ const project = await Project.load(id, {
 ### **5. Validation & Custom Methods**
 ```typescript
 class DraftPost extends CoMap {
-  title = co.optional.string;
-  content = co.optional.string;
+  title = coField.optional.string;
+  content = coField.optional.string;
   validate() {
     const errors: string[] = [];
     if (!this.title) errors.push("Title is required");
@@ -89,52 +89,52 @@ class DraftPost extends CoMap {
 ### **Real-World Examples**
 - **Chat Schema**
 ```typescript
-class Message extends CoMap { text = co.string; image = co.optional.ref(ImageDefinition); }
-class Chat extends CoList.Of(co.ref(Message)) {}
+class Message extends CoMap { text = coField.string; image = coField.optional.ref(ImageDefinition); }
+class Chat extends CoList.Of(coField.ref(Message)) {}
 ```
 - **Organization Schema**
 ```typescript
-class Project extends CoMap { name = co.string; }
-class ListOfProjects extends CoList.Of(co.ref(Project)) {}
+class Project extends CoMap { name = coField.string; }
+class ListOfProjects extends CoList.Of(coField.ref(Project)) {}
 class Organization extends CoMap {
-  name = co.string;
-  projects = co.ref(ListOfProjects);
+  name = coField.string;
+  projects = coField.ref(ListOfProjects);
 }
 ```
 - **Issue Tracking**
 ```typescript
 class Issue extends CoMap {
-  title = co.string;
-  description = co.string;
-  estimate = co.number;
-  status? = co.literal("backlog", "in progress", "done");
+  title = coField.string;
+  description = coField.string;
+  estimate = coField.number;
+  status? = coField.literal("backlog", "in progress", "done");
 }
-class ListOfIssues extends CoList.Of(co.ref(Issue)) {}
+class ListOfIssues extends CoList.Of(coField.ref(Issue)) {}
 class Project extends CoMap {
-  name = co.string;
-  issues = co.ref(ListOfIssues);
+  name = coField.string;
+  issues = coField.ref(ListOfIssues);
 }
 ```
 
 ### **Testing Example**
 ```typescript
 class TestMap extends CoMap {
-  color = co.string;
-  _height = co.number;
-  birthday = co.Date;
-  name? = co.string;
-  nullable = co.optional.encoded<string | undefined>({
+  color = coField.string;
+  _height = coField.number;
+  birthday = coField.Date;
+  name? = coField.string;
+  nullable = coField.optional.encoded<string | undefined>({
     encode: (v: string | undefined) => v || null,
     decode: (v: unknown) => (v as string) || undefined,
   });
-  optionalDate = co.optional.encoded(Encoders.Date);
+  optionalDate = coField.optional.encoded(Encoders.Date);
   get roughColor() { return this.color + "ish"; }
 }
 ```
 
 ### **Key Takeaways**
 - Extend **CoMap** for schemas.
-- Use `co.ref()` for references, `co.optional` for optional fields.
+- Use `coField.ref()` for references, `coField.optional` for optional fields.
 - Use `CoList.Of()` for collections.
 - Fields auto-sync across clients.
 - Add computed properties & validation methods.
@@ -146,17 +146,17 @@ class TestMap extends CoMap {
 
 ### **1. Basic Definition**
 ```typescript
-import { CoList, co } from "jazz-tools";
-class ColorList extends CoList.Of(co.string) {}
-class NumberList extends CoList.Of(co.number) {}
-class BooleanList extends CoList.Of(co.boolean) {}
+import { CoList, coField } from "jazz-tools";
+class ColorList extends CoList.Of(coField.string) {}
+class NumberList extends CoList.Of(coField.number) {}
+class BooleanList extends CoList.Of(coField.boolean) {}
 ```
 
 ### **2. Lists of CoMaps**
 ```typescript
-import { CoList, CoMap, co } from "jazz-tools";
-class Task extends CoMap { title = co.string; completed = co.boolean; }
-class ListOfTasks extends CoList.Of(co.ref(Task)) {}
+import { CoList, CoMap, coField } from "jazz-tools";
+class Task extends CoMap { title = coField.string; completed = coField.boolean; }
+class ListOfTasks extends CoList.Of(coField.ref(Task)) {}
 
 // Loading with resolve API (0.12.0+)
 const taskList = await ListOfTasks.load(id, { resolve: { $each: true } });
@@ -173,14 +173,14 @@ taskList.splice(1, 1);
 
 ### **4. Nested Lists**
 ```typescript
-class Comment extends CoMap { text = co.string; createdAt = co.Date; }
-class ListOfComments extends CoList.Of(co.ref(Comment)) {}
+class Comment extends CoMap { text = coField.string; createdAt = coField.Date; }
+class ListOfComments extends CoList.Of(coField.ref(Comment)) {}
 class Post extends CoMap {
-  title = co.string;
-  content = co.string;
-  comments = co.ref(ListOfComments);
+  title = coField.string;
+  content = coField.string;
+  comments = coField.ref(ListOfComments);
 }
-class ListOfPosts extends CoList.Of(co.ref(Post)) {}
+class ListOfPosts extends CoList.Of(coField.ref(Post)) {}
 
 // Loading with resolve API (0.12.0+)
 const posts = await ListOfPosts.load(id, {
@@ -197,27 +197,27 @@ const posts = await ListOfPosts.load(id, {
 ### **Real-World Examples**
 - **Chat Schema**
 ```typescript
-class Message extends CoMap { text = co.string; image = co.optional.ref(ImageDefinition); }
-class Chat extends CoList.Of(co.ref(Message)) {}
+class Message extends CoMap { text = coField.string; image = coField.optional.ref(ImageDefinition); }
+class Chat extends CoList.Of(coField.ref(Message)) {}
 ```
 - **Todo App Schema**
 ```typescript
-class Task extends CoMap { done = co.boolean; text = co.string; }
-class ListOfTasks extends CoList.Of(co.ref(Task)) {}
+class Task extends CoMap { done = coField.boolean; text = coField.string; }
+class ListOfTasks extends CoList.Of(coField.ref(Task)) {}
 ```
 - **Organization Schema**
 ```typescript
-class Project extends CoMap { name = co.string; }
-class ListOfProjects extends CoList.Of(co.ref(Project)) {}
+class Project extends CoMap { name = coField.string; }
+class ListOfProjects extends CoList.Of(coField.ref(Project)) {}
 class Organization extends CoMap {
-  name = co.string;
-  projects = co.ref(ListOfProjects);
+  name = coField.string;
+  projects = coField.ref(ListOfProjects);
 }
 ```
 
 ### **5. Advanced Features**
 ```typescript
-class TaskList extends CoList.Of(co.ref(Task)) {
+class TaskList extends CoList.Of(coField.ref(Task)) {
   getCompletedTasks() { return this.filter(task => task.completed); }
   getPendingTasks() { return this.filter(task => !task.completed); }
 }
@@ -225,7 +225,7 @@ class TaskList extends CoList.Of(co.ref(Task)) {
 
 ### **Key Takeaways**
 - `CoList.Of()` for list definitions.
-- `co.ref()` for CoMap references.
+- `coField.ref()` for CoMap references.
 - Acts like arrays with real-time sync.
 - Supports custom methods & nested lists.
 
@@ -236,9 +236,9 @@ class TaskList extends CoList.Of(co.ref(Task)) {
 
 ### **1. Basic Definition**
 ```typescript
-import { CoFeed, co } from "jazz-tools";
-class ActivityFeed extends CoFeed.Of(co.string) {}
-class MetricsFeed extends CoFeed.Of(co.number) {}
+import { CoFeed, coField } from "jazz-tools";
+class ActivityFeed extends CoFeed.Of(coField.string) {}
+class MetricsFeed extends CoFeed.Of(coField.number) {}
 ```
 
 ### **2. Feeds with Complex Types**
@@ -248,13 +248,13 @@ interface LogEvent {
   level: "info" | "warn" | "error";
   message: string;
 }
-class LogFeed extends CoFeed.Of(co.json<LogEvent>()) {}
+class LogFeed extends CoFeed.Of(coField.json<LogEvent>()) {}
 ```
 
 ### **3. Pet Reactions Example**
 ```typescript
 export const ReactionTypes = ["aww","love","haha","wow","tiny","chonkers"] as const;
-export class PetReactions extends CoFeed.Of(co.json<ReactionType>()) {}
+export class PetReactions extends CoFeed.Of(coField.json<ReactionType>()) {}
 ```
 
 ### **4. Working with CoFeeds**
@@ -267,15 +267,15 @@ reactions.subscribe(feedId, me, {}, (feed) => console.log(feed.latest()));
 ### **5. Common Use Cases**
 - **Activity Streams**
 ```typescript
-class ActivityStream extends CoFeed.Of(co.json<{ type:"comment"|"like"|"share";userId:string;timestamp:number;}>) {}
+class ActivityStream extends CoFeed.Of(coField.json<{ type:"comment"|"like"|"share";userId:string;timestamp:number;}>) {}
 ```
 - **Chat Messages**
 ```typescript
-class ChatFeed extends CoFeed.Of(co.json<{ type:"message"|"join"|"leave";userId:string; content?:string;timestamp:number;}>) {}
+class ChatFeed extends CoFeed.Of(coField.json<{ type:"message"|"join"|"leave";userId:string; content?:string;timestamp:number;}>) {}
 ```
 - **Audit Logs**
 ```typescript
-class AuditLog extends CoFeed.Of(co.json<{ action:string; user:string; details:Record<string,unknown>;timestamp:number;}>) {}
+class AuditLog extends CoFeed.Of(coField.json<{ action:string; user:string; details:Record<string,unknown>;timestamp:number;}>) {}
 ```
 
 ### **6. Differences: CoFeed vs. CoList**
@@ -296,10 +296,10 @@ class AuditLog extends CoFeed.Of(co.json<{ action:string; user:string; details:R
 
 ### **1. Basic Definition**
 ```typescript
-import { SchemaUnion, CoMap, co } from "jazz-tools";
-class BaseShape extends CoMap { type = co.string; }
-class Circle extends BaseShape { type = co.literal("circle"); radius = co.number; }
-class Rectangle extends BaseShape { type = co.literal("rectangle"); width = co.number; height = co.number; }
+import { SchemaUnion, CoMap, coField } from "jazz-tools";
+class BaseShape extends CoMap { type = coField.string; }
+class Circle extends BaseShape { type = coField.literal("circle"); radius = coField.number; }
+class Rectangle extends BaseShape { type = coField.literal("rectangle"); width = coField.number; height = coField.number; }
 const Shape = SchemaUnion.Of<BaseShape>((raw) => {
   switch (raw.get("type")) {
     case "circle": return Circle;
@@ -311,9 +311,9 @@ const Shape = SchemaUnion.Of<BaseShape>((raw) => {
 
 ### **2. Nested Discriminators**
 ```typescript
-class BaseButton extends CoMap { type = co.literal("button"); variant = co.string; }
-class PrimaryButton extends BaseButton { variant = co.literal("primary"); label = co.string; size = co.literal("small","medium","large"); }
-class SecondaryButton extends BaseButton { variant = co.literal("secondary"); label = co.string; outline = co.boolean; }
+class BaseButton extends CoMap { type = coField.literal("button"); variant = coField.string; }
+class PrimaryButton extends BaseButton { variant = coField.literal("primary"); label = coField.string; size = coField.literal("small","medium","large"); }
+class SecondaryButton extends BaseButton { variant = coField.literal("secondary"); label = coField.string; outline = coField.boolean; }
 const Button = SchemaUnion.Of<BaseButton>((raw) => {
   switch (raw.get("variant")) {
     case "primary": return PrimaryButton;
@@ -325,9 +325,9 @@ const Button = SchemaUnion.Of<BaseButton>((raw) => {
 
 ### **3. Using SchemaUnion with CoLists**
 ```typescript
-class BaseWidget extends CoMap { type = co.string; }
-class ButtonWidget extends BaseWidget { type = co.literal("button"); label = co.string; }
-class SliderWidget extends BaseWidget { type = co.literal("slider"); min = co.number; max = co.number; }
+class BaseWidget extends CoMap { type = coField.string; }
+class ButtonWidget extends BaseWidget { type = coField.literal("button"); label = coField.string; }
+class SliderWidget extends BaseWidget { type = coField.literal("slider"); min = coField.number; max = coField.number; }
 const Widget = SchemaUnion.Of<BaseWidget>((raw) => {
   switch (raw.get("type")) {
     case "button": return ButtonWidget;
@@ -335,7 +335,7 @@ const Widget = SchemaUnion.Of<BaseWidget>((raw) => {
     default: throw new Error("Unknown widget");
   }
 });
-class WidgetList extends CoList.Of(co.ref(Widget)) {}
+class WidgetList extends CoList.Of(coField.ref(Widget)) {}
 ```
 
 ### **4. Working with SchemaUnion Instances**
@@ -349,20 +349,20 @@ if (widget instanceof SliderWidget) console.log(widget.min, widget.max);
 ### **5. Validation Example**
 ```typescript
 class BaseFormField extends CoMap {
-  type = co.string;
-  label = co.string;
-  required = co.boolean;
+  type = coField.string;
+  label = coField.string;
+  required = coField.boolean;
 }
 class TextField extends BaseFormField {
-  type = co.literal("text");
-  minLength = co.optional.number;
-  maxLength = co.optional.number;
+  type = coField.literal("text");
+  minLength = coField.optional.number;
+  maxLength = coField.optional.number;
   validate(value: string){/* ... */}
 }
 class NumberField extends BaseFormField {
-  type = co.literal("number");
-  min = co.optional.number;
-  max = co.optional.number;
+  type = coField.literal("number");
+  min = coField.optional.number;
+  max = coField.optional.number;
   validate(value: number){/* ... */}
 }
 const FormField = SchemaUnion.Of<BaseFormField>((raw) => {
@@ -376,7 +376,7 @@ const FormField = SchemaUnion.Of<BaseFormField>((raw) => {
 
 ### **Key Takeaways**
 - **SchemaUnion** = polymorphic CoMaps.
-- Use `co.literal()` for discriminators.
+- Use `coField.literal()` for discriminators.
 - `instanceof` for type-narrowing.
 - Great for complex forms & dynamic components.
 
@@ -387,7 +387,7 @@ const FormField = SchemaUnion.Of<BaseFormField>((raw) => {
 ### **1. Ownership & Groups**
 Every `CoValue` has an owner (an `Account` or `Group`):
 ```typescript
-import { Account, Group, CoMap, co } from "jazz-tools";
+import { Account, Group, CoMap, coField } from "jazz-tools";
 const privateDoc = Document.create({ title:"Private" }, { owner: me });
 const group = Group.create({ owner: me });
 const sharedDoc = Document.create({ title:"Shared" }, { owner: group });
@@ -403,14 +403,14 @@ group.addMember("everyone","reader");
 
 ### **3. Organizations & Memberships**
 ```typescript
-import { Account, CoMap, CoList, Group, co } from "jazz-tools";
-class Project extends CoMap { name = co.string; description = co.string; }
+import { Account, CoMap, CoList, Group, coField } from "jazz-tools";
+class Project extends CoMap { name = coField.string; description = coField.string; }
 class Organization extends CoMap {
-  name = co.string;
-  projects = co.ref(CoList.Of(co.ref(Project)));
+  name = coField.string;
+  projects = coField.ref(CoList.Of(coField.ref(Project)));
   static create(name: string, owner: Account) {
     const group = Group.create({ owner });
-    return super.create({ name, projects: CoList.Of(co.ref(Project)).create([], { owner: group }) }, { owner: group });
+    return super.create({ name, projects: CoList.Of(coField.ref(Project)).create([], { owner: group }) }, { owner: group });
   }
   addMember(account: Account, role: "admin"|"writer"|"reader") {
     this._owner.castAs(Group).addMember(account, role);
@@ -421,12 +421,12 @@ class Organization extends CoMap {
 ### **4. Account Root & Migration Pattern**
 ```typescript
 class TodoAccountRoot extends CoMap {
-  projects = co.ref(ListOfProjects);
+  projects = coField.ref(ListOfProjects);
 }
-export class UserProfile extends Profile { someProperty = co.string; }
+export class UserProfile extends Profile { someProperty = coField.string; }
 class TodoAccount extends Account {
-  root = co.ref(TodoAccountRoot);
-  profile = co.ref(UserProfile);
+  root = coField.ref(TodoAccountRoot);
+  profile = coField.ref(UserProfile);
   migrate() {
     if (!this._refs.root) {
       this.root = TodoAccountRoot.create({ projects: ListOfProjects.create([], { owner: this }) }, { owner: this });
@@ -438,20 +438,20 @@ class TodoAccount extends Account {
 ### **5. Public Sharing Example**
 ```typescript
 class SharedFile extends CoMap {
-  name = co.string;
-  file = co.ref(FileStream);
-  createdAt = co.Date;
-  size = co.number;
+  name = coField.string;
+  file = coField.ref(FileStream);
+  createdAt = coField.Date;
+  size = coField.number;
 }
 class FileShareAccountRoot extends CoMap {
-  type = co.string;
-  sharedFiles = co.ref(ListOfSharedFiles);
-  publicGroup = co.ref(Group);
+  type = coField.string;
+  sharedFiles = coField.ref(ListOfSharedFiles);
+  publicGroup = coField.ref(Group);
 }
-export class UserProfile extends Profile { someProperty = co.string; }
+export class UserProfile extends Profile { someProperty = coField.string; }
 class FileShareAccount extends Account {
-  root = co.ref(FileShareAccountRoot);
-  profile = co.ref(UserProfile);
+  root = coField.ref(FileShareAccountRoot);
+  profile = coField.ref(UserProfile);
   async migrate() {
     await this._refs.root?.load();
     if (!this.root || this.root.type !== "file-share-account") {
@@ -486,12 +486,12 @@ const hasWriteAccess = myRole === "admin" || myRole === "writer";
 ### **8. Invitation Pattern**
 ```typescript
 class TeamInvite extends CoMap {
-  email = co.string;
-  role = co.literal("admin","writer","reader");
-  accepted = co.boolean;
+  email = coField.string;
+  role = coField.literal("admin","writer","reader");
+  accepted = coField.boolean;
 }
 class Team extends CoMap {
-  invites = co.ref(CoList.Of(co.ref(TeamInvite)));
+  invites = coField.ref(CoList.Of(coField.ref(TeamInvite)));
   async inviteMember(email: string, role: "admin"|"writer"|"reader") {
     const group = this._owner.castAs(Group);
     const invite = TeamInvite.create({ email, role, accepted:false }, { owner: group });
@@ -524,15 +524,15 @@ Enables message exchange between accounts using `CoMap`, `CoList`, `Group`.
 
 ### **1. Basic Inbox Setup**
 ```typescript
-import { CoMap, co, Group } from "jazz-tools";
+import { CoMap, coField, Group } from "jazz-tools";
 class Message extends CoMap {
-  text = co.string;
-  createdAt = co.Date;
-  read = co.boolean;
+  text = coField.string;
+  createdAt = coField.Date;
+  read = coField.boolean;
 }
 class ChatInbox extends CoMap {
-  messages = co.ref(CoList.Of(co.ref(Message)));
-  lastReadAt = co.Date;
+  messages = coField.ref(CoList.Of(coField.ref(Message)));
+  lastReadAt = coField.Date;
 }
 ```
 
@@ -558,25 +558,25 @@ async function setupInbox(receiver: Account) {
 
 ### **4. Chat Application Example**
 ```typescript
-class ChatMessage extends CoMap { text = co.string; createdAt=co.Date; read=co.boolean; }
+class ChatMessage extends CoMap { text = coField.string; createdAt=coField.Date; read=coField.boolean; }
 class ChatThread extends CoMap {
-  participants = co.json<string[]>();
-  messages = co.ref(CoList.Of(co.ref(ChatMessage)));
-  lastReadAt = co.optional.Date;
+  participants = coField.json<string[]>();
+  messages = coField.ref(CoList.Of(coField.ref(ChatMessage)));
+  lastReadAt = coField.optional.Date;
 }
 class ChatRoot extends CoMap {
-  threads = co.ref(CoList.Of(co.ref(ChatThread)));
-  inbox = co.ref(Inbox);
+  threads = coField.ref(CoList.Of(coField.ref(ChatThread)));
+  inbox = coField.ref(Inbox);
 }
-export class UserProfile extends Profile { someProperty=co.string; }
+export class UserProfile extends Profile { someProperty=coField.string; }
 class ChatAccount extends Account {
-  root = co.ref(ChatRoot);
-  profile = co.ref(UserProfile);
+  root = coField.ref(ChatRoot);
+  profile = coField.ref(UserProfile);
   async migrate() {
     if(!this._refs.root) {
       const group = Group.create({ owner:this });
       this.root = ChatRoot.create({
-        threads: CoList.Of(co.ref(ChatThread)).create([], { owner: group }),
+        threads: CoList.Of(coField.ref(ChatThread)).create([], { owner: group }),
         inbox: await Inbox.create(this)
       },{ owner:this });
     }
@@ -622,15 +622,15 @@ describe("Inbox", () => {
 ### **6. Message Status Tracking**
 ```typescript
 class MessageStatus extends CoMap {
-  messageId = co.string;
-  delivered = co.boolean;
-  read = co.boolean;
-  readAt = co.optional.Date;
+  messageId = coField.string;
+  delivered = coField.boolean;
+  read = coField.boolean;
+  readAt = coField.optional.Date;
 }
 class EnhancedMessage extends CoMap {
-  text = co.string;
-  createdAt = co.Date;
-  status = co.ref(MessageStatus);
+  text = coField.string;
+  createdAt = coField.Date;
+  status = coField.ref(MessageStatus);
 }
 async function sendMessageWithStatus(sender: Account, receiverId: ID<Account>, text:string) {
   const group = Group.create({ owner:sender });
@@ -655,10 +655,10 @@ Sharing access to `CoValues` with other users via invites.
 
 ### **1. Creating & Handling Invites**
 ```typescript
-import { CoMap, Group, co, createInviteLink } from "jazz-tools";
-class Project extends CoMap { name = co.string; members = co.ref(CoList.Of(co.ref(Member))); }
+import { CoMap, Group, coField, createInviteLink } from "jazz-tools";
+class Project extends CoMap { name = coField.string; members = coField.ref(CoList.Of(coField.ref(Member))); }
 const group = Group.create({ owner: me });
-const project = Project.create({ name:"New Project", members:CoList.Of(co.ref(Member)).create([],{owner:group}) }, { owner:group });
+const project = Project.create({ name:"New Project", members:CoList.Of(coField.ref(Member)).create([],{owner:group}) }, { owner:group });
 const readerInvite = createInviteLink(project,"reader");
 const writerInvite = createInviteLink(project,"writer");
 const adminInvite = createInviteLink(project,"admin");
@@ -676,8 +676,8 @@ useAcceptInvite({
 ### **3. Organization Example**
 ```typescript
 class Organization extends CoMap {
-  name = co.string;
-  projects = co.ref(ListOfProjects);
+  name = coField.string;
+  projects = coField.ref(ListOfProjects);
   createInvite(role:"reader"|"writer"|"admin"){ return createInviteLink(this,role); }
 }
 useAcceptInvite({
@@ -689,7 +689,7 @@ useAcceptInvite({
 ### **4. Value Hints in Invites**
 ```typescript
 class Team extends CoMap {
-  name = co.string;
+  name = coField.string;
   generateInvite(role:"reader"|"writer"|"admin"){ return createInviteLink(this, role, window.location.origin, "team"); }
 }
 useAcceptInvite({
@@ -720,13 +720,13 @@ describe("Invite Links", () => {
 ### **6. File Sharing with Invites**
 ```typescript
 class SharedFile extends CoMap {
-  name = co.string;
-  sharedWith = co.ref(CoList.Of(co.ref(SharedWith)));
+  name = coField.string;
+  sharedWith = coField.ref(CoList.Of(coField.ref(SharedWith)));
 }
 class SharedWith extends CoMap {
-  email = co.string;
-  role = co.literal("reader","writer");
-  acceptedAt = co.optional.Date;
+  email = coField.string;
+  role = coField.literal("reader","writer");
+  acceptedAt = coField.optional.Date;
 }
 class FileShareAccount extends Account {
   async shareFile(file:SharedFile, email:string, role:"reader"|"writer") {
@@ -761,32 +761,32 @@ useAcceptInvite({
 - Example:
 ```typescript
 class UserProfile extends CoMap {
-  name = co.string;
-  email = co.string;
-  avatar = co.ref(FileStream);
-  preferences = co.json<{ theme:string; notifications:boolean }>();
+  name = coField.string;
+  email = coField.string;
+  avatar = coField.ref(FileStream);
+  preferences = coField.json<{ theme:string; notifications:boolean }>();
 }
-class TagColors extends CoMap.Record(co.string) {}
+class TagColors extends CoMap.Record(coField.string) {}
 ```
 
 ### **2. CoList**
 - Use for ordered, real-time collaborative arrays.
 ```typescript
-class TodoList extends CoList.Of(co.ref(TodoItem)) {}
-class StringList extends CoList.Of(co.string) {}
+class TodoList extends CoList.Of(coField.ref(TodoItem)) {}
+class StringList extends CoList.Of(coField.string) {}
 ```
 
 ### **3. CoFeed**
 - Use for append-only event/log data.
 ```typescript
-class UserActivity extends CoFeed.Of(co.json<{ type:string; timestamp:number; text?:string }>) {}
+class UserActivity extends CoFeed.Of(coField.json<{ type:string; timestamp:number; text?:string }>) {}
 ```
 
 ### **4. SchemaUnion**
 - Use for polymorphic objects with a runtime discriminator.
 ```typescript
-class BaseWidget extends CoMap { type=co.string; }
-class ButtonWidget extends BaseWidget { type=co.literal("button"); label=co.string; }
+class BaseWidget extends CoMap { type=coField.string; }
+class ButtonWidget extends BaseWidget { type=coField.literal("button"); label=coField.string; }
 const Widget=SchemaUnion.Of<BaseWidget>(raw=>raw.get("type")==="button"?ButtonWidget:null);
 ```
 
@@ -802,8 +802,8 @@ group.addMember("everyone","reader");
 - Per-user data storage with migrations.
 ```typescript
 class JazzAccount extends Account {
-  root=co.ref(JazzAccountRoot);
-  profile=co.ref(UserProfile);
+  root=coField.ref(JazzAccountRoot);
+  profile=coField.ref(UserProfile);
   async migrate(){/*...*/}
 }
 ```
@@ -869,10 +869,10 @@ function TaskComponent({ taskList }: { taskList: TaskListResolved }) {
 **Jazz**:
 ```typescript
 class UserProfile extends CoMap {
-  name = co.string;
-  email = co.string;
-  avatar = co.ref(FileStream);
-  preferences = co.json<{theme:string;notifications:boolean}>();
+  name = coField.string;
+  email = coField.string;
+  avatar = coField.ref(FileStream);
+  preferences = coField.json<{theme:string;notifications:boolean}>();
 }
 ```
 
@@ -883,8 +883,8 @@ class UserProfile extends CoMap {
 ```
 **Jazz**:
 ```typescript
-class TodoItem extends CoMap { title=co.string; completed=co.boolean; }
-class TodoList extends CoList.Of(co.ref(TodoItem)) {}
+class TodoItem extends CoMap { title=coField.string; completed=coField.boolean; }
+class TodoList extends CoList.Of(coField.ref(TodoItem)) {}
 ```
 
 3. **Activity Feed (CoFeed)**
@@ -894,7 +894,7 @@ class TodoList extends CoList.Of(co.ref(TodoItem)) {}
 ```
 **Jazz**:
 ```typescript
-class UserActivity extends CoFeed.Of(co.json<{type:string;timestamp:number;text?:string}>()) {}
+class UserActivity extends CoFeed.Of(coField.json<{type:string;timestamp:number;text?:string}>()) {}
 ```
 
 4. **Polymorphic Widgets (SchemaUnion)**
@@ -904,9 +904,9 @@ class UserActivity extends CoFeed.Of(co.json<{type:string;timestamp:number;text?
 ```
 **Jazz**:
 ```typescript
-class BaseWidget extends CoMap { type=co.string; }
-class ButtonWidget extends BaseWidget { type=co.literal("button"); label=co.string; }
-class SliderWidget extends BaseWidget { type=co.literal("slider"); min=co.number; max=co.number; }
+class BaseWidget extends CoMap { type=coField.string; }
+class ButtonWidget extends BaseWidget { type=coField.literal("button"); label=coField.string; }
+class SliderWidget extends BaseWidget { type=coField.literal("slider"); min=coField.number; max=coField.number; }
 const Widget=SchemaUnion.Of<BaseWidget>((raw)=>{...});
 ```
 
@@ -930,13 +930,13 @@ group.addMember(user789,"writer");
 **Jazz**:
 ```typescript
 class AppAccountRoot extends CoMap {
-  profile=co.ref(UserProfile);
-  documents=co.ref(CoList.Of(co.ref(Document)));
-  activities=co.ref(UserActivity);
+  profile=coField.ref(UserProfile);
+  documents=coField.ref(CoList.Of(coField.ref(Document)));
+  activities=coField.ref(UserActivity);
 }
 class AppAccount extends Account {
-  root=co.ref(AppAccountRoot);
-  profile=co.ref(UserProfile);
+  root=coField.ref(AppAccountRoot);
+  profile=coField.ref(UserProfile);
 }
 ```
 
@@ -953,9 +953,9 @@ class AppAccount extends Account {
 **Jazz**:
 ```typescript
 class Document extends CoMap {
-  title=co.string;content=co.string;
-  collaborators=co.ref(CoList.Of(co.ref(UserProfile)));
-  history=co.ref(CoFeed.Of(co.json<{user:string;timestamp:number;change:string}>()));
+  title=coField.string;content=coField.string;
+  collaborators=coField.ref(CoList.Of(coField.ref(UserProfile)));
+  history=coField.ref(CoFeed.Of(coField.json<{user:string;timestamp:number;change:string}>()));
 }
 ```
 
@@ -967,8 +967,8 @@ class Document extends CoMap {
 **Jazz**:
 ```typescript
 class DraftProject extends CoMap {
-  name=co.optional.string;
-  tasks=co.ref(CoList.Of(co.ref(TodoItem)));
+  name=coField.optional.string;
+  tasks=coField.ref(CoList.Of(coField.ref(TodoItem)));
   validate(){/*...*/}
 }
 ```
@@ -981,9 +981,9 @@ class DraftProject extends CoMap {
 **Jazz**:
 ```typescript
 class SharedFile extends CoMap {
-  name=co.string;
-  file=co.ref(FileStream);
-  uploadedAt=co.Date;
+  name=coField.string;
+  file=coField.ref(FileStream);
+  uploadedAt=coField.Date;
 }
 const publicGroup=Group.create({owner:me});
 publicGroup.addMember("everyone","reader");
@@ -997,9 +997,9 @@ publicGroup.addMember("everyone","reader");
 **Jazz**:
 ```typescript
 class Invite extends CoMap {
-  email=co.string;
-  role=co.literal("reader","writer","admin");
-  status=co.literal("pending","accepted");
+  email=coField.string;
+  role=coField.literal("reader","writer","admin");
+  status=coField.literal("pending","accepted");
 }
 const inviteLink=createInviteLink(project,"writer");
 useAcceptInvite({ invitedObjectSchema:Project, onAccept:(id)=>navigate(`/projects/${id}`) });

@@ -1,4 +1,4 @@
-import { CoFeed, co } from "jazz-tools";
+import { CoFeed, coField } from "jazz-tools";
 
 export const ReactionTypes = [
   "aww",
@@ -11,4 +11,4 @@ export const ReactionTypes = [
 
 export type ReactionType = (typeof ReactionTypes)[number];
 
-export class Reactions extends CoFeed.Of(co.json<ReactionType>()) {}
+export class Reactions extends CoFeed.Of(coField.json<ReactionType>()) {}

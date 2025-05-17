@@ -3,13 +3,13 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { createWorkerAccount } from "jazz-run/createWorkerAccount";
 import { startSyncServer } from "jazz-run/startSyncServer";
-import { CoMap, co } from "jazz-tools";
+import { co, z } from "jazz-tools";
 import { describe, expect, test } from "vitest";
 import { startWorker } from "../index.js";
 
-class TestMap extends CoMap {
-  value = co.string;
-}
+const TestMap = co.map({
+  value: z.string(),
+});
 
 describe("startSyncServer", () => {
   test("persists values in storage and loads them after restart", async () => {

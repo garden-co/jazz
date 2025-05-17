@@ -1,8 +1,10 @@
 ```ts
-class Message extends CoMap {
-  text = co.string;
-}
+import { co, z } from "jazz-tools";
 
-class Chat extends CoList.Of(co.ref(Message)) {}
+const Message = co.map({
+  text: z.string(),
+});
+
+const Chat = co.list(Message);
 ```
 

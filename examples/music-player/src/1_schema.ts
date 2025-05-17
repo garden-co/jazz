@@ -1,4 +1,11 @@
-import { Account, CoList, CoMap, FileStream, Profile, co } from "jazz-tools";
+import {
+  Account,
+  CoList,
+  CoMap,
+  FileStream,
+  Profile,
+  coField,
+} from "jazz-tools";
 
 /** Walkthrough: Defining the data model with CoJSON
  *
@@ -16,17 +23,17 @@ export class MusicTrack extends CoMap {
    *  and you can get the types from the `co` module
    *  here we are defining the title and duration for our music track
    *
-   *  Tip: try to follow the co.string defintion to discover the other available primitives!
+   *  Tip: try to follow the coField.string defintion to discover the other available primitives!
    */
-  title = co.string;
-  duration = co.number;
+  title = coField.string;
+  duration = coField.number;
 
   /**
-   * With `co.ref` you can define relations between your coValues.
+   * With `coField.ref` you can define relations between your coValues.
    *
    * Attributes are required by default unless you mark them as optional.
    */
-  sourceTrack = co.optional.ref(MusicTrack);
+  sourceTrack = coField.optional.ref(MusicTrack);
 
   /**
    * In Jazz you can upload files using FileStream.
@@ -34,14 +41,14 @@ export class MusicTrack extends CoMap {
    * As for any other coValue the music files we put inside FileStream
    * is available offline and end-to-end encrypted 😉
    */
-  file = co.ref(FileStream);
-  waveform = co.ref(MusicTrackWaveform);
+  file = coField.ref(FileStream);
+  waveform = coField.ref(MusicTrackWaveform);
 
-  isExampleTrack = co.optional.boolean;
+  isExampleTrack = coField.optional.boolean;
 }
 
 export class MusicTrackWaveform extends CoMap {
-  data = co.json<number[]>();
+  data = coField.json<number[]>();
 }
 
 /**
@@ -50,38 +57,38 @@ export class MusicTrackWaveform extends CoMap {
  * They are strongly typed and accept only the type you define here
  * as "CoList.Of" argument
  */
-export class ListOfTracks extends CoList.Of(co.ref(MusicTrack)) {}
+export class ListOfTracks extends CoList.Of(coField.ref(MusicTrack)) {}
 
 export class Playlist extends CoMap {
-  title = co.string;
-  tracks = co.ref(ListOfTracks);
+  title = coField.string;
+  tracks = coField.ref(ListOfTracks);
 }
 
-export class ListOfPlaylists extends CoList.Of(co.ref(Playlist)) {}
+export class ListOfPlaylists extends CoList.Of(coField.ref(Playlist)) {}
 
 /** The account root is an app-specific per-user private `CoMap`
  *  where you can store top-level objects for that user */
 export class MusicaAccountRoot extends CoMap {
   // The root playlist works as container for the tracks that
   // the user has uploaded
-  rootPlaylist = co.ref(Playlist);
+  rootPlaylist = coField.ref(Playlist);
   // Here we store the list of playlists that the user has created
   // or that has been invited to
-  playlists = co.ref(ListOfPlaylists);
+  playlists = coField.ref(ListOfPlaylists);
   // We store the active track and playlist as coValue here
   // so when the user reloads the page can see the last played
   // track and playlist
   // You can also add the position in time if you want make it possible
   // to resume the song
-  activeTrack = co.optional.ref(MusicTrack);
-  activePlaylist = co.ref(Playlist);
+  activeTrack = coField.optional.ref(MusicTrack);
+  activePlaylist = coField.ref(Playlist);
 
-  exampleDataLoaded = co.optional.boolean;
+  exampleDataLoaded = coField.optional.boolean;
 }
 
 export class MusicaAccount extends Account {
-  profile = co.ref(Profile);
-  root = co.ref(MusicaAccountRoot);
+  profile = coField.ref(Profile);
+  root = coField.ref(MusicaAccountRoot);
 
   /**
    *  The account migration is run on account creation and on every log-in.

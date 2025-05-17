@@ -25,15 +25,15 @@ See the [schema docs](/docs/schemas/covalues) for more information.
 <CodeGroup>
 ```ts
 // src/lib/schema.ts
-import { Account, Profile, co } from "jazz-tools";
+import { Account, Profile, coField } from "jazz-tools";
 
 export class MyProfile extends Profile {
-  name = co.string;
-  counter = co.number; // This will be publically visible
+  name = coField.string;
+  counter = coField.number; // This will be publically visible
 }
 
 export class MyAccount extends Account {
-  profile = co.ref(MyProfile);
+  profile = coField.ref(MyProfile);
 
   // ...
 }

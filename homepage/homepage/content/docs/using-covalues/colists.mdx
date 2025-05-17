@@ -14,9 +14,9 @@ CoLists are defined by specifying the type of items they contain:
 
 <CodeGroup>
 ```ts
-class ListOfResources extends CoList.Of(co.string) {}
+class ListOfResources extends CoList.Of(coField.string) {}
 
-class ListOfTasks extends CoList.Of(co.ref(Task)) {}
+class ListOfTasks extends CoList.Of(coField.ref(Task)) {}
 ```
 </CodeGroup>
 
@@ -41,15 +41,15 @@ Like other CoValues, you can specify ownership when creating CoLists.
 
 <CodeGroup>
 ```ts twoslash
-import { Group, co, CoMap, CoList } from "jazz-tools";
+import { Group, coField, CoMap, CoList } from "jazz-tools";
 import { createJazzTestAccount } from 'jazz-tools/testing';
 const me = await createJazzTestAccount();
 const colleagueAccount = await createJazzTestAccount();
 class Task extends CoMap {
-  title = co.string;
-  status = co.string;
+  title = coField.string;
+  status = coField.string;
 }
-class ListOfTasks extends CoList.Of(co.ref(Task)) {}
+class ListOfTasks extends CoList.Of(coField.ref(Task)) {}
 
 // ---cut---
 // Create with shared ownership
@@ -98,7 +98,7 @@ Update `CoList`s just like you would JavaScript arrays:
 resources.push("Tomatoes");       // Add to end
 resources.unshift("Lettuce");     // Add to beginning
 tasks.push(Task.create({          // Add complex items
-  title: "Install irrigation", 
+  title: "Install irrigation",
   status: "todo"
 }));
 
@@ -117,7 +117,7 @@ Remove specific items by index with `splice`, or remove the first or last item w
 <CodeGroup>
 ```ts
 // Remove 2 items starting at index 1
-resources.splice(1, 2);              
+resources.splice(1, 2);
 console.log(resources);              // ["Cucumber", "Peppers"]
 
 // Remove a single item at index 0
@@ -200,13 +200,13 @@ CoLists can be used to create one-to-many relationships:
 <CodeGroup>
 ```ts
 class Project extends CoMap {
-  name = co.string;
-  tasks = co.ref(ListOfTasks);
+  name = coField.string;
+  tasks = coField.ref(ListOfTasks);
 }
 
 // ...
 
-const task = Task.create({ 
+const task = Task.create({
   title: "Plant seedlings",
   status: "todo",
   project: project, // Add a reference to the project

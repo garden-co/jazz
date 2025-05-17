@@ -1,12 +1,11 @@
 import { SessionID } from "cojson";
-import { ItemsSym, UnCo } from "../internal.js";
+import { ItemsSym } from "../internal.js";
 import { type Account } from "./account.js";
 import { CoFeedEntry } from "./coFeed.js";
 import { type CoKeys, type CoMap } from "./coMap.js";
 import { type CoValue, type ID } from "./interfaces.js";
 
-type UnCoNotNull<T> = UnCo<Exclude<T, null>>;
-export type Clean<T> = UnCo<NonNullable<T>>;
+type NotNull<T> = Exclude<T, null>;
 
 export type RefsToResolve<
   V,
@@ -22,7 +21,7 @@ export type RefsToResolve<
         ?
             | {
                 $each: RefsToResolve<
-                  UnCoNotNull<Item>,
+                  NotNull<Item>,
                   DepthLimit,
                   [0, ...CurrentDepth]
                 >;
@@ -33,10 +32,10 @@ export type RefsToResolve<
           V extends { _type: "CoMap" | "Group" | "Account" }
           ?
               | ({
-                  [Key in CoKeys<V> as Clean<V[Key]> extends CoValue
+                  [Key in CoKeys<V> as NonNullable<V[Key]> extends CoValue
                     ? Key
                     : never]?: RefsToResolve<
-                    Clean<V[Key]>,
+                    NonNullable<V[Key]>,
                     DepthLimit,
                     [0, ...CurrentDepth]
                   >;
@@ -44,7 +43,7 @@ export type RefsToResolve<
               | (ItemsSym extends keyof V
                   ? {
                       $each: RefsToResolve<
-                        Clean<V[ItemsSym]>,
+                        NonNullable<V[ItemsSym]>,
                         DepthLimit,
                         [0, ...CurrentDepth]
                       >;
@@ -59,7 +58,7 @@ export type RefsToResolve<
             ?
                 | {
                     $each: RefsToResolve<
-                      UnCoNotNull<Item>,
+                      NotNull<Item>,
                       DepthLimit,
                       [0, ...CurrentDepth]
                     >;
@@ -72,12 +71,10 @@ export type RefsToResolveStrict<T, V> = V extends RefsToResolve<T>
   ? RefsToResolve<T>
   : V;
 
-export type Resolved<T, R extends RefsToResolve<T> | undefined> = DeeplyLoaded<
+export type Resolved<
   T,
-  R,
-  10,
-  []
->;
+  R extends RefsToResolve<T> | undefined = true,
+> = DeeplyLoaded<T, R, 10, []>;
 
 type onErrorNullEnabled<Depth> = Depth extends { $onError: null }
   ? null
@@ -94,13 +91,13 @@ export type DeeplyLoaded<
     ? V
     : // Basically V extends CoList - but if we used that we'd introduce circularity into the definition of CoList itself
       [V] extends [Array<infer Item>]
-      ? UnCoNotNull<Item> extends CoValue
+      ? NotNull<Item> extends CoValue
         ? Depth extends { $each: infer ItemDepth }
           ? // Deeply loaded CoList
             (
-              | (Clean<Item> &
+              | (NotNull<Item> &
                   DeeplyLoaded<
-                    Clean<Item>,
+                    NotNull<Item>,
                     ItemDepth,
                     DepthLimit,
                     [0, ...CurrentDepth]
@@ -118,37 +115,32 @@ export type DeeplyLoaded<
               {
                 [key: string]:
                   | DeeplyLoaded<
-                      Clean<V[ItemsSym]>,
+                      NonNullable<V[ItemsSym]>,
                       ItemDepth,
                       DepthLimit,
                       [0, ...CurrentDepth]
                     >
-                  | onErrorNullEnabled<ItemDepth>;
+                  | onErrorNullEnabled<Depth["$each"]>;
               } & V // same reason as in CoList
             : never
           : keyof Depth extends never // Depth = {}
             ? V
-            : Depth extends { $onError: null }
-              ? V
-              : // Deeply loaded CoMap
-                {
-                  -readonly [Key in Exclude<
-                    keyof Depth,
-                    "$onError"
-                  >]-?: Key extends CoKeys<V>
-                    ? Clean<V[Key]> extends CoValue
-                      ?
-                          | DeeplyLoaded<
-                              Clean<V[Key]>,
-                              Depth[Key],
-                              DepthLimit,
-                              [0, ...CurrentDepth]
-                            >
-                          | (undefined extends V[Key] ? undefined : never)
-                          | onErrorNullEnabled<Depth[Key]>
-                      : never
-                    : never;
-                } & V // same reason as in CoList
+            : // Deeply loaded CoMap
+              {
+                -readonly [Key in keyof Depth]-?: Key extends CoKeys<V>
+                  ? NonNullable<V[Key]> extends CoValue
+                    ?
+                        | DeeplyLoaded<
+                            NonNullable<V[Key]>,
+                            Depth[Key],
+                            DepthLimit,
+                            [0, ...CurrentDepth]
+                          >
+                        | (undefined extends V[Key] ? undefined : never)
+                        | onErrorNullEnabled<Depth[Key]>
+                    : never
+                  : never;
+              } & V // same reason as in CoList
         : [V] extends [
               {
                 _type: "CoStream";
@@ -157,12 +149,12 @@ export type DeeplyLoaded<
             ]
           ? // Deeply loaded CoStream
             {
-              byMe?: { value: UnCoNotNull<Item> };
-              inCurrentSession?: { value: UnCoNotNull<Item> };
+              byMe?: { value: NotNull<Item> };
+              inCurrentSession?: { value: NotNull<Item> };
               perSession: {
-                [key: SessionID]: { value: UnCoNotNull<Item> };
+                [key: SessionID]: { value: NotNull<Item> };
               };
-            } & { [key: ID<Account>]: { value: UnCoNotNull<Item> } } & V // same reason as in CoList
+            } & { [key: ID<Account>]: { value: NotNull<Item> } } & V // same reason as in CoList
           : [V] extends [
                 {
                   _type: "BinaryCoStream";

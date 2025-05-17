@@ -1,13 +1,13 @@
 # Example app 5: An employee onboarding app that streamlines the hiring process through structured steps, including initial data collection, document uploads, and final approvals
 
 ```typescript
-import { Account, CoList, CoMap, Group, ImageDefinition, Profile, co } from "jazz-tools";
+import { Account, CoList, CoMap, Group, ImageDefinition, Profile, coField } from "jazz-tools";
 
 type Steps = "initial" | "upload" | "final";
 
 interface Step {
   type: Steps;
-  prevStep: ReturnType<typeof co.ref> | undefined;
+  prevStep: ReturnType<typeof coField.ref> | undefined;
   done: boolean;
   isCurrentStep(): boolean;
 }
@@ -23,10 +23,10 @@ interface Step {
  *  - prevStep: Not applicable for the initial step.
  */
 export class CoInitialStep extends CoMap implements Step {
-  type = co.literal("initial");
-  ssn? = co.string;
-  address? = co.string;
-  done = co.boolean;
+  type = coField.literal("initial");
+  ssn? = coField.string;
+  address? = coField.string;
+  done = coField.boolean;
   prevStep = co.null;
   isCurrentStep() {
     return !this.done;
@@ -43,10 +43,10 @@ export class CoInitialStep extends CoMap implements Step {
  *  - done: Indicates if this step is completed.
  */
 export class CoDocUploadStep extends CoMap implements Step {
-  type = co.literal("upload");
-  prevStep = co.ref(CoInitialStep);
-  photo = co.ref(ImageDefinition, { optional: true });
-  done = co.boolean;
+  type = coField.literal("upload");
+  prevStep = coField.ref(CoInitialStep);
+  photo = coField.ref(ImageDefinition, { optional: true });
+  done = coField.boolean;
   isCurrentStep() {
     return !!(this.prevStep?.done && !this.done);
   }
@@ -61,9 +61,9 @@ export class CoDocUploadStep extends CoMap implements Step {
  *  - done: Indicates if this step is completed.
  */
 export class CoFinalStep extends CoMap implements Step {
-  type = co.literal("final");
-  prevStep = co.ref(CoDocUploadStep);
-  done = co.boolean;
+  type = coField.literal("final");
+  prevStep = coField.ref(CoDocUploadStep);
+  done = coField.boolean;
   isCurrentStep() {
     return !!(this.prevStep?.done && !this.done);
   }
@@ -80,17 +80,17 @@ export class CoFinalStep extends CoMap implements Step {
  *  - finalStep: Reference to the final step.
  */
 export class CoEmployee extends CoMap {
-  name = co.string;
-  deleted? = co.boolean;
-  initialStep = co.ref(CoInitialStep);
-  docUploadStep = co.ref(CoDocUploadStep);
-  finalStep = co.ref(CoFinalStep);
+  name = coField.string;
+  deleted? = coField.boolean;
+  initialStep = coField.ref(CoInitialStep);
+  docUploadStep = coField.ref(CoDocUploadStep);
+  finalStep = coField.ref(CoFinalStep);
 }
 
 /**
  * A collaborative list of employee references.
  */
-export class EmployeeList extends CoList.Of(co.ref(CoEmployee)) {}
+export class EmployeeList extends CoList.Of(coField.ref(CoEmployee)) {}
 
 /**
  * The top-level account root for the HR app.
@@ -100,8 +100,8 @@ export class EmployeeList extends CoList.Of(co.ref(CoEmployee)) {}
  *  - version: Optional version number for migrations.
  */
 export class HRAccountRoot extends CoMap {
-  employees = co.ref(EmployeeList);
-  version = co.optional.number;
+  employees = coField.ref(EmployeeList);
+  version = coField.optional.number;
 }
 
 /**
@@ -114,7 +114,7 @@ export class HRAccountRoot extends CoMap {
  *  - validate: Ensures that a non-empty name (and email, if provided) is present.
  */
 export class UserProfile extends Profile {
-  name = co.string;
+  name = coField.string;
 
   static validate(data: { name?: string; email?: string }) {
     const errors: string[] = [];
@@ -134,8 +134,8 @@ export class UserProfile extends Profile {
  * Handles account initialization and migrations.
  */
 export class HRAccount extends Account {
-  profile = co.ref(UserProfile);
-  root = co.ref(HRAccountRoot);
+  profile = coField.ref(UserProfile);
+  root = coField.ref(HRAccountRoot);
 
   /**
    * Migrate is run on account creation and on every log-in.

@@ -6,11 +6,13 @@ import type {
   RawGroup,
   Role,
 } from "cojson";
-import { activeAccountContext } from "../implementation/activeAccountContext.js";
 import type {
+  AnyAccountSchema,
+  CoMap,
   CoValue,
   CoValueClass,
   ID,
+  InstanceOfSchema,
   RefEncoded,
   RefsToResolve,
   RefsToResolveStrict,
@@ -20,23 +22,23 @@ import type {
   SubscribeRestArgs,
 } from "../internal.js";
 import {
+  Account,
+  AccountAndGroupProxyHandler,
   CoValueBase,
+  Profile,
   Ref,
+  RegisteredSchemas,
   accessChildById,
-  co,
+  activeAccountContext,
+  anySchemaToCoSchema,
   ensureCoValueLoaded,
+  isControlledAccount,
   loadCoValueWithoutMe,
   parseGroupCreateOptions,
   parseSubscribeRestArgs,
   subscribeToCoValueWithoutMe,
   subscribeToExistingCoValue,
 } from "../internal.js";
-import { RegisteredAccount } from "../types.js";
-import { AccountAndGroupProxyHandler, isControlledAccount } from "./account.js";
-import { type Account } from "./account.js";
-import { type CoMap } from "./coMap.js";
-import { type Profile } from "./profile.js";
-import { RegisteredSchemas } from "./registeredSchemas.js";
 
 /** @category Identity & Permissions */
 export class Group extends CoValueBase implements CoValue {
@@ -80,26 +82,26 @@ export class Group extends CoValueBase implements CoValue {
       | ID<NonNullable<this["root"]>>
       | undefined;
     return {
-      profile:
-        profileID &&
-        (new Ref(
-          profileID,
-          this._loadedAs,
-          this._schema.profile as RefEncoded<NonNullable<this["profile"]>>,
-          this,
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        ) as any as this["profile"] extends Profile
-          ? Ref<this["profile"]>
-          : never),
-      root:
-        rootID &&
-        (new Ref(
-          rootID,
-          this._loadedAs,
-          this._schema.root as RefEncoded<NonNullable<this["root"]>>,
-          this,
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        ) as any as this["root"] extends CoMap ? Ref<this["root"]> : never),
+      profile: profileID
+        ? (new Ref(
+            profileID,
+            this._loadedAs,
+            this._schema.profile as RefEncoded<NonNullable<this["profile"]>>,
+            this,
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          ) as any as this["profile"] extends Profile
+            ? Ref<this["profile"]>
+            : never)
+        : undefined,
+      root: rootID
+        ? (new Ref(
+            rootID,
+            this._loadedAs,
+            this._schema.root as RefEncoded<NonNullable<this["root"]>>,
+            this,
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          ) as any as this["root"] extends CoMap ? Ref<this["root"]> : never)
+        : undefined,
     };
   }
 
@@ -153,21 +155,21 @@ export class Group extends CoValueBase implements CoValue {
     return this._raw.removeMember(member === "everyone" ? member : member._raw);
   }
 
-  get members(): Array<{
-    id: ID<RegisteredAccount>;
+  members<A extends typeof Account | AnyAccountSchema>(
+    AccountSchema: A = Account as A,
+  ): Array<{
+    id: string;
     role: AccountRole;
-    ref: Ref<RegisteredAccount>;
-    account: RegisteredAccount;
+    ref: Ref<InstanceOfSchema<A>>;
+    account: InstanceOfSchema<A>;
   }> {
     const members = [];
 
-    const BaseAccountSchema =
-      (activeAccountContext.maybeGet()?.constructor as typeof Account) ||
-      RegisteredSchemas["Account"];
     const refEncodedAccountSchema = {
-      ref: () => BaseAccountSchema,
+      ref: () =>
+        anySchemaToCoSchema(AccountSchema) as CoValueClass<InstanceOfSchema<A>>,
       optional: false,
-    } satisfies RefEncoded<RegisteredAccount>;
+    } satisfies RefEncoded<InstanceOfSchema<A>>;
 
     for (const accountID of this._raw.getAllMemberKeysSet()) {
       if (!isAccountID(accountID)) continue;
@@ -180,8 +182,8 @@ export class Group extends CoValueBase implements CoValue {
         role === "reader" ||
         role === "writeOnly"
       ) {
-        const ref = new Ref<RegisteredAccount>(
-          accountID as unknown as ID<RegisteredAccount>,
+        const ref = new Ref<InstanceOfSchema<A>>(
+          accountID,
           this._loadedAs,
           refEncodedAccountSchema,
           this,

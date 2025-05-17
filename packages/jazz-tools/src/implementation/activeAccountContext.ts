@@ -1,4 +1,4 @@
-import type { Account } from "../coValues/account.js";
+import type { Account } from "../internal.js";
 
 class ActiveAccountContext {
   private activeAccount: Account | null = null;

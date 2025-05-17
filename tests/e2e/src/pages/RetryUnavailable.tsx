@@ -1,9 +1,9 @@
 import { useAccount, useCoState } from "jazz-react";
-import { CoMap, Group, ID, co } from "jazz-tools";
+import { CoMap, Group, ID, coField } from "jazz-tools";
 import { useEffect, useState } from "react";
 
 export class RetryUnavailableCoMap extends CoMap {
-  value = co.string;
+  value = coField.string;
 }
 
 function getIdParam() {

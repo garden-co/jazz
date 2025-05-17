@@ -33,11 +33,21 @@ Define your data schema using [CoValues](/docs/schemas/covalues) from `jazz-tool
 <CodeGroup>
 ```tsx twoslash
 // schema.ts
-import { Account, co } from "jazz-tools";
+import { co, z } from "jazz-tools";
 
-export class MyAppAccount extends Account {
-  name = co.string;
-}
+export const TodoItem = co.map({
+  title: z.string(),
+  completed: z.boolean(),
+});
+
+export const AccountRoot = co.map({
+  todos: co.list(TodoItem),
+});
+
+export const MyAppAccount = co.account({
+  root: AccountRoot,
+  profile: co.map({ name: z.string() }),
+});
 ```
 </CodeGroup>
 
@@ -50,9 +60,21 @@ Wrap your application with `<JazzProvider />` to connect to the Jazz network and
 <CodeGroup>
 ```tsx twoslash
 // @filename: schema.ts
-import { Account } from "jazz-tools";
+import { co, z } from "jazz-tools";
 
-export class MyAppAccount extends Account {}
+export const TodoItem = co.map({
+  title: z.string(),
+  completed: z.boolean(),
+});
+
+export const AccountRoot = co.map({
+  todos: co.list(TodoItem),
+});
+
+export const MyAppAccount = co.account({
+  root: AccountRoot,
+  profile: co.map({ name: z.string() }),
+});
 // @filename: app.tsx
 import * as React from "react";
 import { createRoot } from 'react-dom/client';
@@ -73,13 +95,6 @@ createRoot(document.getElementById("root")!).render(
     <App />
   </JazzProvider>
 );
-
-// Register your Account schema to enhance TypeScript support
-declare module "jazz-react" {
-  interface Register {
-    Account: MyAppAccount;
-  }
-}
 ```
 </CodeGroup>
 
@@ -99,9 +114,21 @@ The simplest approach for Next.js is client-side only integration:
 <CodeGroup>
 ```tsx twoslash
 // @filename: schema.ts
-import { Account } from "jazz-tools";
+import { co, z } from "jazz-tools";
 
-export class MyAppAccount extends Account {}
+export const TodoItem = co.map({
+  title: z.string(),
+  completed: z.boolean(),
+});
+
+export const AccountRoot = co.map({
+  todos: co.list(TodoItem),
+});
+
+export const MyAppAccount = co.account({
+  root: AccountRoot,
+  profile: co.map({ name: z.string() }),
+});
 // @filename: app.tsx
 import * as React from "react";
 // ---cut---
@@ -129,30 +156,35 @@ Remember to mark any component that uses Jazz hooks with `"use client"`:
 <CodeGroup>
 ```tsx twoslash
 // @filename: schema.ts
-import { Account, co } from "jazz-tools";
+import { co, z } from "jazz-tools";
 
-export class MyAppAccount extends Account {
-  name = co.string;
-}
+export const TodoItem = co.map({
+  title: z.string(),
+  completed: z.boolean(),
+});
+
+export const AccountRoot = co.map({
+  todos: co.list(TodoItem),
+});
+
+export const MyAppAccount = co.account({
+  root: AccountRoot,
+  profile: co.map({ name: z.string() }),
+});
 // @filename: Profile.tsx
 import * as React from "react";
-import { MyAppAccount } from "./schema";
 
-declare module "jazz-react" {
-  interface Register {
-    Account: MyAppAccount;
-  }
-}
 // ---cut---
 // Profile.tsx
 "use client"; // [!code ++]
 
 import { useAccount } from "jazz-react";
+import { MyAppAccount } from "./schema";
 
 export function Profile() {
-  const { me } = useAccount();
+  const { me } = useAccount(MyAppAccount, { resolve: { profile: true } });
 
-  return <div>Hello, {me?.name}</div>;
+  return <div>Hello, {me?.profile.name}</div>;
 }
 ```
 </CodeGroup>

@@ -26,14 +26,14 @@ If you're using React in your project, check out our [React hooks](/docs/react/u
 
 <CodeGroup>
 ```ts twoslash
-import { ID, CoMap, co } from "jazz-tools";
+import { ID, CoMap, coField } from "jazz-tools";
 const taskId = "co_123" as ID<Task>;
 // ---cut-before---
 class Task extends CoMap {
-  title = co.string;
-  description = co.string;
-  status = co.literal("todo", "in-progress", "completed");
-  assignedTo = co.optional.string;
+  title = coField.string;
+  description = coField.string;
+  status = coField.literal("todo", "in-progress", "completed");
+  assignedTo = coField.optional.string;
 }
 
 // ...
@@ -54,13 +54,13 @@ If you already have a CoValue instance, you can subscribe to it by calling its `
 
 <CodeGroup>
 ```ts twoslash
-import { ID, CoMap, co } from "jazz-tools";
+import { ID, CoMap, coField } from "jazz-tools";
 
 class Task extends CoMap {
-  title = co.string;
-  description = co.string;
-  status = co.literal("todo", "in-progress", "completed");
-  assignedTo = co.optional.string;
+  title = coField.string;
+  description = coField.string;
+  status = coField.literal("todo", "in-progress", "completed");
+  assignedTo = coField.optional.string;
 }
 const otherProps = {} as any;
 // ---cut-before---
@@ -88,17 +88,17 @@ Jazz provides a `useCoState` hook that provides a convenient way to subscribe to
 <CodeGroup>
 ```tsx twoslash
 import React from "react";
-import { ID, CoMap, co, CoList } from "jazz-tools";
+import { ID, CoMap, coField, CoList } from "jazz-tools";
 
 class Task extends CoMap {
-  title = co.string;
-  status = co.literal("todo", "in-progress", "completed");
+  title = coField.string;
+  status = coField.literal("todo", "in-progress", "completed");
 }
 class Project extends CoMap {
-  name = co.string;
-  tasks = co.ref(ListOfTasks);
+  name = coField.string;
+  tasks = coField.ref(ListOfTasks);
 }
-class ListOfTasks extends CoList.Of(co.ref(Task)) {}
+class ListOfTasks extends CoList.Of(coField.ref(Task)) {}
 
 // ---cut-before---
 import { useCoState } from "jazz-react";
@@ -152,22 +152,22 @@ Like `useCoState`, you can specify a resolve query to also subscribe to CoValues
 <CodeGroup>
 ```tsx twoslash
 import React from "react";
-import { ID, CoMap, co, CoList, Account } from "jazz-tools";
+import { ID, CoMap, coField, CoList, Account } from "jazz-tools";
 class Task extends CoMap {
-  title = co.string;
+  title = coField.string;
 }
-class ListOfTasks extends CoList.Of(co.ref(Task)) {}
+class ListOfTasks extends CoList.Of(coField.ref(Task)) {}
 class Project extends CoMap {
-  name = co.string;
-  tasks = co.ref(ListOfTasks);
+  name = coField.string;
+  tasks = coField.ref(ListOfTasks);
 }
-class ListOfProjects extends CoList.Of(co.ref(Project)) {}
+class ListOfProjects extends CoList.Of(coField.ref(Project)) {}
 
 class AccountRoot extends CoMap {
-  myProjects = co.ref(ListOfProjects);
+  myProjects = coField.ref(ListOfProjects);
 }
 class MyAppAccount extends Account {
-  root = co.ref(AccountRoot);
+  root = coField.ref(AccountRoot);
 }
 declare module "jazz-react" { interface Register { Account: MyAppAccount; } }
 // ---cut-before---
@@ -219,9 +219,9 @@ This allows you to handle loading, error, and success states in your application
 
 <CodeGroup>
 ```ts twoslash
-import { ID, CoMap, co } from "jazz-tools";
+import { ID, CoMap, coField } from "jazz-tools";
 class Task extends CoMap {
-  title = co.string;
+  title = coField.string;
 }
 
 const taskId = "co_123" as ID<Task>;
@@ -248,27 +248,27 @@ Resolve queries let you declare exactly which references to load and how deep to
 
 <CodeGroup>
 ```ts twoslash
-import { ID, CoMap, co, CoList } from "jazz-tools";
+import { ID, CoMap, coField, CoList } from "jazz-tools";
 const projectId = "co_123" as ID<Project>;
 
 // ---cut-before---
 class Project extends CoMap {
-  name = co.string;
-  tasks = co.ref(ListOfTasks);
-  owner = co.ref(TeamMember);
+  name = coField.string;
+  tasks = coField.ref(ListOfTasks);
+  owner = coField.ref(TeamMember);
 }
 
 class Task extends CoMap {
-  title = co.string;
-  subtasks = co.ref(ListOfTasks);
-  assignee = co.optional.ref(TeamMember);
+  title = coField.string;
+  subtasks = coField.ref(ListOfTasks);
+  assignee = coField.optional.ref(TeamMember);
 }
 
 class TeamMember extends CoMap {
-  name = co.string;
+  name = coField.string;
 }
 
-class ListOfTasks extends CoList.Of(co.ref(Task)) {}
+class ListOfTasks extends CoList.Of(coField.ref(Task)) {}
 
 // Load just the project, not its references
 const project = await Project.load(projectId);
@@ -350,25 +350,25 @@ When a user tries to load a reference they don't have access to:
 
 <CodeGroup>
 ```typescript twoslash
-import { ID, CoMap, co, CoList } from "jazz-tools";
+import { ID, CoMap, coField, CoList } from "jazz-tools";
 
 class Project extends CoMap {
-  name = co.string;
-  tasks = co.ref(ListOfTasks);
-  owner = co.ref(TeamMember);
+  name = coField.string;
+  tasks = coField.ref(ListOfTasks);
+  owner = coField.ref(TeamMember);
 }
 
 class Task extends CoMap {
-  title = co.string;
-  subtasks = co.ref(ListOfTasks);
-  assignee = co.optional.ref(TeamMember);
+  title = coField.string;
+  subtasks = coField.ref(ListOfTasks);
+  assignee = coField.optional.ref(TeamMember);
 }
 
 class TeamMember extends CoMap {
-  name = co.string;
+  name = coField.string;
 }
 
-class ListOfTasks extends CoList.Of(co.ref(Task)) {}
+class ListOfTasks extends CoList.Of(coField.ref(Task)) {}
 
 const taskId = "co_123" as ID<Task>;
 
@@ -391,25 +391,25 @@ When a list contains references to items the user can't access:
 
 <CodeGroup>
 ```typescript twoslash
-import { ID, CoMap, co, CoList } from "jazz-tools";
+import { ID, CoMap, coField, CoList } from "jazz-tools";
 
 class Project extends CoMap {
-  name = co.string;
-  tasks = co.ref(ListOfTasks);
-  owner = co.ref(TeamMember);
+  name = coField.string;
+  tasks = coField.ref(ListOfTasks);
+  owner = coField.ref(TeamMember);
 }
 
 class Task extends CoMap {
-  title = co.string;
-  subtasks = co.ref(ListOfTasks);
-  assignee = co.optional.ref(TeamMember);
+  title = coField.string;
+  subtasks = coField.ref(ListOfTasks);
+  assignee = coField.optional.ref(TeamMember);
 }
 
 class TeamMember extends CoMap {
-  name = co.string;
+  name = coField.string;
 }
 
-class ListOfTasks extends CoList.Of(co.ref(Task)) {}
+class ListOfTasks extends CoList.Of(coField.ref(Task)) {}
 
 const projectId = "co_123" as ID<Project>;
 // ---cut-before---
@@ -429,25 +429,25 @@ When trying to load an object with an inaccessible reference without directly re
 
 <CodeGroup>
 ```typescript twoslash
-import { ID, CoMap, co, CoList } from "jazz-tools";
+import { ID, CoMap, coField, CoList } from "jazz-tools";
 
 class Project extends CoMap {
-  name = co.string;
-  tasks = co.ref(ListOfTasks);
-  owner = co.ref(TeamMember);
+  name = coField.string;
+  tasks = coField.ref(ListOfTasks);
+  owner = coField.ref(TeamMember);
 }
 
 class Task extends CoMap {
-  title = co.string;
-  subtasks = co.ref(ListOfTasks);
-  assignee = co.optional.ref(TeamMember);
+  title = coField.string;
+  subtasks = coField.ref(ListOfTasks);
+  assignee = coField.optional.ref(TeamMember);
 }
 
 class TeamMember extends CoMap {
-  name = co.string;
+  name = coField.string;
 }
 
-class ListOfTasks extends CoList.Of(co.ref(Task)) {}
+class ListOfTasks extends CoList.Of(coField.ref(Task)) {}
 
 const projectId = "co_123" as ID<Project>;
 // ---cut-before---
@@ -660,25 +660,25 @@ The `Resolved` type is especially useful when passing data between components, a
 <CodeGroup>
 ```tsx twoslash
 import React from "react";
-import { ID, CoMap, co, CoList, Resolved } from "jazz-tools";
+import { ID, CoMap, coField, CoList, Resolved } from "jazz-tools";
 
 class Project extends CoMap {
-  name = co.string;
-  tasks = co.ref(ListOfTasks);
-  owner = co.ref(TeamMember);
+  name = coField.string;
+  tasks = coField.ref(ListOfTasks);
+  owner = coField.ref(TeamMember);
 }
 
 class Task extends CoMap {
-  title = co.string;
-  subtasks = co.ref(ListOfTasks);
-  assignee = co.optional.ref(TeamMember);
+  title = coField.string;
+  subtasks = coField.ref(ListOfTasks);
+  assignee = coField.optional.ref(TeamMember);
 }
 
 class TeamMember extends CoMap {
-  name = co.string;
+  name = coField.string;
 }
 
-class ListOfTasks extends CoList.Of(co.ref(Task)) {}
+class ListOfTasks extends CoList.Of(coField.ref(Task)) {}
 
 
 // ---cut-before---
@@ -727,25 +727,25 @@ function processProject(project: FullyLoadedProject) {
 <ContentByFramework framework="vanilla">
 <CodeGroup>
 ```ts twoslash
-import { ID, CoMap, co, CoList, Resolved } from "jazz-tools";
+import { ID, CoMap, coField, CoList, Resolved } from "jazz-tools";
 
 class Project extends CoMap {
-  name = co.string;
-  tasks = co.ref(ListOfTasks);
-  owner = co.ref(TeamMember);
+  name = coField.string;
+  tasks = coField.ref(ListOfTasks);
+  owner = coField.ref(TeamMember);
 }
 
 class Task extends CoMap {
-  title = co.string;
-  subtasks = co.ref(ListOfTasks);
-  assignee = co.optional.ref(TeamMember);
+  title = coField.string;
+  subtasks = coField.ref(ListOfTasks);
+  assignee = coField.optional.ref(TeamMember);
 }
 
 class TeamMember extends CoMap {
-  name = co.string;
+  name = coField.string;
 }
 
-class ListOfTasks extends CoList.Of(co.ref(Task)) {}
+class ListOfTasks extends CoList.Of(coField.ref(Task)) {}
 
 
 // ---cut-before---
@@ -796,26 +796,26 @@ Sometimes you need to make sure data is loaded before proceeding with an operati
 
 <CodeGroup>
 ```ts twoslash
-import { ID, CoMap, co, CoList, Resolved } from "jazz-tools";
+import { ID, CoMap, coField, CoList, Resolved } from "jazz-tools";
 
 class Project extends CoMap {
-  name = co.string;
-  tasks = co.ref(ListOfTasks);
-  owner = co.ref(TeamMember);
+  name = coField.string;
+  tasks = coField.ref(ListOfTasks);
+  owner = coField.ref(TeamMember);
 }
 
 class Task extends CoMap {
-  title = co.string;
-  status = co.literal("todo", "in-progress", "completed");
-  subtasks = co.ref(ListOfTasks);
-  assignee = co.optional.ref(TeamMember);
+  title = coField.string;
+  status = coField.literal("todo", "in-progress", "completed");
+  subtasks = coField.ref(ListOfTasks);
+  assignee = coField.optional.ref(TeamMember);
 }
 
 class TeamMember extends CoMap {
-  name = co.string;
+  name = coField.string;
 }
 
-class ListOfTasks extends CoList.Of(co.ref(Task)) {}
+class ListOfTasks extends CoList.Of(coField.ref(Task)) {}
 
 // ---cut-before---
 async function completeAllTasks(projectId: ID<Project>) {

@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 
-import { Account, CoMap, co } from "jazz-tools";
+import { Account, CoMap, coField } from "jazz-tools";
 import { describe, expect, it } from "vitest";
 import { useAccountOrGuest } from "../composables.js";
 import { createJazzTestAccount, createJazzTestGuest } from "../testing.js";
@@ -29,11 +29,11 @@ describe("useAccountOrGuest", () => {
 
   it("should load nested values if requested", async () => {
     class AccountRoot extends CoMap {
-      value = co.string;
+      value = coField.string;
     }
 
     class AccountSchema extends Account {
-      root = co.ref(AccountRoot);
+      root = coField.ref(AccountRoot);
 
       migrate() {
         if (!this._refs.root) {

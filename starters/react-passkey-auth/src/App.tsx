@@ -2,6 +2,7 @@ import { useAccount, useIsAuthenticated } from "jazz-react";
 import { AuthButton } from "./AuthButton.tsx";
 import { Form } from "./Form.tsx";
 import { Logo } from "./Logo.tsx";
+import { AccountRoot } from "./schema.ts";
 
 function App() {
   const { me } = useAccount({ resolve: { profile: true, root: true } });
@@ -28,8 +29,8 @@ function App() {
             Welcome{me?.profile.firstName ? <>, {me?.profile.firstName}</> : ""}
             !
           </h1>
-          {!!me?.root.age && (
-            <p>As of today, you are {me.root.age} years old.</p>
+          {!!me?.root && (
+            <p>As of today, you are {AccountRoot.age(me.root)} years old.</p>
           )}
         </div>
 

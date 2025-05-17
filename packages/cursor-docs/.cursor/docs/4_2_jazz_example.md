@@ -2,13 +2,13 @@
 
 ```typescript
 export class MusicTrack extends CoMap {
-  title = co.string;
-  duration = co.number;
-  sourceTrack = co.optional.ref(MusicTrack);
-  file = co.ref(FileStream);
-  waveform = co.ref(MusicTrackWaveform);
-  container = co.ref(Playlist);
-  deleted = co.boolean;
+  title = coField.string;
+  duration = coField.number;
+  sourceTrack = coField.optional.ref(MusicTrack);
+  file = coField.ref(FileStream);
+  waveform = coField.ref(MusicTrackWaveform);
+  container = coField.ref(Playlist);
+  deleted = coField.boolean;
 }
 
 /**
@@ -18,13 +18,13 @@ export class MusicTrack extends CoMap {
  *  - data: A JSON array of numbers representing the waveform.
  */
 export class MusicTrackWaveform extends CoMap {
-  data = co.json<number[]>();
+  data = coField.json<number[]>();
 }
 
 /**
  * A collaborative list of MusicTrack references.
  */
-export class MusicTrackList extends CoList.Of(co.ref(MusicTrack)) {}
+export class MusicTrackList extends CoList.Of(coField.ref(MusicTrack)) {}
 
 /**
  * Acts as a container for music tracks.
@@ -34,8 +34,8 @@ export class MusicTrackList extends CoList.Of(co.ref(MusicTrack)) {}
  *  - items: A list of MusicTracks in this playlist.
  */
 export class Playlist extends CoMap {
-  name = co.string;
-  items = co.ref(MusicTrackList);
+  name = coField.string;
+  items = coField.ref(MusicTrackList);
 }
 
 /**
@@ -46,8 +46,8 @@ export class Playlist extends CoMap {
  *  - version: Optional version number for migrations.
  */
 export class MusicAccountRoot extends CoMap {
-  container = co.ref(Playlist);
-  version = co.optional.number;
+  container = coField.ref(Playlist);
+  version = coField.optional.number;
 }
 
 /**
@@ -60,7 +60,7 @@ export class MusicAccountRoot extends CoMap {
  *  - validate: Ensures that a non-empty name and email are provided.
  */
 export class UserProfile extends Profile {
-  name = co.string;
+  name = coField.string;
 
   static validate(data: { name?: string; email?: string }) {
     const errors: string[] = [];
@@ -80,8 +80,8 @@ export class UserProfile extends Profile {
  * Handles data initialization and migrations.
  */
 export class MusicAccount extends Account {
-  profile = co.ref(UserProfile);
-  root = co.ref(MusicAccountRoot);
+  profile = coField.ref(UserProfile);
+  root = coField.ref(MusicAccountRoot);
 
   /**
    * Migrate is run on account creation and each login.

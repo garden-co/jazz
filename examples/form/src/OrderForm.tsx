@@ -1,4 +1,4 @@
-import { CoPlainText } from "jazz-tools";
+import { CoPlainText, Loaded } from "jazz-tools";
 import {
   BubbleTeaAddOnTypes,
   BubbleTeaBaseTeaTypes,
@@ -10,7 +10,7 @@ export function OrderForm({
   order,
   onSave,
 }: {
-  order: BubbleTeaOrder | DraftBubbleTeaOrder;
+  order: Loaded<typeof BubbleTeaOrder> | Loaded<typeof DraftBubbleTeaOrder>;
   onSave?: (e: React.FormEvent<HTMLFormElement>) => void;
 }) {
   // Handles updates to the instructions field of the order.

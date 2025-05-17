@@ -1,6 +1,6 @@
 import { cojsonInternals } from "cojson";
 import { beforeEach, expect, test } from "vitest";
-import { Account, CoMap, Group, co } from "../exports.js";
+import { Account, Group, co, z } from "../exports.js";
 import {
   createJazzTestAccount,
   getPeerConnectedToTestSyncServer,
@@ -15,9 +15,9 @@ beforeEach(async () => {
 });
 
 test("load a value", async () => {
-  class Person extends CoMap {
-    name = co.string;
-  }
+  const Person = co.map({
+    name: z.string(),
+  });
 
   const group = Group.create();
   const map = Person.create({ name: "John" }, group);
@@ -31,9 +31,9 @@ test("load a value", async () => {
 });
 
 test("retry an unavailable a value", async () => {
-  class Person extends CoMap {
-    name = co.string;
-  }
+  const Person = co.map({
+    name: z.string(),
+  });
 
   const currentAccount = Account.getMe();
 
@@ -74,9 +74,9 @@ test("retry an unavailable a value", async () => {
 });
 
 test("returns null if the value is unavailable after retries", async () => {
-  class Person extends CoMap {
-    name = co.string;
-  }
+  const Person = co.map({
+    name: z.string(),
+  });
 
   const currentAccount = Account.getMe();
 

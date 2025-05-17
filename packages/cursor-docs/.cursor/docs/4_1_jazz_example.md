@@ -1,7 +1,7 @@
 # Example app 1: A secure and organized password manager app that allows users to store, manage, and categorize their credentials in folders
 
 ```typescript
-import { Account, CoList, CoMap, Group, Profile, co } from "jazz-tools";
+import { Account, CoList, CoMap, Group, Profile, coField } from "jazz-tools";
 
 /**
  * Represents a password item in the Password Manager.
@@ -17,20 +17,20 @@ import { Account, CoList, CoMap, Group, Profile, co } from "jazz-tools";
  *  - deleted: Soft delete flag.
  */
 export class PasswordItem extends CoMap {
-  name = co.string;
-  username = co.optional.string;
-  username_input_selector = co.optional.string;
-  password = co.string;
-  password_input_selector = co.optional.string;
-  uri = co.optional.string;
-  folder = co.ref(Folder);
-  deleted = co.boolean;
+  name = coField.string;
+  username = coField.optional.string;
+  username_input_selector = coField.optional.string;
+  password = coField.string;
+  password_input_selector = coField.optional.string;
+  uri = coField.optional.string;
+  folder = coField.ref(Folder);
+  deleted = coField.boolean;
 }
 
 /**
  * A list of PasswordItem references.
  */
-export class PasswordList extends CoList.Of(co.ref(PasswordItem)) {}
+export class PasswordList extends CoList.Of(coField.ref(PasswordItem)) {}
 
 /**
  * Represents a folder that groups password items.
@@ -40,14 +40,14 @@ export class PasswordList extends CoList.Of(co.ref(PasswordItem)) {}
  *  - items: A list of PasswordItems contained in the folder.
  */
 export class Folder extends CoMap {
-  name = co.string;
-  items = co.ref(PasswordList);
+  name = coField.string;
+  items = coField.ref(PasswordList);
 }
 
 /**
  * A list of Folder references.
  */
-export class FolderList extends CoList.Of(co.ref(Folder)) {}
+export class FolderList extends CoList.Of(coField.ref(Folder)) {}
 
 /**
  * Top-level container for the Password Manager.
@@ -57,7 +57,7 @@ export class FolderList extends CoList.Of(co.ref(Folder)) {}
  *  - folders: A list of Folder entities.
  */
 export class Container extends CoMap {
-  folders = co.ref(FolderList);
+  folders = coField.ref(FolderList);
 }
 
 /**
@@ -68,8 +68,8 @@ export class Container extends CoMap {
  *  - version: An optional version number used for migrations.
  */
 export class PasswordManagerAccountRoot extends CoMap {
-  container = co.ref(Container);
-  version = co.optional.number;
+  container = coField.ref(Container);
+  version = coField.optional.number;
 }
 
 /**
@@ -82,7 +82,7 @@ export class PasswordManagerAccountRoot extends CoMap {
  *  - validate: Ensures that a non-empty name is provided.
  */
 export class UserProfile extends Profile {
-  name = co.string;
+  name = coField.string;
 
   static validate(data: { name?: string; email?: string }) {
     const errors: string[] = [];
@@ -100,8 +100,8 @@ export class UserProfile extends Profile {
  * Handles data initialization and migrations.
  */
 export class PasswordManagerAccount extends Account {
-  profile = co.ref(UserProfile);
-  root = co.ref(PasswordManagerAccountRoot);
+  profile = coField.ref(UserProfile);
+  root = coField.ref(PasswordManagerAccountRoot);
 
   /**
    * The migrate method is called on account creation and login.

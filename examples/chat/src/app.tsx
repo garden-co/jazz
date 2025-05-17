@@ -3,7 +3,7 @@ import { getRandomUsername, inIframe, onChatLoad } from "@/util.ts";
 import { useIframeHashRouter } from "hash-slash";
 import { JazzInspector } from "jazz-inspector";
 import { JazzProvider, useAccount } from "jazz-react";
-import { Group, ID } from "jazz-tools";
+import { Group } from "jazz-tools";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { ChatScreen } from "./chatScreen.tsx";
@@ -43,7 +43,7 @@ export function App() {
       </TopBar>
       {router.route({
         "/": () => createChat() as never,
-        "/chat/:id": (id) => <ChatScreen chatID={id as ID<Chat>} />,
+        "/chat/:id": (id) => <ChatScreen chatID={id} />,
       })}
     </AppContainer>
   );

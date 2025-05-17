@@ -1,31 +1,33 @@
 import { describe, expect, it, vi } from "vitest";
-import { Account } from "../coValues/account";
-import { CoMap } from "../coValues/coMap";
-import { Group } from "../coValues/group";
-import { Inbox, InboxSender } from "../coValues/inbox";
-import { Profile } from "../exports";
-import { co } from "../internal";
+import {
+  Account,
+  CoMap,
+  Group,
+  Inbox,
+  InboxSender,
+  Profile,
+  z,
+} from "../exports";
+import { Loaded, co, coField, zodSchemaToCoSchema } from "../internal";
 import { setupTwoNodes, waitFor } from "./utils";
 
-class Message extends CoMap {
-  text = co.string;
-}
+const Message = co.map({
+  text: z.string(),
+});
 
 describe("Inbox", () => {
   describe("Private profile", () => {
     it("Should throw if the inbox owner profile is private", async () => {
-      class WorkerAccount extends Account {
-        migrate() {
-          this.profile = Profile.create(
-            { name: "Worker" },
-            Group.create({ owner: this }),
-          );
-        }
-      }
+      const WorkerAccount = co.account().withMigration((account) => {
+        account.profile = Profile.create(
+          { name: "Worker" },
+          Group.create({ owner: account }),
+        );
+      });
 
       const { clientAccount: sender, serverAccount: receiver } =
         await setupTwoNodes({
-          ServerAccountSchema: WorkerAccount,
+          ServerAccountSchema: zodSchemaToCoSchema(WorkerAccount),
         });
 
       await expect(() => InboxSender.load(receiver.id, sender)).rejects.toThrow(
@@ -53,7 +55,7 @@ describe("Inbox", () => {
     inboxSender.sendMessage(message);
 
     // Track received messages
-    const receivedMessages: Message[] = [];
+    const receivedMessages: Loaded<typeof Message>[] = [];
     let senderAccountID: unknown = undefined;
 
     // Subscribe to inbox messages
@@ -79,7 +81,7 @@ describe("Inbox", () => {
     const { clientAccount: sender, serverAccount: receiver } =
       await setupTwoNodes();
 
-    class EmptyMessage extends CoMap {}
+    const EmptyMessage = co.map({});
 
     const receiverInbox = await Inbox.load(receiver);
 
@@ -96,7 +98,7 @@ describe("Inbox", () => {
     inboxSender.sendMessage(message);
 
     // Track received messages
-    const receivedMessages: EmptyMessage[] = [];
+    const receivedMessages: Loaded<typeof EmptyMessage>[] = [];
     let senderAccountID: unknown = undefined;
 
     // Subscribe to inbox messages
@@ -140,10 +142,10 @@ describe("Inbox", () => {
     });
 
     // Setup inbox sender
-    const inboxSender = await InboxSender.load<Message, Message>(
-      receiver.id,
-      sender,
-    );
+    const inboxSender = await InboxSender.load<
+      Loaded<typeof Message>,
+      Loaded<typeof Message>
+    >(receiver.id, sender);
     const resultId = await inboxSender.sendMessage(message);
 
     const result = await Message.load(resultId, { loadAs: receiver });
@@ -169,7 +171,10 @@ describe("Inbox", () => {
     const unsubscribe = receiverInbox.subscribe(Message, async (message) => {});
 
     // Setup inbox sender
-    const inboxSender = await InboxSender.load<Message>(receiver.id, sender);
+    const inboxSender = await InboxSender.load<Loaded<typeof Message>>(
+      receiver.id,
+      sender,
+    );
     const result = await inboxSender.sendMessage(message);
 
     expect(result).toBeUndefined();
@@ -198,7 +203,10 @@ describe("Inbox", () => {
     });
 
     // Setup inbox sender
-    const inboxSender = await InboxSender.load<Message>(receiver.id, sender);
+    const inboxSender = await InboxSender.load<Loaded<typeof Message>>(
+      receiver.id,
+      sender,
+    );
 
     await expect(inboxSender.sendMessage(message)).rejects.toThrow(
       "Error: Failed",
@@ -233,7 +241,7 @@ describe("Inbox", () => {
     inboxSender.sendMessage(message);
 
     // Track received messages
-    const receivedMessages: Message[] = [];
+    const receivedMessages: Loaded<typeof Message>[] = [];
 
     // Subscribe to inbox messages
     const unsubscribe = receiverInbox.subscribe(Message, async (message) => {
@@ -273,7 +281,7 @@ describe("Inbox", () => {
     inboxSender.sendMessage(message);
 
     // Track received messages
-    const receivedMessages: Message[] = [];
+    const receivedMessages: Loaded<typeof Message>[] = [];
 
     // Subscribe to inbox messages
     const unsubscribe = receiverInbox.subscribe(Message, async (message) => {

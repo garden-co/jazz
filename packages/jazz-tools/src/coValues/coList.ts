@@ -2,10 +2,14 @@ import type { JsonValue, RawCoList } from "cojson";
 import { ControlledAccount, RawAccount } from "cojson";
 import { calcPatch } from "fast-myers-diff";
 import type {
+  Account,
+  AnyAccountSchema,
   CoValue,
   CoValueClass,
   CoValueFromRaw,
+  Group,
   ID,
+  InstanceOfSchema,
   RefEncoded,
   RefsToResolve,
   RefsToResolveStrict,
@@ -14,15 +18,17 @@ import type {
   SchemaFor,
   SubscribeListenerOptions,
   SubscribeRestArgs,
-  UnCo,
 } from "../internal.js";
 import {
   AnonymousJazzAgent,
   ItemsSym,
   Ref,
+  RegisteredSchemas,
   SchemaInit,
   accessChildByKey,
-  co,
+  anySchemaToCoSchema,
+  coField,
+  coValuesCache,
   ensureCoValueLoaded,
   inspect,
   isRefEncoded,
@@ -33,11 +39,6 @@ import {
   subscribeToCoValueWithoutMe,
   subscribeToExistingCoValue,
 } from "../internal.js";
-import { coValuesCache } from "../lib/cache.js";
-import { RegisteredAccount } from "../types.js";
-import { type Account } from "./account.js";
-import { type Group } from "./group.js";
-import { RegisteredSchemas } from "./registeredSchemas.js";
 
 /**
  * CoLists are collaborative versions of plain arrays.
@@ -64,10 +65,10 @@ export class CoList<Item = any> extends Array<Item> implements CoValue {
    * @example
    * ```ts
    * class ColorList extends CoList.Of(
-   *   co.string
+   *   coField.string
    * ) {}
    * class AnimalList extends CoList.Of(
-   *   co.ref(Animal)
+   *   coField.ref(Animal)
    * ) {}
    * ```
    *
@@ -76,7 +77,7 @@ export class CoList<Item = any> extends Array<Item> implements CoValue {
   static Of<Item>(item: Item): typeof CoList<Item> {
     // TODO: cache superclass for item class
     return class CoListOf extends CoList<Item> {
-      [co.items] = item;
+      [coField.items] = item;
     };
   }
 
@@ -116,12 +117,14 @@ export class CoList<Item = any> extends Array<Item> implements CoValue {
   /** @category Collaboration */
   get _owner(): Account | Group {
     return this._raw.group instanceof RawAccount
-      ? RegisteredSchemas["Account"].fromRaw(this._raw.group)
+      ? anySchemaToCoSchema(RegisteredSchemas["Account"]).fromRaw(
+          this._raw.group,
+        )
       : RegisteredSchemas["Group"].fromRaw(this._raw.group);
   }
 
   /**
-   * If a `CoList`'s items are a `co.ref(...)`, you can use `coList._refs[i]` to access
+   * If a `CoList`'s items are a `coField.ref(...)`, you can use `coList._refs[i]` to access
    * the `Ref` instead of the potentially loaded/null value.
    *
    * This allows you to always get the ID or load the value manually.
@@ -138,7 +141,7 @@ export class CoList<Item = any> extends Array<Item> implements CoValue {
    **/
   get _refs(): {
     [idx: number]: Exclude<Item, null> extends CoValue
-      ? Ref<UnCo<Exclude<Item, null>>>
+      ? Ref<Exclude<Item, null>>
       : never;
   } & {
     length: number;
@@ -160,7 +163,9 @@ export class CoList<Item = any> extends Array<Item> implements CoValue {
     [idx: number]: {
       value?: Item;
       ref?: Item extends CoValue ? Ref<Item> : never;
-      by?: RegisteredAccount;
+      by<A extends typeof Account | AnyAccountSchema>(
+        AccountSchema?: A,
+      ): InstanceOfSchema<A> | null;
       madeAt: Date;
     };
   } {
@@ -172,7 +177,9 @@ export class CoList<Item = any> extends Array<Item> implements CoValue {
 
     if (agent instanceof ControlledAccount) {
       return coValuesCache.get(agent.account, () =>
-        RegisteredSchemas["Account"].fromRaw(agent.account),
+        anySchemaToCoSchema(RegisteredSchemas["Account"]).fromRaw(
+          agent.account,
+        ),
       );
     }
 
@@ -231,7 +238,7 @@ export class CoList<Item = any> extends Array<Item> implements CoValue {
    **/
   static create<L extends CoList>(
     this: CoValueClass<L>,
-    items: UnCo<L[number]>[],
+    items: L[number][],
     options?: { owner: Account | Group } | Account | Group,
   ) {
     const { owner } = parseCoValueCreateOptions(options);
@@ -580,7 +587,7 @@ const CoListProxyHandler: ProxyHandler<CoList> = {
           ? undefined
           : itemDescriptor.encoded.decode(rawValue);
       } else if (isRefEncoded(itemDescriptor)) {
-        return rawValue === undefined
+        return rawValue === undefined || rawValue === null
           ? undefined
           : accessChildByKey(target, rawValue as string, key);
       }
@@ -605,11 +612,13 @@ const CoListProxyHandler: ProxyHandler<CoList> = {
       } else if ("encoded" in itemDescriptor) {
         rawValue = itemDescriptor.encoded.encode(value);
       } else if (isRefEncoded(itemDescriptor)) {
-        if (value === null) {
+        if (value === undefined) {
           if (itemDescriptor.optional) {
             rawValue = null;
           } else {
-            throw new Error(`Cannot set required reference ${key} to null`);
+            throw new Error(
+              `Cannot set required reference ${key} to undefined`,
+            );
           }
         } else if (value?.id) {
           rawValue = value.id;

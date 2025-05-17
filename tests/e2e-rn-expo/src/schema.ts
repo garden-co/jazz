@@ -1,5 +1,5 @@
-import { CoMap, co } from "jazz-tools";
+import { CoMap, coField } from "jazz-tools";
 
 export class CoMapWithText extends CoMap {
-  text = co.string;
+  text = coField.string;
 }

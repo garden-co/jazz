@@ -1,7 +1,10 @@
 import {
   Account,
   AccountClass,
+  AnyAccountSchema,
+  CoValueFromRaw,
   InMemoryKVStore,
+  InstanceOfSchema,
   JazzContextManager,
   SyncConfig,
 } from "jazz-tools";
@@ -13,20 +16,28 @@ import {
   createJazzBrowserGuestContext,
 } from "./createBrowserContext.js";
 
-export type JazzContextManagerProps<Acc extends Account> = {
+export type JazzContextManagerProps<
+  S extends
+    | (AccountClass<Account> & CoValueFromRaw<Account>)
+    | AnyAccountSchema,
+> = {
   guestMode?: boolean;
   sync: SyncConfig;
   onLogOut?: () => void;
   logOutReplacement?: () => void;
-  onAnonymousAccountDiscarded?: (anonymousAccount: Acc) => Promise<void>;
+  onAnonymousAccountDiscarded?: (
+    anonymousAccount: InstanceOfSchema<S>,
+  ) => Promise<void>;
   storage?: BaseBrowserContextOptions["storage"];
-  AccountSchema?: AccountClass<Acc>;
+  AccountSchema?: S;
   defaultProfileName?: string;
 };
 
 export class JazzBrowserContextManager<
-  Acc extends Account,
-> extends JazzContextManager<Acc, JazzContextManagerProps<Acc>> {
+  S extends
+    | (AccountClass<Account> & CoValueFromRaw<Account>)
+    | AnyAccountSchema,
+> extends JazzContextManager<InstanceOfSchema<S>, JazzContextManagerProps<S>> {
   // TODO: When the storage changes, if the user is changed, update the context
   getKvStore() {
     if (typeof window === "undefined") {
@@ -38,7 +49,7 @@ export class JazzBrowserContextManager<
   }
 
   async getNewContext(
-    props: JazzContextManagerProps<Acc>,
+    props: JazzContextManagerProps<S>,
     authProps?: JazzContextManagerAuthProps,
   ) {
     if (props.guestMode) {
@@ -48,7 +59,7 @@ export class JazzBrowserContextManager<
         authSecretStorage: this.authSecretStorage,
       });
     } else {
-      return createJazzBrowserContext<Acc>({
+      return createJazzBrowserContext<S>({
         sync: props.sync,
         storage: props.storage,
         AccountSchema: props.AccountSchema,
@@ -60,7 +71,7 @@ export class JazzBrowserContextManager<
     }
   }
 
-  propsChanged(props: JazzContextManagerProps<Acc>) {
+  propsChanged(props: JazzContextManagerProps<S>) {
     if (!this.props) {
       return true;
     }

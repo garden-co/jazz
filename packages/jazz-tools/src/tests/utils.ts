@@ -1,4 +1,4 @@
-import { isControlledAccount } from "../coValues/account";
+import { AccountClass, isControlledAccount } from "../coValues/account";
 
 import { CoID, LocalNode, RawCoValue } from "cojson";
 import { cojsonInternals } from "cojson";
@@ -8,6 +8,7 @@ import {
   createJazzContextFromExistingCredentials,
   randomSessionProvider,
 } from "../index";
+import { CoValueFromRaw } from "../internal";
 
 const Crypto = await WasmCrypto.create();
 
@@ -45,7 +46,7 @@ export async function setupAccount() {
 }
 
 export async function setupTwoNodes(options?: {
-  ServerAccountSchema?: typeof Account;
+  ServerAccountSchema?: CoValueFromRaw<Account> & AccountClass<Account>;
 }) {
   const ServerAccountSchema = options?.ServerAccountSchema ?? Account;
 

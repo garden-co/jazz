@@ -388,7 +388,7 @@
 
 ### Patch Changes
 
-- d8582fc: Fixes co.optional.Date throwing when assigned undefined
+- d8582fc: Fixes coField.optional.Date throwing when assigned undefined
 
 ## 0.10.2
 
@@ -780,7 +780,7 @@
 ### Patch Changes
 
 - c3f4e6b: Fix order of exports fields in package.json
-- d9152ed: Allow interface types as generic argument in co.json
+- d9152ed: Allow interface types as generic argument in coField.json
 - Updated dependencies [c3f4e6b]
 - Updated dependencies [d9152ed]
   - cojson@0.8.5
@@ -831,7 +831,7 @@
 ### Patch Changes
 
 - 49a8b54: Fix on CoMapInit to not allow null values on required refs
-- 6f80282: fix: handle null values for co.refs
+- 6f80282: fix: handle null values for coField.refs
 - 35bbcd9: Fix loadAsBlob resolving too early
 - f350e90: Added a priority system for the sync messages
 - Updated dependencies [35bbcd9]

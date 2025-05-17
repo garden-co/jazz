@@ -9,11 +9,14 @@ import {
   ID,
   InMemoryKVStore,
   KvStoreContext,
+  co,
   createAnonymousJazzContext,
   createJazzContext,
   createJazzContextForNewAccount,
   createJazzContextFromExistingCredentials,
   randomSessionProvider,
+  z,
+  zodSchemaToCoSchema,
 } from "../exports";
 import { activeAccountContext } from "../implementation/activeAccountContext";
 import {
@@ -62,9 +65,14 @@ describe("createContext methods", () => {
     });
 
     test("handles custom account schema", async () => {
-      class CustomAccount extends Account {
-        static migration = async () => {};
-      }
+      const CustomAccount = co
+        .account({
+          root: co.map({}),
+          profile: co.map({
+            name: z.string(),
+          }),
+        })
+        .withMigration(async () => {});
 
       const account = await createJazzTestAccount({
         isCurrentActiveAccount: true,
@@ -79,11 +87,13 @@ describe("createContext methods", () => {
         credentials,
         peersToLoadFrom: [getPeerConnectedToTestSyncServer()],
         crypto: Crypto,
-        AccountSchema: CustomAccount,
+        AccountSchema: zodSchemaToCoSchema(CustomAccount),
         sessionProvider: randomSessionProvider,
       });
 
-      expect(context.account).toBeInstanceOf(CustomAccount);
+      expect(context.account).toBeInstanceOf(
+        zodSchemaToCoSchema(CustomAccount),
+      );
     });
 
     test("calls onLogOut callback when logging out", async () => {
@@ -176,18 +186,25 @@ describe("createContext methods", () => {
     });
 
     test("handles custom account schema", async () => {
-      class CustomAccount extends Account {
-        static migration = async () => {};
-      }
+      const CustomAccount = co
+        .account({
+          root: co.map({}),
+          profile: co.map({
+            name: z.string(),
+          }),
+        })
+        .withMigration(async () => {});
 
       const context = await createJazzContextForNewAccount({
         creationProps: { name: "New User" },
         peersToLoadFrom: [],
         crypto: Crypto,
-        AccountSchema: CustomAccount,
+        AccountSchema: zodSchemaToCoSchema(CustomAccount),
       });
 
-      expect(context.account).toBeInstanceOf(CustomAccount);
+      expect(context.account).toBeInstanceOf(
+        zodSchemaToCoSchema(CustomAccount),
+      );
     });
 
     test("sets the active account to the new account", async () => {
@@ -321,19 +338,26 @@ describe("createContext methods", () => {
     });
 
     test("handles custom account schema", async () => {
-      class CustomAccount extends Account {
-        static migration = async () => {};
-      }
+      const CustomAccount = co
+        .account({
+          root: co.map({}),
+          profile: co.map({
+            name: z.string(),
+          }),
+        })
+        .withMigration(async () => {});
 
       const context = await createJazzContext({
         peersToLoadFrom: [],
         crypto: Crypto,
         authSecretStorage,
         sessionProvider: randomSessionProvider,
-        AccountSchema: CustomAccount,
+        AccountSchema: zodSchemaToCoSchema(CustomAccount),
       });
 
-      expect(context.account).toBeInstanceOf(CustomAccount);
+      expect(context.account).toBeInstanceOf(
+        zodSchemaToCoSchema(CustomAccount),
+      );
     });
   });
 });

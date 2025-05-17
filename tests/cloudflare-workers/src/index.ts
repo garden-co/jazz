@@ -3,17 +3,17 @@ import { WasmCrypto } from "cojson/crypto/WasmCrypto";
 import { Hono } from "hono";
 import { startWorker } from "jazz-nodejs";
 import { startSyncServer } from "jazz-run/startSyncServer";
-import { CoMap, co } from "jazz-tools";
+import { CoMap, coField } from "jazz-tools";
 import { Account } from "jazz-tools";
 
 const app = new Hono();
 
 class MyAccountRoot extends CoMap {
-  text = co.string;
+  text = coField.string;
 }
 
 class MyAccount extends Account {
-  root = co.ref(MyAccountRoot);
+  root = coField.ref(MyAccountRoot);
 
   migrate(): void {
     if (this.root === undefined) {

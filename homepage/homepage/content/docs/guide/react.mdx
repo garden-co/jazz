@@ -48,14 +48,14 @@ Collaborative Values (CoValues), build a UI and subscribe to changes, set permis
 <CodeGroup>
     {/* prettier-ignore */}
     ```tsx
-    import React from "react"; 
-    import ReactDOM from "react-dom/client"; 
-    import App from "./App.tsx"; 
-    import "./index.css"; 
+    import React from "react";
+    import ReactDOM from "react-dom/client";
+    import App from "./App.tsx";
+    import "./index.css";
     import { JazzProvider } from "jazz-react";  // [!code ++]
 
-    ReactDOM.createRoot(document.getElementById("root")!).render( 
-        <React.StrictMode> 
+    ReactDOM.createRoot(document.getElementById("root")!).render(
+        <React.StrictMode>
             <JazzProvider // [!code ++:6]
                 // replace `you@example.com` with your email as a temporary API key
                 sync={{ peer: "wss://cloud.jazz.tools/?key=you@example.com" }}
@@ -63,7 +63,7 @@ Collaborative Values (CoValues), build a UI and subscribe to changes, set permis
                 <App />
             </JazzProvider>
         </React.StrictMode>
-    ); 
+    );
     ```
 </CodeGroup>
 
@@ -94,13 +94,13 @@ Create a new file `src/schema.ts` and add the following:
 
 <CodeGroup>
 ```ts
-import { CoMap, co } from "jazz-tools";
+import { CoMap, coField } from "jazz-tools";
 
 export class Issue extends CoMap {
-    title = co.string;
-    description = co.string;
-    estimate = co.number;
-    status = co.optional.literal("backlog", "in progress", "done");
+    title = coField.string;
+    description = coField.string;
+    estimate = coField.number;
+    status = coField.optional.literal("backlog", "in progress", "done");
 }
 ```
 </CodeGroup>
@@ -236,38 +236,38 @@ Let's modify `src/App.tsx`:
 <CodeGroup>
 {/* prettier-ignore */}
 ```tsx
-import { useState } from "react"; 
-import { Issue } from "./schema"; 
-import { IssueComponent } from "./components/Issue.tsx"; 
+import { useState } from "react";
+import { Issue } from "./schema";
+import { IssueComponent } from "./components/Issue.tsx";
 import { useCoState } from "jazz-react"; // [!code ++]
 import { ID } from "jazz-tools" // [!code ++]
 
-function App() { 
+function App() {
     const [issue, setIssue] = useState<Issue>(); // [!code --]
     const [issueID, setIssueID] = useState<ID<Issue>>(); // [!code ++]
-    
+
     const issue = useCoState(Issue, issueID); // [!code ++]
-    
+
     const createIssue = () => {
         const newIssue = Issue.create(
-            { 
-                title: "Buy terrarium", 
-                description: "Make sure it's big enough for 10 snails.", 
-                estimate: 5, 
-                status: "backlog", 
-            }, 
-        ); 
+            {
+                title: "Buy terrarium",
+                description: "Make sure it's big enough for 10 snails.",
+                estimate: 5,
+                status: "backlog",
+            },
+        );
         setIssueID(newIssue.id);
-    }; 
-    
-    if (issue) { 
-        return <IssueComponent issue={issue} />; 
-    } else { 
-        return <button onClick={createIssue}>Create Issue</button>; 
-    } 
-} 
+    };
 
-export default App; 
+    if (issue) {
+        return <IssueComponent issue={issue} />;
+    } else {
+        return <button onClick={createIssue}>Create Issue</button>;
+    }
+}
+
+export default App;
 ```
 </CodeGroup>
 
@@ -276,11 +276,11 @@ And now for the exciting part! Let's make `src/components/Issue.tsx` an editing 
 <CodeGroup>
 {/* prettier-ignore */}
 ```tsx
-import { Issue } from "../schema"; 
+import { Issue } from "../schema";
 
-export function IssueComponent({ issue }: { issue: Issue }) { 
-    return ( 
-        <div className="grid grid-cols-6 text-sm border-r border-b [&>*]:p-2 [&>*]:border-l [&>*]:border-t"> 
+export function IssueComponent({ issue }: { issue: Issue }) {
+    return (
+        <div className="grid grid-cols-6 text-sm border-r border-b [&>*]:p-2 [&>*]:border-l [&>*]:border-t">
             <input type="text" // [!code ++:22]
                 value={issue.title}
                 onChange={(event) => { issue.title = event.target.value }}/>
@@ -303,9 +303,9 @@ export function IssueComponent({ issue }: { issue: Issue }) {
                 <option value="in progress">In Progress</option>
                 <option value="done">Done</option>
             </select>
-        </div> 
-    ); 
-} 
+        </div>
+    );
+}
 ```
 </CodeGroup>
 
@@ -383,40 +383,40 @@ So let's store the ID in the browser's URL and make sure our useState is in sync
 <CodeGroup>
 {/* prettier-ignore */}
 ```tsx
-import { useState } from "react"; 
-import { Issue } from "./schema"; 
-import { IssueComponent } from "./components/Issue.tsx"; 
-import { useCoState } from "jazz-react"; 
-import { ID } from "jazz-tools" 
+import { useState } from "react";
+import { Issue } from "./schema";
+import { IssueComponent } from "./components/Issue.tsx";
+import { useCoState } from "jazz-react";
+import { ID } from "jazz-tools"
 
-function App() { 
+function App() {
     const [issueID, setIssueID] = useState<ID<Issue> | undefined>( // [!code ++:3]
         (window.location.search?.replace("?issue=", "") || undefined) as ID<Issue> | undefined,
     );
-    
-    const issue = useCoState(Issue, issueID); 
-    
+
+    const issue = useCoState(Issue, issueID);
+
     const createIssue = () => {
         const newIssue = Issue.create(
-            { 
-                title: "Buy terrarium", 
-                description: "Make sure it's big enough for 10 snails.", 
-                estimate: 5, 
-                status: "backlog", 
-            }, 
-        ); 
-        setIssueID(newIssue.id); 
+            {
+                title: "Buy terrarium",
+                description: "Make sure it's big enough for 10 snails.",
+                estimate: 5,
+                status: "backlog",
+            },
+        );
+        setIssueID(newIssue.id);
         window.history.pushState({}, "", `?issue=${newIssue.id}`); // [!code ++]
-    }; 
-    
-    if (issue) { 
-        return <IssueComponent issue={issue} />; 
-    } else { 
-        return <button onClick={createIssue}>Create Issue</button>; 
-    } 
-} 
+    };
 
-export default App; 
+    if (issue) {
+        return <IssueComponent issue={issue} />;
+    } else {
+        return <button onClick={createIssue}>Create Issue</button>;
+    }
+}
+
+export default App;
 ```
 </CodeGroup>
 
@@ -442,45 +442,45 @@ All we have to do is create a new group to own each new issue and add "everyone"
 <CodeGroup>
 {/* prettier-ignore */}
 ```tsx
-import { useState } from "react"; 
-import { Issue } from "./schema"; 
-import { IssueComponent } from "./components/Issue.tsx"; 
+import { useState } from "react";
+import { Issue } from "./schema";
+import { IssueComponent } from "./components/Issue.tsx";
 import { useAccount, useCoState } from "jazz-react"; // [!code ++:2]
 import { ID, Group } from "jazz-tools"
 
-function App() { 
+function App() {
     const { me } = useAccount(); // [!code ++]
     const [issueID, setIssueID] = useState<ID<Issue> | undefined>(
         (window.location.search?.replace("?issue=", "") || undefined) as ID<Issue> | undefined,
-    ); 
-    
-    const issue = useCoState(Issue, issueID); 
-    
-    const createIssue = () => { 
+    );
+
+    const issue = useCoState(Issue, issueID);
+
+    const createIssue = () => {
         const group = Group.create(); // [!code ++:2]
         group.addMember("everyone", "writer");
-        
-        const newIssue = Issue.create( 
-            { 
-                title: "Buy terrarium", 
-                description: "Make sure it's big enough for 10 snails.", 
-                estimate: 5, 
-                status: "backlog", 
-            }, 
-            { owner: group }, // [!code ++]
-        ); 
-        setIssueID(newIssue.id); 
-        window.history.pushState({}, "", `?issue=${newIssue.id}`); 
-    }; 
-    
-    if (issue) { 
-        return <IssueComponent issue={issue} />; 
-    } else { 
-        return <button onClick={createIssue}>Create Issue</button>; 
-    } 
-} 
 
-export default App; 
+        const newIssue = Issue.create(
+            {
+                title: "Buy terrarium",
+                description: "Make sure it's big enough for 10 snails.",
+                estimate: 5,
+                status: "backlog",
+            },
+            { owner: group }, // [!code ++]
+        );
+        setIssueID(newIssue.id);
+        window.history.pushState({}, "", `?issue=${newIssue.id}`);
+    };
+
+    if (issue) {
+        return <IssueComponent issue={issue} />;
+    } else {
+        return <button onClick={createIssue}>Create Issue</button>;
+    }
+}
+
+export default App;
 ```
 </CodeGroup>
 
@@ -511,20 +511,20 @@ Add the following to `src/schema.ts`:
 
 <CodeGroup>
 ```ts
-import { CoMap, CoList, co } from "jazz-tools"; // [!code ++]
+import { CoMap, CoList, coField } from "jazz-tools"; // [!code ++]
 
-export class Issue extends CoMap { 
-    title = co.string; 
-    description = co.string; 
-    estimate = co.number; 
-    status? = co.optional.literal("backlog", "in progress", "done"); 
-} 
+export class Issue extends CoMap {
+    title = coField.string;
+    description = coField.string;
+    estimate = coField.number;
+    status? = coField.optional.literal("backlog", "in progress", "done");
+}
 
-export class ListOfIssues extends CoList.Of(co.ref(Issue)) {} // [!code ++:6]
+export class ListOfIssues extends CoList.Of(coField.ref(Issue)) {} // [!code ++:6]
 
 export class Project extends CoMap {
-    name = co.string;
-    issues = co.ref(ListOfIssues);
+    name = coField.string;
+    issues = coField.ref(ListOfIssues);
 }
 ```
 </CodeGroup>
@@ -536,18 +536,18 @@ First, we'll change `App.tsx` to create and render `Project`s instead of `Issue`
 <CodeGroup>
 {/* prettier-ignore */}
 ```tsx
-import { useState } from "react"; 
+import { useState } from "react";
 import { Project, ListOfIssues } from "./schema"; // [!code ++:3]
 import { ProjectComponent } from "./components/Project.tsx";
 import { ID, Group } from "jazz-tools"
 
-function App() { 
+function App() {
     const [projectID, setProjectID] = useState<ID<Project> | undefined>( // [!code ++:3]
         (window.location.search?.replace("?project=", "") || undefined) as ID<Project> | undefined
     );
-    
+
     const issue = useCoState(Issue, issueID); // [!code --]
-    
+
     const createProject = () => { // [!code ++:14]
         const group = Group.create();
         group.addMember("everyone", "writer");
@@ -562,15 +562,15 @@ function App() {
         setProjectID(newProject.id);
         window.history.pushState({}, "", `?project=${newProject.id}`);
     };
-    
+
     if (projectID) { // [!code ++:4]
         return <ProjectComponent projectID={projectID} />;
     } else {
         return <button onClick={createProject}>Create Project</button>;
     }
-} 
+}
 
-export default App; 
+export default App;
 ```
 </CodeGroup>
 
@@ -635,9 +635,9 @@ But you can also take more precise control over loading by defining a minimum-de
 {/* prettier-ignore */}
 ```tsx
 import { ID } from "jazz-tools";
-import { Project, Issue } from "../schema"; 
-import { IssueComponent } from "./Issue.tsx"; 
-import { useCoState } from "jazz-react"; 
+import { Project, Issue } from "../schema";
+import { IssueComponent } from "./Issue.tsx";
+import { useCoState } from "jazz-react";
 
 export function ProjectComponent({ projectID }: { projectID: ID<Project> }) {
     const project = useCoState(
@@ -707,39 +707,39 @@ Turns out, we're already mostly there! First, let's remove making the Project pu
 <CodeGroup>
 {/* prettier-ignore */}
 ```tsx
-import { useState } from "react"; 
-import { Project, ListOfIssues } from "./schema"; 
-import { ProjectComponent } from "./components/Project.tsx"; 
-import { ID, Group } from "jazz-tools" 
+import { useState } from "react";
+import { Project, ListOfIssues } from "./schema";
+import { ProjectComponent } from "./components/Project.tsx";
+import { ID, Group } from "jazz-tools"
 
-function App() { 
-    const [projectID, setProjectID] = useState<ID<Project> | undefined>( 
-        (window.location.search?.replace("?project=", "") || undefined) as ID<Project> | undefined, 
-    ); 
-    
-    const createProject = () => { 
-        const group = Group.create(); 
+function App() {
+    const [projectID, setProjectID] = useState<ID<Project> | undefined>(
+        (window.location.search?.replace("?project=", "") || undefined) as ID<Project> | undefined,
+    );
+
+    const createProject = () => {
+        const group = Group.create();
         group.addMember("everyone", "writer"); // [!code --]
-        
-        const newProject = Project.create( 
-            { 
-                name: "New Project", 
-                issues: ListOfIssues.create([], { owner: group }) 
-            }, 
-            group, 
-        ); 
-        setProjectID(newProject.id); 
-        window.history.pushState({}, "", `?project=${newProject.id}`); 
-    }; 
-    
-    if (projectID) { 
-        return <ProjectComponent projectID={projectID} />; 
-    } else { 
-        return <button onClick={createProject}>Create Project</button>; 
-    } 
-} 
 
-export default App; 
+        const newProject = Project.create(
+            {
+                name: "New Project",
+                issues: ListOfIssues.create([], { owner: group })
+            },
+            group,
+        );
+        setProjectID(newProject.id);
+        window.history.pushState({}, "", `?project=${newProject.id}`);
+    };
+
+    if (projectID) {
+        return <ProjectComponent projectID={projectID} />;
+    } else {
+        return <button onClick={createProject}>Create Project</button>;
+    }
+}
+
+export default App;
 ```
 </CodeGroup>
 
@@ -748,15 +748,15 @@ Now, inside ProjectComponent, let's add a button to invite guests (read-only) or
 <CodeGroup>
 {/* prettier-ignore */}
 ```tsx
-import { ID } from "jazz-tools"; 
-import { Project, Issue } from "../schema"; 
-import { IssueComponent } from "./Issue.tsx"; 
-import { useCoState } from "jazz-react"; 
+import { ID } from "jazz-tools";
+import { Project, Issue } from "../schema";
+import { IssueComponent } from "./Issue.tsx";
+import { useCoState } from "jazz-react";
 import { createInviteLink } from "jazz-react"; // [!code ++]
 
 
 export function ProjectComponent({ projectID }: { projectID: ID<Project> }) {
-    const project = useCoState(Project, projectID, { resolve: { issues:  { $each: true } } }); 
+    const project = useCoState(Project, projectID, { resolve: { issues:  { $each: true } } });
 
     const { me } = useAccount(); // [!code ++:6]
 
@@ -766,7 +766,7 @@ export function ProjectComponent({ projectID }: { projectID: ID<Project> }) {
     };
 
     const createAndAddIssue = () => {
-        project?.issues.push(Issue.create({ 
+        project?.issues.push(Issue.create({
             title: "",
             description: "",
             estimate: 0,
@@ -784,8 +784,8 @@ export function ProjectComponent({ projectID }: { projectID: ID<Project> }) {
                 </>
             )}
             <div className="border-r border-b">
-                {project.issues.map((issue) => ( 
-                    <IssueComponent key={issue.id} issue={issue} /> 
+                {project.issues.map((issue) => (
+                    <IssueComponent key={issue.id} issue={issue} />
                 ))}
                 <button onClick={createAndAddIssue}>Create Issue</button>
             </div>

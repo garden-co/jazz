@@ -1,5 +1,11 @@
 import ImageBlobReduce from "image-blob-reduce";
-import { Account, FileStream, Group, ImageDefinition } from "jazz-tools";
+import {
+  Account,
+  FileStream,
+  Group,
+  ImageDefinition,
+  Loaded,
+} from "jazz-tools";
 import Pica from "pica";
 
 let pica: Pica.Pica | undefined;
@@ -11,7 +17,7 @@ export async function createImage(
     owner?: Group | Account;
     maxSize?: 256 | 1024 | 2048;
   },
-): Promise<ImageDefinition> {
+): Promise<Loaded<typeof ImageDefinition>> {
   // Inizialize Pica here to not have module side effects
   if (!pica) {
     pica = new Pica();

@@ -1,56 +1,56 @@
 # Example app 6: A task management app that helps users organize their to-dos with categories, tags, due dates, and priority levels
 
 ```typescript
-import { Account, CoList, CoMap, Group, Profile, co } from "jazz-tools";
+import { Account, CoList, CoMap, Group, Profile, coField } from "jazz-tools";
 
 // Task priority levels
 export type PriorityLevel = "Low" | "Medium" | "High";
 
 // Represents a tag that can be associated with tasks
 export class Tag extends CoMap {
-  name = co.string;
-  deleted = co.boolean;
+  name = coField.string;
+  deleted = coField.boolean;
 }
 
-export class TagList extends CoList.Of(co.ref(Tag)) {}
+export class TagList extends CoList.Of(coField.ref(Tag)) {}
 
 // Represents a category that can group tasks
 export class Category extends CoMap {
-  name = co.string;
-  deleted = co.boolean;
+  name = coField.string;
+  deleted = coField.boolean;
 }
 
-export class CategoryList extends CoList.Of(co.ref(Category)) {}
+export class CategoryList extends CoList.Of(coField.ref(Category)) {}
 
 // Represents a single task in the todo app
 export class Task extends CoMap {
-  title = co.string;
-  description = co.optional.string;
-  dueDate = co.optional.Date;
-  isCompleted = co.boolean;
-  priority = co.literal("Low", "Medium", "High");
-  tags = co.ref(TagList);
-  category = co.optional.ref(Category);
-  deleted = co.boolean;
+  title = coField.string;
+  description = coField.optional.string;
+  dueDate = coField.optional.Date;
+  isCompleted = coField.boolean;
+  priority = coField.literal("Low", "Medium", "High");
+  tags = coField.ref(TagList);
+  category = coField.optional.ref(Category);
+  deleted = coField.boolean;
 }
 
-export class TaskList extends CoList.Of(co.ref(Task)) {}
+export class TaskList extends CoList.Of(coField.ref(Task)) {}
 
 // Container for organizing tasks, categories and tags
 export class Container extends CoMap {
-  tasks = co.ref(TaskList);
-  categories = co.ref(CategoryList);
-  tags = co.ref(TagList);
+  tasks = coField.ref(TaskList);
+  categories = coField.ref(CategoryList);
+  tags = coField.ref(TagList);
 }
 
 // Root structure holding all data
 export class AccountRoot extends CoMap {
-  container = co.ref(Container);
-  version = co.optional.number;
+  container = coField.ref(Container);
+  version = coField.optional.number;
 }
 
 export class UserProfile extends Profile {
-  name = co.string;
+  name = coField.string;
 
   static validate(data: { name?: string; other?: Record<string, unknown> }) {
     const errors: string[] = [];
@@ -63,8 +63,8 @@ export class UserProfile extends Profile {
 
 // Main account class that handles data initialization
 export class JazzAccount extends Account {
-  profile = co.ref(UserProfile);
-  root = co.ref(AccountRoot);
+  profile = coField.ref(UserProfile);
+  root = coField.ref(AccountRoot);
 
   async migrate(creationProps?: {
     name: string;

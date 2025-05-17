@@ -1,17 +1,17 @@
 // @vitest-environment happy-dom
 
-import { Account, CoMap, co } from "jazz-tools";
+import { Account, CoMap, coField } from "jazz-tools";
 import { describe, expect, it } from "vitest";
 import { useAccount } from "../composables.js";
 import { createJazzTestAccount } from "../testing.js";
 import { withJazzTestSetup } from "./testUtils.js";
 
 class AccountRoot extends CoMap {
-  value = co.string;
+  value = coField.string;
 }
 
 class AccountSchema extends Account {
-  root = co.ref(AccountRoot);
+  root = coField.ref(AccountRoot);
 
   migrate() {
     if (!this._refs.root) {

@@ -4,13 +4,12 @@ import {
   render,
   renderHook,
 } from "@testing-library/react";
-import { AnonymousJazzAgent, AuthSecretStorage } from "jazz-tools";
+import { Account, AnonymousJazzAgent, AuthSecretStorage } from "jazz-tools";
 import React from "react";
-import { RegisteredAccount } from "../provider.js";
 import { JazzTestProvider } from "../testing.js";
 
 type JazzExtendedOptions = {
-  account?: RegisteredAccount | { guest: AnonymousJazzAgent };
+  account?: Account | { guest: AnonymousJazzAgent };
   isAuthenticated?: boolean;
 };
 

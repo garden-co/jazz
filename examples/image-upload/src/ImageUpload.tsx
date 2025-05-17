@@ -34,9 +34,9 @@ export default function ImageUpload() {
       setImagePreviewUrl(objectUrl);
 
       try {
-        me.profile.image = await createImage(file, {
+        me.profile.image = (await createImage(file, {
           owner: me.profile._owner,
-        });
+        })) as any; // TODO: fix this
       } catch (error) {
         console.error("Error uploading image:", error);
       } finally {
@@ -54,7 +54,7 @@ export default function ImageUpload() {
   if (me?.profile?.image) {
     return (
       <>
-        <ProgressiveImg image={me.profile.image}>
+        <ProgressiveImg image={me.profile.image as any /* TODO: fix this */}>
           {({ src }) => <img alt="" src={src} className="w-full h-auto" />}
         </ProgressiveImg>
 

@@ -3,13 +3,18 @@ import { LocalNode, Peer, RawAccountID } from "cojson";
 import { PureJSCrypto } from "cojson/dist/crypto/PureJSCrypto"; // Importing from dist to not rely on the exports field
 import {
   Account,
+  AccountClass,
+  AccountSchema,
   AgentID,
+  AnyAccountSchema,
   AuthCredentials,
   AuthSecretStorage,
   CoValue,
   CoValueClass,
+  CoValueFromRaw,
   CryptoProvider,
   ID,
+  InstanceOfSchema,
   NewAccountProps,
   SessionID,
   SyncConfig,
@@ -131,18 +136,22 @@ export async function createJazzReactNativeGuestContext(
   };
 }
 
-export type ReactNativeContextOptions<Acc extends Account> = {
+export type ReactNativeContextOptions<
+  S extends
+    | (AccountClass<Account> & CoValueFromRaw<Account>)
+    | AnyAccountSchema,
+> = {
   credentials?: AuthCredentials;
-  AccountSchema?: CoValueClass<Acc> & {
-    fromNode: (typeof Account)["fromNode"];
-  };
+  AccountSchema?: S;
   newAccountProps?: NewAccountProps;
   defaultProfileName?: string;
 } & BaseReactNativeContextOptions;
 
-export async function createJazzReactNativeContext<Acc extends Account>(
-  options: ReactNativeContextOptions<Acc>,
-) {
+export async function createJazzReactNativeContext<
+  S extends
+    | (AccountClass<Account> & CoValueFromRaw<Account>)
+    | AnyAccountSchema,
+>(options: ReactNativeContextOptions<S>) {
   const { toggleNetwork, peersToLoadFrom, setNode, crypto } =
     await setupPeers(options);
 

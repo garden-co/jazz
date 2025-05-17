@@ -7,30 +7,39 @@ import { WasmCrypto } from "cojson/crypto/WasmCrypto";
 import {
   Account,
   AccountClass,
-  ID,
+  AccountSchema,
+  AnyAccountSchema,
+  CoValueFromRaw,
   Inbox,
+  InstanceOfSchema,
   createJazzContextFromExistingCredentials,
   randomSessionProvider,
 } from "jazz-tools";
 
-type WorkerOptions<Acc extends Account> = {
+type WorkerOptions<
+  S extends
+    | (AccountClass<Account> & CoValueFromRaw<Account>)
+    | AnyAccountSchema,
+> = {
   accountID?: string;
   accountSecret?: string;
   syncServer?: string;
   WebSocket?: AnyWebSocketConstructor;
-  AccountSchema?: AccountClass<Acc>;
+  AccountSchema?: S;
   crypto?: CryptoProvider;
 };
 
 /** @category Context Creation */
-export async function startWorker<Acc extends Account>(
-  options: WorkerOptions<Acc>,
-) {
+export async function startWorker<
+  S extends
+    | (AccountClass<Account> & CoValueFromRaw<Account>)
+    | AnyAccountSchema,
+>(options: WorkerOptions<S>) {
   const {
     accountID = process.env.JAZZ_WORKER_ACCOUNT,
     accountSecret = process.env.JAZZ_WORKER_SECRET,
     syncServer = "wss://cloud.jazz.tools",
-    AccountSchema = Account as unknown as AccountClass<Acc>,
+    AccountSchema = Account as unknown as S,
   } = options;
 
   let node: LocalNode | undefined = undefined;
@@ -68,7 +77,7 @@ export async function startWorker<Acc extends Account>(
 
   const context = await createJazzContextFromExistingCredentials({
     credentials: {
-      accountID: accountID as ID<Acc>,
+      accountID: accountID,
       secret: accountSecret as AgentSecret,
     },
     AccountSchema,
@@ -78,7 +87,7 @@ export async function startWorker<Acc extends Account>(
     crypto: options.crypto ?? (await WasmCrypto.create()),
   });
 
-  const account = context.account as Acc;
+  const account = context.account as InstanceOfSchema<S>;
   node = account._raw.core.node;
 
   if (!account._refs.profile?.id) {
@@ -99,7 +108,7 @@ export async function startWorker<Acc extends Account>(
   };
 
   return {
-    worker: context.account as Acc,
+    worker: context.account as InstanceOfSchema<S>,
     experimental: {
       inbox: inboxPublicApi,
     },

@@ -1,6 +1,11 @@
 import { type InviteSecret, cojsonInternals } from "cojson";
 import { Account } from "../coValues/account.js";
-import type { CoValue, CoValueClass, ID } from "../internal.js";
+import type {
+  CoValue,
+  CoValueClass,
+  CoValueOrZodSchema,
+  ID,
+} from "../internal.js";
 
 /** @category Invite Links */
 export function createInviteLink<C extends CoValue>(
@@ -35,7 +40,7 @@ export function parseInviteLink<C extends CoValue>(
   inviteURL: string,
 ):
   | {
-      valueID: ID<C>;
+      valueID: string;
       valueHint?: string;
       inviteSecret: InviteSecret;
     }
@@ -44,16 +49,16 @@ export function parseInviteLink<C extends CoValue>(
   const parts = url.hash.split("/");
 
   let valueHint: string | undefined;
-  let valueID: ID<C> | undefined;
+  let valueID: string | undefined;
   let inviteSecret: InviteSecret | undefined;
 
   if (parts[0] === "#" && parts[1] === "invite") {
     if (parts.length === 5) {
       valueHint = parts[2];
-      valueID = parts[3] as ID<C>;
+      valueID = parts[3];
       inviteSecret = parts[4] as InviteSecret;
     } else if (parts.length === 4) {
-      valueID = parts[2] as ID<C>;
+      valueID = parts[2];
       inviteSecret = parts[3] as InviteSecret;
     }
 
@@ -65,7 +70,7 @@ export function parseInviteLink<C extends CoValue>(
 }
 
 /** @category Invite Links */
-export function consumeInviteLink<V extends CoValue>({
+export function consumeInviteLink<S extends CoValueOrZodSchema>({
   inviteURL,
   as = Account.getMe(),
   forValueHint,
@@ -74,17 +79,17 @@ export function consumeInviteLink<V extends CoValue>({
   inviteURL: string;
   as?: Account;
   forValueHint?: string;
-  invitedObjectSchema: CoValueClass<V>;
+  invitedObjectSchema: S;
 }): Promise<
   | {
-      valueID: ID<V>;
+      valueID: string;
       valueHint?: string;
       inviteSecret: InviteSecret;
     }
   | undefined
 > {
   return new Promise((resolve, reject) => {
-    const result = parseInviteLink<V>(inviteURL);
+    const result = parseInviteLink(inviteURL);
 
     if (result && result.valueHint === forValueHint) {
       as.acceptInvite(result.valueID, result.inviteSecret, invitedObjectSchema)

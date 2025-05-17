@@ -13,9 +13,9 @@ Jazz requires an [Expo development build](https://docs.expo.dev/develop/developm
 Tested with:
 
 <CodeGroup>
-```json 
-"expo": "~52.0.0", 
-"react-native": "0.76.7", 
+```json
+"expo": "~53.0.0",
+"react-native": "0.79.2",
 "react": "18.3.1"
 ```
 </CodeGroup>
@@ -71,13 +71,13 @@ If you are not working within a monorepo, create a new file `metro.config.js` in
 ```ts twoslash
 // @noErrors: 2304
 // metro.config.js
-const { getDefaultConfig } = require("expo/metro-config"); 
+const { getDefaultConfig } = require("expo/metro-config");
 const config = getDefaultConfig(__dirname);
-  
-config.resolver.sourceExts = ["mjs", "js", "json", "ts", "tsx"]; 
-config.resolver.requireCycleIgnorePatterns = [/(^|\/|\\)node_modules($|\/|\\)/]; 
-  
-module.exports = config; 
+
+config.resolver.sourceExts = ["mjs", "js", "json", "ts", "tsx"];
+config.resolver.requireCycleIgnorePatterns = [/(^|\/|\\)node_modules($|\/|\\)/];
+
+module.exports = config;
 ```
 </CodeGroup>
 

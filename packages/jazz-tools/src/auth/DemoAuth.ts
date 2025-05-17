@@ -1,6 +1,5 @@
 import { AgentSecret } from "cojson";
-import { Account } from "../coValues/account.js";
-import { ID } from "../internal.js";
+import { Account, ID } from "../internal.js";
 import { AuthenticateAccountFunction } from "../types.js";
 import { AuthSecretStorage } from "./AuthSecretStorage.js";
 import { KvStore, KvStoreContext } from "./KvStoreContext.js";

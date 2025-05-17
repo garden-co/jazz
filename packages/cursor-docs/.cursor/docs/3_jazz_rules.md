@@ -5,13 +5,13 @@
 1. **User Profile and Account**
    1.1. Define `export class UserProfile extends Profile` with exactly one property:
    ```ts
-   name = co.string;
+   name = coField.string;
    ```
    1.2. Add a static `validate` method in `UserProfile` that checks `name` is present and non-empty.
    1.3. Define `export class JazzAccount extends Account` with exactly two properties:
    ```ts
-   profile = co.ref(UserProfile);
-   root = co.ref(AccountRoot);
+   profile = coField.ref(UserProfile);
+   root = coField.ref(AccountRoot);
    ```
    1.4. The `JazzAccount` class must have a `migrate(creationProps?: { name: string; other?: Record<string, unknown> })` method.
       - Within `migrate`, if `this._refs.root` is undefined and `creationProps` is provided, run `initialMigration`.
@@ -34,16 +34,16 @@
 4. **No Direct CoList Fields**
    4.1. **Never** do:
    ```ts
-   co.ref(CoList.Of(co.ref(SomeClass)));
+   coField.ref(CoList.Of(coField.ref(SomeClass)));
    ```
-   4.2. Instead, define a CoList class (e.g. `export class SomeClassList extends CoList.Of(co.ref(SomeClass)) {}`) and reference it.
+   4.2. Instead, define a CoList class (e.g. `export class SomeClassList extends CoList.Of(coField.ref(SomeClass)) {}`) and reference it.
 
 5. **Schema Structure & Fields**
    5.1. Follow the provided template patterns. **Do not** add extra entities or fields outside the user's requirements or the template.
    5.2. Do **not** use properties like `createdAt` or `updatedAt`; they're implicit in CoValue.
-   5.3. If a property is optional, denote it with a question mark (`?`) in the field definition, or use `co.optional.*`.
+   5.3. If a property is optional, denote it with a question mark (`?`) in the field definition, or use `coField.optional.*`.
    5.4. Keep comments from the template, especially around migration blocks, intact.
-   5.5. Never set a property to "co.ref(UserProfile)".
+   5.5. Never set a property to "coField.ref(UserProfile)".
 
 6. **Output & Formatting**
    6.1. Generate the final schema in TypeScript with no extra markdown or triple backticks.

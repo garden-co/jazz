@@ -1,4 +1,4 @@
-export const metadata = { 
+export const metadata = {
   description: "CoValues are the core abstraction of Jazz. They're your bread-and-butter datastructures that you use to represent everything in your app."
 };
 
@@ -30,43 +30,45 @@ Thinking about the shape of your data is also a great first step to model your a
 
 Even before you know the details of how your app will work, you'll probably know which kinds of objects it will deal with, and how they relate to each other.
 
-Jazz makes it quick to declare schemas, since they are simple TypeScript classes:
+In Jazz, you define schemas using `co` for CoValues and `z` (from [Zod](https://zod.dev/)) for their primitive fields.
 
 <CodeGroup>
 ```ts twoslash
-import { co, CoMap, CoList } from "jazz-tools";
-class ListOfTasks extends CoList.Of(co.string) {}
-// ---cut---
 // schema.ts
-export class TodoProject extends CoMap {
-  title = co.string;
-  tasks = co.ref(ListOfTasks);
-}
+import { co, z } from "jazz-tools";
+
+const ListOfTasks = co.list(z.string());
+
+export const TodoProject = co.map({
+  title: z.string(),
+  tasks: ListOfTasks,
+});
 ```
 </CodeGroup>
 
-Here you can see how we extend a CoValue type and use `co` for declaring (collaboratively) editable fields. This means that schema info is available for type inference *and* at runtime.
+This gives us schema info that is available for type inference *and* at runtime.
 
-Classes might look old-fashioned, but Jazz makes use of them being both types and values in TypeScript, letting you refer to either with a single definition and import.
+Check out the inferred type of `project` in the example below, as well as the input `.create()` expects.
 
 <CodeGroup>
 ```ts twoslash
 // @filename: schema.ts
-import { co, CoMap, CoList } from "jazz-tools";
+import { co, z, CoMap, CoList } from "jazz-tools";
 
-export class ListOfTasks extends CoList.Of(co.string) {}
+export const ListOfTasks = co.list(z.string());
 
-export class TodoProject extends CoMap {
-  title = co.string;
-  tasks = co.ref(ListOfTasks);
-}
+export const TodoProject = co.map({
+  title: z.string(),
+  tasks: ListOfTasks,
+});
+
 // @filename: app.ts
-import { Group } from "jazz-tools";
 // ---cut---
 // app.ts
+import { Group } from "jazz-tools";
 import { TodoProject, ListOfTasks } from "./schema";
 
-const project: TodoProject = TodoProject.create(
+const project = TodoProject.create(
   {
     title: "New Project",
     tasks: ListOfTasks.create([], Group.create()),
@@ -87,12 +89,12 @@ You can either declare struct-like CoMaps:
 <CodeGroup>
 ```ts twoslash
 // schema.ts
-import { co, CoMap } from "jazz-tools";
+import { co, z } from "jazz-tools";
 // ---cut---
-export class Task extends CoMap {
-  title = co.string;
-  completed = co.boolean;
-}
+const Task = co.map({
+  title: z.string(),
+  completed: z.boolean(),
+});
 ```
 </CodeGroup>
 
@@ -100,15 +102,15 @@ Or record-like CoMaps (key-value pairs, where keys are always `string`):
 
 <CodeGroup>
 ```ts twoslash
-import { co, CoMap } from "jazz-tools";
-class Fruit extends CoMap {
-  name = co.string;
-  color = co.string;
-}
+import { co, z } from "jazz-tools";
+const Fruit = co.map({
+  name: z.string(),
+  color: z.string(),
+});
 // ---cut---
-class ColorToHex extends CoMap.Record(co.string) {}
+const ColorToHex = co.record(z.string(), z.string());
 
-class ColorToFruit extends CoMap.Record(co.ref(Fruit)) {}
+const ColorToFruit = co.record(z.string(), Fruit);
 ```
 </CodeGroup>
 
@@ -126,15 +128,14 @@ You define them by specifying the type of the items they contain:
 
 <CodeGroup>
 ```ts twoslash
-import { co, CoList, CoMap } from "jazz-tools";
-class Task extends CoMap {
-  title = co.string;
-  completed = co.boolean;
-}
+import { co, z } from "jazz-tools";
+const Task = co.map({
+  title: z.string(),
+  completed: z.boolean(),
+});
 // ---cut---
-class ListOfColors extends CoList.Of(co.string) {}
-
-class ListOfTasks extends CoList.Of(co.ref(Task)) {}
+const ListOfColors = co.list(z.string());
+const ListOfTasks = co.list(Task);
 ```
 </CodeGroup>
 
@@ -153,13 +154,13 @@ You define them by specifying the type of feed item:
 
 <CodeGroup>
 ```ts twoslash
-import { co, CoFeed, CoMap } from "jazz-tools";
-class Task extends CoMap {
-  title = co.string;
-  completed = co.boolean;
-}
+import { co, z } from "jazz-tools";
+const Task = co.map({
+  title: z.string(),
+  completed: z.boolean(),
+});
 // ---cut---
-class FeedOfTasks extends CoFeed.Of(co.ref(Task)) {}
+const FeedOfTasks = co.feed(Task);
 ```
 </CodeGroup>
 
@@ -172,20 +173,18 @@ See the corresponding sections for [creating](/docs/using-covalues/cofeeds#creat
 
 FileStreams are a special type of CoValue that represent binary data. (They are created by a single user and offer no internal collaboration.)
 
-They allow you to upload and reference files, images, etc.
+They allow you to upload and reference files.
 
-You typically don't need to declare or extend them yourself, you simply refer to the built-in `FileStream` from another CoValue:
+You typically don't need to declare or extend them yourself, you simply refer to the built-in `co.fileStream()` from another CoValue:
 
 <CodeGroup>
 ```ts twoslash
-import { co, CoMap } from "jazz-tools";
+import { co, z } from "jazz-tools";
 // ---cut---
-import { FileStream } from "jazz-tools";
-
-class Document extends CoMap {
-  title = co.string;
-  file = co.ref(FileStream);
-}
+const Document = co.map({
+  title: z.string(),
+  file: co.fileStream(),
+});
 ```
 </CodeGroup>
 
@@ -194,40 +193,29 @@ See the corresponding sections for [creating](/docs/using-covalues/filestreams#c
 [reading from](/docs/using-covalues/filestreams#reading-from-filestreams) and
 [writing to](/docs/using-covalues/filestreams#writing-to-filestreams) FileStreams.
 
-### `SchemaUnion` (declaration)
+**Note: For images, we have a special, higher-level `co.image()` helper, see [ImageDefinition](/docs/using-covalues/imagedef).**
 
-SchemaUnion is a helper type that allows you to load and refer to multiple subclasses of a CoMap schema, distinguished by a discriminating field.
+### Unions of CoMaps (declaration)
 
-You declare them with a base class type and discriminating lambda, in which you have access to the `RawCoMap`, on which you can call `get` with the field name to get the discriminating value.
+You can declare unions of CoMaps that have discriminating fields, using `z.discriminatedUnion()`.
 
 <CodeGroup>
 ```ts twoslash
-import { co } from "jazz-tools";
+import { co, z } from "jazz-tools";
 // ---cut---
-import { SchemaUnion, CoMap } from "jazz-tools";
 
-class BaseWidget extends CoMap {
-  type = co.string;
-}
-
-class ButtonWidget extends BaseWidget {
-  type = co.literal("button");
-  label = co.string;
-}
-
-class SliderWidget extends BaseWidget {
-  type = co.literal("slider");
-  min = co.number;
-  max = co.number;
-}
-
-const WidgetUnion = SchemaUnion.Of<BaseWidget>((raw) => {
-  switch (raw.get("type")) {
-    case "button": return ButtonWidget;
-    case "slider": return SliderWidget;
-    default: throw new Error("Unknown widget type");
-  }
+const ButtonWidget = co.map({
+  type: z.literal("button"),
+  label: z.string(),
 });
+
+const SliderWidget = co.map({
+  type: z.literal("slider"),
+  min: z.number(),
+  max: z.number(),
+});
+
+const WidgetUnion = z.discriminatedUnion([ButtonWidget, SliderWidget]);
 ```
 </CodeGroup>
 
@@ -241,17 +229,17 @@ Now that we've seen the different types of CoValues, let's see more precisely ho
 
 ### Primitive fields
 
-You can declare primitive field types using the `co` declarer:
+You can declare primitive field types using `z` (re-exported in `jazz-tools` from [Zod](https://zod.dev/)):
 
 <CodeGroup>
 ```ts twoslash
-import { co, CoMap, CoList } from "jazz-tools";
+import { co, z } from "jazz-tools";
 
-export class Person extends CoMap {
-  title = co.string;
-}
+const Person = co.map({
+  title: z.string(),
+})
 
-export class ListOfColors extends CoList.Of(co.string) {}
+export const ListOfColors = co.list(z.string());
 ```
 </CodeGroup>
 
@@ -259,30 +247,46 @@ Here's a quick overview of the primitive types you can use:
 
 <CodeGroup>
 ```ts twoslash
-import { co } from "jazz-tools";
+import { z } from "jazz-tools";
 // ---cut---
-co.string;  // For simple strings
-co.number;  // For numbers
-co.boolean; // For booleans
-co.null;    // For null
-co.Date;    // For dates
-co.literal("waiting", "ready"); // For enums
+z.string();  // For simple strings
+z.number();  // For numbers
+z.boolean(); // For booleans
+z.null();    // For null
+z.date();    // For dates
+z.literal(["waiting", "ready"]); // For enums
 ```
 </CodeGroup>
 
-Finally, for more complex JSON data, that you *don't want to be collaborative internally* (but only ever update as a whole), you can use `co.json<T>()`:
+Finally, for more complex JSON data, that you *don't want to be collaborative internally* (but only ever update as a whole), you can use more complex Zod types.
+
+For example, you can use `z.object()` to represent an internally immutable position:
 
 <CodeGroup>
 ```ts twoslash
-import { co } from "jazz-tools";
+import { co, z } from "jazz-tools";
 // ---cut---
-co.json<{ name: string }>(); // For JSON objects
+const Sprite = co.map({
+  // assigned as a whole
+  position: z.object({ x: z.number(), y: z.number() }),
+});
 ```
 </CodeGroup>
 
-For more detail, see the API Reference for the [`co` field declarer](/api-reference/jazz-tools#co).
+Or you could use a `z.tuple()`:
 
-### Refs to other CoValues
+<CodeGroup>
+```ts twoslash
+import { co, z } from "jazz-tools";
+// ---cut---
+const Sprite = co.map({
+  // assigned as a whole
+  position: z.tuple([z.number(), z.number()]),
+});
+```
+</CodeGroup>
+
+### References to other CoValues
 
 To represent complex structured data with Jazz, you form trees or graphs of CoValues that reference each other.
 
@@ -290,65 +294,127 @@ Internally, this is represented by storing the IDs of the referenced CoValues in
 
 The important caveat here is that **a referenced CoValue might or might not be loaded yet,** but we'll see what exactly that means in [Subscribing and Deep Loading](/docs/using-covalues/subscription-and-loading).
 
-In Schemas, you declare Refs using the `co.ref<T>()` declarer:
+In Schemas, you declare references by just using the schema of the referenced CoValue:
 
 <CodeGroup>
 ```ts twoslash
-import { co, CoMap, CoList } from "jazz-tools";
-class Person extends CoMap {
-  name = co.string;
-}
+import { co, z } from "jazz-tools";
 // ---cut---
 // schema.ts
-class ListOfPeople extends CoList.Of(co.ref(Person)) {}
+const Person = co.map({
+  name: z.string(),
+});
 
-class Company extends CoMap {
-  members = co.ref(ListOfPeople);
-}
+const ListOfPeople = co.list(Person);
+
+const Company = co.map({
+  members: ListOfPeople,
+});
 ```
 </CodeGroup>
 
-#### Optional Refs
+#### Optional References
 
-⚠️ If you want to make a referenced CoValue field optional, you *have to* use `co.optional.ref<T>()`: ⚠️
+You can make references optional with `z.optional()`:
 
 <CodeGroup>
 ```ts twoslash
-import { co, CoMap } from "jazz-tools";
-class Pet extends CoMap {
-  name = co.string;
-}
+import { co, z } from "jazz-tools";
+const Pet = co.map({
+  name: z.string(),
+});
 // ---cut---
-class Person extends CoMap {
-  pet = co.optional.ref(Pet);
-}
+const Person = co.map({
+  pet: z.optional(Pet),
+});
 ```
 </CodeGroup>
 
-### Computed fields & methods
+#### Recursive References
 
-Since CoValue schemas are based on classes, you can easily add computed fields and methods:
+You can refer to the same schema from within itself using getters:
 
 <CodeGroup>
 ```ts twoslash
-import { co, CoMap } from "jazz-tools";
+import { co, z } from "jazz-tools";
+// ---cut---
+const Person = co.map({
+  name: z.string(),
+  get bestFriend() {
+    return Person;
+  }
+});
+```
+</CodeGroup>
+
+You can use the same technique for mutually recursive references, but you'll need to help TypeScript along:
+
+<CodeGroup>
+```ts twoslash
+// ---cut---
+import { co, z, CoListSchema } from "jazz-tools";
+
+const Person = co.map({
+  name: z.string(),
+  get friends(): CoListSchema<typeof Person> {
+    return ListOfPeople;
+  }
+});
+
+const ListOfPeople = co.list(Person);
+```
+</CodeGroup>
+
+Note: similarly, if you use modifiers like `z.optional()` you'll need to help TypeScript along:
+
+<CodeGroup>
+```ts twoslash
+import { co, z } from "jazz-tools";
+// ---cut---
+const Person = co.map({
+  name: z.string(),
+  get bestFriend(): z.ZodOptional<typeof Person> {
+    return z.optional(Person);
+  }
+});
+```
+</CodeGroup>
+
+### Helper methods
+
+You can use the `withHelpers` method on CoValue schemas to add helper functions to the schema itself.
+
+These typically take a parameter of a loaded CoValue of the schema.
+
+<CodeGroup>
+```ts twoslash
+import { co, z, Loaded } from "jazz-tools";
 function differenceInYears(date1: Date, date2: Date) {
   const diffTime = Math.abs(date1.getTime() - date2.getTime());
   return Math.ceil(diffTime / (1000 * 60 * 60 * 24 * 365.25));
 }
 // ---cut---
-class Person extends CoMap {
-  firstName = co.string;
-  lastName = co.string;
-  dateOfBirth = co.Date;
+const Person = co.map({
+  firstName: z.string(),
+  lastName: z.string(),
+  dateOfBirth: z.date(),
+}).withHelpers((Self) => ({
+  fullName(person: Loaded<typeof Self>) {
+    return `${person.firstName} ${person.lastName}`;
+  },
 
-  get name() {
-    return `${this.firstName} ${this.lastName}`;
+  ageAsOf(person: Loaded<typeof Self>, date: Date) {
+    return differenceInYears(date, person.dateOfBirth);
   }
+}));
 
-  ageAsOf(date: Date) {
-    return differenceInYears(date, this.dateOfBirth);
-  }
-}
+const person = Person.create({
+  firstName: "John",
+  lastName: "Doe",
+  dateOfBirth: new Date("1990-01-01"),
+});
+
+const fullName = Person.fullName(person);
+const age = Person.ageAsOf(person, new Date());
 ```
 </CodeGroup>

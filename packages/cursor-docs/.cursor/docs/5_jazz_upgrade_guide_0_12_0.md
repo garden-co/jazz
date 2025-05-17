@@ -38,7 +38,7 @@ const shallowData = useCoState(MyClass, id, { resolve: true });
 ### **3. Deep Resolving with `$each`**
 For `CoList`:
 ```typescript
-class ListOfTasks extends CoList.Of(co.ref(Task)) {}
+class ListOfTasks extends CoList.Of(coField.ref(Task)) {}
 
 // Before
 const tasks = useCoState(ListOfTasks, id, [{}]);
@@ -51,7 +51,7 @@ const tasks = useCoState(ListOfTasks, id, {
 
 For `CoMap.Record`:
 ```typescript
-class UsersByUsername extends CoMap.Record(co.ref(MyAppAccount)) {}
+class UsersByUsername extends CoMap.Record(coField.ref(MyAppAccount)) {}
 
 // Before
 const usersByUsername = useCoState(UsersByUsername, id, [{}]);
@@ -98,7 +98,7 @@ Playlist.load(id, {
 ### **6. Improved Permission Checks**
 More clear handling of loading/missing states:
 ```typescript
-class ListOfTracks extends CoList.Of(co.optional.ref(Track)) {}
+class ListOfTracks extends CoList.Of(coField.optional.ref(Track)) {}
 
 // Before (ambiguous states)
 const value = useCoState(ListOfTasks, id, [{}]);

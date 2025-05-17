@@ -4,17 +4,14 @@ import { PureJSCrypto } from "cojson/dist/crypto/PureJSCrypto";
 import {
   Account,
   AccountClass,
-  AuthCredentials,
-  JazzContextManagerAuthProps,
-} from "./exports.js";
-import {
-  JazzContextManager,
-  JazzContextManagerBaseProps,
-} from "./implementation/ContextManager.js";
-import { activeAccountContext } from "./implementation/activeAccountContext.js";
-import {
   type AnonymousJazzAgent,
+  AuthCredentials,
   type CoValueClass,
+  CoValueFromRaw,
+  JazzContextManager,
+  JazzContextManagerAuthProps,
+  JazzContextManagerBaseProps,
+  activeAccountContext,
   createAnonymousJazzContext,
   createJazzContext,
   randomSessionProvider,
@@ -76,13 +73,13 @@ export function getPeerConnectedToTestSyncServer() {
 const SecretSeedMap = new Map<string, Uint8Array>();
 let isMigrationActive = false;
 
-export async function createJazzTestAccount<Acc extends Account>(options?: {
+export async function createJazzTestAccount<A extends Account>(options?: {
   isCurrentActiveAccount?: boolean;
-  AccountSchema?: CoValueClass<Acc>;
+  AccountSchema?: CoValueClass<A>;
   creationProps?: Record<string, unknown>;
-}): Promise<Acc> {
+}): Promise<A> {
   const AccountSchema = (options?.AccountSchema ??
-    Account) as unknown as TestAccountSchema<Acc>;
+    Account) as unknown as TestAccountSchema<Account>;
   const peers = [];
   if (syncServer.current) {
     peers.push(getPeerConnectedToTestSyncServer());
@@ -134,7 +131,7 @@ export async function createJazzTestAccount<Acc extends Account>(options?: {
     activeAccountContext.set(account);
   }
 
-  return account;
+  return account as A;
 }
 
 export function setActiveAccount(account: Account) {
@@ -155,7 +152,7 @@ export async function createJazzTestGuest() {
 export type TestJazzContextManagerProps<Acc extends Account> =
   JazzContextManagerBaseProps<Acc> & {
     defaultProfileName?: string;
-    AccountSchema?: AccountClass<Acc>;
+    AccountSchema?: AccountClass<Acc> & CoValueFromRaw<Acc>;
     isAuthenticated?: boolean;
   };
 
@@ -194,7 +191,8 @@ export class TestJazzContextManager<
 
     context.updateContext(
       {
-        AccountSchema: account.constructor as AccountClass<Acc>,
+        AccountSchema: account.constructor as AccountClass<Acc> &
+          CoValueFromRaw<Acc>,
         ...props,
       },
       {
@@ -247,7 +245,7 @@ export class TestJazzContextManager<
       );
     }
 
-    const context = await createJazzContext<Acc>({
+    const context = await createJazzContext({
       credentials: authProps?.credentials,
       defaultProfileName: props.defaultProfileName,
       newAccountProps: authProps?.newAccountProps,

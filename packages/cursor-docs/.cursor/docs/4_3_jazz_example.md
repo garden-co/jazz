@@ -1,7 +1,7 @@
 # Example app 3: A social pet app where users can share pet photos, react with fun emojis, and organize posts in a collaborative feed
 
 ```typescript
-import { Account, CoFeed, CoList, CoMap, Group, ImageDefinition, Profile, co } from "jazz-tools";
+import { Account, CoFeed, CoList, CoMap, Group, ImageDefinition, Profile, coField } from "jazz-tools";
 
 export const ReactionTypes = [
   "aww",
@@ -17,7 +17,7 @@ export type ReactionType = (typeof ReactionTypes)[number];
 /**
  * Represents an append-only feed of reactions for a pet post.
  */
-export class PetReactions extends CoFeed.Of(co.json<ReactionType>()) {}
+export class PetReactions extends CoFeed.Of(coField.json<ReactionType>()) {}
 
 /**
  * Represents a pet post.
@@ -28,15 +28,15 @@ export class PetReactions extends CoFeed.Of(co.json<ReactionType>()) {}
  *  - reactions: A feed of reactions (of type ReactionType) for the post.
  */
 export class PetPost extends CoMap {
-  name = co.string;
-  image = co.ref(ImageDefinition);
-  reactions = co.ref(PetReactions);
+  name = coField.string;
+  image = coField.ref(ImageDefinition);
+  reactions = coField.ref(PetReactions);
 }
 
 /**
  * A collaborative list of PetPost references.
  */
-export class ListOfPosts extends CoList.Of(co.ref(PetPost)) {}
+export class ListOfPosts extends CoList.Of(coField.ref(PetPost)) {}
 
 /**
  * Container for the pet posts.
@@ -47,7 +47,7 @@ export class ListOfPosts extends CoList.Of(co.ref(PetPost)) {}
  *  - posts: A list of pet posts.
  */
 export class PetContainer extends CoMap {
-  posts = co.ref(ListOfPosts);
+  posts = coField.ref(ListOfPosts);
 }
 
 /**
@@ -58,8 +58,8 @@ export class PetContainer extends CoMap {
  *  - version: An optional version number for supporting migrations.
  */
 export class PetAccountRoot extends CoMap {
-  container = co.ref(PetContainer);
-  version = co.optional.number;
+  container = coField.ref(PetContainer);
+  version = coField.optional.number;
 }
 
 /**
@@ -72,7 +72,7 @@ export class PetAccountRoot extends CoMap {
  *  - validate: Ensures that both "name" and "email" (if provided) are non-empty.
  */
 export class UserProfile extends Profile {
-  name = co.string;
+  name = coField.string;
 
   static validate(data: { name?: string; email?: string }) {
     const errors: string[] = [];
@@ -93,8 +93,8 @@ export class UserProfile extends Profile {
  * and migrations.
  */
 export class PetAccount extends Account {
-  profile = co.ref(UserProfile);
-  root = co.ref(PetAccountRoot);
+  profile = coField.ref(UserProfile);
+  root = coField.ref(PetAccountRoot);
 
   /**
    * Migrate is run on account creation and on every log-in.

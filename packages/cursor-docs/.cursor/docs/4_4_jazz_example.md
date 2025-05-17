@@ -1,7 +1,7 @@
 # Example app 4: A bubble tea ordering app that lets users customize drinks with different tea bases, add-ons, and delivery preferences
 
 ```typescript
-import { Account, CoList, CoMap, Group, Profile, co } from "jazz-tools";
+import { Account, CoList, CoMap, Group, Profile, coField } from "jazz-tools";
 
 export const BubbleTeaAddOnTypes = [
   "Pearl",
@@ -22,7 +22,7 @@ export const BubbleTeaBaseTeaTypes = [
  * A list of Bubble Tea add-ons.
  * Provides a computed property to check for insertions.
  */
-export class ListOfBubbleTeaAddOns extends CoList.Of(co.literal(...BubbleTeaAddOnTypes)) {
+export class ListOfBubbleTeaAddOns extends CoList.Of(coField.literal(...BubbleTeaAddOnTypes)) {
   get hasChanges() {
     return Object.entries(this._raw.insertions).length > 0;
   }
@@ -39,11 +39,11 @@ export class ListOfBubbleTeaAddOns extends CoList.Of(co.literal(...BubbleTeaAddO
  *  - instructions: Optional additional instructions.
  */
 export class BubbleTeaOrder extends CoMap {
-  baseTea = co.literal(...BubbleTeaBaseTeaTypes);
-  addOns = co.ref(ListOfBubbleTeaAddOns);
-  deliveryDate = co.Date;
-  withMilk = co.boolean;
-  instructions = co.optional.string;
+  baseTea = coField.literal(...BubbleTeaBaseTeaTypes);
+  addOns = coField.ref(ListOfBubbleTeaAddOns);
+  deliveryDate = coField.Date;
+  withMilk = coField.boolean;
+  instructions = coField.optional.string;
 }
 
 /**
@@ -62,11 +62,11 @@ export class BubbleTeaOrder extends CoMap {
  *  - hasChanges: Indicates if there have been modifications.
  */
 export class DraftBubbleTeaOrder extends CoMap {
-  baseTea = co.optional.literal(...BubbleTeaBaseTeaTypes);
-  addOns = co.optional.ref(ListOfBubbleTeaAddOns);
-  deliveryDate = co.optional.Date;
-  withMilk = co.optional.boolean;
-  instructions = co.optional.string;
+  baseTea = coField.optional.literal(...BubbleTeaBaseTeaTypes);
+  addOns = coField.optional.ref(ListOfBubbleTeaAddOns);
+  deliveryDate = coField.optional.Date;
+  withMilk = coField.optional.boolean;
+  instructions = coField.optional.string;
 
   get hasChanges() {
     return Object.keys(this._edits).length > 1 || this.addOns?.hasChanges;
@@ -87,15 +87,15 @@ export class DraftBubbleTeaOrder extends CoMap {
 /**
  * A collaborative list of finalized Bubble Tea orders.
  */
-export class ListOfBubbleTeaOrders extends CoList.Of(co.ref(BubbleTeaOrder)) {}
+export class ListOfBubbleTeaOrders extends CoList.Of(coField.ref(BubbleTeaOrder)) {}
 
 /**
  * Container for Bubble Tea orders.
  * Holds the draft order and the list of finalized orders.
  */
 export class BubbleTeaContainer extends CoMap {
-  draft = co.ref(DraftBubbleTeaOrder);
-  orders = co.ref(ListOfBubbleTeaOrders);
+  draft = coField.ref(DraftBubbleTeaOrder);
+  orders = coField.ref(ListOfBubbleTeaOrders);
 }
 
 /**
@@ -106,8 +106,8 @@ export class BubbleTeaContainer extends CoMap {
  *  - version: Optional version number for migration tracking.
  */
 export class BubbleTeaAccountRoot extends CoMap {
-  container = co.ref(BubbleTeaContainer);
-  version = co.optional.number;
+  container = coField.ref(BubbleTeaContainer);
+  version = coField.optional.number;
 }
 
 /**
@@ -120,7 +120,7 @@ export class BubbleTeaAccountRoot extends CoMap {
  *  - validate: Ensures that a non-empty name and email (if provided) are present.
  */
 export class UserProfile extends Profile {
-  name = co.string;
+  name = coField.string;
 
   static validate(data: { name?: string; email?: string }) {
     const errors: string[] = [];
@@ -140,8 +140,8 @@ export class UserProfile extends Profile {
  * Handles account initialization and migrations.
  */
 export class BubbleTeaAccount extends Account {
-  profile = co.ref(UserProfile);
-  root = co.ref(BubbleTeaAccountRoot);
+  profile = coField.ref(UserProfile);
+  root = coField.ref(BubbleTeaAccountRoot);
 
   /**
    * The migrate method is run on account creation and login.

@@ -1,20 +1,22 @@
-import { co } from "../../internal.js";
-import { FileStream } from "../coFeed.js";
-import { CoMap } from "../coMap.js";
+import z from "zod";
+import { Loaded, coFileStreamDefiner, coMapDefiner } from "../../internal.js";
+
+// avoiding circularity by using the standalone definers instead of `co`
+const ImageDefinitionBase = coMapDefiner({
+  originalSize: z.tuple([z.number(), z.number()]),
+  placeholderDataURL: z.string().optional(),
+}).catchall(coFileStreamDefiner());
 
 /** @category Media */
-export class ImageDefinition extends CoMap {
-  originalSize = co.json<[number, number]>();
-  placeholderDataURL? = co.string;
-
-  [co.items] = co.ref(FileStream);
-  [res: `${number}x${number}`]: co<FileStream | null>;
-
-  highestResAvailable(options?: {
-    maxWidth?: number;
-    targetWidth?: number;
-  }): { res: `${number}x${number}`; stream: FileStream } | undefined {
-    const resolutions = Object.keys(this).filter((key) =>
+export const ImageDefinition = ImageDefinitionBase.withHelpers((Self) => ({
+  highestResAvailable(
+    imageDef: Loaded<typeof Self>,
+    options?: {
+      maxWidth?: number;
+      targetWidth?: number;
+    },
+  ) {
+    const resolutions = Object.keys(imageDef).filter((key) =>
       key.match(/^\d+x\d+$/),
     ) as `${number}x${number}`[];
 
@@ -41,7 +43,7 @@ export class ImageDefinition extends CoMap {
     let highestAvailableResolution: `${number}x${number}` | undefined;
 
     for (const resolution of validResolutions) {
-      if (this[resolution] && this[resolution]?.getChunks()) {
+      if (imageDef[resolution] && imageDef[resolution]?.getChunks()) {
         highestAvailableResolution = resolution;
       }
     }
@@ -50,8 +52,8 @@ export class ImageDefinition extends CoMap {
     return (
       highestAvailableResolution && {
         res: highestAvailableResolution,
-        stream: this[highestAvailableResolution]!,
+        stream: imageDef[highestAvailableResolution]!,
       }
     );
-  }
-}
+  },
+}));

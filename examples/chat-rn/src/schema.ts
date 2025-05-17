@@ -1,7 +1,7 @@
-import { CoList, CoMap, CoPlainText, co } from "jazz-tools";
+import { CoList, CoMap, CoPlainText, coField } from "jazz-tools";
 
 export class Message extends CoMap {
-  text = co.ref(CoPlainText);
+  text = coField.ref(CoPlainText);
 }
 
-export class Chat extends CoList.Of(co.ref(Message)) {}
+export class Chat extends CoList.Of(coField.ref(Message)) {}

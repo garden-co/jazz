@@ -2,8 +2,8 @@
 // This is NOT needed to make the chat work
 
 import { Chat } from "@/schema.ts";
-
-export function onChatLoad(chat: Chat) {
+import { Loaded } from "jazz-tools";
+export function onChatLoad(chat: Loaded<typeof Chat>) {
   if (window.parent) {
     chat.waitForSync().then(() => {
       window.parent.postMessage(

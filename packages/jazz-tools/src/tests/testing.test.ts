@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, test } from "vitest";
-import { Account, CoMap, Group, co } from "../exports";
+import { Account, CoMap, Group, co, z, zodSchemaToCoSchema } from "../exports";
 import { createJazzTestAccount, setupJazzTestSync } from "../testing";
 
 describe("Jazz Test Sync", () => {
@@ -25,24 +25,27 @@ describe("Jazz Test Sync", () => {
   });
 
   test("correctly set the globalMe before starting the migration", async () => {
-    class MyRoot extends CoMap {
-      value = co.string;
-    }
+    const MyRoot = co.map({
+      value: z.string(),
+    });
 
-    class CustomAccount extends Account {
-      root = co.ref(MyRoot);
-
-      migrate() {
-        if (this.root === undefined) {
-          this.root = MyRoot.create({
+    const CustomAccount = co
+      .account({
+        root: MyRoot,
+        profile: co.map({
+          name: z.string(),
+        }),
+      })
+      .withMigration((account) => {
+        if (account.root === undefined) {
+          account.root = MyRoot.create({
             value: "ok",
           });
         }
-      }
-    }
+      });
 
     const account1 = await createJazzTestAccount({
-      AccountSchema: CustomAccount,
+      AccountSchema: zodSchemaToCoSchema(CustomAccount),
       isCurrentActiveAccount: true,
     });
 
@@ -50,29 +53,32 @@ describe("Jazz Test Sync", () => {
   });
 
   test("correctly manages the global me during the migrations", async () => {
-    class MyRoot extends CoMap {
-      value = co.string;
-    }
+    const MyRoot = co.map({
+      value: z.string(),
+    });
 
-    class CustomAccount extends Account {
-      root = co.ref(MyRoot);
-
-      migrate() {
-        if (this.root === undefined) {
-          this.root = MyRoot.create({
+    const CustomAccount = co
+      .account({
+        root: MyRoot,
+        profile: co.map({
+          name: z.string(),
+        }),
+      })
+      .withMigration((account) => {
+        if (account.root === undefined) {
+          account.root = MyRoot.create({
             value: "ok",
           });
         }
-      }
-    }
+      });
 
     const account1 = await createJazzTestAccount({
-      AccountSchema: CustomAccount,
+      AccountSchema: zodSchemaToCoSchema(CustomAccount),
       isCurrentActiveAccount: true,
     });
 
     const account2 = await createJazzTestAccount({
-      AccountSchema: CustomAccount,
+      AccountSchema: zodSchemaToCoSchema(CustomAccount),
       isCurrentActiveAccount: false,
     });
 
@@ -83,19 +89,17 @@ describe("Jazz Test Sync", () => {
   });
 
   test("throws when running multiple migrations in parallel", async () => {
-    class CustomAccount extends Account {
-      async migrate() {
-        await new Promise((resolve) => setTimeout(resolve, 10));
-      }
-    }
+    const CustomAccount = co.account().withMigration(async (account) => {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    });
 
     const promise = Promise.all([
       createJazzTestAccount({
-        AccountSchema: CustomAccount,
+        AccountSchema: zodSchemaToCoSchema(CustomAccount),
         isCurrentActiveAccount: true,
       }),
       createJazzTestAccount({
-        AccountSchema: CustomAccount,
+        AccountSchema: zodSchemaToCoSchema(CustomAccount),
         isCurrentActiveAccount: true,
       }),
     ]);

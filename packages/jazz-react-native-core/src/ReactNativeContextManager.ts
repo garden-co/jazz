@@ -1,6 +1,7 @@
 import {
   Account,
   AccountClass,
+  CoValueFromRaw,
   JazzContextManager,
   KvStore,
   SyncConfig,
@@ -19,7 +20,7 @@ export type JazzContextManagerProps<Acc extends Account> = {
   onLogOut?: () => void;
   logOutReplacement?: () => void;
   storage?: BaseReactNativeContextOptions["storage"];
-  AccountSchema?: AccountClass<Acc>;
+  AccountSchema?: AccountClass<Acc> & CoValueFromRaw<Acc>;
   defaultProfileName?: string;
   onAnonymousAccountDiscarded?: (anonymousAccount: Acc) => Promise<void>;
   CryptoProvider?: BaseReactNativeContextOptions["CryptoProvider"];
@@ -40,7 +41,9 @@ export class ReactNativeContextManager<
         CryptoProvider: props.CryptoProvider,
       });
     } else {
-      return createJazzReactNativeContext<Acc>({
+      return createJazzReactNativeContext<
+        AccountClass<Acc> & CoValueFromRaw<Acc>
+      >({
         sync: props.sync,
         storage: props.storage,
         AccountSchema: props.AccountSchema,

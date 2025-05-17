@@ -1,19 +1,18 @@
 import { describe, expectTypeOf, it } from "vitest";
-import { CoMap, co } from "../index.js";
-import { co as valueWithCoMarker } from "../internal.js";
+import { CoMap, coField } from "../index.js";
 
-describe("co.json TypeScript validation", () => {
+describe("coField.json TypeScript validation", () => {
   it("should accept serializable types", async () => {
     type ValidType = { str: string; num: number; bool: boolean };
 
     class ValidPrimitiveMap extends CoMap {
-      data = co.json<ValidType>();
+      data = coField.json<ValidType>();
     }
 
     expectTypeOf(ValidPrimitiveMap.create<ValidPrimitiveMap>)
       .parameter(0)
       .toEqualTypeOf<{
-        data: valueWithCoMarker<ValidType>;
+        data: ValidType;
       }>();
   });
 
@@ -27,13 +26,13 @@ describe("co.json TypeScript validation", () => {
     };
 
     class ValidNestedMap extends CoMap {
-      data = co.json<NestedType>();
+      data = coField.json<NestedType>();
     }
 
     expectTypeOf(ValidNestedMap.create<ValidNestedMap>)
       .parameter(0)
       .toEqualTypeOf<{
-        data: valueWithCoMarker<NestedType>;
+        data: NestedType;
       }>();
   });
 
@@ -44,13 +43,13 @@ describe("co.json TypeScript validation", () => {
     };
 
     class ValidMap extends CoMap {
-      data = co.json<TypeWithOptional>();
+      data = coField.json<TypeWithOptional>();
     }
 
     expectTypeOf(ValidMap.create<ValidMap>)
       .parameter(0)
       .toEqualTypeOf<{
-        data: valueWithCoMarker<TypeWithOptional>;
+        data: TypeWithOptional;
       }>();
   });
 
@@ -66,13 +65,13 @@ describe("co.json TypeScript validation", () => {
     }
 
     class ValidNestedMap extends CoMap {
-      data = co.json<NestedInterface>();
+      data = coField.json<NestedInterface>();
     }
 
     expectTypeOf(ValidNestedMap.create<ValidNestedMap>)
       .parameter(0)
       .toEqualTypeOf<{
-        data: valueWithCoMarker<NestedInterface>;
+        data: NestedInterface;
       }>();
   });
 
@@ -83,13 +82,13 @@ describe("co.json TypeScript validation", () => {
     }
 
     class ValidArrayMap extends CoMap {
-      data = co.json<ArrayInterface>();
+      data = coField.json<ArrayInterface>();
     }
 
     expectTypeOf(ValidArrayMap.create<ValidArrayMap>)
       .parameter(0)
       .toEqualTypeOf<{
-        data: valueWithCoMarker<ArrayInterface>;
+        data: ArrayInterface;
       }>();
   });
 
@@ -100,13 +99,13 @@ describe("co.json TypeScript validation", () => {
 
     class InvalidFunctionMap extends CoMap {
       // @ts-expect-error Should not be considered valid
-      data = co.json<InvalidInterface>();
+      data = coField.json<InvalidInterface>();
     }
 
     expectTypeOf(InvalidFunctionMap.create<InvalidFunctionMap>)
       .parameter(0)
       .toEqualTypeOf<{
-        data: valueWithCoMarker<InvalidInterface>;
+        data: InvalidInterface;
       }>();
   });
 
@@ -115,13 +114,13 @@ describe("co.json TypeScript validation", () => {
 
     class InvalidFunctionMap extends CoMap {
       // @ts-expect-error Should not be considered valid
-      data = co.json<InvalidType>();
+      data = coField.json<InvalidType>();
     }
 
     expectTypeOf(InvalidFunctionMap.create<InvalidFunctionMap>)
       .parameter(0)
       .toEqualTypeOf<{
-        data: valueWithCoMarker<InvalidType>;
+        data: InvalidType;
       }>();
   });
 
@@ -130,13 +129,13 @@ describe("co.json TypeScript validation", () => {
 
     class InvalidFunctionMap extends CoMap {
       // @ts-expect-error Should not be considered valid
-      data = co.json<InvalidType>();
+      data = coField.json<InvalidType>();
     }
 
     expectTypeOf(InvalidFunctionMap.create<InvalidFunctionMap>)
       .parameter(0)
       .toEqualTypeOf<{
-        data: valueWithCoMarker<InvalidType>;
+        data: InvalidType;
       }>();
   });
 
@@ -145,7 +144,7 @@ describe("co.json TypeScript validation", () => {
 
     class InvalidFunctionMap extends CoMap {
       // @ts-expect-error Should not be considered valid
-      data = co.json<InvalidType>();
+      data = coField.json<InvalidType>();
     }
   });
 
@@ -159,16 +158,16 @@ describe("co.json TypeScript validation", () => {
     };
 
     class MapWithOptionalJSON extends CoMap {
-      data = co.optional.json<ValidType>();
+      data = coField.optional.json<ValidType>();
       // @ts-expect-error Should not be considered valid
-      data2 = co.optional.json<InvalidType>();
+      data2 = coField.optional.json<InvalidType>();
     }
 
     expectTypeOf(MapWithOptionalJSON.create<MapWithOptionalJSON>)
       .parameter(0)
       .toEqualTypeOf<{
-        data?: valueWithCoMarker<ValidType> | null;
-        data2?: valueWithCoMarker<InvalidType> | null;
+        data?: ValidType | null;
+        data2?: InvalidType | null;
       }>();
   });
 
@@ -188,58 +187,58 @@ describe("co.json TypeScript validation", () => {
     }
 
     class MapWithOptionalJSON extends CoMap {
-      data1 = co.optional.json<ValidInterface0>();
-      data2 = co.optional.json<ValidInterface1>();
-      data3 = co.optional.json<InterfaceWithOptionalTypes>();
+      data1 = coField.optional.json<ValidInterface0>();
+      data2 = coField.optional.json<ValidInterface1>();
+      data3 = coField.optional.json<InterfaceWithOptionalTypes>();
     }
 
     expectTypeOf(MapWithOptionalJSON.create<MapWithOptionalJSON>)
       .parameter(0)
       .toEqualTypeOf<{
-        data1?: valueWithCoMarker<ValidInterface0> | null;
-        data2?: valueWithCoMarker<ValidInterface1> | null;
-        data3?: valueWithCoMarker<InterfaceWithOptionalTypes> | null;
+        data1?: ValidInterface0 | null;
+        data2?: ValidInterface1 | null;
+        data3?: InterfaceWithOptionalTypes | null;
       }>();
   });
 
   it("should not accept functions", async () => {
     class InvalidFunctionMap extends CoMap {
       // @ts-expect-error Should not be considered valid
-      data = co.json<() => void>();
+      data = coField.json<() => void>();
     }
   });
 
   it("should not accept functions in nested properties", async () => {
     class InvalidFunctionMap extends CoMap {
       // @ts-expect-error Should not be considered valid
-      data = co.json<{ func: () => void }>();
+      data = coField.json<{ func: () => void }>();
     }
   });
 
   it("should not accept RegExp", async () => {
     class InvalidFunctionMap extends CoMap {
       // @ts-expect-error Should not be considered valid
-      data = co.json<RegExp>();
+      data = coField.json<RegExp>();
     }
 
     expectTypeOf(InvalidFunctionMap.create<InvalidFunctionMap>)
       .parameter(0)
       .toEqualTypeOf<{
-        data: valueWithCoMarker<RegExp>;
+        data: RegExp;
       }>();
   });
 
   it("should accept strings and numbers", async () => {
     class InvalidFunctionMap extends CoMap {
-      str = co.json<string>();
-      num = co.json<number>();
+      str = coField.json<string>();
+      num = coField.json<number>();
     }
 
     expectTypeOf(InvalidFunctionMap.create<InvalidFunctionMap>)
       .parameter(0)
       .toEqualTypeOf<{
-        str: valueWithCoMarker<string>;
-        num: valueWithCoMarker<number>;
+        str: string;
+        num: number;
       }>();
   });
 });

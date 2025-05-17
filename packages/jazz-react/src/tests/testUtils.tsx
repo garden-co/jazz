@@ -4,13 +4,12 @@ import {
   render,
   renderHook,
 } from "@testing-library/react";
-import { AnonymousJazzAgent } from "jazz-tools";
+import { Account, AnonymousJazzAgent } from "jazz-tools";
 import React from "react";
-import { RegisteredAccount } from "../provider.js";
 import { JazzTestProvider } from "../testing.js";
 
 type JazzExtendedOptions = {
-  account: RegisteredAccount | { guest: AnonymousJazzAgent };
+  account: Account | { guest: AnonymousJazzAgent };
 };
 
 const customRender = (

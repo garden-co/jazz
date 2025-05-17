@@ -15,18 +15,18 @@ import {
  * import { SchemaUnion, CoMap } from "jazz-tools";
  *
  * class BaseWidget extends CoMap {
- *   type = co.string;
+ *   type = coField.string;
  * }
  *
  * class ButtonWidget extends BaseWidget {
- *   type = co.literal("button");
- *   label = co.string;
+ *   type = coField.literal("button");
+ *   label = coField.string;
  * }
  *
  * class SliderWidget extends BaseWidget {
- *   type = co.literal("slider");
- *   min = co.number;
- *   max = co.number;
+ *   type = coField.literal("slider");
+ *   min = coField.number;
+ *   max = coField.number;
  * }
  *
  * const WidgetUnion = SchemaUnion.Of<BaseWidget>((raw) => {

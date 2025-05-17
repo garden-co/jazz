@@ -3,21 +3,30 @@ import {
   JazzContextManagerProps,
 } from "jazz-browser";
 import { JazzContext, JazzContextManagerContext } from "jazz-react-core";
-import { Account, JazzContextType } from "jazz-tools";
+import {
+  Account,
+  AccountClass,
+  AnyAccountSchema,
+  CoValueFromRaw,
+  InstanceOfSchema,
+  JazzContextType,
+} from "jazz-tools";
 import React, { useEffect, useRef } from "react";
 
-export interface Register {}
-
-export type RegisteredAccount = Register extends { Account: infer Acc }
-  ? Acc
-  : Account;
-
-export type JazzProviderProps<Acc extends Account = RegisteredAccount> = {
+export type JazzProviderProps<
+  S extends
+    | (AccountClass<Account> & CoValueFromRaw<Account>)
+    | AnyAccountSchema,
+> = {
   children: React.ReactNode;
-} & JazzContextManagerProps<Acc>;
+} & JazzContextManagerProps<S>;
 
 /** @category Context & Hooks */
-export function JazzProvider<Acc extends Account = RegisteredAccount>({
+export function JazzProvider<
+  S extends
+    | (AccountClass<Account> & CoValueFromRaw<Account>)
+    | AnyAccountSchema,
+>({
   children,
   guestMode,
   sync,
@@ -27,9 +36,9 @@ export function JazzProvider<Acc extends Account = RegisteredAccount>({
   onLogOut,
   logOutReplacement,
   onAnonymousAccountDiscarded,
-}: JazzProviderProps<Acc>) {
+}: JazzProviderProps<S>) {
   const [contextManager] = React.useState(
-    () => new JazzBrowserContextManager<Acc>(),
+    () => new JazzBrowserContextManager<S>(),
   );
 
   const onLogOutRefCallback = useRefCallback(onLogOut);
@@ -40,7 +49,9 @@ export function JazzProvider<Acc extends Account = RegisteredAccount>({
   const logoutReplacementActiveRef = useRef(false);
   logoutReplacementActiveRef.current = Boolean(logOutReplacement);
 
-  const value = React.useSyncExternalStore<JazzContextType<Acc> | undefined>(
+  const value = React.useSyncExternalStore<
+    JazzContextType<InstanceOfSchema<S>> | undefined
+  >(
     React.useCallback(
       (callback) => {
         const props = {
@@ -54,7 +65,7 @@ export function JazzProvider<Acc extends Account = RegisteredAccount>({
             ? logOutReplacementRefCallback
             : undefined,
           onAnonymousAccountDiscarded: onAnonymousAccountDiscardedRefCallback,
-        } satisfies JazzContextManagerProps<Acc>;
+        } satisfies JazzContextManagerProps<S>;
 
         if (contextManager.propsChanged(props)) {
           contextManager.createContext(props).catch((error) => {

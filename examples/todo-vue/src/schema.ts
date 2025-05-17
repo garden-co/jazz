@@ -1,26 +1,26 @@
-import { Account, CoList, CoMap, Group, Profile, co } from "jazz-tools";
+import { Account, CoList, CoMap, Group, Profile, coField } from "jazz-tools";
 
 export class ToDoItem extends CoMap {
-  name = co.string;
-  completed = co.boolean;
+  name = coField.string;
+  completed = coField.boolean;
 }
 
-export class ToDoList extends CoList.Of(co.ref(ToDoItem)) {}
+export class ToDoList extends CoList.Of(coField.ref(ToDoItem)) {}
 
 export class Folder extends CoMap {
-  name = co.string;
-  items = co.ref(ToDoList);
+  name = coField.string;
+  items = coField.ref(ToDoList);
 }
 
-export class FolderList extends CoList.Of(co.ref(Folder)) {}
+export class FolderList extends CoList.Of(coField.ref(Folder)) {}
 
 export class ToDoAccountRoot extends CoMap {
-  folders = co.ref(FolderList);
+  folders = coField.ref(FolderList);
 }
 
 export class ToDoAccount extends Account {
-  profile = co.ref(Profile);
-  root = co.ref(ToDoAccountRoot);
+  profile = coField.ref(Profile);
+  root = coField.ref(ToDoAccountRoot);
 
   migrate() {
     if (!this._refs.root) {

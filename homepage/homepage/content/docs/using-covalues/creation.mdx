@@ -10,16 +10,16 @@ CoValues are collaborative by nature - anything you create can be shared and syn
 
 ## Creating CoValues
 
-Every CoValue starts with a [schema](/docs/schemas/covalues#start-your-app-with-a-schema). From there you can create CoValues with the `create` method. Creating CoValues is straightforward - you define the structure in your schema and then instantiate instances with initial values. These newly created CoValues automatically sync across devices and users who have access to them. 
+Every CoValue starts with a [schema](/docs/schemas/covalues#start-your-app-with-a-schema). From there you can create CoValues with the `create` method. Creating CoValues is straightforward - you define the structure in your schema and then instantiate instances with initial values. These newly created CoValues automatically sync across devices and users who have access to them.
 
 Here's a simple example:
 
 <CodeGroup>
 ```ts
 class Task extends CoMap {
-  title = co.string;
-  description = co.string;
-  status = co.literal("todo", "in-progress", "completed");
+  title = coField.string;
+  description = coField.string;
+  status = coField.literal("todo", "in-progress", "completed");
 }
 
 // Create a new task
@@ -39,12 +39,12 @@ For more examples of creating different types of CoValues:
 ```ts
 // Creating a CoFeed for activity notifications
 class ActivityNotification extends CoMap {
-  message = co.string;
-  type = co.literal("info", "warning", "success");
-  timestamp = co.Date;
+  message = coField.string;
+  type = coField.literal("info", "warning", "success");
+  timestamp = coField.Date;
 }
 
-class ActivityFeed extends CoFeed.Of(co.ref(ActivityNotification)) {}
+class ActivityFeed extends CoFeed.Of(coField.ref(ActivityNotification)) {}
 
 const feed = ActivityFeed.create();
 

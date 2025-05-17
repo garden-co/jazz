@@ -1,7 +1,7 @@
 import { WasmCrypto } from "cojson/crypto/WasmCrypto";
 import { assert, beforeEach, describe, expect, test } from "vitest";
-import { Account, CoMap, Group, Profile, co } from "../exports.js";
-import { Ref } from "../internal.js";
+import { Account, CoMap, Group, Profile, coField, z } from "../exports.js";
+import { Loaded, Ref, co, zodSchemaToCoSchema } from "../internal.js";
 import { createJazzTestAccount, setupJazzTestSync } from "../testing.js";
 import { setupTwoNodes, waitFor } from "./utils.js";
 
@@ -17,31 +17,37 @@ beforeEach(async () => {
 
 describe("Custom accounts and groups", async () => {
   test("Custom account and group", async () => {
-    class CustomProfile extends Profile {
-      name = co.string;
-      color = co.string;
-    }
+    const CustomProfile = co.map({
+      name: z.string(),
+      color: z.string(),
+    });
 
-    class CustomAccount extends Account {
-      profile = co.ref(CustomProfile);
-      root = co.ref(CoMap);
-
-      migrate(this: CustomAccount, creationProps?: { name: string }) {
-        if (creationProps) {
-          const profileGroup = Group.create({ owner: this });
-          profileGroup.addMember("everyone", "reader");
-          this.profile = CustomProfile.create(
-            { name: creationProps.name, color: "blue" },
-            profileGroup,
-          );
-        }
-      }
-    }
+    const CustomAccount = co
+      .account({
+        profile: CustomProfile,
+        root: co.map({}),
+      })
+      .withMigration(
+        (
+          account: Loaded<typeof CustomAccount>,
+          creationProps?: { name: string },
+        ) => {
+          if (creationProps) {
+            console.log("In migration!");
+            const profileGroup = Group.create({ owner: account });
+            profileGroup.addMember("everyone", "reader");
+            account.profile = CustomProfile.create(
+              { name: creationProps.name, color: "blue" },
+              profileGroup,
+            );
+          }
+        },
+      );
 
     const me = await createJazzTestAccount({
       creationProps: { name: "Hermes Puggington" },
       isCurrentActiveAccount: true,
-      AccountSchema: CustomAccount,
+      AccountSchema: zodSchemaToCoSchema(CustomAccount),
     });
 
     expect(me.profile).toBeDefined();
@@ -53,25 +59,31 @@ describe("Custom accounts and groups", async () => {
 
     expect(group.members).toMatchObject([{ id: me.id, role: "admin" }]);
 
-    const meAsMember = group.members.find((member) => member.id === me.id);
-    expect((meAsMember?.account as CustomAccount).profile?.name).toBe(
-      "Hermes Puggington",
-    );
-    expect((meAsMember?.account as CustomAccount).profile?.color).toBe("blue");
+    const meAsMember = group
+      .members(CustomAccount)
+      .find((member) => member.id === me.id);
+    assert(meAsMember?.account);
+    expect((meAsMember?.account).profile?.name).toBe("Hermes Puggington");
+    expect((meAsMember?.account).profile?.color).toBe("blue");
   });
 
   test("Should throw when creating a profile with an account as owner", async () => {
-    class CustomAccount extends Account {
-      migrate(this: CustomAccount, creationProps?: { name: string }) {
-        if (creationProps) {
-          this.profile = Profile.create(
-            { name: creationProps.name },
-            // @ts-expect-error - only groups can own profiles, but we want to also perform a runtime check
-            this,
-          );
-        }
-      }
-    }
+    const CustomAccount = co
+      .account()
+      .withMigration(
+        (
+          account: Loaded<typeof CustomAccount>,
+          creationProps?: { name: string },
+        ) => {
+          if (creationProps) {
+            account.profile = Profile.create(
+              { name: creationProps.name },
+              // @ts-expect-error - only groups can own profiles, but we want to also perform a runtime check
+              account,
+            );
+          }
+        },
+      );
 
     await expect(() =>
       CustomAccount.create({
@@ -83,12 +95,12 @@ describe("Custom accounts and groups", async () => {
 });
 
 describe("Group inheritance", () => {
-  class TestMap extends CoMap {
-    title = co.string;
-  }
+  const TestMap = co.map({
+    title: z.string(),
+  });
 
   test("Group inheritance", async () => {
-    const me = await Account.create({
+    const me = await co.account().create({
       creationProps: { name: "Hermes Puggington" },
       crypto: Crypto,
     });
@@ -98,7 +110,7 @@ describe("Group inheritance", () => {
 
     group.extend(parentGroup);
 
-    const reader = await Account.createAs(me, {
+    const reader = await co.account().createAs(me, {
       creationProps: { name: "Reader" },
     });
 
@@ -122,7 +134,7 @@ describe("Group inheritance", () => {
   });
 
   test("Group inheritance with grand-children", async () => {
-    const me = await Account.create({
+    const me = await co.account().create({
       creationProps: { name: "Hermes Puggington" },
       crypto: Crypto,
     });
@@ -134,7 +146,7 @@ describe("Group inheritance", () => {
     group.extend(parentGroup);
     parentGroup.extend(grandParentGroup);
 
-    const reader = await Account.createAs(me, {
+    const reader = await co.account().createAs(me, {
       creationProps: { name: "Reader" },
     });
 
@@ -163,7 +175,7 @@ describe("Group inheritance", () => {
   });
 
   test("Group.getParentGroups should return the parent groups", async () => {
-    const me = await Account.create({
+    const me = await co.account().create({
       creationProps: { name: "Test Owner" },
       crypto: Crypto,
     });
@@ -188,7 +200,7 @@ describe("Group inheritance", () => {
   });
 
   test("Account.getParentGroups should return an empty array", async () => {
-    const account = await Account.create({
+    const account = await co.account().create({
       creationProps: { name: "Test Account" },
       crypto: Crypto,
     });
@@ -313,7 +325,7 @@ describe("Group.getRoleOf with 'me' parameter", () => {
     await account.waitForAllCoValuesSync();
     const group = Group.create({ owner: account });
 
-    group.addMember(Account.getMe(), "writer");
+    group.addMember(co.account().getMe(), "writer");
 
     expect(group.getRoleOf("me")).toBe("writer");
   });
@@ -323,7 +335,7 @@ describe("Group.getRoleOf with 'me' parameter", () => {
     await account.waitForAllCoValuesSync();
     const group = Group.create({ owner: account });
 
-    group.addMember(Account.getMe(), "reader");
+    group.addMember(co.account().getMe(), "reader");
 
     expect(group.getRoleOf("me")).toBe("reader");
   });
@@ -343,7 +355,7 @@ describe("Account permissions", () => {
   });
 
   test("getRoleOf returns admin only for self and me", async () => {
-    const account = await Account.create({
+    const account = await co.account().create({
       creationProps: { name: "Test Account" },
       crypto: Crypto,
     });
@@ -353,10 +365,10 @@ describe("Account permissions", () => {
 
     // The GlobalMe is not this account
     expect(account.getRoleOf("me")).toBe(undefined);
-    expect(Account.getMe().getRoleOf("me")).toBe("admin");
+    expect(co.account().getMe().getRoleOf("me")).toBe("admin");
 
     // Other accounts should have no role
-    const otherAccount = await Account.create({
+    const otherAccount = await co.account().create({
       creationProps: { name: "Other Account" },
       crypto: Crypto,
     });
@@ -367,7 +379,7 @@ describe("Account permissions", () => {
   });
 
   test("members array only contains self as admin", async () => {
-    const account = await Account.create({
+    const account = await co.account().create({
       creationProps: { name: "Test Account" },
       crypto: Crypto,
     });
@@ -381,7 +393,7 @@ describe("Account permissions", () => {
 describe("Account permissions", () => {
   test("canRead permissions for different roles", async () => {
     // Create test accounts
-    const admin = await Account.create({
+    const admin = await co.account().create({
       creationProps: { name: "Admin" },
       crypto: Crypto,
     });
@@ -389,13 +401,13 @@ describe("Account permissions", () => {
     const group = Group.create({ owner: admin });
     const testObject = CoMap.create({}, { owner: group });
 
-    const writer = await Account.createAs(admin, {
+    const writer = await co.account().createAs(admin, {
       creationProps: { name: "Writer" },
     });
-    const reader = await Account.createAs(admin, {
+    const reader = await co.account().createAs(admin, {
       creationProps: { name: "Reader" },
     });
-    const writeOnly = await Account.createAs(admin, {
+    const writeOnly = await co.account().createAs(admin, {
       creationProps: { name: "WriteOnly" },
     });
 
@@ -413,7 +425,7 @@ describe("Account permissions", () => {
 
   test("canWrite permissions for different roles", async () => {
     // Create test accounts
-    const admin = await Account.create({
+    const admin = await co.account().create({
       creationProps: { name: "Admin" },
       crypto: Crypto,
     });
@@ -421,13 +433,13 @@ describe("Account permissions", () => {
     const group = Group.create({ owner: admin });
     const testObject = CoMap.create({}, { owner: group });
 
-    const writer = await Account.createAs(admin, {
+    const writer = await co.account().createAs(admin, {
       creationProps: { name: "Writer" },
     });
-    const reader = await Account.createAs(admin, {
+    const reader = await co.account().createAs(admin, {
       creationProps: { name: "Reader" },
     });
-    const writeOnly = await Account.createAs(admin, {
+    const writeOnly = await co.account().createAs(admin, {
       creationProps: { name: "WriteOnly" },
     });
 
@@ -445,7 +457,7 @@ describe("Account permissions", () => {
 
   test("canAdmin permissions for different roles", async () => {
     // Create test accounts
-    const admin = await Account.create({
+    const admin = await co.account().create({
       creationProps: { name: "Admin" },
       crypto: Crypto,
     });
@@ -453,13 +465,13 @@ describe("Account permissions", () => {
     const group = Group.create({ owner: admin });
     const testObject = CoMap.create({}, { owner: group });
 
-    const writer = await Account.createAs(admin, {
+    const writer = await co.account().createAs(admin, {
       creationProps: { name: "Writer" },
     });
-    const reader = await Account.createAs(admin, {
+    const reader = await co.account().createAs(admin, {
       creationProps: { name: "Reader" },
     });
-    const writeOnly = await Account.createAs(admin, {
+    const writeOnly = await co.account().createAs(admin, {
       creationProps: { name: "WriteOnly" },
     });
 
@@ -476,7 +488,7 @@ describe("Account permissions", () => {
   });
 
   test("permissions for non-members", async () => {
-    const admin = await Account.create({
+    const admin = await co.account().create({
       creationProps: { name: "Admin" },
       crypto: Crypto,
     });
@@ -484,7 +496,7 @@ describe("Account permissions", () => {
     const group = Group.create({ owner: admin });
     const testObject = CoMap.create({}, { owner: group });
 
-    const nonMember = await Account.createAs(admin, {
+    const nonMember = await co.account().createAs(admin, {
       creationProps: { name: "NonMember" },
     });
 
@@ -508,7 +520,7 @@ describe("Group.members", () => {
     expect(childGroup.members).toEqual([
       expect.objectContaining({
         account: expect.objectContaining({
-          id: Account.getMe().id,
+          id: co.account().getMe().id,
         }),
         role: "admin",
       }),
@@ -536,7 +548,7 @@ describe("Group.members", () => {
     expect(childGroup.members).toEqual([
       expect.objectContaining({
         account: expect.objectContaining({
-          id: Account.getMe().id,
+          id: co.account().getMe().id,
         }),
         role: "admin",
       }),
@@ -558,7 +570,7 @@ describe("Group.members", () => {
     expect(childGroup.members).toEqual([
       expect.objectContaining({
         account: expect.objectContaining({
-          id: Account.getMe().id,
+          id: co.account().getMe().id,
         }),
         role: "admin",
       }),
@@ -579,7 +591,7 @@ describe("Group.members", () => {
     expect(childGroup.members).toEqual([
       expect.objectContaining({
         account: expect.objectContaining({
-          id: Account.getMe().id,
+          id: co.account().getMe().id,
         }),
         role: "admin",
       }),

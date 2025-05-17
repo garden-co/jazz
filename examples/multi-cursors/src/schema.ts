@@ -1,24 +1,24 @@
-import { Account, CoFeed, CoMap, Group, Profile, co } from "jazz-tools";
+import { Account, CoFeed, CoMap, Group, Profile, coField } from "jazz-tools";
 import type { Camera, Cursor } from "./types";
 
-export class CursorFeed extends CoFeed.Of(co.json<Cursor>()) {}
+export class CursorFeed extends CoFeed.Of(coField.json<Cursor>()) {}
 
 export class CursorProfile extends Profile {
-  name = co.string;
+  name = coField.string;
 }
 
 export class CursorRoot extends CoMap {
-  camera = co.json<Camera>();
-  cursors = co.ref(CursorFeed);
+  camera = coField.json<Camera>();
+  cursors = coField.ref(CursorFeed);
 }
 
 export class CursorContainer extends CoMap {
-  cursorFeed = co.ref(CursorFeed);
+  cursorFeed = coField.ref(CursorFeed);
 }
 
 export class CursorAccount extends Account {
-  profile = co.ref(CursorProfile);
-  root = co.ref(CursorRoot);
+  profile = coField.ref(CursorProfile);
+  root = coField.ref(CursorRoot);
 
   /** The account migration is run on account creation and on every log-in.
    *  You can use it to set up the account root and any other initial CoValues you need.

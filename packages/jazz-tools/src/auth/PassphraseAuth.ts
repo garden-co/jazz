@@ -1,8 +1,8 @@
 import * as bip39 from "@scure/bip39";
 import { entropyToMnemonic } from "@scure/bip39";
 import { CryptoProvider, cojsonInternals } from "cojson";
-import { Account } from "../coValues/account.js";
 import type { ID } from "../internal.js";
+import { Account } from "../internal.js";
 import type {
   AuthenticateAccountFunction,
   RegisterAccountFunction,

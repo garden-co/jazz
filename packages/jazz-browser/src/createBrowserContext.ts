@@ -4,11 +4,13 @@ import { WebSocketPeerWithReconnection } from "cojson-transport-ws";
 import { WasmCrypto } from "cojson/crypto/WasmCrypto";
 import {
   Account,
+  AccountClass,
   AgentID,
+  AnyAccountSchema,
   AuthCredentials,
   AuthSecretStorage,
   CoValue,
-  CoValueClass,
+  CoValueFromRaw,
   CryptoProvider,
   ID,
   InviteSecret,
@@ -134,18 +136,22 @@ export async function createJazzBrowserGuestContext(
   };
 }
 
-export type BrowserContextOptions<Acc extends Account> = {
+export type BrowserContextOptions<
+  S extends
+    | (AccountClass<Account> & CoValueFromRaw<Account>)
+    | AnyAccountSchema,
+> = {
   credentials?: AuthCredentials;
-  AccountSchema?: CoValueClass<Acc> & {
-    fromNode: (typeof Account)["fromNode"];
-  };
+  AccountSchema?: S;
   newAccountProps?: NewAccountProps;
   defaultProfileName?: string;
 } & BaseBrowserContextOptions;
 
-export async function createJazzBrowserContext<Acc extends Account>(
-  options: BrowserContextOptions<Acc>,
-) {
+export async function createJazzBrowserContext<
+  S extends
+    | (AccountClass<Account> & CoValueFromRaw<Account>)
+    | AnyAccountSchema,
+>(options: BrowserContextOptions<S>) {
   const { toggleNetwork, peersToLoadFrom, setNode, crypto } =
     await setupPeers(options);
 

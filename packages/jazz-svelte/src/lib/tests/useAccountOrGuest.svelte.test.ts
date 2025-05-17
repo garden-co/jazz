@@ -1,5 +1,5 @@
 import { render } from "@testing-library/svelte";
-import { Account, AnonymousJazzAgent, CoMap, co, type RefsToResolve } from "jazz-tools";
+import { Account, AnonymousJazzAgent, CoMap, coField, type RefsToResolve } from "jazz-tools";
 import { describe, expect, it } from "vitest";
 import { useAccountOrGuest, type RegisteredAccount } from "../index.js";
 import { createJazzTestAccount, createJazzTestContext, createJazzTestGuest } from "../testing.js";
@@ -31,11 +31,11 @@ declare module "../jazz.svelte.js" {
 }
 
 class AccountRoot extends CoMap {
-  value = co.string;
+  value = coField.string;
 }
 
 class AccountSchema extends Account {
-  root = co.ref(AccountRoot);
+  root = coField.ref(AccountRoot);
 
   migrate() {
     if (!this._refs.root) {

@@ -33,9 +33,9 @@ console.log(note.toString());  // "Meeting notes for Tuesday"
 
 For a full example of CoTexts in action, see [our Richtext example app](https://github.com/garden-co/jazz/tree/main/examples/richtext), which shows plain text and rich text editing.
 
-## CoPlainText vs co.string
+## CoPlainText vs coField.string
 
-While `co.string` is perfect for simple text fields, `CoPlainText` is the right choice when you need:
+While `coField.string` is perfect for simple text fields, `CoPlainText` is the right choice when you need:
 
 - Multiple users editing the same text simultaneously
 - Fine-grained control over text edits (inserting, deleting at specific positions)
@@ -50,13 +50,13 @@ CoText values are typically used as fields in your schemas:
 
 <CodeGroup>
 ```ts twoslash
-import { CoMap, CoPlainText, CoRichText, co } from "jazz-tools";
+import { CoMap, CoPlainText, CoRichText, coField } from "jazz-tools";
 
 // ---cut---
 class Profile extends CoMap {
-  name = co.string;
-  bio = co.ref(CoPlainText);         // Plain text field
-  description = co.ref(CoRichText);  // Rich text with formatting
+  name = coField.string;
+  bio = coField.ref(CoPlainText);         // Plain text field
+  description = coField.ref(CoRichText);  // Rich text with formatting
 }
 ```
 </CodeGroup>
@@ -205,7 +205,7 @@ const me = await createJazzTestAccount();
 // ---cut---
 function TextEditor() {
   const [note, setNote] = useState(CoPlainText.create("", { owner: me }));
-  
+
   return (
     <textarea
       value={note.toString()}
@@ -273,7 +273,7 @@ function updateText(e) {
 </script>
 
 <template>
-  <textarea 
+  <textarea
     :value="textContent"
     @input="updateText"
   />
@@ -337,11 +337,11 @@ For use with React:
 <CodeGroup>
 ```tsx twoslash
 class JazzProfile extends Profile {
-  bio = co.ref(CoRichText);
+  bio = coField.ref(CoRichText);
 }
 
 class JazzAccount extends Account {
-  profile = co.ref(JazzProfile);
+  profile = coField.ref(JazzProfile);
 }
 
 declare module "jazz-react" {
@@ -351,7 +351,7 @@ declare module "jazz-react" {
 }
 
 import { useAccount, useCoState } from "jazz-react";
-import { CoRichText, Account, Profile, co } from "jazz-tools";
+import { CoRichText, Account, Profile, coField } from "jazz-tools";
 import React, { useEffect, useRef } from "react";
 // ---cut---
 // RichTextEditor.tsx
@@ -429,7 +429,7 @@ function setupRichTextEditor(coRichText, container) {
   // Create the Jazz plugin for ProseMirror
   // Providing a CoRichText instance to the plugin to automatically sync changes
   const jazzPlugin = createJazzPlugin(coRichText); // [!code ++]
-  
+
   // Set up ProseMirror with Jazz plugin
   const view = new EditorView(container, {
     state: EditorState.create({
@@ -440,7 +440,7 @@ function setupRichTextEditor(coRichText, container) {
       ],
     }),
   });
-  
+
   // Return cleanup function
   return () => {
     view.destroy();

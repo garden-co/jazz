@@ -25,11 +25,11 @@ We're introducing a new resolve API for deep loading, more friendly to TypeScrip
 <CodeGroup>
 ```tsx twoslash
 // @noErrors: 2451
-import { CoMap, CoList, co, Account } from "jazz-tools";
+import { CoMap, CoList, coField, Account } from "jazz-tools";
 import { useAccount } from "jazz-react";
-class AccountRoot extends CoMap { friends = co.ref(ListOfAccounts); }
-class ListOfAccounts extends CoList.Of(co.ref(Account)) {}
-class MyAppAccount extends Account { root = co.ref(AccountRoot);}
+class AccountRoot extends CoMap { friends = coField.ref(ListOfAccounts); }
+class ListOfAccounts extends CoList.Of(coField.ref(Account)) {}
+class MyAppAccount extends Account { root = coField.ref(AccountRoot);}
 declare module "jazz-react" { interface Register { Account: MyAppAccount; } }
 // ---cut-before---
 // Before
@@ -50,12 +50,12 @@ For a `CoList`:
 <CodeGroup>
 ```tsx twoslash
 // @noErrors: 2451
-import { CoList, co, ID, CoMap } from "jazz-tools";
+import { CoList, coField, ID, CoMap } from "jazz-tools";
 import { useCoState } from "jazz-react";
 
 // ---cut-before---
 class Task extends CoMap { }
-class ListOfTasks extends CoList.Of(co.ref(Task)) {}
+class ListOfTasks extends CoList.Of(coField.ref(Task)) {}
 
 const id = "co_123" as ID<Task>;
 
@@ -73,13 +73,13 @@ For a `CoMap.Record`:
 <CodeGroup>
 ```tsx twoslash
 // @noErrors: 2451
-import { CoMap, co, Account, ID } from "jazz-tools";
+import { CoMap, coField, Account, ID } from "jazz-tools";
 import { useCoState } from "jazz-react";
 class MyAppAccount extends Account {}
 const id = "co_123" as ID<UsersByUsername>;
 
 // ---cut-before---
-class UsersByUsername extends CoMap.Record(co.ref(MyAppAccount)) {}
+class UsersByUsername extends CoMap.Record(coField.ref(MyAppAccount)) {}
 
 // Before
 // @ts-expect-error
@@ -97,27 +97,27 @@ Nested loading &mdash; note how it's now less terse, but more readable:
 <CodeGroup>
 ```tsx twoslash
 // @noErrors: 2451
-import { CoList, CoMap, co, Account, ID } from "jazz-tools";
+import { CoList, CoMap, coField, Account, ID } from "jazz-tools";
 import { useCoState } from "jazz-react";
 
 const id = "co_123" as ID<ListOfTasks>;
 
 // ---cut-before---
 class Org extends CoMap {
-  name = co.string;
+  name = coField.string;
 }
 
 class Assignee extends CoMap {
-  name = co.string;
-  org = co.ref(Org);
+  name = coField.string;
+  org = coField.ref(Org);
 }
-class ListOfAssignees extends CoList.Of(co.ref(Assignee)) {}
+class ListOfAssignees extends CoList.Of(coField.ref(Assignee)) {}
 
 class Task extends CoMap {
-  content = co.string;
-  assignees = co.ref(ListOfAssignees);
+  content = coField.string;
+  assignees = coField.ref(ListOfAssignees);
 }
-class ListOfTasks extends CoList.Of(co.ref(Task)) {}
+class ListOfTasks extends CoList.Of(coField.ref(Task)) {}
 
 // Before
 // @ts-expect-error
@@ -143,14 +143,14 @@ It's also a lot more auto-complete friendly:
 <CodeGroup>
 ```tsx twoslash
 // @noErrors: 2451 2353 2581
-import { CoList, CoMap, co, ID } from "jazz-tools";
+import { CoList, CoMap, coField, ID } from "jazz-tools";
 import { useCoState } from "jazz-react";
 
-class Org extends CoMap { name = co.string; }
-class Assignee extends CoMap { org = co.ref(Org); }
-class ListOfAssignees extends CoList.Of(co.ref(Assignee)) {}
-class Task extends CoMap { assignees = co.ref(ListOfAssignees);  }
-class ListOfTasks extends CoList.Of(co.ref(Task)) {}
+class Org extends CoMap { name = coField.string; }
+class Assignee extends CoMap { org = coField.ref(Org); }
+class ListOfAssignees extends CoList.Of(coField.ref(Assignee)) {}
+class Task extends CoMap { assignees = coField.ref(ListOfAssignees);  }
+class ListOfTasks extends CoList.Of(coField.ref(Task)) {}
 const id = "co_123" as ID<ListOfTasks>;
 
 // ---cut-before---
@@ -175,11 +175,11 @@ other options with default values are easier to manage, for example: loading a v
 <CodeGroup>
 ```ts twoslash
 // @noErrors: 2451
-import { co, Account, CoMap, CoList, ID } from "jazz-tools";
+import { coField, Account, CoMap, CoList, ID } from "jazz-tools";
 
 class Track extends CoMap {}
-class ListOfTracks extends CoList.Of(co.ref(Track)) {}
-class Playlist extends CoMap { tracks = co.ref(ListOfTracks); }
+class ListOfTracks extends CoList.Of(coField.ref(Track)) {}
+class Playlist extends CoMap { tracks = coField.ref(ListOfTracks); }
 const id = "co_123" as ID<Playlist>;
 const otherAccount = {} as Account;
 
@@ -215,13 +215,13 @@ We also have implemented a more granular permission checking, where if an *optio
 ```tsx twoslash
 // @noErrors: 2451
 import React from "react";
-import { CoList, CoMap, co, ID } from "jazz-tools";
+import { CoList, CoMap, coField, ID } from "jazz-tools";
 import { useCoState } from "jazz-react";
 class Track extends CoMap {}
 function TrackComponent({ track }: { track: Track }) {return ""}
 
 // ---cut-before---
-class ListOfTracks extends CoList.Of(co.optional.ref(Track)) {}
+class ListOfTracks extends CoList.Of(coField.optional.ref(Track)) {}
 
 function TrackListComponent({ id }: { id: ID<ListOfTracks> }) {
   // Before (ambiguous states)
@@ -246,7 +246,7 @@ The same change is applied to the load function, so now it returns `null` instea
 <CodeGroup>
 ```tsx twoslash
 // @noErrors: 2451
-import { CoMap, co, ID } from "jazz-tools";
+import { CoMap, coField, ID } from "jazz-tools";
 import { useAccount } from "jazz-react";
 
 class MyCoMap extends CoMap {}
@@ -278,10 +278,10 @@ The new `Resolved` type can be used to define what kind of deeply loaded data yo
 ```tsx twoslash
 // @noErrors: 2451
 import React from "react";
-import { Resolved, CoMap, CoList, co } from "jazz-tools";
+import { Resolved, CoMap, CoList, coField } from "jazz-tools";
 class Track extends CoMap {}
-class ListOfTracks extends CoList.Of(co.ref(Track)) {}
-class Playlist extends CoMap { tracks = co.ref(ListOfTracks); }
+class ListOfTracks extends CoList.Of(coField.ref(Track)) {}
+class Playlist extends CoMap { tracks = coField.ref(ListOfTracks); }
 function TrackComponent({ track }: { track: Track }) {return ""}
 
 // ---cut-before---

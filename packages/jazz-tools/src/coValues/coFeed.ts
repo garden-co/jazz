@@ -12,10 +12,12 @@ import type {
 import { MAX_RECOMMENDED_TX_SIZE, cojsonInternals } from "cojson";
 import type {
   AnonymousJazzAgent,
+  AnyAccountSchema,
   CoValue,
   CoValueClass,
+  Group,
   ID,
-  IfCo,
+  InstanceOfSchema,
   RefsToResolve,
   RefsToResolveStrict,
   Resolved,
@@ -23,15 +25,17 @@ import type {
   SchemaFor,
   SubscribeListenerOptions,
   SubscribeRestArgs,
-  UnCo,
 } from "../internal.js";
 import {
+  Account,
   CoValueBase,
   ItemsSym,
   Ref,
+  RegisteredSchemas,
   SchemaInit,
   accessChildById,
-  co,
+  anySchemaToCoSchema,
+  coField,
   ensureCoValueLoaded,
   inspect,
   isRefEncoded,
@@ -41,10 +45,6 @@ import {
   subscribeToCoValueWithoutMe,
   subscribeToExistingCoValue,
 } from "../internal.js";
-import { RegisteredAccount } from "../types.js";
-import { type Account } from "./account.js";
-import { type Group } from "./group.js";
-import { RegisteredSchemas } from "./registeredSchemas.js";
 
 /** @deprecated Use CoFeedEntry instead */
 export type CoStreamEntry<Item> = CoFeedEntry<Item>;
@@ -59,7 +59,9 @@ export type SingleCoStreamEntry<Item> = SingleCoFeedEntry<Item>;
 export type SingleCoFeedEntry<Item> = {
   value: NonNullable<Item> extends CoValue ? NonNullable<Item> | null : Item;
   ref: NonNullable<Item> extends CoValue ? Ref<NonNullable<Item>> : never;
-  by?: RegisteredAccount | null;
+  by<A extends typeof Account | AnyAccountSchema>(
+    AccountSchema?: A,
+  ): InstanceOfSchema<A> | null;
   madeAt: Date;
   tx: CojsonInternalTypes.TransactionID;
 };
@@ -85,19 +87,19 @@ export { CoFeed as CoStream };
  */
 export class CoFeed<Item = any> extends CoValueBase implements CoValue {
   /**
-   * Declare a `CoFeed` by subclassing `CoFeed.Of(...)` and passing the item schema using a `co` primitive or a `co.ref`.
+   * Declare a `CoFeed` by subclassing `CoFeed.Of(...)` and passing the item schema using a `co` primitive or a `coField.ref`.
    *
    * @example
    * ```ts
-   * class ColorFeed extends CoFeed.Of(co.string) {}
-   * class AnimalFeed extends CoFeed.Of(co.ref(Animal)) {}
+   * class ColorFeed extends CoFeed.Of(coField.string) {}
+   * class AnimalFeed extends CoFeed.Of(coField.ref(Animal)) {}
    * ```
    *
    * @category Declaration
    */
-  static Of<Item>(item: IfCo<Item, Item>): typeof CoFeed<Item> {
+  static Of<Item>(item: Item): typeof CoFeed<Item> {
     return class CoFeedOf extends CoFeed<Item> {
-      [co.items] = item;
+      [coField.items] = item;
     };
   }
 
@@ -147,7 +149,7 @@ export class CoFeed<Item = any> extends CoValueBase implements CoValue {
    *
    * @category Content
    */
-  [key: ID<Account>]: CoFeedEntry<Item>;
+  [key: ID<Account>]: CoFeedEntry<Item> | any;
 
   /**
    * The current account's view of this `CoFeed`
@@ -210,7 +212,7 @@ export class CoFeed<Item = any> extends CoValueBase implements CoValue {
    */
   static create<S extends CoFeed>(
     this: CoValueClass<S>,
-    init: S extends CoFeed<infer Item> ? UnCo<Item>[] : never,
+    init: S extends CoFeed<infer Item> ? Item[] : never,
     options?: { owner: Account | Group } | Account | Group,
   ) {
     const { owner } = parseCoValueCreateOptions(options);
@@ -467,11 +469,13 @@ function entryFromRawEntry<Item>(
         return undefined as never;
       }
     },
-    get by() {
+    by<A extends typeof Account | AnyAccountSchema>(
+      AccountSchema: A = Account as unknown as A,
+    ): InstanceOfSchema<A> | null {
       return (
         accountID &&
         accessChildById(accessFrom, accountID, {
-          ref: RegisteredSchemas["Account"],
+          ref: anySchemaToCoSchema(AccountSchema),
           optional: false,
         })
       );
@@ -652,10 +656,10 @@ export { FileStream as BinaryCoStream };
  * `FileStream` can be referenced in schemas.
  *
  * ```ts
- * import { co, FileStream } from "jazz-tools";
+ * import { coField, FileStream } from "jazz-tools";
  *
  * class MyCoMap extends CoMap {
- *   file = co.ref(FileStream);
+ *   file = coField.ref(FileStream);
  * }
  * ```
  *
@@ -817,7 +821,7 @@ export class FileStream extends CoValueBase implements CoValue {
    *
    * @example
    * ```ts
-   * import { co, FileStream } from "jazz-tools";
+   * import { coField, FileStream } from "jazz-tools";
    *
    * const fileStream = await FileStream.createFromBlob(file, {owner: group})
    * ```

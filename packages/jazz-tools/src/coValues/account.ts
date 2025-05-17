@@ -14,24 +14,35 @@ import {
   SessionID,
   cojsonInternals,
 } from "cojson";
-import { activeAccountContext } from "../implementation/activeAccountContext.js";
 import {
   AnonymousJazzAgent,
+  AnyAccountSchema,
+  type CoMap,
   type CoValue,
   CoValueBase,
   CoValueClass,
+  CoValueOrZodSchema,
+  type Group,
   ID,
+  InstanceOfSchema,
+  InstanceOrPrimitiveOfSchema,
+  Profile,
   Ref,
   type RefEncoded,
   RefIfCoValue,
   RefsToResolve,
   RefsToResolveStrict,
+  RegisteredSchemas,
   Resolved,
   type Schema,
   SchemaInit,
   SubscribeListenerOptions,
   SubscribeRestArgs,
   accessChildByKey,
+  activeAccountContext,
+  anySchemaToCoSchema,
+  coValuesCache,
+  createInboxRoot,
   ensureCoValueLoaded,
   inspect,
   loadCoValue,
@@ -40,18 +51,20 @@ import {
   subscribeToCoValueWithoutMe,
   subscribeToExistingCoValue,
 } from "../internal.js";
-import { coValuesCache } from "../lib/cache.js";
-import { RegisteredAccount } from "../types.js";
-import { type CoMap } from "./coMap.js";
-import { type Group } from "./group.js";
-import { createInboxRoot } from "./inbox.js";
-import { Profile } from "./profile.js";
-import { RegisteredSchemas } from "./registeredSchemas.js";
 
 export type AccountCreationProps = {
   name: string;
   onboarding?: boolean;
 };
+
+type AccountMembers<A extends Account> = [
+  {
+    id: string | "everyone";
+    role: Role;
+    ref: Ref<A>;
+    account: A;
+  },
+];
 
 /** @category Identity & Permissions */
 export class Account extends CoValueBase implements CoValue {
@@ -122,26 +135,28 @@ export class Account extends CoValueBase implements CoValue {
       | undefined;
 
     return {
-      profile:
-        profileID &&
-        (new Ref(
-          profileID,
-          this._loadedAs,
-          this._schema.profile as RefEncoded<
-            NonNullable<this["profile"]> & CoValue
-          >,
-          this,
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        ) as any as RefIfCoValue<this["profile"]>),
-      root:
-        rootID &&
-        (new Ref(
-          rootID,
-          this._loadedAs,
-          this._schema.root as RefEncoded<NonNullable<this["root"]> & CoValue>,
-          this,
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        ) as any as RefIfCoValue<this["root"]>),
+      profile: profileID
+        ? (new Ref(
+            profileID,
+            this._loadedAs,
+            this._schema.profile as RefEncoded<
+              NonNullable<this["profile"]> & CoValue
+            >,
+            this,
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          ) as any as RefIfCoValue<this["profile"]>)
+        : undefined,
+      root: rootID
+        ? (new Ref(
+            rootID,
+            this._loadedAs,
+            this._schema.root as RefEncoded<
+              NonNullable<this["root"]> & CoValue
+            >,
+            this,
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          ) as any as RefIfCoValue<this["root"]>)
+        : undefined,
     };
   }
 
@@ -204,17 +219,12 @@ export class Account extends CoValueBase implements CoValue {
     return [];
   }
 
-  get members(): Array<{
-    id: ID<RegisteredAccount> | "everyone";
-    role: Role;
-    ref: Ref<RegisteredAccount> | undefined;
-    account: RegisteredAccount | null | undefined;
-  }> {
-    const ref = new Ref<RegisteredAccount>(
+  members(): AccountMembers<this> {
+    const ref = new Ref<typeof this>(
       this.id,
       this._loadedAs,
       {
-        ref: () => this.constructor as typeof Account,
+        ref: () => this.constructor as AccountClass<typeof this>,
         optional: false,
       },
       this,
@@ -244,11 +254,11 @@ export class Account extends CoValueBase implements CoValue {
     return value._owner.getRoleOf(this.id) === "admin";
   }
 
-  async acceptInvite<V extends CoValue>(
-    valueID: ID<V>,
+  async acceptInvite<S extends CoValueOrZodSchema>(
+    valueID: string,
     inviteSecret: InviteSecret,
-    coValueClass: CoValueClass<V>,
-  ): Promise<Resolved<V, true> | null> {
+    coValueClass: S,
+  ): Promise<Resolved<InstanceOrPrimitiveOfSchema<S>, true> | null> {
     if (!this.isLocalNodeOwner) {
       throw new Error("Only a controlled account can accept invites");
     }
@@ -258,9 +268,9 @@ export class Account extends CoValueBase implements CoValue {
       inviteSecret,
     );
 
-    return loadCoValue(coValueClass, valueID, {
+    return loadCoValue(anySchemaToCoSchema(coValueClass), valueID, {
       loadAs: this,
-    });
+    }) as Resolved<InstanceOrPrimitiveOfSchema<S>, true> | null;
   }
 
   /** @private */
@@ -347,7 +357,7 @@ export class Account extends CoValueBase implements CoValue {
       const profileGroup = RegisteredSchemas["Group"].create({ owner: this });
 
       this.profile = Profile.create({ name: creationProps.name }, profileGroup);
-      this.profile._owner.addMember("everyone", "reader");
+      profileGroup.addMember("everyone", "reader");
     } else if (this.profile && creationProps) {
       if (this.profile._owner._type !== "Group") {
         throw new Error("Profile must be owned by a Group", {

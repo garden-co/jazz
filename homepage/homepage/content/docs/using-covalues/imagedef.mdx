@@ -30,7 +30,7 @@ async function handleFileUpload(event) {
     const image = await createImage(file, {
       owner: me.profile._owner,
     });
-    
+
     // Store the image in your application data
     me.profile.image = image;
   }
@@ -125,13 +125,13 @@ Each resolution is stored with a key in the format `"widthxheight"` (e.g., `"192
 
 <CodeGroup>
 ```ts
-import { CoMap, CoList, ImageDefinition, co } from "jazz-tools";
+import { CoMap, CoList, ImageDefinition, coField } from "jazz-tools";
 
-class ListOfImages extends CoList.Of(co.ref(ImageDefinition)) {}
+class ListOfImages extends CoList.Of(coField.ref(ImageDefinition)) {}
 
 class Gallery extends CoMap {
-  title = co.string;
-  images = co.ref(ListOfImages);
+  title = coField.string;
+  images = coField.ref(ListOfImages);
 }
 ```
 </CodeGroup>
@@ -164,13 +164,13 @@ The `highestResAvailable` method helps select the best image resolution for the 
 const highestRes = image.highestResAvailable();
 if (highestRes) {
   console.log(`Found resolution: ${highestRes.res}`);
-  
+
   // Convert to a usable blob
   const blob = highestRes.stream.toBlob();
   if (blob) {
     const url = URL.createObjectURL(blob);
     imageElement.src = url;
-    
+
     // Remember to revoke the URL when no longer needed
     imageElement.onload = () => {
       URL.revokeObjectURL(url);
@@ -222,7 +222,7 @@ if (bestRes) {
   if (blob) {
     const url = URL.createObjectURL(blob);
     imageElement.src = url;
-    
+
     // Remember to revoke the URL when no longer needed
     imageElement.onload = () => {
       URL.revokeObjectURL(url);

@@ -1,67 +1,47 @@
 import { WasmCrypto } from "cojson/crypto/WasmCrypto";
-import { beforeAll, describe, expect, it } from "vitest";
-import { SchemaUnion } from "../coValues/schemaUnion.js";
+import { assert, beforeAll, describe, expect, it } from "vitest";
 import {
   Account,
-  CoMap,
   CryptoProvider,
+  Loaded,
   co,
   loadCoValue,
   subscribeToCoValue,
+  z,
+  zodSchemaToCoSchema,
 } from "../exports.js";
 
-class BaseWidget extends CoMap {
-  type = co.string;
-}
-
-class RedButtonWidget extends BaseWidget {
-  type = co.literal("button");
-  color = co.literal("red");
-  label = co.string;
-}
-
-class BlueButtonWidget extends BaseWidget {
-  type = co.literal("button");
-  color = co.literal("blue");
-  label = co.string;
-}
-
-const ButtonWidget = SchemaUnion.Of<BaseWidget>((raw) => {
-  switch (raw.get("color")) {
-    case "red":
-      return RedButtonWidget;
-    case "blue":
-      return BlueButtonWidget;
-    default:
-      throw new Error(`Unknown button color: ${raw.get("color")}`);
-  }
+const RedButtonWidget = co.map({
+  type: z.literal("button"),
+  color: z.literal("red"),
+  label: z.string(),
 });
 
-class SliderWidget extends BaseWidget {
-  type = co.literal("slider");
-  min = co.number;
-  max = co.number;
-}
+const BlueButtonWidget = co.map({
+  type: z.literal("button"),
+  color: z.literal("blue"),
+  label: z.string(),
+  blueness: z.number(),
+});
 
-class CheckboxWidget extends BaseWidget {
-  type = co.literal("checkbox");
-  checked = co.boolean;
-}
+const ButtonWidget = z.discriminatedUnion([RedButtonWidget, BlueButtonWidget]);
 
-const getWidgetSchemaFromRaw = (raw: BaseWidget["_raw"]) => {
-  switch (raw.get("type")) {
-    case "button":
-      return ButtonWidget;
-    case "slider":
-      return SliderWidget;
-    case "checkbox":
-      return CheckboxWidget;
-    default:
-      throw new Error(`Unknown widget type: ${raw.get("type")}`);
-  }
-};
+const SliderWidget = co.map({
+  type: z.literal("slider"),
+  min: z.number(),
+  max: z.number(),
+});
 
-class WidgetUnion extends SchemaUnion.Of<BaseWidget>(getWidgetSchemaFromRaw) {}
+const CheckboxWidget = co.map({
+  type: z.literal("checkbox"),
+  checked: z.boolean(),
+});
+
+const WidgetUnion = z.discriminatedUnion([
+  ButtonWidget,
+  SliderWidget,
+  CheckboxWidget,
+]);
 
 describe("SchemaUnion", () => {
   let Crypto: CryptoProvider;
@@ -75,7 +55,7 @@ describe("SchemaUnion", () => {
     });
   });
 
-  it("should instantiate the correct subclass based on schema and provided data", async () => {
+  it("should instantiate the correct schema based on schema and provided data", async () => {
     const buttonWidget = RedButtonWidget.create(
       { type: "button", color: "red", label: "Submit" },
       { owner: me },
@@ -89,36 +69,46 @@ describe("SchemaUnion", () => {
       { owner: me },
     );
 
-    const loadedButtonWidget = await loadCoValue(WidgetUnion, buttonWidget.id, {
-      loadAs: me,
-    });
-    const loadedSliderWidget = await loadCoValue(WidgetUnion, sliderWidget.id, {
-      loadAs: me,
-    });
+    const loadedButtonWidget = await loadCoValue(
+      zodSchemaToCoSchema(WidgetUnion),
+      buttonWidget.id,
+      {
+        loadAs: me,
+      },
+    );
+    const loadedSliderWidget = await loadCoValue(
+      zodSchemaToCoSchema(WidgetUnion),
+      sliderWidget.id,
+      {
+        loadAs: me,
+      },
+    );
     const loadedCheckboxWidget = await loadCoValue(
-      WidgetUnion,
+      zodSchemaToCoSchema(WidgetUnion),
       checkboxWidget.id,
       { loadAs: me },
     );
 
-    expect(loadedButtonWidget).toBeInstanceOf(RedButtonWidget);
-    expect(loadedSliderWidget).toBeInstanceOf(SliderWidget);
-    expect(loadedCheckboxWidget).toBeInstanceOf(CheckboxWidget);
+    expect(loadedButtonWidget?.type).toBe("button");
+    expect(loadedSliderWidget?.type).toBe("slider");
+    expect(loadedCheckboxWidget?.type).toBe("checkbox");
   });
 
   it("should integrate with subscribeToCoValue correctly", async () => {
     const buttonWidget = BlueButtonWidget.create(
-      { type: "button", color: "blue", label: "Submit" },
+      { type: "button", color: "blue", label: "Submit", blueness: 100 },
       { owner: me },
     );
     let currentValue = "Submit";
     const unsubscribe = subscribeToCoValue(
-      WidgetUnion,
+      zodSchemaToCoSchema(WidgetUnion),
       buttonWidget.id,
       { loadAs: me, syncResolution: true },
-      (value: BaseWidget) => {
-        if (value instanceof BlueButtonWidget) {
+      (value: Loaded<typeof WidgetUnion>) => {
+        if (value.type === "button") {
           expect(value.label).toBe(currentValue);
+          assert(value.color === "blue");
+          expect(value.blueness).toBe(100);
         } else {
           throw new Error("Unexpected widget type");
         }

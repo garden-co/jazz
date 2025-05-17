@@ -5,17 +5,17 @@ import {
   CoMap,
   FileStream,
   Group,
-  co,
+  coField,
 } from "jazz-tools";
 import { afterAll, afterEach, describe, expect, test } from "vitest";
 import { createAccountContext, startSyncServer } from "./testUtils";
 
 class TestMap extends CoMap {
-  value = co.string;
+  value = coField.string;
 }
 
 class CustomAccount extends Account {
-  root = co.ref(TestMap);
+  root = coField.ref(TestMap);
 
   migrate() {
     if (!this.root) {

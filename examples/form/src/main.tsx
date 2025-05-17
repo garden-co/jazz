@@ -6,12 +6,6 @@ import "./index.css";
 import { apiKey } from "./apiKey";
 import { JazzAccount } from "./schema.ts";
 
-declare module "jazz-react" {
-  interface Register {
-    Account: JazzAccount;
-  }
-}
-
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
     <JazzProvider

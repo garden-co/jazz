@@ -5,7 +5,8 @@ import {
   CoMap,
   ImageDefinition,
   Profile,
-  co,
+  coField,
+  zodSchemaToCoSchema,
 } from "jazz-tools";
 
 /** Walkthrough: Defining the data model with CoJSON
@@ -26,23 +27,23 @@ export const ReactionTypes = [
 
 export type ReactionType = (typeof ReactionTypes)[number];
 
-export class PetReactions extends CoFeed.Of(co.json<ReactionType>()) {}
+export class PetReactions extends CoFeed.Of(coField.json<ReactionType>()) {}
 
 export class PetPost extends CoMap {
-  name = co.string;
-  image = co.ref(ImageDefinition);
-  reactions = co.ref(PetReactions);
+  name = coField.string;
+  image = coField.ref(zodSchemaToCoSchema(ImageDefinition));
+  reactions = coField.ref(PetReactions);
 }
 
-export class ListOfPosts extends CoList.Of(co.ref(PetPost)) {}
+export class ListOfPosts extends CoList.Of(coField.ref(PetPost)) {}
 
 export class PetAccountRoot extends CoMap {
-  posts = co.ref(ListOfPosts);
+  posts = coField.ref(ListOfPosts);
 }
 
 export class PetAccount extends Account {
-  profile = co.ref(Profile);
-  root = co.ref(PetAccountRoot);
+  profile = coField.ref(Profile);
+  root = coField.ref(PetAccountRoot);
 
   migrate() {
     if (!this._refs.root) {

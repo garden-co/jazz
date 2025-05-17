@@ -1,32 +1,32 @@
-import { Account, CoList, CoMap, Group, Profile, co } from "jazz-tools";
+import { Account, CoList, CoMap, Group, Profile, coField } from "jazz-tools";
 
 export class PasswordItem extends CoMap {
-  name = co.string;
-  username = co.optional.string;
-  username_input_selector = co.optional.string;
-  password = co.string;
-  password_input_selector = co.optional.string;
-  uri = co.optional.string;
-  folder = co.ref(Folder);
-  deleted = co.boolean;
+  name = coField.string;
+  username = coField.optional.string;
+  username_input_selector = coField.optional.string;
+  password = coField.string;
+  password_input_selector = coField.optional.string;
+  uri = coField.optional.string;
+  folder = coField.ref(Folder);
+  deleted = coField.boolean;
 }
 
-export class PasswordList extends CoList.Of(co.ref(PasswordItem)) {}
+export class PasswordList extends CoList.Of(coField.ref(PasswordItem)) {}
 
 export class Folder extends CoMap {
-  name = co.string;
-  items = co.ref(PasswordList);
+  name = coField.string;
+  items = coField.ref(PasswordList);
 }
 
-export class FolderList extends CoList.Of(co.ref(Folder)) {}
+export class FolderList extends CoList.Of(coField.ref(Folder)) {}
 
 export class PasswordManagerAccountRoot extends CoMap {
-  folders = co.ref(FolderList);
+  folders = coField.ref(FolderList);
 }
 
 export class PasswordManagerAccount extends Account {
-  profile = co.ref(Profile);
-  root = co.ref(PasswordManagerAccountRoot);
+  profile = coField.ref(Profile);
+  root = coField.ref(PasswordManagerAccountRoot);
 
   migrate() {
     if (!this._refs.root) {

@@ -14,14 +14,20 @@ import {
   CoMap,
   FileStream,
   Group,
-  co,
+  coField,
   cojsonInternals,
+  z,
 } from "../index.js";
 import {
+  CoMapInstance,
   ID,
+  InstanceOrPrimitiveOfSchema,
+  Loaded,
   Resolved,
+  co,
   createCoValueObservable,
   subscribeToCoValue,
+  zodSchemaToCoSchema,
 } from "../internal.js";
 import {
   createJazzTestAccount,
@@ -32,30 +38,29 @@ import { setupAccount, waitFor } from "./utils.js";
 
 cojsonInternals.setCoValueLoadingRetryDelay(300);
 
-class ChatRoom extends CoMap {
-  messages = co.ref(MessagesList);
-  name = co.string;
-}
+const ReactionsFeed = co.feed(z.string());
 
-class Message extends CoMap {
-  text = co.string;
-  reactions = co.ref(ReactionsStream);
-  attachment = co.optional.ref(FileStream);
-}
+const Message = co.map({
+  text: z.string(),
+  reactions: ReactionsFeed,
+  attachment: z.optional(co.fileStream()),
+});
 
-class MessagesList extends CoList.Of(co.ref(Message)) {}
-class ReactionsStream extends CoFeed.Of(co.string) {}
+const ChatRoom = co.map({
+  messages: co.list(Message),
+  name: z.string(),
+});
 
 function createChatRoom(me: Account | Group, name: string) {
   return ChatRoom.create(
-    { messages: MessagesList.create([], { owner: me }), name },
+    { messages: co.list(Message).create([], { owner: me }), name },
     { owner: me },
   );
 }
 
 function createMessage(me: Account | Group, text: string) {
   return Message.create(
-    { text, reactions: ReactionsStream.create([], { owner: me }) },
+    { text, reactions: ReactionsFeed.create([], { owner: me }) },
     { owner: me },
   );
 }
@@ -76,10 +81,10 @@ describe("subscribeToCoValue", () => {
     const chatRoom = createChatRoom(me, "General");
     const updateFn = vi.fn();
 
-    let result = null as Resolved<ChatRoom, {}> | null;
+    let result = null as Loaded<typeof ChatRoom, {}> | null;
 
     const unsubscribe = subscribeToCoValue(
-      ChatRoom,
+      zodSchemaToCoSchema(ChatRoom),
       chatRoom.id,
       { loadAs: meOnSecondPeer },
       (value) => {
@@ -123,10 +128,10 @@ describe("subscribeToCoValue", () => {
     const chatRoom = createChatRoom(me, "General");
     const updateFn = vi.fn();
 
-    let result = null as Resolved<ChatRoom, {}> | null;
+    let result = null as Loaded<typeof ChatRoom, {}> | null;
 
     const unsubscribe = subscribeToCoValue(
-      ChatRoom,
+      zodSchemaToCoSchema(ChatRoom),
       chatRoom.id,
       {
         loadAs: meOnSecondPeer,
@@ -167,7 +172,7 @@ describe("subscribeToCoValue", () => {
     messages.push(createMessage(me, "Hello"));
 
     const unsubscribe = subscribeToCoValue(
-      ChatRoom,
+      zodSchemaToCoSchema(ChatRoom),
       chatRoom.id,
       {
         loadAs: meOnSecondPeer,
@@ -210,7 +215,7 @@ describe("subscribeToCoValue", () => {
     const updateFn = vi.fn();
 
     const unsubscribe = subscribeToCoValue(
-      ChatRoom,
+      zodSchemaToCoSchema(ChatRoom),
       chatRoom.id,
       {
         loadAs: meOnSecondPeer,
@@ -258,8 +263,8 @@ describe("subscribeToCoValue", () => {
 
     const updateFn = vi.fn();
 
-    const updates = [] as Resolved<
-      ChatRoom,
+    const updates = [] as Loaded<
+      typeof ChatRoom,
       {
         messages: {
           $each: {
@@ -270,7 +275,7 @@ describe("subscribeToCoValue", () => {
     >[];
 
     const unsubscribe = subscribeToCoValue(
-      ChatRoom,
+      zodSchemaToCoSchema(ChatRoom),
       chatRoom.id,
       {
         loadAs: meOnSecondPeer,
@@ -341,7 +346,7 @@ describe("subscribeToCoValue", () => {
     const updateFn = vi.fn();
 
     const unsubscribe = subscribeToCoValue(
-      ChatRoom,
+      zodSchemaToCoSchema(ChatRoom),
       chatRoom.id,
       {
         loadAs: meOnSecondPeer,
@@ -384,11 +389,11 @@ describe("subscribeToCoValue", () => {
   });
 
   it("should emit only once when loading a list of values", async () => {
-    class TestMap extends CoMap {
-      value = co.string;
-    }
+    const TestMap = co.map({
+      value: z.string(),
+    });
 
-    class TestList extends CoList.Of(co.ref(TestMap)) {}
+    const TestList = co.list(TestMap);
 
     const account = await createJazzTestAccount({
       isCurrentActiveAccount: true,
@@ -405,7 +410,7 @@ describe("subscribeToCoValue", () => {
     const updateFn = vi.fn();
 
     const unsubscribe = subscribeToCoValue(
-      TestList,
+      zodSchemaToCoSchema(TestList),
       list.id,
       {
         loadAs: account,
@@ -428,11 +433,11 @@ describe("subscribeToCoValue", () => {
   });
 
   it("should emit when all the items become accessible", async () => {
-    class TestMap extends CoMap {
-      value = co.string;
-    }
+    const TestMap = co.map({
+      value: z.string(),
+    });
 
-    class TestList extends CoList.Of(co.ref(TestMap)) {}
+    const TestList = co.list(TestMap);
 
     const reader = await createJazzTestAccount({
       isCurrentActiveAccount: true,
@@ -458,7 +463,7 @@ describe("subscribeToCoValue", () => {
       everyone,
     );
 
-    let result = null as Resolved<TestList, { $each: true }> | null;
+    let result = null as Loaded<typeof TestList, { $each: true }> | null;
 
     const updateFn = vi.fn().mockImplementation((value) => {
       result = value;
@@ -466,7 +471,7 @@ describe("subscribeToCoValue", () => {
     const onUnauthorized = vi.fn();
 
     const unsubscribe = subscribeToCoValue(
-      TestList,
+      zodSchemaToCoSchema(TestList),
       list.id,
       {
         loadAs: reader,
@@ -498,11 +503,11 @@ describe("subscribeToCoValue", () => {
   });
 
   it("should emit when all the items become available", async () => {
-    class TestMap extends CoMap {
-      value = co.string;
-    }
+    const TestMap = co.map({
+      value: z.string(),
+    });
 
-    class TestList extends CoList.Of(co.ref(TestMap)) {}
+    const TestList = co.list(TestMap);
 
     const reader = await createJazzTestAccount({
       isCurrentActiveAccount: true,
@@ -528,7 +533,7 @@ describe("subscribeToCoValue", () => {
       everyone,
     );
 
-    let result = null as Resolved<TestList, { $each: true }> | null;
+    let result = null as Loaded<typeof TestList, { $each: true }> | null;
 
     const updateFn = vi.fn().mockImplementation((value) => {
       result = value;
@@ -537,7 +542,7 @@ describe("subscribeToCoValue", () => {
     const onUnavailable = vi.fn();
 
     const unsubscribe = subscribeToCoValue(
-      TestList,
+      zodSchemaToCoSchema(TestList),
       list.id,
       {
         loadAs: reader,
@@ -573,12 +578,12 @@ describe("subscribeToCoValue", () => {
     expect(updateFn).toHaveBeenCalledTimes(2);
   });
 
-  it("should handle null values in lists with required refs", async () => {
-    class TestMap extends CoMap {
-      value = co.string;
-    }
+  it("should handle undefined values in lists with required refs", async () => {
+    const TestMap = co.map({
+      value: z.string(),
+    });
 
-    class TestList extends CoList.Of(co.ref(TestMap)) {}
+    const TestList = co.list(TestMap);
 
     const reader = await createJazzTestAccount({
       isCurrentActiveAccount: true,
@@ -593,8 +598,8 @@ describe("subscribeToCoValue", () => {
 
     const list = TestList.create(
       [
-        // TODO: This should be flagged as an error by typescript
-        null,
+        // @ts-expect-error
+        undefined,
         TestMap.create({ value: "2" }, everyone),
         TestMap.create({ value: "3" }, everyone),
         TestMap.create({ value: "4" }, everyone),
@@ -603,7 +608,7 @@ describe("subscribeToCoValue", () => {
       everyone,
     );
 
-    let result = null as Resolved<TestList, { $each: true }> | null;
+    let result = null as Loaded<typeof TestList, { $each: true }> | null;
 
     const updateFn = vi.fn().mockImplementation((value) => {
       result = value;
@@ -612,7 +617,7 @@ describe("subscribeToCoValue", () => {
     const onUnavailable = vi.fn();
 
     const unsubscribe = subscribeToCoValue(
-      TestList,
+      zodSchemaToCoSchema(TestList),
       list.id,
       {
         loadAs: reader,
@@ -644,12 +649,12 @@ describe("subscribeToCoValue", () => {
     expect(updateFn).toHaveBeenCalledTimes(1);
   });
 
-  it("should handle null values in lists with optional refs", async () => {
-    class TestMap extends CoMap {
-      value = co.string;
-    }
+  it("should handle undefined values in lists with optional refs", async () => {
+    const TestMap = co.map({
+      value: z.string(),
+    });
 
-    class TestList extends CoList.Of(co.optional.ref(TestMap)) {}
+    const TestList = co.list(z.optional(TestMap));
 
     const reader = await createJazzTestAccount({
       isCurrentActiveAccount: true,
@@ -664,7 +669,7 @@ describe("subscribeToCoValue", () => {
 
     const list = TestList.create(
       [
-        null,
+        undefined,
         TestMap.create({ value: "2" }, everyone),
         TestMap.create({ value: "3" }, everyone),
         TestMap.create({ value: "4" }, everyone),
@@ -673,7 +678,7 @@ describe("subscribeToCoValue", () => {
       everyone,
     );
 
-    let result = null as Resolved<TestList, { $each: true }> | null;
+    let result = null as Loaded<typeof TestList, { $each: true }> | null;
 
     const updateFn = vi.fn().mockImplementation((value) => {
       result = value;
@@ -682,7 +687,7 @@ describe("subscribeToCoValue", () => {
     const onUnavailable = vi.fn();
 
     const unsubscribe = subscribeToCoValue(
-      TestList,
+      zodSchemaToCoSchema(TestList),
       list.id,
       {
         loadAs: reader,
@@ -703,17 +708,17 @@ describe("subscribeToCoValue", () => {
 
     assert(result);
 
-    expect(result[0]).toBeNull();
+    expect(result[0]).toBeUndefined();
 
     expect(updateFn).toHaveBeenCalledTimes(1);
   });
 
-  it("should unsubscribe from a nested ref when the value is set to null", async () => {
-    class TestMap extends CoMap {
-      value = co.string;
-    }
+  it("should unsubscribe from a nested ref when the value is set to undefined", async () => {
+    const TestMap = co.map({
+      value: z.string(),
+    });
 
-    class TestList extends CoList.Of(co.optional.ref(TestMap)) {}
+    const TestList = co.list(z.optional(TestMap));
 
     const creator = await createJazzTestAccount({
       isCurrentActiveAccount: true,
@@ -727,14 +732,14 @@ describe("subscribeToCoValue", () => {
       creator,
     );
 
-    let result = null as Resolved<TestList, { $each: true }> | null;
+    let result = null as Loaded<typeof TestList, { $each: true }> | null;
 
     const updateFn = vi.fn().mockImplementation((value) => {
       result = value;
     });
 
     const unsubscribe = subscribeToCoValue(
-      TestList,
+      zodSchemaToCoSchema(TestList),
       list.id,
       {
         loadAs: creator,
@@ -759,14 +764,14 @@ describe("subscribeToCoValue", () => {
 
     updateFn.mockClear();
 
-    list[0] = null;
+    list[0] = undefined;
 
     await waitFor(() => {
       expect(updateFn).toHaveBeenCalled();
     });
 
     assert(result);
-    expect(result[0]).toBeNull();
+    expect(result[0]).toBeUndefined();
 
     updateFn.mockClear();
 
@@ -776,11 +781,11 @@ describe("subscribeToCoValue", () => {
   });
 
   it("should unsubscribe from a nested ref when the value is changed to a different ref", async () => {
-    class TestMap extends CoMap {
-      value = co.string;
-    }
+    const TestMap = co.map({
+      value: z.string(),
+    });
 
-    class TestList extends CoList.Of(co.ref(TestMap)) {}
+    const TestList = co.list(TestMap);
 
     const creator = await createJazzTestAccount({
       isCurrentActiveAccount: true,
@@ -794,14 +799,14 @@ describe("subscribeToCoValue", () => {
       creator,
     );
 
-    let result = null as Resolved<TestList, { $each: true }> | null;
+    let result = null as Loaded<typeof TestList, { $each: true }> | null;
 
     const updateFn = vi.fn().mockImplementation((value) => {
       result = value;
     });
 
     const unsubscribe = subscribeToCoValue(
-      TestList,
+      zodSchemaToCoSchema(TestList),
       list.id,
       {
         loadAs: creator,
@@ -850,9 +855,9 @@ describe("subscribeToCoValue", () => {
   });
 
   it("should emit on group changes, even when the amount of totalValidTransactions doesn't change but the content does", async () => {
-    class Person extends CoMap {
-      name = co.string;
-    }
+    const Person = co.map({
+      name: z.string(),
+    });
 
     const creator = await createJazzTestAccount();
 
@@ -884,16 +889,13 @@ describe("subscribeToCoValue", () => {
     group.removeMember(writer1);
     group.addMember(writer2, "writer");
 
-    let value: Resolved<Person, {}> | null = null as Resolved<
-      Person,
-      {}
-    > | null;
+    let value = null as Loaded<typeof Person, {}> | null;
     const spy = vi.fn((update) => {
       value = update;
     });
 
     const unsubscribe = subscribeToCoValue(
-      Person,
+      zodSchemaToCoSchema(Person),
       person.id,
       {
         loadAs: reader,
@@ -941,11 +943,11 @@ describe("subscribeToCoValue", () => {
   });
 
   it("errors on autoloaded values shouldn't block updates", async () => {
-    class TestMap extends CoMap {
-      value = co.string;
-    }
+    const TestMap = co.map({
+      value: z.string(),
+    });
 
-    class TestList extends CoList.Of(co.ref(TestMap)) {}
+    const TestList = co.list(TestMap);
 
     const reader = await createJazzTestAccount({
       isCurrentActiveAccount: true,
@@ -971,7 +973,7 @@ describe("subscribeToCoValue", () => {
       everyone,
     );
 
-    let result = null as Resolved<TestList, { $each: true }> | null;
+    let result = null as Loaded<typeof TestList, { $each: true }> | null;
 
     const updateFn = vi.fn().mockImplementation((value) => {
       result = value;
@@ -980,7 +982,7 @@ describe("subscribeToCoValue", () => {
     const onUnavailable = vi.fn();
 
     const unsubscribe = subscribeToCoValue(
-      TestList,
+      zodSchemaToCoSchema(TestList),
       list.id,
       {
         loadAs: reader,
@@ -1018,16 +1020,16 @@ describe("subscribeToCoValue", () => {
   });
 
   it("errors on autoloaded values shouldn't block updates, even when the error comes from a new ref", async () => {
-    class Dog extends CoMap {
-      name = co.string;
-    }
+    const Dog = co.map({
+      name: z.string(),
+    });
 
-    class Person extends CoMap {
-      name = co.string;
-      dog = co.ref(Dog);
-    }
+    const Person = co.map({
+      name: z.string(),
+      dog: Dog,
+    });
 
-    class PersonList extends CoList.Of(co.ref(Person)) {}
+    const PersonList = co.list(Person);
 
     const reader = await createJazzTestAccount({
       isCurrentActiveAccount: true,
@@ -1058,7 +1060,7 @@ describe("subscribeToCoValue", () => {
       everyone,
     );
 
-    let result = null as Resolved<PersonList, { $each: true }> | null;
+    let result = null as Loaded<typeof PersonList, { $each: true }> | null;
 
     const updateFn = vi.fn().mockImplementation((value) => {
       result = value;
@@ -1067,7 +1069,7 @@ describe("subscribeToCoValue", () => {
     const onUnavailable = vi.fn();
 
     const unsubscribe = subscribeToCoValue(
-      PersonList,
+      zodSchemaToCoSchema(PersonList),
       list.id,
       {
         loadAs: reader,
@@ -1114,16 +1116,16 @@ describe("subscribeToCoValue", () => {
   });
 
   it("autoload on $each resolve should work on all items", async () => {
-    class Dog extends CoMap {
-      name = co.string;
-    }
+    const Dog = co.map({
+      name: z.string(),
+    });
 
-    class Person extends CoMap {
-      name = co.string;
-      dog = co.ref(Dog);
-    }
+    const Person = co.map({
+      name: z.string(),
+      dog: Dog,
+    });
 
-    class PersonList extends CoList.Of(co.ref(Person)) {}
+    const PersonList = co.list(Person);
 
     const reader = await createJazzTestAccount({
       isCurrentActiveAccount: true,
@@ -1154,7 +1156,7 @@ describe("subscribeToCoValue", () => {
       everyone,
     );
 
-    let result = null as Resolved<PersonList, { $each: true }> | null;
+    let result = null as Loaded<typeof PersonList, { $each: true }> | null;
 
     const updateFn = vi.fn().mockImplementation((value) => {
       result = value;
@@ -1163,7 +1165,7 @@ describe("subscribeToCoValue", () => {
     const onUnavailable = vi.fn();
 
     const unsubscribe = subscribeToCoValue(
-      PersonList,
+      zodSchemaToCoSchema(PersonList),
       list.id,
       {
         loadAs: reader,
@@ -1199,9 +1201,9 @@ describe("subscribeToCoValue", () => {
 });
 
 describe("createCoValueObservable", () => {
-  class TestMap extends CoMap {
-    color = co.string;
-  }
+  const TestMap = co.map({
+    color: z.string(),
+  });
 
   function createTestMap(me: Account | Group) {
     return TestMap.create({ color: "red" }, { owner: me });
@@ -1220,7 +1222,7 @@ describe("createCoValueObservable", () => {
     const mockListener = vi.fn();
 
     const unsubscribe = observable.subscribe(
-      TestMap,
+      zodSchemaToCoSchema(TestMap),
       testMap.id,
       {
         loadAs: meOnSecondPeer,
@@ -1249,7 +1251,7 @@ describe("createCoValueObservable", () => {
     const mockListener = vi.fn();
 
     const unsubscribe = observable.subscribe(
-      TestMap,
+      zodSchemaToCoSchema(TestMap),
       testMap.id,
       {
         loadAs: meOnSecondPeer,
@@ -1269,13 +1271,13 @@ describe("createCoValueObservable", () => {
   it("should return null if the coValue is not found", async () => {
     const { meOnSecondPeer } = await setupAccount();
     const observable = createCoValueObservable<
-      TestMap,
-      Resolved<TestMap, {}>
+      InstanceOrPrimitiveOfSchema<typeof TestMap>,
+      Loaded<typeof TestMap, {}>
     >();
 
     const unsubscribe = observable.subscribe(
-      TestMap,
-      "co_z123" as ID<TestMap>,
+      zodSchemaToCoSchema(TestMap),
+      "co_z123",
       { loadAs: meOnSecondPeer },
       () => {},
     );

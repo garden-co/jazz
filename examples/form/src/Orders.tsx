@@ -1,9 +1,10 @@
 import { useAccount } from "jazz-react";
 import { DraftIndicator } from "./DraftIndicator.tsx";
 import { OrderThumbnail } from "./OrderThumbnail.tsx";
+import { JazzAccount } from "./schema.ts";
 
 export function Orders() {
-  const { me } = useAccount({
+  const { me } = useAccount(JazzAccount, {
     resolve: { root: { orders: true } },
   });
 

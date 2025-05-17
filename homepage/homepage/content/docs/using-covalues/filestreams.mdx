@@ -22,11 +22,11 @@ In your schema, reference FileStreams like any other CoValue:
 <CodeGroup>
 ```ts twoslash
 // schema.ts
-import { CoMap, FileStream, co } from "jazz-tools";
+import { CoMap, FileStream, coField } from "jazz-tools";
 
 class Document extends CoMap {
-  title = co.string;
-  file = co.ref(FileStream);  // Store a document file
+  title = coField.string;
+  file = coField.ref(FileStream);  // Store a document file
 }
 ```
 </CodeGroup>
@@ -52,10 +52,10 @@ const fileInput = document.querySelector('input[type="file"]') as HTMLInputEleme
 fileInput.addEventListener('change', async () => {
   const file = fileInput.files?.[0];
   if (!file) return;
-  
+
   // Create FileStream from user-selected file
   const fileStream = await FileStream.createFromBlob(file, { owner: myGroup });
-  
+
   // Or with progress tracking for better UX
   const fileWithProgress = await FileStream.createFromBlob(file, {
     onProgress: (progress) => {
@@ -128,7 +128,7 @@ if (fileData) {
   console.log(`Total size: ${fileData.totalSizeBytes} bytes`);
   console.log(`File name: ${fileData.fileName}`);
   console.log(`Is complete: ${fileData.finished}`);
-  
+
   // Access raw binary chunks
   for (const chunk of fileData.chunks) {
     // Each chunk is a Uint8Array
@@ -168,13 +168,13 @@ const filename = fileStream.getChunks()?.fileName;
 if (blob) {
   // Use with URL.createObjectURL
   const url = URL.createObjectURL(blob);
-  
+
   // Create a download link
   const link = document.createElement('a');
   link.href = url;
   link.download = filename || 'document.pdf';
   link.click();
-  
+
   // Clean up when done
   URL.revokeObjectURL(url);
 }
@@ -196,7 +196,7 @@ const blob = await FileStream.loadAsBlob(fileStreamId);
 // By default, waits for complete uploads
 // For in-progress uploads:
 const partialBlob = await FileStream.loadAsBlob(fileStreamId, {
-  allowUnfinished: true 
+  allowUnfinished: true
 });
 ```
 </CodeGroup>
@@ -271,10 +271,10 @@ const chunkSize = 1024 * 100;
 for (let i = 0; i < data.length; i += chunkSize) {
   // Create a slice of the data
   const chunk = data.slice(i, i + chunkSize);
-  
+
   // Push chunk to the FileStream
   fileStream.push(chunk);
-  
+
   // Track progress
   const progress = Math.min(100, Math.round((i + chunk.length) * 100 / data.length));
   console.log(`Upload progress: ${progress}%`);
@@ -316,7 +316,7 @@ const fileStream = await FileStream.load(fileStreamId);
 
 if (fileStream) {
   console.log('FileStream loaded successfully');
-  
+
   // Check if it's complete
   if (fileStream.isBinaryStreamEnded()) {
     // Process the completed file
@@ -340,28 +340,28 @@ const fileStreamId = "co_z123" as ID<FileStream>;
 const unsubscribe = FileStream.subscribe(fileStreamId, (fileStream: FileStream) => {
   // Called whenever the FileStream changes
   console.log('FileStream updated');
-  
+
   // Get current status
   const chunks = fileStream.getChunks({ allowUnfinished: true });
   if (chunks) {
     const uploadedBytes = chunks.chunks.reduce((sum: number, chunk: Uint8Array) => sum + chunk.length, 0);
     const totalBytes = chunks.totalSizeBytes || 1;
     const progress = Math.min(100, Math.round(uploadedBytes * 100 / totalBytes));
-    
+
     console.log(`Upload progress: ${progress}%`);
-    
+
     if (fileStream.isBinaryStreamEnded()) {
       console.log('Upload complete!');
       // Now safe to use the file
       const blob = fileStream.toBlob();
-      
+
       // Clean up the subscription if we're done
       unsubscribe();
     }
   }
 });
 ```
-</CodeGroup>  
+</CodeGroup>
 
 ### Waiting for Upload Completion
 

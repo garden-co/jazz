@@ -1,6 +1,8 @@
 import type { LocalNode, RawCoValue } from "cojson";
-import type { CoFeed, CoList, CoMap } from "../exports.js";
 import {
+  CoFeed,
+  CoList,
+  CoMap,
   type CoValue,
   type ID,
   type RefEncoded,

@@ -1,9 +1,7 @@
 import { useIframeHashRouter } from "hash-slash";
-import { ID } from "jazz-tools";
 import { CreateOrder } from "./CreateOrder.tsx";
 import { EditOrder } from "./EditOrder.tsx";
 import { Orders } from "./Orders.tsx";
-import { BubbleTeaOrder } from "./schema.ts";
 
 function App() {
   const router = useIframeHashRouter();
@@ -14,7 +12,7 @@ function App() {
         {router.route({
           "/": () => <Orders />,
           "/order": () => <CreateOrder />,
-          "/order/:id": (id) => <EditOrder id={id as ID<BubbleTeaOrder>} />,
+          "/order/:id": (id) => <EditOrder id={id} />,
         })}
       </main>
     </>

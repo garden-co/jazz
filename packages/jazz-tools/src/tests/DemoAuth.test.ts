@@ -4,7 +4,7 @@ import { AuthSecretStorage } from "../auth/AuthSecretStorage";
 import { DemoAuth } from "../auth/DemoAuth";
 import { InMemoryKVStore } from "../auth/InMemoryKVStore";
 import { KvStoreContext } from "../auth/KvStoreContext";
-import { Account } from "../coValues/account";
+import { Account } from "../exports";
 import { ID } from "../internal";
 import { createJazzTestAccount } from "../testing";
 

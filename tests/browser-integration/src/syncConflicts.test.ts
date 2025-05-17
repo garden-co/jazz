@@ -1,10 +1,10 @@
 import { commands } from "@vitest/browser/context";
-import { AuthSecretStorage, CoMap, co } from "jazz-tools";
+import { AuthSecretStorage, CoMap, coField } from "jazz-tools";
 import { assert, afterAll, afterEach, describe, expect, test } from "vitest";
 import { createAccountContext, startSyncServer, waitFor } from "./testUtils";
 
 class Issue extends CoMap {
-  estimate = co.number;
+  estimate = coField.number;
 }
 
 afterAll(async () => {

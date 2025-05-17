@@ -1,5 +1,5 @@
 import { WasmCrypto } from "cojson/crypto/WasmCrypto";
-import { describe, expect, test } from "vitest";
+import { describe, expect, expectTypeOf, test } from "vitest";
 import {
   Account,
   CoFeed,
@@ -7,10 +7,13 @@ import {
   Group,
   ID,
   co,
+  coField,
   cojsonInternals,
   isControlledAccount,
+  z,
 } from "../index.js";
 import {
+  AnyCoFeedSchema,
   createJazzContextFromExistingCredentials,
   randomSessionProvider,
 } from "../internal.js";
@@ -29,7 +32,7 @@ describe("Simple CoFeed operations", async () => {
   if (!isControlledAccount(me)) {
     throw "me is not a controlled account";
   }
-  class TestStream extends CoFeed.Of(co.string) {}
+  const TestStream = co.feed(z.string());
 
   const stream = TestStream.create(["milk"], { owner: me });
 
@@ -67,15 +70,9 @@ describe("Simple CoFeed operations", async () => {
 });
 
 describe("CoFeed resolution", async () => {
-  class TwiceNestedStream extends CoFeed.Of(co.string) {
-    fancyValueOf(account: ID<Account>) {
-      return "Sir " + this[account]?.value;
-    }
-  }
-
-  class NestedStream extends CoFeed.Of(co.ref(TwiceNestedStream)) {}
-
-  class TestStream extends CoFeed.Of(co.ref(NestedStream)) {}
+  const TwiceNestedStream = co.feed(z.string());
+  const NestedStream = co.feed(TwiceNestedStream);
+  const TestStream = co.feed(NestedStream);
 
   const initNodeAndStream = async () => {
     const me = await Account.create({
@@ -98,6 +95,10 @@ describe("CoFeed resolution", async () => {
 
   test("Construction", async () => {
     const { me, stream } = await initNodeAndStream();
+
+    // TODO: fix this
+    // expectTypeOf(stream[me.id]).not.toBeAny();
+
     expect(stream[me.id]?.value?.[me.id]?.value?.[me.id]?.value).toEqual(
       "milk",
     );
@@ -127,6 +128,9 @@ describe("CoFeed resolution", async () => {
     const loadedStream = await TestStream.load(stream.id, {
       loadAs: meOnSecondPeer,
     });
+
+    // TODO: fix this
+    // expectTypeOf(loadedStream?.[me.id]).not.toBeAny();
 
     expect(loadedStream?.[me.id]?.value).toEqual(null);
     expect(loadedStream?.[me.id]?.ref?.id).toEqual(stream[me.id]?.value?.id);
@@ -158,9 +162,6 @@ describe("CoFeed resolution", async () => {
     expect(loadedStream?.[me.id]?.value?.[me.id]?.value?.id).toEqual(
       loadedTwiceNestedStream?.id,
     );
-    expect(
-      loadedStream?.[me.id]?.value?.[me.id]?.value?.fancyValueOf(me.id),
-    ).toEqual("Sir milk");
     // expect(loadedStream?.[me.id]?.ref?.value).toEqual(loadedNestedStream);
     expect(loadedStream?.[me.id]?.ref?.value?.id).toEqual(
       loadedNestedStream?.id,
@@ -182,9 +183,6 @@ describe("CoFeed resolution", async () => {
     expect(loadedStream?.[me.id]?.value?.[me.id]?.value?.id).toEqual(
       otherNestedStream[me.id]?.value?.id,
     );
-    expect(
-      loadedStream?.[me.id]?.value?.[me.id]?.value?.fancyValueOf(me.id),
-    ).toEqual("Sir butter");
   });
 
   test("Subscription & auto-resolution", async () => {
@@ -611,7 +609,7 @@ describe("FileStream progress tracking", async () => {
 
 describe("waitForSync", async () => {
   test("CoFeed: should resolve when the value is uploaded", async () => {
-    class TestStream extends CoFeed.Of(co.string) {}
+    const TestStream = co.feed(z.string());
 
     const { clientNode, serverNode, clientAccount } = await setupTwoNodes();
 
