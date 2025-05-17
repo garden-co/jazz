@@ -412,8 +412,8 @@ importers:
         specifier: 0.25.2
         version: 0.25.2(react-native@0.76.7(@babel/core@7.26.0)(@babel/preset-env@7.26.0(@babel/core@7.26.0))(@react-native-community/cli-server-api@15.0.1)(@types/react@18.3.12)(react@18.3.1))(react@18.3.1)
       react-native-quick-crypto:
-        specifier: 1.0.0-beta.15
-        version: 1.0.0-beta.15(react-native-nitro-modules@0.25.2(react-native@0.76.7(@babel/core@7.26.0)(@babel/preset-env@7.26.0(@babel/core@7.26.0))(@react-native-community/cli-server-api@15.0.1)(@types/react@18.3.12)(react@18.3.1))(react@18.3.1))(react-native@0.76.7(@babel/core@7.26.0)(@babel/preset-env@7.26.0(@babel/core@7.26.0))(@react-native-community/cli-server-api@15.0.1)(@types/react@18.3.12)(react@18.3.1))(react@18.3.1)
+        specifier: 1.0.0-beta.16
+        version: 1.0.0-beta.16(react-native-nitro-modules@0.25.2(react-native@0.76.7(@babel/core@7.26.0)(@babel/preset-env@7.26.0(@babel/core@7.26.0))(@react-native-community/cli-server-api@15.0.1)(@types/react@18.3.12)(react@18.3.1))(react@18.3.1))(react-native@0.76.7(@babel/core@7.26.0)(@babel/preset-env@7.26.0(@babel/core@7.26.0))(@react-native-community/cli-server-api@15.0.1)(@types/react@18.3.12)(react@18.3.1))(react@18.3.1)
       react-native-safe-area-context:
         specifier: 4.12.0
         version: 4.12.0(react-native@0.76.7(@babel/core@7.26.0)(@babel/preset-env@7.26.0(@babel/core@7.26.0))(@react-native-community/cli-server-api@15.0.1)(@types/react@18.3.12)(react@18.3.1))(react@18.3.1)
@@ -2586,12 +2586,15 @@ importers:
       jazz-tools:
         specifier: workspace:*
         version: link:../jazz-tools
+      react-native-fast-encoder:
+        specifier: ^0.2.0
+        version: 0.2.0(react-native@0.76.8(@babel/core@7.26.10)(@babel/preset-env@7.26.0(@babel/core@7.26.10))(@react-native-community/cli@15.0.1(typescript@5.6.2))(@types/react@18.3.18)(react@18.3.1))(react@18.3.1)
       react-native-nitro-modules:
         specifier: 0.25.2
         version: 0.25.2(react-native@0.76.8(@babel/core@7.26.10)(@babel/preset-env@7.26.0(@babel/core@7.26.10))(@react-native-community/cli@15.0.1(typescript@5.6.2))(@types/react@18.3.18)(react@18.3.1))(react@18.3.1)
       react-native-quick-crypto:
-        specifier: 1.0.0-beta.15
-        version: 1.0.0-beta.15(react-native-nitro-modules@0.25.2(react-native@0.76.8(@babel/core@7.26.10)(@babel/preset-env@7.26.0(@babel/core@7.26.10))(@react-native-community/cli@15.0.1(typescript@5.6.2))(@types/react@18.3.18)(react@18.3.1))(react@18.3.1))(react-native@0.76.8(@babel/core@7.26.10)(@babel/preset-env@7.26.0(@babel/core@7.26.10))(@react-native-community/cli@15.0.1(typescript@5.6.2))(@types/react@18.3.18)(react@18.3.1))(react@18.3.1)
+        specifier: 1.0.0-beta.16
+        version: 1.0.0-beta.16(react-native-nitro-modules@0.25.2(react-native@0.76.8(@babel/core@7.26.10)(@babel/preset-env@7.26.0(@babel/core@7.26.10))(@react-native-community/cli@15.0.1(typescript@5.6.2))(@types/react@18.3.18)(react@18.3.1))(react@18.3.1))(react-native@0.76.8(@babel/core@7.26.10)(@babel/preset-env@7.26.0(@babel/core@7.26.10))(@react-native-community/cli@15.0.1(typescript@5.6.2))(@types/react@18.3.18)(react@18.3.1))(react@18.3.1)
     devDependencies:
       typescript:
         specifier: 'catalog:'
@@ -9622,6 +9625,9 @@ packages:
     resolution: {integrity: sha512-f7ccFPK3SXFHpx15UIGyRJ/FJQctuKZ0zVuN3frBo4HnK3cay9VEW0R6yPYFHC0AgqhukPzKjq22t5DmAyqGyw==}
     engines: {node: '>=16'}
 
+  flatbuffers@2.0.6:
+    resolution: {integrity: sha512-QTTZTXTbVfuOVQu2X6eLOw4vefUxnFJZxAKeN3rEPhjEzBtIbehimJLfVGHPM8iX0Na+9i76SBEg0skf0c0sCA==}
+
   flatted@3.3.2:
     resolution: {integrity: sha512-AiwGJM8YcNOaobumgtng+6NHuOqC3A7MixFeDafM3X9cIUM+xUXoS5Vfgf+OihAYe20fxqNM9yPBXJzRtZ/4eA==}
 
@@ -12530,6 +12536,13 @@ packages:
       react-native-svg:
         optional: true
 
+  react-native-fast-encoder@0.2.0:
+    resolution: {integrity: sha512-E4mx81fRMVs0qq8is3cZTrbuEJdsDo8Nfe7qTxKZwsCianpYpA2QfyH6cEYumSOEht6l+KeRJ4RqcyfxMDyesg==}
+    engines: {node: '>= 18.0.0'}
+    peerDependencies:
+      react: 18.3.1
+      react-native: '*'
+
   react-native-fetch-api@3.0.0:
     resolution: {integrity: sha512-g2rtqPjdroaboDKTsJCTlcmtw54E25OjyaunUP0anOZn4Fuo2IKs8BVfe02zVggA/UysbmfSnRJIqtNkAgggNA==}
 
@@ -12583,8 +12596,8 @@ packages:
       react: 18.3.1
       react-native: '*'
 
-  react-native-quick-crypto@1.0.0-beta.15:
-    resolution: {integrity: sha512-714wO6+AzAeqLvA7ZgvLSYYWOVtNgowFvpnrxfZOt6DQpGgumW1FYrUPLMwGankYzpKKwQ0LeKZSqyDZs8N9ow==}
+  react-native-quick-crypto@1.0.0-beta.16:
+    resolution: {integrity: sha512-XcBhwNiIeQ/LoBd5xf5+4lLXi5Svu+bnp3/baiL6U3cd+gvgx6KgOVQMgPcy+zEz5UnD6L9DrC9N9cU5FGmx+w==}
     peerDependencies:
       react: 18.3.1
       react-native: '*'
@@ -23836,6 +23849,8 @@ snapshots:
       flatted: 3.3.2
       keyv: 4.5.4
 
+  flatbuffers@2.0.6: {}
+
   flatted@3.3.2: {}
 
   flatted@3.3.3: {}
@@ -27110,6 +27125,13 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
+  react-native-fast-encoder@0.2.0(react-native@0.76.8(@babel/core@7.26.10)(@babel/preset-env@7.26.0(@babel/core@7.26.10))(@react-native-community/cli@15.0.1(typescript@5.6.2))(@types/react@18.3.18)(react@18.3.1))(react@18.3.1):
+    dependencies:
+      big-integer: 1.6.52
+      flatbuffers: 2.0.6
+      react: 18.3.1
+      react-native: 0.76.8(@babel/core@7.26.10)(@babel/preset-env@7.26.0(@babel/core@7.26.10))(@react-native-community/cli@15.0.1(typescript@5.6.2))(@types/react@18.3.18)(react@18.3.1)
+
   react-native-fetch-api@3.0.0:
     dependencies:
       p-defer: 3.0.0
@@ -27181,7 +27203,7 @@ snapshots:
       react: 18.3.1
       react-native: 0.76.8(@babel/core@7.26.10)(@babel/preset-env@7.26.0(@babel/core@7.26.10))(@react-native-community/cli@15.0.1(typescript@5.6.2))(@types/react@18.3.18)(react@18.3.1)
 
-  react-native-quick-crypto@1.0.0-beta.15(react-native-nitro-modules@0.25.2(react-native@0.76.7(@babel/core@7.26.0)(@babel/preset-env@7.26.0(@babel/core@7.26.0))(@react-native-community/cli-server-api@15.0.1)(@types/react@18.3.12)(react@18.3.1))(react@18.3.1))(react-native@0.76.7(@babel/core@7.26.0)(@babel/preset-env@7.26.0(@babel/core@7.26.0))(@react-native-community/cli-server-api@15.0.1)(@types/react@18.3.12)(react@18.3.1))(react@18.3.1):
+  react-native-quick-crypto@1.0.0-beta.16(react-native-nitro-modules@0.25.2(react-native@0.76.7(@babel/core@7.26.0)(@babel/preset-env@7.26.0(@babel/core@7.26.0))(@react-native-community/cli-server-api@15.0.1)(@types/react@18.3.12)(react@18.3.1))(react@18.3.1))(react-native@0.76.7(@babel/core@7.26.0)(@babel/preset-env@7.26.0(@babel/core@7.26.0))(@react-native-community/cli-server-api@15.0.1)(@types/react@18.3.12)(react@18.3.1))(react@18.3.1):
     dependencies:
       '@craftzdog/react-native-buffer': 6.0.5(react-native@0.76.7(@babel/core@7.26.0)(@babel/preset-env@7.26.0(@babel/core@7.26.0))(@react-native-community/cli-server-api@15.0.1)(@types/react@18.3.12)(react@18.3.1))(react@18.3.1)
       events: 3.3.0
@@ -27192,7 +27214,7 @@ snapshots:
       readable-stream: 4.5.2
       util: 0.12.5
 
-  react-native-quick-crypto@1.0.0-beta.15(react-native-nitro-modules@0.25.2(react-native@0.76.8(@babel/core@7.26.10)(@babel/preset-env@7.26.0(@babel/core@7.26.10))(@react-native-community/cli@15.0.1(typescript@5.6.2))(@types/react@18.3.18)(react@18.3.1))(react@18.3.1))(react-native@0.76.8(@babel/core@7.26.10)(@babel/preset-env@7.26.0(@babel/core@7.26.10))(@react-native-community/cli@15.0.1(typescript@5.6.2))(@types/react@18.3.18)(react@18.3.1))(react@18.3.1):
+  react-native-quick-crypto@1.0.0-beta.16(react-native-nitro-modules@0.25.2(react-native@0.76.8(@babel/core@7.26.10)(@babel/preset-env@7.26.0(@babel/core@7.26.10))(@react-native-community/cli@15.0.1(typescript@5.6.2))(@types/react@18.3.18)(react@18.3.1))(react@18.3.1))(react-native@0.76.8(@babel/core@7.26.10)(@babel/preset-env@7.26.0(@babel/core@7.26.10))(@react-native-community/cli@15.0.1(typescript@5.6.2))(@types/react@18.3.18)(react@18.3.1))(react@18.3.1):
     dependencies:
       '@craftzdog/react-native-buffer': 6.0.5(react-native@0.76.8(@babel/core@7.26.10)(@babel/preset-env@7.26.0(@babel/core@7.26.10))(@react-native-community/cli@15.0.1(typescript@5.6.2))(@types/react@18.3.18)(react@18.3.1))(react@18.3.1)
       events: 3.3.0

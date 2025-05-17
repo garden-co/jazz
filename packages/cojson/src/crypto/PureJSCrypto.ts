@@ -67,7 +67,7 @@ export class PureJSCrypto extends CryptoProvider<Blake3State> {
     return this.blake3HashOnce(input).slice(0, 24);
   }
 
-  private generateJsonNonce(material: JsonValue): Uint8Array {
+  protected generateJsonNonce(material: JsonValue): Uint8Array {
     return this.generateNonce(textEncoder.encode(stableStringify(material)));
   }
 
