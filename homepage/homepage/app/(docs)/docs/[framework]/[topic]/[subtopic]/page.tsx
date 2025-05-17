@@ -1,4 +1,4 @@
-import { docNavigationItems } from "@/content/docs/docNavigationItems.js";
+import { docNavigationItems } from "@/content/docs/docNavigationItems";
 import { Framework, frameworks } from "@/content/framework";
 import { DocPage, getDocMetadata } from "@/lib/docMdxContent";
 

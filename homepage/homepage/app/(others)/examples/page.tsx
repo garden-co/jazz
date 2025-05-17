@@ -679,13 +679,13 @@ export default function Page() {
             </div>
 
             <GappedGrid>
-              {category.examples.map((example) =>
+              {category.examples.map((example) => (
                 <ExampleCard
                   className="border bg-stone-50 shadow-sm p-3 rounded-lg dark:bg-stone-950"
                   key={example.slug}
                   example={example}
                 />
-              )}
+              ))}
             </GappedGrid>
           </div>
         ))}
