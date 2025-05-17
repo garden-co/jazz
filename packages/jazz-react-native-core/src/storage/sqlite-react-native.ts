@@ -4,7 +4,7 @@ import {
   type Peer,
   cojsonInternals,
 } from "cojson";
-import { StorageManagerAsync } from "cojson-storage";
+import { StorageManagerSync } from "cojson-storage";
 import { SQLiteClient } from "./client.js";
 import type { SQLiteAdapter } from "./sqlite-adapter.js";
 
@@ -13,9 +13,9 @@ export interface SQLiteConfig {
 }
 
 export class SQLiteReactNative {
-  private syncManager!: StorageManagerAsync;
+  private syncManager!: StorageManagerSync;
   private dbClient!: SQLiteClient;
-  private initialized: Promise<void>;
+  private initialized: void;
   private isInitialized = false;
 
   constructor(
@@ -26,21 +26,21 @@ export class SQLiteReactNative {
     this.initialized = this.initialize(adapter, fromLocalNode, toLocalNode);
   }
 
-  private async initialize(
+  private initialize(
     adapter: SQLiteAdapter,
     fromLocalNode: IncomingSyncStream,
     toLocalNode: OutgoingSyncQueue,
-  ): Promise<void> {
+  ): void {
     try {
       // 1. First initialize the adapter
-      await adapter.initialize();
+      adapter.initialize();
 
       // 2. Create and initialize the client
       this.dbClient = new SQLiteClient(adapter, toLocalNode);
-      await this.dbClient.ensureInitialized();
+      this.dbClient.ensureInitialized();
 
       // 3. Create the sync manager
-      this.syncManager = new StorageManagerAsync(this.dbClient, toLocalNode);
+      this.syncManager = new StorageManagerSync(this.dbClient, toLocalNode);
 
       // 4. Start message processing
       this.isInitialized = true;
@@ -57,7 +57,7 @@ export class SQLiteReactNative {
     try {
       for await (const msg of fromLocalNode) {
         if (!this.isInitialized) {
-          await this.initialized;
+          this.initialized;
         }
 
         try {
@@ -95,7 +95,7 @@ export class SQLiteReactNative {
     }
 
     // Initialize adapter before creating any connections
-    await config.adapter.initialize();
+    config.adapter.initialize();
 
     const [localNodeAsPeer, storageAsPeer] = cojsonInternals.connectedPeers(
       "localNode",
@@ -114,7 +114,7 @@ export class SQLiteReactNative {
     );
 
     // Wait for full initialization before returning peer
-    await storage.initialized;
+    storage.initialized;
 
     return { ...storageAsPeer, priority: 100 };
   }

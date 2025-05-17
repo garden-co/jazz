@@ -22,7 +22,8 @@
     "playwright": "^1.50.1",
     "turbo": "^2.3.1",
     "typedoc": "^0.25.13",
-    "vitest": "catalog:"
+    "vitest": "catalog:",
+    "yalc": "^1.0.0-pre.53"
   },
   "scripts": {
     "dev": "turbo dev",
@@ -37,7 +38,8 @@
     "changeset-version": "changeset version && pnpm i --no-frozen-lockfile",
     "release": "turbo run build --filter='./packages/*' && pnpm changeset publish && git push --follow-tags",
     "clean": "rm -rf ./packages/*/dist && rm -rf ./packages/*/node_modules && rm -rf ./examples/*/node_modules && rm -rf ./examples/*/dist",
-    "check-catalog-deps": "node scripts/check-catalog-deps.js"
+    "check-catalog-deps": "node scripts/check-catalog-deps.js",
+    "yalc:all": "for d in packages/*/; do echo $d; cd $d; pnpm yalc push --replace --sig; cd '../../'; done"
   },
   "version": "0.0.0",
   "pnpm": {
