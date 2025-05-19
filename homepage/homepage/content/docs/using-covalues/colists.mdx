@@ -38,16 +38,12 @@ const Task = co.map({
   title: z.string(),
   status: z.literal(["todo", "in-progress", "complete"]),
 });
-
-const ListOfResources = co.list(z.string());
-
-const ListOfTasks = co.list(Task);
 // ---cut---
 // Create an empty list
-const resources = ListOfResources.create([]);
+const resources = co.list(z.string()).create([]);
 
 // Create a list with initial items
-const tasks = ListOfTasks.create([
+const tasks = co.list(Task).create([
   Task.create({ title: "Prepare soil beds", status: "in-progress" }),
   Task.create({ title: "Order compost", status: "todo" })
 ]);
@@ -330,7 +326,7 @@ const task = Task.create({
 project.tasks.push(task);
 
 // Access the project from the task
-console.log(task.project); // { name: "Garden Project", tasks: [] }
+console.log(task.project); // { name: "Garden Project", tasks: [task] }
 ```
 </CodeGroup>
 
