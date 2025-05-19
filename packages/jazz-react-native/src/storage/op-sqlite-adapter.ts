@@ -7,35 +7,22 @@ import { Platform } from "react-native";
 
 type OPSQLiteDB = ReturnType<typeof opSQLite.open>;
 
-import {
-  type SQLiteDatabaseDriver,
-  getSQLiteMigrationQueries,
-} from "jazz-react-native-core";
+import { type SQLiteDatabaseDriver } from "jazz-react-native-core";
 
 export class OPSQLiteAdapter implements SQLiteDatabaseDriver {
   private db: OPSQLiteDB | null = null;
   private dbName: string;
-  private dbPath: string;
 
   public constructor(dbName: string = "jazz-storage") {
     this.dbName = dbName;
-    this.dbPath =
+    const dbPath =
       Platform.OS === "ios" ? IOS_LIBRARY_PATH : ANDROID_DATABASE_PATH;
-  }
 
-  public initialize(): void {
     const db = (this.db = opSQLite.open({
       name: this.dbName,
-      location: this.dbPath,
+      location: dbPath,
     }));
     db.execute("PRAGMA journal_mode=WAL");
-
-    const rows = this.query<{ user_version: string }>("PRAGMA user_version");
-    const currentVersion = Number(rows[0]?.user_version) ?? 0;
-    const migrationQueries = getSQLiteMigrationQueries(currentVersion);
-    for (const sql of migrationQueries) {
-      this.run(sql);
-    }
   }
 
   public query<T>(sql: string, params?: unknown[]): T[] {

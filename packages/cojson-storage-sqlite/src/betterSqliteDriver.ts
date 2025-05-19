@@ -1,31 +1,18 @@
 import Database, { type Database as DatabaseT } from "better-sqlite3";
-import {
-  type SQLiteDatabaseDriver,
-  type TransactionRow,
-  getSQLiteMigrationQueries,
-} from "cojson-storage";
+import type { SQLiteDatabaseDriver } from "cojson-storage";
 
 export class BetterSqliteDriver implements SQLiteDatabaseDriver {
   private readonly db: DatabaseT;
 
   constructor(filename: string) {
-    this.db = new Database(filename);
+    const db = new Database(filename);
+    this.db = db;
+    db.pragma("journal_mode = WAL");
   }
 
-  initialize() {
-    const db = this.db;
-
-    db.pragma("journal_mode = WAL");
-
-    const oldVersion = (
-      db.pragma("user_version") as [{ user_version: number }]
-    )[0].user_version as number;
-
-    const migrations = getSQLiteMigrationQueries(oldVersion);
-
-    for (const migration of migrations) {
-      db.prepare(migration).run();
-    }
+  getUserVersion() {
+    return (this.db.pragma("user_version") as [{ user_version: number }])[0]
+      .user_version as number;
   }
 
   run(sql: string, params: unknown[]) {

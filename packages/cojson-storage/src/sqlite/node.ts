@@ -8,6 +8,7 @@ import {
 } from "cojson";
 import { StorageManagerSync } from "../managerSync.js";
 import { SQLiteClient } from "./client.js";
+import { getSQLiteMigrationQueries } from "./sqliteMigrations.js";
 import type { SQLiteDatabaseDriver } from "./types.js";
 
 export class SQLiteNodeBase {
@@ -77,6 +78,15 @@ export class SQLiteNodeBase {
       "storage",
       { peer1role: "client", peer2role: "storage", crashOnClose: true },
     );
+
+    const rows = db.query<{ user_version: string }>("PRAGMA user_version", []);
+    const userVersion = Number(rows[0]?.user_version) ?? 0;
+
+    const migrations = getSQLiteMigrationQueries(userVersion);
+
+    for (const migration of migrations) {
+      db.run(migration, []);
+    }
 
     new SQLiteNodeBase(db, localNodeAsPeer.incoming, localNodeAsPeer.outgoing);
 

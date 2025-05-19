@@ -11,7 +11,6 @@ export class SQLiteNode extends SQLiteNodeBase {
     localNodeName?: string;
   }): Promise<Peer> {
     const db = new BetterSqliteDriver(filename);
-    db.initialize();
 
     return SQLiteNodeBase.create({
       db,

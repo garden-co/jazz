@@ -1,9 +1,6 @@
 import { openDatabaseSync } from "expo-sqlite";
 import type { SQLiteBindValue, SQLiteDatabase } from "expo-sqlite";
-import {
-  type SQLiteDatabaseDriver,
-  getSQLiteMigrationQueries,
-} from "jazz-react-native-core";
+import { type SQLiteDatabaseDriver } from "jazz-react-native-core";
 
 export class ExpoSQLiteAdapter implements SQLiteDatabaseDriver {
   private db: SQLiteDatabase | null = null;
@@ -11,21 +8,11 @@ export class ExpoSQLiteAdapter implements SQLiteDatabaseDriver {
 
   public constructor(dbName: string = "jazz-storage") {
     this.dbName = dbName;
-  }
-
-  public initialize(): void {
     const db = openDatabaseSync(this.dbName, {
       useNewConnection: true,
     });
     db.execSync("PRAGMA journal_mode = WAL");
     this.db = db;
-
-    const rows = this.query<{ user_version: string }>("PRAGMA user_version");
-    const currentVersion = Number(rows[0]?.user_version) ?? 0;
-    const migrationQueries = getSQLiteMigrationQueries(currentVersion);
-    for (const sql of migrationQueries) {
-      this.run(sql);
-    }
   }
 
   public query<T>(sql: string, params?: unknown[]): T[] {

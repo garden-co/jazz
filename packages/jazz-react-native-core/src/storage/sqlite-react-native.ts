@@ -11,9 +11,6 @@ export class SQLiteReactNative extends SQLiteNodeBase {
       throw new Error("SQLite adapter is required");
     }
 
-    // Initialize adapter before creating any connections
-    config.adapter.initialize();
-
     const [localNodeAsPeer, storageAsPeer] = cojsonInternals.connectedPeers(
       "localNode",
       "storage",
