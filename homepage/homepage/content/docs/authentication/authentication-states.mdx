@@ -6,34 +6,13 @@ import { CodeGroup, ContentByFramework } from "@/components/forMdx";
 
 # Authentication States
 
-Jazz provides three distinct authentication states that determine how users interact with your app: **Anonymous Authentication**, **Guest Mode**, and **Authenticated Account**.
+Jazz provides three distinct authentication states that determine how users interact with your app:
 
-## Anonymous Authentication
+- [**Anonymous Authentication**](/docs/building-with-jazz/authentication#anonymous-authentication)
+- [**Authenticated Account**](/docs/building-with-jazz/authentication#authenticated-account)
+- [**Guest Mode**](/docs/building-with-jazz/authentication#guest-mode)
 
-When a user loads a Jazz application for the first time, we create a new Account by generating keys and storing them locally:
-
-- Users have full accounts with unique IDs
-- Data persists between sessions on the same device
-- Can be upgraded to a full account (passkey, passphrase, etc.)
-- Data syncs across the network (if enabled)
-
-## Authenticated Account
-
-**Authenticated Account** provides full multi-device functionality:
-
-- Persistent identity across multiple devices
-- Full access to all application features
-- Data can sync across all user devices
-- Multiple authentication methods available
-
-## Guest Mode
-
-**Guest Mode** provides a completely accountless context:
-
-- No persistent identity or account
-- Only provides access to publicly readable content
-- Cannot save or sync user-specific data
-- Suitable for read-only access to public resources
+**Note:** For a conceptual overview of authentication states, see the [Building with Jazz - Authentication](/docs/building-with-jazz/authentication). This document focuses on implementation details and code examples.
 
 ## Detecting Authentication State
 

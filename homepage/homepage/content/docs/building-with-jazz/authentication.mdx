@@ -16,7 +16,12 @@ This approach provides strong security while enabling seamless collaboration acr
 
 ## Authentication States
 
-When a user interacts with your Jazz application, they can be in one of three states:
+Jazz provides three distinct authentication states that determine how users interact with your application:
+- [Anonymous Authentication](#anonymous-authentication)
+- [Authenticated Account](#authenticated-account)
+- [Guest Mode](#guest-mode)
+
+For implementation details, code examples, and state detection patterns, see the [Authentication States](/docs/authentication/authentication-states) reference.
 
 ### Anonymous Authentication
 
@@ -26,7 +31,7 @@ This is the default starting point for new users. Jazz automatically creates a l
 - Users can create and edit content immediately
 - Their work can be upgraded to a full account later
 
-This approach enables a frictionless onboarding experience, allowing users to start using your application without immediately signing up.
+This approach enables a frictionless onboarding experience, allowing users to start using your application without immediately signing up. You can [detect this state](/docs/authentication/authentication-states#detecting-authentication-state) in your application using Jazz's hooks.
 
 ### Authenticated Account
 
@@ -36,7 +41,7 @@ Once a user creates a full account, they enter the authenticated state. With an 
 - Users can collaborate with others
 - Their identity is consistent across sessions
 
-Authenticated accounts are the foundation of collaborative applications, enabling real-time data synchronization across devices and between users.
+Authenticated accounts are the foundation of collaborative applications, enabling real-time data synchronization across devices and between users. You can [configure sync behavior](/docs/authentication/authentication-states#controlling-sync-for-different-authentication-states) based on authentication state through the Jazz provider.
 
 ### Guest Mode
 
@@ -46,18 +51,18 @@ Applications can also offer a guest mode that provides read-only access without 
 - No data is saved or synchronized
 - No identity is established
 
-Guest mode is ideal for users who just want to view content without creating an account.
+Guest mode is ideal for users who just want to view content without creating an account. This mode can be enabled or disabled through [provider configuration](/docs/authentication/authentication-states#configuring-guest-mode-access).
 
 ## Authentication Flow
 
 Understanding the flow between authentication states helps you design a smooth user experience:
 
-1. **First Visit**: Users start in anonymous authentication with a new local account
-2. **Registration**: When users register, their anonymous account is upgraded to authenticated
-3. **Logout**: When users log out, they return to anonymous authentication with a new account
-4. **Login**: When users log in again, they access their authenticated account
+1. **First Visit**: Users start in **anonymous authentication** with a new local account
+2. **Registration**: When users register, their anonymous account is upgraded to **authenticated**
+3. **Logout**: When users log out, they return to **anonymous authentication** with a new account
+4. **Login**: When users log in again, they access their **authenticated** account
 
-This flow preserves user data during transitions and creates a seamless experience.
+This flow is designed to create a seamless experience. When users upgrade from anonymous to authenticated accounts, Jazz provides mechanisms to [migrate their data](/docs/authentication/authentication-states#migrating-data-from-anonymous-to-authenticated-account) through the `onAnonymousAccountDiscarded` handler, ensuring no work is lost during authentication transitions.
 
 ## Authentication Methods
 
@@ -105,6 +110,11 @@ Now that you understand authentication, you're ready to learn about [Groups and 
 
 For more detailed information about authentication, see:
 - [Authentication States](/docs/authentication/authentication-states) - Detailed explanation of authentication states and implementation
+  - [Detecting Authentication State](/docs/authentication/authentication-states#detecting-authentication-state) - Using hooks to check current authentication
+  - [Data Migration](/docs/authentication/authentication-states#migrating-data-from-anonymous-to-authenticated-account) - Preserving user data during authentication changes
+  - [Provider Configuration](/docs/authentication/authentication-states#provider-configuration-for-authentication) - Customizing authentication behavior
+  - [Sync Control](/docs/authentication/authentication-states#controlling-sync-for-different-authentication-states) - Managing network sync based on authentication
 - [Passkey Authentication](/docs/authentication/passkey) - Implementing passkey authentication
 - [Passphrase Authentication](/docs/authentication/passphrase) - Implementing passphrase authentication
 - [Clerk Authentication](/docs/authentication/clerk) - Integrating with Clerk for third-party authentication
+- [JazzProvider Options](/docs/project-setup/providers/#additional-options) - Complete provider configuration documentation
