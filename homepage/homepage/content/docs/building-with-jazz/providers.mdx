@@ -23,11 +23,14 @@ Here's a simple example of a provider in a React application:
 <CodeGroup>
 ```tsx twoslash
 // @filename: schema.ts
-import { Account, co } from "jazz-tools";
+import { co, z } from "jazz-tools";
 
-export class MyAppAccount extends Account {
-  name = co.string;
-}
+export const MyAppAccount = co.account({
+  root: co.map({}),
+  profile: co.profile({
+    name: z.string(),
+  }),
+});
 
 // @filename: app.tsx
 import * as React from "react";
@@ -50,13 +53,6 @@ export function AppWrapper({ children }: { children: React.ReactNode }) {
     </JazzProvider>
   );
 }
-
-// Register your schema for TypeScript
-declare module "jazz-react" {
-  interface Register {
-    Account: MyAppAccount;
-  }
-}
 ```
 </CodeGroup>
 
@@ -77,12 +73,12 @@ Subscriptions are how components in your application access Jazz data.
 <CodeGroup>
 ```tsx twoslash
 // @filename: schema.ts
-import { co, CoMap } from "jazz-tools";
+import { co, z } from "jazz-tools";
 
-export class Task extends CoMap {
-  title = co.string;
-  completed = co.boolean;
-}
+export const Task = co.map({
+  title: z.string(),
+  completed: z.boolean(),
+});
 // @filename: TaskComponent.tsx
 import * as React from "react";
 import { ID } from "jazz-tools";
@@ -90,7 +86,7 @@ import { Task } from "./schema";
 // ---cut---
 import { useCoState } from "jazz-react";
 
-function TaskComponent({ taskId }: { taskId: ID<Task> }) {
+function TaskComponent({ taskId }: { taskId: ID<typeof Task> }) {
   // Subscribe to a Task by ID
   const task = useCoState(Task, taskId);
   
@@ -133,19 +129,19 @@ When working with complex data structures that reference other CoValues, you can
 <CodeGroup>
 ```tsx twoslash
 // @filename: schema.ts
-import { co, CoMap, CoList } from "jazz-tools";
+import { co, z } from "jazz-tools";
 
-export class Task extends CoMap {
-  title = co.string;
-  completed = co.boolean;
-}
+export const Task = co.map({
+  title: z.string(),
+  completed: z.boolean(),
+});
 
-export class TaskList extends CoList.Of(co.ref(Task)) {}
+export const TaskList = co.list(Task);
 
-export class Project extends CoMap {
-  title = co.string;
-  tasks = co.ref(TaskList);
-}
+export const Project = co.map({
+  title: z.string(),
+  tasks: TaskList,
+});
 // @filename: ProjectComponent.tsx
 import * as React from "react";
 import { ID } from "jazz-tools";
@@ -153,7 +149,7 @@ import { Project } from "./schema";
 // ---cut---
 import { useCoState } from "jazz-react";
 
-function ProjectComponent({ projectId }: { projectId: ID<Project> }) {
+function ProjectComponent({ projectId }: { projectId: ID<typeof Project> }) {
   // Subscribe to a Project and its tasks
   const project = useCoState(Project, projectId, {
     // Load the tasks list and all tasks inside it

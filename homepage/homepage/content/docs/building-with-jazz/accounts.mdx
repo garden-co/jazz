@@ -3,7 +3,9 @@ export const metadata = { title: "Accounts" };
 
 # Accounts
 
-Accounts are the foundation of user identity in Jazz. They serve as the entry point to all user data and enable collaboration between users. With [providers](/docs/building-with-jazz/providers) in place, the next step is understanding how users and their data are represented.
+Accounts represent user identity and serve as the entry point to all user data in Jazz.
+
+After setting up providers, accounts provide the foundation for user data and multi-user interactions.
 
 ## What are Accounts in Jazz?
 
@@ -29,33 +31,25 @@ Here's a simple example of a Jazz Account:
 
 <CodeGroup>
 ```ts twoslash
-import "jazz-react";
-import { Account, CoMap, Profile, co } from "jazz-tools";
+import { co, z } from "jazz-tools";
 
 // Custom root structure for private user data
-export class MyAppRoot extends CoMap {
-  notes = co.string;
-  settings = co.json<{ theme: string }>();
-}
+export const MyAppRoot = co.map({
+  notes: z.string(),
+  settings: z.object({ theme: z.string() }), // Non-collaborative object
+});
 
 // Extended profile with additional fields
-export class MyAppProfile extends Profile {
-  name = co.string;  // Inherited from base Profile
-  bio = co.string;   // Custom field
-}
+export const MyAppProfile = co.profile({
+  name: z.string(),
+  bio: z.string(),
+});
 
 // Complete account definition
-export class MyAppAccount extends Account {
-  profile = co.ref(MyAppProfile);  // Public data
-  root = co.ref(MyAppRoot);        // Private data
-}
-
-// Register with TypeScript
-declare module "jazz-react" {
-  interface Register {
-    Account: MyAppAccount;
-  }
-}
+export const MyAppAccount = co.account({
+  profile: MyAppProfile,
+  root: MyAppRoot,
+});
 ```
 </CodeGroup>
 
@@ -78,43 +72,42 @@ As your application evolves, you might need to update your account schema. Jazz 
 
 <CodeGroup>
 ```ts twoslash
-import { Account, CoMap, Profile, co, CoList, Group } from "jazz-tools";
+import { Group, co, z } from "jazz-tools";
 
 // A new feature - bookmarks
-class Bookmark extends CoMap {
-  url = co.string;
-  title = co.string;
-}
-
-class BookmarkList extends CoList.Of(co.ref(Bookmark)) {}
+export const Bookmark = co.map({
+  url: z.string(),
+  title: z.string(),
+});
 
 // Root data with new bookmarks field
-class MyAppRoot extends CoMap {
-  notes = co.string;
-  bookmarks = co.optional.ref(BookmarkList);  // New field
-}
+export const MyAppRoot = co.map({
+  notes: z.string(),
+  bookmarks: z.optional(co.list(Bookmark)), // New field
+});
 
 // ---cut---
 // Account with migration support
-export class MyAppAccount extends Account {
-  profile = co.ref(Profile);
-  root = co.ref(MyAppRoot);
-  
-  // Migration runs when user logs in
-  async migrate() {
+export const MyAppAccount = co
+  .account({
+    root: MyAppRoot,
+    profile: co.profile(),
+  })
+  .withMigration((account) => {
+    // Migration runs when user logs in
+
     // Create root if it doesn't exist
-    if (!this.root) {
-      this.root = MyAppRoot.create({
+    if (!account.root) {
+      account.root = MyAppRoot.create({
         notes: "Welcome to our app!",
       });
     }
-    
+
     // Add bookmarks list if it doesn't exist
-    if (!this.root?.bookmarks) {
-      this.root.bookmarks = BookmarkList.create([], Group.create());
+    if (!account.root?.bookmarks) {
+      account.root.bookmarks = co.list(Bookmark).create([], Group.create());
     }
-  }
-}
+  });
 ```
 </CodeGroup>
 
@@ -124,7 +117,7 @@ For more information see [Migrations](/docs/schemas/accounts-and-migrations#popu
 
 ## Next Steps
 
-Now that you understand accounts, you're ready to learn about [Authentication](/docs/building-with-jazz/authentication) - the process that connects users to their accounts.
+After understanding accounts, implement [Authentication](/docs/building-with-jazz/authentication) to connect users to their accounts.
 
 ## Further Reading
 

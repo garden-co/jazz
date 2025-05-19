@@ -16,12 +16,12 @@ When you create a new CoValue, you can specify its owner (by default, the curren
 
 <CodeGroup>
 ```tsx twoslash
-import { Group, Account, CoMap, co } from "jazz-tools";
+import { Group, co, z } from "jazz-tools";
 
-class Note extends CoMap {
-  title = co.string;
-  content = co.string;
-}
+export const Note = co.map({
+  title: z.string(),
+  content: z.string(),
+});
 
 // ---cut---
 // Create data owned by an individual account
@@ -95,19 +95,19 @@ Here's an example of accessing data that might be shared with you:
 <CodeGroup>
 ```tsx twoslash
 // @filename: schema.ts
-import { co, CoMap } from "jazz-tools";
+import { co, z } from "jazz-tools";
 
-export class Document extends CoMap {
-  title = co.string;
-  content = co.string;
-}
+export const Document = co.map({
+  title: z.string(),
+  content: z.string(),
+});
 // @filename: SharedDocumentView.tsx
 import * as React from "react";
 import { useCoState } from "jazz-react";
 import { Document } from "./schema";
 import { ID } from "jazz-tools";
 // ---cut---
-function SharedDocumentView({ documentId }: { documentId: ID<Document> }) {
+function SharedDocumentView({ documentId }: { documentId: ID<typeof Document> }) {
   // Access a shared document by its ID
   const document = useCoState(Document, documentId);
   

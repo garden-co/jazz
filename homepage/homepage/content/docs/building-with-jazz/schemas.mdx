@@ -46,19 +46,19 @@ At their core, Jazz schemas are just TypeScript classes that extend CoValue type
 
 <CodeGroup>
 ```ts twoslash
-import { co, CoMap, CoList } from "jazz-tools";
+import { co, z } from "jazz-tools";
 
 // Define a list of tasks (extends CoList)
-class TaskList extends CoList.Of(co.string) {}
+export const TaskList = co.list(z.string());
 
 // Define a project (extends CoMap)
-export class Project extends CoMap {
+export const Project = co.map({
   // Simple field
-  title = co.string;
+  title: z.string(),
   
   // Reference to another CoValue
-  tasks = co.ref(TaskList);
-}
+  tasks: TaskList,
+});
 ```
 </CodeGroup>
 
@@ -75,17 +75,17 @@ Jazz provides several CoValue types to model different kinds of data. Here's a s
 
 <CodeGroup>
 ```ts twoslash
-import { co, CoMap, CoList } from "jazz-tools";
+import { co, z } from "jazz-tools";
 
-// CoMap - for object-like data with named properties
-export class Task extends CoMap {
-  description = co.string;
-  completed = co.boolean;
-  dueDate = co.Date;
-}
+// co.map - for object-like data with named properties
+export const Task = co.map({
+  description: z.string(),
+  completed: z.boolean(),
+  dueDate: z.date(),
+});
 
 // CoList - for ordered collections of items
-export class TaskList extends CoList.Of(co.ref(Task)) {}
+export const TaskList = co.list(Task);
 ```
 </CodeGroup>
 
@@ -104,32 +104,34 @@ Jazz provides a range of field types through the `co` namespace. Here's an examp
 
 <CodeGroup>
 ```ts twoslash
-import { co, CoMap, CoList } from "jazz-tools";
+import { co, z, CoListSchema } from "jazz-tools";
 
 // A simple category
-class Category extends CoMap {
-  name = co.string;
-}
+export const Category = co.map({
+  name: z.string(),
+});
 
 // ---cut---
 // A product with various field types
-export class Product extends CoMap {
+export const Product = co.map({
   // Basic types
-  name = co.string;
-  price = co.number;
-  inStock = co.boolean;
-  createdAt = co.Date;
+  name: z.string(),
+  price: z.number(),
+  inStock: z.boolean(),
+  createdAt: z.date(),
   
   // Enum/literal type
-  status = co.literal("draft", "published", "archived");
+  status: z.literal(["draft", "published", "archived"]),
   
   // Optional field
-  description = co.optional.string;
+  description: z.optional(z.string()),
   
   // References to other CoValues
-  category = co.ref(Category);
-  relatedProducts = co.optional.ref(CoList.Of(co.ref(Product)));
-}
+  category: Category,
+  get relatedProducts(): z.ZodOptional<CoListSchema<typeof Product>> {
+    return z.optional(co.list(Product));
+  }
+});
 ```
 </CodeGroup>
 
