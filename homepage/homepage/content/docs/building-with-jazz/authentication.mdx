@@ -66,41 +66,21 @@ This flow is designed to create a seamless experience. When users upgrade from a
 
 ## Authentication Methods
 
-Jazz offers several authentication methods to suit different needs:
+Jazz offers several authentication methods, each with different strengths. For implementation details, see the specific documentation for each method.
 
-### Passkeys
-
-Passkeys use biometric authentication (fingerprint, face recognition) and device security to provide a passwordless experience:
-
-- **Advantages**: Highly secure, easy to use, no passwords to remember
-- **Best for**: Modern applications with security-conscious users
-- **Limitations**: Requires platform support (most modern browsers and devices)
-
-### Passphrases
-
-Passphrases provide a recovery method using a sequence of words:
-
-- **Advantages**: Works across all platforms, user-controlled recovery
-- **Best for**: Applications where users may need manual account recovery
-- **Limitations**: Users must securely store their passphrase
-
-### Third-Party Authentication
-
-Jazz supports integration with authentication providers like Clerk:
-
-- **Advantages**: Offers social login options (Google, GitHub, etc.)
-- **Best for**: Applications where users expect social login options
-- **Limitations**: Depends on external service availability
+- [Passkeys](/docs/authentication/passkey) - Biometric authentication using TouchID/FaceID. The most secure option with excellent user experience, but requires modern device support.
+- [Passphrases](/docs/authentication/passphrase) - Sequence of words users store and enter when logging in. Works everywhere, even offline, but users must securely store their phrase.
+- [Clerk Integration](/docs/authentication/clerk) - Third-party authentication with email/password, social logins, and user management. Familiar for users but requires internet connectivity.
 
 ## Choosing Authentication Methods
 
-When designing your application, consider offering multiple authentication methods to accommodate different user preferences and scenarios:
+When designing your application, consider offering multiple authentication methods to accommodate different user preferences and scenarios. For most applications, we recommend using:
 
-- Passkeys for primary authentication
-- Passphrases as a recovery method
-- Third-party options for ease of onboarding
+- **Passkeys** as the primary authentication method for security and ease of use
+- **Passphrases** as a fallback or recovery method for devices without biometric support
+- **Clerk or Jazz Cloud** for applications that need social login options or traditional email/password flows
 
-The right combination depends on your user base and application requirements.
+For examples of different authentication methods in action, check out our [example apps](/docs/examples).
 
 ## Next Steps
 
@@ -114,7 +94,4 @@ For more detailed information about authentication, see:
   - [Data Migration](/docs/authentication/authentication-states#migrating-data-from-anonymous-to-authenticated-account) - Preserving user data during authentication changes
   - [Provider Configuration](/docs/authentication/authentication-states#provider-configuration-for-authentication) - Customizing authentication behavior
   - [Sync Control](/docs/authentication/authentication-states#controlling-sync-for-different-authentication-states) - Managing network sync based on authentication
-- [Passkey Authentication](/docs/authentication/passkey) - Implementing passkey authentication
-- [Passphrase Authentication](/docs/authentication/passphrase) - Implementing passphrase authentication
-- [Clerk Authentication](/docs/authentication/clerk) - Integrating with Clerk for third-party authentication
-- [JazzProvider Options](/docs/project-setup/providers/#additional-options) - Complete provider configuration documentation
+- [Provider Options](/docs/project-setup/providers/#additional-options) - Complete provider configuration documentation
