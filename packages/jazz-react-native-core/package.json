@@ -40,8 +40,9 @@
     "cojson-transport-ws": "workspace:*",
     "jazz-react-core": "workspace:*",
     "jazz-tools": "workspace:*",
+    "react-native-fast-encoder": "^0.2.0",
     "react-native-nitro-modules": "0.25.2",
-    "react-native-quick-crypto": "1.0.0-beta.15"
+    "react-native-quick-crypto": "1.0.0-beta.16"
   },
   "devDependencies": {
     "typescript": "catalog:"
