@@ -2,6 +2,7 @@ import {
   docNavigationItems,
   flatItemsWithNavLinks,
 } from "@/content/docs/docNavigationItems";
+import { Icon } from "@garden-co/design-system/src/components/atoms/Icon";
 import { Separator } from "@garden-co/design-system/src/components/atoms/Separator";
 import Link from "next/link";
 
@@ -37,8 +38,9 @@ export function PreviousNextLinks({ slug, framework }: PreviousNextLinksProps) {
             )}
             className="group py-5 xl:pr-12"
           >
-            <span className="text-xs block md:text-sm md:mb-1">Previous</span>
-            <div className="text-highlight font-medium inline-flex gap-2 items-center group-hover:text-blue">
+            <span className="hidden text-sm mb-1 sm:block">Previous</span>
+            <div className="text-sm text-highlight font-medium inline-flex gap-1 items-center group-hover:text-blue sm:text-base">
+              <Icon name="previous" size="xs" className="sm:hidden" />
               {currentItem.previous.name}
             </div>
           </Link>
@@ -48,9 +50,10 @@ export function PreviousNextLinks({ slug, framework }: PreviousNextLinksProps) {
             href={currentItem.next.href.replace("/docs", `/docs/${framework}`)}
             className="group text-right ml-auto py-5 xl:pl-12"
           >
-            <span className="text-xs block md:text-sm md:mb-1">Next</span>
-            <div className="text-highlight font-medium inline-flex gap-2 items-center group-hover:text-blue">
+            <span className="hidden text-sm mb-1 sm:block">Next</span>
+            <div className="text-sm text-highlight font-medium inline-flex gap-1 items-center group-hover:text-blue sm:text-base">
               {currentItem.next.name}
+              <Icon name="next" size="xs" className="sm:hidden" />
             </div>
           </Link>
         )}

@@ -9,7 +9,9 @@ import {
   Brackets,
   CheckIcon,
   ChevronDown,
+  ChevronLeftIcon,
   ChevronRight,
+  ChevronRightIcon,
   ClipboardIcon,
   CodeIcon,
   FileLock2Icon,
@@ -89,6 +91,9 @@ const icons = {
   colist: Brackets,
   user: UserIcon,
   group: UsersIcon,
+
+  previous: ChevronLeftIcon,
+  next: ChevronRightIcon,
 
   // text editor icons
   bold: BoldIcon,
