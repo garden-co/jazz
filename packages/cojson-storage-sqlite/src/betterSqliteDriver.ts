@@ -10,17 +10,16 @@ export class BetterSqliteDriver implements SQLiteDatabaseDriver {
     db.pragma("journal_mode = WAL");
   }
 
-  getUserVersion() {
-    return (this.db.pragma("user_version") as [{ user_version: number }])[0]
-      .user_version as number;
-  }
-
   run(sql: string, params: unknown[]) {
     this.db.prepare(sql).run(params);
   }
 
   query<T>(sql: string, params: unknown[]): T[] {
     return this.db.prepare(sql).all(params) as T[];
+  }
+
+  get<T>(sql: string, params: unknown[]): T | undefined {
+    return this.db.prepare(sql).get(params) as T | undefined;
   }
 
   transaction(callback: () => unknown) {

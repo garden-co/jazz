@@ -36,10 +36,10 @@ export class SQLiteClient implements DBClientInterfaceSync {
   }
 
   getCoValue(coValueId: RawCoID): StoredCoValueRow | undefined {
-    const coValueRow = this.db.query<RawCoValueRow & { rowID: number }>(
+    const coValueRow = this.db.get<RawCoValueRow & { rowID: number }>(
       "SELECT * FROM coValues WHERE id = ?",
       [coValueId],
-    )[0];
+    );
 
     if (!coValueRow) return;
 
@@ -72,10 +72,10 @@ export class SQLiteClient implements DBClientInterfaceSync {
     coValueRowId: number,
     sessionID: SessionID,
   ): StoredSessionRow | undefined {
-    return this.db.query<StoredSessionRow>(
+    return this.db.get<StoredSessionRow>(
       "SELECT * FROM sessions WHERE coValue = ? AND sessionID = ?",
       [coValueRowId, sessionID],
-    )[0];
+    );
   }
 
   getNewTransactionInSession(
@@ -110,10 +110,10 @@ export class SQLiteClient implements DBClientInterfaceSync {
   }
 
   addCoValue(msg: CojsonInternalTypes.NewContentMessage): number {
-    const result = this.db.query<{ rowID: number }>(
+    const result = this.db.get<{ rowID: number }>(
       "INSERT INTO coValues (id, header) VALUES (?, ?) RETURNING rowID",
       [msg.id, JSON.stringify(msg.header)],
-    )[0];
+    );
 
     if (!result) {
       throw new Error("Failed to add coValue");
@@ -127,7 +127,7 @@ export class SQLiteClient implements DBClientInterfaceSync {
   }: {
     sessionUpdate: SessionRow;
   }): number {
-    const result = this.db.query<{ rowID: number }>(
+    const result = this.db.get<{ rowID: number }>(
       `INSERT INTO sessions (coValue, sessionID, lastIdx, lastSignature, bytesSinceLastSignature) VALUES (?, ?, ?, ?, ?)
                             ON CONFLICT(coValue, sessionID) DO UPDATE SET lastIdx=excluded.lastIdx, lastSignature=excluded.lastSignature, bytesSinceLastSignature=excluded.bytesSinceLastSignature
                             RETURNING rowID`,
@@ -138,7 +138,7 @@ export class SQLiteClient implements DBClientInterfaceSync {
         sessionUpdate.lastSignature,
         sessionUpdate.bytesSinceLastSignature,
       ],
-    )[0];
+    );
 
     if (!result) {
       throw new Error("Failed to add session update");

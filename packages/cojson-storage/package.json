@@ -9,6 +9,7 @@
     "cojson": "workspace:*"
   },
   "devDependencies": {
+    "libsql": "^0.5.10",
     "typescript": "catalog:",
     "vitest": "catalog:"
   },
