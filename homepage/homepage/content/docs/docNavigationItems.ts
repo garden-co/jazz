@@ -31,6 +31,7 @@ export const docNavigationItems: DocNavigationSection[] = [
         name: "Introduction",
         href: "/docs",
         done: 100,
+        excludeFromNavigation: true,
       },
       {
         name: "Guide",
@@ -43,6 +44,7 @@ export const docNavigationItems: DocNavigationSection[] = [
         name: "Example apps",
         href: "/examples",
         done: 30,
+        excludeFromNavigation: true,
       },
       { name: "FAQs", href: "/docs/faq", done: 100 },
     ],
