@@ -49,7 +49,7 @@ export class ExpoSQLiteAdapter implements SQLiteDatabaseDriverAsync {
       throw new Error("Database not initialized");
     }
 
-    await this.db.runAsync(sql);
+    await this.db.runAsync(sql, params?.map((p) => p as SQLiteBindValue) ?? []);
   }
 
   public async transaction(callback: () => unknown) {
