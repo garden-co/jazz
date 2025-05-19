@@ -87,3 +87,14 @@ html.dark {
 }
 
 @import "@shikijs/twoslash/style-rich.css";
+
+/* fix for https://github.com/garden-co/jazz/issues/2257*/
+.twoslash .twoslash-popup-container {
+  display: none;
+}
+.twoslash .twoslash-hover:hover .twoslash-popup-container,
+ .twoslash .twoslash-error-hover:hover .twoslash-popup-container,
+ .twoslash .twoslash-query-presisted .twoslash-popup-container,
+ .twoslash .twoslash-query-line .twoslash-popup-container {
+  display: inline-flex;
+ }

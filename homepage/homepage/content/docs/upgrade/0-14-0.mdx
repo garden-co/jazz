@@ -85,15 +85,112 @@ You now define CoValue schemas using two new exports from `jazz-tools`:
 
 Similar to Zod v4's new object syntax, recursive and mutually recursive types are now [much easier to express](/docs/react/schemas/covalues#recursive-references).
 
+### How to pass loaded CoValues
+
+Calls to `useCoState()` work just the same, but they return a slightly different type than before.
+
+And while you can still read from the type just as before...
+
+<CodeGroup>
+```tsx twoslash
+import React from "react";
+// ---cut---
+import { z, co } from "jazz-tools";
+import { useCoState } from "jazz-react";
+
+const Pet = co.map({
+  name: z.string(),
+  age: z.number(),
+});
+
+const Person = co.map({
+  name: z.string(),
+  age: z.number(),
+  pets: co.list(Pet),
+});
+
+function MyComponent({ id }: { id: string }) {
+  const person = useCoState(Person, id);
+
+  return person && <div>{person.name}</div>;
+}
+```
+</CodeGroup>
+
+...you now need to specify the type differently **when passing CoValues as a parameter** or
+**whenever you need to refer to the type of a loaded CoValue instance:**
+
+<CodeGroup>
+```tsx twoslash
+import React from "react";
+// ---cut---
+import { z, co, Loaded } from "jazz-tools"; // [!code ++]
+import { useCoState } from "jazz-react";
+
+const Pet = co.map({
+  name: z.string(),
+  age: z.number(),
+});
+
+const Person = co.map({
+  name: z.string(),
+  age: z.number(),
+  pets: co.list(Pet),
+});
+
+function MyComponent({ id }: { id: string }) {
+  const person = useCoState(Person, id);
+
+  return person && <PersonName person={person} />;
+}
+
+function PersonName({ person }: { person: Loaded<typeof Person> }) { // [!code ++]
+  return <div>{person.name}</div>;
+}
+```
+</CodeGroup>
+
+`Loaded` can also take a second argument to specify the loading depth of the expected CoValue, mirroring the `resolve` options for `useCoState`, `load`, `subscribe`, etc.
+
+<CodeGroup>
+```tsx twoslash
+import React from "react";
+// ---cut---
+import { z, co, Loaded } from "jazz-tools";
+import { useCoState } from "jazz-react";
+
+const Pet = co.map({
+  name: z.string(),
+  age: z.number(),
+});
+
+const Person = co.map({
+  name: z.string(),
+  age: z.number(),
+  pets: co.list(Pet),
+});
+
+function MyComponent({ id }: { id: string }) {
+  const personWithPets = useCoState(Person, id, {
+    resolve: { pets: { $each: true } }  // [!code ++]
+  });
+
+  return personWithPets && <PersonAndFirstPetName person={personWithPets} />;
+}
+
+function PersonAndFirstPetName({ person }: {
+  person: Loaded<typeof Person, { pets: { $each: true } }> // [!code ++]
+}) {
+  return <div>{person.name} & {person.pets[0].name}</div>;
+}
+```
+</CodeGroup>
+
 ### Defining migrations
 
 TODO
 
 ### Defining Schema helper methods
-
-TODO
-
-### How to pass loaded CoValues
 
 TODO
 

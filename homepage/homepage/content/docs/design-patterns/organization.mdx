@@ -4,10 +4,9 @@ export const metadata = {
 
 import { CodeGroup } from "@/components/forMdx";
 
-# Sharing data through Organizations
+# How to share data between users through Organizations
 
-Organizations are a way to share a set of data between users.
-Different apps have different names for this concept, such as "teams" or "workspaces".
+This guide shows you how to share a set of CoValues between users. Different apps have different names for this concept, such as "teams" or "workspaces".
 
 We'll use the term Organization.
 
@@ -104,12 +103,16 @@ This schema now allows users to create `Organization`s and add `Project`s to the
 
 [See the schema for the example app here.](https://github.com/garden-co/jazz/blob/main/examples/organization/src/schema.ts)
 
-## Adding other users to an Organization
+## Adding members to an Organization
 
-To give users access to an `Organization`, you can either send them an invite link, or
-add their `Account` manually.
+Here are different ways to add members to an `Organization`.
 
-### Adding users through invite links
+- Send users an invite link.
+- [The user requests to join.](/docs/groups/sharing#requesting-invites)
+
+This guide and the example app show you the first method.
+
+### Adding members through invite links
 
 Here's how you can generate an [invite link](/docs/groups/sharing#invites).
 
@@ -180,6 +183,7 @@ export function AcceptInvitePage() {
 ```
 </CodeGroup>
 
-### Adding users through their Account ID
+## Further reading
 
-...more on this coming soon
+- [Allowing users to request an invite to join a Group](/docs/groups/sharing#requesting-invites)
+- [Groups as permission scopes](/docs/groups/intro#adding-group-members-by-id)

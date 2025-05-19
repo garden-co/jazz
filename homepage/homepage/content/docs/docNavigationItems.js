@@ -287,7 +287,7 @@ export const docNavigationItems = [
     name: "Design patterns",
     items: [
       {
-        name: "Form",
+        name: "Autosaving forms",
         href: "/docs/design-patterns/form",
         done: 100,
       },
