@@ -72,43 +72,6 @@ export const docNavigationItems = [
       },
     ],
   },
-  // {
-  //   name: "Project setup",
-  //   items: [
-  //     {
-  //       name: "Installation",
-  //       href: "/docs/project-setup",
-  //       done: {
-  //         react: 100,
-  //         vue: 100,
-  //         "react-native": 100,
-  //         "react-native-expo": 100,
-  //         svelte: 100,
-  //       },
-  //     },
-  //     {
-  //       // jazz mesh, setting api key, free plan, unlimited
-  //       name: "Sync and storage",
-  //       href: "/docs/sync-and-storage",
-  //       done: 100,
-  //     },
-  //     {
-  //       name: "Node.JS / server workers",
-  //       href: "/docs/project-setup/server-side",
-  //       done: 80,
-  //     },
-  //     {
-  //       name: "Providers",
-  //       href: "/docs/project-setup/providers",
-  //       done: {
-  //         react: 100,
-  //         "react-native": 100,
-  //         "react-native-expo": 100,
-  //         svelte: 100,
-  //       },
-  //     },
-  //   ],
-  // },
   {
     name: "Tools",
     items: [
@@ -192,6 +155,31 @@ export const docNavigationItems = [
       //   href: "/docs/upgrade/0-9-0",
       //   done: 100,
       // },
+    ],
+  },
+  {
+    name: "Project setup",
+    items: [
+      {
+        name: "Providers",
+        href: "/docs/project-setup/providers",
+        done: {
+          react: 100,
+          "react-native": 100,
+          "react-native-expo": 100,
+          svelte: 100,
+        },
+      },
+      {
+        name: "Sync and storage",
+        href: "/docs/sync-and-storage",
+        done: 100,
+      },
+      {
+        name: "Node.JS / server workers",
+        href: "/docs/project-setup/server-side",
+        done: 80,
+      },
     ],
   },
   {
