@@ -11,6 +11,7 @@ export type DocNavigationItem = {
   framework?: Framework;
   next?: DocNavigationItem | null;
   previous?: DocNavigationItem | null;
+  excludeFromNavigation?: boolean;
 };
 
 export type DocNavigationSection = {
@@ -111,24 +112,21 @@ export const docNavigationItems: DocNavigationSection[] = [
         name: "0.13.0 - React Native Split",
         href: "/docs/upgrade/0-13-0",
         done: 100,
-        next: null,
-        previous: null,
+        excludeFromNavigation: true,
       },
       {
         // upgrade guides
         name: "0.12.0 - Deeply Resolved Data",
         href: "/docs/upgrade/0-12-0",
         done: 100,
-        next: null,
-        previous: null,
+        excludeFromNavigation: true,
       },
       {
         // upgrade guides
         name: "0.11.0 - Roles and permissions",
         href: "/docs/upgrade/0-11-0",
         done: 100,
-        next: null,
-        previous: null,
+        excludeFromNavigation: true,
       },
       // {
       //   // upgrade guides
@@ -155,6 +153,7 @@ export const docNavigationItems: DocNavigationSection[] = [
         href: "/docs/upgrade/react-native-local-persistence",
         done: 100,
         framework: Framework.ReactNativeExpo,
+        excludeFromNavigation: true,
       },
       // {
       //   // upgrade guides
@@ -325,16 +324,14 @@ export const docNavigationItems: DocNavigationSection[] = [
   },
 ];
 
-const flatItems = docNavigationItems.flatMap((section) => section.items);
+const flatItems = docNavigationItems
+  .flatMap((section) => section.items)
+  .filter((item) => !item.excludeFromNavigation);
 
-export const flatItemsWithNavLinks = flatItems.map((item) => {
-  const currentIndex = flatItems.findIndex(
-    (flatItem) => flatItem.href === item.href,
-  );
+export const flatItemsWithNavLinks = flatItems.map((item, index) => {
   return {
     ...item,
-    next: item.next === null ? null : flatItems[currentIndex + 1] || undefined,
-    previous:
-      item.previous === null ? null : flatItems[currentIndex - 1] || undefined,
+    next: item.next === null ? null : flatItems[index + 1],
+    previous: item.previous === null ? null : flatItems[index - 1],
   };
 });
