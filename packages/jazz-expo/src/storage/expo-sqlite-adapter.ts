@@ -14,7 +14,7 @@ export class ExpoSQLiteAdapter implements SQLiteDatabaseDriverAsync {
     const db = await openDatabaseAsync(this.dbName, {
       useNewConnection: true,
     });
-    db.execAsync("PRAGMA journal_mode = WAL");
+    await db.execAsync("PRAGMA journal_mode = WAL");
     this.db = db;
   }
 
