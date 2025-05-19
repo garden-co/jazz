@@ -25,6 +25,7 @@ export class SQLiteReactNative extends SQLiteNodeBase {
       config.adapter,
       localNodeAsPeer.incoming,
       localNodeAsPeer.outgoing,
+      30,
     );
 
     return { ...storageAsPeer, priority: 100 };

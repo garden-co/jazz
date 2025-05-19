@@ -15,6 +15,7 @@ export class SQLiteNode extends SQLiteNodeBase {
     return SQLiteNodeBase.create({
       db,
       localNodeName,
+      maxBlockingTime: 500,
     });
   }
 }

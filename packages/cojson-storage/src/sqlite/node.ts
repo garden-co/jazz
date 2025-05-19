@@ -18,6 +18,7 @@ export class SQLiteNodeBase {
     db: SQLiteDatabaseDriver,
     fromLocalNode: IncomingSyncStream,
     toLocalNode: OutgoingSyncQueue,
+    maxBlockingTime: number,
   ) {
     this.dbClient = new SQLiteClient(db);
     this.syncManager = new StorageManagerSync(this.dbClient, toLocalNode);
@@ -47,7 +48,7 @@ export class SQLiteNodeBase {
           // which may block other peers from sending messages.
 
           // To avoid this we schedule a timer to downgrade the priority of the storage peer work
-          if (performance.now() - lastTimer > 500) {
+          if (performance.now() - lastTimer > maxBlockingTime) {
             lastTimer = performance.now();
             await new Promise((resolve) => setTimeout(resolve, 0));
           }
@@ -68,9 +69,11 @@ export class SQLiteNodeBase {
   static create({
     db,
     localNodeName = "local",
+    maxBlockingTime = 500,
   }: {
     db: SQLiteDatabaseDriver;
     localNodeName?: string;
+    maxBlockingTime?: number;
   }): Peer {
     const [localNodeAsPeer, storageAsPeer] = cojsonInternals.connectedPeers(
       localNodeName,
@@ -87,7 +90,12 @@ export class SQLiteNodeBase {
       db.run(migration, []);
     }
 
-    new SQLiteNodeBase(db, localNodeAsPeer.incoming, localNodeAsPeer.outgoing);
+    new SQLiteNodeBase(
+      db,
+      localNodeAsPeer.incoming,
+      localNodeAsPeer.outgoing,
+      maxBlockingTime,
+    );
 
     return { ...storageAsPeer, priority: 100 };
   }
