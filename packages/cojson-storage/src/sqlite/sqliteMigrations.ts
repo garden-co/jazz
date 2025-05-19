@@ -14,14 +14,14 @@ export const migrations: Record<number, string[]> = {
       lastSignature TEXT,
       UNIQUE (sessionID, coValue)
     );`,
-    `CREATE INDEX IF NOT EXISTS sessionsByCoValue ON sessions (coValue);`,
+    "CREATE INDEX IF NOT EXISTS sessionsByCoValue ON sessions (coValue);",
     `CREATE TABLE IF NOT EXISTS coValues (
       rowID INTEGER PRIMARY KEY,
       id TEXT NOT NULL UNIQUE,
       header TEXT NOT NULL UNIQUE
     );`,
-    `CREATE INDEX IF NOT EXISTS coValuesByID ON coValues (id);`,
-    `PRAGMA user_version = 1;`,
+    "CREATE INDEX IF NOT EXISTS coValuesByID ON coValues (id);",
+    "PRAGMA user_version = 1;",
   ],
   3: [
     `CREATE TABLE IF NOT EXISTS signatureAfter (
@@ -30,14 +30,14 @@ export const migrations: Record<number, string[]> = {
       signature TEXT NOT NULL,
       PRIMARY KEY (ses, idx)
     ) WITHOUT ROWID;`,
-    `ALTER TABLE sessions ADD COLUMN bytesSinceLastSignature INTEGER;`,
-    `PRAGMA user_version = 3;`,
+    "ALTER TABLE sessions ADD COLUMN bytesSinceLastSignature INTEGER;",
+    "PRAGMA user_version = 3;",
   ],
 };
 
-export function getMigrationQueries(version: number): string[] {
+export function getSQLiteMigrationQueries(version: number): string[] {
   return Object.keys(migrations)
-    .map((k) => parseInt(k, 10))
+    .map((k) => Number.parseInt(k, 10))
     .filter((v) => v > version)
     .sort((a, b) => a - b)
     .flatMap((v) => migrations[v] ?? []);
