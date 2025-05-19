@@ -1,58 +1,64 @@
-import { openDatabaseSync } from "expo-sqlite";
+import { openDatabaseAsync } from "expo-sqlite";
 import type { SQLiteBindValue, SQLiteDatabase } from "expo-sqlite";
-import { type SQLiteDatabaseDriver } from "jazz-react-native-core";
+import { type SQLiteDatabaseDriverAsync } from "jazz-react-native-core";
 
-export class ExpoSQLiteAdapter implements SQLiteDatabaseDriver {
+export class ExpoSQLiteAdapter implements SQLiteDatabaseDriverAsync {
   private db: SQLiteDatabase | null = null;
   private dbName: string;
 
   public constructor(dbName: string = "jazz-storage") {
     this.dbName = dbName;
-    const db = openDatabaseSync(this.dbName, {
+  }
+
+  public async initialize(): Promise<void> {
+    const db = await openDatabaseAsync(this.dbName, {
       useNewConnection: true,
     });
-    db.execSync("PRAGMA journal_mode = WAL");
+    db.execAsync("PRAGMA journal_mode = WAL");
     this.db = db;
   }
 
-  public query<T>(sql: string, params?: unknown[]): T[] {
+  public async query<T>(sql: string, params?: unknown[]): Promise<T[]> {
     if (!this.db) {
       throw new Error("Database not initialized");
     }
 
-    const statement = this.db.prepareSync(sql);
-    try {
-      const result = statement.executeSync(
-        params?.map((p) => p as SQLiteBindValue) ?? [],
-      );
-      return result.getAllSync() as T[];
-    } finally {
-      statement.finalizeSync();
-    }
+    const result = await this.db.getAllAsync(
+      sql,
+      params?.map((p) => p as SQLiteBindValue) ?? [],
+    );
+
+    return result as T[];
   }
 
-  public run(sql: string, params?: unknown[]) {
+  public async get<T>(sql: string, params?: unknown[]): Promise<T | undefined> {
     if (!this.db) {
       throw new Error("Database not initialized");
     }
 
-    const statement = this.db.prepareSync(sql);
-    try {
-      statement.executeSync(params?.map((p) => p as SQLiteBindValue) ?? []);
-    } finally {
-      statement.finalizeSync();
-    }
+    const result = await this.db.getFirstAsync(
+      sql,
+      params?.map((p) => p as SQLiteBindValue) ?? [],
+    );
+
+    return (result as T) ?? undefined;
   }
 
-  public transaction(callback: () => unknown) {
-    this.run("BEGIN TRANSACTION");
-
-    try {
-      callback();
-      this.run("COMMIT");
-    } catch (error) {
-      this.run("ROLLBACK");
-      throw error;
+  public async run(sql: string, params?: unknown[]) {
+    if (!this.db) {
+      throw new Error("Database not initialized");
     }
+
+    await this.db.runAsync(sql);
+  }
+
+  public async transaction(callback: () => unknown) {
+    if (!this.db) {
+      throw new Error("Database not initialized");
+    }
+
+    await this.db.withTransactionAsync(async () => {
+      await callback();
+    });
   }
 }

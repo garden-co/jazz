@@ -1,33 +1,19 @@
-import { type Peer, cojsonInternals } from "cojson";
-import { SQLiteDatabaseDriver, SQLiteNodeBase } from "cojson-storage";
+import { type Peer } from "cojson";
+import { SQLiteDatabaseDriverAsync, SQLiteNodeBaseAsync } from "cojson-storage";
 
 export interface SQLiteConfig {
-  adapter: SQLiteDatabaseDriver;
+  adapter: SQLiteDatabaseDriverAsync;
 }
 
-export class SQLiteReactNative extends SQLiteNodeBase {
+export class SQLiteReactNative extends SQLiteNodeBaseAsync {
   static async asPeer(config: SQLiteConfig): Promise<Peer> {
     if (!config.adapter) {
       throw new Error("SQLite adapter is required");
     }
 
-    const [localNodeAsPeer, storageAsPeer] = cojsonInternals.connectedPeers(
-      "localNode",
-      "storage",
-      {
-        peer1role: "client",
-        peer2role: "storage",
-        crashOnClose: true,
-      },
-    );
-
-    new SQLiteReactNative(
-      config.adapter,
-      localNodeAsPeer.incoming,
-      localNodeAsPeer.outgoing,
-      30,
-    );
-
-    return { ...storageAsPeer, priority: 100 };
+    return SQLiteNodeBaseAsync.create({
+      db: config.adapter,
+      localNodeName: "localNode",
+    });
   }
 }

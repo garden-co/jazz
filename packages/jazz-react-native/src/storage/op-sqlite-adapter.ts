@@ -7,14 +7,17 @@ import { Platform } from "react-native";
 
 type OPSQLiteDB = ReturnType<typeof opSQLite.open>;
 
-import { type SQLiteDatabaseDriver } from "jazz-react-native-core";
+import { type SQLiteDatabaseDriverAsync } from "jazz-react-native-core";
 
-export class OPSQLiteAdapter implements SQLiteDatabaseDriver {
+export class OPSQLiteAdapter implements SQLiteDatabaseDriverAsync {
   private db: OPSQLiteDB | null = null;
   private dbName: string;
 
   public constructor(dbName: string = "jazz-storage") {
     this.dbName = dbName;
+  }
+
+  public async initialize(): Promise<void> {
     const dbPath =
       Platform.OS === "ios" ? IOS_LIBRARY_PATH : ANDROID_DATABASE_PATH;
 
@@ -22,33 +25,46 @@ export class OPSQLiteAdapter implements SQLiteDatabaseDriver {
       name: this.dbName,
       location: dbPath,
     }));
-    db.execute("PRAGMA journal_mode=WAL");
+
+    await db.execute("PRAGMA journal_mode=WAL");
   }
 
-  public query<T>(sql: string, params?: unknown[]): T[] {
+  public async query<T>(sql: string, params?: unknown[]): Promise<T[]> {
     if (!this.db) {
       throw new Error("Database not initialized");
     }
 
-    return this.db.executeSync(sql, params as any[]).rows as T[];
+    const result = await this.db.execute(sql, params as any[]);
+
+    return result.rows as T[];
   }
 
-  public run(sql: string, params?: unknown[]) {
+  public async get<T>(sql: string, params?: unknown[]): Promise<T | undefined> {
     if (!this.db) {
       throw new Error("Database not initialized");
     }
 
-    this.db.executeRaw(sql, params as any[]);
+    const result = await this.db.execute(sql, params as any[]);
+
+    return result.rows[0] as T | undefined;
   }
 
-  public transaction(callback: () => unknown) {
-    this.run("BEGIN TRANSACTION");
+  public async run(sql: string, params?: unknown[]) {
+    if (!this.db) {
+      throw new Error("Database not initialized");
+    }
+
+    await this.db.executeRaw(sql, params as any[]);
+  }
+
+  public async transaction(callback: () => unknown) {
+    await this.run("BEGIN TRANSACTION");
 
     try {
-      callback();
-      this.run("COMMIT");
+      await callback();
+      await this.run("COMMIT");
     } catch (error) {
-      this.run("ROLLBACK");
+      await this.run("ROLLBACK");
       throw error;
     }
   }

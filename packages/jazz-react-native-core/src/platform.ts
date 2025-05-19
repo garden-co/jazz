@@ -25,14 +25,14 @@ import {
 import { KvStore, KvStoreContext } from "./storage/kv-store-context.js";
 import { SQLiteReactNative } from "./storage/sqlite-react-native.js";
 
-import { SQLiteDatabaseDriver } from "cojson-storage";
+import { SQLiteDatabaseDriverAsync } from "cojson-storage";
 import { WebSocketPeerWithReconnection } from "cojson-transport-ws";
 import type { RNQuickCrypto } from "./crypto/RNQuickCrypto.js";
 
 export type BaseReactNativeContextOptions = {
   sync: SyncConfig;
   reconnectionTimeout?: number;
-  storage?: SQLiteDatabaseDriver | "disabled";
+  storage?: SQLiteDatabaseDriverAsync | "disabled";
   CryptoProvider?: typeof PureJSCrypto | typeof RNQuickCrypto;
   authSecretStorage: AuthSecretStorage;
 };
