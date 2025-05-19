@@ -259,6 +259,9 @@ importers:
       jazz-expo:
         specifier: link:../../packages/jazz-expo
         version: link:../../packages/jazz-expo
+      jazz-inspector:
+        specifier: link:../../packages/jazz-inspector
+        version: link:../../packages/jazz-inspector
       jazz-nodejs:
         specifier: link:../../packages/jazz-nodejs
         version: link:../../packages/jazz-nodejs

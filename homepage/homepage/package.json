@@ -40,6 +40,7 @@
     "jazz-browser": "link:../../packages/jazz-browser",
     "jazz-browser-media-images": "link:../../packages/jazz-browser-media-images",
     "jazz-expo": "link:../../packages/jazz-expo",
+    "jazz-inspector": "link:../../packages/jazz-inspector",
     "jazz-nodejs": "link:../../packages/jazz-nodejs",
     "jazz-react": "link:../../packages/jazz-react",
     "jazz-react-auth-clerk": "link:../../packages/jazz-react-auth-clerk",

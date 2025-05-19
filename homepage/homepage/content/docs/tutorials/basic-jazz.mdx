@@ -1,0 +1,628 @@
+export const metadata = { title: "Get Started" };
+
+import { CodeGroup } from "@/components/forMdx";
+
+# Get Started with Jazz
+
+Build your first collaborative app with Jazz in minutes. This guide walks you through creating a new Jazz project, understanding the key components, and experiencing real-time collaboration.
+
+You're going to build a simple profile app. You'll see how to:
+
+- Create a new Jazz project with `create-jazz-app`
+- Define your data with schemas
+- Read and write data with hooks
+- See Jazz's easy persistence and real-time collaboration
+
+By the end of this guide, you'll have a simple app that you can use as a starting point for your own projects. If you'd like to see the complete example of what you'll build, see the [complete example app](https://github.com/garden-co/my-first-jazz-app).
+
+If you would like to learn more about how Jazz works, check out the [overview](/docs/overview).
+
+## Before you begin
+
+You'll need:
+- Node.js 22
+- `pnpm` (or another package manager of your choice)
+
+## Create your first Jazz app
+
+Start by creating a new Jazz project with the CLI tool:
+
+<CodeGroup>
+```bash
+npx create-jazz-app@latest my-first-jazz-app --api-key you@example.com
+Let's create your Jazz app! 🎷
+
+? Choose a framework: React
+? Choose an authentication method: Passkey auth (easiest to start with)
+? Choose a package manager: pnpm
+✔ Template cloned successfully
+✔ Package versions fetched successfully
+✔ Package versions fetched successfully
+✔ Dependencies updated
+✔ API key updated
+✔ Dependencies installed
+✔ .cursor directory added successfully
+? Initialize git repository? Yes
+✔ Git repository initialized
+
+✨ Project setup completed! ✨
+
+To get started:
+  cd my-first-jazz-app
+  pnpm run dev
+```
+</CodeGroup>
+
+You have now created your first Jazz app! 🎉
+
+Start the development server with `pnpm run dev`. You should see the app running in your browser.
+
+**Key Concepts:**
+- `create-jazz-app` is a command-line tool that scaffolds a complete Jazz application with authentication, schema definition, and provider setup already configured. The generated app is ready to run and develop further.
+
+Now, let's examine what's in your new Jazz app, and add some new fields.
+
+## Understanding your project
+
+Take a look at your project structure. It should look like this (with some files omitted to focus on the important ones):
+
+<CodeGroup>
+```bash
+my-first-jazz-app/
+├── src/
+│   ├── apiKey.ts # Your API key
+│   ├── App.tsx # Root app component
+│   ├── main.tsx # Provider setup
+│   └── schema.ts # Your data models
+├── tests/
+├── package.json # Your package manager config.
+└── ... # Project files
+```
+</CodeGroup>
+
+The most important files for understanding Jazz are:
+- `src/schema.ts` - Your data models
+- `src/main.tsx` - Your provider setup
+- `src/App.tsx` - Your root app component
+
+**Key Concepts:**
+- A Jazz application has three essential components:
+  - Schemas (data models)
+  - A provider (for sync/storage)
+  - Hooks that interact with your collaborative data
+
+## Defining your data with schemas
+
+Jazz uses schemas to define the structure of your CoValues (collaborative values). Schemas can live anywhere, but you should start with `schema.ts`.
+
+Your starter app already stores first name and date of birth for users. Now you'll add a public email address and a private notes section.
+
+<CodeGroup>
+```ts twoslash
+// schema.ts
+import {
+  co,
+  CoMap,
+  CoList,
+  Profile,
+  CoPlainText, // [!code ++]
+} from "jazz-tools";
+
+// ...
+
+export class JazzProfile extends Profile {
+  firstName = co.string;
+  email = co.string; // [!code ++]
+}
+
+// ...
+
+export class AccountRoot extends CoMap {
+  dateOfBirth = co.Date;
+  notes = co.optional.ref(CoPlainText); // [!code ++]
+}
+
+// ...
+```
+</CodeGroup>
+
+You'll also need to add the new fields to the migration to update any live profiles:
+
+<CodeGroup>
+```ts twoslash
+// schema.ts
+import {
+  Account,
+  Group,
+  co,
+  CoMap,
+  CoList,
+  Profile,
+  CoPlainText,
+} from "jazz-tools";
+
+// ...
+
+export class JazzProfile extends Profile {
+  firstName = co.string;
+  email = co.string; // [!code ++]
+}
+
+// ...
+
+export class AccountRoot extends CoMap {
+  dateOfBirth = co.Date;
+  notes = co.optional.ref(CoPlainText); // [!code ++]
+}
+
+
+// ---cut---
+// schema.ts
+// ...
+
+export class JazzAccount extends Account {
+  profile = co.ref(JazzProfile);
+  root = co.ref(AccountRoot);
+
+  /** The account migration is run on account creation and on every log-in.
+   *  You can use it to set up the account root and any other initial CoValues you need.
+   */
+  migrate(this: JazzAccount) {
+    if (this.root === undefined) {
+      const group = Group.create();
+
+      this.root = AccountRoot.create(
+        {
+          dateOfBirth: new Date("1/1/1990"),
+          notes: CoPlainText.create(""), // [!code ++]
+        },
+        group,
+      );
+    }
+
+    if (this.profile === undefined) {
+      const group = Group.create();
+      group.addMember("everyone", "reader"); // The profile info is visible to everyone
+
+      this.profile = JazzProfile.create(
+        {
+          name: "Anonymous user",
+          firstName: "",
+          email: "", // [!code ++]
+        },
+        group,
+      );
+    }
+  }
+}
+```
+</CodeGroup>
+
+Great! You've now added the `email` field to the public profile and the `notes` field to the private root.
+
+**Key Concepts:** 
+- Schemas in Jazz define your data structure using classes that extend base types like `CoMap` and properties defined with the `co` namespace.
+- The `migrate` function initializes fields when users log in, ensuring data consistency.
+
+For more detail about CoValues, check out [schemas](/docs/schemas/covalues).
+
+For more on migrations, check out [migrations](/docs/schemas/accounts-and-migrations).
+
+## Jazz provider setup
+
+For persistence and collaboration, Jazz needs a provider. This is already set up for you in `src/main.tsx`:
+
+<CodeGroup>
+```tsx twoslash
+// @filename: schema.ts
+import { Account } from "jazz-tools";
+export class JazzAccount extends Account {}
+
+// @filename: App.tsx
+import * as React from "react";
+export default function App() {
+  return <div>Hello, world!</div>;
+}
+
+// @filename: main.tsx
+// @noErrors: 5097
+import * as React from "react";
+import { StrictMode } from "react";
+import { createRoot } from "react-dom/client";
+const apiKey = "you@example.com";
+import { JazzInspector } from "jazz-inspector";
+// ---cut---
+// main.tsx
+// ...
+import { JazzProvider } from "jazz-react";
+import App from "./App.tsx";
+import { JazzAccount } from "./schema.ts";
+
+// We use this to identify the app in the passkey auth
+export const APPLICATION_NAME = "Jazz starter";
+
+declare module "jazz-react" {
+  export interface Register {
+    Account: JazzAccount;
+  }
+}
+
+// ---cut---
+// main.tsx
+// ...
+
+createRoot(document.getElementById("root")!).render(
+  <StrictMode>
+    <JazzProvider
+      sync={{
+        peer: `wss://cloud.jazz.tools/?key=${apiKey}`,
+      }}
+      AccountSchema={JazzAccount}
+    >
+      <App />
+      <JazzInspector />
+    </JazzProvider>
+  </StrictMode>,
+);
+```
+</CodeGroup>
+
+Out of the box, your provider is configured to use the Jazz Cloud, and you don't have to do anything to get started. Easy!
+
+**Key Concepts:** 
+- `<JazzProvider />` wraps your application and handles synchronization of data. It takes a sync configuration that determines how data is sent between peers and persisted. The default sync configuration connects to [Jazz Cloud](https://cloud.jazz.tools).
+
+For more details about Providers and configuration, see [Providers](/docs/project-setup/providers).
+
+## Adding to the form
+
+Let's put the `email` and `notes` fields to use. There are already some fields in the form.
+
+<CodeGroup>
+```tsx twoslash
+// @filename: schema.ts
+import { Account, CoMap, CoPlainText, Group, Profile, co } from "jazz-tools";
+export class JazzProfile extends Profile {
+  firstName = co.string;
+  email = co.string;
+}
+
+export class AccountRoot extends CoMap {
+  dateOfBirth = co.Date;
+  notes = co.ref(CoPlainText)
+
+  get age() {
+    if (!this.dateOfBirth) return null;
+
+    return new Date().getFullYear() - this.dateOfBirth.getFullYear();
+  }
+}
+
+export class JazzAccount extends Account {
+  profile = co.ref(JazzProfile);
+  root = co.ref(AccountRoot);
+}
+
+// @filename: App.tsx
+// @noErrors: 5097
+import { JazzAccount } from "./schema.ts";
+declare module "jazz-react" {
+  export interface Register {
+    Account: JazzAccount;
+  }
+}
+// @filename: form.tsx
+import * as React from "react";
+// ---cut---
+// form.tsx
+import { useAccount } from "jazz-react";
+import { CoPlainText } from "jazz-tools";
+
+export function Form() {
+  const { me } = useAccount({ resolve: { profile: true, root: true } });
+
+  if (!me) return null;
+
+  return (
+    <div className="grid gap-4 border p-8">
+      <div className="flex items-center gap-3">
+        <label htmlFor="firstName" className="sm:w-32">
+          First name
+        </label>
+        <input
+          type="text"
+          id="firstName"
+          placeholder="Enter your first name here..."
+          className="border border-stone-300 rounded shadow-sm py-1 px-2 flex-1"
+          value={me.profile.firstName || ""}
+          onChange={(e) => (me.profile.firstName = e.target.value)}
+        />
+      </div>
+
+      <div className="flex items-center gap-3"> {/* [!code ++:14] */}
+        <label htmlFor="email" className="sm:w-32">
+          Email
+        </label>
+        <input
+          type="text"
+          id="email"
+          placeholder="eg. you@example.com"
+          className="border border-stone-300 rounded shadow-sm py-1 px-2 flex-1"
+          value={me.profile.email || ""}
+          onChange={(e) => (me.profile.email = e.target.value)}
+        />
+      </div>
+
+      <div className="flex items-center gap-3">
+        <label htmlFor="dateOfBirth" className="sm:w-32">
+          Date of birth
+        </label>
+        <input
+          type="date"
+          id="dateOfBirth"
+          className="border border-stone-300 rounded shadow-sm py-1 px-2 flex-1"
+          value={me.root.dateOfBirth?.toISOString().split("T")[0] || ""}
+          onChange={(e) => (me.root.dateOfBirth = new Date(e.target.value))}
+        />
+      </div>
+
+      {/*Add more fields here*/} {/* [!code --] */}
+      <div className="flex items-center gap-3"> {/* [!code ++:11] */}
+        <label htmlFor="notes" className="sm:w-32">
+          Private Notes
+        </label>
+        <textarea
+          id="notes"
+          className="border border-stone-300 rounded shadow-sm py-1 px-2 flex-1"
+          value={me.root.notes?.toString() || ""}
+          onChange={(e) => (me.root.notes = CoPlainText.create(e.target.value))}
+        />
+      </div>
+    </div>
+  );
+}
+```
+</CodeGroup>
+
+Excellent! You've now added the `email` and `notes` fields to the form.
+
+But there's a problem: the notes field is creating a new `CoPlainText` every time you type. Instead you can use `CoPlainText.applyDiff()` to intelligently update it instead.
+
+Start by adding a new function to handle the change, then update the form to use it:
+
+<CodeGroup>
+```tsx twoslash
+// @filename: form.tsx
+// @noErrors: 2339
+import { useAccount } from "jazz-react";
+import { Account, CoMap, CoPlainText, Profile, co } from "jazz-tools";
+  
+class AccountRoot extends CoMap {
+  notes = co.ref(CoPlainText);
+}
+
+class JazzProfile extends Profile {
+  firstName = co.string;
+  email = co.string;
+}
+
+export class JazzAccount extends Account {
+  root = co.ref(AccountRoot);
+  profile = co.ref(JazzProfile);
+};
+
+declare module "jazz-react" {
+  export interface Register {
+    Account: JazzAccount;
+  }
+}
+
+// ...
+
+function Form() {
+  const me = useAccount({ resolve: { profile: true, root: true } });
+
+  if (!me) return null;
+// ---cut-before---
+// form.tsx
+
+const handleNotesChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+  const text = e.target.value.trim();
+  if (me.root.notes) { // If the notes field already exists
+    // Apply the change to the existing field
+    me.root.notes.applyDiff(text);
+  } else {
+    // Create a new field if it doesn't exist
+    me.root.notes = CoPlainText.create(text); 
+  }
+};
+// ---cut-after---
+}
+```
+</CodeGroup>
+
+Now insert that into the form component. Your changes will look like this:
+
+<CodeGroup>
+```tsx twoslash
+// @filename: schema.ts
+import { Account, CoMap, CoPlainText, Group, Profile, co } from "jazz-tools";
+export class JazzProfile extends Profile {
+  firstName = co.string;
+  email = co.string;
+}
+
+export class AccountRoot extends CoMap {
+  dateOfBirth = co.Date;
+  notes = co.ref(CoPlainText)
+
+  get age() {
+    if (!this.dateOfBirth) return null;
+
+    return new Date().getFullYear() - this.dateOfBirth.getFullYear();
+  }
+}
+
+export class JazzAccount extends Account {
+  profile = co.ref(JazzProfile);
+  root = co.ref(AccountRoot);
+}
+
+// @filename: App.tsx
+// @noErrors: 5097 1005
+import { JazzAccount } from "./schema.ts";
+declare module "jazz-react" {
+  export interface Register {
+    Account: JazzAccount;
+  }
+}
+// @filename: form.tsx
+import * as React from "react";
+// form.tsx
+import { useAccount } from "jazz-react";
+import { CoPlainText } from "jazz-tools";
+
+// ---cut---
+// form.tsx
+// ...
+
+export function Form() {
+  const { me } = useAccount({ resolve: { profile: true, root: true } });
+
+  if (!me) return null;
+
+  const handleNotesChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => { {/* [!code ++:8] */}
+    const text = e.target.value.trim();
+    if (me.root.notes) {
+      me.root.notes.applyDiff(text);
+    } else {
+      me.root.notes = CoPlainText.create(text);
+    }
+  };
+
+  return (
+    <div className="grid gap-4 border p-8">
+      <div className="flex items-center gap-3">
+        <label htmlFor="firstName" className="sm:w-32">
+          First name
+        </label>
+        <input
+          type="text"
+          id="firstName"
+          placeholder="Enter your first name here..."
+          className="border border-stone-300 rounded shadow-sm py-1 px-2 flex-1"
+          value={me.profile.firstName || ""}
+          onChange={(e) => (me.profile.firstName = e.target.value)}
+        />
+      </div>
+
+      <div className="flex items-center gap-3">
+        <label htmlFor="email" className="sm:w-32">
+          Email
+        </label>
+        <input
+          type="text"
+          id="email"
+          placeholder="eg. you@example.com"
+          className="border border-stone-300 rounded shadow-sm py-1 px-2 flex-1"
+          value={me.profile.email || ""}
+          onChange={(e) => (me.profile.email = e.target.value)}
+        />
+      </div>
+
+      <div className="flex items-center gap-3">
+        <label htmlFor="dateOfBirth" className="sm:w-32">
+          Date of birth
+        </label>
+        <input
+          type="date"
+          id="dateOfBirth"
+          className="border border-stone-300 rounded shadow-sm py-1 px-2 flex-1"
+          value={me.root.dateOfBirth?.toISOString().split("T")[0] || ""}
+          onChange={(e) => (me.root.dateOfBirth = new Date(e.target.value))}
+        />
+      </div>
+
+      <div className="flex items-center gap-3">
+        <label htmlFor="notes" className="sm:w-32">
+          Private Notes
+        </label>
+        <textarea
+          id="notes"
+          className="border border-stone-300 rounded shadow-sm py-1 px-2 flex-1"
+          value={me.root.notes?.toString() || ""}
+          onChange={(e) => (me.root.notes = CoPlainText.create(e.target.value))} {/* [!code --] */}
+          onChange={handleNotesChange} {/* [!code ++] */}
+        />
+      </div>
+    </div>
+  );
+}
+```
+</CodeGroup>
+
+**Key Concepts:**
+- The `useAccount` hook provides access to the current user's account and its associated data.
+- Jazz allows direct mutation of CoValues with assignment operations, but for more nuanced values like `CoPlainText`, specialized methods like `applyDiff()` can optimize updates by only sending the changes instead of creating new instances.
+
+TODO: Link to UseAccount/UseCoState hook docs
+
+## Persisting data
+
+Now that you've added the `notes` field, try refreshing the page. You'll see that the notes you added are still there. Jazz automatically persists your data without any additional configuration.
+
+**Key Concepts:**
+- Jazz provides automatic persistence of all your data. By default, every CoValue you create is automatically saved to local storage and synchronized with the cloud when changes are made. You don't need to write any code to handle saving or loading.
+
+For more on persistence, check out [Sync and Storage](/docs/sync-and-storage/).
+
+TODO: Sync and Storage docs don't talk about persistence
+
+## Real-time collaboration
+
+One of the most powerful features of Jazz is that collaboration works automatically. Every change you make is synced to all connected clients.
+
+To experience real-time collaboration:
+
+1. Open your app in two browser windows side-by-side
+2. Make changes in one window
+3. Watch as they appear instantly in the other window
+
+This works across different devices and users too.
+
+**Key Concept:**
+- Real-time collaboration is built into Jazz at the core. When you make changes to a CoValue, Jazz automatically handles synchronizing those changes to all connected clients. This happens without you having to write any additional code for syncing or conflict resolution.
+
+## Complete
+
+Congratulations! You've built your first Jazz app.
+
+For a complete example of what you've built, see the [complete example app](https://github.com/garden-co/my-first-jazz-app).
+
+You've accomplished several important things:
+- You've created a simple app with `create-jazz-app`
+- You've added new fields to the profile and root
+- You've seen where Jazz configures the sync and storage
+- You've learned how to add new fields to a component
+
+You've only scratched the surface of what Jazz can do.
+
+**Key Concepts Review:**
+
+Through this tutorial, you've experienced the core concepts of Jazz:
+- **Schemas** define your data structure using CoValues
+- **Providers** handle synchronization and persistence
+- **Hooks** like `useAccount` connect your React components to your data
+- **Editing** CoValues updates your data everywhere instantly
+- **Automatic persistence** saves your data without extra code
+
+## Next steps
+
+Now that you've built your first Jazz app, you can:
+
+- Add [authentication and sharing](/docs/authentication/overview)
+- Add [groups and permissions](/docs/groups/intro)
+- Explore the [example apps](/examples) to see more complex implementations
+- Dive into [collaborative values](/docs/schemas/covalues) to understand more advanced schema patterns
+
+If you have any questions or need help, join our [Discord community](https://discord.gg/utDMjHYg42).
