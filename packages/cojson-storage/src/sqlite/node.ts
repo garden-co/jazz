@@ -1,4 +1,3 @@
-import Database, { type Database as DatabaseT } from "better-sqlite3";
 import {
   type IncomingSyncStream,
   type OutgoingSyncQueue,
