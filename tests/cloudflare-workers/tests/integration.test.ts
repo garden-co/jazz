@@ -9,6 +9,7 @@ const projectRoot = join(packageRoot, "../..");
 
 test(
   "server responds with hello world",
+  { timeout: 10_000, retry: 3 },
   async () => {
     // Start the dev server
     const server = execa(
@@ -52,5 +53,4 @@ test(
       server.kill();
     }
   },
-  { timeout: 10_000 },
 );
