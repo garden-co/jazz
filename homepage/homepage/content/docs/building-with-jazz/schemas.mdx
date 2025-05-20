@@ -33,7 +33,7 @@ By combining Zod with our collaborative data structures, we've created a system 
 
 ### Built on CRDTs
 
-Behind the scenes, CoValues use Conflict-free Replicated Data Types (CRDTs). Don't worry about the fancy name - it just means your data works well in a collaborative environment without constant server check-ins.
+Behind the scenes, CoValues implement [Conflict-free Replicated Data Types (CRDTs)](https://crdt.tech/). Don't worry about the fancy name - it just means your data works well across multiple users and devices without constant server check-ins.
 
 We built Jazz on CRDTs because they allow for true local-first collaboration. Your app works even when offline, and when everyone reconnects, all the changes merge together smoothly.
 
@@ -174,3 +174,5 @@ Want to dive deeper? Check out these resources:
 - [Accounts & Migrations](/docs/schemas/accounts-and-migrations) - Learn how to evolve your schemas over time
 - [Schema Examples](/docs/examples/schema-patterns) - Common patterns to solve real-world problems
 - [Type Safety](/docs/schemas/type-safety) - Get the most out of TypeScript with Jazz
+- [Zod Documentation](https://zod.dev) - Learn more about the schema validation library we use
+- [About CRDTs](https://crdt.tech/) - An approachable guide to Conflict-free Replicated Data Types
