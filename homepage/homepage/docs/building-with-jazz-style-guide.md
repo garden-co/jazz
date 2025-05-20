@@ -10,6 +10,28 @@ With that in mind, we have to step away from our usual approach of code first, e
 
 Our explanatory documentation helps developers understand what Jazz is, how it works, and why it matters. We write like we're helping a smart but busy friend understand the power and potential of Jazz—clear, direct, and focused on concepts rather than exhaustive implementation details.
 
+## Building with Jazz Page Structure
+
+Each page in the Building with Jazz section should follow this consistent structure:
+
+1. **Single-sentence introduction** - Start with a concise, engaging one-sentence description of the concept.
+
+2. **Context paragraph with links** - Follow with a paragraph that:
+   - References previous knowledge/steps with links
+   - Outlines what readers will learn on the page
+   - Uses **bold text** for important concepts/terms
+   - Helps readers quickly decide if this content is relevant to them
+
+3. **Section headings as questions or statements** - Use conversational headings that signpost content.
+
+4. **Minimal code examples** - Show just enough code to illustrate concepts without overwhelming details.
+
+5. **Next Steps section** - Direct readers to the logical next documentation page.
+
+6. **Further Reading section** - Provide links to more detailed documentation resources.
+
+This structure helps readers quickly understand what they'll learn, how it connects to what they already know, and whether this page has the information they need.
+
 ## Voice and Tone
 
 - **Conversational and enthusiastic**: Write as if explaining to a friend who's excited about collaborative applications
