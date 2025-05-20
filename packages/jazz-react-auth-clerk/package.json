@@ -9,11 +9,11 @@
     "cojson": "workspace:*",
     "jazz-auth-clerk": "workspace:*",
     "jazz-browser": "workspace:*",
-    "jazz-react": "workspace:*",
-    "jazz-tools": "workspace:*"
+    "jazz-react": "workspace:*"
   },
   "peerDependencies": {
-    "react": "^17.0.0 || ^18.0.0 || ^19.0.0"
+    "react": "^17.0.0 || ^18.0.0 || ^19.0.0",
+    "jazz-tools": "workspace:*"
   },
   "scripts": {
     "format-and-lint": "biome check .",
@@ -25,6 +25,7 @@
     "@testing-library/react": "16.2.0",
     "@types/react": "18.3.12",
     "@types/react-dom": "18.3.1",
-    "typescript": "catalog:"
+    "typescript": "catalog:",
+    "jazz-tools": "workspace:*"
   }
 }

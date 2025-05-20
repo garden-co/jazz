@@ -8,12 +8,15 @@
   "version": "0.14.1",
   "dependencies": {
     "cojson": "workspace:*",
-    "cojson-transport-ws": "workspace:*",
+    "cojson-transport-ws": "workspace:*"
+  },
+  "peerDependencies": {
     "jazz-tools": "workspace:*"
   },
   "devDependencies": {
     "jazz-run": "workspace:*",
-    "typescript": "catalog:"
+    "typescript": "catalog:",
+    "jazz-tools": "workspace:*"
   },
   "scripts": {
     "dev": "tsc --watch --sourceMap --outDir dist",
