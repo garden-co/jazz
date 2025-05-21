@@ -40,7 +40,7 @@ export const JoinGameRequest = co.map({
   waitingRoom: WaitingRoom,
 });
 
-export const InboxMessage = z.discriminatedUnion([
+export const InboxMessage = z.discriminatedUnion("type", [
   PlayIntent,
   NewGameIntent,
   CreateGameRequest,

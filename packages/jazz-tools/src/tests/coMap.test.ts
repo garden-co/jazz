@@ -11,7 +11,7 @@ import {
 } from "vitest";
 import { Group, co, subscribeToCoValue, z } from "../exports.js";
 import { Account } from "../index.js";
-import { CoKeys, Loaded, zodSchemaToCoSchema } from "../internal.js";
+import { Loaded, zodSchemaToCoSchema } from "../internal.js";
 import { createJazzTestAccount, setupJazzTestSync } from "../testing.js";
 import { setupTwoNodes, waitFor } from "./utils.js";
 
@@ -416,7 +416,7 @@ describe("CoMap", async () => {
 
     const MapWithEnumOfMaps = co.map({
       name: z.string(),
-      child: z.discriminatedUnion([ChildA, ChildB]),
+      child: z.discriminatedUnion("type", [ChildA, ChildB]),
     });
 
     const mapWithEnum = MapWithEnumOfMaps.create({
