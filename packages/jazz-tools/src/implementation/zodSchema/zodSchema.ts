@@ -29,7 +29,8 @@ import { InstanceOrPrimitiveOfSchemaCoValuesNullable } from "./typeConverters/In
 export type WithHelpers<
   Base extends z.core.$ZodType,
   Helpers extends object,
-> = Base & Helpers;
+  InstanceHelpers extends object,
+> = Base & Helpers & { $instanceHelpers: InstanceHelpers };
 
 export type FullyOrPartiallyLoaded<S extends z.core.$ZodType | CoValueClass> =
   InstanceOrPrimitiveOfSchema<S> extends CoValue
@@ -98,10 +99,21 @@ type AnyCoSchema =
   | RichTextSchema
   | FileStreamSchema;
 
-export type Loaded<
+type LoadedWithoutHelpers<
   T extends CoValueClass | AnyCoSchema,
   R extends ResolveQuery<T> = true,
 > = Resolved<NonNullable<InstanceOfSchemaCoValuesNullable<T>>, R>;
+
+export type Loaded<
+  T extends CoValueClass | AnyCoSchema,
+  R extends ResolveQuery<T> = true,
+> = AddHelpers<T, LoadedWithoutHelpers<T, R>>;
+
+export type AddHelpers<Schema, Instance> = Schema extends {
+  $instanceHelpers: infer Helpers;
+}
+  ? Instance & { [K in keyof Helpers]: Helpers[K] & { $helper$: true } }
+  : Instance;
 
 export type ResolveQuery<T extends CoValueClass | AnyCoSchema> = RefsToResolve<
   NonNullable<InstanceOfSchemaCoValuesNullable<T>>

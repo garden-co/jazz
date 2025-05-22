@@ -81,9 +81,9 @@ export const coMapDefiner = <Shape extends z.core.$ZodLooseShape>(
 
   coMapSchema.withHelpers = function (
     this: CoMapSchema<Shape>,
-    helpers: (Self: CoMapSchema<Shape>) => object,
+    helpers: () => object,
   ) {
-    return { ...this, ...helpers(this) };
+    return { ...this, ...helpers() };
   } as CoMapSchema<Shape>["withHelpers"];
 
   return coMapSchema as unknown as CoMapSchema<Shape>;

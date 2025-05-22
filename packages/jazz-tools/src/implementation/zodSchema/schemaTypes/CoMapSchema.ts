@@ -13,16 +13,25 @@ import {
 import { AnonymousJazzAgent } from "../../anonymousJazzAgent.js";
 import { InstanceOrPrimitiveOfSchema } from "../typeConverters/InstanceOrPrimitiveOfSchema.js";
 import { InstanceOrPrimitiveOfSchemaCoValuesNullable } from "../typeConverters/InstanceOrPrimitiveOfSchemaCoValuesNullable.js";
-import { FullyOrPartiallyLoaded, WithHelpers } from "../zodSchema.js";
+import {
+  AddHelpers,
+  FullyOrPartiallyLoaded,
+  Loaded,
+  ResolveQuery,
+  WithHelpers,
+} from "../zodSchema.js";
 
 export type CoMapSchema<
   Shape extends z.core.$ZodLooseShape,
   Config extends z.core.$ZodObjectConfig = z.core.$ZodObjectConfig,
+  Helpers extends object = {},
+  InstanceHelpers extends object = {},
 > = z.core.$ZodObject<Shape, Config> &
   z.$ZodTypeDiscriminable & {
     collaborative: true;
 
-    create: (
+    create<S>(
+      this: S,
       init: Simplify<CoMapInitZod<Shape>>,
       options?:
         | {
@@ -31,25 +40,30 @@ export type CoMapSchema<
           }
         | Account
         | Group,
-    ) => (Shape extends Record<string, never>
-      ? {}
-      : {
-          -readonly [key in keyof Shape]: InstanceOrPrimitiveOfSchema<
-            Shape[key]
-          >;
-        }) &
-      (unknown extends Config["out"][string]
+    ): AddHelpers<
+      S,
+      (Shape extends Record<string, never>
         ? {}
         : {
-            [key: string]: Config["out"][string];
+            -readonly [key in keyof Shape]: InstanceOrPrimitiveOfSchema<
+              Shape[key]
+            >;
           }) &
-      CoMap;
+        (unknown extends Config["out"][string]
+          ? {}
+          : {
+              [key: string]: Config["out"][string];
+            }) &
+        CoMap
+    >;
 
     load<
+      S,
       const R extends RefsToResolve<
         Simplify<CoMapInstanceCoValuesNullable<Shape>> & CoMap
       > = true,
     >(
+      this: S,
       id: string,
       options?: {
         resolve?: RefsToResolveStrict<
@@ -58,10 +72,15 @@ export type CoMapSchema<
         >;
         loadAs?: Account | AnonymousJazzAgent;
       },
-    ): Promise<Resolved<
-      Simplify<CoMapInstanceCoValuesNullable<Shape>> & CoMap,
-      R
-    > | null>;
+    ): Promise<
+      AddHelpers<
+        S,
+        Resolved<
+          Simplify<CoMapInstanceCoValuesNullable<Shape>> & CoMap,
+          R
+        > | null
+      >
+    >;
 
     subscribe<
       const R extends RefsToResolve<
@@ -94,8 +113,24 @@ export type CoMapSchema<
 
     withHelpers<S extends z.core.$ZodType, T extends object>(
       this: S,
-      helpers: (Self: S) => T,
-    ): WithHelpers<S, T>;
+      helpers: (Base: S) => T,
+    ): S extends WithHelpers<infer Base, infer Helpers, infer InstanceHelpers>
+      ? WithHelpers<Base, Helpers & T, InstanceHelpers>
+      : WithHelpers<S, T, InstanceHelpers>;
+
+    withInstanceHelper<
+      S extends CoMapSchema<Shape, Config>,
+      R extends ResolveQuery<S>,
+      H extends (this: Loaded<S, R>, ...args: any[]) => any,
+      N extends string,
+    >(
+      this: S,
+      name: N,
+      minResolve: R,
+      helper: H,
+    ): S extends WithHelpers<infer Base, infer Helpers, infer InstanceHelpers>
+      ? WithHelpers<Base, Helpers, InstanceHelpers & { [key in N]: H }>
+      : WithHelpers<S, Helpers, { [key in N]: H }>;
   };
 
 export type CoMapInitZod<Shape extends z.core.$ZodLooseShape> = {

@@ -247,7 +247,9 @@ export class CoMap extends CoValueBase implements CoValue {
         },
       },
     ) as {
-      [Key in CoKeys<this>]?: LastAndAllCoMapEdits<this[Key]>;
+      [Key in CoKeys<this> as this[Key] extends { $helper$: true }
+        ? never
+        : Key]: LastAndAllCoMapEdits<this[Key]>;
     };
   }
 

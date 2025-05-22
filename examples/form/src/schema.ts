@@ -17,8 +17,8 @@ export const BubbleTeaBaseTeaTypes = [
 
 export const ListOfBubbleTeaAddOns = co
   .list(z.literal([...BubbleTeaAddOnTypes]))
-  .withHelpers((Self) => ({
-    hasChanges(list?: Loaded<typeof Self> | null) {
+  .withHelpers(() => ({
+    hasChanges(list?: Loaded<typeof ListOfBubbleTeaAddOns> | null) {
       return list && Object.entries(list._raw.insertions).length > 0;
     },
   }));
@@ -39,16 +39,15 @@ export const DraftBubbleTeaOrder = co
     withMilk: z.optional(z.boolean()),
     instructions: z.optional(co.plainText()),
   })
-  .withHelpers((Self) => ({
-    hasChanges(order: Loaded<typeof Self> | undefined) {
+  .withHelpers(() => ({
+    hasChanges(order: Loaded<typeof DraftBubbleTeaOrder> | undefined) {
       return (
         !!order &&
         (Object.keys(order._edits).length > 1 ||
           ListOfBubbleTeaAddOns.hasChanges(order.addOns))
       );
     },
-
-    validate(order: Loaded<typeof Self>) {
+    validate(order: Loaded<typeof DraftBubbleTeaOrder>) {
       const errors: string[] = [];
 
       if (!order.baseTea) {

@@ -74,7 +74,7 @@ export type CoRecordSchema<
   withHelpers<S extends z.core.$ZodType, T extends object>(
     this: S,
     helpers: (Self: S) => T,
-  ): WithHelpers<S, T>;
+  ): WithHelpers<S, T, {}>;
 };
 
 // less precise verion to avoid circularity issues and allow matching against

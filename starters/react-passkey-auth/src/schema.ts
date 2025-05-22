@@ -23,9 +23,9 @@ export const AccountRoot = co
   .map({
     dateOfBirth: z.date(),
   })
-  .withHelpers((Self) => ({
+  .withHelpers(() => ({
     // Add helper methods here
-    age(root: Loaded<typeof Self>) {
+    age(root: Loaded<typeof AccountRoot>) {
       if (!root?.dateOfBirth) return null;
       return new Date().getFullYear() - root.dateOfBirth.getFullYear();
     },
