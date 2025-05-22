@@ -3,89 +3,89 @@ export const metadata = { title: "Authentication" };
 
 # Authentication
 
-Authentication is how your users prove who they are to Jazz, turning anonymous visitors into known collaborators.
+Authentication connects users to their Jazz accounts, enabling personalized collaboration.
 
-Now that you've set up [Accounts](/docs/building-with-jazz/accounts), it's time to connect real people to them. We'll explore **authentication states**, **authentication methods**, and how to create a smooth experience that works **even when users are offline**.
+Now that you've set up [Accounts](/docs/building-with-jazz/accounts), connect users to them. We'll explore **authentication states**, **authentication methods**, and **offline experiences**.
 
 ## What is Authentication in Jazz?
 
-Think of Jazz authentication as a digital handshake between your users and their data. Unlike traditional password systems, Jazz uses secure cryptographic keys:
+Jazz authentication uses cryptographic keys instead of traditional passwords:
 
-- The **public key** is like your user's digital name tag that everyone can see
-- The **private key** is like their secret handshake that proves it's really them
+- **Public key**: User's visible digital identity
+- **Private key**: Secure proof of identity
 
-This approach makes your app both highly secure and delightfully user-friendly. No more forgotten passwords or complex security questions!
+This approach provides security without password complexity.
 
-For more details on how Jazz's cryptographic authentication works under the hood, see [Authentication Security](/docs/authentication/security).
+See [Authentication Security](/docs/authentication/security) for technical details.
 
-## The Three Authentication States
+## Authentication States
 
-Jazz gives users three different ways to exist in your application:
+Jazz provides three user states:
 
-### Anonymous Mode: Try Before You Sign Up
+### Anonymous Mode
 
-When someone first opens your app, they get an anonymous account automatically. It's like being given a visitor badge at a conference:
+New users receive anonymous accounts automatically:
 
-- They can start creating content immediately
-- Their work stays on their current device
-- Everything they create can be upgraded to a full account later
+- Immediate content creation
+- Device-local storage
+- Upgradeable to full accounts
 
-This creates a "no-friction" first experience - users can start using your app without signing up first.
+This enables friction-free onboarding.
 
-Learn how to [detect when users are in anonymous mode](/docs/authentication/authentication-states#detecting-authentication-state) in your application code.
+See [detecting authentication state](/docs/authentication/authentication-states#detecting-authentication-state) for implementation.
 
-### Authenticated: Full Access Everywhere
+### Authenticated Mode
 
-Once users create a proper account, they enter authenticated mode. This is like having a permanent membership card:
+Users with full accounts get:
 
-- Their data syncs across all their devices
-- They can collaborate with other users
-- Their identity remains consistent across sessions
+- Cross-device data sync
+- Collaboration capabilities
+- Persistent identity
 
-This is the ideal state for regular users of your application.
+This is the target state for regular users.
 
-See how to [implement authenticated accounts](/docs/authentication/overview#authentication-flow) in your Jazz application.
+See [authentication flow implementation](/docs/authentication/overview#authentication-flow).
 
-### Guest Mode: Just Browsing
+### Guest Mode
 
-Some applications also offer a guest mode for users who just want to view content. It's like window shopping:
+Optional guest access for viewing:
 
-- Users can browse public content
-- Nothing gets saved or synchronized
-- No identity or account is created
+- Browse public content
+- No data persistence
+- No account creation
 
-This is perfect for applications where some content should be publicly viewable without requiring an account.
+Useful for public content viewing.
 
-Learn how to [configure guest mode access](/docs/authentication/authentication-states#configuring-guest-mode-access) in your application.
+See [guest mode configuration](/docs/authentication/authentication-states#configuring-guest-mode-access).
 
-## The User's Journey
+## User Journey
 
-Here's how users typically move through your authentication system:
+Typical authentication flow:
 
-1. They start as **anonymous** users on their first visit
-2. When they sign up, they become **authenticated** users
-3. If they log out, they return to being **anonymous** (with a new account)
-4. When they log back in, they regain access to their **authenticated** account
+1. Start as **anonymous** user
+2. Sign up to become **authenticated**
+3. Log out returns to **anonymous** (new account)
+4. Log in restores **authenticated** access
 
-The best part? When users upgrade from anonymous to authenticated, Jazz helps you migrate their work automatically, so nothing gets lost in the transition.
+Jazz automatically migrates data when upgrading from anonymous to authenticated.
 
-See a complete example of [migrating data between accounts](/docs/authentication/authentication-states#migrating-data-from-anonymous-to-authenticated-account) when users authenticate.
+See [account migration examples](/docs/authentication/authentication-states#migrating-data-from-anonymous-to-authenticated-account).
 
-## Choosing Your Authentication Methods
+## Authentication Methods
 
-Jazz offers several ways for users to prove their identity:
+Available authentication options:
 
-- **Passkeys**: The modern approach using TouchID/FaceID - super secure and convenient (but needs device support)
-- **Passphrases**: A sequence of words that works everywhere, even offline (but users need to remember them)
-- **Clerk Integration**: Traditional logins with email/password, Google, GitHub, etc. (familiar but requires internet)
+- **Passkeys**: TouchID/FaceID biometric authentication (requires device support)
+- **Passphrases**: Word sequences that work offline (requires memorization)
+- **Clerk Integration**: Traditional email/password and social logins (requires internet)
 
-Most apps should offer multiple methods to cover different scenarios. We recommend:
+Recommended approach:
 
-- **Passkeys as your primary method** (for the best security and user experience)
-- Passphrases as a backup option (for devices without biometric support)
-- Jazz Cloud or Clerk for apps that need traditional social logins
+- **Primary**: Passkeys for security and convenience
+- **Backup**: Passphrases for broader device support
+- **Traditional**: Clerk for familiar social login patterns
 
-Explore the [complete list of authentication methods](/docs/authentication/overview#available-authentication-methods) available in Jazz.
+See [available authentication methods](/docs/authentication/overview#available-authentication-methods).
 
 ## Next Steps
 
@@ -93,7 +93,7 @@ With authentication in place, let's explore [Groups and Ownership](/docs/buildin
 
 ## Further Reading
 
-Want to dive deeper into authentication?
+Additional resources:
 
 - [Authentication States](/docs/authentication/authentication-states) - Complete details about auth states
 - [Passkey Auth](/docs/authentication/passkey) - Implementing biometric authentication

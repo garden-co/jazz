@@ -3,24 +3,24 @@ export const metadata = { title: "Providers" };
 
 # Providers
 
-Think of Providers as the magical glue that brings your Jazz application to life. They connect your app to Jazz's collaborative network, making real-time collaboration possible with just a few lines of code.
+Providers connect your Jazz application to the collaborative network, enabling real-time sync across devices.
 
-Now that you've [created your schemas](/docs/building-with-jazz/schemas), it's time to wire everything up and get your collaborative features working across all your users' devices.
+Now that you've [created your schemas](/docs/building-with-jazz/schemas), connect them to your application.
 
 ## What are Providers?
 
-Providers are special components that you wrap around your application. They're like mission control for your collaborative features - quietly working behind the scenes to handle all the complex stuff while you focus on building your app.
+Providers are components that wrap your application to enable collaborative features.
 
-Here's what providers take care of for you:
+Providers handle:
 
-- **Keeping Everyone in Sync**: They automatically sync data between users so everyone sees the latest changes
-- **Saving Progress**: They store data locally so your users never lose their work, even offline
-- **Making Schemas Available**: They register your schemas and make them available throughout your app
-- **Managing User Accounts**: They connect user identities to your data, enabling true multi-device experiences
+- **Data sync**: Automatic synchronization between users
+- **Local storage**: Persistent data storage, including offline
+- **Schema registration**: Make schemas available throughout your app
+- **Account management**: Connect user identities to data
 
 ## Setting Up Your Provider
 
-Adding a provider to your app is super easy. Here's a simple example in React:
+Add a provider to your React app:
 
 <CodeGroup>
 ```tsx twoslash
@@ -58,19 +58,19 @@ export function AppWrapper({ children }: { children: React.ReactNode }) {
 ```
 </CodeGroup>
 
-That's it! With just these few lines of code, you've:
+This setup:
 
-- **Connected to Jazz Cloud**: Your app can now sync data across all your users
-- **Registered Your Schema**: Your account structure is ready to use throughout your app
-- **Enabled Type Safety**: TypeScript knows exactly what your data looks like
+- **Connects to Jazz Cloud**: Enables data sync across users
+- **Registers schemas**: Makes account structure available
+- **Enables type safety**: TypeScript integration
 
 ## Accessing Your Data
 
-Once your provider is set up, accessing your collaborative data is a breeze. Let's look at how:
+With the provider configured, access collaborative data using hooks.
 
 ### Subscribe to Data with Hooks
 
-The easiest way to get your data is with our hooks. They're just like React's built-in hooks but for your collaborative data:
+Use Jazz hooks to access collaborative data:
 
 <CodeGroup>
 ```tsx twoslash
@@ -89,7 +89,7 @@ import { Task } from "./schema";
 import { useCoState } from "jazz-react";
 
 function TaskComponent({ taskId }: { taskId: ID<typeof Task> }) {
-  // This is like useState, but for collaborative data!
+  // Like useState, but for collaborative data
   const task = useCoState(Task, taskId);
   
   if (task === undefined) {
@@ -114,17 +114,17 @@ function TaskComponent({ taskId }: { taskId: ID<typeof Task> }) {
 ```
 </CodeGroup>
 
-When you use the `useCoState` hook, it gives you three possible states:
+The `useCoState` hook returns three possible states:
 
-- `undefined` → "Hold on, I'm still loading this data"
-- `null` → "Sorry, you don't have permission or this doesn't exist"
-- An actual object → "Here's your data, ready to use!"
+- `undefined` → Loading data
+- `null` → Permission denied or not found
+- An object → Data ready
 
-This makes it super easy to build user-friendly loading states and error handling.
+This enables clear loading states and error handling.
 
-### Load Related Data Too
+### Load Related Data
 
-Got nested data? No problem! You can tell Jazz exactly which related data you want to load:
+Specify which nested data to load:
 
 <CodeGroup>
 ```tsx twoslash
@@ -183,17 +183,17 @@ function ProjectComponent({ projectId }: { projectId: ID<typeof Project> }) {
 ```
 </CodeGroup>
 
-With the `resolve` option, you can load entire trees of data in a single request. This gives you complete control over what data you fetch and when, helping you build lightning-fast interfaces.
+The `resolve` option loads entire data trees in a single request, providing control over data fetching and performance.
 
-## The Magic of Real-Time Collaboration
+## Real-Time Collaboration
 
-The coolest part about providers is how they make real-time collaboration just work. When you wrap your app in a provider:
+Providers enable automatic real-time collaboration:
 
-1. **Changes sync automatically**: When someone makes a change, everyone sees it almost instantly
-2. **Schemas stay consistent**: Everyone uses the same data structure, so there's no confusion
-3. **User permissions just work**: The right people see the right data, automatically
+1. **Automatic sync**: Changes propagate to all connected users
+2. **Schema consistency**: Shared data structure across all users
+3. **Permission handling**: Access control works automatically
 
-It's like having a virtual whiteboard where everyone can draw together - providers make sure everyone sees the same picture, no matter where they are or what device they're using.
+Providers ensure all users see consistent data regardless of device or location.
 
 ## Next Steps
 
@@ -201,7 +201,7 @@ Now that your application is connected to Jazz, let's explore [Accounts](/docs/b
 
 ## Further Reading
 
-Want to dive deeper into providers? Check out these resources:
+Additional resources:
 
 - [Provider Configuration](/docs/project-setup/providers) - All the options for fine-tuning your providers
 - [Authentication States](/docs/authentication/authentication-states) - How providers handle different user login states

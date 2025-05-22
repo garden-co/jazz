@@ -9,12 +9,12 @@ Now that you've set up [Authentication](/docs/building-with-jazz/authentication)
 
 ## What is Ownership in Jazz?
 
-Think of ownership in Jazz like having your name on the deed to a house. Every piece of data in your app must have an owner, which can be either:
+Ownership in Jazz determines data access control. Every piece of data requires an owner:
 
-- An individual **Account** - like your private diary that only you can read
-- A **Group** - like a shared whiteboard that a whole team can use
+- **Individual Account** - Private data accessible only to the owner
+- **Group** - Shared data accessible to group members
 
-When you create something new in Jazz, you get to decide who owns it:
+Ownership is set during data creation:
 
 <CodeGroup>
 ```tsx twoslash
@@ -39,32 +39,32 @@ const sharedNote = Note.create(
 ```
 </CodeGroup>
 
-This ownership concept is the foundation of Jazz's permission system, controlling who can access what across your entire application.
+Ownership forms the foundation of Jazz's permission system.
 
-Learn more about how ownership works in [Groups as Permission Scopes](/docs/groups/intro#ownership).
+See [Groups as Permission Scopes](/docs/groups/intro#ownership) for details.
 
-## Groups: The Magic Behind Sharing
+## Groups: Enabling Data Sharing
 
-Groups in Jazz are like magical access passes that determine who gets to enter different rooms in your data castle. They're super lightweight but incredibly powerful, letting you:
+Groups in Jazz control data access and enable collaboration. They provide:
 
-- Control exactly who can see your data
-- Decide what actions different people can take
-- Share content with specific individuals or everyone
-- Build complex organizational structures
+- Precise access control
+- Role-based permissions
+- Content sharing capabilities
+- Organizational structures
 
-The best part? Groups are so lightweight that you can create thousands of them without worrying about performance - one for each document, project, team, or whatever your app needs.
+Groups are lightweight - create thousands without performance concerns.
 
-See how to create and manage groups in the [Group Management documentation](/docs/groups/intro).
+See [Group Management](/docs/groups/intro) for implementation details.
 
-## The Three Permission Roles
+## Permission Roles
 
-Jazz keeps permissions simple with three fundamental roles:
+Jazz uses three permission levels:
 
-- **Reader**: Can look but not touch (view-only access)
-- **Writer**: Can make changes but not invite others
-- **Admin**: The VIP pass - can edit content and manage who has access
+- **Reader**: View-only access
+- **Writer**: Edit content, no member management
+- **Admin**: Full control including member management
 
-This simple trio of roles covers most collaboration scenarios while keeping your code clean and straightforward.
+These roles cover most collaboration scenarios:
 
 <CodeGroup>
 ```tsx twoslash
@@ -83,30 +83,24 @@ documentGroup.addMember("everyone", "reader");
 ```
 </CodeGroup>
 
-Learn about implementing different permission levels in [Group Roles](/docs/groups/intro#roles).
+See [Group Roles](/docs/groups/intro#roles) for implementation.
 
-## Collaboration Made Easy
+## Collaboration Features
 
-Groups are the secret sauce of collaboration in Jazz. They enable:
+Groups enable several sharing patterns:
 
-- **Seamless Sharing**: Add someone to a group, and they instantly get access
-- **Public Content**: Use the special `"everyone"` member for public access
-- **Fine-grained Control**: Different users can have different permission levels
-- **Nested Structures**: Create org charts with inherited permissions
+- **Direct sharing**: Add specific users by account ID
+- **Public access**: Use `"everyone"` member for public content
+- **Fine-grained control**: Different permission levels per user
+- **Hierarchical structures**: Nested permission inheritance
 
-Jazz gives you several user-friendly ways to share content:
+Sharing options support familiar user experiences similar to Google Docs or Figma.
 
-- **Direct Sharing**: Add specific people by their account ID
-- **Public Links**: Make content accessible to everyone with a single switch
-- **Invite Links**: Generate special links users can click to gain access
-
-These options let you create familiar sharing experiences like those in Google Docs or Figma, where sharing feels natural and intuitive. Without Groups, each piece of data would be a lonely island. With Groups, your app becomes a bustling collaborative community.
-
-See examples of implementing sharing features in [Public Sharing and Invites](/docs/groups/sharing).
+See [Public Sharing and Invites](/docs/groups/sharing) for examples.
 
 ## Working with Shared Data
 
-The beauty of Jazz's permission system is that it's completely invisible in your code. You access shared data exactly the same way as private data:
+Jazz handles permissions transparently in your code. Access shared data the same way as private data:
 
 <CodeGroup>
 ```ts twoslash
@@ -129,17 +123,17 @@ if (document) {
 ```
 </CodeGroup>
 
-Behind the scenes, Jazz handles all the permission checks, only allowing operations the current user is authorized to perform.
+Jazz automatically handles permission checks, allowing only authorized operations.
 
-Find out more about accessing shared data in [Subscription and Loading](/docs/react/using-covalues/subscription-and-loading).
+See [Subscription and Loading](/docs/react/using-covalues/subscription-and-loading) for data access patterns.
 
-## Building Organizational Structures
+## Organizational Structures
 
-For more complex apps, you can create permission hierarchies that mirror real-world structures:
+For complex applications, create permission hierarchies:
 
 - Company → Department → Team → Project
 
-Groups can inherit from other groups, so changing permissions at one level automatically updates all the levels below it:
+Groups support inheritance, so permission changes propagate through the hierarchy:
 
 <CodeGroup>
 ```ts twoslash
@@ -154,41 +148,37 @@ projectGroup.extend(teamGroup);
 ```
 </CodeGroup>
 
-This inheritance model makes it easy to implement enterprise-grade permission systems with minimal code.
+This inheritance model enables enterprise-grade permission systems with minimal code.
 
-Explore more complex permission structures in [Group Inheritance](/docs/groups/inheritance).
+See [Group Inheritance](/docs/groups/inheritance) for advanced patterns.
 
 ## Next Steps
 
-🎉 **Congratulations!** You've completed the core journey of building applications with Jazz!
-
-You now understand all the essential building blocks:
-- **Schemas** define your data structure
-- **Providers** connect your app to Jazz
+**Congratulations!** You've completed the core Jazz concepts:
+- **Schemas** define data structure
+- **Providers** connect to Jazz
 - **Accounts** represent user identity
-- **Authentication** secures user access
-- **Groups** manage permissions and sharing
+- **Authentication** secures access
+- **Groups** manage permissions
 
-With this knowledge, you're ready to build collaborative applications that work seamlessly across devices.
+You're ready to build collaborative applications.
 
-### Ready to build?
+### Start Building
 
-You can start creating your Jazz application right away with what you've learned. Check out:
-- [Example Applications](/docs/examples) - See what we've covered in working apps, and get inspired to build your own
-- [`create-jazz-app`](/docs/tools/create-jazz-app) - Quickly create a new Jazz app with a pre-configured template
-- [AI tools](/docs/ai-tools) - Vibe-code your way to a working app
+Begin creating your Jazz application:
+- [Example Applications](/docs/examples) - Working examples and inspiration
+- [`create-jazz-app`](/docs/tools/create-jazz-app) - Quick project setup
+- [AI tools](/docs/ai-tools) - Rapid prototyping assistance
 
-### Want to learn more advanced topics?
+### Advanced Topics
 
-If you're interested in diving deeper, you can explore:
-- [Sync](/docs/building-with-jazz/sync) - Learn how data flows between devices
-- [Server Workers](/docs/building-with-jazz/server-workers) - Add server-side logic to your app
-
-Now go build something amazing!
+Explore additional capabilities:
+- [Sync](/docs/building-with-jazz/sync) - Data synchronization between devices
+- [Server Workers](/docs/building-with-jazz/server-workers) - Server-side application logic
 
 ## Further Reading
 
-Want to dive deeper into permissions and sharing?
+Additional resources:
 
 - [Groups as Permission Scopes](/docs/groups/intro) - Complete guide to group permissions
 - [Public Sharing and Invites](/docs/groups/sharing) - Implementation details for sharing

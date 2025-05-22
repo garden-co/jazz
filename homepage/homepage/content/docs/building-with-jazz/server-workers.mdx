@@ -2,115 +2,113 @@ export const metadata = { title: "Server Workers" };
 
 # Server Workers
 
-Server Workers are like robot assistants that do behind-the-scenes work for your Jazz app, connecting to external services and handling complex tasks.
+Server Workers extend Jazz applications with server-side functionality, connecting to external services and implementing backend logic.
 
-Now that you've explored [Sync](/docs/building-with-jazz/sync), it's time to discover the power of server-side functionality. We'll look at how Server Workers act as **automated team members** in your collaborative space, implement powerful **integration patterns**, and extend your app with **backend capabilities** while maintaining Jazz's magical collaboration model.
+Now that you've explored [Sync](/docs/building-with-jazz/sync), discover server-side capabilities. We'll cover how Server Workers function as **automated collaborators**, implement **integration patterns**, and extend applications with **backend capabilities** while maintaining Jazz's collaboration model.
 
 ## What Are Server Workers?
 
-Think of Server Workers as AI teammates that join your collaborative workspace. While your human users collaborate through their devices, Server Workers join the party from the cloud. They're special because:
+Server Workers are server-side collaborators in your Jazz workspace. They provide:
 
-- They have their own **identity** in your system, just like a regular user
-- They can **read and write data** based on the permissions you give them
-- They **watch for changes** and respond automatically
-- They run on servers instead of browsers (Node.js, Cloudflare Workers, etc.)
+- **Identity**: Own accounts in your system
+- **Data access**: Read and write data based on permissions
+- **Change monitoring**: React to data modifications
+- **Server execution**: Run on Node.js, Cloudflare Workers, etc.
 
-The beautiful insight here is that **Server Workers aren't a separate system** - they're just another kind of collaborator in your app. It's like having a robot friend who's always ready to help your human users!
+Server Workers aren't separate systems - they're collaborators alongside human users.
 
-Learn more about setting up server workers in the [Node.JS / Server Workers guide](/docs/project-setup/server-side).
+See [Node.JS / Server Workers guide](/docs/project-setup/server-side) for setup.
 
-## When Your App Needs Server Workers
+## When to Use Server Workers
 
-Server Workers shine in these situations:
+Server Workers excel in these scenarios:
 
-- **Secret Keeping**: When you need to use API keys that shouldn't be exposed to browsers
-- **Heavy Lifting**: For intensive calculations that would slow down your user's device
-- **External Connections**: To talk to databases, payment processors, or other services
-- **Automation Magic**: Creating workflows that happen automatically when data changes
-- **Rule Enforcement**: Ensuring important business rules are always followed
-- **Background Processing**: Handling time-consuming tasks without making users wait
+- **API key security**: Keep secrets out of browsers
+- **Heavy computation**: Avoid slowing user devices
+- **External integrations**: Connect to databases, payment processors, services
+- **Automation**: Create workflows triggered by data changes
+- **Business rules**: Enforce constraints consistently
+- **Background processing**: Handle time-consuming tasks
 
-Instead of building a completely separate backend like in traditional apps, Server Workers let you extend your Jazz app with server powers while keeping everything in harmony.
+Instead of building separate backends, Server Workers extend Jazz applications while maintaining collaborative harmony.
 
-Check out the [Jazz Paper Scissors Example](https://github.com/garden-co/jazz/tree/main/examples/jazz-paper-scissors) to see Server Workers in action.
+See the [Jazz Paper Scissors Example](https://github.com/garden-co/jazz/tree/main/examples/jazz-paper-scissors) for implementation examples.
 
 ## The Collaboration Model
 
-What makes Server Workers special is their unique approach to collaboration with your users through shared data:
+Server Workers collaborate through shared data:
 
-- **Shared Task Boards**: Humans and Server Workers both update the same CoValues
-- **Automatic Reactions**: Server Workers spring into action when users make changes
-- **Invisible Integration**: Results flow back to users without them needing to refresh
+- **Shared workspaces**: Humans and Server Workers update the same CoValues
+- **Automatic responses**: Server Workers react to user changes
+- **Seamless integration**: Results flow back without user refresh
 
-This feels much more natural than the old request-response model. Instead of humans shouting requests at a server and waiting for answers, everyone (humans and Server Workers) collaborates on the same digital workspace.
+This approach feels more natural than traditional request-response patterns. Everyone collaborates on the same digital workspace.
 
-## How Server Workers Join Your Team
+## How Server Workers Join
 
-Server Workers become part of your app in three key ways:
+Server Workers integrate through three mechanisms:
 
 ### Digital Identity
 
-Each Server Worker gets its own account and identity:
+Each Server Worker has its own account:
 
-- A stable **ID** for identification (like "payment-processor" or "email-sender")
-- A secure **authentication key** for security
-- A presence in **edit history** so you can track their actions
+- Stable **ID** for identification
+- Secure **authentication key**
+- Presence in **edit history**
 
 ### Permission Management
 
-Server Workers use the same permission system as human users:
+Server Workers use the standard permission system:
 
-- Add them to **Groups** to control what they can access
-- Assign **roles** (reader, writer, admin) based on what they need to do
-- **Share specific data** with them just like you would with teammates
+- Add to **Groups** to control access
+- Assign **roles** (reader, writer, admin) based on requirements
+- **Share data** like with human collaborators
 
-This unified approach means your security model stays clean and consistent.
+This unified approach maintains consistent security.
 
-Check out [Node.JS / Server Workers](/docs/project-setup/server-side) for implementation details.
+See [Node.JS / Server Workers](/docs/project-setup/server-side) for implementation.
 
-### Always-On Attention
+### Change Monitoring
 
-Server Workers stay vigilant by subscribing to data changes:
+Server Workers monitor data through subscriptions:
 
-1. They **watch specific data** you tell them to monitor
-2. When changes happen, they **spring into action**
-3. They **update the same workspace** with results
+1. **Subscribe** to specific data
+2. **React** when changes occur
+3. **Update** the same workspace with results
 
-This creates a smooth, continuous flow of information between users and servers.
+This creates continuous information flow between users and servers.
 
-## Powerful Server Worker Patterns
+## Server Worker Patterns
 
-Here are two game-changing patterns you can implement:
+Two effective patterns:
 
-### The State Machine Pattern
+### State Machine Pattern
 
-This popular pattern turns CoValues into processing pipelines:
+Turn CoValues into processing pipelines:
 
-1. A user changes a document's status to "ready for processing"
-2. The Server Worker notices this status change
-3. It runs its processing magic (maybe generating a PDF or analyzing text)
-4. It updates the document with results and changes status to "processed"
+1. User changes document status to "ready for processing"
+2. Server Worker detects status change
+3. Worker processes data (generates PDF, analyzes text)
+4. Worker updates document with results and changes status to "processed"
 
-This creates a natural, asynchronous workflow between humans and servers.
+This creates natural, asynchronous workflows.
 
-### The Bridge to the Outside World
+### External Integration Pattern
 
-Server Workers can connect your Jazz world to external services:
+Connect Jazz to external services:
 
-1. They keep an eye on "outbound request" CoValues
-2. When a new request appears, they call external APIs
-3. They bring the results back into your Jazz app for users to see
+1. Monitor "outbound request" CoValues
+2. Call external APIs when requests appear
+3. Return results into Jazz app
 
-This lets your Jazz app talk to anything on the internet without exposing secrets to the browser.
+This connects your Jazz world to external services without exposing secrets.
 
 ## Next Steps
 
-Congratulations on reaching the end of this advanced topic! Server Workers complete the picture of what's possible with Jazz, giving you both real-time collaboration AND powerful server capabilities.
+Server Workers complete the advanced Jazz capabilities, providing both real-time collaboration and server functionality.
 
-Ready to see these concepts in action? Check out:
+Ready to implement:
 
-- The [Jazz Paper Scissors Example](https://github.com/garden-co/jazz/tree/main/examples/jazz-paper-scissors) for a complete game with Server Workers
-- [Node.JS / Server Workers](/docs/project-setup/server-side) for deployment instructions
-- Head back to [building your app](/docs/building-with-jazz/groups#next-steps) with the core Jazz concepts you've already mastered
-
-Now go build something truly extraordinary! ✨
+- [Jazz Paper Scissors Example](https://github.com/garden-co/jazz/tree/main/examples/jazz-paper-scissors) - Complete implementation
+- [Node.JS / Server Workers](/docs/project-setup/server-side) - Deployment guide
+- Return to [core concepts](/docs/building-with-jazz/groups#next-steps) for application building

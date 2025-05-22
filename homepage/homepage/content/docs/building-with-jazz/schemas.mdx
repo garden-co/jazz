@@ -5,15 +5,15 @@ export const metadata = { title: "Schemas" };
 
 Schemas define the structure of your data in Jazz applications, enabling type-safe collaborative editing.
 
-Now that you've [installed Jazz](/docs/building-with-jazz/installation), let's create your first schemas! We'll explore how schemas work with [CoValues](/docs/schemas/covalues), enable [real-time collaboration](/docs/using-covalues/collaboration), and help you build amazing collaborative experiences.
+Now that you've [installed Jazz](/docs/building-with-jazz/installation), create your first schemas. We'll explore how schemas work with [CoValues](/docs/schemas/covalues) and enable [real-time collaboration](/docs/using-covalues/collaboration).
 
 ## What are Jazz Schemas?
 
-Think of schemas as blueprints for your data. They tell Jazz what your data looks like and how it behaves when people collaborate.
+Schemas are blueprints for your data. They define structure and enable collaborative behavior.
 
-In Jazz, we use special data structures called **CoValues** (Collaborative Values). Think of CoValues as **super-fast Git for lots of tiny data** - they track changes, handle merges, and keep everything in sync, but for small pieces of data rather than entire files.
+Jazz uses **CoValues** (Collaborative Values) - data structures that track changes, handle merges, and sync automatically.
 
-With CoValues, you get:
+CoValues provide:
 
 - Automatic change tracking without any extra code
 - Conflict resolution when two people edit the same thing
@@ -21,45 +21,43 @@ With CoValues, you get:
 
 ### Why Zod for Schemas?
 
-We chose [Zod](https://zod.dev/) to handle our schema validation because it makes your life easier:
+We use [Zod](https://zod.dev/) for schema validation:
 
-- **Simple to Use**: Zod's straightforward syntax means you'll be writing schemas in minutes, not hours
-- **Catches Bugs Early**: It validates your data at runtime with helpful error messages that point directly to the problem
-- **TypeScript Heaven**: Zod automatically generates TypeScript types so you don't have to write them twice
-- **Works Great with AI Tools**: The clean syntax plays nicely with AI assistants and language models
-- **Grows With You**: As your app gets bigger, Zod's modular approach makes it easy to evolve your schemas
+- **Simple syntax**: Write schemas quickly with clear, readable code
+- **Runtime validation**: Catch errors early with detailed error messages
+- **TypeScript integration**: Automatic type generation
+- **AI-friendly**: Clean syntax works well with code generation tools
+- **Scalable**: Modular approach supports growing applications
 
-By combining Zod with our collaborative data structures, we've created a system that's powerful yet feels natural to use.
+Zod combined with CoValues creates a powerful, intuitive system.
 
 ### Built on CRDTs
 
-Behind the scenes, CoValues implement [Conflict-free Replicated Data Types (CRDTs)](https://crdt.tech/). Don't worry about the fancy name - it just means your data works well across multiple users and devices without constant server check-ins.
+CoValues implement [Conflict-free Replicated Data Types (CRDTs)](https://crdt.tech/). CRDTs enable data to work across multiple users and devices without constant server coordination.
 
-We built Jazz on CRDTs because they allow for true local-first collaboration. Your app works even when offline, and when everyone reconnects, all the changes merge together smoothly.
+CRDTs enable local-first collaboration:
 
-Here's what that means for you:
+- **Automatic conflict resolution**: The system handles concurrent edits
+- **Offline capability**: Changes sync when connectivity returns
+- **Direct collaboration**: Users can collaborate peer-to-peer
+- **Eventual consistency**: All users see the same final state
 
-- **No more merge conflicts**: When two people change the same thing, the system figures it out automatically
-- **Works offline**: Make changes on the plane, in a tunnel, or anywhere - they'll sync when you reconnect
-- **No server required**: Your users can collaborate directly without everything going through a central server
-- **Everything eventually matches**: Everyone ends up seeing the same data, even if changes arrive in a different order
-
-The best part? You don't need to worry about any of this complexity. We handle it behind the scenes so you can focus on building your app.
+This complexity is handled automatically.
 
 ## Why Use Schemas?
 
-Defining schemas early in your project saves you tons of headaches down the road:
+Defining schemas early prevents problems:
 
-1. **Catch Errors Early**: TypeScript will warn you about mistakes as you type, not when your app crashes in production
-2. **Self-Documenting Code**: Your schemas clearly show everyone on your team what your data looks like
-3. **Easy Updates**: When your app evolves, schemas make it simple to modify your data model without breaking things
-4. **Collaboration Built-in**: Everyone works with the same data model, so collaboration just works
+1. **Type safety**: Catch errors at compile time
+2. **Documentation**: Clear data structure for your team
+3. **Evolution**: Modify data models safely
+4. **Consistency**: Shared data model across collaborators
 
 ## Anatomy of a Schema
 
-Creating schemas in Jazz is surprisingly simple. We use [Zod](https://zod.dev/) for validation and add our own special sauce with the `co` namespace to make things collaborative.
+Creating schemas in Jazz uses [Zod](https://zod.dev/) with the `co` namespace for collaborative features.
 
-Here's a basic example:
+Basic example:
 
 <CodeGroup>
 ```ts twoslash
@@ -79,16 +77,16 @@ export const Project = co.map({
 ```
 </CodeGroup>
 
-This example shows several cool things about Jazz schemas:
+This example demonstrates Jazz schema features:
 
-- **Super readable**: The syntax is clean and easy to understand
-- **Field declarations**: We use `co` combined with Zod to define fields
-- **Connected data**: Schemas can easily reference other schemas
-- **Type-safe**: TypeScript automatically figures out the right types
+- **Readable syntax**: Clean, understandable declarations
+- **Field definitions**: `co` namespace combined with Zod
+- **Schema references**: Easy linking between data types
+- **Type safety**: Automatic TypeScript integration
 
 ## CoValue Types
 
-Jazz gives you a few different types of collaborative values to model your data. Here are the two you'll use most often:
+Jazz provides several collaborative value types. The most common:
 
 <CodeGroup>
 ```ts twoslash
@@ -106,7 +104,7 @@ export const TaskList = co.list(Task);
 ```
 </CodeGroup>
 
-Jazz offers several types of CoValues:
+Available CoValue types:
 
 - [**CoMap**](/docs/using-covalues/comaps) - For object-like data with named properties (like a JSON object)
 - [**CoList**](/docs/using-covalues/colists) - For ordered collections of items (like an array)
@@ -117,7 +115,7 @@ Check out the [CoValues documentation](/docs/schemas/covalues) to learn more abo
 
 ## Field Types
 
-Jazz gives you lots of field types to express exactly what your data should look like. Here's an example showing some of the possibilities:
+Jazz provides various field types for different data requirements:
 
 <CodeGroup>
 ```ts twoslash
@@ -152,14 +150,14 @@ export const Product = co.map({
 ```
 </CodeGroup>
 
-Here are the main field types you'll use:
+Main field types:
 
 - **Simple types**: `z.string()`, `z.number()`, `z.boolean()`, `z.date()`
 - **Choice fields**: `z.literal(["option1", "option2"])` for predefined choices
 - **Optional fields**: `z.optional(z.string())` for fields that might not exist
 - **References**: Use other schemas directly to link your data together
 
-Want to see all the options? Check out the [Field Types documentation](/docs/schemas/covalues#covalue-fielditem-types).
+See the [Field Types documentation](/docs/schemas/covalues#covalue-fielditem-types) for complete options.
 
 ## Next Steps
 
@@ -167,7 +165,7 @@ Now that you've got schemas under your belt, let's connect them to your applicat
 
 ## Further Reading
 
-Want to dive deeper? Check out these resources:
+Additional resources:
 
 - [CoValues Reference](/docs/schemas/covalues) - See all the details about CoValue types
 - [Field Types](/docs/schemas/covalues#covalue-fielditem-types) - The complete field type reference

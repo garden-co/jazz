@@ -3,70 +3,70 @@ export const metadata = { title: "Sync" };
 
 # Sync
 
-Sync is how Jazz transfers data between users and devices, enabling real-time collaboration.
+Sync enables data transfer between users and devices in Jazz applications.
 
-Now that you've mastered the [core concepts](/docs/building-with-jazz/groups) of Jazz, let's explore the **advanced topic** of synchronization. We'll look at how Jazz's **local-first** architecture works, different **sync options** including Jazz Cloud and self-hosted solutions, and how to configure sync for your specific needs.
+Now that you've mastered the [core concepts](/docs/building-with-jazz/groups), explore synchronization. We'll cover Jazz's **local-first** architecture, **sync options** including Jazz Cloud and self-hosted solutions, and **configuration** for specific needs.
 
 ## How Sync Works in Jazz
 
-At its core, Jazz's sync system is like a magical courier service that ensures everyone sees the same information, no matter where they are. When any user makes a change, three things happen:
+Jazz's sync system ensures data consistency across all users and devices. When changes occur:
 
-- **Local-first operations**: Changes happen immediately on the local device
-- **Background synchronization**: Changes are sent to a [sync server](/docs/sync-and-storage)
-- **Conflict resolution**: The CRDT nature of CoValues automatically resolves conflicts
+- **Local-first operations**: Changes apply immediately to the local device
+- **Background sync**: Changes send to a [sync server](/docs/sync-and-storage)
+- **Conflict resolution**: CRDT architecture automatically resolves conflicts
 
-Think of Jazz's sync system as a team of invisible assistants working behind the scenes to keep everyone's data in harmony, regardless of when or where they're working.
+This process maintains data harmony regardless of when or where users work.
 
-## The Sync Journey
+## The Sync Process
 
-When someone changes a CoValue in Jazz, a bit of magic happens behind the scenes:
+When someone modifies a CoValue:
 
-1. The change is **immediately applied** to the local device's state
-2. The **user interface updates** to reflect the change
-3. In the background, the change is **sent to a sync server**
-4. The sync server **forwards the change** to all other connected devices
-5. Other devices **merge the change** into their local state
-6. Their **user interfaces update** to reflect the change
+1. Change **applies immediately** to local device state
+2. **User interface updates** to reflect the change
+3. Change **sends to sync server** in background
+4. Sync server **forwards change** to connected devices
+5. Other devices **merge the change** into local state
+6. Their **interfaces update** to show the change
 
-This whole process happens automatically and feels like wizardry to your users - everyone sees the same data as if they were all editing the same document together, even when they're miles apart!
+This process happens automatically and provides seamless collaboration.
 
 ## Sync Options
 
-Jazz gives you two super simple ways to keep everyone's data in sync:
+Jazz provides two sync approaches:
 
 ### Jazz Cloud
 
-The easiest option is to use [Jazz Cloud](/docs/sync-and-storage#using-jazz-cloud), our ready-to-go service that does all the heavy lifting for you:
+[Jazz Cloud](/docs/sync-and-storage#using-jazz-cloud) provides ready-to-use sync infrastructure:
 
-- **Real-time synchronization** between users and devices
+- **Real-time sync** between users and devices
 - **Persistent storage** with redundancy and backups
 - **Distributed caching** for low-latency access
-- **Zero configuration** for quick application development
+- **Zero configuration** for rapid development
 
-Jazz Cloud is ideal for teams who want to focus on building amazing features rather than managing infrastructure - it's like having a team of expert DevOps engineers working for you!
+Jazz Cloud is optimal for teams focused on features rather than infrastructure management.
 
 ### Self-Hosted Sync Server
 
-Feel like being in the driver's seat? Jazz lets you [run your own sync server](/docs/sync-and-storage#running-your-own-sync-server) with just a single command:
+[Run your own sync server](/docs/sync-and-storage#running-your-own-sync-server) for maximum control:
 
-- **Complete control** over your data and infrastructure
+- **Complete control** over data and infrastructure
 - **On-premises deployment** for compliance requirements
 - **Custom configurations** for specific performance needs
-- **Private networks** for heightened security
+- **Private networks** for enhanced security
 
-Running your own sync server gives you maximum flexibility but requires more setup and maintenance. It's perfect for the techies who like to tinker under the hood!
+Self-hosting provides flexibility but requires setup and maintenance.
 
 ## Next Steps
 
-Now you can choose your own adventure:
+Choose your path:
 
-- Dive into [Server Workers](/docs/building-with-jazz/server-workers) to add super-powered server-side logic to your app
-- Head back to [building your app](/docs/building-with-jazz/groups#next-steps) with the core Jazz concepts you've already mastered
+- [Server Workers](/docs/building-with-jazz/server-workers) - Add server-side logic to your application
+- Return to [building your app](/docs/building-with-jazz/groups#next-steps) with core Jazz concepts
 
-Whichever path you choose, you're well on your way to creating collaborative experiences that will delight your users!
+Both paths lead to creating collaborative experiences.
 
 ## Further Reading
 
-For more detailed information about sync, see:
+For detailed sync information, see:
 - [Sync and Storage](/docs/sync-and-storage) - Complete guide to sync options and configuration
 - [Providers](/docs/building-with-jazz/providers) - Configuring sync in your application
