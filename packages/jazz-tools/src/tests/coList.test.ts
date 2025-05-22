@@ -47,6 +47,15 @@ describe("Simple CoList operations", async () => {
     ]);
   });
 
+  test("list with enum type", () => {
+    const List = co.list(z.enum(["a", "b", "c"]));
+    const list = List.create(["a", "b", "c"]);
+    expect(list.length).toBe(3);
+    expect(list[0]).toBe("a");
+    expect(list[1]).toBe("b");
+    expect(list[2]).toBe("c");
+  });
+
   test("Construction with an Account", () => {
     const list = TestList.create(["milk"], me);
 

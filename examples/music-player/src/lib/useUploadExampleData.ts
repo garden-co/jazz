@@ -8,7 +8,7 @@ export function useUploadExampleData() {
 
   useEffect(() => {
     uploadOnboardingData();
-  }, [me.id]);
+  }, [me?.id]);
 }
 
 async function uploadOnboardingData() {

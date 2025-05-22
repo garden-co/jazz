@@ -1,7 +1,7 @@
 {
   "name": "jazz-example-todo",
   "private": true,
-  "version": "0.0.216",
+  "version": "0.0.221",
   "type": "module",
   "scripts": {
     "dev": "vite",

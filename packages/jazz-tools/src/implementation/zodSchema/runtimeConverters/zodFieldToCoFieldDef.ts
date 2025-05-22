@@ -1,4 +1,4 @@
-import z from "zod/v4";
+import z, { ZodCatch, ZodLazy, ZodReadonly } from "zod/v4";
 import { CoMap, CoValueClass, isCoValueClass } from "../../../internal.js";
 import { coField } from "../../schema.js";
 import {
@@ -17,6 +17,12 @@ type FieldSchema =
   | z.core.$ZodObject<z.core.$ZodLooseShape>
   | z.core.$ZodArray<z.core.$ZodType>
   | z.core.$ZodTuple<z.core.$ZodType[]>
+  | z.core.$ZodReadonly<z.core.$ZodType>
+  | z.core.$ZodLazy<z.core.$ZodType>
+  | z.core.$ZodTemplateLiteral<any>
+  | z.core.$ZodLiteral<any>
+  | z.core.$ZodCatch<z.core.$ZodType>
+  | z.core.$ZodEnum<any>
   | (z.core.$ZodCustom<any, any> & { builtin: any });
 
 export function zodFieldToCoFieldDef(schema: FieldSchema) {
@@ -41,8 +47,21 @@ export function zodFieldToCoFieldDef(schema: FieldSchema) {
         return coField.boolean;
       } else if (schema._zod.def.type === "null") {
         return coField.null;
+      } else if (schema._zod.def.type === "enum") {
+        return coField.string;
+      } else if (schema._zod.def.type === "readonly") {
+        return zodFieldToCoFieldDef(
+          (schema as unknown as ZodReadonly).def.innerType as FieldSchema,
+        );
       } else if (schema._zod.def.type === "date") {
         return coField.Date;
+      } else if (schema._zod.def.type === "template_literal") {
+        return coField.string;
+      } else if (schema._zod.def.type === "lazy") {
+        // Mostly to support z.json()
+        return zodFieldToCoFieldDef(
+          (schema as unknown as ZodLazy).unwrap() as FieldSchema,
+        );
       } else if (schema._zod.def.type === "literal") {
         if (
           schema._zod.def.values.some(

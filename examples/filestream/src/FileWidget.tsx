@@ -1,6 +1,6 @@
 "use client";
 import { useAccount } from "jazz-react";
-import { FileStream, co } from "jazz-tools";
+import { co } from "jazz-tools";
 import { useRef, useState } from "react";
 import { JazzAccount } from "./schema";
 
@@ -125,7 +125,7 @@ export function FileWidget() {
 
     try {
       setIsUploading(true);
-      me.profile.file = await FileStream.createFromBlob(file, {
+      me.profile.file = await co.fileStream().createFromBlob(file, {
         onProgress: (p) => setProgress(Math.round(p * 100)),
       });
     } catch (error) {

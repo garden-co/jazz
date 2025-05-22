@@ -1,5 +1,38 @@
 # jazz-tools
 
+## 0.14.7
+
+### Patch Changes
+
+- 365b0ea: reduce the z exported APIs to the ones we support and fix compatible types
+
+## 0.14.6
+
+### Patch Changes
+
+- 9d6d9fe: Fixes co.fileStream create and createFromBlob types
+- 9d6d9fe: Fixes init type for CoList, CoFeed and CoRecord to accept optional partially loaded values
+
+## 0.14.5
+
+### Patch Changes
+
+- 91cbb2f: Fix CoMap.create with optional types
+- 20b3d88: Add co.loaded utility
+
+## 0.14.4
+
+### Patch Changes
+
+- 011af55: Support z.enum in the schema definitions
+
+## 0.14.2
+
+### Patch Changes
+
+- 3d1027f: Make possible to extend a group without having access to it
+- c240eed: Fix custom AccountSchema support in testing utils
+
 ## 0.14.1
 
 ### Patch Changes

@@ -13,7 +13,13 @@ CoLists are ordered collections that work like JavaScript arrays. They provide i
 CoLists are defined by specifying the type of items they contain:
 
 <CodeGroup>
-```ts
+```ts twoslash
+const Task = co.map({
+  title: z.string(),
+  status: z.literal(["todo", "in-progress", "complete"]),
+});
+
+// ---cut---
 import { co, z } from "jazz-tools";
 
 const ListOfResources = co.list(z.string());
@@ -25,7 +31,14 @@ const ListOfTasks = co.list(Task);
 To create a `CoList`:
 
 <CodeGroup>
-```ts
+```ts twoslash
+import { co, z } from "jazz-tools";
+
+const Task = co.map({
+  title: z.string(),
+  status: z.literal(["todo", "in-progress", "complete"]),
+});
+// ---cut---
 // Create an empty list
 const resources = co.list(z.string()).create([]);
 
@@ -68,7 +81,22 @@ See [Groups as permission scopes](/docs/groups/intro) for more information on ho
 CoLists support standard array access patterns:
 
 <CodeGroup>
-```ts
+```ts twoslash
+
+import { co, z } from "jazz-tools";
+
+const Task = co.map({
+  title: z.string(),
+  status: z.literal(["todo", "in-progress", "complete"]),
+});
+
+const ListOfTasks = co.list(Task);
+
+const tasks = ListOfTasks.create([
+  Task.create({ title: "Prepare soil beds", status: "todo" }),
+  Task.create({ title: "Order compost", status: "todo" }),
+]);
+// ---cut---
 // Access by index
 const firstTask = tasks[0];
 console.log(firstTask.title);  // "Prepare soil beds"
@@ -94,7 +122,22 @@ console.log(todoTasks.length); // 1
 Update `CoList`s just like you would JavaScript arrays:
 
 <CodeGroup>
-```ts
+```ts twoslash
+import { co, z } from "jazz-tools";
+
+const Task = co.map({
+  title: z.string(),
+  status: z.literal(["todo", "in-progress", "complete"]),
+});
+
+const ListOfTasks = co.list(Task);
+
+const ListOfResources = co.list(z.string());
+
+const resources = ListOfResources.create([]);
+const tasks = ListOfTasks.create([]);
+
+// ---cut---
 // Add items
 resources.push("Tomatoes");       // Add to end
 resources.unshift("Lettuce");     // Add to beginning
@@ -116,7 +159,18 @@ tasks[0].status = "complete";        // Update properties of references
 Remove specific items by index with `splice`, or remove the first or last item with `pop` or `shift`:
 
 <CodeGroup>
-```ts
+```ts twoslash
+import { co, z } from "jazz-tools";
+
+const ListOfResources = co.list(z.string());
+
+const resources = ListOfResources.create([
+  "Tomatoes",
+  "Cucumber",
+  "Peppers",
+]);
+
+// ---cut---
 // Remove 2 items starting at index 1
 resources.splice(1, 2);
 console.log(resources);              // ["Cucumber", "Peppers"]
@@ -136,7 +190,14 @@ resources.shift();                   // Remove first item
 `CoList`s support the standard JavaScript array methods you already know:
 
 <CodeGroup>
-```ts
+```ts twoslash
+import { co, z } from "jazz-tools";
+
+const ListOfResources = co.list(z.string());
+
+const resources = ListOfResources.create([]);
+
+// ---cut---
 // Add multiple items at once
 resources.push("Tomatoes", "Basil", "Peppers");
 
@@ -158,9 +219,23 @@ console.log(resources); // ["Basil", "Peppers", "Tomatoes"]
 CoLists maintain type safety for their items:
 
 <CodeGroup>
-```ts
+```ts twoslash
+import { co, z } from "jazz-tools";
+
+const Task = co.map({
+  title: z.string(),
+  status: z.literal(["todo", "in-progress", "complete"]),
+});
+
+const ListOfTasks = co.list(Task);
+const ListOfResources = co.list(z.string());
+
+const resources = ListOfResources.create([]);
+const tasks = ListOfTasks.create([]);
+// ---cut---
 // TypeScript catches type errors
 resources.push("Carrots");        // ✓ Valid string
+// @errors: 2345
 resources.push(42);               // ✗ Type error: expected string
 
 // For lists of references
@@ -178,20 +253,30 @@ tasks.forEach(task => {
 CoLists work well with UI rendering libraries:
 
 <CodeGroup>
-```tsx
+```tsx twoslash
+import * as React from "react";
+
+const Task = co.map({
+  title: z.string(),
+  status: z.literal(["todo", "in-progress", "complete"]),
+});
+
+// ---cut---
 import { co, z, Loaded } from "jazz-tools";
 const ListOfTasks = co.list(Task);
 
 // React example
-function TaskList({ tasks: Loaded<typeof ListOfTasks> }) {
-  return (
-    <ul>
-      {tasks.map(task => (
+function TaskList({ tasks }: { tasks: Loaded<typeof ListOfTasks> }) {
+  return  (
+   <ul>
+     {tasks.map(task => (
+       task ? (
         <li key={task.id}>
           {task.title} - {task.status}
         </li>
-      ))}
-    </ul>
+      ): null
+     ))}
+   </ul>
   );
 }
 ```
@@ -202,15 +287,34 @@ function TaskList({ tasks: Loaded<typeof ListOfTasks> }) {
 CoLists can be used to create one-to-many relationships:
 
 <CodeGroup>
-```ts
-import { co, z } from "jazz-tools";
+```ts twoslash
+import { co, z, CoListSchema } from "jazz-tools";
+
+const Task = co.map({
+  title: z.string(),
+  status: z.literal(["todo", "in-progress", "complete"]),
+
+  get project(): z.ZodOptional<typeof Project> {
+    return z.optional(Project);
+  }
+});
+
+const ListOfTasks = co.list(Task);
 
 const Project = co.map({
   name: z.string(),
-  tasks: co.list(Task),
+
+  get tasks(): CoListSchema<typeof Task> {
+    return ListOfTasks;
+  }
 });
 
-// ...
+const project = Project.create(
+  {
+    name: "Garden Project",
+    tasks: ListOfTasks.create([]),
+  },
+);
 
 const task = Task.create({
   title: "Plant seedlings",

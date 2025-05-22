@@ -1,6 +1,6 @@
 import { CodeGroup } from "@/components/forMdx";
 
-export const metadata = { 
+export const metadata = {
   description: "ImageDefinition is a CoValue for managing images, storage of multiple resolutions, and progressive loading."
 };
 
@@ -19,26 +19,55 @@ The [Image Upload example](https://github.com/gardencmp/jazz/tree/main/examples/
 The easiest way to create and use images in your Jazz application is with the `createImage()` function:
 
 <CodeGroup>
-```ts
+```ts twoslash
+import { Group, co, z } from "jazz-tools";
+
+const MyProfile = co.profile({
+  name: z.string(),
+  image: z.optional(co.image()),
+});
+
+const MyAccount = co.account({
+  root: co.map({}),
+  profile: MyProfile,
+});
+
+MyAccount.withMigration((account, creationProps) => {
+  if (account.profile === undefined) {
+    const profileGroup = Group.create();
+    profileGroup.addMember("everyone", "reader");
+    account.profile = MyProfile.create(
+      {
+        name: creationProps?.name ?? "New user",
+      },
+      profileGroup,
+    );
+  }
+});
+
+const me = await MyAccount.create({ creationProps: { name: "John Doe" } });
+
+const myGroup = Group.create();
+
+// ---cut---
 import { createImage } from "jazz-browser-media-images";
 
 // Create an image from a file input
-async function handleFileUpload(event) {
-  const file = event.target.files[0];
+async function handleFileUpload(event: Event) {
+  const file = (event.target as HTMLInputElement).files?.[0];
   if (file) {
     // Creates ImageDefinition with multiple resolutions automatically
-    const image = await createImage(file, {
-      owner: me.profile._owner,
-    });
+    const image = await createImage(file, { owner: myGroup });
 
     // Store the image in your application data
     me.profile.image = image;
   }
 }
+
 ```
 </CodeGroup>
 
-> Note: `createImage()` requires a browser environment as it uses browser APIs to process images.
+**Note:** `createImage()` requires a browser environment as it uses browser APIs to process images.
 
 The `createImage()` function:
 - Creates an `ImageDefinition` with the right properties
@@ -51,11 +80,16 @@ The `createImage()` function:
 You can configure `createImage()` with additional options:
 
 <CodeGroup>
-```tsx
+```tsx twoslash
+import { createImage } from "jazz-browser-media-images";
+import { createJazzTestAccount } from 'jazz-tools/testing';
+const me = await createJazzTestAccount();
+const file = new File([], "test.jpg", { type: "image/jpeg" });
+// ---cut---
 // Configuration options
 const options = {
   owner: me,                // Owner for access control
-  maxSize: 1024             // Maximum resolution to generate
+  maxSize: 1024 as 1024     // Maximum resolution to generate
 };
 
 // Setting maxSize controls which resolutions are generated:
@@ -98,7 +132,7 @@ See [Groups as permission scopes](/docs/groups/intro) for more information on ho
 Create an `ImageDefinition` by specifying the original dimensions and an optional placeholder:
 
 <CodeGroup>
-```ts
+```ts twoslash
 import { ImageDefinition } from "jazz-tools";
 
 // Create with original dimensions
@@ -109,7 +143,7 @@ const image = ImageDefinition.create({
 // With a placeholder for immediate display
 const imageWithPlaceholder = ImageDefinition.create({
   originalSize: [1920, 1080],
-  placeholderDataURL: "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAAP...",
+  placeholderDataURL: "data:image/jpeg;base64,/9j/4AAQSkZJ...",
 });
 ```
 </CodeGroup>
@@ -124,15 +158,13 @@ const imageWithPlaceholder = ImageDefinition.create({
 Each resolution is stored with a key in the format `"widthxheight"` (e.g., `"1920x1080"`, `"800x450"`).
 
 <CodeGroup>
-```ts
-import { CoMap, CoList, ImageDefinition, coField } from "jazz-tools";
+```ts twoslash
+import { ImageDefinition, co, z } from "jazz-tools";
 
-class ListOfImages extends CoList.Of(coField.ref(ImageDefinition)) {}
-
-class Gallery extends CoMap {
-  title = coField.string;
-  images = coField.ref(ListOfImages);
-}
+const Gallery = co.map({
+  title: z.string(),
+  images: co.list(co.image()),
+});
 ```
 </CodeGroup>
 
@@ -141,7 +173,19 @@ class Gallery extends CoMap {
 Add multiple resolutions to an `ImageDefinition` by creating `FileStream`s for each size:
 
 <CodeGroup>
-```ts
+```ts twoslash
+import { FileStream, ImageDefinition } from "jazz-tools";
+import { createJazzTestAccount } from 'jazz-tools/testing';
+const me = await createJazzTestAccount();
+
+const fullSizeBlob = new Blob([], { type: "image/jpeg" });
+const mediumSizeBlob = new Blob([], { type: "image/jpeg" });
+const thumbnailBlob = new Blob([], { type: "image/jpeg" });
+
+const image = ImageDefinition.create({
+  originalSize: [1920, 1080],
+}, { owner: me });
+// ---cut---
 // Create FileStreams for different resolutions
 const fullRes = await FileStream.createFromBlob(fullSizeBlob);
 const mediumRes = await FileStream.createFromBlob(mediumSizeBlob);
@@ -159,28 +203,46 @@ image["320x180"] = thumbnailRes;
 The `highestResAvailable` method helps select the best image resolution for the current context:
 
 <CodeGroup>
-```ts
-// Get the highest resolution available
-const highestRes = image.highestResAvailable();
-if (highestRes) {
-  console.log(`Found resolution: ${highestRes.res}`);
+```ts twoslash
+import { ImageDefinition, FileStream } from "jazz-tools";
+import { createJazzTestAccount } from "jazz-tools/testing";
 
-  // Convert to a usable blob
+// Simple document environment
+global.document = {
+  createElement: () =>
+    ({ src: "", onload: null }) as unknown as HTMLImageElement,
+} as unknown as Document;
+global.window = { innerWidth: 1000 } as unknown as Window & typeof globalThis;
+
+// Setup
+const fakeBlob = new Blob(["fake image data"], { type: "image/jpeg" });
+const me = await createJazzTestAccount();
+const image = ImageDefinition.create(
+  { originalSize: [1920, 1080] },
+  { owner: me },
+);
+image["1920x1080"] = await FileStream.createFromBlob(fakeBlob, { owner: me });
+const imageElement = document.createElement("img");
+
+// ---cut---
+// Get highest resolution available (unconstrained)
+const highestRes = ImageDefinition.highestResAvailable(image);
+console.log(highestRes);
+if (highestRes) {
   const blob = highestRes.stream.toBlob();
   if (blob) {
+    // Create a URL for the blob
     const url = URL.createObjectURL(blob);
     imageElement.src = url;
-
-    // Remember to revoke the URL when no longer needed
-    imageElement.onload = () => {
-      URL.revokeObjectURL(url);
-    };
+    // Revoke the URL when the image is loaded
+    imageElement.onload = () => URL.revokeObjectURL(url);
   }
 }
 
-// Or constrain by maximum width
-const targetWidth = window.innerWidth;
-const appropriateRes = image.highestResAvailable({ targetWidth });
+// Get appropriate resolution for specific width
+const appropriateRes = ImageDefinition.highestResAvailable(image, {
+  targetWidth: window.innerWidth,
+});
 ```
 </CodeGroup>
 
@@ -189,7 +251,11 @@ const appropriateRes = image.highestResAvailable({ targetWidth });
 `highestResAvailable` returns the largest resolution that fits your constraints. If a resolution has incomplete data, it falls back to the next available lower resolution.
 
 <CodeGroup>
-```ts
+```ts twoslash
+import { ImageDefinition, FileStream } from "jazz-tools";
+
+const mediumSizeBlob = new Blob([], { type: "image/jpeg" });
+// ---cut---
 const image = ImageDefinition.create({
   originalSize: [1920, 1080],
 });
@@ -197,8 +263,8 @@ const image = ImageDefinition.create({
 image["1920x1080"] = FileStream.create(); // Empty image upload
 image["800x450"] = await FileStream.createFromBlob(mediumSizeBlob);
 
-const highestRes = image.highestResAvailable();
-console.log(highestRes.res); // 800x450
+const highestRes = ImageDefinition.highestResAvailable(image);
+console.log(highestRes?.res); // 800x450
 ```
 </CodeGroup>
 
@@ -207,7 +273,31 @@ console.log(highestRes.res); // 800x450
 `ImageDefinition` supports simple progressive loading with placeholders and resolution selection:
 
 <CodeGroup>
-```ts
+```ts twoslash
+import { FileStream, ImageDefinition } from "jazz-tools";
+import { createJazzTestAccount } from "jazz-tools/testing";
+
+// Simple document environment
+global.document = {
+  createElement: () =>
+    ({ src: "", onload: null }) as unknown as HTMLImageElement,
+} as unknown as Document;
+global.window = { innerWidth: 1000 } as unknown as Window & typeof globalThis;
+
+const me = await createJazzTestAccount();
+
+const mediumSizeBlob = new Blob([], { type: "image/jpeg" });
+const image = ImageDefinition.create(
+  {
+    originalSize: [1920, 1080],
+  },
+  { owner: me },
+);
+image["1920x1080"] = await FileStream.createFromBlob(mediumSizeBlob, {
+  owner: me,
+});
+const imageElement = document.createElement("img");
+// ---cut---
 // Start with placeholder for immediate display
 if (image.placeholderDataURL) {
   imageElement.src = image.placeholderDataURL;
@@ -215,7 +305,9 @@ if (image.placeholderDataURL) {
 
 // Then load the best resolution for the current display
 const screenWidth = window.innerWidth;
-const bestRes = image.highestResAvailable({ targetWidth: screenWidth });
+const bestRes = ImageDefinition.highestResAvailable(image, {
+  targetWidth: screenWidth,
+});
 
 if (bestRes) {
   const blob = bestRes.stream.toBlob();
@@ -229,6 +321,7 @@ if (bestRes) {
     };
   }
 }
+
 ```
 </CodeGroup>
 ## Best Practices

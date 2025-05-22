@@ -16,6 +16,15 @@ import { InstanceOrPrimitiveOfSchema } from "../typeConverters/InstanceOrPrimiti
 import { InstanceOrPrimitiveOfSchemaCoValuesNullable } from "../typeConverters/InstanceOrPrimitiveOfSchemaCoValuesNullable.js";
 import { WithHelpers } from "../zodSchema.js";
 
+type CoRecordInit<
+  K extends z.core.$ZodString<string>,
+  V extends z.core.$ZodType,
+> = {
+  [key in z.output<K>]: V extends z.core.$ZodOptional<any>
+    ? InstanceOrPrimitiveOfSchemaCoValuesNullable<V>
+    : NonNullable<InstanceOrPrimitiveOfSchemaCoValuesNullable<V>>;
+};
+
 export type CoRecordSchema<
   K extends z.core.$ZodString<string>,
   V extends z.core.$ZodType,
@@ -23,9 +32,7 @@ export type CoRecordSchema<
   collaborative: true;
 
   create: (
-    init: Simplify<{
-      [key in z.output<K>]?: InstanceOrPrimitiveOfSchema<V>;
-    }>,
+    init: Simplify<CoRecordInit<K, V>>,
     options?:
       | {
           owner: Account | Group;

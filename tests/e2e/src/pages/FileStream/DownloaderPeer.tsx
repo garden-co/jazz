@@ -8,23 +8,23 @@ export function DownloaderPeer(props: { testCoMapId: string }) {
   const [synced, setSynced] = useState(false);
 
   useEffect(() => {
-    async function run(me: Account, uploadedFileId: string) {
+    async function run(me: Account | null | undefined, uploadedFileId: string) {
       const uploadedFile = await UploadedFile.load(uploadedFileId, {
-        loadAs: me,
+        loadAs: me ?? undefined,
       });
 
       if (!uploadedFile) {
         throw new Error("Uploaded file not found");
       }
 
-      me.waitForAllCoValuesSync().then(() => {
+      me?.waitForAllCoValuesSync().then(() => {
         setSynced(true);
       });
 
       uploadedFile.coMapDownloaded = true;
 
       await FileStream.loadAsBlob(uploadedFile._refs.file!.id, {
-        loadAs: me,
+        loadAs: me ?? undefined,
       });
 
       uploadedFile.syncCompleted = true;

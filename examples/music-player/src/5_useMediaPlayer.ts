@@ -2,7 +2,7 @@ import { MusicTrack, MusicaAccount, Playlist } from "@/1_schema";
 import { usePlayMedia } from "@/lib/audio/usePlayMedia";
 import { usePlayState } from "@/lib/audio/usePlayState";
 import { useAccount } from "jazz-react";
-import { FileStream, Loaded } from "jazz-tools";
+import { FileStream } from "jazz-tools";
 import { useRef, useState } from "react";
 import { updateActivePlaylist, updateActiveTrack } from "./4_actions";
 import { getNextTrack, getPrevTrack } from "./lib/getters";
@@ -22,7 +22,7 @@ export function useMediaPlayer() {
   // Reference used to avoid out-of-order track loads
   const lastLoadedTrackId = useRef<string | null>(null);
 
-  async function loadTrack(track: Loaded<typeof MusicTrack>) {
+  async function loadTrack(track: MusicTrack) {
     lastLoadedTrackId.current = track.id;
 
     setLoading(track.id);
@@ -64,10 +64,7 @@ export function useMediaPlayer() {
     }
   }
 
-  async function setActiveTrack(
-    track: Loaded<typeof MusicTrack>,
-    playlist?: Loaded<typeof Playlist>,
-  ) {
+  async function setActiveTrack(track: MusicTrack, playlist?: Playlist) {
     if (activeTrackId === track.id && lastLoadedTrackId.current !== null) {
       playState.toggle();
       return;

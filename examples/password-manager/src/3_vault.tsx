@@ -36,13 +36,13 @@ const VaultPage: React.FC = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const items = me.root?.folders?.flatMap(
+  const items = me?.root?.folders?.flatMap(
     (folder) =>
       folder?.items?.filter(
         (item): item is Exclude<typeof item, null> => !!item,
       ) || [],
   );
-  const folders = useCoState(co.list(Folder), me.root?._refs.folders?.id, {
+  const folders = useCoState(co.list(Folder), me?.root?._refs.folders?.id, {
     resolve: {
       $each: { items: { $each: true } },
     },
@@ -109,11 +109,11 @@ const VaultPage: React.FC = () => {
 
   const handleDeleteFolder = async () => {
     try {
-      const selectedFolderIndex = me.root?.folders?.findIndex(
+      const selectedFolderIndex = me?.root?.folders?.findIndex(
         (folder) => folder?.id === selectedFolder?.id,
       );
       if (selectedFolderIndex !== undefined && selectedFolderIndex > -1)
-        me.root?.folders?.splice(selectedFolderIndex, 1);
+        me?.root?.folders?.splice(selectedFolderIndex, 1);
     } catch (err) {
       setError("Failed to create folder. Please try again.");
     }
@@ -141,14 +141,14 @@ const VaultPage: React.FC = () => {
           </Button>
           <Button
             onClick={() => setEditingItem(item)}
-            disabled={!me.canWrite(item)}
+            disabled={!me?.canWrite(item)}
           >
             Edit
           </Button>
           <Button
             onClick={() => handleDeleteItem(item)}
             variant="danger"
-            disabled={!me.canWrite(item)}
+            disabled={!me?.canWrite(item)}
           >
             Delete
           </Button>
@@ -209,13 +209,13 @@ const VaultPage: React.FC = () => {
         <div className="flex gap-2">
           <Button
             onClick={() => setIsNewItemModalOpen(true)}
-            disabled={!selectedFolder || !me.canWrite(selectedFolder)}
+            disabled={!selectedFolder || !me?.canWrite(selectedFolder)}
           >
             New Item
           </Button>
           <Button
             onClick={() => setIsInviteModalOpen(true)}
-            disabled={!selectedFolder || !me.canWrite(selectedFolder)}
+            disabled={!selectedFolder || !me?.canWrite(selectedFolder)}
           >
             Share Folder
           </Button>

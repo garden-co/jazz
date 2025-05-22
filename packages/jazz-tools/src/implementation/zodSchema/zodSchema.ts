@@ -31,11 +31,6 @@ export type WithHelpers<
   Helpers extends object,
 > = Base & Helpers;
 
-export type FullyOrPartiallyLoaded<S extends z.core.$ZodType | CoValueClass> =
-  InstanceOrPrimitiveOfSchema<S> extends CoValue
-    ? NonNullable<InstanceOrPrimitiveOfSchemaCoValuesNullable<S>>
-    : InstanceOrPrimitiveOfSchema<S>;
-
 export type ZodPrimitiveSchema =
   | z.core.$ZodString
   | z.core.$ZodNumber

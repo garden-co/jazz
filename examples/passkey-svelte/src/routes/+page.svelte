@@ -1,15 +1,18 @@
 <script lang="ts">
-  import { useAccount } from 'jazz-svelte';
+  import { AccountCoState } from 'jazz-svelte';
+  import { Account } from 'jazz-tools';
 
-  const account = useAccount({
-    root: {}
+  const account = new AccountCoState(Account, {
+    resolve: {
+      profile: true
+    }
   });
 
   $inspect(account);
 </script>
 
 <div class="container">
-  <h1>Welcome back, {account?.me?.profile?.name}</h1>
+  <h1>Welcome back, {account?.current?.profile?.name}</h1>
   <button onclick={() => account.logOut()}>Log out</button>
 </div>
 

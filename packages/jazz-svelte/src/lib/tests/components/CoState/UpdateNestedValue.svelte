@@ -1,13 +1,11 @@
 <script lang="ts" module>
   export type Props = {
-    id: ID<Person>;
+    id: string;
   };
 </script>
 
 <script lang="ts">
   import { CoState } from '../../../jazz.class.svelte.js';
-
-  import { type ID } from 'jazz-tools';
   import { Person } from './schema.js';
 
   let props: Props = $props();

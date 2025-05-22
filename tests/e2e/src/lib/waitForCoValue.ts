@@ -1,5 +1,6 @@
 import {
   Account,
+  AnonymousJazzAgent,
   CoValue,
   CoValueClass,
   ID,
@@ -15,7 +16,10 @@ export function waitForCoValue<
   coMap: CoValueClass<T>,
   valueId: ID<T>,
   predicate: (value: T) => boolean,
-  options: { loadAs: Account; resolve?: RefsToResolveStrict<T, R> },
+  options: {
+    loadAs: Account | AnonymousJazzAgent;
+    resolve?: RefsToResolveStrict<T, R>;
+  },
 ) {
   return new Promise<T>((resolve, reject) => {
     function subscribe() {

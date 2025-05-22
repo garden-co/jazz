@@ -31,6 +31,7 @@ export * from "./implementation/createContext.js";
 export * from "./types.js";
 export * from "./implementation/zodSchema/zodSchema.js";
 export * from "./implementation/zodSchema/zodCo.js";
+export * as co from "./implementation/zodSchema/coExport.js";
 export * from "./implementation/zodSchema/schemaTypes/CoMapSchema.js";
 export * from "./implementation/zodSchema/schemaTypes/CoRecordSchema.js";
 export * from "./implementation/zodSchema/schemaTypes/CoListSchema.js";

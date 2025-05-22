@@ -41,8 +41,6 @@ export function DocNav() {
         {items.map((item) => (
           <SideNavSection item={item} key={item.name} />
         ))}
-
-        <SideNavHeader href="/api-reference">API Reference</SideNavHeader>
       </SideNavBody>
     </SideNav>
   );

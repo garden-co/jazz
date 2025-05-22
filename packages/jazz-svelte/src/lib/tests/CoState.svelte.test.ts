@@ -5,6 +5,7 @@ import { createJazzTestAccount, createJazzTestContext, setupJazzTestSync } from 
 import UpdateNestedValue from './components/CoState/UpdateNestedValue.svelte';
 import { Person } from './components/CoState/schema.js';
 import { Dog } from './components/CoState/schema.js';
+import type { Loaded } from 'jazz-tools';
 
 beforeEach(async () => {
   await setupJazzTestSync();
@@ -13,7 +14,7 @@ beforeEach(async () => {
   });
 });
 
-function setup(person: Person) {
+function setup(person: Loaded<typeof Person>) {
   const result = render(UpdateNestedValue, {
     context: createJazzTestContext(),
     props: { id: person.id }

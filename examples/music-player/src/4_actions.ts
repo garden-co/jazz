@@ -1,5 +1,5 @@
 import { getAudioFileData } from "@/lib/audio/getAudioFileData";
-import { FileStream, Group, Loaded, co } from "jazz-tools";
+import { FileStream, Group, co } from "jazz-tools";
 import {
   MusicTrack,
   MusicTrackWaveform,
@@ -94,8 +94,8 @@ export async function createNewPlaylist() {
 }
 
 export async function addTrackToPlaylist(
-  playlist: Loaded<typeof Playlist>,
-  track: Loaded<typeof MusicTrack>,
+  playlist: Playlist,
+  track: MusicTrack,
 ) {
   const alreadyAdded = playlist.tracks?.some(
     (t) => t?.id === track.id || t?._refs.sourceTrack?.id === track.id,
@@ -118,8 +118,8 @@ export async function addTrackToPlaylist(
 }
 
 export async function removeTrackFromPlaylist(
-  playlist: Loaded<typeof Playlist>,
-  track: Loaded<typeof MusicTrack>,
+  playlist: Playlist,
+  track: MusicTrack,
 ) {
   const notAdded = !playlist.tracks?.some(
     (t) => t?.id === track.id || t?._refs.sourceTrack?.id === track.id,
@@ -142,21 +142,15 @@ export async function removeTrackFromPlaylist(
   }
 }
 
-export async function updatePlaylistTitle(
-  playlist: Loaded<typeof Playlist>,
-  title: string,
-) {
+export async function updatePlaylistTitle(playlist: Playlist, title: string) {
   playlist.title = title;
 }
 
-export async function updateMusicTrackTitle(
-  track: Loaded<typeof MusicTrack>,
-  title: string,
-) {
+export async function updateMusicTrackTitle(track: MusicTrack, title: string) {
   track.title = title;
 }
 
-export async function updateActivePlaylist(playlist?: Loaded<typeof Playlist>) {
+export async function updateActivePlaylist(playlist?: Playlist) {
   const { root } = await MusicaAccount.getMe().ensureLoaded({
     resolve: {
       root: {
@@ -169,7 +163,7 @@ export async function updateActivePlaylist(playlist?: Loaded<typeof Playlist>) {
   root.activePlaylist = playlist ?? root.rootPlaylist;
 }
 
-export async function updateActiveTrack(track: Loaded<typeof MusicTrack>) {
+export async function updateActiveTrack(track: MusicTrack) {
   const { root } = await MusicaAccount.getMe().ensureLoaded({
     resolve: {
       root: {},
@@ -180,7 +174,7 @@ export async function updateActiveTrack(track: Loaded<typeof MusicTrack>) {
 }
 
 export async function onAnonymousAccountDiscarded(
-  anonymousAccount: Loaded<typeof MusicaAccount>,
+  anonymousAccount: MusicaAccount,
 ) {
   const { root: anonymousAccountRoot } = await anonymousAccount.ensureLoaded({
     resolve: {

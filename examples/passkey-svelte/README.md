@@ -5,6 +5,7 @@ This example app demonstrates how to implement passkey authentication in a Svelt
 ## Features
 
 This example showcases how to:
+
 - Set up passkey authentication in a Svelte application
 - Handle user registration with passkeys
 - Manage authentication state
@@ -13,23 +14,26 @@ This example showcases how to:
 ## Getting started
 
 You can either
+
 1. Clone the jazz repository, and run the app within the monorepo.
 2. Or create a new Jazz project using this example as a template.
-
 
 ### Using the example as a template
 
 Create a new Jazz project, and use this example as a template.
+
 ```bash
 npx create-jazz-app@latest passkey-svelte-app --example passkey-svelte
 ```
 
 Go to the new project directory.
+
 ```bash
 cd passkey-svelte-app
 ```
 
 Run the dev server.
+
 ```bash
 npm run dev
 ```
@@ -39,21 +43,25 @@ npm run dev
 This requires `pnpm` to be installed, see [https://pnpm.io/installation](https://pnpm.io/installation).
 
 Clone the jazz repository.
+
 ```bash
 git clone https://github.com/garden-co/jazz.git
 ```
 
 Install and build dependencies.
+
 ```bash
 pnpm i && npx turbo build
 ```
 
 Go to the example directory.
+
 ```bash
 cd jazz/examples/passkey-svelte/
 ```
 
 Start the dev server.
+
 ```bash
 pnpm dev
 ```

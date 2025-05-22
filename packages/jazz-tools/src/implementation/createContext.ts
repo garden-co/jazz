@@ -275,13 +275,13 @@ export async function createJazzContext<
   };
 }
 
-export async function createAnonymousJazzContext({
+export function createAnonymousJazzContext({
   peersToLoadFrom,
   crypto,
 }: {
   peersToLoadFrom: Peer[];
   crypto: CryptoProvider;
-}): Promise<JazzContextWithAgent> {
+}): JazzContextWithAgent {
   const agentSecret = crypto.newRandomAgentSecret();
 
   const node = new LocalNode(

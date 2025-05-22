@@ -1,20 +1,22 @@
 <script lang="ts">
   import { AccountCoState } from 'jazz-svelte';
-  import { SharedFile } from '$lib/schema';
-  import { FileStream } from 'jazz-tools';
+  import { SharedFile, FileShareAccount } from '$lib/schema';
+  import { FileStream, type Loaded } from 'jazz-tools';
   import FileItem from '$lib/components/FileItem.svelte';
   import { CloudUpload } from 'lucide-svelte';
 
-  const me = new AccountCoState({
+  const me = new AccountCoState(FileShareAccount, {
     resolve: {
       profile: true,
       root: {
         sharedFiles: {
           $each: true
-        },
+        }
       }
     }
   });
+
+  $inspect(me);
 
   const sharedFiles = $derived(me.current?.root.sharedFiles);
 
@@ -53,7 +55,7 @@
     }
   }
 
-  async function deleteFile(file: SharedFile) {
+  async function deleteFile(file: Loaded<typeof SharedFile>) {
     if (!sharedFiles) return;
 
     const index = sharedFiles.indexOf(file);
@@ -107,10 +109,7 @@
         {#if sharedFiles.length}
           {#each sharedFiles as file}
             {#if file}
-              <FileItem
-                {file}
-                onDelete={deleteFile}
-              />
+              <FileItem {file} onDelete={deleteFile} />
             {/if}
           {/each}
         {:else}

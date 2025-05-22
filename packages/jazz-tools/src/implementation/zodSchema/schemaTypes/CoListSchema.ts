@@ -13,11 +13,17 @@ import { InstanceOrPrimitiveOfSchema } from "../typeConverters/InstanceOrPrimiti
 import { InstanceOrPrimitiveOfSchemaCoValuesNullable } from "../typeConverters/InstanceOrPrimitiveOfSchemaCoValuesNullable.js";
 import { WithHelpers } from "../zodSchema.js";
 
+type CoListInit<T extends z.core.$ZodType> = Array<
+  T extends z.core.$ZodOptional<any>
+    ? InstanceOrPrimitiveOfSchemaCoValuesNullable<T>
+    : NonNullable<InstanceOrPrimitiveOfSchemaCoValuesNullable<T>>
+>;
+
 export type CoListSchema<T extends z.core.$ZodType> = z.core.$ZodArray<T> & {
   collaborative: true;
 
   create: (
-    items: InstanceOrPrimitiveOfSchema<T>[],
+    items: CoListInit<T>,
     options?: { owner: Account | Group } | Account | Group,
   ) => CoList<InstanceOrPrimitiveOfSchema<T>>;
 

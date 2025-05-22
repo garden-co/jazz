@@ -76,11 +76,11 @@ Create an empty FileStream when you want to manually [add binary data in chunks]
 
 <CodeGroup>
 ```ts twoslash
-import { Group, co } from "jazz-tools";
+import { Group, FileStream } from "jazz-tools";
 const myGroup = Group.create();
 // ---cut---
 // Create a new empty FileStream
-const fileStream = co.fileStream().create({ owner: myGroup } );
+const fileStream = FileStream.create({ owner: myGroup } );
 ```
 </CodeGroup>
 
@@ -90,7 +90,7 @@ Like other CoValues, you can specify ownership when creating FileStreams.
 
 <CodeGroup>
 ```ts twoslash
-import { Group, co } from "jazz-tools";
+import { Group, FileStream } from "jazz-tools";
 import { createJazzTestAccount } from 'jazz-tools/testing';
 const me = await createJazzTestAccount();
 const colleagueAccount = await createJazzTestAccount();
@@ -101,7 +101,7 @@ const teamGroup = Group.create();
 teamGroup.addMember(colleagueAccount, "writer");
 
 // Create a FileStream with shared ownership
-const teamFileStream = co.fileStream().create({ owner: teamGroup });
+const teamFileStream = FileStream.create({ owner: teamGroup });
 ```
 </CodeGroup>
 
@@ -117,8 +117,8 @@ To access the raw binary data and metadata:
 
 <CodeGroup>
 ```ts twoslash
-import { co } from "jazz-tools";
-const fileStream = co.fileStream().create();
+import { FileStream } from "jazz-tools";
+const fileStream = FileStream.create();
 // ---cut---
 // Get all chunks and metadata
 const fileData = fileStream.getChunks();
@@ -142,8 +142,8 @@ By default, `getChunks()` only returns data for completely synced `FileStream`s.
 
 <CodeGroup>
 ```ts twoslash
-import { co } from "jazz-tools";
-const fileStream = co.fileStream().create();
+import { FileStream } from "jazz-tools";
+const fileStream = FileStream.create();
 // ---cut---
 // Get data even if the stream isn't complete
 const partialData = fileStream.getChunks({ allowUnfinished: true });
@@ -156,8 +156,8 @@ For easier integration with web APIs, convert to a `Blob`:
 
 <CodeGroup>
 ```ts twoslash
-import { co } from "jazz-tools";
-const fileStream = co.fileStream().create();
+import { FileStream } from "jazz-tools";
+const fileStream = FileStream.create();
 // ---cut---
 // Convert to a Blob
 const blob = fileStream.toBlob();
@@ -187,16 +187,16 @@ You can directly load a `FileStream` as a `Blob` when you only have its ID:
 
 <CodeGroup>
 ```ts twoslash
-import { co, type ID } from "jazz-tools";
+import { FileStream, type ID } from "jazz-tools";
 const fileStreamId = "co_z123" as ID<FileStream>;
 // ---cut---
 // Load directly as a Blob when you have an ID
-const blob = await co.fileStream().loadAsBlob(fileStreamId);
+const blob = await FileStream.loadAsBlob(fileStreamId);
 
 // By default, waits for complete uploads
 // For in-progress uploads:
-const partialBlob = await co.fileStream().loadAsBlob(fileStreamId, {
-  allowUnfinished: true
+const partialBlob = await FileStream.loadAsBlob(fileStreamId, {
+  allowUnfinished: true,
 });
 ```
 </CodeGroup>
@@ -207,8 +207,8 @@ Check if a `FileStream` is fully synced:
 
 <CodeGroup>
 ```ts twoslash
-import { co } from "jazz-tools";
-const fileStream = co.fileStream().create();
+import { FileStream } from "jazz-tools";
+const fileStream = FileStream.create();
 // ---cut---
 if (fileStream.isBinaryStreamEnded()) {
   console.log('File is completely synced');
@@ -236,11 +236,11 @@ Begin by providing metadata about the file:
 
 <CodeGroup>
 ```ts twoslash
-import { co, Group } from "jazz-tools";
+import { FileStream, Group } from "jazz-tools";
 const myGroup = Group.create();
 // ---cut---
 // Create an empty FileStream
-const fileStream = co.fileStream().create({ owner: myGroup });
+const fileStream = FileStream.create({ owner: myGroup });
 
 // Initialize with metadata
 fileStream.start({
@@ -257,8 +257,8 @@ Add binary data in chunks - this helps with large files and progress tracking:
 
 <CodeGroup>
 ```ts twoslash
-import { co, Group } from "jazz-tools";
-const fileStream = co.fileStream().create();
+import { FileStream, Group } from "jazz-tools";
+const fileStream = FileStream.create();
 const file = [0x48, 0x65, 0x6C, 0x6C, 0x6F, 0x20, 0x57, 0x6F, 0x72, 0x6C, 0x64]; // "Hello World" in ASCII
 const bytes = new Uint8Array(file);
 const arrayBuffer = bytes.buffer;
@@ -288,8 +288,8 @@ Once all chunks are pushed, mark the `FileStream` as complete:
 
 <CodeGroup>
 ```ts twoslash
-import { co } from "jazz-tools";
-const fileStream = co.fileStream().create();
+import { FileStream } from "jazz-tools";
+const fileStream = FileStream.create();
 // ---cut---
 // Finalize the upload
 fileStream.end();
@@ -308,11 +308,11 @@ Load a `FileStream` when you have its ID:
 
 <CodeGroup>
 ```ts twoslash
-import { co, type ID } from "jazz-tools";
-const fileStreamId = "co_z123" as ID<FileStream>;
+import { FileStream } from "jazz-tools";
+const fileStreamId = "co_z123";
 // ---cut---
 // Load a FileStream by ID
-const fileStream = await co.fileStream().load(fileStreamId);
+const fileStream = await FileStream.load(fileStreamId);
 
 if (fileStream) {
   console.log('FileStream loaded successfully');
@@ -332,12 +332,12 @@ Subscribe to a `FileStream` to be notified when chunks are added or when the upl
 
 <CodeGroup>
 ```ts twoslash
-import { co, type ID } from "jazz-tools";
+import { FileStream } from "jazz-tools";
 import { createJazzTestAccount } from 'jazz-tools/testing';
-const fileStreamId = "co_z123" as ID<FileStream>;
+const fileStreamId = "co_z123";
 // ---cut---
 // Subscribe to a FileStream by ID
-const unsubscribe = co.fileStream().subscribe(fileStreamId, (fileStream: FileStream) => {
+const unsubscribe = FileStream.subscribe(fileStreamId, (fileStream: FileStream) => {
   // Called whenever the FileStream changes
   console.log('FileStream updated');
 
@@ -369,8 +369,8 @@ If you need to wait for a `FileStream` to be fully synchronized across devices:
 
 <CodeGroup>
 ```ts twoslash
-import { co } from "jazz-tools";
-const fileStream = co.fileStream().create();
+import { FileStream } from "jazz-tools";
+const fileStream = FileStream.create();
 // ---cut---
 // Wait for the FileStream to be fully synced
 await fileStream.waitForSync({

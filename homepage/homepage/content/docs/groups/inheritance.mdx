@@ -15,7 +15,9 @@ When a group extends another group, members of the parent group will become auto
 Here's how to extend a group:
 
 <CodeGroup>
-```typescript
+```ts twoslash
+import { Group } from "jazz-tools";
+// ---cut---
 const playlistGroup = Group.create();
 const trackGroup = Group.create();
 
@@ -34,7 +36,11 @@ When you extend a group:
 In some cases you might want to inherit all members from a parent group but override/flatten their roles to the same specific role in the child group. You can do so by passing an "override role" as a second argument to `extend`:
 
 <CodeGroup>
-```typescript
+```ts twoslash
+import { Group } from "jazz-tools";
+import { createJazzTestAccount } from 'jazz-tools/testing';
+const bob = await createJazzTestAccount();
+// ---cut---
 const organizationGroup = Group.create();
 organizationGroup.addMember(bob, "admin");
 
@@ -48,7 +54,12 @@ billingGroup.extend(organizationGroup, "reader");
 The "override role" works in both directions:
 
 <CodeGroup>
-```typescript
+```ts twoslash
+import { Group } from "jazz-tools";
+import { createJazzTestAccount } from 'jazz-tools/testing';
+const bob = await createJazzTestAccount();
+const alice = await createJazzTestAccount();
+// ---cut---
 const parentGroup = Group.create();
 parentGroup.addMember(bob, "reader");
 parentGroup.addMember(alice, "admin");
@@ -65,7 +76,9 @@ childGroup.extend(parentGroup, "writer");
 Groups can be extended multiple levels deep:
 
 <CodeGroup>
-```typescript
+```ts twoslash
+import { Group } from "jazz-tools";
+// ---cut---
 const grandParentGroup = Group.create();
 const parentGroup = Group.create();
 const childGroup = Group.create(); 
@@ -82,7 +95,12 @@ Members of the grandparent group will get access to all descendant groups based 
 When you remove a member from a parent group, they automatically lose access to all child groups. We handle key rotation automatically to ensure security.
 
 <CodeGroup>
-```typescript
+```ts twoslash
+import { Group } from "jazz-tools";
+import { createJazzTestAccount } from 'jazz-tools/testing';
+const bob = await createJazzTestAccount();
+const parentGroup = Group.create();
+// ---cut---
 // Remove member from parent
 await parentGroup.removeMember(bob);
 
@@ -94,7 +112,11 @@ await parentGroup.removeMember(bob);
 
 If the account is already a member of the child group, it will get the more permissive role:
 <CodeGroup>
-```typescript
+```ts twoslash
+import { Group } from "jazz-tools";
+import { createJazzTestAccount } from 'jazz-tools/testing';
+const bob = await createJazzTestAccount();
+// ---cut---
 const parentGroup = Group.create();
 parentGroup.addMember(bob, "reader");
 
@@ -109,7 +131,11 @@ childGroup.extend(parentGroup);
 
 When extending groups, only admin, writer and reader roles are inherited:
 <CodeGroup>
-```typescript
+```ts twoslash
+import { Group } from "jazz-tools";
+import { createJazzTestAccount } from 'jazz-tools/testing';
+const bob = await createJazzTestAccount();
+// ---cut---
 const parentGroup = Group.create();
 parentGroup.addMember(bob, "writeOnly");
 
@@ -126,7 +152,13 @@ To extend a group:
 2. The current account must be a member of the parent group
 
 <CodeGroup>
-```typescript
+```ts twoslash
+import { Group, co, z } from "jazz-tools";
+const Company = co.map({
+  name: z.string(),
+});
+const company = Company.create({ name: "Garden Computing" });
+// ---cut---
 const companyGroup = company._owner.castAs(Group)
 const teamGroup = Group.create();
 
@@ -140,7 +172,9 @@ teamGroup.extend(companyGroup);
 You can revoke a group extension by using the `revokeExtend` method:
 
 <CodeGroup>
-```typescript
+```ts twoslash
+import { Group } from "jazz-tools";
+// ---cut---
 const parentGroup = Group.create();
 const childGroup = Group.create();
 
@@ -156,7 +190,9 @@ await childGroup.revokeExtend(parentGroup);
 You can get all the parent groups of a group by calling the `getParentGroups` method:
 
 <CodeGroup>
-```typescript
+```ts twoslash
+import { Group } from "jazz-tools";
+// ---cut---
 const childGroup = Group.create();
 const parentGroup = Group.create();
 childGroup.extend(parentGroup);
@@ -170,7 +206,14 @@ console.log(childGroup.getParentGroups()); // [parentGroup]
 Here's a practical example of using group inheritance for team permissions:
 
 <CodeGroup>
-```typescript
+```ts twoslash
+import { Group } from "jazz-tools";
+import { createJazzTestAccount } from 'jazz-tools/testing';
+const CEO = await createJazzTestAccount();
+const teamLead = await createJazzTestAccount();
+const developer = await createJazzTestAccount();
+const client = await createJazzTestAccount();
+// ---cut---
 // Company-wide group
 const companyGroup = Group.create();
 companyGroup.addMember(CEO, "admin");

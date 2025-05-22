@@ -19,7 +19,6 @@ Server Workers typically have static credentials, consisting of a public Account
 To generate new credentials for a Server Worker, you can run:
 
 <CodeGroup>
-{/* prettier-ignore */}
 ```sh
 npx jazz-run account create --name "My Server Worker"
 ```
@@ -43,13 +42,15 @@ You can use `startWorker` from `jazz-nodejs` to start a Server Worker. Similarly
 `startWorker` expects credentials in the `JAZZ_WORKER_ACCOUNT` and `JAZZ_WORKER_SECRET` environment variables by default (as printed by `npx account create ...`), but you can also pass them manually as `accountID` and `accountSecret` parameters if you get them from elsewhere.
 
 <CodeGroup>
-{/* prettier-ignore */}
-```ts
+```ts twoslash
+import { Account } from "jazz-tools";
+class MyWorkerAccount extends Account {}
+// ---cut---
 import { startWorker } from 'jazz-nodejs';
 
 const { worker } = await startWorker({
-    AccountSchema: MyWorkerAccount,
-    syncServer: 'wss://cloud.jazz.tools/?key=you@example.com',
+  AccountSchema: MyWorkerAccount,
+  syncServer: 'wss://cloud.jazz.tools/?key=you@example.com',
 });
 ```
 </CodeGroup>

@@ -1,21 +1,20 @@
-import { Account, coField, CoMap } from "jazz-tools";
+import { co, z } from "jazz-tools";
 
-export class Dog extends CoMap {
-    name = coField.string;
-  }
+export const Dog = co.map({
+    name: z.string(),
+});
 
-export class Person extends CoMap {
-    name = coField.string;
-    age = coField.number;
-    dog = coField.ref(Dog);
-}
+export const Person = co.map({
+    name: z.string(),
+    age: z.number(),
+    dog: Dog,
+});
 
-export class MyAccount extends Account {
-    root = coField.ref(Person);
-
-    migrate() {
-        if (!this._refs.root) {
-            this.root = Person.create({ name: "John", age: 30, dog: Dog.create({ name: "Rex" }, this) }, this);
-        }
+export const MyAccount = co.account({
+    profile: co.profile(),
+    root: Person,
+}).withMigration((account) => {
+    if (!account._refs.root) {
+        account.root = Person.create({ name: "John", age: 30, dog: Dog.create({ name: "Rex" }, account) }, account);
     }
-}
+});

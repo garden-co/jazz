@@ -28,9 +28,6 @@ export const PACKAGES = [
     packageName: "jazz-react",
     entryPoint: "index.ts",
     description: "React bindings for Jazz, a framework for distributed state.",
-    typedocOptions: {
-      skipErrorChecking: true, // TODO: remove this. Temporary workaround
-    },
   },
   {
     packageName: "jazz-browser",

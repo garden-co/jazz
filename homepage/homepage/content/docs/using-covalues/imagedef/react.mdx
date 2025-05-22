@@ -1,6 +1,6 @@
 import { CodeGroup } from "@/components/forMdx";
 
-export const metadata = { 
+export const metadata = {
   description: "ImageDefinition is a CoValue for managing images, storage of multiple resolutions, and progressive loading."
 };
 
@@ -20,26 +20,55 @@ The [Image Upload example](https://github.com/gardencmp/jazz/tree/main/examples/
 The easiest way to create and use images in your Jazz application is with the `createImage()` function:
 
 <CodeGroup>
-```ts
+```ts twoslash
+import { Group, co, z } from "jazz-tools";
+
+const MyProfile = co.profile({
+  name: z.string(),
+  image: z.optional(co.image()),
+});
+
+const MyAccount = co.account({
+  root: co.map({}),
+  profile: MyProfile,
+});
+
+MyAccount.withMigration((account, creationProps) => {
+  if (account.profile === undefined) {
+    const profileGroup = Group.create();
+    profileGroup.addMember("everyone", "reader");
+    account.profile = MyProfile.create(
+      {
+        name: creationProps?.name ?? "New user",
+      },
+      profileGroup,
+    );
+  }
+});
+
+const me = await MyAccount.create({});
+
+const myGroup = Group.create();
+
+// ---cut---
 import { createImage } from "jazz-browser-media-images";
 
 // Create an image from a file input
-async function handleFileUpload(event) {
-  const file = event.target.files[0];
+async function handleFileUpload(event: React.ChangeEvent<HTMLInputElement>) {
+  const file = event.target.files?.[0];
   if (file) {
     // Creates ImageDefinition with multiple resolutions automatically
-    const image = await createImage(file, {
-      owner: me.profile._owner,
-    });
-    
+    const image = await createImage(file, { owner: myGroup });
+
     // Store the image in your application data
     me.profile.image = image;
   }
 }
+
 ```
 </CodeGroup>
 
-> Note: `createImage()` requires a browser environment as it uses browser APIs to process images.
+**Note:** `createImage()` requires a browser environment as it uses browser APIs to process images.
 
 The `createImage()` function:
 - Creates an `ImageDefinition` with the right properties
@@ -52,11 +81,16 @@ The `createImage()` function:
 You can configure `createImage()` with additional options:
 
 <CodeGroup>
-```tsx
+```ts twoslash
+import { createImage } from "jazz-browser-media-images";
+import { createJazzTestAccount } from 'jazz-tools/testing';
+const me = await createJazzTestAccount();
+const file = new File([], "test.jpg", { type: "image/jpeg" });
+// ---cut---
 // Configuration options
 const options = {
   owner: me,                // Owner for access control
-  maxSize: 1024             // Maximum resolution to generate
+  maxSize: 1024 as 1024     // Maximum resolution to generate
 };
 
 // Setting maxSize controls which resolutions are generated:
@@ -99,10 +133,14 @@ See [Groups as permission scopes](/docs/groups/intro) for more information on ho
 For a complete progressive loading experience, use the `ProgressiveImg` component:
 
 <CodeGroup>
-```tsx
+```tsx twoslash
+import * as React from "react";
+// ---cut---
 import { ProgressiveImg } from "jazz-react";
+import { Loaded, co } from "jazz-tools";
+const Image = co.image();
 
-function GalleryView({ image }) {
+function GalleryView({ image }: { image: Loaded<typeof Image> }) {
   return (
     <div className="image-container">
       <ProgressiveImg
@@ -134,10 +172,14 @@ The `ProgressiveImg` component handles:
 For more control over image loading, you can implement your own progressive image component:
 
 <CodeGroup>
-```tsx
+```tsx twoslash
+import * as React from "react";
+import { Loaded, co } from "jazz-tools";
+const Image = co.image();
+// ---cut---
 import { useProgressiveImg } from "jazz-react";
 
-function CustomImageComponent({ image }) {
+function CustomImageComponent({ image }: { image: Loaded<typeof Image> }) {
   const {
     src,         // Data URI containing the image data as a base64 string,
                  // or a placeholder image URI
@@ -186,7 +228,9 @@ Behind the scenes, `ImageDefinition` is a specialized CoValue that stores:
 Each resolution is stored with a key in the format `"widthxheight"` (e.g., `"1920x1080"`, `"800x450"`).
 
 <CodeGroup>
-```ts
+```ts twoslash
+import { ImageDefinition } from "jazz-tools";
+// ---cut---
 // Structure of an ImageDefinition
 const image = ImageDefinition.create({
   originalSize: [1920, 1080],
@@ -194,7 +238,7 @@ const image = ImageDefinition.create({
 });
 
 // Accessing the highest available resolution
-const highestRes = image.highestResAvailable();
+const highestRes = ImageDefinition.highestResAvailable(image);
 if (highestRes) {
   console.log(`Found resolution: ${highestRes.res}`);
   console.log(`Stream: ${highestRes.stream}`);
@@ -209,7 +253,11 @@ For more details on using `ImageDefinition` directly, see the [VanillaJS docs](/
 `highestResAvailable` returns the largest resolution that fits your constraints. If a resolution has incomplete data, it falls back to the next available lower resolution.
 
 <CodeGroup>
-```ts
+```ts twoslash
+import { ImageDefinition, FileStream } from "jazz-tools";
+const mediumSizeBlob = new Blob([], { type: "image/jpeg" });
+
+// ---cut---
 const image = ImageDefinition.create({
   originalSize: [1920, 1080],
 });
@@ -217,7 +265,7 @@ const image = ImageDefinition.create({
 image["1920x1080"] = FileStream.create(); // Empty image upload
 image["800x450"] = await FileStream.createFromBlob(mediumSizeBlob);
 
-const highestRes = image.highestResAvailable();
-console.log(highestRes.res); // 800x450
+const highestRes = ImageDefinition.highestResAvailable(image);
+console.log(highestRes?.res); // 800x450
 ```
 </CodeGroup>

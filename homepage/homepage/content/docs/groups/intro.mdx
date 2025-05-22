@@ -16,7 +16,7 @@ have different roles, such as "writer", "reader" or "admin".
 Here's how you can create a `Group`.
 
 <CodeGroup>
-```tsx
+```tsx twoslash
 import { Group } from "jazz-tools";
 
 const group = Group.create();
@@ -33,33 +33,54 @@ But if you already know their ID, you can add them directly (see below).
 You can add group members by ID by using `Account.load` and `Group.addMember`.
 
 <CodeGroup>
-```tsx
+```tsx twoslash
+import { ID } from "jazz-tools";
+
+const bobsID = "co_z123" as ID<Account>;
+
+// ---cut---
 import { Group, Account } from "jazz-tools";
 
 const group = Group.create();
 
-const bob = await Account.load(bobsID, []);
-group.addMember(bob, "writer");
+const bob = await Account.load(bobsID);
+
+if (bob) {
+  group.addMember(bob, "writer");
+}
 ```
 </CodeGroup>
 
 **Note:** if the account ID is of type `string`, because it comes from a URL parameter or something similar, you need to cast it to `ID<Account>` first:
 
 <CodeGroup>
-```tsx
+```tsx twoslash
+const bobsID = "co_z123" as ID<Account>;
+
+const group = Group.create();
+
+// ---cut---
 import { Group, Account, ID } from "jazz-tools";
 
-const bob = await Account.load(bobsID as ID<Account>, []);
-group.addMember(bob, "writer");
+const bob = await Account.load(bobsID as ID<Account>);
+
+if (bob) {
+  group.addMember(bob, "writer");
+}
 ```
 </CodeGroup>
 
-## Change a member's role
+## Changing a member's role
 
 To change a member's role, use the `addMember` method.
 
 <CodeGroup>
-```ts
+```ts twoslash
+import { Group, Account, ID } from "jazz-tools";
+import { createJazzTestAccount } from 'jazz-tools/testing';
+const bob = await createJazzTestAccount();
+const group = Group.create();
+// ---cut---
 group.addMember(bob, "reader");
 ```
 </CodeGroup>
@@ -73,7 +94,12 @@ Bob just went from a writer to a reader.
 To remove a member, use the `removeMember` method.
 
 <CodeGroup>
-```ts
+```ts twoslash
+import { Group, Account, ID } from "jazz-tools";
+import { createJazzTestAccount } from 'jazz-tools/testing';
+const bob = await createJazzTestAccount();
+const group = Group.create();
+// ---cut---
 group.removeMember(bob);
 ```
 </CodeGroup>
@@ -89,7 +115,16 @@ Rules:
 You can get the group of an existing CoValue by using `coValue._owner`.
 
 <CodeGroup>
-```tsx
+```ts twoslash
+import { createJazzTestAccount } from 'jazz-tools/testing';
+import { co, z } from "jazz-tools";
+const existingCoValue = await createJazzTestAccount();
+
+const MyCoMap = co.map({
+  color: z.string(),
+});
+
+// ---cut---
 const group = existingCoValue._owner;
 const newValue = MyCoMap.create(
   { color: "red"},
@@ -101,13 +136,27 @@ const newValue = MyCoMap.create(
 Because `._owner` can be an `Account` or a `Group`, in cases where you specifically need to use `Group` methods (such as for adding members or getting your own role), you can cast it to assert it to be a Group:
 
 <CodeGroup>
-```tsx
+```ts twoslash
+import { createJazzTestAccount } from 'jazz-tools/testing';
+import { co, z } from "jazz-tools";
+const bob = await createJazzTestAccount();
+
+const MyCoMap = co.map({
+  color: z.string(),
+});
+
+const existingCoValue = MyCoMap.create(
+  { color: "red"},
+  { owner: bob }
+);
+
+// ---cut---
 import { Group } from "jazz-tools";
 
 const group = existingCoValue._owner.castAs(Group);
 group.addMember(bob, "writer");
 
-const role = group.getRoleOf(bob);
+const role = group.getRoleOf(bob.id);
 ```
 </CodeGroup>
 
@@ -116,8 +165,14 @@ const role = group.getRoleOf(bob);
 You can check the permissions of an account on a CoValue by using the `canRead`, `canWrite` and `canAdmin` methods.
 
 <CodeGroup>
-```tsx
-const value = await MyCoMap.load(valueID, {});
+```ts twoslash
+import { co, z, Account } from "jazz-tools";
+
+const MyCoMap = co.map({
+  color: z.string(),
+});
+// ---cut---
+const value = await MyCoMap.create({ color: "red"})
 const me = Account.getMe();
 
 if (me.canAdmin(value)) {
@@ -135,18 +190,29 @@ if (me.canAdmin(value)) {
 To check the permissions of another account, you need to load it first:
 
 <CodeGroup>
-```tsx
-const value = await MyCoMap.load(valueID, {});
-const bob = await Account.load(accountID, []);
+```ts twoslash
+import { co, z, Account } from "jazz-tools";
+import { createJazzTestAccount } from 'jazz-tools/testing';
 
-if (bob.canAdmin(value)) {
-  console.log("Bob can share value with others"); 
-} else if (bob.canWrite(value)) {
-  console.log("Bob can edit value");
-} else if (bob.canRead(value)) {
-  console.log("Bob can view value");
-} else {
-  console.log("Bob cannot access value");
+const MyCoMap = co.map({
+  color: z.string(),
+});
+const account = await createJazzTestAccount();
+const accountID = account.id;
+// ---cut---
+const value = await MyCoMap.create({ color: "red"})
+const bob = await Account.load(accountID);
+
+if (bob) {
+  if (bob.canAdmin(value)) {
+    console.log("Bob can share value with others");
+  } else if (bob.canWrite(value)) {
+    console.log("Bob can edit value");
+  } else if (bob.canRead(value)) {
+    console.log("Bob can view value");
+  } else {
+    console.log("Bob cannot access value");
+  }
 }
 ```
 </CodeGroup>

@@ -1,7 +1,7 @@
 <script lang="ts" module>
   declare module 'jazz-svelte' {
     interface Register {
-      Account: FileShareAccount;
+      Account: typeof FileShareAccount;
     }
   }
 </script>

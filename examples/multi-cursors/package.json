@@ -1,7 +1,7 @@
 {
   "name": "multi-cursors",
   "private": true,
-  "version": "0.0.93",
+  "version": "0.0.98",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -16,7 +16,8 @@
     "jazz-react": "workspace:*",
     "jazz-tools": "workspace:*",
     "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "react-dom": "^18.3.1",
+    "zod": "3.25.0-beta.20250518T002810"
   },
   "devDependencies": {
     "@biomejs/biome": "1.9.4",

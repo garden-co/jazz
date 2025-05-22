@@ -17,13 +17,11 @@ export function useAcceptInvite<S extends CoValueOrZodSchema>({
 }): void {
   const context = useJazzContext();
 
-  if (!("me" in context)) {
-    throw new Error(
-      "useAcceptInvite can't be used in a JazzProvider with auth === 'guest'.",
-    );
-  }
-
   useEffect(() => {
+    if (!("me" in context)) {
+      return;
+    }
+
     const handleInvite = () => {
       const result = consumeInviteLinkFromWindowLocation({
         as: context.me,
@@ -50,5 +48,4 @@ export {
   experimental_useInboxSender,
   useJazzContext,
   useAccount,
-  useAccountOrGuest,
 } from "jazz-react-core";

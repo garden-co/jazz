@@ -1,4 +1,4 @@
-export const metadata = { 
+export const metadata = {
   description: "Learn about Jazz's authentication states: anonymous, guest, and fully authenticated."
 };
 
@@ -37,24 +37,24 @@ When a user loads a Jazz application for the first time, we create a new Account
 
 ## Detecting Authentication State
 
-You can detect the current authentication state using `useAccountOrGuest` and `useIsAuthenticated`.
+You can detect the current authentication state using `useAccount` and `useIsAuthenticated`.
 
 <ContentByFramework framework="react">
 <CodeGroup>
 ```tsx twoslash
 import * as React from "react";
 // ---cut---
-import { useAccountOrGuest, useIsAuthenticated } from "jazz-react";
+import { useAccount, useIsAuthenticated } from "jazz-react";
 
 function AuthStateIndicator() {
-  const { me } = useAccountOrGuest();
+  const { agent } = useAccount();
   const isAuthenticated = useIsAuthenticated();
 
   // Check if guest mode is enabled in JazzProvider
-  const isGuest = me._type !== "Account"
+  const isGuest = agent._type !== "Account"
 
   // Anonymous authentication: has an account but not fully authenticated
-  const isAnonymous =  me._type === "Account" && !isAuthenticated;
+  const isAnonymous =  agent._type === "Account" && !isAuthenticated;
   return (
     <div>
       {isGuest && <span>Guest Mode</span>}

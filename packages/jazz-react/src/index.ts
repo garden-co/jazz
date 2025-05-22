@@ -2,7 +2,6 @@ export { JazzProvider } from "./provider.js";
 export type { JazzProviderProps } from "./provider.js";
 export {
   useAccount,
-  useAccountOrGuest,
   useCoState,
   useAcceptInvite,
   experimental_useInboxSender,

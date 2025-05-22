@@ -19,6 +19,7 @@ export type JazzProviderProps<
     | AnyAccountSchema,
 > = {
   children: React.ReactNode;
+  enableSSR?: boolean;
 } & JazzContextManagerProps<S>;
 
 /** @category Context & Hooks */
@@ -36,9 +37,13 @@ export function JazzProvider<
   onLogOut,
   logOutReplacement,
   onAnonymousAccountDiscarded,
+  enableSSR,
 }: JazzProviderProps<S>) {
   const [contextManager] = React.useState(
-    () => new JazzBrowserContextManager<S>(),
+    () =>
+      new JazzBrowserContextManager<S>({
+        useAnonymousFallback: enableSSR,
+      }),
   );
 
   const onLogOutRefCallback = useRefCallback(onLogOut);

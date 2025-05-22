@@ -41,6 +41,17 @@ describe("CoMap.Record", async () => {
       expect(Object.keys(person)).toEqual(["name", "age"]);
     });
 
+    test("create a Record with enum value", () => {
+      const Person = co.record(z.string(), z.enum(["a", "b", "c"]));
+
+      const person = Person.create({
+        age: "a",
+      });
+
+      expect(person.age).toEqual("a");
+      expect(Object.keys(person)).toEqual(["age"]);
+    });
+
     test("property existence", () => {
       const Person = co.record(z.string(), z.string());
 

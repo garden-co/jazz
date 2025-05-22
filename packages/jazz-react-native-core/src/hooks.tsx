@@ -13,7 +13,6 @@ export {
   useAuthSecretStorage,
   useIsAuthenticated,
   useAccount,
-  useAccountOrGuest,
 } from "jazz-react-core";
 
 export function useAcceptInvite<S extends CoValueOrZodSchema>({

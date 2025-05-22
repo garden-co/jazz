@@ -21,7 +21,7 @@ export function ChatScreen({ navigation }: { navigation: any }) {
   const [chatId, setChatId] = useState<string>();
   const loadedChat = useCoState(Chat, chatId, { resolve: { $each: true } });
   const [message, setMessage] = useState("");
-  const profile = useCoState(Profile, me._refs.profile?.id, {});
+  const profile = useCoState(Profile, me?._refs.profile?.id, {});
 
   function handleLogOut() {
     setChatId(undefined);
@@ -49,7 +49,7 @@ export function ChatScreen({ navigation }: { navigation: any }) {
   }, [navigation, loadedChat]);
 
   const createChat = () => {
-    const group = Group.create({ owner: me });
+    const group = Group.create(me ? { owner: me } : undefined);
     group.addMember("everyone", "writer");
     const chat = Chat.create([], { owner: group });
     setChatId(chat.id);

@@ -1,4 +1,5 @@
 import { AgentSecret, LocalNode, cojsonInternals } from "cojson";
+import { PureJSCrypto } from "cojson/dist/crypto/PureJSCrypto";
 import { AuthSecretStorage } from "../auth/AuthSecretStorage.js";
 import { InMemoryKVStore } from "../auth/InMemoryKVStore.js";
 import { KvStore, KvStoreContext } from "../auth/KvStoreContext.js";
@@ -6,6 +7,8 @@ import { Account } from "../coValues/account.js";
 import { AuthCredentials } from "../types.js";
 import { JazzContextType } from "../types.js";
 import { AnonymousJazzAgent } from "./anonymousJazzAgent.js";
+import { createAnonymousJazzContext } from "./createContext.js";
+import { InstanceOfSchema } from "./zodSchema/typeConverters/InstanceOfSchema.js";
 
 export type JazzContextManagerAuthProps = {
   credentials?: AuthCredentials;
@@ -36,6 +39,25 @@ type PlatformSpecificContext<Acc extends Account> =
   | PlatformSpecificAuthContext<Acc>
   | PlatformSpecificGuestContext;
 
+function getAnonymousFallback() {
+  const context = createAnonymousJazzContext({
+    peersToLoadFrom: [],
+    crypto: new PureJSCrypto(),
+  });
+
+  return {
+    guest: context.agent,
+    node: context.agent.node,
+    done: () => {},
+    logOut: async () => {},
+    isAuthenticated: false,
+    authenticate: async () => {},
+    register: async () => {
+      throw new Error("Not implemented");
+    },
+  } satisfies JazzContextType<InstanceOfSchema<any>>;
+}
+
 export class JazzContextManager<
   Acc extends Account,
   P extends JazzContextManagerBaseProps<Acc>,
@@ -45,10 +67,16 @@ export class JazzContextManager<
   protected props: P | undefined;
   protected authSecretStorage = new AuthSecretStorage();
   protected keepContextOpen = false;
-  protected contextPromise: Promise<void> | undefined;
+  contextPromise: Promise<void> | undefined;
 
-  constructor() {
+  constructor(opts?: {
+    useAnonymousFallback?: boolean;
+  }) {
     KvStoreContext.getInstance().initialize(this.getKvStore());
+
+    if (opts?.useAnonymousFallback) {
+      this.value = getAnonymousFallback();
+    }
   }
 
   getKvStore(): KvStore {

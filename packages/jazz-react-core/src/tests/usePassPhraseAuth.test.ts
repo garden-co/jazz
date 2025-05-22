@@ -118,14 +118,16 @@ describe("usePassphraseAuth", () => {
         const passphraseAuth = usePassphraseAuth({ wordlist: testWordlist });
         const account = useAccount();
 
-        if (!accounts.includes(account.me.id)) {
+        if (account.me && !accounts.includes(account.me.id)) {
           accounts.push(account.me.id);
         }
 
-        updates.push({
-          state: passphraseAuth.state,
-          accountIndex: accounts.indexOf(account.me.id),
-        });
+        if (account.me) {
+          updates.push({
+            state: passphraseAuth.state,
+            accountIndex: accounts.indexOf(account.me.id),
+          });
+        }
 
         return { passphraseAuth, account };
       },
@@ -145,21 +147,17 @@ describe("usePassphraseAuth", () => {
     });
 
     expect(result.current?.passphraseAuth.state).toBe("signedIn");
-    expect(result.current?.account?.me.id).toBe(id);
+    expect(result.current?.account?.me?.id).toBe(id);
 
     await act(async () => {
       await result.current?.account?.logOut();
     });
 
     expect(result.current?.passphraseAuth.state).toBe("anonymous");
-    expect(result.current?.account?.me.id).not.toBe(id);
+    expect(result.current?.account?.me?.id).not.toBe(id);
 
     expect(updates).toMatchInlineSnapshot(`
       [
-        {
-          "accountIndex": 0,
-          "state": "anonymous",
-        },
         {
           "accountIndex": 0,
           "state": "anonymous",

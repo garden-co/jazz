@@ -13,7 +13,7 @@ jobs:
     continue-on-error: true
     strategy:
       matrix:
-        project: ["tests/e2e", "examples/chat",  "examples/clerk", "examples/betterauth", "examples/file-share-svelte", "examples/form", "examples/music-player", "examples/organization", "examples/pets", "starters/react-passkey-auth"]
+        project: ["tests/e2e", "examples/chat",  "examples/clerk", "examples/betterauth", "examples/file-share-svelte", "examples/form", "examples/jazz-nextjs", "examples/music-player", "examples/organization", "examples/pets", "starters/react-passkey-auth"]
 
     steps:
       - uses: actions/checkout@v4

@@ -34,6 +34,8 @@ describe("CoMap", async () => {
         _height: z.number(),
         birthday: z.date(),
         name: z.string(),
+        enum: z.enum(["a", "b", "c"]),
+        enumMap: z.enum({ a: 1, b: 2, c: 3 }),
         // nullable: z.optional.encoded<string | undefined>({
         //   encode: (value: string | undefined) => value || null,
         //   decode: (value: unknown) => (value as string) || undefined,
@@ -48,6 +50,8 @@ describe("CoMap", async () => {
         _height: 10,
         birthday,
         name: "John",
+        enum: "a",
+        enumMap: 1,
       });
 
       expect(john.color).toEqual("red");
@@ -59,7 +63,11 @@ describe("CoMap", async () => {
         "_height",
         "birthday",
         "name",
+        "enum",
+        "enumMap",
       ]);
+      expect(john.enum).toEqual("a");
+      expect(john.enumMap).toEqual(1);
     });
 
     test("property existence", () => {

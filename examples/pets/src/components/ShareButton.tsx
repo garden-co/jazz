@@ -17,7 +17,7 @@ export function ShareButton({
 
   return (
     petPost &&
-    me.canAdmin(petPost) && (
+    me?.canAdmin(petPost) && (
       <Button
         size="sm"
         className="py-0"

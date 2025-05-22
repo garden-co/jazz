@@ -1,6 +1,6 @@
 {
   "name": "chat-rn-expo",
-  "version": "1.0.112",
+  "version": "1.0.117",
   "main": "index.js",
   "scripts": {
     "build": "tsc --noEmit && expo export -p ios",

@@ -31,9 +31,9 @@ export const deleteItem = (item: Loaded<typeof PasswordItem>): void => {
 
 export const createFolder = (
   folderName: string,
-  me: Loaded<typeof PasswordManagerAccount>,
+  me: Loaded<typeof PasswordManagerAccount> | null | undefined,
 ): Loaded<typeof Folder> => {
-  const group = Group.create({ owner: me });
+  const group = Group.create(me ? { owner: me } : undefined);
   const folder = Folder.create(
     {
       name: folderName,
@@ -41,7 +41,7 @@ export const createFolder = (
     },
     { owner: group },
   );
-  me.root?.folders?.push(folder);
+  me?.root?.folders?.push(folder);
   return folder;
 };
 
@@ -57,13 +57,15 @@ export const shareFolder = (
 
 export async function addSharedFolder(
   sharedFolderId: string,
-  me: Loaded<typeof PasswordManagerAccount>,
+  me: Loaded<typeof PasswordManagerAccount> | null | undefined,
 ) {
   const [sharedFolder, account] = await Promise.all([
     Folder.load(sharedFolderId),
-    PasswordManagerAccount.load(me.id, {
-      resolve: { root: { folders: true } },
-    }),
+    me
+      ? PasswordManagerAccount.load(me?.id, {
+          resolve: { root: { folders: true } },
+        })
+      : undefined,
   ]);
 
   if (!sharedFolder || !account) return;

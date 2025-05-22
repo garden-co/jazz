@@ -1,13 +1,13 @@
 import { render, waitFor } from "@testing-library/svelte";
-import { Account, CoMap, Group, coField, type CoValue, type CoValueClass, type ID } from "jazz-tools";
+import { Account, Group, co, z, type CoValue, type CoValueOrZodSchema, type ID } from "jazz-tools";
 import { describe, expect, it } from "vitest";
 import { createInviteLink } from "../index.js";
 import { createJazzTestAccount, createJazzTestContext, linkAccounts } from "../testing.js";
 import UseAcceptInvite from "./components/useAcceptInvite.svelte";
 
-function setup<T extends CoValue>(options: {
+function setup<T extends CoValueOrZodSchema>(options: {
   account: Account;
-  invitedObjectSchema: CoValueClass<T>;
+  invitedObjectSchema: CoValueOrZodSchema;
 }) {
   const result = { current: undefined } as { current: ID<T> | undefined };
 
@@ -26,9 +26,9 @@ function setup<T extends CoValue>(options: {
 
 describe("useAcceptInvite", () => {
   it("should accept the invite", async () => {
-    class TestMap extends CoMap {
-      value = coField.string;
-    }
+    const TestMap = co.map({
+      value: z.string(),
+    });
 
     const account = await createJazzTestAccount();
     const inviteSender = await createJazzTestAccount();

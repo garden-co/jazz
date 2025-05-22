@@ -61,7 +61,7 @@ export function RatePetPostUI() {
         ))}
       </div>
 
-      {petPost && me.canAdmin(petPost) && petPost.reactions && (
+      {petPost && me?.canAdmin(petPost) && petPost.reactions && (
         <ReactionOverview petReactions={petPost.reactions} />
       )}
     </div>

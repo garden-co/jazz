@@ -19,7 +19,7 @@ export function InviteButton<T extends CoValue>({
 
   return (
     value &&
-    me.canAdmin(value) && (
+    me?.canAdmin(value) && (
       <Button
         size="sm"
         className="py-0"

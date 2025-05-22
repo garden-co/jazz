@@ -7,7 +7,7 @@ import {
   WaitingRoom,
 } from "@/schema";
 import { startWorker } from "jazz-nodejs";
-import { Account, Group, type Loaded, co } from "jazz-tools";
+import { Account, Group, co } from "jazz-tools";
 import { determineWinner } from "./lib/utils";
 
 if (!process.env.VITE_JAZZ_WORKER_ACCOUNT || !process.env.JAZZ_WORKER_SECRET) {
@@ -124,10 +124,7 @@ function createPlayer({ account }: CreatePlayerParams) {
   return player;
 }
 
-async function handleNewGameIntent(
-  _: string,
-  message: Loaded<typeof NewGameIntent>,
-) {
+async function handleNewGameIntent(_: string, message: NewGameIntent) {
   const gameId = message.gameId;
 
   const game = await Game.load(gameId, {
@@ -152,7 +149,7 @@ async function handleNewGameIntent(
   }
 }
 
-async function handlePlayIntent(_: string, message: Loaded<typeof PlayIntent>) {
+async function handlePlayIntent(_: string, message: PlayIntent) {
   // determine current player, update game with outcome
   const gameId = message.gameId;
   if (!gameId) {
