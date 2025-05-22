@@ -27,13 +27,13 @@ export const frameworkNames: Record<
     label: "React Native (Expo)",
     experimental: false,
   },
+  [Framework.Svelte]: {
+    label: "Svelte",
+    experimental: false,
+  },
   [Framework.Vanilla]: {
     label: "VanillaJS",
     experimental: false,
-  },
-  [Framework.Svelte]: {
-    label: "Svelte",
-    experimental: true,
   },
   [Framework.Vue]: {
     label: "Vue",
