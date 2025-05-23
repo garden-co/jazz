@@ -31,8 +31,8 @@ export const docNavigationItems = [
     name: "Building with Jazz",
     items: [
       {
-        name: "Installation",
-        href: "/docs/building-with-jazz/installation",
+        name: "Overview",
+        href: "/docs/building-with-jazz/overview",
         done: 100,
       },
       {
