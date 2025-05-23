@@ -1,19 +1,17 @@
+import { GetStartedButton } from "@/components/GetStartedButton";
 import { Button } from "@garden-co/design-system/src/components/atoms/Button";
 import { clsx } from "clsx";
 import {
   CircleCheckIcon,
   LucideBuilding2,
-  LucideChevronUp,
   LucideChevronsUp,
   LucideCloudDownload,
   LucideDatabase,
   LucideHandshake,
   LucideIcon,
-  LucideInfinity,
   LucideServer,
   LucideUsers,
 } from "lucide-react";
-import { FakeGetStartedButton } from "./FakeGetStartedButton";
 import { IndieTierLogo, ProTierLogo, StarterTierLogo } from "./TierLogos";
 
 export function ListItem({
@@ -88,7 +86,7 @@ export function Pricing() {
             </ul>
           </div>
 
-          <FakeGetStartedButton tier="starter" />
+          <GetStartedButton tier="starter" />
 
           <p className="text-sm">No credit card required. Takes 20s.</p>
         </div>
@@ -133,7 +131,7 @@ export function Pricing() {
             </ul>
           </div>
 
-          <FakeGetStartedButton tier="indie" />
+          <GetStartedButton tier="indie" />
 
           <p className="text-sm">
             One month free trial. Unlimited projects. Takes 1min.

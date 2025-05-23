@@ -45,12 +45,13 @@ You can use `startWorker` from `jazz-nodejs` to start a Server Worker. Similarly
 ```ts twoslash
 import { Account } from "jazz-tools";
 class MyWorkerAccount extends Account {}
+const apiKey = "Replace with API key from dashboard.jazz.tools";
 // ---cut---
 import { startWorker } from 'jazz-nodejs';
 
 const { worker } = await startWorker({
   AccountSchema: MyWorkerAccount,
-  syncServer: 'wss://cloud.jazz.tools/?key=you@example.com',
+  syncServer: `wss://cloud.jazz.tools/?key=${apiKey}`,
 });
 ```
 </CodeGroup>

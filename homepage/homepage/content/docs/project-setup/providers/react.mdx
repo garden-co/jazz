@@ -39,6 +39,7 @@ export const MyAppAccount = co.account({
 });
 // @filename: app.tsx
 import * as React from "react";
+const apiKey = "Replace with API key from dashboard.jazz.tools";
 // ---cut---
 // App.tsx
 import { JazzProvider } from "jazz-react";
@@ -48,7 +49,7 @@ export function MyApp({ children }: { children: React.ReactNode }) {
   return (
     <JazzProvider
       sync={{
-        peer: "wss://cloud.jazz.tools/?key=your-api-key",
+        peer: `wss://cloud.jazz.tools/?key=${apiKey}`,
         when: "always" // When to sync: "always", "never", or "signedUp"
       }}
       AccountSchema={MyAppAccount}
@@ -68,11 +69,13 @@ The `sync` property configures how your application connects to the Jazz network
 
 <CodeGroup>
 ```tsx twoslash
+const apiKey = "Replace with API key from dashboard.jazz.tools";
+// ---cut---
 import { type SyncConfig } from "jazz-tools";
 
 const syncConfig: SyncConfig = {
   // Connection to Jazz Cloud or your own sync server
-  peer: "wss://cloud.jazz.tools/?key=your-api-key",
+  peer: `wss://cloud.jazz.tools/?key=${apiKey}`,
 
   // When to sync: "always" (default), "never", or "signedUp"
   when: "always",
@@ -111,8 +114,9 @@ import * as React from "react";
 import { JazzProvider } from "jazz-react";
 import { SyncConfig } from "jazz-tools";
 
+const apiKey = "Replace with API key from dashboard.jazz.tools";
 const syncConfig: SyncConfig = {
-  peer: "wss://cloud.jazz.tools/?key=your-api-key",
+  peer: `wss://cloud.jazz.tools/?key=${apiKey}`,
   when: "always",
 }
 
@@ -144,8 +148,9 @@ import * as React from "react";
 import { JazzProvider } from "jazz-react";
 import { SyncConfig } from "jazz-tools";
 
+const apiKey = "Replace with API key from dashboard.jazz.tools";
 const syncConfig: SyncConfig = {
-  peer: "wss://cloud.jazz.tools/?key=your-api-key",
+  peer: `wss://cloud.jazz.tools/?key=${apiKey}`,
   when: "always",
 }
 
