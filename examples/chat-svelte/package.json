@@ -1,0 +1,44 @@
+{
+  "name": "chat-svelte",
+  "version": "0.0.84",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "vite dev",
+    "build": "vite build",
+    "preview": "vite preview",
+    "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
+    "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
+    "format": "prettier --write .",
+    "lint": "prettier --check . && eslint .",
+    "format-and-lint": "pnpm run format && pnpm run lint",
+    "format-and-lint:fix": "pnpm run format --write && pnpm run lint --fix",
+    "test:e2e": "playwright test",
+    "test:e2e:ui": "playwright test --ui"
+  },
+  "devDependencies": {
+    "@sveltejs/adapter-auto": "^3.3.1",
+    "@sveltejs/kit": "^2.21.1",
+    "@sveltejs/vite-plugin-svelte": "^5.0.3",
+    "@types/eslint": "^9.6.1",
+    "eslint": "^9.27.0",
+    "eslint-config-prettier": "^9.1.0",
+    "eslint-plugin-svelte": "^2.46.1",
+    "globals": "^15.15.0",
+    "jazz-inspector-element": "workspace:*",
+    "prettier": "^3.5.3",
+    "prettier-plugin-svelte": "^3.4.0",
+    "svelte": "^5.31.1",
+    "svelte-check": "^4.2.1",
+    "typescript": "5.6.2",
+    "typescript-eslint": "^8.32.1",
+    "vite": "6.0.11"
+  },
+  "dependencies": {
+    "@tailwindcss/vite": "^4.1.7",
+    "jazz-browser-media-images": "workspace:*",
+    "jazz-svelte": "workspace:*",
+    "jazz-tools": "workspace:*",
+    "tailwindcss": "^4.1.7"
+  }
+}

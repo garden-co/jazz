@@ -1,0 +1,21 @@
+@import 'tailwindcss';
+@theme {
+  --color-stone-50: oklch(0.988281 0.002 75);
+  --color-stone-75: oklch(0.980563 0.002 75);
+  --color-stone-100: oklch(0.964844 0.002 75);
+  --color-stone-200: oklch(0.917969 0.002 75);
+  --color-stone-300: oklch(0.853516 0.002 75);
+  --color-stone-400: oklch(0.789063 0.002 75);
+  --color-stone-500: oklch(0.726563 0.002 75);
+  --color-stone-600: oklch(0.613281 0.002 75);
+  --color-stone-700: oklch(0.523438 0.002 75);
+  --color-stone-800: oklch(0.412109 0.002 75);
+  --color-stone-900: oklch(0.302734 0.002 75);
+  --color-stone-925: oklch(0.22 0.002 75);
+  --color-stone-950: oklch(0.193359 0.002 75);
+  --color-blue: oklch(0.57 0.2346 261.2);
+}
+
+:focus {
+  @apply outline-hidden;
+}

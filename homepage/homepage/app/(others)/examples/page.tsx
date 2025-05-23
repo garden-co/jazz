@@ -630,6 +630,13 @@ const svelteExamples: Example[] = [
     tech: [tech.svelte],
     features: [features.fileUpload, features.passkey, features.inviteLink],
     illustration: <FileShareIllustration />,
+  }, {
+    name: "Chat",
+    slug: "chat-svelte",
+    description:
+      "A simple Svelte app that creates a chat room with a shareable link.",
+    tech: [tech.svelte],
+    illustration: <ChatIllustration />,
   },
 ];
 
