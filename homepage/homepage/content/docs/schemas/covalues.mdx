@@ -388,7 +388,7 @@ These typically take a parameter of a loaded CoValue of the schema.
 
 <CodeGroup>
 ```ts twoslash
-import { co, z, Loaded } from "jazz-tools";
+import { co, z } from "jazz-tools";
 function differenceInYears(date1: Date, date2: Date) {
   const diffTime = Math.abs(date1.getTime() - date2.getTime());
   return Math.ceil(diffTime / (1000 * 60 * 60 * 24 * 365.25));
@@ -399,11 +399,11 @@ const Person = co.map({
   lastName: z.string(),
   dateOfBirth: z.date(),
 }).withHelpers((Self) => ({
-  fullName(person: Loaded<typeof Self>) {
+  fullName(person: co.loaded<typeof Self>) {
     return `${person.firstName} ${person.lastName}`;
   },
 
-  ageAsOf(person: Loaded<typeof Self>, date: Date) {
+  ageAsOf(person: co.loaded<typeof Self>, date: Date) {
     return differenceInYears(date, person.dateOfBirth);
   }
 }));

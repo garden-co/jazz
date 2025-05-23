@@ -76,7 +76,7 @@ To retrieve entries from a session:
 
 <CodeGroup>
 ```ts twoslash
-import { Group, co, z, ID, Account, SessionID } from "jazz-tools";
+import { co, z, SessionID } from "jazz-tools";
 import { createJazzTestAccount } from 'jazz-tools/testing';
 const me = await createJazzTestAccount();
 
@@ -87,7 +87,7 @@ const Activity = co.map({
 });
 
 const ActivityFeed = co.feed(Activity);
-const activityFeed = ActivityFeed.create([]);
+const activityFeed = ActivityFeed.create([], me);
 const sessionId = `${me.id}_session_z1` as SessionID;
 
 // ---cut---
@@ -103,7 +103,7 @@ For convenience, you can also access the latest entry from the current session w
 
 <CodeGroup>
 ```ts twoslash
-import { Group, co, z, ID, Account, SessionID } from "jazz-tools";
+import { co, z, SessionID } from "jazz-tools";
 import { createJazzTestAccount } from 'jazz-tools/testing';
 const me = await createJazzTestAccount();
 
@@ -132,7 +132,7 @@ To retrieve entries from a specific account (with entries from all sessions comb
 
 <CodeGroup>
 ```ts twoslash
-import { Group, co, z, ID, Account, SessionID } from "jazz-tools";
+import { co, z, SessionID } from "jazz-tools";
 import { createJazzTestAccount } from 'jazz-tools/testing';
 const me = await createJazzTestAccount();
 
@@ -159,7 +159,7 @@ For convenience, you can also access the latest entry from the current account w
 
 <CodeGroup>
 ```ts twoslash
-import { Group, co, z, ID, Account, SessionID } from "jazz-tools";
+import { co, z, SessionID } from "jazz-tools";
 import { createJazzTestAccount } from 'jazz-tools/testing';
 const me = await createJazzTestAccount();
 
@@ -190,7 +190,7 @@ To retrieve all entries from a CoFeed:
 
 <CodeGroup>
 ```ts twoslash
-import { Group, co, z, ID, Account, SessionID } from "jazz-tools";
+import { co, z, SessionID } from "jazz-tools";
 import { createJazzTestAccount } from 'jazz-tools/testing';
 const me = await createJazzTestAccount();
 
@@ -228,7 +228,7 @@ To retrieve the latest entry from a CoFeed, ie. the last update:
 
 <CodeGroup>
 ```ts twoslash
-import { Group, co, z, ID, Account, SessionID } from "jazz-tools";
+import { co, z, SessionID } from "jazz-tools";
 import { createJazzTestAccount } from 'jazz-tools/testing';
 const me = await createJazzTestAccount();
 
@@ -264,7 +264,7 @@ CoFeeds are append-only; you can add new items, but not modify existing ones. Th
 
 <CodeGroup>
 ```ts twoslash
-import { Group, co, z, ID, Account, SessionID } from "jazz-tools";
+import { co, z } from "jazz-tools";
 import { createJazzTestAccount } from 'jazz-tools/testing';
 const me = await createJazzTestAccount();
 
@@ -295,7 +295,7 @@ Each entry is automatically added to the current session's feed. When a user has
 
 <CodeGroup>
 ```ts twoslash
-import { Group, co, z, ID, Account, SessionID } from "jazz-tools";
+import { co, z } from "jazz-tools";
 import { createJazzTestAccount } from 'jazz-tools/testing';
 const me = await createJazzTestAccount();
 
@@ -338,7 +338,7 @@ The `by` property is the account that made the entry.
 
 <CodeGroup>
 ```ts twoslash
-import { Group, co, z, ID, Account, SessionID } from "jazz-tools";
+import { co, z } from "jazz-tools";
 import { createJazzTestAccount } from 'jazz-tools/testing';
 const me = await createJazzTestAccount();
 
@@ -366,7 +366,7 @@ The `madeAt` property is a timestamp of when the entry was added to the feed.
 
 <CodeGroup>
 ```ts twoslash
-import { Group, co, z, ID, Account, SessionID } from "jazz-tools";
+import { co, z } from "jazz-tools";
 import { createJazzTestAccount } from 'jazz-tools/testing';
 const me = await createJazzTestAccount();
 

@@ -325,19 +325,19 @@ You can add helper methods to your CoMap schema to make it more useful:
 import { createJazzTestAccount } from 'jazz-tools/testing';
 const me = await createJazzTestAccount();
 // ---cut---
-import { co, z, Loaded } from "jazz-tools";
+import { co, z } from "jazz-tools";
 
 const Project = co.map({
   name: z.string(),
   startDate: z.date(),
   endDate: z.optional(z.date()),
 }).withHelpers((Self) => ({
-  isActive(project: Loaded<typeof Self>) {
+  isActive(project: co.loaded<typeof Self>) {
     const now = new Date();
     return now >= project.startDate && (!project.endDate || now <= project.endDate);
   },
 
-  formatDuration(project: Loaded<typeof Self>, format: "short" | "full") {
+  formatDuration(project: co.loaded<typeof Self>, format: "short" | "full") {
     const start = project.startDate.toLocaleDateString();
     if (!project.endDate) {
       return format === "full"

@@ -109,7 +109,7 @@ To use per-user data in your app, you typically use `useAccount` somewhere in a 
 <CodeGroup>
 ```tsx twoslash
 import * as React from "react";
-import { co, z, Loaded } from "jazz-tools";
+import { co, z } from "jazz-tools";
 
 const Chat = co.map({});
 
@@ -124,8 +124,8 @@ const MyAppAccount = co.account({
   profile: MyAppProfile,
 });
 
-class ChatPreview extends React.Component<{ chat: Loaded<typeof Chat> }> {};
-class ContactPreview extends React.Component<{ contact: Loaded<typeof MyAppAccount> }> {};
+class ChatPreview extends React.Component<{ chat: co.loaded<typeof Chat> }> {};
+class ContactPreview extends React.Component<{ contact: co.loaded<typeof MyAppAccount> }> {};
 // ---cut---
 import { useAccount } from "jazz-react";
 

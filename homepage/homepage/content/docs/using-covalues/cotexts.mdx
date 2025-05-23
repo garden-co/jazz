@@ -8,8 +8,8 @@ export const metadata = {
 
 Jazz provides two CoValue types for collaborative text editing, collectively referred to as "CoText" values:
 
-- **co.plainText()** for simple text editing without formatting
-- **co.richText()** for rich text with HTML-based formatting (extends co.plainText())
+- **`co.plainText()`** for simple text editing without formatting
+- **`co.richText()`** for rich text with HTML-based formatting (extends `co.plainText()`)
 
 Both types enable real-time collaborative editing of text content while maintaining consistency across multiple users.
 
@@ -33,7 +33,7 @@ console.log(note.toString());  // "Meeting notes for Tuesday"
 
 For a full example of CoTexts in action, see [our Richtext example app](https://github.com/garden-co/jazz/tree/main/examples/richtext), which shows plain text and rich text editing.
 
-## co.plainText() vs z.string()
+## `co.plainText()` vs `z.string()`
 
 While `z.string()` is perfect for simple text fields, `co.plainText()` is the right choice when you need:
 
@@ -288,7 +288,7 @@ function updateText(e) {
 <CodeGroup>
 ```svelte twoslash
 <script lang="ts">
-import { co, Account } from "jazz-tools";
+import { co } from "jazz-tools";
 import { createJazzTestAccount } from 'jazz-tools/testing';
 const me = await createJazzTestAccount();
 
@@ -305,13 +305,13 @@ const note = co.plainText().create("", { owner: me });
 
 ## Using Rich Text with ProseMirror
 
-Jazz provides a dedicated plugin for integrating co.richText() with the popular ProseMirror editor. This plugin, [`jazz-richtext-prosemirror`](https://www.npmjs.com/package/jazz-richtext-prosemirror), enables bidirectional synchronization between your co.richText() instances and ProseMirror editors.
+Jazz provides a dedicated plugin for integrating `co.richText()` with the popular ProseMirror editor. This plugin, [`jazz-richtext-prosemirror`](https://www.npmjs.com/package/jazz-richtext-prosemirror), enables bidirectional synchronization between your co.richText() instances and ProseMirror editors.
 
 ### ProseMirror Plugin Features
 
-- **Bidirectional Sync**: Changes in the editor automatically update the co.richText() and vice versa
+- **Bidirectional Sync**: Changes in the editor automatically update the `co.richText()` and vice versa
 - **Real-time Collaboration**: Multiple users can edit the same document simultaneously
-- **HTML Conversion**: Automatically converts between HTML (used by co.richText()) and ProseMirror's document model
+- **HTML Conversion**: Automatically converts between HTML (used by `co.richText()`) and ProseMirror's document model
 
 ### Installation
 

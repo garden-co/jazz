@@ -1,4 +1,4 @@
-export const metadata = { 
+export const metadata = {
   description: "Learn about Jazz's authentication states: anonymous, guest, and fully authenticated."
 };
 
@@ -77,24 +77,26 @@ This example from our [music player example app](https://github.com/garden-co/ja
 
 <CodeGroup>
 ```ts twoslash
-import { Account, Group, CoMap, coField, CoList } from "jazz-tools";
+import { co, z, Group } from "jazz-tools";
 
-class MusicTrack extends CoMap {
-  title = coField.string;
-  duration = coField.number;
-  isExampleTrack = coField.optional.boolean;
-}
-class ListOfTracks extends CoList.Of(coField.ref(MusicTrack)) {}
-class Playlist extends CoMap {
-  title = coField.string;
-  tracks = coField.ref(ListOfTracks);
-}
-class MusicaAccountRoot extends CoMap {
-  rootPlaylist = coField.ref(Playlist);
-}
-class MusicaAccount extends Account {
-  root = coField.ref(MusicaAccountRoot);
-}
+const MusicTrack = co.map({
+  title: z.string(),
+  duration: z.number(),
+  isExampleTrack: z.boolean().optional(),
+});
+const Playlist = co.map({
+  title: z.string(),
+  tracks: co.list(MusicTrack),
+});
+const MusicaAccountRoot = co.map({
+  rootPlaylist: Playlist,
+});
+
+const MusicaAccount = co.account({
+  root: MusicaAccountRoot,
+  profile: co.profile({}),
+});
+type MusicaAccount = co.loaded<typeof MusicaAccount>
 
 // ---cut---
 export async function onAnonymousAccountDiscarded(

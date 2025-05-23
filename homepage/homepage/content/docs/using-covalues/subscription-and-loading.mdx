@@ -87,7 +87,7 @@ Jazz provides a `useCoState` hook that provides a convenient way to subscribe to
 <CodeGroup>
 ```tsx twoslash
 import React from "react";
-import { co, z, ID, Loaded } from "jazz-tools";
+import { co, z } from "jazz-tools";
 
 const Task = co.map({
   title: z.string(),
@@ -122,7 +122,7 @@ function GardenPlanner({ projectId }: { projectId: string }) {
   );
 }
 
-function TaskList({ tasks }: { tasks: Loaded<typeof Task>[] }) {
+function TaskList({ tasks }: { tasks: co.loaded<typeof Task>[] }) {
   return (
     <ul>
       {tasks.map((task) => (
@@ -220,14 +220,14 @@ This allows you to handle loading, error, and success states in your application
 
 <CodeGroup>
 ```ts twoslash
-import { co, z, Loaded } from "jazz-tools";
+import { co, z } from "jazz-tools";
 const Task = co.map({
   title: z.string(),
 });
 
 const taskId = "co_123";
 // ---cut-before---
-Task.subscribe(taskId, {}, (task: Loaded<typeof Task>) => {
+Task.subscribe(taskId, {}, (task: co.loaded<typeof Task>) => {
   if (task === undefined) {
     console.log("Task is loading...");
   } else if (task === null) {
@@ -644,16 +644,16 @@ console.log(friends?.[0]?.dog); // => null
 ```
 </CodeGroup>
 
-## Type Safety with Loaded Type
+## Type Safety with `co.loaded` Type
 
-Jazz provides the `Loaded` type to help you define and enforce the structure of deeply loaded data in your application. This makes it easier to ensure that components receive the data they expect with proper TypeScript validation.
+Jazz provides the `co.loaded` type to help you define and enforce the structure of deeply loaded data in your application. This makes it easier to ensure that components receive the data they expect with proper TypeScript validation.
 
-The `Loaded` type is especially useful when passing data between components, as it guarantees that all necessary nested data has been loaded:
+The `co.loaded` type is especially useful when passing data between components, as it guarantees that all necessary nested data has been loaded:
 
 <ContentByFramework framework="react">
 <CodeGroup>
 ```tsx twoslash
-import { CoListSchema, Loaded, co, z } from "jazz-tools";
+import { CoListSchema, co, z } from "jazz-tools";
 import React from "react";
 
 const TeamMember = co.map({
@@ -676,7 +676,7 @@ const Project = co.map({
 
 // ---cut-before---
 // Define a type that includes loaded nested data
-type ProjectWithTasks = Loaded<
+type ProjectWithTasks = co.loaded<
   typeof Project,
   {
     tasks: { $each: true };
@@ -696,7 +696,7 @@ function TaskList({ project }: { project: ProjectWithTasks }) {
 }
 
 // For more complex resolutions
-type FullyLoadedProject = Loaded<
+type FullyLoadedProject = co.loaded<
   typeof Project,
   {
     tasks: {
@@ -727,7 +727,7 @@ function processProject(project: FullyLoadedProject) {
 <ContentByFramework framework="vanilla">
 <CodeGroup>
 ```ts twoslash
-import { CoListSchema, Loaded, co, z } from "jazz-tools";
+import { CoListSchema, co, z } from "jazz-tools";
 
 const TeamMember = co.map({
   name: z.string(),
@@ -749,7 +749,7 @@ const Project = co.map({
 
 // ---cut-before---
 // Define a type that includes loaded nested data
-type ProjectWithTasks = Loaded<
+type ProjectWithTasks = co.loaded<
   typeof Project,
   {
     tasks: { $each: true };
@@ -763,7 +763,7 @@ async function taskList({ project }: { project: ProjectWithTasks }) {
 }
 
 // For more complex resolutions
-type FullyLoadedProject = Loaded<
+type FullyLoadedProject = co.loaded<
   typeof Project,
   {
     tasks: {
@@ -791,7 +791,7 @@ function processProject(project: FullyLoadedProject) {
 </CodeGroup>
 </ContentByFramework>
 
-Using the `Loaded` type helps catch errors at compile time rather than runtime, ensuring that your components and functions receive data with the proper resolution depth. This is especially useful for larger applications where data is passed between many components.
+Using the `co.loaded` type helps catch errors at compile time rather than runtime, ensuring that your components and functions receive data with the proper resolution depth. This is especially useful for larger applications where data is passed between many components.
 
 ## Ensuring Data is Loaded
 
@@ -799,7 +799,7 @@ Sometimes you need to make sure data is loaded before proceeding with an operati
 
 <CodeGroup>
 ```ts twoslash
-import { CoListSchema, Loaded, co, z } from "jazz-tools";
+import { CoListSchema, co, z } from "jazz-tools";
 
 const TeamMember = co.map({
   name: z.string(),
@@ -851,4 +851,4 @@ async function completeAllTasks(projectId: string) {
 2. **Use framework integrations**: They handle subscription lifecycle automatically
 3. **Clean up subscriptions**: Always store and call the unsubscribe function when you're done
 4. **Handle all loading states**: Check for undefined (loading), null (not found), and success states
-5. **Use the Loaded type**: Add compile-time type safety for components that require specific resolution patterns
+5. **Use the `co.loaded` type**: Add compile-time type safety for components that require specific resolution patterns
