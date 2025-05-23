@@ -11,6 +11,18 @@ export const docNavigationItems = [
         done: 100,
         excludeFromNavigation: true,
       },
+      {
+        name: "Installation",
+        href: "/docs/project-setup",
+        done: {
+          react: 100,
+          "react-native": 100,
+          "react-native-expo": 100,
+          svelte: 100,
+          vanilla: 0,
+          vue: 100,
+        },
+      },
       // {
       //   name: "Guide",
       //   href: "/docs/guide",
