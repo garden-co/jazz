@@ -121,7 +121,7 @@ function SharedCoMapWithChildren(props: {
 
       if (node) {
         const childGroup = node._owner as Group;
-        childGroup.extend(parentGroup);
+        childGroup.addMember(parentGroup);
       }
     }
   };

@@ -472,7 +472,7 @@ class FileShareAccount extends Account {
 const parentGroup = Group.create({ owner: me });
 parentGroup.addMember(bob, "reader");
 const childGroup = Group.create({ owner: me });
-childGroup.extend(parentGroup);
+childGroup.addMember(parentGroup);
 const doc = Document.create({ title:"Inherited Access" }, { owner: childGroup });
 ```
 
