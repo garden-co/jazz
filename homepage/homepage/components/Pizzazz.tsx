@@ -15,7 +15,7 @@ export function Pizzazz() {
         count: 12,
         sizeRange: [10, 40],
         duration: 1500,
-      });
+      } as any);
     }
   }, []);
 
