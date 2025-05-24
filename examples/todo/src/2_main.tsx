@@ -6,12 +6,7 @@ import {
 } from "react-router-dom";
 import "./index.css";
 
-import {
-  JazzProvider,
-  PassphraseAuthBasicUI,
-  useAcceptInvite,
-  useAccount,
-} from "jazz-react";
+import { JazzProvider, useAcceptInvite, useAccount } from "jazz-react";
 
 import React from "react";
 import { TodoAccount, TodoProject } from "./1_schema.ts";
@@ -23,8 +18,9 @@ import {
   ThemeProvider,
   TitleAndLogo,
 } from "./basicComponents/index.ts";
+import { AccountTransferLinkHandlerPage } from "./components/Auth/AccountTransferLinkHandlerPage";
+import { PasskeyAndCrossDeviceAccountTransferAuth } from "./components/Auth/PasskeyAndCrossDeviceAccountTransferAuth";
 import { TaskGenerator } from "./components/TaskGenerator.tsx";
-import { wordlist } from "./wordlist.ts";
 
 /**
  * Walkthrough: The top-level provider `<JazzProvider/>`
@@ -46,9 +42,9 @@ function JazzAndAuth({ children }: { children: React.ReactNode }) {
       }}
       AccountSchema={TodoAccount}
     >
-      <PassphraseAuthBasicUI appName={appName} wordlist={wordlist}>
+      <PasskeyAndCrossDeviceAccountTransferAuth>
         {children}
-      </PassphraseAuthBasicUI>
+      </PasskeyAndCrossDeviceAccountTransferAuth>
     </JazzProvider>
   );
 }
@@ -89,6 +85,10 @@ export default function App() {
     {
       path: "/invite/*",
       element: <p>Accepting invite...</p>,
+    },
+    {
+      path: "/accept-account-transfer/:x/:y",
+      element: <AccountTransferLinkHandlerPage />,
     },
     {
       path: "/generate",
