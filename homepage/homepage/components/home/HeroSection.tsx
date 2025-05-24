@@ -51,7 +51,14 @@ const features: Array<{
 
 export function HeroSection() {
   return (
-    <div className="container grid items-center gap-x-8 gap-y-12 my-12 md:my-16 lg:my-24 lg:gap-x-10 lg:grid-cols-3">
+    <div className="container relative grid items-center gap-x-8 gap-y-12 my-12 md:my-16 lg:my-24 lg:gap-x-10 lg:grid-cols-3">
+      <Link href="" className="absolute right-4 -top-12 sm:top-0 xl:top-6 xl:right-6">
+        <img
+          alt="Meet us at Local-first Conference 2025"
+          src="/local-first-conf-sticker.png"
+          className="w-[120px] sm:w-[150px] h-auto rotate-[10deg]"
+        />
+      </Link>
       <div className="flex flex-col justify-center gap-5 lg:col-span-2 lg:gap-8">
         <Kicker>Toolkit for backendless apps</Kicker>
         <H1>
