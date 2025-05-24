@@ -2,7 +2,7 @@
 # fully erased.  The tap into the input field hits the middle, and clears all
 # text to the left.  If there's more to the right, it slides left, and thus we
 # repeat this step.  https://maestro.mobile.dev/api-reference/commands/erasetext
-appId: com.jazz.chatrn
+appId: tools.jazz.chatrnexpo
 ---
 - copyTextFrom:
    id: ${id}
