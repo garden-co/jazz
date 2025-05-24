@@ -23,16 +23,16 @@ import {
   createJazzContext,
 } from "jazz-tools";
 import { KvStore, KvStoreContext } from "./storage/kv-store-context.js";
-import type { SQLiteAdapter } from "./storage/sqlite-adapter.js";
 import { SQLiteReactNative } from "./storage/sqlite-react-native.js";
 
+import { SQLiteDatabaseDriverAsync } from "cojson-storage";
 import { WebSocketPeerWithReconnection } from "cojson-transport-ws";
 import type { RNQuickCrypto } from "./crypto/RNQuickCrypto.js";
 
 export type BaseReactNativeContextOptions = {
   sync: SyncConfig;
   reconnectionTimeout?: number;
-  storage?: SQLiteAdapter | "disabled";
+  storage?: SQLiteDatabaseDriverAsync | "disabled";
   CryptoProvider?: typeof PureJSCrypto | typeof RNQuickCrypto;
   authSecretStorage: AuthSecretStorage;
 };

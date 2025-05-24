@@ -14,7 +14,7 @@
     },
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.anonymous.chatrnexpo"
+      "bundleIdentifier": "tools.jazz.chatrnexpo"
     },
     "android": {
       "adaptiveIcon": {
@@ -22,7 +22,7 @@
         "backgroundColor": "#ffffff"
       },
       "edgeToEdgeEnabled": true,
-      "package": "com.anonymous.chatrnexpo"
+      "package": "tools.jazz.chatrnexpo"
     },
     "web": {
       "favicon": "./assets/favicon.png"
