@@ -1,0 +1,186 @@
+import { CodeGroup } from "@/components/forMdx";
+export const metadata = { title: "Groups and Ownership" };
+
+# Groups and Ownership
+
+Groups are how you control who can see and edit data in your Jazz app, turning personal notes into collaborative workspaces.
+
+Now that you've set up [Authentication](/docs/building-with-jazz/authentication), it's time to explore how data access works in Jazz. We'll look at how **ownership** determines who data belongs to, how **groups enable sharing**, and how **permission roles** give different users different capabilities.
+
+## What is Ownership in Jazz?
+
+Ownership in Jazz determines data access control. Every piece of data requires an owner:
+
+- **Individual Account** - Private data accessible only to the owner
+- **Group** - Shared data accessible to group members
+
+Ownership is set during data creation:
+
+<CodeGroup>
+```tsx twoslash
+import { Group, co, z } from "jazz-tools";
+
+export const Note = co.map({
+  title: z.string(),
+});
+
+const teamGroup = Group.create();
+// ---cut---
+// Create private data (owned by the current user)
+const privateNote = Note.create({ 
+  title: "My Private Note"
+});
+
+// Create shared data (owned by a group)
+const sharedNote = Note.create(
+  { title: "Team Note" },
+  teamGroup // This note is owned by the group
+);
+```
+</CodeGroup>
+
+Ownership forms the foundation of Jazz's permission system.
+
+See [Groups as Permission Scopes](/docs/groups/intro#ownership) for details.
+
+## Groups: Enabling Data Sharing
+
+Groups in Jazz control data access and enable collaboration. They provide:
+
+- Precise access control
+- Role-based permissions
+- Content sharing capabilities
+- Organizational structures
+
+Groups are lightweight - create thousands without performance concerns.
+
+See [Group Management](/docs/groups/intro) for implementation details.
+
+## Permission Roles
+
+Jazz uses three permission levels:
+
+- **Reader**: View-only access
+- **Writer**: Edit content, no member management
+- **Admin**: Full control including member management
+
+These roles cover most collaboration scenarios:
+
+<CodeGroup>
+```tsx twoslash
+import { Group, co, z } from "jazz-tools";
+import { createJazzTestAccount } from "jazz-tools/testing";
+
+const projectGroup = Group.create();
+const documentGroup = Group.create();
+const alice = await createJazzTestAccount();
+// ---cut---
+// Give Alice writer access to the project
+projectGroup.addMember(alice, "writer");
+
+// Make content public (everyone can read)
+documentGroup.addMember("everyone", "reader");
+```
+</CodeGroup>
+
+See [Group Roles](/docs/groups/intro#roles) for implementation.
+
+## Collaboration Features
+
+Groups enable several sharing patterns:
+
+- **Direct sharing**: Add specific users by account ID
+- **Public access**: Use `"everyone"` member for public content
+- **Fine-grained control**: Different permission levels per user
+- **Hierarchical structures**: Nested permission inheritance
+
+Sharing options support familiar user experiences similar to Google Docs or Figma.
+
+See [Public Sharing and Invites](/docs/groups/sharing) for examples.
+
+## Working with Shared Data
+
+Jazz handles permissions transparently in your code. Access shared data the same way as private data:
+
+<CodeGroup>
+```ts twoslash
+import { co, z } from "jazz-tools";
+
+export const Document = co.map({
+  title: z.string(),
+});
+
+const documentId = "co_z123";
+// ---cut---
+// Access data - permissions are handled automatically
+const document = await Document.load(documentId);
+
+// If you have access, you can read and modify
+if (document) {
+  // Will succeed if you have writer access
+  document.title = "New Title"; 
+}
+```
+</CodeGroup>
+
+Jazz automatically handles permission checks, allowing only authorized operations.
+
+See [Subscription and Loading](/docs/react/using-covalues/subscription-and-loading) for data access patterns.
+
+## Organizational Structures
+
+For complex applications, create permission hierarchies:
+
+- Company → Department → Team → Project
+
+Groups support inheritance, so permission changes propagate through the hierarchy:
+
+<CodeGroup>
+```ts twoslash
+import { Group } from "jazz-tools";
+// ---cut---
+// Create a hierarchy
+const teamGroup = Group.create();
+const projectGroup = Group.create();
+
+// Project inherits from team
+projectGroup.extend(teamGroup);
+```
+</CodeGroup>
+
+This inheritance model enables enterprise-grade permission systems with minimal code.
+
+See [Group Inheritance](/docs/groups/inheritance) for advanced patterns.
+
+## Next Steps
+
+**Congratulations!** You've completed the core Jazz concepts:
+- **Schemas** define data structure
+- **Providers** connect to Jazz
+- **Accounts** represent user identity
+- **Authentication** secures access
+- **Groups** manage permissions
+
+You're ready to build collaborative applications.
+
+### Start Building
+
+Begin creating your Jazz application:
+- [Example Applications](/docs/examples) - Working examples and inspiration
+- [`create-jazz-app`](/docs/tools/create-jazz-app) - Quick project setup
+- [AI tools](/docs/ai-tools) - Rapid prototyping assistance
+
+### Advanced Topics
+
+Explore additional capabilities:
+- [Sync](/docs/building-with-jazz/sync) - Data synchronization between devices
+- [Server Workers](/docs/building-with-jazz/server-workers) - Server-side application logic
+
+## Further Reading
+
+Additional resources:
+
+- [Groups as Permission Scopes](/docs/groups/intro) - Complete guide to group permissions
+- [Public Sharing and Invites](/docs/groups/sharing) - Implementation details for sharing
+- [Group Inheritance](/docs/groups/inheritance) - Advanced permission hierarchies
+- [Subscription and Loading](/docs/react/using-covalues/subscription-and-loading) - How to access shared data

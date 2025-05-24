@@ -1,0 +1,114 @@
+export const metadata = { title: "Server Workers" };
+
+# Server Workers
+
+Server Workers extend Jazz applications with server-side functionality, connecting to external services and implementing backend logic.
+
+Now that you've explored [Sync](/docs/building-with-jazz/sync), discover server-side capabilities. We'll cover how Server Workers function as **automated collaborators**, implement **integration patterns**, and extend applications with **backend capabilities** while maintaining Jazz's collaboration model.
+
+## What Are Server Workers?
+
+Server Workers are server-side collaborators in your Jazz workspace. They provide:
+
+- **Identity**: Own accounts in your system
+- **Data access**: Read and write data based on permissions
+- **Change monitoring**: React to data modifications
+- **Server execution**: Run on Node.js, Cloudflare Workers, etc.
+
+Server Workers aren't separate systems - they're collaborators alongside human users.
+
+See [Node.JS / Server Workers guide](/docs/project-setup/server-side) for setup.
+
+## When to Use Server Workers
+
+Server Workers excel in these scenarios:
+
+- **API key security**: Keep secrets out of browsers
+- **Heavy computation**: Avoid slowing user devices
+- **External integrations**: Connect to databases, payment processors, services
+- **Automation**: Create workflows triggered by data changes
+- **Business rules**: Enforce constraints consistently
+- **Background processing**: Handle time-consuming tasks
+
+Instead of building separate backends, Server Workers extend Jazz applications while maintaining collaborative harmony.
+
+See the [Jazz Paper Scissors Example](https://github.com/garden-co/jazz/tree/main/examples/jazz-paper-scissors) for implementation examples.
+
+## The Collaboration Model
+
+Server Workers collaborate through shared data:
+
+- **Shared workspaces**: Humans and Server Workers update the same CoValues
+- **Automatic responses**: Server Workers react to user changes
+- **Seamless integration**: Results flow back without user refresh
+
+This approach feels more natural than traditional request-response patterns. Everyone collaborates on the same digital workspace.
+
+## How Server Workers Join
+
+Server Workers integrate through three mechanisms:
+
+### Digital Identity
+
+Each Server Worker has its own account:
+
+- Stable **ID** for identification
+- Secure **authentication key**
+- Presence in **edit history**
+
+### Permission Management
+
+Server Workers use the standard permission system:
+
+- Add to **Groups** to control access
+- Assign **roles** (reader, writer, admin) based on requirements
+- **Share data** like with human collaborators
+
+This unified approach maintains consistent security.
+
+See [Node.JS / Server Workers](/docs/project-setup/server-side) for implementation.
+
+### Change Monitoring
+
+Server Workers monitor data through subscriptions:
+
+1. **Subscribe** to specific data
+2. **React** when changes occur
+3. **Update** the same workspace with results
+
+This creates continuous information flow between users and servers.
+
+## Server Worker Patterns
+
+Two effective patterns:
+
+### State Machine Pattern
+
+Turn CoValues into processing pipelines:
+
+1. User changes document status to "ready for processing"
+2. Server Worker detects status change
+3. Worker processes data (generates PDF, analyzes text)
+4. Worker updates document with results and changes status to "processed"
+
+This creates natural, asynchronous workflows.
+
+### External Integration Pattern
+
+Connect Jazz to external services:
+
+1. Monitor "outbound request" CoValues
+2. Call external APIs when requests appear
+3. Return results into Jazz app
+
+This connects your Jazz world to external services without exposing secrets.
+
+## Next Steps
+
+Server Workers complete the advanced Jazz capabilities, providing both real-time collaboration and server functionality.
+
+Ready to implement:
+
+- [Jazz Paper Scissors Example](https://github.com/garden-co/jazz/tree/main/examples/jazz-paper-scissors) - Complete implementation
+- [Node.JS / Server Workers](/docs/project-setup/server-side) - Deployment guide
+- Return to [core concepts](/docs/building-with-jazz/groups#next-steps) for application building
