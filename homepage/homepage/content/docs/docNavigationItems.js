@@ -233,7 +233,7 @@ export const docNavigationItems = [
         done: 10,
       },
       {
-        name: "Group inheritance",
+        name: "Groups as members",
         href: "/docs/groups/inheritance",
         done: 100,
       },
