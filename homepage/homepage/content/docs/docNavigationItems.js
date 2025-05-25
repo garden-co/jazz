@@ -277,6 +277,11 @@ export const docNavigationItems = [
         done: 100,
       },
       {
+        name: "Cross-Device Account Transfer",
+        href: "/docs/authentication/cross-device-account-transfer",
+        done: 100,
+      },
+      {
         name: "Writing your own",
         href: "/docs/authentication/writing-your-own",
         done: 0,

@@ -59,6 +59,7 @@ export async function createTwoConnectedNodes(
     {
       peer1role: node2Role,
       peer2role: node1Role,
+      deletePeerStateOnClose: false,
     },
   );
 
@@ -624,6 +625,7 @@ export function connectedPeersWithMessagesTracking(opts: {
   const [peer1, peer2] = connectedPeers(opts.peer1.id, opts.peer2.id, {
     peer1role: opts.peer1.role,
     peer2role: opts.peer2.role,
+    deletePeerStateOnClose: false,
   });
 
   const peer1Push = peer1.outgoing.push;
