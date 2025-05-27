@@ -20,6 +20,9 @@ __screenshots__
 # Playwright
 test-results
 
+# Java
+.java-version
+
 .husky
 
 .vscode/*
