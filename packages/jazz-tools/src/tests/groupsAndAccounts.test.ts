@@ -242,6 +242,18 @@ describe("Group inheritance", () => {
     expect(group.getRoleOf("everyone")).toBe("writeOnly");
   });
 
+  test("makePublic should add everyone as a reader", () => {
+    const group = Group.create();
+    group.makePublic();
+    expect(group.getRoleOf("everyone")).toBe("reader");
+  });
+
+  test("makePublic should add everyone as a writer", () => {
+    const group = Group.create();
+    group.makePublic("writer");
+    expect(group.getRoleOf("everyone")).toBe("writer");
+  });
+
   test("typescript should show an error when adding a member with a non-account role", async () => {
     const account = await createJazzTestAccount({});
     await account.waitForAllCoValuesSync();
