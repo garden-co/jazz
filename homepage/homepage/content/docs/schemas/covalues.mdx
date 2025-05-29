@@ -417,3 +417,40 @@ const fullName = getPersonFullName(person);
 const age = getPersonAgeAsOf(person, new Date());
 ```
 </CodeGroup>
+
+### Finding Unique CoValues with findUnique
+
+Jazz provides a powerful mechanism to find unique CoMap instances based on their `CoValueUniqueness` identifier. 
+The `findUnique` method allows for the location of specific CoMap instances without needing to load them first.
+
+#### When to use findUnique
+Use findUnique when there's an assigned unique identifier on a CoMap (via CoValueUniqueness) and you want to retrieve that specific instance. 
+This is useful for:
+- **Singleton CoValues** - When a `CoMap` should only ever have one instance
+- **Referencing specific instances** - When there's a need to access a CoMap that is known by its unique ID and owner
+
+<CodeGroup>
+```ts twoslash
+import {co, z, Group} from "jazz-tools"
+const group = Group.create();
+
+// ---cut---
+
+const Person = co.map({
+  firstName: z.string(),
+  lastName: z.string(),
+  dateOfBirth: z.date()
+});
+
+const person = Person.create(
+  {
+    firstName: "John",
+    lastName: "Doe",
+    dateOfBirth: new Date("1990-01-01"),
+  },
+  { owner: group, unique: { lastName: "Doe" } },
+);
+
+const foundPerson = Person.findUnique({ lastName: "Doe" }, group.id);
+```
+</CodeGroup>
