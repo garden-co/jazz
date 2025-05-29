@@ -155,16 +155,6 @@ function SearchResult({
   result: any;
   setOpen: (open: boolean) => void;
 }) {
-  // const [data, setData] = useState<any>(null);
-
-  // useEffect(() => {
-  //   async function fetchData() {
-  //     const data = await result.data();
-  //     setData(data);
-  //   }
-  //   fetchData();
-  // }, [result]);
-
   if (!result) {
     return null;
   }

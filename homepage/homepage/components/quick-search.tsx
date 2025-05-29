@@ -1,6 +1,7 @@
 import { Search } from "lucide-react";
 
 export function QuickSearch({ onClick }: { onClick: () => void }) {
+  const isMac = navigator.userAgent.includes("Mac");
   return (
     <button
       onClick={onClick}
@@ -11,9 +12,9 @@ export function QuickSearch({ onClick }: { onClick: () => void }) {
     hover:text-stone-600 dark:hover:text-stone-300 text-sm"
     >
       <Search className="h-4 w-4" />
-      <span className="flex-1 text-left">Quick search...</span>
+      <span className="flex-1 text-left">Quick search&hellip;</span>
       <span className="text-xs bg-stone-100 dark:bg-stone-800 px-2 py-0.5 rounded">
-        ⌘K
+        {isMac ? "⌘+K" : "^+K"}
       </span>
     </button>
   );

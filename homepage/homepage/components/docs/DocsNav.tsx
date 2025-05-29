@@ -41,11 +41,11 @@ export function DocNav() {
 
   return (
     <SideNav>
-      <FrameworkSelect />
-
       <div className="pb-5">
         <QuickSearch onClick={() => setOpen((open) => !open)} />
       </div>
+
+      <FrameworkSelect />
 
       <SideNavBody>
         {items.map((item) => (
