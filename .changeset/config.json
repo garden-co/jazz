@@ -12,6 +12,7 @@
       "cojson-transport-ws",
       "jazz-browser",
       "jazz-auth-clerk",
+      "jazz-auth-workos",
       "jazz-auth-betterauth",
       "jazz-betterauth-client-plugin",
       "jazz-betterauth-server-plugin",

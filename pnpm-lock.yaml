@@ -2190,6 +2190,22 @@ importers:
         specifier: 'catalog:'
         version: 5.6.2
 
+  packages/jazz-auth-workos:
+    dependencies:
+      cojson:
+        specifier: workspace:0.14.16
+        version: link:../cojson
+      jazz-browser:
+        specifier: workspace:0.14.17
+        version: link:../jazz-browser
+      jazz-tools:
+        specifier: workspace:0.14.17
+        version: link:../jazz-tools
+    devDependencies:
+      typescript:
+        specifier: 'catalog:'
+        version: 5.6.2
+
   packages/jazz-betterauth-client-plugin:
     dependencies:
       jazz-betterauth-server-plugin:
@@ -2292,6 +2308,9 @@ importers:
       jazz-auth-clerk:
         specifier: workspace:*
         version: link:../jazz-auth-clerk
+      jazz-auth-workos:
+        specifier: workspace:*
+        version: link:../jazz-auth-workos
       jazz-react-core:
         specifier: workspace:*
         version: link:../jazz-react-core
@@ -2502,6 +2521,40 @@ importers:
       jazz-auth-clerk:
         specifier: workspace:*
         version: link:../jazz-auth-clerk
+      jazz-browser:
+        specifier: workspace:*
+        version: link:../jazz-browser
+      jazz-react:
+        specifier: workspace:*
+        version: link:../jazz-react
+      jazz-tools:
+        specifier: workspace:*
+        version: link:../jazz-tools
+      react:
+        specifier: 19.0.0
+        version: 19.0.0
+    devDependencies:
+      '@testing-library/react':
+        specifier: 16.2.0
+        version: 16.2.0(@testing-library/dom@10.4.0)(@types/react-dom@19.0.0)(@types/react@19.0.0)(react-dom@19.0.0(react@19.0.0))(react@19.0.0)
+      '@types/react':
+        specifier: 19.0.0
+        version: 19.0.0
+      '@types/react-dom':
+        specifier: 19.0.0
+        version: 19.0.0
+      typescript:
+        specifier: 'catalog:'
+        version: 5.6.2
+
+  packages/jazz-react-auth-workos:
+    dependencies:
+      cojson:
+        specifier: workspace:*
+        version: link:../cojson
+      jazz-auth-workos:
+        specifier: workspace:*
+        version: link:../jazz-auth-workos
       jazz-browser:
         specifier: workspace:*
         version: link:../jazz-browser
