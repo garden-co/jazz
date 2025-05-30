@@ -213,9 +213,9 @@ export const docNavigationItems = [
         done: 80,
       },
       {
-        name: "History & time travel",
+        name: "History",
         href: "/docs/using-covalues/history",
-        done: 0,
+        done: 100,
       },
     ],
   },
@@ -295,6 +295,11 @@ export const docNavigationItems = [
         name: "Organization/Team",
         href: "/docs/design-patterns/organization",
         done: 80,
+      },
+      {
+        name: "History Patterns",
+        href: "/docs/design-patterns/history-patterns",
+        done: 100,
       },
     ],
   },
