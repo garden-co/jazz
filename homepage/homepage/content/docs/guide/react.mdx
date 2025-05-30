@@ -46,6 +46,8 @@ Collaborative Values (CoValues), build a UI and subscribe to changes, set permis
 3. Modify `src/main.tsx` to set up a Jazz context:
 
 <CodeGroup>
+const apiKey = "Replace with API key from dashboard.jazz.tools";
+// ---cut---
     {/* prettier-ignore */}
     ```tsx
     import React from "react";
@@ -58,7 +60,7 @@ Collaborative Values (CoValues), build a UI and subscribe to changes, set permis
         <React.StrictMode>
             <JazzProvider // [!code ++:6]
                 // replace `you@example.com` with your email as a temporary API key
-                sync={{ peer: "wss://cloud.jazz.tools/?key=you@example.com" }}
+                sync={{ peer: `wss://cloud.jazz.tools/?${apiKey}` }}
             >
                 <App />
             </JazzProvider>

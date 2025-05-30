@@ -6,9 +6,48 @@ export const metadata = {
 
 # Sync and storage
 
+For sync and storage, you can either use Jazz Cloud for zero-config magic, or run your own sync server.
+
 ## Using Jazz Cloud
 
-Simply use `wss://cloud.jazz.tools/?key=...` as the sync server URL.
+To get your Jazz Cloud API key, create an account on [dashboard.jazz.tools](https://dashboard.jazz.tools).
+
+It will generate an app with an API key for you.
+
+![Jazz Cloud screenshot with API key generated](/jazz-cloud-api-key.png)
+
+In your `JazzProvider`, replace the API key in the sync server URL with your API key.
+
+<ContentByFramework framework={["vue", "svelte", "react-native", "react-native-expo", "vanilla"]}>
+<CodeGroup>
+```
+wss://cloud.jazz.tools/?key=YOUR_API_KEY
+```
+</CodeGroup>
+</ContentByFramework>
+
+<ContentByFramework framework="react">
+<CodeGroup>
+```tsx twoslash
+const apiKey = "Replace with API key from dashboard.jazz.tools";
+import * as React from "react";
+import { JazzProvider } from "jazz-react";
+// ---cut---
+export function MyApp({ children }: { children: React.ReactNode }) {
+  return (
+    <JazzProvider
+      sync={{
+        peer: `wss://cloud.jazz.tools/?key=${apiKey}`,
+        // ...
+      }}
+    >
+      {children}
+    </JazzProvider>
+  );
+}
+```
+</CodeGroup>
+</ContentByFramework>
 
 Jazz Cloud will
 - sync CoValues in real-time between users and devices
@@ -20,14 +59,6 @@ Jazz Cloud will
 - Jazz Cloud is free during the public alpha, with no strict usage limits
 - We plan to keep a free tier, so you'll always be able to get started with zero setup
 - See [Jazz Cloud pricing](/cloud#pricing) for more details
-- ⚠️ Please use a valid email address as your API key.
-
-    Your full sync server URL should look something like
-
-    ```wss://cloud.jazz.tools/?key=you@example.com```
-
-    Once we support per-app API keys, we'll email you an API key you can use instead.
-
 
 ## Running your own sync server
 

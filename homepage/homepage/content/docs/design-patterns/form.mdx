@@ -426,6 +426,7 @@ export const JazzAccount = co.account({
 
 // @filename: App.tsx
 import * as React from "react";
+const apiKey = "Replace with API key from dashboard.jazz.tools";
 // ---cut---
 import { Loaded } from "jazz-tools"
 import { JazzProvider } from "jazz-react";
@@ -434,7 +435,7 @@ import { JazzAccount } from "./schema"; // [!code ++]
 export function MyJazzProvider({ children }: { children: React.ReactNode }) {
     return (
         <JazzProvider
-            sync={{ peer: "wss://cloud.jazz.tools/?key=you@example.com" }}
+            sync={{ peer: `wss://cloud.jazz.tools/?${apiKey}` }}
             AccountSchema={JazzAccount} // [!code ++]
         >
             {children}
