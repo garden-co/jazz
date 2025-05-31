@@ -1,5 +1,11 @@
 # cojson-storage
 
+## 0.14.18
+
+### Patch Changes
+
+- be7c4c2: Incorporate SQLite sync/async adapters and make them more aligned
+
 ## 0.14.16
 
 ### Patch Changes

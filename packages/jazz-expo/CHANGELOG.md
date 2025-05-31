@@ -1,5 +1,12 @@
 # jazz-browser
 
+## 0.14.18
+
+### Patch Changes
+
+- jazz-react-native-core@0.14.18
+- jazz-auth-clerk@0.14.18
+
 ## 0.14.17
 
 ### Patch Changes
