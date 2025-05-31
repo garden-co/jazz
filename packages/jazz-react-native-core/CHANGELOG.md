@@ -1,5 +1,12 @@
 # jazz-browser
 
+## 0.14.18
+
+### Patch Changes
+
+- Updated dependencies [be7c4c2]
+  - cojson-storage@0.14.18
+
 ## 0.14.17
 
 ### Patch Changes

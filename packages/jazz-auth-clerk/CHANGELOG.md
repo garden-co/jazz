@@ -1,5 +1,11 @@
 # jazz-auth-clerk
 
+## 0.14.18
+
+### Patch Changes
+
+- jazz-browser@0.14.18
+
 ## 0.14.17
 
 ### Patch Changes
