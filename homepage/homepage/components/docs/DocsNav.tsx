@@ -10,28 +10,31 @@ import React from "react";
 
 export function DocNav() {
   const framework = useFramework();
-  const items = (docNavigationItems as DocNavigationSection[]).map((headerItem) => {
-    return {
-      ...headerItem,
-      items: headerItem.items
-        .filter(
-          (item) => !("framework" in item) || item.framework === framework,
-        )
-        .map((item) => {
-          if (!item.href?.startsWith("/docs")) return item;
+  const items = (docNavigationItems as DocNavigationSection[]).map(
+    (headerItem) => {
+      return {
+        ...headerItem,
+        items: headerItem.items
+          .filter(
+            (item) => !("framework" in item) || item.framework === framework,
+          )
+          .map((item) => {
+            if (!item.href?.startsWith("/docs")) return item;
 
-          const frameworkDone = (item.done as any)[framework] ?? 0;
-          let done = typeof item.done === "number" ? item.done : frameworkDone;
-          let href = item.href.replace("/docs", `/docs/${framework}`);
+            const frameworkDone = (item.done as any)[framework] ?? 0;
+            let done =
+              typeof item.done === "number" ? item.done : frameworkDone;
+            let href = item.href.replace("/docs", `/docs/${framework}`);
 
-          return {
-            ...item,
-            href,
-            done,
-          };
-        }),
-    };
-  });
+            return {
+              ...item,
+              href,
+              done,
+            };
+          }),
+      };
+    },
+  );
 
   return (
     <SideNav>

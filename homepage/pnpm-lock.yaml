@@ -226,6 +226,9 @@ importers:
       '@types/topojson-client':
         specifier: ^3.1.5
         version: 3.1.5
+      '@unicorn-poo/pizzazz':
+        specifier: ^1.1.0
+        version: 1.1.0
       '@vercel/analytics':
         specifier: ^1.3.1
         version: 1.5.0(next@15.2.1(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(react@18.3.1)
@@ -1632,6 +1635,10 @@ packages:
 
   '@ungap/structured-clone@1.3.0':
     resolution: {integrity: sha512-WmoN8qaIAo7WTYWbAZuG8PYEhn5fkz7dZrqTBZ7dtt//lL2Gwms1IcnQ5yHqjDfX8Ft5j4YzDM23f87zBfDe9g==}
+
+  '@unicorn-poo/pizzazz@1.1.0':
+    resolution: {integrity: sha512-8JfIW41yEaFjxW/ChtycVU0DW1ygCVTuPezmI63llgSf56WEOhEwuTxJLiL6E6VmtFKTqkikPGD1vKZUKoj/Iw==}
+    engines: {node: '>=14.0.0', npm: '>=6.0.0'}
 
   '@vercel/analytics@1.5.0':
     resolution: {integrity: sha512-MYsBzfPki4gthY5HnYN7jgInhAZ7Ac1cYDoRWFomwGHWEX7odTEzbtg9kf/QSo7XEsEAqlQugA6gJ2WS2DEa3g==}
@@ -5390,6 +5397,8 @@ snapshots:
       - supports-color
 
   '@ungap/structured-clone@1.3.0': {}
+
+  '@unicorn-poo/pizzazz@1.1.0': {}
 
   '@vercel/analytics@1.5.0(next@14.2.15(react-dom@18.3.1(react@18.3.1))(react@18.3.1))(react@18.3.1)':
     optionalDependencies:
