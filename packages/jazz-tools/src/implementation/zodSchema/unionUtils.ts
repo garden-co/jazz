@@ -65,8 +65,6 @@ export function schemaUnionDiscriminatorFor(
             return false;
           }
 
-          console.log(discriminatorDef._zod.def);
-
           if (discriminatorDef._zod.def.type !== "literal") {
             console.warn(
               "Non-literal discriminator found in z.discriminatedUnion() of collaborative types",
