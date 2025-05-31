@@ -1,0 +1,176 @@
+import { CodeGroup } from "@/components/forMdx";
+export const metadata = { title: "Schemas" };
+
+# Schemas
+
+Schemas define the structure of your data in Jazz applications, enabling type-safe collaborative editing.
+
+Now that you've [installed Jazz](/docs/building-with-jazz/installation), create your first schemas. We'll explore how schemas work with [CoValues](/docs/schemas/covalues) and enable [real-time collaboration](/docs/using-covalues/collaboration).
+
+## What are Jazz Schemas?
+
+Schemas are blueprints for your data. They define structure and enable collaborative behavior.
+
+Jazz uses **CoValues** (Collaborative Values) - data structures that track changes, handle merges, and sync automatically.
+
+CoValues provide:
+
+- Automatic change tracking without any extra code
+- Conflict resolution when two people edit the same thing
+- TypeScript types that stay accurate as your data changes
+
+### Why Zod for Schemas?
+
+We use [Zod](https://zod.dev/) for schema validation:
+
+- **Simple syntax**: Write schemas quickly with clear, readable code
+- **Runtime validation**: Catch errors early with detailed error messages
+- **TypeScript integration**: Automatic type generation
+- **AI-friendly**: Clean syntax works well with code generation tools
+- **Scalable**: Modular approach supports growing applications
+
+Zod combined with CoValues creates a powerful, intuitive system.
+
+### Built on CRDTs
+
+CoValues implement [Conflict-free Replicated Data Types (CRDTs)](https://crdt.tech/). CRDTs enable data to work across multiple users and devices without constant server coordination.
+
+CRDTs enable local-first collaboration:
+
+- **Automatic conflict resolution**: The system handles concurrent edits
+- **Offline capability**: Changes sync when connectivity returns
+- **Direct collaboration**: Users can collaborate peer-to-peer
+- **Eventual consistency**: All users see the same final state
+
+This complexity is handled automatically.
+
+## Why Use Schemas?
+
+Defining schemas early prevents problems:
+
+1. **Type safety**: Catch errors at compile time
+2. **Documentation**: Clear data structure for your team
+3. **Evolution**: Modify data models safely
+4. **Consistency**: Shared data model across collaborators
+
+## Anatomy of a Schema
+
+Creating schemas in Jazz uses [Zod](https://zod.dev/) with the `co` namespace for collaborative features.
+
+Basic example:
+
+<CodeGroup>
+```ts twoslash
+import { co, z } from "jazz-tools";
+
+// Define a list of tasks 
+export const TaskList = co.list(z.string());
+
+// Define a project
+export const Project = co.map({
+  // Simple field
+  title: z.string(),
+  
+  // Reference to another CoValue
+  tasks: TaskList,
+});
+```
+</CodeGroup>
+
+This example demonstrates Jazz schema features:
+
+- **Readable syntax**: Clean, understandable declarations
+- **Field definitions**: `co` namespace combined with Zod
+- **Schema references**: Easy linking between data types
+- **Type safety**: Automatic TypeScript integration
+
+## CoValue Types
+
+Jazz provides several collaborative value types. The most common:
+
+<CodeGroup>
+```ts twoslash
+import { co, z } from "jazz-tools";
+
+// co.map - for object-like data with named properties
+export const Task = co.map({
+  description: z.string(),
+  completed: z.boolean(),
+  dueDate: z.date(),
+});
+
+// CoList - for ordered collections of items
+export const TaskList = co.list(Task);
+```
+</CodeGroup>
+
+Available CoValue types:
+
+- [**CoMap**](/docs/using-covalues/comaps) - For object-like data with named properties (like a JSON object)
+- [**CoList**](/docs/using-covalues/colists) - For ordered collections of items (like an array)
+- [**CoFeed**](/docs/using-covalues/cofeeds) - Perfect for comments, reactions, or activity streams
+- [**FileStream**](/docs/using-covalues/filestreams) - For binary data like images and documents
+
+Check out the [CoValues documentation](/docs/schemas/covalues) to learn more about all these types.
+
+## Field Types
+
+Jazz provides various field types for different data requirements:
+
+<CodeGroup>
+```ts twoslash
+import { co, z, CoListSchema } from "jazz-tools";
+
+// A simple category
+export const Category = co.map({
+  name: z.string(),
+});
+
+// ---cut---
+// A product with various field types
+export const Product = co.map({
+  // Basic types
+  name: z.string(),
+  price: z.number(),
+  inStock: z.boolean(),
+  createdAt: z.date(),
+  
+  // Enum/literal type
+  status: z.literal(["draft", "published", "archived"]),
+  
+  // Optional field
+  description: z.optional(z.string()),
+  
+  // References to other CoValues
+  category: Category,
+  get relatedProducts(): z.ZodOptional<CoListSchema<typeof Product>> {
+    return z.optional(co.list(Product));
+  }
+});
+```
+</CodeGroup>
+
+Main field types:
+
+- **Simple types**: `z.string()`, `z.number()`, `z.boolean()`, `z.date()`
+- **Choice fields**: `z.literal(["option1", "option2"])` for predefined choices
+- **Optional fields**: `z.optional(z.string())` for fields that might not exist
+- **References**: Use other schemas directly to link your data together
+
+See the [Field Types documentation](/docs/schemas/covalues#covalue-fielditem-types) for complete options.
+
+## Next Steps
+
+Now that you've got schemas under your belt, let's connect them to your application with [Providers](/docs/building-with-jazz/providers).
+
+## Further Reading
+
+Additional resources:
+
+- [CoValues Reference](/docs/schemas/covalues) - See all the details about CoValue types
+- [Field Types](/docs/schemas/covalues#covalue-fielditem-types) - The complete field type reference
+- [Accounts & Migrations](/docs/schemas/accounts-and-migrations) - Learn how to evolve your schemas over time
+- [Schema Examples](/docs/examples/schema-patterns) - Common patterns to solve real-world problems
+- [Type Safety](/docs/schemas/type-safety) - Get the most out of TypeScript with Jazz
+- [Zod Documentation](https://zod.dev) - Learn more about the schema validation library we use
+- [About CRDTs](https://crdt.tech/) - An approachable guide to Conflict-free Replicated Data Types

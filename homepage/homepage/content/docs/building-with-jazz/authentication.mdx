@@ -1,0 +1,101 @@
+import { CodeGroup } from "@/components/forMdx";
+export const metadata = { title: "Authentication" };
+
+# Authentication
+
+Authentication connects users to their Jazz accounts, enabling personalized collaboration.
+
+Now that you've set up [Accounts](/docs/building-with-jazz/accounts), connect users to them. We'll explore **authentication states**, **authentication methods**, and **offline experiences**.
+
+## What is Authentication in Jazz?
+
+Jazz authentication uses cryptographic keys instead of traditional passwords:
+
+- **Public key**: User's visible digital identity
+- **Private key**: Secure proof of identity
+
+This approach provides security without password complexity.
+
+See [Authentication Security](/docs/authentication/security) for technical details.
+
+## Authentication States
+
+Jazz provides three user states:
+
+### Anonymous Mode
+
+New users receive anonymous accounts automatically:
+
+- Immediate content creation
+- Device-local storage
+- Upgradeable to full accounts
+
+This enables friction-free onboarding.
+
+See [detecting authentication state](/docs/authentication/authentication-states#detecting-authentication-state) for implementation.
+
+### Authenticated Mode
+
+Users with full accounts get:
+
+- Cross-device data sync
+- Collaboration capabilities
+- Persistent identity
+
+This is the target state for regular users.
+
+See [authentication flow implementation](/docs/authentication/overview#authentication-flow).
+
+### Guest Mode
+
+Optional guest access for viewing:
+
+- Browse public content
+- No data persistence
+- No account creation
+
+Useful for public content viewing.
+
+See [guest mode configuration](/docs/authentication/authentication-states#configuring-guest-mode-access).
+
+## User Journey
+
+Typical authentication flow:
+
+1. Start as **anonymous** user
+2. Sign up to become **authenticated**
+3. Log out returns to **anonymous** (new account)
+4. Log in restores **authenticated** access
+
+Jazz automatically migrates data when upgrading from anonymous to authenticated.
+
+See [account migration examples](/docs/authentication/authentication-states#migrating-data-from-anonymous-to-authenticated-account).
+
+## Authentication Methods
+
+Available authentication options:
+
+- **Passkeys**: TouchID/FaceID biometric authentication (requires device support)
+- **Passphrases**: Word sequences that work offline (requires memorization)
+- **Clerk Integration**: Traditional email/password and social logins (requires internet)
+
+Recommended approach:
+
+- **Primary**: Passkeys for security and convenience
+- **Backup**: Passphrases for broader device support
+- **Traditional**: Clerk for familiar social login patterns
+
+See [available authentication methods](/docs/authentication/overview#available-authentication-methods).
+
+## Next Steps
+
+With authentication in place, let's explore [Groups and Ownership](/docs/building-with-jazz/groups) to control who can access what data.
+
+## Further Reading
+
+Additional resources:
+
+- [Authentication States](/docs/authentication/authentication-states) - Complete details about auth states
+- [Passkey Auth](/docs/authentication/passkey) - Implementing biometric authentication
+- [Passphrase Auth](/docs/authentication/passphrase) - Setting up word-based authentication
+- [Clerk Integration](/docs/authentication/clerk) - Using Clerk for social logins
