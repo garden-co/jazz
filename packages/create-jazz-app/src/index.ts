@@ -106,6 +106,28 @@ function isInsideGitRepository(projectPath: string): boolean {
   }
 }
 
+function getPkgManager() {
+  const userAgent = process.env.npm_config_user_agent || "";
+
+  if (userAgent.startsWith("yarn")) {
+    return "yarn";
+  }
+
+  if (userAgent.startsWith("pnpm")) {
+    return "pnpm";
+  }
+
+  if (userAgent.startsWith("bun")) {
+    return "bun";
+  }
+
+  if (userAgent.startsWith("deno")) {
+    return "deno";
+  }
+
+  return "npm";
+}
+
 async function scaffoldProject({
   template,
   projectName,
@@ -443,6 +465,8 @@ async function promptUser(
   }
 
   if (!partialOptions.packageManager) {
+    const defaultPackageManager = getPkgManager();
+
     questions.push({
       type: "list",
       name: "packageManager",
@@ -454,7 +478,7 @@ async function promptUser(
         { name: chalk.white("bun"), value: "bun" },
         { name: chalk.white("deno"), value: "deno" },
       ],
-      default: "npm",
+      default: defaultPackageManager,
     });
   }
 
