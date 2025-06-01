@@ -1,44 +1,65 @@
 import { AgentSecret } from "cojson";
 import { Account, ID } from "jazz-tools";
 
-export type MinimalWorkOSClient = {
+// A copy of the WorkOS redirect options needed for the signIn abstraction
+// Since RedirectOptions is not exported directly from @workos-inc/authkit-js
+export interface RedirectOptions {
+  /**
+   *  @deprecated We previously required initiate login endpoints to return the `context`
+   *  query parameter when getting the authorization URL. This is no longer necessary.
+   */
+  context?: string;
+  invitationToken?: string;
+  loginHint?: string;
+  organizationId?: string;
+  passwordResetToken?: string;
+  state?: any;
+  type: "sign-in" | "sign-up";
+}
+
+export type WorkOSAuthHook = {
+  getAccessToken: (options?: {
+    forceRefresh?: boolean;
+  }) => Promise<string>
+  switchToOrganization: ({ organizationId, signInOpts, }: {
+    organizationId: string;
+    signInOpts?: Omit<RedirectOptions, "type" | "organizationId">;
+  }) => Promise<void>
+  signIn: (opts?: Omit<RedirectOptions, "type">) => Promise<void>;
+  signUp: (opts?: Omit<RedirectOptions, "type">) => Promise<void>;
+  signOut: (options?: { returnTo?: string, navigate?: true }) => void;
+  isLoading: boolean;
+  role: string | null;
+  organizationId: string | null;
+  permissions: string[];
   user: {
     id: string;
     email: string;
     firstName: string | null;
     lastName: string | null;
     profilePictureUrl: string | null;
-    metadata: Record<string, unknown>;
-    update: (args: {
-        metadata: Record<string, unknown>;
-    }) => Promise<unknown>;
   } | null | undefined;
-  signOut: () => Promise<void>;
-  addListener: (listener: (data: unknown) => void) => void;
 };
 
-export type WorkOSCredentials = {
+export type JazzCredentials = {
   jazzAccountID: ID<Account>;
   jazzAccountSecret: AgentSecret;
   jazzAccountSeed?: number[];
 };
 
-export function isWorkOSCredentials(
-  data: NonNullable<MinimalWorkOSClient["user"]>["metadata"] | undefined,
-): data is WorkOSCredentials {
+export function isJazzCredentials(
+  data: JazzCredentials | null | undefined,
+): data is JazzCredentials {
   return !!data && "jazzAccountID" in data && "jazzAccountSecret" in data;
 }
 
 export function isWorkOSAuthStateEqual(
-  previousUser: MinimalWorkOSClient["user"] | null | undefined,
-  newUser: MinimalWorkOSClient["user"] | null | undefined,
+  prevCredentails: JazzCredentials | null | undefined,
+  newCredentials: JazzCredentials | null | undefined,
 ) {
-  if (Boolean(previousUser) !== Boolean(newUser)) {
+  if (Boolean(prevCredentails) !== Boolean(newCredentials)) {
     return false;
   }
 
-  const previousCredentials = isWorkOSCredentials(previousUser?.metadata);
-  const newCredentials = isWorkOSCredentials(newUser?.metadata);
-
-  return previousCredentials === newCredentials;
+  return isJazzCredentials(prevCredentails) && isJazzCredentials(newCredentials) && prevCredentails === newCredentials;
 }

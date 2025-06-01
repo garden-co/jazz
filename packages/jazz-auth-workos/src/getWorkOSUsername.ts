@@ -1,7 +1,7 @@
-import type { MinimalWorkOSClient } from "./types.js";
+import type { WorkOSAuthHook } from "./types.js";
 
 export function getWorkOSUsername(
-  workosClient: Pick<MinimalWorkOSClient, "user">,
+  workosClient: Pick<WorkOSAuthHook, "user">,
 ) {
   if (!workosClient.user) {
     return null;
