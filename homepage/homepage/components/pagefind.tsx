@@ -4,6 +4,49 @@ import { Command } from "cmdk";
 import React, { useState, useEffect, useRef } from "react";
 import { singletonHook } from "react-singleton-hook";
 
+// Types
+interface PagefindResult {
+  id: string;
+  url: string;
+  meta: {
+    title: string;
+  };
+  excerpt: string;
+  sub_results?: Array<{
+    id: string;
+    title: string;
+    url: string;
+    excerpt: string;
+  }>;
+}
+
+// Constants
+const SEARCH_SHORTCUT_KEY = "k";
+
+// Utility functions
+const processUrl = (url: string): string => {
+  const urlPath = url?.split("/_next/static/chunks/pages/")?.[1]?.split(".html")?.[0];
+  return urlPath?.startsWith("/") ? urlPath : `/${urlPath}`;
+};
+
+const processSubUrl = (url: string): { path: string; hash: string } => {
+  const [subUrlPath, subUrlHash] = url
+    ?.split("/_next/static/chunks/pages/")?.[1]
+    ?.split(".html") || [];
+  
+  const path = subUrlPath?.startsWith("/") ? subUrlPath : `/${subUrlPath}`;
+  const hash = subUrlHash ? `${subUrlHash}` : "";
+  
+  return { path, hash };
+};
+
+const navigateToUrl = (url: string, setOpen: (open: boolean) => void) => {
+  if (!url) return;
+  window.location.href = `${window.location.origin}${url}`;
+  setOpen(false);
+};
+
+// Hooks
 export const usePagefindSearch = singletonHook(
   { open: false, setOpen: () => {} },
   () => {
@@ -12,37 +55,36 @@ export const usePagefindSearch = singletonHook(
   },
 );
 
+// Components
 export function PagefindSearch() {
   const { open, setOpen } = usePagefindSearch();
   const [query, setQuery] = useState("");
-  const [results, setResults] = useState([]);
+  const [results, setResults] = useState<PagefindResult[]>([]);
   const listRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    const down = (e: KeyboardEvent) => {
-      if (e.key === "k" && (e.metaKey || e.ctrlKey)) {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === SEARCH_SHORTCUT_KEY && (e.metaKey || e.ctrlKey)) {
         e.preventDefault();
         setOpen((open) => !open);
       }
     };
 
-    document.addEventListener("keydown", down);
-    return () => document.removeEventListener("keydown", down);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
   }, [setOpen]);
 
   useEffect(() => {
     async function loadPagefind() {
-      // @ts-expect-error pagefind.js generated after build
-      if (typeof window.pagefind === "undefined") {
+      if (typeof window !== "undefined" && !window.pagefind) {
         try {
-          // @ts-expect-error pagefind.js generated after build
-          window.pagefind = await import(
-            // @ts-expect-error pagefind.js generated after build
+          const pagefindModule = await import(
+            // @ts-expect-error - pagefind.js is generated after build and not available at compile time
             /* webpackIgnore: true */ "/_next/static/chunks/pages/pagefind/pagefind.js"
           );
+          window.pagefind = pagefindModule.default || pagefindModule;
         } catch (e) {
-          // @ts-expect-error pagefind.js generated after build
-          window.pagefind = { search: () => ({ results: [] }) };
+          window.pagefind = { search: async () => ({ results: [] }) };
         }
       }
     }
@@ -55,35 +97,34 @@ export function PagefindSearch() {
     }
   }, [results]);
 
-  async function handleSearch(value: string) {
+  const handleSearch = async (value: string) => {
     setQuery(value);
-    // @ts-expect-error pagefind.js generated after build
     if (window.pagefind) {
-      // @ts-expect-error pagefind.js generated after build
       const search = await window.pagefind.search(value);
       const results = await Promise.all(
         search.results.map((result: any) => result.data()),
       );
       setResults(results);
     }
-  }
+  };
+
+  const handleOpenChange = (open: boolean) => {
+    if (!open) {
+      setQuery("");
+      setResults([]);
+    }
+    setOpen(open);
+  };
 
   return (
     <Command.Dialog
       open={open}
-      onOpenChange={(open) => {
-        if (!open) {
-          setQuery("");
-          setResults([]);
-        }
-        setOpen(open);
-      }}
+      onOpenChange={handleOpenChange}
       label="Search"
       className="fixed top-[10%] sm:top-1/2 left-1/2 -translate-x-1/2 sm:-translate-y-1/2 w-full sm:w-auto z-20"
       shouldFilter={false}
     >
-      <div
-        className="w-full sm:w-[640px] mx-auto max-w-[calc(100%-2rem)] overflow-hidden rounded-xl bg-gradient-to-b from-gray-900 to-gray-800 shadow-2xl border border-gray-700
+      <div className="w-full sm:w-[640px] mx-auto max-w-[calc(100%-2rem)] overflow-hidden rounded-xl bg-gradient-to-b from-gray-900 to-gray-800 shadow-2xl border border-gray-700
         origin-center animate-in fade-in
         data-[state=open]:animate-in data-[state=closed]:animate-out
         data-[state=open]:scale-100 data-[state=closed]:scale-95
@@ -91,8 +132,7 @@ export function PagefindSearch() {
         transition-all duration-200 ease-in-out
         hover:border-gray-600
         hover:shadow-[0_0_30px_rgba(0,0,0,0.2)]
-        hover:shadow-indigo-500/10"
-      >
+        hover:shadow-indigo-500/10">
         <Command.Input
           value={query}
           onValueChange={handleSearch}
@@ -109,7 +149,7 @@ export function PagefindSearch() {
             </Command.Empty>
           ) : (
             <Command.Group>
-              {results.map((result: any) => (
+              {results.map((result) => (
                 <SearchResult
                   key={result.id}
                   result={result}
@@ -152,32 +192,32 @@ function SearchResult({
   result,
   setOpen,
 }: {
-  result: any;
+  result: PagefindResult;
   setOpen: (open: boolean) => void;
 }) {
-  if (!result) {
-    return null;
-  }
+  if (!result) return null;
 
-  let url = result?.url
-  ?.split("/_next/static/chunks/pages/")?.[1]
-  ?.split(".html")?.[0];
+  const url = processUrl(result.url);
+
+  const handleMainResultSelect = () => {
+    navigateToUrl(url, setOpen);
+  };
+
+  const handleSubResultSelect = (subResult: NonNullable<PagefindResult["sub_results"]>[number]) => {
+    const { path, hash } = processSubUrl(subResult.url);
+    navigateToUrl(`${path}${hash}`, setOpen);
+  };
 
   return (
     <>
       <Command.Item
         value={result.meta.title}
-        onSelect={() => {
-          if (!url) return;
-          const cleanUrl = url.startsWith("/") ? url : `/${url}`;
-          window.location.href = `${window.location.origin}${cleanUrl}`;
-          setOpen(false);
-        }}
-        className={`group relative flex items-center gap-2 sm:gap-3 px-3 sm:px-4 py-2 sm:py-3 cursor-pointer text-sm rounded-md mt-1 select-none
+        onSelect={handleMainResultSelect}
+        className="group relative flex items-center gap-2 sm:gap-3 px-3 sm:px-4 py-2 sm:py-3 cursor-pointer text-sm rounded-md mt-1 select-none
       transition-all duration-200 ease-in-out
       animate-in fade-in-0
       text-gray-100 data-[selected=true]:bg-gray-800/50 hover:bg-gray-800/30 active:bg-gray-800/50
-      max-w-full`}
+      max-w-full"
       >
         <div className="min-w-0 flex-1">
           <h3 className="text-sm font-medium text-gray-200 truncate">
@@ -185,36 +225,25 @@ function SearchResult({
           </h3>
           <HighlightedText text={result.excerpt || ""} />
         </div>
-
         <div className="absolute left-0 w-[3px] h-full bg-indigo-500 transition-opacity duration-200 ease-in-out opacity-0 group-data-[selected=true]:opacity-100" />
       </Command.Item>
-      {/* Sub-results section */}
+
       {result.sub_results && result.sub_results.length > 0 && (
         <div className="ml-4 border-l border-gray-700">
-          {result.sub_results.map((subResult: any) => {
-            // to avoid showing the same result twice
+          {result.sub_results.map((subResult) => {
+            // Avoid showing duplicate results
             if (subResult.title === result.meta.title) return null;
+            
             return (
               <Command.Item
                 key={subResult.id}
                 value={subResult.title}
-                onSelect={() => {
-                  const [subUrlPath, subUrlHash] = subResult?.url
-                    ?.split("/_next/static/chunks/pages/")?.[1]
-                    ?.split(".html");
-                  if (!subUrlPath) return;
-                  const cleanSubUrl = subUrlPath.startsWith("/")
-                    ? subUrlPath
-                    : `/${subUrlPath}`;
-                  const hash = subUrlHash ? `${subUrlHash}` : "";
-                  window.location.href = `${window.location.origin}${cleanSubUrl}${hash}`;
-                  setOpen(false);
-                }}
-                className={`group relative flex items-center gap-2 sm:gap-3 px-3 sm:px-4 py-2 sm:py-3 cursor-pointer text-sm rounded-md mt-1 select-none
+                onSelect={() => handleSubResultSelect(subResult)}
+                className="group relative flex items-center gap-2 sm:gap-3 px-3 sm:px-4 py-2 sm:py-3 cursor-pointer text-sm rounded-md mt-1 select-none
             transition-all duration-200 ease-in-out
             animate-in fade-in-0
             text-gray-100 data-[selected=true]:bg-gray-800/50 hover:bg-gray-800/30 active:bg-gray-800/50
-            max-w-full`}
+            max-w-full"
               >
                 <div className="min-w-0 flex-1">
                   <h3 className="text-sm font-medium text-gray-200/80 truncate">
@@ -230,4 +259,17 @@ function SearchResult({
       )}
     </>
   );
+}
+
+// Global type augmentation for pagefind
+declare global {
+  interface Window {
+    pagefind?: {
+      search: (query: string) => Promise<{
+        results: Array<{
+          data: () => Promise<PagefindResult>;
+        }>;
+      }>;
+    };
+  }
 }
