@@ -160,8 +160,8 @@ function SearchResult({
   }
 
   let url = result?.url
-    ?.split("/_next/static/chunks/server/app/")?.[1]
-    ?.split(".html")?.[0];
+  ?.split("/_next/static/chunks/pages/")?.[1]
+  ?.split(".html")?.[0];
 
   return (
     <>
@@ -200,7 +200,7 @@ function SearchResult({
                 value={subResult.title}
                 onSelect={() => {
                   const [subUrlPath, subUrlHash] = subResult?.url
-                    ?.split("/_next/static/chunks/server/app/")?.[1]
+                    ?.split("/_next/static/chunks/pages/")?.[1]
                     ?.split(".html");
                   if (!subUrlPath) return;
                   const cleanSubUrl = subUrlPath.startsWith("/")
