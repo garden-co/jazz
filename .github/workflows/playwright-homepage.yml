@@ -22,6 +22,10 @@ jobs:
       - name: Setup Source Code
         uses: ./.github/actions/source-code/
 
+      - name: Install project dependencies
+        run: pnpm install
+        working-directory: ./${{ matrix.project }}
+
       - name: Pnpm Build
         run: pnpm turbo build
         working-directory: ./${{ matrix.project }}
