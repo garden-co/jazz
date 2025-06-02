@@ -46,7 +46,7 @@ export default function DocsLayout({
 
   return (
     <>
-      <div className="data-pagefind-body">{children}</div>
+      <div data-pagefind-body>{children}</div>
 
       <div className="pl-3 py-8 shrink-0 text-sm sticky align-start top-[61px] w-[16rem] h-[calc(100vh-61px)] overflow-y-auto hidden lg:block">
         {itemsWithoutH1?.length ? (
