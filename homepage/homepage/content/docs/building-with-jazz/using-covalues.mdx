@@ -1,0 +1,110 @@
+import { CodeGroup, ContentByFramework } from "@/components/forMdx";
+export const metadata = { title: "Using CoValues" };
+
+# Using CoValues
+
+Now we've seen [how schemas let you design your data model](/docs/building-with-jazz/schemas), let's put them to work in your application. Using CoValues involves two main steps: connecting your app to the Jazz network with a provider, then subscribing to and manipulating collaborative data.
+
+## Setting Up Your Provider
+
+Before you can work with CoValues, you need to connect your application to Jazz with a provider. The provider handles network connections, data sync, and schema registration.
+
+Add a provider to wrap your app:
+
+<ContentByFramework framework="react">
+<CodeGroup>
+```tsx twoslash
+// @filename: schema.ts
+import { co, z } from "jazz-tools";
+
+export const MyAppAccount = co.account({
+  root: co.map({}),
+  profile: co.profile({
+    name: z.string(),
+  }),
+});
+
+// @filename: app.tsx
+import * as React from "react";
+// ---cut---
+// App.tsx
+import { JazzProvider } from "jazz-react";
+import { MyAppAccount } from "./schema";
+
+export function App({ children }: { children: React.ReactNode }) {
+  return (
+    <JazzProvider
+      sync={{ 
+        peer: "wss://cloud.jazz.tools/?key=your-api-key"
+      }}
+      AccountSchema={MyAppAccount}
+    >
+      {children}
+    </JazzProvider>
+  );
+}
+```
+</CodeGroup>
+</ContentByFramework>
+
+This connects your app to Jazz Cloud and registers your account schema for type-safe data handling.
+
+For detailed provider configuration options, see [Provider Configuration](/docs/project-setup/providers).
+
+## Working with CoValues
+
+Once your provider is set up, you can subscribe to and manipulate CoValues throughout your application:
+
+<CodeGroup>
+```ts twoslash
+const projectId = "123";
+// ---cut---
+import { co, z } from "jazz-tools";
+
+const Task = co.map({
+  title: z.string(),
+  status: z.literal(["todo", "in-progress", "done"]),
+});
+type Task = co.loaded<typeof Task>;
+
+const Tasks = co.list(Task);
+type Tasks = co.loaded<typeof Tasks>;
+
+const tasks = Tasks.create([]);
+
+// ---cut---
+// Create a new task
+const newTask = Task.create({
+  title: "New task",
+  status: "todo"
+});
+
+// Add a new task to the list
+tasks.push(newTask);
+
+// Read properties of a CoValues like a normal object
+console.log(newTask.title);
+// "New task"
+
+// Updating existing tasks syncs automatically
+newTask.status  = "done";
+```
+</CodeGroup>
+
+This shows the vanilla JavaScript approach. Our framework integrations provide more ergonomic ways to work with CoValues, such as `useCoState` in React and `CoState` class in Svelte.
+
+For more details on usage, check [CoMaps](/docs/using-covalues/comaps), [CoLists](/docs/using-covalues/colists), [CoTexts](/docs/using-covalues/cotexts), [Subscriptions & Deep Loading](/docs/using-covalues/subscription-and-loading).
+
+## Next Steps
+
+Now that you can work with CoValues, let's explore [Accounts](/docs/building-with-jazz/accounts) - the building blocks of user identity that make multi-device experiences possible.
+
+## Further Reading
+
+Deep dive into working with specific CoValue types and advanced patterns:
+
+- [CoMaps](/docs/using-covalues/comaps) - Key-value objects for structured data
+- [CoLists](/docs/using-covalues/colists) - Ordered collections that sync automatically  
+- [CoTexts](/docs/using-covalues/cotexts) - Collaborative text editing
+- [Subscriptions & Deep Loading](/docs/using-covalues/subscription-and-loading) - Advanced data loading patterns
+- [Provider Configuration](/docs/project-setup/providers) - Complete provider setup options

@@ -58,7 +58,7 @@ fileInput.addEventListener('change', async () => {
 
   // Or with progress tracking for better UX
   const fileWithProgress = await co.fileStream().createFromBlob(file, {
-    onProgress: (progress) => {
+    onProgress: (progress: number) => {
       // progress is a value between 0 and 1
       const percent = Math.round(progress * 100);
       console.log(`Upload progress: ${percent}%`);

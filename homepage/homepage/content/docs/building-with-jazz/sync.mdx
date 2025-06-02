@@ -1,0 +1,72 @@
+import { CodeGroup } from "@/components/forMdx";
+export const metadata = { title: "Sync" };
+
+# Sync
+
+Sync enables data transfer between users and devices in Jazz applications.
+
+Now that you've mastered the [core concepts](/docs/building-with-jazz/groups), explore synchronization. We'll cover Jazz's **local-first** architecture, **sync options** including Jazz Cloud and self-hosted solutions, and **configuration** for specific needs.
+
+## How Sync Works in Jazz
+
+Jazz's sync system ensures data consistency across all users and devices. When changes occur:
+
+- **Local-first operations**: Changes apply immediately to the local device
+- **Background sync**: Changes send to a [sync server](/docs/sync-and-storage)
+- **Conflict resolution**: CRDT architecture automatically resolves conflicts
+
+This process maintains data harmony regardless of when or where users work.
+
+## The Sync Process
+
+When someone modifies a CoValue:
+
+1. Change **applies immediately** to local device state
+2. **User interface updates** to reflect the change
+3. Change **sends to sync server** in background
+4. Sync server **forwards change** to connected devices
+5. Other devices **merge the change** into local state
+6. Their **interfaces update** to show the change
+
+This process happens automatically and provides seamless collaboration.
+
+## Sync Options
+
+Jazz provides two sync approaches:
+
+### Jazz Cloud
+
+[Jazz Cloud](/docs/sync-and-storage#using-jazz-cloud) provides ready-to-use sync infrastructure:
+
+- **Real-time sync** between users and devices
+- **Persistent storage** with redundancy and backups
+- **Distributed caching** for low-latency access
+- **Zero configuration** for rapid development
+
+Jazz Cloud is optimal for teams focused on features rather than infrastructure management.
+
+### Self-Hosted Sync Server
+
+[Run your own sync server](/docs/sync-and-storage#running-your-own-sync-server) for maximum control:
+
+- **Complete control** over data and infrastructure
+- **On-premises deployment** for compliance requirements
+- **Custom configurations** for specific performance needs
+- **Private networks** for enhanced security
+
+Self-hosting provides flexibility but requires setup and maintenance.
+
+## Next Steps
+
+Choose your path:
+
+- [Server Workers](/docs/building-with-jazz/server-workers) - Add server-side logic to your application
+- Return to [building your app](/docs/building-with-jazz/groups#next-steps) with core Jazz concepts
+
+Both paths lead to creating collaborative experiences.
+
+## Further Reading
+
+For detailed sync information, see:
+- [Sync and Storage](/docs/sync-and-storage) - Complete guide to sync options and configuration
+- [Providers](/docs/building-with-jazz/providers) - Configuring sync in your application
