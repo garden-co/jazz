@@ -29,7 +29,7 @@ export async function PackageNavItem({
 }: {
   package: string;
 }) {
-  let project = await requestProject(packageName as any);
+  let project = await requestProject(packageName as never);
 
   return (
     <>

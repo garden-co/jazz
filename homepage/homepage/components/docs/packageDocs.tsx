@@ -24,7 +24,7 @@ export async function PackageDocs({
 }: {
   package: string;
 }) {
-  let project = await requestProject(packageName as any);
+  let project = await requestProject(packageName as never);
 
   // console.dir(project, {depth: 10});
 
