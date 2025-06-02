@@ -14,7 +14,7 @@
     "generate:llm-docs": "node generate-docs/llms-full.mjs",
     "test": "pnpm run test:llm-docs",
     "test:llm-docs": "node generate-docs/llms-full.test.mjs",
-    "postbuild": "pagefind --site .next --output-path .next/static/chunks/pages/pagefind"
+    "postbuild": "pagefind --site .next/server/app --output-path .next/static/chunks/pages/pagefind --exclude-selectors 'nav, header, footer, .not-prose, [data-pagefind-ignore]' --verbose"
   },
   "packageManager": "pnpm@9.14.0",
   "dependencies": {
