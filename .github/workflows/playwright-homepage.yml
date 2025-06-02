@@ -10,10 +10,9 @@ jobs:
   test:
     timeout-minutes: 60
     runs-on: blacksmith-4vcpu-ubuntu-2204
-    continue-on-error: true
     strategy:
       matrix:
-        project: ["tests/e2e", "examples/chat",  "examples/clerk", "examples/betterauth", "examples/file-share-svelte", "examples/form", "examples/music-player", "examples/organization", "examples/pets", "starters/react-passkey-auth"]
+        project: ["homepage/homepage"]
 
     steps:
       - uses: actions/checkout@v4
