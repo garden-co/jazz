@@ -13,6 +13,7 @@ import { usePathname } from "next/navigation";
 import { ComponentType, ReactNode, useEffect, useState } from "react";
 import React from "react";
 import { isActive } from "../../utils/nav";
+import { Button } from "../atoms/Button";
 import { Icon } from "../atoms/Icon";
 import type { IconName } from "../atoms/Icon";
 import { BreadCrumb } from "../molecules/Breadcrumb";
@@ -146,7 +147,7 @@ export function MobileNav({
     icon: "menu",
     content: (
       <>
-        <div className="flex items-center justify-between border-b p-3">
+        <div className="flex items-center justify-between border-b p-3 position-sticky top-0 left-0 right-0 bg-white dark:bg-stone-950 z-50">
           <Link href="/" className="flex items-center">
             {mainLogo}
           </Link>
@@ -170,6 +171,10 @@ export function MobileNav({
               </NavLink>
             ))}
         </div>
+
+        <Button variant="primary" size="sm" className="mb-3 ml-4">
+          <Link href="/docs">Get started</Link>
+        </Button>
       </>
     ),
   };
@@ -199,7 +204,11 @@ export function MobileNav({
         <NavLinkLogo prominent href="/" className="mr-auto">
           {mainLogo}
         </NavLinkLogo>
-        <button
+        <Button variant="primary" size="sm" className="mr-3">
+          <Link href="/docs">Get started</Link>
+        </Button>
+        <Button
+          variant="plain"
           className="flex gap-2 p-3 rounded-xl items-center"
           onClick={() => {
             setActive("Menu");
@@ -208,7 +217,7 @@ export function MobileNav({
         >
           <Icon name="menu" />
           <BreadCrumb items={items} />
-        </button>
+        </Button>
       </div>
 
       <div
@@ -361,6 +370,10 @@ export function Nav(props: NavProps) {
               className={i == items.length - 1 ? "mr-3" : ""}
             />
           ))}
+
+          <Button variant="primary" size="sm" className="mr-3">
+            <Link href="/docs">Get started</Link>
+          </Button>
 
           <SocialLinks
             {...props.socials}
