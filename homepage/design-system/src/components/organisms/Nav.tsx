@@ -147,7 +147,7 @@ export function MobileNav({
     icon: "menu",
     content: (
       <>
-        <div className="flex items-center justify-between border-b p-3 position-sticky top-0 left-0 right-0 bg-white dark:bg-stone-950 z-50">
+        <div className="flex items-center justify-between border-b p-3">
           <Link href="/" className="flex items-center">
             {mainLogo}
           </Link>
