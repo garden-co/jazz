@@ -1,0 +1,30 @@
+{
+  "name": "jazz-react-auth-workos",
+  "version": "0.14.17",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "license": "MIT",
+  "dependencies": {
+    "cojson": "workspace:*",
+    "jazz-auth-workos": "workspace:*",
+    "jazz-browser": "workspace:*",
+    "jazz-react": "workspace:*",
+    "jazz-tools": "workspace:*"
+  },
+  "peerDependencies": {
+    "react": "*"
+  },
+  "scripts": {
+    "format-and-lint": "biome check .",
+    "format-and-lint:fix": "biome check . --write",
+    "build": "rm -rf ./dist && tsc --sourceMap --outDir dist",
+    "dev": " tsc --sourceMap --outDir dist --watch"
+  },
+  "devDependencies": {
+    "@testing-library/react": "16.2.0",
+    "@types/react": "19.0.0",
+    "@types/react-dom": "19.0.0",
+    "typescript": "catalog:"
+  }
+}

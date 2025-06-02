@@ -1,0 +1,33 @@
+{
+  "name": "workos",
+  "private": true,
+  "version": "0.0.114",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "format-and-lint": "biome check .",
+    "format-and-lint:fix": "biome check . --write",
+    "test:e2e": "playwright test",
+    "test:e2e:ui": "playwright test --ui"
+  },
+  "dependencies": {
+    "@workos-inc/authkit-react": "^0.10.0",
+    "jazz-react": "workspace:*",
+    "jazz-react-auth-workos": "workspace:*",
+    "jazz-tools": "workspace:*",
+    "react": "19.0.0",
+    "react-dom": "19.0.0"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "1.9.4",
+    "@playwright/test": "^1.50.1",
+    "@types/react": "19.0.0",
+    "@types/react-dom": "19.0.0",
+    "@vitejs/plugin-react": "^4.3.3",
+    "globals": "^15.11.0",
+    "typescript": "5.6.2",
+    "vite": "6.0.11"
+  }
+}

@@ -2006,6 +2006,52 @@ importers:
         specifier: 6.0.11
         version: 6.0.11(@types/node@22.15.18)(jiti@2.4.2)(lightningcss@1.29.2)(terser@5.37.0)(tsx@4.19.3)(yaml@2.6.1)
 
+  examples/workos:
+    dependencies:
+      '@workos-inc/authkit-react':
+        specifier: ^0.10.0
+        version: 0.10.0(react@19.0.0)
+      jazz-react:
+        specifier: workspace:*
+        version: link:../../packages/jazz-react
+      jazz-react-auth-workos:
+        specifier: workspace:*
+        version: link:../../packages/jazz-react-auth-workos
+      jazz-tools:
+        specifier: workspace:*
+        version: link:../../packages/jazz-tools
+      react:
+        specifier: 19.0.0
+        version: 19.0.0
+      react-dom:
+        specifier: 19.0.0
+        version: 19.0.0(react@19.0.0)
+    devDependencies:
+      '@biomejs/biome':
+        specifier: 1.9.4
+        version: 1.9.4
+      '@playwright/test':
+        specifier: ^1.50.1
+        version: 1.50.1
+      '@types/react':
+        specifier: 19.0.0
+        version: 19.0.0
+      '@types/react-dom':
+        specifier: 19.0.0
+        version: 19.0.0
+      '@vitejs/plugin-react':
+        specifier: ^4.3.3
+        version: 4.3.4(vite@6.0.11(@types/node@22.15.18)(jiti@2.4.2)(lightningcss@1.29.2)(terser@5.37.0)(tsx@4.19.3)(yaml@2.6.1))
+      globals:
+        specifier: ^15.11.0
+        version: 15.14.0
+      typescript:
+        specifier: 5.6.2
+        version: 5.6.2
+      vite:
+        specifier: 6.0.11
+        version: 6.0.11(@types/node@22.15.18)(jiti@2.4.2)(lightningcss@1.29.2)(terser@5.37.0)(tsx@4.19.3)(yaml@2.6.1)
+
   packages/cojson:
     dependencies:
       '@noble/ciphers':
@@ -2190,6 +2236,22 @@ importers:
         specifier: 'catalog:'
         version: 5.6.2
 
+  packages/jazz-auth-workos:
+    dependencies:
+      cojson:
+        specifier: workspace:0.14.16
+        version: link:../cojson
+      jazz-browser:
+        specifier: workspace:0.14.17
+        version: link:../jazz-browser
+      jazz-tools:
+        specifier: workspace:0.14.17
+        version: link:../jazz-tools
+    devDependencies:
+      typescript:
+        specifier: 'catalog:'
+        version: 5.6.2
+
   packages/jazz-betterauth-client-plugin:
     dependencies:
       jazz-betterauth-server-plugin:
@@ -2292,6 +2354,9 @@ importers:
       jazz-auth-clerk:
         specifier: workspace:*
         version: link:../jazz-auth-clerk
+      jazz-auth-workos:
+        specifier: workspace:*
+        version: link:../jazz-auth-workos
       jazz-react-core:
         specifier: workspace:*
         version: link:../jazz-react-core
@@ -2502,6 +2567,40 @@ importers:
       jazz-auth-clerk:
         specifier: workspace:*
         version: link:../jazz-auth-clerk
+      jazz-browser:
+        specifier: workspace:*
+        version: link:../jazz-browser
+      jazz-react:
+        specifier: workspace:*
+        version: link:../jazz-react
+      jazz-tools:
+        specifier: workspace:*
+        version: link:../jazz-tools
+      react:
+        specifier: 19.0.0
+        version: 19.0.0
+    devDependencies:
+      '@testing-library/react':
+        specifier: 16.2.0
+        version: 16.2.0(@testing-library/dom@10.4.0)(@types/react-dom@19.0.0)(@types/react@19.0.0)(react-dom@19.0.0(react@19.0.0))(react@19.0.0)
+      '@types/react':
+        specifier: 19.0.0
+        version: 19.0.0
+      '@types/react-dom':
+        specifier: 19.0.0
+        version: 19.0.0
+      typescript:
+        specifier: 'catalog:'
+        version: 5.6.2
+
+  packages/jazz-react-auth-workos:
+    dependencies:
+      cojson:
+        specifier: workspace:*
+        version: link:../cojson
+      jazz-auth-workos:
+        specifier: workspace:*
+        version: link:../jazz-auth-workos
       jazz-browser:
         specifier: workspace:*
         version: link:../jazz-browser
@@ -7593,6 +7692,14 @@ packages:
   '@wdio/utils@8.41.0':
     resolution: {integrity: sha512-0TcTjBiax1VxtJQ/iQA0ZyYOSHjjX2ARVmEI0AMo9+AuIq+xBfnY561+v8k9GqOMPKsiH/HrK3xwjx8xCVS03g==}
     engines: {node: ^16.13 || >=18}
+
+  '@workos-inc/authkit-js@0.11.0':
+    resolution: {integrity: sha512-RL05tPt6bTsmnubWvgjonjKwx9vHiQXz7ZdEibqMfNDM9Pxult3Y3k3i5RSEX1MsfELMv0y5OsEktyaYG0RsPw==}
+
+  '@workos-inc/authkit-react@0.10.0':
+    resolution: {integrity: sha512-MW2Yi8ROAAzcoN708TmxDF9VTGYf7xUbzkU6B0u8MEgJcXANpr3pYalloJMH5xNd7apxXonHYtjR4O29oOLcNw==}
+    peerDependencies:
+      react: 19.0.0
 
   '@xmldom/xmldom@0.7.13':
     resolution: {integrity: sha512-lm2GW5PkosIzccsaZIz7tp8cPADSIlIHWDFTR1N0SzfinhhYgeIQjFMz4rYzanCScr3DqQLeomUDArp6MWKm+g==}
@@ -20766,7 +20873,7 @@ snapshots:
       sirv: 3.0.1
       tinyglobby: 0.2.12
       tinyrainbow: 2.0.0
-      vitest: 3.1.1(@types/node@22.15.18)(@vitest/browser@3.1.1)(@vitest/ui@3.1.1)(happy-dom@17.4.4)(jiti@2.4.2)(jsdom@25.0.1)(lightningcss@1.29.2)(msw@2.7.0(@types/node@22.15.18)(typescript@5.6.2))(terser@5.37.0)(tsx@4.19.3)(yaml@2.6.1)
+      vitest: 3.1.1(@types/node@22.15.18)(@vitest/browser@3.1.1)(@vitest/ui@3.1.1)(happy-dom@17.4.4)(jiti@2.4.2)(jsdom@25.0.1)(lightningcss@1.29.2)(msw@2.7.0(@types/node@22.15.18)(typescript@5.8.3))(terser@5.37.0)(tsx@4.19.3)(yaml@2.6.1)
 
   '@vitest/utils@3.1.1':
     dependencies:
@@ -20964,6 +21071,13 @@ snapshots:
       wait-port: 1.1.0
     transitivePeerDependencies:
       - supports-color
+
+  '@workos-inc/authkit-js@0.11.0': {}
+
+  '@workos-inc/authkit-react@0.10.0(react@19.0.0)':
+    dependencies:
+      '@workos-inc/authkit-js': 0.11.0
+      react: 19.0.0
 
   '@xmldom/xmldom@0.7.13': {}
 
