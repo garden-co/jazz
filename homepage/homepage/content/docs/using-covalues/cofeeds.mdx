@@ -228,17 +228,17 @@ To retrieve the latest entry from a CoFeed, ie. the last update:
 
 <CodeGroup>
 ```ts twoslash
-import { Group, co, z, ID, Account, SessionID } from "jazz-tools";
-import { createJazzTestAccount } from 'jazz-tools/testing';
-const me = await createJazzTestAccount();
+import { co, z } from "jazz-tools";
 
 const Activity = co.map({
   timestamp: z.date(),
   action: z.literal(["watering", "planting", "harvesting", "maintenance"]),
   notes: z.optional(z.string()),
 });
+type Activity = typeof Activity;
 
 const ActivityFeed = co.feed(Activity);
+type ActivityFeed = typeof ActivityFeed;
 const activityFeed = ActivityFeed.create([]);
 
 // ---cut---
@@ -249,7 +249,7 @@ console.log(`My last action was ${latestEntry?.value?.action}`);
   // "My last action was harvesting"
 
 // Get the latest entry from each account
-const latestEntriesByAccount = Object.values(activityFeed.perAccount).map(entry => ({
+const latestEntriesByAccount = Object.values(activityFeed.perAccount).map((entry: ActivityFeed) => ({
   accountName: entry.by?.profile?.name,
   value: entry.value,
 }));

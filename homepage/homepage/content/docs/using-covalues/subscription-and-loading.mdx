@@ -6,50 +6,42 @@ export const metadata = {
 
 # Subscriptions & Deep Loading
 
-Jazz's Collaborative Values (such as [CoMaps](/docs/using-covalues/comaps) or [CoLists](/docs/using-covalues/colists)) work like reactive state. By subscribing to them, you can react to both local and remote updates. This is the main way to consume data in your application.
+Jazz's Collaborative Values work like reactive state. By subscribing to them, you can react to both local and remote updates automatically. This is the fundamental way data flows in Jazz applications.
 
-Subscriptions also take care of loading CoValues that are not yet loaded locally and can do so *deeply* &mdash; by resolving nested CoValues. To make use of this, we'll show you how to specify the depth of data you need with resolve queries.
+Subscriptions handle loading CoValues that aren't yet available locally and can load *deeply* by resolving nested CoValues in a single operation. You control exactly how much data to load using resolve queries.
 
-With each update you can also handle loading states and inaccessible CoValues.
+Every subscription handles three states: loading, inaccessible, and loaded data.
 
-## Manual subscriptions
+## How Subscriptions Work
 
-You can subscribe to a CoValue from anywhere in your code (if you have its ID) by using `CoValue.subscribe()`.
-
-<ContentByFramework framework="vanilla">
-If you're using React in your project, check out our [React hooks](/docs/react/using-covalues/subscription-and-loading#subscription-hooks) which provide a more streamlined experience with automatic subscription management.
-</ContentByFramework>
-
-<ContentByFramework framework={["react", "react-native"]}>
-**Note:** Unless you're using vanilla JavaScript, this is only used outside of React components - for example in server-side code or in tests. See the section below for convenient subscription *hooks* that you typically use in React.
-</ContentByFramework>
+You can subscribe to any CoValue if you have its ID. The subscription will notify you whenever the data changes, whether from local edits or remote updates from other users.
 
 <CodeGroup>
 ```ts twoslash
 import { co, z } from "jazz-tools";
-const taskId = "co_123";
-// ---cut-before---
+const taskId = "co_z1234567890";
+// ---cut---
 const Task = co.map({
   title: z.string(),
-  description: z.string(),
   status: z.literal(["todo", "in-progress", "completed"]),
   assignedTo: z.optional(z.string()),
 });
-
-// ...
+type Task = co.loaded<typeof Task>;
 
 // Subscribe to a Task by ID
-const unsubscribe = Task.subscribe(taskId, {}, (updatedTask) => {
-  console.log("Task updated:", updatedTask.title);
-  console.log("New status:", updatedTask.status);
+const unsubscribe = Task.subscribe(taskId, {}, (task: Task) => {
+  if (task) {
+    console.log("Task updated:", task.title);
+    console.log("Status:", task.status);
+  }
 });
 
-// Clean up when you're done
+// Clean up when done
 unsubscribe();
 ```
 </CodeGroup>
 
-If you already have a CoValue instance, you can subscribe to it by calling its `subscribe` method.
+If you already have a CoValue instance, subscribe directly to it:
 
 <CodeGroup>
 ```ts twoslash
@@ -57,156 +49,24 @@ import { co, z } from "jazz-tools";
 
 const Task = co.map({
   title: z.string(),
-  description: z.string(),
   status: z.literal(["todo", "in-progress", "completed"]),
-  assignedTo: z.optional(z.string()),
 });
-const otherProps = {} as any;
-// ---cut-before---
+type Task = co.loaded<typeof Task>;
+
+// ---cut---
 const task = Task.create({
-  title: "Cut the grass",
-  ...otherProps
+  title: "Review documentation",
+  status: "todo"
 });
 
-const unsubscribe = task.subscribe((updatedTask) => {
-  console.log("Task updated:", updatedTask.title);
+const unsubscribe = task.subscribe((updatedTask: Task) => {
+  console.log("Task changed:", updatedTask.title);
 });
 
-// Clean up when you're done
+// Clean up when done
 unsubscribe();
 ```
 </CodeGroup>
-
-<ContentByFramework framework={["react", "react-native"]}>
-## Subscription hooks
-
-### `useCoState`
-
-Jazz provides a `useCoState` hook that provides a convenient way to subscribe to CoValues and handle loading states:
-
-<CodeGroup>
-```tsx twoslash
-import React from "react";
-import { co, z, ID, Loaded } from "jazz-tools";
-
-const Task = co.map({
-  title: z.string(),
-  status: z.literal(["todo", "in-progress", "completed"]),
-});
-const Project = co.map({
-  name: z.string(),
-  tasks: co.list(Task),
-});
-// ---cut-before---
-import { useCoState } from "jazz-react";
-
-function GardenPlanner({ projectId }: { projectId: string }) {
-  // Subscribe to a project and its tasks
-  const project = useCoState(Project, projectId, {
-    resolve: {
-      tasks: { $each: true },
-    },
-  });
-
-  if (!project) {
-    return project === null
-      ? "Project not found or not accessible"
-      : "Loading project ...";
-  }
-
-  return (
-    <div>
-      <h1>{project.name}</h1>
-      <TaskList tasks={project.tasks} />
-    </div>
-  );
-}
-
-function TaskList({ tasks }: { tasks: Loaded<typeof Task>[] }) {
-  return (
-    <ul>
-      {tasks.map((task) => (
-        <li key={task.id}>
-          <span>{task.title}</span>
-          <span>{task.status}</span>
-        </li>
-      ))}
-    </ul>
-  );
-}
-```
-</CodeGroup>
-
-The `useCoState` hook handles subscribing when the component mounts and unsubscribing when it unmounts, making it easy to keep your UI in sync with the underlying data.
-
-### `useAccount`
-
-`useAccount` is used to access the current user's account.
-You can use this at the top-level of your app to subscribe to the current user's [account profile and root](../schemas/accounts-and-migrations#covalues-as-a-graph-of-data-rooted-in-accounts).
-
-Like `useCoState`, you can specify a resolve query to also subscribe to CoValues referenced in the account profile or root.
-
-<CodeGroup>
-```tsx twoslash
-import React from "react";
-import { co, z } from "jazz-tools";
-const Task = co.map({
-  title: z.string(),
-});
-
-const Project = co.map({
-  name: z.string(),
-  tasks: co.list(Task),
-});
-
-const AccountRoot = co.map({
-  myProjects: co.list(Project),
-});
-
-const MyAppAccount = co.account({
-  root: AccountRoot,
-  profile: co.profile(),
-});
-
-// ---cut-before---
-import { useAccount } from "jazz-react";
-
-function ProjectList() {
-  const { me } = useAccount(MyAppAccount, {
-    resolve: {
-      profile: true,
-      root: {
-        myProjects: {
-          $each: {
-            tasks: true,
-          },
-        },
-      },
-    },
-  });
-
-  if (!me) {
-    return <div>Loading...</div>;
-  }
-
-  return (
-    <div>
-      <h1>{me.profile.name}'s projects</h1>
-      <ul>
-        {me.root.myProjects.map((project) => (
-          <li key={project.id}>
-            {project.name} ({project.tasks.length} tasks)
-          </li>
-        ))}
-      </ul>
-    </div>
-  );
-}
-
-```
-</CodeGroup>
-
-</ContentByFramework>
 
 ## Loading States and Permission Checking
 
@@ -220,14 +80,15 @@ This allows you to handle loading, error, and success states in your application
 
 <CodeGroup>
 ```ts twoslash
-import { co, z, Loaded } from "jazz-tools";
+import { co, z } from "jazz-tools";
 const Task = co.map({
   title: z.string(),
 });
+type Task = co.loaded<typeof Task>;
 
 const taskId = "co_123";
 // ---cut-before---
-Task.subscribe(taskId, {}, (task: Loaded<typeof Task>) => {
+Task.subscribe(taskId, {}, (task: Task) => {
   if (task === undefined) {
     console.log("Task is loading...");
   } else if (task === null) {
@@ -653,12 +514,13 @@ The `Loaded` type is especially useful when passing data between components, as 
 <ContentByFramework framework="react">
 <CodeGroup>
 ```tsx twoslash
-import { CoListSchema, Loaded, co, z } from "jazz-tools";
+import { CoListSchema, co, z } from "jazz-tools";
 import React from "react";
 
 const TeamMember = co.map({
   name: z.string(),
 });
+type TeamMember = typeof TeamMember;
 
 const Task = co.map({
   title: z.string(),
@@ -667,16 +529,18 @@ const Task = co.map({
     return co.list(Task);
   },
 });
+type Task = typeof Task;
 
 const Project = co.map({
   name: z.string(),
   tasks: co.list(Task),
   owner: TeamMember,
 });
+type Project = typeof Project;
 
 // ---cut-before---
 // Define a type that includes loaded nested data
-type ProjectWithTasks = Loaded<
+type ProjectWithTasks = co.loaded<
   typeof Project,
   {
     tasks: { $each: true };
@@ -688,7 +552,7 @@ function TaskList({ project }: { project: ProjectWithTasks }) {
   // TypeScript knows tasks are loaded, so this is type-safe
   return (
     <ul>
-      {project.tasks.map((task) => (
+      {project.tasks.map((task: Task) => (
         <li key={task.id}>{task.title}</li>
       ))}
     </ul>
@@ -696,7 +560,7 @@ function TaskList({ project }: { project: ProjectWithTasks }) {
 }
 
 // For more complex resolutions
-type FullyLoadedProject = Loaded<
+type FullyLoadedProject = co.loaded<
   typeof Project,
   {
     tasks: {
@@ -714,7 +578,7 @@ function processProject(project: FullyLoadedProject) {
   // Safe access to all loaded properties
   console.log(`Project ${project.name} owned by ${project.owner.name}`);
 
-  project.tasks.forEach((task) => {
+  project.tasks.forEach((task: Task) => {
     console.log(`Task: ${task.title}, Assigned to: ${task.assignee?.name}`);
     console.log(`Subtasks: ${task.subtasks.length}`);
   });
@@ -727,7 +591,7 @@ function processProject(project: FullyLoadedProject) {
 <ContentByFramework framework="vanilla">
 <CodeGroup>
 ```ts twoslash
-import { CoListSchema, Loaded, co, z } from "jazz-tools";
+import { CoListSchema, co, z } from "jazz-tools";
 
 const TeamMember = co.map({
   name: z.string(),
@@ -740,16 +604,18 @@ const Task = co.map({
     return co.list(Task);
   },
 });
+type Task = typeof Task;
 
 const Project = co.map({
   name: z.string(),
   tasks: co.list(Task),
   owner: TeamMember,
 });
+type Project = typeof Project;
 
 // ---cut-before---
 // Define a type that includes loaded nested data
-type ProjectWithTasks = Loaded<
+type ProjectWithTasks = co.loaded<
   typeof Project,
   {
     tasks: { $each: true };
@@ -759,11 +625,11 @@ type ProjectWithTasks = Loaded<
 // Function that expects loaded data
 async function taskList({ project }: { project: ProjectWithTasks }) {
   // TypeScript knows tasks are loaded, so this is type-safe
-  return project.tasks.map((task) => task.title).join(`\n - `);
+  return project.tasks.map((task: Task) => task.title).join(`\n - `);
 }
 
 // For more complex resolutions
-type FullyLoadedProject = Loaded<
+type FullyLoadedProject = co.loaded<
   typeof Project,
   {
     tasks: {
@@ -782,7 +648,7 @@ function processProject(project: FullyLoadedProject) {
   // Safe access to all loaded properties
   console.log(`Project ${project.name} owned by ${project.owner.name}`);
 
-  project.tasks.forEach((task) => {
+  project.tasks.forEach((task: Task) => {
     console.log(`Task: ${task.title}, Assigned to: ${task.assignee?.name}`);
     console.log(`Subtasks: ${task.subtasks.length}`);
   });
@@ -813,6 +679,7 @@ const Task = co.map({
     return co.list(Task);
   },
 });
+type Task = typeof Task;
 
 const Project = co.map({
   name: z.string(),
@@ -836,7 +703,7 @@ async function completeAllTasks(projectId: string) {
   });
 
   // Now we can safely access and modify tasks
-  loadedProject.tasks.forEach((task) => {
+  loadedProject.tasks.forEach((task: Task) => {
     task.status = "completed";
   });
 }

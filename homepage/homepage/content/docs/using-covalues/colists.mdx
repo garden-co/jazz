@@ -89,10 +89,9 @@ const Task = co.map({
   title: z.string(),
   status: z.literal(["todo", "in-progress", "complete"]),
 });
+type Task = typeof Task;
 
-const ListOfTasks = co.list(Task);
-
-const tasks = ListOfTasks.create([
+const tasks = co.list(Task).create([
   Task.create({ title: "Prepare soil beds", status: "todo" }),
   Task.create({ title: "Order compost", status: "todo" }),
 ]);
@@ -105,14 +104,14 @@ console.log(firstTask.title);  // "Prepare soil beds"
 console.log(tasks.length);     // 2
 
 // Iteration
-tasks.forEach(task => {
+tasks.forEach((task: Task) => {
   console.log(task.title);
   // "Prepare soil beds"
   // "Order compost"
 });
 
 // Array methods
-const todoTasks = tasks.filter(task => task.status === "todo");
+const todoTasks = tasks.filter((task: Task) => task.status === "todo");
 console.log(todoTasks.length); // 1
 ```
 </CodeGroup>
@@ -129,13 +128,10 @@ const Task = co.map({
   title: z.string(),
   status: z.literal(["todo", "in-progress", "complete"]),
 });
+type Task = typeof Task;
 
-const ListOfTasks = co.list(Task);
-
-const ListOfResources = co.list(z.string());
-
-const resources = ListOfResources.create([]);
-const tasks = ListOfTasks.create([]);
+const resources = co.list(z.string());
+const tasks = co.list(Task);
 
 // ---cut---
 // Add items
@@ -162,9 +158,7 @@ Remove specific items by index with `splice`, or remove the first or last item w
 ```ts twoslash
 import { co, z } from "jazz-tools";
 
-const ListOfResources = co.list(z.string());
-
-const resources = ListOfResources.create([
+const resources = co.list(z.string()).create([
   "Tomatoes",
   "Cucumber",
   "Peppers",
@@ -193,19 +187,17 @@ resources.shift();                   // Remove first item
 ```ts twoslash
 import { co, z } from "jazz-tools";
 
-const ListOfResources = co.list(z.string());
-
-const resources = ListOfResources.create([]);
+const resources = co.list(z.string()).create([]);
 
 // ---cut---
 // Add multiple items at once
 resources.push("Tomatoes", "Basil", "Peppers");
 
 // Find items
-const basil = resources.find(r => r === "Basil");
+const basil = resources.find((r: string) => r === "Basil");
 
 // Filter (returns regular array, not a CoList)
-const tItems = resources.filter(r => r.startsWith("T"));
+const tItems = resources.filter((r: string) => r.startsWith("T"));
 console.log(tItems); // ["Tomatoes"]
 
 // Sort (modifies the CoList in-place)
@@ -226,12 +218,10 @@ const Task = co.map({
   title: z.string(),
   status: z.literal(["todo", "in-progress", "complete"]),
 });
+type Task = typeof Task;
 
-const ListOfTasks = co.list(Task);
-const ListOfResources = co.list(z.string());
-
-const resources = ListOfResources.create([]);
-const tasks = ListOfTasks.create([]);
+const resources = co.list(z.string()).create([]);
+const tasks = co.list(Task).create([]);
 // ---cut---
 // TypeScript catches type errors
 resources.push("Carrots");        // ✓ Valid string
@@ -239,7 +229,7 @@ resources.push("Carrots");        // ✓ Valid string
 resources.push(42);               // ✗ Type error: expected string
 
 // For lists of references
-tasks.forEach(task => {
+tasks.forEach((task: Task) => {
   console.log(task.title);        // TypeScript knows task has title
 });
 ```
@@ -260,6 +250,7 @@ const Task = co.map({
   title: z.string(),
   status: z.literal(["todo", "in-progress", "complete"]),
 });
+type Task = typeof Task;
 
 // ---cut---
 import { co, z, Loaded } from "jazz-tools";
@@ -269,7 +260,7 @@ const ListOfTasks = co.list(Task);
 function TaskList({ tasks }: { tasks: Loaded<typeof ListOfTasks> }) {
   return  (
    <ul>
-     {tasks.map(task => (
+     {tasks.map((task: Task) => (
        task ? (
         <li key={task.id}>
           {task.title} - {task.status}
