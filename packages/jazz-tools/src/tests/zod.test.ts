@@ -43,6 +43,15 @@ describe("co.map and Zod schema compatibility", () => {
       expect(map.createdAt).toEqual(date);
     });
 
+    it("should handle optional date fields", async () => {
+      const schema = co.map({
+        createdAt: z.date().optional(),
+      });
+      const account = await createJazzTestAccount();
+      const map = schema.create({ createdAt: undefined }, account);
+      expect(map.createdAt).toEqual(undefined);
+    });
+
     it("should handle literal fields", async () => {
       const schema = co.map({
         status: z.literal("active"),

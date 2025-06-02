@@ -74,12 +74,8 @@ export type DefaultProfileShape = {
 
 export type CoProfileSchema<
   Shape extends z.core.$ZodLooseShape = DefaultProfileShape,
-> = Omit<CoMapSchema<Shape & DefaultProfileShape>, "create"> & {
-  create: (
-    init: Simplify<CoMapInitZod<Shape & DefaultProfileShape>>,
-    options: { owner: Exclude<Group, Account> } | Exclude<Group, Account>,
-  ) => CoMapInstance<Shape & Simplify<DefaultProfileShape>>;
-};
+  Config extends z.core.$ZodObjectConfig = z.core.$ZodObjectConfig,
+> = CoMapSchema<Shape & DefaultProfileShape, Config, Group>;
 
 // less precise verion to avoid circularity issues and allow matching against
 export type AnyAccountSchema<

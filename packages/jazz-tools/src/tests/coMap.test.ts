@@ -110,29 +110,6 @@ describe("CoMap", async () => {
       expect(emptyMap.color).toEqual(undefined);
     });
 
-    test("setting date as undefined should throw", () => {
-      const Person = co.map({
-        color: z.string(),
-        _height: z.number(),
-        birthday: z.date(),
-        name: z.string(),
-        // nullable: z.optional.encoded<string | undefined>({
-        //   encode: (value: string | undefined) => value || null,
-        //   decode: (value: unknown) => (value as string) || undefined,
-        // });
-        optionalDate: z.date().optional(),
-      });
-
-      expect(() =>
-        Person.create({
-          color: "red",
-          _height: 10,
-          name: "John",
-          birthday: undefined!,
-        }),
-      ).toThrow();
-    });
-
     test("CoMap with reference", () => {
       const Dog = co.map({
         name: z.string(),
@@ -1222,5 +1199,160 @@ describe("Creating and finding unique CoMaps", async () => {
 
     const foundAlice = Person.findUnique({ name: "Alice" }, group.id);
     expect(foundAlice).toEqual(alice.id);
+  });
+
+  test("complex discriminated union", () => {
+    const StringTag = co.map({
+      type: z.literal("string"),
+      stringValue: z.string(),
+    });
+
+    const DateTag = co.map({
+      type: z.literal("date"),
+      dateValue: z.date(),
+      repeat: z.optional(
+        z.literal("daily").or(z.literal("weekly")).or(z.literal("monthly")),
+      ),
+    });
+
+    const StringAttributeValue = co.map({
+      type: z.literal(["somethingElse", "string"]),
+      stringValue: z.string(),
+    });
+
+    const NumberAttributeValue = co.map({
+      type: z.literal("number"),
+      numberValue: z.number(),
+    });
+
+    const DateAttributeValue = co.map({
+      type: z.literal("date"),
+      dateValue: z.date(),
+    });
+
+    const AttributeValue = z.discriminatedUnion("type", [
+      StringAttributeValue,
+      NumberAttributeValue,
+      DateAttributeValue,
+    ]);
+
+    const AttributeTagKey = co.map({
+      key: z.string(),
+    });
+
+    const AttributeTag = co.map({
+      type: z.literal("attribute"),
+      key: AttributeTagKey, // this is a covalue so that it can be referenced uniquely by other tags
+      attributeValue: AttributeValue,
+    });
+
+    const Tag = z.discriminatedUnion("type", [
+      AttributeTag,
+      StringTag,
+      DateTag,
+    ]);
+
+    const Wrapper = co.map({
+      tag: Tag,
+    });
+
+    const wrapper = Wrapper.create({
+      tag: AttributeTag.create({
+        type: "attribute",
+        key: AttributeTagKey.create({ key: "name" }),
+        attributeValue: StringAttributeValue.create({
+          type: "string",
+          stringValue: "Alice",
+        }),
+      }),
+    });
+
+    if (wrapper.tag.type === "attribute") {
+      expect(wrapper.tag.key.key).toEqual("name");
+      if (wrapper.tag.attributeValue.type === "string") {
+        expect(wrapper.tag.attributeValue.stringValue).toEqual("Alice");
+      }
+    }
+  });
+
+  test("complex discriminated union with numeric discriminator value", () => {
+    const HttpError = co.map({
+      code: z.number(),
+      message: z.string(),
+    });
+
+    const ClientError = co.map({
+      type: z.literal(400),
+      error: HttpError,
+    });
+
+    const ServerError = co.map({
+      type: z.literal(500),
+      error: HttpError,
+    });
+
+    const NetworkError = co.map({
+      type: z.literal(0),
+      error: HttpError,
+    });
+
+    const ErrorResponse = z.discriminatedUnion("type", [
+      ClientError,
+      ServerError,
+      NetworkError,
+    ]);
+
+    const ErrorWrapper = co.map({
+      response: ErrorResponse,
+    });
+
+    const wrapper = ErrorWrapper.create({
+      response: ClientError.create({
+        type: 400,
+        error: HttpError.create({
+          code: 400,
+          message: "Bad Request",
+        }),
+      }),
+    });
+
+    if (wrapper.response.type === 400) {
+      expect(wrapper.response.error.code).toEqual(400);
+      expect(wrapper.response.error.message).toEqual("Bad Request");
+    }
+
+    const serverErrorWrapper = ErrorWrapper.create({
+      response: ServerError.create({
+        type: 500,
+        error: HttpError.create({
+          code: 500,
+          message: "Internal Server Error",
+        }),
+      }),
+    });
+
+    if (serverErrorWrapper.response.type === 500) {
+      expect(serverErrorWrapper.response.error.code).toEqual(500);
+      expect(serverErrorWrapper.response.error.message).toEqual(
+        "Internal Server Error",
+      );
+    }
+
+    const networkErrorWrapper = ErrorWrapper.create({
+      response: NetworkError.create({
+        type: 0,
+        error: HttpError.create({
+          code: 0,
+          message: "Network Error",
+        }),
+      }),
+    });
+
+    if (networkErrorWrapper.response.type === 0) {
+      expect(networkErrorWrapper.response.error.code).toEqual(0);
+      expect(networkErrorWrapper.response.error.message).toEqual(
+        "Network Error",
+      );
+    }
   });
 });

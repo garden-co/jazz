@@ -1,4 +1,5 @@
 import { CoValueUniqueness } from "cojson";
+import { ZodObject } from "zod/v4";
 import {
   Account,
   AccountCreationProps,
@@ -26,6 +27,41 @@ import {
 import { RichTextSchema } from "./schemaTypes/RichTextSchema.js";
 import { z } from "./zodReExport.js";
 
+function enrichCoMapSchema<Shape extends z.core.$ZodLooseShape>(
+  schema: z.ZodObject<
+    { -readonly [P in keyof Shape]: Shape[P] },
+    z.core.$strip
+  >,
+) {
+  const baseCatchall = schema.catchall;
+
+  const enrichedSchema = Object.assign(schema, {
+    collaborative: true,
+    create: (...args: any[]) => {
+      return coSchema.create(...args);
+    },
+    load: (...args: any[]) => {
+      return coSchema.load(...args);
+    },
+    subscribe: (...args: any[]) => {
+      return coSchema.subscribe(...args);
+    },
+    findUnique: (...args: any[]) => {
+      return coSchema.findUnique(...args);
+    },
+    catchall: (index: z.core.$ZodType) => {
+      return enrichCoMapSchema(baseCatchall(index));
+    },
+    withHelpers: (helpers: (Self: z.core.$ZodType) => object) => {
+      return Object.assign(schema, helpers(schema));
+    },
+  }) as unknown as CoMapSchema<Shape>;
+
+  // Needs to be derived from the enriched schema
+  const coSchema = zodSchemaToCoSchema(enrichedSchema) as any;
+  return enrichedSchema;
+}
+
 export const coMapDefiner = <Shape extends z.core.$ZodLooseShape>(
   shape: Shape,
 ): CoMapSchema<Shape> => {
@@ -33,61 +69,7 @@ export const coMapDefiner = <Shape extends z.core.$ZodLooseShape>(
     collaborative: true,
   });
 
-  type CleanedType = Pick<
-    typeof objectSchema,
-    "_zod" | "def" | "~standard" | "catchall"
-  >;
-
-  const coMapSchema = objectSchema as unknown as CleanedType & {
-    collaborative: true;
-    create: CoMapSchema<Shape>["create"];
-    load: CoMapSchema<Shape>["load"];
-    subscribe: CoMapSchema<Shape>["subscribe"];
-    findUnique: CoMapSchema<Shape>["findUnique"];
-    catchall: CoMapSchema<Shape>["catchall"];
-    /** @deprecated Define your helper methods separately, in standalone functions. */
-    withHelpers: CoMapSchema<Shape>["withHelpers"];
-  };
-
-  coMapSchema.collaborative = true;
-
-  coMapSchema.create = function (this: CoMapSchema<Shape>, ...args: any[]) {
-    return (zodSchemaToCoSchema(this) as any).create(...args);
-  } as CoMapSchema<Shape>["create"];
-
-  coMapSchema.load = function (this: CoMapSchema<Shape>, ...args: any[]) {
-    return (zodSchemaToCoSchema(this) as any).load(...args);
-  } as CoMapSchema<Shape>["load"];
-
-  coMapSchema.subscribe = function (this: CoMapSchema<Shape>, ...args: any[]) {
-    return (zodSchemaToCoSchema(this) as any).subscribe(...args);
-  } as CoMapSchema<Shape>["subscribe"];
-
-  coMapSchema.findUnique = function (
-    this: CoMapSchema<Shape>,
-    unique: CoValueUniqueness["uniqueness"],
-    ownerID: string,
-    as?: Account | Group | AnonymousJazzAgent,
-  ) {
-    return (zodSchemaToCoSchema(this) as any).findUnique(unique, ownerID, as);
-  } as CoMapSchema<Shape>["findUnique"];
-
-  const oldCatchall = coMapSchema.catchall;
-  coMapSchema.catchall = function (
-    this: CoMapSchema<Shape>,
-    schema: z.core.$ZodType,
-  ) {
-    return { ...this, ...oldCatchall(schema) } as any;
-  } as CoMapSchema<Shape>["catchall"] as any;
-
-  coMapSchema.withHelpers = function (
-    this: CoMapSchema<Shape>,
-    helpers: (Self: CoMapSchema<Shape>) => object,
-  ) {
-    return { ...this, ...helpers(this) };
-  } as CoMapSchema<Shape>["withHelpers"];
-
-  return coMapSchema as unknown as CoMapSchema<Shape>;
+  return enrichCoMapSchema(objectSchema);
 };
 
 export const coAccountDefiner = <
@@ -179,7 +161,7 @@ export const coAccountDefiner = <
       creationProps?: AccountCreationProps,
     ) => void,
   ) {
-    return { ...this, migration };
+    return Object.assign(this, { migration });
   } as AccountSchema<Shape>["withMigration"];
 
   return accountSchema as unknown as AccountSchema<Shape>;
@@ -234,7 +216,7 @@ export const coListDefiner = <T extends z.core.$ZodType>(
     this: CoListSchema<T>,
     helpers: (Self: CoListSchema<T>) => object,
   ) {
-    return { ...this, ...helpers(this) };
+    return Object.assign(this, helpers(this));
   } as CoListSchema<T>["withHelpers"];
 
   return coListSchema;
@@ -249,19 +231,13 @@ export const coProfileDefiner = <
     inboxInvite?: z.core.$ZodOptional<z.core.$ZodString>;
   } = {} as any,
 ): CoProfileSchema<Shape> => {
-  const base = coMapDefiner({
-    ...(shape ?? {}),
+  const ehnancedShape = Object.assign(shape ?? {}, {
     name: z.string(),
     inbox: z.optional(z.string()),
     inboxInvite: z.optional(z.string()),
   });
-  return {
-    ...base,
-    // enforce that the owner is a group
-    create: ((init: any, options: { owner: Group } | Group) => {
-      return base.create(init, options);
-    }) as CoProfileSchema<Shape>["create"],
-  } as CoProfileSchema<Shape>;
+
+  return coMapDefiner(ehnancedShape) as CoProfileSchema<Shape>;
 };
 
 export const coFeedDefiner = <T extends z.core.$ZodType>(

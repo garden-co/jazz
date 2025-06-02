@@ -18,6 +18,7 @@ import { WithHelpers } from "../zodSchema.js";
 export type CoMapSchema<
   Shape extends z.core.$ZodLooseShape,
   Config extends z.core.$ZodObjectConfig = z.core.$ZodObjectConfig,
+  Owner extends Account | Group = Account | Group,
 > = z.core.$ZodObject<Shape, Config> &
   z.$ZodTypeDiscriminable & {
     collaborative: true;
@@ -26,11 +27,10 @@ export type CoMapSchema<
       init: Simplify<CoMapInitZod<Shape>>,
       options?:
         | {
-            owner: Account | Group;
+            owner: Owner;
             unique?: CoValueUniqueness["uniqueness"];
           }
-        | Account
-        | Group,
+        | Owner,
     ) => (Shape extends Record<string, never>
       ? {}
       : {

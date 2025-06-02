@@ -17,6 +17,7 @@ export default function Home() {
       <HeroSection />
 
       <div className="container flex flex-col gap-12 mt-12 lg:gap-20 lg:mt-20">
+        <SupportedEnvironmentsSection />
         <HowJazzWorksSection />
 
         <Testimonial name="Spreadsheet app (stealth)" role="CTO">
@@ -50,8 +51,6 @@ export default function Home() {
         </Testimonial>
 
         <FeaturesSection />
-
-        <SupportedEnvironmentsSection />
 
         <ComingSoonSection />
 

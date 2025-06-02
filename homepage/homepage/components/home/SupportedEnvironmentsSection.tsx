@@ -1,95 +1,118 @@
-import { KotlinLogo } from "@/components/icons/KotlinLogo";
+import { BunLogo } from "@/components/icons/BunLogo";
+import { CloudflareWorkerLogo } from "@/components/icons/CloudflareWorkerLogo";
+import { ExpoLogo } from "@/components/icons/ExpoLogo";
+import { JavascriptLogo } from "@/components/icons/JavascriptLogo";
 import { NodejsLogo } from "@/components/icons/NodejsLogo";
 import { ReactLogo } from "@/components/icons/ReactLogo";
 import { ReactNativeLogo } from "@/components/icons/ReactNativeLogo";
-import { RustLogo } from "@/components/icons/RustLogo";
 import { SvelteLogo } from "@/components/icons/SvelteLogo";
-import { SwiftLogo } from "@/components/icons/SwiftLogo";
-import { VueLogo } from "@/components/icons/VueLogo";
-import { Icon } from "@garden-co/design-system/src/components/atoms/Icon";
+import { GappedGrid } from "@garden-co/design-system/src/components/molecules/GappedGrid";
 import React from "react";
 
 export function SupportedEnvironmentsSection() {
-  const supported = [
+  const frameworks = [
     {
-      name: "Browser (vanilla JS)",
-      icon: (
-        <Icon
-          name="browser"
-          size="3xl"
-          className="text-highlight"
-          height="1em"
-          width="1em"
-        />
-      ),
+      name: "JavaScript",
+      icon: JavascriptLogo,
     },
     {
       name: "React",
-      icon: <ReactLogo />,
+      icon: ReactLogo,
     },
     {
       name: "React Native",
-      icon: <ReactNativeLogo />,
+      icon: ReactNativeLogo,
     },
     {
-      name: "Vue",
-      icon: <VueLogo />,
+      name: "Expo",
+      icon: ExpoLogo,
     },
     {
       name: "Svelte",
-      icon: <SvelteLogo />,
-    },
-    {
-      name: "Node.js",
-      icon: <NodejsLogo />,
+      icon: SvelteLogo,
     },
   ];
 
-  const comingSoon = [
+  const serverWorkers = [
     {
-      name: "Swift",
-      icon: <SwiftLogo />,
+      name: "Node.js",
+      icon: NodejsLogo,
     },
     {
-      name: "Rust",
-      icon: <RustLogo className="text-black dark:text-white" />,
+      name: "Cloudflare Workers",
+      icon: CloudflareWorkerLogo,
     },
     {
-      name: "Kotlin",
-      icon: <KotlinLogo />,
+      name: "Bun",
+      icon: BunLogo,
+    },
+  ];
+
+  const first = [
+    {
+      name: "JavaScript",
+      icon: JavascriptLogo,
+    },
+    {
+      name: "React",
+      icon: ReactLogo,
+    },
+    {
+      name: "Svelte",
+      icon: SvelteLogo,
+    },
+    {
+      name: "Expo",
+      icon: ExpoLogo,
+    },
+    {
+      name: "React Native",
+      icon: ReactNativeLogo,
+    },
+  ];
+
+  const second = [
+    {
+      name: "Node.js",
+      icon: NodejsLogo,
+    },
+    {
+      name: "Cloudflare Workers",
+      icon: CloudflareWorkerLogo,
+    },
+    {
+      name: "Bun",
+      icon: BunLogo,
     },
   ];
 
   return (
-    <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3 lg:gap-8">
-      <h2 className="font-semibold tracking-tight font-display text-2xl text-stone-900 lg:text-balance sm:text-4xl dark:text-white">
-        Jazz works with your favorite stack
-      </h2>
-      <div className="flex flex-col gap-6 lg:col-span-2 lg:gap-8">
-        <div className="flex flex-col gap-5 lg:flex-row lg:gap-8">
-          {supported.map((tech) => (
-            <div key={tech.name} className="flex items-center gap-2">
-              <span className="text-xl">{tech.icon}</span>
-              <div className="text-center font-medium text-highlight lg:text-lg">
-                {tech.name}
-              </div>
-            </div>
-          ))}
-        </div>
-        <div className="flex flex-col gap-3">
-          <p className="text-sm">Coming soon</p>
-          <div className="flex gap-x-5 gap-y-3 flex-wrap">
-            {comingSoon.map((tech) => (
-              <div key={tech.name} className="flex items-center gap-2">
-                <span className="text-xl">{tech.icon}</span>
-                <div className="text-center text-sm text-highlight">
-                  {tech.name}
+    <>
+      <h2 className="sr-only">Supported environments</h2>
+      <GappedGrid>
+        {[
+          {
+            label: "Build apps with",
+            items: frameworks,
+          },
+          {
+            label: "Optionally add server workers",
+            items: serverWorkers,
+          },
+        ].map(({ label, items }) => (
+          <div className="col-span-2 lg:col-span-3" key={label}>
+            <h3 className="mb-4 text-highlight font-medium">{label}</h3>
+            <div className="flex gap-x-6 gap-y-3 grayscale flex-col lg:flex-row">
+              {items.map(({ name, icon: Icon }) => (
+                <div key={name} className="flex items-center gap-2">
+                  <Icon className="size-6" />
+                  {name}
                 </div>
-              </div>
-            ))}
+              ))}
+            </div>
           </div>
-        </div>
-      </div>
-    </div>
+        ))}
+      </GappedGrid>
+    </>
   );
 }

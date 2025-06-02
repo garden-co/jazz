@@ -8,7 +8,7 @@
     },
     "build:generate-docs": {
       "inputs": ["../../../packages/*/src/**"],
-      "outputs": ["typedoc/**", "public/llms.txt", "public/llms-full.txt"],
+      "outputs": [ "public/llms.txt", "public/llms-full.txt"],
       "dependsOn": ["^build"]
     },
     "dev": {

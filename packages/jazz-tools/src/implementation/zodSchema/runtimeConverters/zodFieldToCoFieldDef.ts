@@ -62,7 +62,7 @@ export function zodFieldToCoFieldDef(schema: FieldSchema) {
           (schema as unknown as ZodReadonly).def.innerType as FieldSchema,
         );
       } else if (schema._zod.def.type === "date") {
-        return coField.Date;
+        return coField.optional.Date;
       } else if (schema._zod.def.type === "template_literal") {
         return coField.string;
       } else if (schema._zod.def.type === "lazy") {

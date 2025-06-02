@@ -386,7 +386,7 @@ You should define helper methods of CoValue schemas separately, in standalone fu
 
 <CodeGroup>
 ```ts twoslash
-import { co, z, Loaded } from "jazz-tools";
+import { co, z } from "jazz-tools";
 function differenceInYears(date1: Date, date2: Date) {
   const diffTime = Math.abs(date1.getTime() - date2.getTime());
   return Math.ceil(diffTime / (1000 * 60 * 60 * 24 * 365.25));

@@ -1,5 +1,5 @@
 import { assert, beforeEach, expect, test } from "vitest";
-import { Account, Group, co, z } from "../exports.js";
+import { Account, CoListSchema, Group, co, z } from "../exports.js";
 import {
   createJazzTestAccount,
   linkAccounts,
@@ -135,4 +135,62 @@ test("loading raw accounts should work", async () => {
 
   assert(loadedAccount);
   expect(loadedAccount.profile!.name).toBe("test 1");
+});
+
+test("should support recursive props on co.profile", async () => {
+  const User = co.profile({
+    name: z.string(),
+    email: z.optional(z.string()),
+    image_url: z.optional(z.string()),
+    created: z.date(),
+    updated: z.date(),
+    username: z.optional(z.string()),
+    display_name: z.optional(z.string()),
+    anonymous: z.boolean(),
+    get following(): CoListSchema<typeof User> {
+      return co.list(User);
+    },
+    get followers(): CoListSchema<typeof User> {
+      return co.list(User);
+    },
+  });
+
+  const MyAccount = co
+    .account({
+      profile: User,
+      root: co.map({}),
+    })
+    .withMigration((me) => {
+      if (me.profile === undefined) {
+        const group = Group.create({ owner: me });
+        group.addMember("everyone", "reader");
+        me.profile = User.create(
+          {
+            name: "test 1",
+            created: new Date(),
+            updated: new Date(),
+            anonymous: false,
+            following: co.list(User).create([], group),
+            followers: co.list(User).create([], group),
+          },
+          group,
+        );
+      }
+
+      if (me.root === undefined) {
+        me.root = co.map({}).create({});
+      }
+    });
+
+  const account = await createJazzTestAccount({
+    creationProps: {
+      name: "test 1",
+    },
+    AccountSchema: MyAccount,
+  });
+
+  expect(account.profile.name).toBe("test 1");
+  expect(account.root).toBeDefined();
+  expect(account.profile.following.length).toBe(0);
+  expect(account.profile.followers.length).toBe(0);
 });

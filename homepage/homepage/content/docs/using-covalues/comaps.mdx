@@ -325,7 +325,7 @@ You should define helper methods of CoValue schemas separately, in standalone fu
 import { createJazzTestAccount } from 'jazz-tools/testing';
 const me = await createJazzTestAccount();
 // ---cut---
-import { co, z, Loaded } from "jazz-tools";
+import { co, z } from "jazz-tools";
 
 const Project = co.map({
   name: z.string(),

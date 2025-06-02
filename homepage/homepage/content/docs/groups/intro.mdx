@@ -1,4 +1,4 @@
-export const metadata = { 
+export const metadata = {
   description: "Manage permissions of CoValues using Groups. Learn how to add members to a Group, check permissions, and more."
 };
 
@@ -34,16 +34,14 @@ You can add group members by ID by using `Account.load` and `Group.addMember`.
 
 <CodeGroup>
 ```tsx twoslash
-import { ID } from "jazz-tools";
-
-const bobsID = "co_z123" as ID<Account>;
+const bobsID = "co_z123";
 
 // ---cut---
-import { Group, Account } from "jazz-tools";
+import { Group, co } from "jazz-tools";
 
 const group = Group.create();
 
-const bob = await Account.load(bobsID);
+const bob = await co.account().load(bobsID);
 
 if (bob) {
   group.addMember(bob, "writer");
@@ -55,14 +53,14 @@ if (bob) {
 
 <CodeGroup>
 ```tsx twoslash
-const bobsID = "co_z123" as ID<Account>;
+const bobsID = "co_z123";
 
 const group = Group.create();
 
 // ---cut---
-import { Group, Account, ID } from "jazz-tools";
+import { co, Group } from "jazz-tools";
 
-const bob = await Account.load(bobsID as ID<Account>);
+const bob = await co.account().load(bobsID);
 
 if (bob) {
   group.addMember(bob, "writer");
@@ -76,7 +74,7 @@ To change a member's role, use the `addMember` method.
 
 <CodeGroup>
 ```ts twoslash
-import { Group, Account, ID } from "jazz-tools";
+import { Group } from "jazz-tools";
 import { createJazzTestAccount } from 'jazz-tools/testing';
 const bob = await createJazzTestAccount();
 const group = Group.create();
@@ -95,7 +93,7 @@ To remove a member, use the `removeMember` method.
 
 <CodeGroup>
 ```ts twoslash
-import { Group, Account, ID } from "jazz-tools";
+import { Group } from "jazz-tools";
 import { createJazzTestAccount } from 'jazz-tools/testing';
 const bob = await createJazzTestAccount();
 const group = Group.create();
@@ -133,7 +131,7 @@ const newValue = MyCoMap.create(
 ```
 </CodeGroup>
 
-Because `._owner` can be an `Account` or a `Group`, in cases where you specifically need to use `Group` methods (such as for adding members or getting your own role), you can cast it to assert it to be a Group:
+Because `._owner` can be an `co.account` or a `Group`, in cases where you specifically need to use `Group` methods (such as for adding members or getting your own role), you can cast it to assert it to be a Group:
 
 <CodeGroup>
 ```ts twoslash
@@ -166,14 +164,14 @@ You can check the permissions of an account on a CoValue by using the `canRead`,
 
 <CodeGroup>
 ```ts twoslash
-import { co, z, Account } from "jazz-tools";
+import { co, z } from "jazz-tools";
 
 const MyCoMap = co.map({
   color: z.string(),
 });
 // ---cut---
 const value = await MyCoMap.create({ color: "red"})
-const me = Account.getMe();
+const me = await co.account().getMe();
 
 if (me.canAdmin(value)) {
   console.log("I can share value with others"); 
@@ -191,7 +189,7 @@ To check the permissions of another account, you need to load it first:
 
 <CodeGroup>
 ```ts twoslash
-import { co, z, Account } from "jazz-tools";
+import { co, z } from "jazz-tools";
 import { createJazzTestAccount } from 'jazz-tools/testing';
 
 const MyCoMap = co.map({
@@ -201,7 +199,7 @@ const account = await createJazzTestAccount();
 const accountID = account.id;
 // ---cut---
 const value = await MyCoMap.create({ color: "red"})
-const bob = await Account.load(accountID);
+const bob = await co.account().load(accountID);
 
 if (bob) {
   if (bob.canAdmin(value)) {

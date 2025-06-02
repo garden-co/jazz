@@ -72,7 +72,7 @@ export const team: Array<TeamMember> = [
   {
     name: "Emil Sayahi",
     titles: ["Full-Stack Dev", "Support Dev"],
-    location: "Oxford, Ohio, US",
+    location: "San Francisco, California, US",
     github: "emmyoh",
     linkedin: "emil-sayahi",
     bluesky: "sayahi.bsky.social",

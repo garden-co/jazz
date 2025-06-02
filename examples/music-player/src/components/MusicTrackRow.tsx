@@ -62,9 +62,7 @@ export function MusicTrackRow({
 
   return (
     <li
-      className={
-        "flex gap-1  hover:bg-slate-200 group py-2 px-2 cursor-pointer"
-      }
+      className={"flex gap-1 hover:bg-slate-200 group py-2 px-2 cursor-pointer"}
       onClick={handleTrackClick}
     >
       <button

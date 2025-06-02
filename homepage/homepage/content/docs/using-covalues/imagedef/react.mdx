@@ -137,10 +137,10 @@ For a complete progressive loading experience, use the `ProgressiveImg` componen
 import * as React from "react";
 // ---cut---
 import { ProgressiveImg } from "jazz-react";
-import { Loaded, co } from "jazz-tools";
+import { co } from "jazz-tools";
 const Image = co.image();
 
-function GalleryView({ image }: { image: Loaded<typeof Image> }) {
+function GalleryView({ image }: { image: co.loaded<typeof Image> }) {
   return (
     <div className="image-container">
       <ProgressiveImg
@@ -174,12 +174,12 @@ For more control over image loading, you can implement your own progressive imag
 <CodeGroup>
 ```tsx twoslash
 import * as React from "react";
-import { Loaded, co } from "jazz-tools";
+import { co } from "jazz-tools";
 const Image = co.image();
 // ---cut---
 import { useProgressiveImg } from "jazz-react";
 
-function CustomImageComponent({ image }: { image: Loaded<typeof Image> }) {
+function CustomImageComponent({ image }: { image: co.loaded<typeof Image> }) {
   const {
     src,         // Data URI containing the image data as a base64 string,
                  // or a placeholder image URI

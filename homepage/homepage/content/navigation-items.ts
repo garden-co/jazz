@@ -11,10 +11,6 @@ export const navigationItems: NavItemProps[] = [
     title: "Examples",
     href: "/examples",
   },
-  // {
-  //   title: "API ref",
-  //   href: "/api-reference",
-  // },
   {
     title: "Built with Jazz",
     href: "/showcase",

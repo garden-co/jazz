@@ -1,5 +1,11 @@
 # cojson
 
+## 0.14.18
+
+### Patch Changes
+
+- 0d5ee3e: Enable react-native-quick-crypto xsalsa20 accelerated algorithm for encrypt/decrypt functions
+
 ## 0.14.16
 
 ### Patch Changes

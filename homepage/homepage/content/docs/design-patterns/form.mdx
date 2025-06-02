@@ -68,8 +68,8 @@ Let's write the form component that will be used for both create and update.
 
 <CodeGroup>
 ```tsx twoslash
-import { co, z, Loaded } from "jazz-tools";
 import * as React from "react";
+import { co, z } from "jazz-tools";
 
 export const BubbleTeaOrder = co.map({
   name: z.string(),
@@ -84,7 +84,7 @@ export function OrderForm({
   order,
   onSave,
 }: {
-  order: Loaded<typeof BubbleTeaOrder> | Loaded<typeof DraftBubbleTeaOrder>;
+  order: co.loaded<typeof BubbleTeaOrder> | co.loaded<typeof DraftBubbleTeaOrder>;
   onSave?: (e: React.FormEvent<HTMLFormElement>) => void;
 }) {
   return (
@@ -112,7 +112,7 @@ To make the edit form, simply pass the `BubbleTeaOrder`.
 
 <CodeGroup>
 ```tsx twoslash
-import { co, z, Loaded } from "jazz-tools";
+import { co, z } from "jazz-tools";
 import { useCoState } from "jazz-react";
 import * as React from "react";
 
@@ -128,7 +128,7 @@ export function OrderForm({
   order,
   onSave,
 }: {
-  order: Loaded<typeof BubbleTeaOrder> | Loaded<typeof DraftBubbleTeaOrder>;
+  order: co.loaded<typeof BubbleTeaOrder> | co.loaded<typeof DraftBubbleTeaOrder>;
   onSave?: (e: React.FormEvent<HTMLFormElement>) => void;
 }) {
   return (
@@ -170,7 +170,7 @@ Here's how that looks like:
 
 <CodeGroup>
 ```tsx twoslash
-import { co, z, Loaded, Account } from "jazz-tools";
+import { co, z } from "jazz-tools";
 import { useCoState, useAccount } from "jazz-react";
 import * as React from "react";
 import { useState, useEffect } from "react";
@@ -196,7 +196,7 @@ export function OrderForm({
   order,
   onSave,
 }: {
-  order: Loaded<typeof BubbleTeaOrder> | Loaded<typeof DraftBubbleTeaOrder>;
+  order: co.loaded<typeof BubbleTeaOrder> | co.loaded<typeof DraftBubbleTeaOrder>;
   onSave?: (e: React.FormEvent<HTMLFormElement>) => void;
 }) {
   return (
@@ -219,7 +219,7 @@ export function OrderForm({
 // CreateOrder.tsx
 export function CreateOrder() {
   const { me } = useAccount();
-  const [draft, setDraft] = useState<Loaded<typeof DraftBubbleTeaOrder>>();
+  const [draft, setDraft] = useState<co.loaded<typeof DraftBubbleTeaOrder>>();
 
   useEffect(() => {
     setDraft(DraftBubbleTeaOrder.create({}));
@@ -229,7 +229,7 @@ export function CreateOrder() {
     e.preventDefault();
     if (!draft || !draft.name) return;
 
-    const order = draft as Loaded<typeof BubbleTeaOrder>; // TODO: this should narrow correctly
+    const order = draft as co.loaded<typeof BubbleTeaOrder>; // TODO: this should narrow correctly
 
     console.log("Order created:", order);
   };
@@ -249,13 +249,13 @@ Update the schema to include a `validate` helper.
 
 <CodeGroup>
 ```ts twoslash
-import { co, z, Loaded, CoMap } from "jazz-tools";
+import { co, z } from "jazz-tools";
 // ---cut---
 // schema.ts
 export const DraftBubbleTeaOrder = co.map({
   name: z.optional(z.string()),
 }).withHelpers((Self) => ({ // [!code ++:11]
-  validate(draft: Loaded<typeof Self>) {
+  validate(draft: co.loaded<typeof Self>) {
     const errors: string[] = [];
 
     if (!draft.name) {
@@ -272,7 +272,7 @@ Then perform the validation on submit.
 
 <CodeGroup>
 ```tsx twoslash
-import { co, z, Loaded, Account } from "jazz-tools";
+import { co, z } from "jazz-tools";
 import { useCoState, useAccount } from "jazz-react";
 import * as React from "react";
 import { useState, useEffect } from "react";
@@ -284,7 +284,7 @@ export const BubbleTeaOrder = co.map({
 export const DraftBubbleTeaOrder = co.map({
   name: z.optional(z.string()),
 }).withHelpers((Self) => ({
-  validate(draft: Loaded<typeof Self>) {
+  validate(draft: co.loaded<typeof Self>) {
     const errors: string[] = [];
 
     if (!draft.name) {
@@ -308,7 +308,7 @@ export function OrderForm({
   order,
   onSave,
 }: {
-  order: Loaded<typeof BubbleTeaOrder> | Loaded<typeof DraftBubbleTeaOrder>;
+  order: co.loaded<typeof BubbleTeaOrder> | co.loaded<typeof DraftBubbleTeaOrder>;
   onSave?: (e: React.FormEvent<HTMLFormElement>) => void;
 }) {
   return (
@@ -331,7 +331,7 @@ export function OrderForm({
 // CreateOrder.tsx
 export function CreateOrder() {
   const { me } = useAccount();
-  const [draft, setDraft] = useState<Loaded<typeof DraftBubbleTeaOrder>>();
+  const [draft, setDraft] = useState<co.loaded<typeof DraftBubbleTeaOrder>>();
 
   useEffect(() => {
     setDraft(DraftBubbleTeaOrder.create({}));
@@ -347,7 +347,7 @@ export function CreateOrder() {
       return;
     }
 
-    const order = draft as Loaded<typeof BubbleTeaOrder>;
+    const order = draft as co.loaded<typeof BubbleTeaOrder>;
 
     console.log("Order created:", order);
   };
@@ -367,7 +367,7 @@ By storing the draft in the user's account, they can come back to it anytime wit
 
 <CodeGroup>
 ```ts twoslash
-import { co, z, Loaded, Account } from "jazz-tools";
+import { co, z } from "jazz-tools";
 // ---cut---
 // schema.ts
 export const BubbleTeaOrder = co.map({
@@ -400,7 +400,7 @@ Let's not forget to update the `AccountSchema`.
 <CodeGroup>
 ```ts twoslash
 // @filename: schema.tsx
-import { co, z, Loaded, Account } from "jazz-tools";
+import { co, z } from "jazz-tools";
 export const BubbleTeaOrder = co.map({
   name: z.string(),
 });
@@ -427,7 +427,6 @@ export const JazzAccount = co.account({
 // @filename: App.tsx
 import * as React from "react";
 // ---cut---
-import { Loaded } from "jazz-tools"
 import { JazzProvider } from "jazz-react";
 import { JazzAccount } from "./schema"; // [!code ++]
 
@@ -449,7 +448,7 @@ Instead of creating a new draft every time we use the create form, let's use the
 <CodeGroup>
 ```tsx twoslash
 // @filename: schema.ts
-import { co, z, Loaded } from "jazz-tools";
+import { co, z } from "jazz-tools";
 
 export const BubbleTeaOrder = co.map({
   name: z.string(),
@@ -458,7 +457,7 @@ export const BubbleTeaOrder = co.map({
 export const DraftBubbleTeaOrder = co.map({
   name: z.optional(z.string()),
 }).withHelpers((Self) => ({
-  validate(draft: Loaded<typeof Self>) {
+  validate(draft: co.loaded<typeof Self>) {
     const errors: string[] = [];
 
     if (!draft.name) {
@@ -488,13 +487,13 @@ export const JazzAccount = co.account({
 import * as React from "react";
 import { useCoState, useAccount } from "jazz-react";
 import { BubbleTeaOrder, DraftBubbleTeaOrder, JazzAccount } from "schema";
-import { Loaded } from "jazz-tools";
+import { co } from "jazz-tools";
 
 export function OrderForm({
   order,
   onSave,
 }: {
-  order: Loaded<typeof BubbleTeaOrder> | Loaded<typeof DraftBubbleTeaOrder>;
+  order: co.loaded<typeof BubbleTeaOrder> | co.loaded<typeof DraftBubbleTeaOrder>;
   onSave?: (e: React.FormEvent<HTMLFormElement>) => void;
 }) {
   return (
@@ -535,7 +534,7 @@ export function CreateOrder() {
       return;
     }
 
-    const order = draft as Loaded<typeof BubbleTeaOrder>;
+    const order = draft as co.loaded<typeof BubbleTeaOrder>;
     console.log("Order created:", order);
 
     // create a new empty draft
@@ -576,13 +575,13 @@ Simply add a `hasChanges` helper to your schema.
 
 <CodeGroup>
 ```ts twoslash
-import { co, z, Loaded } from "jazz-tools";
+import { co, z } from "jazz-tools";
 // ---cut---
 // schema.ts
 export const DraftBubbleTeaOrder = co.map({
   name: z.optional(z.string()),
 }).withHelpers((Self) => ({
-  validate(draft: Loaded<typeof Self>) {
+  validate(draft: co.loaded<typeof Self>) {
     const errors: string[] = [];
 
     if (!draft.name) {
@@ -592,7 +591,7 @@ export const DraftBubbleTeaOrder = co.map({
     return { errors };
   },
 
-  hasChanges(draft?: Loaded<typeof Self>) { // [!code ++:3]
+  hasChanges(draft?: co.loaded<typeof Self>) { // [!code ++:3]
     return draft ? Object.keys(draft._edits).length : false;
   },
 }));
@@ -603,7 +602,7 @@ In the UI, you can choose how you want to show the draft indicator.
 
 <CodeGroup>
 ```tsx twoslash
-import { co, z, Loaded } from "jazz-tools";
+import { co, z } from "jazz-tools";
 import { useCoState, useAccount } from "jazz-react";
 import * as React from "react";
 
@@ -614,7 +613,7 @@ export const BubbleTeaOrder = co.map({
 export const DraftBubbleTeaOrder = co.map({
   name: z.optional(z.string()),
 }).withHelpers((Self) => ({
-  validate(draft: Loaded<typeof Self>) {
+  validate(draft: co.loaded<typeof Self>) {
     const errors: string[] = [];
 
     if (!draft.name) {
@@ -624,7 +623,7 @@ export const DraftBubbleTeaOrder = co.map({
     return { errors };
   },
 
-  hasChanges(draft?: Loaded<typeof Self>) { // [!code ++:3]
+  hasChanges(draft?: co.loaded<typeof Self>) { // [!code ++:3]
     return draft ? Object.keys(draft._edits).length : false;
   },
 }));
@@ -682,7 +681,7 @@ how to handle single-select, multi-select, date, and boolean inputs.
 
 <CodeGroup>
 ```tsx twoslash
-import { co, z, Loaded } from "jazz-tools";
+import { co, z } from "jazz-tools";
 
 export const BubbleTeaAddOnTypes = [
   "Pearl",

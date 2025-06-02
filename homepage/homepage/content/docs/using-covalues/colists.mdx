@@ -262,11 +262,11 @@ const Task = co.map({
 });
 
 // ---cut---
-import { co, z, Loaded } from "jazz-tools";
+import { co, z } from "jazz-tools";
 const ListOfTasks = co.list(Task);
 
 // React example
-function TaskList({ tasks }: { tasks: Loaded<typeof ListOfTasks> }) {
+function TaskList({ tasks }: { tasks: co.loaded<typeof ListOfTasks> }) {
   return  (
    <ul>
      {tasks.map(task => (

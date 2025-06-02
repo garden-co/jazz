@@ -1,5 +1,21 @@
 # jazz-browser
 
+## 0.14.18
+
+### Patch Changes
+
+- 0d5ee3e: Enable react-native-quick-crypto xsalsa20 accelerated algorithm for encrypt/decrypt functions
+- Updated dependencies [4b950bc]
+- Updated dependencies [0d5ee3e]
+- Updated dependencies [d6d9c0a]
+- Updated dependencies [be7c4c2]
+- Updated dependencies [c559054]
+  - jazz-tools@0.14.18
+  - cojson@0.14.18
+  - cojson-storage@0.14.18
+  - jazz-react-core@0.14.18
+  - cojson-transport-ws@0.14.18
+
 ## 0.14.17
 
 ### Patch Changes

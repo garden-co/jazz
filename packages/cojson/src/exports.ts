@@ -58,7 +58,7 @@ import type {
   BinaryStreamInfo,
 } from "./coValues/coStream.js";
 import type { InviteSecret } from "./coValues/group.js";
-import type { AgentSecret } from "./crypto/crypto.js";
+import { AgentSecret, textDecoder, textEncoder } from "./crypto/crypto.js";
 import type { AgentID, RawCoID, SessionID } from "./ids.js";
 import type { JsonObject, JsonValue } from "./jsonValue.js";
 import type * as Media from "./media.js";
@@ -108,6 +108,8 @@ export const cojsonInternals = {
   setCoValueLoadingRetryDelay(delay: number) {
     CO_VALUE_LOADING_CONFIG.RETRY_DELAY = delay;
   },
+  textEncoder,
+  textDecoder,
 };
 
 export {
@@ -169,18 +171,19 @@ export type {
   AccountRole,
 };
 
+// biome-ignore format: off
 // eslint-disable-next-line @typescript-eslint/no-namespace
 export namespace CojsonInternalTypes {
   export type CoValueKnownState = import("./sync.js").CoValueKnownState;
   export type CoJsonValue<T> = import("./jsonValue.js").CoJsonValue<T>;
   export type DoneMessage = import("./sync.js").DoneMessage;
+  export type Encrypted<T extends JsonValue, N extends JsonValue> = import("./crypto/crypto.js").Encrypted<T, N>;
+  export type KeySecret = import("./crypto/crypto.js").KeySecret;
   export type KnownStateMessage = import("./sync.js").KnownStateMessage;
   export type LoadMessage = import("./sync.js").LoadMessage;
   export type NewContentMessage = import("./sync.js").NewContentMessage;
   export type SessionNewContent = import("./sync.js").SessionNewContent;
-  // biome-ignore format: inserts spurious trialing comma that breaks some parsers
   export type CoValueHeader = import("./coValueCore/verifiedState.js").CoValueHeader;
-  // biome-ignore format: inserts spurious trialing comma that breaks some parsers
   export type Transaction = import("./coValueCore/verifiedState.js").Transaction;
   export type TransactionID = import("./ids.js").TransactionID;
   export type Signature = import("./crypto/crypto.js").Signature;
@@ -191,3 +194,4 @@ export namespace CojsonInternalTypes {
   export type SignerSecret = import("./crypto/crypto.js").SignerSecret;
   export type JsonObject = import("./jsonValue.js").JsonObject;
 }
+// biome-ignore format: on

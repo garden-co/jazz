@@ -2,8 +2,8 @@
   "$schema": "https://unpkg.com/@changesets/config@2.3.1/schema.json",
   "changelog": "@changesets/cli/changelog",
   "commit": false,
-  "fixed": [],
-  "linked": [
+  "linked": [],
+  "fixed": [
     [
       "cojson",
       "cojson-storage",
@@ -27,6 +27,8 @@
       "jazz-react-native-core",
       "jazz-react-native",
       "jazz-react-native-media-images",
+      "jazz-richtext-prosemirror",
+      "jazz-richtext-tiptap",
       "jazz-run",
       "jazz-svelte",
       "jazz-tools",

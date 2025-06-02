@@ -1,5 +1,15 @@
 # jazz-tools
 
+## 0.14.18
+
+### Patch Changes
+
+- 4b950bc: Fixes support for recursive props on co.profile and for co.image inside z.discriminatedUnion
+- d6d9c0a: Make checks on the discriminator field on z.discriminatedUnion more specific and less strict
+- c559054: Add support for optional dates
+- Updated dependencies [0d5ee3e]
+  - cojson@0.14.18
+
 ## 0.14.17
 
 ### Patch Changes

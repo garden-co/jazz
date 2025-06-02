@@ -15,13 +15,6 @@ export function PlayerControls({ mediaPlayer }: { mediaPlayer: MediaPlayer }) {
     resolve: { root: { activePlaylist: true } },
   }).me?.root.activePlaylist;
 
-  useMediaEndListener(mediaPlayer.playNextTrack);
-  useKeyboardListener("Space", () => {
-    if (document.activeElement !== document.body) return;
-
-    playState.toggle();
-  });
-
   const activeTrack = useCoState(MusicTrack, mediaPlayer.activeTrackId, {
     resolve: { waveform: true },
   });
@@ -72,4 +65,19 @@ export function PlayerControls({ mediaPlayer }: { mediaPlayer: MediaPlayer }) {
       </div>
     </footer>
   );
+}
+
+export function KeyboardListener({
+  mediaPlayer,
+}: { mediaPlayer: MediaPlayer }) {
+  const playState = usePlayState();
+
+  useMediaEndListener(mediaPlayer.playNextTrack);
+  useKeyboardListener("Space", () => {
+    if (document.activeElement !== document.body) return;
+
+    playState.toggle();
+  });
+
+  return null;
 }

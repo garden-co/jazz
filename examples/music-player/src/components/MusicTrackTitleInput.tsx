@@ -31,7 +31,7 @@ export function MusicTrackTitleInput({
 
   return (
     <div
-      className="relative flex-grow"
+      className="relative flex-grow max-w-64"
       onClick={(evt) => evt.stopPropagation()}
     >
       <input

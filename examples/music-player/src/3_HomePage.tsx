@@ -67,7 +67,7 @@ export function HomePage({ mediaPlayer }: { mediaPlayer: MediaPlayer }) {
     <SidebarInset className="flex flex-col h-screen text-gray-800 bg-blue-50">
       <div className="flex flex-1 overflow-hidden">
         <SidePanel mediaPlayer={mediaPlayer} />
-        <main className="flex-1 p-6 overflow-y-auto">
+        <main className="flex-1 p-6 overflow-y-auto overflow-x-hidden">
           <SidebarTrigger />
           <div className="flex items-center justify-between mb-6">
             {isRootPlaylist ? (
@@ -90,7 +90,7 @@ export function HomePage({ mediaPlayer }: { mediaPlayer: MediaPlayer }) {
               )}
             </div>
           </div>
-          <ul className="flex flex-col">
+          <ul className="flex flex-col max-w-full">
             {playlist?.tracks?.map(
               (track) =>
                 track && (
