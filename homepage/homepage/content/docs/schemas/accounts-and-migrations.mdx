@@ -112,6 +112,7 @@ import * as React from "react";
 import { co, z, Loaded } from "jazz-tools";
 
 const Chat = co.map({});
+type Chat = typeof Chat;
 
 const MyAppRoot = co.map({
   myChats: co.list(Chat),
@@ -144,7 +145,7 @@ function DashboardPageComponent() {
         <div>
           <p>Logged in as {me.profile.name}</p>
           <h2>My chats</h2>
-          {me.root.myChats.map((chat) => (
+          {me.root.myChats.map((chat: Chat) => (
             <ChatPreview key={chat.id} chat={chat} />
           ))}
         </div>
