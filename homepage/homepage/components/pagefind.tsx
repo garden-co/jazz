@@ -56,6 +56,187 @@ export const usePagefindSearch = singletonHook(
 );
 
 // Components
+function HighlightedText({ text }: { text: string }) {
+  const decodedText = text.replace(/&lt;/g, "<").replace(/&gt;/g, ">");
+  const parts = decodedText.split(/(<mark>.*?<\/mark>)/g);
+
+  return (
+    <p className="text-xs text-gray-400 mt-1">
+      {parts.map((part, i) => {
+        if (part.startsWith("<mark>")) {
+          const content = part.replace(/<\/?mark>/g, "");
+          return (
+            <mark
+              key={i}
+              className="bg-indigo-500/20 text-indigo-200 rounded px-0.5"
+            >
+              {content}
+            </mark>
+          );
+        }
+        return part;
+      })}
+    </p>
+  );
+}
+
+function SearchInput({ 
+  query, 
+  onSearch 
+}: { 
+  query: string; 
+  onSearch: (value: string) => void; 
+}) {
+  return (
+    <Command.Input
+      value={query}
+      onValueChange={onSearch}
+      placeholder="Search documentation..."
+      className="w-full text-base sm:text-lg px-4 sm:px-5 py-4 sm:py-5 outline-none border-b border-gray-700 bg-transparent text-gray-100 placeholder:text-gray-400 caret-indigo-500"
+    />
+  );
+}
+
+function EmptyState() {
+  return (
+    <Command.Empty className="flex items-center justify-center h-16 text-sm text-gray-400">
+      No results found.
+    </Command.Empty>
+  );
+}
+
+function MainResultItem({ 
+  result, 
+  onSelect 
+}: { 
+  result: PagefindResult; 
+  onSelect: () => void; 
+}) {
+  return (
+    <Command.Item
+      value={result.meta.title}
+      onSelect={onSelect}
+      className="group relative flex items-center gap-2 sm:gap-3 px-3 sm:px-4 py-2 sm:py-3 cursor-pointer text-sm rounded-md mt-1 select-none
+      transition-all duration-200 ease-in-out
+      animate-in fade-in-0
+      text-gray-100 data-[selected=true]:bg-gray-800/50 hover:bg-gray-800/30 active:bg-gray-800/50
+      max-w-full"
+    >
+      <div className="min-w-0 flex-1">
+        <h3 className="text-sm font-medium text-gray-200 truncate">
+          {result.meta?.title || "No title"}
+        </h3>
+        <HighlightedText text={result.excerpt || ""} />
+      </div>
+      <div className="absolute left-0 w-[3px] h-full bg-indigo-500 transition-opacity duration-200 ease-in-out opacity-0 group-data-[selected=true]:opacity-100" />
+    </Command.Item>
+  );
+}
+
+function SubResultItem({ 
+  subResult, 
+  onSelect 
+}: { 
+  subResult: NonNullable<PagefindResult["sub_results"]>[number]; 
+  onSelect: () => void; 
+}) {
+  return (
+    <Command.Item
+      key={subResult.id}
+      value={subResult.title}
+      onSelect={onSelect}
+      className="group relative flex items-center gap-2 sm:gap-3 px-3 sm:px-4 py-2 sm:py-3 cursor-pointer text-sm rounded-md mt-1 select-none
+      transition-all duration-200 ease-in-out
+      animate-in fade-in-0
+      text-gray-100 data-[selected=true]:bg-gray-800/50 hover:bg-gray-800/30 active:bg-gray-800/50
+      max-w-full"
+    >
+      <div className="min-w-0 flex-1">
+        <h3 className="text-sm font-medium text-gray-200/80 truncate">
+          {subResult?.title || "No title"}
+        </h3>
+        <HighlightedText text={subResult?.excerpt || ""} />
+      </div>
+      <div className="absolute left-0 w-[3px] h-full bg-indigo-500/70 transition-opacity duration-200 ease-in-out opacity-0 group-data-[selected=true]:opacity-100" />
+    </Command.Item>
+  );
+}
+
+function SearchResults({ 
+  results, 
+  setOpen,
+  listRef 
+}: { 
+  results: PagefindResult[]; 
+  setOpen: (open: boolean) => void;
+  listRef: React.RefObject<HTMLDivElement>;
+}) {
+  return (
+    <Command.List
+      ref={listRef}
+      className="h-[50vh] sm:h-[300px] max-h-[60vh] sm:max-h-[400px] overflow-y-auto overflow-x-hidden overscroll-contain transition-all duration-100 ease-in p-2"
+    >
+      {results.length === 0 ? (
+        <EmptyState />
+      ) : (
+        <Command.Group>
+          {results.map((result) => (
+            <SearchResult
+              key={result.id}
+              result={result}
+              setOpen={setOpen}
+            />
+          ))}
+        </Command.Group>
+      )}
+    </Command.List>
+  );
+}
+
+function SearchResult({
+  result,
+  setOpen,
+}: {
+  result: PagefindResult;
+  setOpen: (open: boolean) => void;
+}) {
+  if (!result) return null;
+
+  const url = processUrl(result.url);
+
+  const handleMainResultSelect = () => {
+    navigateToUrl(url, setOpen);
+  };
+
+  const handleSubResultSelect = (subResult: NonNullable<PagefindResult["sub_results"]>[number]) => {
+    const { path, hash } = processSubUrl(subResult.url);
+    navigateToUrl(`${path}${hash}`, setOpen);
+  };
+
+  return (
+    <>
+      <MainResultItem result={result} onSelect={handleMainResultSelect} />
+
+      {result.sub_results && result.sub_results.length > 0 && (
+        <div className="ml-4 border-l border-gray-700">
+          {result.sub_results.map((subResult) => {
+            // Avoid showing duplicate results
+            if (subResult.title === result.meta.title) return null;
+            
+            return (
+              <SubResultItem
+                key={subResult.id}
+                subResult={subResult}
+                onSelect={() => handleSubResultSelect(subResult)}
+              />
+            );
+          })}
+        </div>
+      )}
+    </>
+  );
+}
+
 export function PagefindSearch() {
   const { open, setOpen } = usePagefindSearch();
   const [query, setQuery] = useState("");
@@ -133,131 +314,10 @@ export function PagefindSearch() {
         hover:border-gray-600
         hover:shadow-[0_0_30px_rgba(0,0,0,0.2)]
         hover:shadow-indigo-500/10">
-        <Command.Input
-          value={query}
-          onValueChange={handleSearch}
-          placeholder="Search documentation..."
-          className="w-full text-base sm:text-lg px-4 sm:px-5 py-4 sm:py-5 outline-none border-b border-gray-700 bg-transparent text-gray-100 placeholder:text-gray-400 caret-indigo-500"
-        />
-        <Command.List
-          ref={listRef}
-          className="h-[50vh] sm:h-[300px] max-h-[60vh] sm:max-h-[400px] overflow-y-auto overflow-x-hidden overscroll-contain transition-all duration-100 ease-in p-2"
-        >
-          {results.length === 0 ? (
-            <Command.Empty className="flex items-center justify-center h-16 text-sm text-gray-400">
-              No results found.
-            </Command.Empty>
-          ) : (
-            <Command.Group>
-              {results.map((result) => (
-                <SearchResult
-                  key={result.id}
-                  result={result}
-                  setOpen={setOpen}
-                />
-              ))}
-            </Command.Group>
-          )}
-        </Command.List>
+        <SearchInput query={query} onSearch={handleSearch} />
+        <SearchResults results={results} setOpen={setOpen} listRef={listRef} />
       </div>
     </Command.Dialog>
-  );
-}
-
-function HighlightedText({ text }: { text: string }) {
-  const decodedText = text.replace(/&lt;/g, "<").replace(/&gt;/g, ">");
-  const parts = decodedText.split(/(<mark>.*?<\/mark>)/g);
-
-  return (
-    <p className="text-xs text-gray-400 mt-1">
-      {parts.map((part, i) => {
-        if (part.startsWith("<mark>")) {
-          const content = part.replace(/<\/?mark>/g, "");
-          return (
-            <mark
-              key={i}
-              className="bg-indigo-500/20 text-indigo-200 rounded px-0.5"
-            >
-              {content}
-            </mark>
-          );
-        }
-        return part;
-      })}
-    </p>
-  );
-}
-
-function SearchResult({
-  result,
-  setOpen,
-}: {
-  result: PagefindResult;
-  setOpen: (open: boolean) => void;
-}) {
-  if (!result) return null;
-
-  const url = processUrl(result.url);
-
-  const handleMainResultSelect = () => {
-    navigateToUrl(url, setOpen);
-  };
-
-  const handleSubResultSelect = (subResult: NonNullable<PagefindResult["sub_results"]>[number]) => {
-    const { path, hash } = processSubUrl(subResult.url);
-    navigateToUrl(`${path}${hash}`, setOpen);
-  };
-
-  return (
-    <>
-      <Command.Item
-        value={result.meta.title}
-        onSelect={handleMainResultSelect}
-        className="group relative flex items-center gap-2 sm:gap-3 px-3 sm:px-4 py-2 sm:py-3 cursor-pointer text-sm rounded-md mt-1 select-none
-      transition-all duration-200 ease-in-out
-      animate-in fade-in-0
-      text-gray-100 data-[selected=true]:bg-gray-800/50 hover:bg-gray-800/30 active:bg-gray-800/50
-      max-w-full"
-      >
-        <div className="min-w-0 flex-1">
-          <h3 className="text-sm font-medium text-gray-200 truncate">
-            {result.meta?.title || "No title"}
-          </h3>
-          <HighlightedText text={result.excerpt || ""} />
-        </div>
-        <div className="absolute left-0 w-[3px] h-full bg-indigo-500 transition-opacity duration-200 ease-in-out opacity-0 group-data-[selected=true]:opacity-100" />
-      </Command.Item>
-
-      {result.sub_results && result.sub_results.length > 0 && (
-        <div className="ml-4 border-l border-gray-700">
-          {result.sub_results.map((subResult) => {
-            // Avoid showing duplicate results
-            if (subResult.title === result.meta.title) return null;
-            
-            return (
-              <Command.Item
-                key={subResult.id}
-                value={subResult.title}
-                onSelect={() => handleSubResultSelect(subResult)}
-                className="group relative flex items-center gap-2 sm:gap-3 px-3 sm:px-4 py-2 sm:py-3 cursor-pointer text-sm rounded-md mt-1 select-none
-            transition-all duration-200 ease-in-out
-            animate-in fade-in-0
-            text-gray-100 data-[selected=true]:bg-gray-800/50 hover:bg-gray-800/30 active:bg-gray-800/50
-            max-w-full"
-              >
-                <div className="min-w-0 flex-1">
-                  <h3 className="text-sm font-medium text-gray-200/80 truncate">
-                    {subResult?.title || "No title"}
-                  </h3>
-                  <HighlightedText text={subResult?.excerpt || ""} />
-                </div>
-                <div className="absolute left-0 w-[3px] h-full bg-indigo-500/70 transition-opacity duration-200 ease-in-out opacity-0 group-data-[selected=true]:opacity-100" />
-              </Command.Item>
-            );
-          })}
-        </div>
-      )}
-    </>
   );
 }
 

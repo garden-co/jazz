@@ -14,7 +14,7 @@ export function QuickSearch({ onClick }: { onClick: () => void }) {
       <Search className="h-4 w-4" />
       <span className="flex-1 text-left">Quick search&hellip;</span>
       <span className="text-xs bg-stone-100 dark:bg-stone-800 px-2 py-0.5 rounded">
-        {isMac ? "⌘+K" : "^+K"}
+        {isMac ? "⌘+K" : "Ctrl+K"}
       </span>
     </button>
   );
