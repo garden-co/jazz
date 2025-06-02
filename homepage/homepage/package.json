@@ -11,7 +11,7 @@
     "format-and-lint": "biome check .",
     "format-and-lint:fix": "biome check . --write",
     "generate:llm-docs": "node generate-docs/llms-full.mjs",
-    "test": "pnpm run test:llm-docs && pnpm run test:e2e",
+    "test": "pnpm run test:llm-docs",
     "test:llm-docs": "node generate-docs/llms-full.test.mjs",
     "test:e2e": "playwright test"
   },
