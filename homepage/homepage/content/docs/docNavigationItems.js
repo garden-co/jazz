@@ -53,8 +53,8 @@ export const docNavigationItems = [
         done: 100,
       },
       {
-        name: "Providers",
-        href: "/docs/building-with-jazz/providers",
+        name: "Using CoValues",
+        href: "/docs/building-with-jazz/using-covalues",
         done: 100,
       },
       {
