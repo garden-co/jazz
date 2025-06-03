@@ -173,6 +173,16 @@ export class RawProfile<
   Meta extends JsonObject | null = JsonObject | null,
 > extends RawCoMap<Shape, Meta> {}
 
+export type InboxShape = {
+  inbox: string;
+  inboxInvite: string;
+};
+
+export class RawInbox<
+  Shape extends InboxShape = InboxShape,
+  Meta extends JsonObject | null = JsonObject | null,
+> extends RawCoMap<Shape, Meta> {}
+
 export type RawAccountMigration<Meta extends AccountMeta = AccountMeta> = (
   account: RawAccount<Meta>,
   localNode: LocalNode,

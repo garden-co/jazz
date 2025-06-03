@@ -255,13 +255,13 @@ export class Inbox {
       throw new Error("Account profile should already be loaded");
     }
 
-    if (!profile.inbox) {
+    if (!account.inbox?.inbox) {
       throw new Error("The account has not set up their inbox");
     }
 
     const node = account._raw.core.node;
 
-    const root = await node.load(profile.inbox as CoID<InboxRoot>);
+    const root = await node.load(account.inbox.inbox as CoID<InboxRoot>);
 
     if (root === "unavailable") {
       throw new Error("Inbox not found");

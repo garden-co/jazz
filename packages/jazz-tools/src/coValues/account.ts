@@ -16,15 +16,13 @@ import {
 } from "cojson";
 import {
   AnonymousJazzAgent,
-  AnyAccountSchema,
-  type CoMap,
+  CoMap,
   type CoValue,
   CoValueBase,
   CoValueClass,
   CoValueOrZodSchema,
   type Group,
   ID,
-  InstanceOfSchema,
   InstanceOrPrimitiveOfSchema,
   Profile,
   Ref,
@@ -41,6 +39,7 @@ import {
   accessChildByKey,
   activeAccountContext,
   anySchemaToCoSchema,
+  coField,
   coValuesCache,
   createInboxRoot,
   ensureCoValueLoaded,
@@ -66,6 +65,11 @@ type AccountMembers<A extends Account> = [
   },
 ];
 
+class Inbox extends CoMap {
+  inbox? = coField.optional.string;
+  inboxInvite? = coField.optional.string;
+}
+
 /** @category Identity & Permissions */
 export class Account extends CoValueBase implements CoValue {
   declare id: ID<this>;
@@ -77,6 +81,7 @@ export class Account extends CoValueBase implements CoValue {
   get _schema(): {
     profile: Schema;
     root: Schema;
+    inbox: Schema;
   } {
     return (this.constructor as typeof Account)._schema;
   }
@@ -90,6 +95,10 @@ export class Account extends CoValueBase implements CoValue {
         ref: () => RegisteredSchemas["CoMap"],
         optional: true,
       } satisfies RefEncoded<CoMap>,
+      inbox: {
+        ref: () => Inbox,
+        optional: false,
+      } satisfies RefEncoded<Inbox>,
     };
   }
 
@@ -112,12 +121,15 @@ export class Account extends CoValueBase implements CoValue {
 
   declare profile: Profile | null;
   declare root: CoMap | null;
+  declare inbox: Inbox | null;
 
   getDescriptor(key: string) {
     if (key === "profile") {
       return this._schema.profile;
     } else if (key === "root") {
       return this._schema.root;
+    } else if (key === "inbox") {
+      return this._schema.inbox;
     }
 
     return undefined;
@@ -126,12 +138,16 @@ export class Account extends CoValueBase implements CoValue {
   get _refs(): {
     profile: RefIfCoValue<Profile> | undefined;
     root: RefIfCoValue<CoMap> | undefined;
+    inbox: RefIfCoValue<Inbox> | undefined;
   } {
     const profileID = this._raw.get("profile") as unknown as
       | ID<NonNullable<this["profile"]>>
       | undefined;
     const rootID = this._raw.get("root") as unknown as
       | ID<NonNullable<this["root"]>>
+      | undefined;
+    const inboxID = this._raw.get("inbox") as unknown as
+      | ID<NonNullable<this["inbox"]>>
       | undefined;
 
     return {
@@ -156,6 +172,17 @@ export class Account extends CoValueBase implements CoValue {
             this,
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
           ) as any as RefIfCoValue<this["root"]>)
+        : undefined,
+      inbox: inboxID
+        ? (new Ref(
+            inboxID,
+            this._loadedAs,
+            this._schema.inbox as RefEncoded<
+              NonNullable<this["inbox"]> & CoValue
+            >,
+            this,
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          ) as any as RefIfCoValue<this["inbox"]>)
         : undefined,
     };
   }
