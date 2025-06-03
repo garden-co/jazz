@@ -22,6 +22,7 @@ import {
   RawAccount,
   RawAccountID,
   RawAccountMigration,
+  RawInbox,
   RawProfile,
   accountHeaderForInitialAgentSecret,
   expectAccount,
@@ -226,6 +227,11 @@ export class LocalNode {
         name: creationProps.name,
       });
       account.set("profile", profile.id, "trusting");
+
+      const inboxGroup = node.createGroup();
+      inboxGroup.addMember("everyone", "writeOnly");
+      const inbox = inboxGroup.createMap<RawInbox>();
+      account.set("inbox", inbox.id, "trusting");
     }
 
     const profileId = account.get("profile");

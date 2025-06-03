@@ -7,6 +7,7 @@ import type {
   Role,
 } from "cojson";
 import type {
+  AccountInbox,
   AnyAccountSchema,
   CoMap,
   CoValue,
@@ -54,6 +55,7 @@ export class Group extends CoValueBase implements CoValue {
   get _schema(): {
     profile: Schema;
     root: Schema;
+    inbox: Schema;
   } {
     return (this.constructor as typeof Group)._schema;
   }
@@ -61,6 +63,7 @@ export class Group extends CoValueBase implements CoValue {
     this._schema = {
       profile: "json" satisfies Schema,
       root: "json" satisfies Schema,
+      inbox: "json" satisfies Schema,
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
     } as any;
     Object.defineProperty(this.prototype, "_schema", {
@@ -70,16 +73,21 @@ export class Group extends CoValueBase implements CoValue {
 
   declare profile: Profile | null;
   declare root: CoMap | null;
+  declare inbox: AccountInbox | null;
 
   get _refs(): {
     profile: Ref<Profile> | undefined;
     root: Ref<CoMap> | undefined;
+    inbox: Ref<AccountInbox> | undefined;
   } {
     const profileID = this._raw.get("profile") as unknown as
       | ID<NonNullable<this["profile"]>>
       | undefined;
     const rootID = this._raw.get("root") as unknown as
       | ID<NonNullable<this["root"]>>
+      | undefined;
+    const inboxID = this._raw.get("inbox") as unknown as
+      | ID<NonNullable<this["inbox"]>>
       | undefined;
     return {
       profile: profileID
@@ -101,6 +109,17 @@ export class Group extends CoValueBase implements CoValue {
             this,
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
           ) as any as this["root"] extends CoMap ? Ref<this["root"]> : never)
+        : undefined,
+      inbox: inboxID
+        ? (new Ref(
+            inboxID,
+            this._loadedAs,
+            this._schema.inbox as RefEncoded<NonNullable<this["inbox"]>>,
+            this,
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          ) as any as this["inbox"] extends AccountInbox
+            ? Ref<this["inbox"]>
+            : never)
         : undefined,
     };
   }

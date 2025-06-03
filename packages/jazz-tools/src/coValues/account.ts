@@ -398,11 +398,6 @@ export class Account extends CoValueBase implements CoValue {
         });
       }
     }
-
-    const node = this._raw.core.node;
-    const profile = node
-      .expectCoValueLoaded(this._raw.get("profile")!)
-      .getCurrentContent() as RawCoMap;
   }
 
   // Placeholder method for subclasses to override
@@ -496,7 +491,7 @@ export class Account extends CoValueBase implements CoValue {
 
 export const AccountAndGroupProxyHandler: ProxyHandler<Account | Group> = {
   get(target, key, receiver) {
-    if (key === "profile" || key === "root") {
+    if (key === "profile" || key === "root" || key === "inbox") {
       const id = target._raw.get(key);
 
       if (id) {
@@ -510,12 +505,18 @@ export const AccountAndGroupProxyHandler: ProxyHandler<Account | Group> = {
   },
   set(target, key, value, receiver) {
     if (
-      (key === "profile" || key === "root") &&
+      (key === "profile" || key === "root" || key === "inbox") &&
       typeof value === "object" &&
       SchemaInit in value
     ) {
       (target.constructor as typeof CoMap)._schema ||= {};
       (target.constructor as typeof CoMap)._schema[key] = value[SchemaInit];
+      return true;
+    } else if (key === "inbox") {
+      if (value) {
+        target._raw.set("inbox", value.id as unknown as CoID<RawCoMap>);
+      }
+
       return true;
     } else if (key === "profile") {
       if (value) {
@@ -538,7 +539,7 @@ export const AccountAndGroupProxyHandler: ProxyHandler<Account | Group> = {
   },
   defineProperty(target, key, descriptor) {
     if (
-      (key === "profile" || key === "root") &&
+      (key === "profile" || key === "root" || key === "inbox") &&
       typeof descriptor.value === "object" &&
       SchemaInit in descriptor.value
     ) {
