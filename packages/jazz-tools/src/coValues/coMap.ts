@@ -118,6 +118,22 @@ export class CoMap extends CoValueBase implements CoValue {
     } & { [ItemsSym]?: Schema };
   }
 
+  /** @internal */
+  get _createdAt() {
+    return (
+      this._raw
+        .keys()
+        .flatMap((x) => this._raw.ops[x]?.map((y) => y.madeAt))
+        .filter((x) => x !== undefined)
+        .sort()[0] ?? this._lastUpdatedAt
+    );
+  }
+
+  /** @internal */
+  get _lastUpdatedAt() {
+    return this._raw.latestTxMadeAt;
+  }
+
   /**
    * If property `prop` is a `coField.ref(...)`, you can use `coMaps._refs.prop` to access
    * the `Ref` instead of the potentially loaded/null value.
