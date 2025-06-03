@@ -27,6 +27,7 @@ function App() {
         ),
         estimate: 5,
         status: "backlog",
+        createdAt: new Date(),
       },
       group,
     );

@@ -74,6 +74,8 @@ export function IssueVersionHistory({ id }: { id: string }) {
     ].sort((a, b) => (a.madeAt < b.madeAt ? -1 : a.madeAt > b.madeAt ? 1 : 0));
   }, [issue?._edits]);
 
+  if (!issue) return;
+
   return (
     <>
       <div className="flex flex-col text-sm gap-2">
@@ -98,6 +100,12 @@ export function IssueVersionHistory({ id }: { id: string }) {
       <hr />
 
       <DescriptionVersionHistory id={id} />
+
+      <hr />
+
+      <div>
+        <p>This issue was created at {issue.createdAt.toLocaleString()}</p>
+      </div>
     </>
   );
 }
