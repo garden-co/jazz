@@ -125,14 +125,14 @@ function HighlightedText({ text }: { text: string }) {
   const parts = decodedText.split(/(<mark>.*?<\/mark>)/g);
 
   return (
-    <p className="text-xs text-gray-400 mt-1">
+    <p className="mt-1">
       {parts.map((part, i) => {
         if (part.startsWith("<mark>")) {
           const content = part.replace(/<\/?mark>/g, "");
           return (
             <mark
               key={i}
-              className="bg-indigo-500/20 text-indigo-200 rounded px-0.5"
+              className="px-0.5 bg-primary-100 text-primary-900 dark:bg-stone-900 dark:text-white"
             >
               {content}
             </mark>
@@ -156,14 +156,14 @@ function SearchInput({
       value={query}
       onValueChange={onSearch}
       placeholder="Search documentation..."
-      className="w-full text-base sm:text-lg px-4 sm:px-5 py-4 sm:py-5 outline-none border-b border-gray-700 bg-transparent text-gray-100 placeholder:text-gray-400 caret-indigo-500"
+      className="w-full text-base sm:text-lg px-4 sm:px-5 py-4 sm:py-5 outline-none border-b bg-white dark:bg-stone-950 text-stone-900 dark:text-stone-100 placeholder:text-stone-400 dark:placeholder:text-stone-500 focus-visible:ring-0"
     />
   );
 }
 
 function EmptyState() {
   return (
-    <Command.Empty className="flex items-center justify-center h-16 text-sm text-gray-400">
+    <Command.Empty className="flex items-center justify-center h-16 text-sm">
       No results found.
     </Command.Empty>
   );
@@ -183,16 +183,16 @@ function MainResultItem({
       className="group relative flex items-center gap-2 sm:gap-3 px-3 sm:px-4 py-2 sm:py-3 cursor-pointer text-sm rounded-md mt-1 select-none
       transition-all duration-200 ease-in-out
       animate-in fade-in-0
-      text-gray-100 data-[selected=true]:bg-gray-800/50 hover:bg-gray-800/30 active:bg-gray-800/50
+      data-[selected=true]:bg-stone-100 dark:data-[selected=true]:bg-stone-925 hover:bg-stone-100 dark:hover:bg-stone-925 active:bg-stone-100 dark:active:bg-stone-925
       max-w-full"
     >
       <div className="min-w-0 flex-1">
-        <h3 className="text-sm font-medium text-gray-200 truncate">
+        <h3 className="font-medium text-highlight truncate">
           {result.meta?.title || "No title"} ({(result.meta as any)?.framework})
         </h3>
         <HighlightedText text={result.excerpt || ""} />
       </div>
-      <div className="absolute left-0 w-[3px] h-full bg-indigo-500 transition-opacity duration-200 ease-in-out opacity-0 group-data-[selected=true]:opacity-100" />
+      <div className="absolute left-0 w-[3px] h-full bg-primary transition-opacity duration-200 ease-in-out opacity-0 group-data-[selected=true]:opacity-100" />
     </Command.Item>
   );
 }
@@ -212,16 +212,16 @@ function SubResultItem({
       className="group relative flex items-center gap-2 sm:gap-3 px-3 sm:px-4 py-2 sm:py-3 cursor-pointer text-sm rounded-md mt-1 select-none
       transition-all duration-200 ease-in-out
       animate-in fade-in-0
-      text-gray-100 data-[selected=true]:bg-gray-800/50 hover:bg-gray-800/30 active:bg-gray-800/50
+      data-[selected=true]:bg-stone-100 dark:data-[selected=true]:bg-stone-925 hover:bg-stone-100 dark:hover:bg-stone-925 active:bg-stone-100 dark:active:bg-stone-925
       max-w-full"
     >
       <div className="min-w-0 flex-1">
-        <h3 className="text-sm font-medium text-gray-200/80 truncate">
+        <h4 className="text-sm font-medium truncate text-highlight">
           {subResult?.title || "No title"}
-        </h3>
+        </h4>
         <HighlightedText text={subResult?.excerpt || ""} />
       </div>
-      <div className="absolute left-0 w-[3px] h-full bg-indigo-500/70 transition-opacity duration-200 ease-in-out opacity-0 group-data-[selected=true]:opacity-100" />
+      <div className="absolute left-0 w-[3px] h-full bg-primary transition-opacity duration-200 ease-in-out opacity-0 group-data-[selected=true]:opacity-100" />
     </Command.Item>
   );
 }
@@ -280,7 +280,7 @@ function SearchResult({
       <MainResultItem result={result} onSelect={handleMainResultSelect} />
 
       {result.sub_results && result.sub_results.length > 0 && (
-        <div className="ml-4 border-l border-gray-700">
+        <div className="ml-4 border-l">
           {result.sub_results.map((subResult) => {
             // Avoid showing duplicate results
             if (subResult.title === result.meta.title) return null;
@@ -387,15 +387,15 @@ export function PagefindSearch() {
       shouldFilter={false}
     >
       <div
-        className="w-full sm:w-[640px] mx-auto max-w-[calc(100%-2rem)] overflow-hidden rounded-xl bg-gradient-to-b from-gray-900 to-gray-800 shadow-2xl border border-gray-700
-        origin-center animate-in fade-in
-        data-[state=open]:animate-in data-[state=closed]:animate-out
-        data-[state=open]:scale-100 data-[state=closed]:scale-95
-        data-[state=closed]:opacity-0 data-[state=open]:opacity-100
-        transition-all duration-200 ease-in-out
-        hover:border-gray-600
-        hover:shadow-[0_0_30px_rgba(0,0,0,0.2)]
-        hover:shadow-indigo-500/10"
+        className="w-full sm:w-[640px] mx-auto max-w-[calc(100%-2rem)] overflow-hidden rounded-xl bg-white dark:bg-stone-950
+          origin-center animate-in fade-in
+          data-[state=open]:animate-in data-[state=closed]:animate-out
+          data-[state=open]:scale-100 data-[state=closed]:scale-95
+          data-[state=closed]:opacity-0 data-[state=open]:opacity-100
+          transition-all duration-200 ease-in-out
+          data-[state=open]:shadow-2xl data-[state=closed]:shadow-none
+          shadow-lg ring-1 ring-stone-950/10 dark:ring-white/10
+        "
       >
         <SearchInput query={query} onSearch={handleSearch} />
         <SearchResults results={results} setOpen={setOpen} listRef={listRef} />

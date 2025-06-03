@@ -10,7 +10,7 @@
   }
 
   :focus-visible {
-    @apply ring-2 ring-blue/75 dark:ring-blue-400/75;
+    @apply ring-2 ring-primary;
   }
 
   details > summary {
