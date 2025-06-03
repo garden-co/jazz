@@ -1,5 +1,6 @@
 "use client";
 
+import { useFramework } from "@/lib/use-framework";
 import { Command } from "cmdk";
 import React, { useState, useEffect, useRef } from "react";
 import { singletonHook } from "react-singleton-hook";
@@ -25,18 +26,19 @@ const SEARCH_SHORTCUT_KEY = "k";
 
 // Utility functions
 const processUrl = (url: string): string => {
-  const urlPath = url?.split("/_next/static/chunks/pages/")?.[1]?.split(".html")?.[0];
+  const urlPath = url
+    ?.split("/_next/static/chunks/pages/")?.[1]
+    ?.split(".html")?.[0];
   return urlPath?.startsWith("/") ? urlPath : `/${urlPath}`;
 };
 
 const processSubUrl = (url: string): { path: string; hash: string } => {
-  const [subUrlPath, subUrlHash] = url
-    ?.split("/_next/static/chunks/pages/")?.[1]
-    ?.split(".html") || [];
-  
+  const [subUrlPath, subUrlHash] =
+    url?.split("/_next/static/chunks/pages/")?.[1]?.split(".html") || [];
+
   const path = subUrlPath?.startsWith("/") ? subUrlPath : `/${subUrlPath}`;
   const hash = subUrlHash ? `${subUrlHash}` : "";
-  
+
   return { path, hash };
 };
 
@@ -46,28 +48,23 @@ const navigateToUrl = (url: string, setOpen: (open: boolean) => void) => {
   setOpen(false);
 };
 
-// Add new utility function for framework detection and prioritization
-const getCurrentFramework = (): string | null => {
-  if (typeof window === 'undefined') return null;
-  const path = window.location.pathname;
-  const frameworks = ['react', 'vue', 'svelte', 'react-native', 'angular', 'vanilla'];
-  return frameworks.find(framework => path.includes(`/${framework}`)) || null;
-};
-
-const prioritizeResultsByFramework = (results: PagefindResult[], currentFramework: string | null): PagefindResult[] => {
+const prioritizeResultsByFramework = (
+  results: PagefindResult[],
+  currentFramework: string | null,
+): PagefindResult[] => {
   if (!currentFramework) return results;
-  
+
   return results.sort((a, b) => {
     const aUrl = processUrl(a.url);
     const bUrl = processUrl(b.url);
-    
+
     const aHasFramework = aUrl.includes(`/${currentFramework}`);
     const bHasFramework = bUrl.includes(`/${currentFramework}`);
-    
+
     // Prioritize results that match the current framework
     if (aHasFramework && !bHasFramework) return -1;
     if (!aHasFramework && bHasFramework) return 1;
-    
+
     // Keep original order for results with same framework priority
     return 0;
   });
@@ -107,12 +104,12 @@ function HighlightedText({ text }: { text: string }) {
   );
 }
 
-function SearchInput({ 
-  query, 
-  onSearch 
-}: { 
-  query: string; 
-  onSearch: (value: string) => void; 
+function SearchInput({
+  query,
+  onSearch,
+}: {
+  query: string;
+  onSearch: (value: string) => void;
 }) {
   return (
     <Command.Input
@@ -132,12 +129,12 @@ function EmptyState() {
   );
 }
 
-function MainResultItem({ 
-  result, 
-  onSelect 
-}: { 
-  result: PagefindResult; 
-  onSelect: () => void; 
+function MainResultItem({
+  result,
+  onSelect,
+}: {
+  result: PagefindResult;
+  onSelect: () => void;
 }) {
   return (
     <Command.Item
@@ -160,12 +157,12 @@ function MainResultItem({
   );
 }
 
-function SubResultItem({ 
-  subResult, 
-  onSelect 
-}: { 
-  subResult: NonNullable<PagefindResult["sub_results"]>[number]; 
-  onSelect: () => void; 
+function SubResultItem({
+  subResult,
+  onSelect,
+}: {
+  subResult: NonNullable<PagefindResult["sub_results"]>[number];
+  onSelect: () => void;
 }) {
   return (
     <Command.Item
@@ -189,12 +186,12 @@ function SubResultItem({
   );
 }
 
-function SearchResults({ 
-  results, 
+function SearchResults({
+  results,
   setOpen,
-  listRef 
-}: { 
-  results: PagefindResult[]; 
+  listRef,
+}: {
+  results: PagefindResult[];
   setOpen: (open: boolean) => void;
   listRef: React.RefObject<HTMLDivElement>;
 }) {
@@ -208,11 +205,7 @@ function SearchResults({
       ) : (
         <Command.Group>
           {results.map((result) => (
-            <SearchResult
-              key={result.id}
-              result={result}
-              setOpen={setOpen}
-            />
+            <SearchResult key={result.id} result={result} setOpen={setOpen} />
           ))}
         </Command.Group>
       )}
@@ -235,7 +228,9 @@ function SearchResult({
     navigateToUrl(url, setOpen);
   };
 
-  const handleSubResultSelect = (subResult: NonNullable<PagefindResult["sub_results"]>[number]) => {
+  const handleSubResultSelect = (
+    subResult: NonNullable<PagefindResult["sub_results"]>[number],
+  ) => {
     const { path, hash } = processSubUrl(subResult.url);
     navigateToUrl(`${path}${hash}`, setOpen);
   };
@@ -249,7 +244,7 @@ function SearchResult({
           {result.sub_results.map((subResult) => {
             // Avoid showing duplicate results
             if (subResult.title === result.meta.title) return null;
-            
+
             return (
               <SubResultItem
                 key={subResult.id}
@@ -269,6 +264,7 @@ export function PagefindSearch() {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<PagefindResult[]>([]);
   const listRef = useRef<HTMLDivElement>(null);
+  const currentFramework = useFramework();
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -291,15 +287,15 @@ export function PagefindSearch() {
             /* webpackIgnore: true */ "/_next/static/chunks/pages/pagefind/pagefind.js"
           );
           window.pagefind = pagefindModule.default || pagefindModule;
-          
+
           // Configure ranking based on current framework context
           if (window.pagefind && window.pagefind.options) {
             await window.pagefind.options({
               ranking: {
                 termFrequency: 0.8, // Reduce term frequency weight to favor content density
-                pageLength: 0.6,    // Reduce page length bias to favor comprehensive docs
-                termSaturation: 1.2 // Allow more term repetition to boost framework-specific content
-              }
+                pageLength: 0.6, // Reduce page length bias to favor comprehensive docs
+                termSaturation: 1.2, // Allow more term repetition to boost framework-specific content
+              },
             });
           }
         } catch (e) {
@@ -323,13 +319,14 @@ export function PagefindSearch() {
       const results = await Promise.all(
         search.results.map((result: any) => result.data()),
       );
-      
-      // Prioritize results based on current framework
-      const currentFramework = getCurrentFramework();
-      const prioritizedResults = prioritizeResultsByFramework(results, currentFramework);
+
+      const prioritizedResults = prioritizeResultsByFramework(
+        results,
+        currentFramework,
+      );
 
       console.log(prioritizedResults);
-      
+
       setResults(prioritizedResults);
     }
   };
@@ -349,8 +346,10 @@ export function PagefindSearch() {
       label="Search"
       className="fixed top-[10%] sm:top-1/2 left-1/2 -translate-x-1/2 sm:-translate-y-1/2 w-full sm:w-auto z-20"
       shouldFilter={false}
+      title="Search"
     >
-      <div className="w-full sm:w-[640px] mx-auto max-w-[calc(100%-2rem)] overflow-hidden rounded-xl bg-gradient-to-b from-gray-900 to-gray-800 shadow-2xl border border-gray-700
+      <div
+        className="w-full sm:w-[640px] mx-auto max-w-[calc(100%-2rem)] overflow-hidden rounded-xl bg-gradient-to-b from-gray-900 to-gray-800 shadow-2xl border border-gray-700
         origin-center animate-in fade-in
         data-[state=open]:animate-in data-[state=closed]:animate-out
         data-[state=open]:scale-100 data-[state=closed]:scale-95
@@ -358,7 +357,8 @@ export function PagefindSearch() {
         transition-all duration-200 ease-in-out
         hover:border-gray-600
         hover:shadow-[0_0_30px_rgba(0,0,0,0.2)]
-        hover:shadow-indigo-500/10">
+        hover:shadow-indigo-500/10"
+      >
         <SearchInput query={query} onSearch={handleSearch} />
         <SearchResults results={results} setOpen={setOpen} listRef={listRef} />
       </div>
