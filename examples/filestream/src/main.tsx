@@ -13,7 +13,7 @@ createRoot(document.getElementById("root")!).render(
   <StrictMode>
     <JazzProvider
       sync={{
-        peer: `wss://cloud.jazz.tools/?key=${apiKey}`,
+        peer: peer ?? `wss://cloud.jazz.tools/?key=${apiKey}`,
       }}
       AccountSchema={JazzAccount}
     >
