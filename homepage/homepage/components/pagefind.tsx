@@ -1,5 +1,6 @@
 "use client";
 
+import { Framework } from "@/content/framework";
 import { useFramework } from "@/lib/use-framework";
 import { Command } from "cmdk";
 import React, { useState, useEffect, useRef } from "react";
@@ -48,18 +49,57 @@ const navigateToUrl = (url: string, setOpen: (open: boolean) => void) => {
   setOpen(false);
 };
 
+const filterAndPrioritizeResultsByFramework = (
+  results: PagefindResult[],
+  currentFramework: Framework = Framework.React,
+  query: string,
+): PagefindResult[] => {
+  const frameworksToSearch: Framework[] = [];
+
+  if (Framework.Svelte.startsWith(query)) {
+    frameworksToSearch.push(Framework.Svelte);
+  } else if (Framework.Vue.startsWith(query)) {
+    frameworksToSearch.push(Framework.Vue);
+  } else if (
+    Framework.ReactNativeExpo.startsWith(query) ||
+    query.includes("expo") ||
+    "react native expo".startsWith(query)
+  ) {
+    frameworksToSearch.push(Framework.ReactNativeExpo);
+  } else if (
+    Framework.ReactNative.startsWith(query) ||
+    "react native".startsWith(query)
+  ) {
+    frameworksToSearch.push(Framework.ReactNative);
+  }
+
+  frameworksToSearch.push(currentFramework);
+
+  console.log(frameworksToSearch);
+
+  const filteredResults = results.filter((result) => {
+    const url = processUrl(result.url);
+    const fragments = url.split("/").filter(Boolean);
+    const frameworkInUrl = fragments[1];
+
+    return fragments.length > 1
+      ? frameworksToSearch.includes(frameworkInUrl as Framework)
+      : false;
+  });
+
+  return prioritizeResultsByFramework(filteredResults, frameworksToSearch[0]);
+};
+
 const prioritizeResultsByFramework = (
   results: PagefindResult[],
-  currentFramework: string | null,
+  framework: Framework,
 ): PagefindResult[] => {
-  if (!currentFramework) return results;
-
   return results.sort((a, b) => {
     const aUrl = processUrl(a.url);
     const bUrl = processUrl(b.url);
 
-    const aHasFramework = aUrl.includes(`/${currentFramework}`);
-    const bHasFramework = bUrl.includes(`/${currentFramework}`);
+    const aHasFramework = aUrl.includes(`/${framework}`);
+    const bHasFramework = bUrl.includes(`/${framework}`);
 
     // Prioritize results that match the current framework
     if (aHasFramework && !bHasFramework) return -1;
@@ -320,14 +360,13 @@ export function PagefindSearch() {
         search.results.map((result: any) => result.data()),
       );
 
-      const prioritizedResults = prioritizeResultsByFramework(
+      const filteredResults = filterAndPrioritizeResultsByFramework(
         results,
         currentFramework,
+        value,
       );
 
-      console.log(prioritizedResults);
-
-      setResults(prioritizedResults);
+      setResults(filteredResults);
     }
   };
 
@@ -346,7 +385,6 @@ export function PagefindSearch() {
       label="Search"
       className="fixed top-[10%] sm:top-1/2 left-1/2 -translate-x-1/2 sm:-translate-y-1/2 w-full sm:w-auto z-20"
       shouldFilter={false}
-      title="Search"
     >
       <div
         className="w-full sm:w-[640px] mx-auto max-w-[calc(100%-2rem)] overflow-hidden rounded-xl bg-gradient-to-b from-gray-900 to-gray-800 shadow-2xl border border-gray-700

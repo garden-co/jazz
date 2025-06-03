@@ -3,11 +3,11 @@
 import { HelpLinks } from "@/components/docs/HelpLinks";
 import { TableOfContents } from "@/components/docs/TableOfContents";
 import { JazzMobileNav } from "@/components/nav";
+import { useFramework } from "@/lib/use-framework";
 import type { IconName } from "@garden-co/design-system/src/components/atoms/Icon";
 import { Separator } from "@garden-co/design-system/src/components/atoms/Separator";
 import { NavSection } from "@garden-co/design-system/src/components/organisms/Nav";
 import { TocEntry } from "@stefanprobst/rehype-extract-toc";
-import { useFramework } from "@/lib/use-framework";
 
 export default function DocsLayout({
   children,
@@ -45,11 +45,13 @@ export default function DocsLayout({
     });
   }
 
-  const framework = useFramework()
+  const framework = useFramework();
 
   return (
     <>
-      <div data-pagefind-body data-pagefind-meta={`framework: ${framework}`}>{children}</div>
+      <div data-pagefind-body data-pagefind-meta={`framework: ${framework}`}>
+        {children}
+      </div>
 
       <div className="pl-3 py-8 shrink-0 text-sm sticky align-start top-[61px] w-[16rem] h-[calc(100vh-61px)] overflow-y-auto hidden lg:block">
         {itemsWithoutH1?.length ? (
