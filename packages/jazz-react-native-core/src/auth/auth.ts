@@ -12,3 +12,8 @@ export function clearUserCredentials() {
     kvStore.delete("jazz-logged-in-secret"),
   ]);
 }
+
+export function clearLocalData() {
+  const kvStore = KvStoreContext.getInstance().getStorage();
+  return kvStore.clearAll();
+}
