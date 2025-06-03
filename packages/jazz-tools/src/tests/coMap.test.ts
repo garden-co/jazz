@@ -11,7 +11,7 @@ import {
 } from "vitest";
 import { Group, co, subscribeToCoValue, z } from "../exports.js";
 import { Account } from "../index.js";
-import { CoKeys, Loaded, zodSchemaToCoSchema } from "../internal.js";
+import { Loaded, zodSchemaToCoSchema } from "../internal.js";
 import { createJazzTestAccount, setupJazzTestSync } from "../testing.js";
 import { setupTwoNodes, waitFor } from "./utils.js";
 
@@ -1354,5 +1354,219 @@ describe("Creating and finding unique CoMaps", async () => {
         "Network Error",
       );
     }
+  });
+});
+
+describe("castAs", () => {
+  test("should cast a co.map type", () => {
+    const Person = co.map({
+      name: z.string(),
+    });
+
+    const PersonWithAge = co.map({
+      name: z.string(),
+      age: z.number().optional(),
+    });
+
+    const person = Person.create({
+      name: "Alice",
+    });
+
+    const personWithAge = person.castAs(PersonWithAge);
+
+    personWithAge.age = 20;
+
+    expect(personWithAge.age).toEqual(20);
+  });
+
+  test("should still be able to autoload in-memory deps", () => {
+    const Dog = co.map({
+      name: z.string(),
+    });
+
+    const Person = co.map({
+      name: z.string(),
+      dog: Dog,
+    });
+
+    const PersonWithAge = co.map({
+      name: z.string(),
+      age: z.number().optional(),
+      dog: Dog,
+    });
+
+    const person = Person.create({
+      name: "Alice",
+      dog: Dog.create({ name: "Rex" }),
+    });
+
+    const personWithAge = person.castAs(PersonWithAge);
+
+    personWithAge.age = 20;
+
+    expect(personWithAge.age).toEqual(20);
+    expect(personWithAge.dog?.name).toEqual("Rex");
+  });
+});
+
+describe("CoMap migration", () => {
+  test("should run on load", async () => {
+    const PersonV1 = co.map({
+      name: z.string(),
+      version: z.literal(1),
+    });
+
+    const Person = co
+      .map({
+        name: z.string(),
+        age: z.number(),
+        version: z.literal([1, 2]),
+      })
+      .withMigration((person) => {
+        if (person.version === 1) {
+          person.age = 20;
+          person.version = 2;
+        }
+      });
+
+    const person = PersonV1.create({
+      name: "Bob",
+      version: 1,
+    });
+
+    expect(person?.name).toEqual("Bob");
+    expect(person?.version).toEqual(1);
+
+    const loadedPerson = await Person.load(person.id);
+
+    expect(loadedPerson?.name).toEqual("Bob");
+    expect(loadedPerson?.age).toEqual(20);
+    expect(loadedPerson?.version).toEqual(2);
+  });
+
+  test("should handle group updates", async () => {
+    const Person = co
+      .map({
+        name: z.string(),
+        version: z.literal([1, 2]),
+      })
+      .withMigration((person) => {
+        if (person.version === 1) {
+          person.version = 2;
+
+          person._owner.castAs(Group).addMember("everyone", "reader");
+        }
+      });
+
+    const person = Person.create({
+      name: "Bob",
+      version: 1,
+    });
+
+    expect(person?.name).toEqual("Bob");
+    expect(person?.version).toEqual(1);
+
+    const loadedPerson = await Person.load(person.id);
+
+    expect(loadedPerson?.name).toEqual("Bob");
+    expect(loadedPerson?.version).toEqual(2);
+
+    const anotherAccount = await createJazzTestAccount();
+
+    const loadedPersonFromAnotherAccount = await Person.load(person.id, {
+      loadAs: anotherAccount,
+    });
+
+    expect(loadedPersonFromAnotherAccount?.name).toEqual("Bob");
+  });
+
+  test("should throw an error if a migration is async", async () => {
+    const Person = co
+      .map({
+        name: z.string(),
+        version: z.number(),
+      })
+      // @ts-expect-error async function
+      .withMigration(async () => {});
+
+    const person = Person.create({
+      name: "Bob",
+      version: 1,
+    });
+
+    await expect(Person.load(person.id)).rejects.toThrow(
+      "Migration function cannot be async",
+    );
+  });
+
+  test("should run only once", async () => {
+    const spy = vi.fn();
+    const Person = co
+      .map({
+        name: z.string(),
+        version: z.number(),
+      })
+      .withMigration((person) => {
+        spy(person);
+      });
+
+    const person = Person.create({
+      name: "Bob",
+      version: 1,
+    });
+
+    await Person.load(person.id);
+    await Person.load(person.id);
+    expect(spy).toHaveBeenCalledTimes(1);
+  });
+
+  test("should not break recursive schemas", async () => {
+    const PersonV1 = co.map({
+      name: z.string(),
+      version: z.literal(1),
+      get friend() {
+        return PersonV1.optional();
+      },
+    });
+
+    const Person = co
+      .map({
+        name: z.string(),
+        age: z.number(),
+        get friend() {
+          return Person.optional();
+        },
+        version: z.literal([1, 2]),
+      })
+      .withMigration((person) => {
+        if (person.version === 1) {
+          person.age = 20;
+          person.version = 2;
+        }
+      });
+
+    const charlie = PersonV1.create({
+      name: "Charlie",
+      version: 1,
+    });
+
+    const bob = PersonV1.create({
+      name: "Bob",
+      version: 1,
+      friend: charlie,
+    });
+
+    const loaded = await Person.load(bob.id, {
+      resolve: {
+        friend: true,
+      },
+    });
+
+    // Migration should run on both the person and their friend
+    expect(loaded?.name).toEqual("Bob");
+    expect(loaded?.age).toEqual(20);
+    expect(loaded?.version).toEqual(2);
+    expect(loaded?.friend?.name).toEqual("Charlie");
+    expect(loaded?.friend?.version).toEqual(2);
   });
 });

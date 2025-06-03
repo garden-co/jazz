@@ -1,7 +1,7 @@
 {
   "name": "passkey",
   "private": true,
-  "version": "0.0.113",
+  "version": "0.0.115",
   "type": "module",
   "scripts": {
     "dev": "vite",

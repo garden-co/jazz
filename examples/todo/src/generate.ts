@@ -19,6 +19,7 @@ export function generateRandomProject(
         faker.lorem.sentence({ min: 3, max: 8 }),
         tasks._owner,
       ),
+      version: 1,
     });
     tasks.push(task);
   }

@@ -1,7 +1,7 @@
 {
   "name": "jazz-inspector-app",
   "private": true,
-  "version": "0.0.165",
+  "version": "0.0.167",
   "type": "module",
   "scripts": {
     "dev": "vite",

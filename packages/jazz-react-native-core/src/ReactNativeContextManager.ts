@@ -6,7 +6,11 @@ import {
   KvStore,
   SyncConfig,
 } from "jazz-tools";
-import type { JazzContextManagerAuthProps } from "jazz-tools";
+import type {
+  AnyAccountSchema,
+  InstanceOfSchema,
+  JazzContextManagerAuthProps,
+} from "jazz-tools";
 import {
   BaseReactNativeContextOptions,
   createJazzReactNativeContext,
@@ -14,23 +18,31 @@ import {
 } from "./platform.js";
 import { KvStoreContext } from "./storage/kv-store-context.js";
 
-export type JazzContextManagerProps<Acc extends Account> = {
+export type JazzContextManagerProps<
+  S extends
+    | (AccountClass<Account> & CoValueFromRaw<Account>)
+    | AnyAccountSchema,
+> = {
   guestMode?: boolean;
   sync: SyncConfig;
   onLogOut?: () => void;
   logOutReplacement?: () => void;
   storage?: BaseReactNativeContextOptions["storage"];
-  AccountSchema?: AccountClass<Acc> & CoValueFromRaw<Acc>;
+  AccountSchema?: S;
   defaultProfileName?: string;
-  onAnonymousAccountDiscarded?: (anonymousAccount: Acc) => Promise<void>;
+  onAnonymousAccountDiscarded?: (
+    anonymousAccount: InstanceOfSchema<S>,
+  ) => Promise<void>;
   CryptoProvider?: BaseReactNativeContextOptions["CryptoProvider"];
 };
 
 export class ReactNativeContextManager<
-  Acc extends Account,
-> extends JazzContextManager<Acc, JazzContextManagerProps<Acc>> {
+  S extends
+    | (AccountClass<Account> & CoValueFromRaw<Account>)
+    | AnyAccountSchema,
+> extends JazzContextManager<InstanceOfSchema<S>, JazzContextManagerProps<S>> {
   async getNewContext(
-    props: JazzContextManagerProps<Acc>,
+    props: JazzContextManagerProps<S>,
     authProps?: JazzContextManagerAuthProps,
   ) {
     if (props.guestMode) {
@@ -41,9 +53,7 @@ export class ReactNativeContextManager<
         CryptoProvider: props.CryptoProvider,
       });
     } else {
-      return createJazzReactNativeContext<
-        AccountClass<Acc> & CoValueFromRaw<Acc>
-      >({
+      return createJazzReactNativeContext<S>({
         sync: props.sync,
         storage: props.storage,
         AccountSchema: props.AccountSchema,
@@ -60,7 +70,7 @@ export class ReactNativeContextManager<
     return KvStoreContext.getInstance().getStorage();
   }
 
-  propsChanged(props: JazzContextManagerProps<Acc>) {
+  propsChanged(props: JazzContextManagerProps<S>) {
     if (!this.props) {
       return true;
     }
