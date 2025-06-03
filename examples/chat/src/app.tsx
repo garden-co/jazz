@@ -50,7 +50,7 @@ export function App() {
 }
 
 const url = new URL(window.location.href);
-const peer = url.searchParams.get("peer") as `wss://${string}` | `wss://${string}` | null;
+const peer = url.searchParams.get("peer") as `wss://${string}` | `ws://${string}` | null;
 const defaultProfileName = url.searchParams.get("user") ?? getRandomUsername();
 
 createRoot(document.getElementById("root")!).render(

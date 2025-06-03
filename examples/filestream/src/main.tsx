@@ -10,7 +10,7 @@ import { JazzAccount } from "./schema.ts";
 // We use this to identify the app in the passkey auth
 export const APPLICATION_NAME = "Jazz File Stream Example";
 const url = new URL(window.location.href);
-const peer = url.searchParams.get("peer") as `wss://${string}` | `wss://${string}` | null;
+const peer = url.searchParams.get("peer") as `wss://${string}` | `ws://${string}` | null;
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
     <JazzProvider
