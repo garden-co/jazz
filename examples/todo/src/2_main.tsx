@@ -38,11 +38,14 @@ import { wordlist } from "./wordlist.ts";
  */
 const appName = "Jazz Todo List Example";
 
+const url = new URL(window.location.href);
+const peer = url.searchParams.get("peer") as `wss://${string}` | `wss://${string}` | null;
+
 function JazzAndAuth({ children }: { children: React.ReactNode }) {
   return (
     <JazzProvider
       sync={{
-        peer: `wss://cloud.jazz.tools/?key=${apiKey}`,
+        peer: peer ?? `wss://cloud.jazz.tools/?key=${apiKey}`,
       }}
       AccountSchema={TodoAccount}
     >
