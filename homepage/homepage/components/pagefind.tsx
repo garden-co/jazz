@@ -151,7 +151,7 @@ function MainResultItem({
     >
       <div className="min-w-0 flex-1">
         <h3 className="text-sm font-medium text-gray-200 truncate">
-          {result.meta?.title || "No title"}
+          {result.meta?.title || "No title"} ({(result.meta as any)?.framework})
         </h3>
         <HighlightedText text={result.excerpt || ""} />
       </div>
