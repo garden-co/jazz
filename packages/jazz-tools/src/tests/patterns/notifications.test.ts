@@ -15,6 +15,7 @@ const WorkerAccount = co
   .account({
     root: WorkerRoot,
     profile: co.profile(),
+    inbox: co.inbox(),
   })
   .withMigration((account) => {
     if (account.root === undefined) {

@@ -35,6 +35,7 @@ export const JazzAccount = co
   .account({
     profile: JazzProfile,
     root: AccountRoot,
+    inbox: co.inbox(),
   })
   .withMigration(async (account) => {
     /** The account migration is run on account creation and on every log-in.

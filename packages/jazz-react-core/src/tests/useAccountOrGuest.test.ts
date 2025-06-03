@@ -24,6 +24,7 @@ describe("useAccountOrGuest", () => {
     .account({
       root: AccountRoot,
       profile: co.profile(),
+      inbox: co.inbox(),
     })
     .withMigration((account, creationProps) => {
       if (!account._refs.root) {

@@ -175,7 +175,6 @@ export class RawProfile<
 
 export type InboxShape = {
   inbox: string;
-  inboxInvite: string;
 };
 
 export class RawInbox<

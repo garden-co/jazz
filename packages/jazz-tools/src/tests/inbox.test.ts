@@ -8,7 +8,14 @@ import {
   Profile,
   z,
 } from "../exports";
-import { Loaded, co, coField, zodSchemaToCoSchema } from "../internal";
+import {
+  AccountInbox,
+  Loaded,
+  co,
+  coField,
+  createInboxRoot,
+  zodSchemaToCoSchema,
+} from "../internal";
 import { setupTwoNodes, waitFor } from "./utils";
 
 const Message = co.map({
@@ -18,11 +25,23 @@ const Message = co.map({
 describe("Inbox", () => {
   describe("Private profile", () => {
     it("Should throw if the inbox owner profile is private", async () => {
-      const WorkerAccount = co.account().withMigration((account) => {
-        account.profile = co
-          .profile()
-          .create({ name: "Worker" }, Group.create({ owner: account }));
-      });
+      const WorkerAccount = co
+        .account({
+          inbox: co.inbox(),
+          profile: co.profile(),
+          root: co.map({}),
+        })
+        .withMigration((account) => {
+          if (!account.inbox?.inbox === undefined) {
+            const inboxRoot = createInboxRoot(account);
+            account.inbox = co
+              .inbox()
+              .create(
+                { inbox: inboxRoot.id },
+                Group.create({ owner: account }),
+              );
+          }
+        });
 
       const { clientAccount: sender, serverAccount: receiver } =
         await setupTwoNodes({
@@ -30,7 +49,7 @@ describe("Inbox", () => {
         });
 
       await expect(() => InboxSender.load(receiver.id, sender)).rejects.toThrow(
-        "Insufficient permissions to access the inbox, make sure its user profile is publicly readable.",
+        "Insufficient permissions to access the inbox, make sure it's publicly readable.",
       );
     });
   });
@@ -38,6 +57,9 @@ describe("Inbox", () => {
   it("should create inbox and allow message exchange between accounts", async () => {
     const { clientAccount: sender, serverAccount: receiver } =
       await setupTwoNodes();
+    await sender.applyMigration();
+    await receiver.applyMigration();
+    console.log("receiver.inbox", receiver.inbox);
 
     const receiverInbox = await Inbox.load(receiver);
 
@@ -79,6 +101,8 @@ describe("Inbox", () => {
   it("should work with empty CoMaps", async () => {
     const { clientAccount: sender, serverAccount: receiver } =
       await setupTwoNodes();
+    await sender.applyMigration();
+    await receiver.applyMigration();
 
     const EmptyMessage = co.map({});
 
@@ -122,6 +146,8 @@ describe("Inbox", () => {
   it("should return the result of the message", async () => {
     const { clientAccount: sender, serverAccount: receiver } =
       await setupTwoNodes();
+    await sender.applyMigration();
+    await receiver.applyMigration();
 
     const receiverInbox = await Inbox.load(receiver);
 
@@ -156,6 +182,8 @@ describe("Inbox", () => {
   it("should return the undefined if the subscription returns undefined", async () => {
     const { clientAccount: sender, serverAccount: receiver } =
       await setupTwoNodes();
+    await sender.applyMigration();
+    await receiver.applyMigration();
 
     const receiverInbox = await Inbox.load(receiver);
 
@@ -184,6 +212,8 @@ describe("Inbox", () => {
   it("should reject if the subscription throws an error", async () => {
     const { clientAccount: sender, serverAccount: receiver } =
       await setupTwoNodes();
+    await sender.applyMigration();
+    await receiver.applyMigration();
 
     const receiverInbox = await Inbox.load(receiver);
 
@@ -224,6 +254,8 @@ describe("Inbox", () => {
   it("should mark messages as processed", async () => {
     const { clientAccount: sender, serverAccount: receiver } =
       await setupTwoNodes();
+    await sender.applyMigration();
+    await receiver.applyMigration();
 
     const receiverInbox = await Inbox.load(receiver);
 
@@ -264,6 +296,8 @@ describe("Inbox", () => {
   it("should unsubscribe correctly", async () => {
     const { clientAccount: sender, serverAccount: receiver } =
       await setupTwoNodes();
+    await sender.applyMigration();
+    await receiver.applyMigration();
 
     const receiverInbox = await Inbox.load(receiver);
 
@@ -303,6 +337,8 @@ describe("Inbox", () => {
   it("should retry failed messages", async () => {
     const { clientAccount: sender, serverAccount: receiver } =
       await setupTwoNodes();
+    await sender.applyMigration();
+    await receiver.applyMigration();
 
     const receiverInbox = await Inbox.load(receiver);
 
@@ -348,6 +384,8 @@ describe("Inbox", () => {
   it("should not break the subscription if the message is unavailable", async () => {
     const { clientAccount: sender, serverAccount: receiver } =
       await setupTwoNodes();
+    await sender.applyMigration();
+    await receiver.applyMigration();
 
     const receiverInbox = await Inbox.load(receiver);
 

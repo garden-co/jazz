@@ -9,12 +9,14 @@ import {
   AnyCoMapSchema,
   CoFeed,
   CoFeedSchema,
+  CoInboxSchema,
   CoListSchema,
   CoMapSchema,
   CoPlainText,
   CoProfileSchema,
   CoRecordSchema,
   CoRichText,
+  DefaultInboxShape,
   DefaultProfileShape,
   FileStream,
   FileStreamSchema,
@@ -76,19 +78,21 @@ export const coAccountDefiner = <
   Shape extends {
     profile: AnyCoMapSchema<{
       name: z.core.$ZodString<string>;
-      inbox?: z.core.$ZodOptional<z.core.$ZodString>;
-      inboxInvite?: z.core.$ZodOptional<z.core.$ZodString>;
     }>;
     root: AnyCoMapSchema;
+    inbox: AnyCoMapSchema<{
+      inbox?: z.core.$ZodOptional<z.core.$ZodString>;
+    }>;
   },
 >(
   shape: Shape = {
     profile: coMapDefiner({
       name: z.string(),
-      inbox: z.optional(z.string()),
-      inboxInvite: z.optional(z.string()),
     }),
     root: coMapDefiner({}),
+    inbox: coMapDefiner({
+      inbox: z.optional(z.string()),
+    }),
   } as unknown as Shape,
 ): AccountSchema<Shape> => {
   const objectSchema = z.object(shape).meta({
@@ -222,19 +226,29 @@ export const coListDefiner = <T extends z.core.$ZodType>(
   return coListSchema;
 };
 
+export const coInboxDefiner = <
+  Shape extends z.core.$ZodLooseShape = Simplify<DefaultInboxShape>,
+>(
+  shape: Shape & {
+    inbox?: z.core.$ZodOptional<z.core.$ZodString>;
+  } = {} as any,
+): CoInboxSchema<Shape> => {
+  const ehnancedShape = Object.assign(shape ?? {}, {
+    inbox: z.optional(z.string()),
+  });
+
+  return coMapDefiner(ehnancedShape) as CoInboxSchema<Shape>;
+};
+
 export const coProfileDefiner = <
   Shape extends z.core.$ZodLooseShape = Simplify<DefaultProfileShape>,
 >(
   shape: Shape & {
     name?: z.core.$ZodString<string>;
-    inbox?: z.core.$ZodOptional<z.core.$ZodString>;
-    inboxInvite?: z.core.$ZodOptional<z.core.$ZodString>;
   } = {} as any,
 ): CoProfileSchema<Shape> => {
   const ehnancedShape = Object.assign(shape ?? {}, {
     name: z.string(),
-    inbox: z.optional(z.string()),
-    inboxInvite: z.optional(z.string()),
   });
 
   return coMapDefiner(ehnancedShape) as CoProfileSchema<Shape>;

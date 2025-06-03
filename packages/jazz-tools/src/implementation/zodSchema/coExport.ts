@@ -10,4 +10,5 @@ export {
   coImageDefiner as image,
   coAccountDefiner as account,
   coProfileDefiner as profile,
+  coInboxDefiner as inbox,
 } from "./zodCo.js";

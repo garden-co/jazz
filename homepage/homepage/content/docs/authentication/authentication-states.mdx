@@ -95,6 +95,7 @@ const MusicaAccountRoot = co.map({
 const MusicaAccount = co.account({
   root: MusicaAccountRoot,
   profile: co.profile({}),
+  inbox: co.inbox()
 });
 type MusicaAccount = co.loaded<typeof MusicaAccount>
 

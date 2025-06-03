@@ -125,6 +125,7 @@ describe("startWorker integration", () => {
       .account({
         root: AccountRoot,
         profile: co.profile(),
+        inbox: co.inbox(),
       })
       .withMigration((account) => {
         if (account.root === undefined) {

@@ -69,6 +69,7 @@ describe("createContext methods", () => {
         .account({
           root: co.map({}),
           profile: co.profile(),
+          inbox: co.inbox(),
         })
         .withMigration(async () => {});
 
@@ -188,6 +189,7 @@ describe("createContext methods", () => {
         .account({
           root: co.map({}),
           profile: co.profile(),
+          inbox: co.inbox(),
         })
         .withMigration(async () => {});
 
@@ -338,6 +340,7 @@ describe("createContext methods", () => {
         .account({
           root: co.map({}),
           profile: co.profile(),
+          inbox: co.inbox(),
         })
         .withMigration(async () => {});
 

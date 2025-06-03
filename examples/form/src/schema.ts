@@ -73,6 +73,7 @@ export const JazzAccount = co
   .account({
     root: AccountRoot,
     profile: co.profile(),
+    inbox: co.inbox(),
   })
   .withMigration((account) => {
     if (!account.root) {

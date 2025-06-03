@@ -26,6 +26,7 @@ describe("Custom accounts and groups", async () => {
       .account({
         profile: CustomProfile,
         root: co.map({}),
+        inbox: co.inbox(),
       })
       .withMigration(
         (

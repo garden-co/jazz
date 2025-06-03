@@ -31,6 +31,7 @@ const MyProfile = co.profile({
 const MyAccount = co.account({
   root: co.map({}),
   profile: MyProfile,
+  inbox: co.inbox()
 });
 
 MyAccount.withMigration((account, creationProps) => {
@@ -148,9 +149,9 @@ function GalleryView({ image }: { image: co.loaded<typeof Image> }) {
         targetWidth={800} // Looks for the best available resolution for a 800px image
       >
         {({ src }) => (
-          <img 
-            src={src} 
-            alt="Gallery image" 
+          <img
+            src={src}
+            alt="Gallery image"
             className="gallery-image"
           />
         )}
@@ -194,7 +195,7 @@ function CustomImageComponent({ image }: { image: co.loaded<typeof Image> }) {
   if (!src) {
     return <div className="image-loading-fallback">Loading image...</div>;
   }
-  
+
   // When image is loading, show a placeholder
   if (res === "placeholder") {
     return <img src={src} alt="Loading..." className="blur-effect" />;
@@ -203,9 +204,9 @@ function CustomImageComponent({ image }: { image: co.loaded<typeof Image> }) {
   // Full image display with custom overlay
   return (
     <div className="custom-image-wrapper">
-      <img 
-        src={src} 
-        alt="Custom image" 
+      <img
+        src={src}
+        alt="Custom image"
         className="custom-image"
       />
       <div className="image-overlay">

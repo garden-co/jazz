@@ -38,6 +38,7 @@ export const JazzAccount = co
   .account({
     profile: co.profile(),
     root: JazzAccountRoot,
+    inbox: co.inbox(),
   })
   .withMigration(async (account) => {
     if (account.profile === undefined) {

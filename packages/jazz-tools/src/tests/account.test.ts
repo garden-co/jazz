@@ -159,6 +159,7 @@ test("should support recursive props on co.profile", async () => {
     .account({
       profile: User,
       root: co.map({}),
+      inbox: co.inbox(),
     })
     .withMigration((me) => {
       if (me.profile === undefined) {

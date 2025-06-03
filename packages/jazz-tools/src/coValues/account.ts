@@ -65,9 +65,8 @@ type AccountMembers<A extends Account> = [
   },
 ];
 
-class Inbox extends CoMap {
+export class AccountInbox extends CoMap {
   inbox? = coField.optional.string;
-  inboxInvite? = coField.optional.string;
 }
 
 /** @category Identity & Permissions */
@@ -96,9 +95,9 @@ export class Account extends CoValueBase implements CoValue {
         optional: true,
       } satisfies RefEncoded<CoMap>,
       inbox: {
-        ref: () => Inbox,
-        optional: false,
-      } satisfies RefEncoded<Inbox>,
+        ref: () => AccountInbox,
+        optional: true,
+      } satisfies RefEncoded<AccountInbox>,
     };
   }
 
@@ -121,7 +120,7 @@ export class Account extends CoValueBase implements CoValue {
 
   declare profile: Profile | null;
   declare root: CoMap | null;
-  declare inbox: Inbox | null;
+  declare inbox: AccountInbox | null;
 
   getDescriptor(key: string) {
     if (key === "profile") {
@@ -138,7 +137,7 @@ export class Account extends CoValueBase implements CoValue {
   get _refs(): {
     profile: RefIfCoValue<Profile> | undefined;
     root: RefIfCoValue<CoMap> | undefined;
-    inbox: RefIfCoValue<Inbox> | undefined;
+    inbox: RefIfCoValue<AccountInbox> | undefined;
   } {
     const profileID = this._raw.get("profile") as unknown as
       | ID<NonNullable<this["profile"]>>
@@ -379,6 +378,13 @@ export class Account extends CoValueBase implements CoValue {
   async applyMigration(creationProps?: AccountCreationProps) {
     await this.migrate(creationProps);
 
+    if (this.inbox?.inbox === undefined) {
+      const inboxGroup = RegisteredSchemas["Group"].create({ owner: this });
+      const inboxRoot = createInboxRoot(this);
+      this.inbox = AccountInbox.create({ inbox: inboxRoot.id }, inboxGroup);
+      inboxGroup.addMember("everyone", "writeOnly");
+    }
+
     // if the user has not defined a profile themselves, we create one
     if (this.profile === undefined && creationProps) {
       const profileGroup = RegisteredSchemas["Group"].create({ owner: this });
@@ -397,12 +403,6 @@ export class Account extends CoValueBase implements CoValue {
     const profile = node
       .expectCoValueLoaded(this._raw.get("profile")!)
       .getCurrentContent() as RawCoMap;
-
-    if (!profile.get("inbox")) {
-      const inboxRoot = createInboxRoot(this);
-      profile.set("inbox", inboxRoot.id);
-      profile.set("inboxInvite", inboxRoot.inviteLink);
-    }
   }
 
   // Placeholder method for subclasses to override

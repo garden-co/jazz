@@ -1,10 +1,12 @@
 import { CoID, InviteSecret, RawAccount, RawCoMap, SessionID } from "cojson";
 import { CoStreamItem, RawCoStream } from "cojson";
 import {
-  type Account,
+  Account,
+  AccountInbox,
   CoValue,
   CoValueClass,
   CoValueOrZodSchema,
+  Group,
   ID,
   InstanceOfSchema,
   activeAccountContext,
@@ -13,7 +15,6 @@ import {
   zodSchemaToCoSchema,
 } from "../internal.js";
 
-export type InboxInvite = `${CoID<MessagesStream>}/${InviteSecret}`;
 type TxKey = `${SessionID}/${number}`;
 
 type MessagesStream = RawCoStream<CoID<InboxMessage<CoValue, any>>>;
@@ -26,7 +27,6 @@ export type InboxRoot = RawCoMap<{
   messages: CoID<MessagesStream>;
   processed: CoID<TxKeyStream>;
   failed: CoID<FailedMessagesStream>;
-  inviteLink: InboxInvite;
 }>;
 
 export function createInboxRoot(account: Account) {
@@ -37,14 +37,12 @@ export function createInboxRoot(account: Account) {
   const rawAccount = account._raw;
 
   const group = rawAccount.core.node.createGroup();
+  group.addMember("everyone", "writeOnly");
   const messagesFeed = group.createStream<MessagesStream>();
 
   const inboxRoot = rawAccount.createMap<InboxRoot>();
   const processedFeed = rawAccount.createStream<TxKeyStream>();
   const failedFeed = rawAccount.createStream<FailedMessagesStream>();
-
-  const inviteLink =
-    `${messagesFeed.id}/${group.createInvite("writeOnly")}` as const;
 
   inboxRoot.set("messages", messagesFeed.id);
   inboxRoot.set("processed", processedFeed.id);
@@ -52,7 +50,6 @@ export function createInboxRoot(account: Account) {
 
   return {
     id: inboxRoot.id,
-    inviteLink,
   };
 }
 
@@ -249,12 +246,6 @@ export class Inbox {
   }
 
   static async load(account: Account) {
-    const profile = account.profile;
-
-    if (!profile) {
-      throw new Error("Account profile should already be loaded");
-    }
-
     if (!account.inbox?.inbox) {
       throw new Error("The account has not set up their inbox");
     }
@@ -343,31 +334,32 @@ export class InboxSender<I extends CoValue, O extends CoValue | undefined> {
       throw new Error("Failed to load the inbox owner");
     }
 
-    const inboxOwnerProfileRaw = await node.load(inboxOwnerRaw.get("profile")!);
+    const inboxOwnerInbox = await node.load(currentAccount.inbox?._raw.id!);
 
-    if (inboxOwnerProfileRaw === "unavailable") {
-      throw new Error("Failed to load the inbox owner profile");
+    if (inboxOwnerInbox === "unavailable") {
+      throw new Error("Failed to load the inbox owner's inbox ID");
     }
 
     if (
-      inboxOwnerProfileRaw.group.roleOf(currentAccount._raw.id) !== "reader" &&
-      inboxOwnerProfileRaw.group.roleOf(currentAccount._raw.id) !== "writer" &&
-      inboxOwnerProfileRaw.group.roleOf(currentAccount._raw.id) !== "admin"
+      inboxOwnerInbox.group.roleOf(currentAccount._raw.id) !== "writeOnly" &&
+      inboxOwnerInbox.group.roleOf(currentAccount._raw.id) !== "reader" &&
+      inboxOwnerInbox.group.roleOf(currentAccount._raw.id) !== "writer" &&
+      inboxOwnerInbox.group.roleOf(currentAccount._raw.id) !== "admin"
     ) {
       throw new Error(
-        "Insufficient permissions to access the inbox, make sure its user profile is publicly readable.",
+        "Insufficient permissions to access the inbox, make sure it's publicly readable.",
       );
     }
 
-    const inboxInvite = inboxOwnerProfileRaw.get("inboxInvite");
+    const inboxRoot = await node.load(
+      inboxOwnerInbox.get("inbox") as CoID<InboxRoot>,
+    );
 
-    if (!inboxInvite) {
-      throw new Error("The user has not set up their inbox");
+    if (inboxRoot === "unavailable") {
+      throw new Error("Failed to load the inbox root");
     }
 
-    const id = await acceptInvite(inboxInvite as InboxInvite, currentAccount);
-
-    const messages = await node.load(id);
+    const messages = await node.load(inboxRoot.get("messages")!);
 
     if (messages === "unavailable") {
       throw new Error("Inbox not found");
@@ -375,26 +367,6 @@ export class InboxSender<I extends CoValue, O extends CoValue | undefined> {
 
     return new InboxSender<I, O>(currentAccount, inboxOwnerRaw, messages);
   }
-}
-
-async function acceptInvite(invite: string, account?: Account) {
-  account ||= activeAccountContext.get();
-
-  const id = invite.slice(0, invite.indexOf("/")) as CoID<MessagesStream>;
-
-  const inviteSecret = invite.slice(invite.indexOf("/") + 1) as InviteSecret;
-
-  if (!id?.startsWith("co_z") || !inviteSecret.startsWith("inviteSecret_")) {
-    throw new Error("Invalid inbox ticket");
-  }
-
-  if (!account.isLocalNodeOwner) {
-    throw new Error("Account is not controlled");
-  }
-
-  await account._raw.core.node.acceptInvite(id, inviteSecret);
-
-  return id;
 }
 
 function getAccountIDfromSessionID(sessionID: SessionID) {

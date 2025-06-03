@@ -21,17 +21,17 @@ export type AccountSchema<
   Shape extends {
     profile: AnyCoMapSchema<{
       name: z.core.$ZodString<string>;
-      inbox?: z.core.$ZodOptional<z.core.$ZodString>;
-      inboxInvite?: z.core.$ZodOptional<z.core.$ZodString>;
     }>;
     root: AnyCoMapSchema;
+    inbox: AnyCoMapSchema;
   } = {
     profile: CoMapSchema<{
       name: z.core.$ZodString<string>;
-      inbox?: z.core.$ZodOptional<z.core.$ZodString>;
-      inboxInvite?: z.core.$ZodOptional<z.core.$ZodString>;
     }>;
     root: CoMapSchema<{}>;
+    inbox: CoMapSchema<{
+      inbox: z.core.$ZodOptional<z.core.$ZodString>;
+    }>;
   },
 > = Omit<CoMapSchema<Shape>, "create" | "load"> & {
   builtin: "Account";
@@ -66,10 +66,17 @@ export type AccountSchema<
   ): AccountSchema<Shape>;
 };
 
+export type DefaultInboxShape = {
+  inbox: z.core.$ZodOptional<z.core.$ZodString>;
+};
+
+export type CoInboxSchema<
+  Shape extends z.core.$ZodLooseShape = DefaultInboxShape,
+  Config extends z.core.$ZodObjectConfig = z.core.$ZodObjectConfig,
+> = CoMapSchema<Shape & DefaultInboxShape, Config, Group>;
+
 export type DefaultProfileShape = {
   name: z.core.$ZodString<string>;
-  inbox: z.core.$ZodOptional<z.core.$ZodString>;
-  inboxInvite: z.core.$ZodOptional<z.core.$ZodString>;
 };
 
 export type CoProfileSchema<

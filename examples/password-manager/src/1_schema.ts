@@ -28,6 +28,7 @@ export const PasswordManagerAccount = co
   .account({
     profile: co.profile(),
     root: PasswordManagerAccountRoot,
+    inbox: co.inbox(),
   })
   .withMigration(async (account) => {
     if (!account.root) {

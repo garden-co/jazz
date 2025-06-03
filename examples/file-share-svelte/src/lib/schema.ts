@@ -18,6 +18,7 @@ export const FileShareAccountRoot = co.map({
 export const FileShareAccount = co.account({
   profile: co.profile(),
   root: FileShareAccountRoot,
+  inbox: co.inbox()
 }).withMigration((account) => {
   if (account.root === undefined) {
     const publicGroup = Group.create({ owner: account });

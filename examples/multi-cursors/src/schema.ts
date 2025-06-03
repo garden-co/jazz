@@ -20,6 +20,7 @@ export const CursorAccount = co
   .account({
     profile: CursorProfile,
     root: CursorRoot,
+    inbox: co.inbox(),
   })
   .withMigration((account) => {
     if (account.root === undefined) {

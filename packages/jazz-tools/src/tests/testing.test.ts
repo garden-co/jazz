@@ -33,6 +33,7 @@ describe("Jazz Test Sync", () => {
       .account({
         root: MyRoot,
         profile: co.profile(),
+        inbox: co.inbox(),
       })
       .withMigration((account) => {
         if (account.root === undefined) {
@@ -59,6 +60,7 @@ describe("Jazz Test Sync", () => {
       .account({
         root: MyRoot,
         profile: co.profile(),
+        inbox: co.inbox(),
       })
       .withMigration((account) => {
         if (account.root === undefined) {

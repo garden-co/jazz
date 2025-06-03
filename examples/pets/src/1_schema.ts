@@ -34,6 +34,7 @@ export const PetAccount = co
   .account({
     profile: co.profile(),
     root: PetAccountRoot,
+    inbox: co.inbox(),
   })
   .withMigration(async (account) => {
     if (!account.root) {
