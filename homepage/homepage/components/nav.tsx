@@ -1,4 +1,5 @@
 import { ThemeToggle } from "@/components/ThemeToggle";
+import { QuickSearch } from "@/components/quick-search";
 import { navigationItems } from "@/content/navigation-items";
 import { socials } from "@/content/socials";
 import { JazzLogo } from "@garden-co/design-system/src/components/atoms/logos/JazzLogo";
@@ -20,7 +21,8 @@ export function JazzNav({
       items={navigationItems}
       socials={socials}
       hideMobileNav={hideMobileNav}
-    />
+      cta={<QuickSearch />}
+    ></Nav>
   );
 }
 

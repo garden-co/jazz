@@ -362,14 +362,14 @@ export function Nav(props: NavProps) {
             />
           ))}
 
+          {cta}
+
           <SocialLinks
             {...props.socials}
             className={
               !items.find((item) => item.firstOnRight) ? "ml-auto" : ""
             }
           />
-
-          {cta}
         </PopoverGroup>
       </div>
       {!hideMobileNav && <MobileNav {...props} />}

@@ -36,6 +36,7 @@ import {
   MousePointerSquareDashedIcon,
   ScanFace,
   ScrollIcon,
+  SearchIcon,
   SunIcon,
   TrashIcon,
   UploadCloudIcon,
@@ -91,6 +92,7 @@ const icons = {
   colist: Brackets,
   user: UserIcon,
   group: UsersIcon,
+  search: SearchIcon,
 
   previous: ChevronLeftIcon,
   next: ChevronRightIcon,
