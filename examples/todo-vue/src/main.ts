@@ -13,7 +13,7 @@ declare module "jazz-vue" {
 }
 
 const url = new URL(window.location.href);
-const peer = url.searchParams.get("peer") as `wss://${string}` | `wss://${string}` | null;
+const peer = url.searchParams.get("peer") as `wss://${string}` | `ws://${string}` | null;
 
 
 const RootComponent = defineComponent({
