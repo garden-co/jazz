@@ -46,6 +46,33 @@ const navigateToUrl = (url: string, setOpen: (open: boolean) => void) => {
   setOpen(false);
 };
 
+// Add new utility function for framework detection and prioritization
+const getCurrentFramework = (): string | null => {
+  if (typeof window === 'undefined') return null;
+  const path = window.location.pathname;
+  const frameworks = ['react', 'vue', 'svelte', 'react-native', 'angular', 'vanilla'];
+  return frameworks.find(framework => path.includes(`/${framework}`)) || null;
+};
+
+const prioritizeResultsByFramework = (results: PagefindResult[], currentFramework: string | null): PagefindResult[] => {
+  if (!currentFramework) return results;
+  
+  return results.sort((a, b) => {
+    const aUrl = processUrl(a.url);
+    const bUrl = processUrl(b.url);
+    
+    const aHasFramework = aUrl.includes(`/${currentFramework}`);
+    const bHasFramework = bUrl.includes(`/${currentFramework}`);
+    
+    // Prioritize results that match the current framework
+    if (aHasFramework && !bHasFramework) return -1;
+    if (!aHasFramework && bHasFramework) return 1;
+    
+    // Keep original order for results with same framework priority
+    return 0;
+  });
+};
+
 // Hooks
 export const usePagefindSearch = singletonHook(
   { open: false, setOpen: () => {} },
@@ -285,7 +312,14 @@ export function PagefindSearch() {
       const results = await Promise.all(
         search.results.map((result: any) => result.data()),
       );
-      setResults(results);
+      
+      // Prioritize results based on current framework
+      const currentFramework = getCurrentFramework();
+      const prioritizedResults = prioritizeResultsByFramework(results, currentFramework);
+
+      console.log(prioritizedResults);
+      
+      setResults(prioritizedResults);
     }
   };
 
@@ -330,6 +364,14 @@ declare global {
           data: () => Promise<PagefindResult>;
         }>;
       }>;
+      options?: (config: {
+        ranking?: {
+          termFrequency?: number;
+          pageLength?: number;
+          termSaturation?: number;
+          termSimilarity?: number;
+        };
+      }) => Promise<void>;
     };
   }
 }
