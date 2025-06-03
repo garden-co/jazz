@@ -291,6 +291,17 @@ export function PagefindSearch() {
             /* webpackIgnore: true */ "/_next/static/chunks/pages/pagefind/pagefind.js"
           );
           window.pagefind = pagefindModule.default || pagefindModule;
+          
+          // Configure ranking based on current framework context
+          if (window.pagefind && window.pagefind.options) {
+            await window.pagefind.options({
+              ranking: {
+                termFrequency: 0.8, // Reduce term frequency weight to favor content density
+                pageLength: 0.6,    // Reduce page length bias to favor comprehensive docs
+                termSaturation: 1.2 // Allow more term repetition to boost framework-specific content
+              }
+            });
+          }
         } catch (e) {
           window.pagefind = { search: async () => ({ results: [] }) };
         }
