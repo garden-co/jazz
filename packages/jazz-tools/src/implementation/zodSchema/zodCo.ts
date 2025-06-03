@@ -82,10 +82,11 @@ function enrichAccountSchema<
   Shape extends {
     profile: AnyCoMapSchema<{
       name: z.core.$ZodString<string>;
-      inbox?: z.core.$ZodOptional<z.core.$ZodString>;
-      inboxInvite?: z.core.$ZodOptional<z.core.$ZodString>;
     }>;
     root: AnyCoMapSchema;
+    inbox: AnyCoMapSchema<{
+      inbox?: z.core.$ZodOptional<z.core.$ZodString>;
+    }>;
   },
 >(schema: z.ZodObject<Shape, z.core.$strip>) {
   const enrichedSchema = Object.assign(schema, {
