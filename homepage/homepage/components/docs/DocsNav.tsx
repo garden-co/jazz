@@ -1,10 +1,8 @@
 "use client";
 
-import { SideNav, SideNavBody, SideNavHeader } from "@/components/SideNav";
+import { SideNav, SideNavBody } from "@/components/SideNav";
 import { SideNavSection } from "@/components/SideNavSection";
 import { FrameworkSelect } from "@/components/docs/FrameworkSelect";
-import { usePagefindSearch } from "@/components/pagefind";
-import { QuickSearch } from "@/components/quick-search";
 import { docNavigationItems } from "@/content/docs/docNavigationItems";
 import { DocNavigationSection } from "@/content/docs/docNavigationItemsTypes";
 import { useFramework } from "@/lib/use-framework";
@@ -37,14 +35,9 @@ export function DocNav() {
       };
     },
   );
-  const { setOpen } = usePagefindSearch();
 
   return (
     <SideNav>
-      <div className="pb-5">
-        <QuickSearch onClick={() => setOpen((open) => !open)} />
-      </div>
-
       <FrameworkSelect />
 
       <SideNavBody>
