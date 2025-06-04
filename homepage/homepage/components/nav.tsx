@@ -35,6 +35,7 @@ export function JazzMobileNav({ sections }: { sections?: NavSection[] }) {
       themeToggle={ThemeToggle}
       items={navigationItems}
       socials={socials}
+      cta={<QuickSearch />}
     />
   );
 }
