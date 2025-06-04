@@ -667,16 +667,16 @@ const categories = [
     examples: rnExamples,
   },
   {
-    name: "Vue",
-    id: "vue",
-    logo: VueLogo,
-    examples: vueExamples,
-  },
-  {
     name: "Svelte",
     id: "svelte",
     logo: SvelteLogo,
     examples: svelteExamples,
+  },
+  {
+    name: "Vue",
+    id: "vue",
+    logo: VueLogo,
+    examples: vueExamples,
   },
 ];
 
