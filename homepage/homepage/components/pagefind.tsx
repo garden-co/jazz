@@ -2,7 +2,10 @@
 
 import { Framework, frameworks } from "@/content/framework";
 import { useFramework } from "@/lib/use-framework";
-import { Command } from "cmdk";
+import {
+  Dialog,
+  DialogBody,
+} from "@garden-co/design-system/src/components/organisms/Dialog";
 import React, { useState, useEffect, useRef } from "react";
 import { singletonHook } from "react-singleton-hook";
 
@@ -14,12 +17,14 @@ interface PagefindResult {
     title: string;
   };
   excerpt: string;
-  sub_results?: Array<{
-    id: string;
-    title: string;
-    url: string;
-    excerpt: string;
-  }>;
+  sub_results?: Array<PagefindSubResult>;
+}
+
+interface PagefindSubResult {
+  id: string;
+  title: string;
+  url: string;
+  excerpt: string;
 }
 
 // Constants
@@ -43,10 +48,10 @@ const processSubUrl = (url: string): { path: string; hash: string } => {
   return { path, hash };
 };
 
-const navigateToUrl = (url: string, setOpen: (open: boolean) => void) => {
+const navigateToUrl = (url: string, setOpen?: (open: boolean) => void) => {
   if (!url) return;
   window.location.href = `${window.location.origin}${url}`;
-  setOpen(false);
+  // setOpen(false);
 };
 
 const alternativeKeywordsByFramework: Partial<Record<Framework, string[]>> = {
@@ -72,7 +77,6 @@ const filterAndPrioritizeResultsByFramework = (
   frameworks.forEach((framework) => {
     const alternativeKeywords = alternativeKeywordsByFramework[framework] || [];
 
-    // Check if query contains framework name or any of its alternative keywords
     if (
       framework.startsWith(query) ||
       alternativeKeywords.some((keyword: string) => keyword.startsWith(query))
@@ -126,7 +130,6 @@ export const usePagefindSearch = singletonHook(
   },
 );
 
-// Components
 function HighlightedText({ text }: { text: string }) {
   const decodedText = text.replace(/&lt;/g, "<").replace(/&gt;/g, ">");
   const parts = decodedText.split(/(<mark>.*?<\/mark>)/g);
@@ -151,157 +154,48 @@ function HighlightedText({ text }: { text: string }) {
   );
 }
 
-function SearchInput({
-  query,
-  onSearch,
-}: {
-  query: string;
-  onSearch: (value: string) => void;
-}) {
-  return (
-    <Command.Input
-      value={query}
-      onValueChange={onSearch}
-      placeholder="Search documentation..."
-      className="w-full text-base sm:text-lg px-4 sm:px-5 py-4 sm:py-5 outline-none border-b bg-white dark:bg-stone-950 text-stone-900 dark:text-stone-100 placeholder:text-stone-400 dark:placeholder:text-stone-500 focus-visible:ring-0"
-    />
-  );
-}
-
-function EmptyState() {
-  return (
-    <Command.Empty className="flex items-center justify-center h-16 text-sm">
-      No results found.
-    </Command.Empty>
-  );
-}
-
-function MainResultItem({
+function Result({
   result,
-  onSelect,
+  onClick,
 }: {
-  result: PagefindResult;
-  onSelect: () => void;
+  result: PagefindResult | PagefindSubResult;
+  onClick: () => void;
 }) {
-  return (
-    <Command.Item
-      value={result.meta.title}
-      onSelect={onSelect}
-      className="group relative flex items-center gap-2 sm:gap-3 px-3 sm:px-4 py-2 sm:py-3 cursor-pointer text-sm rounded-md mt-1 select-none
-      transition-all duration-200 ease-in-out
-      animate-in fade-in-0
-      data-[selected=true]:bg-stone-100 dark:data-[selected=true]:bg-stone-925 hover:bg-stone-100 dark:hover:bg-stone-925 active:bg-stone-100 dark:active:bg-stone-925
-      max-w-full"
-    >
-      <div className="min-w-0 flex-1">
-        <h3 className="font-medium text-highlight truncate">
-          {result.meta?.title || "No title"} ({(result.meta as any)?.framework})
-        </h3>
-        <HighlightedText text={result.excerpt || ""} />
-      </div>
-      <div className="absolute left-0 w-[3px] h-full bg-primary transition-opacity duration-200 ease-in-out opacity-0 group-data-[selected=true]:opacity-100" />
-    </Command.Item>
-  );
-}
-
-function SubResultItem({
-  subResult,
-  onSelect,
-}: {
-  subResult: NonNullable<PagefindResult["sub_results"]>[number];
-  onSelect: () => void;
-}) {
-  return (
-    <Command.Item
-      key={subResult.id}
-      value={subResult.title}
-      onSelect={onSelect}
-      className="group relative flex items-center gap-2 sm:gap-3 px-3 sm:px-4 py-2 sm:py-3 cursor-pointer text-sm rounded-md mt-1 select-none
-      transition-all duration-200 ease-in-out
-      animate-in fade-in-0
-      data-[selected=true]:bg-stone-100 dark:data-[selected=true]:bg-stone-925 hover:bg-stone-100 dark:hover:bg-stone-925 active:bg-stone-100 dark:active:bg-stone-925
-      max-w-full"
-    >
-      <div className="min-w-0 flex-1">
-        <h4 className="text-sm font-medium truncate text-highlight">
-          {subResult?.title || "No title"}
-        </h4>
-        <HighlightedText text={subResult?.excerpt || ""} />
-      </div>
-      <div className="absolute left-0 w-[3px] h-full bg-primary transition-opacity duration-200 ease-in-out opacity-0 group-data-[selected=true]:opacity-100" />
-    </Command.Item>
-  );
-}
-
-function SearchResults({
-  results,
-  setOpen,
-  listRef,
-}: {
-  results: PagefindResult[];
-  setOpen: (open: boolean) => void;
-  listRef: React.RefObject<HTMLDivElement>;
-}) {
-  return (
-    <Command.List
-      ref={listRef}
-      className="h-[50vh] sm:h-[300px] max-h-[60vh] sm:max-h-[400px] overflow-y-auto overflow-x-hidden overscroll-contain transition-all duration-100 ease-in p-2"
-    >
-      {results.length === 0 ? (
-        <EmptyState />
-      ) : (
-        <Command.Group>
-          {results.map((result) => (
-            <SearchResult key={result.id} result={result} setOpen={setOpen} />
-          ))}
-        </Command.Group>
-      )}
-    </Command.List>
-  );
-}
-
-function SearchResult({
-  result,
-  setOpen,
-}: {
-  result: PagefindResult;
-  setOpen: (open: boolean) => void;
-}) {
-  if (!result) return null;
-
-  const url = processUrl(result.url);
-
-  const handleMainResultSelect = () => {
-    navigateToUrl(url, setOpen);
-  };
-
-  const handleSubResultSelect = (
-    subResult: NonNullable<PagefindResult["sub_results"]>[number],
-  ) => {
-    const { path, hash } = processSubUrl(subResult.url);
-    navigateToUrl(`${path}${hash}`, setOpen);
-  };
-
+  const title = "meta" in result ? result.meta?.title : result.title;
+  const subResults = "sub_results" in result ? result.sub_results : [];
+  const framework = "meta" in result ? (result.meta as any)?.framework : null;
   return (
     <>
-      <MainResultItem result={result} onSelect={handleMainResultSelect} />
-
-      {result.sub_results && result.sub_results.length > 0 && (
-        <div className="ml-4 border-l">
-          {result.sub_results.map((subResult) => {
-            // Avoid showing duplicate results
-            if (subResult.title === result.meta.title) return null;
-
-            return (
-              <SubResultItem
-                key={subResult.id}
-                subResult={subResult}
-                onSelect={() => handleSubResultSelect(subResult)}
-              />
-            );
-          })}
+      <button
+        type="button"
+        onClick={onClick}
+        className={`text-left group relative flex items-center gap-2 sm:gap-3 px-3 sm:px-4 py-2 sm:py-3 cursor-pointer text-sm rounded-md select-none
+          transition-all duration-200 ease-in-out
+          `}
+      >
+        <div className="min-w-0 flex-1">
+          <h3 className="font-medium text-highlight truncate">
+            {title || "No title"} {framework ? `(${framework})` : ""}
+          </h3>
+          <HighlightedText text={result.excerpt || ""} />
         </div>
-      )}
+      </button>
+
+      {subResults?.length ? (
+        <ul className="ml-4">
+          {subResults?.map((subResult) => (
+            <li key={subResult.id} className="block">
+              <Result
+                result={subResult}
+                onClick={() => {
+                  const { path, hash } = processSubUrl(subResult.url);
+                  navigateToUrl(`${path}${hash}`);
+                }}
+              />
+            </li>
+          ))}
+        </ul>
+      ) : null}
     </>
   );
 }
@@ -329,13 +223,20 @@ export function PagefindSearch() {
     async function loadPagefind() {
       if (typeof window !== "undefined" && !window.pagefind) {
         try {
+          // First try loading from the standard location
           const pagefindModule = await import(
             // @ts-expect-error - pagefind.js is generated after build and not available at compile time
-            /* webpackIgnore: true */ "/_next/static/chunks/pages/pagefind/pagefind.js"
-          );
+            /* webpackIgnore: true */ "/_pagefind/pagefind.js"
+          ).catch(() => {
+            // If that fails, try the alternative location
+            return import(
+              // @ts-expect-error - pagefind.js is generated after build and not available at compile time
+              /* webpackIgnore: true */ "/_next/static/chunks/pages/pagefind/pagefind.js"
+            );
+          });
+
           window.pagefind = pagefindModule.default || pagefindModule;
 
-          // Configure ranking based on current framework context
           if (window.pagefind && window.pagefind.options) {
             await window.pagefind.options({
               ranking: {
@@ -346,7 +247,12 @@ export function PagefindSearch() {
             });
           }
         } catch (e) {
-          window.pagefind = { search: async () => ({ results: [] }) };
+          console.warn("Failed to load Pagefind:", e);
+          // Provide a fallback implementation
+          window.pagefind = {
+            search: async () => ({ results: [] }),
+            options: async () => {},
+          };
         }
       }
     }
@@ -377,38 +283,46 @@ export function PagefindSearch() {
     }
   };
 
-  const handleOpenChange = (open: boolean) => {
-    if (!open) {
-      setQuery("");
-      setResults([]);
-    }
-    setOpen(open);
-  };
+  if (!open) return null;
 
   return (
-    <Command.Dialog
-      open={open}
-      onOpenChange={handleOpenChange}
-      label="Search"
-      className="fixed top-[10%] sm:top-1/2 left-1/2 -translate-x-1/2 sm:-translate-y-1/2 w-full sm:w-auto z-20"
-      shouldFilter={false}
-      title="Search"
-    >
-      <div
-        className="w-full sm:w-[640px] mx-auto max-w-[calc(100%-2rem)] overflow-hidden rounded-xl bg-white dark:bg-stone-950
-          origin-center animate-in fade-in
-          data-[state=open]:animate-in data-[state=closed]:animate-out
-          data-[state=open]:scale-100 data-[state=closed]:scale-95
-          data-[state=closed]:opacity-0 data-[state=open]:opacity-100
-          transition-all duration-200 ease-in-out
-          data-[state=open]:shadow-2xl data-[state=closed]:shadow-none
-          shadow-lg ring-1 ring-stone-950/10 dark:ring-white/10
-        "
-      >
-        <SearchInput query={query} onSearch={handleSearch} />
-        <SearchResults results={results} setOpen={setOpen} listRef={listRef} />
-      </div>
-    </Command.Dialog>
+    <Dialog open={open} onClose={() => setOpen(false)} className="!p-0">
+      <DialogBody className="mt-0">
+        <input
+          type="text"
+          value={query}
+          onChange={(e) => handleSearch(e.target.value)}
+          placeholder="Search documentation..."
+          className="w-full text-base sm:text-lg px-4 sm:px-5 py-4 sm:py-5 outline-none border-b bg-white dark:bg-stone-950 text-stone-900 dark:text-stone-100 placeholder:text-stone-400 dark:placeholder:text-stone-500"
+          data-autofocus
+        />
+        <div
+          ref={listRef}
+          className="h-[50vh] sm:h-[300px] max-h-[60vh] sm:max-h-[400px] overflow-y-auto overflow-x-hidden overscroll-contain p-2"
+        >
+          {results.length === 0 ? (
+            <div className="flex items-center justify-center h-16 text-sm">
+              No results found.
+            </div>
+          ) : (
+            <div className="space-y-1">
+              {results.map((result, index) => (
+                <>
+                  <Result
+                    key={result.id}
+                    result={result}
+                    onClick={() => {
+                      const url = processUrl(result.url);
+                      navigateToUrl(url, setOpen);
+                    }}
+                  />
+                </>
+              ))}
+            </div>
+          )}
+        </div>
+      </DialogBody>
+    </Dialog>
   );
 }
 
