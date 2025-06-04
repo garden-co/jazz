@@ -1671,7 +1671,56 @@ importers:
         specifier: 6.3.5
         version: 6.3.5(@types/node@22.15.18)(jiti@2.4.2)(lightningcss@1.29.2)(terser@5.37.0)(tsx@4.19.3)(yaml@2.6.1)
 
-  examples/richtext:
+  examples/richtext-prosekit:
+    dependencies:
+      jazz-react:
+        specifier: workspace:*
+        version: link:../../packages/jazz-react
+      jazz-richtext-prosemirror:
+        specifier: workspace:*
+        version: link:../../packages/jazz-richtext-prosemirror
+      jazz-tools:
+        specifier: workspace:*
+        version: link:../../packages/jazz-tools
+      prosekit:
+        specifier: ^0.13.3
+        version: 0.13.4(@shikijs/types@3.5.0)(@types/hast@3.0.4)(preact@10.25.3)(prosemirror-model@1.25.1)(prosemirror-state@1.4.3)(prosemirror-transform@1.10.4)(prosemirror-view@1.39.2)(react-dom@19.0.0(react@19.0.0))(react@19.0.0)(solid-js@1.9.5)(svelte@5.15.0)(vue@3.5.13(typescript@5.6.2))
+      react:
+        specifier: 19.0.0
+        version: 19.0.0
+      react-dom:
+        specifier: 19.0.0
+        version: 19.0.0(react@19.0.0)
+    devDependencies:
+      '@egoist/tailwindcss-icons':
+        specifier: ^1.9.0
+        version: 1.9.0(tailwindcss@3.4.17(ts-node@10.9.2(@swc/core@1.11.29)(@types/node@22.15.18)(typescript@5.6.2)))
+      '@iconify-json/lucide':
+        specifier: ^1.2.45
+        version: 1.2.45
+      '@types/react':
+        specifier: 19.0.0
+        version: 19.0.0
+      '@types/react-dom':
+        specifier: 19.0.0
+        version: 19.0.0
+      '@vitejs/plugin-react':
+        specifier: ^4.5.0
+        version: 4.5.1(vite@6.3.5(@types/node@22.15.18)(jiti@2.4.2)(lightningcss@1.29.2)(terser@5.37.0)(tsx@4.19.3)(yaml@2.6.1))
+      postcss:
+        specifier: ^8.5.4
+        version: 8.5.4
+      tailwindcss:
+        specifier: ^3.4.17
+        version: 3.4.17(ts-node@10.9.2(@swc/core@1.11.29)(@types/node@22.15.18)(typescript@5.6.2))
+      typescript:
+        specifier: 5.6.2
+        version: 5.6.2
+      vite:
+        specifier: 6.3.5
+        version: 6.3.5(@types/node@22.15.18)(jiti@2.4.2)(lightningcss@1.29.2)(terser@5.37.0)(tsx@4.19.3)(yaml@2.6.1)
+
+  examples/richtext-prosemirror:
     dependencies:
       jazz-react:
         specifier: workspace:*
@@ -1724,7 +1773,7 @@ importers:
         version: 4.5.1(vite@6.3.5(@types/node@22.15.18)(jiti@2.4.2)(lightningcss@1.29.2)(terser@5.37.0)(tsx@4.19.3)(yaml@2.6.1))
       autoprefixer:
         specifier: ^10.4.20
-        version: 10.4.20(postcss@8.5.3)
+        version: 10.4.20(postcss@8.5.4)
       globals:
         specifier: ^15.11.0
         version: 15.14.0
@@ -1733,55 +1782,6 @@ importers:
         version: 3.0.1
       postcss:
         specifier: ^8.4.27
-        version: 8.5.3
-      tailwindcss:
-        specifier: ^3.4.17
-        version: 3.4.17(ts-node@10.9.2(@swc/core@1.11.29)(@types/node@22.15.18)(typescript@5.6.2))
-      typescript:
-        specifier: 5.6.2
-        version: 5.6.2
-      vite:
-        specifier: 6.3.5
-        version: 6.3.5(@types/node@22.15.18)(jiti@2.4.2)(lightningcss@1.29.2)(terser@5.37.0)(tsx@4.19.3)(yaml@2.6.1)
-
-  examples/richtext-prosekit:
-    dependencies:
-      jazz-react:
-        specifier: workspace:*
-        version: link:../../packages/jazz-react
-      jazz-richtext-prosemirror:
-        specifier: workspace:*
-        version: link:../../packages/jazz-richtext-prosemirror
-      jazz-tools:
-        specifier: workspace:*
-        version: link:../../packages/jazz-tools
-      prosekit:
-        specifier: ^0.13.3
-        version: 0.13.4(@shikijs/types@3.5.0)(@types/hast@3.0.4)(preact@10.25.3)(prosemirror-model@1.25.1)(prosemirror-state@1.4.3)(prosemirror-transform@1.10.4)(prosemirror-view@1.39.2)(react-dom@19.0.0(react@19.0.0))(react@19.0.0)(solid-js@1.9.5)(svelte@5.15.0)(vue@3.5.13(typescript@5.6.2))
-      react:
-        specifier: 19.0.0
-        version: 19.0.0
-      react-dom:
-        specifier: 19.0.0
-        version: 19.0.0(react@19.0.0)
-    devDependencies:
-      '@egoist/tailwindcss-icons':
-        specifier: ^1.9.0
-        version: 1.9.0(tailwindcss@3.4.17(ts-node@10.9.2(@swc/core@1.11.29)(@types/node@22.15.18)(typescript@5.6.2)))
-      '@iconify-json/lucide':
-        specifier: ^1.2.45
-        version: 1.2.45
-      '@types/react':
-        specifier: 19.0.0
-        version: 19.0.0
-      '@types/react-dom':
-        specifier: 19.0.0
-        version: 19.0.0
-      '@vitejs/plugin-react':
-        specifier: ^4.5.0
-        version: 4.5.1(vite@6.3.5(@types/node@22.15.18)(jiti@2.4.2)(lightningcss@1.29.2)(terser@5.37.0)(tsx@4.19.3)(yaml@2.6.1))
-      postcss:
-        specifier: ^8.5.4
         version: 8.5.4
       tailwindcss:
         specifier: ^3.4.17
@@ -20445,7 +20445,7 @@ snapshots:
       eslint: 8.57.1
       eslint-config-prettier: 8.10.0(eslint@8.57.1)
       eslint-plugin-eslint-comments: 3.2.0(eslint@8.57.1)
-      eslint-plugin-ft-flow: 2.0.3(@babel/eslint-parser@7.27.0(@babel/core@7.27.1)(eslint@8.57.1))(eslint@8.57.1)
+      eslint-plugin-ft-flow: 2.0.3(@babel/eslint-parser@7.27.0(@babel/core@7.26.0)(eslint@8.57.1))(eslint@8.57.1)
       eslint-plugin-jest: 27.9.0(@typescript-eslint/eslint-plugin@7.18.0(@typescript-eslint/parser@7.18.0(eslint@8.57.1)(typescript@5.6.2))(eslint@8.57.1)(typescript@5.6.2))(eslint@8.57.1)(jest@29.7.0(@types/node@22.15.18)(babel-plugin-macros@3.1.0)(ts-node@10.9.2(@swc/core@1.11.29)(@types/node@22.15.18)(typescript@5.6.2)))(typescript@5.6.2)
       eslint-plugin-react: 7.37.4(eslint@8.57.1)
       eslint-plugin-react-hooks: 4.6.2(eslint@8.57.1)
@@ -24196,7 +24196,7 @@ snapshots:
       eslint: 8.57.1
       ignore: 5.3.2
 
-  eslint-plugin-ft-flow@2.0.3(@babel/eslint-parser@7.27.0(@babel/core@7.27.1)(eslint@8.57.1))(eslint@8.57.1):
+  eslint-plugin-ft-flow@2.0.3(@babel/eslint-parser@7.27.0(@babel/core@7.26.0)(eslint@8.57.1))(eslint@8.57.1):
     dependencies:
       '@babel/eslint-parser': 7.27.0(@babel/core@7.27.1)(eslint@8.57.1)
       eslint: 8.57.1
