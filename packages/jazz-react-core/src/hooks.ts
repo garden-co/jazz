@@ -19,8 +19,8 @@ import {
   Loaded,
   ResolveQuery,
   ResolveQueryStrict,
-  createCoValueObservable,
-  z,
+  SubscriptionScope,
+  anySchemaToCoSchema,
 } from "jazz-tools";
 import { JazzContext, JazzContextManagerContext } from "./provider.js";
 import { getCurrentAccountFromContextManager } from "./utils.js";
@@ -80,80 +80,154 @@ export function useIsAuthenticated() {
   );
 }
 
-function useCoValueObservable<
+function useCoValueSubscription<
   S extends CoValueOrZodSchema,
   const R extends ResolveQuery<S>,
->() {
-  const [initialValue] = React.useState(() => createCoValueObservable<S, R>());
-  const ref = useRef(initialValue);
+>(
+  Schema: S,
+  id: string | undefined | null,
+  options?: {
+    resolve?: ResolveQueryStrict<S, R>;
+  },
+) {
+  const contextManager = useJazzContextManager();
 
-  return {
-    getCurrentValue() {
-      return ref.current.getCurrentValue();
-    },
-    getCurrentObservable() {
-      return ref.current;
-    },
-    reset(initialValue?: undefined | null) {
-      ref.current = createCoValueObservable<S, R>(initialValue);
-    },
+  const createSubscription = () => {
+    if (!id) {
+      return {
+        subscription: null,
+        contextManager,
+        id,
+        Schema,
+      };
+    }
+
+    const node = contextManager.getCurrentValue()!.node;
+    const subscription = new SubscriptionScope<any>(
+      node,
+      options?.resolve ?? true,
+      id,
+      {
+        ref: anySchemaToCoSchema(Schema),
+        optional: true,
+      },
+    );
+
+    return {
+      subscription,
+      contextManager,
+      id,
+      Schema,
+    };
   };
+
+  const [subscription, setSubscription] = React.useState(createSubscription);
+
+  React.useLayoutEffect(() => {
+    if (
+      subscription.contextManager !== contextManager ||
+      subscription.id !== id ||
+      subscription.Schema !== Schema
+    ) {
+      subscription.subscription?.destroy();
+      setSubscription(createSubscription());
+    }
+
+    return contextManager.subscribe(() => {
+      subscription.subscription?.destroy();
+      setSubscription(createSubscription());
+    });
+  }, [Schema, id, contextManager]);
+
+  return subscription.subscription;
 }
 
 export function useCoState<
   S extends CoValueOrZodSchema,
   const R extends ResolveQuery<S> = true,
 >(
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   Schema: S,
   id: string | undefined,
   options?: {
     resolve?: ResolveQueryStrict<S, R>;
   },
 ): Loaded<S, R> | undefined | null {
-  const contextManager = useJazzContextManager();
-
-  const observable = useCoValueObservable<S, R>();
+  const subscription = useCoValueSubscription(Schema, id, options);
 
   const value = React.useSyncExternalStore<Loaded<S, R> | undefined | null>(
     React.useCallback(
       (callback) => {
-        if (!id) {
-          observable.reset(null);
-
+        if (!subscription) {
           return () => {};
         }
 
-        observable.reset();
-
-        // We subscribe to the context manager to react to the account updates
-        // faster than the useSyncExternalStore callback update to keep the isAuthenticated state
-        // up to date with the data when logging in and out.
-        return subscribeToContextManager(contextManager, () => {
-          const agent = getCurrentAccountFromContextManager(contextManager);
-          observable.reset();
-
-          return observable.getCurrentObservable().subscribe(
-            Schema,
-            id,
-            {
-              loadAs: agent,
-              resolve: options?.resolve,
-              onUnauthorized: callback,
-              onUnavailable: callback,
-              syncResolution: true,
-            },
-            callback,
-          );
-        });
+        return subscription.subscribe(callback);
       },
-      [Schema, id, contextManager],
+      [subscription],
     ),
-    () => observable.getCurrentValue(),
-    () => observable.getCurrentValue(),
+    () => (subscription ? subscription.getCurrentValue() : null),
+    () => (subscription ? subscription.getCurrentValue() : null),
   );
 
   return value;
+}
+
+function useAccountSubscription<
+  S extends AccountClass<Account> | AnyAccountSchema,
+  const R extends ResolveQuery<S>,
+>(
+  Schema: S,
+  options?: {
+    resolve?: ResolveQueryStrict<S, R>;
+  },
+) {
+  const contextManager = useJazzContextManager();
+
+  const createSubscription = () => {
+    const agent = getCurrentAccountFromContextManager(contextManager);
+
+    if (agent._type === "Anonymous") {
+      return {
+        subscription: null,
+        contextManager,
+        agent,
+      };
+    }
+
+    // We don't need type validation here, since it's mostly to help users on public API
+    const resolve: any = options?.resolve ?? true;
+
+    const node = contextManager.getCurrentValue()!.node;
+    const subscription = new SubscriptionScope<any>(node, resolve, agent.id, {
+      ref: anySchemaToCoSchema(Schema),
+      optional: true,
+    });
+
+    return {
+      subscription,
+      contextManager,
+      Schema,
+    };
+  };
+
+  const [subscription, setSubscription] = React.useState(createSubscription);
+
+  React.useLayoutEffect(() => {
+    if (
+      subscription.contextManager !== contextManager ||
+      subscription.Schema !== Schema
+    ) {
+      subscription.subscription?.destroy();
+      setSubscription(createSubscription());
+    }
+
+    return contextManager.subscribe(() => {
+      subscription.subscription?.destroy();
+      setSubscription(createSubscription());
+    });
+  }, [Schema, contextManager]);
+
+  return subscription.subscription;
 }
 
 function useAccount<A extends AccountClass<Account> | AnyAccountSchema>(
@@ -185,50 +259,32 @@ function useAccount<
 } {
   const context = useJazzContext<InstanceOfSchema<A>>();
   const contextManager = useJazzContextManager<InstanceOfSchema<A>>();
+  const subscription = useAccountSubscription(AccountSchema, options);
 
-  const observable = useCoValueObservable<A, R>();
-
-  const me = React.useSyncExternalStore<Loaded<A, R> | undefined | null>(
+  const value = React.useSyncExternalStore<Loaded<A, R> | undefined | null>(
     React.useCallback(
       (callback) => {
-        return subscribeToContextManager(contextManager, () => {
-          const agent = getCurrentAccountFromContextManager(contextManager);
+        if (!subscription) {
+          return () => {};
+        }
 
-          observable.reset();
-
-          if (agent._type === "Anonymous") {
-            return () => {};
-          }
-
-          return observable.getCurrentObservable().subscribe(
-            AccountSchema,
-            agent.id,
-            {
-              loadAs: agent,
-              resolve: options?.resolve,
-              onUnauthorized: callback,
-              onUnavailable: callback,
-              syncResolution: true,
-            },
-            callback,
-          );
-        });
+        return subscription.subscribe(callback);
       },
-      [contextManager],
+      [subscription],
     ),
-    () => observable.getCurrentValue() as Loaded<A, R> | undefined | null,
-    () => observable.getCurrentValue() as Loaded<A, R> | undefined | null,
+    () => (subscription ? subscription.getCurrentValue() : null),
+    () => (subscription ? subscription.getCurrentValue() : null),
   );
 
   if (options?.resolve === undefined && "me" in context) {
     return {
-      me: me || (context.me as Loaded<A, R>),
+      me: value || (context.me as Loaded<A, R>),
       logOut: contextManager.logOut,
     };
   }
 
   return {
-    me,
+    me: value,
     logOut: contextManager.logOut,
   };
 }
@@ -262,45 +318,11 @@ function useAccountOrGuest<
     | AnonymousJazzAgent;
 } {
   const context = useJazzContext<InstanceOfSchema<A>>();
-  const contextManager = useJazzContextManager<InstanceOfSchema<A>>();
-
-  const observable = useCoValueObservable<A, R>();
-
-  const me = React.useSyncExternalStore<Loaded<A, R> | undefined | null>(
-    React.useCallback(
-      (callback) => {
-        return subscribeToContextManager(contextManager, () => {
-          const agent = getCurrentAccountFromContextManager(contextManager);
-
-          if (agent._type === "Anonymous") {
-            return () => {};
-          }
-
-          observable.reset();
-
-          return observable.getCurrentObservable().subscribe(
-            AccountSchema,
-            agent.id,
-            {
-              loadAs: agent,
-              resolve: options?.resolve,
-              onUnauthorized: callback,
-              onUnavailable: callback,
-              syncResolution: true,
-            },
-            callback,
-          );
-        });
-      },
-      [contextManager],
-    ),
-    () => observable.getCurrentValue(),
-    () => observable.getCurrentValue(),
-  );
+  const account = useAccount(AccountSchema, options);
 
   if ("me" in context) {
     return {
-      me: options?.resolve === undefined ? me || context.me : me,
+      me: account.me,
     };
   } else {
     return { me: context.guest };
