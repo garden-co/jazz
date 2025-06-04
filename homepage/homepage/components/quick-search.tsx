@@ -3,10 +3,15 @@
 import { usePagefindSearch } from "@/components/pagefind";
 import { Button } from "@garden-co/design-system/src/components/atoms/Button";
 import { Icon } from "@garden-co/design-system/src/components/atoms/Icon";
+import { useEffect, useState } from "react";
 
 export function QuickSearch() {
-  const isMac = navigator.userAgent.includes("Mac");
+  const [isMac, setIsMac] = useState(true);
   const { setOpen } = usePagefindSearch();
+
+  useEffect(() => {
+    setIsMac(navigator.userAgent.includes("Mac"));
+  }, []);
 
   return (
     <Button

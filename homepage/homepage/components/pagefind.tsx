@@ -392,6 +392,7 @@ export function PagefindSearch() {
       label="Search"
       className="fixed top-[10%] sm:top-1/2 left-1/2 -translate-x-1/2 sm:-translate-y-1/2 w-full sm:w-auto z-20"
       shouldFilter={false}
+      title="Search"
     >
       <div
         className="w-full sm:w-[640px] mx-auto max-w-[calc(100%-2rem)] overflow-hidden rounded-xl bg-white dark:bg-stone-950
