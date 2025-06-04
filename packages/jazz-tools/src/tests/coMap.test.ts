@@ -1569,4 +1569,28 @@ describe("CoMap migration", () => {
     expect(loaded?.friend?.name).toEqual("Charlie");
     expect(loaded?.friend?.version).toEqual(2);
   });
+  describe("Time", () => {
+    test("created time and last updated time", async () => {
+      const Person = co.map({
+        name: z.string(),
+      });
+
+      let currentTimestampInSeconds = Math.floor(Date.now() / 1000);
+      const person = Person.create({ name: "John" });
+
+      const createdAt = person._createdAt;
+      const createdAtInSeconds = Math.floor(createdAt / 1000);
+      expect(createdAtInSeconds).toEqual(currentTimestampInSeconds);
+      expect(person._lastUpdatedAt).toEqual(createdAt);
+
+      await new Promise((r) => setTimeout(r, 1000));
+      currentTimestampInSeconds = Math.floor(Date.now() / 1000);
+      person.name = "Jane";
+
+      const lastUpdatedAtInSeconds = Math.floor(person._lastUpdatedAt / 1000);
+      expect(lastUpdatedAtInSeconds).toEqual(currentTimestampInSeconds);
+      expect(person._createdAt).toEqual(createdAt);
+      expect(person._lastUpdatedAt).not.toEqual(createdAt);
+    });
+  });
 });

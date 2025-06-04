@@ -120,13 +120,7 @@ export class CoMap extends CoValueBase implements CoValue {
 
   /** @internal */
   get _createdAt() {
-    return (
-      this._raw
-        .keys()
-        .flatMap((x) => this._raw.ops[x]?.map((y) => y.madeAt))
-        .filter((x) => x !== undefined)
-        .sort()[0] ?? this._lastUpdatedAt
-    );
+    return this._raw.earliestTxMadeAt;
   }
 
   /** @internal */

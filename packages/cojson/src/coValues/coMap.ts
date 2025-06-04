@@ -50,6 +50,8 @@ export class RawCoMapView<
   /** @internal */
   latestTxMadeAt: number;
   /** @internal */
+  earliestTxMadeAt: number;
+  /** @internal */
   ops: {
     [Key in keyof Shape & string]?: MapOp<Key, Shape[Key]>[];
   };
@@ -75,6 +77,7 @@ export class RawCoMapView<
     this.id = core.id as CoID<this>;
     this.core = core;
     this.latestTxMadeAt = 0;
+    this.earliestTxMadeAt = Number.MAX_SAFE_INTEGER;
     this.ignorePrivateTransactions =
       options?.ignorePrivateTransactions ?? false;
     this.ops = {};
@@ -120,6 +123,9 @@ export class RawCoMapView<
 
         if (madeAt > this.latestTxMadeAt) {
           this.latestTxMadeAt = madeAt;
+        }
+        if (madeAt < this.earliestTxMadeAt) {
+          this.earliestTxMadeAt = madeAt;
         }
 
         const entries = ops[change.key];
