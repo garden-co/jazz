@@ -32,6 +32,9 @@ interface PagefindSubResult {
   title: string;
   url: string;
   excerpt: string;
+  anchor?: {
+    element: string;
+  };
 }
 
 // Constants
@@ -285,6 +288,8 @@ export function PagefindSearch() {
         value,
       );
 
+      console.log(filteredResults);
+
       setResults(filteredResults);
     }
   };
@@ -344,20 +349,22 @@ export function PagefindSearch() {
                       </div>
                     </ComboboxOption>
 
-                    {result.sub_results?.map((subResult) => (
-                      <ComboboxOption
-                        key={subResult.id}
-                        value={subResult}
-                        className="ml-5 group cursor-default select-none rounded-lg px-4 py-2 data-[focus]:bg-stone-200 data-[focus]:outline-none"
-                      >
-                        <div className="min-w-0 flex-1">
-                          <h3 className="font-medium text-highlight truncate">
-                            {subResult?.title || "No title"}
-                          </h3>
-                          <HighlightedText text={subResult.excerpt || ""} />
-                        </div>
-                      </ComboboxOption>
-                    ))}
+                    {result.sub_results?.map((subResult) =>
+                      subResult.anchor?.element === "h1" ? null : (
+                        <ComboboxOption
+                          key={subResult.id}
+                          value={subResult}
+                          className="ml-5 group cursor-default select-none rounded-lg px-4 py-2 data-[focus]:bg-stone-200 data-[focus]:outline-none"
+                        >
+                          <div className="min-w-0 flex-1">
+                            <h3 className="font-medium text-highlight truncate">
+                              {subResult?.title || "No title"}
+                            </h3>
+                            <HighlightedText text={subResult.excerpt || ""} />
+                          </div>
+                        </ComboboxOption>
+                      ),
+                    )}
                   </>
                 ))}
               </ComboboxOptions>
