@@ -1,6 +1,6 @@
 "use client";
 
-import { Framework } from "@/content/framework";
+import { Framework, frameworks } from "@/content/framework";
 import { useFramework } from "@/lib/use-framework";
 import { Command } from "cmdk";
 import React, { useState, useEffect, useRef } from "react";
@@ -49,6 +49,19 @@ const navigateToUrl = (url: string, setOpen: (open: boolean) => void) => {
   setOpen(false);
 };
 
+const alternativeKeywordsByFramework: Partial<Record<Framework, string[]>> = {
+  [Framework.React]: ["reactjs", "react.js", "next.js", "nextjs"],
+  [Framework.Vue]: ["vuejs", "vue.js"],
+  [Framework.ReactNative]: ["react native"],
+  [Framework.ReactNativeExpo]: ["react native expo", "expo"],
+  [Framework.Vanilla]: ["javascript", "js", "plain js", "vanilla js"],
+};
+
+const relatedFrameworks: Partial<Record<Framework, Framework[]>> = {
+  [Framework.ReactNative]: [Framework.ReactNativeExpo],
+  [Framework.ReactNativeExpo]: [Framework.ReactNative],
+};
+
 const filterAndPrioritizeResultsByFramework = (
   results: PagefindResult[],
   currentFramework: Framework = Framework.React,
@@ -56,26 +69,20 @@ const filterAndPrioritizeResultsByFramework = (
 ): PagefindResult[] => {
   const frameworksToSearch: Framework[] = [];
 
-  if (Framework.Svelte.startsWith(query)) {
-    frameworksToSearch.push(Framework.Svelte);
-  } else if (Framework.Vue.startsWith(query)) {
-    frameworksToSearch.push(Framework.Vue);
-  } else if (
-    Framework.ReactNativeExpo.startsWith(query) ||
-    query.includes("expo") ||
-    "react native expo".startsWith(query)
-  ) {
-    frameworksToSearch.push(Framework.ReactNativeExpo);
-  } else if (
-    Framework.ReactNative.startsWith(query) ||
-    "react native".startsWith(query)
-  ) {
-    frameworksToSearch.push(Framework.ReactNative);
-  }
+  frameworks.forEach((framework) => {
+    const alternativeKeywords = alternativeKeywordsByFramework[framework] || [];
+
+    // Check if query contains framework name or any of its alternative keywords
+    if (
+      framework.startsWith(query) ||
+      alternativeKeywords.some((keyword: string) => keyword.startsWith(query))
+    ) {
+      frameworksToSearch.push(framework);
+      frameworksToSearch.push(...(relatedFrameworks[framework] || []));
+    }
+  });
 
   frameworksToSearch.push(currentFramework);
-
-  console.log(frameworksToSearch);
 
   const filteredResults = results.filter((result) => {
     const url = processUrl(result.url);
