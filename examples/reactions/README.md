@@ -1,6 +1,6 @@
 # Reactions example with Jazz and React
 
-Live version: [https://reactions-demo.jazz.tools](https://reactions-demo.jazz.tools)
+Live version: [https://reactions.demo.jazz.tools](https://reactions.demo.jazz.tools)
 
 ## Getting started
 

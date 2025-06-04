@@ -1,6 +1,6 @@
 # Password manager example with Jazz and React
 
-Live version: [https://passwords-demo.jazz.tools](https://passwords-demo.jazz.tools)
+Live version: [https://passwords.demo.jazz.tools](https://passwords.demo.jazz.tools)
 
 ![Password Manager Screenshot](demo.png "Screenshot")
 

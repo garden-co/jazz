@@ -2,7 +2,7 @@
 
 A demonstration of collaborative rich text editing with Jazz, React, and Tiptap.
 
-Live version: [https://richtext-tiptap-demo.jazz.tools](https://richtext-tiptap-demo.jazz.tools)
+Live version: [https://richtext-tiptap.demo.jazz.tools](https://richtext-tiptap.demo.jazz.tools)
 
 ## Overview
 

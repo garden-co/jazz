@@ -1,6 +1,6 @@
 # Todo list example with Jazz and React
 
-Live version: [https://todo-demo.jazz.tools/](https://todo-demo.jazz.tools/)
+Live version: [https://todo.demo.jazz.tools/](https://todo.demo.jazz.tools/)
 
 ## Getting started
 

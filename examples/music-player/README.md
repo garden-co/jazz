@@ -1,6 +1,6 @@
 # Music player example with Jazz and React
 
-Live version: [https://music-demo.jazz.tools](https://music-demo.jazz.tools)
+Live version: [https://music.demo.jazz.tools](https://music.demo.jazz.tools)
 
 ## Getting started
 

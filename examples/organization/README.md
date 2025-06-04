@@ -2,7 +2,7 @@
 
 This is an example of how to share a set of data between users through a CoMap called Organization. 
 Different apps have different names for this concept, such as "teams" or "workspaces".
-Live version: [https://jazz-organization.vercel.app/](https://jazz-organization.vercel.app/)
+Live version: [https://organization.demo.jazz.tools/](https://organization.demo.jazz.tools/)
 Refer to the [documentation](https://jazz.tools/docs/react/design-patterns/organization)  for more information.
 
 ## Getting started

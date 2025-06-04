@@ -1,7 +1,7 @@
 # Jazz Version History Example
 
 A minimal example showing how to use Jazz's built-in version history to show and restore changes.
-Live Version: [https://jazz-version-history.vercel.app/](https://jazz-version-history.vercel.app/)
+Live Version: [https://version-history.demo.jazz.tools/](https://jazz-version-history.demo.jazz.tools/)
 
 ## Getting started
 

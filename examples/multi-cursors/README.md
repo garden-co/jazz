@@ -1,7 +1,7 @@
 # Jazz Multi-Cursors Example
 
 Track user presence on a canvas with multiple cursors and out of bounds indicators.
-Live version: [https://multi-cursors-demo.jazz.tools/](https://multi-cursors-demo.jazz.tools/)
+Live version: [https://multi-cursors.demo.jazz.tools/](https://multi-cursors.demo.jazz.tools/)
 
 ## Getting started
 

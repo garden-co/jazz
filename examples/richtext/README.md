@@ -2,7 +2,7 @@
 
 A demonstration of collaborative rich text editing with Jazz, React, and ProseMirror.
 
-Live version: [https://richtext-demo.jazz.tools](https://richtext-demo.jazz.tools)
+Live version: [https://richtext-prosemirror.demo.jazz.tools](https://richtext-prosemirror.demo.jazz.tools)
 
 ## Overview
 

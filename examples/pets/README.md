@@ -1,6 +1,6 @@
 # Rate My Pets example with Jazz and React
 
-Live version: [https://pets-demo.jazz.tools/](https://pets-demo.jazz.tools/)
+Live version: [https://pets.demo.jazz.tools/](https://pets.demo.jazz.tools/)
 
 ## Getting started
 
