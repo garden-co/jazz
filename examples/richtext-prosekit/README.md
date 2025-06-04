@@ -2,6 +2,8 @@
 
 A demonstration of collaborative rich text editing with Jazz, React, and ProseKit.
 
+Original implementation by [prosekit](https://github.com/prosekit/prosekit-jazz)
+
 Live version: [https://richtext-prosekit.demo.jazz.tools](https://richtext-prosekit.demo.jazz.tools)
 
 ## Overview
