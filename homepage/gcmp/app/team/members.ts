@@ -29,14 +29,6 @@ export const team: Array<TeamMember> = [
     github: "gdorsi",
   },
   {
-    name: "Andrei Popa",
-    titles: ["Full-Stack Dev", "Infra"],
-    image: "andrei.jpeg",
-    location: "Bucharest, Romania ",
-    x: "elitepax",
-    github: "pax-k",
-  },
-  {
     name: "Trisha Lim",
     titles: ["Frontend Dev", "Marketing"],
     image: "trisha.png",
@@ -84,23 +76,6 @@ export const team: Array<TeamMember> = [
     location: "Minneapolis, Minnesota, US",
     github: "mculotta120",
     image: "meg.jpg",
-  },
-  {
-    name: "James Vickery",
-    location: "Birmingham, UK",
-    titles: ["Full-Stack Dev", "Support Dev"],
-    github: "jmsv",
-    bluesky: "jmsv.bsky.social",
-    image: "james.jpg",
-  },
-  {
-    name: "Stephanie Lemmeyer",
-    location: "Boston, Massachusetts, US",
-    titles: ["Lead DevOps"],
-    github: "slemmeyer",
-    linkedin: "stephanielemmeyer",
-    website: "https://stephanielemmeyer.me",
-    image: "stephanie.jpg",
   },
   {
     name: "Nikita Voloboev",
