@@ -120,15 +120,12 @@ export class CoMap extends CoValueBase implements CoValue {
 
   /** @internal */
   get _createdAt() {
-    return this._raw.core.verified.header.createdAt
-      ? new Date(this._raw.core.verified.header.createdAt).getTime()
-      : Number.MAX_SAFE_INTEGER;
+    return this._raw.earliestTxMadeAt;
   }
 
   /** @internal */
   get _lastUpdatedAt() {
-    // The latest transaction timestamp can remain unchanged (0), so falling back to the creation time is necessary
-    return this._raw.latestTxMadeAt || this._createdAt;
+    return this._raw.latestTxMadeAt;
   }
 
   /**

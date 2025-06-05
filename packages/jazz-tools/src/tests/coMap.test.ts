@@ -1569,16 +1569,7 @@ describe("CoMap migration", () => {
     expect(loaded?.friend?.name).toEqual("Charlie");
     expect(loaded?.friend?.version).toEqual(2);
   });
-});
-describe("Time", () => {
-  test("empty map created time", () => {
-    const currentTimestampInSeconds = Math.floor(Date.now() / 1000);
-    const emptyMap = co.map({}).create({});
-    const createdAtInSeconds = Math.floor(emptyMap._createdAt / 1000);
-
-    expect(createdAtInSeconds).toEqual(currentTimestampInSeconds);
-    expect(emptyMap._lastUpdatedAt).toEqual(emptyMap._createdAt);
-  }),
+  describe("Time", () => {
     test("created time and last updated time", async () => {
       const Person = co.map({
         name: z.string(),
@@ -1601,4 +1592,5 @@ describe("Time", () => {
       expect(person._createdAt).toEqual(createdAt);
       expect(person._lastUpdatedAt).not.toEqual(createdAt);
     });
+  });
 });
