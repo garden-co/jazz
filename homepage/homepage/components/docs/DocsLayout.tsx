@@ -16,6 +16,7 @@ export default function DocsLayout({
   navIcon,
   tocItems,
   pagefindIgnore,
+  pagefindLowPriority,
 }: {
   children: React.ReactNode;
   nav?: React.ReactNode;
@@ -23,6 +24,7 @@ export default function DocsLayout({
   navIcon?: IconName;
   tocItems?: TocEntry[];
   pagefindIgnore?: boolean;
+  pagefindLowPriority?: boolean;
 }) {
   const tableOfContentsItems = tocItems ?? [];
 
@@ -49,12 +51,18 @@ export default function DocsLayout({
 
   const framework = useFramework();
 
-  const pagefindProps = pagefindIgnore
+  let pagefindProps: {
+    [key: `data-pagefind-${string}`]: string | boolean | number;
+  } = pagefindIgnore
     ? { "data-pagefind-ignore": true }
     : {
         "data-pagefind-body": true,
         "data-pagefind-meta": `framework: ${framework}`,
       };
+
+  if (pagefindLowPriority) {
+    pagefindProps["data-pagefind-weight"] = 0.5;
+  }
 
   return (
     <>

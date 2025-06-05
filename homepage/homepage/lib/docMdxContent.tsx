@@ -68,7 +68,11 @@ export async function DocPage({
     const { Content, tocItems } = await getMdxWithToc(framework, slug);
 
     return (
-      <DocsLayout nav={<DocNav />} tocItems={tocItems}>
+      <DocsLayout
+        nav={<DocNav />}
+        tocItems={tocItems}
+        pagefindLowPriority={slug?.includes("upgrade")}
+      >
         <DocProse>
           <Content />
 
