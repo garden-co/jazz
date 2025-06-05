@@ -1,6 +1,5 @@
 ---
 "jazz-tools": patch
-"cojson": patch
 ---
 
-feat: `_createdAt` and `_lastUpdatedAt` getters for CoMaps
+Add `_createdAt` and `_lastUpdatedAt` getters for CoMaps
