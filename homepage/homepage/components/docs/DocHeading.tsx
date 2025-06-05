@@ -16,6 +16,7 @@ export const Heading = ({ children, tag: Tag, ...props }: HeadingProps) => {
         className="no-underline float-left absolute -ml-[1.25em] hidden sm:block opacity-0 group-hover:opacity-100 transition-opacity"
         aria-label="Navigate to header"
         ref={linkRef}
+        data-pagefind-ignore
       >
         <span aria-hidden="true">#</span>
       </a>

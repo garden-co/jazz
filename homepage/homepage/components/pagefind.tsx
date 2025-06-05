@@ -329,7 +329,8 @@ export function PagefindSearch() {
                             <Icon name="hash" className="shrink-0" />
                             <div>
                               <p className="text-sm text-highlight">
-                                {subResult.title || "No title"}
+                                {subResult.title?.replace("#", "") ||
+                                  "No title"}
                               </p>
                               <HighlightedText text={subResult.excerpt || ""} />
                             </div>
