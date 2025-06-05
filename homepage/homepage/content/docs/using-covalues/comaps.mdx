@@ -306,6 +306,88 @@ project.coordinator = undefined;  // Remove the reference
 ```
 </CodeGroup>
 
+## Running migrations on CoMaps
+
+Migrations are functions that run when a CoMap is loaded, allowing you to update existing data to match new schema versions. Use them when you need to modify the structure of CoMaps that already exist in your app. Unlike [Account migrations](/docs/schemas/accounts-and-migrations#when-migrations-run), CoMap migrations are not run when a CoMap is created.
+
+**Note:** Migrations are run synchronously and cannot be run asynchronously.
+
+Here's an example of a migration that adds the `priority` field to the `Task` CoMap:
+
+<CodeGroup>
+```ts twoslash
+import { co, z } from "jazz-tools";
+
+// ---cut---
+const Task = co
+  .map({
+    done: z.boolean(),
+    text: co.plainText(),
+    version: z.literal([1, 2]),
+    priority: z.enum(["low", "medium", "high"]), // new field
+  })
+  .withMigration((task) => {
+    if (task.version === 1) {
+      task.priority = "medium";
+      // Upgrade the version so the migration won't run again
+      task.version = 2; 
+    }
+  });
+```
+</CodeGroup>
+
+### Migration best practices
+
+Design your schema changes to be compatible with existing data:
+- **Add, don't change:** Only add new fields; avoid renaming or changing types of existing fields
+- **Make new fields optional:** This prevents errors when loading older data
+- **Use version fields:** Track schema versions to run migrations only when needed
+
+### Migration & reader permissions
+
+Migrations need write access to modify CoMaps. If some users only have read permissions, they can't run migrations on those CoMaps.
+
+**Forward-compatible schemas** (where new fields are optional) handle this gracefully - users can still use the app even if migrations haven't run.
+
+**Non-compatible changes** require handling both schema versions in your app code using discriminated unions.
+
+When you can't guarantee all users can run migrations, handle multiple schema versions explicitly:
+
+<CodeGroup>
+```ts twoslash
+import { co, z } from "jazz-tools";
+
+// ---cut---
+const TaskV1 = co.map({
+  version: z.literal(1),
+  done: z.boolean(),
+  text: z.string(),
+});
+
+const TaskV2 = co.map({
+  // We need to be more strict about the version to make the
+  // discriminated union work
+  version: z.literal(2), 
+  done: z.boolean(),
+  text: z.string(),
+  priority: z.enum(["low", "medium", "high"]),
+}).withMigration((task) => {
+  // @ts-expect-error - check if we need to run the migration
+  if (task.version === 1) {
+    task.version = 2;
+    task.priority = "medium";
+  }
+});
+
+// Export the discriminated union; because some users might
+// not be able to run the migration
+export const Task = z.discriminatedUnion("version", [
+  TaskV1,
+  TaskV2,
+]);
+```
+</CodeGroup>
+
 ## Best Practices
 
 ### Structuring Data

@@ -215,6 +215,18 @@ export class Group extends CoValueBase implements CoValue {
     );
   }
 
+  /**
+   * Make the group public, so that everyone can read it.
+   * Alias for `addMember("everyone", role)`.
+   *
+   * @param role - Optional: the role to grant to everyone. Defaults to "reader".
+   * @returns The group itself.
+   */
+  makePublic(role: "reader" | "writer" = "reader") {
+    this.addMember("everyone", role);
+    return this;
+  }
+
   getParentGroups(): Array<Group> {
     return this._raw.getParentGroups().map((group) => Group.fromRaw(group));
   }

@@ -1,14 +1,8 @@
-<script lang="ts" module>
-  export type Props = {
-    id: string;
-  };
-</script>
-
 <script lang="ts">
   import { CoState } from '../../../jazz.class.svelte.js';
   import { Person } from './schema.js';
 
-  let props: Props = $props();
+  let props: { id: string } = $props();
 
   const person = new CoState(Person, () => props.id, {
     resolve: {

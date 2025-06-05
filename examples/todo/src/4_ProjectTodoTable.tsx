@@ -51,6 +51,7 @@ export function ProjectTodoTable() {
         {
           done: false,
           text: CoPlainText.create(text, project._owner),
+          version: 1,
         },
         project._owner,
       );

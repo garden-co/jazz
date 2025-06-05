@@ -1,5 +1,21 @@
 # jazz-inspector-element
 
+## 0.14.20
+
+### Patch Changes
+
+- Updated dependencies [6f72419]
+- Updated dependencies [04b20c2]
+  - jazz-tools@0.14.20
+  - jazz-inspector@0.14.20
+
+## 0.14.19
+
+### Patch Changes
+
+- jazz-inspector@0.14.19
+- jazz-tools@0.14.19
+
 ## 0.14.18
 
 ### Patch Changes

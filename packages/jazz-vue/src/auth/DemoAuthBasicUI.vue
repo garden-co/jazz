@@ -8,6 +8,7 @@ interface Props {
 
 defineProps<Props>();
 defineSlots<{
+  // biome-ignore lint/suspicious/noExplicitAny: Complex type
   default?: () => any;
 }>();
 

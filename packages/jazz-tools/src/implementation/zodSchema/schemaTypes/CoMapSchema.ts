@@ -97,6 +97,17 @@ export type CoMapSchema<
       this: S,
       helpers: (Self: S) => T,
     ): WithHelpers<S, T>;
+
+    withMigration(
+      migration: (
+        value: Resolved<
+          Simplify<CoMapInstanceCoValuesNullable<Shape>> & CoMap,
+          true
+        >,
+      ) => undefined,
+    ): CoMapSchema<Shape, Config, Owner>;
+
+    getCoSchema: () => typeof CoMap;
   };
 
 export type optionalKeys<Shape extends z.core.$ZodLooseShape> = {

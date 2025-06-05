@@ -1,5 +1,19 @@
 # cojson-storage-sqlite
 
+## 0.14.20
+
+### Patch Changes
+
+- cojson@0.14.20
+- cojson-storage@0.14.20
+
+## 0.14.19
+
+### Patch Changes
+
+- cojson@0.14.19
+- cojson-storage@0.14.19
+
 ## 0.14.18
 
 ### Patch Changes

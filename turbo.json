@@ -14,7 +14,7 @@
     "dev": {
       "cache": false,
       "persistent": true,
-      "dependsOn": ["build"]
+      "dependsOn": ["^build"]
     },
     "test": {
       "env": ["CI"],

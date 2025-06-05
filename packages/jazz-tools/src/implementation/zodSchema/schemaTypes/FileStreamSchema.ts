@@ -40,4 +40,5 @@ export type FileStreamSchema = z.core.$ZodCustom<FileStream, unknown> & {
     id: string,
     listener: (value: FileStream, unsubscribe: () => void) => void,
   ): () => void;
+  getCoSchema: () => typeof FileStream;
 };

@@ -1,5 +1,27 @@
 # jazz-browser
 
+## 0.14.20
+
+### Patch Changes
+
+- Updated dependencies [6f72419]
+- Updated dependencies [04b20c2]
+  - jazz-tools@0.14.20
+  - jazz-react-native-core@0.14.20
+  - cojson@0.14.20
+  - cojson-storage@0.14.20
+
+## 0.14.19
+
+### Patch Changes
+
+- 061ec99: Fix the AccountSchema prop type to accept co.account schemas
+- Updated dependencies [061ec99]
+  - jazz-react-native-core@0.14.19
+  - cojson@0.14.19
+  - cojson-storage@0.14.19
+  - jazz-tools@0.14.19
+
 ## 0.14.18
 
 ### Patch Changes

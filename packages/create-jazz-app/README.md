@@ -17,11 +17,13 @@ You can create a new Jazz app in two ways:
 ### Interactive mode
 
 Simply run:
+
 ```bash
 npx create-jazz-app@latest
 ```
 
 Then follow the interactive prompts to select your:
+
 - Framework and authentication combination
 - Package manager
 - Project name

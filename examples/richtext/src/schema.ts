@@ -46,7 +46,7 @@ export const JazzAccount = co
 
     if (account.profile === undefined) {
       const group = Group.create();
-      group.addMember("everyone", "reader"); // The profile info is visible to everyone
+      group.makePublic(); // The profile info is visible to everyone
 
       account.profile = JazzProfile.create(
         {

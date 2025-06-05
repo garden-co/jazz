@@ -1,23 +1,33 @@
 import { JazzContext, JazzContextManagerContext } from "jazz-react-core";
-import { Account, JazzContextType, KvStore } from "jazz-tools";
+import {
+  Account,
+  AccountClass,
+  AnyAccountSchema,
+  CoValueFromRaw,
+  InstanceOfSchema,
+  JazzContextType,
+  KvStore,
+} from "jazz-tools";
 import React, { useEffect, useRef } from "react";
 import { JazzContextManagerProps } from "./ReactNativeContextManager.js";
 import { ReactNativeContextManager } from "./ReactNativeContextManager.js";
 import { setupKvStore } from "./platform.js";
 
-export interface Register {}
-
-export type RegisteredAccount = Register extends { Account: infer Acc }
-  ? Acc
-  : Account;
-
-export type JazzProviderProps<Acc extends Account = RegisteredAccount> = {
+export type JazzProviderProps<
+  S extends
+    | (AccountClass<Account> & CoValueFromRaw<Account>)
+    | AnyAccountSchema,
+> = {
   children: React.ReactNode;
   kvStore?: KvStore;
-} & JazzContextManagerProps<Acc>;
+} & JazzContextManagerProps<S>;
 
 /** @category Context & Hooks */
-export function JazzProviderCore<Acc extends Account = RegisteredAccount>({
+export function JazzProviderCore<
+  S extends
+    | (AccountClass<Account> & CoValueFromRaw<Account>)
+    | AnyAccountSchema,
+>({
   children,
   guestMode,
   sync,
@@ -29,11 +39,11 @@ export function JazzProviderCore<Acc extends Account = RegisteredAccount>({
   onAnonymousAccountDiscarded,
   CryptoProvider,
   logOutReplacement,
-}: JazzProviderProps<Acc>) {
+}: JazzProviderProps<S>) {
   setupKvStore(kvStore);
 
   const [contextManager] = React.useState(
-    () => new ReactNativeContextManager<Acc>(),
+    () => new ReactNativeContextManager<S>(),
   );
 
   const onAnonymousAccountDiscardedRefCallback = useRefCallback(
@@ -44,7 +54,9 @@ export function JazzProviderCore<Acc extends Account = RegisteredAccount>({
   const logoutReplacementActiveRef = useRef(false);
   logoutReplacementActiveRef.current = Boolean(logOutReplacement);
 
-  const value = React.useSyncExternalStore<JazzContextType<Acc> | undefined>(
+  const value = React.useSyncExternalStore<
+    JazzContextType<InstanceOfSchema<S>> | undefined
+  >(
     React.useCallback(
       (callback) => {
         const props = {

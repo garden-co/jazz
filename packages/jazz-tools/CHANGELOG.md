@@ -1,5 +1,19 @@
 # jazz-tools
 
+## 0.14.20
+
+### Patch Changes
+
+- 6f72419: Add support for per-CoMap migrations
+- 04b20c2: Make Zod schemas compatible with castAs
+  - cojson@0.14.20
+
+## 0.14.19
+
+### Patch Changes
+
+- cojson@0.14.19
+
 ## 0.14.18
 
 ### Patch Changes

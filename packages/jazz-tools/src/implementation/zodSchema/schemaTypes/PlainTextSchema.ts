@@ -24,4 +24,5 @@ export type PlainTextSchema = z.core.$ZodCustom<CoPlainText, unknown> & {
     listener: (value: CoPlainText, unsubscribe: () => void) => void,
   ): () => void;
   fromRaw(raw: RawCoPlainText): CoPlainText;
+  getCoSchema: () => typeof CoPlainText;
 };

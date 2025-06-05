@@ -80,7 +80,7 @@ type AccountClassEssentials = {
   fromNode: <A extends Account>(this: AccountClass<A>, node: LocalNode) => A;
 };
 
-type AnyCoSchema =
+export type AnyCoSchema =
   | AnyCoMapSchema
   | AnyAccountSchema
   | AnyCoRecordSchema

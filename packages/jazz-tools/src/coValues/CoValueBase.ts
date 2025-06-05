@@ -1,4 +1,5 @@
 import { ControlledAccount, RawAccount, type RawCoValue } from "cojson";
+import { z } from "../implementation/zodSchema/zodReExport.js";
 import {
   AnonymousJazzAgent,
   CoValue,
@@ -11,7 +12,12 @@ import {
   coValuesCache,
   inspect,
 } from "../internal.js";
-import type { Account, Group } from "../internal.js";
+import type {
+  Account,
+  CoValueClassFromZodSchema,
+  Group,
+  InstanceOfSchemaCoValuesNullable,
+} from "../internal.js";
 
 /** @internal */
 
@@ -61,7 +67,6 @@ export class CoValueBase implements CoValue {
   static fromRaw<V extends CoValue>(this: CoValueClass<V>, raw: RawCoValue): V {
     return new this({ fromRaw: raw });
   }
-
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   toJSON(): object | any[] | string {
     return {
@@ -76,13 +81,32 @@ export class CoValueBase implements CoValue {
   }
 
   /** @category Type Helpers */
-  castAs<Cl extends CoValueClass & CoValueFromRaw<CoValue>>(
-    cl: Cl,
-  ): InstanceType<Cl> {
+  castAs<
+    S extends
+      | CoValueClass
+      | z.core.$ZodType
+      | (z.core.$ZodObject<any, any> & {
+          builtin: "Account";
+          migration?: (account: any, creationProps?: { name: string }) => void;
+        })
+      | (z.core.$ZodCustom<any, any> & { builtin: "FileStream" })
+      | (z.core.$ZodCustom<any, any> & {
+          builtin: "CoFeed";
+          element: z.core.$ZodType;
+        }),
+  >(
+    schema: S,
+  ): S extends CoValueClass
+    ? InstanceType<S>
+    : S extends z.core.$ZodType
+      ? NonNullable<InstanceOfSchemaCoValuesNullable<S>>
+      : never {
+    const cl = "getCoSchema" in schema ? (schema as any).getCoSchema() : schema;
+
     if (this.constructor === cl) {
-      return this as InstanceType<Cl>;
+      return this as any;
     }
 
-    return cl.fromRaw(this._raw) as InstanceType<Cl>;
+    return (cl as unknown as CoValueFromRaw<CoValue>).fromRaw(this._raw) as any;
   }
 }

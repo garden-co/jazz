@@ -1,25 +1,23 @@
 import { consumeInviteLinkFromWindowLocation } from "jazz-browser";
 import {
-  Account,
-  AnonymousJazzAgent,
-  AuthSecretStorage,
-  CoValue,
-  CoValueClass,
-  ID,
-  JazzAuthContext,
-  JazzContextType,
-  JazzGuestContext,
-  RefsToResolve,
-  RefsToResolveStrict,
-  Resolved,
+  type AnonymousJazzAgent,
+  type AuthSecretStorage,
+  type CoValue,
+  type CoValueClass,
+  type ID,
+  type JazzAuthContext,
+  type JazzContextType,
+  type JazzGuestContext,
+  type RefsToResolve,
+  type RefsToResolveStrict,
+  type Resolved,
   subscribeToCoValue,
 } from "jazz-tools";
-/* eslint-disable @typescript-eslint/no-explicit-any */
 import {
-  ComputedRef,
-  MaybeRef,
-  Ref,
-  ShallowRef,
+  type ComputedRef,
+  type MaybeRef,
+  type Ref,
+  type ShallowRef,
   computed,
   inject,
   onMounted,
@@ -33,7 +31,7 @@ import {
 import {
   JazzAuthContextSymbol,
   JazzContextSymbol,
-  RegisteredAccount,
+  type RegisteredAccount,
 } from "./provider.js";
 
 export const logoutHandler = ref<() => void>();
@@ -164,11 +162,11 @@ export function useAccountOrGuest<
           : me.value,
       ),
     };
-  } else {
-    return {
-      me: computed(() => toRaw((context.value as JazzGuestContext).guest)),
-    };
   }
+
+  return {
+    me: computed(() => toRaw((context.value as JazzGuestContext).guest)),
+  };
 }
 
 export function useCoState<V extends CoValue, const R extends RefsToResolve<V>>(

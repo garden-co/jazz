@@ -8,8 +8,7 @@ import { ContentByFramework, CodeGroup } from '@/components/forMdx'
 
 ## Public sharing
 
-You can share CoValues publicly by setting the `owner` to a `Group`, and granting
-access to "everyone".
+You can share CoValues publicly by setting the `owner` to a `Group`, and granting access to "everyone".
 
 <CodeGroup>
 ```ts twoslash
@@ -17,6 +16,19 @@ import { Group } from "jazz-tools";
 // ---cut---
 const group = Group.create();
 group.addMember("everyone", "writer");
+```
+</CodeGroup>
+
+You can also use `makePublic(role)` alias to grant access to everyone with a specific role (defaults to `reader`).
+
+<CodeGroup>
+```ts twoslash
+import { Group } from "jazz-tools";
+// ---cut---
+const group = Group.create();
+group.addMember("everyone", "writer"); // [!code --]
+group.makePublic("writer"); // [!code ++]
+// group.makePublic(); // Defaults to "reader" access
 ```
 </CodeGroup>
 

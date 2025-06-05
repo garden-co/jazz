@@ -10,6 +10,7 @@ export const Issue = co.map({
   description: co.plainText(),
   estimate: z.number(),
   status: z.literal(["backlog", "in progress", "done"]),
+  createdAt: z.date(),
 });
 
 export const Project = co.map({

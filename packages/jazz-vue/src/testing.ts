@@ -1,7 +1,7 @@
-import { Account, AnonymousJazzAgent } from "jazz-tools";
+import type { Account, AnonymousJazzAgent } from "jazz-tools";
 import { TestJazzContextManager } from "jazz-tools/testing";
 import { provide } from "vue";
-import { PropType, defineComponent, ref } from "vue";
+import { type PropType, defineComponent, ref } from "vue";
 import { JazzAuthContextSymbol, JazzContextSymbol } from "./provider.js";
 
 export const JazzTestProvider = defineComponent({

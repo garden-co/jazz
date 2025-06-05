@@ -1,9 +1,14 @@
 import { JazzBrowserContextManager } from "jazz-browser";
-import { Account, AccountClass, JazzContextType, SyncConfig } from "jazz-tools";
-/* eslint-disable @typescript-eslint/no-explicit-any */
+import type {
+  Account,
+  AccountClass,
+  AnyAccountSchema,
+  CoValueFromRaw,
+  JazzContextType,
+  SyncConfig,
+} from "jazz-tools";
 import {
-  PropType,
-  computed,
+  type PropType,
   defineComponent,
   onMounted,
   onUnmounted,
@@ -14,7 +19,7 @@ import {
 
 export const logoutHandler = ref<() => void>();
 
-// eslint-disable-next-line @typescript-eslint/no-empty-object-type
+// biome-ignore lint/suspicious/noEmptyInterface: This interface is meant to be module augmented by users
 export interface Register {}
 
 export type RegisteredAccount = Register extends { Account: infer Acc }
@@ -29,6 +34,7 @@ declare module "jazz-tools" {
 
 export const JazzContextSymbol = Symbol("JazzContext");
 export const JazzAuthContextSymbol = Symbol("JazzAuthContext");
+
 export const JazzProvider = defineComponent({
   name: "JazzProvider",
   props: {
@@ -41,7 +47,9 @@ export const JazzProvider = defineComponent({
       required: true,
     },
     AccountSchema: {
-      type: Function as unknown as PropType<AccountClass<RegisteredAccount>>,
+      type: Function as unknown as PropType<
+        (AccountClass<Account> & CoValueFromRaw<Account>) | AnyAccountSchema
+      >,
       required: false,
     },
     storage: {
@@ -53,9 +61,8 @@ export const JazzProvider = defineComponent({
       required: false,
     },
     onAnonymousAccountDiscarded: {
-      type: Function as PropType<
-        (anonymousAccount: RegisteredAccount) => Promise<void>
-      >,
+      // biome-ignore lint/suspicious/noExplicitAny: Complex generic typing with Jazz framework internals
+      type: Function as PropType<(anonymousAccount: any) => Promise<void>>,
       required: false,
     },
     onLogOut: {
@@ -64,8 +71,11 @@ export const JazzProvider = defineComponent({
     },
   },
   setup(props, { slots }) {
-    const contextManager = new JazzBrowserContextManager<RegisteredAccount>();
-    const ctx = ref<JazzContextType<RegisteredAccount>>();
+    const contextManager = new JazzBrowserContextManager<
+      (AccountClass<Account> & CoValueFromRaw<Account>) | AnyAccountSchema
+    >();
+    // biome-ignore lint/suspicious/noExplicitAny: Complex generic typing with Jazz framework internals
+    const ctx = ref<JazzContextType<any>>();
 
     provide(JazzContextSymbol, ctx);
     provide(JazzAuthContextSymbol, contextManager.getAuthSecretStorage());

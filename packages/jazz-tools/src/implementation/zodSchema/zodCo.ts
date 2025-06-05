@@ -1,11 +1,7 @@
-import { CoValueUniqueness } from "cojson";
-import { ZodObject } from "zod/v4";
 import {
-  Account,
+  type Account,
   AccountCreationProps,
-  AccountInstance,
   AccountSchema,
-  AnonymousJazzAgent,
   AnyCoMapSchema,
   CoFeed,
   CoFeedSchema,
@@ -18,7 +14,6 @@ import {
   DefaultProfileShape,
   FileStream,
   FileStreamSchema,
-  Group,
   ImageDefinition,
   PlainTextSchema,
   Simplify,
@@ -55,10 +50,19 @@ function enrichCoMapSchema<Shape extends z.core.$ZodLooseShape>(
     withHelpers: (helpers: (Self: z.core.$ZodType) => object) => {
       return Object.assign(schema, helpers(schema));
     },
+    withMigration: (migration: (value: any) => undefined) => {
+      coSchema.prototype.migrate = migration;
+
+      return enrichedSchema;
+    },
+    getCoSchema: () => {
+      return coSchema;
+    },
   }) as unknown as CoMapSchema<Shape>;
 
   // Needs to be derived from the enriched schema
   const coSchema = zodSchemaToCoSchema(enrichedSchema) as any;
+
   return enrichedSchema;
 }
 
@@ -71,6 +75,66 @@ export const coMapDefiner = <Shape extends z.core.$ZodLooseShape>(
 
   return enrichCoMapSchema(objectSchema);
 };
+
+function enrichAccountSchema<
+  Shape extends {
+    profile: AnyCoMapSchema<{
+      name: z.core.$ZodString<string>;
+      inbox?: z.core.$ZodOptional<z.core.$ZodString>;
+      inboxInvite?: z.core.$ZodOptional<z.core.$ZodString>;
+    }>;
+    root: AnyCoMapSchema;
+  },
+>(schema: z.ZodObject<Shape, z.core.$strip>) {
+  const enrichedSchema = Object.assign(schema, {
+    collaborative: true,
+    builtin: "Account",
+    create: (...args: any[]) => {
+      return coSchema.create(...args);
+    },
+    createAs: (...args: any[]) => {
+      return coSchema.createAs(...args);
+    },
+    getMe: (...args: any[]) => {
+      return coSchema.getMe(...args);
+    },
+    load: (...args: any[]) => {
+      return coSchema.load(...args);
+    },
+    subscribe: (...args: any[]) => {
+      return coSchema.subscribe(...args);
+    },
+    withHelpers: (helpers: (Self: z.core.$ZodType) => object) => {
+      return Object.assign(schema, helpers(schema));
+    },
+    fromRaw: (...args: any[]) => {
+      return coSchema.fromRaw(...args);
+    },
+    withMigration: (
+      migration: (
+        value: any,
+        creationProps?: AccountCreationProps,
+      ) => void | Promise<void>,
+    ) => {
+      (coSchema.prototype as Account).migrate = async function (
+        this,
+        creationProps,
+      ) {
+        await migration(this, creationProps);
+      };
+
+      return enrichedSchema;
+    },
+    getCoSchema: () => {
+      return coSchema;
+    },
+  }) as unknown as AccountSchema<Shape>;
+
+  // Needs to be derived from the enriched schema
+  const coSchema = zodSchemaToCoSchema(enrichedSchema) as any;
+
+  return enrichedSchema;
+}
 
 export const coAccountDefiner = <
   Shape extends {
@@ -95,76 +159,7 @@ export const coAccountDefiner = <
     collaborative: true,
   });
 
-  type CleanedType = Pick<
-    typeof objectSchema,
-    "_zod" | "def" | "~standard" | "catchall"
-  >;
-
-  const accountSchema = objectSchema as unknown as CleanedType & {
-    collaborative: true;
-    builtin: "Account";
-    migration?: (
-      account: AccountInstance<Shape>,
-      creationProps?: AccountCreationProps,
-    ) => void;
-
-    create: AccountSchema<Shape>["create"];
-    createAs: AccountSchema<Shape>["createAs"];
-    getMe: AccountSchema<Shape>["getMe"];
-    load: AccountSchema<Shape>["load"];
-    subscribe: AccountSchema<Shape>["subscribe"];
-    /** @deprecated Define your helper methods separately, in standalone functions. */
-    withHelpers: AccountSchema<Shape>["withHelpers"];
-    withMigration: AccountSchema<Shape>["withMigration"];
-  };
-
-  accountSchema.collaborative = true;
-  accountSchema.builtin = "Account";
-
-  accountSchema.create = function (this: AccountSchema<Shape>, ...args: any[]) {
-    return (zodSchemaToCoSchema(this) as any).create(...args);
-  } as AccountSchema<Shape>["create"];
-
-  accountSchema.createAs = function (
-    this: AccountSchema<Shape>,
-    ...args: any[]
-  ) {
-    return (zodSchemaToCoSchema(this) as any).createAs(...args);
-  } as AccountSchema<Shape>["createAs"];
-
-  accountSchema.getMe = function (this: AccountSchema<Shape>) {
-    return (zodSchemaToCoSchema(this) as any).getMe();
-  } as AccountSchema<Shape>["getMe"];
-
-  accountSchema.load = function (this: AccountSchema<Shape>, ...args: any[]) {
-    return (zodSchemaToCoSchema(this) as any).load(...args);
-  } as AccountSchema<Shape>["load"];
-
-  accountSchema.subscribe = function (
-    this: AccountSchema<Shape>,
-    ...args: any[]
-  ) {
-    return (zodSchemaToCoSchema(this) as any).subscribe(...args);
-  } as AccountSchema<Shape>["subscribe"];
-
-  accountSchema.withHelpers = function (
-    this: CoMapSchema<Shape>,
-    helpers: object,
-  ) {
-    return { ...this, ...helpers };
-  } as CoMapSchema<Shape>["withHelpers"];
-
-  accountSchema.withMigration = function (
-    this: AccountSchema<Shape>,
-    migration: (
-      account: AccountInstance<Shape>,
-      creationProps?: AccountCreationProps,
-    ) => void,
-  ) {
-    return Object.assign(this, { migration });
-  } as AccountSchema<Shape>["withMigration"];
-
-  return accountSchema as unknown as AccountSchema<Shape>;
+  return enrichAccountSchema(objectSchema) as unknown as AccountSchema<Shape>;
 };
 
 export const coRecordDefiner = <
@@ -180,6 +175,32 @@ export const coRecordDefiner = <
   >;
 };
 
+function enrichCoListSchema<T extends z.core.$ZodType>(schema: z.ZodArray<T>) {
+  const enrichedSchema = Object.assign(schema, {
+    collaborative: true,
+    create: (...args: any[]) => {
+      return coSchema.create(...args);
+    },
+    load: (...args: any[]) => {
+      return coSchema.load(...args);
+    },
+    subscribe: (...args: any[]) => {
+      return coSchema.subscribe(...args);
+    },
+    withHelpers: (helpers: (Self: z.core.$ZodType) => object) => {
+      return Object.assign(schema, helpers(schema));
+    },
+    getCoSchema: () => {
+      return coSchema;
+    },
+  }) as unknown as CoListSchema<T>;
+
+  // Needs to be derived from the enriched schema
+  const coSchema = zodSchemaToCoSchema(enrichedSchema) as any;
+
+  return enrichedSchema;
+}
+
 export const coListDefiner = <T extends z.core.$ZodType>(
   element: T,
 ): CoListSchema<T> => {
@@ -187,39 +208,7 @@ export const coListDefiner = <T extends z.core.$ZodType>(
     collaborative: true,
   });
 
-  type CleanedType = Pick<typeof arraySchema, "_zod" | "def" | "~standard">;
-
-  const coListSchema = arraySchema as unknown as CleanedType & {
-    collaborative: true;
-    create: CoListSchema<T>["create"];
-    load: CoListSchema<T>["load"];
-    subscribe: CoListSchema<T>["subscribe"];
-    /** @deprecated Define your helper methods separately, in standalone functions. */
-    withHelpers: CoListSchema<T>["withHelpers"];
-  };
-
-  coListSchema.collaborative = true;
-
-  coListSchema.create = function (this: CoListSchema<T>, ...args: any[]) {
-    return (zodSchemaToCoSchema(this) as any).create(...args);
-  } as CoListSchema<T>["create"];
-
-  coListSchema.load = function (this: CoListSchema<T>, ...args: any[]) {
-    return (zodSchemaToCoSchema(this) as any).load(...args);
-  } as CoListSchema<T>["load"];
-
-  coListSchema.subscribe = function (this: CoListSchema<T>, ...args: any[]) {
-    return (zodSchemaToCoSchema(this) as any).subscribe(...args);
-  } as CoListSchema<T>["subscribe"];
-
-  coListSchema.withHelpers = function (
-    this: CoListSchema<T>,
-    helpers: (Self: CoListSchema<T>) => object,
-  ) {
-    return Object.assign(this, helpers(this));
-  } as CoListSchema<T>["withHelpers"];
-
-  return coListSchema;
+  return enrichCoListSchema(arraySchema);
 };
 
 export const coProfileDefiner = <
@@ -240,155 +229,134 @@ export const coProfileDefiner = <
   return coMapDefiner(ehnancedShape) as CoProfileSchema<Shape>;
 };
 
+function enrichCoFeedSchema<T extends z.core.$ZodType>(
+  schema: z.ZodCustom<CoFeed<unknown>, unknown>,
+  element: T,
+) {
+  const enrichedSchema = Object.assign(schema, {
+    collaborative: true,
+    builtin: "CoFeed",
+    element,
+    create: (...args: any[]) => {
+      return coSchema.create(...args);
+    },
+    load: (...args: any[]) => {
+      return coSchema.load(...args);
+    },
+    subscribe: (...args: any[]) => {
+      return coSchema.subscribe(...args);
+    },
+    withHelpers: (helpers: (Self: z.core.$ZodType) => object) => {
+      return Object.assign(schema, helpers(schema));
+    },
+    getCoSchema: () => {
+      return coSchema;
+    },
+  }) as unknown as CoFeedSchema<T>;
+
+  // Needs to be derived from the enriched schema
+  const coSchema = zodSchemaToCoSchema(enrichedSchema) as any;
+
+  return enrichedSchema;
+}
+
 export const coFeedDefiner = <T extends z.core.$ZodType>(
   element: T,
 ): CoFeedSchema<T> => {
-  const placeholderSchema = z.instanceof(CoFeed);
-
-  const coFeedSchema = placeholderSchema as unknown as Pick<
-    typeof placeholderSchema,
-    "_zod" | "def" | "~standard"
-  > & {
-    collaborative: true;
-    builtin: "CoFeed";
-    element: T;
-    create: CoFeedSchema<T>["create"];
-    load: CoFeedSchema<T>["load"];
-    subscribe: CoFeedSchema<T>["subscribe"];
-  };
-
-  coFeedSchema.collaborative = true;
-  coFeedSchema.builtin = "CoFeed";
-  coFeedSchema.element = element;
-
-  coFeedSchema.create = function (this: CoFeedSchema<T>, ...args: any[]) {
-    return (zodSchemaToCoSchema(this) as any).create(...args);
-  } as CoFeedSchema<T>["create"];
-
-  coFeedSchema.load = function (this: CoFeedSchema<T>, ...args: any[]) {
-    return (zodSchemaToCoSchema(this) as any).load(...args);
-  } as CoFeedSchema<T>["load"];
-
-  coFeedSchema.subscribe = function (this: CoFeedSchema<T>, ...args: any[]) {
-    return (zodSchemaToCoSchema(this) as any).subscribe(...args);
-  } as CoFeedSchema<T>["subscribe"];
-
-  return coFeedSchema as unknown as CoFeedSchema<T>;
+  return enrichCoFeedSchema(z.instanceof(CoFeed), element);
 };
+
+function enrichFileStreamSchema(schema: z.ZodCustom<FileStream, unknown>) {
+  const enrichedSchema = Object.assign(schema, {
+    collaborative: true,
+    builtin: "FileStream",
+    create: (...args: any[]) => {
+      return coSchema.create(...args);
+    },
+    createFromBlob: (...args: any[]) => {
+      return coSchema.createFromBlob(...args);
+    },
+    load: (...args: any[]) => {
+      return coSchema.load(...args);
+    },
+    loadAsBlob: (...args: any[]) => {
+      return coSchema.loadAsBlob(...args);
+    },
+    subscribe: (...args: any[]) => {
+      return coSchema.subscribe(...args);
+    },
+    getCoSchema: () => {
+      return coSchema;
+    },
+  }) as unknown as FileStreamSchema;
+
+  // Needs to be derived from the enriched schema
+  const coSchema = zodSchemaToCoSchema(enrichedSchema) as any;
+
+  return enrichedSchema;
+}
 
 export const coFileStreamDefiner = (): FileStreamSchema => {
-  const placeholderSchema = z.instanceof(FileStream);
-
-  const fileStreamSchema = placeholderSchema as unknown as Pick<
-    typeof placeholderSchema,
-    "_zod" | "def" | "~standard"
-  > & {
-    collaborative: true;
-    builtin: "FileStream";
-    create: FileStreamSchema["create"];
-    createFromBlob: FileStreamSchema["createFromBlob"];
-    load: FileStreamSchema["load"];
-    loadAsBlob: FileStreamSchema["loadAsBlob"];
-    subscribe: FileStreamSchema["subscribe"];
-  };
-
-  fileStreamSchema.collaborative = true;
-  fileStreamSchema.builtin = "FileStream";
-
-  fileStreamSchema.create = function (options: any) {
-    return FileStream.create(options);
-  } as FileStreamSchema["create"];
-
-  fileStreamSchema.createFromBlob = function (blob: Blob, options: any) {
-    return FileStream.createFromBlob(blob, options);
-  } as FileStreamSchema["createFromBlob"];
-
-  fileStreamSchema.load = function (id: string, options: any) {
-    return FileStream.load(id, options);
-  } as FileStreamSchema["load"];
-
-  fileStreamSchema.loadAsBlob = function (id: string, options: any) {
-    return FileStream.loadAsBlob(id, options);
-  } as FileStreamSchema["loadAsBlob"];
-
-  fileStreamSchema.subscribe = function (
-    id: string,
-    options: any,
-    listener: any,
-  ) {
-    return FileStream.subscribe(id, options, listener);
-  } as FileStreamSchema["subscribe"];
-
-  return fileStreamSchema;
+  return enrichFileStreamSchema(z.instanceof(FileStream));
 };
+
+function enrichPlainTextSchema(schema: z.ZodCustom<CoPlainText, unknown>) {
+  const enrichedSchema = Object.assign(schema, {
+    collaborative: true,
+    builtin: "CoPlainText",
+    create: (...args: any[]) => {
+      return coSchema.create(...args);
+    },
+    load: (...args: any[]) => {
+      return coSchema.load(...args);
+    },
+    subscribe: (...args: any[]) => {
+      return coSchema.subscribe(...args);
+    },
+    fromRaw: (...args: any[]) => {
+      return coSchema.fromRaw(...args);
+    },
+    getCoSchema: () => {
+      return coSchema;
+    },
+  }) as unknown as PlainTextSchema;
+
+  // Needs to be derived from the enriched schema
+  const coSchema = zodSchemaToCoSchema(enrichedSchema) as any;
+
+  return enrichedSchema;
+}
 
 export const coPlainTextDefiner = (): PlainTextSchema => {
-  const placeholderSchema = z.instanceof(CoPlainText);
-
-  const plainTextSchema = placeholderSchema as unknown as Pick<
-    typeof placeholderSchema,
-    "_zod" | "def" | "~standard"
-  > & {
-    collaborative: true;
-    builtin: "CoPlainText";
-    create: PlainTextSchema["create"];
-    load: PlainTextSchema["load"];
-    subscribe: PlainTextSchema["subscribe"];
-    fromRaw: PlainTextSchema["fromRaw"];
-  };
-
-  plainTextSchema.collaborative = true;
-  plainTextSchema.builtin = "CoPlainText";
-
-  plainTextSchema.create = function (...args: any[]) {
-    return (CoPlainText as any).create(...args);
-  } as PlainTextSchema["create"];
-
-  plainTextSchema.load = function (...args: any[]) {
-    return (CoPlainText as any).load(...args);
-  } as PlainTextSchema["load"];
-
-  plainTextSchema.subscribe = function (...args: any[]) {
-    return (CoPlainText as any).subscribe(...args);
-  } as PlainTextSchema["subscribe"];
-
-  plainTextSchema.fromRaw = function (...args: any[]) {
-    return (CoPlainText as any).fromRaw(...args);
-  } as PlainTextSchema["fromRaw"];
-
-  return plainTextSchema;
+  return enrichPlainTextSchema(z.instanceof(CoPlainText));
 };
 
+function enrichRichTextSchema(schema: z.ZodCustom<CoRichText, unknown>) {
+  const enrichedSchema = Object.assign(schema, {
+    collaborative: true,
+    builtin: "CoRichText",
+    create: (...args: any[]) => {
+      return coSchema.create(...args);
+    },
+    load: (...args: any[]) => {
+      return coSchema.load(...args);
+    },
+    subscribe: (...args: any[]) => {
+      return coSchema.subscribe(...args);
+    },
+    getCoSchema: () => {
+      return coSchema;
+    },
+  }) as unknown as RichTextSchema;
+
+  // Needs to be derived from the enriched schema
+  const coSchema = zodSchemaToCoSchema(enrichedSchema) as any;
+
+  return enrichedSchema;
+}
+
 export const coRichTextDefiner = (): RichTextSchema => {
-  const placeholderSchema = z.instanceof(CoRichText);
-
-  const richTextSchema = placeholderSchema as unknown as Pick<
-    typeof placeholderSchema,
-    "_zod" | "def" | "~standard"
-  > & {
-    collaborative: true;
-    builtin: "CoRichText";
-    create: RichTextSchema["create"];
-    load: RichTextSchema["load"];
-    subscribe: RichTextSchema["subscribe"];
-  };
-
-  richTextSchema.collaborative = true;
-  richTextSchema.builtin = "CoRichText";
-
-  richTextSchema.create = function (...args: any[]) {
-    return (CoRichText as any).create(...args);
-  } as RichTextSchema["create"];
-
-  richTextSchema.load = function (...args: any[]) {
-    return (CoRichText as any).load(...args);
-  } as RichTextSchema["load"];
-
-  richTextSchema.subscribe = function (...args: any[]) {
-    return (CoRichText as any).subscribe(...args);
-  } as RichTextSchema["subscribe"];
-
-  return richTextSchema;
+  return enrichRichTextSchema(z.instanceof(CoRichText));
 };
 
 export const coImageDefiner = (): typeof ImageDefinition => {

@@ -18,7 +18,7 @@ export function App() {
   const createChat = () => {
     if (!me) return;
     const group = Group.create();
-    group.addMember("everyone", "writer");
+    group.makePublic("writer");
     const chat = Chat.create([], group);
     router.navigate("/#/chat/" + chat.id);
 

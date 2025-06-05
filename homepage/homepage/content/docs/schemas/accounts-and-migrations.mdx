@@ -209,7 +209,7 @@ export const MyAppAccount = co.account({
   if (account.profile === undefined) {
     const profileGroup = Group.create();
     // Unlike the root, we want the profile to be publicly readable.
-    profileGroup.addMember("everyone", "reader");
+    profileGroup.makePublic();
 
     account.profile = MyAppProfile.create({
       name: creationProps?.name ?? "New user",
