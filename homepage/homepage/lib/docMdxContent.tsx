@@ -71,7 +71,7 @@ export async function DocPage({
       <DocsLayout
         nav={<DocNav />}
         tocItems={tocItems}
-        pagefindLowPriority={slug?.includes("upgrade")}
+        pagefindLowPriority={slug?.length ? slug[0] === "upgrade" : false}
       >
         <DocProse>
           <Content />
