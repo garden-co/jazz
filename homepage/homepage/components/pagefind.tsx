@@ -132,7 +132,6 @@ const prioritizeResultsByFramework = (
   });
 };
 
-// Hooks
 export const usePagefindSearch = singletonHook(
   { open: false, setOpen: () => {} },
   () => {
@@ -164,52 +163,6 @@ function HighlightedText({ text }: { text: string }) {
     </p>
   );
 }
-
-// function Result({
-//   result,
-//   onClick,
-// }: {
-//   result: PagefindResult | PagefindSubResult;
-//   onClick: () => void;
-// }) {
-//   const title = "meta" in result ? result.meta?.title : result.title;
-//   const subResults = "sub_results" in result ? result.sub_results : [];
-//   const framework = "meta" in result ? (result.meta as any)?.framework : null;
-//   return (
-//     <>
-//       <button
-//         type="button"
-//         onClick={onClick}
-//         className={`text-left group relative flex items-center gap-2 sm:gap-3 px-3 sm:px-4 py-2 sm:py-3 cursor-pointer text-sm rounded-md select-none
-//           transition-all duration-200 ease-in-out
-//           `}
-//       >
-//         <div className="min-w-0 flex-1">
-//           <h3 className="font-medium text-highlight truncate">
-//             {title || "No title"} {framework ? `(${framework})` : ""}
-//           </h3>
-//           <HighlightedText text={result.excerpt || ""} />
-//         </div>
-//       </button>
-//
-//       {subResults?.length ? (
-//         <ul className="ml-4">
-//           {subResults?.map((subResult) => (
-//             <li key={subResult.id} className="block">
-//               <Result
-//                 result={subResult}
-//                 onClick={() => {
-//                   const { path, hash } = processSubUrl(subResult.url);
-//                   navigateToUrl(`${path}${hash}`);
-//                 }}
-//               />
-//             </li>
-//           ))}
-//         </ul>
-//       ) : null}
-//     </>
-//   );
-// }
 
 export function PagefindSearch() {
   const { open, setOpen } = usePagefindSearch();
