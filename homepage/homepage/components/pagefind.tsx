@@ -171,6 +171,11 @@ export function PagefindSearch() {
   const listRef = useRef<HTMLDivElement>(null);
   const currentFramework = useFramework();
 
+  const close = () => {
+    setOpen(false);
+    setQuery("");
+  };
+
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === SEARCH_SHORTCUT_KEY && (e.metaKey || e.ctrlKey)) {
@@ -181,7 +186,7 @@ export function PagefindSearch() {
 
     document.addEventListener("keydown", handleKeyDown);
     return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [setOpen]);
+  }, [setOpen, close]);
 
   useEffect(() => {
     async function loadPagefind() {
@@ -248,11 +253,6 @@ export function PagefindSearch() {
 
   if (!open) return null;
 
-  const close = () => {
-    setOpen(false);
-    setQuery("");
-  };
-
   return (
     <Dialog open={open} onClose={close} className="!p-0">
       <DialogBody className="!mt-0">
@@ -270,20 +270,25 @@ export function PagefindSearch() {
             }
           }}
         >
-          <div className="p-2 border-b">
+          <div className="p-2 border-b grid grid-cols-1">
             <ComboboxInput
-              className="w-full rounded-lg bg-stone-100 px-4 py-2.5 text-highlight outline-none placeholder:text-stone-500 dark:bg-stone-925"
+              className="col-start-1 row-start-1  w-full rounded-xl bg-stone-100 pl-11 pr-4 py-2.5 text-highlight outline-none placeholder:text-stone-500 dark:bg-stone-925 sm:rounded-lg focus-visible:outline-none"
               placeholder="Search documentation..."
               onChange={(e) => handleSearch(e.target.value)}
               value={query}
               autoFocus
               autoComplete="off"
-              onBlur={close}
+              onBlur={() => setQuery("")}
+            />
+            <Icon
+              name="search"
+              size="sm"
+              className="col-start-1 row-start-1 ml-3 self-center pointer-events-none text-stone-600"
             />
           </div>
           <div
             ref={listRef}
-            className="h-[50vh] sm:h-[300px] max-h-[60vh] sm:max-h-[400px] overflow-y-auto overflow-x-hidden overscroll-contain pb-2"
+            className="h-[50vh] sm:h-[300px] max-h-[60vh] sm:max-h-[400px] overflow-y-auto overflow-x-hidden overscroll-contain"
           >
             {results.length === 0 ? (
               <p className="text-center py-5">No results found.</p>
