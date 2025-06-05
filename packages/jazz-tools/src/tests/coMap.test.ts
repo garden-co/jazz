@@ -1570,6 +1570,15 @@ describe("CoMap migration", () => {
     expect(loaded?.friend?.version).toEqual(2);
   });
   describe("Time", () => {
+    test("empty map created time", () => {
+      const currentTimestampInSeconds = Math.floor(Date.now() / 1000);
+      const emptyMap = co.map({}).create({});
+      const createdAtInSeconds = Math.floor(emptyMap._createdAt / 1000);
+
+      expect(createdAtInSeconds).toEqual(currentTimestampInSeconds);
+      expect(emptyMap._lastUpdatedAt).toEqual(emptyMap._createdAt);
+    });
+
     test("created time and last updated time", async () => {
       const Person = co.map({
         name: z.string(),
@@ -1591,6 +1600,38 @@ describe("CoMap migration", () => {
       expect(lastUpdatedAtInSeconds).toEqual(currentTimestampInSeconds);
       expect(person._createdAt).toEqual(createdAt);
       expect(person._lastUpdatedAt).not.toEqual(createdAt);
+    });
+
+    test("comap with custom uniqueness", () => {
+      const Person = co.map({
+        name: z.string(),
+      });
+
+      let currentTimestampInSeconds = Math.floor(Date.now() / 1000);
+      const person = Person.create(
+        { name: "John" },
+        { unique: "name", owner: Account.getMe() },
+      );
+
+      const createdAt = person._createdAt;
+      const createdAtInSeconds = Math.floor(createdAt / 1000);
+      expect(createdAtInSeconds).toEqual(currentTimestampInSeconds);
+    });
+
+    test("empty comap with custom uniqueness", () => {
+      const Person = co.map({
+        name: z.optional(z.string()),
+      });
+
+      let currentTimestampInSeconds = Math.floor(Date.now() / 1000);
+      const person = Person.create(
+        {},
+        { unique: "name", owner: Account.getMe() },
+      );
+
+      const createdAt = person._createdAt;
+      const createdAtInSeconds = Math.floor(createdAt / 1000);
+      expect(createdAtInSeconds).toEqual(currentTimestampInSeconds);
     });
   });
 });

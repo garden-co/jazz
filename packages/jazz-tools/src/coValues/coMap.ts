@@ -118,12 +118,16 @@ export class CoMap extends CoValueBase implements CoValue {
     } & { [ItemsSym]?: Schema };
   }
 
-  /** @internal */
+  /**
+   * The timestamp of the creation time of the CoMap
+   */
   get _createdAt() {
-    return this._raw.earliestTxMadeAt;
+    return this._raw.earliestTxMadeAt ?? Number.MAX_SAFE_INTEGER;
   }
 
-  /** @internal */
+  /**
+   * The timestamp of the last updated time of the CoMap
+   */
   get _lastUpdatedAt() {
     return this._raw.latestTxMadeAt;
   }
