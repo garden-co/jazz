@@ -28,15 +28,12 @@ function Router() {
   return <RouterProvider router={router}></RouterProvider>;
 }
 
-const url = new URL(window.location.href);
-const peer = url.searchParams.get("peer") as `wss://${string}` | `ws://${string}` | null;
-
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
     <JazzProvider
       AccountSchema={JazzAccount}
       sync={{
-        peer: peer ?? `wss://cloud.jazz.tools/?key=${apiKey}`,
+        peer: `wss://cloud.jazz.tools/?key=${apiKey}`,
       }}
     >
       <Router />

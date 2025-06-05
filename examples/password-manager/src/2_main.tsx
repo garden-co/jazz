@@ -6,15 +6,12 @@ import App from "./5_App.tsx";
 import "./index.css";
 import { apiKey } from "./apiKey";
 
-const url = new URL(window.location.href);
-const peer = url.searchParams.get("peer") as `wss://${string}` | `ws://${string}` | null;
-
 function JazzAndAuth({ children }: { children: React.ReactNode }) {
   return (
     <JazzProvider
       AccountSchema={PasswordManagerAccount}
       sync={{
-        peer: peer ?? `wss://cloud.jazz.tools/?key=${apiKey}`,
+        peer: `wss://cloud.jazz.tools/?key=${apiKey}`,
       }}
     >
       <PasskeyAuthBasicUI appName="Jazz Password Manager">

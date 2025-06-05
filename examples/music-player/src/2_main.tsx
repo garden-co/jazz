@@ -57,16 +57,11 @@ function Main() {
   );
 }
 
-const peer =
-  (new URL(window.location.href).searchParams.get(
-    "peer",
-  ) as `ws://${string}`) ?? `wss://cloud.jazz.tools/?key=${apiKey}`;
-
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
     <JazzProvider
       sync={{
-        peer,
+        peer: `wss://cloud.jazz.tools/?key=${apiKey}`,
       }}
       storage="indexedDB"
       AccountSchema={MusicaAccount}
