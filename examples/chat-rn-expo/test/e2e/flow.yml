@@ -41,7 +41,14 @@ appId: tools.jazz.chatrnexpo
 # logout
 - tapOn: "Logout"
 - assertVisible: "Username"
-- assertVisible: "Anonymous user"
+
+- extendedWaitUntil:
+    visible: "Anonymous user"
+    timeout: 10000
+
+- extendedWaitUntil:
+    visible: "Join chat"
+    timeout: 10000
 
 # join chat
 - tapOn:

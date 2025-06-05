@@ -129,7 +129,7 @@ export default function ChatScreen() {
             testID="chat-id-input"
           />
           <TouchableOpacity onPress={joinChat} style={styles.joinChatButton}>
-            <Text style={styles.newChatButtonText}>Join chat</Text>
+            <Button title="Join chat" onPress={joinChat} />
           </TouchableOpacity>
         </View>
       ) : (
