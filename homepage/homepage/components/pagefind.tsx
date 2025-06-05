@@ -299,7 +299,7 @@ export function PagefindSearch() {
                       <Icon name="file" className="shrink-0" />
                       <div>
                         <p className="font-medium text-highlight line-clamp-1">
-                          {result?.meta?.title || "No title"}{" "}
+                          {result.meta?.title || "No title"}{" "}
                           {result.meta?.framework ? (
                             <span className="text-stone-600 dark:text-stone-400 font-normal">
                               (
@@ -329,8 +329,7 @@ export function PagefindSearch() {
                             <Icon name="hash" className="shrink-0" />
                             <div>
                               <p className="text-sm text-highlight">
-                                {subResult?.title?.replace("#", "") ||
-                                  "No title"}
+                                {subResult.title || "No title"}
                               </p>
                               <HighlightedText text={subResult.excerpt || ""} />
                             </div>

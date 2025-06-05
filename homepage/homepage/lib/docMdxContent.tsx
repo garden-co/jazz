@@ -85,7 +85,7 @@ export async function DocPage({
       "../content/docs/coming-soon.mdx"
     );
     return (
-      <DocsLayout nav={<DocNav />} tocItems={[]}>
+      <DocsLayout nav={<DocNav />} tocItems={[]} pagefindIgnore>
         <DocProse>
           <ComingSoon />
         </DocProse>
