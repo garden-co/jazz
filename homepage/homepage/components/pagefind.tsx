@@ -13,6 +13,7 @@ import {
   ComboboxOption,
   ComboboxOptions,
 } from "@headlessui/react";
+import { clsx } from "clsx";
 import React, { useState, useEffect, useRef } from "react";
 import { singletonHook } from "react-singleton-hook";
 
@@ -251,8 +252,6 @@ export function PagefindSearch() {
     }
   };
 
-  if (!open) return null;
-
   return (
     <Dialog open={open} onClose={close} className="!p-0">
       <DialogBody className="!mt-0">
@@ -272,7 +271,12 @@ export function PagefindSearch() {
         >
           <div className="p-2 border-b grid grid-cols-1">
             <ComboboxInput
-              className="col-start-1 row-start-1  w-full rounded-xl bg-stone-100 pl-11 pr-4 py-2.5 text-highlight outline-none placeholder:text-stone-500 dark:bg-stone-925 sm:rounded-lg focus-visible:outline-none"
+              className={clsx(
+                "col-start-1 row-start-1",
+                "text-highlight placeholder:text-stone-500 sm:bg-stone-100 sm:dark:bg-stone-925",
+                "w-full pl-11 pr-4 py-2.5 rounded-xl sm:rounded-lg",
+                "outline-none focus-visible:outline-none",
+              )}
               placeholder="Search documentation..."
               onChange={(e) => handleSearch(e.target.value)}
               value={query}
