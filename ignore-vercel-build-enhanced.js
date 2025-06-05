@@ -21,22 +21,20 @@ function gitCommand(command) {
 // Get list of changed files since last deployment
 function getChangedFiles() {
   // Try to get files changed since the last commit on the main branch
-  let changedFiles = gitCommand(
-    "git diff --name-only HEAD~1 HEAD"
-  );
-  
+  let changedFiles = gitCommand("git diff --name-only HEAD~1 HEAD");
+
   // If that fails, get files changed in the current commit
   if (!changedFiles) {
     changedFiles = gitCommand("git diff --name-only HEAD^ HEAD");
   }
-  
+
   // If still no files, assume we need to build (safety fallback)
   if (!changedFiles) {
     console.log("⚠️  Could not determine changed files, proceeding with build");
     return null;
   }
-  
-  return changedFiles.split("\n").filter(file => file.trim() !== "");
+
+  return changedFiles.split("\n").filter((file) => file.trim() !== "");
 }
 
 // Determine project path from APP_NAME
@@ -44,24 +42,24 @@ function getProjectPath(appName) {
   if (appName === homepageAppName) {
     return "homepage/homepage";
   }
-  
+
   // Check examples first
   const examplePath = `examples/${appName.replace(/^jazz-/, "")}`;
   if (existsSync(examplePath)) {
     return examplePath;
   }
-  
+
   // Check starters
   const starterPath = `starters/${appName.replace(/^jazz-/, "")}`;
   if (existsSync(starterPath)) {
     return starterPath;
   }
-  
+
   // Fallback - try the exact app name
   if (existsSync(appName)) {
     return appName;
   }
-  
+
   console.log(`⚠️  Could not determine project path for ${appName}`);
   return null;
 }
@@ -72,36 +70,41 @@ function getProjectDependencies(projectPath) {
   if (!existsSync(packageJsonPath)) {
     return [];
   }
-  
+
   try {
     const packageJson = JSON.parse(readFileSync(packageJsonPath, "utf8"));
     const deps = {
       ...packageJson.dependencies,
       ...packageJson.devDependencies,
     };
-    
+
     // Filter to only local workspace dependencies (packages that start with workspace path)
-    return Object.keys(deps).filter(dep => 
-      deps[dep].startsWith("workspace:") || 
-      dep.startsWith("@jazz-tools/") ||
-      dep.startsWith("jazz-")
+    return Object.keys(deps).filter(
+      (dep) =>
+        deps[dep].startsWith("workspace:") ||
+        dep.startsWith("@jazz-tools/") ||
+        dep.startsWith("jazz-"),
     );
   } catch (error) {
-    console.log(`Error reading package.json for ${projectPath}:`, error.message);
+    console.log(
+      `Error reading package.json for ${projectPath}:`,
+      error.message,
+    );
     return [];
   }
 }
 
 // Check if any workspace packages changed
 function workspacePackagesChanged(changedFiles, dependencies) {
-  return changedFiles.some(file => {
+  return changedFiles.some((file) => {
     // Check if any file in packages/ directory changed
     if (file.startsWith("packages/")) {
       const packageName = file.split("/")[1];
       // Check if this package is a dependency of our project
-      return dependencies.some(dep => 
-        dep.includes(packageName) || 
-        file.startsWith(`packages/${packageName}`)
+      return dependencies.some(
+        (dep) =>
+          dep.includes(packageName) ||
+          file.startsWith(`packages/${packageName}`),
       );
     }
     return false;
@@ -121,14 +124,16 @@ function globalConfigChanged(changedFiles) {
     ".npmrc",
     ".nvmrc",
     "ignore-vercel-build.js",
-    "ignore-vercel-build-enhanced.js"
+    "ignore-vercel-build-enhanced.js",
   ];
-  
-  return changedFiles.some(file => globalFiles.includes(file));
+
+  return changedFiles.some((file) => globalFiles.includes(file));
 }
 
 // Main logic
-console.log(`🔍 Checking build necessity for ${currentAppName} on branch ${branchName}`);
+console.log(
+  `🔍 Checking build necessity for ${currentAppName} on branch ${branchName}`,
+);
 
 // Keep existing docs branch logic
 if (
@@ -136,15 +141,19 @@ if (
   process.env.VERCEL_GIT_COMMIT_MESSAGE?.includes("docs")
 ) {
   if (currentAppName === homepageAppName) {
-    console.log("✅ Building homepage because a \"docs\" branch was merged into \"main\".");
+    console.log(
+      '✅ Building homepage because a "docs" branch was merged into "main".',
+    );
     process.exit(1);
   } else {
-    console.log(`🛑 Skipping build for ${currentAppName} after \"docs\" branch merged to main.`);
+    console.log(
+      `🛑 Skipping build for ${currentAppName} after \"docs\" branch merged to main.`,
+    );
     process.exit(0);
   }
 } else if (branchName.includes("docs")) {
   if (currentAppName === homepageAppName) {
-    console.log("✅ Building homepage for \"docs\" branch.");
+    console.log('✅ Building homepage for "docs" branch.');
     process.exit(1);
   } else {
     console.log(`🛑 Skipping build for ${currentAppName} on \"docs\" branch.`);
@@ -155,23 +164,29 @@ if (
 // Enhanced change detection
 const changedFiles = getChangedFiles();
 if (!changedFiles) {
-  console.log("✅ Could not determine changes, proceeding with build for safety.");
+  console.log(
+    "✅ Could not determine changes, proceeding with build for safety.",
+  );
   process.exit(1);
 }
 
 console.log(`📁 Changed files: ${changedFiles.length}`);
-console.log(changedFiles.map(f => `  - ${f}`).join("\n"));
+console.log(changedFiles.map((f) => `  - ${f}`).join("\n"));
 
 const projectPath = getProjectPath(currentAppName);
 if (!projectPath) {
-  console.log("✅ Could not determine project path, proceeding with build for safety.");
+  console.log(
+    "✅ Could not determine project path, proceeding with build for safety.",
+  );
   process.exit(1);
 }
 
 console.log(`📂 Project path: ${projectPath}`);
 
 // Check if project files changed
-const projectChanged = changedFiles.some(file => file.startsWith(projectPath + "/"));
+const projectChanged = changedFiles.some((file) =>
+  file.startsWith(projectPath + "/"),
+);
 
 // Check if global config changed
 const globalChanged = globalConfigChanged(changedFiles);
@@ -188,9 +203,13 @@ console.log(`  - Dependencies: ${dependencies.join(", ") || "none"}`);
 
 // Decision logic
 if (projectChanged || globalChanged || depsChanged) {
-  console.log(`✅ Building ${currentAppName} - changes detected that affect this project.`);
+  console.log(
+    `✅ Building ${currentAppName} - changes detected that affect this project.`,
+  );
   process.exit(1);
 } else {
-  console.log(`🛑 Skipping build for ${currentAppName} - no relevant changes detected.`);
+  console.log(
+    `🛑 Skipping build for ${currentAppName} - no relevant changes detected.`,
+  );
   process.exit(0);
 }
