@@ -12,10 +12,6 @@ declare module "jazz-vue" {
   }
 }
 
-const url = new URL(window.location.href);
-const peer = url.searchParams.get("peer") as `wss://${string}` | `ws://${string}` | null;
-
-
 const RootComponent = defineComponent({
   name: "RootComponent",
   setup() {
@@ -25,7 +21,7 @@ const RootComponent = defineComponent({
         {
           AccountSchema: ToDoAccount,
           sync: {
-            peer: peer ?? `wss://cloud.jazz.tools/?key=${apiKey}`,
+            peer: `wss://cloud.jazz.tools/?key=${apiKey}`,
           },
         },
         h(

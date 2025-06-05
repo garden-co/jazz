@@ -6,14 +6,11 @@ import "./index.css";
 import { apiKey } from "./apiKey";
 import { JazzAccount } from "./schema.ts";
 
-const url = new URL(window.location.href);
-const peer = url.searchParams.get("peer") as `wss://${string}` | `ws://${string}` | null;
-
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
     <JazzProvider
       sync={{
-        peer: peer ?? `wss://cloud.jazz.tools/?key=${apiKey}`,
+        peer: `wss://cloud.jazz.tools/?key=${apiKey}`,
       }}
       AccountSchema={JazzAccount}
     >
