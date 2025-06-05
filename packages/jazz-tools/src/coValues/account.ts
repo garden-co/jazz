@@ -385,6 +385,7 @@ export class Account extends CoValueBase implements CoValue {
       this.inbox = AccountInbox.create({ inbox: inboxRoot.id }, inboxGroup);
       inboxGroup.addMember("everyone", "writeOnly");
       console.log("created inbox in migration", this.inbox);
+    } else if (this.inbox) {
       if (this.inbox._owner._type !== "Group") {
         throw new Error("Inbox must be owned by a Group", {
           cause: `The inbox of the account "${this.id}" was created with an Account as owner, which is not allowed.`,
