@@ -6,7 +6,7 @@ import { jazzDark } from "../../themes/jazzDark.mjs";
 import { jazzLight } from "../../themes/jazzLight.mjs";
 
 const highlighterPromise = createHighlighter({
-  langs: ["typescript", "bash", "tsx", "json", "svelte", "vue"],
+  langs: ["typescript", "bash", "tsx", "json", "ruby", "groovy", "svelte", "vue"],
   themes: [jazzLight as any, jazzDark as any],
 });
 

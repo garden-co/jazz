@@ -97,4 +97,14 @@ export const team: Array<TeamMember> = [
     linkedin: "sammii",
     image: "sammii.jpg",
   },
+  {
+    name: "Brad Anderson",
+    location: "Atlanta, Georgia, US",
+    titles: ["React Native Specialist"],
+    x: "boorad",
+    github: "boorad",
+    bluesky: "boorad.bsky.social",
+    linkedin: "boorad",
+    image: "brad.png",
+  },
 ];
