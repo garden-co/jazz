@@ -1,4 +1,4 @@
-import { openDatabaseAsync } from "expo-sqlite";
+import { deleteDatabaseAsync, openDatabaseAsync } from "expo-sqlite";
 import type { SQLiteBindValue, SQLiteDatabase } from "expo-sqlite";
 import { type SQLiteDatabaseDriverAsync } from "jazz-react-native-core";
 
@@ -60,5 +60,27 @@ export class ExpoSQLiteAdapter implements SQLiteDatabaseDriverAsync {
     await this.db.withTransactionAsync(async () => {
       await callback();
     });
+  }
+
+  /**
+   * Deletes and re-initialises the database.
+   * Dropping every table would not account for internal data, such as PRAGMAs, so deletion is required to completely clear the database.
+   */
+  public async clearLocalData(): Promise<void> {
+    if (!this.db) {
+      throw new Error("Database not initialized");
+    }
+
+    // We must close the database before attempting to delete it.
+    // However, this may fail if the database was already closed; if so, we can still proceed to deletion.
+    try {
+      await this.db.closeAsync();
+    } catch (e) {
+      console.error(e);
+    }
+
+    await deleteDatabaseAsync(this.dbName);
+    this.db = null;
+    await this.initialize();
   }
 }

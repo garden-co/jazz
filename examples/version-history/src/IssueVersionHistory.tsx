@@ -104,7 +104,14 @@ export function IssueVersionHistory({ id }: { id: string }) {
       <hr />
 
       <div>
-        <p>This issue was created at {issue.createdAt.toLocaleString()}</p>
+        <p>
+          This issue was created at{" "}
+          {new Date(issue._createdAt).toLocaleString()}
+        </p>
+        <p>
+          This issue was last updated at{" "}
+          {new Date(issue._lastUpdatedAt).toLocaleString()}
+        </p>
       </div>
     </>
   );

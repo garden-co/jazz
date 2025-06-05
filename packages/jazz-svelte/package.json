@@ -1,6 +1,6 @@
 {
   "name": "jazz-svelte",
-  "version": "0.14.20",
+  "version": "0.14.21",
   "scripts": {
     "dev": "vite dev",
     "build": "vite build && npm run package",
@@ -56,7 +56,7 @@
     "prettier": "^3.3.2",
     "prettier-plugin-svelte": "^3.2.6",
     "publint": "^0.2.0",
-    "svelte": "^5.0.0",
+    "svelte": "^5.33.0",
     "svelte-check": "^4.0.0",
     "typescript": "catalog:",
     "typescript-eslint": "^8.0.0",

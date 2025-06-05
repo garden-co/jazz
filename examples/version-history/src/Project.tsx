@@ -22,7 +22,6 @@ export function ProjectComponent({ projectID }: { projectID: string }) {
           description: CoPlainText.create("", project._owner),
           estimate: 0,
           status: "backlog",
-          createdAt: new Date(),
         },
         project._owner,
       ),

@@ -1,5 +1,19 @@
 # jazz-svelte
 
+## 0.14.21
+
+### Patch Changes
+
+- d14a069: Fix id reactivity on CoState for Svelte 5.33
+- Updated dependencies [e7e505e]
+- Updated dependencies [c3d8779]
+- Updated dependencies [13b57aa]
+- Updated dependencies [5662faa]
+- Updated dependencies [2116a59]
+  - jazz-tools@0.14.21
+  - cojson@0.14.21
+  - jazz-browser@0.14.21
+
 ## 0.14.20
 
 ### Patch Changes

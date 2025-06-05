@@ -1,7 +1,7 @@
 ```tsx
 const group = Group.create();
 group.addMember(Alice, "writer");
-group.addMember("everyone", "reader");
+group.makePublic();
 
 Message.create({ text: "..." }, group);
 ```

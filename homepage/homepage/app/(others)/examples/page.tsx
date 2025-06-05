@@ -416,7 +416,7 @@ const reactExamples: Example[] = [
     slug: "chat",
     description: "A simple app that creates a chat room with a shareable link.",
     tech: [tech.react],
-    demoUrl: "https://chat.jazz.tools",
+    demoUrl: "https://chat.demo.jazz.tools",
     illustration: <ChatIllustration />,
   },
   {
@@ -425,7 +425,7 @@ const reactExamples: Example[] = [
     description: "Learn how to upload and delete images.",
     tech: [tech.react],
     features: [features.imageUpload],
-    demoUrl: "https://image-upload-demo.jazz.tools",
+    demoUrl: "https://image-upload.demo.jazz.tools",
     illustration: <ImageUploadIllustration />,
   },
   {
@@ -435,7 +435,7 @@ const reactExamples: Example[] = [
       "Upload different types of files, and show upload progress, file size, and type.",
     tech: [tech.react],
     features: [features.fileUpload],
-    demoUrl: "https://file-upload-demo.jazz.tools",
+    demoUrl: "https://file-upload.demo.jazz.tools",
     illustration: <FileUploadIllustration />,
   },
   {
@@ -444,7 +444,7 @@ const reactExamples: Example[] = [
     description: "Collect and render reactions from multiple users.",
     tech: [tech.react],
     features: [features.coFeed],
-    demoUrl: "https://reactions-demo.jazz.tools",
+    demoUrl: "https://reactions.demo.jazz.tools",
     illustration: <ReactionsIllustration />,
   },
   {
@@ -454,17 +454,37 @@ const reactExamples: Example[] = [
       "Track user presence on a canvas with multiple cursors and out of bounds indicators.",
     tech: [tech.react],
     features: [features.coFeed],
-    demoUrl: "https://multi-cursors-demo.jazz.tools",
+    demoUrl: "https://multi-cursors.demo.jazz.tools",
     illustration: <MultiCursorIllustration />,
   },
   {
-    name: "Collaborative rich text",
-    slug: "richtext",
+    name: "Collaborative rich text with ProseMirror",
+    slug: "richtext-prosemirror",
     description:
       "Handle multiple users editing the same text, integrated with a ProseMirror editor for rich text.",
     tech: [tech.react],
     features: [features.coRichText, features.coPlainText],
-    demoUrl: "https://richtext-demo.jazz.tools",
+    demoUrl: "https://richtext-prosemirror.demo.jazz.tools",
+    illustration: <CoTextIllustration />,
+  },
+  {
+    name: "Collaborative rich text with ProseKit",
+    slug: "richtext-prosekit",
+    description:
+      "Handle multiple users editing the same text, integrated with a ProseKit editor for rich text.",
+    tech: [tech.react],
+    features: [features.coRichText, features.coPlainText],
+    demoUrl: "https://richtext-prosekit.demo.jazz.tools",
+    illustration: <CoTextIllustration />,
+  },
+  {
+    name: "Collaborative rich text with Tiptap",
+    slug: "richtext-tiptap",
+    description:
+      "Handle multiple users editing the same text, integrated with a Tiptap editor for rich text.",
+    tech: [tech.react],
+    features: [features.coRichText, features.coPlainText],
+    demoUrl: "https://richtext-tiptap.demo.jazz.tools",
     illustration: <CoTextIllustration />,
   },
   {
@@ -474,7 +494,7 @@ const reactExamples: Example[] = [
       "Upload a photo of your pet, and invite your friends to react to it.",
     tech: [tech.react],
     features: [features.imageUpload, features.inviteLink],
-    demoUrl: "https://pets-demo.jazz.tools",
+    demoUrl: "https://pets.demo.jazz.tools",
     illustration: <PetIllustration />,
   },
   {
@@ -483,7 +503,7 @@ const reactExamples: Example[] = [
     description: "A todo list where you can collaborate with invited guests.",
     tech: [tech.react],
     features: [features.inviteLink],
-    demoUrl: "https://todo-demo.jazz.tools",
+    demoUrl: "https://todo.demo.jazz.tools",
     illustration: (
       <div className="h-full w-full bg-cover bg-[url('/todo.jpg')] bg-left-bottom"></div>
     ),
@@ -494,7 +514,7 @@ const reactExamples: Example[] = [
     description: "A secure password manager, using Passkey for authentication.",
     tech: [tech.react],
     features: [features.passkey],
-    demoUrl: "https://passwords-demo.jazz.tools",
+    demoUrl: "https://passwords.demo.jazz.tools",
     illustration: <PasswordManagerIllustration />,
   },
   {
@@ -504,7 +524,7 @@ const reactExamples: Example[] = [
       "Upload your favorite songs, and share them with your friends.",
     tech: [tech.react],
     features: [features.fileUpload],
-    demoUrl: "https://music-demo.jazz.tools",
+    demoUrl: "https://music.demo.jazz.tools",
     illustration: <MusicIllustration />,
   },
   // {
@@ -515,7 +535,7 @@ const reactExamples: Example[] = [
   //   tech: [tech.react],
   //   features: [features.serverWorker, features.inbox],
   //   illustration: <JazzPaperScissorsIllustration />,
-  //   demoUrl: "https://jazz-paper-scissors.vercel.app",
+  //   demoUrl: "https://jazz-paper-scissors.demo.jazz.tools",
   // },
   {
     name: "Clerk",
@@ -523,7 +543,7 @@ const reactExamples: Example[] = [
     description: "A React app that uses Clerk for authentication",
     tech: [tech.react],
     features: [features.clerk],
-    demoUrl: "https://clerk-demo.jazz.tools",
+    demoUrl: "https://clerk.demo.jazz.tools",
     illustration: <ClerkIllustration />,
   },
   {
@@ -532,7 +552,7 @@ const reactExamples: Example[] = [
     description: "A React app that uses Passkey for authentication",
     tech: [tech.react],
     features: [features.passkey],
-    demoUrl: "https://passkey-demo.jazz.tools",
+    demoUrl: "https://passkey.demo.jazz.tools",
     illustration: <PasskeyIllustration />,
   },
   {
@@ -540,7 +560,7 @@ const reactExamples: Example[] = [
     slug: "form",
     description: "A form example for creating and editing CoValues",
     tech: [tech.react],
-    demoUrl: "https://form-demo.jazz.tools",
+    demoUrl: "https://form.demo.jazz.tools",
     illustration: <FormIllustration />,
   },
   {
@@ -551,7 +571,7 @@ const reactExamples: Example[] = [
     tech: [tech.react],
     features: [features.inviteLink],
     illustration: <OrganizationIllustration />,
-    demoUrl: "https://jazz-organization.vercel.app",
+    demoUrl: "https://organization.demo.jazz.tools",
   },
   {
     name: "Version history",
@@ -560,7 +580,7 @@ const reactExamples: Example[] = [
       "Track and restore previous versions of your data, and see who made the changes.",
     tech: [tech.react],
     illustration: <VersionHistoryIllustration />,
-    demoUrl: "https://jazz-version-history.vercel.app",
+    demoUrl: "https://version-history.demo.jazz.tools",
   },
 ];
 
@@ -647,16 +667,16 @@ const categories = [
     examples: rnExamples,
   },
   {
-    name: "Vue",
-    id: "vue",
-    logo: VueLogo,
-    examples: vueExamples,
-  },
-  {
     name: "Svelte",
     id: "svelte",
     logo: SvelteLogo,
     examples: svelteExamples,
+  },
+  {
+    name: "Vue",
+    id: "vue",
+    logo: VueLogo,
+    examples: vueExamples,
   },
 ];
 

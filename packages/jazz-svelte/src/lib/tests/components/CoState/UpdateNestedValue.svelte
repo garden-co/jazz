@@ -9,6 +9,8 @@
       dog: true
     }
   })
+
+  const dogName = $derived(person.current!.dog.name);
 </script>
 
 <!-- Using non-null assertions because we want to test that locally available values are never null -->
@@ -27,4 +29,4 @@
 </label>
 
 <div data-testid="person-name">{person.current!.name}</div>
-<div data-testid="person-dog-name">{person.current!.dog.name}</div>
+<div data-testid="person-dog-name">{dogName}</div>

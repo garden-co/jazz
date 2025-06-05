@@ -1,6 +1,6 @@
 {
   "name": "chat-rn-expo",
-  "version": "1.0.11",
+  "version": "1.0.12",
   "main": "index.ts",
   "scripts": {
     "build": "expo prebuild",

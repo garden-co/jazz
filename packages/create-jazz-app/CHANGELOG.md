@@ -1,5 +1,11 @@
 # create-jazz-app
 
+## 0.1.21
+
+### Patch Changes
+
+- e005ecd: Sets selected package manager based on command runner
+
 ## 0.1.20
 
 ### Patch Changes

@@ -119,6 +119,20 @@ export class CoMap extends CoValueBase implements CoValue {
   }
 
   /**
+   * The timestamp of the creation time of the CoMap
+   */
+  get _createdAt() {
+    return this._raw.earliestTxMadeAt ?? Number.MAX_SAFE_INTEGER;
+  }
+
+  /**
+   * The timestamp of the last updated time of the CoMap
+   */
+  get _lastUpdatedAt() {
+    return this._raw.latestTxMadeAt;
+  }
+
+  /**
    * If property `prop` is a `coField.ref(...)`, you can use `coMaps._refs.prop` to access
    * the `Ref` instead of the potentially loaded/null value.
    *

@@ -328,8 +328,8 @@ describe("useCoState", () => {
   it("should update when an inner coValue is updated", async () => {
     const TestMap = co.map({
       value: z.string(),
-      get nested(): z.ZodOptional<typeof TestMap> {
-        return z.optional(TestMap);
+      get nested() {
+        return TestMap.optional();
       },
     });
 
@@ -424,7 +424,7 @@ describe("useCoState", () => {
     expect(result.current?.value).toBeUndefined();
   });
 
-  it("should only render twice when loading a list of values", async () => {
+  it("should only render once when loading a list of values", async () => {
     const TestMap = co.map({
       value: z.string(),
     });
@@ -457,7 +457,7 @@ describe("useCoState", () => {
 
     await new Promise((resolve) => setTimeout(resolve, 100));
 
-    expect(renderCount).toBe(2);
+    expect(renderCount).toBe(1);
   });
 
   it("should manage correctly the group.members[number].account.profile?.name autoload", async () => {
@@ -507,7 +507,7 @@ describe("useCoState", () => {
     });
   });
 
-  it.skip("should immediately load deeploaded data when available locally", async () => {
+  it("should immediately load deeploaded data when available locally", async () => {
     const Message = co.map({
       content: CoRichText,
     });
@@ -547,6 +547,6 @@ describe("useCoState", () => {
 
     await new Promise((resolve) => setTimeout(resolve, 20));
 
-    expect(renderings).toBe([true]);
+    expect(renderings).toEqual([true]);
   });
 });

@@ -168,23 +168,23 @@ console.log(`Started as: ${initialValue}`);
 ```
 </CodeGroup>
 
-## Showing creation date
+### Created Date and Last Updated Date
 
-To show when a `Task` was created, store the date manually.
+To show created date and last updated date, use the `_createdAt` and `_lastUpdatedAt` getters.
 
 <CodeGroup>
-```ts twoslash
+```tsx twoslash
 import { co, z } from "jazz-tools";
-// ---cut---
 const Task = co.map({
     title: z.string(),
     status: z.literal(["todo", "in-progress", "completed"]),
-    createdAt: z.date(), // [!code ++]
 });
+const task = Task.create({ title: "New task", status: "todo" });
+// ---cut---
+console.log(new Date(task._createdAt));
+console.log(new Date(task._lastUpdatedAt));
 ```
 </CodeGroup>
-
-Alternatively, you can use the first edit's `madeAt` property.
 
 ## Requirements
 

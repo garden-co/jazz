@@ -6,7 +6,7 @@ import { SectionHeader } from "@garden-co/design-system/src/components/molecules
 
 export default function ProblemStatementSection() {
   return (
-    <div className="container grid gap-4 lg:gap-8">
+    <div className="grid gap-4 lg:gap-8">
       <SectionHeader
         className="sm:text-center sm:mx-auto"
         title={"Powered by the first “flat stack”"}

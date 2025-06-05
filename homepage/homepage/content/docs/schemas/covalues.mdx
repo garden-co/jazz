@@ -1,5 +1,5 @@
 export const metadata = {
-  description: "CoValues are the core abstraction of Jazz. They're your bread-and-butter datastructures that you use to represent everything in your app."
+  description: "CoValues are the core abstraction of Jazz. They're your bread-and-butter datastructures that you use to represent everything in your app.",
 };
 
 import { CodeGroup, ComingSoon } from "@/components/forMdx";
@@ -23,6 +23,7 @@ CoValues model JSON with CoMaps and CoLists, but also offer CoFeeds for simple p
 Fundamentally, CoValues are as dynamic and flexible as JSON, but in Jazz you use them by defining fixed schemas to describe the shape of data in your app.
 
 This helps correctness and development speed, but is particularly important...
+
 - when you evolve your app and need migrations
 - when different clients and server workers collaborate on CoValues and need to make compatible changes
 
@@ -76,6 +77,7 @@ const project = TodoProject.create(
   Group.create()
 );
 ```
+
 </CodeGroup>
 
 ## Types of CoValues
@@ -96,6 +98,7 @@ const Task = co.map({
   completed: z.boolean(),
 });
 ```
+
 </CodeGroup>
 
 Or record-like CoMaps (key-value pairs, where keys are always `string`):
@@ -112,6 +115,7 @@ const ColorToHex = co.record(z.string(), z.string());
 
 const ColorToFruit = co.record(z.string(), Fruit);
 ```
+
 </CodeGroup>
 
 
@@ -137,6 +141,7 @@ const Task = co.map({
 const ListOfColors = co.list(z.string());
 const ListOfTasks = co.list(Task);
 ```
+
 </CodeGroup>
 
 See the corresponding sections for [creating](/docs/using-covalues/colists#creating-colists),
@@ -207,7 +212,7 @@ import { co, z } from "jazz-tools";
 const ButtonWidget = co.map({
   type: z.literal("button"),
   label: z.string(),
-});
+}); 
 
 const SliderWidget = co.map({
   type: z.literal("slider"),
@@ -215,8 +220,9 @@ const SliderWidget = co.map({
   max: z.number(),
 });
 
-const WidgetUnion = z.discriminatedUnion([ButtonWidget, SliderWidget]);
+const WidgetUnion = z.discriminatedUnion("type", [ButtonWidget, SliderWidget]);
 ```
+
 </CodeGroup>
 
 See the corresponding sections for [creating](/docs/using-covalues/schemaunions#creating-schemaunions),
@@ -246,15 +252,15 @@ export const ListOfColors = co.list(z.string());
 Here's a quick overview of the primitive types you can use:
 
 <CodeGroup>
-```ts twoslash
-import { z } from "jazz-tools";
-// ---cut---
-z.string();  // For simple strings
-z.number();  // For numbers
+```ts twoslash 
+import {z} from "jazz-tools"; 
+// ---cut--- 
+z.string();  // For simple strings 
+z.number();  // For numbers 
 z.boolean(); // For booleans
-z.null();    // For null
-z.date();    // For dates
-z.literal(["waiting", "ready"]); // For enums
+z.null();    // For null 
+z.date();    // For dates 
+z.literal(["waiting", "ready"]); // For enums 
 ```
 </CodeGroup>
 
@@ -311,6 +317,7 @@ const Company = co.map({
   members: ListOfPeople,
 });
 ```
+
 </CodeGroup>
 
 #### Optional References
@@ -363,6 +370,7 @@ const Person = co.map({
 
 const ListOfPeople = co.list(Person);
 ```
+
 </CodeGroup>
 
 Note: similarly, if you use modifiers like `z.optional()` you'll need to help TypeScript along:
@@ -378,6 +386,7 @@ const Person = co.map({
   }
 });
 ```
+
 </CodeGroup>
 
 ### Helper methods
@@ -417,3 +426,4 @@ const fullName = getPersonFullName(person);
 const age = getPersonAgeAsOf(person, new Date());
 ```
 </CodeGroup>
+```

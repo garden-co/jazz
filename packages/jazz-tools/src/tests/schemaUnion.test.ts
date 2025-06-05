@@ -4,11 +4,11 @@ import {
   Account,
   CryptoProvider,
   Loaded,
+  anySchemaToCoSchema,
   co,
   loadCoValue,
   subscribeToCoValue,
   z,
-  zodSchemaToCoSchema,
 } from "../exports.js";
 
 const RedButtonWidget = co.map({
@@ -73,21 +73,21 @@ describe("SchemaUnion", () => {
     );
 
     const loadedButtonWidget = await loadCoValue(
-      zodSchemaToCoSchema(WidgetUnion),
+      anySchemaToCoSchema(WidgetUnion),
       buttonWidget.id,
       {
         loadAs: me,
       },
     );
     const loadedSliderWidget = await loadCoValue(
-      zodSchemaToCoSchema(WidgetUnion),
+      anySchemaToCoSchema(WidgetUnion),
       sliderWidget.id,
       {
         loadAs: me,
       },
     );
     const loadedCheckboxWidget = await loadCoValue(
-      zodSchemaToCoSchema(WidgetUnion),
+      anySchemaToCoSchema(WidgetUnion),
       checkboxWidget.id,
       { loadAs: me },
     );
@@ -104,7 +104,7 @@ describe("SchemaUnion", () => {
     );
     let currentValue = "Submit";
     const unsubscribe = subscribeToCoValue(
-      zodSchemaToCoSchema(WidgetUnion),
+      anySchemaToCoSchema(WidgetUnion),
       buttonWidget.id,
       { loadAs: me, syncResolution: true },
       (value: Loaded<typeof WidgetUnion>) => {

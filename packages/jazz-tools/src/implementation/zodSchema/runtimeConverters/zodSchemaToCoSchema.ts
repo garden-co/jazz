@@ -164,9 +164,17 @@ export function anySchemaToCoSchema<
     return schema as any;
   } else if ("getCoSchema" in schema) {
     return (schema as any).getCoSchema() as any;
+  } else if ("def" in schema) {
+    const coSchema = tryZodSchemaToCoSchema(schema as z.core.$ZodType);
+    if (!coSchema) {
+      throw new Error(
+        `Unsupported zod type: ${(schema.def as any)?.type || JSON.stringify(schema)}`,
+      );
+    }
+    return coSchema as any;
   }
 
-  throw new Error(`Unsupported schema: ${schema}`);
+  throw new Error(`Unsupported schema: ${JSON.stringify(schema)}`);
 }
 
 export function zodSchemaToCoSchemaOrKeepPrimitive<S extends z.core.$ZodType>(

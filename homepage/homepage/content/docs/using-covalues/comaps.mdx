@@ -308,7 +308,9 @@ project.coordinator = undefined;  // Remove the reference
 
 ## Running migrations on CoMaps
 
-Migrations in CoMaps are functions that run when a CoMap is loaded, not when it's created. They're useful for updating the structure of existing CoMaps to match new schema versions. Migrations are synchronous and cannot be async.
+Migrations are functions that run when a CoMap is loaded, allowing you to update existing data to match new schema versions. Use them when you need to modify the structure of CoMaps that already exist in your app. Unlike [Account migrations](/docs/schemas/accounts-and-migrations#when-migrations-run), CoMap migrations are not run when a CoMap is created.
+
+**Note:** Migrations are run synchronously and cannot be run asynchronously.
 
 Here's an example of a migration that adds the `priority` field to the `Task` CoMap:
 
@@ -316,6 +318,7 @@ Here's an example of a migration that adds the `priority` field to the `Task` Co
 ```ts twoslash
 import { co, z } from "jazz-tools";
 
+// ---cut---
 const Task = co
   .map({
     done: z.boolean(),
@@ -326,35 +329,35 @@ const Task = co
   .withMigration((task) => {
     if (task.version === 1) {
       task.priority = "medium";
-      task.version = 2; // Upgrade the version so the migration won't run again
+      // Upgrade the version so the migration won't run again
+      task.version = 2; 
     }
   });
 ```
 </CodeGroup>
 
-### Migrations best practices
+### Migration best practices
 
-It's always a good idea to keep the schema backward & forward compatible when possible.
-
-This means that you should:
-- Only add new fields, never rename or change the type of existing fields
-- The new fields should be optional if possible
+Design your schema changes to be compatible with existing data:
+- **Add, don't change:** Only add new fields; avoid renaming or changing types of existing fields
+- **Make new fields optional:** This prevents errors when loading older data
+- **Use version fields:** Track schema versions to run migrations only when needed
 
 ### Migration & reader permissions
 
-Migrations need to modify the CoMap's structure, so they are not allowed if you only have read permissions on the CoMap.
+Migrations need write access to modify CoMaps. If some users only have read permissions, they can't run migrations on those CoMaps.
 
-If some users might have only read permissions, you should be more careful about how you handle migrations.
+**Forward-compatible schemas** (where new fields are optional) handle this gracefully - users can still use the app even if migrations haven't run.
 
-If your schemas are forward compatible, good news! They should still be able to use your app even if the migration has not been run yet.
-This means that you won't need to do manage both versions of the CoMap in your app.
+**Non-compatible changes** require handling both schema versions in your app code using discriminated unions.
 
-If they are not forward compatible, you will need to handle both versions of the CoMap in your app using a discriminated union:
+When you can't guarantee all users can run migrations, handle multiple schema versions explicitly:
 
 <CodeGroup>
 ```ts twoslash
 import { co, z } from "jazz-tools";
 
+// ---cut---
 const TaskV1 = co.map({
   version: z.literal(1),
   done: z.boolean(),
@@ -362,19 +365,22 @@ const TaskV1 = co.map({
 });
 
 const TaskV2 = co.map({
-  version: z.literal(2), // This time we need to be more strict about the version to make the discriminated union work
+  // We need to be more strict about the version to make the
+  // discriminated union work
+  version: z.literal(2), 
   done: z.boolean(),
   text: z.string(),
   priority: z.enum(["low", "medium", "high"]),
 }).withMigration((task) => {
-  // @ts-expect-error - we are checking the version field to see if we need to run the migration
+  // @ts-expect-error - check if we need to run the migration
   if (task.version === 1) {
     task.version = 2;
     task.priority = "medium";
   }
 });
 
-// Export the discriminated union because some users might not be able to run the migration
+// Export the discriminated union; because some users might
+// not be able to run the migration
 export const Task = z.discriminatedUnion("version", [
   TaskV1,
   TaskV2,
