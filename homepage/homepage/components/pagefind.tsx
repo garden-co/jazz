@@ -2,6 +2,7 @@
 
 import { Framework, frameworks } from "@/content/framework";
 import { useFramework } from "@/lib/use-framework";
+import { Icon } from "@garden-co/design-system/src/components/atoms/Icon";
 import {
   Dialog,
   DialogBody,
@@ -145,14 +146,14 @@ function HighlightedText({ text }: { text: string }) {
   const parts = decodedText.split(/(<mark>.*?<\/mark>)/g);
 
   return (
-    <p className="mt-1 text-sm line-clamp-3">
+    <p className="mt-1 text-sm line-clamp-2">
       {parts.map((part, i) => {
         if (part.startsWith("<mark>")) {
           const content = part.replace(/<\/?mark>/g, "");
           return (
             <mark
               key={i}
-              className="px-0.5 bg-primary-100 text-primary-900 dark:bg-stone-900 dark:text-white"
+              className="px-0.5 bg-transparent text-primary group-data-[focus]:text-underline"
             >
               {content}
             </mark>
@@ -313,59 +314,57 @@ export function PagefindSearch() {
             }
           }}
         >
-          <ComboboxInput
-            className="rounded-t-xl w-full text-base sm:text-lg px-4 sm:px-5 py-4 sm:py-5 outline-none border-b bg-white dark:bg-stone-950 text-stone-900 dark:text-stone-100 placeholder:text-stone-400 dark:placeholder:text-stone-500"
-            placeholder="Search documentation..."
-            onChange={(e) => handleSearch(e.target.value)}
-            value={query}
-            data-autofocus
-            autoComplete="off"
-          />
+          <div className="p-2 border-b">
+            <ComboboxInput
+              className="w-full rounded-md bg-stone-100 px-4 py-2.5 text-highlight outline-none placeholder:text-stone-500"
+              placeholder="Search documentation..."
+              onChange={(e) => handleSearch(e.target.value)}
+              value={query}
+              autoFocus
+              autoComplete="off"
+            />
+          </div>
           <div
             ref={listRef}
-            className="h-[50vh] sm:h-[300px] max-h-[60vh] sm:max-h-[400px] overflow-y-auto overflow-x-hidden overscroll-contain p-2"
+            className="h-[50vh] sm:h-[300px] max-h-[60vh] sm:max-h-[400px] overflow-y-auto overflow-x-hidden overscroll-contain"
           >
             {results.length === 0 ? (
-              <div className="flex items-center justify-center h-16 text-sm">
-                No results found.
-              </div>
+              <p className="text-center py-5">No results found.</p>
             ) : (
-              <ComboboxOptions static className="space-y-1 mb-3">
+              <ComboboxOptions>
                 {results.map((result) => (
-                  <>
+                  <div className="border-b space-y-1 p-2">
                     <ComboboxOption
                       key={result.id}
                       value={result}
-                      className="group cursor-default select-none rounded-lg px-4 py-2 data-[focus]:bg-stone-200 data-[focus]:outline-none"
+                      className="cursor-default flex gap-3 items-center group data-[focus]:bg-stone-100 rounded-lg p-2"
                     >
-                      <div className="min-w-0 flex-1">
-                        <h3 className="font-medium text-highlight truncate">
-                          {result.meta?.title || "No title"}{" "}
-                          {result.meta?.framework
-                            ? `(${result.meta.framework})`
-                            : ""}
-                        </h3>
-                        <HighlightedText text={result.excerpt || ""} />
-                      </div>
+                      <Icon name="file" className="shrink-0" />
+                      <p className="font-medium text-highlight line-clamp-1">
+                        {result?.meta?.title || "No title"}
+                      </p>
                     </ComboboxOption>
-
                     {result.sub_results?.map((subResult) =>
                       subResult.anchor?.element === "h1" ? null : (
-                        <ComboboxOption
-                          key={subResult.id}
-                          value={subResult}
-                          className="ml-5 group cursor-default select-none rounded-lg px-4 py-2 data-[focus]:bg-stone-200 data-[focus]:outline-none"
-                        >
-                          <div className="min-w-0 flex-1">
-                            <h3 className="font-medium text-highlight truncate">
-                              {subResult?.title || "No title"}
-                            </h3>
-                            <HighlightedText text={subResult.excerpt || ""} />
-                          </div>
-                        </ComboboxOption>
+                        <>
+                          <ComboboxOption
+                            key={subResult.id}
+                            value={subResult}
+                            className="group cursor-default flex gap-3 items-center group data-[focus]:bg-stone-100 rounded-lg p-2"
+                          >
+                            <Icon name="hash" className="shrink-0" />
+                            <div>
+                              <p className="text-sm text-highlight">
+                                {subResult?.title?.replace("#", "") ||
+                                  "No title"}
+                              </p>
+                              <HighlightedText text={subResult.excerpt || ""} />
+                            </div>
+                          </ComboboxOption>
+                        </>
                       ),
                     )}
-                  </>
+                  </div>
                 ))}
               </ComboboxOptions>
             )}
