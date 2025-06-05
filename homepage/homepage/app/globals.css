@@ -93,8 +93,8 @@ html.dark {
   display: none;
 }
 .twoslash .twoslash-hover:hover .twoslash-popup-container,
- .twoslash .twoslash-error-hover:hover .twoslash-popup-container,
- .twoslash .twoslash-query-presisted .twoslash-popup-container,
- .twoslash .twoslash-query-line .twoslash-popup-container {
+.twoslash .twoslash-error-hover:hover .twoslash-popup-container,
+.twoslash .twoslash-query-presisted .twoslash-popup-container,
+.twoslash .twoslash-query-line .twoslash-popup-container {
   display: inline-flex;
- }
+}
