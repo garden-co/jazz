@@ -1,8 +1,19 @@
 "use client";
 
-import { Framework, frameworks } from "@/content/framework";
+import { Framework, frameworkNames, frameworks } from "@/content/framework";
 import { useFramework } from "@/lib/use-framework";
-import { Command } from "cmdk";
+import { Icon } from "@garden-co/design-system/src/components/atoms/Icon";
+import {
+  Dialog,
+  DialogBody,
+} from "@garden-co/design-system/src/components/organisms/Dialog";
+import {
+  Combobox,
+  ComboboxInput,
+  ComboboxOption,
+  ComboboxOptions,
+} from "@headlessui/react";
+import { clsx } from "clsx";
 import React, { useState, useEffect, useRef } from "react";
 import { singletonHook } from "react-singleton-hook";
 
@@ -12,14 +23,20 @@ interface PagefindResult {
   url: string;
   meta: {
     title: string;
+    framework?: string;
   };
   excerpt: string;
-  sub_results?: Array<{
-    id: string;
-    title: string;
-    url: string;
-    excerpt: string;
-  }>;
+  sub_results?: Array<PagefindSubResult>;
+}
+
+interface PagefindSubResult {
+  id: string;
+  title: string;
+  url: string;
+  excerpt: string;
+  anchor?: {
+    element: string;
+  };
 }
 
 // Constants
@@ -43,10 +60,10 @@ const processSubUrl = (url: string): { path: string; hash: string } => {
   return { path, hash };
 };
 
-const navigateToUrl = (url: string, setOpen: (open: boolean) => void) => {
+const navigateToUrl = (url: string, close: () => void) => {
   if (!url) return;
   window.location.href = `${window.location.origin}${url}`;
-  setOpen(false);
+  close();
 };
 
 const alternativeKeywordsByFramework: Partial<Record<Framework, string[]>> = {
@@ -72,7 +89,6 @@ const filterAndPrioritizeResultsByFramework = (
   frameworks.forEach((framework) => {
     const alternativeKeywords = alternativeKeywordsByFramework[framework] || [];
 
-    // Check if query contains framework name or any of its alternative keywords
     if (
       framework.startsWith(query) ||
       alternativeKeywords.some((keyword: string) => keyword.startsWith(query))
@@ -117,7 +133,6 @@ const prioritizeResultsByFramework = (
   });
 };
 
-// Hooks
 export const usePagefindSearch = singletonHook(
   { open: false, setOpen: () => {} },
   () => {
@@ -126,20 +141,19 @@ export const usePagefindSearch = singletonHook(
   },
 );
 
-// Components
 function HighlightedText({ text }: { text: string }) {
   const decodedText = text.replace(/&lt;/g, "<").replace(/&gt;/g, ">");
   const parts = decodedText.split(/(<mark>.*?<\/mark>)/g);
 
   return (
-    <p className="mt-1">
+    <p className="mt-1 text-sm line-clamp-2">
       {parts.map((part, i) => {
         if (part.startsWith("<mark>")) {
           const content = part.replace(/<\/?mark>/g, "");
           return (
             <mark
               key={i}
-              className="px-0.5 bg-primary-100 text-primary-900 dark:bg-stone-900 dark:text-white"
+              className="bg-transparent text-primary dark:text-white dark:text-underline dark:bg-highlight"
             >
               {content}
             </mark>
@@ -151,167 +165,17 @@ function HighlightedText({ text }: { text: string }) {
   );
 }
 
-function SearchInput({
-  query,
-  onSearch,
-}: {
-  query: string;
-  onSearch: (value: string) => void;
-}) {
-  return (
-    <Command.Input
-      value={query}
-      onValueChange={onSearch}
-      placeholder="Search documentation..."
-      className="w-full text-base sm:text-lg px-4 sm:px-5 py-4 sm:py-5 outline-none border-b bg-white dark:bg-stone-950 text-stone-900 dark:text-stone-100 placeholder:text-stone-400 dark:placeholder:text-stone-500 focus-visible:ring-0"
-    />
-  );
-}
-
-function EmptyState() {
-  return (
-    <Command.Empty className="flex items-center justify-center h-16 text-sm">
-      No results found.
-    </Command.Empty>
-  );
-}
-
-function MainResultItem({
-  result,
-  onSelect,
-}: {
-  result: PagefindResult;
-  onSelect: () => void;
-}) {
-  return (
-    <Command.Item
-      value={result.meta.title}
-      onSelect={onSelect}
-      className="group relative flex items-center gap-2 sm:gap-3 px-3 sm:px-4 py-2 sm:py-3 cursor-pointer text-sm rounded-md mt-1 select-none
-      transition-all duration-200 ease-in-out
-      animate-in fade-in-0
-      data-[selected=true]:bg-stone-100 dark:data-[selected=true]:bg-stone-925 hover:bg-stone-100 dark:hover:bg-stone-925 active:bg-stone-100 dark:active:bg-stone-925
-      max-w-full"
-    >
-      <div className="min-w-0 flex-1">
-        <h3 className="font-medium text-highlight truncate">
-          {result.meta?.title || "No title"} ({(result.meta as any)?.framework})
-        </h3>
-        <HighlightedText text={result.excerpt || ""} />
-      </div>
-      <div className="absolute left-0 w-[3px] h-full bg-primary transition-opacity duration-200 ease-in-out opacity-0 group-data-[selected=true]:opacity-100" />
-    </Command.Item>
-  );
-}
-
-function SubResultItem({
-  subResult,
-  onSelect,
-}: {
-  subResult: NonNullable<PagefindResult["sub_results"]>[number];
-  onSelect: () => void;
-}) {
-  return (
-    <Command.Item
-      key={subResult.id}
-      value={subResult.title}
-      onSelect={onSelect}
-      className="group relative flex items-center gap-2 sm:gap-3 px-3 sm:px-4 py-2 sm:py-3 cursor-pointer text-sm rounded-md mt-1 select-none
-      transition-all duration-200 ease-in-out
-      animate-in fade-in-0
-      data-[selected=true]:bg-stone-100 dark:data-[selected=true]:bg-stone-925 hover:bg-stone-100 dark:hover:bg-stone-925 active:bg-stone-100 dark:active:bg-stone-925
-      max-w-full"
-    >
-      <div className="min-w-0 flex-1">
-        <h4 className="text-sm font-medium truncate text-highlight">
-          {subResult?.title || "No title"}
-        </h4>
-        <HighlightedText text={subResult?.excerpt || ""} />
-      </div>
-      <div className="absolute left-0 w-[3px] h-full bg-primary transition-opacity duration-200 ease-in-out opacity-0 group-data-[selected=true]:opacity-100" />
-    </Command.Item>
-  );
-}
-
-function SearchResults({
-  results,
-  setOpen,
-  listRef,
-}: {
-  results: PagefindResult[];
-  setOpen: (open: boolean) => void;
-  listRef: React.RefObject<HTMLDivElement>;
-}) {
-  return (
-    <Command.List
-      ref={listRef}
-      className="h-[50vh] sm:h-[300px] max-h-[60vh] sm:max-h-[400px] overflow-y-auto overflow-x-hidden overscroll-contain transition-all duration-100 ease-in p-2"
-    >
-      {results.length === 0 ? (
-        <EmptyState />
-      ) : (
-        <Command.Group>
-          {results.map((result) => (
-            <SearchResult key={result.id} result={result} setOpen={setOpen} />
-          ))}
-        </Command.Group>
-      )}
-    </Command.List>
-  );
-}
-
-function SearchResult({
-  result,
-  setOpen,
-}: {
-  result: PagefindResult;
-  setOpen: (open: boolean) => void;
-}) {
-  if (!result) return null;
-
-  const url = processUrl(result.url);
-
-  const handleMainResultSelect = () => {
-    navigateToUrl(url, setOpen);
-  };
-
-  const handleSubResultSelect = (
-    subResult: NonNullable<PagefindResult["sub_results"]>[number],
-  ) => {
-    const { path, hash } = processSubUrl(subResult.url);
-    navigateToUrl(`${path}${hash}`, setOpen);
-  };
-
-  return (
-    <>
-      <MainResultItem result={result} onSelect={handleMainResultSelect} />
-
-      {result.sub_results && result.sub_results.length > 0 && (
-        <div className="ml-4 border-l">
-          {result.sub_results.map((subResult) => {
-            // Avoid showing duplicate results
-            if (subResult.title === result.meta.title) return null;
-
-            return (
-              <SubResultItem
-                key={subResult.id}
-                subResult={subResult}
-                onSelect={() => handleSubResultSelect(subResult)}
-              />
-            );
-          })}
-        </div>
-      )}
-    </>
-  );
-}
-
 export function PagefindSearch() {
   const { open, setOpen } = usePagefindSearch();
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<PagefindResult[]>([]);
   const listRef = useRef<HTMLDivElement>(null);
   const currentFramework = useFramework();
+
+  const close = () => {
+    setOpen(false);
+    setQuery("");
+  };
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -323,30 +187,41 @@ export function PagefindSearch() {
 
     document.addEventListener("keydown", handleKeyDown);
     return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [setOpen]);
+  }, [setOpen, close]);
 
   useEffect(() => {
     async function loadPagefind() {
       if (typeof window !== "undefined" && !window.pagefind) {
         try {
+          // First try loading from the standard location
           const pagefindModule = await import(
             // @ts-expect-error - pagefind.js is generated after build and not available at compile time
-            /* webpackIgnore: true */ "/_next/static/chunks/pages/pagefind/pagefind.js"
-          );
+            /* webpackIgnore: true */ "/_pagefind/pagefind.js"
+          ).catch(() => {
+            // If that fails, try the alternative location
+            return import(
+              // @ts-expect-error - pagefind.js is generated after build and not available at compile time
+              /* webpackIgnore: true */ "/_next/static/chunks/pages/pagefind/pagefind.js"
+            );
+          });
+
           window.pagefind = pagefindModule.default || pagefindModule;
 
-          // Configure ranking based on current framework context
           if (window.pagefind && window.pagefind.options) {
             await window.pagefind.options({
               ranking: {
-                termFrequency: 0.8, // Reduce term frequency weight to favor content density
-                pageLength: 0.6, // Reduce page length bias to favor comprehensive docs
-                termSaturation: 1.2, // Allow more term repetition to boost framework-specific content
+                termFrequency: 0.8,
+                pageLength: 0.6,
+                termSaturation: 1.2,
               },
             });
           }
         } catch (e) {
-          window.pagefind = { search: async () => ({ results: [] }) };
+          console.warn("Failed to load Pagefind:", e);
+          window.pagefind = {
+            search: async () => ({ results: [] }),
+            options: async () => {},
+          };
         }
       }
     }
@@ -377,38 +252,111 @@ export function PagefindSearch() {
     }
   };
 
-  const handleOpenChange = (open: boolean) => {
-    if (!open) {
-      setQuery("");
-      setResults([]);
-    }
-    setOpen(open);
-  };
+  if (!open) return null;
 
   return (
-    <Command.Dialog
-      open={open}
-      onOpenChange={handleOpenChange}
-      label="Search"
-      className="fixed top-[10%] sm:top-1/2 left-1/2 -translate-x-1/2 sm:-translate-y-1/2 w-full sm:w-auto z-20"
-      shouldFilter={false}
-      title="Search"
-    >
-      <div
-        className="w-full sm:w-[640px] mx-auto max-w-[calc(100%-2rem)] overflow-hidden rounded-xl bg-white dark:bg-stone-950
-          origin-center animate-in fade-in
-          data-[state=open]:animate-in data-[state=closed]:animate-out
-          data-[state=open]:scale-100 data-[state=closed]:scale-95
-          data-[state=closed]:opacity-0 data-[state=open]:opacity-100
-          transition-all duration-200 ease-in-out
-          data-[state=open]:shadow-2xl data-[state=closed]:shadow-none
-          shadow-lg ring-1 ring-stone-950/10 dark:ring-white/10
-        "
-      >
-        <SearchInput query={query} onSearch={handleSearch} />
-        <SearchResults results={results} setOpen={setOpen} listRef={listRef} />
-      </div>
-    </Command.Dialog>
+    <Dialog open={open} onClose={close} className="!p-0">
+      <DialogBody className="!mt-0">
+        <Combobox
+          onChange={(result: PagefindResult | PagefindSubResult) => {
+            if (result) {
+              let url;
+              if ("meta" in result) {
+                url = processUrl(result.url);
+              } else {
+                const { path, hash } = processSubUrl(result.url);
+                url = `${path}${hash}`;
+              }
+              navigateToUrl(url, close);
+            }
+          }}
+        >
+          <div className="p-2 grid grid-cols-1">
+            <ComboboxInput
+              className={clsx(
+                "col-start-1 row-start-1",
+                "text-highlight placeholder:text-stone-500 sm:bg-stone-100 sm:dark:bg-stone-925",
+                "w-full pl-11 pr-4 py-2.5 rounded-xl sm:rounded-lg",
+                "outline-none focus-visible:outline-none",
+              )}
+              placeholder="Search documentation..."
+              onChange={(e) => handleSearch(e.target.value)}
+              value={query}
+              autoFocus
+              autoComplete="off"
+              onBlur={() => setQuery("")}
+              onKeyDown={(e) => {
+                if (e.key === "Escape") {
+                  close();
+                }
+              }}
+            />
+            <Icon
+              name="search"
+              size="sm"
+              className="col-start-1 row-start-1 ml-3 self-center pointer-events-none text-stone-600"
+            />
+          </div>
+          <div ref={listRef}>
+            {results.length > 0 ? (
+              <ComboboxOptions className="border-t divide-y h-[50vh] sm:h-[300px] max-h-[60vh] sm:max-h-[400px] overflow-y-auto overflow-x-hidden overscroll-contain">
+                {results.map((result) => (
+                  <div className="space-y-1 p-2">
+                    <ComboboxOption
+                      key={result.id}
+                      value={result}
+                      className="cursor-default flex gap-3 items-center group data-[focus]:bg-stone-100 rounded-lg p-2 dark:data-[focus]:bg-stone-900"
+                    >
+                      <Icon name="file" className="shrink-0" />
+                      <div>
+                        <p className="font-medium text-highlight line-clamp-1">
+                          {result.meta?.title || "No title"}{" "}
+                          {result.meta?.framework ? (
+                            <span className="text-stone-600 dark:text-stone-400 font-normal">
+                              (
+                              {
+                                frameworkNames[
+                                  result.meta?.framework as Framework
+                                ].label
+                              }
+                              )
+                            </span>
+                          ) : null}
+                        </p>
+
+                        {result.sub_results?.length ? null : (
+                          <HighlightedText text={result.excerpt || ""} />
+                        )}
+                      </div>
+                    </ComboboxOption>
+                    {result.sub_results?.map((subResult) =>
+                      subResult.anchor?.element === "h1" ? null : (
+                        <>
+                          <ComboboxOption
+                            key={subResult.id}
+                            value={subResult}
+                            className="group cursor-default flex gap-3 items-center group data-[focus]:bg-stone-100 rounded-lg p-2 dark:data-[focus]:bg-stone-900"
+                          >
+                            <Icon name="hash" className="shrink-0" />
+                            <div>
+                              <p className="text-sm text-highlight">
+                                {subResult.title?.replace("#", "") ||
+                                  "No title"}
+                              </p>
+                              <HighlightedText text={subResult.excerpt || ""} />
+                            </div>
+                          </ComboboxOption>
+                        </>
+                      ),
+                    )}
+                  </div>
+                ))}
+              </ComboboxOptions>
+            ) : null}
+          </div>
+        </Combobox>
+      </DialogBody>
+    </Dialog>
   );
 }
 

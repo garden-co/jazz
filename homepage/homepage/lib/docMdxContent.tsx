@@ -68,7 +68,11 @@ export async function DocPage({
     const { Content, tocItems } = await getMdxWithToc(framework, slug);
 
     return (
-      <DocsLayout nav={<DocNav />} tocItems={tocItems}>
+      <DocsLayout
+        nav={<DocNav />}
+        tocItems={tocItems}
+        pagefindLowPriority={slug?.length ? slug[0] === "upgrade" : false}
+      >
         <DocProse>
           <Content />
 
@@ -85,7 +89,7 @@ export async function DocPage({
       "../content/docs/coming-soon.mdx"
     );
     return (
-      <DocsLayout nav={<DocNav />} tocItems={[]}>
+      <DocsLayout nav={<DocNav />} tocItems={[]} pagefindIgnore>
         <DocProse>
           <ComingSoon />
         </DocProse>

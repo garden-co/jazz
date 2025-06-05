@@ -34,7 +34,7 @@ export function Dialog({
       />
 
       <div className="z-50 fixed inset-0 w-screen overflow-y-auto pt-6 sm:pt-0">
-        <div className="grid min-h-full grid-rows-[1fr_auto] justify-items-center sm:grid-rows-[1fr_auto_3fr] sm:p-4">
+        <div className="grid min-h-full grid-rows-[1fr_auto] justify-items-center sm:block sm:p-4 sm:pt-20 sm:items-start md:pt-20 lg:pt-36">
           <Headless.DialogPanel
             transition
             className={clsx(
