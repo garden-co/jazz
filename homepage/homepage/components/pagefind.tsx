@@ -252,6 +252,8 @@ export function PagefindSearch() {
     }
   };
 
+  if (!open) return null;
+
   return (
     <Dialog open={open} onClose={close} className="!p-0">
       <DialogBody className="!mt-0">
