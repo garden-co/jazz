@@ -2,7 +2,7 @@ import "./app.css";
 import { JazzProvider } from "jazz-react";
 import React from "react";
 import ReactDOM from "react-dom/client";
-import { apiKey } from "./api-key.ts";
+import { apiKey } from "./apiKey.ts";
 import App from "./app.tsx";
 import { JazzAccount } from "./schema.ts";
 
