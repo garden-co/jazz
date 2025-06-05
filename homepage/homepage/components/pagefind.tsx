@@ -271,7 +271,7 @@ export function PagefindSearch() {
             }
           }}
         >
-          <div className="p-2 border-b grid grid-cols-1">
+          <div className="p-2 grid grid-cols-1">
             <ComboboxInput
               className={clsx(
                 "col-start-1 row-start-1",
@@ -285,6 +285,11 @@ export function PagefindSearch() {
               autoFocus
               autoComplete="off"
               onBlur={() => setQuery("")}
+              onKeyDown={(e) => {
+                if (e.key === "Escape") {
+                  close();
+                }
+              }}
             />
             <Icon
               name="search"
@@ -292,14 +297,9 @@ export function PagefindSearch() {
               className="col-start-1 row-start-1 ml-3 self-center pointer-events-none text-stone-600"
             />
           </div>
-          <div
-            ref={listRef}
-            className="h-[50vh] sm:h-[300px] max-h-[60vh] sm:max-h-[400px] overflow-y-auto overflow-x-hidden overscroll-contain"
-          >
-            {results.length === 0 ? (
-              <p className="text-center py-5">No results found.</p>
-            ) : (
-              <ComboboxOptions className="divide-y">
+          <div ref={listRef}>
+            {results.length > 0 ? (
+              <ComboboxOptions className="border-t divide-y h-[50vh] sm:h-[300px] max-h-[60vh] sm:max-h-[400px] overflow-y-auto overflow-x-hidden overscroll-contain">
                 {results.map((result) => (
                   <div className="space-y-1 p-2">
                     <ComboboxOption
@@ -352,7 +352,7 @@ export function PagefindSearch() {
                   </div>
                 ))}
               </ComboboxOptions>
-            )}
+            ) : null}
           </div>
         </Combobox>
       </DialogBody>
