@@ -256,7 +256,7 @@ export function PagefindSearch() {
 
   return (
     <Dialog open={open} onClose={close} className="!p-0">
-      <DialogBody className="!mt-0">
+      <DialogBody className="!mt-0 min-h-75">
         <Combobox
           onChange={(result: PagefindResult | PagefindSubResult) => {
             if (result) {
@@ -352,7 +352,9 @@ export function PagefindSearch() {
                   </div>
                 ))}
               </ComboboxOptions>
-            ) : null}
+            ) :
+              <p className="py-12 border-t text-center sm:hidden">No results...</p>
+            }
           </div>
         </Combobox>
       </DialogBody>
