@@ -1,6 +1,6 @@
 "use client";
 
-import { Framework, frameworks } from "@/content/framework";
+import { Framework, frameworkNames, frameworks } from "@/content/framework";
 import { useFramework } from "@/lib/use-framework";
 import { Icon } from "@garden-co/design-system/src/components/atoms/Icon";
 import {
@@ -59,10 +59,10 @@ const processSubUrl = (url: string): { path: string; hash: string } => {
   return { path, hash };
 };
 
-const navigateToUrl = (url: string, setOpen?: (open: boolean) => void) => {
+const navigateToUrl = (url: string, close: () => void) => {
   if (!url) return;
   window.location.href = `${window.location.origin}${url}`;
-  // setOpen(false);
+  close();
 };
 
 const alternativeKeywordsByFramework: Partial<Record<Framework, string[]>> = {
@@ -153,7 +153,7 @@ function HighlightedText({ text }: { text: string }) {
           return (
             <mark
               key={i}
-              className="px-0.5 bg-transparent text-primary group-data-[focus]:text-underline"
+              className="bg-transparent text-primary dark:text-white dark:text-underline dark:bg-highlight"
             >
               {content}
             </mark>
@@ -165,51 +165,51 @@ function HighlightedText({ text }: { text: string }) {
   );
 }
 
-function Result({
-  result,
-  onClick,
-}: {
-  result: PagefindResult | PagefindSubResult;
-  onClick: () => void;
-}) {
-  const title = "meta" in result ? result.meta?.title : result.title;
-  const subResults = "sub_results" in result ? result.sub_results : [];
-  const framework = "meta" in result ? (result.meta as any)?.framework : null;
-  return (
-    <>
-      <button
-        type="button"
-        onClick={onClick}
-        className={`text-left group relative flex items-center gap-2 sm:gap-3 px-3 sm:px-4 py-2 sm:py-3 cursor-pointer text-sm rounded-md select-none
-          transition-all duration-200 ease-in-out
-          `}
-      >
-        <div className="min-w-0 flex-1">
-          <h3 className="font-medium text-highlight truncate">
-            {title || "No title"} {framework ? `(${framework})` : ""}
-          </h3>
-          <HighlightedText text={result.excerpt || ""} />
-        </div>
-      </button>
-
-      {subResults?.length ? (
-        <ul className="ml-4">
-          {subResults?.map((subResult) => (
-            <li key={subResult.id} className="block">
-              <Result
-                result={subResult}
-                onClick={() => {
-                  const { path, hash } = processSubUrl(subResult.url);
-                  navigateToUrl(`${path}${hash}`);
-                }}
-              />
-            </li>
-          ))}
-        </ul>
-      ) : null}
-    </>
-  );
-}
+// function Result({
+//   result,
+//   onClick,
+// }: {
+//   result: PagefindResult | PagefindSubResult;
+//   onClick: () => void;
+// }) {
+//   const title = "meta" in result ? result.meta?.title : result.title;
+//   const subResults = "sub_results" in result ? result.sub_results : [];
+//   const framework = "meta" in result ? (result.meta as any)?.framework : null;
+//   return (
+//     <>
+//       <button
+//         type="button"
+//         onClick={onClick}
+//         className={`text-left group relative flex items-center gap-2 sm:gap-3 px-3 sm:px-4 py-2 sm:py-3 cursor-pointer text-sm rounded-md select-none
+//           transition-all duration-200 ease-in-out
+//           `}
+//       >
+//         <div className="min-w-0 flex-1">
+//           <h3 className="font-medium text-highlight truncate">
+//             {title || "No title"} {framework ? `(${framework})` : ""}
+//           </h3>
+//           <HighlightedText text={result.excerpt || ""} />
+//         </div>
+//       </button>
+//
+//       {subResults?.length ? (
+//         <ul className="ml-4">
+//           {subResults?.map((subResult) => (
+//             <li key={subResult.id} className="block">
+//               <Result
+//                 result={subResult}
+//                 onClick={() => {
+//                   const { path, hash } = processSubUrl(subResult.url);
+//                   navigateToUrl(`${path}${hash}`);
+//                 }}
+//               />
+//             </li>
+//           ))}
+//         </ul>
+//       ) : null}
+//     </>
+//   );
+// }
 
 export function PagefindSearch() {
   const { open, setOpen } = usePagefindSearch();
@@ -289,16 +289,19 @@ export function PagefindSearch() {
         value,
       );
 
-      console.log(filteredResults);
-
       setResults(filteredResults);
     }
   };
 
   if (!open) return null;
 
+  const close = () => {
+    setOpen(false);
+    setQuery("");
+  };
+
   return (
-    <Dialog open={open} onClose={() => setOpen(false)} className="!p-0">
+    <Dialog open={open} onClose={close} className="!p-0">
       <DialogBody className="!mt-0">
         <Combobox
           onChange={(result: PagefindResult | PagefindSubResult) => {
@@ -310,39 +313,57 @@ export function PagefindSearch() {
                 const { path, hash } = processSubUrl(result.url);
                 url = `${path}${hash}`;
               }
-              navigateToUrl(url, setOpen);
+              navigateToUrl(url, close);
             }
           }}
         >
           <div className="p-2 border-b">
             <ComboboxInput
-              className="w-full rounded-md bg-stone-100 px-4 py-2.5 text-highlight outline-none placeholder:text-stone-500"
+              className="w-full rounded-lg bg-stone-100 px-4 py-2.5 text-highlight outline-none placeholder:text-stone-500 dark:bg-stone-925"
               placeholder="Search documentation..."
               onChange={(e) => handleSearch(e.target.value)}
               value={query}
               autoFocus
               autoComplete="off"
+              onBlur={close}
             />
           </div>
           <div
             ref={listRef}
-            className="h-[50vh] sm:h-[300px] max-h-[60vh] sm:max-h-[400px] overflow-y-auto overflow-x-hidden overscroll-contain"
+            className="h-[50vh] sm:h-[300px] max-h-[60vh] sm:max-h-[400px] overflow-y-auto overflow-x-hidden overscroll-contain pb-2"
           >
             {results.length === 0 ? (
               <p className="text-center py-5">No results found.</p>
             ) : (
-              <ComboboxOptions>
+              <ComboboxOptions className="divide-y">
                 {results.map((result) => (
-                  <div className="border-b space-y-1 p-2">
+                  <div className="space-y-1 p-2">
                     <ComboboxOption
                       key={result.id}
                       value={result}
-                      className="cursor-default flex gap-3 items-center group data-[focus]:bg-stone-100 rounded-lg p-2"
+                      className="cursor-default flex gap-3 items-center group data-[focus]:bg-stone-100 rounded-lg p-2 dark:data-[focus]:bg-stone-900"
                     >
                       <Icon name="file" className="shrink-0" />
-                      <p className="font-medium text-highlight line-clamp-1">
-                        {result?.meta?.title || "No title"}
-                      </p>
+                      <div>
+                        <p className="font-medium text-highlight line-clamp-1">
+                          {result?.meta?.title || "No title"}{" "}
+                          {result.meta?.framework ? (
+                            <span className="text-stone-600 dark:text-stone-400 font-normal">
+                              (
+                              {
+                                frameworkNames[
+                                  result.meta?.framework as Framework
+                                ].label
+                              }
+                              )
+                            </span>
+                          ) : null}
+                        </p>
+
+                        {result.sub_results?.length ? null : (
+                          <HighlightedText text={result.excerpt || ""} />
+                        )}
+                      </div>
                     </ComboboxOption>
                     {result.sub_results?.map((subResult) =>
                       subResult.anchor?.element === "h1" ? null : (
@@ -350,7 +371,7 @@ export function PagefindSearch() {
                           <ComboboxOption
                             key={subResult.id}
                             value={subResult}
-                            className="group cursor-default flex gap-3 items-center group data-[focus]:bg-stone-100 rounded-lg p-2"
+                            className="group cursor-default flex gap-3 items-center group data-[focus]:bg-stone-100 rounded-lg p-2 dark:data-[focus]:bg-stone-900"
                           >
                             <Icon name="hash" className="shrink-0" />
                             <div>
