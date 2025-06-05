@@ -40,7 +40,7 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
       <div className="flex flex-col h-full items-center justify-start gap-10 pt-10 pb-10 px-5">
         <JazzProvider
           sync={{
-            peer: `wss://cloud.jazz.tools/?key=${apiKey}`
+            peer: `wss://cloud.jazz.tools/?key=${apiKey}`,
           }}
           AccountSchema={PetAccount}
         >

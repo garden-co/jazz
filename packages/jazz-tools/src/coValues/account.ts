@@ -381,15 +381,24 @@ export class Account extends CoValueBase implements CoValue {
     if (this.inbox?.inbox === undefined) {
       const inboxGroup = RegisteredSchemas["Group"].create({ owner: this });
       const inboxRoot = createInboxRoot(this);
+      console.log("creating inbox in migration");
       this.inbox = AccountInbox.create({ inbox: inboxRoot.id }, inboxGroup);
       inboxGroup.addMember("everyone", "writeOnly");
+      console.log("created inbox in migration", this.inbox);
+      if (this.inbox._owner._type !== "Group") {
+        throw new Error("Inbox must be owned by a Group", {
+          cause: `The inbox of the account "${this.id}" was created with an Account as owner, which is not allowed.`,
+        });
+      }
     }
 
     // if the user has not defined a profile themselves, we create one
     if (this.profile === undefined && creationProps) {
       const profileGroup = RegisteredSchemas["Group"].create({ owner: this });
 
+      console.log("creating profile in migration");
       this.profile = Profile.create({ name: creationProps.name }, profileGroup);
+      console.log("created profile in migration", this.profile);
       profileGroup.addMember("everyone", "reader");
     } else if (this.profile && creationProps) {
       if (this.profile._owner._type !== "Group") {
@@ -489,10 +498,15 @@ export class Account extends CoValueBase implements CoValue {
   }
 }
 
+/**
+ * For accounts and groups, the values for the `profile`, `root`, and `inbox` keys are their IDs, not the values themselves.
+ * Setting any other property will set a key-value mapping where the key is the property name and the value is the property value.
+ */
 export const AccountAndGroupProxyHandler: ProxyHandler<Account | Group> = {
   get(target, key, receiver) {
     if (key === "profile" || key === "root" || key === "inbox") {
       const id = target._raw.get(key);
+      console.log(`get ${key}`, id);
 
       if (id) {
         return accessChildByKey(target, id, key);
@@ -504,6 +518,7 @@ export const AccountAndGroupProxyHandler: ProxyHandler<Account | Group> = {
     }
   },
   set(target, key, value, receiver) {
+    console.log(`set ${key.toString()}`, value?.id, target.myRole());
     if (
       (key === "profile" || key === "root" || key === "inbox") &&
       typeof value === "object" &&
@@ -514,12 +529,16 @@ export const AccountAndGroupProxyHandler: ProxyHandler<Account | Group> = {
       return true;
     } else if (key === "inbox") {
       if (value) {
+        // The 'trusting' privacy level means that the inbox ID is readable by anyone, allowing other accounts to load this account's inbox ID.
+        // FIXME: `trusting` causes getting the inbox ID to fail for everyone (including the setter); however, 'private' (default) allows the setter to read the inbox ID, but nobody else can. No idea why.
         target._raw.set("inbox", value.id as unknown as CoID<RawCoMap>);
       }
 
       return true;
     } else if (key === "profile") {
       if (value) {
+        // The 'trusting' privacy level allows other accounts to load this account's profile ID.
+        // This is unlike the account root, whose ID is not visible to other accounts (unless shared out-of-band).
         target._raw.set(
           "profile",
           value.id as unknown as CoID<RawCoMap>,
@@ -543,6 +562,7 @@ export const AccountAndGroupProxyHandler: ProxyHandler<Account | Group> = {
       typeof descriptor.value === "object" &&
       SchemaInit in descriptor.value
     ) {
+      console.log(`define property ${key}`, descriptor.value);
       (target.constructor as typeof CoMap)._schema ||= {};
       (target.constructor as typeof CoMap)._schema[key] =
         descriptor.value[SchemaInit];

@@ -235,6 +235,7 @@ export class LocalNode {
     }
 
     const profileId = account.get("profile");
+    const inboxId = account.get("inbox");
 
     if (!profileId) {
       throw new Error("Must set account profile in initial migration");
@@ -244,6 +245,9 @@ export class LocalNode {
       await Promise.all([
         node.syncManager.waitForStorageSync(account.id),
         node.syncManager.waitForStorageSync(profileId),
+        inboxId
+          ? node.syncManager.waitForStorageSync(inboxId)
+          : Promise.resolve(),
       ]);
     }
 
@@ -289,12 +293,18 @@ export class LocalNode {
       }
 
       const profileID = account.get("profile");
+      const inboxID = account.get("inbox");
       if (!profileID) {
         throw new Error("Account has no profile");
       }
 
       // Preload the profile
       await node.load(profileID);
+
+      if (inboxID) {
+        // Preload the inbox if it exists
+        await node.load(inboxID);
+      }
 
       if (migration) {
         await migration(account, node);

@@ -23,8 +23,8 @@ const Message = co.map({
 });
 
 describe("Inbox", () => {
-  describe("Private profile", () => {
-    it("Should throw if the inbox owner profile is private", async () => {
+  describe("Private inbox property", () => {
+    it("Should throw if the inbox owner's inbox property is private", async () => {
       const WorkerAccount = co
         .account({
           inbox: co.inbox(),
@@ -32,7 +32,7 @@ describe("Inbox", () => {
           root: co.map({}),
         })
         .withMigration((account) => {
-          if (!account.inbox?.inbox === undefined) {
+          if (account.inbox?.inbox === undefined) {
             const inboxRoot = createInboxRoot(account);
             account.inbox = co
               .inbox()
@@ -47,6 +47,8 @@ describe("Inbox", () => {
         await setupTwoNodes({
           ServerAccountSchema: zodSchemaToCoSchema(WorkerAccount),
         });
+      console.log("receiver.inbox", receiver.inbox);
+      console.log("sender.inbox", sender.inbox);
 
       await expect(() => InboxSender.load(receiver.id, sender)).rejects.toThrow(
         "Insufficient permissions to access the inbox, make sure it's publicly readable.",
@@ -103,6 +105,9 @@ describe("Inbox", () => {
       await setupTwoNodes();
     await sender.applyMigration();
     await receiver.applyMigration();
+    console.log("sender.id", sender.id);
+    console.log("receiver.id", receiver.id);
+    console.log("receiver._raw.keys()", receiver._raw.keys());
 
     const EmptyMessage = co.map({});
 
@@ -118,6 +123,7 @@ describe("Inbox", () => {
 
     // Setup inbox sender
     const inboxSender = await InboxSender.load(receiver.id, sender);
+    // console.log("inboxSender", inboxSender);
     inboxSender.sendMessage(message);
 
     // Track received messages
@@ -125,6 +131,9 @@ describe("Inbox", () => {
     let senderAccountID: unknown = undefined;
 
     // Subscribe to inbox messages
+    console.log("receiver.inbox?.inbox", receiver.inbox?.inbox);
+    console.log("receiverInbox.messages", receiverInbox.messages);
+    console.log("inboxSender.messages", inboxSender.messages);
     const unsubscribe = receiverInbox.subscribe(
       EmptyMessage,
       async (message, id) => {
