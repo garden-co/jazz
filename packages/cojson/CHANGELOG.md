@@ -1,5 +1,11 @@
 # cojson
 
+## 0.14.21
+
+### Patch Changes
+
+- c3d8779: Fix setting latestTxMadeAt when the transaction is empty. (can happen when calling assign with an empty object)
+
 ## 0.14.20
 
 ## 0.14.19

@@ -1,5 +1,18 @@
 # jazz-react-core
 
+## 0.14.21
+
+### Patch Changes
+
+- 2116a59: Adapt useCoState and useAccount to the new behavoir of useSyncExternalStore in React 19 to keep the re-renders minimal when a value is already in memory
+- Updated dependencies [e7e505e]
+- Updated dependencies [c3d8779]
+- Updated dependencies [13b57aa]
+- Updated dependencies [5662faa]
+- Updated dependencies [2116a59]
+  - jazz-tools@0.14.21
+  - cojson@0.14.21
+
 ## 0.14.20
 
 ### Patch Changes

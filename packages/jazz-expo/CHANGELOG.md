@@ -1,5 +1,23 @@
 # jazz-browser
 
+## 0.14.21
+
+### Patch Changes
+
+- cfb6786: feat: API for clearing local data storage
+- Updated dependencies [e7e505e]
+- Updated dependencies [c3d8779]
+- Updated dependencies [13b57aa]
+- Updated dependencies [2116a59]
+- Updated dependencies [5662faa]
+- Updated dependencies [2116a59]
+  - jazz-tools@0.14.21
+  - cojson@0.14.21
+  - jazz-react-core@0.14.21
+  - jazz-auth-clerk@0.14.21
+  - jazz-react-native-core@0.14.21
+  - cojson-transport-ws@0.14.21
+
 ## 0.14.20
 
 ### Patch Changes
