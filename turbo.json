@@ -1,15 +1,35 @@
 {
   "$schema": "https://turbo.build/schema.json",
-  "remoteCache": {},
+  "remoteCache": {
+    "enabled": true
+  },
   "tasks": {
     "build": {
       "env": [
         "RESEND_API_KEY",
-        "RESEND_AUDIENCE_ID",
-        "GRAFANA_SERVICE_ACCOUNT"
+        "RESEND_AUDIENCE_ID", 
+        "GRAFANA_SERVICE_ACCOUNT",
+        "NODE_ENV",
+        "APP_NAME"
       ],
       "dependsOn": ["^build"],
-      "outputs": ["dist/**", ".svelte-kit/output/**"]
+      "outputs": [
+        "dist/**", 
+        ".svelte-kit/output/**",
+        ".next/**",
+        "build/**",
+        "out/**"
+      ],
+      "inputs": [
+        "src/**",
+        "pages/**",
+        "app/**",
+        "public/**",
+        "package.json",
+        "tsconfig.json",
+        "*.config.*",
+        "!node_modules/**"
+      ]
     },
     "dev": {
       "cache": false,
@@ -18,12 +38,49 @@
     },
     "test": {
       "env": ["CI"],
-      "dependsOn": ["^build"]
+      "dependsOn": ["^build"],
+      "inputs": [
+        "src/**",
+        "test/**",
+        "tests/**",
+        "*.test.*",
+        "*.spec.*",
+        "package.json"
+      ]
     },
-    "type-check": {},
-    "//#format-and-lint": {},
+    "type-check": {
+      "inputs": [
+        "src/**",
+        "*.ts",
+        "*.tsx",
+        "tsconfig.json",
+        "package.json"
+      ]
+    },
+    "lint": {
+      "inputs": [
+        "src/**",
+        "*.js",
+        "*.ts", 
+        "*.tsx",
+        "*.json",
+        "biome.json",
+        ".eslintrc.*",
+        "package.json"
+      ]
+    },
+    "//#format-and-lint": {
+      "inputs": [
+        "**/*.{js,ts,tsx,json,md}",
+        "biome.json"
+      ]
+    },
     "//#format-and-lint:fix": {
-      "cache": false
+      "cache": false,
+      "inputs": [
+        "**/*.{js,ts,tsx,json,md}",
+        "biome.json"
+      ]
     }
   }
 }
