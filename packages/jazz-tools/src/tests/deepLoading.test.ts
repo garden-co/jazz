@@ -38,7 +38,6 @@ const TestMap = co.map({
   list: TestList,
   optionalRef: z.optional(InnermostMap),
 });
-const TestService = co.service();
 
 describe("Deep loading with depth arg", async () => {
   const me = await Account.create({
@@ -201,7 +200,6 @@ const CustomAccount = co
   .account({
     profile: CustomProfile,
     root: TestMap,
-    service: TestService,
   })
   .withMigration(async (account, creationProps) => {
     if (creationProps) {
@@ -261,7 +259,6 @@ test("Deep loading within account", async () => {
         root: Loaded<typeof TestMap> & {
           list: Loaded<typeof TestList>;
         };
-        service: Loaded<typeof TestService>;
       })
     | null = meLoaded;
 
@@ -377,7 +374,6 @@ test("The resolve type doesn't accept extra keys", async () => {
             list: Loaded<typeof TestList>;
             extraKey: never;
           };
-          service: Loaded<typeof TestService>;
         })
       | null = meLoaded;
   } catch (e) {

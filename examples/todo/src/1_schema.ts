@@ -53,7 +53,6 @@ export const TodoAccount = co
   .account({
     profile: co.profile(),
     root: TodoAccountRoot,
-    service: co.service(),
   })
   .withMigration(async (account) => {
     /** The account migration is run on account creation and on every log-in.

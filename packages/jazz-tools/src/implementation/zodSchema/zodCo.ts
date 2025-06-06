@@ -84,7 +84,7 @@ function enrichAccountSchema<
       name: z.core.$ZodString<string>;
     }>;
     root: AnyCoMapSchema;
-    service: AnyCoMapSchema<{
+    service?: AnyCoMapSchema<{
       service?: z.core.$ZodOptional<z.core.$ZodString>;
     }>;
   },
@@ -145,7 +145,7 @@ export const coAccountDefiner = <
       name: z.core.$ZodString<string>;
     }>;
     root: AnyCoMapSchema;
-    service: AnyCoMapSchema<{
+    service?: AnyCoMapSchema<{
       service?: z.core.$ZodOptional<z.core.$ZodString>;
     }>;
   },
@@ -223,11 +223,11 @@ export const coServiceDefiner = <
     service?: z.core.$ZodOptional<z.core.$ZodString>;
   } = {} as any,
 ): CoServiceSchema<Shape> => {
-  const ehnancedShape = Object.assign(shape ?? {}, {
+  const enhancedShape = Object.assign(shape ?? {}, {
     service: z.optional(z.string()),
   });
 
-  return coMapDefiner(ehnancedShape) as CoServiceSchema<Shape>;
+  return coMapDefiner(enhancedShape) as CoServiceSchema<Shape>;
 };
 
 export const coProfileDefiner = <

@@ -41,7 +41,6 @@ describe("useAccount", () => {
       .account({
         root: AccountRoot,
         profile: co.profile(),
-        service: co.service(),
       })
       .withMigration((account, creationProps) => {
         if (!account._refs.root) {

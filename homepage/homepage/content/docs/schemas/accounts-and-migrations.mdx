@@ -34,7 +34,6 @@ const MyAppRoot = co.map({
 export const MyAppAccount = co.account({
   root: MyAppRoot,
   profile: co.profile(),
-  service: co.service()
 });
 ```
 </CodeGroup>
@@ -57,7 +56,6 @@ const Account = co.account({
   profile: co.profile({
     name: z.string(),
   }),
-  service: co.service()
 });
 ```
 </CodeGroup>
@@ -76,7 +74,6 @@ const MyAppRoot = co.map({ // [!code ++:3]
 export const MyAppAccount = co.account({
   root: MyAppRoot, // [!code ++]
   profile: co.profile(),
-  service: co.service()
 });
 ```
 </CodeGroup>
@@ -100,7 +97,6 @@ export const MyAppProfile = co.profile({ // [!code ++:4]
 export const MyAppAccount = co.account({
   root: MyAppRoot,
   profile: MyAppProfile, // [!code ++]
-  service: co.service()
 });
 ```
 </CodeGroup>
@@ -126,7 +122,6 @@ const MyAppProfile = co.profile();
 const MyAppAccount = co.account({
   root: MyAppRoot,
   profile: MyAppProfile,
-  service: co.service()
 });
 
 class ChatPreview extends React.Component<{ chat: co.loaded<typeof Chat> }> {};
@@ -199,7 +194,6 @@ const MyAppProfile = co.profile({
 export const MyAppAccount = co.account({
   root: MyAppRoot,
   profile: MyAppProfile,
-  service: co.service()
 }).withMigration((account, creationProps?: { name: string }) => {
   // we specifically need to check for undefined,
   // because the root might simply be not loaded (`null`) yet
@@ -256,7 +250,6 @@ const MyAppRoot = co.map({
 export const MyAppAccount = co.account({
   root: MyAppRoot,
   profile: MyAppProfile,
-  service: co.service()
 }).withMigration(async (account) => {
   if (account.root === undefined) {
     account.root = MyAppRoot.create({

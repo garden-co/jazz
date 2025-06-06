@@ -34,7 +34,6 @@ export const PetAccount = co
   .account({
     profile: co.profile(),
     root: PetAccountRoot,
-    service: co.service(),
   })
   .withMigration(async (account) => {
     if (!account.root) {

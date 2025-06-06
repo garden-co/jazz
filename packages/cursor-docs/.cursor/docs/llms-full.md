@@ -107,7 +107,6 @@ export const AccountRoot = co.map({
 export const MyAppAccount = co.account({
   root: AccountRoot,
   profile: co.map({ name: z.string() }),
-  service: co.service()
 });
 ```
 </CodeGroup>
@@ -134,7 +133,6 @@ export const AccountRoot = co.map({
 export const MyAppAccount = co.account({
   root: AccountRoot,
   profile: co.map({ name: z.string() }),
-  service: co.service()
 });
 // @filename: app.tsx
 
@@ -184,7 +182,6 @@ export const AccountRoot = co.map({
 export const MyAppAccount = co.account({
   root: AccountRoot,
   profile: co.map({ name: z.string() }),
-  service: co.service()
 });
 // @filename: app.tsx
 // ---cut---
@@ -223,7 +220,6 @@ export const AccountRoot = co.map({
 export const MyAppAccount = co.account({
   root: AccountRoot,
   profile: co.map({ name: z.string() }),
-  service: co.service()
 });
 // @filename: Profile.tsx
 
@@ -982,7 +978,6 @@ export const AccountRoot = co.map({
 export const MyAppAccount = co.account({
   root: AccountRoot,
   profile: co.map({ name: z.string() }),
-  service: co.service()
 });
 // @filename: app.tsx
 // ---cut---
@@ -1046,7 +1041,6 @@ export const AccountRoot = co.map({
 export const MyAppAccount = co.account({
   root: AccountRoot,
   profile: co.map({ name: z.string() }),
-  service: co.service()
 });
 
 // @filename: app.tsx
@@ -1781,7 +1775,6 @@ When using `useAccount` you should now pass the `Account` schema directly:
 export const MyAccount = co.account({
   profile: co.profile(),
   root: co.map({}),
-  service: co.service()
 });
 
 // @filename: app.tsx
@@ -1845,7 +1838,6 @@ const MyAppProfile = co.profile({
 export const MyAppAccount = co.account({
   root: MyAppRoot,
   profile: MyAppProfile,
-  service: co.service()
 }).withMigration((account, creationProps?: { name: string }) => {
   if (account.root === undefined) {
     account.root = MyAppRoot.create({
@@ -1916,7 +1908,6 @@ const MyAppProfile = co.profile({
 export const MyAppAccount = co.account({
   root: MyAppRoot,
   profile: MyAppProfile,
-  service: co.service()
 });
 
 // ---cut---
@@ -2388,7 +2379,6 @@ const MyAppRoot = co.map({
 export const MyAppAccount = co.account({
   root: MyAppRoot,
   profile: co.profile(),
-  service: co.service()
 });
 ```
 </CodeGroup>
@@ -2410,7 +2400,6 @@ const Account = co.account({
   profile: co.profile({
     name: z.string(),
   }),
-  service: co.service()
 });
 ```
 </CodeGroup>
@@ -2428,7 +2417,6 @@ const MyAppRoot = co.map({ // [!code ++:3]
 export const MyAppAccount = co.account({
   root: MyAppRoot, // [!code ++]
   profile: co.profile(),
-  service: co.service()
 });
 ```
 </CodeGroup>
@@ -2451,7 +2439,6 @@ export const MyAppProfile = co.profile({ // [!code ++:4]
 export const MyAppAccount = co.account({
   root: MyAppRoot,
   profile: MyAppProfile, // [!code ++]
-  service: co.service()
 });
 ```
 </CodeGroup>
@@ -2475,7 +2462,6 @@ const MyAppProfile = co.profile();
 const MyAppAccount = co.account({
   root: MyAppRoot,
   profile: MyAppProfile,
-  service: co.service()
 });
 
 class ChatPreview extends React.Component<{ chat: Loaded<typeof Chat> }> {};
@@ -2546,7 +2532,6 @@ const MyAppProfile = co.profile({
 export const MyAppAccount = co.account({
   root: MyAppRoot,
   profile: MyAppProfile,
-  service: co.service()
 }).withMigration((account, creationProps?: { name: string }) => {
   // we specifically need to check for undefined,
   // because the root might simply be not loaded (`null`) yet
@@ -2602,7 +2587,6 @@ const MyAppRoot = co.map({
 export const MyAppAccount = co.account({
   root: MyAppRoot,
   profile: MyAppProfile,
-  service: co.service()
 }).withMigration(async (account) => {
   if (account.root === undefined) {
     account.root = MyAppRoot.create({
@@ -3995,7 +3979,6 @@ const JazzProfile = co.profile({
 const JazzAccount = co.account({
   profile: JazzProfile,
   root: co.map({}),
-  service: co.service()
 });
 
 // ---cut---
@@ -4956,7 +4939,6 @@ const MyProfile = co.profile({
 const MyAccount = co.account({
   root: co.map({}),
   profile: MyProfile,
-  service: co.service()
 });
 
 MyAccount.withMigration((account, creationProps) => {
@@ -5341,7 +5323,6 @@ const AccountRoot = co.map({
 const MyAppAccount = co.account({
   root: AccountRoot,
   profile: co.profile(),
-  service: co.service()
 });
 
 // ---cut-before---
@@ -7347,7 +7328,6 @@ export const AccountRoot = co.map({
 export const JazzAccount = co.account({
   root: AccountRoot,
   profile: co.map({ name: z.string() }),
-  service: co.service()
 });
 
 export function OrderForm({
@@ -7455,7 +7435,6 @@ export const AccountRoot = co.map({
 export const JazzAccount = co.account({
   root: AccountRoot,
   profile: co.map({ name: z.string() }),
-  service: co.service()
 });
 
 export function OrderForm({
@@ -7538,7 +7517,6 @@ export const AccountRoot = co.map({ // [!code ++:15]
 export const JazzAccount = co.account({
   root: AccountRoot,
   profile: co.map({ name: z.string() }),
-  service: co.service()
 }).withMigration((account, creationProps?: { name: string }) => {
   if (account.root === undefined) {
     const draft = DraftBubbleTeaOrder.create({});
@@ -7569,7 +7547,6 @@ export const AccountRoot = co.map({
 export const JazzAccount = co.account({
   root: AccountRoot,
   profile: co.map({ name: z.string() }),
-  service: co.service()
 }).withMigration((account, creationProps?: { name: string }) => {
   if (account.root === undefined) {
     const draft = DraftBubbleTeaOrder.create({});
@@ -7625,7 +7602,6 @@ export const AccountRoot = co.map({
 export const JazzAccount = co.account({
   root: AccountRoot,
   profile: co.map({ name: z.string() }),
-  service: co.service()
 }).withMigration((account, creationProps?: { name: string }) => {
   if (account.root === undefined) {
     const draft = DraftBubbleTeaOrder.create({});
@@ -7778,7 +7754,6 @@ export const AccountRoot = co.map({
 export const JazzAccount = co.account({
   root: AccountRoot,
   profile: co.map({ name: z.string() }),
-  service: co.service()
 }).withMigration((account, creationProps?: { name: string }) => {
   if (account.root === undefined) {
     const draft = DraftBubbleTeaOrder.create({});
@@ -7976,7 +7951,6 @@ const JazzAccountRoot = co.map({
 const JazzAccount = co.account({
   root: JazzAccountRoot,
   profile: co.profile({}),
-  service: co.service()
 });
 
 // ---cut---
@@ -8110,7 +8084,6 @@ export const MusicaAccount = co
     /** the default user profile with a name */
     profile: co.profile(),
     root: MusicaAccountRoot,
-    service: co.service()
   })
   .withMigration((account) => {
     /**

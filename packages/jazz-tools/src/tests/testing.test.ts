@@ -33,7 +33,6 @@ describe("Jazz Test Sync", () => {
       .account({
         root: MyRoot,
         profile: co.profile(),
-        service: co.service(),
       })
       .withMigration((account) => {
         if (account.root === undefined) {
@@ -60,7 +59,6 @@ describe("Jazz Test Sync", () => {
       .account({
         root: MyRoot,
         profile: co.profile(),
-        service: co.service(),
       })
       .withMigration((account) => {
         if (account.root === undefined) {

@@ -77,7 +77,6 @@ export const MusicaAccount = co
     /** the default user profile with a name */
     profile: co.profile(),
     root: MusicaAccountRoot,
-    service: co.service(),
   })
   .withMigration((account) => {
     /**

@@ -23,7 +23,7 @@ export type AccountSchema<
       name: z.core.$ZodString<string>;
     }>;
     root: AnyCoMapSchema;
-    service: AnyCoMapSchema;
+    service?: AnyCoMapSchema;
   } = {
     profile: CoMapSchema<{
       name: z.core.$ZodString<string>;

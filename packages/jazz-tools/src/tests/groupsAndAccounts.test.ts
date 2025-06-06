@@ -26,7 +26,6 @@ describe("Custom accounts and groups", async () => {
       .account({
         profile: CustomProfile,
         root: co.map({}),
-        service: co.service(),
       })
       .withMigration(
         (

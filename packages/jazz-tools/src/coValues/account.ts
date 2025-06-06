@@ -120,7 +120,7 @@ export class Account extends CoValueBase implements CoValue {
 
   declare profile: Profile | null;
   declare root: CoMap | null;
-  declare service: AccountService | null;
+  declare service: AccountService | null | undefined;
 
   getDescriptor(key: string) {
     if (key === "profile") {
@@ -378,7 +378,11 @@ export class Account extends CoValueBase implements CoValue {
   async applyMigration(creationProps?: AccountCreationProps) {
     await this.migrate(creationProps);
 
-    if (this.service?.service === undefined) {
+    // console.log("RegisteredSchemas[\"Account\"]._schema.service.optional", RegisteredSchemas["Account"]._schema.service.optional);
+    if (
+      !RegisteredSchemas["Account"]._schema.service.optional &&
+      this.service?.service === undefined
+    ) {
       const serviceGroup = RegisteredSchemas["Group"].create({ owner: this });
       const serviceRoot = createServiceRoot(this);
       this.service = AccountService.create(
@@ -386,12 +390,10 @@ export class Account extends CoValueBase implements CoValue {
         serviceGroup,
       );
       serviceGroup.addMember("everyone", "reader"); // Allows others to see our account's service property, which contains the ID of our service (ie, allows others to see our service's ID)
-    } else if (this.service) {
-      if (this.service._owner._type !== "Group") {
-        throw new Error("Service must be owned by a Group", {
-          cause: `The service of the account "${this.id}" was created with an Account as owner, which is not allowed.`,
-        });
-      }
+    } else if (this.service && this.service._owner._type !== "Group") {
+      throw new Error("Service must be owned by a Group", {
+        cause: `The service of the account "${this.id}" was created with an Account as owner, which is not allowed.`,
+      });
     }
 
     // if the user has not defined a profile themselves, we create one

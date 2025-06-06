@@ -1,6 +1,14 @@
 // @vitest-environment happy-dom
 
-import { CoMap, Group, Loaded, Service, co, z } from "jazz-tools";
+import {
+  CoMap,
+  Group,
+  Loaded,
+  Service,
+  co,
+  z,
+  zodSchemaToCoSchema,
+} from "jazz-tools";
 import { describe, expect, it } from "vitest";
 import { experimental_useServiceSender } from "../index.js";
 import { createJazzTestAccount, linkAccounts } from "../testing.js";
@@ -13,7 +21,16 @@ describe("useServiceSender", () => {
     });
 
     const account = await createJazzTestAccount();
-    const serviceReceiver = await createJazzTestAccount();
+    const serviceReceiver = await createJazzTestAccount({
+      AccountSchema: zodSchemaToCoSchema(
+        co.account({
+          service: co.service({ service: z.string().optional() }),
+          profile: co.profile(),
+          root: co.map({}),
+        }),
+      ),
+    });
+    console.log(serviceReceiver.service);
 
     await linkAccounts(account, serviceReceiver);
 

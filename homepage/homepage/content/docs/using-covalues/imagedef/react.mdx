@@ -31,7 +31,6 @@ const MyProfile = co.profile({
 const MyAccount = co.account({
   root: co.map({}),
   profile: MyProfile,
-  service: co.service()
 });
 
 MyAccount.withMigration((account, creationProps) => {

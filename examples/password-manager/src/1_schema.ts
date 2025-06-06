@@ -28,7 +28,6 @@ export const PasswordManagerAccount = co
   .account({
     profile: co.profile(),
     root: PasswordManagerAccountRoot,
-    service: co.service(),
   })
   .withMigration(async (account) => {
     if (!account.root) {

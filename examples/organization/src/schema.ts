@@ -38,7 +38,6 @@ export const JazzAccount = co
   .account({
     profile: co.profile(),
     root: JazzAccountRoot,
-    service: co.service(),
   })
   .withMigration(async (account) => {
     if (account.profile === undefined) {

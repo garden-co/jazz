@@ -12,6 +12,12 @@ const Message = co.map({
   text: z.string(),
 });
 
+const GenericWorkerAccount = co.account({
+  service: co.service({}),
+  profile: co.profile(),
+  root: co.map({}),
+});
+
 describe("Service", () => {
   describe("Private service property", () => {
     it("Should throw if the service owner's service property is private", async () => {
@@ -48,7 +54,9 @@ describe("Service", () => {
 
   it("should create service and allow message exchange between accounts", async () => {
     const { clientAccount: sender, serverAccount: receiver } =
-      await setupTwoNodes();
+      await setupTwoNodes({
+        ServerAccountSchema: zodSchemaToCoSchema(GenericWorkerAccount),
+      });
 
     const receiverService = await Service.load(receiver);
 
@@ -89,7 +97,9 @@ describe("Service", () => {
 
   it("should work with empty CoMaps", async () => {
     const { clientAccount: sender, serverAccount: receiver } =
-      await setupTwoNodes();
+      await setupTwoNodes({
+        ServerAccountSchema: zodSchemaToCoSchema(GenericWorkerAccount),
+      });
 
     const EmptyMessage = co.map({});
 
@@ -132,7 +142,9 @@ describe("Service", () => {
 
   it("should return the result of the message", async () => {
     const { clientAccount: sender, serverAccount: receiver } =
-      await setupTwoNodes();
+      await setupTwoNodes({
+        ServerAccountSchema: zodSchemaToCoSchema(GenericWorkerAccount),
+      });
 
     const receiverService = await Service.load(receiver);
 
@@ -166,7 +178,9 @@ describe("Service", () => {
 
   it("should return the undefined if the subscription returns undefined", async () => {
     const { clientAccount: sender, serverAccount: receiver } =
-      await setupTwoNodes();
+      await setupTwoNodes({
+        ServerAccountSchema: zodSchemaToCoSchema(GenericWorkerAccount),
+      });
 
     const receiverService = await Service.load(receiver);
 
@@ -197,7 +211,9 @@ describe("Service", () => {
 
   it("should reject if the subscription throws an error", async () => {
     const { clientAccount: sender, serverAccount: receiver } =
-      await setupTwoNodes();
+      await setupTwoNodes({
+        ServerAccountSchema: zodSchemaToCoSchema(GenericWorkerAccount),
+      });
 
     const receiverService = await Service.load(receiver);
 
@@ -237,7 +253,9 @@ describe("Service", () => {
 
   it("should mark messages as processed", async () => {
     const { clientAccount: sender, serverAccount: receiver } =
-      await setupTwoNodes();
+      await setupTwoNodes({
+        ServerAccountSchema: zodSchemaToCoSchema(GenericWorkerAccount),
+      });
 
     const receiverService = await Service.load(receiver);
 
@@ -277,7 +295,9 @@ describe("Service", () => {
 
   it("should unsubscribe correctly", async () => {
     const { clientAccount: sender, serverAccount: receiver } =
-      await setupTwoNodes();
+      await setupTwoNodes({
+        ServerAccountSchema: zodSchemaToCoSchema(GenericWorkerAccount),
+      });
 
     const receiverService = await Service.load(receiver);
 
@@ -316,7 +336,9 @@ describe("Service", () => {
 
   it("should retry failed messages", async () => {
     const { clientAccount: sender, serverAccount: receiver } =
-      await setupTwoNodes();
+      await setupTwoNodes({
+        ServerAccountSchema: zodSchemaToCoSchema(GenericWorkerAccount),
+      });
 
     const receiverService = await Service.load(receiver);
 
@@ -361,7 +383,9 @@ describe("Service", () => {
 
   it("should not break the subscription if the message is unavailable", async () => {
     const { clientAccount: sender, serverAccount: receiver } =
-      await setupTwoNodes();
+      await setupTwoNodes({
+        ServerAccountSchema: zodSchemaToCoSchema(GenericWorkerAccount),
+      });
 
     const receiverService = await Service.load(receiver);
 
