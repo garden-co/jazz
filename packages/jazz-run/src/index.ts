@@ -4,6 +4,7 @@ import { Command, Options } from "@effect/cli";
 import { NodeContext, NodeRuntime } from "@effect/platform-node";
 import { Console, Effect } from "effect";
 import { createWorkerAccount } from "./createWorkerAccount.js";
+import { createWorkerGroup } from "./greateWorkerGroup.js";
 import { startSyncServer } from "./startSyncServer.js";
 
 const jazzTools = Command.make("jazz-tools");
@@ -37,6 +38,46 @@ JAZZ_WORKER_SECRET=${agentSecret}
 
 const accountCommand = Command.make("account").pipe(
   Command.withSubcommands([createAccountCommand]),
+);
+
+const ownerOption = Options.text("owner").pipe(
+  Options.withAlias("o"),
+  Options.withDescription("The owner of the group"),
+  Options.withDefault(process.env.JAZZ_WORKER_ACCOUNT),
+);
+
+const ownerSecretOption = Options.text("secret").pipe(
+  Options.withAlias("s"),
+  Options.withDescription("The secret of the owner"),
+  Options.withDefault(process.env.JAZZ_WORKER_SECRET),
+);
+
+const createGroupCommand = Command.make(
+  "create",
+  {
+    owner: ownerOption,
+    ownerSecret: ownerSecretOption,
+    peer: peerOption,
+  },
+  ({ owner, ownerSecret, peer }) => {
+    return Effect.gen(function* () {
+      if (!owner) {
+        throw new Error("Owner is required");
+      }
+      if (!ownerSecret) {
+        throw new Error("Owner secret is required");
+      }
+      const { groupID } = yield* Effect.promise(() =>
+        createWorkerGroup({ owner, ownerSecret, peer }),
+      );
+      yield* Console.log(`# Worker group with owner "${owner}":
+JAZZ_WORKER_GROUP=${groupID}`);
+    });
+  },
+);
+
+const groupCommand = Command.make("group").pipe(
+  Command.withSubcommands([createGroupCommand]),
 );
 
 const portOption = Options.text("port")
@@ -78,12 +119,16 @@ const startSyncServerCommand = Command.make(
 );
 
 const command = jazzTools.pipe(
-  Command.withSubcommands([accountCommand, startSyncServerCommand]),
+  Command.withSubcommands([
+    accountCommand,
+    groupCommand,
+    startSyncServerCommand,
+  ]),
 );
 
 const cli = Command.run(command, {
   name: "Jazz CLI Tools",
-  version: "v0.8.11",
+  version: "v" + process.env.npm_package_version,
 });
 
 Effect.suspend(() => cli(process.argv)).pipe(
