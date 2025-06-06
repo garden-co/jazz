@@ -1,3 +1,5 @@
+"use client";
+
 import CreateJazzApp from "@/components/home/CreateJazzApp.mdx";
 import { marketingCopy } from "@/content/marketingCopy";
 import { H1 } from "@garden-co/design-system/src/components/atoms/Headings";
@@ -9,6 +11,7 @@ import { Kicker } from "@garden-co/design-system/src/components/atoms/Kicker";
 import { CopyButton } from "@garden-co/design-system/src/components/molecules/CodeGroup";
 import { Prose } from "@garden-co/design-system/src/components/molecules/Prose";
 import { SectionHeader } from "@garden-co/design-system/src/components/molecules/SectionHeader";
+import { track } from "@vercel/analytics";
 import Link from "next/link";
 
 const features: Array<{
@@ -107,6 +110,7 @@ export function HeroSection() {
                 code="npx create-jazz-app@latest"
                 size="md"
                 className="mt-0.5 mr-0.5"
+                onCopy={() => track("create-jazz-app command copied from hero")}
               />
             </div>
             <div className="p-3">

@@ -8,7 +8,13 @@ export function CopyButton({
   code,
   size,
   className,
-}: { code: string; size: "md" | "lg"; className?: string }) {
+  onCopy,
+}: {
+  code: string;
+  size: "md" | "lg";
+  className?: string;
+  onCopy?: () => void;
+}) {
   const [copyCount, setCopyCount] = useState(0);
   const copied = copyCount > 0;
 
@@ -38,6 +44,7 @@ export function CopyButton({
         window.navigator.clipboard.writeText(code).then(() => {
           setCopyCount((count) => count + 1);
         });
+        onCopy?.();
       }}
     >
       <span
