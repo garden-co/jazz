@@ -2,7 +2,7 @@ import {
   useAccount,
   experimental_useServiceSender as useServiceSender,
 } from "jazz-react";
-import { Account, CoMap, Group, ID, Service, coField } from "jazz-tools";
+import { Account, CoMap, Group, ID, Service, co, coField } from "jazz-tools";
 import { useEffect, useRef, useState } from "react";
 import { createCredentiallessIframe } from "../lib/createCredentiallessIframe";
 
@@ -27,6 +27,9 @@ export function ServicePage() {
     let unmounted = false;
 
     async function load() {
+      if (!me.service?.service) {
+        me.service = co.service().create({}, me);
+      }
       const service = await Service.load(me);
 
       if (unmounted) return;
