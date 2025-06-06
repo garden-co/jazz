@@ -1,12 +1,29 @@
 import { clsx } from "clsx";
 import Link from "next/link";
 import { forwardRef } from "react";
+import {
+  colorClasses,
+  colorToBgHoverMap10,
+  colorToBgHoverMap30,
+  colorToBgMap,
+  sizeClasses,
+  variantToBgMap,
+  variantToBgTransparentHoverMap,
+  variantToBorderMap,
+  variantToColorMap,
+  variantToTextHoverMap,
+  variantToTextMap,
+} from "../../utils/tailwindClassesMap";
+import { Variant } from "../../utils/variants";
 import { Icon } from "./Icon";
 import type { IconName } from "./Icon";
 import { Spinner } from "./Spinner";
 
 interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
-  variant?: "primary" | "secondary" | "tertiary" | "destructive" | "plain";
+  variant?: Variant;
+  color?: "light" | "dark" | "white" | "black" | "default";
+  styleVariant?: "outline" | "inverted" | "ghost" | "text" | "default";
+  state?: "hover" | "active" | "focus" | "disabled";
   size?: "sm" | "md" | "lg";
   href?: string;
   newTab?: boolean;
@@ -23,11 +40,11 @@ function ButtonIcon({ icon, loading }: ButtonProps) {
 
   const className = "size-5";
 
-  if (loading) return <Spinner className={className} />;
-
-  if (icon) {
-    return <Icon name={icon} className={className} />;
-  }
+  return loading ? (
+    <Spinner className={className} />
+  ) : icon ? (
+    <Icon name={icon} className={className} />
+  ) : null;
 }
 
 export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
@@ -37,6 +54,8 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
       children,
       size = "md",
       variant = "primary",
+      color,
+      styleVariant,
       href,
       disabled,
       newTab,
@@ -48,33 +67,28 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
     },
     ref,
   ) => {
-    const sizeClasses = {
-      sm: "text-sm py-1 px-2",
-      md: "py-1.5 px-3",
-      lg: "md:text-lg  py-2 px-3 md:px-8 md:py-3",
+    const styleClass =
+      styleClasses(variant)[styleVariant as keyof typeof styleClasses] || "";
+
+    const getClasses = ({
+      styleVariant,
+    }: { styleVariant: string | undefined }) => {
+      return {
+        [sizeClasses[size as keyof typeof sizeClasses]]: size,
+        [variantClass(variant)]: !styleVariant && !color,
+        [colorClasses[color as keyof typeof colorClasses]]:
+          color && !styleVariant,
+        [styleClass]: styleVariant,
+      };
     };
 
-    const variantClasses = {
-      primary:
-        "bg-primary border border-primary text-white font-medium hover:bg-highlight hover:border-primary hover:text-primary dark:hover:bg-highlight dark:hover:text-primary",
-      secondary:
-        "text-stone-900 border font-medium hover:border-primary hover:text-primary hover:bg-highlight hover:dark:border-primary dark:text-white dark:hover:text-primary",
-      tertiary: "text-primary underline underline-offset-4",
-      destructive:
-        "bg-red-600 border-red-600 text-white font-medium hover:bg-red-700 hover:border-red-700",
-    };
-
-    const classNames =
-      variant === "plain"
-        ? className
-        : clsx(
-            className,
-            "inline-flex items-center justify-center gap-2 rounded-lg text-center transition-colors",
-            "disabled:pointer-events-none disabled:opacity-70",
-            sizeClasses[size],
-            variantClasses[variant],
-            disabled && "opacity-50 cursor-not-allowed pointer-events-none",
-          );
+    const classNames = clsx(
+      className,
+      "inline-flex items-center justify-center gap-2 rounded-full text-center transition-colors",
+      getClasses({ styleVariant }),
+      "disabled:pointer-events-none disabled:opacity-70",
+      disabled && "opacity-50 cursor-not-allowed pointer-events-none",
+    );
 
     if (href) {
       return (
@@ -86,7 +100,9 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
           <ButtonIcon icon={icon} loading={loading} />
           {children}
           {newTab ? (
-            <span className="inline-block text-muted relative -top-0.5 -left-2 -mr-2">
+            <span
+              className={`inline-block relative -top-0.5 -left-2 -mr-2 ${variantToTextMap[variant as keyof typeof variantToTextMap]}`}
+            >
               ⌝
             </span>
           ) : (
@@ -111,3 +127,15 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
     );
   },
 );
+
+const variantClass = (variant: keyof typeof variantToBgMap) =>
+  `${variantToBgMap[variant]} ${variantToBgTransparentHoverMap[variant]} text-white`;
+
+const styleClasses = (variant: keyof typeof variantToBgMap) => {
+  return {
+    outline: `border ${variantToBorderMap[variant]} bg-transparent hover:bg-transparent my-[0.06rem] hover:m-0 ${variantToTextMap[variant]} hover:border-2 dark:border-${variant}`,
+    inverted: `${variantToTextMap[variant]} ${colorToBgHoverMap30[variantToColorMap[variant] as keyof typeof colorToBgHoverMap30]} ${colorToBgMap[variantToColorMap[variant] as keyof typeof colorToBgMap]}`,
+    ghost: `bg-transparent ${variantToTextMap[variant]} ${colorToBgHoverMap10[variantToColorMap[variant] as keyof typeof colorToBgHoverMap10]}`,
+    text: `bg-transparent ${variantToTextMap[variant]} underline underline-offset-2 hover:bg-transparent ${variantToTextHoverMap[variant]}`,
+  };
+};

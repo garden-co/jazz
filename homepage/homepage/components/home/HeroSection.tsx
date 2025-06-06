@@ -83,7 +83,7 @@ export function HeroSection() {
               key={title}
               className="flex text-xs sm:text-sm gap-2 items-center"
             >
-              <span className="text-primary p-1.5 rounded-lg bg-highlight dark:bg-stone-900">
+              <span className="text-white p-1.5 rounded-lg bg-highlight dark:bg-stone-900">
                 <Icon size="xs" name={icon} />
               </span>
               <p>{title}</p>

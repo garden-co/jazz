@@ -31,10 +31,10 @@ export function FrameworkSelect() {
       <DropdownButton
         className="w-full justify-between"
         as={Button}
-        variant="secondary"
+        styleVariant="inverted"
       >
         {frameworkNames[selectedFramework].label}
-        <Icon name="chevronDown" size="sm" className="text-muted" />
+        <Icon name="chevronDown" size="sm" />
       </DropdownButton>
       <DropdownMenu className="w-[--button-width] z-50" anchor="bottom start">
         {Object.entries(frameworkNames).map(([key, framework]) => (
