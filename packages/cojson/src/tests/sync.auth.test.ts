@@ -34,27 +34,39 @@ describe("LocalNode auth sync", () => {
     await account.core.waitForSync();
 
     const profileID = account.get("profile")!;
+    const inboxID = account.get("inbox")!;
 
     const profileCoreOnSyncServer = jazzCloud.node.getCoValue(profileID);
+    const inboxCoreOnSyncServer = jazzCloud.node.getCoValue(inboxID);
+    await profileCoreOnSyncServer.waitForAvailable();
+    await inboxCoreOnSyncServer.waitForAvailable();
 
     expect(profileCoreOnSyncServer.isAvailable()).toBe(true);
+    expect(inboxCoreOnSyncServer.isAvailable()).toBe(true);
 
     assert(profileCoreOnSyncServer.isAvailable());
+    assert(inboxCoreOnSyncServer.isAvailable());
 
     expect(
       SyncMessagesLog.getMessages({
         Account: account.core,
         Profile: profileCoreOnSyncServer,
         ProfileGroup: profileCoreOnSyncServer.getGroup().core,
+        Inbox: inboxCoreOnSyncServer,
+        InboxGroup: inboxCoreOnSyncServer.getGroup().core,
       }),
     ).toMatchInlineSnapshot(`
       [
-        "client -> server | CONTENT Account header: true new: After: 0 New: 4",
-        "server -> client | KNOWN Account sessions: header/4",
+        "client -> server | CONTENT Account header: true new: After: 0 New: 5",
+        "server -> client | KNOWN Account sessions: header/5",
         "client -> server | CONTENT ProfileGroup header: true new: After: 0 New: 5",
         "server -> client | KNOWN ProfileGroup sessions: header/5",
+        "client -> server | CONTENT InboxGroup header: true new: After: 0 New: 5",
+        "server -> client | KNOWN InboxGroup sessions: header/5",
         "client -> server | CONTENT Profile header: true new: After: 0 New: 1",
         "server -> client | KNOWN Profile sessions: header/1",
+        "client -> server | CONTENT Inbox header: true new: ",
+        "server -> client | KNOWN Inbox sessions: header/0",
       ]
     `);
   });
@@ -230,8 +242,10 @@ describe("LocalNode auth sync", () => {
 
     const account = node.expectCurrentAccount("after login");
     const profile = creationNode.getCoValue(account.get("profile")!);
+    const inbox = creationNode.getCoValue(account.get("inbox")!);
 
     assert(profile.isAvailable());
+    assert(inbox.isAvailable());
 
     expect(account.id).toBe(accountID);
     expect(node.agentSecret).toBe(accountSecret);
@@ -241,18 +255,34 @@ describe("LocalNode auth sync", () => {
         Account: account.core,
         Profile: profile,
         ProfileGroup: profile.getGroup().core,
+        Inbox: inbox,
+        InboxGroup: inbox.getGroup().core,
       }),
     ).toMatchInlineSnapshot(`
       [
-        "creation-node -> server | CONTENT Account header: true new: After: 0 New: 4",
+        "creation-node -> server | CONTENT Account header: true new: After: 0 New: 5",
         "auth-node -> server | LOAD Account sessions: empty",
-        "server -> creation-node | KNOWN Account sessions: header/4",
-        "server -> auth-node | CONTENT Account header: true new: After: 0 New: 4",
-        "auth-node -> server | KNOWN Account sessions: header/4",
+        "server -> creation-node | KNOWN Account sessions: header/5",
+        "creation-node -> server | CONTENT ProfileGroup header: true new: After: 0 New: 5",
+        "server -> auth-node | CONTENT Account header: true new: After: 0 New: 5",
+        "server -> creation-node | KNOWN ProfileGroup sessions: header/5",
+        "creation-node -> server | CONTENT InboxGroup header: true new: After: 0 New: 5",
+        "auth-node -> server | KNOWN Account sessions: header/5",
+        "server -> creation-node | KNOWN InboxGroup sessions: header/5",
+        "creation-node -> server | CONTENT Profile header: true new: After: 0 New: 1",
+        "server -> creation-node | KNOWN Profile sessions: header/1",
+        "creation-node -> server | CONTENT Inbox header: true new: ",
+        "server -> creation-node | KNOWN Inbox sessions: header/0",
         "auth-node -> server | LOAD Profile sessions: empty",
-        "server -> auth-node | KNOWN Profile sessions: empty",
-        "auth-node -> server | LOAD Profile sessions: empty",
-        "server -> auth-node | KNOWN Profile sessions: empty",
+        "server -> auth-node | CONTENT ProfileGroup header: true new: After: 0 New: 5",
+        "auth-node -> server | KNOWN ProfileGroup sessions: header/5",
+        "server -> auth-node | CONTENT Profile header: true new: After: 0 New: 1",
+        "auth-node -> server | KNOWN Profile sessions: header/1",
+        "auth-node -> server | LOAD Inbox sessions: empty",
+        "server -> auth-node | CONTENT InboxGroup header: true new: After: 0 New: 5",
+        "auth-node -> server | KNOWN InboxGroup sessions: header/5",
+        "server -> auth-node | CONTENT Inbox header: true new: ",
+        "auth-node -> server | KNOWN Inbox sessions: header/0",
       ]
     `);
   });
