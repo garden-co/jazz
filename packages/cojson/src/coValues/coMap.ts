@@ -387,15 +387,6 @@ export class RawCoMap<
       throw new Error("Cannot set value on a time travel entity");
     }
 
-    if (key === "inbox") {
-      console.log(
-        "rawcomap set inbox",
-        value,
-        privacy,
-        this.core.verified.header,
-      );
-    }
-
     this.core.makeTransaction(
       [
         {

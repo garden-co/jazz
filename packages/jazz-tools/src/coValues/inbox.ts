@@ -151,7 +151,6 @@ export class Inbox {
         CoStreamItem<CoID<InboxMessage<InstanceOfSchema<M>, O>>>[],
       ][]) {
         const accountID = getAccountIDfromSessionID(sessionID);
-        console.log("going to process messages from account", accountID);
 
         if (!accountID) {
           console.warn("Received message from unknown account", sessionID);
@@ -169,7 +168,6 @@ export class Inbox {
             node
               .load(id)
               .then((message) => {
-                console.log("going to process message", message);
                 if (message === "unavailable") {
                   return Promise.reject(
                     new Error("Unable to load inbox message " + id),
@@ -202,7 +200,6 @@ export class Inbox {
                   inboxMessage.set("result", result.id);
                 }
 
-                console.log("going to set message as processed");
                 inboxMessage.set("processed", true);
 
                 this.processed.push(txKey);
@@ -308,23 +305,15 @@ export class InboxSender<I extends CoValue, O extends CoValue | undefined> {
   ): Promise<O extends CoValue ? ID<O> : undefined> {
     const inboxMessage = await createInboxMessage<I, O>(message, this.owner);
 
-    console.log("pushing message");
     this.messages.push(inboxMessage.id);
-    console.log("message pushed");
 
     return new Promise((resolve, reject) => {
       inboxMessage.subscribe((message) => {
-        console.log("message received", message);
-        console.log("message processed", message.get("processed"));
-        console.log("message error", message.get("error"));
-        console.log("message result", message.get("result"));
         if (message.get("processed")) {
           const error = message.get("error");
           if (error) {
-            console.log("rejecting message due to error", error);
             reject(new Error(error));
           } else {
-            console.log("resolving message");
             resolve(
               message.get("result") as O extends CoValue ? ID<O> : undefined,
             );
@@ -350,12 +339,6 @@ export class InboxSender<I extends CoValue, O extends CoValue | undefined> {
       throw new Error("Failed to load the inbox owner");
     }
 
-    console.log("inboxOwnerRaw.id", inboxOwnerRaw.id);
-    console.log("inboxOwnerRaw.keys", inboxOwnerRaw.keys());
-    console.log(
-      "inboxOwnerRaw.roleOf(currentAccount._raw.id)",
-      inboxOwnerRaw.roleOf(currentAccount._raw.id),
-    );
     const inboxOwnerInbox = await node.load(inboxOwnerRaw.get("inbox")!);
 
     if (inboxOwnerInbox === "unavailable") {
@@ -376,10 +359,6 @@ export class InboxSender<I extends CoValue, O extends CoValue | undefined> {
       | CoID<InboxRoot>
       | undefined;
 
-    console.log("inboxOwnerInbox.keys", inboxOwnerInbox.keys());
-    console.log("inboxOwnerInbox.core.verified", inboxOwnerInbox.core.verified);
-    console.log("inboxOwnerInbox inbox property", inboxRootId);
-
     if (!inboxRootId) {
       throw new Error("Inbox owner does not have their inbox setup");
     }
@@ -390,9 +369,6 @@ export class InboxSender<I extends CoValue, O extends CoValue | undefined> {
       throw new Error("Failed to load the inbox root");
     }
 
-    console.log("inboxRoot.keys", inboxRoot.keys());
-    console.log("inboxRoot.core.verified", inboxRoot.core.verified);
-    console.log("sender loading messages ID", inboxRoot.get("messages"));
     const messages = await node.load(inboxRoot.get("messages")!);
 
     if (messages === "unavailable") {

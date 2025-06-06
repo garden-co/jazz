@@ -381,10 +381,8 @@ export class Account extends CoValueBase implements CoValue {
     if (this.inbox?.inbox === undefined) {
       const inboxGroup = RegisteredSchemas["Group"].create({ owner: this });
       const inboxRoot = createInboxRoot(this);
-      console.log("creating inbox in migration");
       this.inbox = AccountInbox.create({ inbox: inboxRoot.id }, inboxGroup);
       inboxGroup.addMember("everyone", "reader"); // Allows others to see our account's inbox property, which contains the ID of our inbox (ie, allows others to see our inbox's ID)
-      console.log("created inbox in migration", this.inbox);
     } else if (this.inbox) {
       if (this.inbox._owner._type !== "Group") {
         throw new Error("Inbox must be owned by a Group", {
@@ -397,9 +395,7 @@ export class Account extends CoValueBase implements CoValue {
     if (this.profile === undefined && creationProps) {
       const profileGroup = RegisteredSchemas["Group"].create({ owner: this });
 
-      console.log("creating profile in migration");
       this.profile = Profile.create({ name: creationProps.name }, profileGroup);
-      console.log("created profile in migration", this.profile);
       profileGroup.addMember("everyone", "reader");
     } else if (this.profile && creationProps) {
       if (this.profile._owner._type !== "Group") {
@@ -507,7 +503,6 @@ export const AccountAndGroupProxyHandler: ProxyHandler<Account | Group> = {
   get(target, key, receiver) {
     if (key === "profile" || key === "root" || key === "inbox") {
       const id = target._raw.get(key);
-      console.log(`get ${key}`, id);
 
       if (id) {
         return accessChildByKey(target, id, key);
@@ -519,7 +514,6 @@ export const AccountAndGroupProxyHandler: ProxyHandler<Account | Group> = {
     }
   },
   set(target, key, value, receiver) {
-    console.log(`set ${key.toString()}`, value?.id, target.myRole());
     if (
       (key === "profile" || key === "root" || key === "inbox") &&
       typeof value === "object" &&
@@ -566,7 +560,6 @@ export const AccountAndGroupProxyHandler: ProxyHandler<Account | Group> = {
       typeof descriptor.value === "object" &&
       SchemaInit in descriptor.value
     ) {
-      console.log(`define property ${key}`, descriptor.value);
       (target.constructor as typeof CoMap)._schema ||= {};
       (target.constructor as typeof CoMap)._schema[key] =
         descriptor.value[SchemaInit];
