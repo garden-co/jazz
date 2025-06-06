@@ -150,8 +150,10 @@ describe("LocalNode auth sync", () => {
 
     const account = node.expectCurrentAccount("after login");
     const profile = node.getCoValue(account.get("profile")!);
+    const inbox = node.getCoValue(account.get("inbox")!);
 
     assert(profile.isAvailable());
+    assert(inbox.isAvailable());
 
     expect(account.id).toBe(accountID);
     expect(node.agentSecret).toBe(accountSecret);
@@ -161,23 +163,34 @@ describe("LocalNode auth sync", () => {
         Account: account.core,
         Profile: profile,
         ProfileGroup: profile.getGroup().core,
+        Inbox: inbox,
+        InboxGroup: inbox.getGroup().core,
       }),
     ).toMatchInlineSnapshot(`
       [
-        "creation-node -> server | CONTENT Account header: true new: After: 0 New: 4",
+        "creation-node -> server | CONTENT Account header: true new: After: 0 New: 5",
         "auth-node -> server | LOAD Account sessions: empty",
-        "server -> creation-node | KNOWN Account sessions: header/4",
+        "server -> creation-node | KNOWN Account sessions: header/5",
         "creation-node -> server | CONTENT ProfileGroup header: true new: After: 0 New: 5",
-        "server -> auth-node | CONTENT Account header: true new: After: 0 New: 4",
+        "server -> auth-node | CONTENT Account header: true new: After: 0 New: 5",
         "server -> creation-node | KNOWN ProfileGroup sessions: header/5",
+        "creation-node -> server | CONTENT InboxGroup header: true new: After: 0 New: 5",
+        "auth-node -> server | KNOWN Account sessions: header/5",
+        "server -> creation-node | KNOWN InboxGroup sessions: header/5",
         "creation-node -> server | CONTENT Profile header: true new: After: 0 New: 1",
-        "auth-node -> server | KNOWN Account sessions: header/4",
         "server -> creation-node | KNOWN Profile sessions: header/1",
+        "creation-node -> server | CONTENT Inbox header: true new: ",
+        "server -> creation-node | KNOWN Inbox sessions: header/0",
         "auth-node -> server | LOAD Profile sessions: empty",
         "server -> auth-node | CONTENT ProfileGroup header: true new: After: 0 New: 5",
         "auth-node -> server | KNOWN ProfileGroup sessions: header/5",
         "server -> auth-node | CONTENT Profile header: true new: After: 0 New: 1",
         "auth-node -> server | KNOWN Profile sessions: header/1",
+        "auth-node -> server | LOAD Inbox sessions: empty",
+        "server -> auth-node | CONTENT InboxGroup header: true new: After: 0 New: 5",
+        "auth-node -> server | KNOWN InboxGroup sessions: header/5",
+        "server -> auth-node | CONTENT Inbox header: true new: ",
+        "auth-node -> server | KNOWN Inbox sessions: header/0",
       ]
     `);
   });

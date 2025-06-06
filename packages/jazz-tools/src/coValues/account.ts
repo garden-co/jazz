@@ -404,6 +404,11 @@ export class Account extends CoValueBase implements CoValue {
         });
       }
     }
+
+    const node = this._raw.core.node;
+    node
+      .expectCoValueLoaded(this._raw.get("profile")!)
+      .getCurrentContent() as RawCoMap;
   }
 
   // Placeholder method for subclasses to override

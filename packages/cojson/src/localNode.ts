@@ -595,6 +595,21 @@ export class LocalNode {
   }
 
   /** @internal */
+  expectInboxLoaded(id: RawAccountID, expectation?: string): RawInbox {
+    const account = this.expectCoValueLoaded(id, expectation);
+    const inboxID = expectGroup(account.getCurrentContent()).get("inbox");
+    if (!inboxID) {
+      throw new Error(
+        `${expectation ? expectation + ": " : ""}Account ${id} has no inbox`,
+      );
+    }
+    return this.expectCoValueLoaded(
+      inboxID,
+      expectation,
+    ).getCurrentContent() as RawInbox;
+  }
+
+  /** @internal */
   resolveAccountAgent(
     id: RawAccountID | AgentID,
     expectation?: string,

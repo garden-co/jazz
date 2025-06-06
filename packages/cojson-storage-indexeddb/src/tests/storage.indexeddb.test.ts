@@ -602,6 +602,8 @@ test("should sync and load accounts from storage", async () => {
   const account1 = node1.getCoValue(accountID);
   const profile = node1.expectProfileLoaded(accountID);
   const profileGroup = profile.group;
+  const inbox = node1.expectInboxLoaded(accountID);
+  const inboxGroup = inbox.group;
 
   await new Promise((resolve) => setTimeout(resolve, 200));
 
@@ -611,17 +613,23 @@ test("should sync and load accounts from storage", async () => {
         Account: account1,
         Profile: profile.core,
         ProfileGroup: profileGroup.core,
+        Inbox: inbox.core,
+        InboxGroup: inboxGroup.core,
       },
       syncMessages.messages,
     ),
   ).toMatchInlineSnapshot(`
     [
-      "client -> CONTENT Account header: true new: After: 0 New: 4",
-      "storage -> KNOWN Account sessions: header/4",
+      "client -> CONTENT Account header: true new: After: 0 New: 5",
+      "storage -> KNOWN Account sessions: header/5",
       "client -> CONTENT ProfileGroup header: true new: After: 0 New: 5",
       "storage -> KNOWN ProfileGroup sessions: header/5",
+      "client -> CONTENT InboxGroup header: true new: After: 0 New: 5",
+      "storage -> KNOWN InboxGroup sessions: header/5",
       "client -> CONTENT Profile header: true new: After: 0 New: 1",
       "storage -> KNOWN Profile sessions: header/1",
+      "client -> CONTENT Inbox header: true new: ",
+      "storage -> KNOWN Inbox sessions: header/0",
     ]
   `);
 
@@ -645,19 +653,26 @@ test("should sync and load accounts from storage", async () => {
         Account: account1,
         Profile: profile.core,
         ProfileGroup: profileGroup.core,
+        Inbox: inbox.core,
+        InboxGroup: inboxGroup.core,
       },
       syncMessages.messages,
     ),
   ).toMatchInlineSnapshot(`
     [
       "client -> LOAD Account sessions: empty",
-      "storage -> CONTENT Account header: true new: After: 0 New: 4",
-      "client -> KNOWN Account sessions: header/4",
+      "storage -> CONTENT Account header: true new: After: 0 New: 5",
+      "client -> KNOWN Account sessions: header/5",
       "client -> LOAD Profile sessions: empty",
       "storage -> CONTENT ProfileGroup header: true new: After: 0 New: 5",
       "storage -> CONTENT Profile header: true new: After: 0 New: 1",
       "client -> KNOWN ProfileGroup sessions: header/5",
       "client -> KNOWN Profile sessions: header/1",
+      "client -> LOAD Inbox sessions: empty",
+      "storage -> CONTENT InboxGroup header: true new: After: 0 New: 5",
+      "storage -> CONTENT Inbox header: true new: ",
+      "client -> KNOWN InboxGroup sessions: header/5",
+      "client -> KNOWN Inbox sessions: header/0",
     ]
   `);
 
