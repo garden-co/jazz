@@ -41,12 +41,19 @@ appId: tools.jazz.chatrnexpo
 # logout
 - tapOn: "Logout"
 - assertVisible: "Username"
-- assertVisible: "Anonymous user"
+
+- extendedWaitUntil:
+    visible: "Anonymous user"
+    timeout: 10000
+
+- extendedWaitUntil:
+    visible: "Join chat"
+    timeout: 10000
 
 # join chat
-# - tapOn:
-#     id: "chat-id-input"
-# - inputText: "co_zFs6KFyhxPw4xtw83tcEMzeHUNv" # Use a static id because maestro doesn't have access to the system clipboard
-# - tapOn: "Join chat"
-# - assertVisible: "boorad"
-# - assertVisible: "bro, low key, it do be like that tho"
+- tapOn:
+    id: "chat-id-input"
+- inputText: "co_zFs6KFyhxPw4xtw83tcEMzeHUNv" # Use a static id because maestro doesn't have access to the system clipboard
+- tapOn: "Join chat"
+- assertVisible: "boorad"
+- assertVisible: "bro, low key, it do be like that tho"

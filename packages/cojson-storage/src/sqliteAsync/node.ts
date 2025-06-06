@@ -37,6 +37,10 @@ export class SQLiteNodeBaseAsync {
           });
         }
       }
+
+      db.closeDb().catch((e) =>
+        logger.error("Error closing sqlite", { err: e }),
+      );
     };
 
     processMessages().catch((e) =>

@@ -83,4 +83,13 @@ export class ExpoSQLiteAdapter implements SQLiteDatabaseDriverAsync {
     this.db = null;
     await this.initialize();
   }
+
+  public async closeDb(): Promise<void> {
+    if (!this.db) {
+      throw new Error("Database not initialized");
+    }
+
+    await this.db.closeAsync();
+    this.db = null;
+  }
 }

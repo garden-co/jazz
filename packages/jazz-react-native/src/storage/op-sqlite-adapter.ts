@@ -68,4 +68,13 @@ export class OPSQLiteAdapter implements SQLiteDatabaseDriverAsync {
       throw error;
     }
   }
+
+  public async closeDb(): Promise<void> {
+    if (!this.db) {
+      throw new Error("Database not initialized");
+    }
+
+    this.db.close();
+    this.db = null;
+  }
 }

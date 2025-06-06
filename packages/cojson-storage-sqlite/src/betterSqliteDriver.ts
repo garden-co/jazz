@@ -25,4 +25,8 @@ export class BetterSqliteDriver implements SQLiteDatabaseDriver {
   transaction(callback: () => unknown) {
     return this.db.transaction(callback)();
   }
+
+  closeDb() {
+    this.db.close();
+  }
 }

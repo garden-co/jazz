@@ -5,7 +5,7 @@ import {
   AnyAccountSchema,
   CoValueFromRaw,
 } from "jazz-tools";
-import React from "react";
+import React, { useMemo } from "react";
 import { ExpoSecureStoreAdapter } from "./storage/expo-secure-store-adapter.js";
 import { ExpoSQLiteAdapter } from "./storage/expo-sqlite-adapter.js";
 
@@ -14,14 +14,13 @@ export function JazzProvider<
     | (AccountClass<Account> & CoValueFromRaw<Account>)
     | AnyAccountSchema,
 >(props: JazzProviderProps<S>) {
-  // Destructure kvStore and pass everything else via rest
-  const { kvStore, storage, ...rest } = props;
+  const storage = useMemo(() => {
+    return props.storage ?? new ExpoSQLiteAdapter();
+  }, [props.storage]);
 
-  return (
-    <JazzProviderCore
-      {...rest}
-      storage={storage ?? new ExpoSQLiteAdapter()}
-      kvStore={kvStore ?? new ExpoSecureStoreAdapter()}
-    />
-  );
+  const kvStore = useMemo(() => {
+    return props.kvStore ?? new ExpoSecureStoreAdapter();
+  }, [props.kvStore]);
+
+  return <JazzProviderCore {...props} storage={storage} kvStore={kvStore} />;
 }

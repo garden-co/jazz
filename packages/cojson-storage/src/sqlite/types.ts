@@ -3,4 +3,5 @@ export interface SQLiteDatabaseDriver {
   get<T>(sql: string, params: unknown[]): T | undefined;
   query<T>(sql: string, params: unknown[]): T[];
   transaction(callback: () => unknown): void;
+  closeDb(): void;
 }
