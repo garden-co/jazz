@@ -4,6 +4,7 @@ import { Command, Options } from "@effect/cli";
 import { NodeContext, NodeRuntime } from "@effect/platform-node";
 import { Console, Effect } from "effect";
 import { createWorkerAccount } from "./createWorkerAccount.js";
+import { createWorkerGroupWithAdmin } from "./createWorkerGroupWithAdmin.js";
 import { createWorkerGroup } from "./greateWorkerGroup.js";
 import { startSyncServer } from "./startSyncServer.js";
 
@@ -76,8 +77,40 @@ JAZZ_WORKER_GROUP=${groupID}`);
   },
 );
 
+const createGroupWithAdminCommand = Command.make(
+  "create-with-admin",
+  {
+    name: nameOption,
+    peer: peerOption,
+  },
+  ({ name, peer }) => {
+    return Effect.gen(function* () {
+      const {
+        adminAccountID,
+        adminAgentSecret,
+        groupID,
+        accountID,
+        agentSecret,
+      } = yield* Effect.promise(() =>
+        createWorkerGroupWithAdmin({ name, peer }),
+      );
+
+      yield* Console.log(`# Admin account ${name}_admin
+# %%% store this somewhere safe and don't distribute along with group ID & worker account %%%
+JAZZ_ADMIN_ACCOUNT=${adminAccountID}
+JAZZ_ADMIN_SECRET=${adminAgentSecret}
+# -----
+# Worker group ID with owner "${adminAccountID}"
+JAZZ_WORKER_GROUP=${groupID}
+# Worker account ${name}_0 ("writer" in group)
+JAZZ_WORKER_ACCOUNT=${accountID}
+JAZZ_WORKER_SECRET=${agentSecret}`);
+    });
+  },
+);
+
 const groupCommand = Command.make("group").pipe(
-  Command.withSubcommands([createGroupCommand]),
+  Command.withSubcommands([createGroupCommand, createGroupWithAdminCommand]),
 );
 
 const portOption = Options.text("port")

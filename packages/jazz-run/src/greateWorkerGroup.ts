@@ -38,5 +38,6 @@ export const createWorkerGroup = async ({
 
   return {
     groupID: group.id,
+    groupAsOwner: group,
   };
 };
