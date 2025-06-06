@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { ImageDefinition, Loaded } from "jazz-tools";
+import { ImageDefinition, type Loaded } from "jazz-tools";
 import { type Ref, onUnmounted, ref, toRef, watch } from "vue";
 
 interface ImageState {

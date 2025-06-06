@@ -1,6 +1,6 @@
 {
   "name": "jazz-inspector",
-  "version": "0.14.18",
+  "version": "0.14.21",
   "type": "module",
   "main": "./dist/app.js",
   "types": "./dist/app.d.ts",
@@ -28,7 +28,7 @@
   "devDependencies": {
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
-    "@vitejs/plugin-react-swc": "^3.3.2",
+    "@vitejs/plugin-react-swc": "^3.10.1",
     "rollup-plugin-node-externals": "^8.0.0",
     "typescript": "catalog:",
     "vite": "catalog:"

@@ -1,7 +1,7 @@
 {
-  "name": "jazz-tailwind-demo-auth-starter",
+  "name": "jazz-react-tailwind-starter",
   "private": true,
-  "version": "0.0.109",
+  "version": "0.0.112",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -13,24 +13,24 @@
     "format-and-lint:fix": "biome check . --write"
   },
   "dependencies": {
+    "jazz-inspector": "workspace:*",
     "jazz-react": "workspace:*",
     "jazz-tools": "workspace:*",
-    "jazz-inspector": "workspace:*",
     "react": "18.3.1",
     "react-dom": "18.3.1"
   },
   "devDependencies": {
     "@biomejs/biome": "1.9.4",
     "@playwright/test": "^1.50.1",
+    "@tailwindcss/postcss": "^4.1.8",
     "@types/react": "~18.3.12",
     "@types/react-dom": "^18.3.1",
-    "@vitejs/plugin-react": "^4.3.3",
-    "autoprefixer": "^10.4.20",
+    "@vitejs/plugin-react": "^4.5.1",
     "globals": "^15.11.0",
     "is-ci": "^3.0.1",
     "postcss": "^8.4.27",
-    "tailwindcss": "^3.4.17",
+    "tailwindcss": "^4.1.8",
     "typescript": "~5.6.2",
-    "vite": "^6.0.11"
+    "vite": "^6.3.5"
   }
 }

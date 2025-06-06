@@ -1,20 +1,16 @@
-<script lang="ts" module>
-  export type Props = {
-    id: string;
-  };
-</script>
-
 <script lang="ts">
   import { CoState } from '../../../jazz.class.svelte.js';
   import { Person } from './schema.js';
 
-  let props: Props = $props();
+  let props: { id: string } = $props();
 
   const person = new CoState(Person, () => props.id, {
     resolve: {
       dog: true
     }
   })
+
+  const dogName = $derived(person.current!.dog.name);
 </script>
 
 <!-- Using non-null assertions because we want to test that locally available values are never null -->
@@ -33,4 +29,4 @@
 </label>
 
 <div data-testid="person-name">{person.current!.name}</div>
-<div data-testid="person-dog-name">{person.current!.dog.name}</div>
+<div data-testid="person-dog-name">{dogName}</div>

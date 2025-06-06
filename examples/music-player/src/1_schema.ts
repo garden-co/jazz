@@ -41,8 +41,8 @@ export const MusicTrack = co.map({
   /**
    * You can use getters for recusrive relations
    */
-  get sourceTrack(): z.ZodOptional<typeof MusicTrack> {
-    return z.optional(MusicTrack);
+  get sourceTrack() {
+    return MusicTrack.optional();
   },
 });
 export type MusicTrack = co.loaded<typeof MusicTrack>;

@@ -22,4 +22,5 @@ export type RichTextSchema = z.core.$ZodCustom<CoRichText, unknown> & {
     id: string,
     listener: (value: CoRichText, unsubscribe: () => void) => void,
   ): () => void;
+  getCoSchema: () => typeof CoRichText;
 };

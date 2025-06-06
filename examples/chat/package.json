@@ -1,7 +1,7 @@
 {
   "name": "jazz-example-chat",
   "private": true,
-  "version": "0.0.216",
+  "version": "0.0.219",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -27,12 +27,12 @@
     "@playwright/test": "^1.50.1",
     "@types/react": "19.0.0",
     "@types/react-dom": "19.0.0",
-    "@vitejs/plugin-react-swc": "^3.3.2",
+    "@vitejs/plugin-react-swc": "^3.10.1",
     "autoprefixer": "^10.4.20",
     "is-ci": "^3.0.1",
     "postcss": "^8.4.27",
     "tailwindcss": "^3.4.17",
     "typescript": "5.6.2",
-    "vite": "6.0.11"
+    "vite": "6.3.5"
   }
 }

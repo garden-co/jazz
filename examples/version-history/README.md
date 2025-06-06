@@ -1,7 +1,7 @@
 # Jazz Version History Example
 
 A minimal example showing how to use Jazz's built-in version history to show and restore changes.
-Live Version: [https://jazz-version-history.vercel.app/](https://jazz-version-history.vercel.app/)
+Live Version: [https://version-history.demo.jazz.tools/](https://jazz-version-history.demo.jazz.tools/)
 
 ## Getting started
 
@@ -62,4 +62,4 @@ If you have feedback, let us know on [Discord](https://discord.gg/utDMjHYg42) or
 
 By default, the example app uses [Jazz Cloud](https://jazz.tools/cloud) (`wss://cloud.jazz.tools`) - so cross-device use, invites and collaboration should just work.
 
-You can also run a local sync server by running `npx jazz-run sync` and adding the query param `?sync=ws://localhost:4200` to the URL of the example app (for example: `http://localhost:5173/?peer=ws://localhost:4200`), or by setting the `sync` parameter of `JazzProvider` component in [./src/main.tsx](./src/main.tsx).
+You can also run a local sync server by running`npx jazz-run sync`, and setting the `sync` parameter of`JazzProvider` in [./src/main.tsx](./src/main.tsx) to`{ peer: "ws://localhost:4200" }`.

@@ -50,6 +50,8 @@ export class RawCoMapView<
   /** @internal */
   latestTxMadeAt: number;
   /** @internal */
+  earliestTxMadeAt: number | null;
+  /** @internal */
   ops: {
     [Key in keyof Shape & string]?: MapOp<Key, Shape[Key]>[];
   };
@@ -75,6 +77,7 @@ export class RawCoMapView<
     this.id = core.id as CoID<this>;
     this.core = core;
     this.latestTxMadeAt = 0;
+    this.earliestTxMadeAt = null;
     this.ignorePrivateTransactions =
       options?.ignorePrivateTransactions ?? false;
     this.ops = {};
@@ -98,6 +101,10 @@ export class RawCoMapView<
       return;
     }
 
+    if (this.earliestTxMadeAt === null && newValidTransactions[0]) {
+      this.earliestTxMadeAt = newValidTransactions[0].madeAt;
+    }
+
     const { ops } = this;
 
     const changedEntries = new Map<
@@ -106,6 +113,10 @@ export class RawCoMapView<
     >();
 
     for (const { txID, changes, madeAt } of newValidTransactions) {
+      if (madeAt > this.latestTxMadeAt) {
+        this.latestTxMadeAt = madeAt;
+      }
+
       for (let changeIdx = 0; changeIdx < changes.length; changeIdx++) {
         const change = changes[changeIdx] as MapOpPayload<
           keyof Shape & string,
@@ -117,10 +128,6 @@ export class RawCoMapView<
           changeIdx,
           change,
         };
-
-        if (madeAt > this.latestTxMadeAt) {
-          this.latestTxMadeAt = madeAt;
-        }
 
         const entries = ops[change.key];
         if (!entries) {

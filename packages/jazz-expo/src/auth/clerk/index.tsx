@@ -1,5 +1,11 @@
 import { JazzClerkAuth, type MinimalClerkClient } from "jazz-auth-clerk";
-import { KvStoreContext } from "jazz-tools";
+import {
+  Account,
+  AccountClass,
+  AnyAccountSchema,
+  CoValueFromRaw,
+  KvStoreContext,
+} from "jazz-tools";
 import { useEffect, useMemo, useState } from "react";
 import {
   ExpoSecureStoreAdapter,
@@ -34,8 +40,12 @@ function RegisterClerkAuth(props: {
   return props.children;
 }
 
-export const JazzProviderWithClerk = (
-  props: { clerk: MinimalClerkClient } & JazzProviderProps,
+export const JazzProviderWithClerk = <
+  S extends
+    | (AccountClass<Account> & CoValueFromRaw<Account>)
+    | AnyAccountSchema,
+>(
+  props: { clerk: MinimalClerkClient } & JazzProviderProps<S>,
 ) => {
   const [isLoaded, setIsLoaded] = useState(false);
 

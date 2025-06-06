@@ -81,7 +81,7 @@ test("Admins can't demote other admins in a group (high level)", () => {
   );
 
   expect(() => groupAsOtherAdmin.addMemberInternal(admin.id, "writer")).toThrow(
-    "Failed to set role",
+    "Administrators cannot demote other administrators in a group",
   );
 
   expect(groupAsOtherAdmin.get(admin.id)).toEqual("admin");
@@ -133,13 +133,13 @@ test("Admins an add writers to a group, who can't add admins, writers, or reader
   const otherAgent = createAccountInNode(groupAsWriter.core.node);
 
   expect(() => groupAsWriter.addMember(otherAgent, "admin")).toThrow(
-    "Failed to set role",
+    "Failed to set role due to insufficient permissions (role of current account is writer)",
   );
   expect(() => groupAsWriter.addMember(otherAgent, "writer")).toThrow(
-    "Failed to set role",
+    "Failed to set role due to insufficient permissions (role of current account is writer)",
   );
   expect(() => groupAsWriter.addMember(otherAgent, "reader")).toThrow(
-    "Failed to set role",
+    "Failed to set role due to insufficient permissions (role of current account is writer)",
   );
 
   expect(groupAsWriter.get(otherAgent.id)).toBeUndefined();
@@ -190,13 +190,13 @@ test("Admins can add readers to a group, who can't add admins, writers, or reade
   const otherAgent = createAccountInNode(groupAsReader.core.node);
 
   expect(() => groupAsReader.addMember(otherAgent, "admin")).toThrow(
-    "Failed to set role",
+    "Failed to set role due to insufficient permissions (role of current account is reader)",
   );
   expect(() => groupAsReader.addMember(otherAgent, "writer")).toThrow(
-    "Failed to set role",
+    "Failed to set role due to insufficient permissions (role of current account is reader)",
   );
   expect(() => groupAsReader.addMember(otherAgent, "reader")).toThrow(
-    "Failed to set role",
+    "Failed to set role due to insufficient permissions (role of current account is reader)",
   );
 
   expect(groupAsReader.get(otherAgent.id)).toBeUndefined();

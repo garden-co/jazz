@@ -1,5 +1,32 @@
 # jazz-nextjs
 
+## 0.1.8
+
+### Patch Changes
+
+- Updated dependencies [e7e505e]
+- Updated dependencies [13b57aa]
+- Updated dependencies [5662faa]
+- Updated dependencies [2116a59]
+  - jazz-tools@0.14.21
+  - jazz-react@0.14.21
+
+## 0.1.7
+
+### Patch Changes
+
+- Updated dependencies [6f72419]
+- Updated dependencies [04b20c2]
+  - jazz-tools@0.14.20
+  - jazz-react@0.14.20
+
+## 0.1.6
+
+### Patch Changes
+
+- jazz-react@0.14.19
+- jazz-tools@0.14.19
+
 ## 0.1.5
 
 ### Patch Changes

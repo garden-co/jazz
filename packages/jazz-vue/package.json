@@ -1,6 +1,6 @@
 {
   "name": "jazz-vue",
-  "version": "0.14.18",
+  "version": "0.14.21",
   "type": "module",
   "main": "dist/index.js",
   "types": "src/index.ts",
@@ -37,6 +37,7 @@
     "dev": "vite build --watch",
     "format-and-lint": "biome check .",
     "format-and-lint:fix": "biome check . --write",
-    "build": "rm -rf ./dist && vite build"
+    "typecheck": "vue-tsc --noEmit",
+    "build": "pnpm typecheck && rm -rf ./dist && vite build"
   }
 }

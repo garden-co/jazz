@@ -1,7 +1,7 @@
 import { CoValueUniqueness } from "cojson";
 import {
   Account,
-  CoMap,
+  type CoMap,
   Group,
   ID,
   RefsToResolve,
@@ -83,6 +83,7 @@ export type CoRecordSchema<
     this: S,
     helpers: (Self: S) => T,
   ): WithHelpers<S, T>;
+  getCoSchema: () => typeof CoMap;
 };
 
 // less precise verion to avoid circularity issues and allow matching against

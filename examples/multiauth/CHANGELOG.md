@@ -1,5 +1,35 @@
 # multiauth
 
+## 0.0.59
+
+### Patch Changes
+
+- Updated dependencies [e7e505e]
+- Updated dependencies [13b57aa]
+- Updated dependencies [5662faa]
+- Updated dependencies [2116a59]
+  - jazz-tools@0.14.21
+  - jazz-react@0.14.21
+  - jazz-react-auth-clerk@0.14.21
+
+## 0.0.58
+
+### Patch Changes
+
+- Updated dependencies [6f72419]
+- Updated dependencies [04b20c2]
+  - jazz-tools@0.14.20
+  - jazz-react@0.14.20
+  - jazz-react-auth-clerk@0.14.20
+
+## 0.0.57
+
+### Patch Changes
+
+- jazz-react@0.14.19
+- jazz-react-auth-clerk@0.14.19
+- jazz-tools@0.14.19
+
 ## 0.0.56
 
 ### Patch Changes

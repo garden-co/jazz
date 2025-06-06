@@ -1,8 +1,0 @@
-{
-  "build": {
-    "env": {
-      "APP_NAME": "richtext"
-    }
-  },
-  "ignoreCommand": "node ../../ignore-vercel-build.js"
-}

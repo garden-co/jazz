@@ -1,6 +1,6 @@
 {
   "name": "jazz-inspector-element",
-  "version": "0.14.18",
+  "version": "0.14.21",
   "type": "module",
   "main": "./dist/main.js",
   "types": "./dist/main.d.ts",
@@ -24,7 +24,7 @@
   "devDependencies": {
     "@types/react": "19.0.0",
     "@types/react-dom": "19.0.0",
-    "@vitejs/plugin-react-swc": "^3.3.2",
+    "@vitejs/plugin-react-swc": "^3.10.1",
     "rollup-plugin-node-externals": "^8.0.0",
     "typescript": "catalog:",
     "vite": "catalog:"

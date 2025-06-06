@@ -35,7 +35,6 @@ import {
   accessChildById,
   accessChildByKey,
   activeAccountContext,
-  anySchemaToCoSchema,
   ensureCoValueLoaded,
   inspect,
   isRefEncoded,
@@ -117,6 +116,20 @@ export class CoMap extends CoValueBase implements CoValue {
     return (this.constructor as typeof CoMap)._schema as {
       [key: string]: Schema;
     } & { [ItemsSym]?: Schema };
+  }
+
+  /**
+   * The timestamp of the creation time of the CoMap
+   */
+  get _createdAt() {
+    return this._raw.earliestTxMadeAt ?? Number.MAX_SAFE_INTEGER;
+  }
+
+  /**
+   * The timestamp of the last updated time of the CoMap
+   */
+  get _lastUpdatedAt() {
+    return this._raw.latestTxMadeAt;
   }
 
   /**

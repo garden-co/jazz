@@ -51,6 +51,8 @@ export type CoListSchema<T extends z.core.$ZodType> = z.core.$ZodArray<T> & {
     this: S,
     helpers: (Self: S) => T,
   ): WithHelpers<S, T>;
+
+  getCoSchema: () => typeof CoList;
 };
 
 // less precise verion to avoid circularity issues and allow matching against

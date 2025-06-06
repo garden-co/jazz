@@ -1,7 +1,7 @@
 {
   "name": "jazz-example-music-player",
   "private": true,
-  "version": "0.0.137",
+  "version": "0.0.140",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -37,11 +37,11 @@
     "@playwright/test": "^1.50.1",
     "@types/react": "19.0.0",
     "@types/react-dom": "19.0.0",
-    "@vitejs/plugin-react-swc": "^3.3.2",
+    "@vitejs/plugin-react-swc": "^3.10.1",
     "autoprefixer": "^10.4.20",
     "postcss": "^8.4.27",
     "tailwindcss": "^3.4.17",
     "typescript": "5.6.2",
-    "vite": "6.0.11"
+    "vite": "6.3.5"
   }
 }

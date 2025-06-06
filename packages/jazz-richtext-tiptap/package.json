@@ -1,6 +1,6 @@
 {
   "name": "jazz-richtext-tiptap",
-  "version": "0.14.18",
+  "version": "0.14.21",
   "description": "Tiptap integration for Jazz rich text editing",
   "main": "dist/index.js",
   "types": "src/index.ts",

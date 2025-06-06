@@ -33,7 +33,7 @@ export type AccountSchema<
     }>;
     root: CoMapSchema<{}>;
   },
-> = Omit<CoMapSchema<Shape>, "create" | "load"> & {
+> = Omit<CoMapSchema<Shape>, "create" | "load" | "withMigration"> & {
   builtin: "Account";
 
   create: (options: {
@@ -64,6 +64,8 @@ export type AccountSchema<
       creationProps?: { name: string },
     ) => void,
   ): AccountSchema<Shape>;
+
+  getCoSchema: () => typeof Account;
 };
 
 export type DefaultProfileShape = {

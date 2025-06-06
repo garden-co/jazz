@@ -52,7 +52,7 @@ const config = {
 };
 
 const highlighterPromise = createHighlighter({
-  langs: ["typescript", "bash", "tsx", "json", "svelte", "vue"],
+  langs: ["typescript", "bash", "tsx", "json", "ruby", "groovy", "svelte", "vue"],
   themes: [jazzLight, jazzDark],
 });
 

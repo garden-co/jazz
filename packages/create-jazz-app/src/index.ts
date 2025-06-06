@@ -16,10 +16,14 @@ import {
   frameworkToAuthExamples,
   frameworks,
 } from "./config.js";
+import { type PackageManager, getPkgManager } from "./utils.js";
+
+// Handle SIGINT (Ctrl+C) gracefully
+process.on("SIGINT", () => {
+  process.exit(0);
+});
 
 const program = new Command();
-
-type PackageManager = "npm" | "yarn" | "pnpm" | "bun" | "deno";
 
 type ScaffoldOptions = {
   template: FrameworkAuthPair | string;
@@ -443,6 +447,8 @@ async function promptUser(
   }
 
   if (!partialOptions.packageManager) {
+    const defaultPackageManager = getPkgManager();
+
     questions.push({
       type: "list",
       name: "packageManager",
@@ -454,7 +460,7 @@ async function promptUser(
         { name: chalk.white("bun"), value: "bun" },
         { name: chalk.white("deno"), value: "deno" },
       ],
-      default: "npm",
+      default: defaultPackageManager,
     });
   }
 

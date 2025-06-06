@@ -2,7 +2,7 @@
 
 This is an example of how to use passkey authentication with Jazz.
 
-Live version: [https://passkey-demo.jazz.tools](https://passkey-demo.jazz.tools)
+Live version: [https://passkey.demo.jazz.tools](https://passkey.demo.jazz.tools)
 
 ## Getting started
 

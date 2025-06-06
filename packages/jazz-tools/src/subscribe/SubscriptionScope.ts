@@ -7,8 +7,10 @@ import {
   type ID,
   type RefEncoded,
   type RefsToResolve,
+  instantiateRefEncoded,
   isRefEncoded,
 } from "../internal.js";
+import { applyCoValueMigrations } from "../lib/migration.js";
 import { CoValueCoreSubscription } from "./CoValueCoreSubscription.js";
 import { JazzError, type JazzErrorIssue } from "./JazzError.js";
 import type { SubscriptionValue, Unloaded } from "./types.js";
@@ -32,6 +34,8 @@ export class SubscriptionScope<D extends CoValue> {
   autoloadedKeys = new Set<string>();
   skipInvalidKeys = new Set<string>();
   totalValidTransactions = 0;
+  migrated = false;
+  migrating = false;
 
   silenceUpdates = false;
 
@@ -43,7 +47,29 @@ export class SubscriptionScope<D extends CoValue> {
   ) {
     this.resolve = resolve;
     this.value = { type: "unloaded", id };
+
+    let lastUpdate: RawCoValue | "unavailable" | undefined;
     this.subscription = new CoValueCoreSubscription(node, id, (value) => {
+      lastUpdate = value;
+
+      // Need all these checks because the migration can trigger new syncronous updates
+      //
+      // We want to:
+      // - Run the migration only once
+      // - Skip all the updates until the migration is done
+      // - Trigger handleUpdate only with the final value
+      if (!this.migrated && value !== "unavailable") {
+        if (this.migrating) {
+          return;
+        }
+
+        this.migrating = true;
+        applyCoValueMigrations(instantiateRefEncoded(this.schema, value));
+        this.migrated = true;
+        this.handleUpdate(lastUpdate);
+        return;
+      }
+
       this.handleUpdate(value);
     });
   }
@@ -223,9 +249,28 @@ export class SubscriptionScope<D extends CoValue> {
   }
 
   getCurrentValue() {
-    if (!this.shouldSendUpdates()) return;
-    if (this.errorFromChildren) return this.errorFromChildren;
-    return this.value;
+    if (
+      this.value.type === "unauthorized" ||
+      this.value.type === "unavailable"
+    ) {
+      console.error(this.value.toString());
+      return null;
+    }
+
+    if (!this.shouldSendUpdates()) {
+      return undefined;
+    }
+
+    if (this.errorFromChildren) {
+      console.error(this.errorFromChildren.toString());
+      return null;
+    }
+
+    if (this.value.type === "loaded") {
+      return this.value.value;
+    }
+
+    return undefined;
   }
 
   triggerUpdate() {

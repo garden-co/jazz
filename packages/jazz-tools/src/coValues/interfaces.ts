@@ -294,6 +294,11 @@ export function subscribeToCoValue<
   return unsubscribe;
 }
 
+/**
+ * @deprecated Used for the React integration in the past, but we moved to use SubscriptionScope directly.
+ *
+ * Going to be removed in the next minor version.
+ */
 export function createCoValueObservable<
   S extends CoValueOrZodSchema,
   const R extends ResolveQuery<S>,

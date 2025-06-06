@@ -1,6 +1,6 @@
 {
 	"name": "betterauth",
-	"version": "0.1.21",
+	"version": "0.1.24",
 	"private": true,
 	"type": "module",
 	"scripts": {

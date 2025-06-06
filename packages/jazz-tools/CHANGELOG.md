@@ -1,5 +1,30 @@
 # jazz-tools
 
+## 0.14.21
+
+### Patch Changes
+
+- e7e505e: Adds `makePublic(role)` alias for `group.addMember("everyone", role)`
+- 13b57aa: Fix creation of z.discriminatedUnions of CoValue schemas in Inbox and other places
+- 5662faa: Add `_createdAt` and `_lastUpdatedAt` getters for CoMaps
+- 2116a59: Improve SubscriptionScope.getCurrentValue to be the basis of the new React integration
+- Updated dependencies [c3d8779]
+  - cojson@0.14.21
+
+## 0.14.20
+
+### Patch Changes
+
+- 6f72419: Add support for per-CoMap migrations
+- 04b20c2: Make Zod schemas compatible with castAs
+  - cojson@0.14.20
+
+## 0.14.19
+
+### Patch Changes
+
+- cojson@0.14.19
+
 ## 0.14.18
 
 ### Patch Changes

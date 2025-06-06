@@ -57,6 +57,8 @@ export type CoFeedSchema<T extends z.core.$ZodType> = z.core.$ZodCustom<
       unsubscribe: () => void,
     ) => void,
   ): () => void;
+
+  getCoSchema: () => typeof CoFeed;
 };
 
 // less precise verion to avoid circularity issues and allow matching against

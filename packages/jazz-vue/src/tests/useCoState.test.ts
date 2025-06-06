@@ -1,9 +1,15 @@
 // @vitest-environment happy-dom
 
-import { CoMap, CoValue, ID, coField, cojsonInternals } from "jazz-tools";
+import {
+  CoMap,
+  type CoValue,
+  type ID,
+  coField,
+  cojsonInternals,
+} from "jazz-tools";
 import { createJazzTestAccount, setupJazzTestSync } from "jazz-tools/testing";
 import { beforeEach, describe, expect, expectTypeOf, it } from "vitest";
-import { Ref } from "vue";
+import type { Ref } from "vue";
 import { useCoState } from "../index.js";
 import { waitFor, withJazzTestSetup } from "./testUtils.js";
 
