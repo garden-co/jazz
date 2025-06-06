@@ -6,6 +6,7 @@ import {
   type IconName,
 } from "@garden-co/design-system/src/components/atoms/Icon";
 import { Kicker } from "@garden-co/design-system/src/components/atoms/Kicker";
+import { Button } from "@garden-co/design-system/src/components/atoms/Button";
 import { CopyButton } from "@garden-co/design-system/src/components/molecules/CodeGroup";
 import { Prose } from "@garden-co/design-system/src/components/molecules/Prose";
 import { SectionHeader } from "@garden-co/design-system/src/components/molecules/SectionHeader";
@@ -89,6 +90,14 @@ export function HeroSection() {
               <p>{title}</p>
             </div>
           ))}
+          <div className="mt-5">
+            <Button
+              variant="primary"
+              size="md"
+            >
+              <Link href="/docs">Get started</Link>
+            </Button>
+          </div>
         </div>
       </div>
 
