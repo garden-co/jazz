@@ -96,7 +96,7 @@ export class Account extends CoValueBase implements CoValue {
       } satisfies RefEncoded<CoMap>,
       inbox: {
         ref: () => AccountInbox,
-        optional: true,
+        optional: false,
       } satisfies RefEncoded<AccountInbox>,
     };
   }
@@ -531,8 +531,12 @@ export const AccountAndGroupProxyHandler: ProxyHandler<Account | Group> = {
     } else if (key === "inbox") {
       if (value) {
         // The 'trusting' privacy level means that the inbox ID is readable by anyone, allowing other accounts to load this account's inbox ID.
-        // FIXME: `trusting` causes getting the inbox ID to fail for everyone (including the setter); however, 'private' (default) allows the setter to read the inbox ID, but nobody else can. No idea why.
-        target._raw.set("inbox", value.id as unknown as CoID<RawCoMap>);
+        // FIXME: The setter can read the inbox ID, but nobody else can. No idea why.
+        target._raw.set(
+          "inbox",
+          value.id as unknown as CoID<RawCoMap>,
+          "trusting",
+        );
       }
 
       return true;
