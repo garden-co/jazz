@@ -1,7 +1,7 @@
 {
   "name": "jazz-react-tailwind-starter",
   "private": true,
-  "version": "0.0.112",
+  "version": "0.0.113",
   "type": "module",
   "scripts": {
     "dev": "vite",
