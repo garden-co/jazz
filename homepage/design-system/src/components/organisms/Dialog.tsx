@@ -33,7 +33,7 @@ export function Dialog({
         className="z-50 fixed inset-0 overflow-y-auto bg-stone-950/25 px-2 py-2 transition duration-100 focus:outline-0 data-[closed]:opacity-0 data-[enter]:ease-out data-[leave]:ease-in sm:px-6 sm:py-8 lg:px-8 lg:py-16 dark:bg-stone-950/70"
       />
 
-      <div className="z-50 fixed inset-0 w-screen overflow-y-auto px-3 flex flex-col pt-8 sm:pt-16 lg:pt-32">
+      <div className="z-50 fixed inset-0 w-screen overflow-y-auto px-3 flex flex-col pt-3 sm:pt-16 lg:pt-32">
         <Headless.DialogPanel
           transition
           className={clsx(
