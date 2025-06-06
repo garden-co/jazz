@@ -33,5 +33,6 @@ export const createWorkerAccount = async ({
   return {
     accountID: account.id,
     agentSecret: account._raw.core.node.getCurrentAgent().agentSecret,
+    account,
   };
 };
