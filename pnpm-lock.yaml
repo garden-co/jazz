@@ -691,6 +691,67 @@ importers:
         specifier: 6.3.5
         version: 6.3.5(@types/node@22.15.18)(jiti@2.4.2)(lightningcss@1.30.1)(terser@5.37.0)(tsx@4.19.3)(yaml@2.6.1)
 
+  examples/cross-device-account-transfer:
+    dependencies:
+      input-otp:
+        specifier: ^1.4.2
+        version: 1.4.2(react-dom@19.0.0(react@19.0.0))(react@19.0.0)
+      jazz-react:
+        specifier: workspace:*
+        version: link:../../packages/jazz-react
+      jazz-tools:
+        specifier: workspace:*
+        version: link:../../packages/jazz-tools
+      qrcode:
+        specifier: ^1.5.3
+        version: 1.5.4
+      react:
+        specifier: 19.0.0
+        version: 19.0.0
+      react-dom:
+        specifier: 19.0.0
+        version: 19.0.0(react@19.0.0)
+      react-router:
+        specifier: ^6.16.0
+        version: 6.28.0(react@19.0.0)
+    devDependencies:
+      '@biomejs/biome':
+        specifier: 1.9.4
+        version: 1.9.4
+      '@types/qrcode':
+        specifier: ^1.5.1
+        version: 1.5.5
+      '@types/react':
+        specifier: 19.0.0
+        version: 19.0.0
+      '@types/react-dom':
+        specifier: 19.0.0
+        version: 19.0.0
+      '@vitejs/plugin-react':
+        specifier: ^4.3.3
+        version: 4.3.4(vite@6.0.11(@types/node@22.15.18)(jiti@2.4.2)(lightningcss@1.29.2)(terser@5.37.0)(tsx@4.19.3)(yaml@2.6.1))
+      autoprefixer:
+        specifier: ^10.4.20
+        version: 10.4.20(postcss@8.5.3)
+      globals:
+        specifier: ^15.11.0
+        version: 15.14.0
+      is-ci:
+        specifier: ^3.0.1
+        version: 3.0.1
+      postcss:
+        specifier: ^8.4.27
+        version: 8.5.3
+      tailwindcss:
+        specifier: ^3.4.17
+        version: 3.4.17(ts-node@10.9.2(@swc/core@1.10.1(@swc/helpers@0.5.15))(@types/node@22.15.18)(typescript@5.6.2))
+      typescript:
+        specifier: ~5.6.2
+        version: 5.6.2
+      vite:
+        specifier: ^6.0.11
+        version: 6.0.11(@types/node@22.15.18)(jiti@2.4.2)(lightningcss@1.29.2)(terser@5.37.0)(tsx@4.19.3)(yaml@2.6.1)
+
   examples/file-share-svelte:
     dependencies:
       '@tailwindcss/typography':
@@ -1895,6 +1956,9 @@ importers:
       clsx:
         specifier: ^2.0.0
         version: 2.1.1
+      input-otp:
+        specifier: ^1.4.2
+        version: 1.4.2(react-dom@19.0.0(react@19.0.0))(react@19.0.0)
       jazz-react:
         specifier: workspace:*
         version: link:../../packages/jazz-react
@@ -10787,6 +10851,12 @@ packages:
 
   inline-style-prefixer@7.0.1:
     resolution: {integrity: sha512-lhYo5qNTQp3EvSSp3sRvXMbVQTLrvGV6DycRMJ5dm2BLMiJ30wpXKdDdgX+GmJZ5uQMucwRKHamXSst3Sj/Giw==}
+
+  input-otp@1.4.2:
+    resolution: {integrity: sha512-l3jWwYNvrEa6NTCt7BECfCm48GvwuZzkoeG3gBL2w4CHeOXW3eKFmf9UNYkNfYc3mxMrthMnxjIE07MT0zLBQA==}
+    peerDependencies:
+      react: 19.0.0
+      react-dom: 19.0.0
 
   inquirer@9.3.7:
     resolution: {integrity: sha512-LJKFHCSeIRq9hanN14IlOtPSTe3lNES7TYDTE2xxdAy1LS5rYphajK1qtwvj3YmQXvvk0U2Vbmcni8P9EIQW9w==}
@@ -25813,6 +25883,11 @@ snapshots:
   inline-style-prefixer@7.0.1:
     dependencies:
       css-in-js-utils: 3.1.0
+
+  input-otp@1.4.2(react-dom@19.0.0(react@19.0.0))(react@19.0.0):
+    dependencies:
+      react: 19.0.0
+      react-dom: 19.0.0(react@19.0.0)
 
   inquirer@9.3.7:
     dependencies:

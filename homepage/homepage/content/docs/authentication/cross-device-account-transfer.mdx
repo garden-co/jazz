@@ -1,0 +1,155 @@
+export const metadata = { title: "Cross-Device Account Transfer" };
+
+import { CodeGroup, ContentByFramework } from "@/components/forMdx";
+
+# Cross-Device Account Transfer
+
+Cross-Device Account Transfer can be used to transfer authentication from one device to another, for example using a QR code.
+
+## How it works
+
+Cross-Device Account Transfer supports two flows, where **Desktop** refers to the device that creates and displays the QR code, and **Mobile** refers to the device that scans and handles it:
+
+- **Mobile to Desktop**: Mobile scans the QR code to authenticate the desktop device
+- **Desktop to Mobile**: Mobile scans the QR to authenticate itself
+
+Once the QR code has been scanned, the already-authenticated `source` device shows a 6-digit code that the user should enter on the `target` device trying to authenticate.
+
+If the confirmation code is correct, the source device reveals the secret, and the target device uses it to authenticate.
+
+You can pick a flow that suits your use case, or use both!
+
+## Key benefits
+
+- **Portable**: Apps using passkey auth for example can use cross-device account transfer links to authenticate devices where the passkey is not available
+- **User-friendly**: Users familiar with WhatsApp, Discord, etc. already know how this works
+
+## Implementation
+
+<ContentByFramework framework="react">
+### Mobile to Desktop
+
+We start by creating a link on the **Desktop** device using `useCreateAccountTransfer` as `target`, and handling the flow's `status`:
+
+<CodeGroup>
+```tsx twoslash
+import { useCreateAccountTransfer } from "jazz-react";
+import React, { useState } from "react";
+interface CreateAccountTransferAsTargetProps {
+  onLoggedIn: () => void;
+}
+const QRCode = (_: { url: string }) => (<></>)
+const ConfirmationCodeForm = (_: { onSubmit: (code: string) => void}) => (<></>)
+
+
+// ---cut---
+export function CreateAccountTransferAsTarget({
+  onLoggedIn,
+}: CreateAccountTransferAsTargetProps) {
+  const [link, setLink] = useState<string | undefined>();
+
+  const { status, createLink, sendConfirmationCode } = useCreateAccountTransfer({
+    as: "target",
+    onLoggedIn,
+  });
+
+  // Handle the status
+}
+```
+</CodeGroup>
+
+[Full example](https://github.com/garden-co/jazz/blob/main/examples/cross-device-account-transfer/src/components/CreateCrossDeviceAccountTransferAsTarget.tsx)
+
+On the **Mobile** side, we need to host a page at `#/accept-account-transfer`, or provide an alternative handler path to the hooks using the `handlerPath` option.
+
+This is the page we'll land on when the QR code is scanned, handling the link with the `useAcceptAccountTransfer` hook as `source`, and using `status` to display the current state:
+
+<CodeGroup>
+```tsx twoslash
+import React from "react";
+import { useAcceptAccountTransfer } from "jazz-react";
+
+// ---cut---
+export function HandleAccountTransferAsSource() {
+  const { status, confirmationCode } = useAcceptAccountTransfer({
+    as: "source",
+  });
+
+  // Handle the status
+}
+```
+</CodeGroup>
+
+[Full example](https://github.com/garden-co/jazz/blob/main/examples/cross-device-account-transfer/src/components/pages/CrossDeviceAccountTransferHandlerSource.tsx)
+
+### Desktop to Mobile
+
+This is similar to the **Mobile to Desktop** flow, but the roles are reversed: `useCreateAccountTransfer` on the **Desktop** device should be used as `source`, and `useAcceptAccountTransfer` on the **Mobile** device should be used as `target`.
+
+On the **Desktop** device:
+
+<CodeGroup>
+```tsx twoslash
+import React, { useState } from "react";
+import { useCreateAccountTransfer } from "jazz-react";
+const QRCode = (_: { url: string }) => (<></>)
+
+// ---cut---
+export function CreateAccountTransferAsSource() {
+  const [link, setLink] = useState<string | undefined>();
+
+  const { status, createLink, confirmationCode } = useCreateAccountTransfer({
+    as: "source",
+  });
+
+  // Handle the status
+}
+```
+</CodeGroup>
+
+[Full example](https://github.com/garden-co/jazz/blob/main/examples/cross-device-account-transfer/src/components/CreateCrossDeviceAccountTransferAsSource.tsx)
+
+On the **Mobile** device we need to host a page at `#/accept-account-transfer`, or provide an alternative handler path to the hooks using the `handlerPath` option.
+
+This is the page we'll land on when the QR code is scanned, handling the link with the `useAcceptAccountTransfer` hook as `target`, and using `status` to display the current state:
+
+<CodeGroup>
+```tsx twoslash
+import React from "react";
+import { useAcceptAccountTransfer } from "jazz-react";
+const ConfirmationCodeForm = (_: { onSubmit: (code: string) => void}) => (<></>)
+
+// ---cut---
+export function HandleAccountTransferAsTarget() {
+  const { status, sendConfirmationCode } = useAcceptAccountTransfer({
+    as: "target",
+    handlerPath: "/#/accept-account-transfer",
+    onLoggedIn: () => {
+      console.log("logged in!");
+    },
+  });
+
+  // Handle the status
+}
+```
+</CodeGroup>
+
+[Full example](https://github.com/garden-co/jazz/blob/main/examples/cross-device-account-transfer/src/components/pages/CrossDeviceAccountTransferHandlerTarget.tsx)
+</ContentByFramework>
+
+## Examples
+
+- [cross-device-account-transfer](https://cross-device-account-transfer-demo.jazz.tools/): Both flows implemented to demonstrate how everything works - [code](https://github.com/garden-co/jazz/blob/main/examples/cross-device-account-transfer)
+- [todo](https://todo-demo.jazz.tools/): Mobile to Desktop flow implemented as a more practical demo - [code](https://github.com/garden-co/jazz/blob/main/examples/todo)
+
+## When to use Cross-Device Account Transfer
+
+Ideal when:
+
+- You need a fallback authentication method alongside passkeys
+- Your app is designed to be used on mobile devices
+
+## Limitations and considerations
+
+- **No revocation**: Once the secret has been shared with the target device, it cannot be revoked
+- **Requires a camera**: The link handler needs to have a camera to scan the QR code, or another way to get the link

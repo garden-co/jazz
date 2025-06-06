@@ -17,6 +17,7 @@
     "@radix-ui/react-toast": "^1.1.4",
     "class-variance-authority": "^0.7.0",
     "clsx": "^2.0.0",
+    "input-otp": "^1.4.2",
     "jazz-react": "workspace:*",
     "jazz-tools": "workspace:*",
     "lucide-react": "^0.274.0",
