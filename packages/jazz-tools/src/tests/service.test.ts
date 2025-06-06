@@ -12,10 +12,10 @@ const Message = co.map({
   text: z.string(),
 });
 
-const GenericWorkerAccount = co.account({
-  service: co.service({}),
-  profile: co.profile(),
-  root: co.map({}),
+const GenericWorkerAccount = co.account().withMigration((account) => {
+  if (!account.service?.service) {
+    account.service = co.service().create({}, account);
+  }
 });
 
 describe("Service", () => {
@@ -31,7 +31,9 @@ describe("Service", () => {
           if (account.service?.service === undefined) {
             const serviceRoot = createServiceRoot(account);
             account.service = co
-              .service()
+              .map({
+                service: z.string(),
+              })
               .create(
                 { service: serviceRoot.id },
                 Group.create({ owner: account }),

@@ -12,6 +12,7 @@ import {
   CoValueFromRaw,
   InstanceOfSchema,
   Service,
+  co,
   createJazzContextFromExistingCredentials,
   randomSessionProvider,
 } from "jazz-tools";
@@ -94,6 +95,9 @@ export async function startWorker<
     throw new Error("Account has no profile");
   }
 
+  if (!account.service?.service) {
+    account.service = co.service().create({}, account);
+  }
   const service = await Service.load(account);
 
   async function done() {

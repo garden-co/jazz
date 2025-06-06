@@ -13,12 +13,16 @@ import {
   CoRichText,
   CoServiceSchema,
   DefaultProfileShape,
-  DefaultServiceShape,
   FileStream,
   FileStreamSchema,
   ImageDefinition,
   PlainTextSchema,
+  RegisteredSchemas,
+  ServiceShape,
   Simplify,
+  activeAccountContext,
+  createServiceRoot,
+  isAccountInstance,
   zodSchemaToCoSchema,
 } from "../../internal.js";
 import { RichTextSchema } from "./schemaTypes/RichTextSchema.js";
@@ -84,9 +88,6 @@ function enrichAccountSchema<
       name: z.core.$ZodString<string>;
     }>;
     root: AnyCoMapSchema;
-    service?: AnyCoMapSchema<{
-      service?: z.core.$ZodOptional<z.core.$ZodString>;
-    }>;
   },
 >(schema: z.ZodObject<Shape, z.core.$strip>) {
   const enrichedSchema = Object.assign(schema, {
@@ -145,9 +146,6 @@ export const coAccountDefiner = <
       name: z.core.$ZodString<string>;
     }>;
     root: AnyCoMapSchema;
-    service?: AnyCoMapSchema<{
-      service?: z.core.$ZodOptional<z.core.$ZodString>;
-    }>;
   },
 >(
   shape: Shape = {
@@ -155,9 +153,6 @@ export const coAccountDefiner = <
       name: z.string(),
     }),
     root: coMapDefiner({}),
-    service: coMapDefiner({
-      service: z.optional(z.string()),
-    }),
   } as unknown as Shape,
 ): AccountSchema<Shape> => {
   const objectSchema = z.object(shape).meta({
@@ -216,18 +211,29 @@ export const coListDefiner = <T extends z.core.$ZodType>(
   return enrichCoListSchema(arraySchema);
 };
 
-export const coServiceDefiner = <
-  Shape extends z.core.$ZodLooseShape = Simplify<DefaultServiceShape>,
->(
-  shape: Shape & {
-    service?: z.core.$ZodOptional<z.core.$ZodString>;
-  } = {} as any,
-): CoServiceSchema<Shape> => {
-  const enhancedShape = Object.assign(shape ?? {}, {
+export const coServiceDefiner = (): CoServiceSchema<ServiceShape> => {
+  const coService = coMapDefiner({
     service: z.optional(z.string()),
-  });
+  }) as CoServiceSchema<ServiceShape>;
 
-  return coMapDefiner(enhancedShape) as CoServiceSchema<Shape>;
+  const superCreate = coService.create;
+  coService.create = (init, options) => {
+    const { owner } = options
+      ? "_type" in options && isAccountInstance(options)
+        ? { owner: options }
+        : !("_type" in options) && isAccountInstance(options.owner)
+          ? { owner: options.owner }
+          : { owner: activeAccountContext.get() }
+      : { owner: activeAccountContext.get() };
+    const serviceGroup = RegisteredSchemas["Group"].create(owner);
+    serviceGroup.addMember("everyone", "reader");
+    const serviceRoot = init.service
+      ? { id: init.service }
+      : createServiceRoot(owner);
+    return superCreate({ service: serviceRoot.id }, serviceGroup);
+  };
+
+  return coService;
 };
 
 export const coProfileDefiner = <

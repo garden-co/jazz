@@ -1,6 +1,7 @@
 import {
   AgentSecret,
   CoID,
+  CoValueUniqueness,
   ControlledAccount,
   CryptoProvider,
   Everyone,
@@ -17,6 +18,7 @@ import {
 import {
   AnonymousJazzAgent,
   CoMap,
+  CoMapInit,
   type CoValue,
   CoValueBase,
   CoValueClass,
@@ -34,18 +36,22 @@ import {
   Resolved,
   type Schema,
   SchemaInit,
+  Simplify,
   SubscribeListenerOptions,
   SubscribeRestArgs,
   accessChildByKey,
   activeAccountContext,
   anySchemaToCoSchema,
+  co,
   coField,
   coValuesCache,
   createServiceRoot,
   ensureCoValueLoaded,
   inspect,
+  isAccountInstance,
   loadCoValue,
   loadCoValueWithoutMe,
+  parseGroupCreateOptions,
   parseSubscribeRestArgs,
   subscribeToCoValueWithoutMe,
   subscribeToExistingCoValue,
@@ -120,7 +126,7 @@ export class Account extends CoValueBase implements CoValue {
 
   declare profile: Profile | null;
   declare root: CoMap | null;
-  declare service: AccountService | null | undefined;
+  declare service: AccountService | null;
 
   getDescriptor(key: string) {
     if (key === "profile") {
@@ -378,18 +384,8 @@ export class Account extends CoValueBase implements CoValue {
   async applyMigration(creationProps?: AccountCreationProps) {
     await this.migrate(creationProps);
 
-    // console.log("RegisteredSchemas[\"Account\"]._schema.service.optional", RegisteredSchemas["Account"]._schema.service.optional);
-    if (
-      !RegisteredSchemas["Account"]._schema.service.optional &&
-      this.service?.service === undefined
-    ) {
-      const serviceGroup = RegisteredSchemas["Group"].create({ owner: this });
-      const serviceRoot = createServiceRoot(this);
-      this.service = AccountService.create(
-        { service: serviceRoot.id },
-        serviceGroup,
-      );
-      serviceGroup.addMember("everyone", "reader"); // Allows others to see our account's service property, which contains the ID of our service (ie, allows others to see our service's ID)
+    if (this.service && this.service.service === undefined) {
+      this.service = co.service().create({}, this);
     } else if (this.service && this.service._owner._type !== "Group") {
       throw new Error("Service must be owned by a Group", {
         cause: `The service of the account "${this.id}" was created with an Account as owner, which is not allowed.`,
