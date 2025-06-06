@@ -1,4 +1,3 @@
-import CreateJazzApp from "@/components/home/CreateJazzApp.mdx";
 import { marketingCopy } from "@/content/marketingCopy";
 import { H1 } from "@garden-co/design-system/src/components/atoms/Headings";
 import {
@@ -6,10 +5,10 @@ import {
   type IconName,
 } from "@garden-co/design-system/src/components/atoms/Icon";
 import { Kicker } from "@garden-co/design-system/src/components/atoms/Kicker";
-import { CopyButton } from "@garden-co/design-system/src/components/molecules/CodeGroup";
 import { Prose } from "@garden-co/design-system/src/components/molecules/Prose";
-import { SectionHeader } from "@garden-co/design-system/src/components/molecules/SectionHeader";
 import Link from "next/link";
+import { GetStartedSnippetSelect } from "./GetStartedSnippetSelect";
+
 
 const features: Array<{
   title: string;
@@ -51,8 +50,8 @@ const features: Array<{
 
 export function HeroSection() {
   return (
-    <div className="container grid items-center gap-x-8 gap-y-12 my-12 md:my-16 lg:my-24 lg:gap-x-10 lg:grid-cols-3">
-      <div className="flex flex-col justify-center gap-5 lg:col-span-2 lg:gap-8">
+    <div className="container grid items-center gap-x-8 gap-y-12 my-12 md:my-16 lg:my-24 lg:gap-x-10 lg:grid-cols-12">
+      <div className="flex flex-col justify-center gap-5 lg:col-span-11 lg:gap-8">
         <Kicker>Toolkit for backendless apps</Kicker>
         <H1>
           <span className="inline-block text-highlight">
@@ -83,37 +82,14 @@ export function HeroSection() {
               key={title}
               className="flex text-xs sm:text-sm gap-2 items-center"
             >
-              <span className="text-primary p-1.5 rounded-lg bg-highlight dark:bg-stone-900">
-                <Icon size="xs" name={icon} />
-              </span>
+              <Icon size="xs" name={icon} />
               <p>{title}</p>
             </div>
           ))}
         </div>
-      </div>
-
-      <div className="h-full group grid md:grid-cols-2 items-center lg:grid-cols-1 lg:pt-36">
-        <SectionHeader
-          className="md:col-span-2 lg:sr-only"
-          title="Get a Jazz app running in minutes."
-        />
-        <div className="overflow-hidden sm:rounded-xl sm:border h-full sm:px-8 sm:pt-6 bg-stone-50 dark:bg-stone-950">
-          <div className="rounded-lg bg-white dark:bg-stone-925 sm:ring-4 ring-stone-400/20 sm:shadow-xl sm:shadow-blue/20 border relative sm:top-2 h-full w-full">
-            <div className="py-4 flex items-center gap-2.5 px-6 border-b">
-              <span className="rounded-full size-3 bg-stone-200 dark:bg-stone-900" />
-              <span className="rounded-full size-3 bg-stone-200 dark:bg-stone-900" />
-              <span className="rounded-full size-3 bg-stone-200 dark:bg-stone-900" />
-              <CopyButton
-                code="npx create-jazz-app@latest"
-                size="md"
-                className="mt-0.5 mr-0.5"
-              />
-            </div>
-            <div className="p-3">
-              <CreateJazzApp />
-            </div>
+          <div className="col-span-10">
+            <GetStartedSnippetSelect />
           </div>
-        </div>
       </div>
     </div>
   );
