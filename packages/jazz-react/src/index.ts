@@ -5,7 +5,7 @@ export {
   useAccountOrGuest,
   useCoState,
   useAcceptInvite,
-  experimental_useInboxSender,
+  experimental_useServiceSender,
   useJazzContext,
   useAuthSecretStorage,
 } from "./hooks.js";

@@ -23,14 +23,14 @@ export type AccountSchema<
       name: z.core.$ZodString<string>;
     }>;
     root: AnyCoMapSchema;
-    inbox: AnyCoMapSchema;
+    service: AnyCoMapSchema;
   } = {
     profile: CoMapSchema<{
       name: z.core.$ZodString<string>;
     }>;
     root: CoMapSchema<{}>;
-    inbox: CoMapSchema<{
-      inbox: z.core.$ZodOptional<z.core.$ZodString>;
+    service: CoMapSchema<{
+      service: z.core.$ZodOptional<z.core.$ZodString>;
     }>;
   },
 > = Omit<CoMapSchema<Shape>, "create" | "load" | "withMigration"> & {
@@ -68,14 +68,14 @@ export type AccountSchema<
   getCoSchema: () => typeof Account;
 };
 
-export type DefaultInboxShape = {
-  inbox: z.core.$ZodOptional<z.core.$ZodString>;
+export type DefaultServiceShape = {
+  service: z.core.$ZodOptional<z.core.$ZodString>;
 };
 
-export type CoInboxSchema<
-  Shape extends z.core.$ZodLooseShape = DefaultInboxShape,
+export type CoServiceSchema<
+  Shape extends z.core.$ZodLooseShape = DefaultServiceShape,
   Config extends z.core.$ZodObjectConfig = z.core.$ZodObjectConfig,
-> = CoMapSchema<Shape & DefaultInboxShape, Config, Group>;
+> = CoMapSchema<Shape & DefaultServiceShape, Config, Group>;
 
 export type DefaultProfileShape = {
   name: z.core.$ZodString<string>;

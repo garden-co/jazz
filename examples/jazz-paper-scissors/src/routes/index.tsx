@@ -3,7 +3,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { WORKER_ID } from "@/constants";
 import { CreateGameRequest } from "@/schema";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
-import { experimental_useInboxSender as useInboxSender } from "jazz-react";
+import { experimental_useServiceSender as useServiceSender } from "jazz-react";
 import { useState } from "react";
 
 export const Route = createFileRoute("/")({
@@ -11,7 +11,7 @@ export const Route = createFileRoute("/")({
 });
 
 function HomeComponent() {
-  const createGame = useInboxSender(WORKER_ID);
+  const createGame = useServiceSender(WORKER_ID);
   const navigate = useNavigate({ from: "/" });
   const [isLoading, setIsLoading] = useState(false);
 

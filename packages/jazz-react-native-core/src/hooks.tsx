@@ -6,7 +6,7 @@ import { Linking } from "react-native";
 
 export {
   useCoState,
-  experimental_useInboxSender,
+  experimental_useServiceSender,
   useDemoAuth,
   usePassphraseAuth,
   useJazzContext,

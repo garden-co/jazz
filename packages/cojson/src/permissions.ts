@@ -4,8 +4,8 @@ import { Transaction } from "./coValueCore/verifiedState.js";
 import {
   RawAccount,
   RawAccountID,
-  RawInbox,
   RawProfile,
+  RawService,
 } from "./coValues/account.js";
 import { MapOpPayload } from "./coValues/coMap.js";
 import {
@@ -275,7 +275,7 @@ function determineValidTransactionsForGroup(
       | MapOpPayload<RawAccountID | AgentID | Everyone, Role>
       | MapOpPayload<"readKey", JsonValue>
       | MapOpPayload<"profile", CoID<RawProfile>>
-      | MapOpPayload<"inbox", CoID<RawInbox>>
+      | MapOpPayload<"service", CoID<RawService>>
       | MapOpPayload<`parent_${CoID<RawGroup>}`, CoID<RawGroup>>
       | MapOpPayload<`child_${CoID<RawGroup>}`, CoID<RawGroup>>;
 
@@ -305,9 +305,9 @@ function determineValidTransactionsForGroup(
 
       validTransactions.push({ txID: { sessionID, txIndex }, tx });
       continue;
-    } else if (change.key === "inbox") {
+    } else if (change.key === "service") {
       if (memberState[transactor] !== "admin") {
-        logPermissionError("Only admins can set inbox");
+        logPermissionError("Only admins can set service");
         continue;
       }
 

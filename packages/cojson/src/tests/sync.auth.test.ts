@@ -34,26 +34,26 @@ describe("LocalNode auth sync", () => {
     await account.core.waitForSync();
 
     const profileID = account.get("profile")!;
-    const inboxID = account.get("inbox")!;
+    const serviceID = account.get("service")!;
 
     const profileCoreOnSyncServer = jazzCloud.node.getCoValue(profileID);
-    const inboxCoreOnSyncServer = jazzCloud.node.getCoValue(inboxID);
+    const serviceCoreOnSyncServer = jazzCloud.node.getCoValue(serviceID);
     await profileCoreOnSyncServer.waitForAvailable();
-    await inboxCoreOnSyncServer.waitForAvailable();
+    await serviceCoreOnSyncServer.waitForAvailable();
 
     expect(profileCoreOnSyncServer.isAvailable()).toBe(true);
-    expect(inboxCoreOnSyncServer.isAvailable()).toBe(true);
+    expect(serviceCoreOnSyncServer.isAvailable()).toBe(true);
 
     assert(profileCoreOnSyncServer.isAvailable());
-    assert(inboxCoreOnSyncServer.isAvailable());
+    assert(serviceCoreOnSyncServer.isAvailable());
 
     expect(
       SyncMessagesLog.getMessages({
         Account: account.core,
         Profile: profileCoreOnSyncServer,
         ProfileGroup: profileCoreOnSyncServer.getGroup().core,
-        Inbox: inboxCoreOnSyncServer,
-        InboxGroup: inboxCoreOnSyncServer.getGroup().core,
+        Service: serviceCoreOnSyncServer,
+        ServiceGroup: serviceCoreOnSyncServer.getGroup().core,
       }),
     ).toMatchInlineSnapshot(`
       [
@@ -61,12 +61,12 @@ describe("LocalNode auth sync", () => {
         "server -> client | KNOWN Account sessions: header/5",
         "client -> server | CONTENT ProfileGroup header: true new: After: 0 New: 5",
         "server -> client | KNOWN ProfileGroup sessions: header/5",
-        "client -> server | CONTENT InboxGroup header: true new: After: 0 New: 5",
-        "server -> client | KNOWN InboxGroup sessions: header/5",
+        "client -> server | CONTENT ServiceGroup header: true new: After: 0 New: 5",
+        "server -> client | KNOWN ServiceGroup sessions: header/5",
         "client -> server | CONTENT Profile header: true new: After: 0 New: 1",
         "server -> client | KNOWN Profile sessions: header/1",
-        "client -> server | CONTENT Inbox header: true new: ",
-        "server -> client | KNOWN Inbox sessions: header/0",
+        "client -> server | CONTENT Service header: true new: ",
+        "server -> client | KNOWN Service sessions: header/0",
       ]
     `);
   });
@@ -162,10 +162,10 @@ describe("LocalNode auth sync", () => {
 
     const account = node.expectCurrentAccount("after login");
     const profile = node.getCoValue(account.get("profile")!);
-    const inbox = node.getCoValue(account.get("inbox")!);
+    const service = node.getCoValue(account.get("service")!);
 
     assert(profile.isAvailable());
-    assert(inbox.isAvailable());
+    assert(service.isAvailable());
 
     expect(account.id).toBe(accountID);
     expect(node.agentSecret).toBe(accountSecret);
@@ -175,8 +175,8 @@ describe("LocalNode auth sync", () => {
         Account: account.core,
         Profile: profile,
         ProfileGroup: profile.getGroup().core,
-        Inbox: inbox,
-        InboxGroup: inbox.getGroup().core,
+        Service: service,
+        ServiceGroup: service.getGroup().core,
       }),
     ).toMatchInlineSnapshot(`
       [
@@ -186,23 +186,23 @@ describe("LocalNode auth sync", () => {
         "creation-node -> server | CONTENT ProfileGroup header: true new: After: 0 New: 5",
         "server -> auth-node | CONTENT Account header: true new: After: 0 New: 5",
         "server -> creation-node | KNOWN ProfileGroup sessions: header/5",
-        "creation-node -> server | CONTENT InboxGroup header: true new: After: 0 New: 5",
+        "creation-node -> server | CONTENT ServiceGroup header: true new: After: 0 New: 5",
         "auth-node -> server | KNOWN Account sessions: header/5",
-        "server -> creation-node | KNOWN InboxGroup sessions: header/5",
+        "server -> creation-node | KNOWN ServiceGroup sessions: header/5",
         "creation-node -> server | CONTENT Profile header: true new: After: 0 New: 1",
         "server -> creation-node | KNOWN Profile sessions: header/1",
-        "creation-node -> server | CONTENT Inbox header: true new: ",
-        "server -> creation-node | KNOWN Inbox sessions: header/0",
+        "creation-node -> server | CONTENT Service header: true new: ",
+        "server -> creation-node | KNOWN Service sessions: header/0",
         "auth-node -> server | LOAD Profile sessions: empty",
         "server -> auth-node | CONTENT ProfileGroup header: true new: After: 0 New: 5",
         "auth-node -> server | KNOWN ProfileGroup sessions: header/5",
         "server -> auth-node | CONTENT Profile header: true new: After: 0 New: 1",
         "auth-node -> server | KNOWN Profile sessions: header/1",
-        "auth-node -> server | LOAD Inbox sessions: empty",
-        "server -> auth-node | CONTENT InboxGroup header: true new: After: 0 New: 5",
-        "auth-node -> server | KNOWN InboxGroup sessions: header/5",
-        "server -> auth-node | CONTENT Inbox header: true new: ",
-        "auth-node -> server | KNOWN Inbox sessions: header/0",
+        "auth-node -> server | LOAD Service sessions: empty",
+        "server -> auth-node | CONTENT ServiceGroup header: true new: After: 0 New: 5",
+        "auth-node -> server | KNOWN ServiceGroup sessions: header/5",
+        "server -> auth-node | CONTENT Service header: true new: ",
+        "auth-node -> server | KNOWN Service sessions: header/0",
       ]
     `);
   });
@@ -242,10 +242,10 @@ describe("LocalNode auth sync", () => {
 
     const account = node.expectCurrentAccount("after login");
     const profile = creationNode.getCoValue(account.get("profile")!);
-    const inbox = creationNode.getCoValue(account.get("inbox")!);
+    const service = creationNode.getCoValue(account.get("service")!);
 
     assert(profile.isAvailable());
-    assert(inbox.isAvailable());
+    assert(service.isAvailable());
 
     expect(account.id).toBe(accountID);
     expect(node.agentSecret).toBe(accountSecret);
@@ -255,8 +255,8 @@ describe("LocalNode auth sync", () => {
         Account: account.core,
         Profile: profile,
         ProfileGroup: profile.getGroup().core,
-        Inbox: inbox,
-        InboxGroup: inbox.getGroup().core,
+        Service: service,
+        ServiceGroup: service.getGroup().core,
       }),
     ).toMatchInlineSnapshot(`
       [
@@ -269,10 +269,10 @@ describe("LocalNode auth sync", () => {
         "server -> auth-node | KNOWN Profile sessions: empty",
         "auth-node -> server | LOAD Profile sessions: empty",
         "server -> auth-node | KNOWN Profile sessions: empty",
-        "auth-node -> server | LOAD Inbox sessions: empty",
-        "server -> auth-node | KNOWN Inbox sessions: empty",
-        "auth-node -> server | LOAD Inbox sessions: empty",
-        "server -> auth-node | KNOWN Inbox sessions: empty",
+        "auth-node -> server | LOAD Service sessions: empty",
+        "server -> auth-node | KNOWN Service sessions: empty",
+        "auth-node -> server | LOAD Service sessions: empty",
+        "server -> auth-node | KNOWN Service sessions: empty",
       ]
     `);
   }, 10000);

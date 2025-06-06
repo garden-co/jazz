@@ -602,8 +602,8 @@ test("should sync and load accounts from storage", async () => {
   const account1 = node1.getCoValue(accountID);
   const profile = node1.expectProfileLoaded(accountID);
   const profileGroup = profile.group;
-  const inbox = node1.expectInboxLoaded(accountID);
-  const inboxGroup = inbox.group;
+  const service = node1.expectServiceLoaded(accountID);
+  const serviceGroup = service.group;
 
   await new Promise((resolve) => setTimeout(resolve, 200));
 
@@ -613,8 +613,8 @@ test("should sync and load accounts from storage", async () => {
         Account: account1,
         Profile: profile.core,
         ProfileGroup: profileGroup.core,
-        Inbox: inbox.core,
-        InboxGroup: inboxGroup.core,
+        Service: service.core,
+        ServiceGroup: serviceGroup.core,
       },
       syncMessages.messages,
     ),
@@ -624,12 +624,12 @@ test("should sync and load accounts from storage", async () => {
       "storage -> KNOWN Account sessions: header/5",
       "client -> CONTENT ProfileGroup header: true new: After: 0 New: 5",
       "storage -> KNOWN ProfileGroup sessions: header/5",
-      "client -> CONTENT InboxGroup header: true new: After: 0 New: 5",
-      "storage -> KNOWN InboxGroup sessions: header/5",
+      "client -> CONTENT ServiceGroup header: true new: After: 0 New: 5",
+      "storage -> KNOWN ServiceGroup sessions: header/5",
       "client -> CONTENT Profile header: true new: After: 0 New: 1",
       "storage -> KNOWN Profile sessions: header/1",
-      "client -> CONTENT Inbox header: true new: ",
-      "storage -> KNOWN Inbox sessions: header/0",
+      "client -> CONTENT Service header: true new: ",
+      "storage -> KNOWN Service sessions: header/0",
     ]
   `);
 
@@ -653,8 +653,8 @@ test("should sync and load accounts from storage", async () => {
         Account: account1,
         Profile: profile.core,
         ProfileGroup: profileGroup.core,
-        Inbox: inbox.core,
-        InboxGroup: inboxGroup.core,
+        Service: service.core,
+        ServiceGroup: serviceGroup.core,
       },
       syncMessages.messages,
     ),
@@ -668,11 +668,11 @@ test("should sync and load accounts from storage", async () => {
       "storage -> CONTENT Profile header: true new: After: 0 New: 1",
       "client -> KNOWN ProfileGroup sessions: header/5",
       "client -> KNOWN Profile sessions: header/1",
-      "client -> LOAD Inbox sessions: empty",
-      "storage -> CONTENT InboxGroup header: true new: After: 0 New: 5",
-      "storage -> CONTENT Inbox header: true new: ",
-      "client -> KNOWN InboxGroup sessions: header/5",
-      "client -> KNOWN Inbox sessions: header/0",
+      "client -> LOAD Service sessions: empty",
+      "storage -> CONTENT ServiceGroup header: true new: After: 0 New: 5",
+      "storage -> CONTENT Service header: true new: ",
+      "client -> KNOWN ServiceGroup sessions: header/5",
+      "client -> KNOWN Service sessions: header/0",
     ]
   `);
 

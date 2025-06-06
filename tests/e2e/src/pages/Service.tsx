@@ -1,8 +1,8 @@
 import {
   useAccount,
-  experimental_useInboxSender as useInboxSender,
+  experimental_useServiceSender as useServiceSender,
 } from "jazz-react";
-import { Account, CoMap, Group, ID, Inbox, coField } from "jazz-tools";
+import { Account, CoMap, Group, ID, Service, coField } from "jazz-tools";
 import { useEffect, useRef, useState } from "react";
 import { createCredentiallessIframe } from "../lib/createCredentiallessIframe";
 
@@ -16,7 +16,7 @@ function getIdParam() {
   return (url.searchParams.get("id") as ID<Account> | undefined) ?? undefined;
 }
 
-export function InboxPage() {
+export function ServicePage() {
   const [id] = useState(getIdParam);
   const { me } = useAccount();
   const [pingPong, setPingPong] = useState<PingPong | null>(null);
@@ -27,11 +27,11 @@ export function InboxPage() {
     let unmounted = false;
 
     async function load() {
-      const inbox = await Inbox.load(me);
+      const service = await Service.load(me);
 
       if (unmounted) return;
 
-      unsubscribe = inbox.subscribe(PingPong, async (message) => {
+      unsubscribe = service.subscribe(PingPong, async (message) => {
         const pingPong = PingPong.create(
           { ping: message.ping, pong: Date.now() },
           { owner: message._owner },
@@ -48,7 +48,7 @@ export function InboxPage() {
     };
   }, [me]);
 
-  const sendPingPong = useInboxSender(id);
+  const sendPingPong = useServiceSender(id);
 
   useEffect(() => {
     async function load() {
@@ -82,7 +82,7 @@ export function InboxPage() {
 
   return (
     <div>
-      <h1>Inbox test</h1>
+      <h1>Service test</h1>
       <button onClick={handlePingPong}>Start a ping-pong</button>
       {pingPong && (
         <div data-testid="ping-pong">

@@ -47,7 +47,7 @@ export function useAcceptInvite<S extends CoValueOrZodSchema>({
 }
 
 export {
-  experimental_useInboxSender,
+  experimental_useServiceSender,
   useJazzContext,
   useAccount,
   useAccountOrGuest,

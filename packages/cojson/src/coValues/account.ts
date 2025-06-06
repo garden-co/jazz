@@ -173,12 +173,12 @@ export class RawProfile<
   Meta extends JsonObject | null = JsonObject | null,
 > extends RawCoMap<Shape, Meta> {}
 
-export type InboxShape = {
-  inbox: string;
+export type ServiceShape = {
+  service: string;
 };
 
-export class RawInbox<
-  Shape extends InboxShape = InboxShape,
+export class RawService<
+  Shape extends ServiceShape = ServiceShape,
   Meta extends JsonObject | null = JsonObject | null,
 > extends RawCoMap<Shape, Meta> {}
 

@@ -190,7 +190,7 @@ export const AccountRoot = co.map({
 export const JazzAccount = co.account({
   root: AccountRoot,
   profile: co.map({ name: z.string() }),
-  inbox: co.inbox()
+  service: co.service()
 });
 
 export function OrderForm({
@@ -303,7 +303,7 @@ export const AccountRoot = co.map({
 export const JazzAccount = co.account({
   root: AccountRoot,
   profile: co.map({ name: z.string() }),
-  inbox: co.inbox()
+  service: co.service()
 });
 
 export function OrderForm({
@@ -387,7 +387,7 @@ export const AccountRoot = co.map({ // [!code ++:15]
 export const JazzAccount = co.account({
   root: AccountRoot,
   profile: co.map({ name: z.string() }),
-  inbox: co.inbox()
+  service: co.service()
 }).withMigration((account, creationProps?: { name: string }) => {
   if (account.root === undefined) {
     const draft = DraftBubbleTeaOrder.create({});
@@ -419,7 +419,7 @@ export const AccountRoot = co.map({
 export const JazzAccount = co.account({
   root: AccountRoot,
   profile: co.map({ name: z.string() }),
-  inbox: co.inbox()
+  service: co.service()
 }).withMigration((account, creationProps?: { name: string }) => {
   if (account.root === undefined) {
     const draft = DraftBubbleTeaOrder.create({});
@@ -479,7 +479,7 @@ export const AccountRoot = co.map({
 export const JazzAccount = co.account({
   root: AccountRoot,
   profile: co.map({ name: z.string() }),
-  inbox: co.inbox()
+  service: co.service()
 }).withMigration((account, creationProps?: { name: string }) => {
   if (account.root === undefined) {
     const draft = DraftBubbleTeaOrder.create({});
@@ -640,7 +640,7 @@ export const AccountRoot = co.map({
 export const JazzAccount = co.account({
   root: AccountRoot,
   profile: co.map({ name: z.string() }),
-  inbox: co.inbox()
+  service: co.service()
 }).withMigration((account, creationProps?: { name: string }) => {
   if (account.root === undefined) {
     const draft = DraftBubbleTeaOrder.create({});

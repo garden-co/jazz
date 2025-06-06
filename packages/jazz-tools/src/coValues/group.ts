@@ -7,7 +7,7 @@ import type {
   Role,
 } from "cojson";
 import type {
-  AccountInbox,
+  AccountService,
   AnyAccountSchema,
   CoMap,
   CoValue,
@@ -55,7 +55,7 @@ export class Group extends CoValueBase implements CoValue {
   get _schema(): {
     profile: Schema;
     root: Schema;
-    inbox: Schema;
+    service: Schema;
   } {
     return (this.constructor as typeof Group)._schema;
   }
@@ -63,7 +63,7 @@ export class Group extends CoValueBase implements CoValue {
     this._schema = {
       profile: "json" satisfies Schema,
       root: "json" satisfies Schema,
-      inbox: "json" satisfies Schema,
+      service: "json" satisfies Schema,
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
     } as any;
     Object.defineProperty(this.prototype, "_schema", {
@@ -73,12 +73,12 @@ export class Group extends CoValueBase implements CoValue {
 
   declare profile: Profile | null;
   declare root: CoMap | null;
-  declare inbox: AccountInbox | null;
+  declare service: AccountService | null;
 
   get _refs(): {
     profile: Ref<Profile> | undefined;
     root: Ref<CoMap> | undefined;
-    inbox: Ref<AccountInbox> | undefined;
+    service: Ref<AccountService> | undefined;
   } {
     const profileID = this._raw.get("profile") as unknown as
       | ID<NonNullable<this["profile"]>>
@@ -86,8 +86,8 @@ export class Group extends CoValueBase implements CoValue {
     const rootID = this._raw.get("root") as unknown as
       | ID<NonNullable<this["root"]>>
       | undefined;
-    const inboxID = this._raw.get("inbox") as unknown as
-      | ID<NonNullable<this["inbox"]>>
+    const serviceID = this._raw.get("service") as unknown as
+      | ID<NonNullable<this["service"]>>
       | undefined;
     return {
       profile: profileID
@@ -110,15 +110,15 @@ export class Group extends CoValueBase implements CoValue {
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
           ) as any as this["root"] extends CoMap ? Ref<this["root"]> : never)
         : undefined,
-      inbox: inboxID
+      service: serviceID
         ? (new Ref(
-            inboxID,
+            serviceID,
             this._loadedAs,
-            this._schema.inbox as RefEncoded<NonNullable<this["inbox"]>>,
+            this._schema.service as RefEncoded<NonNullable<this["service"]>>,
             this,
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          ) as any as this["inbox"] extends AccountInbox
-            ? Ref<this["inbox"]>
+          ) as any as this["service"] extends AccountService
+            ? Ref<this["service"]>
             : never)
         : undefined,
     };

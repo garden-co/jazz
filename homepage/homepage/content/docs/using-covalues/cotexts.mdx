@@ -345,7 +345,7 @@ const JazzProfile = co.profile({
 const JazzAccount = co.account({
   profile: JazzProfile,
   root: co.map({}),
-  inbox: co.inbox()
+  service: co.service()
 });
 
 import { useAccount, useCoState } from "jazz-react";

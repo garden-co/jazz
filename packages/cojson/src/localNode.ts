@@ -22,8 +22,8 @@ import {
   RawAccount,
   RawAccountID,
   RawAccountMigration,
-  RawInbox,
   RawProfile,
+  RawService,
   accountHeaderForInitialAgentSecret,
   expectAccount,
 } from "./coValues/account.js";
@@ -228,14 +228,14 @@ export class LocalNode {
       });
       account.set("profile", profile.id, "trusting");
 
-      const inboxGroup = node.createGroup();
-      inboxGroup.addMember("everyone", "reader"); // Allows others to read the account's inbox ID stored in the `RawInbox`
-      const inbox = inboxGroup.createMap<RawInbox>();
-      account.set("inbox", inbox.id, "trusting");
+      const serviceGroup = node.createGroup();
+      serviceGroup.addMember("everyone", "reader"); // Allows others to read the account's service ID stored in the `RawService`
+      const service = serviceGroup.createMap<RawService>();
+      account.set("service", service.id, "trusting");
     }
 
     const profileId = account.get("profile");
-    const inboxId = account.get("inbox");
+    const serviceID = account.get("service");
 
     if (!profileId) {
       throw new Error("Must set account profile in initial migration");
@@ -245,8 +245,8 @@ export class LocalNode {
       await Promise.all([
         node.syncManager.waitForStorageSync(account.id),
         node.syncManager.waitForStorageSync(profileId),
-        inboxId
-          ? node.syncManager.waitForStorageSync(inboxId)
+        serviceID
+          ? node.syncManager.waitForStorageSync(serviceID)
           : Promise.resolve(),
       ]);
     }
@@ -293,7 +293,7 @@ export class LocalNode {
       }
 
       const profileID = account.get("profile");
-      const inboxID = account.get("inbox");
+      const serviceID = account.get("service");
       if (!profileID) {
         throw new Error("Account has no profile");
       }
@@ -301,9 +301,9 @@ export class LocalNode {
       // Preload the profile
       await node.load(profileID);
 
-      if (inboxID) {
-        // Preload the inbox if it exists
-        await node.load(inboxID);
+      if (serviceID) {
+        // Preload the service if it exists
+        await node.load(serviceID);
       }
 
       if (migration) {
@@ -595,18 +595,18 @@ export class LocalNode {
   }
 
   /** @internal */
-  expectInboxLoaded(id: RawAccountID, expectation?: string): RawInbox {
+  expectServiceLoaded(id: RawAccountID, expectation?: string): RawService {
     const account = this.expectCoValueLoaded(id, expectation);
-    const inboxID = expectGroup(account.getCurrentContent()).get("inbox");
-    if (!inboxID) {
+    const serviceID = expectGroup(account.getCurrentContent()).get("service");
+    if (!serviceID) {
       throw new Error(
-        `${expectation ? expectation + ": " : ""}Account ${id} has no inbox`,
+        `${expectation ? expectation + ": " : ""}Account ${id} has no service`,
       );
     }
     return this.expectCoValueLoaded(
-      inboxID,
+      serviceID,
       expectation,
-    ).getCurrentContent() as RawInbox;
+    ).getCurrentContent() as RawService;
   }
 
   /** @internal */

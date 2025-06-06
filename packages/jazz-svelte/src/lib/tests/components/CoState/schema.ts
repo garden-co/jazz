@@ -13,7 +13,7 @@ export const Person = co.map({
 export const MyAccount = co.account({
     profile: co.profile(),
     root: Person,
-    inbox: co.inbox()
+    service: co.service()
 }).withMigration((account) => {
     if (!account._refs.root) {
         account.root = Person.create({ name: "John", age: 30, dog: Dog.create({ name: "Rex" }, account) }, account);

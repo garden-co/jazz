@@ -5,15 +5,15 @@ import {
   AnyCoMapSchema,
   CoFeed,
   CoFeedSchema,
-  CoInboxSchema,
   CoListSchema,
   CoMapSchema,
   CoPlainText,
   CoProfileSchema,
   CoRecordSchema,
   CoRichText,
-  DefaultInboxShape,
+  CoServiceSchema,
   DefaultProfileShape,
+  DefaultServiceShape,
   FileStream,
   FileStreamSchema,
   ImageDefinition,
@@ -84,8 +84,8 @@ function enrichAccountSchema<
       name: z.core.$ZodString<string>;
     }>;
     root: AnyCoMapSchema;
-    inbox: AnyCoMapSchema<{
-      inbox?: z.core.$ZodOptional<z.core.$ZodString>;
+    service: AnyCoMapSchema<{
+      service?: z.core.$ZodOptional<z.core.$ZodString>;
     }>;
   },
 >(schema: z.ZodObject<Shape, z.core.$strip>) {
@@ -145,8 +145,8 @@ export const coAccountDefiner = <
       name: z.core.$ZodString<string>;
     }>;
     root: AnyCoMapSchema;
-    inbox: AnyCoMapSchema<{
-      inbox?: z.core.$ZodOptional<z.core.$ZodString>;
+    service: AnyCoMapSchema<{
+      service?: z.core.$ZodOptional<z.core.$ZodString>;
     }>;
   },
 >(
@@ -155,8 +155,8 @@ export const coAccountDefiner = <
       name: z.string(),
     }),
     root: coMapDefiner({}),
-    inbox: coMapDefiner({
-      inbox: z.optional(z.string()),
+    service: coMapDefiner({
+      service: z.optional(z.string()),
     }),
   } as unknown as Shape,
 ): AccountSchema<Shape> => {
@@ -216,18 +216,18 @@ export const coListDefiner = <T extends z.core.$ZodType>(
   return enrichCoListSchema(arraySchema);
 };
 
-export const coInboxDefiner = <
-  Shape extends z.core.$ZodLooseShape = Simplify<DefaultInboxShape>,
+export const coServiceDefiner = <
+  Shape extends z.core.$ZodLooseShape = Simplify<DefaultServiceShape>,
 >(
   shape: Shape & {
-    inbox?: z.core.$ZodOptional<z.core.$ZodString>;
+    service?: z.core.$ZodOptional<z.core.$ZodString>;
   } = {} as any,
-): CoInboxSchema<Shape> => {
+): CoServiceSchema<Shape> => {
   const ehnancedShape = Object.assign(shape ?? {}, {
-    inbox: z.optional(z.string()),
+    service: z.optional(z.string()),
   });
 
-  return coMapDefiner(ehnancedShape) as CoInboxSchema<Shape>;
+  return coMapDefiner(ehnancedShape) as CoServiceSchema<Shape>;
 };
 
 export const coProfileDefiner = <

@@ -7,5 +7,5 @@ export const JazzProfile = co.profile({
 export const JazzAccount = co.account({
   profile: JazzProfile,
   root: co.map({}),
-  inbox: co.inbox(),
+  service: co.service(),
 });

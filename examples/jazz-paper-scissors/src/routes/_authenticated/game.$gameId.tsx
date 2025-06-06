@@ -9,7 +9,7 @@ import {
 import { WORKER_ID } from "@/constants";
 import { Game, NewGameIntent, PlayIntent } from "@/schema";
 import { createFileRoute, redirect } from "@tanstack/react-router";
-import { experimental_useInboxSender, useCoState } from "jazz-react";
+import { experimental_useServiceSender, useCoState } from "jazz-react";
 import { Badge, CircleHelp, Scissors, ScrollText } from "lucide-react";
 import { useEffect, useState } from "react";
 
@@ -52,7 +52,7 @@ function RouteComponent() {
   const [playSelection, setPlaySelection] = useState<
     "rock" | "paper" | "scissors" | undefined
   >(loaderGame[player]?.playSelection);
-  const sendInboxMessage = experimental_useInboxSender(WORKER_ID);
+  const sendServiceMessage = experimental_useServiceSender(WORKER_ID);
 
   const game = useCoState(Game, gameId);
 
@@ -85,13 +85,13 @@ function RouteComponent() {
     playSelection: "rock" | "paper" | "scissors" | undefined,
   ) => {
     if (!playSelection) return;
-    sendInboxMessage(
+    sendServiceMessage(
       PlayIntent.create({ type: "play", gameId, player, playSelection }),
     );
   };
 
   const onNewGame = async () => {
-    sendInboxMessage(NewGameIntent.create({ type: "newGame", gameId }));
+    sendServiceMessage(NewGameIntent.create({ type: "newGame", gameId }));
   };
 
   return (

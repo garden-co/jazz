@@ -1,8 +1,8 @@
 import { expect, test } from "@playwright/test";
 
-test.describe("Inbox - Sync", () => {
+test.describe("Service - Sync", () => {
   test("should pass the message between the two peers", async ({ page }) => {
-    await page.goto("/inbox");
+    await page.goto("/service");
 
     await page.getByRole("button", { name: "Start a ping-pong" }).click();
 

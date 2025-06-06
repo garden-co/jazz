@@ -30,7 +30,7 @@ const MyProfile = co.profile({
 const MyAccount = co.account({
   root: co.map({}),
   profile: MyProfile,
-  inbox: co.inbox()
+  service: co.service()
 });
 
 MyAccount.withMigration((account, creationProps) => {

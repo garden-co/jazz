@@ -244,7 +244,7 @@ describe("ContextManager", () => {
       .account({
         root: AccountRoot,
         profile: co.profile(),
-        inbox: co.inbox(),
+        service: co.service(),
       })
       .withMigration(async (account) => {
         account.root = AccountRoot.create({
@@ -294,7 +294,7 @@ describe("ContextManager", () => {
       .account({
         root: AccountRoot,
         profile: co.profile(),
-        inbox: co.inbox(),
+        service: co.service(),
       })
       .withMigration(async (account) => {
         if (account.root === undefined) {
@@ -349,7 +349,7 @@ describe("ContextManager", () => {
       .account({
         root: AccountRoot,
         profile: co.profile(),
-        inbox: co.inbox(),
+        service: co.service(),
       })
       .withMigration(async (account) => {
         if (account.root === undefined) {

@@ -12,8 +12,8 @@ import {
   CoMap,
   CoValueFromRaw,
   Group,
-  InboxSender,
   Loaded,
+  ServiceSender,
   co,
   coField,
   z,
@@ -125,7 +125,7 @@ describe("startWorker integration", () => {
       .account({
         root: AccountRoot,
         profile: co.profile(),
-        inbox: co.inbox(),
+        service: co.service(),
       })
       .withMigration((account) => {
         if (account.root === undefined) {
@@ -195,7 +195,7 @@ describe("startWorker integration", () => {
     await worker2.done();
   });
 
-  test("reiceves the messages from the inbox", async () => {
+  test("receives the messages from the service", async () => {
     const worker1 = await setup();
     const worker2 = await setupWorker(worker1.syncServer);
 
@@ -207,16 +207,16 @@ describe("startWorker integration", () => {
       { owner: group },
     );
 
-    worker2.experimental.inbox.subscribe(TestMap, async (value) => {
+    worker2.experimental.service.subscribe(TestMap, async (value) => {
       return TestMap.create(
         {
-          value: value.value + " Responded from the inbox",
+          value: value.value + " Responded from the service",
         },
         { owner: value._owner },
       );
     });
 
-    const sender = await InboxSender.load<
+    const sender = await ServiceSender.load<
       Loaded<typeof TestMap>,
       Loaded<typeof TestMap>
     >(worker2.worker.id, worker1.worker);
@@ -225,7 +225,7 @@ describe("startWorker integration", () => {
 
     const result = await TestMap.load(resultId, { loadAs: worker2.worker });
 
-    expect(result?.value).toEqual("Hello! Responded from the inbox");
+    expect(result?.value).toEqual("Hello! Responded from the service");
 
     await worker1.done();
     await worker2.done();
