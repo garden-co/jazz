@@ -299,7 +299,7 @@ export function PagefindSearch() {
           </div>
           <div ref={listRef}>
             {results.length > 0 ? (
-              <ComboboxOptions className="border-t divide-y h-[50vh] sm:h-[300px] max-h-[60vh] sm:max-h-[400px] overflow-y-auto overflow-x-hidden overscroll-contain">
+              <ComboboxOptions className="border-t divide-y h-[60vh] sm:h-[600px] max-h-[60vh] sm:max-h-[800px] overflow-y-auto overflow-x-hidden overscroll-contain">
                 {results.map((result) => (
                   <div className="space-y-1 p-2">
                     <ComboboxOption
