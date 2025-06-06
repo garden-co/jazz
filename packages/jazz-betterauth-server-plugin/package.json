@@ -1,6 +1,6 @@
 {
   "name": "jazz-betterauth-server-plugin",
-  "version": "0.14.21",
+  "version": "0.14.22",
   "type": "module",
   "main": "dist/index.js",
   "types": "src/index.ts",

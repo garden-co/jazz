@@ -1,5 +1,11 @@
 # cojson
 
+## 0.14.22
+
+### Patch Changes
+
+- 57fb69f: fix: clarify `Group.addMember` error message when attempting to set roles with insufficient permissions
+
 ## 0.14.21
 
 ### Patch Changes
