@@ -531,7 +531,6 @@ export const AccountAndGroupProxyHandler: ProxyHandler<Account | Group> = {
     } else if (key === "inbox") {
       if (value) {
         // The 'trusting' privacy level means that the inbox ID is readable by anyone, allowing other accounts to load this account's inbox ID.
-        // FIXME: The setter can read the inbox ID, but nobody else can. No idea why.
         target._raw.set(
           "inbox",
           value.id as unknown as CoID<RawCoMap>,

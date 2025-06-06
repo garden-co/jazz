@@ -3,6 +3,7 @@ import { CoStreamItem, RawCoStream } from "cojson";
 import {
   Account,
   AccountInbox,
+  CoMap,
   CoValue,
   CoValueClass,
   CoValueOrZodSchema,
@@ -368,6 +369,8 @@ export class InboxSender<I extends CoValue, O extends CoValue | undefined> {
       );
     }
 
+    console.log("inboxOwnerInbox", CoMap.fromRaw(inboxOwnerInbox));
+    console.log("inboxOwnerInbox inbox property", inboxOwnerInbox.get("inbox"));
     const inboxRoot = await node.load(
       inboxOwnerInbox.get("inbox") as CoID<InboxRoot>,
     );
