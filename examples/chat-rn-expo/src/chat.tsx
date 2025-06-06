@@ -1,4 +1,5 @@
 import * as Clipboard from "expo-clipboard";
+import { clearLocalData, useAccount, useCoState } from "jazz-expo";
 import { Account, Group } from "jazz-tools";
 import { useState } from "react";
 import React, {
@@ -13,8 +14,6 @@ import React, {
   Alert,
   StyleSheet,
 } from "react-native";
-
-import { useAccount, useCoState } from "jazz-expo";
 import { Chat, Message } from "./schema";
 
 export default function ChatScreen() {
@@ -27,6 +26,14 @@ export default function ChatScreen() {
   function handleLogOut() {
     setChatId(undefined);
     logOut();
+  }
+
+  function handleClearLocalData() {
+    clearLocalData()
+      .catch(console.error)
+      .then(() => {
+        handleLogOut();
+      });
   }
 
   const createChat = () => {
@@ -151,6 +158,7 @@ export default function ChatScreen() {
             />
             <Text style={{ fontWeight: "bold", fontSize: 18 }}>Jazz chat</Text>
             <Button onPress={handleLogOut} title="Logout" />
+            <Button onPress={handleClearLocalData} title="Reset" />
           </View>
           <FlatList
             contentContainerStyle={{
