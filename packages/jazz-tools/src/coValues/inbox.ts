@@ -36,14 +36,18 @@ export function createInboxRoot(account: Account) {
   }
 
   const rawAccount = account._raw;
-
+  // Inbox root needs to be publicly readable so the ID of its properties (in particular `messages`) can be read.
   const group = rawAccount.core.node.createGroup();
-  group.addMember("everyone", "writeOnly");
-  const messagesFeed = group.createStream<MessagesStream>();
+  group.addMember("everyone", "reader");
 
-  const inboxRoot = rawAccount.createMap<InboxRoot>();
-  const processedFeed = rawAccount.createStream<TxKeyStream>();
-  const failedFeed = rawAccount.createStream<FailedMessagesStream>();
+  // The `messages` property (despite having a public ID) is write-only.
+  const messagesGroup = rawAccount.core.node.createGroup();
+  messagesGroup.addMember("everyone", "writeOnly");
+  const messagesFeed = messagesGroup.createStream<MessagesStream>();
+
+  const inboxRoot = group.createMap<InboxRoot>();
+  const processedFeed = group.createStream<TxKeyStream>();
+  const failedFeed = group.createStream<FailedMessagesStream>();
 
   inboxRoot.set("messages", messagesFeed.id);
   inboxRoot.set("processed", processedFeed.id);
@@ -359,7 +363,6 @@ export class InboxSender<I extends CoValue, O extends CoValue | undefined> {
     }
 
     if (
-      inboxOwnerInbox.group.roleOf(currentAccount._raw.id) !== "writeOnly" &&
       inboxOwnerInbox.group.roleOf(currentAccount._raw.id) !== "reader" &&
       inboxOwnerInbox.group.roleOf(currentAccount._raw.id) !== "writer" &&
       inboxOwnerInbox.group.roleOf(currentAccount._raw.id) !== "admin"
@@ -369,16 +372,26 @@ export class InboxSender<I extends CoValue, O extends CoValue | undefined> {
       );
     }
 
-    console.log("inboxOwnerInbox", CoMap.fromRaw(inboxOwnerInbox));
-    console.log("inboxOwnerInbox inbox property", inboxOwnerInbox.get("inbox"));
-    const inboxRoot = await node.load(
-      inboxOwnerInbox.get("inbox") as CoID<InboxRoot>,
-    );
+    const inboxRootId = inboxOwnerInbox.get("inbox") as
+      | CoID<InboxRoot>
+      | undefined;
+
+    console.log("inboxOwnerInbox.keys", inboxOwnerInbox.keys());
+    console.log("inboxOwnerInbox.core.verified", inboxOwnerInbox.core.verified);
+    console.log("inboxOwnerInbox inbox property", inboxRootId);
+
+    if (!inboxRootId) {
+      throw new Error("Inbox owner does not have their inbox setup");
+    }
+
+    const inboxRoot = await node.load(inboxRootId);
 
     if (inboxRoot === "unavailable") {
       throw new Error("Failed to load the inbox root");
     }
 
+    console.log("inboxRoot.keys", inboxRoot.keys());
+    console.log("inboxRoot.core.verified", inboxRoot.core.verified);
     console.log("sender loading messages ID", inboxRoot.get("messages"));
     const messages = await node.load(inboxRoot.get("messages")!);
 

@@ -229,7 +229,7 @@ export class LocalNode {
       account.set("profile", profile.id, "trusting");
 
       const inboxGroup = node.createGroup();
-      inboxGroup.addMember("everyone", "writeOnly");
+      inboxGroup.addMember("everyone", "reader"); // Allows others to read the account's inbox ID stored in the `RawInbox`
       const inbox = inboxGroup.createMap<RawInbox>();
       account.set("inbox", inbox.id, "trusting");
     }

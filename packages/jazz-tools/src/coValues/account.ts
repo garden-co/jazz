@@ -383,7 +383,7 @@ export class Account extends CoValueBase implements CoValue {
       const inboxRoot = createInboxRoot(this);
       console.log("creating inbox in migration");
       this.inbox = AccountInbox.create({ inbox: inboxRoot.id }, inboxGroup);
-      inboxGroup.addMember("everyone", "writeOnly");
+      inboxGroup.addMember("everyone", "reader"); // Allows others to see our account's inbox property, which contains the ID of our inbox (ie, allows others to see our inbox's ID)
       console.log("created inbox in migration", this.inbox);
     } else if (this.inbox) {
       if (this.inbox._owner._type !== "Group") {
