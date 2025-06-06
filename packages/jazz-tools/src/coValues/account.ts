@@ -1,6 +1,7 @@
 import {
   AgentSecret,
   CoID,
+  CoValueUniqueness,
   ControlledAccount,
   CryptoProvider,
   Everyone,
@@ -16,15 +17,14 @@ import {
 } from "cojson";
 import {
   AnonymousJazzAgent,
-  AnyAccountSchema,
-  type CoMap,
+  CoMap,
+  CoMapInit,
   type CoValue,
   CoValueBase,
   CoValueClass,
   CoValueOrZodSchema,
   type Group,
   ID,
-  InstanceOfSchema,
   InstanceOrPrimitiveOfSchema,
   Profile,
   Ref,
@@ -36,17 +36,22 @@ import {
   Resolved,
   type Schema,
   SchemaInit,
+  Simplify,
   SubscribeListenerOptions,
   SubscribeRestArgs,
   accessChildByKey,
   activeAccountContext,
   anySchemaToCoSchema,
+  co,
+  coField,
   coValuesCache,
-  createInboxRoot,
+  createServiceRoot,
   ensureCoValueLoaded,
   inspect,
+  isAccountInstance,
   loadCoValue,
   loadCoValueWithoutMe,
+  parseGroupCreateOptions,
   parseSubscribeRestArgs,
   subscribeToCoValueWithoutMe,
   subscribeToExistingCoValue,
@@ -66,6 +71,10 @@ type AccountMembers<A extends Account> = [
   },
 ];
 
+export class AccountService extends CoMap {
+  service? = coField.optional.string;
+}
+
 /** @category Identity & Permissions */
 export class Account extends CoValueBase implements CoValue {
   declare id: ID<this>;
@@ -77,6 +86,7 @@ export class Account extends CoValueBase implements CoValue {
   get _schema(): {
     profile: Schema;
     root: Schema;
+    service: Schema;
   } {
     return (this.constructor as typeof Account)._schema;
   }
@@ -90,6 +100,10 @@ export class Account extends CoValueBase implements CoValue {
         ref: () => RegisteredSchemas["CoMap"],
         optional: true,
       } satisfies RefEncoded<CoMap>,
+      service: {
+        ref: () => AccountService,
+        optional: false,
+      } satisfies RefEncoded<AccountService>,
     };
   }
 
@@ -112,12 +126,15 @@ export class Account extends CoValueBase implements CoValue {
 
   declare profile: Profile | null;
   declare root: CoMap | null;
+  declare service: AccountService | null;
 
   getDescriptor(key: string) {
     if (key === "profile") {
       return this._schema.profile;
     } else if (key === "root") {
       return this._schema.root;
+    } else if (key === "service") {
+      return this._schema.service;
     }
 
     return undefined;
@@ -126,12 +143,16 @@ export class Account extends CoValueBase implements CoValue {
   get _refs(): {
     profile: RefIfCoValue<Profile> | undefined;
     root: RefIfCoValue<CoMap> | undefined;
+    service: RefIfCoValue<AccountService> | undefined;
   } {
     const profileID = this._raw.get("profile") as unknown as
       | ID<NonNullable<this["profile"]>>
       | undefined;
     const rootID = this._raw.get("root") as unknown as
       | ID<NonNullable<this["root"]>>
+      | undefined;
+    const serviceID = this._raw.get("service") as unknown as
+      | ID<NonNullable<this["service"]>>
       | undefined;
 
     return {
@@ -156,6 +177,17 @@ export class Account extends CoValueBase implements CoValue {
             this,
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
           ) as any as RefIfCoValue<this["root"]>)
+        : undefined,
+      service: serviceID
+        ? (new Ref(
+            serviceID,
+            this._loadedAs,
+            this._schema.service as RefEncoded<
+              NonNullable<this["service"]> & CoValue
+            >,
+            this,
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          ) as any as RefIfCoValue<this["service"]>)
         : undefined,
     };
   }
@@ -352,6 +384,14 @@ export class Account extends CoValueBase implements CoValue {
   async applyMigration(creationProps?: AccountCreationProps) {
     await this.migrate(creationProps);
 
+    if (this.service && this.service.service === undefined) {
+      this.service = co.service().create({}, this);
+    } else if (this.service && this.service._owner._type !== "Group") {
+      throw new Error("Service must be owned by a Group", {
+        cause: `The service of the account "${this.id}" was created with an Account as owner, which is not allowed.`,
+      });
+    }
+
     // if the user has not defined a profile themselves, we create one
     if (this.profile === undefined && creationProps) {
       const profileGroup = RegisteredSchemas["Group"].create({ owner: this });
@@ -367,15 +407,9 @@ export class Account extends CoValueBase implements CoValue {
     }
 
     const node = this._raw.core.node;
-    const profile = node
+    node
       .expectCoValueLoaded(this._raw.get("profile")!)
       .getCurrentContent() as RawCoMap;
-
-    if (!profile.get("inbox")) {
-      const inboxRoot = createInboxRoot(this);
-      profile.set("inbox", inboxRoot.id);
-      profile.set("inboxInvite", inboxRoot.inviteLink);
-    }
   }
 
   // Placeholder method for subclasses to override
@@ -467,9 +501,13 @@ export class Account extends CoValueBase implements CoValue {
   }
 }
 
+/**
+ * For accounts and groups, the values for the `profile`, `root`, and `service` keys are their IDs, not the values themselves.
+ * Setting any other property will set a key-value mapping where the key is the property name and the value is the property value.
+ */
 export const AccountAndGroupProxyHandler: ProxyHandler<Account | Group> = {
   get(target, key, receiver) {
-    if (key === "profile" || key === "root") {
+    if (key === "profile" || key === "root" || key === "service") {
       const id = target._raw.get(key);
 
       if (id) {
@@ -483,15 +521,28 @@ export const AccountAndGroupProxyHandler: ProxyHandler<Account | Group> = {
   },
   set(target, key, value, receiver) {
     if (
-      (key === "profile" || key === "root") &&
+      (key === "profile" || key === "root" || key === "service") &&
       typeof value === "object" &&
       SchemaInit in value
     ) {
       (target.constructor as typeof CoMap)._schema ||= {};
       (target.constructor as typeof CoMap)._schema[key] = value[SchemaInit];
       return true;
+    } else if (key === "service") {
+      if (value) {
+        // The 'trusting' privacy level means that the service ID is readable by anyone, allowing other accounts to load this account's service ID.
+        target._raw.set(
+          "service",
+          value.id as unknown as CoID<RawCoMap>,
+          "trusting",
+        );
+      }
+
+      return true;
     } else if (key === "profile") {
       if (value) {
+        // The 'trusting' privacy level allows other accounts to load this account's profile ID.
+        // This is unlike the account root, whose ID is not visible to other accounts (unless shared out-of-band).
         target._raw.set(
           "profile",
           value.id as unknown as CoID<RawCoMap>,
@@ -511,7 +562,7 @@ export const AccountAndGroupProxyHandler: ProxyHandler<Account | Group> = {
   },
   defineProperty(target, key, descriptor) {
     if (
-      (key === "profile" || key === "root") &&
+      (key === "profile" || key === "root" || key === "service") &&
       typeof descriptor.value === "object" &&
       SchemaInit in descriptor.value
     ) {

@@ -4,9 +4,9 @@ import { Link, RouterProvider, createBrowserRouter } from "react-router-dom";
 import { AuthAndJazz } from "./jazz";
 import { ConcurrentChanges } from "./pages/ConcurrentChanges";
 import { FileStreamTest } from "./pages/FileStream";
-import { InboxPage } from "./pages/Inbox";
 import { ResumeSyncState } from "./pages/ResumeSyncState";
 import { RetryUnavailable } from "./pages/RetryUnavailable";
+import { ServicePage } from "./pages/Service";
 import { Sharing } from "./pages/Sharing";
 import { TestInput } from "./pages/TestInput";
 import { WriteOnlyRole } from "./pages/WriteOnly";
@@ -36,7 +36,7 @@ function Index() {
         <Link to="/concurrent-changes">Concurrent Changes</Link>
       </li>
       <li>
-        <Link to="/inbox">Inbox</Link>
+        <Link to="/service">Service</Link>
       </li>
     </ul>
   );
@@ -68,8 +68,8 @@ const router = createBrowserRouter([
     element: <WriteOnlyRole />,
   },
   {
-    path: "/inbox",
-    element: <InboxPage />,
+    path: "/service",
+    element: <ServicePage />,
   },
   {
     path: "/concurrent-changes",

@@ -14,7 +14,7 @@ export type { CoValue, ID } from "./internal.js";
 
 export { Encoders, coField } from "./internal.js";
 
-export { Inbox, InboxSender } from "./internal.js";
+export { Service, ServiceSender } from "./internal.js";
 
 export { Group } from "./internal.js";
 export { CoValueBase } from "./internal.js";

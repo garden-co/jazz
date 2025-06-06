@@ -175,6 +175,7 @@ describe("extend", () => {
       node2.node,
       parentGroup.id,
     );
+    await parentGroupOnNode2.core.waitForAvailable();
 
     childGroup.extend(parentGroupOnNode2);
 
@@ -231,6 +232,7 @@ describe("unextend", () => {
       node2.node,
       parentGroup.id,
     );
+    await parentGroupOnNode2.core.waitForAvailable();
 
     childGroup.extend(parentGroupOnNode2);
 
@@ -273,6 +275,7 @@ describe("unextend", () => {
       aliceNode.node,
       childGroup.id,
     );
+    await childGroupOnAlice.core.waitForAvailable();
 
     // `childGroup` no longer has `parentGroup`'s members
     await childGroupOnAlice.revokeExtend(parentGroup);

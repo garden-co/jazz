@@ -10,8 +10,9 @@ import {
   AccountSchema,
   AnyAccountSchema,
   CoValueFromRaw,
-  Inbox,
   InstanceOfSchema,
+  Service,
+  co,
   createJazzContextFromExistingCredentials,
   randomSessionProvider,
 } from "jazz-tools";
@@ -94,7 +95,10 @@ export async function startWorker<
     throw new Error("Account has no profile");
   }
 
-  const inbox = await Inbox.load(account);
+  if (!account.service?.service) {
+    account.service = co.service().create({}, account);
+  }
+  const service = await Service.load(account);
 
   async function done() {
     await context.account.waitForAllCoValuesSync();
@@ -103,14 +107,14 @@ export async function startWorker<
     context.done();
   }
 
-  const inboxPublicApi = {
-    subscribe: inbox.subscribe.bind(inbox) as Inbox["subscribe"],
+  const servicePublicApi = {
+    subscribe: service.subscribe.bind(service) as Service["subscribe"],
   };
 
   return {
     worker: context.account as InstanceOfSchema<S>,
     experimental: {
-      inbox: inboxPublicApi,
+      service: servicePublicApi,
     },
     waitForConnection() {
       return wsPeer.waitUntilConnected();

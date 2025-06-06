@@ -7,6 +7,7 @@ import type {
   Role,
 } from "cojson";
 import type {
+  AccountService,
   AnyAccountSchema,
   CoMap,
   CoValue,
@@ -54,6 +55,7 @@ export class Group extends CoValueBase implements CoValue {
   get _schema(): {
     profile: Schema;
     root: Schema;
+    service: Schema;
   } {
     return (this.constructor as typeof Group)._schema;
   }
@@ -61,6 +63,7 @@ export class Group extends CoValueBase implements CoValue {
     this._schema = {
       profile: "json" satisfies Schema,
       root: "json" satisfies Schema,
+      service: "json" satisfies Schema,
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
     } as any;
     Object.defineProperty(this.prototype, "_schema", {
@@ -70,16 +73,21 @@ export class Group extends CoValueBase implements CoValue {
 
   declare profile: Profile | null;
   declare root: CoMap | null;
+  declare service: AccountService | null;
 
   get _refs(): {
     profile: Ref<Profile> | undefined;
     root: Ref<CoMap> | undefined;
+    service: Ref<AccountService> | undefined;
   } {
     const profileID = this._raw.get("profile") as unknown as
       | ID<NonNullable<this["profile"]>>
       | undefined;
     const rootID = this._raw.get("root") as unknown as
       | ID<NonNullable<this["root"]>>
+      | undefined;
+    const serviceID = this._raw.get("service") as unknown as
+      | ID<NonNullable<this["service"]>>
       | undefined;
     return {
       profile: profileID
@@ -101,6 +109,17 @@ export class Group extends CoValueBase implements CoValue {
             this,
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
           ) as any as this["root"] extends CoMap ? Ref<this["root"]> : never)
+        : undefined,
+      service: serviceID
+        ? (new Ref(
+            serviceID,
+            this._loadedAs,
+            this._schema.service as RefEncoded<NonNullable<this["service"]>>,
+            this,
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          ) as any as this["service"] extends AccountService
+            ? Ref<this["service"]>
+            : never)
         : undefined,
     };
   }

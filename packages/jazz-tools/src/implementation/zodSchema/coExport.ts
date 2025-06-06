@@ -10,4 +10,5 @@ export {
   coImageDefiner as image,
   coAccountDefiner as account,
   coProfileDefiner as profile,
+  coServiceDefiner as service,
 } from "./zodCo.js";

@@ -10,7 +10,7 @@ import { Input } from "@/components/ui/input";
 import { WORKER_ID } from "@/constants";
 import { JoinGameRequest, WaitingRoom } from "@/schema";
 import { createFileRoute, redirect } from "@tanstack/react-router";
-import { Group, InboxSender } from "jazz-tools";
+import { Group, ServiceSender } from "jazz-tools";
 import { ClipboardCopyIcon, Loader2Icon } from "lucide-react";
 import { useEffect, useState } from "react";
 
@@ -29,7 +29,7 @@ export const Route = createFileRoute(
       throw redirect({ to: "/" });
     }
     if (!waitingRoom?.account1?.isMe) {
-      const sender = await InboxSender.load<JoinGameRequest, WaitingRoom>(
+      const sender = await ServiceSender.load<JoinGameRequest, WaitingRoom>(
         WORKER_ID,
         me,
         // { account1: {}, account2: {}, me, game: {} },

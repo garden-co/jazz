@@ -23,6 +23,7 @@ import {
   RawAccountID,
   RawAccountMigration,
   RawProfile,
+  RawService,
   accountHeaderForInitialAgentSecret,
   expectAccount,
 } from "./coValues/account.js";
@@ -226,9 +227,15 @@ export class LocalNode {
         name: creationProps.name,
       });
       account.set("profile", profile.id, "trusting");
+
+      const serviceGroup = node.createGroup();
+      serviceGroup.addMember("everyone", "reader"); // Allows others to read the account's service ID stored in the `RawService`
+      const service = serviceGroup.createMap<RawService>();
+      account.set("service", service.id, "trusting");
     }
 
     const profileId = account.get("profile");
+    const serviceID = account.get("service");
 
     if (!profileId) {
       throw new Error("Must set account profile in initial migration");
@@ -238,6 +245,9 @@ export class LocalNode {
       await Promise.all([
         node.syncManager.waitForStorageSync(account.id),
         node.syncManager.waitForStorageSync(profileId),
+        serviceID
+          ? node.syncManager.waitForStorageSync(serviceID)
+          : Promise.resolve(),
       ]);
     }
 
@@ -283,12 +293,18 @@ export class LocalNode {
       }
 
       const profileID = account.get("profile");
+      const serviceID = account.get("service");
       if (!profileID) {
         throw new Error("Account has no profile");
       }
 
       // Preload the profile
       await node.load(profileID);
+
+      if (serviceID) {
+        // Preload the service if it exists
+        await node.load(serviceID);
+      }
 
       if (migration) {
         await migration(account, node);
@@ -576,6 +592,21 @@ export class LocalNode {
       profileID,
       expectation,
     ).getCurrentContent() as RawProfile;
+  }
+
+  /** @internal */
+  expectServiceLoaded(id: RawAccountID, expectation?: string): RawService {
+    const account = this.expectCoValueLoaded(id, expectation);
+    const serviceID = expectGroup(account.getCurrentContent()).get("service");
+    if (!serviceID) {
+      throw new Error(
+        `${expectation ? expectation + ": " : ""}Account ${id} has no service`,
+      );
+    }
+    return this.expectCoValueLoaded(
+      serviceID,
+      expectation,
+    ).getCurrentContent() as RawService;
   }
 
   /** @internal */
