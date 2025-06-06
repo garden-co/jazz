@@ -13,7 +13,9 @@ import {
   ComboboxOption,
   ComboboxOptions,
 } from "@headlessui/react";
+import { track } from "@vercel/analytics";
 import { clsx } from "clsx";
+import { usePathname } from "next/navigation";
 import React, { useState, useEffect, useRef } from "react";
 import { singletonHook } from "react-singleton-hook";
 
@@ -171,6 +173,7 @@ export function PagefindSearch() {
   const [results, setResults] = useState<PagefindResult[]>([]);
   const listRef = useRef<HTMLDivElement>(null);
   const currentFramework = useFramework();
+  const pathname = usePathname();
 
   const close = () => {
     setOpen(false);
@@ -268,6 +271,11 @@ export function PagefindSearch() {
                 url = `${path}${hash}`;
               }
               navigateToUrl(url, close);
+              track("Docs search", {
+                query,
+                destination: url,
+                source: pathname,
+              });
             }
           }}
         >
