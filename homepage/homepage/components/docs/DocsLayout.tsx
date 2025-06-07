@@ -54,8 +54,8 @@ export default function DocsLayout({
   let pagefindProps: {
     [key: `data-pagefind-${string}`]: string | boolean | number;
   } = pagefindIgnore
-    ? { "data-pagefind-ignore": true }
-    : {
+      ? { "data-pagefind-ignore": true }
+      : {
         "data-pagefind-body": true,
         "data-pagefind-meta": `framework: ${framework}`,
       };
@@ -66,7 +66,7 @@ export default function DocsLayout({
 
   return (
     <>
-      <div {...pagefindProps}>{children}</div>
+      <div className="w-full" {...pagefindProps}>{children}</div>
 
       <div className="pl-3 py-8 shrink-0 text-sm sticky align-start top-[61px] w-[16rem] h-[calc(100vh-61px)] overflow-y-auto hidden lg:block">
         {itemsWithoutH1?.length ? (
