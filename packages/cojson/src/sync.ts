@@ -537,36 +537,7 @@ export class SyncManager {
 
     let invalidStateAssumed = false;
 
-    let totalNewTransactionsSize = 0;
-
-    for (const tx of Object.values(msg.new).flatMap(
-      (tx) => tx.newTransactions,
-    )) {
-      const txLength =
-        tx.privacy === "private"
-          ? tx.encryptedChanges.length
-          : tx.changes.length;
-      totalNewTransactionsSize += txLength;
-    }
-
-    if (
-      process.env.DC === "frankf" &&
-      totalNewTransactionsSize > MAX_RECOMMENDED_TX_SIZE * 10
-    ) {
-      logger.error("New content is too large, skipping", {
-        peerId: peer.id,
-        peerRole: peer.role,
-        otherPeersSubscribed: Object.values(this.peers)
-          .filter(
-            (peer) =>
-              peer.role !== "storage" && peer.optimisticKnownStates.has(msg.id),
-          )
-          .map((peer) => peer.id),
-        id: msg.id,
-        totalNewTransactionsSize,
-      });
-      return;
-    }
+    const before = performance.now();
 
     for (const [sessionID, newContentForSession] of Object.entries(msg.new) as [
       SessionID,
@@ -631,6 +602,36 @@ export class SyncManager {
         newContentForSession.after +
           newContentForSession.newTransactions.length,
       );
+    }
+
+    const after = performance.now();
+
+    if (after - before > 5) {
+      let totalNewTransactionsSize = 0;
+
+      for (const tx of Object.values(msg.new).flatMap(
+        (tx) => tx.newTransactions,
+      )) {
+        const txLength =
+          tx.privacy === "private"
+            ? tx.encryptedChanges.length
+            : tx.changes.length;
+        totalNewTransactionsSize += txLength;
+      }
+
+      logger.warn("New content is took long", {
+        peerId: peer.id,
+        peerRole: peer.role,
+        duration: after - before,
+        otherPeersSubscribed: Object.values(this.peers)
+          .filter(
+            (peer) =>
+              peer.role !== "storage" && peer.optimisticKnownStates.has(msg.id),
+          )
+          .map((peer) => peer.id),
+        id: msg.id,
+        totalNewTransactionsSize,
+      });
     }
 
     if (invalidStateAssumed) {
