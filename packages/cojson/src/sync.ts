@@ -549,7 +549,10 @@ export class SyncManager {
       totalNewTransactionsSize += txLength;
     }
 
-    if (totalNewTransactionsSize > MAX_RECOMMENDED_TX_SIZE * 10) {
+    if (
+      process.env.DC === "frankf" &&
+      totalNewTransactionsSize > MAX_RECOMMENDED_TX_SIZE * 10
+    ) {
       logger.error("New content is too large, skipping", {
         peerId: peer.id,
         peerRole: peer.role,
