@@ -1,11 +1,13 @@
 import { useCoState } from "jazz-tools/react";
 import { LinkToHome } from "./LinkToHome.tsx";
-import { OrderForm } from "./OrderForm.tsx";
+import { OrderFormWithSaveButton } from "./OrderFormWithSaveButton.tsx";
 import { OrderThumbnail } from "./OrderThumbnail.tsx";
 import { BubbleTeaOrder } from "./schema.ts";
 
 export function EditOrder(props: { id: string }) {
-  const order = useCoState(BubbleTeaOrder, props.id);
+  const order = useCoState(BubbleTeaOrder, props.id, {
+    resolve: { addOns: true, instructions: true },
+  });
 
   if (!order) return;
 
@@ -19,7 +21,7 @@ export function EditOrder(props: { id: string }) {
         <strong>Edit your bubble tea order 🧋</strong>
       </h1>
 
-      <OrderForm order={order} />
+      <OrderFormWithSaveButton order={order} />
     </>
   );
 }
