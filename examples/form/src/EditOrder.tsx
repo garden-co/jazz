@@ -15,7 +15,11 @@ export function EditOrder(props: { id: string }) {
     <>
       <LinkToHome />
 
-      <OrderThumbnail order={order} />
+      <div>
+        <p>Saved order:</p>
+
+        <OrderThumbnail order={order} />
+      </div>
 
       <h1 className="text-lg">
         <strong>Edit your bubble tea order 🧋</strong>

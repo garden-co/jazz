@@ -1,3 +1,4 @@
+import { useCoState } from "jazz-react";
 import { CoPlainText, Loaded } from "jazz-tools";
 import { useEffect, useState } from "react";
 import { OrderThumbnail } from "./OrderThumbnail.tsx";
@@ -8,31 +9,26 @@ import {
   ListOfBubbleTeaAddOns,
 } from "./schema.ts";
 
-const useOrderForm = (
-  order: Loaded<
-    typeof BubbleTeaOrder,
-    { addOns: { $each: true }; instructions: true }
-  >,
-) => {
-  const [value, setValue] = useState<
-    | Loaded<
-        typeof BubbleTeaOrder,
-        { addOns: { $each: true }; instructions: true }
-      >
-    | undefined
-  >();
+type LoadedBubbleTeaOrder = Loaded<
+  typeof BubbleTeaOrder,
+  { addOns: { $each: true }; instructions: true }
+>;
 
-  console.log("hook value id", value?.id);
+const useOrderForm = (order: LoadedBubbleTeaOrder) => {
+  const [id, setId] = useState<string | undefined>();
+
+  const value = useCoState(BubbleTeaOrder, id, {
+    resolve: { addOns: { $each: true }, instructions: true },
+  });
 
   useEffect(() => {
     // deep clone order
-    setValue(
-      BubbleTeaOrder.create({
-        ...order,
-        instructions: CoPlainText.create(`${order.instructions}` || ""),
-        addOns: ListOfBubbleTeaAddOns.create([...order.addOns]),
-      }),
-    );
+    const cloned = BubbleTeaOrder.create({
+      ...order,
+      instructions: CoPlainText.create(`${order.instructions}` || ""),
+      addOns: ListOfBubbleTeaAddOns.create([...order.addOns]),
+    });
+    setId(cloned.id);
   }, [order.id]);
 
   if (!value) return { value, save: () => {} };
@@ -42,7 +38,7 @@ const useOrderForm = (
     value.addOns.applyDiff(order.addOns);
     order.deliveryDate = value.deliveryDate;
     order.withMilk = value.withMilk;
-    order.instructions = value.instructions;
+    order.instructions.applyDiff(value.instructions);
   };
 
   return { value, save };
@@ -51,16 +47,11 @@ const useOrderForm = (
 export function OrderFormWithSaveButton({
   order: originalOrder,
 }: {
-  order: Loaded<
-    typeof BubbleTeaOrder,
-    { addOns: { $each: true }; instructions: true }
-  >;
+  order: LoadedBubbleTeaOrder;
 }) {
   const { value: order, save } = useOrderForm(originalOrder);
 
   if (!order) return null;
-
-  console.log("cloned order id", order.id);
 
   const handleInstructionsChange = (
     e: React.ChangeEvent<HTMLTextAreaElement>,
@@ -79,16 +70,10 @@ export function OrderFormWithSaveButton({
 
   return (
     <form onSubmit={submit} className="grid gap-5">
-      <h1>With save button</h1>
-
       <div>
-        <div>original order id: {originalOrder.id}</div>
-        <div>cloned order id: {order.id}</div>
+        <p>Unsaved order:</p>
+        <OrderThumbnail order={order} />
       </div>
-
-      <OrderThumbnail order={order} />
-
-      <strong>base tea: {order.baseTea}</strong>
 
       <div className="flex flex-col gap-2">
         <label htmlFor="baseTea">Base tea</label>
