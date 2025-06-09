@@ -345,9 +345,14 @@ export class ServiceSender<I extends CoValue, O extends CoValue | undefined> {
       throw new Error("Failed to load the service owner");
     }
 
-    const serviceOwnerService = await node.load(
-      serviceOwnerRaw.get("service")!,
-    );
+    const serviceOwnerServiceValue = serviceOwnerRaw.get("service");
+    if (!serviceOwnerServiceValue) {
+      throw new Error(
+        "Service owner does not have their service setup (service field is missing)",
+      );
+    }
+
+    const serviceOwnerService = await node.load(serviceOwnerServiceValue);
 
     if (serviceOwnerService === "unavailable") {
       throw new Error("Failed to load the service owner's service ID");
@@ -368,7 +373,9 @@ export class ServiceSender<I extends CoValue, O extends CoValue | undefined> {
       | undefined;
 
     if (!serviceRootId) {
-      throw new Error("Service owner does not have their service setup");
+      throw new Error(
+        "Service owner does not have their service setup (service root ID is missing)",
+      );
     }
 
     const serviceRoot = await node.load(serviceRootId);
@@ -377,10 +384,14 @@ export class ServiceSender<I extends CoValue, O extends CoValue | undefined> {
       throw new Error("Failed to load the service root");
     }
 
-    const messages = await node.load(serviceRoot.get("messages")!);
+    const messagesId = serviceRoot.get("messages");
+    if (!messagesId) {
+      throw new Error("Service root does not have a messages ID");
+    }
+    const messages = await node.load(messagesId);
 
     if (messages === "unavailable") {
-      throw new Error("Service not found");
+      throw new Error("Service messages are unavailable");
     }
 
     return new ServiceSender<I, O>(currentAccount, serviceOwnerRaw, messages);

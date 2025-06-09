@@ -1,7 +1,6 @@
 import {
   AgentSecret,
   CoID,
-  CoValueUniqueness,
   ControlledAccount,
   CryptoProvider,
   Everyone,
@@ -18,7 +17,6 @@ import {
 import {
   AnonymousJazzAgent,
   CoMap,
-  CoMapInit,
   type CoValue,
   CoValueBase,
   CoValueClass,
@@ -36,7 +34,6 @@ import {
   Resolved,
   type Schema,
   SchemaInit,
-  Simplify,
   SubscribeListenerOptions,
   SubscribeRestArgs,
   accessChildByKey,
@@ -45,13 +42,10 @@ import {
   co,
   coField,
   coValuesCache,
-  createServiceRoot,
   ensureCoValueLoaded,
   inspect,
-  isAccountInstance,
   loadCoValue,
   loadCoValueWithoutMe,
-  parseGroupCreateOptions,
   parseSubscribeRestArgs,
   subscribeToCoValueWithoutMe,
   subscribeToExistingCoValue,
@@ -126,7 +120,7 @@ export class Account extends CoValueBase implements CoValue {
 
   declare profile: Profile | null;
   declare root: CoMap | null;
-  declare service: AccountService | null;
+  declare service: AccountService | null | undefined;
 
   getDescriptor(key: string) {
     if (key === "profile") {

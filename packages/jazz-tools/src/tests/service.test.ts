@@ -13,17 +13,57 @@ const Message = co.map({
 });
 
 const GenericWorkerAccount = co.account().withMigration((account) => {
+  // Worker accounts automatically create a service if they don't have one
+  // This is behaviour copied from `jazz-nodejs` into this test file
   if (!account.service?.service) {
     account.service = co.service().create({}, account);
   }
 });
 
 describe("Service", () => {
-  describe("Private service property", () => {
+  describe("Incorrect service property", () => {
+    it("Should throw if the service owner's service property doesn't exist", async () => {
+      // Account with no service field added
+      const DefaultAccount = co.account();
+
+      const { clientAccount: sender, serverAccount: receiver } =
+        await setupTwoNodes({
+          ServerAccountSchema: zodSchemaToCoSchema(DefaultAccount),
+        });
+
+      expect(receiver.service?.service).toBeUndefined();
+      expect(receiver.service).toBeUndefined();
+
+      await expect(() =>
+        ServiceSender.load(receiver.id, sender),
+      ).rejects.toThrow(
+        "Service owner does not have their service setup (service field is missing)",
+      );
+
+      // Add service field with correct permissions but no service root ID
+      const publicGroup = Group.create({ owner: receiver });
+      publicGroup.addMember("everyone", "reader");
+      receiver.service = co
+        .map({
+          service: z.string().optional(),
+        })
+        .create({ service: undefined }, publicGroup);
+
+      expect(receiver.service?.service).toBeUndefined();
+      expect(receiver.service).toBeDefined();
+      expect(receiver.service).not.toBeNull();
+      expect(receiver.service).toBeTruthy();
+
+      await expect(() =>
+        ServiceSender.load(receiver.id, sender),
+      ).rejects.toThrow(
+        "Service owner does not have their service setup (service root ID is missing)",
+      );
+    });
+
     it("Should throw if the service owner's service property is private", async () => {
       const WorkerAccount = co
         .account({
-          service: co.service(),
           profile: co.profile(),
           root: co.map({}),
         })
