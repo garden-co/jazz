@@ -827,6 +827,9 @@ importers:
       hash-slash:
         specifier: workspace:*
         version: link:../../packages/hash-slash
+      jazz-inspector:
+        specifier: workspace:*
+        version: link:../../packages/jazz-inspector
       jazz-react:
         specifier: workspace:*
         version: link:../../packages/jazz-react

@@ -3,6 +3,7 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import App from "./App.tsx";
 import "./index.css";
+import { JazzInspector } from "jazz-inspector";
 import { apiKey } from "./apiKey";
 import { JazzAccount } from "./schema.ts";
 
@@ -15,6 +16,7 @@ createRoot(document.getElementById("root")!).render(
       AccountSchema={JazzAccount}
     >
       <App />
+      <JazzInspector />
     </JazzProvider>
   </StrictMode>,
 );

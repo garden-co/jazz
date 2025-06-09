@@ -14,6 +14,7 @@
     "hash-slash": "workspace:*",
     "jazz-react": "workspace:*",
     "jazz-tools": "workspace:*",
+    "jazz-inspector": "workspace:*",
     "react": "19.0.0",
     "react-dom": "19.0.0"
   },
