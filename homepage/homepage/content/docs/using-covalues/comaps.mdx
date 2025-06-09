@@ -266,6 +266,20 @@ project.startDate = "2025-03-15"; // ✗ Type error: expected Date
 ```
 </CodeGroup>
 
+### Soft Deletion 
+
+Implementing a soft deletion pattern by using a `deleted` flag allows you to maintain data for potential recovery and auditing. 
+
+<CodeGroup>
+```tsx
+export class Project extends co.map({
+    name = z.string;
+    deleted = z.optional.boolean; // [!code ++]
+})
+```
+</CodeGroup>
+When an object needs to be "deleted", instead of removing it from the system, the deleted flag is set to true. This gives us a property to omit it in the future.
+
 
 ### Deleting Properties
 
