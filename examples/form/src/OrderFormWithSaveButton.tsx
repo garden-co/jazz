@@ -38,7 +38,12 @@ const useOrderForm = (order: LoadedBubbleTeaOrder) => {
     value.addOns.applyDiff(order.addOns);
     order.deliveryDate = value.deliveryDate;
     order.withMilk = value.withMilk;
-    order.instructions.applyDiff(value.instructions);
+
+    const instructions = order.instructions || CoPlainText.create("");
+    if (value.instructions) {
+      instructions.applyDiff(value.instructions.toString());
+      order.instructions = instructions;
+    }
   };
 
   return { value, save };
