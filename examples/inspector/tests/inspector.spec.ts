@@ -1,127 +1,9 @@
 import { expect, test } from "@playwright/test";
+import { createOrganization } from "./data";
+import { createAccount, initializeKvStore } from "./lib";
 
-import { createWebSocketPeer } from "cojson-transport-ws";
-import { WasmCrypto } from "cojson/dist/crypto/WasmCrypto";
-import {
-  AuthSecretStorage,
-  co,
-  createJazzContext,
-  randomSessionProvider,
-  z,
-} from "jazz-tools";
-
-async function createAccount() {
-  const { account, authSecretStorage } = await createJazzContext({
-    defaultProfileName: "Inspector test account",
-    crypto: await WasmCrypto.create(),
-    sessionProvider: randomSessionProvider,
-    authSecretStorage: new AuthSecretStorage(),
-    peersToLoadFrom: [
-      createWebSocketPeer({
-        id: "upstream",
-        role: "server",
-        websocket: new WebSocket(
-          "wss://cloud.jazz.tools/?key=inspector-test@jazz.tools",
-        ),
-      }),
-    ],
-  });
-
-  await account.waitForAllCoValuesSync();
-
-  const credentials = await authSecretStorage.get();
-  if (!credentials) {
-    throw new Error("No credentials found");
-  }
-
-  return { account, ...credentials };
-}
-
+initializeKvStore();
 const { account, accountID, accountSecret } = await createAccount();
-
-const projectsData: {
-  name: string;
-  description: string;
-  issues: {
-    title: string;
-    status: "open" | "closed";
-    labels: string[];
-  }[];
-}[] = [
-  {
-    name: "Jazz",
-    description: "Jazz is a framework for building collaborative apps.",
-    issues: [
-      {
-        title: "Issue 1",
-        status: "open",
-        labels: [
-          "bug",
-          "feature",
-          "enhancement",
-          "documentation",
-          "homepage",
-          "help needed",
-          "requested",
-          "blocked",
-          "high priority",
-          "urgent",
-        ],
-      },
-      { title: "Issue 2", status: "closed", labels: ["bug"] },
-      { title: "Issue 3", status: "open", labels: ["feature", "enhancement"] },
-    ],
-  },
-  {
-    name: "Waffle",
-    description: "Start waffling",
-    issues: [],
-  },
-  {
-    name: "Garden",
-    description: "Grow your garden",
-    issues: [],
-  },
-];
-const Issue = co.map({
-  title: z.string(),
-  status: z.enum(["open", "closed"]),
-  labels: co.list(z.string()),
-});
-
-const Project = co.map({
-  name: z.string(),
-  description: z.string(),
-  issues: co.list(Issue),
-});
-
-const Organization = co.map({
-  name: z.string(),
-  projects: co.list(Project),
-});
-
-const createOrganization = () => {
-  return Organization.create({
-    name: "Garden Computing",
-    projects: co.list(Project).create(
-      projectsData.map((project) =>
-        Project.create({
-          name: project.name,
-          description: project.description,
-          issues: co.list(Issue).create(
-            project.issues.map((issue) =>
-              Issue.create({
-                title: issue.title,
-                status: issue.status,
-                labels: co.list(z.string()).create(issue.labels),
-              }),
-            ),
-          ),
-        }),
-      ),
-    ),
-  });
-};
 
 test("should add and delete account in dropdown", async ({ page }) => {
   await page.goto("/");
@@ -165,4 +47,38 @@ test("should inspect CoValue", async ({ page }) => {
   const organization = createOrganization();
 
   await account.waitForAllCoValuesSync(); // Ensures that the organization is uploaded
+
+  await page.getByLabel("CoValue ID").fill(organization.id);
+  await page.getByRole("button", { name: "Inspect CoValue" }).click();
+
+  await expect(page.getByText("nameGarden Computing")).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: organization.id }),
+  ).toBeVisible();
+  await expect(page.getByText("Role: admin")).toBeVisible();
+
+  await page
+    .getByRole("button", { name: "projects ☰ CoList List (4)" })
+    .click();
+  await expect(page.getByText("Showing 4 of 4")).toBeVisible();
+
+  await page.getByRole("button", { name: "View" }).first().click();
+  await expect(
+    page.getByText("Jazz is a framework for building collaborative apps."),
+  ).toBeVisible();
+
+  await page.getByRole("button", { name: "issues ☰ CoList List (3)" }).click();
+  await expect(page.getByText("Showing 3 of 3")).toBeVisible();
+  await page.getByRole("button", { name: "View" }).first().click();
+
+  await page.getByRole("button", { name: "labels ☰ CoList List (10)" }).click();
+  // currently broken:
+  // await expect(page.getByText("Showing 10 of 10")).toBeVisible();
+  await expect(page.getByRole("table").getByRole("row")).toHaveCount(11);
+
+  await page.getByRole("button", { name: "issues" }).click();
+  await expect(page.getByRole("table").getByRole("row")).toHaveCount(4);
+
+  await page.getByRole("button", { name: "projects" }).click();
+  await expect(page.getByRole("table").getByRole("row")).toHaveCount(5);
 });
