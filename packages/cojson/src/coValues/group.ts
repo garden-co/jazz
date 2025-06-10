@@ -46,6 +46,7 @@ export type ParentGroupReferenceRole =
 export type GroupShape = {
   profile: CoID<RawCoMap> | null;
   root: CoID<RawCoMap> | null;
+  service: CoID<RawCoMap> | null;
   [key: RawAccountID | AgentID]: Role;
   [EVERYONE]?: Role;
   readKey?: KeyID;

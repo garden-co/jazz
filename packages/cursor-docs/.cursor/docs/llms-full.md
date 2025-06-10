@@ -782,7 +782,7 @@ The authentication hooks must always be used inside the `<JazzProvider />` compo
 Implementing PassphraseAuth is straightforward:
 
 1. Import the [wordlist](https://github.com/bitcoinjs/bip39/tree/a7ecbfe2e60d0214ce17163d610cad9f7b23140c/src/wordlists) for generating recovery phrases
-2. Use the `usePassphraseAuth` hook to handle authentication 
+2. Use the `usePassphraseAuth` hook to handle authentication
 3. Create simple registration and sign-in screens
 
 <CodeGroup>
@@ -803,7 +803,7 @@ function JazzAuthentication({ children }: { children: ReactNode }) {
   if (auth.state === "signedIn") {
     return children
   }
-  
+
   // Otherwise, show a sign-in screen
   return <SignInScreen auth={auth} />;
 }
@@ -894,7 +894,7 @@ The authentication hooks must always be used inside the `<JazzProvider />` compo
 Implementing PassphraseAuth is straightforward:
 
 1. Import the [wordlist](https://github.com/bitcoinjs/bip39/tree/a7ecbfe2e60d0214ce17163d610cad9f7b23140c/src/wordlists) for generating recovery phrases
-2. Use the `usePassphraseAuth` hook to handle authentication 
+2. Use the `usePassphraseAuth` hook to handle authentication
 3. Create simple registration and sign-in screens
 
 <CodeGroup>
@@ -915,7 +915,7 @@ function JazzAuthentication({ children }: { children: ReactNode }) {
   if (auth.state === "signedIn") {
     return children
   }
-  
+
   // Otherwise, show a sign-in screen
   return <SignInScreen auth={auth} />;
 }
@@ -1159,7 +1159,7 @@ The `<JazzProvider />` accepts several configuration options:
 </script>
 
 <JazzProvider
-  sync={{ 
+  sync={{
     peer: "wss://cloud.jazz.tools/?key=your-api-key",
     when: "always" // When to sync: "always", "never", or "signedUp"
   }}
@@ -1186,7 +1186,7 @@ The `sync` property configures how your application connects to the Jazz network
 const syncConfig: SyncConfig = {
   // Connection to Jazz Cloud or your own sync server
   peer: "wss://cloud.jazz.tools/?key=your-api-key",
-  
+
   // When to sync: "always" (default), "never", or "signedUp"
   when: "always",
 }
@@ -1238,13 +1238,13 @@ The provider accepts these additional options:
   import { JazzProvider } from "jazz-svelte";
   import { syncConfig } from "$lib/syncConfig";
   let { children } = $props();
-  
+
   // Enable guest mode for account-less access
-  const guestMode = false; 
-  
+  const guestMode = false;
+
   // Default name for new user profiles
-  const defaultProfileName = "New User"; 
-  
+  const defaultProfileName = "New User";
+
   // Handle user logout
   const onLogOut = () => {
     console.log("User logged out");
@@ -1717,7 +1717,7 @@ const Person = co.map({
   pets: co.list(Pet),
 });
 type Person = co.loaded<typeof Person>;
-``` 
+```
 ```svelte twoslash filename="app.svelte"
 // @filename: app.svelte
 <script lang="ts">
@@ -1743,7 +1743,7 @@ const person = new CoState(Person, id);
 
 <script lang="ts">
   import { Person } from './schema';
-  
+
   let props: Props = $props();
 </script>
 
@@ -1774,7 +1774,7 @@ When using `useAccount` you should now pass the `Account` schema directly:
 
 export const MyAccount = co.account({
   profile: co.profile(),
-  root: co.map({})
+  root: co.map({}),
 });
 
 // @filename: app.tsx
@@ -1868,7 +1868,7 @@ TODO
 The type of `_refs` and `_edits` is now nullable.
 
 <CodeGroup>
-```ts twoslash 
+```ts twoslash
 // ---cut---
 const Person = co.map({
   name: z.string(),
@@ -1879,7 +1879,7 @@ const person = Person.create({ name: "John", age: 30 });
 
 person._refs; // now nullable
 person._edits; // now nullable
-``` 
+```
 </CodeGroup>
 
 ### `members` and `by` now return basic `Account`
@@ -3978,7 +3978,7 @@ const JazzProfile = co.profile({
 
 const JazzAccount = co.account({
   profile: JazzProfile,
-  root: co.map({})
+  root: co.map({}),
 });
 
 // ---cut---
@@ -5047,9 +5047,9 @@ function GalleryView({ image }: { image: Loaded<typeof Image> }) {
         targetWidth={800} // Looks for the best available resolution for a 800px image
       >
         {({ src }) => (
-          <img 
-            src={src} 
-            alt="Gallery image" 
+          <img
+            src={src}
+            alt="Gallery image"
             className="gallery-image"
           />
         )}
@@ -5090,7 +5090,7 @@ function CustomImageComponent({ image }: { image: Loaded<typeof Image> }) {
   if (!src) {
     return <div className="image-loading-fallback">Loading image...</div>;
   }
-  
+
   // When image is loading, show a placeholder
   if (res === "placeholder") {
     return <img src={src} alt="Loading..." className="blur-effect" />;
@@ -5099,9 +5099,9 @@ function CustomImageComponent({ image }: { image: Loaded<typeof Image> }) {
   // Full image display with custom overlay
   return (
     <div className="custom-image-wrapper">
-      <img 
-        src={src} 
-        alt="Custom image" 
+      <img
+        src={src}
+        alt="Custom image"
         className="custom-image"
       />
       <div className="image-overlay">
@@ -6158,7 +6158,7 @@ const value = await MyCoMap.create({ color: "red"})
 const me = Account.getMe();
 
 if (me.canAdmin(value)) {
-  console.log("I can share value with others"); 
+  console.log("I can share value with others");
 } else if (me.canWrite(value)) {
   console.log("I can edit value");
 } else if (me.canRead(value)) {
@@ -6271,7 +6271,7 @@ useAcceptInvite({
 ### Requesting Invites
 
 To allow a non-group member to request an invitation to a group you can use the `writeOnly` role.
-This means that users only have write access to a specific requests list (they can't read other requests). 
+This means that users only have write access to a specific requests list (they can't read other requests).
 However, Administrators can review and approve these requests.
 
 Create the data models.
@@ -6369,7 +6369,7 @@ async function approveJoinRequest(
 
 # Group Inheritance
 
-Groups can inherit members from other groups using the `extend` method. 
+Groups can inherit members from other groups using the `extend` method.
 
 When a group extends another group, members of the parent group will become automatically part of the child group.
 
@@ -6407,7 +6407,7 @@ organizationGroup.addMember(bob, "admin");
 const billingGroup = Group.create();
 
 // This way the members of the organization can only read the billing data
-billingGroup.extend(organizationGroup, "reader"); 
+billingGroup.extend(organizationGroup, "reader");
 ```
 </CodeGroup>
 
@@ -6438,7 +6438,7 @@ Groups can be extended multiple levels deep:
 // ---cut---
 const grandParentGroup = Group.create();
 const parentGroup = Group.create();
-const childGroup = Group.create(); 
+const childGroup = Group.create();
 
 childGroup.extend(parentGroup);
 parentGroup.extend(grandParentGroup);
@@ -6513,7 +6513,7 @@ const companyGroup = company._owner.castAs(Group)
 const teamGroup = Group.create();
 
 // Works only if I'm a member of companyGroup
-teamGroup.extend(companyGroup); 
+teamGroup.extend(companyGroup);
 ```
 </CodeGroup>
 
@@ -6527,7 +6527,7 @@ You can revoke a group extension by using the `revokeExtend` method:
 const parentGroup = Group.create();
 const childGroup = Group.create();
 
-childGroup.extend(parentGroup); 
+childGroup.extend(parentGroup);
 
 // Revoke the extension
 await childGroup.revokeExtend(parentGroup);

@@ -173,6 +173,15 @@ export class RawProfile<
   Meta extends JsonObject | null = JsonObject | null,
 > extends RawCoMap<Shape, Meta> {}
 
+export type ServiceShape = {
+  service: string;
+};
+
+export class RawService<
+  Shape extends ServiceShape = ServiceShape,
+  Meta extends JsonObject | null = JsonObject | null,
+> extends RawCoMap<Shape, Meta> {}
+
 export type RawAccountMigration<Meta extends AccountMeta = AccountMeta> = (
   account: RawAccount<Meta>,
   localNode: LocalNode,

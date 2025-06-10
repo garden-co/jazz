@@ -28,5 +28,5 @@ export const features = {
   coRichText: "CoRichText",
   coPlainText: "CoPlainText",
   serverWorker: "Server worker",
-  inbox: "Inbox",
+  service: "Service",
 };

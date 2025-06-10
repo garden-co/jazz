@@ -12,13 +12,13 @@ import {
   AnyAccountSchema,
   CoValue,
   CoValueOrZodSchema,
-  InboxSender,
   InstanceOfSchema,
   JazzContextManager,
   JazzContextType,
   Loaded,
   ResolveQuery,
   ResolveQueryStrict,
+  ServiceSender,
   SubscriptionScope,
   anySchemaToCoSchema,
 } from "jazz-tools";
@@ -331,41 +331,43 @@ function useAccountOrGuest<
 
 export { useAccount, useAccountOrGuest };
 
-export function experimental_useInboxSender<
+export function experimental_useServiceSender<
   I extends CoValue,
   O extends CoValue | undefined,
->(inboxOwnerID: string | undefined) {
+>(serviceOwnerID: string | undefined) {
   const context = useJazzContext();
 
   if (!("me" in context)) {
     throw new Error(
-      "useInboxSender can't be used in a JazzProvider with auth === 'guest'.",
+      "useServiceSender can't be used in a JazzProvider with auth === 'guest'.",
     );
   }
 
   const me = context.me;
-  const inboxRef = useRef<Promise<InboxSender<I, O>> | undefined>(undefined);
+  const serviceRef = useRef<Promise<ServiceSender<I, O>> | undefined>(
+    undefined,
+  );
 
   const sendMessage = useCallback(
     async (message: I) => {
-      if (!inboxOwnerID) throw new Error("Inbox owner ID is required");
+      if (!serviceOwnerID) throw new Error("Service owner ID is required");
 
-      if (!inboxRef.current) {
-        const inbox = InboxSender.load<I, O>(inboxOwnerID, me);
-        inboxRef.current = inbox;
+      if (!serviceRef.current) {
+        const service = ServiceSender.load<I, O>(serviceOwnerID, me);
+        serviceRef.current = service;
       }
 
-      let inbox = await inboxRef.current;
+      let service = await serviceRef.current;
 
-      if (inbox.owner.id !== inboxOwnerID) {
-        const req = InboxSender.load<I, O>(inboxOwnerID, me);
-        inboxRef.current = req;
-        inbox = await req;
+      if (service.owner.id !== serviceOwnerID) {
+        const req = ServiceSender.load<I, O>(serviceOwnerID, me);
+        serviceRef.current = req;
+        service = await req;
       }
 
-      return inbox.sendMessage(message);
+      return service.sendMessage(message);
     },
-    [inboxOwnerID],
+    [serviceOwnerID],
   );
 
   return sendMessage;

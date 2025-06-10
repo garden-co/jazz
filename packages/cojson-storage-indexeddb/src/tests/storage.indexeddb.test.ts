@@ -602,6 +602,8 @@ test("should sync and load accounts from storage", async () => {
   const account1 = node1.getCoValue(accountID);
   const profile = node1.expectProfileLoaded(accountID);
   const profileGroup = profile.group;
+  const service = node1.expectServiceLoaded(accountID);
+  const serviceGroup = service.group;
 
   await new Promise((resolve) => setTimeout(resolve, 200));
 
@@ -611,17 +613,23 @@ test("should sync and load accounts from storage", async () => {
         Account: account1,
         Profile: profile.core,
         ProfileGroup: profileGroup.core,
+        Service: service.core,
+        ServiceGroup: serviceGroup.core,
       },
       syncMessages.messages,
     ),
   ).toMatchInlineSnapshot(`
     [
-      "client -> CONTENT Account header: true new: After: 0 New: 4",
-      "storage -> KNOWN Account sessions: header/4",
+      "client -> CONTENT Account header: true new: After: 0 New: 5",
+      "storage -> KNOWN Account sessions: header/5",
       "client -> CONTENT ProfileGroup header: true new: After: 0 New: 5",
       "storage -> KNOWN ProfileGroup sessions: header/5",
+      "client -> CONTENT ServiceGroup header: true new: After: 0 New: 5",
+      "storage -> KNOWN ServiceGroup sessions: header/5",
       "client -> CONTENT Profile header: true new: After: 0 New: 1",
       "storage -> KNOWN Profile sessions: header/1",
+      "client -> CONTENT Service header: true new: ",
+      "storage -> KNOWN Service sessions: header/0",
     ]
   `);
 
@@ -645,19 +653,26 @@ test("should sync and load accounts from storage", async () => {
         Account: account1,
         Profile: profile.core,
         ProfileGroup: profileGroup.core,
+        Service: service.core,
+        ServiceGroup: serviceGroup.core,
       },
       syncMessages.messages,
     ),
   ).toMatchInlineSnapshot(`
     [
       "client -> LOAD Account sessions: empty",
-      "storage -> CONTENT Account header: true new: After: 0 New: 4",
-      "client -> KNOWN Account sessions: header/4",
+      "storage -> CONTENT Account header: true new: After: 0 New: 5",
+      "client -> KNOWN Account sessions: header/5",
       "client -> LOAD Profile sessions: empty",
       "storage -> CONTENT ProfileGroup header: true new: After: 0 New: 5",
       "storage -> CONTENT Profile header: true new: After: 0 New: 1",
       "client -> KNOWN ProfileGroup sessions: header/5",
       "client -> KNOWN Profile sessions: header/1",
+      "client -> LOAD Service sessions: empty",
+      "storage -> CONTENT ServiceGroup header: true new: After: 0 New: 5",
+      "storage -> CONTENT Service header: true new: ",
+      "client -> KNOWN ServiceGroup sessions: header/5",
+      "client -> KNOWN Service sessions: header/0",
     ]
   `);
 

@@ -1,10 +1,13 @@
 import { CoID, InviteSecret, RawAccount, RawCoMap, SessionID } from "cojson";
 import { CoStreamItem, RawCoStream } from "cojson";
 import {
-  type Account,
+  Account,
+  AccountService,
+  CoMap,
   CoValue,
   CoValueClass,
   CoValueOrZodSchema,
+  Group,
   ID,
   InstanceOfSchema,
   activeAccountContext,
@@ -13,69 +16,71 @@ import {
   zodSchemaToCoSchema,
 } from "../internal.js";
 
-export type InboxInvite = `${CoID<MessagesStream>}/${InviteSecret}`;
 type TxKey = `${SessionID}/${number}`;
 
-type MessagesStream = RawCoStream<CoID<InboxMessage<CoValue, any>>>;
+type MessagesStream = RawCoStream<CoID<ServiceMessage<CoValue, any>>>;
 type FailedMessagesStream = RawCoStream<{
   errors: string[];
-  value: CoID<InboxMessage<CoValue, any>>;
+  value: CoID<ServiceMessage<CoValue, any>>;
 }>;
 type TxKeyStream = RawCoStream<TxKey>;
-export type InboxRoot = RawCoMap<{
+export type ServiceRoot = RawCoMap<{
   messages: CoID<MessagesStream>;
   processed: CoID<TxKeyStream>;
   failed: CoID<FailedMessagesStream>;
-  inviteLink: InboxInvite;
 }>;
 
-export function createInboxRoot(account: Account) {
+export function createServiceRoot(account: Account) {
   if (!account.isLocalNodeOwner) {
     throw new Error("Account is not controlled");
   }
 
   const rawAccount = account._raw;
-
+  // Service root needs to be publicly readable so the ID of its properties (in particular `messages`) can be read.
   const group = rawAccount.core.node.createGroup();
-  const messagesFeed = group.createStream<MessagesStream>();
+  group.addMember("everyone", "reader");
 
-  const inboxRoot = rawAccount.createMap<InboxRoot>();
-  const processedFeed = rawAccount.createStream<TxKeyStream>();
-  const failedFeed = rawAccount.createStream<FailedMessagesStream>();
+  // The `messages` property (despite having a public ID) is write-only.
+  const messagesGroup = rawAccount.core.node.createGroup();
+  messagesGroup.addMember("everyone", "writeOnly");
+  const messagesFeed = messagesGroup.createStream<MessagesStream>();
 
-  const inviteLink =
-    `${messagesFeed.id}/${group.createInvite("writeOnly")}` as const;
+  const serviceRoot = group.createMap<ServiceRoot>();
+  const processedFeed = group.createStream<TxKeyStream>();
+  const failedFeed = group.createStream<FailedMessagesStream>();
 
-  inboxRoot.set("messages", messagesFeed.id);
-  inboxRoot.set("processed", processedFeed.id);
-  inboxRoot.set("failed", failedFeed.id);
+  serviceRoot.set("messages", messagesFeed.id);
+  serviceRoot.set("processed", processedFeed.id);
+  serviceRoot.set("failed", failedFeed.id);
 
   return {
-    id: inboxRoot.id,
-    inviteLink,
+    id: serviceRoot.id,
   };
 }
 
-type InboxMessage<I extends CoValue, O extends CoValue | undefined> = RawCoMap<{
+type ServiceMessage<
+  I extends CoValue,
+  O extends CoValue | undefined,
+> = RawCoMap<{
   payload: ID<I>;
   result: ID<O> | undefined;
   processed: boolean;
   error: string | undefined;
 }>;
 
-async function createInboxMessage<
+async function createServiceMessage<
   I extends CoValue,
   O extends CoValue | undefined,
->(payload: I, inboxOwner: RawAccount) {
+>(payload: I, serviceOwner: RawAccount) {
   const group = payload._raw.group;
 
   if (group instanceof RawAccount) {
-    throw new Error("Inbox messages should be owned by a group");
+    throw new Error("Service messages should be owned by a group");
   }
 
-  group.addMember(inboxOwner, "writer");
+  group.addMember(serviceOwner, "writer");
 
-  const message = group.createMap<InboxMessage<I, O>>({
+  const message = group.createMap<ServiceMessage<I, O>>({
     payload: payload.id,
     result: undefined,
     processed: false,
@@ -88,17 +93,17 @@ async function createInboxMessage<
   return message;
 }
 
-export class Inbox {
+export class Service {
   account: Account;
   messages: MessagesStream;
   processed: TxKeyStream;
   failed: FailedMessagesStream;
-  root: InboxRoot;
+  root: ServiceRoot;
   processing = new Set<`${SessionID}/${number}`>();
 
   private constructor(
     account: Account,
-    root: InboxRoot,
+    root: ServiceRoot,
     messages: MessagesStream,
     processed: TxKeyStream,
     failed: FailedMessagesStream,
@@ -146,7 +151,7 @@ export class Inbox {
 
       for (const [sessionID, items] of Object.entries(stream.items) as [
         SessionID,
-        CoStreamItem<CoID<InboxMessage<InstanceOfSchema<M>, O>>>[],
+        CoStreamItem<CoID<ServiceMessage<InstanceOfSchema<M>, O>>>[],
       ][]) {
         const accountID = getAccountIDfromSessionID(sessionID);
 
@@ -168,7 +173,7 @@ export class Inbox {
               .then((message) => {
                 if (message === "unavailable") {
                   return Promise.reject(
-                    new Error("Unable to load inbox message " + id),
+                    new Error("Unable to load service message " + id),
                   );
                 }
 
@@ -183,46 +188,46 @@ export class Inbox {
               .then((value) => {
                 if (!value) {
                   return Promise.reject(
-                    new Error("Unable to load inbox message " + id),
+                    new Error("Unable to load service message " + id),
                   );
                 }
 
                 return callback(value as InstanceOfSchema<M>, accountID);
               })
               .then((result) => {
-                const inboxMessage = node
+                const serviceMessage = node
                   .expectCoValueLoaded(item.value)
                   .getCurrentContent() as RawCoMap;
 
                 if (result) {
-                  inboxMessage.set("result", result.id);
+                  serviceMessage.set("result", result.id);
                 }
 
-                inboxMessage.set("processed", true);
+                serviceMessage.set("processed", true);
 
                 this.processed.push(txKey);
                 this.processing.delete(txKey);
               })
               .catch((error) => {
-                console.error("Error processing inbox message", error);
+                console.error("Error processing service message", error);
                 this.processing.delete(txKey);
                 const errors = failed.get(txKey) ?? [];
 
                 const stringifiedError = String(error);
                 errors.push(stringifiedError);
 
-                let inboxMessage: RawCoMap | undefined;
+                let serviceMessage: RawCoMap | undefined;
 
                 try {
-                  inboxMessage = node
+                  serviceMessage = node
                     .expectCoValueLoaded(item.value)
                     .getCurrentContent() as RawCoMap;
 
-                  inboxMessage.set("error", stringifiedError);
+                  serviceMessage.set("error", stringifiedError);
                 } catch (error) {}
 
                 if (errors.length > retries) {
-                  inboxMessage?.set("processed", true);
+                  serviceMessage?.set("processed", true);
                   this.processed.push(txKey);
                   this.failed.push({ errors, value: item.value });
                 } else {
@@ -249,22 +254,16 @@ export class Inbox {
   }
 
   static async load(account: Account) {
-    const profile = account.profile;
-
-    if (!profile) {
-      throw new Error("Account profile should already be loaded");
-    }
-
-    if (!profile.inbox) {
-      throw new Error("The account has not set up their inbox");
+    if (!account.service?.service) {
+      throw new Error("The account has not set up their service");
     }
 
     const node = account._raw.core.node;
 
-    const root = await node.load(profile.inbox as CoID<InboxRoot>);
+    const root = await node.load(account.service.service as CoID<ServiceRoot>);
 
     if (root === "unavailable") {
-      throw new Error("Inbox not found");
+      throw new Error("Service not found");
     }
 
     const [messages, processed, failed] = await Promise.all([
@@ -278,14 +277,14 @@ export class Inbox {
       processed === "unavailable" ||
       failed === "unavailable"
     ) {
-      throw new Error("Inbox not found");
+      throw new Error("Service not found");
     }
 
-    return new Inbox(account, root, messages, processed, failed);
+    return new Service(account, root, messages, processed, failed);
   }
 }
 
-export class InboxSender<I extends CoValue, O extends CoValue | undefined> {
+export class ServiceSender<I extends CoValue, O extends CoValue | undefined> {
   currentAccount: Account;
   owner: RawAccount;
   messages: MessagesStream;
@@ -307,12 +306,15 @@ export class InboxSender<I extends CoValue, O extends CoValue | undefined> {
   async sendMessage(
     message: I,
   ): Promise<O extends CoValue ? ID<O> : undefined> {
-    const inboxMessage = await createInboxMessage<I, O>(message, this.owner);
+    const serviceMessage = await createServiceMessage<I, O>(
+      message,
+      this.owner,
+    );
 
-    this.messages.push(inboxMessage.id);
+    this.messages.push(serviceMessage.id);
 
     return new Promise((resolve, reject) => {
-      inboxMessage.subscribe((message) => {
+      serviceMessage.subscribe((message) => {
         if (message.get("processed")) {
           const error = message.get("error");
           if (error) {
@@ -330,71 +332,70 @@ export class InboxSender<I extends CoValue, O extends CoValue | undefined> {
   static async load<
     I extends CoValue,
     O extends CoValue | undefined = undefined,
-  >(inboxOwnerID: ID<Account>, currentAccount?: Account) {
+  >(serviceOwnerID: ID<Account>, currentAccount?: Account) {
     currentAccount ||= activeAccountContext.get();
 
     const node = currentAccount._raw.core.node;
 
-    const inboxOwnerRaw = await node.load(
-      inboxOwnerID as unknown as CoID<RawAccount>,
+    const serviceOwnerRaw = await node.load(
+      serviceOwnerID as unknown as CoID<RawAccount>,
     );
 
-    if (inboxOwnerRaw === "unavailable") {
-      throw new Error("Failed to load the inbox owner");
+    if (serviceOwnerRaw === "unavailable") {
+      throw new Error("Failed to load the service owner");
     }
 
-    const inboxOwnerProfileRaw = await node.load(inboxOwnerRaw.get("profile")!);
-
-    if (inboxOwnerProfileRaw === "unavailable") {
-      throw new Error("Failed to load the inbox owner profile");
-    }
-
-    if (
-      inboxOwnerProfileRaw.group.roleOf(currentAccount._raw.id) !== "reader" &&
-      inboxOwnerProfileRaw.group.roleOf(currentAccount._raw.id) !== "writer" &&
-      inboxOwnerProfileRaw.group.roleOf(currentAccount._raw.id) !== "admin"
-    ) {
+    const serviceOwnerServiceValue = serviceOwnerRaw.get("service");
+    if (!serviceOwnerServiceValue) {
       throw new Error(
-        "Insufficient permissions to access the inbox, make sure its user profile is publicly readable.",
+        "Service owner does not have their service setup (service field is missing)",
       );
     }
 
-    const inboxInvite = inboxOwnerProfileRaw.get("inboxInvite");
+    const serviceOwnerService = await node.load(serviceOwnerServiceValue);
 
-    if (!inboxInvite) {
-      throw new Error("The user has not set up their inbox");
+    if (serviceOwnerService === "unavailable") {
+      throw new Error("Failed to load the service owner's service ID");
     }
 
-    const id = await acceptInvite(inboxInvite as InboxInvite, currentAccount);
+    if (
+      serviceOwnerService.group.roleOf(currentAccount._raw.id) !== "reader" &&
+      serviceOwnerService.group.roleOf(currentAccount._raw.id) !== "writer" &&
+      serviceOwnerService.group.roleOf(currentAccount._raw.id) !== "admin"
+    ) {
+      throw new Error(
+        "Insufficient permissions to access the service, make sure it's publicly readable.",
+      );
+    }
 
-    const messages = await node.load(id);
+    const serviceRootId = serviceOwnerService.get("service") as
+      | CoID<ServiceRoot>
+      | undefined;
+
+    if (!serviceRootId) {
+      throw new Error(
+        "Service owner does not have their service setup (service root ID is missing)",
+      );
+    }
+
+    const serviceRoot = await node.load(serviceRootId);
+
+    if (serviceRoot === "unavailable") {
+      throw new Error("Failed to load the service root");
+    }
+
+    const messagesId = serviceRoot.get("messages");
+    if (!messagesId) {
+      throw new Error("Service root does not have a messages ID");
+    }
+    const messages = await node.load(messagesId);
 
     if (messages === "unavailable") {
-      throw new Error("Inbox not found");
+      throw new Error("Service messages are unavailable");
     }
 
-    return new InboxSender<I, O>(currentAccount, inboxOwnerRaw, messages);
+    return new ServiceSender<I, O>(currentAccount, serviceOwnerRaw, messages);
   }
-}
-
-async function acceptInvite(invite: string, account?: Account) {
-  account ||= activeAccountContext.get();
-
-  const id = invite.slice(0, invite.indexOf("/")) as CoID<MessagesStream>;
-
-  const inviteSecret = invite.slice(invite.indexOf("/") + 1) as InviteSecret;
-
-  if (!id?.startsWith("co_z") || !inviteSecret.startsWith("inviteSecret_")) {
-    throw new Error("Invalid inbox ticket");
-  }
-
-  if (!account.isLocalNodeOwner) {
-    throw new Error("Account is not controlled");
-  }
-
-  await account._raw.core.node.acceptInvite(id, inviteSecret);
-
-  return id;
 }
 
 function getAccountIDfromSessionID(sessionID: SessionID) {

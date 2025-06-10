@@ -1,9 +1,9 @@
 import {
   Game,
-  InboxMessage,
   NewGameIntent,
   PlayIntent,
   Player,
+  ServiceMessage,
   WaitingRoom,
 } from "@/schema";
 import { startWorker } from "jazz-nodejs";
@@ -16,14 +16,14 @@ if (!process.env.VITE_JAZZ_WORKER_ACCOUNT || !process.env.JAZZ_WORKER_SECRET) {
 
 const {
   worker,
-  experimental: { inbox },
+  experimental: { service },
 } = await startWorker({
   accountID: process.env.VITE_JAZZ_WORKER_ACCOUNT,
   syncServer: "wss://cloud.jazz.tools/?key=jazz-paper-scissors@garden.co ",
 });
 
-inbox.subscribe(
-  InboxMessage,
+service.subscribe(
+  ServiceMessage,
   async (message, senderID) => {
     const playerAccount = await co.account().load(senderID, { loadAs: worker });
     if (!playerAccount) {

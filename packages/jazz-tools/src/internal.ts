@@ -11,7 +11,7 @@ export * from "./coValues/coFeed.js";
 export * from "./coValues/account.js";
 export * from "./coValues/group.js";
 export * from "./coValues/profile.js";
-export * from "./coValues/inbox.js";
+export * from "./coValues/service.js";
 export * from "./coValues/coPlainText.js";
 export * from "./coValues/coRichText.js";
 export * from "./coValues/schemaUnion.js";

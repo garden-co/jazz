@@ -531,9 +531,9 @@ const reactExamples: Example[] = [
   //   name: "Jazz paper scissors",
   //   slug: "jazz-paper-scissors",
   //   description:
-  //     "A game that shows how to communicate with other accounts through the experimental Inbox API.",
+  //     "A game that shows how to communicate with other accounts through the experimental Service API.",
   //   tech: [tech.react],
-  //   features: [features.serverWorker, features.inbox],
+  //   features: [features.serverWorker, features.service],
   //   illustration: <JazzPaperScissorsIllustration />,
   //   demoUrl: "https://jazz-paper-scissors.demo.jazz.tools",
   // },

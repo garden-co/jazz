@@ -34,27 +34,39 @@ describe("LocalNode auth sync", () => {
     await account.core.waitForSync();
 
     const profileID = account.get("profile")!;
+    const serviceID = account.get("service")!;
 
     const profileCoreOnSyncServer = jazzCloud.node.getCoValue(profileID);
+    const serviceCoreOnSyncServer = jazzCloud.node.getCoValue(serviceID);
+    await profileCoreOnSyncServer.waitForAvailable();
+    await serviceCoreOnSyncServer.waitForAvailable();
 
     expect(profileCoreOnSyncServer.isAvailable()).toBe(true);
+    expect(serviceCoreOnSyncServer.isAvailable()).toBe(true);
 
     assert(profileCoreOnSyncServer.isAvailable());
+    assert(serviceCoreOnSyncServer.isAvailable());
 
     expect(
       SyncMessagesLog.getMessages({
         Account: account.core,
         Profile: profileCoreOnSyncServer,
         ProfileGroup: profileCoreOnSyncServer.getGroup().core,
+        Service: serviceCoreOnSyncServer,
+        ServiceGroup: serviceCoreOnSyncServer.getGroup().core,
       }),
     ).toMatchInlineSnapshot(`
       [
-        "client -> server | CONTENT Account header: true new: After: 0 New: 4",
-        "server -> client | KNOWN Account sessions: header/4",
+        "client -> server | CONTENT Account header: true new: After: 0 New: 5",
+        "server -> client | KNOWN Account sessions: header/5",
         "client -> server | CONTENT ProfileGroup header: true new: After: 0 New: 5",
         "server -> client | KNOWN ProfileGroup sessions: header/5",
+        "client -> server | CONTENT ServiceGroup header: true new: After: 0 New: 5",
+        "server -> client | KNOWN ServiceGroup sessions: header/5",
         "client -> server | CONTENT Profile header: true new: After: 0 New: 1",
         "server -> client | KNOWN Profile sessions: header/1",
+        "client -> server | CONTENT Service header: true new: ",
+        "server -> client | KNOWN Service sessions: header/0",
       ]
     `);
   });
@@ -150,8 +162,10 @@ describe("LocalNode auth sync", () => {
 
     const account = node.expectCurrentAccount("after login");
     const profile = node.getCoValue(account.get("profile")!);
+    const service = node.getCoValue(account.get("service")!);
 
     assert(profile.isAvailable());
+    assert(service.isAvailable());
 
     expect(account.id).toBe(accountID);
     expect(node.agentSecret).toBe(accountSecret);
@@ -161,23 +175,34 @@ describe("LocalNode auth sync", () => {
         Account: account.core,
         Profile: profile,
         ProfileGroup: profile.getGroup().core,
+        Service: service,
+        ServiceGroup: service.getGroup().core,
       }),
     ).toMatchInlineSnapshot(`
       [
-        "creation-node -> server | CONTENT Account header: true new: After: 0 New: 4",
+        "creation-node -> server | CONTENT Account header: true new: After: 0 New: 5",
         "auth-node -> server | LOAD Account sessions: empty",
-        "server -> creation-node | KNOWN Account sessions: header/4",
+        "server -> creation-node | KNOWN Account sessions: header/5",
         "creation-node -> server | CONTENT ProfileGroup header: true new: After: 0 New: 5",
-        "server -> auth-node | CONTENT Account header: true new: After: 0 New: 4",
+        "server -> auth-node | CONTENT Account header: true new: After: 0 New: 5",
         "server -> creation-node | KNOWN ProfileGroup sessions: header/5",
+        "creation-node -> server | CONTENT ServiceGroup header: true new: After: 0 New: 5",
+        "auth-node -> server | KNOWN Account sessions: header/5",
+        "server -> creation-node | KNOWN ServiceGroup sessions: header/5",
         "creation-node -> server | CONTENT Profile header: true new: After: 0 New: 1",
-        "auth-node -> server | KNOWN Account sessions: header/4",
         "server -> creation-node | KNOWN Profile sessions: header/1",
+        "creation-node -> server | CONTENT Service header: true new: ",
+        "server -> creation-node | KNOWN Service sessions: header/0",
         "auth-node -> server | LOAD Profile sessions: empty",
         "server -> auth-node | CONTENT ProfileGroup header: true new: After: 0 New: 5",
         "auth-node -> server | KNOWN ProfileGroup sessions: header/5",
         "server -> auth-node | CONTENT Profile header: true new: After: 0 New: 1",
         "auth-node -> server | KNOWN Profile sessions: header/1",
+        "auth-node -> server | LOAD Service sessions: empty",
+        "server -> auth-node | CONTENT ServiceGroup header: true new: After: 0 New: 5",
+        "auth-node -> server | KNOWN ServiceGroup sessions: header/5",
+        "server -> auth-node | CONTENT Service header: true new: ",
+        "auth-node -> server | KNOWN Service sessions: header/0",
       ]
     `);
   });
@@ -217,8 +242,10 @@ describe("LocalNode auth sync", () => {
 
     const account = node.expectCurrentAccount("after login");
     const profile = creationNode.getCoValue(account.get("profile")!);
+    const service = creationNode.getCoValue(account.get("service")!);
 
     assert(profile.isAvailable());
+    assert(service.isAvailable());
 
     expect(account.id).toBe(accountID);
     expect(node.agentSecret).toBe(accountSecret);
@@ -228,19 +255,25 @@ describe("LocalNode auth sync", () => {
         Account: account.core,
         Profile: profile,
         ProfileGroup: profile.getGroup().core,
+        Service: service,
+        ServiceGroup: service.getGroup().core,
       }),
     ).toMatchInlineSnapshot(`
       [
-        "creation-node -> server | CONTENT Account header: true new: After: 0 New: 4",
+        "creation-node -> server | CONTENT Account header: true new: After: 0 New: 5",
         "auth-node -> server | LOAD Account sessions: empty",
-        "server -> creation-node | KNOWN Account sessions: header/4",
-        "server -> auth-node | CONTENT Account header: true new: After: 0 New: 4",
-        "auth-node -> server | KNOWN Account sessions: header/4",
+        "server -> creation-node | KNOWN Account sessions: header/5",
+        "server -> auth-node | CONTENT Account header: true new: After: 0 New: 5",
+        "auth-node -> server | KNOWN Account sessions: header/5",
         "auth-node -> server | LOAD Profile sessions: empty",
         "server -> auth-node | KNOWN Profile sessions: empty",
         "auth-node -> server | LOAD Profile sessions: empty",
         "server -> auth-node | KNOWN Profile sessions: empty",
+        "auth-node -> server | LOAD Service sessions: empty",
+        "server -> auth-node | KNOWN Service sessions: empty",
+        "auth-node -> server | LOAD Service sessions: empty",
+        "server -> auth-node | KNOWN Service sessions: empty",
       ]
     `);
-  });
+  }, 10000);
 });
