@@ -943,6 +943,9 @@ importers:
       jazz-inspector:
         specifier: workspace:*
         version: link:../../packages/jazz-inspector
+      jazz-run:
+        specifier: workspace:*
+        version: link:../../packages/jazz-run
       jazz-tools:
         specifier: workspace:*
         version: link:../../packages/jazz-tools
