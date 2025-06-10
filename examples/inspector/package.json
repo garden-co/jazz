@@ -13,15 +13,13 @@
   },
   "dependencies": {
     "jazz-inspector": "workspace:*",
+    "jazz-tools": "workspace:*",
     "clsx": "^2.0.0",
     "cojson": "workspace:*",
     "cojson-transport-ws": "workspace:*",
     "hash-slash": "workspace:*",
-    "lucide-react": "^0.274.0",
     "react": "19.0.0",
     "react-dom": "19.0.0",
-    "react-router": "^6.16.0",
-    "react-router-dom": "^6.16.0",
     "react-use": "^17.4.0"
   },
   "devDependencies": {

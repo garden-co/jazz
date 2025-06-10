@@ -943,21 +943,15 @@ importers:
       jazz-inspector:
         specifier: workspace:*
         version: link:../../packages/jazz-inspector
-      lucide-react:
-        specifier: ^0.274.0
-        version: 0.274.0(react@19.0.0)
+      jazz-tools:
+        specifier: workspace:*
+        version: link:../../packages/jazz-tools
       react:
         specifier: 19.0.0
         version: 19.0.0
       react-dom:
         specifier: 19.0.0
         version: 19.0.0(react@19.0.0)
-      react-router:
-        specifier: ^6.16.0
-        version: 6.28.0(react@19.0.0)
-      react-router-dom:
-        specifier: ^6.16.0
-        version: 6.28.0(react-dom@19.0.0(react@19.0.0))(react@19.0.0)
       react-use:
         specifier: ^17.4.0
         version: 17.6.0(react-dom@19.0.0(react@19.0.0))(react@19.0.0)
