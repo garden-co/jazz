@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "test": "playwright test",
     "format-and-lint": "biome check .",
     "format-and-lint:fix": "biome check . --write",
     "preview": "vite preview"
@@ -24,6 +25,7 @@
     "react-use": "^17.4.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.50.1",
     "@types/react": "19.0.0",
     "@types/react-dom": "19.0.0",
     "@vitejs/plugin-react-swc": "^3.10.1",
