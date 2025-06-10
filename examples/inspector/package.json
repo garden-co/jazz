@@ -14,8 +14,6 @@
   "dependencies": {
     "jazz-inspector": "workspace:*",
     "jazz-tools": "workspace:*",
-    "jazz-run": "workspace:*",
-    "jazz-browser": "workspace:*",
     "clsx": "^2.0.0",
     "cojson": "workspace:*",
     "cojson-transport-ws": "workspace:*",

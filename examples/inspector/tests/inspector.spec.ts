@@ -1,18 +1,43 @@
 import { expect, test } from "@playwright/test";
-import { LocalNode } from "cojson";
-import { WasmCrypto } from "cojson/crypto/WasmCrypto";
-import { createJazzBrowserGuestContext } from "jazz-browser";
-import { createWorkerAccount } from "jazz-run/createWorkerAccount";
-import { createJazzTestAccount } from "jazz-tools/testing";
 
-import { co, z } from "jazz-tools";
+import { createWebSocketPeer } from "cojson-transport-ws";
+import { WasmCrypto } from "cojson/dist/crypto/WasmCrypto";
+import {
+  AuthSecretStorage,
+  co,
+  createJazzContext,
+  randomSessionProvider,
+  z,
+} from "jazz-tools";
 
-const account = await createWorkerAccount({
-  name: "Inspector test account",
-  peer: "wss://cloud.jazz.tools/?key=inspector-test@jazz.tools",
-});
+async function createAccount() {
+  const { account, authSecretStorage } = await createJazzContext({
+    defaultProfileName: "Inspector test account",
+    crypto: await WasmCrypto.create(),
+    sessionProvider: randomSessionProvider,
+    authSecretStorage: new AuthSecretStorage(),
+    peersToLoadFrom: [
+      createWebSocketPeer({
+        id: "upstream",
+        role: "server",
+        websocket: new WebSocket(
+          "wss://cloud.jazz.tools/?key=inspector-test@jazz.tools",
+        ),
+      }),
+    ],
+  });
 
-const peer = "wss://cloud.jazz.tools/?key=inspector-test@jazz.tools";
+  await account.waitForAllCoValuesSync();
+
+  const credentials = await authSecretStorage.get();
+  if (!credentials) {
+    throw new Error("No credentials found");
+  }
+
+  return { account, ...credentials };
+}
+
+const { account, accountID, accountSecret } = await createAccount();
 
 const projectsData: {
   name: string;
@@ -99,11 +124,9 @@ const createOrganization = () => {
 };
 
 test("should add and delete account in dropdown", async ({ page }) => {
-  const { accountID, agentSecret } = account;
-
   await page.goto("/");
   await page.getByLabel("Account ID").fill(accountID);
-  await page.getByLabel("Account secret").fill(agentSecret);
+  await page.getByLabel("Account secret").fill(accountSecret);
   await page.getByRole("button", { name: "Add account" }).click();
 
   await expect(page.getByText("Jazz CoValue Inspector")).toBeVisible();
@@ -120,11 +143,9 @@ test("should add and delete account in dropdown", async ({ page }) => {
 });
 
 test("should inspect account", async ({ page }) => {
-  const { accountID, agentSecret } = account;
-
   await page.goto("/");
   await page.getByLabel("Account ID").fill(accountID);
-  await page.getByLabel("Account secret").fill(agentSecret);
+  await page.getByLabel("Account secret").fill(accountSecret);
   await page.getByRole("button", { name: "Add account" }).click();
   await page.getByRole("button", { name: "Inspect my account" }).click();
 
@@ -136,12 +157,12 @@ test("should inspect account", async ({ page }) => {
 });
 
 test("should inspect CoValue", async ({ page }) => {
-  const { accountID, agentSecret } = account;
-
   await page.goto("/");
   await page.getByLabel("Account ID").fill(accountID);
-  await page.getByLabel("Account secret").fill(agentSecret);
+  await page.getByLabel("Account secret").fill(accountSecret);
   await page.getByRole("button", { name: "Add account" }).click();
 
-  const organization = createOrganization(); // fails here
+  const organization = createOrganization();
+
+  await account.waitForAllCoValuesSync(); // Ensures that the organization is uploaded
 });
