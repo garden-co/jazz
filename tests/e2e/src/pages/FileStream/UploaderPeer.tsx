@@ -37,7 +37,7 @@ export function UploaderPeer() {
     setSyncDuration(null);
     setUploadedFileId(file.id);
 
-    account.me.waitForAllCoValuesSync().then(() => {
+    account.me?.waitForAllCoValuesSync().then(() => {
       setSynced(true);
     });
 
@@ -47,7 +47,7 @@ export function UploaderPeer() {
       zodSchemaToCoSchema(UploadedFile),
       file.id,
       (value) => value.syncCompleted,
-      { loadAs: account.me },
+      { loadAs: account.agent },
     );
 
     iframe.remove();

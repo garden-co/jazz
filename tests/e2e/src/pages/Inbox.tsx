@@ -20,24 +20,26 @@ export function InboxPage() {
   const [id] = useState(getIdParam);
   const { me } = useAccount();
   const [pingPong, setPingPong] = useState<PingPong | null>(null);
-  const iframeRef = useRef<HTMLIFrameElement>(null);
+  const iframeRef = useRef<HTMLIFrameElement>();
 
   useEffect(() => {
     let unsubscribe = () => {};
     let unmounted = false;
 
     async function load() {
-      const inbox = await Inbox.load(me);
+      const inbox = me ? await Inbox.load(me) : undefined;
 
       if (unmounted) return;
 
-      unsubscribe = inbox.subscribe(PingPong, async (message) => {
-        const pingPong = PingPong.create(
-          { ping: message.ping, pong: Date.now() },
-          { owner: message._owner },
-        );
-        setPingPong(pingPong);
-      });
+      unsubscribe = inbox
+        ? inbox.subscribe(PingPong, async (message) => {
+            const pingPong = PingPong.create(
+              { ping: message.ping, pong: Date.now() },
+              { owner: message._owner },
+            );
+            setPingPong(pingPong);
+          })
+        : () => {};
     }
 
     load();

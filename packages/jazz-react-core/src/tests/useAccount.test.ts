@@ -1,16 +1,6 @@
 // @vitest-environment happy-dom
 
-import {
-  Account,
-  CoMap,
-  Loaded,
-  RefsToResolve,
-  Resolved,
-  co,
-  coField,
-  z,
-  zodSchemaToCoSchema,
-} from "jazz-tools";
+import { RefsToResolve, co, z, zodSchemaToCoSchema } from "jazz-tools";
 import { beforeEach, describe, expect, it } from "vitest";
 import { useAccount, useJazzContextManager } from "../hooks.js";
 import { useIsAuthenticated } from "../index.js";
@@ -84,14 +74,21 @@ describe("useAccount", () => {
         const isAuthenticated = useIsAuthenticated();
         const account = useAccount();
 
-        if (!accounts.includes(account.me.id)) {
+        if (account.me && !accounts.includes(account.me.id)) {
           accounts.push(account.me.id);
         }
 
-        updates.push({
-          isAuthenticated,
-          accountIndex: accounts.indexOf(account.me.id),
-        });
+        if (account.me) {
+          updates.push({
+            isAuthenticated,
+            accountIndex: accounts.indexOf(account.me.id),
+          });
+        } else {
+          updates.push({
+            isAuthenticated,
+            accountIndex: -1,
+          });
+        }
 
         return { isAuthenticated, account };
       },
@@ -111,7 +108,7 @@ describe("useAccount", () => {
     });
 
     expect(result.current?.isAuthenticated).toBe(false);
-    expect(result.current?.account?.me.id).not.toBe(id);
+    expect(result.current?.account?.me?.id).not.toBe(id);
 
     expect(updates).toMatchInlineSnapshot(`
       [
@@ -144,14 +141,21 @@ describe("useAccount", () => {
         const account = useAccount();
         const contextManager = useJazzContextManager();
 
-        if (!accounts.includes(account.me.id)) {
+        if (account.me && !accounts.includes(account.me.id)) {
           accounts.push(account.me.id);
         }
 
-        updates.push({
-          isAuthenticated,
-          accountIndex: accounts.indexOf(account.me.id),
-        });
+        if (account.me) {
+          updates.push({
+            isAuthenticated,
+            accountIndex: accounts.indexOf(account.me.id),
+          });
+        } else {
+          updates.push({
+            isAuthenticated,
+            accountIndex: -1,
+          });
+        }
 
         return { isAuthenticated, account, contextManager };
       },
@@ -175,7 +179,7 @@ describe("useAccount", () => {
     });
 
     expect(result.current?.isAuthenticated).toBe(true);
-    expect(result.current?.account?.me.id).not.toBe(id);
+    expect(result.current?.account?.me?.id).not.toBe(id);
 
     expect(updates).toMatchInlineSnapshot(`
       [

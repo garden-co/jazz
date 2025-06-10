@@ -17,13 +17,11 @@ export function useAcceptInvite<S extends CoValueOrZodSchema>({
 }): void {
   const context = useJazzContext();
 
-  if (!("me" in context)) {
-    throw new Error(
-      "useAcceptInvite can't be used in a JazzProvider with auth === 'guest'.",
-    );
-  }
-
   useEffect(() => {
+    if (!("me" in context)) {
+      return;
+    }
+
     const handleInvite = () => {
       const result = consumeInviteLinkFromWindowLocation({
         as: context.me,
@@ -43,7 +41,7 @@ export function useAcceptInvite<S extends CoValueOrZodSchema>({
     window.addEventListener("hashchange", handleInvite);
 
     return () => window.removeEventListener("hashchange", handleInvite);
-  }, [onAccept]);
+  }, [onAccept, context]);
 }
 
 export {
