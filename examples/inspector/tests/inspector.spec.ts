@@ -51,15 +51,13 @@ test("should inspect CoValue", async ({ page }) => {
   await page.getByLabel("CoValue ID").fill(organization.id);
   await page.getByRole("button", { name: "Inspect CoValue" }).click();
 
-  await expect(page.getByText("nameGarden Computing")).toBeVisible();
+  await expect(page.getByText(/Garden Computing/)).toHaveCount(2);
   await expect(
     page.getByRole("heading", { name: organization.id }),
   ).toBeVisible();
   await expect(page.getByText("Role: admin")).toBeVisible();
 
-  await page
-    .getByRole("button", { name: "projects ☰ CoList List (4)" })
-    .click();
+  await page.getByRole("button", { name: /projects/ }).click();
   await expect(page.getByText("Showing 4 of 4")).toBeVisible();
 
   await page.getByRole("button", { name: "View" }).first().click();
@@ -67,11 +65,11 @@ test("should inspect CoValue", async ({ page }) => {
     page.getByText("Jazz is a framework for building collaborative apps."),
   ).toBeVisible();
 
-  await page.getByRole("button", { name: "issues ☰ CoList List (3)" }).click();
+  await page.getByRole("button", { name: /issues/ }).click();
   await expect(page.getByText("Showing 3 of 3")).toBeVisible();
   await page.getByRole("button", { name: "View" }).first().click();
 
-  await page.getByRole("button", { name: "labels ☰ CoList List (10)" }).click();
+  await page.getByRole("button", { name: /labels/ }).click();
   // currently broken:
   // await expect(page.getByText("Showing 10 of 10")).toBeVisible();
   await expect(page.getByRole("table").getByRole("row")).toHaveCount(11);
