@@ -2,6 +2,7 @@
 
 import { JazzProvider } from "jazz-react";
 import { AuthProvider } from "jazz-react-auth-betterauth";
+import { Account } from "jazz-tools";
 import { type ReactNode, lazy } from "react";
 
 const JazzDevTools =
@@ -16,6 +17,7 @@ const JazzDevTools =
 export function JazzAndAuth({ children }: { children: ReactNode }) {
   return (
     <JazzProvider
+      AccountSchema={Account}
       sync={{
         peer: "wss://cloud.jazz.tools/?key=betterauth-example@garden.co",
       }}

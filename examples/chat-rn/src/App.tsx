@@ -4,6 +4,7 @@ import {
 } from "@react-navigation/native";
 import { createNativeStackNavigator } from "@react-navigation/native-stack";
 import { JazzProvider } from "jazz-react-native";
+import { Account } from "jazz-tools";
 import React, { StrictMode, useEffect, useState } from "react";
 import { Linking } from "react-native";
 import { apiKey } from "./apiKey";
@@ -50,6 +51,7 @@ function App() {
   return (
     <StrictMode>
       <JazzProvider
+        AccountSchema={Account}
         sync={{
           peer: `wss://cloud.jazz.tools/?key=${apiKey}`,
         }}

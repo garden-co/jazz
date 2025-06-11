@@ -50,7 +50,7 @@ export const JazzProvider = defineComponent({
       type: Function as unknown as PropType<
         (AccountClass<Account> & CoValueFromRaw<Account>) | AnyAccountSchema
       >,
-      required: false,
+      required: true,
     },
     storage: {
       type: String as PropType<"indexedDB">,

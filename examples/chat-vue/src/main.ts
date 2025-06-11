@@ -3,6 +3,7 @@ import { createApp, defineComponent, h } from "vue";
 import App from "./App.vue";
 import "./index.css";
 import { apiKey } from "@/apiKey";
+import { Account } from "jazz-tools";
 import router from "./router";
 
 const RootComponent = defineComponent({
@@ -12,6 +13,7 @@ const RootComponent = defineComponent({
       h(
         JazzProvider,
         {
+          AccountSchema: Account,
           sync: {
             peer: `wss://cloud.jazz.tools/?key=${apiKey}`,
           },

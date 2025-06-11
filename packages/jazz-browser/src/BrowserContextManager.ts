@@ -29,7 +29,7 @@ export type JazzContextManagerProps<
     anonymousAccount: InstanceOfSchema<S>,
   ) => Promise<void>;
   storage?: BaseBrowserContextOptions["storage"];
-  AccountSchema?: S;
+  AccountSchema: S;
   defaultProfileName?: string;
 };
 

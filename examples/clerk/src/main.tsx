@@ -5,6 +5,7 @@ import App from "./App.tsx";
 import "./index.css";
 import { JazzInspector } from "jazz-inspector";
 import { JazzProviderWithClerk } from "jazz-react-auth-clerk";
+import { Account } from "jazz-tools";
 import { ReactNode } from "react";
 import { apiKey } from "./apiKey";
 
@@ -20,6 +21,7 @@ function JazzProvider({ children }: { children: ReactNode }) {
 
   return (
     <JazzProviderWithClerk
+      AccountSchema={Account}
       clerk={clerk}
       sync={{
         peer: `wss://cloud.jazz.tools/?key=${apiKey}`,
