@@ -54,6 +54,12 @@ export default function CoJsonViewerApp() {
   const [coValueId, setCoValueId] = useState<CoID<RawCoValue> | "">("");
   const { path, addPages, goToIndex, goBack, setPage } = usePagePath();
 
+  const KNOWN_ERRORS = [
+    "trying to load covalue with invalid id",
+    "account has no profile",
+    "invalid sealer secret format",
+  ];
+
   useEffect(() => {
     localStorage.setItem("inspectorAccounts", JSON.stringify(accounts));
   }, [accounts]);
@@ -94,7 +100,13 @@ export default function CoJsonViewerApp() {
           },
         });
       } catch (err: any) {
-        if (err.toString().includes("invalid id")) {
+        const normalizeError = (str: string): string =>
+          str.toLowerCase().replace(/\s+/g, " ").trim();
+        const matchError: string =
+          KNOWN_ERRORS.filter((e) =>
+            normalizeError(err.message).includes(e),
+          )[0] || "";
+        if (KNOWN_ERRORS.indexOf(matchError) >= 0) {
           setAccounts(accounts.filter((acc) => acc.id !== currentAccount.id));
           //remove from localStorage
           localStorage.removeItem("lastSelectedAccountId");
@@ -105,9 +117,9 @@ export default function CoJsonViewerApp() {
             ),
           );
           setCurrentAccount(null);
-          setErrors("Trying to load covalue with invalid id");
+          setErrors(KNOWN_ERRORS[KNOWN_ERRORS.indexOf(matchError)]);
         } else {
-          setErrors("The account could not be loaded");
+          setErrors("Something went wrong, the account could not be loaded");
         }
         setLocalNode(null);
         goToIndex(-1);
@@ -369,7 +381,11 @@ function AddAccountForm({
         onChange={(e) => setSecret(e.target.value)}
         placeholder="sealerSecret_ziz7NA12340abcdef123789..."
       />
-      <Button className="mt-3" type="submit">
+      <Button
+        className="mt-3"
+        type="submit"
+        disabled={secret.length == 0 || id.length == 0}
+      >
         Add account
       </Button>
     </form>
