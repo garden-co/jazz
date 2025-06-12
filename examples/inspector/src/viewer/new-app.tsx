@@ -370,23 +370,21 @@ function AddAccountForm({
         secret separately.
       </p>
       <Input
+        required
         label="Account ID"
         value={id}
         placeholder="co_z1234567890abcdef123456789 or paste full JSON"
         onChange={handleIdChange}
       />
       <Input
+        required
         label="Account secret"
         type="password"
         value={secret}
         onChange={(e) => setSecret(e.target.value)}
         placeholder="sealerSecret_ziz7NA12340abcdef123789..."
       />
-      <Button
-        className="mt-3"
-        type="submit"
-        disabled={secret.length == 0 || id.length == 0}
-      >
+      <Button className="mt-3" type="submit">
         Add account
       </Button>
     </form>
