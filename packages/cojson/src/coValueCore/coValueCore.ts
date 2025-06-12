@@ -369,11 +369,9 @@ export class CoValueCore {
   tryAddTransactions(
     sessionID: SessionID,
     newTransactions: Transaction[],
-    givenExpectedNewHash: Hash | undefined,
     newSignature: Signature,
     notifyMode: "immediate" | "deferred",
     skipVerify: boolean = false,
-    givenNewStreamingHash?: StreamingHash,
   ): Result<true, TryAddTransactionsError> {
     return this.node
       .resolveAccountAgent(
@@ -390,14 +388,12 @@ export class CoValueCore {
 
         const signerID = this.crypto.getAgentSignerID(agent);
 
-        const result = this.verified.tryAddTransactions(
+        const result = this.verified.tryAdd(
           sessionID,
           signerID,
           newTransactions,
-          givenExpectedNewHash,
           newSignature,
           skipVerify,
-          givenNewStreamingHash,
         );
 
         if (result.isOk()) {
@@ -531,30 +527,33 @@ export class CoValueCore {
           ) as SessionID)
         : this.node.currentSessionID;
 
-    const { expectedNewHash, newStreamingHash } =
-      this.verified.expectedNewHashAfter(sessionID, [transaction]);
+    const agent = this.node.getCurrentAgent();
 
-    const signature = this.crypto.sign(
-      this.node.getCurrentAgent().currentSignerSecret(),
-      expectedNewHash,
+    this.verified.addNew(
+      sessionID,
+      agent.currentSignerID(),
+      [transaction],
+      agent.currentSignerSecret(),
     );
 
-    const success = this.tryAddTransactions(
-      sessionID,
-      [transaction],
-      expectedNewHash,
-      signature,
-      "immediate",
-      true,
-      newStreamingHash,
-    )._unsafeUnwrap({ withStackTrace: true });
+    this.node.syncManager.recordTransactionsSize([transaction], "local");
+    void this.node.syncManager.requestCoValueSync(this);
 
-    if (success) {
-      this.node.syncManager.recordTransactionsSize([transaction], "local");
-      void this.node.syncManager.requestCoValueSync(this);
+    if (
+      this._cachedContent &&
+      "processNewTransactions" in this._cachedContent &&
+      typeof this._cachedContent.processNewTransactions === "function"
+    ) {
+      this._cachedContent.processNewTransactions();
+    } else {
+      this._cachedContent = undefined;
     }
 
-    return success;
+    this._cachedDependentOn = undefined;
+
+    this.notifyUpdate("immediate");
+
+    return true;
   }
 
   getCurrentContent(options?: {

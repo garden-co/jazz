@@ -297,6 +297,10 @@ export abstract class CryptoProvider<Blake3State = any> {
   newRandomSessionID(accountID: RawAccountID | AgentID): SessionID {
     return `${accountID}_session_z${base58.encode(this.randomBytes(8))}`;
   }
+
+  abstract emptyAppendOnlyVerifiedLog<T>(
+    signedID: SignerID,
+  ): AppendOnlyVerifiedLog<T>;
 }
 
 export type Hash = `hash_z${string}`;
@@ -341,3 +345,29 @@ export type KeySecret = `keySecret_z${string}`;
 export type KeyID = `key_z${string}`;
 
 export const secretSeedLength = 32;
+
+export const APPEND_OK = 0;
+export const APPEND_INVALID_SIGNATURE = 1;
+
+export type AppendResult =
+  | typeof APPEND_OK
+  | typeof APPEND_INVALID_SIGNATURE
+  | typeof APPEND_INVALID_HASH;
+
+export interface AppendOnlyVerifiedLog<T> {
+  // these only have to be maintained in JS, anything lower level
+  // only needs to store the encoded items and last streaming hash
+  // and return the new signature on addNew
+  transactions: readonly T[];
+  signerID: SignerID;
+  lastSignature: Signature;
+  signatureAfter: { [txIdx: number]: Signature | undefined };
+
+  clone(): AppendOnlyVerifiedLog<T>;
+  tryAdd(
+    items: T[],
+    newSignature: Signature,
+    skipVerify: boolean,
+  ): AppendResult;
+  addNew(items: T[], signerSecret: SignerSecret): void;
+}
