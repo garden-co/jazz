@@ -28,6 +28,11 @@
   {/each}
   <button
     onclick={() => {
+      console.log(person.current?.name);
+    }}>Log person</button
+  >
+  <button
+    onclick={() => {
       id = undefined;
     }}>Set undefined</button
   >
