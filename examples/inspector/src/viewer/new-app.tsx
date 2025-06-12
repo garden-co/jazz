@@ -106,7 +106,8 @@ export default function CoJsonViewerApp() {
           KNOWN_ERRORS.filter((e) =>
             normalizeError(err.message).includes(e),
           )[0] || "";
-        if (KNOWN_ERRORS.indexOf(matchError) >= 0) {
+        const knownErrorIndex: number = KNOWN_ERRORS.indexOf(matchError);
+        if (knownErrorIndex >= 0) {
           setAccounts(accounts.filter((acc) => acc.id !== currentAccount.id));
           //remove from localStorage
           localStorage.removeItem("lastSelectedAccountId");
@@ -117,7 +118,7 @@ export default function CoJsonViewerApp() {
             ),
           );
           setCurrentAccount(null);
-          setErrors(KNOWN_ERRORS[KNOWN_ERRORS.indexOf(matchError)]);
+          setErrors(KNOWN_ERRORS[knownErrorIndex]);
         } else {
           setErrors("Something went wrong, the account could not be loaded");
         }
