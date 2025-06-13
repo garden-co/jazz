@@ -81,11 +81,13 @@ export function CodeGroup({
   children,
   size = "md",
   className,
+  onCopy,
 }: {
   children?: React.ReactNode;
   text?: string;
   size?: "md" | "lg";
   className?: string;
+  onCopy?: () => void;
 }) {
   const textRef = useRef<HTMLPreElement | null>(null);
   const [code, setCode] = useState<string>();
@@ -127,7 +129,7 @@ export function CodeGroup({
         {children}
       </pre>
 
-      {code ? <CopyButton size={size} code={code} /> : <></>}
+      {code ? <CopyButton onCopy={onCopy} size={size} code={code} /> : <></>}
     </div>
   );
 }

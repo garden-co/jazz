@@ -11,6 +11,7 @@ import {
   DialogTitle,
 } from "@garden-co/design-system/src/components/organisms/Dialog";
 import { DialogDescription } from "@headlessui/react";
+import { track } from "@vercel/analytics";
 import { useState } from "react";
 import CreateJazzApp from "./CreateJazzApp.mdx";
 
@@ -47,7 +48,13 @@ export function ExampleLinks({ example }: { example: Example }) {
           <p className="mb-3">
             Generate a new Jazz app by running the command below.
           </p>
-          <CodeGroup>
+          <CodeGroup
+            onCopy={() => {
+              track("Template command copied from examples page", {
+                example: example.slug,
+              });
+            }}
+          >
             <CreateJazzApp
               components={InterpolateInCode({
                 $EXAMPLE: example.slug,
