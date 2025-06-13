@@ -47,7 +47,7 @@ export function RatePetPostUI() {
             variant={
               petPost?.reactions?.byMe?.value === reactionType
                 ? "default"
-                : "outline"
+                : "outline-solid"
             }
             onClick={() => {
               petPost?.reactions?.push(reactionType);
