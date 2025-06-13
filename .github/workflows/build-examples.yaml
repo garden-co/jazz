@@ -10,15 +10,9 @@ jobs:
     strategy:
       matrix:
         example: [
-          "chat",
-          "clerk",
-          "passkey",
-          "inspector",
-          "music-player",
-          "password-manager",
-          "pets",
-          "reactions",
-          "todo",
+          "passkey-svelte",
+          "chat-svelte",
+          "file-share-svelte",
         ]
 
     steps:
