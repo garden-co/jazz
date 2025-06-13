@@ -13,12 +13,14 @@ import { createSubscriber } from 'svelte/reactivity';
 import { getJazzContext } from './jazz.svelte';
 import { anySchemaToCoSchema, subscribeToCoValue } from 'jazz-tools';
 import { useIsAuthenticated } from './auth/useIsAuthenticated.svelte.js';
+import { untrack } from 'svelte';
 
 export class CoState<V extends CoValueOrZodSchema, R extends ResolveQuery<V> = true> {
 	#value: Loaded<V, R> | undefined | null = undefined;
 	#ctx = getJazzContext<InstanceOfSchema<AccountClass<Account>>>();
 	#id: string | undefined | null;
 	#subscribe: () => void;
+	#update = () => {};
 
 	constructor(
 		Schema: V,
@@ -28,48 +30,50 @@ export class CoState<V extends CoValueOrZodSchema, R extends ResolveQuery<V> = t
 		this.#id = $derived.by(typeof id === 'function' ? id : () => id);
 
 		this.#subscribe = createSubscriber(update => {
-			return $effect.root(() => {
-				$effect.pre(() => {
-					const ctx = this.#ctx.current;
-					const id = this.#id;
-
-					if (!ctx || !id) return update();
-					const agent = 'me' in ctx ? ctx.me : ctx.guest;
-
-					const unsubscribe = subscribeToCoValue(
-						anySchemaToCoSchema(Schema),
-						id,
-						{
-							// @ts-expect-error The resolve query type isn't compatible with the anySchemaToCoSchema conversion
-							resolve: options?.resolve,
-							loadAs: agent,
-							onUnavailable: () => {
-								this.#value = null;
-								update();
-							},
-							onUnauthorized: () => {
-								this.#value = null;
-								update();
-							},
-							syncResolution: true
-						},
-						value => {
-							if (value === this.#value) return;
-							this.#value = value as Loaded<V, R>;
-							update();
-						}
-					);
-					return () => {
-						unsubscribe();
-						this.#value = undefined;
-					};
-				});
-			});
+			this.#update = update;
 		});
 
 		$effect.pre(() => {
-			this.#subscribe();
-		})
+			const ctx = this.#ctx.current;
+			const id = this.#id;
+
+			return untrack(() => {
+				if (!ctx || !id) {
+					return this.update(undefined);
+				}
+				const agent = 'me' in ctx ? ctx.me : ctx.guest;
+
+				const unsubscribe = subscribeToCoValue(
+					anySchemaToCoSchema(Schema),
+					id,
+					{
+						// @ts-expect-error The resolve query type isn't compatible with the anySchemaToCoSchema conversion
+						resolve: options?.resolve,
+						loadAs: agent,
+						onUnavailable: () => {
+							this.update(null);
+						},
+						onUnauthorized: () => {
+							this.update(null);
+						},
+						syncResolution: true
+					},
+					value => {
+						this.update(value as Loaded<V, R>);
+					}
+				);
+
+				return () => {
+					unsubscribe();
+				};
+			});
+		});
+	}
+
+	update(value: Loaded<V, R> | undefined | null) {
+		if (this.#value === value) return;
+		this.#value = value;
+		this.#update();
 	}
 
 	get current() {
@@ -85,52 +89,54 @@ export class AccountCoState<
 	#value: Loaded<A, R> | undefined | null = undefined;
 	#ctx = getJazzContext<InstanceOfSchema<A>>();
 	#subscribe: () => void;
+	#update = () => {};
 
 	constructor(Schema: A, options?: { resolve?: ResolveQueryStrict<A, R> }) {
 		this.#subscribe = createSubscriber(update => {
-			return $effect.root(() => {
-				$effect.pre(() => {
-					const ctx = this.#ctx.current;
-
-					if (!ctx || !('me' in ctx)) return update();
-
-					const me = ctx.me;
-
-					const unsubscribe = subscribeToCoValue(
-						anySchemaToCoSchema(Schema),
-						me.id,
-						{
-							// @ts-expect-error The resolve query type isn't compatible with the anySchemaToCoSchema conversion
-							resolve: options?.resolve,
-							loadAs: me,
-							onUnavailable: () => {
-								this.#value = null;
-								update();
-							},
-							onUnauthorized: () => {
-								this.#value = null;
-								update();
-							},
-							syncResolution: true
-						},
-						value => {
-							if (value === this.#value) return;
-							this.#value = value as Loaded<A, R>;
-							update();
-						}
-					);
-
-					return () => {
-						unsubscribe();
-						this.#value = undefined;
-					};
-				});
-			});
+			this.#update = update;
 		});
 
 		$effect.pre(() => {
-			this.#subscribe();
-		})
+			const ctx = this.#ctx.current;
+
+			return untrack(() => {
+				if (!ctx || !('me' in ctx)) {
+					return this.update(undefined);
+				}
+
+				const me = ctx.me;
+
+				const unsubscribe = subscribeToCoValue(
+					anySchemaToCoSchema(Schema),
+					me.id,
+					{
+						// @ts-expect-error The resolve query type isn't compatible with the anySchemaToCoSchema conversion
+						resolve: options?.resolve,
+						loadAs: me,
+						onUnavailable: () => {
+							this.update(null);
+						},
+						onUnauthorized: () => {
+							this.update(null);
+						},
+						syncResolution: true
+					},
+					value => {
+						this.update(value as Loaded<A, R>);
+					}
+				);
+
+				return () => {
+					unsubscribe();
+				};
+			})
+		});
+	}
+
+	update(value: Loaded<A, R> | undefined | null) {
+		if (this.#value === value) return;
+		this.#value = value;
+		this.#update();
 	}
 
 	logOut = () => {
