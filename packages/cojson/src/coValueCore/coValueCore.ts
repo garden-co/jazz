@@ -19,6 +19,7 @@ import {
   RawCoID,
   SessionID,
   TransactionID,
+  getGroupDependentKey,
   getGroupDependentKeyList,
   getParentGroupId,
   isParentGroupReference,
@@ -35,6 +36,7 @@ import { CoValueKnownState, PeerID, emptyKnownState } from "../sync.js";
 import { accountOrAgentIDfromSessionID } from "../typeUtils/accountOrAgentIDfromSessionID.js";
 import { expectGroup } from "../typeUtils/expectGroup.js";
 import { isAccountID } from "../typeUtils/isAccountID.js";
+import { getDependedOnCoValuesFromRawData } from "./utils.js";
 import { CoValueHeader, Transaction, VerifiedState } from "./verifiedState.js";
 
 /**
@@ -112,6 +114,8 @@ export class CoValueCore {
   private _cachedDependentOn?: Set<RawCoID>;
   private counter: UpDownCounter;
 
+  correctionsRequested = new Set<SessionID>();
+
   private constructor(
     init: { header: CoValueHeader } | { id: RawCoID },
     node: LocalNode,
@@ -172,7 +176,7 @@ export class CoValueCore {
   }
 
   isAvailable(): this is AvailableCoValueCore {
-    return !!this.verified;
+    return !!this.verified && this.missingDependencies.size === 0;
   }
 
   isErroredInPeer(peerId: PeerID) {
@@ -229,13 +233,34 @@ export class CoValueCore {
     this.notifyUpdate("immediate");
   }
 
-  // TODO: rename to "provided"
-  markAvailable(header: CoValueHeader, fromPeerId: PeerID) {
+  missingDependencies = new Set<RawCoID>();
+  markMissingDependency(dependency: RawCoID) {
+    const value = this.node.getCoValue(dependency);
+
+    if (value.isAvailable()) {
+      this.missingDependencies.delete(dependency);
+    } else {
+      const unsubscribe = value.subscribe(() => {
+        if (value.isAvailable()) {
+          this.missingDependencies.delete(dependency);
+          unsubscribe();
+        }
+
+        if (this.isAvailable()) {
+          this.notifyUpdate("immediate");
+        }
+      });
+
+      this.missingDependencies.add(dependency);
+    }
+  }
+
+  provideHeader(header: CoValueHeader, fromPeerId: PeerID) {
     const previousState = this.loadingState;
 
     if (this._verified?.sessions.size) {
       throw new Error(
-        "CoValueCore: markAvailable called on coValue with verified sessions present!",
+        "CoValueCore: provideHeader called on coValue with verified sessions present!",
       );
     }
     this._verified = new VerifiedState(
@@ -919,49 +944,18 @@ export class CoValueCore {
         return new Set();
       }
 
-      const dependentOn = this.getDependedOnCoValuesFromHeaderAndSessions(
+      const dependentOn = getDependedOnCoValuesFromRawData(
+        this.id,
         this.verified.header,
         this.verified.sessions.keys(),
+        Array.from(
+          this.verified.sessions.values(),
+          (session) => session.transactions,
+        ),
       );
       this._cachedDependentOn = dependentOn;
       return dependentOn;
     }
-  }
-
-  /** @internal */
-  getDependedOnCoValuesFromHeaderAndSessions(
-    header: CoValueHeader,
-    sessions: Iterable<SessionID>,
-  ): Set<RawCoID> {
-    const deps = new Set<RawCoID>();
-
-    for (const session of sessions) {
-      const accountId = accountOrAgentIDfromSessionID(session);
-
-      if (isAccountID(accountId) && accountId !== this.id) {
-        deps.add(accountId);
-      }
-    }
-
-    if (header.ruleset.type === "group") {
-      if (isAccountID(header.ruleset.initialAdmin)) {
-        deps.add(header.ruleset.initialAdmin);
-      }
-
-      if (this.verified) {
-        for (const id of getGroupDependentKeyList(
-          expectGroup(this.getCurrentContent()).keys(),
-        )) {
-          deps.add(id);
-        }
-      }
-    }
-
-    if (header.ruleset.type === "ownedByGroup") {
-      deps.add(header.ruleset.group);
-    }
-
-    return deps;
   }
 
   waitForSync(options?: {

@@ -1,15 +1,20 @@
-import { beforeEach, describe, expect, test } from "vitest";
+import { beforeEach, describe, expect, onTestFinished, test, vi } from "vitest";
 
 import { expectMap } from "../coValue";
-import { toSimplifiedMessages } from "./messagesTestUtils";
+import { CO_VALUE_LOADING_CONFIG } from "../coValueCore/coValueCore";
 import {
   SyncMessagesLog,
+  blockMessageTypeOnOutgoingPeer,
   loadCoValueOrFail,
+  setupTestAccount,
   setupTestNode,
   waitFor,
 } from "./testUtils";
 
 let jazzCloud = setupTestNode({ isSyncServer: true });
+
+// Set a short timeout to make the tests on unavailable complete faster
+CO_VALUE_LOADING_CONFIG.RETRY_DELAY = 100;
 
 beforeEach(async () => {
   SyncMessagesLog.clear();
@@ -403,6 +408,210 @@ describe("loading coValues from server", () => {
         "client -> server | LOAD Map sessions: empty",
         "server -> client | CONTENT Group header: true new: After: 0 New: 5",
         "server -> client | CONTENT Map header: true new: After: 0 New: 1",
+      ]
+    `);
+  });
+
+  test("coValue with a delayed group loading", async () => {
+    const client = setupTestNode();
+
+    const { peerOnServer } = client.connectToSyncServer();
+
+    const group = jazzCloud.node.createGroup();
+    const parentGroup = jazzCloud.node.createGroup();
+    parentGroup.addMember("everyone", "reader");
+
+    const blocker = blockMessageTypeOnOutgoingPeer(peerOnServer, "content", {
+      id: group.id,
+      once: true,
+    });
+
+    group.extend(parentGroup);
+
+    const map = group.createMap();
+    map.set("hello", "world");
+
+    const mapOnClient = await loadCoValueOrFail(client.node, map.id);
+    expect(mapOnClient.get("hello")).toEqual("world");
+
+    expect(
+      SyncMessagesLog.getMessages({
+        ParentGroup: parentGroup.core,
+        Group: group.core,
+        Map: map.core,
+      }),
+    ).toMatchInlineSnapshot(`
+      [
+        "client -> server | LOAD Map sessions: empty",
+        "server -> client | CONTENT ParentGroup header: true new: After: 0 New: 6",
+        "client -> server | KNOWN ParentGroup sessions: header/6",
+        "server -> client | CONTENT Map header: true new: After: 0 New: 1",
+        "client -> server | LOAD Group sessions: empty",
+        "client -> server | KNOWN Map sessions: empty",
+        "server -> client | CONTENT Group header: true new: After: 0 New: 5",
+        "client -> server | KNOWN Group sessions: header/5",
+      ]
+    `);
+
+    blocker.unblock();
+  });
+
+  test("coValue with a delayed parent group loading", async () => {
+    const client = setupTestNode();
+
+    const { peerOnServer } = client.connectToSyncServer();
+
+    const group = jazzCloud.node.createGroup();
+    const parentGroup = jazzCloud.node.createGroup();
+    parentGroup.addMember("everyone", "reader");
+
+    const blocker = blockMessageTypeOnOutgoingPeer(peerOnServer, "content", {
+      id: parentGroup.id,
+      once: true,
+    });
+
+    group.extend(parentGroup);
+
+    const map = group.createMap();
+    map.set("hello", "world");
+
+    const mapOnClient = await loadCoValueOrFail(client.node, map.id);
+    expect(mapOnClient.get("hello")).toEqual("world");
+
+    expect(
+      SyncMessagesLog.getMessages({
+        ParentGroup: parentGroup.core,
+        Group: group.core,
+        Map: map.core,
+      }),
+    ).toMatchInlineSnapshot(`
+      [
+        "client -> server | LOAD Map sessions: empty",
+        "server -> client | CONTENT Group header: true new: After: 0 New: 5",
+        "client -> server | LOAD ParentGroup sessions: empty",
+        "client -> server | KNOWN Group sessions: empty",
+        "server -> client | CONTENT ParentGroup header: true new: After: 0 New: 6",
+        "client -> server | KNOWN ParentGroup sessions: header/6",
+        "server -> client | CONTENT Map header: true new: After: 0 New: 1",
+        "client -> server | KNOWN Map sessions: header/1",
+      ]
+    `);
+
+    blocker.unblock();
+  });
+
+  test("coValue with a delayed account loading (block once)", async () => {
+    const client = setupTestNode();
+    const syncServer = await setupTestAccount({ isSyncServer: true });
+
+    const { peerOnServer } = client.connectToSyncServer({
+      syncServer: syncServer.node,
+    });
+
+    const group = syncServer.node.createGroup();
+    group.addMember("everyone", "writer");
+    const blocker = blockMessageTypeOnOutgoingPeer(peerOnServer, "content", {
+      id: syncServer.accountID,
+      once: true,
+    });
+
+    const account = syncServer.node.expectCurrentAccount(syncServer.accountID);
+
+    const map = group.createMap();
+    map.set("hello", "world");
+
+    const mapOnClient = await loadCoValueOrFail(client.node, map.id);
+    expect(mapOnClient.get("hello")).toEqual("world");
+
+    // ParentGroup sent twice, once because the server pushed it and another time because the client requested the missing dependency
+    expect(
+      SyncMessagesLog.getMessages({
+        Account: account.core,
+        Group: group.core,
+        Map: map.core,
+      }),
+    ).toMatchInlineSnapshot(`
+      [
+        "client -> server | LOAD Map sessions: empty",
+        "server -> client | CONTENT Group header: true new: After: 0 New: 5",
+        "client -> server | LOAD Account sessions: empty",
+        "client -> server | KNOWN CORRECTION Group sessions: empty",
+        "server -> client | CONTENT Account header: true new: After: 0 New: 4",
+        "client -> server | KNOWN Account sessions: header/4",
+        "server -> client | CONTENT Group header: true new: After: 0 New: 5",
+        "client -> server | KNOWN Group sessions: header/5",
+        "server -> client | CONTENT Map header: true new: After: 0 New: 1",
+        "client -> server | KNOWN Map sessions: header/1",
+      ]
+    `);
+
+    blocker.unblock();
+  });
+
+  test("coValue with a delayed account loading (block for 100ms)", async () => {
+    const client = setupTestNode();
+    const syncServer = await setupTestAccount({ isSyncServer: true });
+
+    const { peerOnServer } = client.connectToSyncServer({
+      syncServer: syncServer.node,
+    });
+
+    const group = syncServer.node.createGroup();
+    group.addMember("everyone", "writer");
+
+    const blocker = blockMessageTypeOnOutgoingPeer(peerOnServer, "content", {
+      id: syncServer.accountID,
+      once: true,
+    });
+
+    const account = syncServer.node.expectCurrentAccount(syncServer.accountID);
+
+    const map = group.createMap();
+    map.set("hello", "world");
+
+    const core = client.node.getCoValue(map.id);
+    const promise = client.node.loadCoValueCore(map.id);
+
+    const spy = vi.fn();
+
+    core.subscribe(spy);
+    spy.mockClear(); // Reset the first call
+
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    console.log("sending blocked messages");
+    blocker.sendBlockedMessages();
+    blocker.unblock();
+
+    await promise;
+
+    expect(spy).toHaveBeenCalled();
+    expect(core.isAvailable()).toBe(true);
+
+    const mapOnClient = expectMap(core.getCurrentContent());
+    expect(mapOnClient.get("hello")).toEqual("world");
+
+    // ParentGroup sent twice, once because the server pushed it and another time because the client requested the missing dependency
+    expect(
+      SyncMessagesLog.getMessages({
+        Account: account.core,
+        Group: group.core,
+        Map: map.core,
+      }),
+    ).toMatchInlineSnapshot(`
+      [
+        "client -> server | LOAD Map sessions: empty",
+        "server -> client | CONTENT Group header: true new: After: 0 New: 5",
+        "client -> server | LOAD Account sessions: empty",
+        "client -> server | KNOWN CORRECTION Group sessions: empty",
+        "server -> client | CONTENT Account header: true new: After: 0 New: 4",
+        "client -> server | KNOWN Account sessions: header/4",
+        "server -> client | CONTENT Group header: true new: After: 0 New: 5",
+        "client -> server | KNOWN Group sessions: header/5",
+        "server -> client | CONTENT Map header: true new: After: 0 New: 1",
+        "client -> server | KNOWN Map sessions: header/1",
+        "server -> client | CONTENT Account header: true new: After: 0 New: 4",
+        "client -> server | KNOWN Account sessions: header/4",
       ]
     `);
   });

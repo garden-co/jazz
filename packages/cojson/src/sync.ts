@@ -5,6 +5,7 @@ import {
   AvailableCoValueCore,
   CoValueCore,
 } from "./coValueCore/coValueCore.js";
+import { getDependedOnCoValuesFromRawData } from "./coValueCore/utils.js";
 import { CoValueHeader, Transaction } from "./coValueCore/verifiedState.js";
 import { Signature } from "./crypto/crypto.js";
 import { RawCoID, SessionID } from "./ids.js";
@@ -468,7 +469,7 @@ export class SyncManager {
   handleNewContent(msg: NewContentMessage, peer: PeerState) {
     const coValue = this.local.getCoValue(msg.id);
 
-    if (!coValue.isAvailable()) {
+    if (!coValue.verified) {
       if (!msg.header) {
         this.trySendToPeer(peer, {
           action: "known",
@@ -480,58 +481,36 @@ export class SyncManager {
         return;
       }
 
-      let dependencyMissing = false;
       const sessionIDs = Object.keys(msg.new) as SessionID[];
-      for (const dependency of coValue.getDependedOnCoValuesFromHeaderAndSessions(
+      const transactions = Object.values(msg.new).map(
+        (content) => content.newTransactions,
+      );
+
+      for (const dependency of getDependedOnCoValuesFromRawData(
+        msg.id,
         msg.header,
         sessionIDs,
+        transactions,
       )) {
         const dependencyCoValue = this.local.getCoValue(dependency);
 
         if (!dependencyCoValue.isAvailable()) {
-          if (peer.role !== "storage") {
-            this.trySendToPeer(peer, {
-              action: "load",
-              id: dependency,
-              header: false,
-              sessions: {},
-            });
+          coValue.markMissingDependency(dependency);
+
+          if (!dependencyCoValue.verified) {
+            dependencyCoValue.loadFromPeers(this.getServerAndStoragePeers());
           }
-
-          dependencyMissing = true;
         }
-      }
-
-      if (dependencyMissing) {
-        if (peer.role !== "storage") {
-          /**
-           * If we have missing dependencies, we send a known state message to the peer
-           * to let it know that we need a correction update.
-           *
-           * Sync-wise is sub-optimal, but it gives us correctness until
-           * https://github.com/garden-co/jazz/issues/1917 is implemented.
-           */
-          this.trySendToPeer(peer, {
-            action: "known",
-            isCorrection: true,
-            id: msg.id,
-            header: false,
-            sessions: {},
-          });
-        } else {
-          /** Cases of broken deps from storage are recovered by falling back to the server peers */
-          coValue.loadFromPeers(this.getServerAndStoragePeers(peer.id));
-        }
-
-        return;
       }
 
       peer.updateHeader(msg.id, true);
-      coValue.markAvailable(msg.header, peer.id);
+      coValue.provideHeader(msg.header, peer.id);
     }
 
-    if (!coValue.isAvailable()) {
-      throw new Error("Unreachable: CoValue should be available in every case");
+    if (!coValue.verified) {
+      throw new Error(
+        "Unreachable: CoValue should always have a verified state at this point",
+      );
     }
 
     let invalidStateAssumed = false;
@@ -565,12 +544,17 @@ export class SyncManager {
       if (isAccountID(accountId)) {
         const account = this.local.getCoValue(accountId);
 
+        // We can't verify the transaction without the account, so we skip it and ask for a correction
         if (!account.isAvailable()) {
-          account.loadFromPeers([peer]);
-          invalidStateAssumed = true;
+          if (!coValue.correctionsRequested.has(sessionID)) {
+            coValue.correctionsRequested.add(sessionID);
+            invalidStateAssumed = true;
+          }
           continue;
         }
       }
+
+      coValue.correctionsRequested.delete(sessionID);
 
       const result = coValue.tryAddTransactions(
         sessionID,
