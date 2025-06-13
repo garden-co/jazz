@@ -1,3 +1,5 @@
+"use client";
+
 import { consumeInviteLinkFromWindowLocation } from "jazz-browser";
 import { useEffect } from "react";
 

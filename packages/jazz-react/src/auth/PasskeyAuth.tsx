@@ -1,3 +1,5 @@
+"use client";
+
 import { BrowserPasskeyAuth } from "jazz-browser";
 import {
   useAuthSecretStorage,
