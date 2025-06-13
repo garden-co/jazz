@@ -121,7 +121,7 @@ export default function App() {
 
 function HomeScreen() {
   const { me } = useAccount(TodoAccount, {
-    resolve: { root: { projects: { $each: true } } },
+    resolve: { root: { projects: { $each: { $onError: null } } } },
   });
   const navigate = useNavigate();
 
@@ -129,6 +129,8 @@ function HomeScreen() {
     <>
       {me?.root.projects.length ? <h1>My Projects</h1> : null}
       {me?.root.projects.map((project) => {
+        if (!project) return null;
+
         return (
           <Button
             key={project.id}

@@ -13,6 +13,25 @@ export function internal_setDatabaseName(name: string) {
   DATABASE_NAME = name;
 }
 
+function createParallelOpsRunner() {
+  const ops = new Set<Promise<unknown>>();
+
+  return {
+    add: (op: Promise<unknown>) => {
+      ops.add(op);
+      op.finally(() => {
+        ops.delete(op);
+      });
+    },
+    wait() {
+      return Promise.race(ops);
+    },
+    get size() {
+      return ops.size;
+    },
+  };
+}
+
 export class IDBNode {
   private readonly dbClient: IDBClient;
   private readonly syncManager: StorageManagerAsync;
@@ -26,12 +45,23 @@ export class IDBNode {
     this.syncManager = new StorageManagerAsync(this.dbClient, toLocalNode);
 
     const processMessages = async () => {
+      const batch = createParallelOpsRunner();
+
       for await (const msg of fromLocalNode) {
         try {
           if (msg === "Disconnected" || msg === "PingTimeout") {
             throw new Error("Unexpected Disconnected message");
           }
-          await this.syncManager.handleSyncMessage(msg);
+
+          if (msg.action === "content") {
+            await this.syncManager.handleSyncMessage(msg);
+          } else {
+            batch.add(this.syncManager.handleSyncMessage(msg));
+          }
+
+          if (batch.size > 10) {
+            await batch.wait();
+          }
         } catch (e) {
           console.error(e);
         }

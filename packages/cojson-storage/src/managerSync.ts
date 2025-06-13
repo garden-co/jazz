@@ -15,14 +15,9 @@ import type {
   StoredCoValueRow,
   StoredSessionRow,
 } from "./types.js";
-import NewContentMessage = CojsonInternalTypes.NewContentMessage;
+
 import KnownStateMessage = CojsonInternalTypes.KnownStateMessage;
 import RawCoID = CojsonInternalTypes.RawCoID;
-
-type OutputMessageMap = Record<
-  RawCoID,
-  { knownMessage: KnownStateMessage; contentMessages?: NewContentMessage[] }
->;
 
 export class StorageManagerSync {
   private readonly toLocalNode: OutgoingSyncQueue;
@@ -35,7 +30,7 @@ export class StorageManagerSync {
     this.dbClient = dbClient;
   }
 
-  async handleSyncMessage(msg: SyncMessage) {
+  handleSyncMessage(msg: SyncMessage) {
     switch (msg.action) {
       case "load":
         this.handleLoad(msg);

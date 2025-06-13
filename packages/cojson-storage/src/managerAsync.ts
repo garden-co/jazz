@@ -15,6 +15,7 @@ import type {
   StoredCoValueRow,
   StoredSessionRow,
 } from "./types.js";
+
 import KnownStateMessage = CojsonInternalTypes.KnownStateMessage;
 import RawCoID = CojsonInternalTypes.RawCoID;
 
@@ -74,14 +75,20 @@ export class StorageManagerAsync {
     >();
 
     let contentStreaming = false;
-    for (const sessionRow of allCoValueSessions) {
-      const signatures = await this.dbClient.getSignatures(sessionRow.rowID, 0);
 
-      if (signatures.length > 0) {
-        contentStreaming = true;
-        signaturesBySession.set(sessionRow.sessionID, signatures);
-      }
-    }
+    await Promise.all(
+      allCoValueSessions.map(async (sessionRow) => {
+        const signatures = await this.dbClient.getSignatures(
+          sessionRow.rowID,
+          0,
+        );
+
+        if (signatures.length > 0) {
+          contentStreaming = true;
+          signaturesBySession.set(sessionRow.sessionID, signatures);
+        }
+      }),
+    );
 
     /**
      * If we are going to send the content in streaming, we send before a known state message

@@ -10,6 +10,25 @@ import { getSQLiteMigrationQueries } from "../sqlite/sqliteMigrations.js";
 import { SQLiteClientAsync } from "./client.js";
 import type { SQLiteDatabaseDriverAsync } from "./types.js";
 
+function createParallelOpsRunner() {
+  const ops = new Set<Promise<unknown>>();
+
+  return {
+    add: (op: Promise<unknown>) => {
+      ops.add(op);
+      op.finally(() => {
+        ops.delete(op);
+      });
+    },
+    wait() {
+      return Promise.race(ops);
+    },
+    get size() {
+      return ops.size;
+    },
+  };
+}
+
 export class SQLiteNodeBaseAsync {
   private readonly syncManager: StorageManagerAsync;
   private readonly dbClient: SQLiteClientAsync;
@@ -23,13 +42,23 @@ export class SQLiteNodeBaseAsync {
     this.syncManager = new StorageManagerAsync(this.dbClient, toLocalNode);
 
     const processMessages = async () => {
+      const batch = createParallelOpsRunner();
+
       for await (const msg of fromLocalNode) {
         try {
           if (msg === "Disconnected" || msg === "PingTimeout") {
             throw new Error("Unexpected Disconnected message");
           }
 
-          await this.syncManager.handleSyncMessage(msg);
+          if (msg.action === "content") {
+            await this.syncManager.handleSyncMessage(msg);
+          } else {
+            batch.add(this.syncManager.handleSyncMessage(msg));
+          }
+
+          if (batch.size > 10) {
+            await batch.wait();
+          }
         } catch (e) {
           logger.error("Error reading from localNode, handling msg", {
             msg,

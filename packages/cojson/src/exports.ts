@@ -78,6 +78,7 @@ import {
 
 type Value = JsonValue | AnyRawCoValue;
 
+import { getDependedOnCoValuesFromRawData } from "./coValueCore/utils.js";
 import { logger } from "./logger.js";
 import { getPriorityFromHeader } from "./priority.js";
 
@@ -93,6 +94,7 @@ export const cojsonInternals = {
   bytesToBase64url,
   parseJSON,
   stableStringify,
+  getDependedOnCoValuesFromRawData,
   accountOrAgentIDfromSessionID,
   isAccountID,
   accountHeaderForInitialAgentSecret,

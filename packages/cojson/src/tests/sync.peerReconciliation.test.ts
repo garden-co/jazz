@@ -1,9 +1,9 @@
 import { assert, beforeEach, describe, expect, test } from "vitest";
 import { expectMap } from "../coValue";
+import { CO_VALUE_LOADING_CONFIG } from "../coValueCore/coValueCore";
 import { WasmCrypto } from "../crypto/WasmCrypto";
 import {
   SyncMessagesLog,
-  loadCoValueOrFail,
   setupTestAccount,
   setupTestNode,
   waitFor,
@@ -193,16 +193,13 @@ describe("peer reconciliation", () => {
         "client -> server | CONTENT Map header: false new: After: 1 New: 1",
         "server -> client | KNOWN CORRECTION Map sessions: empty",
         "client -> server | CONTENT Map header: true new: After: 0 New: 2",
-        "server -> client | LOAD Group sessions: empty",
-        "client -> server | CONTENT Group header: true new: After: 0 New: 3",
-        "server -> client | KNOWN CORRECTION Map sessions: empty",
-        "client -> server | CONTENT Map header: true new: After: 0 New: 2",
-        "server -> client | KNOWN Group sessions: header/3",
-        "server -> client | KNOWN Map sessions: header/2",
+        "server -> client | KNOWN Map sessions: empty",
         "client -> server | LOAD Group sessions: header/3",
-        "server -> client | KNOWN Group sessions: header/3",
+        "server -> client | KNOWN Group sessions: empty",
         "client -> server | LOAD Map sessions: header/2",
-        "server -> client | KNOWN Map sessions: header/2",
+        "server -> client | KNOWN Map sessions: empty",
+        "client -> server | CONTENT Map header: true new: After: 0 New: 2",
+        "server -> client | KNOWN Map sessions: empty",
       ]
     `);
   });
@@ -254,30 +251,26 @@ describe("peer reconciliation", () => {
         "server -> client | KNOWN Profile sessions: empty",
         "client -> server | LOAD Group sessions: header/3",
         "server -> client | KNOWN Group sessions: empty",
-        "client -> server | LOAD Map sessions: header/2",
+        "client -> server | LOAD Map sessions: header/1",
         "server -> client | KNOWN Map sessions: empty",
         "client -> server | CONTENT Map header: false new: After: 1 New: 1",
         "server -> client | KNOWN CORRECTION Map sessions: empty",
         "client -> server | CONTENT Map header: true new: After: 0 New: 2",
-        "server -> client | LOAD Account sessions: empty",
-        "client -> server | CONTENT Account header: true new: After: 0 New: 4",
-        "server -> client | LOAD Group sessions: empty",
-        "client -> server | CONTENT Group header: true new: After: 0 New: 3",
         "server -> client | KNOWN CORRECTION Map sessions: empty",
         "client -> server | CONTENT Map header: true new: After: 0 New: 2",
-        "server -> client | KNOWN Account sessions: header/4",
-        "server -> client | KNOWN Group sessions: header/3",
-        "server -> client | KNOWN Map sessions: header/2",
+        "server -> client | KNOWN Map sessions: empty",
         "client -> server | LOAD Account sessions: header/4",
-        "server -> client | KNOWN Account sessions: header/4",
+        "server -> client | KNOWN Account sessions: empty",
         "client -> server | LOAD ProfileGroup sessions: header/5",
         "server -> client | KNOWN ProfileGroup sessions: empty",
         "client -> server | LOAD Profile sessions: header/1",
         "server -> client | KNOWN Profile sessions: empty",
         "client -> server | LOAD Group sessions: header/3",
-        "server -> client | KNOWN Group sessions: header/3",
+        "server -> client | KNOWN Group sessions: empty",
         "client -> server | LOAD Map sessions: header/2",
-        "server -> client | KNOWN Map sessions: header/2",
+        "server -> client | KNOWN Map sessions: empty",
+        "client -> server | CONTENT Map header: true new: After: 0 New: 2",
+        "server -> client | KNOWN Map sessions: empty",
       ]
     `);
   });

@@ -380,7 +380,7 @@ describe("multiple clients syncing with the a cloud-like server mesh", () => {
     map.set("hello", "updated", "trusting");
 
     // Block the content message from the core peer to simulate the delay on response
-    blockMessageTypeOnOutgoingPeer(peerOnServer, "content");
+    blockMessageTypeOnOutgoingPeer(peerOnServer, "content", {});
 
     const mapOnClient = await loadCoValueOrFail(client.node, map.id);
 
@@ -431,7 +431,7 @@ describe("multiple clients syncing with the a cloud-like server mesh", () => {
       },
     });
 
-    blockMessageTypeOnOutgoingPeer(peerToCoreServer, "load");
+    blockMessageTypeOnOutgoingPeer(peerToCoreServer, "load", {});
 
     client.node.syncManager.addPeer(peer1);
     anotherServer.node.syncManager.addPeer(peer2);

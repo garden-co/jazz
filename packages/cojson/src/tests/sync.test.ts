@@ -601,7 +601,7 @@ describe("SyncManager - knownStates vs optimisticKnownStates", () => {
     // optimisticKnownStates is updated when the content messages are sent,
     // while knownStates is only updated when we receive the "known" messages
     // that are acknowledging the receipt of the content messages
-    const outgoing = blockMessageTypeOnOutgoingPeer(peer, "content");
+    const outgoing = blockMessageTypeOnOutgoingPeer(peer, "content", {});
 
     map.set("key2", "value2", "trusting");
 

@@ -287,15 +287,25 @@ export async function loadCoValueOrFail<V extends RawCoValue>(
 export function blockMessageTypeOnOutgoingPeer(
   peer: Peer,
   messageType: SyncMessage["action"],
+  opts: {
+    id?: string;
+    once?: boolean;
+  },
 ) {
   const push = peer.outgoing.push;
   const pushSpy = vi.spyOn(peer.outgoing, "push");
 
   const blockedMessages: SyncMessage[] = [];
+  const blockedIds = new Set<string>();
 
   pushSpy.mockImplementation(async (msg) => {
-    if (msg.action === messageType) {
+    if (
+      msg.action === messageType &&
+      (!opts.id || msg.id === opts.id) &&
+      (!opts.once || !blockedIds.has(msg.id))
+    ) {
       blockedMessages.push(msg);
+      blockedIds.add(msg.id);
       return Promise.resolve();
     }
 

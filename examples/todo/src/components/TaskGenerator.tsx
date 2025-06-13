@@ -26,9 +26,11 @@ export function TaskGenerator() {
       },
     });
 
-    root.projects.push(project);
+    root.projects.push(project.value);
 
-    navigate(`/project/${project.id}`);
+    await project.done;
+
+    navigate(`/project/${project.value.id}`);
   };
 
   return (
