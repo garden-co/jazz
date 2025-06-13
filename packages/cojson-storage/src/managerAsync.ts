@@ -350,6 +350,10 @@ export class StorageManagerAsync {
       | CojsonInternalTypes.KnownStateMessage
       | CojsonInternalTypes.NewContentMessage,
   ): Promise<unknown> {
-    return this.toLocalNode.push(msg);
+    return this.toLocalNode.push(msg).catch((e) =>
+      logger.error(`Error sending ${msg.action} state, id ${msg.id}`, {
+        err: e,
+      }),
+    );
   }
 }

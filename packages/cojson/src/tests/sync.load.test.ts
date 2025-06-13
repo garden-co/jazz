@@ -548,6 +548,69 @@ describe("loading coValues from server", () => {
     blocker.unblock();
   });
 
+  test("coValue with a delayed account loading related to an update (block once)", async () => {
+    const client = setupTestNode();
+    const user = await setupTestAccount({
+      connected: true,
+    });
+
+    const { peerOnServer } = client.connectToSyncServer();
+
+    const account = user.node.expectCurrentAccount(user.accountID);
+    await user.node.syncManager.waitForAllCoValuesSync();
+
+    SyncMessagesLog.clear();
+
+    const group = jazzCloud.node.createGroup();
+    group.addMember("everyone", "writer");
+    const blocker = blockMessageTypeOnOutgoingPeer(peerOnServer, "content", {
+      id: user.accountID,
+      once: true,
+    });
+
+    const map = group.createMap();
+    map.set("hello", "world");
+
+    const mapOnUser = await loadCoValueOrFail(user.node, map.id);
+    mapOnUser.set("user", true);
+
+    await mapOnUser.core.waitForSync();
+
+    const mapOnClient = await loadCoValueOrFail(client.node, map.id);
+    expect(mapOnClient.get("user")).toEqual(true);
+
+    // ParentGroup sent twice, once because the server pushed it and another time because the client requested the missing dependency
+    expect(
+      SyncMessagesLog.getMessages({
+        Account: account.core,
+        Group: group.core,
+        Map: map.core,
+      }),
+    ).toMatchInlineSnapshot(`
+      [
+        "client -> server | LOAD Map sessions: empty",
+        "server -> client | CONTENT Group header: true new: After: 0 New: 5",
+        "client -> server | KNOWN Group sessions: header/5",
+        "server -> client | CONTENT Map header: true new: After: 0 New: 1",
+        "client -> server | KNOWN Map sessions: header/1",
+        "client -> server | CONTENT Map header: false new: After: 0 New: 1",
+        "server -> client | KNOWN Map sessions: header/2",
+        "client -> server | LOAD Map sessions: empty",
+        "server -> client | CONTENT Group header: true new: After: 0 New: 5",
+        "client -> server | KNOWN Group sessions: header/5",
+        "server -> client | CONTENT Map header: true new: After: 0 New: 1 | After: 0 New: 1",
+        "client -> server | LOAD Account sessions: empty",
+        "client -> server | KNOWN CORRECTION Map sessions: empty",
+        "server -> client | CONTENT Account header: true new: After: 0 New: 4",
+        "client -> server | KNOWN Account sessions: header/4",
+        "server -> client | CONTENT Map header: true new: After: 0 New: 1 | After: 0 New: 1",
+        "client -> server | KNOWN Map sessions: header/2",
+      ]
+    `);
+
+    blocker.unblock();
+  });
+
   test("coValue with a delayed account loading (block for 100ms)", async () => {
     const client = setupTestNode();
     const syncServer = await setupTestAccount({ isSyncServer: true });

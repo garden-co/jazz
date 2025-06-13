@@ -544,6 +544,11 @@ export class SyncManager {
       if (isAccountID(accountId)) {
         const account = this.local.getCoValue(accountId);
 
+        // New transaction with a missing account on an already loaded coValue
+        if (!coValue.missingDependencies.has(accountId)) {
+          account.loadFromPeers(this.getServerAndStoragePeers());
+        }
+
         // We can't verify the transaction without the account, so we skip it and ask for a correction
         if (!account.isAvailable()) {
           if (!coValue.correctionsRequested.has(sessionID)) {

@@ -348,6 +348,10 @@ export class StorageManagerSync {
       | CojsonInternalTypes.KnownStateMessage
       | CojsonInternalTypes.NewContentMessage,
   ) {
-    this.toLocalNode.push(msg);
+    this.toLocalNode.push(msg).catch((e) =>
+      logger.error(`Error sending ${msg.action} state, id ${msg.id}`, {
+        err: e,
+      }),
+    );
   }
 }
