@@ -23,10 +23,6 @@ export function getDependedOnCoValuesFromRawData(
   }
 
   if (header.ruleset.type === "group") {
-    if (isAccountID(header.ruleset.initialAdmin)) {
-      deps.add(header.ruleset.initialAdmin);
-    }
-
     for (const txs of transactions) {
       for (const tx of txs) {
         if (tx.privacy !== "trusting") continue;
