@@ -330,7 +330,7 @@ const Task = co
     if (task.version === 1) {
       task.priority = "medium";
       // Upgrade the version so the migration won't run again
-      task.version = 2; 
+      task.version = 2;
     }
   });
 ```
@@ -367,7 +367,7 @@ const TaskV1 = co.map({
 const TaskV2 = co.map({
   // We need to be more strict about the version to make the
   // discriminated union work
-  version: z.literal(2), 
+  version: z.literal(2),
   done: z.boolean(),
   text: z.string(),
   priority: z.enum(["low", "medium", "high"]),
@@ -443,5 +443,129 @@ const project = Project.create({
 
 console.log(isProjectActive(project)); // false
 console.log(formatProjectDuration(project, "short")); // "3 days"
+```
+</CodeGroup>
+
+#### Uniqueness
+
+Identifying CoMaps by their CoValue IDs can be inconvenient if using an externally-generated identifier is preferrable, such as when:
+- The CoMaps have user-generated identifiers, such as a slug
+- The CoMaps have identifiers referring to equivalent data in an external system
+- The CoMaps have human-readable & application-specific identifiers
+  - If an application has CoValues used by every user, referring to it by a unique name (eg, `"my-global-comap"`) can be more convenient than using a CoValue ID
+
+Consider a scenario where one wants to identify a CoMap using some unique identifier that isn't the Jazz CoValue ID:
+
+<CodeGroup>
+```ts twoslash
+import { co, z, Group, ID } from "jazz-tools";
+const Event = co.map({
+  title: z.string(),
+  identifier: z.string(),
+  external_id: z.string(),
+});
+const sourceData = {
+  title: "" as string,
+  identifier: "" as string,
+  _id: "" as string,
+};
+// ---cut---
+// This will not work, as `sourceData.identifier` is some externally-generated string, not a CoValue ID
+let activeEvent = await Event.load(sourceData.identifier);
+```
+</CodeGroup>
+
+To achieve this, one could use `CoMap.loadUnique`:
+
+<CodeGroup>
+```ts twoslash
+import { co, z, Group, ID } from "jazz-tools";
+const Event = co.map({
+  title: z.string(),
+  identifier: z.string(),
+  external_id: z.string(),
+});
+const sourceData = {
+  title: "" as string,
+  identifier: "" as string,
+  _id: "" as string,
+};
+const workspace = Group.create();
+// ---cut---
+let activeEvent = await Event.loadUnique(
+  { identifier: sourceData.identifier },
+  workspace.id
+);
+```
+</CodeGroup>
+
+Now suppose you wished to create or modify a CoMap using its unique identifier:
+
+<CodeGroup>
+```ts twoslash
+import { co, z, Group, ID } from "jazz-tools";
+const Event = co.map({
+  title: z.string(),
+  identifier: z.string(),
+  external_id: z.string(),
+});
+const sourceData = {
+  title: "" as string,
+  identifier: "" as string,
+  _id: "" as string,
+};
+const workspace = Group.create();
+// ---cut---
+let activeEvent = await Event.loadUnique(
+  { identifier: sourceData.identifier },
+  workspace.id
+);
+if (!activeEvent) {
+  activeEvent = Event.create(
+    {
+      title: sourceData.title,
+      identifier: sourceData.identifier,
+      external_id: sourceData._id,
+    },
+    workspace,
+  );
+} else {
+  activeEvent.applyDiff({
+    title: sourceData.title,
+    identifier: sourceData.identifier,
+    external_id: sourceData._id,
+  });
+}
+```
+</CodeGroup>
+
+To simplify this, one could use `CoMap.upsertUnique`:
+
+<CodeGroup>
+```ts twoslash
+import { co, z, Group, ID } from "jazz-tools";
+const Event = co.map({
+  title: z.string(),
+  identifier: z.string(),
+  external_id: z.string(),
+});
+const sourceData = {
+  title: "" as string,
+  identifier: "" as string,
+  _id: "" as string,
+};
+const workspace = Group.create();
+// ---cut---
+const activeEvent = await Event.upsertUnique(
+  {
+    value: {
+      title: sourceData.title,
+      identifier: sourceData.identifier,
+      external_id: sourceData._id,
+    },
+    unique: sourceData.identifier,
+    owner: workspace
+  }
+);
 ```
 </CodeGroup>

@@ -325,6 +325,7 @@ export class LocalNode {
   async loadCoValueCore(
     id: RawCoID,
     skipLoadingFromPeer?: PeerID,
+    skipRetry?: boolean,
   ): Promise<CoValueCore> {
     if (!id) {
       throw new Error("Trying to load CoValue with undefined id");
@@ -372,6 +373,7 @@ export class LocalNode {
 
       if (
         result.isAvailable() ||
+        skipRetry ||
         retries >= CO_VALUE_LOADING_CONFIG.MAX_RETRIES
       ) {
         return result;
@@ -395,8 +397,11 @@ export class LocalNode {
    *
    * @category 3. Low-level
    */
-  async load<T extends RawCoValue>(id: CoID<T>): Promise<T | "unavailable"> {
-    const core = await this.loadCoValueCore(id);
+  async load<T extends RawCoValue>(
+    id: CoID<T>,
+    skipRetry?: boolean,
+  ): Promise<T | "unavailable"> {
+    const core = await this.loadCoValueCore(id, undefined, skipRetry);
 
     if (!core.isAvailable()) {
       return "unavailable";
@@ -419,11 +424,12 @@ export class LocalNode {
   subscribe<T extends RawCoValue>(
     id: CoID<T>,
     callback: (update: T | "unavailable") => void,
+    skipRetry?: boolean,
   ): () => void {
     let stopped = false;
     let unsubscribe!: () => void;
 
-    this.load(id)
+    this.load(id, skipRetry)
       .then((coValue) => {
         if (stopped) {
           return;

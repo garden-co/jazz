@@ -650,7 +650,8 @@ const svelteExamples: Example[] = [
     tech: [tech.svelte],
     features: [features.fileUpload, features.passkey, features.inviteLink],
     illustration: <FileShareIllustration />,
-  }, {
+  },
+  {
     name: "Chat",
     slug: "chat-svelte",
     description:

@@ -1,3 +1,4 @@
+import { cojsonInternals } from "cojson";
 import { WasmCrypto } from "cojson/crypto/WasmCrypto";
 import {
   assert,
@@ -11,8 +12,12 @@ import {
 } from "vitest";
 import { Group, co, subscribeToCoValue, z } from "../exports.js";
 import { Account } from "../index.js";
-import { Loaded, zodSchemaToCoSchema } from "../internal.js";
-import { createJazzTestAccount, setupJazzTestSync } from "../testing.js";
+import { ID, Loaded, zodSchemaToCoSchema } from "../internal.js";
+import {
+  createJazzTestAccount,
+  getPeerConnectedToTestSyncServer,
+  setupJazzTestSync,
+} from "../testing.js";
 import { setupTwoNodes, waitFor } from "./utils.js";
 
 const Crypto = await WasmCrypto.create();
@@ -469,6 +474,66 @@ describe("CoMap resolution", async () => {
     expect(loadedPerson.dog?.name).toEqual("Rex");
   });
 
+  test("loading a locally available map with skipRetry set to true", async () => {
+    const Dog = co.map({
+      name: z.string(),
+      breed: z.string(),
+    });
+
+    const Person = co.map({
+      name: z.string(),
+      age: z.number(),
+      dog: Dog,
+    });
+
+    // Disconnect the current account
+    const currentAccount = Account.getMe();
+    currentAccount._raw.core.node.syncManager.getPeers().forEach((peer) => {
+      peer.gracefulShutdown();
+    });
+
+    const person = Person.create({
+      name: "John",
+      age: 20,
+      dog: Dog.create({ name: "Rex", breed: "Labrador" }),
+    });
+
+    const loadedPerson = await Person.load(person.id, { skipRetry: true });
+
+    assert(loadedPerson);
+    expect(loadedPerson.dog?.name).toEqual("Rex");
+  });
+
+  test("loading a locally available map with skipRetry set to false", async () => {
+    const Dog = co.map({
+      name: z.string(),
+      breed: z.string(),
+    });
+
+    const Person = co.map({
+      name: z.string(),
+      age: z.number(),
+      dog: Dog,
+    });
+
+    // Disconnect the current account
+    const currentAccount = Account.getMe();
+    currentAccount._raw.core.node.syncManager.getPeers().forEach((peer) => {
+      peer.gracefulShutdown();
+    });
+
+    const person = Person.create({
+      name: "John",
+      age: 20,
+      dog: Dog.create({ name: "Rex", breed: "Labrador" }),
+    });
+
+    const loadedPerson = await Person.load(person.id, { skipRetry: false });
+
+    assert(loadedPerson);
+    expect(loadedPerson.dog?.name).toEqual("Rex");
+  });
+
   test("loading a remotely available map with deep resolve", async () => {
     const Dog = co.map({
       name: z.string(),
@@ -535,6 +600,135 @@ describe("CoMap resolution", async () => {
       loadAs: userB,
     });
 
+    assert(loadedPerson);
+    expect(loadedPerson.dog).toBe(null);
+
+    await waitFor(() => expect(loadedPerson.dog).toBeTruthy());
+
+    expect(loadedPerson.dog?.name).toEqual("Rex");
+  });
+
+  test("loading a remotely available map with skipRetry set to true", async () => {
+    const Dog = co.map({
+      name: z.string(),
+      breed: z.string(),
+    });
+
+    const Person = co.map({
+      name: z.string(),
+      age: z.number(),
+      dog: Dog,
+    });
+
+    const currentAccount = Account.getMe();
+
+    // Disconnect the current account
+    currentAccount._raw.core.node.syncManager.getPeers().forEach((peer) => {
+      peer.gracefulShutdown();
+    });
+
+    const group = Group.create();
+    group.addMember("everyone", "writer");
+
+    const person = Person.create(
+      {
+        name: "John",
+        age: 20,
+        dog: Dog.create({ name: "Rex", breed: "Labrador" }, group),
+      },
+      group,
+    );
+
+    const userB = await createJazzTestAccount();
+    let resolved = false;
+    const promise = Person.load(person.id, {
+      loadAs: userB,
+      skipRetry: true,
+    });
+    promise.then(() => {
+      resolved = true;
+    });
+
+    expect(resolved).toBe(false);
+
+    await new Promise((resolve) =>
+      setTimeout(
+        resolve,
+        cojsonInternals.CO_VALUE_LOADING_CONFIG.RETRY_DELAY - 100,
+      ),
+    );
+
+    expect(resolved).toBe(true);
+
+    // Reconnect the current account
+    currentAccount._raw.core.node.syncManager.addPeer(
+      getPeerConnectedToTestSyncServer(),
+    );
+
+    const loadedPerson = await promise;
+    expect(loadedPerson).toBeNull();
+    expect(loadedPerson?.dog).toBeFalsy();
+    expect(loadedPerson?.dog?.name).toBeUndefined();
+  });
+
+  test("loading a remotely available map with skipRetry set to false", async () => {
+    const Dog = co.map({
+      name: z.string(),
+      breed: z.string(),
+    });
+
+    const Person = co.map({
+      name: z.string(),
+      age: z.number(),
+      dog: Dog,
+    });
+
+    const currentAccount = Account.getMe();
+
+    // Disconnect the current account
+    currentAccount._raw.core.node.syncManager.getPeers().forEach((peer) => {
+      peer.gracefulShutdown();
+    });
+
+    const group = Group.create();
+    group.addMember("everyone", "writer");
+
+    const person = Person.create(
+      {
+        name: "John",
+        age: 20,
+        dog: Dog.create({ name: "Rex", breed: "Labrador" }, group),
+      },
+      group,
+    );
+
+    const userB = await createJazzTestAccount();
+    let resolved = false;
+    const promise = Person.load(person.id, {
+      loadAs: userB,
+      skipRetry: false,
+    });
+    promise.then(() => {
+      resolved = true;
+    });
+
+    await new Promise((resolve) =>
+      setTimeout(
+        resolve,
+        cojsonInternals.CO_VALUE_LOADING_CONFIG.RETRY_DELAY - 100,
+      ),
+    );
+
+    expect(resolved).toBe(false);
+
+    // Reconnect the current account
+    currentAccount._raw.core.node.syncManager.addPeer(
+      getPeerConnectedToTestSyncServer(),
+    );
+
+    const loadedPerson = await promise;
+
+    expect(resolved).toBe(true);
     assert(loadedPerson);
     expect(loadedPerson.dog).toBe(null);
 
@@ -1199,6 +1393,132 @@ describe("Creating and finding unique CoMaps", async () => {
 
     const foundAlice = Person.findUnique({ name: "Alice" }, group.id);
     expect(foundAlice).toEqual(alice.id);
+  });
+
+  test("manual upserting pattern", async () => {
+    // Schema
+    const Event = co.map({
+      title: z.string(),
+      identifier: z.string(),
+      external_id: z.string(),
+    });
+
+    // Data
+    const sourceData = {
+      title: "Test Event Title",
+      identifier: "test-event-identifier",
+      _id: "test-event-external-id",
+    };
+    const workspace = Group.create();
+
+    // Pattern
+    let eventId = Event.findUnique(
+      { identifier: sourceData.identifier },
+      workspace.id,
+    );
+    let activeEvent = await Event.load(eventId as unknown as ID<Event>);
+    if (!activeEvent) {
+      activeEvent = Event.create(
+        {
+          title: sourceData.title,
+          identifier: sourceData.identifier,
+          external_id: sourceData._id,
+        },
+        workspace,
+      );
+    } else {
+      activeEvent.applyDiff({
+        title: sourceData.title,
+        identifier: sourceData.identifier,
+        external_id: sourceData._id,
+      });
+    }
+    expect(activeEvent).toEqual({
+      title: sourceData.title,
+      identifier: sourceData.identifier,
+      external_id: sourceData._id,
+    });
+  });
+
+  test("upserting a non-existent value", async () => {
+    // Schema
+    const Event = co.map({
+      title: z.string(),
+      identifier: z.string(),
+      external_id: z.string(),
+    });
+
+    // Data
+    const sourceData = {
+      title: "Test Event Title",
+      identifier: "test-event-identifier",
+      _id: "test-event-external-id",
+    };
+    const workspace = Group.create();
+
+    // Upserting
+    const activeEvent = await Event.upsertUnique({
+      value: {
+        title: sourceData.title,
+        identifier: sourceData.identifier,
+        external_id: sourceData._id,
+      },
+      unique: sourceData.identifier,
+      owner: workspace,
+    });
+    expect(activeEvent).toEqual({
+      title: sourceData.title,
+      identifier: sourceData.identifier,
+      external_id: sourceData._id,
+    });
+  });
+
+  test("upserting an existing value", async () => {
+    // Schema
+    const Event = co.map({
+      title: z.string(),
+      identifier: z.string(),
+      external_id: z.string(),
+    });
+
+    // Data
+    const oldSourceData = {
+      title: "Old Event Title",
+      identifier: "test-event-identifier",
+      _id: "test-event-external-id",
+    };
+    const newSourceData = {
+      title: "New Event Title",
+      identifier: "test-event-identifier",
+      _id: "test-event-external-id",
+    };
+    expect(oldSourceData.identifier).toEqual(newSourceData.identifier);
+    const workspace = Group.create();
+    const oldActiveEvent = Event.create(
+      {
+        title: oldSourceData.title,
+        identifier: oldSourceData.identifier,
+        external_id: oldSourceData._id,
+      },
+      workspace,
+    );
+
+    // Upserting
+    const activeEvent = await Event.upsertUnique({
+      value: {
+        title: newSourceData.title,
+        identifier: newSourceData.identifier,
+        external_id: newSourceData._id,
+      },
+      unique: newSourceData.identifier,
+      owner: workspace,
+    });
+    expect(activeEvent).toEqual({
+      title: newSourceData.title,
+      identifier: newSourceData.identifier,
+      external_id: newSourceData._id,
+    });
+    expect(activeEvent).not.toEqual(oldActiveEvent);
   });
 
   test("complex discriminated union", () => {

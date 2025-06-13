@@ -30,7 +30,7 @@ test("load a value", async () => {
   expect(john?.name).toBe("John");
 });
 
-test("retry an unavailable a value", async () => {
+test("retry an unavailable value", async () => {
   const Person = co.map({
     name: z.string(),
   });
@@ -69,6 +69,96 @@ test("retry an unavailable a value", async () => {
   );
 
   const john = await promise;
+  expect(resolved).toBe(true);
+  expect(john).not.toBeNull();
+  expect(john?.name).toBe("John");
+});
+
+test("skip retrying an unavailable value", async () => {
+  const Person = co.map({
+    name: z.string(),
+  });
+
+  const currentAccount = Account.getMe();
+
+  // Disconnect the current account
+  currentAccount._raw.core.node.syncManager.getPeers().forEach((peer) => {
+    peer.gracefulShutdown();
+  });
+
+  const group = Group.create();
+  const map = Person.create({ name: "John" }, group);
+  group.addMember("everyone", "reader");
+
+  const alice = await createJazzTestAccount();
+
+  let resolved = false;
+  const promise = Person.load(map.id, { loadAs: alice, skipRetry: true });
+  promise.then(() => {
+    resolved = true;
+  });
+
+  expect(resolved).toBe(false);
+
+  await new Promise((resolve) =>
+    setTimeout(
+      resolve,
+      cojsonInternals.CO_VALUE_LOADING_CONFIG.RETRY_DELAY - 100,
+    ),
+  );
+
+  expect(resolved).toBe(true);
+
+  // Reconnect the current account
+  currentAccount._raw.core.node.syncManager.addPeer(
+    getPeerConnectedToTestSyncServer(),
+  );
+
+  const john = await promise;
+  expect(john).toBeNull();
+  expect(john?.name).toBeUndefined();
+});
+
+test("retry an unavailable value with skipRetry set to false", async () => {
+  const Person = co.map({
+    name: z.string(),
+  });
+
+  const currentAccount = Account.getMe();
+
+  // Disconnect the current account
+  currentAccount._raw.core.node.syncManager.getPeers().forEach((peer) => {
+    peer.gracefulShutdown();
+  });
+
+  const group = Group.create();
+  const map = Person.create({ name: "John" }, group);
+  group.addMember("everyone", "reader");
+
+  const alice = await createJazzTestAccount();
+
+  let resolved = false;
+  const promise = Person.load(map.id, { loadAs: alice, skipRetry: false });
+  promise.then(() => {
+    resolved = true;
+  });
+
+  await new Promise((resolve) =>
+    setTimeout(
+      resolve,
+      cojsonInternals.CO_VALUE_LOADING_CONFIG.RETRY_DELAY - 100,
+    ),
+  );
+
+  expect(resolved).toBe(false);
+
+  // Reconnect the current account
+  currentAccount._raw.core.node.syncManager.addPeer(
+    getPeerConnectedToTestSyncServer(),
+  );
+
+  const john = await promise;
+  expect(resolved).toBe(true);
   expect(john).not.toBeNull();
   expect(john?.name).toBe("John");
 });
