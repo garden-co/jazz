@@ -1,3 +1,5 @@
+"use client";
+
 import { DemoAuth } from "jazz-tools";
 import { useEffect, useMemo, useState } from "react";
 import { useAuthSecretStorage, useJazzContext } from "../hooks.js";

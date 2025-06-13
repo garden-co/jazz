@@ -1,3 +1,5 @@
+"use client";
+
 import { PassphraseAuth } from "jazz-tools";
 import { useCallback, useMemo, useSyncExternalStore } from "react";
 import { useAuthSecretStorage, useJazzContext } from "../hooks.js";

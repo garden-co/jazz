@@ -1,3 +1,5 @@
+"use client";
+
 import { usePassphraseAuth } from "jazz-react-core";
 import { useState } from "react";
 
