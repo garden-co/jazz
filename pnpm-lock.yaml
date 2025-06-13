@@ -4,33 +4,6 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
-catalogs:
-  default:
-    '@biomejs/biome':
-      specifier: 1.9.4
-      version: 1.9.4
-    '@vitest/browser':
-      specifier: 3.1.3
-      version: 3.1.3
-    '@vitest/coverage-istanbul':
-      specifier: 3.1.3
-      version: 3.1.3
-    '@vitest/coverage-v8':
-      specifier: 3.1.3
-      version: 3.1.3
-    '@vitest/ui':
-      specifier: 3.1.3
-      version: 3.1.3
-    typescript:
-      specifier: 5.6.2
-      version: 5.6.2
-    vite:
-      specifier: 6.3.5
-      version: 6.3.5
-    vitest:
-      specifier: 3.1.3
-      version: 3.1.3
-
 overrides:
   '@types/react': 19.0.0
   '@types/react-dom': 19.0.0
@@ -2036,11 +2009,14 @@ importers:
         version: 1.14.0
       tailwindcss-animate:
         specifier: ^1.0.7
-        version: 1.0.7(tailwindcss@3.4.17(ts-node@10.9.2(@swc/core@1.11.29)(@types/node@22.15.18)(typescript@5.6.2)))
+        version: 1.0.7(tailwindcss@4.1.10)
       uniqolor:
         specifier: ^1.1.0
         version: 1.1.1
     devDependencies:
+      '@tailwindcss/postcss':
+        specifier: ^4.1.10
+        version: 4.1.10
       '@types/qrcode':
         specifier: ^1.5.1
         version: 1.5.5
@@ -2053,15 +2029,12 @@ importers:
       '@vitejs/plugin-react-swc':
         specifier: ^3.10.1
         version: 3.10.1(vite@6.3.5(@types/node@22.15.18)(jiti@2.4.2)(lightningcss@1.30.1)(terser@5.37.0)(tsx@4.19.3)(yaml@2.6.1))
-      autoprefixer:
-        specifier: ^10.4.20
-        version: 10.4.20(postcss@8.5.3)
       postcss:
         specifier: ^8.4.27
         version: 8.5.3
       tailwindcss:
-        specifier: ^3.4.17
-        version: 3.4.17(ts-node@10.9.2(@swc/core@1.11.29)(@types/node@22.15.18)(typescript@5.6.2))
+        specifier: ^4.1.10
+        version: 4.1.10
       typescript:
         specifier: 5.6.2
         version: 5.6.2
@@ -7687,6 +7660,9 @@ packages:
   '@tailwindcss/oxide@4.1.8':
     resolution: {integrity: sha512-d7qvv9PsM5N3VNKhwVUhpK6r4h9wtLkJ6lz9ZY9aeZgrUWk1Z8VPyqyDT9MZlem7GTGseRQHkeB1j3tC7W1P+A==}
     engines: {node: '>= 10'}
+
+  '@tailwindcss/postcss@4.1.10':
+    resolution: {integrity: sha512-B+7r7ABZbkXJwpvt2VMnS6ujcDoR2OOcFaqrLIo1xbcdxje4Vf+VgJdBzNNbrAjBj/rLZ66/tlQ1knIGNLKOBQ==}
 
   '@tailwindcss/postcss@4.1.6':
     resolution: {integrity: sha512-ELq+gDMBuRXPJlpE3PEen+1MhnHAQQrh2zF0dI1NXOlEWfr2qWf2CQdr5jl9yANv8RErQaQ2l6nIFO9OSCVq/g==}
@@ -22204,6 +22180,14 @@ snapshots:
       '@tailwindcss/oxide-win32-arm64-msvc': 4.1.8
       '@tailwindcss/oxide-win32-x64-msvc': 4.1.8
 
+  '@tailwindcss/postcss@4.1.10':
+    dependencies:
+      '@alloc/quick-lru': 5.2.0
+      '@tailwindcss/node': 4.1.10
+      '@tailwindcss/oxide': 4.1.10
+      postcss: 8.5.4
+      tailwindcss: 4.1.10
+
   '@tailwindcss/postcss@4.1.6':
     dependencies:
       '@alloc/quick-lru': 5.2.0
@@ -23341,7 +23325,7 @@ snapshots:
       sirv: 3.0.1
       tinyglobby: 0.2.14
       tinyrainbow: 2.0.0
-      vitest: 3.1.3(@types/node@22.15.18)(@vitest/browser@3.1.3)(@vitest/ui@3.1.3)(happy-dom@17.4.4)(jiti@2.4.2)(jsdom@25.0.1)(lightningcss@1.30.1)(msw@2.7.0(@types/node@22.15.18)(typescript@5.6.2))(terser@5.37.0)(tsx@4.19.3)(yaml@2.6.1)
+      vitest: 3.1.3(@types/node@22.15.18)(@vitest/browser@3.1.3)(@vitest/ui@3.1.3)(happy-dom@17.4.4)(jiti@2.4.2)(jsdom@25.0.1)(lightningcss@1.30.1)(msw@2.7.0(@types/node@22.15.18)(typescript@5.8.3))(terser@5.37.0)(tsx@4.19.3)(yaml@2.6.1)
 
   '@vitest/utils@3.1.1':
     dependencies:
@@ -31394,6 +31378,10 @@ snapshots:
   tailwindcss-animate@1.0.7(tailwindcss@3.4.17(ts-node@10.9.2(@swc/core@1.11.29)(@types/node@22.15.18)(typescript@5.6.2))):
     dependencies:
       tailwindcss: 3.4.17(ts-node@10.9.2(@swc/core@1.11.29)(@types/node@22.15.18)(typescript@5.6.2))
+
+  tailwindcss-animate@1.0.7(tailwindcss@4.1.10):
+    dependencies:
+      tailwindcss: 4.1.10
 
   tailwindcss@3.3.2(ts-node@10.9.2(@swc/core@1.11.29)(@types/node@22.15.18)(typescript@5.8.3)):
     dependencies:
