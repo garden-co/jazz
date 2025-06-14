@@ -1,24 +1,26 @@
 import * as Clipboard from "expo-clipboard";
-import { Account, Group } from "jazz-tools";
+import { useAccount, useCoState } from "jazz-expo";
+import { Group } from "jazz-tools";
 import { useState } from "react";
 import React, {
+  Alert,
   Button,
   FlatList,
   KeyboardAvoidingView,
   SafeAreaView,
+  StyleSheet,
   Text,
   TextInput,
   TouchableOpacity,
   View,
-  Alert,
-  StyleSheet,
 } from "react-native";
-
-import { useAccount, useCoState } from "jazz-expo";
-import { Chat, Message } from "./schema";
+import { BackgroundPhoto } from "./background";
+import { Chat, ChatAccount, Message } from "./schema";
 
 export default function ChatScreen() {
-  const { me, logOut } = useAccount(Account, { resolve: { profile: true } });
+  const { me, logOut } = useAccount(ChatAccount, {
+    resolve: { profile: true },
+  });
   const [chatId, setChatId] = useState<string>();
   const [chatIdInput, setChatIdInput] = useState<string>();
   const loadedChat = useCoState(Chat, chatId, { resolve: { $each: true } });
@@ -96,6 +98,10 @@ export default function ChatScreen() {
     <View style={styles.container}>
       {!loadedChat ? (
         <View style={styles.welcomeContainer}>
+          <BackgroundPhoto
+            image={me?.profile.backgroundPhoto ?? null}
+            owner={me}
+          />
           <Text style={styles.usernameTitle}>Username</Text>
           <TextInput
             style={styles.usernameInput}

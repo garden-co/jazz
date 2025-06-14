@@ -11,18 +11,22 @@
   "dependencies": {
     "@azure/core-asynciterator-polyfill": "^1.0.2",
     "@bacons/text-decoder": "^0.0.0",
+    "@bam.tech/react-native-image-resizer": "^3.0.11",
     "@craftzdog/react-native-buffer": "^6.0.5",
     "@react-native-community/netinfo": "11.4.1",
     "expo": "~53.0.9",
     "expo-clipboard": "^7.1.4",
+    "expo-image-picker": "~16.1.4",
     "expo-secure-store": "~14.2.3",
     "expo-sqlite": "~15.2.10",
     "expo-status-bar": "~2.2.3",
     "jazz-expo": "workspace:*",
+    "jazz-react-native-media-images": "workspace:*",
     "jazz-tools": "workspace:*",
     "react": "19.0.0",
     "react-native": "0.79.2",
     "react-native-get-random-values": "^1.11.0",
+    "react-native-svg": "^15.12.0",
     "readable-stream": "^4.7.0"
   },
   "devDependencies": {
