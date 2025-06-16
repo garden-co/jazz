@@ -316,6 +316,10 @@ export class LocalNode {
       new VerifiedState(id, this.crypto, header, new Map()),
     );
 
+    logger.info(
+      `[cojson] New coValue with id: ${id} created from account: ${coValue.node.getCurrentAccountOrAgentID()}`,
+    );
+
     void this.syncManager.requestCoValueSync(coValue);
 
     return coValue;
