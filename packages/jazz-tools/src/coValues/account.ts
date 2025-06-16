@@ -78,7 +78,6 @@ export class Account extends CoValueBase implements CoValue {
     profile: Schema;
     root: Schema;
   } {
-    console.log("test");
     return (this.constructor as typeof Account)._schema;
   }
   static {
