@@ -1,0 +1,80 @@
+export const metadata = {
+  description: "How Jazz encrypts your data to ensure privacy and security."
+};
+
+# Encryption
+
+Jazz uses proven cryptographic primitives in a novel, but simple protocol to implement auditable permissions while allowing real-time collaboration and offline editing.
+
+## How encryption works
+
+Jazz uses proven cryptographic primitives in a novel, but simple protocol to implement auditable permissions while allowing real-time collaboration and offline editing.
+
+### Write permissions: Signing with your keys
+
+When you create or modify CoValues, Jazz cryptographically signs every transaction:
+
+- All transactions are signed with your account's signing keypair
+- This proves the transaction came from you
+- Whether transactions are valid depends on your permissions in the Group that owns the CoValue
+- Groups have internal logic ensuring only admins can change roles or create invites
+- You can add yourself to a Group only with a specific role via invites
+
+### Read permissions: Symmetric encryption
+
+Groups use a shared "read key" for encrypting data:
+
+- Admins reveal this symmetric encryption key to accounts with "reader" role or higher
+- All transactions in CoValues owned by that Group are encrypted with the current read key
+- When someone is removed from a Group, the read key rotates and gets revealed to all remaining members
+- CoValues start using the new read key for future transactions
+
+This means removed members can't read new data, but existing data they already had access to remains readable to them.
+
+## Key rotation and security
+
+Jazz automatically handles key management:
+
+- **Member removal triggers rotation**: When you remove someone from a Group, Jazz generates a new read key
+- **Seamless transition**: New transactions use the new key immediately
+- **No data loss**: Existing members get the new key automatically
+
+## Streaming encryption
+
+Jazz encrypts data efficiently for real-time collaboration:
+
+- **Incremental hashing**: CoValue sessions use [Blake3](https://github.com/BLAKE3-team/BLAKE3) for append-only hashing
+- **Session signatures**: Each session is signed with [ed25519](https://ed25519.cr.yp.to/) after each transaction
+- **Stream ciphers**: Data is encrypted using [xsalsa20](https://cr.yp.to/salsa20.html) stream cipher
+- **Integrity protection**: Hashing and signing ensure data hasn't been tampered with
+
+## Content addressing
+
+CoValue IDs are the [Blake3](https://github.com/BLAKE3-team/BLAKE3) hash of their immutable "header" (containing CoValue type and owning group). This allows CoValues to be "content addressed" while remaining dynamic and changeable.
+
+## What this means for you
+
+**Privacy by default**: Your data is always encrypted, even on Jazz Cloud servers. Only people you explicitly give access to can read your data.
+
+**Flexible permissions**: Use Groups to control exactly who can read, write, or admin your CoValues.
+
+**Automatic security**: Key rotation and encryption happen behind the scenes - you don't need to think about it.
+
+**Verifiable authenticity**: Every change is cryptographically signed, so you always know who made what changes.
+
+## Further reading
+
+- [Blake3](https://github.com/BLAKE3-team/BLAKE3) - append-only hashing
+- [ed25519](https://ed25519.cr.yp.to/) - signature scheme
+- [xsalsa20](https://cr.yp.to/salsa20.html) - stream cipher for data encryption
+
+### Implementation details
+
+The cryptographic primitives are implemented in the [`cojson/src/crypto`](https://github.com/garden-co/jazz/tree/main/packages/cojson/src/crypto) package.
+
+Key files to explore:
+
+- [`permissions.ts`](https://github.com/garden-co/jazz/blob/main/packages/cojson/src/permissions.ts) - Permission logic
+- [`permissions.test.ts`](https://github.com/garden-co/jazz/blob/main/packages/cojson/src/tests/permissions.test.ts) - Permission tests
+- [`verifiedState.ts`](https://github.com/garden-co/jazz/blob/main/packages/cojson/src/coValueCore/verifiedState.ts) - State verification
+- [`coValueCore.test.ts`](https://github.com/garden-co/jazz/blob/main/packages/cojson/src/tests/coValueCore.test.ts) - Core functionality tests

@@ -1,7 +1,6 @@
 {
   "name": "image-upload",
   "private": true,
-  "version": "0.0.115",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -11,6 +10,7 @@
     "format-and-lint:fix": "biome check . --write"
   },
   "dependencies": {
+    "jazz-inspector": "workspace:*",
     "jazz-react": "workspace:*",
     "jazz-tools": "workspace:*",
     "react": "19.0.0",
@@ -18,14 +18,14 @@
   },
   "devDependencies": {
     "@biomejs/biome": "1.9.4",
+    "@tailwindcss/postcss": "^4.1.10",
     "@types/react": "19.0.0",
     "@types/react-dom": "19.0.0",
     "@vitejs/plugin-react": "^4.5.1",
     "globals": "^15.11.0",
     "typescript": "5.6.2",
     "vite": "6.3.5",
-    "autoprefixer": "^10.4.20",
-    "postcss": "^8.4.27",
-    "tailwindcss": "^3.4.17"
+    "postcss": "^8.4.40",
+    "tailwindcss": "^4.1.10"
   }
 }

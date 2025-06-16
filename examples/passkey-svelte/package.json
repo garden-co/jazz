@@ -1,6 +1,5 @@
 {
   "name": "passkey-svelte",
-  "version": "0.0.105",
   "type": "module",
   "private": true,
   "scripts": {
@@ -33,6 +32,7 @@
   },
   "dependencies": {
     "jazz-svelte": "workspace:*",
-    "jazz-tools": "workspace:*"
+    "jazz-tools": "workspace:*",
+    "tailwindcss": "^4.1.10"
   }
 }

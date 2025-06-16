@@ -48,6 +48,10 @@ class LibSQLSqliteDriver implements SQLiteDatabaseDriverAsync {
       await this.run("ROLLBACK", []);
     }
   }
+
+  async closeDb() {
+    this.db.close();
+  }
 }
 
 async function createSQLiteStorage(defaultDbPath?: string) {
@@ -66,6 +70,7 @@ async function createSQLiteStorage(defaultDbPath?: string) {
       db,
     }),
     dbPath,
+    db,
   };
 }
 
@@ -752,4 +757,30 @@ test("large coValue upload streaming", async () => {
       "client -> KNOWN Map sessions: header/200",
     ]
   `);
+});
+
+test("should close the db when the node is closed", async () => {
+  const agentSecret = Crypto.newRandomAgentSecret();
+
+  const node1 = new LocalNode(
+    agentSecret,
+    Crypto.newRandomSessionID(Crypto.getAgentID(agentSecret)),
+    Crypto,
+  );
+
+  const { peer, db } = await createSQLiteStorage();
+
+  const spy = vi.spyOn(db, "closeDb");
+
+  node1.syncManager.addPeer(peer);
+
+  await new Promise((resolve) => setTimeout(resolve, 10));
+
+  expect(spy).not.toHaveBeenCalled();
+
+  node1.gracefulShutdown();
+
+  await new Promise((resolve) => setTimeout(resolve, 10));
+
+  expect(spy).toHaveBeenCalled();
 });

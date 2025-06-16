@@ -59,6 +59,8 @@ export class SQLiteNodeBase {
           });
         }
       }
+
+      db.closeDb();
     };
 
     processMessages().catch((e) =>

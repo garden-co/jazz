@@ -1,5 +1,6 @@
 "use client";
 
+import { JazzInspector } from "jazz-inspector";
 import { JazzProvider } from "jazz-react";
 
 export function Jazz({ children }: { children: React.ReactNode }) {
@@ -11,6 +12,7 @@ export function Jazz({ children }: { children: React.ReactNode }) {
       }}
     >
       {children}
+      <JazzInspector />
     </JazzProvider>
   );
 }

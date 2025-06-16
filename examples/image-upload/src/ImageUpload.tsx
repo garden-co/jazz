@@ -59,7 +59,11 @@ export default function ImageUpload() {
           {({ src }) => <img alt="" src={src} className="w-full h-auto" />}
         </ProgressiveImg>
 
-        <button type="button" onClick={deleteImage} className="mt-5">
+        <button
+          type="button"
+          onClick={deleteImage}
+          className="mt-5 bg-blue-600 text-white py-2 px-3 rounded"
+        >
           Delete image
         </button>
       </>

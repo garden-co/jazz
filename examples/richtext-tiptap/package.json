@@ -1,7 +1,6 @@
 {
   "name": "richtext-tiptap",
   "private": true,
-  "version": "0.1.28",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -21,6 +20,7 @@
     "@tiptap/react": "^2.12.0",
     "@tiptap/starter-kit": "^2.12.0",
     "clsx": "^2.1.1",
+    "jazz-inspector": "workspace:*",
     "jazz-react": "workspace:*",
     "jazz-richtext-tiptap": "workspace:*",
     "jazz-tools": "workspace:*",
@@ -31,14 +31,14 @@
   "devDependencies": {
     "@biomejs/biome": "1.9.4",
     "@playwright/test": "^1.50.1",
+    "@tailwindcss/postcss": "^4.1.10",
     "@types/react": "19.0.0",
     "@types/react-dom": "19.0.0",
     "@vitejs/plugin-react": "^4.5.1",
-    "autoprefixer": "^10.4.20",
     "globals": "^15.11.0",
     "is-ci": "^3.0.1",
-    "postcss": "^8.4.27",
-    "tailwindcss": "^3.4.17",
+    "postcss": "^8.4.40",
+    "tailwindcss": "^4.1.10",
     "typescript": "5.6.2",
     "vite": "6.3.5"
   }

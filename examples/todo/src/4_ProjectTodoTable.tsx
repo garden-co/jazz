@@ -63,7 +63,7 @@ export function ProjectTodoTable() {
   );
 
   return (
-    <div className="max-w-full w-4xl">
+    <div className="max-w-full w-xl">
       <div className="flex justify-between items-center gap-4 mb-4">
         <h1>
           {

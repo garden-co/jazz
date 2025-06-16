@@ -86,7 +86,7 @@ export function BubbleImage(props: { image: ImageDefinition }) {
     <ProgressiveImg image={props.image}>
       {({ src }) => (
         <img
-          className="h-auto max-h-[20rem] max-w-full rounded-t-xl mb-1"
+          className="h-auto max-h-80 max-w-full rounded-t-xl mb-1"
           src={src}
         />
       )}

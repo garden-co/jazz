@@ -1,5 +1,21 @@
 # cojson
 
+## 0.14.25
+
+## 0.14.24
+
+## 0.14.23
+
+### Patch Changes
+
+- 1ca9299: Adds grapheme split helpers for coText
+
+## 0.14.22
+
+### Patch Changes
+
+- 57fb69f: fix: clarify `Group.addMember` error message when attempting to set roles with insufficient permissions
+
 ## 0.14.21
 
 ### Patch Changes

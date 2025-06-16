@@ -19,3 +19,16 @@ That's why we've designed Jazz with longevity in mind from the start:
 
 This approach creates a foundation that can continue regardless of any single company's involvement. The local-first architecture means your apps will always work, even offline, and your data remains yours.
 
+## How secure is my data?
+
+Jazz encrypts all your data by default using modern cryptographic standards. Every transaction is cryptographically signed, and data is encrypted using industry-standard algorithms including Blake3 hashing, ed25519 signatures, and xsalsa20 stream ciphers.
+
+Key features of Jazz's security:
+
+- **Privacy by default**: Your data is encrypted even on Jazz Cloud servers
+- **Automatic key rotation**: When members are removed from Groups, encryption keys rotate automatically
+- **Verifiable authenticity**: Every change is cryptographically signed
+- **Zero-trust architecture**: Only people you explicitly grant access can read your data
+
+For technical details, see our [encryption documentation](/docs/resources/encryption).
+

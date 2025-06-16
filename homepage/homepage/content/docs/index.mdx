@@ -6,7 +6,11 @@ export const metadata = {
 
 # Learn some <span className="sr-only">Jazz</span> <JazzLogo className="h-[41px] -ml-0.5 -mt-[3px] inline" />
 
-Welcome to the Jazz documentation!
+**Jazz is a toolkit for building backendless apps**. You get data without needing a database — plus auth, permissions, files and multiplayer without needing a backend. Jazz lets you do everything right from the frontend and you'll ship better apps, faster.
+
+Instead of wrestling with databases, APIs, and server infrastructure, you work with **CoValues** ("collaborative values") — your new cloud-synced building blocks that feel like local state but automatically sync across all devices and users in real-time.
+
+---
 
 **Note:** We just released [Jazz 0.14.0](/docs/upgrade/0-14-0) with a bunch of breaking changes and are still cleaning the docs up - see the [upgrade guide](/docs/upgrade/0-14-0) for details.
 
@@ -20,37 +24,44 @@ npx create-jazz-app@latest --api-key you@example.com
 ```
 </CodeGroup>
 
-Or set up Jazz yourself, using the following instructions for your framework of choice:
-
-- [React](/docs/react/project-setup)
-- [Next.js](/docs/react/project-setup#nextjs)
-- [React Native](/docs/react-native/project-setup)
-- [React Native Expo](/docs/react-native-expo/project-setup)
-- [Vue](/docs/vue/project-setup)
-- [Svelte](/docs/svelte/project-setup)
-
 {/* <ContentByFramework framework="react">
   Or you can follow this [React step-by-step guide](/docs/react/guide) where we walk you through building an issue tracker app.
 </ContentByFramework> */}
 
-## Example apps
+## Why Jazz is different
 
-You can also find [example apps](/examples) with code most similar to what you want to build. These apps
-make use of different features such as auth, file upload, and more.
+Most apps rebuild the same thing: shared state that syncs between users and devices. Jazz starts from that shared state, giving you:
+
+- **No backend required** — Focus on building features, not infrastructure
+- **Real-time sync** — Changes appear everywhere immediately  
+- **Multiplayer by default** — Collaboration just works
+- **Local-first** — Your app works offline and feels instant
+
+Think Figma, Notion, or Linear — but you don't need years to build a custom stack.
+
+## How it works
+
+1. **Define your data** with CoValues schemas
+2. **Connect to sync infrastructure** (Jazz Cloud or self-hosted)
+3. **Create and edit CoValues** like normal objects
+4. **Get automatic sync and persistence** across all devices and users
+
+Your UI updates instantly on every change, everywhere. It's like having reactive local state that happens to be shared with the world.
+
+## Ready to see Jazz in action?
+
+Have a look at our [example apps](/examples) for inspiration and to see what's possible with Jazz. From real-time chat and collaborative editors to file sharing and social features — these are just the beginning of what you can build.
+
+## Core concepts
+
+Learn how to structure your data using [collaborative values](/docs/schemas/covalues) — the building blocks that make Jazz apps work.
 
 ## Sync and storage
 
-Sync and persist your data by setting up a [sync and storage infrastructure](/docs/sync-and-storage) using Jazz Cloud, or do it yourself.
+Sync and persist your data by setting up [sync and storage infrastructure](/docs/sync-and-storage) using Jazz Cloud, or host it yourself.
 
-## Collaborative values
-
-Learn how to structure your data using [collaborative values](/docs/schemas/covalues).
-
-## LLM Docs
+## Going deeper
 
 Get better results with AI by [importing the Jazz docs](/docs/ai-tools) into your context window.
 
-## Get support
-
-If you have any questions or need assistance, please don't hesitate to reach out to us on [Discord](https://discord.gg/utDMjHYg42).
-We would love to help you get started.
+If you have any questions or need assistance, please don't hesitate to reach out to us on [Discord](https://discord.gg/utDMjHYg42). We'd love to help you get started.

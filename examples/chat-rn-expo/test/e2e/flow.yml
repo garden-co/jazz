@@ -41,12 +41,17 @@ appId: tools.jazz.chatrnexpo
 # logout
 - tapOn: "Logout"
 - assertVisible: "Username"
-- assertVisible: "Anonymous user"
 
-# join chat
+- extendedWaitUntil:
+    visible: "Anonymous user"
+    timeout: 10000
+# join chat 
+
+## Commented because it fails on CI
 # - tapOn:
 #     id: "chat-id-input"
 # - inputText: "co_zFs6KFyhxPw4xtw83tcEMzeHUNv" # Use a static id because maestro doesn't have access to the system clipboard
-# - tapOn: "Join chat"
+# - tapOn:
+#     id: "join-chat-button"
 # - assertVisible: "boorad"
 # - assertVisible: "bro, low key, it do be like that tho"

@@ -116,3 +116,61 @@ Jazz for Expo includes built-in local persistence using SQLite. Following Expo's
 - **Key-Value Storage**: `expo-secure-store` - Expo's secure storage system
 
 Local persistence is enabled by default with no additional configuration required. Your data will automatically persist across app restarts.
+
+## Quick Crypto
+
+For accelerated crypto operations, you can use the `RNQuickCrypto` crypto provider. 
+
+To use it, install the following Packages:
+
+<CodeGroup>
+```bash
+pnpm add react-native-quick-crypto@1.0.0-beta.18 react-native-nitro-modules
+```
+</CodeGroup>
+
+Then add the following to your `JazzProvider`:
+
+<CodeGroup>
+```tsx twoslash
+// @noErrors: 2307 2322
+import React, { ReactNode } from "react";
+function SignInScreen({ auth }: { auth: any }) {
+  return null;
+}
+// ---cut-before---
+import { JazzProvider } from "jazz-expo";
+import { RNQuickCrypto } from "jazz-expo/crypto";
+
+function MyJazzProvider({ children }: { children: ReactNode }) {
+  return (
+    <JazzProvider
+      sync={{ peer: "wss://cloud.jazz.tools/?key=your-api-key" }}
+      CryptoProvider={RNQuickCrypto}
+    >
+      {children}
+    </JazzProvider>
+  );
+}
+```
+</CodeGroup>
+
+For configuration, use the RNQC Expo config plugin:
+
+<CodeGroup>
+```json twoslash
+// app.json
+{
+  "expo": {
+    "plugins": [
+      [
+        "react-native-quick-crypto",
+        {
+          "sodiumEnabled": true
+        }
+      ]
+    ]
+  }
+}
+```
+</CodeGroup>

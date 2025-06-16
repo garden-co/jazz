@@ -8,7 +8,7 @@
     },
     "build:generate-docs": {
       "inputs": ["../../../packages/*/src/**"],
-      "outputs": [ "public/llms.txt", "public/llms-full.txt"],
+      "outputs": ["public/llms.txt", "public/llms-full.txt"],
       "dependsOn": ["^build"]
     },
     "dev": {
@@ -16,5 +16,6 @@
       "persistent": true,
       "dependsOn": ["build"]
     }
-  }
+  },
+  "extends": ["//"]
 }

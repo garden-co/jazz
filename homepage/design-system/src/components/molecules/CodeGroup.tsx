@@ -8,7 +8,13 @@ export function CopyButton({
   code,
   size,
   className,
-}: { code: string; size: "md" | "lg"; className?: string }) {
+  onCopy,
+}: {
+  code: string;
+  size: "md" | "lg";
+  className?: string;
+  onCopy?: () => void;
+}) {
   const [copyCount, setCopyCount] = useState(0);
   const copied = copyCount > 0;
 
@@ -38,6 +44,7 @@ export function CopyButton({
         window.navigator.clipboard.writeText(code).then(() => {
           setCopyCount((count) => count + 1);
         });
+        onCopy?.();
       }}
     >
       <span
@@ -74,11 +81,13 @@ export function CodeGroup({
   children,
   size = "md",
   className,
+  onCopy,
 }: {
   children?: React.ReactNode;
   text?: string;
   size?: "md" | "lg";
   className?: string;
+  onCopy?: () => void;
 }) {
   const textRef = useRef<HTMLPreElement | null>(null);
   const [code, setCode] = useState<string>();
@@ -120,7 +129,7 @@ export function CodeGroup({
         {children}
       </pre>
 
-      {code ? <CopyButton size={size} code={code} /> : <></>}
+      {code ? <CopyButton onCopy={onCopy} size={size} code={code} /> : <></>}
     </div>
   );
 }

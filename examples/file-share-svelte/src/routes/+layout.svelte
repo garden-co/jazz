@@ -1,11 +1,3 @@
-<script lang="ts" module>
-  declare module 'jazz-svelte' {
-    interface Register {
-      Account: typeof FileShareAccount;
-    }
-  }
-</script>
-
 <script lang="ts">
   import { JazzProvider } from 'jazz-svelte';
   import "jazz-inspector-element"

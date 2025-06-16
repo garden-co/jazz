@@ -1,7 +1,6 @@
 {
   "name": "organization",
   "private": true,
-  "version": "0.0.111",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -13,6 +12,7 @@
     "test:e2e:ui": "playwright test --ui"
   },
   "dependencies": {
+    "jazz-inspector": "workspace:*",
     "jazz-react": "workspace:*",
     "jazz-tools": "workspace:*",
     "lucide-react": "^0.274.0",
@@ -22,16 +22,16 @@
     "react-router-dom": "^6.16.0"
   },
   "devDependencies": {
-    "@playwright/test": "^1.50.1",
     "@biomejs/biome": "1.9.4",
-    "@tailwindcss/forms": "^0.5.9",
+    "@playwright/test": "^1.50.1",
+    "@tailwindcss/forms": "^0.5.10",
+    "@tailwindcss/postcss": "^4.1.10",
     "@types/react": "19.0.0",
     "@types/react-dom": "19.0.0",
     "@vitejs/plugin-react": "^4.5.1",
-    "autoprefixer": "^10.4.20",
     "globals": "^15.11.0",
-    "postcss": "^8.4.27",
-    "tailwindcss": "^3.4.17",
+    "postcss": "^8.4.40",
+    "tailwindcss": "^4.1.10",
     "typescript": "5.6.2",
     "vite": "6.3.5"
   }

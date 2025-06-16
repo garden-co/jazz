@@ -85,6 +85,14 @@ describe("CoPlainText", () => {
         text.applyDiff("hello cruel world");
         expect(text.toString()).toEqual("hello cruel world");
       });
+
+      test("applyDiff with complex grapheme clusters", () => {
+        const text = co.plainText().create(`😊`, { owner: me });
+        text.applyDiff(`😊안녕!`);
+        expect(text.toString()).toEqual(`😊안녕!`);
+        text.applyDiff(`😊👋 안녕!`);
+        expect(text.toString()).toEqual(`😊👋 안녕!`);
+      });
     });
 
     describe("Properties", () => {

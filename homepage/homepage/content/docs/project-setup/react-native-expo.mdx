@@ -132,6 +132,54 @@ If you're using `pnpm`, you'll need to make sure that your expo app's `package.j
 
 For more information, refer to [this Expo monorepo example](https://github.com/byCedric/expo-monorepo-example#pnpm-workarounds).
 
+### Add polyfills
+
+Create a file `polyfills.js` at the project root with the following content:
+
+<CodeGroup>
+```ts twoslash
+// @noErrors: 7016
+// polyfills.js
+import { polyfillGlobal } from 'react-native/Libraries/Utilities/PolyfillFunctions';
+import { Buffer } from "@craftzdog/react-native-buffer";
+polyfillGlobal("Buffer", () => Buffer); // polyfill Buffer
+
+import { ReadableStream } from "readable-stream";
+polyfillGlobal("ReadableStream", () => ReadableStream); // polyfill ReadableStream
+
+import "@azure/core-asynciterator-polyfill"; // polyfill Async Iterator
+import "@bacons/text-decoder/install"; // polyfill Text Decoder
+import 'react-native-get-random-values'; // polyfill getRandomValues
+```
+</CodeGroup>
+
+Update `index.js`:
+
+<CodeGroup>
+```ts twoslash
+// @noErrors: 2307
+// index.js
+import { AppRegistry } from 'react-native';
+import App from './App';
+import { name as appName } from './app.json';
+import './polyfills';
+
+AppRegistry.registerComponent(appName, () => App);
+```
+</CodeGroup>
+
+Lastly, ensure that the `"main"` field in your `package.json` points to `index.js`:
+
+<CodeGroup>
+```json
+// package.json
+{
+  "main": "index.js",
+  ...
+}
+```
+</CodeGroup>
+
 ## Authentication
 
 Jazz provides authentication to help users access their data across multiple devices. For details on implementing authentication with Expo, check our [Authentication Overview](/docs/authentication/overview) guide and see the [Expo Chat Demo](https://github.com/garden-co/jazz/tree/main/examples/chat-rn-expo-clerk) for a complete example.

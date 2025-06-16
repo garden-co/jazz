@@ -1,8 +1,3 @@
 {
-  "build": {
-    "env": {
-      "APP_NAME": "version-history"
-    }
-  },
-  "ignoreCommand": "node ../../ignore-vercel-build.js"
+  "ignoreCommand": "npx turbo-ignore"
 }

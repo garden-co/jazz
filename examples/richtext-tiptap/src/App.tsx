@@ -14,7 +14,7 @@ function App() {
   return (
     <>
       <header>
-        <nav className="container flex justify-between items-center py-3">
+        <nav className="max-w-3xl mx-auto px-3 flex justify-between items-center py-3">
           {isAuthenticated ? (
             <span>You're logged in.</span>
           ) : (
@@ -23,7 +23,7 @@ function App() {
           <AuthButton />
         </nav>
       </header>
-      <main className="container mt-16 flex flex-col gap-8">
+      <main className="max-w-3xl mx-auto px-3 mt-16 flex flex-col gap-8">
         <Logo />
 
         <div className="text-center">

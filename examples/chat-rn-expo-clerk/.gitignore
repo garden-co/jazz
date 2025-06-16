@@ -15,3 +15,9 @@ web-build/
 
 ios
 android
+
+# Env
+.env
+.env.*
+!.env.example
+!.env.test

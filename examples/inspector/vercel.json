@@ -1,8 +1,3 @@
 {
-  "build": {
-    "env": {
-      "APP_NAME": "jazz-inspector"
-    }
-  },
-  "ignoreCommand": "node ../../ignore-vercel-build.js"
+  "ignoreCommand": "npx turbo-ignore"
 }

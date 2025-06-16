@@ -22,6 +22,7 @@ beforeEach(async () => {
 describe("BrowserPasskeyAuth", () => {
   let mockNavigator: any;
   const mockCrypto = {
+    randomBytes: (l: number) => crypto.getRandomValues(new Uint8Array(l)),
     newRandomSecretSeed: () => new Uint8Array([1, 2, 3]),
     agentSecretFromSecretSeed: () => "mock-secret" as AgentSecret,
   } as any;

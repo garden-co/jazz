@@ -147,6 +147,13 @@ async function scaffoldProject({
       verbose: true,
     });
     await emitter.clone(projectName);
+
+    // Remove .env.test file if it exists
+    const envTestFilePath = `${projectName}/.env.test`;
+    if (fs.existsSync(envTestFilePath)) {
+      fs.unlinkSync(envTestFilePath);
+    }
+
     cloneSpinner.succeed(chalk.green("Template cloned successfully"));
   } catch (error) {
     cloneSpinner.fail(chalk.red("Failed to clone template"));

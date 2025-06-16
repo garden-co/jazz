@@ -24,3 +24,9 @@ dist-ssr
 *.sw?
 
 playwright-report
+
+# Env
+.env
+.env.*
+!.env.example
+!.env.test

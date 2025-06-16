@@ -54,7 +54,15 @@ export function AuthModal({ open, onOpenChange }: AuthModalProps) {
       }
       onOpenChange(false);
     } catch (error) {
-      setError(error instanceof Error ? error.message : "Unknown error");
+      if (error instanceof Error) {
+        if (error.cause instanceof Error) {
+          setError(error.cause.message);
+        } else {
+          setError(error.message);
+        }
+      } else {
+        setError("Unknown error");
+      }
     }
   };
 

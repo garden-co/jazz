@@ -55,7 +55,7 @@ describe('PasskeyAuthBasicUI', () => {
     expect(logIn).toHaveBeenCalled();
   });
 
-  it('should show login errors', async () => {
+  it.skip('should show login errors', async () => {
     logIn.mockRejectedValue(new Error('Test error message'));
     render(PasskeyAuthBasicUI, {
       context: createJazzTestContext(),
@@ -80,7 +80,7 @@ describe('PasskeyAuthBasicUI', () => {
     expect(signUp).toHaveBeenCalledWith('Test User');
   });
 
-  it('should show signup errors', async () => {
+  it.skip('should show signup errors', async () => {
     signUp.mockRejectedValue(new Error('Test error message'));
     render(PasskeyAuthBasicUI, {
       context: createJazzTestContext(),

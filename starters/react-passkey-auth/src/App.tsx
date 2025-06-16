@@ -2,7 +2,7 @@ import { useAccount, useIsAuthenticated } from "jazz-react";
 import { AuthButton } from "./AuthButton.tsx";
 import { Form } from "./Form.tsx";
 import { Logo } from "./Logo.tsx";
-import { AccountRoot, JazzAccount } from "./schema.ts";
+import { JazzAccount, getUserAge } from "./schema.ts";
 
 function App() {
   const { me } = useAccount(JazzAccount, {
@@ -14,7 +14,7 @@ function App() {
   return (
     <>
       <header>
-        <nav className="container flex justify-between items-center py-3">
+        <nav className="max-w-2xl mx-auto flex justify-between items-center p-3">
           {isAuthenticated ? (
             <span>You're logged in.</span>
           ) : (
@@ -23,7 +23,7 @@ function App() {
           <AuthButton />
         </nav>
       </header>
-      <main className="container mt-16 flex flex-col gap-8">
+      <main className="max-w-2xl mx-auto px-3 mt-16 flex flex-col gap-8">
         <Logo />
 
         <div className="text-center">
@@ -32,7 +32,7 @@ function App() {
             !
           </h1>
           {!!me?.root && (
-            <p>As of today, you are {AccountRoot.age(me.root)} years old.</p>
+            <p>As of today, you are {getUserAge(me.root)} years old.</p>
           )}
         </div>
 

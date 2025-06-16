@@ -154,6 +154,59 @@ tasks[0].status = "complete";        // Update properties of references
 ```
 </CodeGroup>
 
+### Soft Deletion
+You can do a soft deletion by using a deleted flag, then creating a helper method that explicitly filters out items where the deleted property is true.
+
+<CodeGroup>
+```ts twoslash
+import { co, z } from "jazz-tools";
+
+// ---cut---
+const Task = co.map({
+  title: z.string(),
+  status: z.literal(["todo", "in-progress", "complete"]),
+  deleted: z.optional(z.boolean()) // [!code ++]
+});
+type Task = typeof Task;
+
+const ListOfTasks = co.list(Task);
+type ListOfTasks = typeof ListOfTasks;
+
+export function getCurrentTasks(list: co.loaded<ListOfTasks>) {
+  return list.filter(
+    (task): task is co.loaded<Task> => !task?.deleted
+  );
+}
+
+async function main() {
+  const myTaskList = ListOfTasks.create([]);
+  myTaskList.push(Task.create({ 
+    title: "Tomatoes",
+    status: "todo",
+    deleted: false
+  }));
+  myTaskList.push(Task.create({
+    title: "Cucumbers",
+    status: "todo",
+    deleted: true
+  }));
+  myTaskList.push(Task.create({
+    title: "Carrots",
+    status: "todo"
+  }));
+
+  const activeTasks = getCurrentTasks(myTaskList);
+  console.log(activeTasks.map((task) => task.title));
+  // Output: ["Tomatoes", "Carrots"]
+}
+```
+</CodeGroup>
+
+There are several benefits to soft deletions:
+- **recoverablity** - Nothing is truly deleted, so recovery is possible in the future
+- **data integrity** - Relationships can be maintained between current and deleted values
+- **auditable** - The data can still be accessed, good for audit trails and checking compliance
+
 ### Deleting Items
 
 Remove specific items by index with `splice`, or remove the first or last item with `pop` or `shift`:

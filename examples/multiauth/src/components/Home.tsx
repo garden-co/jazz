@@ -17,7 +17,7 @@ export function Home() {
         gap: "1rem",
       }}
     >
-      <div className="container">
+      <div className="max-w-2xl mx-auto">
         <h1>You're logged in</h1>
         <p>Welcome back, {me?.profile?.name}</p>
         <button onClick={() => logOut()}>Logout</button>

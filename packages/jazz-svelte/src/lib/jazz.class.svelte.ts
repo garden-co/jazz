@@ -12,12 +12,15 @@ import type {
 import { createSubscriber } from 'svelte/reactivity';
 import { getJazzContext } from './jazz.svelte';
 import { anySchemaToCoSchema, subscribeToCoValue } from 'jazz-tools';
+import { useIsAuthenticated } from './auth/useIsAuthenticated.svelte.js';
+import { untrack } from 'svelte';
 
 export class CoState<V extends CoValueOrZodSchema, R extends ResolveQuery<V> = true> {
 	#value: Loaded<V, R> | undefined | null = undefined;
 	#ctx = getJazzContext<InstanceOfSchema<AccountClass<Account>>>();
 	#id: string | undefined | null;
-	#subscribe: (() => void) | undefined;
+	#subscribe: () => void;
+	#update = () => {};
 
 	constructor(
 		Schema: V,
@@ -26,15 +29,20 @@ export class CoState<V extends CoValueOrZodSchema, R extends ResolveQuery<V> = t
 	) {
 		this.#id = $derived.by(typeof id === 'function' ? id : () => id);
 
-		this.#subscribe = $derived.by(() => {
+		this.#subscribe = createSubscriber(update => {
+			this.#update = update;
+		});
+
+		$effect.pre(() => {
 			const ctx = this.#ctx.current;
 			const id = this.#id;
 
-			if (!ctx || !id) return;
+			return untrack(() => {
+				if (!ctx || !id) {
+					return this.update(undefined);
+				}
+				const agent = 'me' in ctx ? ctx.me : ctx.guest;
 
-			const agent = 'me' in ctx ? ctx.me : ctx.guest;
-
-			return createSubscriber(update => {
 				const unsubscribe = subscribeToCoValue(
 					anySchemaToCoSchema(Schema),
 					id,
@@ -43,37 +51,33 @@ export class CoState<V extends CoValueOrZodSchema, R extends ResolveQuery<V> = t
 						resolve: options?.resolve,
 						loadAs: agent,
 						onUnavailable: () => {
-							this.#value = null;
-							update();
+							this.update(null);
 						},
 						onUnauthorized: () => {
-							this.#value = null;
-							update();
+							this.update(null);
 						},
 						syncResolution: true
 					},
 					value => {
-						if (value === this.#value) return;
-						this.#value = value as Loaded<V, R>;
-						update();
+						this.update(value as Loaded<V, R>);
 					}
 				);
 
 				return () => {
 					unsubscribe();
-					this.#value = undefined;
 				};
 			});
 		});
+	}
 
-		$effect.pre(() => {
-			if (!this.#id || !this.#ctx.current) return;
-			this.#subscribe?.();
-		})
+	update(value: Loaded<V, R> | undefined | null) {
+		if (this.#value === value) return;
+		this.#value = value;
+		this.#update();
 	}
 
 	get current() {
-		this.#subscribe?.();
+		this.#subscribe();
 		return this.#value;
 	}
 }
@@ -84,18 +88,24 @@ export class AccountCoState<
 > {
 	#value: Loaded<A, R> | undefined | null = undefined;
 	#ctx = getJazzContext<InstanceOfSchema<A>>();
-	#subscribe: (() => void) | undefined;
+	#subscribe: () => void;
+	#update = () => {};
 
 	constructor(Schema: A, options?: { resolve?: ResolveQueryStrict<A, R> }) {
-		this.#subscribe = $derived.by(() => {
+		this.#subscribe = createSubscriber(update => {
+			this.#update = update;
+		});
+
+		$effect.pre(() => {
 			const ctx = this.#ctx.current;
 
-			if (!ctx || !('me' in ctx)) return;
+			return untrack(() => {
+				if (!ctx || !('me' in ctx)) {
+					return this.update(undefined);
+				}
 
-			const me = ctx.me;
+				const me = ctx.me;
 
-			return createSubscriber(update => {
-				// Setup subscription with current values
 				const unsubscribe = subscribeToCoValue(
 					anySchemaToCoSchema(Schema),
 					me.id,
@@ -104,33 +114,29 @@ export class AccountCoState<
 						resolve: options?.resolve,
 						loadAs: me,
 						onUnavailable: () => {
-							this.#value = null;
-							update();
+							this.update(null);
 						},
 						onUnauthorized: () => {
-							this.#value = null;
-							update();
+							this.update(null);
 						},
 						syncResolution: true
 					},
 					value => {
-						if (value === this.#value) return;
-						this.#value = value as Loaded<A, R>;
-						update();
+						this.update(value as Loaded<A, R>);
 					}
 				);
 
 				return () => {
 					unsubscribe();
-					this.#value = undefined;
-				}
+				};
 			})
 		});
+	}
 
-		$effect.pre(() => {
-			if (!this.#ctx.current) return;
-			this.#subscribe?.();
-		})
+	update(value: Loaded<A, R> | undefined | null) {
+		if (this.#value === value) return;
+		this.#value = value;
+		this.#update();
 	}
 
 	logOut = () => {
@@ -138,7 +144,7 @@ export class AccountCoState<
 	};
 
 	get current() {
-		this.#subscribe?.();
+		this.#subscribe();
 
 		return this.#value;
 	}
@@ -149,5 +155,11 @@ export class AccountCoState<
 		}
 
 		return 'me' in this.#ctx.current ? this.#ctx.current.me : this.#ctx.current.guest;
+	}
+
+	#isAuthenticated = useIsAuthenticated();
+
+	get isAuthenticated() {
+		return this.#isAuthenticated.current;
 	}
 }

@@ -1,6 +1,6 @@
 import { WasmCrypto } from "cojson/crypto/WasmCrypto";
 import { assert, beforeEach, describe, expect, test } from "vitest";
-import { Account, CoMap, Group, Profile, coField, z } from "../exports.js";
+import { CoMap, Group, z } from "../exports.js";
 import { Loaded, Ref, co, zodSchemaToCoSchema } from "../internal.js";
 import { createJazzTestAccount, setupJazzTestSync } from "../testing.js";
 import { setupTwoNodes, waitFor } from "./utils.js";
@@ -27,22 +27,22 @@ describe("Custom accounts and groups", async () => {
         profile: CustomProfile,
         root: co.map({}),
       })
-      .withMigration(
-        (
-          account: Loaded<typeof CustomAccount>,
-          creationProps?: { name: string },
-        ) => {
-          if (creationProps) {
-            console.log("In migration!");
-            const profileGroup = Group.create({ owner: account });
-            profileGroup.addMember("everyone", "reader");
-            account.profile = CustomProfile.create(
-              { name: creationProps.name, color: "blue" },
-              profileGroup,
-            );
-          }
-        },
-      );
+      .withMigration((account, creationProps?: { name: string }) => {
+        // making sure that the inferred type of account.root & account.profile considers the root/profile not being loaded
+        type R = typeof account.root;
+        const _r: R = {} as Loaded<typeof CustomAccount.def.shape.root> | null;
+        type P = typeof account.profile;
+        const _p: P = {} as Loaded<typeof CustomProfile> | null;
+        if (creationProps) {
+          console.log("In migration!");
+          const profileGroup = Group.create({ owner: account });
+          profileGroup.addMember("everyone", "reader");
+          account.profile = CustomProfile.create(
+            { name: creationProps.name, color: "blue" },
+            profileGroup,
+          );
+        }
+      });
 
     const me = await createJazzTestAccount({
       creationProps: { name: "Hermes Puggington" },
@@ -105,7 +105,7 @@ describe("Group inheritance", () => {
     const parentGroup = Group.create({ owner: me });
     const group = Group.create({ owner: me });
 
-    group.extend(parentGroup);
+    group.addMember(parentGroup);
 
     const reader = await co.account().createAs(me, {
       creationProps: { name: "Reader" },
@@ -140,8 +140,8 @@ describe("Group inheritance", () => {
     const parentGroup = Group.create({ owner: me });
     const group = Group.create({ owner: me });
 
-    group.extend(parentGroup);
-    parentGroup.extend(grandParentGroup);
+    group.addMember(parentGroup);
+    parentGroup.addMember(grandParentGroup);
 
     const reader = await co.account().createAs(me, {
       creationProps: { name: "Reader" },
@@ -181,8 +181,8 @@ describe("Group inheritance", () => {
     const parentGroup = Group.create({ owner: me });
     const childGroup = Group.create({ owner: me });
 
-    childGroup.extend(parentGroup);
-    parentGroup.extend(grandParentGroup);
+    childGroup.addMember(parentGroup);
+    parentGroup.addMember(grandParentGroup);
 
     const parentGroups = childGroup.getParentGroups();
 
@@ -262,6 +262,10 @@ describe("Group inheritance", () => {
 
     // @ts-expect-error - Even though readerInvite is a valid role for an account, we don't allow it to not create confusion when using the intellisense
     group.addMember(account, "readerInvite");
+    // @ts-expect-error - Only groups can have an `inherit` role, not accounts
+    group.addMember(account, "inherit");
+    // @ts-expect-error - Only groups can be added without a role, not accounts
+    group.addMember(account, undefined);
 
     expect(group.members).not.toContainEqual(
       expect.objectContaining({
@@ -271,6 +275,45 @@ describe("Group inheritance", () => {
     );
 
     expect(group.getRoleOf(account.id)).toBe("readerInvite");
+  });
+
+  test("adding a group member as writeOnly should fail", async () => {
+    const account = await createJazzTestAccount({});
+    await account.waitForAllCoValuesSync();
+
+    const parentGroup = Group.create();
+    const group = Group.create();
+    expect(() => {
+      // @ts-expect-error
+      group.addMember(parentGroup, "writeOnly");
+    }).toThrow();
+  });
+
+  test("Removing member group", async () => {
+    const alice = await createJazzTestAccount({});
+    await alice.waitForAllCoValuesSync();
+    const bob = await createJazzTestAccount({});
+    await bob.waitForAllCoValuesSync();
+
+    const parentGroup = Group.create();
+    // `parentGroup` has `alice` as a writer
+    parentGroup.addMember(alice, "writer");
+    expect(parentGroup.getRoleOf(alice.id)).toBe("writer");
+
+    const group = Group.create();
+    // `group` has `bob` as a reader
+    group.addMember(bob, "reader");
+    expect(group.getRoleOf(bob.id)).toBe("reader");
+
+    group.addMember(parentGroup);
+    // `group` has `parentGroup`'s members (in this case, `alice` as a writer)
+    expect(group.getRoleOf(bob.id)).toBe("reader");
+    expect(group.getRoleOf(alice.id)).toBe("writer");
+
+    // `group` no longer has `parentGroup`'s members
+    await group.removeMember(parentGroup);
+    expect(group.getRoleOf(bob.id)).toBe("reader");
+    expect(group.getRoleOf(alice.id)).toBe(undefined);
   });
 });
 
@@ -550,7 +593,7 @@ describe("Group.members", () => {
     await bob.waitForAllCoValuesSync();
 
     parentGroup.addMember(bob, "writer");
-    childGroup.extend(parentGroup, "reader");
+    childGroup.addMember(parentGroup, "reader");
 
     expect(childGroup.getRoleOf(bob.id)).toBe("reader");
 

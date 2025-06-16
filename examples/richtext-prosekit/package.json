@@ -1,6 +1,5 @@
 {
   "name": "example-prosekit-jazz",
-  "version": "0.0.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -9,6 +8,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "jazz-inspector": "workspace:*",
     "jazz-react": "workspace:*",
     "jazz-richtext-prosemirror": "workspace:*",
     "jazz-tools": "workspace:*",

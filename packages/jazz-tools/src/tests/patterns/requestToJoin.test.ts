@@ -41,15 +41,15 @@ async function setup() {
 
   const publicGroup = Group.create(admin1);
   publicGroup.addMember("everyone", "reader");
-  publicGroup.extend(adminsGroup);
+  publicGroup.addMember(adminsGroup);
 
   // Everyone can write to requests, but only admins can read
   const requestsGroup = Group.create(admin1);
   requestsGroup.addMember("everyone", "writeOnly");
-  requestsGroup.extend(adminsGroup);
+  requestsGroup.addMember(adminsGroup);
 
   const organizationGroup = Group.create(admin1);
-  organizationGroup.extend(adminsGroup);
+  organizationGroup.addMember(adminsGroup);
 
   const organization = Organization.create(
     {
@@ -95,7 +95,7 @@ async function sendRequestToJoin(organizationId: string, account: Account) {
   }
 
   const group = Group.create(account);
-  group.extend(organization.adminsGroup);
+  group.addMember(organization.adminsGroup);
 
   const request = RequestToJoin.create(
     {

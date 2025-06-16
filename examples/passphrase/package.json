@@ -1,7 +1,6 @@
 {
   "name": "passphrase",
   "private": true,
-  "version": "0.0.113",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -11,10 +10,12 @@
     "format-and-lint:fix": "biome check . --write"
   },
   "dependencies": {
+    "jazz-inspector": "workspace:*",
     "jazz-react": "workspace:*",
     "jazz-tools": "workspace:*",
     "react": "19.0.0",
-    "react-dom": "19.0.0"
+    "react-dom": "19.0.0",
+    "tailwindcss": "^4.1.10"
   },
   "devDependencies": {
     "@biomejs/biome": "1.9.4",

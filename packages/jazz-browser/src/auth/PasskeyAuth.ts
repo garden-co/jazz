@@ -122,7 +122,7 @@ export class BrowserPasskeyAuth {
     try {
       await navigator.credentials.create({
         publicKey: {
-          challenge: Uint8Array.from([0, 1, 2]),
+          challenge: this.crypto.randomBytes(20),
           rp: {
             name: this.appName,
             id: this.appHostname,

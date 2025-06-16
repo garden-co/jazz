@@ -292,7 +292,18 @@ export class RawGroup<
       this.set(account, role, "trusting");
 
       if (this.get(account) !== role) {
-        throw new Error("Failed to set role");
+        // The role was not set correctly; this presents three scenarios:
+        // 1. The current user is an administrator trying to set another administrator to a lower role
+        // 2. The current user is an administrator but something has gone wrong with the role assignment
+        // 3. The current user is not an administrator and does not have sufficient permissions to set the role
+        const myRole = this.myRole();
+        throw new Error(
+          myRole === "admin"
+            ? this.get(account) === "admin"
+              ? "Administrators cannot demote other administrators in a group"
+              : "Failed to set role"
+            : `Failed to set role due to insufficient permissions (role of current account is ${myRole})`,
+        );
       }
 
       if (role === "writeOnly") {
@@ -349,7 +360,14 @@ export class RawGroup<
       this.set(memberKey, role, "trusting");
 
       if (this.get(memberKey) !== role) {
-        throw new Error("Failed to set role");
+        const myRole = this.myRole();
+        throw new Error(
+          myRole === "admin"
+            ? this.get(memberKey) === "admin"
+              ? "Administrators cannot demote other administrators in a group"
+              : "Failed to set role"
+            : `Failed to set role due to insufficient permissions (role of current account is ${myRole})`,
+        );
       }
 
       this.storeKeyRevelationForMember(

@@ -1,22 +1,28 @@
+import { createSubscriber } from "svelte/reactivity";
 import { getAuthSecretStorage } from "../jazz.svelte.js";
-import { onDestroy } from "svelte";
 
 export function useIsAuthenticated() {
     const authSecretStorage = getAuthSecretStorage();
 
-    let isAuthenticated = $state(authSecretStorage.isAuthenticated);
+    const subscribe = createSubscriber((update) => {
+        const off = authSecretStorage.onUpdate(update)
 
-    const unsubscribe = authSecretStorage.onUpdate(() => {
-        isAuthenticated = authSecretStorage.isAuthenticated;
-    });
+        return () => off()
+    })
 
-    onDestroy(() => {
-        unsubscribe();
-    });
+    function getCurrent() {
+        subscribe();
+
+        return authSecretStorage.isAuthenticated;
+    }
 
     return {
+        /** @deprecated Use `current` instead */
         get value() {
-            return isAuthenticated;
+            return getCurrent();
+        },
+        get current() {
+            return getCurrent();
         }
     };
 }

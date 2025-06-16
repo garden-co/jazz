@@ -178,12 +178,22 @@ export class CoPlainText extends String implements CoValue {
    */
   applyDiff(other: string) {
     const current = this._raw.toString();
-    for (const [from, to, insert] of [...calcPatch(current, other)].reverse()) {
+
+    // Split both strings into grapheme arrays for proper comparison
+    const currentGraphemes = this._raw.toGraphemes(current);
+    const otherGraphemes = this._raw.toGraphemes(other);
+
+    // Calculate the diff on grapheme arrays
+    const patches = [...calcPatch(currentGraphemes, otherGraphemes)];
+
+    // Apply patches in reverse order to avoid index shifting issues
+    for (const [from, to, insert] of patches.reverse()) {
       if (to > from) {
         this.deleteRange({ from, to });
       }
       if (insert.length > 0) {
-        this.insertBefore(from, insert);
+        // Join the graphemes back into a string for insertion
+        this.insertBefore(from, this._raw.fromGraphemes(insert));
       }
     }
   }

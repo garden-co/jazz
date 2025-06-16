@@ -8,7 +8,7 @@ function App() {
 
   return (
     <>
-      <main className="container py-8 space-y-8">
+      <main className="max-w-xl mx-auto px-3 py-8 space-y-8">
         {router.route({
           "/": () => <Orders />,
           "/order": () => <CreateOrder />,

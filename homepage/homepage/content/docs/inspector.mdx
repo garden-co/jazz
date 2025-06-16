@@ -9,7 +9,10 @@ export const metadata = {
 
 [Jazz Inspector](https://inspector.jazz.tools) is a tool to visually inspect a Jazz account or other CoValues.
 
-For now, you can get your account credentials from the `jazz-logged-in-secret` local storage key from within your Jazz app.
+To pass your account credentials, go to your Jazz app, copy the full JSON from the `jazz-logged-in-secret` local storage key,
+and paste it into the Inspector's Account ID field.
+
+Alternatively, you can pass the Account ID and Account Secret separately.
 
 [https://inspector.jazz.tools](https://inspector.jazz.tools)
 
@@ -20,7 +23,7 @@ In development mode, you can launch the Inspector from your Jazz app to inspect 
 
 ## Embedding the Inspector widget into your app [!framework=react,svelte,vue,vanilla]
 
-Alternatively, you can embed the Inspector directly into your app, so you don't need to open a separate window.
+You can also embed the Inspector directly into your app, so you don't need to open a separate window.
 
 Install the package.
 

@@ -1,7 +1,6 @@
 {
   "name": "clerk",
   "private": true,
-  "version": "0.0.118",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -14,6 +13,7 @@
   },
   "dependencies": {
     "@clerk/clerk-react": "^5.4.1",
+    "jazz-inspector": "workspace:*",
     "jazz-react": "workspace:*",
     "jazz-react-auth-clerk": "workspace:*",
     "jazz-tools": "workspace:*",

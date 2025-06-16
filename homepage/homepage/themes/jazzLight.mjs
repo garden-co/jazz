@@ -1,3 +1,4 @@
+/** @type {import('shiki').ThemeRegistration} */
 export const jazzLight = {
   name: "jazz-light",
   type: "light",

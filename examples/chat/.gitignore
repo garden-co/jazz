@@ -29,3 +29,9 @@ sync-db/
 /playwright-report/
 /blob-report/
 /playwright/.cache/
+
+# env files
+.env
+.env.*
+!.env.example
+!.env.test

@@ -1,6 +1,7 @@
 import "./globals.css";
 import { ThemeProvider } from "@/components/ThemeProvider";
 import { JazzFooter } from "@/components/footer";
+import { PagefindSearch } from "@/components/pagefind";
 import { marketingCopy } from "@/content/marketingCopy";
 import { fontClasses } from "@garden-co/design-system/src/fonts";
 import { Analytics } from "@vercel/analytics/next";
@@ -57,6 +58,7 @@ export default function RootLayout({
         >
           {children}
           <JazzFooter />
+          <PagefindSearch />
         </ThemeProvider>
       </body>
     </html>

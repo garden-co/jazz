@@ -31,7 +31,7 @@ export function usePasskeyAuth({
 
   const isAuthenticated = useIsAuthenticated();
 
-  const state = $derived(isAuthenticated.value ? "signedIn" : "anonymous");
+  const state = $derived(isAuthenticated.current ? "signedIn" : "anonymous");
 
   return {
     current: auth,

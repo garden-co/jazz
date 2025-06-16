@@ -8,8 +8,11 @@ First, install dependencies and build the project:
 
 ```bash
 pnpm i
+mv .env.example .env
 pnpm run build
 ```
+
+Don't forget to update `VITE_CLERK_PUBLISHABLE_KEY` in `.env` with your [Publishable Key](https://clerk.com/docs/deployments/clerk-environment-variables#clerk-publishable-and-secret-keys) from Clerk.
 
 ### 2. Inside the `examples/chat-rn-expo-clerk` Directory
 

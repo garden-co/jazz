@@ -27,7 +27,15 @@ interface Account {
   secret: AgentSecret;
 }
 
+interface JazzLoggedInSecret {
+  accountID: string;
+  accountSecret: string;
+  secretSeed?: number[];
+  provider?: string;
+}
+
 export default function CoJsonViewerApp() {
+  const [errors, setErrors] = useState<string | null>(null);
   const [accounts, setAccounts] = useState<Account[]>(() => {
     const storedAccounts = localStorage.getItem("inspectorAccounts");
     return storedAccounts ? JSON.parse(storedAccounts) : [];
@@ -73,23 +81,46 @@ export default function CoJsonViewerApp() {
         websocket: new WebSocket("wss://cloud.jazz.tools"),
         role: "server",
       });
-      const node = await LocalNode.withLoadedAccount({
-        accountID: currentAccount.id,
-        accountSecret: currentAccount.secret,
-        sessionID: crypto.newRandomSessionID(currentAccount.id),
-        peersToLoadFrom: [wsPeer],
-        crypto,
-        migration: async () => {
-          console.log("Not running any migration in inspector");
-        },
-      });
+      let node;
+      try {
+        node = await LocalNode.withLoadedAccount({
+          accountID: currentAccount.id,
+          accountSecret: currentAccount.secret,
+          sessionID: crypto.newRandomSessionID(currentAccount.id),
+          peersToLoadFrom: [wsPeer],
+          crypto,
+          migration: async () => {
+            console.log("Not running any migration in inspector");
+          },
+        });
+      } catch (err: any) {
+        if (err.toString().includes("invalid id")) {
+          setAccounts(accounts.filter((acc) => acc.id !== currentAccount.id));
+          //remove from localStorage
+          localStorage.removeItem("lastSelectedAccountId");
+          localStorage.setItem(
+            "inspectorAccounts",
+            JSON.parse(localStorage.inspectorAccounts).filter(
+              (acc: Account) => acc.id != currentAccount.id,
+            ),
+          );
+          setCurrentAccount(null);
+          setErrors("Trying to load covalue with invalid id");
+        } else {
+          setErrors("The account could not be loaded");
+        }
+        setLocalNode(null);
+        goToIndex(-1);
+        return;
+      }
       setLocalNode(node);
     });
-  }, [currentAccount, goToIndex, path]);
+  }, [currentAccount, accounts, goToIndex, path]);
 
   const addAccount = (id: RawAccountID, secret: AgentSecret) => {
     const newAccount = { id, secret };
     const accountExists = accounts.some((account) => account.id === id);
+    //todo: ideally there would be some validation here so we don't have to manually remove a non existent account from localStorage
     if (!accountExists) {
       setAccounts([...accounts, newAccount]);
     }
@@ -140,7 +171,7 @@ export default function CoJsonViewerApp() {
           <form onSubmit={handleCoValueIdSubmit}>
             {path.length !== 0 && (
               <Input
-                className="min-w-[21rem] font-mono"
+                className="min-w-84 font-mono"
                 placeholder="co_z1234567890abcdef123456789"
                 label="CoValue ID"
                 hideLabel
@@ -167,7 +198,9 @@ export default function CoJsonViewerApp() {
         goBack={goBack}
         addPages={addPages}
       >
-        {!currentAccount && <AddAccountForm addAccount={addAccount} />}
+        {!currentAccount && (
+          <AddAccountForm addAccount={addAccount} errors={errors} />
+        )}
 
         {currentAccount && path.length <= 0 && (
           <form
@@ -263,13 +296,34 @@ function AccountSwitcher({
 
 function AddAccountForm({
   addAccount,
+  errors,
 }: {
   addAccount: (id: RawAccountID, secret: AgentSecret) => void;
+  errors: string | null;
 }) {
   const [id, setId] = useState("");
   const [secret, setSecret] = useState("");
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleIdChange = (e: React.ChangeEvent<HTMLInputElement>): void => {
+    const value = e.target.value;
+    setId(value);
+
+    // Try to parse as JSON if it looks like a JSON object
+    if (value.trim().startsWith("{") && value.trim().endsWith("}")) {
+      try {
+        const parsed: JazzLoggedInSecret = JSON.parse(value);
+        if (parsed.accountID && parsed.accountSecret) {
+          setId(parsed.accountID);
+          setSecret(parsed.accountSecret);
+        }
+      } catch (error) {
+        // If parsing fails, just keep the raw value in the id field
+        console.log("Failed to parse JSON:", error);
+      }
+    }
+  };
+
+  const handleSubmit = (e: React.FormEvent): void => {
     e.preventDefault();
     addAccount(id as RawAccountID, secret as AgentSecret);
     setId("");
@@ -279,8 +333,17 @@ function AddAccountForm({
   return (
     <form
       onSubmit={handleSubmit}
-      className="flex flex-col gap-3 max-w-md mx-auto h-full justify-center"
+      className={`flex flex-col max-w-120 mx-auto justify-center ${errors == null ? "h-full" : ""}`}
     >
+      {errors != null && (
+        <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded mt-4 font-mono whitespace-pre-wrap break-words mb-8">
+          <h3>Error</h3>
+          <pre className="whitespace-pre-wrap break-words overflow-hidden">
+            {errors}
+          </pre>
+        </div>
+      )}
+
       <h2 className="text-2xl font-medium text-gray-900 dark:text-white">
         Add an account to inspect
       </h2>
@@ -290,13 +353,14 @@ function AddAccountForm({
           jazz-logged-in-secret
         </code>{" "}
         local storage key from within your Jazz app for your account
-        credentials.
+        credentials. You can paste the full JSON object or enter the ID and
+        secret separately.
       </p>
       <Input
         label="Account ID"
         value={id}
-        placeholder="co_z1234567890abcdef123456789"
-        onChange={(e) => setId(e.target.value)}
+        placeholder="co_z1234567890abcdef123456789 or paste full JSON"
+        onChange={handleIdChange}
       />
       <Input
         label="Account secret"

@@ -2,6 +2,7 @@ import { untrack } from "svelte";
 import { getAuthSecretStorage, getJazzContext } from "../jazz.svelte.js";
 import { useIsAuthenticated } from "./useIsAuthenticated.svelte.js";
 import { PassphraseAuth } from "jazz-tools";
+import { createSubscriber } from "svelte/reactivity";
 
 /** @category Auth Providers */
 export function usePassphraseAuth({
@@ -19,19 +20,17 @@ export function usePassphraseAuth({
     wordlist
   );
 
-  let passphrase = $state(auth.passphrase);
+  auth.loadCurrentAccountPassphrase();
 
-  $effect(untrack(() => {
-    auth.loadCurrentAccountPassphrase();
-    return auth.subscribe(() => {
-      passphrase = auth.passphrase;
-    });
-  }));
+  const subscribe = createSubscriber((update) => {
+    const off = auth.subscribe(update)
 
+    return () => off()
+  })
 
   const isAuthenticated = useIsAuthenticated();
 
-  const state = $derived(isAuthenticated.value ? "signedIn" : "anonymous");
+  const state = $derived(isAuthenticated.current ? "signedIn" : "anonymous");
 
   return {
     logIn: auth.logIn,
@@ -39,7 +38,9 @@ export function usePassphraseAuth({
     registerNewAccount: auth.registerNewAccount,
     generateRandomPassphrase: auth.generateRandomPassphrase,
     get passphrase() {
-      return passphrase;
+      subscribe();
+  
+      return auth.passphrase;
     },
     get state() {
       return state;

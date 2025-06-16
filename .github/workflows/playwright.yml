@@ -13,7 +13,21 @@ jobs:
     continue-on-error: true
     strategy:
       matrix:
-        project: ["tests/e2e", "examples/chat",  "examples/clerk", "examples/betterauth", "examples/file-share-svelte", "examples/form", "examples/music-player", "examples/organization", "examples/pets", "starters/react-passkey-auth"]
+        project: [
+          "tests/e2e",
+          "examples/chat",
+          "examples/clerk",
+          "examples/betterauth",
+          "examples/file-share-svelte",
+          "examples/form",
+          "examples/inspector",
+          "examples/music-player",
+          "examples/organization",
+          "examples/pets",
+          "starters/react-passkey-auth",
+          "starters/svelte-passkey-auth",
+          "packages/jazz-svelte"
+        ]
 
     steps:
       - uses: actions/checkout@v4
@@ -24,7 +38,11 @@ jobs:
         uses: ./.github/actions/source-code/
 
       - name: Pnpm Build
-        run: pnpm turbo build
+        run: |
+          if [ -f .env.test ]; then
+            cp .env.test .env
+          fi
+          pnpm turbo build
         working-directory: ./${{ matrix.project }}
 
       - name: Install Playwright Browsers

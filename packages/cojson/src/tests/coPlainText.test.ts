@@ -265,3 +265,24 @@ test("Handle deletion of complex grapheme clusters correctly", () => {
   content.deleteRange({ from: 1, to: 2 }, "trusting");
   expect(content.toString()).toEqual(" 녕!");
 });
+
+test("Splits into and from grapheme string arrays", () => {
+  const node = nodeWithRandomAgentAndSessionID();
+  const coValue = node.createCoValue({
+    type: "coplaintext",
+    ruleset: { type: "unsafeAllowAll" },
+    meta: null,
+    ...Crypto.createdNowUnique(),
+  });
+
+  const content = expectPlainText(coValue.getCurrentContent());
+
+  content.insertAfter(0, "👋 안녕!", "trusting");
+  expect(content.toString()).toEqual("👋 안녕!");
+
+  const graphemes = content.toGraphemes("👋 안녕!");
+  expect(graphemes).toEqual(["👋", " ", "안", "녕", "!"]);
+
+  const text = content.fromGraphemes(graphemes);
+  expect(text).toEqual("👋 안녕!");
+});

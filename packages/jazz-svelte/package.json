@@ -1,6 +1,6 @@
 {
   "name": "jazz-svelte",
-  "version": "0.14.21",
+  "version": "0.14.25",
   "scripts": {
     "dev": "vite dev",
     "build": "vite build && npm run package",
@@ -13,7 +13,9 @@
     "format-and-lint": "pnpm run format && pnpm run lint",
     "format-and-lint:fix": "pnpm run format --write && pnpm run lint --fix",
     "test": "vitest",
-    "test:coverage": "vitest --coverage"
+    "test:coverage": "vitest --coverage",
+    "test:e2e": "playwright test",
+    "test:e2e:ui": "playwright test --ui"
   },
   "files": [
     "dist",
@@ -52,6 +54,7 @@
     "eslint-config-prettier": "^9.1.0",
     "eslint-plugin-svelte": "^2.36.0",
     "globals": "^15.11.0",
+    "jazz-inspector-element": "workspace:*",
     "jsdom": "^25.0.1",
     "prettier": "^3.3.2",
     "prettier-plugin-svelte": "^3.2.6",
@@ -60,6 +63,7 @@
     "svelte-check": "^4.0.0",
     "typescript": "catalog:",
     "typescript-eslint": "^8.0.0",
+    "virtua": "^0.41.5",
     "vite": "catalog:"
   },
   "dependencies": {

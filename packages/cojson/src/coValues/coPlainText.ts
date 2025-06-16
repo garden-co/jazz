@@ -3,12 +3,6 @@ import { AvailableCoValueCore } from "../coValueCore/coValueCore.js";
 import { JsonObject } from "../jsonValue.js";
 import { DeletionOpPayload, OpID, RawCoList } from "./coList.js";
 
-declare const navigator:
-  | {
-      language: string;
-    }
-  | undefined;
-
 export type StringifiedOpID = string & { __stringifiedOpID: true };
 
 export function stringifyOpID(opID: OpID): StringifiedOpID {
@@ -63,15 +57,6 @@ export class RawCoPlainText<
   constructor(core: AvailableCoValueCore) {
     super(core);
     this._cachedMapping = new WeakMap();
-
-    // Use locale from meta if provided, fallback to browser locale, or 'en' as last resort
-    const effectiveLocale =
-      (core.verified.header.meta &&
-      typeof core.verified.header.meta === "object" &&
-      "locale" in core.verified.header.meta
-        ? (core.verified.header.meta.locale as string)
-        : undefined) ||
-      (typeof navigator !== "undefined" ? navigator.language : "en");
   }
 
   get mapping() {
@@ -181,5 +166,15 @@ export class RawCoPlainText<
     }
     this.core.makeTransaction(ops, privacy);
     this.processNewTransactions();
+  }
+
+  /** @internal Helper method to split text into graphemes */
+  toGraphemes(text: string): string[] {
+    return [...splitGraphemes(text)];
+  }
+
+  /** @internal Helper method to join graphemes into a string */
+  fromGraphemes(graphemes: string[]): string {
+    return graphemes.join("");
   }
 }

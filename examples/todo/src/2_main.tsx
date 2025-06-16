@@ -6,13 +6,13 @@ import {
 } from "react-router-dom";
 import "./index.css";
 
+import { JazzInspector } from "jazz-inspector";
 import {
   JazzProvider,
   PassphraseAuthBasicUI,
   useAcceptInvite,
   useAccount,
 } from "jazz-react";
-
 import React from "react";
 import { TodoAccount, TodoProject } from "./1_schema.ts";
 import { NewProjectForm } from "./3_NewProjectForm.tsx";
@@ -62,6 +62,7 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
           <App />
         </div>
       </ThemeProvider>
+      <JazzInspector />
     </JazzAndAuth>
   </React.StrictMode>,
 );

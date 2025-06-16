@@ -1,7 +1,6 @@
 {
   "name": "reactions",
   "private": true,
-  "version": "0.0.115",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -12,10 +11,12 @@
   },
   "dependencies": {
     "hash-slash": "workspace:*",
+    "jazz-inspector": "workspace:*",
     "jazz-react": "workspace:*",
     "jazz-tools": "workspace:*",
     "react": "19.0.0",
-    "react-dom": "19.0.0"
+    "react-dom": "19.0.0",
+    "tailwindcss": "^4.1.10"
   },
   "devDependencies": {
     "@biomejs/biome": "1.9.4",

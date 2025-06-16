@@ -11,6 +11,10 @@ export class ExpoSQLiteAdapter implements SQLiteDatabaseDriverAsync {
   }
 
   public async initialize(): Promise<void> {
+    if (this.db) {
+      return;
+    }
+
     const db = await openDatabaseAsync(this.dbName, {
       useNewConnection: true,
     });
@@ -82,5 +86,9 @@ export class ExpoSQLiteAdapter implements SQLiteDatabaseDriverAsync {
     await deleteDatabaseAsync(this.dbName);
     this.db = null;
     await this.initialize();
+  }
+
+  public async closeDb(): Promise<void> {
+    // Keeping the database open and reusing the same connection over multiple ctx instances.
   }
 }

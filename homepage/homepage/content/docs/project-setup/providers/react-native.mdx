@@ -114,3 +114,57 @@ Jazz for React Native includes built-in local persistence using SQLite. This imp
 - **Key-Value Storage**: `react-native-mmkv` - A fast key-value storage system
 
 Local persistence is enabled by default with no additional configuration required. Your data will automatically persist across app restarts.
+
+## Quick Crypto
+
+For accelerated crypto operations, you can use the `RNQuickCrypto` crypto provider. 
+
+To use it, install the following Packages:
+
+<CodeGroup>
+```bash
+pnpm add react-native-quick-crypto@1.0.0-beta.18 react-native-nitro-modules
+```
+</CodeGroup>
+
+Then add the following to your `JazzProvider`:
+
+<CodeGroup>
+```tsx twoslash
+// @noErrors: 2307 2322
+import React, { ReactNode } from "react";
+function SignInScreen({ auth }: { auth: any }) {
+  return null;
+}
+// ---cut-before---
+import { JazzProvider } from "jazz-react-native";
+import { RNQuickCrypto } from "jazz-react-native/crypto";
+
+function MyJazzProvider({ children }: { children: ReactNode }) {
+  return (
+    <JazzProvider
+      sync={{ peer: "wss://cloud.jazz.tools/?key=your-api-key" }}
+      CryptoProvider={RNQuickCrypto}
+    >
+      {children}
+    </JazzProvider>
+  );
+}
+```
+</CodeGroup>
+
+For configuration, add the following settings:
+
+<CodeGroup>
+```ruby twoslash
+# ios/Podfile
+ENV['SODIUM_ENABLED'] = '1'
+```
+</CodeGroup>
+and
+<CodeGroup>
+```groovy twoslash
+// android/gradle.properties
+sodiumEnabled=true
+```
+</CodeGroup>

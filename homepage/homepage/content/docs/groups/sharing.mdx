@@ -2,7 +2,7 @@ export const metadata = {
   description: "Share CoValues in Jazz through public sharing and invite links. Enable collaboration by granting access to everyone or specific users with different permission levels."
 };
 
-import { ContentByFramework, CodeGroup } from '@/components/forMdx'
+import { CodeGroup, ContentByFramework } from '@/components/forMdx';
 
 # Public sharing and invites
 
@@ -87,6 +87,27 @@ useAcceptInvite({
 ```
 </CodeGroup>
 
+You can accept an invitation programmatically by using the `acceptInvite` method on an account.
+Pass the ID of the CoValue you're being invited to, the secret from the invite link, and the schema of the CoValue.
+
+<CodeGroup>
+```ts twoslash
+import { co, z, Account } from "jazz-tools";
+
+const Organization = co.map({
+  name: z.string(),
+});
+const account = {} as unknown as Account;
+const organizationId = "";
+const inviteSecret = "inviteSecret_z";
+// ---cut---
+await account.acceptInvite(
+  organizationId,
+  inviteSecret,
+  Organization
+);
+```
+</CodeGroup>
 
 ### Requesting Invites
 

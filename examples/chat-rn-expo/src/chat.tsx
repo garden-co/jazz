@@ -135,7 +135,11 @@ export default function ChatScreen() {
             }}
             testID="chat-id-input"
           />
-          <TouchableOpacity onPress={joinChat} style={styles.joinChatButton}>
+          <TouchableOpacity
+            testID="join-chat-button"
+            onPress={joinChat}
+            style={styles.joinChatButton}
+          >
             <Text style={styles.newChatButtonText}>Join chat</Text>
           </TouchableOpacity>
         </View>

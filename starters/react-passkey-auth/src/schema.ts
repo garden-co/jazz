@@ -3,7 +3,7 @@
  * https://jazz.tools/docs/react/schemas/covalues
  */
 
-import { Group, Loaded, co, z } from "jazz-tools";
+import { Group, co, z } from "jazz-tools";
 
 /** The account profile is an app-specific per-user public `CoMap`
  *  where you can store top-level objects for that user */
@@ -19,17 +19,14 @@ export const JazzProfile = co.profile({
 
 /** The account root is an app-specific per-user private `CoMap`
  *  where you can store top-level objects for that user */
-export const AccountRoot = co
-  .map({
-    dateOfBirth: z.date(),
-  })
-  .withHelpers((Self) => ({
-    // Add helper methods here
-    age(root: Loaded<typeof Self>) {
-      if (!root?.dateOfBirth) return null;
-      return new Date().getFullYear() - root.dateOfBirth.getFullYear();
-    },
-  }));
+export const AccountRoot = co.map({
+  dateOfBirth: z.date(),
+});
+
+export function getUserAge(root: co.loaded<typeof AccountRoot> | undefined) {
+  if (!root) return null;
+  return new Date().getFullYear() - root.dateOfBirth.getFullYear();
+}
 
 export const JazzAccount = co
   .account({

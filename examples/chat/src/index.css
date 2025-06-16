@@ -1,3 +1,54 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss";
+
+/* Custom stone color palette */
+@theme {
+  --color-stone-50: oklch(0.988281 0.002 75);
+  --color-stone-75: oklch(0.980563 0.002 75);
+  --color-stone-100: oklch(0.964844 0.002 75);
+  --color-stone-200: oklch(0.917969 0.002 75);
+  --color-stone-300: oklch(0.853516 0.002 75);
+  --color-stone-400: oklch(0.789063 0.002 75);
+  --color-stone-500: oklch(0.726563 0.002 75);
+  --color-stone-600: oklch(0.613281 0.002 75);
+  --color-stone-700: oklch(0.523438 0.002 75);
+  --color-stone-800: oklch(0.412109 0.002 75);
+  --color-stone-900: oklch(0.302734 0.002 75);
+  --color-stone-925: oklch(0.22 0.002 75);
+  --color-stone-950: oklch(0.193359 0.002 75);
+
+  /* Blue color overrides */
+  --color-blue-50: #eef2ff;
+  --color-blue-100: #e0e7ff;
+  --color-blue-200: #c7d2fe;
+  --color-blue-300: #a5b4fc;
+  --color-blue-400: #818cf8;
+  --color-blue-500: #5870f1;
+  --color-blue-600: #5145cd;
+  --color-blue-700: #4338ca;
+  --color-blue-800: #3730a3;
+  --color-blue-900: #312e81;
+  --color-blue-950: #1e1b4b;
+  --color-blue: #146aff;
+}
+
+@layer base {
+  *:focus {
+    outline: none;
+  }
+
+  :root {
+    --border-default: var(--color-stone-200);
+  }
+
+  .dark {
+    --border-default: var(--color-stone-900);
+  }
+
+  *,
+  ::after,
+  ::before,
+  ::backdrop,
+  ::file-selector-button {
+    border-color: var(--border-default, currentColor);
+  }
+}

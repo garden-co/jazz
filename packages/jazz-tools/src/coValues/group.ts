@@ -7,12 +7,10 @@ import type {
   Role,
 } from "cojson";
 import type {
-  AnyAccountSchema,
   CoMap,
   CoValue,
   CoValueClass,
   ID,
-  InstanceOfSchema,
   RefEncoded,
   RefsToResolve,
   RefsToResolveStrict,
@@ -30,7 +28,6 @@ import {
   RegisteredSchemas,
   accessChildById,
   activeAccountContext,
-  anySchemaToCoSchema,
   ensureCoValueLoaded,
   isControlledAccount,
   loadCoValueWithoutMe,
@@ -147,12 +144,42 @@ export class Group extends CoValueBase implements CoValue {
 
   addMember(member: Everyone, role: "writer" | "reader" | "writeOnly"): void;
   addMember(member: Account, role: AccountRole): void;
-  addMember(member: Everyone | Account, role: AccountRole) {
-    this._raw.addMember(member === "everyone" ? member : member._raw, role);
+  /** @category Identity & Permissions
+   * Gives members of a parent group membership in this group.
+   * @param member The group that will gain access to this group.
+   * @param role The role all members of the parent group should have in this group.
+   */
+  addMember(
+    member: Group,
+    role?: "reader" | "writer" | "admin" | "inherit",
+  ): void;
+  addMember(
+    member: Group | Everyone | Account,
+    role?: AccountRole | "inherit",
+  ) {
+    if (member !== "everyone" && member._type === "Group") {
+      if (role === "writeOnly")
+        throw new Error("Cannot add group as member with write-only role");
+      this._raw.extend(member._raw, role);
+    } else if (role !== undefined && role !== "inherit") {
+      this._raw.addMember(member === "everyone" ? member : member._raw, role);
+    }
   }
 
-  removeMember(member: Everyone | Account) {
-    return this._raw.removeMember(member === "everyone" ? member : member._raw);
+  removeMember(member: Everyone | Account): Promise<void>;
+  /** @category Identity & Permissions
+   * Revokes membership from members a parent group.
+   * @param member The group that will lose access to this group.
+   */
+  removeMember(member: Group): Promise<void>;
+  removeMember(member: Group | Everyone | Account) {
+    if (member !== "everyone" && member._type === "Group") {
+      return this._raw.revokeExtend(member._raw);
+    } else {
+      return this._raw.removeMember(
+        member === "everyone" ? member : member._raw,
+      );
+    }
   }
 
   get members(): Array<{
@@ -231,6 +258,13 @@ export class Group extends CoValueBase implements CoValue {
     return this._raw.getParentGroups().map((group) => Group.fromRaw(group));
   }
 
+  /** @category Identity & Permissions
+   * Gives members of a parent group membership in this group.
+   * @deprecated Use `addMember` instead.
+   * @param parent The group that will gain access to this group.
+   * @param roleMapping The role all members of the parent group should have in this group.
+   * @returns This group.
+   */
   extend(
     parent: Group,
     roleMapping?: "reader" | "writer" | "admin" | "inherit",
@@ -239,6 +273,12 @@ export class Group extends CoValueBase implements CoValue {
     return this;
   }
 
+  /** @category Identity & Permissions
+   * Revokes membership from members a parent group.
+   * @deprecated Use `removeMember` instead.
+   * @param parent The group that will lose access to this group.
+   * @returns This group.
+   */
   async revokeExtend(parent: Group) {
     await this._raw.revokeExtend(parent._raw);
     return this;

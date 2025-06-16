@@ -1,4 +1,5 @@
 import { ClerkProvider } from "@clerk/clerk-react";
+import { JazzInspector } from "jazz-inspector";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import App from "./App";
@@ -22,6 +23,7 @@ createRoot(document.getElementById("root")!).render(
         }}
       >
         <App />
+        <JazzInspector />
       </OmniAuth>
     </ClerkProvider>
   </StrictMode>,

@@ -110,7 +110,7 @@ export async function addTrackToPlaylist(
      * visible to the Playlist user
      */
     const trackGroup = track._owner;
-    trackGroup.extend(playlist._owner);
+    trackGroup.addMember(playlist._owner);
 
     playlist.tracks?.push(track);
     return;
@@ -129,7 +129,7 @@ export async function removeTrackFromPlaylist(
 
   if (track._owner._type === "Group" && playlist._owner._type === "Group") {
     const trackGroup = track._owner;
-    await trackGroup.revokeExtend(playlist._owner);
+    await trackGroup.removeMember(playlist._owner);
 
     const index =
       playlist.tracks?.findIndex(

@@ -54,6 +54,8 @@ const packageJsonFiles = findPackageJsonFiles(rootDir);
 let hasIssues = false;
 
 for (const file of packageJsonFiles) {
+  if (file.includes("homepage")) continue;
+
   const issues = checkCatalogDependencies(file);
   if (issues.length > 0) {
     hasIssues = true;

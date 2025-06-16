@@ -1,3 +1,4 @@
+import { JazzInspector } from "jazz-inspector";
 import { JazzProvider, PasskeyAuthBasicUI } from "jazz-react";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
@@ -15,6 +16,7 @@ function JazzAndAuth({ children }: { children: React.ReactNode }) {
       <PasskeyAuthBasicUI appName="Jazz Minimal Auth Passkey Example">
         {children}
       </PasskeyAuthBasicUI>
+      <JazzInspector />
     </JazzProvider>
   );
 }

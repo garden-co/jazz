@@ -1,21 +1,11 @@
 import { CryptoProvider } from "cojson";
-import {
-  Account,
-  Group,
-  RefsToResolveStrict,
-  Simplify,
-} from "../../../internal.js";
+import { Account, Group, RefsToResolveStrict } from "../../../internal.js";
 import { AnonymousJazzAgent } from "../../anonymousJazzAgent.js";
 import { InstanceOrPrimitiveOfSchema } from "../typeConverters/InstanceOrPrimitiveOfSchema.js";
 import { InstanceOrPrimitiveOfSchemaCoValuesNullable } from "../typeConverters/InstanceOrPrimitiveOfSchemaCoValuesNullable.js";
 import { z } from "../zodReExport.js";
 import { Loaded, ResolveQuery } from "../zodSchema.js";
-import {
-  AnyCoMapSchema,
-  CoMapInitZod,
-  CoMapInstance,
-  CoMapSchema,
-} from "./CoMapSchema.js";
+import { AnyCoMapSchema, CoMapSchema } from "./CoMapSchema.js";
 
 export type AccountSchema<
   Shape extends {
@@ -60,7 +50,7 @@ export type AccountSchema<
 
   withMigration(
     migration: (
-      account: InstanceOrPrimitiveOfSchema<AccountSchema<Shape>>,
+      account: Loaded<AccountSchema<Shape>>,
       creationProps?: { name: string },
     ) => void,
   ): AccountSchema<Shape>;

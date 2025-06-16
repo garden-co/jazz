@@ -3,9 +3,10 @@ import { unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LocalNode, cojsonInternals } from "cojson";
-import { StorageManagerSync } from "cojson-storage";
+import { SQLiteNodeBase, StorageManagerSync } from "cojson-storage";
 import { WasmCrypto } from "cojson/crypto/WasmCrypto";
 import { expect, onTestFinished, test, vi } from "vitest";
+import { BetterSqliteDriver } from "../betterSqliteDriver.js";
 import { SQLiteNode } from "../index.js";
 import { toSimplifiedMessages } from "./messagesTestUtils.js";
 import { trackMessages, waitFor } from "./testUtils.js";
@@ -724,4 +725,40 @@ test("large coValue upload streaming", async () => {
       "client -> KNOWN Map sessions: header/200",
     ]
   `);
+});
+
+test("should close the db when the node is closed", async () => {
+  const agentSecret = Crypto.newRandomAgentSecret();
+
+  const node1 = new LocalNode(
+    agentSecret,
+    Crypto.newRandomSessionID(Crypto.getAgentID(agentSecret)),
+    Crypto,
+  );
+
+  const dbPath = join(tmpdir(), `test-${randomUUID()}.db`);
+
+  const db = new BetterSqliteDriver(dbPath);
+
+  const peer = SQLiteNodeBase.create({
+    db,
+    localNodeName: "test",
+    maxBlockingTime: 500,
+  });
+
+  const spy = vi.spyOn(db, "closeDb");
+
+  node1.syncManager.addPeer(peer);
+
+  await new Promise((resolve) => setTimeout(resolve, 10));
+
+  expect(spy).not.toHaveBeenCalled();
+
+  node1.gracefulShutdown();
+
+  await new Promise((resolve) => setTimeout(resolve, 10));
+
+  expect(spy).toHaveBeenCalled();
+
+  unlinkSync(dbPath);
 });

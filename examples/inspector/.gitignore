@@ -24,3 +24,9 @@ dist-ssr
 *.sw?
 
 sync-db/
+
+# env files
+.env
+.env.*
+!.env.example
+!.env.test

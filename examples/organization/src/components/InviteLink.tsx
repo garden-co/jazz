@@ -7,15 +7,8 @@ import { Organization } from "../schema.ts";
 export function InviteLink({
   organization,
 }: { organization: Loaded<typeof Organization> }) {
-  const [inviteLink, setInviteLink] = useState<string>();
   let [copyCount, setCopyCount] = useState(0);
   let copied = copyCount > 0;
-
-  useEffect(() => {
-    if (organization) {
-      setInviteLink(createInviteLink(organization, "writer"));
-    }
-  }, [organization.id]);
 
   useEffect(() => {
     if (copyCount > 0) {
@@ -27,11 +20,10 @@ export function InviteLink({
   }, [copyCount]);
 
   const copyUrl = () => {
-    if (inviteLink) {
-      navigator.clipboard.writeText(inviteLink).then(() => {
-        setCopyCount((count) => count + 1);
-      });
-    }
+    const inviteLink = createInviteLink(organization, "writer");
+    navigator.clipboard.writeText(inviteLink).then(() => {
+      setCopyCount((count) => count + 1);
+    });
   };
 
   return (

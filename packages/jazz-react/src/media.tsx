@@ -68,7 +68,7 @@ export function ProgressiveImg({
   image: Loaded<typeof ImageDefinition> | null | undefined;
   maxWidth?: number;
   targetWidth?: number;
-}) {
+}): React.ReactNode {
   const result = useProgressiveImg({ image, maxWidth, targetWidth });
-  return result && children(result);
+  return result ? children(result) : null;
 }

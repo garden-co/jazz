@@ -105,7 +105,7 @@ export const frameworkToAuthExamples: Partial<
   },
   "svelte-passkey-auth": {
     name: "Passkey auth",
-    repo: "garden-co/jazz/examples/passkey-svelte",
+    repo: "garden-co/jazz/starters/svelte-passkey-auth",
     platform: PLATFORM.WEB,
   },
   "rn-minimal-auth": {

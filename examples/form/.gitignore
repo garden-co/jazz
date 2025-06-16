@@ -25,3 +25,9 @@ dist-ssr
 
 /test-results/
 /playwright-report/
+
+# env files
+.env
+.env.*
+!.env.example
+!.env.test

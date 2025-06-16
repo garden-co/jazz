@@ -1,3 +1,4 @@
+import { JazzInspector } from "jazz-inspector";
 import React from "react";
 import ReactDOM from "react-dom/client";
 import {
@@ -25,11 +26,6 @@ import {
   TitleAndLogo,
 } from "./basicComponents/index.ts";
 
-const peer =
-  (new URL(window.location.href).searchParams.get(
-    "peer",
-  ) as `ws://${string}`) ?? `wss://cloud.jazz.tools/?key=${apiKey}`;
-
 const appName = "Jazz Rate My Pet Example";
 
 /** Walkthrough: The top-level provider `<JazzProvider/>`
@@ -45,13 +41,14 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
       <div className="flex flex-col h-full items-center justify-start gap-10 pt-10 pb-10 px-5">
         <JazzProvider
           sync={{
-            peer,
+            peer: `wss://cloud.jazz.tools/?key=${apiKey}`,
           }}
           AccountSchema={PetAccount}
         >
           <PasskeyAuthBasicUI appName={appName}>
             <App />
           </PasskeyAuthBasicUI>
+          <JazzInspector />
         </JazzProvider>
       </div>
     </ThemeProvider>
