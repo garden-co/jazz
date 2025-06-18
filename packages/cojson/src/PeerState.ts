@@ -128,6 +128,9 @@ export class PeerState {
     this.processing = true;
 
     let msg: SyncMessage | undefined;
+
+    logger.info("[queue] Processing queue ${msg?.sessions?.sessionId}");
+
     while ((msg = this.queue.pull())) {
       if (this.closed) {
         break;

@@ -361,6 +361,9 @@ export class SyncManager {
   }
 
   trySendToPeer(peer: PeerState, msg: SyncMessage) {
+    logger.info(
+      "[queue] Pushing coval ${msg.id} from session ${msg.sessions.sessionID} of ${peer.id} to the queue",
+    );
     return peer.pushOutgoingMessage(msg);
   }
 
