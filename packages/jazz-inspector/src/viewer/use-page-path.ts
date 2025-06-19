@@ -2,11 +2,24 @@ import { CoID, RawCoValue } from "cojson";
 import { useCallback, useEffect, useState } from "react";
 import { PageInfo } from "./types.js";
 
+const STORAGE_KEY = "jazz-inspector-paths";
+
 export function usePagePath(defaultPath?: PageInfo[]) {
-  const [path, setPath] = useState<PageInfo[]>([]);
+  const [path, setPath] = useState<PageInfo[]>(() => {
+    const stored = localStorage.getItem(STORAGE_KEY);
+    if (stored) {
+      try {
+        return JSON.parse(stored);
+      } catch (e) {
+        console.warn("Failed to parse stored path:", e);
+      }
+    }
+    return defaultPath || [];
+  });
 
   const updatePath = useCallback((newPath: PageInfo[]) => {
     setPath(newPath);
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(newPath));
   }, []);
 
   useEffect(() => {

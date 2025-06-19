@@ -12,6 +12,7 @@ import { Account } from "jazz-tools";
 import { GlobalStyles } from "../ui/global-styles.js";
 import { Heading } from "../ui/heading.js";
 import { InspectorButton, type Position } from "./inpsector-button.js";
+import { useOpenInspector } from "./use-open-inspector.js";
 
 const InspectorContainer = styled("div")`
   position: fixed;
@@ -85,7 +86,7 @@ export function JazzInspectorInternal({
   localNode?: LocalNode;
   accountId?: CoID<RawAccount>;
 }) {
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useOpenInspector();
   const [coValueId, setCoValueId] = useState<CoID<RawCoValue> | "">("");
   const { path, addPages, goToIndex, goBack, setPage } = usePagePath();
 
