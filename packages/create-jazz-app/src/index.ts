@@ -125,8 +125,7 @@ async function scaffoldProject({
     platform: getPlatformFromTemplateName(template),
   };
 
-  const devCommand =
-    starterConfig.platform === PLATFORM.REACT_NATIVE ? "ios" : "dev";
+  let devCommand = "dev";
 
   if (!starterConfig.repo) {
     throw new Error(
@@ -259,32 +258,47 @@ async function scaffoldProject({
     throw error;
   }
 
-  const metroConfigPath = `${projectName}/metro.config.js`;
-
   // Additional setup for React Native
-  if (
-    starterConfig.platform === PLATFORM.REACT_NATIVE &&
-    fs.existsSync(metroConfigPath)
-  ) {
+  if (starterConfig.platform === PLATFORM.REACT_NATIVE) {
     const rnSpinner = ora({
       text: chalk.blue("Setting up React Native project..."),
       spinner: "dots",
     }).start();
 
     try {
-      execSync(`cd "${projectName}" && npx expo prebuild`, { stdio: "pipe" });
-      execSync(`cd "${projectName}" && npx pod-install`, { stdio: "pipe" });
+      const metroConfigPath = `${projectName}/metro.config.js`;
+      const appJsonPath = `${projectName}/app.json`;
+      const appJson = JSON.parse(fs.readFileSync(appJsonPath, "utf8"));
+      const isExpo = appJson.expo !== undefined;
 
-      // Update metro.config.js
-      const metroConfig = `
-  const { getDefaultConfig } = require("expo/metro-config");
-  const { withNativeWind } = require("nativewind/metro");
+      if (isExpo) {
+        devCommand = "start";
+        // Replace monorepo metro.config.js with default one
+        const metroConfig = `const { getDefaultConfig } = require("expo/metro-config");
+const config = getDefaultConfig(__dirname);
 
-  const config = getDefaultConfig(__dirname);
+config.resolver.sourceExts = ["mjs", "js", "json", "ts", "tsx"];
+config.resolver.requireCycleIgnorePatterns = [/(^|\\/|\\\\)node_modules($|\\/|\\\\)/];
 
-  module.exports = withNativeWind(config, { input: "./global.css" });
-  `;
-      fs.writeFileSync(metroConfigPath, metroConfig);
+module.exports = config;`;
+        fs.writeFileSync(metroConfigPath, metroConfig);
+        execSync(`cd "${projectName}" && npx expo prebuild`, { stdio: "pipe" });
+      } else {
+        devCommand = "ios";
+        // Replace monorepo metro.config.js with default one
+        const metroConfig = `const { getDefaultConfig, mergeConfig } = require('@react-native/metro-config');
+
+const config = {
+  resolver: {
+    sourceExts: ["mjs", "js", "json", "ts", "tsx"],
+    requireCycleIgnorePatterns: [/(^|\\/|\\\\)node_modules($|\\/|\\\\)/],
+  }
+};
+
+module.exports = mergeConfig(getDefaultConfig(__dirname), config);`;
+        fs.writeFileSync(metroConfigPath, metroConfig);
+        execSync(`cd "${projectName}" && npx pod-install`, { stdio: "pipe" });
+      }
 
       rnSpinner.succeed(chalk.green("React Native setup completed"));
     } catch (error) {
