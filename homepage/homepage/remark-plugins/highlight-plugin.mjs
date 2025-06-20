@@ -4,6 +4,7 @@ import { transformerNotationDiff } from "@shikijs/transformers";
 import { transformerTwoslash } from "@shikijs/twoslash";
 import { jazzDark } from "../themes/jazzDark.mjs";
 import { jazzLight } from "../themes/jazzLight.mjs";
+import { getCachedResult, setCachedResult, createCacheKey } from "./utils/cache.mjs";
 
 const highlighterPromise = createHighlighter({
   langs: [
@@ -26,9 +27,28 @@ const highlighterPromise = createHighlighter({
 export function highlightPlugin() {
   return async function transformer(tree) {
     const highlighter = await highlighterPromise;
-    visit(tree, "code", visitor);
-
-    function visitor(node) {
+    
+    // First pass: collect all code blocks
+    const codeBlocks = [];
+    visit(tree, "code", (node) => {
+      codeBlocks.push(node);
+    });
+    
+    // Second pass: process each code block with caching
+    for (const node of codeBlocks) {
+      // Create cache key based on code content, language, and meta
+      const cacheKey = createCacheKey(node.value, node.lang, node.meta);
+      
+      // Try to get cached result first
+      const cachedResult = await getCachedResult(cacheKey);
+      if (cachedResult) {
+        node.type = "html";
+        node.value = cachedResult.html;
+        node.children = [];
+        continue;
+      }
+      
+      // Cache miss - process the code block
       /** @type {any} */
       let error = null;
       
@@ -68,15 +88,21 @@ export function highlightPlugin() {
         ],
       });
 
-      node.type = "html";
-      node.value = error
+      const finalHtml = error
         ? `<div style="color: red; background: #fee; padding: 8px; border: 1px solid #fcc; margin: 8px 0;">
             <strong>Twoslash Error:</strong> ${error.description || error.message || 'Unknown error'}
             ${error.recommendation ? `<div>${error.recommendation}</div>` : ''}
           </div>` + html
         : html;
+
+      // Cache the result (only cache successful results, not errors)
+      if (!error) {
+        await setCachedResult(cacheKey, { html: finalHtml });
+      }
+
+      node.type = "html";
+      node.value = finalHtml;
       node.children = [];
-      return SKIP;
     }
   };
 }
