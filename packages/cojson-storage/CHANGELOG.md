@@ -1,5 +1,11 @@
 # cojson-storage
 
+## 0.15.0
+
+### Patch Changes
+
+- cojson@0.15.0
+
 ## 0.14.28
 
 ### Patch Changes
