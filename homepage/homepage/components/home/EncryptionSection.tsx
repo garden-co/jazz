@@ -51,7 +51,9 @@ function Illustration() {
       <Icon
         name="encryption"
         size="3xl"
-        className="z-30 text-primary p-1.5 rounded-lg bg-highlight dark:bg-stone-900"
+        className="z-30 p-1.5 rounded-lg"
+        variant="primary"
+        hasBackground
       />
 
       {/*<LockKeyholeIcon*/}
@@ -72,7 +74,7 @@ function Illustration() {
 export function EncryptionSection() {
   return (
     <Card className="overflow-hidden dark:bg-stone-925">
-      <div className="flex grid md:grid-cols-3 md:gap-3">
+      <div className="grid md:grid-cols-3 md:gap-3">
         <div className="md:col-span-2 px-4 pb-4 md:p-8">
           <H3 className="mb-0 text-balance">
             End-to-end encrypted and tamper-proof

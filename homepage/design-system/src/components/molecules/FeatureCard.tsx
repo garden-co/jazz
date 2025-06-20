@@ -21,7 +21,9 @@ export function FeatureCard({
       {icon && (
         <Icon
           name={icon}
-          className="text-primary p-1.5 rounded-lg bg-blue-50 dark:bg-stone-900 mb-2.5"
+          variant="primary"
+          hasBackground
+          className="p-1.5 rounded-lg mb-2.5"
           size="3xl"
         />
       )}

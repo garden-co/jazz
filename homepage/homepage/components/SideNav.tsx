@@ -37,7 +37,10 @@ export function SideNavSectionList({ items }: { items?: SideNavItem[] }) {
         {items.map(({ name, href, items, done }) => (
           <li key={name}>
             <SideNavItem href={href}>
-              <span className={done === 0 ? "text-muted" : ""}>{name}</span>
+              <span className={done === 0 ? "text-muted" : ""}>
+                {name}
+                {done === 0 && <span className="text-stone-800 text-[0.5rem]"> (docs coming soon)</span>}
+              </span>
             </SideNavItem>
           </li>
         ))}

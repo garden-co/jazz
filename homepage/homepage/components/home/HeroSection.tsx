@@ -86,8 +86,8 @@ export function HeroSection() {
               key={title}
               className="flex text-xs sm:text-sm gap-2 items-center"
             >
-              <span className="text-primary p-1.5 rounded-lg bg-highlight dark:bg-stone-900">
-                <Icon size="xs" name={icon} />
+              <span className="p-1.5 rounded-lg bg-primary-transparent">
+                <Icon size="xs" name={icon} variant="primary" />
               </span>
               <p>{title}</p>
             </div>

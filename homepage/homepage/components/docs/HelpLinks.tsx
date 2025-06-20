@@ -19,9 +19,6 @@ export function HelpLinks({ className }: { className?: string }) {
     }
   }, []);
 
-  const linkClassName =
-    "inline-flex items-center gap-2 py-1 text-sm text-stone-600 dark:text-stone-400 hover:text-highlight";
-
   return (
     <div
       className={clsx(
@@ -29,15 +26,16 @@ export function HelpLinks({ className }: { className?: string }) {
         className,
       )}
     >
-      <Button href={issueUrl} variant="plain" newTab className={linkClassName}>
+      <Button href={issueUrl} variant="primary" styleVariant="outline" newTab>
         <SiGithub className="size-4" />
         Docs issue?
       </Button>
       <Button
         href="https://discord.gg/utDMjHYg42"
-        variant="plain"
+        variant="primary"
+        styleVariant="outline"
         newTab
-        className={linkClassName}
+        className="lg:mt-3"
       >
         <SiDiscord className="size-4" />
         Join Discord

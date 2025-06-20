@@ -1,14 +1,42 @@
 import { clsx } from "clsx";
 import { forwardRef, useId } from "react";
+import { Variant } from "../..//utils/variants";
+import { variantToActiveBorderMap } from "../../utils/tailwindClassesMap";
+import { Button, ButtonProps } from "../atoms/Button";
+import { Icon, icons } from "../atoms/Icon";
+import { Label } from "../atoms/Label";
 
-interface InputProps extends React.InputHTMLAttributes<HTMLInputElement> {
-  // label can be hidden with a "label:sr-only" className
+export interface InputProps
+  extends React.InputHTMLAttributes<HTMLInputElement> {
   label: string;
   className?: string;
   id?: string;
+  placeholder?: string;
+  icon?: keyof typeof icons;
+  iconPosition?: "left" | "right";
+  labelHidden?: boolean;
+  labelPosition?: "column" | "row";
+  button?: ButtonProps;
+  variant?: Variant;
 }
+
 export const Input = forwardRef<HTMLInputElement, InputProps>(
-  ({ label, className, id: customId, ...inputProps }, ref) => {
+  (
+    {
+      label,
+      className,
+      id: customId,
+      placeholder,
+      icon,
+      iconPosition,
+      labelHidden,
+      labelPosition,
+      button,
+      variant = "primary",
+      ...inputProps
+    },
+    ref,
+  ) => {
     const generatedId = useId();
     const id = customId || generatedId;
 
@@ -18,15 +46,54 @@ export const Input = forwardRef<HTMLInputElement, InputProps>(
       "dark:text-white dark:bg-stone-925",
     );
 
-    const containerClassName = clsx("grid gap-1", className);
-
     return (
-      <div className={containerClassName}>
-        <label htmlFor={id} className="text-stone-600 dark:text-stone-300">
-          {label}
-        </label>
-
-        <input ref={ref} {...inputProps} id={id} className={inputClassName} />
+      <div
+        className={clsx(
+          "relative w-full",
+          labelPosition === "row" ? "flex flex-row items-center" : "",
+        )}
+      >
+        <Label
+          label={label}
+          htmlFor={id}
+          className={clsx(
+            labelPosition === "row" ? "mr-2" : "w-full",
+            labelHidden ? "sr-only" : "",
+          )}
+        />
+        <div className={clsx("flex gap-2 w-full items-center")}>
+          <input
+            ref={ref}
+            {...inputProps}
+            id={id}
+            className={clsx(
+              inputClassName,
+              iconPosition === "left"
+                ? "pl-9"
+                : iconPosition === "right"
+                  ? "pr-9"
+                  : "",
+              className,
+              "px-2",
+              variantToActiveBorderMap[variant],
+            )}
+            placeholder={placeholder}
+          />
+          {icon && (
+            <Icon
+              name={icon}
+              className={clsx(
+                "absolute",
+                iconPosition === "left"
+                  ? "left-2"
+                  : iconPosition === "right"
+                    ? "right-2"
+                    : "",
+              )}
+            />
+          )}
+          {button && <Button {...button} />}
+        </div>
       </div>
     );
   },

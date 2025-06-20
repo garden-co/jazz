@@ -1,5 +1,7 @@
 import type { Metadata } from "next";
 import "./globals.css";
+import { Toaster } from "react-hot-toast";
+import { ThemeProvider } from "../components/organisms/ThemeProvider";
 import { fontClasses } from "../fonts";
 
 export const metadata: Metadata = {
@@ -13,7 +15,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en" className="h-full">
+    <html lang="en" className="h-full" suppressHydrationWarning>
       <body
         className={[
           ...fontClasses,
@@ -21,7 +23,15 @@ export default function RootLayout({
           "bg-white dark:bg-stone-950 text-default",
         ].join(" ")}
       >
-        {children}
+        <ThemeProvider
+          attribute="class"
+          defaultTheme="system"
+          enableSystem
+          disableTransitionOnChange
+        >
+          <Toaster position="bottom-right" />
+          {children}
+        </ThemeProvider>
       </body>
     </html>
   );

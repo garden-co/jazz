@@ -1,7 +1,7 @@
 import type { Config } from "tailwindcss";
 
 const config: Config = {
-  presets: [require("@garden-co/design-system/tailwind.config.js")],
+  presets: [require("@garden-co/design-system/tailwind.config.js").preset],
   darkMode: ["class"],
   content: [
     "./pages/**/*.{js,ts,jsx,tsx,mdx}",

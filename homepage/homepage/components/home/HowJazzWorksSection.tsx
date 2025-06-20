@@ -63,9 +63,8 @@ function Step({
       <div className="flex gap-3 px-4 sm:px-6">
         <p
           className={clsx(
-            "bg-highlight size-6 rounded-full text-primary text-sm font-semibold font-mono",
+            "bg-primary-transparent text-primary size-6 rounded-full text-sm font-semibold font-mono",
             "inline-flex items-center justify-center text-center shrink-0",
-            "dark:bg-blue dark:text-white",
           )}
         >
           <span className="sr-only">Step</span>

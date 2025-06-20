@@ -1,33 +1,52 @@
 import { clsx } from "clsx";
 import Link from "next/link";
 import { forwardRef } from "react";
+import {
+  VariantColor,
+  colorToBgActiveMap25,
+  colorToBgActiveMap50,
+  colorToBgHoverMap10,
+  colorToBgHoverMap30,
+  colorToBgMap,
+  shadowClassesBase,
+  sizeClasses,
+  variantToBgGradientColorMap,
+  variantToBgGradientHoverMap,
+  variantToBgTransparentActiveMap,
+  variantToBorderMap,
+  variantToButtonStateMap,
+  variantToColorMap,
+  variantToHoverShadowMap,
+  variantToTextActiveMap,
+  variantToTextHoverMap,
+  variantToTextMap,
+} from "../../utils/tailwindClassesMap";
+import { Variant } from "../../utils/variants";
 import { Icon } from "./Icon";
 import type { IconName } from "./Icon";
 import { Spinner } from "./Spinner";
 
-interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
-  variant?: "primary" | "secondary" | "tertiary" | "destructive" | "plain";
+export type StyleVariant =
+  | "outline"
+  | "inverted"
+  | "ghost"
+  | "text"
+  | "default";
+export interface ButtonProps
+  extends React.ButtonHTMLAttributes<HTMLButtonElement> {
+  variant?: Variant;
+  styleVariant?: StyleVariant;
+  state?: "hover" | "active" | "focus" | "disabled";
   size?: "sm" | "md" | "lg";
   href?: string;
   newTab?: boolean;
   icon?: IconName;
+  iconPosition?: "left" | "right" | "center";
   loading?: boolean;
   loadingText?: string;
   children?: React.ReactNode;
   className?: string;
   disabled?: boolean;
-}
-
-function ButtonIcon({ icon, loading }: ButtonProps) {
-  if (!Icon) return null;
-
-  const className = "size-5";
-
-  if (loading) return <Spinner className={className} />;
-
-  if (icon) {
-    return <Icon name={icon} className={className} />;
-  }
 }
 
 export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
@@ -37,44 +56,42 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
       children,
       size = "md",
       variant = "primary",
+      styleVariant,
       href,
       disabled,
       newTab,
       loading,
       loadingText,
       icon,
+      iconPosition = "left",
       type = "button",
       ...buttonProps
     },
     ref,
   ) => {
-    const sizeClasses = {
-      sm: "text-sm py-1 px-2",
-      md: "py-1.5 px-3",
-      lg: "md:text-lg  py-2 px-3 md:px-8 md:py-3",
+    const styleClass =
+      styleClasses(variant, styleVariant)[
+        styleVariant as keyof typeof styleClasses
+      ] || "";
+
+    const getClasses = ({
+      styleVariant,
+    }: { styleVariant: string | undefined }) => {
+      return {
+        [sizeClasses[size as keyof typeof sizeClasses]]: size,
+        [variantClass(variant, styleVariant as StyleVariant | undefined)]:
+          !styleVariant,
+        [styleClass]: styleVariant,
+      };
     };
 
-    const variantClasses = {
-      primary:
-        "bg-primary border border-primary text-white font-medium hover:bg-highlight hover:border-primary hover:text-primary dark:hover:bg-highlight dark:hover:text-primary",
-      secondary:
-        "text-stone-900 border font-medium hover:border-primary hover:text-primary hover:bg-highlight hover:dark:border-primary dark:text-white dark:hover:text-primary",
-      tertiary: "text-primary underline underline-offset-4",
-      destructive:
-        "bg-red-600 border-red-600 text-white font-medium hover:bg-red-700 hover:border-red-700",
-    };
-
-    const classNames =
-      variant === "plain"
-        ? className
-        : clsx(
-            className,
-            "inline-flex items-center justify-center gap-2 rounded-lg text-center transition-colors",
-            "disabled:pointer-events-none disabled:opacity-70",
-            sizeClasses[size],
-            variantClasses[variant],
-            disabled && "opacity-50 cursor-not-allowed pointer-events-none",
-          );
+    const classNames = clsx(
+      "inline-flex items-center justify-center gap-2 rounded-lg text-center transition-colors w-fit text-nowrap",
+      getClasses({ styleVariant }),
+      "disabled:pointer-events-none disabled:opacity-70",
+      disabled && "opacity-50 cursor-not-allowed pointer-events-none",
+      className,
+    );
 
     if (href) {
       return (
@@ -83,10 +100,17 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
           target={newTab ? "_blank" : undefined}
           className={classNames}
         >
-          <ButtonIcon icon={icon} loading={loading} />
+          {icon && (
+            <Icon
+              name={icon}
+              className={`size-5 ${iconPosition === "left" ? "mr-2" : iconPosition === "right" ? "ml-2" : ""}, ${iconVariant(variant, styleVariant)}`}
+            />
+          )}
           {children}
           {newTab ? (
-            <span className="inline-block text-muted relative -top-0.5 -left-2 -mr-2">
+            <span
+              className={`inline-block relative -top-0.5 -left-2 -mr-2 ${variantToTextMap[variant as keyof typeof variantToTextMap]}`}
+            >
               ⌝
             </span>
           ) : (
@@ -104,10 +128,48 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
         className={classNames}
         type={type}
       >
-        <ButtonIcon icon={icon} loading={loading} />
-
+        {loading ? (
+          <Spinner className="size-5" />
+        ) : (
+          icon &&
+          iconPosition === "left" && (
+            <Icon name={icon} variant={iconVariant(variant, styleVariant)} />
+          )
+        )}
         {loading && loadingText ? loadingText : children}
+        {icon && iconPosition === "right" && (
+          <Icon name={icon} variant={iconVariant(variant, styleVariant)} />
+        )}
       </button>
     );
   },
 );
+
+const iconVariant = (
+  variant: Variant,
+  styleVariant: StyleVariant | undefined,
+) => {
+  return styleVariant ? variant : "white";
+};
+
+const textColorVariant = (variant: Variant) => {
+  return variant === "default" ? "text-black dark:text-white" : "text-white";
+};
+
+const variantClass = (
+  variant: Variant,
+  styleVariant: StyleVariant | undefined,
+) =>
+  `bg-gradient-to-tr ${variantToBgGradientColorMap[variant]} ${variantToBgGradientHoverMap[variant]} ${textColorVariant(variant)} ${variantToButtonStateMap[variant]} ${shadowClassesBase} shadow-stone-400/20`;
+
+const styleClasses = (
+  variant: Variant,
+  styleVariant: StyleVariant | undefined,
+) => {
+  return {
+    outline: `border ${variantToBorderMap[variant]} ${variantToTextMap[variant]} ${variantToHoverShadowMap[variant]} ${variantToBgTransparentActiveMap[variant]} shadow-[5px_0px]`,
+    inverted: `${variantToTextMap[variant]} ${colorToBgHoverMap30[variantToColorMap[variant] as VariantColor]} ${colorToBgMap[variantToColorMap[variant] as VariantColor]} ${colorToBgActiveMap50[variantToColorMap[variant] as VariantColor]} ${shadowClassesBase}`,
+    ghost: `bg-transparent ${variantToTextMap[variant]} ${colorToBgHoverMap10[variantToColorMap[variant] as VariantColor]} ${colorToBgActiveMap25[variantToColorMap[variant] as VariantColor]}`,
+    text: `bg-transparent ${variantToTextMap[variant]} underline underline-offset-2 p-0 hover:bg-transparent ${variantToTextHoverMap[variant]} ${variantToTextActiveMap[variant]} active:underline-stone-500`,
+  };
+};

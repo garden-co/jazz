@@ -161,8 +161,8 @@ export function FeaturesSection() {
                   key={feature}
                   className="flex items-center gap-1.5 whitespace-nowrap"
                 >
-                  <span className="text-primary p-1 rounded-full bg-highlight">
-                    <Icon name="check" size="xs" />
+                  <span className="p-1 rounded-full bg-primary-transparent">
+                    <Icon name="check" size="xs" variant="primary" />
                   </span>
                   {feature}
                 </li>

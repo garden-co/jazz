@@ -6,6 +6,7 @@ import { subscribe } from "../../actions/resend";
 import { Button } from "../atoms/Button";
 import { Icon } from "../atoms/Icon";
 import { Input } from "../molecules/Input";
+import { InputWithButton } from "../molecules/InputWithButton";
 
 export function NewsletterForm() {
   const [email, setEmail] = useState("");
@@ -41,32 +42,35 @@ export function NewsletterForm() {
   }
 
   if (state === "error" && error?.message) {
-    return <p className="text-red-700">Error: {error.message}</p>;
+    return <p className="text-danger">Error: {error.message}</p>;
   }
 
   return (
     <form action="" onSubmit={submit} className="flex gap-x-4 w-120 max-w-md">
-      <Input
-        id="email-address"
-        name="email"
-        type="email"
-        value={email}
-        onChange={(e) => setEmail(e.target.value)}
-        required
-        placeholder="Enter your email"
-        autoComplete="email"
-        className="flex-1 label:sr-only"
-        label="Email address"
+      <InputWithButton
+        inputProps={{
+          id: "email-address",
+          name: "email",
+          type: "email",
+          value: email,
+          onChange: (e) => setEmail(e.target.value),
+          required: true,
+          placeholder: "Enter your email",
+          autoComplete: "email",
+          className: "flex-1",
+          label: "Email address",
+          labelHidden: true,
+        }}
+        buttonProps={{
+          type: "submit",
+          variant: "secondary",
+          loadingText: "Subscribing...",
+          loading: state === "loading",
+          icon: "newsletter",
+          iconPosition: "right",
+          children: "Subscribe",
+        }}
       />
-      <Button
-        type="submit"
-        variant="secondary"
-        loadingText="Subscribing..."
-        loading={state === "loading"}
-        icon="newsletter"
-      >
-        Subscribe
-      </Button>
     </form>
   );
 }

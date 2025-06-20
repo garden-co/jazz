@@ -4,7 +4,12 @@ import { GcmpLogo } from "@garden-co/design-system/src/components/atoms/logos/Gc
 import { Nav } from "@garden-co/design-system/src/components/organisms/Nav";
 export function GcmpNav() {
   const cta = (
-    <Button variant="secondary" className="ml-3" href="mailto:hello@garden.co">
+    <Button
+      variant="success"
+      styleVariant="outline"
+      className="ml-3"
+      href="mailto:hello@garden.co"
+    >
       Contact us
     </Button>
   );

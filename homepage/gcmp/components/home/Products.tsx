@@ -31,7 +31,11 @@ export default function Products() {
             <div className="flex items-center justify-between gap-4">
               <JazzLogo className="h-10 w-auto" />
               <div>
-                <Button href="https://jazz.tools" variant="secondary">
+                <Button
+                  href="https://jazz.tools"
+                  variant="primary"
+                  styleVariant="outline"
+                >
                   Go to jazz.tools
                 </Button>
               </div>
