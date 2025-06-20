@@ -1,5 +1,19 @@
 # jazz-tools
 
+## 0.15.0
+
+### Minor Changes
+
+- 1378a1f: Moved all the framework adapters in jazz-tools to simplify dependency management
+- 0fa051a: Remove the experimental prefix from enableSSR, change the useAccount type to make me always nullable and remove useAccountOrGuest
+
+### Patch Changes
+
+- cojson@0.15.0
+- cojson-storage@0.15.0
+- cojson-storage-indexeddb@0.15.0
+- cojson-transport-ws@0.15.0
+
 ## 0.14.28
 
 ### Patch Changes
