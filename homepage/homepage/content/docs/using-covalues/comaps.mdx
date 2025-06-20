@@ -346,7 +346,7 @@ const Task = co
     if (task.version === 1) {
       task.priority = "medium";
       // Upgrade the version so the migration won't run again
-      task.version = 2; 
+      task.version = 2;
     }
   });
 ```
@@ -383,7 +383,7 @@ const TaskV1 = co.map({
 const TaskV2 = co.map({
   // We need to be more strict about the version to make the
   // discriminated union work
-  version: z.literal(2), 
+  version: z.literal(2),
   done: z.boolean(),
   text: z.string(),
   priority: z.enum(["low", "medium", "high"]),
@@ -459,5 +459,115 @@ const project = Project.create({
 
 console.log(isProjectActive(project)); // false
 console.log(formatProjectDuration(project, "short")); // "3 days"
+```
+</CodeGroup>
+
+#### Uniqueness
+
+Identifying CoMaps by their CoValue IDs can be inconvenient if using an externally-generated identifier is preferrable, such as when:
+- The CoMaps have user-generated identifiers, such as a slug
+- The CoMaps have identifiers referring to equivalent data in an external system
+- The CoMaps have human-readable & application-specific identifiers
+  - If an application has CoValues used by every user, referring to it by a unique name (eg, `"my-global-comap"`) can be more convenient than using a CoValue ID
+
+Consider a scenario where one wants to identify a CoMap using some unique identifier that isn't the Jazz CoValue ID:
+
+<CodeGroup>
+```ts twoslash
+import { co, z, Group, ID } from "jazz-tools";
+const Task = co.map({
+  text: z.string(),
+});
+// ---cut---
+// This will not work as `learning-jazz` is not a CoValue ID
+const myTask = await Task.load("learning-jazz");
+```
+</CodeGroup>
+
+To make it possible to use human-readable identifiers Jazz lets you to define a `unique` property on CoMaps.
+
+Then the CoValue id will be generated based on the `unique` property and the owner of the CoMap.
+
+<CodeGroup>
+```ts twoslash
+import { co, z, Group, ID } from "jazz-tools";
+const Task = co.map({
+  text: z.string(),
+});
+const Project = co.map({
+  name: z.string(),
+  startDate: z.date(),
+  endDate: z.optional(z.date()),
+});
+const project = Project.create({
+  name: "My project",
+  startDate: new Date("2025-04-01"),
+  endDate: new Date("2025-04-04"),
+});
+// ---cut---
+// Given the project owner, myTask will have always the same id
+const learnJazzTask = await Task.create({
+  text: "Let's learn some Jazz!",
+}, {
+  unique: "learning-jazz",
+  owner: project._owner, // Different owner, different id
+});
+```
+</CodeGroup>
+
+Now you can use `CoMap.loadUnique` to easily load the CoMap using the human-readable identifier:
+
+<CodeGroup>
+```ts twoslash
+import { co, z, Group, ID } from "jazz-tools";
+const Task = co.map({
+  text: z.string(),
+});
+const Project = co.map({
+  name: z.string(),
+  startDate: z.date(),
+  endDate: z.optional(z.date()),
+});
+const project = Project.create({
+  name: "My project",
+  startDate: new Date("2025-04-01"),
+  endDate: new Date("2025-04-04"),
+});
+// ---cut---
+const learnJazzTask = await Task.loadUnique(
+  "learning-jazz",
+  project._owner.id
+);
+```
+</CodeGroup>
+
+It's also possible to combine the create+load operation using `CoMap.upsertUnique`:
+
+<CodeGroup>
+```ts twoslash
+import { co, z, Group, ID } from "jazz-tools";
+const Task = co.map({
+  text: z.string(),
+});
+const Project = co.map({
+  name: z.string(),
+  startDate: z.date(),
+  endDate: z.optional(z.date()),
+});
+const project = Project.create({
+  name: "My project",
+  startDate: new Date("2025-04-01"),
+  endDate: new Date("2025-04-04"),
+});
+// ---cut---
+const learnJazzTask = await Task.upsertUnique(
+  {
+    value: {
+      text: "Let's learn some Jazz!",
+    },
+    unique: "learning-jazz",
+    owner: project._owner,
+  }
+);
 ```
 </CodeGroup>

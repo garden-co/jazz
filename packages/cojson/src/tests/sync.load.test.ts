@@ -1,5 +1,4 @@
-import { beforeEach, describe, expect, onTestFinished, test, vi } from "vitest";
-
+import { beforeEach, describe, expect, test, vi } from "vitest";
 import { expectMap } from "../coValue";
 import { CO_VALUE_LOADING_CONFIG } from "../coValueCore/coValueCore";
 import { RawCoMap } from "../exports";
@@ -47,6 +46,91 @@ describe("loading coValues from server", () => {
         "client -> server | KNOWN Group sessions: header/3",
         "server -> client | CONTENT Map header: true new: After: 0 New: 1",
         "client -> server | KNOWN Map sessions: header/1",
+      ]
+    `);
+  });
+
+  test("unavailable coValue retry with skipRetry set to true", async () => {
+    const client = setupTestNode();
+    const client2 = setupTestNode();
+
+    client2.connectToSyncServer({
+      ourName: "client2",
+    });
+
+    const group = client.node.createGroup();
+    const map = group.createMap();
+    map.set("hello", "world", "trusting");
+
+    const promise = client2.node.load(map.id, true);
+
+    await new Promise((resolve) => setTimeout(resolve, 1));
+
+    client.connectToSyncServer();
+
+    const mapOnClient2 = await promise;
+
+    expect(mapOnClient2).toBe("unavailable");
+
+    expect(
+      SyncMessagesLog.getMessages({
+        Group: group.core,
+        Map: map.core,
+      }),
+    ).toMatchInlineSnapshot(`
+      [
+        "client2 -> server | LOAD Map sessions: empty",
+        "server -> client2 | KNOWN Map sessions: empty",
+        "client -> server | LOAD Group sessions: header/3",
+        "server -> client | KNOWN Group sessions: empty",
+        "client -> server | LOAD Map sessions: header/1",
+      ]
+    `);
+  });
+
+  test("unavailable coValue retry with skipRetry set to false", async () => {
+    const client = setupTestNode();
+    const client2 = setupTestNode();
+
+    client2.connectToSyncServer({
+      ourName: "client2",
+    });
+
+    const group = client.node.createGroup();
+    const map = group.createMap();
+    map.set("hello", "world", "trusting");
+
+    const promise = loadCoValueOrFail(client2.node, map.id, false);
+
+    await new Promise((resolve) => setTimeout(resolve, 1));
+
+    client.connectToSyncServer();
+
+    const mapOnClient2 = await promise;
+
+    expect(mapOnClient2.get("hello")).toEqual("world");
+
+    expect(
+      SyncMessagesLog.getMessages({
+        Group: group.core,
+        Map: map.core,
+      }),
+    ).toMatchInlineSnapshot(`
+      [
+        "client2 -> server | LOAD Map sessions: empty",
+        "server -> client2 | KNOWN Map sessions: empty",
+        "client -> server | LOAD Group sessions: header/3",
+        "server -> client | KNOWN Group sessions: empty",
+        "client -> server | LOAD Map sessions: header/1",
+        "server -> client | KNOWN Map sessions: empty",
+        "client -> server | CONTENT Group header: true new: After: 0 New: 3",
+        "server -> client | KNOWN Group sessions: header/3",
+        "client -> server | CONTENT Map header: true new: After: 0 New: 1",
+        "server -> client | KNOWN Map sessions: header/1",
+        "server -> client2 | CONTENT Group header: true new: After: 0 New: 3",
+        "client2 -> server | KNOWN Group sessions: header/3",
+        "server -> client2 | CONTENT Map header: true new: After: 0 New: 1",
+        "client2 -> server | KNOWN Map sessions: header/1",
       ]
     `);
   });

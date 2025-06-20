@@ -57,6 +57,7 @@ export type CoMapSchema<
           R
         >;
         loadAs?: Account | AnonymousJazzAgent;
+        skipRetry?: boolean;
       },
     ): Promise<Resolved<
       Simplify<CoMapInstanceCoValuesNullable<Shape>> & CoMap,
@@ -82,11 +83,48 @@ export type CoMapSchema<
       ) => void,
     ): () => void;
 
+    /** @deprecated Use `CoMap.upsertUnique` and `CoMap.loadUnique` instead. */
     findUnique(
       unique: CoValueUniqueness["uniqueness"],
       ownerID: string,
       as?: Account | Group | AnonymousJazzAgent,
     ): string;
+
+    upsertUnique: <
+      const R extends RefsToResolve<
+        Simplify<CoMapInstanceCoValuesNullable<Shape>> & CoMap
+      > = true,
+    >(options: {
+      value: Simplify<CoMapInitZod<Shape>>;
+      unique: CoValueUniqueness["uniqueness"];
+      owner: Owner;
+      resolve?: RefsToResolveStrict<
+        Simplify<CoMapInstanceCoValuesNullable<Shape>> & CoMap,
+        R
+      >;
+    }) => Promise<Resolved<
+      Simplify<CoMapInstanceCoValuesNullable<Shape>> & CoMap,
+      R
+    > | null>;
+
+    loadUnique<
+      const R extends RefsToResolve<
+        Simplify<CoMapInstanceCoValuesNullable<Shape>> & CoMap
+      > = true,
+    >(
+      unique: CoValueUniqueness["uniqueness"],
+      ownerID: string,
+      options?: {
+        resolve?: RefsToResolveStrict<
+          Simplify<CoMapInstanceCoValuesNullable<Shape>> & CoMap,
+          R
+        >;
+        loadAs?: Account | AnonymousJazzAgent;
+      },
+    ): Promise<Resolved<
+      Simplify<CoMapInstanceCoValuesNullable<Shape>> & CoMap,
+      R
+    > | null>;
 
     catchall<T extends z.core.$ZodType>(
       schema: T,

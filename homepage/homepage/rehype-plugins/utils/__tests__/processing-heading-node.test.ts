@@ -1,6 +1,6 @@
-import { describe, it, expect } from "vitest";
-import { processHeadingNode } from "../processing-heading-node.mjs";
 import type { Element, Text } from "hast";
+import { describe, expect, it } from "vitest";
+import { processHeadingNode } from "../processing-heading-node.mjs";
 
 describe("processHeadingNode", () => {
   it("should return undefined for non-heading nodes", () => {

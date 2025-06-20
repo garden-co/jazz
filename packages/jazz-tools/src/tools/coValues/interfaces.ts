@@ -90,6 +90,7 @@ export function loadCoValueWithoutMe<
   options?: {
     resolve?: RefsToResolveStrict<V, R>;
     loadAs?: Account | AnonymousJazzAgent;
+    skipRetry?: boolean;
   },
 ): Promise<Resolved<V, R> | null> {
   return loadCoValue(cls, id, {
@@ -107,6 +108,7 @@ export function loadCoValue<
   options: {
     resolve?: RefsToResolveStrict<V, R>;
     loadAs: Account | AnonymousJazzAgent;
+    skipRetry?: boolean;
   },
 ): Promise<Resolved<V, R> | null> {
   return new Promise((resolve) => {
@@ -117,6 +119,7 @@ export function loadCoValue<
         resolve: options.resolve,
         loadAs: options.loadAs,
         syncResolution: true,
+        skipRetry: options.skipRetry,
         onUnavailable: () => {
           resolve(null);
         },
@@ -242,6 +245,7 @@ export function subscribeToCoValue<
     onUnavailable?: () => void;
     onUnauthorized?: () => void;
     syncResolution?: boolean;
+    skipRetry?: boolean;
   },
   listener: SubscribeListener<V, R>,
 ): () => void {
@@ -252,10 +256,16 @@ export function subscribeToCoValue<
 
   let unsubscribed = false;
 
-  const rootNode = new SubscriptionScope<V>(node, resolve, id as ID<V>, {
-    ref: cls,
-    optional: false,
-  });
+  const rootNode = new SubscriptionScope<V>(
+    node,
+    resolve,
+    id as ID<V>,
+    {
+      ref: cls,
+      optional: false,
+    },
+    options.skipRetry,
+  );
 
   const handleUpdate = (value: SubscriptionValue<V, any>) => {
     if (unsubscribed) return;

@@ -1,7 +1,7 @@
-import { visit, SKIP } from "unist-util-visit";
-import { createHighlighter } from "shiki";
 import { transformerNotationDiff } from "@shikijs/transformers";
 import { transformerTwoslash } from "@shikijs/twoslash";
+import { createHighlighter } from "shiki";
+import { SKIP, visit } from "unist-util-visit";
 import { jazzDark } from "../themes/jazzDark.mjs";
 import { jazzLight } from "../themes/jazzLight.mjs";
 
@@ -31,7 +31,7 @@ export function highlightPlugin() {
     function visitor(node) {
       /** @type {any} */
       let error = null;
-      
+
       const html = highlighter.codeToHtml(node.value, {
         lang: node.lang,
         meta: { __raw: node.lang + " " + node.meta },
@@ -49,17 +49,23 @@ export function highlightPlugin() {
                 // Re-throw to actually fail the build in production
                 throw e;
               }
-              
+
               // Type guard to check if error has the expected properties
-              const errorObj = e && typeof e === 'object' ? e : {};
-              const description = 'description' in errorObj ? errorObj.description : 'Unknown error';
-              const recommendation = 'recommendation' in errorObj ? errorObj.recommendation : 'No recommendation available';
-              
+              const errorObj = e && typeof e === "object" ? e : {};
+              const description =
+                "description" in errorObj
+                  ? errorObj.description
+                  : "Unknown error";
+              const recommendation =
+                "recommendation" in errorObj
+                  ? errorObj.recommendation
+                  : "No recommendation available";
+
               console.error("\nTwoslash error: ");
               console.log(description);
               console.log(recommendation);
               console.log("\nCode: \n```\n" + code + "\n```");
-              
+
               // In development, store the error to show inline
               error = /** @type {any} */ (e);
             },
@@ -71,8 +77,8 @@ export function highlightPlugin() {
       node.type = "html";
       node.value = error
         ? `<div style="color: red; background: #fee; padding: 8px; border: 1px solid #fcc; margin: 8px 0;">
-            <strong>Twoslash Error:</strong> ${error.description || error.message || 'Unknown error'}
-            ${error.recommendation ? `<div>${error.recommendation}</div>` : ''}
+            <strong>Twoslash Error:</strong> ${error.description || error.message || "Unknown error"}
+            ${error.recommendation ? `<div>${error.recommendation}</div>` : ""}
           </div>` + html
         : html;
       node.children = [];

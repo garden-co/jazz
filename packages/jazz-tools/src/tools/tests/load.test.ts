@@ -30,7 +30,7 @@ test("load a value", async () => {
   expect(john?.name).toBe("John");
 });
 
-test("retry an unavailable a value", async () => {
+test("retry an unavailable value", async () => {
   const Person = co.map({
     name: z.string(),
   });
@@ -69,6 +69,7 @@ test("retry an unavailable a value", async () => {
   );
 
   const john = await promise;
+  expect(resolved).toBe(true);
   expect(john).not.toBeNull();
   expect(john?.name).toBe("John");
 });

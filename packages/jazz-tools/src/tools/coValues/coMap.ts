@@ -10,12 +10,10 @@ import {
 } from "cojson";
 import type {
   AnonymousJazzAgent,
-  AnyAccountSchema,
   CoValue,
   CoValueClass,
   Group,
   ID,
-  InstanceOfSchema,
   RefEncoded,
   RefIfCoValue,
   RefsToResolve,
@@ -319,18 +317,7 @@ export class CoMap extends CoValueBase implements CoValue {
   ) {
     const instance = new this();
 
-    const { owner, uniqueness } = parseCoValueCreateOptions(options);
-    const raw = instance.rawFromInit(init, owner, uniqueness);
-
-    Object.defineProperties(instance, {
-      id: {
-        value: raw.id,
-        enumerable: false,
-      },
-      _raw: { value: raw, enumerable: false },
-    });
-
-    return instance;
+    return instance._createCoMap(init, options);
   }
 
   /**
@@ -386,6 +373,30 @@ export class CoMap extends CoValueBase implements CoValue {
 
   [inspect]() {
     return this.toJSON();
+  }
+
+  _createCoMap(
+    init: Simplify<CoMapInit<typeof this>>,
+    options?:
+      | {
+          owner: Account | Group;
+          unique?: CoValueUniqueness["uniqueness"];
+        }
+      | Account
+      | Group,
+  ): typeof this {
+    const { owner, uniqueness } = parseCoValueCreateOptions(options);
+    const raw = this.rawFromInit(init, owner, uniqueness);
+
+    Object.defineProperties(this, {
+      id: {
+        value: raw.id,
+        enumerable: false,
+      },
+      _raw: { value: raw, enumerable: false },
+    });
+
+    return this;
   }
 
   /**
@@ -490,6 +501,7 @@ export class CoMap extends CoValueBase implements CoValue {
     options?: {
       resolve?: RefsToResolveStrict<M, R>;
       loadAs?: Account | AnonymousJazzAgent;
+      skipRetry?: boolean;
     },
   ): Promise<Resolved<M, R> | null> {
     return loadCoValueWithoutMe(this, id, options);
@@ -542,7 +554,18 @@ export class CoMap extends CoValueBase implements CoValue {
     return subscribeToCoValueWithoutMe<M, R>(this, id, options, listener);
   }
 
+  /** @deprecated Use `CoMap.upsertUnique` and `CoMap.loadUnique` instead. */
   static findUnique<M extends CoMap>(
+    this: CoValueClass<M>,
+    unique: CoValueUniqueness["uniqueness"],
+    ownerID: ID<Account> | ID<Group>,
+    as?: Account | Group | AnonymousJazzAgent,
+  ) {
+    return CoMap._findUnique(unique, ownerID, as);
+  }
+
+  /** @internal */
+  static _findUnique<M extends CoMap>(
     this: CoValueClass<M>,
     unique: CoValueUniqueness["uniqueness"],
     ownerID: ID<Account> | ID<Group>,
@@ -562,6 +585,87 @@ export class CoMap extends CoValueBase implements CoValue {
     const crypto =
       as._type === "Anonymous" ? as.node.crypto : as._raw.core.node.crypto;
     return cojsonInternals.idforHeader(header, crypto) as ID<M>;
+  }
+
+  /**
+   * Given some data, updates an existing CoMap or initialises a new one if none exists.
+   *
+   * Note: This method respects resolve options, and thus can return `null` if the references cannot be resolved.
+   *
+   * @example
+   * ```ts
+   * const activeEvent = await Event.upsertUnique(
+   *   sourceData.identifier,
+   *   workspace.id,
+   *   {
+   *     title: sourceData.title,
+   *     identifier: sourceData.identifier,
+   *     external_id: sourceData._id,
+   *   },
+   *   workspace
+   * );
+   * ```
+   *
+   * @param options The options for creating or loading the CoMap. This includes the intended state of the CoMap, its unique identifier, its owner, and the references to resolve.
+   * @returns Either an existing & modified CoMap, or a new initialised CoMap if none exists.
+   * @category Subscription & Loading
+   */
+  static async upsertUnique<
+    M extends CoMap,
+    const R extends RefsToResolve<M> = true,
+  >(
+    this: CoValueClass<M>,
+    options: {
+      value: Simplify<CoMapInit<M>>;
+      unique: CoValueUniqueness["uniqueness"];
+      owner: Account | Group;
+      resolve?: RefsToResolveStrict<M, R>;
+    },
+  ): Promise<Resolved<M, R> | null> {
+    let mapId = CoMap._findUnique(options.unique, options.owner.id);
+    let map: Resolved<M, R> | null = await loadCoValueWithoutMe(this, mapId, {
+      ...options,
+      loadAs: options.owner._loadedAs,
+      skipRetry: true,
+    });
+    if (!map) {
+      const instance = new this();
+      map = instance._createCoMap(options.value, {
+        owner: options.owner,
+        unique: options.unique,
+      }) as Resolved<M, R>;
+    } else {
+      (map as M).applyDiff(options.value as Partial<CoMapInit<M>>);
+    }
+
+    return await loadCoValueWithoutMe(this, mapId, {
+      ...options,
+      loadAs: options.owner._loadedAs,
+      skipRetry: true,
+    });
+  }
+
+  /**
+   * Loads a CoMap by its unique identifier and owner's ID.
+   * @param unique The unique identifier of the CoMap to load.
+   * @param ownerID The ID of the owner of the CoMap.
+   * @param options Additional options for loading the CoMap.
+   * @returns The loaded CoMap, or null if unavailable.
+   */
+  static loadUnique<M extends CoMap, const R extends RefsToResolve<M> = true>(
+    this: CoValueClass<M>,
+    unique: CoValueUniqueness["uniqueness"],
+    ownerID: ID<Account> | ID<Group>,
+    options?: {
+      resolve?: RefsToResolveStrict<M, R>;
+      loadAs?: Account | AnonymousJazzAgent;
+    },
+  ): Promise<Resolved<M, R> | null> {
+    return loadCoValueWithoutMe(
+      this,
+      CoMap._findUnique(unique, ownerID, options?.loadAs),
+      { ...options, skipRetry: true },
+    );
   }
 
   /**

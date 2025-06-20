@@ -2,10 +2,10 @@
 
 import createMDX from "@next/mdx";
 import withToc from "@stefanprobst/rehype-extract-toc";
-import { remarkHtmlToJsx } from "./remark-plugins/html-to-jsx.mjs";
-import { highlightPlugin } from "./remark-plugins/highlight-plugin.mjs";
 import { withSlugAndHeadingsFrameworkVisibility } from "./rehype-plugins/with-slug-and-framework-visibility.mjs";
 import { withTocAndFrameworkHeadingsVisibilityExport } from "./rehype-plugins/with-toc-and-framework-visibility-export.mjs";
+import { highlightPlugin } from "./remark-plugins/highlight-plugin.mjs";
+import { remarkHtmlToJsx } from "./remark-plugins/html-to-jsx.mjs";
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {

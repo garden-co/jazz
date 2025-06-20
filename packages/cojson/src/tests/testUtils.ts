@@ -276,8 +276,9 @@ export function waitFor(
 export async function loadCoValueOrFail<V extends RawCoValue>(
   node: LocalNode,
   id: CoID<V>,
+  skipRetry?: boolean,
 ): Promise<V> {
-  const value = await node.load(id);
+  const value = await node.load(id, skipRetry);
   if (value === "unavailable") {
     throw new Error("CoValue not found");
   }

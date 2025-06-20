@@ -46,16 +46,16 @@ export async function loadCursorContainer(
   console.log("Loading group...");
   const group = await loadGroup(me, groupID);
 
-  const cursorContainerID = CursorContainer.findUnique(
+  const cursorContainer = await CursorContainer.loadUnique(
     cursorFeedID,
-    group?.id as ID<Group>,
-  );
-  console.log("Loading cursor container:", cursorContainerID);
-  const cursorContainer = await CursorContainer.load(cursorContainerID, {
-    resolve: {
-      cursorFeed: true,
+    group?.id,
+    {
+      resolve: {
+        cursorFeed: true,
+      },
     },
-  });
+  );
+  console.log(`Loading cursor container: ${cursorContainer?.id}`);
 
   if (cursorContainer === null || cursorContainer === undefined) {
     console.log("Global cursors does not exist, creating...");

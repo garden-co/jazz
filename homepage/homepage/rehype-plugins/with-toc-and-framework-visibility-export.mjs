@@ -21,31 +21,31 @@ export function withTocAndFrameworkHeadingsVisibilityExport() {
 
     // Create an MDX JSX node with the exports
     const mdxjsEsmNode = {
-      type: 'mdxjsEsm',
+      type: "mdxjsEsm",
       data: {
         estree: {
-          type: 'Program',
-          sourceType: 'module',
+          type: "Program",
+          sourceType: "module",
           body: [
             {
-              type: 'ExportNamedDeclaration',
+              type: "ExportNamedDeclaration",
               source: null,
               specifiers: [],
               declaration: {
-                type: 'VariableDeclaration',
-                kind: 'const',
+                type: "VariableDeclaration",
+                kind: "const",
                 declarations: [
                   {
-                    type: 'VariableDeclarator',
+                    type: "VariableDeclarator",
                     id: {
-                      type: 'Identifier',
-                      name: 'headingsFrameworkVisibility',
+                      type: "Identifier",
+                      name: "headingsFrameworkVisibility",
                     },
                     init: valueToEstree(vfile.data.headingsFrameworkVisibility),
                   },
                   {
-                    type: 'VariableDeclarator',
-                    id: { type: 'Identifier', name: 'tableOfContents' },
+                    type: "VariableDeclarator",
+                    id: { type: "Identifier", name: "tableOfContents" },
                     init: valueToEstree(vfile.data.toc),
                   },
                 ],
