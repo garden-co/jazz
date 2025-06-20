@@ -39,14 +39,14 @@ export function TodoComponent({
 
 ## Major breaking changes
 
-<ContentByFramework framework={["react-native", "vue", "vanilla", "react-native-expo", "svelte"]}>
-- A single package for all: `jazz-tools` now exports all the bindings using export paths
-- Support for Vue is discontinued: maintaining multiple framework bindings is hard and we prefer to focus our efforts on the most used frameworks in our community
+<ContentByFramework framework={["vue", "vanilla", "svelte"]}>
+- A single package for everything: `jazz-tools` now exports all the bindings using export paths
+- Support for Vue is discontinued: maintaining multiple framework bindings is hard and we have decided to focus our efforts on the most used frameworks in our community
 </ContentByFramework>
-<ContentByFramework framework={["react"]}>
-- A single package for all: `jazz-tools` now exports all the bindings using export paths
-- Support for Vue is discontinued: maintaining multiple framework bindings is hard and we prefer to focus our efforts on the most used frameworks in our community
-- SSR is now stable: We have removed the experimental flag from `enableSSR` and unified `useAccount` and `useAccountOrGuest` hooks under the `useAccount` hook
+<ContentByFramework framework={["react", "react-native", "react-native-expo"]}>
+- A single package for everything: `jazz-tools` now exports all the bindings using export paths
+- Support for Vue is discontinued: maintaining multiple framework bindings is hard and we have decided to focus our efforts on the most used frameworks in our community
+- SSR is now stable: We have removed the experimental flag from `enableSSR` and unified `useAccount` and `useAccountOrGuest` hooks
 </ContentByFramework>
 
 ### A single package for all
@@ -94,7 +94,7 @@ To make this upgrade possible we have fully transtioned to [Package Exports](htt
 
 This means that if you are using an old version of React Native you will need to enable the [enablePackageExports](https://metrobundler.dev/docs/configuration/#unstable_enablepackageexports-experimental) flag in your metro config.
 </ContentByFramework>
-<ContentByFramework framework={["react"]}>
+<ContentByFramework framework={["react", "react-native", "react-native-expo"]}>
 ### SSR is now stable
 
 The `enableSSR` was marked as experimental because the `useAccount` return type was not matching the returned values in SSR mode.
