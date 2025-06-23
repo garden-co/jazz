@@ -1,4 +1,5 @@
 import { base58 } from "@scure/base";
+import { Transaction } from "../coValueCore/verifiedState.js";
 import { RawAccountID } from "../coValues/account.js";
 import { AgentID, RawCoID, TransactionID } from "../ids.js";
 import { SessionID } from "../ids.js";
@@ -349,25 +350,30 @@ export const secretSeedLength = 32;
 export const APPEND_OK = 0;
 export const APPEND_INVALID_SIGNATURE = 1;
 
-export type AppendResult =
-  | typeof APPEND_OK
-  | typeof APPEND_INVALID_SIGNATURE
-  | typeof APPEND_INVALID_HASH;
+export type AppendResult = typeof APPEND_OK | typeof APPEND_INVALID_SIGNATURE;
 
-export interface AppendOnlyVerifiedLog<T> {
+export interface SessionLog {
   // these only have to be maintained in JS, anything lower level
   // only needs to store the encoded items and last streaming hash
   // and return the new signature on addNew
-  transactions: readonly T[];
+  transactions: readonly Transaction[];
   signerID: SignerID;
   lastSignature: Signature;
   signatureAfter: { [txIdx: number]: Signature | undefined };
 
-  clone(): AppendOnlyVerifiedLog<T>;
+  clone(): SessionLog;
   tryAdd(
-    items: T[],
+    transactions: Transaction[],
     newSignature: Signature,
     skipVerify: boolean,
   ): AppendResult;
-  addNew(items: T[], signerSecret: SignerSecret): void;
+  addNewTransaction(changes: JsonValue[], signerSecret: SignerSecret): void;
+
+  // note: this may need to decrypt all transactions since the last decrypted one, even if some of these are invalid
+  // in case we use compression etc.
+  // invariant: we must call this with strictly monotonically increasing txIndex
+  decryptNextTransactionChanges(
+    txIndex: number,
+    keySecret: KeySecret,
+  ): JsonValue[] | undefined;
 }
