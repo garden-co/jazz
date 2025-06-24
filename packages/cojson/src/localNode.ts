@@ -34,6 +34,7 @@ import {
 import { AgentSecret, CryptoProvider } from "./crypto/crypto.js";
 import { AgentID, RawCoID, SessionID, isAgentID } from "./ids.js";
 import { logger } from "./logger.js";
+import { StorageAPI } from "./storageApi.js";
 import { Peer, PeerID, SyncManager } from "./sync.js";
 import { accountOrAgentIDfromSessionID } from "./typeUtils/accountOrAgentIDfromSessionID.js";
 import { expectGroup } from "./typeUtils/expectGroup.js";
@@ -64,6 +65,8 @@ export class LocalNode {
 
   crashed: Error | undefined = undefined;
 
+  storage?: StorageAPI;
+
   /** @category 3. Low-level */
   constructor(
     agentSecret: AgentSecret,
@@ -73,6 +76,14 @@ export class LocalNode {
     this.agentSecret = agentSecret;
     this.currentSessionID = currentSessionID;
     this.crypto = crypto;
+  }
+
+  setStorage(storage: StorageAPI) {
+    this.storage = storage;
+
+    storage.setPushCallback((data) => {
+      this.syncManager.handleNewContent(data);
+    });
   }
 
   getCoValue(id: RawCoID) {

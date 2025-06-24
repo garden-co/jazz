@@ -1,6 +1,5 @@
 import type { CojsonInternalTypes, SessionID } from "cojson";
 
-type RawCoID = CojsonInternalTypes.RawCoID;
 type Transaction = CojsonInternalTypes.Transaction;
 type Signature = CojsonInternalTypes.Signature;
 
@@ -35,7 +34,7 @@ export type SignatureAfterRow = {
 
 export interface DBClientInterfaceAsync {
   getCoValue(
-    coValueId: RawCoID,
+    coValueId: string,
   ): Promise<StoredCoValueRow | undefined> | undefined;
 
   getCoValueSessions(coValueRowId: number): Promise<StoredSessionRow[]>;
@@ -86,7 +85,7 @@ export interface DBClientInterfaceAsync {
 }
 
 export interface DBClientInterfaceSync {
-  getCoValue(coValueId: RawCoID): StoredCoValueRow | undefined;
+  getCoValue(coValueId: string): StoredCoValueRow | undefined;
 
   getCoValueSessions(coValueRowId: number): StoredSessionRow[];
 

@@ -78,12 +78,15 @@ import {
 
 type Value = JsonValue | AnyRawCoValue;
 
+import { PeerKnownStates } from "./PeerKnownStates.js";
 import { getDependedOnCoValuesFromRawData } from "./coValueCore/utils.js";
 import { LogLevel, logger } from "./logger.js";
 import { getPriorityFromHeader } from "./priority.js";
+import { StorageAPI } from "./storageApi.js";
 
 /** @hidden */
 export const cojsonInternals = {
+  PeerKnownStates,
   connectedPeers,
   rawCoIDtoBytes,
   rawCoIDfromBytes,
@@ -172,6 +175,7 @@ export type {
   BinaryStreamStart,
   OpID,
   AccountRole,
+  StorageAPI,
 };
 
 // biome-ignore format: off

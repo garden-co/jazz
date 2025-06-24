@@ -1,10 +1,7 @@
 import { Histogram, ValueType, metrics } from "@opentelemetry/api";
 import { PeerState } from "./PeerState.js";
 import { SyncStateManager } from "./SyncStateManager.js";
-import {
-  AvailableCoValueCore,
-  CoValueCore,
-} from "./coValueCore/coValueCore.js";
+import { CoValueCore } from "./coValueCore/coValueCore.js";
 import { getDependedOnCoValuesFromRawData } from "./coValueCore/utils.js";
 import { CoValueHeader, Transaction } from "./coValueCore/verifiedState.js";
 import { Signature } from "./crypto/crypto.js";
@@ -466,7 +463,7 @@ export class SyncManager {
     }
   }
 
-  handleNewContent(msg: NewContentMessage, peer: PeerState) {
+  handleNewContent(msg: NewContentMessage, peer?: PeerState) {
     const coValue = this.local.getCoValue(msg.id);
 
     if (!coValue.verified) {
