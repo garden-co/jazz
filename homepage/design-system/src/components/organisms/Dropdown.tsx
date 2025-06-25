@@ -28,7 +28,6 @@ export function DropdownMenu({
       transition
       anchor={anchor}
       className={clsx(
-        className,
         // Anchor positioning
         "[--anchor-gap:theme(spacing.2)] [--anchor-padding:theme(spacing.1.5)]",
         // Base styles
@@ -45,6 +44,7 @@ export function DropdownMenu({
         "supports-[grid-template-columns:subgrid]:grid supports-[grid-template-columns:subgrid]:grid-cols-[auto_1fr_1.5rem_0.5rem_auto]",
         // Transitions
         "transition data-[closed]:data-[leave]:opacity-0 data-[leave]:duration-100 data-[leave]:ease-in",
+        className,
       )}
     />
   );
@@ -58,7 +58,6 @@ export function DropdownItem({
   | Omit<Headless.MenuItemProps<typeof Link>, "as" | "className">
 )) {
   let classes = clsx(
-    className,
     // Base styles
     "group rounded-md space-x-2  focus:outline-none px-2.5 py-1.5",
     // Text styles
@@ -76,6 +75,7 @@ export function DropdownItem({
     "[&>[data-slot=icon]]:text-stone-500 [&>[data-slot=icon]]:data-[focus]:text-white [&>[data-slot=icon]]: [&>[data-slot=icon]]:data-[focus]:dark:text-white",
     // Avatar
     "[&>[data-slot=avatar]]:mr-2.5 [&>[data-slot=avatar]]:size-6 sm:[&>[data-slot=avatar]]:mr-2 sm:[&>[data-slot=avatar]]:size-5",
+    className,
   );
 
   return "href" in props ? (

@@ -10,10 +10,19 @@ import {
   DropdownItem,
   DropdownMenu,
 } from "@garden-co/design-system/src/components/organisms/Dropdown";
+import clsx from "clsx";
 import { usePathname, useRouter } from "next/navigation";
 import { useState } from "react";
 
-export function FrameworkSelect() {
+export function FrameworkSelect({
+  onSelect,
+  size = "md",
+  routerPush = true,
+}: {
+  onSelect?: (framework: Framework) => void;
+  size?: "sm" | "md";
+  routerPush?: boolean;
+}) {
   const router = useRouter();
   const defaultFramework = useFramework();
   const [selectedFramework, setSelectedFramework] =
@@ -23,13 +32,14 @@ export function FrameworkSelect() {
 
   const selectFramework = (newFramework: Framework) => {
     setSelectedFramework(newFramework);
-    router.push(path.replace(defaultFramework, newFramework));
+    onSelect && onSelect(newFramework);
+    routerPush && router.push(path.replace(defaultFramework, newFramework));
   };
 
   return (
     <Dropdown>
       <DropdownButton
-        className="w-full justify-between"
+        className={clsx("w-full justify-between overflow-clip", size === "sm" && "text-sm text-nowrap")}
         as={Button}
         variant="secondary"
       >
@@ -38,10 +48,9 @@ export function FrameworkSelect() {
       </DropdownButton>
       <DropdownMenu className="w-[--button-width] z-50" anchor="bottom start">
         {Object.entries(frameworkNames)
-          .filter(([_, framework]) => !framework.hidden)
           .map(([key, framework]) => (
             <DropdownItem
-              className="items-baseline"
+            className={clsx("items-baseline", size === "sm" && "text-xs text-nowrap", selectedFramework === key && "text-primary dark:text-primary")}
               key={key}
               onClick={() => selectFramework(key as Framework)}
           >
