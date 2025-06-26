@@ -1,17 +1,30 @@
-import { AgentSecret, CryptoProvider, LocalNode, Peer } from "cojson";
+import {
+  AgentSecret,
+  CojsonInternalTypes,
+  CryptoProvider,
+  JsonValue,
+  LocalNode,
+  Peer,
+  cojsonInternals,
+} from "cojson";
 import {
   type AnyWebSocketConstructor,
   WebSocketPeerWithReconnection,
 } from "cojson-transport-ws";
 import { WasmCrypto } from "cojson/crypto/WasmCrypto";
+import { CoValueKnownState, NewContentMessage } from "cojson/dist/sync.js";
 import {
   Account,
   AccountClass,
   AccountSchema,
   AnyAccountSchema,
+  CoValue,
   CoValueFromRaw,
+  CoValueOrZodSchema,
   Inbox,
   InstanceOfSchema,
+  Loaded,
+  ResolveQuery,
   createJazzContextFromExistingCredentials,
   randomSessionProvider,
 } from "jazz-tools";
@@ -124,4 +137,130 @@ export async function startWorker<
     },
     done,
   };
+}
+
+export function experimental_sendCoValueRequest<
+  V extends Record<string, CoValue>,
+  P extends JsonValue,
+  R extends JsonValue,
+>(
+  values: V,
+  params: P,
+  url: URL | string,
+  options?: {
+    assumeUnknown?: boolean;
+  },
+): Promise<{ responseBody: R | undefined; response: Response }> {
+  const valuesWithAccount = { ...values, madeBy: context.account };
+
+  const knownStates = Object.fromEntries(
+    Object.values(valuesWithAccount).map((v) => [
+      v.id,
+      v._raw.core.knownState(),
+    ]),
+  );
+
+  const signature: CojsonInternalTypes.Signature = {} as any;
+  const signerID: CojsonInternalTypes.SignerID = {} as any;
+
+  const requestBody = {
+    signed: {
+      params,
+      values: Object.fromEntries(
+        Object.entries(valuesWithAccount).map(([name, v]) => [name, v.id]),
+      ),
+    },
+    signerID,
+    signature,
+    knownStates,
+  };
+
+  let request = new Request(url, {
+    method: "POST",
+    body: JSON.stringify(requestBody),
+  });
+
+  return Promise.race([
+    (async () => {
+      while (true) {
+        let response = await fetch(request);
+        if (response.status === 200) {
+          return {
+            responseBody: (await response.json()) as R,
+            response,
+          };
+        } else if (response.status === 100) {
+          // "continue"
+          const serverKnownStates = (await response.json()) as {
+            knownStates: Record<string, CoValueKnownState>;
+          };
+
+          const contentPieces = Object.fromEntries(
+            Object.values(values)
+              .map((v) => [
+                v.id,
+                v._raw.core.verified.newContentSince(
+                  serverKnownStates.knownStates[v.id],
+                ),
+              ])
+              .filter(([_, content]) => content !== undefined),
+          );
+
+          const newRequestBody = {
+            params,
+            contentPieces,
+          };
+
+          const newRequest = new Request(url, {
+            method: "POST",
+            body: JSON.stringify(newRequestBody),
+          });
+
+          request = newRequest;
+        } else {
+          console.error("Unexpected response status", response.status);
+          return {
+            responseBody: undefined,
+            response,
+          };
+        }
+      }
+    })(),
+    new Promise<{ responseBody: R | undefined; response: Response }>(
+      (_resolve, reject) =>
+        setTimeout(() => reject(new Error("Request timed out")), 1000),
+    ),
+  ]);
+}
+
+export async function experimental_handleCoValueRequest<
+  V extends Record<string, CoValue>,
+  P extends JsonValue,
+  R extends JsonValue,
+  S extends
+    | (AccountClass<Account> & CoValueFromRaw<Account>)
+    | AnyAccountSchema,
+>(
+  request: Request,
+  callback: (values: V, payload: R) => Promise<void>,
+  worker: S | WorkerOptions<S>,
+) {
+  const body = (await request.json()) as {
+    values: V;
+    params: P;
+  } & (
+    | {
+        contentPieces: Record<string, NewContentMessage>;
+      }
+    | {
+        knownStates: Record<string, CoValueKnownState>;
+      }
+  );
+
+  // make sure that for all values ("relevant values") we know more and
+  // are fully synced with the sync server before proceeding
+
+  if ("knownStates" in body) {
+  } else {
+  }
 }
