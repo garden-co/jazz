@@ -23,6 +23,12 @@
             # JS development
             nodejs_22
             pnpm_9
+
+            # C++ development
+            clang_20
+            clang-tools
+            cmake
+            pkg-config
           ];
 
           shellHook = ''
