@@ -207,7 +207,18 @@ export class SyncManager {
     }
   }
 
-  sendNewContentIncludingDependencies(id: RawCoID, peer: PeerState) {
+  sendNewContentIncludingDependencies(
+    id: RawCoID,
+    peer: PeerState,
+    seen: Set<RawCoID> = new Set(),
+  ) {
+    if (seen.has(id)) {
+      console.log("unexpected loop in sendNewContentIncludingDependencies", id);
+      return;
+    }
+
+    seen.add(id);
+
     const coValue = this.local.getCoValue(id);
 
     if (!coValue.isAvailable()) {
@@ -215,7 +226,11 @@ export class SyncManager {
     }
 
     for (const dependency of coValue.getDependedOnCoValues()) {
-      this.sendNewContentIncludingDependencies(dependency, peer);
+      this.sendNewContentIncludingDependencies(
+        dependency,
+        peer,
+        new Set(seen.values()),
+      );
     }
 
     const newContentPieces = coValue.verified.newContentSince(
