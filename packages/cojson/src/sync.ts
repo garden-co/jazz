@@ -213,7 +213,10 @@ export class SyncManager {
     seen: Set<RawCoID> = new Set(),
   ) {
     if (seen.has(id)) {
-      console.log("unexpected loop in sendNewContentIncludingDependencies", id);
+      logger.error("unexpected loop in sendNewContentIncludingDependencies", {
+        id,
+        seen: Array.from(seen),
+      });
       return;
     }
 
