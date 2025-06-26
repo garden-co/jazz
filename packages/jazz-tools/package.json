@@ -164,9 +164,7 @@
     "prosemirror-state": "^1.4.3",
     "prosemirror-transform": "^1.9.0",
     "react-native-fast-encoder": "^0.2.0",
-    "react-native-mmkv": "^3.2.0",
-    "react-native-nitro-modules": "0.25.2",
-    "react-native-quick-crypto": "1.0.0-beta.16",
+    "react-native-mmkv": "^3.3.0",
     "zod": "3.25.28"
   },
   "scripts": {
@@ -200,6 +198,8 @@
     "react": "*",
     "react-dom": "*",
     "react-native": "*",
+    "react-native-nitro-modules": "0.26.2",
+    "react-native-quick-crypto": "1.0.0-beta.18",
     "svelte": "^5.0.0"
   },
   "peerDependenciesMeta": {
