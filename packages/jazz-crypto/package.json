@@ -1,0 +1,19 @@
+{
+  "name": "jazz-crypto",
+  "description": "Jazz Crypto",
+  "type": "module",
+  "license": "MIT",
+  "version": "0.15.2",
+  "scripts": {
+    "format-and-lint": "biome check .",
+    "format-and-lint:fix": "biome check . --write",
+    "build": "rm -rf ./dist && tsc --sourceMap --outDir dist"
+  },
+  "dependencies": {
+    "@react-native/codegen": "^0.80.0",
+    "react-native-nitro-modules": "0.26.2"
+  },
+  "devDependencies": {
+    "nitro-codegen": "0.26.2"
+  }
+}
