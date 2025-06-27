@@ -1,5 +1,4 @@
 import { commands } from "@vitest/browser/context";
-import { StorageManagerAsync } from "cojson-storage";
 import { internal_setDatabaseName } from "cojson-storage-indexeddb";
 import {
   Account,
@@ -91,54 +90,5 @@ export async function startSyncServer(port?: number, dbName?: string) {
     disconnectAllClients: () => commands.disconnectAllClients(url),
     setOffline: (active: boolean) => commands.setOffline(url, active),
     close,
-  };
-}
-
-const { SyncManager } = cojsonInternals;
-
-export function trackMessages() {
-  const messages: {
-    from: "client" | "server" | "storage";
-    msg: SyncMessage;
-  }[] = [];
-
-  const originalHandleSyncMessage =
-    StorageManagerAsync.prototype.handleSyncMessage;
-  const originalNodeSyncMessage = SyncManager.prototype.handleSyncMessage;
-
-  StorageManagerAsync.prototype.handleSyncMessage = async function (msg: any) {
-    messages.push({
-      from: "client",
-      msg,
-    });
-    return originalHandleSyncMessage.call(this, msg);
-  };
-
-  SyncManager.prototype.handleSyncMessage = async function (msg, peer) {
-    messages.push({
-      from: peer.role,
-      msg,
-    });
-    return originalNodeSyncMessage.call(this, msg, peer);
-  };
-
-  const restore = () => {
-    StorageManagerAsync.prototype.handleSyncMessage = originalHandleSyncMessage;
-    SyncManager.prototype.handleSyncMessage = originalNodeSyncMessage;
-    messages.length = 0;
-  };
-
-  const clear = () => {
-    messages.length = 0;
-  };
-
-  onTestFinished(() => {
-    restore();
-  });
-
-  return {
-    messages,
-    restore,
-    clear,
   };
 }

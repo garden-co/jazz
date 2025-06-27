@@ -269,6 +269,7 @@ export class CoValueCore {
     );
 
     this.peers.set(fromPeerId, { type: "available" });
+
     this.updateCounter(previousState);
     this.notifyUpdate("immediate");
   }
@@ -292,7 +293,7 @@ export class CoValueCore {
     this.notifyUpdate("immediate");
   }
 
-  private markPending(peerId: PeerID) {
+  markPending(peerId: PeerID) {
     const previousState = this.loadingState;
     this.peers.set(peerId, { type: "pending" });
     this.updateCounter(previousState);
@@ -978,6 +979,49 @@ export class CoValueCore {
     timeout?: number;
   }) {
     return this.node.syncManager.waitForSync(this.id, options?.timeout);
+  }
+
+  load(peers: PeerState[]) {
+    this.loadFromStorage((found) => {
+      // When found the load is triggered by handleNewContent
+      if (!found) {
+        this.loadFromPeers(peers).catch((e) => {
+          logger.error("Error loading coValue in loadFromPeers", { err: e });
+        });
+      }
+    });
+  }
+
+  loadFromStorage(done?: (found: boolean) => void) {
+    const node = this.node;
+
+    if (!node.storage) {
+      done?.(false);
+      return;
+    }
+
+    const currentState = this.peers.get("storage");
+
+    if (currentState && currentState.type !== "unknown") {
+      done?.(currentState.type === "available");
+      return;
+    }
+
+    this.markPending("storage");
+    node.storage.load(
+      this.id,
+      (data) => {
+        // TODO: content streaming triggers a load request
+        node.syncManager.handleNewContent(data);
+      },
+      (found) => {
+        if (!found) {
+          this.markNotFoundInPeer("storage");
+        }
+
+        done?.(found);
+      },
+    );
   }
 
   async loadFromPeers(peers: PeerState[]) {

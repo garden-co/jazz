@@ -3,7 +3,7 @@ import { expectAccount } from "../coValues/account.js";
 import { WasmCrypto } from "../crypto/WasmCrypto.js";
 import { LocalNode } from "../localNode.js";
 import { connectedPeers } from "../streamUtils.js";
-import { createMockStoragePeer } from "./testUtils.js";
+import { createAsyncStorage } from "./testStorage.js";
 
 const Crypto = await WasmCrypto.create();
 
@@ -89,23 +89,22 @@ test("throws an error if the user tried to create an invite from an account", as
 });
 
 test("wait for storage sync before resolving withNewlyCreatedAccount", async () => {
-  const { storage, peer } = createMockStoragePeer({
-    peerId: "account-node",
+  const storage = await createAsyncStorage({
+    nodeName: "account-node",
+    storageName: "storage",
   });
 
-  const { node, accountID } = await LocalNode.withNewlyCreatedAccount({
+  const { accountID, node } = await LocalNode.withNewlyCreatedAccount({
     creationProps: { name: "Hermes Puggington" },
     crypto: Crypto,
-    peersToLoadFrom: [peer],
+    storage,
   });
 
-  const account = storage.getCoValue(accountID);
+  expect(storage.getKnownState(accountID).header).toBe(true);
 
-  expect(account.isAvailable()).toBe(true);
+  const profileId = expectAccount(
+    node.getCoValue(accountID).getCurrentContent(),
+  ).get("profile")!;
 
-  const profile = storage.getCoValue(
-    expectAccount(account.getCurrentContent()).get("profile")!,
-  );
-
-  expect(profile.isAvailable()).toBe(true);
+  expect(storage.getKnownState(profileId).header).toBe(true);
 });

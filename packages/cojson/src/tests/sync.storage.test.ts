@@ -18,7 +18,7 @@ describe("client with storage syncs with server", () => {
     const client = setupTestNode();
 
     client.connectToSyncServer();
-    client.addStoragePeer();
+    client.addStorage();
 
     const group = jazzCloud.node.createGroup();
     const map = group.createMap();
@@ -39,14 +39,10 @@ describe("client with storage syncs with server", () => {
         "client -> server | LOAD Map sessions: empty",
         "server -> client | CONTENT Group header: true new: After: 0 New: 3",
         "client -> server | KNOWN Group sessions: header/3",
-        "client -> storage | LOAD Group sessions: header/3",
-        "server -> client | CONTENT Map header: true new: After: 0 New: 1",
-        "storage -> client | KNOWN Group sessions: empty",
-        "client -> server | KNOWN Map sessions: header/1",
         "client -> storage | CONTENT Group header: true new: After: 0 New: 3",
-        "storage -> client | KNOWN Group sessions: header/3",
+        "server -> client | CONTENT Map header: true new: After: 0 New: 1",
+        "client -> server | KNOWN Map sessions: header/1",
         "client -> storage | CONTENT Map header: true new: After: 0 New: 1",
-        "storage -> client | KNOWN Map sessions: header/1",
       ]
     `);
   });
@@ -55,14 +51,23 @@ describe("client with storage syncs with server", () => {
     const client = setupTestNode();
 
     client.connectToSyncServer();
-    const { storage } = client.addStoragePeer();
-
-    // biome-ignore lint/suspicious/noExplicitAny: Super ugly, might have unintended side effects
-    (storage as any).coValues = (jazzCloud.node as any).coValues;
+    const { storage } = client.addStorage();
 
     const group = jazzCloud.node.createGroup();
     const map = group.createMap();
     map.set("hello", "world", "trusting");
+
+    await loadCoValueOrFail(client.node, map.id);
+
+    client.restart();
+
+    client.connectToSyncServer();
+    client.addStorage({
+      ourName: "client",
+      storage,
+    });
+
+    SyncMessagesLog.clear();
 
     const mapOnClient = await loadCoValueOrFail(client.node, map.id);
     expect(mapOnClient.get("hello")).toEqual("world");
@@ -76,11 +81,9 @@ describe("client with storage syncs with server", () => {
       [
         "client -> storage | LOAD Map sessions: empty",
         "storage -> client | CONTENT Group header: true new: After: 0 New: 3",
-        "client -> storage | KNOWN Group sessions: header/3",
         "client -> server | LOAD Group sessions: header/3",
         "storage -> client | CONTENT Map header: true new: After: 0 New: 1",
         "server -> client | KNOWN Group sessions: header/3",
-        "client -> storage | KNOWN Map sessions: header/1",
         "client -> server | LOAD Map sessions: header/1",
         "server -> client | KNOWN Map sessions: header/1",
       ]
@@ -91,7 +94,7 @@ describe("client with storage syncs with server", () => {
     const client = setupTestNode();
 
     client.connectToSyncServer();
-    client.addStoragePeer();
+    client.addStorage();
 
     const group = jazzCloud.node.createGroup();
     const parentGroup = jazzCloud.node.createGroup();
@@ -118,20 +121,13 @@ describe("client with storage syncs with server", () => {
         "client -> server | LOAD Map sessions: empty",
         "server -> client | CONTENT ParentGroup header: true new: After: 0 New: 6",
         "client -> server | KNOWN ParentGroup sessions: header/6",
-        "client -> storage | LOAD ParentGroup sessions: header/6",
-        "server -> client | CONTENT Group header: true new: After: 0 New: 5",
-        "storage -> client | KNOWN ParentGroup sessions: empty",
-        "client -> server | KNOWN Group sessions: header/5",
-        "client -> storage | LOAD Group sessions: header/5",
-        "server -> client | CONTENT Map header: true new: After: 0 New: 1",
-        "storage -> client | KNOWN Group sessions: empty",
         "client -> storage | CONTENT ParentGroup header: true new: After: 0 New: 6",
-        "client -> server | KNOWN Map sessions: header/1",
-        "storage -> client | KNOWN ParentGroup sessions: header/6",
+        "server -> client | CONTENT Group header: true new: After: 0 New: 5",
+        "client -> server | KNOWN Group sessions: header/5",
         "client -> storage | CONTENT Group header: true new: After: 0 New: 5",
-        "storage -> client | KNOWN Group sessions: header/5",
+        "server -> client | CONTENT Map header: true new: After: 0 New: 1",
+        "client -> server | KNOWN Map sessions: header/1",
         "client -> storage | CONTENT Map header: true new: After: 0 New: 1",
-        "storage -> client | KNOWN Map sessions: header/1",
       ]
     `);
   });
@@ -140,7 +136,7 @@ describe("client with storage syncs with server", () => {
     const client = setupTestNode();
 
     client.connectToSyncServer();
-    client.addStoragePeer();
+    client.addStorage();
 
     const group = jazzCloud.node.createGroup();
     const map = group.createMap();
@@ -174,8 +170,8 @@ describe("client with storage syncs with server", () => {
         "client -> server | KNOWN Map sessions: header/2",
         "client -> storage | CONTENT Map header: false new: After: 1 New: 1",
         "server -> client | CONTENT Map header: false new: After: 1 New: 1",
-        "storage -> client | KNOWN Map sessions: header/2",
         "client -> server | KNOWN Map sessions: header/2",
+        "client -> storage | CONTENT Map header: false new: After: 1 New: 1",
       ]
     `);
   });
@@ -191,7 +187,7 @@ describe("client syncs with a server with storage", () => {
     jazzCloud = setupTestNode({
       isSyncServer: true,
     });
-    jazzCloud.addStoragePeer({
+    jazzCloud.addStorage({
       ourName: "server",
     });
   });
@@ -219,51 +215,115 @@ describe("client syncs with a server with storage", () => {
       [
         "client -> server | CONTENT Group header: true new: After: 0 New: 3",
         "server -> client | KNOWN Group sessions: header/3",
-        "server -> storage | LOAD Group sessions: header/3",
-        "client -> server | CONTENT Map header: true new: After: 0 New: 1",
-        "storage -> server | KNOWN Group sessions: empty",
-        "server -> client | KNOWN Map sessions: header/1",
-        "server -> storage | LOAD Map sessions: header/1",
-        "storage -> server | KNOWN Map sessions: empty",
         "server -> storage | CONTENT Group header: true new: After: 0 New: 3",
-        "storage -> server | KNOWN Group sessions: header/3",
+        "client -> server | CONTENT Map header: true new: After: 0 New: 1",
+        "server -> client | KNOWN Map sessions: header/1",
         "server -> storage | CONTENT Map header: true new: After: 0 New: 1",
-        "storage -> server | KNOWN Map sessions: header/1",
       ]
     `);
   });
 
-  test.skip("server restarts", async () => {
+  test("large coValue streaming", async () => {
     const client = setupTestNode();
 
-    client.addStoragePeer();
+    client.connectToSyncServer({
+      syncServer: jazzCloud.node,
+    });
+
+    const { storage } = client.addStorage({
+      ourName: "client",
+    });
 
     const group = client.node.createGroup();
-    const map = group.createMap();
-    map.set("hello", "world", "trusting");
+    group.addMember("everyone", "writer");
 
-    await map.core.waitForSync();
+    const largeMap = group.createMap();
 
-    jazzCloud.restart();
+    // Generate a large amount of data (about 100MB)
+    const dataSize = 1 * 200 * 1024;
+    const chunkSize = 1024; // 1KB chunks
+    const chunks = dataSize / chunkSize;
 
-    SyncMessagesLog.clear();
-    client.addStoragePeer();
+    const value = Buffer.alloc(chunkSize, `value$`).toString("base64");
 
-    const mapOnServer = await loadCoValueOrFail(jazzCloud.node, map.id);
-    expect(mapOnServer.get("hello")).toEqual("world");
+    for (let i = 0; i < chunks; i++) {
+      const key = `key${i}`;
+      largeMap.set(key, value, "trusting");
+    }
+
+    await largeMap.core.waitForSync();
 
     expect(
       SyncMessagesLog.getMessages({
         Group: group.core,
-        Map: map.core,
+        Map: largeMap.core,
       }),
     ).toMatchInlineSnapshot(`
       [
-        "server -> storage | LOAD Group sessions: header/3",
-        "storage -> server | KNOWN Map sessions: header/1",
-        "storage -> server | KNOWN Group sessions: empty",
-        "server -> storage | LOAD Map sessions: header/1",
-        "storage -> server | KNOWN Map sessions: empty",
+        "client -> storage | CONTENT Group header: true new: After: 0 New: 5",
+        "client -> server | CONTENT Group header: true new: After: 0 New: 5",
+        "client -> storage | CONTENT Map header: true new: ",
+        "client -> storage | CONTENT Map header: false new: After: 0 New: 73",
+        "client -> storage | CONTENT Map header: false new: After: 73 New: 73",
+        "client -> storage | CONTENT Map header: false new: After: 146 New: 54",
+        "server -> client | KNOWN Group sessions: header/5",
+        "server -> storage | CONTENT Group header: true new: After: 0 New: 5",
+        "client -> server | CONTENT Map header: true new: ",
+        "server -> client | KNOWN Map sessions: header/0",
+        "server -> storage | CONTENT Map header: true new: ",
+        "client -> server | CONTENT Map header: false new: After: 0 New: 73",
+        "server -> client | KNOWN Map sessions: header/73",
+        "server -> storage | CONTENT Map header: false new: After: 0 New: 73",
+        "client -> server | CONTENT Map header: false new: After: 73 New: 73",
+        "server -> client | KNOWN Map sessions: header/146",
+        "server -> storage | CONTENT Map header: false new: After: 73 New: 73",
+        "client -> server | CONTENT Map header: false new: After: 146 New: 54",
+        "server -> client | KNOWN Map sessions: header/200",
+        "server -> storage | CONTENT Map header: false new: After: 146 New: 54",
+      ]
+    `);
+
+    SyncMessagesLog.clear();
+
+    client.restart();
+
+    client.connectToSyncServer({
+      ourName: "client",
+      syncServer: jazzCloud.node,
+    });
+
+    client.addStorage({
+      ourName: "client",
+      storage,
+    });
+
+    const mapOnClient2 = await loadCoValueOrFail(client.node, largeMap.id);
+
+    await mapOnClient2.core.waitForSync();
+
+    // TODO: The client should wait for the full load from the storage peer before subscribing to the core server
+    expect(
+      SyncMessagesLog.getMessages({
+        Group: group.core,
+        Map: largeMap.core,
+      }),
+    ).toMatchInlineSnapshot(`
+      [
+        "client -> storage | LOAD Map sessions: empty",
+        "storage -> client | CONTENT Group header: true new: After: 0 New: 5",
+        "client -> server | LOAD Group sessions: header/5",
+        "storage -> client | CONTENT Map header: true new: After: 0 New: 73",
+        "server -> client | KNOWN Group sessions: header/5",
+        "client -> server | LOAD Map sessions: header/73",
+        "server -> client | CONTENT Map header: false new: After: 73 New: 73",
+        "client -> server | KNOWN Map sessions: header/146",
+        "client -> storage | CONTENT Map header: false new: After: 73 New: 73",
+        "server -> client | CONTENT Map header: false new: After: 146 New: 54",
+        "client -> server | CONTENT Map header: true new: ",
+        "client -> storage | CONTENT Map header: false new: After: 146 New: 54",
+        "server -> client | KNOWN Map sessions: header/200",
+        "server -> storage | CONTENT Map header: true new: ",
+        "client -> server | KNOWN Map sessions: header/200",
       ]
     `);
   });

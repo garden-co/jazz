@@ -207,9 +207,7 @@ export class RawGroup<
         child.loadingState === "unknown" ||
         child.loadingState === "unavailable"
       ) {
-        child.loadFromPeers(peers).catch(() => {
-          logger.error(`Failed to load child group ${id}`);
-        });
+        child.load(peers);
       }
 
       requests.push(

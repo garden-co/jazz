@@ -15,11 +15,7 @@ import {
   onTestFinished,
   test,
 } from "vitest";
-import {
-  createAccountContext,
-  startSyncServer,
-  trackMessages,
-} from "./testUtils";
+import { createAccountContext, startSyncServer } from "./testUtils";
 
 const TestMap = co.map({ value: z.string() });
 
@@ -63,8 +59,6 @@ describe("Browser sync", () => {
 
     // Clearing the credentials storage so the next auth will be a new account
     await contextManager.getAuthSecretStorage().clear();
-
-    const messages = trackMessages();
 
     const { account: account2 } = await createAccountContext({
       sync: {

@@ -174,6 +174,8 @@ export type {
   AccountRole,
 };
 
+export * from "./storage/index.js";
+
 // biome-ignore format: off
 // eslint-disable-next-line @typescript-eslint/no-namespace
 export namespace CojsonInternalTypes {

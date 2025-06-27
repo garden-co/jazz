@@ -14,13 +14,15 @@ import {
   type CoValueCore,
   type RawAccount,
   type RawCoValue,
+  StorageAPI,
 } from "../exports.js";
-import type { SessionID } from "../ids.js";
+import type { RawCoID, SessionID } from "../ids.js";
 import { LocalNode } from "../localNode.js";
 import { connectedPeers } from "../streamUtils.js";
 import type { Peer, SyncMessage } from "../sync.js";
 import { expectGroup } from "../typeUtils/expectGroup.js";
 import { toSimplifiedMessages } from "./messagesTestUtils.js";
+import { createAsyncStorage, createSyncStorage } from "./testStorage.js";
 
 const Crypto = await WasmCrypto.create();
 
@@ -459,32 +461,6 @@ export function getSyncServerConnectedPeer(opts: {
   };
 }
 
-export function createMockStoragePeer(opts: {
-  ourName?: string;
-  peerId: string;
-}) {
-  const storage = createTestNode();
-
-  const { peer1, peer2 } = connectedPeersWithMessagesTracking({
-    peer1: { id: storage.getCurrentAgent().id, role: "storage" },
-    peer2: {
-      id: opts.peerId,
-      role: "client",
-      name: opts.ourName,
-    },
-  });
-
-  peer1.role = "storage";
-  peer1.priority = 100;
-
-  storage.syncManager.addPeer(peer2);
-
-  return {
-    storage,
-    peer: peer1,
-  };
-}
-
 export function setupTestNode(
   opts: {
     isSyncServer?: boolean;
@@ -521,15 +497,26 @@ export function setupTestNode(
     };
   }
 
-  function addStoragePeer(opts: { ourName?: string } = {}) {
-    const { peer, storage } = createMockStoragePeer({
-      peerId: node.getCurrentAgent().id,
-      ourName: opts.ourName,
+  function addStorage(opts: { ourName?: string; storage?: StorageAPI } = {}) {
+    const storage =
+      opts.storage ??
+      createSyncStorage({
+        nodeName: opts.ourName ?? "client",
+        storageName: "storage",
+      });
+    node.setStorage(storage);
+
+    return { storage };
+  }
+
+  async function addAsyncStorage(opts: { ourName?: string } = {}) {
+    const storage = await createAsyncStorage({
+      nodeName: opts.ourName ?? "client",
+      storageName: "storage",
     });
+    node.setStorage(storage);
 
-    node.syncManager.addPeer(peer);
-
-    return { peer, peerState: node.syncManager.peers[peer.id]!, storage };
+    return { storage };
   }
 
   if (opts.connected) {
@@ -539,7 +526,8 @@ export function setupTestNode(
   const ctx = {
     node,
     connectToSyncServer,
-    addStoragePeer,
+    addStorage,
+    addAsyncStorage,
     restart: () => {
       node.gracefulShutdown();
       ctx.node = node = new LocalNode(admin.agentSecret, session, Crypto);
@@ -559,12 +547,14 @@ export async function setupTestAccount(
   opts: {
     isSyncServer?: boolean;
     connected?: boolean;
+    storage?: StorageAPI;
   } = {},
 ) {
   const ctx = await LocalNode.withNewlyCreatedAccount({
     peersToLoadFrom: [],
     crypto: Crypto,
     creationProps: { name: "Client" },
+    storage: opts.storage,
   });
 
   if (opts.isSyncServer) {
@@ -599,15 +589,26 @@ export async function setupTestAccount(
     };
   }
 
-  function addStoragePeer(opts: { ourName?: string } = {}) {
-    const { peer, storage } = createMockStoragePeer({
-      peerId: ctx.node.getCurrentAgent().id,
-      ourName: opts.ourName,
+  function addStorage(opts: { ourName?: string; storage?: StorageAPI } = {}) {
+    const storage =
+      opts.storage ??
+      createSyncStorage({
+        nodeName: opts.ourName ?? "client",
+        storageName: "storage",
+      });
+    ctx.node.setStorage(storage);
+
+    return { storage };
+  }
+
+  async function addAsyncStorage(opts: { ourName?: string } = {}) {
+    const storage = await createAsyncStorage({
+      nodeName: opts.ourName ?? "client",
+      storageName: "storage",
     });
+    ctx.node.setStorage(storage);
 
-    ctx.node.syncManager.addPeer(peer);
-
-    return { peer, peerState: ctx.node.syncManager.peers[peer.id]!, storage };
+    return { storage };
   }
 
   if (opts.connected) {
@@ -618,7 +619,8 @@ export async function setupTestAccount(
     node: ctx.node,
     accountID: ctx.accountID,
     connectToSyncServer,
-    addStoragePeer,
+    addStorage,
+    addAsyncStorage,
   };
 }
 

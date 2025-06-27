@@ -108,11 +108,21 @@ export class WasmCrypto extends CryptoProvider<Blake3State> {
   }
 
   verify(signature: Signature, message: JsonValue, id: SignerID): boolean {
-    return verify(
+    const result = verify(
       textEncoder.encode(signature),
       textEncoder.encode(stableStringify(message)),
       textEncoder.encode(id),
     );
+
+    if (!result) {
+      logger.error("Failed to verify signature", {
+        signature,
+        message,
+        id,
+      });
+    }
+
+    return result;
   }
 
   newX25519StaticSecret(): Uint8Array {

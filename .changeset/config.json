@@ -6,7 +6,6 @@
   "fixed": [
     [
       "cojson",
-      "cojson-storage",
       "cojson-storage-indexeddb",
       "cojson-storage-sqlite",
       "cojson-transport-ws",

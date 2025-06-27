@@ -1,9 +1,6 @@
-import type { LocalNode, SyncMessage } from "cojson";
-import { cojsonInternals } from "cojson";
-import { StorageManagerAsync } from "cojson-storage";
+import type { RawCoID, SyncMessage } from "cojson";
+import { StorageApiAsync } from "cojson";
 import { onTestFinished } from "vitest";
-
-const { SyncManager } = cojsonInternals;
 
 export function trackMessages() {
   const messages: {
@@ -11,29 +8,56 @@ export function trackMessages() {
     msg: SyncMessage;
   }[] = [];
 
-  const originalHandleSyncMessage =
-    StorageManagerAsync.prototype.handleSyncMessage;
-  const originalNodeSyncMessage = SyncManager.prototype.handleSyncMessage;
+  const originalLoad = StorageApiAsync.prototype.load;
+  const originalStore = StorageApiAsync.prototype.store;
 
-  StorageManagerAsync.prototype.handleSyncMessage = async function (msg) {
+  StorageApiAsync.prototype.load = async function (id, callback, done) {
     messages.push({
       from: "client",
-      msg,
+      msg: {
+        action: "load",
+        id: id as RawCoID,
+        header: false,
+        sessions: {},
+      },
     });
-    return originalHandleSyncMessage.call(this, msg);
+    return originalLoad.call(
+      this,
+      id,
+      (msg) => {
+        messages.push({
+          from: "storage",
+          msg,
+        });
+        callback(msg);
+      },
+      done,
+    );
   };
 
-  SyncManager.prototype.handleSyncMessage = async function (msg, peer) {
-    messages.push({
-      from: "storage",
-      msg,
+  StorageApiAsync.prototype.store = async function (data, correctionCallback) {
+    for (const msg of data) {
+      messages.push({
+        from: "client",
+        msg,
+      });
+    }
+    return originalStore.call(this, data, (msg) => {
+      messages.push({
+        from: "storage",
+        msg: {
+          action: "known",
+          isCorrection: true,
+          ...msg,
+        },
+      });
+      correctionCallback(msg);
     });
-    return originalNodeSyncMessage.call(this, msg, peer);
   };
 
   const restore = () => {
-    StorageManagerAsync.prototype.handleSyncMessage = originalHandleSyncMessage;
-    SyncManager.prototype.handleSyncMessage = originalNodeSyncMessage;
+    StorageApiAsync.prototype.load = originalLoad;
+    StorageApiAsync.prototype.store = originalStore;
     messages.length = 0;
   };
 

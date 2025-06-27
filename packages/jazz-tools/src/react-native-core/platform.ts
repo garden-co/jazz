@@ -1,20 +1,17 @@
 import NetInfo from "@react-native-community/netinfo";
-import { LocalNode, Peer, RawAccountID } from "cojson";
+import { LocalNode, Peer, RawAccountID, getSqliteStorageAsync } from "cojson";
 import { PureJSCrypto } from "cojson/dist/crypto/PureJSCrypto"; // Importing from dist to not rely on the exports field
 import {
   Account,
   AccountClass,
-  AccountSchema,
   AgentID,
   AnyAccountSchema,
   AuthCredentials,
   AuthSecretStorage,
   CoValue,
-  CoValueClass,
   CoValueFromRaw,
   CryptoProvider,
   ID,
-  InstanceOfSchema,
   NewAccountProps,
   SessionID,
   SyncConfig,
@@ -23,9 +20,8 @@ import {
   createJazzContext,
 } from "jazz-tools";
 import { KvStore, KvStoreContext } from "./storage/kv-store-context.js";
-import { SQLiteReactNative } from "./storage/sqlite-react-native.js";
 
-import { SQLiteDatabaseDriverAsync } from "cojson-storage";
+import { SQLiteDatabaseDriverAsync } from "cojson";
 import { WebSocketPeerWithReconnection } from "cojson-transport-ws";
 import type { RNQuickCrypto } from "./crypto/RNQuickCrypto.js";
 
@@ -52,12 +48,10 @@ async function setupPeers(options: BaseReactNativeContextOptions) {
 
   const peersToLoadFrom: Peer[] = [];
 
-  if (options.storage && options.storage !== "disabled") {
-    const storage = await SQLiteReactNative.asPeer({
-      adapter: options.storage,
-    });
-    peersToLoadFrom.push(storage);
-  }
+  const storage =
+    options.storage && options.storage !== "disabled"
+      ? await getSqliteStorageAsync(options.storage)
+      : undefined;
 
   if (options.sync.when === "never") {
     return {
@@ -65,6 +59,7 @@ async function setupPeers(options: BaseReactNativeContextOptions) {
       peersToLoadFrom,
       setNode: () => {},
       crypto,
+      storage,
     };
   }
 
@@ -104,18 +99,20 @@ async function setupPeers(options: BaseReactNativeContextOptions) {
     peersToLoadFrom,
     setNode,
     crypto,
+    storage,
   };
 }
 
 export async function createJazzReactNativeGuestContext(
   options: BaseReactNativeContextOptions,
 ) {
-  const { toggleNetwork, peersToLoadFrom, setNode, crypto } =
+  const { toggleNetwork, peersToLoadFrom, setNode, crypto, storage } =
     await setupPeers(options);
 
-  const context = await createAnonymousJazzContext({
+  const context = createAnonymousJazzContext({
     crypto,
     peersToLoadFrom,
+    storage,
   });
 
   setNode(context.agent.node);
@@ -152,7 +149,7 @@ export async function createJazzReactNativeContext<
     | (AccountClass<Account> & CoValueFromRaw<Account>)
     | AnyAccountSchema,
 >(options: ReactNativeContextOptions<S>) {
-  const { toggleNetwork, peersToLoadFrom, setNode, crypto } =
+  const { toggleNetwork, peersToLoadFrom, setNode, crypto, storage } =
     await setupPeers(options);
 
   let unsubscribeAuthUpdate = () => {};
@@ -185,6 +182,7 @@ export async function createJazzReactNativeContext<
     AccountSchema: options.AccountSchema,
     sessionProvider: provideLockSession,
     authSecretStorage: options.authSecretStorage,
+    storage,
   });
 
   setNode(context.node);

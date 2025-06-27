@@ -22,7 +22,6 @@ import {
   ThemeProvider,
   TitleAndLogo,
 } from "./basicComponents/index.ts";
-import { TaskGenerator } from "./components/TaskGenerator.tsx";
 import { wordlist } from "./wordlist.ts";
 
 /**
@@ -91,10 +90,6 @@ export default function App() {
     {
       path: "/invite/*",
       element: <p>Accepting invite...</p>,
-    },
-    {
-      path: "/generate",
-      element: <TaskGenerator />,
     },
   ]);
 
