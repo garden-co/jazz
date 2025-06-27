@@ -47,7 +47,7 @@ const features: Array<{
     icon: "encryption",
   },
   {
-    title: "Authentication",
+    title: "Auth",
     icon: "auth",
   },
 ];
