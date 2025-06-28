@@ -102,3 +102,5 @@ export class BetterAuth<T extends ClientOptions> {
     await BetterAuth.loadAuthData(this.authSecretStorage, credentials);
   };
 }
+
+export * from "./react.js";
