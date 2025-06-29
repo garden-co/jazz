@@ -5,7 +5,6 @@ import {
   JsonValue,
   LocalNode,
   Peer,
-  cojsonInternals,
 } from "cojson";
 import {
   type AnyWebSocketConstructor,
@@ -16,9 +15,7 @@ import { CoValueKnownState, NewContentMessage } from "cojson/dist/sync.js";
 import {
   Account,
   AccountClass,
-  AccountSchema,
   AnyAccountSchema,
-  CoValue,
   CoValueFromRaw,
   CoValueOrZodSchema,
   Inbox,
@@ -27,6 +24,7 @@ import {
   ResolveQuery,
   createJazzContextFromExistingCredentials,
   randomSessionProvider,
+  z,
 } from "jazz-tools";
 
 type WorkerOptions<
@@ -139,128 +137,236 @@ export async function startWorker<
   };
 }
 
-export function experimental_sendCoValueRequest<
-  V extends Record<string, CoValue>,
-  P extends JsonValue,
-  R extends JsonValue,
+export type ValueSchemas = Record<string, CoValueOrZodSchema>;
+
+export type ValueResolves<Vs extends ValueSchemas> = {
+  [K in keyof Vs]?: ResolveQuery<Vs[K]>;
+};
+
+export type ValuesFor<Vs extends ValueSchemas, Vr extends ValueResolves<Vs>> = {
+  [K in keyof Vs]: Vr[K] extends ResolveQuery<Vs[K]>
+    ? Loaded<Vs[K], Vr[K]>
+    : Loaded<Vs[K]>;
+};
+
+export type CoValueRequest<Vs extends ValueSchemas, P extends z.z.ZodType> = {
+  payload: {
+    values: Record<keyof Vs, string>;
+    params: z.infer<P>;
+  };
+  madeBy: string;
+  signerID: CojsonInternalTypes.SignerID;
+  signature: CojsonInternalTypes.Signature;
+  knownStates?: Record<string, CoValueKnownState>;
+  contentPieces?: Record<string, CojsonInternalTypes.NewContentMessage>;
+};
+
+export function experimental_defineRequest<
+  Vs extends ValueSchemas,
+  Vr extends ValueResolves<Vs>,
+  P extends z.z.ZodType,
+  R extends z.z.ZodType,
 >(
-  values: V,
-  params: P,
-  url: URL | string,
-  options?: {
-    assumeUnknown?: boolean;
+  valueSchemas: Vs,
+  defOptions: {
+    resolve: Vr;
+    paramsSchema: P;
+    responseSchema: R;
+    url: string;
   },
-): Promise<{ responseBody: R | undefined; response: Response }> {
-  const valuesWithAccount = { ...values, madeBy: context.account };
-
-  const knownStates = Object.fromEntries(
-    Object.values(valuesWithAccount).map((v) => [
-      v.id,
-      v._raw.core.knownState(),
-    ]),
-  );
-
-  const signature: CojsonInternalTypes.Signature = {} as any;
-  const signerID: CojsonInternalTypes.SignerID = {} as any;
-
-  const requestBody = {
-    signed: {
-      params,
+) {
+  const makeRequest = (
+    values: ValuesFor<Vs, {}>,
+    params: z.infer<P>,
+    _options?: { assumeUnknown?: boolean },
+  ): CoValueRequest<Vs, P> => {
+    const payload = {
       values: Object.fromEntries(
-        Object.entries(valuesWithAccount).map(([name, v]) => [name, v.id]),
-      ),
-    },
-    signerID,
-    signature,
-    knownStates,
+        Object.entries(values).map(([k, v]) => [k, v.id]),
+      ) as Record<keyof Vs, string>,
+      params: defOptions.paramsSchema.parse(params),
+    };
+
+    // TODO: either send known states for values (as deep as Vr, but best effort), or content if assumeUnknown
+
+    const me = Account.getMe();
+    const signerID = me._raw.core.node.getCurrentAgent().currentSignerID();
+    const signature = me._raw.core.node.crypto.sign(
+      me._raw.core.node.getCurrentAgent().currentSignerSecret(),
+      payload as JsonValue,
+    );
+
+    return {
+      payload,
+      madeBy: me.id,
+      signerID,
+      signature,
+    };
   };
 
-  let request = new Request(url, {
-    method: "POST",
-    body: JSON.stringify(requestBody),
-  });
+  const processRequest = async (
+    request: JsonValue,
+    as: Account,
+    process: (
+      values: ValuesFor<Vs, Vr>,
+      params: z.infer<P>,
+      madeBy: Account,
+    ) => Promise<z.infer<R>>,
+  ) => {
+    const requestParsed = z
+      .object({
+        payload: z.object({
+          values: z.z.record(z.string(), z.string()),
+          params: defOptions.paramsSchema,
+        }),
+        madeBy: z.string(),
+        signerID: z.string(),
+        signature: z.string(),
+      })
+      .parse(request);
 
-  return Promise.race([
-    (async () => {
-      while (true) {
-        let response = await fetch(request);
-        if (response.status === 200) {
-          return {
-            responseBody: (await response.json()) as R,
-            response,
-          };
-        } else if (response.status === 100) {
-          // "continue"
-          const serverKnownStates = (await response.json()) as {
-            knownStates: Record<string, CoValueKnownState>;
-          };
+    const signerID = requestParsed.signerID as CojsonInternalTypes.SignerID;
+    const signature = requestParsed.signature as CojsonInternalTypes.Signature;
 
-          const contentPieces = Object.fromEntries(
-            Object.values(values)
-              .map((v) => [
-                v.id,
-                v._raw.core.verified.newContentSince(
-                  serverKnownStates.knownStates[v.id],
-                ),
-              ])
-              .filter(([_, content]) => content !== undefined),
-          );
+    if (
+      !as._raw.core.node.crypto.verify(
+        signature,
+        requestParsed.payload as JsonValue,
+        signerID,
+      )
+    ) {
+      throw new Error("Invalid signature");
+    }
 
-          const newRequestBody = {
-            params,
-            contentPieces,
-          };
+    const madeByLoaded = await Account.load(requestParsed.madeBy);
 
-          const newRequest = new Request(url, {
-            method: "POST",
-            body: JSON.stringify(newRequestBody),
-          });
+    if (!madeByLoaded) {
+      throw new Error("Made by account not found");
+    }
 
-          request = newRequest;
-        } else {
-          console.error("Unexpected response status", response.status);
-          return {
-            responseBody: undefined,
-            response,
-          };
-        }
-      }
-    })(),
-    new Promise<{ responseBody: R | undefined; response: Response }>(
-      (_resolve, reject) =>
-        setTimeout(() => reject(new Error("Request timed out")), 1000),
-    ),
-  ]);
-}
+    if (!madeByLoaded._raw.currentAgentID().includes(signerID)) {
+      throw new Error("Not a valid signer ID for madeBy");
+    }
 
-export async function experimental_handleCoValueRequest<
-  V extends Record<string, CoValue>,
-  P extends JsonValue,
-  R extends JsonValue,
-  S extends
-    | (AccountClass<Account> & CoValueFromRaw<Account>)
-    | AnyAccountSchema,
->(
-  request: Request,
-  callback: (values: V, payload: R) => Promise<void>,
-  worker: S | WorkerOptions<S>,
-) {
-  const body = (await request.json()) as {
-    values: V;
-    params: P;
-  } & (
-    | {
-        contentPieces: Record<string, NewContentMessage>;
-      }
-    | {
-        knownStates: Record<string, CoValueKnownState>;
-      }
-  );
+    const values = Object.fromEntries(
+      await Promise.all(
+        Object.entries(requestParsed.payload.values).map(async ([k, id]) => [
+          k,
+          (await (valueSchemas[k] as any).load(id, {
+            resolve: defOptions.resolve[k],
+            loadAs: as,
+          })) ||
+            (() => {
+              throw new Error(`Value ${k} in request not found/accessible`);
+            })(),
+        ]),
+      ),
+    ) as ValuesFor<Vs, Vr>;
 
-  // make sure that for all values ("relevant values") we know more and
-  // are fully synced with the sync server before proceeding
+    const responsePayload = await process(
+      values,
+      (requestParsed.payload as { params: z.infer<P> }).params, // TODO: weird
+      madeByLoaded,
+    );
 
-  if ("knownStates" in body) {
-  } else {
-  }
+    return {
+      type: "success",
+      payload: responsePayload,
+    };
+  };
+
+  const handle = async (
+    request: Request,
+    as: Account,
+    callback: (
+      values: ValuesFor<Vs, Vr>,
+      params: z.infer<P>,
+      madeBy: Account,
+    ) => Promise<z.infer<R>>,
+  ): Promise<Response> => {
+    const responsePayload = await processRequest(
+      await request.json(),
+      as,
+      callback,
+    );
+
+    const _ = z
+      .object({
+        type: z.literal("success"),
+        payload: defOptions.responseSchema,
+      })
+      .parse(responsePayload);
+
+    return new Response(JSON.stringify(responsePayload), {
+      status: 200,
+      headers: {
+        "Content-Type": "application/json",
+      },
+    });
+  };
+
+  const handleResponse = (
+    response:
+      | { type: "success"; payload: z.infer<R> }
+      | { type: "continue"; knownStates: Record<string, CoValueKnownState> },
+  ):
+    | { type: "newRequest"; payload: CoValueRequest<Vs, P> }
+    | { type: "success"; payload: z.infer<R> }
+    | { type: "error"; error: string } => {
+    if (response.type === "success") {
+      return { type: "success", payload: response.payload };
+    } else if (response.type === "continue") {
+      // TODO: send content pieces according to response.knownStates
+      throw new Error("Continue response not yet implemented");
+    } else {
+      throw new Error("Unknown response type");
+    }
+  };
+
+  const send = async (
+    values: ValuesFor<Vs, {}>,
+    params: z.infer<P>,
+    options?: { assumeUnknown?: boolean },
+  ) => {
+    const request = makeRequest(values, params, options);
+
+    const response = await fetch(defOptions.url, {
+      method: "POST",
+      body: JSON.stringify(request),
+    });
+
+    const responseBody = await response.json();
+    const responseParsed = z
+      .object({
+        type: z.literal("success"),
+        payload: defOptions.responseSchema,
+      })
+      .parse(responseBody);
+    const responseResult = handleResponse(
+      responseParsed as {
+        type: "success";
+        payload: z.infer<R>;
+      },
+    ); // TODO: weird
+
+    if (responseResult.type === "success") {
+      return responseResult.payload;
+    } else if (responseResult.type === "newRequest") {
+      throw new Error("New request response not yet implemented");
+    } else if (responseResult.type === "error") {
+      throw new Error(responseResult.error);
+    } else {
+      throw new Error("Unknown response type");
+    }
+  };
+
+  return {
+    send,
+    handle,
+    internal: {
+      makeRequest,
+      processRequest,
+      handleResponse,
+    },
+  };
 }
