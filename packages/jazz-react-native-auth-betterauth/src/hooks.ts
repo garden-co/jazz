@@ -1,4 +1,4 @@
-import { createUseBetterAuthHook } from "jazz-auth-betterauth/src/react";
+import { createUseBetterAuthHook } from "jazz-auth-betterauth/react";
 import {
   useAuthSecretStorage,
   useIsAuthenticated,

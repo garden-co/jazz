@@ -5,7 +5,8 @@ import type {
 } from "jazz-tools";
 import * as React from "react";
 import { useEffect, useMemo, useState } from "react";
-import { type AuthClient, BetterAuth } from "./index.js";
+import { BetterAuth } from "./index.js";
+import type { AuthClient } from "./index.js";
 
 export interface JazzBetterAuthUser {
   id: string;

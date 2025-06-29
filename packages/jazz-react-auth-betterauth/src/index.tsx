@@ -1,7 +1,7 @@
 import {
   createAuthContext,
   createUseBetterAuthHook,
-} from "jazz-auth-betterauth";
+} from "jazz-auth-betterauth/react";
 import {
   useAuthSecretStorage,
   useIsAuthenticated,
