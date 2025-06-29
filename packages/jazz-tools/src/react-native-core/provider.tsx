@@ -71,7 +71,8 @@ export function JazzProviderCore<
             : undefined,
           onAnonymousAccountDiscarded: onAnonymousAccountDiscardedRefCallback,
           CryptoProvider,
-        };
+        } satisfies JazzContextManagerProps<S>;
+
         if (contextManager.propsChanged(props)) {
           contextManager.createContext(props).catch((error) => {
             console.log(error.stack);

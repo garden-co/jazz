@@ -1,0 +1,34 @@
+{
+  "name": "jazz-react-native-auth-betterauth",
+  "version": "0.15.4",
+  "description": "BetterAuth integration for React Native",
+  "main": "dist/index.js",
+  "module": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./contexts/Auth": {
+      "types": "./dist/contexts/Auth.d.ts",
+      "default": "./dist/contexts/Auth.js"
+    }
+  },
+  "scripts": {
+    "build": "rm -rf ./dist && tsc --sourceMap --outDir dist"
+  },
+  "dependencies": {
+    "jazz-auth-betterauth": "workspace:*",
+    "jazz-react-auth-betterauth": "workspace:*"
+  },
+  "peerDependencies": {
+    "react": "*",
+    "react-native": "*"
+  },
+  "devDependencies": {
+    "@types/react": "19.1.0",
+    "typescript": "catalog:"
+  }
+}

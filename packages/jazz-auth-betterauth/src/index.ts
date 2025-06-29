@@ -9,29 +9,33 @@ import {
 } from "jazz-tools";
 import type { AuthSetPayload } from "jazz-tools";
 
-export const newAuthClient = <T extends ClientOptions>(options?: T) => {
-  type Plugins = Array<
-    | NonNullable<NonNullable<T>["plugins"]>[number]
-    | ReturnType<typeof jazzClientPlugin>
+type Plugins<T extends ClientOptions> = Array<
+  | NonNullable<NonNullable<T>["plugins"]>[number]
+  | ReturnType<typeof jazzClientPlugin>
+>;
+
+type Options<T extends ClientOptions> = {
+  plugins: Plugins<T>;
+} & T;
+
+export type AuthClient<T extends ClientOptions> = ReturnType<
+  typeof createAuthClient<Options<T>>
+> &
+  ReturnType<
+    typeof createAuthClient<{
+      plugins: [ReturnType<typeof jazzClientPlugin>];
+    }>
   >;
-  type Options<T> = {
-    plugins: Plugins;
-  } & T;
-  type AuthClient<T> = ReturnType<typeof createAuthClient<Options<T>>> &
-    ReturnType<
-      typeof createAuthClient<{
-        plugins: [ReturnType<typeof jazzClientPlugin>];
-      }>
-    >;
+
+export const newAuthClient = <T extends ClientOptions>(
+  options?: T,
+): AuthClient<T> => {
   return createAuthClient<Options<T>>({
     ...options,
     plugins: [...(options?.plugins ?? []), ...[jazzClientPlugin()]],
   } as Options<T>) as AuthClient<T>;
 };
 
-export type AuthClient<T extends ClientOptions> = ReturnType<
-  typeof newAuthClient<T>
->;
 export type InferredSession<T extends ClientOptions> =
   AuthClient<T>["$Infer"]["Session"];
 export type Session<T extends ClientOptions> =

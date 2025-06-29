@@ -2,9 +2,17 @@
 	"name": "jazz-auth-betterauth",
 	"version": "0.15.4",
 	"type": "module",
-	"main": "dist/index.js",
-	"types": "src/index.ts",
 	"license": "MIT",
+	"exports": {
+		".": {
+			"types": "./src/index.ts",
+			"default": "./dist/index.js"
+		},
+		"./react": {
+			"types": "./src/react.ts",
+			"default": "./dist/react.js"
+		}
+	},
 	"dependencies": {
 		"cojson": "workspace:*",
 		"jazz-tools": "workspace:*",
@@ -13,12 +21,17 @@
 	"scripts": {
 		"format-and-lint": "biome check .",
 		"format-and-lint:fix": "biome check . --write",
-		"build": "rm -rf ./dist && tsc --sourceMap --outDir dist",
+		"build": "tsup",
+		"dev": "tsup --watch",
 		"prepublishOnly": "npm run build",
 		"test": "vitest --run --root ../../ --project jazz-auth-betterauth",
 		"test:watch": "vitest --watch --root ../../ --project jazz-auth-betterauth"
 	},
+	"peerDependencies": {
+		"react": "*"
+	},
 	"devDependencies": {
-		"typescript": "catalog:"
+		"typescript": "catalog:",
+		"tsup": "^8.0.2"
 	}
 }

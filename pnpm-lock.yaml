@@ -1711,7 +1711,13 @@ importers:
       jazz-tools:
         specifier: workspace:*
         version: link:../jazz-tools
+      react:
+        specifier: 19.0.0
+        version: 19.0.0
     devDependencies:
+      tsup:
+        specifier: ^8.0.2
+        version: 8.5.0(@microsoft/api-extractor@7.48.1(@types/node@22.15.18))(@swc/core@1.11.29(@swc/helpers@0.5.17))(jiti@2.4.2)(postcss@8.5.4)(tsx@4.19.3)(typescript@5.6.2)(yaml@2.6.1)
       typescript:
         specifier: 'catalog:'
         version: 5.6.2
@@ -1772,6 +1778,28 @@ importers:
       '@testing-library/react':
         specifier: ^16.1.0
         version: 16.2.0(@testing-library/dom@10.4.0)(@types/react-dom@19.0.0)(@types/react@19.0.0)(react-dom@19.0.0(react@19.0.0))(react@19.0.0)
+      '@types/react':
+        specifier: 19.0.0
+        version: 19.0.0
+      typescript:
+        specifier: 'catalog:'
+        version: 5.6.2
+
+  packages/jazz-react-native-auth-betterauth:
+    dependencies:
+      jazz-auth-betterauth:
+        specifier: workspace:*
+        version: link:../jazz-auth-betterauth
+      jazz-react-auth-betterauth:
+        specifier: workspace:*
+        version: link:../jazz-react-auth-betterauth
+      react:
+        specifier: 19.0.0
+        version: 19.0.0
+      react-native:
+        specifier: '*'
+        version: 0.80.0(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@types/react@19.0.0)(react@19.0.0)
+    devDependencies:
       '@types/react':
         specifier: 19.0.0
         version: 19.0.0
@@ -7385,10 +7413,6 @@ packages:
   connect@3.7.0:
     resolution: {integrity: sha512-ZqRXc+tZukToSNmh5C2iWMSoV3X1YUcPbqEM4DkEG5tNQXrQUZCNVGGv3IuicnkMtPfGf3Xtp8WCXs295iQ1pQ==}
     engines: {node: '>= 0.10.0'}
-
-  consola@3.3.0:
-    resolution: {integrity: sha512-kxltocVQCwQNFvw40dlVRYeAkAvtYjMFZYNlOcsF5wExPpGwPxMwgx4IfDJvBRPtBpnQwItd5WkTaR0ZwT/TmQ==}
-    engines: {node: ^14.18.0 || >=16.10.0}
 
   consola@3.4.2:
     resolution: {integrity: sha512-5IKcdX0nnYavi6G7TtOhwkYzyjfJlatbjMjuLSfE2kYT5pMDOilZ4OvMhi637CcDICTmz3wARPoyhqyX1Y+XvA==}
@@ -15754,7 +15778,7 @@ snapshots:
 
   '@mapbox/node-pre-gyp@2.0.0-rc.0':
     dependencies:
-      consola: 3.3.0
+      consola: 3.4.2
       detect-libc: 2.0.4
       https-proxy-agent: 7.0.6
       node-fetch: 2.7.0
@@ -19890,8 +19914,6 @@ snapshots:
       utils-merge: 1.0.1
     transitivePeerDependencies:
       - supports-color
-
-  consola@3.3.0: {}
 
   consola@3.4.2: {}
 

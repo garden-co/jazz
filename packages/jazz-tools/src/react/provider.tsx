@@ -74,6 +74,7 @@ export function JazzReactProvider<
 
         if (contextManager.propsChanged(props)) {
           contextManager.createContext(props).catch((error) => {
+            console.log(error.stack);
             console.error("Error creating Jazz browser context:", error);
           });
         }
