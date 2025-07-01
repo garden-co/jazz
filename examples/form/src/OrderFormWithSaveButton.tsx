@@ -1,4 +1,4 @@
-import { useCoState } from "jazz-react";
+import { useCoState } from "jazz-tools/react";
 import { CoPlainText, Loaded } from "jazz-tools";
 import { useEffect, useState } from "react";
 import { OrderThumbnail } from "./OrderThumbnail.tsx";
