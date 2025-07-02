@@ -7,7 +7,7 @@ import type {
   StoredCoValueRow,
   StoredSessionRow,
   TransactionRow,
-} from "cojson-storage";
+} from "cojson";
 import { CoJsonIDBTransaction } from "./CoJsonIDBTransaction.js";
 
 export class IDBClient implements DBClientInterfaceAsync {

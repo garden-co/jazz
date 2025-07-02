@@ -1,5 +1,5 @@
 import { LocalNode, Peer, RawAccountID } from "cojson";
-import { IDBStorage } from "cojson-storage-indexeddb";
+import { getIndexedDBStorage } from "cojson-storage-indexeddb";
 import { WebSocketPeerWithReconnection } from "cojson-transport-ws";
 import { WasmCrypto } from "cojson/crypto/WasmCrypto";
 import {
@@ -55,14 +55,13 @@ async function setupPeers(options: BaseBrowserContextOptions) {
 
   const peersToLoadFrom: Peer[] = [];
 
-  if (useIndexedDB) {
-    peersToLoadFrom.push(await IDBStorage.asPeer());
-  }
+  const storage = useIndexedDB ? await getIndexedDBStorage() : undefined;
 
   if (options.sync.when === "never") {
     return {
       toggleNetwork: () => {},
       peersToLoadFrom,
+      storage,
       setNode: () => {},
       crypto,
     };
@@ -102,6 +101,7 @@ async function setupPeers(options: BaseBrowserContextOptions) {
   return {
     toggleNetwork,
     peersToLoadFrom,
+    storage,
     setNode,
     crypto,
   };
@@ -110,12 +110,13 @@ async function setupPeers(options: BaseBrowserContextOptions) {
 export async function createJazzBrowserGuestContext(
   options: BaseBrowserContextOptions,
 ) {
-  const { toggleNetwork, peersToLoadFrom, setNode, crypto } =
+  const { toggleNetwork, peersToLoadFrom, setNode, crypto, storage } =
     await setupPeers(options);
 
   const context = await createAnonymousJazzContext({
     crypto,
     peersToLoadFrom,
+    storage,
   });
 
   setNode(context.agent.node);
@@ -152,7 +153,7 @@ export async function createJazzBrowserContext<
     | (AccountClass<Account> & CoValueFromRaw<Account>)
     | AnyAccountSchema,
 >(options: BrowserContextOptions<S>) {
-  const { toggleNetwork, peersToLoadFrom, setNode, crypto } =
+  const { toggleNetwork, peersToLoadFrom, setNode, crypto, storage } =
     await setupPeers(options);
 
   let unsubscribeAuthUpdate = () => {};
@@ -177,6 +178,7 @@ export async function createJazzBrowserContext<
     credentials: options.credentials,
     newAccountProps: options.newAccountProps,
     peersToLoadFrom,
+    storage,
     crypto,
     defaultProfileName: options.defaultProfileName,
     AccountSchema: options.AccountSchema,

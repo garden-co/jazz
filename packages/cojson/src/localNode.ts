@@ -34,6 +34,7 @@ import {
 import { AgentSecret, CryptoProvider } from "./crypto/crypto.js";
 import { AgentID, RawCoID, SessionID, isAgentID } from "./ids.js";
 import { logger } from "./logger.js";
+import { StorageAPI } from "./storage/index.js";
 import { Peer, PeerID, SyncManager } from "./sync.js";
 import { accountOrAgentIDfromSessionID } from "./typeUtils/accountOrAgentIDfromSessionID.js";
 import { expectGroup } from "./typeUtils/expectGroup.js";
@@ -64,6 +65,8 @@ export class LocalNode {
 
   crashed: Error | undefined = undefined;
 
+  storage?: StorageAPI;
+
   /** @category 3. Low-level */
   constructor(
     agentSecret: AgentSecret,
@@ -73,6 +76,10 @@ export class LocalNode {
     this.agentSecret = agentSecret;
     this.currentSessionID = currentSessionID;
     this.crypto = crypto;
+  }
+
+  setStorage(storage: StorageAPI) {
+    this.storage = storage;
   }
 
   getCoValue(id: RawCoID) {
@@ -142,6 +149,7 @@ export class LocalNode {
     crypto: CryptoProvider;
     initialAgentSecret?: AgentSecret;
     peersToLoadFrom?: Peer[];
+    storage?: StorageAPI;
   }): RawAccount {
     const {
       crypto,
@@ -159,6 +167,10 @@ export class LocalNode {
       crypto.newRandomSessionID(accountID as RawAccountID),
       crypto,
     );
+
+    if (opts.storage) {
+      node.setStorage(opts.storage);
+    }
 
     for (const peer of peersToLoadFrom) {
       node.syncManager.addPeer(peer);
@@ -198,12 +210,14 @@ export class LocalNode {
     migration,
     crypto,
     initialAgentSecret = crypto.newRandomAgentSecret(),
+    storage,
   }: {
     creationProps: { name: string };
     peersToLoadFrom?: Peer[];
     migration?: RawAccountMigration<AccountMeta>;
     crypto: CryptoProvider;
     initialAgentSecret?: AgentSecret;
+    storage?: StorageAPI;
   }): Promise<{
     node: LocalNode;
     accountID: RawAccountID;
@@ -214,6 +228,7 @@ export class LocalNode {
       crypto,
       initialAgentSecret,
       peersToLoadFrom,
+      storage,
     });
     const node = account.core.node;
 
@@ -234,7 +249,7 @@ export class LocalNode {
       throw new Error("Must set account profile in initial migration");
     }
 
-    if (node.syncManager.hasStoragePeers()) {
+    if (node.storage) {
       await Promise.all([
         node.syncManager.waitForStorageSync(account.id),
         node.syncManager.waitForStorageSync(profileId),
@@ -257,6 +272,7 @@ export class LocalNode {
     peersToLoadFrom,
     crypto,
     migration,
+    storage,
   }: {
     accountID: RawAccountID;
     accountSecret: AgentSecret;
@@ -264,6 +280,7 @@ export class LocalNode {
     peersToLoadFrom: Peer[];
     crypto: CryptoProvider;
     migration?: RawAccountMigration<AccountMeta>;
+    storage?: StorageAPI;
   }): Promise<LocalNode> {
     try {
       const node = new LocalNode(
@@ -271,6 +288,10 @@ export class LocalNode {
         sessionID || crypto.newRandomSessionID(accountID),
         crypto,
       );
+
+      if (storage) {
+        node.setStorage(storage);
+      }
 
       for (const peer of peersToLoadFrom) {
         node.syncManager.addPeer(peer);
@@ -354,19 +375,13 @@ export class LocalNode {
         coValue.loadingState === "unknown" ||
         coValue.loadingState === "unavailable"
       ) {
-        const peers =
-          this.syncManager.getServerAndStoragePeers(skipLoadingFromPeer);
+        const peers = this.syncManager.getServerPeers(skipLoadingFromPeer);
 
-        if (peers.length === 0) {
+        if (!this.storage && peers.length === 0) {
           return coValue;
         }
 
-        coValue.loadFromPeers(peers).catch((e) => {
-          logger.error("Error loading from peers", {
-            id,
-            err: e,
-          });
-        });
+        coValue.load(peers);
       }
 
       const result = await coValue.waitForAvailableOrUnavailable();
@@ -714,6 +729,7 @@ export class LocalNode {
   }
 
   gracefulShutdown() {
+    this.storage?.close();
     this.syncManager.gracefulShutdown();
   }
 }

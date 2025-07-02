@@ -193,7 +193,7 @@ export class RawGroup<
 
   loadAllChildGroups() {
     const requests: Promise<unknown>[] = [];
-    const peers = this.core.node.syncManager.getServerAndStoragePeers();
+    const peers = this.core.node.syncManager.getServerPeers();
 
     for (const key of this.keys()) {
       if (!isChildGroupReference(key)) {
@@ -207,9 +207,7 @@ export class RawGroup<
         child.loadingState === "unknown" ||
         child.loadingState === "unavailable"
       ) {
-        child.loadFromPeers(peers).catch(() => {
-          logger.error(`Failed to load child group ${id}`);
-        });
+        child.load(peers);
       }
 
       requests.push(

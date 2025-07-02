@@ -74,17 +74,14 @@ describe("Browser sync on unstable connection", () => {
 
     const promise2 = FileStream.loadAsBlob(file.id);
 
-    // TODO: If the connection is dropped in the middle of streaming, the load fails
-    // await syncServer.disconnectAllClients()
+    await syncServer.disconnectAllClients();
 
     const fileOnSecondAccount = await promise2;
 
     expect(fileOnSecondAccount?.size).toBe(bytes10MB);
   });
 
-  // TODO: This test is flaky, it fails when running it in CI. Related to an issue investigation
-  // so it's probably flaky due some bugs.
-  test.skip("load files from storage correctly when pointing to different sync servers", async () => {
+  test("load files from storage correctly when pointing to different sync servers", async () => {
     const syncServer = await startSyncServer();
     const { contextManager } = await createAccountContext({
       sync: {

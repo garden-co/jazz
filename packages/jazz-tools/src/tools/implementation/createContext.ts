@@ -8,6 +8,7 @@ import {
   RawAccount,
   RawAccountID,
   SessionID,
+  StorageAPI,
 } from "cojson";
 import { AuthSecretStorage } from "../auth/AuthSecretStorage.js";
 import { type Account, type AccountClass } from "../coValues/account.js";
@@ -93,6 +94,7 @@ export async function createJazzContextFromExistingCredentials<
   credentials,
   peersToLoadFrom,
   crypto,
+  storage,
   AccountSchema: PropsAccountSchema,
   sessionProvider,
   onLogOut,
@@ -103,6 +105,7 @@ export async function createJazzContextFromExistingCredentials<
   AccountSchema?: S;
   sessionProvider: SessionProvider;
   onLogOut?: () => void;
+  storage?: StorageAPI;
 }): Promise<JazzContextWithAccount<InstanceOfSchema<S>>> {
   const { sessionID, sessionDone } = await sessionProvider(
     credentials.accountID,
@@ -120,6 +123,7 @@ export async function createJazzContextFromExistingCredentials<
     sessionID: sessionID,
     peersToLoadFrom: peersToLoadFrom,
     crypto: crypto,
+    storage,
     migration: async (rawAccount, _node, creationProps) => {
       const account = AccountClass.fromRaw(rawAccount) as InstanceOfSchema<S>;
       activeAccountContext.set(account);
@@ -157,6 +161,7 @@ export async function createJazzContextForNewAccount<
   crypto,
   AccountSchema: PropsAccountSchema,
   onLogOut,
+  storage,
 }: {
   creationProps: { name: string };
   initialAgentSecret?: AgentSecret;
@@ -164,6 +169,7 @@ export async function createJazzContextForNewAccount<
   crypto: CryptoProvider;
   AccountSchema?: S;
   onLogOut?: () => Promise<void>;
+  storage?: StorageAPI;
 }): Promise<JazzContextWithAccount<InstanceOfSchema<S>>> {
   const CurrentAccountSchema =
     PropsAccountSchema ?? (RegisteredSchemas["Account"] as unknown as S);
@@ -175,6 +181,7 @@ export async function createJazzContextForNewAccount<
     peersToLoadFrom,
     crypto,
     initialAgentSecret,
+    storage,
     migration: async (rawAccount, _node, creationProps) => {
       const account = AccountClass.fromRaw(rawAccount) as InstanceOfSchema<S>;
       activeAccountContext.set(account);
@@ -212,6 +219,7 @@ export async function createJazzContext<
   AccountSchema?: S;
   sessionProvider: SessionProvider;
   authSecretStorage: AuthSecretStorage;
+  storage?: StorageAPI;
 }) {
   const crypto = options.crypto;
 
@@ -236,6 +244,7 @@ export async function createJazzContext<
       onLogOut: () => {
         authSecretStorage.clearWithoutNotify();
       },
+      storage: options.storage,
     });
   } else {
     const secretSeed = options.crypto.newRandomSecretSeed();
@@ -257,6 +266,7 @@ export async function createJazzContext<
       onLogOut: async () => {
         await authSecretStorage.clearWithoutNotify();
       },
+      storage: options.storage,
     });
 
     if (!options.newAccountProps) {
@@ -278,9 +288,11 @@ export async function createJazzContext<
 export function createAnonymousJazzContext({
   peersToLoadFrom,
   crypto,
+  storage,
 }: {
   peersToLoadFrom: Peer[];
   crypto: CryptoProvider;
+  storage?: StorageAPI;
 }): JazzContextWithAgent {
   const agentSecret = crypto.newRandomAgentSecret();
 
@@ -292,6 +304,10 @@ export function createAnonymousJazzContext({
 
   for (const peer of peersToLoadFrom) {
     node.syncManager.addPeer(peer);
+  }
+
+  if (storage) {
+    node.setStorage(storage);
   }
 
   activeAccountContext.setGuestMode();

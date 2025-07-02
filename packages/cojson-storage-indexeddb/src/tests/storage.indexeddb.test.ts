@@ -1,8 +1,7 @@
-import { LocalNode } from "cojson";
-import { StorageManagerAsync } from "cojson-storage";
+import { LocalNode, StorageApiAsync } from "cojson";
 import { WasmCrypto } from "cojson/crypto/WasmCrypto";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
-import { IDBStorage } from "../index.js";
+import { getIndexedDBStorage } from "../index.js";
 import { toSimplifiedMessages } from "./messagesTestUtils.js";
 import { trackMessages, waitFor } from "./testUtils.js";
 
@@ -17,22 +16,6 @@ afterEach(() => {
   syncMessages.restore();
 });
 
-test("Should be able to initialize and load from empty DB", async () => {
-  const agentSecret = Crypto.newRandomAgentSecret();
-
-  const node = new LocalNode(
-    agentSecret,
-    Crypto.newRandomSessionID(Crypto.getAgentID(agentSecret)),
-    Crypto,
-  );
-
-  node.syncManager.addPeer(await IDBStorage.asPeer());
-
-  await new Promise((resolve) => setTimeout(resolve, 200));
-
-  expect(node.syncManager.peers.indexedDB).toBeDefined();
-});
-
 test("should sync and load data from storage", async () => {
   const agentSecret = Crypto.newRandomAgentSecret();
 
@@ -41,18 +24,14 @@ test("should sync and load data from storage", async () => {
     Crypto.newRandomSessionID(Crypto.getAgentID(agentSecret)),
     Crypto,
   );
-
-  const peer = await IDBStorage.asPeer();
-
-  node1.syncManager.addPeer(peer);
+  node1.setStorage(await getIndexedDBStorage());
 
   const group = node1.createGroup();
-
   const map = group.createMap();
 
   map.set("hello", "world");
 
-  await new Promise((resolve) => setTimeout(resolve, 200));
+  await map.core.waitForSync();
 
   expect(
     toSimplifiedMessages(
@@ -65,9 +44,7 @@ test("should sync and load data from storage", async () => {
   ).toMatchInlineSnapshot(`
     [
       "client -> CONTENT Group header: true new: After: 0 New: 3",
-      "storage -> KNOWN Group sessions: header/3",
       "client -> CONTENT Map header: true new: After: 0 New: 1",
-      "storage -> KNOWN Map sessions: header/1",
     ]
   `);
 
@@ -80,9 +57,7 @@ test("should sync and load data from storage", async () => {
     Crypto,
   );
 
-  const peer2 = await IDBStorage.asPeer();
-
-  node2.syncManager.addPeer(peer2);
+  node2.setStorage(await getIndexedDBStorage());
 
   const map2 = await node2.load(map.id);
   if (map2 === "unavailable") {
@@ -103,9 +78,7 @@ test("should sync and load data from storage", async () => {
     [
       "client -> LOAD Map sessions: empty",
       "storage -> CONTENT Group header: true new: After: 0 New: 3",
-      "client -> KNOWN Group sessions: header/3",
       "storage -> CONTENT Map header: true new: After: 0 New: 1",
-      "client -> KNOWN Map sessions: header/1",
     ]
   `);
 });
@@ -119,15 +92,12 @@ test("should send an empty content message if there is no content", async () => 
     Crypto,
   );
 
-  const peer = await IDBStorage.asPeer();
-
-  node1.syncManager.addPeer(peer);
+  node1.setStorage(await getIndexedDBStorage());
 
   const group = node1.createGroup();
-
   const map = group.createMap();
 
-  await new Promise((resolve) => setTimeout(resolve, 200));
+  await map.core.waitForSync();
 
   expect(
     toSimplifiedMessages(
@@ -140,9 +110,7 @@ test("should send an empty content message if there is no content", async () => 
   ).toMatchInlineSnapshot(`
     [
       "client -> CONTENT Group header: true new: After: 0 New: 3",
-      "storage -> KNOWN Group sessions: header/3",
       "client -> CONTENT Map header: true new: ",
-      "storage -> KNOWN Map sessions: header/0",
     ]
   `);
 
@@ -155,9 +123,7 @@ test("should send an empty content message if there is no content", async () => 
     Crypto,
   );
 
-  const peer2 = await IDBStorage.asPeer();
-
-  node2.syncManager.addPeer(peer2);
+  node2.setStorage(await getIndexedDBStorage());
 
   const map2 = await node2.load(map.id);
   if (map2 === "unavailable") {
@@ -176,9 +142,7 @@ test("should send an empty content message if there is no content", async () => 
     [
       "client -> LOAD Map sessions: empty",
       "storage -> CONTENT Group header: true new: After: 0 New: 3",
-      "client -> KNOWN Group sessions: header/3",
       "storage -> CONTENT Map header: true new: ",
-      "client -> KNOWN Map sessions: header/0",
     ]
   `);
 });
@@ -192,10 +156,7 @@ test("should load dependencies correctly (group inheritance)", async () => {
     Crypto,
   );
 
-  const peer = await IDBStorage.asPeer();
-
-  node1.syncManager.addPeer(peer);
-
+  node1.setStorage(await getIndexedDBStorage());
   const group = node1.createGroup();
   const parentGroup = node1.createGroup();
 
@@ -205,7 +166,7 @@ test("should load dependencies correctly (group inheritance)", async () => {
 
   map.set("hello", "world");
 
-  await new Promise((resolve) => setTimeout(resolve, 200));
+  await map.core.waitForSync();
 
   expect(
     toSimplifiedMessages(
@@ -218,12 +179,9 @@ test("should load dependencies correctly (group inheritance)", async () => {
     ),
   ).toMatchInlineSnapshot(`
     [
-      "client -> CONTENT ParentGroup header: true new: After: 0 New: 4",
-      "storage -> KNOWN ParentGroup sessions: header/4",
       "client -> CONTENT Group header: true new: After: 0 New: 5",
-      "storage -> KNOWN Group sessions: header/5",
+      "client -> CONTENT ParentGroup header: true new: After: 0 New: 4",
       "client -> CONTENT Map header: true new: After: 0 New: 1",
-      "storage -> KNOWN Map sessions: header/1",
     ]
   `);
 
@@ -236,9 +194,7 @@ test("should load dependencies correctly (group inheritance)", async () => {
     Crypto,
   );
 
-  const peer2 = await IDBStorage.asPeer();
-
-  node2.syncManager.addPeer(peer2);
+  node2.setStorage(await getIndexedDBStorage());
 
   await node2.load(map.id);
 
@@ -259,11 +215,8 @@ test("should load dependencies correctly (group inheritance)", async () => {
     [
       "client -> LOAD Map sessions: empty",
       "storage -> CONTENT ParentGroup header: true new: After: 0 New: 4",
-      "client -> KNOWN ParentGroup sessions: header/4",
       "storage -> CONTENT Group header: true new: After: 0 New: 5",
-      "client -> KNOWN Group sessions: header/5",
       "storage -> CONTENT Map header: true new: After: 0 New: 1",
-      "client -> KNOWN Map sessions: header/1",
     ]
   `);
 });
@@ -277,9 +230,7 @@ test("should not send the same dependency value twice", async () => {
     Crypto,
   );
 
-  const peer = await IDBStorage.asPeer();
-
-  node1.syncManager.addPeer(peer);
+  node1.setStorage(await getIndexedDBStorage());
 
   const group = node1.createGroup();
   const parentGroup = node1.createGroup();
@@ -292,7 +243,8 @@ test("should not send the same dependency value twice", async () => {
   map.set("hello", "world");
   mapFromParent.set("hello", "world");
 
-  await new Promise((resolve) => setTimeout(resolve, 200));
+  await map.core.waitForSync();
+  await mapFromParent.core.waitForSync();
 
   syncMessages.clear();
   node1.gracefulShutdown();
@@ -303,9 +255,7 @@ test("should not send the same dependency value twice", async () => {
     Crypto,
   );
 
-  const peer2 = await IDBStorage.asPeer();
-
-  node2.syncManager.addPeer(peer2);
+  node2.setStorage(await getIndexedDBStorage());
 
   await node2.load(map.id);
   await node2.load(mapFromParent.id);
@@ -329,14 +279,10 @@ test("should not send the same dependency value twice", async () => {
     [
       "client -> LOAD Map sessions: empty",
       "storage -> CONTENT ParentGroup header: true new: After: 0 New: 4",
-      "client -> KNOWN ParentGroup sessions: header/4",
       "storage -> CONTENT Group header: true new: After: 0 New: 5",
-      "client -> KNOWN Group sessions: header/5",
       "storage -> CONTENT Map header: true new: After: 0 New: 1",
-      "client -> KNOWN Map sessions: header/1",
       "client -> LOAD MapFromParent sessions: empty",
       "storage -> CONTENT MapFromParent header: true new: After: 0 New: 1",
-      "client -> KNOWN MapFromParent sessions: header/1",
     ]
   `);
 });
@@ -350,9 +296,8 @@ test("should recover from data loss", async () => {
     Crypto,
   );
 
-  const peer = await IDBStorage.asPeer();
-
-  node1.syncManager.addPeer(peer);
+  const storage = await getIndexedDBStorage();
+  node1.setStorage(storage);
 
   const group = node1.createGroup();
 
@@ -360,22 +305,25 @@ test("should recover from data loss", async () => {
 
   map.set("0", 0);
 
-  await new Promise((resolve) => setTimeout(resolve, 200));
+  await map.core.waitForSync();
 
   const mock = vi
-    .spyOn(StorageManagerAsync.prototype, "handleSyncMessage")
-    .mockImplementation(() => Promise.resolve());
+    .spyOn(StorageApiAsync.prototype, "store")
+    .mockImplementation(() => Promise.resolve(undefined));
 
   map.set("1", 1);
   map.set("2", 2);
 
   await new Promise((resolve) => setTimeout(resolve, 200));
 
+  const knownState = storage.getKnownState(map.id);
+  Object.assign(knownState, map.core.knownState());
+
   mock.mockReset();
 
   map.set("3", 3);
 
-  await new Promise((resolve) => setTimeout(resolve, 200));
+  await map.core.waitForSync();
 
   expect(
     toSimplifiedMessages(
@@ -388,13 +336,10 @@ test("should recover from data loss", async () => {
   ).toMatchInlineSnapshot(`
     [
       "client -> CONTENT Group header: true new: After: 0 New: 3",
-      "storage -> KNOWN Group sessions: header/3",
       "client -> CONTENT Map header: true new: After: 0 New: 1",
-      "storage -> KNOWN Map sessions: header/1",
       "client -> CONTENT Map header: false new: After: 3 New: 1",
-      "storage -> KNOWN CORRECTION Map sessions: header/1",
+      "storage -> KNOWN CORRECTION Map sessions: header/4",
       "client -> CONTENT Map header: false new: After: 1 New: 3",
-      "storage -> KNOWN Map sessions: header/4",
     ]
   `);
 
@@ -407,9 +352,7 @@ test("should recover from data loss", async () => {
     Crypto,
   );
 
-  const peer2 = await IDBStorage.asPeer();
-
-  node2.syncManager.addPeer(peer2);
+  node2.setStorage(await getIndexedDBStorage());
 
   const map2 = await node2.load(map.id);
 
@@ -436,9 +379,7 @@ test("should recover from data loss", async () => {
     [
       "client -> LOAD Map sessions: empty",
       "storage -> CONTENT Group header: true new: After: 0 New: 3",
-      "client -> KNOWN Group sessions: header/3",
       "storage -> CONTENT Map header: true new: After: 0 New: 4",
-      "client -> KNOWN Map sessions: header/4",
     ]
   `);
 });
@@ -452,7 +393,7 @@ test("should sync multiple sessions in a single content message", async () => {
     Crypto,
   );
 
-  node1.syncManager.addPeer(await IDBStorage.asPeer());
+  node1.setStorage(await getIndexedDBStorage());
 
   const group = node1.createGroup();
 
@@ -460,7 +401,7 @@ test("should sync multiple sessions in a single content message", async () => {
 
   map.set("hello", "world");
 
-  await new Promise((resolve) => setTimeout(resolve, 200));
+  await map.core.waitForSync();
 
   node1.gracefulShutdown();
 
@@ -470,7 +411,7 @@ test("should sync multiple sessions in a single content message", async () => {
     Crypto,
   );
 
-  node2.syncManager.addPeer(await IDBStorage.asPeer());
+  node2.setStorage(await getIndexedDBStorage());
 
   const map2 = await node2.load(map.id);
   if (map2 === "unavailable") {
@@ -493,7 +434,7 @@ test("should sync multiple sessions in a single content message", async () => {
 
   syncMessages.clear();
 
-  node3.syncManager.addPeer(await IDBStorage.asPeer());
+  node3.setStorage(await getIndexedDBStorage());
 
   const map3 = await node3.load(map.id);
   if (map3 === "unavailable") {
@@ -514,9 +455,7 @@ test("should sync multiple sessions in a single content message", async () => {
     [
       "client -> LOAD Map sessions: empty",
       "storage -> CONTENT Group header: true new: After: 0 New: 3",
-      "client -> KNOWN Group sessions: header/3",
       "storage -> CONTENT Map header: true new: After: 0 New: 1 | After: 0 New: 1",
-      "client -> KNOWN Map sessions: header/2",
     ]
   `);
 });
@@ -530,7 +469,7 @@ test("large coValue upload streaming", async () => {
     Crypto,
   );
 
-  node1.syncManager.addPeer(await IDBStorage.asPeer());
+  node1.setStorage(await getIndexedDBStorage());
 
   const group = node1.createGroup();
   const largeMap = group.createMap();
@@ -547,6 +486,7 @@ test("large coValue upload streaming", async () => {
     largeMap.set(key, value, "trusting");
   }
 
+  // TODO: Wait for storage to be updated
   await largeMap.core.waitForSync();
 
   const knownState = largeMap.core.knownState();
@@ -561,7 +501,7 @@ test("large coValue upload streaming", async () => {
 
   syncMessages.clear();
 
-  node2.syncManager.addPeer(await IDBStorage.asPeer());
+  node2.setStorage(await getIndexedDBStorage());
 
   const largeMapOnNode2 = await node2.load(largeMap.id);
 
@@ -586,15 +526,10 @@ test("large coValue upload streaming", async () => {
   ).toMatchInlineSnapshot(`
     [
       "client -> LOAD Map sessions: empty",
-      "storage -> KNOWN Map sessions: header/200",
       "storage -> CONTENT Group header: true new: After: 0 New: 3",
-      "client -> KNOWN Group sessions: header/3",
       "storage -> CONTENT Map header: true new: After: 0 New: 97",
-      "client -> KNOWN Map sessions: header/97",
       "storage -> CONTENT Map header: true new: After: 97 New: 97",
-      "client -> KNOWN Map sessions: header/194",
       "storage -> CONTENT Map header: true new: After: 194 New: 6",
-      "client -> KNOWN Map sessions: header/200",
     ]
   `);
 });
@@ -605,7 +540,7 @@ test("should sync and load accounts from storage", async () => {
   const { node: node1, accountID } = await LocalNode.withNewlyCreatedAccount({
     crypto: Crypto,
     initialAgentSecret: agentSecret,
-    peersToLoadFrom: [await IDBStorage.asPeer()],
+    storage: await getIndexedDBStorage(),
     creationProps: {
       name: "test",
     },
@@ -614,8 +549,6 @@ test("should sync and load accounts from storage", async () => {
   const account1 = node1.getCoValue(accountID);
   const profile = node1.expectProfileLoaded(accountID);
   const profileGroup = profile.group;
-
-  await new Promise((resolve) => setTimeout(resolve, 200));
 
   expect(
     toSimplifiedMessages(
@@ -629,11 +562,8 @@ test("should sync and load accounts from storage", async () => {
   ).toMatchInlineSnapshot(`
     [
       "client -> CONTENT Account header: true new: After: 0 New: 4",
-      "storage -> KNOWN Account sessions: header/4",
       "client -> CONTENT ProfileGroup header: true new: After: 0 New: 5",
-      "storage -> KNOWN ProfileGroup sessions: header/5",
       "client -> CONTENT Profile header: true new: After: 0 New: 1",
-      "storage -> KNOWN Profile sessions: header/1",
     ]
   `);
 
@@ -645,11 +575,10 @@ test("should sync and load accounts from storage", async () => {
     crypto: Crypto,
     accountSecret: agentSecret,
     accountID,
-    peersToLoadFrom: [await IDBStorage.asPeer()],
+    peersToLoadFrom: [],
+    storage: await getIndexedDBStorage(),
     sessionID: Crypto.newRandomSessionID(Crypto.getAgentID(agentSecret)),
   });
-
-  await new Promise((resolve) => setTimeout(resolve, 200));
 
   expect(
     toSimplifiedMessages(
@@ -664,12 +593,9 @@ test("should sync and load accounts from storage", async () => {
     [
       "client -> LOAD Account sessions: empty",
       "storage -> CONTENT Account header: true new: After: 0 New: 4",
-      "client -> KNOWN Account sessions: header/4",
       "client -> LOAD Profile sessions: empty",
       "storage -> CONTENT ProfileGroup header: true new: After: 0 New: 5",
-      "client -> KNOWN ProfileGroup sessions: header/5",
       "storage -> CONTENT Profile header: true new: After: 0 New: 1",
-      "client -> KNOWN Profile sessions: header/1",
     ]
   `);
 

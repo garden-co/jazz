@@ -139,7 +139,7 @@ export class SyncStateManager {
   }
 }
 
-function getIsUploaded(
+export function getIsUploaded(
   from: Record<string, number>,
   to: Record<string, number>,
 ) {

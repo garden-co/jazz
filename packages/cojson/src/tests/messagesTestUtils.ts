@@ -1,7 +1,7 @@
 import { CoValueCore, LocalNode } from "../exports";
 import { CoValueKnownState, NewContentMessage, SyncMessage } from "../sync";
 
-function simplifySessions(msg: CoValueKnownState) {
+function simplifySessions(msg: Pick<CoValueKnownState, "sessions" | "header">) {
   const count = Object.values(msg.sessions).reduce(
     (acc, session) => acc + session,
     0,
@@ -51,7 +51,7 @@ export function toSimplifiedMessages(
       case "done":
         return `${from} -> ${to} | DONE ${getCoValue(msg.id)}`;
       case "content":
-        return `${from} -> ${to} | CONTENT ${getCoValue(msg.id)} header: ${Boolean(msg.header)} new: ${simplifyNewContent(msg.new)}`;
+        return `${from} -> ${to} | CONTENT ${getCoValue(msg.id)} header: ${Boolean(msg.header)} new: ${simplifyNewContent(msg.new)}${msg.streamingTarget ? ` streamingTarget: ${simplifySessions({ sessions: msg.streamingTarget, header: true })}` : ""}`;
     }
   }
 

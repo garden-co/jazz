@@ -12,7 +12,6 @@
   },
   "dependencies": {
     "cojson": "workspace:*",
-    "cojson-storage": "workspace:*",
     "cojson-storage-indexeddb": "workspace:*",
     "cojson-storage-sqlite": "workspace:*",
     "cojson-transport-ws": "workspace:*",

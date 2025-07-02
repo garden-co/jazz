@@ -28,6 +28,7 @@
   "version": "0.15.4",
   "devDependencies": {
     "@opentelemetry/sdk-metrics": "^2.0.0",
+    "libsql": "^0.5.13",
     "typescript": "catalog:"
   },
   "dependencies": {

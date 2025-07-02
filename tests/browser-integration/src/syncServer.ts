@@ -3,7 +3,7 @@ import { createServer } from "http";
 import { tmpdir } from "os";
 import { dirname, join } from "path";
 import { LocalNode } from "cojson";
-import { SQLiteStorage } from "cojson-storage-sqlite";
+import { getBetterSqliteStorage } from "cojson-storage-sqlite";
 import { createWebSocketPeer } from "cojson-transport-ws";
 import { WasmCrypto } from "cojson/crypto/WasmCrypto";
 import { mkdir, unlink } from "fs/promises";
@@ -34,9 +34,8 @@ export const startSyncServer = async (port?: number, dbName?: string) => {
   const db = join(tmpdir(), `${dbName ?? randomUUID()}.db`);
   await mkdir(dirname(db), { recursive: true });
 
-  const storage = await SQLiteStorage.asPeer({ filename: db });
-
-  localNode.syncManager.addPeer(storage);
+  const storage = getBetterSqliteStorage(db);
+  localNode.setStorage(storage);
 
   const connections = new Set<WebSocket>();
   let isActive = true;

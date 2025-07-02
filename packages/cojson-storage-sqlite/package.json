@@ -7,8 +7,7 @@
   "license": "MIT",
   "dependencies": {
     "better-sqlite3": "^11.7.0",
-    "cojson": "workspace:0.15.4",
-    "cojson-storage": "workspace:*"
+    "cojson": "workspace:*"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.12",

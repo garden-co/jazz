@@ -174,7 +174,11 @@ export class CoValueCore {
   }
 
   isAvailable(): this is AvailableCoValueCore {
-    return !!this.verified && this.missingDependencies.size === 0;
+    return this.hasVerifiedContent() && this.missingDependencies.size === 0;
+  }
+
+  hasVerifiedContent(): this is AvailableCoValueCore {
+    return !!this.verified;
   }
 
   isErroredInPeer(peerId: PeerID) {
@@ -253,7 +257,11 @@ export class CoValueCore {
     }
   }
 
-  provideHeader(header: CoValueHeader, fromPeerId: PeerID) {
+  provideHeader(
+    header: CoValueHeader,
+    fromPeerId: PeerID,
+    streamingKnownState?: CoValueKnownState["sessions"],
+  ) {
     const previousState = this.loadingState;
 
     if (this._verified?.sessions.size) {
@@ -266,9 +274,11 @@ export class CoValueCore {
       this.node.crypto,
       header,
       new Map(),
+      streamingKnownState,
     );
 
     this.peers.set(fromPeerId, { type: "available" });
+
     this.updateCounter(previousState);
     this.notifyUpdate("immediate");
   }
@@ -292,7 +302,7 @@ export class CoValueCore {
     this.notifyUpdate("immediate");
   }
 
-  private markPending(peerId: PeerID) {
+  markPending(peerId: PeerID) {
     const previousState = this.loadingState;
     this.peers.set(peerId, { type: "pending" });
     this.updateCounter(previousState);
@@ -353,6 +363,14 @@ export class CoValueCore {
     return this.node
       .loadCoValueAsDifferentAgent(this.id, account.agentSecret, account.id)
       .getCurrentContent();
+  }
+
+  knownStateWithStreaming(): CoValueKnownState {
+    if (this.isAvailable()) {
+      return this.verified.knownStateWithStreaming();
+    } else {
+      return emptyKnownState(this.id);
+    }
   }
 
   knownState(): CoValueKnownState {
@@ -980,65 +998,68 @@ export class CoValueCore {
     return this.node.syncManager.waitForSync(this.id, options?.timeout);
   }
 
-  async loadFromPeers(peers: PeerState[]) {
+  load(peers: PeerState[]) {
+    this.loadFromStorage((found) => {
+      // When found the load is triggered by handleNewContent
+      if (!found) {
+        this.loadFromPeers(peers);
+      }
+    });
+  }
+
+  loadFromStorage(done?: (found: boolean) => void) {
+    const node = this.node;
+
+    if (!node.storage) {
+      done?.(false);
+      return;
+    }
+
+    const currentState = this.peers.get("storage");
+
+    if (currentState && currentState.type !== "unknown") {
+      done?.(currentState.type === "available");
+      return;
+    }
+
+    this.markPending("storage");
+    node.storage.load(
+      this.id,
+      (data) => {
+        node.syncManager.handleNewContent(data);
+      },
+      (found) => {
+        if (!found) {
+          this.markNotFoundInPeer("storage");
+        }
+
+        done?.(found);
+      },
+    );
+  }
+
+  loadFromPeers(peers: PeerState[]) {
     if (peers.length === 0) {
       return;
     }
 
-    const peersToActuallyLoadFrom = {
-      storage: [] as PeerState[],
-      server: [] as PeerState[],
-    };
+    const peersToActuallyLoadFrom = [] as PeerState[];
 
     for (const peer of peers) {
-      const currentState = this.peers.get(peer.id);
+      const currentState = this.peers.get(peer.id)?.type;
 
       if (
-        currentState?.type === "available" ||
-        currentState?.type === "pending"
+        !currentState ||
+        currentState === "unknown" ||
+        currentState === "unavailable"
       ) {
-        continue;
-      }
-
-      if (currentState?.type === "errored") {
-        continue;
-      }
-
-      if (currentState?.type === "unavailable") {
-        if (peer.role === "server") {
-          peersToActuallyLoadFrom.server.push(peer);
-          this.markPending(peer.id);
-        }
-
-        continue;
-      }
-
-      if (!currentState || currentState?.type === "unknown") {
-        if (peer.role === "storage") {
-          peersToActuallyLoadFrom.storage.push(peer);
-        } else {
-          peersToActuallyLoadFrom.server.push(peer);
-        }
-
+        peersToActuallyLoadFrom.push(peer);
         this.markPending(peer.id);
       }
     }
 
-    // Load from storage peers first, then from server peers
-    if (peersToActuallyLoadFrom.storage.length > 0) {
-      await Promise.all(
-        peersToActuallyLoadFrom.storage.map((peer) =>
-          this.internalLoadFromPeer(peer),
-        ),
-      );
-    }
-
-    if (peersToActuallyLoadFrom.server.length > 0) {
-      await Promise.all(
-        peersToActuallyLoadFrom.server.map((peer) =>
-          this.internalLoadFromPeer(peer),
-        ),
-      );
+    for (const peer of peersToActuallyLoadFrom) {
+      this.internalLoadFromPeer(peer);
     }
   }
 

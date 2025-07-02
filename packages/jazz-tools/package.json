@@ -149,7 +149,6 @@
     "@types/image-blob-reduce": "^4.1.1",
     "clsx": "^2.0.0",
     "cojson": "workspace:*",
-    "cojson-storage": "workspace:*",
     "cojson-storage-indexeddb": "workspace:*",
     "cojson-transport-ws": "workspace:*",
     "expo-sqlite": "15.2.9",
