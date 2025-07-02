@@ -1,6 +1,5 @@
-import { CoPlainText, Loaded } from "jazz-tools";
-import { useState } from "react";
-import { OrderThumbnail } from "./OrderThumbnail.tsx";
+import { CoMap, CoPlainText, Loaded } from "jazz-tools";
+import { useForm, SubmitHandler } from "react-hook-form";
 import {
   BubbleTeaAddOnTypes,
   BubbleTeaBaseTeaTypes,
@@ -12,35 +11,13 @@ type LoadedBubbleTeaOrder = Loaded<
   { addOns: { $each: true }; instructions: true }
 >;
 
-const useOrderForm = (order: LoadedBubbleTeaOrder) => {
-  const [value, _setValue] = useState(order.toJSON());
-
-  // toJSON serializes non-JSON values, such as Dates
-  value.deliveryDate = value.deliveryDate
-    ? new Date(value.deliveryDate)
-    : value.deliveryDate;
-
-  const setValue = (
-    newKey: keyof LoadedBubbleTeaOrder,
-    newValue: LoadedBubbleTeaOrder[keyof LoadedBubbleTeaOrder],
-  ) => {
-    _setValue({ ...value, [newKey]: newValue });
-  };
-
-  const save = () => {
-    order.baseTea = value.baseTea;
-    order.addOns.applyDiff(value.addOns);
-    order.deliveryDate = value.deliveryDate;
-    order.withMilk = value.withMilk;
-
-    // `applyDiff` requires nested objects to be CoValues as well
-    const instructions = order.instructions ?? CoPlainText.create("");
-    if (value.instructions) {
-      instructions.applyDiff(value.instructions);
-    }
-  };
-
-  return { value, setValue, save };
+// Would be great to derive this type from the CoValue schema
+type OrderFormData = {
+  baseTea: (typeof BubbleTeaBaseTeaTypes)[number];
+  addOns: (typeof BubbleTeaAddOnTypes)[number][];
+  deliveryDate: string;
+  withMilk: boolean;
+  instructions?: string;
 };
 
 export function OrderFormWithSaveButton({
@@ -48,30 +25,74 @@ export function OrderFormWithSaveButton({
 }: {
   order: LoadedBubbleTeaOrder;
 }) {
-  const { value: order, setValue, save } = useOrderForm(originalOrder);
+  const defaultValues = originalOrder.toJSON();
+  // Convert timestamp to string format for HTML date input (YYYY-MM-DD)
+  defaultValues.deliveryDate = defaultValues.deliveryDate.split("T")[0];
+  const {
+    register,
+    handleSubmit,
+    watch,
+    formState: { errors },
+  } = useForm<OrderFormData>({
+    defaultValues,
+  });
 
-  const submit = (e: React.FormEvent<HTMLFormElement>) => {
-    console.log("submit form");
-    e.preventDefault();
-    save();
+  const watchedValues = watch();
+
+  const onSubmit: SubmitHandler<OrderFormData> = (data) => {
+    console.log("submit form", data);
+
+    // Apply changes to the original Jazz order
+    originalOrder.baseTea = data.baseTea;
+    originalOrder.addOns.applyDiff(data.addOns);
+    originalOrder.deliveryDate = new Date(data.deliveryDate);
+    originalOrder.withMilk = data.withMilk;
+
+    // `applyDiff` requires nested objects to be CoValues as well
+    const instructions = originalOrder.instructions ?? CoPlainText.create("");
+    if (data.instructions) {
+      instructions.applyDiff(data.instructions);
+    }
   };
 
   return (
-    <form onSubmit={submit} className="grid gap-5">
+    <form onSubmit={handleSubmit(onSubmit)} className="grid gap-5">
+      {/* TODO refactor OrderThumbnail to support receiving a plain JSON object */}
       <div>
-        <p>Unsaved order:</p>
-        <OrderThumbnail order={order} />
+        <p>Unsaved order preview:</p>
+        <div className="border p-3 bg-gray-50 dark:bg-gray-800">
+          <strong>
+            {watchedValues.baseTea || "(No tea selected)"}
+            {watchedValues.withMilk ? " milk " : " "}
+            tea
+          </strong>
+          {watchedValues.addOns && watchedValues.addOns.length > 0 && (
+            <p className="text-sm text-stone-600">
+              with {watchedValues.addOns.join(", ").toLowerCase()}
+            </p>
+          )}
+          {watchedValues.instructions && (
+            <p className="text-sm text-stone-600 italic">
+              {watchedValues.instructions}
+            </p>
+          )}
+          {watchedValues.deliveryDate && (
+            <p className="text-sm text-stone-600">
+              Delivery:{" "}
+              {new Date(watchedValues.deliveryDate).toLocaleDateString()}
+            </p>
+          )}
+        </div>
       </div>
 
       <div className="flex flex-col gap-2">
         <label htmlFor="baseTea">Base tea</label>
         <select
-          name="baseTea"
+          {...register("baseTea", {
+            required: "Please select your preferred base tea",
+          })}
           id="baseTea"
-          value={order.baseTea || ""}
           className="dark:bg-transparent"
-          onChange={(e) => setValue("baseTea", e.target.value)}
-          required
         >
           <option value="" disabled>
             Please select your preferred base tea
@@ -82,27 +103,20 @@ export function OrderFormWithSaveButton({
             </option>
           ))}
         </select>
+        {errors.baseTea && (
+          <span className="text-red-500 text-sm">{errors.baseTea.message}</span>
+        )}
       </div>
 
       <fieldset>
         <legend className="mb-2">Add-ons</legend>
-
         {BubbleTeaAddOnTypes.map((addOn) => (
           <div key={addOn} className="flex items-center gap-2">
             <input
               type="checkbox"
               value={addOn}
-              name={addOn}
+              {...register("addOns")}
               id={addOn}
-              checked={order.addOns?.includes(addOn) || false}
-              onChange={(e) => {
-                if (e.target.checked) {
-                  order.addOns?.push(addOn);
-                } else {
-                  order.addOns?.splice(order.addOns?.indexOf(addOn), 1);
-                }
-                setValue("addOns", order.addOns);
-              }}
             />
             <label htmlFor={addOn}>{addOn}</label>
           </div>
@@ -113,35 +127,31 @@ export function OrderFormWithSaveButton({
         <label htmlFor="deliveryDate">Delivery date</label>
         <input
           type="date"
-          name="deliveryDate"
+          {...register("deliveryDate", {
+            required: "Delivery date is required",
+          })}
           id="deliveryDate"
           className="dark:bg-transparent"
-          value={order.deliveryDate?.toISOString().split("T")[0] ?? ""}
-          onChange={(e) => setValue("deliveryDate", new Date(e.target.value))}
-          required
         />
+        {errors.deliveryDate && (
+          <span className="text-red-500 text-sm">
+            {errors.deliveryDate.message}
+          </span>
+        )}
       </div>
 
       <div className="flex items-center gap-2">
-        <input
-          type="checkbox"
-          name="withMilk"
-          id="withMilk"
-          checked={order.withMilk}
-          onChange={(e) => setValue("withMilk", e.target.checked)}
-        />
+        <input type="checkbox" {...register("withMilk")} id="withMilk" />
         <label htmlFor="withMilk">With milk?</label>
       </div>
 
       <div className="flex flex-col gap-2">
         <label htmlFor="instructions">Special instructions</label>
         <textarea
-          name="instructions"
+          {...register("instructions")}
           id="instructions"
-          value={`${order.instructions}`}
           className="dark:bg-transparent"
-          onChange={(e) => setValue("instructions", e.target.value)}
-        ></textarea>
+        />
       </div>
 
       <button
