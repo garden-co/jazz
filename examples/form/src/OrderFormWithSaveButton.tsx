@@ -1,12 +1,10 @@
-import { useCoState } from "jazz-tools/react";
 import { CoPlainText, Loaded } from "jazz-tools";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { OrderThumbnail } from "./OrderThumbnail.tsx";
 import {
   BubbleTeaAddOnTypes,
   BubbleTeaBaseTeaTypes,
   BubbleTeaOrder,
-  ListOfBubbleTeaAddOns,
 } from "./schema.ts";
 
 type LoadedBubbleTeaOrder = Loaded<
@@ -15,38 +13,34 @@ type LoadedBubbleTeaOrder = Loaded<
 >;
 
 const useOrderForm = (order: LoadedBubbleTeaOrder) => {
-  const [id, setId] = useState<string | undefined>();
+  const [value, _setValue] = useState(order.toJSON());
 
-  const value = useCoState(BubbleTeaOrder, id, {
-    resolve: { addOns: { $each: true }, instructions: true },
-  });
+  // toJSON serializes non-JSON values, such as Dates
+  value.deliveryDate = value.deliveryDate
+    ? new Date(value.deliveryDate)
+    : value.deliveryDate;
 
-  useEffect(() => {
-    // deep clone order
-    const cloned = BubbleTeaOrder.create({
-      ...order,
-      instructions: CoPlainText.create(`${order.instructions}` || ""),
-      addOns: ListOfBubbleTeaAddOns.create([...order.addOns]),
-    });
-    setId(cloned.id);
-  }, [order.id]);
-
-  if (!value) return { value, save: () => {} };
+  const setValue = (
+    newKey: keyof LoadedBubbleTeaOrder,
+    newValue: LoadedBubbleTeaOrder[keyof LoadedBubbleTeaOrder],
+  ) => {
+    _setValue({ ...value, [newKey]: newValue });
+  };
 
   const save = () => {
     order.baseTea = value.baseTea;
-    value.addOns.applyDiff(order.addOns);
+    order.addOns.applyDiff(value.addOns);
     order.deliveryDate = value.deliveryDate;
     order.withMilk = value.withMilk;
 
-    const instructions = order.instructions || CoPlainText.create("");
+    // `applyDiff` requires nested objects to be CoValues as well
+    const instructions = order.instructions ?? CoPlainText.create("");
     if (value.instructions) {
-      instructions.applyDiff(value.instructions.toString());
-      order.instructions = instructions;
+      instructions.applyDiff(value.instructions);
     }
   };
 
-  return { value, save };
+  return { value, setValue, save };
 };
 
 export function OrderFormWithSaveButton({
@@ -54,18 +48,7 @@ export function OrderFormWithSaveButton({
 }: {
   order: LoadedBubbleTeaOrder;
 }) {
-  const { value: order, save } = useOrderForm(originalOrder);
-
-  if (!order) return null;
-
-  const handleInstructionsChange = (
-    e: React.ChangeEvent<HTMLTextAreaElement>,
-  ) => {
-    if (order.instructions) {
-      return order.instructions.applyDiff(e.target.value);
-    }
-    order.instructions = CoPlainText.create(e.target.value, order._owner);
-  };
+  const { value: order, setValue, save } = useOrderForm(originalOrder);
 
   const submit = (e: React.FormEvent<HTMLFormElement>) => {
     console.log("submit form");
@@ -87,7 +70,7 @@ export function OrderFormWithSaveButton({
           id="baseTea"
           value={order.baseTea || ""}
           className="dark:bg-transparent"
-          onChange={(e) => (order.baseTea = e.target.value as any)}
+          onChange={(e) => setValue("baseTea", e.target.value)}
           required
         >
           <option value="" disabled>
@@ -118,6 +101,7 @@ export function OrderFormWithSaveButton({
                 } else {
                   order.addOns?.splice(order.addOns?.indexOf(addOn), 1);
                 }
+                setValue("addOns", order.addOns);
               }}
             />
             <label htmlFor={addOn}>{addOn}</label>
@@ -132,8 +116,8 @@ export function OrderFormWithSaveButton({
           name="deliveryDate"
           id="deliveryDate"
           className="dark:bg-transparent"
-          value={order.deliveryDate?.toISOString().split("T")[0] || ""}
-          onChange={(e) => (order.deliveryDate = new Date(e.target.value))}
+          value={order.deliveryDate?.toISOString().split("T")[0] ?? ""}
+          onChange={(e) => setValue("deliveryDate", new Date(e.target.value))}
           required
         />
       </div>
@@ -144,7 +128,7 @@ export function OrderFormWithSaveButton({
           name="withMilk"
           id="withMilk"
           checked={order.withMilk}
-          onChange={(e) => (order.withMilk = e.target.checked)}
+          onChange={(e) => setValue("withMilk", e.target.checked)}
         />
         <label htmlFor="withMilk">With milk?</label>
       </div>
@@ -156,7 +140,7 @@ export function OrderFormWithSaveButton({
           id="instructions"
           value={`${order.instructions}`}
           className="dark:bg-transparent"
-          onChange={handleInstructionsChange}
+          onChange={(e) => setValue("instructions", e.target.value)}
         ></textarea>
       </div>
 
