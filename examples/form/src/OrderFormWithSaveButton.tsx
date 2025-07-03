@@ -5,6 +5,7 @@ import {
   BubbleTeaBaseTeaTypes,
   BubbleTeaOrder,
 } from "./schema.ts";
+import { OrderThumbnail } from "./OrderThumbnail.tsx";
 
 type LoadedBubbleTeaOrder = Loaded<
   typeof BubbleTeaOrder,
@@ -12,10 +13,11 @@ type LoadedBubbleTeaOrder = Loaded<
 >;
 
 // Would be great to derive this type from the CoValue schema
-type OrderFormData = {
+export type OrderFormData = {
+  id: string;
   baseTea: (typeof BubbleTeaBaseTeaTypes)[number];
   addOns: (typeof BubbleTeaAddOnTypes)[number][];
-  deliveryDate: string;
+  deliveryDate: Date;
   withMilk: boolean;
   instructions?: string;
 };
@@ -27,7 +29,7 @@ export function OrderFormWithSaveButton({
 }) {
   const defaultValues = originalOrder.toJSON();
   // Convert timestamp to string format for HTML date input (YYYY-MM-DD)
-  defaultValues.deliveryDate = defaultValues.deliveryDate.split("T")[0];
+  defaultValues.deliveryDate = new Date(defaultValues.deliveryDate);
   const {
     register,
     handleSubmit,
@@ -57,32 +59,9 @@ export function OrderFormWithSaveButton({
 
   return (
     <form onSubmit={handleSubmit(onSubmit)} className="grid gap-5">
-      {/* TODO refactor OrderThumbnail to support receiving a plain JSON object */}
       <div>
         <p>Unsaved order preview:</p>
-        <div className="border p-3 bg-gray-50 dark:bg-gray-800">
-          <strong>
-            {watchedValues.baseTea || "(No tea selected)"}
-            {watchedValues.withMilk ? " milk " : " "}
-            tea
-          </strong>
-          {watchedValues.addOns && watchedValues.addOns.length > 0 && (
-            <p className="text-sm text-stone-600">
-              with {watchedValues.addOns.join(", ").toLowerCase()}
-            </p>
-          )}
-          {watchedValues.instructions && (
-            <p className="text-sm text-stone-600 italic">
-              {watchedValues.instructions}
-            </p>
-          )}
-          {watchedValues.deliveryDate && (
-            <p className="text-sm text-stone-600">
-              Delivery:{" "}
-              {new Date(watchedValues.deliveryDate).toLocaleDateString()}
-            </p>
-          )}
-        </div>
+        <OrderThumbnail order={watchedValues} />
       </div>
 
       <div className="flex flex-col gap-2">
