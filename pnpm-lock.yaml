@@ -129,7 +129,7 @@ importers:
         version: 0.510.0(react@19.0.0)
       next:
         specifier: 15.3.2
-        version: 15.3.2(@opentelemetry/api@1.9.0)(@playwright/test@1.50.1)(react-dom@19.0.0(react@19.0.0))(react@19.0.0)
+        version: 15.3.2(@babel/core@7.27.1)(@opentelemetry/api@1.9.0)(@playwright/test@1.50.1)(react-dom@19.0.0(react@19.0.0))(react@19.0.0)
       react:
         specifier: 19.0.0
         version: 19.0.0
@@ -169,7 +169,7 @@ importers:
         version: 19.0.0
       react-email:
         specifier: ^4.0.11
-        version: 4.0.13(@opentelemetry/api@1.9.0)(@playwright/test@1.50.1)(react-dom@19.0.0(react@19.0.0))(react@19.0.0)
+        version: 4.0.13(@babel/core@7.27.1)(@opentelemetry/api@1.9.0)(@playwright/test@1.50.1)(react-dom@19.0.0(react@19.0.0))(react@19.0.0)
       tailwindcss:
         specifier: ^4
         version: 4.1.10
@@ -728,6 +728,9 @@ importers:
       '@tailwindcss/vite':
         specifier: ^4.1.7
         version: 4.1.10(vite@6.3.5(@types/node@22.15.18)(jiti@2.4.2)(lightningcss@1.30.1)(terser@5.37.0)(tsx@4.19.3)(yaml@2.6.1))
+      '@tanstack/svelte-form':
+        specifier: ^1.12.4
+        version: 1.12.4(svelte@5.34.6)
       jazz-tools:
         specifier: workspace:*
         version: link:../../packages/jazz-tools
@@ -889,7 +892,7 @@ importers:
         version: link:../../packages/jazz-tools
       next:
         specifier: 15.3.2
-        version: 15.3.2(@opentelemetry/api@1.9.0)(@playwright/test@1.50.1)(react-dom@19.0.0(react@19.0.0))(react@19.0.0)
+        version: 15.3.2(@babel/core@7.27.1)(@opentelemetry/api@1.9.0)(@playwright/test@1.50.1)(react-dom@19.0.0(react@19.0.0))(react@19.0.0)
       react:
         specifier: 19.0.0
         version: 19.0.0
@@ -5881,6 +5884,9 @@ packages:
   '@tanstack/form-core@0.33.0':
     resolution: {integrity: sha512-ouu1JVwLZgfPkIdIq3TWIZs++KpLOo8Bx4tXYOc/1KwA9qUQ0Iv/+Y6GfiC4wMcUzGCtLKOww84eZ8Qdge3ZmQ==}
 
+  '@tanstack/form-core@1.12.4':
+    resolution: {integrity: sha512-BhfNI5sEjI68Im1Vqezf9w68fJL4EB80cqW5w0zb/MV1erHHsXNRwLGmljF88VnCx1t/xd4fmF0D08wNajBauQ==}
+
   '@tanstack/history@1.115.0':
     resolution: {integrity: sha512-K7JJNrRVvyjAVnbXOH2XLRhFXDkeP54Kt2P4FR1Kl2KDGlIbkua5VqZQD2rot3qaDrpufyUa63nuLai1kOLTsQ==}
     engines: {node: '>=12'}
@@ -5976,6 +5982,19 @@ packages:
 
   '@tanstack/store@0.7.0':
     resolution: {integrity: sha512-CNIhdoUsmD2NolYuaIs8VfWM467RK6oIBAW4nPEKZhg1smZ+/CwtCdpURgp7nxSqOaV9oKkzdWD80+bC66F/Jg==}
+
+  '@tanstack/store@0.7.1':
+    resolution: {integrity: sha512-PjUQKXEXhLYj2X5/6c1Xn/0/qKY0IVFxTJweopRfF26xfjVyb14yALydJrHupDh3/d+1WKmfEgZPBVCmDkzzwg==}
+
+  '@tanstack/svelte-form@1.12.4':
+    resolution: {integrity: sha512-as8J3wu+GZUIeG1DZSEibF81D8GoalCJvag/OiOjeO28aHZEL3fExtCltzJkCE5odQCrL0QmNUreQ/P3gE7rEA==}
+    peerDependencies:
+      svelte: ^5.0.0
+
+  '@tanstack/svelte-store@0.7.1':
+    resolution: {integrity: sha512-09GSf96YCmwquWVqLbbX0VpO+bXdJFqzxTC7gVR6Q/uqd+3mwZnC3ORVMi25tFQDKNrbAtAzhpEwzOgSUobeyQ==}
+    peerDependencies:
+      svelte: ^5.0.0
 
   '@tanstack/virtual-file-routes@1.115.0':
     resolution: {integrity: sha512-XLUh1Py3AftcERrxkxC5Y5m5mfllRH3YR6YVlyjFgI2Tc2Ssy2NKmQFQIafoxfW459UJ8Dn81nWKETEIJifE4g==}
@@ -18043,6 +18062,10 @@ snapshots:
     dependencies:
       '@tanstack/store': 0.5.5
 
+  '@tanstack/form-core@1.12.4':
+    dependencies:
+      '@tanstack/store': 0.7.1
+
   '@tanstack/history@1.115.0': {}
 
   '@tanstack/react-form@0.33.0(react-dom@19.0.0(react@19.0.0))(react@19.0.0)(typescript@5.6.2)':
@@ -18153,6 +18176,19 @@ snapshots:
   '@tanstack/store@0.5.5': {}
 
   '@tanstack/store@0.7.0': {}
+
+  '@tanstack/store@0.7.1': {}
+
+  '@tanstack/svelte-form@1.12.4(svelte@5.34.6)':
+    dependencies:
+      '@tanstack/form-core': 1.12.4
+      '@tanstack/svelte-store': 0.7.1(svelte@5.34.6)
+      svelte: 5.34.6
+
+  '@tanstack/svelte-store@0.7.1(svelte@5.34.6)':
+    dependencies:
+      '@tanstack/store': 0.7.1
+      svelte: 5.34.6
 
   '@tanstack/virtual-file-routes@1.115.0': {}
 
@@ -19064,7 +19100,7 @@ snapshots:
       sirv: 3.0.1
       tinyglobby: 0.2.14
       tinyrainbow: 2.0.0
-      vitest: 3.1.3(@types/node@22.15.18)(@vitest/browser@3.1.3)(@vitest/ui@3.1.3)(happy-dom@17.4.4)(jiti@2.4.2)(jsdom@25.0.1)(lightningcss@1.30.1)(msw@2.7.0(@types/node@22.15.18)(typescript@5.6.2))(terser@5.37.0)(tsx@4.19.3)(yaml@2.6.1)
+      vitest: 3.1.3(@types/node@22.15.18)(@vitest/browser@3.1.3)(@vitest/ui@3.1.3)(happy-dom@17.4.4)(jiti@2.4.2)(jsdom@25.0.1)(lightningcss@1.30.1)(msw@2.7.0(@types/node@22.15.18)(typescript@5.8.3))(terser@5.37.0)(tsx@4.19.3)(yaml@2.6.1)
 
   '@vitest/utils@3.1.1':
     dependencies:
@@ -23347,7 +23383,7 @@ snapshots:
 
   neverthrow@7.2.0: {}
 
-  next@15.3.2(@opentelemetry/api@1.9.0)(@playwright/test@1.50.1)(react-dom@19.0.0(react@19.0.0))(react@19.0.0):
+  next@15.3.2(@babel/core@7.27.1)(@opentelemetry/api@1.9.0)(@playwright/test@1.50.1)(react-dom@19.0.0(react@19.0.0))(react@19.0.0):
     dependencies:
       '@next/env': 15.3.2
       '@swc/counter': 0.1.3
@@ -23357,7 +23393,7 @@ snapshots:
       postcss: 8.4.31
       react: 19.0.0
       react-dom: 19.0.0(react@19.0.0)
-      styled-jsx: 5.1.6(react@19.0.0)
+      styled-jsx: 5.1.6(@babel/core@7.27.1)(react@19.0.0)
     optionalDependencies:
       '@next/swc-darwin-arm64': 15.3.2
       '@next/swc-darwin-x64': 15.3.2
@@ -24321,7 +24357,7 @@ snapshots:
       react: 19.0.0
       scheduler: 0.25.0
 
-  react-email@4.0.13(@opentelemetry/api@1.9.0)(@playwright/test@1.50.1)(react-dom@19.0.0(react@19.0.0))(react@19.0.0):
+  react-email@4.0.13(@babel/core@7.27.1)(@opentelemetry/api@1.9.0)(@playwright/test@1.50.1)(react-dom@19.0.0(react@19.0.0))(react@19.0.0):
     dependencies:
       '@babel/parser': 7.27.2
       '@babel/traverse': 7.27.1
@@ -24333,7 +24369,7 @@ snapshots:
       glob: 11.0.2
       log-symbols: 7.0.0
       mime-types: 3.0.1
-      next: 15.3.2(@opentelemetry/api@1.9.0)(@playwright/test@1.50.1)(react-dom@19.0.0(react@19.0.0))(react@19.0.0)
+      next: 15.3.2(@babel/core@7.27.1)(@opentelemetry/api@1.9.0)(@playwright/test@1.50.1)(react-dom@19.0.0(react@19.0.0))(react@19.0.0)
       normalize-path: 3.0.0
       ora: 8.2.0
       socket.io: 4.8.1
@@ -25557,10 +25593,12 @@ snapshots:
 
   structured-headers@0.4.1: {}
 
-  styled-jsx@5.1.6(react@19.0.0):
+  styled-jsx@5.1.6(@babel/core@7.27.1)(react@19.0.0):
     dependencies:
       client-only: 0.0.1
       react: 19.0.0
+    optionalDependencies:
+      '@babel/core': 7.27.1
 
   stylis@4.2.0: {}
 
