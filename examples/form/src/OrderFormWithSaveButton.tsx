@@ -1,5 +1,5 @@
-import { CoMap, CoPlainText, Loaded } from "jazz-tools";
-import { useForm, SubmitHandler } from "react-hook-form";
+import { CoPlainText, Loaded } from "jazz-tools";
+import { useForm, SubmitHandler, Controller } from "react-hook-form";
 import {
   BubbleTeaAddOnTypes,
   BubbleTeaBaseTeaTypes,
@@ -28,12 +28,13 @@ export function OrderFormWithSaveButton({
   order: LoadedBubbleTeaOrder;
 }) {
   const defaultValues = originalOrder.toJSON();
-  // Convert timestamp to string format for HTML date input (YYYY-MM-DD)
+  // Convert timestamp to Date object
   defaultValues.deliveryDate = new Date(defaultValues.deliveryDate);
   const {
     register,
     handleSubmit,
     watch,
+    control,
     formState: { errors },
   } = useForm<OrderFormData>({
     defaultValues,
@@ -47,7 +48,7 @@ export function OrderFormWithSaveButton({
     // Apply changes to the original Jazz order
     originalOrder.baseTea = data.baseTea;
     originalOrder.addOns.applyDiff(data.addOns);
-    originalOrder.deliveryDate = new Date(data.deliveryDate);
+    originalOrder.deliveryDate = data.deliveryDate;
     originalOrder.withMilk = data.withMilk;
 
     // `applyDiff` requires nested objects to be CoValues as well
@@ -104,13 +105,23 @@ export function OrderFormWithSaveButton({
 
       <div className="flex flex-col gap-2">
         <label htmlFor="deliveryDate">Delivery date</label>
-        <input
-          type="date"
-          {...register("deliveryDate", {
-            required: "Delivery date is required",
-          })}
-          id="deliveryDate"
-          className="dark:bg-transparent"
+        <Controller
+          name="deliveryDate"
+          control={control}
+          rules={{ required: "Delivery date is required" }}
+          render={({ field }) => (
+            <input
+              type="date"
+              id="deliveryDate"
+              className="dark:bg-transparent"
+              value={
+                field.value instanceof Date
+                  ? field.value.toISOString().split("T")[0]
+                  : ""
+              }
+              onChange={(e) => field.onChange(new Date(e.target.value))}
+            />
+          )}
         />
         {errors.deliveryDate && (
           <span className="text-red-500 text-sm">
