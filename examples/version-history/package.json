@@ -12,14 +12,14 @@
   "dependencies": {
     "@tailwindcss/forms": "^0.5.9",
     "jazz-tools": "workspace:*",
-    "react": "19.0.0",
-    "react-dom": "19.0.0"
+    "react": "19.1.0",
+    "react-dom": "19.1.0"
   },
   "devDependencies": {
     "@biomejs/biome": "1.9.4",
     "@tailwindcss/postcss": "^4.1.10",
-    "@types/react": "19.0.0",
-    "@types/react-dom": "19.0.0",
+    "@types/react": "19.1.0",
+    "@types/react-dom": "19.1.0",
     "@vitejs/plugin-react": "^4.5.1",
     "globals": "^15.11.0",
     "tailwindcss": "^4.1.10",
