@@ -1,24 +1,23 @@
-### What this Does
-Brief summary of the change, ideally framed in user or product terms.
+# Description
+<!-- Please include a summary of the change and which issue is fixed -->
+<!-- Please also include relevant motivation and context -->
+<!-- Include any links to documentation like RFC’s if necessary -->
+<!-- Add a link to to relevant preview environments or anything that would simplify visual review process -->
+<!-- Supplemental screenshots and video are encouraged, but the primary description should be in text -->
 
-### Why Are We Doing This?
-Link to the shaped pitch or explain what problem it solves.
+## Manual testing instructions
 
-### Scope / Boundaries
-Includes:
-- [x] Core feature functionality
-- [x] Tests or validation steps
+<!-- Add any actions required to manually test the changes -->
 
-Do NOT include:
-- [ ] Related stretch features or follow-ups
+## Tests
 
-### Testing Instructions
-How a reviewer or QA can verify behavior, offer step-by-step instructions if possible. Screenshots or recordings are welcome.
+- [ ] Tests have been added and/or updated
+- [ ] Tests have not been updated, because: <!-- Insert reason for not updating tests here -->
+- [ ] I need help with writing tests
 
-### Known Issues / Open Questions (if any)
-- [ ] Note anything you’d like review on or decided async
 
-### Related Links
-- GitHub issue
-- Linear pitch
-- Design links or references
+## Checklist
+
+- [ ] I've updated the part of the docs that are affected the PR changes
+- [ ] I've generated a changeset, if a version bump is required
+- [ ] I've updated the jsDoc comments to the public APIs I've modified, or added them when missing
