@@ -7,12 +7,12 @@ export function OrderThumbnail({
 }: {
   order: Loaded<typeof BubbleTeaOrder> | OrderFormData;
 }) {
-  const { id, baseTea, addOns, instructions, deliveryDate, withMilk } = order;
+  const { baseTea, addOns, instructions, deliveryDate, withMilk } = order;
   const date = deliveryDate.toLocaleDateString();
 
   return (
     <a
-      href={`/#/order/${id}`}
+      href={"id" in order ? `/#/order/${order.id}` : undefined}
       className="border p-3 flex justify-between items-start gap-3"
     >
       <div>

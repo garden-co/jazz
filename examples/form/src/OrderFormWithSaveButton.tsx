@@ -12,16 +12,16 @@ type LoadedBubbleTeaOrder = Loaded<
   { addOns: { $each: true }; instructions: true }
 >;
 
-const orderFormSchema = z.object({
-  id: z.string(),
-  baseTea: z.enum(BubbleTeaBaseTeaTypes),
-  addOns: z
-    .array(z.enum(BubbleTeaAddOnTypes))
-    .min(1, "Please select at least one add-on"),
-  deliveryDate: z.date("Delivery date is required"),
-  withMilk: z.boolean(),
-  instructions: z.string().optional(),
-});
+const orderFormSchema = BubbleTeaOrder.getZodSchema()
+  .extend({
+    addOns: z
+      .array(z.enum(BubbleTeaAddOnTypes))
+      .min(1, "Please select at least one add-on"),
+    deliveryDate: z.date("Delivery date is required"),
+    // TanStack Form doesn't support CoPlainText fields, so we need to convert them to strings
+    instructions: z.string().optional(),
+  })
+  .strict();
 
 export type OrderFormData = z.infer<typeof orderFormSchema>;
 
@@ -30,7 +30,7 @@ export function OrderFormWithSaveButton({
 }: {
   order: LoadedBubbleTeaOrder;
 }) {
-  const defaultValues = originalOrder.toJSON();
+  const defaultValues: OrderFormData = originalOrder.toJSON();
   // Convert timestamp to Date
   defaultValues.deliveryDate = new Date(defaultValues.deliveryDate);
 
@@ -39,7 +39,7 @@ export function OrderFormWithSaveButton({
     validators: {
       onChange: orderFormSchema,
     },
-    onSubmit: async ({ value }: { value: OrderFormData }) => {
+    onSubmit: async ({ value }) => {
       // Apply changes to the original Jazz order
       originalOrder.baseTea = value.baseTea;
       originalOrder.deliveryDate = value.deliveryDate;
