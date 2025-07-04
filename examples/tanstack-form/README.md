@@ -1,21 +1,12 @@
-# Form example with Jazz and React
-
-Live version: [https://form-demo.jazz.tools](https://form-demo.jazz.tools)
+# Form example with Jazz and TanStack Form
 
 This is a simple form example that shows you how to make a form for creating and editing a `CoValue`, 
 called `BubbleTeaOrder`, with fields of different types such
 as single-select, multi-select, date, text, and boolean.
 
-To create a new `BubbleTeaOrder`, we create an empty order. Because `BubbleTeaOrder` has some
-required fields, we can't create an empty `BubbleTeaOrder` directly. 
-
-Instead, we create a `DraftBubbleTeaOrder`,
-which has the same structure as `BubbleTeaOrder`, but with all fields set to `optional`.
-
-When the user is ready to submit the order, we treat `DraftBubbleTeaOrder` as a "real order" by
-converting it into a `BubbleTeaOrder`.
-
-[See the full guide here.](https://jazz.tools/docs/react/design-patterns/form)
+The form is built using [TanStack Form](https://tanstack.com/form/). We leverage TanStack Form's
+support for [schema validation libraries](https://tanstack.com/form/latest/docs/framework/react/guides/validation#standard-schema-libraries)
+and validate the form using Jazz's Zod-based schemas.
 
 ## Getting started
 
@@ -28,7 +19,7 @@ You can either
 
 Create a new Jazz project, and use this example as a template.
 ```bash
-npx create-jazz-app@latest form-app --example form
+npx create-jazz-app@latest form-app --example tanstack-form
 ```
 
 Go to the new project directory.
@@ -57,7 +48,7 @@ pnpm i && npx turbo build
 
 Go to the example directory.
 ```bash
-cd jazz/examples/form/
+cd jazz/examples/tanstack-form/
 ```
 
 Start the dev server.
