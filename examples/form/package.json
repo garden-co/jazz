@@ -10,6 +10,7 @@
     "format-and-lint:fix": "biome check . --write"
   },
   "dependencies": {
+    "@tanstack/react-form": "^0.33.0",
     "hash-slash": "workspace:*",
     "jazz-tools": "workspace:*",
     "react": "19.0.0",
