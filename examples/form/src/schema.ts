@@ -16,7 +16,7 @@ export const BubbleTeaBaseTeaTypes = [
 ] as const;
 
 export const ListOfBubbleTeaAddOns = co
-  .list(z.literal([...BubbleTeaAddOnTypes]))
+  .list(z.enum(BubbleTeaAddOnTypes))
   .withHelpers((Self) => ({
     hasChanges(list?: Loaded<typeof Self> | null) {
       return list && Object.entries(list._raw.insertions).length > 0;
@@ -24,7 +24,7 @@ export const ListOfBubbleTeaAddOns = co
   }));
 
 export const BubbleTeaOrder = co.map({
-  baseTea: z.literal([...BubbleTeaBaseTeaTypes]),
+  baseTea: z.enum(BubbleTeaBaseTeaTypes),
   addOns: ListOfBubbleTeaAddOns,
   deliveryDate: z.date(),
   withMilk: z.boolean(),
@@ -33,7 +33,7 @@ export const BubbleTeaOrder = co.map({
 
 export const DraftBubbleTeaOrder = co
   .map({
-    baseTea: z.optional(z.literal([...BubbleTeaBaseTeaTypes])),
+    baseTea: z.optional(z.enum(BubbleTeaBaseTeaTypes)),
     addOns: z.optional(ListOfBubbleTeaAddOns),
     deliveryDate: z.optional(z.date()),
     withMilk: z.optional(z.boolean()),

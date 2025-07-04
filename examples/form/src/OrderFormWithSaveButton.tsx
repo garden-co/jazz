@@ -1,4 +1,4 @@
-import { CoPlainText, Loaded } from "jazz-tools";
+import { CoPlainText, Loaded, z } from "jazz-tools";
 import { useForm } from "@tanstack/react-form";
 import {
   BubbleTeaAddOnTypes,
@@ -12,15 +12,18 @@ type LoadedBubbleTeaOrder = Loaded<
   { addOns: { $each: true }; instructions: true }
 >;
 
-// Would be great to derive this type from the CoValue schema
-export type OrderFormData = {
-  id: string;
-  baseTea: (typeof BubbleTeaBaseTeaTypes)[number];
-  addOns: (typeof BubbleTeaAddOnTypes)[number][];
-  deliveryDate: Date;
-  withMilk: boolean;
-  instructions?: string;
-};
+const orderFormSchema = z.object({
+  id: z.string(),
+  baseTea: z.enum(BubbleTeaBaseTeaTypes),
+  addOns: z
+    .array(z.enum(BubbleTeaAddOnTypes))
+    .min(1, "Please select at least one add-on"),
+  deliveryDate: z.date("Delivery date is required"),
+  withMilk: z.boolean(),
+  instructions: z.string().optional(),
+});
+
+export type OrderFormData = z.infer<typeof orderFormSchema>;
 
 export function OrderFormWithSaveButton({
   order: originalOrder,
@@ -31,16 +34,17 @@ export function OrderFormWithSaveButton({
   // Convert timestamp to Date
   defaultValues.deliveryDate = new Date(defaultValues.deliveryDate);
 
-  const form = useForm<OrderFormData>({
+  const form = useForm({
     defaultValues,
+    validators: {
+      onChange: orderFormSchema,
+    },
     onSubmit: async ({ value }: { value: OrderFormData }) => {
-      console.log("submit form", value);
-
       // Apply changes to the original Jazz order
       originalOrder.baseTea = value.baseTea;
-      originalOrder.addOns.applyDiff(value.addOns);
-      originalOrder.deliveryDate = new Date(value.deliveryDate);
+      originalOrder.deliveryDate = value.deliveryDate;
       originalOrder.withMilk = value.withMilk;
+      originalOrder.addOns.applyDiff(value.addOns);
 
       // `applyDiff` requires nested objects to be CoValues as well
       const instructions = originalOrder.instructions ?? CoPlainText.create("");
@@ -59,7 +63,6 @@ export function OrderFormWithSaveButton({
       }}
       className="grid gap-5"
     >
-      {/* TODO refactor OrderThumbnail to support receiving a plain JSON object */}
       <div>
         <p>Unsaved order preview:</p>
         <form.Subscribe
@@ -72,10 +75,6 @@ export function OrderFormWithSaveButton({
         <label htmlFor="baseTea">Base tea</label>
         <form.Field
           name="baseTea"
-          validators={{
-            onChange: ({ value }) =>
-              !value ? "Please select your preferred base tea" : undefined,
-          }}
           children={(field) => (
             <>
               <select
@@ -98,7 +97,7 @@ export function OrderFormWithSaveButton({
               </select>
               {field.state.meta.errors.length > 0 && (
                 <span className="text-red-500 text-sm">
-                  {field.state.meta.errors[0]}
+                  {field.state.meta.errors[0]?.message}
                 </span>
               )}
             </>
@@ -121,18 +120,20 @@ export function OrderFormWithSaveButton({
                     checked={field.state.value.includes(addOn)}
                     onChange={(e) => {
                       const currentValue = field.state.value;
-                      if (e.target.checked) {
-                        field.handleChange([...currentValue, addOn]);
-                      } else {
-                        field.handleChange(
-                          currentValue.filter((item) => item !== addOn),
-                        );
-                      }
+                      const updatedValue = e.target.checked
+                        ? [...currentValue, addOn]
+                        : currentValue.filter((item) => item !== addOn);
+                      field.handleChange(updatedValue);
                     }}
                   />
                   <label htmlFor={addOn}>{addOn}</label>
                 </div>
               ))}
+              {field.state.meta.errors.length > 0 && (
+                <span className="text-red-500 text-sm">
+                  {field.state.meta.errors[0]?.message}
+                </span>
+              )}
             </>
           )}
         />
@@ -142,27 +143,29 @@ export function OrderFormWithSaveButton({
         <label htmlFor="deliveryDate">Delivery date</label>
         <form.Field
           name="deliveryDate"
-          validators={{
-            onChange: ({ value }) =>
-              !value ? "Delivery date is required" : undefined,
+          children={(field) => {
+            // Check if the date is valid
+            const dateString = !isNaN(field.state.value.getTime())
+              ? field.state.value.toISOString().split("T")[0]
+              : "";
+            return (
+              <>
+                <input
+                  type="date"
+                  id="deliveryDate"
+                  className="dark:bg-transparent"
+                  value={dateString}
+                  onChange={(e) => field.handleChange(new Date(e.target.value))}
+                  onBlur={field.handleBlur}
+                />
+                {field.state.meta.errors.length > 0 && (
+                  <span className="text-red-500 text-sm">
+                    {field.state.meta.errors[0]?.message}
+                  </span>
+                )}
+              </>
+            );
           }}
-          children={(field) => (
-            <>
-              <input
-                type="date"
-                id="deliveryDate"
-                className="dark:bg-transparent"
-                value={field.state.value.toISOString().split("T")[0]}
-                onChange={(e) => field.handleChange(new Date(e.target.value))}
-                onBlur={field.handleBlur}
-              />
-              {field.state.meta.errors.length > 0 && (
-                <span className="text-red-500 text-sm">
-                  {field.state.meta.errors[0]}
-                </span>
-              )}
-            </>
-          )}
         />
       </div>
 
