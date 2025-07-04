@@ -1,5 +1,15 @@
 # jazz-tools
 
+## 0.15.6
+
+### Patch Changes
+
+- a5ceaff: add Group.getDirectMembers to get only direct members of a group
+  - cojson@0.15.6
+  - cojson-storage@0.15.6
+  - cojson-storage-indexeddb@0.15.6
+  - cojson-transport-ws@0.15.6
+
 ## 0.15.5
 
 ### Patch Changes
