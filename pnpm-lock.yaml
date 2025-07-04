@@ -1426,6 +1426,64 @@ importers:
         specifier: 6.3.5
         version: 6.3.5(@types/node@22.15.18)(jiti@2.4.2)(lightningcss@1.30.1)(terser@5.37.0)(tsx@4.19.3)(yaml@2.6.1)
 
+  examples/tanstack-form:
+    dependencies:
+      '@tanstack/react-form':
+        specifier: ^1.0.0
+        version: 1.12.4(react-dom@19.0.0(react@19.0.0))(react@19.0.0)
+      hash-slash:
+        specifier: workspace:*
+        version: link:../../packages/hash-slash
+      jazz-tools:
+        specifier: workspace:*
+        version: link:../../packages/jazz-tools
+      react:
+        specifier: 19.0.0
+        version: 19.0.0
+      react-dom:
+        specifier: 19.0.0
+        version: 19.0.0(react@19.0.0)
+    devDependencies:
+      '@biomejs/biome':
+        specifier: 1.9.4
+        version: 1.9.4
+      '@playwright/test':
+        specifier: ^1.50.1
+        version: 1.50.1
+      '@tailwindcss/forms':
+        specifier: ^0.5.10
+        version: 0.5.10(tailwindcss@4.1.10)
+      '@tailwindcss/postcss':
+        specifier: ^4.1.10
+        version: 4.1.10
+      '@types/react':
+        specifier: 19.0.0
+        version: 19.0.0
+      '@types/react-dom':
+        specifier: 19.0.0
+        version: 19.0.0
+      '@vitejs/plugin-react':
+        specifier: ^4.5.1
+        version: 4.5.1(vite@6.3.5(@types/node@22.15.18)(jiti@2.4.2)(lightningcss@1.30.1)(terser@5.37.0)(tsx@4.19.3)(yaml@2.6.1))
+      globals:
+        specifier: ^15.11.0
+        version: 15.15.0
+      is-ci:
+        specifier: ^3.0.1
+        version: 3.0.1
+      postcss:
+        specifier: ^8.4.40
+        version: 8.5.4
+      tailwindcss:
+        specifier: ^4.1.10
+        version: 4.1.10
+      typescript:
+        specifier: 5.6.2
+        version: 5.6.2
+      vite:
+        specifier: 6.3.5
+        version: 6.3.5(@types/node@22.15.18)(jiti@2.4.2)(lightningcss@1.30.1)(terser@5.37.0)(tsx@4.19.3)(yaml@2.6.1)
+
   examples/todo:
     dependencies:
       '@faker-js/faker':
