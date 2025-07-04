@@ -1,5 +1,15 @@
 # jazz-run
 
+## 0.15.6
+
+### Patch Changes
+
+- Updated dependencies [a5ceaff]
+  - jazz-tools@0.15.6
+  - cojson@0.15.6
+  - cojson-storage-sqlite@0.15.6
+  - cojson-transport-ws@0.15.6
+
 ## 0.15.5
 
 ### Patch Changes

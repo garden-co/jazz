@@ -25,7 +25,7 @@
   },
   "type": "module",
   "license": "MIT",
-  "version": "0.15.5",
+  "version": "0.15.6",
   "devDependencies": {
     "@opentelemetry/sdk-metrics": "^2.0.0",
     "typescript": "catalog:"
