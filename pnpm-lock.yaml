@@ -667,9 +667,6 @@ importers:
 
   examples/form:
     dependencies:
-      '@tanstack/react-form':
-        specifier: ^1.0.0
-        version: 1.12.4(react-dom@19.0.0(react@19.0.0))(react@19.0.0)
       hash-slash:
         specifier: workspace:*
         version: link:../../packages/hash-slash
