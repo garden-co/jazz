@@ -12,6 +12,7 @@ import {
   NewContentMessage,
   emptyKnownState,
 } from "../sync.js";
+import { StoreQueue } from "./StoreQueue.js";
 import { StorageKnownState } from "./knownState.js";
 import { collectNewTxs, getDependedOnCoValues } from "./syncUtils.js";
 import type {
@@ -193,8 +194,7 @@ export class StorageApiAsync implements StorageAPI {
     pushCallback(contentMessage);
   }
 
-  storeQueue = createStoreQueue();
-  processingStoreQueue = false;
+  storeQueue = new StoreQueue();
 
   async store(
     msgs: NewContentMessage[],
@@ -204,24 +204,11 @@ export class StorageApiAsync implements StorageAPI {
      * The store operations must be done one by one, because we can't start a new transaction when there
      * is already a transaction open.
      */
-    this.storeQueue.push({ data: msgs, correctionCallback });
+    this.storeQueue.push(msgs, correctionCallback);
 
-    if (this.processingStoreQueue) {
-      return;
-    }
-
-    this.processingStoreQueue = true;
-
-    let entry:
-      | {
-          data: NewContentMessage[];
-          correctionCallback: (data: CoValueKnownState) => void;
-        }
-      | undefined;
-
-    while ((entry = this.storeQueue.shift())) {
-      for (const msg of entry.data) {
-        const success = await this.storeSingle(msg, entry.correctionCallback);
+    this.storeQueue.processQueue(async (data, correctionCallback) => {
+      for (const msg of data) {
+        const success = await this.storeSingle(msg, correctionCallback);
 
         if (!success) {
           // Stop processing the messages for this entry, because the data is out of sync with storage
@@ -229,9 +216,7 @@ export class StorageApiAsync implements StorageAPI {
           break;
         }
       }
-    }
-
-    this.processingStoreQueue = false;
+    });
   }
 
   private async storeSingle(
@@ -373,21 +358,7 @@ export class StorageApiAsync implements StorageAPI {
   }
 
   close() {
-    let entry:
-      | {
-          data: NewContentMessage[];
-          correctionCallback: (data: CoValueKnownState) => void;
-        }
-      | undefined;
-
     // Drain the store queue
-    while ((entry = this.storeQueue.shift())) {}
+    this.storeQueue.drain();
   }
-}
-
-function createStoreQueue() {
-  return new LinkedList<{
-    data: NewContentMessage[];
-    correctionCallback: (data: CoValueKnownState) => void;
-  }>();
 }

@@ -1,6 +1,7 @@
 import { randomUUID } from "crypto";
 import { tmpdir } from "os";
 import { join } from "path";
+import { LocalNode } from "cojson";
 import { co, z } from "jazz-tools";
 import { startWorker } from "jazz-tools/worker";
 import { describe, expect, test } from "vitest";

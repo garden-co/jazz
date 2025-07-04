@@ -1,4 +1,5 @@
 import { WasmCrypto } from "cojson/crypto/WasmCrypto";
+import { Channel } from "queueueue";
 import { describe, expect, test } from "vitest";
 import {
   Account,
@@ -215,7 +216,7 @@ describe("CoPlainText", () => {
         crypto: Crypto,
       });
 
-    const queue = new cojsonInternals.Channel();
+    const queue = new Channel();
 
     // Subscribe to text updates
     co.plainText().subscribe(

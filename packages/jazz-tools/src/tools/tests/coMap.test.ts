@@ -543,10 +543,6 @@ describe("CoMap resolution", async () => {
     });
 
     assert(loadedPerson);
-    expect(loadedPerson.dog).toBe(null);
-
-    await waitFor(() => expect(loadedPerson.dog).toBeTruthy());
-
     expect(loadedPerson.dog?.name).toEqual("Rex");
   });
 
@@ -652,10 +648,6 @@ describe("CoMap resolution", async () => {
 
     expect(resolved).toBe(true);
     assert(loadedPerson);
-    expect(loadedPerson.dog).toBe(null);
-
-    await waitFor(() => expect(loadedPerson.dog).toBeTruthy());
-
     expect(loadedPerson.dog?.name).toEqual("Rex");
   });
 

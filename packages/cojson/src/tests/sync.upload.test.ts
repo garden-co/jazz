@@ -4,13 +4,17 @@ import { expectList, expectMap } from "../coValue";
 import { WasmCrypto } from "../crypto/WasmCrypto";
 import {
   SyncMessagesLog,
+  TEST_NODE_CONFIG,
   loadCoValueOrFail,
   setupTestNode,
   waitFor,
 } from "./testUtils";
 
+// We want to simulate a real world communication that happens asynchronously
+TEST_NODE_CONFIG.withAsyncPeers = true;
+
 const Crypto = await WasmCrypto.create();
-let jazzCloud = setupTestNode({ isSyncServer: true });
+let jazzCloud: ReturnType<typeof setupTestNode>;
 
 beforeEach(async () => {
   SyncMessagesLog.clear();
@@ -40,8 +44,8 @@ describe("client to server upload", () => {
     ).toMatchInlineSnapshot(`
       [
         "client -> server | CONTENT Group header: true new: After: 0 New: 3",
-        "server -> client | KNOWN Group sessions: header/3",
         "client -> server | CONTENT Map header: true new: After: 0 New: 1",
+        "server -> client | KNOWN Group sessions: header/3",
         "server -> client | KNOWN Map sessions: header/1",
       ]
     `);
@@ -75,10 +79,10 @@ describe("client to server upload", () => {
     ).toMatchInlineSnapshot(`
       [
         "client -> server | CONTENT ParentGroup header: true new: After: 0 New: 6",
-        "server -> client | KNOWN ParentGroup sessions: header/6",
         "client -> server | CONTENT Group header: true new: After: 0 New: 5",
-        "server -> client | KNOWN Group sessions: header/5",
         "client -> server | CONTENT Map header: true new: After: 0 New: 1",
+        "server -> client | KNOWN ParentGroup sessions: header/6",
+        "server -> client | KNOWN Group sessions: header/5",
         "server -> client | KNOWN Map sessions: header/1",
       ]
     `);
@@ -113,8 +117,8 @@ describe("client to server upload", () => {
     ).toMatchInlineSnapshot(`
       [
         "client -> server | CONTENT Group header: true new: After: 0 New: 3",
-        "server -> client | KNOWN Group sessions: header/3",
         "client -> server | CONTENT Map header: true new: After: 0 New: 1",
+        "server -> client | KNOWN Group sessions: header/3",
         "server -> client | KNOWN Map sessions: header/1",
         "client -> server | CONTENT Map header: false new: After: 1 New: 1",
         "server -> client | KNOWN Map sessions: header/2",
@@ -158,8 +162,8 @@ describe("client to server upload", () => {
     ).toMatchInlineSnapshot(`
       [
         "client -> server | CONTENT Group header: true new: After: 0 New: 5",
-        "server -> client | KNOWN Group sessions: header/5",
         "client -> server | CONTENT Map header: true new: After: 0 New: 1",
+        "server -> client | KNOWN Group sessions: header/5",
         "server -> client | KNOWN Map sessions: header/1",
         "client -> server | CONTENT Map header: false new: After: 1 New: 1",
         "server -> client | KNOWN CORRECTION Map sessions: empty",
@@ -233,16 +237,17 @@ describe("client to server upload", () => {
         "otherClient -> server | KNOWN Colist sessions: header/1",
         "client -> server | CONTENT Colist header: false new: After: 1 New: 1",
         "server -> client | KNOWN Colist sessions: header/2",
+        "server -> otherClient | CONTENT Colist header: false new: After: 1 New: 1",
         "otherClient -> server | LOAD Colist sessions: header/3",
         "client -> server | CONTENT Colist header: false new: After: 2 New: 1",
         "server -> otherClient | CONTENT Colist header: false new: After: 1 New: 1",
         "server -> client | KNOWN Colist sessions: header/3",
-        "otherClient -> server | KNOWN Colist sessions: header/4",
         "server -> otherClient | CONTENT Colist header: false new: After: 2 New: 1",
+        "otherClient -> server | KNOWN Colist sessions: header/4",
         "otherClient -> server | CONTENT Colist header: false new: After: 0 New: 2",
+        "otherClient -> server | KNOWN Colist sessions: header/5",
         "server -> otherClient | KNOWN Colist sessions: header/5",
         "server -> client | CONTENT Colist header: false new: After: 0 New: 2",
-        "otherClient -> server | KNOWN Colist sessions: header/5",
         "client -> server | KNOWN Colist sessions: header/5",
       ]
     `);
@@ -283,38 +288,38 @@ describe("client to server upload", () => {
       [
         "client -> server | LOAD Map sessions: empty",
         "server -> client | CONTENT Group header: true new: After: 0 New: 5",
-        "client -> server | KNOWN Group sessions: header/5",
         "server -> client | CONTENT Map header: true new:  streamingTarget: header/1024",
-        "client -> server | KNOWN Map sessions: header/0",
         "server -> client | CONTENT Map header: false new: After: 0 New: 73 streamingTarget: header/1024",
-        "client -> server | KNOWN Map sessions: header/73",
         "server -> client | CONTENT Map header: false new: After: 73 New: 73 streamingTarget: header/1024",
-        "client -> server | KNOWN Map sessions: header/146",
         "server -> client | CONTENT Map header: false new: After: 146 New: 73 streamingTarget: header/1024",
-        "client -> server | KNOWN Map sessions: header/219",
         "server -> client | CONTENT Map header: false new: After: 219 New: 73 streamingTarget: header/1024",
-        "client -> server | KNOWN Map sessions: header/292",
         "server -> client | CONTENT Map header: false new: After: 292 New: 73 streamingTarget: header/1024",
-        "client -> server | KNOWN Map sessions: header/365",
         "server -> client | CONTENT Map header: false new: After: 365 New: 73 streamingTarget: header/1024",
-        "client -> server | KNOWN Map sessions: header/438",
         "server -> client | CONTENT Map header: false new: After: 438 New: 73 streamingTarget: header/1024",
-        "client -> server | KNOWN Map sessions: header/511",
         "server -> client | CONTENT Map header: false new: After: 511 New: 73 streamingTarget: header/1024",
-        "client -> server | KNOWN Map sessions: header/584",
         "server -> client | CONTENT Map header: false new: After: 584 New: 73 streamingTarget: header/1024",
-        "client -> server | KNOWN Map sessions: header/657",
         "server -> client | CONTENT Map header: false new: After: 657 New: 73 streamingTarget: header/1024",
-        "client -> server | KNOWN Map sessions: header/730",
         "server -> client | CONTENT Map header: false new: After: 730 New: 73 streamingTarget: header/1024",
-        "client -> server | KNOWN Map sessions: header/803",
         "server -> client | CONTENT Map header: false new: After: 803 New: 73 streamingTarget: header/1024",
-        "client -> server | KNOWN Map sessions: header/876",
         "server -> client | CONTENT Map header: false new: After: 876 New: 73 streamingTarget: header/1024",
-        "client -> server | KNOWN Map sessions: header/949",
         "server -> client | CONTENT Map header: false new: After: 949 New: 73 streamingTarget: header/1024",
-        "client -> server | KNOWN Map sessions: header/1022",
         "server -> client | CONTENT Map header: false new: After: 1022 New: 2 streamingTarget: header/1024",
+        "client -> server | KNOWN Group sessions: header/5",
+        "client -> server | KNOWN Map sessions: header/0",
+        "client -> server | KNOWN Map sessions: header/73",
+        "client -> server | KNOWN Map sessions: header/146",
+        "client -> server | KNOWN Map sessions: header/219",
+        "client -> server | KNOWN Map sessions: header/292",
+        "client -> server | KNOWN Map sessions: header/365",
+        "client -> server | KNOWN Map sessions: header/438",
+        "client -> server | KNOWN Map sessions: header/511",
+        "client -> server | KNOWN Map sessions: header/584",
+        "client -> server | KNOWN Map sessions: header/657",
+        "client -> server | KNOWN Map sessions: header/730",
+        "client -> server | KNOWN Map sessions: header/803",
+        "client -> server | KNOWN Map sessions: header/876",
+        "client -> server | KNOWN Map sessions: header/949",
+        "client -> server | KNOWN Map sessions: header/1022",
         "client -> server | KNOWN Map sessions: header/1024",
       ]
     `);

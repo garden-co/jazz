@@ -1,27 +1,13 @@
 import { PeerKnownStates, ReadonlyPeerKnownStates } from "./PeerKnownStates.js";
-import { PriorityBasedMessageQueue } from "./PriorityBasedMessageQueue.js";
 import { RawCoID, SessionID } from "./ids.js";
 import { logger } from "./logger.js";
-import { CO_VALUE_PRIORITY } from "./priority.js";
 import { CoValueKnownState, Peer, SyncMessage } from "./sync.js";
 
 export class PeerState {
-  private queue: PriorityBasedMessageQueue;
-
   constructor(
     private peer: Peer,
     knownStates: ReadonlyPeerKnownStates | undefined,
   ) {
-    /**
-     * We set as default priority HIGH to handle all the messages without a
-     * priority property as HIGH priority.
-     *
-     * This way we consider all the non-content messsages as HIGH priority.
-     */
-    this.queue = new PriorityBasedMessageQueue(CO_VALUE_PRIORITY.HIGH, {
-      peerRole: peer.role,
-    });
-
     this._knownStates = knownStates?.clone() ?? new PeerKnownStates();
     this._optimisticKnownStates = knownStates?.clone() ?? new PeerKnownStates();
   }
@@ -105,67 +91,14 @@ export class PeerState {
     return this.peer.priority;
   }
 
-  get crashOnClose() {
-    return this.peer.crashOnClose;
-  }
-
-  private processing = false;
   public closed = false;
 
-  async processQueue() {
-    if (this.processing) {
-      return;
-    }
-
-    this.processing = true;
-
-    let msg: SyncMessage | undefined;
-    while ((msg = this.queue.pull())) {
-      if (this.closed) {
-        break;
-      }
-
-      // Awaiting the push to send one message at a time
-      // This way when the peer is "under pressure" we can enqueue all
-      // the coming messages and organize them by priority
-      try {
-        await this.peer.outgoing.push(msg);
-      } catch (e) {
-        logger.error("Error sending message", {
-          err: e,
-          action: msg.action,
-          id: msg.id,
-          peerId: this.id,
-          peerRole: this.role,
-        });
-      }
-    }
-
-    this.processing = false;
+  get incoming() {
+    return this.peer.incoming;
   }
 
   pushOutgoingMessage(msg: SyncMessage) {
-    if (this.closed) {
-      return;
-    }
-
-    this.queue.push(msg);
-
-    void this.processQueue();
-  }
-
-  isProcessing() {
-    return this.processing;
-  }
-
-  get incoming() {
-    if (this.closed) {
-      return (async function* () {
-        yield "Disconnected" as const;
-      })();
-    }
-
-    return this.peer.incoming;
+    this.peer.outgoing.push(msg);
   }
 
   closeListeners = new Set<() => void>();
@@ -192,43 +125,19 @@ export class PeerState {
   }
 
   gracefulShutdown() {
+    if (this.closed) {
+      return;
+    }
+
     logger.debug("Gracefully closing", {
       peerId: this.id,
       peerRole: this.role,
     });
-    this.peer.crashOnClose = false;
-    this.peer.outgoing.close();
+
     this.closed = true;
+    this.peer.outgoing.push("Disconnected");
+    this.peer.outgoing.close();
+    this.peer.incoming.close();
     this.emitClose();
-  }
-
-  async processIncomingMessages(callback: (msg: SyncMessage) => void) {
-    if (this.closed) {
-      throw new Error("Peer is closed");
-    }
-
-    const processIncomingMessages = async () => {
-      for await (const msg of this.incoming) {
-        if (this.closed) {
-          return;
-        }
-
-        if (msg === "Disconnected") {
-          return;
-        }
-
-        if (msg === "PingTimeout") {
-          logger.error("Ping timeout from peer", {
-            peerId: this.id,
-            peerRole: this.role,
-          });
-          return;
-        }
-
-        callback(msg);
-      }
-    };
-
-    return processIncomingMessages();
   }
 }

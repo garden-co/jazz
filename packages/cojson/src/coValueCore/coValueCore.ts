@@ -236,12 +236,41 @@ export class CoValueCore {
   }
 
   missingDependencies = new Set<RawCoID>();
+
+  // Checks if the current CoValueCore is already a missing dependency of the given CoValueCore
+  checkCircularDependencies(dependency: CoValueCore) {
+    const visited = new Set<RawCoID>();
+    const stack = [dependency];
+
+    while (stack.length > 0) {
+      const current = stack.pop();
+
+      if (!current) {
+        return true;
+      }
+
+      visited.add(current.id);
+
+      for (const dependency of current.missingDependencies) {
+        if (dependency === this.id) {
+          return false;
+        }
+
+        if (!visited.has(dependency)) {
+          stack.push(this.node.getCoValue(dependency));
+        }
+      }
+    }
+
+    return true;
+  }
+
   markMissingDependency(dependency: RawCoID) {
     const value = this.node.getCoValue(dependency);
 
     if (value.isAvailable()) {
       this.missingDependencies.delete(dependency);
-    } else {
+    } else if (this.checkCircularDependencies(value)) {
       const unsubscribe = value.subscribe(() => {
         if (value.isAvailable()) {
           this.missingDependencies.delete(dependency);

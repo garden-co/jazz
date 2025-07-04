@@ -7,6 +7,8 @@ import {
   setupJazzTestSync,
 } from "../testing.js";
 
+cojsonInternals.CO_VALUE_LOADING_CONFIG.RETRY_DELAY = 10;
+
 beforeEach(async () => {
   await setupJazzTestSync();
   await createJazzTestAccount({
@@ -48,20 +50,9 @@ test("retry an unavailable value", async () => {
 
   const alice = await createJazzTestAccount();
 
-  let resolved = false;
   const promise = Person.load(map.id, { loadAs: alice });
-  promise.then(() => {
-    resolved = true;
-  });
 
-  await new Promise((resolve) =>
-    setTimeout(
-      resolve,
-      cojsonInternals.CO_VALUE_LOADING_CONFIG.RETRY_DELAY - 100,
-    ),
-  );
-
-  expect(resolved).toBe(false);
+  await new Promise((resolve) => setTimeout(resolve));
 
   // Reconnect the current account
   currentAccount._raw.core.node.syncManager.addPeer(
@@ -69,7 +60,6 @@ test("retry an unavailable value", async () => {
   );
 
   const john = await promise;
-  expect(resolved).toBe(true);
   expect(john).not.toBeNull();
   expect(john?.name).toBe("John");
 });
@@ -92,26 +82,7 @@ test("returns null if the value is unavailable after retries", async () => {
 
   const alice = await createJazzTestAccount();
 
-  let resolved = false;
-  const promise = Person.load(map.id, { loadAs: alice });
-  promise.then(() => {
-    resolved = true;
-  });
+  const john = await Person.load(map.id, { loadAs: alice });
 
-  await new Promise((resolve) =>
-    setTimeout(
-      resolve,
-      cojsonInternals.CO_VALUE_LOADING_CONFIG.RETRY_DELAY + 100,
-    ),
-  );
-
-  expect(resolved).toBe(true);
-
-  // Reconnect the current account
-  currentAccount._raw.core.node.syncManager.addPeer(
-    getPeerConnectedToTestSyncServer(),
-  );
-
-  const john = await promise;
   expect(john).toBeNull();
 });

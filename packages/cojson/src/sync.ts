@@ -1,4 +1,5 @@
 import { Histogram, ValueType, metrics } from "@opentelemetry/api";
+import { IncomingMessagesQueue } from "./IncomingMessagesQueue.js";
 import { PeerState } from "./PeerState.js";
 import { SyncStateManager } from "./SyncStateManager.js";
 import { CoValueCore } from "./coValueCore/coValueCore.js";
@@ -69,23 +70,24 @@ export type PeerID = string;
 
 export type DisconnectedError = "Disconnected";
 
-export type PingTimeoutError = "PingTimeout";
-
-export type IncomingSyncStream = AsyncIterable<
-  SyncMessage | DisconnectedError | PingTimeoutError
->;
-export type OutgoingSyncQueue = {
-  push: (msg: SyncMessage) => Promise<unknown>;
+export interface IncomingPeerChannel {
   close: () => void;
-};
+  onMessage: (callback: (msg: SyncMessage | DisconnectedError) => void) => void;
+  onClose: (callback: () => void) => void;
+}
+
+export interface OutgoingPeerChannel {
+  push: (msg: SyncMessage | DisconnectedError) => void;
+  close: () => void;
+  onClose: (callback: () => void) => void;
+}
 
 export interface Peer {
   id: PeerID;
-  incoming: IncomingSyncStream;
-  outgoing: OutgoingSyncQueue;
+  incoming: IncomingPeerChannel;
+  outgoing: OutgoingPeerChannel;
   role: "server" | "client";
   priority?: number;
-  crashOnClose: boolean;
   deletePeerStateOnClose?: boolean;
 }
 
@@ -303,6 +305,19 @@ export class SyncManager {
     }
   }
 
+  messagesQueue = new IncomingMessagesQueue();
+  pushMessage(incoming: SyncMessage, peer: PeerState) {
+    this.messagesQueue.push(incoming, peer);
+
+    if (this.messagesQueue.processing) {
+      return;
+    }
+
+    this.messagesQueue.processQueue((msg, peer) => {
+      this.handleSyncMessage(msg, peer);
+    });
+  }
+
   addPeer(peer: Peer) {
     const prevPeer = this.peers[peer.id];
 
@@ -325,41 +340,23 @@ export class SyncManager {
       void this.startPeerReconciliation(peerState);
     }
 
-    peerState
-      .processIncomingMessages((msg) => {
-        this.handleSyncMessage(msg, peerState);
-      })
-      .then(() => {
-        if (peer.crashOnClose) {
-          logger.error("Unexepcted close from peer", {
-            peerId: peer.id,
-            peerRole: peer.role,
-          });
-          this.local.crashed = new Error("Unexpected close from peer");
-          throw new Error("Unexpected close from peer");
-        }
-      })
-      .catch((e) => {
-        logger.error("Error processing messages from peer", {
-          err: e,
-          peerId: peer.id,
-          peerRole: peer.role,
-        });
-
-        if (peer.crashOnClose) {
-          this.local.crashed = e;
-          throw new Error(e);
-        }
-      })
-      .finally(() => {
+    peerState.incoming.onMessage((msg) => {
+      if (msg === "Disconnected") {
         peerState.gracefulShutdown();
-        unsubscribeFromKnownStatesUpdates();
-        this.peersCounter.add(-1, { role: peer.role });
+        return;
+      }
 
-        if (peer.deletePeerStateOnClose && this.peers[peer.id] === peerState) {
-          delete this.peers[peer.id];
-        }
-      });
+      this.pushMessage(msg, peerState);
+    });
+
+    peerState.addCloseListener(() => {
+      unsubscribeFromKnownStatesUpdates();
+      this.peersCounter.add(-1, { role: peer.role });
+
+      if (peer.deletePeerStateOnClose && this.peers[peer.id] === peerState) {
+        delete this.peers[peer.id];
+      }
+    });
   }
 
   trySendToPeer(peer: PeerState, msg: SyncMessage) {
@@ -495,6 +492,8 @@ export class SyncManager {
           }
 
           dependencyCoValue.load(peers);
+        } else if (!dependencyCoValue.isAvailable()) {
+          coValue.markMissingDependency(dependency);
         }
       }
 

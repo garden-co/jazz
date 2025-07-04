@@ -1,6 +1,7 @@
 import { describe, expect, test, vi } from "vitest";
 import { PeerState } from "../PeerState.js";
 import { CO_VALUE_PRIORITY } from "../priority.js";
+import { ConnectedPeerChannel } from "../streamUtils.js";
 import { CoValueKnownState, Peer, SyncMessage } from "../sync.js";
 import { waitFor } from "./testUtils.js";
 
@@ -9,13 +10,12 @@ function setup() {
     id: "test-peer",
     role: "client",
     priority: 1,
-    crashOnClose: false,
-    incoming: (async function* () {})(),
-    outgoing: {
-      push: vi.fn().mockResolvedValue(undefined),
-      close: vi.fn(),
-    },
+    incoming: new ConnectedPeerChannel(),
+    outgoing: new ConnectedPeerChannel(),
   };
+  vi.spyOn(mockPeer.outgoing, "push");
+  vi.spyOn(mockPeer.incoming, "close");
+  vi.spyOn(mockPeer.outgoing, "close");
   const peerState = new PeerState(mockPeer, undefined);
   return { mockPeer, peerState };
 }
@@ -38,123 +38,11 @@ describe("PeerState", () => {
     expect(peerState.incoming).toBe(mockPeer.incoming);
   });
 
-  test("should return Disconnected when closed", async () => {
-    const { peerState } = setup();
-    peerState.gracefulShutdown();
-    const incomingIterator = peerState.incoming[Symbol.asyncIterator]();
-    const { value, done } = await incomingIterator.next();
-    expect(value).toBe("Disconnected");
-    expect(done).toBe(false);
-  });
-
   test("should perform graceful shutdown", () => {
     const { mockPeer, peerState } = setup();
     peerState.gracefulShutdown();
     expect(mockPeer.outgoing.close).toHaveBeenCalled();
     expect(peerState.closed).toBe(true);
-  });
-
-  test("should empty the queue when closing", async () => {
-    const { mockPeer, peerState } = setup();
-
-    mockPeer.outgoing.push = vi.fn().mockImplementation((message) => {
-      return new Promise<void>((resolve) => {
-        setTimeout(resolve, 100);
-      });
-    });
-
-    peerState.pushOutgoingMessage({
-      action: "content",
-      id: "co_z1",
-      new: {},
-      priority: CO_VALUE_PRIORITY.HIGH,
-    });
-    peerState.pushOutgoingMessage({
-      action: "content",
-      id: "co_z1",
-      new: {},
-      priority: CO_VALUE_PRIORITY.HIGH,
-    });
-    peerState.pushOutgoingMessage({
-      action: "content",
-      id: "co_z1",
-      new: {},
-      priority: CO_VALUE_PRIORITY.HIGH,
-    });
-
-    peerState.gracefulShutdown();
-
-    await waitFor(() => {
-      expect(peerState.isProcessing()).toBe(false);
-    });
-
-    expect(mockPeer.outgoing.push).toHaveBeenCalledTimes(1);
-  });
-
-  test("should schedule outgoing messages based on their priority", async () => {
-    const { peerState, mockPeer } = setup();
-
-    mockPeer.outgoing.push = vi.fn().mockImplementation((message) => {
-      return new Promise<void>((resolve) => {
-        setTimeout(resolve, 0);
-      });
-    });
-
-    const loadMessage: SyncMessage = {
-      action: "load",
-      id: "co_zhigh",
-      header: false,
-      sessions: {},
-    };
-    const contentMessageHigh: SyncMessage = {
-      action: "content",
-      id: "co_zhigh",
-      new: {},
-      priority: CO_VALUE_PRIORITY.HIGH,
-    };
-    const contentMessageMid: SyncMessage = {
-      action: "content",
-      id: "co_zmid",
-      new: {},
-      priority: CO_VALUE_PRIORITY.MEDIUM,
-    };
-    const contentMessageLow: SyncMessage = {
-      action: "content",
-      id: "co_zlow",
-      new: {},
-      priority: CO_VALUE_PRIORITY.LOW,
-    };
-
-    peerState.pushOutgoingMessage(contentMessageLow);
-    peerState.pushOutgoingMessage(contentMessageMid);
-    peerState.pushOutgoingMessage(contentMessageHigh);
-    peerState.pushOutgoingMessage(loadMessage);
-
-    await waitFor(() => {
-      expect(peerState.isProcessing()).toBe(false);
-    });
-
-    // The first message is pushed directly, the other three are queued because are waiting
-    // for the first push to be completed.
-    expect(peerState["peer"].outgoing.push).toHaveBeenNthCalledWith(
-      1,
-      contentMessageLow,
-    );
-
-    // Load message are managed as high priority messages and having the same priority as the content message
-    // they follow the push order.
-    expect(peerState["peer"].outgoing.push).toHaveBeenNthCalledWith(
-      2,
-      contentMessageHigh,
-    );
-    expect(peerState["peer"].outgoing.push).toHaveBeenNthCalledWith(
-      3,
-      loadMessage,
-    );
-    expect(peerState["peer"].outgoing.push).toHaveBeenNthCalledWith(
-      4,
-      contentMessageMid,
-    );
   });
 
   test("should clone the knownStates into optimisticKnownStates and knownStates when passed as argument", () => {

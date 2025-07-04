@@ -385,7 +385,6 @@ export class LocalNode {
       }
 
       const result = await coValue.waitForAvailableOrUnavailable();
-
       if (
         result.isAvailable() ||
         skipRetry ||

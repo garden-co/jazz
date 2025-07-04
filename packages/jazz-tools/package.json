@@ -187,6 +187,7 @@
     "@types/react": "19.0.0",
     "@types/react-dom": "19.0.0",
     "@vitest/browser": "^3.2.4",
+    "queueueue": "^4.1.2",
     "playwright": "^1.50.1",
     "tsup": "8.5.0",
     "typescript": "catalog:",

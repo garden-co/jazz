@@ -1,12 +1,19 @@
 import { useAccount, useCoState } from "jazz-tools/react-core";
-import { useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router";
 import { TodoAccount, TodoProject } from "./1_schema";
 
 export function ProjectScreen() {
   const { projectId } = useParams();
   const project = useCoState(TodoProject, projectId, {
-    resolve: { tasks: { $each: { $onError: null } } },
+    resolve: {
+      tasks: {
+        $each: {
+          $onError: null,
+          text: true,
+        },
+      },
+    },
   });
   const { me } = useAccount(TodoAccount, {
     resolve: {

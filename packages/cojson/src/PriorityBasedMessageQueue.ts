@@ -65,6 +65,10 @@ export class LinkedList<T> {
     this.meter?.pull();
     return value;
   }
+
+  isEmpty() {
+    return this.head === undefined;
+  }
 }
 
 class QueueMeter {

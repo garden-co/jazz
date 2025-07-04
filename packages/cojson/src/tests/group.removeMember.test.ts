@@ -1,19 +1,13 @@
 import { beforeEach, describe, expect, test } from "vitest";
-import { RawCoList } from "../coValues/coList.js";
-import { RawCoMap } from "../coValues/coMap.js";
-import { RawCoStream } from "../coValues/coStream.js";
-import { RawBinaryCoStream } from "../coValues/coStream.js";
-import { WasmCrypto } from "../crypto/WasmCrypto.js";
-import { RawAccountID } from "../exports.js";
 import {
   SyncMessagesLog,
-  createTwoConnectedNodes,
+  TEST_NODE_CONFIG,
   loadCoValueOrFail,
   setupTestAccount,
   setupTestNode,
 } from "./testUtils.js";
 
-let jazzCloud = setupTestNode({ isSyncServer: true });
+let jazzCloud: ReturnType<typeof setupTestNode>;
 
 beforeEach(async () => {
   SyncMessagesLog.clear();

@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, test } from "vitest";
 import { expectMap } from "../coValue.js";
 import {
   SyncMessagesLog,
+  TEST_NODE_CONFIG,
   loadCoValueOrFail,
   setupTestAccount,
   setupTestNode,

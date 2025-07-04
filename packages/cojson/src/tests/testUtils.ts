@@ -303,6 +303,7 @@ export function blockMessageTypeOnOutgoingPeer(
 
   pushSpy.mockImplementation(async (msg) => {
     if (
+      typeof msg === "object" &&
       msg.action === messageType &&
       (!opts.id || msg.id === opts.id) &&
       (!opts.once || !blockedIds.has(msg.id))
@@ -461,6 +462,10 @@ export function getSyncServerConnectedPeer(opts: {
   };
 }
 
+export const TEST_NODE_CONFIG = {
+  withAsyncPeers: false,
+};
+
 export function setupTestNode(
   opts: {
     isSyncServer?: boolean;
@@ -522,6 +527,10 @@ export function setupTestNode(
   if (opts.connected) {
     connectToSyncServer();
   }
+
+  onTestFinished(() => {
+    node.gracefulShutdown();
+  });
 
   const ctx = {
     node,
@@ -615,6 +624,10 @@ export async function setupTestAccount(
     connectToSyncServer();
   }
 
+  onTestFinished(() => {
+    ctx.node.gracefulShutdown();
+  });
+
   return {
     node: ctx.node,
     accountID: ctx.accountID,
@@ -641,22 +654,42 @@ export function connectedPeersWithMessagesTracking(opts: {
 
   const peer1Push = peer1.outgoing.push;
   peer1.outgoing.push = (msg) => {
-    SyncMessagesLog.add({
-      from: opts.peer2.name ?? opts.peer2.role,
-      to: opts.peer1.name ?? opts.peer1.role,
-      msg,
-    });
-    return peer1Push.call(peer1.outgoing, msg);
+    if (typeof msg !== "string") {
+      SyncMessagesLog.add({
+        from: opts.peer2.name ?? opts.peer2.role,
+        to: opts.peer1.name ?? opts.peer1.role,
+        msg,
+      });
+    }
+
+    if (!TEST_NODE_CONFIG.withAsyncPeers) {
+      peer1Push.call(peer1.outgoing, msg);
+    } else {
+      // Simulate the async nature of the real push
+      setTimeout(() => {
+        peer1Push.call(peer1.outgoing, msg);
+      }, 0);
+    }
   };
 
   const peer2Push = peer2.outgoing.push;
   peer2.outgoing.push = (msg) => {
-    SyncMessagesLog.add({
-      from: opts.peer1.name ?? opts.peer1.role,
-      to: opts.peer2.name ?? opts.peer2.role,
-      msg,
-    });
-    return peer2Push.call(peer2.outgoing, msg);
+    if (typeof msg !== "string") {
+      SyncMessagesLog.add({
+        from: opts.peer1.name ?? opts.peer1.role,
+        to: opts.peer2.name ?? opts.peer2.role,
+        msg,
+      });
+    }
+
+    if (!TEST_NODE_CONFIG.withAsyncPeers) {
+      peer2Push.call(peer2.outgoing, msg);
+    } else {
+      // Simulate the async nature of the real push
+      setTimeout(() => {
+        peer2Push.call(peer2.outgoing, msg);
+      }, 0);
+    }
   };
 
   return {

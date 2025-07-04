@@ -1,5 +1,13 @@
 import { WasmCrypto } from "cojson/crypto/WasmCrypto";
-import { describe, expect, expectTypeOf, test } from "vitest";
+import { Channel } from "queueueue";
+import {
+  assert,
+  beforeEach,
+  describe,
+  expect,
+  expectTypeOf,
+  test,
+} from "vitest";
 import {
   Account,
   FileStream,
@@ -14,12 +22,24 @@ import {
   createJazzContextFromExistingCredentials,
   randomSessionProvider,
 } from "../internal.js";
-import { createJazzTestAccount } from "../testing.js";
+import { createJazzTestAccount, setupJazzTestSync } from "../testing.js";
 import { setupTwoNodes } from "./utils.js";
 
 const Crypto = await WasmCrypto.create();
 
-const connectedPeers = cojsonInternals.connectedPeers;
+let me = await Account.create({
+  creationProps: { name: "Hermes Puggington" },
+  crypto: Crypto,
+});
+
+beforeEach(async () => {
+  await setupJazzTestSync();
+
+  me = await createJazzTestAccount({
+    isCurrentActiveAccount: true,
+    creationProps: { name: "Hermes Puggington" },
+  });
+});
 
 describe("Simple CoFeed operations", async () => {
   const me = await Account.create({
@@ -72,19 +92,20 @@ describe("CoFeed resolution", async () => {
   const TestStream = co.feed(NestedStream);
 
   const initNodeAndStream = async () => {
-    const me = await Account.create({
-      creationProps: { name: "Hermes Puggington" },
-      crypto: Crypto,
+    const me = await createJazzTestAccount({
+      isCurrentActiveAccount: true,
     });
 
+    const group = Group.create(me);
+    group.makePublic();
     const stream = TestStream.create(
       [
         NestedStream.create(
-          [TwiceNestedStream.create(["milk"], { owner: me })],
-          { owner: me },
+          [TwiceNestedStream.create(["milk"], { owner: group })],
+          { owner: group },
         ),
       ],
-      { owner: me },
+      { owner: group },
     );
 
     return { me, stream };
@@ -105,177 +126,86 @@ describe("CoFeed resolution", async () => {
 
   test("Loading and availability", async () => {
     const { me, stream } = await initNodeAndStream();
-    const [initialAsPeer, secondPeer] = connectedPeers("initial", "second", {
-      peer1role: "server",
-      peer2role: "client",
-    });
-    if (!isControlledAccount(me)) {
-      throw "me is not a controlled account";
-    }
-    me._raw.core.node.syncManager.addPeer(secondPeer);
-    const { account: meOnSecondPeer } =
-      await createJazzContextFromExistingCredentials({
-        credentials: {
-          accountID: me.id,
-          secret: me._raw.core.node.getCurrentAgent().agentSecret,
-        },
-        sessionProvider: randomSessionProvider,
-        peersToLoadFrom: [initialAsPeer],
-        crypto: Crypto,
-      });
+
+    const anotherAccount = await createJazzTestAccount();
 
     const loadedStream = await TestStream.load(stream.id, {
-      loadAs: meOnSecondPeer,
+      loadAs: anotherAccount,
     });
 
-    // TODO: fix this
-    // expectTypeOf(loadedStream?.[me.id]).not.toBeAny();
+    assert(loadedStream);
 
-    expect(loadedStream?.perAccount[me.id]?.value).toEqual(null);
-    expect(loadedStream?.perAccount[me.id]?.ref?.id).toEqual(
-      stream.perAccount[me.id]?.value?.id,
-    );
+    const myStream = loadedStream.perAccount[me.id];
 
-    const loadedNestedStream = await NestedStream.load(
-      stream.perAccount[me.id]!.value!.id,
-      { loadAs: meOnSecondPeer },
-    );
+    assert(myStream);
 
-    // expect(loadedStream?.[me.id]?.value).toEqual(loadedNestedStream);
-    expect(loadedStream?.perAccount[me.id]?.value?.id).toEqual(
-      loadedNestedStream?.id,
-    );
-    expect(
-      loadedStream?.perAccount[me.id]?.value?.perAccount[me.id]?.value,
-    ).toEqual(null);
-    // expect(loadedStream?.[me.id]?.ref?.value).toEqual(loadedNestedStream);
-    expect(loadedStream?.perAccount[me.id]?.ref?.value?.id).toEqual(
-      loadedNestedStream?.id,
-    );
-    expect(
-      loadedStream?.perAccount[me.id]?.value?.perAccount[me.id]?.ref?.id,
-    ).toEqual(stream.perAccount[me.id]?.value?.perAccount[me.id]?.value?.id);
+    expect(myStream.value).toBeTruthy();
 
-    const loadedTwiceNestedStream = await TwiceNestedStream.load(
-      stream.perAccount[me.id]!.value!.perAccount[me.id]!.value!.id,
-      { loadAs: meOnSecondPeer },
-    );
+    assert(myStream.value);
 
-    // expect(loadedStream?.[me.id]?.value?.[me.id]?.value).toEqual(
-    //     loadedTwiceNestedStream
-    // );
-    expect(
-      loadedStream?.perAccount[me.id]?.value?.perAccount[me.id]?.value?.id,
-    ).toEqual(loadedTwiceNestedStream?.id);
-    // expect(loadedStream?.[me.id]?.ref?.value).toEqual(loadedNestedStream);
-    expect(loadedStream?.perAccount[me.id]?.ref?.value?.id).toEqual(
-      loadedNestedStream?.id,
-    );
-    expect(
-      loadedStream?.perAccount[me.id]?.value?.perAccount[me.id]?.ref?.value?.id,
-    ).toEqual(loadedTwiceNestedStream?.id);
+    const loadedNestedStreamByMe = myStream.value.perAccount[me.id];
 
-    const otherNestedStream = NestedStream.create(
-      [TwiceNestedStream.create(["butter"], { owner: meOnSecondPeer })],
-      { owner: meOnSecondPeer },
-    );
-    loadedStream?.push(otherNestedStream);
-    // expect(loadedStream?.[me.id]?.value).toEqual(otherNestedStream);
-    expect(loadedStream?.perAccount[me.id]?.value?.id).toEqual(
-      otherNestedStream?.id,
-    );
-    expect(loadedStream?.perAccount[me.id]?.ref?.value?.id).toEqual(
-      otherNestedStream?.id,
-    );
-    expect(
-      loadedStream?.perAccount[me.id]?.value?.perAccount[me.id]?.value?.id,
-    ).toEqual(otherNestedStream.perAccount[me.id]?.value?.id);
+    assert(loadedNestedStreamByMe);
+
+    expect(loadedNestedStreamByMe.value).toBeTruthy();
+
+    assert(loadedNestedStreamByMe.value);
+
+    const loadedTwiceNestedStreamByMe =
+      loadedNestedStreamByMe.value.perAccount[me.id];
+
+    assert(loadedTwiceNestedStreamByMe);
+
+    expect(loadedTwiceNestedStreamByMe.value).toBe("milk");
+
+    assert(loadedTwiceNestedStreamByMe.value);
   });
 
   test("Subscription & auto-resolution", async () => {
     const { me, stream } = await initNodeAndStream();
 
-    const [initialAsPeer, secondAsPeer] = connectedPeers("initial", "second", {
-      peer1role: "server",
-      peer2role: "client",
-    });
+    const anotherAccount = await createJazzTestAccount();
 
-    me._raw.core.node.syncManager.addPeer(secondAsPeer);
-    if (!isControlledAccount(me)) {
-      throw "me is not a controlled account";
-    }
-    const { account: meOnSecondPeer } =
-      await createJazzContextFromExistingCredentials({
-        credentials: {
-          accountID: me.id,
-          secret: me._raw.core.node.getCurrentAgent().agentSecret,
-        },
-        sessionProvider: randomSessionProvider,
-        peersToLoadFrom: [initialAsPeer],
-        crypto: Crypto,
-      });
-
-    const queue = new cojsonInternals.Channel();
+    const queue = new Channel();
 
     TestStream.subscribe(
       stream.id,
-      { loadAs: meOnSecondPeer },
+      { loadAs: anotherAccount },
       (subscribedStream) => {
         void queue.push(subscribedStream);
       },
     );
 
     const update1 = (await queue.next()).value;
-    expect(update1.perAccount[me.id]?.value).toEqual(null);
-
-    const update2 = (await queue.next()).value;
-    expect(update2.perAccount[me.id]?.value).toBeDefined();
-    expect(update2.perAccount[me.id]?.value?.perAccount[me.id]?.value).toBe(
-      null,
-    );
-
-    const update3 = (await queue.next()).value;
     expect(
-      update3.perAccount[me.id]?.value?.perAccount[me.id]?.value,
-    ).toBeDefined();
-    expect(
-      update3.perAccount[me.id]?.value?.perAccount[me.id]?.value?.perAccount[
+      update1.perAccount[me.id]?.value?.perAccount[me.id]?.value?.perAccount[
         me.id
       ]?.value,
     ).toBe("milk");
 
-    update3.perAccount[me.id]!.value!.perAccount[me.id]!.value!.push("bread");
-
-    const update4 = (await queue.next()).value;
-    expect(
-      update4.perAccount[me.id]?.value?.perAccount[me.id]?.value?.perAccount[
-        me.id
-      ]?.value,
-    ).toBe("bread");
-
     // When assigning a new nested stream, we get an update
     const newTwiceNested = TwiceNestedStream.create(["butter"], {
-      owner: meOnSecondPeer,
+      owner: stream._owner,
     });
 
     const newNested = NestedStream.create([newTwiceNested], {
-      owner: meOnSecondPeer,
+      owner: stream._owner,
     });
 
-    update4.push(newNested);
+    stream.push(newNested);
 
-    const update5 = (await queue.next()).value;
+    const update2 = (await queue.next()).value;
     expect(
-      update5.perAccount[me.id]?.value?.perAccount[me.id]?.value?.perAccount[
+      update2.perAccount[me.id]?.value?.perAccount[me.id]?.value?.perAccount[
         me.id
       ]?.value,
     ).toBe("butter");
 
     // we get updates when the new nested stream changes
     newTwiceNested.push("jam");
-    const update6 = (await queue.next()).value;
+    const update3 = (await queue.next()).value;
     expect(
-      update6.perAccount[me.id]?.value?.perAccount[me.id]?.value?.perAccount[
+      update3.perAccount[me.id]?.value?.perAccount[me.id]?.value?.perAccount[
         me.id
       ]?.value,
     ).toBe("jam");
@@ -284,54 +214,24 @@ describe("CoFeed resolution", async () => {
   test("Subscription without options", async () => {
     const { me, stream } = await initNodeAndStream();
 
-    const [initialAsPeer, secondAsPeer] = connectedPeers("initial", "second", {
-      peer1role: "server",
-      peer2role: "client",
-    });
-    if (!isControlledAccount(me)) {
-      throw "me is not a controlled account";
-    }
-    me._raw.core.node.syncManager.addPeer(secondAsPeer);
-
-    await createJazzContextFromExistingCredentials({
-      credentials: {
-        accountID: me.id,
-        secret: me._raw.core.node.getCurrentAgent().agentSecret,
-      },
-      sessionProvider: randomSessionProvider,
-      peersToLoadFrom: [initialAsPeer],
-      crypto: Crypto,
-    });
-
-    const queue = new cojsonInternals.Channel<Loaded<typeof TestStream>>();
+    const queue = new Channel();
 
     TestStream.subscribe(stream.id, (subscribedStream) => {
       void queue.push(subscribedStream);
     });
 
     const update1 = (await queue.next()).value;
-    expect(update1.perAccount[me.id]?.value).toEqual(null);
-
-    const update2 = (await queue.next()).value;
-    expect(update2.perAccount[me.id]?.value?.perAccount[me.id]?.value).toEqual(
-      null,
-    );
-
-    const update3 = (await queue.next()).value;
     expect(
-      update3.perAccount[me.id]?.value?.perAccount[me.id]?.value,
-    ).toBeDefined();
-    expect(
-      update3.perAccount[me.id]?.value?.perAccount[me.id]?.value?.perAccount[
+      update1.perAccount[me.id]?.value?.perAccount[me.id]?.value?.perAccount[
         me.id
       ]?.value,
     ).toBe("milk");
 
-    update3.perAccount[me.id]!.value!.perAccount[me.id]!.value!.push("bread");
+    stream.perAccount[me.id]!.value!.perAccount[me.id]!.value!.push("bread");
 
-    const update4 = (await queue.next()).value;
+    const update2 = (await queue.next()).value;
     expect(
-      update4.perAccount[me.id]?.value?.perAccount[me.id]?.value?.perAccount[
+      update2.perAccount[me.id]?.value?.perAccount[me.id]?.value?.perAccount[
         me.id
       ]?.value,
     ).toBe("bread");
@@ -395,12 +295,13 @@ describe("Simple FileStream operations", async () => {
 
 describe("FileStream loading & Subscription", async () => {
   const initNodeAndStream = async () => {
-    const me = await Account.create({
-      creationProps: { name: "Hermes Puggington" },
-      crypto: Crypto,
+    const me = await createJazzTestAccount({
+      isCurrentActiveAccount: true,
     });
 
-    const stream = FileStream.create({ owner: me });
+    const group = Group.create(me);
+    group.makePublic();
+    const stream = FileStream.create({ owner: group });
 
     stream.start({ mimeType: "text/plain" });
     stream.push(new Uint8Array([1, 2, 3]));
@@ -420,28 +321,11 @@ describe("FileStream loading & Subscription", async () => {
   });
 
   test("Loading and availability", async () => {
-    const { me, stream } = await initNodeAndStream();
-    const [initialAsPeer, secondAsPeer] = connectedPeers("initial", "second", {
-      peer1role: "server",
-      peer2role: "client",
-    });
-    if (!isControlledAccount(me)) {
-      throw "me is not a controlled account";
-    }
-    me._raw.core.node.syncManager.addPeer(secondAsPeer);
-    const { account: meOnSecondPeer } =
-      await createJazzContextFromExistingCredentials({
-        credentials: {
-          accountID: me.id,
-          secret: me._raw.core.node.getCurrentAgent().agentSecret,
-        },
-        sessionProvider: randomSessionProvider,
-        peersToLoadFrom: [initialAsPeer],
-        crypto: Crypto,
-      });
+    const { stream } = await initNodeAndStream();
+    const anotherAccount = await createJazzTestAccount();
 
     const loadedStream = await FileStream.load(stream.id, {
-      loadAs: meOnSecondPeer,
+      loadAs: anotherAccount,
     });
 
     expect(loadedStream?.getChunks()).toEqual({
@@ -453,32 +337,17 @@ describe("FileStream loading & Subscription", async () => {
 
   test("Subscription", async () => {
     const { me } = await initNodeAndStream();
-    const stream = FileStream.create({ owner: me });
+    const group = Group.create(me);
+    group.makePublic();
+    const stream = FileStream.create({ owner: group });
 
-    const [initialAsPeer, secondAsPeer] = connectedPeers("initial", "second", {
-      peer1role: "server",
-      peer2role: "client",
-    });
-    me._raw.core.node.syncManager.addPeer(secondAsPeer);
-    if (!isControlledAccount(me)) {
-      throw "me is not a controlled account";
-    }
-    const { account: meOnSecondPeer } =
-      await createJazzContextFromExistingCredentials({
-        credentials: {
-          accountID: me.id,
-          secret: me._raw.core.node.getCurrentAgent().agentSecret,
-        },
-        sessionProvider: randomSessionProvider,
-        peersToLoadFrom: [initialAsPeer],
-        crypto: Crypto,
-      });
+    const anotherAccount = await createJazzTestAccount();
 
-    const queue = new cojsonInternals.Channel();
+    const queue = new Channel();
 
     FileStream.subscribe(
       stream.id,
-      { loadAs: meOnSecondPeer },
+      { loadAs: anotherAccount },
       (subscribedStream) => {
         void queue.push(subscribedStream);
       },
@@ -534,27 +403,11 @@ describe("FileStream loading & Subscription", async () => {
 
   test("Subscription without options", async () => {
     const { me } = await initNodeAndStream();
-    const stream = FileStream.create({ owner: me });
+    const group = Group.create(me);
+    group.makePublic();
+    const stream = FileStream.create({ owner: group });
 
-    const [initialAsPeer, secondAsPeer] = connectedPeers("initial", "second", {
-      peer1role: "server",
-      peer2role: "client",
-    });
-    me._raw.core.node.syncManager.addPeer(secondAsPeer);
-    if (!isControlledAccount(me)) {
-      throw "me is not a controlled account";
-    }
-    await createJazzContextFromExistingCredentials({
-      credentials: {
-        accountID: me.id,
-        secret: me._raw.core.node.getCurrentAgent().agentSecret,
-      },
-      sessionProvider: randomSessionProvider,
-      peersToLoadFrom: [initialAsPeer],
-      crypto: Crypto,
-    });
-
-    const queue = new cojsonInternals.Channel();
+    const queue = new Channel();
 
     FileStream.subscribe(stream.id, (subscribedStream) => {
       void queue.push(subscribedStream);
@@ -591,12 +444,13 @@ describe("FileStream loading & Subscription", async () => {
 
 describe("FileStream.load", async () => {
   async function setup() {
-    const me = await Account.create({
-      creationProps: { name: "Hermes Puggington" },
-      crypto: Crypto,
+    const me = await createJazzTestAccount({
+      isCurrentActiveAccount: true,
     });
 
-    const stream = FileStream.create({ owner: me });
+    const group = Group.create(me);
+    group.makePublic();
+    const stream = FileStream.create({ owner: group });
 
     stream.start({ mimeType: "text/plain" });
 

@@ -1,14 +1,15 @@
-import type { SyncMessage } from "cojson";
-import type { Channel } from "queueueue";
+import type { CojsonInternalTypes, SyncMessage } from "cojson";
+import { cojsonInternals } from "cojson";
 import { type Mocked, describe, expect, test, vi } from "vitest";
 import { MAX_OUTGOING_MESSAGES_CHUNK_BYTES } from "../BatchedOutgoingMessages.js";
 import {
-  BUFFER_LIMIT,
-  BUFFER_LIMIT_POLLING_INTERVAL,
   type CreateWebSocketPeerOpts,
   createWebSocketPeer,
 } from "../createWebSocketPeer.js";
 import type { AnyWebSocket } from "../types.js";
+import { BUFFER_LIMIT, BUFFER_LIMIT_POLLING_INTERVAL } from "../utils.js";
+
+const { CO_VALUE_PRIORITY } = cojsonInternals;
 
 function setup(opts: Partial<CreateWebSocketPeerOpts> = {}) {
   const listeners = new Map<string, (event: MessageEvent) => void>();
@@ -48,34 +49,28 @@ describe("createWebSocketPeer", () => {
     expect(peer).toHaveProperty("incoming");
     expect(peer).toHaveProperty("outgoing");
     expect(peer).toHaveProperty("role", "client");
-    expect(peer).toHaveProperty("crashOnClose", false);
   });
 
   test("should handle disconnection", async () => {
-    expect.assertions(1);
-
     const { listeners, peer } = setup();
 
-    const incoming = peer.incoming as Channel<
-      SyncMessage | "Disconnected" | "PingTimeout"
-    >;
-    const pushSpy = vi.spyOn(incoming, "push");
+    const onMessageSpy = vi.fn();
+    peer.incoming.onMessage(onMessageSpy);
 
     const closeHandler = listeners.get("close");
 
     closeHandler?.(new MessageEvent("close"));
 
-    expect(pushSpy).toHaveBeenCalledWith("Disconnected");
+    expect(onMessageSpy).toHaveBeenCalledWith("Disconnected");
   });
 
   test("should handle ping timeout", async () => {
     vi.useFakeTimers();
     const { listeners, peer } = setup();
 
-    const incoming = peer.incoming as Channel<
-      SyncMessage | "Disconnected" | "PingTimeout"
-    >;
-    const pushSpy = vi.spyOn(incoming, "push");
+    const onMessageSpy = vi.fn();
+
+    peer.incoming.onMessage(onMessageSpy);
 
     const messageHandler = listeners.get("message");
 
@@ -83,7 +78,7 @@ describe("createWebSocketPeer", () => {
 
     await vi.advanceTimersByTimeAsync(10_000);
 
-    expect(pushSpy).toHaveBeenCalledWith("PingTimeout");
+    expect(onMessageSpy).toHaveBeenCalledWith("Disconnected");
 
     vi.useRealTimers();
   });
@@ -97,15 +92,14 @@ describe("createWebSocketPeer", () => {
       header: false,
       sessions: {},
     };
-    const promise = peer.outgoing.push(testMessage);
+
+    peer.outgoing.push(testMessage);
 
     await waitFor(() => {
       expect(mockWebSocket.send).toHaveBeenCalledWith(
         JSON.stringify(testMessage),
       );
     });
-
-    await expect(promise).resolves.toBeUndefined();
   });
 
   test("should stop sending messages when the websocket is closed", async () => {
@@ -151,23 +145,6 @@ describe("createWebSocketPeer", () => {
     peer.outgoing.close();
 
     expect(mockWebSocket.close).toHaveBeenCalled();
-  });
-
-  test("should return a rejection if a message is sent after the peer is closed", async () => {
-    const { peer } = setup();
-
-    peer.outgoing.close();
-
-    const message: SyncMessage = {
-      action: "known",
-      id: "co_ztest",
-      header: false,
-      sessions: {},
-    };
-
-    await expect(peer.outgoing.push(message)).rejects.toThrow(
-      "WebSocket closed",
-    );
   });
 
   test("should call onSuccess handler after receiving first message", () => {
@@ -226,6 +203,42 @@ describe("createWebSocketPeer", () => {
 
       expect(mockWebSocket.send).toHaveBeenCalledWith(
         [message1, message2].map((msg) => JSON.stringify(msg)).join("\n"),
+      );
+    });
+
+    test("should sort outgoing messages by priority", async () => {
+      const { peer, mockWebSocket } = setup();
+
+      mockWebSocket.send.mockImplementation(() => {
+        mockWebSocket.readyState = 0;
+      });
+
+      const message1: SyncMessage = {
+        action: "content",
+        id: "co_zlow",
+        new: {},
+        priority: CO_VALUE_PRIORITY.LOW,
+      };
+
+      const message2: SyncMessage = {
+        action: "content",
+        id: "co_zhigh",
+        new: {},
+        priority: CO_VALUE_PRIORITY.HIGH,
+      };
+
+      void peer.outgoing.push(message1);
+      void peer.outgoing.push(message2);
+      void peer.outgoing.push(message2);
+
+      await waitFor(() => {
+        expect(mockWebSocket.send).toHaveBeenCalled();
+      });
+
+      expect(mockWebSocket.send).toHaveBeenCalledWith(
+        [message2, message2, message1]
+          .map((msg) => JSON.stringify(msg))
+          .join("\n"),
       );
     });
 
@@ -295,6 +308,43 @@ describe("createWebSocketPeer", () => {
       expect(mockWebSocket.send).toHaveBeenNthCalledWith(
         2,
         JSON.stringify(message2),
+      );
+    });
+
+    test("should send accumulated messages before a large message", async () => {
+      const { peer, mockWebSocket } = setup();
+
+      const smallMessage: SyncMessage = {
+        action: "known",
+        id: "co_z_small",
+        header: false,
+        sessions: {},
+      };
+      const largeMessage: SyncMessage = {
+        action: "known",
+        id: "co_z_large",
+        header: false,
+        sessions: {
+          // Add a large payload to exceed MAX_OUTGOING_MESSAGES_CHUNK_BYTES
+          payload: "x".repeat(MAX_OUTGOING_MESSAGES_CHUNK_BYTES),
+        } as CojsonInternalTypes.CoValueKnownState["sessions"],
+      };
+
+      void peer.outgoing.push(smallMessage);
+      void peer.outgoing.push(largeMessage);
+
+      await waitFor(() => {
+        expect(mockWebSocket.send).toHaveBeenCalledTimes(2);
+      });
+
+      expect(mockWebSocket.send).toHaveBeenCalledTimes(2);
+      expect(mockWebSocket.send).toHaveBeenNthCalledWith(
+        1,
+        JSON.stringify(smallMessage),
+      );
+      expect(mockWebSocket.send).toHaveBeenNthCalledWith(
+        2,
+        JSON.stringify(largeMessage),
       );
     });
 
