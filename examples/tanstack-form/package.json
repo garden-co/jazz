@@ -1,5 +1,5 @@
 {
-	"name": "form-svelte",
+	"name": "tanstack-form",
 	"private": true,
 	"type": "module",
 	"scripts": {
