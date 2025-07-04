@@ -146,6 +146,8 @@ export type CoMapSchema<
     ): CoMapSchema<Shape, Config, Owner>;
 
     getCoSchema: () => typeof CoMap;
+
+    getZodSchema: () => z.ZodObject<Shape, Config>;
   };
 
 export type optionalKeys<Shape extends z.core.$ZodLooseShape> = {

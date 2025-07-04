@@ -64,6 +64,9 @@ function enrichCoMapSchema<Shape extends z.core.$ZodLooseShape>(
     getCoSchema: () => {
       return coSchema;
     },
+    getZodSchema: () => {
+      return schema;
+    },
   }) as unknown as CoMapSchema<Shape>;
 
   // Needs to be derived from the enriched schema
