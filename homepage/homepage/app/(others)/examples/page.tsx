@@ -469,6 +469,15 @@ const reactExamples: Example[] = [
     illustration: <FormIllustration />,
   },
   {
+    name: "TanStack Form",
+    slug: "tanstack-form",
+    description:
+      "A form example for creating and editing CoValues using TanStack Form",
+    tech: [tech.react],
+    demoUrl: "https://tanstack-form.demo.jazz.tools",
+    illustration: <FormIllustration />,
+  },
+  {
     name: "Organization/Team",
     slug: "organization",
     description:
