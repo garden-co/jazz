@@ -1,9 +1,9 @@
+import { CoPlainText, Loaded } from "jazz-tools";
 import { useCoState } from "jazz-tools/react";
 import { LinkToHome } from "./LinkToHome.tsx";
 import { OrderForm, OrderFormData } from "./OrderForm.tsx";
 import { OrderThumbnail } from "./OrderThumbnail.tsx";
 import { BubbleTeaOrder } from "./schema.ts";
-import { CoPlainText, Loaded } from "jazz-tools";
 
 export type LoadedBubbleTeaOrder = Loaded<
   typeof BubbleTeaOrder,

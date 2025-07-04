@@ -1,11 +1,11 @@
-import { z } from "jazz-tools";
 import { useForm } from "@tanstack/react-form";
+import { z } from "jazz-tools";
+import { OrderThumbnail } from "./OrderThumbnail.tsx";
 import {
   BubbleTeaAddOnTypes,
   BubbleTeaBaseTeaTypes,
   BubbleTeaOrder,
 } from "./schema.ts";
-import { OrderThumbnail } from "./OrderThumbnail.tsx";
 
 // TanStack Form can leverage Jazz's Zod schema to validate the form
 const orderZodSchemaShape = BubbleTeaOrder.getZodSchema().shape;

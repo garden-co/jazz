@@ -1,6 +1,6 @@
 import { Loaded } from "jazz-tools";
-import { BubbleTeaOrder } from "./schema.ts";
 import { OrderFormData } from "./OrderForm.tsx";
+import { BubbleTeaOrder } from "./schema.ts";
 
 export function OrderThumbnail({
   order,
