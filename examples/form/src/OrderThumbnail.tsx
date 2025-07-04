@@ -1,18 +1,17 @@
 import { Loaded } from "jazz-tools";
 import { BubbleTeaOrder } from "./schema.ts";
-import { OrderFormData } from "./OrderForm.tsx";
 
 export function OrderThumbnail({
   order,
 }: {
-  order: Loaded<typeof BubbleTeaOrder> | Partial<OrderFormData>;
+  order: Loaded<typeof BubbleTeaOrder>;
 }) {
-  const { baseTea, addOns, instructions, deliveryDate, withMilk } = order;
-  const date = deliveryDate?.toLocaleDateString();
+  const { id, baseTea, addOns, instructions, deliveryDate, withMilk } = order;
+  const date = deliveryDate.toLocaleDateString();
 
   return (
     <a
-      href={"id" in order ? `/#/order/${order.id}` : undefined}
+      href={`/#/order/${id}`}
       className="border p-3 flex justify-between items-start gap-3"
     >
       <div>
