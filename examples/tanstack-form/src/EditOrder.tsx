@@ -25,9 +25,9 @@ export function EditOrder(props: { id: string }) {
     order.addOns.applyDiff(updatedOrder.addOns);
 
     // `applyDiff` requires nested objects to be CoValues as well
-    const instructions = order.instructions ?? CoPlainText.create("");
+    order.instructions ??= CoPlainText.create("");
     if (updatedOrder.instructions) {
-      instructions.applyDiff(updatedOrder.instructions);
+      order.instructions.applyDiff(updatedOrder.instructions);
     }
   };
 
