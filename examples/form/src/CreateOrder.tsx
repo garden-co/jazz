@@ -1,43 +1,42 @@
 import { useIframeHashRouter } from "hash-slash";
-import { Loaded } from "jazz-tools";
-import { useAccount, useCoState } from "jazz-tools/react";
-import { useState } from "react";
-import { Errors } from "./Errors.tsx";
+import { CoPlainText } from "jazz-tools";
+import { useAccount } from "jazz-tools/react";
 import { LinkToHome } from "./LinkToHome.tsx";
-import { OrderForm } from "./OrderForm.tsx";
 import {
   BubbleTeaOrder,
-  DraftBubbleTeaOrder,
   JazzAccount,
   ListOfBubbleTeaAddOns,
 } from "./schema.ts";
+import { OrderForm, OrderFormData } from "./OrderForm.tsx";
 
 export function CreateOrder() {
   const { me } = useAccount(JazzAccount, {
-    resolve: { root: { draft: true, orders: true } },
+    resolve: { root: { orders: true } },
   });
   const router = useIframeHashRouter();
-  const [errors, setErrors] = useState<string[]>([]);
 
   if (!me?.root) return;
 
-  const onSave = (draft: Loaded<typeof DraftBubbleTeaOrder>) => {
-    // validate if the draft is a valid order
-    const validation = DraftBubbleTeaOrder.validate(draft);
-    setErrors(validation.errors);
-    if (validation.errors.length > 0) {
-      return;
-    }
-
-    // turn the draft into a real order
-    me.root.orders.push(draft as Loaded<typeof BubbleTeaOrder>);
-
-    // reset the draft
-    me.root.draft = DraftBubbleTeaOrder.create({
-      addOns: ListOfBubbleTeaAddOns.create([]),
+  const addOrder = (draft: OrderFormData) => {
+    const newOrder = BubbleTeaOrder.create({
+      baseTea: draft.baseTea,
+      deliveryDate: draft.deliveryDate,
+      withMilk: draft.withMilk,
+      addOns: ListOfBubbleTeaAddOns.create(draft.addOns),
+      instructions: draft.instructions
+        ? CoPlainText.create(draft.instructions)
+        : undefined,
     });
 
+    me.root.orders.push(newOrder);
+
     router.navigate("/");
+  };
+
+  const draftOrder: Partial<OrderFormData> = {
+    baseTea: "Black",
+    addOns: [],
+    withMilk: false,
   };
 
   return (
@@ -48,30 +47,7 @@ export function CreateOrder() {
         <strong>Make a new bubble tea order 🧋</strong>
       </h1>
 
-      <Errors errors={errors} />
-
-      <CreateOrderForm id={me?.root?.draft.id} onSave={onSave} />
+      <OrderForm order={draftOrder} onSubmit={addOrder} validateOn="submit" />
     </>
   );
-}
-
-function CreateOrderForm({
-  id,
-  onSave,
-}: {
-  id: string;
-  onSave: (draft: Loaded<typeof DraftBubbleTeaOrder>) => void;
-}) {
-  const draft = useCoState(DraftBubbleTeaOrder, id, {
-    resolve: { addOns: true, instructions: true },
-  });
-
-  if (!draft) return;
-
-  const addOrder = (e: React.FormEvent<HTMLFormElement>) => {
-    e.preventDefault();
-    onSave(draft);
-  };
-
-  return <OrderForm order={draft} onSave={addOrder} />;
 }

@@ -1,5 +1,4 @@
 import { useAccount } from "jazz-tools/react";
-import { DraftIndicator } from "./DraftIndicator.tsx";
 import { OrderThumbnail } from "./OrderThumbnail.tsx";
 import { JazzAccount } from "./schema.ts";
 
@@ -16,7 +15,6 @@ export function Orders() {
           className="block relative p-3 bg-white border border-stone-200 text-center rounded-md dark:bg-stone-900 dark:border-stone-900"
         >
           <strong>Add new order</strong>
-          <DraftIndicator />
         </a>
 
         <div className="space-y-3">

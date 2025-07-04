@@ -1,8 +1,14 @@
 import { useCoState } from "jazz-tools/react";
 import { LinkToHome } from "./LinkToHome.tsx";
-import { OrderFormWithSaveButton } from "./OrderFormWithSaveButton.tsx";
+import { OrderForm, OrderFormData } from "./OrderForm.tsx";
 import { OrderThumbnail } from "./OrderThumbnail.tsx";
 import { BubbleTeaOrder } from "./schema.ts";
+import { CoPlainText, Loaded } from "jazz-tools";
+
+export type LoadedBubbleTeaOrder = Loaded<
+  typeof BubbleTeaOrder,
+  { addOns: { $each: true }; instructions: true }
+>;
 
 export function EditOrder(props: { id: string }) {
   const order = useCoState(BubbleTeaOrder, props.id, {
@@ -10,6 +16,24 @@ export function EditOrder(props: { id: string }) {
   });
 
   if (!order) return;
+
+  const onSubmit = (updatedOrder: OrderFormData) => {
+    // Apply changes to the original Jazz order
+    order.baseTea = updatedOrder.baseTea;
+    order.deliveryDate = updatedOrder.deliveryDate;
+    order.withMilk = updatedOrder.withMilk;
+    order.addOns.applyDiff(updatedOrder.addOns);
+
+    // `applyDiff` requires nested objects to be CoValues as well
+    const instructions = order.instructions ?? CoPlainText.create("");
+    if (updatedOrder.instructions) {
+      instructions.applyDiff(updatedOrder.instructions);
+    }
+  };
+
+  const originalOrder: OrderFormData = order.toJSON();
+  // Convert timestamp to Date
+  originalOrder.deliveryDate = new Date(originalOrder.deliveryDate);
 
   return (
     <>
@@ -25,7 +49,11 @@ export function EditOrder(props: { id: string }) {
         <strong>Edit your bubble tea order 🧋</strong>
       </h1>
 
-      <OrderFormWithSaveButton order={order} />
+      <OrderForm
+        order={originalOrder}
+        onSubmit={onSubmit}
+        validateOn="change"
+      />
     </>
   );
 }

@@ -1,14 +1,14 @@
 import { Loaded } from "jazz-tools";
 import { BubbleTeaOrder } from "./schema.ts";
-import { OrderFormData } from "./OrderFormWithSaveButton.tsx";
+import { OrderFormData } from "./OrderForm.tsx";
 
 export function OrderThumbnail({
   order,
 }: {
-  order: Loaded<typeof BubbleTeaOrder> | OrderFormData;
+  order: Loaded<typeof BubbleTeaOrder> | Partial<OrderFormData>;
 }) {
   const { baseTea, addOns, instructions, deliveryDate, withMilk } = order;
-  const date = deliveryDate.toLocaleDateString();
+  const date = deliveryDate?.toLocaleDateString();
 
   return (
     <a
