@@ -24,6 +24,11 @@
       "types": "./dist/browser-media-images/index.d.ts",
       "default": "./dist/browser-media-images/index.js"
     },
+    "./media": {
+      "@jazz-tools/source": "./src/media/index.ts",
+      "types": "./dist/media/index.d.ts",
+      "default": "./dist/media/index.browser.js"
+    },
     "./expo": {
       "@jazz-tools/source": "./src/expo/index.ts",
       "types": "./dist/expo/index.d.ts",
@@ -108,11 +113,6 @@
       "@jazz-tools/source": "./src/react-native-core/testing.tsx",
       "types": "./dist/react-native-core/testing.d.ts",
       "default": "./dist/react-native-core/testing.js"
-    },
-    "./react-native-media-images": {
-      "@jazz-tools/source": "./src/react-native-media-images/index.ts",
-      "types": "./dist/react-native-media-images/index.d.ts",
-      "default": "./dist/react-native-media-images/index.js"
     },
     "./svelte": {
       "svelte": "./dist/svelte/index.js",
