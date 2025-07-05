@@ -4,6 +4,7 @@ import { SyncStateManager } from "./SyncStateManager.js";
 import {
   AvailableCoValueCore,
   CoValueCore,
+  MAX_RECOMMENDED_TX_SIZE,
 } from "./coValueCore/coValueCore.js";
 import { getDependedOnCoValuesFromRawData } from "./coValueCore/utils.js";
 import { CoValueHeader, Transaction } from "./coValueCore/verifiedState.js";
@@ -533,6 +534,8 @@ export class SyncManager {
 
     let invalidStateAssumed = false;
 
+    const before = performance.now();
+
     for (const [sessionID, newContentForSession] of Object.entries(msg.new) as [
       SessionID,
       SessionNewContent,
@@ -632,6 +635,36 @@ export class SyncManager {
         newContentForSession.after +
           newContentForSession.newTransactions.length,
       );
+    }
+
+    const after = performance.now();
+
+    if (after - before > 5) {
+      let totalNewTransactionsSize = 0;
+
+      for (const tx of Object.values(msg.new).flatMap(
+        (tx) => tx.newTransactions,
+      )) {
+        const txLength =
+          tx.privacy === "private"
+            ? tx.encryptedChanges.length
+            : tx.changes.length;
+        totalNewTransactionsSize += txLength;
+      }
+
+      logger.warn("New content is took long", {
+        peerId: peer.id,
+        peerRole: peer.role,
+        duration: after - before,
+        otherPeersSubscribed: Object.values(this.peers)
+          .filter(
+            (peer) =>
+              peer.role !== "storage" && peer.optimisticKnownStates.has(msg.id),
+          )
+          .map((peer) => peer.id),
+        id: msg.id,
+        totalNewTransactionsSize,
+      });
     }
 
     if (invalidStateAssumed) {
