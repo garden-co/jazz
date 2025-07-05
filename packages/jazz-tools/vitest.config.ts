@@ -9,13 +9,13 @@ export default defineConfig({
             enabled: true,
             checker: "tsc",
           },
-          include: ["src/**/*.test.ts"],
+          include: ["src/**/*.test.ts", "src/**/*.test.tsx"],
           name: "unit",
         },
       },
       {
         test: {
-          include: ["src/**/*.test.browser.ts"],
+          include: ["src/**/*.test.browser.ts", "src/**/*.test.browser.tsx"],
           name: "browser",
           browser: {
             enabled: true,
