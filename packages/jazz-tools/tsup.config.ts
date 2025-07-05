@@ -29,9 +29,10 @@ export default defineConfig([
   {
     ...cfg,
     entry: {
-      index: "src/browser-media-images/index.ts",
+      index: "src/media/index.ts",
+      "index.browser": "src/media/index.browser.ts",
     },
-    outDir: "dist/browser-media-images",
+    outDir: "dist/media",
   },
   {
     ...cfg,
@@ -122,13 +123,6 @@ export default defineConfig([
       crypto: "src/react-native-core/crypto/index.ts",
     },
     outDir: "dist/react-native-core",
-  },
-  {
-    ...cfg,
-    entry: {
-      index: "src/react-native-media-images/index.ts",
-    },
-    outDir: "dist/react-native-media-images",
   },
   {
     ...cfg,
