@@ -21,6 +21,7 @@
     "src/**/*.ts",
     "./src/**/*.js",
     "./src/**/*.ts",
+    "./src/**/*.tsx",
     "./src/**/*.svelte"
   ],
   "exclude": ["./node_modules"]
