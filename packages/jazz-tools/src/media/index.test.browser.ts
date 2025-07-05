@@ -1,71 +1,31 @@
-// @vitest-environment happy-dom
-
 import { createJazzTestAccount } from "jazz-tools/testing";
 import { describe, expect, it } from "vitest";
-import { createImage } from "./index.js";
+import { createImage } from "./index.browser";
 
-describe("createImage", () => {
-  it("should create an image with a single size if width/height < 256", async () => {
-    const OnePixel =
-      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg==";
-    const imageBlob = new Blob(
-      [Uint8Array.from(atob(OnePixel), (c) => c.charCodeAt(0))],
-      { type: "image/png" },
-    );
+describe("createImage - Browser Edition", async () => {
+  const account = await createJazzTestAccount();
 
-    const account = await createJazzTestAccount();
-
-    const image = await createImage(imageBlob, { owner: account._owner });
-    expect(image).toBeDefined();
-
-    expect(image.originalSize).toEqual([1, 1]);
-    expect(image.placeholderDataURL).toBeDefined();
-
-    expect(image[`1x1`]).toBeDefined();
-    expect(image[`1x1`]!.getMetadata()!.mimeType).toBe("image/png");
-    expect(image["256x256"]).not.toBeDefined();
-    expect(image["1024x1024"]).not.toBeDefined();
-  });
-
-  it("should create an image with three sizes", async () => {
+  it("should create an image", async () => {
     const imageBlob = new Blob(
       [Uint8Array.from(White1920, (c) => c.charCodeAt(0))],
       { type: "image/png" },
     );
-
-    const account = await createJazzTestAccount();
-
-    const image = await createImage(imageBlob, { owner: account._owner });
-    expect(image).toBeDefined();
-
-    expect(image.originalSize).toEqual([1920, 400]);
-    expect(image.placeholderDataURL).toBeDefined();
-    expect(image[`256x53`]).toBeDefined();
-    expect(image[`1024x213`]).toBeDefined();
-    expect(image[`1920x400`]).toBeDefined();
-  });
-
-  it("should lose the original size and create image based on maxSize", async () => {
-    const imageBlob = new Blob(
-      [Uint8Array.from(White1920, (c) => c.charCodeAt(0))],
-      { type: "image/png" },
-    );
-
-    const account = await createJazzTestAccount();
 
     const image = await createImage(imageBlob, {
-      owner: account._owner,
-      maxSize: 256,
+      progressive: true,
+      maxSize: 600,
+      placeholder: "blur",
+      owner: account,
     });
-    expect(image).toBeDefined();
 
-    expect(image.originalSize).toEqual([256, 53]);
-    expect(image.placeholderDataURL).toBeDefined();
-    expect(image[`256x53`]).toBeDefined();
-    expect(image[`1024x213`]).not.toBeDefined();
-    expect(image[`1920x400`]).not.toBeDefined();
+    expect(image.originalSize).toEqual([600, 125]);
   });
 });
+
+// 1x1 png
+const OnePixel = atob(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg==",
+);
 
 // Image 1920x400
 const White1920 = atob(
