@@ -282,6 +282,9 @@ function enrichFileStreamSchema(schema: z.ZodCustom<FileStream, unknown>) {
     createFromBlob: (...args: any[]) => {
       return coSchema.createFromBlob(...args);
     },
+    createFromArrayBuffer: (...args: any[]) => {
+      return coSchema.createFromArrayBuffer(...args);
+    },
     load: (...args: any[]) => {
       return coSchema.load(...args);
     },
