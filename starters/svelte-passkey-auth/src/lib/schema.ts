@@ -25,7 +25,22 @@ export const AccountRoot = co.map({
 
 export function getUserAge(root: co.loaded<typeof AccountRoot> | undefined) {
   if (!root) return null;
-  return new Date().getFullYear() - root.dateOfBirth.getFullYear();
+
+  const today = new Date();
+  const birthDate = root.dateOfBirth;
+
+  let age = today.getFullYear() - birthDate.getFullYear();
+
+  // Check if the birthday hasn't occurred yet this year
+  const hasBirthdayPassed =
+    today.getMonth() > birthDate.getMonth() ||
+    (today.getMonth() === birthDate.getMonth() && today.getDate() > birthDate.getDate());
+
+  if (!hasBirthdayPassed) {
+    age--;
+  }
+
+  return age;
 }
 
 export const JazzAccount = co
