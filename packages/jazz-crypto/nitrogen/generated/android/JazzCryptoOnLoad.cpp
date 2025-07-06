@@ -15,7 +15,7 @@
 #include <fbjni/fbjni.h>
 #include <NitroModules/HybridObjectRegistry.hpp>
 
-
+#include "HybridJazzCrypto.hpp"
 
 namespace margelo::nitro::jazz_crypto {
 
@@ -29,7 +29,15 @@ int initialize(JavaVM* vm) {
     
 
     // Register Nitro Hybrid Objects
-    
+    HybridObjectRegistry::registerHybridObjectConstructor(
+      "JazzCrypto",
+      []() -> std::shared_ptr<HybridObject> {
+        static_assert(std::is_default_constructible_v<HybridJazzCrypto>,
+                      "The HybridObject \"HybridJazzCrypto\" is not default-constructible! "
+                      "Create a public constructor that takes zero arguments to be able to autolink this HybridObject.");
+        return std::make_shared<HybridJazzCrypto>();
+      }
+    );
   });
 }
 
