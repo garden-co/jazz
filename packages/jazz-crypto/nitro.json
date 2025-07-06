@@ -10,7 +10,7 @@
   },
   "autolinking": {
     "JazzCrypto": {
-      "cpp": "JazzCrypto"
+      "cpp": "HybridJazzCrypto"
     }
   }
 }

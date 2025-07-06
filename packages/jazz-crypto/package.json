@@ -3,11 +3,17 @@
   "description": "Jazz Crypto",
   "type": "module",
   "license": "MIT",
+  "homepage": "https://github.com/garden-co/jazz",
+  "authors": {
+    "name": "Garden Co",
+    "url": "https://garden.co"
+  },
   "version": "0.15.2",
   "scripts": {
     "format-and-lint": "biome check .",
     "format-and-lint:fix": "biome check . --write",
-    "build": "rm -rf ./dist && tsc --sourceMap --outDir dist"
+    "build": "rm -rf ./dist && tsc --sourceMap --outDir dist",
+    "specs": "nitro-codegen"
   },
   "dependencies": {
     "@react-native/codegen": "^0.80.0",
@@ -15,5 +21,8 @@
   },
   "devDependencies": {
     "nitro-codegen": "0.26.2"
+  },
+  "peerDependencies": {
+    "react-native": "*"
   }
 }
