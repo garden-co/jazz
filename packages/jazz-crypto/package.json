@@ -1,14 +1,16 @@
 {
   "name": "jazz-crypto",
   "description": "Jazz Crypto",
-  "type": "module",
+  "version": "0.15.4",
   "license": "MIT",
   "homepage": "https://github.com/garden-co/jazz",
   "authors": {
     "name": "Garden Co",
     "url": "https://garden.co"
   },
-  "version": "0.15.2",
+	"type": "module",
+	"main": "dist/index.js",
+	"types": "src/ts/index.ts",
   "scripts": {
     "format-and-lint": "biome check .",
     "format-and-lint:fix": "biome check . --write",

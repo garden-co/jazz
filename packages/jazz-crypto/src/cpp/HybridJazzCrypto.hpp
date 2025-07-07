@@ -4,7 +4,9 @@
 
 #include "HybridJazzCryptoSpec.hpp"
 
-namespace margelo { namespace nitro { namespace jazz_crypto {
+namespace margelo {
+namespace nitro {
+namespace jazz_crypto {
 
 using namespace margelo::nitro;
   
