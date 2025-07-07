@@ -23,6 +23,9 @@ test-results
 # Java
 .java-version
 
+# C++
+build/*
+
 .husky
 
 .vscode/*
