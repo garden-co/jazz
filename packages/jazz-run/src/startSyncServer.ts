@@ -5,7 +5,7 @@ import { LocalNode } from "cojson";
 import { SQLiteStorage } from "cojson-storage-sqlite";
 import { createWebSocketPeer } from "cojson-transport-ws";
 import { WasmCrypto } from "cojson/crypto/WasmCrypto";
-import { WebSocketServer } from "ws";
+import { WebSocket, WebSocketServer } from "ws";
 
 export const startSyncServer = async ({
   port,
@@ -43,20 +43,13 @@ export const startSyncServer = async ({
     localNode.syncManager.addPeer(storage);
   }
 
-  wss.on("connection", function connection(ws, req) {
-    // ping/pong for the connection liveness
-    const pinging = setInterval(() => {
-      ws.send(
-        JSON.stringify({
-          type: "ping",
-          time: Date.now(),
-          dc: "unknown",
-        }),
-      );
-    }, 1500);
+  const aliveSockets = new WeakSet<WebSocket>();
 
-    ws.on("close", () => {
-      clearInterval(pinging);
+  wss.on("connection", function connection(ws, req) {
+    aliveSockets.add(ws);
+
+    ws.on("pong", () => {
+      aliveSockets.add(ws);
     });
 
     const clientAddress =
@@ -78,6 +71,36 @@ export const startSyncServer = async ({
     );
 
     ws.on("error", (e) => console.error(`Error on connection ${clientId}:`, e));
+  });
+
+  // Used to detect dead connections
+  const heartbeatInterval = setInterval(function ping() {
+    wss.clients.forEach(function each(ws) {
+      if (!aliveSockets.has(ws)) {
+        return ws.terminate();
+      }
+
+      aliveSockets.delete(ws);
+      ws.ping();
+    });
+  }, 30000);
+
+  // Required for the clients to check the connection with the server
+  const jazzPingInterval = setInterval(function ping() {
+    const jazzPing = JSON.stringify({
+      type: "ping",
+      time: Date.now(),
+      dc: "unknown",
+    });
+
+    wss.clients.forEach(function each(ws) {
+      ws.send(jazzPing);
+    });
+  }, 1500);
+
+  wss.on("close", function close() {
+    clearInterval(heartbeatInterval);
+    clearInterval(jazzPingInterval);
   });
 
   server.on("upgrade", function upgrade(req, socket, head) {
