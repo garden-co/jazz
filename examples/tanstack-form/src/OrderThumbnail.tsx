@@ -8,7 +8,9 @@ export function OrderThumbnail({
   order: Loaded<typeof BubbleTeaOrder> | Partial<OrderFormData>;
 }) {
   const { baseTea, addOns, instructions, deliveryDate, withMilk } = order;
-  const date = deliveryDate?.toLocaleDateString();
+  const date = deliveryDate?.toLocaleDateString("en-US", {
+    timeZone: "UTC",
+  });
 
   return (
     <a

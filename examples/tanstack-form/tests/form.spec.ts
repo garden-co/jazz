@@ -29,6 +29,7 @@ test("create and edit an order", async ({ page }) => {
   await page.getByLabel("Delivery date").fill("2024-12-25");
   await page.getByLabel("With milk?").uncheck();
   await page.getByLabel("Special instructions").fill("10% sugar");
+  await page.getByRole("button", { name: "Submit" }).click();
   await page.getByRole("link", { name: /Back to all orders/ }).click();
 
   // check if order was edited correctly
