@@ -3,6 +3,12 @@ import {
   useNavigationContainerRef,
 } from "@react-navigation/native";
 import { createNativeStackNavigator } from "@react-navigation/native-stack";
+import {
+  args_return_ab,
+  args_return_string,
+  no_args_return_ab,
+  no_args_return_string,
+} from "jazz-crypto";
 import { JazzReactNativeProvider } from "jazz-tools/react-native";
 import React, { StrictMode, useEffect, useState } from "react";
 import { Linking } from "react-native";
@@ -16,27 +22,30 @@ type RootStackParamList = {
   HandleInviteScreen: undefined;
 };
 
-// Create the stack navigator with proper typing
 const Stack = createNativeStackNavigator<RootStackParamList>();
-
-// const prefix = Linking.createURL("/");
-
-// const linking = {
-//   prefixes: [prefix],
-//   config: {
-//     screens: {
-//       HandleInviteScreen: {
-//         path: "router/invite/:valueHint?/:valueID/:inviteSecret",
-//       },
-//     },
-//   },
-// };
 
 function App() {
   const [initialRoute, setInitialRoute] = useState<
     "ChatScreen" | "HandleInviteScreen"
   >("ChatScreen");
   const navigationRef = useNavigationContainerRef();
+
+  useEffect(() => {
+    // test crypto
+    try {
+      const ret1 = no_args_return_string();
+      console.log(ret1);
+      const ret2 = args_return_string("test");
+      console.log(ret2);
+      const ret3 = no_args_return_ab();
+      console.log(ret3);
+      const ret4 = args_return_ab(new ArrayBuffer(1));
+      console.log(ret4);
+    } catch (e) {
+      console.error(e);
+    }
+  }, []);
+
   useEffect(() => {
     Linking.getInitialURL().then((url) => {
       if (url) {
