@@ -30,6 +30,7 @@ jobs:
           "examples/inspector",
           "examples/music-player",
           "examples/organization",
+          "examples/tanstack-form",
           "starters/react-passkey-auth",
           "starters/svelte-passkey-auth",
           "tests/jazz-svelte"
