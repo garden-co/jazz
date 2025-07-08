@@ -1,34 +1,63 @@
-import { FileStream, ImageDefinition } from "jazz-tools";
-
-const INTERNAL_SIZES = [256, 1024, 2048] as const;
+import type { CoID } from "cojson";
+import { Account, FileStream, ImageDefinition } from "jazz-tools";
 
 export function highestResAvailable(
   image: ImageDefinition,
   wantedWidth: number,
   wantedHeight: number,
 ): FileStream | null {
-  const availableSizes = Object.keys(image)
+  console.count("CALLED");
+
+  const availableSizes: [number, number, string][] = image._raw
+    .keys()
     .filter((key) => /^\d+x\d+$/.test(key))
-    .map((key) => key.split("x").map(Number) as [number, number]);
+    .map((key) => {
+      const [w, h] = key.split("x").map(Number) as [number, number];
+      return [w, h, key];
+    });
 
   if (availableSizes.length === 0) {
     return image.original;
   }
 
-  console.count("CALLED");
+  const sortedSizes = availableSizes
+    .map((size) => {
+      return {
+        size,
+        match: sizesMatchWanted(size[0], size[1], wantedWidth, wantedHeight),
+        isLoaded: isLoaded(image._raw.get(size[2]) as CoID<any> | undefined),
+      };
+    })
+    .sort((a, b) => a.match - b.match);
 
-  const sortedSizes = sortByBestFit(availableSizes, wantedWidth, wantedHeight);
+  // We try to find the better already loaded image
+  // note: `toReversed` is not available in react-native.
+  const bestLoaded = [...sortedSizes]
+    .reverse()
+    .find((el) => el.isLoaded && image[el.size[2]]?.getChunks());
+  const bestTarget =
+    sortedSizes.find((el) => el.match > 0.95) || sortedSizes[0];
 
-  // This still triggers the shallow load, waiting for the best fit to be loaded
-  const findLoaded = sortedSizes.find(({ size }) => {
-    return image[`${size[0]}x${size[1]}`]?.getChunks();
-  });
-
-  if (!findLoaded) {
-    return null;
+  // if the best target is already loaded, we are done
+  if (image[bestTarget!.size[2]]?.getChunks()) {
+    return image[bestTarget!.size[2]] || null;
   }
 
-  return image[`${findLoaded.size[0]}x${findLoaded.size[1]}`] || null;
+  // if the best already loaded is not the best target
+  // let's trigger the load of the best target
+  if (bestLoaded) {
+    image[bestTarget!.size[2]]?.getChunks();
+    return image[bestLoaded.size[2]] || null;
+  }
+
+  // if nothing is loaded, then start fetching all the images till the best
+  for (let size of sortedSizes) {
+    if (size.match <= bestTarget!.match) {
+      image[size.size[2]]?.getChunks();
+    }
+  }
+
+  return null;
 }
 
 function sizesMatchWanted(
@@ -42,34 +71,20 @@ function sizesMatchWanted(
 
   const areaRatio = area1 / area2;
 
-  // Below 0.95 means the image is too small, we don't want to upscale it
-  if (areaRatio < 0.95) {
-    return 9999;
-  }
+  // // Below 0.95 means the image is too small, we don't want to upscale it
+  // if (areaRatio < 0.95) {
+  //   return 9999;
+  // }
 
   return areaRatio;
 }
 
-function sortByBestFit(
-  sizes: [number, number][],
-  wantedWidth: number,
-  wantedHeight: number,
-): Array<{ size: [number, number]; match: number }> {
-  if (sizes.length === 0) {
-    return [];
+function isLoaded(id: CoID<any> | null | undefined): boolean {
+  if (!id) {
+    return false;
   }
 
-  const bestFit = sizes
-    .map((size) => {
-      return {
-        size,
-        match: sizesMatchWanted(size[0], size[1], wantedWidth, wantedHeight),
-      };
-    })
-    .sort((a, b) => a.match - b.match);
-
-  // We might want to cut unprobable sizes
-  return bestFit;
+  return !!Account.getMe()._raw.core.node.getLoaded(id);
 }
 
 export async function loadImage(
@@ -125,42 +140,45 @@ export async function loadImageBySize(
     return null;
   }
 
-  const availableSizes = Object.keys(image)
+  if (image.progressive === false) {
+    return loadImage(imageOrId);
+  }
+
+  const availableSizes: [number, number, string][] = image._raw
+    .keys()
     .filter((key) => /^\d+x\d+$/.test(key))
-    .map((key) => key.split("x").map(Number) as [number, number]);
+    .map((key) => {
+      const [w, h] = key.split("x").map(Number) as [number, number];
+      return [w, h, key];
+    });
 
   if (availableSizes.length === 0) {
     return null;
   }
 
-  if (image.progressive === false) {
-    return loadImage(imageOrId);
-  }
+  const sortedSizes = availableSizes
+    .map((size) => ({
+      size,
+      match: sizesMatchWanted(size[0], size[1], wantedWidth, wantedHeight),
+    }))
+    .sort((a, b) => a.match - b.match);
 
-  const sortedSizes = sortByBestFit(availableSizes, wantedWidth, wantedHeight);
-
-  const bestFitSize = sortedSizes[0];
-
-  if (!bestFitSize) {
-    return null;
-  }
+  const bestTarget =
+    sortedSizes.find((el) => el.match > 0.95) || sortedSizes[0]!;
 
   const deepLoaded = await ImageDefinition.load(image.id, {
     resolve: {
-      [`${bestFitSize.size[0]}x${bestFitSize.size[1]}`]: true,
+      [bestTarget.size[2]]: true,
     },
   });
 
-  if (
-    deepLoaded === null ||
-    deepLoaded[`${bestFitSize.size[0]}x${bestFitSize.size[1]}`] === undefined
-  ) {
+  if (deepLoaded === null || deepLoaded[bestTarget.size[2]] === undefined) {
     return null;
   }
 
   return {
-    width: bestFitSize.size[0],
-    height: bestFitSize.size[1],
-    image: deepLoaded[`${bestFitSize.size[0]}x${bestFitSize.size[1]}`]!,
+    width: bestTarget.size[0],
+    height: bestTarget.size[1],
+    image: deepLoaded[bestTarget.size[2]]!,
   };
 }
