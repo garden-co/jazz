@@ -1,6 +1,6 @@
-import { FileStream, ImageDefinition } from "jazz-tools";
+import { Account, FileStream, ImageDefinition } from "jazz-tools";
 import { createJazzTestAccount } from "jazz-tools/testing";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { highestResAvailable } from "./utils";
 
 const createFileStream = (account: any, blobSize?: number) => {
@@ -14,6 +14,7 @@ const createFileStream = (account: any, blobSize?: number) => {
 
 describe("highestResAvailable", async () => {
   const account = await createJazzTestAccount();
+  vi.spyOn(Account, "getMe").mockReturnValue(account);
 
   it("returns original if progressive is false", async () => {
     const original = await createFileStream(account._owner);
