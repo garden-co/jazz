@@ -1,6 +1,4 @@
-import ImageBlobReduce from "image-blob-reduce";
 import { Account, FileStream, Group, ImageDefinition } from "jazz-tools";
-import Pica from "pica";
 import { CreateImageOptions, createImageFactory } from "./create-image";
 
 export { highestResAvailable, loadImage, loadImageBySize } from "./utils";
@@ -33,64 +31,114 @@ async function createFileStreamFromSource(
   return FileStream.createFromBlob(imageBlobOrFile, owner);
 }
 
-async function getImageSize(
-  imageBlobOrFile: Blob | File | string,
-): Promise<{ width: number; height: number }> {
-  if (typeof imageBlobOrFile === "string") {
-    throw new Error("getImageSize(string) is not supported on browser");
-  }
-  // using createImageBitmap is ~10x slower than Image object
-  // Image object: 640 milliseconds
-  // createImageBitmap: 8128 milliseconds
-  const { width, height } = await new Promise<{
-    width: number;
-    height: number;
-  }>((resolve, reject) => {
+// using createImageBitmap is ~10x slower than Image object
+// Image object: 640 milliseconds
+// createImageBitmap: 8128 milliseconds
+function getImageFromBlob(blob: Blob): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
     const img = new Image();
     img.onload = () => {
-      resolve({ width: img.width, height: img.height });
+      resolve(img);
       URL.revokeObjectURL(img.src);
     };
     img.onerror = () => {
       reject(new Error("Failed to load image"));
       URL.revokeObjectURL(img.src);
     };
-
-    img.src = URL.createObjectURL(imageBlobOrFile);
+    img.src = URL.createObjectURL(blob);
   });
+}
 
-  return { width, height };
+async function getImageSize(
+  imageBlobOrFile: Blob | File | string,
+): Promise<{ width: number; height: number }> {
+  if (typeof imageBlobOrFile === "string") {
+    throw new Error("getImageSize(string) is not supported on browser");
+  }
+
+  const image = await getImageFromBlob(imageBlobOrFile);
+
+  return { width: image.width, height: image.height };
 }
 
 async function getPlaceholderBase64(
   imageBlobOrFile: Blob | File | string,
 ): Promise<string> {
-  // Inizialize Reducer here to not have module side effects
-  if (!reducer) {
-    reducer = new ImageBlobReduce({ pica: new Pica() });
-  }
-
   if (typeof imageBlobOrFile === "string") {
     throw new Error("getPlaceholderBase64(string) is not supported on browser");
   }
 
-  const canvas = await reducer.toCanvas(imageBlobOrFile, { max: 8 });
+  const image = await getImageFromBlob(imageBlobOrFile);
+
+  const { width, height } = resizeDimensionsKeepingAspectRatio(
+    image.width,
+    image.height,
+    8,
+  );
+
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+
+  const ctx = canvas.getContext("2d");
+
+  if (!ctx) {
+    throw new Error("Failed to get context");
+  }
+
+  ctx.drawImage(image, 0, 0, width, height);
+
   return canvas.toDataURL("image/png");
 }
+
+const resizeDimensionsKeepingAspectRatio = (
+  width: number,
+  height: number,
+  maxSize: number,
+) => {
+  const aspectRatio = width / height;
+  if (width > height) {
+    return {
+      width: Math.min(width, maxSize),
+      height: Math.round(width / aspectRatio),
+    };
+  }
+  return {
+    width: Math.round(height * aspectRatio),
+    height: Math.min(height, maxSize),
+  };
+};
 
 async function resize(
   imageBlobOrFile: Blob | File | string,
   width: number,
   height: number,
 ): Promise<Blob> {
-  // Inizialize Reducer here to not have module side effects
-  if (!reducer) {
-    reducer = new ImageBlobReduce({ pica: new Pica() });
-  }
-
   if (typeof imageBlobOrFile === "string") {
     throw new Error("resize(string) is not supported on browser");
   }
 
-  return reducer.toBlob(imageBlobOrFile, { max: Math.max(width, height) });
+  const image = await getImageFromBlob(imageBlobOrFile);
+
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+
+  const ctx = canvas.getContext("2d");
+
+  if (!ctx) {
+    throw new Error("Failed to get context");
+  }
+
+  ctx.drawImage(image, 0, 0, width, height);
+
+  return new Promise<Blob>((resolve, reject) => {
+    canvas.toBlob((blob) => {
+      if (!blob) {
+        reject(new Error("Failed to convert canvas to blob"));
+        return;
+      }
+      resolve(blob);
+    }, "image/png");
+  });
 }
