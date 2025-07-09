@@ -1,9 +1,16 @@
+import {
+  core,
+  ZodObject,
+  object as zodObject,
+  ZodOptional,
+  optional as zodOptional,
+} from "zod/v4";
+import { util } from "zod/v4/core";
 export {
   string,
   number,
   boolean,
   union,
-  object,
   array,
   templateLiteral,
   json,
@@ -32,7 +39,6 @@ export {
   //   intersection,
   //   record,
   int,
-  optional,
   type ZodOptional,
   type ZodReadonly,
   type ZodLazy,
@@ -41,3 +47,16 @@ export {
   type output as infer,
   z,
 } from "zod/v4";
+
+type NonCoZodType = core.$ZodType & { collaborative?: false };
+
+export function object<T extends Record<string, NonCoZodType>>(
+  shape?: T,
+  params?: string | core.$ZodObjectParams,
+): ZodObject<util.Writeable<T> & {}, core.$strip> {
+  return zodObject(shape, params);
+}
+
+export function optional<T extends NonCoZodType>(schema: T): ZodOptional<T> {
+  return zodOptional(schema);
+}
