@@ -85,6 +85,32 @@ describe("CoMap", async () => {
       matches(person);
     });
 
+    test("cannot use z.optional with a coSchema", () => {
+      const Dog = co.map({
+        name: z.string(),
+        breed: z.string(),
+      });
+
+      const Person = co.map({
+        // @ts-expect-error: cannot use z.optional with a coSchema
+        pet: z.optional(Dog),
+      });
+    });
+
+    test("cannot use z.object with coSchemas as values", () => {
+      const Dog = co.map({
+        name: z.string(),
+        breed: z.string(),
+      });
+
+      const Person = co.map({
+        pets: z.object({
+          // @ts-expect-error: cannot use z.optional with a coSchema
+          dog: Dog,
+        }),
+      });
+    });
+
     test("CoMap with optional reference", () => {
       const Dog = co.map({
         name: z.string(),
