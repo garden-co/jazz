@@ -1,6 +1,7 @@
 import { Channel } from "queueueue";
 import { Peer, PeerID, SyncMessage } from "./sync.js";
 export { Channel } from "queueueue";
+import { logger } from "./logger.js";
 
 export function connectedPeers(
   peer1id: PeerID,
@@ -17,6 +18,10 @@ export function connectedPeers(
 ): [Peer, Peer] {
   const [from1to2Rx, from1to2Tx] = newQueuePair();
   const [from2to1Rx, from2to1Tx] = newQueuePair();
+
+  logger.info(
+    "A channel was opened for consumer with id: ${peer1id} and producer with id: ${peer2id}",
+  );
 
   const peer2AsPeer: Peer = {
     id: peer2id,
