@@ -48,7 +48,11 @@ describe("PriorityBasedMessageQueue", () => {
         await metricReader.getMetricValue("jazz.messagequeue.pulled", {
           priority: CO_VALUE_PRIORITY.MEDIUM,
         }),
-      ).toBe(0);
+      ).toBe(
+        await metricReader.getMetricValue("jazz.messagequeue.pushed", {
+          priority: CO_VALUE_PRIORITY.MEDIUM,
+        }),
+      );
     });
 
     test("should corretly count pushes", async () => {

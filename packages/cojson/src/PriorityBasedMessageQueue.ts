@@ -112,7 +112,7 @@ class QueueMeter {
   }
 
   public clear(items: number) {
-    this.pullCounter.add(-items, this.attrs);
+    this.pullCounter.add(items, this.attrs);
   }
 }
 
