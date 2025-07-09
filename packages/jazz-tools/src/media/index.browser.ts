@@ -118,6 +118,8 @@ async function resize(
     throw new Error("resize(string) is not supported on browser");
   }
 
+  const mimeType = imageBlobOrFile.type;
+
   const image = await getImageFromBlob(imageBlobOrFile);
 
   const canvas = document.createElement("canvas");
@@ -133,12 +135,16 @@ async function resize(
   ctx.drawImage(image, 0, 0, width, height);
 
   return new Promise<Blob>((resolve, reject) => {
-    canvas.toBlob((blob) => {
-      if (!blob) {
-        reject(new Error("Failed to convert canvas to blob"));
-        return;
-      }
-      resolve(blob);
-    }, "image/png");
+    canvas.toBlob(
+      (blob) => {
+        if (!blob) {
+          reject(new Error("Failed to convert canvas to blob"));
+          return;
+        }
+        resolve(blob);
+      },
+      mimeType,
+      0.8,
+    );
   });
 }
