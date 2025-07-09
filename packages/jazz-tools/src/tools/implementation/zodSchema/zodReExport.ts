@@ -1,13 +1,27 @@
+import {
+  ZodArray,
+  ZodDiscriminatedUnion,
+  ZodIntersection,
+  ZodOptional,
+  ZodRecord,
+  ZodTuple,
+  ZodUnion,
+  core,
+  array as zodArray,
+  discriminatedUnion as zodDiscriminatedUnion,
+  intersection as zodIntersection,
+  optional as zodOptional,
+  record as zodRecord,
+  tuple as zodTuple,
+  union as zodUnion,
+} from "zod/v4";
 export {
   string,
   number,
   boolean,
-  union,
   object,
-  array,
   templateLiteral,
   json,
-  tuple,
   date,
   emoji,
   base64,
@@ -28,11 +42,7 @@ export {
   iso,
   int32,
   strictObject,
-  discriminatedUnion,
-  //   intersection,
-  //   record,
   int,
-  optional,
   type ZodOptional,
   type ZodReadonly,
   type ZodLazy,
@@ -41,3 +51,57 @@ export {
   type output as infer,
   z,
 } from "zod/v4";
+
+type NonCoZodType = core.$ZodType & { collaborative?: false };
+
+export function record<
+  Key extends core.$ZodRecordKey,
+  Value extends NonCoZodType,
+>(
+  keyType: Key,
+  valueType: Value,
+  params?: string | core.$ZodRecordParams,
+): ZodRecord<Key, Value> {
+  return zodRecord(keyType, valueType, params);
+}
+
+export function optional<T extends NonCoZodType>(schema: T): ZodOptional<T> {
+  return zodOptional(schema);
+}
+
+export function discriminatedUnion<
+  T extends readonly [
+    NonCoZodType & core.$ZodTypeDiscriminable,
+    ...(NonCoZodType & core.$ZodTypeDiscriminable)[],
+  ],
+>(discriminator: string, schemas: T): ZodDiscriminatedUnion<T> {
+  return zodDiscriminatedUnion(discriminator, schemas as any);
+}
+
+export function union<const T extends readonly NonCoZodType[]>(
+  options: T,
+  params?: string | core.$ZodUnionParams,
+): ZodUnion<T> {
+  return zodUnion(options, params);
+}
+
+export function intersection<T extends NonCoZodType, U extends NonCoZodType>(
+  left: T,
+  right: U,
+): ZodIntersection<T, U> {
+  return zodIntersection(left, right);
+}
+
+export function array<T extends NonCoZodType>(
+  element: T,
+  params?: string | core.$ZodArrayParams,
+): ZodArray<T> {
+  return zodArray(element, params);
+}
+
+export function tuple<T extends readonly [NonCoZodType, ...NonCoZodType[]]>(
+  options: T,
+  params?: string | core.$ZodTupleParams,
+): ZodTuple<T> {
+  return zodTuple(options, params);
+}
