@@ -179,5 +179,24 @@ describe("highestResAvailable", async () => {
     expect(result?.id).toBe(imageDef["256x256"].id);
   });
 
+  it("returns the highest resolution if no good match is found", async () => {
+    const original = await createFileStream(account._owner, 1);
+
+    const imageDef = ImageDefinition.create(
+      {
+        originalSize: [300, 300],
+        progressive: true,
+        original,
+      },
+      { owner: account._owner },
+    );
+
+    imageDef["256x256"] = await createFileStream(account._owner, 1);
+    imageDef["300x300"] = original;
+
+    const result = highestResAvailable(imageDef, 1024, 1024);
+    expect(result?.id).toBe(original.id);
+  });
+
   it.todo("returns the correct size based on aspect ratio and maxWidth");
 });

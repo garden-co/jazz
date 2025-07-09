@@ -35,8 +35,10 @@ export function highestResAvailable(
   const bestLoaded = [...sortedSizes]
     .reverse()
     .find((el) => el.isLoaded && image[el.size[2]]?.getChunks());
+
+  // if I can't find a good match, let's use the highest resolution
   const bestTarget =
-    sortedSizes.find((el) => el.match > 0.95) || sortedSizes[0];
+    sortedSizes.find((el) => el.match > 0.95) || sortedSizes.at(-1);
 
   // if the best target is already loaded, we are done
   if (image[bestTarget!.size[2]]?.getChunks()) {
