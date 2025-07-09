@@ -1,12 +1,12 @@
 import { CodeGroup } from "@/components/forMdx";
 
 export const metadata = {
-  description: "ImageDefinition is a CoValue for store images with bult-in UX features."
+  description: "ImageDefinition is a CoValue for storing images with built-in UX features."
 };
 
 # ImageDefinition
 
-`ImageDefinition` is a specialized CoValue designed specifically for managing images in Jazz applications. It extends beyond basic file storage by supporting blurry placeholder, a built-in max size resizing, and progressive loading patterns.
+`ImageDefinition` is a specialized CoValue designed specifically for managing images in Jazz applications. It extends beyond basic file storage by supporting a blurry placeholder, built-in resizing, and progressive loading patterns.
 
 Beyond ImageDefinition, Jazz offers higher-level functions and components that make it easier to use images:
 - [`createImage()`](#creating-images) - function to create an `ImageDefinition` from a file
@@ -119,6 +119,37 @@ The image generation process includes a maximum size setting that controls the l
 The progressive loading pattern is a technique that allows images to load incrementally, starting with a small version and gradually replacing it with a larger version as it becomes available. This is useful for improving the user experience by showing a placeholder while the image is loading.
 
 Passing `progressive: true` to `createImage()` will create internal smaller versions of the image for future uses.
+
+### Create multiple resized copies
+
+To create multiple resized copies of an original image for better layout control, you can utilize the `createImage` function multiple times with different parameters for each desired size. Here’s an example of how you might implement this:
+
+<CodeGroup>
+```ts
+import { co } from "jazz-tools";
+
+// Jazz Schema
+const ProductImage = co.map({
+  image: co.image(),
+  thumbnail: co.image(),
+});
+
+const mainImage = await createImage(myBlob);
+const thumbnail = await createImage(myBlob, {
+  maxSize: 100,
+});
+
+// or, in case of migration, you can use the original stored image.
+const newThumb = await createImage(mainImage.original.toBlob(), {
+  maxSize: 100,
+});
+
+const imageSet = ProductImage.create({
+  image: mainImage,
+  thumbnail,
+});
+```
+</CodeGroup>
 
 ## Displaying Images
 
@@ -238,7 +269,7 @@ console.log({
 ```
 </CodeGroup>
 
-If the image was generated with progressive loading, and you want to access the best resolution, `loadImageBySize` function is here the utility function you need. It will load the image of the best resolution that fits the wanted width and height.
+If the image was generated with progressive loading, and you want to access the best-fit resolution, use `loadImageBySize`. It will load the image of the best resolution that fits the wanted width and height.
 
 <CodeGroup>
 ```ts
@@ -255,7 +286,7 @@ console.log({
 </CodeGroup>
 
 
-But you know, the CoValue are alive and they will change over time. If want to listen to the changes and retrieve the best resolution _loaded_ that fits the wanted width and height, you can use the `subscribe` and the `highestResAvailable` function.
+If want to dynamically listen to the _loaded_ resolution that best fits the wanted width and height, you can use the `subscribe` and the `highestResAvailable` function.
 
 <CodeGroup>
 ```ts
