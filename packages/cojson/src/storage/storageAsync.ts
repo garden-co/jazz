@@ -1,4 +1,3 @@
-import { LinkedList } from "../PriorityBasedMessageQueue.js";
 import {
   type CoValueCore,
   MAX_RECOMMENDED_TX_SIZE,

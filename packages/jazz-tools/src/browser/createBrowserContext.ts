@@ -1,5 +1,4 @@
-import { LocalNode, Peer, RawAccountID } from "cojson";
-import { getIndexedDBStorage } from "cojson-storage-indexeddb";
+import { LocalNode, Peer, RawAccountID, getIndexedDBStorage } from "cojson";
 import { WebSocketPeerWithReconnection } from "cojson-transport-ws";
 import { WasmCrypto } from "cojson/crypto/WasmCrypto";
 import {
