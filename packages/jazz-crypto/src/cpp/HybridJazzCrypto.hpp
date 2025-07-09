@@ -1,8 +1,29 @@
 #include <string>
+#include <memory>
 
 #include <NitroModules/ArrayBuffer.hpp>
 
 #include "HybridJazzCryptoSpec.hpp"
+
+// Define the struct for FFI with Rust
+struct ByteBuffer {
+    uint8_t* ptr;
+    size_t len;
+    size_t cap;
+};
+
+// Declare the C-style functions from the Rust FFI
+extern "C" {
+    // String functions
+    char* rust_no_args_return_string();
+    char* rust_args_return_string(const char* arg1);
+    void free_rust_string(char* s);
+
+    // ArrayBuffer (byte buffer) functions
+    ByteBuffer rust_no_args_return_ab();
+    ByteBuffer rust_args_return_ab(const uint8_t* arg1_ptr, size_t arg1_len);
+    void free_rust_byte_buffer(ByteBuffer buf);
+}
 
 namespace margelo {
 namespace nitro {

@@ -1,0 +1,11 @@
+[package]
+name = "jazz-crypto"
+version = "0.15.5"
+edition = "2024"
+
+[dependencies]
+
+
+[[bin]]
+name = "jazz-crypto"
+path = "src/rust/main.rs"
