@@ -1,6 +1,13 @@
-import type { CoValueUniqueness, RawCoValue } from "cojson";
 import {
-  type Account,
+  CoValueCore,
+  type CoValueUniqueness,
+  type CojsonInternalTypes,
+  type RawCoValue,
+  emptyKnownState,
+} from "cojson";
+import { AvailableCoValueCore } from "cojson/dist/coValueCore/coValueCore.js";
+import {
+  Account,
   AnonymousJazzAgent,
   CoValueOrZodSchema,
   type Group,
@@ -15,6 +22,7 @@ import {
   type SubscriptionValue,
   activeAccountContext,
   anySchemaToCoSchema,
+  getSubscriptionScope,
   inspect,
 } from "../internal.js";
 
@@ -461,4 +469,101 @@ export function parseGroupCreateOptions(
   return "_type" in options && isAccountInstance(options)
     ? { owner: options }
     : { owner: options.owner ?? activeAccountContext.get() };
+}
+
+export async function exportCoValue<
+  S extends CoValueOrZodSchema | CoValueClass<CoValue>,
+  const R extends ResolveQuery<S>,
+>(
+  cls: S,
+  id: ID<CoValue>,
+  options: {
+    resolve?: ResolveQueryStrict<S, R>;
+    loadAs: Account | AnonymousJazzAgent;
+    skipRetry?: boolean;
+  },
+) {
+  const value = await loadCoValue(anySchemaToCoSchema(cls), id, {
+    // @ts-expect-error We can't really validate this
+    resolve: options.resolve,
+    loadAs: options.loadAs,
+    skipRetry: options.skipRetry,
+  });
+
+  if (!value) {
+    return null;
+  }
+
+  const subscription = getSubscriptionScope(value);
+  const valuesExported = new Set<string>();
+
+  const contentPieces: CojsonInternalTypes.NewContentMessage[] = [];
+
+  loadContentPiecesFromSubscription(
+    subscription,
+    valuesExported,
+    contentPieces,
+  );
+
+  return contentPieces;
+}
+
+function loadContentPiecesFromSubscription(
+  subscription: SubscriptionScope<any>,
+  valuesExported: Set<string>,
+  contentPieces: CojsonInternalTypes.NewContentMessage[],
+) {
+  if (valuesExported.has(subscription.id)) {
+    return;
+  }
+
+  valuesExported.add(subscription.id);
+
+  const core = subscription.getCurrentValue()?._raw
+    .core as AvailableCoValueCore;
+
+  if (core) {
+    loadContentPiecesFromCoValue(core, valuesExported, contentPieces);
+  }
+
+  for (const child of subscription.childNodes.values()) {
+    loadContentPiecesFromSubscription(child, valuesExported, contentPieces);
+  }
+}
+
+function loadContentPiecesFromCoValue(
+  core: AvailableCoValueCore,
+  valuesExported: Set<string>,
+  contentPieces: CojsonInternalTypes.NewContentMessage[],
+) {
+  for (const dependency of core.getDependedOnCoValues()) {
+    if (valuesExported.has(dependency)) {
+      continue;
+    }
+
+    const depCoValue = core.node.getCoValue(dependency);
+
+    if (depCoValue.isAvailable()) {
+      valuesExported.add(dependency);
+      loadContentPiecesFromCoValue(depCoValue, valuesExported, contentPieces);
+    }
+  }
+
+  const pieces = core.verified.newContentSince(emptyKnownState(core.id));
+
+  for (const piece of pieces ?? []) {
+    contentPieces.push(piece);
+  }
+}
+
+export function importContentPieces(
+  contentPieces: CojsonInternalTypes.NewContentMessage[],
+  loadAs?: Account | AnonymousJazzAgent,
+) {
+  const account = loadAs ?? Account.getMe();
+  const node = "node" in account ? account.node : account._raw.core.node;
+
+  for (const piece of contentPieces) {
+    node.syncManager.handleNewContent(piece, "import");
+  }
 }

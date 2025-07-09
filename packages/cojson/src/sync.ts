@@ -443,8 +443,19 @@ export class SyncManager {
     }
   }
 
-  handleNewContent(msg: NewContentMessage, peer?: PeerState) {
+  handleNewContent(
+    msg: NewContentMessage,
+    from: PeerState | "storage" | "import",
+  ) {
     const coValue = this.local.getCoValue(msg.id);
+
+    const peer = from === "storage" || from === "import" ? undefined : from;
+    const sourceRole =
+      from === "storage"
+        ? "storage"
+        : from === "import"
+          ? "import"
+          : peer?.role;
 
     if (!coValue.hasVerifiedContent()) {
       if (!msg.header) {
@@ -586,7 +597,7 @@ export class SyncManager {
                 },
                 priority: msg.priority,
               },
-              peer,
+              from,
             );
           });
           continue;
@@ -619,7 +630,9 @@ export class SyncManager {
         continue;
       }
 
-      this.recordTransactionsSize(newTransactions, peer?.role ?? "storage");
+      if (sourceRole && sourceRole !== "import") {
+        this.recordTransactionsSize(newTransactions, sourceRole);
+      }
 
       peer?.updateSessionCounter(
         msg.id,
@@ -660,8 +673,7 @@ export class SyncManager {
       peer.trackToldKnownState(msg.id);
     }
 
-    const sourcePeer = peer;
-    const isContentFromStorage = !sourcePeer;
+    const isContentFromStorage = from === "storage";
     const syncedPeers = [];
 
     if (!isContentFromStorage) {
