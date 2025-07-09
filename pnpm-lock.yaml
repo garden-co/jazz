@@ -255,6 +255,9 @@ importers:
       '@react-navigation/native-stack':
         specifier: 7.3.19
         version: 7.3.19(@react-navigation/native@7.1.14(react-native@0.80.0(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0))(react-native-safe-area-context@5.5.0(react-native@0.80.0(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0))(react-native-screens@4.11.1(react-native@0.80.0(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0))(react-native@0.80.0(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0)
+      jazz-crypto:
+        specifier: workspace:*
+        version: link:../../packages/jazz-crypto
       jazz-tools:
         specifier: workspace:*
         version: link:../../packages/jazz-tools
@@ -270,6 +273,9 @@ importers:
       react-native-mmkv:
         specifier: 3.3.0
         version: 3.3.0(react-native@0.80.0(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0)
+      react-native-nitro-modules:
+        specifier: 0.26.2
+        version: 0.26.2(react-native@0.80.0(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0)
       react-native-safe-area-context:
         specifier: 5.5.0
         version: 5.5.0(react-native@0.80.0(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0)
@@ -1730,7 +1736,7 @@ importers:
     dependencies:
       '@react-native/codegen':
         specifier: ^0.80.0
-        version: 0.80.0(@babel/core@7.27.1)
+        version: 0.80.1(@babel/core@7.27.1)
       react-native:
         specifier: '*'
         version: 0.80.0(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.8.3))(@types/react@19.1.0)(react@19.1.0)
@@ -1906,14 +1912,14 @@ importers:
         specifier: ^0.2.0
         version: 0.2.0(react-native@0.79.2(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0)
       react-native-mmkv:
-        specifier: ^3.2.0
-        version: 3.2.0(react-native@0.79.2(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0)
+        specifier: ^3.3.0
+        version: 3.3.0(react-native@0.79.2(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0)
       react-native-nitro-modules:
-        specifier: 0.25.2
-        version: 0.25.2(react-native@0.79.2(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0)
+        specifier: 0.26.2
+        version: 0.26.2(react-native@0.79.2(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0)
       react-native-quick-crypto:
-        specifier: 1.0.0-beta.16
-        version: 1.0.0-beta.16(react-native-nitro-modules@0.25.2(react-native@0.79.2(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0))(react-native@0.79.2(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0)
+        specifier: 1.0.0-beta.18
+        version: 1.0.0-beta.18(expo@54.0.0-canary-20250701-6a945c5(@babel/core@7.27.1)(graphql@16.11.0)(metro-runtime@0.82.3)(react-native@0.79.2(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@types/react@19.1.0)(react@19.1.0))(react-refresh@0.17.0)(react@19.1.0))(react-native-nitro-modules@0.26.2(react-native@0.79.2(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0))(react-native@0.79.2(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0)
       svelte:
         specifier: ^5.0.0
         version: 5.34.6
@@ -7592,6 +7598,10 @@ packages:
     resolution: {integrity: sha512-ZqRXc+tZukToSNmh5C2iWMSoV3X1YUcPbqEM4DkEG5tNQXrQUZCNVGGv3IuicnkMtPfGf3Xtp8WCXs295iQ1pQ==}
     engines: {node: '>= 0.10.0'}
 
+  consola@3.3.0:
+    resolution: {integrity: sha512-kxltocVQCwQNFvw40dlVRYeAkAvtYjMFZYNlOcsF5wExPpGwPxMwgx4IfDJvBRPtBpnQwItd5WkTaR0ZwT/TmQ==}
+    engines: {node: ^14.18.0 || >=16.10.0}
+
   consola@3.4.2:
     resolution: {integrity: sha512-5IKcdX0nnYavi6G7TtOhwkYzyjfJlatbjMjuLSfE2kYT5pMDOilZ4OvMhi637CcDICTmz3wARPoyhqyX1Y+XvA==}
     engines: {node: ^14.18.0 || >=16.10.0}
@@ -11346,12 +11356,6 @@ packages:
       react: 19.1.0
       react-native: '*'
 
-  react-native-mmkv@3.2.0:
-    resolution: {integrity: sha512-9y7K//1MaU46TFrXkyU0wT5VGk9Y2FDLFV6NPl+z3jTbm2G7SC1UIxneF6CfhSmBX5CfKze9SO7kwDuRx7flpQ==}
-    peerDependencies:
-      react: 19.1.0
-      react-native: '*'
-
   react-native-mmkv@3.3.0:
     resolution: {integrity: sha512-2iPjIJ+IAODXN35wm53EN6nv+hR/0NXLLiLWOdPA/0gXDB2dYVrr6MqvoiFpxhLhdj0B8fkf5ARNVavJaSvuuQ==}
     peerDependencies:
@@ -11373,6 +11377,7 @@ packages:
   react-native-quick-crypto@1.0.0-beta.18:
     resolution: {integrity: sha512-tAppGOR4REPlq5oPBEsnPqYYaiNXhNuYvM1OXSThdeED/zUaJE7/AzOFm21pXtceel1s13nUGqEtxrZyJDVWFA==}
     peerDependencies:
+      expo: '>=47.0.0'
       react: 19.1.0
       react-native: '*'
       react-native-nitro-modules: '*'
@@ -14816,10 +14821,10 @@ snapshots:
       eventemitter3: 5.0.1
       preact: 10.25.3
 
-  '@craftzdog/react-native-buffer@6.0.5(react-native@0.79.2(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0)':
+  '@craftzdog/react-native-buffer@6.1.0(react-native@0.79.2(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0)':
     dependencies:
       ieee754: 1.2.1
-      react-native-quick-base64: 2.1.2(react-native@0.79.2(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0)
+      react-native-quick-base64: 2.2.0(react-native@0.79.2(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0)
     transitivePeerDependencies:
       - react
       - react-native
@@ -16078,7 +16083,7 @@ snapshots:
 
   '@mapbox/node-pre-gyp@2.0.0-rc.0':
     dependencies:
-      consola: 3.4.2
+      consola: 3.3.0
       detect-libc: 2.0.4
       https-proxy-agent: 7.0.6
       node-fetch: 2.7.0
@@ -17593,24 +17598,6 @@ snapshots:
       nullthrows: 1.1.1
       react: 19.1.0
       react-native: 0.79.2(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@types/react@19.1.0)(react@19.1.0)
-    optionalDependencies:
-      '@types/react': 19.1.0
-
-  '@react-native/virtualized-lists@0.80.0(@types/react@19.1.0)(react-native@0.80.0(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0)':
-    dependencies:
-      invariant: 2.2.4
-      nullthrows: 1.1.1
-      react: 19.1.0
-      react-native: 0.80.0(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@types/react@19.1.0)(react@19.1.0)
-    optionalDependencies:
-      '@types/react': 19.1.0
-
-  '@react-native/virtualized-lists@0.80.0(@types/react@19.1.0)(react-native@0.80.0(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.8.3))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0)':
-    dependencies:
-      invariant: 2.2.4
-      nullthrows: 1.1.1
-      react: 19.1.0
-      react-native: 0.80.0(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.8.3))(@types/react@19.1.0)(react@19.1.0)
     optionalDependencies:
       '@types/react': 19.1.0
 
@@ -20345,6 +20332,8 @@ snapshots:
       utils-merge: 1.0.1
     transitivePeerDependencies:
       - supports-color
+
+  consola@3.3.0: {}
 
   consola@3.4.2: {}
 
@@ -24647,7 +24636,7 @@ snapshots:
       react: 19.1.0
       react-native: 0.80.0(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@types/react@19.1.0)(react@19.1.0)
 
-  react-native-mmkv@3.2.0(react-native@0.79.2(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0):
+  react-native-mmkv@3.3.0(react-native@0.79.2(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0):
     dependencies:
       react: 19.1.0
       react-native: 0.79.2(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@types/react@19.1.0)(react@19.1.0)
@@ -24657,29 +24646,38 @@ snapshots:
       react: 19.1.0
       react-native: 0.80.0(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@types/react@19.1.0)(react@19.1.0)
 
-  react-native-nitro-modules@0.25.2(react-native@0.79.2(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0):
+  react-native-nitro-modules@0.26.2(react-native@0.79.2(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0):
     dependencies:
       react: 19.1.0
       react-native: 0.79.2(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@types/react@19.1.0)(react@19.1.0)
 
-  react-native-quick-base64@2.1.2(react-native@0.79.2(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0):
+  react-native-nitro-modules@0.26.2(react-native@0.80.0(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0):
     dependencies:
-      base64-js: 1.5.1
+      react: 19.1.0
+      react-native: 0.80.0(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@types/react@19.1.0)(react@19.1.0)
+
+  react-native-nitro-modules@0.26.2(react-native@0.80.0(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.8.3))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0):
+    dependencies:
+      react: 19.1.0
+      react-native: 0.80.0(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.8.3))(@types/react@19.1.0)(react@19.1.0)
+
+  react-native-quick-base64@2.2.0(react-native@0.79.2(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0):
+    dependencies:
       react: 19.1.0
       react-native: 0.79.2(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@types/react@19.1.0)(react@19.1.0)
 
-  react-native-quick-crypto@1.0.0-beta.16(react-native-nitro-modules@0.25.2(react-native@0.79.2(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0))(react-native@0.79.2(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0):
+  react-native-quick-crypto@1.0.0-beta.18(expo@54.0.0-canary-20250701-6a945c5(@babel/core@7.27.1)(graphql@16.11.0)(metro-runtime@0.82.3)(react-native@0.79.2(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@types/react@19.1.0)(react@19.1.0))(react-refresh@0.17.0)(react@19.1.0))(react-native-nitro-modules@0.26.2(react-native@0.79.2(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0))(react-native@0.79.2(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0):
     dependencies:
-      '@craftzdog/react-native-buffer': 6.0.5(react-native@0.79.2(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0)
+      '@craftzdog/react-native-buffer': 6.1.0(react-native@0.79.2(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0)
       events: 3.3.0
       react: 19.1.0
       react-native: 0.79.2(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@types/react@19.1.0)(react@19.1.0)
-      react-native-nitro-modules: 0.25.2(react-native@0.79.2(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0)
-      react-native-quick-base64: 2.1.2(react-native@0.79.2(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0)
+      react-native-nitro-modules: 0.26.2(react-native@0.79.2(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0)
+      react-native-quick-base64: 2.2.0(react-native@0.79.2(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0)
       readable-stream: 4.5.2
       util: 0.12.5
     optionalDependencies:
-      expo: 54.0.0-canary-20250611-f0afe80(@babel/core@7.27.1)(graphql@16.11.0)(react-native@0.79.2(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0)
+      expo: 54.0.0-canary-20250701-6a945c5(@babel/core@7.27.1)(graphql@16.11.0)(metro-runtime@0.82.3)(react-native@0.79.2(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@types/react@19.1.0)(react@19.1.0))(react-refresh@0.17.0)(react@19.1.0)
 
   react-native-safe-area-context@5.5.0(react-native@0.80.0(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0):
     dependencies:
@@ -24775,7 +24773,7 @@ snapshots:
       nullthrows: 1.1.1
       pretty-format: 29.7.0
       promise: 8.3.0
-      react: 19.0.0
+      react: 19.1.0
       react-devtools-core: 6.1.1
       react-refresh: 0.14.2
       regenerator-runtime: 0.13.11
