@@ -127,7 +127,7 @@ describe("Simple CoList operations", async () => {
         name: z.string(),
       });
 
-      const Recipe = co.list(z.optional(Ingredient));
+      const Recipe = co.list(co.optional(Ingredient));
 
       const recipe = Recipe.create(
         [

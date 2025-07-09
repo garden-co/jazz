@@ -281,7 +281,7 @@ describe("CoMap.Record", async () => {
     });
 
     test("Is ok to omit optional fields", () => {
-      const TestRecord = co.record(z.string(), z.optional(NestedRecord));
+      const TestRecord = co.record(z.string(), co.optional(NestedRecord));
 
       expectTypeOf<typeof TestRecord.create>().toBeCallableWith(
         {

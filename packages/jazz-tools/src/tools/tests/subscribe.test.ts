@@ -43,7 +43,7 @@ const ReactionsFeed = co.feed(z.string());
 const Message = co.map({
   text: z.string(),
   reactions: ReactionsFeed,
-  attachment: z.optional(co.fileStream()),
+  attachment: co.optional(co.fileStream()),
 });
 
 const ChatRoom = co.map({
@@ -654,7 +654,7 @@ describe("subscribeToCoValue", () => {
       value: z.string(),
     });
 
-    const TestList = co.list(z.optional(TestMap));
+    const TestList = co.list(co.optional(TestMap));
 
     const reader = await createJazzTestAccount({
       isCurrentActiveAccount: true,
@@ -718,7 +718,7 @@ describe("subscribeToCoValue", () => {
       value: z.string(),
     });
 
-    const TestList = co.list(z.optional(TestMap));
+    const TestList = co.list(co.optional(TestMap));
 
     const creator = await createJazzTestAccount({
       isCurrentActiveAccount: true,
