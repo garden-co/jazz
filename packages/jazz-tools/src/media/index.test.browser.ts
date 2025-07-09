@@ -19,13 +19,62 @@ describe("createImage - Browser Edition", async () => {
     });
 
     expect(image.originalSize).toEqual([600, 125]);
+    expect(image["600x125"]).toBeDefined();
+    expect(image["256x53"]).toBeDefined();
+
+    const imgOriginal = document.createElement("img");
+    imgOriginal.src = URL.createObjectURL(image.original!.toBlob()!);
+
+    await new Promise((resolve) => (imgOriginal.onload = resolve));
+
+    expect(imgOriginal.width).toBe(600);
+    expect(imgOriginal.height).toBe(125);
+
+    URL.revokeObjectURL(imgOriginal.src);
+
+    const imgResized = document.createElement("img");
+    imgResized.src = URL.createObjectURL(image["256x53"]!.toBlob()!);
+
+    await new Promise((resolve) => (imgResized.onload = resolve));
+
+    expect(imgResized.width).toBe(256);
+    expect(imgResized.height).toBe(53);
+
+    URL.revokeObjectURL(imgResized.src);
+  });
+
+  it("should keep the original mime type", async () => {
+    const pngBlob = new Blob(
+      [Uint8Array.from(White1920, (c) => c.charCodeAt(0))],
+      { type: "image/png" },
+    );
+
+    const pngImage = await createImage(pngBlob, {
+      progressive: true,
+      maxSize: 600,
+      placeholder: "blur",
+      owner: account,
+    });
+
+    expect(pngImage.original!.toBlob()!.type).toBe("image/png");
+    expect(pngImage["256x53"]!.toBlob()!.type).toBe("image/png");
+
+    const jpegBlob = new Blob(
+      [Uint8Array.from(White1920, (c) => c.charCodeAt(0))],
+      { type: "image/jpeg" },
+    );
+
+    const jpegImage = await createImage(jpegBlob, {
+      progressive: true,
+      maxSize: 600,
+      placeholder: "blur",
+      owner: account,
+    });
+
+    expect(jpegImage.original!.toBlob()!.type).toBe("image/jpeg");
+    expect(jpegImage["256x53"]!.toBlob()!.type).toBe("image/jpeg");
   });
 });
-
-// 1x1 png
-const OnePixel = atob(
-  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg==",
-);
 
 // Image 1920x400
 const White1920 = atob(
