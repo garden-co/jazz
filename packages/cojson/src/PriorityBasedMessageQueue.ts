@@ -65,6 +65,10 @@ export class LinkedList<T> {
     this.meter?.pull();
     return value;
   }
+
+  clearMetrics() {
+    this.meter?.clear(this.length);
+  }
 }
 
 class QueueMeter {
@@ -105,6 +109,10 @@ class QueueMeter {
 
   public push() {
     this.pushCounter.add(1, this.attrs);
+  }
+
+  public clear(items: number) {
+    this.pullCounter.add(-items, this.attrs);
   }
 }
 
@@ -150,5 +158,9 @@ export class PriorityBasedMessageQueue {
     const priority = this.queues.findIndex((queue) => queue.length > 0);
 
     return this.queues[priority]?.shift();
+  }
+
+  public clearMetrics() {
+    this.queues.forEach((queue) => queue.clearMetrics());
   }
 }

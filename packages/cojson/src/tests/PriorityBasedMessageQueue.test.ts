@@ -19,6 +19,38 @@ describe("PriorityBasedMessageQueue", () => {
   });
 
   describe("meteredQueue", () => {
+    test("should corretly clear metrics", async () => {
+      const { queue, metricReader } = setup();
+      const message: SyncMessage = {
+        action: "load",
+        id: "co_ztest-id",
+        header: false,
+        sessions: {},
+      };
+
+      expect(
+        await metricReader.getMetricValue("jazz.messagequeue.pushed", {
+          priority: CO_VALUE_PRIORITY.MEDIUM,
+        }),
+      ).toBe(0);
+
+      void queue.push(message);
+      void queue.push(message);
+      void queue.push(message);
+      expect(
+        await metricReader.getMetricValue("jazz.messagequeue.pushed", {
+          priority: CO_VALUE_PRIORITY.MEDIUM,
+        }),
+      ).toBe(3);
+
+      queue.clearMetrics();
+      expect(
+        await metricReader.getMetricValue("jazz.messagequeue.pulled", {
+          priority: CO_VALUE_PRIORITY.MEDIUM,
+        }),
+      ).toBe(0);
+    });
+
     test("should corretly count pushes", async () => {
       const { queue, metricReader } = setup();
       const message: SyncMessage = {

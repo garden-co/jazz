@@ -207,6 +207,7 @@ export class PeerState {
     this.peer.crashOnClose = false;
     this.peer.outgoing.close();
     this.closed = true;
+    this.queue.clearMetrics();
     this.emitClose();
   }
 
