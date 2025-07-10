@@ -54,8 +54,8 @@ async function getPlaceholderBase64(filePath: SourceType): Promise<string> {
     filePath,
     8,
     8,
-    "JPEG",
-    80,
+    "PNG",
+    100,
   );
 
   return imageUrlToBase64(uri);
@@ -78,15 +78,30 @@ async function resize(
     );
   }
 
+  const mimeType = await getMimeType(filePath);
+
   const { uri } = await ImageResizer.createResizedImage(
     filePath,
     width,
     height,
-    "JPEG",
+    contentTypeToFormat(mimeType),
     80,
   );
 
   return uri;
+}
+
+function getMimeType(filePath: string): Promise<string> {
+  return fetch(filePath)
+    .then((res) => res.blob())
+    .then((blob) => blob.type);
+}
+
+function contentTypeToFormat(contentType: string) {
+  if (contentType.includes("image/png")) return "PNG";
+  if (contentType.includes("image/jpeg")) return "JPEG";
+  if (contentType.includes("image/webp")) return "WEBP";
+  return "PNG";
 }
 
 export async function createFileStreamFromSource(
@@ -107,7 +122,7 @@ export async function createFileStreamFromSource(
   });
 }
 
-// TODO: look for more efficient way to do this
+// TODO: look for more efficient way to do this as React Native hasn't blob.arrayBuffer()
 function toArrayBuffer(blob: Blob): Promise<ArrayBuffer> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
