@@ -25,6 +25,7 @@ export function DropdownButton<T extends React.ElementType = typeof Button>({
       <Component
         icon={props.icon || "chevronDown"}
         iconPosition="right"
+        variant={props.variant || "outline"}
         {...props}
       />
     </DropdownMenuPrimitive.Trigger>
@@ -73,11 +74,11 @@ export const DropdownItem = React.forwardRef<
     },
     ref,
   ) => {
-    const effectiveIntent = selected ? selectedItemColor : intent || "default";
+    const effectiveIntent =
+      selected && !intent ? selectedItemColor : intent || "default";
 
     const getTextColor = () => {
-      if (selected && intent === undefined) {
-        console.log(selected, intent, effectiveIntent);
+      if (selected && !!intent) {
         return styleToTextDarkMap[
           effectiveIntent as keyof typeof styleToTextDarkMap
         ];
