@@ -21,7 +21,7 @@ export function FrameworkSelect({
   className,
 }: {
   onSelect?: (framework: Framework) => void;
-  size?: "sm" | "md";
+  size?: "sm" | "md" | "lg";
   routerPush?: boolean;
   className?: string;
 }) {
@@ -45,6 +45,7 @@ export function FrameworkSelect({
         as={Button}
         variant="outline"
         intent="default"
+        size={size}
       >
         <span className="text-nowrap max-w-full overflow-hidden text-ellipsis">{frameworkNames[selectedFramework].label}</span>
         <Icon name="chevronDown" size="sm" />
