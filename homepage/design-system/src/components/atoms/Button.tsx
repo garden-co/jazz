@@ -18,6 +18,7 @@ import {
   styleToBorderMap,
   styleToButtonStateMap,
   styleToColorMap,
+  styleToFocusMap,
   styleToHoverShadowMap,
   styleToTextActiveMap,
   styleToTextHoverMap,
@@ -153,14 +154,14 @@ const textColorVariant = (style: Style) => {
 const variantClass = (intent: Style) =>
   `${styleToBgGradientColorMap[intent]} ${styleToBgGradientHoverMap[intent]} ${textColorVariant(intent)} ${styleToButtonStateMap[intent]} ${shadowClassesBase} shadow-stone-400/20`;
 
-const styleClasses = (intent: Style, variant: Variant | undefined) => {
+const styleClasses = (intent: Style) => {
   return {
-    outline: `border ${styleToBorderMap[intent]} ${styleToTextMap[intent]} ${styleToTextHoverMap[intent]} ${styleToHoverShadowMap[intent]} ${styleToBgTransparentActiveMap[intent]} shadow-[5px_0px]`,
-    inverted: `${styleToTextMap[intent]} ${colorToBgHoverMap30[styleToColorMap[intent] as VariantColor]} ${colorToBgMap[styleToColorMap[intent] as VariantColor]} ${colorToBgActiveMap50[styleToColorMap[intent] as VariantColor]} ${shadowClassesBase}`,
-    ghost: `bg-transparent ${styleToTextMap[intent]} ${colorToBgHoverMap10[styleToColorMap[intent] as VariantColor]} ${colorToBgActiveMap25[styleToColorMap[intent] as VariantColor]}`,
-    link: `bg-transparent ${styleToTextMap[intent]} underline underline-offset-2 p-0 hover:bg-transparent ${styleToTextHoverMap[intent]} ${styleToTextActiveMap[intent]} active:underline-stone-500`,
+    outline: `border ${styleToBorderMap[intent]} ${styleToTextMap[intent]} ${styleToTextHoverMap[intent]} ${styleToHoverShadowMap[intent]} ${styleToBgTransparentActiveMap[intent]} shadow-[5px_0px] ${styleToFocusMap[intent]}`,
+    inverted: `${styleToTextMap[intent]} ${colorToBgHoverMap30[styleToColorMap[intent] as VariantColor]} ${colorToBgMap[styleToColorMap[intent] as VariantColor]} ${colorToBgActiveMap50[styleToColorMap[intent] as VariantColor]} ${shadowClassesBase} ${styleToFocusMap[intent]}`,
+    ghost: `bg-transparent ${styleToTextMap[intent]} ${colorToBgHoverMap10[styleToColorMap[intent] as VariantColor]} ${colorToBgActiveMap25[styleToColorMap[intent] as VariantColor]} ${styleToFocusMap[intent]}`,
+    link: `bg-transparent ${styleToTextMap[intent]} underline underline-offset-2 p-0 hover:bg-transparent ${styleToTextHoverMap[intent]} ${styleToTextActiveMap[intent]} active:underline-stone-500 ${styleToFocusMap[intent]}`,
     secondary: variantClass("muted"),
     destructive: variantClass("danger"),
-    default: `${styleToBgGradientColorMap["default"]} ${styleToBgGradientHoverMap["default"]} ${textColorVariant("default")} ${styleToButtonStateMap["default"]} ${shadowClassesBase} shadow-stone-400/20`,
+    default: `${styleToBgGradientColorMap["default"]} ${styleToBgGradientHoverMap["default"]} ${textColorVariant("default")} ${styleToButtonStateMap["default"]} ${shadowClassesBase} shadow-stone-400/20 ${styleToFocusMap["default"]}`,
   };
 };
