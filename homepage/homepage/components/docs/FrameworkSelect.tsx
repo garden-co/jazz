@@ -53,8 +53,12 @@ export function FrameworkSelect({
         {Object.entries(frameworkNames)
           .map(([key, framework]) => (
             <DropdownItem
-            className={clsx("items-baseline", size === "sm" && "text-xs text-nowrap", selectedFramework === key && "text-primary dark:text-primary")}
+            className={clsx(
+              "items-baseline", 
+              size === "sm" && "text-xs text-nowrap"
+            )}
               key={key}
+              selected={selectedFramework === key}
               onClick={() => selectFramework(key as Framework)}
           >
             {framework.label}

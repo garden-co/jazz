@@ -72,6 +72,7 @@ export default function ButtonsPage() {
               {variants.map((variant) => (
                 <DropdownItem
                   key={variant}
+                  selected={selectedVariant === variant}
                   onClick={() => setSelectedVariant(variant)}
                 >
                   {variant}

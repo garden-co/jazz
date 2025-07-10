@@ -54,37 +54,55 @@ export const DropdownItem = React.forwardRef<
   React.ComponentPropsWithoutRef<typeof DropdownMenuPrimitive.Item> & {
     intent?: Style;
     href?: string;
+    selected?: boolean;
+    selectedItemColor?: Style;
   }
->(({ className, intent = "default", href, ...props }, ref) => {
-  const classes = clsx(
-    className,
-    "group rounded-md space-x-2 focus:outline-none px-2.5 py-1.5 cursor-pointer select-none",
-    "text-left text-sm/6 text-stone-800 dark:text-white forced-colors:text-[CanvasText]",
-    "data-[highlighted]:bg-stone-100 dark:data-[highlighted]:bg-stone-900",
-    "data-[disabled]:opacity-50",
-    "forced-color-adjust-none forced-colors:data-[highlighted]:bg-[Highlight] forced-colors:data-[highlighted]:text-[HighlightText] forced-colors:[&>[data-slot=icon]]:data-[highlighted]:text-[HighlightText]",
-    "col-span-full grid grid-cols-[auto_1fr_1.5rem_0.5rem_auto] items-center",
-    "[&>[data-slot=icon]]:col-start-1 [&>[data-slot=icon]]:row-start-1 [&>[data-slot=icon]]:-ml-0.5 [&>[data-slot=icon]]:mr-2.5 [&>[data-slot=icon]]:size-5 sm:[&>[data-slot=icon]]:mr-2 [&>[data-slot=icon]]:sm:size-4",
-    "[&>[data-slot=icon]]:text-stone-500 [&>[data-slot=icon]]:data-[highlighted]:text-stone-700 [&>[data-slot=icon]]:dark:data-[highlighted]:text-white",
-    "[&>[data-slot=avatar]]:mr-2.5 [&>[data-slot=avatar]]:size-6 sm:[&>[data-slot=avatar]]:mr-2 sm:[&>[data-slot=avatar]]:size-5",
-    styleToTextMap[intent as keyof typeof styleToTextMap],
-  );
+>(
+  (
+    {
+      className,
+      intent = "default",
+      href,
+      selected,
+      selectedItemColor = "primary",
+      ...props
+    },
+    ref,
+  ) => {
+    const effectiveIntent = selected ? selectedItemColor : intent;
+    const shouldUseBaseTextColors = effectiveIntent === "default" && !selected;
 
-  return (
-    <DropdownMenuPrimitive.Item
-      ref={ref}
-      className={classes}
-      {...props}
-      asChild
-    >
-      {href ? (
-        <Link href={href}>{props.children}</Link>
-      ) : (
-        <div>{props.children}</div>
-      )}
-    </DropdownMenuPrimitive.Item>
-  );
-});
+    const classes = clsx(
+      className,
+      "group rounded-md space-x-2 focus:outline-none px-2.5 py-1.5 cursor-pointer select-none",
+      "text-left text-sm/6 forced-colors:text-[CanvasText]",
+      shouldUseBaseTextColors && "text-stone-800 dark:text-white",
+      "data-[highlighted]:bg-stone-100 dark:data-[highlighted]:bg-stone-900",
+      "data-[disabled]:opacity-50",
+      "forced-color-adjust-none forced-colors:data-[highlighted]:bg-[Highlight] forced-colors:data-[highlighted]:text-[HighlightText] forced-colors:[&>[data-slot=icon]]:data-[highlighted]:text-[HighlightText]",
+      "col-span-full grid grid-cols-[auto_1fr_1.5rem_0.5rem_auto] items-center",
+      "[&>[data-slot=icon]]:col-start-1 [&>[data-slot=icon]]:row-start-1 [&>[data-slot=icon]]:-ml-0.5 [&>[data-slot=icon]]:mr-2.5 [&>[data-slot=icon]]:size-5 sm:[&>[data-slot=icon]]:mr-2 [&>[data-slot=icon]]:sm:size-4",
+      "[&>[data-slot=icon]]:text-stone-500 [&>[data-slot=icon]]:data-[highlighted]:text-stone-700 [&>[data-slot=icon]]:dark:data-[highlighted]:text-white",
+      "[&>[data-slot=avatar]]:mr-2.5 [&>[data-slot=avatar]]:size-6 sm:[&>[data-slot=avatar]]:mr-2 sm:[&>[data-slot=avatar]]:size-5",
+      styleToTextMap[effectiveIntent as keyof typeof styleToTextMap],
+    );
+
+    return (
+      <DropdownMenuPrimitive.Item
+        ref={ref}
+        className={classes}
+        {...props}
+        asChild
+      >
+        {href ? (
+          <Link href={href}>{props.children}</Link>
+        ) : (
+          <div>{props.children}</div>
+        )}
+      </DropdownMenuPrimitive.Item>
+    );
+  },
+);
 DropdownItem.displayName = DropdownMenuPrimitive.Item.displayName;
 
 export function DropdownHeader({
