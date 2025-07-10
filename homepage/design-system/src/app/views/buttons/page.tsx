@@ -9,20 +9,9 @@ import {
   DropdownMenu,
 } from "@/components/organisms/Dropdown";
 import { useState } from "react";
-import { Style } from "../../../utils/tailwindClassesMap";
+import { Style, variants } from "../../../utils/tailwindClassesMap";
+
 export default function ButtonsPage() {
-  const variants = [
-    "default",
-    "primary",
-    "tip",
-    "info",
-    "success",
-    "warning",
-    "alert",
-    "danger",
-    "muted",
-    "strong",
-  ] as const;
   const [selectedVariant, setSelectedVariant] = useState<Style>("default");
   return (
     <>

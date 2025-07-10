@@ -19,6 +19,19 @@ export type Style =
   | "muted"
   | "strong";
 
+export const variants = [
+  "default",
+  "primary",
+  "tip",
+  "info",
+  "success",
+  "warning",
+  "alert",
+  "danger",
+  "muted",
+  "strong",
+] as const;
+
 export const sizeClasses = {
   sm: "text-sm py-1 px-2",
   md: "py-1.5 px-3 h-[36px]",
