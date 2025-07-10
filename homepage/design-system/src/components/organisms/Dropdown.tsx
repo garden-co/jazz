@@ -1,94 +1,91 @@
 "use client";
 
-import * as Headless from "@headlessui/react";
+import * as DropdownMenuPrimitive from "@radix-ui/react-dropdown-menu";
 import clsx from "clsx";
 import Link from "next/link";
-import type React from "react";
+import * as React from "react";
+import { Style, styleToTextMap } from "../../utils/tailwindClassesMap";
 import { Button } from "../atoms/Button";
 
-export function Dropdown(props: Headless.MenuProps) {
-  return <Headless.Menu {...props} />;
-}
+export const Dropdown = DropdownMenuPrimitive.Root;
+
+export const DropdownTrigger = DropdownMenuPrimitive.Trigger;
 
 export function DropdownButton<T extends React.ElementType = typeof Button>({
-  as = Button,
+  as,
   ...props
-}: { className?: string } & Omit<Headless.MenuButtonProps<T>, "className">) {
-  return <Headless.MenuButton as={as} {...props} />;
+}: { as?: T } & React.ComponentProps<T>) {
+  const Component = as ?? Button;
+  return (
+    <DropdownMenuPrimitive.Trigger asChild>
+      <Component
+        icon={props.icon || "chevronDown"}
+        iconPosition="right"
+        {...props}
+      />
+    </DropdownMenuPrimitive.Trigger>
+  );
 }
 
-export function DropdownMenu({
-  anchor = "bottom",
-  className,
-  ...props
-}: { className?: string } & Omit<Headless.MenuItemsProps, "as" | "className">) {
-  return (
-    <Headless.MenuItems
-      {...props}
-      transition
-      anchor={anchor}
+export const DropdownMenu = React.forwardRef<
+  React.ElementRef<typeof DropdownMenuPrimitive.Content>,
+  React.ComponentPropsWithoutRef<typeof DropdownMenuPrimitive.Content>
+>(({ className, sideOffset = 8, ...props }, ref) => (
+  <DropdownMenuPrimitive.Portal>
+    <DropdownMenuPrimitive.Content
+      ref={ref}
+      sideOffset={sideOffset}
       className={clsx(
         className,
-        // Anchor positioning
-        "[--anchor-gap:theme(spacing.2)] [--anchor-padding:theme(spacing.1.5)]",
-        // Base styles
-        "isolate rounded-lg p-1.5",
-        // Invisible border that is only visible in `forced-colors` mode for accessibility purposes
-        "outline outline-1 outline-transparent focus:outline-none",
-        // Handle scrolling when menu won't fit in viewport
-        "overflow-y-auto",
-        // Popover background
+        "isolate z-50 min-w-[12rem] overflow-hidden rounded-lg p-1.5",
         "bg-white/75 backdrop-blur-xl dark:bg-stone-925",
-        // Shadows
         "shadow-lg ring-1 ring-stone-950/10 dark:ring-inset dark:ring-white/10",
-        // Define grid at the menu level if subgrid is supported
         "supports-[grid-template-columns:subgrid]:grid supports-[grid-template-columns:subgrid]:grid-cols-[auto_1fr_1.5rem_0.5rem_auto]",
-        // Transitions
-        "transition data-[closed]:data-[leave]:opacity-0 data-[leave]:duration-100 data-[leave]:ease-in",
+        "data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2",
       )}
-    />
-  );
-}
-
-export function DropdownItem({
-  className,
-  ...props
-}: { className?: string } & (
-  | Omit<Headless.MenuItemProps<"button">, "as" | "className">
-  | Omit<Headless.MenuItemProps<typeof Link>, "as" | "className">
-)) {
-  let classes = clsx(
-    className,
-    // Base styles
-    "group rounded-md space-x-2 focus:outline-none px-2.5 py-1.5",
-    // Text styles
-    "text-left text-sm/6 dark:text-white forced-colors:text-[CanvasText]",
-    // Focus
-    "data-[focus]:bg-stone-100 dark:data-[focus]:bg-stone-900",
-    // Disabled state
-    "data-[disabled]:opacity-50",
-    // Forced colors mode
-    "forced-color-adjust-none forced-colors:data-[focus]:bg-[Highlight] forced-colors:data-[focus]:text-[HighlightText] forced-colors:[&>[data-slot=icon]]:data-[focus]:text-[HighlightText]",
-    // Use subgrid when available but fallback to an explicit grid layout if not
-    "col-span-full grid grid-cols-[auto_1fr_1.5rem_0.5rem_auto] items-center",
-    // Icons
-    "[&>[data-slot=icon]]:col-start-1 [&>[data-slot=icon]]:row-start-1 [&>[data-slot=icon]]:-ml-0.5 [&>[data-slot=icon]]:mr-2.5 [&>[data-slot=icon]]:size-5 sm:[&>[data-slot=icon]]:mr-2 [&>[data-slot=icon]]:sm:size-4",
-    "[&>[data-slot=icon]]:text-stone-500 [&>[data-slot=icon]]:data-[focus]:text-white [&>[data-slot=icon]]: [&>[data-slot=icon]]:data-[focus]:dark:text-white",
-    // Avatar
-    "[&>[data-slot=avatar]]:mr-2.5 [&>[data-slot=avatar]]:size-6 sm:[&>[data-slot=avatar]]:mr-2 sm:[&>[data-slot=avatar]]:size-5",
-  );
-
-  return "href" in props ? (
-    <Headless.MenuItem as={Link} {...props} className={classes} />
-  ) : (
-    <Headless.MenuItem
-      as="button"
-      type="button"
       {...props}
-      className={classes}
     />
+  </DropdownMenuPrimitive.Portal>
+));
+DropdownMenu.displayName = DropdownMenuPrimitive.Content.displayName;
+
+export const DropdownItem = React.forwardRef<
+  React.ElementRef<typeof DropdownMenuPrimitive.Item>,
+  React.ComponentPropsWithoutRef<typeof DropdownMenuPrimitive.Item> & {
+    intent?: Style;
+    href?: string;
+  }
+>(({ className, intent = "default", href, ...props }, ref) => {
+  const classes = clsx(
+    className,
+    "group rounded-md space-x-2 focus:outline-none px-2.5 py-1.5 cursor-pointer select-none",
+    "text-left text-sm/6 text-stone-800 dark:text-white forced-colors:text-[CanvasText]",
+    "data-[highlighted]:bg-stone-100 dark:data-[highlighted]:bg-stone-900",
+    "data-[disabled]:opacity-50",
+    "forced-color-adjust-none forced-colors:data-[highlighted]:bg-[Highlight] forced-colors:data-[highlighted]:text-[HighlightText] forced-colors:[&>[data-slot=icon]]:data-[highlighted]:text-[HighlightText]",
+    "col-span-full grid grid-cols-[auto_1fr_1.5rem_0.5rem_auto] items-center",
+    "[&>[data-slot=icon]]:col-start-1 [&>[data-slot=icon]]:row-start-1 [&>[data-slot=icon]]:-ml-0.5 [&>[data-slot=icon]]:mr-2.5 [&>[data-slot=icon]]:size-5 sm:[&>[data-slot=icon]]:mr-2 [&>[data-slot=icon]]:sm:size-4",
+    "[&>[data-slot=icon]]:text-stone-500 [&>[data-slot=icon]]:data-[highlighted]:text-stone-700 [&>[data-slot=icon]]:dark:data-[highlighted]:text-white",
+    "[&>[data-slot=avatar]]:mr-2.5 [&>[data-slot=avatar]]:size-6 sm:[&>[data-slot=avatar]]:mr-2 sm:[&>[data-slot=avatar]]:size-5",
+    styleToTextMap[intent as keyof typeof styleToTextMap],
   );
-}
+
+  return (
+    <DropdownMenuPrimitive.Item
+      ref={ref}
+      className={classes}
+      {...props}
+      asChild
+    >
+      {href ? (
+        <Link href={href}>{props.children}</Link>
+      ) : (
+        <div>{props.children}</div>
+      )}
+    </DropdownMenuPrimitive.Item>
+  );
+});
+DropdownItem.displayName = DropdownMenuPrimitive.Item.displayName;
 
 export function DropdownHeader({
   className,
@@ -102,105 +99,90 @@ export function DropdownHeader({
   );
 }
 
-export function DropdownSection({
-  className,
-  ...props
-}: { className?: string } & Omit<
-  Headless.MenuSectionProps,
-  "as" | "className"
->) {
-  return (
-    <Headless.MenuSection
-      {...props}
-      className={clsx(
-        className,
-        // Define grid at the section level instead of the item level if subgrid is supported
-        "col-span-full supports-[grid-template-columns:subgrid]:grid supports-[grid-template-columns:subgrid]:grid-cols-[auto_1fr_1.5rem_0.5rem_auto]",
-      )}
-    />
-  );
-}
+export const DropdownSection = React.forwardRef<
+  React.ElementRef<typeof DropdownMenuPrimitive.Group>,
+  React.ComponentPropsWithoutRef<typeof DropdownMenuPrimitive.Group>
+>(({ className, ...props }, ref) => (
+  <DropdownMenuPrimitive.Group
+    ref={ref}
+    className={clsx(
+      className,
+      "col-span-full supports-[grid-template-columns:subgrid]:grid supports-[grid-template-columns:subgrid]:grid-cols-[auto_1fr_1.5rem_0.5rem_auto]",
+    )}
+    {...props}
+  />
+));
+DropdownSection.displayName = DropdownMenuPrimitive.Group.displayName;
 
-export function DropdownHeading({
-  className,
-  ...props
-}: { className?: string } & Omit<
-  Headless.MenuHeadingProps,
-  "as" | "className"
->) {
-  return (
-    <Headless.MenuHeading
-      {...props}
-      className={clsx(
-        className,
-        "col-span-full grid grid-cols-[1fr,auto] gap-x-12 px-3.5 pb-1 pt-2 text-sm/5 font-medium text-stone-500 sm:px-3 sm:text-xs/5",
-      )}
-    />
-  );
-}
+export const DropdownHeading = React.forwardRef<
+  React.ElementRef<typeof DropdownMenuPrimitive.Label>,
+  React.ComponentPropsWithoutRef<typeof DropdownMenuPrimitive.Label>
+>(({ className, ...props }, ref) => (
+  <DropdownMenuPrimitive.Label
+    ref={ref}
+    className={clsx(
+      className,
+      "col-span-full grid grid-cols-[1fr,auto] gap-x-12 px-3.5 pb-1 pt-2 text-sm/5 font-medium text-stone-500 sm:px-3 sm:text-xs/5",
+    )}
+    {...props}
+  />
+));
+DropdownHeading.displayName = DropdownMenuPrimitive.Label.displayName;
 
-export function DropdownDivider({
-  className,
-  ...props
-}: { className?: string } & Omit<
-  Headless.MenuSeparatorProps,
-  "as" | "className"
->) {
-  return (
-    <Headless.MenuSeparator
-      {...props}
-      className={clsx(
-        className,
-        "col-span-full mx-3.5 my-1 h-px border-0 bg-stone-950/5 sm:mx-3 dark:bg-white/10 forced-colors:bg-[CanvasText]",
-      )}
-    />
-  );
-}
+export const DropdownDivider = React.forwardRef<
+  React.ElementRef<typeof DropdownMenuPrimitive.Separator>,
+  React.ComponentPropsWithoutRef<typeof DropdownMenuPrimitive.Separator>
+>(({ className, ...props }, ref) => (
+  <DropdownMenuPrimitive.Separator
+    ref={ref}
+    className={clsx(
+      className,
+      "col-span-full mx-3.5 my-1 h-px border-0 bg-stone-950/5 sm:mx-3 dark:bg-white/10 forced-colors:bg-[CanvasText]",
+    )}
+    {...props}
+  />
+));
+DropdownDivider.displayName = DropdownMenuPrimitive.Separator.displayName;
 
 export function DropdownLabel({
   className,
   ...props
-}: { className?: string } & Omit<Headless.LabelProps, "as" | "className">) {
+}: React.ComponentPropsWithoutRef<"span">) {
   return (
-    <Headless.Label
+    <span
       {...props}
       data-slot="label"
       className={clsx(className, "text-highlight col-start-2 row-start-1")}
-      {...props}
     />
   );
 }
 
-export function DropdownDescription({
-  className,
-  ...props
-}: { className?: string } & Omit<
-  Headless.DescriptionProps,
-  "as" | "className"
->) {
-  return (
-    <Headless.Description
-      data-slot="description"
-      {...props}
-      className={clsx(
-        className,
-        "col-span-2 col-start-2 row-start-2 text-sm/5 text-stone-500 group-data-[focus]:text-white sm:text-xs/5  forced-colors:group-data-[focus]:text-[HighlightText]",
-      )}
-    />
-  );
-}
+export const DropdownDescription = React.forwardRef<
+  React.ElementRef<"p">,
+  React.ComponentPropsWithoutRef<"p">
+>(({ className, ...props }, ref) => (
+  <p
+    ref={ref}
+    data-slot="description"
+    className={clsx(
+      className,
+      "col-span-2 col-start-2 row-start-2 text-sm/5 text-stone-500 group-data-[highlighted]:text-white sm:text-xs/5  forced-colors:group-data-[highlighted]:text-[HighlightText]",
+    )}
+    {...props}
+  />
+));
+DropdownDescription.displayName = "DropdownDescription";
 
 export function DropdownShortcut({
   keys,
   className,
   ...props
-}: { keys: string | string[]; className?: string } & Omit<
-  Headless.DescriptionProps<"kbd">,
-  "as" | "className"
->) {
+}: {
+  keys: string | string[];
+  className?: string;
+} & React.ComponentPropsWithoutRef<"div">) {
   return (
-    <Headless.Description
-      as="kbd"
+    <div
       {...props}
       className={clsx(
         className,
@@ -211,7 +193,7 @@ export function DropdownShortcut({
         <kbd
           key={index}
           className={clsx([
-            "min-w-[2ch] text-center font-sans capitalize text-stone-400 group-data-[focus]:text-white forced-colors:group-data-[focus]:text-[HighlightText]",
+            "min-w-[2ch] text-center font-sans capitalize text-stone-400 group-data-[highlighted]:text-white forced-colors:group-data-[highlighted]:text-[HighlightText]",
             // Make sure key names that are longer than one character (like "Tab") have extra space
             index > 0 && char.length > 1 && "pl-1",
           ])}
@@ -219,6 +201,6 @@ export function DropdownShortcut({
           {char}
         </kbd>
       ))}
-    </Headless.Description>
+    </div>
   );
 }

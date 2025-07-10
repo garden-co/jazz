@@ -67,7 +67,6 @@ export default function ButtonsPage() {
               variant="inverted"
             >
               {selectedVariant}
-              <Icon name="chevronDown" size="sm" />
             </DropdownButton>
             <DropdownMenu>
               {variants.map((variant) => (

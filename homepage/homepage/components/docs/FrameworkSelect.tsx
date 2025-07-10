@@ -48,9 +48,8 @@ export function FrameworkSelect({
         size={size}
       >
         <span className="text-nowrap max-w-full overflow-hidden text-ellipsis">{frameworkNames[selectedFramework].label}</span>
-        <Icon name="chevronDown" size="sm" />
       </DropdownButton>
-      <DropdownMenu className="w-[--button-width] z-50" anchor="bottom start">
+      <DropdownMenu className="w-[--button-width] z-50">
         {Object.entries(frameworkNames)
           .map(([key, framework]) => (
             <DropdownItem
