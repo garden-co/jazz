@@ -28,14 +28,25 @@ The Jazz's images implementation is based on `@bam.tech/react-native-image-resiz
 The easiest way to create and use images in your Jazz application is with the `createImage()` function:
 
 <CodeGroup>
-```tsx
+```ts
+import { Account, Group, ImageDefinition } from "jazz-tools";
+
+declare const me: {
+  _owner: Account | Group;
+  profile: {
+    image: ImageDefinition;
+  };
+};
+
+// ---cut---
+
 import { createImage } from "jazz-tools/media";
-import * as ImagePicker from 'expo-image-picker';
+import { launchImageLibrary } from 'react-native-image-picker';
 
 async function handleImagePicker() {
-  // Launch the image picker
-  const result = await ImagePicker.launchImageLibraryAsync({
-    mediaTypes: ImagePicker.MediaTypeOptions.Images,
+  // Use your favorite image picker library to get the image URI
+  const result = await launchImageLibrary({
+    mediaType: 'photo',
     quality: 1,
   });
 
@@ -43,7 +54,7 @@ async function handleImagePicker() {
     // Creates ImageDefinition with a blurry placeholder, limited to 1024px on the longest side, and multiple resolutions automatically.
     // See the options below for more details.
     const image = await createImage(result.assets[0].uri, {
-      owner: myGroup,
+      owner: me._owner,
       maxSize: 1024,
       placeholder: "blur",
       progressive: true,
@@ -109,8 +120,11 @@ Passing `progressive: true` to `createImage()` will create internal smaller vers
 To create multiple resized copies of an original image for better layout control, you can utilize the `createImage` function multiple times with different parameters for each desired size. Here’s an example of how you might implement this:
 
 <CodeGroup>
-```ts
+```ts twoslash
+declare const myFile: string;
+// ---cut---
 import { co } from "jazz-tools";
+import { createImage } from "jazz-tools/media";
 
 // Jazz Schema
 const ProductImage = co.map({
@@ -118,13 +132,13 @@ const ProductImage = co.map({
   thumbnail: co.image(),
 });
 
-const mainImage = await createImage(myBlob);
-const thumbnail = await createImage(myBlob, {
+const mainImage = await createImage(myFile);
+const thumbnail = await createImage(myFile, {
   maxSize: 100,
 });
 
 // or, in case of migration, you can use the original stored image.
-const newThumb = await createImage(mainImage.original.toBlob(), {
+const newThumb = await createImage(mainImage!.original!.toBlob()!, {
   maxSize: 100,
 });
 
@@ -225,7 +239,7 @@ If the image was generated with progressive loading, the `width` and `height` pr
 Like other CoValues, `ImageDefinition` can be used to load the object.
 
 <CodeGroup>
-```tsx
+```tsx twoslash
 import { ImageDefinition } from "jazz-tools";
 
 const image = await ImageDefinition.load("123", {
@@ -234,11 +248,13 @@ const image = await ImageDefinition.load("123", {
   },
 });
 
-console.log({
-  originalSize: image.originalSize,
-  placeholderDataUrl: image.placeholderDataUrl,
-  original: image.original, // this FileStream may be not loaded yet
-});
+if(image) {
+  console.log({
+    originalSize: image.originalSize,
+    placeholderDataUrl: image.placeholderDataURL,
+    original: image.original, // this FileStream may be not loaded yet
+  });
+}
 ```
 </CodeGroup>
 
@@ -247,32 +263,40 @@ console.log({
 Since FileStream objects are also CoValues, they must be loaded before use. To simplify loading, if you want to load the binary data saved as Original, you can use the `loadImage` function.
 
 <CodeGroup>
-```ts
+```ts twoslash
+declare const imageDefinitionOrId: string;
+// ---cut---
 import { loadImage } from "jazz-tools/media";
 
 const image = await loadImage(imageDefinitionOrId);
-
-console.log({
-  width: image.width,
-  height: image.height,
-  image: image.image,
-});
+if(image) {
+  console.log({
+    width: image.width,
+    height: image.height,
+    image: image.image,
+  });
+}
 ```
 </CodeGroup>
 
 If the image was generated with progressive loading, and you want to access the best-fit resolution, use `loadImageBySize`. It will load the image of the best resolution that fits the wanted width and height.
 
 <CodeGroup>
-```ts
+```ts twoslash
+declare const imageDefinitionOrId: string;
+// ---cut---
 import { loadImageBySize } from "jazz-tools/media";
 
-const image = await loadImageBySize(imageDefinitionOrId, 600, 600);
+const image = await loadImageBySize(imageDefinitionOrId, 600, 600); // 600x600
 
-console.log({
-  width: image.width,
-  height: image.height,
-  image: image.image,
-});
+if(image) {
+
+  console.log({
+    width: image.width,
+    height: image.height,
+    image: image.image,
+  });
+}
 ```
 </CodeGroup>
 
@@ -288,8 +312,9 @@ import { highestResAvailable } from "jazz-tools/media";
 
 const image = await ImageDefinition.load("123");
 
-image.subscribe({}, (image) => {
+image?.subscribe({}, (image) => {
   const bestImage = highestResAvailable(image, 600, 600);
+
   if(bestImage) {
     // bestImage is again a FileStream
     const blob = bestImage.toBlob();
@@ -301,7 +326,6 @@ image.subscribe({}, (image) => {
 });
 ```
 </CodeGroup>
-
 
 
 
