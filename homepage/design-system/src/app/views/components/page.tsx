@@ -37,7 +37,30 @@ export default function Components() {
           size="sm"
           intent="success"
         />
-        <div className="max-w-xs ml-3">
+        <div className="flex gap-2 ml-3">
+          <Dropdown>
+            <DropdownButton
+              className="w-full justify-between"
+              as={Button}
+              intent="default"
+              variant="inverted"
+            >
+              {selectedVariant}
+            </DropdownButton>
+            <DropdownMenu>
+              {variants.map((variant) => (
+                <DropdownItem
+                  key={variant}
+                  selected={selectedVariant === variant}
+                  selectedItemColor={variant}
+                  intent={variant}
+                  onClick={() => setSelectedVariant(variant)}
+                >
+                  {variant}
+                </DropdownItem>
+              ))}
+            </DropdownMenu>
+          </Dropdown>
           <Dropdown>
             <DropdownButton
               className="w-full justify-between"
@@ -58,7 +81,6 @@ export default function Components() {
                   {variant}
                 </DropdownItem>
               ))}
-              <DropdownItem intent="danger">{selectedVariant}</DropdownItem>
             </DropdownMenu>
           </Dropdown>
         </div>
