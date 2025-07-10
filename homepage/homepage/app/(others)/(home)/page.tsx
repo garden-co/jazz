@@ -26,7 +26,7 @@ export default function Home() {
           <p>
             You don&apos;t have to think about deploying a database, SQL
             schemas, relations, and writing queries… Basically,{" "}
-            <span className="bg-highlight px-1">
+            <span className="bg-highlight text-strong px-1">
               if you know TypeScript, you know Jazz
             </span>
             , and you can ship an app. It&apos;s just so nice!
@@ -47,7 +47,7 @@ export default function Home() {
           We just wanted to build a single-player experience first, planning to
           add team and org features much later. But because of Jazz, we had that
           from day one.{" "}
-          <span className="bg-highlight px-1">
+          <span className="bg-highlight text-strong px-1">
             All we needed to add was an invite button.
           </span>
         </Testimonial>
