@@ -10,4 +10,6 @@ export {
   coImageDefiner as image,
   coAccountDefiner as account,
   coProfileDefiner as profile,
+  coOptionalDefiner as optional,
+  coDiscriminatedUnionDefiner as discriminatedUnion,
 } from "./zodCo.js";

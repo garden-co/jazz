@@ -2,7 +2,7 @@ import {
   type Account,
   type AccountCreationProps,
   type AccountSchema,
-  type AnyCoMapSchema,
+  AnyCoSchema,
   BaseAccountShape,
   CoFeed,
   type CoFeedSchema,
@@ -389,4 +389,22 @@ export const coRichTextDefiner = (): RichTextSchema => {
 
 export const coImageDefiner = (): typeof ImageDefinition => {
   return ImageDefinition;
+};
+
+export const coOptionalDefiner = <T extends AnyCoSchema>(
+  schema: T,
+): z.ZodOptional<T> => {
+  return z.optional(schema);
+};
+
+export const coDiscriminatedUnionDefiner = <
+  T extends readonly [
+    AnyCoSchema & z.core.$ZodTypeDiscriminable,
+    ...(AnyCoSchema & z.core.$ZodTypeDiscriminable)[],
+  ],
+>(
+  discriminator: string,
+  schemas: T,
+): z.ZodDiscriminatedUnion<T> => {
+  return z.discriminatedUnion(discriminator, schemas as any);
 };

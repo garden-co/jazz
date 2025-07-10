@@ -339,7 +339,7 @@ describe("ContextManager", () => {
     const AccountRoot = co.map({
       value: z.string(),
       get transferredRoot(): z.ZodOptional<typeof AccountRoot> {
-        return z.optional(AccountRoot);
+        return co.optional(AccountRoot);
       },
     });
 

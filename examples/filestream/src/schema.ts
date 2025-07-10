@@ -1,7 +1,7 @@
-import { co, z } from "jazz-tools";
+import { co } from "jazz-tools";
 
 export const JazzProfile = co.profile({
-  file: z.optional(co.fileStream()),
+  file: co.optional(co.fileStream()),
 });
 
 export const JazzAccount = co.account({

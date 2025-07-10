@@ -66,7 +66,7 @@ export const MusicaAccountRoot = co.map({
   // track and playlist
   // You can also add the position in time if you want make it possible
   // to resume the song
-  activeTrack: z.optional(MusicTrack),
+  activeTrack: co.optional(MusicTrack),
   activePlaylist: Playlist,
 
   exampleDataLoaded: z.optional(z.boolean()),

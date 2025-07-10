@@ -24,7 +24,7 @@ const Project = co.map({
   name: z.string(),
   startDate: z.date(),
   status: z.literal(["planning", "active", "completed"]),
-  coordinator: z.optional(Member),
+  coordinator: co.optional(Member),
 });
 export type Project = co.loaded<typeof Project>;
 ```
@@ -54,7 +54,7 @@ const Project = co.map({
   name: z.string(),
   startDate: z.date(),
   status: z.literal(["planning", "active", "completed"]),
-  coordinator: z.optional(Member),
+  coordinator: co.optional(Member),
 });
 const Inventory = co.record(z.string(), z.number());
 // ---cut---
@@ -90,7 +90,7 @@ const Project = co.map({
   name: z.string(),
   startDate: z.date(),
   status: z.literal(["planning", "active", "completed"]),
-  coordinator: z.optional(Member),
+  coordinator: co.optional(Member),
 });
 
 // ---cut---
@@ -134,7 +134,7 @@ const Project = co.map({
   name: z.string(),
   startDate: z.date(),
   status: z.literal(["planning", "active", "completed"]),
-  coordinator: z.optional(Member),
+  coordinator: co.optional(Member),
 });
 const project = Project.create(
   {
@@ -165,7 +165,7 @@ const Project = co.map({
   name: z.string(),
   startDate: z.date(),
   status: z.literal(["planning", "active", "completed"]),
-  coordinator: z.optional(Member),
+  coordinator: co.optional(Member),
 });
 const project = Project.create(
   {
@@ -197,7 +197,7 @@ const Project = co.map({
   name: z.string(),
   startDate: z.date(),
   status: z.literal(["planning", "active", "completed"]),
-  coordinator: z.optional(Member),
+  coordinator: co.optional(Member),
   get subProject() {
     return Project.optional();
   }
@@ -219,9 +219,9 @@ const Project = co.map({
   name: z.string(),
   startDate: z.date(),
   status: z.literal(["planning", "active", "completed"]),
-  coordinator: z.optional(Member),
+  coordinator: co.optional(Member),
   get subProjects(): z.ZodOptional<CoListSchema<typeof Project>> {
-    return z.optional(co.list(Project));
+    return co.optional(co.list(Project));
   }
 });
 export type Project = co.loaded<typeof Project>;
@@ -265,7 +265,7 @@ const Project = co.map({
   name: z.string(),
   startDate: z.date(),
   status: z.literal(["planning", "active", "completed"]),
-  coordinator: z.optional(Member),
+  coordinator: co.optional(Member),
 });
 const Inventory = co.record(z.string(), z.number());
 const project = Project.create(
@@ -297,7 +297,7 @@ const Project = co.map({
   name: z.string(),
   startDate: z.date(),
   status: z.literal(["planning", "active", "completed"]),
-  coordinator: z.optional(Member),
+  coordinator: co.optional(Member),
 });
 const Inventory = co.record(z.string(), z.number());
 const project = Project.create(
@@ -347,7 +347,7 @@ const Project = co.map({
   name: z.string(),
   startDate: z.date(),
   status: z.literal(["planning", "active", "completed"]),
-  coordinator: z.optional(Member),
+  coordinator: co.optional(Member),
 });
 const Inventory = co.record(z.string(), z.number());
 const project = Project.create(
@@ -445,7 +445,7 @@ const TaskV2 = co.map({
 
 // Export the discriminated union; because some users might
 // not be able to run the migration
-export const Task = z.discriminatedUnion("version", [
+export const Task = co.discriminatedUnion("version", [
   TaskV1,
   TaskV2,
 ]);

@@ -2136,7 +2136,7 @@ See the corresponding sections for [creating](/docs/using-covalues/filestreams#c
 
 ### Unions of CoMaps (declaration)
 
-You can declare unions of CoMaps that have discriminating fields, using `z.discriminatedUnion()`.
+You can declare unions of CoMaps that have discriminating fields, using `co.discriminatedUnion()`.
 
 <CodeGroup>
 ```ts twoslash
@@ -2153,7 +2153,7 @@ const SliderWidget = co.map({
   max: z.number(),
 });
 
-const WidgetUnion = z.discriminatedUnion([ButtonWidget, SliderWidget]);
+const WidgetUnion = co.discriminatedUnion([ButtonWidget, SliderWidget]);
 ```
 </CodeGroup>
 

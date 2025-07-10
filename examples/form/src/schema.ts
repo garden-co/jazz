@@ -28,16 +28,16 @@ export const BubbleTeaOrder = co.map({
   addOns: ListOfBubbleTeaAddOns,
   deliveryDate: z.date(),
   withMilk: z.boolean(),
-  instructions: z.optional(co.plainText()),
+  instructions: co.optional(co.plainText()),
 });
 
 export const DraftBubbleTeaOrder = co
   .map({
     baseTea: z.optional(z.literal([...BubbleTeaBaseTeaTypes])),
-    addOns: z.optional(ListOfBubbleTeaAddOns),
+    addOns: co.optional(ListOfBubbleTeaAddOns),
     deliveryDate: z.optional(z.date()),
     withMilk: z.optional(z.boolean()),
-    instructions: z.optional(co.plainText()),
+    instructions: co.optional(co.plainText()),
   })
   .withHelpers((Self) => ({
     hasChanges(order: Loaded<typeof Self> | undefined) {

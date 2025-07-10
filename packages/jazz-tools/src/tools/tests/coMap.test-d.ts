@@ -159,7 +159,7 @@ describe("CoMap", async () => {
     test("Comap with recursive optional reference", () => {
       const Recursive = co.map({
         get child(): z.ZodOptional<typeof Recursive> {
-          return z.optional(Recursive);
+          return co.optional(Recursive);
         },
       });
 
@@ -185,7 +185,7 @@ describe("CoMap", async () => {
         age: z.number(),
         // TODO: would be nice if this didn't need a type annotation
         get friend(): z.ZodOptional<typeof Person> {
-          return z.optional(Person);
+          return co.optional(Person);
         },
       });
 
@@ -280,7 +280,7 @@ describe("CoMap", async () => {
 
     const MapWithEnumOfMaps = co.map({
       name: z.string(),
-      child: z.discriminatedUnion("type", [ChildA, ChildB]),
+      child: co.discriminatedUnion("type", [ChildA, ChildB]),
     });
 
     const mapWithEnum = MapWithEnumOfMaps.create({

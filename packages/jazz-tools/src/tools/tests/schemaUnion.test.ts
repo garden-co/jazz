@@ -24,7 +24,7 @@ const BlueButtonWidget = co.map({
   blueness: z.number(),
 });
 
-const ButtonWidget = z.discriminatedUnion("type", [
+const ButtonWidget = co.discriminatedUnion("type", [
   RedButtonWidget,
   BlueButtonWidget,
 ]);
@@ -40,7 +40,7 @@ const CheckboxWidget = co.map({
   checked: z.boolean(),
 });
 
-const WidgetUnion = z.discriminatedUnion("type", [
+const WidgetUnion = co.discriminatedUnion("type", [
   ButtonWidget,
   SliderWidget,
   CheckboxWidget,

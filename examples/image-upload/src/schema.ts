@@ -1,7 +1,7 @@
-import { co, z } from "jazz-tools";
+import { co } from "jazz-tools";
 
 export const JazzProfile = co.profile({
-  image: z.optional(co.image()),
+  image: co.optional(co.image()),
 });
 
 export const JazzAccount = co.account({
