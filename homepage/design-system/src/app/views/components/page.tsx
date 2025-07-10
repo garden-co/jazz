@@ -98,9 +98,9 @@ export default function DropdownPage() {
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
         <Dropdown>
           <DropdownButton
-          // className="w-full justify-between"
-          // as={Button}
-          // variant="outline"
+            className="w-full justify-between"
+            as={Button}
+            variant="outline"
           >
             {selectedVariant}
           </DropdownButton>
