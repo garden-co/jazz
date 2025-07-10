@@ -66,7 +66,7 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
     ref,
   ) => {
     const styleClass =
-      styleClasses(intent, variant)[variant as keyof typeof styleClasses] || "";
+      styleClasses(intent)[variant as keyof typeof styleClasses] || "";
 
     const getClasses = ({ variant }: { variant: string | undefined }) => {
       return {
