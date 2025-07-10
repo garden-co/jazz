@@ -26,12 +26,7 @@ export default function DropdownPage() {
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
         <Dropdown>
-          <DropdownButton
-            className="w-full justify-between"
-            as={Button}
-            variant="outline"
-            intent="primary"
-          >
+          <DropdownButton className="w-full justify-between" intent="primary">
             Primary Button
           </DropdownButton>
           <DropdownMenu>
@@ -44,7 +39,6 @@ export default function DropdownPage() {
         <Dropdown>
           <DropdownButton
             className="w-full justify-between"
-            as={Button}
             variant="inverted"
             intent="success"
             icon="browser"
@@ -67,11 +61,7 @@ export default function DropdownPage() {
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
         <Dropdown>
-          <DropdownButton
-            className="w-full justify-between"
-            as={Button}
-            variant="outline"
-          >
+          <DropdownButton className="w-full justify-between">
             {selectedVariantIntent}
           </DropdownButton>
           <DropdownMenu>
@@ -97,11 +87,7 @@ export default function DropdownPage() {
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
         <Dropdown>
-          <DropdownButton
-            className="w-full justify-between"
-            as={Button}
-            variant="outline"
-          >
+          <DropdownButton className="w-full justify-between">
             {selectedVariant}
           </DropdownButton>
           <DropdownMenu>

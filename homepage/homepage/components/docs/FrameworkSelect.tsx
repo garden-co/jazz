@@ -42,9 +42,6 @@ export function FrameworkSelect({
     <Dropdown>
       <DropdownButton
         className={clsx("w-full justify-between overflow-hidden text-nowrap", size === "sm" && "text-sm", className)}
-        as={Button}
-        variant="outline"
-        intent="default"
         size={size}
       >
         <span className="text-nowrap max-w-full overflow-hidden text-ellipsis">{frameworkNames[selectedFramework].label}</span>
