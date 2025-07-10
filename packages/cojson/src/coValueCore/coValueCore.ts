@@ -1039,7 +1039,7 @@ export class CoValueCore {
     node.storage.load(
       this.id,
       (data) => {
-        node.syncManager.handleNewContent(data);
+        node.syncManager.handleNewContent(data, "storage");
       },
       (found) => {
         if (!found) {

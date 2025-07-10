@@ -443,8 +443,9 @@ export class SyncManager {
     }
   }
 
-  handleNewContent(msg: NewContentMessage, peer?: PeerState) {
+  handleNewContent(msg: NewContentMessage, from: PeerState | "storage") {
     const coValue = this.local.getCoValue(msg.id);
+    const peer = from === "storage" ? undefined : from;
 
     if (!coValue.hasVerifiedContent()) {
       if (!msg.header) {
@@ -586,7 +587,7 @@ export class SyncManager {
                 },
                 priority: msg.priority,
               },
-              peer,
+              from,
             );
           });
           continue;
@@ -599,6 +600,7 @@ export class SyncManager {
         undefined,
         newContentForSession.lastSignature,
         "immediate", // TODO: can we change this to deferred?
+        from === "storage",
       );
 
       if (result.isErr()) {
@@ -660,11 +662,9 @@ export class SyncManager {
       peer.trackToldKnownState(msg.id);
     }
 
-    const sourcePeer = peer;
-    const isContentFromStorage = !sourcePeer;
     const syncedPeers = [];
 
-    if (!isContentFromStorage) {
+    if (from !== "storage") {
       this.storeCoValue(coValue, [msg]);
     }
 
