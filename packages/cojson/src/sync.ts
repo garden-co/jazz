@@ -600,6 +600,7 @@ export class SyncManager {
         undefined,
         newContentForSession.lastSignature,
         "immediate",
+        // TODO: Do this only for "trusted" storage (e.g. storage on clients)
         from === "storage",
       );
 
