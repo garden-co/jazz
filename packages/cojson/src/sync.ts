@@ -599,7 +599,7 @@ export class SyncManager {
         newTransactions,
         undefined,
         newContentForSession.lastSignature,
-        "immediate", // TODO: can we change this to deferred?
+        "immediate",
         from === "storage",
       );
 

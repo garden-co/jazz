@@ -114,14 +114,6 @@ export class WasmCrypto extends CryptoProvider<Blake3State> {
       textEncoder.encode(id),
     );
 
-    if (!result) {
-      logger.error("Failed to verify signature", {
-        signature,
-        message,
-        id,
-      });
-    }
-
     return result;
   }
 

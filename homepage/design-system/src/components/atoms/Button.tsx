@@ -159,8 +159,8 @@ const styleClasses = (intent: Style, variant: Variant | undefined) => {
     inverted: `${styleToTextMap[intent]} ${colorToBgHoverMap30[styleToColorMap[intent] as VariantColor]} ${colorToBgMap[styleToColorMap[intent] as VariantColor]} ${colorToBgActiveMap50[styleToColorMap[intent] as VariantColor]} ${shadowClassesBase}`,
     ghost: `bg-transparent ${styleToTextMap[intent]} ${colorToBgHoverMap10[styleToColorMap[intent] as VariantColor]} ${colorToBgActiveMap25[styleToColorMap[intent] as VariantColor]}`,
     link: `bg-transparent ${styleToTextMap[intent]} underline underline-offset-2 p-0 hover:bg-transparent ${styleToTextHoverMap[intent]} ${styleToTextActiveMap[intent]} active:underline-stone-500`,
-    secondary: `bg-stone-300 ${styleToTextMap[intent]} hover:bg-stone-400/80 active:bg-stone-500/80`,
-    destructive: `bg-danger text-white hover:bg-red/80 active:bg-red/70`,
+    secondary: variantClass("muted"),
+    destructive: variantClass("danger"),
     default: `${styleToBgGradientColorMap["default"]} ${styleToBgGradientHoverMap["default"]} ${textColorVariant("default")} ${styleToButtonStateMap["default"]} ${shadowClassesBase} shadow-stone-400/20`,
   };
 };

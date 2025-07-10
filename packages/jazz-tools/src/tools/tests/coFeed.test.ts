@@ -643,6 +643,103 @@ describe("FileStream progress tracking", async () => {
   });
 });
 
+describe("FileStream large file loading", async () => {
+  test("load a large FileStream with allowUnfinished: true should return the loaded file before it's fully loaded", async () => {
+    const syncServer = await setupJazzTestSync({ asyncPeers: true });
+
+    const group = Group.create(syncServer);
+    const largeStream = FileStream.create({ owner: group });
+    group.addMember("everyone", "reader");
+
+    // Create a large file stream with multiple chunks
+    largeStream.start({ mimeType: "application/octet-stream" });
+
+    const dataSize = 100 * 1024; // 100KB total
+    const chunkSize = 1024; // 1KB chunks
+    const numChunks = dataSize / chunkSize;
+
+    // Create test data chunks
+    for (let i = 0; i < numChunks; i++) {
+      const chunk = new Uint8Array(chunkSize);
+      for (let j = 0; j < chunkSize; j++) {
+        chunk[j] = (i * chunkSize + j) % 256;
+      }
+      largeStream.push(chunk);
+    }
+
+    largeStream.end();
+
+    // Wait for the large FileStream to be fully synced
+    await largeStream.waitForSync();
+
+    const alice = await createJazzTestAccount();
+
+    // Test loading the large FileStream
+    const loadedStream = await FileStream.load(largeStream.id, {
+      loadAs: alice,
+      allowUnfinished: true,
+    });
+
+    assert(loadedStream);
+
+    const loadedChunks = loadedStream.getChunks({ allowUnfinished: true });
+    expect(loadedChunks).not.toBeNull();
+    expect(loadedChunks?.finished).toBe(undefined);
+
+    expect(loadedStream._raw.core.knownState()).not.toEqual(
+      largeStream._raw.core.knownState(),
+    );
+  });
+
+  test("load a large FileStream with allowUnfinished: false should return the loaded file only when it's fully loaded", async () => {
+    const syncServer = await setupJazzTestSync({ asyncPeers: true });
+
+    const group = Group.create(syncServer);
+    const largeStream = FileStream.create({ owner: group });
+    group.addMember("everyone", "reader");
+
+    // Create a large file stream with multiple chunks
+    largeStream.start({ mimeType: "application/octet-stream" });
+
+    const dataSize = 100 * 1024; // 100KB total
+    const chunkSize = 1024; // 1KB chunks
+    const numChunks = dataSize / chunkSize;
+
+    // Create test data chunks
+    for (let i = 0; i < numChunks; i++) {
+      const chunk = new Uint8Array(chunkSize);
+      for (let j = 0; j < chunkSize; j++) {
+        chunk[j] = (i * chunkSize + j) % 256;
+      }
+      largeStream.push(chunk);
+    }
+
+    largeStream.end();
+
+    // Wait for the large FileStream to be fully synced
+    await largeStream.waitForSync();
+
+    const alice = await createJazzTestAccount();
+
+    // Test loading the large FileStream
+    const loadedStream = await FileStream.load(largeStream.id, {
+      loadAs: alice,
+      allowUnfinished: false,
+    });
+
+    assert(loadedStream);
+
+    const loadedChunks = loadedStream.getChunks();
+    expect(loadedChunks).not.toBeNull();
+    expect(loadedChunks?.finished).toBe(true);
+    expect(loadedChunks?.chunks).toHaveLength(numChunks); // 100 chunks of 1KB each
+
+    expect(loadedStream._raw.core.knownState()).toEqual(
+      largeStream._raw.core.knownState(),
+    );
+  });
+});
+
 describe("waitForSync", async () => {
   test("CoFeed: should resolve when the value is uploaded", async () => {
     const TestStream = co.feed(z.string());

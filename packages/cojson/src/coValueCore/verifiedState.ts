@@ -157,13 +157,14 @@ export class VerifiedState {
     newSignature: Signature,
     newStreamingHash?: StreamingHash,
   ) {
-    const transactions = this.sessions.get(sessionID)?.transactions ?? [];
+    const sessionLog = this.sessions.get(sessionID);
+    const transactions = sessionLog?.transactions ?? [];
 
     for (const tx of newTransactions) {
       transactions.push(tx);
     }
 
-    const signatureAfter = this.sessions.get(sessionID)?.signatureAfter ?? {};
+    const signatureAfter = sessionLog?.signatureAfter ?? {};
 
     const lastInbetweenSignatureIdx = Object.keys(signatureAfter).reduce(
       (max, idx) => (parseInt(idx) > max ? parseInt(idx) : max),
@@ -204,8 +205,9 @@ export class VerifiedState {
 
     if (!sessionLog?.streamingHash) {
       const streamingHash = new StreamingHash(this.crypto);
+      const oldTransactions = sessionLog?.transactions ?? [];
 
-      for (const transaction of sessionLog?.transactions ?? []) {
+      for (const transaction of oldTransactions) {
         streamingHash.update(transaction);
       }
 
@@ -395,6 +397,13 @@ export class VerifiedState {
     }
 
     return knownState;
+  }
+
+  isStreaming(): boolean {
+    // Call knownStateWithStreaming to delete the streamingKnownState when it matches the current knownState
+    this.knownStateWithStreaming();
+
+    return this.streamingKnownState !== undefined;
   }
 
   knownState(): CoValueKnownState {

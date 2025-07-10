@@ -1,5 +1,6 @@
-import { cojsonInternals } from "cojson";
-import { beforeEach, expect, test } from "vitest";
+import { waitFor } from "@testing-library/dom";
+import { cojsonInternals, emptyKnownState } from "cojson";
+import { assert, beforeEach, expect, test } from "vitest";
 import { Account, Group, co, z } from "../exports.js";
 import {
   createJazzTestAccount,
@@ -85,4 +86,67 @@ test("returns null if the value is unavailable after retries", async () => {
   const john = await Person.load(map.id, { loadAs: alice });
 
   expect(john).toBeNull();
+});
+
+test("load a large coValue", async () => {
+  const syncServer = await setupJazzTestSync({ asyncPeers: true });
+
+  const LargeDataset = co.map({
+    metadata: z.object({
+      name: z.string(),
+      description: z.string(),
+      createdAt: z.number(),
+    }),
+    data: co.list(z.string()),
+  });
+
+  const group = Group.create(syncServer);
+  const largeMap = LargeDataset.create(
+    {
+      metadata: {
+        name: "Large Dataset",
+        description:
+          "A dataset with many entries for testing large coValue loading",
+        createdAt: Date.now(),
+      },
+      data: LargeDataset.def.shape.data.create([], group),
+    },
+    group,
+  );
+  group.addMember("everyone", "reader");
+
+  const dataSize = 100 * 1024;
+  const chunkSize = 1024;
+  const chunks = dataSize / chunkSize;
+
+  const value = "x".repeat(chunkSize);
+
+  for (let i = 0; i < chunks; i++) {
+    largeMap.data.push(value);
+  }
+
+  // Wait for the large coValue to be fully synced
+  await largeMap.data._raw.core.waitForSync();
+
+  const alice = await createJazzTestAccount();
+
+  // Test loading the large coValue
+  const loadedDataset = await LargeDataset.load(largeMap.id, {
+    loadAs: alice,
+    resolve: {
+      data: true,
+    },
+  });
+
+  assert(loadedDataset);
+
+  expect(loadedDataset.metadata.name).toBe("Large Dataset");
+  expect(loadedDataset.metadata.description).toBe(
+    "A dataset with many entries for testing large coValue loading",
+  );
+
+  expect(loadedDataset.data.length).toBe(chunks);
+  expect(loadedDataset.data._raw.core.knownState()).toEqual(
+    largeMap.data._raw.core.knownState(),
+  );
 });

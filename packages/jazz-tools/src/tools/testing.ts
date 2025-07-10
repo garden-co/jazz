@@ -19,7 +19,10 @@ import {
   randomSessionProvider,
 } from "./internal.js";
 
-const syncServer: { current: LocalNode | null } = { current: null };
+const syncServer: { current: LocalNode | null; asyncPeers: boolean } = {
+  current: null,
+  asyncPeers: false,
+};
 
 export class TestJSCrypto extends PureJSCrypto {
   static async create() {
@@ -57,6 +60,23 @@ export function getPeerConnectedToTestSyncServer() {
       peer2role: "server",
     },
   );
+
+  if (syncServer.asyncPeers) {
+    const push = aPeer.outgoing.push;
+
+    aPeer.outgoing.push = (message) => {
+      setTimeout(() => {
+        push.call(aPeer.outgoing, message);
+      });
+    };
+
+    bPeer.outgoing.push = (message) => {
+      setTimeout(() => {
+        push.call(bPeer.outgoing, message);
+      });
+    };
+  }
+
   syncServer.current.syncManager.addPeer(aPeer);
 
   return bPeer;
@@ -283,7 +303,9 @@ export async function linkAccounts(
   await b.waitForAllCoValuesSync();
 }
 
-export async function setupJazzTestSync() {
+export async function setupJazzTestSync({
+  asyncPeers = false,
+}: { asyncPeers?: boolean } = {}) {
   if (syncServer.current) {
     syncServer.current.gracefulShutdown();
   }
@@ -296,6 +318,7 @@ export async function setupJazzTestSync() {
   });
 
   syncServer.current = account._raw.core.node;
+  syncServer.asyncPeers = asyncPeers;
 
   return account;
 }

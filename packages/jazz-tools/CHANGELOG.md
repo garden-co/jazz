@@ -1,5 +1,16 @@
 # jazz-tools
 
+## 0.15.9
+
+### Patch Changes
+
+- 27b4837: Wait for the full streaming before return values in load and subscribe
+- Updated dependencies [27b4837]
+- Updated dependencies [2776263]
+  - cojson@0.15.9
+  - cojson-storage-indexeddb@0.15.9
+  - cojson-transport-ws@0.15.9
+
 ## 0.15.8
 
 ### Patch Changes

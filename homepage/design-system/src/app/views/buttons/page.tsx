@@ -27,28 +27,26 @@ export default function ButtonsPage() {
   return (
     <>
       <h3 className="text-lg mt-5 mb-2 font-bold">Variants</h3>
-      <p className="mb-3">
-        For compatibility the shadcn/ui variants are mapped to the design
-        system.
-      </p>
+
+      <p className="my-3">Buttons are styled with the variant prop.</p>
 
       <div className="grid grid-cols-2 gap-2">
         <Button variant="default">default</Button>
         <Button variant="link">link</Button>
         <Button variant="ghost">ghost</Button>
         <Button variant="outline">outline</Button>
-        <Button variant="secondary">secondary</Button>
-        <Button variant="destructive">destructive</Button>
       </div>
 
-      <h3 className="text-lg mt-5 mb-2 font-bold">Intents</h3>
-      <p>
-        We have extended the shadcn/ui variants to include more styles via the
-        intent prop.
+      <h3 className="text-lg mt-5 font-bold">Intents</h3>
+      <p className="my-3">
+        We have extended the variants to include more styles via the intent
+        prop.
       </p>
 
       <div className="grid grid-cols-2 gap-2">
-        {/* <Button intent="default">default</Button> */}
+        <Button intent="default">default</Button>
+        <Button intent="muted">muted</Button>
+        <Button intent="strong">strong</Button>
         <Button intent="primary">primary</Button>
         <Button intent="tip">tip</Button>
         <Button intent="info">info</Button>
@@ -56,8 +54,6 @@ export default function ButtonsPage() {
         <Button intent="warning">warning</Button>
         <Button intent="alert">alert</Button>
         <Button intent="danger">danger</Button>
-        <Button intent="muted">muted</Button>
-        <Button intent="strong">strong</Button>
       </div>
 
       <div className="flex justify-between items-center w-48 mt-10">
@@ -89,7 +85,7 @@ export default function ButtonsPage() {
 
       <p className="text-sm mt-2 mb-5">
         <strong>NB:</strong> Variants and styles are interchangeable. See the
-        intent on each variant with the dropdown
+        intent on each variant with the dropdown.
       </p>
 
       <div className="grid grid-cols-2 gap-2">
@@ -107,9 +103,19 @@ export default function ButtonsPage() {
         </Button>
       </div>
 
+      <p className="my-3">
+        For compatibility the shadcn/ui variants are mapped to the design
+        system.
+      </p>
+
+      <div className="grid grid-cols-2 gap-2">
+        <Button variant="secondary">secondary</Button>
+        <Button variant="destructive">destructive</Button>
+      </div>
+
       <h3 className="text-lg font-bold mt-5">Icons</h3>
 
-      <p>Buttons can also contain an icon and text.</p>
+      <p className="my-3">Buttons can also contain an icon and text.</p>
 
       <div className="grid grid-cols-2 gap-2">
         <Button
@@ -130,7 +136,7 @@ export default function ButtonsPage() {
         >
           outline info with icon
         </Button>
-        <p className="col-span-2">
+        <p className="col-span-2 my-2">
           Or just use the icon prop with any of the button variants, style
           variants and colors.
         </p>
@@ -151,6 +157,7 @@ const buttonPropsTableData = {
     {
       prop: "intent?",
       types: [
+        "default",
         "primary",
         "tip",
         "info",
@@ -174,7 +181,7 @@ const buttonPropsTableData = {
         "secondary",
         "destructive",
       ],
-      default: "undefined",
+      default: "default",
     },
     {
       prop: "icon?",

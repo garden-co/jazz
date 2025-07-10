@@ -1,5 +1,13 @@
 import { encrypt } from "jazz-crypto-rs";
-import { assert, afterEach, beforeEach, expect, test, vi } from "vitest";
+import {
+  assert,
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  test,
+  vi,
+} from "vitest";
 import { bytesToBase64url } from "../base64url.js";
 import { CoValueCore } from "../coValueCore/coValueCore.js";
 import { Transaction } from "../coValueCore/verifiedState.js";
@@ -511,4 +519,265 @@ test("getValidTransactions should skip private transactions with invalid JSON", 
   expect(Array.isArray(validTransactions)).toBe(true);
   expect(validTransactions.length).toBe(1);
   expect(validTransactions[0]?.changes).toEqual([{ hello: "world" }]);
+});
+
+describe("markErrored and isErroredInPeer", () => {
+  test("markErrored should mark a peer as errored with the provided error", () => {
+    const [agent, sessionID] = randomAgentAndSessionID();
+    const node = new LocalNode(agent.agentSecret, sessionID, Crypto);
+
+    const coValue = node.createCoValue({
+      type: "costream",
+      ruleset: { type: "unsafeAllowAll" },
+      meta: null,
+      ...Crypto.createdNowUnique(),
+    });
+
+    const peerId = "test-peer-1";
+    const testError = {
+      type: "InvalidSignature" as const,
+      id: coValue.id,
+      newSignature: "invalid-signature" as any,
+      sessionID: sessionID,
+      signerID: "test-signer" as any,
+    };
+
+    // Initially, the peer should not be errored
+    expect(coValue.isErroredInPeer(peerId)).toBe(false);
+
+    // Mark the peer as errored
+    coValue.markErrored(peerId, testError);
+
+    // Verify the peer is now marked as errored
+    expect(coValue.isErroredInPeer(peerId)).toBe(true);
+
+    // Verify the peer state contains the error
+    const peerState = coValue.getStateForPeer(peerId);
+    expect(peerState).toBeDefined();
+    expect(peerState?.type).toBe("errored");
+  });
+
+  test("markErrored should update loading state and notify listeners", () => {
+    const [agent, sessionID] = randomAgentAndSessionID();
+    const node = new LocalNode(agent.agentSecret, sessionID, Crypto);
+
+    const coValue = node.createCoValue({
+      type: "costream",
+      ruleset: { type: "unsafeAllowAll" },
+      meta: null,
+      ...Crypto.createdNowUnique(),
+    });
+
+    const peerId = "test-peer-2";
+    const testError = {
+      type: "InvalidHash" as const,
+      id: coValue.id,
+      expectedNewHash: "expected-hash" as any,
+      givenExpectedNewHash: "given-hash" as any,
+    };
+
+    const listener = vi.fn();
+    coValue.subscribe(listener);
+
+    // Mark the peer as errored
+    coValue.markErrored(peerId, testError);
+
+    // Verify the listener was called
+    expect(listener).toHaveBeenCalled();
+  });
+
+  test("isErroredInPeer should return false for non-existent peers", () => {
+    const [agent, sessionID] = randomAgentAndSessionID();
+    const node = new LocalNode(agent.agentSecret, sessionID, Crypto);
+
+    const coValue = node.createCoValue({
+      type: "costream",
+      ruleset: { type: "unsafeAllowAll" },
+      meta: null,
+      ...Crypto.createdNowUnique(),
+    });
+
+    const nonExistentPeerId = "non-existent-peer";
+
+    // Verify non-existent peer is not errored
+    expect(coValue.isErroredInPeer(nonExistentPeerId)).toBe(false);
+  });
+
+  test("isErroredInPeer should return false for peers with other states", () => {
+    const [agent, sessionID] = randomAgentAndSessionID();
+    const node = new LocalNode(agent.agentSecret, sessionID, Crypto);
+
+    const coValue = node.createCoValue({
+      type: "costream",
+      ruleset: { type: "unsafeAllowAll" },
+      meta: null,
+      ...Crypto.createdNowUnique(),
+    });
+
+    const peerId = "test-peer-3";
+
+    // Mark peer as pending
+    coValue.markPending(peerId);
+    expect(coValue.isErroredInPeer(peerId)).toBe(false);
+
+    // Mark peer as unavailable
+    coValue.markNotFoundInPeer(peerId);
+    expect(coValue.isErroredInPeer(peerId)).toBe(false);
+
+    // Mark peer as available
+    coValue.provideHeader({} as any, peerId);
+    expect(coValue.isErroredInPeer(peerId)).toBe(false);
+  });
+
+  test("markErrored should work with multiple peers", () => {
+    const [agent, sessionID] = randomAgentAndSessionID();
+    const node = new LocalNode(agent.agentSecret, sessionID, Crypto);
+
+    const coValue = node.createCoValue({
+      type: "costream",
+      ruleset: { type: "unsafeAllowAll" },
+      meta: null,
+      ...Crypto.createdNowUnique(),
+    });
+
+    const peer1Id = "peer-1";
+    const peer2Id = "peer-2";
+    const peer3Id = "peer-3";
+
+    const error1 = {
+      type: "InvalidSignature" as const,
+      id: coValue.id,
+      newSignature: "invalid-signature-1" as any,
+      sessionID: sessionID,
+      signerID: "test-signer-1" as any,
+    };
+
+    const error2 = {
+      type: "InvalidHash" as const,
+      id: coValue.id,
+      expectedNewHash: "expected-hash-2" as any,
+      givenExpectedNewHash: "given-hash-2" as any,
+    };
+
+    // Mark different peers as errored
+    coValue.markErrored(peer1Id, error1);
+    coValue.markErrored(peer2Id, error2);
+
+    // Verify each peer is correctly marked as errored
+    expect(coValue.isErroredInPeer(peer1Id)).toBe(true);
+    expect(coValue.isErroredInPeer(peer2Id)).toBe(true);
+    expect(coValue.isErroredInPeer(peer3Id)).toBe(false);
+  });
+
+  test("markErrored should override previous peer states", () => {
+    const [agent, sessionID] = randomAgentAndSessionID();
+    const node = new LocalNode(agent.agentSecret, sessionID, Crypto);
+
+    const coValue = node.createCoValue({
+      type: "costream",
+      ruleset: { type: "unsafeAllowAll" },
+      meta: null,
+      ...Crypto.createdNowUnique(),
+    });
+
+    const peerId = "test-peer-4";
+
+    // Initially mark as pending
+    coValue.markPending(peerId);
+    expect(coValue.isErroredInPeer(peerId)).toBe(false);
+
+    // Then mark as errored
+    const testError = {
+      type: "TriedToAddTransactionsWithoutVerifiedState" as const,
+      id: coValue.id,
+    };
+
+    coValue.markErrored(peerId, testError);
+
+    // Verify the peer is now errored
+    expect(coValue.isErroredInPeer(peerId)).toBe(true);
+
+    const peerState = coValue.getStateForPeer(peerId);
+    expect(peerState?.type).toBe("errored");
+  });
+
+  test("markErrored should work with different error types", () => {
+    const [agent, sessionID] = randomAgentAndSessionID();
+    const node = new LocalNode(agent.agentSecret, sessionID, Crypto);
+
+    const coValue = node.createCoValue({
+      type: "costream",
+      ruleset: { type: "unsafeAllowAll" },
+      meta: null,
+      ...Crypto.createdNowUnique(),
+    });
+
+    const peerId = "test-peer-5";
+
+    // Test with InvalidSignature error
+    const invalidSignatureError = {
+      type: "InvalidSignature" as const,
+      id: coValue.id,
+      newSignature: "invalid-sig" as any,
+      sessionID: sessionID,
+      signerID: "test-signer" as any,
+    };
+
+    coValue.markErrored(peerId, invalidSignatureError);
+    expect(coValue.isErroredInPeer(peerId)).toBe(true);
+
+    // Test with InvalidHash error
+    const invalidHashError = {
+      type: "InvalidHash" as const,
+      id: coValue.id,
+      expectedNewHash: "expected" as any,
+      givenExpectedNewHash: "given" as any,
+    };
+
+    coValue.markErrored(peerId, invalidHashError);
+    expect(coValue.isErroredInPeer(peerId)).toBe(true);
+
+    // Test with TriedToAddTransactionsWithoutVerifiedState error
+    const noVerifiedStateError = {
+      type: "TriedToAddTransactionsWithoutVerifiedState" as const,
+      id: coValue.id,
+    };
+
+    coValue.markErrored(peerId, noVerifiedStateError);
+    expect(coValue.isErroredInPeer(peerId)).toBe(true);
+  });
+
+  test("markErrored should trigger immediate notification", () => {
+    const [agent, sessionID] = randomAgentAndSessionID();
+    const node = new LocalNode(agent.agentSecret, sessionID, Crypto);
+
+    const coValue = node.createCoValue({
+      type: "costream",
+      ruleset: { type: "unsafeAllowAll" },
+      meta: null,
+      ...Crypto.createdNowUnique(),
+    });
+
+    const peerId = "test-peer-6";
+    const testError = {
+      type: "InvalidSignature" as const,
+      id: coValue.id,
+      newSignature: "test-sig" as any,
+      sessionID: sessionID,
+      signerID: "test-signer" as any,
+    };
+
+    let notificationCount = 0;
+    const listener = () => {
+      notificationCount++;
+    };
+
+    coValue.subscribe(listener);
+
+    // Mark as errored
+    coValue.markErrored(peerId, testError);
+
+    // Verify immediate notification
+    expect(notificationCount).toBeGreaterThan(0);
+  });
 });

@@ -1198,6 +1198,98 @@ describe("subscribeToCoValue", () => {
     expect(onUnavailable).not.toHaveBeenCalled();
     expect(onUnauthorized).not.toHaveBeenCalled();
   });
+
+  it("should subscribe to a large coValue", async () => {
+    const syncServer = await setupJazzTestSync({ asyncPeers: true });
+
+    const LargeDataset = co.map({
+      metadata: z.object({
+        name: z.string(),
+        description: z.string(),
+        createdAt: z.number(),
+      }),
+      data: co.list(z.string()),
+    });
+
+    const group = Group.create(syncServer);
+    const largeMap = LargeDataset.create(
+      {
+        metadata: {
+          name: "Large Dataset",
+          description:
+            "A dataset with many entries for testing large coValue subscription",
+          createdAt: Date.now(),
+        },
+        data: LargeDataset.def.shape.data.create([], group),
+      },
+      group,
+    );
+    group.addMember("everyone", "reader");
+
+    const dataSize = 100 * 1024;
+    const chunkSize = 1024;
+    const chunks = dataSize / chunkSize;
+
+    const value = "x".repeat(chunkSize);
+
+    for (let i = 0; i < chunks; i++) {
+      largeMap.data.push(value);
+    }
+
+    // Wait for the large coValue to be fully synced
+    await largeMap.data._raw.core.waitForSync();
+
+    const alice = await createJazzTestAccount();
+
+    let result = null as Loaded<typeof LargeDataset, { data: true }> | null;
+    const updateFn = vi.fn().mockImplementation((value) => {
+      result = value;
+    });
+
+    // Test subscribing to the large coValue
+    const unsubscribe = subscribeToCoValue(
+      zodSchemaToCoSchema(LargeDataset),
+      largeMap.id,
+      {
+        loadAs: alice,
+        resolve: {
+          data: true,
+        },
+      },
+      updateFn,
+    );
+
+    onTestFinished(unsubscribe);
+
+    await waitFor(() => {
+      expect(updateFn).toHaveBeenCalled();
+    });
+
+    assert(result);
+
+    expect(updateFn).toHaveBeenCalledTimes(1);
+    expect(result.metadata.name).toBe("Large Dataset");
+    expect(result.metadata.description).toBe(
+      "A dataset with many entries for testing large coValue subscription",
+    );
+
+    expect(result.data.length).toBe(chunks);
+    expect(result.data._raw.core.knownState()).toEqual(
+      largeMap.data._raw.core.knownState(),
+    );
+
+    // Test that updates to the large coValue are properly subscribed
+    updateFn.mockClear();
+    largeMap.data.push("new entry");
+
+    await waitFor(() => {
+      expect(updateFn).toHaveBeenCalled();
+    });
+
+    expect(updateFn).toHaveBeenCalledTimes(1);
+    expect(result.data.length).toBe(chunks + 1);
+    expect(result.data[chunks]).toBe("new entry");
+  });
 });
 
 describe("createCoValueObservable", () => {

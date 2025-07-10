@@ -7,12 +7,7 @@ export function ProjectScreen() {
   const { projectId } = useParams();
   const project = useCoState(TodoProject, projectId, {
     resolve: {
-      tasks: {
-        $each: {
-          $onError: null,
-          text: true,
-        },
-      },
+      tasks: true,
     },
   });
   const { me } = useAccount(TodoAccount, {
@@ -108,9 +103,9 @@ export function ProjectScreen() {
           marginBottom: "30px",
         }}
       >
-        {project.tasks.slice(0, visibleTasks).map((task) => (
+        {project.tasks.slice(0, visibleTasks).map((task, index) => (
           <label
-            key={task?.id}
+            key={task?.id ?? index}
             style={{
               display: "flex",
               alignItems: "center",

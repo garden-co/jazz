@@ -1,5 +1,14 @@
 # jazz-betterauth-server-plugin
 
+## 0.15.9
+
+### Patch Changes
+
+- Updated dependencies [27b4837]
+- Updated dependencies [2776263]
+  - jazz-tools@0.15.9
+  - cojson@0.15.9
+
 ## 0.15.8
 
 ### Patch Changes
