@@ -145,6 +145,19 @@ export const styleToTextActiveMap = {
   default: "active:text-stone-800 dark:active:text-stone-400",
 };
 
+export const styleToTextDarkMap = {
+  primary: "text-primary-dark",
+  info: "text-info-dark",
+  success: "text-success-dark",
+  warning: "text-warning-dark",
+  danger: "text-danger-dark",
+  alert: "text-alert-dark",
+  tip: "text-tip-dark",
+  muted: "text-stone-600 dark:text-stone-300",
+  strong: "text-stone-950 dark:text-stone-50",
+  default: "text-stone-800 dark:text-stone-200",
+};
+
 export type VariantColor =
   | "blue"
   | "indigo"

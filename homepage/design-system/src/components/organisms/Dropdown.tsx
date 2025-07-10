@@ -4,7 +4,11 @@ import * as DropdownMenuPrimitive from "@radix-ui/react-dropdown-menu";
 import clsx from "clsx";
 import Link from "next/link";
 import * as React from "react";
-import { Style, styleToTextMap } from "../../utils/tailwindClassesMap";
+import {
+  Style,
+  styleToTextDarkMap,
+  styleToTextMap,
+} from "../../utils/tailwindClassesMap";
 import { Button } from "../atoms/Button";
 
 export const Dropdown = DropdownMenuPrimitive.Root;
@@ -52,7 +56,7 @@ DropdownMenu.displayName = DropdownMenuPrimitive.Content.displayName;
 export const DropdownItem = React.forwardRef<
   React.ElementRef<typeof DropdownMenuPrimitive.Item>,
   React.ComponentPropsWithoutRef<typeof DropdownMenuPrimitive.Item> & {
-    intent?: Style;
+    intent?: Style | undefined;
     href?: string;
     selected?: boolean;
     selectedItemColor?: Style;
@@ -61,22 +65,30 @@ export const DropdownItem = React.forwardRef<
   (
     {
       className,
-      intent = "default",
+      intent,
       href,
-      selected,
+      selected = false,
       selectedItemColor = "primary",
       ...props
     },
     ref,
   ) => {
-    const effectiveIntent = selected ? selectedItemColor : intent;
-    const shouldUseBaseTextColors = effectiveIntent === "default" && !selected;
+    const effectiveIntent = selected ? selectedItemColor : intent || "default";
+
+    const getTextColor = () => {
+      if (selected && intent === undefined) {
+        console.log(selected, intent, effectiveIntent);
+        return styleToTextDarkMap[
+          effectiveIntent as keyof typeof styleToTextDarkMap
+        ];
+      }
+      return styleToTextMap[effectiveIntent as keyof typeof styleToTextMap];
+    };
 
     const classes = clsx(
       className,
-      "group rounded-md space-x-2 focus:outline-none px-2.5 py-1.5 cursor-pointer select-none",
+      "group rounded-md space-x-2 focus:outline-none px-2.5 py-1.5 cursor-pointer select-none transition-colors",
       "text-left text-sm/6 forced-colors:text-[CanvasText]",
-      shouldUseBaseTextColors && "text-stone-800 dark:text-white",
       "data-[highlighted]:bg-stone-100 dark:data-[highlighted]:bg-stone-900",
       "data-[disabled]:opacity-50",
       "forced-color-adjust-none forced-colors:data-[highlighted]:bg-[Highlight] forced-colors:data-[highlighted]:text-[HighlightText] forced-colors:[&>[data-slot=icon]]:data-[highlighted]:text-[HighlightText]",
@@ -84,7 +96,7 @@ export const DropdownItem = React.forwardRef<
       "[&>[data-slot=icon]]:col-start-1 [&>[data-slot=icon]]:row-start-1 [&>[data-slot=icon]]:-ml-0.5 [&>[data-slot=icon]]:mr-2.5 [&>[data-slot=icon]]:size-5 sm:[&>[data-slot=icon]]:mr-2 [&>[data-slot=icon]]:sm:size-4",
       "[&>[data-slot=icon]]:text-stone-500 [&>[data-slot=icon]]:data-[highlighted]:text-stone-700 [&>[data-slot=icon]]:dark:data-[highlighted]:text-white",
       "[&>[data-slot=avatar]]:mr-2.5 [&>[data-slot=avatar]]:size-6 sm:[&>[data-slot=avatar]]:mr-2 sm:[&>[data-slot=avatar]]:size-5",
-      styleToTextMap[effectiveIntent as keyof typeof styleToTextMap],
+      getTextColor(),
     );
 
     return (
@@ -212,7 +224,6 @@ export function DropdownShortcut({
           key={index}
           className={clsx([
             "min-w-[2ch] text-center font-sans capitalize text-stone-400 group-data-[highlighted]:text-white forced-colors:group-data-[highlighted]:text-[HighlightText]",
-            // Make sure key names that are longer than one character (like "Tab") have extra space
             index > 0 && char.length > 1 && "pl-1",
           ])}
         >
