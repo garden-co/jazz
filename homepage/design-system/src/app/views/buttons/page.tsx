@@ -103,6 +103,14 @@ export default function ButtonsPage() {
         </Button>
       </div>
 
+      <p className="text-sm mt-2 mb-5">Buttons have 3 sizes: sm, md, lg.</p>
+
+      <div className="grid grid-cols-2 gap-2">
+        <Button size="sm">sm</Button>
+        <Button size="md">md</Button>
+        <Button size="lg">lg</Button>
+      </div>
+
       <p className="my-3">
         For compatibility the shadcn/ui variants are mapped to the design
         system.
