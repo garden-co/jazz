@@ -23,7 +23,10 @@ import {
   type Simplify,
   zodSchemaToCoSchema,
 } from "../../internal.js";
-import { CoDiscriminatedUnionSchema } from "./schemaTypes/CoDiscriminatedUnionSchema.js";
+import {
+  AnyDiscriminableCoSchema,
+  CoDiscriminatedUnionSchema,
+} from "./schemaTypes/CoDiscriminatedUnionSchema.js";
 import {
   CoOptionalSchema,
   createCoOptionalSchema,
@@ -125,7 +128,7 @@ export const coListDefiner = <T extends z.core.$ZodType>(
   const enrichedSchema = Object.assign(schema, {
     collaborative: true,
   }) as AnyCoListSchema<T>;
-  return zodSchemaToCoSchema(enrichedSchema);
+  return zodSchemaToCoSchema(enrichedSchema) as unknown as CoListSchema<T>;
 };
 
 export const coProfileDefiner = <
@@ -191,10 +194,7 @@ export const coOptionalDefiner = <T extends AnyCoSchema>(
 };
 
 export const coDiscriminatedUnionDefiner = <
-  T extends readonly [
-    AnyCoSchema & z.core.$ZodTypeDiscriminable,
-    ...(AnyCoSchema & z.core.$ZodTypeDiscriminable)[],
-  ],
+  T extends readonly [AnyDiscriminableCoSchema, ...AnyDiscriminableCoSchema[]],
 >(
   discriminator: string,
   schemas: T,

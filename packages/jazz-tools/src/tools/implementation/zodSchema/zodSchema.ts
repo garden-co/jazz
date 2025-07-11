@@ -15,7 +15,10 @@ import {
   AnyAccountSchema,
   BaseAccountShape,
 } from "./schemaTypes/AccountSchema.js";
-import { CoDiscriminatedUnionSchema } from "./schemaTypes/CoDiscriminatedUnionSchema.js";
+import {
+  AnyDiscriminableCoSchema,
+  CoDiscriminatedUnionSchema,
+} from "./schemaTypes/CoDiscriminatedUnionSchema.js";
 import { AnyCoFeedSchema, CoFeedSchema } from "./schemaTypes/CoFeedSchema.js";
 import { AnyCoListSchema, CoListSchema } from "./schemaTypes/CoListSchema.js";
 import {
@@ -114,8 +117,8 @@ export type CoValueSchemaFromZodSchema<S extends z.core.$ZodType> =
                       ? CoValueSchemaFromZodSchema<Inner>
                       : S extends z.core.$ZodUnion<
                             infer Members extends readonly [
-                              z.core.$ZodTypeDiscriminable,
-                              ...z.core.$ZodTypeDiscriminable[],
+                              AnyDiscriminableCoSchema,
+                              ...AnyDiscriminableCoSchema[],
                             ]
                           >
                         ? CoDiscriminatedUnionSchema<Members>

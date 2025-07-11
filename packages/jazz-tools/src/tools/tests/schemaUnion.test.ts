@@ -6,7 +6,6 @@ import {
   Loaded,
   anySchemaToCoSchema,
   co,
-  loadCoValue,
   subscribeToCoValue,
   z,
 } from "../exports.js";
@@ -72,25 +71,15 @@ describe("SchemaUnion", () => {
       { owner: me },
     );
 
-    const loadedButtonWidget = await loadCoValue(
-      anySchemaToCoSchema(WidgetUnion),
-      buttonWidget.id,
-      {
-        loadAs: me,
-      },
-    );
-    const loadedSliderWidget = await loadCoValue(
-      anySchemaToCoSchema(WidgetUnion),
-      sliderWidget.id,
-      {
-        loadAs: me,
-      },
-    );
-    const loadedCheckboxWidget = await loadCoValue(
-      anySchemaToCoSchema(WidgetUnion),
-      checkboxWidget.id,
-      { loadAs: me },
-    );
+    const loadedButtonWidget = await WidgetUnion.load(buttonWidget.id, {
+      loadAs: me,
+    });
+    const loadedSliderWidget = await WidgetUnion.load(sliderWidget.id, {
+      loadAs: me,
+    });
+    const loadedCheckboxWidget = await WidgetUnion.load(checkboxWidget.id, {
+      loadAs: me,
+    });
 
     expect(loadedButtonWidget?.type).toBe("button");
     expect(loadedSliderWidget?.type).toBe("slider");

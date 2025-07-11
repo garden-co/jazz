@@ -1,8 +1,19 @@
 import {
+  Account,
+  AnonymousJazzAgent,
   CoValue,
   CoValueBase,
   CoValueClass,
   CoValueFromRaw,
+  ID,
+  RefsToResolve,
+  RefsToResolveStrict,
+  Resolved,
+  SubscribeListenerOptions,
+  SubscribeRestArgs,
+  loadCoValueWithoutMe,
+  parseSubscribeRestArgs,
+  subscribeToCoValueWithoutMe,
 } from "../internal.js";
 
 /**
@@ -98,5 +109,56 @@ export abstract class SchemaUnion extends CoValueBase implements CoValue {
   // @ts-ignore
   static fromRaw<V extends CoValue>(this: CoValueClass<V>, raw: V["_raw"]): V {
     throw new Error("Not implemented");
+  }
+
+  /**
+   * Load a `SchemaUnion` with a given ID, as a given account.
+   *
+   * Note: The `resolve` option is not supported for `SchemaUnion`s due to https://github.com/garden-co/jazz/issues/2639
+   *
+   * @category Subscription & Loading
+   */
+  static load<M extends SchemaUnion>(
+    this: CoValueClass<M>,
+    id: ID<M>,
+    options?: {
+      loadAs?: Account | AnonymousJazzAgent;
+      skipRetry?: boolean;
+    },
+  ): Promise<Resolved<M, true> | null> {
+    return loadCoValueWithoutMe(this, id, options);
+  }
+
+  /**
+   * Load and subscribe to a `CoMap` with a given ID, as a given account.
+   *
+   * Automatically also subscribes to updates to all referenced/nested CoValues as soon as they are accessed in the listener.
+   *
+   * Returns an unsubscribe function that you should call when you no longer need updates.
+   *
+   * Also see the `useCoState` hook to reactively subscribe to a CoValue in a React component.
+   *
+   * Note: The `resolve` option is not supported for `SchemaUnion`s due to https://github.com/garden-co/jazz/issues/2639
+   *
+   * @category Subscription & Loading
+   */
+  static subscribe<M extends SchemaUnion>(
+    this: CoValueClass<M>,
+    id: ID<M>,
+    listener: (value: Resolved<M, true>, unsubscribe: () => void) => void,
+  ): () => void;
+  static subscribe<M extends SchemaUnion>(
+    this: CoValueClass<M>,
+    id: ID<M>,
+    options: SubscribeListenerOptions<M, true>,
+    listener: (value: Resolved<M, true>, unsubscribe: () => void) => void,
+  ): () => void;
+  static subscribe<M extends SchemaUnion>(
+    this: CoValueClass<M>,
+    id: ID<M>,
+    ...args: SubscribeRestArgs<M, true>
+  ): () => void {
+    const { options, listener } = parseSubscribeRestArgs(args);
+    return subscribeToCoValueWithoutMe<M, true>(this, id, options, listener);
   }
 }
