@@ -8,6 +8,7 @@ import {
   Resolved,
   Simplify,
   SubscribeListenerOptions,
+  zodSchemaToCoSchema,
 } from "../../../internal.js";
 import { AnonymousJazzAgent } from "../../anonymousJazzAgent.js";
 import { InstanceOrPrimitiveOfSchema } from "../typeConverters/InstanceOrPrimitiveOfSchema.js";
@@ -19,10 +20,8 @@ export type CoMapSchema<
   Shape extends z.core.$ZodLooseShape,
   Config extends z.core.$ZodObjectConfig = z.core.$ZodObjectConfig,
   Owner extends Account | Group = Account | Group,
-> = z.core.$ZodObject<Shape, Config> &
+> = AnyCoMapSchema<Shape, Config> &
   z.$ZodTypeDiscriminable & {
-    collaborative: true;
-
     create: (
       init: Simplify<CoMapInitZod<Shape>>,
       options?:
@@ -145,8 +144,64 @@ export type CoMapSchema<
       ) => undefined,
     ): CoMapSchema<Shape, Config, Owner>;
 
-    getCoSchema: () => typeof CoMap;
+    getCoValueClass: () => typeof CoMap;
   };
+
+export function enrichCoMapSchema<
+  Shape extends z.core.$ZodLooseShape,
+  Config extends z.core.$ZodObjectConfig,
+>(
+  schema: AnyCoMapSchema<Shape, Config>,
+  coValueClass: typeof CoMap,
+): CoMapSchema<Shape, Config> {
+  // @ts-expect-error schema is actually a z.ZodObject, but we need to use z.core.$ZodObject to avoid circularity issues
+  const baseCatchall = schema.catchall;
+  const coValueSchema = Object.assign(schema, {
+    create: (...args: [any, ...any[]]) => {
+      return coValueClass.create(...args);
+    },
+    load: (...args: [any, ...any[]]) => {
+      return coValueClass.load(...args);
+    },
+    subscribe: (...args: [any, ...any[]]) => {
+      // @ts-expect-error
+      return coValueClass.subscribe(...args);
+    },
+    findUnique: (...args: [any, ...any[]]) => {
+      // @ts-expect-error
+      return coValueClass.findUnique(...args);
+    },
+    upsertUnique: (...args: [any, ...any[]]) => {
+      // @ts-expect-error
+      return coValueClass.upsertUnique(...args);
+    },
+    loadUnique: (...args: [any, ...any[]]) => {
+      // @ts-expect-error
+      return coValueClass.loadUnique(...args);
+    },
+    catchall: (index: z.core.$ZodType) => {
+      const newSchema = baseCatchall(index);
+      // TODO avoid repeating this with coMapDefiner
+      const enrichedSchema = Object.assign(newSchema, {
+        collaborative: true,
+      }) as AnyCoMapSchema<Shape, Config>;
+      return zodSchemaToCoSchema(enrichedSchema);
+    },
+    withHelpers: (helpers: (Self: z.core.$ZodType) => object) => {
+      return Object.assign(schema, helpers(schema));
+    },
+    withMigration: (migration: (value: any) => undefined) => {
+      // @ts-expect-error TODO check
+      coValueClass.prototype.migrate = migration;
+
+      return coValueSchema;
+    },
+    getCoValueClass: () => {
+      return coValueClass;
+    },
+  }) as unknown as CoMapSchema<Shape, Config>;
+  return coValueSchema;
+}
 
 export type optionalKeys<Shape extends z.core.$ZodLooseShape> = {
   [key in keyof Shape]: Shape[key] extends z.core.$ZodOptional<any>
@@ -170,7 +225,7 @@ export type CoMapInitZod<Shape extends z.core.$ZodLooseShape> = {
   >;
 } & { [key in keyof Shape]?: unknown };
 
-// less precise verion to avoid circularity issues and allow matching against
+// less precise version to avoid circularity issues and allow matching against
 export type AnyCoMapSchema<
   Shape extends z.core.$ZodLooseShape = z.core.$ZodLooseShape,
   Config extends z.core.$ZodObjectConfig = z.core.$ZodObjectConfig,

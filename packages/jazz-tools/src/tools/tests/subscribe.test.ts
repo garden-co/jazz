@@ -7,23 +7,10 @@ import {
   onTestFinished,
   vi,
 } from "vitest";
+import { Account, Group, cojsonInternals, z } from "../index.js";
 import {
-  Account,
-  CoFeed,
-  CoList,
-  CoMap,
-  FileStream,
-  Group,
-  coField,
-  cojsonInternals,
-  z,
-} from "../index.js";
-import {
-  CoMapInstance,
-  ID,
-  InstanceOrPrimitiveOfSchema,
   Loaded,
-  Resolved,
+  anySchemaToCoSchema,
   co,
   createCoValueObservable,
   subscribeToCoValue,
@@ -84,7 +71,7 @@ describe("subscribeToCoValue", () => {
     let result = null as Loaded<typeof ChatRoom, true> | null;
 
     const unsubscribe = subscribeToCoValue(
-      zodSchemaToCoSchema(ChatRoom),
+      anySchemaToCoSchema(ChatRoom),
       chatRoom.id,
       { loadAs: meOnSecondPeer },
       (value) => {
@@ -131,7 +118,7 @@ describe("subscribeToCoValue", () => {
     let result = null as Loaded<typeof ChatRoom, {}> | null;
 
     const unsubscribe = subscribeToCoValue(
-      zodSchemaToCoSchema(ChatRoom),
+      anySchemaToCoSchema(ChatRoom),
       chatRoom.id,
       {
         loadAs: meOnSecondPeer,
@@ -172,7 +159,7 @@ describe("subscribeToCoValue", () => {
     messages.push(createMessage(me, "Hello"));
 
     const unsubscribe = subscribeToCoValue(
-      zodSchemaToCoSchema(ChatRoom),
+      anySchemaToCoSchema(ChatRoom),
       chatRoom.id,
       {
         loadAs: meOnSecondPeer,
@@ -215,7 +202,7 @@ describe("subscribeToCoValue", () => {
     const updateFn = vi.fn();
 
     const unsubscribe = subscribeToCoValue(
-      zodSchemaToCoSchema(ChatRoom),
+      anySchemaToCoSchema(ChatRoom),
       chatRoom.id,
       {
         loadAs: meOnSecondPeer,
@@ -275,7 +262,7 @@ describe("subscribeToCoValue", () => {
     >[];
 
     const unsubscribe = subscribeToCoValue(
-      zodSchemaToCoSchema(ChatRoom),
+      anySchemaToCoSchema(ChatRoom),
       chatRoom.id,
       {
         loadAs: meOnSecondPeer,
@@ -346,7 +333,7 @@ describe("subscribeToCoValue", () => {
     const updateFn = vi.fn();
 
     const unsubscribe = subscribeToCoValue(
-      zodSchemaToCoSchema(ChatRoom),
+      anySchemaToCoSchema(ChatRoom),
       chatRoom.id,
       {
         loadAs: meOnSecondPeer,
@@ -410,7 +397,7 @@ describe("subscribeToCoValue", () => {
     const updateFn = vi.fn();
 
     const unsubscribe = subscribeToCoValue(
-      zodSchemaToCoSchema(TestList),
+      anySchemaToCoSchema(TestList),
       list.id,
       {
         loadAs: account,
@@ -471,7 +458,7 @@ describe("subscribeToCoValue", () => {
     const onUnauthorized = vi.fn();
 
     const unsubscribe = subscribeToCoValue(
-      zodSchemaToCoSchema(TestList),
+      anySchemaToCoSchema(TestList),
       list.id,
       {
         loadAs: reader,
@@ -542,7 +529,7 @@ describe("subscribeToCoValue", () => {
     const onUnavailable = vi.fn();
 
     const unsubscribe = subscribeToCoValue(
-      zodSchemaToCoSchema(TestList),
+      anySchemaToCoSchema(TestList),
       list.id,
       {
         loadAs: reader,
@@ -617,7 +604,7 @@ describe("subscribeToCoValue", () => {
     const onUnavailable = vi.fn();
 
     const unsubscribe = subscribeToCoValue(
-      zodSchemaToCoSchema(TestList),
+      anySchemaToCoSchema(TestList),
       list.id,
       {
         loadAs: reader,
@@ -687,7 +674,7 @@ describe("subscribeToCoValue", () => {
     const onUnavailable = vi.fn();
 
     const unsubscribe = subscribeToCoValue(
-      zodSchemaToCoSchema(TestList),
+      anySchemaToCoSchema(TestList),
       list.id,
       {
         loadAs: reader,
@@ -739,7 +726,7 @@ describe("subscribeToCoValue", () => {
     });
 
     const unsubscribe = subscribeToCoValue(
-      zodSchemaToCoSchema(TestList),
+      anySchemaToCoSchema(TestList),
       list.id,
       {
         loadAs: creator,
@@ -806,7 +793,7 @@ describe("subscribeToCoValue", () => {
     });
 
     const unsubscribe = subscribeToCoValue(
-      zodSchemaToCoSchema(TestList),
+      anySchemaToCoSchema(TestList),
       list.id,
       {
         loadAs: creator,
@@ -895,7 +882,7 @@ describe("subscribeToCoValue", () => {
     });
 
     const unsubscribe = subscribeToCoValue(
-      zodSchemaToCoSchema(Person),
+      anySchemaToCoSchema(Person),
       person.id,
       {
         loadAs: reader,
@@ -982,7 +969,7 @@ describe("subscribeToCoValue", () => {
     const onUnavailable = vi.fn();
 
     const unsubscribe = subscribeToCoValue(
-      zodSchemaToCoSchema(TestList),
+      anySchemaToCoSchema(TestList),
       list.id,
       {
         loadAs: reader,
@@ -1069,7 +1056,7 @@ describe("subscribeToCoValue", () => {
     const onUnavailable = vi.fn();
 
     const unsubscribe = subscribeToCoValue(
-      zodSchemaToCoSchema(PersonList),
+      anySchemaToCoSchema(PersonList),
       list.id,
       {
         loadAs: reader,
@@ -1165,7 +1152,7 @@ describe("subscribeToCoValue", () => {
     const onUnavailable = vi.fn();
 
     const unsubscribe = subscribeToCoValue(
-      zodSchemaToCoSchema(PersonList),
+      anySchemaToCoSchema(PersonList),
       list.id,
       {
         loadAs: reader,

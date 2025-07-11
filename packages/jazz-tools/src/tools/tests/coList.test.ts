@@ -1,15 +1,7 @@
 import { WasmCrypto } from "cojson/crypto/WasmCrypto";
 import { beforeEach, describe, expect, test, vi } from "vitest";
-import {
-  Account,
-  CoList,
-  CoMap,
-  Group,
-  coField,
-  subscribeToCoValue,
-  z,
-} from "../index.js";
-import { Loaded, co, zodSchemaToCoSchema } from "../internal.js";
+import { Account, Group, subscribeToCoValue, z } from "../index.js";
+import { Loaded, anySchemaToCoSchema, co } from "../internal.js";
 import { createJazzTestAccount, setupJazzTestSync } from "../testing.js";
 import { waitFor } from "./utils.js";
 
@@ -588,7 +580,7 @@ describe("CoList subscription", async () => {
     const spy = vi.fn((list) => updates.push(list));
 
     subscribeToCoValue(
-      zodSchemaToCoSchema(TestList),
+      anySchemaToCoSchema(TestList),
       list.id,
       {
         syncResolution: true,

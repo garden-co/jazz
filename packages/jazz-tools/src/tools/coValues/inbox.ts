@@ -3,14 +3,12 @@ import { CoStreamItem, RawCoStream } from "cojson";
 import {
   type Account,
   CoValue,
-  CoValueClass,
   CoValueOrZodSchema,
   ID,
   InstanceOfSchema,
   activeAccountContext,
   anySchemaToCoSchema,
   loadCoValue,
-  zodSchemaToCoSchema,
 } from "../internal.js";
 
 export type InboxInvite = `${CoID<MessagesStream>}/${InviteSecret}`;

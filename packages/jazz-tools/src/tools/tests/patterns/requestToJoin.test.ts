@@ -1,5 +1,5 @@
 import { assert, describe, expect, test } from "vitest";
-import { Account, CoList, CoMap, Group, ID, co, z } from "../../exports";
+import { Account, Group, co, z } from "../../exports";
 import { createJazzTestAccount, linkAccounts } from "../../testing";
 
 const RequestToJoin = co.map({

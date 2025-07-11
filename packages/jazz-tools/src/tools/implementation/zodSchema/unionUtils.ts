@@ -1,5 +1,12 @@
 import { RawAccount, RawCoList, RawCoMap } from "cojson";
-import { zodSchemaToCoSchema } from "./runtimeConverters/zodSchemaToCoSchema.js";
+import { CoValueClass, CoValueFromRaw } from "../../internal.js";
+import {
+  isAnyCoValueSchema,
+  zodSchemaToCoSchema,
+} from "./runtimeConverters/zodSchemaToCoSchema.js";
+import { AccountSchema } from "./schemaTypes/AccountSchema.js";
+import { CoListSchema } from "./schemaTypes/CoListSchema.js";
+import { CoMapSchema } from "./schemaTypes/CoMapSchema.js";
 import { z } from "./zodReExport.js";
 
 export function schemaUnionDiscriminatorFor(
@@ -90,7 +97,12 @@ export function schemaUnionDiscriminatorFor(
         }
 
         if (match) {
-          return zodSchemaToCoSchema(option);
+          const coValueSchema = zodSchemaToCoSchema(option) as
+            | CoMapSchema<any>
+            | AccountSchema
+            | CoListSchema<any>;
+          return coValueSchema.getCoValueClass() as CoValueClass<any> &
+            CoValueFromRaw<any>;
         }
       }
 
@@ -120,11 +132,7 @@ export function isUnionOfCoMapsDeeply(
 function isCoMapOrUnionOfCoMapsDeeply(
   schema: z.core.$ZodType,
 ): schema is z.core.$ZodDiscriminatedUnion {
-  if (
-    schema instanceof z.core.$ZodObject &&
-    "collaborative" in schema &&
-    schema.collaborative
-  ) {
+  if (schema instanceof z.core.$ZodObject && isAnyCoValueSchema(schema)) {
     return true;
   } else if (schema instanceof z.core.$ZodUnion) {
     return schema._zod.def.options.every(isCoMapOrUnionOfCoMapsDeeply);
@@ -137,6 +145,6 @@ export function isUnionOfPrimitivesDeeply(schema: z.core.$ZodType) {
   if (schema instanceof z.core.$ZodUnion) {
     return schema._zod.def.options.every(isUnionOfPrimitivesDeeply);
   } else {
-    return !("collaborative" in schema);
+    return !isAnyCoValueSchema(schema);
   }
 }

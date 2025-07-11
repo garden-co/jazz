@@ -11,10 +11,10 @@ import {
   anySchemaToCoSchema,
   coValuesCache,
   inspect,
+  isCoValueSchema,
 } from "../internal.js";
 import type {
   Account,
-  CoValueClassFromZodSchema,
   Group,
   InstanceOfSchemaCoValuesNullable,
 } from "../internal.js";
@@ -101,7 +101,7 @@ export class CoValueBase implements CoValue {
     : S extends z.core.$ZodType
       ? NonNullable<InstanceOfSchemaCoValuesNullable<S>>
       : never {
-    const cl = "getCoSchema" in schema ? (schema as any).getCoSchema() : schema;
+    const cl = isCoValueSchema(schema) ? schema.getCoValueClass() : schema;
 
     if (this.constructor === cl) {
       return this as any;

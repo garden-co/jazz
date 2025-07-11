@@ -1,4 +1,4 @@
-import { AgentSecret, RawCoMap } from "cojson";
+import { AgentSecret } from "cojson";
 import { WasmCrypto } from "cojson/crypto/WasmCrypto";
 import { beforeEach, describe, expect, test, vi } from "vitest";
 import {
@@ -9,6 +9,7 @@ import {
   ID,
   InMemoryKVStore,
   KvStoreContext,
+  anySchemaToCoSchema,
   co,
   createAnonymousJazzContext,
   createJazzContext,
@@ -90,7 +91,7 @@ describe("createContext methods", () => {
       });
 
       expect(context.account).toBeInstanceOf(
-        zodSchemaToCoSchema(CustomAccount),
+        anySchemaToCoSchema(CustomAccount),
       );
     });
 
@@ -199,7 +200,7 @@ describe("createContext methods", () => {
       });
 
       expect(context.account).toBeInstanceOf(
-        zodSchemaToCoSchema(CustomAccount),
+        anySchemaToCoSchema(CustomAccount),
       );
     });
 
@@ -350,7 +351,7 @@ describe("createContext methods", () => {
       });
 
       expect(context.account).toBeInstanceOf(
-        zodSchemaToCoSchema(CustomAccount),
+        anySchemaToCoSchema(CustomAccount),
       );
     });
   });

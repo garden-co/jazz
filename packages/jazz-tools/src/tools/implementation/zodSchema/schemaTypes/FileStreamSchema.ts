@@ -6,9 +6,12 @@ import {
 } from "../../../internal.js";
 import { z } from "../zodReExport.js";
 
-export type FileStreamSchema = z.core.$ZodCustom<FileStream, unknown> & {
+export type AnyFileStreamSchema = z.core.$ZodCustom<FileStream, unknown> & {
   collaborative: true;
   builtin: "FileStream";
+};
+
+export type FileStreamSchema = AnyFileStreamSchema & {
   create(options?: { owner?: Account | Group } | Account | Group): FileStream;
   createFromBlob(
     blob: Blob | File,
@@ -40,5 +43,32 @@ export type FileStreamSchema = z.core.$ZodCustom<FileStream, unknown> & {
     id: string,
     listener: (value: FileStream, unsubscribe: () => void) => void,
   ): () => void;
-  getCoSchema: () => typeof FileStream;
+  getCoValueClass: () => typeof FileStream;
 };
+
+export function enrichFileStreamSchema(
+  schema: AnyFileStreamSchema,
+  coValueClass: typeof FileStream,
+): FileStreamSchema {
+  return Object.assign(schema, {
+    create: (...args: any[]) => {
+      return coValueClass.create(...args);
+    },
+    createFromBlob: (...args: [any, ...any[]]) => {
+      return coValueClass.createFromBlob(...args);
+    },
+    load: (...args: [any, ...any[]]) => {
+      return coValueClass.load(...args);
+    },
+    loadAsBlob: (...args: [any, ...any[]]) => {
+      return coValueClass.loadAsBlob(...args);
+    },
+    subscribe: (...args: [any, ...any[]]) => {
+      // @ts-expect-error
+      return coValueClass.subscribe(...args);
+    },
+    getCoValueClass: () => {
+      return coValueClass;
+    },
+  }) as unknown as FileStreamSchema;
+}
