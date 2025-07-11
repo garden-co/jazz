@@ -8,6 +8,67 @@ PODS:
   - hermes-engine (0.80.0):
     - hermes-engine/Pre-built (= 0.80.0)
   - hermes-engine/Pre-built (0.80.0)
+  - JazzCrypto (0.15.5):
+    - boost
+    - DoubleConversion
+    - fast_float
+    - fmt
+    - glog
+    - hermes-engine
+    - NitroModules
+    - RCT-Folly
+    - RCT-Folly/Fabric
+    - RCTRequired
+    - RCTTypeSafety
+    - React-callinvoker
+    - React-Core
+    - React-debug
+    - React-Fabric
+    - React-featureflags
+    - React-graphics
+    - React-hermes
+    - React-ImageManager
+    - React-jsi
+    - React-NativeModulesApple
+    - React-RCTFabric
+    - React-renderercss
+    - React-rendererdebug
+    - React-utils
+    - ReactCodegen
+    - ReactCommon/turbomodule/bridging
+    - ReactCommon/turbomodule/core
+    - SocketRocket
+    - Yoga
+  - NitroModules (0.26.2):
+    - boost
+    - DoubleConversion
+    - fast_float
+    - fmt
+    - glog
+    - hermes-engine
+    - RCT-Folly
+    - RCT-Folly/Fabric
+    - RCTRequired
+    - RCTTypeSafety
+    - React-callinvoker
+    - React-Core
+    - React-debug
+    - React-Fabric
+    - React-featureflags
+    - React-graphics
+    - React-hermes
+    - React-ImageManager
+    - React-jsi
+    - React-NativeModulesApple
+    - React-RCTFabric
+    - React-renderercss
+    - React-rendererdebug
+    - React-utils
+    - ReactCodegen
+    - ReactCommon/turbomodule/bridging
+    - ReactCommon/turbomodule/core
+    - SocketRocket
+    - Yoga
   - op-sqlite (14.1.0):
     - boost
     - DoubleConversion
@@ -2276,7 +2337,7 @@ PODS:
     - React-perflogger (= 0.80.0)
     - React-utils (= 0.80.0)
     - SocketRocket
-  - RNCClipboard (1.16.2):
+  - RNCClipboard (1.16.3):
     - boost
     - DoubleConversion
     - fast_float
@@ -2377,6 +2438,8 @@ DEPENDENCIES:
   - fmt (from `../../../node_modules/react-native/third-party-podspecs/fmt.podspec`)
   - glog (from `../../../node_modules/react-native/third-party-podspecs/glog.podspec`)
   - hermes-engine (from `../../../node_modules/react-native/sdks/hermes-engine/hermes-engine.podspec`)
+  - JazzCrypto (from `../node_modules/jazz-crypto`)
+  - NitroModules (from `../../../node_modules/react-native-nitro-modules`)
   - "op-sqlite (from `../../../node_modules/@op-engineering/op-sqlite`)"
   - RCT-Folly (from `../../../node_modules/react-native/third-party-podspecs/RCT-Folly.podspec`)
   - RCTDeprecation (from `../../../node_modules/react-native/ReactApple/Libraries/RCTFoundation/RCTDeprecation`)
@@ -2472,6 +2535,10 @@ EXTERNAL SOURCES:
   hermes-engine:
     :podspec: "../../../node_modules/react-native/sdks/hermes-engine/hermes-engine.podspec"
     :tag: hermes-2025-05-06-RNv0.80.0-4eb6132a5bf0450bf4c6c91987675381d7ac8bca
+  JazzCrypto:
+    :path: "../node_modules/jazz-crypto"
+  NitroModules:
+    :path: "../../../node_modules/react-native-nitro-modules"
   op-sqlite:
     :path: "../../../node_modules/@op-engineering/op-sqlite"
   RCT-Folly:
@@ -2625,6 +2692,8 @@ SPEC CHECKSUMS:
   fmt: a40bb5bd0294ea969aaaba240a927bd33d878cdd
   glog: 5683914934d5b6e4240e497e0f4a3b42d1854183
   hermes-engine: 7068e976238b29e97b3bafd09a994542af7d5c0b
+  JazzCrypto: 937be142cfccdc05e297a8e4091895fe82ced1ad
+  NitroModules: b5f759d2a05356da680bfe43cd20aaa8f689917f
   op-sqlite: 11caeb381964751c263209ce125442ea57cae253
   RCT-Folly: 846fda9475e61ec7bcbf8a3fe81edfcaeb090669
   RCTDeprecation: ff787f6c860a1b97dd1bc27264b61d23ad1994da
@@ -2694,7 +2763,7 @@ SPEC CHECKSUMS:
   ReactAppDependencyProvider: 3267432b637c9b38e86961b287f784ee1b08dde0
   ReactCodegen: d82f538f70f00484d418803f74b5a0ea09cc8689
   ReactCommon: b028d09a66e60ebd83ca59d8cc9a1216360db147
-  RNCClipboard: 54ff19965d7c816febbafe5f520c2c3e7b677a49
+  RNCClipboard: b228d492733d66e0126e18ce66c6d2f90bacc7e5
   RNScreens: ee2abe7e0c548eed14e92742e81ed991165c56aa
   SocketRocket: d4aabe649be1e368d1318fdf28a022d714d65748
   Yoga: 0c4b7d2aacc910a1f702694fa86be830386f4ceb
