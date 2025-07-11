@@ -6,7 +6,7 @@ export const metadata = {
 
 # Connecting CoValues with direct linking
 CoValues can form relationships with each other by **linking directly to other CoValues**. This creates a powerful connection where one CoValue can point to the unique identity of another. 
-Instead of embedding all of the details of one coValue directly within another, you use its Jazz-Tools schema as the field type. This allows multiple CoValues to point to the same piece of data effortlessly.
+Instead of embedding all the details of one CoValue directly within another, you use its Jazz-Tools schema as the field type. This allows multiple CoValues to point to the same piece of data effortlessly.
 
 <CodeGroup>
 ```ts twoslash
@@ -50,3 +50,69 @@ export type User = co.loaded<typeof User>;
 This direct linking approach offers a single source of truth. When you update a referenced CoValue, all other CoValues that point to it are automatically updated, ensuring data consistency across your application.
 
 By connecting CoValues through these direct references, you can build robust and collaborative applications where data is consistent, efficient to manage, and relationships are clearly defined. The ability to link different CoValue types to the same underlying data is fundamental to building complex applications with Jazz.
+
+
+## Recursive Connections with Unions
+In advanced schemas, you may want a CoValue that recursively references itself. For example, a `ReferenceItem` that contains a list of other items like `NoteItem` or `AttachmentItem`. This is common in tree-like structures such as threaded comments or nested project outlines.
+
+You can model this with a Zod `z.discriminatedUnion`, but TypeScript’s type inference doesn't handle recursive unions well without a workaround.
+
+Here’s how to structure your schema to avoid circular reference errors.
+
+### Use this pattern for recursive discriminated unions
+<CodeGroup> 
+```ts 
+// Recursive item modeling pattern using discriminated unions
+// First, define the non-recursive types
+export const NoteItem = co.map({
+  type: z.literal("note"),
+  internal: z.boolean(),
+  content: co.plainText(),
+});
+
+export const AttachmentItem = co.map({
+  type: z.literal("attachment"),
+  internal: z.boolean(),
+  content: co.fileStream(),
+});
+
+// List the types in advance — ReferenceItem will be added after union creation
+const projectContextItemTypes = [NoteItem, AttachmentItem];
+
+// Create the union early (needed for circular refs to work)
+export const ProjectContextItem = z.discriminatedUnion("type", projectContextItemTypes);
+
+// Now define the recursive type
+export const ReferenceItem = co.map({
+  type: z.literal("reference"),
+  internal: z.boolean(),
+  content: z.string(),
+
+  // Workaround: use ZodDiscriminatedUnion so TS can safely recurse
+  get children(): CoListSchema<ZodDiscriminatedUnion<"type", [typeof NoteItem, typeof AttachmentItem]>> {
+    return ProjectContextItemList;
+  },
+});
+
+// Add it to the list after the union is created
+projectContextItemTypes.push(ReferenceItem);
+
+// Final list of recursive types
+export const ProjectContextItemList = co.list(ProjectContextItem);
+```
+</CodeGroup>
+**Why it works:** By creating the union before adding recursion, TypeScript can resolve types without circular reference errors during inference.
+This workaround is purely for TypeScript’s benefit. The order has no effect at runtime.
+
+
+### Avoid defining recursive unions inline
+<CodeGroup>
+```ts 
+// This causes a circular reference error
+export const ReferenceItem = co.map({
+  children: co.list(ProjectContextItem), // X ProjectContextItem not yet defined
+});
+```
+</CodeGroup>
+
+Even though this seems like a shortcut, TypeScript and Zod can't resolve the circular reference this way. Always define the discriminated union before introducing recursive links.
