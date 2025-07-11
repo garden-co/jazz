@@ -2337,7 +2337,7 @@ PODS:
     - React-perflogger (= 0.80.0)
     - React-utils (= 0.80.0)
     - SocketRocket
-  - RNCClipboard (1.16.2):
+  - RNCClipboard (1.16.3):
     - boost
     - DoubleConversion
     - fast_float
@@ -2438,6 +2438,8 @@ DEPENDENCIES:
   - fmt (from `../../../node_modules/react-native/third-party-podspecs/fmt.podspec`)
   - glog (from `../../../node_modules/react-native/third-party-podspecs/glog.podspec`)
   - hermes-engine (from `../../../node_modules/react-native/sdks/hermes-engine/hermes-engine.podspec`)
+  - JazzCrypto (from `../node_modules/jazz-crypto`)
+  - NitroModules (from `../../../node_modules/react-native-nitro-modules`)
   - "op-sqlite (from `../../../node_modules/@op-engineering/op-sqlite`)"
   - RCT-Folly (from `../../../node_modules/react-native/third-party-podspecs/RCT-Folly.podspec`)
   - RCTDeprecation (from `../../../node_modules/react-native/ReactApple/Libraries/RCTFoundation/RCTDeprecation`)
@@ -2683,14 +2685,14 @@ EXTERNAL SOURCES:
     :path: "../../../node_modules/react-native/ReactCommon/yoga"
 
 SPEC CHECKSUMS:
-  boost: 1dca942403ed9342f98334bf4c3621f011aa7946
-  DoubleConversion: f16ae600a246532c4020132d54af21d0ddb2a385
+  boost: 7e761d76ca2ce687f7cc98e698152abd03a18f90
+  DoubleConversion: cb417026b2400c8f53ae97020b2be961b59470cb
   fast_float: b32c788ed9c6a8c584d114d0047beda9664e7cc6
   FBLazyVector: 778b815a6fb3fa1599f581ffb9a5e85fad313c1d
-  fmt: 01b82d4ca6470831d1cc0852a1af644be019e8f6
-  glog: 08b301085f15bcbb6ff8632a8ebaf239aae04e6a
+  fmt: a40bb5bd0294ea969aaaba240a927bd33d878cdd
+  glog: 5683914934d5b6e4240e497e0f4a3b42d1854183
   hermes-engine: 7068e976238b29e97b3bafd09a994542af7d5c0b
-  JazzCrypto: 1d444c6e10d6a5e60b9abc0d69b9d61fc6573fee
+  JazzCrypto: 937be142cfccdc05e297a8e4091895fe82ced1ad
   NitroModules: b5f759d2a05356da680bfe43cd20aaa8f689917f
   op-sqlite: 11caeb381964751c263209ce125442ea57cae253
   RCT-Folly: 846fda9475e61ec7bcbf8a3fe81edfcaeb090669
@@ -2761,11 +2763,11 @@ SPEC CHECKSUMS:
   ReactAppDependencyProvider: 3267432b637c9b38e86961b287f784ee1b08dde0
   ReactCodegen: d82f538f70f00484d418803f74b5a0ea09cc8689
   ReactCommon: b028d09a66e60ebd83ca59d8cc9a1216360db147
-  RNCClipboard: 54ff19965d7c816febbafe5f520c2c3e7b677a49
+  RNCClipboard: b228d492733d66e0126e18ce66c6d2f90bacc7e5
   RNScreens: ee2abe7e0c548eed14e92742e81ed991165c56aa
   SocketRocket: d4aabe649be1e368d1318fdf28a022d714d65748
   Yoga: 0c4b7d2aacc910a1f702694fa86be830386f4ceb
 
 PODFILE CHECKSUM: 5fbc2a9ed4dd8671bf3315b5e0286b23f163d497
 
-COCOAPODS: 1.15.2
+COCOAPODS: 1.16.2
