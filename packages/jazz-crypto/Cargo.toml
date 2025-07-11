@@ -1,11 +1,17 @@
 [package]
 name = "jazz-crypto"
 version = "0.15.5"
-edition = "2024"
+edition = "2021"
+build = "build.rs"
 
 [dependencies]
+cxx = { version = "1.0.160", features = ["alloc", "std", "c++20"] }
 
+[build-dependencies]
+cxx-build = "1.0.160"
 
-[[bin]]
-name = "jazz-crypto"
-path = "src/rust/main.rs"
+[lib]
+name = "jazz_crypto"
+crate-type = ["cdylib"]
+path = "src/rust/lib.rs"
+

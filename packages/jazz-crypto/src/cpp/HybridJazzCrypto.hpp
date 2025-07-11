@@ -5,32 +5,12 @@
 
 #include "HybridJazzCryptoSpec.hpp"
 
-// Define the struct for FFI with Rust
-struct ByteBuffer {
-    uint8_t* ptr;
-    size_t len;
-    size_t cap;
-};
-
-// Declare the C-style functions from the Rust FFI
-extern "C" {
-    // String functions
-    char* rust_no_args_return_string();
-    char* rust_args_return_string(const char* arg1);
-    void free_rust_string(char* s);
-
-    // ArrayBuffer (byte buffer) functions
-    ByteBuffer rust_no_args_return_ab();
-    ByteBuffer rust_args_return_ab(const uint8_t* arg1_ptr, size_t arg1_len);
-    void free_rust_byte_buffer(ByteBuffer buf);
-}
-
 namespace margelo {
 namespace nitro {
 namespace jazz_crypto {
 
 using namespace margelo::nitro;
-  
+
 class HybridJazzCrypto: public HybridJazzCryptoSpec {
 
  public:
@@ -42,6 +22,15 @@ class HybridJazzCrypto: public HybridJazzCryptoSpec {
   std::shared_ptr<ArrayBuffer> no_args_return_ab() override;
   std::shared_ptr<ArrayBuffer> args_return_ab(const std::shared_ptr<ArrayBuffer>& arg1) override;
 
+ protected:
+  // copy a JSArrayBuffer that we do not own into a NativeArrayBuffer that we do own
+  inline std::shared_ptr<margelo::nitro::NativeArrayBuffer> ToNativeArrayBuffer(const std::shared_ptr<margelo::nitro::ArrayBuffer>& buffer) {
+    size_t bufferSize = buffer.get()->size();
+    uint8_t* data = new uint8_t[bufferSize];
+    memcpy(data, buffer.get()->data(), bufferSize);
+    return std::make_shared<margelo::nitro::NativeArrayBuffer>(data, bufferSize, [=]() { delete[] data; });
+  }
+  
 };
 
 } // namespace jazz_crypto

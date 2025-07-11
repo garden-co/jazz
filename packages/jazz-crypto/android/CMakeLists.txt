@@ -26,6 +26,8 @@ include(${CMAKE_SOURCE_DIR}/../nitrogen/generated/android/JazzCrypto+autolinking
 # Specify include directories
 include_directories(
   "../src/cpp"
+  "../target/debug"
+  "../target/cxxbridge"
 )
 
 # Third party libraries (Prefabs)
@@ -41,11 +43,13 @@ target_link_libraries(
 if(ReactAndroid_VERSION_MINOR GREATER_EQUAL 76)
   target_link_libraries(
     ${PACKAGE_NAME}
+    ${CMAKE_CURRENT_SOURCE_DIR}/../target/debug/libjazz_crypto.dylib
     ReactAndroid::reactnative              # <-- RN: Native Modules umbrella prefab
   )
 else()
   target_link_libraries(
     ${PACKAGE_NAME}
+    ${CMAKE_CURRENT_SOURCE_DIR}/../target/debug/libjazz_crypto.dylib
     ReactAndroid::react_nativemodule_core  # <-- RN: TurboModules Core
     ReactAndroid::turbomodulejsijni        # <-- RN: TurboModules utils (e.g. CallInvokerHolder)
   )
