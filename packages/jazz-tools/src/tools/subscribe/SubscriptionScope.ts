@@ -126,8 +126,7 @@ export class SubscriptionScope<D extends CoValue> {
           new JazzError(this.id, "unauthorized", [
             {
               code: "unauthorized",
-              message:
-                "The current user is not authorized to access this value",
+              message: `The current user (${this.node.getCurrentAgent().id}) is not authorized to access this value`,
               params: {
                 id: this.id,
               },

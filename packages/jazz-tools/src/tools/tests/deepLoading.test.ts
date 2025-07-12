@@ -409,7 +409,7 @@ describe("Deep loading with unauthorized account", async () => {
     expect(mapOnAlice).toBe(null);
 
     expect(errorSpy).toHaveBeenCalledWith(
-      `The current user is not authorized to access this value from ${map.id}`,
+      `The current user (${alice.id}) is not authorized to access this value from ${map.id}`,
     );
 
     errorSpy.mockReset();
@@ -431,7 +431,7 @@ describe("Deep loading with unauthorized account", async () => {
     expect(mapWithListOnAlice).toBe(null);
 
     expect(errorSpy).toHaveBeenCalledWith(
-      `The current user is not authorized to access this value from ${map.id} on path list`,
+      `The current user (${alice.id}) is not authorized to access this value from ${map.id} on path list`,
     );
 
     errorSpy.mockReset();
@@ -465,7 +465,7 @@ describe("Deep loading with unauthorized account", async () => {
     expect(mapOnAlice).toBe(null);
 
     expect(errorSpy).toHaveBeenCalledWith(
-      `The current user is not authorized to access this value from ${map.id} on path list.0`,
+      `The current user (${alice.id}) is not authorized to access this value from ${map.id} on path list.0`,
     );
 
     errorSpy.mockReset();
@@ -492,7 +492,7 @@ describe("Deep loading with unauthorized account", async () => {
     expect(mapOnAlice?.optionalRef?.value).toBe(undefined);
 
     expect(errorSpy).toHaveBeenCalledWith(
-      `The current user is not authorized to access this value from ${map.id} on path optionalRef`,
+      `The current user (${alice.id}) is not authorized to access this value from ${map.id} on path optionalRef`,
     );
 
     errorSpy.mockReset();
@@ -551,7 +551,7 @@ describe("Deep loading with unauthorized account", async () => {
     expect(mapOnAlice).toBe(null);
 
     expect(errorSpy).toHaveBeenCalledWith(
-      `The current user is not authorized to access this value from ${map.id} on path list.0.stream`,
+      `The current user (${alice.id}) is not authorized to access this value from ${map.id} on path list.0.stream`,
     );
 
     errorSpy.mockReset();
@@ -587,7 +587,7 @@ describe("Deep loading with unauthorized account", async () => {
     expect(mapOnAlice).toBe(null);
 
     expect(errorSpy).toHaveBeenCalledWith(
-      `The current user is not authorized to access this value from ${map.id} on path list.0.stream.${value.id}`,
+      `The current user (${alice.id}) is not authorized to access this value from ${map.id} on path list.0.stream.${value.id}`,
     );
 
     errorSpy.mockReset();
