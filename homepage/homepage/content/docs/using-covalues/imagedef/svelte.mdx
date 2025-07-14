@@ -8,9 +8,9 @@ export const metadata = {
 
 `ImageDefinition` is a specialized CoValue designed specifically for managing images in Jazz applications. It extends beyond basic file storage by supporting a blurry placeholder, built-in resizing, and progressive loading patterns.
 
-Beyond ImageDefinition, Jazz offers higher-level functions and components that make it easier to use images:
+Beyond [`ImageDefinition`](#understanding-imagedefinition), Jazz offers higher-level functions and components that make it easier to use images:
 - [`createImage()`](#creating-images) - function to create an `ImageDefinition` from a file
-- [`Image`](#displaying-images) - React component to display a stored image
+- [`Image`](#displaying-images) - Svelte component to display a stored image
 
 The [Image Upload example](https://github.com/gardencmp/jazz/tree/main/examples/image-upload) demonstrates use of images in Jazz.
 
@@ -62,7 +62,7 @@ The `createImage()` function:
 ### Configuration Options
 
 <CodeGroup>
-```ts
+```ts twoslash
 import type { ImageDefinition, Group, Account } from "jazz-tools";
 // ---cut---
 declare function createImage(
@@ -142,20 +142,19 @@ To use the stored ImageDefinition, there are two ways: the `Image` react compone
 The Image component is the best way to let Jazz handle the image loading.
 
 <CodeGroup>
-```tsx
-import * as React from "react";
-import { co } from "jazz-tools";
-const ImageDef = co.image();
-// ---cut---
-import { Image } from "jazz-tools/react";
+```svelte twoslash
+<script lang="ts">
+  import { ImageDefinition, type Loaded } from 'jazz-tools';
+  import { Image } from 'jazz-tools/svelte';
+  let { image }: { image: Loaded<typeof ImageDefinition> } = $props();
+</script>
 
-function GalleryView({ image }: { image: co.loaded<typeof ImageDef> }) {
-  return (
-    <div className="image-container">
-      <Image imageId={image.id} alt="Profile" width={600} />
-    </div>
-  );
-}
+<Image
+  imageId={image.id}
+  alt=""
+  class="h-auto max-h-[20rem] max-w-full rounded-t-xl mb-1"
+/>
+
 ```
 </CodeGroup>
 
@@ -170,14 +169,11 @@ The component's props are:
 
 <CodeGroup>
 ```ts
-export type ImageProps = Omit<
-  JSX.IntrinsicElements["img"],
-  "src" | "srcSet" | "width" | "height"
-> & {
+interface ImageProps extends Omit<HTMLImgAttributes, "width" | "height"> {
   imageId: string;
   width?: number | "original";
   height?: number | "original";
-};
+}
 ```
 </CodeGroup>
 
@@ -188,7 +184,7 @@ The `width` and `height` props are used to control the best resolution to use bu
 Let's say we have an image with a width of 1920px and a height of 1080px.
 
 <CodeGroup>
-```tsx
+```svelte
 <Image imageId="123" />
 // <img src={...} /> with the highest resolution available
 
@@ -303,6 +299,7 @@ image?.subscribe({}, (image) => {
 });
 ```
 </CodeGroup>
+
 
 
 ## Image manipulation custom implementation

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { createImage } from 'jazz-tools/browser-media-images';
+  import { createImage } from 'jazz-tools/media';
   import { AccountCoState, CoState } from 'jazz-tools/svelte';
   import { Account, CoPlainText, type ID } from 'jazz-tools';
 
