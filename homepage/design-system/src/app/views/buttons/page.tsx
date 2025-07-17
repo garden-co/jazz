@@ -113,6 +113,28 @@ export default function ButtonsPage() {
         <Button variant="destructive">destructive</Button>
       </div>
 
+      <h3 className="text-lg font-bold mt-5">Glass Effects</h3>
+
+      <p className="my-3">
+        Glass variant provides beautiful transparent effects with intent-colored
+        specular highlights.
+      </p>
+
+      <div className="grid grid-cols-2 gap-2">
+        <Button intent="primary" variant="glass">
+          primary glass
+        </Button>
+        <Button intent="success" variant="glass">
+          success glass
+        </Button>
+        <Button intent="warning" variant="glass">
+          warning glass
+        </Button>
+        <Button intent="danger" variant="glass">
+          danger glass
+        </Button>
+      </div>
+
       <h3 className="text-lg font-bold mt-5">Icons</h3>
 
       <p className="my-3">Buttons can also contain an icon and text.</p>
@@ -180,6 +202,7 @@ const buttonPropsTableData = {
         "link",
         "secondary",
         "destructive",
+        "glass",
       ],
       default: "default",
     },
