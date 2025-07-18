@@ -103,7 +103,7 @@ export class RawCoStreamView<
   processNewTransactions() {
     const changeEntries = new Set<CoStreamItem<Item>[]>();
 
-    const newValidTransactions = this.core.getValidTransactions({
+    const newValidTransactions = this.core.getValidDecryptedTransactions({
       ignorePrivateTransactions: false,
       knownTransactions: this.knownTransactions,
     });

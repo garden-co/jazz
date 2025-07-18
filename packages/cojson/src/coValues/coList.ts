@@ -105,7 +105,7 @@ export class RawCoList<
   }
 
   processNewTransactions() {
-    const transactions = this.core.getValidSortedTransactions({
+    const transactions = this.core.getValidDecryptedTransactions({
       ignorePrivateTransactions: false,
       knownTransactions: this.knownTransactions,
     });

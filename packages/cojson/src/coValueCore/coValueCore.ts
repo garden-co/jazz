@@ -1,4 +1,5 @@
 import { UpDownCounter, ValueType, metrics } from "@opentelemetry/api";
+import { SessionLog } from "cojson-core-wasm";
 import { Result, err } from "neverthrow";
 import { PeerState } from "../PeerState.js";
 import { RawCoValue } from "../coValue.js";
@@ -17,6 +18,7 @@ import {
   StreamingHash,
 } from "../crypto/crypto.js";
 import {
+  AgentID,
   RawCoID,
   SessionID,
   TransactionID,
@@ -28,8 +30,9 @@ import { JsonValue } from "../jsonValue.js";
 import { LocalNode, ResolveAccountAgentError } from "../localNode.js";
 import { logger } from "../logger.js";
 import {
-  determineValidTransactions,
+  MemberState,
   isKeyForKeyField,
+  validationPass,
 } from "../permissions.js";
 import { CoValueKnownState, PeerID, emptyKnownState } from "../sync.js";
 import { accountOrAgentIDfromSessionID } from "../typeUtils/accountOrAgentIDfromSessionID.js";
@@ -46,15 +49,18 @@ export function idforHeader(
   return `co_z${hash.slice("shortHash_z".length)}`;
 }
 
-export type DecryptedTransaction = {
-  txID: TransactionID;
-  changes: JsonValue[];
-  madeAt: number;
-};
-
 const readKeyCache = new WeakMap<CoValueCore, { [id: KeyID]: KeySecret }>();
 
 export type AvailableCoValueCore = CoValueCore & { verified: VerifiedState };
+
+export type ProcessedTransaction = {
+  txID: TransactionID;
+  tx: Transaction;
+  valid: true | false | null;
+  invalidReason?: string;
+  changes: JsonValue[] | null;
+  madeAt: number;
+};
 
 export class CoValueCore {
   // context
@@ -78,6 +84,13 @@ export class CoValueCore {
   get verified() {
     return this._verified;
   }
+
+  processedSorted: ProcessedTransaction[] = [];
+  nValidated: number = 0;
+  nDecrypted: number = 0;
+  // in Groups: own member state, in OwnedByGroup: group member state
+  memberState: MemberState | undefined;
+
   private readonly peers = new Map<
     PeerID,
     | { type: "unknown" | "pending" | "available" | "unavailable" }
@@ -92,9 +105,6 @@ export class CoValueCore {
   private readonly listeners: Set<
     (core: CoValueCore, unsub: () => void) => void
   > = new Set();
-  private readonly _decryptionCache: {
-    [key: Encrypted<JsonValue[], JsonValue>]: JsonValue[] | undefined;
-  } = {};
   private _cachedDependentOn?: Set<RawCoID>;
   private counter: UpDownCounter;
 
@@ -334,6 +344,16 @@ export class CoValueCore {
     this._verified = state.clone();
     this._cachedContent = undefined;
     this._cachedDependentOn = undefined;
+    for (const [sessionID, session] of this._verified.sessions.entries()) {
+      this.createProcessedTransactions(
+        sessionID,
+        session.transactions,
+        0,
+        null,
+      );
+    }
+    this.nValidated = 0;
+    this.nDecrypted = 0;
   }
 
   internalShamefullyResetCachedContent() {
@@ -361,6 +381,10 @@ export class CoValueCore {
       if (entry.isAvailable()) {
         this.groupInvalidationSubscription = entry.subscribe((_groupUpdate) => {
           this._cachedContent = undefined;
+          for (const tx of this.processedSorted) {
+            tx.valid = null;
+          }
+          this.nValidated = 0;
           this.notifyUpdate("immediate");
         }, false);
       } else {
@@ -444,6 +468,9 @@ export class CoValueCore {
 
         const signerID = this.crypto.getAgentSignerID(agent);
 
+        const nTxBefore =
+          this.verified.sessions.get(sessionID)?.transactions.length || 0;
+
         const result = this.verified.tryAddTransactions(
           sessionID,
           signerID,
@@ -455,6 +482,13 @@ export class CoValueCore {
         );
 
         if (result.isOk()) {
+          this.createProcessedTransactions(
+            sessionID,
+            newTransactions,
+            nTxBefore,
+            null,
+          );
+
           if (
             this._cachedContent &&
             "processNewTransactions" in this._cachedContent &&
@@ -472,6 +506,60 @@ export class CoValueCore {
 
         return result;
       });
+  }
+
+  createProcessedTransactions(
+    sessionID: SessionID,
+    newTransactions: Transaction[],
+    startTxIndex: number,
+    initialDecryptedChanges: JsonValue[][] | null,
+  ) {
+    for (const [idx, tx] of newTransactions.entries()) {
+      const processed: ProcessedTransaction = {
+        txID: {
+          sessionID,
+          txIndex: startTxIndex + idx,
+        },
+        tx,
+        valid: null,
+        changes: initialDecryptedChanges?.[idx] ?? null,
+        madeAt: tx.madeAt,
+      };
+
+      if (tx.privacy === "trusting" && !processed.changes) {
+        const changesString = tx.changes;
+        try {
+          processed.changes = parseJSON(changesString);
+        } catch (e) {
+          logger.error("Failed to parse trusting transaction on " + this.id, {
+            err: e,
+            txID: processed.txID,
+            changes: changesString.slice(0, 50),
+          });
+          processed.valid = false;
+          processed.invalidReason = "Failed to parse trusting changes";
+        }
+      }
+
+      // insert into processedSorted by ascending madeAt, then sessionID, then txIndex
+      const insertIndex = this.processedSorted.findIndex(
+        (tx) =>
+          tx.madeAt > processed.madeAt ||
+          (tx.madeAt === processed.madeAt &&
+            tx.txID.sessionID > processed.txID.sessionID) ||
+          (tx.madeAt === processed.madeAt &&
+            tx.txID.sessionID === processed.txID.sessionID &&
+            tx.txID.txIndex > processed.txID.txIndex),
+      );
+
+      if (insertIndex === -1) {
+        this.processedSorted.push(processed);
+      } else {
+        this.processedSorted.splice(insertIndex, 0, processed);
+        this.nValidated = Math.min(this.nValidated ?? 0, insertIndex);
+        this.nDecrypted = Math.min(this.nDecrypted ?? 0, insertIndex);
+      }
+    }
   }
 
   deferredUpdates = 0;
@@ -544,38 +632,6 @@ export class CoValueCore {
       );
     }
 
-    const madeAt = Date.now();
-
-    let transaction: Transaction;
-
-    if (privacy === "private") {
-      const { secret: keySecret, id: keyID } = this.getCurrentReadKey();
-
-      if (!keySecret) {
-        throw new Error("Can't make transaction without read key secret");
-      }
-
-      const encrypted = this.crypto.encryptForTransaction(changes, keySecret, {
-        in: this.id,
-        tx: this.nextTransactionID(),
-      });
-
-      this._decryptionCache[encrypted] = changes;
-
-      transaction = {
-        privacy: "private",
-        madeAt,
-        keyUsed: keyID,
-        encryptedChanges: encrypted,
-      };
-    } else {
-      transaction = {
-        privacy: "trusting",
-        madeAt,
-        changes: stableStringify(changes),
-      };
-    }
-
     // This is an ugly hack to get a unique but stable session ID for editing the current account
     const sessionID =
       this.verified.header.meta?.type === "account"
@@ -585,30 +641,42 @@ export class CoValueCore {
           ) as SessionID)
         : this.node.currentSessionID;
 
-    const { expectedNewHash, newStreamingHash } =
-      this.verified.expectedNewHashAfter(sessionID, [transaction]);
+    const signerAgent = this.node.getCurrentAgent();
 
-    const signature = this.crypto.sign(
-      this.node.getCurrentAgent().currentSignerSecret(),
-      expectedNewHash,
-    );
+    let privacyMode:
+      | { type: "private"; keyID: KeyID; keySecret: KeySecret }
+      | { type: "trusting" };
 
-    const success = this.tryAddTransactions(
-      sessionID,
-      [transaction],
-      expectedNewHash,
-      signature,
-      "immediate",
-      true,
-      newStreamingHash,
-    )._unsafeUnwrap({ withStackTrace: true });
+    if (privacy === "private") {
+      const { secret: keySecret, id: keyID } = this.getCurrentReadKey();
 
-    if (success) {
-      this.node.syncManager.recordTransactionsSize([transaction], "local");
-      void this.node.syncManager.requestCoValueSync(this);
+      if (!keySecret) {
+        throw new Error("Can't make transaction without read key secret");
+      }
+
+      privacyMode = { type: "private", keyID, keySecret };
+    } else {
+      privacyMode = { type: "trusting" };
     }
 
-    return success;
+    const nTxBefore =
+      this.verified.sessions.get(sessionID)?.transactions.length || 0;
+
+    const { transaction } = this.verified.makeNewTransaction(
+      sessionID,
+      signerAgent,
+      changes,
+      privacyMode,
+    );
+
+    this.createProcessedTransactions(sessionID, [transaction], nTxBefore, [
+      changes,
+    ]);
+
+    this.node.syncManager.recordTransactionsSize([transaction], "local");
+    void this.node.syncManager.requestCoValueSync(this);
+
+    return true;
   }
 
   getCurrentContent(options?: {
@@ -635,105 +703,106 @@ export class CoValueCore {
     return newContent;
   }
 
-  getValidTransactions(options?: {
-    ignorePrivateTransactions: boolean;
-    knownTransactions?: CoValueKnownState["sessions"];
-  }): DecryptedTransaction[] {
-    const validTransactions = determineValidTransactions(
-      this,
-      options?.knownTransactions,
-    );
-
-    const allTransactions: DecryptedTransaction[] = [];
-
-    for (const { txID, tx } of validTransactions) {
-      if (options?.knownTransactions?.[txID.sessionID]! >= txID.txIndex) {
-        continue;
-      }
-
-      if (tx.privacy === "trusting") {
-        try {
-          allTransactions.push({
-            txID,
-            madeAt: tx.madeAt,
-            changes: parseJSON(tx.changes),
-          });
-        } catch (e) {
-          logger.error("Failed to parse trusting transaction on " + this.id, {
-            err: e,
-            txID,
-            changes: tx.changes.slice(0, 50),
-          });
-        }
-        continue;
-      }
-
-      if (options?.ignorePrivateTransactions) {
-        continue;
-      }
-
-      const readKey = this.getReadKey(tx.keyUsed);
-
-      if (!readKey) {
-        continue;
-      }
-
-      let decryptedChanges = this._decryptionCache[tx.encryptedChanges];
-
-      if (!decryptedChanges) {
-        const decryptedString = this.crypto.decryptRawForTransaction(
-          tx.encryptedChanges,
-          readKey,
-          {
-            in: this.id,
-            tx: txID,
-          },
-        );
-
-        try {
-          decryptedChanges = decryptedString && parseJSON(decryptedString);
-        } catch (e) {
-          logger.error("Failed to parse private transaction on " + this.id, {
-            err: e,
-            txID,
-            changes: decryptedString?.slice(0, 50),
-          });
-          continue;
-        }
-        this._decryptionCache[tx.encryptedChanges] = decryptedChanges;
-      }
-
-      if (!decryptedChanges) {
-        logger.error("Failed to decrypt transaction despite having key", {
-          err: new Error("Failed to decrypt transaction despite having key"),
-        });
-        continue;
-      }
-
-      allTransactions.push({
-        txID,
-        madeAt: tx.madeAt,
-        changes: decryptedChanges,
-      });
-    }
-
-    return allTransactions;
+  validationPass() {
+    validationPass(this);
+    this.nValidated = this.processedSorted.length;
   }
 
-  getValidSortedTransactions(options?: {
+  decryptionPass(options?: {
     ignorePrivateTransactions: boolean;
-    knownTransactions: CoValueKnownState["sessions"];
-  }): DecryptedTransaction[] {
-    const allTransactions = this.getValidTransactions(options);
+  }) {
+    let continouslyDescryptedUntil = this.nDecrypted;
+    for (let i = this.nDecrypted; i < this.processedSorted.length; i++) {
+      const processed = this.processedSorted[i]!;
 
-    allTransactions.sort(this.compareTransactions);
+      if (!processed.changes && processed.valid === true) {
+        if (processed.tx.privacy === "trusting") {
+          logger.error(
+            "Trusting transaction should already have changes set " + this.id,
+            {
+              txID: processed.txID,
+              changes: processed.tx.changes.slice(0, 50),
+            },
+          );
+          processed.valid = false;
+          processed.invalidReason =
+            "Trusting transaction should already have changes set";
+          continue;
+        } else {
+          if (options?.ignorePrivateTransactions) {
+            continue;
+          }
 
-    return allTransactions;
+          const readKey = this.getReadKey(processed.tx.keyUsed);
+
+          if (!readKey) {
+            continue;
+          }
+
+          const decryptedString = this.crypto.decryptRawForTransaction(
+            processed.tx.encryptedChanges,
+            readKey,
+            {
+              in: this.id,
+              tx: processed.txID,
+            },
+          );
+
+          if (!decryptedString) {
+            processed.valid = false;
+            processed.invalidReason =
+              "Failed to decrypt private transaction despite having key";
+            continue;
+          }
+
+          try {
+            processed.changes = decryptedString && parseJSON(decryptedString);
+          } catch (e) {
+            logger.error("Failed to parse private transaction on " + this.id, {
+              err: e,
+              txID: processed.txID,
+              changes: decryptedString?.slice(0, 50),
+            });
+            processed.valid = false;
+            processed.invalidReason = "Failed to parse private changes";
+            continue;
+          }
+        }
+      }
+    }
+    this.nDecrypted = continouslyDescryptedUntil;
+  }
+
+  getValidDecryptedTransactions(options?: {
+    ignorePrivateTransactions: boolean;
+    knownTransactions?: CoValueKnownState["sessions"];
+  }): (ProcessedTransaction & {
+    valid: true;
+    changes: JsonValue[];
+  })[] {
+    this.validationPass();
+    this.decryptionPass(options);
+
+    return this.processedSorted.filter(
+      (tx) =>
+        tx.valid === true &&
+        tx.changes !== null &&
+        (options?.ignorePrivateTransactions
+          ? tx.tx.privacy !== "private"
+          : true) &&
+        (options?.knownTransactions
+          ? tx.txID.txIndex >
+            (options.knownTransactions[tx.txID.sessionID] ?? -1)
+          : true),
+    ) as (ProcessedTransaction & {
+      valid: true;
+      changes: JsonValue[];
+    })[];
   }
 
   compareTransactions(
-    a: Pick<DecryptedTransaction, "madeAt" | "txID">,
-    b: Pick<DecryptedTransaction, "madeAt" | "txID">,
+    a: Pick<ProcessedTransaction, "madeAt" | "txID">,
+    b: Pick<ProcessedTransaction, "madeAt" | "txID">,
   ) {
     if (a.madeAt !== b.madeAt) {
       return a.madeAt - b.madeAt;
@@ -1136,6 +1205,7 @@ export type InvalidSignatureError = {
   newSignature: Signature;
   sessionID: SessionID;
   signerID: SignerID;
+  error: Error;
 };
 
 export type TriedToAddTransactionsWithoutVerifiedStateErrpr = {

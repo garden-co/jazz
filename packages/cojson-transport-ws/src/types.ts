@@ -23,7 +23,7 @@ export interface AnyWebSocket {
   close(): void;
   send(data: string): void;
   readyState: number;
-  bufferedAmount: number;
+  bufferedAmount?: number;
 }
 
 export interface AnyWebSocketConstructor {
