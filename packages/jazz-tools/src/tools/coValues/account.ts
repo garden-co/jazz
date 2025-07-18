@@ -16,12 +16,12 @@ import {
 } from "cojson";
 import {
   AnonymousJazzAgent,
-  AnyAccountSchema,
   type CoMap,
   type CoValue,
   CoValueBase,
   CoValueClass,
-  CoValueOrZodSchema,
+  CoValueClassOrSchema,
+  CoreAccountSchema,
   type Group,
   ID,
   InstanceOfSchema,
@@ -40,7 +40,7 @@ import {
   SubscribeRestArgs,
   accessChildByKey,
   activeAccountContext,
-  anySchemaToCoSchema,
+  coValueClassFromCoValueClassOrSchema,
   coValuesCache,
   createInboxRoot,
   ensureCoValueLoaded,
@@ -254,7 +254,7 @@ export class Account extends CoValueBase implements CoValue {
     return value._owner.getRoleOf(this.id) === "admin";
   }
 
-  async acceptInvite<S extends CoValueOrZodSchema>(
+  async acceptInvite<S extends CoValueClassOrSchema>(
     valueID: string,
     inviteSecret: InviteSecret,
     coValueClass: S,
@@ -268,9 +268,13 @@ export class Account extends CoValueBase implements CoValue {
       inviteSecret,
     );
 
-    return loadCoValue(anySchemaToCoSchema(coValueClass), valueID, {
-      loadAs: this,
-    }) as Resolved<InstanceOrPrimitiveOfSchema<S>, true> | null;
+    return loadCoValue(
+      coValueClassFromCoValueClassOrSchema(coValueClass),
+      valueID,
+      {
+        loadAs: this,
+      },
+    ) as Resolved<InstanceOrPrimitiveOfSchema<S>, true> | null;
   }
 
   /** @private */
@@ -447,9 +451,7 @@ export class Account extends CoValueBase implements CoValue {
    *
    * @category Subscription & Loading
    */
-  waitForSync(options?: {
-    timeout?: number;
-  }) {
+  waitForSync(options?: { timeout?: number }) {
     return this._raw.core.waitForSync(options);
   }
 
@@ -458,9 +460,7 @@ export class Account extends CoValueBase implements CoValue {
    *
    * @category Subscription & Loading
    */
-  waitForAllCoValuesSync(options?: {
-    timeout?: number;
-  }) {
+  waitForAllCoValuesSync(options?: { timeout?: number }) {
     return this._raw.core.node.syncManager.waitForAllCoValuesSync(
       options?.timeout,
     );

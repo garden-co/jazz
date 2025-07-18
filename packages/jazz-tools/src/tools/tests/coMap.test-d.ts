@@ -117,9 +117,10 @@ describe("CoMap", async () => {
     });
 
     test("CoMap create with partially loaded, reference and optional", () => {
+      const Breed = co.map({ type: z.literal("labrador"), value: z.string() });
       const Dog = co.map({
         name: z.string(),
-        breed: co.map({ type: z.literal("labrador"), value: z.string() }),
+        breed: Breed,
       });
       type Dog = co.loaded<typeof Dog>;
 
@@ -131,7 +132,7 @@ describe("CoMap", async () => {
 
       const dog = Dog.create({
         name: "Rex",
-        breed: Dog.def.shape.breed.create({
+        breed: Breed.create({
           type: "labrador",
           value: "Labrador",
         }),
@@ -158,7 +159,7 @@ describe("CoMap", async () => {
 
     test("Comap with recursive optional reference", () => {
       const Recursive = co.map({
-        get child(): z.ZodOptional<typeof Recursive> {
+        get child(): co.Optional<typeof Recursive> {
           return co.optional(Recursive);
         },
       });
@@ -184,7 +185,7 @@ describe("CoMap", async () => {
         name: z.string(),
         age: z.number(),
         // TODO: would be nice if this didn't need a type annotation
-        get friend(): z.ZodOptional<typeof Person> {
+        get friend(): co.Optional<typeof Person> {
           return co.optional(Person);
         },
       });

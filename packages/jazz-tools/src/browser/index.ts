@@ -1,9 +1,7 @@
 import {
   Account,
   CoValue,
-  CoValueClass,
-  CoValueOrZodSchema,
-  ID,
+  CoValueClassOrSchema,
   InviteSecret,
   createInviteLink as baseCreateInviteLink,
   consumeInviteLink,
@@ -36,7 +34,7 @@ export { parseInviteLink } from "jazz-tools";
 
 /** @category Invite Links */
 export async function consumeInviteLinkFromWindowLocation<
-  S extends CoValueOrZodSchema,
+  S extends CoValueClassOrSchema,
 >({
   as,
   forValueHint,

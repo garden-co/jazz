@@ -736,7 +736,7 @@ describe("Deep loading with unauthorized account", async () => {
   test("unaccessible list element with $onError and $each with depth", async () => {
     const Person = co.map({
       name: z.string(),
-      get friends(): z.ZodOptional<typeof Friends> {
+      get friends(): co.Optional<typeof Friends> {
         return co.optional(Friends);
       },
     });

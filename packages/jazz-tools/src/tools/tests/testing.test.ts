@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, test } from "vitest";
-import { Account, CoMap, Group, co, z, zodSchemaToCoSchema } from "../exports";
+import { Account, CoMap, Group, co, z } from "../exports";
 import { createJazzTestAccount, setupJazzTestSync } from "../testing";
 
 describe("Jazz Test Sync", () => {
@@ -43,7 +43,7 @@ describe("Jazz Test Sync", () => {
       });
 
     const account1 = await createJazzTestAccount({
-      AccountSchema: zodSchemaToCoSchema(CustomAccount),
+      AccountSchema: CustomAccount,
       isCurrentActiveAccount: true,
     });
 
@@ -69,12 +69,12 @@ describe("Jazz Test Sync", () => {
       });
 
     const account1 = await createJazzTestAccount({
-      AccountSchema: zodSchemaToCoSchema(CustomAccount),
+      AccountSchema: CustomAccount,
       isCurrentActiveAccount: true,
     });
 
     const account2 = await createJazzTestAccount({
-      AccountSchema: zodSchemaToCoSchema(CustomAccount),
+      AccountSchema: CustomAccount,
       isCurrentActiveAccount: false,
     });
 
@@ -91,11 +91,11 @@ describe("Jazz Test Sync", () => {
 
     const promise = Promise.all([
       createJazzTestAccount({
-        AccountSchema: zodSchemaToCoSchema(CustomAccount),
+        AccountSchema: CustomAccount,
         isCurrentActiveAccount: true,
       }),
       createJazzTestAccount({
-        AccountSchema: zodSchemaToCoSchema(CustomAccount),
+        AccountSchema: CustomAccount,
         isCurrentActiveAccount: true,
       }),
     ]);

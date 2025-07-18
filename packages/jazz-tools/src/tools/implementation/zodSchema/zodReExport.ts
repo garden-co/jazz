@@ -1,17 +1,14 @@
 import {
-  ZodArray,
-  ZodTuple,
-  ZodUnion,
+  ZodObject,
   core,
-  array as zodArray,
-  tuple as zodTuple,
-  union as zodUnion,
-} from "zod/v4";
+  object as zodObject,
+  strictObject as zodStrictObject,
+} from "zod";
+import { removeGetters } from "../schemaUtils.js";
 export {
   string,
   number,
   boolean,
-  object,
   templateLiteral,
   json,
   date,
@@ -33,12 +30,14 @@ export {
   cidrv6,
   iso,
   int32,
-  strictObject,
+  union,
   discriminatedUnion,
   // record,
   // intersection,
   int,
   optional,
+  array,
+  tuple,
   type ZodOptional,
   type ZodReadonly,
   type ZodLazy,
@@ -47,27 +46,48 @@ export {
   type output as infer,
   type ZodDiscriminatedUnion,
   z,
-} from "zod/v4";
+} from "zod";
 
-type NonCoZodType = core.$ZodType & { collaborative?: false };
-
-export function union<const T extends readonly NonCoZodType[]>(
-  options: T,
-  params?: string | core.$ZodUnionParams,
-): ZodUnion<T> {
-  return zodUnion(options, params);
+export function object<
+  T extends core.$ZodLooseShape = Partial<Record<never, core.SomeType>>,
+>(
+  shape?: T,
+  params?: string | core.$ZodObjectParams,
+): ZodObject<T, core.$strip> {
+  rejectCoValueSchemas(
+    shape,
+    "z.object() does not support collaborative types as values. Use co.map() instead",
+  );
+  return zodObject(shape, params);
 }
 
-export function array<T extends NonCoZodType>(
-  element: T,
-  params?: string | core.$ZodArrayParams,
-): ZodArray<T> {
-  return zodArray(element, params);
+export function strictObject<T extends core.$ZodLooseShape>(
+  shape: T,
+  params?: string | core.$ZodObjectParams,
+): ZodObject<T, core.$strict> {
+  rejectCoValueSchemas(
+    shape,
+    "z.strictObject() does not support collaborative types as values. Use co.map() instead",
+  );
+  return zodStrictObject(shape, params);
 }
 
-export function tuple<T extends readonly [NonCoZodType, ...NonCoZodType[]]>(
-  options: T,
-  params?: string | core.$ZodTupleParams,
-): ZodTuple<T> {
-  return zodTuple(options, params);
+function rejectCoValueSchemas(
+  shape: core.$ZodLooseShape | undefined,
+  errorMessage: string,
+) {
+  if (containsCoValueSchema(shape)) {
+    throw Error(errorMessage);
+  }
+}
+
+function containsCoValueSchema(shape?: core.$ZodLooseShape): boolean {
+  // Remove getters to avoid circularity issues accessing schemas that may not be defined yet
+  return Object.values(removeGetters(shape ?? {})).some(isAnyCoValueSchema);
+}
+
+// Note: if you're editing this function, edit the `isAnyCoValueSchema`
+// function in `zodSchemaToCoSchema.ts` as well
+function isAnyCoValueSchema(schema: any): boolean {
+  return "collaborative" in schema && schema.collaborative === true;
 }

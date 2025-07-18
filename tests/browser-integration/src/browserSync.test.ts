@@ -1,11 +1,5 @@
 import { commands } from "@vitest/browser/context";
-import {
-  AuthSecretStorage,
-  Group,
-  co,
-  z,
-  zodSchemaToCoSchema,
-} from "jazz-tools";
+import { AuthSecretStorage, Group, co, z } from "jazz-tools";
 import {
   assert,
   afterAll,
@@ -47,7 +41,7 @@ describe("Browser sync", () => {
         peer: syncServer.url,
       },
       storage: "indexedDB",
-      AccountSchema: zodSchemaToCoSchema(CustomAccount),
+      AccountSchema: CustomAccount,
     });
 
     const group = Group.create(account1);

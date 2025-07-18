@@ -1,7 +1,7 @@
 import type {
   AccountClass,
   AuthSecretStorage,
-  CoValueOrZodSchema,
+  CoValueClassOrSchema,
   ID,
   InstanceOfSchema,
   JazzContextType,
@@ -66,7 +66,7 @@ export function getAuthSecretStorage() {
  * @param forValueHint - Hint for the value.
  * @returns The accept invite hook.
  */
-export class InviteListener<V extends CoValueOrZodSchema> {
+export class InviteListener<V extends CoValueClassOrSchema> {
   constructor({
     invitedObjectSchema,
     onAccept,

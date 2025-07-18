@@ -1,7 +1,7 @@
 import { WasmCrypto } from "cojson/crypto/WasmCrypto";
 import { assert, beforeEach, describe, expect, test } from "vitest";
 import { CoMap, Group, z } from "../exports.js";
-import { Loaded, Ref, co, zodSchemaToCoSchema } from "../internal.js";
+import { Loaded, Ref, co } from "../internal.js";
 import { createJazzTestAccount, setupJazzTestSync } from "../testing.js";
 import { setupTwoNodes, waitFor } from "./utils.js";
 
@@ -22,15 +22,16 @@ describe("Custom accounts and groups", async () => {
       color: z.string(),
     });
 
+    const Root = co.map({});
     const CustomAccount = co
       .account({
         profile: CustomProfile,
-        root: co.map({}),
+        root: Root,
       })
       .withMigration((account, creationProps?: { name: string }) => {
         // making sure that the inferred type of account.root & account.profile considers the root/profile not being loaded
         type R = typeof account.root;
-        const _r: R = {} as Loaded<typeof CustomAccount.def.shape.root> | null;
+        const _r: R = {} as Loaded<typeof Root> | null;
         type P = typeof account.profile;
         const _p: P = {} as Loaded<typeof CustomProfile> | null;
         if (creationProps) {
@@ -47,7 +48,7 @@ describe("Custom accounts and groups", async () => {
     const me = await createJazzTestAccount({
       creationProps: { name: "Hermes Puggington" },
       isCurrentActiveAccount: true,
-      AccountSchema: zodSchemaToCoSchema(CustomAccount),
+      AccountSchema: CustomAccount,
     });
 
     expect(me.profile).toBeDefined();

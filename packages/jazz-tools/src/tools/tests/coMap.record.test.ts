@@ -236,9 +236,6 @@ describe("CoMap.Record", async () => {
         pet1: Dog.create({ name: "Rex", breed: "Labrador" }),
       });
 
-      type V = (typeof Person)["_zod"]["def"]["valueType"];
-      type T = InstanceOrPrimitiveOfSchema<typeof Person>;
-
       const updates: Loaded<typeof Person, { $each: true }>[] = [];
       const spy = vi.fn((person) => updates.push(person));
 
@@ -307,9 +304,10 @@ describe("CoMap.Record", async () => {
       name: z.string(),
     });
 
+    const Catchall = co.map({}).withHelpers((self) => self);
     const IssueRepro = co.map({
       type: z.literal("repro"),
-      catchall: co.map({}).withHelpers((self) => self),
+      catchall: Catchall,
       name: z.string(),
     });
 
@@ -320,7 +318,7 @@ describe("CoMap.Record", async () => {
 
     const person = IssueRepro.create({
       type: "repro",
-      catchall: IssueRepro.def.shape.catchall.create({}),
+      catchall: Catchall.create({}),
       name: "John",
     });
 
@@ -342,9 +340,10 @@ describe("CoMap.Record", async () => {
       name: z.string(),
     });
 
+    const Catchall = co.map({}).catchall(z.string());
     const IssueRepro = co.map({
       type: z.literal("repro"),
-      catchall: co.map({}).catchall(z.string()),
+      catchall: Catchall,
       name: z.string(),
     });
 
@@ -355,7 +354,7 @@ describe("CoMap.Record", async () => {
 
     const person = IssueRepro.create({
       type: "repro",
-      catchall: IssueRepro.def.shape.catchall.create({}),
+      catchall: Catchall.create({}),
       name: "John",
     });
 

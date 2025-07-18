@@ -12,12 +12,10 @@ import type {
 import { MAX_RECOMMENDED_TX_SIZE, cojsonInternals } from "cojson";
 import type {
   AnonymousJazzAgent,
-  AnyAccountSchema,
   CoValue,
   CoValueClass,
   Group,
   ID,
-  InstanceOfSchema,
   RefsToResolve,
   RefsToResolveStrict,
   Resolved,
@@ -31,10 +29,8 @@ import {
   CoValueBase,
   ItemsSym,
   Ref,
-  RegisteredSchemas,
   SchemaInit,
   accessChildById,
-  anySchemaToCoSchema,
   coField,
   ensureCoValueLoaded,
   inspect,

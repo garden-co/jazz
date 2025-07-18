@@ -5,15 +5,15 @@ import {
   Account,
   AccountClass,
   type AnonymousJazzAgent,
-  AnyAccountSchema,
   AuthCredentials,
   CoValueFromRaw,
+  CoreAccountSchema,
   InstanceOfSchema,
   JazzContextManager,
   JazzContextManagerAuthProps,
   JazzContextManagerBaseProps,
   activeAccountContext,
-  anySchemaToCoSchema,
+  coValueClassFromCoValueClassOrSchema,
   createAnonymousJazzContext,
   createJazzContext,
   randomSessionProvider,
@@ -88,14 +88,14 @@ let isMigrationActive = false;
 export async function createJazzTestAccount<
   S extends
     | (AccountClass<Account> & CoValueFromRaw<Account>)
-    | AnyAccountSchema,
+    | CoreAccountSchema,
 >(options?: {
   isCurrentActiveAccount?: boolean;
   AccountSchema?: S;
   creationProps?: Record<string, unknown>;
 }): Promise<InstanceOfSchema<S>> {
   const AccountClass = options?.AccountSchema
-    ? anySchemaToCoSchema(options.AccountSchema)
+    ? coValueClassFromCoValueClassOrSchema(options.AccountSchema)
     : Account;
   const peers = [];
   if (syncServer.current) {

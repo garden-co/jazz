@@ -96,16 +96,15 @@ export {
 export type * from "./types.js";
 
 export {
-  zodSchemaToCoSchema,
-  anySchemaToCoSchema,
+  coValueClassFromCoValueClassOrSchema,
   type InstanceOfSchema,
   type InstanceOfSchemaCoValuesNullable,
-  type CoValueOrZodSchema,
+  type CoValueClassOrSchema,
   type Loaded,
   type BaseAccountShape,
   type DefaultAccountShape,
   type AccountSchema,
-  type AnyAccountSchema,
+  type CoreAccountSchema as AnyAccountSchema,
   type CoListSchema,
   type CoMapSchema,
   type CoFeedSchema,

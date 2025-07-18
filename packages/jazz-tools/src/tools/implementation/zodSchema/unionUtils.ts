@@ -1,34 +1,34 @@
 import { RawAccount, RawCoList, RawCoMap } from "cojson";
-import { CoValueClass, CoValueFromRaw } from "../../internal.js";
 import {
+  AnyZodOrCoValueSchema,
+  CoDiscriminatedUnionSchema,
+  CoMap,
+  CoreCoDiscriminatedUnionSchema,
+  CoreCoMapSchema,
+  DiscriminableCoValueSchemas,
+  DiscriminableCoreCoValueSchema,
+} from "../../internal.js";
+import {
+  hydrateCoreCoValueSchema,
   isAnyCoValueSchema,
-  zodSchemaToCoSchema,
-} from "./runtimeConverters/zodSchemaToCoSchema.js";
-import { AccountSchema } from "./schemaTypes/AccountSchema.js";
-import { CoListSchema } from "./schemaTypes/CoListSchema.js";
-import { CoMapSchema } from "./schemaTypes/CoMapSchema.js";
+} from "./runtimeConverters/coValueSchemaTransformation.js";
 import { z } from "./zodReExport.js";
 
 export function schemaUnionDiscriminatorFor(
-  schema: z.core.$ZodDiscriminatedUnion,
+  schema: CoreCoDiscriminatedUnionSchema<DiscriminableCoValueSchemas>,
 ) {
   if (isUnionOfCoMapsDeeply(schema)) {
-    if (!schema._zod.disc || schema._zod.disc.size == 0) {
-      throw new Error(
-        "z.union() of collaborative types is not supported, use co.discriminatedUnion() instead",
-      );
-    }
+    const definition = schema.getDefinition();
+    const { discriminatorMap, discriminator, options } = definition;
 
-    const discriminator = schema._zod.def.discriminator;
-    const field = schema._zod.disc.get(discriminator);
-
+    const field = discriminatorMap[discriminator];
     if (!field) {
       throw new Error(
         "co.discriminatedUnion() of collaborative types with non-existent discriminator key is not supported",
       );
     }
 
-    for (const value of field.values) {
+    for (const value of field) {
       if (typeof value !== "string" && typeof value !== "number") {
         throw new Error(
           "co.discriminatedUnion() of collaborative types with non-string or non-number discriminator value is not supported",
@@ -36,15 +36,17 @@ export function schemaUnionDiscriminatorFor(
       }
     }
 
-    const availableOptions: z.core.$ZodObject[] = [];
+    const availableOptions: DiscriminableCoreCoValueSchema[] = [];
 
-    for (const option of schema._zod.def.options) {
-      if (option._zod.def.type === "object") {
-        availableOptions.push(option as z.core.$ZodObject);
-      } else if (option._zod.def.type === "union") {
-        for (const subOption of (option as z.core.$ZodUnion)._zod.def.options) {
-          if (subOption._zod.def.type === "object") {
-            availableOptions.push(subOption as z.core.$ZodObject);
+    for (const option of options) {
+      if (option.builtin === "CoMap") {
+        availableOptions.push(option);
+      } else if (option.builtin === "CoDiscriminatedUnion") {
+        for (const subOption of (
+          option as CoDiscriminatedUnionSchema<any>
+        ).getDefinition().options) {
+          if (!options.includes(subOption)) {
+            options.push(subOption);
           }
         }
       } else {
@@ -64,10 +66,9 @@ export function schemaUnionDiscriminatorFor(
       for (const option of availableOptions) {
         let match = true;
 
-        for (const key of schema._zod.disc.keys()) {
-          const discriminatorDef = (option as z.core.$ZodObject)._zod.def.shape[
-            key as string
-          ];
+        for (const key of Object.keys(discriminatorMap)) {
+          const discriminatorDef = (option as CoreCoMapSchema).getDefinition()
+            .shape[key as string];
 
           const discriminatorValue = (_raw as RawCoMap).get(key as string);
 
@@ -88,7 +89,8 @@ export function schemaUnionDiscriminatorFor(
             break;
           }
 
-          const literalDef = discriminatorDef._zod.def as z.core.$ZodLiteralDef;
+          const literalDef = discriminatorDef._zod
+            .def as z.core.$ZodLiteralDef<any>;
 
           if (!Array.from(literalDef.values).includes(discriminatorValue)) {
             match = false;
@@ -97,12 +99,8 @@ export function schemaUnionDiscriminatorFor(
         }
 
         if (match) {
-          const coValueSchema = zodSchemaToCoSchema(option) as
-            | CoMapSchema<any>
-            | AccountSchema
-            | CoListSchema<any>;
-          return coValueSchema.getCoValueClass() as CoValueClass<any> &
-            CoValueFromRaw<any>;
+          const coValueSchema = hydrateCoreCoValueSchema(option as any);
+          return coValueSchema.getCoValueClass() as typeof CoMap;
         }
       }
 
@@ -114,34 +112,32 @@ export function schemaUnionDiscriminatorFor(
     return determineSchema;
   } else {
     throw new Error(
-      "z.discriminatedUnion() of non-collaborative types is not supported",
+      "co.discriminatedUnion() of non-collaborative types is not supported",
     );
   }
 }
 
-export function isUnionOfCoMapsDeeply(
-  schema: z.core.$ZodType,
-): schema is z.core.$ZodDiscriminatedUnion {
-  if (schema instanceof z.core.$ZodUnion) {
-    return schema._zod.def.options.every(isCoMapOrUnionOfCoMapsDeeply);
-  } else {
-    return false;
-  }
+function isUnionOfCoMapsDeeply(
+  schema: CoreCoDiscriminatedUnionSchema<DiscriminableCoValueSchemas>,
+): boolean {
+  return schema.getDefinition().options.every(isCoMapOrUnionOfCoMapsDeeply);
 }
 
 function isCoMapOrUnionOfCoMapsDeeply(
-  schema: z.core.$ZodType,
-): schema is z.core.$ZodDiscriminatedUnion {
-  if (schema instanceof z.core.$ZodObject && isAnyCoValueSchema(schema)) {
+  schema: DiscriminableCoreCoValueSchema,
+): boolean {
+  if (schema.builtin === "CoMap") {
     return true;
-  } else if (schema instanceof z.core.$ZodUnion) {
-    return schema._zod.def.options.every(isCoMapOrUnionOfCoMapsDeeply);
+  } else if (schema.builtin === "CoDiscriminatedUnion") {
+    return (schema as CoDiscriminatedUnionSchema<any>)
+      .getDefinition()
+      .options.every(isCoMapOrUnionOfCoMapsDeeply);
   } else {
     return false;
   }
 }
 
-export function isUnionOfPrimitivesDeeply(schema: z.core.$ZodType) {
+export function isUnionOfPrimitivesDeeply(schema: AnyZodOrCoValueSchema) {
   if (schema instanceof z.core.$ZodUnion) {
     return schema._zod.def.options.every(isUnionOfPrimitivesDeeply);
   } else {

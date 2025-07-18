@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 
-import { RefsToResolve, co, z, zodSchemaToCoSchema } from "jazz-tools";
+import { RefsToResolve, co, z } from "jazz-tools";
 import { beforeEach, describe, expect, it } from "vitest";
 import { useAccount, useJazzContextManager } from "../hooks.js";
 import { useIsAuthenticated } from "../index.js";
@@ -46,7 +46,7 @@ describe("useAccount", () => {
       });
 
     const account = await createJazzTestAccount({
-      AccountSchema: zodSchemaToCoSchema(AccountSchema),
+      AccountSchema,
     });
 
     const { result } = renderHook(

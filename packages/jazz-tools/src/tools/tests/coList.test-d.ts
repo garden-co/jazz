@@ -74,9 +74,10 @@ describe("CoList", () => {
     });
 
     test("CoList create with partially loaded, reference and optional", () => {
+      const Breed = co.map({ type: z.literal("labrador"), value: z.string() });
       const Dog = co.map({
         name: z.string(),
-        breed: co.map({ type: z.literal("labrador"), value: z.string() }),
+        breed: Breed,
       });
       type Dog = co.loaded<typeof Dog>;
 
@@ -84,11 +85,11 @@ describe("CoList", () => {
 
       const dog = Dog.create({
         name: "Rex",
-        breed: Dog.def.shape.breed.create({
+        breed: Breed.create({
           type: "labrador",
           value: "Labrador",
         }),
-      }) as Dog;
+      });
 
       const list = DogList.create([dog, undefined]);
 

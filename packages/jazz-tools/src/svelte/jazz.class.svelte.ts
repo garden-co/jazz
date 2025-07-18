@@ -2,21 +2,24 @@ import type {
   Account,
   AccountClass,
   AnyAccountSchema,
+  CoValueClassOrSchema,
   CoValueFromRaw,
-  CoValueOrZodSchema,
   InstanceOfSchema,
   Loaded,
   ResolveQuery,
   ResolveQueryStrict,
 } from "jazz-tools";
-import { anySchemaToCoSchema, subscribeToCoValue } from "jazz-tools";
+import {
+  coValueClassFromCoValueClassOrSchema,
+  subscribeToCoValue,
+} from "jazz-tools";
 import { untrack } from "svelte";
 import { createSubscriber } from "svelte/reactivity";
 import { useIsAuthenticated } from "./auth/useIsAuthenticated.svelte.js";
 import { getJazzContext } from "./jazz.svelte";
 
 export class CoState<
-  V extends CoValueOrZodSchema,
+  V extends CoValueClassOrSchema,
   R extends ResolveQuery<V> = true,
 > {
   #value: Loaded<V, R> | undefined | null = undefined;
@@ -47,10 +50,10 @@ export class CoState<
         const agent = "me" in ctx ? ctx.me : ctx.guest;
 
         const unsubscribe = subscribeToCoValue(
-          anySchemaToCoSchema(Schema),
+          coValueClassFromCoValueClassOrSchema(Schema),
           id,
           {
-            // @ts-expect-error The resolve query type isn't compatible with the anySchemaToCoSchema conversion
+            // @ts-expect-error The resolve query type isn't compatible with the coValueClassFromCoValueClassOrSchema conversion
             resolve: options?.resolve,
             loadAs: agent,
             onUnavailable: () => {
@@ -112,10 +115,10 @@ export class AccountCoState<
         const me = ctx.me;
 
         const unsubscribe = subscribeToCoValue(
-          anySchemaToCoSchema(Schema),
+          coValueClassFromCoValueClassOrSchema(Schema),
           me.id,
           {
-            // @ts-expect-error The resolve query type isn't compatible with the anySchemaToCoSchema conversion
+            // @ts-expect-error The resolve query type isn't compatible with the coValueClassFromCoValueClassOrSchema conversion
             resolve: options?.resolve,
             loadAs: me,
             onUnavailable: () => {

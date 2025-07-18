@@ -6,8 +6,6 @@ import {
   CoValueClass,
   CoValueFromRaw,
   ID,
-  RefsToResolve,
-  RefsToResolveStrict,
   Resolved,
   SubscribeListenerOptions,
   SubscribeRestArgs,
@@ -15,6 +13,12 @@ import {
   parseSubscribeRestArgs,
   subscribeToCoValueWithoutMe,
 } from "../internal.js";
+
+/**
+ * Extends `SchemaUnion` with a non-abstract constructor.
+ */
+export type SchemaUnionConcreteSubclass<V extends CoValue> =
+  typeof SchemaUnion & CoValueClass<V>;
 
 /**
  * SchemaUnion allows you to create union types of CoValues that can be discriminated at runtime.
@@ -86,7 +90,7 @@ export abstract class SchemaUnion extends CoValueBase implements CoValue {
    **/
   static Of<V extends CoValue>(
     discriminator: (raw: V["_raw"]) => CoValueClass<V> & CoValueFromRaw<V>,
-  ): CoValueClass<V> & typeof SchemaUnion {
+  ): SchemaUnionConcreteSubclass<V> {
     return class SchemaUnionClass extends SchemaUnion {
       static override fromRaw<T extends CoValue>(
         this: CoValueClass<T> & CoValueFromRaw<T>,
@@ -97,7 +101,7 @@ export abstract class SchemaUnion extends CoValueBase implements CoValue {
         ) as unknown as CoValueClass<T> & CoValueFromRaw<T>;
         return ResolvedClass.fromRaw(raw);
       }
-    } as unknown as CoValueClass<V> & typeof SchemaUnion;
+    } as unknown as SchemaUnionConcreteSubclass<V>;
   }
 
   /**

@@ -1,7 +1,6 @@
 import {
   AgentSecret,
   CoID,
-  ControlledAgent,
   CryptoProvider,
   LocalNode,
   Peer,
@@ -14,12 +13,11 @@ import { AuthSecretStorage } from "../auth/AuthSecretStorage.js";
 import { type Account, type AccountClass } from "../coValues/account.js";
 import { RegisteredSchemas } from "../coValues/registeredSchemas.js";
 import {
-  type AccountSchema,
-  type AnyAccountSchema,
   CoValueFromRaw,
+  type CoreAccountSchema,
   type ID,
   type InstanceOfSchema,
-  anySchemaToCoSchema,
+  coValueClassFromCoValueClassOrSchema,
 } from "../internal.js";
 import { AuthCredentials, NewAccountProps } from "../types.js";
 import { activeAccountContext } from "./activeAccountContext.js";
@@ -89,7 +87,7 @@ export type JazzContext<Acc extends Account> =
 export async function createJazzContextFromExistingCredentials<
   S extends
     | (AccountClass<Account> & CoValueFromRaw<Account>)
-    | AnyAccountSchema,
+    | CoreAccountSchema,
 >({
   credentials,
   peersToLoadFrom,
@@ -115,7 +113,8 @@ export async function createJazzContextFromExistingCredentials<
   const CurrentAccountSchema =
     PropsAccountSchema ?? (RegisteredSchemas["Account"] as unknown as S);
 
-  const AccountClass = anySchemaToCoSchema(CurrentAccountSchema);
+  const AccountClass =
+    coValueClassFromCoValueClassOrSchema(CurrentAccountSchema);
 
   const node = await LocalNode.withLoadedAccount({
     accountID: credentials.accountID as unknown as CoID<RawAccount>,
@@ -153,7 +152,7 @@ export async function createJazzContextFromExistingCredentials<
 export async function createJazzContextForNewAccount<
   S extends
     | (AccountClass<Account> & CoValueFromRaw<Account>)
-    | AnyAccountSchema,
+    | CoreAccountSchema,
 >({
   creationProps,
   initialAgentSecret,
@@ -174,7 +173,8 @@ export async function createJazzContextForNewAccount<
   const CurrentAccountSchema =
     PropsAccountSchema ?? (RegisteredSchemas["Account"] as unknown as S);
 
-  const AccountClass = anySchemaToCoSchema(CurrentAccountSchema);
+  const AccountClass =
+    coValueClassFromCoValueClassOrSchema(CurrentAccountSchema);
 
   const { node } = await LocalNode.withNewlyCreatedAccount({
     creationProps,
@@ -209,7 +209,7 @@ export async function createJazzContextForNewAccount<
 export async function createJazzContext<
   S extends
     | (AccountClass<Account> & CoValueFromRaw<Account>)
-    | AnyAccountSchema,
+    | CoreAccountSchema,
 >(options: {
   credentials?: AuthCredentials;
   newAccountProps?: NewAccountProps;

@@ -2,8 +2,10 @@ import { LocalNode, RawAccount } from "cojson";
 import {
   Account,
   AccountClass,
+  CoRecordSchema,
   CoValueClass,
   CoValueFromRaw,
+  CoreCoRecordSchema,
   InstanceOfSchema,
   RefsToResolve,
   RefsToResolveStrict,
@@ -12,35 +14,35 @@ import {
 } from "../../internal.js";
 import {
   AccountSchema,
-  AnyAccountSchema,
   BaseAccountShape,
+  CoreAccountSchema,
 } from "./schemaTypes/AccountSchema.js";
 import {
-  AnyDiscriminableCoSchema,
   CoDiscriminatedUnionSchema,
+  CoreCoDiscriminatedUnionSchema,
 } from "./schemaTypes/CoDiscriminatedUnionSchema.js";
-import { AnyCoFeedSchema, CoFeedSchema } from "./schemaTypes/CoFeedSchema.js";
-import { AnyCoListSchema, CoListSchema } from "./schemaTypes/CoListSchema.js";
+import { CoFeedSchema, CoreCoFeedSchema } from "./schemaTypes/CoFeedSchema.js";
+import { CoListSchema, CoreCoListSchema } from "./schemaTypes/CoListSchema.js";
 import {
-  AnyCoMapSchema,
   CoMapInitZod,
   CoMapSchema,
+  CoreCoMapSchema,
 } from "./schemaTypes/CoMapSchema.js";
-import { AnyCoOptionalSchema } from "./schemaTypes/CoOptionalSchema.js";
 import {
-  AnyCoRecordSchema,
-  CoRecordSchema,
-} from "./schemaTypes/CoRecordSchema.js";
+  CoOptionalSchema,
+  CoreCoOptionalSchema,
+} from "./schemaTypes/CoOptionalSchema.js";
+import { CoreCoValueSchema } from "./schemaTypes/CoValueSchema.js";
 import {
-  AnyFileStreamSchema,
+  CoreFileStreamSchema,
   FileStreamSchema,
 } from "./schemaTypes/FileStreamSchema.js";
 import {
-  AnyPlainTextSchema,
+  CorePlainTextSchema,
   PlainTextSchema,
 } from "./schemaTypes/PlainTextSchema.js";
 import {
-  AnyRichTextSchema,
+  CoreRichTextSchema,
   RichTextSchema,
 } from "./schemaTypes/RichTextSchema.js";
 import { InstanceOfSchemaCoValuesNullable } from "./typeConverters/InstanceOfSchemaCoValuesNullable.js";
@@ -49,7 +51,7 @@ import { z } from "./zodReExport.js";
 // defining an extra type for this, otherwise BaseSchema & {...} often
 // gets expanded into a n inferred type that's too long for typescript to print
 export type WithHelpers<
-  Base extends z.core.$ZodType,
+  Base extends CoreCoValueSchema,
   Helpers extends object,
 > = Base & Helpers;
 
@@ -61,108 +63,75 @@ export type ZodPrimitiveSchema =
   | z.core.$ZodDate
   | z.core.$ZodLiteral;
 
-export type AnyCoUnionSchema = z.core.$ZodDiscriminatedUnion<
-  (
-    | (z.core.$ZodType & { collaborative: true })
-    | z.core.$ZodDiscriminatedUnion
-  )[]
->;
+export type CoValueClassOrSchema = CoValueClass | CoreCoValueSchema;
 
-// this is a series of hacks to work around z4 removing _zod at runtime from z.core.$ZodType
-export function isZodObject(
-  schema: z.core.$ZodType,
-): schema is z.ZodObject<any, any> {
-  return (schema as any).def?.type === "object";
-}
+export type CoValueSchemaFromCoreSchema<S extends CoreCoValueSchema> =
+  S extends CoreAccountSchema<infer Shape extends BaseAccountShape>
+    ? AccountSchema<Shape>
+    : S extends CoreCoRecordSchema<infer K, infer V>
+      ? CoRecordSchema<K, V>
+      : S extends CoreCoMapSchema<infer Shape, infer Config>
+        ? CoMapSchema<Shape, Config>
+        : S extends CoreCoListSchema<infer T>
+          ? CoListSchema<T>
+          : S extends CoreCoFeedSchema<infer T>
+            ? CoFeedSchema<T>
+            : S extends CorePlainTextSchema
+              ? PlainTextSchema
+              : S extends CoreRichTextSchema
+                ? RichTextSchema
+                : S extends CoreFileStreamSchema
+                  ? FileStreamSchema
+                  : S extends CoreCoOptionalSchema<infer Inner>
+                    ? CoOptionalSchema<Inner>
+                    : S extends CoreCoDiscriminatedUnionSchema<infer Members>
+                      ? CoDiscriminatedUnionSchema<Members>
+                      : never;
 
-export function isZodArray(
-  schema: z.core.$ZodType,
-): schema is z.core.$ZodArray<any> {
-  return (schema as any).def?.type === "array";
-}
-
-export function isZodCustom(
-  schema: z.core.$ZodType,
-): schema is z.core.$ZodCustom<any, any> {
-  return (schema as any).def?.type === "custom";
-}
-
-export function getDef<S extends z.core.$ZodType>(schema: S): S["_zod"]["def"] {
-  return (schema as any).def;
-}
-
-// TODO rename. This represents a CoValue class or a CoValue schema
-export type CoValueOrZodSchema = CoValueClass | AnyCoSchema;
-
-// TODO rename to CoValueSchemaFromCoProtoSchema
-export type CoValueSchemaFromZodSchema<S extends z.core.$ZodType> =
-  S extends z.core.$ZodType
-    ? S extends AnyAccountSchema<infer Shape extends BaseAccountShape>
-      ? AccountSchema<Shape>
-      : S extends AnyCoRecordSchema<infer K, infer V>
-        ? CoRecordSchema<K, V>
-        : S extends AnyCoMapSchema<infer Shape, infer Config>
-          ? CoMapSchema<Shape, Config>
-          : S extends AnyCoListSchema<infer T>
-            ? CoListSchema<T>
-            : S extends AnyCoFeedSchema<infer T>
-              ? CoFeedSchema<T>
-              : S extends AnyPlainTextSchema
-                ? PlainTextSchema
-                : S extends AnyRichTextSchema
-                  ? RichTextSchema
-                  : S extends AnyFileStreamSchema
-                    ? FileStreamSchema
-                    : S extends z.core.$ZodOptional<infer Inner>
-                      ? CoValueSchemaFromZodSchema<Inner>
-                      : S extends z.core.$ZodUnion<
-                            infer Members extends readonly [
-                              AnyDiscriminableCoSchema,
-                              ...AnyDiscriminableCoSchema[],
-                            ]
-                          >
-                        ? CoDiscriminatedUnionSchema<Members>
-                        : never
-    : never;
-
-export type CoValueClassFromAnySchema<S extends CoValueOrZodSchema> =
+export type CoValueClassFromAnySchema<S extends CoValueClassOrSchema> =
   S extends CoValueClass<any>
     ? S
     : CoValueClass<InstanceOfSchema<S>> &
         CoValueFromRaw<InstanceOfSchema<S>> &
-        (S extends AnyAccountSchema ? AccountClassEssentials : {});
+        (S extends CoreAccountSchema ? AccountClassEssentials : {});
 
 type AccountClassEssentials = {
   fromRaw: <A extends Account>(this: AccountClass<A>, raw: RawAccount) => A;
   fromNode: <A extends Account>(this: AccountClass<A>, node: LocalNode) => A;
 };
 
-// TODO rename to ProtoCoSchema?
-export type AnyCoSchema =
-  | AnyCoMapSchema
-  | AnyAccountSchema
-  | AnyCoRecordSchema
-  | AnyCoListSchema
-  | AnyCoFeedSchema
-  | AnyCoUnionSchema
-  | AnyCoOptionalSchema
-  | AnyPlainTextSchema
-  | AnyRichTextSchema
-  | AnyFileStreamSchema;
+export type AnyCoreCoValueSchema =
+  | CoreCoMapSchema
+  | CoreAccountSchema
+  | CoreCoRecordSchema
+  | CoreCoListSchema
+  | CoreCoFeedSchema
+  | CoreCoDiscriminatedUnionSchema<any>
+  | CoreCoOptionalSchema
+  | CorePlainTextSchema
+  | CoreRichTextSchema
+  | CoreFileStreamSchema;
+
+type AnyZodSchema = z.core.$ZodType;
+
+export type AnyZodOrCoValueSchema = AnyZodSchema | CoreCoValueSchema;
 
 export type Loaded<
-  T extends CoValueClass | AnyCoSchema,
+  T extends CoValueClassOrSchema,
   R extends ResolveQuery<T> = true,
 > = Resolved<NonNullable<InstanceOfSchemaCoValuesNullable<T>>, R>;
 
-export type ResolveQuery<T extends CoValueClass | AnyCoSchema> = RefsToResolve<
+export type ResolveQuery<T extends CoValueClassOrSchema> = RefsToResolve<
   NonNullable<InstanceOfSchemaCoValuesNullable<T>>
 >;
 
 export type ResolveQueryStrict<
-  T extends CoValueClass | AnyCoSchema,
+  T extends CoValueClassOrSchema,
   R extends ResolveQuery<T>,
 > = RefsToResolveStrict<NonNullable<InstanceOfSchemaCoValuesNullable<T>>, R>;
 
-export type InitFor<T extends CoValueClass | AnyCoSchema> =
-  T extends AnyCoMapSchema<infer Shape> ? Simplify<CoMapInitZod<Shape>> : never;
+export type InitFor<T extends CoValueClassOrSchema> = T extends CoreCoMapSchema<
+  infer Shape
+>
+  ? Simplify<CoMapInitZod<Shape>>
+  : never;

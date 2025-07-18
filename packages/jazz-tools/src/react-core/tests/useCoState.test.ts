@@ -520,12 +520,13 @@ describe("useCoState", () => {
     const Message = co.map({
       content: CoRichText,
     });
+    const Messages = co.list(Message);
     const Thread = co.map({
-      messages: co.list(Message),
+      messages: Messages,
     });
 
     const thread = Thread.create({
-      messages: Thread.def.shape.messages.create([
+      messages: Messages.create([
         Message.create({
           content: CoRichText.create("Hello man!"),
         }),

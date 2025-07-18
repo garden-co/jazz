@@ -69,33 +69,6 @@ test("load a missing optional value (co.optional)", async () => {
   expect(john.dog).toBeUndefined();
 });
 
-test("load a missing optional value (z.optional)", async () => {
-  const Dog = co.map({
-    name: z.string(),
-  });
-
-  const Person = co.map({
-    name: z.string(),
-    dog: z.optional(Dog),
-  });
-
-  const group = Group.create();
-  const map = Person.create({ name: "John" }, group);
-  group.addMember("everyone", "reader");
-
-  const alice = await createJazzTestAccount();
-
-  const john = await Person.load(map.id, {
-    loadAs: alice,
-    resolve: { dog: true },
-  });
-
-  assert(john);
-
-  expect(john.name).toBe("John");
-  expect(john.dog).toBeUndefined();
-});
-
 test("load a missing optional value (Schema.optional)", async () => {
   const Dog = co.map({
     name: z.string(),
@@ -214,13 +187,14 @@ test("returns null if the value is unavailable after retries", async () => {
 test("load a large coValue", async () => {
   const syncServer = await setupJazzTestSync({ asyncPeers: true });
 
+  const Data = co.list(z.string());
   const LargeDataset = co.map({
     metadata: z.object({
       name: z.string(),
       description: z.string(),
       createdAt: z.number(),
     }),
-    data: co.list(z.string()),
+    data: Data,
   });
 
   const group = Group.create(syncServer);
@@ -232,7 +206,7 @@ test("load a large coValue", async () => {
           "A dataset with many entries for testing large coValue loading",
         createdAt: Date.now(),
       },
-      data: LargeDataset.def.shape.data.create([], group),
+      data: Data.create([], group),
     },
     group,
   );

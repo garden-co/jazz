@@ -3,7 +3,7 @@ import { Account } from "../coValues/account.js";
 import type {
   CoValue,
   CoValueClass,
-  CoValueOrZodSchema,
+  CoValueClassOrSchema,
   ID,
 } from "../internal.js";
 
@@ -68,7 +68,7 @@ export function parseInviteLink(inviteURL: string):
 }
 
 /** @category Invite Links */
-export function consumeInviteLink<S extends CoValueOrZodSchema>({
+export function consumeInviteLink<S extends CoValueClassOrSchema>({
   inviteURL,
   as = Account.getMe(),
   forValueHint,

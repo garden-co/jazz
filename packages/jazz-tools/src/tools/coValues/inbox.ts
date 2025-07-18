@@ -3,11 +3,11 @@ import { CoStreamItem, RawCoStream } from "cojson";
 import {
   type Account,
   CoValue,
-  CoValueOrZodSchema,
+  CoValueClassOrSchema,
   ID,
   InstanceOfSchema,
   activeAccountContext,
-  anySchemaToCoSchema,
+  coValueClassFromCoValueClassOrSchema,
   loadCoValue,
 } from "../internal.js";
 
@@ -108,7 +108,7 @@ export class Inbox {
     this.failed = failed;
   }
 
-  subscribe<M extends CoValueOrZodSchema, O extends CoValue | undefined>(
+  subscribe<M extends CoValueClassOrSchema, O extends CoValue | undefined>(
     Schema: M,
     callback: (
       message: InstanceOfSchema<M>,
@@ -171,7 +171,7 @@ export class Inbox {
                 }
 
                 return loadCoValue(
-                  anySchemaToCoSchema(Schema),
+                  coValueClassFromCoValueClassOrSchema(Schema),
                   message.get("payload")!,
                   {
                     loadAs: account,

@@ -11,7 +11,7 @@ import {
   AnonymousJazzAgent,
   AnyAccountSchema,
   CoValue,
-  CoValueOrZodSchema,
+  CoValueClassOrSchema,
   InboxSender,
   InstanceOfSchema,
   JazzContextManager,
@@ -20,7 +20,7 @@ import {
   ResolveQuery,
   ResolveQueryStrict,
   SubscriptionScope,
-  anySchemaToCoSchema,
+  coValueClassFromCoValueClassOrSchema,
 } from "jazz-tools";
 import { JazzContext, JazzContextManagerContext } from "./provider.js";
 import { getCurrentAccountFromContextManager } from "./utils.js";
@@ -80,7 +80,7 @@ export function useIsAuthenticated() {
 }
 
 function useCoValueSubscription<
-  S extends CoValueOrZodSchema,
+  S extends CoValueClassOrSchema,
   const R extends ResolveQuery<S>,
 >(
   Schema: S,
@@ -107,7 +107,7 @@ function useCoValueSubscription<
       options?.resolve ?? true,
       id,
       {
-        ref: anySchemaToCoSchema(Schema),
+        ref: coValueClassFromCoValueClassOrSchema(Schema),
         optional: true,
       },
     );
@@ -142,7 +142,7 @@ function useCoValueSubscription<
 }
 
 export function useCoState<
-  S extends CoValueOrZodSchema,
+  S extends CoValueClassOrSchema,
   const R extends ResolveQuery<S> = true,
 >(
   Schema: S,
@@ -198,7 +198,7 @@ function useAccountSubscription<
 
     const node = contextManager.getCurrentValue()!.node;
     const subscription = new SubscriptionScope<any>(node, resolve, agent.id, {
-      ref: anySchemaToCoSchema(Schema),
+      ref: coValueClassFromCoValueClassOrSchema(Schema),
       optional: true,
     });
 

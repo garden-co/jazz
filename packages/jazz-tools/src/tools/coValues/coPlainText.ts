@@ -14,7 +14,7 @@ import {
   Resolved,
   SubscribeListenerOptions,
   SubscribeRestArgs,
-  anySchemaToCoSchema,
+  coValueClassFromCoValueClassOrSchema,
   parseCoValueCreateOptions,
 } from "../internal.js";
 import {
@@ -47,9 +47,9 @@ export class CoPlainText extends String implements CoValue {
 
     if (agent instanceof ControlledAccount) {
       return coValuesCache.get(agent.account, () =>
-        anySchemaToCoSchema(RegisteredSchemas["Account"]).fromRaw(
-          agent.account,
-        ),
+        coValueClassFromCoValueClassOrSchema(
+          RegisteredSchemas["Account"],
+        ).fromRaw(agent.account),
       );
     }
 

@@ -1899,8 +1899,8 @@ importers:
         specifier: ^5.0.0
         version: 5.34.6
       zod:
-        specifier: 3.25.28
-        version: 3.25.28
+        specifier: 4.0.5
+        version: 4.0.5
     devDependencies:
       '@sveltejs/package':
         specifier: ^2.0.0
@@ -13347,6 +13347,9 @@ packages:
 
   zod@3.25.28:
     resolution: {integrity: sha512-/nt/67WYKnr5by3YS7LroZJbtcCBurDKKPBPWWzaxvVCGuG/NOsiKkrjoOhI8mJ+SQUXEbUzeB3S+6XDUEEj7Q==}
+
+  zod@4.0.5:
+    resolution: {integrity: sha512-/5UuuRPStvHXu7RS+gmvRf4NXrNxpSllGwDnCBcJZtQsKrviYXm54yDGV2KYNLT5kq0lHGcl7lqWJLgSaG+tgA==}
 
   zwitch@2.0.4:
     resolution: {integrity: sha512-bXE4cR/kVZhKZX/RjPEflHaKVhUVl85noU3v6b8apfQEc1x4A+zBxjZ4lN8LqGd6WZ3dl98pY4o717VFmoPp+A==}
@@ -27013,5 +27016,7 @@ snapshots:
   zod@3.22.3: {}
 
   zod@3.25.28: {}
+
+  zod@4.0.5: {}
 
   zwitch@2.0.4: {}

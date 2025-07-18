@@ -1,33 +1,37 @@
-import { isAnyCoValueSchema } from "../runtimeConverters/zodSchemaToCoSchema.js";
 import { z } from "../zodReExport.js";
-import { AnyCoSchema, CoValueSchemaFromZodSchema } from "../zodSchema.js";
+import { CoValueSchemaFromCoreSchema } from "../zodSchema.js";
+import { CoreCoValueSchema } from "./CoValueSchema.js";
 
-export type AnyCoOptionalSchema<
-  Shape extends z.core.$ZodType = z.core.$ZodType,
-> = z.ZodOptional<Shape> & {
-  collaborative: true;
+type CoOptionalSchemaDefinition<
+  Shape extends CoreCoValueSchema = CoreCoValueSchema,
+> = {
+  innerType: Shape;
 };
 
-export type CoOptionalSchema<Shape extends z.core.$ZodType = z.core.$ZodType> =
-  AnyCoOptionalSchema<Shape> & {
-    getCoValueClass: () => CoValueSchemaFromZodSchema<AnyCoSchema>["getCoValueClass"];
-  };
+export interface CoreCoOptionalSchema<
+  Shape extends CoreCoValueSchema = CoreCoValueSchema,
+> extends CoreCoValueSchema {
+  builtin: "CoOptional";
+  getDefinition: () => CoOptionalSchemaDefinition<Shape>;
+}
 
-export function createCoOptionalSchema<T extends AnyCoSchema>(
+export interface CoOptionalSchema<
+  Shape extends CoreCoValueSchema = CoreCoValueSchema,
+> extends CoreCoOptionalSchema<Shape> {
+  getCoValueClass: () => CoValueSchemaFromCoreSchema<Shape>["getCoValueClass"];
+}
+
+export function createCoOptionalSchema<T extends CoreCoValueSchema>(
   schema: T,
 ): CoOptionalSchema<T> {
-  return Object.assign(z.optional(schema), {
+  const zodSchema = z.optional(schema as any);
+  return Object.assign(zodSchema, {
     collaborative: true,
+    builtin: "CoOptional" as const,
     getCoValueClass: () => {
       return (
-        schema as CoValueSchemaFromZodSchema<AnyCoSchema>
+        schema as unknown as CoValueSchemaFromCoreSchema<T>
       ).getCoValueClass();
     },
   }) as unknown as CoOptionalSchema<T>;
-}
-
-export function isAnyCoOptionalSchema(
-  schema: z.core.$ZodType,
-): schema is CoOptionalSchema<z.core.$ZodType> {
-  return isAnyCoValueSchema(schema) && schema._zod.def.type === "optional";
 }

@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 
-import { CoValueOrZodSchema, parseInviteLink } from "jazz-tools";
+import { CoValueClassOrSchema, parseInviteLink } from "jazz-tools";
 import { useJazzContext } from "jazz-tools/react-core";
 import { Linking } from "react-native";
 
@@ -15,7 +15,7 @@ export {
   useAccount,
 } from "jazz-tools/react-core";
 
-export function useAcceptInviteNative<S extends CoValueOrZodSchema>({
+export function useAcceptInviteNative<S extends CoValueClassOrSchema>({
   invitedObjectSchema,
   onAccept,
   forValueHint,

@@ -1,4 +1,4 @@
-import { anySchemaToCoSchema } from "jazz-tools";
+import { coValueClassFromCoValueClassOrSchema } from "jazz-tools";
 import { useAccount, useCoState } from "jazz-tools/react";
 import { useEffect, useState } from "react";
 import { createCredentiallessIframe } from "../../lib/createCredentiallessIframe";
@@ -44,7 +44,7 @@ export function UploaderPeer() {
     // The downloader peer will set the syncCompleted to true when the download is complete.
     // We use this to measure the sync duration.
     await waitForCoValue(
-      anySchemaToCoSchema(UploadedFile),
+      coValueClassFromCoValueClassOrSchema(UploadedFile),
       file.id,
       (value) => value.syncCompleted,
       { loadAs: account.me },

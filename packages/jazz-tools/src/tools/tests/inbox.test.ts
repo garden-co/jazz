@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { Group, Inbox, InboxSender, z } from "../exports";
-import { Loaded, anySchemaToCoSchema, co } from "../internal";
+import { Loaded, co, coValueClassFromCoValueClassOrSchema } from "../internal";
 import { setupTwoNodes, waitFor } from "./utils";
 
 const Message = co.map({
@@ -18,7 +18,8 @@ describe("Inbox", () => {
 
       const { clientAccount: sender, serverAccount: receiver } =
         await setupTwoNodes({
-          ServerAccountSchema: anySchemaToCoSchema(WorkerAccount),
+          ServerAccountSchema:
+            coValueClassFromCoValueClassOrSchema(WorkerAccount),
         });
 
       await expect(() => InboxSender.load(receiver.id, sender)).rejects.toThrow(

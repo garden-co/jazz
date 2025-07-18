@@ -2,13 +2,13 @@ import { RawCoPlainText } from "cojson";
 import { Account, CoPlainText, Group } from "../../../internal.js";
 import { AnonymousJazzAgent } from "../../anonymousJazzAgent.js";
 import { z } from "../zodReExport.js";
+import { CoreCoValueSchema } from "./CoValueSchema.js";
 
-export type AnyPlainTextSchema = z.core.$ZodCustom<CoPlainText, unknown> & {
-  collaborative: true;
+export interface CorePlainTextSchema extends CoreCoValueSchema {
   builtin: "CoPlainText";
-};
+}
 
-export type PlainTextSchema = AnyPlainTextSchema & {
+export interface PlainTextSchema extends CorePlainTextSchema {
   create(
     text: string,
     options?: { owner: Account | Group } | Account | Group,
@@ -28,10 +28,20 @@ export type PlainTextSchema = AnyPlainTextSchema & {
   ): () => void;
   fromRaw(raw: RawCoPlainText): CoPlainText;
   getCoValueClass: () => typeof CoPlainText;
-};
+}
+
+export function createCoreCoPlainTextSchema(): CorePlainTextSchema {
+  const zodSchema = z.instanceof(CoPlainText).meta({
+    collaborative: true,
+  });
+  return Object.assign(zodSchema, {
+    collaborative: true as const,
+    builtin: "CoPlainText" as const,
+  });
+}
 
 export function enrichPlainTextSchema(
-  schema: AnyPlainTextSchema,
+  schema: CorePlainTextSchema,
   coValueClass: typeof CoPlainText,
 ): PlainTextSchema {
   return Object.assign(schema, {

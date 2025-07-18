@@ -4,8 +4,8 @@ import {
   Account,
   CryptoProvider,
   Loaded,
-  anySchemaToCoSchema,
   co,
+  coValueClassFromCoValueClassOrSchema,
   subscribeToCoValue,
   z,
 } from "../exports.js";
@@ -93,7 +93,7 @@ describe("SchemaUnion", () => {
     );
     let currentValue = "Submit";
     const unsubscribe = subscribeToCoValue(
-      anySchemaToCoSchema(WidgetUnion),
+      coValueClassFromCoValueClassOrSchema(WidgetUnion),
       buttonWidget.id,
       { loadAs: me, syncResolution: true },
       (value: Loaded<typeof WidgetUnion>) => {

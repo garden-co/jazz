@@ -1,52 +1,46 @@
 import {
   type AccountSchema,
-  AnyAccountSchema,
-  AnyCoFeedSchema,
-  AnyCoListSchema,
-  AnyCoSchema,
-  AnyFileStreamSchema,
-  AnyPlainTextSchema,
+  AnyZodOrCoValueSchema,
   BaseAccountShape,
-  CoFeed,
   type CoFeedSchema,
   type CoListSchema,
   type CoMapSchema,
-  CoPlainText,
   type CoProfileSchema,
   type CoRecordSchema,
-  CoRichText,
   type DefaultProfileShape,
-  FileStream,
   type FileStreamSchema,
   ImageDefinition,
   type PlainTextSchema,
   type Simplify,
-  zodSchemaToCoSchema,
+  createCoreAccountSchema,
+  createCoreCoFeedSchema,
+  createCoreCoListSchema,
+  createCoreCoMapSchema,
+  createCoreCoPlainTextSchema,
+  createCoreFileStreamSchema,
+  hydrateCoreCoValueSchema,
 } from "../../internal.js";
 import {
-  AnyDiscriminableCoSchema,
   CoDiscriminatedUnionSchema,
+  DiscriminableCoValueSchemas,
+  createCoreCoDiscriminatedUnionSchema,
 } from "./schemaTypes/CoDiscriminatedUnionSchema.js";
 import {
   CoOptionalSchema,
   createCoOptionalSchema,
 } from "./schemaTypes/CoOptionalSchema.js";
+import { CoreCoValueSchema } from "./schemaTypes/CoValueSchema.js";
 import {
-  AnyRichTextSchema,
   RichTextSchema,
+  createCoreCoRichTextSchema,
 } from "./schemaTypes/RichTextSchema.js";
 import { z } from "./zodReExport.js";
 
 export const coMapDefiner = <Shape extends z.core.$ZodLooseShape>(
   shape: Shape,
 ): CoMapSchema<Shape> => {
-  const objectSchema = z.object(shape).meta({
-    collaborative: true,
-  });
-  const enrichedSchema = Object.assign(objectSchema, {
-    collaborative: true,
-  });
-  return zodSchemaToCoSchema(enrichedSchema);
+  const coreSchema = createCoreCoMapSchema(shape);
+  return hydrateCoreCoValueSchema(coreSchema);
 };
 
 /**
@@ -96,19 +90,13 @@ export const coAccountDefiner = <Shape extends BaseAccountShape>(
     root: coMapDefiner({}),
   } as unknown as Shape,
 ): AccountSchema<Shape> => {
-  const schema = z.object(shape).meta({
-    collaborative: true,
-  });
-  const enrichedSchema = Object.assign(schema, {
-    collaborative: true,
-    builtin: "Account",
-  }) as AnyAccountSchema<Shape>;
-  return zodSchemaToCoSchema(enrichedSchema);
+  const coreSchema = createCoreAccountSchema(shape);
+  return hydrateCoreCoValueSchema(coreSchema);
 };
 
 export const coRecordDefiner = <
   K extends z.core.$ZodString<string>,
-  V extends z.core.$ZodType,
+  V extends AnyZodOrCoValueSchema,
 >(
   _keyType: K,
   valueType: V,
@@ -119,16 +107,11 @@ export const coRecordDefiner = <
   >;
 };
 
-export const coListDefiner = <T extends z.core.$ZodType>(
+export const coListDefiner = <T extends AnyZodOrCoValueSchema>(
   element: T,
 ): CoListSchema<T> => {
-  const schema = z.array(element).meta({
-    collaborative: true,
-  });
-  const enrichedSchema = Object.assign(schema, {
-    collaborative: true,
-  }) as AnyCoListSchema<T>;
-  return zodSchemaToCoSchema(enrichedSchema) as unknown as CoListSchema<T>;
+  const coreSchema = createCoreCoListSchema(element);
+  return hydrateCoreCoValueSchema(coreSchema) as unknown as CoListSchema<T>;
 };
 
 export const coProfileDefiner = <
@@ -144,61 +127,47 @@ export const coProfileDefiner = <
   return coMapDefiner(ehnancedShape) as CoProfileSchema<Shape>;
 };
 
-export const coFeedDefiner = <T extends z.core.$ZodType>(
+export const coFeedDefiner = <T extends AnyZodOrCoValueSchema>(
   element: T,
 ): CoFeedSchema<T> => {
-  const schema = z.instanceof(CoFeed);
-  const enrichedSchema = Object.assign(schema, {
-    collaborative: true,
-    builtin: "CoFeed",
-    element,
-  }) as AnyCoFeedSchema<T>;
-  return zodSchemaToCoSchema(enrichedSchema);
+  const coreSchema = createCoreCoFeedSchema(element);
+  return hydrateCoreCoValueSchema(coreSchema);
 };
 
 export const coFileStreamDefiner = (): FileStreamSchema => {
-  const schema = z.instanceof(FileStream);
-  const enrichedSchema = Object.assign(schema, {
-    collaborative: true,
-    builtin: "FileStream",
-  }) as AnyFileStreamSchema;
-  return zodSchemaToCoSchema(enrichedSchema);
+  const coreSchema = createCoreFileStreamSchema();
+  return hydrateCoreCoValueSchema(coreSchema);
 };
 
 export const coPlainTextDefiner = (): PlainTextSchema => {
-  const schema = z.instanceof(CoPlainText);
-  const enrichedSchema = Object.assign(schema, {
-    collaborative: true,
-    builtin: "CoPlainText",
-  }) as AnyPlainTextSchema;
-  return zodSchemaToCoSchema(enrichedSchema);
+  const coreSchema = createCoreCoPlainTextSchema();
+  return hydrateCoreCoValueSchema(coreSchema);
 };
 
 export const coRichTextDefiner = (): RichTextSchema => {
-  const schema = z.instanceof(CoRichText);
-  const enrichedSchema = Object.assign(schema, {
-    collaborative: true,
-    builtin: "CoRichText",
-  }) as AnyRichTextSchema;
-  return zodSchemaToCoSchema(enrichedSchema);
+  const coreSchema = createCoreCoRichTextSchema();
+  return hydrateCoreCoValueSchema(coreSchema);
 };
 
 export const coImageDefiner = (): typeof ImageDefinition => {
   return ImageDefinition;
 };
 
-export const coOptionalDefiner = <T extends AnyCoSchema>(
+export const coOptionalDefiner = <T extends CoreCoValueSchema>(
   schema: T,
 ): CoOptionalSchema<T> => {
   return createCoOptionalSchema(schema);
 };
 
 export const coDiscriminatedUnionDefiner = <
-  T extends readonly [AnyDiscriminableCoSchema, ...AnyDiscriminableCoSchema[]],
+  Options extends DiscriminableCoValueSchemas,
 >(
   discriminator: string,
-  schemas: T,
-): CoDiscriminatedUnionSchema<T> => {
-  const schema = z.discriminatedUnion(discriminator, schemas as any);
-  return zodSchemaToCoSchema(schema);
+  schemas: Options,
+): CoDiscriminatedUnionSchema<Options> => {
+  const coreSchema = createCoreCoDiscriminatedUnionSchema(
+    discriminator,
+    schemas,
+  );
+  return hydrateCoreCoValueSchema(coreSchema);
 };

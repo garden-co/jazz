@@ -3,7 +3,7 @@ import { RegisteredSchemas } from "../coValues/registeredSchemas.js";
 import {
   CoValue,
   RefEncoded,
-  anySchemaToCoSchema,
+  coValueClassFromCoValueClassOrSchema,
   instantiateRefEncoded,
 } from "../internal.js";
 import { coValuesCache } from "../lib/cache.js";
@@ -14,7 +14,9 @@ export function getOwnerFromRawValue(raw: RawCoValue) {
 
   return coValuesCache.get(owner, () =>
     owner instanceof RawAccount
-      ? anySchemaToCoSchema(RegisteredSchemas["Account"]).fromRaw(owner)
+      ? coValueClassFromCoValueClassOrSchema(
+          RegisteredSchemas["Account"],
+        ).fromRaw(owner)
       : RegisteredSchemas["Group"].fromRaw(owner as any),
   );
 }

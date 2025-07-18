@@ -25,8 +25,7 @@ import {
   CoValueFromRaw,
   InstanceOfSchema,
   Loaded,
-  anySchemaToCoSchema,
-  zodSchemaToCoSchema,
+  coValueClassFromCoValueClassOrSchema,
 } from "../internal";
 import {
   createJazzTestAccount,
@@ -244,7 +243,7 @@ describe("ContextManager", () => {
 
     const AccountRoot = co.map({
       value: z.string(),
-      get transferredRoot(): z.ZodOptional<typeof AccountRoot> {
+      get transferredRoot(): co.Optional<typeof AccountRoot> {
         return co.optional(AccountRoot);
       },
     });
@@ -270,7 +269,7 @@ describe("ContextManager", () => {
     >();
 
     await customManager.createContext({
-      AccountSchema: anySchemaToCoSchema(CustomAccount),
+      AccountSchema: coValueClassFromCoValueClassOrSchema(CustomAccount),
       storage: dbFilename,
       onAnonymousAccountDiscarded: async (anonymousAccount) => {
         const anonymousAccountWithRoot = await anonymousAccount.ensureLoaded({
@@ -336,7 +335,7 @@ describe("ContextManager", () => {
 
     // Create initial anonymous context
     await customManager.createContext({
-      AccountSchema: anySchemaToCoSchema(CustomAccount),
+      AccountSchema: coValueClassFromCoValueClassOrSchema(CustomAccount),
     });
 
     const account = (
@@ -387,7 +386,7 @@ describe("ContextManager", () => {
 
     // Create initial anonymous context
     await customManager.createContext({
-      AccountSchema: anySchemaToCoSchema(CustomAccount),
+      AccountSchema: coValueClassFromCoValueClassOrSchema(CustomAccount),
     });
 
     const account = (
@@ -412,7 +411,7 @@ describe("ContextManager", () => {
   test("onAnonymousAccountDiscarded should work on transfering data between accounts", async () => {
     const AccountRoot = co.map({
       value: z.string(),
-      get transferredRoot(): z.ZodOptional<typeof AccountRoot> {
+      get transferredRoot(): co.Optional<typeof AccountRoot> {
         return co.optional(AccountRoot);
       },
     });
@@ -459,12 +458,12 @@ describe("ContextManager", () => {
     // Create initial anonymous context
     await customManager.createContext({
       onAnonymousAccountDiscarded,
-      AccountSchema: anySchemaToCoSchema(CustomAccount),
+      AccountSchema: coValueClassFromCoValueClassOrSchema(CustomAccount),
     });
 
     const account = await createJazzTestAccount({
       isCurrentActiveAccount: true,
-      AccountSchema: zodSchemaToCoSchema(CustomAccount),
+      AccountSchema: CustomAccount,
     });
 
     await customManager.authenticate({

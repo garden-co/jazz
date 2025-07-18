@@ -55,7 +55,7 @@ By connecting CoValues through these direct references, you can build robust and
 ## Recursive references with DiscriminatedUnion
 In advanced schemas, you may want a CoValue that recursively references itself. For example, a `ReferenceItem` that contains a list of other items like `NoteItem` or `AttachmentItem`. This is common in tree-like structures such as threaded comments or nested project outlines.
 
-You can model this with a Zod `z.discriminatedUnion`, but TypeScript’s type inference doesn't handle recursive unions well without a workaround.
+You can model this with a Zod `co.discriminatedUnion`, but TypeScript’s type inference doesn't handle recursive unions well without a workaround.
 
 Here’s how to structure your schema to avoid circular reference errors.
 
@@ -90,7 +90,7 @@ export const ReferenceItem = co.map({
 });
 
 // Create the recursive union
-export const ProjectContextItem = z.discriminatedUnion("type",  [NoteItem, AttachmentItem, ReferenceItem]);
+export const ProjectContextItem = co.discriminatedUnion("type",  [NoteItem, AttachmentItem, ReferenceItem]);
 
 // Final list of recursive types
 export const ProjectContextItemList = co.list(ProjectContextItem);

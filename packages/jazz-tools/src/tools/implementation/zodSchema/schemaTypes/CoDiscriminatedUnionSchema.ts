@@ -1,34 +1,47 @@
 import {
   Account,
   AnonymousJazzAgent,
-  AnyCoSchema,
+  InstanceOfSchema,
   InstanceOrPrimitiveOfSchemaCoValuesNullable,
-  RefsToResolve,
-  RefsToResolveStrict,
   Resolved,
   SchemaUnion,
+  SchemaUnionConcreteSubclass,
   SubscribeListenerOptions,
+  coOptionalDefiner,
 } from "../../../internal.js";
 import { z } from "../zodReExport.js";
+import { CoOptionalSchema } from "./CoOptionalSchema.js";
+import { CoreCoValueSchema } from "./CoValueSchema.js";
 
-export type AnyDiscriminableCoSchema = AnyCoSchema &
-  z.core.$ZodTypeDiscriminable;
+export interface DiscriminableCoValueSchemaDefinition {
+  discriminatorMap: z.core.$ZodDiscriminatedUnionInternals["propValues"];
+}
 
-export type AnyCoDiscriminatedUnionSchema<
-  Types extends readonly [
-    AnyDiscriminableCoSchema,
-    ...AnyDiscriminableCoSchema[],
-  ],
-> = z.ZodDiscriminatedUnion<Types> & {
-  collaborative: true;
-};
+export interface DiscriminableCoreCoValueSchema extends CoreCoValueSchema {
+  getDefinition: () => DiscriminableCoValueSchemaDefinition;
+}
 
-export type CoDiscriminatedUnionSchema<
-  Types extends readonly [
-    AnyDiscriminableCoSchema,
-    ...AnyDiscriminableCoSchema[],
-  ],
-> = AnyCoDiscriminatedUnionSchema<Types> & {
+export interface CoDiscriminatedUnionSchemaDefinition<
+  Options extends DiscriminableCoValueSchemas,
+> extends DiscriminableCoValueSchemaDefinition {
+  discriminator: string;
+  options: Options;
+}
+
+export type DiscriminableCoValueSchemas = [
+  DiscriminableCoreCoValueSchema,
+  ...DiscriminableCoreCoValueSchema[],
+];
+
+export interface CoreCoDiscriminatedUnionSchema<
+  Options extends DiscriminableCoValueSchemas = DiscriminableCoValueSchemas,
+> extends DiscriminableCoreCoValueSchema {
+  builtin: "CoDiscriminatedUnion";
+  getDefinition: () => CoDiscriminatedUnionSchemaDefinition<Options>;
+}
+export interface CoDiscriminatedUnionSchema<
+  Options extends DiscriminableCoValueSchemas,
+> extends CoreCoDiscriminatedUnionSchema<Options> {
   load(
     id: string,
     options?: {
@@ -36,40 +49,77 @@ export type CoDiscriminatedUnionSchema<
       skipRetry?: boolean;
     },
   ): Promise<Resolved<
-    CoDiscriminatedUnionInstanceCoValuesNullable<Types> & SchemaUnion,
+    CoDiscriminatedUnionInstanceCoValuesNullable<Options> & SchemaUnion,
     true
   > | null>;
 
   subscribe(
     id: string,
     options: SubscribeListenerOptions<
-      CoDiscriminatedUnionInstanceCoValuesNullable<Types> & SchemaUnion,
+      CoDiscriminatedUnionInstanceCoValuesNullable<Options> & SchemaUnion,
       true
     >,
     listener: (
       value: Resolved<
-        CoDiscriminatedUnionInstanceCoValuesNullable<Types> & SchemaUnion,
+        CoDiscriminatedUnionInstanceCoValuesNullable<Options> & SchemaUnion,
         true
       >,
       unsubscribe: () => void,
     ) => void,
   ): () => void;
 
-  getCoValueClass: () => typeof SchemaUnion;
-};
+  getCoValueClass: () => SchemaUnionConcreteSubclass<
+    InstanceOfSchema<Options[number]>
+  >;
+
+  optional(): CoOptionalSchema<CoDiscriminatedUnionSchema<Options>>;
+}
+
+export function createCoreCoDiscriminatedUnionSchema<
+  Options extends DiscriminableCoValueSchemas,
+>(
+  discriminator: string,
+  schemas: Options,
+): CoreCoDiscriminatedUnionSchema<Options> {
+  const zodSchema = z.discriminatedUnion(discriminator, schemas as any);
+  return Object.assign(zodSchema, {
+    collaborative: true as const,
+    builtin: "CoDiscriminatedUnion" as const,
+    getDefinition: () => ({
+      discriminator,
+      get discriminatorMap() {
+        const propValues: DiscriminableCoValueSchemaDefinition["discriminatorMap"] =
+          {};
+        for (const option of schemas) {
+          const dm = option.getDefinition().discriminatorMap;
+          if (!dm || Object.keys(dm).length === 0)
+            throw new Error(
+              `Invalid discriminated union option at index "${schemas.indexOf(option)}"`,
+            );
+          for (const [k, v] of Object.entries(dm)) {
+            propValues[k] ??= new Set();
+            for (const val of v) {
+              propValues[k].add(val);
+            }
+          }
+        }
+        return propValues;
+      },
+      get options() {
+        return schemas;
+      },
+    }),
+  });
+}
 
 export function enrichCoDiscriminatedUnionSchema<
-  Types extends readonly [
-    AnyDiscriminableCoSchema,
-    ...AnyDiscriminableCoSchema[],
-  ],
+  Options extends DiscriminableCoValueSchemas,
 >(
-  schema: z.ZodDiscriminatedUnion<Types>,
-  coValueClass: typeof SchemaUnion,
-): CoDiscriminatedUnionSchema<Types> {
-  return Object.assign(schema, {
+  schema: CoreCoDiscriminatedUnionSchema<Options>,
+  coValueClass: SchemaUnionConcreteSubclass<InstanceOfSchema<Options[number]>>,
+): CoDiscriminatedUnionSchema<Options> {
+  const coValueSchema = Object.assign(schema, {
     load: (...args: [any, ...any]) => {
-      // @ts-expect-error
       return coValueClass.load(...args);
     },
     subscribe: (...args: [any, ...any[]]) => {
@@ -79,12 +129,14 @@ export function enrichCoDiscriminatedUnionSchema<
     getCoValueClass: () => {
       return coValueClass;
     },
-  }) as unknown as CoDiscriminatedUnionSchema<Types>;
+
+    optional: () => {
+      return coOptionalDefiner(coValueSchema);
+    },
+  }) as unknown as CoDiscriminatedUnionSchema<Options>;
+  return coValueSchema;
 }
 
 type CoDiscriminatedUnionInstanceCoValuesNullable<
-  Types extends readonly [
-    AnyDiscriminableCoSchema,
-    ...AnyDiscriminableCoSchema[],
-  ],
-> = NonNullable<InstanceOrPrimitiveOfSchemaCoValuesNullable<Types[number]>>;
+  Options extends DiscriminableCoValueSchemas,
+> = NonNullable<InstanceOrPrimitiveOfSchemaCoValuesNullable<Options[number]>>;

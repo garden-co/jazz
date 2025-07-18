@@ -368,51 +368,6 @@ describe("co.map and Zod schema compatibility", () => {
     //   expect(failedMap.result).toEqual({ status: "failed", error: "error" });
     // });
 
-    it("should handle discriminated unions of CoValues", () => {
-      const Dog = co.map({
-        type: z.literal("dog"),
-        breed: z.string(),
-      });
-
-      const Cat = co.map({
-        type: z.literal("cat"),
-        name: z.string(),
-      });
-
-      const Person = co.map({
-        pet: z.discriminatedUnion("type", [Dog, Cat]),
-      });
-
-      const person = Person.create({
-        pet: Dog.create({ type: "dog", breed: "Labrador" }),
-      });
-
-      expect(person.pet).toEqual({ type: "dog", breed: "Labrador" });
-
-      person.pet = Cat.create({ type: "cat", name: "Whiskers" });
-
-      expect(person.pet).toEqual({ type: "cat", name: "Whiskers" });
-    });
-
-    it("should handle optional CoValues", () => {
-      const Dog = co.map({
-        name: z.string(),
-        breed: z.string(),
-      });
-
-      const Person = co.map({
-        pet: z.optional(Dog),
-      });
-
-      const person = Person.create({});
-
-      expect(person.pet).toBeUndefined();
-
-      person.pet = Dog.create({ name: "Rex", breed: "Labrador" });
-
-      expect(person.pet).toEqual({ name: "Rex", breed: "Labrador" });
-    });
-
     // it("should handle intersections", async () => {
     //   const schema = co.map({
     //     value: z.intersection(
@@ -501,5 +456,55 @@ describe("co.map and Zod schema compatibility", () => {
       const map = schema.create({ readonly: { name: "John" } }, account);
       expect(map.readonly).toEqual({ name: "John" });
     });
+  });
+});
+
+describe("z.object() and CoValue schema compatibility", () => {
+  it("z.object() should throw an error when used with CoValue schema values", () => {
+    const coValueSchema = co.map({});
+    expect(() => z.object({ value: coValueSchema })).toThrow(
+      "z.object() does not support collaborative types as values. Use co.map() instead",
+    );
+  });
+
+  it("z.strictObject() should throw an error when used with CoValue schema values", () => {
+    const coValueSchema = co.map({});
+    expect(() => z.strictObject({ value: coValueSchema })).toThrow(
+      "z.strictObject() does not support collaborative types as values. Use co.map() instead",
+    );
+  });
+
+  it("z.object() should continue to work with cyclic references", () => {
+    const NoteItem = z.object({
+      type: z.literal("note"),
+      content: z.string(),
+    });
+
+    const ReferenceItem = z.object({
+      type: z.literal("reference"),
+      content: z.string(),
+
+      get child(): z.ZodDiscriminatedUnion<
+        [typeof NoteItem, typeof ReferenceItem]
+      > {
+        return ProjectContextItem;
+      },
+    });
+
+    const ProjectContextItem = z.discriminatedUnion("type", [
+      NoteItem,
+      ReferenceItem,
+    ]);
+
+    const referenceItem = ReferenceItem.parse({
+      type: "reference",
+      content: "Hello",
+      child: {
+        type: "note",
+        content: "Hello",
+      },
+    });
+
+    expect(referenceItem.child.type).toEqual("note");
   });
 });
