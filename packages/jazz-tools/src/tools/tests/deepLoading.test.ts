@@ -381,6 +381,64 @@ test("The resolve type doesn't accept extra keys", async () => {
   }
 });
 
+test("The resolve type accepts keys from optional fields", async () => {
+  const Person = co.map({
+    name: z.string(),
+  });
+  const Dog = co.map({
+    type: z.literal("dog"),
+    owner: Person.optional(),
+  });
+  const Pets = co.list(Dog);
+
+  const pets = await Pets.create([
+    Dog.create({ type: "dog", owner: Person.create({ name: "Rex" }) }),
+  ]);
+
+  await pets.ensureLoaded({
+    resolve: {
+      $each: { owner: true },
+    },
+  });
+
+  expect(pets[0]?.owner?.name).toEqual("Rex");
+});
+
+test("The resolve type doesn't accept keys from discriminated unions", async () => {
+  const Person = co.map({
+    name: z.string(),
+  });
+  const Dog = co.map({
+    type: z.literal("dog"),
+    owner: Person,
+  });
+  const Cat = co.map({
+    type: z.literal("cat"),
+  });
+  const Pet = co.discriminatedUnion("type", [Dog, Cat]);
+  const Pets = co.list(Pet);
+
+  const pets = await Pets.create([
+    Dog.create({ type: "dog", owner: Person.create({ name: "Rex" }) }),
+  ]);
+
+  await pets.ensureLoaded({
+    resolve: {
+      $each: true,
+    },
+  });
+
+  await pets.ensureLoaded({
+    // @ts-expect-error cannot resolve owner
+    resolve: { $each: { owner: true } },
+  });
+
+  expect(pets).toBeTruthy();
+  if (pets?.[0]?.type === "dog") {
+    expect(pets[0].owner?.name).toEqual("Rex");
+  }
+});
+
 describe("Deep loading with unauthorized account", async () => {
   const bob = await createJazzTestAccount({
     creationProps: { name: "Bob" },
