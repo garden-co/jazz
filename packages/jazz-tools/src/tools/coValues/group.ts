@@ -153,6 +153,7 @@ export class Group extends CoValueBase implements CoValue {
     member: Group,
     role?: "reader" | "writer" | "admin" | "inherit",
   ): void;
+  addMember(member: Group | Account, role: "reader" | "writer" | "admin"): void;
   addMember(
     member: Group | Everyone | Account,
     role?: AccountRole | "inherit",

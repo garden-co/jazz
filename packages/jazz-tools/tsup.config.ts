@@ -73,8 +73,6 @@ export default defineConfig([
   {
     ...cfg,
     entry: {
-      index: "src/react/index.ts",
-      testing: "src/react/testing.tsx",
       ssr: "src/react/ssr.ts",
     },
     outDir: "dist/react",

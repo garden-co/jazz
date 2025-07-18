@@ -1,4 +1,3 @@
-import { JazzInspector } from "jazz-tools/inspector";
 import { JazzReactProvider } from "jazz-tools/react";
 import { apiKey } from "./apiKey";
 
@@ -11,7 +10,6 @@ export function Jazz({ children }: { children: React.ReactNode }) {
       }}
     >
       {children}
-      <JazzInspector />
     </JazzReactProvider>
   );
 }
