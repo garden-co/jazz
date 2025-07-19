@@ -30,7 +30,7 @@ export function GetStartedSnippetSelect() {
       </div>
       <div className="col-span-2 lg:col-span-3 flex flex-row gap-2">
         <div className="h-full items-center w-[175px]">
-          <FrameworkSelect onSelect={setSelectedFramework} size="md" routerPush={false} className="h-full md:px-4" />
+          <FrameworkSelect onSelect={setSelectedFramework} size="lg" routerPush={false} className="h-full md:px-4" />
         </div>
         <div className="flex h-full items-center">
           <Button intent="primary" size="lg" className="w-full">

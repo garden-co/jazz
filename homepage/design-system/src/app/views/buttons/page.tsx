@@ -9,20 +9,9 @@ import {
   DropdownMenu,
 } from "@/components/organisms/Dropdown";
 import { useState } from "react";
-import { Style } from "../../../utils/tailwindClassesMap";
+import { Style, variants } from "../../../utils/tailwindClassesMap";
+
 export default function ButtonsPage() {
-  const variants = [
-    "default",
-    "primary",
-    "tip",
-    "info",
-    "success",
-    "warning",
-    "alert",
-    "danger",
-    "muted",
-    "strong",
-  ] as const;
   const [selectedVariant, setSelectedVariant] = useState<Style>("default");
   return (
     <>
@@ -67,12 +56,12 @@ export default function ButtonsPage() {
               variant="inverted"
             >
               {selectedVariant}
-              <Icon name="chevronDown" size="sm" />
             </DropdownButton>
             <DropdownMenu>
               {variants.map((variant) => (
                 <DropdownItem
                   key={variant}
+                  selected={selectedVariant === variant}
                   onClick={() => setSelectedVariant(variant)}
                 >
                   {variant}
@@ -101,6 +90,14 @@ export default function ButtonsPage() {
         <Button intent={selectedVariant} variant="link">
           link
         </Button>
+      </div>
+
+      <p className="text-sm mt-2 mb-5">Buttons have 3 sizes: sm, md, lg.</p>
+
+      <div className="grid grid-cols-2 gap-2">
+        <Button size="sm">sm</Button>
+        <Button size="md">md</Button>
+        <Button size="lg">lg</Button>
       </div>
 
       <p className="my-3">
