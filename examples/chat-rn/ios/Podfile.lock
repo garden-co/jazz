@@ -8,7 +8,7 @@ PODS:
   - hermes-engine (0.80.0):
     - hermes-engine/Pre-built (= 0.80.0)
   - hermes-engine/Pre-built (0.80.0)
-  - JazzCrypto (0.15.5):
+  - JazzCrypto (0.15.12):
     - boost
     - DoubleConversion
     - fast_float
@@ -2692,7 +2692,7 @@ SPEC CHECKSUMS:
   fmt: a40bb5bd0294ea969aaaba240a927bd33d878cdd
   glog: 5683914934d5b6e4240e497e0f4a3b42d1854183
   hermes-engine: 7068e976238b29e97b3bafd09a994542af7d5c0b
-  JazzCrypto: 937be142cfccdc05e297a8e4091895fe82ced1ad
+  JazzCrypto: b8df51fa7f25c601f6006e53141bbaa1ca12e7e1
   NitroModules: b5f759d2a05356da680bfe43cd20aaa8f689917f
   op-sqlite: 11caeb381964751c263209ce125442ea57cae253
   RCT-Folly: 846fda9475e61ec7bcbf8a3fe81edfcaeb090669

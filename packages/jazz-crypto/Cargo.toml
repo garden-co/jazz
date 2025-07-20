@@ -1,6 +1,6 @@
 [package]
 name = "jazz-crypto"
-version = "0.15.5"
+version = "0.15.12"
 edition = "2021"
 build = "build.rs"
 
@@ -12,6 +12,6 @@ cxx-build = "1.0.160"
 
 [lib]
 name = "jazz_crypto"
-crate-type = ["cdylib"]
+crate-type = ["staticlib", "cdylib"]
 path = "src/rust/lib.rs"
 

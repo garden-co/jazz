@@ -1,6 +1,6 @@
 #include "HybridJazzCrypto.hpp"
 #include "lib.rs.h"
-#include "cxx.h"
+#include "rust/cxx.h"
 
 namespace margelo {
 namespace nitro {
