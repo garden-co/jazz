@@ -44,7 +44,6 @@ describe("Images upload", () => {
 
     assert(highestRes);
 
-
     const blob = highestRes.toBlob();
 
     assert(blob);
