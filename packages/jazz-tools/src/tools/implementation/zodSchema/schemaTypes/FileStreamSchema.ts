@@ -57,7 +57,9 @@ export function enrichFileStreamSchema(
     createFromBlob: (...args: [any, ...any[]]) => {
       return coValueClass.createFromBlob(...args);
     },
-    createFromArrayBuffer: (...args: Parameters<typeof FileStream.createFromArrayBuffer>) => {
+    createFromArrayBuffer: (
+      ...args: Parameters<typeof FileStream.createFromArrayBuffer>
+    ) => {
       return coValueClass.createFromArrayBuffer(...args);
     },
     load: (...args: [any, ...any[]]) => {
