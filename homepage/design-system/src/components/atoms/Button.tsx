@@ -12,6 +12,7 @@ import {
   colorToBgMap20,
   shadowClassesBase,
   sizeClasses,
+  styleToBgGradientColorMap,
   styleToBgGradientHoverMap,
   styleToBgTransparentActiveMap,
   styleToBorderMap,
@@ -151,7 +152,7 @@ const textColorVariant = (style: Style) => {
 };
 
 const variantClass = (intent: Style) =>
-  `${styleToGlassButtonClassMap[intent]} ${textColorVariant(intent)} ${styleToButtonStateMap[intent]} ${shadowClassesBase} shadow-stone-400/20`;
+  `${styleToBgGradientColorMap[intent]} ${textColorVariant(intent)} ${styleToButtonStateMap[intent]} ${shadowClassesBase} shadow-stone-400/20`;
 
 const styleClasses = (intent: Style, variant: Variant | undefined) => {
   return {
