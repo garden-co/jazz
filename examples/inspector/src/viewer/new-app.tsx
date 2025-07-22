@@ -54,6 +54,12 @@ export default function CoJsonViewerApp() {
   const [coValueId, setCoValueId] = useState<CoID<RawCoValue> | "">("");
   const { path, addPages, goToIndex, goBack, setPage } = usePagePath();
 
+  const KNOWN_ERRORS = [
+    "trying to load covalue with invalid id",
+    "account has no profile",
+    "invalid sealer secret format",
+  ];
+
   useEffect(() => {
     localStorage.setItem("inspectorAccounts", JSON.stringify(accounts));
   }, [accounts]);
@@ -94,7 +100,14 @@ export default function CoJsonViewerApp() {
           },
         });
       } catch (err: any) {
-        if (err.toString().includes("invalid id")) {
+        const normalizeError = (str: string): string =>
+          str.toLowerCase().replace(/\s+/g, " ").trim();
+        const matchError: string =
+          KNOWN_ERRORS.filter((e) =>
+            normalizeError(err.message).includes(e),
+          )[0] || "";
+        const knownErrorIndex: number = KNOWN_ERRORS.indexOf(matchError);
+        if (knownErrorIndex >= 0) {
           setAccounts(accounts.filter((acc) => acc.id !== currentAccount.id));
           //remove from localStorage
           localStorage.removeItem("lastSelectedAccountId");
@@ -105,9 +118,9 @@ export default function CoJsonViewerApp() {
             ),
           );
           setCurrentAccount(null);
-          setErrors("Trying to load covalue with invalid id");
+          setErrors(KNOWN_ERRORS[knownErrorIndex]);
         } else {
-          setErrors("The account could not be loaded");
+          setErrors("Something went wrong, the account could not be loaded");
         }
         setLocalNode(null);
         goToIndex(-1);
@@ -357,12 +370,14 @@ function AddAccountForm({
         secret separately.
       </p>
       <Input
+        required
         label="Account ID"
         value={id}
         placeholder="co_z1234567890abcdef123456789 or paste full JSON"
         onChange={handleIdChange}
       />
       <Input
+        required
         label="Account secret"
         type="password"
         value={secret}
