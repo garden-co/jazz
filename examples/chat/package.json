@@ -12,12 +12,12 @@
     "test:e2e:ui": "playwright test --ui"
   },
   "dependencies": {
-    "clsx": "^2.0.0",
     "hash-slash": "workspace:*",
     "jazz-tools": "workspace:*",
     "lucide-react": "^0.274.0",
     "react": "19.1.0",
     "react-dom": "19.1.0",
+    "quint": "workspace:*",
     "zod": "3.25.28"
   },
   "devDependencies": {

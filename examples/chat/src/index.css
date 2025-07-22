@@ -1,4 +1,6 @@
-@import "tailwindcss";
+@import "quint/styles.css";
+/* We need to tell tailwind to detect classes from quint components */
+@source "../node_modules/quint";
 
 /* Custom stone color palette */
 @theme {

@@ -1,7 +1,7 @@
-import clsx from "clsx";
-import { CoPlainText, ImageDefinition } from "jazz-tools";
+import type { CoPlainText, ImageDefinition } from "jazz-tools";
 import { ProgressiveImg } from "jazz-tools/react";
 import { ImageIcon } from "lucide-react";
+import { cn } from "quint";
 import { useId, useRef } from "react";
 
 export function AppContainer(props: { children: React.ReactNode }) {
@@ -57,7 +57,7 @@ export function BubbleBody(props: {
 }) {
   return (
     <div
-      className={clsx(
+      className={cn(
         "line-clamp-10 text-ellipsis whitespace-pre-wrap",
         "rounded-2xl overflow-hidden max-w-[calc(100%-5rem)] shadow-sm p-1",
         props.fromMe
@@ -75,9 +75,7 @@ export function BubbleText(props: {
   className?: string;
 }) {
   return (
-    <p className={clsx("px-2 leading-relaxed", props.className)}>
-      {props.text}
-    </p>
+    <p className={cn("px-2 leading-relaxed", props.className)}>{props.text}</p>
   );
 }
 

@@ -179,9 +179,6 @@ importers:
 
   examples/chat:
     dependencies:
-      clsx:
-        specifier: ^2.0.0
-        version: 2.1.1
       hash-slash:
         specifier: workspace:*
         version: link:../../packages/hash-slash
@@ -191,6 +188,9 @@ importers:
       lucide-react:
         specifier: ^0.274.0
         version: 0.274.0(react@19.1.0)
+      quint:
+        specifier: workspace:*
+        version: link:../../packages/quint
       react:
         specifier: 19.1.0
         version: 19.1.0
