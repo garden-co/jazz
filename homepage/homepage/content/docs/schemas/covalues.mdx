@@ -320,6 +320,10 @@ const Company = co.map({
 </CodeGroup>
 
 #### Optional References
+You can make schema fields optional using either `z.optional()` or `co.optional()`, depending on the type of value:  
+
+- Use `z.optional()` for primitive Zod values like `z.string()`, `z.number()`, or `z.boolean()`  
+- Use `co.optional()` for CoValues like `co.map()`, `co.list()`, or `co.record()`   
 
 You can make references optional with `co.optional()`:
 
@@ -331,7 +335,8 @@ const Pet = co.map({
 });
 // ---cut---
 const Person = co.map({
-  pet: co.optional(Pet),
+  age: z.optional(z.number()),      // primitive
+  pet: co.optional(Pet),            // CoValue
 });
 ```
 </CodeGroup>

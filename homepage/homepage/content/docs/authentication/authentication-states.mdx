@@ -54,7 +54,7 @@ function AuthStateIndicator() {
   const isGuest = agent._type !== "Account"
 
   // Anonymous authentication: has an account but not fully authenticated
-  const isAnonymous =  agent._type === "Account" && !isAuthenticated;
+  const isAnonymous = agent._type === "Account" && !isAuthenticated;
   return (
     <div>
       {isGuest && <span>Guest Mode</span>}
@@ -94,7 +94,7 @@ const MusicaAccountRoot = co.map({
 
 const MusicaAccount = co.account({
   root: MusicaAccountRoot,
-  profile: co.profile({}),
+  profile: co.profile({ name: z.string() }),
 });
 type MusicaAccount = co.loaded<typeof MusicaAccount>
 

@@ -31,7 +31,7 @@ export const Organization = co.map({
   name: z.string(),
 
   // shared data between users of each organization
-  projects: co.list(Project),
+  projects: co.list(Project), 
 });
 
 export const ListOfOrganizations = co.list(Organization);
@@ -67,7 +67,7 @@ export const JazzAccountRoot = co.map({
 export const JazzAccount = co
   .account({
     root: JazzAccountRoot,
-    profile: co.profile({}),
+    profile: co.profile({ name: z.string() }),
   })
   .withMigration((account) => {
     if (account.root === undefined) {
@@ -115,7 +115,7 @@ import * as React from "react";
 import { useAcceptInvite, useAccount } from "jazz-tools/react";
 import { co, z } from "jazz-tools";
 
-const Project = z.object({
+const Project = co.map({
   name: z.string(),
 });
 
@@ -130,7 +130,7 @@ const JazzAccountRoot = co.map({
 
 const JazzAccount = co.account({
   root: JazzAccountRoot,
-  profile: co.profile({}),
+  profile: co.profile({ name: z.string() }),
 });
 
 // ---cut---
