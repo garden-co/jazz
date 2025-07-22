@@ -4,7 +4,7 @@ import { useIframeHashRouter } from "hash-slash";
 import { Group } from "jazz-tools";
 import { JazzInspector } from "jazz-tools/inspector";
 import { JazzReactProvider, useAccount } from "jazz-tools/react";
-import { Button } from "quint";
+import { Button } from "quint-ui";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { ChatScreen } from "./chatScreen.tsx";

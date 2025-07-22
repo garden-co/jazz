@@ -188,9 +188,9 @@ importers:
       lucide-react:
         specifier: ^0.274.0
         version: 0.274.0(react@19.1.0)
-      quint:
+      quint-ui:
         specifier: workspace:*
-        version: link:../../packages/quint
+        version: link:../../packages/quint-ui
       react:
         specifier: 19.1.0
         version: 19.1.0

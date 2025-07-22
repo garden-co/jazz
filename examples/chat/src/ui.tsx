@@ -1,7 +1,7 @@
 import type { CoPlainText, ImageDefinition } from "jazz-tools";
 import { ProgressiveImg } from "jazz-tools/react";
 import { ImageIcon } from "lucide-react";
-import { cn } from "quint";
+import { cn } from "quint-ui";
 import { useId, useRef } from "react";
 
 export function AppContainer(props: { children: React.ReactNode }) {
