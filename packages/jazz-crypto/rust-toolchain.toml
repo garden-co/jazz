@@ -1,0 +1,14 @@
+[toolchain]
+channel = "stable"
+components = [ "rustfmt", "rust-src" ]
+targets = [
+    "aarch64-apple-darwin", 
+    "aarch64-apple-ios", 
+    "aarch64-apple-ios-sim", 
+    "x86_64-apple-ios",
+    "aarch64-linux-android", 
+    "arm-linux-androideabi", 
+    "armv7-linux-androideabi", 
+    "i686-linux-android"
+]
+profile = "default"

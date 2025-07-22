@@ -1,0 +1,11 @@
+.cache/*
+compile_commands.json
+
+target/*
+target-cxx/*
+build/ios/*
+ios/*
+android/.gradle/*
+android/src/main/jniLibs/*
+includes/*
+src/generated/*
