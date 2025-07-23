@@ -1,0 +1,29 @@
+{
+  "name": "community-clerk-vue",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "format-and-lint": "biome check .",
+    "format-and-lint:fix": "biome check . --write",
+    "test:e2e": "playwright test",
+    "test:e2e:ui": "playwright test --ui"
+  },
+  "dependencies": {
+    "@clerk/vue": "^1.8.10",
+    "community-jazz-vue": "workspace:*",
+    "jazz-tools": "workspace:*",
+    "vue": "^3.5.13",
+    "vue-router": "^4.5.1"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "1.9.4",
+    "@playwright/test": "^1.50.1",
+    "@vitejs/plugin-vue": "^5.2.1",
+    "globals": "^15.11.0",
+    "typescript": "5.6.2",
+    "vite": "^6.3.5"
+  }
+}
