@@ -1,22 +1,14 @@
-# CMakeLists.txt for JazzCrypto
-
 cmake_minimum_required(VERSION 3.10)
-
 project(JazzCrypto LANGUAGES CXX)
 
 set(PACKAGE_NAME JazzCrypto)
-
-# Set the C++ standard
+set(CMAKE_VERBOSE_MAKEFILE ON)
 set(CMAKE_CXX_STANDARD 20)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-
-# Disable automatic generation of compile_commands.json for clangd
-# We'll use a custom one for IDE integration
-set(CMAKE_EXPORT_COMPILE_COMMANDS OFF)
 
 # Add a library from the source files
 add_library(
   ${PACKAGE_NAME} SHARED
+  "src/main/cpp/cpp-adapter.cpp"
   "../src/cpp/HybridJazzCrypto.cpp"
 )
 
@@ -25,9 +17,12 @@ include(${CMAKE_SOURCE_DIR}/../nitrogen/generated/android/JazzCrypto+autolinking
 
 # Specify include directories
 include_directories(
+  "src/main/cpp"
   "../src/cpp"
-  "../target/debug"
-  "../target/cxxbridge"
+  "../includes"
+  "../includes/rust"
+  "../nitrogen/generated/shared/c++"
+  "../src/generated"
 )
 
 # Third party libraries (Prefabs)
@@ -40,17 +35,59 @@ target_link_libraries(
   android                                  # <-- Android core
 )
 
+# # Map Android ABI to Rust target for architecture-specific builds
+# if(ANDROID_ABI STREQUAL "arm64-v8a")
+#     set(RUST_TARGET "aarch64-linux-android")
+# elseif(ANDROID_ABI STREQUAL "armeabi-v7a")
+#     set(RUST_TARGET "armv7-linux-androideabi")
+# elseif(ANDROID_ABI STREQUAL "x86")
+#     set(RUST_TARGET "i686-linux-android")
+# elseif(ANDROID_ABI STREQUAL "x86_64")
+#     set(RUST_TARGET "x86_64-linux-android")
+# else()
+#     message(FATAL_ERROR "Unsupported Android ABI: ${ANDROID_ABI}")
+# endif()
+
+# # Find Rust static libraries for the current architecture
+# set(RUST_MAIN_LIB "${CMAKE_CURRENT_SOURCE_DIR}/../target/${RUST_TARGET}/release/libjazz_crypto.a")
+# if(NOT EXISTS ${RUST_MAIN_LIB})
+#   message(FATAL_ERROR "Could not find main libjazz_crypto.a at ${RUST_MAIN_LIB} for ${RUST_TARGET}. Make sure the Rust build has completed.")
+# endif()
+
+# file(GLOB JAZZ_CRYPTO_LIB "${CMAKE_CURRENT_SOURCE_DIR}/../target/${RUST_TARGET}/release/build/jazz-crypto-*/out/libjazz_crypto.a")
+# if(NOT JAZZ_CRYPTO_LIB)
+#   message(FATAL_ERROR "Could not find libjazz_crypto.a from cxxbridge for ${RUST_TARGET}. Make sure the Rust build has completed.")
+# endif()
+# list(GET JAZZ_CRYPTO_LIB 0 JAZZ_CRYPTO_LIB_PATH)
+
+# file(GLOB CXXBRIDGE_LIB "${CMAKE_CURRENT_SOURCE_DIR}/../target/${RUST_TARGET}/release/build/cxx-*/out/libcxxbridge1.a")
+# if(NOT CXXBRIDGE_LIB)
+#   message(FATAL_ERROR "Could not find libcxxbridge1.a for ${RUST_TARGET}. Make sure the Rust build has completed.")
+# endif()
+# list(GET CXXBRIDGE_LIB 0 CXXBRIDGE_LIB_PATH)
+
+# # Link NitroModules shared library (required for symbol resolution)
+# get_filename_component(PROJECT_ROOT "${CMAKE_SOURCE_DIR}/../../.." ABSOLUTE)
+# set(NITRO_MODULES_LIB "${PROJECT_ROOT}/node_modules/react-native-nitro-modules/android/build/intermediates/cmake/debug/obj/${ANDROID_ABI}/libNitroModules.so")
+
+# Link all required libraries with proper React Native version handling
 if(ReactAndroid_VERSION_MINOR GREATER_EQUAL 76)
-  target_link_libraries(
-    ${PACKAGE_NAME}
-    ${CMAKE_CURRENT_SOURCE_DIR}/../target/debug/libjazz_crypto.dylib
-    ReactAndroid::reactnative              # <-- RN: Native Modules umbrella prefab
-  )
+    target_link_libraries(
+        ${PACKAGE_NAME}
+        # ${NITRO_MODULES_LIB}                   # <-- NitroModules shared library
+        # ${RUST_MAIN_LIB}                       # <-- Main Rust library with runtime
+        # ${JAZZ_CRYPTO_LIB_PATH}                # <-- Our Rust+C++ bridge library
+        # ${CXXBRIDGE_LIB_PATH}                  # <-- cxx bridge C++ runtime
+        ReactAndroid::reactnative              # <-- RN: Native Modules umbrella prefab
+    )
 else()
-  target_link_libraries(
-    ${PACKAGE_NAME}
-    ${CMAKE_CURRENT_SOURCE_DIR}/../target/debug/libjazz_crypto.dylib
-    ReactAndroid::react_nativemodule_core  # <-- RN: TurboModules Core
-    ReactAndroid::turbomodulejsijni        # <-- RN: TurboModules utils (e.g. CallInvokerHolder)
-  )
+    target_link_libraries(
+        ${PACKAGE_NAME}
+        # ${NITRO_MODULES_LIB}                   # <-- NitroModules shared library
+        # ${RUST_MAIN_LIB}                       # <-- Main Rust library with runtime
+        # ${JAZZ_CRYPTO_LIB_PATH}                # <-- Our Rust+C++ bridge library
+        # ${CXXBRIDGE_LIB_PATH}                  # <-- cxx bridge C++ runtime
+        ReactAndroid::react_nativemodule_core  # <-- RN: TurboModules Core
+        ReactAndroid::turbomodulejsijni        # <-- RN: TurboModules utils (e.g. CallInvokerHolder)
+    )
 endif()

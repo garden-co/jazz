@@ -12,6 +12,6 @@ cxx-build = "1.0.160"
 
 [lib]
 name = "jazz_crypto"
-crate-type = ["staticlib", "cdylib"]
+crate-type = ["staticlib"]
 path = "src/rust/lib.rs"
 

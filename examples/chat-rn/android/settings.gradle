@@ -1,12 +1,8 @@
+import com.facebook.react.ReactSettingsExtension
+
 pluginManagement { includeBuild("../../../node_modules/@react-native/gradle-plugin") }
 plugins { id("com.facebook.react.settings") }
-extensions.configure(com.facebook.react.ReactSettingsExtension){ ex -> ex.autolinkLibrariesFromCommand() }
+extensions.configure(ReactSettingsExtension){ ex -> ex.autolinkLibrariesFromCommand() }
 rootProject.name = 'ChatRN'
-
-include ':react-native-nitro-modules'
-project(':react-native-nitro-modules').projectDir = new File(settingsDir, '../../../node_modules/react-native-nitro-modules/android')
-
-include ':jazz-crypto'
-project(':jazz-crypto').projectDir = new File(settingsDir, '../../../packages/jazz-crypto/android')
 include ':app'
 includeBuild('../../../node_modules/@react-native/gradle-plugin')

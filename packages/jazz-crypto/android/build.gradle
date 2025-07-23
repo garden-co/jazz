@@ -35,7 +35,7 @@ def getExtOrIntegerDefault(name) {
 }
 
 android {
-  namespace "co.garden.nitro.jazzcrypto"
+  namespace "com.margelo.nitro.jazz_crypto"
 
   ndkVersion getExtOrDefault("ndkVersion")
   compileSdkVersion getExtOrIntegerDefault("compileSdkVersion")
@@ -47,7 +47,7 @@ android {
 
     externalNativeBuild {
       cmake {
-        cppFlags "-frtti -fexceptions -Wall -Wextra -fstack-protector-all"
+        cppFlags "-frtti -fexceptions -Wall -Wextra -fstack-protector-all -std=c++20"
         arguments "-DANDROID_STL=c++_shared", "-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON"
         abiFilters (*reactNativeArchitectures())
 
@@ -66,6 +66,15 @@ android {
   externalNativeBuild {
     cmake {
       path "CMakeLists.txt"
+    }
+  }
+
+  // Build Rust static libraries before native build
+  tasks.whenTaskAdded { task ->
+    if (task.name.contains('externalNativeBuild')) {
+      task.dependsOn 'buildRustStaticLibs'
+      // Ensure NitroModules is built first
+      task.dependsOn ':react-native-nitro-modules:externalNativeBuildDebug'
     }
   }
 
@@ -122,6 +131,21 @@ android {
   }
 }
 
+// Task to build Rust static libraries for Android with proper NDK environment
+task buildRustStaticLibs {
+  doLast {
+    def architectures = reactNativeArchitectures()
+    architectures.each { arch ->
+      println "Building Rust static library for Android architecture: ${arch}"
+      exec {
+        workingDir '../'
+        environment 'ANDROID_ABI', arch
+        commandLine './build/build-rust.sh'
+      }
+    }
+  }
+}
+
 repositories {
   mavenCentral()
   google()
@@ -141,6 +165,6 @@ if (isNewArchitectureEnabled()) {
   react {
     jsRootDir = file("../src/ts")
     libraryName = "JazzCrypto"
-    codegenJavaPackageName = "co.garden.nitro.jazzcrypto"
+    codegenJavaPackageName = "com.margelo.nitro.jazz_crypto"
   }
 }
