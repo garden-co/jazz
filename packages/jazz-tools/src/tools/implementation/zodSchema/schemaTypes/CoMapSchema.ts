@@ -5,6 +5,8 @@ import {
   DiscriminableCoValueSchemaDefinition,
   DiscriminableCoreCoValueSchema,
   Group,
+  NotNull,
+  OptionalizeUndefinedKeys,
   RefsToResolve,
   RefsToResolveStrict,
   Resolved,
@@ -20,7 +22,7 @@ import { InstanceOrPrimitiveOfSchema } from "../typeConverters/InstanceOrPrimiti
 import { InstanceOrPrimitiveOfSchemaCoValuesNullable } from "../typeConverters/InstanceOrPrimitiveOfSchemaCoValuesNullable.js";
 import { z } from "../zodReExport.js";
 import { AnyZodOrCoValueSchema } from "../zodSchema.js";
-import { CoOptionalSchema, CoreCoOptionalSchema } from "./CoOptionalSchema.js";
+import { CoOptionalSchema } from "./CoOptionalSchema.js";
 
 export interface CoMapSchema<
   Shape extends z.core.$ZodLooseShape,
@@ -236,31 +238,12 @@ export function enrichCoMapSchema<
   return coValueSchema;
 }
 
-export type optionalKeys<Shape extends z.core.$ZodLooseShape> = {
-  [key in keyof Shape]: Shape[key] extends
-    | z.core.$ZodOptional<any>
-    | CoreCoOptionalSchema<any>
-    ? key
-    : never;
-}[keyof Shape];
-
-export type requiredKeys<Shape extends z.core.$ZodLooseShape> = {
-  [key in keyof Shape]: Shape[key] extends
-    | z.core.$ZodOptional<any>
-    | CoreCoOptionalSchema<any>
-    ? never
-    : key;
-}[keyof Shape];
-
-export type CoMapInitZod<Shape extends z.core.$ZodLooseShape> = {
-  [key in optionalKeys<Shape>]?: NonNullable<
-    InstanceOrPrimitiveOfSchemaCoValuesNullable<Shape[key]>
-  >;
-} & {
-  [key in requiredKeys<Shape>]: NonNullable<
-    InstanceOrPrimitiveOfSchemaCoValuesNullable<Shape[key]>
-  >;
-} & { [key in keyof Shape]?: unknown };
+export type CoMapInitZod<Shape extends z.core.$ZodLooseShape> =
+  OptionalizeUndefinedKeys<{
+    [key in keyof Shape]: NotNull<
+      InstanceOrPrimitiveOfSchemaCoValuesNullable<Shape[key]>
+    >;
+  }>;
 
 export interface CoMapSchemaDefinition<
   Shape extends z.core.$ZodLooseShape = z.core.$ZodLooseShape,

@@ -14,6 +14,7 @@ import type {
   CoValueClass,
   Group,
   ID,
+  OptionalizeUndefinedKeys,
   RefEncoded,
   RefIfCoValue,
   RefsToResolve,
@@ -778,13 +779,9 @@ type ForceRequiredRef<V> = V extends InstanceType<CoValueClass> | null
     ? V | null
     : V;
 
-export type CoMapInit<Map extends object> = {
-  [Key in CoKeys<Map> as undefined extends Map[Key]
-    ? never
-    : Key]: ForceRequiredRef<Map[Key]>;
-} & {
-  [Key in CoKeys<Map>]?: ForceRequiredRef<Map[Key]>;
-};
+export type CoMapInit<Map extends object> = OptionalizeUndefinedKeys<{
+  [Key in CoKeys<Map>]: ForceRequiredRef<Map[Key]>;
+}>;
 
 // TODO: cache handlers per descriptor for performance?
 const CoMapProxyHandler: ProxyHandler<CoMap> = {
