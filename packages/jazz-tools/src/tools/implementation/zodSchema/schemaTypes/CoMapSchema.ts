@@ -37,14 +37,7 @@ export interface CoMapSchema<
           unique?: CoValueUniqueness["uniqueness"];
         }
       | Owner,
-  ) => {
-    -readonly [key in keyof Shape]: InstanceOrPrimitiveOfSchema<Shape[key]>;
-  } & (CatchAll extends AnyZodOrCoValueSchema
-    ? {
-        [key: string]: InstanceOrPrimitiveOfSchema<CatchAll>;
-      }
-    : {}) &
-    CoMap;
+  ) => CoMapInstanceShape<Shape, CatchAll> & CoMap;
 
   load<
     const R extends RefsToResolve<
@@ -260,9 +253,16 @@ export interface CoreCoMapSchema<
   getDefinition: () => CoMapSchemaDefinition;
 }
 
-export type CoMapInstance<Shape extends z.core.$ZodLooseShape> = {
+export type CoMapInstanceShape<
+  Shape extends z.core.$ZodLooseShape,
+  CatchAll extends AnyZodOrCoValueSchema | unknown = unknown,
+> = {
   -readonly [key in keyof Shape]: InstanceOrPrimitiveOfSchema<Shape[key]>;
-} & CoMap;
+} & (CatchAll extends AnyZodOrCoValueSchema
+  ? {
+      [key: string]: InstanceOrPrimitiveOfSchema<CatchAll>;
+    }
+  : {});
 
 export type CoMapInstanceCoValuesNullable<Shape extends z.core.$ZodLooseShape> =
   {
