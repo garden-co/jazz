@@ -1,7 +1,7 @@
 /**
  * Make any property optional if its type includes `undefined`, preserving the type as-is
  */
-export type OptionalizeUndefinedKeys<T> = {
+export type PartialOnUndefined<T> = {
   [K in keyof T as undefined extends T[K] ? never : K]: T[K];
 } & {
   [K in keyof T as undefined extends T[K] ? K : never]?: T[K];

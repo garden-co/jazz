@@ -14,7 +14,7 @@ import type {
   CoValueClass,
   Group,
   ID,
-  OptionalizeUndefinedKeys,
+  PartialOnUndefined,
   RefEncoded,
   RefIfCoValue,
   RefsToResolve,
@@ -779,7 +779,7 @@ type ForceRequiredRef<V> = V extends InstanceType<CoValueClass> | null
     ? V | null
     : V;
 
-export type CoMapInit<Map extends object> = OptionalizeUndefinedKeys<{
+export type CoMapInit<Map extends object> = PartialOnUndefined<{
   [Key in CoKeys<Map>]: ForceRequiredRef<Map[Key]>;
 }>;
 

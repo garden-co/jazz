@@ -6,7 +6,7 @@ import {
   DiscriminableCoreCoValueSchema,
   Group,
   NotNull,
-  OptionalizeUndefinedKeys,
+  PartialOnUndefined,
   RefsToResolve,
   RefsToResolveStrict,
   Resolved,
@@ -230,7 +230,7 @@ export function enrichCoMapSchema<
 // Due to a TS limitation with types that contain known properties and
 // an index signature, we cannot accept catchall properties on creation
 export type CoMapSchemaInit<Shape extends z.core.$ZodLooseShape> =
-  OptionalizeUndefinedKeys<{
+  PartialOnUndefined<{
     [key in keyof Shape]: NotNull<
       InstanceOrPrimitiveOfSchemaCoValuesNullable<Shape[key]>
     >;
