@@ -1895,6 +1895,9 @@ importers:
       react-native-quick-crypto:
         specifier: 1.0.0-beta.16
         version: 1.0.0-beta.16(react-native-nitro-modules@0.25.2(react-native@0.79.2(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0))(react-native@0.79.2(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0)
+      solid-js:
+        specifier: ^1.8.0
+        version: 1.9.5
       svelte:
         specifier: ^5.0.0
         version: 5.34.6
