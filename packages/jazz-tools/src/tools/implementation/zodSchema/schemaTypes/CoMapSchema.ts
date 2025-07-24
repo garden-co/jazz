@@ -30,7 +30,7 @@ export interface CoMapSchema<
   Owner extends Account | Group = Account | Group,
 > extends CoreCoMapSchema<Shape, CatchAll> {
   create: (
-    init: Simplify<CoMapInitZod<Shape>>,
+    init: Simplify<CoMapSchemaInit<Shape>>,
     options?:
       | {
           owner: Owner;
@@ -89,7 +89,7 @@ export interface CoMapSchema<
       Simplify<CoMapInstanceCoValuesNullable<Shape>> & CoMap
     > = true,
   >(options: {
-    value: Simplify<CoMapInitZod<Shape>>;
+    value: Simplify<CoMapSchemaInit<Shape>>;
     unique: CoValueUniqueness["uniqueness"];
     owner: Owner;
     resolve?: RefsToResolveStrict<
@@ -227,7 +227,9 @@ export function enrichCoMapSchema<
   return coValueSchema;
 }
 
-export type CoMapInitZod<Shape extends z.core.$ZodLooseShape> =
+// Due to a TS limitation with types that contain known properties and
+// an index signature, we cannot accept catchall properties on creation
+export type CoMapSchemaInit<Shape extends z.core.$ZodLooseShape> =
   OptionalizeUndefinedKeys<{
     [key in keyof Shape]: NotNull<
       InstanceOrPrimitiveOfSchemaCoValuesNullable<Shape[key]>

@@ -24,8 +24,8 @@ import {
 import { CoFeedSchema, CoreCoFeedSchema } from "./schemaTypes/CoFeedSchema.js";
 import { CoListSchema, CoreCoListSchema } from "./schemaTypes/CoListSchema.js";
 import {
-  CoMapInitZod,
   CoMapSchema,
+  CoMapSchemaInit,
   CoreCoMapSchema,
 } from "./schemaTypes/CoMapSchema.js";
 import {
@@ -126,5 +126,5 @@ export type ResolveQueryStrict<
 export type InitFor<T extends CoValueClassOrSchema> = T extends CoreCoMapSchema<
   infer Shape
 >
-  ? Simplify<CoMapInitZod<Shape>>
+  ? Simplify<CoMapSchemaInit<Shape>>
   : never;
