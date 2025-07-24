@@ -1872,7 +1872,7 @@ importers:
       '@scure/base':
         specifier: 1.2.1
         version: 1.2.1
-      cojson-core-wasm:
+      cojson-core-rn:
         specifier: workspace:*
         version: link:../../crates/cojson-core-wasm
       neverthrow:
