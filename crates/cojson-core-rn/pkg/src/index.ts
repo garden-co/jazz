@@ -43,13 +43,17 @@ export function tryAddTransactions(
   transactionsJson: string[],
   newSignature: string,
   skipVerify: boolean,
-): TransactionResult {
-  return HybridCoJSONCoreRN.tryAddTransactions(
+): string {
+  const result = HybridCoJSONCoreRN.tryAddTransactions(
     handle,
     transactionsJson,
     newSignature,
     skipVerify,
   );
+  if (!result.success) {
+    throw new Error(result.error);
+  }
+  return result.result;
 }
 
 /**
@@ -62,8 +66,8 @@ export function addNewPrivateTransaction(
   encryptionKey: string,
   keyId: string,
   madeAt: number,
-): TransactionResult {
-  return HybridCoJSONCoreRN.addNewPrivateTransaction(
+): string {
+  const result = HybridCoJSONCoreRN.addNewPrivateTransaction(
     handle,
     changesJson,
     signerSecret,
@@ -71,6 +75,10 @@ export function addNewPrivateTransaction(
     keyId,
     madeAt,
   );
+  if (!result.success) {
+    throw new Error(result.error);
+  }
+  return result.result;
 }
 
 /**
@@ -81,13 +89,17 @@ export function addNewTrustingTransaction(
   changesJson: string,
   signerSecret: string,
   madeAt: number,
-): TransactionResult {
-  return HybridCoJSONCoreRN.addNewTrustingTransaction(
+): string {
+  const result = HybridCoJSONCoreRN.addNewTrustingTransaction(
     handle,
     changesJson,
     signerSecret,
     madeAt,
   );
+  if (!result.success) {
+    throw new Error(result.error);
+  }
+  return result.result;
 }
 
 /**
@@ -96,8 +108,15 @@ export function addNewTrustingTransaction(
 export function testExpectedHashAfter(
   handle: SessionLogHandle,
   transactionsJson: string[],
-): TransactionResult {
-  return HybridCoJSONCoreRN.testExpectedHashAfter(handle, transactionsJson);
+): string {
+  const result = HybridCoJSONCoreRN.testExpectedHashAfter(
+    handle,
+    transactionsJson,
+  );
+  if (!result.success) {
+    throw new Error(result.error);
+  }
+  return result.result;
 }
 
 /**
@@ -107,12 +126,16 @@ export function decryptNextTransactionChangesJson(
   handle: SessionLogHandle,
   txIndex: number,
   keySecret: ArrayBuffer,
-): TransactionResult {
-  return HybridCoJSONCoreRN.decryptNextTransactionChangesJson(
+): string {
+  const result = HybridCoJSONCoreRN.decryptNextTransactionChangesJson(
     handle,
     txIndex,
     keySecret,
   );
+  if (!result.success) {
+    throw new Error(result.error);
+  }
+  return result.result;
 }
 
 /**
@@ -140,7 +163,7 @@ export class SessionLog {
     transactionsJson: string[],
     newSignature: string,
     skipVerify: boolean = false,
-  ): TransactionResult {
+  ): string {
     return tryAddTransactions(
       this.handle,
       transactionsJson,
@@ -155,7 +178,7 @@ export class SessionLog {
     encryptionKey: string,
     keyId: string,
     madeAt: number,
-  ): TransactionResult {
+  ): string {
     return addNewPrivateTransaction(
       this.handle,
       changesJson,
@@ -170,7 +193,7 @@ export class SessionLog {
     changesJson: string,
     signerSecret: string,
     madeAt: number,
-  ): TransactionResult {
+  ): string {
     return addNewTrustingTransaction(
       this.handle,
       changesJson,
@@ -179,19 +202,24 @@ export class SessionLog {
     );
   }
 
-  testExpectedHashAfter(transactionsJson: string[]): TransactionResult {
+  testExpectedHashAfter(transactionsJson: string[]): string {
     return testExpectedHashAfter(this.handle, transactionsJson);
   }
 
   decryptNextTransactionChangesJson(
     txIndex: number,
     keySecret: ArrayBuffer,
-  ): TransactionResult {
+  ): string {
     return decryptNextTransactionChangesJson(this.handle, txIndex, keySecret);
   }
 
   destroy(): void {
     destroySessionLog(this.handle);
+  }
+
+  // Alias for destroy() to match WASM API
+  free(): void {
+    this.destroy();
   }
 
   // Getter for the handle (in case direct access is needed)
