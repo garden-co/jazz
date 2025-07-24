@@ -291,6 +291,28 @@ describe("CoMap", async () => {
         age: 30,
       });
     });
+
+    it("should allow extra properties when catchall is provided", () => {
+      const Person = co
+        .map({
+          name: z.string(),
+          age: z.number(),
+        })
+        .catchall(z.string());
+
+      const person = Person.create({ name: "John", age: 20 });
+      expect(person.name).toEqual("John");
+      expect(person.age).toEqual(20);
+      expect(person.extra).toBeUndefined();
+
+      person.name = "Jane";
+      person.age = 28;
+      person.extra = "extra";
+
+      expect(person.name).toEqual("Jane");
+      expect(person.age).toEqual(28);
+      expect(person.extra).toEqual("extra");
+    });
   });
 
   describe("Mutation", () => {
