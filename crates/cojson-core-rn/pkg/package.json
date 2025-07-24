@@ -8,9 +8,9 @@
       "name": "Garden Co",
       "url": "https://garden.co"
     },
-      "type": "module",
-      "main": "dist/index.js",
-      "types": "src/ts/index.ts",
+    "type": "module",
+    "main": "dist/index.js",
+    "types": "dist/index.d.ts",
     "scripts": {
       "format-and-lint": "biome check .",
       "format-and-lint:fix": "biome check . --write",
