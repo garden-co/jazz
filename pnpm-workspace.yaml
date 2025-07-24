@@ -4,7 +4,8 @@ packages:
   - 'homepage/*'
   - 'starters/*'
   - 'tests/*'
-  - 'crates/cojson-core-wasm'
+  - 'crates/cojson-core-wasm/pkg'
+  - 'crates/cojson-core-rn/pkg'
 
 catalog:
   "@biomejs/biome": 1.9.4
