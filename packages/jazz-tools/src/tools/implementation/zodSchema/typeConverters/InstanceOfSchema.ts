@@ -36,12 +36,11 @@ export type InstanceOfSchema<S extends CoValueClass | AnyZodOrCoValueSchema> =
         : S extends CoreCoMapSchema<infer Shape, infer CatchAll>
           ? {
               [key in keyof Shape]: InstanceOrPrimitiveOfSchema<Shape[key]>;
-            } & (unknown extends CatchAll
-              ? {}
-              : {
-                  // @ts-expect-error
+            } & (CatchAll extends AnyZodOrCoValueSchema
+              ? {
                   [key: string]: InstanceOrPrimitiveOfSchema<CatchAll>;
-                }) &
+                }
+              : {}) &
               CoMap
           : S extends CoreCoListSchema<infer T>
             ? CoList<InstanceOrPrimitiveOfSchema<T>>

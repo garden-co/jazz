@@ -39,12 +39,11 @@ export interface CoMapSchema<
       | Owner,
   ) => {
     -readonly [key in keyof Shape]: InstanceOrPrimitiveOfSchema<Shape[key]>;
-  } & (unknown extends CatchAll
-    ? {}
-    : {
-        // @ts-expect-error
+  } & (CatchAll extends AnyZodOrCoValueSchema
+    ? {
         [key: string]: InstanceOrPrimitiveOfSchema<CatchAll>;
-      }) &
+      }
+    : {}) &
     CoMap;
 
   load<
