@@ -1,0 +1,18 @@
+[package]
+name = "cojson-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+lzy = { path = "../lzy", optional = true }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0", features = ["raw_value"] }
+ed25519-dalek = { version = "2.2.0", features = ["rand_core"] }
+bs58 = "0.5.1"
+blake3 = "1.5.1"
+salsa20 = "0.10.2"
+base64 = "0.22.1"
+thiserror = "1.0"
+
+[dev-dependencies]
+rand_core = { version = "0.6", features = ["getrandom"] }

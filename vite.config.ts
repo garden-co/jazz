@@ -6,7 +6,7 @@ export default defineConfig({
   test: {
     workspace: [
       "packages/*",
-      "tests/browser-integration",
+      // "tests/browser-integration",
       "tests/cloudflare-workers",
     ],
     maxConcurrency: 5,

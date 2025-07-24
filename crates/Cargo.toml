@@ -1,0 +1,7 @@
+[workspace]
+resolver = "2"
+members = [
+    "lzy",
+    "cojson-core",
+    "cojson-core-wasm",
+]

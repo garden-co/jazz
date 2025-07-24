@@ -92,7 +92,7 @@ export class RawCoMapView<
       throw new Error("Cannot process transactions on a time travel entity");
     }
 
-    const newValidTransactions = this.core.getValidTransactions({
+    const newValidTransactions = this.core.getValidDecryptedTransactions({
       ignorePrivateTransactions: this.ignorePrivateTransactions,
       knownTransactions: this.knownTransactions,
     });

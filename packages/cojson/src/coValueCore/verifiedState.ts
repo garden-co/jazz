@@ -1,17 +1,20 @@
+import { SessionLog as WasmSessionLog } from "cojson-core-wasm";
 import { Result, err, ok } from "neverthrow";
 import { AnyRawCoValue } from "../coValue.js";
+import { ControlledAccountOrAgent } from "../coValues/account.js";
 import { MAX_RECOMMENDED_TX_SIZE } from "../config.js";
 import {
   CryptoProvider,
   Encrypted,
   Hash,
   KeyID,
+  KeySecret,
   Signature,
   SignerID,
   StreamingHash,
 } from "../crypto/crypto.js";
 import { RawCoID, SessionID, TransactionID } from "../ids.js";
-import { Stringified } from "../jsonStringify.js";
+import { Stringified, stableStringify } from "../jsonStringify.js";
 import { JsonObject, JsonValue } from "../jsonValue.js";
 import { PermissionsDef as RulesetDef } from "../permissions.js";
 import { getPriorityFromHeader } from "../priority.js";
@@ -46,10 +49,13 @@ export type TrustingTransaction = {
 export type Transaction = PrivateTransaction | TrustingTransaction;
 
 type SessionLog = {
-  readonly transactions: Transaction[];
-  streamingHash?: StreamingHash;
-  readonly signatureAfter: { [txIdx: number]: Signature | undefined };
-  lastSignature: Signature;
+  signerID: SignerID;
+  wasm: WasmSessionLog;
+  transactions: Transaction[];
+  lastSignature: Signature | undefined;
+  // lastHash: Hash | undefined;
+  signatureAfter: { [txIdx: number]: Signature | undefined };
+  txSizeSinceLastInbetweenSignature: number;
 };
 
 export type ValidatedSessions = Map<SessionID, SessionLog>;
@@ -84,11 +90,12 @@ export class VerifiedState {
     const clonedSessions = new Map();
     for (let [sessionID, sessionLog] of this.sessions) {
       clonedSessions.set(sessionID, {
-        lastSignature: sessionLog.lastSignature,
-        streamingHash: sessionLog.streamingHash?.clone(),
-        signatureAfter: { ...sessionLog.signatureAfter },
+        wasm: sessionLog.wasm.clone(),
         transactions: sessionLog.transactions.slice(),
-      } satisfies SessionLog);
+        lastSignature: sessionLog.lastSignature,
+        // lastHash: sessionLog.lastHash,
+        signatureAfter: { ...sessionLog.signatureAfter },
+      });
     }
     return new VerifiedState(
       this.id,
@@ -108,128 +115,154 @@ export class VerifiedState {
     skipVerify: boolean = false,
     givenNewStreamingHash?: StreamingHash,
   ): Result<true, TryAddTransactionsError> {
-    if (skipVerify === true) {
-      this.doAddTransactions(
-        sessionID,
-        newTransactions,
-        newSignature,
-        givenNewStreamingHash,
-      );
-    } else {
-      const { expectedNewHash, newStreamingHash } = this.expectedNewHashAfter(
-        sessionID,
-        newTransactions,
-      );
-
-      if (givenExpectedNewHash && givenExpectedNewHash !== expectedNewHash) {
-        return err({
-          type: "InvalidHash",
-          id: this.id,
-          expectedNewHash,
-          givenExpectedNewHash,
-        } satisfies InvalidHashError);
-      }
-
-      if (!this.crypto.verify(newSignature, expectedNewHash, signerID)) {
-        return err({
-          type: "InvalidSignature",
-          id: this.id,
-          newSignature,
-          sessionID,
-          signerID,
-        } satisfies InvalidSignatureError);
-      }
-
-      this.doAddTransactions(
-        sessionID,
-        newTransactions,
-        newSignature,
-        newStreamingHash,
-      );
+    let sessionLog = this.sessions.get(sessionID);
+    if (!sessionLog) {
+      sessionLog = {
+        signerID,
+        wasm: new WasmSessionLog(this.id, sessionID, signerID),
+        transactions: [],
+        lastSignature: undefined,
+        // lastHash: undefined,
+        signatureAfter: {},
+        txSizeSinceLastInbetweenSignature: 0,
+      };
+      this.sessions.set(sessionID, sessionLog);
     }
 
-    return ok(true as const);
+    try {
+      const newHash = sessionLog.wasm.tryAdd(
+        newTransactions.map((tx) => stableStringify(tx)),
+        newSignature,
+        skipVerify,
+      );
+      this.addTransactionsToJsLog(
+        sessionLog,
+        newTransactions,
+        newSignature,
+        newHash as Hash,
+      );
+
+      return ok(true as const);
+    } catch (e) {
+      return err({
+        type: "InvalidSignature",
+        id: this.id,
+        sessionID,
+        newSignature,
+        signerID,
+        error: e as Error,
+      } satisfies TryAddTransactionsError);
+    }
   }
 
-  private doAddTransactions(
+  makeNewTransaction(
     sessionID: SessionID,
-    newTransactions: Transaction[],
-    newSignature: Signature,
-    newStreamingHash?: StreamingHash,
-  ) {
-    const sessionLog = this.sessions.get(sessionID);
-    const transactions = sessionLog?.transactions ?? [];
-
-    for (const tx of newTransactions) {
-      transactions.push(tx);
+    signerAgent: ControlledAccountOrAgent,
+    changes: JsonValue[],
+    privacy:
+      | { type: "private"; keyID: KeyID; keySecret: KeySecret }
+      | { type: "trusting" },
+  ): { signature: Signature; transaction: Transaction } {
+    let sessionLog = this.sessions.get(sessionID);
+    if (!sessionLog) {
+      sessionLog = {
+        signerID: signerAgent.currentSignerID(),
+        wasm: new WasmSessionLog(
+          this.id,
+          sessionID,
+          signerAgent.currentSignerID(),
+        ),
+        transactions: [],
+        lastSignature: undefined,
+        // lastHash: undefined,
+        signatureAfter: {},
+        txSizeSinceLastInbetweenSignature: 0,
+      };
+      this.sessions.set(sessionID, sessionLog);
     }
 
-    const signatureAfter = sessionLog?.signatureAfter ?? {};
+    const madeAt = Date.now();
 
-    const lastInbetweenSignatureIdx = Object.keys(signatureAfter).reduce(
-      (max, idx) => (parseInt(idx) > max ? parseInt(idx) : max),
-      -1,
+    let signatureAndTxJson: string;
+
+    if (privacy.type === "private") {
+      signatureAndTxJson = sessionLog.wasm.addNewPrivateTransaction(
+        stableStringify(changes),
+        signerAgent.currentSignerSecret(),
+        privacy.keySecret,
+        privacy.keyID,
+        madeAt,
+      ) as Signature;
+    } else {
+      signatureAndTxJson = sessionLog.wasm.addNewTrustingTransaction(
+        stableStringify(changes),
+        signerAgent.currentSignerSecret(),
+        madeAt,
+      ) as Signature;
+    }
+
+    const { signature, transaction, hash } = JSON.parse(signatureAndTxJson);
+
+    this.addTransactionsToJsLog(sessionLog, [transaction], signature, hash);
+
+    return { signature, transaction };
+  }
+
+  private addTransactionsToJsLog(
+    sessionLog: SessionLog,
+    newTransactions: Transaction[],
+    signature: Signature,
+    hash: Hash,
+  ) {
+    sessionLog.transactions.push(...newTransactions);
+    sessionLog.lastSignature = signature;
+
+    sessionLog.txSizeSinceLastInbetweenSignature += newTransactions.reduce(
+      (sum, tx) =>
+        sum +
+        (tx.privacy === "private"
+          ? tx.encryptedChanges.length
+          : tx.changes.length),
+      0,
     );
 
-    const sizeOfTxsSinceLastInbetweenSignature = transactions
-      .slice(lastInbetweenSignatureIdx + 1)
-      .reduce(
-        (sum, tx) =>
-          sum +
-          (tx.privacy === "private"
-            ? tx.encryptedChanges.length
-            : tx.changes.length),
-        0,
-      );
-
-    if (sizeOfTxsSinceLastInbetweenSignature > MAX_RECOMMENDED_TX_SIZE) {
-      signatureAfter[transactions.length - 1] = newSignature;
+    if (
+      sessionLog.txSizeSinceLastInbetweenSignature > MAX_RECOMMENDED_TX_SIZE
+    ) {
+      sessionLog.signatureAfter[sessionLog.transactions.length - 1] = signature;
+      sessionLog.txSizeSinceLastInbetweenSignature = 0;
     }
 
-    this.sessions.set(sessionID, {
-      transactions,
-      streamingHash: newStreamingHash,
-      lastSignature: newSignature,
-      signatureAfter: signatureAfter,
-    });
-
+    // sessionLog.lastHash = hash;
     this._cachedNewContentSinceEmpty = undefined;
     this._cachedKnownState = undefined;
   }
 
-  expectedNewHashAfter(
+  testExpectedHashAfter(
     sessionID: SessionID,
-    newTransactions: Transaction[],
-  ): { expectedNewHash: Hash; newStreamingHash: StreamingHash } {
-    const sessionLog = this.sessions.get(sessionID);
+    transactions: Transaction[],
+  ): { expectedNewHash: Hash } {
+    let sessionLog = this.sessions.get(sessionID);
+    if (!sessionLog) {
+      // TODO: this is ugly
+      const ephemeralSigner = this.crypto.newRandomSigner();
+      const ephemeralSignerID = this.crypto.getSignerID(ephemeralSigner);
 
-    if (!sessionLog?.streamingHash) {
-      const streamingHash = new StreamingHash(this.crypto);
-      const oldTransactions = sessionLog?.transactions ?? [];
-
-      for (const transaction of oldTransactions) {
-        streamingHash.update(transaction);
-      }
-
-      for (const transaction of newTransactions) {
-        streamingHash.update(transaction);
-      }
-
-      return {
-        expectedNewHash: streamingHash.digest(),
-        newStreamingHash: streamingHash,
-      };
+      const ephemeralSessionLog = new WasmSessionLog(
+        this.id,
+        sessionID,
+        ephemeralSignerID,
+      );
+      const result = ephemeralSessionLog.testExpectedHashAfter(
+        transactions.map((tx) => stableStringify(tx)),
+      );
+      ephemeralSessionLog.free();
+      return { expectedNewHash: result as Hash };
     }
-
-    const streamingHash = sessionLog.streamingHash.clone();
-
-    for (const transaction of newTransactions) {
-      streamingHash.update(transaction);
-    }
-
     return {
-      expectedNewHash: streamingHash.digest(),
-      newStreamingHash: streamingHash,
+      expectedNewHash: sessionLog.wasm.testExpectedHashAfter(
+        transactions.map((tx) => stableStringify(tx)),
+      ) as Hash,
     };
   }
 

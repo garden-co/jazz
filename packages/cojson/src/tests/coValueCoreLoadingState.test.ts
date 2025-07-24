@@ -331,6 +331,7 @@ function createMockCoValueVerified(mockCoValueId: string) {
       sessions: {},
     }),
     clone: vi.fn().mockReturnThis(),
+    sessions: new Map(),
   }) as unknown as VerifiedState;
 
   return mockCoValueVerified as unknown as VerifiedState;
