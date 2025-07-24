@@ -37,17 +37,14 @@ export interface CoMapSchema<
           unique?: CoValueUniqueness["uniqueness"];
         }
       | Owner,
-  ) => (Shape extends Record<string, never>
+  ) => {
+    -readonly [key in keyof Shape]: InstanceOrPrimitiveOfSchema<Shape[key]>;
+  } & (unknown extends CatchAll
     ? {}
     : {
-        -readonly [key in keyof Shape]: InstanceOrPrimitiveOfSchema<Shape[key]>;
+        // @ts-expect-error
+        [key: string]: InstanceOrPrimitiveOfSchema<CatchAll>;
       }) &
-    (unknown extends CatchAll
-      ? {}
-      : {
-          // @ts-expect-error
-          [key: string]: InstanceOrPrimitiveOfSchema<CatchAll>;
-        }) &
     CoMap;
 
   load<
