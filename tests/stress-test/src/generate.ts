@@ -7,7 +7,7 @@ export function generateRandomProject(numTasks: number) {
   const tasks = TodoProject.def.shape.tasks.create([]);
 
   // Generate random tasks
-  function populateTasks() {
+  async function populateTasks() {
     for (let i = 0; i < numTasks; i++) {
       const task = Task.create({
         done: faker.datatype.boolean(),
@@ -17,6 +17,10 @@ export function generateRandomProject(numTasks: number) {
         ),
       });
       tasks.push(task);
+
+      if (i % 500 === 0) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
     }
   }
 
@@ -26,11 +30,6 @@ export function generateRandomProject(numTasks: number) {
       title: `${numTasks} tasks`,
       tasks: tasks,
     }),
-    done: new Promise((resolve) => {
-      setTimeout(() => {
-        populateTasks();
-        resolve(true);
-      }, 10);
-    }),
+    done: populateTasks(),
   };
 }
