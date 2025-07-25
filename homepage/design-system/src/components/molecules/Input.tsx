@@ -1,6 +1,10 @@
 import { clsx } from "clsx";
 import { forwardRef, useId } from "react";
-import { Style, styleToActiveBorderMap } from "../../utils/tailwindClassesMap";
+import {
+  Style,
+  styleToActiveBorderMap,
+  styleToFocusMap,
+} from "../../utils/tailwindClassesMap";
 import { Button, ButtonProps } from "../atoms/Button";
 import { Icon, icons } from "../atoms/Icon";
 import { Label } from "../atoms/Label";
@@ -77,6 +81,7 @@ export const Input = forwardRef<HTMLInputElement, InputProps>(
               styleToActiveBorderMap[
                 intent as keyof typeof styleToActiveBorderMap
               ],
+              styleToFocusMap[intent as keyof typeof styleToFocusMap],
             )}
             placeholder={placeholder}
           />
