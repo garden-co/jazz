@@ -103,15 +103,18 @@ export class CoMap extends CoValueBase implements CoValue {
   /** @category Internals */
   declare _raw: RawCoMap;
 
+  /**
+   * Jazz methods for CoMaps are inside this property.
+   *
+   * This allows CoMaps to be used as plain objects while still having
+   * access to Jazz methods, and also doesn't limit which key names can be
+   * used inside CoMaps.
+   */
+  declare $jazz: CoMapJazzApi<this>;
+
   /** @internal */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   static _schema: any;
-  /** @internal */
-  get _schema() {
-    return (this.constructor as typeof CoMap)._schema as {
-      [key: string]: Schema;
-    } & { [ItemsSym]?: Schema };
-  }
 
   /**
    * The timestamp of the creation time of the CoMap
@@ -274,6 +277,10 @@ export class CoMap extends CoValueBase implements CoValue {
             enumerable: false,
           },
           _raw: { value: options.fromRaw, enumerable: false },
+          $jazz: {
+            value: new CoMapJazzApi(this),
+            enumerable: false,
+          },
         });
       } else {
         throw new Error("Invalid CoMap constructor arguments");
@@ -383,6 +390,12 @@ export class CoMap extends CoValueBase implements CoValue {
       | Group,
   ): typeof this {
     const { owner, uniqueness } = parseCoValueCreateOptions(options);
+
+    Object.defineProperty(this, "$jazz", {
+      value: new CoMapJazzApi(this),
+      enumerable: false,
+    });
+
     const raw = this.rawFromInit(init, owner, uniqueness);
 
     Object.defineProperties(this, {
@@ -448,8 +461,12 @@ export class CoMap extends CoValueBase implements CoValue {
     return rawOwner.createMap(rawInit, null, "private", uniqueness);
   }
 
-  getDescriptor(key: string) {
-    return this._schema?.[key] || this._schema?.[ItemsSym];
+  /**
+   * Get the descriptor for a given key
+   * @internal
+   */
+  getDescriptor(key: string): Schema | undefined {
+    return this.$jazz.getDescriptor(key);
   }
 
   /**
@@ -753,6 +770,66 @@ export class CoMap extends CoValueBase implements CoValue {
   }
 }
 
+/**
+ * Contains CoMap Jazz methods that are part of the {@link CoMap.$jazz`} property.
+ */
+class CoMapJazzApi<M extends CoMap> {
+  constructor(private coMap: M) {}
+
+  /**
+   * Set a value on the CoMap
+   *
+   * @param key The key to set
+   * @param value The value to set
+   */
+  set<K extends CoKeys<M>>(key: K, value: M[K]): void {
+    const descriptor = this.coMap.getDescriptor(key as string);
+
+    if (!descriptor) {
+      throw Error(`Cannot set unknown key ${key}`);
+    }
+
+    if (descriptor === "json") {
+      this.raw.set(key, value as JsonValue | undefined);
+    } else if ("encoded" in descriptor) {
+      this.raw.set(key, descriptor.encoded.encode(value));
+    } else if (isRefEncoded(descriptor)) {
+      if (value === undefined) {
+        if (descriptor.optional) {
+          this.raw.set(key, null);
+        } else {
+          throw Error(`Cannot set required reference ${key} to undefined`);
+        }
+      } else if ((value as CoValue)?.id) {
+        this.raw.set(key, (value as CoValue).id);
+      } else {
+        throw Error(
+          `Cannot set reference ${key} to a non-CoValue. Got ${value}`,
+        );
+      }
+    }
+  }
+
+  /**
+   * Get the descriptor for a given key
+   * @internal
+   */
+  getDescriptor(key: string): Schema | undefined {
+    return this._schema?.[key] || this._schema?.[ItemsSym];
+  }
+
+  get raw() {
+    return this.coMap._raw;
+  }
+
+  /** @internal */
+  get _schema() {
+    return (this.coMap.constructor as typeof CoMap)._schema as {
+      [key: string]: Schema;
+    } & { [ItemsSym]?: Schema };
+  }
+}
+
 export type CoKeys<Map extends object> = Exclude<
   keyof Map & string,
   keyof CoMap
@@ -841,27 +918,7 @@ const CoMapProxyHandler: ProxyHandler<CoMap> = {
     if (!descriptor) return false;
 
     if (typeof key === "string") {
-      if (descriptor === "json") {
-        target._raw.set(key, value);
-      } else if ("encoded" in descriptor) {
-        target._raw.set(key, descriptor.encoded.encode(value));
-      } else if (isRefEncoded(descriptor)) {
-        if (value === undefined) {
-          if (descriptor.optional) {
-            target._raw.set(key, null);
-          } else {
-            throw new Error(
-              `Cannot set required reference ${key} to undefined`,
-            );
-          }
-        } else if (value?.id) {
-          target._raw.set(key, value.id);
-        } else {
-          throw new Error(
-            `Cannot set reference ${key} to a non-CoValue. Got ${value}`,
-          );
-        }
-      }
+      target.$jazz.set(key as never, value as never);
       return true;
     } else {
       return Reflect.set(target, key, value, receiver);

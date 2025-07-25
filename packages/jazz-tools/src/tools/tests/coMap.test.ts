@@ -88,6 +88,17 @@ describe("CoMap", async () => {
       expect("age" in john).toEqual(false);
     });
 
+    test("internal properties are not enumerable", () => {
+      const Person = co.map({
+        name: z.string(),
+      });
+
+      const person = Person.create({ name: "John" });
+
+      expect(Object.keys(person)).toEqual(["name"]);
+      expect(person).toEqual({ name: "John" });
+    });
+
     test("create a CoMap with an account as owner", () => {
       const Person = co.map({
         name: z.string(),
@@ -233,6 +244,16 @@ describe("CoMap", async () => {
 
       expect(person.friend?.name).toEqual("Jane");
       expect(person.friend?.age).toEqual(21);
+    });
+
+    test.skip("JSON.stringify should not include internal properties", () => {
+      const Person = co.map({
+        name: z.string(),
+      });
+
+      const person = Person.create({ name: "John" });
+
+      expect(JSON.stringify(person)).toEqual('{"name":"John"}');
     });
 
     test("toJSON should not fail when there is a key in the raw value not represented in the schema", () => {
@@ -446,7 +467,7 @@ describe("CoMap", async () => {
 
       const john = Person.create({ name: "John", age: 20 });
 
-      john.name = "Jane";
+      john.$jazz.set("name", "Jane");
 
       expect(john.name).toEqual("Jane");
       expect(john.age).toEqual(20);
