@@ -10,8 +10,8 @@ import z from "zod/v4";
 import {
   AnyZodOrCoValueSchema,
   CoMap,
-  CoMapInitZod,
   CoMapSchema,
+  CoMapSchemaInit,
   CoValueClass,
   CoreCoMapSchema,
   Group,
@@ -93,7 +93,7 @@ type AsNullablePayload<T extends MessageShape> = T extends Record<string, never>
   ? undefined
   : never;
 type MessageValuePayload<T extends MessageShape> =
-  | Simplify<CoMapInitZod<T>>
+  | Simplify<CoMapSchemaInit<T>>
   | AsNullablePayload<T>;
 
 function createMessageEnvelope<S extends MessageShape>(

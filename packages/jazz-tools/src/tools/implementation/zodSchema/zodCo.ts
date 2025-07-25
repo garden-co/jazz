@@ -108,7 +108,7 @@ export const coListDefiner = <T extends AnyZodOrCoValueSchema>(
   element: T,
 ): CoListSchema<T> => {
   const coreSchema = createCoreCoListSchema(element);
-  return hydrateCoreCoValueSchema(coreSchema) as unknown as CoListSchema<T>;
+  return hydrateCoreCoValueSchema(coreSchema);
 };
 
 export const coProfileDefiner = <
@@ -121,7 +121,7 @@ export const coProfileDefiner = <
     inbox: z.optional(z.string()),
     inboxInvite: z.optional(z.string()),
   });
-  return coMapDefiner(ehnancedShape) as CoProfileSchema<Shape>;
+  return coMapDefiner(ehnancedShape) as unknown as CoProfileSchema<Shape>;
 };
 
 export const coFeedDefiner = <T extends AnyZodOrCoValueSchema>(
