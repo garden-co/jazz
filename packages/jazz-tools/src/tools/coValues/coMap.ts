@@ -57,6 +57,10 @@ type CoMapEdit<V> = {
 
 type LastAndAllCoMapEdits<V> = CoMapEdit<V> & { all: CoMapEdit<V>[] };
 
+type CoMapFieldSchema = {
+  [key: string]: Schema;
+} & { [ItemsSym]?: Schema };
+
 /**
  * CoMaps are collaborative versions of plain objects, mapping string-like keys to values.
  *
@@ -113,8 +117,7 @@ export class CoMap extends CoValueBase implements CoValue {
   declare $jazz: CoMapJazzApi<this>;
 
   /** @internal */
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  static _schema: any;
+  static _schema: CoMapFieldSchema;
 
   /**
    * The timestamp of the creation time of the CoMap
@@ -769,7 +772,7 @@ class CoMapJazzApi<M extends CoMap> {
    * @internal
    */
   getDescriptor(key: string): Schema | undefined {
-    return this._schema?.[key] || this._schema?.[ItemsSym];
+    return this.schema?.[key] || this.schema?.[ItemsSym];
   }
 
   /**
@@ -825,10 +828,8 @@ class CoMapJazzApi<M extends CoMap> {
   }
 
   /** @internal */
-  get _schema() {
-    return (this.coMap.constructor as typeof CoMap)._schema as {
-      [key: string]: Schema;
-    } & { [ItemsSym]?: Schema };
+  get schema(): CoMapFieldSchema {
+    return (this.coMap.constructor as typeof CoMap)._schema;
   }
 }
 
@@ -905,7 +906,7 @@ const CoMapProxyHandler: ProxyHandler<CoMap> = {
   },
   set(target, key, value, receiver) {
     if (
-      (typeof key === "string" || ItemsSym) &&
+      typeof key === "string" &&
       typeof value === "object" &&
       value !== null &&
       SchemaInit in value
