@@ -1,0 +1,4 @@
+.cache
+compile_commands.json
+pkg/build
+pkg/dist
