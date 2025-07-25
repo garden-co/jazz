@@ -527,7 +527,7 @@ describe("CoMap", async () => {
 
       john.age = 21;
 
-      expect(john._edits.age?.all).toEqual([
+      expect(john.$jazz.getEdits().age?.all).toEqual([
         expect.objectContaining({
           value: 20,
           key: "age",
@@ -541,11 +541,11 @@ describe("CoMap", async () => {
           madeAt: expect.any(Date),
         }),
       ]);
-      expect(john._edits.age?.all[0]?.by).toMatchObject({
+      expect(john.$jazz.getEdits().age?.all[0]?.by).toMatchObject({
         _type: "Account",
         id: me.id,
       });
-      expect(john._edits.age?.all[1]?.by).toMatchObject({
+      expect(john.$jazz.getEdits().age?.all[1]?.by).toMatchObject({
         _type: "Account",
         id: me.id,
       });
@@ -2206,10 +2206,10 @@ describe("CoMap migration", () => {
     test("empty map created time", () => {
       const currentTimestampInSeconds = Math.floor(Date.now() / 1000);
       const emptyMap = co.map({}).create({});
-      const createdAtInSeconds = Math.floor(emptyMap._createdAt / 1000);
+      const createdAtInSeconds = Math.floor(emptyMap.$jazz.createdAt / 1000);
 
       expect(createdAtInSeconds).toEqual(currentTimestampInSeconds);
-      expect(emptyMap._lastUpdatedAt).toEqual(emptyMap._createdAt);
+      expect(emptyMap.$jazz.lastUpdatedAt).toEqual(emptyMap.$jazz.createdAt);
     });
 
     test("created time and last updated time", async () => {
@@ -2220,19 +2220,21 @@ describe("CoMap migration", () => {
       let currentTimestampInSeconds = Math.floor(Date.now() / 1000);
       const person = Person.create({ name: "John" });
 
-      const createdAt = person._createdAt;
+      const createdAt = person.$jazz.createdAt;
       const createdAtInSeconds = Math.floor(createdAt / 1000);
       expect(createdAtInSeconds).toEqual(currentTimestampInSeconds);
-      expect(person._lastUpdatedAt).toEqual(createdAt);
+      expect(person.$jazz.lastUpdatedAt).toEqual(createdAt);
 
       await new Promise((r) => setTimeout(r, 1000));
       currentTimestampInSeconds = Math.floor(Date.now() / 1000);
       person.name = "Jane";
 
-      const lastUpdatedAtInSeconds = Math.floor(person._lastUpdatedAt / 1000);
+      const lastUpdatedAtInSeconds = Math.floor(
+        person.$jazz.lastUpdatedAt / 1000,
+      );
       expect(lastUpdatedAtInSeconds).toEqual(currentTimestampInSeconds);
-      expect(person._createdAt).toEqual(createdAt);
-      expect(person._lastUpdatedAt).not.toEqual(createdAt);
+      expect(person.$jazz.createdAt).toEqual(createdAt);
+      expect(person.$jazz.lastUpdatedAt).not.toEqual(createdAt);
     });
 
     test("comap with custom uniqueness", () => {
@@ -2246,7 +2248,7 @@ describe("CoMap migration", () => {
         { unique: "name", owner: Account.getMe() },
       );
 
-      const createdAt = person._createdAt;
+      const createdAt = person.$jazz.createdAt;
       const createdAtInSeconds = Math.floor(createdAt / 1000);
       expect(createdAtInSeconds).toEqual(currentTimestampInSeconds);
     });
@@ -2262,7 +2264,7 @@ describe("CoMap migration", () => {
         { unique: "name", owner: Account.getMe() },
       );
 
-      const createdAt = person._createdAt;
+      const createdAt = person.$jazz.createdAt;
       const createdAtInSeconds = Math.floor(createdAt / 1000);
       expect(createdAtInSeconds).toEqual(currentTimestampInSeconds);
     });

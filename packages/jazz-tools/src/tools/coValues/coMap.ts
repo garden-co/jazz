@@ -57,6 +57,10 @@ type CoMapEdit<V> = {
 
 type LastAndAllCoMapEdits<V> = CoMapEdit<V> & { all: CoMapEdit<V>[] };
 
+type CoMapEdits<M extends CoMap> = {
+  [Key in CoKeys<M>]?: LastAndAllCoMapEdits<M[Key]>;
+};
+
 type CoMapFieldSchema = {
   [key: string]: Schema;
 } & { [ItemsSym]?: Schema };
@@ -118,104 +122,6 @@ export class CoMap extends CoValueBase implements CoValue {
 
   /** @internal */
   static _schema: CoMapFieldSchema;
-
-  /**
-   * The timestamp of the creation time of the CoMap
-   */
-  get _createdAt() {
-    return this._raw.earliestTxMadeAt ?? Number.MAX_SAFE_INTEGER;
-  }
-
-  /**
-   * The timestamp of the last updated time of the CoMap
-   */
-  get _lastUpdatedAt() {
-    return this._raw.latestTxMadeAt;
-  }
-
-  /** @internal */
-  public getEditFromRaw(
-    target: CoMap,
-    rawEdit: {
-      by: RawAccountID | AgentID;
-      tx: CojsonInternalTypes.TransactionID;
-      at: Date;
-      value?: JsonValue | undefined;
-    },
-    descriptor: Schema,
-    key: string,
-  ) {
-    return {
-      value:
-        descriptor === "json"
-          ? rawEdit.value
-          : "encoded" in descriptor
-            ? rawEdit.value === null || rawEdit.value === undefined
-              ? rawEdit.value
-              : descriptor.encoded.decode(rawEdit.value)
-            : accessChildById(target, rawEdit.value as string, descriptor),
-      ref:
-        descriptor !== "json" && isRefEncoded(descriptor)
-          ? new Ref(
-              rawEdit.value as ID<CoValue>,
-              target._loadedAs,
-              descriptor,
-              target,
-            )
-          : undefined,
-      get by() {
-        return (
-          rawEdit.by &&
-          accessChildById(target, rawEdit.by, {
-            ref: Account,
-            optional: false,
-          })
-        );
-      },
-      madeAt: rawEdit.at,
-      key,
-    };
-  }
-
-  /** @category Collaboration */
-  get _edits() {
-    const map = this;
-    return new Proxy(
-      {},
-      {
-        get(_target, key) {
-          const rawEdit = map._raw.lastEditAt(key as string);
-          if (!rawEdit) return undefined;
-
-          const descriptor = map.$jazz.getDescriptor(key as string);
-
-          if (!descriptor) return undefined;
-
-          return {
-            ...map.getEditFromRaw(map, rawEdit, descriptor, key as string),
-            get all() {
-              return [...map._raw.editsAt(key as string)].map((rawEdit) =>
-                map.getEditFromRaw(map, rawEdit, descriptor, key as string),
-              );
-            },
-          };
-        },
-        ownKeys(_target) {
-          return map._raw.keys();
-        },
-        getOwnPropertyDescriptor(target, key) {
-          return {
-            value: Reflect.get(target, key),
-            writable: false,
-            enumerable: true,
-            configurable: true,
-          };
-        },
-      },
-    ) as {
-      [Key in CoKeys<this>]?: LastAndAllCoMapEdits<this[Key]>;
-    };
-  }
 
   /** @internal */
   constructor(
@@ -827,8 +733,60 @@ class CoMapJazzApi<M extends CoMap> {
     ) as any;
   }
 
+  /** @category Collaboration */
+  getEdits(): CoMapEdits<M> {
+    const map = this.coMap;
+    return new Proxy(
+      {},
+      {
+        get(_target, key) {
+          const rawEdit = map._raw.lastEditAt(key as string);
+          if (!rawEdit) return undefined;
+
+          const descriptor = map.$jazz.getDescriptor(key as string);
+
+          if (!descriptor) return undefined;
+
+          return {
+            ...getEditFromRaw(map, rawEdit, descriptor, key as string),
+            get all() {
+              return [...map._raw.editsAt(key as string)].map((rawEdit) =>
+                getEditFromRaw(map, rawEdit, descriptor, key as string),
+              );
+            },
+          };
+        },
+        ownKeys(_target) {
+          return map._raw.keys();
+        },
+        getOwnPropertyDescriptor(target, key) {
+          return {
+            value: Reflect.get(target, key),
+            writable: false,
+            enumerable: true,
+            configurable: true,
+          };
+        },
+      },
+    );
+  }
+
   get raw() {
     return this.coMap._raw;
+  }
+
+  /**
+   * The timestamp of the creation time of the CoMap
+   */
+  get createdAt() {
+    return this.raw.earliestTxMadeAt ?? Number.MAX_SAFE_INTEGER;
+  }
+
+  /**
+   * The timestamp of the last updated time of the CoMap
+   */
+  get lastUpdatedAt() {
+    return this.raw.latestTxMadeAt;
   }
 
   /** @internal */
@@ -993,3 +951,47 @@ const CoMapProxyHandler: ProxyHandler<CoMap> = {
 };
 
 RegisteredSchemas["CoMap"] = CoMap;
+
+/** @internal */
+function getEditFromRaw(
+  target: CoMap,
+  rawEdit: {
+    by: RawAccountID | AgentID;
+    tx: CojsonInternalTypes.TransactionID;
+    at: Date;
+    value?: JsonValue | undefined;
+  },
+  descriptor: Schema,
+  key: string,
+) {
+  return {
+    value:
+      descriptor === "json"
+        ? rawEdit.value
+        : "encoded" in descriptor
+          ? rawEdit.value === null || rawEdit.value === undefined
+            ? rawEdit.value
+            : descriptor.encoded.decode(rawEdit.value)
+          : accessChildById(target, rawEdit.value as string, descriptor),
+    ref:
+      descriptor !== "json" && isRefEncoded(descriptor)
+        ? new Ref(
+            rawEdit.value as ID<CoValue>,
+            target._loadedAs,
+            descriptor,
+            target,
+          )
+        : undefined,
+    get by() {
+      return (
+        rawEdit.by &&
+        accessChildById(target, rawEdit.by, {
+          ref: Account,
+          optional: false,
+        })
+      );
+    },
+    madeAt: rawEdit.at,
+    key,
+  };
+}

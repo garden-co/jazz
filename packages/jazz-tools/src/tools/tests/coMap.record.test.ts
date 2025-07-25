@@ -168,7 +168,7 @@ describe("CoMap.Record", async () => {
 
       person.name = "Jane";
 
-      const edits = person._edits.name?.all;
+      const edits = person.$jazz.getEdits().name?.all;
       expect(edits).toEqual([
         expect.objectContaining({
           value: "John",
