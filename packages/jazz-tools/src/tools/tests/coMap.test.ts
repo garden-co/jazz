@@ -895,7 +895,7 @@ describe("CoMap resolution", async () => {
 
     expect(updates[0]?.dog.name).toEqual("Rex");
 
-    person.dog!.name = "Fido";
+    person.dog!.$jazz.set("name", "Fido");
 
     await waitFor(() => expect(spy).toHaveBeenCalledTimes(2));
 

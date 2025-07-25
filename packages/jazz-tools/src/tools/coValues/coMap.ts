@@ -276,7 +276,7 @@ export class CoMap extends CoValueBase implements CoValue {
   ) {
     const instance = new this();
 
-    return instance._createCoMap(init, options);
+    return CoMap._createCoMap(instance, init, options);
   }
 
   /**
@@ -334,8 +334,12 @@ export class CoMap extends CoValueBase implements CoValue {
     return this.toJSON();
   }
 
-  _createCoMap(
-    init: Simplify<CoMapInit<typeof this>>,
+  /**
+   * @internal
+   */
+  static _createCoMap<M extends CoMap>(
+    instance: M,
+    init: Simplify<CoMapInit<M>>,
     options?:
       | {
           owner: Account | Group;
@@ -343,17 +347,17 @@ export class CoMap extends CoValueBase implements CoValue {
         }
       | Account
       | Group,
-  ): typeof this {
+  ): M {
     const { owner, uniqueness } = parseCoValueCreateOptions(options);
 
-    Object.defineProperty(this, "$jazz", {
-      value: new CoMapJazzApi(this),
+    Object.defineProperty(instance, "$jazz", {
+      value: new CoMapJazzApi(instance),
       enumerable: false,
     });
 
-    const raw = this.rawFromInit(init, owner, uniqueness);
+    const raw = CoMap._rawFromInit(instance, init, owner, uniqueness);
 
-    Object.defineProperties(this, {
+    Object.defineProperties(instance, {
       id: {
         value: raw.id,
         enumerable: false,
@@ -361,15 +365,15 @@ export class CoMap extends CoValueBase implements CoValue {
       _raw: { value: raw, enumerable: false },
     });
 
-    return this;
+    return instance;
   }
 
   /**
    * Create a new `RawCoMap` from an initialization object
    * @internal
    */
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  rawFromInit<Fields extends object = Record<string, any>>(
+  static _rawFromInit<M extends CoMap, Fields extends object>(
+    instance: M,
     init: Simplify<CoMapInit<Fields>> | undefined,
     owner: Account | Group,
     uniqueness?: CoValueUniqueness,
@@ -384,7 +388,7 @@ export class CoMap extends CoValueBase implements CoValue {
       for (const key of Object.keys(init) as (keyof Fields)[]) {
         const initValue = init[key as keyof typeof init];
 
-        const descriptor = this.$jazz.getDescriptor(key as string);
+        const descriptor = instance.$jazz.getDescriptor(key as string);
 
         if (!descriptor) {
           continue;
@@ -610,7 +614,7 @@ export class CoMap extends CoValueBase implements CoValue {
     });
     if (!map) {
       const instance = new this();
-      map = instance._createCoMap(options.value, {
+      map = CoMap._createCoMap(instance, options.value, {
         owner: options.owner,
         unique: options.unique,
       }) as Resolved<M, R>;
