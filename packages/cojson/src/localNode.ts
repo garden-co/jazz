@@ -351,7 +351,7 @@ export class LocalNode {
       new VerifiedState(id, this.crypto, header, new Map()),
     );
 
-    void this.syncManager.requestCoValueSync(coValue);
+    this.syncManager.syncLocalCoValueCreation(coValue.verified);
 
     return coValue;
   }

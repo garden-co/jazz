@@ -1,15 +1,27 @@
 import { Histogram, ValueType, metrics } from "@opentelemetry/api";
 import { PeerState } from "./PeerState.js";
 import { SyncStateManager } from "./SyncStateManager.js";
-import { CoValueCore } from "./coValueCore/coValueCore.js";
+import {
+  AvailableCoValueCore,
+  CoValueCore,
+} from "./coValueCore/coValueCore.js";
 import { getDependedOnCoValuesFromRawData } from "./coValueCore/utils.js";
-import { CoValueHeader, Transaction } from "./coValueCore/verifiedState.js";
+import {
+  CoValueHeader,
+  Transaction,
+  VerifiedState,
+} from "./coValueCore/verifiedState.js";
 import { Signature } from "./crypto/crypto.js";
-import { RawCoID, SessionID } from "./ids.js";
+import { RawCoID, SessionID, isRawCoID } from "./ids.js";
 import { LocalNode } from "./localNode.js";
 import { logger } from "./logger.js";
-import { CoValuePriority } from "./priority.js";
+import {
+  CO_VALUE_PRIORITY,
+  CoValuePriority,
+  getPriorityFromHeader,
+} from "./priority.js";
 import { IncomingMessagesQueue } from "./queue/IncomingMessagesQueue.js";
+import { LinkedList } from "./queue/LinkedList.js";
 import { accountOrAgentIDfromSessionID } from "./typeUtils/accountOrAgentIDfromSessionID.js";
 import { isAccountID } from "./typeUtils/isAccountID.js";
 
@@ -162,13 +174,9 @@ export class SyncManager {
   }
 
   handleSyncMessage(msg: SyncMessage, peer: PeerState) {
-    if (msg.id === undefined || msg.id === null) {
-      logger.warn("Received sync message with undefined id", {
-        msg,
-      });
-      return;
-    } else if (!msg.id.startsWith("co_z")) {
-      logger.warn("Received sync message with invalid id", {
+    if (!isRawCoID(msg.id)) {
+      const errorType = msg.id ? "invalid" : "undefined";
+      logger.warn(`Received sync message with ${errorType} id`, {
         msg,
       });
       return;
@@ -736,23 +744,95 @@ export class SyncManager {
     };
   }
 
-  requestedSyncs = new Set<RawCoID>();
-  requestCoValueSync(coValue: CoValueCore) {
-    if (this.requestedSyncs.has(coValue.id)) {
+  requestedSyncs: LinkedList<NewContentMessage> = new LinkedList();
+
+  getContentMessage(coValue: VerifiedState): NewContentMessage {
+    return {
+      action: "content",
+      id: coValue.id,
+      header: coValue.header,
+      priority: getPriorityFromHeader(coValue.header),
+      new: {},
+    };
+  }
+
+  syncLocalCoValueCreation(coValue: VerifiedState) {
+    if (
+      this.requestedSyncs.tail &&
+      this.requestedSyncs.tail.value.id === coValue.id
+    ) {
       return;
     }
 
-    for (const trackingSet of this.dirtyCoValuesTrackingSets) {
-      trackingSet.add(coValue.id);
+    this.requestedSyncs.push(this.getContentMessage(coValue));
+
+    this.processPendingSyncs();
+  }
+
+  syncLocalCoValueTransaction(
+    coValue: VerifiedState,
+    transaction: Transaction,
+    sessionID: SessionID,
+    signature: Signature,
+    txIdx: number,
+  ) {
+    if (
+      this.requestedSyncs.tail &&
+      this.requestedSyncs.tail.value.id === coValue.id
+    ) {
+      const value = this.requestedSyncs.tail.value;
+      const newContent = value.new[sessionID];
+
+      if (newContent) {
+        newContent.newTransactions.push(transaction);
+        newContent.lastSignature = signature;
+      } else {
+        value.new[sessionID] = {
+          after: txIdx - 1,
+          newTransactions: [transaction],
+          lastSignature: signature,
+        };
+      }
+
+      return;
     }
 
-    queueMicrotask(() => {
-      if (this.requestedSyncs.has(coValue.id)) {
-        this.syncCoValue(coValue);
-      }
+    this.requestedSyncs.push({
+      action: "content",
+      id: coValue.id,
+      header: coValue.header,
+      priority: getPriorityFromHeader(coValue.header),
+      new: {
+        [sessionID]: {
+          after: txIdx - 1,
+          newTransactions: [transaction],
+          lastSignature: signature,
+        },
+      },
     });
 
-    this.requestedSyncs.add(coValue.id);
+    this.processPendingSyncs();
+  }
+
+  processingSyncs = false;
+  processPendingSyncs() {
+    if (this.processingSyncs) return;
+
+    this.processingSyncs = true;
+
+    queueMicrotask(() => {
+      while (this.requestedSyncs.head) {
+        const content = this.requestedSyncs.head.value;
+
+        const coValue = this.local.getCoValue(content.id);
+        this.storeCoValue(coValue, [content]);
+        this.syncCoValue(coValue);
+
+        this.requestedSyncs.shift();
+      }
+
+      this.processingSyncs = false;
+    });
   }
 
   storeCoValue(coValue: CoValueCore, data: NewContentMessage[] | undefined) {
@@ -782,15 +862,6 @@ export class SyncManager {
   }
 
   syncCoValue(coValue: CoValueCore) {
-    this.requestedSyncs.delete(coValue.id);
-
-    if (this.local.storage && coValue.hasVerifiedContent()) {
-      const knownState = this.local.storage.getKnownState(coValue.id);
-      const newContentPieces = coValue.verified.newContentSince(knownState);
-
-      this.storeCoValue(coValue, newContentPieces);
-    }
-
     for (const peer of this.peersInPriorityOrder()) {
       if (peer.closed) continue;
       if (coValue.isErroredInPeer(peer.id)) continue;

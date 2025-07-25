@@ -179,8 +179,11 @@ test("should load dependencies correctly (group inheritance)", async () => {
     ),
   ).toMatchInlineSnapshot(`
     [
-      "client -> CONTENT Group header: true new: After: 0 New: 5",
-      "client -> CONTENT ParentGroup header: true new: After: 0 New: 4",
+      "client -> CONTENT Group header: true new: After: 0 New: 3",
+      "client -> CONTENT ParentGroup header: true new: After: 0 New: 3",
+      "client -> CONTENT Group header: true new: After: 3 New: 1",
+      "client -> CONTENT ParentGroup header: true new: After: 3 New: 1",
+      "client -> CONTENT Group header: true new: After: 4 New: 1",
       "client -> CONTENT Map header: true new: After: 0 New: 1",
     ]
   `);
@@ -337,7 +340,7 @@ test("should recover from data loss", async () => {
     [
       "client -> CONTENT Group header: true new: After: 0 New: 3",
       "client -> CONTENT Map header: true new: After: 0 New: 1",
-      "client -> CONTENT Map header: false new: After: 3 New: 1",
+      "client -> CONTENT Map header: true new: After: 3 New: 1",
       "storage -> KNOWN CORRECTION Map sessions: header/4",
       "client -> CONTENT Map header: false new: After: 1 New: 3",
     ]
@@ -527,9 +530,8 @@ test("large coValue upload streaming", async () => {
     [
       "client -> LOAD Map sessions: empty",
       "storage -> CONTENT Group header: true new: After: 0 New: 3",
-      "storage -> CONTENT Map header: true new: After: 0 New: 97",
-      "storage -> CONTENT Map header: true new: After: 97 New: 97",
-      "storage -> CONTENT Map header: true new: After: 194 New: 6",
+      "storage -> CONTENT Map header: true new: After: 0 New: 200",
+      "storage -> CONTENT Map header: true new: After: 200 New: 0",
     ]
   `);
 });
@@ -561,9 +563,10 @@ test("should sync and load accounts from storage", async () => {
     ),
   ).toMatchInlineSnapshot(`
     [
-      "client -> CONTENT Account header: true new: After: 0 New: 4",
+      "client -> CONTENT Account header: true new: After: 0 New: 3",
       "client -> CONTENT ProfileGroup header: true new: After: 0 New: 5",
       "client -> CONTENT Profile header: true new: After: 0 New: 1",
+      "client -> CONTENT Account header: true new: After: 3 New: 1",
     ]
   `);
 
