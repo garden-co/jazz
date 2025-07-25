@@ -240,6 +240,28 @@ describe("CoMap", async () => {
       john.dog = Dog.create({ name: "Fido" });
     });
 
+    test("cannot update a non-existing key", () => {
+      const Person = co.map({
+        name: z.string(),
+      });
+
+      const john = Person.create({ name: "John" });
+
+      // @ts-expect-error - Argument of type '"non-existing-key"' is not assignable to parameter of type '"name"'
+      john.$jazz.set("non-existing-key", "Jane");
+    });
+
+    test("cannot set a value with an incorrect type", () => {
+      const Person = co.map({
+        name: z.string(),
+      });
+
+      const john = Person.create({ name: "John" });
+
+      // @ts-expect-error - Argument of type 'number' is not assignable to parameter of type 'string'
+      john.$jazz.set("name", 12);
+    });
+
     test("update a reference on a loaded value", () => {
       const Dog = co.map({
         name: z.string(),
