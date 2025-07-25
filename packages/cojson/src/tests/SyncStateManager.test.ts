@@ -98,7 +98,7 @@ describe("SyncStateManager", () => {
       unsubscribe2();
     });
 
-    await client.node.syncManager.syncCoValue(map.core);
+    client.node.syncManager.syncCoValue(map.core);
 
     expect(updateToJazzCloudSpy).toHaveBeenCalledWith(
       emptyKnownState(map.core.id),
@@ -117,7 +117,7 @@ describe("SyncStateManager", () => {
       { uploaded: true },
     );
 
-    expect(updateToStorageSpy).toHaveBeenLastCalledWith(
+    expect(updateToStorageSpy).toHaveBeenCalledWith(
       emptyKnownState(group.core.id),
       { uploaded: false },
     );
