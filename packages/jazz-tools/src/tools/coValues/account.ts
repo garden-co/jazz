@@ -487,8 +487,8 @@ export const AccountAndGroupProxyHandler: ProxyHandler<Account | Group> = {
       typeof value === "object" &&
       SchemaInit in value
     ) {
-      (target.constructor as typeof CoMap)._schema ||= {};
-      (target.constructor as typeof CoMap)._schema[key] = value[SchemaInit];
+      (target.constructor as typeof Account)._schema ||= {};
+      (target.constructor as typeof Account)._schema[key] = value[SchemaInit];
       return true;
     } else if (key === "profile") {
       if (value) {
@@ -519,8 +519,8 @@ export const AccountAndGroupProxyHandler: ProxyHandler<Account | Group> = {
       typeof descriptor.value === "object" &&
       SchemaInit in descriptor.value
     ) {
-      (target.constructor as typeof CoMap)._schema ||= {};
-      (target.constructor as typeof CoMap)._schema[key] =
+      (target.constructor as typeof Account)._schema ||= {};
+      (target.constructor as typeof Account)._schema[key] =
         descriptor.value[SchemaInit];
       return true;
     } else {
