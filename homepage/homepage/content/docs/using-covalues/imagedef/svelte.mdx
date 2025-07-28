@@ -8,27 +8,18 @@ export const metadata = {
 
 `ImageDefinition` is a specialized CoValue designed specifically for managing images in Jazz applications. It extends beyond basic file storage by supporting a blurry placeholder, built-in resizing, and progressive loading patterns.
 
-**Note**: This guide applies to both Expo and framework-less React Native implementations.
-
-Beyond ImageDefinition, Jazz offers higher-level functions and components that make it easier to use images:
+Beyond [`ImageDefinition`](#understanding-imagedefinition), Jazz offers higher-level functions and components that make it easier to use images:
 - [`createImage()`](#creating-images) - function to create an `ImageDefinition` from a file
-- [`Image`](#displaying-images) - React Native component to display a stored image
+- [`Image`](#displaying-images) - Svelte component to display a stored image
 
-For examples of use, see our example apps:
-- [React Native Chat](https://github.com/gardencmp/jazz/tree/main/examples/chat-rn) (Framework-less implementation)
-- [Expo Chat](https://github.com/gardencmp/jazz/tree/main/examples/chat-rn-expo) (Expo implementation)
-- [Expo Clerk](https://github.com/gardencmp/jazz/tree/main/examples/clerk-expo) (Expo with Clerk-based authentication)
-
-## Installation
-
-The Jazz's images implementation is based on `@bam.tech/react-native-image-resizer`. Check the [installation guide](/docs/react-native/project-setup#install-dependencies) for more details.
+The [Image Upload example](https://github.com/gardencmp/jazz/tree/main/examples/image-upload) demonstrates use of images in Jazz.
 
 ## Creating Images
 
 The easiest way to create and use images in your Jazz application is with the `createImage()` function:
 
 <CodeGroup>
-```ts
+```ts twoslash
 import { Account, Group, ImageDefinition } from "jazz-tools";
 
 declare const me: {
@@ -39,28 +30,21 @@ declare const me: {
 };
 
 // ---cut---
-
 import { createImage } from "jazz-tools/media";
-import { launchImageLibrary } from 'react-native-image-picker';
 
-async function handleImagePicker() {
-  // Use your favorite image picker library to get the image URI
-  const result = await launchImageLibrary({
-    mediaType: 'photo',
-    quality: 1,
-  });
-
-  if (!result.didCancel && result.assets && result.assets.length > 0) {
-    // Creates ImageDefinition with a blurry placeholder, limited to 1024px on the longest side, and multiple resolutions automatically.
-    // See the options below for more details.
-    const image = await createImage(result.assets[0].uri, {
+// Create an image from a file input
+async function handleFileUpload(event: React.ChangeEvent<HTMLInputElement>) {
+  const file = event.target.files?.[0];
+  if (file) {
+    // Creates ImageDefinition with a blurry placeholder, limited to 1024px on the longest side, and multiple resolutions automatically
+    const image = await createImage(file, {
       owner: me._owner,
       maxSize: 1024,
       placeholder: "blur",
       progressive: true,
     });
 
-    // Store the image
+    // Store the image in your application data
     me.profile.image = image;
   }
 }
@@ -121,7 +105,7 @@ To create multiple resized copies of an original image for better layout control
 
 <CodeGroup>
 ```ts twoslash
-declare const myFile: string;
+declare const myBlob: Blob;
 // ---cut---
 import { co } from "jazz-tools";
 import { createImage } from "jazz-tools/media";
@@ -132,8 +116,8 @@ const ProductImage = co.map({
   thumbnail: co.image(),
 });
 
-const mainImage = await createImage(myFile);
-const thumbnail = await createImage(myFile, {
+const mainImage = await createImage(myBlob);
+const thumbnail = await createImage(myBlob, {
   maxSize: 100,
 });
 
@@ -151,35 +135,28 @@ const imageSet = ProductImage.create({
 
 ## Displaying Images
 
+To use the stored ImageDefinition, there are two ways: the `Image` react component, and the helpers functions.
+
+### `<Image>` component
+
 The Image component is the best way to let Jazz handle the image loading.
 
-
 <CodeGroup>
-```tsx
-import { Image } from "jazz-tools/react-native";
-import { StyleSheet } from "react-native";
+```svelte twoslash
+<script lang="ts">
+  import { ImageDefinition, type Loaded } from 'jazz-tools';
+  import { Image } from 'jazz-tools/svelte';
+  let { image }: { image: Loaded<typeof ImageDefinition> } = $props();
+</script>
 
-function GalleryView({ image }) {
-  return (
-    <Image
-      imageId={image.id}
-      style={styles.galleryImage}
-      width={400}
-      resizeMode="cover"
-    />
-  );
-}
+<Image
+  imageId={image.id}
+  alt=""
+  class="h-auto max-h-[20rem] max-w-full rounded-t-xl mb-1"
+/>
 
-const styles = StyleSheet.create({
-  galleryImage: {
-    width: '100%',
-    height: 200,
-    borderRadius: 8,
-  }
-});
 ```
 </CodeGroup>
-
 
 The `Image` component handles:
 - Showing a placeholder while loading, if generated
@@ -192,17 +169,13 @@ The component's props are:
 
 <CodeGroup>
 ```ts
-export type ImageProps = Omit<
-  RNImageProps,
-  "width" | "height" | "source"
-> & {
+interface ImageProps extends Omit<HTMLImgAttributes, "width" | "height"> {
   imageId: string;
   width?: number | "original";
   height?: number | "original";
-};
+}
 ```
 </CodeGroup>
-
 
 #### Width and Height props
 
@@ -211,24 +184,24 @@ The `width` and `height` props are used to control the best resolution to use bu
 Let's say we have an image with a width of 1920px and a height of 1080px.
 
 <CodeGroup>
-```tsx
+```svelte
 <Image imageId="123" />
-// <RNImage src={...} /> with the highest resolution available
+// <img src={...} /> with the highest resolution available
 
 <Image imageId="123" width="original" height="original" />
-// <RNImage width="1920" height="1080" />
+// <img width="1920" height="1080" />
 
 <Image imageId="123" width="600" />
-// <RNImage width="600" /> BAD! See https://reactnative.dev/docs/images#network-images
+// <img width="600" /> leaving the browser to compute the height (might cause layout shift)
 
 <Image imageId="123" width="600" height="original" />
-// <RNImage width="600" height="338" /> keeping the aspect ratio
+// <img width="600" height="338" /> keeping the aspect ratio
 
 <Image imageId="123" width="original" height="600" />
-// <RNImage width="1067" height="600" /> keeping the aspect ratio
+// <img width="1067" height="600" /> keeping the aspect ratio
 
 <Image imageId="123" width="600" height="600" />
-// <RNImage width="600" height="600" />
+// <img width="600" height="600" />
 ```
 </CodeGroup>
 
@@ -328,11 +301,12 @@ image?.subscribe({}, (image) => {
 </CodeGroup>
 
 
+
 ## Image manipulation custom implementation
 
-As mentioned, to manipulate the images (like placeholders, resizing, etc.), `createImage()` uses different implementations depending on the environment. Currently, the image manipulation is supported on browser and react-native environments.
+To manipulate the images (like placeholders, resizing, etc.), `createImage()` uses different implementations depending on the environment. Currently, the image manipulation is supported on browser and react-native environments.
 
-On react-native, the image manipulation is done using the `@bam.tech/react-native-image-resizer` library. If you want to use a custom implementation, you can use the `createImageFactory` function in order create your own `createImage` function and use your preferred image manipulation library.
+On the browser, the image manipulation is done using the `canvas` API. If you want to use a custom implementation, you can use the `createImageFactory` function in order create your own `createImage` function and use your preferred image manipulation library.
 
 <CodeGroup>
 ```ts
@@ -354,3 +328,4 @@ const createImage = createImageFactory({
 });
 ```
 </CodeGroup>
+
