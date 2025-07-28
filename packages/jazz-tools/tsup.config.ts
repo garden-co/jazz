@@ -31,6 +31,7 @@ export default defineConfig([
     entry: {
       index: "src/media/index.ts",
       "index.browser": "src/media/index.browser.ts",
+      "index.native": "src/media/index.native.ts",
     },
     outDir: "dist/media",
   },
@@ -121,13 +122,6 @@ export default defineConfig([
       crypto: "src/react-native-core/crypto/index.ts",
     },
     outDir: "dist/react-native-core",
-  },
-  {
-    ...cfg,
-    entry: {
-      index: "src/react-native-media-images/index.ts",
-    },
-    outDir: "dist/react-native-media-images",
   },
   {
     ...cfg,
