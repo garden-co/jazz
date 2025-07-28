@@ -24,6 +24,11 @@
       "types": "./dist/browser-media-images/index.d.ts",
       "default": "./dist/browser-media-images/index.js"
     },
+    "./media": {
+      "@jazz-tools/source": "./src/media/index.ts",
+      "types": "./dist/media/index.d.ts",
+      "default": "./dist/media/index.browser.js"
+    },
     "./expo": {
       "@jazz-tools/source": "./src/expo/index.ts",
       "types": "./dist/expo/index.d.ts",
@@ -145,15 +150,12 @@
     "@scure/base": "1.2.1",
     "@scure/bip39": "^1.3.0",
     "@tiptap/core": "^2.12.0",
-    "@types/image-blob-reduce": "^4.1.1",
     "clsx": "^2.0.0",
     "cojson": "workspace:*",
     "cojson-storage-indexeddb": "workspace:*",
     "cojson-transport-ws": "workspace:*",
     "fast-myers-diff": "^3.2.0",
     "goober": "^2.1.16",
-    "image-blob-reduce": "^4.1.0",
-    "pica": "^9.0.1",
     "prosemirror-example-setup": "^1.2.2",
     "prosemirror-menu": "^1.2.4",
     "prosemirror-model": "^1.21.1",
