@@ -1,4 +1,5 @@
-import { ProgressiveImg, createImage, useAccount } from "jazz-tools/react";
+import { createImage } from "jazz-tools/media";
+import { useAccount } from "jazz-tools/react";
 import { ChangeEvent, useEffect, useRef, useState } from "react";
 import { JazzAccount } from "./schema";
 
@@ -35,9 +36,14 @@ export default function ImageUpload() {
       setImagePreviewUrl(objectUrl);
 
       try {
+        const startTime = performance.now();
         me.profile.image = await createImage(file, {
           owner: me.profile._owner,
+          progressive: true,
+          placeholder: "blur",
         });
+        const endTime = performance.now();
+        console.log(`Image upload took ${endTime - startTime} milliseconds`);
       } catch (error) {
         console.error("Error uploading image:", error);
       } finally {
@@ -46,29 +52,6 @@ export default function ImageUpload() {
       }
     }
   };
-
-  const deleteImage = () => {
-    if (!me?.profile) return;
-    me.profile.image = undefined;
-  };
-
-  if (me?.profile?.image) {
-    return (
-      <>
-        <ProgressiveImg image={me.profile.image as any /* TODO: fix this */}>
-          {({ src }) => <img alt="" src={src} className="w-full h-auto" />}
-        </ProgressiveImg>
-
-        <button
-          type="button"
-          onClick={deleteImage}
-          className="mt-5 bg-blue-600 text-white py-2 px-3 rounded"
-        >
-          Delete image
-        </button>
-      </>
-    );
-  }
 
   if (imagePreviewUrl) {
     return (
