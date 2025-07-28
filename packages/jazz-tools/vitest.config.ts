@@ -23,7 +23,7 @@ export default defineProject({
       },
       {
         test: {
-          include: ["src/**/*.test.{js,ts,svelte}"],
+          include: ["src/**/*.test.{js,ts,tsx,svelte}"],
           name: "unit",
         },
       },
