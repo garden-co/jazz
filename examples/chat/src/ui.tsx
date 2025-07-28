@@ -1,6 +1,6 @@
 import clsx from "clsx";
 import { CoPlainText, ImageDefinition } from "jazz-tools";
-import { ProgressiveImg } from "jazz-tools/react";
+import { Image } from "jazz-tools/react";
 import { ImageIcon } from "lucide-react";
 import { useId, useRef } from "react";
 
@@ -83,14 +83,12 @@ export function BubbleText(props: {
 
 export function BubbleImage(props: { image: ImageDefinition }) {
   return (
-    <ProgressiveImg image={props.image}>
-      {({ src }) => (
-        <img
-          className="h-auto max-h-80 max-w-full rounded-t-xl mb-1"
-          src={src}
-        />
-      )}
-    </ProgressiveImg>
+    <Image
+      imageId={props.image.id}
+      className="h-auto max-h-80 max-w-full rounded-t-xl mb-1"
+      height="original"
+      width="original"
+    />
   );
 }
 
