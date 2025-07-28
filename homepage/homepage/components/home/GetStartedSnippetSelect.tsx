@@ -1,4 +1,4 @@
-'use client'
+"use client";
 
 import { Framework } from "@/content/framework";
 import { useFramework } from "@/lib/use-framework";
@@ -30,12 +30,19 @@ export function GetStartedSnippetSelect() {
       </div>
       <div className="col-span-2 lg:col-span-3 flex flex-row gap-2">
         <div className="h-full items-center w-[175px]">
-          <FrameworkSelect onSelect={setSelectedFramework} size="md" routerPush={false} className="h-full md:px-4" />
+          <FrameworkSelect
+            onSelect={setSelectedFramework}
+            size="md"
+            routerPush={false}
+            className="h-full md:px-4"
+          />
         </div>
         <div className="flex h-full items-center">
-          <Button intent="primary" size="lg" className="w-full">
-            <Link className="my-[0.11rem]" href={`/docs/${selectedFramework}`}>Get started</Link>
-          </Button>
+          <Link href={`/docs/${selectedFramework}`}>
+            <Button intent="primary" size="lg" className="w-full py-[0.11rem]">
+              Get started
+            </Button>
+          </Link>
         </div>
       </div>
     </GappedGrid>
