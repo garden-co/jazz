@@ -1,6 +1,6 @@
 import { page, userEvent } from "@vitest/browser/context";
-import { AuthSecretStorage, ImageDefinition } from "jazz-tools";
-import { createImage } from "jazz-tools/browser-media-images";
+import { AuthSecretStorage } from "jazz-tools";
+import { createImage, highestResAvailable } from "jazz-tools/media";
 import { assert, afterEach, describe, expect, test } from "vitest";
 import { createAccountContext, startSyncServer } from "./testUtils";
 
@@ -40,13 +40,11 @@ describe("Images upload", () => {
 
     const image = await createImage(file);
 
-    const highestRes = ImageDefinition.highestResAvailable(image);
+    const highestRes = highestResAvailable(image, 512, 512);
 
     assert(highestRes);
 
-    expect(highestRes.res).toBe("512x512");
-
-    const blob = highestRes.stream.toBlob();
+    const blob = highestRes.image.toBlob();
 
     assert(blob);
 

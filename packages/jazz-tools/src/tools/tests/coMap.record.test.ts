@@ -8,8 +8,7 @@ import {
   test,
   vi,
 } from "vitest";
-import { Group, co, z } from "../exports.js";
-import { InstanceOrPrimitiveOfSchema } from "../implementation/zodSchema/typeConverters/InstanceOrPrimitiveOfSchema.js";
+import { FileStream, Group, co, z } from "../exports.js";
 import { Loaded } from "../implementation/zodSchema/zodSchema.js";
 import { Account } from "../index.js";
 import { createJazzTestAccount, setupJazzTestSync } from "../testing.js";
@@ -328,6 +327,8 @@ describe("CoMap.Record", async () => {
       type: "repro",
       name: "John",
       image: co.image().create({
+        original: FileStream.create(),
+        progressive: false,
         originalSize: [1920, 1080],
       }),
     });

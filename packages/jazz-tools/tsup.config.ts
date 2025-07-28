@@ -29,9 +29,10 @@ export default defineConfig([
   {
     ...cfg,
     entry: {
-      index: "src/browser-media-images/index.ts",
+      index: "src/media/index.ts",
+      "index.browser": "src/media/index.browser.ts",
     },
-    outDir: "dist/browser-media-images",
+    outDir: "dist/media",
   },
   {
     ...cfg,

@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, test } from "vitest";
-import { CoPlainText, co, z } from "../exports.js";
+import { CoPlainText, FileStream, co, z } from "../exports.js";
 import { createJazzTestAccount, setupJazzTestSync } from "../testing.js";
 
 describe("co.optional", () => {
@@ -69,6 +69,8 @@ describe("co.optional", () => {
     schema.fileStream = Schema.shape.fileStream.innerType.create();
     schema.image = Schema.shape.image.innerType.create({
       originalSize: [1920, 1080],
+      original: FileStream.create(),
+      progressive: false,
     });
     schema.record = Schema.shape.record.innerType.create({ field: "hello" });
     schema.map = Schema.shape.map.innerType.create({ field: "hello" });
