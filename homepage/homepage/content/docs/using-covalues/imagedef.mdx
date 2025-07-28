@@ -1,18 +1,18 @@
 import { CodeGroup } from "@/components/forMdx";
 
 export const metadata = {
-  description: "ImageDefinition is a CoValue for managing images, storage of multiple resolutions, and progressive loading."
+  description: "ImageDefinition is a CoValue for storing images with built-in UX features."
 };
 
 # ImageDefinition
 
-`ImageDefinition` is a specialized CoValue designed specifically for managing images in Jazz applications. It extends beyond basic file storage by supporting multiple resolutions of the same image and progressive loading patterns.
+`ImageDefinition` is a specialized CoValue designed specifically for managing images in Jazz applications. It extends beyond basic file storage by supporting a blurry placeholder, built-in resizing, and progressive loading patterns.
 
-We also offer [`createImage()`](#creating-images), a higher-level function to create an `ImageDefinition` from a file.
+Beyond ImageDefinition, Jazz offers higher-level functions and components that make it easier to use images:
+- [`createImage()`](#creating-images) - function to create an `ImageDefinition` from a file
+- [`loadImage`, `loadImageBySize`, `highestResAvailable`](#displaying-images) - functions to load and display images
 
-If you're building with React, we recommend starting with our [React-specific image documentation](/docs/react/using-covalues/imagedef) which covers higher-level components and hooks for working with images.
-
-The [Image Upload example](https://github.com/gardencmp/jazz/tree/main/examples/image-upload) demonstrates use of `ImageDefinition`.
+The [Image Upload example](https://github.com/gardencmp/jazz/tree/main/examples/image-upload) demonstrates use of images in Jazz.
 
 ## Creating Images
 
@@ -20,314 +20,258 @@ The easiest way to create and use images in your Jazz application is with the `c
 
 <CodeGroup>
 ```ts twoslash
-import { Group, co, z } from "jazz-tools";
+import { Account, Group, ImageDefinition } from "jazz-tools";
 
-const MyProfile = co.profile({
-  name: z.string(),
-  image: co.optional(co.image()),
-});
-
-const MyAccount = co.account({
-  root: co.map({}),
-  profile: MyProfile,
-});
-
-MyAccount.withMigration((account, creationProps) => {
-  if (account.profile === undefined) {
-    const profileGroup = Group.create();
-    profileGroup.makePublic();
-    account.profile = MyProfile.create(
-      {
-        name: creationProps?.name ?? "New user",
-      },
-      profileGroup,
-    );
-  }
-});
-
-const me = await MyAccount.create({ creationProps: { name: "John Doe" } });
-
-const myGroup = Group.create();
+declare const me: {
+  _owner: Account | Group;
+  profile: {
+    image: ImageDefinition;
+  };
+};
 
 // ---cut---
-import { createImage } from "jazz-tools/browser-media-images";
+import { createImage } from "jazz-tools/media";
 
 // Create an image from a file input
-async function handleFileUpload(event: Event) {
-  const file = (event.target as HTMLInputElement).files?.[0];
+async function handleFileUpload(event: React.ChangeEvent<HTMLInputElement>) {
+  const file = event.target.files?.[0];
   if (file) {
-    // Creates ImageDefinition with multiple resolutions automatically
-    const image = await createImage(file, { owner: myGroup });
+    // Creates ImageDefinition with a blurry placeholder, limited to 1024px on the longest side, and multiple resolutions automatically
+    const image = await createImage(file, {
+      owner: me._owner,
+      maxSize: 1024,
+      placeholder: "blur",
+      progressive: true,
+    });
 
     // Store the image in your application data
     me.profile.image = image;
   }
 }
-
 ```
 </CodeGroup>
 
-**Note:** `createImage()` requires a browser environment as it uses browser APIs to process images.
+**Note:** `createImage()` currently supports browser and react-native environments.
 
 The `createImage()` function:
 - Creates an `ImageDefinition` with the right properties
 - Generates a small placeholder for immediate display
 - Creates multiple resolution variants of your image
-- Returns the ID of the created `ImageDefinition`
+- Returns the created `ImageDefinition`
 
 ### Configuration Options
 
-You can configure `createImage()` with additional options:
+<CodeGroup>
+```ts
+import type { ImageDefinition, Group, Account } from "jazz-tools";
+// ---cut---
+declare function createImage(
+  image: Blob | File | string,
+  options: {
+    owner?: Group | Account;
+    placeholder?: "blur" | false;
+    maxSize?: number;
+    progressive?: boolean;
+  }): Promise<ImageDefinition>
+```
+</CodeGroup>
+
+#### `image`
+
+The image to create an `ImageDefinition` from. On browser environments, this can be a `Blob` or a `File`. On React Native, this must be a `string` with the file path.
+
+#### `owner`
+
+The owner of the `ImageDefinition`. This is used to control access to the image. See [Groups as permission scopes](/docs/groups/intro) for more information on how to use groups to control access to images.
+
+#### `placeholder`
+
+Sometimes the wanted image is not loaded yet. The placeholder is a base64 encoded image that is displayed while the image is loading. Currently, only `"blur"` is a supported.
+
+#### `maxSize`
+
+The image generation process includes a maximum size setting that controls the longest side of the image. A built-in resizing feature is applied based on this setting.
+
+
+#### `progressive`
+
+The progressive loading pattern is a technique that allows images to load incrementally, starting with a small version and gradually replacing it with a larger version as it becomes available. This is useful for improving the user experience by showing a placeholder while the image is loading.
+
+Passing `progressive: true` to `createImage()` will create internal smaller versions of the image for future uses.
+
+### Create multiple resized copies
+
+To create multiple resized copies of an original image for better layout control, you can utilize the `createImage` function multiple times with different parameters for each desired size. Here’s an example of how you might implement this:
+
+<CodeGroup>
+```ts twoslash
+declare const myBlob: Blob;
+// ---cut---
+import { co } from "jazz-tools";
+import { createImage } from "jazz-tools/media";
+
+// Jazz Schema
+const ProductImage = co.map({
+  image: co.image(),
+  thumbnail: co.image(),
+});
+
+const mainImage = await createImage(myBlob);
+const thumbnail = await createImage(myBlob, {
+  maxSize: 100,
+});
+
+// or, in case of migration, you can use the original stored image.
+const newThumb = await createImage(mainImage!.original!.toBlob()!, {
+  maxSize: 100,
+});
+
+const imageSet = ProductImage.create({
+  image: mainImage,
+  thumbnail,
+});
+```
+</CodeGroup>
+
+## Displaying Images
+
+Like other CoValues, `ImageDefinition` can be used to load the object.
 
 <CodeGroup>
 ```tsx twoslash
-import { createImage } from "jazz-tools/browser-media-images";
-import { createJazzTestAccount } from 'jazz-tools/testing';
-const me = await createJazzTestAccount();
-const file = new File([], "test.jpg", { type: "image/jpeg" });
-// ---cut---
-// Configuration options
-const options = {
-  owner: me,                // Owner for access control
-  maxSize: 1024 as 1024     // Maximum resolution to generate
-};
-
-// Setting maxSize controls which resolutions are generated:
-// 256: Only creates the smallest resolution (256px on longest side)
-// 1024: Creates 256px and 1024px resolutions
-// 2048: Creates 256px, 1024px, and 2048px resolutions
-// undefined: Creates all resolutions including the original size
-
-const image = await createImage(file, options);
-```
-</CodeGroup>
-
-### Ownership
-
-Like other CoValues, you can specify ownership when creating image definitions.
-
-<CodeGroup>
-```ts twoslash
-import { Group } from "jazz-tools";
-import { createImage } from "jazz-tools/browser-media-images";
-import { createJazzTestAccount } from 'jazz-tools/testing';
-const me = await createJazzTestAccount();
-const colleagueAccount = await createJazzTestAccount();
-
-const file = new File([], "test.jpg", { type: "image/jpeg" });
-
-// ---cut---
-const teamGroup = Group.create();
-teamGroup.addMember(colleagueAccount, "writer");
-
-// Create an image with shared ownership
-const teamImage = await createImage(file, { owner: teamGroup });
-```
-</CodeGroup>
-
-See [Groups as permission scopes](/docs/groups/intro) for more information on how to use groups to control access to images.
-
-## Creating ImageDefinitions
-
-Create an `ImageDefinition` by specifying the original dimensions and an optional placeholder:
-
-<CodeGroup>
-```ts twoslash
 import { ImageDefinition } from "jazz-tools";
 
-// Create with original dimensions
-const image = ImageDefinition.create({
-  originalSize: [1920, 1080],
-});
-
-// With a placeholder for immediate display
-const imageWithPlaceholder = ImageDefinition.create({
-  originalSize: [1920, 1080],
-  placeholderDataURL: "data:image/jpeg;base64,/9j/4AAQSkZJ...",
-});
-```
-</CodeGroup>
-
-### Structure
-
-`ImageDefinition` stores:
-- The original image dimensions (`originalSize`)
-- An optional placeholder (`placeholderDataURL`, typically a tiny base64-encoded preview)
-- Multiple resolution variants of the same image as [`FileStream`s](./using-covalues/filestreams)
-
-Each resolution is stored with a key in the format `"widthxheight"` (e.g., `"1920x1080"`, `"800x450"`).
-
-<CodeGroup>
-```ts twoslash
-import { ImageDefinition, co, z } from "jazz-tools";
-
-const Gallery = co.map({
-  title: z.string(),
-  images: co.list(co.image()),
-});
-```
-</CodeGroup>
-
-## Adding Image Resolutions
-
-Add multiple resolutions to an `ImageDefinition` by creating `FileStream`s for each size:
-
-<CodeGroup>
-```ts twoslash
-import { FileStream, ImageDefinition } from "jazz-tools";
-import { createJazzTestAccount } from 'jazz-tools/testing';
-const me = await createJazzTestAccount();
-
-const fullSizeBlob = new Blob([], { type: "image/jpeg" });
-const mediumSizeBlob = new Blob([], { type: "image/jpeg" });
-const thumbnailBlob = new Blob([], { type: "image/jpeg" });
-
-const image = ImageDefinition.create({
-  originalSize: [1920, 1080],
-}, { owner: me });
-// ---cut---
-// Create FileStreams for different resolutions
-const fullRes = await FileStream.createFromBlob(fullSizeBlob);
-const mediumRes = await FileStream.createFromBlob(mediumSizeBlob);
-const thumbnailRes = await FileStream.createFromBlob(thumbnailBlob);
-
-// Add to the ImageDefinition with appropriate resolution keys
-image["1920x1080"] = fullRes;
-image["800x450"] = mediumRes;
-image["320x180"] = thumbnailRes;
-```
-</CodeGroup>
-
-## Retrieving Images
-
-The `highestResAvailable` method helps select the best image resolution for the current context:
-
-<CodeGroup>
-```ts twoslash
-import { ImageDefinition, FileStream } from "jazz-tools";
-import { createJazzTestAccount } from "jazz-tools/testing";
-
-// Simple document environment
-global.document = {
-  createElement: () =>
-    ({ src: "", onload: null }) as unknown as HTMLImageElement,
-} as unknown as Document;
-global.window = { innerWidth: 1000 } as unknown as Window & typeof globalThis;
-
-// Setup
-const fakeBlob = new Blob(["fake image data"], { type: "image/jpeg" });
-const me = await createJazzTestAccount();
-const image = ImageDefinition.create(
-  { originalSize: [1920, 1080] },
-  { owner: me },
-);
-image["1920x1080"] = await FileStream.createFromBlob(fakeBlob, { owner: me });
-const imageElement = document.createElement("img");
-
-// ---cut---
-// Get highest resolution available (unconstrained)
-const highestRes = ImageDefinition.highestResAvailable(image);
-console.log(highestRes);
-if (highestRes) {
-  const blob = highestRes.stream.toBlob();
-  if (blob) {
-    // Create a URL for the blob
-    const url = URL.createObjectURL(blob);
-    imageElement.src = url;
-    // Revoke the URL when the image is loaded
-    imageElement.onload = () => URL.revokeObjectURL(url);
-  }
-}
-
-// Get appropriate resolution for specific width
-const appropriateRes = ImageDefinition.highestResAvailable(image, {
-  targetWidth: window.innerWidth,
-});
-```
-</CodeGroup>
-
-### Fallback Behavior
-
-`highestResAvailable` returns the largest resolution that fits your constraints. If a resolution has incomplete data, it falls back to the next available lower resolution.
-
-<CodeGroup>
-```ts twoslash
-import { ImageDefinition, FileStream } from "jazz-tools";
-
-const mediumSizeBlob = new Blob([], { type: "image/jpeg" });
-// ---cut---
-const image = ImageDefinition.create({
-  originalSize: [1920, 1080],
-});
-
-image["1920x1080"] = FileStream.create(); // Empty image upload
-image["800x450"] = await FileStream.createFromBlob(mediumSizeBlob);
-
-const highestRes = ImageDefinition.highestResAvailable(image);
-console.log(highestRes?.res); // 800x450
-```
-</CodeGroup>
-
-## Progressive Loading Patterns
-
-`ImageDefinition` supports simple progressive loading with placeholders and resolution selection:
-
-<CodeGroup>
-```ts twoslash
-import { FileStream, ImageDefinition } from "jazz-tools";
-import { createJazzTestAccount } from "jazz-tools/testing";
-
-// Simple document environment
-global.document = {
-  createElement: () =>
-    ({ src: "", onload: null }) as unknown as HTMLImageElement,
-} as unknown as Document;
-global.window = { innerWidth: 1000 } as unknown as Window & typeof globalThis;
-
-const me = await createJazzTestAccount();
-
-const mediumSizeBlob = new Blob([], { type: "image/jpeg" });
-const image = ImageDefinition.create(
-  {
-    originalSize: [1920, 1080],
+const image = await ImageDefinition.load("123", {
+  resolve: {
+    original: true,
   },
-  { owner: me },
-);
-image["1920x1080"] = await FileStream.createFromBlob(mediumSizeBlob, {
-  owner: me,
-});
-const imageElement = document.createElement("img");
-// ---cut---
-// Start with placeholder for immediate display
-if (image.placeholderDataURL) {
-  imageElement.src = image.placeholderDataURL;
-}
-
-// Then load the best resolution for the current display
-const screenWidth = window.innerWidth;
-const bestRes = ImageDefinition.highestResAvailable(image, {
-  targetWidth: screenWidth,
 });
 
-if (bestRes) {
-  const blob = bestRes.stream.toBlob();
-  if (blob) {
-    const url = URL.createObjectURL(blob);
-    imageElement.src = url;
-
-    // Remember to revoke the URL when no longer needed
-    imageElement.onload = () => {
-      URL.revokeObjectURL(url);
-    };
-  }
+if(image) {
+  console.log({
+    originalSize: image.originalSize,
+    placeholderDataUrl: image.placeholderDataURL,
+    original: image.original, // this FileStream may be not loaded yet
+  });
 }
-
 ```
 </CodeGroup>
-## Best Practices
 
-- **Generate resolutions server-side** when possible for optimal quality
+`image.original` is a `FileStream` and its content can be read as described in the [FileStream](/docs/vanilla/using-covalues/filestreams#reading-from-filestreams) documentation.
+
+Since FileStream objects are also CoValues, they must be loaded before use. To simplify loading, if you want to load the binary data saved as Original, you can use the `loadImage` function.
+
+<CodeGroup>
+```ts twoslash
+declare const imageDefinitionOrId: string;
+// ---cut---
+import { loadImage } from "jazz-tools/media";
+
+const image = await loadImage(imageDefinitionOrId);
+if(image === null) {
+  throw new Error("Image not found");
+}
+
+const img = document.createElement("img");
+img.width = image.width;
+img.height = image.height;
+img.src = URL.createObjectURL(image.image.toBlob()!);
+img.onload = () => URL.revokeObjectURL(img.src);
+```
+</CodeGroup>
+
+If the image was generated with progressive loading, and you want to access the best-fit resolution, use `loadImageBySize`. It will load the image of the best resolution that fits the wanted width and height.
+
+<CodeGroup>
+```ts twoslash
+declare const imageDefinitionOrId: string;
+// ---cut---
+import { loadImageBySize } from "jazz-tools/media";
+
+const image = await loadImageBySize(imageDefinitionOrId, 600, 600); // 600x600
+
+if(image) {
+  console.log({
+    width: image.width,
+    height: image.height,
+    image: image.image,
+  });
+}
+```
+</CodeGroup>
+
+
+If want to dynamically listen to the _loaded_ resolution that best fits the wanted width and height, you can use the `subscribe` and the `highestResAvailable` function.
+
+<CodeGroup>
+```ts
+import { ImageDefinition } from "jazz-tools";
+// function highestResAvailable(image: ImageDefinition, wantedWidth: number, wantedHeight: number): FileStream | null
+import { highestResAvailable } from "jazz-tools/media";
+
+const image = await ImageDefinition.load(imageId);
+
+if(image === null) {
+  throw new Error("Image not found");
+}
+
+const img = document.createElement("img");
+img.width = 600;
+img.height = 600;
+
+// start with the placeholder
+if(image.placeholderDataURL) {
+  img.src = image.placeholderDataURL;
+}
+
+// then listen to the image changes
+image.subscribe({}, (image) => {
+  const bestImage = highestResAvailable(image, 600, 600);
+
+  if(bestImage) {
+    // bestImage is again a FileStream
+    const blob = bestImage.image.toBlob();
+    if(blob) {
+      const url = URL.createObjectURL(blob);
+      img.src = url;
+      img.onload = () => URL.revokeObjectURL(url);
+    }
+  }
+});
+```
+</CodeGroup>
+
+### Best Practices
+
+- **Set image sizes** when possible to avoid layout shifts
 - **Use placeholders** (like LQIP - Low Quality Image Placeholders) for instant rendering
 - **Prioritize loading** the resolution appropriate for the current viewport
 - **Consider device pixel ratio** (window.devicePixelRatio) for high-DPI displays
 - **Always call URL.revokeObjectURL** after the image loads to prevent memory leaks
+
+## Image manipulation custom implementation
+
+To manipulate the images (like placeholders, resizing, etc.), `createImage()` uses different implementations depending on the environment. Currently, the image manipulation is supported on browser and react-native environments.
+
+On the browser, the image manipulation is done using the `canvas` API. If you want to use a custom implementation, you can use the `createImageFactory` function in order create your own `createImage` function and use your preferred image manipulation library.
+
+<CodeGroup>
+```ts
+import { createImageFactory } from "jazz-tools/media";
+
+const createImage = createImageFactory({
+    createFileStreamFromSource: async (source, owner) => {
+        // ...
+    },
+    getImageSize: async (image) => {
+        // ...
+    },
+    getPlaceholderBase64: async (image) => {
+        // ...
+    },
+    resize: async (image, width, height) => {
+        // ...
+    },
+});
+```
+</CodeGroup>
