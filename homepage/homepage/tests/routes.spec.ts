@@ -33,21 +33,34 @@ test.describe("Docs pages load", () => {
     expect(response?.ok()).toBeTruthy();
   });
 
-  [
-    "react",
-    "react-native",
-    "react-native-expo",
-    "svelte",
-    "vanilla",
-  ].forEach((framework) => {
-    test(`docs for ${framework} loads`, async ({ page }) => {
-      const response = await page.goto(`/docs/${framework}`);
-      expect(response?.ok()).toBeTruthy();
-    });
-  });
+  ["react", "react-native", "react-native-expo", "svelte", "vanilla"].forEach(
+    (framework) => {
+      test(`docs for ${framework} loads`, async ({ page }) => {
+        const response = await page.goto(`/docs/${framework}`);
+        expect(response?.ok()).toBeTruthy();
+      });
+    },
+  );
 
   test("/docs redirects to /docs/react", async ({ page }) => {
     await page.goto("/docs");
     await expect(page).toHaveURL(/\/docs\/react$/);
+  });
+});
+
+test.describe("Homepage", () => {
+  test(`'Get started' button is fully clickable`, async ({ page }) => {
+    await page.goto("/");
+
+    // Locate button text and click it
+    const text = page.locator('a >> button:has-text("Get started")');
+    await text.click();
+    await expect(page).toHaveURL(/\/docs\/\w+/);
+
+    // Go back and click the whole button area
+    await page.goBack();
+    const button = page.locator("a >> button");
+    await button.click();
+    await expect(page).toHaveURL(/\/docs\/\w+/);
   });
 });
