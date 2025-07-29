@@ -23,6 +23,8 @@ import { EVERYONE, RawGroup } from "./coValues/group.js";
 import type { Everyone } from "./coValues/group.js";
 import {
   CryptoProvider,
+  SessionLogImpl,
+  SignerID,
   StreamingHash,
   secretSeedLength,
   shortHashLength,
@@ -150,6 +152,8 @@ export {
   AgentSecret,
   InviteSecret,
   CryptoProvider,
+  SessionLogImpl,
+  SignerID,
   SyncMessage,
   isRawCoID,
   emptyKnownState,
