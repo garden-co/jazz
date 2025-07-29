@@ -4284,11 +4284,94 @@ packages:
   '@coinbase/wallet-sdk@4.3.0':
     resolution: {integrity: sha512-T3+SNmiCw4HzDm4we9wCHCxlP0pqCiwKe4sOwPH3YAK2KSKjxPRydKu6UQJrdONFVLG7ujXvbd/6ZqmvJb8rkw==}
 
+<<<<<<< HEAD
   '@craftzdog/react-native-buffer@6.0.5':
     resolution: {integrity: sha512-Av+YqfwA9e7jhgI9GFE/gTpwl/H+dRRLmZyJPOpKTy107j9Oj7oXlm3/YiMNz+C/CEGqcKAOqnXDLs4OL6AAFw==}
 
+=======
+<<<<<<< HEAD
+>>>>>>> 193b7349f (feat: integrate cojson-core-rn crate into RNCrypto provider)
   '@craftzdog/react-native-buffer@6.1.0':
     resolution: {integrity: sha512-lJXdjZ7fTllLbzDrwg/FrJLjQ5sBcAgwcqgAB6OPpXTHdCenEhHZblQpfmBLLe7/S7m0yKXL3kN3jpwOEkpjGg==}
+=======
+  '@cspotcode/source-map-support@0.8.1':
+    resolution: {integrity: sha512-IchNf6dN4tHoMFIn/7OE8LWZ19Y6q/67Bmf6vnGREv8RSbBVb9LPJxEcnwrcwX6ixSvaiGoomAUvu4YSxXrVgw==}
+    engines: {node: '>=12'}
+
+  '@csstools/color-helpers@4.2.1':
+    resolution: {integrity: sha512-CEypeeykO9AN7JWkr1OEOQb0HRzZlPWGwV0Ya6DuVgFdDi6g3ma/cPZ5ZPZM4AWQikDpq/0llnGGlIL+j8afzw==}
+    engines: {node: ^14 || ^16 || >=18}
+
+  '@csstools/color-helpers@5.0.2':
+    resolution: {integrity: sha512-JqWH1vsgdGcw2RR6VliXXdA0/59LttzlU8UlRT/iUUsEeWfYq8I+K0yhihEUTTHLRm1EXvpsCx3083EU15ecsA==}
+    engines: {node: '>=18'}
+
+  '@csstools/css-calc@1.2.4':
+    resolution: {integrity: sha512-tfOuvUQeo7Hz+FcuOd3LfXVp+342pnWUJ7D2y8NUpu1Ww6xnTbHLpz018/y6rtbHifJ3iIEf9ttxXd8KG7nL0Q==}
+    engines: {node: ^14 || ^16 || >=18}
+    peerDependencies:
+      '@csstools/css-parser-algorithms': ^2.7.1
+      '@csstools/css-tokenizer': ^2.4.1
+
+  '@csstools/css-calc@2.1.4':
+    resolution: {integrity: sha512-3N8oaj+0juUw/1H3YwmDDJXCgTB1gKU6Hc/bB502u9zR0q2vd786XJH9QfrKIEgFlZmhZiq6epXl4rHqhzsIgQ==}
+    engines: {node: '>=18'}
+    peerDependencies:
+      '@csstools/css-parser-algorithms': ^3.0.5
+      '@csstools/css-tokenizer': ^3.0.4
+
+  '@csstools/css-color-parser@2.0.5':
+    resolution: {integrity: sha512-lRZSmtl+DSjok3u9hTWpmkxFZnz7stkbZxzKc08aDUsdrWwhSgWo8yq9rq9DaFUtbAyAq2xnH92fj01S+pwIww==}
+    engines: {node: ^14 || ^16 || >=18}
+    peerDependencies:
+      '@csstools/css-parser-algorithms': ^2.7.1
+      '@csstools/css-tokenizer': ^2.4.1
+
+  '@csstools/css-color-parser@3.0.10':
+    resolution: {integrity: sha512-TiJ5Ajr6WRd1r8HSiwJvZBiJOqtH86aHpUjq5aEKWHiII2Qfjqd/HCWKPOW8EP4vcspXbHnXrwIDlu5savQipg==}
+    engines: {node: '>=18'}
+    peerDependencies:
+      '@csstools/css-parser-algorithms': ^3.0.5
+      '@csstools/css-tokenizer': ^3.0.4
+
+  '@csstools/css-parser-algorithms@2.7.1':
+    resolution: {integrity: sha512-2SJS42gxmACHgikc1WGesXLIT8d/q2l0UFM7TaEeIzdFCE/FPMtTiizcPGGJtlPo2xuQzY09OhrLTzRxqJqwGw==}
+    engines: {node: ^14 || ^16 || >=18}
+    peerDependencies:
+      '@csstools/css-tokenizer': ^2.4.1
+
+  '@csstools/css-parser-algorithms@3.0.5':
+    resolution: {integrity: sha512-DaDeUkXZKjdGhgYaHNJTV9pV7Y9B3b644jCLs9Upc3VeNGg6LWARAT6O+Q+/COo+2gg/bM5rhpMAtf70WqfBdQ==}
+    engines: {node: '>=18'}
+    peerDependencies:
+      '@csstools/css-tokenizer': ^3.0.4
+
+  '@csstools/css-tokenizer@2.4.1':
+    resolution: {integrity: sha512-eQ9DIktFJBhGjioABJRtUucoWR2mwllurfnM8LuNGAqX3ViZXaUchqk+1s7jjtkFiT9ySdACsFEA3etErkALUg==}
+    engines: {node: ^14 || ^16 || >=18}
+
+  '@csstools/css-tokenizer@3.0.4':
+    resolution: {integrity: sha512-Vd/9EVDiu6PPJt9yAh6roZP6El1xHrdvIVGjyBsHR0RYwNHgL7FJPyIIW4fANJNG6FtyZfvlRPpFI4ZM/lubvw==}
+    engines: {node: '>=18'}
+
+  '@csstools/postcss-oklab-function@3.0.19':
+    resolution: {integrity: sha512-e3JxXmxjU3jpU7TzZrsNqSX4OHByRC3XjItV3Ieo/JEQmLg5rdOL4lkv/1vp27gXemzfNt44F42k/pn0FpE21Q==}
+    engines: {node: ^14 || ^16 || >=18}
+    peerDependencies:
+      postcss: ^8.4
+
+  '@csstools/postcss-progressive-custom-properties@3.3.0':
+    resolution: {integrity: sha512-W2oV01phnILaRGYPmGFlL2MT/OgYjQDrL9sFlbdikMFi6oQkFki9B86XqEWR7HCsTZFVq7dbzr/o71B75TKkGg==}
+    engines: {node: ^14 || ^16 || >=18}
+    peerDependencies:
+      postcss: ^8.4
+
+  '@csstools/utilities@1.0.0':
+    resolution: {integrity: sha512-tAgvZQe/t2mlvpNosA4+CkMiZ2azISW5WPAcdSalZlEjQvUfghHxfQcrCiK/7/CrfAWVxyM88kGFYO82heIGDg==}
+    engines: {node: ^14 || ^16 || >=18}
+    peerDependencies:
+      postcss: ^8.4
+>>>>>>> 815246c0c (feat: integrate cojson-core-rn crate into RNCrypto provider)
 
   '@cspotcode/source-map-support@0.8.1':
     resolution: {integrity: sha512-IchNf6dN4tHoMFIn/7OE8LWZ19Y6q/67Bmf6vnGREv8RSbBVb9LPJxEcnwrcwX6ixSvaiGoomAUvu4YSxXrVgw==}
@@ -10449,9 +10532,17 @@ packages:
     resolution: {integrity: sha512-zHtQzGojZXTwZTHQqra+ETKd4Sn3vgi7uBmlPoXVWZqYvuKmtI0l/VZTjqGmJY9x88GGOaZ9+G9ES8hC4T4X8g==}
     engines: {node: '>= 12'}
 
+<<<<<<< HEAD
   is-arguments@1.2.0:
     resolution: {integrity: sha512-7bVbi0huj/wrIAOzb8U1aszg9kdi3KN/CyU19CTI7tAoZYEZoL9yCDXpbXN+uPsuWnP02cyug1gleqq+TU+YCA==}
     engines: {node: '>= 0.4'}
+=======
+  is-alphabetical@2.0.1:
+    resolution: {integrity: sha512-FWyyY60MeTNyeSRpkM2Iry0G9hpr7/9kD40mD/cGQEuilcZYS4okz8SN2Q6rLCJ8gbCt6fN+rC+6tMGS99LaxQ==}
+
+  is-alphanumerical@2.0.1:
+    resolution: {integrity: sha512-hmbYhX/9MUMF5uh7tOXyK/n0ZvWpad5caBA17GsC6vyuCqaWliRG5K1qS9inmUhEMaOBIW7/whAnSwveW/LtZw==}
+>>>>>>> 815246c0c (feat: integrate cojson-core-rn crate into RNCrypto provider)
 
   is-array-buffer@3.0.5:
     resolution: {integrity: sha512-DDfANUiiG2wC1qawP66qlTugJeL5HyzMpfr8lLK+jMQirGzNod0B12cFB/9q838Ru27sBwfw78/rdoU7RERz6A==}
@@ -12929,6 +13020,7 @@ packages:
       react: 19.1.0
       react-native: '*'
 
+<<<<<<< HEAD
   react-native-nitro-modules@0.26.4:
     resolution: {integrity: sha512-sCZ0U+FY6JM73HaZYyc4kSRV7JQZXGfbimpYJzaAaZFQMGpJFkD5c3Jt66j1v83wN/m6D/SM9yyx+dN6XTfGAg==}
     peerDependencies:
@@ -12970,6 +13062,8 @@ packages:
       expo:
         optional: true
 
+=======
+>>>>>>> 193b7349f (feat: integrate cojson-core-rn crate into RNCrypto provider)
   react-native-safe-area-context@5.5.0:
     resolution: {integrity: sha512-BQcSvVEJj3T4zBQH9YrnlfcLGHiVOsmeiE10PSBsmI/xyzULSZdJISFOH0HLcLU7/nePC+HsaaVzIsEa1CVBYw==}
     peerDependencies:
@@ -18223,7 +18317,12 @@ snapshots:
       eventemitter3: 5.0.1
       preact: 10.26.9
 
+<<<<<<< HEAD
   '@craftzdog/react-native-buffer@6.0.5(react-native@0.81.0(@babel/core@7.28.3)(@react-native-community/cli@19.0.0(typescript@5.9.2))(@react-native/metro-config@0.81.0(@babel/core@7.28.3))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0)':
+=======
+<<<<<<< HEAD
+  '@craftzdog/react-native-buffer@6.1.0(react-native@0.80.0(@babel/core@7.28.0)(@react-native-community/cli@20.0.0(typescript@5.6.2))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0)':
+>>>>>>> 193b7349f (feat: integrate cojson-core-rn crate into RNCrypto provider)
     dependencies:
       ieee754: 1.2.1
       react-native-quick-base64: 2.2.0(react-native@0.81.0(@babel/core@7.28.3)(@react-native-community/cli@19.0.0(typescript@5.9.2))(@react-native/metro-config@0.81.0(@babel/core@7.28.3))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0)
@@ -18232,6 +18331,7 @@ snapshots:
       - react-native
     optional: true
 
+<<<<<<< HEAD
   '@craftzdog/react-native-buffer@6.1.0(react-native@0.80.0(@babel/core@7.28.0)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0)':
     dependencies:
       ieee754: 1.2.1
@@ -18240,6 +18340,10 @@ snapshots:
       - react
       - react-native
 
+=======
+=======
+>>>>>>> 815246c0c (feat: integrate cojson-core-rn crate into RNCrypto provider)
+>>>>>>> 193b7349f (feat: integrate cojson-core-rn crate into RNCrypto provider)
   '@cspotcode/source-map-support@0.8.1':
     dependencies:
       '@jridgewell/trace-mapping': 0.3.9
@@ -26774,10 +26878,19 @@ snapshots:
       jsbn: 1.1.0
       sprintf-js: 1.1.3
 
+<<<<<<< HEAD
   is-arguments@1.2.0:
     dependencies:
       call-bound: 1.0.4
       has-tostringtag: 1.0.2
+=======
+  is-alphabetical@2.0.1: {}
+
+  is-alphanumerical@2.0.1:
+    dependencies:
+      is-alphabetical: 2.0.1
+      is-decimal: 2.0.1
+>>>>>>> 815246c0c (feat: integrate cojson-core-rn crate into RNCrypto provider)
 
   is-array-buffer@3.0.5:
     dependencies:
@@ -29792,7 +29905,29 @@ snapshots:
 
   react-native-quick-crypto@1.0.0-beta.16(react-native-nitro-modules@0.25.2(react-native@0.81.0(@babel/core@7.28.3)(@react-native-community/cli@19.0.0(typescript@5.9.2))(@react-native/metro-config@0.81.0(@babel/core@7.28.3))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0))(react-native@0.81.0(@babel/core@7.28.3)(@react-native-community/cli@19.0.0(typescript@5.9.2))(@react-native/metro-config@0.81.0(@babel/core@7.28.3))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0):
     dependencies:
+<<<<<<< HEAD
       '@craftzdog/react-native-buffer': 6.0.5(react-native@0.81.0(@babel/core@7.28.3)(@react-native-community/cli@19.0.0(typescript@5.9.2))(@react-native/metro-config@0.81.0(@babel/core@7.28.3))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0)
+=======
+      react: 19.1.0
+      react-native: 0.80.0(@babel/core@7.28.0)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@types/react@19.1.0)(react@19.1.0)
+
+  react-native-quick-base64@2.1.2(react-native@0.80.0(@babel/core@7.28.0)(@react-native-community/cli@19.0.0(typescript@5.8.3))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0):
+    dependencies:
+      base64-js: 1.5.1
+      react: 19.1.0
+      react-native: 0.80.0(@babel/core@7.28.0)(@react-native-community/cli@19.0.0(typescript@5.8.3))(@types/react@19.1.0)(react@19.1.0)
+    optional: true
+
+<<<<<<< HEAD
+  react-native-quick-base64@2.2.0(react-native@0.80.0(@babel/core@7.28.0)(@react-native-community/cli@20.0.0(typescript@5.6.2))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0):
+    dependencies:
+      react: 19.1.0
+      react-native: 0.80.0(@babel/core@7.28.0)(@react-native-community/cli@20.0.0(typescript@5.6.2))(@types/react@19.1.0)(react@19.1.0)
+
+  react-native-quick-crypto@1.0.0-beta.18(expo@54.0.0-preview.0(@babel/core@7.28.0)(graphql@16.11.0)(react-native@0.80.0(@babel/core@7.28.0)(@react-native-community/cli@20.0.0(typescript@5.6.2))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0))(react-native-nitro-modules@0.26.4(react-native@0.80.0(@babel/core@7.28.0)(@react-native-community/cli@20.0.0(typescript@5.6.2))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0))(react-native@0.80.0(@babel/core@7.28.0)(@react-native-community/cli@20.0.0(typescript@5.6.2))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0):
+    dependencies:
+      '@craftzdog/react-native-buffer': 6.1.0(react-native@0.80.0(@babel/core@7.28.0)(@react-native-community/cli@20.0.0(typescript@5.6.2))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0)
+>>>>>>> 193b7349f (feat: integrate cojson-core-rn crate into RNCrypto provider)
       events: 3.3.0
       react: 19.1.0
       react-native: 0.81.0(@babel/core@7.28.3)(@react-native-community/cli@19.0.0(typescript@5.9.2))(@react-native/metro-config@0.81.0(@babel/core@7.28.3))(@types/react@19.1.0)(react@19.1.0)
@@ -29815,7 +29950,26 @@ snapshots:
     optionalDependencies:
       expo: 54.0.0-preview.4(@babel/core@7.28.0)(graphql@16.11.0)(react-native@0.80.0(@babel/core@7.28.0)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0)
 
+<<<<<<< HEAD
   react-native-safe-area-context@5.5.0(react-native@0.81.0(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@react-native/metro-config@0.81.0(@babel/core@7.27.1))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0):
+=======
+  react-native-quick-crypto@1.0.0-beta.16(react-native-nitro-modules@0.25.2(react-native@0.80.0(@babel/core@7.28.0)(@react-native-community/cli@19.0.0(typescript@5.8.3))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0))(react-native@0.80.0(@babel/core@7.28.0)(@react-native-community/cli@19.0.0(typescript@5.8.3))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0):
+    dependencies:
+      '@craftzdog/react-native-buffer': 6.0.5(react-native@0.80.0(@babel/core@7.28.0)(@react-native-community/cli@19.0.0(typescript@5.8.3))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0)
+      events: 3.3.0
+      react: 19.1.0
+      react-native: 0.80.0(@babel/core@7.28.0)(@react-native-community/cli@19.0.0(typescript@5.8.3))(@types/react@19.1.0)(react@19.1.0)
+      react-native-nitro-modules: 0.25.2(react-native@0.80.0(@babel/core@7.28.0)(@react-native-community/cli@19.0.0(typescript@5.8.3))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0)
+      react-native-quick-base64: 2.1.2(react-native@0.80.0(@babel/core@7.28.0)(@react-native-community/cli@19.0.0(typescript@5.8.3))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0)
+      readable-stream: 4.5.2
+      util: 0.12.5
+    optional: true
+
+  react-native-safe-area-context@5.5.0(react-native@0.80.0(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0):
+=======
+  react-native-safe-area-context@5.5.0(react-native@0.80.0(@babel/core@7.28.0)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0):
+>>>>>>> 815246c0c (feat: integrate cojson-core-rn crate into RNCrypto provider)
+>>>>>>> 193b7349f (feat: integrate cojson-core-rn crate into RNCrypto provider)
     dependencies:
       react: 19.1.0
       react-native: 0.81.0(@babel/core@7.27.1)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@react-native/metro-config@0.81.0(@babel/core@7.27.1))(@types/react@19.1.0)(react@19.1.0)
