@@ -44,16 +44,16 @@ export function tryAddTransactions(
   newSignature: string,
   skipVerify: boolean,
 ): string {
-  const result = HybridCoJSONCoreRN.tryAddTransactions(
+  const { success, result, error } = HybridCoJSONCoreRN.tryAddTransactions(
     handle,
     transactionsJson,
     newSignature,
     skipVerify,
   );
-  if (!result.success) {
-    throw new Error(result.error);
+  if (!success) {
+    throw new Error(error);
   }
-  return result.result;
+  return result;
 }
 
 /**
@@ -67,18 +67,19 @@ export function addNewPrivateTransaction(
   keyId: string,
   madeAt: number,
 ): string {
-  const result = HybridCoJSONCoreRN.addNewPrivateTransaction(
-    handle,
-    changesJson,
-    signerSecret,
-    encryptionKey,
-    keyId,
-    madeAt,
-  );
-  if (!result.success) {
-    throw new Error(result.error);
+  const { success, result, error } =
+    HybridCoJSONCoreRN.addNewPrivateTransaction(
+      handle,
+      changesJson,
+      signerSecret,
+      encryptionKey,
+      keyId,
+      madeAt,
+    );
+  if (!success) {
+    throw new Error(error);
   }
-  return result.result;
+  return result;
 }
 
 /**
@@ -90,16 +91,17 @@ export function addNewTrustingTransaction(
   signerSecret: string,
   madeAt: number,
 ): string {
-  const result = HybridCoJSONCoreRN.addNewTrustingTransaction(
-    handle,
-    changesJson,
-    signerSecret,
-    madeAt,
-  );
-  if (!result.success) {
-    throw new Error(result.error);
+  const { success, result, error } =
+    HybridCoJSONCoreRN.addNewTrustingTransaction(
+      handle,
+      changesJson,
+      signerSecret,
+      madeAt,
+    );
+  if (!success) {
+    throw new Error(error);
   }
-  return result.result;
+  return result;
 }
 
 /**
@@ -109,14 +111,14 @@ export function testExpectedHashAfter(
   handle: SessionLogHandle,
   transactionsJson: string[],
 ): string {
-  const result = HybridCoJSONCoreRN.testExpectedHashAfter(
+  const { success, result, error } = HybridCoJSONCoreRN.testExpectedHashAfter(
     handle,
     transactionsJson,
   );
-  if (!result.success) {
-    throw new Error(result.error);
+  if (!success) {
+    throw new Error(error);
   }
-  return result.result;
+  return result;
 }
 
 /**
@@ -127,15 +129,16 @@ export function decryptNextTransactionChangesJson(
   txIndex: number,
   keySecret: ArrayBuffer,
 ): string {
-  const result = HybridCoJSONCoreRN.decryptNextTransactionChangesJson(
-    handle,
-    txIndex,
-    keySecret,
-  );
-  if (!result.success) {
-    throw new Error(result.error);
+  const { success, result, error } =
+    HybridCoJSONCoreRN.decryptNextTransactionChangesJson(
+      handle,
+      txIndex,
+      keySecret,
+    );
+  if (!success) {
+    throw new Error(error);
   }
-  return result.result;
+  return result;
 }
 
 /**
