@@ -1,9 +1,5 @@
 import { NitroModules } from "react-native-nitro-modules";
-import type {
-  CoJSONCoreRN,
-  SessionLogHandle,
-  TransactionResult,
-} from "./cojson-core-rn.nitro";
+import type { CoJSONCoreRN, SessionLogHandle } from "./cojson-core-rn.nitro";
 
 export const HybridCoJSONCoreRN =
   NitroModules.createHybridObject<CoJSONCoreRN>("CoJSONCoreRN");
