@@ -5,10 +5,14 @@
 namespace margelo::nitro::cojson_core_rn {
 
 // Helper function to convert Nitro SessionLogHandle to Rust FFI SessionLogHandle
-static auto toRustHandle(const SessionLogHandle& nitroHandle) {
-    auto rustHandle = create_session_log("", "", "");
-    rustHandle.id = static_cast<uint64_t>(nitroHandle.id);
-    return rustHandle;
+// We need to store the handle statically so we can return a reference to it
+static ::SessionLogHandle rustHandleStorage;
+
+static const ::SessionLogHandle& toRustHandle(const SessionLogHandle& nitroHandle) {
+    // Create a Rust handle struct directly without calling create_session_log
+    // The Rust side will look up the existing session log by ID
+    rustHandleStorage.id = static_cast<uint64_t>(nitroHandle.id);
+    return rustHandleStorage;
 }
 
 SessionLogHandle HybridCoJSONCoreRN::createSessionLog(const std::string& coId, const std::string& sessionId, const std::string& signerId) {
