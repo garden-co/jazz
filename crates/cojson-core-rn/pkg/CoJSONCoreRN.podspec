@@ -25,7 +25,7 @@ Pod::Spec.new do |s|
   s.public_header_files = [
     "cpp/**/*.{h,hpp}",
     "build/includes/**/*.{h,hpp}",
-    "nitrogen/generated/**/*.{h,hpp}",
+    "nitrogen/generated/shared/c++/*.{h,hpp}",
   ]
 
   s.vendored_libraries = 'build/ios/libcojson_core_rn.a'
