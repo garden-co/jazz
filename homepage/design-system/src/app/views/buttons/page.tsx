@@ -113,6 +113,53 @@ export default function ButtonsPage() {
         <Button variant="destructive">destructive</Button>
       </div>
 
+      <h3 className="text-lg font-bold mt-5">Glass Effects</h3>
+
+      <p className="my-3">
+        Glass variant provides beautiful transparent effects with intent-colored
+        specular highlights and backdrop blur for a sophisticated glass morphism
+        appearance.
+      </p>
+
+      <div className="grid grid-cols-2 gap-2">
+        <Button intent="primary" variant="glass">
+          primary glass
+        </Button>
+        <Button intent="info" variant="glass">
+          info glass
+        </Button>
+        <Button intent="success" variant="glass">
+          success glass
+        </Button>
+        <Button intent="warning" variant="glass">
+          warning glass
+        </Button>
+        <Button intent="danger" variant="glass">
+          danger glass
+        </Button>
+        <Button intent="alert" variant="glass">
+          alert glass
+        </Button>
+        <Button intent="tip" variant="glass">
+          tip glass
+        </Button>
+        <Button intent="default" variant="glass">
+          default glass
+        </Button>
+        <Button intent="muted" variant="glass">
+          muted glass
+        </Button>
+        <Button intent="strong" variant="glass">
+          strong glass
+        </Button>
+      </div>
+
+      <p className="text-sm mt-3 mb-2">
+        <strong>Interactive States:</strong> Hover creates a depressed gradient
+        effect with enhanced saturation. Active state maintains the depressed
+        look but with reduced opacity for visual feedback.
+      </p>
+
       <h3 className="text-lg font-bold mt-5">Icons</h3>
 
       <p className="my-3">Buttons can also contain an icon and text.</p>
@@ -180,6 +227,7 @@ const buttonPropsTableData = {
         "link",
         "secondary",
         "destructive",
+        "glass",
       ],
       default: "default",
     },

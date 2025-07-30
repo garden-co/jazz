@@ -5,7 +5,8 @@ export type Variant =
   | "ghost"
   | "outline"
   | "link"
-  | "inverted";
+  | "inverted"
+  | "glass";
 
 export type Style =
   | "default"
@@ -159,6 +160,20 @@ export const styleToColorMap = {
 };
 
 export const colorToBgMap = {
+  blue: "bg-blue",
+  indigo: "bg-indigo-500",
+  purple: "bg-purple",
+  green: "bg-green",
+  orange: "bg-orange",
+  red: "bg-red",
+  yellow: "bg-yellow",
+  cyan: "bg-cyan",
+  muted: "bg-stone-200 dark:bg-stone-900",
+  strong: "bg-stone-900 dark:bg-stone-100",
+  default: "bg-stone-600 dark:bg-white",
+};
+
+export const colorToBgMap20 = {
   blue: "bg-blue/20",
   indigo: "bg-indigo-500/20",
   purple: "bg-purple/20",
@@ -284,20 +299,77 @@ export const styleToHoverShadowMap = {
   default: `${shadowClassesBase} shadow-stone-600/20 hover:shadow-stone-600/30 dark:shadow-stone-200/20 dark:hover:shadow-stone-200/30`,
 };
 
+// Enhanced glass effect utilities - cleaner and more transparent
+export const glassBaseClasses =
+  "relative overflow-hidden backdrop-blur-xs shadow-[0_6px_6px_rgba(0,0,0,0.2),0_0_20px_rgba(0,0,0,0.1)] transition-all duration-400 [transition-timing-function:cubic-bezier(0.175,0.885,0.32,2.2)]";
+
+export const glassOverlayClasses =
+  "before:content-[''] before:absolute before:inset-0 before:rounded-[inherit] before:pointer-events-none before:z-[1]";
+
+export const glassSpecularClasses =
+  "after:content-[''] after:absolute after:inset-0 after:rounded-[inherit] after:pointer-events-none after:z-[2]";
+
+export const glassContentClasses = "relative z-[3]";
+
+// Clean glass effects with transparent intent colors and proper specular highlights
+export const styleToGlassMap = {
+  primary: `${glassBaseClasses} ${glassOverlayClasses} ${glassSpecularClasses} before:bg-blue-500/20 after:shadow-[inset_1px_1px_0_rgba(59,130,246,0.75),inset_0_0_5px_rgba(59,130,246,0.4)]`,
+  info: `${glassBaseClasses} ${glassOverlayClasses} ${glassSpecularClasses} before:bg-purple-500/20 after:shadow-[inset_1px_1px_0_rgba(147,51,234,0.75),inset_0_0_5px_rgba(147,51,234,0.4)]`,
+  success: `${glassBaseClasses} ${glassOverlayClasses} ${glassSpecularClasses} before:bg-green-500/20 after:shadow-[inset_1px_1px_0_rgba(34,197,94,0.75),inset_0_0_5px_rgba(34,197,94,0.4)]`,
+  warning: `${glassBaseClasses} ${glassOverlayClasses} ${glassSpecularClasses} before:bg-orange-500/20 after:shadow-[inset_1px_1px_0_rgba(249,115,22,0.75),inset_0_0_5px_rgba(249,115,22,0.4)]`,
+  danger: `${glassBaseClasses} ${glassOverlayClasses} ${glassSpecularClasses} before:bg-red-500/20 after:shadow-[inset_1px_1px_0_rgba(239,68,68,0.75),inset_0_0_5px_rgba(239,68,68,0.4)]`,
+  alert: `${glassBaseClasses} ${glassOverlayClasses} ${glassSpecularClasses} before:bg-yellow-500/20 after:shadow-[inset_1px_1px_0_rgba(234,179,8,0.75),inset_0_0_5px_rgba(234,179,8,0.4)]`,
+  tip: `${glassBaseClasses} ${glassOverlayClasses} ${glassSpecularClasses} before:bg-cyan-500/20 after:shadow-[inset_1px_1px_0_rgba(6,182,212,0.75),inset_0_0_5px_rgba(6,182,212,0.4)]`,
+  muted: `${glassBaseClasses} ${glassOverlayClasses} ${glassSpecularClasses} before:bg-stone-500/20 after:shadow-[inset_1px_1px_0_rgba(120,113,108,0.75),inset_0_0_5px_rgba(120,113,108,0.4)]`,
+  strong: `${glassBaseClasses} ${glassOverlayClasses} ${glassSpecularClasses} before:bg-stone-800/20 after:shadow-[inset_1px_1px_0_rgba(68,64,60,0.75),inset_0_0_5px_rgba(68,64,60,0.4)]`,
+  default: `${glassBaseClasses} ${glassOverlayClasses} ${glassSpecularClasses} before:bg-white/15 after:shadow-[inset_1px_1px_0_rgba(255,255,255,0.75),inset_0_0_5px_rgba(255,255,255,0.4)]`,
+};
+
+// Subtle glass variants with cleaner transparency
+export const styleToGlassSubtleMap = {
+  primary: `${glassBaseClasses} ${glassOverlayClasses} before:bg-blue-500/10 after:shadow-[inset_1px_1px_0_rgba(59,130,246,0.4),inset_0_0_5px_rgba(59,130,246,0.2)]`,
+  info: `${glassBaseClasses} ${glassOverlayClasses} before:bg-purple-500/10 after:shadow-[inset_1px_1px_0_rgba(147,51,234,0.4),inset_0_0_5px_rgba(147,51,234,0.2)]`,
+  success: `${glassBaseClasses} ${glassOverlayClasses} before:bg-green-500/10 after:shadow-[inset_1px_1px_0_rgba(34,197,94,0.4),inset_0_0_5px_rgba(34,197,94,0.2)]`,
+  warning: `${glassBaseClasses} ${glassOverlayClasses} before:bg-orange-500/10 after:shadow-[inset_1px_1px_0_rgba(249,115,22,0.4),inset_0_0_5px_rgba(249,115,22,0.2)]`,
+  danger: `${glassBaseClasses} ${glassOverlayClasses} before:bg-red-500/10 after:shadow-[inset_1px_1px_0_rgba(239,68,68,0.4),inset_0_0_5px_rgba(239,68,68,0.2)]`,
+  alert: `${glassBaseClasses} ${glassOverlayClasses} before:bg-yellow-500/10 after:shadow-[inset_1px_1px_0_rgba(234,179,8,0.4),inset_0_0_5px_rgba(234,179,8,0.2)]`,
+  tip: `${glassBaseClasses} ${glassOverlayClasses} before:bg-cyan-500/10 after:shadow-[inset_1px_1px_0_rgba(6,182,212,0.4),inset_0_0_5px_rgba(6,182,212,0.2)]`,
+  muted: `${glassBaseClasses} ${glassOverlayClasses} before:bg-stone-500/10 after:shadow-[inset_1px_1px_0_rgba(120,113,108,0.4),inset_0_0_5px_rgba(120,113,108,0.2)]`,
+  strong: `${glassBaseClasses} ${glassOverlayClasses} before:bg-stone-800/10 after:shadow-[inset_1px_1px_0_rgba(68,64,60,0.4),inset_0_0_5px_rgba(68,64,60,0.2)]`,
+  default: `${glassBaseClasses} ${glassOverlayClasses} before:bg-white/8 after:shadow-[inset_1px_1px_0_rgba(255,255,255,0.4),inset_0_0_5px_rgba(255,255,255,0.2)]`,
+};
+
+// Clean glass button classes with shared properties
+export const glassButtonBaseClasses =
+  "relative backdrop-blur-sm overflow-hidden transition-all duration-400 ease-in-out border-0 bg-gradient-to-br shadow-[0_6px_6px_rgba(0,0,0,0.2),0_0_20px_rgba(0,0,0,0.1)]";
+
+export const styleToGlassButtonClassMap = {
+  primary: `${glassButtonBaseClasses} from-primary-light to-primary-dark hover:from-primary-dark hover:to-primary-brightLight active:from-primary-brightDark active:to-primary-light shadow-[inset_0_0_0_0.4px_rgba(59,130,246,0.2),inset_0_0.4px_0_rgba(147,197,253,0.4),inset_0_-0.4px_0_rgba(30,64,175,0.3)]`,
+  info: `${glassButtonBaseClasses} from-info-light to-info-dark hover:from-info-dark hover:to-info-brightLight active:from-info-brightDark active:to-info-light shadow-[inset_0_0_0_0.4px_rgba(147,51,234,0.2),inset_0_0.4px_0_rgba(221,214,254,0.4),inset_0_-0.4px_0_rgba(88,28,135,0.3)]`,
+  success: `${glassButtonBaseClasses} from-success-light to-success-dark hover:from-success-brightDark hover:to-success-brightLight active:from-success-dark hover:to-success-light shadow-[inset_0_0_0_0.4px_rgba(34,197,94,0.2),inset_0_0.4px_0_rgba(187,247,208,0.4),inset_0_-0.4px_0_rgba(22,101,52,0.3)]`,
+  warning: `${glassButtonBaseClasses} from-warning-light to-warning-dark hover:from-warning-dark hover:to-warning-brightLight active:from-warning-brightDark active:to-warning-light shadow-[inset_0_0_0_0.4px_rgba(249,115,22,0.2),inset_0_0.4px_0_rgba(254,240,138,0.4),inset_0_-0.4px_0_rgba(154,52,18,0.3)]`,
+  danger: `${glassButtonBaseClasses} from-danger-light to-danger-dark hover:from-danger-brightDark hover:to-danger-brightLight active:from-danger-dark active:to-danger-light shadow-[inset_0_0_0_0.4px_rgba(239,68,68,0.2),inset_0_0.4px_0_rgba(254,202,202,0.4),inset_0_-0.4px_0_rgba(153,27,27,0.3)]`,
+  alert: `${glassButtonBaseClasses} from-alert-light to-alert-dark hover:from-alert-dark hover:to-alert-brightLight active:from-alert-brightDark active:to-alert-light shadow-[inset_0_0_0_0.4px_rgba(234,179,8,0.2),inset_0_0.4px_0_rgba(254,249,195,0.4),inset_0_-0.4px_0_rgba(133,77,14,0.3)]`,
+  tip: `${glassButtonBaseClasses} from-tip-light to-tip-dark hover:from-tip-dark hover:to-tip-brightLight active:from-tip-brightDark active:to-tip-light shadow-[inset_0_0_0_0.4px_rgba(6,182,212,0.2),inset_0_0.4px_0_rgba(207,250,254,0.4),inset_0_-0.4px_0_rgba(21,94,117,0.3)]`,
+  muted: `${glassButtonBaseClasses} from-stone-300 to-stone-600 hover:from-stone-600 hover:to-stone-200 active:from-stone-700 active:to-stone-300 shadow-[inset_0_0_0_0.4px_rgba(120,113,108,0.2),inset_0_0.4px_0_rgba(245,245,244,0.4),inset_0_-0.4px_0_rgba(68,64,60,0.3)]`,
+  strong: `${glassButtonBaseClasses} from-stone-700 to-stone-900 hover:from-stone-900 hover:to-stone-600 active:from-stone-800 active:to-stone-700 shadow-[inset_0_0_0_0.4px_rgba(68,64,60,0.2),inset_0_0.4px_0_rgba(168,162,158,0.4),inset_0_-0.4px_0_rgba(41,37,36,0.3)]`,
+  default: `${glassButtonBaseClasses} from-stone-200 to-stone-400 hover:from-stone-400 hover:to-stone-100 active:from-stone-500 active:to-stone-200 shadow-[inset_0_0_0_0.4px_rgba(255,255,255,0.2),inset_0_0.4px_0_rgba(255,255,255,0.4),inset_0_-0.4px_0_rgba(156,163,175,0.3)]`,
+};
+
 const focusRingClassesBase =
   "focus:outline-none focus-visible:ring focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-opacity-10";
 
 export const styleToButtonStateMap = {
-  primary: `${styleToBgGradientActiveMap.primary} ${focusRingClassesBase} focus:ring-primary`,
-  info: `${styleToBgGradientActiveMap.info} ${focusRingClassesBase} focus:ring-info`,
-  success: `${styleToBgGradientActiveMap.success} ${focusRingClassesBase} focus:ring-success`,
-  warning: `${styleToBgGradientActiveMap.warning} ${focusRingClassesBase} focus:ring-warning`,
-  danger: `${styleToBgGradientActiveMap.danger} ${focusRingClassesBase} focus:ring-danger`,
-  alert: `${styleToBgGradientActiveMap.alert} ${focusRingClassesBase} focus:ring-alert`,
-  tip: `${styleToBgGradientActiveMap.tip} ${focusRingClassesBase} focus:ring-tip`,
-  muted: `${styleToBgGradientActiveMap.muted} ${focusRingClassesBase} focus:ring-stone-200 dark:focus:ring-stone-900`,
-  strong: `${styleToBgGradientActiveMap.strong} ${focusRingClassesBase} focus:ring-stone-800 dark:focus:ring-stone-200`,
-  default: `${styleToBgGradientActiveMap.default} ${focusRingClassesBase} focus:ring-black dark:focus:ring-white`,
+  primary: `${styleToBgGradientActiveMap.primary} ${styleToBgGradientHoverMap.primary} ${focusRingClassesBase} focus:ring-primary`,
+  info: `${styleToBgGradientActiveMap.info} ${styleToBgGradientHoverMap.info} ${focusRingClassesBase} focus:ring-info`,
+  success: `${styleToBgGradientActiveMap.success} ${styleToBgGradientHoverMap.success} ${focusRingClassesBase} focus:ring-success`,
+  warning: `${styleToBgGradientActiveMap.warning} ${styleToBgGradientHoverMap.warning} ${focusRingClassesBase} focus:ring-warning`,
+  danger: `${styleToBgGradientActiveMap.danger} ${styleToBgGradientHoverMap.danger} ${focusRingClassesBase} focus:ring-danger`,
+  alert: `${styleToBgGradientActiveMap.alert} ${styleToBgGradientHoverMap.alert} ${focusRingClassesBase} focus:ring-alert`,
+  tip: `${styleToBgGradientActiveMap.tip} ${styleToBgGradientHoverMap.tip} ${focusRingClassesBase} focus:ring-tip`,
+  muted: `${styleToBgGradientActiveMap.muted} ${styleToBgGradientHoverMap.muted} ${focusRingClassesBase} focus:ring-stone-200 dark:focus:ring-stone-900`,
+  strong: `${styleToBgGradientActiveMap.strong} ${styleToBgGradientHoverMap.strong} ${focusRingClassesBase} focus:ring-stone-800 dark:focus:ring-stone-200`,
+  default: `${styleToBgGradientActiveMap.default} ${styleToBgGradientHoverMap.default} ${focusRingClassesBase} focus:ring-black dark:focus:ring-white`,
 };
 
 export const variantStyleToButtonStateMap = {
