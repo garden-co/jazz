@@ -1,5 +1,5 @@
 import { RawCoID, SessionID, SessionLogImpl, SignerID } from "cojson";
-import { SessionLog } from "cojson-core-rn";
+import { HybridCoJSONCoreRN, SessionLogHandle } from "cojson-core-rn";
 import { PureJSCrypto } from "cojson/crypto/PureJSCrypto";
 
 /**
@@ -25,8 +25,12 @@ export class RNCrypto extends PureJSCrypto {
     sessionID: SessionID,
     signerID: SignerID,
   ): SessionLogImpl {
-    const rnSessionLog = new SessionLog(coID, sessionID, signerID);
-    return new RNSessionLog(rnSessionLog);
+    const handle = HybridCoJSONCoreRN.createSessionLog(
+      coID,
+      sessionID,
+      signerID,
+    );
+    return new RNSessionLog(handle);
   }
 }
 
@@ -35,10 +39,11 @@ export class RNCrypto extends PureJSCrypto {
  * by converting between ArrayBuffer and Uint8Array types as needed.
  */
 class RNSessionLog implements SessionLogImpl {
-  constructor(private readonly rnSessionLog: SessionLog) {}
+  constructor(private readonly handle: SessionLogHandle) {}
 
   clone(): SessionLogImpl {
-    return new RNSessionLog(this.rnSessionLog.clone());
+    const clonedHandle = HybridCoJSONCoreRN.cloneSessionLog(this.handle);
+    return new RNSessionLog(clonedHandle);
   }
 
   tryAdd(
@@ -46,11 +51,16 @@ class RNSessionLog implements SessionLogImpl {
     newSignatureStr: string,
     skipVerify: boolean,
   ): string {
-    return this.rnSessionLog.tryAdd(
+    const { success, result, error } = HybridCoJSONCoreRN.tryAddTransactions(
+      this.handle,
       transactionsJson,
       newSignatureStr,
       skipVerify,
     );
+    if (!success) {
+      throw new Error(error);
+    }
+    return result;
   }
 
   addNewPrivateTransaction(
@@ -60,13 +70,19 @@ class RNSessionLog implements SessionLogImpl {
     keyId: string,
     madeAt: number,
   ): string {
-    return this.rnSessionLog.addNewPrivateTransaction(
-      changesJson,
-      signerSecret,
-      encryptionKey,
-      keyId,
-      madeAt,
-    );
+    const { success, result, error } =
+      HybridCoJSONCoreRN.addNewPrivateTransaction(
+        this.handle,
+        changesJson,
+        signerSecret,
+        encryptionKey,
+        keyId,
+        madeAt,
+      );
+    if (!success) {
+      throw new Error(error);
+    }
+    return result;
   }
 
   addNewTrustingTransaction(
@@ -74,19 +90,34 @@ class RNSessionLog implements SessionLogImpl {
     signerSecret: string,
     madeAt: number,
   ): string {
-    return this.rnSessionLog.addNewTrustingTransaction(
-      changesJson,
-      signerSecret,
-      madeAt,
-    );
+    const { success, result, error } =
+      HybridCoJSONCoreRN.addNewTrustingTransaction(
+        this.handle,
+        changesJson,
+        signerSecret,
+        madeAt,
+      );
+    if (!success) {
+      throw new Error(error);
+    }
+    return result;
   }
 
   testExpectedHashAfter(transactionsJson: string[]): string {
-    return this.rnSessionLog.testExpectedHashAfter(transactionsJson);
+    const { success, result, error } = HybridCoJSONCoreRN.testExpectedHashAfter(
+      this.handle,
+      transactionsJson,
+    );
+    if (!success) {
+      throw new Error(error);
+    }
+    return result;
   }
 
   /**
-   * Converts Uint8Array to ArrayBuffer for compatibility with React Native SessionLog
+   * Converts Uint8Array to ArrayBuffer for compatibility with React Native SessionLog.
+   * This ensures proper type conversion between the SessionLogImpl interface (Uint8Array)
+   * and the cojson-core-rn native module (ArrayBuffer).
    */
   decryptNextTransactionChangesJson(
     txIndex: number,
@@ -106,13 +137,19 @@ class RNSessionLog implements SessionLogImpl {
       new Uint8Array(arrayBuffer).set(keySecret);
     }
 
-    return this.rnSessionLog.decryptNextTransactionChangesJson(
-      txIndex,
-      arrayBuffer,
-    );
+    const { success, result, error } =
+      HybridCoJSONCoreRN.decryptNextTransactionChangesJson(
+        this.handle,
+        txIndex,
+        arrayBuffer,
+      );
+    if (!success) {
+      throw new Error(error);
+    }
+    return result;
   }
 
   free() {
-    this.rnSessionLog.free();
+    HybridCoJSONCoreRN.destroySessionLog(this.handle);
   }
 }
