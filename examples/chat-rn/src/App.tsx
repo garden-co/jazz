@@ -4,6 +4,7 @@ import {
 } from "@react-navigation/native";
 import { createNativeStackNavigator } from "@react-navigation/native-stack";
 import { JazzReactNativeProvider } from "jazz-tools/react-native";
+import { RNCrypto } from "jazz-tools/react-native-core/crypto";
 import React, { StrictMode, useEffect, useState } from "react";
 import { Linking } from "react-native";
 import { apiKey } from "./apiKey";
@@ -18,19 +19,6 @@ type RootStackParamList = {
 
 // Create the stack navigator with proper typing
 const Stack = createNativeStackNavigator<RootStackParamList>();
-
-// const prefix = Linking.createURL("/");
-
-// const linking = {
-//   prefixes: [prefix],
-//   config: {
-//     screens: {
-//       HandleInviteScreen: {
-//         path: "router/invite/:valueHint?/:valueID/:inviteSecret",
-//       },
-//     },
-//   },
-// };
 
 function App() {
   const [initialRoute, setInitialRoute] = useState<
@@ -53,6 +41,7 @@ function App() {
         sync={{
           peer: `wss://cloud.jazz.tools/?key=${apiKey}`,
         }}
+        CryptoProvider={RNCrypto}
       >
         <NavigationContainer ref={navigationRef} theme={theme}>
           <Stack.Navigator initialRouteName={initialRoute}>

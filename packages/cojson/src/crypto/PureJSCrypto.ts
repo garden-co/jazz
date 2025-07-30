@@ -370,4 +370,8 @@ export class PureJSSessionLog implements SessionLogImpl {
       return tx.changes;
     }
   }
+
+  free() {
+    return;
+  }
 }

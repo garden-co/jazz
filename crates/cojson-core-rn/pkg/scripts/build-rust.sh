@@ -2,8 +2,8 @@
 # Rust build script
 set -e
 
-# Add cargo to PATH
-export PATH="$HOME/.cargo/bin:$PATH"
+# Add some usual cargo locations to PATH
+export PATH="$HOME/.cargo/bin:$HOME/.rustup/toolchains/stable-aarch64-apple-darwin/bin:$PATH"
 
 # If CARGO is not set, use the default cargo
 if [ -z "$CARGO" ]; then
@@ -58,7 +58,7 @@ mkdir -p $BUILD_DIR/android
 mkdir -p $BUILD_DIR/ios
 
 # Flatten nitro headers
-./flatten-nitro-headers.sh $BUILD_DIR
+$SCRIPT_DIR/flatten-nitro-headers.sh $BUILD_DIR
 
 # Determine Rust target based on platform
 if [ "$PLATFORM" = "android" ]; then
@@ -109,7 +109,19 @@ echo "Building for $PLATFORM target: $RUST_TARGET"
 
 # Set build flags
 export CXXFLAGS="-std=c++20 -fPIC"
-export RUSTFLAGS="-C link-arg=-fPIC"
+
+# Set platform-specific linker flags
+if [ "$PLATFORM" != "android" ]; then
+  # iOS: Set SDK path and use framework linking
+  if [ "$PLATFORM_NAME" = "iphonesimulator" ]; then
+    SDK_PATH="/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneSimulator.platform/Developer/SDKs/iPhoneSimulator.sdk"
+  else
+    SDK_PATH="/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS.sdk"
+  fi
+  export RUSTFLAGS="-C link-arg=-fPIC -C link-arg=-isysroot -C link-arg=$SDK_PATH"
+else
+  export RUSTFLAGS="-C link-arg=-fPIC"
+fi
 
 # Set up Android NDK environment if building for Android
 if [ "$PLATFORM" = "android" ]; then
