@@ -154,6 +154,6 @@ class RNSessionLog implements SessionLogImpl {
   }
 
   free() {
-    this.rnSessionLog.free();
+    HybridCoJSONCoreRN.destroySessionLog(this.handle);
   }
 }
