@@ -273,6 +273,9 @@ importers:
       '@react-navigation/native-stack':
         specifier: 7.3.19
         version: 7.3.19(@react-navigation/native@7.1.14(react-native@0.80.0(@babel/core@7.28.0)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0))(react-native-safe-area-context@5.5.0(react-native@0.80.0(@babel/core@7.28.0)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0))(react-native-screens@4.11.1(react-native@0.80.0(@babel/core@7.28.0)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0))(react-native@0.80.0(@babel/core@7.28.0)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0)
+      cojson-core-rn:
+        specifier: workspace:*
+        version: link:../../crates/cojson-core-rn/pkg
       jazz-tools:
         specifier: workspace:*
         version: link:../../packages/jazz-tools
@@ -288,6 +291,9 @@ importers:
       react-native-mmkv:
         specifier: 3.3.0
         version: 3.3.0(react-native@0.80.0(@babel/core@7.28.0)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0)
+      react-native-nitro-modules:
+        specifier: 0.26.4
+        version: 0.26.4(react-native@0.80.0(@babel/core@7.28.0)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0)
       react-native-safe-area-context:
         specifier: 5.5.0
         version: 5.5.0(react-native@0.80.0(@babel/core@7.28.0)(@react-native-community/cli@19.0.0(typescript@5.6.2))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0)
@@ -337,6 +343,9 @@ importers:
       '@rnx-kit/metro-resolver-symlinks':
         specifier: ^0.2.5
         version: 0.2.5
+      '@types/jest':
+        specifier: ^29.5.0
+        version: 29.5.14
       '@types/react':
         specifier: 19.1.0
         version: 19.1.0
@@ -4260,6 +4269,10 @@ packages:
     resolution: {integrity: sha512-aQIfHDq33ExsN4jP1NWGXhxgQ/wixs60gDiKO+XVMd8Mn0NWPWgc34ZQDTb2jKaUWQ7MuwoitXAsN2XVXNMpAw==}
     engines: {node: ^14.15.0 || ^16.10.0 || >=18.0.0}
 
+  '@jest/expect-utils@29.7.0':
+    resolution: {integrity: sha512-GlsNBWiFQFCVi9QVSx7f5AgMeLxe9YCCs5PuP2O2LdjDAA8Jh9eX7lA1Jq/xdXw3Wb3hyvlFNfZIfcRetSzYcA==}
+    engines: {node: ^14.15.0 || ^16.10.0 || >=18.0.0}
+
   '@jest/fake-timers@29.7.0':
     resolution: {integrity: sha512-q4DH1Ha4TTFPdxLsqDXK1d3+ioSL7yL5oCMJZgDYm6i+6CygW5E5xVr/D1HdsGxjt1ZWSfUAs9OxSB/BNelWrQ==}
     engines: {node: ^14.15.0 || ^16.10.0 || >=18.0.0}
@@ -7071,6 +7084,9 @@ packages:
   '@types/istanbul-reports@3.0.4':
     resolution: {integrity: sha512-pk2B1NWalF9toCRu6gjBzR69syFjP4Od8WRAX+0mmf9lAjCRicLOWc+ZrxZHx/0XRjotgkF9t6iaMJ+aXcOdZQ==}
 
+  '@types/jest@29.5.14':
+    resolution: {integrity: sha512-ZN+4sdnLUbo8EVvVc2ao0GFW6oVrQRPn4K2lglySj7APvSrgzxHiNNK99us4WDMi57xxA2yggblIAMNhXOotLQ==}
+
   '@types/js-cookie@2.2.7':
     resolution: {integrity: sha512-aLkWa0C0vO5b4Sr798E26QgOkss68Un0bLjs7u9qxzPT5CG+8DuNTffWES58YzJs3hrVAOs1wonycqEBqNJubA==}
 
@@ -8710,6 +8726,10 @@ packages:
   didyoumean@1.2.2:
     resolution: {integrity: sha512-gxtyfqMg7GKyhQmb056K7M3xszy/myH8w+B4RT+QXBQsvAOdc3XymqDDPHx1BgPgsdAA5SIifona89YtRATDzw==}
 
+  diff-sequences@29.6.3:
+    resolution: {integrity: sha512-EjePK1srD3P08o2j4f0ExnylqRs5B9tJjcp9t1krH2qRi8CCdsYfwe9JgSLurFBWwq4uOlipzfk5fHNvwFKr8Q==}
+    engines: {node: ^14.15.0 || ^16.10.0 || >=18.0.0}
+
   diff@3.5.0:
     resolution: {integrity: sha512-A46qtFgd+g7pDZinpnwiRJtxbC1hpgf0uzP3iG89scHk0AUC7A1TGxf5OiiOUv/JMZR8GOt8hL900hV0bOy5xA==}
     engines: {node: '>=0.3.1'}
@@ -9136,6 +9156,10 @@ packages:
   expect-type@1.2.2:
     resolution: {integrity: sha512-JhFGDVJ7tmDJItKhYgJCGLOWjuK9vPxiXoUFLwLDc99NlmklilbiQJwoctZtt13+xMw91MCk/REan6MWHqDjyA==}
     engines: {node: '>=12.0.0'}
+
+  expect@29.7.0:
+    resolution: {integrity: sha512-2Zks0hf1VLFYI1kbh0I5jP3KHHyCHpkfyHBzsSXRFgl/Bg9mWYfMW8oD+PdMPlEwy5HNsR9JutYy6pMeOh61nw==}
+    engines: {node: ^14.15.0 || ^16.10.0 || >=18.0.0}
 
   expo-application@6.1.5:
     resolution: {integrity: sha512-ToImFmzw8luY043pWFJhh2ZMm4IwxXoHXxNoGdlhD4Ym6+CCmkAvCglg0FK8dMLzAb+/XabmOE7Rbm8KZb6NZg==}
@@ -10090,6 +10114,10 @@ packages:
   jazz-crypto-rs@0.0.7:
     resolution: {integrity: sha512-Pzs8Zu1zgKVURkBVvqqF1B2r78FaSZdwPbmeCWx0Nb3nibzPuB/kSKEO7LJsKnb3P5HO0v+lTIJ53mGC5H1urQ==}
 
+  jest-diff@29.7.0:
+    resolution: {integrity: sha512-LMIgiIrhigmPrs03JHpxUh2yISK3vLFPkAodPeo0+BuF7wA2FoQbkEg1u8gBYBThncu7e1oEDUfIXVuTqLRUjw==}
+    engines: {node: ^14.15.0 || ^16.10.0 || >=18.0.0}
+
   jest-environment-node@29.7.0:
     resolution: {integrity: sha512-DOSwCRqXirTOyheM+4d5YZOrWcdu0LNZ87ewUoywbcb2XR4wKgqiG8vNeYwhjFMbEkfju7wx2GYH0P2gevGvFw==}
     engines: {node: ^14.15.0 || ^16.10.0 || >=18.0.0}
@@ -10100,6 +10128,10 @@ packages:
 
   jest-haste-map@29.7.0:
     resolution: {integrity: sha512-fP8u2pyfqx0K1rGn1R9pyE0/KTn+G7PxktWidOBTqFPLYX0b9ksaMFkhK5vrS3DVun09pckLdlx90QthlW7AmA==}
+    engines: {node: ^14.15.0 || ^16.10.0 || >=18.0.0}
+
+  jest-matcher-utils@29.7.0:
+    resolution: {integrity: sha512-sBkD+Xi9DtcChsI3L3u0+N0opgPYnCRPtGcQYrgXmR+hmt/fYfWAL0xRXYU8eWOdfuLgBe0YCW3AFtnRLagq/g==}
     engines: {node: ^14.15.0 || ^16.10.0 || >=18.0.0}
 
   jest-message-util@29.7.0:
@@ -12915,6 +12947,7 @@ packages:
   source-map@0.8.0-beta.0:
     resolution: {integrity: sha512-2ymg6oRBpebeZi9UUNsgQ89bhx01TcTkmNTGnNO88imTmbSgy4nfujrgVEFKWpMTEGA11EDkTt7mqObTPdigIA==}
     engines: {node: '>= 8'}
+    deprecated: The work that was done in this beta branch won't be included in future versions
 
   space-separated-tokens@2.0.2:
     resolution: {integrity: sha512-PEGlAwrG8yXGXRjW32fGbg66JAlOAwbObuqVoJpv/mRgoWDQfgH1wDPvtzWyUSNAXBGSk8h755YDbbcEy3SH2Q==}
@@ -16501,6 +16534,10 @@ snapshots:
       '@jest/types': 29.6.3
       '@types/node': 22.16.5
       jest-mock: 29.7.0
+
+  '@jest/expect-utils@29.7.0':
+    dependencies:
+      jest-get-type: 29.6.3
 
   '@jest/fake-timers@29.7.0':
     dependencies:
@@ -20731,6 +20768,11 @@ snapshots:
     dependencies:
       '@types/istanbul-lib-report': 3.0.3
 
+  '@types/jest@29.5.14':
+    dependencies:
+      expect: 29.7.0
+      pretty-format: 29.7.0
+
   '@types/js-cookie@2.2.7': {}
 
   '@types/json-schema@7.0.15': {}
@@ -22638,6 +22680,8 @@ snapshots:
 
   didyoumean@1.2.2: {}
 
+  diff-sequences@29.6.3: {}
+
   diff@3.5.0: {}
 
   diff@5.2.0: {}
@@ -23230,6 +23274,14 @@ snapshots:
   expand-template@2.0.3: {}
 
   expect-type@1.2.2: {}
+
+  expect@29.7.0:
+    dependencies:
+      '@jest/expect-utils': 29.7.0
+      jest-get-type: 29.6.3
+      jest-matcher-utils: 29.7.0
+      jest-message-util: 29.7.0
+      jest-util: 29.7.0
 
   expo-application@6.1.5(expo@54.0.0-canary-20250701-6a945c5(@babel/core@7.28.0)(metro-runtime@0.82.5)(react-native@0.80.0(@babel/core@7.28.0)(@react-native-community/cli@19.0.0(typescript@5.8.3))(@types/react@19.1.0)(react@19.1.0))(react-refresh@0.17.0)(react@19.1.0)):
     dependencies:
@@ -24343,6 +24395,13 @@ snapshots:
 
   jazz-crypto-rs@0.0.7: {}
 
+  jest-diff@29.7.0:
+    dependencies:
+      chalk: 4.1.2
+      diff-sequences: 29.6.3
+      jest-get-type: 29.6.3
+      pretty-format: 29.7.0
+
   jest-environment-node@29.7.0:
     dependencies:
       '@jest/environment': 29.7.0
@@ -24369,6 +24428,13 @@ snapshots:
       walker: 1.0.8
     optionalDependencies:
       fsevents: 2.3.3
+
+  jest-matcher-utils@29.7.0:
+    dependencies:
+      chalk: 4.1.2
+      jest-diff: 29.7.0
+      jest-get-type: 29.6.3
+      pretty-format: 29.7.0
 
   jest-message-util@29.7.0:
     dependencies:

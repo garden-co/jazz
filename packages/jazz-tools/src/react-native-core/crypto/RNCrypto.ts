@@ -111,4 +111,8 @@ class RNSessionLog implements SessionLogImpl {
       arrayBuffer,
     );
   }
+
+  free() {
+    this.rnSessionLog.free();
+  }
 }
