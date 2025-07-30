@@ -6,7 +6,7 @@ import { createNativeStackNavigator } from "@react-navigation/native-stack";
 import { JazzReactNativeProvider } from "jazz-tools/react-native";
 import { RNCrypto } from "jazz-tools/react-native-core/crypto";
 import React, { StrictMode, useEffect, useState } from "react";
-import { Linking } from "react-native";
+import { Linking, LogBox } from "react-native";
 import { apiKey } from "./apiKey";
 import { ChatScreen } from "./chat";
 import { HandleInviteScreen } from "./invite";
@@ -62,3 +62,5 @@ function App() {
 }
 
 export default App;
+
+LogBox.ignoreLogs(["Open debugger to view warnings"]);
