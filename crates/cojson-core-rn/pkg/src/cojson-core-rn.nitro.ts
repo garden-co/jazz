@@ -13,7 +13,7 @@ export interface TransactionResult {
 
 export interface MakeTransactionResult {
   signature: string;
-  transaction_json: string;
+  transaction: string;
   hash: string;
 }
 

@@ -1,5 +1,6 @@
 use cojson_core::{
-    CoID, KeyID, KeySecret, SessionID, SessionLogInternal, Signature, SignerID, SignerSecret, TransactionMode
+    CoID, KeyID, KeySecret, SessionID, SessionLogInternal, Signature, SignerID, SignerSecret,
+    TransactionMode,
 };
 use serde_json::value::RawValue;
 use std::collections::HashMap;
@@ -21,13 +22,17 @@ mod ffi {
     #[derive(Serialize)]
     struct MakeTransactionResult {
         signature: String,
-        transaction_json: String,
+        transaction: String,
         hash: String,
     }
 
     // Rust functions exposed to C++
     extern "Rust" {
-        fn create_session_log(co_id: String, session_id: String, signer_id: String) -> SessionLogHandle;
+        fn create_session_log(
+            co_id: String,
+            session_id: String,
+            signer_id: String,
+        ) -> SessionLogHandle;
         fn clone_session_log(handle: &SessionLogHandle) -> SessionLogHandle;
         fn try_add_transactions(
             handle: &SessionLogHandle,
@@ -98,32 +103,36 @@ fn success_result(result: String) -> ffi::TransactionResult {
 }
 
 // FFI function implementations
-pub fn create_session_log(co_id: String, session_id: String, signer_id: String) -> ffi::SessionLogHandle {
+pub fn create_session_log(
+    co_id: String,
+    session_id: String,
+    signer_id: String,
+) -> ffi::SessionLogHandle {
     let co_id = CoID(co_id);
     let session_id = SessionID(session_id);
     let signer_id = SignerID(signer_id);
-    
+
     let internal = SessionLogInternal::new(co_id, session_id, signer_id);
     let id = get_next_id();
-    
+
     let storage = ensure_storage();
     let mut logs = storage.lock().unwrap();
     logs.insert(id, internal);
-    
+
     ffi::SessionLogHandle { id }
 }
 
 pub fn clone_session_log(handle: &ffi::SessionLogHandle) -> ffi::SessionLogHandle {
     let storage = ensure_storage();
     let mut logs = storage.lock().unwrap();
-    
+
     if let Some(log) = logs.get(&handle.id) {
         let cloned = log.clone();
         let new_id = get_next_id();
         logs.insert(new_id, cloned);
         return ffi::SessionLogHandle { id: new_id };
     }
-    
+
     // Return invalid handle if not found
     ffi::SessionLogHandle { id: 0 }
 }
@@ -136,13 +145,13 @@ pub fn try_add_transactions(
 ) -> ffi::TransactionResult {
     let storage = ensure_storage();
     let mut logs = storage.lock().unwrap();
-    
+
     if let Some(log) = logs.get_mut(&handle.id) {
         let transactions: Result<Vec<Box<RawValue>>, _> = transactions_json
             .into_iter()
             .map(|s| serde_json::from_str(&s))
             .collect();
-        
+
         match transactions {
             Ok(transactions) => {
                 let signature = Signature(new_signature);
@@ -168,7 +177,7 @@ pub fn add_new_private_transaction(
 ) -> ffi::TransactionResult {
     let storage = ensure_storage();
     let mut logs = storage.lock().unwrap();
-    
+
     if let Some(log) = logs.get_mut(&handle.id) {
         let (hash, signature, transaction) = log.add_new_transaction(
             &changes_json,
@@ -179,17 +188,12 @@ pub fn add_new_private_transaction(
             &SignerSecret(signer_secret),
             made_at as u64,
         );
-        
-        let result = ffi::MakeTransactionResult {
-            signature: signature.0,
-            transaction_json: match serde_json::to_string(&transaction) {
-                Ok(json) => json,
-                Err(e) => return error_result(format!("Failed to serialize transaction: {}", e)),
-            },
-            hash: hash.0,
-        };
-        
-        match serde_json::to_string(&result) {
+
+        match serde_json::to_string(&serde_json::json!({
+            "signature": signature.0,
+            "transaction": transaction,
+            "hash": hash.0
+        })) {
             Ok(json) => success_result(json),
             Err(e) => error_result(format!("Failed to serialize result: {}", e)),
         }
@@ -206,7 +210,7 @@ pub fn add_new_trusting_transaction(
 ) -> ffi::TransactionResult {
     let storage = ensure_storage();
     let mut logs = storage.lock().unwrap();
-    
+
     if let Some(log) = logs.get_mut(&handle.id) {
         let (hash, signature, transaction) = log.add_new_transaction(
             &changes_json,
@@ -214,17 +218,12 @@ pub fn add_new_trusting_transaction(
             &SignerSecret(signer_secret),
             made_at as u64,
         );
-        
-        let result = ffi::MakeTransactionResult {
-            signature: signature.0,
-            transaction_json: match serde_json::to_string(&transaction) {
-                Ok(json) => json,
-                Err(e) => return error_result(format!("Failed to serialize transaction: {}", e)),
-            },
-            hash: hash.0,
-        };
-        
-        match serde_json::to_string(&result) {
+
+        match serde_json::to_string(&serde_json::json!({
+            "signature": signature.0,
+            "transaction": transaction,
+            "hash": hash.0
+        })) {
             Ok(json) => success_result(json),
             Err(e) => error_result(format!("Failed to serialize result: {}", e)),
         }
@@ -239,13 +238,13 @@ pub fn test_expected_hash_after(
 ) -> ffi::TransactionResult {
     let storage = ensure_storage();
     let logs = storage.lock().unwrap();
-    
+
     if let Some(log) = logs.get(&handle.id) {
         let transactions: Result<Vec<Box<RawValue>>, _> = transactions_json
             .into_iter()
             .map(|s| serde_json::from_str(&s))
             .collect();
-        
+
         match transactions {
             Ok(transactions) => {
                 let hash = log.test_expected_hash_after(&transactions);
@@ -265,7 +264,7 @@ pub fn decrypt_next_transaction_changes_json(
 ) -> ffi::TransactionResult {
     let storage = ensure_storage();
     let logs = storage.lock().unwrap();
-    
+
     if let Some(log) = logs.get(&handle.id) {
         match log.decrypt_next_transaction_changes_json(tx_index, &key_secret) {
             Ok(changes) => success_result(changes),
