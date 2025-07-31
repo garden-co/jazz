@@ -21,7 +21,7 @@ export function FrameworkSelect({
   className,
 }: {
   onSelect?: (framework: Framework) => void;
-  size?: "sm" | "md";
+  size?: "sm" | "md" | "lg";
   routerPush?: boolean;
   className?: string;
 }) {
@@ -42,19 +42,20 @@ export function FrameworkSelect({
     <Dropdown>
       <DropdownButton
         className={clsx("w-full justify-between overflow-hidden text-nowrap", size === "sm" && "text-sm", className)}
-        as={Button}
-        variant="outline"
-        intent="default"
+        size={size}
       >
         <span className="text-nowrap max-w-full overflow-hidden text-ellipsis">{frameworkNames[selectedFramework].label}</span>
-        <Icon name="chevronDown" size="sm" />
       </DropdownButton>
-      <DropdownMenu className="w-[--button-width] z-50" anchor="bottom start">
+      <DropdownMenu className="w-[--button-width] z-50">
         {Object.entries(frameworkNames)
           .map(([key, framework]) => (
             <DropdownItem
-            className={clsx("items-baseline", size === "sm" && "text-xs text-nowrap", selectedFramework === key && "text-primary dark:text-primary")}
+            className={clsx(
+              "items-baseline", 
+              size === "sm" && "text-xs text-nowrap"
+            )}
               key={key}
+              selected={selectedFramework === key}
               onClick={() => selectFramework(key as Framework)}
           >
             {framework.label}
