@@ -20,7 +20,6 @@ import {
   Signature,
   SignerID,
   SignerSecret,
-  StreamingHash,
   textDecoder,
   textEncoder,
 } from "./crypto.js";
@@ -370,5 +369,9 @@ export class PureJSSessionLog implements SessionLogImpl {
     } else {
       return tx.changes;
     }
+  }
+
+  free() {
+    return;
   }
 }

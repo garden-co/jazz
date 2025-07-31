@@ -372,4 +372,5 @@ export interface SessionLogImpl {
     tx_index: number,
     key_secret: Uint8Array,
   ): string;
+  free(): void;
 }
