@@ -7,11 +7,65 @@ export type ImageProps = Omit<
   JSX.IntrinsicElements["img"],
   "src" | "srcSet" | "width" | "height"
 > & {
+  /** The ID of the ImageDefinition to display */
   imageId: string;
+  /**
+   * The desired width of the image. Can be a number in pixels or "original" to use the image's original width.
+   * When set to a number, the component will select the best available resolution and maintain aspect ratio.
+   *
+   * @example
+   * ```tsx
+   * // Use original width
+   * <Image imageId="123" width="original" />
+   *
+   * // Set width to 600px, height will be calculated to maintain aspect ratio
+   * <Image imageId="123" width={600} />
+   *
+   * // Set both width and height to maintain aspect ratio
+   * <Image imageId="123" width={600} height={400} />
+   * ```
+   */
   width?: number | "original";
+  /**
+   * The desired height of the image. Can be a number in pixels or "original" to use the image's original height.
+   * When set to a number, the component will select the best available resolution and maintain aspect ratio.
+   *
+   * @example
+   * ```tsx
+   * // Use original height
+   * <Image imageId="123" height="original" />
+   *
+   * // Set height to 400px, width will be calculated to maintain aspect ratio
+   * <Image imageId="123" height={400} />
+   *
+   * // Set both width and height to maintain aspect ratio
+   * <Image imageId="123" width={600} height={400} />
+   * ```
+   */
   height?: number | "original";
 };
 
+/**
+ * A React component for displaying images stored as ImageDefinition CoValues.
+ *
+ * @example
+ * ```tsx
+ * import { Image } from "jazz-tools/react";
+ *
+ * // Force specific dimensions (may crop or stretch)
+ * function Avatar({ imageId }: { imageId: string }) {
+ *   return (
+ *     <Image
+ *       imageId={imageId}
+ *       width={100}
+ *       height={100}
+ *       alt="Avatar"
+ *       style={{ borderRadius: "50%", objectFit: "cover" }}
+ *     />
+ *   );
+ * }
+ * ```
+ */
 export const Image = forwardRef<HTMLImageElement, ImageProps>(function Image(
   { imageId, width, height, ...props },
   ref,

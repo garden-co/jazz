@@ -5,11 +5,65 @@ import { forwardRef, useEffect, useMemo, useState } from "react";
 import { Image as RNImage, ImageProps as RNImageProps } from "react-native";
 
 export type ImageProps = Omit<RNImageProps, "width" | "height" | "source"> & {
+  /** The ID of the ImageDefinition to display */
   imageId: string;
+  /**
+   * Width of the image. Can be a number or "original" to use the original image width.
+   * When set to "original", the component will calculate the appropriate height to maintain aspect ratio.
+   *
+   * @example
+   * ```tsx
+   * // Fixed width, auto-calculated height
+   * <Image imageId="123" width={600} />
+   *
+   * // Original width
+   * <Image imageId="123" width="original" />
+   * ```
+   */
   width?: number | "original";
+  /**
+   * Height of the image. Can be a number or "original" to use the original image height.
+   * When set to "original", the component will calculate the appropriate width to maintain aspect ratio.
+   *
+   * @example
+   * ```tsx
+   * // Fixed height, auto-calculated width
+   * <Image imageId="123" height={400} />
+   *
+   * // Original height
+   * <Image imageId="123" height="original" />
+   * ```
+   */
   height?: number | "original";
 };
 
+/**
+ * A React Native Image component that integrates with Jazz's ImageDefinition system.
+ *
+ * @example
+ * ```tsx
+ * import { Image } from "jazz-tools/react-native";
+ * import { StyleSheet } from "react-native";
+ *
+ * function ProfilePicture({ imageId }) {
+ *   return (
+ *     <Image
+ *       imageId={imageId}
+ *       style={styles.profilePic}
+ *       width={100}
+ *       height={100}
+ *       resizeMode="cover"
+ *     />
+ *   );
+ * }
+ *
+ * const styles = StyleSheet.create({
+ *   profilePic: {
+ *     borderRadius: 50,
+ *   }
+ * });
+ * ```
+ */
 const Image = forwardRef<RNImage, ImageProps>(function Image(
   { imageId, width, height, ...props },
   ref,

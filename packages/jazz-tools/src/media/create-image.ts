@@ -9,9 +9,29 @@ import {
 export type SourceType = Blob | File | string;
 
 export type CreateImageOptions = {
+  /** The owner of the image. Can be either a Group or Account. If not specified, the current user will be the owner. */
   owner?: Group | Account;
-  placeholder?: "blur" | false; // default "blur"
+  /**
+   * Controls placeholder generation for the image.
+   * - `"blur"`: Generates a blurred placeholder image (default)
+   * - `false`: No placeholder is generated
+   * @default "blur"
+   */
+  placeholder?: "blur" | false;
+  /**
+   * Maximum size constraint for the image. The image will be resized to fit within this size while maintaining aspect ratio.
+   * If the image is smaller than maxSize in both dimensions, no resizing occurs.
+   * @example 1024 // Resizes image to fit within 1024px in the largest dimension
+   */
   maxSize?: number; // | [number, number];
+  /**
+   * The progressive loading pattern is a technique that allows images to load incrementally, starting with a small version and gradually replacing it with a larger version as it becomes available.
+   * This is useful for improving the user experience by showing a placeholder while the image is loading.
+   *
+   * Passing progressive: true to createImage() will create internal smaller versions of the image for future uses.
+   *
+   * @default false
+   */
   progressive?: boolean;
 };
 
