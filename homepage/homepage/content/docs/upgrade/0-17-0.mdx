@@ -1,0 +1,98 @@
+import { CodeGroup } from '@/components/forMdx'
+
+# Jazz 0.17.0 - New Image APIs
+
+This release introduces a comprehensive refactoring of the image API, from creation to consumption. The result is a more flexible set of components and lower-level primitives that provide better developer experience and performance.
+
+## Motivation
+
+Before 0.17.0, the image APIs had several limitations:
+- Progressive loading created confusion in usage patterns, and the API lacked flexibility to support all use cases
+- The resize methods were overly opinionated, and the chosen library had compatibility issues in incognito mode
+- The imperative functions for loading images were unnecessarily complex for simple use cases
+
+## Breaking Changes
+
+- The `createImage` options have been restructured, and the function has been moved to the `jazz-tools/media` namespace for both React and React Native
+- The `<ProgressiveImg>` component has been replaced with `<Image>` from `jazz-tools/react`
+- The `<ProgressiveImgNative>` component has been replaced with `<Image>` from `jazz-tools/react-native`
+- The `highestResAvailable` function has been moved from `ImageDefinition.highestResAvailable` to `import { highestResAvailable } from "jazz-tools/media"`
+- Existing image data remains compatible and accessible
+- Progressive images created with previous versions will continue to work
+
+## Changes
+
+### `createImage` Function
+
+The `createImage` function has been refactored to allow opt-in specific features and moved to the `jazz-tools/media` namespace.
+
+<CodeGroup>
+```tsx
+export type CreateImageOptions = {
+  owner?: Group | Account;
+  placeholder?: "blur" | false;
+  maxSize?: number;
+  progressive?: boolean;
+};
+```
+</CodeGroup>
+
+- By default, images are now created with only the original size saved (no progressive loading or placeholder)
+- The `maxSize` property is no longer restricted and affects the original size saved
+- Placeholder generation is now a configurable property, disabled by default. Currently, only `"blur"` is supported, with more built-in options planned for future releases
+- The `progressive` property creates internal resizes used exclusively via public APIs. Direct manipulation of internal resize state is no longer recommended
+
+The `pica` library used internally for browser image resizing has been replaced with a simpler canvas-based implementation. Since every image manipulation library has trade-offs, we've chosen the simplest solution while providing flexibility through `createImageFactory`. This new factory function allows you to create custom `createImage` instances with your preferred libraries for resizing, placeholder generation, and source reading. It's used internally to create default instances for browsers, React Native, and Node.js environments.
+
+### Replaced `<ProgressiveImg>` Component with `<Image>`
+
+The `<ProgressiveImg>` component has been replaced with `<Image>` component for both React and React Native.
+
+<CodeGroup>
+```tsx
+// Before
+import { ProgressiveImg } from "jazz-tools/react";
+
+<ProgressiveImg image={me.profile.image}>
+  {({ src }) => <img alt="" src={src} className="w-full h-auto" />}
+</ProgressiveImg>
+
+// After
+import { Image } from "jazz-tools/react";
+
+<Image imageId={me.profile.image.id} alt="Profile" width={600} />
+```
+</CodeGroup>
+
+The `width` and `height` props are now used internally to load the optimal image size, but only if progressive loading was enabled during image creation.
+
+For detailed usage examples and API reference, see the [Image component documentation](/docs/react/using-covalues/imagedef#displaying-images).
+
+### New `Image` Component for Svelte
+
+A new `Image` component has been added for Svelte, featuring the same API as the React and React Native components.
+
+<CodeGroup>
+```svelte
+<script lang="ts">
+  import { Image } from 'jazz-tools/svelte';
+</script>
+
+<Image
+  imageId={image.id}
+  alt=""
+  class="h-auto max-h-[20rem] max-w-full rounded-t-xl mb-1"
+  width={600}
+/>
+```
+</CodeGroup>
+
+For detailed usage examples and API reference, see the [Image component documentation](/docs/svelte/using-covalues/imagedef#displaying-images).
+
+### New Image Loading Utilities
+
+Two new utility functions are now available from the `jazz-tools/media` package:
+- `loadImage` - Fetches the original image file by ID
+- `loadImageBySize` - Fetches the best stored size for a given width and height
+
+For detailed usage examples and API reference, see the [Image component documentation](/docs/vanilla/using-covalues/imagedef#displaying-images).
