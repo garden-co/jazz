@@ -87,7 +87,7 @@ export async function startWorker<
   });
 
   const account = context.account as InstanceOfSchema<S>;
-  node = account._raw.core.node;
+  node = account.$jazz.localNode;
 
   if (!account.$jazz.refs.profile?.id) {
     throw new Error("Account has no profile");

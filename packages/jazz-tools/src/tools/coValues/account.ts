@@ -22,10 +22,8 @@ import {
   CoValueClass,
   CoValueClassOrSchema,
   CoValueJazzApi,
-  CoreAccountSchema,
   type Group,
   ID,
-  InstanceOfSchema,
   InstanceOrPrimitiveOfSchema,
   Profile,
   Ref,
@@ -71,7 +69,6 @@ type AccountMembers<A extends Account> = [
 export class Account extends CoValueBase implements CoValue {
   declare id: ID<this>;
   declare _type: "Account";
-  declare _raw: RawAccount;
 
   /**
    * Jazz methods for Accounts are inside this property.
@@ -110,13 +107,11 @@ export class Account extends CoValueBase implements CoValue {
         value: options.fromRaw.id,
         enumerable: false,
       },
-      _raw: { value: options.fromRaw, enumerable: false },
       _type: { value: "Account", enumerable: false },
-    });
-
-    Object.defineProperty(this, "$jazz", {
-      value: new AccountJazzApi(this),
-      enumerable: false,
+      $jazz: {
+        value: new AccountJazzApi(this, options.fromRaw),
+        enumerable: false,
+      },
     });
 
     return new Proxy(this, AccountAndGroupProxyHandler as ProxyHandler<this>);
@@ -274,7 +269,7 @@ export class Account extends CoValueBase implements CoValue {
     }
 
     const profile = this.$jazz.localNode
-      .expectCoValueLoaded(this._raw.get("profile")!)
+      .expectCoValueLoaded(this.$jazz.raw.get("profile")!)
       .getCurrentContent() as RawCoMap;
 
     if (!profile.get("inbox")) {
@@ -333,7 +328,10 @@ class AccountJazzApi<A extends Account> extends CoValueJazzApi<A> {
   /** @internal */
   sessionID: SessionID | undefined;
 
-  constructor(private account: A) {
+  constructor(
+    private account: A,
+    public raw: RawAccount,
+  ) {
     super(account);
     this.isLocalNodeOwner = this.raw.id == this.localNode.getCurrentAgent().id;
     if (this.isLocalNodeOwner) {
@@ -452,11 +450,6 @@ class AccountJazzApi<A extends Account> extends CoValueJazzApi<A> {
     return (this.account.constructor as typeof Account)._schema;
   }
 
-  /** @internal */
-  get raw() {
-    return this.account._raw;
-  }
-
   /**
    * Whether this account is the currently active account.
    */
@@ -521,7 +514,7 @@ class AccountJazzApi<A extends Account> extends CoValueJazzApi<A> {
 export const AccountAndGroupProxyHandler: ProxyHandler<Account | Group> = {
   get(target, key, receiver) {
     if (key === "profile" || key === "root") {
-      const id = target._raw.get(key);
+      const id = target.$jazz.raw.get(key);
 
       if (id) {
         return accessChildByKey(target, id, key);
@@ -543,7 +536,7 @@ export const AccountAndGroupProxyHandler: ProxyHandler<Account | Group> = {
       return true;
     } else if (key === "profile") {
       if (value) {
-        target._raw.set(
+        target.$jazz.raw.set(
           "profile",
           value.id as unknown as CoID<RawCoMap>,
           "trusting",
@@ -553,7 +546,7 @@ export const AccountAndGroupProxyHandler: ProxyHandler<Account | Group> = {
       return true;
     } else if (key === "root") {
       if (value) {
-        target._raw.set(
+        target.$jazz.raw.set(
           "root",
           value.id as unknown as CoID<RawCoMap>,
           "trusting",
@@ -582,9 +575,8 @@ export const AccountAndGroupProxyHandler: ProxyHandler<Account | Group> = {
 
 /** @category Identity & Permissions */
 export function isControlledAccount(account: Account): account is Account & {
-  _raw: RawAccount;
-} & {
   $jazz: {
+    raw: RawAccount;
     isLocalNodeOwner: true;
     sessionID: SessionID;
   };

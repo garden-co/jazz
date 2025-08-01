@@ -47,12 +47,12 @@ describe("Deep loading with depth arg", async () => {
   if (!isControlledAccount(me)) {
     throw "me is not a controlled account";
   }
-  me._raw.core.node.syncManager.addPeer(secondPeer);
+  me.$jazz.localNode.syncManager.addPeer(secondPeer);
   const { account: meOnSecondPeer } =
     await createJazzContextFromExistingCredentials({
       credentials: {
         accountID: me.id,
-        secret: me._raw.core.node.getCurrentAgent().agentSecret,
+        secret: me.$jazz.localNode.getCurrentAgent().agentSecret,
       },
       sessionProvider: randomSessionProvider,
       peersToLoadFrom: [initialAsPeer],
@@ -277,12 +277,12 @@ test("Deep loading a record-like coMap", async () => {
     throw "me is not a controlled account";
   }
 
-  me._raw.core.node.syncManager.addPeer(secondPeer);
+  me.$jazz.localNode.syncManager.addPeer(secondPeer);
   const { account: meOnSecondPeer } =
     await createJazzContextFromExistingCredentials({
       credentials: {
         accountID: me.id,
-        secret: me._raw.core.node.getCurrentAgent().agentSecret,
+        secret: me.$jazz.localNode.getCurrentAgent().agentSecret,
       },
       sessionProvider: randomSessionProvider,
       peersToLoadFrom: [initialAsPeer],

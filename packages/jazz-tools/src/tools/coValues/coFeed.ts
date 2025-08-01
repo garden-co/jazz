@@ -82,7 +82,7 @@ export { CoFeed as CoStream };
  * @category CoValues
  */
 export class CoFeed<out Item = any> extends CoValueBase implements CoValue {
-  declare $jazz: CoValueJazzApi<this>;
+  declare $jazz: CoFeedJazzApi<this>;
 
   /**
    * Declare a `CoFeed` by subclassing `CoFeed.Of(...)` and passing the item schema using a `co` primitive or a `coField.ref`.
@@ -115,8 +115,6 @@ export class CoFeed<out Item = any> extends CoValueBase implements CoValue {
   static {
     this.prototype._type = "CoStream";
   }
-  /** @category Internals */
-  declare _raw: RawCoStream;
 
   /** @internal This is only a marker type and doesn't exist at runtime */
   [ItemsSym]!: Item;
@@ -210,9 +208,8 @@ export class CoFeed<out Item = any> extends CoValueBase implements CoValue {
           value: options.fromRaw.id,
           enumerable: false,
         },
-        _raw: { value: options.fromRaw, enumerable: false },
         $jazz: {
-          value: new CoValueJazzApi(this),
+          value: new CoFeedJazzApi(this, options.fromRaw),
           enumerable: false,
         },
       });
@@ -232,16 +229,15 @@ export class CoFeed<out Item = any> extends CoValueBase implements CoValue {
   ) {
     const { owner } = parseCoValueCreateOptions(options);
     const instance = new this({ init, owner });
-    const raw = owner._raw.createStream();
+    const raw = owner.$jazz.raw.createStream();
 
     Object.defineProperties(instance, {
       id: {
         value: raw.id,
         enumerable: false,
       },
-      _raw: { value: raw, enumerable: false },
       $jazz: {
-        value: new CoValueJazzApi(instance),
+        value: new CoFeedJazzApi(instance, raw),
         enumerable: false,
       },
     });
@@ -286,9 +282,9 @@ export class CoFeed<out Item = any> extends CoValueBase implements CoValue {
     const itemDescriptor = this._schema[ItemsSym] as Schema;
 
     if (itemDescriptor === "json") {
-      this._raw.push(item as JsonValue);
+      this.$jazz.raw.push(item as JsonValue);
     } else if ("encoded" in itemDescriptor) {
-      this._raw.push(itemDescriptor.encoded.encode(item));
+      this.$jazz.raw.push(itemDescriptor.encoded.encode(item));
     } else if (isRefEncoded(itemDescriptor)) {
       let refId = (item as unknown as CoValue).id;
       if (!refId) {
@@ -299,7 +295,7 @@ export class CoFeed<out Item = any> extends CoValueBase implements CoValue {
         );
         refId = coValue.id;
       }
-      this._raw.push(refId);
+      this.$jazz.raw.push(refId);
     }
   }
 
@@ -440,7 +436,16 @@ export class CoFeed<out Item = any> extends CoValueBase implements CoValue {
    * @category Subscription & Loading
    */
   waitForSync(options?: { timeout?: number }) {
-    return this._raw.core.waitForSync(options);
+    return this.$jazz.raw.core.waitForSync(options);
+  }
+}
+
+export class CoFeedJazzApi<F extends CoFeed> extends CoValueJazzApi<F> {
+  constructor(
+    coFeed: F,
+    public raw: RawCoStream,
+  ) {
+    super(coFeed);
   }
 }
 
@@ -518,7 +523,7 @@ export const CoStreamPerAccountProxyHandler = (
 ): ProxyHandler<{}> => ({
   get(_target, key, receiver) {
     if (typeof key === "string" && key.startsWith("co_")) {
-      const rawEntry = innerTarget._raw.lastItemBy(key as RawAccountID);
+      const rawEntry = innerTarget.$jazz.raw.lastItemBy(key as RawAccountID);
 
       if (!rawEntry) return;
       const entry = entryFromRawEntry(
@@ -531,7 +536,9 @@ export const CoStreamPerAccountProxyHandler = (
 
       Object.defineProperty(entry, "all", {
         get: () => {
-          const allRawEntries = innerTarget._raw.itemsBy(key as RawAccountID);
+          const allRawEntries = innerTarget.$jazz.raw.itemsBy(
+            key as RawAccountID,
+          );
           return (function* () {
             while (true) {
               const rawEntry = allRawEntries.next();
@@ -555,7 +562,7 @@ export const CoStreamPerAccountProxyHandler = (
     }
   },
   ownKeys(_target) {
-    return Array.from(innerTarget._raw.accounts());
+    return Array.from(innerTarget.$jazz.raw.accounts());
   },
   getOwnPropertyDescriptor(_target, key) {
     if (typeof key === "string" && key.startsWith("co_")) {
@@ -581,7 +588,7 @@ const CoStreamPerSessionProxyHandler = (
   get(_target, key, receiver) {
     if (typeof key === "string" && key.includes("session")) {
       const sessionID = key as SessionID;
-      const rawEntry = innerTarget._raw.lastItemIn(sessionID);
+      const rawEntry = innerTarget.$jazz.raw.lastItemIn(sessionID);
 
       if (!rawEntry) return;
       const by = cojsonInternals.accountOrAgentIDfromSessionID(sessionID);
@@ -598,7 +605,7 @@ const CoStreamPerSessionProxyHandler = (
 
       Object.defineProperty(entry, "all", {
         get: () => {
-          const allRawEntries = innerTarget._raw.itemsIn(sessionID);
+          const allRawEntries = innerTarget.$jazz.raw.itemsIn(sessionID);
           return (function* () {
             while (true) {
               const rawEntry = allRawEntries.next();
@@ -624,7 +631,7 @@ const CoStreamPerSessionProxyHandler = (
     }
   },
   ownKeys() {
-    return innerTarget._raw.sessions();
+    return innerTarget.$jazz.raw.sessions();
   },
   getOwnPropertyDescriptor(target, key) {
     if (typeof key === "string" && key.startsWith("co_")) {
@@ -659,7 +666,7 @@ export { FileStream as BinaryCoStream };
  * @category CoValues
  */
 export class FileStream extends CoValueBase implements CoValue {
-  declare $jazz: CoValueJazzApi<this>;
+  declare $jazz: FileStreamJazzApi<this>;
 
   /**
    * The ID of this `FileStream`
@@ -668,8 +675,6 @@ export class FileStream extends CoValueBase implements CoValue {
   declare id: ID<this>;
   /** @category Type Helpers */
   declare _type: "BinaryCoStream";
-  /** @internal */
-  declare _raw: RawBinaryCoStream;
 
   constructor(
     options:
@@ -687,7 +692,7 @@ export class FileStream extends CoValueBase implements CoValue {
     if ("fromRaw" in options) {
       raw = options.fromRaw;
     } else {
-      const rawOwner = options.owner._raw;
+      const rawOwner = options.owner.$jazz.raw;
       raw = rawOwner.createBinaryStream();
     }
 
@@ -697,9 +702,8 @@ export class FileStream extends CoValueBase implements CoValue {
         enumerable: false,
       },
       _type: { value: "BinaryCoStream", enumerable: false },
-      _raw: { value: raw, enumerable: false },
       $jazz: {
-        value: new CoValueJazzApi(this),
+        value: new FileStreamJazzApi(this, raw),
         enumerable: false,
       },
     });
@@ -736,7 +740,7 @@ export class FileStream extends CoValueBase implements CoValue {
   }
 
   getMetadata(): BinaryStreamInfo | undefined {
-    return this._raw.getBinaryStreamInfo();
+    return this.$jazz.raw.getBinaryStreamInfo();
   }
 
   getChunks(options?: {
@@ -744,23 +748,23 @@ export class FileStream extends CoValueBase implements CoValue {
   }):
     | (BinaryStreamInfo & { chunks: Uint8Array[]; finished: boolean })
     | undefined {
-    return this._raw.getBinaryChunks(options?.allowUnfinished);
+    return this.$jazz.raw.getBinaryChunks(options?.allowUnfinished);
   }
 
   isBinaryStreamEnded(): boolean {
-    return this._raw.isBinaryStreamEnded();
+    return this.$jazz.raw.isBinaryStreamEnded();
   }
 
   start(options: BinaryStreamInfo): void {
-    this._raw.startBinaryStream(options);
+    this.$jazz.raw.startBinaryStream(options);
   }
 
   push(data: Uint8Array): void {
-    this._raw.pushBinaryStreamChunk(data);
+    this.$jazz.raw.pushBinaryStreamChunk(data);
   }
 
   end(): void {
-    this._raw.endBinaryStream();
+    this.$jazz.raw.endBinaryStream();
   }
 
   toBlob(options?: { allowUnfinished?: boolean }): Blob | undefined {
@@ -997,6 +1001,15 @@ export class FileStream extends CoValueBase implements CoValue {
    * @category Subscription & Loading
    */
   waitForSync(options?: { timeout?: number }) {
-    return this._raw.core.waitForSync(options);
+    return this.$jazz.raw.core.waitForSync(options);
+  }
+}
+
+export class FileStreamJazzApi<F extends FileStream> extends CoValueJazzApi<F> {
+  constructor(
+    fileStream: F,
+    public raw: RawBinaryCoStream,
+  ) {
+    super(fileStream);
   }
 }

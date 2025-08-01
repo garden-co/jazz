@@ -64,7 +64,7 @@ describe("CoMap", async () => {
       expect(john.color).toEqual("red");
       expect(john._height).toEqual(10);
       expect(john.birthday).toEqual(birthday);
-      expect(john._raw.get("birthday")).toEqual(birthday.toISOString());
+      expect(john.$jazz.raw.get("birthday")).toEqual(birthday.toISOString());
       expect(Object.keys(john)).toEqual([
         "color",
         "_height",
@@ -107,7 +107,7 @@ describe("CoMap", async () => {
       const john = Person.create({ name: "John" }, Account.getMe());
 
       expect(john.name).toEqual("John");
-      expect(john._raw.get("name")).toEqual("John");
+      expect(john.$jazz.raw.get("name")).toEqual("John");
     });
 
     test("create a CoMap with a group as owner", () => {
@@ -118,7 +118,7 @@ describe("CoMap", async () => {
       const john = Person.create({ name: "John" }, Group.create());
 
       expect(john.name).toEqual("John");
-      expect(john._raw.get("name")).toEqual("John");
+      expect(john.$jazz.raw.get("name")).toEqual("John");
     });
 
     test("Empty schema", () => {
@@ -264,7 +264,7 @@ describe("CoMap", async () => {
 
       const person = Person.create({ name: "John", age: 20 });
 
-      person._raw.set("extra", "extra");
+      person.$jazz.raw.set("extra", "extra");
 
       expect(person.toJSON()).toEqual({
         _type: "CoMap",
@@ -729,7 +729,7 @@ describe("CoMap resolution", async () => {
     const currentAccount = Account.getMe();
 
     // Disconnect the current account
-    currentAccount._raw.core.node.syncManager.getPeers().forEach((peer) => {
+    currentAccount.$jazz.localNode.syncManager.getPeers().forEach((peer) => {
       peer.gracefulShutdown();
     });
 
@@ -774,7 +774,7 @@ describe("CoMap resolution", async () => {
     const currentAccount = Account.getMe();
 
     // Disconnect the current account
-    currentAccount._raw.core.node.syncManager.getPeers().forEach((peer) => {
+    currentAccount.$jazz.localNode.syncManager.getPeers().forEach((peer) => {
       peer.gracefulShutdown();
     });
 
@@ -805,7 +805,7 @@ describe("CoMap resolution", async () => {
     expect(resolved).toBe(false);
 
     // Reconnect the current account
-    currentAccount._raw.core.node.syncManager.addPeer(
+    currentAccount.$jazz.localNode.syncManager.addPeer(
       getPeerConnectedToTestSyncServer(),
     );
 
@@ -1442,7 +1442,7 @@ describe("CoMap Typescript validation", async () => {
     // Killing the client node so the serverNode can't load the map from it
     clientNode.gracefulShutdown();
 
-    const loadedMap = await serverNode.load(map._raw.id);
+    const loadedMap = await serverNode.load(map.$jazz.raw.id);
 
     expect(loadedMap).not.toBe("unavailable");
   });

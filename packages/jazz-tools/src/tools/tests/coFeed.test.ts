@@ -728,8 +728,8 @@ describe("FileStream large file loading", async () => {
     expect(loadedChunks).not.toBeNull();
     expect(loadedChunks?.finished).toBe(undefined);
 
-    expect(loadedStream._raw.core.knownState()).not.toEqual(
-      largeStream._raw.core.knownState(),
+    expect(loadedStream.$jazz.raw.core.knownState()).not.toEqual(
+      largeStream.$jazz.raw.core.knownState(),
     );
   });
 
@@ -776,8 +776,8 @@ describe("FileStream large file loading", async () => {
     expect(loadedChunks?.finished).toBe(true);
     expect(loadedChunks?.chunks).toHaveLength(numChunks); // 100 chunks of 1KB each
 
-    expect(loadedStream._raw.core.knownState()).toEqual(
-      largeStream._raw.core.knownState(),
+    expect(loadedStream.$jazz.raw.core.knownState()).toEqual(
+      largeStream.$jazz.raw.core.knownState(),
     );
   });
 });
@@ -795,7 +795,7 @@ describe("waitForSync", async () => {
     // Killing the client node so the serverNode can't load the map from it
     clientNode.gracefulShutdown();
 
-    const loadedStream = await serverNode.load(stream._raw.id);
+    const loadedStream = await serverNode.load(stream.$jazz.raw.id);
 
     expect(loadedStream).not.toBe("unavailable");
   });
@@ -814,7 +814,7 @@ describe("waitForSync", async () => {
     // Killing the client node so the serverNode can't load the map from it
     clientNode.gracefulShutdown();
 
-    const loadedStream = await serverNode.load(stream._raw.id);
+    const loadedStream = await serverNode.load(stream.$jazz.raw.id);
 
     expect(loadedStream).not.toBe("unavailable");
   });
@@ -827,7 +827,7 @@ describe("waitForSync", async () => {
     const stream = FileStream.create();
     expect(stream.$jazz.owner._type).toEqual("Group");
     expect(
-      stream.$jazz.owner.castAs(Group)._raw.roleOf(account._raw.id),
+      stream.$jazz.owner.castAs(Group).$jazz.raw.roleOf(account.$jazz.raw.id),
     ).toEqual("admin");
   });
 });

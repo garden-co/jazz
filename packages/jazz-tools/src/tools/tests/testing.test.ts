@@ -16,12 +16,12 @@ describe("Jazz Test Sync", () => {
     group.addMember("everyone", "reader");
 
     const map = CoMap.create({}, group);
-    map._raw.set("test", "value");
+    map.$jazz.raw.set("test", "value");
 
     // Verify account2 can see the group
     const loadedMap = await CoMap.load(map.id, { loadAs: account2 });
     expect(loadedMap).toBeDefined();
-    expect(loadedMap?._raw.get("test")).toBe("value");
+    expect(loadedMap?.$jazz.raw.get("test")).toBe("value");
   });
 
   test("correctly set the globalMe before starting the migration", async () => {

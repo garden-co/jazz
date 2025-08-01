@@ -115,7 +115,7 @@ export abstract class SchemaUnion extends CoValueBase implements CoValue {
 
       static override fromRaw<T extends CoValue>(
         this: CoValueClass<T> & CoValueFromRaw<T>,
-        raw: T["_raw"],
+        raw: T["$jazz"]["raw"],
       ): T {
         const ResolvedClass = discriminator(
           raw as RawCoMap,
@@ -139,7 +139,10 @@ export abstract class SchemaUnion extends CoValueBase implements CoValue {
    *
    * @internal
    */
-  static fromRaw<V extends CoValue>(this: CoValueClass<V>, raw: V["_raw"]): V {
+  static fromRaw<V extends CoValue>(
+    this: CoValueClass<V>,
+    raw: V["$jazz"]["raw"],
+  ): V {
     throw new Error("Not implemented");
   }
 

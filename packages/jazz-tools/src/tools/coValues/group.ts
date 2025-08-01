@@ -45,8 +45,7 @@ export class Group extends CoValueBase implements CoValue {
   static {
     this.prototype._type = "Group";
   }
-  declare _raw: RawGroup;
-  declare $jazz: CoValueJazzApi<this>;
+  declare $jazz: GroupJazzApi<this>;
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   static _schema: any;
@@ -74,10 +73,10 @@ export class Group extends CoValueBase implements CoValue {
     profile: Ref<Profile> | undefined;
     root: Ref<CoMap> | undefined;
   } {
-    const profileID = this._raw.get("profile") as unknown as
+    const profileID = this.$jazz.raw.get("profile") as unknown as
       | ID<NonNullable<this["profile"]>>
       | undefined;
-    const rootID = this._raw.get("root") as unknown as
+    const rootID = this.$jazz.raw.get("root") as unknown as
       | ID<NonNullable<this["root"]>>
       | undefined;
     return {
@@ -115,7 +114,7 @@ export class Group extends CoValueBase implements CoValue {
       const initOwner = options.owner;
       if (!initOwner) throw new Error("No owner provided");
       if (initOwner._type === "Account" && isControlledAccount(initOwner)) {
-        const rawOwner = initOwner._raw;
+        const rawOwner = initOwner.$jazz.raw;
         raw = rawOwner.core.node.createGroup();
       } else {
         throw new Error("Can only construct group as a controlled account");
@@ -127,9 +126,8 @@ export class Group extends CoValueBase implements CoValue {
         value: raw.id,
         enumerable: false,
       },
-      _raw: { value: raw, enumerable: false },
       $jazz: {
-        value: new CoValueJazzApi(this),
+        value: new GroupJazzApi(this, raw),
         enumerable: false,
       },
     });
@@ -145,7 +143,7 @@ export class Group extends CoValueBase implements CoValue {
   }
 
   myRole(): Role | undefined {
-    return this._raw.myRole();
+    return this.$jazz.raw.myRole();
   }
 
   addMember(member: Everyone, role: "writer" | "reader" | "writeOnly"): void;
@@ -167,9 +165,12 @@ export class Group extends CoValueBase implements CoValue {
     if (member !== "everyone" && member._type === "Group") {
       if (role === "writeOnly")
         throw new Error("Cannot add group as member with write-only role");
-      this._raw.extend(member._raw, role);
+      this.$jazz.raw.extend(member.$jazz.raw, role);
     } else if (role !== undefined && role !== "inherit") {
-      this._raw.addMember(member === "everyone" ? member : member._raw, role);
+      this.$jazz.raw.addMember(
+        member === "everyone" ? member : member.$jazz.raw,
+        role,
+      );
     }
   }
 
@@ -181,10 +182,10 @@ export class Group extends CoValueBase implements CoValue {
   removeMember(member: Group): Promise<void>;
   removeMember(member: Group | Everyone | Account) {
     if (member !== "everyone" && member._type === "Group") {
-      return this._raw.revokeExtend(member._raw);
+      return this.$jazz.raw.revokeExtend(member.$jazz.raw);
     } else {
-      return this._raw.removeMember(
-        member === "everyone" ? member : member._raw,
+      return this.$jazz.raw.removeMember(
+        member === "everyone" ? member : member.$jazz.raw,
       );
     }
   }
@@ -207,7 +208,7 @@ export class Group extends CoValueBase implements CoValue {
     for (const accountID of accountIDs) {
       if (!isAccountID(accountID)) continue;
 
-      const role = this._raw.roleOf(accountID);
+      const role = this.$jazz.raw.roleOf(accountID);
 
       if (
         role === "admin" ||
@@ -249,7 +250,7 @@ export class Group extends CoValueBase implements CoValue {
    * @returns The members of the group.
    */
   get members() {
-    return this.getMembersFromKeys(this._raw.getAllMemberKeysSet());
+    return this.getMembersFromKeys(this.$jazz.raw.getAllMemberKeysSet());
   }
 
   /**
@@ -260,17 +261,17 @@ export class Group extends CoValueBase implements CoValue {
    * @returns The direct members of the group.
    */
   getDirectMembers() {
-    return this.getMembersFromKeys(this._raw.getMemberKeys());
+    return this.getMembersFromKeys(this.$jazz.raw.getMemberKeys());
   }
 
   getRoleOf(member: Everyone | ID<Account> | "me") {
     if (member === "me") {
-      return this._raw.roleOf(
+      return this.$jazz.raw.roleOf(
         activeAccountContext.get().id as unknown as RawAccountID,
       );
     }
 
-    return this._raw.roleOf(
+    return this.$jazz.raw.roleOf(
       member === "everyone" ? member : (member as unknown as RawAccountID),
     );
   }
@@ -288,7 +289,9 @@ export class Group extends CoValueBase implements CoValue {
   }
 
   getParentGroups(): Array<Group> {
-    return this._raw.getParentGroups().map((group) => Group.fromRaw(group));
+    return this.$jazz.raw
+      .getParentGroups()
+      .map((group) => Group.fromRaw(group));
   }
 
   /** @category Identity & Permissions
@@ -302,7 +305,7 @@ export class Group extends CoValueBase implements CoValue {
     parent: Group,
     roleMapping?: "reader" | "writer" | "admin" | "inherit",
   ) {
-    this._raw.extend(parent._raw, roleMapping);
+    this.$jazz.raw.extend(parent.$jazz.raw, roleMapping);
     return this;
   }
 
@@ -313,7 +316,7 @@ export class Group extends CoValueBase implements CoValue {
    * @returns This group.
    */
   async revokeExtend(parent: Group) {
-    await this._raw.revokeExtend(parent._raw);
+    await this.$jazz.raw.revokeExtend(parent.$jazz.raw);
     return this;
   }
 
@@ -379,7 +382,20 @@ export class Group extends CoValueBase implements CoValue {
    * @category Subscription & Loading
    */
   waitForSync(options?: { timeout?: number }) {
-    return this._raw.core.waitForSync(options);
+    return this.$jazz.raw.core.waitForSync(options);
+  }
+}
+
+export class GroupJazzApi<G extends Group> extends CoValueJazzApi<G> {
+  constructor(
+    group: G,
+    private _raw: RawGroup,
+  ) {
+    super(group);
+  }
+
+  override get raw(): RawGroup {
+    return this._raw;
   }
 }
 

@@ -33,7 +33,7 @@ export interface CoValueClass<Value extends CoValue = CoValue> {
 }
 
 export interface CoValueFromRaw<V extends CoValue> {
-  fromRaw(raw: V["_raw"]): V;
+  fromRaw(raw: V["$jazz"]["raw"]): V;
 }
 
 /** @category Abstract interfaces */
@@ -43,14 +43,14 @@ export interface CoValue {
   readonly id: ID<this>;
   /** @category Type Helpers */
   _type: string;
-  /** @category Internals */
-  _raw: RawCoValue;
 
   $jazz: {
     /** @category Collaboration */
     owner: Account | Group;
     /** @internal */
     readonly loadedAs: Account | AnonymousJazzAgent;
+    /** @category Internals */
+    raw: RawCoValue;
   };
 
   /** @internal */
@@ -259,7 +259,7 @@ export function subscribeToCoValue<
   listener: SubscribeListener<V, R>,
 ): () => void {
   const loadAs = options.loadAs ?? activeAccountContext.get();
-  const node = "node" in loadAs ? loadAs.node : loadAs._raw.core.node;
+  const node = "node" in loadAs ? loadAs.node : loadAs.$jazz.raw.core.node;
 
   const resolve = options.resolve ?? true;
 
@@ -464,7 +464,7 @@ export async function exportCoValue<
   },
 ) {
   const loadAs = options.loadAs ?? activeAccountContext.get();
-  const node = "node" in loadAs ? loadAs.node : loadAs._raw.core.node;
+  const node = "node" in loadAs ? loadAs.node : loadAs.$jazz.localNode;
 
   const resolve = options.resolve ?? true;
 
@@ -519,7 +519,7 @@ function loadContentPiecesFromSubscription(
 
   valuesExported.add(subscription.id);
 
-  const core = subscription.getCurrentValue()?._raw
+  const core = subscription.getCurrentValue()?.$jazz.raw
     .core as AvailableCoValueCore;
 
   if (core) {
@@ -567,7 +567,7 @@ export function importContentPieces(
   loadAs?: Account | AnonymousJazzAgent,
 ) {
   const account = loadAs ?? Account.getMe();
-  const node = "node" in account ? account.node : account._raw.core.node;
+  const node = "node" in account ? account.node : account.$jazz.localNode;
 
   for (const piece of contentPieces) {
     node.syncManager.handleNewContent(piece, "import");

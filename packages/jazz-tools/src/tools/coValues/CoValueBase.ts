@@ -25,7 +25,6 @@ import type {
 export abstract class CoValueBase implements CoValue {
   declare id: ID<this>;
   declare _type: string;
-  declare _raw: RawCoValue;
   /** @category Internals */
   declare _instanceID: string;
 
@@ -70,20 +69,22 @@ export abstract class CoValueBase implements CoValue {
       return this as any;
     }
 
-    return (cl as unknown as CoValueFromRaw<CoValue>).fromRaw(this._raw) as any;
+    return (cl as unknown as CoValueFromRaw<CoValue>).fromRaw(
+      this.$jazz.raw,
+    ) as any;
   }
 }
 
-export class CoValueJazzApi<V extends CoValue> {
+export abstract class CoValueJazzApi<V extends CoValue> {
   constructor(private coValue: V) {}
 
   get owner(): Account | Group {
     const schema =
-      this._raw.group instanceof RawAccount
+      this.raw.group instanceof RawAccount
         ? RegisteredSchemas["Account"]
         : RegisteredSchemas["Group"];
 
-    return accessChildById(this.coValue, this._raw.group.id, {
+    return accessChildById(this.coValue, this.raw.group.id, {
       ref: schema,
       optional: false,
     });
@@ -91,7 +92,7 @@ export class CoValueJazzApi<V extends CoValue> {
 
   /** @private */
   get loadedAs() {
-    const agent = this._raw.core.node.getCurrentAgent();
+    const agent = this.raw.core.node.getCurrentAgent();
 
     if (agent instanceof ControlledAccount) {
       return coValuesCache.get(agent.account, () =>
@@ -101,10 +102,8 @@ export class CoValueJazzApi<V extends CoValue> {
       );
     }
 
-    return new AnonymousJazzAgent(this._raw.core.node);
+    return new AnonymousJazzAgent(this.raw.core.node);
   }
 
-  get _raw() {
-    return this.coValue._raw;
-  }
+  abstract get raw(): RawCoValue;
 }

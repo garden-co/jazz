@@ -218,7 +218,7 @@ describe("Group inheritance", () => {
     // Killing the client node so the serverNode can't load the map from it
     clientNode.gracefulShutdown();
 
-    const loadedGroup = await serverNode.load(group._raw.id);
+    const loadedGroup = await serverNode.load(group.$jazz.raw.id);
 
     expect(loadedGroup).not.toBe("unavailable");
   });

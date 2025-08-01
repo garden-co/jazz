@@ -46,7 +46,7 @@ describe("createContext methods", () => {
 
       const credentials: Credentials = {
         accountID: account.id,
-        secret: account._raw.core.node.getCurrentAgent().agentSecret,
+        secret: account.$jazz.localNode.getCurrentAgent().agentSecret,
       };
 
       const context = await createJazzContextFromExistingCredentials({
@@ -77,7 +77,7 @@ describe("createContext methods", () => {
 
       const credentials: Credentials = {
         accountID: account.id,
-        secret: account._raw.core.node.getCurrentAgent().agentSecret,
+        secret: account.$jazz.localNode.getCurrentAgent().agentSecret,
       };
 
       const context = await createJazzContextFromExistingCredentials({
@@ -103,7 +103,7 @@ describe("createContext methods", () => {
       const context = await createJazzContextFromExistingCredentials({
         credentials: {
           accountID: account.id,
-          secret: account._raw.core.node.getCurrentAgent().agentSecret,
+          secret: account.$jazz.localNode.getCurrentAgent().agentSecret,
         },
         peersToLoadFrom: [getPeerConnectedToTestSyncServer()],
         crypto: Crypto,
@@ -120,13 +120,13 @@ describe("createContext methods", () => {
         isCurrentActiveAccount: true,
       });
 
-      const coMap = account._raw.createMap();
+      const coMap = account.$jazz.raw.createMap();
       coMap.set("test", "test", "trusting");
 
       const context = await createJazzContextFromExistingCredentials({
         credentials: {
           accountID: account.id,
-          secret: account._raw.core.node.getCurrentAgent().agentSecret,
+          secret: account.$jazz.localNode.getCurrentAgent().agentSecret,
         },
         peersToLoadFrom: [getPeerConnectedToTestSyncServer()],
         crypto: Crypto,
@@ -146,7 +146,7 @@ describe("createContext methods", () => {
       const context = await createJazzContextFromExistingCredentials({
         credentials: {
           accountID: account.id,
-          secret: account._raw.core.node.getCurrentAgent().agentSecret,
+          secret: account.$jazz.localNode.getCurrentAgent().agentSecret,
         },
         peersToLoadFrom: [getPeerConnectedToTestSyncServer()],
         crypto: Crypto,
@@ -229,7 +229,7 @@ describe("createContext methods", () => {
         isCurrentActiveAccount: true,
       });
 
-      const coMap = account._raw.createMap();
+      const coMap = account.$jazz.raw.createMap();
       coMap.set("test", "test", "trusting");
 
       const context = await createAnonymousJazzContext({

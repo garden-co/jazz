@@ -31,7 +31,7 @@ test("waitForAllCoValuesSync should resolve when all the values are synced", asy
   clientNode.gracefulShutdown();
 
   for (const map of maps) {
-    const loadedMap = await serverNode.load(map._raw.id);
+    const loadedMap = await serverNode.load(map.$jazz.raw.id);
     expect(loadedMap).not.toBe("unavailable");
   }
 });
@@ -44,7 +44,7 @@ test("waitForSync should resolve when the value is uploaded", async () => {
   // Killing the client node so the serverNode can't load the map from it
   clientNode.gracefulShutdown();
 
-  const loadedAccount = await serverNode.load(clientAccount._raw.id);
+  const loadedAccount = await serverNode.load(clientAccount.$jazz.raw.id);
 
   expect(loadedAccount).not.toBe("unavailable");
 });

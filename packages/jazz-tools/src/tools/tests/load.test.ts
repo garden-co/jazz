@@ -137,7 +137,7 @@ test("retry an unavailable value", async () => {
   const currentAccount = Account.getMe();
 
   // Disconnect the current account
-  currentAccount._raw.core.node.syncManager.getPeers().forEach((peer) => {
+  currentAccount.$jazz.localNode.syncManager.getPeers().forEach((peer) => {
     peer.gracefulShutdown();
   });
 
@@ -152,7 +152,7 @@ test("retry an unavailable value", async () => {
   await new Promise((resolve) => setTimeout(resolve));
 
   // Reconnect the current account
-  currentAccount._raw.core.node.syncManager.addPeer(
+  currentAccount.$jazz.localNode.syncManager.addPeer(
     getPeerConnectedToTestSyncServer(),
   );
 
@@ -169,7 +169,7 @@ test("returns null if the value is unavailable after retries", async () => {
   const currentAccount = Account.getMe();
 
   // Disconnect the current account
-  currentAccount._raw.core.node.syncManager.getPeers().forEach((peer) => {
+  currentAccount.$jazz.localNode.syncManager.getPeers().forEach((peer) => {
     peer.gracefulShutdown();
   });
 
@@ -223,7 +223,7 @@ test("load a large coValue", async () => {
   }
 
   // Wait for the large coValue to be fully synced
-  await largeMap.data._raw.core.waitForSync();
+  await largeMap.data.$jazz.raw.core.waitForSync();
 
   const alice = await createJazzTestAccount();
 
@@ -243,7 +243,7 @@ test("load a large coValue", async () => {
   );
 
   expect(loadedDataset.data.length).toBe(chunks);
-  expect(loadedDataset.data._raw.core.knownState()).toEqual(
-    largeMap.data._raw.core.knownState(),
+  expect(loadedDataset.data.$jazz.raw.core.knownState()).toEqual(
+    largeMap.data.$jazz.raw.core.knownState(),
   );
 });

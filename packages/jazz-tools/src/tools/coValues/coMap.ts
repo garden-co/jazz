@@ -109,8 +109,6 @@ export class CoMap extends CoValueBase implements CoValue {
   static {
     this.prototype._type = "CoMap";
   }
-  /** @category Internals */
-  declare _raw: RawCoMap;
 
   /**
    * Jazz methods for CoMaps are inside this property.
@@ -135,9 +133,8 @@ export class CoMap extends CoValueBase implements CoValue {
             value: options.fromRaw.id as unknown as ID<this>,
             enumerable: false,
           },
-          _raw: { value: options.fromRaw, enumerable: false },
           $jazz: {
-            value: new CoMapJazzApi(this),
+            value: new CoMapJazzApi(this, () => options.fromRaw),
             enumerable: false,
           },
         });
@@ -194,7 +191,7 @@ export class CoMap extends CoValueBase implements CoValue {
       _type: this._type,
     } as Record<string, any>;
 
-    for (const key of this._raw.keys()) {
+    for (const key of this.$jazz.raw.keys()) {
       const tKey = key as CoKeys<this>;
       const descriptor = this.$jazz.getDescriptor(tKey);
 
@@ -203,9 +200,9 @@ export class CoMap extends CoValueBase implements CoValue {
       }
 
       if (descriptor == "json" || "encoded" in descriptor) {
-        result[key] = this._raw.get(key);
+        result[key] = this.$jazz.raw.get(key);
       } else if (isRefEncoded(descriptor)) {
-        const id = this._raw.get(key) as ID<CoValue>;
+        const id = this.$jazz.raw.get(key) as ID<CoValue>;
 
         if (processedValues?.includes(id) || id === this.id) {
           result[key] = { _circular: id };
@@ -255,18 +252,18 @@ export class CoMap extends CoValueBase implements CoValue {
     const { owner, uniqueness } = parseCoValueCreateOptions(options);
 
     Object.defineProperty(instance, "$jazz", {
-      value: new CoMapJazzApi(instance),
+      value: new CoMapJazzApi(instance, () => raw),
       enumerable: false,
     });
 
-    const raw = CoMap._rawFromInit(instance, init, owner, uniqueness);
+    const raw = CoMap.rawFromInit(instance, init, owner, uniqueness);
 
     Object.defineProperties(instance, {
       id: {
         value: raw.id,
         enumerable: false,
       },
-      _raw: { value: raw, enumerable: false },
+      raw: { value: raw, enumerable: false },
     });
 
     return instance;
@@ -276,13 +273,13 @@ export class CoMap extends CoValueBase implements CoValue {
    * Create a new `RawCoMap` from an initialization object
    * @internal
    */
-  static _rawFromInit<M extends CoMap, Fields extends object>(
+  static rawFromInit<M extends CoMap, Fields extends object>(
     instance: M,
     init: Simplify<CoMapInit<Fields>> | undefined,
     owner: Account | Group,
     uniqueness?: CoValueUniqueness,
   ) {
-    const rawOwner = owner._raw;
+    const rawOwner = owner.$jazz.raw;
 
     const rawInit = {} as {
       [key in keyof Fields]: JsonValue | undefined;
@@ -461,7 +458,7 @@ export class CoMap extends CoValueBase implements CoValue {
       uniqueness: unique,
     };
     const crypto =
-      as._type === "Anonymous" ? as.node.crypto : as._raw.core.node.crypto;
+      as._type === "Anonymous" ? as.node.crypto : as.$jazz.raw.core.node.crypto;
     return cojsonInternals.idforHeader(header, crypto) as ID<M>;
   }
 
@@ -551,7 +548,10 @@ export class CoMap extends CoValueBase implements CoValue {
  * Contains CoMap Jazz methods that are part of the {@link CoMap.$jazz`} property.
  */
 class CoMapJazzApi<M extends CoMap> extends CoValueJazzApi<M> {
-  constructor(private coMap: M) {
+  constructor(
+    private coMap: M,
+    private getRaw: () => RawCoMap,
+  ) {
     super(coMap);
   }
 
@@ -744,7 +744,7 @@ class CoMapJazzApi<M extends CoMap> extends CoValueJazzApi<M> {
       {},
       {
         get(_target, key) {
-          const rawEdit = map._raw.lastEditAt(key as string);
+          const rawEdit = map.$jazz.raw.lastEditAt(key as string);
           if (!rawEdit) return undefined;
 
           const descriptor = map.$jazz.getDescriptor(key as string);
@@ -754,14 +754,14 @@ class CoMapJazzApi<M extends CoMap> extends CoValueJazzApi<M> {
           return {
             ...getEditFromRaw(map, rawEdit, descriptor, key as string),
             get all() {
-              return [...map._raw.editsAt(key as string)].map((rawEdit) =>
+              return [...map.$jazz.raw.editsAt(key as string)].map((rawEdit) =>
                 getEditFromRaw(map, rawEdit, descriptor, key as string),
               );
             },
           };
         },
         ownKeys(_target) {
-          return map._raw.keys();
+          return map.$jazz.raw.keys();
         },
         getOwnPropertyDescriptor(target, key) {
           return {
@@ -776,8 +776,8 @@ class CoMapJazzApi<M extends CoMap> extends CoValueJazzApi<M> {
   }
 
   /** @internal */
-  get raw() {
-    return this.coMap._raw;
+  override get raw() {
+    return this.getRaw();
   }
 
   /**
@@ -862,7 +862,7 @@ const CoMapProxyHandler: ProxyHandler<CoMap> = {
         return undefined;
       }
 
-      const raw = target._raw.get(key);
+      const raw = target.$jazz.raw.get(key);
 
       if (descriptor === "json") {
         return raw;
@@ -915,7 +915,7 @@ const CoMapProxyHandler: ProxyHandler<CoMap> = {
   ownKeys(target) {
     const keys = Reflect.ownKeys(target).filter((k) => k !== ItemsSym);
 
-    for (const key of target._raw.keys()) {
+    for (const key of target.$jazz.raw.keys()) {
       if (!keys.includes(key)) {
         keys.push(key);
       }
@@ -929,7 +929,7 @@ const CoMapProxyHandler: ProxyHandler<CoMap> = {
     } else {
       const descriptor = target.$jazz.getDescriptor(key as string);
 
-      if (descriptor || key in target._raw.latest) {
+      if (descriptor || key in target.$jazz.raw.latest) {
         return {
           enumerable: true,
           configurable: true,
@@ -941,8 +941,8 @@ const CoMapProxyHandler: ProxyHandler<CoMap> = {
   has(target, key) {
     const descriptor = target.$jazz.getDescriptor(key as string);
 
-    if (target._raw && typeof key === "string" && descriptor) {
-      return target._raw.get(key) !== undefined;
+    if (target.$jazz.raw && typeof key === "string" && descriptor) {
+      return target.$jazz.raw.get(key) !== undefined;
     } else {
       return Reflect.has(target, key);
     }
@@ -951,7 +951,7 @@ const CoMapProxyHandler: ProxyHandler<CoMap> = {
     const descriptor = target.$jazz.getDescriptor(key as string);
 
     if (typeof key === "string" && descriptor) {
-      target._raw.delete(key);
+      target.$jazz.raw.delete(key);
       return true;
     } else {
       return Reflect.deleteProperty(target, key);

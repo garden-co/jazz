@@ -59,7 +59,7 @@ import {
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export class CoList<out Item = any> extends Array<Item> implements CoValue {
-  declare $jazz: CoValueJazzApi<this>;
+  declare $jazz: CoListJazzApi<this>;
 
   /**
    * Declare a `CoList` by subclassing `CoList.Of(...)` and passing the item schema using `co`.
@@ -100,8 +100,6 @@ export class CoList<out Item = any> extends Array<Item> implements CoValue {
     this.prototype._type = "CoList";
   }
   /** @category Internals */
-  declare _raw: RawCoList;
-  /** @category Internals */
   declare _instanceID: string;
 
   /** @internal This is only a marker type and doesn't exist at runtime */
@@ -118,11 +116,11 @@ export class CoList<out Item = any> extends Array<Item> implements CoValue {
 
   /** @category Collaboration */
   get owner(): Account | Group {
-    return this._raw.group instanceof RawAccount
+    return this.$jazz.raw.group instanceof RawAccount
       ? coValueClassFromCoValueClassOrSchema(
           RegisteredSchemas["Account"],
-        ).fromRaw(this._raw.group)
-      : RegisteredSchemas["Group"].fromRaw(this._raw.group);
+        ).fromRaw(this.$jazz.raw.group)
+      : RegisteredSchemas["Group"].fromRaw(this.$jazz.raw.group);
   }
 
   /**
@@ -153,9 +151,13 @@ export class CoList<out Item = any> extends Array<Item> implements CoValue {
   } {
     return makeRefs<number>(
       this,
-      (idx) => this._raw.get(idx) as unknown as ID<CoValue>,
-      () => Array.from({ length: this._raw.entries().length }, (_, idx) => idx),
-      this.loadedAs,
+      (idx) => this.$jazz.raw.get(idx) as unknown as ID<CoValue>,
+      () =>
+        Array.from(
+          { length: this.$jazz.raw.entries().length },
+          (_, idx) => idx,
+        ),
+      this._loadedAs,
       (_idx) => this._schema[ItemsSym] as RefEncoded<CoValue>,
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
     ) as any;
@@ -172,8 +174,8 @@ export class CoList<out Item = any> extends Array<Item> implements CoValue {
     throw new Error("Not implemented");
   }
 
-  get loadedAs() {
-    const agent = this._raw.core.node.getCurrentAgent();
+  get _loadedAs() {
+    const agent = this.$jazz.raw.core.node.getCurrentAgent();
 
     if (agent instanceof ControlledAccount) {
       return coValuesCache.get(agent.account, () =>
@@ -183,7 +185,7 @@ export class CoList<out Item = any> extends Array<Item> implements CoValue {
       );
     }
 
-    return new AnonymousJazzAgent(this._raw.core.node);
+    return new AnonymousJazzAgent(this.$jazz.raw.core.node);
   }
 
   static get [Symbol.species]() {
@@ -202,10 +204,6 @@ export class CoList<out Item = any> extends Array<Item> implements CoValue {
         value: `instance-${Math.random().toString(36).slice(2)}`,
         enumerable: false,
       },
-      $jazz: {
-        value: new CoValueJazzApi(this),
-        enumerable: false,
-      },
     });
 
     if (options && "fromRaw" in options) {
@@ -214,7 +212,10 @@ export class CoList<out Item = any> extends Array<Item> implements CoValue {
           value: options.fromRaw.id,
           enumerable: false,
         },
-        _raw: { value: options.fromRaw, enumerable: false },
+        $jazz: {
+          value: new CoListJazzApi(this, options.fromRaw),
+          enumerable: false,
+        },
       });
     }
 
@@ -249,7 +250,7 @@ export class CoList<out Item = any> extends Array<Item> implements CoValue {
   ) {
     const { owner } = parseCoValueCreateOptions(options);
     const instance = new this({ init: items, owner });
-    const raw = owner._raw.createList(
+    const raw = owner.$jazz.raw.createList(
       toRawItems(items, instance._schema[ItemsSym], owner),
     );
 
@@ -258,20 +259,23 @@ export class CoList<out Item = any> extends Array<Item> implements CoValue {
         value: raw.id,
         enumerable: false,
       },
-      _raw: { value: raw, enumerable: false },
+      $jazz: {
+        value: new CoListJazzApi(instance, raw),
+        enumerable: false,
+      },
     });
 
     return instance;
   }
 
   push(...items: Item[]): number {
-    this._raw.appendItems(
+    this.$jazz.raw.appendItems(
       toRawItems(items, this._schema[ItemsSym], this.owner),
       undefined,
       "private",
     );
 
-    return this._raw.entries().length;
+    return this.$jazz.raw.entries().length;
   }
 
   unshift(...items: Item[]): number {
@@ -280,16 +284,16 @@ export class CoList<out Item = any> extends Array<Item> implements CoValue {
       this._schema[ItemsSym],
       this.owner,
     )) {
-      this._raw.prepend(item);
+      this.$jazz.raw.prepend(item);
     }
 
-    return this._raw.entries().length;
+    return this.$jazz.raw.entries().length;
   }
 
   pop(): Item | undefined {
     const last = this[this.length - 1];
 
-    this._raw.delete(this.length - 1);
+    this.$jazz.raw.delete(this.length - 1);
 
     return last;
   }
@@ -297,7 +301,7 @@ export class CoList<out Item = any> extends Array<Item> implements CoValue {
   shift(): Item | undefined {
     const first = this[0];
 
-    this._raw.delete(0);
+    this.$jazz.raw.delete(0);
 
     return first;
   }
@@ -317,7 +321,7 @@ export class CoList<out Item = any> extends Array<Item> implements CoValue {
       idxToDelete >= start;
       idxToDelete--
     ) {
-      this._raw.delete(idxToDelete);
+      this.$jazz.raw.delete(idxToDelete);
     }
 
     const rawItems = toRawItems(
@@ -336,9 +340,9 @@ export class CoList<out Item = any> extends Array<Item> implements CoValue {
       const item = rawItems[0];
       if (item === undefined) return deleted;
       if (start === 0) {
-        this._raw.prepend(item);
+        this.$jazz.raw.prepend(item);
       } else {
-        this._raw.append(item, Math.max(start - 1, 0));
+        this.$jazz.raw.append(item, Math.max(start - 1, 0));
       }
       return deleted;
     }
@@ -349,13 +353,13 @@ export class CoList<out Item = any> extends Array<Item> implements CoValue {
       for (let i = rawItems.length - 1; i >= 0; i--) {
         const item = rawItems[i];
         if (item === undefined) continue;
-        this._raw.prepend(item);
+        this.$jazz.raw.prepend(item);
       }
     } else {
       let appendAfter = Math.max(start - 1, 0);
       for (const item of rawItems) {
         if (item === undefined) continue;
-        this._raw.append(item, appendAfter);
+        this.$jazz.raw.append(item, appendAfter);
         appendAfter++;
       }
     }
@@ -369,7 +373,7 @@ export class CoList<out Item = any> extends Array<Item> implements CoValue {
    * @param result - The resolved list of items.
    */
   applyDiff(result: Item[]) {
-    const current = this._raw.asArray() as Item[];
+    const current = this.$jazz.raw.asArray() as Item[];
     const comparator = isRefEncoded(this._schema[ItemsSym])
       ? (aIdx: number, bIdx: number) => {
           return (
@@ -388,9 +392,11 @@ export class CoList<out Item = any> extends Array<Item> implements CoValue {
   toJSON(_key?: string, seenAbove?: ID<CoValue>[]): any[] {
     const itemDescriptor = this._schema[ItemsSym] as Schema;
     if (itemDescriptor === "json") {
-      return this._raw.asArray();
+      return this.$jazz.raw.asArray();
     } else if ("encoded" in itemDescriptor) {
-      return this._raw.asArray().map((e) => itemDescriptor.encoded.encode(e));
+      return this.$jazz.raw
+        .asArray()
+        .map((e) => itemDescriptor.encoded.encode(e));
     } else if (isRefEncoded(itemDescriptor)) {
       return this.map((item, idx) =>
         seenAbove?.includes((item as CoValue)?.id)
@@ -552,7 +558,7 @@ export class CoList<out Item = any> extends Array<Item> implements CoValue {
   castAs<Cl extends CoValueClass & CoValueFromRaw<CoValue>>(
     cl: Cl,
   ): InstanceType<Cl> {
-    return cl.fromRaw(this._raw) as InstanceType<Cl>;
+    return cl.fromRaw(this.$jazz.raw) as InstanceType<Cl>;
   }
 
   /**
@@ -561,7 +567,16 @@ export class CoList<out Item = any> extends Array<Item> implements CoValue {
    * @category Subscription & Loading
    */
   waitForSync(options?: { timeout?: number }) {
-    return this._raw.core.waitForSync(options);
+    return this.$jazz.raw.core.waitForSync(options);
+  }
+}
+
+export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
+  constructor(
+    coList: L,
+    public raw: RawCoList,
+  ) {
+    super(coList);
   }
 }
 
@@ -606,7 +621,7 @@ const CoListProxyHandler: ProxyHandler<CoList> = {
   get(target, key, receiver) {
     if (typeof key === "string" && !isNaN(+key)) {
       const itemDescriptor = target._schema[ItemsSym] as Schema;
-      const rawValue = target._raw.get(Number(key));
+      const rawValue = target.$jazz.raw.get(Number(key));
       if (itemDescriptor === "json") {
         return rawValue;
       } else if ("encoded" in itemDescriptor) {
@@ -619,7 +634,7 @@ const CoListProxyHandler: ProxyHandler<CoList> = {
           : accessChildByKey(target, rawValue as string, key);
       }
     } else if (key === "length") {
-      return target._raw.entries().length;
+      return target.$jazz.raw.entries().length;
     } else {
       return Reflect.get(target, key, receiver);
     }
@@ -655,7 +670,7 @@ const CoListProxyHandler: ProxyHandler<CoList> = {
           );
         }
       }
-      target._raw.replace(Number(key), rawValue);
+      target.$jazz.raw.replace(Number(key), rawValue);
       return true;
     } else {
       return Reflect.set(target, key, value, receiver);
@@ -678,7 +693,7 @@ const CoListProxyHandler: ProxyHandler<CoList> = {
   },
   has(target, key) {
     if (typeof key === "string" && !isNaN(+key)) {
-      return Number(key) < target._raw.entries().length;
+      return Number(key) < target.$jazz.raw.entries().length;
     } else {
       return Reflect.has(target, key);
     }
