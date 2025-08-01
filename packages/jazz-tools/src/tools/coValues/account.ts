@@ -78,7 +78,7 @@ export class Account extends CoValueBase implements CoValue {
    * This allows Accounts to be used as plain objects while still having
    * access to Jazz methods.
    */
-  declare $jazz: AccountJazzApi;
+  declare $jazz: AccountJazzApi<this>;
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   static _schema: any;
@@ -423,14 +423,6 @@ export class Account extends CoValueBase implements CoValue {
   }
 
   /** @category Subscription & Loading */
-  ensureLoaded<A extends Account, const R extends RefsToResolve<A>>(
-    this: A,
-    options: { resolve: RefsToResolveStrict<A, R> },
-  ): Promise<Resolved<A, R>> {
-    return ensureCoValueLoaded(this, options);
-  }
-
-  /** @category Subscription & Loading */
   subscribe<A extends Account, const R extends RefsToResolve<A>>(
     this: A,
     listener: (value: Resolved<A, R>, unsubscribe: () => void) => void,
@@ -469,8 +461,8 @@ export class Account extends CoValueBase implements CoValue {
   }
 }
 
-class AccountJazzApi {
-  constructor(private account: Account) {}
+class AccountJazzApi<A extends Account> {
+  constructor(private account: A) {}
 
   /**
    * Get the descriptor for a given key
@@ -484,6 +476,16 @@ class AccountJazzApi {
     }
 
     return undefined;
+  }
+
+  /** @category Subscription & Loading */
+  ensureLoaded<A extends Account, const R extends RefsToResolve<A>>(
+    this: AccountJazzApi<A>,
+    options: {
+      resolve: RefsToResolveStrict<A, R>;
+    },
+  ): Promise<Resolved<A, R>> {
+    return ensureCoValueLoaded(this.account as unknown as A, options);
   }
 
   /** @internal */

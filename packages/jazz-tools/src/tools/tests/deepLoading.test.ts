@@ -211,7 +211,7 @@ const CustomAccount = co
       );
     }
 
-    const accountLoaded = await account.ensureLoaded({
+    const accountLoaded = await account.$jazz.ensureLoaded({
       resolve: {
         profile: { stream: true },
         root: { list: true },
@@ -237,7 +237,7 @@ test("Deep loading within account", async () => {
     crypto: Crypto,
   });
 
-  const meLoaded = await me.ensureLoaded({
+  const meLoaded = await me.$jazz.ensureLoaded({
     resolve: {
       profile: { stream: true },
       root: { list: true },
@@ -333,7 +333,7 @@ test("The resolve type doesn't accept extra keys", async () => {
   });
 
   try {
-    const meLoaded = await me.ensureLoaded({
+    const meLoaded = await me.$jazz.ensureLoaded({
       resolve: {
         // @ts-expect-error
         profile: { stream: true, extraKey: true },
@@ -342,14 +342,14 @@ test("The resolve type doesn't accept extra keys", async () => {
       },
     });
 
-    await me.ensureLoaded({
+    await me.$jazz.ensureLoaded({
       resolve: {
         // @ts-expect-error
         root: { list: { $each: true, extraKey: true } },
       },
     });
 
-    await me.ensureLoaded({
+    await me.$jazz.ensureLoaded({
       resolve: {
         root: { list: true },
         // @ts-expect-error

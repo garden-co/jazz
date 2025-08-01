@@ -80,7 +80,7 @@ describe("JazzClerkAuth", () => {
         provider: "clerk",
       });
 
-      const me = await Account.getMe().ensureLoaded({
+      const me = await Account.getMe().$jazz.ensureLoaded({
         resolve: {
           profile: true,
         },

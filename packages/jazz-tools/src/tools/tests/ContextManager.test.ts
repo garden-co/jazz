@@ -272,11 +272,12 @@ describe("ContextManager", () => {
       AccountSchema: coValueClassFromCoValueClassOrSchema(CustomAccount),
       storage: dbFilename,
       onAnonymousAccountDiscarded: async (anonymousAccount) => {
-        const anonymousAccountWithRoot = await anonymousAccount.ensureLoaded({
-          resolve: { root: true },
-        });
+        const anonymousAccountWithRoot =
+          await anonymousAccount.$jazz.ensureLoaded({
+            resolve: { root: true },
+          });
 
-        const me = await CustomAccount.getMe().ensureLoaded({
+        const me = await CustomAccount.getMe().$jazz.ensureLoaded({
           resolve: { root: true },
         });
 
@@ -303,7 +304,7 @@ describe("ContextManager", () => {
     // The storage should be closed and set to undefined
     expect(prevContextNode.storage).toBeUndefined();
 
-    const me = await CustomAccount.getMe().ensureLoaded({
+    const me = await CustomAccount.getMe().$jazz.ensureLoaded({
       resolve: { root: { transferredRoot: true } },
     });
 
@@ -350,7 +351,7 @@ describe("ContextManager", () => {
       provider: "test",
     });
 
-    const me = await CustomAccount.getMe().ensureLoaded({
+    const me = await CustomAccount.getMe().$jazz.ensureLoaded({
       resolve: { root: true },
     });
 
@@ -373,7 +374,7 @@ describe("ContextManager", () => {
             value: 1,
           });
         } else {
-          const { root } = await account.ensureLoaded({
+          const { root } = await account.$jazz.ensureLoaded({
             resolve: { root: true },
           });
 
@@ -401,7 +402,7 @@ describe("ContextManager", () => {
       provider: "test",
     });
 
-    const me = await CustomAccount.getMe().ensureLoaded({
+    const me = await CustomAccount.getMe().$jazz.ensureLoaded({
       resolve: { root: true },
     });
 
@@ -432,13 +433,14 @@ describe("ContextManager", () => {
     const onAnonymousAccountDiscarded = async (
       anonymousAccount: Loaded<typeof CustomAccount, { root: true }>,
     ) => {
-      const anonymousAccountWithRoot = await anonymousAccount.ensureLoaded({
-        resolve: {
-          root: true,
-        },
-      });
+      const anonymousAccountWithRoot =
+        await anonymousAccount.$jazz.ensureLoaded({
+          resolve: {
+            root: true,
+          },
+        });
 
-      const meWithRoot = await CustomAccount.getMe().ensureLoaded({
+      const meWithRoot = await CustomAccount.getMe().$jazz.ensureLoaded({
         resolve: {
           root: true,
         },
@@ -472,7 +474,7 @@ describe("ContextManager", () => {
       provider: "test",
     });
 
-    const me = await CustomAccount.getMe().ensureLoaded({
+    const me = await CustomAccount.getMe().$jazz.ensureLoaded({
       resolve: {
         root: true,
       },
