@@ -227,11 +227,11 @@ describe("CoFeed resolution", async () => {
 
     // When assigning a new nested stream, we get an update
     const newTwiceNested = TwiceNestedStream.create(["butter"], {
-      owner: stream._owner,
+      owner: stream.$jazz.owner,
     });
 
     const newNested = NestedStream.create([newTwiceNested], {
-      owner: stream._owner,
+      owner: stream.$jazz.owner,
     });
 
     stream.push(newNested);
@@ -825,9 +825,9 @@ describe("waitForSync", async () => {
     });
 
     const stream = FileStream.create();
-    expect(stream._owner._type).toEqual("Group");
-    expect(stream._owner.castAs(Group)._raw.roleOf(account._raw.id)).toEqual(
-      "admin",
-    );
+    expect(stream.$jazz.owner._type).toEqual("Group");
+    expect(
+      stream.$jazz.owner.castAs(Group)._raw.roleOf(account._raw.id),
+    ).toEqual("admin");
   });
 });

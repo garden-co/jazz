@@ -448,7 +448,9 @@ describe("ContextManager", () => {
 
       const rootToTransfer = anonymousAccountWithRoot.root;
 
-      await rootToTransfer._owner.castAs(Group).addMember(meWithRoot, "admin");
+      await rootToTransfer.$jazz.owner
+        .castAs(Group)
+        .addMember(meWithRoot, "admin");
 
       meWithRoot.root.transferredRoot = rootToTransfer;
     };

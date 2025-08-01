@@ -10,6 +10,7 @@ import {
   AnonymousJazzAgent,
   CoValue,
   CoValueClass,
+  CoValueJazzApi,
   ID,
   Resolved,
   SubscribeListenerOptions,
@@ -36,13 +37,15 @@ export class CoPlainText extends String implements CoValue {
   declare _type: "CoPlainText";
   declare _raw: RawCoPlainText;
 
-  get _owner(): Account | Group {
+  declare $jazz: CoValueJazzApi<this>;
+
+  get owner(): Account | Group {
     return this._raw.group instanceof RawAccount
       ? Account.fromRaw(this._raw.group)
       : Group.fromRaw(this._raw.group);
   }
 
-  get _loadedAs() {
+  get loadedAs() {
     const agent = this._raw.core.node.getCurrentAgent();
 
     if (agent instanceof ControlledAccount) {
@@ -75,6 +78,10 @@ export class CoPlainText extends String implements CoValue {
         id: { value: raw.id, enumerable: false },
         _type: { value: "CoPlainText", enumerable: false },
         _raw: { value: raw, enumerable: false },
+        $jazz: {
+          value: new CoValueJazzApi(this),
+          enumerable: false,
+        },
       });
       return;
     }
@@ -86,6 +93,10 @@ export class CoPlainText extends String implements CoValue {
         id: { value: raw.id, enumerable: false },
         _type: { value: "CoPlainText", enumerable: false },
         _raw: { value: raw, enumerable: false },
+        $jazz: {
+          value: new CoValueJazzApi(this),
+          enumerable: false,
+        },
       });
       return;
     }

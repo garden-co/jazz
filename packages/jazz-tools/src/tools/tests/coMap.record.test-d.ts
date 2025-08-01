@@ -24,12 +24,12 @@ describe("CoMap.Record", () => {
       matches(person);
     });
 
-    test("has the _owner property", () => {
+    test("has the owner property", () => {
       const Person = co.record(z.string(), z.string());
 
       const person = Person.create({ name: "John" }, Account.getMe());
 
-      expectTypeOf(person._owner).toEqualTypeOf<Account | Group>();
+      expectTypeOf(person.$jazz.owner).toEqualTypeOf<Account | Group>();
     });
 
     test("Record with reference", () => {

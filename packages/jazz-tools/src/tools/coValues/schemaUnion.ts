@@ -7,6 +7,7 @@ import {
   CoValueBase,
   CoValueClass,
   CoValueFromRaw,
+  CoValueJazzApi,
   Group,
   ID,
   Resolved,
@@ -100,6 +101,8 @@ export abstract class SchemaUnion extends CoValueBase implements CoValue {
     discriminator: SchemaUnionDiscriminator<V>,
   ): SchemaUnionConcreteSubclass<V> {
     return class SchemaUnionClass extends SchemaUnion {
+      declare $jazz: CoValueJazzApi<this>;
+
       static override create<V extends CoValue>(
         this: CoValueClass<V>,
         init: Simplify<CoMapInit<V>>,

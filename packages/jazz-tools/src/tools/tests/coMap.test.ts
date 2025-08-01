@@ -209,14 +209,14 @@ describe("CoMap", async () => {
       it("creates a group for each new CoValue that is a child of the referencing CoValue's owner", () => {
         for (const value of Object.values(person)) {
           expect(
-            value._owner.getParentGroups().map((group: Group) => group.id),
-          ).toContain(person._owner.id);
+            value.$jazz.owner.getParentGroups().map((group: Group) => group.id),
+          ).toContain(person.$jazz.owner.id);
         }
         const friend = person.friends[0]!;
         for (const value of Object.values(friend)) {
           expect(
-            value._owner.getParentGroups().map((group: Group) => group.id),
-          ).toContain(friend._owner.id);
+            value.$jazz.owner.getParentGroups().map((group: Group) => group.id),
+          ).toContain(friend.$jazz.owner.id);
         }
       });
 
@@ -2086,7 +2086,7 @@ describe("CoMap migration", () => {
         if (person.version === 1) {
           person.version = 2;
 
-          person._owner.castAs(Group).addMember("everyone", "reader");
+          person.$jazz.owner.castAs(Group).addMember("everyone", "reader");
         }
       });
 

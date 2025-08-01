@@ -23,6 +23,7 @@ import {
   Account,
   AccountAndGroupProxyHandler,
   CoValueBase,
+  CoValueJazzApi,
   Profile,
   Ref,
   RegisteredSchemas,
@@ -45,6 +46,7 @@ export class Group extends CoValueBase implements CoValue {
     this.prototype._type = "Group";
   }
   declare _raw: RawGroup;
+  declare $jazz: CoValueJazzApi<this>;
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   static _schema: any;
@@ -82,7 +84,7 @@ export class Group extends CoValueBase implements CoValue {
       profile: profileID
         ? (new Ref(
             profileID,
-            this._loadedAs,
+            this.$jazz.loadedAs,
             this._schema.profile as RefEncoded<NonNullable<this["profile"]>>,
             this,
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -93,7 +95,7 @@ export class Group extends CoValueBase implements CoValue {
       root: rootID
         ? (new Ref(
             rootID,
-            this._loadedAs,
+            this.$jazz.loadedAs,
             this._schema.root as RefEncoded<NonNullable<this["root"]>>,
             this,
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -126,6 +128,10 @@ export class Group extends CoValueBase implements CoValue {
         enumerable: false,
       },
       _raw: { value: raw, enumerable: false },
+      $jazz: {
+        value: new CoValueJazzApi(this),
+        enumerable: false,
+      },
     });
 
     return new Proxy(this, AccountAndGroupProxyHandler as ProxyHandler<this>);
@@ -211,7 +217,7 @@ export class Group extends CoValueBase implements CoValue {
       ) {
         const ref = new Ref<Account>(
           accountID,
-          this._loadedAs,
+          this.$jazz.loadedAs,
           refEncodedAccountSchema,
           this,
         );

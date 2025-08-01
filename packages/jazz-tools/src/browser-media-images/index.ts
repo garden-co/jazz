@@ -41,7 +41,7 @@ export async function createImage(
     { originalSize: [finalWidth, finalHeight] },
     options?.owner,
   );
-  const owner = imageDefinition._owner;
+  const owner = imageDefinition.$jazz.owner;
 
   // Placeholder 8x8
   imageDefinition.placeholderDataURL =

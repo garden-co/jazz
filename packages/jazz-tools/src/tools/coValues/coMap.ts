@@ -28,6 +28,7 @@ import type {
 import {
   Account,
   CoValueBase,
+  CoValueJazzApi,
   ItemsSym,
   Ref,
   RegisteredSchemas,
@@ -502,7 +503,7 @@ export class CoMap extends CoValueBase implements CoValue {
     let mapId = CoMap._findUnique(options.unique, options.owner.id);
     let map: Resolved<M, R> | null = await loadCoValueWithoutMe(this, mapId, {
       ...options,
-      loadAs: options.owner._loadedAs,
+      loadAs: options.owner.$jazz.loadedAs,
       skipRetry: true,
     });
     if (!map) {
@@ -517,7 +518,7 @@ export class CoMap extends CoValueBase implements CoValue {
 
     return await loadCoValueWithoutMe(this, mapId, {
       ...options,
-      loadAs: options.owner._loadedAs,
+      loadAs: options.owner.$jazz.loadedAs,
       skipRetry: true,
     });
   }
@@ -549,8 +550,10 @@ export class CoMap extends CoValueBase implements CoValue {
 /**
  * Contains CoMap Jazz methods that are part of the {@link CoMap.$jazz`} property.
  */
-class CoMapJazzApi<M extends CoMap> {
-  constructor(private coMap: M) {}
+class CoMapJazzApi<M extends CoMap> extends CoValueJazzApi<M> {
+  constructor(private coMap: M) {
+    super(coMap);
+  }
 
   /**
    * Set a value on the CoMap
@@ -724,7 +727,7 @@ class CoMapJazzApi<M extends CoMap> {
 
         return keys;
       },
-      this.coMap._loadedAs,
+      this.loadedAs,
       (key) => this.getDescriptor(key as string) as RefEncoded<CoValue>,
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
     ) as any;
@@ -983,7 +986,7 @@ function getEditFromRaw(
       descriptor !== "json" && isRefEncoded(descriptor)
         ? new Ref(
             rawEdit.value as ID<CoValue>,
-            target._loadedAs,
+            target.$jazz.loadedAs,
             descriptor,
             target,
           )

@@ -19,12 +19,12 @@ describe("CoList", () => {
       matches(list);
     });
 
-    test("has the _owner property", () => {
+    test("has the owner property", () => {
       const StringList = co.list(z.string());
 
       const list = StringList.create(["a", "b", "c"], Account.getMe());
 
-      expectTypeOf(list._owner).toEqualTypeOf<Account | Group>();
+      expectTypeOf(list.owner).toEqualTypeOf<Account | Group>();
     });
 
     test("CoList with reference", () => {

@@ -66,7 +66,7 @@ describe("experimental_defineRequest", () => {
               worker,
               async (user, madeBy) => {
                 receivedUser = user.toJSON();
-                requestOwner = user._owner;
+                requestOwner = user.$jazz.owner;
                 receivedMadeBy = madeBy.id;
 
                 // Return a plain object (CoMapInit) instead of a CoMap instance
@@ -105,7 +105,7 @@ describe("experimental_defineRequest", () => {
       ]);
 
       expect(
-        response._owner.members.map((m) => [m.account.id, m.role]),
+        response.$jazz.owner.members.map((m) => [m.account.id, m.role]),
       ).toEqual([
         [worker.id, "admin"],
         [me.id, "reader"],
@@ -269,7 +269,7 @@ describe("experimental_defineRequest", () => {
           request,
           worker,
           async ({ person }, madeBy) => {
-            person.address.street._owner
+            person.address.street.owner
               .castAs(Group)
               .addMember(madeBy, "reader");
 
@@ -414,7 +414,9 @@ describe("experimental_defineRequest", () => {
     );
 
     // Verify the response owner structure - should include the worker account
-    expect(response._owner.members.map((m) => [m.account.id, m.role])).toEqual([
+    expect(
+      response.$jazz.owner.members.map((m) => [m.account.id, m.role]),
+    ).toEqual([
       [worker.id, "admin"],
       [me.id, "reader"],
     ]);

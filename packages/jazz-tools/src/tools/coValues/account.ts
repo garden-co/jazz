@@ -21,6 +21,7 @@ import {
   CoValueBase,
   CoValueClass,
   CoValueClassOrSchema,
+  CoValueJazzApi,
   CoreAccountSchema,
   type Group,
   ID,
@@ -95,24 +96,6 @@ export class Account extends CoValueBase implements CoValue {
     };
   }
 
-  // TODO move _owner and _loadedAs to AccountJazzApi once CoValueBase is migrated as well
-  get _owner(): Account {
-    return this as Account;
-  }
-  get _loadedAs(): Account | AnonymousJazzAgent {
-    if (this.$jazz.isLocalNodeOwner) return this;
-
-    const agent = this.$jazz.localNode.getCurrentAgent();
-
-    if (agent instanceof ControlledAccount) {
-      return coValuesCache.get(agent.account, () =>
-        Account.fromRaw(agent.account),
-      );
-    }
-
-    return new AnonymousJazzAgent(this.$jazz.localNode);
-  }
-
   declare profile: Profile | null;
   declare root: CoMap | null;
 
@@ -139,7 +122,7 @@ export class Account extends CoValueBase implements CoValue {
     return new Proxy(this, AccountAndGroupProxyHandler as ProxyHandler<this>);
   }
 
-  // TODO move to AccountJazzApi once Group.myRole() is migrated as well
+  // TODO Q: does it make sense to move Group methods into `$jazz` as well?
   myRole(): "admin" | undefined {
     if (this.$jazz.isLocalNodeOwner) {
       return "admin";
@@ -165,7 +148,7 @@ export class Account extends CoValueBase implements CoValue {
   get members(): AccountMembers<this> {
     const ref = new Ref<typeof this>(
       this.id,
-      this._loadedAs,
+      this.$jazz.loadedAs,
       {
         ref: () => this.constructor as AccountClass<typeof this>,
         optional: false,
@@ -177,7 +160,7 @@ export class Account extends CoValueBase implements CoValue {
   }
 
   canRead(value: CoValue) {
-    const role = value._owner.getRoleOf(this.id);
+    const role = value.$jazz.owner.getRoleOf(this.id);
 
     return (
       role === "admin" ||
@@ -188,13 +171,13 @@ export class Account extends CoValueBase implements CoValue {
   }
 
   canWrite(value: CoValue) {
-    const role = value._owner.getRoleOf(this.id);
+    const role = value.$jazz.owner.getRoleOf(this.id);
 
     return role === "admin" || role === "writer" || role === "writeOnly";
   }
 
   canAdmin(value: CoValue) {
-    return value._owner.getRoleOf(this.id) === "admin";
+    return value.$jazz.owner.getRoleOf(this.id) === "admin";
   }
 
   /** @private */
@@ -283,7 +266,7 @@ export class Account extends CoValueBase implements CoValue {
       this.profile = Profile.create({ name: creationProps.name }, profileGroup);
       profileGroup.addMember("everyone", "reader");
     } else if (this.profile && creationProps) {
-      if (this.profile._owner._type !== "Group") {
+      if (this.profile.$jazz.owner._type !== "Group") {
         throw new Error("Profile must be owned by a Group", {
           cause: `The profile of the account "${this.id}" was created with an Account as owner, which is not allowed.`,
         });
@@ -340,7 +323,7 @@ export class Account extends CoValueBase implements CoValue {
   }
 }
 
-class AccountJazzApi<A extends Account> {
+class AccountJazzApi<A extends Account> extends CoValueJazzApi<A> {
   /**
    * Whether this account is the owner of the local node.
    *
@@ -351,6 +334,7 @@ class AccountJazzApi<A extends Account> {
   sessionID: SessionID | undefined;
 
   constructor(private account: A) {
+    super(account);
     this.isLocalNodeOwner = this.raw.id == this.localNode.getCurrentAgent().id;
     if (this.isLocalNodeOwner) {
       this.sessionID = this.localNode.currentSessionID;
@@ -473,10 +457,6 @@ class AccountJazzApi<A extends Account> {
     return this.account._raw;
   }
 
-  get loadedAs(): Account | AnonymousJazzAgent {
-    return this.account._loadedAs;
-  }
-
   /**
    * Whether this account is the currently active account.
    */
@@ -518,6 +498,23 @@ class AccountJazzApi<A extends Account> {
   /** @internal */
   get localNode(): LocalNode {
     return this.raw.core.node;
+  }
+
+  get owner(): Account {
+    return this.account;
+  }
+  get loadedAs(): Account | AnonymousJazzAgent {
+    if (this.isLocalNodeOwner) return this.account;
+
+    const agent = this.localNode.getCurrentAgent();
+
+    if (agent instanceof ControlledAccount) {
+      return coValuesCache.get(agent.account, () =>
+        Account.fromRaw(agent.account),
+      );
+    }
+
+    return new AnonymousJazzAgent(this.localNode);
   }
 }
 

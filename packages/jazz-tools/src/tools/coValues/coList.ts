@@ -1,11 +1,12 @@
 import type { JsonValue, RawCoList } from "cojson";
 import { ControlledAccount, RawAccount } from "cojson";
 import { calcPatch } from "fast-myers-diff";
-import type {
+import {
   Account,
   CoValue,
   CoValueClass,
   CoValueFromRaw,
+  CoValueJazzApi,
   Group,
   ID,
   RefEncoded,
@@ -58,6 +59,8 @@ import {
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export class CoList<out Item = any> extends Array<Item> implements CoValue {
+  declare $jazz: CoValueJazzApi<this>;
+
   /**
    * Declare a `CoList` by subclassing `CoList.Of(...)` and passing the item schema using `co`.
    *
@@ -114,7 +117,7 @@ export class CoList<out Item = any> extends Array<Item> implements CoValue {
   }
 
   /** @category Collaboration */
-  get _owner(): Account | Group {
+  get owner(): Account | Group {
     return this._raw.group instanceof RawAccount
       ? coValueClassFromCoValueClassOrSchema(
           RegisteredSchemas["Account"],
@@ -152,7 +155,7 @@ export class CoList<out Item = any> extends Array<Item> implements CoValue {
       this,
       (idx) => this._raw.get(idx) as unknown as ID<CoValue>,
       () => Array.from({ length: this._raw.entries().length }, (_, idx) => idx),
-      this._loadedAs,
+      this.loadedAs,
       (_idx) => this._schema[ItemsSym] as RefEncoded<CoValue>,
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
     ) as any;
@@ -169,7 +172,7 @@ export class CoList<out Item = any> extends Array<Item> implements CoValue {
     throw new Error("Not implemented");
   }
 
-  get _loadedAs() {
+  get loadedAs() {
     const agent = this._raw.core.node.getCurrentAgent();
 
     if (agent instanceof ControlledAccount) {
@@ -194,9 +197,15 @@ export class CoList<out Item = any> extends Array<Item> implements CoValue {
   constructor(options: { fromRaw: RawCoList } | undefined) {
     super();
 
-    Object.defineProperty(this, "_instanceID", {
-      value: `instance-${Math.random().toString(36).slice(2)}`,
-      enumerable: false,
+    Object.defineProperties(this, {
+      _instanceID: {
+        value: `instance-${Math.random().toString(36).slice(2)}`,
+        enumerable: false,
+      },
+      $jazz: {
+        value: new CoValueJazzApi(this),
+        enumerable: false,
+      },
     });
 
     if (options && "fromRaw" in options) {
@@ -257,7 +266,7 @@ export class CoList<out Item = any> extends Array<Item> implements CoValue {
 
   push(...items: Item[]): number {
     this._raw.appendItems(
-      toRawItems(items, this._schema[ItemsSym], this._owner),
+      toRawItems(items, this._schema[ItemsSym], this.owner),
       undefined,
       "private",
     );
@@ -269,7 +278,7 @@ export class CoList<out Item = any> extends Array<Item> implements CoValue {
     for (const item of toRawItems(
       items as Item[],
       this._schema[ItemsSym],
-      this._owner,
+      this.owner,
     )) {
       this._raw.prepend(item);
     }
@@ -314,7 +323,7 @@ export class CoList<out Item = any> extends Array<Item> implements CoValue {
     const rawItems = toRawItems(
       items as Item[],
       this._schema[ItemsSym],
-      this._owner,
+      this.owner,
     );
 
     // If there are no items to insert, return the deleted items

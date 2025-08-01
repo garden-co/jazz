@@ -361,7 +361,7 @@ describe("Group inheritance", () => {
       });
 
       const task = board.columns[0]![0]!;
-      const taskGroup = task._owner.castAs(Group);
+      const taskGroup = task.owner.castAs(Group);
       taskGroup.addMember(reader, "reader");
 
       const taskAsReader = await Task.load(task.id, { loadAs: reader });

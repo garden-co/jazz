@@ -44,14 +44,14 @@ describe("CoMap", async () => {
       matches(john);
     });
 
-    test("has the _owner property", () => {
+    test("has the owner property", () => {
       const Person = co.map({
         name: z.string(),
       });
 
       const john = Person.create({ name: "John" }, Account.getMe());
 
-      expectTypeOf(john._owner).toEqualTypeOf<Account | Group>();
+      expectTypeOf(john.$jazz.owner).toEqualTypeOf<Account | Group>();
     });
 
     test("create CoMap with reference using CoValue", () => {

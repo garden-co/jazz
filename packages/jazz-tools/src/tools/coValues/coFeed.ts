@@ -27,6 +27,7 @@ import type {
 import {
   Account,
   CoValueBase,
+  CoValueJazzApi,
   ItemsSym,
   Ref,
   SchemaInit,
@@ -81,6 +82,8 @@ export { CoFeed as CoStream };
  * @category CoValues
  */
 export class CoFeed<out Item = any> extends CoValueBase implements CoValue {
+  declare $jazz: CoValueJazzApi<this>;
+
   /**
    * Declare a `CoFeed` by subclassing `CoFeed.Of(...)` and passing the item schema using a `co` primitive or a `coField.ref`.
    *
@@ -131,8 +134,8 @@ export class CoFeed<out Item = any> extends CoValueBase implements CoValue {
    * @category Content
    */
   get byMe(): CoFeedEntry<Item> | undefined {
-    if (this._loadedAs._type === "Account") {
-      return this.perAccount[this._loadedAs.id];
+    if (this.$jazz.loadedAs._type === "Account") {
+      return this.perAccount[this.$jazz.loadedAs.id];
     } else {
       return undefined;
     }
@@ -187,8 +190,8 @@ export class CoFeed<out Item = any> extends CoValueBase implements CoValue {
    * @category Content
    */
   get inCurrentSession(): CoFeedEntry<Item> | undefined {
-    if (this._loadedAs._type === "Account") {
-      return this.perSession[this._loadedAs.$jazz.sessionID!];
+    if (this.$jazz.loadedAs._type === "Account") {
+      return this.perSession[this.$jazz.loadedAs.$jazz.sessionID!];
     } else {
       return undefined;
     }
@@ -208,6 +211,10 @@ export class CoFeed<out Item = any> extends CoValueBase implements CoValue {
           enumerable: false,
         },
         _raw: { value: options.fromRaw, enumerable: false },
+        $jazz: {
+          value: new CoValueJazzApi(this),
+          enumerable: false,
+        },
       });
     }
 
@@ -233,6 +240,10 @@ export class CoFeed<out Item = any> extends CoValueBase implements CoValue {
         enumerable: false,
       },
       _raw: { value: raw, enumerable: false },
+      $jazz: {
+        value: new CoValueJazzApi(instance),
+        enumerable: false,
+      },
     });
 
     if (init) {
@@ -284,7 +295,7 @@ export class CoFeed<out Item = any> extends CoValueBase implements CoValue {
         const coValue = instantiateRefEncodedWithInit(
           itemDescriptor,
           item,
-          this._owner,
+          this.$jazz.owner,
         );
         refId = coValue.id;
       }
@@ -513,7 +524,7 @@ export const CoStreamPerAccountProxyHandler = (
       const entry = entryFromRawEntry(
         receiver,
         rawEntry,
-        innerTarget._loadedAs,
+        innerTarget.$jazz.loadedAs,
         key as unknown as ID<Account>,
         innerTarget._schema[ItemsSym],
       );
@@ -528,7 +539,7 @@ export const CoStreamPerAccountProxyHandler = (
               yield entryFromRawEntry(
                 receiver,
                 rawEntry.value,
-                innerTarget._loadedAs,
+                innerTarget.$jazz.loadedAs,
                 key as unknown as ID<Account>,
                 innerTarget._schema[ItemsSym],
               );
@@ -578,7 +589,7 @@ const CoStreamPerSessionProxyHandler = (
       const entry = entryFromRawEntry(
         accessFrom,
         rawEntry,
-        innerTarget._loadedAs,
+        innerTarget.$jazz.loadedAs,
         cojsonInternals.isAccountID(by)
           ? (by as unknown as ID<Account>)
           : undefined,
@@ -595,7 +606,7 @@ const CoStreamPerSessionProxyHandler = (
               yield entryFromRawEntry(
                 accessFrom,
                 rawEntry.value,
-                innerTarget._loadedAs,
+                innerTarget.$jazz.loadedAs,
                 cojsonInternals.isAccountID(by)
                   ? (by as unknown as ID<Account>)
                   : undefined,
@@ -648,6 +659,8 @@ export { FileStream as BinaryCoStream };
  * @category CoValues
  */
 export class FileStream extends CoValueBase implements CoValue {
+  declare $jazz: CoValueJazzApi<this>;
+
   /**
    * The ID of this `FileStream`
    * @category Content
@@ -685,6 +698,10 @@ export class FileStream extends CoValueBase implements CoValue {
       },
       _type: { value: "BinaryCoStream", enumerable: false },
       _raw: { value: raw, enumerable: false },
+      $jazz: {
+        value: new CoValueJazzApi(this),
+        enumerable: false,
+      },
     });
   }
 

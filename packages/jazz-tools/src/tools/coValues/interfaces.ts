@@ -43,16 +43,19 @@ export interface CoValue {
   readonly id: ID<this>;
   /** @category Type Helpers */
   _type: string;
-  /** @category Collaboration */
-  _owner: Account | Group;
   /** @category Internals */
   _raw: RawCoValue;
+
+  $jazz: {
+    /** @category Collaboration */
+    owner: Account | Group;
+    /** @internal */
+    readonly loadedAs: Account | AnonymousJazzAgent;
+  };
 
   /** @internal */
   _subscriptionScope?: SubscriptionScope<this>;
 
-  /** @internal */
-  readonly _loadedAs: Account | AnonymousJazzAgent;
   /** @category Stringifying & Inspection */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   toJSON(key?: string, seenAbove?: ID<CoValue>[]): any[] | object | string;
@@ -152,7 +155,7 @@ export async function ensureCoValueLoaded<
     existing.constructor as CoValueClass<V>,
     existing.id,
     {
-      loadAs: existing._loadedAs,
+      loadAs: existing.$jazz.loadedAs,
       resolve: options?.resolve,
     },
   );
@@ -328,7 +331,7 @@ export function subscribeToExistingCoValue<
     existing.constructor as CoValueClass<V>,
     existing.id,
     {
-      loadAs: existing._loadedAs,
+      loadAs: existing.$jazz.loadedAs,
       resolve: options?.resolve,
       onUnavailable: options?.onUnavailable,
       onUnauthorized: options?.onUnauthorized,

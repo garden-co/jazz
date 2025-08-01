@@ -32,7 +32,7 @@ describe("CoPlainText", () => {
         crypto: Crypto,
       });
       const text = co.plainText().create("hello world", me);
-      expect(text._owner.id).toBe(me.id);
+      expect(text.owner.id).toBe(me.id);
     });
 
     test("should allow `create` from raw", async () => {
@@ -43,7 +43,7 @@ describe("CoPlainText", () => {
       const text = co.plainText().create("hello world", me);
       const raw = text._raw;
       const text2 = co.plainText().fromRaw(raw);
-      expect(text2._owner.id).toBe(me.id);
+      expect(text2.owner.id).toBe(me.id);
     });
 
     test("should allow owner shorthand", async () => {
@@ -52,7 +52,7 @@ describe("CoPlainText", () => {
         crypto: Crypto,
       });
       const text = co.plainText().create("hello world", me);
-      expect(text._owner.id).toBe(me.id);
+      expect(text.owner.id).toBe(me.id);
     });
   });
 

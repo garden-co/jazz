@@ -22,39 +22,14 @@ import type {
 
 /** @internal */
 
-export class CoValueBase implements CoValue {
+export abstract class CoValueBase implements CoValue {
   declare id: ID<this>;
   declare _type: string;
   declare _raw: RawCoValue;
   /** @category Internals */
   declare _instanceID: string;
 
-  get _owner(): Account | Group {
-    const schema =
-      this._raw.group instanceof RawAccount
-        ? RegisteredSchemas["Account"]
-        : RegisteredSchemas["Group"];
-
-    return accessChildById(this, this._raw.group.id, {
-      ref: schema,
-      optional: false,
-    });
-  }
-
-  /** @private */
-  get _loadedAs() {
-    const agent = this._raw.core.node.getCurrentAgent();
-
-    if (agent instanceof ControlledAccount) {
-      return coValuesCache.get(agent.account, () =>
-        coValueClassFromCoValueClassOrSchema(
-          RegisteredSchemas["Account"],
-        ).fromRaw(agent.account),
-      );
-    }
-
-    return new AnonymousJazzAgent(this._raw.core.node);
-  }
+  declare abstract $jazz: CoValueJazzApi<this>;
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   constructor(..._args: any) {
@@ -96,5 +71,40 @@ export class CoValueBase implements CoValue {
     }
 
     return (cl as unknown as CoValueFromRaw<CoValue>).fromRaw(this._raw) as any;
+  }
+}
+
+export class CoValueJazzApi<V extends CoValue> {
+  constructor(private coValue: V) {}
+
+  get owner(): Account | Group {
+    const schema =
+      this._raw.group instanceof RawAccount
+        ? RegisteredSchemas["Account"]
+        : RegisteredSchemas["Group"];
+
+    return accessChildById(this.coValue, this._raw.group.id, {
+      ref: schema,
+      optional: false,
+    });
+  }
+
+  /** @private */
+  get loadedAs() {
+    const agent = this._raw.core.node.getCurrentAgent();
+
+    if (agent instanceof ControlledAccount) {
+      return coValuesCache.get(agent.account, () =>
+        coValueClassFromCoValueClassOrSchema(
+          RegisteredSchemas["Account"],
+        ).fromRaw(agent.account),
+      );
+    }
+
+    return new AnonymousJazzAgent(this._raw.core.node);
+  }
+
+  get _raw() {
+    return this.coValue._raw;
   }
 }
