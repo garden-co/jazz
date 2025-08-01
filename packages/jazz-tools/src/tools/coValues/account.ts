@@ -95,11 +95,12 @@ export class Account extends CoValueBase implements CoValue {
     };
   }
 
+  // TODO move _owner and _loadedAs to AccountJazzApi once CoValueBase is migrated as well
   get _owner(): Account {
     return this as Account;
   }
   get _loadedAs(): Account | AnonymousJazzAgent {
-    if (this.isLocalNodeOwner) return this;
+    if (this.$jazz.isLocalNodeOwner) return this;
 
     const agent = this._raw.core.node.getCurrentAgent();
 
@@ -122,22 +123,11 @@ export class Account extends CoValueBase implements CoValue {
     return activeAccountContext.get().id === this.id;
   }
 
-  /**
-   * Whether this account is the owner of the local node.
-   *
-   * @internal
-   */
-  isLocalNodeOwner: boolean;
-  /** @internal */
-  sessionID: SessionID | undefined;
-
   constructor(options: { fromRaw: RawAccount }) {
     super();
     if (!("fromRaw" in options)) {
       throw new Error("Can only construct account from raw or with .create()");
     }
-    this.isLocalNodeOwner =
-      options.fromRaw.id == options.fromRaw.core.node.getCurrentAgent().id;
 
     Object.defineProperties(this, {
       id: {
@@ -146,21 +136,19 @@ export class Account extends CoValueBase implements CoValue {
       },
       _raw: { value: options.fromRaw, enumerable: false },
       _type: { value: "Account", enumerable: false },
-      $jazz: {
-        value: new AccountJazzApi(this),
-        enumerable: false,
-      },
     });
 
-    if (this.isLocalNodeOwner) {
-      this.sessionID = options.fromRaw.core.node.currentSessionID;
-    }
+    Object.defineProperty(this, "$jazz", {
+      value: new AccountJazzApi(this),
+      enumerable: false,
+    });
 
     return new Proxy(this, AccountAndGroupProxyHandler as ProxyHandler<this>);
   }
 
+  // TODO move to AccountJazzApi once Group.myRole() is migrated as well
   myRole(): "admin" | undefined {
-    if (this.isLocalNodeOwner) {
+    if (this.$jazz.isLocalNodeOwner) {
       return "admin";
     }
   }
@@ -221,7 +209,7 @@ export class Account extends CoValueBase implements CoValue {
     inviteSecret: InviteSecret,
     coValueClass: S,
   ): Promise<Resolved<InstanceOrPrimitiveOfSchema<S>, true> | null> {
-    if (!this.isLocalNodeOwner) {
+    if (!this.$jazz.isLocalNodeOwner) {
       throw new Error("Only a controlled account can accept invites");
     }
 
@@ -422,7 +410,22 @@ export class Account extends CoValueBase implements CoValue {
 }
 
 class AccountJazzApi<A extends Account> {
-  constructor(private account: A) {}
+  /**
+   * Whether this account is the owner of the local node.
+   *
+   * @internal
+   */
+  isLocalNodeOwner: boolean;
+  /** @internal */
+  sessionID: SessionID | undefined;
+
+  constructor(private account: A) {
+    this.isLocalNodeOwner =
+      this.raw.id == this.raw.core.node.getCurrentAgent().id;
+    if (this.isLocalNodeOwner) {
+      this.sessionID = this.raw.core.node.currentSessionID;
+    }
+  }
 
   /**
    * Get the descriptor for a given key
@@ -499,11 +502,12 @@ class AccountJazzApi<A extends Account> {
     return (this.account.constructor as typeof Account)._schema;
   }
 
+  /** @internal */
   get raw() {
     return this.account._raw;
   }
 
-  get loadedAs() {
+  get loadedAs(): Account | AnonymousJazzAgent {
     return this.account._loadedAs;
   }
 }
@@ -572,11 +576,14 @@ export const AccountAndGroupProxyHandler: ProxyHandler<Account | Group> = {
 
 /** @category Identity & Permissions */
 export function isControlledAccount(account: Account): account is Account & {
-  isLocalNodeOwner: true;
-  sessionID: SessionID;
   _raw: RawAccount;
+} & {
+  $jazz: {
+    isLocalNodeOwner: true;
+    sessionID: SessionID;
+  };
 } {
-  return account.isLocalNodeOwner;
+  return account.$jazz.isLocalNodeOwner;
 }
 
 export type AccountClass<Acc extends Account> = CoValueClass<Acc> & {

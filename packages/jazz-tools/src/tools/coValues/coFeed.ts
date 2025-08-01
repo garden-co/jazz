@@ -188,7 +188,7 @@ export class CoFeed<out Item = any> extends CoValueBase implements CoValue {
    */
   get inCurrentSession(): CoFeedEntry<Item> | undefined {
     if (this._loadedAs._type === "Account") {
-      return this.perSession[this._loadedAs.sessionID!];
+      return this.perSession[this._loadedAs.$jazz.sessionID!];
     } else {
       return undefined;
     }

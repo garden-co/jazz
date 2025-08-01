@@ -49,7 +49,7 @@ describe("Simple CoFeed operations", async () => {
 
   test("Construction", () => {
     expect(stream.perAccount[me.id]?.value).toEqual("milk");
-    expect(stream.perSession[me.sessionID]?.value).toEqual("milk");
+    expect(stream.perSession[me.$jazz.sessionID]?.value).toEqual("milk");
   });
 
   describe("Create CoFeed with a reference", () => {
@@ -97,14 +97,14 @@ describe("Simple CoFeed operations", async () => {
     const stream = NullableTestStream.create(["milk", null], { owner: me });
 
     expect(stream.perAccount[me.id]?.value).toEqual(null);
-    expect(stream.perSession[me.sessionID]?.value).toEqual(null);
+    expect(stream.perSession[me.$jazz.sessionID]?.value).toEqual(null);
   });
 
   test("Construction with an Account", () => {
     const stream = TestStream.create(["milk"], me);
 
     expect(stream.perAccount[me.id]?.value).toEqual("milk");
-    expect(stream.perSession[me.sessionID]?.value).toEqual("milk");
+    expect(stream.perSession[me.$jazz.sessionID]?.value).toEqual("milk");
   });
 
   test("Construction with a Group", () => {
@@ -112,18 +112,18 @@ describe("Simple CoFeed operations", async () => {
     const stream = TestStream.create(["milk"], group);
 
     expect(stream.perAccount[me.id]?.value).toEqual("milk");
-    expect(stream.perSession[me.sessionID]?.value).toEqual("milk");
+    expect(stream.perSession[me.$jazz.sessionID]?.value).toEqual("milk");
   });
 
   describe("Mutation", () => {
     test("pushing", () => {
       stream.push("bread");
       expect(stream.perAccount[me.id]?.value).toEqual("bread");
-      expect(stream.perSession[me.sessionID]?.value).toEqual("bread");
+      expect(stream.perSession[me.$jazz.sessionID]?.value).toEqual("bread");
 
       stream.push("butter");
       expect(stream.perAccount[me.id]?.value).toEqual("butter");
-      expect(stream.perSession[me.sessionID]?.value).toEqual("butter");
+      expect(stream.perSession[me.$jazz.sessionID]?.value).toEqual("butter");
     });
   });
 });
