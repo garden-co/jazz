@@ -54,19 +54,19 @@ test("isMe gets updated correctly when switching accounts", async () => {
     isCurrentActiveAccount: true,
   });
 
-  expect(oldMe.isMe).toBe(true);
+  expect(oldMe.$jazz.isMe).toBe(true);
 
   const newMe = await createJazzTestAccount({
     isCurrentActiveAccount: false,
   });
 
-  expect(newMe.isMe).toBe(false);
-  expect(oldMe.isMe).toBe(true);
+  expect(newMe.$jazz.isMe).toBe(false);
+  expect(oldMe.$jazz.isMe).toBe(true);
 
   setActiveAccount(newMe);
 
-  expect(newMe.isMe).toBe(true);
-  expect(oldMe.isMe).toBe(false);
+  expect(newMe.$jazz.isMe).toBe(true);
+  expect(oldMe.$jazz.isMe).toBe(false);
 });
 
 test("Me gets updated correctly when creating a new account as active", async () => {
@@ -74,14 +74,14 @@ test("Me gets updated correctly when creating a new account as active", async ()
     isCurrentActiveAccount: true,
   });
 
-  expect(oldMe.isMe).toBe(true);
+  expect(oldMe.$jazz.isMe).toBe(true);
 
   const newMe = await createJazzTestAccount({
     isCurrentActiveAccount: true,
   });
 
-  expect(newMe.isMe).toBe(true);
-  expect(oldMe.isMe).toBe(false);
+  expect(newMe.$jazz.isMe).toBe(true);
+  expect(oldMe.$jazz.isMe).toBe(false);
 });
 
 test("accounts should sync correctly", async () => {

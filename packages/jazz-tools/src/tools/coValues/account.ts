@@ -102,7 +102,7 @@ export class Account extends CoValueBase implements CoValue {
   get _loadedAs(): Account | AnonymousJazzAgent {
     if (this.$jazz.isLocalNodeOwner) return this;
 
-    const agent = this._raw.core.node.getCurrentAgent();
+    const agent = this.$jazz.localNode.getCurrentAgent();
 
     if (agent instanceof ControlledAccount) {
       return coValuesCache.get(agent.account, () =>
@@ -110,18 +110,11 @@ export class Account extends CoValueBase implements CoValue {
       );
     }
 
-    return new AnonymousJazzAgent(this._raw.core.node);
+    return new AnonymousJazzAgent(this.$jazz.localNode);
   }
 
   declare profile: Profile | null;
   declare root: CoMap | null;
-
-  /**
-   * Whether this account is the currently active account.
-   */
-  get isMe() {
-    return activeAccountContext.get().id === this.id;
-  }
 
   constructor(options: { fromRaw: RawAccount }) {
     super();
@@ -155,7 +148,7 @@ export class Account extends CoValueBase implements CoValue {
 
   getRoleOf(member: Everyone | ID<Account> | "me") {
     if (member === "me") {
-      return this.isMe ? "admin" : undefined;
+      return this.$jazz.isMe ? "admin" : undefined;
     }
 
     if (member === this.id) {
@@ -204,29 +197,6 @@ export class Account extends CoValueBase implements CoValue {
     return value._owner.getRoleOf(this.id) === "admin";
   }
 
-  async acceptInvite<S extends CoValueClassOrSchema>(
-    valueID: string,
-    inviteSecret: InviteSecret,
-    coValueClass: S,
-  ): Promise<Resolved<InstanceOrPrimitiveOfSchema<S>, true> | null> {
-    if (!this.$jazz.isLocalNodeOwner) {
-      throw new Error("Only a controlled account can accept invites");
-    }
-
-    await this._raw.core.node.acceptInvite(
-      valueID as unknown as CoID<RawCoValue>,
-      inviteSecret,
-    );
-
-    return loadCoValue(
-      coValueClassFromCoValueClassOrSchema(coValueClass),
-      valueID,
-      {
-        loadAs: this,
-      },
-    ) as Resolved<InstanceOrPrimitiveOfSchema<S>, true> | null;
-  }
-
   /** @private */
   static async create<A extends Account>(
     this: CoValueClass<A> & typeof Account,
@@ -269,11 +239,11 @@ export class Account extends CoValueBase implements CoValue {
       { peer1role: "server", peer2role: "client" },
     );
 
-    as._raw.core.node.syncManager.addPeer(connectedPeers[1]);
+    as.$jazz.localNode.syncManager.addPeer(connectedPeers[1]);
 
     const account = await this.create<A>({
       creationProps: options.creationProps,
-      crypto: as._raw.core.node.crypto,
+      crypto: as.$jazz.localNode.crypto,
       peersToLoadFrom: [connectedPeers[0]],
     });
 
@@ -320,8 +290,7 @@ export class Account extends CoValueBase implements CoValue {
       }
     }
 
-    const node = this._raw.core.node;
-    const profile = node
+    const profile = this.$jazz.localNode
       .expectCoValueLoaded(this._raw.get("profile")!)
       .getCurrentContent() as RawCoMap;
 
@@ -403,7 +372,7 @@ export class Account extends CoValueBase implements CoValue {
    * @category Subscription & Loading
    */
   waitForAllCoValuesSync(options?: { timeout?: number }) {
-    return this._raw.core.node.syncManager.waitForAllCoValuesSync(
+    return this.$jazz.localNode.syncManager.waitForAllCoValuesSync(
       options?.timeout,
     );
   }
@@ -420,10 +389,9 @@ class AccountJazzApi<A extends Account> {
   sessionID: SessionID | undefined;
 
   constructor(private account: A) {
-    this.isLocalNodeOwner =
-      this.raw.id == this.raw.core.node.getCurrentAgent().id;
+    this.isLocalNodeOwner = this.raw.id == this.localNode.getCurrentAgent().id;
     if (this.isLocalNodeOwner) {
-      this.sessionID = this.raw.core.node.currentSessionID;
+      this.sessionID = this.localNode.currentSessionID;
     }
   }
 
@@ -509,6 +477,49 @@ class AccountJazzApi<A extends Account> {
 
   get loadedAs(): Account | AnonymousJazzAgent {
     return this.account._loadedAs;
+  }
+
+  /**
+   * Whether this account is the currently active account.
+   */
+  get isMe() {
+    return activeAccountContext.get().id === this.account.id;
+  }
+
+  /**
+   * Accept an invite to a `CoValue` or `Group`.
+   *
+   * @param valueID The ID of the `CoValue` or `Group` to accept the invite to.
+   * @param inviteSecret The secret of the invite to accept.
+   * @param coValueClass The class of the `CoValue` or `Group` to accept the invite to.
+   * @returns The loaded `CoValue` or `Group`.
+   */
+  async acceptInvite<S extends CoValueClassOrSchema>(
+    valueID: string,
+    inviteSecret: InviteSecret,
+    coValueClass: S,
+  ): Promise<Resolved<InstanceOrPrimitiveOfSchema<S>, true> | null> {
+    if (!this.isLocalNodeOwner) {
+      throw new Error("Only a controlled account can accept invites");
+    }
+
+    await this.localNode.acceptInvite(
+      valueID as unknown as CoID<RawCoValue>,
+      inviteSecret,
+    );
+
+    return loadCoValue(
+      coValueClassFromCoValueClassOrSchema(coValueClass),
+      valueID,
+      {
+        loadAs: this.account,
+      },
+    ) as Resolved<InstanceOrPrimitiveOfSchema<S>, true> | null;
+  }
+
+  /** @internal */
+  get localNode(): LocalNode {
+    return this.raw.core.node;
   }
 }
 

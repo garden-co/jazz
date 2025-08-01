@@ -90,7 +90,8 @@ export function consumeInviteLink<S extends CoValueClassOrSchema>({
     const result = parseInviteLink(inviteURL);
 
     if (result && result.valueHint === forValueHint) {
-      as.acceptInvite(result.valueID, result.inviteSecret, invitedObjectSchema)
+      as.$jazz
+        .acceptInvite(result.valueID, result.inviteSecret, invitedObjectSchema)
         .then(() => {
           resolve(result);
         })
