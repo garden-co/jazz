@@ -144,10 +144,6 @@ export const Image = forwardRef<HTMLImageElement, ImageProps>(function Image(
     [src],
   );
 
-  if (!image) {
-    return null;
-  }
-
   return (
     <img
       ref={ref}
