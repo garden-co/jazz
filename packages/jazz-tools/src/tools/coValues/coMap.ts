@@ -772,6 +772,7 @@ class CoMapJazzApi<M extends CoMap> {
     );
   }
 
+  /** @internal */
   get raw() {
     return this.coMap._raw;
   }

@@ -37,7 +37,7 @@ describe("useAccount", () => {
         profile: co.profile(),
       })
       .withMigration((account, creationProps) => {
-        if (!account._refs.root) {
+        if (!account.$jazz.refs.root) {
           account.root = AccountRoot.create(
             { value: "123" },
             { owner: account },
@@ -200,7 +200,7 @@ describe("useAccount", () => {
         profile: co.profile(),
       })
       .withMigration((account, creationProps) => {
-        if (!account._refs.root) {
+        if (!account.$jazz.refs.root) {
           account.root = AccountRoot.create(
             { value: "123" },
             { owner: account },

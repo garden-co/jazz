@@ -82,12 +82,6 @@ export class Account extends CoValueBase implements CoValue {
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   static _schema: any;
-  get _schema(): {
-    profile: Schema;
-    root: Schema;
-  } {
-    return (this.constructor as typeof Account)._schema;
-  }
   static {
     this._schema = {
       profile: {
@@ -121,43 +115,6 @@ export class Account extends CoValueBase implements CoValue {
   declare profile: Profile | null;
   declare root: CoMap | null;
 
-  get _refs(): {
-    profile: RefIfCoValue<Profile> | undefined;
-    root: RefIfCoValue<CoMap> | undefined;
-  } {
-    const profileID = this._raw.get("profile") as unknown as
-      | ID<NonNullable<this["profile"]>>
-      | undefined;
-    const rootID = this._raw.get("root") as unknown as
-      | ID<NonNullable<this["root"]>>
-      | undefined;
-
-    return {
-      profile: profileID
-        ? (new Ref(
-            profileID,
-            this._loadedAs,
-            this._schema.profile as RefEncoded<
-              NonNullable<this["profile"]> & CoValue
-            >,
-            this,
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          ) as any as RefIfCoValue<this["profile"]>)
-        : undefined,
-      root: rootID
-        ? (new Ref(
-            rootID,
-            this._loadedAs,
-            this._schema.root as RefEncoded<
-              NonNullable<this["root"]> & CoValue
-            >,
-            this,
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          ) as any as RefIfCoValue<this["root"]>)
-        : undefined,
-    };
-  }
-
   /**
    * Whether this account is the currently active account.
    */
@@ -167,8 +124,11 @@ export class Account extends CoValueBase implements CoValue {
 
   /**
    * Whether this account is the owner of the local node.
+   *
+   * @internal
    */
   isLocalNodeOwner: boolean;
+  /** @internal */
   sessionID: SessionID | undefined;
 
   constructor(options: { fromRaw: RawAccount }) {
@@ -470,12 +430,55 @@ class AccountJazzApi<A extends Account> {
    */
   getDescriptor(key: string) {
     if (key === "profile") {
-      return this._schema.profile;
+      return this.schema.profile;
     } else if (key === "root") {
-      return this._schema.root;
+      return this.schema.root;
     }
 
     return undefined;
+  }
+
+  /**
+   * If property `prop` is a `coField.ref(...)`, you can use `account.$jazz.refs.prop` to access
+   * the `Ref` instead of the potentially loaded/null value.
+   *
+   * This allows you to always get the ID or load the value manually.
+   *
+   * @category Content
+   */
+  get refs(): {
+    profile: RefIfCoValue<Profile> | undefined;
+    root: RefIfCoValue<CoMap> | undefined;
+  } {
+    const profileID = this.raw.get("profile") as unknown as
+      | ID<NonNullable<(typeof this.account)["profile"]>>
+      | undefined;
+    const rootID = this.raw.get("root") as unknown as
+      | ID<NonNullable<(typeof this.account)["root"]>>
+      | undefined;
+
+    return {
+      profile: profileID
+        ? (new Ref(
+            profileID,
+            this.loadedAs,
+            this.schema.profile as RefEncoded<
+              NonNullable<(typeof this.account)["profile"]> & CoValue
+            >,
+            this.account,
+          ) as unknown as RefIfCoValue<(typeof this.account)["profile"]>)
+        : undefined,
+      root: rootID
+        ? (new Ref(
+            rootID,
+            this.loadedAs,
+            this.schema.root as RefEncoded<
+              NonNullable<(typeof this.account)["root"]> & CoValue
+            >,
+            this.account,
+          ) as unknown as RefIfCoValue<(typeof this.account)["root"]>)
+        : undefined,
+    };
   }
 
   /** @category Subscription & Loading */
@@ -489,8 +492,19 @@ class AccountJazzApi<A extends Account> {
   }
 
   /** @internal */
-  get _schema() {
-    return this.account._schema;
+  get schema(): {
+    profile: Schema;
+    root: Schema;
+  } {
+    return (this.account.constructor as typeof Account)._schema;
+  }
+
+  get raw() {
+    return this.account._raw;
+  }
+
+  get loadedAs() {
+    return this.account._loadedAs;
   }
 }
 

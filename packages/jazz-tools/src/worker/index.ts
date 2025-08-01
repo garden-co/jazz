@@ -89,7 +89,7 @@ export async function startWorker<
   const account = context.account as InstanceOfSchema<S>;
   node = account._raw.core.node;
 
-  if (!account._refs.profile?.id) {
+  if (!account.$jazz.refs.profile?.id) {
     throw new Error("Account has no profile");
   }
 
