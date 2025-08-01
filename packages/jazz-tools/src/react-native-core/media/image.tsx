@@ -1,8 +1,8 @@
 import { FileStream, ImageDefinition } from "jazz-tools";
 import { highestResAvailable } from "jazz-tools/media";
-import { useCoState } from "jazz-tools/react-native-core";
 import { forwardRef, useEffect, useMemo, useState } from "react";
 import { Image as RNImage, ImageProps as RNImageProps } from "react-native";
+import { useCoState } from "../hooks.js";
 
 export type ImageProps = Omit<RNImageProps, "width" | "height" | "source"> & {
   /** The ID of the ImageDefinition to display */
@@ -64,7 +64,7 @@ export type ImageProps = Omit<RNImageProps, "width" | "height" | "source"> & {
  * });
  * ```
  */
-const Image = forwardRef<RNImage, ImageProps>(function Image(
+export const Image = forwardRef<RNImage, ImageProps>(function Image(
   { imageId, width, height, ...props },
   ref,
 ) {
@@ -157,5 +157,3 @@ const Image = forwardRef<RNImage, ImageProps>(function Image(
     />
   );
 });
-
-export { Image };
