@@ -1189,7 +1189,7 @@ describe("CoMap applyDiff", async () => {
       isActive: false,
     };
 
-    map.applyDiff(newValues);
+    map.$jazz.applyDiff(newValues);
 
     expect(map.name).toEqual("Bob");
     expect(map.age).toEqual(35);
@@ -1215,7 +1215,7 @@ describe("CoMap applyDiff", async () => {
       nested: NestedMap.create({ value: "updated" }, { owner: me }),
     };
 
-    map.applyDiff(newValues);
+    map.$jazz.applyDiff(newValues);
 
     expect(map.name).toEqual("David");
     expect(map.age).toEqual(25);
@@ -1238,7 +1238,7 @@ describe("CoMap applyDiff", async () => {
       birthday: new Date("1993-06-15"),
     };
 
-    map.applyDiff(newValues);
+    map.$jazz.applyDiff(newValues);
 
     expect(map.birthday).toEqual(new Date("1993-06-15"));
   });
@@ -1259,11 +1259,11 @@ describe("CoMap applyDiff", async () => {
       optionalField: "New optional value",
     };
 
-    map.applyDiff(newValues);
+    map.$jazz.applyDiff(newValues);
 
     expect(map.optionalField).toEqual("New optional value");
 
-    map.applyDiff({ optionalField: undefined });
+    map.$jazz.applyDiff({ optionalField: undefined });
 
     expect(map.optionalField).toBeUndefined();
   });
@@ -1282,7 +1282,7 @@ describe("CoMap applyDiff", async () => {
 
     const originalJSON = map.toJSON();
 
-    map.applyDiff({});
+    map.$jazz.applyDiff({});
 
     expect(map.toJSON()).toEqual(originalJSON);
   });
@@ -1303,8 +1303,7 @@ describe("CoMap applyDiff", async () => {
       name: "Ian",
       invalidField: "This should be ignored",
     };
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    map.applyDiff(newValues as any);
+    map.$jazz.applyDiff(newValues);
 
     expect(map.name).toEqual("Ian");
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -1328,7 +1327,7 @@ describe("CoMap applyDiff", async () => {
       optionalNested: undefined,
     };
 
-    map.applyDiff(newValues);
+    map.$jazz.applyDiff(newValues);
 
     expect(map.optionalNested).toBeUndefined();
   });
@@ -1349,7 +1348,7 @@ describe("CoMap applyDiff", async () => {
       nested: undefined,
     };
 
-    expect(() => map.applyDiff(newValues)).toThrowError(
+    expect(() => map.$jazz.applyDiff(newValues)).toThrowError(
       "Cannot set required reference nested to undefined",
     );
   });
@@ -1438,7 +1437,7 @@ describe("CoMap Typescript validation", async () => {
       { owner: clientAccount },
     );
 
-    await map.waitForSync({ timeout: 1000 });
+    await map.$jazz.waitForSync({ timeout: 1000 });
 
     // Killing the client node so the serverNode can't load the map from it
     clientNode.gracefulShutdown();
@@ -1505,7 +1504,7 @@ describe("Creating and finding unique CoMaps", async () => {
         workspace,
       );
     } else {
-      activeEvent.applyDiff({
+      activeEvent.$jazz.applyDiff({
         title: sourceData.title,
         identifier: sourceData.identifier,
         external_id: sourceData._id,
@@ -2350,7 +2349,7 @@ describe("Updating a nested reference", () => {
     const playSelection = PlaySelection.create({ value: "rock", group }, group);
 
     // Assign the play selection to player1 (similar to the route logic)
-    loadedGame.player1.playSelection = playSelection;
+    loadedGame.player1.$jazz.set("playSelection", playSelection);
 
     // Verify that the playSelection is not null and has the expected value
     expect(loadedGame.player1.playSelection).not.toBeNull();

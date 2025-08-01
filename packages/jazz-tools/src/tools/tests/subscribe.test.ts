@@ -150,7 +150,7 @@ describe("subscribeToCoValue", () => {
     const chatRoom = createChatRoom(me, "General");
     const updateFn = vi.fn();
 
-    const { messages } = await chatRoom.ensureLoaded({
+    const { messages } = await chatRoom.$jazz.ensureLoaded({
       resolve: { messages: { $each: true } },
     });
 
@@ -864,7 +864,7 @@ describe("subscribeToCoValue", () => {
 
     const person = Person.create({ name: "creator" }, group);
 
-    await person.waitForSync();
+    await person.$jazz.waitForSync();
 
     // Disconnect from the sync server, so we can change permissions but not sync them
     creator._raw.core.node.syncManager.getPeers().forEach((peer) => {

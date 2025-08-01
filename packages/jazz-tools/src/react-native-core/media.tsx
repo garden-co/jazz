@@ -18,7 +18,7 @@ export function useProgressiveImgNative({
   useEffect(() => {
     let lastHighestRes: string | undefined;
     if (!image) return;
-    const unsub = image.subscribe({}, (update) => {
+    const unsub = image.$jazz.subscribe({}, (update) => {
       const highestRes = ImageDefinition.highestResAvailable(update, {
         maxWidth,
         targetWidth,

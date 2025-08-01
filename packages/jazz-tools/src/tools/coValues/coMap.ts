@@ -512,7 +512,7 @@ export class CoMap extends CoValueBase implements CoValue {
         unique: options.unique,
       }) as Resolved<M, R>;
     } else {
-      (map as M).applyDiff(options.value as Partial<CoMapInit<M>>);
+      (map as M).$jazz.applyDiff(options.value as Partial<CoMapInit<M>>);
     }
 
     return await loadCoValueWithoutMe(this, mapId, {
@@ -544,84 +544,6 @@ export class CoMap extends CoValueBase implements CoValue {
       { ...options, skipRetry: true },
     );
   }
-
-  /**
-   * Given an already loaded `CoMap`, ensure that the specified fields are loaded to the specified depth.
-   *
-   * Works like `CoMap.load()`, but you don't need to pass the ID or the account to load as again.
-   *
-   * @category Subscription & Loading
-   */
-  ensureLoaded<M extends CoMap, const R extends RefsToResolve<M>>(
-    this: M,
-    options: { resolve: RefsToResolveStrict<M, R> },
-  ): Promise<Resolved<M, R>> {
-    return ensureCoValueLoaded(this, options);
-  }
-
-  /**
-   * Given an already loaded `CoMap`, subscribe to updates to the `CoMap` and ensure that the specified fields are loaded to the specified depth.
-   *
-   * Works like `CoMap.subscribe()`, but you don't need to pass the ID or the account to load as again.
-   *
-   * Returns an unsubscribe function that you should call when you no longer need updates.
-   *
-   * @category Subscription & Loading
-   **/
-  subscribe<M extends CoMap, const R extends RefsToResolve<M> = true>(
-    this: M,
-    listener: (value: Resolved<M, R>, unsubscribe: () => void) => void,
-  ): () => void;
-  subscribe<M extends CoMap, const R extends RefsToResolve<M> = true>(
-    this: M,
-    options: { resolve?: RefsToResolveStrict<M, R> },
-    listener: (value: Resolved<M, R>, unsubscribe: () => void) => void,
-  ): () => void;
-  subscribe<M extends CoMap, const R extends RefsToResolve<M>>(
-    this: M,
-    ...args: SubscribeRestArgs<M, R>
-  ): () => void {
-    const { options, listener } = parseSubscribeRestArgs(args);
-    return subscribeToExistingCoValue<M, R>(this, options, listener);
-  }
-
-  applyDiff<N extends Partial<CoMapInit<this>>>(newValues: N) {
-    for (const key in newValues) {
-      if (Object.prototype.hasOwnProperty.call(newValues, key)) {
-        const tKey = key as keyof typeof newValues & keyof this;
-        const descriptor = this.$jazz.getDescriptor(key);
-
-        if (!descriptor) continue;
-
-        const newValue = newValues[tKey];
-        const currentValue = (this as unknown as N)[tKey];
-
-        if (descriptor === "json" || "encoded" in descriptor) {
-          if (currentValue !== newValue) {
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            (this as any)[tKey] = newValue;
-          }
-        } else if (isRefEncoded(descriptor)) {
-          const currentId = (currentValue as CoValue | undefined)?.id;
-          const newId = (newValue as CoValue | undefined)?.id;
-          if (currentId !== newId) {
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            (this as any)[tKey] = newValue;
-          }
-        }
-      }
-    }
-    return this;
-  }
-
-  /**
-   * Wait for the `CoMap` to be uploaded to the other peers.
-   *
-   * @category Subscription & Loading
-   */
-  waitForSync(options?: { timeout?: number }) {
-    return this._raw.core.waitForSync(options);
-  }
 }
 
 /**
@@ -635,6 +557,8 @@ class CoMapJazzApi<M extends CoMap> {
    *
    * @param key The key to set
    * @param value The value to set
+   *
+   * @category Content
    */
   set<K extends CoKeys<M>>(key: K, value: M[K]): void {
     const descriptor = this.getDescriptor(key as string);
@@ -662,6 +586,92 @@ class CoMapJazzApi<M extends CoMap> {
         );
       }
     }
+  }
+
+  /**
+   * Modify the `CoMap` to match another map.
+   *
+   * @param newValues - The new values to apply to the CoMap.
+   * @returns The modified CoMap.
+   *
+   * @category Content
+   */
+  applyDiff<N extends Partial<CoMapInit<M>>>(newValues: N): M {
+    for (const key in newValues) {
+      if (Object.prototype.hasOwnProperty.call(newValues, key)) {
+        const tKey = key as keyof typeof newValues & keyof this;
+        const descriptor = this.getDescriptor(key);
+
+        if (!descriptor) continue;
+
+        const newValue = newValues[tKey];
+        const currentValue = (this.coMap as unknown as N)[tKey];
+
+        if (descriptor === "json" || "encoded" in descriptor) {
+          if (currentValue !== newValue) {
+            this.set(tKey as any, newValue);
+          }
+        } else if (isRefEncoded(descriptor)) {
+          const currentId = (currentValue as CoValue | undefined)?.id;
+          const newId = (newValue as CoValue | undefined)?.id;
+          if (currentId !== newId) {
+            this.set(tKey as any, newValue);
+          }
+        }
+      }
+    }
+    return this.coMap;
+  }
+
+  /**
+   * Given an already loaded `CoMap`, ensure that the specified fields are loaded to the specified depth.
+   *
+   * Works like `CoMap.load()`, but you don't need to pass the ID or the account to load as again.
+   *
+   * @category Subscription & Loading
+   */
+  ensureLoaded<Map extends CoMap, const R extends RefsToResolve<Map>>(
+    this: CoMapJazzApi<Map>,
+    options: {
+      resolve: RefsToResolveStrict<Map, R>;
+    },
+  ): Promise<Resolved<Map, R>> {
+    return ensureCoValueLoaded(this.coMap, options);
+  }
+
+  /**
+   * Given an already loaded `CoMap`, subscribe to updates to the `CoMap` and ensure that the specified fields are loaded to the specified depth.
+   *
+   * Works like `CoMap.subscribe()`, but you don't need to pass the ID or the account to load as again.
+   *
+   * Returns an unsubscribe function that you should call when you no longer need updates.
+   *
+   * @category Subscription & Loading
+   **/
+  subscribe<Map extends CoMap, const R extends RefsToResolve<Map> = true>(
+    this: CoMapJazzApi<Map>,
+    listener: (value: Resolved<Map, R>, unsubscribe: () => void) => void,
+  ): () => void;
+  subscribe<Map extends CoMap, const R extends RefsToResolve<Map> = true>(
+    this: CoMapJazzApi<Map>,
+    options: { resolve?: RefsToResolveStrict<Map, R> },
+    listener: (value: Resolved<Map, R>, unsubscribe: () => void) => void,
+  ): () => void;
+  subscribe<Map extends CoMap, const R extends RefsToResolve<Map>>(
+    this: CoMapJazzApi<Map>,
+    ...args: SubscribeRestArgs<Map, R>
+  ): () => void {
+    const { options, listener } = parseSubscribeRestArgs(args);
+    return subscribeToExistingCoValue(this.coMap, options, listener);
+  }
+
+  /**
+   * Wait for the `CoMap` to be uploaded to the other peers.
+   *
+   * @category Subscription & Loading
+   */
+  async waitForSync(options?: { timeout?: number }): Promise<void> {
+    await this.raw.core.waitForSync(options);
   }
 
   /**
@@ -720,7 +730,11 @@ class CoMapJazzApi<M extends CoMap> {
     ) as any;
   }
 
-  /** @category Collaboration */
+  /**
+   * Get the edits made to the CoMap.
+   *
+   * @category Collaboration
+   */
   getEdits(): CoMapEdits<M> {
     const map = this.coMap;
     return new Proxy(
@@ -764,15 +778,19 @@ class CoMapJazzApi<M extends CoMap> {
 
   /**
    * The timestamp of the creation time of the CoMap
+   *
+   * @category Content
    */
-  get createdAt() {
+  get createdAt(): number {
     return this.raw.earliestTxMadeAt ?? Number.MAX_SAFE_INTEGER;
   }
 
   /**
    * The timestamp of the last updated time of the CoMap
+   *
+   * @category Content
    */
-  get lastUpdatedAt() {
+  get lastUpdatedAt(): number {
     return this.raw.latestTxMadeAt;
   }
 

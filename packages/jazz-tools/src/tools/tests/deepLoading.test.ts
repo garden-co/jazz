@@ -567,7 +567,7 @@ describe("Deep loading with unauthorized account", async () => {
     assert(mapOnAlice, "Alice isn't able to load the map");
 
     const result = await new Promise((resolve) => {
-      const unsub = mapOnAlice.subscribe((value) => {
+      const unsub = mapOnAlice.$jazz.subscribe((value) => {
         resolve(value.optionalRef);
         unsub();
       });
@@ -942,7 +942,7 @@ test("doesn't break on Map.Record key deletion when the key is referenced in the
   });
 
   const spy = vi.fn();
-  const unsub = snapStore.subscribe(
+  const unsub = snapStore.$jazz.subscribe(
     { resolve: { profile1: true, profile2: true } },
     spy,
   );
@@ -957,7 +957,7 @@ test("doesn't break on Map.Record key deletion when the key is referenced in the
   unsub();
 
   await expect(
-    snapStore.ensureLoaded({
+    snapStore.$jazz.ensureLoaded({
       resolve: {
         profile1: true,
       },
@@ -987,7 +987,7 @@ test("throw when calling ensureLoaded on a ref that's required but missing", asy
   );
 
   await expect(
-    root.ensureLoaded({
+    root.$jazz.ensureLoaded({
       resolve: { profile: true },
     }),
   ).rejects.toThrow("Failed to deeply load CoValue " + root.id);
@@ -1004,7 +1004,7 @@ test("throw when calling ensureLoaded on a ref that is not defined in the schema
   const root = JazzRoot.create({}, { owner: me });
 
   await expect(
-    root.ensureLoaded({
+    root.$jazz.ensureLoaded({
       // @ts-expect-error missing required ref
       resolve: { profile: true },
     }),
@@ -1032,7 +1032,7 @@ test("should not throw when calling ensureLoaded a record with a deleted ref", a
   );
 
   let value: any;
-  let unsub = root.subscribe({ resolve: { $each: true } }, (v) => {
+  let unsub = root.$jazz.subscribe({ resolve: { $each: true } }, (v) => {
     value = v;
   });
 
@@ -1045,7 +1045,7 @@ test("should not throw when calling ensureLoaded a record with a deleted ref", a
   unsub();
 
   value = undefined;
-  unsub = root.subscribe({ resolve: { $each: true } }, (v) => {
+  unsub = root.$jazz.subscribe({ resolve: { $each: true } }, (v) => {
     value = v;
   });
 
