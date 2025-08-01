@@ -11,7 +11,7 @@ export default function RootLayout({
         <title>Quint UI</title>
       </head>
       <body>
-        <div className="container mx-auto">{children}</div>
+        <div className="container m-21">{children}</div>
       </body>
     </html>
   );
