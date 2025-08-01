@@ -72,6 +72,14 @@ export class Account extends CoValueBase implements CoValue {
   declare _type: "Account";
   declare _raw: RawAccount;
 
+  /**
+   * Jazz methods for Accounts are inside this property.
+   *
+   * This allows Accounts to be used as plain objects while still having
+   * access to Jazz methods.
+   */
+  declare $jazz: AccountJazzApi;
+
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   static _schema: any;
   get _schema(): {
@@ -112,16 +120,6 @@ export class Account extends CoValueBase implements CoValue {
 
   declare profile: Profile | null;
   declare root: CoMap | null;
-
-  getDescriptor(key: string) {
-    if (key === "profile") {
-      return this._schema.profile;
-    } else if (key === "root") {
-      return this._schema.root;
-    }
-
-    return undefined;
-  }
 
   get _refs(): {
     profile: RefIfCoValue<Profile> | undefined;
@@ -188,6 +186,10 @@ export class Account extends CoValueBase implements CoValue {
       },
       _raw: { value: options.fromRaw, enumerable: false },
       _type: { value: "Account", enumerable: false },
+      $jazz: {
+        value: new AccountJazzApi(this),
+        enumerable: false,
+      },
     });
 
     if (this.isLocalNodeOwner) {
@@ -464,6 +466,29 @@ export class Account extends CoValueBase implements CoValue {
     return this._raw.core.node.syncManager.waitForAllCoValuesSync(
       options?.timeout,
     );
+  }
+}
+
+class AccountJazzApi {
+  constructor(private account: Account) {}
+
+  /**
+   * Get the descriptor for a given key
+   * @internal
+   */
+  getDescriptor(key: string) {
+    if (key === "profile") {
+      return this._schema.profile;
+    } else if (key === "root") {
+      return this._schema.root;
+    }
+
+    return undefined;
+  }
+
+  /** @internal */
+  get _schema() {
+    return this.account._schema;
   }
 }
 

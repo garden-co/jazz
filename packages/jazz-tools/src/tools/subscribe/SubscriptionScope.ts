@@ -526,7 +526,7 @@ export class SubscriptionScope<D extends CoValue> {
     }
 
     const id = map._raw.get(key) as string | undefined;
-    const descriptor = map.getDescriptor(key);
+    const descriptor = map.$jazz.getDescriptor(key);
 
     if (!descriptor) {
       this.childErrors.set(

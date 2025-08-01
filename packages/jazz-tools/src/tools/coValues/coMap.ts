@@ -124,10 +124,7 @@ export class CoMap extends CoValueBase implements CoValue {
   static _schema: CoMapFieldSchema;
 
   /** @internal */
-  constructor(
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    options: { fromRaw: RawCoMap } | undefined,
-  ) {
+  constructor(options: { fromRaw: RawCoMap } | undefined) {
     super();
 
     if (options) {
@@ -324,16 +321,6 @@ export class CoMap extends CoValueBase implements CoValue {
       }
 
     return rawOwner.createMap(rawInit, null, "private", uniqueness);
-  }
-
-  /**
-   * Get the descriptor for a given key
-   * @internal
-   *
-   * TODO remove once `Account.getDescriptor` is moved over to `$jazz` as well
-   */
-  getDescriptor(key: string): Schema | undefined {
-    return this.$jazz.getDescriptor(key);
   }
 
   /**
