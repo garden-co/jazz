@@ -89,6 +89,43 @@ importers:
         specifier: 'catalog:'
         version: 3.2.4(@types/debug@4.1.12)(@types/node@22.16.5)(@vitest/browser@3.2.4)(@vitest/ui@3.2.4)(happy-dom@17.4.4)(jiti@2.4.2)(jsdom@25.0.1)(lightningcss@1.30.1)(msw@2.10.4(@types/node@22.16.5)(typescript@5.8.3))(terser@5.37.0)(tsx@4.20.3)(yaml@2.6.1)
 
+  examples/better-auth-adapter:
+    dependencies:
+      better-auth:
+        specifier: ^1.2.4
+        version: 1.3.4(react-dom@19.1.0(react@19.1.0))(react@19.1.0)
+      jazz-better-auth:
+        specifier: workspace:*
+        version: link:../../packages/jazz-better-auth
+      next:
+        specifier: 15.4.4
+        version: 15.4.4(@opentelemetry/api@1.9.0)(@playwright/test@1.50.1)(react-dom@19.1.0(react@19.1.0))(react@19.1.0)
+      react:
+        specifier: 19.1.0
+        version: 19.1.0
+      react-dom:
+        specifier: 19.1.0
+        version: 19.1.0(react@19.1.0)
+    devDependencies:
+      '@tailwindcss/postcss':
+        specifier: ^4
+        version: 4.1.11
+      '@types/node':
+        specifier: ^20
+        version: 20.17.46
+      '@types/react':
+        specifier: 19.1.0
+        version: 19.1.0
+      '@types/react-dom':
+        specifier: 19.1.0
+        version: 19.1.0(@types/react@19.1.0)
+      tailwindcss:
+        specifier: ^4
+        version: 4.1.11
+      typescript:
+        specifier: ^5
+        version: 5.8.3
+
   examples/betterauth:
     dependencies:
       '@icons-pack/react-simple-icons':
@@ -1758,6 +1795,28 @@ importers:
         specifier: 'catalog:'
         version: 5.6.2
 
+  packages/jazz-better-auth:
+    dependencies:
+      better-auth:
+        specifier: ^1.3.2
+        version: 1.3.4(react-dom@19.1.0(react@19.1.0))(react@19.1.0)
+      jazz-tools:
+        specifier: workspace:*
+        version: link:../jazz-tools
+    devDependencies:
+      jazz-run:
+        specifier: workspace:*
+        version: link:../jazz-run
+      tsup:
+        specifier: 8.5.0
+        version: 8.5.0(@microsoft/api-extractor@7.48.1(@types/node@22.16.5))(@swc/core@1.11.29(@swc/helpers@0.5.17))(jiti@2.4.2)(postcss@8.5.6)(tsx@4.20.3)(typescript@5.6.2)(yaml@2.6.1)
+      typescript:
+        specifier: 'catalog:'
+        version: 5.6.2
+      vitest:
+        specifier: 'catalog:'
+        version: 3.2.4(@types/debug@4.1.12)(@types/node@22.16.5)(@vitest/browser@3.2.4)(@vitest/ui@3.2.4)(happy-dom@17.4.4)(jiti@2.4.2)(jsdom@25.0.1)(lightningcss@1.30.1)(msw@2.10.4(@types/node@22.16.5)(typescript@5.6.2))(terser@5.37.0)(tsx@4.20.3)(yaml@2.6.1)
+
   packages/jazz-betterauth-client-plugin:
     dependencies:
       jazz-betterauth-server-plugin:
@@ -3301,6 +3360,9 @@ packages:
   '@better-auth/utils@0.2.4':
     resolution: {integrity: sha512-ayiX87Xd5sCHEplAdeMgwkA0FgnXsEZBgDn890XHHwSWNqqRZDYOq3uj2Ei2leTv1I2KbG5HHn60Ah1i2JWZjQ==}
 
+  '@better-auth/utils@0.2.5':
+    resolution: {integrity: sha512-uI2+/8h/zVsH8RrYdG8eUErbuGBk16rZKQfz8CjxQOyCE6v7BqFYEbFwvOkvl1KbUdxhqOnXp78+uE5h8qVEgQ==}
+
   '@better-fetch/fetch@1.1.18':
     resolution: {integrity: sha512-rEFOE1MYIsBmoMJtQbl32PGHHXuG2hDxvEd7rUHE0vCBoFQVSDqaVs9hkZEtHCxRoY+CljXKFCOuJ8uxqw1LcA==}
 
@@ -4634,6 +4696,9 @@ packages:
   '@next/env@15.4.2':
     resolution: {integrity: sha512-kd7MvW3pAP7tmk1NaiX4yG15xb2l4gNhteKQxt3f+NGR22qwPymn9RBuv26QKfIKmfo6z2NpgU8W2RT0s0jlvg==}
 
+  '@next/env@15.4.4':
+    resolution: {integrity: sha512-SJKOOkULKENyHSYXE5+KiFU6itcIb6wSBjgM92meK0HVKpo94dNOLZVdLLuS7/BxImROkGoPsjR4EnuDucqiiA==}
+
   '@next/swc-darwin-arm64@15.3.2':
     resolution: {integrity: sha512-2DR6kY/OGcokbnCsjHpNeQblqCZ85/1j6njYSkzRdpLn5At7OkSdmk7WyAmB9G0k25+VgqVZ/u356OSoQZ3z0g==}
     engines: {node: '>= 10'}
@@ -4642,6 +4707,12 @@ packages:
 
   '@next/swc-darwin-arm64@15.4.2':
     resolution: {integrity: sha512-ovqjR8NjCBdBf1U+R/Gvn0RazTtXS9n6wqs84iFaCS1NHbw9ksVE4dfmsYcLoyUVd9BWE0bjkphOWrrz8uz/uw==}
+    engines: {node: '>= 10'}
+    cpu: [arm64]
+    os: [darwin]
+
+  '@next/swc-darwin-arm64@15.4.4':
+    resolution: {integrity: sha512-eVG55dnGwfUuG+TtnUCt+mEJ+8TGgul6nHEvdb8HEH7dmJIFYOCApAaFrIrxwtEq2Cdf+0m5sG1Np8cNpw9EAw==}
     engines: {node: '>= 10'}
     cpu: [arm64]
     os: [darwin]
@@ -4658,6 +4729,12 @@ packages:
     cpu: [x64]
     os: [darwin]
 
+  '@next/swc-darwin-x64@15.4.4':
+    resolution: {integrity: sha512-zqG+/8apsu49CltEj4NAmCGZvHcZbOOOsNoTVeIXphYWIbE4l6A/vuQHyqll0flU2o3dmYCXsBW5FmbrGDgljQ==}
+    engines: {node: '>= 10'}
+    cpu: [x64]
+    os: [darwin]
+
   '@next/swc-linux-arm64-gnu@15.3.2':
     resolution: {integrity: sha512-covwwtZYhlbRWK2HlYX9835qXum4xYZ3E2Mra1mdQ+0ICGoMiw1+nVAn4d9Bo7R3JqSmK1grMq/va+0cdh7bJA==}
     engines: {node: '>= 10'}
@@ -4666,6 +4743,12 @@ packages:
 
   '@next/swc-linux-arm64-gnu@15.4.2':
     resolution: {integrity: sha512-lvhz02dU3Ec5thzfQ2RCUeOFADjNkS/px1W7MBt7HMhf0/amMfT8Z/aXOwEA+cVWN7HSDRSUc8hHILoHmvajsg==}
+    engines: {node: '>= 10'}
+    cpu: [arm64]
+    os: [linux]
+
+  '@next/swc-linux-arm64-gnu@15.4.4':
+    resolution: {integrity: sha512-LRD4l2lq4R+2QCHBQVC0wjxxkLlALGJCwigaJ5FSRSqnje+MRKHljQNZgDCaKUZQzO/TXxlmUdkZP/X3KNGZaw==}
     engines: {node: '>= 10'}
     cpu: [arm64]
     os: [linux]
@@ -4682,6 +4765,12 @@ packages:
     cpu: [arm64]
     os: [linux]
 
+  '@next/swc-linux-arm64-musl@15.4.4':
+    resolution: {integrity: sha512-LsGUCTvuZ0690fFWerA4lnQvjkYg9gHo12A3wiPUR4kCxbx/d+SlwmonuTH2SWZI+RVGA9VL3N0S03WTYv6bYg==}
+    engines: {node: '>= 10'}
+    cpu: [arm64]
+    os: [linux]
+
   '@next/swc-linux-x64-gnu@15.3.2':
     resolution: {integrity: sha512-uRBo6THWei0chz+Y5j37qzx+BtoDRFIkDzZjlpCItBRXyMPIg079eIkOCl3aqr2tkxL4HFyJ4GHDes7W8HuAUg==}
     engines: {node: '>= 10'}
@@ -4690,6 +4779,12 @@ packages:
 
   '@next/swc-linux-x64-gnu@15.4.2':
     resolution: {integrity: sha512-PHLYOC9W2cu6I/JEKo77+LW4uPNvyEQiSkVRUQPsOIsf01PRr8PtPhwtz3XNnC9At8CrzPkzqQ9/kYDg4R4Inw==}
+    engines: {node: '>= 10'}
+    cpu: [x64]
+    os: [linux]
+
+  '@next/swc-linux-x64-gnu@15.4.4':
+    resolution: {integrity: sha512-aOy5yNRpLL3wNiJVkFYl6w22hdREERNjvegE6vvtix8LHRdsTHhWTpgvcYdCK7AIDCQW5ATmzr9XkPHvSoAnvg==}
     engines: {node: '>= 10'}
     cpu: [x64]
     os: [linux]
@@ -4706,6 +4801,12 @@ packages:
     cpu: [x64]
     os: [linux]
 
+  '@next/swc-linux-x64-musl@15.4.4':
+    resolution: {integrity: sha512-FL7OAn4UkR8hKQRGBmlHiHinzOb07tsfARdGh7v0Z0jEJ3sz8/7L5bR23ble9E6DZMabSStqlATHlSxv1fuzAg==}
+    engines: {node: '>= 10'}
+    cpu: [x64]
+    os: [linux]
+
   '@next/swc-win32-arm64-msvc@15.3.2':
     resolution: {integrity: sha512-LLTKmaI5cfD8dVzh5Vt7+OMo+AIOClEdIU/TSKbXXT2iScUTSxOGoBhfuv+FU8R9MLmrkIL1e2fBMkEEjYAtPQ==}
     engines: {node: '>= 10'}
@@ -4718,6 +4819,12 @@ packages:
     cpu: [arm64]
     os: [win32]
 
+  '@next/swc-win32-arm64-msvc@15.4.4':
+    resolution: {integrity: sha512-eEdNW/TXwjYhOulQh0pffTMMItWVwKCQpbziSBmgBNFZIIRn2GTXrhrewevs8wP8KXWYMx8Z+mNU0X+AfvtrRg==}
+    engines: {node: '>= 10'}
+    cpu: [arm64]
+    os: [win32]
+
   '@next/swc-win32-x64-msvc@15.3.2':
     resolution: {integrity: sha512-aW5B8wOPioJ4mBdMDXkt5f3j8pUr9W8AnlX0Df35uRWNT1Y6RIybxjnSUe+PhM+M1bwgyY8PHLmXZC6zT1o5tA==}
     engines: {node: '>= 10'}
@@ -4726,6 +4833,12 @@ packages:
 
   '@next/swc-win32-x64-msvc@15.4.2':
     resolution: {integrity: sha512-FxwauyexSFu78wEqR/+NB9MnqXVj6SxJKwcVs2CRjeSX/jBagDCgtR2W36PZUYm0WPgY1pQ3C1+nn7zSnwROuw==}
+    engines: {node: '>= 10'}
+    cpu: [x64]
+    os: [win32]
+
+  '@next/swc-win32-x64-msvc@15.4.4':
+    resolution: {integrity: sha512-SE5pYNbn/xZKMy1RE3pAs+4xD32OI4rY6mzJa4XUkp/ItZY+OMjIgilskmErt8ls/fVJ+Ihopi2QIeW6O3TrMw==}
     engines: {node: '>= 10'}
     cpu: [x64]
     os: [win32]
@@ -7533,6 +7646,20 @@ packages:
   better-auth@1.2.7:
     resolution: {integrity: sha512-2hCB263GSrgetsMUZw8vv9O1e4S4AlYJW3P4e8bX9u3Q3idv4u9BzDFCblpTLuL4YjYovghMCN0vurAsctXOAQ==}
 
+  better-auth@1.3.4:
+    resolution: {integrity: sha512-JbZYam6Cs3Eu5CSoMK120zSshfaKvrCftSo/+v7524H1RvhryQ7UtMbzagBcXj0Digjj8hZtVkkR4tTZD/wK2g==}
+    peerDependencies:
+      react: 19.1.0
+      react-dom: 19.1.0
+    peerDependenciesMeta:
+      react:
+        optional: true
+      react-dom:
+        optional: true
+
+  better-call@1.0.12:
+    resolution: {integrity: sha512-ssq5OfB9Ungv2M1WVrRnMBomB0qz1VKuhkY2WxjHaLtlsHoSe9EPolj1xf7xf8LY9o3vfk3Rx6rCWI4oVHeBRg==}
+
   better-call@1.0.9:
     resolution: {integrity: sha512-Qfm0gjk0XQz0oI7qvTK1hbqTsBY4xV2hsHAxF8LZfUYl3RaECCIifXuVqtPpZJWvlCCMlQSvkvhhyuApGUba6g==}
 
@@ -9980,6 +10107,10 @@ packages:
     resolution: {integrity: sha512-FIyV/64EkKhJmjgC0g2hygpBv5RNWVPyNCqSAD7eTCv6eFWNIi4PN1UvdSJGicN/o35bnevgis4Y0UDC0qi8jQ==}
     engines: {node: '>=14.0.0'}
 
+  kysely@0.28.3:
+    resolution: {integrity: sha512-svKnkSH72APRdjfVCCOknxaC9Eb3nA2StHG9d5/sKOqRvHRp2Dtf1XwDvc92b4B5v6LV+EAGWXQbZ5jMOvHaDw==}
+    engines: {node: '>=20.0.0'}
+
   lan-network@0.1.7:
     resolution: {integrity: sha512-mnIlAEMu4OyEvUNdzco9xpuB9YVcPkQec+QsgycBCtPZvEqWPCDPfbAE4OJMdBBWpZWtpCn1xw9jJYlwjWI5zQ==}
     hasBin: true
@@ -10755,6 +10886,27 @@ packages:
 
   next@15.4.2:
     resolution: {integrity: sha512-oH1rmFso+84NIkocfuxaGKcXIjMUTmnzV2x0m8qsYtB4gD6iflLMESXt5XJ8cFgWMBei4v88rNr/j+peNg72XA==}
+    engines: {node: ^18.18.0 || ^19.8.0 || >= 20.0.0}
+    hasBin: true
+    peerDependencies:
+      '@opentelemetry/api': ^1.1.0
+      '@playwright/test': ^1.51.1
+      babel-plugin-react-compiler: '*'
+      react: 19.1.0
+      react-dom: 19.1.0
+      sass: ^1.3.0
+    peerDependenciesMeta:
+      '@opentelemetry/api':
+        optional: true
+      '@playwright/test':
+        optional: true
+      babel-plugin-react-compiler:
+        optional: true
+      sass:
+        optional: true
+
+  next@15.4.4:
+    resolution: {integrity: sha512-kNcubvJjOL9yUOfwtZF3HfDhuhp+kVD+FM2A6Tyua1eI/xfmY4r/8ZS913MMz+oWKDlbps/dQOWdDricuIkXLw==}
     engines: {node: ^18.18.0 || ^19.8.0 || >= 20.0.0}
     hasBin: true
     peerDependencies:
@@ -13866,6 +14018,9 @@ packages:
   zod@3.25.76:
     resolution: {integrity: sha512-gzUt/qt81nXsFGKIFcC3YnfEAx5NkunCfnDlvuBSSFS02bcXu4Lmea0AFIUwbLWxWPx3d9p8S5QoaujKcNQxcQ==}
 
+  zod@4.0.13:
+    resolution: {integrity: sha512-jv+zRxuZQxTrFHzxZ46ezL2FtnE+M4HIJHJEwLsZ7UjrXHltdG6HrxvqM0twoVCWxJiYf8WqKjAcjztegpkB+Q==}
+
   zwitch@2.0.4:
     resolution: {integrity: sha512-bXE4cR/kVZhKZX/RjPEflHaKVhUVl85noU3v6b8apfQEc1x4A+zBxjZ4lN8LqGd6WZ3dl98pY4o717VFmoPp+A==}
 
@@ -15536,6 +15691,11 @@ snapshots:
   '@bcoe/v8-coverage@1.0.2': {}
 
   '@better-auth/utils@0.2.4':
+    dependencies:
+      typescript: 5.8.3
+      uncrypto: 0.1.3
+
+  '@better-auth/utils@0.2.5':
     dependencies:
       typescript: 5.8.3
       uncrypto: 0.1.3
@@ -17291,10 +17451,15 @@ snapshots:
 
   '@next/env@15.4.2': {}
 
+  '@next/env@15.4.4': {}
+
   '@next/swc-darwin-arm64@15.3.2':
     optional: true
 
   '@next/swc-darwin-arm64@15.4.2':
+    optional: true
+
+  '@next/swc-darwin-arm64@15.4.4':
     optional: true
 
   '@next/swc-darwin-x64@15.3.2':
@@ -17303,10 +17468,16 @@ snapshots:
   '@next/swc-darwin-x64@15.4.2':
     optional: true
 
+  '@next/swc-darwin-x64@15.4.4':
+    optional: true
+
   '@next/swc-linux-arm64-gnu@15.3.2':
     optional: true
 
   '@next/swc-linux-arm64-gnu@15.4.2':
+    optional: true
+
+  '@next/swc-linux-arm64-gnu@15.4.4':
     optional: true
 
   '@next/swc-linux-arm64-musl@15.3.2':
@@ -17315,10 +17486,16 @@ snapshots:
   '@next/swc-linux-arm64-musl@15.4.2':
     optional: true
 
+  '@next/swc-linux-arm64-musl@15.4.4':
+    optional: true
+
   '@next/swc-linux-x64-gnu@15.3.2':
     optional: true
 
   '@next/swc-linux-x64-gnu@15.4.2':
+    optional: true
+
+  '@next/swc-linux-x64-gnu@15.4.4':
     optional: true
 
   '@next/swc-linux-x64-musl@15.3.2':
@@ -17327,16 +17504,25 @@ snapshots:
   '@next/swc-linux-x64-musl@15.4.2':
     optional: true
 
+  '@next/swc-linux-x64-musl@15.4.4':
+    optional: true
+
   '@next/swc-win32-arm64-msvc@15.3.2':
     optional: true
 
   '@next/swc-win32-arm64-msvc@15.4.2':
     optional: true
 
+  '@next/swc-win32-arm64-msvc@15.4.4':
+    optional: true
+
   '@next/swc-win32-x64-msvc@15.3.2':
     optional: true
 
   '@next/swc-win32-x64-msvc@15.4.2':
+    optional: true
+
+  '@next/swc-win32-x64-msvc@15.4.4':
     optional: true
 
   '@nicolo-ribaudo/eslint-scope-5-internals@5.1.1-v1':
@@ -19876,7 +20062,7 @@ snapshots:
 
   '@types/better-sqlite3@7.6.12':
     dependencies:
-      '@types/node': 22.15.18
+      '@types/node': 22.16.5
 
   '@types/chai@5.2.2':
     dependencies:
@@ -20001,7 +20187,7 @@ snapshots:
 
   '@types/qrcode@1.5.5':
     dependencies:
-      '@types/node': 22.15.18
+      '@types/node': 22.16.5
 
   '@types/react-dom@19.1.0(@types/react@19.1.0)':
     dependencies:
@@ -21281,6 +21467,31 @@ snapshots:
       kysely: 0.27.6
       nanostores: 0.11.4
       zod: 3.25.28
+
+  better-auth@1.3.4(react-dom@19.1.0(react@19.1.0))(react@19.1.0):
+    dependencies:
+      '@better-auth/utils': 0.2.5
+      '@better-fetch/fetch': 1.1.18
+      '@noble/ciphers': 0.6.0
+      '@noble/hashes': 1.8.0
+      '@simplewebauthn/browser': 13.1.0
+      '@simplewebauthn/server': 13.1.1
+      better-call: 1.0.12
+      defu: 6.1.4
+      jose: 5.10.0
+      kysely: 0.28.3
+      nanostores: 0.11.4
+      zod: 4.0.13
+    optionalDependencies:
+      react: 19.1.0
+      react-dom: 19.1.0(react@19.1.0)
+
+  better-call@1.0.12:
+    dependencies:
+      '@better-fetch/fetch': 1.1.18
+      rou3: 0.5.1
+      set-cookie-parser: 2.7.1
+      uncrypto: 0.1.3
 
   better-call@1.0.9:
     dependencies:
@@ -24237,6 +24448,8 @@ snapshots:
 
   kysely@0.27.6: {}
 
+  kysely@0.28.3: {}
+
   lan-network@0.1.7: {}
 
   launch-editor@2.10.0:
@@ -25118,6 +25331,31 @@ snapshots:
       '@next/swc-linux-x64-musl': 15.4.2
       '@next/swc-win32-arm64-msvc': 15.4.2
       '@next/swc-win32-x64-msvc': 15.4.2
+      '@opentelemetry/api': 1.9.0
+      '@playwright/test': 1.50.1
+      sharp: 0.34.3
+    transitivePeerDependencies:
+      - '@babel/core'
+      - babel-plugin-macros
+
+  next@15.4.4(@opentelemetry/api@1.9.0)(@playwright/test@1.50.1)(react-dom@19.1.0(react@19.1.0))(react@19.1.0):
+    dependencies:
+      '@next/env': 15.4.4
+      '@swc/helpers': 0.5.15
+      caniuse-lite: 1.0.30001727
+      postcss: 8.4.31
+      react: 19.1.0
+      react-dom: 19.1.0(react@19.1.0)
+      styled-jsx: 5.1.6(react@19.1.0)
+    optionalDependencies:
+      '@next/swc-darwin-arm64': 15.4.4
+      '@next/swc-darwin-x64': 15.4.4
+      '@next/swc-linux-arm64-gnu': 15.4.4
+      '@next/swc-linux-arm64-musl': 15.4.4
+      '@next/swc-linux-x64-gnu': 15.4.4
+      '@next/swc-linux-x64-musl': 15.4.4
+      '@next/swc-win32-arm64-msvc': 15.4.4
+      '@next/swc-win32-x64-msvc': 15.4.4
       '@opentelemetry/api': 1.9.0
       '@playwright/test': 1.50.1
       sharp: 0.34.3
@@ -26082,7 +26320,7 @@ snapshots:
       glob: 11.0.2
       log-symbols: 7.0.0
       mime-types: 3.0.1
-      next: 15.3.2(@opentelemetry/api@1.9.0)(@playwright/test@1.50.1)(react-dom@19.1.0(react@19.1.0))(react@19.1.0)
+      next: 15.4.4(@opentelemetry/api@1.9.0)(@playwright/test@1.50.1)(react-dom@19.1.0(react@19.1.0))(react@19.1.0)
       normalize-path: 3.0.0
       ora: 8.2.0
       socket.io: 4.8.1
@@ -28787,5 +29025,7 @@ snapshots:
   zod@3.25.28: {}
 
   zod@3.25.76: {}
+
+  zod@4.0.13: {}
 
   zwitch@2.0.4: {}

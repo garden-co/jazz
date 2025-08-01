@@ -1,0 +1,40 @@
+{
+  "name": "jazz-better-auth",
+  "module": "dist/index.js",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    "./database-adapter": {
+      "@jazz-tools/source": "./src/database-adapter/index.ts",
+      "types": "./dist/database-adapter/index.d.ts",
+      "default": "./dist/database-adapter/index.js"
+    }
+  },
+  "type": "module",
+  "license": "MIT",
+  "version": "0.16.1",
+  "dependencies": {
+    "jazz-tools": "workspace:*"
+  },
+  "scripts": {
+    "check": "tsc --noEmit",
+    "format-and-lint": "biome check .",
+    "format-and-lint:fix": "biome check . --write",
+    "dev": "tsup --watch --dts",
+		"test": "vitest --run --root ../../ --project jazz-better-auth",
+		"test:watch": "vitest --watch --root ../../ --project jazz-better-auth",
+    "types": "tsc --outDir dist",
+    "build": "tsup && pnpm types"
+  },
+  "devDependencies": {
+    "tsup": "8.5.0",
+    "typescript": "catalog:",
+    "vitest": "catalog:",
+    "jazz-run": "workspace:*"
+  },
+  "peerDependencies": {
+    "better-auth": "^1.3.2"
+  },
+  "peerDependenciesMeta": {
+  }
+}
