@@ -257,7 +257,7 @@ describe("Group inheritance", () => {
 
   test("typescript should show an error when adding a member with a non-account role", async () => {
     const account = await createJazzTestAccount({});
-    await account.waitForAllCoValuesSync();
+    await account.$jazz.waitForAllCoValuesSync();
 
     const group = Group.create();
 
@@ -280,7 +280,7 @@ describe("Group inheritance", () => {
 
   test("adding a group member as writeOnly should fail", async () => {
     const account = await createJazzTestAccount({});
-    await account.waitForAllCoValuesSync();
+    await account.$jazz.waitForAllCoValuesSync();
 
     const parentGroup = Group.create();
     const group = Group.create();
@@ -292,9 +292,9 @@ describe("Group inheritance", () => {
 
   test("Removing member group", async () => {
     const alice = await createJazzTestAccount({});
-    await alice.waitForAllCoValuesSync();
+    await alice.$jazz.waitForAllCoValuesSync();
     const bob = await createJazzTestAccount({});
-    await bob.waitForAllCoValuesSync();
+    await bob.$jazz.waitForAllCoValuesSync();
 
     const parentGroup = Group.create();
     // `parentGroup` has `alice` as a writer
@@ -380,7 +380,7 @@ describe("Group.getRoleOf", () => {
   test("returns correct role for admin", async () => {
     const group = Group.create();
     const admin = await createJazzTestAccount({});
-    await admin.waitForAllCoValuesSync();
+    await admin.$jazz.waitForAllCoValuesSync();
     group.addMember(admin, "admin");
     expect(group.getRoleOf(admin.id)).toBe("admin");
     expect(group.getRoleOf("me")).toBe("admin");
@@ -389,7 +389,7 @@ describe("Group.getRoleOf", () => {
   test("returns correct role for writer", async () => {
     const group = Group.create();
     const writer = await createJazzTestAccount({});
-    await writer.waitForAllCoValuesSync();
+    await writer.$jazz.waitForAllCoValuesSync();
     group.addMember(writer, "writer");
     expect(group.getRoleOf(writer.id)).toBe("writer");
   });
@@ -397,7 +397,7 @@ describe("Group.getRoleOf", () => {
   test("returns correct role for reader", async () => {
     const group = Group.create();
     const reader = await createJazzTestAccount({});
-    await reader.waitForAllCoValuesSync();
+    await reader.$jazz.waitForAllCoValuesSync();
     group.addMember(reader, "reader");
     expect(group.getRoleOf(reader.id)).toBe("reader");
   });
@@ -405,7 +405,7 @@ describe("Group.getRoleOf", () => {
   test("returns correct role for writeOnly", async () => {
     const group = Group.create();
     const writeOnly = await createJazzTestAccount({});
-    await writeOnly.waitForAllCoValuesSync();
+    await writeOnly.$jazz.waitForAllCoValuesSync();
     group.addMember(writeOnly, "writeOnly");
     expect(group.getRoleOf(writeOnly.id)).toBe("writeOnly");
   });
@@ -429,7 +429,7 @@ describe("Group.getRoleOf with 'me' parameter", () => {
 
   test("returns correct role for 'me' when current account is writer", async () => {
     const account = await createJazzTestAccount();
-    await account.waitForAllCoValuesSync();
+    await account.$jazz.waitForAllCoValuesSync();
     const group = Group.create({ owner: account });
 
     group.addMember(co.account().getMe(), "writer");
@@ -439,7 +439,7 @@ describe("Group.getRoleOf with 'me' parameter", () => {
 
   test("returns correct role for 'me' when current account is reader", async () => {
     const account = await createJazzTestAccount();
-    await account.waitForAllCoValuesSync();
+    await account.$jazz.waitForAllCoValuesSync();
     const group = Group.create({ owner: account });
 
     group.addMember(co.account().getMe(), "reader");
@@ -449,7 +449,7 @@ describe("Group.getRoleOf with 'me' parameter", () => {
 
   test("returns undefined for 'me' when current account has no role", async () => {
     const account = await createJazzTestAccount();
-    await account.waitForAllCoValuesSync();
+    await account.$jazz.waitForAllCoValuesSync();
     const group = Group.create({ owner: account });
 
     expect(group.getRoleOf("me")).toBeUndefined();
@@ -619,7 +619,7 @@ describe("Group.members", () => {
     const childGroup = Group.create();
 
     const bob = await createJazzTestAccount({});
-    await bob.waitForAllCoValuesSync();
+    await bob.$jazz.waitForAllCoValuesSync();
 
     childGroup.addMember(bob, "reader");
     expect(childGroup.getRoleOf(bob.id)).toBe("reader");
@@ -645,7 +645,7 @@ describe("Group.members", () => {
     const parentGroup = Group.create();
 
     const bob = await createJazzTestAccount({});
-    await bob.waitForAllCoValuesSync();
+    await bob.$jazz.waitForAllCoValuesSync();
 
     parentGroup.addMember(bob, "writer");
     childGroup.addMember(parentGroup, "reader");
@@ -688,7 +688,7 @@ describe("Group.members", () => {
     const childGroup = Group.create();
 
     const bob = await createJazzTestAccount({});
-    await bob.waitForAllCoValuesSync();
+    await bob.$jazz.waitForAllCoValuesSync();
 
     childGroup.addMember(bob, "reader");
     await childGroup.removeMember(bob);
@@ -712,7 +712,7 @@ describe("Group.getDirectMembers", () => {
     const childGroup = Group.create();
 
     const bob = await createJazzTestAccount({});
-    await bob.waitForAllCoValuesSync();
+    await bob.$jazz.waitForAllCoValuesSync();
 
     // Add bob to parent group
     parentGroup.addMember(bob, "reader");

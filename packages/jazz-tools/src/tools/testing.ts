@@ -299,8 +299,8 @@ export async function linkAccounts(
   a._raw.core.node.syncManager.addPeer(aPeer);
   b._raw.core.node.syncManager.addPeer(bPeer);
 
-  await a.waitForAllCoValuesSync();
-  await b.waitForAllCoValuesSync();
+  await a.$jazz.waitForAllCoValuesSync();
+  await b.$jazz.waitForAllCoValuesSync();
 }
 
 export async function setupJazzTestSync({

@@ -247,7 +247,7 @@ export class Account extends CoValueBase implements CoValue {
       peersToLoadFrom: [connectedPeers[0]],
     });
 
-    await account.waitForAllCoValuesSync();
+    await account.$jazz.waitForAllCoValuesSync();
 
     return account;
   }
@@ -338,44 +338,6 @@ export class Account extends CoValueBase implements CoValue {
     const { options, listener } = parseSubscribeRestArgs(args);
     return subscribeToCoValueWithoutMe<A, R>(this, id, options, listener);
   }
-
-  /** @category Subscription & Loading */
-  subscribe<A extends Account, const R extends RefsToResolve<A>>(
-    this: A,
-    listener: (value: Resolved<A, R>, unsubscribe: () => void) => void,
-  ): () => void;
-  subscribe<A extends Account, const R extends RefsToResolve<A>>(
-    this: A,
-    options: { resolve?: RefsToResolveStrict<A, R> },
-    listener: (value: Resolved<A, R>, unsubscribe: () => void) => void,
-  ): () => void;
-  subscribe<A extends Account, const R extends RefsToResolve<A>>(
-    this: A,
-    ...args: SubscribeRestArgs<A, R>
-  ): () => void {
-    const { options, listener } = parseSubscribeRestArgs(args);
-    return subscribeToExistingCoValue(this, options, listener);
-  }
-
-  /**
-   * Wait for the `Account` to be uploaded to the other peers.
-   *
-   * @category Subscription & Loading
-   */
-  waitForSync(options?: { timeout?: number }) {
-    return this._raw.core.waitForSync(options);
-  }
-
-  /**
-   * Wait for all the available `CoValues` to be uploaded to the other peers.
-   *
-   * @category Subscription & Loading
-   */
-  waitForAllCoValuesSync(options?: { timeout?: number }) {
-    return this.$jazz.localNode.syncManager.waitForAllCoValuesSync(
-      options?.timeout,
-    );
-  }
 }
 
 class AccountJazzApi<A extends Account> {
@@ -460,6 +422,42 @@ class AccountJazzApi<A extends Account> {
     },
   ): Promise<Resolved<A, R>> {
     return ensureCoValueLoaded(this.account as unknown as A, options);
+  }
+
+  /** @category Subscription & Loading */
+  subscribe<A extends Account, const R extends RefsToResolve<A>>(
+    this: AccountJazzApi<A>,
+    listener: (value: Resolved<A, R>, unsubscribe: () => void) => void,
+  ): () => void;
+  subscribe<A extends Account, const R extends RefsToResolve<A>>(
+    this: AccountJazzApi<A>,
+    options: { resolve?: RefsToResolveStrict<A, R> },
+    listener: (value: Resolved<A, R>, unsubscribe: () => void) => void,
+  ): () => void;
+  subscribe<A extends Account, const R extends RefsToResolve<A>>(
+    this: AccountJazzApi<A>,
+    ...args: SubscribeRestArgs<A, R>
+  ): () => void {
+    const { options, listener } = parseSubscribeRestArgs(args);
+    return subscribeToExistingCoValue(this.account, options, listener);
+  }
+
+  /**
+   * Wait for the `Account` to be uploaded to the other peers.
+   *
+   * @category Subscription & Loading
+   */
+  waitForSync(options?: { timeout?: number }) {
+    return this.raw.core.waitForSync(options);
+  }
+
+  /**
+   * Wait for all the available `CoValues` to be uploaded to the other peers.
+   *
+   * @category Subscription & Loading
+   */
+  waitForAllCoValuesSync(options?: { timeout?: number }) {
+    return this.localNode.syncManager.waitForAllCoValuesSync(options?.timeout);
   }
 
   /** @internal */

@@ -444,7 +444,7 @@ describe("Deep loading with unauthorized account", async () => {
 
   linkAccounts(bob, alice);
 
-  await alice.waitForAllCoValuesSync();
+  await alice.$jazz.waitForAllCoValuesSync();
 
   const onlyBob = bob;
   const group = Group.create(bob);

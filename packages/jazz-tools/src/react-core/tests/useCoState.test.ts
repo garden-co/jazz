@@ -307,7 +307,7 @@ describe("useCoState", () => {
       isCurrentActiveAccount: true,
     });
 
-    await account.waitForAllCoValuesSync();
+    await account.$jazz.waitForAllCoValuesSync();
 
     group.addMember(account, "reader");
 

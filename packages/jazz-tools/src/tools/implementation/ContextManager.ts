@@ -288,7 +288,7 @@ export class JazzContextManager<
 
       try {
         await this.props.onAnonymousAccountDiscarded?.(prevContext.me);
-        await prevContext.me.waitForAllCoValuesSync();
+        await prevContext.me.$jazz.waitForAllCoValuesSync();
       } catch (error) {
         console.error("Error onAnonymousAccountDiscarded", error);
       }

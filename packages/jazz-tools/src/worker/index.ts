@@ -96,7 +96,7 @@ export async function startWorker<
   const inbox = await Inbox.load(account);
 
   async function done() {
-    await context.account.waitForAllCoValuesSync();
+    await context.account.$jazz.waitForAllCoValuesSync();
 
     wsPeer.disable();
     context.done();

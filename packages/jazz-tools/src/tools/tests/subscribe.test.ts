@@ -852,9 +852,9 @@ describe("subscribeToCoValue", () => {
     const reader = await createJazzTestAccount();
 
     await Promise.all([
-      writer1.waitForAllCoValuesSync(),
-      writer2.waitForAllCoValuesSync(),
-      reader.waitForAllCoValuesSync(),
+      writer1.$jazz.waitForAllCoValuesSync(),
+      writer2.$jazz.waitForAllCoValuesSync(),
+      reader.$jazz.waitForAllCoValuesSync(),
     ]);
 
     const group = Group.create(creator);
