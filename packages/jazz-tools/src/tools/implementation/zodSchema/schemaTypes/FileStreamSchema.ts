@@ -42,6 +42,12 @@ export class FileStreamSchema implements CoreFileStreamSchema {
     return this.coValueClass.createFromBlob(blob, options);
   }
 
+  createFromArrayBuffer(
+    ...args: Parameters<typeof FileStream.createFromArrayBuffer>
+  ) {
+    return this.coValueClass.createFromArrayBuffer(...args);
+  }
+
   loadAsBlob(
     id: string,
     options?: {
