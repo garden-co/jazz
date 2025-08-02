@@ -2,7 +2,6 @@ import {
   type CoValueUniqueness,
   type CojsonInternalTypes,
   type RawCoValue,
-  emptyKnownState,
 } from "cojson";
 import { AvailableCoValueCore } from "cojson/dist/coValueCore/coValueCore.js";
 import {
@@ -546,9 +545,9 @@ function loadContentPiecesFromCoValue(
     }
   }
 
-  const pieces = core.verified.newContentSince(emptyKnownState(core.id));
+  const pieces = core.verified.newContentSince(undefined) ?? [];
 
-  for (const piece of pieces ?? []) {
+  for (const piece of pieces) {
     contentPieces.push(piece);
   }
 }

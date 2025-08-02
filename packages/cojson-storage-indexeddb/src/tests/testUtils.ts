@@ -36,12 +36,11 @@ export function trackMessages() {
   };
 
   StorageApiAsync.prototype.store = async function (data, correctionCallback) {
-    for (const msg of data) {
-      messages.push({
-        from: "client",
-        msg,
-      });
-    }
+    messages.push({
+      from: "client",
+      msg: data,
+    });
+
     return originalStore.call(this, data, (msg) => {
       messages.push({
         from: "storage",
@@ -51,7 +50,18 @@ export function trackMessages() {
           ...msg,
         },
       });
-      correctionCallback(msg);
+      const correctionMessages = correctionCallback(msg);
+
+      if (correctionMessages) {
+        for (const msg of correctionMessages) {
+          messages.push({
+            from: "client",
+            msg,
+          });
+        }
+      }
+
+      return correctionMessages;
     });
   };
 

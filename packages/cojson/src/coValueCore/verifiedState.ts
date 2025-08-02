@@ -1,6 +1,10 @@
 import { Result, err, ok } from "neverthrow";
 import { AnyRawCoValue } from "../coValue.js";
-import { MAX_RECOMMENDED_TX_SIZE } from "../config.js";
+import {
+  createContentMessage,
+  exceedsRecommendedSize,
+  getTransactionSize,
+} from "../coValueContentMessage.js";
 import {
   CryptoProvider,
   Encrypted,
@@ -14,7 +18,6 @@ import { RawCoID, SessionID, TransactionID } from "../ids.js";
 import { Stringified } from "../jsonStringify.js";
 import { JsonObject, JsonValue } from "../jsonValue.js";
 import { PermissionsDef as RulesetDef } from "../permissions.js";
-import { getPriorityFromHeader } from "../priority.js";
 import { CoValueKnownState, NewContentMessage } from "../sync.js";
 import { InvalidHashError, InvalidSignatureError } from "./coValueCore.js";
 import { TryAddTransactionsError } from "./coValueCore.js";
@@ -151,6 +154,17 @@ export class VerifiedState {
     return ok(true as const);
   }
 
+  getLastSignatureCheckpoint(sessionID: SessionID): number {
+    const sessionLog = this.sessions.get(sessionID);
+
+    if (!sessionLog?.signatureAfter) return -1;
+
+    return Object.keys(sessionLog.signatureAfter).reduce(
+      (max, idx) => Math.max(max, parseInt(idx)),
+      -1,
+    );
+  }
+
   private doAddTransactions(
     sessionID: SessionID,
     newTransactions: Transaction[],
@@ -165,24 +179,14 @@ export class VerifiedState {
     }
 
     const signatureAfter = sessionLog?.signatureAfter ?? {};
-
-    const lastInbetweenSignatureIdx = Object.keys(signatureAfter).reduce(
-      (max, idx) => (parseInt(idx) > max ? parseInt(idx) : max),
-      -1,
-    );
+    const lastInbetweenSignatureIdx =
+      this.getLastSignatureCheckpoint(sessionID);
 
     const sizeOfTxsSinceLastInbetweenSignature = transactions
       .slice(lastInbetweenSignatureIdx + 1)
-      .reduce(
-        (sum, tx) =>
-          sum +
-          (tx.privacy === "private"
-            ? tx.encryptedChanges.length
-            : tx.changes.length),
-        0,
-      );
+      .reduce((sum, tx) => sum + getTransactionSize(tx), 0);
 
-    if (sizeOfTxsSinceLastInbetweenSignature > MAX_RECOMMENDED_TX_SIZE) {
+    if (exceedsRecommendedSize(sizeOfTxsSinceLastInbetweenSignature)) {
       signatureAfter[transactions.length - 1] = newSignature;
     }
 
@@ -242,13 +246,11 @@ export class VerifiedState {
       return this._cachedNewContentSinceEmpty;
     }
 
-    let currentPiece: NewContentMessage = {
-      action: "content",
-      id: this.id,
-      header: knownState?.header ? undefined : this.header,
-      priority: getPriorityFromHeader(this.header),
-      new: {},
-    };
+    let currentPiece: NewContentMessage = createContentMessage(
+      this.id,
+      this.header,
+      !knownState?.header,
+    );
 
     const pieces = [currentPiece];
 
@@ -299,25 +301,16 @@ export class VerifiedState {
         const oldPieceSize = pieceSize;
         for (let txIdx = firstNewTxIdx; txIdx < afterLastNewTxIdx; txIdx++) {
           const tx = log.transactions[txIdx]!;
-          pieceSize +=
-            tx.privacy === "private"
-              ? tx.encryptedChanges.length
-              : tx.changes.length;
+          pieceSize += getTransactionSize(tx);
         }
 
-        if (pieceSize >= MAX_RECOMMENDED_TX_SIZE) {
+        if (exceedsRecommendedSize(pieceSize)) {
           if (!currentPiece.expectContentUntil && pieces.length === 1) {
             currentPiece.expectContentUntil =
               this.knownStateWithStreaming().sessions;
           }
 
-          currentPiece = {
-            action: "content",
-            id: this.id,
-            header: undefined,
-            new: {},
-            priority: getPriorityFromHeader(this.header),
-          };
+          currentPiece = createContentMessage(this.id, this.header, false);
           pieces.push(currentPiece);
           pieceSize = pieceSize - oldPieceSize;
         }

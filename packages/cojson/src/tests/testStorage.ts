@@ -5,11 +5,7 @@ import { join } from "node:path";
 import Database, { type Database as DatabaseT } from "libsql";
 import { onTestFinished } from "vitest";
 import { RawCoID, StorageAPI } from "../exports";
-import {
-  SQLiteDatabaseDriver,
-  StorageApiAsync,
-  StorageApiSync,
-} from "../storage";
+import { SQLiteDatabaseDriver } from "../storage";
 import { getSqliteStorage } from "../storage/sqlite";
 import {
   SQLiteDatabaseDriverAsync,
@@ -148,13 +144,11 @@ function trackStorageMessages(
   const originalLoad = storage.load;
 
   storage.store = function (data, correctionCallback) {
-    for (const msg of data ?? []) {
-      SyncMessagesLog.add({
-        from: nodeName,
-        to: storageName,
-        msg,
-      });
-    }
+    SyncMessagesLog.add({
+      from: nodeName,
+      to: storageName,
+      msg: data,
+    });
 
     return originalStore.call(storage, data, (correction) => {
       SyncMessagesLog.add({
@@ -167,7 +161,19 @@ function trackStorageMessages(
         },
       });
 
-      return correctionCallback(correction);
+      const correctionMessages = correctionCallback(correction);
+
+      if (correctionMessages) {
+        for (const msg of correctionMessages) {
+          SyncMessagesLog.add({
+            from: nodeName,
+            to: storageName,
+            msg,
+          });
+        }
+      }
+
+      return correctionMessages;
     });
   };
 

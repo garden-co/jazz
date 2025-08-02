@@ -184,6 +184,25 @@ test("returns null if the value is unavailable after retries", async () => {
   expect(john).toBeNull();
 });
 
+test("load works even when the coValue access is granted after the creation", async () => {
+  const alice = await createJazzTestAccount();
+  const bob = await createJazzTestAccount();
+
+  const Person = co.map({
+    name: z.string(),
+  });
+
+  const group = Group.create(alice);
+  const map = Person.create({ name: "John" }, group);
+
+  group.addMember("everyone", "reader");
+
+  const mapOnBob = await Person.load(map.id, { loadAs: bob });
+
+  expect(mapOnBob).not.toBeNull();
+  expect(mapOnBob?.name).toBe("John");
+});
+
 test("load a large coValue", async () => {
   const syncServer = await setupJazzTestSync({ asyncPeers: true });
 

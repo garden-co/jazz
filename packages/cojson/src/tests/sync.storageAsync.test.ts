@@ -16,6 +16,7 @@ describe("client with storage syncs with server", () => {
   let jazzCloud: ReturnType<typeof setupTestNode>;
 
   beforeEach(async () => {
+    vi.resetAllMocks();
     SyncMessagesLog.clear();
     jazzCloud = setupTestNode({
       isSyncServer: true,
@@ -174,15 +175,43 @@ describe("client with storage syncs with server", () => {
       [
         "client -> server | LOAD Group sessions: header/3",
         "client -> server | LOAD Map sessions: header/1",
-        "server -> client | CONTENT Group header: true new: After: 0 New: 3",
-        "server -> client | CONTENT Map header: true new: After: 0 New: 2",
         "server -> client | CONTENT Map header: false new: After: 1 New: 1",
-        "client -> server | KNOWN Group sessions: header/3",
-        "client -> storage | CONTENT Group header: true new: After: 0 New: 3",
-        "client -> server | KNOWN Map sessions: header/2",
-        "client -> storage | CONTENT Map header: true new: After: 0 New: 2",
+        "server -> client | KNOWN Group sessions: header/3",
+        "server -> client | CONTENT Map header: false new: After: 1 New: 1",
         "client -> server | KNOWN Map sessions: header/2",
         "client -> storage | CONTENT Map header: false new: After: 1 New: 1",
+        "client -> server | KNOWN Map sessions: header/2",
+        "client -> storage | CONTENT Map header: false new: After: 1 New: 1",
+      ]
+    `);
+  });
+
+  test("the order of updates between CoValues should be preserved to ensure consistency in case of shutdown in the middle of sync", async () => {
+    const client = setupTestNode();
+
+    await client.addAsyncStorage();
+
+    const group = client.node.createGroup();
+    const initialMap = group.createMap();
+
+    const child = group.createMap();
+    child.set("parent", initialMap.id);
+    initialMap.set("child", child.id);
+
+    await initialMap.core.waitForSync();
+
+    expect(
+      SyncMessagesLog.getMessages({
+        Group: group.core,
+        InitialMap: initialMap.core,
+        ChildMap: child.core,
+      }),
+    ).toMatchInlineSnapshot(`
+      [
+        "client -> storage | CONTENT Group header: true new: After: 0 New: 3",
+        "client -> storage | CONTENT InitialMap header: true new: ",
+        "client -> storage | CONTENT ChildMap header: true new: After: 0 New: 1",
+        "client -> storage | CONTENT InitialMap header: false new: After: 0 New: 1",
       ]
     `);
   });
@@ -271,20 +300,16 @@ describe("client syncs with a server with storage", () => {
       [
         "client -> storage | CONTENT Group header: true new: After: 0 New: 5",
         "client -> server | CONTENT Group header: true new: After: 0 New: 5",
-        "client -> storage | CONTENT Map header: true new:  expectContentUntil: header/200",
-        "client -> storage | CONTENT Map header: false new: After: 0 New: 73",
+        "client -> storage | CONTENT Map header: true new: After: 0 New: 73",
+        "client -> server | CONTENT Map header: true new: After: 0 New: 73",
         "client -> storage | CONTENT Map header: false new: After: 73 New: 73",
-        "client -> storage | CONTENT Map header: false new: After: 146 New: 54",
-        "client -> server | CONTENT Map header: true new:  expectContentUntil: header/200",
-        "client -> server | CONTENT Map header: false new: After: 0 New: 73",
         "client -> server | CONTENT Map header: false new: After: 73 New: 73",
+        "client -> storage | CONTENT Map header: false new: After: 146 New: 54",
         "client -> server | CONTENT Map header: false new: After: 146 New: 54",
         "server -> client | KNOWN Group sessions: header/5",
         "server -> storage | CONTENT Group header: true new: After: 0 New: 5",
-        "server -> client | KNOWN Map sessions: header/0",
-        "server -> storage | CONTENT Map header: true new:  expectContentUntil: header/200",
         "server -> client | KNOWN Map sessions: header/73",
-        "server -> storage | CONTENT Map header: false new: After: 0 New: 73",
+        "server -> storage | CONTENT Map header: true new: After: 0 New: 73",
         "server -> client | KNOWN Map sessions: header/146",
         "server -> storage | CONTENT Map header: false new: After: 73 New: 73",
         "server -> client | KNOWN Map sessions: header/200",
@@ -369,7 +394,7 @@ describe("client syncs with a server with storage", () => {
 
     const correctionSpy = vi.fn();
 
-    client.node.storage?.store(newContentChunks.slice(1, 2), correctionSpy);
+    client.node.storage?.store(newContentChunks[1]!, correctionSpy);
 
     // Wait for the content to be stored in the storage
     // We can't use waitForSync because we are trying to store stale data

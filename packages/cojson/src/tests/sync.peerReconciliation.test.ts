@@ -47,6 +47,8 @@ describe("peer reconciliation", () => {
         "server -> client | KNOWN Map sessions: empty",
         "server -> client | KNOWN Group sessions: header/3",
         "server -> client | KNOWN Map sessions: header/1",
+        "client -> server | CONTENT Group header: true new: ",
+        "client -> server | CONTENT Map header: true new: ",
       ]
     `);
   });
@@ -203,7 +205,7 @@ describe("peer reconciliation", () => {
         "server -> client | KNOWN CORRECTION Map sessions: empty",
         "client -> server | CONTENT Map header: true new: After: 0 New: 2",
         "server -> client | LOAD Group sessions: empty",
-        "server -> client | KNOWN Map sessions: empty",
+        "server -> client | KNOWN Map sessions: header/2",
         "client -> server | CONTENT Group header: true new: After: 0 New: 3",
         "server -> client | KNOWN Group sessions: header/3",
       ]
@@ -276,8 +278,8 @@ describe("peer reconciliation", () => {
         "client -> server | CONTENT Profile header: true new: After: 0 New: 1",
         "client -> server | CONTENT Map header: false new: After: 1 New: 1",
         "server -> client | LOAD Account sessions: empty",
-        "server -> client | KNOWN ProfileGroup sessions: empty",
-        "server -> client | KNOWN Profile sessions: empty",
+        "server -> client | KNOWN ProfileGroup sessions: header/0",
+        "server -> client | KNOWN Profile sessions: header/0",
         "server -> client | KNOWN CORRECTION Map sessions: empty",
         "client -> server | CONTENT Account header: true new: After: 0 New: 4",
         "client -> server | CONTENT Map header: true new: After: 0 New: 2",
@@ -285,7 +287,7 @@ describe("peer reconciliation", () => {
         "server -> client | KNOWN ProfileGroup sessions: header/5",
         "server -> client | KNOWN Profile sessions: header/1",
         "server -> client | LOAD Group sessions: empty",
-        "server -> client | KNOWN Map sessions: empty",
+        "server -> client | KNOWN Map sessions: header/2",
         "client -> server | CONTENT Group header: true new: After: 0 New: 3",
         "server -> client | KNOWN Group sessions: header/3",
       ]

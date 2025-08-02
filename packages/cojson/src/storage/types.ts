@@ -6,6 +6,10 @@ import { Signature } from "../crypto/crypto.js";
 import type { CoValueCore, RawCoID, SessionID } from "../exports.js";
 import { CoValueKnownState, NewContentMessage } from "../sync.js";
 
+export type CorrectionCallback = (
+  correction: CoValueKnownState,
+) => NewContentMessage[] | undefined;
+
 /**
  * The StorageAPI is the interface that the StorageSync and StorageAsync classes implement.
  *
@@ -18,16 +22,13 @@ export interface StorageAPI {
     callback: (data: NewContentMessage) => void,
     done?: (found: boolean) => void,
   ): void;
-  store(
-    data: NewContentMessage[] | undefined,
-    handleCorrection: (correction: CoValueKnownState) => void,
-  ): void;
+  store(data: NewContentMessage, handleCorrection: CorrectionCallback): void;
 
   getKnownState(id: string): CoValueKnownState;
 
   waitForSync(id: string, coValue: CoValueCore): Promise<void>;
 
-  close(): void;
+  close(): Promise<unknown> | undefined;
 }
 
 export type CoValueRow = {

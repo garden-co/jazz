@@ -700,8 +700,8 @@ export class RawGroup<
 
     const value = role === "inherit" ? "extend" : role;
 
-    this.set(`parent_${parent.id}`, value, "trusting");
     parent.set(`child_${this.id}`, "extend", "trusting");
+    this.set(`parent_${parent.id}`, value, "trusting");
 
     if (
       parent.myRole() !== "admin" &&

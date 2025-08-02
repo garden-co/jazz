@@ -211,8 +211,9 @@ test("should load dependencies correctly (group inheritance)", async () => {
     ),
   ).toMatchInlineSnapshot(`
     [
-      "client -> CONTENT Group header: true new: After: 0 New: 5",
+      "client -> CONTENT Group header: true new: After: 0 New: 3",
       "client -> CONTENT ParentGroup header: true new: After: 0 New: 4",
+      "client -> CONTENT Group header: false new: After: 3 New: 2",
       "client -> CONTENT Map header: true new: After: 0 New: 1",
     ]
   `);
@@ -374,6 +375,8 @@ test("should recover from data loss", async () => {
     [
       "client -> CONTENT Group header: true new: After: 0 New: 3",
       "client -> CONTENT Map header: true new: After: 0 New: 1",
+      "client -> CONTENT Map header: false new: After: 3 New: 1",
+      "storage -> KNOWN CORRECTION Map sessions: header/4",
       "client -> CONTENT Map header: false new: After: 1 New: 3",
     ]
   `);
@@ -455,10 +458,7 @@ test("should recover missing dependencies from storage", async () => {
       data,
       correctionCallback,
     ) {
-      if (
-        data[0]?.id &&
-        [group.core.id, account.core.id as string].includes(data[0].id)
-      ) {
+      if ([group.core.id, account.core.id as string].includes(data.id)) {
         return false;
       }
 

@@ -351,7 +351,7 @@ export class LocalNode {
       new VerifiedState(id, this.crypto, header, new Map()),
     );
 
-    void this.syncManager.requestCoValueSync(coValue);
+    this.syncManager.syncHeader(coValue.verified);
 
     return coValue;
   }
@@ -738,9 +738,14 @@ export class LocalNode {
     }
   }
 
-  gracefulShutdown() {
-    this.storage?.close();
+  /**
+   * Closes all the peer connections, drains all the queues and closes the storage.
+   *
+   * @returns Promise of the current pending store operation, if any.
+   */
+  gracefulShutdown(): Promise<unknown> | undefined {
     this.syncManager.gracefulShutdown();
+    return this.storage?.close();
   }
 }
 

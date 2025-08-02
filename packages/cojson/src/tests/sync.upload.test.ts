@@ -78,12 +78,15 @@ describe("client to server upload", () => {
       }),
     ).toMatchInlineSnapshot(`
       [
+        "client -> server | CONTENT Group header: true new: After: 0 New: 3",
         "client -> server | CONTENT ParentGroup header: true new: After: 0 New: 6",
-        "client -> server | CONTENT Group header: true new: After: 0 New: 5",
+        "client -> server | CONTENT Group header: false new: After: 3 New: 2",
         "client -> server | CONTENT Map header: true new: After: 0 New: 1",
+        "server -> client | KNOWN Group sessions: header/3",
         "server -> client | KNOWN ParentGroup sessions: header/6",
         "server -> client | KNOWN Group sessions: header/5",
         "server -> client | KNOWN Map sessions: header/1",
+        "client -> server | CONTENT ParentGroup header: true new: ",
       ]
     `);
   });
@@ -249,6 +252,40 @@ describe("client to server upload", () => {
         "server -> otherClient | KNOWN Colist sessions: header/5",
         "server -> client | CONTENT Colist header: false new: After: 0 New: 2",
         "client -> server | KNOWN Colist sessions: header/5",
+      ]
+    `);
+  });
+
+  test("local updates batching", async () => {
+    const client = setupTestNode({
+      connected: true,
+    });
+
+    const group = client.node.createGroup();
+    const initialMap = group.createMap();
+
+    const child = group.createMap();
+    child.set("parent", initialMap.id);
+    initialMap.set("child", child.id);
+
+    await initialMap.core.waitForSync();
+
+    expect(
+      SyncMessagesLog.getMessages({
+        Group: group.core,
+        InitialMap: initialMap.core,
+        ChildMap: child.core,
+      }),
+    ).toMatchInlineSnapshot(`
+      [
+        "client -> server | CONTENT Group header: true new: After: 0 New: 3",
+        "client -> server | CONTENT InitialMap header: true new: ",
+        "client -> server | CONTENT ChildMap header: true new: After: 0 New: 1",
+        "client -> server | CONTENT InitialMap header: false new: After: 0 New: 1",
+        "server -> client | KNOWN Group sessions: header/3",
+        "server -> client | KNOWN InitialMap sessions: header/0",
+        "server -> client | KNOWN ChildMap sessions: header/1",
+        "server -> client | KNOWN InitialMap sessions: header/1",
       ]
     `);
   });

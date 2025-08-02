@@ -179,8 +179,9 @@ test("should load dependencies correctly (group inheritance)", async () => {
     ),
   ).toMatchInlineSnapshot(`
     [
-      "client -> CONTENT Group header: true new: After: 0 New: 5",
+      "client -> CONTENT Group header: true new: After: 0 New: 3",
       "client -> CONTENT ParentGroup header: true new: After: 0 New: 4",
+      "client -> CONTENT Group header: false new: After: 3 New: 2",
       "client -> CONTENT Map header: true new: After: 0 New: 1",
     ]
   `);
@@ -561,9 +562,10 @@ test("should sync and load accounts from storage", async () => {
     ),
   ).toMatchInlineSnapshot(`
     [
-      "client -> CONTENT Account header: true new: After: 0 New: 4",
+      "client -> CONTENT Account header: true new: After: 0 New: 3",
       "client -> CONTENT ProfileGroup header: true new: After: 0 New: 5",
       "client -> CONTENT Profile header: true new: After: 0 New: 1",
+      "client -> CONTENT Account header: false new: After: 3 New: 1",
     ]
   `);
 

@@ -2,15 +2,13 @@ import { beforeEach, describe, expect, test, vi } from "vitest";
 import { StoreQueue } from "../queue/StoreQueue.js";
 import type { CoValueKnownState, NewContentMessage } from "../sync.js";
 
-function createMockNewContentMessage(id: string): NewContentMessage[] {
-  return [
-    {
-      action: "content",
-      id: id as any,
-      priority: 0,
-      new: {},
-    },
-  ];
+function createMockNewContentMessage(id: string): NewContentMessage {
+  return {
+    action: "content",
+    id: id as any,
+    priority: 0,
+    new: {},
+  };
 }
 
 function setup() {
@@ -154,14 +152,14 @@ describe("StoreQueue", () => {
       storeQueue.push(data1, mockCorrectionCallback);
       storeQueue.push(data2, mockCorrectionCallback);
 
-      storeQueue.drain();
+      storeQueue.close();
 
       expect(storeQueue.pull()).toBeUndefined();
     });
 
     test("should handle empty queue", () => {
       const { storeQueue } = setup();
-      expect(() => storeQueue.drain()).not.toThrow();
+      expect(() => storeQueue.close()).not.toThrow();
       expect(storeQueue.pull()).toBeUndefined();
     });
   });
@@ -240,23 +238,11 @@ describe("StoreQueue", () => {
   });
 
   describe("edge cases", () => {
-    test("should handle undefined data", () => {
-      const { storeQueue, mockCorrectionCallback } = setup();
-      const data: NewContentMessage[] = [];
-      storeQueue.push(data, mockCorrectionCallback);
-
-      const entry = storeQueue.pull();
-      expect(entry).toEqual({
-        data,
-        correctionCallback: mockCorrectionCallback,
-      });
-    });
-
     test("should handle null correction callback", () => {
       const { storeQueue } = setup();
       const data = createMockNewContentMessage("co1");
 
-      const nullCallback = () => {};
+      const nullCallback = () => undefined;
       storeQueue.push(data, nullCallback);
 
       const entry = storeQueue.pull();

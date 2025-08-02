@@ -100,15 +100,18 @@ test("Can sync a coValue with private transactions through a server to another c
 
   const map = group.createMap();
   map.set("hello", "world", "private");
+
   group.addMember("everyone", "reader");
 
   const { node: client2 } = await setupTestAccount({
     connected: true,
   });
 
-  const mapOnClient2 = await loadCoValueOrFail(client2, map.id);
+  await waitFor(async () => {
+    const loadedMap = await loadCoValueOrFail(client2, map.id);
 
-  expect(mapOnClient2.get("hello")).toEqual("world");
+    expect(loadedMap.get("hello")).toEqual("world");
+  });
 });
 
 test("should keep the peer state when the peer closes if persistent is true", async () => {
@@ -563,8 +566,6 @@ describe("SyncManager - knownStates vs optimisticKnownStates", () => {
     const mapOnClient = group.createMap();
     mapOnClient.set("key1", "value1", "trusting");
 
-    await client.syncManager.syncCoValue(mapOnClient.core);
-
     // Wait for the full sync to complete
     await mapOnClient.core.waitForSync();
 
@@ -594,7 +595,6 @@ describe("SyncManager - knownStates vs optimisticKnownStates", () => {
     const map = group.createMap();
     map.set("key1", "value1", "trusting");
 
-    await client.node.syncManager.syncCoValue(map.core);
     await map.core.waitForSync();
 
     // Block the content messages
@@ -606,7 +606,7 @@ describe("SyncManager - knownStates vs optimisticKnownStates", () => {
 
     map.set("key2", "value2", "trusting");
 
-    await client.node.syncManager.syncCoValue(map.core);
+    await new Promise<void>(queueMicrotask);
 
     expect(peerState.optimisticKnownStates.get(map.core.id)).not.toEqual(
       peerState.knownStates.get(map.core.id),
@@ -638,8 +638,6 @@ describe("SyncManager.addPeer", () => {
     const map = group.createMap();
     map.set("key1", "value1", "trusting");
 
-    await client.node.syncManager.syncCoValue(map.core);
-
     // Wait for initial sync
     await map.core.waitForSync();
 
@@ -670,8 +668,6 @@ describe("SyncManager.addPeer", () => {
     const group = client.node.createGroup();
     const map = group.createMap();
     map.set("key1", "value1", "trusting");
-
-    await client.node.syncManager.syncCoValue(map.core);
 
     // Wait for initial sync
     await map.core.waitForSync();
@@ -843,8 +839,6 @@ describe("waitForSyncWithPeer", () => {
     const map = group.createMap();
     map.set("key1", "value1", "trusting");
 
-    await client.node.syncManager.syncCoValue(map.core);
-
     await expect(
       client.node.syncManager.waitForSyncWithPeer(
         peerState.id,
@@ -867,8 +861,6 @@ describe("waitForSyncWithPeer", () => {
     vi.spyOn(peerState, "pushOutgoingMessage").mockImplementation(async () => {
       return Promise.resolve();
     });
-
-    await client.node.syncManager.syncCoValue(map.core);
 
     await expect(
       client.node.syncManager.waitForSyncWithPeer(

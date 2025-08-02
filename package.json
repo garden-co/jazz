@@ -31,7 +31,7 @@
     "build:packages": "turbo build --filter='./packages/*'",
     "lint": "turbo lint && cd homepage/homepage && pnpm run lint",
     "test": "vitest",
-    "test:ci": "vitest run --watch=false --coverage.enabled=true",
+    "test:ci": "vitest run --watch=false",
     "test:coverage": "vitest --ui --coverage.enabled=true",
     "format-and-lint": "biome check .",
     "format-and-lint:fix": "biome check . --write",

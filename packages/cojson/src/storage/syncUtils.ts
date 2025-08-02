@@ -1,5 +1,9 @@
+import { getTransactionSize } from "../coValueContentMessage.js";
 import { getDependedOnCoValuesFromRawData } from "../coValueCore/utils.js";
-import type { CoValueHeader } from "../coValueCore/verifiedState.js";
+import type {
+  CoValueHeader,
+  Transaction,
+} from "../coValueCore/verifiedState.js";
 import type { Signature } from "../crypto/crypto.js";
 import type { SessionID } from "../exports.js";
 import type { NewContentMessage } from "../sync.js";
@@ -47,4 +51,8 @@ export function getDependedOnCoValues(
   );
 
   return getDependedOnCoValuesFromRawData(id, header, sessionIDs, transactions);
+}
+
+export function getNewTransactionsSize(newTxs: Transaction[]) {
+  return newTxs.reduce((sum, tx) => sum + getTransactionSize(tx), 0);
 }

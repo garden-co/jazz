@@ -1,19 +1,22 @@
+import { CorrectionCallback } from "../exports.js";
 import { logger } from "../logger.js";
-import { CoValueKnownState, NewContentMessage } from "../sync.js";
+import { NewContentMessage } from "../sync.js";
 import { LinkedList } from "./LinkedList.js";
 
 type StoreQueueEntry = {
-  data: NewContentMessage[];
-  correctionCallback: (data: CoValueKnownState) => void;
+  data: NewContentMessage;
+  correctionCallback: CorrectionCallback;
 };
 
 export class StoreQueue {
   private queue = new LinkedList<StoreQueueEntry>();
+  closed = false;
 
-  public push(
-    data: NewContentMessage[],
-    correctionCallback: (data: CoValueKnownState) => void,
-  ) {
+  public push(data: NewContentMessage, correctionCallback: CorrectionCallback) {
+    if (this.closed) {
+      return;
+    }
+
     this.queue.push({ data, correctionCallback });
   }
 
@@ -22,12 +25,13 @@ export class StoreQueue {
   }
 
   processing = false;
+  lastCallback: Promise<unknown> | undefined;
 
   async processQueue(
     callback: (
-      data: NewContentMessage[],
-      correctionCallback: (data: CoValueKnownState) => void,
-    ) => Promise<void>,
+      data: NewContentMessage,
+      correctionCallback: CorrectionCallback,
+    ) => Promise<unknown>,
   ) {
     if (this.processing) {
       return;
@@ -41,16 +45,22 @@ export class StoreQueue {
       const { data, correctionCallback } = entry;
 
       try {
-        await callback(data, correctionCallback);
+        this.lastCallback = callback(data, correctionCallback);
+        await this.lastCallback;
       } catch (err) {
         logger.error("Error processing message in store queue", { err });
       }
     }
 
+    this.lastCallback = undefined;
     this.processing = false;
   }
 
-  drain() {
+  close() {
+    this.closed = true;
+
     while (this.pull()) {}
+
+    return this.lastCallback;
   }
 }
