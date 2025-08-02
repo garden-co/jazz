@@ -1,3 +1,4 @@
+import { ValueType, metrics } from "@opentelemetry/api";
 import type { DisconnectedError, SyncMessage } from "cojson";
 import type { Peer } from "cojson";
 import {
@@ -15,7 +16,7 @@ import {
   waitForWebSocketOpen,
 } from "./utils.js";
 
-const { CO_VALUE_PRIORITY } = cojsonInternals;
+const { CO_VALUE_PRIORITY, getContentMessageSize } = cojsonInternals;
 
 export const MAX_OUTGOING_MESSAGES_CHUNK_BYTES = 25_000;
 
@@ -26,11 +27,22 @@ export class BatchedOutgoingMessages
   private queue: PriorityBasedMessageQueue;
   private processing = false;
   private closed = false;
+  private counter = metrics
+    .getMeter("cojson-transport-ws")
+    .createCounter("jazz.usage.egress", {
+      description: "Total egress bytes",
+      unit: "bytes",
+      valueType: ValueType.INT,
+    });
 
   constructor(
     private websocket: AnyWebSocket,
     private batching: boolean,
     peerRole: Peer["role"],
+    /**
+     * Additional key-value pair of attributes to add to the egress metric.
+     */
+    private meta?: Record<string, string | number>,
   ) {
     this.queue = new PriorityBasedMessageQueue(
       CO_VALUE_PRIORITY.HIGH,
@@ -39,6 +51,9 @@ export class BatchedOutgoingMessages
         peerRole: peerRole,
       },
     );
+
+    // Initialize the counter by adding 0
+    this.counter.add(0, this.meta);
   }
 
   push(msg: SyncMessage | DisconnectedError) {
@@ -93,7 +108,11 @@ export class BatchedOutgoingMessages
     this.processing = false;
   }
 
-  processMessage(msg: SyncMessage) {
+  private processMessage(msg: SyncMessage) {
+    if (msg.action === "content") {
+      this.counter.add(getContentMessageSize(msg), this.meta);
+    }
+
     if (!this.batching) {
       this.websocket.send(JSON.stringify(msg));
       return;
@@ -116,7 +135,7 @@ export class BatchedOutgoingMessages
     }
   }
 
-  sendMessagesInBulk() {
+  private sendMessagesInBulk() {
     if (this.backlog.length > 0 && isWebSocketOpen(this.websocket)) {
       this.websocket.send(this.backlog);
       this.backlog = "";

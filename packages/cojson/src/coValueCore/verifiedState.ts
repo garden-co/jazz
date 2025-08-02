@@ -18,6 +18,7 @@ import { getPriorityFromHeader } from "../priority.js";
 import { CoValueKnownState, NewContentMessage } from "../sync.js";
 import { InvalidHashError, InvalidSignatureError } from "./coValueCore.js";
 import { TryAddTransactionsError } from "./coValueCore.js";
+import { getTransactionSize } from "./utils.js";
 
 export type CoValueHeader = {
   type: AnyRawCoValue["type"];
@@ -173,14 +174,7 @@ export class VerifiedState {
 
     const sizeOfTxsSinceLastInbetweenSignature = transactions
       .slice(lastInbetweenSignatureIdx + 1)
-      .reduce(
-        (sum, tx) =>
-          sum +
-          (tx.privacy === "private"
-            ? tx.encryptedChanges.length
-            : tx.changes.length),
-        0,
-      );
+      .reduce((sum, tx) => sum + getTransactionSize(tx), 0);
 
     if (sizeOfTxsSinceLastInbetweenSignature > MAX_RECOMMENDED_TX_SIZE) {
       signatureAfter[transactions.length - 1] = newSignature;

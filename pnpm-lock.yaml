@@ -1683,10 +1683,16 @@ importers:
 
   packages/cojson-transport-ws:
     dependencies:
+      '@opentelemetry/api':
+        specifier: ^1.9.0
+        version: 1.9.0
       cojson:
         specifier: workspace:*
         version: link:../cojson
     devDependencies:
+      '@opentelemetry/sdk-metrics':
+        specifier: ^2.0.0
+        version: 2.0.0(@opentelemetry/api@1.9.0)
       '@types/ws':
         specifier: 8.5.10
         version: 8.5.10

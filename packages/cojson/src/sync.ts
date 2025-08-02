@@ -2,7 +2,10 @@ import { Histogram, ValueType, metrics } from "@opentelemetry/api";
 import { PeerState } from "./PeerState.js";
 import { SyncStateManager } from "./SyncStateManager.js";
 import { CoValueCore } from "./coValueCore/coValueCore.js";
-import { getDependedOnCoValuesFromRawData } from "./coValueCore/utils.js";
+import {
+  getDependedOnCoValuesFromRawData,
+  getTransactionSize,
+} from "./coValueCore/utils.js";
 import { CoValueHeader, Transaction } from "./coValueCore/verifiedState.js";
 import { Signature } from "./crypto/crypto.js";
 import { RawCoID, SessionID } from "./ids.js";
@@ -431,12 +434,7 @@ export class SyncManager {
 
   recordTransactionsSize(newTransactions: Transaction[], source: string) {
     for (const tx of newTransactions) {
-      const txLength =
-        tx.privacy === "private"
-          ? tx.encryptedChanges.length
-          : tx.changes.length;
-
-      this.transactionsSizeHistogram.record(txLength, {
+      this.transactionsSizeHistogram.record(getTransactionSize(tx), {
         source,
       });
     }

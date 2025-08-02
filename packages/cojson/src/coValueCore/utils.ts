@@ -2,6 +2,7 @@ import { getGroupDependentKey } from "../ids.js";
 import { RawCoID, SessionID } from "../ids.js";
 import { Stringified, parseJSON } from "../jsonStringify.js";
 import { JsonValue } from "../jsonValue.js";
+import { NewContentMessage } from "../sync.js";
 import { accountOrAgentIDfromSessionID } from "../typeUtils/accountOrAgentIDfromSessionID.js";
 import { isAccountID } from "../typeUtils/isAccountID.js";
 import { CoValueHeader, Transaction } from "./verifiedState.js";
@@ -61,4 +62,22 @@ function safeParseChanges(value: Stringified<JsonValue[]>): JsonValue[] {
   } catch (e) {
     return [];
   }
+}
+
+export function getContentMessageSize(msg: NewContentMessage) {
+  return Object.values(msg.new).reduce((acc, sessionNewContent) => {
+    return (
+      acc +
+      sessionNewContent.newTransactions.reduce((acc, tx) => {
+        return acc + getTransactionSize(tx);
+      }, 0)
+    );
+  }, 0);
+}
+
+export function getTransactionSize(tx: Transaction): number {
+  if (tx.privacy === "private") {
+    return tx.encryptedChanges.length;
+  }
+  return tx.changes.length;
 }

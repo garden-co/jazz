@@ -1,6 +1,6 @@
 import type { CojsonInternalTypes, SyncMessage } from "cojson";
 import { cojsonInternals } from "cojson";
-import { type Mocked, describe, expect, test, vi } from "vitest";
+import { type Mocked, afterEach, describe, expect, test, vi } from "vitest";
 import { MAX_OUTGOING_MESSAGES_CHUNK_BYTES } from "../BatchedOutgoingMessages.js";
 import {
   type CreateWebSocketPeerOpts,
@@ -8,6 +8,7 @@ import {
 } from "../createWebSocketPeer.js";
 import type { AnyWebSocket } from "../types.js";
 import { BUFFER_LIMIT, BUFFER_LIMIT_POLLING_INTERVAL } from "../utils.js";
+import { createTestMetricReader, tearDownTestMetricReader } from "./utils.js";
 
 const { CO_VALUE_PRIORITY } = cojsonInternals;
 
@@ -518,6 +519,89 @@ describe("createWebSocketPeer", () => {
         2,
         JSON.stringify(message2),
       );
+    });
+  });
+
+  describe("telemetry", () => {
+    afterEach(() => {
+      tearDownTestMetricReader();
+    });
+
+    test("should initialize to 0 when creating a websocket peer", async () => {
+      const metricReader = createTestMetricReader();
+      setup({
+        meta: { test: "test" },
+      });
+
+      const measuredIngress = await metricReader.getMetricValue(
+        "jazz.usage.ingress",
+        {
+          test: "test",
+        },
+      );
+      expect(measuredIngress).toBe(0);
+    });
+
+    test("should correctly measure incoming ingress", async () => {
+      const metricReader = createTestMetricReader();
+      const { listeners } = setup({
+        meta: { label: "value" },
+      });
+
+      const messageHandler = listeners.get("message");
+
+      const encryptedChanges = "Hello, world!";
+      messageHandler?.(
+        new MessageEvent("message", {
+          data: JSON.stringify({
+            action: "content",
+            new: {
+              someSessionId: {
+                after: 0,
+                newTransactions: [
+                  {
+                    privacy: "private" as const,
+                    madeAt: 0,
+                    keyUsed: "key_zkey" as const,
+                    encryptedChanges,
+                  },
+                ],
+              },
+            },
+          }),
+        }),
+      );
+
+      expect(
+        await metricReader.getMetricValue("jazz.usage.ingress", {
+          label: "value",
+        }),
+      ).toBe(encryptedChanges.length);
+
+      const trustingChanges = "Jazz is great!";
+      messageHandler?.(
+        new MessageEvent("message", {
+          data: JSON.stringify({
+            action: "content",
+            new: {
+              someSessionId: {
+                newTransactions: [
+                  {
+                    privacy: "trusting",
+                    changes: trustingChanges,
+                  },
+                ],
+              },
+            },
+          }),
+        }),
+      );
+
+      expect(
+        await metricReader.getMetricValue("jazz.usage.ingress", {
+          label: "value",
+        }),
+      ).toBe(encryptedChanges.length + trustingChanges.length);
     });
   });
 });
