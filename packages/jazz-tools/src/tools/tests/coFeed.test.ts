@@ -49,7 +49,7 @@ describe("Simple CoFeed operations", async () => {
 
   test("Construction", () => {
     expect(stream.perAccount[me.id]?.value).toEqual("milk");
-    expect(stream.perSession[me.sessionID]?.value).toEqual("milk");
+    expect(stream.perSession[me.$jazz.sessionID]?.value).toEqual("milk");
   });
 
   describe("Create CoFeed with a reference", () => {
@@ -97,14 +97,14 @@ describe("Simple CoFeed operations", async () => {
     const stream = NullableTestStream.create(["milk", null], { owner: me });
 
     expect(stream.perAccount[me.id]?.value).toEqual(null);
-    expect(stream.perSession[me.sessionID]?.value).toEqual(null);
+    expect(stream.perSession[me.$jazz.sessionID]?.value).toEqual(null);
   });
 
   test("Construction with an Account", () => {
     const stream = TestStream.create(["milk"], me);
 
     expect(stream.perAccount[me.id]?.value).toEqual("milk");
-    expect(stream.perSession[me.sessionID]?.value).toEqual("milk");
+    expect(stream.perSession[me.$jazz.sessionID]?.value).toEqual("milk");
   });
 
   test("Construction with a Group", () => {
@@ -112,18 +112,18 @@ describe("Simple CoFeed operations", async () => {
     const stream = TestStream.create(["milk"], group);
 
     expect(stream.perAccount[me.id]?.value).toEqual("milk");
-    expect(stream.perSession[me.sessionID]?.value).toEqual("milk");
+    expect(stream.perSession[me.$jazz.sessionID]?.value).toEqual("milk");
   });
 
   describe("Mutation", () => {
     test("pushing", () => {
       stream.push("bread");
       expect(stream.perAccount[me.id]?.value).toEqual("bread");
-      expect(stream.perSession[me.sessionID]?.value).toEqual("bread");
+      expect(stream.perSession[me.$jazz.sessionID]?.value).toEqual("bread");
 
       stream.push("butter");
       expect(stream.perAccount[me.id]?.value).toEqual("butter");
-      expect(stream.perSession[me.sessionID]?.value).toEqual("butter");
+      expect(stream.perSession[me.$jazz.sessionID]?.value).toEqual("butter");
     });
   });
 });
@@ -227,11 +227,11 @@ describe("CoFeed resolution", async () => {
 
     // When assigning a new nested stream, we get an update
     const newTwiceNested = TwiceNestedStream.create(["butter"], {
-      owner: stream._owner,
+      owner: stream.$jazz.owner,
     });
 
     const newNested = NestedStream.create([newTwiceNested], {
-      owner: stream._owner,
+      owner: stream.$jazz.owner,
     });
 
     stream.push(newNested);
@@ -728,8 +728,8 @@ describe("FileStream large file loading", async () => {
     expect(loadedChunks).not.toBeNull();
     expect(loadedChunks?.finished).toBe(undefined);
 
-    expect(loadedStream._raw.core.knownState()).not.toEqual(
-      largeStream._raw.core.knownState(),
+    expect(loadedStream.$jazz.raw.core.knownState()).not.toEqual(
+      largeStream.$jazz.raw.core.knownState(),
     );
   });
 
@@ -776,8 +776,8 @@ describe("FileStream large file loading", async () => {
     expect(loadedChunks?.finished).toBe(true);
     expect(loadedChunks?.chunks).toHaveLength(numChunks); // 100 chunks of 1KB each
 
-    expect(loadedStream._raw.core.knownState()).toEqual(
-      largeStream._raw.core.knownState(),
+    expect(loadedStream.$jazz.raw.core.knownState()).toEqual(
+      largeStream.$jazz.raw.core.knownState(),
     );
   });
 });
@@ -795,7 +795,7 @@ describe("waitForSync", async () => {
     // Killing the client node so the serverNode can't load the map from it
     clientNode.gracefulShutdown();
 
-    const loadedStream = await serverNode.load(stream._raw.id);
+    const loadedStream = await serverNode.load(stream.$jazz.raw.id);
 
     expect(loadedStream).not.toBe("unavailable");
   });
@@ -814,7 +814,7 @@ describe("waitForSync", async () => {
     // Killing the client node so the serverNode can't load the map from it
     clientNode.gracefulShutdown();
 
-    const loadedStream = await serverNode.load(stream._raw.id);
+    const loadedStream = await serverNode.load(stream.$jazz.raw.id);
 
     expect(loadedStream).not.toBe("unavailable");
   });
@@ -825,9 +825,9 @@ describe("waitForSync", async () => {
     });
 
     const stream = FileStream.create();
-    expect(stream._owner._type).toEqual("Group");
-    expect(stream._owner.castAs(Group)._raw.roleOf(account._raw.id)).toEqual(
-      "admin",
-    );
+    expect(stream.$jazz.owner._type).toEqual("Group");
+    expect(
+      stream.$jazz.owner.castAs(Group).$jazz.raw.roleOf(account.$jazz.raw.id),
+    ).toEqual("admin");
   });
 });

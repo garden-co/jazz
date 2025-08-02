@@ -82,7 +82,7 @@ export class BrowserPasskeyAuth {
       username,
     });
 
-    const currentAccount = await Account.getMe().ensureLoaded({
+    const currentAccount = await Account.getMe().$jazz.ensureLoaded({
       resolve: {
         profile: true,
       },

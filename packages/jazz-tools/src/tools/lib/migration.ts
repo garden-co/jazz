@@ -1,7 +1,7 @@
 import type { CoValue } from "../internal.js";
 
 export function applyCoValueMigrations(instance: CoValue) {
-  const node = instance._raw.core.node;
+  const node = instance.$jazz.raw.core.node;
 
   // @ts-expect-error _migratedCoValues is a custom expando property
   const migratedCoValues = (node._migratedCoValues ??= new Set<string>());

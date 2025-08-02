@@ -37,7 +37,7 @@ describe("useAccount", () => {
         profile: co.profile(),
       })
       .withMigration((account, creationProps) => {
-        if (!account._refs.root) {
+        if (!account.$jazz.refs.root) {
           account.root = AccountRoot.create(
             { value: "123" },
             { owner: account },
@@ -168,7 +168,8 @@ describe("useAccount", () => {
       await result.current?.contextManager?.authenticate({
         accountID: accountToAuthenticate.id,
         accountSecret:
-          accountToAuthenticate._raw.core.node.getCurrentAgent().agentSecret,
+          accountToAuthenticate.$jazz.raw.core.node.getCurrentAgent()
+            .agentSecret,
       });
     });
 
@@ -200,7 +201,7 @@ describe("useAccount", () => {
         profile: co.profile(),
       })
       .withMigration((account, creationProps) => {
-        if (!account._refs.root) {
+        if (!account.$jazz.refs.root) {
           account.root = AccountRoot.create(
             { value: "123" },
             { owner: account },

@@ -64,7 +64,7 @@ export class DemoAuth {
       throw new Error("No credentials found");
     }
 
-    const currentAccount = await Account.getMe().ensureLoaded({
+    const currentAccount = await Account.getMe().$jazz.ensureLoaded({
       resolve: {
         profile: true,
       },

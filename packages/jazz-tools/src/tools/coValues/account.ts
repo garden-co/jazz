@@ -21,10 +21,9 @@ import {
   CoValueBase,
   CoValueClass,
   CoValueClassOrSchema,
-  CoreAccountSchema,
+  CoValueJazzApi,
   type Group,
   ID,
-  InstanceOfSchema,
   InstanceOrPrimitiveOfSchema,
   Profile,
   Ref,
@@ -70,16 +69,17 @@ type AccountMembers<A extends Account> = [
 export class Account extends CoValueBase implements CoValue {
   declare id: ID<this>;
   declare _type: "Account";
-  declare _raw: RawAccount;
+
+  /**
+   * Jazz methods for Accounts are inside this property.
+   *
+   * This allows Accounts to be used as plain objects while still having
+   * access to Jazz methods.
+   */
+  declare $jazz: AccountJazzApi<this>;
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   static _schema: any;
-  get _schema(): {
-    profile: Schema;
-    root: Schema;
-  } {
-    return (this.constructor as typeof Account)._schema;
-  }
   static {
     this._schema = {
       profile: {
@@ -93,119 +93,40 @@ export class Account extends CoValueBase implements CoValue {
     };
   }
 
-  get _owner(): Account {
-    return this as Account;
-  }
-  get _loadedAs(): Account | AnonymousJazzAgent {
-    if (this.isLocalNodeOwner) return this;
-
-    const agent = this._raw.core.node.getCurrentAgent();
-
-    if (agent instanceof ControlledAccount) {
-      return coValuesCache.get(agent.account, () =>
-        Account.fromRaw(agent.account),
-      );
-    }
-
-    return new AnonymousJazzAgent(this._raw.core.node);
-  }
-
   declare profile: Profile | null;
   declare root: CoMap | null;
-
-  getDescriptor(key: string) {
-    if (key === "profile") {
-      return this._schema.profile;
-    } else if (key === "root") {
-      return this._schema.root;
-    }
-
-    return undefined;
-  }
-
-  get _refs(): {
-    profile: RefIfCoValue<Profile> | undefined;
-    root: RefIfCoValue<CoMap> | undefined;
-  } {
-    const profileID = this._raw.get("profile") as unknown as
-      | ID<NonNullable<this["profile"]>>
-      | undefined;
-    const rootID = this._raw.get("root") as unknown as
-      | ID<NonNullable<this["root"]>>
-      | undefined;
-
-    return {
-      profile: profileID
-        ? (new Ref(
-            profileID,
-            this._loadedAs,
-            this._schema.profile as RefEncoded<
-              NonNullable<this["profile"]> & CoValue
-            >,
-            this,
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          ) as any as RefIfCoValue<this["profile"]>)
-        : undefined,
-      root: rootID
-        ? (new Ref(
-            rootID,
-            this._loadedAs,
-            this._schema.root as RefEncoded<
-              NonNullable<this["root"]> & CoValue
-            >,
-            this,
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          ) as any as RefIfCoValue<this["root"]>)
-        : undefined,
-    };
-  }
-
-  /**
-   * Whether this account is the currently active account.
-   */
-  get isMe() {
-    return activeAccountContext.get().id === this.id;
-  }
-
-  /**
-   * Whether this account is the owner of the local node.
-   */
-  isLocalNodeOwner: boolean;
-  sessionID: SessionID | undefined;
 
   constructor(options: { fromRaw: RawAccount }) {
     super();
     if (!("fromRaw" in options)) {
       throw new Error("Can only construct account from raw or with .create()");
     }
-    this.isLocalNodeOwner =
-      options.fromRaw.id == options.fromRaw.core.node.getCurrentAgent().id;
 
     Object.defineProperties(this, {
       id: {
         value: options.fromRaw.id,
         enumerable: false,
       },
-      _raw: { value: options.fromRaw, enumerable: false },
       _type: { value: "Account", enumerable: false },
+      $jazz: {
+        value: new AccountJazzApi(this, options.fromRaw),
+        enumerable: false,
+      },
     });
-
-    if (this.isLocalNodeOwner) {
-      this.sessionID = options.fromRaw.core.node.currentSessionID;
-    }
 
     return new Proxy(this, AccountAndGroupProxyHandler as ProxyHandler<this>);
   }
 
+  // TODO Q: does it make sense to move Group methods into `$jazz` as well?
   myRole(): "admin" | undefined {
-    if (this.isLocalNodeOwner) {
+    if (this.$jazz.isLocalNodeOwner) {
       return "admin";
     }
   }
 
   getRoleOf(member: Everyone | ID<Account> | "me") {
     if (member === "me") {
-      return this.isMe ? "admin" : undefined;
+      return this.$jazz.isMe ? "admin" : undefined;
     }
 
     if (member === this.id) {
@@ -222,7 +143,7 @@ export class Account extends CoValueBase implements CoValue {
   get members(): AccountMembers<this> {
     const ref = new Ref<typeof this>(
       this.id,
-      this._loadedAs,
+      this.$jazz.loadedAs,
       {
         ref: () => this.constructor as AccountClass<typeof this>,
         optional: false,
@@ -234,7 +155,7 @@ export class Account extends CoValueBase implements CoValue {
   }
 
   canRead(value: CoValue) {
-    const role = value._owner.getRoleOf(this.id);
+    const role = value.$jazz.owner.getRoleOf(this.id);
 
     return (
       role === "admin" ||
@@ -245,36 +166,13 @@ export class Account extends CoValueBase implements CoValue {
   }
 
   canWrite(value: CoValue) {
-    const role = value._owner.getRoleOf(this.id);
+    const role = value.$jazz.owner.getRoleOf(this.id);
 
     return role === "admin" || role === "writer" || role === "writeOnly";
   }
 
   canAdmin(value: CoValue) {
-    return value._owner.getRoleOf(this.id) === "admin";
-  }
-
-  async acceptInvite<S extends CoValueClassOrSchema>(
-    valueID: string,
-    inviteSecret: InviteSecret,
-    coValueClass: S,
-  ): Promise<Resolved<InstanceOrPrimitiveOfSchema<S>, true> | null> {
-    if (!this.isLocalNodeOwner) {
-      throw new Error("Only a controlled account can accept invites");
-    }
-
-    await this._raw.core.node.acceptInvite(
-      valueID as unknown as CoID<RawCoValue>,
-      inviteSecret,
-    );
-
-    return loadCoValue(
-      coValueClassFromCoValueClassOrSchema(coValueClass),
-      valueID,
-      {
-        loadAs: this,
-      },
-    ) as Resolved<InstanceOrPrimitiveOfSchema<S>, true> | null;
+    return value.$jazz.owner.getRoleOf(this.id) === "admin";
   }
 
   /** @private */
@@ -319,15 +217,15 @@ export class Account extends CoValueBase implements CoValue {
       { peer1role: "server", peer2role: "client" },
     );
 
-    as._raw.core.node.syncManager.addPeer(connectedPeers[1]);
+    as.$jazz.localNode.syncManager.addPeer(connectedPeers[1]);
 
     const account = await this.create<A>({
       creationProps: options.creationProps,
-      crypto: as._raw.core.node.crypto,
+      crypto: as.$jazz.localNode.crypto,
       peersToLoadFrom: [connectedPeers[0]],
     });
 
-    await account.waitForAllCoValuesSync();
+    await account.$jazz.waitForAllCoValuesSync();
 
     return account;
   }
@@ -363,16 +261,15 @@ export class Account extends CoValueBase implements CoValue {
       this.profile = Profile.create({ name: creationProps.name }, profileGroup);
       profileGroup.addMember("everyone", "reader");
     } else if (this.profile && creationProps) {
-      if (this.profile._owner._type !== "Group") {
+      if (this.profile.$jazz.owner._type !== "Group") {
         throw new Error("Profile must be owned by a Group", {
           cause: `The profile of the account "${this.id}" was created with an Account as owner, which is not allowed.`,
         });
       }
     }
 
-    const node = this._raw.core.node;
-    const profile = node
-      .expectCoValueLoaded(this._raw.get("profile")!)
+    const profile = this.$jazz.localNode
+      .expectCoValueLoaded(this.$jazz.raw.get("profile")!)
       .getCurrentContent() as RawCoMap;
 
     if (!profile.get("inbox")) {
@@ -419,31 +316,112 @@ export class Account extends CoValueBase implements CoValue {
     const { options, listener } = parseSubscribeRestArgs(args);
     return subscribeToCoValueWithoutMe<A, R>(this, id, options, listener);
   }
+}
+
+class AccountJazzApi<A extends Account> extends CoValueJazzApi<A> {
+  /**
+   * Whether this account is the owner of the local node.
+   *
+   * @internal
+   */
+  isLocalNodeOwner: boolean;
+  /** @internal */
+  sessionID: SessionID | undefined;
+
+  constructor(
+    private account: A,
+    public raw: RawAccount,
+  ) {
+    super(account);
+    this.isLocalNodeOwner = this.raw.id == this.localNode.getCurrentAgent().id;
+    if (this.isLocalNodeOwner) {
+      this.sessionID = this.localNode.currentSessionID;
+    }
+  }
+
+  /**
+   * Get the descriptor for a given key
+   * @internal
+   */
+  getDescriptor(key: string) {
+    if (key === "profile") {
+      return this.schema.profile;
+    } else if (key === "root") {
+      return this.schema.root;
+    }
+
+    return undefined;
+  }
+
+  /**
+   * If property `prop` is a `coField.ref(...)`, you can use `account.$jazz.refs.prop` to access
+   * the `Ref` instead of the potentially loaded/null value.
+   *
+   * This allows you to always get the ID or load the value manually.
+   *
+   * @category Content
+   */
+  get refs(): {
+    profile: RefIfCoValue<Profile> | undefined;
+    root: RefIfCoValue<CoMap> | undefined;
+  } {
+    const profileID = this.raw.get("profile") as unknown as
+      | ID<NonNullable<(typeof this.account)["profile"]>>
+      | undefined;
+    const rootID = this.raw.get("root") as unknown as
+      | ID<NonNullable<(typeof this.account)["root"]>>
+      | undefined;
+
+    return {
+      profile: profileID
+        ? (new Ref(
+            profileID,
+            this.loadedAs,
+            this.schema.profile as RefEncoded<
+              NonNullable<(typeof this.account)["profile"]> & CoValue
+            >,
+            this.account,
+          ) as unknown as RefIfCoValue<(typeof this.account)["profile"]>)
+        : undefined,
+      root: rootID
+        ? (new Ref(
+            rootID,
+            this.loadedAs,
+            this.schema.root as RefEncoded<
+              NonNullable<(typeof this.account)["root"]> & CoValue
+            >,
+            this.account,
+          ) as unknown as RefIfCoValue<(typeof this.account)["root"]>)
+        : undefined,
+    };
+  }
 
   /** @category Subscription & Loading */
   ensureLoaded<A extends Account, const R extends RefsToResolve<A>>(
-    this: A,
-    options: { resolve: RefsToResolveStrict<A, R> },
+    this: AccountJazzApi<A>,
+    options: {
+      resolve: RefsToResolveStrict<A, R>;
+    },
   ): Promise<Resolved<A, R>> {
-    return ensureCoValueLoaded(this, options);
+    return ensureCoValueLoaded(this.account as unknown as A, options);
   }
 
   /** @category Subscription & Loading */
   subscribe<A extends Account, const R extends RefsToResolve<A>>(
-    this: A,
+    this: AccountJazzApi<A>,
     listener: (value: Resolved<A, R>, unsubscribe: () => void) => void,
   ): () => void;
   subscribe<A extends Account, const R extends RefsToResolve<A>>(
-    this: A,
+    this: AccountJazzApi<A>,
     options: { resolve?: RefsToResolveStrict<A, R> },
     listener: (value: Resolved<A, R>, unsubscribe: () => void) => void,
   ): () => void;
   subscribe<A extends Account, const R extends RefsToResolve<A>>(
-    this: A,
+    this: AccountJazzApi<A>,
     ...args: SubscribeRestArgs<A, R>
   ): () => void {
     const { options, listener } = parseSubscribeRestArgs(args);
-    return subscribeToExistingCoValue(this, options, listener);
+    return subscribeToExistingCoValue(this.account, options, listener);
   }
 
   /**
@@ -452,7 +430,7 @@ export class Account extends CoValueBase implements CoValue {
    * @category Subscription & Loading
    */
   waitForSync(options?: { timeout?: number }) {
-    return this._raw.core.waitForSync(options);
+    return this.raw.core.waitForSync(options);
   }
 
   /**
@@ -461,16 +439,82 @@ export class Account extends CoValueBase implements CoValue {
    * @category Subscription & Loading
    */
   waitForAllCoValuesSync(options?: { timeout?: number }) {
-    return this._raw.core.node.syncManager.waitForAllCoValuesSync(
-      options?.timeout,
+    return this.localNode.syncManager.waitForAllCoValuesSync(options?.timeout);
+  }
+
+  /** @internal */
+  get schema(): {
+    profile: Schema;
+    root: Schema;
+  } {
+    return (this.account.constructor as typeof Account)._schema;
+  }
+
+  /**
+   * Whether this account is the currently active account.
+   */
+  get isMe() {
+    return activeAccountContext.get().id === this.account.id;
+  }
+
+  /**
+   * Accept an invite to a `CoValue` or `Group`.
+   *
+   * @param valueID The ID of the `CoValue` or `Group` to accept the invite to.
+   * @param inviteSecret The secret of the invite to accept.
+   * @param coValueClass The class of the `CoValue` or `Group` to accept the invite to.
+   * @returns The loaded `CoValue` or `Group`.
+   */
+  async acceptInvite<S extends CoValueClassOrSchema>(
+    valueID: string,
+    inviteSecret: InviteSecret,
+    coValueClass: S,
+  ): Promise<Resolved<InstanceOrPrimitiveOfSchema<S>, true> | null> {
+    if (!this.isLocalNodeOwner) {
+      throw new Error("Only a controlled account can accept invites");
+    }
+
+    await this.localNode.acceptInvite(
+      valueID as unknown as CoID<RawCoValue>,
+      inviteSecret,
     );
+
+    return loadCoValue(
+      coValueClassFromCoValueClassOrSchema(coValueClass),
+      valueID,
+      {
+        loadAs: this.account,
+      },
+    ) as Resolved<InstanceOrPrimitiveOfSchema<S>, true> | null;
+  }
+
+  /** @internal */
+  get localNode(): LocalNode {
+    return this.raw.core.node;
+  }
+
+  get owner(): Account {
+    return this.account;
+  }
+  get loadedAs(): Account | AnonymousJazzAgent {
+    if (this.isLocalNodeOwner) return this.account;
+
+    const agent = this.localNode.getCurrentAgent();
+
+    if (agent instanceof ControlledAccount) {
+      return coValuesCache.get(agent.account, () =>
+        Account.fromRaw(agent.account),
+      );
+    }
+
+    return new AnonymousJazzAgent(this.localNode);
   }
 }
 
 export const AccountAndGroupProxyHandler: ProxyHandler<Account | Group> = {
   get(target, key, receiver) {
     if (key === "profile" || key === "root") {
-      const id = target._raw.get(key);
+      const id = target.$jazz.raw.get(key);
 
       if (id) {
         return accessChildByKey(target, id, key);
@@ -487,12 +531,12 @@ export const AccountAndGroupProxyHandler: ProxyHandler<Account | Group> = {
       typeof value === "object" &&
       SchemaInit in value
     ) {
-      (target.constructor as typeof CoMap)._schema ||= {};
-      (target.constructor as typeof CoMap)._schema[key] = value[SchemaInit];
+      (target.constructor as typeof Account)._schema ||= {};
+      (target.constructor as typeof Account)._schema[key] = value[SchemaInit];
       return true;
     } else if (key === "profile") {
       if (value) {
-        target._raw.set(
+        target.$jazz.raw.set(
           "profile",
           value.id as unknown as CoID<RawCoMap>,
           "trusting",
@@ -502,7 +546,7 @@ export const AccountAndGroupProxyHandler: ProxyHandler<Account | Group> = {
       return true;
     } else if (key === "root") {
       if (value) {
-        target._raw.set(
+        target.$jazz.raw.set(
           "root",
           value.id as unknown as CoID<RawCoMap>,
           "trusting",
@@ -519,8 +563,8 @@ export const AccountAndGroupProxyHandler: ProxyHandler<Account | Group> = {
       typeof descriptor.value === "object" &&
       SchemaInit in descriptor.value
     ) {
-      (target.constructor as typeof CoMap)._schema ||= {};
-      (target.constructor as typeof CoMap)._schema[key] =
+      (target.constructor as typeof Account)._schema ||= {};
+      (target.constructor as typeof Account)._schema[key] =
         descriptor.value[SchemaInit];
       return true;
     } else {
@@ -531,11 +575,13 @@ export const AccountAndGroupProxyHandler: ProxyHandler<Account | Group> = {
 
 /** @category Identity & Permissions */
 export function isControlledAccount(account: Account): account is Account & {
-  isLocalNodeOwner: true;
-  sessionID: SessionID;
-  _raw: RawAccount;
+  $jazz: {
+    raw: RawAccount;
+    isLocalNodeOwner: true;
+    sessionID: SessionID;
+  };
 } {
-  return account.isLocalNodeOwner;
+  return account.$jazz.isLocalNodeOwner;
 }
 
 export type AccountClass<Acc extends Account> = CoValueClass<Acc> & {

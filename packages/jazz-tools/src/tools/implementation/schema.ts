@@ -92,24 +92,24 @@ export const coField = {
 };
 
 function optionalRef<C extends CoValueClass>(
-  arg: C | ((_raw: InstanceType<C>["_raw"]) => C),
+  arg: C | ((raw: InstanceType<C>["$jazz"]["raw"]) => C),
 ): InstanceType<C> | null | undefined {
   return ref(arg, { optional: true });
 }
 
 function ref<C extends CoValueClass>(
-  arg: C | ((_raw: InstanceType<C>["_raw"]) => C),
+  arg: C | ((raw: InstanceType<C>["$jazz"]["raw"]) => C),
   options?: never,
 ): InstanceType<C> | null;
 function ref<C extends CoValueClass>(
-  arg: C | ((_raw: InstanceType<C>["_raw"]) => C),
+  arg: C | ((raw: InstanceType<C>["$jazz"]["raw"]) => C),
   options: { optional: true },
 ): InstanceType<C> | null | undefined;
 function ref<
   C extends CoValueClass,
   Options extends { optional?: boolean } | undefined,
 >(
-  arg: C | ((_raw: InstanceType<C>["_raw"]) => C),
+  arg: C | ((raw: InstanceType<C>["$jazz"]["raw"]) => C),
   options?: Options,
 ): Options extends { optional: true }
   ? InstanceType<C> | null | undefined

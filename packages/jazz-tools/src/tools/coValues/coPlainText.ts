@@ -10,6 +10,7 @@ import {
   AnonymousJazzAgent,
   CoValue,
   CoValueClass,
+  CoValueJazzApi,
   ID,
   Resolved,
   SubscribeListenerOptions,
@@ -34,16 +35,17 @@ export type TextPos = OpID;
 export class CoPlainText extends String implements CoValue {
   declare id: ID<this>;
   declare _type: "CoPlainText";
-  declare _raw: RawCoPlainText;
 
-  get _owner(): Account | Group {
-    return this._raw.group instanceof RawAccount
-      ? Account.fromRaw(this._raw.group)
-      : Group.fromRaw(this._raw.group);
+  declare $jazz: CoTextJazzApi<this>;
+
+  get owner(): Account | Group {
+    return this.$jazz.raw.group instanceof RawAccount
+      ? Account.fromRaw(this.$jazz.raw.group)
+      : Group.fromRaw(this.$jazz.raw.group);
   }
 
-  get _loadedAs() {
-    const agent = this._raw.core.node.getCurrentAgent();
+  get loadedAs() {
+    const agent = this.$jazz.raw.core.node.getCurrentAgent();
 
     if (agent instanceof ControlledAccount) {
       return coValuesCache.get(agent.account, () =>
@@ -53,7 +55,7 @@ export class CoPlainText extends String implements CoValue {
       );
     }
 
-    return new AnonymousJazzAgent(this._raw.core.node);
+    return new AnonymousJazzAgent(this.$jazz.raw.core.node);
   }
 
   /** @internal */
@@ -74,18 +76,24 @@ export class CoPlainText extends String implements CoValue {
       Object.defineProperties(this, {
         id: { value: raw.id, enumerable: false },
         _type: { value: "CoPlainText", enumerable: false },
-        _raw: { value: raw, enumerable: false },
+        $jazz: {
+          value: new CoTextJazzApi(this, raw),
+          enumerable: false,
+        },
       });
       return;
     }
 
     if ("text" in options && "owner" in options) {
       super(options.text);
-      const raw = options.owner._raw.createPlainText(options.text);
+      const raw = options.owner.$jazz.raw.createPlainText(options.text);
       Object.defineProperties(this, {
         id: { value: raw.id, enumerable: false },
         _type: { value: "CoPlainText", enumerable: false },
-        _raw: { value: raw, enumerable: false },
+        $jazz: {
+          value: new CoTextJazzApi(this, raw),
+          enumerable: false,
+        },
       });
       return;
     }
@@ -117,19 +125,19 @@ export class CoPlainText extends String implements CoValue {
   }
 
   get length() {
-    return this._raw.toString().length;
+    return this.$jazz.raw.toString().length;
   }
 
   toString() {
-    return this._raw.toString();
+    return this.$jazz.raw.toString();
   }
 
   valueOf() {
-    return this._raw.toString();
+    return this.$jazz.raw.toString();
   }
 
   toJSON(): string {
-    return this._raw.toString();
+    return this.$jazz.raw.toString();
   }
 
   [inspect]() {
@@ -137,31 +145,31 @@ export class CoPlainText extends String implements CoValue {
   }
 
   insertBefore(idx: number, text: string) {
-    this._raw.insertBefore(idx, text);
+    this.$jazz.raw.insertBefore(idx, text);
   }
 
   insertAfter(idx: number, text: string) {
-    this._raw.insertAfter(idx, text);
+    this.$jazz.raw.insertAfter(idx, text);
   }
 
   deleteRange(range: { from: number; to: number }) {
-    this._raw.deleteRange(range);
+    this.$jazz.raw.deleteRange(range);
   }
 
   posBefore(idx: number): TextPos | undefined {
-    return this._raw.mapping.opIDbeforeIdx[idx];
+    return this.$jazz.raw.mapping.opIDbeforeIdx[idx];
   }
 
   posAfter(idx: number): TextPos | undefined {
-    return this._raw.mapping.opIDafterIdx[idx];
+    return this.$jazz.raw.mapping.opIDafterIdx[idx];
   }
 
   idxBefore(pos: TextPos): number | undefined {
-    return this._raw.mapping.idxBeforeOpID[stringifyOpID(pos)];
+    return this.$jazz.raw.mapping.idxBeforeOpID[stringifyOpID(pos)];
   }
 
   idxAfter(pos: TextPos): number | undefined {
-    return this._raw.mapping.idxAfterOpID[stringifyOpID(pos)];
+    return this.$jazz.raw.mapping.idxAfterOpID[stringifyOpID(pos)];
   }
 
   static fromRaw<V extends CoPlainText>(
@@ -177,11 +185,11 @@ export class CoPlainText extends String implements CoValue {
    * @category Mutation
    */
   applyDiff(other: string) {
-    const current = this._raw.toString();
+    const current = this.$jazz.raw.toString();
 
     // Split both strings into grapheme arrays for proper comparison
-    const currentGraphemes = this._raw.toGraphemes(current);
-    const otherGraphemes = this._raw.toGraphemes(other);
+    const currentGraphemes = this.$jazz.raw.toGraphemes(current);
+    const otherGraphemes = this.$jazz.raw.toGraphemes(other);
 
     // Calculate the diff on grapheme arrays
     const patches = [...calcPatch(currentGraphemes, otherGraphemes)];
@@ -193,7 +201,7 @@ export class CoPlainText extends String implements CoValue {
       }
       if (insert.length > 0) {
         // Join the graphemes back into a string for insertion
-        this.insertBefore(from, this._raw.fromGraphemes(insert));
+        this.insertBefore(from, this.$jazz.raw.fromGraphemes(insert));
       }
     }
   }
@@ -287,9 +295,18 @@ export class CoPlainText extends String implements CoValue {
   [Symbol.toPrimitive](hint: string) {
     if (hint === "number") {
       // Not meaningful for text, but required for completeness
-      return Number(this._raw.toString());
+      return Number(this.$jazz.raw.toString());
     }
     // For 'string' and 'default', return the string representation
-    return this._raw.toString();
+    return this.$jazz.raw.toString();
+  }
+}
+
+export class CoTextJazzApi<T extends CoPlainText> extends CoValueJazzApi<T> {
+  constructor(
+    coText: T,
+    public raw: RawCoPlainText,
+  ) {
+    super(coText);
   }
 }

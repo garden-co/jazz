@@ -19,12 +19,12 @@ describe("CoFeed", () => {
       matches(feed.perAccount[Account.getMe().id]!.value);
     });
 
-    test("has the _owner property", () => {
+    test("has the owner property", () => {
       const StringFeed = co.feed(z.string());
 
       const feed = StringFeed.create(["milk"], Account.getMe());
 
-      expectTypeOf(feed._owner).toEqualTypeOf<Account | Group>();
+      expectTypeOf(feed.$jazz.owner).toEqualTypeOf<Account | Group>();
     });
 
     test("CoFeed with reference", () => {

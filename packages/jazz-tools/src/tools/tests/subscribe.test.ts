@@ -150,7 +150,7 @@ describe("subscribeToCoValue", () => {
     const chatRoom = createChatRoom(me, "General");
     const updateFn = vi.fn();
 
-    const { messages } = await chatRoom.ensureLoaded({
+    const { messages } = await chatRoom.$jazz.ensureLoaded({
       resolve: { messages: { $each: true } },
     });
 
@@ -503,7 +503,7 @@ describe("subscribeToCoValue", () => {
     });
 
     // Disconnect the creator from the sync server
-    creator._raw.core.node.syncManager.getPeers().forEach((peer) => {
+    creator.$jazz.localNode.syncManager.getPeers().forEach((peer) => {
       peer.gracefulShutdown();
     });
 
@@ -546,7 +546,7 @@ describe("subscribeToCoValue", () => {
       expect(onUnavailable).toHaveBeenCalled();
     });
 
-    creator._raw.core.node.syncManager.addPeer(
+    creator.$jazz.localNode.syncManager.addPeer(
       getPeerConnectedToTestSyncServer(),
     );
 
@@ -852,9 +852,9 @@ describe("subscribeToCoValue", () => {
     const reader = await createJazzTestAccount();
 
     await Promise.all([
-      writer1.waitForAllCoValuesSync(),
-      writer2.waitForAllCoValuesSync(),
-      reader.waitForAllCoValuesSync(),
+      writer1.$jazz.waitForAllCoValuesSync(),
+      writer2.$jazz.waitForAllCoValuesSync(),
+      reader.$jazz.waitForAllCoValuesSync(),
     ]);
 
     const group = Group.create(creator);
@@ -864,10 +864,10 @@ describe("subscribeToCoValue", () => {
 
     const person = Person.create({ name: "creator" }, group);
 
-    await person.waitForSync();
+    await person.$jazz.waitForSync();
 
     // Disconnect from the sync server, so we can change permissions but not sync them
-    creator._raw.core.node.syncManager.getPeers().forEach((peer) => {
+    creator.$jazz.localNode.syncManager.getPeers().forEach((peer) => {
       peer.gracefulShutdown();
     });
 
@@ -912,19 +912,19 @@ describe("subscribeToCoValue", () => {
     await waitFor(() => expect(spy).toHaveBeenCalled());
     expect(spy).toHaveBeenCalledTimes(1);
     expect(value?.name).toBe("writer1");
-    expect(value?._raw.totalValidTransactions).toBe(2);
+    expect(value?.$jazz.raw.totalValidTransactions).toBe(2);
 
     spy.mockClear();
 
     // Reconnect to the sync server
-    creator._raw.core.node.syncManager.addPeer(
+    creator.$jazz.localNode.syncManager.addPeer(
       getPeerConnectedToTestSyncServer(),
     );
 
     await waitFor(() => expect(spy).toHaveBeenCalled());
     expect(spy).toHaveBeenCalledTimes(1);
     expect(value?.name).toBe("writer2");
-    expect(value?._raw.totalValidTransactions).toBe(2);
+    expect(value?.$jazz.raw.totalValidTransactions).toBe(2);
   });
 
   it("errors on autoloaded values shouldn't block updates", async () => {
@@ -1223,7 +1223,7 @@ describe("subscribeToCoValue", () => {
     }
 
     // Wait for the large coValue to be fully synced
-    await largeMap.data._raw.core.waitForSync();
+    await largeMap.data.$jazz.raw.core.waitForSync();
 
     const alice = await createJazzTestAccount();
 
@@ -1260,8 +1260,8 @@ describe("subscribeToCoValue", () => {
     );
 
     expect(result.data.length).toBe(chunks);
-    expect(result.data._raw.core.knownState()).toEqual(
-      largeMap.data._raw.core.knownState(),
+    expect(result.data.$jazz.raw.core.knownState()).toEqual(
+      largeMap.data.$jazz.raw.core.knownState(),
     );
 
     // Test that updates to the large coValue are properly subscribed

@@ -129,7 +129,7 @@ describe("Inbox", () => {
     const unsubscribe = receiverInbox.subscribe(Message, async (message) => {
       return Message.create(
         { text: "Responded from the inbox" },
-        { owner: message._owner },
+        { owner: message.$jazz.owner },
       );
     });
 

@@ -76,7 +76,7 @@ describe("CoMap.Record", async () => {
       const person = Person.create({ name: "John" }, Account.getMe());
 
       expect(person.name).toEqual("John");
-      expect(person._raw.get("name")).toEqual("John");
+      expect(person.$jazz.raw.get("name")).toEqual("John");
     });
 
     test("create a Record with a group as owner", () => {
@@ -85,7 +85,7 @@ describe("CoMap.Record", async () => {
       const person = Person.create({ name: "John" }, Group.create());
 
       expect(person.name).toEqual("John");
-      expect(person._raw.get("name")).toEqual("John");
+      expect(person.$jazz.raw.get("name")).toEqual("John");
     });
 
     test("Empty schema", () => {
@@ -168,7 +168,7 @@ describe("CoMap.Record", async () => {
 
       person.name = "Jane";
 
-      const edits = person._edits.name?.all;
+      const edits = person.$jazz.getEdits().name?.all;
       expect(edits).toEqual([
         expect.objectContaining({
           value: "John",

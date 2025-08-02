@@ -8,7 +8,7 @@ export function getSubscriptionScope<D extends CoValue>(value: D) {
     return subscriptionScope;
   }
 
-  const node = value._raw.core.node;
+  const node = value.$jazz.raw.core.node;
   const resolve = true;
   const id = value.id;
 

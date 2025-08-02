@@ -14,7 +14,7 @@ export function createInviteLink<C extends CoValue>(
   baseURL: string,
   valueHint?: string,
 ): string {
-  const coValueCore = value._raw.core;
+  const coValueCore = value.$jazz.raw.core;
   let currentCoValue = coValueCore;
 
   while (currentCoValue.verified.header.ruleset.type === "ownedByGroup") {
@@ -90,7 +90,8 @@ export function consumeInviteLink<S extends CoValueClassOrSchema>({
     const result = parseInviteLink(inviteURL);
 
     if (result && result.valueHint === forValueHint) {
-      as.acceptInvite(result.valueID, result.inviteSecret, invitedObjectSchema)
+      as.$jazz
+        .acceptInvite(result.valueID, result.inviteSecret, invitedObjectSchema)
         .then(() => {
           resolve(result);
         })

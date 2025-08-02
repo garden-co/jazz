@@ -151,7 +151,7 @@ describe("PassphraseAuth", () => {
       await passphraseAuth.signUp(testName);
 
       // Verify the account name was set
-      const { profile } = await account.ensureLoaded({
+      const { profile } = await account.$jazz.ensureLoaded({
         resolve: {
           profile: true,
         },

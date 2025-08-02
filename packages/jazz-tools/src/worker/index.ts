@@ -87,16 +87,16 @@ export async function startWorker<
   });
 
   const account = context.account as InstanceOfSchema<S>;
-  node = account._raw.core.node;
+  node = account.$jazz.localNode;
 
-  if (!account._refs.profile?.id) {
+  if (!account.$jazz.refs.profile?.id) {
     throw new Error("Account has no profile");
   }
 
   const inbox = await Inbox.load(account);
 
   async function done() {
-    await context.account.waitForAllCoValuesSync();
+    await context.account.$jazz.waitForAllCoValuesSync();
 
     wsPeer.disable();
     context.done();

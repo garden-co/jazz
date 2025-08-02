@@ -34,7 +34,7 @@ describe("Simple CoList operations", async () => {
     expect(list[0]).toBe("bread");
     expect(list[1]).toBe("butter");
     expect(list[2]).toBe("onion");
-    expect(list._raw.asArray()).toEqual(["bread", "butter", "onion"]);
+    expect(list.$jazz.raw.asArray()).toEqual(["bread", "butter", "onion"]);
     expect(list.length).toBe(3);
     expect(list.map((item) => item.toUpperCase())).toEqual([
       "BREAD",
@@ -123,7 +123,7 @@ describe("Simple CoList operations", async () => {
         owner: me,
       });
       list[1] = "margarine";
-      expect(list._raw.asArray()).toEqual(["bread", "margarine", "onion"]);
+      expect(list.$jazz.raw.asArray()).toEqual(["bread", "margarine", "onion"]);
       expect(list[1]).toBe("margarine");
     });
 
@@ -196,7 +196,7 @@ describe("Simple CoList operations", async () => {
       });
       list.push("cheese");
       expect(list[3]).toBe("cheese");
-      expect(list._raw.asArray()).toEqual([
+      expect(list.$jazz.raw.asArray()).toEqual([
         "bread",
         "butter",
         "onion",
@@ -210,7 +210,7 @@ describe("Simple CoList operations", async () => {
       });
       list.unshift("lettuce");
       expect(list[0]).toBe("lettuce");
-      expect(list._raw.asArray()).toEqual([
+      expect(list.$jazz.raw.asArray()).toEqual([
         "lettuce",
         "bread",
         "butter",
@@ -224,7 +224,7 @@ describe("Simple CoList operations", async () => {
       });
       expect(list.pop()).toBe("onion");
       expect(list.length).toBe(2);
-      expect(list._raw.asArray()).toEqual(["bread", "butter"]);
+      expect(list.$jazz.raw.asArray()).toEqual(["bread", "butter"]);
     });
 
     test("shift", () => {
@@ -233,7 +233,7 @@ describe("Simple CoList operations", async () => {
       });
       expect(list.shift()).toBe("bread");
       expect(list.length).toBe(2);
-      expect(list._raw.asArray()).toEqual(["butter", "onion"]);
+      expect(list.$jazz.raw.asArray()).toEqual(["butter", "onion"]);
     });
 
     describe("splice", () => {
@@ -243,7 +243,7 @@ describe("Simple CoList operations", async () => {
         });
         list.splice(1, 1, "salt", "pepper");
         expect(list.length).toBe(4);
-        expect(list._raw.asArray()).toEqual([
+        expect(list.$jazz.raw.asArray()).toEqual([
           "bread",
           "salt",
           "pepper",
@@ -257,7 +257,7 @@ describe("Simple CoList operations", async () => {
         });
         list.splice(0, 0, "salt", "pepper");
         expect(list.length).toBe(5);
-        expect(list._raw.asArray()).toEqual([
+        expect(list.$jazz.raw.asArray()).toEqual([
           "salt",
           "pepper",
           "bread",
@@ -272,7 +272,7 @@ describe("Simple CoList operations", async () => {
         });
         list.splice(1, 0, "salt", "pepper");
         expect(list.length).toBe(5);
-        expect(list._raw.asArray()).toEqual([
+        expect(list.$jazz.raw.asArray()).toEqual([
           "bread",
           "salt",
           "pepper",
@@ -287,7 +287,7 @@ describe("Simple CoList operations", async () => {
         });
         list.splice(2, 0, "salt", "pepper");
         expect(list.length).toBe(5);
-        expect(list._raw.asArray()).toEqual([
+        expect(list.$jazz.raw.asArray()).toEqual([
           "bread",
           "butter",
           "salt",
@@ -304,7 +304,7 @@ describe("Simple CoList operations", async () => {
       );
 
       list.sort();
-      expect(list._raw.asArray()).toEqual([
+      expect(list.$jazz.raw.asArray()).toEqual([
         "flamingo",
         "giraffe",
         "hedgehog",
@@ -312,7 +312,7 @@ describe("Simple CoList operations", async () => {
       ]);
 
       list.sort((a, b) => b.localeCompare(a));
-      expect(list._raw.asArray()).toEqual([
+      expect(list.$jazz.raw.asArray()).toEqual([
         "iguana",
         "hedgehog",
         "giraffe",
@@ -353,13 +353,13 @@ describe("Simple CoList operations", async () => {
       });
       // replace
       list.applyDiff(["bread", "margarine", "onion"]);
-      expect(list._raw.asArray()).toEqual(["bread", "margarine", "onion"]);
+      expect(list.$jazz.raw.asArray()).toEqual(["bread", "margarine", "onion"]);
       // delete
       list.applyDiff(["bread", "onion"]);
-      expect(list._raw.asArray()).toEqual(["bread", "onion"]);
+      expect(list.$jazz.raw.asArray()).toEqual(["bread", "onion"]);
       // insert multiple
       list.applyDiff(["bread", "margarine", "onion", "cheese"]);
-      expect(list._raw.asArray()).toEqual([
+      expect(list.$jazz.raw.asArray()).toEqual([
         "bread",
         "margarine",
         "onion",
@@ -386,7 +386,11 @@ describe("Simple CoList operations", async () => {
         map.list = map.list?.filter((item) => item !== "butter");
       }).toThrow("Cannot set reference list to a non-CoValue. Got bread,onion");
 
-      expect(map.list?._raw.asArray()).toEqual(["bread", "butter", "onion"]);
+      expect(map.list?.$jazz.raw.asArray()).toEqual([
+        "bread",
+        "butter",
+        "onion",
+      ]);
     });
 
     test("filter + assign to CoList", () => {
@@ -406,7 +410,11 @@ describe("Simple CoList operations", async () => {
         list[0] = list[0]?.filter((item) => item !== "butter");
       }).toThrow("Cannot set reference 0 to a non-CoValue. Got bread,onion");
 
-      expect(list[0]?._raw.asArray()).toEqual(["bread", "butter", "onion"]);
+      expect(list[0]?.$jazz.raw.asArray()).toEqual([
+        "bread",
+        "butter",
+        "onion",
+      ]);
     });
   });
 });
@@ -418,19 +426,19 @@ describe("CoList applyDiff operations", async () => {
 
     // Test adding items
     list.applyDiff(["a", "b", "c", "d", "e"]);
-    expect(list._raw.asArray()).toEqual(["a", "b", "c", "d", "e"]);
+    expect(list.$jazz.raw.asArray()).toEqual(["a", "b", "c", "d", "e"]);
 
     // Test removing items
     list.applyDiff(["a", "c", "e"]);
-    expect(list._raw.asArray()).toEqual(["a", "c", "e"]);
+    expect(list.$jazz.raw.asArray()).toEqual(["a", "c", "e"]);
 
     // Test replacing items
     list.applyDiff(["x", "y", "z"]);
-    expect(list._raw.asArray()).toEqual(["x", "y", "z"]);
+    expect(list.$jazz.raw.asArray()).toEqual(["x", "y", "z"]);
 
     // Test empty list
     list.applyDiff([]);
-    expect(list._raw.asArray()).toEqual([]);
+    expect(list.$jazz.raw.asArray()).toEqual([]);
   });
 
   test("applyDiff with reference values", () => {
@@ -462,7 +470,7 @@ describe("CoList applyDiff operations", async () => {
 
     // Test empty list
     list.applyDiff([]);
-    expect(list._raw.asArray()).toEqual([]);
+    expect(list.$jazz.raw.asArray()).toEqual([]);
   });
 
   test("applyDiff with refs + filter", () => {
@@ -480,7 +488,7 @@ describe("CoList applyDiff operations", async () => {
 
     list.applyDiff(list.filter((item) => item?.type !== "butter"));
 
-    expect(list._raw.asArray()).toEqual([bread.id, onion.id]);
+    expect(list.$jazz.raw.asArray()).toEqual([bread.id, onion.id]);
   });
 
   test("applyDiff with mixed operations", () => {
@@ -489,15 +497,15 @@ describe("CoList applyDiff operations", async () => {
 
     // Test multiple operations at once
     list.applyDiff(["a", "x", "c", "y", "e"]);
-    expect(list._raw.asArray()).toEqual(["a", "x", "c", "y", "e"]);
+    expect(list.$jazz.raw.asArray()).toEqual(["a", "x", "c", "y", "e"]);
 
     // Test reordering
     list.applyDiff(["e", "c", "a", "y", "x"]);
-    expect(list._raw.asArray()).toEqual(["e", "c", "a", "y", "x"]);
+    expect(list.$jazz.raw.asArray()).toEqual(["e", "c", "a", "y", "x"]);
 
     // Test partial update
     list.applyDiff(["e", "c", "new", "y", "x"]);
-    expect(list._raw.asArray()).toEqual(["e", "c", "new", "y", "x"]);
+    expect(list.$jazz.raw.asArray()).toEqual(["e", "c", "new", "y", "x"]);
   });
 });
 

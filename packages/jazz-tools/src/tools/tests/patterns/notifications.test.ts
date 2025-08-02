@@ -28,7 +28,7 @@ async function pushNotification(
   worker: InstanceOfSchema<typeof WorkerAccount>,
   content: string,
 ) {
-  const workerAccount = await worker.ensureLoaded({
+  const workerAccount = await worker.$jazz.ensureLoaded({
     resolve: {
       root: {
         notificationQueue: {
@@ -52,7 +52,7 @@ async function sendAllThePendingNotifications(
   worker: InstanceOfSchema<typeof WorkerAccount>,
   sender: (notification: Loaded<typeof QueuedNotification>) => Promise<void>,
 ) {
-  const workerAccount = await worker.ensureLoaded({
+  const workerAccount = await worker.$jazz.ensureLoaded({
     resolve: {
       root: {
         notificationQueue: {
