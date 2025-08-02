@@ -129,6 +129,7 @@ export const Image = forwardRef<HTMLImageElement, ImageProps>(function Image(
 
     if (blob) {
       const url = URL.createObjectURL(blob);
+      revokeObjectURL(lastBestImage.current?.[1]);
       lastBestImage.current = [bestImage.image.id, url];
       return url;
     }
@@ -136,12 +137,15 @@ export const Image = forwardRef<HTMLImageElement, ImageProps>(function Image(
     return image.placeholderDataURL;
   }, [image, dimensions.width, dimensions.height]);
 
-  // Revoke object URL when src changes or component unmounts
+  // Revoke object URL when component unmounts
   useEffect(
     () => () => {
-      revokeObjectURL(src);
+      // In development mode we don't revokeObjectURL on unmount because
+      // it triggers twice under StrictMode.
+      if (process.env.NODE_ENV === "development") return;
+      revokeObjectURL(lastBestImage.current?.[1]);
     },
-    [src],
+    [],
   );
 
   return (
