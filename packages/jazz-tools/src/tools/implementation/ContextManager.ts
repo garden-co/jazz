@@ -137,6 +137,21 @@ export class JazzContextManager<
       logOut: this.logOut,
     };
 
+    const keys = JSON.parse(localStorage.getItem("$keys") ?? "[]");
+
+    const promises = [];
+    for (const key of keys) {
+      if (key.startsWith("$preload-")) {
+        const ids = JSON.parse(localStorage.getItem(key) || "[]");
+
+        for (const id of ids) {
+          promises.push(context.node.loadCoValueCore(id));
+        }
+      }
+    }
+
+    await Promise.all(promises);
+
     if (authProps?.credentials) {
       this.authSecretStorage.emitUpdate(authProps.credentials);
     } else {

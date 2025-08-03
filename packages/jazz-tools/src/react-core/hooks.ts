@@ -110,6 +110,9 @@ function useCoValueSubscription<
         ref: coValueClassFromCoValueClassOrSchema(Schema),
         optional: true,
       },
+      false,
+      false,
+      true,
     );
 
     return {
@@ -286,10 +289,18 @@ function useAccountSubscription<
     const resolve: any = options?.resolve ?? true;
 
     const node = contextManager.getCurrentValue()!.node;
-    const subscription = new SubscriptionScope<any>(node, resolve, agent.id, {
-      ref: coValueClassFromCoValueClassOrSchema(Schema),
-      optional: true,
-    });
+    const subscription = new SubscriptionScope<any>(
+      node,
+      resolve,
+      agent.id,
+      {
+        ref: coValueClassFromCoValueClassOrSchema(Schema),
+        optional: true,
+      },
+      false,
+      false,
+      true,
+    );
 
     return {
       subscription,

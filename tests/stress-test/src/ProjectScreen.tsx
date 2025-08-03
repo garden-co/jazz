@@ -7,7 +7,11 @@ export function ProjectScreen() {
   const { projectId } = useParams();
   const project = useCoState(TodoProject, projectId, {
     resolve: {
-      tasks: true,
+      tasks: {
+        $each: {
+          text: true,
+        },
+      },
     },
   });
   const { me } = useAccount(TodoAccount, {
