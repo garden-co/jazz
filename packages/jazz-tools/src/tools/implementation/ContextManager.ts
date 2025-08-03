@@ -4,6 +4,7 @@ import { AuthSecretStorage } from "../auth/AuthSecretStorage.js";
 import { InMemoryKVStore } from "../auth/InMemoryKVStore.js";
 import { KvStore, KvStoreContext } from "../auth/KvStoreContext.js";
 import { Account } from "../coValues/account.js";
+import { preloadFromCache } from "../internal.js";
 import { AuthCredentials } from "../types.js";
 import { JazzContextType } from "../types.js";
 import { AnonymousJazzAgent } from "./anonymousJazzAgent.js";
@@ -139,18 +140,11 @@ export class JazzContextManager<
 
     const keys = JSON.parse(localStorage.getItem("$keys") ?? "[]");
 
-    const promises = [];
     for (const key of keys) {
-      if (key.startsWith("$preload-")) {
-        const ids = JSON.parse(localStorage.getItem(key) || "[]");
-
-        for (const id of ids) {
-          promises.push(context.node.loadCoValueCore(id));
-        }
+      if (key.startsWith("$content-")) {
+        preloadFromCache(key, context.node);
       }
     }
-
-    await Promise.all(promises);
 
     if (authProps?.credentials) {
       this.authSecretStorage.emitUpdate(authProps.credentials);
