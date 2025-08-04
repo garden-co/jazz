@@ -172,7 +172,7 @@ describe("useCoState", () => {
       isCurrentActiveAccount: true,
     });
 
-    for (const peer of account._raw.core.node.syncManager.getPeers()) {
+    for (const peer of account.$jazz.raw.core.node.syncManager.getPeers()) {
       peer.gracefulShutdown();
     }
 
@@ -307,7 +307,7 @@ describe("useCoState", () => {
       isCurrentActiveAccount: true,
     });
 
-    await account.waitForAllCoValuesSync();
+    await account.$jazz.waitForAllCoValuesSync();
 
     group.addMember(account, "reader");
 
@@ -504,7 +504,7 @@ describe("useCoState", () => {
     );
 
     const { result } = renderHook(
-      () => useCoState(Dog, dog.id)?._owner.castAs(Group).members,
+      () => useCoState(Dog, dog.id)?.$jazz.owner.castAs(Group).members,
       {
         account: john,
       },

@@ -53,8 +53,8 @@ export class JazzInspectorElement extends HTMLElement {
 
     this.root?.render(
       <JazzInspectorInternal
-        localNode={this.account._raw.core.node}
-        accountId={this.account._raw.id}
+        localNode={this.account.$jazz.raw.core.node}
+        accountId={this.account.$jazz.raw.id}
       />,
     );
   }

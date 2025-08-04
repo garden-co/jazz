@@ -72,7 +72,7 @@ export function JazzInspector({ position = "right" }: { position?: Position }) {
     <JazzInspectorInternal
       position={position}
       localNode={localNode}
-      accountId={me?._raw.id}
+      accountId={me?.$jazz.raw.id}
     />
   );
 }

@@ -136,7 +136,7 @@ async function serializeMessagePayload({
   target: Account | Group;
 }) {
   const me = owner ?? Account.getMe();
-  const node = me._raw.core.node;
+  const node = me.$jazz.localNode;
   const crypto = node.crypto;
 
   const agent = node.getCurrentAgent();
@@ -203,7 +203,7 @@ async function handleMessagePayload({
   request: unknown;
   loadAs: Account;
 }) {
-  const node = loadAs._raw.core.node;
+  const node = loadAs.$jazz.localNode;
   const crypto = node.crypto;
 
   const requestParsed = requestSchema.safeParse(request);
@@ -303,7 +303,7 @@ async function handleMessagePayload({
   }
 
   if (type === "request") {
-    value._raw.set("$handled", loadAs.id);
+    value.$jazz.raw.set("$handled", loadAs.id);
   }
 
   return {
@@ -469,7 +469,7 @@ class HttpRoute<
       | Promise<MessageValuePayload<ResponseShape>>
       | MessageValuePayload<ResponseShape>,
   ): Promise<Response> => {
-    const node = as._raw.core.node;
+    const node = as.$jazz.localNode;
     const body = await request.json();
     const data = await handleMessagePayload({
       type: "request",
@@ -612,7 +612,7 @@ function safeVerifySignature(
 }
 
 async function loadWorkerAccountOrGroup(id: string, loadAs: Account) {
-  const node = loadAs._raw.core.node;
+  const node = loadAs.$jazz.localNode;
   const coValue = await node.loadCoValueCore(id as `co_z${string}`);
 
   if (!coValue.isAvailable()) {

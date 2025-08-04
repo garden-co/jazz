@@ -164,7 +164,7 @@ export async function createImageNative(
 
         const binaryStream = await FileStream.createFromBlob(
           await fileUriToBlob(resizedImage.uri),
-          imageDefinition._owner,
+          imageDefinition.$jazz.owner,
         );
 
         imageDefinition[label] = binaryStream;
@@ -220,7 +220,7 @@ export async function createImageNative(
       try {
         const originalBinaryStream = await FileStream.createFromBlob(
           await base64DataURIToBlob(base64ImageDataURI),
-          imageDefinition._owner,
+          imageDefinition.$jazz.owner,
         );
         imageDefinition[`${originalWidth}x${originalHeight}`] =
           originalBinaryStream;

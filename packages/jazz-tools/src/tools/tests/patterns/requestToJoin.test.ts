@@ -73,7 +73,7 @@ async function setup() {
 
   const organizationId = organization.id;
 
-  await admin1.waitForAllCoValuesSync();
+  await admin1.$jazz.waitForAllCoValuesSync();
 
   return {
     admin1,
@@ -107,7 +107,7 @@ async function sendRequestToJoin(organizationId: string, account: Account) {
 
   organization.requests[account.id] = request;
 
-  await account.waitForAllCoValuesSync();
+  await account.$jazz.waitForAllCoValuesSync();
 
   return request;
 }
@@ -144,7 +144,7 @@ async function approveRequest(
 
   organization.mainGroup.addMember(user, "writer");
 
-  await admin.waitForAllCoValuesSync();
+  await admin.$jazz.waitForAllCoValuesSync();
 }
 
 async function rejectRequest(
@@ -177,7 +177,7 @@ async function rejectRequest(
   request.status = "rejected";
   organization.statuses[user.id] = "rejected";
 
-  await admin.waitForAllCoValuesSync();
+  await admin.$jazz.waitForAllCoValuesSync();
 }
 
 describe("Request to join", () => {

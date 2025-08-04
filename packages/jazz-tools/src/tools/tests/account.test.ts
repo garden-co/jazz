@@ -23,7 +23,7 @@ test("waitForAllCoValuesSync should resolve when all the values are synced", asy
     TestMap.create({ name: "Alice" }, { owner: clientAccount }),
   );
 
-  await clientAccount.waitForAllCoValuesSync({
+  await clientAccount.$jazz.waitForAllCoValuesSync({
     timeout: 1000,
   });
 
@@ -31,7 +31,7 @@ test("waitForAllCoValuesSync should resolve when all the values are synced", asy
   clientNode.gracefulShutdown();
 
   for (const map of maps) {
-    const loadedMap = await serverNode.load(map._raw.id);
+    const loadedMap = await serverNode.load(map.$jazz.raw.id);
     expect(loadedMap).not.toBe("unavailable");
   }
 });
@@ -39,12 +39,12 @@ test("waitForAllCoValuesSync should resolve when all the values are synced", asy
 test("waitForSync should resolve when the value is uploaded", async () => {
   const { clientNode, serverNode, clientAccount } = await setupTwoNodes();
 
-  await clientAccount.waitForSync({ timeout: 1000 });
+  await clientAccount.$jazz.waitForSync({ timeout: 1000 });
 
   // Killing the client node so the serverNode can't load the map from it
   clientNode.gracefulShutdown();
 
-  const loadedAccount = await serverNode.load(clientAccount._raw.id);
+  const loadedAccount = await serverNode.load(clientAccount.$jazz.raw.id);
 
   expect(loadedAccount).not.toBe("unavailable");
 });
@@ -54,19 +54,19 @@ test("isMe gets updated correctly when switching accounts", async () => {
     isCurrentActiveAccount: true,
   });
 
-  expect(oldMe.isMe).toBe(true);
+  expect(oldMe.$jazz.isMe).toBe(true);
 
   const newMe = await createJazzTestAccount({
     isCurrentActiveAccount: false,
   });
 
-  expect(newMe.isMe).toBe(false);
-  expect(oldMe.isMe).toBe(true);
+  expect(newMe.$jazz.isMe).toBe(false);
+  expect(oldMe.$jazz.isMe).toBe(true);
 
   setActiveAccount(newMe);
 
-  expect(newMe.isMe).toBe(true);
-  expect(oldMe.isMe).toBe(false);
+  expect(newMe.$jazz.isMe).toBe(true);
+  expect(oldMe.$jazz.isMe).toBe(false);
 });
 
 test("Me gets updated correctly when creating a new account as active", async () => {
@@ -74,14 +74,14 @@ test("Me gets updated correctly when creating a new account as active", async ()
     isCurrentActiveAccount: true,
   });
 
-  expect(oldMe.isMe).toBe(true);
+  expect(oldMe.$jazz.isMe).toBe(true);
 
   const newMe = await createJazzTestAccount({
     isCurrentActiveAccount: true,
   });
 
-  expect(newMe.isMe).toBe(true);
-  expect(oldMe.isMe).toBe(false);
+  expect(newMe.$jazz.isMe).toBe(true);
+  expect(oldMe.$jazz.isMe).toBe(false);
 });
 
 test("accounts should sync correctly", async () => {

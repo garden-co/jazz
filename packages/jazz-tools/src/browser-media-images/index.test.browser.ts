@@ -15,7 +15,7 @@ describe("createImage", () => {
 
     const account = await createJazzTestAccount();
 
-    const image = await createImage(imageBlob, { owner: account._owner });
+    const image = await createImage(imageBlob, { owner: account.$jazz.owner });
     expect(image).toBeDefined();
 
     expect(image.originalSize).toEqual([1, 1]);
@@ -35,7 +35,7 @@ describe("createImage", () => {
 
     const account = await createJazzTestAccount();
 
-    const image = await createImage(imageBlob, { owner: account._owner });
+    const image = await createImage(imageBlob, { owner: account.$jazz.owner });
     expect(image).toBeDefined();
 
     expect(image.originalSize).toEqual([1920, 400]);
@@ -54,7 +54,7 @@ describe("createImage", () => {
     const account = await createJazzTestAccount();
 
     const image = await createImage(imageBlob, {
-      owner: account._owner,
+      owner: account.$jazz.owner,
       maxSize: 256,
     });
     expect(image).toBeDefined();

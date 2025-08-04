@@ -36,7 +36,7 @@ export function useAcceptInviteNative<S extends CoValueClassOrSchema>({
     const handleDeepLink = ({ url }: { url: string }) => {
       const result = parseInviteLink(url);
       if (result && result.valueHint === forValueHint) {
-        context.me
+        context.me.$jazz
           .acceptInvite(
             result.valueID,
             result.inviteSecret,
