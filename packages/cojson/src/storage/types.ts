@@ -65,6 +65,11 @@ export interface DBClientInterfaceAsync {
     coValueId: string,
   ): Promise<StoredCoValueRow | undefined> | undefined;
 
+  upsertCoValue(
+    id: string,
+    header?: CoValueHeader,
+  ): Promise<number | undefined>;
+
   getCoValueSessions(coValueRowId: number): Promise<StoredSessionRow[]>;
 
   getSingleCoValueSession(
@@ -82,8 +87,6 @@ export interface DBClientInterfaceAsync {
     sessionRowId: number,
     firstNewTxIdx: number,
   ): Promise<SignatureAfterRow[]>;
-
-  addCoValue(msg: NewContentMessage): Promise<number>;
 
   addSessionUpdate({
     sessionUpdate,
@@ -115,6 +118,8 @@ export interface DBClientInterfaceAsync {
 export interface DBClientInterfaceSync {
   getCoValue(coValueId: string): StoredCoValueRow | undefined;
 
+  upsertCoValue(id: string, header?: CoValueHeader): number | undefined;
+
   getCoValueSessions(coValueRowId: number): StoredSessionRow[];
 
   getSingleCoValueSession(
@@ -132,8 +137,6 @@ export interface DBClientInterfaceSync {
     sessionRowId: number,
     firstNewTxIdx: number,
   ): Pick<SignatureAfterRow, "idx" | "signature">[];
-
-  addCoValue(msg: NewContentMessage): number;
 
   addSessionUpdate({
     sessionUpdate,
