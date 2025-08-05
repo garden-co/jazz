@@ -136,6 +136,7 @@ importers:
 
   bench:
     dependencies:
+<<<<<<< HEAD
       cojson:
         specifier: workspace:*
         version: link:../packages/cojson
@@ -163,6 +164,14 @@ importers:
         version: 0.26.4(react-native@0.80.0(@babel/core@7.28.0)(@react-native-community/cli@20.0.0(typescript@5.8.3))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0)
 
   crates/cojson-core-wasm:
+=======
+      react-native:
+        specifier: '*'
+        version: 0.80.0(@babel/core@7.28.0)(@react-native-community/cli@20.0.0(typescript@5.8.3))(@types/react@19.1.0)(react@19.1.0)
+      react-native-nitro-modules:
+        specifier: 0.26.4
+        version: 0.26.4(react-native@0.80.0(@babel/core@7.28.0)(@react-native-community/cli@20.0.0(typescript@5.8.3))(@types/react@19.1.0)(react@19.1.0))(react@19.1.0)
+>>>>>>> 989cdc864 (feat: `android` build working)
     devDependencies:
       nitro-codegen:
         specifier: 0.26.4
