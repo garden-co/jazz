@@ -235,21 +235,14 @@ export class StorageApiSync implements StorageAPI {
     correctionCallback: CorrectionCallback,
   ): boolean {
     const id = msg.id;
-    const coValueRow = this.dbClient.getCoValue(id);
+    const storedCoValueRowID = this.dbClient.upsertCoValue(id, msg.header);
 
-    // We have no info about coValue header
-    const invalidAssumptionOnHeaderPresence = !msg.header && !coValueRow;
-
-    if (invalidAssumptionOnHeaderPresence) {
+    if (!storedCoValueRowID) {
       const knownState = emptyKnownState(id as RawCoID);
       this.knwonStates.setKnownState(id, knownState);
 
       return this.handleCorrection(knownState, correctionCallback);
     }
-
-    const storedCoValueRowID: number = coValueRow
-      ? coValueRow.rowID
-      : this.dbClient.addCoValue(msg);
 
     const knownState = this.knwonStates.getKnownState(id);
     knownState.header = true;

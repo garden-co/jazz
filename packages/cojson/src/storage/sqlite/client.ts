@@ -112,14 +112,28 @@ export class SQLiteClient implements DBClientInterfaceSync {
     ) as SignatureAfterRow[];
   }
 
-  addCoValue(msg: NewContentMessage): number {
+  getCoValueRowID(id: RawCoID): number | undefined {
+    const row = this.db.get<{ rowID: number }>(
+      "SELECT rowID FROM coValues WHERE id = ?",
+      [id],
+    );
+    return row?.rowID;
+  }
+
+  upsertCoValue(id: RawCoID, header?: CoValueHeader): number | undefined {
+    if (!header) {
+      return this.getCoValueRowID(id);
+    }
+
     const result = this.db.get<{ rowID: number }>(
-      "INSERT INTO coValues (id, header) VALUES (?, ?) RETURNING rowID",
-      [msg.id, JSON.stringify(msg.header)],
+      `INSERT INTO coValues (id, header) VALUES (?, ?) 
+       ON CONFLICT(id) DO NOTHING
+       RETURNING rowID`,
+      [id, JSON.stringify(header)],
     );
 
     if (!result) {
-      throw new Error("Failed to add coValue");
+      return this.getCoValueRowID(id);
     }
 
     return result.rowID;
