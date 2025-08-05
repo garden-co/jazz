@@ -91,9 +91,6 @@ importers:
 
   crates/cojson-core-rn/pkg:
     dependencies:
-      '@react-native/codegen':
-        specifier: ^0.80.0
-        version: 0.80.1(@babel/core@7.28.0)
       react-native:
         specifier: '*'
         version: 0.80.0(@babel/core@7.28.0)(@react-native-community/cli@19.0.0(typescript@5.8.3))(@types/react@19.1.0)(react@19.1.0)
