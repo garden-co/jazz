@@ -36,6 +36,7 @@
     "dev": "turbo dev",
     "build": "turbo build && cd homepage/homepage && turbo build",
     "build:packages": "turbo build --filter='./packages/*'",
+    "build:crates": "turbo build --filter='./crates/**/pkg/'",
     "lint": "turbo lint && cd homepage/homepage && pnpm run lint",
     "test": "vitest",
     "test:ci": "vitest run --watch=false",
