@@ -14,6 +14,8 @@ import type {
   twoFactorClient,
   usernameClient,
 } from "better-auth/client/plugins";
+import type { SocialProviderList } from "better-auth/social-providers";
+
 import type {
   AuthClient as GenericAuthClient,
   Session as GenericSession,
@@ -29,9 +31,7 @@ export type Options = AuthClient extends GenericAuthClient<
   : never;
 declare const listAccounts: AuthClient["listAccounts"];
 export type AccountsType = Awaited<ReturnType<typeof listAccounts<{}>>>;
-export type SSOProviderType = Parameters<
-  AuthClient["signIn"]["social"]
->[0]["provider"];
+export type SSOProviderType = SocialProviderList[number];
 export type Session = GenericSession<Options>;
 export type User = GenericUser<Options>;
 

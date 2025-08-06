@@ -137,4 +137,11 @@ export default defineConfig([
     },
     outDir: "dist/worker",
   },
+  {
+    ...cfg,
+    entry: {
+      index: "src/better-auth/database-adapter/index.ts",
+    },
+    outDir: "dist/better-auth/database-adapter",
+  },
 ]);
