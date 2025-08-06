@@ -7,9 +7,13 @@ import {
   SiGithub,
   SiGitlab,
   SiGoogle,
+  SiHuggingface,
   SiKick,
+  SiLinear,
+  SiNotion,
   SiReddit,
   SiRoblox,
+  SiSlack,
   SiSpotify,
   SiTiktok,
   SiTwitch,
@@ -97,6 +101,22 @@ const socialProviderMap: Record<SSOProviderType, SocialProvider> = {
   spotify: {
     name: "Spotify",
     icon: <SiSpotify />,
+  },
+  slack: {
+    name: "Slack",
+    icon: <SiSlack />,
+  },
+  linear: {
+    name: "Linear",
+    icon: <SiLinear />,
+  },
+  notion: {
+    name: "Notion",
+    icon: <SiNotion />,
+  },
+  huggingface: {
+    name: "Hugging Face",
+    icon: <SiHuggingface />,
   },
 };
 
