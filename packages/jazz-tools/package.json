@@ -164,6 +164,11 @@
       "types": "./dist/better-auth/auth/server.d.ts",
       "default": "./dist/better-auth/auth/server.js"
     },
+    "./better-auth/database-adapter": {
+      "@jazz-tools/source": "./src/better-auth/database-adapter/index.ts",
+      "types": "./dist/better-auth/database-adapter/index.d.ts",
+      "default": "./dist/better-auth/database-adapter/index.js"
+    },
     "./load-edge-wasm": {
       "@jazz-tools/source": "./src/worker/edge-wasm.ts",
       "types": "./dist/worker/edge-wasm.d.ts",
@@ -191,7 +196,8 @@
     "prosemirror-state": "^1.4.3",
     "prosemirror-transform": "^1.9.0",
     "use-sync-external-store": "^1.5.0",
-    "zod": "3.25.76"
+    "zod": "3.25.76",
+    "ws": "^8.14.2"
   },
   "scripts": {
     "check": "tsc --noEmit",
@@ -229,7 +235,7 @@
     "@bam.tech/react-native-image-resizer": "*",
     "@op-engineering/op-sqlite": "*",
     "@react-native-community/netinfo": "*",
-    "better-auth": "^1.3.0",
+    "better-auth": "^1.3.2",
     "expo-file-system": "*",
     "expo-secure-store": "*",
     "expo-sqlite": "*",
