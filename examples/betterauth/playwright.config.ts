@@ -37,13 +37,21 @@ export default defineConfig({
   /* Configure projects for major browsers */
   projects: [
     {
+      name: "setup db",
+      testMatch: /tests\/global\.setup\.ts/,
+    },
+    {
       name: "chromium",
       use: { ...devices["Desktop Chrome"] },
+      dependencies: ["setup db"],
     },
   ],
 
   /* Run your local dev server before starting the tests */
   webServer: [
+    {
+      command: "pnpm exec jazz-run sync --in-memory",
+    },
     {
       command: "pnpm dev",
       url: "http://localhost:3000/",
