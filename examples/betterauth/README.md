@@ -15,6 +15,9 @@ To run this example, you may either:
 - `BETTER_AUTH_SECRET`: The encryption secret used by the self-hosted Better Auth server (required only if `NEXT_PUBLIC_AUTH_BASE_URL` is undefined)
 - `GITHUB_CLIENT_ID`: The client ID for the GitHub OAuth provider used by the self-hosted Better Auth server (required only if `NEXT_PUBLIC_AUTH_BASE_URL` is undefined)
 - `GITHUB_CLIENT_SECRET`: The client secret for the GitHub OAuth provider used by the self-hosted Better Auth server (required only if `NEXT_PUBLIC_AUTH_BASE_URL` is undefined)
+- `SYNC_SERVER`: The sync Jazz server
+- `WORKER_ACCOUNT_ID`: The AccountID for the worker that will manage the database
+- `WORKER_ACCOUNT_SECRET`: The AccountSecret for the worker that will manage the database
 
 ### Using this example as a template
 
