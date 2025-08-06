@@ -171,7 +171,7 @@ importers:
         version: 1.2.3(@types/react@19.1.0)(react@19.1.0)
       better-auth:
         specifier: ^1.3.0
-        version: 1.3.6(react-dom@19.1.0(react@19.1.0))(react@19.1.0)(zod@3.25.76)
+        version: 1.3.6(react-dom@19.1.0(react@19.1.0))(react@19.1.0)(zod@4.0.15)
       better-sqlite3:
         specifier: ^11.9.1
         version: 11.10.0
@@ -2099,7 +2099,7 @@ importers:
         specifier: ^2.12.0
         version: 2.12.0(@tiptap/pm@2.12.0)
       better-auth:
-        specifier: ^1.3.0
+        specifier: ^1.3.2
         version: 1.3.6(react-dom@19.1.0(react@19.1.0))(react@19.1.0)(zod@3.25.76)
       clsx:
         specifier: ^2.0.0
@@ -2170,6 +2170,9 @@ importers:
       svelte:
         specifier: ^5.0.0
         version: 5.34.6
+      ws:
+        specifier: ^8.14.2
+        version: 8.18.1
       zod:
         specifier: 3.25.76
         version: 3.25.76
@@ -2219,9 +2222,6 @@ importers:
       vitest:
         specifier: catalog:default
         version: 3.2.4(@types/debug@4.1.12)(@types/node@24.3.0)(@vitest/browser@3.2.4)(@vitest/ui@3.2.4)(happy-dom@17.4.4)(jiti@2.5.1)(jsdom@25.0.1)(lightningcss@1.30.1)(msw@2.10.3(@types/node@24.3.0)(typescript@5.6.2))(terser@5.43.1)(tsx@4.20.3)(yaml@2.6.1)
-      ws:
-        specifier: ^8.14.2
-        version: 8.18.1
 
   packages/quint-ui:
     dependencies:
@@ -5290,9 +5290,6 @@ packages:
 
   '@jridgewell/source-map@0.3.11':
     resolution: {integrity: sha512-ZMp1V8ZFcPG5dIWnQLr3NSI1MiCU7UETdS/A0G8V/XWHvJv3ZsFqutJn1Y5RPmAPX6F3BiE397OqveU/9NCuIA==}
-
-  '@jridgewell/source-map@0.3.6':
-    resolution: {integrity: sha512-1ZJTZebgqllO79ue2bm3rIGud/bOe0pP5BjSRCRxxYkEZS8STV7zN84UBbiYu7jy+eCKSnVIUgoWWE/tt+shMQ==}
 
   '@jridgewell/sourcemap-codec@1.5.0':
     resolution: {integrity: sha512-gv3ZRaISU3fjPAgNsriBRqGWQL6quFx04YMPW/zD8XMLsU32mhCCbfbO6KZFLjvYpCZ8zyDEgqsgf+PwPaM7GQ==}
@@ -14292,11 +14289,6 @@ packages:
     resolution: {integrity: sha512-un0FmiRUQNr5PJqy9kP7c40F5BOfpGlYTrxonDChEZB7pzZxRNp/bt+ymiy9/npwXya9KH99nJ/GXFIiUkYGFQ==}
     engines: {node: '>=8'}
 
-  terser@5.37.0:
-    resolution: {integrity: sha512-B8wRRkmre4ERucLM/uXx4MOV5cbnOlVAqUst+1+iLKPI0dOgFO28f84ptoQt9HEI537PMzfYa/d+GEPKTRXmYA==}
-    engines: {node: '>=10'}
-    hasBin: true
-
   terser@5.43.1:
     resolution: {integrity: sha512-+6erLbBm0+LROX2sPXlUYx/ux5PyE9K/a92Wrt6oA+WDAoFTdpHE5tCYCI5PNzq2y8df4rA+QgHLJuR4jNymsg==}
     engines: {node: '>=10'}
@@ -15478,6 +15470,9 @@ packages:
 
   zod@3.25.76:
     resolution: {integrity: sha512-gzUt/qt81nXsFGKIFcC3YnfEAx5NkunCfnDlvuBSSFS02bcXu4Lmea0AFIUwbLWxWPx3d9p8S5QoaujKcNQxcQ==}
+
+  zod@4.0.15:
+    resolution: {integrity: sha512-2IVHb9h4Mt6+UXkyMs0XbfICUh1eUrlJJAOupBHUhLRnKkruawyDddYRCs0Eizt900ntIMk9/4RksYl+FgSpcQ==}
 
   zwitch@2.0.4:
     resolution: {integrity: sha512-bXE4cR/kVZhKZX/RjPEflHaKVhUVl85noU3v6b8apfQEc1x4A+zBxjZ4lN8LqGd6WZ3dl98pY4o717VFmoPp+A==}
@@ -19779,11 +19774,6 @@ snapshots:
   '@jridgewell/set-array@1.2.1': {}
 
   '@jridgewell/source-map@0.3.11':
-    dependencies:
-      '@jridgewell/gen-mapping': 0.3.13
-      '@jridgewell/trace-mapping': 0.3.30
-
-  '@jridgewell/source-map@0.3.6':
     dependencies:
       '@jridgewell/gen-mapping': 0.3.13
       '@jridgewell/trace-mapping': 0.3.30
@@ -24229,6 +24219,24 @@ snapshots:
       react: 19.1.0
       react-dom: 19.1.0(react@19.1.0)
 
+  better-auth@1.3.6(react-dom@19.1.0(react@19.1.0))(react@19.1.0)(zod@4.0.15):
+    dependencies:
+      '@better-auth/utils': 0.2.6
+      '@better-fetch/fetch': 1.1.18
+      '@noble/ciphers': 0.6.0
+      '@noble/hashes': 1.8.0
+      '@simplewebauthn/browser': 13.1.2
+      '@simplewebauthn/server': 13.1.2
+      better-call: 1.0.13
+      defu: 6.1.4
+      jose: 5.10.0
+      kysely: 0.28.5
+      nanostores: 0.11.4
+      zod: 4.0.15
+    optionalDependencies:
+      react: 19.1.0
+      react-dom: 19.1.0(react@19.1.0)
+
   better-call@1.0.13:
     dependencies:
       '@better-fetch/fetch': 1.1.18
@@ -27988,7 +27996,7 @@ snapshots:
   metro-minify-terser@0.82.3:
     dependencies:
       flow-enums-runtime: 0.0.6
-      terser: 5.37.0
+      terser: 5.43.1
 
   metro-minify-terser@0.83.1:
     dependencies:
@@ -31232,13 +31240,6 @@ snapshots:
       ansi-escapes: 4.3.2
       supports-hyperlinks: 2.3.0
 
-  terser@5.37.0:
-    dependencies:
-      '@jridgewell/source-map': 0.3.6
-      acorn: 8.15.0
-      commander: 2.20.3
-      source-map-support: 0.5.21
-
   terser@5.43.1:
     dependencies:
       '@jridgewell/source-map': 0.3.11
@@ -32684,5 +32685,7 @@ snapshots:
   zod@3.22.3: {}
 
   zod@3.25.76: {}
+
+  zod@4.0.15: {}
 
   zwitch@2.0.4: {}
