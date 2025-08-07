@@ -1,5 +1,5 @@
 import { betterAuth } from "better-auth";
-import { jazzPlugin } from "jazz-betterauth-server-plugin";
+import { jazzPlugin } from "jazz-tools/better-auth/auth/server";
 import { JazzBetterAuthDatabaseAdapter } from "jazz-tools/better-auth/database-adapter";
 import { socialProviders } from "./socialProviders";
 

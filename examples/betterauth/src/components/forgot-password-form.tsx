@@ -10,7 +10,7 @@ import {
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { useAuth } from "jazz-react-auth-betterauth";
+import { useBetterAuth } from "jazz-tools/better-auth/auth/react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
@@ -19,11 +19,11 @@ import { toast } from "sonner";
 export function ForgotPasswordForm() {
   const router = useRouter();
   const [email, setEmail] = useState("");
-  const auth = useAuth();
+  const auth = useBetterAuth();
 
   const handleSubmit = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
-    auth.authClient.forgetPassword(
+    auth.forgetPassword(
       { email, redirectTo: `${window.location.origin}/auth/reset-password` },
       {
         onSuccess: () => {

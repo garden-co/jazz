@@ -10,7 +10,9 @@ import {
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { type SSOProviderType, useAuth } from "jazz-react-auth-betterauth";
+import type { SocialProviderList } from "better-auth/social-providers";
+import { useBetterAuth } from "jazz-tools/better-auth/auth/react";
+import { useAccount } from "jazz-tools/react-core";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
@@ -18,16 +20,18 @@ import { toast } from "sonner";
 import { SSOButton } from "./SSOButton";
 
 interface Props {
-  providers: SSOProviderType[];
+  providers: SocialProviderList;
 }
 
 export function SignupForm({ providers }: Props) {
   const router = useRouter();
-  const auth = useAuth();
+  const auth = useBetterAuth();
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
+
+  const account = useAccount();
 
   const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
@@ -39,7 +43,7 @@ export function SignupForm({ providers }: Props) {
       return;
     }
 
-    await auth.authClient.signUp.email(
+    await auth.signUp.email(
       {
         email,
         password,
@@ -47,7 +51,9 @@ export function SignupForm({ providers }: Props) {
       },
       {
         onSuccess: async () => {
-          await auth.signIn();
+          if (account?.me?.profile) {
+            account.me.profile.name = name;
+          }
           router.push("/");
         },
         onError: (error) => {

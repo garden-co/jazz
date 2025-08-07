@@ -21,7 +21,8 @@ import {
   SiX,
   SiZoom,
 } from "@icons-pack/react-simple-icons";
-import { type SSOProviderType, useAuth } from "jazz-react-auth-betterauth";
+import type { SocialProviderList } from "better-auth/social-providers";
+import { useBetterAuth } from "jazz-tools/better-auth/auth/react";
 import { useRouter } from "next/navigation";
 import type { ReactNode } from "react";
 import { toast } from "sonner";
@@ -31,7 +32,7 @@ interface SocialProvider {
   icon?: ReactNode;
 }
 
-const socialProviderMap: Record<SSOProviderType, SocialProvider> = {
+const socialProviderMap: Record<SocialProviderList[number], SocialProvider> = {
   github: {
     name: "GitHub",
     icon: <SiGithub />,
@@ -121,11 +122,11 @@ const socialProviderMap: Record<SSOProviderType, SocialProvider> = {
 };
 
 interface Props {
-  provider: SSOProviderType;
+  provider: SocialProviderList[number];
 }
 
 export function SSOButton({ provider }: Props) {
-  const auth = useAuth();
+  const auth = useBetterAuth();
   const router = useRouter();
 
   return (
@@ -133,7 +134,7 @@ export function SSOButton({ provider }: Props) {
       type="button"
       variant="outline"
       onClick={() => {
-        auth.authClient.signIn.social(
+        auth.signIn.social(
           {
             provider,
           },
