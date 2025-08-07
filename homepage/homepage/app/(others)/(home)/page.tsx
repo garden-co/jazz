@@ -1,22 +1,21 @@
-import { ChatDemoSection } from "@/components/home/ChatDemoSection";
-import { CollaborationFeaturesSection } from "@/components/home/CollaborationFeaturesSection";
-import { EarlyAdopterSection } from "@/components/home/EarlyAdopterSection";
-import { EncryptionSection } from "@/components/home/EncryptionSection";
-import { FeaturesSection } from "@/components/home/FeaturesSection";
-import { GetStartedSnippetSelect } from "@/components/home/GetStartedSnippetSelect";
-import { HeroSection } from "@/components/home/HeroSection";
-import { HowJazzWorksSection } from "@/components/home/HowJazzWorksSection";
-import { LocalFirstFeaturesSection } from "@/components/home/LocalFirstFeaturesSection";
-import ProblemStatementSection from "@/components/home/ProblemStatementSection";
-import { SupportedEnvironmentsSection } from "@/components/home/SupportedEnvironmentsSection";
+import { ChatDemoSection } from "./components/ChatDemoSection";
+import { CollaborationFeaturesSection } from "./components/collaborationFeatures/CollaborationFeaturesSection";
+import { EarlyAdopterSection } from "./components/EarlyAdopterSection";
+import { EncryptionSection } from "./components/EncryptionSection";
+import { EverythingElseSection } from "./components/everythingElse/EverythingElseSection";
+import { HeroSection } from "./components/hero/HeroSection";
+import { GetStartedSnippetSelect } from "./components/hero/GetStartedSnippetSelect";
+import { HowJazzWorksSection } from "./components/fourSteps/HowJazzWorksSection";
+import { LocalFirstFeaturesSection } from "./components/LocalFirstFeaturesSection";
+import BeforeAndAfterSection from "./components/beforeAndAfter/BeforeAndAfterSection";
+import { SupportedEnvironmentsSection } from "./components/hero/SupportedEnvironmentsSection";
 import { Testimonial } from "@garden-co/design-system/src/components/molecules/Testimonial";
 
 export default function Home() {
   return (
     <>
-        <HeroSection />
+      <HeroSection />
       <div className="container flex flex-col gap-12 lg:gap-20">
-
         <GetStartedSnippetSelect />
         <SupportedEnvironmentsSection />
         <HowJazzWorksSection />
@@ -34,7 +33,7 @@ export default function Home() {
 
         <ChatDemoSection />
 
-        <ProblemStatementSection />
+        <BeforeAndAfterSection />
 
         <LocalFirstFeaturesSection />
 
@@ -51,7 +50,7 @@ export default function Home() {
           </span>
         </Testimonial>
 
-        <FeaturesSection />
+        <EverythingElseSection />
 
         <EarlyAdopterSection />
       </div>

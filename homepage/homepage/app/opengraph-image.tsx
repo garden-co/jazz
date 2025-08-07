@@ -1,14 +1,14 @@
-import { marketingCopy } from "@/content/marketingCopy";
+import { heroCopy } from "@/content/homepage";
 import {
   OpenGraphImage,
   imageContentType,
   imageSize,
 } from "@garden-co/design-system/src/components/organisms/OpenGraphImage";
 
-export const title = marketingCopy.headline;
+export const title = heroCopy.headline;
 export const size = imageSize;
 export const contentType = imageContentType;
-export const alt = marketingCopy.headline;
+export const alt = heroCopy.headline;
 
 export default async function Image() {
   return OpenGraphImage({ title });

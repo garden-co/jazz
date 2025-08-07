@@ -1,4 +1,4 @@
-import { ServerWorkersDiagram } from "@/components/home/ServerWorkersDiagram";
+import { ServerWorkersDiagram } from "@/app/(others)/(home)/components/everythingElse/ServerWorkersDiagram";
 import { ClerkLogo } from "@/components/icons/ClerkLogo";
 import { Button } from "@garden-co/design-system/src/components/atoms/Button";
 import { Card } from "@garden-co/design-system/src/components/atoms/Card";
@@ -89,7 +89,7 @@ const features = [
   },
 ];
 
-export function FeaturesSection() {
+export function EverythingElseSection() {
   return (
     <div>
       <SectionHeader

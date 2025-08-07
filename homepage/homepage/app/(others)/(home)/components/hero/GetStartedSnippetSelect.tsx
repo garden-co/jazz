@@ -2,12 +2,12 @@
 
 import { Framework } from "@/content/framework";
 import { useFramework } from "@/lib/use-framework";
-import NpxCreateJazzApp from "@/components/home/NpxCreateJazzApp.mdx";
+import NpxCreateJazzApp from "./NpxCreateJazzApp.mdx";
 import { CopyButton } from "@garden-co/design-system/src/components/molecules/CodeGroup";
 import { useState } from "react";
 import { Button } from "@garden-co/design-system/src/components/atoms/Button";
 import Link from "next/link";
-import { FrameworkSelect } from "../docs/FrameworkSelect";
+import { FrameworkSelect } from "@/components/docs/FrameworkSelect";
 import clsx from "clsx";
 import { track } from "@vercel/analytics";
 import { GappedGrid } from "@garden-co/design-system/src/components/molecules/GappedGrid";

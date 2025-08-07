@@ -1,4 +1,4 @@
-import { ExampleCard } from "@/components/examples/ExampleCard";
+import { ExampleCard } from "@/app/(others)/examples/components/ExampleCard";
 import { ClerkFullLogo } from "@/components/icons/ClerkFullLogo";
 import { ReactLogo } from "@/components/icons/ReactLogo";
 import { ReactNativeLogo } from "@/components/icons/ReactNativeLogo";

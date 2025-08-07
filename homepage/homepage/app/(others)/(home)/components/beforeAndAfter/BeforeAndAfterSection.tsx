@@ -1,10 +1,10 @@
-import { DiagramAfterJazz } from "@/components/DiagramAfterJazz";
-import { DiagramBeforeJazz } from "@/components/DiagramBeforeJazz";
+import { DiagramAfterJazz } from "./DiagramAfterJazz";
+import { DiagramBeforeJazz } from "./DiagramBeforeJazz";
 import { Icon } from "@garden-co/design-system/src/components/atoms/Icon";
 import { Prose } from "@garden-co/design-system/src/components/molecules/Prose";
 import { SectionHeader } from "@garden-co/design-system/src/components/molecules/SectionHeader";
 
-export default function ProblemStatementSection() {
+export default function BeforeAndAfterSection() {
   return (
     <div className="grid gap-4 lg:gap-8">
       <SectionHeader

@@ -1,5 +1,5 @@
-import { Pricing } from "@/components/Pricing";
-import { LatencyMap } from "@/components/cloud/latencyMap";
+import { Pricing } from "./components/Pricing";
+import { LatencyMap } from "@/app/(others)/cloud/components/latencyMap";
 import { GridCard } from "@garden-co/design-system/src/components/atoms/GridCard";
 import { H2, H3 } from "@garden-co/design-system/src/components/atoms/Headings";
 import { P } from "@garden-co/design-system/src/components/atoms/Paragraph";

@@ -1,4 +1,4 @@
-import LatencyChart from "@/components/LatencyChart";
+import LatencyChart from "@/app/(others)/cloud/components/LatencyChart";
 import { HeroHeader } from "@garden-co/design-system/src/components/molecules/HeroHeader";
 import { clsx } from "clsx";
 import type { Metadata } from "next";
