@@ -461,6 +461,22 @@ export class SyncManager {
 
     if (!coValue.hasVerifiedContent()) {
       if (!msg.header) {
+        const storageKnownState = this.local.storage?.getKnownState(msg.id);
+
+        if (storageKnownState?.header) {
+          // If the CoValue has been garbage collected, we load it from the storage before handling the new content
+          coValue.loadFromStorage((found) => {
+            if (found) {
+              this.handleNewContent(msg, from);
+            } else {
+              logger.error("Known CoValue not found in storage", {
+                id: msg.id,
+              });
+            }
+          });
+          return;
+        }
+
         if (peer) {
           this.trySendToPeer(peer, {
             action: "known",
@@ -782,12 +798,12 @@ export class SyncManager {
 
     if (!storage) return;
 
+    const value = this.local.getCoValue(content.id);
+
     // Try to store the content as-is for performance
     // In case that some transactions are missing, a correction will be requested, but it's an edge case
     storage.store(content, (correction) => {
-      return this.local
-        .getCoValue(content.id)
-        .verified?.newContentSince(correction);
+      return value.verified?.newContentSince(correction);
     });
   }
 

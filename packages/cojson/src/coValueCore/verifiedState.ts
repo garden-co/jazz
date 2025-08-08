@@ -65,6 +65,7 @@ export class VerifiedState {
   private _cachedKnownState?: CoValueKnownState;
   private _cachedNewContentSinceEmpty: NewContentMessage[] | undefined;
   private streamingKnownState?: CoValueKnownState["sessions"];
+  public lastAccessed: number | undefined;
 
   constructor(
     id: RawCoID,

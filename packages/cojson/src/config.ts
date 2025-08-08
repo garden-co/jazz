@@ -32,3 +32,16 @@ export const SYNC_SCHEDULER_CONFIG = {
 export function setIncomingMessagesTimeBudget(budget: number) {
   SYNC_SCHEDULER_CONFIG.INCOMING_MESSAGES_TIME_BUDGET = budget;
 }
+
+export const GARBAGE_COLLECTOR_CONFIG = {
+  MAX_AGE: 1000 * 60 * 10, // 10 minutes
+  INTERVAL: 1000 * 60 * 5, // 5 minutes
+};
+
+export function setGarbageCollectorMaxAge(maxAge: number) {
+  GARBAGE_COLLECTOR_CONFIG.MAX_AGE = maxAge;
+}
+
+export function setGarbageCollectorInterval(interval: number) {
+  GARBAGE_COLLECTOR_CONFIG.INTERVAL = interval;
+}
