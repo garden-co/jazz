@@ -526,6 +526,7 @@ export class CoValueCore {
   makeTransaction(
     changes: JsonValue[],
     privacy: "private" | "trusting",
+    forcedSessionID?: SessionID,
   ): boolean {
     if (!this.verified) {
       throw new Error(
@@ -565,14 +566,23 @@ export class CoValueCore {
       };
     }
 
-    // This is an ugly hack to get a unique but stable session ID for editing the current account
     const sessionID =
-      this.verified.header.meta?.type === "account"
+      (forcedSessionID ?? this.verified.header.meta?.type === "account")
         ? (this.node.currentSessionID.replace(
             this.node.getCurrentAgent().id,
             this.node.getCurrentAgent().currentAgentID(),
           ) as SessionID)
         : this.node.currentSessionID;
+
+    return this.commitTransaction(sessionID, transaction);
+  }
+
+  commitTransaction(sessionID: SessionID, transaction: Transaction) {
+    if (!this.verified) {
+      throw new Error(
+        "CoValueCore: commitTransaction called on coValue without verified state",
+      );
+    }
 
     const { expectedNewHash, newStreamingHash } =
       this.verified.expectedNewHashAfter(sessionID, [transaction]);

@@ -8,7 +8,7 @@ import {
   vi,
 } from "vitest";
 
-import { emptyKnownState } from "../exports";
+import { CoID, RawCoMap, emptyKnownState } from "../exports";
 import {
   SyncMessagesLog,
   TEST_NODE_CONFIG,
@@ -427,5 +427,68 @@ describe("client syncs with a server with storage", () => {
         largeMap.core.knownState(),
       );
     });
+  });
+
+  test("should autofix marked CoValues with invalid signatures", async () => {
+    const client = setupTestNode();
+
+    const coMap = client.node
+      .createCoValue({
+        type: "comap",
+        ruleset: { type: "unsafeAllowAll" },
+        meta: null,
+        ...client.node.crypto.createdNowUnique(),
+      })
+      .getCurrentContent() as RawCoMap;
+    coMap.set("hello", "world", "trusting");
+
+    const content = coMap.core.verified.newContentSince(undefined)?.[0];
+
+    assert(content);
+
+    const sessionChanges = content.new[client.node.currentSessionID];
+
+    assert(sessionChanges);
+
+    // Overwrite the signature with an invalid one to force the fix
+    sessionChanges.lastSignature =
+      "signature_z3tsE7U1JaeNeUmZ4EY3Xq5uQ9jq9jDi6Rkhdt7T7b7z4NCnpMgB4bo8TwLXYVCrRdBm6PoyyPdK8fYFzHJUh5EzA";
+
+    client.restart();
+    const { storage } = client.addStorage();
+
+    storage.store(content, vi.fn());
+    SyncMessagesLog.clear();
+
+    client.node.markAsStorageSignatureToFix(coMap.id);
+
+    const mapWithFixedSignature = await loadCoValueOrFail(
+      client.node,
+      coMap.id as CoID<RawCoMap>,
+    );
+
+    expect(mapWithFixedSignature.get("hello")).toEqual("world");
+
+    expect(
+      SyncMessagesLog.getMessages({
+        Map: coMap.core,
+      }),
+    ).toMatchInlineSnapshot(`
+      [
+        "client -> storage | LOAD Map sessions: empty",
+        "storage -> client | CONTENT Map header: true new: After: 0 New: 1",
+        "client -> storage | CONTENT Map header: false new: After: 1 New: 1",
+      ]
+    `);
+
+    client.restart();
+    client.addStorage({ storage });
+
+    const mapStoredWithTheCorrectSignature = await loadCoValueOrFail(
+      client.node,
+      coMap.id as CoID<RawCoMap>,
+    );
+
+    expect(mapStoredWithTheCorrectSignature.get("hello")).toEqual("world");
   });
 });
