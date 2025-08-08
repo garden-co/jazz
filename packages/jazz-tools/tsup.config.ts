@@ -142,4 +142,20 @@ export default defineConfig([
     },
     outDir: "dist/worker",
   },
+  {
+    ...cfg,
+    entry: {
+      index: "src/better-auth/database-adapter/index.ts",
+    },
+    outDir: "dist/better-auth/database-adapter",
+  },
+  {
+    ...cfg,
+    entry: {
+      client: "src/better-auth/auth/client.ts",
+      server: "src/better-auth/auth/server.ts",
+      react: "src/better-auth/auth/react.tsx",
+    },
+    outDir: "dist/better-auth/auth",
+  },
 ]);

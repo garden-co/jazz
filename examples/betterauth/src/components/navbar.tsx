@@ -1,22 +1,19 @@
 "use client";
 
 import { Button } from "@/components/ui/button";
-import { useAuth } from "jazz-react-auth-betterauth";
-import { Account } from "jazz-tools";
-import { useAccount, useIsAuthenticated } from "jazz-tools/react";
+import { useBetterAuth } from "jazz-tools/better-auth/auth/react";
+import { useIsAuthenticated } from "jazz-tools/react";
 import Image from "next/image";
 import Link from "next/link";
 import { useCallback } from "react";
 
 export function Navbar() {
-  const { authClient } = useAuth();
-  const { logOut } = useAccount(Account, { resolve: { profile: {} } });
-
+  const authClient = useBetterAuth();
   const isAuthenticated = useIsAuthenticated();
 
   const signOut = useCallback(() => {
-    authClient.signOut().catch(console.error).finally(logOut);
-  }, [logOut, authClient]);
+    authClient.signOut().catch(console.error);
+  }, []);
 
   return (
     <header className="absolute p-4 top-0 left-0 w-full z-10 flex justify-between">

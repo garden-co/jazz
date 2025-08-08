@@ -10,7 +10,7 @@ import {
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { useAuth } from "jazz-react-auth-betterauth";
+import { useBetterAuth } from "jazz-tools/better-auth/auth/react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useState } from "react";
@@ -20,7 +20,7 @@ export function ResetPasswordForm() {
   const router = useRouter();
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
-  const auth = useAuth();
+  const auth = useBetterAuth();
   const searchParams = useSearchParams();
 
   const handleSubmit = (e: React.FormEvent<HTMLFormElement>) => {
@@ -37,7 +37,7 @@ export function ResetPasswordForm() {
       return;
     }
 
-    auth.authClient.resetPassword(
+    auth.resetPassword(
       { newPassword: password, token },
       {
         onSuccess: () => {
