@@ -1,12 +1,14 @@
 // @vitest-environment happy-dom
-import { Account, FileStream, ImageDefinition } from "jazz-tools";
 import { describe, expect, it, vi } from "vitest";
+import { Account, FileStream, ImageDefinition } from "../../../";
 import { Image } from "../../media/image";
 import { createJazzTestAccount } from "../../testing";
 import { render, screen, waitFor } from "../testUtils";
 
 describe("Image", async () => {
-  const account = await createJazzTestAccount();
+  const account = await createJazzTestAccount({
+    isCurrentActiveAccount: true,
+  });
 
   vi.spyOn(Account, "getMe").mockReturnValue(account);
 
@@ -504,6 +506,69 @@ describe("Image", async () => {
       const img = container.querySelector("img");
       expect(img).toBeDefined();
       expect(ref.current).toBe(img);
+    });
+  });
+
+  describe("lazy loading", () => {
+    it("should return an empty png if loading is lazy and placeholder is not set", async () => {
+      const im = ImageDefinition.create(
+        {
+          original: await createDummyFileStream(100, account),
+          originalSize: [100, 100],
+          progressive: false,
+        },
+        {
+          owner: account,
+        },
+      );
+
+      const { container } = render(
+        <Image imageId={im.id} alt="test" loading="lazy" />,
+        { account },
+      );
+
+      const img = container.querySelector("img");
+      expect(img).toBeDefined();
+      expect(img!.src).toBe("blob:test-70");
+    });
+
+    it("should load the image when threshold is reached", async () => {
+      const createObjectURLSpy = vi
+        .spyOn(URL, "createObjectURL")
+        .mockImplementation((blob) => {
+          if (!(blob instanceof Blob)) {
+            throw new Error("Blob expected");
+          }
+          return `blob:test-${blob.size}`;
+        });
+
+      const im = ImageDefinition.create(
+        {
+          original: await createDummyFileStream(100, account),
+          originalSize: [100, 100],
+          progressive: false,
+        },
+        {
+          owner: account,
+        },
+      );
+
+      const { container } = render(
+        <Image imageId={im.id} alt="test" loading="lazy" />,
+        { account },
+      );
+
+      const img = container.querySelector("img");
+      // simulate the load event when the browser's viewport reach the image
+      img!.dispatchEvent(new Event("load"));
+
+      await waitFor(() => {
+        expect((container.querySelector("img") as HTMLImageElement).src).toBe(
+          "blob:test-100",
+        );
+      });
+
+      expect(createObjectURLSpy).toHaveBeenCalledTimes(2);
     });
   });
 });

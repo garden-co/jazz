@@ -211,6 +211,17 @@ Let's say we have an image with a width of 1920px and a height of 1080px.
 
 If the image was generated with progressive loading, the `width` and `height` props will determine the best resolution to use.
 
+
+#### Lazy loading
+
+The `Image` component supports lazy loading based on [browser's strategy](https://developer.mozilla.org/en-US/docs/Web/HTML/Reference/Elements/img#loading). It will generate the blob url for the image when the browser's viewport reaches the image.
+
+<CodeGroup>
+```tsx
+<Image imageId="123" width="original" height="original" loading="lazy" />
+```
+</CodeGroup>
+
 ### Imperative usage
 
 Like other CoValues, `ImageDefinition` can be used to load the object.

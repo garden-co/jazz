@@ -1,6 +1,14 @@
 import { ImageDefinition } from "jazz-tools";
-import { highestResAvailable } from "jazz-tools/media";
-import { type JSX, forwardRef, useEffect, useMemo, useRef } from "react";
+import {
+  type JSX,
+  forwardRef,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import { highestResAvailable } from "../../media/index.js";
 import { useCoState } from "../hooks.js";
 
 export type ImageProps = Omit<
@@ -73,6 +81,21 @@ export const Image = forwardRef<HTMLImageElement, ImageProps>(function Image(
   const image = useCoState(ImageDefinition, imageId);
   const lastBestImage = useRef<[string, string] | null>(null);
 
+  /**
+   * For lazy loading, we use the browser's strategy for images with loading="lazy".
+   * We use an empty image, and when the browser triggers the load event, we load the best available image.
+   * On page loading, if the image url is already in browser's cache, the load event is triggered immediately.
+   * This is why we need to use a different blob url for every image.
+   */
+  const [waitingLazyLoading, setWaitingLazyLoading] = useState(
+    props.loading === "lazy",
+  );
+  const lazyPlaceholder = useMemo(
+    () =>
+      waitingLazyLoading ? URL.createObjectURL(emptyPixelBlob) : undefined,
+    [waitingLazyLoading],
+  );
+
   const dimensions: { width: number | undefined; height: number | undefined } =
     useMemo(() => {
       const originalWidth = image?.originalSize?.[0];
@@ -113,6 +136,10 @@ export const Image = forwardRef<HTMLImageElement, ImageProps>(function Image(
     }, [image?.originalSize, width, height]);
 
   const src = useMemo(() => {
+    if (waitingLazyLoading) {
+      return lazyPlaceholder;
+    }
+
     if (!image) return undefined;
 
     const bestImage = highestResAvailable(
@@ -135,7 +162,11 @@ export const Image = forwardRef<HTMLImageElement, ImageProps>(function Image(
     }
 
     return image.placeholderDataURL;
-  }, [image, dimensions.width, dimensions.height]);
+  }, [image, dimensions.width, dimensions.height, waitingLazyLoading]);
+
+  const onThresholdReached = useCallback(() => {
+    setWaitingLazyLoading(false);
+  }, []);
 
   // Revoke object URL when component unmounts
   useEffect(
@@ -154,6 +185,7 @@ export const Image = forwardRef<HTMLImageElement, ImageProps>(function Image(
       src={src}
       width={dimensions.width}
       height={dimensions.height}
+      onLoad={waitingLazyLoading ? onThresholdReached : undefined}
       {...props}
     />
   );
@@ -164,3 +196,15 @@ function revokeObjectURL(url: string | undefined) {
     URL.revokeObjectURL(url);
   }
 }
+
+const emptyPixelBlob = new Blob(
+  [
+    Uint8Array.from(
+      atob(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg==",
+      ),
+      (c) => c.charCodeAt(0),
+    ),
+  ],
+  { type: "image/png" },
+);
