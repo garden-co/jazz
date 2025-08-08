@@ -19,6 +19,19 @@ export type Style =
   | "muted"
   | "strong";
 
+export const variants = [
+  "default",
+  "primary",
+  "tip",
+  "info",
+  "success",
+  "warning",
+  "alert",
+  "danger",
+  "muted",
+  "strong",
+] as const;
+
 export const sizeClasses = {
   sm: "text-sm py-1 px-2",
   md: "py-1.5 px-3 h-[36px]",
@@ -130,6 +143,19 @@ export const styleToTextActiveMap = {
   muted: "active:text-stone-400 dark:active:text-stone-500",
   strong: "active:text-stone-700 dark:active:text-stone-300",
   default: "active:text-stone-800 dark:active:text-stone-400",
+};
+
+export const styleToTextDarkMap = {
+  primary: "text-primary-dark",
+  info: "text-info-dark",
+  success: "text-success-dark",
+  warning: "text-warning-dark",
+  danger: "text-danger-dark",
+  alert: "text-alert-dark",
+  tip: "text-tip-dark",
+  muted: "text-stone-600 dark:text-stone-300",
+  strong: "text-stone-950 dark:text-stone-50",
+  default: "text-stone-800 dark:text-stone-200",
 };
 
 export type VariantColor =
@@ -287,17 +313,30 @@ export const styleToHoverShadowMap = {
 const focusRingClassesBase =
   "focus:outline-none focus-visible:ring focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-opacity-10";
 
+export const styleToFocusMap = {
+  primary: `${focusRingClassesBase} focus:ring-primary`,
+  info: `${focusRingClassesBase} focus:ring-info`,
+  success: `${focusRingClassesBase} focus:ring-success`,
+  warning: `${focusRingClassesBase} focus:ring-warning`,
+  danger: `${focusRingClassesBase} focus:ring-danger`,
+  alert: `${focusRingClassesBase} focus:ring-alert`,
+  tip: `${focusRingClassesBase} focus:ring-tip`,
+  muted: `${focusRingClassesBase} focus:ring-stone-200 dark:focus:ring-stone-900`,
+  strong: `${focusRingClassesBase} focus:ring-stone-900 dark:focus:ring-stone-200`,
+  default: `${focusRingClassesBase} focus:ring-stone-600 dark:focus:ring-stone-100`,
+};
+
 export const styleToButtonStateMap = {
-  primary: `${styleToBgGradientActiveMap.primary} ${focusRingClassesBase} focus:ring-primary`,
-  info: `${styleToBgGradientActiveMap.info} ${focusRingClassesBase} focus:ring-info`,
-  success: `${styleToBgGradientActiveMap.success} ${focusRingClassesBase} focus:ring-success`,
-  warning: `${styleToBgGradientActiveMap.warning} ${focusRingClassesBase} focus:ring-warning`,
-  danger: `${styleToBgGradientActiveMap.danger} ${focusRingClassesBase} focus:ring-danger`,
-  alert: `${styleToBgGradientActiveMap.alert} ${focusRingClassesBase} focus:ring-alert`,
-  tip: `${styleToBgGradientActiveMap.tip} ${focusRingClassesBase} focus:ring-tip`,
-  muted: `${styleToBgGradientActiveMap.muted} ${focusRingClassesBase} focus:ring-stone-200 dark:focus:ring-stone-900`,
-  strong: `${styleToBgGradientActiveMap.strong} ${focusRingClassesBase} focus:ring-stone-800 dark:focus:ring-stone-200`,
-  default: `${styleToBgGradientActiveMap.default} ${focusRingClassesBase} focus:ring-black dark:focus:ring-white`,
+  primary: `${styleToBgGradientActiveMap.primary} ${styleToFocusMap.primary}`,
+  info: `${styleToBgGradientActiveMap.info} ${styleToFocusMap.info}`,
+  success: `${styleToBgGradientActiveMap.success} ${styleToFocusMap.success}`,
+  warning: `${styleToBgGradientActiveMap.warning} ${styleToFocusMap.warning}`,
+  danger: `${styleToBgGradientActiveMap.danger} ${styleToFocusMap.danger}`,
+  alert: `${styleToBgGradientActiveMap.alert} ${styleToFocusMap.alert}`,
+  tip: `${styleToBgGradientActiveMap.tip} ${styleToFocusMap.tip}`,
+  muted: `${styleToBgGradientActiveMap.muted} ${styleToFocusMap.muted}`,
+  strong: `${styleToBgGradientActiveMap.strong} ${styleToFocusMap.strong}`,
+  default: `${styleToBgGradientActiveMap.default} ${styleToFocusMap.default}`,
 };
 
 export const variantStyleToButtonStateMap = {
