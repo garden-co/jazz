@@ -1,5 +1,5 @@
 {
-  "$schema": "https://biomejs.dev/schemas/1.9.4/schema.json",
+  "$schema": "https://biomejs.dev/schemas/2.1.3/schema.json",
   "vcs": {
     "enabled": true,
     "clientKind": "git",
@@ -7,39 +7,35 @@
   },
   "files": {
     "ignoreUnknown": false,
-    "ignore": [
-      "jazz-tools.json",
-      "**/ios/**",
-      "**/android/**",
-      "tests/jazz-svelte/src/**",
-      "examples/*svelte*/**",
-      "starters/*svelte*/**",
-      "examples/server-worker-inbox/src/routeTree.gen.ts",
-      "homepage/homepage/**",
-      "**/package.json"
+    "includes": [
+      "**",
+      "!**/jazz-tools.json",
+      "!**/ios/**",
+      "!**/android/**",
+      "!**/tests/jazz-svelte/src/**",
+      "!**/examples/**/*svelte*/**",
+      "!**/starters/**/*svelte*/**",
+      "!**/examples/server-worker-inbox/src/routeTree.gen.ts",
+      "!**/homepage/homepage/**",
+      "!**/package.json",
+      "!**/*svelte*/**"
     ]
   },
   "formatter": {
     "enabled": true,
     "indentStyle": "space"
   },
-  "organizeImports": {
-    "enabled": true
-  },
+  "assist": { "actions": { "source": { "organizeImports": "on" } } },
   "linter": {
     "enabled": false,
     "rules": {
       "recommended": true,
       "correctness": {
+        "useExhaustiveDependencies": "off",
         "useImportExtensions": {
           "level": "error",
           "options": {
-            "suggestedExtensions": {
-              "ts": {
-                "module": "js",
-                "component": "jsx"
-              }
-            }
+            "forceJsExtensions": true
           }
         }
       }
@@ -47,7 +43,7 @@
   },
   "overrides": [
     {
-      "include": ["packages/**/src/**"],
+      "includes": ["**/packages/**/src/**"],
       "linter": {
         "enabled": true,
         "rules": {
@@ -56,7 +52,10 @@
       }
     },
     {
-      "include": ["packages/cojson/src/storage/*/**", "cojson-transport-ws/**"],
+      "includes": [
+        "**/packages/cojson/src/storage/**/*/**",
+        "**/cojson-transport-ws/**"
+      ],
       "linter": {
         "enabled": true,
         "rules": {
@@ -65,7 +64,7 @@
       }
     },
     {
-      "include": ["**/tests/**"],
+      "includes": ["**/tests/**"],
       "linter": {
         "rules": {
           "correctness": {
@@ -75,7 +74,7 @@
             "noNonNullAssertion": "off"
           },
           "suspicious": {
-            "noExplicitAny": "info"
+            "noExplicitAny": "off"
           }
         }
       }

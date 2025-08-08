@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 
-import { RefsToResolve, co, z } from "jazz-tools";
+import { co, RefsToResolve, z } from "jazz-tools";
 import { beforeEach, describe, expect, it } from "vitest";
 import { useAccount, useJazzContextManager } from "../hooks.js";
 import { useIsAuthenticated } from "../index.js";

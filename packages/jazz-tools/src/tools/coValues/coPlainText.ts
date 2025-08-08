@@ -10,17 +10,15 @@ import {
   AnonymousJazzAgent,
   CoValue,
   CoValueClass,
+  coValueClassFromCoValueClassOrSchema,
   ID,
+  inspect,
+  loadCoValueWithoutMe,
+  parseCoValueCreateOptions,
+  parseSubscribeRestArgs,
   Resolved,
   SubscribeListenerOptions,
   SubscribeRestArgs,
-  coValueClassFromCoValueClassOrSchema,
-  parseCoValueCreateOptions,
-} from "../internal.js";
-import {
-  inspect,
-  loadCoValueWithoutMe,
-  parseSubscribeRestArgs,
   subscribeToCoValueWithoutMe,
   subscribeToExistingCoValue,
 } from "../internal.js";

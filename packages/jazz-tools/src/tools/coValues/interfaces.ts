@@ -1,26 +1,26 @@
 import {
-  type CoValueUniqueness,
   type CojsonInternalTypes,
+  type CoValueUniqueness,
   type RawCoValue,
 } from "cojson";
 import { AvailableCoValueCore } from "cojson/dist/coValueCore/coValueCore.js";
 import {
   Account,
   AnonymousJazzAgent,
+  activeAccountContext,
   CoValueClassOrSchema,
+  coValueClassFromCoValueClassOrSchema,
   type Group,
+  inspect,
   Loaded,
   RefsToResolve,
   RefsToResolveStrict,
   RegisteredSchemas,
+  Resolved,
   ResolveQuery,
   ResolveQueryStrict,
-  Resolved,
   SubscriptionScope,
   type SubscriptionValue,
-  activeAccountContext,
-  coValueClassFromCoValueClassOrSchema,
-  inspect,
 } from "../internal.js";
 
 /** @category Abstract interfaces */

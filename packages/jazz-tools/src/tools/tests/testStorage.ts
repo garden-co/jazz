@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { SQLiteDatabaseDriverAsync, getSqliteStorageAsync } from "cojson";
+import { getSqliteStorageAsync, SQLiteDatabaseDriverAsync } from "cojson";
 import Database, { type Database as DatabaseT } from "libsql";
 import { onTestFinished } from "vitest";
 

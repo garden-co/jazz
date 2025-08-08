@@ -7,29 +7,29 @@ import {
   type CoMapSchema,
   type CoProfileSchema,
   type CoRecordSchema,
-  type DefaultProfileShape,
-  type FileStreamSchema,
-  ImageDefinition,
-  type PlainTextSchema,
-  type Simplify,
   createCoreAccountSchema,
   createCoreCoFeedSchema,
   createCoreCoListSchema,
   createCoreCoMapSchema,
   createCoreCoPlainTextSchema,
   createCoreFileStreamSchema,
+  type DefaultProfileShape,
+  type FileStreamSchema,
   hydrateCoreCoValueSchema,
+  ImageDefinition,
+  type PlainTextSchema,
+  type Simplify,
 } from "../../internal.js";
 import {
   CoDiscriminatedUnionSchema,
-  DiscriminableCoValueSchemas,
   createCoreCoDiscriminatedUnionSchema,
+  DiscriminableCoValueSchemas,
 } from "./schemaTypes/CoDiscriminatedUnionSchema.js";
 import { CoOptionalSchema } from "./schemaTypes/CoOptionalSchema.js";
 import { CoreCoValueSchema } from "./schemaTypes/CoValueSchema.js";
 import {
-  RichTextSchema,
   createCoreCoRichTextSchema,
+  RichTextSchema,
 } from "./schemaTypes/RichTextSchema.js";
 import { z } from "./zodReExport.js";
 

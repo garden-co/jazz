@@ -1,13 +1,13 @@
+import { MAX_RECOMMENDED_TX_SIZE } from "./config.js";
 import {
   CoValueHeader,
   Transaction,
   VerifiedState,
 } from "./coValueCore/verifiedState.js";
-import { MAX_RECOMMENDED_TX_SIZE } from "./config.js";
 import { Signature } from "./crypto/crypto.js";
 import { RawCoID, SessionID } from "./ids.js";
 import { getPriorityFromHeader } from "./priority.js";
-import { NewContentMessage, emptyKnownState } from "./sync.js";
+import { emptyKnownState, NewContentMessage } from "./sync.js";
 
 export function createContentMessage(
   id: RawCoID,

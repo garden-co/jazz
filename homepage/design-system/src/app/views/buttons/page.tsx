@@ -1,4 +1,5 @@
 "use client";
+import { useState } from "react";
 import { Button } from "@/components/atoms/Button";
 import { Icon } from "@/components/atoms/Icon";
 import { Table } from "@/components/molecules/Table";
@@ -8,7 +9,6 @@ import {
   DropdownItem,
   DropdownMenu,
 } from "@/components/organisms/Dropdown";
-import { useState } from "react";
 import { Style } from "../../../utils/tailwindClassesMap";
 export default function ButtonsPage() {
   const variants = [

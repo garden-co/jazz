@@ -1,7 +1,7 @@
 import { useAccount } from "jazz-tools/react";
-import { Layout } from "./Layout.tsx";
 import { CreateOrganization } from "./components/CreateOrganization.tsx";
 import { Heading } from "./components/Heading.tsx";
+import { Layout } from "./Layout.tsx";
 import { JazzAccount } from "./schema";
 
 export function HomePage() {

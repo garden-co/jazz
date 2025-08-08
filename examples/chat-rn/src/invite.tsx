@@ -3,11 +3,7 @@ import React from "react";
 import { Text } from "react-native";
 import { Chat } from "./schema";
 
-export function HandleInviteScreen({
-  navigation,
-}: {
-  navigation: any;
-}) {
+export function HandleInviteScreen({ navigation }: { navigation: any }) {
   useAcceptInviteNative({
     invitedObjectSchema: Chat,
     onAccept: async (chatId) => {

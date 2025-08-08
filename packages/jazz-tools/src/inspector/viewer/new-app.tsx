@@ -1,18 +1,17 @@
 import { CoID, LocalNode, RawAccount, RawCoValue } from "cojson";
 import { styled } from "goober";
+import { Account } from "jazz-tools";
 import { useJazzContext } from "jazz-tools/react-core";
 import React, { useState } from "react";
 import { Button } from "../ui/button.js";
-import { Input } from "../ui/input.js";
-import { Breadcrumbs } from "./breadcrumbs.js";
-import { PageStack } from "./page-stack.js";
-import { usePagePath } from "./use-page-path.js";
-
-import { Account } from "jazz-tools";
 import { GlobalStyles } from "../ui/global-styles.js";
 import { Heading } from "../ui/heading.js";
+import { Input } from "../ui/input.js";
+import { Breadcrumbs } from "./breadcrumbs.js";
 import { InspectorButton, type Position } from "./inpsector-button.js";
+import { PageStack } from "./page-stack.js";
 import { useOpenInspector } from "./use-open-inspector.js";
+import { usePagePath } from "./use-page-path.js";
 
 const InspectorContainer = styled("div")`
   position: fixed;

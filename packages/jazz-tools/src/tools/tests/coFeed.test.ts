@@ -10,9 +10,9 @@ import {
 } from "vitest";
 import {
   Account,
+  co,
   FileStream,
   Group,
-  co,
   isControlledAccount,
   z,
 } from "../index.js";

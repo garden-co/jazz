@@ -1,23 +1,23 @@
 import { ControlledAccount, RawAccount, type RawCoValue } from "cojson";
 import { CoreCoValueSchema } from "../implementation/zodSchema/schemaTypes/CoValueSchema.js";
-import {
-  AnonymousJazzAgent,
-  CoValue,
-  CoValueClass,
-  CoValueFromRaw,
-  ID,
-  RegisteredSchemas,
-  accessChildById,
-  coValueClassFromCoValueClassOrSchema,
-  coValuesCache,
-  inspect,
-  isCoValueSchema,
-} from "../internal.js";
 import type {
   Account,
   CoValueClassOrSchema,
   Group,
   InstanceOfSchemaCoValuesNullable,
+} from "../internal.js";
+import {
+  AnonymousJazzAgent,
+  accessChildById,
+  CoValue,
+  CoValueClass,
+  CoValueFromRaw,
+  coValueClassFromCoValueClassOrSchema,
+  coValuesCache,
+  ID,
+  inspect,
+  isCoValueSchema,
+  RegisteredSchemas,
 } from "../internal.js";
 
 /** @internal */

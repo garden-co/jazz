@@ -1,11 +1,10 @@
 import "prosekit/basic/style.css";
 import "prosekit/basic/typography.css";
 
+import { CoRichText } from "jazz-tools";
 import { createEditor } from "prosekit/core";
 import { ProseKit } from "prosekit/react";
 import { memo, useMemo } from "react";
-
-import { CoRichText } from "jazz-tools";
 import BlockHandle from "./block-handle";
 import { defineExtension } from "./extension";
 import InlineMenu from "./inline-menu";

@@ -1,7 +1,7 @@
 "use client";
 
-import { Switch } from "@/components/atoms/Switch";
 import { useState } from "react";
+import { Switch } from "@/components/atoms/Switch";
 
 export default function Components() {
   const [checked, setChecked] = useState({

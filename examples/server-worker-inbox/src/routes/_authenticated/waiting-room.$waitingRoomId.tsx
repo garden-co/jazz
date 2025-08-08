@@ -1,3 +1,7 @@
+import { createFileRoute, redirect } from "@tanstack/react-router";
+import { Group, InboxSender } from "jazz-tools";
+import { ClipboardCopyIcon, Loader2Icon } from "lucide-react";
+import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -9,10 +13,6 @@ import {
 import { Input } from "@/components/ui/input";
 import { WORKER_ID } from "@/constants";
 import { JoinGameRequest, WaitingRoom } from "@/schema";
-import { createFileRoute, redirect } from "@tanstack/react-router";
-import { Group, InboxSender } from "jazz-tools";
-import { ClipboardCopyIcon, Loader2Icon } from "lucide-react";
-import { useEffect, useState } from "react";
 
 export const Route = createFileRoute(
   "/_authenticated/waiting-room/$waitingRoomId",

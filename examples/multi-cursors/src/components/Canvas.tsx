@@ -6,6 +6,7 @@ import { Boundary } from "./Boundary";
 import { CanvasBackground } from "./CanvasBackground";
 import { CanvasDemoContent } from "./CanvasDemoContent";
 import { Cursor } from "./Cursor";
+
 const DEBUG = import.meta.env.VITE_DEBUG === "true";
 
 // For debugging purposes, we can set a fixed bounds

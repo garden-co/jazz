@@ -6,9 +6,9 @@ import {
   InMemoryKVStore,
   InstanceOfSchema,
   JazzContextManager,
+  JazzContextManagerAuthProps,
   SyncConfig,
 } from "jazz-tools";
-import { JazzContextManagerAuthProps } from "jazz-tools";
 import { LocalStorageKVStore } from "./auth/LocalStorageKVStore.js";
 import {
   BaseBrowserContextOptions,

@@ -1,13 +1,15 @@
+import type { JsonObject, JsonValue } from "cojson";
 import {
+  BinaryStreamItem,
+  BinaryStreamStart,
+  base64URLtoBytes,
   CoID,
+  CoStreamItem,
   LocalNode,
   RawBinaryCoStream,
   RawCoStream,
   RawCoValue,
 } from "cojson";
-import { base64URLtoBytes } from "cojson";
-import { BinaryStreamItem, BinaryStreamStart, CoStreamItem } from "cojson";
-import type { JsonObject, JsonValue } from "cojson";
 import { styled } from "goober";
 import { useEffect, useState } from "react";
 import { Badge } from "../ui/badge.js";
@@ -320,8 +322,8 @@ function RenderCoStream({
           <AccountOrGroupText coId={id as CoID<RawCoValue>} node={node} />
           {/* @ts-expect-error - TODO: fix types */}
           {value.items[streamPerUser[idx]]?.map(
-            (item: CoStreamItem<JsonValue>) => (
-              <div>
+            (item: CoStreamItem<JsonValue>, idx: number) => (
+              <div key={idx}>
                 {new Date(item.madeAt).toLocaleString()}{" "}
                 {JSON.stringify(item.value)}
               </div>

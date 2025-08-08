@@ -9,9 +9,9 @@ import {
 } from "jazz-tools";
 import { JazzContext, JazzContextManagerContext } from "jazz-tools/react-core";
 import React, { useEffect, useRef } from "react";
+import { setupKvStore } from "./platform.js";
 import type { JazzContextManagerProps } from "./ReactNativeContextManager.js";
 import { ReactNativeContextManager } from "./ReactNativeContextManager.js";
-import { setupKvStore } from "./platform.js";
 
 export type JazzProviderProps<
   S extends

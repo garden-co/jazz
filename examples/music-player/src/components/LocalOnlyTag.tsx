@@ -1,3 +1,5 @@
+import { useIsAuthenticated } from "jazz-tools/react";
+import { Info } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import {
   Tooltip,
@@ -5,8 +7,6 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
-import { useIsAuthenticated } from "jazz-tools/react";
-import { Info } from "lucide-react";
 
 export function LocalOnlyTag() {
   const isAuthenticated = useIsAuthenticated();

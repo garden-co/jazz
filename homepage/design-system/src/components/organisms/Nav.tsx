@@ -10,11 +10,10 @@ import {
 import clsx from "clsx";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { ComponentType, ReactNode, useEffect, useState } from "react";
-import React from "react";
+import React, { ComponentType, ReactNode, useEffect, useState } from "react";
 import { isActive } from "../../utils/nav";
-import { Icon } from "../atoms/Icon";
 import type { IconName } from "../atoms/Icon";
+import { Icon } from "../atoms/Icon";
 import { BreadCrumb } from "../molecules/Breadcrumb";
 import { SocialLinks, SocialLinksProps } from "./SocialLinks";
 

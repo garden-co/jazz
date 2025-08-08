@@ -1,9 +1,9 @@
 import { SignInButton } from "@clerk/clerk-react";
-import { usePassphraseAuth } from "jazz-tools/react";
 import {
   JazzProviderProps,
   JazzReactProviderWithClerk,
   useIsAuthenticated,
+  usePassphraseAuth,
 } from "jazz-tools/react";
 import { useState } from "react";
 import "../index.css";

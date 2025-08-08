@@ -2,8 +2,8 @@ import { beforeEach, describe, expect, test } from "vitest";
 import { expectMap } from "../coValue.js";
 import { LogLevel, logger } from "../logger.js";
 import {
-  SyncMessagesLog,
   loadCoValueOrFail,
+  SyncMessagesLog,
   setupTestAccount,
   setupTestNode,
   waitFor,

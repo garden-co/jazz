@@ -7,9 +7,9 @@ import {
   CoMap,
   CoPlainText,
   CoRichText,
-  CoValueClass,
   CoreAccountSchema,
   CoreCoRecordSchema,
+  CoValueClass,
   FileStream,
 } from "../../../internal.js";
 import { CoreCoFeedSchema } from "../schemaTypes/CoFeedSchema.js";

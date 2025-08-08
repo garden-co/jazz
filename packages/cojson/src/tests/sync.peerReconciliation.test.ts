@@ -3,9 +3,9 @@ import { expectMap } from "../coValue";
 import { RawCoMap } from "../exports";
 import {
   SyncMessagesLog,
-  TEST_NODE_CONFIG,
   setupTestAccount,
   setupTestNode,
+  TEST_NODE_CONFIG,
   waitFor,
 } from "./testUtils";
 

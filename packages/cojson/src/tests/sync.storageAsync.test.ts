@@ -2,10 +2,10 @@ import { assert, beforeEach, describe, expect, test, vi } from "vitest";
 
 import { emptyKnownState } from "../exports";
 import {
-  SyncMessagesLog,
-  TEST_NODE_CONFIG,
   loadCoValueOrFail,
+  SyncMessagesLog,
   setupTestNode,
+  TEST_NODE_CONFIG,
   waitFor,
 } from "./testUtils";
 

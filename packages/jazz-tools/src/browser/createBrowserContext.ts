@@ -1,7 +1,7 @@
 import { LocalNode, Peer, RawAccountID } from "cojson";
+import { WasmCrypto } from "cojson/crypto/WasmCrypto";
 import { getIndexedDBStorage } from "cojson-storage-indexeddb";
 import { WebSocketPeerWithReconnection } from "cojson-transport-ws";
-import { WasmCrypto } from "cojson/crypto/WasmCrypto";
 import {
   Account,
   AccountClass,
@@ -12,16 +12,16 @@ import {
   CoValue,
   CoValueFromRaw,
   CryptoProvider,
+  cojsonInternals,
+  createAnonymousJazzContext,
+  createJazzContext,
   ID,
   InviteSecret,
   NewAccountProps,
   SessionID,
   SyncConfig,
-  cojsonInternals,
-  createAnonymousJazzContext,
 } from "jazz-tools";
-import { createJazzContext } from "jazz-tools";
-import { StorageConfig, getStorageOptions } from "./storageOptions.js";
+import { getStorageOptions, StorageConfig } from "./storageOptions.js";
 import { setupInspector } from "./utils/export-account-inspector.js";
 
 setupInspector();

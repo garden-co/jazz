@@ -1,5 +1,5 @@
 import { useAccount } from "jazz-tools/react";
-import { JazzAccount, hasChanges } from "./schema";
+import { hasChanges, JazzAccount } from "./schema";
 export function DraftIndicator() {
   const { me } = useAccount(JazzAccount, {
     resolve: { root: { draft: true } },

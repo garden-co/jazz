@@ -1,10 +1,10 @@
 import { useCoState } from "jazz-tools/react";
 import { useParams } from "react-router";
-import { Layout } from "./Layout.tsx";
 import { CreateProject } from "./components/CreateProject.tsx";
 import { Heading } from "./components/Heading.tsx";
 import { InviteLink } from "./components/InviteLink.tsx";
 import { OrganizationMembers } from "./components/OrganizationMembers.tsx";
+import { Layout } from "./Layout.tsx";
 import { Organization } from "./schema.ts";
 
 export function OrganizationPage() {

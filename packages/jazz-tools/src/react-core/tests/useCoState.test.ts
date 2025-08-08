@@ -5,10 +5,10 @@ import {
   Account,
   CoRichText,
   CoValue,
+  co,
   Group,
   ID,
   Loaded,
-  co,
   z,
 } from "jazz-tools";
 import { assert, beforeEach, describe, expect, expectTypeOf, it } from "vitest";

@@ -1,12 +1,12 @@
 import {
   AgentID,
-  type CoValueUniqueness,
   CojsonInternalTypes,
+  type CoValueUniqueness,
+  cojsonInternals,
   type JsonValue,
   RawAccountID,
   RawCoID,
   type RawCoMap,
-  cojsonInternals,
 } from "cojson";
 import type {
   AnonymousJazzAgent,
@@ -27,15 +27,12 @@ import type {
 } from "../internal.js";
 import {
   Account,
-  CoValueBase,
-  ItemsSym,
-  Ref,
-  RegisteredSchemas,
-  SchemaInit,
   accessChildById,
   accessChildByKey,
   activeAccountContext,
+  CoValueBase,
   ensureCoValueLoaded,
+  ItemsSym,
   inspect,
   instantiateRefEncodedWithInit,
   isRefEncoded,
@@ -43,6 +40,9 @@ import {
   makeRefs,
   parseCoValueCreateOptions,
   parseSubscribeRestArgs,
+  Ref,
+  RegisteredSchemas,
+  SchemaInit,
   subscribeToCoValueWithoutMe,
   subscribeToExistingCoValue,
 } from "../internal.js";

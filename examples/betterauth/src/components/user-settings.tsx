@@ -1,11 +1,11 @@
 "use client";
 
-import { Button } from "@/components/ui/button";
 import { useAuth } from "jazz-react-auth-betterauth";
 import { useAccount, useIsAuthenticated } from "jazz-tools/react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
+import { Button } from "@/components/ui/button";
 
 export function UserSettings() {
   const router = useRouter();

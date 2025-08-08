@@ -1,3 +1,8 @@
+import type {
+  AnyAccountSchema,
+  InstanceOfSchema,
+  JazzContextManagerAuthProps,
+} from "jazz-tools";
 import {
   Account,
   AccountClass,
@@ -5,11 +10,6 @@ import {
   JazzContextManager,
   KvStore,
   SyncConfig,
-} from "jazz-tools";
-import type {
-  AnyAccountSchema,
-  InstanceOfSchema,
-  JazzContextManagerAuthProps,
 } from "jazz-tools";
 import {
   BaseReactNativeContextOptions,

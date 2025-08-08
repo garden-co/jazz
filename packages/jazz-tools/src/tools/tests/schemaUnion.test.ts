@@ -3,9 +3,9 @@ import { assert, beforeAll, describe, expect, it } from "vitest";
 import {
   Account,
   CryptoProvider,
-  Loaded,
   co,
   coValueClassFromCoValueClassOrSchema,
+  Loaded,
   subscribeToCoValue,
   z,
 } from "../exports.js";

@@ -1,6 +1,6 @@
 import { commands } from "@vitest/browser/context";
-import { AuthSecretStorage, FileStream, Group, co, z } from "jazz-tools";
-import { assert, afterAll, afterEach, describe, expect, test } from "vitest";
+import { AuthSecretStorage, co, FileStream, Group, z } from "jazz-tools";
+import { afterAll, afterEach, assert, describe, expect, test } from "vitest";
 import { createAccountContext, startSyncServer } from "./testUtils";
 
 const TestMAP = co.map({

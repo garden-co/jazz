@@ -16,7 +16,7 @@
     "react-dom": "19.1.0"
   },
   "devDependencies": {
-    "@biomejs/biome": "1.9.4",
+    "@biomejs/biome": "catalog:",
     "@tailwindcss/postcss": "^4.1.10",
     "@types/react": "19.1.0",
     "@types/react-dom": "19.1.0",

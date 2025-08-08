@@ -1,6 +1,6 @@
 import type { CojsonInternalTypes, SyncMessage } from "cojson";
 import { cojsonInternals } from "cojson";
-import { type Mocked, describe, expect, test, vi } from "vitest";
+import { describe, expect, type Mocked, test, vi } from "vitest";
 import { MAX_OUTGOING_MESSAGES_CHUNK_BYTES } from "../BatchedOutgoingMessages.js";
 import {
   type CreateWebSocketPeerOpts,

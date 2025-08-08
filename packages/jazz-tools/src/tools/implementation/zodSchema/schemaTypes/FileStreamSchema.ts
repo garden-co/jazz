@@ -1,9 +1,9 @@
 import {
   Account,
   AnonymousJazzAgent,
+  coOptionalDefiner,
   FileStream,
   Group,
-  coOptionalDefiner,
 } from "../../../internal.js";
 import { CoOptionalSchema } from "./CoOptionalSchema.js";
 import { CoreCoValueSchema } from "./CoValueSchema.js";

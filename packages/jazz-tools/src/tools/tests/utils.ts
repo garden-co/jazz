@@ -1,8 +1,6 @@
-import { AccountClass, isControlledAccount } from "../coValues/account";
-
-import { CoID, LocalNode, RawCoValue } from "cojson";
-import { cojsonInternals } from "cojson";
+import { CoID, cojsonInternals, LocalNode, RawCoValue } from "cojson";
 import { WasmCrypto } from "cojson/crypto/WasmCrypto";
+import { AccountClass, isControlledAccount } from "../coValues/account";
 import {
   Account,
   createJazzContextFromExistingCredentials,

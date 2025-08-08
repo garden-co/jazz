@@ -1,6 +1,9 @@
-import { Account, CoList, CoMap, Group, ID, coField } from "jazz-tools";
-import { createInviteLink } from "jazz-tools/react";
-import { useAcceptInvite, useCoState } from "jazz-tools/react";
+import { Account, CoList, CoMap, coField, Group, ID } from "jazz-tools";
+import {
+  createInviteLink,
+  useAcceptInvite,
+  useCoState,
+} from "jazz-tools/react";
 import { useState } from "react";
 
 class SharedCoMap extends CoMap {
@@ -87,9 +90,7 @@ export function WriteOnlyRole() {
   );
 }
 
-function EditSharedCoMap(props: {
-  id: ID<SharedCoMap>;
-}) {
+function EditSharedCoMap(props: { id: ID<SharedCoMap> }) {
   const coMap = useCoState(SharedCoMap, props.id, {});
 
   if (!coMap) return null;

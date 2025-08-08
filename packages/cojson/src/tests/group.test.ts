@@ -1,8 +1,7 @@
 import { describe, expect, test } from "vitest";
 import { RawCoList } from "../coValues/coList.js";
 import { RawCoMap } from "../coValues/coMap.js";
-import { RawCoStream } from "../coValues/coStream.js";
-import { RawBinaryCoStream } from "../coValues/coStream.js";
+import { RawBinaryCoStream, RawCoStream } from "../coValues/coStream.js";
 import { WasmCrypto } from "../crypto/WasmCrypto.js";
 import { RawAccountID } from "../exports.js";
 import {

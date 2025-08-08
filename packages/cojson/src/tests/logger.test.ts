@@ -1,5 +1,5 @@
 import { describe, expect, test, vi } from "vitest";
-import { LogLevel, Logger } from "../logger";
+import { Logger, LogLevel } from "../logger";
 
 describe("Logger", () => {
   describe("Log Level Filtering", () => {

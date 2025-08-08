@@ -1,12 +1,8 @@
-import { CoID, LocalNode, RawCoValue } from "cojson";
 import type { JsonObject } from "cojson";
+import { CoID, LocalNode, RawCoValue } from "cojson";
 import { styled } from "goober";
 import { useMemo, useState } from "react";
 import { Button } from "../ui/button.js";
-import { PageInfo, isCoId } from "./types.js";
-import { useResolvedCoValues } from "./use-resolve-covalue.js";
-import { ValueRenderer } from "./value-renderer.js";
-
 import {
   Table,
   TableBody,
@@ -16,6 +12,9 @@ import {
   TableRow,
 } from "../ui/table.js";
 import { Text } from "../ui/text.js";
+import { isCoId, PageInfo } from "./types.js";
+import { useResolvedCoValues } from "./use-resolve-covalue.js";
+import { ValueRenderer } from "./value-renderer.js";
 
 const PaginationContainer = styled("div")`
   padding: 1rem 0;

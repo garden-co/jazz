@@ -1,11 +1,11 @@
 "use client";
 
-import { Icon } from "@/components/atoms/Icon";
-import { Switch } from "@/components/atoms/Switch";
 import { CoFeedVisualizer } from "@components/atoms/covalues/CoFeeds";
 import { CoListVisualizer } from "@components/atoms/covalues/CoList";
 import { CoMapVisualizer } from "@components/atoms/covalues/CoMap";
 import { useMemo, useState } from "react";
+import { Icon } from "@/components/atoms/Icon";
+import { Switch } from "@/components/atoms/Switch";
 import { ListOfPeople, Person, PersonFeed } from "./schema";
 
 export default function Playground() {

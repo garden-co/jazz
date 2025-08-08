@@ -1,10 +1,9 @@
-import type { DisconnectedError, SyncMessage } from "cojson";
-import type { Peer } from "cojson";
+import type { DisconnectedError, Peer, SyncMessage } from "cojson";
 import {
   type CojsonInternalTypes,
-  PriorityBasedMessageQueue,
   cojsonInternals,
   logger,
+  PriorityBasedMessageQueue,
 } from "cojson";
 import { addMessageToBacklog } from "./serialization.js";
 import type { AnyWebSocket } from "./types.js";

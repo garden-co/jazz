@@ -1,12 +1,14 @@
 "use client";
+
+import Router from "next/router";
 import { ProfileCard } from "@/app/components/ProfileCard";
 import { team } from "@/app/team/members";
 
-import Router from "next/router";
-
 export default async function TeamMemberPage({
   params,
-}: { params: Promise<{ member: string }> }) {
+}: {
+  params: Promise<{ member: string }>;
+}) {
   const { member } = await params;
 
   const memberInfo = team.find((m) => m.slug === member);

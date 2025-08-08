@@ -1,5 +1,5 @@
-import { UserSettings } from "@/components/user-settings";
 import type { Metadata } from "next";
+import { UserSettings } from "@/components/user-settings";
 
 export const metadata: Metadata = {
   title: "Settings | Jazz Example: Better Auth",

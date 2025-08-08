@@ -1,13 +1,13 @@
 import type { ClientOptions } from "better-auth";
 import { createAuthClient } from "better-auth/client";
 import { jazzClientPlugin } from "jazz-betterauth-client-plugin";
+import type { AuthSetPayload } from "jazz-tools";
 import {
   Account,
   type AuthCredentials,
-  type AuthSecretStorage,
   type AuthenticateAccountFunction,
+  type AuthSecretStorage,
 } from "jazz-tools";
-import type { AuthSetPayload } from "jazz-tools";
 
 type Plugins<T extends ClientOptions> = Array<
   | NonNullable<NonNullable<T>["plugins"]>[number]

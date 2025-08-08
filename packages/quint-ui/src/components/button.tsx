@@ -1,6 +1,6 @@
 import { mergeProps } from "@base-ui-components/react/merge-props";
 import { useRender } from "@base-ui-components/react/use-render";
-import { type VariantProps, tv } from "tailwind-variants";
+import { tv, type VariantProps } from "tailwind-variants";
 
 const button = tv({
   base: "inline-flex items-center justify-center gap-2 rounded-sm text-center transition-colors w-fit text-nowrap disabled:pointer-events-none disabled:opacity-70 disabled:cursor-not-allowed disabled:pointer-events-none font-medium",

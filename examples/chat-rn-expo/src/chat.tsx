@@ -1,20 +1,19 @@
 import * as Clipboard from "expo-clipboard";
 import { Account, Group } from "jazz-tools";
+import { useAccount, useCoState } from "jazz-tools/expo";
 import { useState } from "react";
 import React, {
+  Alert,
   Button,
   FlatList,
   KeyboardAvoidingView,
   SafeAreaView,
+  StyleSheet,
   Text,
   TextInput,
   TouchableOpacity,
   View,
-  Alert,
-  StyleSheet,
 } from "react-native";
-
-import { useAccount, useCoState } from "jazz-tools/expo";
 import { Chat, Message } from "./schema";
 
 export default function ChatScreen() {

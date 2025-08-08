@@ -1,4 +1,4 @@
-import { Account, CoMap, Group, ID, Inbox, coField } from "jazz-tools";
+import { Account, CoMap, coField, Group, ID, Inbox } from "jazz-tools";
 import {
   useAccount,
   experimental_useInboxSender as useInboxSender,

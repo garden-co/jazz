@@ -1,5 +1,5 @@
-import { TodoAccount } from "@/1_schema";
 import { FormEvent, useState } from "react";
+import { TodoAccount } from "@/1_schema";
 import { generateRandomProject } from "./generate";
 
 export function ProjectGenerator() {

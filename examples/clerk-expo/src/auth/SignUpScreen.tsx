@@ -10,7 +10,9 @@ import {
 
 export function SignUpScreen({
   setPage,
-}: { setPage: (page: "sign-in" | "sign-up") => void }) {
+}: {
+  setPage: (page: "sign-in" | "sign-up") => void;
+}) {
   const { isLoaded, signUp, setActive } = useSignUp();
 
   const [emailAddress, setEmailAddress] = React.useState("");

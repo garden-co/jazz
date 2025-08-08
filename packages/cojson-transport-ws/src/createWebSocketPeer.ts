@@ -1,4 +1,4 @@
-import { type Peer, type SyncMessage, cojsonInternals, logger } from "cojson";
+import { cojsonInternals, logger, type Peer } from "cojson";
 import { BatchedOutgoingMessages } from "./BatchedOutgoingMessages.js";
 import { deserializeMessages } from "./serialization.js";
 import type { AnyWebSocket } from "./types.js";

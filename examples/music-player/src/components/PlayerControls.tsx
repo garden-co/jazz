@@ -1,10 +1,10 @@
-import { MusicTrack, MusicaAccount } from "@/1_schema";
+import { useAccount, useCoState } from "jazz-tools/react";
+import { Pause, Play, SkipBack, SkipForward } from "lucide-react";
+import { MusicaAccount, MusicTrack } from "@/1_schema";
 import { MediaPlayer } from "@/5_useMediaPlayer";
 import { useMediaEndListener } from "@/lib/audio/useMediaEndListener";
 import { usePlayState } from "@/lib/audio/usePlayState";
 import { useKeyboardListener } from "@/lib/useKeyboardListener";
-import { useAccount, useCoState } from "jazz-tools/react";
-import { Pause, Play, SkipBack, SkipForward } from "lucide-react";
 import { Waveform } from "./Waveform";
 
 export function PlayerControls({ mediaPlayer }: { mediaPlayer: MediaPlayer }) {
@@ -75,7 +75,9 @@ export function PlayerControls({ mediaPlayer }: { mediaPlayer: MediaPlayer }) {
 
 export function KeyboardListener({
   mediaPlayer,
-}: { mediaPlayer: MediaPlayer }) {
+}: {
+  mediaPlayer: MediaPlayer;
+}) {
   const playState = usePlayState();
 
   useMediaEndListener(mediaPlayer.playNextTrack);

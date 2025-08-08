@@ -1,13 +1,13 @@
+import { Account, co, Group } from "jazz-tools";
+import { startWorker } from "jazz-tools/worker";
 import {
   Game,
   InboxMessage,
   NewGameIntent,
-  PlayIntent,
   Player,
+  PlayIntent,
   WaitingRoom,
 } from "@/schema";
-import { Account, Group, co } from "jazz-tools";
-import { startWorker } from "jazz-tools/worker";
 import { determineWinner } from "./lib/utils";
 
 if (!process.env.VITE_JAZZ_WORKER_ACCOUNT || !process.env.JAZZ_WORKER_SECRET) {

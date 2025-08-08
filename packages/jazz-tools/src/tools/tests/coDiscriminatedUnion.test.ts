@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, test, vi } from "vitest";
-import { CoPlainText, Loaded, co, z } from "../exports.js";
+import { CoPlainText, co, Loaded, z } from "../exports.js";
 import { createJazzTestAccount, setupJazzTestSync } from "../testing.js";
 import { waitFor } from "./utils.js";
 

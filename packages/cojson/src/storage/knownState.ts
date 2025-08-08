@@ -1,6 +1,6 @@
-import { getIsUploaded } from "../SyncStateManager.js";
 import { type CoValueCore } from "../exports.js";
 import { RawCoID } from "../ids.js";
+import { getIsUploaded } from "../SyncStateManager.js";
 import { CoValueKnownState, emptyKnownState } from "../sync.js";
 
 /**

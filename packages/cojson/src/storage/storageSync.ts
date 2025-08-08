@@ -1,4 +1,4 @@
-import { UpDownCounter, metrics } from "@opentelemetry/api";
+import { metrics, UpDownCounter } from "@opentelemetry/api";
 import {
   createContentMessage,
   exceedsRecommendedSize,
@@ -6,15 +6,15 @@ import {
 } from "../coValueContentMessage.js";
 import {
   CoValueCore,
+  logger,
   RawCoID,
   type SessionID,
   type StorageAPI,
-  logger,
 } from "../exports.js";
 import {
   CoValueKnownState,
-  NewContentMessage,
   emptyKnownState,
+  NewContentMessage,
 } from "../sync.js";
 import { StorageKnownState } from "./knownState.js";
 import {

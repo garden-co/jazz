@@ -1,6 +1,6 @@
-import { Button } from "@/src/components/button";
 import { BookIcon } from "lucide-react";
 import Link from "next/link";
+import { Button } from "@/src/components/button";
 
 export default function Home() {
   return (

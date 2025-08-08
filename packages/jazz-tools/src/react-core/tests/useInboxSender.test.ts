@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 
-import { CoMap, Group, Inbox, Loaded, co, z } from "jazz-tools";
+import { CoMap, co, Group, Inbox, Loaded, z } from "jazz-tools";
 import { describe, expect, it } from "vitest";
 import { experimental_useInboxSender } from "../index.js";
 import { createJazzTestAccount, linkAccounts } from "../testing.js";

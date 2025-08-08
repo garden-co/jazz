@@ -1,5 +1,4 @@
-import { JsonObject, LocalNode, RawAccount } from "cojson";
-import { CoID } from "cojson";
+import { CoID, JsonObject, LocalNode, RawAccount } from "cojson";
 import {
   Table,
   TableBody,
@@ -11,7 +10,7 @@ import {
 import { Text } from "../ui/text.js";
 import { AccountOrGroupText } from "./account-or-group-text.js";
 import { RawDataCard } from "./raw-data-card.js";
-import { PageInfo, isCoId } from "./types.js";
+import { isCoId, PageInfo } from "./types.js";
 
 export function GroupView({
   data,

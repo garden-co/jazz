@@ -2,9 +2,9 @@ import { RawAccount, RawCoValue } from "cojson";
 import { RegisteredSchemas } from "../coValues/registeredSchemas.js";
 import {
   CoValue,
-  RefEncoded,
   coValueClassFromCoValueClassOrSchema,
   instantiateRefEncodedFromRaw,
+  RefEncoded,
 } from "../internal.js";
 import { coValuesCache } from "../lib/cache.js";
 import { SubscriptionScope } from "./SubscriptionScope.js";

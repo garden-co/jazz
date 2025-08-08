@@ -1,7 +1,7 @@
-import { Playlist } from "@/1_schema";
-import { updatePlaylistTitle } from "@/4_actions";
 import { useCoState } from "jazz-tools/react";
 import { ChangeEvent, useState } from "react";
+import { Playlist } from "@/1_schema";
+import { updatePlaylistTitle } from "@/4_actions";
 
 export function PlaylistTitleInput({
   playlistId,

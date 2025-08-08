@@ -2,8 +2,8 @@ import { RawCoPlainText } from "cojson";
 import {
   Account,
   CoPlainText,
-  Group,
   coOptionalDefiner,
+  Group,
 } from "../../../internal.js";
 import { AnonymousJazzAgent } from "../../anonymousJazzAgent.js";
 import { CoOptionalSchema } from "./CoOptionalSchema.js";

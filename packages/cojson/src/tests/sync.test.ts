@@ -1,6 +1,6 @@
 import {
-  assert,
   afterEach,
+  assert,
   beforeEach,
   describe,
   expect,
@@ -13,7 +13,6 @@ import { WasmCrypto } from "../crypto/WasmCrypto.js";
 import { connectedPeers, newQueuePair } from "../streamUtils.js";
 import type { LoadMessage } from "../sync.js";
 import {
-  TEST_NODE_CONFIG,
   blockMessageTypeOnOutgoingPeer,
   connectTwoPeers,
   createTestMetricReader,
@@ -22,6 +21,7 @@ import {
   nodeWithRandomAgentAndSessionID,
   setupTestAccount,
   setupTestNode,
+  TEST_NODE_CONFIG,
   tearDownTestMetricReader,
   waitFor,
 } from "./testUtils.js";

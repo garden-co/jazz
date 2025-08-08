@@ -1,13 +1,13 @@
 import {
   Account,
   AnonymousJazzAgent,
+  coOptionalDefiner,
   InstanceOfSchema,
   InstanceOrPrimitiveOfSchemaCoValuesNullable,
   Resolved,
   SchemaUnion,
   SchemaUnionConcreteSubclass,
   SubscribeListenerOptions,
-  coOptionalDefiner,
 } from "../../../internal.js";
 import { z } from "../zodReExport.js";
 import { CoOptionalSchema } from "./CoOptionalSchema.js";

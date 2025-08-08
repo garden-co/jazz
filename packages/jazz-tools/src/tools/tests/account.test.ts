@@ -1,5 +1,5 @@
 import { assert, beforeEach, expect, test } from "vitest";
-import { Account, Group, co, z } from "../exports.js";
+import { Account, co, Group, z } from "../exports.js";
 import {
   createJazzTestAccount,
   linkAccounts,

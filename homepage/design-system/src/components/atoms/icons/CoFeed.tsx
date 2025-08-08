@@ -4,7 +4,11 @@ export function IconCoFeed({
   className,
   size,
   strokeWidth,
-}: { className?: string; size?: number; strokeWidth: number }) {
+}: {
+  className?: string;
+  size?: number;
+  strokeWidth: number;
+}) {
   return (
     <svg
       xmlns="http://www.w3.org/2000/svg"

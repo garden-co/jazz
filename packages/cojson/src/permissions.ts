@@ -6,18 +6,18 @@ import { MapOpPayload, RawCoMap } from "./coValues/coMap.js";
 import {
   EVERYONE,
   Everyone,
+  isInheritableRole,
   ParentGroupReferenceRole,
   RawGroup,
-  isInheritableRole,
 } from "./coValues/group.js";
 import { KeyID } from "./crypto/crypto.js";
 import {
   AgentID,
+  getParentGroupId,
   ParentGroupReference,
   RawCoID,
   SessionID,
   TransactionID,
-  getParentGroupId,
 } from "./ids.js";
 import { parseJSON } from "./jsonStringify.js";
 import { JsonValue } from "./jsonValue.js";

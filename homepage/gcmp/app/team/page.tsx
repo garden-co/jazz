@@ -1,6 +1,6 @@
+import { HeroHeader } from "@garden-co/design-system/src/components/molecules/HeroHeader";
 import { ProfileCard } from "@/app/components/ProfileCard";
 import { team } from "@/app/team/members";
-import { HeroHeader } from "@garden-co/design-system/src/components/molecules/HeroHeader";
 
 export default function TeamPage() {
   return (

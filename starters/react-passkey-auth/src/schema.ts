@@ -3,7 +3,7 @@
  * https://jazz.tools/docs/react/schemas/covalues
  */
 
-import { Group, co, z } from "jazz-tools";
+import { co, Group, z } from "jazz-tools";
 
 /** The account profile is an app-specific per-user public `CoMap`
  *  where you can store top-level objects for that user */

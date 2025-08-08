@@ -1,5 +1,5 @@
-import { SigninForm } from "@/components/signin-form";
 import type { Metadata } from "next";
+import { SigninForm } from "@/components/signin-form";
 import { ssoProviders } from "../sso-providers";
 
 export const metadata: Metadata = {

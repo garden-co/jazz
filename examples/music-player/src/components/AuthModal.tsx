@@ -1,3 +1,5 @@
+import { useAccount, usePasskeyAuth } from "jazz-tools/react";
+import { useState } from "react";
 import { MusicaAccount } from "@/1_schema";
 import { Button } from "@/components/ui/button";
 import {
@@ -9,8 +11,6 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { useAccount, usePasskeyAuth } from "jazz-tools/react";
-import { useState } from "react";
 
 interface AuthModalProps {
   open: boolean;

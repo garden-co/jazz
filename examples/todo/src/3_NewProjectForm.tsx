@@ -1,12 +1,9 @@
-import { useCallback } from "react";
-
-import { Task, TodoAccount, TodoProject } from "./1_schema";
-
-import { SubmittableInput } from "./basicComponents";
-
-import { Group, co } from "jazz-tools";
+import { co, Group } from "jazz-tools";
 import { useAccount } from "jazz-tools/react";
+import { useCallback } from "react";
 import { useNavigate } from "react-router";
+import { Task, TodoAccount, TodoProject } from "./1_schema";
+import { SubmittableInput } from "./basicComponents";
 
 export function NewProjectForm() {
   // `me` represents the current user account, which will determine

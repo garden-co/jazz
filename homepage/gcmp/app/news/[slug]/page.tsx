@@ -1,14 +1,14 @@
-import { FormattedDate } from "@/components/FormattedDate";
-import { NewsletterCard } from "@/components/blog/NewsletterCard";
-import PostCoverImage from "@/components/blog/PostCoverImage";
-import { PostJsonLd } from "@/components/blog/PostJsonLd";
-import { BigGrass } from "@/components/blog/Swishes";
-import { getPostBySlug, posts } from "@/lib/posts";
 import { H1, H2 } from "@garden-co/design-system/src/components/atoms/Headings";
 import { Prose } from "@garden-co/design-system/src/components/molecules/Prose";
 import { Metadata } from "next";
 import Image from "next/image";
 import { notFound } from "next/navigation";
+import { NewsletterCard } from "@/components/blog/NewsletterCard";
+import PostCoverImage from "@/components/blog/PostCoverImage";
+import { PostJsonLd } from "@/components/blog/PostJsonLd";
+import { BigGrass } from "@/components/blog/Swishes";
+import { FormattedDate } from "@/components/FormattedDate";
+import { getPostBySlug, posts } from "@/lib/posts";
 
 type Params = {
   params: Promise<{

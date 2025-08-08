@@ -13,11 +13,11 @@ import { AuthSecretStorage } from "../auth/AuthSecretStorage.js";
 import { type Account, type AccountClass } from "../coValues/account.js";
 import { RegisteredSchemas } from "../coValues/registeredSchemas.js";
 import {
-  CoValueFromRaw,
   type CoreAccountSchema,
+  CoValueFromRaw,
+  coValueClassFromCoValueClassOrSchema,
   type ID,
   type InstanceOfSchema,
-  coValueClassFromCoValueClassOrSchema,
 } from "../internal.js";
 import { AuthCredentials, NewAccountProps } from "../types.js";
 import { activeAccountContext } from "./activeAccountContext.js";

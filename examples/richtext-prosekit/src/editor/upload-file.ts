@@ -1,9 +1,9 @@
 import { insertNode, union } from "prosekit/core";
 import {
-  UploadTask,
-  type Uploader,
   defineFileDropHandler,
   defineFilePasteHandler,
+  type Uploader,
+  UploadTask,
 } from "prosekit/extensions/file";
 
 /**

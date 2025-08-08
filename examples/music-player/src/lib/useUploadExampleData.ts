@@ -1,6 +1,6 @@
-import { MusicaAccount } from "@/1_schema";
 import { useAccount } from "jazz-tools/react";
 import { useEffect } from "react";
+import { MusicaAccount } from "@/1_schema";
 import { uploadMusicTracks } from "../4_actions";
 
 export function useUploadExampleData() {

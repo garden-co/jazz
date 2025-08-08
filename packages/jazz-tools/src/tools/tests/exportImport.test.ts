@@ -1,7 +1,7 @@
 import { cojsonInternals } from "cojson";
 import { assert, beforeEach, describe, expect, test } from "vitest";
 import { exportCoValue, importContentPieces } from "../coValues/interfaces.js";
-import { Account, CoPlainText, Group, co, z } from "../exports.js";
+import { Account, CoPlainText, co, Group, z } from "../exports.js";
 import {
   createJazzTestAccount,
   createJazzTestGuest,

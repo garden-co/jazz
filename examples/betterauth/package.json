@@ -34,7 +34,7 @@
 		"tw-animate-css": "^1.2.5"
 	},
 	"devDependencies": {
-		"@biomejs/biome": "1.9.4",
+		"@biomejs/biome": "catalog:",
 		"@playwright/test": "^1.50.1",
 		"@tailwindcss/postcss": "^4",
 		"@types/better-sqlite3": "^7.6.12",

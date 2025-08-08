@@ -1,7 +1,7 @@
+import { Group } from "jazz-tools";
 import { jazzServerAccount } from "@/jazzServerAccount";
 import { WaitingRoom } from "@/schema";
 import { serverApi } from "@/serverApi";
-import { Group } from "jazz-tools";
 
 export async function POST(request: Request) {
   const response = await serverApi.createGame.handle(

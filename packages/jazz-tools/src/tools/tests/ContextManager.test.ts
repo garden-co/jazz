@@ -5,11 +5,11 @@ import {
   Account,
   AccountClass,
   AuthSecretStorage,
+  co,
   Group,
   InMemoryKVStore,
   JazzAuthContext,
   KvStoreContext,
-  co,
   z,
 } from "../exports";
 import {
@@ -23,9 +23,9 @@ import {
 } from "../implementation/createContext";
 import {
   CoValueFromRaw,
+  coValueClassFromCoValueClassOrSchema,
   InstanceOfSchema,
   Loaded,
-  coValueClassFromCoValueClassOrSchema,
 } from "../internal";
 import {
   createJazzTestAccount,

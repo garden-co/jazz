@@ -1,7 +1,9 @@
-import type { CojsonInternalTypes, RawCoID, SessionID } from "cojson";
 import type {
+  CojsonInternalTypes,
   CoValueRow,
   DBClientInterfaceAsync,
+  RawCoID,
+  SessionID,
   SessionRow,
   SignatureAfterRow,
   StoredCoValueRow,
@@ -105,7 +107,6 @@ export class IDBClient implements DBClientInterfaceAsync {
     return (await this.makeRequest<IDBValidKey>((tx) =>
       tx.getObjectStore("coValues").put({
         id: msg.id,
-        // biome-ignore lint/style/noNonNullAssertion: TODO(JAZZ-561): Review
         header: msg.header!,
       } satisfies CoValueRow),
     )) as number;

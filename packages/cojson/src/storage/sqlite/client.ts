@@ -125,11 +125,7 @@ export class SQLiteClient implements DBClientInterfaceSync {
     return result.rowID;
   }
 
-  addSessionUpdate({
-    sessionUpdate,
-  }: {
-    sessionUpdate: SessionRow;
-  }): number {
+  addSessionUpdate({ sessionUpdate }: { sessionUpdate: SessionRow }): number {
     const result = this.db.get<{ rowID: number }>(
       `INSERT INTO sessions (coValue, sessionID, lastIdx, lastSignature, bytesSinceLastSignature) VALUES (?, ?, ?, ?, ?)
                             ON CONFLICT(coValue, sessionID) DO UPDATE SET lastIdx=excluded.lastIdx, lastSignature=excluded.lastSignature, bytesSinceLastSignature=excluded.bytesSinceLastSignature
@@ -166,7 +162,11 @@ export class SQLiteClient implements DBClientInterfaceSync {
     sessionRowID,
     idx,
     signature,
-  }: { sessionRowID: number; idx: number; signature: Signature }) {
+  }: {
+    sessionRowID: number;
+    idx: number;
+    signature: Signature;
+  }) {
     this.db.run(
       "INSERT INTO signatureAfter (ses, idx, signature) VALUES (?, ?, ?)",
       [sessionRowID, idx, signature],

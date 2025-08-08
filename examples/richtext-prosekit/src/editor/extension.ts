@@ -1,4 +1,5 @@
-import { createJazzPlugin } from "jazz-tools/prosemirror";
+import type { CoRichText } from "jazz-tools";
+import { createJazzPlugin, JazzPluginConfig } from "jazz-tools/prosemirror";
 import { defineBasicExtension } from "prosekit/basic";
 import { definePlugin, union } from "prosekit/core";
 import {
@@ -9,12 +10,9 @@ import { defineHorizontalRule } from "prosekit/extensions/horizontal-rule";
 import { defineMention } from "prosekit/extensions/mention";
 import { definePlaceholder } from "prosekit/extensions/placeholder";
 import {
-  type ReactNodeViewComponent,
   defineReactNodeView,
+  type ReactNodeViewComponent,
 } from "prosekit/react";
-
-import type { CoRichText } from "jazz-tools";
-import { JazzPluginConfig } from "jazz-tools/prosemirror";
 import CodeBlockView from "./code-block-view";
 import ImageView from "./image-view";
 import { defineImageFileHandlers } from "./upload-file";

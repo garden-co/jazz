@@ -1,7 +1,7 @@
 import { WasmCrypto } from "cojson/crypto/WasmCrypto";
 import { assert, beforeEach, describe, expect, test } from "vitest";
 import { CoMap, Group, z } from "../exports.js";
-import { Loaded, Ref, co } from "../internal.js";
+import { co, Loaded, Ref } from "../internal.js";
 import { createJazzTestAccount, setupJazzTestSync } from "../testing.js";
 import { setupTwoNodes, waitFor } from "./utils.js";
 

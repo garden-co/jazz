@@ -20,7 +20,6 @@ import { RawCoID, TransactionID } from "../ids.js";
 import { Stringified, stableStringify } from "../jsonStringify.js";
 import { JsonValue } from "../jsonValue.js";
 import { logger } from "../logger.js";
-import { PureJSCrypto } from "./PureJSCrypto.js";
 import {
   CryptoProvider,
   Encrypted,
@@ -34,6 +33,7 @@ import {
   textDecoder,
   textEncoder,
 } from "./crypto.js";
+import { PureJSCrypto } from "./PureJSCrypto.js";
 
 type Blake3State = Blake3Hasher;
 

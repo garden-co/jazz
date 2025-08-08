@@ -1,4 +1,4 @@
 export {
-  internal_setDatabaseName,
   getIndexedDBStorage,
+  internal_setDatabaseName,
 } from "./idbNode.js";

@@ -1,6 +1,6 @@
 import { DownloaderPeer } from "./DownloaderPeer";
-import { UploaderPeer } from "./UploaderPeer";
 import { getValueId } from "./lib/searchParams";
+import { UploaderPeer } from "./UploaderPeer";
 
 export function FileStreamTest() {
   const valueId = getValueId();

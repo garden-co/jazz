@@ -1,10 +1,10 @@
 "use client";
 
+import { useState } from "react";
 import { Input } from "@/components/molecules/Input";
 import { InputWithButton } from "@/components/molecules/InputWithButton";
 import { Table } from "@/components/molecules/Table";
 import { NewsletterForm } from "@/components/organisms/NewsletterForm";
-import { useState } from "react";
 
 export default function InputsView() {
   const [checked, setChecked] = useState({

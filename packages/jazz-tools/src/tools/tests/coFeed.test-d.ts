@@ -1,5 +1,5 @@
 import { assert, describe, expectTypeOf, test } from "vitest";
-import { Group, co, z } from "../exports.js";
+import { co, Group, z } from "../exports.js";
 import { Account } from "../index.js";
 import { CoFeed, FileStream, Loaded } from "../internal.js";
 

@@ -1,4 +1,4 @@
-import { Result, err, ok } from "neverthrow";
+import { err, ok, Result } from "neverthrow";
 import { AnyRawCoValue } from "../coValue.js";
 import {
   createContentMessage,
@@ -19,8 +19,11 @@ import { Stringified } from "../jsonStringify.js";
 import { JsonObject, JsonValue } from "../jsonValue.js";
 import { PermissionsDef as RulesetDef } from "../permissions.js";
 import { CoValueKnownState, NewContentMessage } from "../sync.js";
-import { InvalidHashError, InvalidSignatureError } from "./coValueCore.js";
-import { TryAddTransactionsError } from "./coValueCore.js";
+import {
+  InvalidHashError,
+  InvalidSignatureError,
+  TryAddTransactionsError,
+} from "./coValueCore.js";
 
 export type CoValueHeader = {
   type: AnyRawCoValue["type"];

@@ -4,7 +4,11 @@ export function JazzLogo({
   className,
   width = undefined,
   height = undefined,
-}: { className?: string; width?: number; height?: number }) {
+}: {
+  className?: string;
+  width?: number;
+  height?: number;
+}) {
   return (
     <svg
       viewBox="0 0 386 146"

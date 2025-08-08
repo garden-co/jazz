@@ -1,7 +1,7 @@
 import { describe, expect, test } from "vitest";
+import { KeySecret, StreamingHash } from "../crypto/crypto.js";
 import { PureJSCrypto } from "../crypto/PureJSCrypto.js";
 import { WasmCrypto } from "../crypto/WasmCrypto.js";
-import { KeySecret, StreamingHash } from "../crypto/crypto.js";
 import { SessionID } from "../ids.js";
 
 describe.each([

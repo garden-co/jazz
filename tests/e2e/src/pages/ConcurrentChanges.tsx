@@ -1,4 +1,4 @@
-import { CoFeed, Group, ID, coField } from "jazz-tools";
+import { CoFeed, coField, Group, ID } from "jazz-tools";
 import { useAccount, useCoState } from "jazz-tools/react";
 import { useEffect, useState } from "react";
 

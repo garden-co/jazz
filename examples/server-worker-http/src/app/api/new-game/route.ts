@@ -1,7 +1,7 @@
+import { JazzRequestError } from "jazz-tools";
 import { jazzServerAccount } from "@/jazzServerAccount";
 import { createGameState } from "@/schema";
 import { serverApi } from "@/serverApi";
-import { JazzRequestError } from "jazz-tools";
 
 export async function POST(request: Request) {
   const response = await serverApi.newGame.handle(

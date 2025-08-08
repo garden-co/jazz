@@ -5,7 +5,10 @@ import { useResolvedCoValue } from "./use-resolve-covalue.js";
 export function RoleDisplay({
   node,
   value,
-}: { node: LocalNode; value: RawCoValue }) {
+}: {
+  node: LocalNode;
+  value: RawCoValue;
+}) {
   const { snapshot } = useResolvedCoValue(value.group.id, node);
 
   if (!snapshot || snapshot === "unavailable") {

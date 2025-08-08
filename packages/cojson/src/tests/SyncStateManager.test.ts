@@ -6,12 +6,12 @@ import {
 import { connectedPeers } from "../streamUtils.js";
 import { emptyKnownState } from "../sync.js";
 import {
-  SyncMessagesLog,
   loadCoValueOrFail,
+  SyncMessagesLog,
   setupTestNode,
+  TEST_NODE_CONFIG,
   waitFor,
 } from "./testUtils.js";
-import { TEST_NODE_CONFIG } from "./testUtils.js";
 
 TEST_NODE_CONFIG.withAsyncPeers = true;
 

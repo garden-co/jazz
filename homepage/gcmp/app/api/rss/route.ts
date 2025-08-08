@@ -1,7 +1,7 @@
-import { metaTags } from "@/app/layout";
-import { posts } from "@/lib/posts";
 import { Feed } from "feed";
 import { NextResponse } from "next/server";
+import { metaTags } from "@/app/layout";
+import { posts } from "@/lib/posts";
 
 export async function GET() {
   const feed = new Feed({

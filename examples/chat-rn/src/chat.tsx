@@ -76,7 +76,9 @@ export function ChatScreen({ navigation }: { navigation: any }) {
 
   const renderMessageItem = ({
     item,
-  }: { item: Loaded<typeof Message, { text: true }> }) => {
+  }: {
+    item: Loaded<typeof Message, { text: true }>;
+  }) => {
     const isMe = item._edits?.text?.by?.isMe;
     return (
       <View

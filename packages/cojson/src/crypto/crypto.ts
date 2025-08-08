@@ -1,8 +1,7 @@
 import { base58 } from "@scure/base";
 import { RawAccountID } from "../coValues/account.js";
-import { AgentID, RawCoID, TransactionID } from "../ids.js";
-import { SessionID } from "../ids.js";
-import { Stringified, parseJSON, stableStringify } from "../jsonStringify.js";
+import { AgentID, RawCoID, SessionID, TransactionID } from "../ids.js";
+import { parseJSON, Stringified, stableStringify } from "../jsonStringify.js";
 import { JsonValue } from "../jsonValue.js";
 import { logger } from "../logger.js";
 

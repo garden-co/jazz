@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { Group, Inbox, InboxSender, z } from "../exports";
-import { Loaded, co, coValueClassFromCoValueClassOrSchema } from "../internal";
+import { co, coValueClassFromCoValueClassOrSchema, Loaded } from "../internal";
 import { setupTwoNodes, waitFor } from "./utils";
 
 const Message = co.map({

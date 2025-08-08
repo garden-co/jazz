@@ -1,15 +1,15 @@
-import { JazzClerkAuth, type MinimalClerkClient } from "jazz-tools";
 import {
   Account,
   AccountClass,
   AnyAccountSchema,
   CoValueFromRaw,
+  JazzClerkAuth,
   KvStoreContext,
+  type MinimalClerkClient,
 } from "jazz-tools";
 import { useAuthSecretStorage, useJazzContext } from "jazz-tools/react-core";
 import { JazzProviderProps } from "jazz-tools/react-native-core";
-import React from "react";
-import { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { JazzExpoProvider } from "../../provider.js";
 import { ExpoSecureStoreAdapter } from "../../storage/expo-secure-store-adapter.js";
 

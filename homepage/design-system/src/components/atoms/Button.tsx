@@ -2,14 +2,12 @@ import { clsx } from "clsx";
 import Link from "next/link";
 import { forwardRef } from "react";
 import {
-  Style,
-  Variant,
-  VariantColor,
   colorToBgActiveMap25,
   colorToBgActiveMap50,
   colorToBgHoverMap10,
   colorToBgHoverMap30,
   colorToBgMap,
+  Style,
   shadowClassesBase,
   sizeClasses,
   styleToBgGradientColorMap,
@@ -22,9 +20,11 @@ import {
   styleToTextActiveMap,
   styleToTextHoverMap,
   styleToTextMap,
+  Variant,
+  VariantColor,
 } from "../../utils/tailwindClassesMap";
-import { Icon } from "./Icon";
 import type { IconName } from "./Icon";
+import { Icon } from "./Icon";
 import { Spinner } from "./Spinner";
 
 export interface ButtonProps

@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, test } from "vitest";
+import { MAX_RECOMMENDED_TX_SIZE } from "../config.js";
 import { expectStream } from "../coValue.js";
 import {
   BinaryStreamItem,
@@ -6,7 +7,6 @@ import {
   RawBinaryCoStream,
   RawCoStreamView,
 } from "../coValues/coStream.js";
-import { MAX_RECOMMENDED_TX_SIZE } from "../config.js";
 import { WasmCrypto } from "../crypto/WasmCrypto.js";
 import { SessionID } from "../ids.js";
 import {

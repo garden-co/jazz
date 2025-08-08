@@ -1,15 +1,15 @@
 import {
   Account,
   AuthCredentials,
-  AuthSecretStorage,
   AuthenticateAccountFunction,
+  AuthSecretStorage,
 } from "jazz-tools";
 import { getClerkUsername } from "./getClerkUsername.js";
 import {
   ClerkCredentials,
-  MinimalClerkClient,
   isClerkAuthStateEqual,
   isClerkCredentials,
+  MinimalClerkClient,
 } from "./types.js";
 
 export type { MinimalClerkClient };

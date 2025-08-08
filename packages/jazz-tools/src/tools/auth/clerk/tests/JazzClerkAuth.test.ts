@@ -1,8 +1,13 @@
 // @vitest-environment happy-dom
 
 import { AgentSecret } from "cojson";
-import { AuthSecretStorage } from "jazz-tools";
-import { Account, ID, InMemoryKVStore, KvStoreContext } from "jazz-tools";
+import {
+  Account,
+  AuthSecretStorage,
+  ID,
+  InMemoryKVStore,
+  KvStoreContext,
+} from "jazz-tools";
 import { createJazzTestAccount } from "jazz-tools/testing";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { JazzClerkAuth } from "../index";

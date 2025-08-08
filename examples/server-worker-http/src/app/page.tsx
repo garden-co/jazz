@@ -1,10 +1,10 @@
 "use client";
 
+import { useRouter } from "next/navigation";
+import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { serverApi } from "@/serverApi";
-import { useRouter } from "next/navigation";
-import { useState } from "react";
 
 export default function HomeComponent() {
   const [isLoading, setIsLoading] = useState(false);

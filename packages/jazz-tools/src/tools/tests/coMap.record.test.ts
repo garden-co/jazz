@@ -8,7 +8,7 @@ import {
   test,
   vi,
 } from "vitest";
-import { Group, co, z } from "../exports.js";
+import { co, Group, z } from "../exports.js";
 import { InstanceOrPrimitiveOfSchema } from "../implementation/zodSchema/typeConverters/InstanceOrPrimitiveOfSchema.js";
 import { Loaded } from "../implementation/zodSchema/zodSchema.js";
 import { Account } from "../index.js";

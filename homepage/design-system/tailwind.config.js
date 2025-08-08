@@ -1,8 +1,8 @@
 import harmonyPalette from "@evilmartians/harmony/tailwind";
 import typography from "@tailwindcss/typography";
-import tailwindCSSAnimate from "tailwindcss-animate";
 import colors from "tailwindcss/colors";
 import plugin from "tailwindcss/plugin";
+import tailwindCSSAnimate from "tailwindcss-animate";
 import { COLORS } from "./colors/colors";
 
 const stonePalette = {

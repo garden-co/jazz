@@ -1,5 +1,4 @@
-import { assert } from "node:console";
-import { ControlledAgent, type CryptoProvider, LocalNode } from "cojson";
+import { type CryptoProvider, LocalNode } from "cojson";
 import { WasmCrypto } from "cojson/crypto/WasmCrypto";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { WebSocket } from "ws";

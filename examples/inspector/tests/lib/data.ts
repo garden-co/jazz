@@ -1,10 +1,10 @@
-import { FileStream, ImageDefinition, co, z } from "jazz-tools";
+import { co, FileStream, ImageDefinition, z } from "jazz-tools";
 import {
   Issue,
   Organization,
   Project,
-  ReactionType,
   ReactionsList,
+  ReactionType,
 } from "./schema";
 
 const projectsData: {

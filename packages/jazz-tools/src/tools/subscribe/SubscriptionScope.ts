@@ -5,10 +5,10 @@ import {
   CoMap,
   type CoValue,
   type ID,
-  type RefEncoded,
-  type RefsToResolve,
   instantiateRefEncodedFromRaw,
   isRefEncoded,
+  type RefEncoded,
+  type RefsToResolve,
 } from "../internal.js";
 import { applyCoValueMigrations } from "../lib/migration.js";
 import { CoValueCoreSubscription } from "./CoValueCoreSubscription.js";

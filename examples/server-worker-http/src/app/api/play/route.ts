@@ -1,7 +1,7 @@
+import { Group, JazzRequestError } from "jazz-tools";
 import { jazzServerAccount } from "@/jazzServerAccount";
 import { PlaySelection } from "@/schema";
 import { serverApi } from "@/serverApi";
-import { Group, JazzRequestError } from "jazz-tools";
 
 export async function POST(request: Request) {
   const response = await serverApi.play.handle(

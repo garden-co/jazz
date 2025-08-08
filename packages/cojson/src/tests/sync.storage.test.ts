@@ -1,6 +1,6 @@
 import {
-  assert,
   afterEach,
+  assert,
   beforeEach,
   describe,
   expect,
@@ -10,11 +10,11 @@ import {
 
 import { emptyKnownState } from "../exports";
 import {
-  SyncMessagesLog,
-  TEST_NODE_CONFIG,
   createTestMetricReader,
   loadCoValueOrFail,
+  SyncMessagesLog,
   setupTestNode,
+  TEST_NODE_CONFIG,
   tearDownTestMetricReader,
   waitFor,
 } from "./testUtils";

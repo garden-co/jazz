@@ -1,9 +1,9 @@
 import { commands } from "@vitest/browser/context";
-import { AuthSecretStorage, Group, co, z } from "jazz-tools";
+import { AuthSecretStorage, co, Group, z } from "jazz-tools";
 import {
-  assert,
   afterAll,
   afterEach,
+  assert,
   describe,
   expect,
   onTestFinished,

@@ -1,6 +1,6 @@
-import { getAudioFileData } from "@/lib/audio/getAudioFileData";
 import { FileStream, Group } from "jazz-tools";
-import { MusicTrack, MusicaAccount, Playlist } from "./1_schema";
+import { getAudioFileData } from "@/lib/audio/getAudioFileData";
+import { MusicaAccount, MusicTrack, Playlist } from "./1_schema";
 
 /**
  * Walkthrough: Actions

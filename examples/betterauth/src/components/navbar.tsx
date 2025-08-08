@@ -1,12 +1,12 @@
 "use client";
 
-import { Button } from "@/components/ui/button";
 import { useAuth } from "jazz-react-auth-betterauth";
 import { Account } from "jazz-tools";
 import { useAccount, useIsAuthenticated } from "jazz-tools/react";
 import Image from "next/image";
 import Link from "next/link";
 import { useCallback } from "react";
+import { Button } from "@/components/ui/button";
 
 export function Navbar() {
   const { authClient } = useAuth();

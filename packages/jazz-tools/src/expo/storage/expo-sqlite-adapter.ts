@@ -1,5 +1,5 @@
-import { deleteDatabaseAsync, openDatabaseAsync } from "expo-sqlite";
 import type { SQLiteBindValue, SQLiteDatabase } from "expo-sqlite";
+import { deleteDatabaseAsync, openDatabaseAsync } from "expo-sqlite";
 import { type SQLiteDatabaseDriverAsync } from "jazz-tools/react-native-core";
 
 export class ExpoSQLiteAdapter implements SQLiteDatabaseDriverAsync {

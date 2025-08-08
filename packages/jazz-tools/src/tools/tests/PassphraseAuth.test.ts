@@ -12,9 +12,9 @@ import {
   KvStoreContext,
 } from "../exports";
 import {
-  TestJazzContextManager,
   createJazzTestAccount,
   setupJazzTestSync,
+  TestJazzContextManager,
 } from "../testing";
 import { testWordlist } from "./fixtures";
 

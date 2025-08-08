@@ -1,9 +1,9 @@
 "use client";
 
-import { Button } from "@/components/ui/button";
 import { useAccount, useIsAuthenticated } from "jazz-tools/react";
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
+import { Button } from "@/components/ui/button";
 import { AuthModal } from "./AuthModal";
 
 export function AuthButton() {

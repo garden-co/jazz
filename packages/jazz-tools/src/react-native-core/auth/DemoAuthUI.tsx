@@ -5,8 +5,8 @@ import {
   Text,
   TextInput,
   TouchableOpacity,
-  View,
   useColorScheme,
+  View,
 } from "react-native";
 
 export const DemoAuthBasicUI = ({

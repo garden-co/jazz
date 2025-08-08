@@ -10,7 +10,9 @@ import {
 
 export function SignInScreen({
   setPage,
-}: { setPage: (page: "sign-in" | "sign-up") => void }) {
+}: {
+  setPage: (page: "sign-in" | "sign-up") => void;
+}) {
   const { signIn, setActive, isLoaded } = useSignIn();
 
   const [emailAddress, setEmailAddress] = useState("");

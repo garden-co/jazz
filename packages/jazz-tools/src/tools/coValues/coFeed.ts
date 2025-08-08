@@ -9,7 +9,7 @@ import type {
   RawCoStream,
   SessionID,
 } from "cojson";
-import { MAX_RECOMMENDED_TX_SIZE, cojsonInternals } from "cojson";
+import { cojsonInternals, MAX_RECOMMENDED_TX_SIZE } from "cojson";
 import type {
   AnonymousJazzAgent,
   CoValue,
@@ -26,19 +26,19 @@ import type {
 } from "../internal.js";
 import {
   Account,
-  CoValueBase,
-  ItemsSym,
-  Ref,
-  SchemaInit,
   accessChildById,
+  CoValueBase,
   coField,
   ensureCoValueLoaded,
+  ItemsSym,
   inspect,
   instantiateRefEncodedWithInit,
   isRefEncoded,
   loadCoValueWithoutMe,
   parseCoValueCreateOptions,
   parseSubscribeRestArgs,
+  Ref,
+  SchemaInit,
   subscribeToCoValueWithoutMe,
   subscribeToExistingCoValue,
 } from "../internal.js";

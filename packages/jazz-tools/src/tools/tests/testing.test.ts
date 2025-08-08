@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, test } from "vitest";
-import { Account, CoMap, Group, co, z } from "../exports";
+import { Account, CoMap, co, Group, z } from "../exports";
 import { createJazzTestAccount, setupJazzTestSync } from "../testing";
 
 describe("Jazz Test Sync", () => {

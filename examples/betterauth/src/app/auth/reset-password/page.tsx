@@ -1,5 +1,5 @@
-import { ResetPasswordForm } from "@/components/reset-password-form";
 import type { Metadata } from "next";
+import { ResetPasswordForm } from "@/components/reset-password-form";
 
 export const metadata: Metadata = {
   title: "Reset password | Jazz Example: Better Auth",

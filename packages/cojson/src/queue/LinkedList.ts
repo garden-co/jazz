@@ -1,4 +1,4 @@
-import { Counter, ValueType, metrics } from "@opentelemetry/api";
+import { Counter, metrics, ValueType } from "@opentelemetry/api";
 import type { SyncMessage } from "../sync.js";
 
 /**

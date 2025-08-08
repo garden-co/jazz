@@ -1,9 +1,7 @@
-import { useState } from "react";
-
-import QRCode from "qrcode";
-
 import { CoValue } from "jazz-tools";
 import { createInviteLink, useAccount } from "jazz-tools/react";
+import QRCode from "qrcode";
+import { useState } from "react";
 import { Button, useToast } from "../basicComponents";
 
 export function InviteButton<T extends CoValue>({

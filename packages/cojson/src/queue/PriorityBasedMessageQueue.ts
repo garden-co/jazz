@@ -1,6 +1,6 @@
 import { CO_VALUE_PRIORITY, type CoValuePriority } from "../priority.js";
 import type { SyncMessage } from "../sync.js";
-import { QueueTuple, meteredList } from "./LinkedList.js";
+import { meteredList, QueueTuple } from "./LinkedList.js";
 
 const PRIORITY_TO_QUEUE_INDEX = {
   [CO_VALUE_PRIORITY.HIGH]: 0,

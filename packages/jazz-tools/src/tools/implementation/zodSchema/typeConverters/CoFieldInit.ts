@@ -1,11 +1,11 @@
 import {
   CoDiscriminatedUnionSchema,
-  CoValueClass,
   CoreCoFeedSchema,
   CoreCoListSchema,
   CoreCoMapSchema,
   CoreCoRecordSchema,
   CorePlainTextSchema,
+  CoValueClass,
   PartialOnUndefined,
   Simplify,
 } from "../../../internal.js";

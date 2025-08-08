@@ -5,8 +5,8 @@ import {
   CoMap,
   CoreCoDiscriminatedUnionSchema,
   CoreCoMapSchema,
-  DiscriminableCoValueSchemas,
   DiscriminableCoreCoValueSchema,
+  DiscriminableCoValueSchemas,
   SchemaUnionDiscriminator,
 } from "../../internal.js";
 import {

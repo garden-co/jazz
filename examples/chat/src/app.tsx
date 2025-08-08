@@ -1,11 +1,11 @@
-import { apiKey } from "@/apiKey.ts";
-import { getRandomUsername, inIframe, onChatLoad } from "@/util.ts";
 import { useIframeHashRouter } from "hash-slash";
 import { Group } from "jazz-tools";
 import { JazzInspector } from "jazz-tools/inspector";
 import { JazzReactProvider, useAccount } from "jazz-tools/react";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
+import { apiKey } from "@/apiKey.ts";
+import { getRandomUsername, inIframe, onChatLoad } from "@/util.ts";
 import { ChatScreen } from "./chatScreen.tsx";
 import { Chat } from "./schema.ts";
 import { ThemeProvider } from "./themeProvider.tsx";

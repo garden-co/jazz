@@ -7,10 +7,10 @@ import {
   AccountClass,
   AnyAccountSchema,
   CoValueFromRaw,
+  co,
   Group,
   InboxSender,
   Loaded,
-  co,
   z,
 } from "jazz-tools";
 import { startWorker } from "jazz-tools/worker";

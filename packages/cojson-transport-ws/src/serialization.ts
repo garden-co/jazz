@@ -1,4 +1,4 @@
-import { type SyncMessage, logger } from "cojson";
+import { logger, type SyncMessage } from "cojson";
 import type { PingMsg } from "./types.js";
 
 export function getErrorMessage(error: unknown) {

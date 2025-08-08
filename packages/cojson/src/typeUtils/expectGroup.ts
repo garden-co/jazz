@@ -1,4 +1,4 @@
-import { type RawCoValue, expectMap } from "../coValue.js";
+import { expectMap, type RawCoValue } from "../coValue.js";
 import { RawGroup } from "../coValues/group.js";
 
 export function expectGroup(content: RawCoValue): RawGroup {

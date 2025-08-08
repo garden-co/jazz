@@ -1,17 +1,27 @@
 import { base64URLtoBytes, bytesToBase64url } from "./base64url.js";
+import type { AnyRawCoValue, CoID } from "./coValue.js";
 import { type RawCoValue } from "./coValue.js";
 import { CoValueCore, idforHeader } from "./coValueCore/coValueCore.js";
 import { CoValueUniqueness } from "./coValueCore/verifiedState.js";
+import type {
+  AccountMeta,
+  RawAccountID,
+  RawAccountMigration,
+} from "./coValues/account.js";
 import {
+  accountHeaderForInitialAgentSecret,
   ControlledAccount,
   ControlledAgent,
   RawAccount,
   RawProfile,
-  accountHeaderForInitialAgentSecret,
 } from "./coValues/account.js";
 import { OpID, RawCoList } from "./coValues/coList.js";
 import { RawCoMap } from "./coValues/coMap.js";
 import { RawCoPlainText, stringifyOpID } from "./coValues/coPlainText.js";
+import type {
+  BinaryCoStreamMeta,
+  BinaryStreamInfo,
+} from "./coValues/coStream.js";
 import {
   BinaryStreamItem,
   BinaryStreamStart,
@@ -19,14 +29,18 @@ import {
   RawBinaryCoStream,
   RawCoStream,
 } from "./coValues/coStream.js";
+import type { Everyone, InviteSecret } from "./coValues/group.js";
 import { EVERYONE, RawGroup } from "./coValues/group.js";
-import type { Everyone } from "./coValues/group.js";
 import {
+  AgentSecret,
   CryptoProvider,
   StreamingHash,
   secretSeedLength,
   shortHashLength,
+  textDecoder,
+  textEncoder,
 } from "./crypto/crypto.js";
+import type { AgentID, RawCoID, SessionID } from "./ids.js";
 import {
   getGroupDependentKey,
   getGroupDependentKeyList,
@@ -34,43 +48,30 @@ import {
   rawCoIDfromBytes,
   rawCoIDtoBytes,
 } from "./ids.js";
-import { Stringified, parseJSON, stableStringify } from "./jsonStringify.js";
+import { parseJSON, Stringified, stableStringify } from "./jsonStringify.js";
+import type { JsonObject, JsonValue } from "./jsonValue.js";
 import { LocalNode } from "./localNode.js";
+import type * as Media from "./media.js";
 import type { AccountRole, Role } from "./permissions.js";
+import { disablePermissionErrors } from "./permissions.js";
 import { ConnectedPeerChannel, connectedPeers } from "./streamUtils.js";
+import type { Peer, SyncMessage } from "./sync.js";
+import { DisconnectedError, emptyKnownState, SyncManager } from "./sync.js";
 import { accountOrAgentIDfromSessionID } from "./typeUtils/accountOrAgentIDfromSessionID.js";
 import { expectGroup } from "./typeUtils/expectGroup.js";
 import { isAccountID } from "./typeUtils/isAccountID.js";
 
-import type { AnyRawCoValue, CoID } from "./coValue.js";
-import type {
-  AccountMeta,
-  RawAccountID,
-  RawAccountMigration,
-} from "./coValues/account.js";
-import type {
-  BinaryCoStreamMeta,
-  BinaryStreamInfo,
-} from "./coValues/coStream.js";
-import type { InviteSecret } from "./coValues/group.js";
-import { AgentSecret, textDecoder, textEncoder } from "./crypto/crypto.js";
-import type { AgentID, RawCoID, SessionID } from "./ids.js";
-import type { JsonObject, JsonValue } from "./jsonValue.js";
-import type * as Media from "./media.js";
-import { disablePermissionErrors } from "./permissions.js";
-import type { Peer, SyncMessage } from "./sync.js";
-import { DisconnectedError, SyncManager, emptyKnownState } from "./sync.js";
-
 type Value = JsonValue | AnyRawCoValue;
 
 export { PriorityBasedMessageQueue } from "./queue/PriorityBasedMessageQueue.js";
-import { getDependedOnCoValuesFromRawData } from "./coValueCore/utils.js";
+
 import {
   CO_VALUE_LOADING_CONFIG,
   MAX_RECOMMENDED_TX_SIZE,
   setCoValueLoadingRetryDelay,
   setIncomingMessagesTimeBudget,
 } from "./config.js";
+import { getDependedOnCoValuesFromRawData } from "./coValueCore/utils.js";
 import { LogLevel, logger } from "./logger.js";
 import { CO_VALUE_PRIORITY, getPriorityFromHeader } from "./priority.js";
 import { getDependedOnCoValues } from "./storage/syncUtils.js";

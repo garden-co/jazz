@@ -1,6 +1,5 @@
 "use client";
 
-import { Button } from "@/components/ui/button";
 import { Account } from "jazz-tools";
 import { useAccount } from "jazz-tools/react";
 import {
@@ -10,6 +9,7 @@ import {
   WrenchIcon,
 } from "lucide-react";
 import Image from "next/image";
+import { Button } from "@/components/ui/button";
 
 export default function Home() {
   const { me } = useAccount(Account, { resolve: { profile: {} } });

@@ -5,9 +5,9 @@ import {
   AccountClass,
   AnyAccountSchema,
   CoValueFromRaw,
+  cojsonInternals,
   JazzContextManagerAuthProps,
   SyncMessage,
-  cojsonInternals,
 } from "jazz-tools";
 import {
   JazzBrowserContextManager,

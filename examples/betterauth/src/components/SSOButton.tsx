@@ -1,4 +1,3 @@
-import { Button } from "@/components/ui/button";
 import {
   SiApple,
   SiDiscord,
@@ -21,6 +20,7 @@ import { type SSOProviderType, useAuth } from "jazz-react-auth-betterauth";
 import { useRouter } from "next/navigation";
 import type { ReactNode } from "react";
 import { toast } from "sonner";
+import { Button } from "@/components/ui/button";
 
 interface SocialProvider {
   name: string;

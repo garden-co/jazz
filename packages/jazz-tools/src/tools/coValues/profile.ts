@@ -3,9 +3,9 @@ import {
   CoMap,
   CoMapInit,
   CoValueClass,
+  coField,
   Group,
   Simplify,
-  coField,
 } from "../internal.js";
 
 /** @category Identity & Permissions */

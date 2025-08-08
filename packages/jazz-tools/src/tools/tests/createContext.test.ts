@@ -6,15 +6,15 @@ import {
   AnonymousJazzAgent,
   AuthSecretStorage,
   Credentials,
-  ID,
-  InMemoryKVStore,
-  KvStoreContext,
   co,
   coValueClassFromCoValueClassOrSchema,
   createAnonymousJazzContext,
   createJazzContext,
   createJazzContextForNewAccount,
   createJazzContextFromExistingCredentials,
+  ID,
+  InMemoryKVStore,
+  KvStoreContext,
   randomSessionProvider,
 } from "../exports";
 import { activeAccountContext } from "../implementation/activeAccountContext";
@@ -24,6 +24,7 @@ import {
   setupJazzTestSync,
 } from "../testing";
 import { loadCoValueOrFail } from "./utils";
+
 const Crypto = await WasmCrypto.create();
 
 KvStoreContext.getInstance().initialize(new InMemoryKVStore());

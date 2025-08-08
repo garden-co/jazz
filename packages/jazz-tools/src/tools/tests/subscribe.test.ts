@@ -7,11 +7,11 @@ import {
   onTestFinished,
   vi,
 } from "vitest";
-import { Account, Group, cojsonInternals, z } from "../index.js";
+import { Account, cojsonInternals, Group, z } from "../index.js";
 import {
-  Loaded,
   co,
   coValueClassFromCoValueClassOrSchema,
+  Loaded,
   subscribeToCoValue,
 } from "../internal.js";
 import {

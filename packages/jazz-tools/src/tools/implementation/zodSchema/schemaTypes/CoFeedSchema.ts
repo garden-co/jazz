@@ -2,12 +2,12 @@ import {
   Account,
   AnyZodOrCoValueSchema,
   CoFeed,
+  coOptionalDefiner,
   Group,
   RefsToResolve,
   RefsToResolveStrict,
   Resolved,
   SubscribeListenerOptions,
-  coOptionalDefiner,
 } from "../../../internal.js";
 import { AnonymousJazzAgent } from "../../anonymousJazzAgent.js";
 import { CoFeedInit } from "../typeConverters/CoFieldInit.js";

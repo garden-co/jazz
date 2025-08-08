@@ -1,12 +1,12 @@
+import { LocalNode } from "cojson";
+import { WasmCrypto } from "cojson/crypto/WasmCrypto";
+import { getBetterSqliteStorage } from "cojson-storage-sqlite";
+import { createWebSocketPeer } from "cojson-transport-ws";
 import { randomUUID } from "crypto";
+import { mkdir, unlink } from "fs/promises";
 import { createServer } from "http";
 import { tmpdir } from "os";
 import { dirname, join } from "path";
-import { LocalNode } from "cojson";
-import { getBetterSqliteStorage } from "cojson-storage-sqlite";
-import { createWebSocketPeer } from "cojson-transport-ws";
-import { WasmCrypto } from "cojson/crypto/WasmCrypto";
-import { mkdir, unlink } from "fs/promises";
 import { WebSocket, WebSocketServer } from "ws";
 
 export type TestSyncServer = Awaited<ReturnType<typeof startSyncServer>>;

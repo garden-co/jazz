@@ -3,8 +3,8 @@ import { StrictMode } from "react";
 import ReactDOM from "react-dom/client";
 
 import "./index.css";
-import { apiKey } from "@/apiKey.ts";
 import { JazzReactProvider } from "jazz-tools/react";
+import { apiKey } from "@/apiKey.ts";
 import { App } from "./app";
 
 const rootElement = document.getElementById("app");

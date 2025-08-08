@@ -2,12 +2,12 @@ import { beforeEach, describe, expect, test, vi } from "vitest";
 
 import { expectMap } from "../coValue";
 import {
-  SyncMessagesLog,
-  TEST_NODE_CONFIG,
   blockMessageTypeOnOutgoingPeer,
   connectedPeersWithMessagesTracking,
   loadCoValueOrFail,
+  SyncMessagesLog,
   setupTestNode,
+  TEST_NODE_CONFIG,
   waitFor,
 } from "./testUtils";
 

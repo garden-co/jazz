@@ -1,9 +1,9 @@
 import { beforeEach, describe, expect, test } from "vitest";
 import {
-  SyncMessagesLog,
   createThreeConnectedNodes,
   createTwoConnectedNodes,
   loadCoValueOrFail,
+  SyncMessagesLog,
   setupTestNode,
 } from "./testUtils";
 

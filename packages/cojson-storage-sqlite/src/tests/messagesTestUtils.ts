@@ -1,4 +1,4 @@
-import type { CoValueCore, CojsonInternalTypes, SyncMessage } from "cojson";
+import type { CojsonInternalTypes, CoValueCore, SyncMessage } from "cojson";
 
 function simplifySessions(msg: CojsonInternalTypes.CoValueKnownState) {
   const count = Object.values(msg.sessions).reduce(

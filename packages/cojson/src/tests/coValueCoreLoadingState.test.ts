@@ -1,9 +1,9 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import { PeerState } from "../PeerState";
 import { CoValueCore } from "../coValueCore/coValueCore";
 import { CoValueHeader, VerifiedState } from "../coValueCore/verifiedState";
 import { RawCoID } from "../ids";
 import { LocalNode } from "../localNode";
+import { PeerState } from "../PeerState";
 import { Peer } from "../sync";
 import { createTestMetricReader, tearDownTestMetricReader } from "./testUtils";
 

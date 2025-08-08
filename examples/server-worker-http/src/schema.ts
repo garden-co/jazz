@@ -1,4 +1,4 @@
-import { Account, Group, co, z } from "jazz-tools";
+import { Account, co, Group, z } from "jazz-tools";
 
 export const PlayerState = co.map({
   currentSelection: z.literal(["rock", "paper", "scissors"]).optional(),

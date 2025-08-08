@@ -8,8 +8,8 @@ import { RawCoID, StorageAPI } from "../exports";
 import { SQLiteDatabaseDriver } from "../storage";
 import { getSqliteStorage } from "../storage/sqlite";
 import {
-  SQLiteDatabaseDriverAsync,
   getSqliteStorageAsync,
+  SQLiteDatabaseDriverAsync,
 } from "../storage/sqliteAsync";
 import { SyncMessagesLog, SyncTestMessage } from "./testUtils";
 
@@ -95,7 +95,11 @@ export async function createAsyncStorage({
   filename,
   nodeName = "client",
   storageName = "storage",
-}: { filename?: string; nodeName: string; storageName: string }) {
+}: {
+  filename?: string;
+  nodeName: string;
+  storageName: string;
+}) {
   const storage = await getSqliteStorageAsync(
     new LibSQLSqliteAsyncDriver(getDbPath(filename)),
   );
@@ -113,7 +117,11 @@ export function createSyncStorage({
   filename,
   nodeName = "client",
   storageName = "storage",
-}: { filename?: string; nodeName: string; storageName: string }) {
+}: {
+  filename?: string;
+  nodeName: string;
+  storageName: string;
+}) {
   const storage = getSqliteStorage(
     new LibSQLSqliteSyncDriver(getDbPath(filename)),
   );

@@ -17,11 +17,7 @@ const customRender = (
   ui: React.ReactNode,
   options: RenderOptions & JazzExtendedOptions = {},
 ) => {
-  const AllTheProviders = ({
-    children,
-  }: {
-    children: React.ReactNode;
-  }) => {
+  const AllTheProviders = ({ children }: { children: React.ReactNode }) => {
     return (
       <JazzTestProvider
         account={options.account}
@@ -39,11 +35,7 @@ const customRenderHook = <TProps, TResult>(
   callback: (props: TProps) => TResult,
   options: RenderHookOptions<TProps> & JazzExtendedOptions = {},
 ) => {
-  const AllTheProviders = ({
-    children,
-  }: {
-    children: React.ReactNode;
-  }) => {
+  const AllTheProviders = ({ children }: { children: React.ReactNode }) => {
     return (
       <JazzTestProvider
         account={options.account}

@@ -1,5 +1,10 @@
 "use client";
 
+import { useAuth } from "jazz-react-auth-betterauth";
+import Link from "next/link";
+import { useRouter } from "next/navigation";
+import { useState } from "react";
+import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -10,11 +15,6 @@ import {
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { useAuth } from "jazz-react-auth-betterauth";
-import Link from "next/link";
-import { useRouter } from "next/navigation";
-import { useState } from "react";
-import { toast } from "sonner";
 
 export function ForgotPasswordForm() {
   const router = useRouter();

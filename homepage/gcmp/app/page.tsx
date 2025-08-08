@@ -1,6 +1,6 @@
+import { HeroHeader } from "@garden-co/design-system/src/components/molecules/HeroHeader";
 import Approach from "@/components/home/Approach";
 import Products from "@/components/home/Products";
-import { HeroHeader } from "@garden-co/design-system/src/components/molecules/HeroHeader";
 
 export default function Home() {
   return (

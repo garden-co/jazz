@@ -3,10 +3,10 @@ import { beforeEach, describe, expect, test } from "vitest";
 import { expectList, expectMap } from "../coValue";
 import { WasmCrypto } from "../crypto/WasmCrypto";
 import {
-  SyncMessagesLog,
-  TEST_NODE_CONFIG,
   loadCoValueOrFail,
+  SyncMessagesLog,
   setupTestNode,
+  TEST_NODE_CONFIG,
   waitFor,
 } from "./testUtils";
 

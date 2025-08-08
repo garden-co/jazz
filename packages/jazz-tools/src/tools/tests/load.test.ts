@@ -1,7 +1,7 @@
 import { waitFor } from "@testing-library/dom";
 import { cojsonInternals, emptyKnownState } from "cojson";
 import { assert, beforeEach, expect, test } from "vitest";
-import { Account, Group, co, z } from "../exports.js";
+import { Account, co, Group, z } from "../exports.js";
 import {
   createJazzTestAccount,
   getPeerConnectedToTestSyncServer,

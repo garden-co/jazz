@@ -112,7 +112,9 @@ export function InputBar(props: { children: React.ReactNode }) {
 
 export function ImageInput({
   onImageChange,
-}: { onImageChange?: (event: React.ChangeEvent<HTMLInputElement>) => void }) {
+}: {
+  onImageChange?: (event: React.ChangeEvent<HTMLInputElement>) => void;
+}) {
   const inputRef = useRef<HTMLInputElement>(null);
 
   const onUploadClick = () => {

@@ -1,3 +1,5 @@
+import { Loaded } from "jazz-tools";
+import { useState } from "react";
 import { MusicTrack } from "@/1_schema";
 import { updateMusicTrackTitle } from "@/4_actions";
 import { Button } from "@/components/ui/button";
@@ -10,8 +12,6 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import { Loaded } from "jazz-tools";
-import { useState } from "react";
 import { ConfirmDialog } from "./ConfirmDialog";
 
 interface EditTrackDialogProps {

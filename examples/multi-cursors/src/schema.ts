@@ -1,4 +1,4 @@
-import { Group, co, z } from "jazz-tools";
+import { co, Group, z } from "jazz-tools";
 import { Camera, Cursor } from "./types";
 
 export const CursorFeed = co.feed(Cursor);

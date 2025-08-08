@@ -1,10 +1,5 @@
 "use client";
 
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Game, PlaySelection, PlayerState } from "@/schema";
-import { serverApi } from "@/serverApi";
 import { Group, isJazzRequestError } from "jazz-tools";
 import { useAccount, useCoState } from "jazz-tools/react";
 import {
@@ -20,6 +15,11 @@ import {
 import { useParams } from "next/navigation";
 import { useState } from "react";
 import { toast } from "sonner";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Game, PlayerState, PlaySelection } from "@/schema";
+import { serverApi } from "@/serverApi";
 
 const playIcon = (
   selection: "rock" | "paper" | "scissors" | undefined,

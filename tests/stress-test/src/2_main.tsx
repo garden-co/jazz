@@ -1,11 +1,10 @@
-import ReactDOM from "react-dom/client";
-
 import { JazzInspector } from "jazz-tools/inspector";
 import { JazzReactProvider, useAccount } from "jazz-tools/react";
 import React from "react";
+import ReactDOM from "react-dom/client";
 import {
-  RouterProvider,
   createBrowserRouter,
+  RouterProvider,
   useNavigate,
 } from "react-router-dom";
 import { TodoAccount } from "./1_schema";

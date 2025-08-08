@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { LocalNode, StorageApiSync, cojsonInternals } from "cojson";
+import { cojsonInternals, LocalNode, StorageApiSync } from "cojson";
 import { WasmCrypto } from "cojson/crypto/WasmCrypto";
 import { expect, onTestFinished, test, vi } from "vitest";
 import { getBetterSqliteStorage } from "../index.js";

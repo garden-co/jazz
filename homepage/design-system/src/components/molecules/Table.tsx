@@ -93,7 +93,11 @@ const TableDataContainer = ({
   children,
   className,
   isCopyable,
-}: { children: React.ReactNode; className?: string; isCopyable?: boolean }) => {
+}: {
+  children: React.ReactNode;
+  className?: string;
+  isCopyable?: boolean;
+}) => {
   return (
     <div
       className={clsx("flex gap-2", className, isCopyable && "cursor-pointer")}

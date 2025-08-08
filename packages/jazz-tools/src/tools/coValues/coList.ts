@@ -19,15 +19,12 @@ import type {
 } from "../internal.js";
 import {
   AnonymousJazzAgent,
-  ItemsSym,
-  Ref,
-  RegisteredSchemas,
-  SchemaInit,
   accessChildByKey,
   coField,
   coValueClassFromCoValueClassOrSchema,
   coValuesCache,
   ensureCoValueLoaded,
+  ItemsSym,
   inspect,
   instantiateRefEncodedWithInit,
   isRefEncoded,
@@ -35,6 +32,9 @@ import {
   makeRefs,
   parseCoValueCreateOptions,
   parseSubscribeRestArgs,
+  Ref,
+  RegisteredSchemas,
+  SchemaInit,
   subscribeToCoValueWithoutMe,
   subscribeToExistingCoValue,
 } from "../internal.js";

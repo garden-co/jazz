@@ -12,12 +12,12 @@ import {
 import {
   AgentID,
   ChildGroupReference,
-  ParentGroupReference,
   getChildGroupId,
   getParentGroupId,
   isAgentID,
   isChildGroupReference,
   isParentGroupReference,
+  ParentGroupReference,
 } from "../ids.js";
 import { JsonObject } from "../jsonValue.js";
 import { logger } from "../logger.js";

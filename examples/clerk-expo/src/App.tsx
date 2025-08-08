@@ -2,9 +2,9 @@ import { ClerkLoaded, ClerkProvider, useClerk } from "@clerk/clerk-expo";
 import { resourceCache } from "@clerk/clerk-expo/resource-cache";
 import { tokenCache } from "@clerk/clerk-expo/token-cache";
 import { JazzExpoProviderWithClerk } from "jazz-tools/expo";
-import { MainScreen } from "./MainScreen";
 import { apiKey } from "./apiKey";
 import { AuthScreen } from "./auth/AuthScreen";
+import { MainScreen } from "./MainScreen";
 
 function JazzAndAuth({ children }: { children: React.ReactNode }) {
   const clerk = useClerk();

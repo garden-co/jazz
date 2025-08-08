@@ -1,3 +1,4 @@
+// biome-ignore-all assist/source/organizeImports: weird circular dependencies happen if we sort imports
 export * from "./coValues/interfaces.js";
 export * from "./coValues/CoValueBase.js";
 export * from "./implementation/inspect.js";

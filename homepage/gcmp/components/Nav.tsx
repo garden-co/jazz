@@ -1,7 +1,7 @@
-import { ThemeToggle } from "@/components/ThemeToggle";
 import { Button } from "@garden-co/design-system/src/components/atoms/Button";
 import { GcmpLogo } from "@garden-co/design-system/src/components/atoms/logos/GcmpLogo";
 import { Nav } from "@garden-co/design-system/src/components/organisms/Nav";
+import { ThemeToggle } from "@/components/ThemeToggle";
 export function GcmpNav() {
   const cta = (
     <Button

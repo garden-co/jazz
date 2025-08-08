@@ -1,9 +1,8 @@
-import { createWebSocketPeer } from "cojson-transport-ws";
 import { WasmCrypto } from "cojson/crypto/WasmCrypto";
+import { createWebSocketPeer } from "cojson-transport-ws";
 import { Hono } from "hono";
 import { startSyncServer } from "jazz-run/startSyncServer";
-import { CoMap, coField } from "jazz-tools";
-import { Account } from "jazz-tools";
+import { Account, CoMap, coField } from "jazz-tools";
 import { startWorker } from "jazz-tools/worker";
 
 const app = new Hono();

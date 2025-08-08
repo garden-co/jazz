@@ -1,7 +1,7 @@
 import ReactDOM from "react-dom/client";
 import {
-  RouterProvider,
   createHashRouter,
+  RouterProvider,
   useNavigate,
 } from "react-router-dom";
 import "./index.css";

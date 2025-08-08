@@ -1,17 +1,17 @@
 import { beforeEach, describe, expect, test, vi } from "vitest";
-import { expectMap } from "../coValue";
 import {
   CO_VALUE_LOADING_CONFIG,
   setCoValueLoadingRetryDelay,
 } from "../config";
+import { expectMap } from "../coValue";
 import { RawCoMap } from "../exports";
 import {
-  SyncMessagesLog,
-  TEST_NODE_CONFIG,
   blockMessageTypeOnOutgoingPeer,
   loadCoValueOrFail,
+  SyncMessagesLog,
   setupTestAccount,
   setupTestNode,
+  TEST_NODE_CONFIG,
   waitFor,
 } from "./testUtils";
 

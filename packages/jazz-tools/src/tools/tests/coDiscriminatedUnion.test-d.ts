@@ -1,5 +1,5 @@
 import { beforeEach, describe, test } from "vitest";
-import { Loaded, co, z } from "../exports.js";
+import { co, Loaded, z } from "../exports.js";
 import { createJazzTestAccount, setupJazzTestSync } from "../testing.js";
 
 describe("co.discriminatedUnion", () => {

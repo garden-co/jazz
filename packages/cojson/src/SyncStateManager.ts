@@ -1,9 +1,9 @@
 import { RawCoID } from "./ids.js";
 import {
   CoValueKnownState,
+  emptyKnownState,
   PeerID,
   SyncManager,
-  emptyKnownState,
 } from "./sync.js";
 
 export type SyncState = {

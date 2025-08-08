@@ -1,7 +1,7 @@
-import { Counter, ValueType, metrics } from "@opentelemetry/api";
-import type { PeerState } from "../PeerState.js";
+import { Counter, metrics, ValueType } from "@opentelemetry/api";
 import { SYNC_SCHEDULER_CONFIG } from "../config.js";
 import { logger } from "../logger.js";
+import type { PeerState } from "../PeerState.js";
 import type { SyncMessage } from "../sync.js";
 import { LinkedList } from "./LinkedList.js";
 

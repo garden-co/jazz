@@ -6,13 +6,13 @@ import {
   CoMap,
   CoPlainText,
   CoRichText,
-  CoValueClass,
   CoreAccountSchema,
   CoreCoDiscriminatedUnionSchema,
   CoreCoFeedSchema,
   CoreCoListSchema,
   CoreCoMapSchema,
   CoreCoRecordSchema,
+  CoValueClass,
   FileStream,
 } from "../../../internal.js";
 import { CoreCoOptionalSchema } from "../schemaTypes/CoOptionalSchema.js";

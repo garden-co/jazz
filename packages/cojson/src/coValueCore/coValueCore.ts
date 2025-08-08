@@ -1,11 +1,10 @@
-import { UpDownCounter, ValueType, metrics } from "@opentelemetry/api";
-import { Result, err } from "neverthrow";
-import { PeerState } from "../PeerState.js";
+import { metrics, UpDownCounter, ValueType } from "@opentelemetry/api";
+import { err, Result } from "neverthrow";
+import { CO_VALUE_LOADING_CONFIG } from "../config.js";
+import { coreToCoValue } from "../coreToCoValue.js";
 import { RawCoValue } from "../coValue.js";
 import { ControlledAccountOrAgent } from "../coValues/account.js";
 import { RawGroup } from "../coValues/group.js";
-import { CO_VALUE_LOADING_CONFIG } from "../config.js";
-import { coreToCoValue } from "../coreToCoValue.js";
 import {
   CryptoProvider,
   Encrypted,
@@ -17,21 +16,22 @@ import {
   StreamingHash,
 } from "../crypto/crypto.js";
 import {
+  getParentGroupId,
+  isParentGroupReference,
   RawCoID,
   SessionID,
   TransactionID,
-  getParentGroupId,
-  isParentGroupReference,
 } from "../ids.js";
 import { parseJSON, stableStringify } from "../jsonStringify.js";
 import { JsonValue } from "../jsonValue.js";
 import { LocalNode, ResolveAccountAgentError } from "../localNode.js";
 import { logger } from "../logger.js";
+import { PeerState } from "../PeerState.js";
 import {
   determineValidTransactions,
   isKeyForKeyField,
 } from "../permissions.js";
-import { CoValueKnownState, PeerID, emptyKnownState } from "../sync.js";
+import { CoValueKnownState, emptyKnownState, PeerID } from "../sync.js";
 import { accountOrAgentIDfromSessionID } from "../typeUtils/accountOrAgentIDfromSessionID.js";
 import { expectGroup } from "../typeUtils/expectGroup.js";
 import { isAccountID } from "../typeUtils/isAccountID.js";
@@ -621,9 +621,7 @@ export class CoValueCore {
     return success;
   }
 
-  getCurrentContent(options?: {
-    ignorePrivateTransactions: true;
-  }): RawCoValue {
+  getCurrentContent(options?: { ignorePrivateTransactions: true }): RawCoValue {
     if (!this.verified) {
       throw new Error(
         "CoValueCore: getCurrentContent called on coValue without verified state",
@@ -1016,9 +1014,7 @@ export class CoValueCore {
     }
   }
 
-  waitForSync(options?: {
-    timeout?: number;
-  }) {
+  waitForSync(options?: { timeout?: number }) {
     return this.node.syncManager.waitForSync(this.id, options?.timeout);
   }
 

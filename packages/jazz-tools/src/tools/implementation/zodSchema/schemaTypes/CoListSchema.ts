@@ -1,12 +1,12 @@
 import {
   Account,
   CoList,
+  coOptionalDefiner,
   Group,
   RefsToResolve,
   RefsToResolveStrict,
   Resolved,
   SubscribeListenerOptions,
-  coOptionalDefiner,
 } from "../../../internal.js";
 import { AnonymousJazzAgent } from "../../anonymousJazzAgent.js";
 import { CoListInit } from "../typeConverters/CoFieldInit.js";

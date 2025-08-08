@@ -1,11 +1,10 @@
-import { AgentSecret, LocalNode, cojsonInternals } from "cojson";
+import { AgentSecret, cojsonInternals, LocalNode } from "cojson";
 import { PureJSCrypto } from "cojson/dist/crypto/PureJSCrypto";
 import { AuthSecretStorage } from "../auth/AuthSecretStorage.js";
 import { InMemoryKVStore } from "../auth/InMemoryKVStore.js";
 import { KvStore, KvStoreContext } from "../auth/KvStoreContext.js";
 import { Account } from "../coValues/account.js";
-import { AuthCredentials } from "../types.js";
-import { JazzContextType } from "../types.js";
+import { AuthCredentials, JazzContextType } from "../types.js";
 import { AnonymousJazzAgent } from "./anonymousJazzAgent.js";
 import { createAnonymousJazzContext } from "./createContext.js";
 import { InstanceOfSchema } from "./zodSchema/typeConverters/InstanceOfSchema.js";

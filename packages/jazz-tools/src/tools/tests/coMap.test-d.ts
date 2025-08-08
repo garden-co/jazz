@@ -1,6 +1,6 @@
 import { assert, describe, expectTypeOf, test } from "vitest";
 import { ZodNumber, ZodOptional, ZodString } from "zod/v4";
-import { Group, co, z } from "../exports.js";
+import { co, Group, z } from "../exports.js";
 import { Account } from "../index.js";
 import { CoMap, Loaded } from "../internal.js";
 

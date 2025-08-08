@@ -1,11 +1,7 @@
 import { JsonObject } from "cojson";
 import { RawDataCard } from "./raw-data-card.js";
 
-export function CoPlainTextView({
-  data,
-}: {
-  data: JsonObject;
-}) {
+export function CoPlainTextView({ data }: { data: JsonObject }) {
   if (!data) return;
 
   return (

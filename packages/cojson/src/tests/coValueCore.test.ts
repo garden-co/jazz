@@ -1,7 +1,7 @@
 import { encrypt } from "jazz-crypto-rs";
 import {
-  assert,
   afterEach,
+  assert,
   beforeEach,
   describe,
   expect,

@@ -3,10 +3,10 @@ import { assert, beforeEach, describe, expect, test } from "vitest";
 import { WasmCrypto } from "../crypto/WasmCrypto";
 import { LocalNode } from "../localNode";
 import {
-  SyncMessagesLog,
-  TEST_NODE_CONFIG,
   getSyncServerConnectedPeer,
+  SyncMessagesLog,
   setupTestNode,
+  TEST_NODE_CONFIG,
 } from "./testUtils";
 
 const Crypto = await WasmCrypto.create();
