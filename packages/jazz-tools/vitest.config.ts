@@ -1,6 +1,9 @@
+import { svelte } from "@sveltejs/vite-plugin-svelte";
+import { svelteTesting } from "@testing-library/svelte/vite";
 import { defineProject } from "vitest/config";
 
 export default defineProject({
+  plugins: [svelte(), svelteTesting()],
   test: {
     name: "jazz-tools",
     typecheck: {
@@ -23,7 +26,7 @@ export default defineProject({
       },
       {
         test: {
-          include: ["src/**/*.test.{js,ts,svelte}"],
+          include: ["src/**/*.test.{js,ts,tsx,svelte}"],
           name: "unit",
         },
       },

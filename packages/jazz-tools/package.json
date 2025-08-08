@@ -24,6 +24,12 @@
       "types": "./dist/browser-media-images/index.d.ts",
       "default": "./dist/browser-media-images/index.js"
     },
+    "./media": {
+      "@jazz-tools/source": "./src/media/index.ts",
+      "types": "./dist/media/index.d.ts",
+      "react-native": "./dist/media/index.native.js",
+      "default": "./dist/media/index.browser.js"
+    },
     "./expo": {
       "@jazz-tools/source": "./src/expo/index.ts",
       "types": "./dist/expo/index.d.ts",
@@ -109,11 +115,6 @@
       "types": "./dist/react-native-core/testing.d.ts",
       "default": "./dist/react-native-core/testing.js"
     },
-    "./react-native-media-images": {
-      "@jazz-tools/source": "./src/react-native-media-images/index.ts",
-      "types": "./dist/react-native-media-images/index.d.ts",
-      "default": "./dist/react-native-media-images/index.js"
-    },
     "./svelte": {
       "svelte": "./dist/svelte/index.js",
       "@jazz-tools/source": "./src/svelte/index.ts",
@@ -145,15 +146,12 @@
     "@scure/base": "1.2.1",
     "@scure/bip39": "^1.3.0",
     "@tiptap/core": "^2.12.0",
-    "@types/image-blob-reduce": "^4.1.1",
     "clsx": "^2.0.0",
     "cojson": "workspace:*",
     "cojson-storage-indexeddb": "workspace:*",
     "cojson-transport-ws": "workspace:*",
     "fast-myers-diff": "^3.2.0",
     "goober": "^2.1.16",
-    "image-blob-reduce": "^4.1.0",
-    "pica": "^9.0.1",
     "prosemirror-example-setup": "^1.2.2",
     "prosemirror-menu": "^1.2.4",
     "prosemirror-model": "^1.21.1",
@@ -176,9 +174,11 @@
   "devDependencies": {
     "@scure/bip39": "^1.3.0",
     "@sveltejs/package": "^2.0.0",
+    "@sveltejs/vite-plugin-svelte": "^6.1.0",
     "@testing-library/dom": "^10.4.0",
     "@testing-library/jest-dom": "^6.6.3",
     "@testing-library/react": "16.2.0",
+    "@testing-library/svelte": "^5.2.6",
     "@types/react": "19.1.0",
     "@types/react-dom": "19.1.0",
     "@vitest/browser": "^3.2.4",
