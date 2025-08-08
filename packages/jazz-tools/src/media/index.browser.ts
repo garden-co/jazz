@@ -95,18 +95,18 @@ const resizeDimensionsKeepingAspectRatio = (
   width: number,
   height: number,
   maxSize: number,
-) => {
-  const aspectRatio = width / height;
-  if (width > height) {
-    return {
-      width: Math.min(width, maxSize),
-      height: Math.round(width / aspectRatio),
-    };
+): { width: number; height: number } => {
+  if (width <= maxSize && height <= maxSize) {
+    return { width, height };
   }
-  return {
-    width: Math.round(height * aspectRatio),
-    height: Math.min(height, maxSize),
-  };
+
+  const aspectRatio = width / height;
+
+  if (width >= height) {
+    return { width: maxSize, height: Math.round(maxSize / aspectRatio) };
+  } else {
+    return { width: Math.round(maxSize * aspectRatio), height: maxSize };
+  }
 };
 
 async function resize(
