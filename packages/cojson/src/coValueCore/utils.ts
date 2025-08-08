@@ -2,6 +2,7 @@ import { getGroupDependentKey } from "../ids.js";
 import { RawCoID, SessionID } from "../ids.js";
 import { Stringified, parseJSON } from "../jsonStringify.js";
 import { JsonValue } from "../jsonValue.js";
+import { NewContentMessage } from "../sync.js";
 import { accountOrAgentIDfromSessionID } from "../typeUtils/accountOrAgentIDfromSessionID.js";
 import { isAccountID } from "../typeUtils/isAccountID.js";
 import { CoValueHeader, Transaction } from "./verifiedState.js";

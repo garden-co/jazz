@@ -71,3 +71,14 @@ export function knownStateFromContent(content: NewContentMessage) {
 
   return knownState;
 }
+
+export function getContentMessageSize(msg: NewContentMessage) {
+  return Object.values(msg.new).reduce((acc, sessionNewContent) => {
+    return (
+      acc +
+      sessionNewContent.newTransactions.reduce((acc, tx) => {
+        return acc + getTransactionSize(tx);
+      }, 0)
+    );
+  }, 0);
+}

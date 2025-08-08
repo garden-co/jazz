@@ -61,9 +61,10 @@ import { disablePermissionErrors } from "./permissions.js";
 import type { Peer, SyncMessage } from "./sync.js";
 import { DisconnectedError, SyncManager, emptyKnownState } from "./sync.js";
 
-type Value = JsonValue | AnyRawCoValue;
-
-export { PriorityBasedMessageQueue } from "./queue/PriorityBasedMessageQueue.js";
+import {
+  getContentMessageSize,
+  getTransactionSize,
+} from "./coValueContentMessage.js";
 import { getDependedOnCoValuesFromRawData } from "./coValueCore/utils.js";
 import {
   CO_VALUE_LOADING_CONFIG,
@@ -75,6 +76,9 @@ import { LogLevel, logger } from "./logger.js";
 import { CO_VALUE_PRIORITY, getPriorityFromHeader } from "./priority.js";
 import { getDependedOnCoValues } from "./storage/syncUtils.js";
 
+type Value = JsonValue | AnyRawCoValue;
+
+export { PriorityBasedMessageQueue } from "./queue/PriorityBasedMessageQueue.js";
 /** @hidden */
 export const cojsonInternals = {
   connectedPeers,
@@ -106,6 +110,8 @@ export const cojsonInternals = {
   ConnectedPeerChannel,
   textEncoder,
   textDecoder,
+  getTransactionSize,
+  getContentMessageSize,
 };
 
 export {

@@ -1,9 +1,10 @@
+import { ValueType, metrics } from "@opentelemetry/api";
 import { type Peer, type SyncMessage, cojsonInternals, logger } from "cojson";
 import { BatchedOutgoingMessages } from "./BatchedOutgoingMessages.js";
 import { deserializeMessages } from "./serialization.js";
 import type { AnyWebSocket } from "./types.js";
 
-const { ConnectedPeerChannel } = cojsonInternals;
+const { ConnectedPeerChannel, getContentMessageSize } = cojsonInternals;
 
 export type CreateWebSocketPeerOpts = {
   id: string;
@@ -15,6 +16,10 @@ export type CreateWebSocketPeerOpts = {
   pingTimeout?: number;
   onClose?: () => void;
   onSuccess?: () => void;
+  /**
+   * Additional key-value attributes to add to the ingress metric.
+   */
+  meta?: Record<string, string | number>;
 };
 
 function createPingTimeoutListener(
@@ -64,7 +69,19 @@ export function createWebSocketPeer({
   pingTimeout = 10_000,
   onSuccess,
   onClose,
+  meta,
 }: CreateWebSocketPeerOpts): Peer {
+  const totalIngressBytesCounter = metrics
+    .getMeter("cojson-transport-ws")
+    .createCounter("jazz.usage.ingress", {
+      description: "Total ingress bytes from peer",
+      unit: "bytes",
+      valueType: ValueType.INT,
+    });
+
+  // Initialize the counter by adding 0
+  totalIngressBytesCounter.add(0, meta);
+
   const incoming = new ConnectedPeerChannel();
   const emitClosedEvent = createClosedEventEmitter(onClose);
 
@@ -101,6 +118,7 @@ export function createWebSocketPeer({
     websocket,
     batchingByDefault,
     role,
+    meta,
   );
   let isFirstMessage = true;
 
@@ -135,6 +153,10 @@ export function createWebSocketPeer({
     for (const msg of messages) {
       if (msg && "action" in msg) {
         incoming.push(msg);
+
+        if (msg.action === "content") {
+          totalIngressBytesCounter.add(getContentMessageSize(msg), meta);
+        }
       }
     }
   }
