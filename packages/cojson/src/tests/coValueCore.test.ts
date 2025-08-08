@@ -9,9 +9,10 @@ import {
   vi,
 } from "vitest";
 import { bytesToBase64url } from "../base64url.js";
+import { CoID } from "../coValue.js";
 import { CoValueCore } from "../coValueCore/coValueCore.js";
 import { Transaction } from "../coValueCore/verifiedState.js";
-import { MapOpPayload } from "../coValues/coMap.js";
+import { MapOpPayload, RawCoMap } from "../coValues/coMap.js";
 import { WasmCrypto } from "../crypto/WasmCrypto.js";
 import { stableStringify } from "../jsonStringify.js";
 import { LocalNode } from "../localNode.js";
@@ -23,6 +24,7 @@ import {
   loadCoValueOrFail,
   nodeWithRandomAgentAndSessionID,
   randomAgentAndSessionID,
+  setupTestNode,
   tearDownTestMetricReader,
 } from "./testUtils.js";
 
@@ -779,5 +781,169 @@ describe("markErrored and isErroredInPeer", () => {
 
     // Verify immediate notification
     expect(notificationCount).toBeGreaterThan(0);
+  });
+
+  test("should autofix marked CoValues with invalid signatures (different session)", async () => {
+    const client = setupTestNode();
+
+    const coMap = client.node
+      .createCoValue({
+        type: "comap",
+        ruleset: { type: "unsafeAllowAll" },
+        meta: null,
+        ...Crypto.createdNowUnique(),
+      })
+      .getCurrentContent() as RawCoMap;
+    coMap.set("hello", "world", "trusting");
+
+    const clientOnNewSession = client.spawnNewSession();
+
+    const content = coMap.core.verified.newContentSince(undefined)?.[0];
+
+    assert(content);
+
+    const sessionChanges = content.new[client.node.currentSessionID];
+
+    assert(sessionChanges);
+
+    // Overwrite the signature with an invalid one to force the fix
+    sessionChanges.lastSignature =
+      "signature_z3tsE7U1JaeNeUmZ4EY3Xq5uQ9jq9jDi6Rkhdt7T7b7z4NCnpMgB4bo8TwLXYVCrRdBm6PoyyPdK8fYFzHJUh5EzA";
+
+    clientOnNewSession.node.markAsStorageSignatureToFix(coMap.id);
+    clientOnNewSession.node.syncManager.handleNewContent(content, "storage");
+
+    const mapWithFixedSignature = await loadCoValueOrFail(
+      clientOnNewSession.node,
+      coMap.id as CoID<RawCoMap>,
+    );
+
+    expect(mapWithFixedSignature.get("hello")).toEqual("world");
+
+    mapWithFixedSignature.set("hello", "world2", "trusting");
+
+    expect(mapWithFixedSignature.get("hello")).toEqual("world2");
+  });
+
+  test("should autofix marked CoValues with invalid signatures (same session)", async () => {
+    const client = setupTestNode();
+
+    const coMap = client.node
+      .createCoValue({
+        type: "comap",
+        ruleset: { type: "unsafeAllowAll" },
+        meta: null,
+        ...Crypto.createdNowUnique(),
+      })
+      .getCurrentContent() as RawCoMap;
+    coMap.set("hello", "world", "trusting");
+
+    const content = coMap.core.verified.newContentSince(undefined)?.[0];
+
+    assert(content);
+
+    const sessionChanges = content.new[client.node.currentSessionID];
+
+    assert(sessionChanges);
+
+    // Overwrite the signature with an invalid one to force the fix
+    sessionChanges.lastSignature =
+      "signature_z3tsE7U1JaeNeUmZ4EY3Xq5uQ9jq9jDi6Rkhdt7T7b7z4NCnpMgB4bo8TwLXYVCrRdBm6PoyyPdK8fYFzHJUh5EzA";
+
+    client.restart();
+
+    client.node.markAsStorageSignatureToFix(coMap.id);
+    client.node.syncManager.handleNewContent(content, "storage");
+
+    const mapWithFixedSignature = await loadCoValueOrFail(
+      client.node,
+      coMap.id as CoID<RawCoMap>,
+    );
+
+    expect(mapWithFixedSignature.get("hello")).toEqual("world");
+
+    mapWithFixedSignature.set("hello", "world2", "trusting");
+
+    expect(mapWithFixedSignature.get("hello")).toEqual("world2");
+  });
+
+  test("should not autofix marked CoValues with invalid signatures if the account is not the same", async () => {
+    const alice = setupTestNode();
+    const coMap = alice.node
+      .createCoValue({
+        type: "comap",
+        ruleset: { type: "unsafeAllowAll" },
+        meta: null,
+        ...Crypto.createdNowUnique(),
+      })
+      .getCurrentContent() as RawCoMap;
+    coMap.set("hello", "world", "trusting");
+
+    const content = coMap.core.verified.newContentSince(undefined)?.[0];
+
+    assert(content);
+
+    const sessionChanges = content.new[alice.node.currentSessionID];
+
+    assert(sessionChanges);
+
+    // Overwrite the signature with an invalid one to force the fix
+    sessionChanges.lastSignature =
+      "signature_z3tsE7U1JaeNeUmZ4EY3Xq5uQ9jq9jDi6Rkhdt7T7b7z4NCnpMgB4bo8TwLXYVCrRdBm6PoyyPdK8fYFzHJUh5EzA";
+
+    const bob = setupTestNode();
+    bob.node.markAsStorageSignatureToFix(coMap.id);
+    bob.node.syncManager.handleNewContent(content, "storage");
+
+    const mapWithInvalidSignature = await loadCoValueOrFail(
+      bob.node,
+      coMap.id as CoID<RawCoMap>,
+    );
+
+    expect(mapWithInvalidSignature.get("hello")).toEqual(undefined);
+    mapWithInvalidSignature.set("hello", "world2", "trusting");
+
+    expect(mapWithInvalidSignature.get("hello")).toEqual("world2");
+  });
+
+  test("should not autofix marked CoValues with invalid signatures if the source is not storage", async () => {
+    const client = setupTestNode();
+
+    const coMap = client.node
+      .createCoValue({
+        type: "comap",
+        ruleset: { type: "unsafeAllowAll" },
+        meta: null,
+        ...Crypto.createdNowUnique(),
+      })
+      .getCurrentContent() as RawCoMap;
+    coMap.set("hello", "world", "trusting");
+
+    const content = coMap.core.verified.newContentSince(undefined)?.[0];
+
+    assert(content);
+
+    const sessionChanges = content.new[client.node.currentSessionID];
+
+    assert(sessionChanges);
+
+    // Overwrite the signature with an invalid one to force the fix
+    sessionChanges.lastSignature =
+      "signature_z3tsE7U1JaeNeUmZ4EY3Xq5uQ9jq9jDi6Rkhdt7T7b7z4NCnpMgB4bo8TwLXYVCrRdBm6PoyyPdK8fYFzHJUh5EzA";
+
+    client.restart();
+
+    client.node.markAsStorageSignatureToFix(coMap.id);
+    client.node.syncManager.handleNewContent(content, "import");
+
+    const mapWithInvalidSignature = await loadCoValueOrFail(
+      client.node,
+      coMap.id as CoID<RawCoMap>,
+    );
+
+    expect(mapWithInvalidSignature.get("hello")).toEqual(undefined);
+    mapWithInvalidSignature.set("hello", "world2", "trusting");
+
+    expect(mapWithInvalidSignature.get("hello")).toEqual("world2");
   });
 });

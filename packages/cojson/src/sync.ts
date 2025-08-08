@@ -14,6 +14,7 @@ import {
 } from "./coValueCore/verifiedState.js";
 import { Signature } from "./crypto/crypto.js";
 import { RawCoID, SessionID, isRawCoID } from "./ids.js";
+import { stableStringify } from "./jsonStringify.js";
 import { LocalNode } from "./localNode.js";
 import { logger } from "./logger.js";
 import { CoValuePriority } from "./priority.js";
@@ -615,6 +616,35 @@ export class SyncManager {
       );
 
       if (result.isErr()) {
+        if (
+          from === "storage" &&
+          this.local.fixStorageSignatures.has(msg.id) &&
+          sessionID.startsWith(this.local.getCurrentAccountOrAgentID())
+        ) {
+          coValue.tryAddTransactions(
+            sessionID,
+            newTransactions,
+            undefined,
+            newContentForSession.lastSignature,
+            "immediate",
+            true,
+          );
+          // Push an empty transaction to the session to fix the signature
+          coValue.commitTransaction(sessionID, {
+            privacy: "trusting",
+            madeAt: Date.now(),
+            changes: stableStringify([]),
+          });
+          logger.error(
+            "Pushing an empty transaction to the session to fix the signature",
+            {
+              id: msg.id,
+              sessionID,
+            },
+          );
+          continue;
+        }
+
         if (peer) {
           logger.error("Failed to add transactions", {
             peerId: peer.id,
