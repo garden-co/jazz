@@ -1,5 +1,5 @@
 import type { Config } from "tailwindcss";
-import { pingColorMap } from "./components/cloud/pingColorThresholds";
+import { pingColorMap } from "./app/(others)/cloud/components/pingColorThresholds";
 
 export const colourSafelist = Object.values(pingColorMap).flatMap((value) => {
   const { light, dark } = value as { light: string; dark: string };

@@ -1,5 +1,5 @@
-import { ExampleLinks } from "@/components/examples/ExampleLinks";
-import { ExampleTags } from "@/components/examples/ExampleTags";
+import { ExampleLinks } from "@/app/(others)/examples/components/ExampleLinks";
+import { ExampleTags } from "@/app/(others)/examples/components/ExampleTags";
 import { Example } from "@/content/example";
 import { clsx } from "clsx";
 
