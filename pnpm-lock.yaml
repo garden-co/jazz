@@ -189,8 +189,8 @@ importers:
         specifier: workspace:*
         version: link:../../packages/jazz-tools
       lucide-react:
-        specifier: ^0.274.0
-        version: 0.274.0(react@19.1.0)
+        specifier: ^0.536.0
+        version: 0.536.0(react@19.1.0)
       react:
         specifier: 19.1.0
         version: 19.1.0
@@ -980,8 +980,8 @@ importers:
         specifier: workspace:*
         version: link:../../packages/jazz-tools
       lucide-react:
-        specifier: ^0.274.0
-        version: 0.274.0(react@19.1.0)
+        specifier: ^0.536.0
+        version: 0.536.0(react@19.1.0)
       react:
         specifier: 19.1.0
         version: 19.1.0
@@ -1035,8 +1035,8 @@ importers:
         specifier: workspace:*
         version: link:../../packages/jazz-tools
       lucide-react:
-        specifier: ^0.274.0
-        version: 0.274.0(react@19.1.0)
+        specifier: ^0.536.0
+        version: 0.536.0(react@19.1.0)
       react:
         specifier: 19.1.0
         version: 19.1.0
@@ -1517,8 +1517,8 @@ importers:
         specifier: workspace:*
         version: link:../../packages/jazz-tools
       lucide-react:
-        specifier: ^0.274.0
-        version: 0.274.0(react@19.1.0)
+        specifier: ^0.536.0
+        version: 0.536.0(react@19.1.0)
       qrcode:
         specifier: ^1.5.3
         version: 1.5.4
@@ -10447,11 +10447,6 @@ packages:
     resolution: {integrity: sha512-jumlc0BIUrS3qJGgIkWZsyfAM7NCWiBcCDhnd+3NNM5KbBmLTgHVfWBcg6W+rLUsIpzpERPsvwUP7CckAQSOoA==}
     engines: {node: '>=12'}
 
-  lucide-react@0.274.0:
-    resolution: {integrity: sha512-qiWcojRXEwDiSimMX1+arnxha+ROJzZjJaVvCC0rsG6a9pUPjZePXSq7em4ZKMp0NDm1hyzPNkM7UaWC3LU2AA==}
-    peerDependencies:
-      react: 19.1.0
-
   lucide-react@0.485.0:
     resolution: {integrity: sha512-NvyQJ0LKyyCxL23nPKESlr/jmz8r7fJO1bkuptSNYSy0s8VVj4ojhX0YAgmE1e0ewfxUZjIlZpvH+otfTnla8Q==}
     peerDependencies:
@@ -10469,6 +10464,11 @@ packages:
 
   lucide-react@0.525.0:
     resolution: {integrity: sha512-Tm1txJ2OkymCGkvwoHt33Y2JpN5xucVq1slHcgE6Lk0WjDfjgKWor5CdVER8U6DvcfMwh4M8XxmpTiyzfmfDYQ==}
+    peerDependencies:
+      react: 19.1.0
+
+  lucide-react@0.536.0:
+    resolution: {integrity: sha512-2PgvNa9v+qz4Jt/ni8vPLt4jwoFybXHuubQT8fv4iCW5TjDxkbZjNZZHa485ad73NSEn/jdsEtU57eE1g+ma8A==}
     peerDependencies:
       react: 19.1.0
 
@@ -25139,10 +25139,6 @@ snapshots:
 
   lru-cache@7.18.3: {}
 
-  lucide-react@0.274.0(react@19.1.0):
-    dependencies:
-      react: 19.1.0
-
   lucide-react@0.485.0(react@19.1.0):
     dependencies:
       react: 19.1.0
@@ -25156,6 +25152,10 @@ snapshots:
       react: 19.1.0
 
   lucide-react@0.525.0(react@19.1.0):
+    dependencies:
+      react: 19.1.0
+
+  lucide-react@0.536.0(react@19.1.0):
     dependencies:
       react: 19.1.0
 

@@ -1,6 +1,6 @@
-import { Account, co } from "jazz-tools";
+import { Account } from "jazz-tools";
 import { createImage, useAccount, useCoState } from "jazz-tools/react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Chat, Message } from "./schema.ts";
 import {
   BubbleBody,
@@ -15,14 +15,17 @@ import {
   TextInput,
 } from "./ui.tsx";
 
-export function ChatScreen(props: { chatID: string }) {
-  const chat = useCoState(Chat, props.chatID, {
-    resolve: { $each: { text: true } },
-  });
-  const { me } = useAccount();
-  const [showNLastMessages, setShowNLastMessages] = useState(30);
+const INITIAL_MESSAGES_TO_SHOW = 30;
 
-  if (!chat)
+export function ChatScreen(props: { chatID: string }) {
+  const chat = useCoState(Chat, props.chatID);
+  const { me } = useAccount();
+  const [showNLastMessages, setShowNLastMessages] = useState(
+    INITIAL_MESSAGES_TO_SHOW,
+  );
+  const isLoading = useMessagesPreload(props.chatID);
+
+  if (!chat || isLoading)
     return (
       <div className="flex-1 flex justify-center items-center">Loading...</div>
     );
@@ -41,7 +44,7 @@ export function ChatScreen(props: { chatID: string }) {
       chat.push(
         Message.create(
           {
-            text: co.plainText().create(file.name, chat._owner),
+            text: file.name,
             image: image,
           },
           chat._owner,
@@ -59,9 +62,14 @@ export function ChatScreen(props: { chatID: string }) {
       <ChatBody>
         {chat.length > 0 ? (
           chat
+            // We call slice before reverse to avoid mutating the original array
             .slice(-showNLastMessages)
-            .reverse() // this plus flex-col-reverse on ChatBody gives us scroll-to-bottom behavior
-            .map((msg) => <ChatBubble me={me} msg={msg} key={msg.id} />)
+            // Reverse plus flex-col-reverse on ChatBody gives us scroll-to-bottom behavior
+            .reverse()
+            .map(
+              (msg) =>
+                msg?.text && <ChatBubble me={me} msg={msg} key={msg.id} />,
+            )
         ) : (
           <EmptyChatMessage />
         )}
@@ -80,12 +88,7 @@ export function ChatScreen(props: { chatID: string }) {
 
         <TextInput
           onSubmit={(text) => {
-            chat.push(
-              Message.create(
-                { text: co.plainText().create(text, chat._owner) },
-                chat._owner,
-              ),
-            );
+            chat.push(Message.create({ text }, chat._owner));
           }}
         />
       </InputBar>
@@ -95,7 +98,7 @@ export function ChatScreen(props: { chatID: string }) {
 
 function ChatBubble(props: {
   me: Account;
-  msg: co.loaded<typeof Message, { text: true }>;
+  msg: Message;
 }) {
   if (!props.me.canRead(props.msg) || !props.msg.text?.toString()) {
     return (
@@ -125,4 +128,36 @@ function ChatBubble(props: {
       )}
     </BubbleContainer>
   );
+}
+
+/**
+ * Warms the local cache with the initial messages to load only the initial messages
+ * and avoid flickering
+ */
+function useMessagesPreload(chatID: string) {
+  const [isLoading, setIsLoading] = useState(true);
+
+  useEffect(() => {
+    preloadChatMessages(chatID).finally(() => {
+      setIsLoading(false);
+    });
+  }, [chatID]);
+
+  return isLoading;
+}
+
+async function preloadChatMessages(chatID: string) {
+  const chat = await Chat.load(chatID);
+
+  if (!chat?._refs) return;
+
+  const promises = [];
+
+  for (const msg of Array.from(chat._refs)
+    .reverse()
+    .slice(0, INITIAL_MESSAGES_TO_SHOW)) {
+    promises.push(Message.load(msg.id, { resolve: { text: true } }));
+  }
+
+  await Promise.all(promises);
 }

@@ -13,7 +13,7 @@
   },
   "dependencies": {
     "jazz-tools": "workspace:*",
-    "lucide-react": "^0.274.0",
+    "lucide-react": "^0.536.0",
     "react": "19.1.0",
     "react-dom": "19.1.0",
     "react-router": "^6.16.0",
