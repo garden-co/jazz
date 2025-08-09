@@ -97,6 +97,27 @@ type onErrorNullEnabled<Depth> = Depth extends { $onError: null }
   ? null
   : never;
 
+type CoMapLikeLoaded<
+  V extends object,
+  Depth,
+  DepthLimit extends number,
+  CurrentDepth extends number[],
+> = {
+  -readonly [Key in keyof Depth]-?: Key extends CoKeys<V>
+    ? NonNullable<V[Key]> extends CoValue
+      ?
+          | DeeplyLoaded<
+              NonNullable<V[Key]>,
+              Depth[Key],
+              DepthLimit,
+              [0, ...CurrentDepth]
+            >
+          | (undefined extends V[Key] ? undefined : never)
+          | onErrorNullEnabled<Depth[Key]>
+      : never
+    : never;
+} & V;
+
 export type DeeplyLoaded<
   V,
   Depth,
@@ -126,38 +147,27 @@ export type DeeplyLoaded<
         : V
       : // Basically V extends CoMap | Group | Account - but if we used that we'd introduce circularity into the definition of CoMap itself
         [V] extends [{ _type: "CoMap" | "Group" | "Account" }]
-        ? ItemsSym extends keyof V
-          ? Depth extends { $each: infer ItemDepth }
-            ? // Deeply loaded Record-like CoMap
-              {
-                [key: string]:
-                  | DeeplyLoaded<
-                      NonNullable<V[ItemsSym]>,
-                      ItemDepth,
-                      DepthLimit,
-                      [0, ...CurrentDepth]
-                    >
-                  | onErrorNullEnabled<Depth["$each"]>;
-              } & V // same reason as in CoList
-            : never
-          : keyof Depth extends never // Depth = {}
-            ? V
-            : // Deeply loaded CoMap
-              {
-                -readonly [Key in keyof Depth]-?: Key extends CoKeys<V>
-                  ? NonNullable<V[Key]> extends CoValue
-                    ?
-                        | DeeplyLoaded<
-                            NonNullable<V[Key]>,
-                            Depth[Key],
-                            DepthLimit,
-                            [0, ...CurrentDepth]
-                          >
-                        | (undefined extends V[Key] ? undefined : never)
-                        | onErrorNullEnabled<Depth[Key]>
-                    : never
-                  : never;
-              } & V // same reason as in CoList
+        ? // If Depth = {} return V in any case
+          keyof Depth extends never
+          ? V
+          : // 1. Record-like CoMap
+            ItemsSym extends keyof V
+            ? // 1.1. Deeply loaded Record-like CoMap with { $each: true | {$onError: null} }
+              Depth extends { $each: infer ItemDepth }
+              ? {
+                  [key: string]:
+                    | DeeplyLoaded<
+                        NonNullable<V[ItemsSym]>,
+                        ItemDepth,
+                        DepthLimit,
+                        [0, ...CurrentDepth]
+                      >
+                    | onErrorNullEnabled<Depth["$each"]>;
+                } & V // same reason as in CoList
+              : // 1.2 Deeply loaded Record-like CoMap with single keys
+                CoMapLikeLoaded<V, Depth, DepthLimit, CurrentDepth>
+            : // 2. Deeply loaded CoMap
+              CoMapLikeLoaded<V, Depth, DepthLimit, CurrentDepth>
         : [V] extends [
               {
                 _type: "CoStream";

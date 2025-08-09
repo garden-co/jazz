@@ -1,5 +1,5 @@
 import { WasmCrypto } from "cojson/crypto/WasmCrypto";
-import { beforeEach, describe, expect, test, vi } from "vitest";
+import { assert, beforeEach, describe, expect, test, vi } from "vitest";
 import { Account, Group, subscribeToCoValue, z } from "../index.js";
 import {
   Loaded,

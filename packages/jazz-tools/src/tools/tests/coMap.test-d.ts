@@ -542,6 +542,56 @@ describe("CoMap resolution", async () => {
     > | null>();
   });
 
+  test("partial loading a map with string resolve", async () => {
+    const Dog = co.map({
+      name: z.string(),
+      breed: z.string(),
+    });
+
+    const Person = co.map({
+      name: z.string(),
+      age: z.number(),
+      dog1: Dog,
+      dog2: Dog,
+    });
+
+    const person = Person.create({
+      name: "John",
+      age: 20,
+      dog1: Dog.create({ name: "Rex", breed: "Labrador" }),
+      dog2: Dog.create({ name: "Fido", breed: "Poodle" }),
+    });
+
+    const userId: string = "dog1";
+
+    const loadedPerson = await Person.load(person.id, {
+      resolve: {
+        [userId]: true,
+      },
+    });
+
+    type ExpectedType = {
+      name: string;
+      age: number;
+      dog1: Loaded<typeof Dog> | null;
+      dog2: Loaded<typeof Dog> | null;
+    } | null;
+
+    function matches(value: ExpectedType) {
+      return value;
+    }
+
+    matches(loadedPerson);
+
+    assert(loadedPerson);
+    expectTypeOf<typeof loadedPerson.dog1>().toEqualTypeOf<Loaded<
+      typeof Dog
+    > | null>();
+    expectTypeOf<typeof loadedPerson.dog2>().toEqualTypeOf<Loaded<
+      typeof Dog
+    > | null>();
+  });
+
   test("loading a map with deep resolve and $onError", async () => {
     const Dog = co.map({
       name: z.string(),
