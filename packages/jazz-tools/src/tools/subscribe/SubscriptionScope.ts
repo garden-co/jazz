@@ -1,4 +1,5 @@
-import type { LocalNode, RawCoValue } from "cojson";
+import type { LocalNode, RawCoID, RawCoValue } from "cojson";
+import { NewContentMessage } from "cojson/dist/sync.js";
 import {
   CoFeed,
   CoList,
@@ -15,6 +16,89 @@ import { CoValueCoreSubscription } from "./CoValueCoreSubscription.js";
 import { JazzError, type JazzErrorIssue } from "./JazzError.js";
 import type { SubscriptionValue, Unloaded } from "./types.js";
 import { createCoValue, getOwnerFromRawValue } from "./utils.js";
+
+function getCacheKey(id: string, resolve: RefsToResolve<any>) {
+  return `$content-${id}-${JSON.stringify(resolve)}`;
+}
+
+export function preloadFromCache(
+  key: string,
+  node: LocalNode,
+): string[] | null {
+  const cache = localStorage.getItem(key);
+
+  if (cache) {
+    const ids = JSON.parse(cache) as NewContentMessage[][];
+
+    ids.forEach((messages) => {
+      const coValue = node.getCoValue(messages[0]!.id as `co_z${string}`);
+
+      if (coValue.verified) {
+        return;
+      }
+
+      for (const message of messages) {
+        node.syncManager.handleNewContent(message, "storage");
+      }
+    });
+  }
+
+  return null;
+}
+
+function addValueToCache(
+  ids: Map<string, NewContentMessage[]>,
+  node: LocalNode,
+  id: string,
+) {
+  if (!ids.has(id)) {
+    const coValue = node.getCoValue(id as `co_z${string}`);
+
+    if (coValue.verified) {
+      const newContent = coValue.verified.newContentSince(undefined);
+
+      if (newContent) {
+        ids.set(id, newContent);
+      }
+    }
+  }
+}
+
+function collectIds(
+  scope: SubscriptionScope<any>,
+  ids: Map<string, NewContentMessage[]>,
+) {
+  if (scope.value.type === "loaded") {
+    for (const id of scope.value.value._raw.core.getDependedOnCoValues()) {
+      addValueToCache(ids, scope.node, id);
+    }
+    addValueToCache(ids, scope.node, scope.id);
+  }
+
+  for (const value of scope.childNodes.values()) {
+    collectIds(value, ids);
+  }
+}
+
+function setCache(
+  id: string,
+  resolve: RefsToResolve<any>,
+  scope: SubscriptionScope<any>,
+) {
+  const key = getCacheKey(id, resolve);
+
+  const ids = new Map<string, NewContentMessage[]>();
+
+  collectIds(scope, ids);
+
+  localStorage.setItem(key, JSON.stringify(Array.from(ids.values())));
+
+  const keys = JSON.parse(localStorage.getItem("$keys") ?? "[]");
+
+  keys.push(key);
+
+  localStorage.setItem("$keys", JSON.stringify(keys));
+}
 
 export class SubscriptionScope<D extends CoValue> {
   childNodes = new Map<string, SubscriptionScope<CoValue>>();
@@ -46,9 +130,14 @@ export class SubscriptionScope<D extends CoValue> {
     public schema: RefEncoded<D>,
     public skipRetry = false,
     public bestEffortResolution = false,
+    public cache = false,
   ) {
     this.resolve = resolve;
     this.value = { type: "unloaded", id };
+
+    if (cache) {
+      preloadFromCache(getCacheKey(id, resolve), node);
+    }
 
     let lastUpdate: RawCoValue | "unavailable" | undefined;
     this.subscription = new CoValueCoreSubscription(
@@ -323,6 +412,10 @@ export class SubscriptionScope<D extends CoValue> {
     if (error) {
       this.subscribers.forEach((listener) => listener(error));
     } else if (value.type !== "unloaded") {
+      if (this.cache) {
+        setCache(this.id, this.resolve, this);
+      }
+
       this.subscribers.forEach((listener) => listener(value));
     }
 
