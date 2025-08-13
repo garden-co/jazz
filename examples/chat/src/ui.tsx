@@ -1,7 +1,7 @@
-import clsx from "clsx";
 import { CoPlainText, ImageDefinition } from "jazz-tools";
 import { Image } from "jazz-tools/react";
 import { ImageIcon } from "lucide-react";
+import { Button, cn, Input, Label } from "quint-ui";
 import { useId, useRef } from "react";
 
 export function AppContainer(props: { children: React.ReactNode }) {
@@ -57,7 +57,7 @@ export function BubbleBody(props: {
 }) {
   return (
     <div
-      className={clsx(
+      className={cn(
         "line-clamp-10 text-ellipsis whitespace-pre-wrap",
         "rounded-2xl overflow-hidden max-w-[calc(100%-5rem)] shadow-sm p-1",
         props.fromMe
@@ -75,9 +75,7 @@ export function BubbleText(props: {
   className?: string;
 }) {
   return (
-    <p className={clsx("px-2 leading-relaxed", props.className)}>
-      {props.text}
-    </p>
+    <p className={cn("px-2 leading-relaxed", props.className)}>{props.text}</p>
   );
 }
 
@@ -121,25 +119,26 @@ export function ImageInput({
 
   return (
     <>
-      <button
-        type="button"
+      <Button
         aria-label="Send image"
         title="Send image"
         onClick={onUploadClick}
-        className="text-stone-500 p-1.5 rounded-full hover:bg-stone-100 hover:text-stone-800 dark:hover:bg-stone-800 dark:hover:text-stone-200 transition-colors"
+        intent="strong"
       >
         <ImageIcon size={24} strokeWidth={1.5} />
-      </button>
+      </Button>
 
-      <label className="sr-only">
+      <Label isHiddenVisually htmlFor={inputRef.current?.id}>
         Image
-        <input
-          ref={inputRef}
-          type="file"
-          accept="image/png, image/jpeg, image/gif"
-          onChange={onImageChange}
-        />
-      </label>
+      </Label>
+      <Input
+        id={inputRef.current?.id}
+        ref={inputRef}
+        type="file"
+        accept="image/png, image/jpeg, image/gif"
+        onChange={onImageChange}
+        className="w-32"
+      />
     </>
   );
 }
@@ -149,12 +148,11 @@ export function TextInput(props: { onSubmit: (text: string) => void }) {
 
   return (
     <div className="flex-1">
-      <label className="sr-only" htmlFor={inputId}>
+      <Label isHiddenVisually htmlFor={inputId}>
         Type a message and press Enter
-      </label>
-      <input
+      </Label>
+      <Input
         id={inputId}
-        className="rounded-full py-1 px-3 border block w-full placeholder:text-stone-500 dark:bg-stone-925 dark:text-white dark:border-stone-900"
         placeholder="Type a message and press Enter"
         maxLength={2048}
         onKeyDown={({ key, currentTarget: input }) => {
