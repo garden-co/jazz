@@ -186,12 +186,21 @@ impl SessionLogInternal {
     pub fn new(co_id: CoID, session_id: SessionID, signer_id: SignerID) -> Self {
         let hasher = blake3::Hasher::new();
 
-        let public_key = VerifyingKey::try_from(
-            decode_z(&signer_id.0)
-                .expect("Invalid public key")
-                .as_slice(),
-        )
-        .expect("Invalid public key");
+        // Validate signer_id is not empty
+        if signer_id.0.is_empty() {
+            panic!("SignerID cannot be empty - received empty string");
+        }
+        
+        // Validate signer_id has correct format
+        if !signer_id.0.contains("_z") {
+            panic!("Invalid SignerID format: '{}' - must contain '_z' prefix (expected format: 'signer_z...')", signer_id.0);
+        }
+        
+        let decoded_bytes = decode_z(&signer_id.0)
+            .unwrap_or_else(|e| panic!("Failed to decode SignerID '{}': {}", signer_id.0, e));
+        
+        let public_key = VerifyingKey::try_from(decoded_bytes.as_slice())
+            .unwrap_or_else(|e| panic!("Invalid public key in SignerID '{}': {}", signer_id.0, e));
 
         Self {
             co_id,

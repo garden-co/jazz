@@ -1,11 +1,11 @@
-import { beforeAll, describe, expect, it } from "vitest";
-import { SessionLog } from "cojson-core-wasm";
-import { ed25519 } from "@noble/curves/ed25519";
-import { base58 } from "@scure/base";
 import * as fs from "fs";
 import * as path from "path";
-import { PureJSCrypto } from "../crypto/PureJSCrypto";
+import { ed25519 } from "@noble/curves/ed25519";
+import { base58 } from "@scure/base";
+import { SessionLog } from "cojson-core-wasm";
+import { beforeAll, describe, expect, it } from "vitest";
 import { Transaction } from "../coValueCore/verifiedState";
+import { PureJSCrypto } from "../crypto/PureJSCrypto";
 
 function decodeZ(value: string): Uint8Array {
   const prefixEnd = value.indexOf("_z");

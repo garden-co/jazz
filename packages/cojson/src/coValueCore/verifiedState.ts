@@ -1,4 +1,3 @@
-import { SessionLog as WasmSessionLog } from "cojson-core-wasm";
 import { Result, err, ok } from "neverthrow";
 import { AnyRawCoValue } from "../coValue.js";
 import { ControlledAccountOrAgent } from "../coValues/account.js";
@@ -20,7 +19,6 @@ import { JsonObject, JsonValue } from "../jsonValue.js";
 import { PermissionsDef as RulesetDef } from "../permissions.js";
 import { getPriorityFromHeader } from "../priority.js";
 import { CoValueKnownState, NewContentMessage } from "../sync.js";
-import { InvalidHashError, InvalidSignatureError } from "./coValueCore.js";
 import { TryAddTransactionsError } from "./coValueCore.js";
 
 export type CoValueHeader = {
@@ -249,7 +247,7 @@ export class VerifiedState {
       const ephemeralSigner = this.crypto.newRandomSigner();
       const ephemeralSignerID = this.crypto.getSignerID(ephemeralSigner);
 
-      const ephemeralSessionLog = new WasmSessionLog(
+      const ephemeralSessionLog = this.crypto.createSessionLog(
         this.id,
         sessionID,
         ephemeralSignerID,

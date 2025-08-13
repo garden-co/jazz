@@ -30,7 +30,7 @@
       "default": "./dist/expo/index.js"
     },
     "./expo/crypto": {
-      "@jazz-tools/source": "./src/expo/crypto/index.ts",
+      "@jazz-tools/source": "./src/expo/crypto.ts",
       "types": "./dist/expo/crypto.d.ts",
       "default": "./dist/expo/crypto.js"
     },
@@ -85,7 +85,7 @@
       "default": "./dist/react-native/index.js"
     },
     "./react-native/crypto": {
-      "@jazz-tools/source": "./src/react-native/crypto/index.ts",
+      "@jazz-tools/source": "./src/react-native/crypto.ts",
       "types": "./dist/react-native/crypto.d.ts",
       "default": "./dist/react-native/crypto.js"
     },
@@ -191,18 +191,18 @@
   },
   "peerDependencies": {
     "@bam.tech/react-native-image-resizer": "*",
-    "@op-engineering/op-sqlite": "^11.4.8",
+    "@op-engineering/op-sqlite": "*",
     "@react-native-community/netinfo": "*",
     "expo-file-system": "*",
     "expo-secure-store": "*",
-    "expo-sqlite": "15.2.9",
+    "expo-sqlite": "*",
     "react": "*",
     "react-dom": "*",
     "react-native": "*",
     "react-native-fast-encoder": "^0.2.0",
-    "react-native-mmkv": "^3.2.0",
-    "react-native-nitro-modules": "0.25.2",
-    "react-native-quick-crypto": "1.0.0-beta.16",
+    "react-native-mmkv": "^3.3.0",
+    "react-native-nitro-modules": "0.26.4",
+    "cojson-core-rn": "workspace:*",
     "svelte": "^5.0.0"
   },
   "peerDependenciesMeta": {
