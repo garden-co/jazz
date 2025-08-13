@@ -30,7 +30,7 @@
       "default": "./dist/expo/index.js"
     },
     "./expo/crypto": {
-      "@jazz-tools/source": "./src/expo/crypto/index.ts",
+      "@jazz-tools/source": "./src/expo/crypto.ts",
       "types": "./dist/expo/crypto.d.ts",
       "default": "./dist/expo/crypto.js"
     },
@@ -85,7 +85,7 @@
       "default": "./dist/react-native/index.js"
     },
     "./react-native/crypto": {
-      "@jazz-tools/source": "./src/react-native/crypto/index.ts",
+      "@jazz-tools/source": "./src/react-native/crypto.ts",
       "types": "./dist/react-native/crypto.d.ts",
       "default": "./dist/react-native/crypto.js"
     },
