@@ -29,7 +29,7 @@
     "dev": "turbo dev",
     "build": "turbo build && cd homepage/homepage && turbo build",
     "build:packages": "turbo build --filter='./packages/*'",
-    "build:crates": "turbo build --filter='./crates/**/pkg/'",
+    "build:crates": "turbo build --filter='./crates/cojson-core-wasm' --filter='./crates/cojson-core-rn/pkg'",
     "lint": "turbo lint && cd homepage/homepage && pnpm run lint",
     "test": "vitest",
     "test:ci": "vitest run --watch=false --coverage.enabled=true",

@@ -1,5 +1,8 @@
 import { CoID } from "./coValue.js";
-import { CoValueCore, ProcessedTransaction } from "./coValueCore/coValueCore.js";
+import {
+  CoValueCore,
+  ProcessedTransaction,
+} from "./coValueCore/coValueCore.js";
 import { Transaction } from "./coValueCore/verifiedState.js";
 import { RawAccount, RawAccountID, RawProfile } from "./coValues/account.js";
 import { MapOpPayload } from "./coValues/coMap.js";
@@ -41,7 +44,10 @@ export type Role =
   | "readerInvite"
   | "writeOnlyInvite";
 
-export type MemberState = { [agent: RawAccountID | AgentID]: Role; [EVERYONE]?: Role };
+export type MemberState = {
+  [agent: RawAccountID | AgentID]: Role;
+  [EVERYONE]?: Role;
+};
 
 let logPermissionErrors = true;
 
@@ -173,8 +179,11 @@ function resolveMemberStateFromParentReference(
 
   extendChain.add(parentGroup.id);
 
-  const { memberState: parentGroupMemberState } =
-    groupValidationPass(parentGroup, initialAdmin, extendChain);
+  const { memberState: parentGroupMemberState } = groupValidationPass(
+    parentGroup,
+    initialAdmin,
+    extendChain,
+  );
 
   for (const agent of Object.keys(parentGroupMemberState) as Array<
     keyof MemberState
@@ -212,7 +221,10 @@ function groupValidationPass(
         processed.valid = true;
         continue;
       } else {
-        setInvalid(processed, "Only admins can make private transactions in groups");
+        setInvalid(
+          processed,
+          "Only admins can make private transactions in groups",
+        );
         continue;
       }
     }
@@ -296,7 +308,10 @@ function groupValidationPass(
 
       // Circular reference detected, drop all the transactions involved
       if (extendChain.has(coValue.id)) {
-        setInvalid(processed, "Circular extend detected, dropping the transaction");
+        setInvalid(
+          processed,
+          "Circular extend detected, dropping the transaction",
+        );
         continue;
       }
 
@@ -328,7 +343,10 @@ function groupValidationPass(
        * blocking them from accessing the group.ß
        */
       if (writeKeys.has(change.key) && memberState[transactor] !== "admin") {
-        setInvalid(processed, "Write key already exists and can't be overridden by invite");
+        setInvalid(
+          processed,
+          "Write key already exists and can't be overridden by invite",
+        );
         continue;
       }
 
@@ -365,7 +383,10 @@ function groupValidationPass(
         change.value === "revoked"
       )
     ) {
-      setInvalid(processed, "Everyone can only be set to reader, writer, writeOnly or revoked");
+      setInvalid(
+        processed,
+        "Everyone can only be set to reader, writer, writeOnly or revoked",
+      );
       continue;
     }
 
@@ -412,7 +433,10 @@ function groupValidationPass(
           continue;
         }
       } else {
-        setInvalid(processed, "Group transaction must be made by current admin or invite");
+        setInvalid(
+          processed,
+          "Group transaction must be made by current admin or invite",
+        );
         continue;
       }
     }

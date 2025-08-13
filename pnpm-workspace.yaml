@@ -4,7 +4,7 @@ packages:
   - 'homepage/*'
   - 'starters/*'
   - 'tests/*'
-  - 'crates/cojson-core-wasm/pkg'
+  - 'crates/cojson-core-wasm'
   - 'crates/cojson-core-rn/pkg'
 
 catalog:
