@@ -358,6 +358,29 @@ describe("Simple CoList operations", async () => {
       });
     });
 
+    describe("retain", () => {
+      test("retains elements matching the predicate", () => {
+        const list = TestList.create(["bread", "butter", "onion"]);
+
+        expect(list.$jazz.retain((item) => item === "butter")).toEqual([
+          "bread",
+          "onion",
+        ]);
+        expect(list.$jazz.raw.asArray()).toEqual(["butter"]);
+      });
+
+      test("the predicate is called with the item, index and the coList", () => {
+        const list = TestList.create(["bread", "butter", "onion"]);
+
+        expect(
+          list.$jazz.retain(
+            (item, index, coList) => index > 0 && index < coList.length - 1,
+          ),
+        ).toEqual(["bread", "onion"]);
+        expect(list.$jazz.raw.asArray()).toEqual(["butter"]);
+      });
+    });
+
     test("applyDiff", () => {
       const list = TestList.create(["bread", "butter", "onion"], {
         owner: me,
