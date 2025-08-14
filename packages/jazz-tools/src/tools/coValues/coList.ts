@@ -580,6 +580,54 @@ export class CoListJazzApi<L extends CoList>
   }
 
   /**
+   * Removes the elements at the specified indices from the array.
+   * @param indices The indices of the elements to remove.
+   * @returns The removed elements.
+   *
+   * @category Content
+   */
+  remove(...indices: number[]): CoListItem<L>[];
+  /**
+   * Removes the elements matching the predicate from the array.
+   * @param predicate The predicate to match the elements to remove.
+   * @returns The removed elements.
+   *
+   * @category Content
+   */
+  remove(
+    predicate: (item: CoListItem<L>, index: number, coList: L) => boolean,
+  ): CoListItem<L>[];
+  remove(
+    ...args: (
+      | number
+      | ((item: CoListItem<L>, index: number, coList: L) => boolean)
+    )[]
+  ): CoListItem<L>[] {
+    const predicate = args[0] instanceof Function ? args[0] : undefined;
+    let indices: number[] = [];
+    if (predicate) {
+      for (let i = 0; i < this.coList.length; i++) {
+        if (predicate(this.coList[i], i, this.coList)) indices.push(i);
+      }
+    } else {
+      indices = args as number[];
+      const outOfBoundIndices = indices.filter(
+        (index) => index < 0 || index >= this.coList.length,
+      );
+      if (outOfBoundIndices.length > 0) {
+        throw new Error(
+          `Indices [${outOfBoundIndices}] out of bounds for length ${this.coList.length}`,
+        );
+      }
+    }
+    const deletedItems = indices.map((index) => this.coList[index]);
+    for (const index of indices.reverse()) {
+      this.raw.delete(index);
+    }
+    return deletedItems;
+  }
+
+  /**
    * Modify the `CoList` to match another list, where the changes are managed internally.
    *
    * @param result - The resolved list of items.
