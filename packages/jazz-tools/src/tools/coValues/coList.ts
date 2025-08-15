@@ -610,15 +610,9 @@ export class CoListJazzApi<L extends CoList>
         if (predicate(this.coList[i], i, this.coList)) indices.push(i);
       }
     } else {
-      indices = args as number[];
-      const outOfBoundIndices = indices.filter(
-        (index) => index < 0 || index >= this.coList.length,
-      );
-      if (outOfBoundIndices.length > 0) {
-        throw new Error(
-          `Indices [${outOfBoundIndices}] out of bounds for length ${this.coList.length}`,
-        );
-      }
+      indices = (args as number[])
+        .filter((index) => index >= 0 && index < this.coList.length)
+        .sort();
     }
     const deletedItems = indices.map((index) => this.coList[index]);
     for (const index of indices.reverse()) {

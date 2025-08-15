@@ -313,25 +313,11 @@ describe("Simple CoList operations", async () => {
           expect(list.$jazz.raw.asArray()).toEqual(["butter"]);
         });
 
-        test("throws an error if any of the indices are out of bounds", () => {
+        test("ignores out-of-bound indices", () => {
           const list = TestList.create(["bread", "butter", "onion"]);
 
-          expect(() => list.$jazz.remove(3)).toThrow(
-            "Indices [3] out of bounds for length 3",
-          );
-        });
-
-        test("does not mutate the CoList if any of the indices are out of bounds", () => {
-          const list = TestList.create(["bread", "butter", "onion"]);
-
-          expect(() => list.$jazz.remove(4, 3, 2, 1, 0)).toThrow(
-            "Indices [4,3] out of bounds for length 3",
-          );
-          expect(list.$jazz.raw.asArray()).toEqual([
-            "bread",
-            "butter",
-            "onion",
-          ]);
+          expect(list.$jazz.remove(4, -1, 1)).toEqual(["butter"]);
+          expect(list.$jazz.raw.asArray()).toEqual(["bread", "onion"]);
         });
       });
 
