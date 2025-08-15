@@ -1,0 +1,6 @@
+dist
+# env files
+.env
+.env.*
+!.env.example
+!.env.test

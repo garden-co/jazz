@@ -2,6 +2,7 @@ import { Histogram, ValueType, metrics } from "@opentelemetry/api";
 import { PeerState } from "./PeerState.js";
 import { SyncStateManager } from "./SyncStateManager.js";
 import {
+  getContenDebugInfo,
   getTransactionSize,
   knownStateFromContent,
 } from "./coValueContentMessage.js";
@@ -550,6 +551,14 @@ export class SyncManager {
 
     let invalidStateAssumed = false;
 
+    const contentToStore: NewContentMessage = {
+      action: "content",
+      id: msg.id,
+      priority: msg.priority,
+      header: msg.header,
+      new: {},
+    };
+
     for (const [sessionID, newContentForSession] of Object.entries(msg.new) as [
       SessionID,
       SessionNewContent,
@@ -652,6 +661,8 @@ export class SyncManager {
         this.recordTransactionsSize(newTransactions, sourceRole);
       }
 
+      // The new content for this session has been verified, so we can store it
+      contentToStore.new[sessionID] = newContentForSession;
       peer?.updateSessionCounter(
         msg.id,
         sessionID,
@@ -673,6 +684,8 @@ export class SyncManager {
           "Invalid state assumed when handling new content from storage",
           {
             id: msg.id,
+            content: getContenDebugInfo(msg),
+            knownState: coValue.knownState(),
           },
         );
       }
@@ -693,8 +706,8 @@ export class SyncManager {
 
     const syncedPeers = [];
 
-    if (from !== "storage") {
-      this.storeContent(msg);
+    if (from !== "storage" && Object.keys(contentToStore.new).length > 0) {
+      this.storeContent(contentToStore);
     }
 
     for (const peer of this.peersInPriorityOrder()) {
@@ -803,7 +816,20 @@ export class SyncManager {
     // Try to store the content as-is for performance
     // In case that some transactions are missing, a correction will be requested, but it's an edge case
     storage.store(content, (correction) => {
-      return value.verified?.newContentSince(correction);
+      if (!value.verified) {
+        logger.error(
+          "Correction requested for a CoValue with no verified content",
+          {
+            id: content.id,
+            content: getContenDebugInfo(content),
+            correction,
+            state: value.loadingState,
+          },
+        );
+        return undefined;
+      }
+
+      return value.verified.newContentSince(correction);
     });
   }
 

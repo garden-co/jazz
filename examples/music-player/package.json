@@ -23,8 +23,8 @@
     "clsx": "^2.1.1",
     "jazz-tools": "workspace:*",
     "lucide-react": "^0.536.0",
-    "react": "19.1.0",
-    "react-dom": "19.1.0",
+    "react": "catalog:react",
+    "react-dom": "catalog:react",
     "react-router": "^6.16.0",
     "react-router-dom": "^6.16.0",
     "tailwind-merge": "^1.14.0"
@@ -32,13 +32,13 @@
   "devDependencies": {
     "@playwright/test": "^1.50.1",
     "@tailwindcss/postcss": "^4.1.10",
-    "@types/react": "19.1.0",
-    "@types/react-dom": "19.1.0",
+    "@types/react": "catalog:react",
+    "@types/react-dom": "catalog:react",
     "@vitejs/plugin-react-swc": "^3.10.1",
     "postcss": "^8.4.27",
     "tailwindcss": "^4.1.10",
-    "typescript": "5.6.2",
-    "vite": "^6.3.5",
+    "typescript": "catalog:default",
+    "vite": "catalog:default",
     "vite-plugin-pwa": "^1.0.2"
   }
 }

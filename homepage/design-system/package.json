@@ -31,11 +31,11 @@
     "tailwindcss-animate": "^1.0.7"
   },
   "devDependencies": {
-    "@biomejs/biome": "1.9.4",
+    "@biomejs/biome": "catalog:",
     "@csstools/postcss-oklab-function": "^3.0.6",
     "@types/node": "^20",
     "@types/react": "catalog:",
     "@types/react-dom": "catalog:",
-    "typescript": "^5.3.3"
+    "typescript": "catalog:"
   }
 }

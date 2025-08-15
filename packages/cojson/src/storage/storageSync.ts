@@ -208,7 +208,6 @@ export class StorageApiSync implements StorageAPI {
     if (!correction) {
       logger.error("Correction callback returned undefined", {
         knownState,
-        correction: correction ?? null,
       });
       return false;
     }

@@ -12,17 +12,17 @@
   "dependencies": {
     "hash-slash": "workspace:*",
     "jazz-tools": "workspace:*",
-    "react": "19.1.0",
-    "react-dom": "19.1.0",
+    "react": "catalog:react",
+    "react-dom": "catalog:react",
     "tailwindcss": "^4.1.10"
   },
   "devDependencies": {
-    "@biomejs/biome": "1.9.4",
-    "@types/react": "19.1.0",
-    "@types/react-dom": "19.1.0",
+    "@biomejs/biome": "catalog:default",
+    "@types/react": "catalog:react",
+    "@types/react-dom": "catalog:react",
     "@vitejs/plugin-react": "^4.5.1",
     "globals": "^15.11.0",
-    "typescript": "5.6.2",
-    "vite": "^6.3.5"
+    "typescript": "catalog:default",
+    "vite": "catalog:default"
   }
 }

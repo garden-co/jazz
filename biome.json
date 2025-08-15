@@ -43,6 +43,15 @@
   },
   "overrides": [
     {
+      "includes": ["packages/community-jazz-vue/src/**"],
+      "linter": {
+        "enabled": true,
+        "rules": {
+          "recommended": true
+        }
+      }
+    },
+    {
       "includes": ["**/packages/**/src/**"],
       "linter": {
         "enabled": true,

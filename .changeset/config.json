@@ -14,7 +14,8 @@
       "jazz-betterauth-server-plugin",
       "jazz-react-auth-betterauth",
       "jazz-run",
-      "jazz-tools"
+      "jazz-tools",
+      "community-jazz-vue"
     ]
   ],
   "access": "public",

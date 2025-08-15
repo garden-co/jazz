@@ -1,0 +1,108 @@
+<template>
+  <div v-if="chat">
+    <ChatBody>
+      <template v-if="chat.length > 0">
+        <ChatBubble v-for="msg in displayedMessages" :key="msg.id" :msg="msg" />
+      </template>
+      <EmptyChatMessage v-else />
+      <button
+        v-if="chat.length > showNLastMessages"
+        class="px-4 py-1 block mx-auto my-2 border rounded"
+        @click="showMoreMessages"
+      >
+        Show more
+      </button>
+    </ChatBody>
+    <ChatInput @submit="handleSubmit" @image-submit="handleImageSubmit" />
+  </div>
+  <div v-else class="flex-1 flex justify-center items-center">Loading...</div>
+</template>
+
+<script lang="ts">
+import { useCoState, createImage } from "community-jazz-vue";
+import { CoPlainText, type ID } from "jazz-tools";
+import { type PropType, computed, defineComponent, ref } from "vue";
+import ChatBody from "../components/ChatBody.vue";
+import ChatBubble from "../components/ChatBubble.vue";
+import ChatInput from "../components/ChatInput.vue";
+import EmptyChatMessage from "../components/EmptyChatMessage.vue";
+import { Chat, Message } from "../schema";
+
+export default defineComponent({
+  name: "ChatView",
+  components: {
+    ChatBody,
+    ChatInput,
+    EmptyChatMessage,
+    ChatBubble,
+  },
+  props: {
+    chatId: {
+      type: String as unknown as PropType<ID<Chat>>,
+      required: true,
+    },
+  },
+  setup(props) {
+    const chat = useCoState(Chat, props.chatId, { resolve: { $each: true } });
+    const showNLastMessages = ref(30);
+
+    const displayedMessages = computed(() => {
+      return chat.value?.slice(-showNLastMessages.value).reverse();
+    });
+
+    function showMoreMessages() {
+      showNLastMessages.value += 10;
+    }
+
+    function handleSubmit(text: string) {
+      if (chat.value) {
+        chat.value.push(
+          Message.create(
+            { text: CoPlainText.create(text, chat.value._owner) },
+            chat.value._owner,
+          ),
+        );
+      }
+    }
+
+    async function handleImageSubmit(file: File) {
+      if (!chat.value) return;
+
+      if (file.size > 5000000) {
+        alert("Please upload an image less than 5MB.");
+        return;
+      }
+
+      try {
+        const image = await createImage(file, {
+          owner: chat.value._owner,
+          progressive: true,
+          placeholder: "blur",
+        });
+
+        chat.value.push(
+          Message.create(
+            {
+              text: CoPlainText.create(file.name, chat.value._owner),
+              image: image,
+            },
+            chat.value._owner,
+          ),
+        );
+      } catch (error) {
+        console.error("Failed to upload image:", error);
+        alert("Failed to upload image. Please try again.");
+      }
+    }
+
+    return {
+      chat,
+      showNLastMessages,
+      displayedMessages,
+      showMoreMessages,
+      handleSubmit,
+      handleImageSubmit,
+    };
+  },
+});
+</script>

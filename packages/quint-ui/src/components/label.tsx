@@ -7,11 +7,7 @@ type LabelVariants = VariantProps<typeof label>;
 
 interface LabelProps extends ComponentProps<"label">, LabelVariants {}
 
-export default function Label({
-  size,
-  isHiddenVisually,
-  ...props
-}: LabelProps) {
+export function Label({ size, isHiddenVisually, ...props }: LabelProps) {
   return (
     <label
       className={cn(

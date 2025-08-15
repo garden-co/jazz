@@ -184,7 +184,6 @@ describe("client with storage syncs with server", () => {
         "client -> server | KNOWN Map sessions: header/2",
         "client -> storage | CONTENT Map header: false new: After: 1 New: 1",
         "client -> server | KNOWN Map sessions: header/2",
-        "client -> storage | CONTENT Map header: false new: After: 1 New: 1",
       ]
     `);
   });

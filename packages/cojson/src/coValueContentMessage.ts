@@ -84,3 +84,10 @@ export function getContentMessageSize(msg: NewContentMessage) {
     );
   }, 0);
 }
+
+export function getContenDebugInfo(msg: NewContentMessage) {
+  return Object.entries(msg.new).map(
+    ([sessionID, sessionNewContent]) =>
+      `Session: ${sessionID} After: ${sessionNewContent.after} New: ${sessionNewContent.newTransactions.length}`,
+  );
+}

@@ -1,5 +1,5 @@
-import Input from "@/src/components/input";
-import Label from "@/src/components/label";
+import { Input } from "@/src/components/input";
+import { Label } from "@/src/components/label";
 import { SearchIcon } from "lucide-react";
 
 export default function InputPage() {

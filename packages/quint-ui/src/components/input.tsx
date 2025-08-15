@@ -7,7 +7,7 @@ type InputVariants = VariantProps<typeof input>;
 
 interface InputProps extends ComponentProps<"input">, InputVariants {}
 
-export default function Input({ sizeStyle, intent, ...props }: InputProps) {
+export function Input({ sizeStyle, intent, ...props }: InputProps) {
   return <BaseUiInput className={input({ sizeStyle, intent })} {...props} />;
 }
 
