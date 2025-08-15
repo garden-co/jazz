@@ -1,5 +1,4 @@
-import Input from "@/src/components/input";
-import Label from "@/src/components/label";
+import { Input, Label } from "quint-ui";
 import { SearchIcon } from "lucide-react";
 
 export default function InputPage() {
@@ -11,38 +10,38 @@ export default function InputPage() {
         intent and size props.
       </p>
       <div className="flex flex-row gap-2">
-        <Label htmlFor="input">Label</Label>
-        <Input id="input" />
+        <Label htmlFor="default">Label</Label>
+        <Input id="default" />
       </div>
       <div className="flex flex-col gap-2">
-        <Label htmlFor="input">Label</Label>
-        <Input id="input" intent="primary" />
+        <Label htmlFor="primary">Label</Label>
+        <Input id="primary" intent="primary" />
       </div>
 
       <div className="flex flex-row gap-2">
-        <Label htmlFor="input" size="sm">
+        <Label htmlFor="tip" size="sm">
           Label
         </Label>
-        <Input id="input" intent="tip" sizeStyle="sm" />
+        <Input id="tip" intent="tip" sizeStyle="sm" />
       </div>
       <div className="flex flex-col gap-2">
-        <Label htmlFor="input" size="sm">
+        <Label htmlFor="info" size="sm">
           Label
         </Label>
-        <Input id="input" intent="info" sizeStyle="sm" />
+        <Input id="info" intent="info" sizeStyle="sm" />
       </div>
 
       <div className="flex flex-row gap-2">
-        <Label htmlFor="input" size="lg">
+        <Label htmlFor="warning" size="lg">
           Label
         </Label>
-        <Input id="input" intent="warning" sizeStyle="lg" />
+        <Input id="warning" intent="warning" sizeStyle="lg" />
       </div>
       <div className="flex flex-col gap-2">
-        <Label htmlFor="input" size="lg">
+        <Label htmlFor="danger" size="lg">
           Label
         </Label>
-        <Input id="input" intent="danger" sizeStyle="lg" />
+        <Input id="danger" intent="danger" sizeStyle="lg" />
       </div>
 
       <p>
@@ -51,12 +50,51 @@ export default function InputPage() {
       </p>
 
       <div className="flex flex-row gap-2 items-center">
-        <Label htmlFor="input" isHiddenVisually>
+        <Label htmlFor="hidden" isHiddenVisually>
           Label
         </Label>
         <SearchIcon />
 
-        <Input id="input" />
+        <Input id="hidden" />
+      </div>
+
+      <p>
+        All types of inputs are supported, including file, number, and date.
+      </p>
+
+      <div className="flex flex-row gap-2">
+        <Label htmlFor="email">Email</Label>
+        <Input id="email" type="email" />
+      </div>
+
+      <div className="flex flex-row gap-2">
+        <Label htmlFor="color">Color</Label>
+        <Input id="color" type="color" />
+      </div>
+
+      <div className="flex flex-row gap-2">
+        <Label htmlFor="password">Password</Label>
+        <Input id="password" type="password" />
+      </div>
+
+      <div className="flex flex-row gap-2">
+        <Label htmlFor="search">Search</Label>
+        <Input id="search" type="search" />
+      </div>
+
+      <div className="flex flex-row gap-2">
+        <Label htmlFor="file">File</Label>
+        <Input id="file" type="file" />
+      </div>
+
+      <div className="flex flex-row gap-2">
+        <Label htmlFor="number">Number</Label>
+        <Input id="number" type="number" />
+      </div>
+
+      <div className="flex flex-row gap-2">
+        <Label htmlFor="date">Date</Label>
+        <Input id="date" type="date" />
       </div>
     </div>
   );
