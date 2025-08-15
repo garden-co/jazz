@@ -8,6 +8,8 @@ import {
 
 export type SourceType = Blob | File | string;
 
+export type ResizeOutput = Blob | string;
+
 export type CreateImageOptions = {
   /** The owner of the image. Can be either a Group or Account. If not specified, the current user will be the owner. */
   owner?: Group | Account;
@@ -35,31 +37,39 @@ export type CreateImageOptions = {
   progressive?: boolean;
 };
 
-export type CreateImageImpl = {
+export type CreateImageImpl<
+  TSourceType = SourceType,
+  TResizeOutput = ResizeOutput,
+> = {
   createFileStreamFromSource: (
-    imageBlobOrFile: SourceType,
+    imageBlobOrFile: TSourceType | TResizeOutput,
     owner?: Group | Account,
   ) => Promise<FileStream>;
   getImageSize: (
-    imageBlobOrFile: SourceType,
+    imageBlobOrFile: TSourceType,
   ) => Promise<{ width: number; height: number }>;
-  getPlaceholderBase64: (imageBlobOrFile: SourceType) => Promise<string>;
+  getPlaceholderBase64: (imageBlobOrFile: TSourceType) => Promise<string>;
   resize: (
-    imageBlobOrFile: SourceType,
+    imageBlobOrFile: TSourceType,
     width: number,
     height: number,
-  ) => Promise<Blob | string>;
+  ) => Promise<TResizeOutput>;
 };
 
-export function createImageFactory(impl: CreateImageImpl) {
-  return (source: SourceType, options: CreateImageOptions) =>
-    createImage(source, options, impl);
+export function createImageFactory<TSourceType, TResizeOutput>(
+  impl: CreateImageImpl<TSourceType, TResizeOutput>,
+  imageTypeGuard?: (imageBlobOrFile: TSourceType) => void,
+) {
+  return (source: TSourceType, options?: CreateImageOptions) => {
+    imageTypeGuard?.(source);
+    return createImage(source, options ?? {}, impl);
+  };
 }
 
-async function createImage(
-  imageBlobOrFile: SourceType,
+async function createImage<TSourceType, TResizeOutput>(
+  imageBlobOrFile: TSourceType,
   options: CreateImageOptions,
-  impl: CreateImageImpl,
+  impl: CreateImageImpl<TSourceType, TResizeOutput>,
 ): Promise<Loaded<typeof ImageDefinition, { $each: true }>> {
   // Get the original size of the image
   const { width: originalWidth, height: originalHeight } =

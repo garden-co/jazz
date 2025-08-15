@@ -1,7 +1,7 @@
 import { FileStream } from "jazz-tools";
 import { createJazzTestAccount } from "jazz-tools/testing";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createImageFactory } from "./create-image.js";
+import { createImageFactory } from "./create-image-factory";
 
 describe("createImage", async () => {
   const account = await createJazzTestAccount();
