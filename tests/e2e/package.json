@@ -31,7 +31,7 @@
     "@types/react-dom": "^18.2.7",
     "@vitejs/plugin-react-swc": "^3.10.1",
     "jstat": "^1.9.6",
-    "typescript": "catalog:",
+    "typescript": "catalog:default",
     "jazz-run": "workspace:*",
     "vite": "^6.3.5"
   }

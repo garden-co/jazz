@@ -382,7 +382,6 @@ describe("StorageApiSync", () => {
         "Correction callback returned undefined",
         {
           knownState: expect.any(Object),
-          correction: null,
         },
       );
 
@@ -413,7 +412,6 @@ describe("StorageApiSync", () => {
         "Correction callback returned undefined",
         {
           knownState: expect.any(Object),
-          correction: null,
         },
       );
 

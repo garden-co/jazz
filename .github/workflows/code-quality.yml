@@ -25,6 +25,3 @@ jobs:
           version: 2.1.3
       - name: Run Biome
         run: biome ci .
-
-      - name: Check Catalog Dependencies
-        run: node scripts/check-catalog-deps.js

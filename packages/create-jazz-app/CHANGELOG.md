@@ -1,5 +1,11 @@
 # create-jazz-app
 
+## 0.1.26
+
+### Patch Changes
+
+- 86bd87e: Replace catalog entries on package.json with their current catalog value
+
 ## 0.1.25
 
 ### Patch Changes

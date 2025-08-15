@@ -48,7 +48,7 @@
     "jsdom": "^25.0.1",
     "svelte": "^5.33.0",
     "svelte-check": "^4.0.0",
-    "typescript": "catalog:",
+    "typescript": "catalog:default",
     "virtua": "^0.41.5",
     "vite": "^6.3.5"
   },

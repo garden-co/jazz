@@ -17,6 +17,7 @@ import {
   frameworks,
 } from "./config.js";
 import { type PackageManager, getPkgManager } from "./utils.js";
+import { parseCatalogDefinitions, resolveCatalogVersion } from "./catalog.js";
 
 // Handle SIGINT (Ctrl+C) gracefully
 process.on("SIGINT", () => {
@@ -176,7 +177,10 @@ async function scaffoldProject({
     const packageJsonPath = `${projectName}/package.json`;
     const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, "utf8"));
 
-    // Helper function to update workspace dependencies
+    // Parse catalog definitions once
+    const catalogs = parseCatalogDefinitions();
+
+    // Helper function to update workspace and catalog dependencies
     async function updateWorkspaceDependencies(
       dependencyType: "dependencies" | "devDependencies",
     ) {
@@ -187,8 +191,27 @@ async function scaffoldProject({
 
         Object.entries(packageJson[dependencyType]).forEach(
           ([pkg, version]) => {
-            if (typeof version === "string" && version.includes("workspace:")) {
-              packageJson[dependencyType][pkg] = latestVersions[pkg];
+            if (typeof version === "string") {
+              if (version.includes("workspace:")) {
+                // Handle workspace: dependencies
+                packageJson[dependencyType][pkg] = latestVersions[pkg];
+              } else if (version.startsWith("catalog:")) {
+                // Handle catalog: dependencies
+                const resolvedVersion = resolveCatalogVersion(
+                  pkg,
+                  version,
+                  catalogs,
+                );
+                if (resolvedVersion) {
+                  packageJson[dependencyType][pkg] = resolvedVersion;
+                } else {
+                  console.warn(
+                    chalk.yellow(
+                      `Warning: Could not resolve catalog dependency "${pkg}": "${version}"`,
+                    ),
+                  );
+                }
+              }
             }
           },
         );

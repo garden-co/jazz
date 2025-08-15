@@ -8,76 +8,100 @@
 // You should NOT make any changes in this file as it will be overwritten.
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
-// Import Routes
+import { Route as rootRouteImport } from './routes/__root'
+import { Route as AuthenticatedRouteImport } from './routes/_authenticated'
+import { Route as IndexRouteImport } from './routes/index'
+import { Route as AuthenticatedWaitingRoomWaitingRoomIdRouteImport } from './routes/_authenticated/waiting-room.$waitingRoomId'
+import { Route as AuthenticatedGameGameIdRouteImport } from './routes/_authenticated/game.$gameId'
 
-import { Route as rootRoute } from './routes/__root'
-import { Route as AuthenticatedImport } from './routes/_authenticated'
-import { Route as IndexImport } from './routes/index'
-import { Route as AuthenticatedWaitingRoomWaitingRoomIdImport } from './routes/_authenticated/waiting-room.$waitingRoomId'
-import { Route as AuthenticatedGameGameIdImport } from './routes/_authenticated/game.$gameId'
-
-// Create/Update Routes
-
-const AuthenticatedRoute = AuthenticatedImport.update({
+const AuthenticatedRoute = AuthenticatedRouteImport.update({
   id: '/_authenticated',
-  getParentRoute: () => rootRoute,
+  getParentRoute: () => rootRouteImport,
 } as any)
-
-const IndexRoute = IndexImport.update({
+const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
-  getParentRoute: () => rootRoute,
+  getParentRoute: () => rootRouteImport,
 } as any)
-
 const AuthenticatedWaitingRoomWaitingRoomIdRoute =
-  AuthenticatedWaitingRoomWaitingRoomIdImport.update({
+  AuthenticatedWaitingRoomWaitingRoomIdRouteImport.update({
     id: '/waiting-room/$waitingRoomId',
     path: '/waiting-room/$waitingRoomId',
     getParentRoute: () => AuthenticatedRoute,
   } as any)
-
-const AuthenticatedGameGameIdRoute = AuthenticatedGameGameIdImport.update({
+const AuthenticatedGameGameIdRoute = AuthenticatedGameGameIdRouteImport.update({
   id: '/game/$gameId',
   path: '/game/$gameId',
   getParentRoute: () => AuthenticatedRoute,
 } as any)
 
-// Populate the FileRoutesByPath interface
+export interface FileRoutesByFullPath {
+  '/': typeof IndexRoute
+  '/game/$gameId': typeof AuthenticatedGameGameIdRoute
+  '/waiting-room/$waitingRoomId': typeof AuthenticatedWaitingRoomWaitingRoomIdRoute
+}
+export interface FileRoutesByTo {
+  '/': typeof IndexRoute
+  '/game/$gameId': typeof AuthenticatedGameGameIdRoute
+  '/waiting-room/$waitingRoomId': typeof AuthenticatedWaitingRoomWaitingRoomIdRoute
+}
+export interface FileRoutesById {
+  __root__: typeof rootRouteImport
+  '/': typeof IndexRoute
+  '/_authenticated': typeof AuthenticatedRouteWithChildren
+  '/_authenticated/game/$gameId': typeof AuthenticatedGameGameIdRoute
+  '/_authenticated/waiting-room/$waitingRoomId': typeof AuthenticatedWaitingRoomWaitingRoomIdRoute
+}
+export interface FileRouteTypes {
+  fileRoutesByFullPath: FileRoutesByFullPath
+  fullPaths: '/' | '/game/$gameId' | '/waiting-room/$waitingRoomId'
+  fileRoutesByTo: FileRoutesByTo
+  to: '/' | '/game/$gameId' | '/waiting-room/$waitingRoomId'
+  id:
+    | '__root__'
+    | '/'
+    | '/_authenticated'
+    | '/_authenticated/game/$gameId'
+    | '/_authenticated/waiting-room/$waitingRoomId'
+  fileRoutesById: FileRoutesById
+}
+export interface RootRouteChildren {
+  IndexRoute: typeof IndexRoute
+  AuthenticatedRoute: typeof AuthenticatedRouteWithChildren
+}
 
 declare module '@tanstack/react-router' {
   interface FileRoutesByPath {
-    '/': {
-      id: '/'
-      path: '/'
-      fullPath: '/'
-      preLoaderRoute: typeof IndexImport
-      parentRoute: typeof rootRoute
-    }
     '/_authenticated': {
       id: '/_authenticated'
       path: ''
       fullPath: ''
-      preLoaderRoute: typeof AuthenticatedImport
-      parentRoute: typeof rootRoute
+      preLoaderRoute: typeof AuthenticatedRouteImport
+      parentRoute: typeof rootRouteImport
     }
-    '/_authenticated/game/$gameId': {
-      id: '/_authenticated/game/$gameId'
-      path: '/game/$gameId'
-      fullPath: '/game/$gameId'
-      preLoaderRoute: typeof AuthenticatedGameGameIdImport
-      parentRoute: typeof AuthenticatedImport
+    '/': {
+      id: '/'
+      path: '/'
+      fullPath: '/'
+      preLoaderRoute: typeof IndexRouteImport
+      parentRoute: typeof rootRouteImport
     }
     '/_authenticated/waiting-room/$waitingRoomId': {
       id: '/_authenticated/waiting-room/$waitingRoomId'
       path: '/waiting-room/$waitingRoomId'
       fullPath: '/waiting-room/$waitingRoomId'
-      preLoaderRoute: typeof AuthenticatedWaitingRoomWaitingRoomIdImport
-      parentRoute: typeof AuthenticatedImport
+      preLoaderRoute: typeof AuthenticatedWaitingRoomWaitingRoomIdRouteImport
+      parentRoute: typeof AuthenticatedRoute
+    }
+    '/_authenticated/game/$gameId': {
+      id: '/_authenticated/game/$gameId'
+      path: '/game/$gameId'
+      fullPath: '/game/$gameId'
+      preLoaderRoute: typeof AuthenticatedGameGameIdRouteImport
+      parentRoute: typeof AuthenticatedRoute
     }
   }
 }
-
-// Create and export the route tree
 
 interface AuthenticatedRouteChildren {
   AuthenticatedGameGameIdRoute: typeof AuthenticatedGameGameIdRoute
@@ -94,84 +118,10 @@ const AuthenticatedRouteWithChildren = AuthenticatedRoute._addFileChildren(
   AuthenticatedRouteChildren,
 )
 
-export interface FileRoutesByFullPath {
-  '/': typeof IndexRoute
-  '': typeof AuthenticatedRouteWithChildren
-  '/game/$gameId': typeof AuthenticatedGameGameIdRoute
-  '/waiting-room/$waitingRoomId': typeof AuthenticatedWaitingRoomWaitingRoomIdRoute
-}
-
-export interface FileRoutesByTo {
-  '/': typeof IndexRoute
-  '': typeof AuthenticatedRouteWithChildren
-  '/game/$gameId': typeof AuthenticatedGameGameIdRoute
-  '/waiting-room/$waitingRoomId': typeof AuthenticatedWaitingRoomWaitingRoomIdRoute
-}
-
-export interface FileRoutesById {
-  __root__: typeof rootRoute
-  '/': typeof IndexRoute
-  '/_authenticated': typeof AuthenticatedRouteWithChildren
-  '/_authenticated/game/$gameId': typeof AuthenticatedGameGameIdRoute
-  '/_authenticated/waiting-room/$waitingRoomId': typeof AuthenticatedWaitingRoomWaitingRoomIdRoute
-}
-
-export interface FileRouteTypes {
-  fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '' | '/game/$gameId' | '/waiting-room/$waitingRoomId'
-  fileRoutesByTo: FileRoutesByTo
-  to: '/' | '' | '/game/$gameId' | '/waiting-room/$waitingRoomId'
-  id:
-    | '__root__'
-    | '/'
-    | '/_authenticated'
-    | '/_authenticated/game/$gameId'
-    | '/_authenticated/waiting-room/$waitingRoomId'
-  fileRoutesById: FileRoutesById
-}
-
-export interface RootRouteChildren {
-  IndexRoute: typeof IndexRoute
-  AuthenticatedRoute: typeof AuthenticatedRouteWithChildren
-}
-
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   AuthenticatedRoute: AuthenticatedRouteWithChildren,
 }
-
-export const routeTree = rootRoute
+export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)
   ._addFileTypes<FileRouteTypes>()
-
-/* ROUTE_MANIFEST_START
-{
-  "routes": {
-    "__root__": {
-      "filePath": "__root.tsx",
-      "children": [
-        "/",
-        "/_authenticated"
-      ]
-    },
-    "/": {
-      "filePath": "index.tsx"
-    },
-    "/_authenticated": {
-      "filePath": "_authenticated.tsx",
-      "children": [
-        "/_authenticated/game/$gameId",
-        "/_authenticated/waiting-room/$waitingRoomId"
-      ]
-    },
-    "/_authenticated/game/$gameId": {
-      "filePath": "_authenticated/game.$gameId.tsx",
-      "parent": "/_authenticated"
-    },
-    "/_authenticated/waiting-room/$waitingRoomId": {
-      "filePath": "_authenticated/waiting-room.$waitingRoomId.tsx",
-      "parent": "/_authenticated"
-    }
-  }
-}
-ROUTE_MANIFEST_END */
