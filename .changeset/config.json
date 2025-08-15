@@ -9,10 +9,6 @@
       "cojson-storage-indexeddb",
       "cojson-storage-sqlite",
       "cojson-transport-ws",
-      "jazz-auth-betterauth",
-      "jazz-betterauth-client-plugin",
-      "jazz-betterauth-server-plugin",
-      "jazz-react-auth-betterauth",
       "jazz-run",
       "jazz-tools",
       "community-jazz-vue"

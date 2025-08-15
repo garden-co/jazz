@@ -1,8 +1,7 @@
 import { betterAuth } from "better-auth";
 import { getMigrations } from "better-auth/db";
 import Database from "better-sqlite3";
-import { jazzPlugin } from "jazz-betterauth-server-plugin";
-import { socialProviders } from "./socialProviders";
+import { jazzPlugin } from "jazz-tools/better-auth/auth/server";
 
 export const auth = await (async () => {
   // Configure Better Auth server
@@ -23,7 +22,12 @@ export const auth = await (async () => {
         console.error("Not implemented");
       },
     },
-    socialProviders,
+    socialProviders: {
+      github: {
+        clientId: process.env.GITHUB_CLIENT_ID!,
+        clientSecret: process.env.GITHUB_CLIENT_SECRET!,
+      },
+    },
     user: {
       deleteUser: {
         enabled: true,
@@ -35,7 +39,7 @@ export const auth = await (async () => {
         create: {
           async after(user) {
             // Here we can send a welcome email to the user
-            console.error("Not implemented");
+            console.log("User created with Jazz Account ID:", user.accountID);
           },
         },
       },

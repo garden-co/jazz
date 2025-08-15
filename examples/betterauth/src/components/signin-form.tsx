@@ -10,15 +10,16 @@ import {
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { type SSOProviderType, useAuth } from "jazz-react-auth-betterauth";
+import type { SocialProviderList } from "better-auth/social-providers";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { toast } from "sonner";
 import { SSOButton } from "./SSOButton";
+import { betterAuthClient } from "@/lib/auth-client";
 
 interface Props {
-  providers: SSOProviderType[];
+  providers: SocialProviderList;
 }
 
 export function SigninForm({ providers }: Props) {
@@ -26,15 +27,12 @@ export function SigninForm({ providers }: Props) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
 
-  const auth = useAuth();
-
   const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
-    await auth.authClient.signIn.email(
+    await betterAuthClient.signIn.email(
       { email, password },
       {
         onSuccess: async () => {
-          await auth.logIn();
           router.push("/");
         },
         onError: (error) => {
