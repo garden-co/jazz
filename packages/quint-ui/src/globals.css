@@ -1,5 +1,7 @@
 @import "tailwindcss";
 @import "tw-animate-css";
+@plugin "@tailwindcss/forms";
+
 
 /* Dark mode. If you want to use dark mode, you can add the dark class to the body/head element. */
 @custom-variant dark (&:is(.dark *));
