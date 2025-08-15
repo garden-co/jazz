@@ -25,6 +25,11 @@ export const docNavigationItems = [
         excludeFromNavigation: true,
       },
       { name: "FAQs", href: "/docs/faq", done: 100 },
+      {
+        name: "Troubleshooting",
+        href: "/docs/troubleshooting",
+        done: 100,
+      },
     ],
   },
   {

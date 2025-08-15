@@ -1,0 +1,153 @@
+import { ContentByFramework, CodeGroup } from '@/components/forMdx'
+import { Alert } from "@garden-co/design-system/src/components/atoms/Alert";
+
+export const metadata = {
+  title: "Setup troubleshooting",
+  description: "A few reported setup hiccups and how to fix them."
+};
+
+# Setup troubleshooting
+
+A few reported setup hiccups and how to fix them.
+
+---
+
+## Node.js version requirements
+
+Jazz requires **Node.js v20 or later** due to native module dependencies.  
+Check your version:
+
+<CodeGroup>
+```sh
+node -v
+```
+</CodeGroup>
+If you’re on Node 18 or earlier, upgrade via nvm:
+
+<CodeGroup>
+```sh
+nvm install 20
+nvm use 20
+```
+</CodeGroup>
+---
+## npx jazz-run: command not found
+If, when running:
+<CodeGroup>
+```sh
+npx jazz-run sync
+```
+</CodeGroup>
+
+you encounter:
+
+<CodeGroup>
+```sh
+sh: jazz-run: command not found
+```
+</CodeGroup>
+
+This is often due to an npx cache quirk. (For most apps using Jazz)
+
+1. Clear your npx cache:
+
+<CodeGroup>
+```sh
+npx clear-npx-cache
+```
+</CodeGroup>
+
+2. Rerun the command:
+
+<CodeGroup>
+```sh
+npx jazz-run sync
+```
+</CodeGroup>
+---
+### Node 18 workaround (rebuilding the native module)
+
+If you can’t upgrade to Node 20+, you can rebuild the native `better-sqlite3` module for your architecture.
+
+1. Install `jazz-run` locally in your project:
+
+<CodeGroup>
+```sh
+pnpm add -D jazz-run
+```
+</CodeGroup>
+
+2. Find the installed version of better-sqlite3 inside node_modules.
+It should look like this:
+
+<CodeGroup>
+```sh
+./node_modules/.pnpm/better-sqlite3{version}/node_modules/better-sqlite3
+```
+</CodeGroup>
+
+Replace `{version}` with your installed version and run:
+
+<CodeGroup>
+```sh
+# Navigate to the installed module and rebuild
+pushd ./node_modules/.pnpm/better-sqlite3{version}/node_modules/better-sqlite3
+&& pnpm install
+&& popd
+```
+</CodeGroup>
+If you get ModuleNotFoundError: No module named 'distutils':
+Linux:
+
+<CodeGroup>
+```sh
+pip install --upgrade setuptools
+```
+</CodeGroup>
+macOS:
+
+<CodeGroup>
+```sh
+brew install python-setuptools
+```
+</CodeGroup>
+<p><i>Workaround originally shared by @aheissenberger on Jun 24, 2025.</i></p>
+
+
+---
+### For contributors running inside the Jazz monorepo
+If you’re running `npx jazz-run sync` from inside the Jazz repository itself (not a separate app), npm will try to use the local workspace version of jazz-run.
+
+To fix:
+1. Add jazz-run as a devDependency of the workspace:
+
+<CodeGroup>
+```sh
+pnpm add -D jazz-run@workspace:*
+```
+</CodeGroup>
+Then rerun:
+
+<CodeGroup>
+```sh
+npx jazz-run sync
+```
+</CodeGroup>
+
+---
+### Still having trouble?
+If none of the above fixes work:
+
+Make sure dependencies installed without errors (`pnpm install`).
+
+Double-check your `node -v` output matches the required version.
+
+Open an issue on GitHub with:
+
+- Your OS and version
+
+- Node.js version
+
+- Steps you ran and full error output
+
+We're always happy to help! If you're stuck, reachout via [Discord](https://discord.gg/utDMjHYg42)
