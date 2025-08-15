@@ -297,6 +297,76 @@ describe("Simple CoList operations", async () => {
       });
     });
 
+    describe("remove", () => {
+      describe("remove by index", () => {
+        test("remove one item", () => {
+          const list = TestList.create(["bread", "butter", "onion"]);
+
+          expect(list.$jazz.remove(1)).toEqual(["butter"]);
+          expect(list.$jazz.raw.asArray()).toEqual(["bread", "onion"]);
+        });
+
+        test("remove multiple items", () => {
+          const list = TestList.create(["bread", "butter", "onion"]);
+
+          expect(list.$jazz.remove(0, 2)).toEqual(["bread", "onion"]);
+          expect(list.$jazz.raw.asArray()).toEqual(["butter"]);
+        });
+
+        test("ignores out-of-bound indices", () => {
+          const list = TestList.create(["bread", "butter", "onion"]);
+
+          expect(list.$jazz.remove(4, -1, 1)).toEqual(["butter"]);
+          expect(list.$jazz.raw.asArray()).toEqual(["bread", "onion"]);
+        });
+      });
+
+      describe("remove by predicate", () => {
+        test("removes elements matching the predicate", () => {
+          const list = TestList.create(["bread", "butter", "onion"]);
+
+          expect(list.$jazz.remove((item) => item === "butter")).toEqual([
+            "butter",
+          ]);
+          expect(list.$jazz.raw.asArray()).toEqual(["bread", "onion"]);
+        });
+
+        test("the predicate is called with the item, index and the coList", () => {
+          const list = TestList.create(["bread", "butter", "onion"]);
+
+          expect(
+            list.$jazz.remove(
+              (item, index, coList) => index > 0 && index < coList.length - 1,
+            ),
+          ).toEqual(["butter"]);
+          expect(list.$jazz.raw.asArray()).toEqual(["bread", "onion"]);
+        });
+      });
+    });
+
+    describe("retain", () => {
+      test("retains elements matching the predicate", () => {
+        const list = TestList.create(["bread", "butter", "onion"]);
+
+        expect(list.$jazz.retain((item) => item === "butter")).toEqual([
+          "bread",
+          "onion",
+        ]);
+        expect(list.$jazz.raw.asArray()).toEqual(["butter"]);
+      });
+
+      test("the predicate is called with the item, index and the coList", () => {
+        const list = TestList.create(["bread", "butter", "onion"]);
+
+        expect(
+          list.$jazz.retain(
+            (item, index, coList) => index > 0 && index < coList.length - 1,
+          ),
+        ).toEqual(["bread", "onion"]);
+        expect(list.$jazz.raw.asArray()).toEqual(["butter"]);
+      });
+    });
+
     test("applyDiff", () => {
       const list = TestList.create(["bread", "butter", "onion"], {
         owner: me,
