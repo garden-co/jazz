@@ -612,7 +612,7 @@ export class CoListJazzApi<L extends CoList>
     } else {
       indices = (args as number[])
         .filter((index) => index >= 0 && index < this.coList.length)
-        .sort();
+        .sort((a, b) => a - b);
     }
     const deletedItems = indices.map((index) => this.coList[index]);
     for (const index of indices.reverse()) {
