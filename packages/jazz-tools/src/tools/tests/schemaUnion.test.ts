@@ -71,15 +71,18 @@ describe("SchemaUnion", () => {
       { owner: me },
     );
 
-    const loadedButtonWidget = await WidgetUnion.load(buttonWidget.id, {
+    const loadedButtonWidget = await WidgetUnion.load(buttonWidget.$jazz.id, {
       loadAs: me,
     });
-    const loadedSliderWidget = await WidgetUnion.load(sliderWidget.id, {
+    const loadedSliderWidget = await WidgetUnion.load(sliderWidget.$jazz.id, {
       loadAs: me,
     });
-    const loadedCheckboxWidget = await WidgetUnion.load(checkboxWidget.id, {
-      loadAs: me,
-    });
+    const loadedCheckboxWidget = await WidgetUnion.load(
+      checkboxWidget.$jazz.id,
+      {
+        loadAs: me,
+      },
+    );
 
     expect(loadedButtonWidget?.type).toBe("button");
     expect(loadedSliderWidget?.type).toBe("slider");
@@ -94,7 +97,7 @@ describe("SchemaUnion", () => {
     let currentValue = "Submit";
     const unsubscribe = subscribeToCoValue(
       coValueClassFromCoValueClassOrSchema(WidgetUnion),
-      buttonWidget.id,
+      buttonWidget.$jazz.id,
       { loadAs: me, syncResolution: true },
       (value: Loaded<typeof WidgetUnion>) => {
         if (value.type === "button") {
@@ -107,7 +110,7 @@ describe("SchemaUnion", () => {
       },
     );
     currentValue = "Changed";
-    buttonWidget.label = "Changed";
+    buttonWidget.$jazz.set("label", "Changed");
     unsubscribe();
   });
 });

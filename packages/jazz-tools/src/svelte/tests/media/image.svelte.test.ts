@@ -3,6 +3,7 @@ import { FileStream, ImageDefinition } from "jazz-tools";
 import { createJazzTestAccount } from "jazz-tools/testing";
 import { describe, expect, it, vi } from "vitest";
 import Image from "../../media/image.svelte";
+import type { ImageProps } from "../../media/image.types.js";
 import { render, screen, waitFor } from "../testUtils";
 
 describe("Image", async () => {
@@ -10,7 +11,8 @@ describe("Image", async () => {
     isCurrentActiveAccount: true,
   });
 
-  const renderWithAccount = (props: any) => render(Image, props, { account });
+  const renderWithAccount = (props: ImageProps) =>
+    render(Image, props, { account });
 
   describe("initial rendering", () => {
     it("should render nothing if coValue is not found", async () => {
@@ -28,7 +30,7 @@ describe("Image", async () => {
     });
 
     it("should render an empty image if the image is not loaded yet", async () => {
-      const original = FileStream.create({ owner: account._owner });
+      const original = FileStream.create({ owner: account.$jazz.owner });
       original.start({ mimeType: "image/jpeg" });
       // Don't end original, so it has no chunks
 
@@ -44,7 +46,7 @@ describe("Image", async () => {
       );
 
       const { container } = renderWithAccount({
-        imageId: im.id,
+        imageId: im.$jazz.id,
         alt: "test",
       });
 
@@ -60,7 +62,7 @@ describe("Image", async () => {
       const placeholderDataUrl =
         "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 
-      const original = FileStream.create({ owner: account._owner });
+      const original = FileStream.create({ owner: account.$jazz.owner });
       original.start({ mimeType: "image/jpeg" });
       // Don't end original, so it has no chunks
 
@@ -77,7 +79,7 @@ describe("Image", async () => {
       );
 
       const { container } = renderWithAccount({
-        imageId: im.id,
+        imageId: im.$jazz.id,
         alt: "test",
       });
 
@@ -108,7 +110,7 @@ describe("Image", async () => {
       );
 
       renderWithAccount({
-        imageId: im.id,
+        imageId: im.$jazz.id,
         alt: "test-loading",
       });
 
@@ -136,7 +138,7 @@ describe("Image", async () => {
       );
 
       const { container } = renderWithAccount({
-        imageId: im.id,
+        imageId: im.$jazz.id,
         alt: "test",
       });
 
@@ -159,7 +161,7 @@ describe("Image", async () => {
       );
 
       const { container } = renderWithAccount({
-        imageId: im.id,
+        imageId: im.$jazz.id,
         alt: "test",
         width: "original",
         height: "original",
@@ -184,7 +186,7 @@ describe("Image", async () => {
       );
 
       const { container } = renderWithAccount({
-        imageId: im.id,
+        imageId: im.$jazz.id,
         alt: "test",
         width: "original",
         height: 300,
@@ -209,7 +211,7 @@ describe("Image", async () => {
       );
 
       const { container } = renderWithAccount({
-        imageId: im.id,
+        imageId: im.$jazz.id,
         alt: "test",
         width: 50,
       });
@@ -233,7 +235,7 @@ describe("Image", async () => {
       );
 
       const { container } = renderWithAccount({
-        imageId: im.id,
+        imageId: im.$jazz.id,
         alt: "test",
         height: 50,
       });
@@ -257,7 +259,7 @@ describe("Image", async () => {
       );
 
       const { container } = renderWithAccount({
-        imageId: im.id,
+        imageId: im.$jazz.id,
         alt: "test",
         class: "test-class",
       });
@@ -292,11 +294,11 @@ describe("Image", async () => {
         },
       );
 
-      im["500x500"] = original;
-      im["256x256"] = await createDummyFileStream(256, account);
+      im.$jazz.set("500x500", original);
+      im.$jazz.set("256x256", await createDummyFileStream(256, account));
 
       const { container } = renderWithAccount({
-        imageId: im.id,
+        imageId: im.$jazz.id,
         alt: "test-progressive",
         width: 300,
       });
@@ -333,11 +335,11 @@ describe("Image", async () => {
         },
       );
 
-      im["1920x1080"] = original;
-      im["256x256"] = await createDummyFileStream(256, account);
+      im.$jazz.set("1920x1080", original);
+      im.$jazz.set("256x256", await createDummyFileStream(256, account));
 
       const { container } = renderWithAccount({
-        imageId: im.id,
+        imageId: im.$jazz.id,
         alt: "test-progressive",
         width: 1024,
       });
@@ -351,7 +353,7 @@ describe("Image", async () => {
       expect(createObjectURLSpy).toHaveBeenCalledTimes(1);
 
       // Load higher resolution image
-      im["1024x1024"] = await createDummyFileStream(1024, account);
+      im.$jazz.set("1024x1024", await createDummyFileStream(1024, account));
 
       await waitFor(() => {
         expect((container.querySelector("img") as HTMLImageElement).src).toBe(
@@ -387,12 +389,12 @@ describe("Image", async () => {
         },
       );
 
-      im["100x100"] = original;
-      im["256x256"] = await createDummyFileStream(256, account);
-      im["1024x1024"] = await createDummyFileStream(1024, account);
+      im.$jazz.set("100x100", original);
+      im.$jazz.set("256x256", await createDummyFileStream(256, account));
+      im.$jazz.set("1024x1024", await createDummyFileStream(1024, account));
 
       const { container } = renderWithAccount({
-        imageId: im.id,
+        imageId: im.$jazz.id,
         alt: "test-progressive",
         width: 256,
       });
@@ -428,11 +430,11 @@ describe("Image", async () => {
         },
       );
 
-      im["100x100"] = original;
-      im["256x256"] = await createDummyFileStream(256, account);
+      im.$jazz.set("100x100", original);
+      im.$jazz.set("256x256", await createDummyFileStream(256, account));
 
       const { container } = renderWithAccount({
-        imageId: im.id,
+        imageId: im.$jazz.id,
         alt: "test-progressive",
         width: 100,
       });
@@ -467,11 +469,11 @@ describe("Image", async () => {
           owner: account,
         },
       );
-      im["256x256"] = original;
-      im["1024x1024"] = await createDummyFileStream(1024, account);
+      im.$jazz.set("256x256", original);
+      im.$jazz.set("1024x1024", await createDummyFileStream(1024, account));
 
       const { container, rerender } = renderWithAccount({
-        imageId: im.id,
+        imageId: im.$jazz.id,
         alt: "test-dynamic",
         width: 256,
         height: 256,
@@ -486,7 +488,7 @@ describe("Image", async () => {
       expect(createObjectURLSpy).toHaveBeenCalledTimes(1);
 
       rerender({
-        imageId: im.id,
+        imageId: im.$jazz.id,
         alt: "test-dynamic",
         width: 1024,
         height: 1024,
@@ -516,7 +518,7 @@ describe("Image", async () => {
       );
 
       const { container } = renderWithAccount({
-        imageId: im.id,
+        imageId: im.$jazz.id,
         alt: "test",
         loading: "lazy",
       });
@@ -548,7 +550,7 @@ describe("Image", async () => {
       );
 
       const { container } = renderWithAccount({
-        imageId: im.id,
+        imageId: im.$jazz.id,
         alt: "test",
         loading: "lazy",
       });

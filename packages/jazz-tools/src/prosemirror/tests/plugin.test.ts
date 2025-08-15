@@ -53,7 +53,7 @@ describe("createJazzPlugin", () => {
 
   it("updates editor when CoRichText changes", async () => {
     // Update CoRichText content
-    coRichText.applyDiff("<p>Updated content</p>");
+    coRichText.$jazz.applyDiff("<p>Updated content</p>");
 
     // Wait for the next tick to allow the update to propagate
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -118,7 +118,7 @@ describe("createJazzPlugin", () => {
     expect(view.state.selection.to).toBe(5);
 
     // Update CoRichText content
-    coRichText.applyDiff("<p>Updated content</p>");
+    coRichText.$jazz.applyDiff("<p>Updated content</p>");
 
     // Verify selection is preserved after content update
     expect(view.state.selection.from).toBe(2);

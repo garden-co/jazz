@@ -1,19 +1,19 @@
 /* istanbul ignore file -- @preserve */
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import { ItemsSym } from "./symbols.js";
+import { ItemsSym, TypeSym } from "./symbols.js";
 
 (globalThis as any).devtoolsFormatters = [
   {
     header: (object: any) => {
-      if (object._type === "CoMap") {
+      if (object[TypeSym] === "CoMap") {
         return ["div", {}, ["span", {}, object.constructor.name]];
-      } else if (object._type === "CoList") {
+      } else if (object[TypeSym] === "CoList") {
         return [
           "div",
           {},
           ["span", {}, object.constructor.name + "(" + object.length + ") "],
         ];
-      } else if (object._type === "Account") {
+      } else if (object[TypeSym] === "Account") {
         return [
           "div",
           {},
@@ -35,7 +35,7 @@ import { ItemsSym } from "./symbols.js";
       return true;
     },
     body: function (object: any) {
-      if (object._type === "CoMap" || object._type === "Account") {
+      if (object[TypeSym] === "CoMap" || object[TypeSym] === "Account") {
         return [
           "div",
           { style: "margin-left: 15px" },
@@ -60,7 +60,7 @@ import { ItemsSym } from "./symbols.js";
               : []),
           ]),
         ];
-      } else if (object._type === "CoList") {
+      } else if (object[TypeSym] === "CoList") {
         return [
           "div",
           { style: "margin-left: 15px" },

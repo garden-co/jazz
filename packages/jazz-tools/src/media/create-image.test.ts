@@ -10,7 +10,7 @@ describe("createImage", async () => {
   const getPlaceholderBase64 = vi.fn();
   const createFileStreamFromSource = vi
     .fn()
-    .mockResolvedValue(FileStream.create({ owner: account._owner }));
+    .mockResolvedValue(FileStream.create({ owner: account.$jazz.owner }));
   const resize = vi.fn();
 
   const createImage = createImageFactory({
@@ -33,7 +33,7 @@ describe("createImage", async () => {
     getImageSize.mockResolvedValue({ width: 1, height: 1 });
 
     const image = await createImage(imageBlob, {
-      owner: account._owner,
+      owner: account.$jazz.owner,
       placeholder: false,
       progressive: false,
     });
@@ -60,7 +60,7 @@ describe("createImage", async () => {
     );
 
     const image = await createImage(imageBlob, {
-      owner: account._owner,
+      owner: account.$jazz.owner,
       placeholder: "blur",
       progressive: false,
     });
@@ -83,7 +83,7 @@ describe("createImage", async () => {
     resize.mockResolvedValue(new Blob([White1920], { type: "image/png" }));
 
     const image = await createImage(imageBlob, {
-      owner: account._owner,
+      owner: account.$jazz.owner,
       placeholder: false,
       progressive: false,
       maxSize: 256,
@@ -109,7 +109,7 @@ describe("createImage", async () => {
     getImageSize.mockResolvedValue({ width: 1, height: 1 });
 
     const image = await createImage(imageBlob, {
-      owner: account._owner,
+      owner: account.$jazz.owner,
       placeholder: false,
       progressive: false,
       maxSize: 256,
@@ -136,7 +136,7 @@ describe("createImage", async () => {
     resize.mockResolvedValue(new Blob([White1920], { type: "image/png" }));
 
     const image = await createImage(imageBlob, {
-      owner: account._owner,
+      owner: account.$jazz.owner,
       progressive: true,
       placeholder: false,
     });
@@ -164,7 +164,7 @@ describe("createImage", async () => {
     resize.mockResolvedValue(new Blob([White1920], { type: "image/png" }));
 
     const image = await createImage(imageBlob, {
-      owner: account._owner,
+      owner: account.$jazz.owner,
       maxSize: 256,
       placeholder: false,
       progressive: true,

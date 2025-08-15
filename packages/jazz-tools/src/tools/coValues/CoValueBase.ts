@@ -1,4 +1,9 @@
-import { ControlledAccount, RawAccount, type RawCoValue } from "cojson";
+import {
+  ControlledAccount,
+  LocalNode,
+  RawAccount,
+  type RawCoValue,
+} from "cojson";
 import { CoreCoValueSchema } from "../implementation/zodSchema/schemaTypes/CoValueSchema.js";
 import {
   AnonymousJazzAgent,
@@ -11,39 +16,74 @@ import {
   coValueClassFromCoValueClassOrSchema,
   coValuesCache,
   inspect,
-  isCoValueSchema,
 } from "../internal.js";
-import type {
+import {
   Account,
   CoValueClassOrSchema,
   Group,
   InstanceOfSchemaCoValuesNullable,
+  TypeSym,
 } from "../internal.js";
 
 /** @internal */
+export abstract class CoValueBase implements CoValue {
+  declare [TypeSym]: string;
 
-export class CoValueBase implements CoValue {
-  declare id: ID<this>;
-  declare _type: string;
-  declare _raw: RawCoValue;
+  declare abstract $jazz: CoValueJazzApi<this>;
+
+  /** @category Internals */
+  static fromRaw<V extends CoValue>(this: CoValueClass<V>, raw: RawCoValue): V {
+    return new this({ fromRaw: raw });
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  toJSON(): object | any[] | string {
+    return {
+      id: this.$jazz.id,
+      type: this[TypeSym],
+      error: "unknown CoValue class",
+    };
+  }
+
+  [inspect]() {
+    return this.toJSON();
+  }
+}
+
+export abstract class CoValueJazzApi<V extends CoValue> {
   /** @category Internals */
   declare _instanceID: string;
 
-  get _owner(): Account | Group {
+  constructor(private coValue: V) {
+    Object.defineProperty(this, "_instanceID", {
+      value: `instance-${Math.random().toString(36).slice(2)}`,
+      enumerable: false,
+    });
+  }
+
+  abstract get id(): ID<V>;
+  abstract get raw(): RawCoValue;
+
+  get owner(): Account | Group {
     const schema =
-      this._raw.group instanceof RawAccount
+      this.raw.group instanceof RawAccount
         ? RegisteredSchemas["Account"]
         : RegisteredSchemas["Group"];
 
-    return accessChildById(this, this._raw.group.id, {
+    return accessChildById(this.coValue, this.raw.group.id, {
       ref: schema,
       optional: false,
     });
   }
 
+  /** @internal */
+  get localNode(): LocalNode {
+    return this.raw.core.node;
+  }
+
   /** @private */
-  get _loadedAs() {
-    const agent = this._raw.core.node.getCurrentAgent();
+  get loadedAs() {
+    const agent = this.localNode.getCurrentAgent();
 
     if (agent instanceof ControlledAccount) {
       return coValuesCache.get(agent.account, () =>
@@ -53,32 +93,7 @@ export class CoValueBase implements CoValue {
       );
     }
 
-    return new AnonymousJazzAgent(this._raw.core.node);
-  }
-
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  constructor(..._args: any) {
-    Object.defineProperty(this, "_instanceID", {
-      value: `instance-${Math.random().toString(36).slice(2)}`,
-      enumerable: false,
-    });
-  }
-
-  /** @category Internals */
-  static fromRaw<V extends CoValue>(this: CoValueClass<V>, raw: RawCoValue): V {
-    return new this({ fromRaw: raw });
-  }
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  toJSON(): object | any[] | string {
-    return {
-      id: this.id,
-      type: this._type,
-      error: "unknown CoValue class",
-    };
-  }
-
-  [inspect]() {
-    return this.toJSON();
+    return new AnonymousJazzAgent(this.localNode);
   }
 
   /** @category Type Helpers */
@@ -89,12 +104,12 @@ export class CoValueBase implements CoValue {
     : S extends CoreCoValueSchema
       ? NonNullable<InstanceOfSchemaCoValuesNullable<S>>
       : never {
-    const cl = isCoValueSchema(schema) ? schema.getCoValueClass() : schema;
+    const cl = coValueClassFromCoValueClassOrSchema(schema);
 
-    if (this.constructor === cl) {
-      return this as any;
+    if (this.coValue.constructor === cl) {
+      return this.coValue as any;
     }
 
-    return (cl as unknown as CoValueFromRaw<CoValue>).fromRaw(this._raw) as any;
+    return (cl as unknown as CoValueFromRaw<CoValue>).fromRaw(this.raw) as any;
   }
 }

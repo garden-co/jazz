@@ -149,7 +149,7 @@ export const Image = forwardRef<HTMLImageElement, ImageProps>(function Image(
     );
 
     if (!bestImage) return image.placeholderDataURL;
-    if (lastBestImage.current?.[0] === bestImage.image.id)
+    if (lastBestImage.current?.[0] === bestImage.image.$jazz.id)
       return lastBestImage.current?.[1];
 
     const blob = bestImage.image.toBlob();
@@ -157,7 +157,7 @@ export const Image = forwardRef<HTMLImageElement, ImageProps>(function Image(
     if (blob) {
       const url = URL.createObjectURL(blob);
       revokeObjectURL(lastBestImage.current?.[1]);
-      lastBestImage.current = [bestImage.image.id, url];
+      lastBestImage.current = [bestImage.image.$jazz.id, url];
       return url;
     }
 

@@ -198,7 +198,7 @@ describe("BrowserPasskeyAuth", () => {
 
       await auth.signUp("");
 
-      const currentAccount = await Account.getMe().ensureLoaded({
+      const currentAccount = await Account.getMe().$jazz.ensureLoaded({
         resolve: {
           profile: true,
         },
@@ -230,7 +230,7 @@ describe("BrowserPasskeyAuth", () => {
 
       await auth.signUp("testuser");
 
-      const currentAccount = await Account.getMe().ensureLoaded({
+      const currentAccount = await Account.getMe().$jazz.ensureLoaded({
         resolve: {
           profile: true,
         },

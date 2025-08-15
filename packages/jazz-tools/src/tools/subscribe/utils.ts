@@ -28,7 +28,7 @@ export function createCoValue<D extends CoValue>(
 ) {
   const freshValueInstance = instantiateRefEncodedFromRaw(ref, raw);
 
-  Object.defineProperty(freshValueInstance, "_subscriptionScope", {
+  Object.defineProperty(freshValueInstance.$jazz, "_subscriptionScope", {
     value: subscriptionScope,
     writable: false,
     enumerable: false,

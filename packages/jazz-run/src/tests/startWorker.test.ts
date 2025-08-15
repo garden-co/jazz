@@ -101,9 +101,11 @@ describe("startWorker integration", () => {
       { owner: group },
     );
 
-    await map.waitForSync();
+    await map.$jazz.waitForSync();
 
-    const mapOnWorker2 = await TestMap.load(map.id, { loadAs: worker2.worker });
+    const mapOnWorker2 = await TestMap.load(map.$jazz.id, {
+      loadAs: worker2.worker,
+    });
 
     expect(mapOnWorker2?.value).toBe("test");
 
@@ -142,7 +144,7 @@ describe("startWorker integration", () => {
 
     const worker1 = await setup(CustomAccount);
 
-    const { root } = await worker1.worker.ensureLoaded({
+    const { root } = await worker1.worker.$jazz.ensureLoaded({
       resolve: { root: true },
     });
 
@@ -151,14 +153,14 @@ describe("startWorker integration", () => {
     await worker1.done();
 
     const worker2 = await startWorker({
-      accountID: worker1.worker.id,
+      accountID: worker1.worker.$jazz.id,
       accountSecret:
-        worker1.worker._raw.core.node.getCurrentAgent().agentSecret,
+        worker1.worker.$jazz.localNode.getCurrentAgent().agentSecret,
       syncServer: worker1.syncServer,
       AccountSchema: CustomAccount,
     });
 
-    const { root: root2 } = await worker2.worker.ensureLoaded({
+    const { root: root2 } = await worker2.worker.$jazz.ensureLoaded({
       resolve: { root: true },
     });
 
@@ -184,7 +186,9 @@ describe("startWorker integration", () => {
 
     const worker2 = await setupWorker(worker1.syncServer);
 
-    const mapOnWorker2 = await TestMap.load(map.id, { loadAs: worker2.worker });
+    const mapOnWorker2 = await TestMap.load(map.$jazz.id, {
+      loadAs: worker2.worker,
+    });
 
     expect(mapOnWorker2?.value).toBe("test");
 
@@ -208,14 +212,14 @@ describe("startWorker integration", () => {
         {
           value: value.value + " Responded from the inbox",
         },
-        { owner: value._owner },
+        { owner: value.$jazz.owner },
       );
     });
 
     const sender = await InboxSender.load<
       Loaded<typeof TestMap>,
       Loaded<typeof TestMap>
-    >(worker2.worker.id, worker1.worker);
+    >(worker2.worker.$jazz.id, worker1.worker);
 
     const resultId = await sender.sendMessage(map);
 
@@ -241,7 +245,7 @@ describe("startWorker integration", () => {
       { owner: group },
     );
 
-    await map.waitForSync();
+    await map.$jazz.waitForSync();
 
     // Close the sync server
     worker1.server.close();
@@ -254,7 +258,7 @@ describe("startWorker integration", () => {
       { owner: group },
     );
 
-    map.value = "updated while offline";
+    map.$jazz.set("value", "updated while offline");
 
     // Start a new sync server on the same port
     const newServer = await startSyncServer({
@@ -263,11 +267,13 @@ describe("startWorker integration", () => {
       db: "",
     });
 
-    await worker1.worker.waitForAllCoValuesSync();
+    await worker1.worker.$jazz.waitForAllCoValuesSync();
 
     // Verify both old and new values are synced
-    const mapOnWorker2 = await TestMap.load(map.id, { loadAs: worker2.worker });
-    const map2OnWorker2 = await TestMap.load(map2.id, {
+    const mapOnWorker2 = await TestMap.load(map.$jazz.id, {
+      loadAs: worker2.worker,
+    });
+    const map2OnWorker2 = await TestMap.load(map2.$jazz.id, {
       loadAs: worker2.worker,
     });
 

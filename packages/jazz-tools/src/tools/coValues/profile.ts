@@ -5,6 +5,7 @@ import {
   CoValueClass,
   Group,
   Simplify,
+  TypeSym,
   coField,
 } from "../internal.js";
 
@@ -34,7 +35,7 @@ export class Profile extends CoMap {
       options !== undefined && "owner" in options ? options.owner : options;
 
     // We add some guardrails to ensure that the owner of a profile is a group
-    if ((owner as Group | Account | undefined)?._type === "Account") {
+    if ((owner as Group | Account | undefined)?.[TypeSym] === "Account") {
       throw new Error("Profiles should be owned by a group");
     }
 

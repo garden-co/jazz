@@ -32,9 +32,12 @@ describe("co.discriminatedUnion", () => {
 
     expect(person.pet.type).toEqual("dog");
 
-    person.pet = Cat.create({
-      type: "cat",
-    });
+    person.$jazz.set(
+      "pet",
+      Cat.create({
+        type: "cat",
+      }),
+    );
 
     expect(person.pet.type).toEqual("cat");
   });
@@ -67,11 +70,14 @@ describe("co.discriminatedUnion", () => {
       expect(response.result.data).toEqual("Hello, world!");
     }
 
-    response.result = BadRequestError.create({
-      status: "failed",
-      message: "Bad request",
-      code: 400,
-    });
+    response.$jazz.set(
+      "result",
+      BadRequestError.create({
+        status: "failed",
+        message: "Bad request",
+        code: 400,
+      }),
+    );
 
     expect(response.result.status).toEqual("failed");
     if (response.result.status === "failed") {
@@ -115,11 +121,14 @@ describe("co.discriminatedUnion", () => {
       }
     }
 
-    response.error = UnauthorizedError.create({
-      status: "failed",
-      message: "Unauthorized",
-      code: 401,
-    });
+    response.$jazz.set(
+      "error",
+      UnauthorizedError.create({
+        status: "failed",
+        message: "Unauthorized",
+        code: 401,
+      }),
+    );
 
     expect(response.error.status).toEqual("failed");
     if (response.error.status === "failed") {
@@ -267,7 +276,7 @@ describe("co.discriminatedUnion", () => {
     const Pet = co.discriminatedUnion("type", [Dog, Cat]);
 
     const dog = Dog.create({ type: "dog" });
-    const loadedPet = await Pet.load(dog.id);
+    const loadedPet = await Pet.load(dog.$jazz.id);
     expect(loadedPet?.type).toEqual("dog");
   });
 
@@ -295,7 +304,7 @@ describe("co.discriminatedUnion", () => {
     const updates: Loaded<typeof Pet>[] = [];
     const spy = vi.fn((pet) => updates.push(pet));
 
-    Pet.subscribe(dog.id, {}, (pet) => {
+    Pet.subscribe(dog.$jazz.id, {}, (pet) => {
       expect(pet.type).toEqual("dog");
       spy(pet);
     });
@@ -332,7 +341,7 @@ describe("co.discriminatedUnion", () => {
       },
     });
 
-    const loadedAnimal = await Animal.load(animal.id);
+    const loadedAnimal = await Animal.load(animal.$jazz.id);
 
     expect(loadedAnimal?.breed?.type).toEqual("collie");
   });
@@ -354,7 +363,7 @@ describe("co.discriminatedUnion", () => {
       type: "collie",
     });
 
-    const loadedAnimal = await Animal.load(animal.id);
+    const loadedAnimal = await Animal.load(animal.$jazz.id);
 
     expect(loadedAnimal?.type).toEqual("collie");
   });

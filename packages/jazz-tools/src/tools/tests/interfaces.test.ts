@@ -4,6 +4,7 @@ import { Account } from "../exports";
 import {
   parseCoValueCreateOptions,
   parseGroupCreateOptions,
+  TypeSym,
 } from "../internal";
 import { createJazzTestAccount } from "../testing";
 
@@ -16,9 +17,11 @@ beforeEach(async () => {
 describe("parseCoValueCreateOptions", () => {
   it("should create a new group when no options provided", () => {
     const result = parseCoValueCreateOptions(undefined);
-    expect(result.owner._type).toBe("Group");
+    expect(result.owner[TypeSym]).toBe("Group");
     expect(
-      result.owner.castAs(Group)._raw.roleOf(Account.getMe()._raw.id),
+      result.owner.$jazz
+        .castAs(Group)
+        .$jazz.raw.roleOf(Account.getMe().$jazz.raw.id),
     ).toBe("admin");
     expect(result.uniqueness).toBeUndefined();
   });
@@ -35,7 +38,9 @@ describe("parseCoValueCreateOptions", () => {
     const result = parseCoValueCreateOptions(group);
     expect(result.owner).toBe(group);
     expect(
-      result.owner.castAs(Group)._raw.roleOf(Account.getMe()._raw.id),
+      result.owner.$jazz
+        .castAs(Group)
+        .$jazz.raw.roleOf(Account.getMe().$jazz.raw.id),
     ).toBe("admin");
     expect(result.uniqueness).toBeUndefined();
   });

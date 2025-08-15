@@ -1,7 +1,7 @@
-import type { CoValue } from "../internal.js";
+import { TypeSym, type CoValue } from "../internal.js";
 
 export function applyCoValueMigrations(instance: CoValue) {
-  const node = instance._raw.core.node;
+  const node = instance.$jazz.raw.core.node;
 
   // @ts-expect-error _migratedCoValues is a custom expando property
   const migratedCoValues = (node._migratedCoValues ??= new Set<string>());
@@ -9,11 +9,11 @@ export function applyCoValueMigrations(instance: CoValue) {
   if (
     "migrate" in instance &&
     typeof instance.migrate === "function" &&
-    instance._type !== "Account" &&
-    !migratedCoValues.has(instance.id)
+    instance[TypeSym] !== "Account" &&
+    !migratedCoValues.has(instance.$jazz.id)
   ) {
     // We flag this before the migration to avoid that internal loads trigger the migration again
-    migratedCoValues.add(instance.id);
+    migratedCoValues.add(instance.$jazz.id);
 
     const result = instance.migrate?.(instance);
     if (result && "then" in result) {

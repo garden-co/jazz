@@ -136,7 +136,7 @@ async function serializeMessagePayload({
   target: Account | Group;
 }) {
   const me = owner ?? Account.getMe();
-  const node = me._raw.core.node;
+  const node = me.$jazz.localNode;
   const crypto = node.crypto;
 
   const agent = node.getCurrentAgent();
@@ -146,7 +146,7 @@ async function serializeMessagePayload({
   const envelope = createMessageEnvelope(schema, value, me, target, type);
 
   const contentPieces =
-    (await exportCoValue(schema, envelope.id, {
+    (await exportCoValue(schema, envelope.$jazz.id, {
       resolve,
       loadAs: me,
       bestEffortResolution: true,
@@ -156,7 +156,7 @@ async function serializeMessagePayload({
 
   const signPayload = crypto.secureHash({
     contentPieces,
-    id: envelope.id,
+    id: envelope.$jazz.id,
     createdAt,
     signerID,
   });
@@ -165,7 +165,7 @@ async function serializeMessagePayload({
 
   return {
     contentPieces,
-    id: envelope.id,
+    id: envelope.$jazz.id,
     createdAt,
     authToken,
     signerID,
@@ -203,7 +203,7 @@ async function handleMessagePayload({
   request: unknown;
   loadAs: Account;
 }) {
-  const node = loadAs._raw.core.node;
+  const node = loadAs.$jazz.localNode;
   const crypto = node.crypto;
 
   const requestParsed = requestSchema.safeParse(request);
@@ -225,7 +225,7 @@ async function handleMessagePayload({
     if (core.isAvailable()) {
       const content = core.getCurrentContent() as RawCoMap;
 
-      if (content.get("$handled") === loadAs.id) {
+      if (content.get("$handled") === loadAs.$jazz.id) {
         throw new JazzRequestError("Request payload is already handled", 400);
       }
     }
@@ -303,7 +303,7 @@ async function handleMessagePayload({
   }
 
   if (type === "request") {
-    value._raw.set("$handled", loadAs.id);
+    value.$jazz.raw.set("$handled", loadAs.$jazz.id);
   }
 
   return {
@@ -469,7 +469,7 @@ export class HttpRoute<
       | Promise<MessageValuePayload<ResponseShape>>
       | MessageValuePayload<ResponseShape>,
   ): Promise<Response> => {
-    const node = as._raw.core.node;
+    const node = as.$jazz.localNode;
     const body = await request.json();
     const data = await handleMessagePayload({
       type: "request",
@@ -612,7 +612,7 @@ function safeVerifySignature(
 }
 
 async function loadWorkerAccountOrGroup(id: string, loadAs: Account) {
-  const node = loadAs._raw.core.node;
+  const node = loadAs.$jazz.localNode;
   const coValue = await node.loadCoValueCore(id as `co_z${string}`);
 
   if (!coValue.isAvailable()) {

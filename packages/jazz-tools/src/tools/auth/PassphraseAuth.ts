@@ -82,13 +82,13 @@ export class PassphraseAuth {
     });
 
     if (name?.trim()) {
-      const currentAccount = await Account.getMe().ensureLoaded({
+      const currentAccount = await Account.getMe().$jazz.ensureLoaded({
         resolve: {
           profile: true,
         },
       });
 
-      currentAccount.profile.name = name;
+      currentAccount.profile.$jazz.set("name", name);
     }
 
     return passphrase;

@@ -272,7 +272,7 @@ export function createInviteLink<C extends CoValue>(
     valueHint,
   }: { baseURL?: string; valueHint?: string } = {},
 ): string {
-  const coValueCore = value._raw.core;
+  const coValueCore = value.$jazz.raw.core;
   let currentCoValue = coValueCore;
 
   while (currentCoValue.verified.header.ruleset.type === "ownedByGroup") {
@@ -289,7 +289,7 @@ export function createInviteLink<C extends CoValue>(
   const inviteSecret = group.createInvite(role);
 
   return `${baseURL}#/invite/${valueHint ? valueHint + "/" : ""}${
-    value.id
+    value.$jazz.id
   }/${inviteSecret}`;
 }
 

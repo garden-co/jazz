@@ -30,7 +30,7 @@ function TestLogoutComponent({ onLogout }: { onLogout?: () => void }) {
     },
   });
 
-  const root = useCoState(TestAccount.shape.root, me?.root?.id, {
+  const root = useCoState(TestAccount.shape.root, me?.root?.$jazz.id, {
     resolve: {
       count: true,
     },
@@ -49,7 +49,7 @@ function TestLogoutComponent({ onLogout }: { onLogout?: () => void }) {
         <button
           data-testid="increment-button"
           onClick={() => {
-            root.count.value++;
+            root.count.$jazz.set("value", root.count.value + 1);
           }}
         >
           Increment

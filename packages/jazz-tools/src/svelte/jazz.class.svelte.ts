@@ -116,7 +116,7 @@ export class AccountCoState<
 
         const unsubscribe = subscribeToCoValue(
           coValueClassFromCoValueClassOrSchema(Schema),
-          me.id,
+          me.$jazz.id,
           {
             // @ts-expect-error The resolve query type isn't compatible with the coValueClassFromCoValueClassOrSchema conversion
             resolve: options?.resolve,

@@ -82,7 +82,7 @@ export function createSyncHandlers(coRichText: CoRichText | undefined) {
 
     if (tr.docChanged) {
       const str = proseMirrorToHtml(tr.doc);
-      coRichText.applyDiff(str);
+      coRichText.$jazz.applyDiff(str);
     }
   }
 

@@ -24,7 +24,7 @@ describe("Invite Links", () => {
     const inviteLink = createInviteLink(group, "writer", baseURL);
 
     expect(inviteLink).toMatch(
-      new RegExp(`^${baseURL}#/invite/${group.id}/[A-Za-z0-9_-]+$`),
+      new RegExp(`^${baseURL}#/invite/${group.$jazz.id}/[A-Za-z0-9_-]+$`),
     );
   });
 
@@ -32,7 +32,9 @@ describe("Invite Links", () => {
     const inviteLink = createInviteLink(group, "writer", baseURL, "myGroup");
 
     expect(inviteLink).toMatch(
-      new RegExp(`^${baseURL}#/invite/myGroup/${group.id}/[A-Za-z0-9_-]+$`),
+      new RegExp(
+        `^${baseURL}#/invite/myGroup/${group.$jazz.id}/[A-Za-z0-9_-]+$`,
+      ),
     );
   });
 
@@ -41,7 +43,7 @@ describe("Invite Links", () => {
     const result = parseInviteLink(inviteLink);
 
     expect(result).toBeDefined();
-    expect(result?.valueID).toBe(group.id);
+    expect(result?.valueID).toBe(group.$jazz.id);
     expect(result?.valueHint).toBe("myGroup");
     expect(result?.inviteSecret).toBeDefined();
   });
@@ -65,7 +67,7 @@ describe("Invite Links", () => {
     });
 
     expect(result).toBeDefined();
-    expect(result?.valueID).toBe(group.id);
+    expect(result?.valueID).toBe(group.$jazz.id);
     expect(result?.valueHint).toBe("myGroup");
   });
 

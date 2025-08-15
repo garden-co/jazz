@@ -143,7 +143,7 @@ export class JazzClerkAuth {
       } satisfies ClerkCredentials,
     });
 
-    const currentAccount = await Account.getMe().ensureLoaded({
+    const currentAccount = await Account.getMe().$jazz.ensureLoaded({
       resolve: {
         profile: true,
       },
@@ -152,7 +152,7 @@ export class JazzClerkAuth {
     const username = getClerkUsername(clerkClient);
 
     if (username) {
-      currentAccount.profile.name = username;
+      currentAccount.profile.$jazz.set("name", username);
     }
 
     await JazzClerkAuth.loadClerkAuthData(

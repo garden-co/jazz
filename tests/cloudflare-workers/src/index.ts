@@ -41,17 +41,17 @@ app.get("/", async (c) => {
     crypto,
   });
 
-  await account.waitForAllCoValuesSync();
+  await account.$jazz.waitForAllCoValuesSync();
 
   const admin = await startWorker({
-    accountID: account.id,
-    accountSecret: account._raw.core.node.getCurrentAgent().agentSecret,
+    accountID: account.$jazz.id,
+    accountSecret: account.$jazz.localNode.getCurrentAgent().agentSecret,
     AccountSchema: MyAccount,
     syncServer,
     crypto,
   });
 
-  const { root } = await admin.worker.ensureLoaded({
+  const { root } = await admin.worker.$jazz.ensureLoaded({
     resolve: { root: true },
   });
 

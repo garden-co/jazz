@@ -23,7 +23,7 @@ test("waitForAllCoValuesSync should resolve when all the values are synced", asy
     TestMap.create({ name: "Alice" }, { owner: clientAccount }),
   );
 
-  await clientAccount.waitForAllCoValuesSync({
+  await clientAccount.$jazz.waitForAllCoValuesSync({
     timeout: 1000,
   });
 
@@ -31,7 +31,7 @@ test("waitForAllCoValuesSync should resolve when all the values are synced", asy
   clientNode.gracefulShutdown();
 
   for (const map of maps) {
-    const loadedMap = await serverNode.load(map._raw.id);
+    const loadedMap = await serverNode.load(map.$jazz.raw.id);
     expect(loadedMap).not.toBe("unavailable");
   }
 });
@@ -39,12 +39,12 @@ test("waitForAllCoValuesSync should resolve when all the values are synced", asy
 test("waitForSync should resolve when the value is uploaded", async () => {
   const { clientNode, serverNode, clientAccount } = await setupTwoNodes();
 
-  await clientAccount.waitForSync({ timeout: 1000 });
+  await clientAccount.$jazz.waitForSync({ timeout: 1000 });
 
   // Killing the client node so the serverNode can't load the map from it
   clientNode.gracefulShutdown();
 
-  const loadedAccount = await serverNode.load(clientAccount._raw.id);
+  const loadedAccount = await serverNode.load(clientAccount.$jazz.raw.id);
 
   expect(loadedAccount).not.toBe("unavailable");
 });
@@ -86,11 +86,11 @@ test("Me gets updated correctly when creating a new account as active", async ()
 
 test("accounts should sync correctly", async () => {
   const account = await createJazzTestAccount({ isCurrentActiveAccount: true });
-  account.profile!.name = "test 1";
+  account.profile!.$jazz.set("name", "test 1");
   const otherAccount = await createJazzTestAccount({
     isCurrentActiveAccount: true,
   });
-  otherAccount.profile!.name = "test 2";
+  otherAccount.profile!.$jazz.set("name", "test 2");
 
   await linkAccounts(account, otherAccount);
 
@@ -111,7 +111,7 @@ test("loading accounts should work", async () => {
 
   const otherAccount = await createJazzTestAccount();
 
-  const loadedAccount = await Account.load(account.id, {
+  const loadedAccount = await Account.load(account.$jazz.id, {
     loadAs: otherAccount,
     resolve: {
       profile: true,
@@ -129,7 +129,7 @@ test("loading raw accounts should work", async () => {
     },
   });
 
-  const loadedAccount = await Account.load(account.id, {
+  const loadedAccount = await Account.load(account.$jazz.id, {
     loadAs: account,
   });
 
@@ -243,7 +243,7 @@ test("root and profile should be trusting by default", async () => {
     },
   });
 
-  const bobAccountLoadedFromAlice = await AccountSchema.load(bob.id, {
+  const bobAccountLoadedFromAlice = await AccountSchema.load(bob.$jazz.id, {
     loadAs: alice,
     resolve: {
       profile: true,

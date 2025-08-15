@@ -30,7 +30,7 @@ describe("exportCoValue", () => {
 
     const alice = await createJazzTestAccount();
 
-    const exported = await exportCoValue(Person, person.id, {
+    const exported = await exportCoValue(Person, person.$jazz.id, {
       loadAs: alice,
     });
 
@@ -39,7 +39,9 @@ describe("exportCoValue", () => {
     expect(exported!.length).toBeGreaterThan(0);
 
     // Verify the exported content contains the person data
-    const hasPersonContent = exported!.some((piece) => piece.id === person.id);
+    const hasPersonContent = exported!.some(
+      (piece) => piece.id === person.$jazz.id,
+    );
     expect(hasPersonContent).toBe(true);
   });
 
@@ -64,7 +66,7 @@ describe("exportCoValue", () => {
 
     const alice = await createJazzTestAccount();
 
-    const exported = await exportCoValue(Person, person.id, {
+    const exported = await exportCoValue(Person, person.$jazz.id, {
       resolve: { address: true },
       loadAs: alice,
     });
@@ -74,8 +76,12 @@ describe("exportCoValue", () => {
     expect(exported!.length).toBeGreaterThan(0);
 
     // Verify both person and address content are exported
-    const personContent = exported!.filter((piece) => piece.id === person.id);
-    const addressContent = exported!.filter((piece) => piece.id === address.id);
+    const personContent = exported!.filter(
+      (piece) => piece.id === person.$jazz.id,
+    );
+    const addressContent = exported!.filter(
+      (piece) => piece.id === address.$jazz.id,
+    );
 
     expect(personContent.length).toBeGreaterThan(0);
     expect(addressContent.length).toBeGreaterThan(0);
@@ -86,13 +92,13 @@ describe("exportCoValue", () => {
 
     const group = Group.create();
     const todos = TodoList.create([], group);
-    todos.push("Buy groceries");
-    todos.push("Walk the dog");
+    todos.$jazz.push("Buy groceries");
+    todos.$jazz.push("Walk the dog");
     group.addMember("everyone", "reader");
 
     const alice = await createJazzTestAccount();
 
-    const exported = await exportCoValue(TodoList, todos.id, {
+    const exported = await exportCoValue(TodoList, todos.$jazz.id, {
       loadAs: alice,
     });
 
@@ -100,7 +106,9 @@ describe("exportCoValue", () => {
     expect(exported).toBeInstanceOf(Array);
     expect(exported!.length).toBeGreaterThan(0);
 
-    const hasTodoContent = exported!.some((piece) => piece.id === todos.id);
+    const hasTodoContent = exported!.some(
+      (piece) => piece.id === todos.$jazz.id,
+    );
     expect(hasTodoContent).toBe(true);
   });
 
@@ -109,13 +117,13 @@ describe("exportCoValue", () => {
 
     const group = Group.create();
     const chat = ChatStream.create([], group);
-    chat.push("Hello");
-    chat.push("World");
+    chat.$jazz.push("Hello");
+    chat.$jazz.push("World");
     group.addMember("everyone", "reader");
 
     const alice = await createJazzTestAccount();
 
-    const exported = await exportCoValue(ChatStream, chat.id, {
+    const exported = await exportCoValue(ChatStream, chat.$jazz.id, {
       loadAs: alice,
     });
 
@@ -123,7 +131,9 @@ describe("exportCoValue", () => {
     expect(exported).toBeInstanceOf(Array);
     expect(exported!.length).toBeGreaterThan(0);
 
-    const hasChatContent = exported!.some((piece) => piece.id === chat.id);
+    const hasChatContent = exported!.some(
+      (piece) => piece.id === chat.$jazz.id,
+    );
     expect(hasChatContent).toBe(true);
   });
 
@@ -138,7 +148,7 @@ describe("exportCoValue", () => {
 
     const alice = await createJazzTestAccount();
 
-    const exported = await exportCoValue(Person, person.id, {
+    const exported = await exportCoValue(Person, person.$jazz.id, {
       loadAs: alice,
     });
 
@@ -167,13 +177,17 @@ describe("exportCoValue", () => {
     const alice = await createJazzTestAccount();
 
     // Export without resolving nested references
-    const exportedWithoutResolve = await exportCoValue(Person, person.id, {
-      resolve: { address: false },
-      loadAs: alice,
-    });
+    const exportedWithoutResolve = await exportCoValue(
+      Person,
+      person.$jazz.id,
+      {
+        resolve: { address: false },
+        loadAs: alice,
+      },
+    );
 
     // Export with resolving nested references
-    const exportedWithResolve = await exportCoValue(Person, person.id, {
+    const exportedWithResolve = await exportCoValue(Person, person.$jazz.id, {
       resolve: { address: true },
       loadAs: alice,
     });
@@ -216,7 +230,7 @@ describe("exportCoValue", () => {
 
     // Export from alice's perspective with resolve: true
     // This should attempt to resolve the address but handle the error gracefully
-    const exported = await exportCoValue(Person, person.id, {
+    const exported = await exportCoValue(Person, person.$jazz.id, {
       resolve: { address: { street: true, city: true } },
       loadAs: alice,
       bestEffortResolution: true,
@@ -225,19 +239,23 @@ describe("exportCoValue", () => {
     assert(exported);
 
     // Verify the person content is exported
-    const personContent = exported.filter((piece) => piece.id === person.id);
+    const personContent = exported.filter(
+      (piece) => piece.id === person.$jazz.id,
+    );
     expect(personContent.length).toBeGreaterThan(0);
 
-    const addressContent = exported.filter((piece) => piece.id === address.id);
+    const addressContent = exported.filter(
+      (piece) => piece.id === address.$jazz.id,
+    );
     expect(addressContent.length).toBeGreaterThan(0);
 
     const streetContent = exported.filter(
-      (piece) => piece.id === address.street.id,
+      (piece) => piece.id === address.street.$jazz.id,
     );
     expect(streetContent).toHaveLength(0);
 
     const cityContent = exported.filter(
-      (piece) => piece.id === address.city.id,
+      (piece) => piece.id === address.city.$jazz.id,
     );
     expect(cityContent).toHaveLength(0);
   });
@@ -257,12 +275,12 @@ describe("importContentPieces", () => {
     const alice = await createJazzTestAccount();
     const bob = await createJazzTestAccount();
 
-    bob._raw.core.node.syncManager.getPeers().forEach((peer) => {
+    bob.$jazz.localNode.syncManager.getPeers().forEach((peer) => {
       peer.gracefulShutdown();
     });
 
     // Export from alice's perspective
-    const exported = await exportCoValue(Person, person.id, {
+    const exported = await exportCoValue(Person, person.$jazz.id, {
       loadAs: alice,
     });
 
@@ -272,7 +290,7 @@ describe("importContentPieces", () => {
     importContentPieces(exported!, bob);
 
     // Verify bob can now access the person
-    const importedPerson = await Person.load(person.id, { loadAs: bob });
+    const importedPerson = await Person.load(person.$jazz.id, { loadAs: bob });
     expect(importedPerson).not.toBeNull();
     expect(importedPerson?.name).toBe("John");
     expect(importedPerson?.age).toBe(30);
@@ -300,12 +318,12 @@ describe("importContentPieces", () => {
     const alice = await createJazzTestAccount();
     const bob = await createJazzTestAccount();
 
-    bob._raw.core.node.syncManager.getPeers().forEach((peer) => {
+    bob.$jazz.localNode.syncManager.getPeers().forEach((peer) => {
       peer.gracefulShutdown();
     });
 
     // Export with resolved references
-    const exported = await exportCoValue(Person, person.id, {
+    const exported = await exportCoValue(Person, person.$jazz.id, {
       resolve: { address: true },
       loadAs: alice,
     });
@@ -316,7 +334,7 @@ describe("importContentPieces", () => {
     importContentPieces(exported!, bob);
 
     // Verify bob can access both person and address
-    const importedPerson = await Person.load(person.id, {
+    const importedPerson = await Person.load(person.$jazz.id, {
       resolve: { address: true },
       loadAs: bob,
     });
@@ -345,7 +363,7 @@ describe("importContentPieces", () => {
     });
 
     // Export from alice's perspective
-    const exported = await exportCoValue(Person, person.id, {
+    const exported = await exportCoValue(Person, person.$jazz.id, {
       loadAs: alice,
     });
 
@@ -355,7 +373,9 @@ describe("importContentPieces", () => {
     importContentPieces(exported!, guest);
 
     // Verify anonymous agent can access the person
-    const importedPerson = await Person.load(person.id, { loadAs: guest });
+    const importedPerson = await Person.load(person.$jazz.id, {
+      loadAs: guest,
+    });
     expect(importedPerson).not.toBeNull();
     expect(importedPerson?.name).toBe("John");
   });
@@ -374,12 +394,12 @@ describe("importContentPieces", () => {
       isCurrentActiveAccount: true,
     });
 
-    bob._raw.core.node.syncManager.getPeers().forEach((peer) => {
+    bob.$jazz.localNode.syncManager.getPeers().forEach((peer) => {
       peer.gracefulShutdown();
     });
 
     // Export from alice's perspective
-    const exported = await exportCoValue(Person, person.id, {
+    const exported = await exportCoValue(Person, person.$jazz.id, {
       loadAs: alice,
     });
 
@@ -389,7 +409,7 @@ describe("importContentPieces", () => {
     importContentPieces(exported!);
 
     // Verify bob can access the person
-    const importedPerson = await Person.load(person.id, { loadAs: bob });
+    const importedPerson = await Person.load(person.$jazz.id, { loadAs: bob });
     expect(importedPerson).not.toBeNull();
     expect(importedPerson?.name).toBe("John");
   });
@@ -415,12 +435,12 @@ describe("importContentPieces", () => {
     const alice = await createJazzTestAccount();
     const bob = await createJazzTestAccount();
 
-    bob._raw.core.node.syncManager.getPeers().forEach((peer) => {
+    bob.$jazz.localNode.syncManager.getPeers().forEach((peer) => {
       peer.gracefulShutdown();
     });
 
     // Export from alice's perspective
-    const exported = await exportCoValue(Person, person.id, {
+    const exported = await exportCoValue(Person, person.$jazz.id, {
       loadAs: alice,
     });
 
@@ -431,7 +451,7 @@ describe("importContentPieces", () => {
     importContentPieces(exported!, bob);
 
     // Should still work correctly
-    const importedPerson = await Person.load(person.id, { loadAs: bob });
+    const importedPerson = await Person.load(person.$jazz.id, { loadAs: bob });
     expect(importedPerson).not.toBeNull();
     expect(importedPerson?.name).toBe("John");
   });
@@ -479,12 +499,12 @@ describe("importContentPieces", () => {
     const alice = await createJazzTestAccount();
     const bob = await createJazzTestAccount();
 
-    bob._raw.core.node.syncManager.getPeers().forEach((peer) => {
+    bob.$jazz.localNode.syncManager.getPeers().forEach((peer) => {
       peer.gracefulShutdown();
     });
 
     // Export with all nested references resolved
-    const exported = await exportCoValue(Blog, blog.id, {
+    const exported = await exportCoValue(Blog, blog.$jazz.id, {
       resolve: {
         posts: {
           $each: {
@@ -501,7 +521,7 @@ describe("importContentPieces", () => {
     importContentPieces(exported!, bob);
 
     // Verify bob can access the entire structure
-    const importedBlog = await Blog.load(blog.id, {
+    const importedBlog = await Blog.load(blog.$jazz.id, {
       resolve: {
         posts: {
           $each: {

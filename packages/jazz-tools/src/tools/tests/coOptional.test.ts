@@ -64,19 +64,34 @@ describe("co.optional", () => {
     expect(schema.feed).toBeUndefined();
     expect(schema.union).toBeUndefined();
 
-    schema.plainText = Schema.shape.plainText.innerType.create("Hello");
-    schema.richText = Schema.shape.richText.innerType.create("Hello");
-    schema.fileStream = Schema.shape.fileStream.innerType.create();
-    schema.image = Schema.shape.image.innerType.create({
-      originalSize: [1920, 1080],
-      original: FileStream.create(),
-      progressive: false,
-    });
-    schema.record = Schema.shape.record.innerType.create({ field: "hello" });
-    schema.map = Schema.shape.map.innerType.create({ field: "hello" });
-    schema.list = Schema.shape.list.innerType.create([]);
-    schema.feed = Schema.shape.feed.innerType.create([]);
-    schema.union = Option1.create({ type: "1" });
+    schema.$jazz.set(
+      "plainText",
+      Schema.shape.plainText.innerType.create("Hello"),
+    );
+    schema.$jazz.set(
+      "richText",
+      Schema.shape.richText.innerType.create("Hello"),
+    );
+    schema.$jazz.set("fileStream", Schema.shape.fileStream.innerType.create());
+    schema.$jazz.set(
+      "image",
+      Schema.shape.image.innerType.create({
+        originalSize: [1920, 1080],
+        original: FileStream.create(),
+        progressive: false,
+      }),
+    );
+    schema.$jazz.set(
+      "record",
+      Schema.shape.record.innerType.create({ field: "hello" }),
+    );
+    schema.$jazz.set(
+      "map",
+      Schema.shape.map.innerType.create({ field: "hello" }),
+    );
+    schema.$jazz.set("list", Schema.shape.list.innerType.create([]));
+    schema.$jazz.set("feed", Schema.shape.feed.innerType.create([]));
+    schema.$jazz.set("union", Option1.create({ type: "1" }));
 
     expect(schema.plainText?.toString()).toEqual("Hello");
     expect(schema.richText?.toString()).toEqual("Hello");

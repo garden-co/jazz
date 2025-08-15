@@ -1,5 +1,5 @@
 import { SessionID } from "cojson";
-import { ItemsSym } from "../internal.js";
+import { ItemsSym, TypeSym } from "../internal.js";
 import { type Account } from "./account.js";
 import { CoFeedEntry } from "./coFeed.js";
 import { type CoKeys } from "./coMap.js";
@@ -34,7 +34,7 @@ export type RefsToResolve<
       : IsUnion<NonNullable<V>> extends true
         ? true
         : // Basically V extends CoList - but if we used that we'd introduce circularity into the definition of CoList itself
-          V extends Array<infer Item>
+          V extends ReadonlyArray<infer Item>
           ?
               | {
                   $each: RefsToResolve<
@@ -46,7 +46,7 @@ export type RefsToResolve<
                 }
               | boolean
           : // Basically V extends CoMap | Group | Account - but if we used that we'd introduce circularity into the definition of CoMap itself
-            V extends { _type: "CoMap" | "Group" | "Account" }
+            V extends { [TypeSym]: "CoMap" | "Group" | "Account" }
             ?
                 | ({
                     [Key in CoKeys<V> as NonNullable<V[Key]> extends CoValue
@@ -69,7 +69,7 @@ export type RefsToResolve<
                     : never)
                 | boolean
             : V extends {
-                  _type: "CoStream";
+                  [TypeSym]: "CoStream";
                   byMe: CoFeedEntry<infer Item> | undefined;
                 }
               ?
@@ -103,7 +103,7 @@ type CoMapLikeLoaded<
   DepthLimit extends number,
   CurrentDepth extends number[],
 > = {
-  -readonly [Key in keyof Depth]-?: Key extends CoKeys<V>
+  readonly [Key in keyof Depth]-?: Key extends CoKeys<V>
     ? NonNullable<V[Key]> extends CoValue
       ?
           | DeeplyLoaded<
@@ -128,11 +128,11 @@ export type DeeplyLoaded<
   : Depth extends boolean | undefined // Checking against boolean instead of true because the inference from RefsToResolveStrict transforms true into boolean
     ? V
     : // Basically V extends CoList - but if we used that we'd introduce circularity into the definition of CoList itself
-      [V] extends [Array<infer Item>]
+      [V] extends [ReadonlyArray<infer Item>]
       ? NotNull<Item> extends CoValue
         ? Depth extends { $each: infer ItemDepth }
           ? // Deeply loaded CoList
-            (
+            ReadonlyArray<
               | (NotNull<Item> &
                   DeeplyLoaded<
                     NotNull<Item>,
@@ -141,12 +141,12 @@ export type DeeplyLoaded<
                     [0, ...CurrentDepth]
                   >)
               | onErrorNullEnabled<Depth["$each"]>
-            )[] &
+            > &
               V // the CoList base type needs to be intersected after so that built-in methods return the correct narrowed array type
           : never
         : V
       : // Basically V extends CoMap | Group | Account - but if we used that we'd introduce circularity into the definition of CoMap itself
-        [V] extends [{ _type: "CoMap" | "Group" | "Account" }]
+        [V] extends [{ [TypeSym]: "CoMap" | "Group" | "Account" }]
         ? // If Depth = {} return V in any case
           keyof Depth extends never
           ? V
@@ -155,7 +155,7 @@ export type DeeplyLoaded<
             ? // 1.1. Deeply loaded Record-like CoMap with { $each: true | {$onError: null} }
               Depth extends { $each: infer ItemDepth }
               ? {
-                  [key: string]:
+                  readonly [key: string]:
                     | DeeplyLoaded<
                         NonNullable<V[ItemsSym]>,
                         ItemDepth,
@@ -174,7 +174,7 @@ export type DeeplyLoaded<
               CoMapLikeLoaded<V, Depth, DepthLimit, CurrentDepth>
         : [V] extends [
               {
-                _type: "CoStream";
+                [TypeSym]: "CoStream";
                 byMe: CoFeedEntry<infer Item> | undefined;
               },
             ]
@@ -188,13 +188,13 @@ export type DeeplyLoaded<
             } & { [key: ID<Account>]: { value: NotNull<Item> } } & V // same reason as in CoList
           : [V] extends [
                 {
-                  _type: "BinaryCoStream";
+                  [TypeSym]: "BinaryCoStream";
                 },
               ]
             ? V
             : [V] extends [
                   {
-                    _type: "CoPlainText";
+                    [TypeSym]: "CoPlainText";
                   },
                 ]
               ? V

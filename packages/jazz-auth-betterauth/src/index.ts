@@ -97,7 +97,7 @@ export class BetterAuth<T extends ClientOptions> {
         : undefined,
     }); // Sends the credentials to the authentication server.
 
-    const currentAccount = await Account.getMe().ensureLoaded({
+    const currentAccount = await Account.getMe().$jazz.ensureLoaded({
       resolve: {
         profile: true,
       },

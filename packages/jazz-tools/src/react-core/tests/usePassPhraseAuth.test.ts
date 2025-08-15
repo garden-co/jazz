@@ -119,13 +119,13 @@ describe("usePassphraseAuth", () => {
         const account = useAccount();
 
         if (account.me) {
-          if (!accounts.includes(account.me.id)) {
-            accounts.push(account.me.id);
+          if (!accounts.includes(account.me.$jazz.id)) {
+            accounts.push(account.me.$jazz.id);
           }
 
           updates.push({
             state: passphraseAuth.state,
-            accountIndex: accounts.indexOf(account.me.id),
+            accountIndex: accounts.indexOf(account.me.$jazz.id),
           });
         }
 
@@ -140,21 +140,21 @@ describe("usePassphraseAuth", () => {
     expect(result.current?.passphraseAuth.state).toBe("anonymous");
     expect(result.current?.account?.me).toBeDefined();
 
-    const id = result.current?.account?.me?.id;
+    const id = result.current?.account?.me?.$jazz.id;
 
     await act(async () => {
       await result.current?.passphraseAuth.signUp();
     });
 
     expect(result.current?.passphraseAuth.state).toBe("signedIn");
-    expect(result.current?.account?.me?.id).toBe(id);
+    expect(result.current?.account?.me?.$jazz.id).toBe(id);
 
     await act(async () => {
       await result.current?.account?.logOut();
     });
 
     expect(result.current?.passphraseAuth.state).toBe("anonymous");
-    expect(result.current?.account?.me?.id).not.toBe(id);
+    expect(result.current?.account?.me?.$jazz.id).not.toBe(id);
 
     expect(updates).toMatchInlineSnapshot(`
       [

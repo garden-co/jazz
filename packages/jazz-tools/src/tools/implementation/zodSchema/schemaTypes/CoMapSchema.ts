@@ -298,16 +298,16 @@ export type CoMapInstanceShape<
   Shape extends z.core.$ZodLooseShape,
   CatchAll extends AnyZodOrCoValueSchema | unknown = unknown,
 > = {
-  -readonly [key in keyof Shape]: InstanceOrPrimitiveOfSchema<Shape[key]>;
+  readonly [key in keyof Shape]: InstanceOrPrimitiveOfSchema<Shape[key]>;
 } & (CatchAll extends AnyZodOrCoValueSchema
   ? {
-      [key: string]: InstanceOrPrimitiveOfSchema<CatchAll>;
+      readonly [key: string]: InstanceOrPrimitiveOfSchema<CatchAll>;
     }
   : {});
 
 export type CoMapInstanceCoValuesNullable<Shape extends z.core.$ZodLooseShape> =
   {
-    -readonly [key in keyof Shape]: InstanceOrPrimitiveOfSchemaCoValuesNullable<
+    readonly [key in keyof Shape]: InstanceOrPrimitiveOfSchemaCoValuesNullable<
       Shape[key]
     >;
   };

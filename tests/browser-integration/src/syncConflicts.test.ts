@@ -29,7 +29,7 @@ describe("Browser sync", () => {
 
     const issue = Issue.create({ estimate: 1 }, context.me);
 
-    await issue.waitForSync();
+    await issue.$jazz.waitForSync();
 
     // Clearing the credentials storage so the next auth will be a new account
     const credentials = await contextManager.getAuthSecretStorage().get();
@@ -49,7 +49,7 @@ describe("Browser sync", () => {
       },
     );
 
-    const loadedIssue = await Issue.load(issue.id, {
+    const loadedIssue = await Issue.load(issue.$jazz.id, {
       loadAs: account2,
     });
 

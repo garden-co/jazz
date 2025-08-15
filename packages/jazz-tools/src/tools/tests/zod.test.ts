@@ -79,7 +79,7 @@ describe("co.map and Zod schema compatibility", () => {
       });
       expect(map.updatedAt).toBeNull();
 
-      map.updatedAt = "Test";
+      map.$jazz.set("updatedAt", "Test");
       expect(map.updatedAt).toEqual("Test");
     });
 
@@ -91,10 +91,10 @@ describe("co.map and Zod schema compatibility", () => {
       const map = schema.create({});
       expect(map.updatedAt).toBeUndefined();
 
-      map.updatedAt = null;
+      map.$jazz.set("updatedAt", null);
       expect(map.updatedAt).toBeNull();
 
-      map.updatedAt = "Test";
+      map.$jazz.set("updatedAt", "Test");
       expect(map.updatedAt).toEqual("Test");
     });
 

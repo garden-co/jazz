@@ -45,14 +45,14 @@ describe("CoMap", async () => {
       matches(john);
     });
 
-    test("has the _owner property", () => {
+    test("has the owner property", () => {
       const Person = co.map({
         name: z.string(),
       });
 
       const john = Person.create({ name: "John" }, Account.getMe());
 
-      expectTypeOf(john._owner).toEqualTypeOf<Account | Group>();
+      expectTypeOf(john.$jazz.owner).toEqualTypeOf<Account | Group>();
     });
 
     test("create CoMap with reference using CoValue", () => {
@@ -278,7 +278,29 @@ describe("CoMap", async () => {
         dog: Dog.create({ name: "Rex" }),
       });
 
-      john.dog = Dog.create({ name: "Fido" });
+      john.$jazz.set("dog", Dog.create({ name: "Fido" }));
+    });
+
+    test("cannot update a non-existing key", () => {
+      const Person = co.map({
+        name: z.string(),
+      });
+
+      const john = Person.create({ name: "John" });
+
+      // @ts-expect-error - Argument of type '"non-existing-key"' is not assignable to parameter of type '"name"'
+      john.$jazz.set("non-existing-key", "Jane");
+    });
+
+    test("cannot set a value with an incorrect type", () => {
+      const Person = co.map({
+        name: z.string(),
+      });
+
+      const john = Person.create({ name: "John" });
+
+      // @ts-expect-error - Argument of type 'number' is not assignable to parameter of type 'string'
+      john.$jazz.set("name", 12);
     });
 
     test("update a reference on a loaded value", () => {
@@ -301,10 +323,13 @@ describe("CoMap", async () => {
         dog: Dog.create({ name: "Rex", siblings: co.list(Dog).create([]) }),
       }) as Loaded<typeof Person, { dog: { siblings: true } }>;
 
-      john.dog = Dog.create({
-        name: "Fido",
-        siblings: co.list(Dog).create([]),
-      });
+      john.$jazz.set(
+        "dog",
+        Dog.create({
+          name: "Fido",
+          siblings: co.list(Dog).create([]),
+        }),
+      );
     });
   });
 
@@ -516,7 +541,7 @@ describe("CoMap resolution", async () => {
       dog2: Dog.create({ name: "Fido", breed: "Poodle" }),
     });
 
-    const loadedPerson = await Person.load(person.id, {
+    const loadedPerson = await Person.load(person.$jazz.id, {
       resolve: {
         dog1: true,
       },
@@ -564,7 +589,7 @@ describe("CoMap resolution", async () => {
 
     const userId: string = "dog1";
 
-    const loadedPerson = await Person.load(person.id, {
+    const loadedPerson = await Person.load(person.$jazz.id, {
       resolve: {
         [userId]: true,
       },
@@ -612,7 +637,7 @@ describe("CoMap resolution", async () => {
       dog2: Dog.create({ name: "Fido", breed: "Poodle" }),
     });
 
-    const loadedPerson = await Person.load(person.id, {
+    const loadedPerson = await Person.load(person.$jazz.id, {
       resolve: {
         dog1: true,
         dog2: { $onError: null },
@@ -636,7 +661,7 @@ describe("CoMap resolution", async () => {
     expectTypeOf<typeof loadedPerson.dog1.name>().toEqualTypeOf<string>();
     expectTypeOf<typeof loadedPerson.dog2>().toEqualTypeOf<
       | (Loaded<typeof Dog> & {
-          $onError: never; // TODO: Clean the $onError from the type
+          readonly $onError: never; // TODO: Clean the $onError from the type
         })
       | null
     >();
@@ -659,13 +684,13 @@ describe("CoMap resolution", async () => {
       dog: Dog.create({ name: "Rex", breed: "Labrador" }),
     });
 
-    const loadedPerson = await Person.load(person.id);
+    const loadedPerson = await Person.load(person.$jazz.id);
 
     expectTypeOf(loadedPerson!).toEqualTypeOf<
       {
-        name: string;
-        age: number | null;
-        dog: Loaded<typeof Dog> | null;
+        readonly name: string;
+        readonly age: number | null;
+        readonly dog: Loaded<typeof Dog> | null;
       } & CoMap
     >();
   });
