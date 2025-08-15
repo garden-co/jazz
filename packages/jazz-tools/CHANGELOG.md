@@ -1,5 +1,28 @@
 # jazz-tools
 
+## 0.17.2
+
+### Patch Changes
+
+- 794681a: fix unused blob creation on react Image component
+- 83fc22f: React Native resizer is now imported dynamically, as it is an optional dependency
+- Updated dependencies [5b2b16a]
+  - cojson@0.17.2
+  - cojson-storage-indexeddb@0.17.2
+  - cojson-transport-ws@0.17.2
+
+## 0.17.1
+
+### Patch Changes
+
+- 0bcbf55: Export the HttpRoute type
+- d1bdbf5: fix: ensure file downloaded in loadImageBySize
+- 4b73834: fix(jazz-tools/svelte): Make Image reactive to imageId change
+- Updated dependencies [2fd88b9]
+  - cojson@0.17.1
+  - cojson-storage-indexeddb@0.17.1
+  - cojson-transport-ws@0.17.1
+
 ## 0.17.0
 
 ### Minor Changes

@@ -13,7 +13,7 @@ interface ImageProps extends Omit<HTMLImgAttributes, "width" | "height"> {
 
 const { imageId, width, height, ...rest }: ImageProps = $props();
 
-const imageState = new CoState(ImageDefinition, imageId);
+const imageState = new CoState(ImageDefinition, () => imageId);
 let lastBestImage: [string, string] | null = null;
 
 /**

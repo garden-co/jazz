@@ -17,19 +17,19 @@
     "cojson-transport-ws": "workspace:*",
     "hash-slash": "workspace:*",
     "jazz-tools": "workspace:*",
-    "react": "19.1.0",
-    "react-dom": "19.1.0",
+    "react": "catalog:react",
+    "react-dom": "catalog:react",
     "react-use": "^17.4.0"
   },
   "devDependencies": {
     "@playwright/test": "^1.50.1",
     "@tailwindcss/postcss": "^4.1.10",
-    "@types/react": "19.1.0",
-    "@types/react-dom": "19.1.0",
+    "@types/react": "catalog:react",
+    "@types/react-dom": "catalog:react",
     "@vitejs/plugin-react-swc": "^3.10.1",
     "postcss": "^8.4.40",
     "tailwindcss": "^4.1.10",
-    "typescript": "5.6.2",
-    "vite": "^6.3.5"
+    "typescript": "catalog:default",
+    "vite": "catalog:default"
   }
 }

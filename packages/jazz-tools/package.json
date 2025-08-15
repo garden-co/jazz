@@ -36,7 +36,7 @@
       "default": "./dist/expo/index.js"
     },
     "./expo/crypto": {
-      "@jazz-tools/source": "./src/expo/crypto/index.ts",
+      "@jazz-tools/source": "./src/expo/crypto.ts",
       "types": "./dist/expo/crypto.d.ts",
       "default": "./dist/expo/crypto.js"
     },
@@ -91,7 +91,7 @@
       "default": "./dist/react-native/index.js"
     },
     "./react-native/crypto": {
-      "@jazz-tools/source": "./src/react-native/crypto/index.ts",
+      "@jazz-tools/source": "./src/react-native/crypto.ts",
       "types": "./dist/react-native/crypto.d.ts",
       "default": "./dist/react-native/crypto.js"
     },
@@ -140,7 +140,7 @@
   },
   "type": "module",
   "license": "MIT",
-  "version": "0.17.0",
+  "version": "0.17.2",
   "dependencies": {
     "@manuscripts/prosemirror-recreate-steps": "^0.1.4",
     "@scure/base": "1.2.1",
@@ -186,8 +186,8 @@
     "playwright": "^1.50.1",
     "queueueue": "^4.1.2",
     "tsup": "8.5.0",
-    "typescript": "catalog:",
-    "vitest": "catalog:",
+    "typescript": "catalog:default",
+    "vitest": "catalog:default",
     "ws": "^8.14.2"
   },
   "peerDependencies": {

@@ -92,7 +92,7 @@ export const Image = forwardRef<HTMLImageElement, ImageProps>(function Image(
   );
   const lazyPlaceholder = useMemo(
     () =>
-      waitingLazyLoading ? URL.createObjectURL(emptyPixelBlob) : undefined,
+      waitingLazyLoading ? URL.createObjectURL(getEmptyPixelBlob()) : undefined,
     [waitingLazyLoading],
   );
 
@@ -197,14 +197,20 @@ function revokeObjectURL(url: string | undefined) {
   }
 }
 
-const emptyPixelBlob = new Blob(
-  [
-    Uint8Array.from(
-      atob(
-        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg==",
-      ),
-      (c) => c.charCodeAt(0),
-    ),
-  ],
-  { type: "image/png" },
-);
+let emptyPixelBlob: Blob | undefined;
+function getEmptyPixelBlob() {
+  if (!emptyPixelBlob) {
+    emptyPixelBlob = new Blob(
+      [
+        Uint8Array.from(
+          atob(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg==",
+          ),
+          (c) => c.charCodeAt(0),
+        ),
+      ],
+      { type: "image/png" },
+    );
+  }
+  return emptyPixelBlob;
+}

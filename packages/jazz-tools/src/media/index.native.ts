@@ -1,5 +1,5 @@
-import ImageResizer from "@bam.tech/react-native-image-resizer";
-import type { Account, Group, ImageDefinition } from "jazz-tools";
+import type ImageResizerType from "@bam.tech/react-native-image-resizer";
+import type { Account, Group } from "jazz-tools";
 import { FileStream } from "jazz-tools";
 import { Image } from "react-native";
 import {
@@ -11,10 +11,23 @@ import {
 export { highestResAvailable, loadImage, loadImageBySize } from "./utils.js";
 export { createImageFactory };
 
+let ImageResizer: typeof ImageResizerType | undefined;
+
 export async function createImage(
   imageBlobOrFile: Blob | File | string,
   options?: CreateImageOptions,
 ) {
+  if (!ImageResizer) {
+    try {
+      ImageResizer = (await import("@bam.tech/react-native-image-resizer"))
+        .default;
+    } catch (e) {
+      throw new Error(
+        "ImageResizer is not installed, please run `npm install @bam.tech/react-native-image-resizer`",
+      );
+    }
+  }
+
   return createImageFactory({
     getImageSize,
     getPlaceholderBase64,
@@ -44,7 +57,7 @@ async function getPlaceholderBase64(filePath: SourceType): Promise<string> {
     );
   }
 
-  if (typeof ImageResizer === "undefined" || ImageResizer === null) {
+  if (!ImageResizer) {
     throw new Error(
       "ImageResizer is not installed, please run `npm install @bam.tech/react-native-image-resizer`",
     );
@@ -72,7 +85,7 @@ async function resize(
     );
   }
 
-  if (typeof ImageResizer === "undefined" || ImageResizer === null) {
+  if (!ImageResizer) {
     throw new Error(
       "ImageResizer is not installed, please run `npm install @bam.tech/react-native-image-resizer`",
     );

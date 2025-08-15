@@ -48,6 +48,7 @@ jobs:
             "tests/e2e"
             "examples/chat"
             "examples/chat-svelte"
+            "examples/community-clerk-vue"
             "examples/clerk"
             "examples/betterauth"
             "examples/file-share-svelte"
