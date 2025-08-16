@@ -1,3 +1,4 @@
+import { useSyncExternalStoreWithSelector } from "use-sync-external-store/shim/with-selector";
 import React, {
   useCallback,
   useContext,
@@ -258,6 +259,167 @@ export function useCoState<
   );
 
   return value;
+}
+
+/**
+ * React hook for subscribing to CoValues with selective data extraction and custom equality checking.
+ *
+ * This hook extends `useCoState` by allowing you to select only specific parts of the CoValue data
+ * through a selector function, which helps reduce unnecessary re-renders by narrowing down the
+ * returned data. Additionally, you can provide a custom equality function to further optimize
+ * performance by controlling when the component should re-render based on the selected data.
+ *
+ * The hook automatically handles the subscription lifecycle and supports deep loading of nested
+ * CoValues through resolve queries, just like `useCoState`.
+ *
+ * @returns The result of the selector function applied to the loaded CoValue data
+ *
+ * @example
+ * ```tsx
+ * // Select only specific fields to reduce re-renders
+ * const Project = co.map({
+ *   name: z.string(),
+ *   description: z.string(),
+ *   tasks: co.list(Task),
+ *   lastModified: z.date(),
+ * });
+ *
+ * function ProjectTitle({ projectId }: { projectId: string }) {
+ *   // Only re-render when the project name changes, not other fields
+ *   const projectName = useCoStateSelector(
+ *     Project,
+ *     projectId,
+ *     {
+ *       select: (project) => project?.name ?? "Loading...",
+ *     }
+ *   );
+ *
+ *   return <h1>{projectName}</h1>;
+ * }
+ * ```
+ *
+ * @example
+ * ```tsx
+ * // Use custom equality function for complex data structures
+ * const TaskList = co.list(Task);
+ *
+ * function TaskCount({ listId }: { listId: string }) {
+ *   const taskStats = useCoStateSelector(
+ *     TaskList,
+ *     listId,
+ *     {
+ *       resolve: { $each: true },
+ *       select: (tasks) => {
+ *         if (!tasks) return { total: 0, completed: 0 };
+ *         return {
+ *           total: tasks.length,
+ *           completed: tasks.filter(task => task.completed).length,
+ *         };
+ *       },
+ *       // Custom equality to prevent re-renders when stats haven't changed
+ *       equalityFn: (a, b) => a.total === b.total && a.completed === b.completed,
+ *     }
+ *   );
+ *
+ *   return (
+ *     <div>
+ *       {taskStats.completed} of {taskStats.total} tasks completed
+ *     </div>
+ *   );
+ * }
+ * ```
+ *
+ * @example
+ * ```tsx
+ * // Combine with deep loading and complex selectors
+ * const Team = co.map({
+ *   name: z.string(),
+ *   members: co.list(TeamMember),
+ *   projects: co.list(Project),
+ * });
+ *
+ * function TeamSummary({ teamId }: { teamId: string }) {
+ *   const summary = useCoStateSelector(
+ *     Team,
+ *     teamId,
+ *     {
+ *       resolve: {
+ *         members: { $each: true },
+ *         projects: { $each: { tasks: { $each: true } } },
+ *       },
+ *       select: (team) => {
+ *         if (!team) return null;
+ *
+ *         const totalTasks = team.projects.reduce(
+ *           (sum, project) => sum + project.tasks.length,
+ *           0
+ *         );
+ *
+ *         return {
+ *           teamName: team.name,
+ *           memberCount: team.members.length,
+ *           projectCount: team.projects.length,
+ *           totalTasks,
+ *         };
+ *       },
+ *     }
+ *   );
+ *
+ *   if (!summary) return <div>Loading team summary...</div>;
+ *
+ *   return (
+ *     <div>
+ *       <h2>{summary.teamName}</h2>
+ *       <p>{summary.memberCount} members</p>
+ *       <p>{summary.projectCount} projects</p>
+ *       <p>{summary.totalTasks} total tasks</p>
+ *     </div>
+ *   );
+ * }
+ * ```
+ *
+ * For more examples, see the [subscription and deep loading](https://jazz.tools/docs/react/using-covalues/subscription-and-loading) documentation.
+ */
+export function useCoStateSelector<
+  S extends CoValueClassOrSchema,
+  TSelectorReturn,
+  TSelectorReturnDerived extends TSelectorReturn = TSelectorReturn,
+  const R extends ResolveQuery<S> = true,
+>(
+  /** The CoValue schema or class constructor */
+  Schema: S,
+  /** The ID of the CoValue to subscribe to. If `undefined`, returns the result of selector called with `null` */
+  id: string | undefined,
+  /** Optional configuration for the subscription */
+  options: {
+    /** Resolve query to specify which nested CoValues to load */
+    resolve?: ResolveQueryStrict<S, R>;
+    /** Select which value to return */
+    select: (value: Loaded<S, R> | undefined | null) => TSelectorReturn;
+    equalityFn?: (a: TSelectorReturn, b: TSelectorReturn) => boolean;
+  },
+): TSelectorReturn {
+  const subscription = useCoValueSubscription(Schema, id, options);
+
+  return useSyncExternalStoreWithSelector<
+    Loaded<S, R> | undefined | null,
+    TSelectorReturn
+  >(
+    React.useCallback(
+      (callback) => {
+        if (!subscription) {
+          return () => {};
+        }
+
+        return subscription.subscribe(callback);
+      },
+      [subscription],
+    ),
+    () => (subscription ? subscription.getCurrentValue() : null),
+    () => (subscription ? subscription.getCurrentValue() : null),
+    options.select,
+    options.equalityFn ?? Object.is,
+  );
 }
 
 function useAccountSubscription<
