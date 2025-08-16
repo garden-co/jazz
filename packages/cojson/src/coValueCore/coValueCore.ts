@@ -27,6 +27,7 @@ import { accountOrAgentIDfromSessionID } from "../typeUtils/accountOrAgentIDfrom
 import { expectGroup } from "../typeUtils/expectGroup.js";
 import { getDependedOnCoValuesFromRawData } from "./utils.js";
 import { CoValueHeader, Transaction, VerifiedState } from "./verifiedState.js";
+import { SessionMap } from "./SessionMap.js";
 
 export function idforHeader(
   header: CoValueHeader,
@@ -95,12 +96,7 @@ export class CoValueCore {
     this.crypto = node.crypto;
     if ("header" in init) {
       this.id = idforHeader(init.header, node.crypto);
-      this._verified = new VerifiedState(
-        this.id,
-        node.crypto,
-        init.header,
-        new Map(),
-      );
+      this._verified = new VerifiedState(this.id, node.crypto, init.header);
     } else {
       this.id = init.id;
       this._verified = null;
@@ -298,7 +294,7 @@ export class CoValueCore {
       this.id,
       this.node.crypto,
       header,
-      new Map(),
+      new SessionMap(this.id, this.node.crypto),
       streamingKnownState,
     );
 
@@ -467,19 +463,7 @@ export class CoValueCore {
         );
 
         if (result.isOk()) {
-          if (
-            this._cachedContent &&
-            "processNewTransactions" in this._cachedContent &&
-            typeof this._cachedContent.processNewTransactions === "function"
-          ) {
-            this._cachedContent.processNewTransactions();
-          } else {
-            this._cachedContent = undefined;
-          }
-
-          this._cachedDependentOn = undefined;
-
-          this.notifyUpdate(notifyMode);
+          this.updateContentAndNotifyUpdate(notifyMode);
         }
 
         return result;
@@ -488,6 +472,22 @@ export class CoValueCore {
 
   deferredUpdates = 0;
   nextDeferredNotify: Promise<void> | undefined;
+
+  updateContentAndNotifyUpdate(notifyMode: "immediate" | "deferred") {
+    if (
+      this._cachedContent &&
+      "processNewTransactions" in this._cachedContent &&
+      typeof this._cachedContent.processNewTransactions === "function"
+    ) {
+      this._cachedContent.processNewTransactions();
+    } else {
+      this._cachedContent = undefined;
+    }
+
+    this._cachedDependentOn = undefined;
+
+    this.notifyUpdate(notifyMode);
+  }
 
   notifyUpdate(notifyMode: "immediate" | "deferred") {
     if (this.listeners.size === 0) {
@@ -556,38 +556,6 @@ export class CoValueCore {
       );
     }
 
-    const madeAt = Date.now();
-
-    let transaction: Transaction;
-
-    if (privacy === "private") {
-      const { secret: keySecret, id: keyID } = this.getCurrentReadKey();
-
-      if (!keySecret) {
-        throw new Error("Can't make transaction without read key secret");
-      }
-
-      const encrypted = this.crypto.encryptForTransaction(changes, keySecret, {
-        in: this.id,
-        tx: this.nextTransactionID(),
-      });
-
-      this._decryptionCache[encrypted] = changes;
-
-      transaction = {
-        privacy: "private",
-        madeAt,
-        keyUsed: keyID,
-        encryptedChanges: encrypted,
-      };
-    } else {
-      transaction = {
-        privacy: "trusting",
-        madeAt,
-        changes: stableStringify(changes),
-      };
-    }
-
     // This is an ugly hack to get a unique but stable session ID for editing the current account
     const sessionID =
       this.verified.header.meta?.type === "account"
@@ -597,39 +565,50 @@ export class CoValueCore {
           ) as SessionID)
         : this.node.currentSessionID;
 
-    const { expectedNewHash, newStreamingHash } =
-      this.verified.expectedNewHashAfter(sessionID, [transaction]);
+    const signerAgent = this.node.getCurrentAgent();
 
-    const signature = this.crypto.sign(
-      this.node.getCurrentAgent().currentSignerSecret(),
-      expectedNewHash,
-    );
+    let privacyMode:
+      | { type: "private"; keyID: KeyID; keySecret: KeySecret }
+      | { type: "trusting" };
 
-    const success = this.tryAddTransactions(
-      sessionID,
-      [transaction],
-      expectedNewHash,
-      signature,
-      "immediate",
-      true,
-      newStreamingHash,
-    )._unsafeUnwrap({ withStackTrace: true });
+    if (privacy === "private") {
+      const { secret: keySecret, id: keyID } = this.getCurrentReadKey();
 
-    if (success) {
-      const session = this.verified.sessions.get(sessionID);
-      const txIdx = session ? session.transactions.length - 1 : 0;
+      if (!keySecret) {
+        throw new Error("Can't make transaction without read key secret");
+      }
 
-      this.node.syncManager.recordTransactionsSize([transaction], "local");
-      this.node.syncManager.syncLocalTransaction(
-        this.verified,
-        transaction,
-        sessionID,
-        signature,
-        txIdx,
-      );
+      privacyMode = { type: "private", keyID, keySecret };
+    } else {
+      privacyMode = { type: "trusting" };
     }
 
-    return success;
+    const { transaction, signature } = this.verified.makeNewTransaction(
+      sessionID,
+      signerAgent,
+      changes,
+      privacyMode,
+    );
+
+    if (transaction.privacy === "private") {
+      this._decryptionCache[transaction.encryptedChanges] = changes;
+    }
+
+    this.node.syncManager.recordTransactionsSize([transaction], "local");
+
+    const session = this.verified.sessions.get(sessionID);
+    const txIdx = session ? session.transactions.length - 1 : 0;
+
+    this.updateContentAndNotifyUpdate("immediate");
+    this.node.syncManager.syncLocalTransaction(
+      this.verified,
+      transaction,
+      sessionID,
+      signature,
+      txIdx,
+    );
+
+    return true;
   }
 
   getCurrentContent(options?: { ignorePrivateTransactions: true }): RawCoValue {

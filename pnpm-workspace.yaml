@@ -1,8 +1,9 @@
 packages:
-  - "packages/*"
-  - "examples/*"
-  - "starters/*"
-  - "tests/*"
+  - 'packages/*'
+  - 'examples/*'
+  - 'starters/*'
+  - 'tests/*'
+  - 'crates/cojson-core-wasm'
 
 catalogs:
   default:

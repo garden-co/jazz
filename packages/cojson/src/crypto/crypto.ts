@@ -297,6 +297,12 @@ export abstract class CryptoProvider<Blake3State = any> {
   newRandomSessionID(accountID: RawAccountID | AgentID): SessionID {
     return `${accountID}_session_z${base58.encode(this.randomBytes(8))}`;
   }
+
+  abstract createSessionLog(
+    coID: RawCoID,
+    sessionID: SessionID,
+    signerID: SignerID,
+  ): SessionLogImpl;
 }
 
 export type Hash = `hash_z${string}`;
@@ -341,3 +347,30 @@ export type KeySecret = `keySecret_z${string}`;
 export type KeyID = `key_z${string}`;
 
 export const secretSeedLength = 32;
+
+export interface SessionLogImpl {
+  clone(): SessionLogImpl;
+  tryAdd(
+    transactions_json: string[],
+    new_signature_str: string,
+    skip_verify: boolean,
+  ): string;
+  addNewPrivateTransaction(
+    changes_json: string,
+    signer_secret: string,
+    encryption_key: string,
+    key_id: string,
+    made_at: number,
+  ): string;
+  addNewTrustingTransaction(
+    changes_json: string,
+    signer_secret: string,
+    made_at: number,
+  ): string;
+  testExpectedHashAfter(transactions_js: any): string;
+  decryptNextTransactionChangesJson(
+    tx_index: number,
+    key_secret: Uint8Array,
+  ): string;
+  free(): void;
+}

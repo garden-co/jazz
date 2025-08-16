@@ -9,6 +9,7 @@
     "ignoreUnknown": false,
     "includes": [
       "**",
+      "!crates/**",
       "!**/jazz-tools.json",
       "!**/ios/**",
       "!**/android/**",

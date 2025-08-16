@@ -3,20 +3,24 @@ import { ed25519, x25519 } from "@noble/curves/ed25519";
 import { blake3 } from "@noble/hashes/blake3";
 import { base58 } from "@scure/base";
 import { base64URLtoBytes, bytesToBase64url } from "../base64url.js";
-import { RawCoID, TransactionID } from "../ids.js";
+import { Transaction } from "../coValueCore/verifiedState.js";
+import { RawCoID, SessionID, TransactionID } from "../ids.js";
 import { Stringified, stableStringify } from "../jsonStringify.js";
 import { JsonValue } from "../jsonValue.js";
 import { logger } from "../logger.js";
 import {
   CryptoProvider,
   Encrypted,
+  KeyID,
   KeySecret,
   Sealed,
   SealerID,
   SealerSecret,
+  SessionLogImpl,
   Signature,
   SignerID,
   SignerSecret,
+  StreamingHash,
   textDecoder,
   textEncoder,
 } from "./crypto.js";
@@ -67,7 +71,7 @@ export class PureJSCrypto extends CryptoProvider<Blake3State> {
     return this.blake3HashOnce(input).slice(0, 24);
   }
 
-  protected generateJsonNonce(material: JsonValue): Uint8Array {
+  generateJsonNonce(material: JsonValue): Uint8Array {
     return this.generateNonce(textEncoder.encode(stableStringify(material)));
   }
 
@@ -198,5 +202,177 @@ export class PureJSCrypto extends CryptoProvider<Blake3State> {
       logger.error("Failed to decrypt/parse sealed message", { err: e });
       return undefined;
     }
+  }
+
+  createSessionLog(
+    coID: RawCoID,
+    sessionID: SessionID,
+    signerID: SignerID,
+  ): SessionLogImpl {
+    return new PureJSSessionLog(coID, sessionID, signerID, this);
+  }
+}
+
+export class PureJSSessionLog implements SessionLogImpl {
+  transactions: string[] = [];
+  lastSignature: Signature | undefined;
+  streamingHash: Blake3State;
+
+  constructor(
+    private readonly coID: RawCoID,
+    private readonly sessionID: SessionID,
+    private readonly signerID: SignerID,
+    private readonly crypto: PureJSCrypto,
+  ) {
+    this.streamingHash = this.crypto.emptyBlake3State();
+  }
+
+  clone(): SessionLogImpl {
+    const newLog = new PureJSSessionLog(
+      this.coID,
+      this.sessionID,
+      this.signerID,
+      this.crypto,
+    );
+    newLog.transactions = this.transactions.slice();
+    newLog.lastSignature = this.lastSignature;
+    newLog.streamingHash = this.crypto.cloneBlake3State(this.streamingHash);
+    return newLog;
+  }
+
+  tryAdd(
+    transactionsJson: string[],
+    newSignatureStr: string,
+    skipVerify: boolean,
+  ): string {
+    if (!skipVerify) {
+      const checkHasher = this.crypto.cloneBlake3State(this.streamingHash);
+      for (const tx of transactionsJson) {
+        checkHasher.update(textEncoder.encode(tx));
+      }
+      const newHash = checkHasher.digest();
+      const newHashEncoded = `hash_z${base58.encode(newHash)}`;
+
+      if (
+        !this.crypto.verify(
+          newSignatureStr as Signature,
+          newHashEncoded,
+          this.signerID,
+        )
+      ) {
+        throw new Error("Signature verification failed");
+      }
+    }
+
+    for (const tx of transactionsJson) {
+      this.crypto.blake3IncrementalUpdate(
+        this.streamingHash,
+        textEncoder.encode(tx),
+      );
+      this.transactions.push(tx);
+    }
+
+    this.lastSignature = newSignatureStr as Signature;
+
+    return newSignatureStr;
+  }
+
+  expectedHashAfter(transactionsJson: string[]): string {
+    const hasher = this.crypto.cloneBlake3State(this.streamingHash);
+    for (const tx of transactionsJson) {
+      hasher.update(textEncoder.encode(tx));
+    }
+    const newHash = hasher.digest();
+    return `hash_z${base58.encode(newHash)}`;
+  }
+
+  addNewPrivateTransaction(
+    changesJson: string,
+    signerSecret: string,
+    encryptionKey: string,
+    keyId: string,
+    madeAt: number,
+  ): string {
+    const encryptedChanges = this.crypto.encrypt(
+      JSON.parse(changesJson),
+      encryptionKey as KeySecret,
+      {
+        in: this.coID,
+        tx: { sessionID: this.sessionID, txIndex: this.transactions.length },
+      },
+    );
+    const tx = {
+      encryptedChanges: encryptedChanges,
+      madeAt: madeAt,
+      privacy: "private",
+      keyUsed: keyId as KeyID,
+    } satisfies Transaction;
+    const txJson = stableStringify(tx);
+    const hashAfter = this.expectedHashAfter([txJson]);
+    const signature = this.crypto.sign(signerSecret as SignerSecret, hashAfter);
+    const signatureStr = this.tryAdd([txJson], signature, false);
+    return JSON.stringify({
+      signature: signatureStr,
+      transaction: tx,
+      hash: hashAfter,
+    });
+  }
+
+  addNewTrustingTransaction(
+    changesJson: string,
+    signerSecret: string,
+
+    madeAt: number,
+  ): string {
+    const tx = {
+      changes: changesJson as Stringified<JsonValue[]>,
+      madeAt: madeAt,
+      privacy: "trusting",
+    } satisfies Transaction;
+    const txJson = stableStringify(tx);
+    const hashAfter = this.expectedHashAfter([txJson]);
+    const signature = this.crypto.sign(signerSecret as SignerSecret, hashAfter);
+    const signatureStr = this.tryAdd([txJson], signature, false);
+    return JSON.stringify({
+      signature: signatureStr,
+      transaction: tx,
+      hash: hashAfter,
+    });
+  }
+
+  testExpectedHashAfter(transactionsJson: string[]): string {
+    return this.expectedHashAfter(transactionsJson);
+  }
+
+  decryptNextTransactionChangesJson(
+    txIndex: number,
+    keySecret: Uint8Array,
+  ): string {
+    const txJson = this.transactions[txIndex];
+    if (!txJson) {
+      throw new Error("Transaction not found");
+    }
+    const tx = JSON.parse(txJson) as Transaction;
+    if (tx.privacy === "private") {
+      const nOnceMaterial = {
+        in: this.coID,
+        tx: { sessionID: this.sessionID, txIndex: txIndex },
+      };
+
+      const nOnce = this.crypto.generateJsonNonce(nOnceMaterial);
+
+      const ciphertext = base64URLtoBytes(
+        tx.encryptedChanges.substring("encrypted_U".length),
+      );
+      const plaintext = xsalsa20(keySecret, nOnce, ciphertext);
+
+      return textDecoder.decode(plaintext);
+    } else {
+      return tx.changes;
+    }
+  }
+
+  free(): void {
+    // no-op
   }
 }
