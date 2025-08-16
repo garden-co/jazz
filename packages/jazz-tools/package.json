@@ -186,8 +186,8 @@
     "playwright": "^1.50.1",
     "queueueue": "^4.1.2",
     "tsup": "8.5.0",
-    "typescript": "5.6.2",
-    "vitest": "3.2.4",
+    "typescript": "catalog:default",
+    "vitest": "catalog:default",
     "ws": "^8.14.2"
   },
   "peerDependencies": {

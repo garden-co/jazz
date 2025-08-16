@@ -8,14 +8,21 @@ type CatalogDefinitions = {
 };
 
 export function findWorkspaceRoot(): string {
-  let currentDir = process.cwd();
+  // Check directories in order: script directory (distributed package), then parent directories (local development)
+  const scriptDir = path.dirname(new URL(import.meta.url).pathname);
+  const searchDirs = [scriptDir];
 
+  let currentDir = process.cwd();
   while (currentDir !== path.dirname(currentDir)) {
-    const workspaceFile = path.join(currentDir, "pnpm-workspace.yaml");
-    if (fs.existsSync(workspaceFile)) {
-      return currentDir;
-    }
+    searchDirs.push(currentDir);
     currentDir = path.dirname(currentDir);
+  }
+
+  for (const dir of searchDirs) {
+    const workspaceFile = path.join(dir, "pnpm-workspace.yaml");
+    if (fs.existsSync(workspaceFile)) {
+      return dir;
+    }
   }
 
   throw new Error("Could not find pnpm-workspace.yaml in any parent directory");
