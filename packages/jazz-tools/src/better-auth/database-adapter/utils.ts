@@ -124,9 +124,10 @@ export function paginateList<T>(
   return data.slice(start, end);
 }
 
-export function isWhereById(
+export function isWhereBySingleField<T extends string>(
+  field: T,
   where: CleanedWhere[] | undefined,
-): where is [{ field: "id"; operator: "eq"; value: string; connector: "AND" }] {
+): where is [{ field: T; operator: "eq"; value: string; connector: "AND" }] {
   if (where === undefined || where.length !== 1) {
     return false;
   }
@@ -136,5 +137,5 @@ export function isWhereById(
     return false;
   }
 
-  return cond.field === "id" && cond.operator === "eq";
+  return cond.field === field && cond.operator === "eq";
 }

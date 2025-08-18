@@ -21,7 +21,7 @@ type JazzSchema = {
   loadDatabase: (
     account: co.loaded<co.Account>,
     options?: Parameters<Database["loadUnique"]>[2],
-  ) => Promise<co.loaded<Database>>;
+  ) => Promise<co.loaded<Database, { group: true }>>;
 };
 
 const DATABASE_ROOT_ID = "better-auth-root";
@@ -82,7 +82,15 @@ export function createJazzSchema(schema: BetterAuthDbSchema): JazzSchema {
     WorkerAccount,
     DatabaseRoot,
     async loadDatabase(account, options) {
-      const db = await DatabaseRoot.loadUnique(
+      if (
+        options?.resolve === false ||
+        (typeof options?.resolve === "object" &&
+          options?.resolve.group !== true)
+      ) {
+        throw new Error("Group is required to load the database");
+      }
+
+      const db = (await DatabaseRoot.loadUnique(
         DATABASE_ROOT_ID,
         account.id,
         options || {
@@ -91,7 +99,7 @@ export function createJazzSchema(schema: BetterAuthDbSchema): JazzSchema {
             tables: true,
           },
         },
-      );
+      )) as co.loaded<Database, { group: true }>;
 
       if (!db) {
         throw new Error("Database not found");
@@ -129,6 +137,24 @@ function generateSchemaFromBetterAuthSchema(schema: BetterAuthDbSchema) {
     const coMap = co.map(modelShape);
     tablesSchema[key] = co.list(coMap);
   }
+
+  if (tablesSchema["user"] && tablesSchema["session"]) {
+    tablesSchema["user"] = co.list(
+      co
+        .map({
+          ...tablesSchema["user"].element.shape,
+          sessions: tablesSchema["session"],
+        })
+        .withMigration((user) => {
+          if (user.sessions === undefined) {
+            user.sessions = tablesSchema["session"]!.create([], user._owner);
+          }
+        }),
+    );
+  } else
+    throw new Error(
+      "Cannot find user and session tables, sessions will not be persisted",
+    );
 
   return tablesSchema;
 }
