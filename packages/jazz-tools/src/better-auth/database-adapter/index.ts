@@ -144,7 +144,12 @@ export const JazzBetterAuthDatabaseAdapter = (
 
           const database = await JazzSchema.loadDatabase(worker);
 
-          return JazzRepository.findOne(database, model, where);
+          return JazzRepository.findOne(
+            database,
+            JazzSchema.DatabaseRoot,
+            model,
+            where,
+          );
         },
         findMany: async ({ model, where, limit, sortBy, offset }) => {
           const worker = await getWorker();

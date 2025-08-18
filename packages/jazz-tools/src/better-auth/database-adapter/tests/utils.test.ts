@@ -1,6 +1,11 @@
 import { CleanedWhere } from "better-auth/adapters";
 import { describe, expect, it } from "vitest";
-import { filterListByWhere, paginateList, sortListByField } from "../utils.js";
+import {
+  filterListByWhere,
+  isWhereById,
+  paginateList,
+  sortListByField,
+} from "../utils.js";
 
 describe("filterListByWhere", () => {
   const testData = [
@@ -716,5 +721,41 @@ describe("paginateList", () => {
       const result = paginateList(testData, 1, 4);
       expect(result).toEqual([{ id: 5, name: "Eve" }]);
     });
+  });
+});
+
+describe("isWhereById", () => {
+  it("should return true if the where condition is an id", () => {
+    const where: CleanedWhere[] = [
+      { field: "id", operator: "eq", value: "1", connector: "AND" },
+    ];
+    expect(isWhereById(where)).toBe(true);
+  });
+
+  it("should return false if the where condition is not an id", () => {
+    const where: CleanedWhere[] = [
+      { field: "name", operator: "eq", value: "Alice", connector: "AND" },
+    ];
+    expect(isWhereById(where)).toBe(false);
+  });
+
+  it("should return false if the where condition has more than one condition", () => {
+    const where: CleanedWhere[] = [
+      { field: "name", operator: "eq", value: "Alice", connector: "AND" },
+      { field: "id", operator: "eq", value: "1", connector: "AND" },
+    ];
+    expect(isWhereById(where)).toBe(false);
+  });
+
+  it("should return false if the where condition has no condition", () => {
+    const where: CleanedWhere[] = [];
+    expect(isWhereById(where)).toBe(false);
+  });
+
+  it("should return false if the where condition on ID is not eq", () => {
+    const where: CleanedWhere[] = [
+      { field: "id", operator: "gt", value: "1", connector: "AND" },
+    ];
+    expect(isWhereById(where)).toBe(false);
   });
 });
