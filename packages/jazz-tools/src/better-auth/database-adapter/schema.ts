@@ -124,6 +124,8 @@ function generateSchemaFromBetterAuthSchema(schema: BetterAuthDbSchema) {
       modelShape[field.fieldName || fieldName] = convertFieldToCoValue(field);
     }
 
+    modelShape["_deleted"] = z.boolean();
+
     const coMap = co.map(modelShape);
     tablesSchema[key] = co.list(coMap);
   }
