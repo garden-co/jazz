@@ -1,16 +1,51 @@
 import { CleanedWhere } from "better-auth/adapters";
 import { CoList, CoMap, co, z } from "jazz-tools";
 import type { Database } from "./schema.js";
-import { filterListByWhere, paginateList, sortListByField } from "./utils.js";
+import {
+  filterListByWhere,
+  isWhereById,
+  paginateList,
+  sortListByField,
+} from "./utils.js";
 
 export async function findOne<T>(
   database: co.loaded<Database>,
+  db: Database,
   model: string,
   where: CleanedWhere[],
 ): Promise<T | null> {
+  if (isWhereById(where)) {
+    return findById<T>(database, db, model, where);
+  }
+
   return findMany<T>(database, model, where).then(
     (users) => users?.at(0) ?? null,
   );
+}
+
+async function findById<T>(
+  database: co.loaded<Database>,
+  db: Database,
+  model: string,
+  where: [{ field: "id"; operator: "eq"; value: string; connector: "AND" }],
+): Promise<T | null> {
+  const id = where[0]!.value;
+
+  if (!id.startsWith("co_")) {
+    return null;
+  }
+
+  const node = await db.shape.tables.shape[model]?.element.load(id);
+
+  if (!node) {
+    return null;
+  }
+
+  if (node._raw.get("_deleted")) {
+    return null;
+  }
+
+  return node as T;
 }
 
 export async function findMany<T>(
@@ -96,11 +131,9 @@ export async function deleteValue(
   model: string,
   where: CleanedWhere[],
 ): Promise<number> {
-  const values = await findMany<CoMap>(database, model, where).then((values) =>
-    values.map((value) => value.id),
-  );
+  const items = await findMany<CoMap>(database, model, where);
 
-  if (values.length === 0) {
+  if (items.length === 0) {
     return 0;
   }
 
@@ -120,18 +153,20 @@ export async function deleteValue(
 
   const list = resolved?.tables?.[model] as unknown as CoList<CoMap>;
 
-  for (const toBeDeleted of values) {
+  for (const toBeDeleted of items) {
     // Get entries without trigger the shallow load
     const index = [...list.entries()].findIndex(
-      ([_, value]) => value && value.id === toBeDeleted,
+      ([_, value]) => value && value.id === toBeDeleted.id,
     );
+
+    toBeDeleted._raw.set("_deleted", true);
 
     if (index !== -1) {
       list.splice(index, 1);
     }
   }
 
-  return values.length;
+  return items.length;
 }
 
 export async function count(

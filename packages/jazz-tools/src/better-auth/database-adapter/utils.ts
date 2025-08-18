@@ -123,3 +123,18 @@ export function paginateList<T>(
   const end = limit ? start + limit : undefined;
   return data.slice(start, end);
 }
+
+export function isWhereById(
+  where: CleanedWhere[] | undefined,
+): where is [{ field: "id"; operator: "eq"; value: string; connector: "AND" }] {
+  if (where === undefined || where.length !== 1) {
+    return false;
+  }
+
+  const [cond] = where;
+  if (!cond) {
+    return false;
+  }
+
+  return cond.field === "id" && cond.operator === "eq";
+}
