@@ -3,19 +3,23 @@ import { CoList, CoMap, co, z } from "jazz-tools";
 import type { Database } from "./schema.js";
 import {
   filterListByWhere,
-  isWhereById,
+  isWhereBySingleField,
   paginateList,
   sortListByField,
 } from "./utils.js";
 
-export async function findOne<T>(
-  database: co.loaded<Database>,
-  db: Database,
+export type DbInstance = {
+  schema: Database;
+  db: co.loaded<Database, { group: true }>;
+};
+
+export async function findOne<T extends CoMap>(
+  database: DbInstance,
   model: string,
   where: CleanedWhere[],
 ): Promise<T | null> {
-  if (isWhereById(where)) {
-    return findById<T>(database, db, model, where);
+  if (isWhereBySingleField("id", where)) {
+    return findById<T>(database, model, where);
   }
 
   return findMany<T>(database, model, where).then(
@@ -23,9 +27,8 @@ export async function findOne<T>(
   );
 }
 
-async function findById<T>(
-  database: co.loaded<Database>,
-  db: Database,
+export async function findById<T extends CoMap>(
+  database: DbInstance,
   model: string,
   where: [{ field: "id"; operator: "eq"; value: string; connector: "AND" }],
 ): Promise<T | null> {
@@ -35,7 +38,8 @@ async function findById<T>(
     return null;
   }
 
-  const node = await db.shape.tables.shape[model]?.element.load(id);
+  const node =
+    await database.schema.shape.tables.shape[model]?.element.load(id);
 
   if (!node) {
     return null;
@@ -45,18 +49,18 @@ async function findById<T>(
     return null;
   }
 
-  return node as T;
+  return node;
 }
 
-export async function findMany<T>(
-  database: co.loaded<Database>,
+export async function findMany<T extends CoMap>(
+  database: DbInstance,
   model: string,
   where: CleanedWhere[] | undefined,
   limit?: number,
   sortBy?: { field: string; direction: "asc" | "desc" },
   offset?: number,
 ): Promise<T[]> {
-  const resolvedRoot = await database.ensureLoaded({
+  const resolvedRoot = await database.db.ensureLoaded({
     resolve: {
       tables: {
         [model]: {
@@ -79,12 +83,12 @@ export async function findMany<T>(
 }
 
 export async function create<T extends z.z.core.$ZodLooseShape>(
-  database: co.loaded<Database>,
+  database: DbInstance,
   schema: co.Map<T>,
   model: string,
   data: T,
 ): Promise<T> {
-  const resolved = await database.ensureLoaded({
+  const resolved = await database.db.ensureLoaded({
     resolve: {
       tables: {
         [model]: {
@@ -101,15 +105,15 @@ export async function create<T extends z.z.core.$ZodLooseShape>(
 
   list.push(node);
 
-  return node as T;
+  return node;
 }
 
 export async function update<T>(
-  database: co.loaded<Database>,
+  database: DbInstance,
   model: string,
   where: CleanedWhere[],
   update: T,
-): Promise<T[]> {
+): Promise<CoMap[]> {
   const nodes = await findMany<CoMap>(database, model, where);
 
   if (nodes.length === 0) {
@@ -123,11 +127,11 @@ export async function update<T>(
     }
   }
 
-  return nodes as unknown as T[];
+  return nodes;
 }
 
 export async function deleteValue(
-  database: co.loaded<Database>,
+  database: DbInstance,
   model: string,
   where: CleanedWhere[],
 ): Promise<number> {
@@ -137,7 +141,7 @@ export async function deleteValue(
     return 0;
   }
 
-  const resolved = await database.ensureLoaded({
+  const resolved = await database.db.ensureLoaded({
     resolve: {
       tables: {
         [model]: {
@@ -170,7 +174,7 @@ export async function deleteValue(
 }
 
 export async function count(
-  database: co.loaded<Database>,
+  database: DbInstance,
   model: string,
   where: CleanedWhere[] | undefined,
 ): Promise<number> {
