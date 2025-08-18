@@ -10,6 +10,7 @@ export const auth = await (async () => {
       syncServer: process.env.SYNC_SERVER!,
       accountID: process.env.WORKER_ACCOUNT_ID!,
       accountSecret: process.env.WORKER_ACCOUNT_SECRET!,
+      debugLogs: true,
     }),
     emailAndPassword: {
       enabled: true,

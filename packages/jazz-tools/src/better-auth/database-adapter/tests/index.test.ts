@@ -19,7 +19,7 @@ describe("JazzBetterAuthDatabaseAdapter tests", async () => {
 
     beforeAll(async () => {
       syncServer = await startSyncServer();
-      await setupJazzTestSync({ asyncPeers: true });
+      await setupJazzTestSync();
 
       const workerAccount = await createWorkerAccount({
         name: "test",
@@ -80,6 +80,7 @@ describe("JazzBetterAuthDatabaseAdapter tests", async () => {
           syncServer: `ws://localhost:${syncServer.port}`,
           accountID,
           accountSecret,
+          debugLogs: true,
         }),
       });
 

@@ -52,6 +52,28 @@ export async function findById<T extends CoMap>(
   return node;
 }
 
+export async function findByUnique<T extends CoMap>(
+  database: DbInstance,
+  model: string,
+  where: [{ field: string; operator: "eq"; value: string; connector: "AND" }],
+): Promise<T | null> {
+  const id = where[0]!.value;
+
+  const node = await database.schema.shape.tables.shape[
+    model
+  ]?.element.loadUnique(id, database.db.group.id);
+
+  if (!node) {
+    return null;
+  }
+
+  if (node._raw.get("_deleted")) {
+    return null;
+  }
+
+  return node;
+}
+
 export async function findMany<T extends CoMap>(
   database: DbInstance,
   model: string,
@@ -87,6 +109,7 @@ export async function create<T extends z.z.core.$ZodLooseShape>(
   schema: co.Map<T>,
   model: string,
   data: T,
+  uniqueId?: string,
 ): Promise<T> {
   const resolved = await database.db.ensureLoaded({
     resolve: {
@@ -101,7 +124,7 @@ export async function create<T extends z.z.core.$ZodLooseShape>(
   const list = resolved.tables?.[model] as unknown as CoList<CoMap>;
 
   // Use the same owner of the table.
-  const node = schema.create(data, list._owner);
+  const node = schema.create(data, { owner: list._owner, unique: uniqueId });
 
   list.push(node);
 
