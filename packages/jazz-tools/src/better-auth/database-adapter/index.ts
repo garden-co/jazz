@@ -5,6 +5,7 @@ import * as JazzRepository from "./jazz-repository.js";
 import { createJazzSchema } from "./schema.js";
 import * as SessionRepository from "./session-repository.js";
 import * as UserRepository from "./user-repository.js";
+import * as VerificationRepository from "./verification-repository.js";
 
 export interface JazzAdapterConfig {
   /**
@@ -25,9 +26,15 @@ export interface JazzAdapterConfig {
   accountSecret: string;
 }
 
-const customRepository: Record<string, typeof JazzRepository> = {
+type CustomRepository = Omit<
+  typeof JazzRepository,
+  "findByUnique" | "findById"
+>;
+
+const customRepository: Record<string, CustomRepository> = {
   session: SessionRepository,
   user: UserRepository,
+  verification: VerificationRepository,
 };
 
 /**
@@ -97,8 +104,8 @@ export const JazzBetterAuthDatabaseAdapter = (
       }
 
       return {
-        // createSchema: async ({ file, tables }) => {},
         create: async ({ data, model, select }) => {
+          // console.log("create", { data, model, select });
           const schema =
             JazzSchema.DatabaseRoot.shape.tables.shape[model]?.element;
 
@@ -120,12 +127,15 @@ export const JazzBetterAuthDatabaseAdapter = (
             model,
             data,
           );
+          // console.log("update", { model, where, update });
         },
         update: async ({ model, where, update }) => {
           const worker = await getWorker();
           const database = await JazzSchema.loadDatabase(worker);
 
-          const updated = await JazzRepository.update(
+          const method = customRepository[model] ?? JazzRepository;
+
+          const updated = await method.update(
             {
               schema: JazzSchema.DatabaseRoot,
               db: database,
@@ -140,12 +150,15 @@ export const JazzBetterAuthDatabaseAdapter = (
           }
 
           return updated[0]!;
+          // console.log("updateMany", { model, where, update });
         },
         updateMany: async ({ model, where, update }) => {
           const worker = await getWorker();
           const database = await JazzSchema.loadDatabase(worker);
 
-          const updated = await JazzRepository.update(
+          const method = customRepository[model] ?? JazzRepository;
+
+          const updated = await method.update(
             {
               schema: JazzSchema.DatabaseRoot,
               db: database,
@@ -156,12 +169,15 @@ export const JazzBetterAuthDatabaseAdapter = (
           );
 
           return updated.length;
+          // console.log("delete", { model, where });
         },
         delete: async ({ model, where }) => {
           const worker = await getWorker();
           const database = await JazzSchema.loadDatabase(worker);
 
-          await JazzRepository.deleteValue(
+          const method = customRepository[model] ?? JazzRepository;
+
+          await method.deleteValue(
             {
               schema: JazzSchema.DatabaseRoot,
               db: database,
@@ -169,6 +185,7 @@ export const JazzBetterAuthDatabaseAdapter = (
             model,
             where,
           );
+          // console.log("findOne", { model, where });
         },
         findOne: async ({ model, where }) => {
           const worker = await getWorker();
@@ -190,23 +207,29 @@ export const JazzBetterAuthDatabaseAdapter = (
           const worker = await getWorker();
           const database = await JazzSchema.loadDatabase(worker);
 
-          return JazzRepository.findMany(
+          const method = customRepository[model] ?? JazzRepository;
+
+          return method.findMany(
             {
               schema: JazzSchema.DatabaseRoot,
               db: database,
             },
             model,
+            // console.log("deleteMany", { model, where });
             where,
             limit,
             sortBy,
             offset,
           );
         },
+        // console.log("count", { model, where });
         deleteMany: async ({ model, where }) => {
           const worker = await getWorker();
           const database = await JazzSchema.loadDatabase(worker);
 
-          return JazzRepository.deleteValue(
+          const method = customRepository[model] ?? JazzRepository;
+
+          return method.deleteValue(
             {
               schema: JazzSchema.DatabaseRoot,
               db: database,
@@ -219,7 +242,9 @@ export const JazzBetterAuthDatabaseAdapter = (
           const worker = await getWorker();
           const database = await JazzSchema.loadDatabase(worker);
 
-          return JazzRepository.count(
+          const method = customRepository[model] ?? JazzRepository;
+
+          return method.count(
             {
               schema: JazzSchema.DatabaseRoot,
               db: database,
