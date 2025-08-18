@@ -124,6 +124,14 @@ export function paginateList<T>(
   return data.slice(start, end);
 }
 
+function isWhereByField(field: string, where: CleanedWhere): boolean {
+  return (
+    where.field === field &&
+    where.operator === "eq" &&
+    where.connector === "AND"
+  );
+}
+
 export function isWhereBySingleField<T extends string>(
   field: T,
   where: CleanedWhere[] | undefined,
@@ -137,5 +145,27 @@ export function isWhereBySingleField<T extends string>(
     return false;
   }
 
-  return cond.field === field && cond.operator === "eq";
+  return isWhereByField(field, cond);
+}
+
+export function containWhereByField<T extends string>(
+  field: T,
+  where: CleanedWhere[] | undefined,
+): boolean {
+  if (where === undefined) {
+    return false;
+  }
+
+  return where.some((cond) => isWhereByField(field, cond));
+}
+
+export function extractWhereByField<T extends string>(
+  field: T,
+  where: CleanedWhere[] | undefined,
+): CleanedWhere[] | undefined {
+  if (where === undefined) {
+    return undefined;
+  }
+
+  return where.filter((cond) => isWhereByField(field, cond));
 }
