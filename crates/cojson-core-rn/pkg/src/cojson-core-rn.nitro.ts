@@ -14,7 +14,6 @@ export interface TransactionResult {
 export interface MakeTransactionResult {
   signature: string;
   transaction: string;
-  hash: string;
 }
 
 export interface CoJSONCoreRN

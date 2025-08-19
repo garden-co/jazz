@@ -4,12 +4,13 @@
 namespace margelo::nitro::cojson_core_rn {
 
 // Helper function to convert Nitro SessionLogHandle to Rust FFI SessionLogHandle
-// We need to store the handle statically so we can return a reference to it
-static ::SessionLogHandle rustHandleStorage;
+// Use thread-local storage to avoid race conditions between threads
+static thread_local ::SessionLogHandle rustHandleStorage;
 
 static const ::SessionLogHandle& toRustHandle(const SessionLogHandle& nitroHandle) {
   // Create a Rust handle struct directly without calling create_session_log
   // The Rust side will look up the existing session log by ID
+  // Using thread_local ensures each thread has its own storage
   rustHandleStorage.id = static_cast<uint64_t>(nitroHandle.id);
   return rustHandleStorage;
 }

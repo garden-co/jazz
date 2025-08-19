@@ -193,8 +193,11 @@ export namespace CojsonInternalTypes {
   export type SessionNewContent = import("./sync.js").SessionNewContent;
   export type CoValueHeader = import("./coValueCore/verifiedState.js").CoValueHeader;
   export type Transaction = import("./coValueCore/verifiedState.js").Transaction;
+  export type PrivateTransaction = import("./coValueCore/verifiedState.js").PrivateTransaction;
+  export type TrustingTransaction = import("./coValueCore/verifiedState.js").TrustingTransaction;
   export type TransactionID = import("./ids.js").TransactionID;
   export type Signature = import("./crypto/crypto.js").Signature;
+  export type ControlledAccountOrAgent = import("./coValues/account.js").ControlledAccountOrAgent;
   export type RawCoID = import("./ids.js").RawCoID;
   export type ProfileShape = import("./coValues/account.js").ProfileShape;
   export type SealerSecret = import("./crypto/crypto.js").SealerSecret;

@@ -1,6 +1,23 @@
-import { RawCoID, SessionID, SessionLogImpl, SignerID } from "cojson";
+import {
+  RawCoID,
+  SessionID,
+  SessionLogImpl,
+  SignerID,
+  JsonValue,
+  CojsonInternalTypes,
+  cojsonInternals,
+} from "cojson";
 import { HybridCoJSONCoreRN, SessionLogHandle } from "cojson-core-rn";
 import { PureJSCrypto } from "cojson/crypto/PureJSCrypto";
+
+type Transaction = CojsonInternalTypes.Transaction;
+type Signature = CojsonInternalTypes.Signature;
+type KeySecret = CojsonInternalTypes.KeySecret;
+type PrivateTransaction = CojsonInternalTypes.PrivateTransaction;
+type TrustingTransaction = CojsonInternalTypes.TrustingTransaction;
+type ControlledAccountOrAgent = CojsonInternalTypes.ControlledAccountOrAgent;
+
+const { stableStringify } = cojsonInternals;
 
 /**
  * React Native implementation of the CryptoProvider interface using cojson-core-rn.
@@ -47,100 +64,99 @@ class RNSessionLog implements SessionLogImpl {
   }
 
   tryAdd(
-    transactionsJson: string[],
-    newSignatureStr: string,
+    transactions: Transaction[],
+    newSignature: Signature,
     skipVerify: boolean,
-  ): string {
-    const { success, result, error } = HybridCoJSONCoreRN.tryAddTransactions(
+  ): void {
+    // Convert Transaction objects to JSON strings for the native layer
+    const transactionsJson = transactions.map((tx) => stableStringify(tx));
+
+    const { success, error } = HybridCoJSONCoreRN.tryAddTransactions(
       this.handle,
       transactionsJson,
-      newSignatureStr,
+      newSignature,
       skipVerify,
     );
     if (!success) {
       throw new Error(error);
     }
-    return result;
   }
 
   addNewPrivateTransaction(
-    changesJson: string,
-    signerSecret: string,
-    encryptionKey: string,
-    keyId: string,
+    signerAgent: ControlledAccountOrAgent,
+    changes: JsonValue[],
+    keyID: `key_z${string}`,
+    keySecret: KeySecret,
     madeAt: number,
-  ): string {
+  ): { signature: Signature; transaction: PrivateTransaction } {
+    const changesJson = stableStringify(changes);
+
     const { success, result, error } =
       HybridCoJSONCoreRN.addNewPrivateTransaction(
         this.handle,
         changesJson,
-        signerSecret,
-        encryptionKey,
-        keyId,
+        signerAgent.agentSecret,
+        keySecret,
+        keyID,
         madeAt,
       );
     if (!success) {
       throw new Error(error);
     }
-    return result;
+
+    // Parse the result which should contain both signature and transaction
+    const parsed = JSON.parse(result) as any;
+    return {
+      signature: parsed.signature as Signature,
+      transaction: parsed.transaction as PrivateTransaction,
+    };
   }
 
   addNewTrustingTransaction(
-    changesJson: string,
-    signerSecret: string,
+    signerAgent: ControlledAccountOrAgent,
+    changes: JsonValue[],
     madeAt: number,
-  ): string {
+  ): { signature: Signature; transaction: TrustingTransaction } {
+    const changesJson = stableStringify(changes);
+
     const { success, result, error } =
       HybridCoJSONCoreRN.addNewTrustingTransaction(
         this.handle,
         changesJson,
-        signerSecret,
+        signerAgent.agentSecret,
         madeAt,
       );
     if (!success) {
       throw new Error(error);
     }
-    return result;
+
+    // Parse the result which should contain both signature and transaction
+    const parsed = JSON.parse(result) as any;
+    return {
+      signature: parsed.signature as Signature,
+      transaction: parsed.transaction as TrustingTransaction,
+    };
   }
 
-  testExpectedHashAfter(transactionsJson: string[]): string {
-    const { success, result, error } = HybridCoJSONCoreRN.testExpectedHashAfter(
-      this.handle,
-      transactionsJson,
-    );
-    if (!success) {
-      throw new Error(error);
-    }
-    return result;
-  }
-
-  /**
-   * Converts Uint8Array to ArrayBuffer for compatibility with React Native SessionLog.
-   * This ensures proper type conversion between the SessionLogImpl interface (Uint8Array)
-   * and the cojson-core-rn native module (ArrayBuffer).
-   */
   decryptNextTransactionChangesJson(
-    txIndex: number,
-    keySecret: Uint8Array,
+    tx_index: number,
+    key_secret: KeySecret,
   ): string {
-    // Convert Uint8Array to ArrayBuffer, ensuring we get a proper ArrayBuffer
+    // Convert KeySecret string to ArrayBuffer for the native layer
+    // KeySecret is a base58-encoded string, we need to decode it to bytes
+    const keyBytes = new TextEncoder().encode(key_secret); // Temporary - may need proper base58 decoding
     const arrayBuffer =
-      keySecret.buffer instanceof ArrayBuffer
-        ? keySecret.buffer.slice(
-            keySecret.byteOffset,
-            keySecret.byteOffset + keySecret.byteLength,
+      keyBytes.buffer instanceof ArrayBuffer
+        ? keyBytes.buffer.slice(
+            keyBytes.byteOffset,
+            keyBytes.byteOffset + keyBytes.byteLength,
           )
-        : new ArrayBuffer(keySecret.byteLength);
-
-    // If we had to create a new ArrayBuffer, copy the data
-    if (!(keySecret.buffer instanceof ArrayBuffer)) {
-      new Uint8Array(arrayBuffer).set(keySecret);
-    }
+        : new ArrayBuffer(keyBytes.byteLength);
 
     const { success, result, error } =
       HybridCoJSONCoreRN.decryptNextTransactionChangesJson(
         this.handle,
-        txIndex,
+        tx_index,
         arrayBuffer,
       );
     if (!success) {

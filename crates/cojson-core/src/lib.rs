@@ -49,6 +49,49 @@ impl Into<SigningKey> for &SignerSecret {
     }
 }
 
+impl SignerSecret {
+    /// Safely convert SignerSecret to SigningKey with proper error handling
+    pub fn try_into_signing_key(&self) -> Result<SigningKey, CoJsonCoreError> {
+        // Handle both formats: "signerSecret_z..." and "sealerSecret_z.../signerSecret_z..."
+        let signer_secret_part = if self.0.contains('/') {
+            // AgentSecret format: "sealerSecret_z.../signerSecret_z..."
+            let parts: Vec<&str> = self.0.split('/').collect();
+            if parts.len() != 2 {
+                return Err(CoJsonCoreError::InvalidSignerSecret(format!(
+                    "AgentSecret must have exactly 2 parts separated by '/', got: '{}'", self.0
+                )));
+            }
+            parts[1] // Take the signerSecret part
+        } else {
+            // Direct SignerSecret format: "signerSecret_z..."
+            &self.0
+        };
+
+        if !signer_secret_part.starts_with("signerSecret_z") {
+            return Err(CoJsonCoreError::InvalidSignerSecret(format!(
+                "signer part must start with 'signerSecret_z', got: '{}'", signer_secret_part
+            )));
+        }
+
+        let base58_part = &signer_secret_part["signerSecret_z".len()..];
+        let key_bytes = bs58::decode(base58_part).into_vec()?;
+        
+        if key_bytes.len() != 32 {
+            return Err(CoJsonCoreError::InvalidSignerSecret(format!(
+                "expected 32 bytes, got {}", key_bytes.len()
+            )));
+        }
+
+        let key_array: [u8; 32] = key_bytes.try_into().map_err(|_| {
+            CoJsonCoreError::InvalidSignerSecret("failed to convert to 32-byte array".to_string())
+        })?;
+
+        // SigningKey::from_bytes can panic, so we wrap it in a catch_unwind for safety
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| SigningKey::from_bytes(&key_array)))
+            .map_err(|_| CoJsonCoreError::InvalidSignerSecret("Invalid signing key bytes".to_string()))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Signature(pub String);
@@ -95,6 +138,25 @@ impl Into<[u8; 32]> for &KeySecret {
     fn into(self) -> [u8; 32] {
         let key_bytes = decode_z(&self.0).expect("Invalid key secret");
         key_bytes.try_into().expect("Invalid key secret length")
+    }
+}
+
+impl KeySecret {
+    /// Safely convert KeySecret to [u8; 32] with proper error handling
+    pub fn try_into_bytes(&self) -> Result<[u8; 32], CoJsonCoreError> {
+        let key_bytes = decode_z(&self.0).map_err(|e| {
+            CoJsonCoreError::InvalidKeySecret(format!("base58 decode failed: {}", e))
+        })?;
+        
+        if key_bytes.len() != 32 {
+            return Err(CoJsonCoreError::InvalidKeySecret(format!(
+                "expected 32 bytes, got {}", key_bytes.len()
+            )));
+        }
+
+        key_bytes.try_into().map_err(|_| {
+            CoJsonCoreError::InvalidKeySecret("failed to convert to 32-byte array".to_string())
+        })
     }
 }
 
@@ -170,6 +232,18 @@ pub enum CoJsonCoreError {
 
     #[error("Signature verification failed: (hash: {0})")]
     SignatureVerification(String),
+
+    #[error("Invalid signer secret format: {0}")]
+    InvalidSignerSecret(String),
+
+    #[error("Invalid key secret format: {0}")]
+    InvalidKeySecret(String),
+
+    #[error("Base58 decoding failed: {0}")]
+    Base58Decode(#[from] bs58::decode::Error),
+
+    #[error("Ed25519 key error: {0}")]
+    Ed25519Key(#[from] ed25519_dalek::SignatureError),
 }
 
 #[derive(Clone)]
@@ -273,6 +347,19 @@ impl SessionLogInternal {
         signer_secret: &SignerSecret,
         made_at: u64,
     ) -> (Signature, Transaction) {
+        // Use the fallible version and panic on error to maintain API compatibility
+        self.try_add_new_transaction(changes_json, mode, signer_secret, made_at)
+            .expect("Transaction creation failed")
+    }
+
+    /// Safely create a new transaction with proper error handling
+    pub fn try_add_new_transaction(
+        &mut self,
+        changes_json: &str,
+        mode: TransactionMode,
+        signer_secret: &SignerSecret,
+        made_at: u64,
+    ) -> Result<(Signature, Transaction), CoJsonCoreError> {
         let new_tx = match mode {
             TransactionMode::Private { key_id, key_secret } => {
                 let tx_index = self.transactions_json.len() as u32;
@@ -291,7 +378,7 @@ impl SessionLogInternal {
 
                 let nonce = self.generate_json_nonce(&nonce_material);
 
-                let secret_key_bytes: [u8; 32] = (&key_secret).into();
+                let secret_key_bytes = key_secret.try_into_bytes()?;
 
                 let mut ciphertext = changes_json.as_bytes().to_vec();
                 let mut cipher = XSalsa20::new(&secret_key_bytes.into(), &nonce.into());
@@ -315,18 +402,18 @@ impl SessionLogInternal {
             }),
         };
 
-        let tx_json = serde_json::to_string(&new_tx).unwrap();
+        let tx_json = serde_json::to_string(&new_tx)?;
         self.hasher.update(tx_json.as_bytes());
         self.transactions_json.push(tx_json);
 
         let new_hash = self.hasher.finalize();
         let new_hash_encoded_stringified = format!("\"hash_z{}\"", bs58::encode(new_hash.as_bytes()).into_string());
-        let signing_key: SigningKey = signer_secret.into();
+        let signing_key = signer_secret.try_into_signing_key()?;
         let new_signature: Signature = signing_key.sign(new_hash_encoded_stringified.as_bytes()).into();
 
         self.last_signature = Some(new_signature.clone());
 
-        (new_signature, new_tx)
+        Ok((new_signature, new_tx))
     }
 
     pub fn decrypt_next_transaction_changes_json(
@@ -462,7 +549,7 @@ mod tests {
         );
 
         match result {
-            Ok(returned_final_hash) => {
+            Ok(_) => {
                 let final_hash = session.hasher.finalize();
                 let final_hash_encoded = format!(
                     "hash_z{}",
@@ -527,7 +614,7 @@ mod tests {
         );
 
         match result {
-            Ok(returned_final_hash) => {
+            Ok(_) => {
                 let final_hash = session.hasher.finalize();
                 let final_hash_encoded = format!(
                     "hash_z{}",

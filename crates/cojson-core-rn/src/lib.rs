@@ -152,7 +152,7 @@ pub fn try_add_transactions(
             Ok(transactions) => {
                 let signature = Signature(new_signature);
                 match log.try_add(transactions, &signature, skip_verify) {
-                    Ok(hash) => success_result(hash.0),
+                    Ok(()) => success_result("success".to_string()),
                     Err(e) => error_result(format!("Failed to add transactions: {}", e)),
                 }
             }
@@ -174,7 +174,7 @@ pub fn add_new_private_transaction(
     let storage = ensure_storage();
     let mut logs = storage.lock().unwrap();
     if let Some(log) = logs.get_mut(&handle.id) {
-        let (hash, signature, transaction) = log.add_new_transaction(
+        match log.try_add_new_transaction(
             &changes_json,
             TransactionMode::Private {
                 key_id: KeyID(key_id),
@@ -182,15 +182,17 @@ pub fn add_new_private_transaction(
             },
             &SignerSecret(signer_secret),
             made_at as u64,
-        );
-
-        match serde_json::to_string(&serde_json::json!({
-            "signature": signature.0,
-            "transaction": transaction,
-            "hash": hash.0
-        })) {
-            Ok(json) => success_result(json),
-            Err(e) => error_result(format!("Failed to serialize result: {}", e)),
+        ) {
+            Ok((signature, transaction)) => {
+                match serde_json::to_string(&serde_json::json!({
+                    "signature": signature.0,
+                    "transaction": transaction
+                })) {
+                    Ok(json) => success_result(json),
+                    Err(e) => error_result(format!("Failed to serialize result: {}", e)),
+                }
+            }
+            Err(e) => error_result(format!("Transaction creation failed: {}", e)),
         }
     } else {
         error_result("Invalid session log handle".to_string())
@@ -206,20 +208,22 @@ pub fn add_new_trusting_transaction(
     let storage = ensure_storage();
     let mut logs = storage.lock().unwrap();
     if let Some(log) = logs.get_mut(&handle.id) {
-        let (hash, signature, transaction) = log.add_new_transaction(
+        match log.try_add_new_transaction(
             &changes_json,
             TransactionMode::Trusting,
             &SignerSecret(signer_secret),
             made_at as u64,
-        );
-
-        match serde_json::to_string(&serde_json::json!({
-            "signature": signature.0,
-            "transaction": transaction,
-            "hash": hash.0
-        })) {
-            Ok(json) => success_result(json),
-            Err(e) => error_result(format!("Failed to serialize result: {}", e)),
+        ) {
+            Ok((signature, transaction)) => {
+                match serde_json::to_string(&serde_json::json!({
+                    "signature": signature.0,
+                    "transaction": transaction
+                })) {
+                    Ok(json) => success_result(json),
+                    Err(e) => error_result(format!("Failed to serialize result: {}", e)),
+                }
+            }
+            Err(e) => error_result(format!("Transaction creation failed: {}", e)),
         }
     } else {
         error_result("Invalid session log handle".to_string())
@@ -257,7 +261,8 @@ pub fn decrypt_next_transaction_changes_json(
     let storage = ensure_storage();
     let logs = storage.lock().unwrap();
     if let Some(log) = logs.get(&handle.id) {
-        match log.decrypt_next_transaction_changes_json(tx_index, &key_secret) {
+        let key_secret = KeySecret(String::from_utf8_lossy(&key_secret).to_string());
+        match log.decrypt_next_transaction_changes_json(tx_index, key_secret) {
             Ok(changes) => success_result(changes),
             Err(e) => error_result(format!("Failed to decrypt transaction: {}", e)),
         }
