@@ -4,7 +4,6 @@ import { assert, afterAll, beforeAll, describe, expect, it } from "vitest";
 import { Account, Group, co, z } from "../../..";
 import {
   createWorkerAccount,
-  setupJazzTestSync,
   startSyncServer,
 } from "../../../tools/testing.js";
 import { startWorker } from "../../../worker/index.js";
@@ -19,7 +18,6 @@ describe("JazzBetterAuthDatabaseAdapter tests", async () => {
 
     beforeAll(async () => {
       syncServer = await startSyncServer();
-      await setupJazzTestSync();
 
       const workerAccount = await createWorkerAccount({
         name: "test",

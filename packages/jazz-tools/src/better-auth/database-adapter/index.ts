@@ -1,11 +1,13 @@
 import { type AdapterDebugLogs, createAdapter } from "better-auth/adapters";
 import type { Account } from "jazz-tools";
 import { startWorker } from "jazz-tools/worker";
-import * as JazzRepository from "./jazz-repository.js";
+import {
+  JazzRepository,
+  UserRepository,
+  SessionRepository,
+  VerificationRepository,
+} from "./repository";
 import { createJazzSchema } from "./schema.js";
-import * as SessionRepository from "./session-repository.js";
-import * as UserRepository from "./user-repository.js";
-import * as VerificationRepository from "./verification-repository.js";
 
 export interface JazzAdapterConfig {
   /**
@@ -25,17 +27,6 @@ export interface JazzAdapterConfig {
    */
   accountSecret: string;
 }
-
-type CustomRepository = Omit<
-  typeof JazzRepository,
-  "findByUnique" | "findById"
->;
-
-const customRepository: Record<string, CustomRepository> = {
-  session: SessionRepository,
-  user: UserRepository,
-  verification: VerificationRepository,
-};
 
 /**
  * Creates a Better Auth database adapter that integrates with Jazz framework.
@@ -103,155 +94,90 @@ export const JazzBetterAuthDatabaseAdapter = (
         return worker;
       }
 
+      async function initRepository(model: string): Promise<JazzRepository> {
+        let Repository: typeof JazzRepository | undefined = undefined;
+        switch (model) {
+          case "user":
+            Repository = UserRepository;
+            break;
+          case "session":
+            Repository = SessionRepository;
+            break;
+          case "verification":
+            Repository = VerificationRepository;
+            break;
+        }
+
+        if (!Repository) {
+          Repository = JazzRepository;
+        }
+
+        const worker = await getWorker();
+        const database = await JazzSchema.loadDatabase(worker);
+
+        const repository = new Repository(
+          JazzSchema.DatabaseRoot,
+          database,
+          worker,
+        );
+
+        return repository;
+      }
+
       return {
         create: async ({ data, model, select }) => {
           // console.log("create", { data, model, select });
-          const schema =
-            JazzSchema.DatabaseRoot.shape.tables.shape[model]?.element;
+          const repository = await initRepository(model);
 
-          if (!schema) {
-            throw new Error(`Schema for model ${model} not found`);
-          }
-
-          const worker = await getWorker();
-          const database = await JazzSchema.loadDatabase(worker);
-
-          const method = customRepository[model] ?? JazzRepository;
-
-          return method.create(
-            {
-              schema: JazzSchema.DatabaseRoot,
-              db: database,
-            },
-            schema,
-            model,
-            data,
-          );
-          // console.log("update", { model, where, update });
+          return repository.create(model, data);
         },
         update: async ({ model, where, update }) => {
-          const worker = await getWorker();
-          const database = await JazzSchema.loadDatabase(worker);
+          // console.log("update", { model, where, update });
+          const repository = await initRepository(model);
 
-          const method = customRepository[model] ?? JazzRepository;
-
-          const updated = await method.update(
-            {
-              schema: JazzSchema.DatabaseRoot,
-              db: database,
-            },
-            model,
-            where,
-            update,
-          );
+          const updated = await repository.update(model, where, update);
 
           if (updated.length === 0) {
             return null;
           }
 
           return updated[0]!;
-          // console.log("updateMany", { model, where, update });
         },
         updateMany: async ({ model, where, update }) => {
-          const worker = await getWorker();
-          const database = await JazzSchema.loadDatabase(worker);
+          // console.log("updateMany", { model, where, update });
+          const repository = await initRepository(model);
 
-          const method = customRepository[model] ?? JazzRepository;
-
-          const updated = await method.update(
-            {
-              schema: JazzSchema.DatabaseRoot,
-              db: database,
-            },
-            model,
-            where,
-            update,
-          );
+          const updated = await repository.update(model, where, update);
 
           return updated.length;
-          // console.log("delete", { model, where });
         },
         delete: async ({ model, where }) => {
-          const worker = await getWorker();
-          const database = await JazzSchema.loadDatabase(worker);
+          // console.log("delete", { model, where });
+          const repository = await initRepository(model);
 
-          const method = customRepository[model] ?? JazzRepository;
-
-          await method.deleteValue(
-            {
-              schema: JazzSchema.DatabaseRoot,
-              db: database,
-            },
-            model,
-            where,
-          );
-          // console.log("findOne", { model, where });
+          await repository.deleteValue(model, where);
         },
         findOne: async ({ model, where }) => {
-          const worker = await getWorker();
+          // console.log("findOne", { model, where });
+          const repository = await initRepository(model);
 
-          const database = await JazzSchema.loadDatabase(worker);
-
-          const method = customRepository[model] ?? JazzRepository;
-
-          return method.findOne(
-            {
-              schema: JazzSchema.DatabaseRoot,
-              db: database,
-            },
-            model,
-            where,
-          );
+          return repository.findOne(model, where);
         },
         findMany: async ({ model, where, limit, sortBy, offset }) => {
-          const worker = await getWorker();
-          const database = await JazzSchema.loadDatabase(worker);
+          const repository = await initRepository(model);
 
-          const method = customRepository[model] ?? JazzRepository;
-
-          return method.findMany(
-            {
-              schema: JazzSchema.DatabaseRoot,
-              db: database,
-            },
-            model,
-            // console.log("deleteMany", { model, where });
-            where,
-            limit,
-            sortBy,
-            offset,
-          );
+          return repository.findMany(model, where, limit, sortBy, offset);
         },
-        // console.log("count", { model, where });
         deleteMany: async ({ model, where }) => {
-          const worker = await getWorker();
-          const database = await JazzSchema.loadDatabase(worker);
+          const repository = await initRepository(model);
 
-          const method = customRepository[model] ?? JazzRepository;
-
-          return method.deleteValue(
-            {
-              schema: JazzSchema.DatabaseRoot,
-              db: database,
-            },
-            model,
-            where,
-          );
+          return repository.deleteValue(model, where);
         },
         count: async ({ model, where }) => {
-          const worker = await getWorker();
-          const database = await JazzSchema.loadDatabase(worker);
+          // console.log("count", { model, where });
+          const repository = await initRepository(model);
 
-          const method = customRepository[model] ?? JazzRepository;
-
-          return method.count(
-            {
-              schema: JazzSchema.DatabaseRoot,
-              db: database,
-            },
-            model,
-            where,
-          );
+          return repository.count(model, where);
         },
       };
     },

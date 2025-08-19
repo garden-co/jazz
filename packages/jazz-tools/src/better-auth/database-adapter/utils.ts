@@ -79,7 +79,7 @@ export function filterListByWhere<T>(
   });
 }
 
-export function sortListByField<T extends Record<string, any>>(
+export function sortListByField<T extends Record<string, any> | null>(
   data: T[],
   sort?: { field: string; direction: "asc" | "desc" },
 ): T[] {
@@ -90,6 +90,10 @@ export function sortListByField<T extends Record<string, any>>(
   const { field, direction } = sort;
 
   data.sort((a, b) => {
+    if (a === null || b === null) {
+      return 0;
+    }
+
     if (typeof a[field] === "string" && typeof b[field] === "string") {
       return direction === "asc"
         ? a[field].localeCompare(b[field])
@@ -162,10 +166,13 @@ export function containWhereByField<T extends string>(
 export function extractWhereByField<T extends string>(
   field: T,
   where: CleanedWhere[] | undefined,
-): CleanedWhere[] | undefined {
+): [CleanedWhere | undefined, CleanedWhere[]] {
   if (where === undefined) {
-    return undefined;
+    return [undefined, []];
   }
 
-  return where.filter((cond) => isWhereByField(field, cond));
+  return [
+    where.find((cond) => isWhereByField(field, cond)),
+    where.filter((cond) => !isWhereByField(field, cond)),
+  ];
 }

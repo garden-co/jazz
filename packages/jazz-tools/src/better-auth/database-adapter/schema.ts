@@ -60,7 +60,10 @@ export function createJazzSchema(schema: BetterAuthDbSchema): JazzSchema {
             group: adminGroup,
             // create empty tables for each model
             tables: Object.fromEntries(
-              Object.keys(tablesSchema).map((key) => [key, []]),
+              Object.entries(tablesSchema).map(([key, value]) => [
+                key,
+                value.create([], adminGroup),
+              ]),
             ),
           },
           unique: DATABASE_ROOT_ID,
@@ -151,10 +154,11 @@ function generateSchemaFromBetterAuthSchema(schema: BetterAuthDbSchema) {
           }
         }),
     );
-  } else
+  } else {
     throw new Error(
       "Cannot find user and session tables, sessions will not be persisted",
     );
+  }
 
   return tablesSchema;
 }
