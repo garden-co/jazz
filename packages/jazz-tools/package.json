@@ -136,6 +136,21 @@
       "@jazz-tools/source": "./src/worker/index.ts",
       "types": "./dist/worker/index.d.ts",
       "default": "./dist/worker/index.js"
+    },
+    "./better-auth/auth/client": {
+      "@jazz-tools/source": "./src/better-auth/auth/client.ts",
+      "types": "./dist/better-auth/auth/client.d.ts",
+      "default": "./dist/better-auth/auth/client.js"
+    },
+    "./better-auth/auth/react": {
+      "@jazz-tools/source": "./src/better-auth/auth/react.tsx",
+      "types": "./dist/better-auth/auth/react.d.ts",
+      "default": "./dist/better-auth/auth/react.js"
+    },
+    "./better-auth/auth/server": {
+      "@jazz-tools/source": "./src/better-auth/auth/server.ts",
+      "types": "./dist/better-auth/auth/server.d.ts",
+      "default": "./dist/better-auth/auth/server.js"
     }
   },
   "type": "module",
@@ -194,6 +209,7 @@
     "@bam.tech/react-native-image-resizer": "*",
     "@op-engineering/op-sqlite": "^11.4.8",
     "@react-native-community/netinfo": "*",
+    "better-auth": "^1.3.0",
     "expo-file-system": "*",
     "expo-secure-store": "*",
     "expo-sqlite": "15.2.9",
@@ -214,6 +230,9 @@
       "optional": true
     },
     "@react-native-community/netinfo": {
+      "optional": true
+    },
+    "better-auth": {
       "optional": true
     },
     "expo-file-system": {
