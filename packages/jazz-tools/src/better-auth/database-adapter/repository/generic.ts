@@ -7,22 +7,26 @@ import {
   paginateList,
   sortListByField,
 } from "../utils.js";
+import { BetterAuthDbSchema } from "better-auth/db";
 
 export class JazzRepository {
   protected databaseSchema: Database;
   protected databaseRoot: co.loaded<Database, { group: true }>;
   protected worker: Account;
   protected owner: Group;
+  protected betterAuthSchema: BetterAuthDbSchema;
 
   constructor(
     databaseSchema: Database,
     databaseRoot: co.loaded<Database, { group: true }>,
     worker: Account,
+    betterAuthSchema: BetterAuthDbSchema = {},
   ) {
     this.databaseSchema = databaseSchema;
     this.databaseRoot = databaseRoot;
     this.worker = worker;
     this.owner = databaseRoot.group;
+    this.betterAuthSchema = betterAuthSchema;
   }
 
   async create<T extends z.z.core.$ZodLooseShape>(

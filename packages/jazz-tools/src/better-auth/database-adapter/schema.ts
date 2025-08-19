@@ -18,6 +18,7 @@ type WorkerAccount = co.Account<{
 type JazzSchema = {
   WorkerAccount: WorkerAccount;
   DatabaseRoot: Database;
+  betterAuthSchema: BetterAuthDbSchema;
   loadDatabase: (
     account: co.loaded<co.Account>,
     options?: Parameters<Database["loadUnique"]>[2],
@@ -48,6 +49,7 @@ export function createJazzSchema(schema: BetterAuthDbSchema): JazzSchema {
             group: true,
             tables: true,
           },
+          loadAs: account,
         },
       );
 
@@ -55,7 +57,7 @@ export function createJazzSchema(schema: BetterAuthDbSchema): JazzSchema {
         // Create a group for the first time
         // it will be the owner of the all tables and data
         const adminGroup = Group.create({ owner: account });
-        DatabaseRoot.upsertUnique({
+        await DatabaseRoot.upsertUnique({
           value: {
             group: adminGroup,
             // create empty tables for each model
@@ -84,6 +86,7 @@ export function createJazzSchema(schema: BetterAuthDbSchema): JazzSchema {
   return {
     WorkerAccount,
     DatabaseRoot,
+    betterAuthSchema: schema,
     async loadDatabase(account, options) {
       if (
         options?.resolve === false ||
