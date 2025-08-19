@@ -6,6 +6,7 @@ import {
   UserRepository,
   SessionRepository,
   VerificationRepository,
+  AccountRepository,
 } from "./repository";
 import { createJazzSchema } from "./schema.js";
 
@@ -105,6 +106,9 @@ export const JazzBetterAuthDatabaseAdapter = (
             break;
           case "verification":
             Repository = VerificationRepository;
+            break;
+          case "account":
+            Repository = AccountRepository;
             break;
         }
 
