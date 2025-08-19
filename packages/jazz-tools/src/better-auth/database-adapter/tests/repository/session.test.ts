@@ -68,7 +68,7 @@ describe("SessionRepository", () => {
   });
 
   describe("create", () => {
-    it.only("should throw an error if token or userId is not provided", async () => {
+    it("should throw an error if token or userId is not provided", async () => {
       const sessionRepository = new SessionRepository(
         databaseSchema,
         databaseRoot,
