@@ -30,7 +30,10 @@ Pod::Spec.new do |s|
 
   s.vendored_libraries = 'build/ios/libcojson_core_rn.a'
 
-  # Build Rust library before linking
+  # Build Rust library during pod install
+  s.prepare_command = 'cd "$PWD" && ./scripts/build-rust.sh'
+  
+  # Keep script phase as backup for incremental builds
   s.script_phase = {
     :name => 'Build Rust Library',
     :script => 'cd "$PODS_TARGET_SRCROOT" && ./scripts/build-rust.sh',
