@@ -25,6 +25,7 @@ crypto_secretbox = { version = "0.1.1", features = ["getrandom"] }
 salsa20 = "0.10.2"
 rand = "0.8"
 bs58 = "0.5"
+once_cell = "1.19"
 
 [features]
 default = ["console_error_panic_hook"]

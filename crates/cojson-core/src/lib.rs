@@ -183,15 +183,8 @@ pub struct SessionLogInternal {
 }
 
 impl SessionLogInternal {
-    pub fn new(co_id: CoID, session_id: SessionID, signer_id: SignerID) -> Self {
+    pub fn new(co_id: CoID, session_id: SessionID, public_key: VerifyingKey) -> Self {
         let hasher = blake3::Hasher::new();
-
-        let public_key = VerifyingKey::try_from(
-            decode_z(&signer_id.0)
-                .expect("Invalid public key")
-                .as_slice(),
-        )
-        .expect("Invalid public key");
 
         Self {
             co_id,
