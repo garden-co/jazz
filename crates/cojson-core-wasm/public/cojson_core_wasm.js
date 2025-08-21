@@ -513,6 +513,89 @@ export function get_signer_id(secret) {
 }
 
 /**
+ * Generate a new X25519 private key using secure random number generation.
+ * Returns 32 bytes of raw key material suitable for use with other X25519 functions.
+ * This key can be reused for multiple Diffie-Hellman exchanges.
+ * @returns {Uint8Array}
+ */
+export function new_x25519_private_key() {
+    const ret = wasm.new_x25519_private_key();
+    var v1 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+    return v1;
+}
+
+/**
+ * WASM-exposed function to derive an X25519 public key from a private key.
+ * - `private_key`: 32 bytes of private key material
+ * Returns 32 bytes of public key material or throws JsError if key is invalid.
+ * @param {Uint8Array} private_key
+ * @returns {Uint8Array}
+ */
+export function x25519_public_key(private_key) {
+    const ptr0 = passArray8ToWasm0(private_key, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.x25519_public_key(ptr0, len0);
+    if (ret[3]) {
+        throw takeFromExternrefTable0(ret[2]);
+    }
+    var v2 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+    return v2;
+}
+
+/**
+ * WASM-exposed function to perform X25519 Diffie-Hellman key exchange.
+ * - `private_key`: 32 bytes of private key material
+ * - `public_key`: 32 bytes of public key material
+ * Returns 32 bytes of shared secret material or throws JsError if key exchange fails.
+ * @param {Uint8Array} private_key
+ * @param {Uint8Array} public_key
+ * @returns {Uint8Array}
+ */
+export function x25519_diffie_hellman(private_key, public_key) {
+    const ptr0 = passArray8ToWasm0(private_key, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passArray8ToWasm0(public_key, wasm.__wbindgen_malloc);
+    const len1 = WASM_VECTOR_LEN;
+    const ret = wasm.x25519_diffie_hellman(ptr0, len0, ptr1, len1);
+    if (ret[3]) {
+        throw takeFromExternrefTable0(ret[2]);
+    }
+    var v3 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+    return v3;
+}
+
+/**
+ * WASM-exposed function to derive a sealer ID from a sealer secret.
+ * - `secret`: Raw bytes of the sealer secret
+ * Returns a base58-encoded sealer ID with "sealer_z" prefix or throws JsError if derivation fails.
+ * @param {Uint8Array} secret
+ * @returns {string}
+ */
+export function get_sealer_id(secret) {
+    let deferred3_0;
+    let deferred3_1;
+    try {
+        const ptr0 = passArray8ToWasm0(secret, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.get_sealer_id(ptr0, len0);
+        var ptr2 = ret[0];
+        var len2 = ret[1];
+        if (ret[3]) {
+            ptr2 = 0; len2 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred3_0 = ptr2;
+        deferred3_1 = len2;
+        return getStringFromWasm0(ptr2, len2);
+    } finally {
+        wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
+    }
+}
+
+/**
  * Generate a 24-byte nonce from input material using BLAKE3.
  * - `nonce_material`: Raw bytes to derive the nonce from
  * Returns 24 bytes suitable for use as a nonce in cryptographic operations.
@@ -612,89 +695,6 @@ export function blake3_digest_for_state(state) {
     var v2 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
     wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
     return v2;
-}
-
-/**
- * Generate a new X25519 private key using secure random number generation.
- * Returns 32 bytes of raw key material suitable for use with other X25519 functions.
- * This key can be reused for multiple Diffie-Hellman exchanges.
- * @returns {Uint8Array}
- */
-export function new_x25519_private_key() {
-    const ret = wasm.new_x25519_private_key();
-    var v1 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
-    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
-    return v1;
-}
-
-/**
- * WASM-exposed function to derive an X25519 public key from a private key.
- * - `private_key`: 32 bytes of private key material
- * Returns 32 bytes of public key material or throws JsError if key is invalid.
- * @param {Uint8Array} private_key
- * @returns {Uint8Array}
- */
-export function x25519_public_key(private_key) {
-    const ptr0 = passArray8ToWasm0(private_key, wasm.__wbindgen_malloc);
-    const len0 = WASM_VECTOR_LEN;
-    const ret = wasm.x25519_public_key(ptr0, len0);
-    if (ret[3]) {
-        throw takeFromExternrefTable0(ret[2]);
-    }
-    var v2 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
-    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
-    return v2;
-}
-
-/**
- * WASM-exposed function to perform X25519 Diffie-Hellman key exchange.
- * - `private_key`: 32 bytes of private key material
- * - `public_key`: 32 bytes of public key material
- * Returns 32 bytes of shared secret material or throws JsError if key exchange fails.
- * @param {Uint8Array} private_key
- * @param {Uint8Array} public_key
- * @returns {Uint8Array}
- */
-export function x25519_diffie_hellman(private_key, public_key) {
-    const ptr0 = passArray8ToWasm0(private_key, wasm.__wbindgen_malloc);
-    const len0 = WASM_VECTOR_LEN;
-    const ptr1 = passArray8ToWasm0(public_key, wasm.__wbindgen_malloc);
-    const len1 = WASM_VECTOR_LEN;
-    const ret = wasm.x25519_diffie_hellman(ptr0, len0, ptr1, len1);
-    if (ret[3]) {
-        throw takeFromExternrefTable0(ret[2]);
-    }
-    var v3 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
-    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
-    return v3;
-}
-
-/**
- * WASM-exposed function to derive a sealer ID from a sealer secret.
- * - `secret`: Raw bytes of the sealer secret
- * Returns a base58-encoded sealer ID with "sealer_z" prefix or throws JsError if derivation fails.
- * @param {Uint8Array} secret
- * @returns {string}
- */
-export function get_sealer_id(secret) {
-    let deferred3_0;
-    let deferred3_1;
-    try {
-        const ptr0 = passArray8ToWasm0(secret, wasm.__wbindgen_malloc);
-        const len0 = WASM_VECTOR_LEN;
-        const ret = wasm.get_sealer_id(ptr0, len0);
-        var ptr2 = ret[0];
-        var len2 = ret[1];
-        if (ret[3]) {
-            ptr2 = 0; len2 = 0;
-            throw takeFromExternrefTable0(ret[2]);
-        }
-        deferred3_0 = ptr2;
-        deferred3_1 = len2;
-        return getStringFromWasm0(ptr2, len2);
-    } finally {
-        wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
-    }
 }
 
 /**

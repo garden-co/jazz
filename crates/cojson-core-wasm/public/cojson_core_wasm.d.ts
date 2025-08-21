@@ -97,6 +97,31 @@ export function verify(signature: Uint8Array, message: Uint8Array, id: Uint8Arra
  */
 export function get_signer_id(secret: Uint8Array): string;
 /**
+ * Generate a new X25519 private key using secure random number generation.
+ * Returns 32 bytes of raw key material suitable for use with other X25519 functions.
+ * This key can be reused for multiple Diffie-Hellman exchanges.
+ */
+export function new_x25519_private_key(): Uint8Array;
+/**
+ * WASM-exposed function to derive an X25519 public key from a private key.
+ * - `private_key`: 32 bytes of private key material
+ * Returns 32 bytes of public key material or throws JsError if key is invalid.
+ */
+export function x25519_public_key(private_key: Uint8Array): Uint8Array;
+/**
+ * WASM-exposed function to perform X25519 Diffie-Hellman key exchange.
+ * - `private_key`: 32 bytes of private key material
+ * - `public_key`: 32 bytes of public key material
+ * Returns 32 bytes of shared secret material or throws JsError if key exchange fails.
+ */
+export function x25519_diffie_hellman(private_key: Uint8Array, public_key: Uint8Array): Uint8Array;
+/**
+ * WASM-exposed function to derive a sealer ID from a sealer secret.
+ * - `secret`: Raw bytes of the sealer secret
+ * Returns a base58-encoded sealer ID with "sealer_z" prefix or throws JsError if derivation fails.
+ */
+export function get_sealer_id(secret: Uint8Array): string;
+/**
  * Generate a 24-byte nonce from input material using BLAKE3.
  * - `nonce_material`: Raw bytes to derive the nonce from
  * Returns 24 bytes suitable for use as a nonce in cryptographic operations.
@@ -137,31 +162,6 @@ export function blake3_update_state(state: Blake3Hasher, data: Uint8Array): void
  * This finalizes an incremental hashing operation.
  */
 export function blake3_digest_for_state(state: Blake3Hasher): Uint8Array;
-/**
- * Generate a new X25519 private key using secure random number generation.
- * Returns 32 bytes of raw key material suitable for use with other X25519 functions.
- * This key can be reused for multiple Diffie-Hellman exchanges.
- */
-export function new_x25519_private_key(): Uint8Array;
-/**
- * WASM-exposed function to derive an X25519 public key from a private key.
- * - `private_key`: 32 bytes of private key material
- * Returns 32 bytes of public key material or throws JsError if key is invalid.
- */
-export function x25519_public_key(private_key: Uint8Array): Uint8Array;
-/**
- * WASM-exposed function to perform X25519 Diffie-Hellman key exchange.
- * - `private_key`: 32 bytes of private key material
- * - `public_key`: 32 bytes of public key material
- * Returns 32 bytes of shared secret material or throws JsError if key exchange fails.
- */
-export function x25519_diffie_hellman(private_key: Uint8Array, public_key: Uint8Array): Uint8Array;
-/**
- * WASM-exposed function to derive a sealer ID from a sealer secret.
- * - `secret`: Raw bytes of the sealer secret
- * Returns a base58-encoded sealer ID with "sealer_z" prefix or throws JsError if derivation fails.
- */
-export function get_sealer_id(secret: Uint8Array): string;
 /**
  * WASM-exposed function for sealing a message using X25519 + XSalsa20-Poly1305.
  * Provides authenticated encryption with perfect forward secrecy.
@@ -235,11 +235,15 @@ export interface InitOutput {
   readonly ed25519_signing_key_to_public: (a: number, b: number) => [number, number, number, number];
   readonly ed25519_verifying_key_from_bytes: (a: number, b: number) => [number, number, number, number];
   readonly ed25519_signature_from_bytes: (a: number, b: number) => [number, number, number, number];
-  readonly ed25519_verifying_key: (a: number, b: number) => [number, number, number, number];
   readonly ed25519_signing_key_sign: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+  readonly ed25519_verifying_key: (a: number, b: number) => [number, number, number, number];
   readonly sign: (a: number, b: number, c: number, d: number) => [number, number, number, number];
   readonly verify: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number];
   readonly get_signer_id: (a: number, b: number) => [number, number, number, number];
+  readonly new_x25519_private_key: () => [number, number];
+  readonly x25519_public_key: (a: number, b: number) => [number, number, number, number];
+  readonly x25519_diffie_hellman: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+  readonly get_sealer_id: (a: number, b: number) => [number, number, number, number];
   readonly generate_nonce: (a: number, b: number) => [number, number];
   readonly blake3_hash_once: (a: number, b: number) => [number, number];
   readonly blake3_hash_once_with_context: (a: number, b: number, c: number, d: number) => [number, number];
@@ -249,12 +253,8 @@ export interface InitOutput {
   readonly blake3_empty_state: () => number;
   readonly blake3_update_state: (a: number, b: number, c: number) => void;
   readonly blake3_digest_for_state: (a: number) => [number, number];
-  readonly blake3hasher_update: (a: number, b: number, c: number) => void;
   readonly blake3hasher_new: () => number;
-  readonly new_x25519_private_key: () => [number, number];
-  readonly x25519_public_key: (a: number, b: number) => [number, number, number, number];
-  readonly x25519_diffie_hellman: (a: number, b: number, c: number, d: number) => [number, number, number, number];
-  readonly get_sealer_id: (a: number, b: number) => [number, number, number, number];
+  readonly blake3hasher_update: (a: number, b: number, c: number) => void;
   readonly seal: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
   readonly unseal: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
   readonly encrypt: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];

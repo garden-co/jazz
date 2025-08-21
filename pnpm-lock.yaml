@@ -148,14 +148,14 @@ importers:
         specifier: workspace:*
         version: link:../packages/cojson
       cojson-latest:
-        specifier: npm:cojson@latest
-        version: cojson@0.17.5
+        specifier: npm:cojson@0.17.10
+        version: cojson@0.17.10
       jazz-tools:
         specifier: workspace:*
         version: link:../packages/jazz-tools
       jazz-tools-latest:
-        specifier: npm:jazz-tools@latest
-        version: jazz-tools@0.17.5(fcnzwos7wezy7dy4sqlslwz4mm)
+        specifier: npm:jazz-tools@0.17.10
+        version: jazz-tools@0.17.10(fcnzwos7wezy7dy4sqlslwz4mm)
 
   crates/cojson-core-wasm:
     devDependencies:
@@ -8329,14 +8329,17 @@ packages:
     resolution: {integrity: sha512-QVb0dM5HvG+uaxitm8wONl7jltx8dqhfU33DcqtOZcLSVIKSDDLDi7+0LbAKiyI8hD9u42m2YxXSkMGWThaecQ==}
     engines: {iojs: '>= 1.0.0', node: '>= 0.12.0'}
 
-  cojson-storage-indexeddb@0.17.5:
-    resolution: {integrity: sha512-Q0VOvqhPvBD18gf0YMXEjq/XzGg3b7B0zGl8DiqtWbCLtei5fzCyCDxcEUSODjBFEC8hYuJTLnbNBdWSnNR+Ug==}
+  cojson-core-wasm@0.17.10:
+    resolution: {integrity: sha512-cfNPtacqatwCMiqcTPOFVqG2TueCQl0Z/r6FcONMjpM2U6zCZFLcQK5jUE/W6YIkDAisIT68QGIYpdgyFqr31w==}
 
-  cojson-transport-ws@0.17.5:
-    resolution: {integrity: sha512-F8z2EhJwYnLiejxwsfrfk6MmhiBcj/jz6qEH0ME4gFy3SUx0QtXeiZI9BwuL/DufoTHB6lNH1xPivu3OdVJjAw==}
+  cojson-storage-indexeddb@0.17.10:
+    resolution: {integrity: sha512-CLHKZwE9oY2g9OUkz/uTb9FjfFXL/OLIPo87cgF5+m1VJwjn3sEVZI+2mWXBuBiJUIs69SpHUhedDngJ1XYpnw==}
 
-  cojson@0.17.5:
-    resolution: {integrity: sha512-GBWySEsURzFakyIhQHSBTxcNQDDmnYVlP802m0jYbSW5aK6PdT1H53QOIzBSq0sm0eEiN8DDP3u+w1TfVJydcQ==}
+  cojson-transport-ws@0.17.10:
+    resolution: {integrity: sha512-JjhguTHLr/yNlz7B7lkz32SrRo9nPfAZovSrD3gtgCCDkDwVBeZpid/EEQP3zoFzvQynrsZHvVPEKG9OBzVWTg==}
+
+  cojson@0.17.10:
+    resolution: {integrity: sha512-MhbchNNqi8s5ukhAEgSj6L+uCGnj7zuedljngni7dS1BEv6INunS+57qtqHCUjRArrA8Gzxez6TO3MrFRBgsfw==}
 
   collect-v8-coverage@1.0.2:
     resolution: {integrity: sha512-lHl4d5/ONEbLlJvaJNtsF/Lz+WvB07u2ycqTYbdrq7UypDXailES4valYb2eWiJFxZlVmpGekfqoxQhzyFdT4Q==}
@@ -10307,11 +10310,8 @@ packages:
     engines: {node: '>=10'}
     hasBin: true
 
-  jazz-crypto-rs@0.0.7:
-    resolution: {integrity: sha512-Pzs8Zu1zgKVURkBVvqqF1B2r78FaSZdwPbmeCWx0Nb3nibzPuB/kSKEO7LJsKnb3P5HO0v+lTIJ53mGC5H1urQ==}
-
-  jazz-tools@0.17.5:
-    resolution: {integrity: sha512-3Kvad7APpnMpYDTX6zZPcyD9vwDeQoa52g809CZ+F0mC9GQZDWTWaY7jYJd+aJbH2K/TLkIcTLDFX8OF6LnNCQ==}
+  jazz-tools@0.17.10:
+    resolution: {integrity: sha512-mNP0SavX6+NF+tCkykUUYil0HQrpX3oIRZ6Vd/d9aA2qvJuBzWLsUsxx57c1Ms3Y12qY6MUgOKbpNbxalcbnyg==}
     peerDependencies:
       '@bam.tech/react-native-image-resizer': '*'
       '@op-engineering/op-sqlite': ^11.4.8
@@ -23018,23 +23018,25 @@ snapshots:
   co@4.6.0:
     optional: true
 
-  cojson-storage-indexeddb@0.17.5:
-    dependencies:
-      cojson: 0.17.5
+  cojson-core-wasm@0.17.10: {}
 
-  cojson-transport-ws@0.17.5:
+  cojson-storage-indexeddb@0.17.10:
+    dependencies:
+      cojson: 0.17.10
+
+  cojson-transport-ws@0.17.10:
     dependencies:
       '@opentelemetry/api': 1.9.0
-      cojson: 0.17.5
+      cojson: 0.17.10
 
-  cojson@0.17.5:
+  cojson@0.17.10:
     dependencies:
       '@noble/ciphers': 1.3.0
       '@noble/curves': 1.9.1
       '@noble/hashes': 1.8.0
       '@opentelemetry/api': 1.9.0
       '@scure/base': 1.2.1
-      jazz-crypto-rs: 0.0.7
+      cojson-core-wasm: 0.17.10
       neverthrow: 7.2.0
       unicode-segmenter: 0.12.0
 
@@ -25369,18 +25371,16 @@ snapshots:
       filelist: 1.0.4
       minimatch: 3.1.2
 
-  jazz-crypto-rs@0.0.7: {}
-
-  jazz-tools@0.17.5(fcnzwos7wezy7dy4sqlslwz4mm):
+  jazz-tools@0.17.10(fcnzwos7wezy7dy4sqlslwz4mm):
     dependencies:
       '@manuscripts/prosemirror-recreate-steps': 0.1.4
       '@scure/base': 1.2.1
       '@scure/bip39': 1.5.0
       '@tiptap/core': 2.12.0(@tiptap/pm@2.12.0)
       clsx: 2.1.1
-      cojson: 0.17.5
-      cojson-storage-indexeddb: 0.17.5
-      cojson-transport-ws: 0.17.5
+      cojson: 0.17.10
+      cojson-storage-indexeddb: 0.17.10
+      cojson-transport-ws: 0.17.10
       fast-myers-diff: 3.2.0
       goober: 2.1.16(csstype@3.1.3)
       prosemirror-example-setup: 1.2.3

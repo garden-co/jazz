@@ -11,8 +11,8 @@ const sampleHiddenIn = ["user1", "user2", "user3"];
 
 // Define the schemas based on the provided Message schema
 async function createSchema(
-  tools: typeof toolsLatest,
-  WasmCrypto: typeof WasmCryptoLatest,
+  tools: typeof tools,
+  WasmCrypto: typeof WasmCrypto,
 ) {
   const Embed = tools.co.map({
     url: tools.z.string(),
@@ -34,11 +34,12 @@ async function createSchema(
     threadId: tools.z.string().optional(),
   });
 
+  // @ts-ignore
   const ctx = await tools.createJazzContextForNewAccount({
     creationProps: {
       name: "Test Account",
     },
-    // @ts-expect-error
+    // @ts-ignore
     crypto: await WasmCrypto.create(),
   });
 
@@ -102,7 +103,7 @@ describe("Message.create", () => {
   );
 
   bench(
-    "Jazz 0.17.5",
+    "Jazz 0.17.10",
     () => {
       schemaLatest.Message.create(
         {
@@ -121,17 +122,25 @@ describe("Message.create", () => {
 });
 
 describe("Message import", () => {
-  bench("current version (SessionLog)", () => {
-    tools.importContentPieces(content ?? [], schema.account as any);
-    schema.account._raw.core.node.internalDeleteCoValue(message.id as any);
-  });
+  bench(
+    "current version",
+    () => {
+      tools.importContentPieces(content ?? [], schema.account as any);
+      schema.account._raw.core.node.internalDeleteCoValue(message.id as any);
+    },
+    { iterations: 5000 },
+  );
 
-  bench("Jazz 0.17.5", () => {
-    toolsLatest.importContentPieces(content ?? [], schemaLatest.account);
-    schemaLatest.account._raw.core.node.internalDeleteCoValue(
-      message.id as any,
-    );
-  });
+  bench(
+    "Jazz 0.17.10",
+    () => {
+      toolsLatest.importContentPieces(content ?? [], schemaLatest.account);
+      schemaLatest.account._raw.core.node.internalDeleteCoValue(
+        message.id as any,
+      );
+    },
+    { iterations: 5000 },
+  );
 });
 
 describe("import+ decrypt", () => {
@@ -145,11 +154,11 @@ describe("import+ decrypt", () => {
       node.expectCoValueLoaded(message.id as any).getCurrentContent();
       node.internalDeleteCoValue(message.id as any);
     },
-    { iterations: 500 },
+    { iterations: 5000 },
   );
 
   bench(
-    "Jazz 0.17.5",
+    "Jazz 0.17.10",
     () => {
       toolsLatest.importContentPieces(content ?? [], schemaLatest.account);
 
@@ -158,6 +167,6 @@ describe("import+ decrypt", () => {
       node.expectCoValueLoaded(message.id as any).getCurrentContent();
       node.internalDeleteCoValue(message.id as any);
     },
-    { iterations: 500 },
+    { iterations: 5000 },
   );
 });

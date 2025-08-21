@@ -9,7 +9,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 cojson-core = { path = "../cojson-core" }
 wasm-bindgen = "0.2"
-wee_alloc = { version = "0.4.5", optional = true }
+lol_alloc = { version = "0.4.1" }
 console_error_panic_hook = { version = "0.1.7", optional = true }
 ed25519-dalek = { version = "2.2.0", default-features = false, features = ["rand_core"] }
 serde_json = "1.0"
