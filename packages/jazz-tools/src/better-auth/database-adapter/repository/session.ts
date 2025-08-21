@@ -74,9 +74,6 @@ export class SessionRepository extends JazzRepository {
 
     sessions.push(session);
 
-    await session.waitForSync();
-    await sessions.waitForSync();
-
     return session;
   }
 
@@ -241,8 +238,6 @@ export class SessionRepository extends JazzRepository {
         sessions.splice(index, 1);
       }
     }
-
-    await sessions.waitForSync();
 
     return items.length;
   }

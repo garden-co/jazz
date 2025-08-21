@@ -133,7 +133,11 @@ export const JazzBetterAuthDatabaseAdapter = (
           // console.log("create", { data, model, select });
           const repository = await initRepository(model);
 
-          return repository.create(model, data);
+          const created = await repository.create(model, data);
+
+          await repository.ensureSync();
+
+          return created;
         },
         update: async ({ model, where, update }) => {
           // console.log("update", { model, where, update });
@@ -145,6 +149,8 @@ export const JazzBetterAuthDatabaseAdapter = (
             return null;
           }
 
+          await repository.ensureSync();
+
           return updated[0]!;
         },
         updateMany: async ({ model, where, update }) => {
@@ -153,6 +159,8 @@ export const JazzBetterAuthDatabaseAdapter = (
 
           const updated = await repository.update(model, where, update);
 
+          await repository.ensureSync();
+
           return updated.length;
         },
         delete: async ({ model, where }) => {
@@ -160,6 +168,8 @@ export const JazzBetterAuthDatabaseAdapter = (
           const repository = await initRepository(model);
 
           await repository.deleteValue(model, where);
+
+          await repository.ensureSync();
         },
         findOne: async ({ model, where }) => {
           // console.log("findOne", { model, where });
@@ -175,7 +185,11 @@ export const JazzBetterAuthDatabaseAdapter = (
         deleteMany: async ({ model, where }) => {
           const repository = await initRepository(model);
 
-          return repository.deleteValue(model, where);
+          const deleted = await repository.deleteValue(model, where);
+
+          await repository.ensureSync();
+
+          return deleted;
         },
         count: async ({ model, where }) => {
           // console.log("count", { model, where });
