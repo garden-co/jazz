@@ -16,6 +16,8 @@ export default function RootLayout({
           <Link href="/">Colors</Link>
           <Link href="/docs/button">Button</Link>
           <Link href="/docs/icons">Icons</Link>
+          <Link href="/docs/input">Input</Link>
+          <Link href="/docs/checkbox">Checkbox</Link>
         </div>
         <div className="container m-21">{children}</div>
       </body>
