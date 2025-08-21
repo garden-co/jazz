@@ -29,6 +29,10 @@ export class JazzRepository {
     this.betterAuthSchema = betterAuthSchema;
   }
 
+  ensureSync() {
+    return this.worker.waitForAllCoValuesSync();
+  }
+
   async create<T extends z.z.core.$ZodLooseShape>(
     model: string,
     data: T,
