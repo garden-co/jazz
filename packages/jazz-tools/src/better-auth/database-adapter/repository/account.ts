@@ -3,7 +3,7 @@ import { co, CoMap, z } from "../../../";
 import { JazzRepository } from "./generic";
 import { isWhereBySingleField } from "../utils";
 
-const AccountIdIndex = co.map({ ids: z.string() });
+const AccountIdIndex = co.list(z.string());
 
 export class AccountRepository extends JazzRepository {
   /**
@@ -38,7 +38,7 @@ export class AccountRepository extends JazzRepository {
         this.getAccountIdProperty(),
       );
 
-      const ids = accountIdIndex?.ids?.split(",") ?? [];
+      const ids = accountIdIndex ?? [];
 
       if (ids.length === 0) {
         return [];
@@ -92,20 +92,12 @@ export class AccountRepository extends JazzRepository {
     accountId: string,
     accountIdProperty: string,
   ) {
-    const accountIdIndex = await AccountIdIndex.loadUnique(
-      accountIdProperty,
-      this.owner.id,
-      {
-        loadAs: this.worker,
-      },
-    );
+    const accountIdIndex = await this.getAccountIdIndex(accountIdProperty);
 
-    const ids = accountIdIndex?.ids?.split(",") ?? [];
+    const ids = accountIdIndex ?? [];
 
     await AccountIdIndex.upsertUnique({
-      value: {
-        ids: [...ids, accountId].join(","),
-      },
+      value: [...ids, accountId],
       unique: accountIdProperty,
       owner: this.owner,
     });
@@ -115,20 +107,12 @@ export class AccountRepository extends JazzRepository {
     accountId: string,
     accountIdProperty: string,
   ) {
-    const accountIdIndex = await AccountIdIndex.loadUnique(
-      accountIdProperty,
-      this.owner.id,
-      {
-        loadAs: this.worker,
-      },
-    );
+    const accountIdIndex = await this.getAccountIdIndex(accountIdProperty);
 
-    const ids = accountIdIndex?.ids?.split(",") ?? [];
+    const ids = accountIdIndex ?? [];
 
     await AccountIdIndex.upsertUnique({
-      value: {
-        ids: ids.filter((id) => id !== accountId).join(","),
-      },
+      value: ids.filter((id) => id !== accountId),
       unique: accountIdProperty,
       owner: this.owner,
     });
