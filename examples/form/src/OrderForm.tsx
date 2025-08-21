@@ -5,6 +5,7 @@ import {
   BubbleTeaOrder,
   DraftBubbleTeaOrder,
 } from "./schema.ts";
+import { Button, Checkbox, Input, Label } from "quint-ui";
 
 export function OrderForm({
   order,
@@ -28,7 +29,7 @@ export function OrderForm({
   return (
     <form onSubmit={onSave} className="grid gap-5">
       <div className="flex flex-col gap-2">
-        <label htmlFor="baseTea">Base tea</label>
+        <Label htmlFor="baseTea">Base tea</Label>
         <select
           name="baseTea"
           id="baseTea"
@@ -53,15 +54,16 @@ export function OrderForm({
 
         {BubbleTeaAddOnTypes.map((addOn) => (
           <div key={addOn} className="flex items-center gap-2">
-            <input
-              type="checkbox"
+            <Checkbox
               value={addOn}
               name={addOn}
               id={addOn}
+              variant="outline"
+              sizeStyle="sm"
               checked={order.addOns?.includes(addOn) || false}
-              onChange={(e) => {
-                if (e.target.checked) {
-                  order.addOns?.push(addOn);
+              onCheckedChange={(checked: boolean) => {
+                if (checked) {
+                  order.addOns?.push(addOn as any);
                 } else {
                   order.addOns?.splice(order.addOns?.indexOf(addOn), 1);
                 }
@@ -73,12 +75,11 @@ export function OrderForm({
       </fieldset>
 
       <div className="flex flex-col gap-2">
-        <label htmlFor="deliveryDate">Delivery date</label>
-        <input
+        <Label htmlFor="deliveryDate">Delivery date</Label>
+        <Input
           type="date"
           name="deliveryDate"
           id="deliveryDate"
-          className="dark:bg-transparent"
           value={order.deliveryDate?.toISOString().split("T")[0] || ""}
           onChange={(e) => (order.deliveryDate = new Date(e.target.value))}
           required
@@ -86,18 +87,19 @@ export function OrderForm({
       </div>
 
       <div className="flex items-center gap-2">
-        <input
-          type="checkbox"
+        <Checkbox
           name="withMilk"
           id="withMilk"
+          sizeStyle="sm"
+          variant="outline"
           checked={order.withMilk}
-          onChange={(e) => (order.withMilk = e.target.checked)}
+          onCheckedChange={(checked) => (order.withMilk = checked)}
         />
-        <label htmlFor="withMilk">With milk?</label>
+        <Label htmlFor="withMilk">With milk?</Label>
       </div>
 
       <div className="flex flex-col gap-2">
-        <label htmlFor="instructions">Special instructions</label>
+        <Label htmlFor="instructions">Special instructions</Label>
         <textarea
           name="instructions"
           id="instructions"
@@ -108,12 +110,9 @@ export function OrderForm({
       </div>
 
       {onSave && (
-        <button
-          type="submit"
-          className="bg-blue-500 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded"
-        >
+        <Button type="submit" intent="info" size="lg" variant="outline">
           Submit
-        </button>
+        </Button>
       )}
     </form>
   );

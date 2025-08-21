@@ -12,6 +12,7 @@
   "dependencies": {
     "hash-slash": "workspace:*",
     "jazz-tools": "workspace:*",
+    "quint-ui": "workspace:*",
     "react": "catalog:react",
     "react-dom": "catalog:react"
   },
