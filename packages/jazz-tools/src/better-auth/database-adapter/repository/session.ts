@@ -1,6 +1,6 @@
 import { BetterAuthDbSchema } from "better-auth/db";
 import { CleanedWhere } from "better-auth/adapters";
-import { co, CoMap, z, Account } from "../../../";
+import { co, CoMap, z, Account } from "jazz-tools";
 import { JazzRepository } from "./generic";
 import { UserRepository } from "./user";
 import {

@@ -10,12 +10,9 @@ import {
   test,
   beforeEach,
 } from "vitest";
-import { Account, Group, co } from "../../..";
-import {
-  createWorkerAccount,
-  startSyncServer,
-} from "../../../tools/testing.js";
-import { startWorker } from "../../../worker/index.js";
+import { Account, co, Group, z } from "jazz-tools";
+import { createWorkerAccount, startSyncServer } from "jazz-tools/testing";
+import { startWorker } from "jazz-tools/worker";
 import { JazzBetterAuthDatabaseAdapter } from "../index.js";
 
 describe("JazzBetterAuthDatabaseAdapter tests", async () => {
