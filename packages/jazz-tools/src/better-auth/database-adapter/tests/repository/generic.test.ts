@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { Account, co } from "../../../..";
-import { createWorkerAccount, startSyncServer } from "../../../../testing";
-import { startWorker } from "../../../../worker";
+import { Account, co } from "jazz-tools";
+import { createWorkerAccount, startSyncServer } from "jazz-tools/testing";
+import { startWorker } from "jazz-tools/worker";
 import { JazzRepository } from "../../repository/generic";
 import { createJazzSchema, Database } from "../../schema";
 
