@@ -1,5 +1,5 @@
 import { CleanedWhere } from "better-auth/adapters";
-import { CoMap, z } from "../../../tools";
+import { CoMap, z } from "jazz-tools";
 import { JazzRepository } from "./generic";
 import { isWhereBySingleField } from "../utils";
 
