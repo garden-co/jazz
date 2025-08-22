@@ -154,8 +154,8 @@ describe("JazzBetterAuthDatabaseAdapter tests", async () => {
       ).rejects.toThrow("Invalid email or password");
     });
 
-    it.skip("tables can be shared with another account", async () => {
-      // Create a new account with main Worker
+    it("tables can be shared with another account", async () => {
+      // Create a new account as main worker
       const auth1 = betterAuth({
         emailAndPassword: {
           enabled: true,
@@ -184,18 +184,20 @@ describe("JazzBetterAuthDatabaseAdapter tests", async () => {
 
       const DatabaseRoot = co.map({
         group: Group,
+        tables: co.map({}),
       });
 
-      console.log("Loading DB with worker: ", accountID);
       const db = await DatabaseRoot.loadUnique("better-auth-root", accountID, {
         loadAs: worker,
         resolve: {
           group: true,
+          tables: true,
         },
       });
 
       assert(db);
       assert(db.group);
+      assert(db.tables);
 
       // Create a new worker account
       const newWorkerAccount = await createWorkerAccount({
@@ -203,11 +205,32 @@ describe("JazzBetterAuthDatabaseAdapter tests", async () => {
         peer: `ws://localhost:${syncServer.port}`,
       });
 
-      const newWorker = await Account.load(newWorkerAccount.accountID);
-      assert(newWorker);
+      const newWorkerRef = await Account.load(newWorkerAccount.accountID);
+      assert(newWorkerRef);
 
       // Add the new worker to the group
-      db.group.addMember(newWorker, "reader");
+      db.group.addMember(newWorkerRef, "admin");
+      // Remove the previous worker if you want to rotate the worker
+      // db.group.removeMember(worker);
+
+      await db.group.waitForSync();
+
+      // Start the new worker
+      const { worker: newWorker } = await startWorker({
+        syncServer: `ws://localhost:${syncServer.port}`,
+        accountID: newWorkerAccount.accountID,
+        accountSecret: newWorkerAccount.agentSecret,
+      });
+
+      // create the database root on the new worker with the same group and tables
+      await DatabaseRoot.upsertUnique({
+        unique: "better-auth-root",
+        value: {
+          group: db.group,
+          tables: db.tables,
+        },
+        owner: newWorker,
+      });
 
       // Try to authenticate with the authorized new worker
       const auth2 = betterAuth({

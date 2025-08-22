@@ -61,12 +61,17 @@ export function createJazzSchema(schema: BetterAuthDbSchema): JazzSchema {
           value: {
             group: adminGroup,
             // create empty tables for each model
-            tables: Object.fromEntries(
-              Object.entries(tablesSchema).map(([key, value]) => [
-                key,
-                value.create([], adminGroup),
-              ]),
-            ),
+            tables: co
+              .map(tablesSchema)
+              .create(
+                Object.fromEntries(
+                  Object.entries(tablesSchema).map(([key, value]) => [
+                    key,
+                    value.create([], adminGroup),
+                  ]),
+                ),
+                adminGroup,
+              ),
           },
           unique: DATABASE_ROOT_ID,
           owner: account,
