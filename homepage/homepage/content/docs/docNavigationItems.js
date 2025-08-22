@@ -65,51 +65,6 @@ export const docNavigationItems = [
     ],
   },
   {
-    name: "Tools",
-    items: [
-      {
-        name: "AI tools",
-        href: "/docs/ai-tools",
-        done: 100,
-      },
-      {
-        name: "create-jazz-app",
-        href: "/docs/tools/create-jazz-app",
-        done: 100,
-      },
-      {
-        name: "Inspector",
-        href: "/docs/inspector",
-        done: 100,
-      },
-    ],
-  },
-  {
-    name: "Server-side",
-    items: [
-      {
-        name: "Setup",
-        href: "/docs/server-side/setup",
-        done: 100,
-      },
-      {
-        name: "Communicating with workers",
-        href: "/docs/server-side/communicating-with-workers",
-        done: 100,
-      },
-      {
-        name: "HTTP requests",
-        href: "/docs/server-side/http-requests",
-        done: 100,
-      },
-      {
-        name: "Inbox",
-        href: "/docs/server-side/inbox",
-        done: 100,
-      },
-    ],
-  },
-  {
     name: "Upgrade guides",
     // collapse: true,
     prefix: "/docs/upgrade",
@@ -330,6 +285,31 @@ export const docNavigationItems = [
     ],
   },
   {
+    name: "Server-side",
+    items: [
+      {
+        name: "Setup",
+        href: "/docs/server-side/setup",
+        done: 100,
+      },
+      {
+        name: "Communicating with workers",
+        href: "/docs/server-side/communicating-with-workers",
+        done: 100,
+      },
+      {
+        name: "HTTP requests",
+        href: "/docs/server-side/http-requests",
+        done: 100,
+      },
+      {
+        name: "Inbox",
+        href: "/docs/server-side/inbox",
+        done: 100,
+      },
+    ],
+  },
+  {
     name: "Design patterns",
     items: [
       {
@@ -345,6 +325,26 @@ export const docNavigationItems = [
       {
         name: "History Patterns",
         href: "/docs/design-patterns/history-patterns",
+        done: 100,
+      },
+    ],
+  },
+  {
+    name: "Tools",
+    items: [
+      {
+        name: "AI tools",
+        href: "/docs/ai-tools",
+        done: 100,
+      },
+      {
+        name: "create-jazz-app",
+        href: "/docs/tools/create-jazz-app",
+        done: 100,
+      },
+      {
+        name: "Inspector",
+        href: "/docs/inspector",
         done: 100,
       },
     ],
