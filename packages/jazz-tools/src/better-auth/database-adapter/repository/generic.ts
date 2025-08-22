@@ -1,5 +1,5 @@
 import { CleanedWhere } from "better-auth/adapters";
-import { Account, CoList, CoMap, Group, co, z } from "../../../";
+import { Account, CoList, CoMap, Group, co, z } from "jazz-tools";
 import type { Database } from "../schema.js";
 import {
   filterListByWhere,
