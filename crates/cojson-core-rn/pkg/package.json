@@ -1,0 +1,29 @@
+{
+  "name": "cojson-core-rn",
+  "description": "CoJSON Core for React Native",
+  "version": "0.17.11",
+  "license": "MIT",
+  "homepage": "https://github.com/garden-co/jazz",
+  "authors": {
+    "name": "Garden Co",
+    "url": "https://garden.co"
+  },
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "format-and-lint": "biome check .",
+    "format-and-lint:fix": "biome check . --write",
+    "build": "rm -rf ./dist && tsc --sourceMap --outDir dist",
+    "specs": "nitro-codegen"
+  },
+  "dependencies": {
+    "react-native-nitro-modules": "0.26.4"
+  },
+  "devDependencies": {
+    "nitro-codegen": "0.26.4"
+  },
+  "peerDependencies": {
+    "react-native": "*"
+  }
+}

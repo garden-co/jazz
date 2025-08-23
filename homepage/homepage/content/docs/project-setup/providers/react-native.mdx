@@ -45,7 +45,7 @@ export function MyJazzProvider({ children }: { children: React.ReactNode }) {
   - `Account` (default)
 - `CryptoProvider`
   - `PureJSCrypto` (default) - Pure JavaScript crypto provider
-  - `RNQuickCrypto` - C++ accelerated crypto provider
+  - `RNCrypto` - Rust-accelerated crypto provider
 
 ## Authentication in the Provider
 
@@ -110,7 +110,7 @@ Local persistence is enabled by default with no additional configuration require
 
 ## Quick Crypto
 
-For accelerated crypto operations, you can use the `RNQuickCrypto` crypto provider. 
+For accelerated crypto operations, you can use the `RNCrypto` crypto provider. 
 
 To use it, install the following Packages:
 
@@ -131,13 +131,13 @@ function SignInScreen({ auth }: { auth: any }) {
 }
 // ---cut-before---
 import { JazzReactNativeProvider } from "jazz-tools/react-native";
-import { RNQuickCrypto } from "jazz-tools/react-native/crypto";
+import { RNCrypto } from "jazz-tools/react-native/crypto";
 
 function MyJazzProvider({ children }: { children: ReactNode }) {
   return (
     <JazzReactNativeProvider
       sync={{ peer: "wss://cloud.jazz.tools/?key=your-api-key" }}
-      CryptoProvider={RNQuickCrypto}
+      CryptoProvider={RNCrypto}
     >
       {children}
     </JazzReactNativeProvider>

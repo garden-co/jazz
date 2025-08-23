@@ -1,6 +1,6 @@
 import NetInfo from "@react-native-community/netinfo";
 import { LocalNode, Peer, RawAccountID, getSqliteStorageAsync } from "cojson";
-import { PureJSCrypto } from "cojson/dist/crypto/PureJSCrypto"; // Importing from dist to not rely on the exports field
+import { PureJSCrypto } from "cojson/crypto/PureJSCrypto";
 import {
   Account,
   AccountClass,
@@ -23,13 +23,13 @@ import { KvStore, KvStoreContext } from "./storage/kv-store-context.js";
 
 import { SQLiteDatabaseDriverAsync } from "cojson";
 import { WebSocketPeerWithReconnection } from "cojson-transport-ws";
-import type { RNQuickCrypto } from "jazz-tools/react-native-core/crypto";
+import type { RNCrypto } from "jazz-tools/react-native-core/crypto";
 
 export type BaseReactNativeContextOptions = {
   sync: SyncConfig;
   reconnectionTimeout?: number;
   storage?: SQLiteDatabaseDriverAsync | "disabled";
-  CryptoProvider?: typeof PureJSCrypto | typeof RNQuickCrypto;
+  CryptoProvider?: typeof PureJSCrypto | typeof RNCrypto;
   authSecretStorage: AuthSecretStorage;
 };
 

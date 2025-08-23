@@ -20,7 +20,6 @@ import { Stringified } from "../jsonStringify.js";
 import { JsonObject, JsonValue } from "../jsonValue.js";
 import { PermissionsDef as RulesetDef } from "../permissions.js";
 import { CoValueKnownState, NewContentMessage } from "../sync.js";
-import { InvalidHashError, InvalidSignatureError } from "./coValueCore.js";
 import { TryAddTransactionsError } from "./coValueCore.js";
 import { SessionLog, SessionMap } from "./SessionMap.js";
 import { ControlledAccountOrAgent } from "../coValues/account.js";
