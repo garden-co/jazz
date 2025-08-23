@@ -167,6 +167,12 @@ function debugString(val) {
     return className;
 }
 
+function takeFromExternrefTable0(idx) {
+    const value = wasm.__wbindgen_export_4.get(idx);
+    wasm.__externref_table_dealloc(idx);
+    return value;
+}
+
 function passArrayJsValueToWasm0(array, malloc) {
     const ptr = malloc(array.length * 4, 4) >>> 0;
     for (let i = 0; i < array.length; i++) {
@@ -175,12 +181,6 @@ function passArrayJsValueToWasm0(array, malloc) {
     }
     WASM_VECTOR_LEN = array.length;
     return ptr;
-}
-
-function takeFromExternrefTable0(idx) {
-    const value = wasm.__wbindgen_export_4.get(idx);
-    wasm.__externref_table_dealloc(idx);
-    return value;
 }
 
 function passArray8ToWasm0(arg, malloc) {
@@ -514,60 +514,6 @@ export function get_signer_id(secret) {
 }
 
 /**
- * WASM-exposed function to encrypt bytes with a key secret and nonce material.
- * - `value`: The raw bytes to encrypt
- * - `key_secret`: A base58-encoded key secret with "keySecret_z" prefix
- * - `nonce_material`: Raw bytes used to generate the nonce
- * Returns the encrypted bytes or throws a JsError if encryption fails.
- * @param {Uint8Array} value
- * @param {string} key_secret
- * @param {Uint8Array} nonce_material
- * @returns {Uint8Array}
- */
-export function encrypt(value, key_secret, nonce_material) {
-    const ptr0 = passArray8ToWasm0(value, wasm.__wbindgen_malloc);
-    const len0 = WASM_VECTOR_LEN;
-    const ptr1 = passStringToWasm0(key_secret, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
-    const len1 = WASM_VECTOR_LEN;
-    const ptr2 = passArray8ToWasm0(nonce_material, wasm.__wbindgen_malloc);
-    const len2 = WASM_VECTOR_LEN;
-    const ret = wasm.encrypt(ptr0, len0, ptr1, len1, ptr2, len2);
-    if (ret[3]) {
-        throw takeFromExternrefTable0(ret[2]);
-    }
-    var v4 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
-    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
-    return v4;
-}
-
-/**
- * WASM-exposed function to decrypt bytes with a key secret and nonce material.
- * - `ciphertext`: The encrypted bytes to decrypt
- * - `key_secret`: A base58-encoded key secret with "keySecret_z" prefix
- * - `nonce_material`: Raw bytes used to generate the nonce (must match encryption)
- * Returns the decrypted bytes or throws a JsError if decryption fails.
- * @param {Uint8Array} ciphertext
- * @param {string} key_secret
- * @param {Uint8Array} nonce_material
- * @returns {Uint8Array}
- */
-export function decrypt(ciphertext, key_secret, nonce_material) {
-    const ptr0 = passArray8ToWasm0(ciphertext, wasm.__wbindgen_malloc);
-    const len0 = WASM_VECTOR_LEN;
-    const ptr1 = passStringToWasm0(key_secret, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
-    const len1 = WASM_VECTOR_LEN;
-    const ptr2 = passArray8ToWasm0(nonce_material, wasm.__wbindgen_malloc);
-    const len2 = WASM_VECTOR_LEN;
-    const ret = wasm.decrypt(ptr0, len0, ptr1, len1, ptr2, len2);
-    if (ret[3]) {
-        throw takeFromExternrefTable0(ret[2]);
-    }
-    var v4 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
-    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
-    return v4;
-}
-
-/**
  * Generate a 24-byte nonce from input material using BLAKE3.
  * - `nonce_material`: Raw bytes to derive the nonce from
  * Returns 24 bytes suitable for use as a nonce in cryptographic operations.
@@ -670,6 +616,124 @@ export function blake3_digest_for_state(state) {
 }
 
 /**
+ * WASM-exposed function to encrypt bytes with a key secret and nonce material.
+ * - `value`: The raw bytes to encrypt
+ * - `key_secret`: A base58-encoded key secret with "keySecret_z" prefix
+ * - `nonce_material`: Raw bytes used to generate the nonce
+ * Returns the encrypted bytes or throws a JsError if encryption fails.
+ * @param {Uint8Array} value
+ * @param {string} key_secret
+ * @param {Uint8Array} nonce_material
+ * @returns {Uint8Array}
+ */
+export function encrypt(value, key_secret, nonce_material) {
+    const ptr0 = passArray8ToWasm0(value, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passStringToWasm0(key_secret, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len1 = WASM_VECTOR_LEN;
+    const ptr2 = passArray8ToWasm0(nonce_material, wasm.__wbindgen_malloc);
+    const len2 = WASM_VECTOR_LEN;
+    const ret = wasm.encrypt(ptr0, len0, ptr1, len1, ptr2, len2);
+    if (ret[3]) {
+        throw takeFromExternrefTable0(ret[2]);
+    }
+    var v4 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+    return v4;
+}
+
+/**
+ * WASM-exposed function to decrypt bytes with a key secret and nonce material.
+ * - `ciphertext`: The encrypted bytes to decrypt
+ * - `key_secret`: A base58-encoded key secret with "keySecret_z" prefix
+ * - `nonce_material`: Raw bytes used to generate the nonce (must match encryption)
+ * Returns the decrypted bytes or throws a JsError if decryption fails.
+ * @param {Uint8Array} ciphertext
+ * @param {string} key_secret
+ * @param {Uint8Array} nonce_material
+ * @returns {Uint8Array}
+ */
+export function decrypt(ciphertext, key_secret, nonce_material) {
+    const ptr0 = passArray8ToWasm0(ciphertext, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passStringToWasm0(key_secret, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len1 = WASM_VECTOR_LEN;
+    const ptr2 = passArray8ToWasm0(nonce_material, wasm.__wbindgen_malloc);
+    const len2 = WASM_VECTOR_LEN;
+    const ret = wasm.decrypt(ptr0, len0, ptr1, len1, ptr2, len2);
+    if (ret[3]) {
+        throw takeFromExternrefTable0(ret[2]);
+    }
+    var v4 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+    return v4;
+}
+
+/**
+ * WASM-exposed function for sealing a message using X25519 + XSalsa20-Poly1305.
+ * Provides authenticated encryption with perfect forward secrecy.
+ * - `message`: Raw bytes to seal
+ * - `sender_secret`: Base58-encoded sender's private key with "sealerSecret_z" prefix
+ * - `recipient_id`: Base58-encoded recipient's public key with "sealer_z" prefix
+ * - `nonce_material`: Raw bytes used to generate the nonce
+ * Returns sealed bytes or throws JsError if sealing fails.
+ * @param {Uint8Array} message
+ * @param {string} sender_secret
+ * @param {string} recipient_id
+ * @param {Uint8Array} nonce_material
+ * @returns {Uint8Array}
+ */
+export function seal(message, sender_secret, recipient_id, nonce_material) {
+    const ptr0 = passArray8ToWasm0(message, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passStringToWasm0(sender_secret, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len1 = WASM_VECTOR_LEN;
+    const ptr2 = passStringToWasm0(recipient_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len2 = WASM_VECTOR_LEN;
+    const ptr3 = passArray8ToWasm0(nonce_material, wasm.__wbindgen_malloc);
+    const len3 = WASM_VECTOR_LEN;
+    const ret = wasm.seal(ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3);
+    if (ret[3]) {
+        throw takeFromExternrefTable0(ret[2]);
+    }
+    var v5 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+    return v5;
+}
+
+/**
+ * WASM-exposed function for unsealing a message using X25519 + XSalsa20-Poly1305.
+ * Provides authenticated decryption with perfect forward secrecy.
+ * - `sealed_message`: The sealed bytes to decrypt
+ * - `recipient_secret`: Base58-encoded recipient's private key with "sealerSecret_z" prefix
+ * - `sender_id`: Base58-encoded sender's public key with "sealer_z" prefix
+ * - `nonce_material`: Raw bytes used to generate the nonce (must match sealing)
+ * Returns unsealed bytes or throws JsError if unsealing fails.
+ * @param {Uint8Array} sealed_message
+ * @param {string} recipient_secret
+ * @param {string} sender_id
+ * @param {Uint8Array} nonce_material
+ * @returns {Uint8Array}
+ */
+export function unseal(sealed_message, recipient_secret, sender_id, nonce_material) {
+    const ptr0 = passArray8ToWasm0(sealed_message, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passStringToWasm0(recipient_secret, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len1 = WASM_VECTOR_LEN;
+    const ptr2 = passStringToWasm0(sender_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len2 = WASM_VECTOR_LEN;
+    const ptr3 = passArray8ToWasm0(nonce_material, wasm.__wbindgen_malloc);
+    const len3 = WASM_VECTOR_LEN;
+    const ret = wasm.unseal(ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3);
+    if (ret[3]) {
+        throw takeFromExternrefTable0(ret[2]);
+    }
+    var v5 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+    return v5;
+}
+
+/**
  * Generate a new X25519 private key using secure random number generation.
  * Returns 32 bytes of raw key material suitable for use with other X25519 functions.
  * This key can be reused for multiple Diffie-Hellman exchanges.
@@ -750,70 +814,6 @@ export function get_sealer_id(secret) {
     } finally {
         wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
     }
-}
-
-/**
- * WASM-exposed function for sealing a message using X25519 + XSalsa20-Poly1305.
- * Provides authenticated encryption with perfect forward secrecy.
- * - `message`: Raw bytes to seal
- * - `sender_secret`: Base58-encoded sender's private key with "sealerSecret_z" prefix
- * - `recipient_id`: Base58-encoded recipient's public key with "sealer_z" prefix
- * - `nonce_material`: Raw bytes used to generate the nonce
- * Returns sealed bytes or throws JsError if sealing fails.
- * @param {Uint8Array} message
- * @param {string} sender_secret
- * @param {string} recipient_id
- * @param {Uint8Array} nonce_material
- * @returns {Uint8Array}
- */
-export function seal(message, sender_secret, recipient_id, nonce_material) {
-    const ptr0 = passArray8ToWasm0(message, wasm.__wbindgen_malloc);
-    const len0 = WASM_VECTOR_LEN;
-    const ptr1 = passStringToWasm0(sender_secret, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
-    const len1 = WASM_VECTOR_LEN;
-    const ptr2 = passStringToWasm0(recipient_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
-    const len2 = WASM_VECTOR_LEN;
-    const ptr3 = passArray8ToWasm0(nonce_material, wasm.__wbindgen_malloc);
-    const len3 = WASM_VECTOR_LEN;
-    const ret = wasm.seal(ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3);
-    if (ret[3]) {
-        throw takeFromExternrefTable0(ret[2]);
-    }
-    var v5 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
-    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
-    return v5;
-}
-
-/**
- * WASM-exposed function for unsealing a message using X25519 + XSalsa20-Poly1305.
- * Provides authenticated decryption with perfect forward secrecy.
- * - `sealed_message`: The sealed bytes to decrypt
- * - `recipient_secret`: Base58-encoded recipient's private key with "sealerSecret_z" prefix
- * - `sender_id`: Base58-encoded sender's public key with "sealer_z" prefix
- * - `nonce_material`: Raw bytes used to generate the nonce (must match sealing)
- * Returns unsealed bytes or throws JsError if unsealing fails.
- * @param {Uint8Array} sealed_message
- * @param {string} recipient_secret
- * @param {string} sender_id
- * @param {Uint8Array} nonce_material
- * @returns {Uint8Array}
- */
-export function unseal(sealed_message, recipient_secret, sender_id, nonce_material) {
-    const ptr0 = passArray8ToWasm0(sealed_message, wasm.__wbindgen_malloc);
-    const len0 = WASM_VECTOR_LEN;
-    const ptr1 = passStringToWasm0(recipient_secret, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
-    const len1 = WASM_VECTOR_LEN;
-    const ptr2 = passStringToWasm0(sender_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
-    const len2 = WASM_VECTOR_LEN;
-    const ptr3 = passArray8ToWasm0(nonce_material, wasm.__wbindgen_malloc);
-    const len3 = WASM_VECTOR_LEN;
-    const ret = wasm.unseal(ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3);
-    if (ret[3]) {
-        throw takeFromExternrefTable0(ret[2]);
-    }
-    var v5 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
-    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
-    return v5;
 }
 
 const Blake3HasherFinalization = (typeof FinalizationRegistry === 'undefined')
@@ -911,7 +911,10 @@ export class SessionLog {
         var ptr2 = isLikeNone(signer_id) ? 0 : passStringToWasm0(signer_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         var len2 = WASM_VECTOR_LEN;
         const ret = wasm.sessionlog_new(ptr0, len0, ptr1, len1, ptr2, len2);
-        this.__wbg_ptr = ret >>> 0;
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        this.__wbg_ptr = ret[0] >>> 0;
         SessionLogFinalization.register(this, this.__wbg_ptr, this);
         return this;
     }

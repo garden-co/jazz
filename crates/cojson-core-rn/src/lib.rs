@@ -112,7 +112,13 @@ pub fn create_session_log(
     let session_id = SessionID(session_id);
     let signer_id = SignerID(signer_id);
 
-    let internal = SessionLogInternal::new(co_id, session_id, signer_id);
+    let internal = match SessionLogInternal::new(co_id, session_id, Some(signer_id)) {
+        Ok(internal) => internal,
+        Err(_) => {
+            // Return a handle with id 0 to indicate error - this will be handled by the caller
+            return ffi::SessionLogHandle { id: 0 };
+        }
+    };
     let id = get_next_id();
 
     let storage = ensure_storage();
