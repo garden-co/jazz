@@ -1,6 +1,6 @@
 [package]
 name = "cojson-core-rn"
-version = "0.15.14"
+version = "0.17.11"
 edition = "2021"
 build = "build.rs"
 

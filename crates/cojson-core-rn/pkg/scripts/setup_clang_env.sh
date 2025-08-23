@@ -5,8 +5,8 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 BUILD_DIR="$SCRIPT_DIR/../build"
-BUILD_DIR="$(cd "$BUILD_DIR" && pwd)"
 mkdir -p "$BUILD_DIR"
+BUILD_DIR="$(cd "$BUILD_DIR" && pwd)"
 
 PKG_DIR="$SCRIPT_DIR/.."
 PKG_DIR="$(cd "$PKG_DIR" && pwd)"

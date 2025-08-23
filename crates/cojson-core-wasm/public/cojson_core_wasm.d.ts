@@ -97,6 +97,22 @@ export function verify(signature: Uint8Array, message: Uint8Array, id: Uint8Arra
  */
 export function get_signer_id(secret: Uint8Array): string;
 /**
+ * WASM-exposed function to encrypt bytes with a key secret and nonce material.
+ * - `value`: The raw bytes to encrypt
+ * - `key_secret`: A base58-encoded key secret with "keySecret_z" prefix
+ * - `nonce_material`: Raw bytes used to generate the nonce
+ * Returns the encrypted bytes or throws a JsError if encryption fails.
+ */
+export function encrypt(value: Uint8Array, key_secret: string, nonce_material: Uint8Array): Uint8Array;
+/**
+ * WASM-exposed function to decrypt bytes with a key secret and nonce material.
+ * - `ciphertext`: The encrypted bytes to decrypt
+ * - `key_secret`: A base58-encoded key secret with "keySecret_z" prefix
+ * - `nonce_material`: Raw bytes used to generate the nonce (must match encryption)
+ * Returns the decrypted bytes or throws a JsError if decryption fails.
+ */
+export function decrypt(ciphertext: Uint8Array, key_secret: string, nonce_material: Uint8Array): Uint8Array;
+/**
  * Generate a 24-byte nonce from input material using BLAKE3.
  * - `nonce_material`: Raw bytes to derive the nonce from
  * Returns 24 bytes suitable for use as a nonce in cryptographic operations.
@@ -182,22 +198,6 @@ export function seal(message: Uint8Array, sender_secret: string, recipient_id: s
  * Returns unsealed bytes or throws JsError if unsealing fails.
  */
 export function unseal(sealed_message: Uint8Array, recipient_secret: string, sender_id: string, nonce_material: Uint8Array): Uint8Array;
-/**
- * WASM-exposed function to encrypt bytes with a key secret and nonce material.
- * - `value`: The raw bytes to encrypt
- * - `key_secret`: A base58-encoded key secret with "keySecret_z" prefix
- * - `nonce_material`: Raw bytes used to generate the nonce
- * Returns the encrypted bytes or throws a JsError if encryption fails.
- */
-export function encrypt(value: Uint8Array, key_secret: string, nonce_material: Uint8Array): Uint8Array;
-/**
- * WASM-exposed function to decrypt bytes with a key secret and nonce material.
- * - `ciphertext`: The encrypted bytes to decrypt
- * - `key_secret`: A base58-encoded key secret with "keySecret_z" prefix
- * - `nonce_material`: Raw bytes used to generate the nonce (must match encryption)
- * Returns the decrypted bytes or throws a JsError if decryption fails.
- */
-export function decrypt(ciphertext: Uint8Array, key_secret: string, nonce_material: Uint8Array): Uint8Array;
 export class Blake3Hasher {
   free(): void;
   constructor();
@@ -219,8 +219,6 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 
 export interface InitOutput {
   readonly memory: WebAssembly.Memory;
-  readonly decrypt_xsalsa20: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
-  readonly encrypt_xsalsa20: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
   readonly __wbg_sessionlog_free: (a: number, b: number) => void;
   readonly sessionlog_new: (a: number, b: number, c: number, d: number, e: number, f: number) => number;
   readonly sessionlog_clone: (a: number) => number;
@@ -228,6 +226,8 @@ export interface InitOutput {
   readonly sessionlog_addNewPrivateTransaction: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number) => [number, number, number, number];
   readonly sessionlog_addNewTrustingTransaction: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
   readonly sessionlog_decryptNextTransactionChangesJson: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+  readonly decrypt_xsalsa20: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
+  readonly encrypt_xsalsa20: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
   readonly new_ed25519_signing_key: () => [number, number];
   readonly ed25519_sign: (a: number, b: number, c: number, d: number) => [number, number, number, number];
   readonly ed25519_verify: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number];
@@ -235,11 +235,13 @@ export interface InitOutput {
   readonly ed25519_signing_key_to_public: (a: number, b: number) => [number, number, number, number];
   readonly ed25519_verifying_key_from_bytes: (a: number, b: number) => [number, number, number, number];
   readonly ed25519_signature_from_bytes: (a: number, b: number) => [number, number, number, number];
-  readonly ed25519_verifying_key: (a: number, b: number) => [number, number, number, number];
   readonly ed25519_signing_key_sign: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+  readonly ed25519_verifying_key: (a: number, b: number) => [number, number, number, number];
   readonly sign: (a: number, b: number, c: number, d: number) => [number, number, number, number];
   readonly verify: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number];
   readonly get_signer_id: (a: number, b: number) => [number, number, number, number];
+  readonly encrypt: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
+  readonly decrypt: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
   readonly generate_nonce: (a: number, b: number) => [number, number];
   readonly blake3_hash_once: (a: number, b: number) => [number, number];
   readonly blake3_hash_once_with_context: (a: number, b: number, c: number, d: number) => [number, number];
@@ -257,8 +259,6 @@ export interface InitOutput {
   readonly get_sealer_id: (a: number, b: number) => [number, number, number, number];
   readonly seal: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
   readonly unseal: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
-  readonly encrypt: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
-  readonly decrypt: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
   readonly __wbindgen_malloc: (a: number, b: number) => number;
   readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
   readonly __wbindgen_exn_store: (a: number) => void;

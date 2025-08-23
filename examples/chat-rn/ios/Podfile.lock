@@ -1,6 +1,6 @@
 PODS:
   - boost (1.84.0)
-  - CoJSONCoreRN (0.16.4):
+  - CoJSONCoreRN (0.17.11):
     - boost
     - DoubleConversion
     - fast_float
@@ -66,7 +66,7 @@ PODS:
     - ReactCommon/turbomodule/core
     - SocketRocket
     - Yoga
-  - op-sqlite (14.1.3):
+  - op-sqlite (14.1.4):
     - boost
     - DoubleConversion
     - fast_float
@@ -2773,7 +2773,7 @@ EXTERNAL SOURCES:
 
 SPEC CHECKSUMS:
   boost: 7e761d76ca2ce687f7cc98e698152abd03a18f90
-  CoJSONCoreRN: 0ec2b80c25b1facd87a945e93b23c3cae8baf6d3
+  CoJSONCoreRN: 843f31387471c3b0afa0f00078fbb9d0a6cb4d04
   DoubleConversion: cb417026b2400c8f53ae97020b2be961b59470cb
   fast_float: b32c788ed9c6a8c584d114d0047beda9664e7cc6
   FBLazyVector: a867936a67af0d09c37935a1b900a1a3c795b6d1
@@ -2781,7 +2781,7 @@ SPEC CHECKSUMS:
   glog: 5683914934d5b6e4240e497e0f4a3b42d1854183
   hermes-engine: e7491a2038f2618c8cd444ed411a6deb350a3742
   NitroModules: 697680c5a5fd4ecc62b728be573f26c7f5b602dd
-  op-sqlite: 1ca805f3058af6ed64eaf6ea2cf14958193aac72
+  op-sqlite: 2e58f87227360fa6251d1fe103d189f11ae8c95f
   RCT-Folly: 846fda9475e61ec7bcbf8a3fe81edfcaeb090669
   RCTDeprecation: 0735ab4f6b3ec93a7f98187b5da74d7916e2cf4c
   RCTRequired: 8fcc7801bfc433072287b0f24a662e2816e89d0c

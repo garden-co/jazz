@@ -1,3 +1,4 @@
+import { LogBox } from "react-native";
 import { JazzExpoProvider } from "jazz-tools/expo";
 import { RNCrypto } from "jazz-tools/expo/crypto";
 import React, { StrictMode } from "react";
@@ -18,3 +19,5 @@ export default function App() {
     </StrictMode>
   );
 }
+
+LogBox.ignoreLogs(["Open debugger to view warnings"]);
