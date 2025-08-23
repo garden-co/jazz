@@ -63,10 +63,10 @@ struct PrivateTransactionResult {
 #[wasm_bindgen]
 impl SessionLog {
     #[wasm_bindgen(constructor)]
-    pub fn new(co_id: String, session_id: String, signer_id: Option<String>) -> SessionLog {
+    pub fn new(co_id: String, session_id: String, signer_id: String) -> SessionLog {
         let co_id = CoID(co_id);
         let session_id = SessionID(session_id);
-        let signer_id = signer_id.map(|id| SignerID(id));
+        let signer_id = SignerID(signer_id);
 
         let internal = SessionLogInternal::new(co_id, session_id, signer_id);
 

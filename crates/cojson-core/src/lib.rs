@@ -250,25 +250,31 @@ pub enum CoJsonCoreError {
 pub struct SessionLogInternal {
     co_id: CoID,
     session_id: SessionID,
-    public_key: Option<VerifyingKey>,
+    public_key: VerifyingKey,
     hasher: blake3::Hasher,
     transactions_json: Vec<String>,
     last_signature: Option<Signature>,
 }
 
 impl SessionLogInternal {
-    pub fn new(co_id: CoID, session_id: SessionID, signer_id: Option<SignerID>) -> Self {
+    pub fn new(co_id: CoID, session_id: SessionID, signer_id: SignerID) -> Self {
         let hasher = blake3::Hasher::new();
 
-        let public_key = match signer_id {
-            Some(signer_id) => Some(VerifyingKey::try_from(
-                decode_z(&signer_id.0)
-                    .expect("Invalid public key")
-                    .as_slice(),
-            )
-            .expect("Invalid public key")),
-            None => None,
-        };
+        // Validate signer_id is not empty
+        if signer_id.0.is_empty() {
+            panic!("SignerID cannot be empty - received empty string");
+        }
+        
+        // Validate signer_id has correct format
+        if !signer_id.0.contains("_z") {
+            panic!("Invalid SignerID format: '{}' - must contain '_z' prefix (expected format: 'signer_z...')", signer_id.0);
+        }
+        
+        let decoded_bytes = decode_z(&signer_id.0)
+            .unwrap_or_else(|e| panic!("Failed to decode SignerID '{}': {}", signer_id.0, e));
+        
+        let public_key = VerifyingKey::try_from(decoded_bytes.as_slice())
+            .unwrap_or_else(|e| panic!("Invalid public key in SignerID '{}': {}", signer_id.0, e));
 
         Self {
             co_id,
@@ -288,13 +294,21 @@ impl SessionLogInternal {
         self.last_signature.as_ref()
     }
 
-    fn expected_hash_after(&self, transactions: &[Box<RawValue>]) -> blake3::Hasher {
+    fn expected_hash_after(&self, transactions: &[Box<RawValue>]) -> blake3::Hash {
         let mut hasher = self.hasher.clone();
         for tx in transactions {
             hasher.update(tx.get().as_bytes());
         }
 
-        hasher
+        hasher.finalize()
+    }
+
+    pub fn test_expected_hash_after(&self, transactions: &[Box<RawValue>]) -> String {
+        let new_hash = self.expected_hash_after(transactions);
+        format!(
+            "hash_z{}",
+            bs58::encode(new_hash.as_bytes()).into_string()
+        )
     }
 
     pub fn try_add(
@@ -304,35 +318,29 @@ impl SessionLogInternal {
         skip_verify: bool,
     ) -> Result<(), CoJsonCoreError> {
         if !skip_verify {
-            let hasher = self.expected_hash_after(&transactions);
+            let new_hash = self.expected_hash_after(&transactions);
             let new_hash_encoded_stringified = format!(
                 "\"hash_z{}\"",
-                bs58::encode(hasher.finalize().as_bytes()).into_string()
+                bs58::encode(new_hash.as_bytes()).into_string()
             );
 
-            if let Some(public_key) = self.public_key {
-                match public_key.verify(
-                    new_hash_encoded_stringified.as_bytes(),
-                    &(new_signature).into(),
-                ) {
-                    Ok(()) => {}
-                    Err(_) => {
-                        return Err(CoJsonCoreError::SignatureVerification(
-                            new_hash_encoded_stringified.replace("\"", ""),
-                        ));
-                    }
+            match self.public_key.verify(
+                new_hash_encoded_stringified.as_bytes(),
+                &(new_signature).into(),
+            ) {
+                Ok(()) => {}
+                Err(_) => {
+                    return Err(CoJsonCoreError::SignatureVerification(
+                        new_hash_encoded_stringified.replace("\"", ""),
+                    ));
                 }
-            } else {
-                return Err(CoJsonCoreError::SignatureVerification(
-                    new_hash_encoded_stringified.replace("\"", ""),
-                ));
             }
-
-            self.hasher = hasher;
         }
 
         for tx in transactions {
-            self.transactions_json.push(tx.get().to_string());
+            let tx_json = tx.get();
+            self.hasher.update(tx_json.as_bytes());
+            self.transactions_json.push(tx_json.to_string());
         }
 
         self.last_signature = Some(new_signature.clone());

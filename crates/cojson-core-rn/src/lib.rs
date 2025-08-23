@@ -125,12 +125,14 @@ pub fn create_session_log(
 pub fn clone_session_log(handle: &ffi::SessionLogHandle) -> ffi::SessionLogHandle {
     let storage = ensure_storage();
     let mut logs = storage.lock().unwrap();
+
     if let Some(log) = logs.get(&handle.id) {
         let cloned = log.clone();
         let new_id = get_next_id();
         logs.insert(new_id, cloned);
         return ffi::SessionLogHandle { id: new_id };
     }
+
     // Return invalid handle if not found
     ffi::SessionLogHandle { id: 0 }
 }
@@ -143,11 +145,13 @@ pub fn try_add_transactions(
 ) -> ffi::TransactionResult {
     let storage = ensure_storage();
     let mut logs = storage.lock().unwrap();
+
     if let Some(log) = logs.get_mut(&handle.id) {
         let transactions: Result<Vec<Box<RawValue>>, _> = transactions_json
             .into_iter()
             .map(|s| serde_json::from_str(&s))
             .collect();
+
         match transactions {
             Ok(transactions) => {
                 let signature = Signature(new_signature);
@@ -172,7 +176,16 @@ pub fn add_new_private_transaction(
     made_at: f64,
 ) -> ffi::TransactionResult {
     let storage = ensure_storage();
-    let mut logs = storage.lock().unwrap();
+    
+    // Use safe lock handling to prevent panic on poisoned mutex
+    let mut logs = match storage.lock() {
+        Ok(logs) => logs,
+        Err(poisoned) => {
+            // Recover from poisoned mutex by taking the guard anyway
+            poisoned.into_inner()
+        }
+    };
+
     if let Some(log) = logs.get_mut(&handle.id) {
         match log.try_add_new_transaction(
             &changes_json,
@@ -206,7 +219,16 @@ pub fn add_new_trusting_transaction(
     made_at: f64,
 ) -> ffi::TransactionResult {
     let storage = ensure_storage();
-    let mut logs = storage.lock().unwrap();
+    
+    // Use safe lock handling to prevent panic on poisoned mutex
+    let mut logs = match storage.lock() {
+        Ok(logs) => logs,
+        Err(poisoned) => {
+            // Recover from poisoned mutex by taking the guard anyway
+            poisoned.into_inner()
+        }
+    };
+
     if let Some(log) = logs.get_mut(&handle.id) {
         match log.try_add_new_transaction(
             &changes_json,
@@ -236,11 +258,13 @@ pub fn test_expected_hash_after(
 ) -> ffi::TransactionResult {
     let storage = ensure_storage();
     let logs = storage.lock().unwrap();
+
     if let Some(log) = logs.get(&handle.id) {
         let transactions: Result<Vec<Box<RawValue>>, _> = transactions_json
             .into_iter()
             .map(|s| serde_json::from_str(&s))
             .collect();
+
         match transactions {
             Ok(transactions) => {
                 let hash = log.test_expected_hash_after(&transactions);
@@ -260,6 +284,7 @@ pub fn decrypt_next_transaction_changes_json(
 ) -> ffi::TransactionResult {
     let storage = ensure_storage();
     let logs = storage.lock().unwrap();
+
     if let Some(log) = logs.get(&handle.id) {
         let key_secret = KeySecret(String::from_utf8_lossy(&key_secret).to_string());
         match log.decrypt_next_transaction_changes_json(tx_index, key_secret) {
