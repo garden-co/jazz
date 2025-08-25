@@ -2179,9 +2179,6 @@ importers:
       use-sync-external-store:
         specifier: ^1.5.0
         version: 1.5.0(react@19.1.0)
-      ws:
-        specifier: ^8.14.2
-        version: 8.18.1
       zod:
         specifier: 3.25.76
         version: 3.25.76
@@ -2237,6 +2234,9 @@ importers:
       vitest:
         specifier: catalog:default
         version: 3.2.4(@types/debug@4.1.12)(@types/node@24.3.0)(@vitest/browser@3.2.4)(@vitest/ui@3.2.4)(happy-dom@17.4.4)(jiti@2.5.1)(jsdom@25.0.1)(lightningcss@1.30.1)(msw@2.10.3(@types/node@24.3.0)(typescript@5.6.2))(terser@5.43.1)(tsx@4.20.3)(yaml@2.6.1)
+      ws:
+        specifier: ^8.14.2
+        version: 8.18.1
 
   packages/quint-ui:
     dependencies:
@@ -21910,7 +21910,7 @@ snapshots:
       eslint: 8.57.1
       eslint-config-prettier: 8.10.0(eslint@8.57.1)
       eslint-plugin-eslint-comments: 3.2.0(eslint@8.57.1)
-      eslint-plugin-ft-flow: 2.0.3(@babel/eslint-parser@7.27.0(@babel/core@7.28.3)(eslint@8.57.1))(eslint@8.57.1)
+      eslint-plugin-ft-flow: 2.0.3(@babel/eslint-parser@7.27.0(@babel/core@7.27.1)(eslint@8.57.1))(eslint@8.57.1)
       eslint-plugin-jest: 27.9.0(@typescript-eslint/eslint-plugin@7.18.0(@typescript-eslint/parser@7.18.0(eslint@8.57.1)(typescript@5.6.2))(eslint@8.57.1)(typescript@5.6.2))(eslint@8.57.1)(jest@29.7.0(@types/node@22.16.5)(babel-plugin-macros@3.1.0)(ts-node@10.9.2(@swc/core@1.11.29(@swc/helpers@0.5.17))(@types/node@22.16.5)(typescript@5.6.2)))(typescript@5.6.2)
       eslint-plugin-react: 7.37.4(eslint@8.57.1)
       eslint-plugin-react-hooks: 5.2.0(eslint@8.57.1)
@@ -25934,7 +25934,7 @@ snapshots:
       eslint: 8.57.1
       ignore: 5.3.2
 
-  eslint-plugin-ft-flow@2.0.3(@babel/eslint-parser@7.27.0(@babel/core@7.28.3)(eslint@8.57.1))(eslint@8.57.1):
+  eslint-plugin-ft-flow@2.0.3(@babel/eslint-parser@7.27.0(@babel/core@7.27.1)(eslint@8.57.1))(eslint@8.57.1):
     dependencies:
       '@babel/eslint-parser': 7.27.0(@babel/core@7.28.3)(eslint@8.57.1)
       eslint: 8.57.1
