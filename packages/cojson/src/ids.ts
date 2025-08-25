@@ -20,7 +20,11 @@ export function rawCoIDfromBytes(bytes: Uint8Array): RawCoID {
   return `co_z${base58.encode(bytes.slice(0, shortHashLength))}` as RawCoID;
 }
 
-export type TransactionID = { sessionID: SessionID; txIndex: number };
+export type TransactionID = {
+  sessionID: SessionID;
+  txIndex: number;
+  source?: RawCoID;
+};
 
 export type AgentID = `sealer_z${string}/signer_z${string}`;
 
