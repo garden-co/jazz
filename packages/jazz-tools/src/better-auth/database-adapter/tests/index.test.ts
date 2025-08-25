@@ -11,9 +11,9 @@ import {
   beforeEach,
   vi,
 } from "vitest";
-import { Account, co, Group, z } from "jazz-tools";
-import { createWorkerAccount, startSyncServer } from "jazz-tools/testing";
+import { Account, co, Group } from "jazz-tools";
 import { startWorker } from "jazz-tools/worker";
+import { createWorkerAccount, startSyncServer } from "./sync-utils.js";
 import { JazzBetterAuthDatabaseAdapter } from "../index.js";
 
 describe("JazzBetterAuthDatabaseAdapter tests", async () => {
