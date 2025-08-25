@@ -16,7 +16,6 @@ import {
   coValueClassFromCoValueClassOrSchema,
   createAnonymousJazzContext,
   createJazzContext,
-  isControlledAccount,
   randomSessionProvider,
 } from "./internal.js";
 
