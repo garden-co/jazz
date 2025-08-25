@@ -255,7 +255,7 @@ describe("JazzBetterAuthDatabaseAdapter tests", async () => {
       expect(res.user.id).match(/^co_\w+$/);
     });
 
-    it.only("should wait for sync before returning", async () => {
+    it("should wait for sync before returning", async () => {
       const { localNode } = syncServer;
 
       const auth = betterAuth({
@@ -277,7 +277,7 @@ describe("JazzBetterAuthDatabaseAdapter tests", async () => {
         model: "user",
         data: {
           name: "test",
-          email: "test@test.com",
+          email: "test-sync@test.com",
           password: "12345678",
         },
       });
