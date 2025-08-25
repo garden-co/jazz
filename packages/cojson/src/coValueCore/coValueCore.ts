@@ -27,6 +27,12 @@ import { expectGroup } from "../typeUtils/expectGroup.js";
 import { getDependedOnCoValuesFromRawData } from "./utils.js";
 import { CoValueHeader, Transaction, VerifiedState } from "./verifiedState.js";
 import { SessionMap } from "./SessionMap.js";
+import {
+  createBranch,
+  getBranchId,
+  getBranchSource,
+  mergeBranch,
+} from "./branching.js";
 
 export function idforHeader(
   header: CoValueHeader,
@@ -649,6 +655,7 @@ export class CoValueCore {
   getValidTransactions(options?: {
     ignorePrivateTransactions: boolean;
     knownTransactions?: CoValueKnownState["sessions"];
+    until?: CoValueKnownState["sessions"];
   }): DecryptedTransaction[] {
     if (!this.verified) {
       throw new Error(
@@ -664,6 +671,12 @@ export class CoValueCore {
     const allTransactions: DecryptedTransaction[] = [];
 
     for (const { txID, tx } of validTransactions) {
+      const until = options?.until?.[txID.sessionID] ?? Infinity;
+
+      if (until < txID.txIndex) {
+        continue;
+      }
+
       if (options?.knownTransactions?.[txID.sessionID]! >= txID.txIndex) {
         continue;
       }
@@ -720,7 +733,90 @@ export class CoValueCore {
       });
     }
 
+    const source = getBranchSource(this);
+
+    if (source && Object.keys(options?.knownTransactions ?? {}).length === 0) {
+      let branchStart: CoValueKnownState["sessions"] | undefined;
+      let madeAt = Infinity;
+
+      for (const { txID, tx } of validTransactions) {
+        if (!tx.meta) {
+          continue;
+        }
+
+        if (tx.madeAt > madeAt) {
+          continue;
+        }
+
+        let meta: JsonValue | undefined;
+
+        if (tx.privacy === "private") {
+          const readKey = this.getReadKey(tx.keyUsed);
+
+          if (!readKey) {
+            continue;
+          }
+
+          let decryptedMeta = this._decryptionCache[tx.meta];
+
+          if (!decryptedMeta) {
+            decryptedMeta = this.verified.decryptTransactionMeta(
+              txID.sessionID,
+              txID.txIndex,
+              readKey,
+            );
+
+            this._decryptionCache[tx.meta] = decryptedMeta;
+          }
+
+          if (!decryptedMeta) {
+            continue;
+          }
+
+          meta = decryptedMeta;
+        } else {
+          meta = parseJSON(tx.meta);
+        }
+
+        if (meta?.["branch"]) {
+          branchStart = meta.branch as CoValueKnownState["sessions"];
+          madeAt = tx.madeAt;
+        }
+      }
+
+      if (branchStart) {
+        const sourceTransactions = source.getValidTransactions({
+          until: branchStart,
+          ignorePrivateTransactions: false,
+        });
+
+        for (const tx of sourceTransactions) {
+          allTransactions.push({
+            txID: {
+              sessionID: `${tx.txID.sessionID}_branch_${source.id}`,
+              txIndex: tx.txID.txIndex,
+            },
+            madeAt: tx.madeAt,
+            changes: tx.changes,
+            trusting: tx.trusting,
+          });
+        }
+      }
+    }
+
     return allTransactions;
+  }
+
+  createBranch(name: string, ownerId: RawCoID) {
+    return createBranch(this, name, ownerId);
+  }
+
+  mergeBranch() {
+    return mergeBranch(this);
+  }
+
+  getBranchId(name: string, ownerId: RawCoID) {
+    return getBranchId(this, name, ownerId);
   }
 
   getValidSortedTransactions(options?: {
