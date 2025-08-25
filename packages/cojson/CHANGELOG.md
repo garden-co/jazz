@@ -1,5 +1,13 @@
 # cojson
 
+## 0.17.13
+
+### Patch Changes
+
+- 7dc3160: Apply `serverPeerSelector` in all the peers getters
+- 474881d: Add support for meta field in transactions and ignore all unkonwn meta when getting valid transactions
+  - cojson-core-wasm@0.17.13
+
 ## 0.17.12
 
 ### Patch Changes

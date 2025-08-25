@@ -1,6 +1,6 @@
 {
   "name": "jazz-auth-betterauth",
-  "version": "0.17.12",
+  "version": "0.17.13",
   "type": "module",
   "main": "dist/index.js",
   "types": "src/index.ts",

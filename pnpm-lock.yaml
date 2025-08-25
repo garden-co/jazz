@@ -2122,19 +2122,19 @@ importers:
         specifier: ^0.25.5
         version: 0.25.8(effect@3.11.9)
       cojson:
-        specifier: workspace:0.17.12
+        specifier: workspace:0.17.13
         version: link:../cojson
       cojson-storage-sqlite:
-        specifier: workspace:0.17.12
+        specifier: workspace:0.17.13
         version: link:../cojson-storage-sqlite
       cojson-transport-ws:
-        specifier: workspace:0.17.12
+        specifier: workspace:0.17.13
         version: link:../cojson-transport-ws
       effect:
         specifier: ^3.6.5
         version: 3.11.9
       jazz-tools:
-        specifier: workspace:0.17.12
+        specifier: workspace:0.17.13
         version: link:../jazz-tools
       ws:
         specifier: ^8.14.2
@@ -21920,7 +21920,9 @@ snapshots:
       metro-runtime: 0.83.1
     transitivePeerDependencies:
       - '@babel/core'
+      - bufferutil
       - supports-color
+      - utf-8-validate
 
   '@react-native/metro-config@0.81.0(@babel/core@7.28.3)':
     dependencies:
@@ -21930,7 +21932,9 @@ snapshots:
       metro-runtime: 0.83.1
     transitivePeerDependencies:
       - '@babel/core'
+      - bufferutil
       - supports-color
+      - utf-8-validate
     optional: true
 
   '@react-native/normalize-colors@0.80.0': {}

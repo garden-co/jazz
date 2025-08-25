@@ -1,5 +1,16 @@
 # jazz-tools
 
+## 0.17.13
+
+### Patch Changes
+
+- d208cd1: Add remove action for CoList table in the inspector
+- Updated dependencies [7dc3160]
+- Updated dependencies [474881d]
+  - cojson@0.17.13
+  - cojson-storage-indexeddb@0.17.13
+  - cojson-transport-ws@0.17.13
+
 ## 0.17.12
 
 ### Patch Changes
