@@ -102,7 +102,7 @@ const group = Group.create();
 const Company = co.map({});
 const company = Company.create({ owner: group });
 // ---cut---
-const companyGroup = company._owner.castAs(Group);
+const companyGroup = company.$jazz.owner;
 const teamGroup = Group.create();
 
 // Works only if I'm a member of `companyGroup`
@@ -205,9 +205,9 @@ console.log(containingGroup.getParentGroups()); // [addedGroup]
 ```
 </CodeGroup>
 
-## Group hierarchy on CoValue creation
+## Ownership on implicit CoValue creation
 
-When creating CoValues that contain other CoValues using plain JSON objects, Jazz not only creates
+When creating CoValues that contain other CoValues (or updating references to CoValues) using plain JSON objects, Jazz not only creates
 the necessary CoValues automatically but it will also manage their group ownership.
 
 <CodeGroup>
@@ -264,7 +264,7 @@ const board = Board.create({
 
 // Give Alice read access to one specific task
 const task = board.columns[0][0];
-const taskGroup = task._owner.castAs(Group);
+const taskGroup = task.$jazz.owner;
 taskGroup.addMember(alice, "reader");
 ```
 </CodeGroup>

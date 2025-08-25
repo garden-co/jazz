@@ -1,10 +1,5 @@
 import { useToast } from "@/hooks/use-toast";
-import {
-  createInviteLink,
-  useAccount,
-  useCoState,
-  useIsAuthenticated,
-} from "jazz-tools/react";
+import { createInviteLink, useAccount, useCoState } from "jazz-tools/react";
 import { useParams } from "react-router";
 import { MusicaAccount, Playlist } from "./1_schema";
 import { uploadMusicTracks } from "./4_actions";
@@ -43,7 +38,7 @@ export function HomePage({ mediaPlayer }: { mediaPlayer: MediaPlayer }) {
   }
 
   const params = useParams<{ playlistId: string }>();
-  const playlistId = params.playlistId ?? me?.root._refs.rootPlaylist.id;
+  const playlistId = params.playlistId ?? me?.root.$jazz.refs.rootPlaylist.id;
 
   const playlist = useCoState(Playlist, playlistId, {
     resolve: {
@@ -53,10 +48,10 @@ export function HomePage({ mediaPlayer }: { mediaPlayer: MediaPlayer }) {
     },
   });
 
-  const membersIds = playlist?._owner.members.map((member) => member.id);
+  const membersIds = playlist?.$jazz.owner.members.map((member) => member.id);
   const isRootPlaylist = !params.playlistId;
-  const isPlaylistOwner = playlist?._owner.myRole() === "admin";
-  const isActivePlaylist = playlistId === me?.root.activePlaylist?.id;
+  const isPlaylistOwner = playlist?.$jazz.owner.myRole() === "admin";
+  const isActivePlaylist = playlistId === me?.root.activePlaylist?.$jazz.id;
 
   const handlePlaylistShareClick = async () => {
     if (!isPlaylistOwner) return;
@@ -74,8 +69,6 @@ export function HomePage({ mediaPlayer }: { mediaPlayer: MediaPlayer }) {
     setIsEditModalOpen(true);
   };
 
-  const isAuthenticated = useIsAuthenticated();
-
   return (
     <SidebarInset className="flex flex-col h-screen text-gray-800">
       <div className="flex flex-1 overflow-hidden">
@@ -91,7 +84,12 @@ export function HomePage({ mediaPlayer }: { mediaPlayer: MediaPlayer }) {
                 <h1 className="text-2xl font-bold text-blue-800">
                   {playlist?.title}
                 </h1>
-                {membersIds && <PlaylistMembers memberIds={membersIds} />}
+                {membersIds && playlist && (
+                  <PlaylistMembers
+                    memberIds={membersIds}
+                    group={playlist.$jazz.owner}
+                  />
+                )}
               </div>
             )}
             <div className="flex items-center space-x-4">
@@ -102,7 +100,7 @@ export function HomePage({ mediaPlayer }: { mediaPlayer: MediaPlayer }) {
                   </FileUploadButton>
                 </>
               )}
-              {!isRootPlaylist && isAuthenticated && (
+              {!isRootPlaylist && (
                 <>
                   <Button onClick={handleEditClick} variant="outline">
                     Edit
@@ -117,11 +115,11 @@ export function HomePage({ mediaPlayer }: { mediaPlayer: MediaPlayer }) {
               (track, index) =>
                 track && (
                   <MusicTrackRow
-                    trackId={track.id}
-                    key={track.id}
+                    trackId={track.$jazz.id}
+                    key={track.$jazz.id}
                     index={index}
                     isPlaying={
-                      mediaPlayer.activeTrackId === track.id &&
+                      mediaPlayer.activeTrackId === track.$jazz.id &&
                       isActivePlaylist &&
                       isPlaying
                     }

@@ -26,7 +26,9 @@ export function Orders() {
 
           {me?.root?.orders?.length ? (
             me?.root?.orders.map((order) =>
-              order ? <OrderThumbnail key={order.id} order={order} /> : null,
+              order ? (
+                <OrderThumbnail key={order.$jazz.id} order={order} />
+              ) : null,
             )
           ) : (
             <p>You have no orders yet.</p>

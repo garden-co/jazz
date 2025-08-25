@@ -14,7 +14,7 @@
 
   function handleDateOfBirthChange(event: Event & { currentTarget: HTMLInputElement }) {
     if (me && event.currentTarget.value) {
-      me.root.dateOfBirth = new Date(event.currentTarget.value);
+      me.root.$jazz.set("dateOfBirth", new Date(event.currentTarget.value));
     }
   }
 </script>
@@ -28,7 +28,10 @@
         id="firstName"
         placeholder="Enter your first name here..."
         class="border border-stone-300 rounded shadow-xs py-1 px-2 flex-1"
-        bind:value={me.profile.firstName}
+        bind:value={
+          () => me.profile.firstName,
+          newValue => me.profile.$jazz.set("firstName", newValue)
+        }
       />
     </div>
 

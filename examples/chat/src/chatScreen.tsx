@@ -42,17 +42,17 @@ export function ChatScreen(props: { chatID: string }) {
     }
 
     createImage(file, {
-      owner: chat._owner,
+      owner: chat.$jazz.owner,
       progressive: true,
       placeholder: "blur",
     }).then((image) => {
-      chat.push(
+      chat.$jazz.push(
         Message.create(
           {
             text: file.name,
             image: image,
           },
-          chat._owner,
+          chat.$jazz.owner,
         ),
       );
     });
@@ -73,7 +73,9 @@ export function ChatScreen(props: { chatID: string }) {
             .reverse()
             .map(
               (msg) =>
-                msg?.text && <ChatBubble me={me} msg={msg} key={msg.id} />,
+                msg?.text && (
+                  <ChatBubble me={me} msg={msg} key={msg.$jazz.id} />
+                ),
             )
         ) : (
           <EmptyChatMessage />
@@ -93,7 +95,7 @@ export function ChatScreen(props: { chatID: string }) {
 
         <TextInput
           onSubmit={(text) => {
-            chat.push(Message.create({ text }, chat._owner));
+            chat.$jazz.push(Message.create({ text }, chat.$jazz.owner));
           }}
         />
       </InputBar>
@@ -115,7 +117,7 @@ function ChatBubble(props: { me: Account; msg: Message }) {
     );
   }
 
-  const lastEdit = props.msg._edits.text;
+  const lastEdit = props.msg.$jazz.getEdits().text;
   const fromMe = lastEdit?.by?.isMe;
   const { text, image } = props.msg;
 
@@ -151,11 +153,11 @@ function useMessagesPreload(chatID: string) {
 async function preloadChatMessages(chatID: string) {
   const chat = await Chat.load(chatID);
 
-  if (!chat?._refs) return;
+  if (!chat?.$jazz.refs) return;
 
   const promises = [];
 
-  for (const msg of Array.from(chat._refs)
+  for (const msg of Array.from(chat.$jazz.refs)
     .reverse()
     .slice(0, INITIAL_MESSAGES_TO_SHOW)) {
     promises.push(Message.load(msg.id, { resolve: { text: true } }));

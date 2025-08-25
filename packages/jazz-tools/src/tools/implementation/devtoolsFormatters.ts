@@ -1,19 +1,19 @@
 /* istanbul ignore file -- @preserve */
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import { ItemsSym } from "./symbols.js";
+import { ItemsSym, TypeSym } from "./symbols.js";
 
 (globalThis as any).devtoolsFormatters = [
   {
     header: (object: any) => {
-      if (object._type === "CoMap") {
+      if (object[TypeSym] === "CoMap") {
         return ["div", {}, ["span", {}, object.constructor.name]];
-      } else if (object._type === "CoList") {
+      } else if (object[TypeSym] === "CoList") {
         return [
           "div",
           {},
           ["span", {}, object.constructor.name + "(" + object.length + ") "],
         ];
-      } else if (object._type === "Account") {
+      } else if (object[TypeSym] === "Account") {
         return [
           "div",
           {},
@@ -22,7 +22,7 @@ import { ItemsSym } from "./symbols.js";
             {},
             object.constructor.name +
               "(" +
-              object._refs.profile.value?.name +
+              object.$jazz.refs.profile.value?.name +
               (object.isMe ? " ME" : "") +
               ")",
           ],
@@ -35,7 +35,7 @@ import { ItemsSym } from "./symbols.js";
       return true;
     },
     body: function (object: any) {
-      if (object._type === "CoMap" || object._type === "Account") {
+      if (object[TypeSym] === "CoMap" || object[TypeSym] === "Account") {
         return [
           "div",
           { style: "margin-left: 15px" },
@@ -52,7 +52,7 @@ import { ItemsSym } from "./symbols.js";
                       "span",
                       { style: "opacity: 0.5" },
                       ` (pending ${object._schema[k].name} `,
-                      ["object", { object: object._refs[k] }],
+                      ["object", { object: object.$jazz.refs[k] }],
                       ")",
                     ],
                   ]
@@ -60,7 +60,7 @@ import { ItemsSym } from "./symbols.js";
               : []),
           ]),
         ];
-      } else if (object._type === "CoList") {
+      } else if (object[TypeSym] === "CoList") {
         return [
           "div",
           { style: "margin-left: 15px" },
@@ -77,7 +77,7 @@ import { ItemsSym } from "./symbols.js";
                       "span",
                       { style: "opacity: 0.5" },
                       ` (pending ${object._schema[ItemsSym].name} `,
-                      ["object", { object: object._refs[i] }],
+                      ["object", { object: object.$jazz.refs[i] }],
                       ")",
                     ],
                   ]

@@ -16,15 +16,15 @@ describe("CoFeed", () => {
         return value;
       }
 
-      matches(feed.perAccount[Account.getMe().id]!.value);
+      matches(feed.perAccount[Account.getMe().$jazz.id]!.value);
     });
 
-    test("has the _owner property", () => {
+    test("has the owner property", () => {
       const StringFeed = co.feed(z.string());
 
       const feed = StringFeed.create(["milk"], Account.getMe());
 
-      expectTypeOf(feed._owner).toEqualTypeOf<Account | Group>();
+      expectTypeOf(feed.$jazz.owner).toEqualTypeOf<Group>();
     });
 
     test("CoFeed with reference", () => {
@@ -45,7 +45,7 @@ describe("CoFeed", () => {
         return value;
       }
 
-      matches(feed.perAccount[Account.getMe().id]!.value);
+      matches(feed.perAccount[Account.getMe().$jazz.id]!.value);
     });
 
     test("CoFeed with optional reference", () => {
@@ -66,7 +66,7 @@ describe("CoFeed", () => {
         return value;
       }
 
-      matches(feed.perAccount[Account.getMe().id]?.value);
+      matches(feed.perAccount[Account.getMe().$jazz.id]?.value);
     });
 
     test("CoFeed create with partially loaded, reference and optional", () => {
@@ -95,7 +95,7 @@ describe("CoFeed", () => {
         return value;
       }
 
-      matches(feed.perAccount[Account.getMe().id]!.value);
+      matches(feed.perAccount[Account.getMe().$jazz.id]!.value);
     });
 
     test("CoFeed with nested feeds", () => {
@@ -109,7 +109,7 @@ describe("CoFeed", () => {
         return value;
       }
 
-      matches(feed.perAccount[Account.getMe().id]?.value);
+      matches(feed.perAccount[Account.getMe().$jazz.id]?.value);
     });
 
     test("CoFeed with enum type", () => {
@@ -123,7 +123,7 @@ describe("CoFeed", () => {
         return value;
       }
 
-      matches(feed.perAccount[Account.getMe().id]?.value);
+      matches(feed.perAccount[Account.getMe().$jazz.id]?.value);
     });
   });
 
@@ -140,7 +140,7 @@ describe("CoFeed", () => {
         Dog.create({ name: "Rex", breed: "Labrador" }),
       ]);
 
-      const loadedFeed = await DogFeed.load(feed.id, {
+      const loadedFeed = await DogFeed.load(feed.$jazz.id, {
         resolve: true,
       });
 
@@ -150,10 +150,10 @@ describe("CoFeed", () => {
         return value;
       }
 
-      matches(loadedFeed?.perAccount[Account.getMe().id]?.value);
+      matches(loadedFeed?.perAccount[Account.getMe().$jazz.id]?.value);
 
       assert(loadedFeed);
-      const dog = loadedFeed.perAccount[Account.getMe().id]?.value;
+      const dog = loadedFeed.perAccount[Account.getMe().$jazz.id]?.value;
       assert(dog);
       expectTypeOf(dog.name).toEqualTypeOf<string>();
     });
@@ -170,7 +170,7 @@ describe("CoFeed", () => {
         Dog.create({ name: "Rex", breed: "Labrador" }),
       ]);
 
-      const loadedFeed = await DogFeed.load(feed.id, {
+      const loadedFeed = await DogFeed.load(feed.$jazz.id, {
         resolve: { $each: { $onError: null } },
       });
 
@@ -180,7 +180,7 @@ describe("CoFeed", () => {
         return value;
       }
 
-      matches(loadedFeed?.perAccount[Account.getMe().id]?.value);
+      matches(loadedFeed?.perAccount[Account.getMe().$jazz.id]?.value);
     });
 
     test("loading a nested feed with deep resolve", async () => {
@@ -196,7 +196,7 @@ describe("CoFeed", () => {
         DogFeed.create([Dog.create({ name: "Rex", breed: "Labrador" })]),
       ]);
 
-      const loadedFeed = await NestedFeed.load(feed.id, {
+      const loadedFeed = await NestedFeed.load(feed.$jazz.id, {
         resolve: {
           $each: true,
         },
@@ -208,12 +208,13 @@ describe("CoFeed", () => {
         return value;
       }
 
-      const nestedFeed = loadedFeed?.perAccount[Account.getMe().id]?.value;
+      const nestedFeed =
+        loadedFeed?.perAccount[Account.getMe().$jazz.id]?.value;
       assert(nestedFeed);
-      matches(nestedFeed.perAccount[Account.getMe().id]?.value);
+      matches(nestedFeed.perAccount[Account.getMe().$jazz.id]?.value);
 
       assert(loadedFeed);
-      const dog = nestedFeed.perAccount[Account.getMe().id]?.value;
+      const dog = nestedFeed.perAccount[Account.getMe().$jazz.id]?.value;
       assert(dog);
       expectTypeOf(dog.name).toEqualTypeOf<string>();
     });

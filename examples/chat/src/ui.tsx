@@ -84,7 +84,7 @@ export function BubbleText(props: {
 export function BubbleImage(props: { image: ImageDefinition }) {
   return (
     <Image
-      imageId={props.image.id}
+      imageId={props.image.$jazz.id}
       className="h-auto max-h-80 max-w-full rounded-t-xl mb-1"
       height="original"
       width="original"

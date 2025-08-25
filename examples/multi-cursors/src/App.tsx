@@ -14,7 +14,7 @@ function App() {
   const [cursorFeedID, setCursorFeedID] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!me?.id) return;
+    if (!me?.$jazz.id) return;
     const loadCursorFeed = async () => {
       const id = await loadCursorContainer(
         me,
@@ -27,7 +27,7 @@ function App() {
       }
     };
     loadCursorFeed();
-  }, [me?.id]);
+  }, [me?.$jazz.id]);
 
   return (
     <>
@@ -42,10 +42,10 @@ function App() {
       <footer className="fixed bottom-4 right-4 flex items-center gap-4">
         <input
           type="text"
-          value={getName(me?.profile?.name, me?.sessionID)}
+          value={getName(me?.profile?.name, me?.$jazz.sessionID)}
           onChange={(e) => {
             if (!me?.profile) return;
-            me.profile.name = e.target.value;
+            me.profile.$jazz.set("name", e.target.value);
           }}
           placeholder="Your name"
           className="px-2 py-1 rounded border pointer-events-auto"

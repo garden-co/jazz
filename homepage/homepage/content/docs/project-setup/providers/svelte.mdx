@@ -114,7 +114,7 @@ The provider accepts these additional options:
 
   // Handle anonymous account data when user logs in to existing account
   const onAnonymousAccountDiscarded = (account) => {
-    console.log("Anonymous account discarded", account.id);
+    console.log("Anonymous account discarded", account.$jazz.id);
     // Migrate data here
     return Promise.resolve();
   };

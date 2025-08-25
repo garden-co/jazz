@@ -22,7 +22,7 @@ import { TypeOfZodSchema } from "./TypeOfZodSchema.js";
  * For CoValue fields, this can be either a shallowly-loaded CoValue instance
  * or a JSON object that will be used to create the CoValue.
  */
-export type CoFieldInit<S extends CoValueClass | AnyZodOrCoValueSchema> =
+export type CoFieldSchemaInit<S extends CoValueClass | AnyZodOrCoValueSchema> =
   S extends CoreCoValueSchema
     ?
         | Loaded<S>
@@ -31,15 +31,15 @@ export type CoFieldInit<S extends CoValueClass | AnyZodOrCoValueSchema> =
             : S extends CoreCoMapSchema<infer Shape>
               ? CoMapSchemaInit<Shape>
               : S extends CoreCoListSchema<infer T>
-                ? CoListInit<T>
+                ? CoListSchemaInit<T>
                 : S extends CoreCoFeedSchema<infer T>
-                  ? CoFeedInit<T>
+                  ? CoFeedSchemaInit<T>
                   : S extends CorePlainTextSchema | CoreRichTextSchema
                     ? string
                     : S extends CoreCoOptionalSchema<infer T>
-                      ? CoFieldInit<T> | undefined
+                      ? CoFieldSchemaInit<T> | undefined
                       : S extends CoDiscriminatedUnionSchema<infer Members>
-                        ? CoFieldInit<Members[number]>
+                        ? CoFieldSchemaInit<Members[number]>
                         : never)
     : S extends z.core.$ZodType
       ? TypeOfZodSchema<S>
@@ -59,20 +59,20 @@ export type CoMapSchemaInit<Shape extends z.core.$ZodLooseShape> = Simplify<
       | CoreCoOptionalSchema
       | z.core.$ZodOptional
       ? never
-      : Key]: CoFieldInit<Shape[Key]>;
+      : Key]: CoFieldSchemaInit<Shape[Key]>;
   } & {
     [Key in keyof Shape as Shape[Key] extends
       | CoreCoOptionalSchema
       | z.core.$ZodOptional
       ? Key
-      : never]?: CoFieldInit<Shape[Key]>;
+      : never]?: CoFieldSchemaInit<Shape[Key]>;
   }
 >;
 
-export type CoListInit<T extends AnyZodOrCoValueSchema> = Simplify<
-  ReadonlyArray<CoFieldInit<T>>
+export type CoListSchemaInit<T extends AnyZodOrCoValueSchema> = Simplify<
+  ReadonlyArray<CoFieldSchemaInit<T>>
 >;
 
-export type CoFeedInit<T extends AnyZodOrCoValueSchema> = Simplify<
-  ReadonlyArray<CoFieldInit<T>>
+export type CoFeedSchemaInit<T extends AnyZodOrCoValueSchema> = Simplify<
+  ReadonlyArray<CoFieldSchemaInit<T>>
 >;

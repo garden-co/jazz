@@ -27,23 +27,23 @@ export type InstanceOfSchema<S extends CoValueClass | AnyZodOrCoValueSchema> =
   S extends CoreCoValueSchema
     ? S extends CoreAccountSchema<infer Shape>
       ? {
-          -readonly [key in keyof Shape]: InstanceOrPrimitiveOfSchema<
+          readonly [key in keyof Shape]: InstanceOrPrimitiveOfSchema<
             Shape[key]
           >;
         } & Account
       : S extends CoreCoRecordSchema<infer K, infer V>
         ? {
-            -readonly [key in z.output<K> &
+            readonly [key in z.output<K> &
               string]: InstanceOrPrimitiveOfSchema<V>;
           } & CoMap
         : S extends CoreCoMapSchema<infer Shape, infer CatchAll>
           ? {
-              -readonly [key in keyof Shape]: InstanceOrPrimitiveOfSchema<
+              readonly [key in keyof Shape]: InstanceOrPrimitiveOfSchema<
                 Shape[key]
               >;
             } & (CatchAll extends AnyZodOrCoValueSchema
               ? {
-                  [key: string]: InstanceOrPrimitiveOfSchema<CatchAll>;
+                  readonly [key: string]: InstanceOrPrimitiveOfSchema<CatchAll>;
                 }
               : {}) &
               CoMap

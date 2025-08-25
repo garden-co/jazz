@@ -35,7 +35,7 @@ export function ConcurrentChanges() {
 
     group.addMember("everyone", "writer");
 
-    const id = Counter.create([{ value: 0 }], group).id;
+    const id = Counter.create([{ value: 0 }], group).$jazz.id;
 
     setId(id);
 
@@ -70,6 +70,6 @@ async function count(counter: Counter) {
 
   while (value < 300) {
     await new Promise((resolve) => setTimeout(resolve, 10));
-    counter.push({ value: ++value });
+    counter.$jazz.push({ value: ++value });
   }
 }

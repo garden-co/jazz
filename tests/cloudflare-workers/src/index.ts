@@ -1,7 +1,6 @@
 import { createWebSocketPeer } from "cojson-transport-ws";
 import { WasmCrypto } from "cojson/crypto/WasmCrypto";
 import { Hono } from "hono";
-import { startSyncServer } from "jazz-run/startSyncServer";
 import { CoMap, coField } from "jazz-tools";
 import { Account } from "jazz-tools";
 import { startWorker } from "jazz-tools/worker";
@@ -17,7 +16,7 @@ class MyAccount extends Account {
 
   migrate(): void {
     if (this.root === undefined) {
-      this.root = MyAccountRoot.create({
+      this.$jazz.set("root", {
         text: "Hello world!",
       });
     }
@@ -41,17 +40,17 @@ app.get("/", async (c) => {
     crypto,
   });
 
-  await account.waitForAllCoValuesSync();
+  await account.$jazz.waitForAllCoValuesSync();
 
   const admin = await startWorker({
-    accountID: account.id,
-    accountSecret: account._raw.core.node.getCurrentAgent().agentSecret,
+    accountID: account.$jazz.id,
+    accountSecret: account.$jazz.localNode.getCurrentAgent().agentSecret,
     AccountSchema: MyAccount,
     syncServer,
     crypto,
   });
 
-  const { root } = await admin.worker.ensureLoaded({
+  const { root } = await admin.worker.$jazz.ensureLoaded({
     resolve: { root: true },
   });
 

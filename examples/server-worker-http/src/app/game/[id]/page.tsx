@@ -3,10 +3,10 @@
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Game, PlaySelection, PlayerState } from "@/schema";
+import { Game } from "@/schema";
 import { serverApi } from "@/serverApi";
-import { Group, isJazzRequestError } from "jazz-tools";
-import { useAccount, useCoState } from "jazz-tools/react";
+import { isJazzRequestError } from "jazz-tools";
+import { useCoState } from "jazz-tools/react";
 import {
   CheckCircle,
   Clock,
@@ -18,7 +18,6 @@ import {
   XCircle,
 } from "lucide-react";
 import { useParams } from "next/navigation";
-import { useState } from "react";
 import { toast } from "sonner";
 
 const playIcon = (
@@ -123,13 +122,13 @@ export default function RouteComponent() {
   const currentPlayerState = game[isPlayer1 ? "player1State" : "player2State"];
 
   const opponentSelection = opponentPlayer?.playSelection;
-  const opponentHasSelected = Boolean(opponentPlayer._refs.playSelection);
+  const opponentHasSelected = Boolean(opponentPlayer.$jazz.refs.playSelection);
 
   const handleSelection = (selection: "rock" | "paper" | "scissors") => {
     if (!currentPlayerState) return;
     if (currentPlayerState.submitted) return;
 
-    currentPlayerState.currentSelection = selection;
+    currentPlayerState.$jazz.set("currentSelection", selection);
   };
 
   const handleSubmit = async (
@@ -138,7 +137,7 @@ export default function RouteComponent() {
     if (!playSelection) return;
     if (!currentPlayerState) return;
 
-    currentPlayerState.submitted = true;
+    currentPlayerState.$jazz.set("submitted", true);
 
     try {
       await serverApi.play.send({
@@ -146,7 +145,7 @@ export default function RouteComponent() {
         selection: playSelection,
       });
     } catch (error) {
-      currentPlayerState.submitted = false;
+      currentPlayerState.$jazz.set("submitted", false);
       if (isJazzRequestError(error)) {
         toast.error(error.message);
       } else {
@@ -159,14 +158,14 @@ export default function RouteComponent() {
   const handleNewGame = async () => {
     if (!currentPlayerState) return;
 
-    currentPlayerState.resetRequested = true;
+    currentPlayerState.$jazz.set("resetRequested", true);
 
     try {
       await serverApi.newGame.send({
         game,
       });
     } catch (error) {
-      currentPlayerState.resetRequested = false;
+      currentPlayerState.$jazz.set("resetRequested", false);
 
       if (isJazzRequestError(error)) {
         toast.error(error.message);

@@ -70,7 +70,7 @@ describe("startSyncServer", () => {
     });
 
     // Try to load the previously created map
-    const loadedMap = await TestMap.load(map.id, {});
+    const loadedMap = await TestMap.load(map.$jazz.id, {});
 
     // Verify the data persisted
     expect(loadedMap).not.toBe(null);

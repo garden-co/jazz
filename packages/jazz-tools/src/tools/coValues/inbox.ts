@@ -29,11 +29,11 @@ export type InboxRoot = RawCoMap<{
 }>;
 
 export function createInboxRoot(account: Account) {
-  if (!account.isLocalNodeOwner) {
+  if (!account.$jazz.isLocalNodeOwner) {
     throw new Error("Account is not controlled");
   }
 
-  const rawAccount = account._raw;
+  const rawAccount = account.$jazz.raw;
 
   const group = rawAccount.core.node.createGroup();
   const messagesFeed = group.createStream<MessagesStream>();
@@ -66,7 +66,7 @@ async function createInboxMessage<
   I extends CoValue,
   O extends CoValue | undefined,
 >(payload: I, inboxOwner: RawAccount) {
-  const group = payload._raw.group;
+  const group = payload.$jazz.raw.group;
 
   if (group instanceof RawAccount) {
     throw new Error("Inbox messages should be owned by a group");
@@ -75,13 +75,13 @@ async function createInboxMessage<
   group.addMember(inboxOwner, "writer");
 
   const message = group.createMap<InboxMessage<I, O>>({
-    payload: payload.id,
+    payload: payload.$jazz.id,
     result: undefined,
     processed: false,
     error: undefined,
   });
 
-  await payload._raw.core.waitForSync();
+  await payload.$jazz.raw.core.waitForSync();
   await message.core.waitForSync();
 
   return message;
@@ -119,7 +119,7 @@ export class Inbox {
   ) {
     const processed = new Set<`${SessionID}/${number}`>();
     const failed = new Map<`${SessionID}/${number}`, string[]>();
-    const node = this.account._raw.core.node;
+    const node = this.account.$jazz.localNode;
 
     this.processed.subscribe((stream) => {
       for (const items of Object.values(stream.items)) {
@@ -194,7 +194,7 @@ export class Inbox {
                   .getCurrentContent() as RawCoMap;
 
                 if (result) {
-                  inboxMessage.set("result", result.id);
+                  inboxMessage.set("result", result.$jazz.id);
                 }
 
                 inboxMessage.set("processed", true);
@@ -258,7 +258,7 @@ export class Inbox {
       throw new Error("The account has not set up their inbox");
     }
 
-    const node = account._raw.core.node;
+    const node = account.$jazz.localNode;
 
     const root = await node.load(profile.inbox as CoID<InboxRoot>);
 
@@ -332,7 +332,7 @@ export class InboxSender<I extends CoValue, O extends CoValue | undefined> {
   >(inboxOwnerID: ID<Account>, currentAccount?: Account) {
     currentAccount ||= activeAccountContext.get();
 
-    const node = currentAccount._raw.core.node;
+    const node = currentAccount.$jazz.localNode;
 
     const inboxOwnerRaw = await node.load(
       inboxOwnerID as unknown as CoID<RawAccount>,
@@ -349,9 +349,11 @@ export class InboxSender<I extends CoValue, O extends CoValue | undefined> {
     }
 
     if (
-      inboxOwnerProfileRaw.group.roleOf(currentAccount._raw.id) !== "reader" &&
-      inboxOwnerProfileRaw.group.roleOf(currentAccount._raw.id) !== "writer" &&
-      inboxOwnerProfileRaw.group.roleOf(currentAccount._raw.id) !== "admin"
+      inboxOwnerProfileRaw.group.roleOf(currentAccount.$jazz.raw.id) !==
+        "reader" &&
+      inboxOwnerProfileRaw.group.roleOf(currentAccount.$jazz.raw.id) !==
+        "writer" &&
+      inboxOwnerProfileRaw.group.roleOf(currentAccount.$jazz.raw.id) !== "admin"
     ) {
       throw new Error(
         "Insufficient permissions to access the inbox, make sure its user profile is publicly readable.",
@@ -387,11 +389,11 @@ async function acceptInvite(invite: string, account?: Account) {
     throw new Error("Invalid inbox ticket");
   }
 
-  if (!account.isLocalNodeOwner) {
+  if (!account.$jazz.isLocalNodeOwner) {
     throw new Error("Account is not controlled");
   }
 
-  await account._raw.core.node.acceptInvite(id, inviteSecret);
+  await account.$jazz.localNode.acceptInvite(id, inviteSecret);
 
   return id;
 }

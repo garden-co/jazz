@@ -49,7 +49,7 @@ unsubscribe();
 ```
 </CodeGroup>
 
-If you already have a CoValue instance, you can subscribe to it by calling its `subscribe` method.
+If you already have a CoValue instance, you can subscribe to it by calling its `$jazz.subscribe` method.
 
 <CodeGroup>
 ```ts twoslash
@@ -68,7 +68,7 @@ const task = Task.create({
   ...otherProps
 });
 
-const unsubscribe = task.subscribe((updatedTask) => {
+const unsubscribe = task.$jazz.subscribe((updatedTask) => {
   console.log("Task updated:", updatedTask.title);
 });
 
@@ -122,11 +122,11 @@ function GardenPlanner({ projectId }: { projectId: string }) {
   );
 }
 
-function TaskList({ tasks }: { tasks: co.loaded<typeof Task>[] }) {
+function TaskList({ tasks }: { tasks: ReadonlyArray<co.loaded<typeof Task>> }) {
   return (
     <ul>
       {tasks.map((task) => (
-        <li key={task.id}>
+        <li key={task.$jazz.id}>
           <span>{task.title}</span>
           <span>{task.status}</span>
         </li>
@@ -194,7 +194,7 @@ function ProjectList() {
       <h1>{me.profile.name}'s projects</h1>
       <ul>
         {me.root.myProjects.map((project) => (
-          <li key={project.id}>
+          <li key={project.$jazz.id}>
             {project.name} ({project.tasks.length} tasks)
           </li>
         ))}
@@ -502,7 +502,7 @@ const source = co.list(Person).create(
   publicGroup,
 );
 
-const friends = await co.list(Person).load(source.id, {
+const friends = await co.list(Person).load(source.$jazz.id, {
   resolve: {
     $each: { $onError: null }
   },
@@ -567,7 +567,7 @@ const source = co.list(Person).create(
   publicGroup,
 );
 
-const friends = await co.list(Person).load(source.id, {
+const friends = await co.list(Person).load(source.$jazz.id, {
   resolve: {
     $each: { dog: true, $onError: null }
   },
@@ -624,7 +624,7 @@ const source = co.list(Person).create(
 );
 
 // ---cut-before---
-const friends = await co.list(Person).load(source.id, {
+const friends = await co.list(Person).load(source.$jazz.id, {
   resolve: {
     $each: { dog: { $onError: null } }
   },
@@ -689,7 +689,7 @@ function TaskList({ project }: { project: ProjectWithTasks }) {
   return (
     <ul>
       {project.tasks.map((task) => (
-        <li key={task.id}>{task.title}</li>
+        <li key={task.$jazz.id}>{task.title}</li>
       ))}
     </ul>
   );
@@ -795,7 +795,7 @@ Using the `co.loaded` type helps catch errors at compile time rather than runtim
 
 ## Ensuring Data is Loaded
 
-Sometimes you need to make sure data is loaded before proceeding with an operation. The `ensureLoaded` method lets you guarantee that a CoValue and its referenced data are loaded to a specific depth:
+Sometimes you need to make sure data is loaded before proceeding with an operation. The `$jazz.ensureLoaded` method lets you guarantee that a CoValue and its referenced data are loaded to a specific depth:
 
 <CodeGroup>
 ```ts twoslash
@@ -827,7 +827,7 @@ async function completeAllTasks(projectId: string) {
   if (!project) return;
 
   // Ensure tasks are loaded
-  const loadedProject = await project.ensureLoaded({
+  const loadedProject = await project.$jazz.ensureLoaded({
     resolve: {
       tasks: {
         $each: true,
@@ -837,7 +837,7 @@ async function completeAllTasks(projectId: string) {
 
   // Now we can safely access and modify tasks
   loadedProject.tasks.forEach((task) => {
-    task.status = "completed";
+    task.$jazz.set("status", "completed");
   });
 }
 ```

@@ -39,8 +39,8 @@ export const TodoAccount = co
      *  You can use it to set up the account root and any other initial CoValues you need.
      */
     if (account.root === undefined) {
-      account.root = TodoAccountRoot.create({
-        projects: co.list(TodoProject).create([], { owner: account }),
+      account.$jazz.set("root", {
+        projects: [],
         profilingEnabled: false,
       });
     }

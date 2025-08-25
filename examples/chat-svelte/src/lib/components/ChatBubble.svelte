@@ -13,7 +13,7 @@
     me: Loaded<typeof Account> | null | undefined;
     msg: Loaded<typeof Message>;
   } = $props();
-  const lastEdit = $derived(msg._edits.text);
+  const lastEdit = $derived(msg.$jazz.getEdits().text);
   const fromMe = $derived(lastEdit?.by?.isMe);
   const { text, image } = $derived(msg);
 </script>

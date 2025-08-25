@@ -28,9 +28,12 @@ describe("useCoState", () => {
       { owner: account },
     );
 
-    const [result] = withJazzTestSetup(() => useCoState(TestMap, map.id, {}), {
-      account,
-    });
+    const [result] = withJazzTestSetup(
+      () => useCoState(TestMap, map.$jazz.id, {}),
+      {
+        account,
+      },
+    );
 
     expect(result.value?.content).toBe("123");
   });
@@ -49,13 +52,16 @@ describe("useCoState", () => {
       { owner: account },
     );
 
-    const [result] = withJazzTestSetup(() => useCoState(TestMap, map.id, {}), {
-      account,
-    });
+    const [result] = withJazzTestSetup(
+      () => useCoState(TestMap, map.$jazz.id, {}),
+      {
+        account,
+      },
+    );
 
     expect(result.value?.content).toBe("123");
 
-    map.content = "456";
+    map.$jazz.set("content", "456");
 
     expect(result.value?.content).toBe("456");
   });
@@ -87,7 +93,7 @@ describe("useCoState", () => {
 
     const [result] = withJazzTestSetup(
       () =>
-        useCoState(TestMap, map.id, {
+        useCoState(TestMap, map.$jazz.id, {
           resolve: {
             nested: true,
           },
@@ -126,9 +132,12 @@ describe("useCoState", () => {
       { owner: account },
     );
 
-    const [result] = withJazzTestSetup(() => useCoState(TestMap, map.id, {}), {
-      account,
-    });
+    const [result] = withJazzTestSetup(
+      () => useCoState(TestMap, map.$jazz.id, {}),
+      {
+        account,
+      },
+    );
 
     expect(result.value?.content).toBe("123");
     expect(result.value?.nested?.content).toBe("456");
@@ -164,7 +173,7 @@ describe("useCoState", () => {
     });
 
     const [result] = withJazzTestSetup(() =>
-      useCoState(TestMap, map.id as ID<CoValue>, {
+      useCoState(TestMap, map.$jazz.id as ID<CoValue>, {
         resolve: true,
       }),
     );

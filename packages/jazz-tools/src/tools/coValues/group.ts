@@ -6,8 +6,7 @@ import type {
   RawGroup,
   Role,
 } from "cojson";
-import type {
-  CoMap,
+import {
   CoValue,
   CoValueClass,
   ID,
@@ -15,15 +14,15 @@ import type {
   RefsToResolve,
   RefsToResolveStrict,
   Resolved,
-  Schema,
   SubscribeListenerOptions,
   SubscribeRestArgs,
+  TypeSym,
 } from "../internal.js";
 import {
   Account,
   AccountAndGroupProxyHandler,
   CoValueBase,
-  Profile,
+  CoValueJazzApi,
   Ref,
   RegisteredSchemas,
   accessChildById,
@@ -37,73 +36,23 @@ import {
   subscribeToExistingCoValue,
 } from "../internal.js";
 
+type GroupMember = {
+  id: string;
+  role: AccountRole;
+  ref: Ref<Account>;
+  account: Account;
+};
+
 /** @category Identity & Permissions */
 export class Group extends CoValueBase implements CoValue {
-  declare id: ID<this>;
-  declare _type: "Group";
+  declare [TypeSym]: "Group";
   static {
-    this.prototype._type = "Group";
+    this.prototype[TypeSym] = "Group";
   }
-  declare _raw: RawGroup;
-
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  static _schema: any;
-  get _schema(): {
-    profile: Schema;
-    root: Schema;
-  } {
-    return (this.constructor as typeof Group)._schema;
-  }
-  static {
-    this._schema = {
-      profile: "json" satisfies Schema,
-      root: "json" satisfies Schema,
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    } as any;
-    Object.defineProperty(this.prototype, "_schema", {
-      get: () => this._schema,
-    });
-  }
-
-  declare profile: Profile | null;
-  declare root: CoMap | null;
-
-  get _refs(): {
-    profile: Ref<Profile> | undefined;
-    root: Ref<CoMap> | undefined;
-  } {
-    const profileID = this._raw.get("profile") as unknown as
-      | ID<NonNullable<this["profile"]>>
-      | undefined;
-    const rootID = this._raw.get("root") as unknown as
-      | ID<NonNullable<this["root"]>>
-      | undefined;
-    return {
-      profile: profileID
-        ? (new Ref(
-            profileID,
-            this._loadedAs,
-            this._schema.profile as RefEncoded<NonNullable<this["profile"]>>,
-            this,
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          ) as any as this["profile"] extends Profile
-            ? Ref<this["profile"]>
-            : never)
-        : undefined,
-      root: rootID
-        ? (new Ref(
-            rootID,
-            this._loadedAs,
-            this._schema.root as RefEncoded<NonNullable<this["root"]>>,
-            this,
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          ) as any as this["root"] extends CoMap ? Ref<this["root"]> : never)
-        : undefined,
-    };
-  }
+  declare $jazz: GroupJazzApi<this>;
 
   /** @deprecated Don't use constructor directly, use .create */
-  constructor(options: { fromRaw: RawGroup } | { owner: Account | Group }) {
+  constructor(options: { fromRaw: RawGroup } | { owner: Account }) {
     super();
     let raw: RawGroup;
 
@@ -112,23 +61,27 @@ export class Group extends CoValueBase implements CoValue {
     } else {
       const initOwner = options.owner;
       if (!initOwner) throw new Error("No owner provided");
-      if (initOwner._type === "Account" && isControlledAccount(initOwner)) {
-        const rawOwner = initOwner._raw;
+      if (initOwner[TypeSym] === "Account" && isControlledAccount(initOwner)) {
+        const rawOwner = initOwner.$jazz.raw;
         raw = rawOwner.core.node.createGroup();
       } else {
         throw new Error("Can only construct group as a controlled account");
       }
     }
 
+    const proxy = new Proxy(
+      this,
+      AccountAndGroupProxyHandler as ProxyHandler<this>,
+    );
+
     Object.defineProperties(this, {
-      id: {
-        value: raw.id,
+      $jazz: {
+        value: new GroupJazzApi(proxy, raw),
         enumerable: false,
       },
-      _raw: { value: raw, enumerable: false },
     });
 
-    return new Proxy(this, AccountAndGroupProxyHandler as ProxyHandler<this>);
+    return proxy;
   }
 
   static create<G extends Group>(
@@ -139,7 +92,7 @@ export class Group extends CoValueBase implements CoValue {
   }
 
   myRole(): Role | undefined {
-    return this._raw.myRole();
+    return this.$jazz.raw.myRole();
   }
 
   addMember(member: Everyone, role: "writer" | "reader" | "writeOnly"): void;
@@ -158,12 +111,15 @@ export class Group extends CoValueBase implements CoValue {
     member: Group | Everyone | Account,
     role?: AccountRole | "inherit",
   ) {
-    if (member !== "everyone" && member._type === "Group") {
+    if (member !== "everyone" && member[TypeSym] === "Group") {
       if (role === "writeOnly")
         throw new Error("Cannot add group as member with write-only role");
-      this._raw.extend(member._raw, role);
+      this.$jazz.raw.extend(member.$jazz.raw, role);
     } else if (role !== undefined && role !== "inherit") {
-      this._raw.addMember(member === "everyone" ? member : member._raw, role);
+      this.$jazz.raw.addMember(
+        member === "everyone" ? member : member.$jazz.raw,
+        role,
+      );
     }
   }
 
@@ -174,23 +130,18 @@ export class Group extends CoValueBase implements CoValue {
    */
   removeMember(member: Group): void;
   removeMember(member: Group | Everyone | Account) {
-    if (member !== "everyone" && member._type === "Group") {
-      this._raw.revokeExtend(member._raw);
+    if (member !== "everyone" && member[TypeSym] === "Group") {
+      this.$jazz.raw.revokeExtend(member.$jazz.raw);
     } else {
-      return this._raw.removeMember(
-        member === "everyone" ? member : member._raw,
+      return this.$jazz.raw.removeMember(
+        member === "everyone" ? member : member.$jazz.raw,
       );
     }
   }
 
   private getMembersFromKeys(
     accountIDs: Iterable<RawAccountID | AgentID>,
-  ): Array<{
-    id: string;
-    role: AccountRole;
-    ref: Ref<Account>;
-    account: Account;
-  }> {
+  ): GroupMember[] {
     const members = [];
 
     const refEncodedAccountSchema = {
@@ -201,7 +152,7 @@ export class Group extends CoValueBase implements CoValue {
     for (const accountID of accountIDs) {
       if (!isAccountID(accountID)) continue;
 
-      const role = this._raw.roleOf(accountID);
+      const role = this.$jazz.raw.roleOf(accountID);
 
       if (
         role === "admin" ||
@@ -211,7 +162,7 @@ export class Group extends CoValueBase implements CoValue {
       ) {
         const ref = new Ref<Account>(
           accountID,
-          this._loadedAs,
+          this.$jazz.loadedAs,
           refEncodedAccountSchema,
           this,
         );
@@ -242,8 +193,8 @@ export class Group extends CoValueBase implements CoValue {
    *
    * @returns The members of the group.
    */
-  get members() {
-    return this.getMembersFromKeys(this._raw.getAllMemberKeysSet());
+  get members(): GroupMember[] {
+    return this.getMembersFromKeys(this.$jazz.raw.getAllMemberKeysSet());
   }
 
   /**
@@ -253,20 +204,18 @@ export class Group extends CoValueBase implements CoValue {
    * parent groups, use {@link Group.members|members} instead.
    * @returns The direct members of the group.
    */
-  getDirectMembers() {
-    return this.getMembersFromKeys(this._raw.getMemberKeys());
+  getDirectMembers(): GroupMember[] {
+    return this.getMembersFromKeys(this.$jazz.raw.getMemberKeys());
   }
 
-  getRoleOf(member: Everyone | ID<Account> | "me") {
-    if (member === "me") {
-      return this._raw.roleOf(
-        activeAccountContext.get().id as unknown as RawAccountID,
-      );
-    }
-
-    return this._raw.roleOf(
-      member === "everyone" ? member : (member as unknown as RawAccountID),
-    );
+  getRoleOf(member: Everyone | ID<Account> | "me"): Role | undefined {
+    const accountId =
+      member === "me"
+        ? (activeAccountContext.get().$jazz.id as RawAccountID)
+        : member === "everyone"
+          ? member
+          : (member as RawAccountID);
+    return this.$jazz.raw.roleOf(accountId);
   }
 
   /**
@@ -276,13 +225,15 @@ export class Group extends CoValueBase implements CoValue {
    * @param role - Optional: the role to grant to everyone. Defaults to "reader".
    * @returns The group itself.
    */
-  makePublic(role: "reader" | "writer" = "reader") {
+  makePublic(role: "reader" | "writer" = "reader"): this {
     this.addMember("everyone", role);
     return this;
   }
 
   getParentGroups(): Array<Group> {
-    return this._raw.getParentGroups().map((group) => Group.fromRaw(group));
+    return this.$jazz.raw
+      .getParentGroups()
+      .map((group) => Group.fromRaw(group));
   }
 
   /** @category Identity & Permissions
@@ -295,8 +246,8 @@ export class Group extends CoValueBase implements CoValue {
   extend(
     parent: Group,
     roleMapping?: "reader" | "writer" | "admin" | "inherit",
-  ) {
-    this._raw.extend(parent._raw, roleMapping);
+  ): this {
+    this.$jazz.raw.extend(parent.$jazz.raw, roleMapping);
     return this;
   }
 
@@ -306,8 +257,8 @@ export class Group extends CoValueBase implements CoValue {
    * @param parent The group that will lose access to this group.
    * @returns This group.
    */
-  async revokeExtend(parent: Group) {
-    await this._raw.revokeExtend(parent._raw);
+  async revokeExtend(parent: Group): Promise<this> {
+    await this.$jazz.raw.revokeExtend(parent.$jazz.raw);
     return this;
   }
 
@@ -340,31 +291,55 @@ export class Group extends CoValueBase implements CoValue {
     const { options, listener } = parseSubscribeRestArgs(args);
     return subscribeToCoValueWithoutMe<G, R>(this, id, options, listener);
   }
+}
+
+export class GroupJazzApi<G extends Group> extends CoValueJazzApi<G> {
+  constructor(
+    private group: G,
+    public raw: RawGroup,
+  ) {
+    super(group);
+  }
+
+  /**
+   * The ID of this `Group`
+   * @category Content
+   */
+  get id(): ID<G> {
+    return this.raw.id;
+  }
+
+  /**
+   * Groups have no owner. They can be accessed by everyone.
+   */
+  get owner(): undefined {
+    return undefined;
+  }
 
   /** @category Subscription & Loading */
   ensureLoaded<G extends Group, const R extends RefsToResolve<G>>(
-    this: G,
+    this: GroupJazzApi<G>,
     options?: { resolve?: RefsToResolveStrict<G, R> },
   ): Promise<Resolved<G, R>> {
-    return ensureCoValueLoaded(this, options);
+    return ensureCoValueLoaded(this.group, options);
   }
 
   /** @category Subscription & Loading */
   subscribe<G extends Group, const R extends RefsToResolve<G>>(
-    this: G,
+    this: GroupJazzApi<G>,
     listener: (value: Resolved<G, R>, unsubscribe: () => void) => void,
   ): () => void;
   subscribe<G extends Group, const R extends RefsToResolve<G>>(
-    this: G,
+    this: GroupJazzApi<G>,
     options: { resolve?: RefsToResolveStrict<G, R> },
     listener: (value: Resolved<G, R>, unsubscribe: () => void) => void,
   ): () => void;
   subscribe<G extends Group, const R extends RefsToResolve<G>>(
-    this: G,
+    this: GroupJazzApi<G>,
     ...args: SubscribeRestArgs<G, R>
   ): () => void {
     const { options, listener } = parseSubscribeRestArgs(args);
-    return subscribeToExistingCoValue(this, options, listener);
+    return subscribeToExistingCoValue(this.group, options, listener);
   }
 
   /**
@@ -373,7 +348,7 @@ export class Group extends CoValueBase implements CoValue {
    * @category Subscription & Loading
    */
   waitForSync(options?: { timeout?: number }) {
-    return this._raw.core.waitForSync(options);
+    return this.raw.core.waitForSync(options);
   }
 }
 
@@ -381,4 +356,15 @@ RegisteredSchemas["Group"] = Group;
 
 export function isAccountID(id: RawAccountID | AgentID): id is RawAccountID {
   return id.startsWith("co_");
+}
+
+export function getCoValueOwner(coValue: CoValue): Group {
+  const group = accessChildById(coValue, coValue.$jazz.raw.group.id, {
+    ref: RegisteredSchemas["Group"],
+    optional: false,
+  });
+  if (!group) {
+    throw new Error("CoValue has no owner");
+  }
+  return group;
 }

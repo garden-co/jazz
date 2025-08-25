@@ -34,7 +34,7 @@
 
     try {
       // Create a FileStream from the uploaded file
-      const fileStream = await FileStream.createFromBlob(file, sharedFiles._owner);
+      const fileStream = await FileStream.createFromBlob(file, sharedFiles.$jazz.owner);
 
       // Create the shared file entry
       const sharedFile = SharedFile.create(
@@ -45,11 +45,11 @@
           uploadedAt: new Date(),
           size: file.size
         },
-        sharedFiles._owner
+        sharedFiles.$jazz.owner
       );
 
       // Add the file to the user's files list
-      sharedFiles.push(sharedFile);
+      sharedFiles.$jazz.push(sharedFile);
     } finally {
       fileInput.value = ''; // reset input
     }
@@ -60,7 +60,7 @@
 
     const index = sharedFiles.indexOf(file);
     if (index > -1) {
-      sharedFiles.splice(index, 1);
+      sharedFiles.$jazz.splice(index, 1);
     }
   }
 </script>

@@ -2,22 +2,22 @@ import type { CoValue, CoValueClass, RefEncoded } from "../internal.js";
 import { SubscriptionScope } from "./SubscriptionScope.js";
 
 export function getSubscriptionScope<D extends CoValue>(value: D) {
-  const subscriptionScope = value._subscriptionScope;
+  const subscriptionScope = value.$jazz._subscriptionScope;
 
   if (subscriptionScope) {
     return subscriptionScope;
   }
 
-  const node = value._raw.core.node;
+  const node = value.$jazz.raw.core.node;
   const resolve = true;
-  const id = value.id;
+  const id = value.$jazz.id;
 
   const newSubscriptionScope = new SubscriptionScope(node, resolve, id, {
     ref: value.constructor as CoValueClass<D>,
     optional: false,
   });
 
-  Object.defineProperty(value, "_subscriptionScope", {
+  Object.defineProperty(value.$jazz, "_subscriptionScope", {
     value: subscriptionScope,
     writable: false,
     enumerable: false,

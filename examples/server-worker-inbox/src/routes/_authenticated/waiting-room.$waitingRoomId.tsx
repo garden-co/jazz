@@ -42,7 +42,7 @@ export const Route = createFileRoute(
       );
       // If the waiting room already has a game, redirect to the game
       if (waitingRoom?.game) {
-        throw redirect({ to: `/game/${waitingRoom.game.id}` as string });
+        throw redirect({ to: `/game/${waitingRoom.game.$jazz.id}` as string });
       }
     }
 
@@ -60,7 +60,7 @@ function RouteComponent() {
       return;
     }
 
-    return waitingRoom.subscribe(
+    return waitingRoom.$jazz.subscribe(
       {
         resolve: {
           game: true,
@@ -68,7 +68,7 @@ function RouteComponent() {
       },
       async () => {
         if (waitingRoom.game) {
-          navigate({ to: `/game/${waitingRoom.game.id}` });
+          navigate({ to: `/game/${waitingRoom.game.$jazz.id}` });
         }
       },
     );

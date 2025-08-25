@@ -28,7 +28,8 @@ export function CreatePlaylistModal({
     setIsCreating(true);
     try {
       const playlist = await createNewPlaylist(playlistTitle.trim());
-      onPlaylistCreated(playlist.id);
+      setPlaylistTitle("");
+      onPlaylistCreated(playlist.$jazz.id);
       onClose();
     } catch (error) {
       console.error("Failed to create playlist:", error);

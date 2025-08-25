@@ -10,7 +10,7 @@ describe("CoList", () => {
 
       const list = StringList.create(["a", "b", "c"]);
 
-      type ExpectedType = string[];
+      type ExpectedType = ReadonlyArray<string>;
 
       function matches(value: ExpectedType) {
         return value;
@@ -19,12 +19,12 @@ describe("CoList", () => {
       matches(list);
     });
 
-    test("has the _owner property", () => {
+    test("has the owner property", () => {
       const StringList = co.list(z.string());
 
       const list = StringList.create(["a", "b", "c"], Account.getMe());
 
-      expectTypeOf(list._owner).toEqualTypeOf<Account | Group>();
+      expectTypeOf(list.$jazz.owner).toEqualTypeOf<Group>();
     });
 
     test("CoList with reference", () => {
@@ -42,7 +42,7 @@ describe("CoList", () => {
         undefined,
       ]);
 
-      type ExpectedType = Loaded<typeof Dog>[];
+      type ExpectedType = ReadonlyArray<Loaded<typeof Dog>>;
 
       function matches(value: ExpectedType) {
         return value;
@@ -64,7 +64,7 @@ describe("CoList", () => {
         undefined,
       ]);
 
-      type ExpectedType = (Loaded<typeof Dog> | undefined)[];
+      type ExpectedType = ReadonlyArray<Loaded<typeof Dog> | undefined>;
 
       function matches(value: ExpectedType) {
         return value;
@@ -93,7 +93,7 @@ describe("CoList", () => {
 
       const list = DogList.create([dog, undefined]);
 
-      type ExpectedType = (Loaded<typeof Dog> | undefined)[];
+      type ExpectedType = ReadonlyArray<Loaded<typeof Dog> | undefined>;
 
       function matches(value: ExpectedType) {
         return value;
@@ -121,7 +121,7 @@ describe("CoList", () => {
 
       const list = DogList.create([rex]);
 
-      type ExpectedType = Loaded<typeof Dog>[];
+      type ExpectedType = ReadonlyArray<Loaded<typeof Dog>>;
 
       function matches(value: ExpectedType) {
         return value;
@@ -138,7 +138,7 @@ describe("CoList", () => {
         co.list(z.string()).create(["c", "d"]),
       ]);
 
-      type ExpectedType = string[][];
+      type ExpectedType = ReadonlyArray<ReadonlyArray<string>>;
 
       function matches(value: ExpectedType) {
         return value;
@@ -152,7 +152,7 @@ describe("CoList", () => {
 
       const list = EnumList.create(["a", "b", "c"]);
 
-      type ExpectedType = ("a" | "b" | "c")[];
+      type ExpectedType = ReadonlyArray<"a" | "b" | "c">;
 
       function matches(value: ExpectedType) {
         return value;
@@ -176,13 +176,13 @@ describe("CoList", () => {
         Dog.create({ name: "Fido", breed: "Poodle" }),
       ]);
 
-      const loadedList = await DogList.load(list.id, {
+      const loadedList = await DogList.load(list.$jazz.id, {
         resolve: {
           $each: true,
         },
       });
 
-      type ExpectedType = Loaded<typeof Dog>[] | null;
+      type ExpectedType = ReadonlyArray<Loaded<typeof Dog>> | null;
 
       function matches(value: ExpectedType) {
         return value;
@@ -209,20 +209,18 @@ describe("CoList", () => {
         Dog.create({ name: "Fido", breed: "Poodle" }),
       ]);
 
-      const loadedList = await DogList.load(list.id, {
+      const loadedList = await DogList.load(list.$jazz.id, {
         resolve: {
           $each: { $onError: null },
         },
       });
 
-      type ExpectedType =
-        | (
-            | (Loaded<typeof Dog> & {
-                $onError: never;
-              })
-            | null
-          )[]
-        | null;
+      type ExpectedType = ReadonlyArray<
+        | (Loaded<typeof Dog> & {
+            $onError: never;
+          })
+        | null
+      > | null;
 
       function matches(value: ExpectedType) {
         return value;
@@ -247,7 +245,7 @@ describe("CoList", () => {
         ]),
       ]);
 
-      const loadedList = await NestedList.load(list.id, {
+      const loadedList = await NestedList.load(list.$jazz.id, {
         resolve: {
           $each: {
             $each: true,
@@ -255,7 +253,9 @@ describe("CoList", () => {
         },
       });
 
-      type ExpectedType = Loaded<typeof Dog>[][] | null;
+      type ExpectedType = ReadonlyArray<
+        ReadonlyArray<Loaded<typeof Dog>>
+      > | null;
 
       function matches(value: ExpectedType) {
         return value;
@@ -292,7 +292,7 @@ describe("CoList", () => {
         ],
       });
 
-      const loadedPerson = await Person.load(person.id, {
+      const loadedPerson = await Person.load(person.$jazz.id, {
         resolve: { dogs: { $onError: null } },
       });
 

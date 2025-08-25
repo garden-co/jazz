@@ -20,7 +20,7 @@ export function App() {
     const group = Group.create();
     group.makePublic("writer");
     const chat = Chat.create([], group);
-    router.navigate("/#/chat/" + chat.id);
+    router.navigate("/#/chat/" + chat.$jazz.id);
 
     // for https://jazz.tools marketing site demo only
     onChatLoad(chat);
@@ -35,7 +35,7 @@ export function App() {
           className="bg-transparent"
           onChange={(e) => {
             if (!me?.profile) return;
-            me.profile.name = e.target.value;
+            me.profile.$jazz.set("name", e.target.value);
           }}
           placeholder="Set username"
         />

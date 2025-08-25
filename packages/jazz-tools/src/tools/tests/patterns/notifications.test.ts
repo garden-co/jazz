@@ -18,8 +18,8 @@ const WorkerAccount = co
   })
   .withMigration((account) => {
     if (account.root === undefined) {
-      account.root = WorkerRoot.create({
-        notificationQueue: co.list(QueuedNotification).create([]),
+      account.$jazz.set("root", {
+        notificationQueue: [],
       });
     }
   });
@@ -28,7 +28,7 @@ async function pushNotification(
   worker: InstanceOfSchema<typeof WorkerAccount>,
   content: string,
 ) {
-  const workerAccount = await worker.ensureLoaded({
+  const workerAccount = await worker.$jazz.ensureLoaded({
     resolve: {
       root: {
         notificationQueue: {
@@ -43,7 +43,7 @@ async function pushNotification(
     sent: false,
   });
 
-  workerAccount.root.notificationQueue.push(notification);
+  workerAccount.root.notificationQueue.$jazz.push(notification);
 
   return notification;
 }
@@ -52,7 +52,7 @@ async function sendAllThePendingNotifications(
   worker: InstanceOfSchema<typeof WorkerAccount>,
   sender: (notification: Loaded<typeof QueuedNotification>) => Promise<void>,
 ) {
-  const workerAccount = await worker.ensureLoaded({
+  const workerAccount = await worker.$jazz.ensureLoaded({
     resolve: {
       root: {
         notificationQueue: {
@@ -64,7 +64,7 @@ async function sendAllThePendingNotifications(
 
   for (const notification of workerAccount.root.notificationQueue) {
     if (!notification.sent) {
-      notification.sent = true;
+      notification.$jazz.set("sent", true);
       await sender(notification);
     }
   }

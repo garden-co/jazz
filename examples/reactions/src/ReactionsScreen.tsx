@@ -44,7 +44,7 @@ const ReactionButtons = ({
         key={reactionType}
         type="button"
         onClick={() => {
-          reactions?.push(reactionType);
+          reactions?.$jazz.push(reactionType);
         }}
         title={`React with ${reactionType}`}
         className={reactions?.byMe?.value === reactionType ? "active" : ""}
@@ -63,7 +63,7 @@ const ReactionOverview = ({
 }) => (
   <>
     {Object.values(reactions.perAccount).map((reaction) => (
-      <div key={reaction.by?.id} className="reaction-row">
+      <div key={reaction.by?.$jazz.id} className="reaction-row">
         {reactionEmojiMap[reaction.value as ReactionType]}{" "}
         {reaction.by?.profile?.name}
       </div>

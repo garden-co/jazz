@@ -14,11 +14,11 @@ export function AcceptInvitePage() {
         if (organization) {
           // avoid duplicates
           const ids = me.root.organizations.map(
-            (organization) => organization?.id,
+            (organization) => organization?.$jazz.id,
           );
           if (ids.includes(organizationId)) return;
 
-          me.root.organizations.push(organization);
+          me.root.organizations.$jazz.push(organization);
           navigate("/organizations/" + organizationId);
         }
       });

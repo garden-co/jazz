@@ -7,7 +7,7 @@ export function OrganizationMembers({
 }: {
   organization: Loaded<typeof Organization>;
 }) {
-  const group = organization._owner.castAs(Group);
+  const group = organization.$jazz.owner;
 
   return (
     <>
@@ -34,7 +34,8 @@ function MemberItem({
 }) {
   const { me } = useAccount();
 
-  const canRemoveMember = group.myRole() === "admin" && account.id !== me?.id;
+  const canRemoveMember =
+    group.myRole() === "admin" && account.$jazz.id !== me?.$jazz.id;
 
   function handleRemoveMember() {
     if (canRemoveMember && account) {

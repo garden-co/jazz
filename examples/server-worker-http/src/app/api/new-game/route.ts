@@ -8,15 +8,15 @@ export async function POST(request: Request) {
     request,
     jazzServerAccount.worker,
     async ({ game }, madeBy) => {
-      const isPlayer1 = game.player1.account.id === madeBy.id;
-      const isPlayer2 = game.player2.account.id === madeBy.id;
+      const isPlayer1 = game.player1.account.$jazz.id === madeBy.$jazz.id;
+      const isPlayer2 = game.player2.account.$jazz.id === madeBy.$jazz.id;
 
       if (!isPlayer1 && !isPlayer2) {
         throw new JazzRequestError("You are not a player in this game", 400);
       }
 
       if (game.outcome) {
-        game.applyDiff(
+        game.$jazz.applyDiff(
           createGameState({
             account1: game.player1.account,
             account2: game.player2.account,

@@ -35,9 +35,9 @@ export function UploaderPeer() {
     document.body.appendChild(iframe);
 
     setSyncDuration(null);
-    setUploadedFileId(file.id);
+    setUploadedFileId(file.$jazz.id);
 
-    account.me.waitForAllCoValuesSync().then(() => {
+    account.me.$jazz.waitForAllCoValuesSync().then(() => {
       setSynced(true);
     });
 
@@ -45,7 +45,7 @@ export function UploaderPeer() {
     // We use this to measure the sync duration.
     await waitForCoValue(
       coValueClassFromCoValueClassOrSchema(UploadedFile),
-      file.id,
+      file.$jazz.id,
       (value) => value.syncCompleted,
       { loadAs: account.me },
     );

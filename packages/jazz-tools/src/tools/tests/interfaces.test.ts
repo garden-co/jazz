@@ -4,6 +4,7 @@ import { Account } from "../exports";
 import {
   parseCoValueCreateOptions,
   parseGroupCreateOptions,
+  TypeSym,
 } from "../internal";
 import { createJazzTestAccount } from "../testing";
 
@@ -16,17 +17,17 @@ beforeEach(async () => {
 describe("parseCoValueCreateOptions", () => {
   it("should create a new group when no options provided", () => {
     const result = parseCoValueCreateOptions(undefined);
-    expect(result.owner._type).toBe("Group");
-    expect(
-      result.owner.castAs(Group)._raw.roleOf(Account.getMe()._raw.id),
-    ).toBe("admin");
+    expect(result.owner[TypeSym]).toBe("Group");
+    expect(result.owner.$jazz.raw.roleOf(Account.getMe().$jazz.raw.id)).toBe(
+      "admin",
+    );
     expect(result.uniqueness).toBeUndefined();
   });
 
-  it("should use the account as the owner when passing an Account", async () => {
+  it("should create a group that wraps a RawAccount as the owner when passing an Account", async () => {
     const account = await createJazzTestAccount();
     const result = parseCoValueCreateOptions(account);
-    expect(result.owner).toBe(account);
+    expect(result.owner.$jazz.id).toBe(account.$jazz.raw.id);
     expect(result.uniqueness).toBeUndefined();
   });
 
@@ -34,9 +35,9 @@ describe("parseCoValueCreateOptions", () => {
     const group = Group.create();
     const result = parseCoValueCreateOptions(group);
     expect(result.owner).toBe(group);
-    expect(
-      result.owner.castAs(Group)._raw.roleOf(Account.getMe()._raw.id),
-    ).toBe("admin");
+    expect(result.owner.$jazz.raw.roleOf(Account.getMe().$jazz.raw.id)).toBe(
+      "admin",
+    );
     expect(result.uniqueness).toBeUndefined();
   });
 
@@ -50,13 +51,13 @@ describe("parseCoValueCreateOptions", () => {
     expect(result.uniqueness?.uniqueness).toBe("per-group");
   });
 
-  it("should use the account as the owner when passing an Account", async () => {
+  it("should create a group that wraps a RawAccount as the owner when passing an Account inside options", async () => {
     const account = await createJazzTestAccount();
     const result = parseCoValueCreateOptions({
       owner: account,
       unique: "per-group",
     });
-    expect(result.owner).toBe(account);
+    expect(result.owner.$jazz.id).toBe(account.$jazz.raw.id);
     expect(result.uniqueness?.uniqueness).toBe("per-group");
   });
 });

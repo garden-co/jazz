@@ -33,7 +33,7 @@ export default function ChatScreen() {
     const group = Group.create();
     group.addMember("everyone", "writer");
     const chat = Chat.create([], group);
-    setChatId(chat.id);
+    setChatId(chat.$jazz.id);
   };
 
   const joinChat = () => {
@@ -51,15 +51,15 @@ export default function ChatScreen() {
   const sendMessage = () => {
     if (!loadedChat) return;
     if (message.trim()) {
-      loadedChat.push(
-        Message.create({ text: message }, { owner: loadedChat?._owner }),
+      loadedChat.$jazz.push(
+        Message.create({ text: message }, { owner: loadedChat?.$jazz.owner }),
       );
       setMessage("");
     }
   };
 
   const renderMessageItem = ({ item }: { item: Message }) => {
-    const isMe = item._edits?.text?.by?.isMe;
+    const isMe = item.$jazz.getEdits()?.text?.by?.isMe;
     return (
       <View
         style={[
@@ -74,16 +74,21 @@ export default function ChatScreen() {
               { textAlign: isMe ? "right" : "left" },
             ]}
           >
-            {item?._edits?.text?.by?.profile?.name}
+            {item?.$jazz.getEdits()?.text?.by?.profile?.name}
           </Text>
         ) : null}
         <View style={styles.messageContent}>
           <Text style={styles.messageText}>{item.text}</Text>
           <Text style={[styles.messageTime, { marginTop: !isMe ? 8 : 4 }]}>
-            {item?._edits?.text?.madeAt?.getHours().toString().padStart(2, "0")}
+            {item?.$jazz
+              .getEdits()
+              ?.text?.madeAt?.getHours()
+              .toString()
+              .padStart(2, "0")}
             :
-            {item?._edits?.text?.madeAt
-              ?.getMinutes()
+            {item?.$jazz
+              .getEdits()
+              ?.text?.madeAt?.getMinutes()
               .toString()
               .padStart(2, "0")}
           </Text>
@@ -102,7 +107,7 @@ export default function ChatScreen() {
             value={me?.profile.name ?? ""}
             onChangeText={(value) => {
               if (me?.profile) {
-                me.profile.name = value;
+                me.profile.$jazz.set("name", value);
               }
             }}
             textAlignVertical="center"
@@ -141,13 +146,13 @@ export default function ChatScreen() {
           <View style={styles.chatHeader}>
             <Button
               onPress={() => {
-                if (loadedChat?.id) {
+                if (loadedChat?.$jazz.id) {
                   Clipboard.setStringAsync(
-                    `https://chat.jazz.tools/#/chat/${loadedChat.id}`,
+                    `https://chat.jazz.tools/#/chat/${loadedChat.$jazz.id}`,
                   );
                   Alert.alert(
                     "Copied to clipboard",
-                    `Chat ID: ${loadedChat.id}`,
+                    `Chat ID: ${loadedChat.$jazz.id}`,
                   );
                 }
               }}
@@ -165,7 +170,7 @@ export default function ChatScreen() {
             }}
             style={styles.messageList}
             data={loadedChat}
-            keyExtractor={(item) => item.id}
+            keyExtractor={(item) => item.$jazz.id}
             renderItem={renderMessageItem}
           />
 

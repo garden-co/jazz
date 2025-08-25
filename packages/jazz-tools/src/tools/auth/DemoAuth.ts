@@ -64,13 +64,13 @@ export class DemoAuth {
       throw new Error("No credentials found");
     }
 
-    const currentAccount = await Account.getMe().ensureLoaded({
+    const currentAccount = await Account.getMe().$jazz.ensureLoaded({
       resolve: {
         profile: true,
       },
     });
 
-    currentAccount.profile.name = username;
+    currentAccount.profile.$jazz.set("name", username);
 
     await this.authSecretStorage.set({
       accountID: credentials.accountID,

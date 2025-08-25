@@ -71,9 +71,9 @@ async function setup() {
     publicGroup,
   );
 
-  const organizationId = organization.id;
+  const organizationId = organization.$jazz.id;
 
-  await admin1.waitForAllCoValuesSync();
+  await admin1.$jazz.waitForAllCoValuesSync();
 
   return {
     admin1,
@@ -105,9 +105,9 @@ async function sendRequestToJoin(organizationId: string, account: Account) {
     group,
   );
 
-  organization.requests[account.id] = request;
+  organization.requests.$jazz.set(account.$jazz.id, request);
 
-  await account.waitForAllCoValuesSync();
+  await account.$jazz.waitForAllCoValuesSync();
 
   return request;
 }
@@ -126,11 +126,11 @@ async function approveRequest(
     throw new Error("Organization not found");
   }
 
-  const request = organization.requests[user.id];
+  const request = organization.requests[user.$jazz.id];
 
   if (
-    organization.statuses[user.id] === "approved" ||
-    organization.statuses[user.id] === "rejected"
+    organization.statuses[user.$jazz.id] === "approved" ||
+    organization.statuses[user.$jazz.id] === "rejected"
   ) {
     throw new Error("Request already processed");
   }
@@ -139,12 +139,12 @@ async function approveRequest(
     throw new Error("Request not found");
   }
 
-  request.status = "approved";
-  organization.statuses[user.id] = "approved";
+  request.$jazz.set("status", "approved");
+  organization.statuses.$jazz.set(user.$jazz.id, "approved");
 
   organization.mainGroup.addMember(user, "writer");
 
-  await admin.waitForAllCoValuesSync();
+  await admin.$jazz.waitForAllCoValuesSync();
 }
 
 async function rejectRequest(
@@ -161,11 +161,11 @@ async function rejectRequest(
     throw new Error("Organization not found");
   }
 
-  const request = organization.requests[user.id];
+  const request = organization.requests[user.$jazz.id];
 
   if (
-    organization.statuses[user.id] === "approved" ||
-    organization.statuses[user.id] === "rejected"
+    organization.statuses[user.$jazz.id] === "approved" ||
+    organization.statuses[user.$jazz.id] === "rejected"
   ) {
     throw new Error("Request already processed");
   }
@@ -174,10 +174,10 @@ async function rejectRequest(
     throw new Error("Request not found");
   }
 
-  request.status = "rejected";
-  organization.statuses[user.id] = "rejected";
+  request.$jazz.set("status", "rejected");
+  organization.statuses.$jazz.set(user.$jazz.id, "rejected");
 
-  await admin.waitForAllCoValuesSync();
+  await admin.$jazz.waitForAllCoValuesSync();
 }
 
 describe("Request to join", () => {
@@ -201,13 +201,13 @@ describe("Request to join", () => {
 
     const projectsOnUser = await co
       .list(z.string())
-      .load(organization.projects.id, {
+      .load(organization.projects.$jazz.id, {
         loadAs: user1,
       });
 
     assert(projectsOnUser);
 
-    projectsOnUser.push("project1");
+    projectsOnUser.$jazz.push("project1");
 
     expect(projectsOnUser[0]).toBe("project1");
   });
@@ -231,7 +231,7 @@ describe("Request to join", () => {
 
     const projectsOnUser = await co
       .list(z.string())
-      .load(organization.projects.id, {
+      .load(organization.projects.$jazz.id, {
         loadAs: user1,
       });
 
@@ -250,8 +250,8 @@ describe("Request to join", () => {
     });
 
     assert(organization);
-    expect(organization.statuses[user1.id]).toBe("approved");
-    const requestOnAdmin2 = await RequestToJoin.load(request.id, {
+    expect(organization.statuses[user1.$jazz.id]).toBe("approved");
+    const requestOnAdmin2 = await RequestToJoin.load(request.$jazz.id, {
       loadAs: admin2,
     });
     assert(requestOnAdmin2);
@@ -263,7 +263,7 @@ describe("Request to join", () => {
 
     const request = await sendRequestToJoin(organizationId, user1);
 
-    const requestOnUser2 = await RequestToJoin.load(request.id, {
+    const requestOnUser2 = await RequestToJoin.load(request.$jazz.id, {
       loadAs: user2,
     });
 

@@ -64,7 +64,7 @@ describe("createJazzPlugin", () => {
     const { coRichText, view } = await setupTest();
 
     // Update CoRichText content
-    coRichText.applyDiff("<p>Updated content</p>");
+    coRichText.$jazz.applyDiff("<p>Updated content</p>");
 
     // Wait for the next tick to allow the update to propagate
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -135,7 +135,7 @@ describe("createJazzPlugin", () => {
     expect(view.state.selection.to).toBe(5);
 
     // Update CoRichText content
-    coRichText.applyDiff("<p>Hello world</p>");
+    coRichText.$jazz.applyDiff("<p>Hello world</p>");
 
     await new Promise((resolve) => setTimeout(resolve, 0));
 
@@ -153,7 +153,7 @@ describe("createJazzPlugin", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     // Update CoRichText content
-    coRichText.applyDiff(
+    coRichText.$jazz.applyDiff(
       "<ol><li><p>A <strong>hu</strong><em><strong>man</strong></em>.</p></li></ol>",
     );
 
@@ -171,7 +171,7 @@ describe("createJazzPlugin", () => {
     );
 
     // Update CoRichText content
-    coRichText.applyDiff("<p>A human💪</p>");
+    coRichText.$jazz.applyDiff("<p>A human💪</p>");
 
     // Wait for the next tick to allow the update to propagate
     await new Promise((resolve) => setTimeout(resolve, 0));

@@ -247,7 +247,7 @@ export class JazzContextManager<
     }
 
     if (this.context && "me" in this.context) {
-      return this.context.me.id;
+      return this.context.me.$jazz.id;
     }
 
     throw new Error("The registration hasn't created a new account");
@@ -271,8 +271,8 @@ export class JazzContextManager<
       // Using a direct connection to make coValue transfer almost synchronous
       const [prevAccountAsPeer, currentAccountAsPeer] =
         cojsonInternals.connectedPeers(
-          prevContext.me.id,
-          currentContext.me.id,
+          prevContext.me.$jazz.id,
+          currentContext.me.$jazz.id,
           {
             peer1role: "client",
             peer2role: "server",
@@ -288,7 +288,7 @@ export class JazzContextManager<
 
       try {
         await this.props.onAnonymousAccountDiscarded?.(prevContext.me);
-        await prevContext.me.waitForAllCoValuesSync();
+        await prevContext.me.$jazz.waitForAllCoValuesSync();
       } catch (error) {
         console.error("Error onAnonymousAccountDiscarded", error);
       }

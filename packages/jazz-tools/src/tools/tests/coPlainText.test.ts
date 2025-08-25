@@ -32,7 +32,7 @@ describe("CoPlainText", () => {
         crypto: Crypto,
       });
       const text = co.plainText().create("hello world", me);
-      expect(text._owner.id).toBe(me.id);
+      expect(text.$jazz.owner.$jazz.id).toBe(me.$jazz.id);
     });
 
     test("should allow `create` from raw", async () => {
@@ -41,9 +41,9 @@ describe("CoPlainText", () => {
         crypto: Crypto,
       });
       const text = co.plainText().create("hello world", me);
-      const raw = text._raw;
+      const raw = text.$jazz.raw;
       const text2 = co.plainText().fromRaw(raw);
-      expect(text2._owner.id).toBe(me.id);
+      expect(text2.$jazz.owner.$jazz.id).toBe(me.$jazz.id);
     });
 
     test("should allow owner shorthand", async () => {
@@ -52,7 +52,7 @@ describe("CoPlainText", () => {
         crypto: Crypto,
       });
       const text = co.plainText().create("hello world", me);
-      expect(text._owner.id).toBe(me.id);
+      expect(text.$jazz.owner.$jazz.id).toBe(me.$jazz.id);
     });
   });
 
@@ -83,15 +83,15 @@ describe("CoPlainText", () => {
 
       test("applyDiff", () => {
         const text = co.plainText().create("hello world", { owner: me });
-        text.applyDiff("hello cruel world");
+        text.$jazz.applyDiff("hello cruel world");
         expect(text.toString()).toEqual("hello cruel world");
       });
 
       test("applyDiff with complex grapheme clusters", () => {
         const text = co.plainText().create(`😊`, { owner: me });
-        text.applyDiff(`😊안녕!`);
+        text.$jazz.applyDiff(`😊안녕!`);
         expect(text.toString()).toEqual(`😊안녕!`);
-        text.applyDiff(`😊👋 안녕!`);
+        text.$jazz.applyDiff(`😊👋 안녕!`);
         expect(text.toString()).toEqual(`😊👋 안녕!`);
       });
     });
@@ -162,7 +162,7 @@ describe("CoPlainText", () => {
   describe("Loading and availability", () => {
     test("can load text across peers", async () => {
       const { me, text } = await initNodeAndText();
-      const id = text.id;
+      const id = text.$jazz.id;
 
       // Set up peer connections
       const [initialAsPeer, secondPeer] = connectedPeers("initial", "second", {
@@ -173,12 +173,12 @@ describe("CoPlainText", () => {
       if (!isControlledAccount(me)) {
         throw "me is not a controlled account";
       }
-      me._raw.core.node.syncManager.addPeer(secondPeer);
+      me.$jazz.localNode.syncManager.addPeer(secondPeer);
       const { account: meOnSecondPeer } =
         await createJazzContextFromExistingCredentials({
           credentials: {
-            accountID: me.id,
-            secret: me._raw.core.node.getCurrentAgent().agentSecret,
+            accountID: me.$jazz.id,
+            secret: me.$jazz.localNode.getCurrentAgent().agentSecret,
           },
           sessionProvider: randomSessionProvider,
           peersToLoadFrom: [initialAsPeer],
@@ -204,12 +204,12 @@ describe("CoPlainText", () => {
     if (!isControlledAccount(me)) {
       throw "me is not a controlled account";
     }
-    me._raw.core.node.syncManager.addPeer(secondPeer);
+    me.$jazz.localNode.syncManager.addPeer(secondPeer);
     const { account: meOnSecondPeer } =
       await createJazzContextFromExistingCredentials({
         credentials: {
-          accountID: me.id,
-          secret: me._raw.core.node.getCurrentAgent().agentSecret,
+          accountID: me.$jazz.id,
+          secret: me.$jazz.localNode.getCurrentAgent().agentSecret,
         },
         sessionProvider: randomSessionProvider,
         peersToLoadFrom: [initialAsPeer],
@@ -220,7 +220,7 @@ describe("CoPlainText", () => {
 
     // Subscribe to text updates
     co.plainText().subscribe(
-      text.id,
+      text.$jazz.id,
       { loadAs: meOnSecondPeer },
       (subscribedText) => {
         void queue.push(subscribedText);

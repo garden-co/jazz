@@ -27,7 +27,7 @@ export { createImageFactory };
  *     // Creates ImageDefinition with a blurry placeholder, limited to 1024px
  *     // on the longest side, and multiple resolutions automatically
  *     const image = await createImage(file, {
- *       owner: me._owner,
+ *       owner: me.$jazz.owner,
  *       maxSize: 1024,
  *       placeholder: "blur",
  *       progressive: true,

@@ -17,7 +17,7 @@ function App() {
   const memoCoRichText: CoRichText | undefined = useMemo(() => {
     console.log("memoCoRichText");
     return me?.profile.bio ?? undefined;
-  }, [me?.id, me?.profile.bio?.id]);
+  }, [me?.$jazz.id, me?.profile.bio?.$jazz.id]);
   // Only recreate if the account or the bio changes
   // https://github.com/garden-co/jazz/blob/b4cd307ebac5860df2f83d75a915906f472a5cd4/examples/richtext/src/Editor.tsx#L46C1-L46C88
 

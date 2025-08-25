@@ -1,0 +1,196 @@
+import { CodeGroup } from '@/components/forMdx'
+
+# Jazz 0.18.0 - New `$jazz` field in CoValues
+
+This release introduces a new `$jazz` field to CoValues. This field serves as a namespace for Jazz methods and internal properties.
+
+## Motivation
+
+Jazz aims to make CoValues work seamlessly with plain JSON objects. Originally, this meant CoValues behaved exactly like
+JSON objects: you could read and edit CoMaps and CoLists just like regular objects and arrays.
+
+However, collaborative objects have unique requirements that create some challenges, both from a user and implementation perspective.
+
+For example, developers want to define any key they need in a CoMap, but they also need access to CoValue-specific properties
+like `id` and `owner`. These Jazz properties shouldn't conflict with user-defined fields.
+
+From an implementation perspective, we need to track changes as CoValues are edited. We rely on proxies for this, but they
+come with significant drawbacks:
+- Many front-end frameworks (like Vue and Svelte) don't play well with proxies, forcing us into suboptimal integration patterns
+- Debugging and serialization become unnecessarily complex with proxies
+
+Direct property assignments also clash with modern front-end frameworks, which discourage this pattern. For example, the React Compiler
+flags direct assignments as mutations and won't memoize components that use them.
+
+Additionally, relying on direct assignments limits our ability to provide a more ergonomic API. With the new `$jazz.set` method,
+you can now update CoValues using either CoValues or plain JSON objects!
+
+By making CoValues behave like readonly JSON objects while providing Jazz-specific methods in the `$jazz` namespace, we've found a
+good balance between plain-JSON-compatibility and the requirements of collaborative objects. This approach also sets us up
+to remove proxies entirely in a future release.
+
+## Changes
+
+### The new `$jazz` field
+
+The new `$jazz` field is a namespace for Jazz methods and internal properties. It is available on all CoValues, and it
+provides access to Jazz internal properties and utility methods:
+- `id`: The ID of the CoValue
+- `owner`: The owner of the CoValue
+- `refs`: A map of references to other CoValues
+- `getEdits`: Returns a list of edits made to the CoValue
+- `ensureLoaded` & `subscribe`: Perform sync operations
+
+### Streamlined CoValue updates
+
+The `$jazz.set` method allows you to update CoValues using either CoValues or plain JSON objects. This makes it easier to work with
+nested data.
+
+<CodeGroup>
+```ts
+const Dog = co.map({
+  name: co.plainText(),
+});
+const Person = co.map({
+  name: co.plainText(),
+  dog: Dog,
+})
+
+const person = Person.create({
+  name: "John",
+  dog: { name: "Rex" },
+});
+
+// Instead of
+person.dog = Dog.create({ name: co.plainText().create("Fido") });
+
+// You can now use plain JSON objects
+person.$jazz.set("dog", { name: "Fido" });
+```
+</CodeGroup>
+
+CoValues are created automatically, and permissions are handled in the same way than when creating CoValues from JSON
+(see [docs](/docs/vanilla/groups/inheritance#ownership-on-implicit-covalue-creation)).
+
+This feature is now available on all methods that mutate CoValues (like `CoList.$jazz.push`, `CoList.$jazz.splice` and `CoFeed.$jazz.push`).
+
+#### New CoList Utility Methods
+Jazz 0.18.0 introduces two new utility methods for easier CoList editing:
+
+<CodeGroup>
+```ts
+// Remove items
+list.$jazz.remove(1); // By index
+list.$jazz.remove(item => item.completed); // By predicate
+
+// Keep only items matching the predicate
+list.$jazz.retain(item => !item.completed);
+```
+</CodeGroup>
+
+They allow editing a CoList in-place with a simpler API than `$jazz.splice`.
+
+## Breaking Changes
+
+### Jazz Properties Migration
+
+All Jazz properties are now available in the `$jazz` namespace.
+
+<CodeGroup>
+```ts
+// Before
+coValue.id; // [!code --:4]
+coValue._owner;
+coValue._refs.someProperty;
+coValue._edits.someProperty;
+
+// After
+coValue.$jazz.id; // [!code ++:4]
+coValue.$jazz.owner;
+coValue.$jazz.refs.someProperty;
+coValue.$jazz.getEdits().someProperty;
+```
+</CodeGroup>
+
+The only exception is the `_type` field, which has been renamed to `$type$` and is still available on CoValues.
+This allows Typescript to perform [type narrowing](https://www.typescriptlang.org/docs/handbook/2/narrowing.html) on CoValues.
+
+### CoMap Changes
+
+All CoMap methods have been moved into `$jazz`, to allow defining any arbitrary key in the CoMap (except for `$jazz` and `$type$`) without conflicts.
+
+<CodeGroup>
+```ts
+// Direct assignment
+person.name = "Alice"; // [!code --]
+person.$jazz.set("name", "Alice"); // [!code ++]
+
+// Deleting properties
+delete person.age; // [!code --]
+person.$jazz.delete("age"); // [!code ++]
+
+// Update multiple properties
+person.applyDiff({ // [!code --:4]
+  name: "Alice",
+  age: 42,
+});
+person.$jazz.applyDiff({ // [!code ++:4]
+  name: "Alice",
+  age: 42,
+});
+```
+</CodeGroup>
+
+For CoMaps created with `co.map()`, fields are now `readonly` and direct assignment will cause type errors. CoMaps created with class schemas will throw
+runtime errors prompting you to use `$jazz.set`.
+
+### CoList Changes
+
+CoLists are now readonly arrays. All mutation methods have been moved to `$jazz` and using array mutation methods directly will cause type errors.
+
+<CodeGroup>
+```ts
+// Before
+list.push("item"); // [!code --:4]
+list.unshift("first");
+list.splice(1, 1, "replacement");
+list[0] = "new value";
+
+// After
+list.$jazz.push("item"); // [!code ++:4]
+list.$jazz.unshift("first");
+list.$jazz.splice(1, 1, "replacement");
+list.$jazz.set(0, "new value");
+```
+</CodeGroup>
+
+The following methods have been deprecated and should not be used:
+- `sort()` 
+- `reverse()` 
+- `fill()` 
+- `copyWithin()`
+
+These methods could behave inconsistently with CoLists. `$jazz` replacements may be introduced in future releases.
+
+### Ownership Changes
+
+The `$jazz.owner` field now always returns a Group (instead of a Group or Account). Having Account owners is discouraged, because it
+restricts the CoValue to a single user, who cannot be changed. As a best practice, it's a good idea to create a Group for every new CoValue,
+even if the Group only has a single user in it (this is the default behavior when creating a CoValue with no explicit owner).
+
+CoValues owned by Accounts will now return a Group that represents that Account. It will continue to behave the same way it previously did:
+trying to add a new member to the Group will fail.
+
+Accounts as CoValue owners will be phased out in a future release.
+
+### Removed Features
+
+#### castAs() Method
+The `castAs()` method has been completely removed as it was an unsafe operation that bypassed type checking and enabled using CoValues in unsupported ways.
+
+#### toJSON() Changes
+The `id` and `_type` fields have been removed from `toJSON()` output for Account, CoMap, CoFeed, and FileStream classes. This aligns with the idea
+of viewing CoValues as JSON objects.
+
+#### Group Property Removal
+The `root` and `profile` fields have been removed from the Group class. These fields were not documented and were not intended to be used by users.

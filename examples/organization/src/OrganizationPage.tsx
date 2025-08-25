@@ -41,7 +41,7 @@ export function OrganizationPage() {
             <div className="flex justify-between items-center">
               <h2>Members</h2>
 
-              {organization._owner?.myRole() === "admin" && (
+              {organization.$jazz.owner?.myRole() === "admin" && (
                 <InviteLink organization={organization} />
               )}
             </div>
@@ -60,7 +60,7 @@ export function OrganizationPage() {
               organization.projects.map((project) =>
                 project ? (
                   <strong
-                    key={project.id}
+                    key={project.$jazz.id}
                     className="px-4 py-5 sm:px-6 font-medium block"
                   >
                     {project.name}

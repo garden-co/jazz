@@ -30,8 +30,8 @@ function App() {
       },
       group,
     );
-    setIssueID(newIssue.id);
-    window.history.pushState({}, "", `?issue=${newIssue.id}`);
+    setIssueID(newIssue.$jazz.id);
+    window.history.pushState({}, "", `?issue=${newIssue.$jazz.id}`);
   };
 
   return (
@@ -55,7 +55,7 @@ function App() {
             <h1 className="sr-only">Issue: {issue.title}</h1>
             <IssueComponent issue={issue} />
             <hr />
-            <IssueVersionHistory id={issue.id} />
+            <IssueVersionHistory id={issue.$jazz.id} />
           </>
         ) : (
           <button onClick={createIssue}>Create Issue</button>

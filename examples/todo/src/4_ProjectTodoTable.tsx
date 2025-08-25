@@ -54,16 +54,16 @@ export function ProjectTodoTable() {
       const task = Task.create(
         {
           done: false,
-          text: CoPlainText.create(text, project._owner),
+          text: CoPlainText.create(text, project.$jazz.owner),
           version: 1,
         },
-        project._owner,
+        project.$jazz.owner,
       );
 
       // push will cause useCoState to rerender this component, both here and on other devices
-      project.tasks.push(task);
+      project.tasks.$jazz.push(task);
     },
-    [project?.tasks, project?._owner],
+    [project?.tasks, project?.$jazz.owner],
   );
 
   return (
@@ -75,7 +75,8 @@ export function ProjectTodoTable() {
             // accounting for the fact that note everything might be loaded yet
             project?.title ? (
               <>
-                {project.title} <span className="text-sm">({project.id})</span>
+                {project.title}{" "}
+                <span className="text-sm">({project.$jazz.id})</span>
               </>
             ) : (
               <Skeleton className="mt-1 w-[200px] h-[1em] rounded-full" />
@@ -93,7 +94,7 @@ export function ProjectTodoTable() {
         </TableHeader>
         <TableBody>
           {project?.tasks.map(
-            (task) => task && <TaskRow key={task.id} task={task} />,
+            (task) => task && <TaskRow key={task.$jazz.id} task={task} />,
           )}
           <NewTaskInputRow createTask={createTask} disabled={!project} />
         </TableBody>
@@ -113,7 +114,7 @@ export function TaskRow({ task }: { task: Loaded<typeof Task> | undefined }) {
             // Tick or untick the task
             // Task is also immutable, but this will update all queries
             // that include this task as a reference
-            if (task) task.done = !!checked;
+            if (task) task.$jazz.set("done", !!checked);
           }}
         />
       </TableCell>
@@ -129,12 +130,14 @@ export function TaskRow({ task }: { task: Loaded<typeof Task> | undefined }) {
           {
             // Here we see for the first time how we can access edit history
             // for a CoValue, and use it to display who created the task.
-            task?._edits.text?.by?.profile?.name ? (
+            task?.$jazz.getEdits().text?.by?.profile?.name ? (
               <span
                 className="rounded-full py-0.5 px-2 text-xs"
-                style={uniqueColoring(task._edits.text.by?.id ?? "")}
+                style={uniqueColoring(
+                  task.$jazz.getEdits().text?.by?.$jazz.id ?? "",
+                )}
               >
-                {task._edits.text.by?.profile?.name}
+                {task.$jazz.getEdits().text?.by?.profile?.name}
               </span>
             ) : (
               <Skeleton className="mt-1 w-[50px] h-[1em] rounded-full" />

@@ -23,14 +23,14 @@ export const CursorAccount = co
   })
   .withMigration((account) => {
     if (account.root === undefined) {
-      account.root = CursorRoot.create({
+      account.$jazz.set("root", {
         camera: {
           position: {
             x: 0,
             y: 0,
           },
         },
-        cursors: CursorFeed.create([]),
+        cursors: [],
       });
     }
 
@@ -38,11 +38,14 @@ export const CursorAccount = co
       const group = Group.create();
       group.makePublic(); // The profile info is visible to everyone
 
-      account.profile = CursorProfile.create(
-        {
-          name: "Anonymous user",
-        },
-        group,
+      account.$jazz.set(
+        "profile",
+        CursorProfile.create(
+          {
+            name: "Anonymous user",
+          },
+          group,
+        ),
       );
     }
   });

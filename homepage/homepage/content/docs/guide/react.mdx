@@ -257,7 +257,7 @@ function App() {
                 status: "backlog",
             },
         );
-        setIssueID(newIssue.id);
+        setIssueID(newIssue.$jazz.id);
     };
 
     if (issue) {
@@ -296,7 +296,7 @@ export function IssueComponent({ issue }: { issue: Issue }) {
             <select
                 value={issue.status}
                 onChange={(event) => {
-                    issue.status = event.target.value as "backlog" | "in progress" | "done"
+                    issue.$jazz.set("status", event.target.value as "backlog" | "in progress" | "done")
                 }}
             >
                 <option value="backlog">Backlog</option>
@@ -334,7 +334,7 @@ This works because CoValues
 
   <CodeGroup>
         ```ts
-        const unsub = issue.subscribe({ resolve: true }, (updatedIssue) => console.log(updatedIssue));
+        const unsub = issue.$jazz.subscribe({ resolve: true }, (updatedIssue) => console.log(updatedIssue));
         ```
   </CodeGroup>
 
@@ -405,8 +405,8 @@ function App() {
                 status: "backlog",
             },
         );
-        setIssueID(newIssue.id);
-        window.history.pushState({}, "", `?issue=${newIssue.id}`); // [!code ++]
+        setIssueID(newIssue.$jazz.id);
+        window.history.pushState({}, "", `?issue=${newIssue.$jazz.id}`); // [!code ++]
     };
 
     if (issue) {
@@ -469,8 +469,8 @@ function App() {
             },
             { owner: group }, // [!code ++]
         );
-        setIssueID(newIssue.id);
-        window.history.pushState({}, "", `?issue=${newIssue.id}`);
+        setIssueID(newIssue.$jazz.id);
+        window.history.pushState({}, "", `?issue=${newIssue.$jazz.id}`);
     };
 
     if (issue) {
@@ -559,8 +559,8 @@ function App() {
             },
             group,
         );
-        setProjectID(newProject.id);
-        window.history.pushState({}, "", `?project=${newProject.id}`);
+        setProjectID(newProject.$jazz.id);
+        window.history.pushState({}, "", `?project=${newProject.$jazz.id}`);
     };
 
     if (projectID) { // [!code ++:4]
@@ -595,7 +595,7 @@ export function ProjectComponent({ projectID }: { projectID: ID<Project> }) {
             description: "",
             estimate: 0,
             status: "backlog",
-        },  project._owner));
+        },  project.$jazz.owner));
     };
 
     return project ? (
@@ -603,7 +603,7 @@ export function ProjectComponent({ projectID }: { projectID: ID<Project> }) {
             <h1>{project.name}</h1>
             <div className="border-r border-b">
                 {project.issues?.map((issue) => (
-                    issue && <IssueComponent key={issue.id} issue={issue} />
+                    issue && <IssueComponent key={issue.$jazz.id} issue={issue} />
                 ))}
                 <button onClick={createAndAddIssue}>Create Issue</button>
             </div>
@@ -652,7 +652,7 @@ export function ProjectComponent({ projectID }: { projectID: ID<Project> }) {
             description: "",
             estimate: 0,
             status: "backlog",
-        }, project._owner));
+        }, project.$jazz.owner));
     };
 
     return project ? (
@@ -660,7 +660,7 @@ export function ProjectComponent({ projectID }: { projectID: ID<Project> }) {
             <h1>{project.name}</h1>
             <div className="border-r border-b">
                 {project.issues.map((issue) => (
-                    <IssueComponent key={issue.id} issue={issue} />
+                    <IssueComponent key={issue.$jazz.id} issue={issue} />
                 ))}
                 <button onClick={createAndAddIssue}>Create Issue</button>
             </div>
@@ -728,8 +728,8 @@ function App() {
             },
             group,
         );
-        setProjectID(newProject.id);
-        window.history.pushState({}, "", `?project=${newProject.id}`);
+        setProjectID(newProject.$jazz.id);
+        window.history.pushState({}, "", `?project=${newProject.$jazz.id}`);
     };
 
     if (projectID) {
@@ -771,7 +771,7 @@ export function ProjectComponent({ projectID }: { projectID: ID<Project> }) {
             description: "",
             estimate: 0,
             status: "backlog",
-        }, project._owner));
+        }, project.$jazz.owner));
     };
 
     return project ? (
@@ -785,7 +785,7 @@ export function ProjectComponent({ projectID }: { projectID: ID<Project> }) {
             )}
             <div className="border-r border-b">
                 {project.issues.map((issue) => (
-                    <IssueComponent key={issue.id} issue={issue} />
+                    <IssueComponent key={issue.$jazz.id} issue={issue} />
                 ))}
                 <button onClick={createAndAddIssue}>Create Issue</button>
             </div>

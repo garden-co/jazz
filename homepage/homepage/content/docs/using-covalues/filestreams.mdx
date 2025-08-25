@@ -373,7 +373,7 @@ import { FileStream } from "jazz-tools";
 const fileStream = FileStream.create();
 // ---cut---
 // Wait for the FileStream to be fully synced
-await fileStream.waitForSync({
+await fileStream.$jazz.waitForSync({
   timeout: 5000  // Optional timeout in ms
 });
 

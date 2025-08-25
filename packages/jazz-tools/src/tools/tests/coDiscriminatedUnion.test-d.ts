@@ -29,9 +29,12 @@ describe("co.discriminatedUnion", () => {
       }),
     });
 
-    person.pet = Cat.create({
-      type: "cat",
-    });
+    person.$jazz.set(
+      "pet",
+      Cat.create({
+        type: "cat",
+      }),
+    );
 
     type ExpectedType = {
       pet: Loaded<typeof Dog> | Loaded<typeof Cat>;
@@ -67,9 +70,12 @@ describe("co.discriminatedUnion", () => {
       }),
     });
 
-    pallino.friend = Cat.create({
-      type: "cat",
-    });
+    pallino.$jazz.set(
+      "friend",
+      Cat.create({
+        type: "cat",
+      }),
+    );
 
     type ExpectedType = {
       friend: Loaded<typeof Dog> | Loaded<typeof Cat> | undefined;

@@ -2,14 +2,8 @@
 import { ImageDefinition } from "jazz-tools";
 import { highestResAvailable } from "jazz-tools/media";
 import { onDestroy } from "svelte";
-import type { HTMLImgAttributes } from "svelte/elements";
 import { CoState } from "../jazz.class.svelte";
-
-interface ImageProps extends Omit<HTMLImgAttributes, "width" | "height"> {
-  imageId: string;
-  width?: number | "original";
-  height?: number | "original";
-}
+import type { ImageProps } from "./image.types.js";
 
 const { imageId, width, height, ...rest }: ImageProps = $props();
 
@@ -83,14 +77,14 @@ const src = $derived.by(() => {
   );
 
   if (!bestImage) return image.placeholderDataURL;
-  if (lastBestImage?.[0] === bestImage.image.id) return lastBestImage?.[1];
+  if (lastBestImage?.[0] === bestImage.image.$jazz.id) return lastBestImage?.[1];
 
   const blob = bestImage.image.toBlob();
 
   if (blob) {
     const url = URL.createObjectURL(blob);
     revokeObjectURL(lastBestImage?.[1]);
-    lastBestImage = [bestImage.image.id, url];
+    lastBestImage = [bestImage.image.$jazz.id, url];
     return url;
   }
 

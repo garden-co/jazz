@@ -23,7 +23,7 @@ async function setupAccounts() {
   const me = await createJazzTestAccount();
   const worker = await createJazzTestAccount();
 
-  const workerPieces = await exportCoValue(Account, worker.id, {
+  const workerPieces = await exportCoValue(Account, worker.$jazz.id, {
     loadAs: worker,
   });
 
@@ -42,7 +42,7 @@ describe("experimental_defineRequest", () => {
 
       const userRequest = experimental_defineRequest({
         url: "https://api.example.com/api/user",
-        workerId: worker.id,
+        workerId: worker.$jazz.id,
         request: {
           name: z.string(),
           email: z.string(),
@@ -56,7 +56,7 @@ describe("experimental_defineRequest", () => {
 
       let receivedUser: unknown;
       let receivedMadeBy: unknown;
-      let requestOwner: Account | Group;
+      let requestOwner: Group;
 
       server.use(
         http.post("https://api.example.com/api/user", async ({ request }) => {
@@ -66,8 +66,8 @@ describe("experimental_defineRequest", () => {
               worker,
               async (user, madeBy) => {
                 receivedUser = user.toJSON();
-                requestOwner = user._owner;
-                receivedMadeBy = madeBy.id;
+                requestOwner = user.$jazz.owner;
+                receivedMadeBy = madeBy.$jazz.id;
 
                 // Return a plain object (CoMapInit) instead of a CoMap instance
                 return {
@@ -99,26 +99,27 @@ describe("experimental_defineRequest", () => {
         "https://example.com/avatars/john@example.com.jpg",
       );
 
-      expect(requestOwner!.members.map((m) => [m.account.id, m.role])).toEqual([
-        [me.id, "admin"],
-        [worker.id, "writer"],
+      expect(
+        requestOwner!.members.map((m) => [m.account.$jazz.id, m.role]),
+      ).toEqual([
+        [me.$jazz.id, "admin"],
+        [worker.$jazz.id, "writer"],
       ]);
 
       expect(
-        response._owner.members.map((m) => [m.account.id, m.role]),
+        response.$jazz.owner.members.map((m) => [m.account.$jazz.id, m.role]),
       ).toEqual([
-        [worker.id, "admin"],
-        [me.id, "reader"],
+        [worker.$jazz.id, "admin"],
+        [me.$jazz.id, "reader"],
       ]);
 
       // Verify the server received the correct data
       expect(receivedUser).toMatchObject({
-        _type: "CoMap",
         name: "John Doe",
         email: "john@example.com",
         age: 30,
       });
-      expect(receivedMadeBy).toEqual(me.id);
+      expect(receivedMadeBy).toEqual(me.$jazz.id);
     });
 
     it("should push the response content directly to the client", async () => {
@@ -139,7 +140,7 @@ describe("experimental_defineRequest", () => {
 
       const userRequest = experimental_defineRequest({
         url: "https://api.example.com/api/user",
-        workerId: worker.id,
+        workerId: worker.$jazz.id,
         request: {
           name: z.string(),
           email: z.string(),
@@ -248,7 +249,7 @@ describe("experimental_defineRequest", () => {
 
     const personRequest = experimental_defineRequest({
       url: "https://api.example.com/api/person",
-      workerId: worker.id,
+      workerId: worker.$jazz.id,
       request: {
         schema: {
           person: Person,
@@ -269,9 +270,7 @@ describe("experimental_defineRequest", () => {
           request,
           worker,
           async ({ person }, madeBy) => {
-            person.address.street._owner
-              .castAs(Group)
-              .addMember(madeBy, "reader");
+            person.address.street.$jazz.owner.addMember(madeBy, "reader");
 
             // The request should handle the error gracefully when trying to resolve
             // child covalues that the worker doesn't have access to
@@ -299,7 +298,7 @@ describe("experimental_defineRequest", () => {
 
     const userRequest = experimental_defineRequest({
       url: "https://api.example.com/api/user",
-      workerId: worker.id,
+      workerId: worker.$jazz.id,
       request: {
         name: z.string(),
         email: z.string(),
@@ -319,7 +318,7 @@ describe("experimental_defineRequest", () => {
             worker,
             async (user, madeBy) => {
               receivedUser = user.toJSON();
-              receivedMadeBy = madeBy.id;
+              receivedMadeBy = madeBy.$jazz.id;
             },
           );
         } catch (error) {
@@ -341,12 +340,11 @@ describe("experimental_defineRequest", () => {
 
     // Verify the server received the correct data
     expect(receivedUser).toMatchObject({
-      _type: "CoMap",
       name: "John Doe",
       email: "john@example.com",
       age: 30,
     });
-    expect(receivedMadeBy).toEqual(me.id);
+    expect(receivedMadeBy).toEqual(me.$jazz.id);
   });
 
   it("should accept group as workerId", async () => {
@@ -359,7 +357,7 @@ describe("experimental_defineRequest", () => {
 
     const userRequest = experimental_defineRequest({
       url: "https://api.example.com/api/user",
-      workerId: workerGroup.id, // Use group ID instead of account ID
+      workerId: workerGroup.$jazz.id, // Use group ID instead of account ID
       request: {
         name: z.string(),
         email: z.string(),
@@ -382,7 +380,7 @@ describe("experimental_defineRequest", () => {
             worker, // The worker account handles the request
             async (user, madeBy) => {
               receivedUser = user.toJSON();
-              receivedMadeBy = madeBy.id;
+              receivedMadeBy = madeBy.$jazz.id;
 
               return {
                 bio: `Profile for ${user.name}`,
@@ -414,19 +412,20 @@ describe("experimental_defineRequest", () => {
     );
 
     // Verify the response owner structure - should include the worker account
-    expect(response._owner.members.map((m) => [m.account.id, m.role])).toEqual([
-      [worker.id, "admin"],
-      [me.id, "reader"],
+    expect(
+      response.$jazz.owner.members.map((m) => [m.account.$jazz.id, m.role]),
+    ).toEqual([
+      [worker.$jazz.id, "admin"],
+      [me.$jazz.id, "reader"],
     ]);
 
     // Verify the server received the correct data
     expect(receivedUser).toMatchObject({
-      _type: "CoMap",
       name: "John Doe",
       email: "john@example.com",
       age: 30,
     });
-    expect(receivedMadeBy).toEqual(me.id);
+    expect(receivedMadeBy).toEqual(me.$jazz.id);
   });
 });
 
@@ -437,7 +436,7 @@ describe("JazzRequestError handling", () => {
 
       const userRequest = experimental_defineRequest({
         url: "https://api.example.com/api/user",
-        workerId: worker.id,
+        workerId: worker.$jazz.id,
         request: {
           name: z.string(),
           email: z.string(),
@@ -497,7 +496,7 @@ describe("JazzRequestError handling", () => {
 
       const userRequest = experimental_defineRequest({
         url: "https://api.example.com/api/user",
-        workerId: worker.id,
+        workerId: worker.$jazz.id,
         request: {
           name: z.string(),
           email: z.string(),
@@ -547,7 +546,7 @@ describe("JazzRequestError handling", () => {
 
       const userRequest = experimental_defineRequest({
         url: "https://api.example.com/api/user",
-        workerId: worker.id,
+        workerId: worker.$jazz.id,
         request: {
           name: z.string(),
           email: z.string(),
@@ -595,7 +594,7 @@ describe("JazzRequestError handling", () => {
 
       const userRequest = experimental_defineRequest({
         url: "https://api.example.com/api/user",
-        workerId: worker.id,
+        workerId: worker.$jazz.id,
         request: {
           name: z.string(),
           email: z.string(),
@@ -643,7 +642,7 @@ describe("JazzRequestError handling", () => {
 
       const userRequest = experimental_defineRequest({
         url: "https://api.example.com/api/user",
-        workerId: worker.id,
+        workerId: worker.$jazz.id,
         request: {
           name: z.string(),
           email: z.string(),
@@ -695,7 +694,7 @@ describe("JazzRequestError handling", () => {
 
       const userRequest = experimental_defineRequest({
         url: "https://api.example.com/api/user",
-        workerId: worker.id,
+        workerId: worker.$jazz.id,
         request: {
           schema: {
             user: User,
@@ -751,7 +750,7 @@ describe("JazzRequestError handling", () => {
 
       const userRequest = experimental_defineRequest({
         url: "https://api.example.com/api/user",
-        workerId: worker.id,
+        workerId: worker.$jazz.id,
         request: {
           schema: {
             user: User,
@@ -807,7 +806,7 @@ describe("JazzRequestError handling", () => {
 
       const userRequest = experimental_defineRequest({
         url: "https://api.example.com/api/user",
-        workerId: worker.id,
+        workerId: worker.$jazz.id,
         request: {
           name: z.string(),
           email: z.string(),
@@ -845,7 +844,7 @@ describe("JazzRequestError handling", () => {
 
       const userRequest = experimental_defineRequest({
         url: "https://api.example.com/api/user",
-        workerId: worker.id,
+        workerId: worker.$jazz.id,
         request: {
           name: z.string(),
           email: z.string(),
@@ -877,7 +876,7 @@ describe("JazzRequestError handling", () => {
 
       const userRequest = experimental_defineRequest({
         url: "https://api.example.com/api/user",
-        workerId: worker.id,
+        workerId: worker.$jazz.id,
         request: {
           name: z.string(),
           email: z.string(),

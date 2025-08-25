@@ -24,6 +24,7 @@ import {
 } from "jazz-tools";
 import { JazzContext, JazzContextManagerContext } from "./provider.js";
 import { getCurrentAccountFromContextManager } from "./utils.js";
+import { TypeSym } from "../tools/internal.js";
 
 export function useJazzContext<Acc extends Account>() {
   const value = useContext(JazzContext) as JazzContextType<Acc>;
@@ -274,7 +275,7 @@ function useAccountSubscription<
   const createSubscription = () => {
     const agent = getCurrentAccountFromContextManager(contextManager);
 
-    if (agent._type === "Anonymous") {
+    if (agent[TypeSym] === "Anonymous") {
       return {
         subscription: null,
         contextManager,
@@ -286,10 +287,15 @@ function useAccountSubscription<
     const resolve: any = options?.resolve ?? true;
 
     const node = contextManager.getCurrentValue()!.node;
-    const subscription = new SubscriptionScope<any>(node, resolve, agent.id, {
-      ref: coValueClassFromCoValueClassOrSchema(Schema),
-      optional: true,
-    });
+    const subscription = new SubscriptionScope<any>(
+      node,
+      resolve,
+      agent.$jazz.id,
+      {
+        ref: coValueClassFromCoValueClassOrSchema(Schema),
+        optional: true,
+      },
+    );
 
     return {
       subscription,

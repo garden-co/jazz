@@ -10,9 +10,9 @@
   const fileId = $page.params.fileId;
 
   const file = $derived(new CoState(SharedFile, fileId));
-  const isAdmin = $derived(file.current?._owner?.myRole() === 'admin');
+  const isAdmin = $derived(file.current?.$jazz.owner.myRole() === 'admin');
 
-  const fileStreamId = $derived(file.current?._refs?.file?.id);
+  const fileStreamId = $derived(file.current?.$jazz.refs.file?.id);
 
   async function downloadFile() {
     if (!fileStreamId || !file.current) {
@@ -36,7 +36,7 @@
 
   async function shareFile() {
     try {
-      const fileUrl = `${window.location.origin}/file/${file.current?.id}`;
+      const fileUrl = `${window.location.origin}/file/${file.current?.$jazz.id}`;
       await navigator.clipboard.writeText(fileUrl);
       toast.success('Share link copied to clipboard');
     } catch (error) {
@@ -68,7 +68,7 @@
               Share
             </button>
           {/if}
-          {#if file.current._refs.file}
+          {#if file.current.$jazz.refs.file}
             <button
               onclick={downloadFile}
               class="flex items-center gap-2 rounded-md bg-blue-600 px-4 py-2 text-white hover:bg-blue-700"

@@ -6,7 +6,7 @@ export default function ProfileImage() {
 
   const deleteImage = () => {
     if (!me?.profile) return;
-    me.profile.image = undefined;
+    me.profile.$jazz.delete("image");
   };
 
   if (!me?.profile?.image) {
@@ -21,7 +21,7 @@ export default function ProfileImage() {
     <div className="space-y-4">
       <h2 className="text-xl font-semibold">Profile Image</h2>
       <div className="border rounded-lg overflow-hidden">
-        <Image imageId={me.profile.image.id} alt="Profile" width={600} />
+        <Image imageId={me.profile.image.$jazz.id} alt="Profile" width={600} />
       </div>
       <button
         type="button"

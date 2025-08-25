@@ -19,7 +19,7 @@ const QuestSchema = co
   })
   .withMigration((quest) => {
     if (quest.categories === undefined) {
-      quest.categories = [quest.category];
+      quest.$jazz.set("categories", [quest.category]);
     }
   });
 
@@ -50,7 +50,7 @@ describe("QuestSchema", () => {
     expect(quest.categories).toBeUndefined();
 
     // Load the quest to trigger the migration
-    const loadedQuest = await QuestSchema.load(quest.id);
+    const loadedQuest = await QuestSchema.load(quest.$jazz.id);
     assert(loadedQuest);
 
     // After loading, the migration should have run and filled categories
@@ -75,7 +75,7 @@ describe("QuestSchema", () => {
     expect(quest.categories).toEqual(["combat", "boss-fight", "endgame"]);
 
     // Load the quest to ensure migration doesn't change existing categories
-    const loadedQuest = await QuestSchema.load(quest.id);
+    const loadedQuest = await QuestSchema.load(quest.$jazz.id);
     assert(loadedQuest);
 
     // Categories should remain unchanged after migration

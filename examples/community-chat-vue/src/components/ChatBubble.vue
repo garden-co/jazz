@@ -30,7 +30,7 @@ export default defineComponent({
     },
   },
   setup(props) {
-    const lastEdit = computed(() => props.msg._edits.text);
+    const lastEdit = computed(() => props.msg.$jazz.getEdits().text);
     return {
       lastEdit,
     };

@@ -112,7 +112,7 @@ const project = TodoProject.create({
 
 <Alert variant="info" className="flex gap-2 items-center my-4">
 To learn more about how permissions work when creating nested CoValues with plain JSON objects,
-refer to [Group hierarchy on CoValue creation](/docs/groups/inheritance#group-hierarchy-on-covalue-creation).
+refer to [Ownership on implicit CoValue creation](/docs/groups/inheritance#ownership-on-implicit-covalue-creation).
 </Alert>
 
 ## Types of CoValues
@@ -465,8 +465,8 @@ type Person = co.loaded<typeof Person>;
 
 export function updatePersonName(person: Person, fullName: string) {
   const [firstName, lastName] = fullName.split(" ");
-  person.firstName = firstName;
-  person.lastName = lastName;
+  person.$jazz.set("firstName", firstName);
+  person.$jazz.set("lastName", lastName);
 }
 
 const person = Person.create({

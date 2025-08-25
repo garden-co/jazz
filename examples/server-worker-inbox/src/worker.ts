@@ -47,7 +47,7 @@ inbox.subscribe(
           { owner: waitingRoomGroup },
         );
 
-        console.log("waiting room created with id:", waitingRoom.id);
+        console.log("waiting room created with id:", waitingRoom.$jazz.id);
         return waitingRoom;
 
       case "joinGame":
@@ -67,16 +67,16 @@ inbox.subscribe(
           account1: joinGameRequest.waitingRoom.account1,
           account2: joinGameRequest.waitingRoom.account2!,
         });
-        console.log("game created with id:", game.id);
+        console.log("game created with id:", game.$jazz.id);
 
-        joinGameRequest.waitingRoom.game = game;
+        joinGameRequest.waitingRoom.$jazz.set("game", game);
         return joinGameRequest.waitingRoom.game;
     }
   },
   { retries: 3 },
 );
 
-console.log("worker", worker.id, "started");
+console.log("worker", worker.$jazz.id, "started");
 
 interface CreateGameParams {
   account1: Account;
@@ -101,7 +101,7 @@ async function createGame({ account1, account2 }: CreateGameParams) {
     { owner: publicReadOnly },
   );
 
-  await game.waitForSync();
+  await game.$jazz.waitForSync();
 
   return game;
 }
@@ -140,11 +140,11 @@ async function handleNewGameIntent(_: string, message: NewGameIntent) {
   }
 
   if (game.outcome) {
-    game.outcome = undefined;
-    game.player1.playSelection = undefined;
+    game.$jazz.set("outcome", undefined);
+    game.player1.$jazz.set("playSelection", undefined);
 
     if (game.player2) {
-      game.player2.playSelection = undefined;
+      game.player2.$jazz.set("playSelection", undefined);
     }
   }
 }
@@ -179,7 +179,7 @@ async function handlePlayIntent(_: string, message: PlayIntent) {
     throw new Error("Player already made a selection");
   }
 
-  currentPlayer.playSelection = message.playSelection;
+  currentPlayer.$jazz.set("playSelection", message.playSelection);
 
   const player1Selection = game?.player1.playSelection;
   const player2Selection = game?.player2?.playSelection;
@@ -192,11 +192,11 @@ async function handlePlayIntent(_: string, message: PlayIntent) {
     player2Selection !== undefined
   ) {
     const outcome = determineWinner(player1Selection, player2Selection);
-    game.outcome = outcome;
+    game.$jazz.set("outcome", outcome);
     if (outcome === "player1") {
-      game.player1Score += 1;
+      game.$jazz.set("player1Score", game.player1Score + 1);
     } else if (outcome === "player2") {
-      game.player2Score += 1;
+      game.$jazz.set("player2Score", game.player2Score + 1);
     }
   }
 }

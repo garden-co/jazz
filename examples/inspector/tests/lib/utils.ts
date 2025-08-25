@@ -31,7 +31,7 @@ export async function createAccount() {
     ],
   });
 
-  await account.waitForAllCoValuesSync();
+  await account.$jazz.waitForAllCoValuesSync();
 
   const credentials = await authSecretStorage.get();
   if (!credentials) {

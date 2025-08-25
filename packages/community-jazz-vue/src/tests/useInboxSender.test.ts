@@ -22,7 +22,7 @@ describe("useInboxSender", () => {
         experimental_useInboxSender<
           Loaded<typeof TestMap>,
           Loaded<typeof TestMap>
-        >(inboxReceiver.id),
+        >(inboxReceiver.$jazz.id),
       {
         account,
       },
@@ -43,7 +43,10 @@ describe("useInboxSender", () => {
       inbox.subscribe(TestMap, async (message) => {
         resolve(message);
 
-        return TestMap.create({ value: "got it" }, { owner: message._owner });
+        return TestMap.create(
+          { value: "got it" },
+          { owner: message.$jazz.owner },
+        );
       });
     });
 

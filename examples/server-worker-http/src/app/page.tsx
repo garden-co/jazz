@@ -15,7 +15,7 @@ export default function HomeComponent() {
 
     const { waitingRoom } = await serverApi.createGame.send({});
 
-    router.push(`/waiting-room/${waitingRoom.id}`);
+    router.push(`/waiting-room/${waitingRoom.$jazz.id}`);
   };
 
   return (

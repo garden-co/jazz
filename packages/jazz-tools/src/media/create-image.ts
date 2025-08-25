@@ -137,7 +137,7 @@ async function createImage(
    * On the client side, the image will be loaded progressively, starting from the smallest size and increasing the size until the original size is reached.
    */
   if (options?.progressive) {
-    imageCoValue.progressive = true;
+    imageCoValue.$jazz.set("progressive", true);
 
     const resizes = ([256, 1024, 2048] as const).filter(
       (s) =>
@@ -153,8 +153,10 @@ async function createImage(
       );
 
       const blob = await impl.resize(imageBlobOrFile, width, height);
-      imageCoValue[`${width}x${height}`] =
-        await impl.createFileStreamFromSource(blob, options?.owner);
+      imageCoValue.$jazz.set(
+        `${width}x${height}`,
+        await impl.createFileStreamFromSource(blob, options?.owner),
+      );
     }
   }
 

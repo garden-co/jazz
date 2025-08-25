@@ -18,6 +18,7 @@ import {
   Resolved,
   SubscriptionScope,
   type SubscriptionValue,
+  TypeSym,
   activeAccountContext,
   coValueClassFromCoValueClassOrSchema,
   inspect,
@@ -32,26 +33,28 @@ export interface CoValueClass<Value extends CoValue = CoValue> {
 }
 
 export interface CoValueFromRaw<V extends CoValue> {
-  fromRaw(raw: V["_raw"]): V;
+  fromRaw(raw: V["$jazz"]["raw"]): V;
 }
 
 /** @category Abstract interfaces */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export interface CoValue {
-  /** @category Content */
-  readonly id: ID<this>;
   /** @category Type Helpers */
-  _type: string;
-  /** @category Collaboration */
-  _owner: Account | Group;
-  /** @category Internals */
-  _raw: RawCoValue;
+  [TypeSym]: string;
 
-  /** @internal */
-  _subscriptionScope?: SubscriptionScope<this>;
+  $jazz: {
+    /** @category Content */
+    readonly id: ID<CoValue>;
+    /** @category Collaboration */
+    owner?: Group;
+    /** @internal */
+    readonly loadedAs: Account | AnonymousJazzAgent;
+    /** @category Internals */
+    raw: RawCoValue;
+    /** @internal */
+    _subscriptionScope?: SubscriptionScope<CoValue>;
+  };
 
-  /** @internal */
-  readonly _loadedAs: Account | AnonymousJazzAgent;
   /** @category Stringifying & Inspection */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   toJSON(key?: string, seenAbove?: ID<CoValue>[]): any[] | object | string;
@@ -62,7 +65,7 @@ export interface CoValue {
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function isCoValue(value: any): value is CoValue {
-  return value && value._type !== undefined;
+  return value && value[TypeSym] !== undefined;
 }
 
 export function isCoValueClass<V extends CoValue>(
@@ -149,15 +152,15 @@ export async function ensureCoValueLoaded<
 ): Promise<Resolved<V, R>> {
   const response = await loadCoValue(
     existing.constructor as CoValueClass<V>,
-    existing.id,
+    existing.$jazz.id,
     {
-      loadAs: existing._loadedAs,
+      loadAs: existing.$jazz.loadedAs,
       resolve: options?.resolve,
     },
   );
 
   if (!response) {
-    throw new Error("Failed to deeply load CoValue " + existing.id);
+    throw new Error("Failed to deeply load CoValue " + existing.$jazz.id);
   }
 
   return response;
@@ -255,7 +258,7 @@ export function subscribeToCoValue<
   listener: SubscribeListener<V, R>,
 ): () => void {
   const loadAs = options.loadAs ?? activeAccountContext.get();
-  const node = "node" in loadAs ? loadAs.node : loadAs._raw.core.node;
+  const node = "node" in loadAs ? loadAs.node : loadAs.$jazz.localNode;
 
   const resolve = options.resolve ?? true;
 
@@ -325,9 +328,9 @@ export function subscribeToExistingCoValue<
 ): () => void {
   return subscribeToCoValue(
     existing.constructor as CoValueClass<V>,
-    existing.id,
+    existing.$jazz.id,
     {
-      loadAs: existing._loadedAs,
+      loadAs: existing.$jazz.loadedAs,
       resolve: options?.resolve,
       onUnavailable: options?.onUnavailable,
       onUnauthorized: options?.onUnauthorized,
@@ -341,7 +344,7 @@ export function isAccountInstance(instance: unknown): instance is Account {
     return false;
   }
 
-  return "_type" in instance && instance._type === "Account";
+  return TypeSym in instance && instance[TypeSym] === "Account";
 }
 
 export function isAnonymousAgentInstance(
@@ -351,7 +354,7 @@ export function isAnonymousAgentInstance(
     return false;
   }
 
-  return "_type" in instance && instance._type === "Anonymous";
+  return TypeSym in instance && instance[TypeSym] === "Anonymous";
 }
 
 export function parseCoValueCreateOptions(
@@ -363,15 +366,20 @@ export function parseCoValueCreateOptions(
     | Account
     | Group
     | undefined,
-) {
+): {
+  owner: Group;
+  uniqueness?: CoValueUniqueness;
+} {
   const Group = RegisteredSchemas["Group"];
 
   if (!options) {
     return { owner: Group.create(), uniqueness: undefined };
   }
 
-  if ("_type" in options) {
-    if (options._type === "Account" || options._type === "Group") {
+  if (TypeSym in options) {
+    if (options[TypeSym] === "Account") {
+      return { owner: accountOrGroupToGroup(options), uniqueness: undefined };
+    } else if (options[TypeSym] === "Group") {
       return { owner: options, uniqueness: undefined };
     }
   }
@@ -380,10 +388,20 @@ export function parseCoValueCreateOptions(
     ? { uniqueness: options.unique }
     : undefined;
 
-  return {
-    owner: options.owner ?? Group.create(),
+  const opts = {
+    owner: options.owner
+      ? accountOrGroupToGroup(options.owner)
+      : Group.create(),
     uniqueness,
   };
+  return opts;
+}
+
+export function accountOrGroupToGroup(accountOrGroup: Account | Group): Group {
+  if (accountOrGroup[TypeSym] === "Group") {
+    return accountOrGroup;
+  }
+  return RegisteredSchemas["Group"].fromRaw(accountOrGroup.$jazz.raw);
 }
 
 export function parseGroupCreateOptions(
@@ -398,7 +416,7 @@ export function parseGroupCreateOptions(
     return { owner: activeAccountContext.get() };
   }
 
-  return "_type" in options && isAccountInstance(options)
+  return TypeSym in options && isAccountInstance(options)
     ? { owner: options }
     : { owner: options.owner ?? activeAccountContext.get() };
 }
@@ -460,7 +478,7 @@ export async function exportCoValue<
   },
 ) {
   const loadAs = options.loadAs ?? activeAccountContext.get();
-  const node = "node" in loadAs ? loadAs.node : loadAs._raw.core.node;
+  const node = "node" in loadAs ? loadAs.node : loadAs.$jazz.localNode;
 
   const resolve = options.resolve ?? true;
 
@@ -515,7 +533,7 @@ function loadContentPiecesFromSubscription(
 
   valuesExported.add(subscription.id);
 
-  const core = subscription.getCurrentValue()?._raw
+  const core = subscription.getCurrentValue()?.$jazz.raw
     .core as AvailableCoValueCore;
 
   if (core) {
@@ -563,7 +581,7 @@ export function importContentPieces(
   loadAs?: Account | AnonymousJazzAgent,
 ) {
   const account = loadAs ?? Account.getMe();
-  const node = "node" in account ? account.node : account._raw.core.node;
+  const node = "node" in account ? account.node : account.$jazz.localNode;
 
   for (const piece of contentPieces) {
     node.syncManager.handleNewContent(piece, "import");

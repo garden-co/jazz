@@ -20,7 +20,7 @@ export function Form() {
           placeholder="Enter your first name here..."
           className="border border-stone-300 rounded-sm shadow-xs py-1 px-2 flex-1"
           value={me.profile.firstName || ""}
-          onChange={(e) => (me.profile.firstName = e.target.value)}
+          onChange={(e) => me.profile.$jazz.set("firstName", e.target.value)}
         />
       </div>
 
@@ -33,7 +33,9 @@ export function Form() {
           id="dateOfBirth"
           className="border border-stone-300 rounded-sm shadow-xs py-1 px-2 flex-1"
           value={me.root.dateOfBirth?.toISOString().split("T")[0] || ""}
-          onChange={(e) => (me.root.dateOfBirth = new Date(e.target.value))}
+          onChange={(e) =>
+            me.root.$jazz.set("dateOfBirth", new Date(e.target.value))
+          }
         />
       </div>
 

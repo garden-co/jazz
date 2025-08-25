@@ -34,9 +34,9 @@ export function NewProjectForm() {
         { owner: projectGroup },
       );
 
-      me.root?.projects?.push(project);
+      me.root?.projects?.$jazz.push(project);
 
-      navigate("/project/" + project.id);
+      navigate("/project/" + project.$jazz.id);
     },
     [me, navigate],
   );

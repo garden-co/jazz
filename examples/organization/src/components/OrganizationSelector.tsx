@@ -52,7 +52,7 @@ export function OrganizationSelector({ className }: { className?: string }) {
           }
 
           return (
-            <option key={organization.id} value={organization.id}>
+            <option key={organization.$jazz.id} value={organization.$jazz.id}>
               {organization.name}
             </option>
           );

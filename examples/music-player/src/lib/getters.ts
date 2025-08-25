@@ -1,7 +1,7 @@
 import { MusicaAccount } from "../1_schema";
 
 export async function getNextTrack() {
-  const me = await MusicaAccount.getMe().ensureLoaded({
+  const me = await MusicaAccount.getMe().$jazz.ensureLoaded({
     resolve: {
       root: {
         activePlaylist: {
@@ -12,9 +12,11 @@ export async function getNextTrack() {
   });
 
   const tracks = me.root.activePlaylist.tracks;
-  const activeTrack = me.root._refs.activeTrack;
+  const activeTrack = me.root.$jazz.refs.activeTrack;
 
-  const currentIndex = tracks.findIndex((item) => item?.id === activeTrack?.id);
+  const currentIndex = tracks.findIndex(
+    (item) => item?.$jazz.id === activeTrack?.id,
+  );
 
   const nextIndex = (currentIndex + 1) % tracks.length;
 
@@ -22,7 +24,7 @@ export async function getNextTrack() {
 }
 
 export async function getPrevTrack() {
-  const me = await MusicaAccount.getMe().ensureLoaded({
+  const me = await MusicaAccount.getMe().$jazz.ensureLoaded({
     resolve: {
       root: {
         activePlaylist: {
@@ -33,9 +35,11 @@ export async function getPrevTrack() {
   });
 
   const tracks = me.root.activePlaylist.tracks;
-  const activeTrack = me.root._refs.activeTrack;
+  const activeTrack = me.root.$jazz.refs.activeTrack;
 
-  const currentIndex = tracks.findIndex((item) => item?.id === activeTrack?.id);
+  const currentIndex = tracks.findIndex(
+    (item) => item?.$jazz.id === activeTrack?.id,
+  );
 
   const previousIndex = (currentIndex - 1 + tracks.length) % tracks.length;
   return tracks[previousIndex];

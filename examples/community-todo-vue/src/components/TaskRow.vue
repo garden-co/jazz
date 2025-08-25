@@ -19,11 +19,11 @@
         <div v-else class="skeleton skeleton-text"></div>
         
         <span 
-          v-if="task?._edits?.text?.by?.profile?.name"
+          v-if="task?.$jazz.getEdits().text?.by?.profile?.name"
           class="task-author"
-          :style="getAuthorStyle(task._edits.text.by?.id ?? '')"
+          :style="getAuthorStyle(task.$jazz.getEdits().text.by?.id ?? '')"
         >
-          {{ task._edits.text.by?.profile?.name }}
+          {{ task.$jazz.getEdits().text.by?.profile?.name }}
         </span>
         <div v-else class="skeleton skeleton-author"></div>
       </div>

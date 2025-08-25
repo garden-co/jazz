@@ -125,15 +125,15 @@ describe("ContextManager", () => {
     await manager.createContext({});
 
     const credentials = {
-      accountID: account.id,
-      accountSecret: account._raw.core.node.getCurrentAgent().agentSecret,
+      accountID: account.$jazz.id,
+      accountSecret: account.$jazz.localNode.getCurrentAgent().agentSecret,
       provider: "test",
     };
 
     // Authenticate with those credentials
     await manager.authenticate(credentials);
 
-    expect(getCurrentValue().me.id).toBe(credentials.accountID);
+    expect(getCurrentValue().me.$jazz.id).toBe(credentials.accountID);
   });
 
   test("handles race conditions on the context creation", async () => {
@@ -142,15 +142,15 @@ describe("ContextManager", () => {
     manager.createContext({});
 
     const credentials = {
-      accountID: account.id,
-      accountSecret: account._raw.core.node.getCurrentAgent().agentSecret,
+      accountID: account.$jazz.id,
+      accountSecret: account.$jazz.localNode.getCurrentAgent().agentSecret,
       provider: "test",
     };
 
     // Authenticate without waiting for the previous context to be created
     await manager.authenticate(credentials);
 
-    expect(getCurrentValue().me.id).toBe(credentials.accountID);
+    expect(getCurrentValue().me.$jazz.id).toBe(credentials.accountID);
   });
 
   test("calls onLogOut callback when logging out", async () => {
@@ -205,8 +205,8 @@ describe("ContextManager", () => {
 
     // Authenticate with credentials
     await manager.authenticate({
-      accountID: account.id,
-      accountSecret: account._raw.core.node.getCurrentAgent().agentSecret,
+      accountID: account.$jazz.id,
+      accountSecret: account.$jazz.localNode.getCurrentAgent().agentSecret,
       provider: "test",
     });
 
@@ -219,8 +219,8 @@ describe("ContextManager", () => {
     const account = await createJazzTestAccount();
 
     await manager.getAuthSecretStorage().set({
-      accountID: account.id,
-      accountSecret: account._raw.core.node.getCurrentAgent().agentSecret,
+      accountID: account.$jazz.id,
+      accountSecret: account.$jazz.localNode.getCurrentAgent().agentSecret,
       provider: "test",
     });
 
@@ -229,8 +229,8 @@ describe("ContextManager", () => {
 
     // Authenticate with same credentials
     await manager.authenticate({
-      accountID: account.id,
-      accountSecret: account._raw.core.node.getCurrentAgent().agentSecret,
+      accountID: account.$jazz.id,
+      accountSecret: account.$jazz.localNode.getCurrentAgent().agentSecret,
       provider: "test",
     });
 
@@ -256,11 +256,14 @@ describe("ContextManager", () => {
         profile: co.profile(),
       })
       .withMigration(async (account) => {
-        account.root = AccountRoot.create(
-          {
-            value: "Hello",
-          },
-          Group.create(this).makePublic(),
+        account.$jazz.set(
+          "root",
+          AccountRoot.create(
+            {
+              value: "Hello",
+            },
+            Group.create(this).makePublic(),
+          ),
         );
       });
 
@@ -272,15 +275,16 @@ describe("ContextManager", () => {
       AccountSchema: coValueClassFromCoValueClassOrSchema(CustomAccount),
       storage: dbFilename,
       onAnonymousAccountDiscarded: async (anonymousAccount) => {
-        const anonymousAccountWithRoot = await anonymousAccount.ensureLoaded({
+        const anonymousAccountWithRoot =
+          await anonymousAccount.$jazz.ensureLoaded({
+            resolve: { root: true },
+          });
+
+        const me = await CustomAccount.getMe().$jazz.ensureLoaded({
           resolve: { root: true },
         });
 
-        const me = await CustomAccount.getMe().ensureLoaded({
-          resolve: { root: true },
-        });
-
-        me.root.transferredRoot = anonymousAccountWithRoot.root;
+        me.root.$jazz.set("transferredRoot", anonymousAccountWithRoot.root);
       },
     });
 
@@ -295,15 +299,15 @@ describe("ContextManager", () => {
     ).me;
 
     await customManager.authenticate({
-      accountID: account.id,
-      accountSecret: account._raw.core.node.getCurrentAgent().agentSecret,
+      accountID: account.$jazz.id,
+      accountSecret: account.$jazz.localNode.getCurrentAgent().agentSecret,
       provider: "test",
     });
 
     // The storage should be closed and set to undefined
     expect(prevContextNode.storage).toBeUndefined();
 
-    const me = await CustomAccount.getMe().ensureLoaded({
+    const me = await CustomAccount.getMe().$jazz.ensureLoaded({
       resolve: { root: { transferredRoot: true } },
     });
 
@@ -322,11 +326,11 @@ describe("ContextManager", () => {
         root: AccountRoot,
         profile: co.profile(),
       })
-      .withMigration(async (account) => {
-        account.root = AccountRoot.create({
+      .withMigration(async (account: Account) => {
+        account.$jazz.set("root", {
           value: "Hello",
         });
-        lastRootId = account.root.id;
+        lastRootId = account.root!.$jazz.id;
       });
 
     const customManager = new TestJazzContextManager<
@@ -345,16 +349,16 @@ describe("ContextManager", () => {
     ).me;
 
     await customManager.authenticate({
-      accountID: account.id,
-      accountSecret: account._raw.core.node.getCurrentAgent().agentSecret,
+      accountID: account.$jazz.id,
+      accountSecret: account.$jazz.localNode.getCurrentAgent().agentSecret,
       provider: "test",
     });
 
-    const me = await CustomAccount.getMe().ensureLoaded({
+    const me = await CustomAccount.getMe().$jazz.ensureLoaded({
       resolve: { root: true },
     });
 
-    expect(me.root.id).toBe(lastRootId);
+    expect(me.root.$jazz.id).toBe(lastRootId);
   });
 
   test("the migration should be applied correctly on existing accounts (2)", async () => {
@@ -369,15 +373,18 @@ describe("ContextManager", () => {
       })
       .withMigration(async (account) => {
         if (account.root === undefined) {
-          account.root = AccountRoot.create({
-            value: 1,
-          });
+          account.$jazz.set(
+            "root",
+            AccountRoot.create({
+              value: 1,
+            }),
+          );
         } else {
-          const { root } = await account.ensureLoaded({
+          const { root } = await account.$jazz.ensureLoaded({
             resolve: { root: true },
           });
 
-          root.value = 2;
+          root.$jazz.set("value", 2);
         }
       });
     const customManager = new TestJazzContextManager<
@@ -396,12 +403,12 @@ describe("ContextManager", () => {
     ).me;
 
     await customManager.authenticate({
-      accountID: account.id,
-      accountSecret: account._raw.core.node.getCurrentAgent().agentSecret,
+      accountID: account.$jazz.id,
+      accountSecret: account.$jazz.localNode.getCurrentAgent().agentSecret,
       provider: "test",
     });
 
-    const me = await CustomAccount.getMe().ensureLoaded({
+    const me = await CustomAccount.getMe().$jazz.ensureLoaded({
       resolve: { root: true },
     });
 
@@ -423,22 +430,26 @@ describe("ContextManager", () => {
       })
       .withMigration(async (account) => {
         if (account.root === undefined) {
-          account.root = AccountRoot.create({
-            value: "Hello",
-          });
+          account.$jazz.set(
+            "root",
+            AccountRoot.create({
+              value: "Hello",
+            }),
+          );
         }
       });
 
     const onAnonymousAccountDiscarded = async (
       anonymousAccount: Loaded<typeof CustomAccount, { root: true }>,
     ) => {
-      const anonymousAccountWithRoot = await anonymousAccount.ensureLoaded({
-        resolve: {
-          root: true,
-        },
-      });
+      const anonymousAccountWithRoot =
+        await anonymousAccount.$jazz.ensureLoaded({
+          resolve: {
+            root: true,
+          },
+        });
 
-      const meWithRoot = await CustomAccount.getMe().ensureLoaded({
+      const meWithRoot = await CustomAccount.getMe().$jazz.ensureLoaded({
         resolve: {
           root: true,
         },
@@ -446,9 +457,9 @@ describe("ContextManager", () => {
 
       const rootToTransfer = anonymousAccountWithRoot.root;
 
-      await rootToTransfer._owner.castAs(Group).addMember(meWithRoot, "admin");
+      await rootToTransfer.$jazz.owner.addMember(meWithRoot, "admin");
 
-      meWithRoot.root.transferredRoot = rootToTransfer;
+      meWithRoot.root.$jazz.set("transferredRoot", rootToTransfer);
     };
 
     const customManager = new TestJazzContextManager<
@@ -467,12 +478,12 @@ describe("ContextManager", () => {
     });
 
     await customManager.authenticate({
-      accountID: account.id,
-      accountSecret: account._raw.core.node.getCurrentAgent().agentSecret,
+      accountID: account.$jazz.id,
+      accountSecret: account.$jazz.localNode.getCurrentAgent().agentSecret,
       provider: "test",
     });
 
-    const me = await CustomAccount.getMe().ensureLoaded({
+    const me = await CustomAccount.getMe().$jazz.ensureLoaded({
       resolve: {
         root: true,
       },
@@ -491,7 +502,7 @@ describe("ContextManager", () => {
     expect(accountId).toBeDefined();
     const context = getCurrentValue();
     expect(context.me.profile?.name).toBe("Test User");
-    expect(context.me.id).toBe(accountId);
+    expect(context.me.$jazz.id).toBe(accountId);
   });
 
   test("calls onAnonymousAccountDiscarded when registering from anonymous user", async () => {
@@ -510,8 +521,8 @@ describe("ContextManager", () => {
     const account = await createJazzTestAccount();
 
     await manager.getAuthSecretStorage().set({
-      accountID: account.id,
-      accountSecret: account._raw.core.node.getCurrentAgent().agentSecret,
+      accountID: account.$jazz.id,
+      accountSecret: account.$jazz.localNode.getCurrentAgent().agentSecret,
       provider: "test",
     });
 

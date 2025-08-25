@@ -42,11 +42,14 @@ export const JazzAccount = co
   .withMigration(async (account) => {
     if (account.profile === undefined) {
       const group = Group.create();
-      account.profile = co.profile().create(
-        {
-          name: getRandomUsername(),
-        },
-        group,
+      account.$jazz.set(
+        "profile",
+        co.profile().create(
+          {
+            name: getRandomUsername(),
+          },
+          group,
+        ),
       );
       group.addMember("everyone", "reader");
     }
@@ -62,7 +65,7 @@ export const JazzAccount = co
 
       const defaultOrgGroup = Group.create();
 
-      const { profile } = await account.ensureLoaded({
+      const { profile } = await account.$jazz.ensureLoaded({
         resolve: {
           profile: true,
         },
@@ -78,7 +81,7 @@ export const JazzAccount = co
         ),
       ]);
 
-      account.root = JazzAccountRoot.create({
+      account.$jazz.set("root", {
         draftOrganization,
         organizations,
       });

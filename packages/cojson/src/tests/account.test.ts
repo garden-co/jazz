@@ -137,6 +137,86 @@ test("Should migrate the root from private to trusting", async () => {
   expect(account3.ops).toEqual(account2.ops); // No new transactions were made
 });
 
+test("myRole returns 'admin' for the current account", async () => {
+  const { node, accountID } = await LocalNode.withNewlyCreatedAccount({
+    creationProps: { name: "Hermes Puggington" },
+    crypto: Crypto,
+  });
+
+  const account = await node.load(accountID);
+  if (account === "unavailable") throw new Error("Account unavailable");
+
+  expect(account.myRole()).toEqual("admin");
+});
+
+test("roleOf returns 'admin' when the accountID is the same as the receiver account", async () => {
+  const { node, accountID } = await LocalNode.withNewlyCreatedAccount({
+    creationProps: { name: "Hermes Puggington" },
+    crypto: Crypto,
+  });
+
+  const account = await node.load(accountID);
+  if (account === "unavailable") throw new Error("Account unavailable");
+
+  expect(account.roleOf(accountID)).toEqual("admin");
+});
+
+test("throws an error if the user tried to add a member to an account", async () => {
+  const { node, accountID } = await LocalNode.withNewlyCreatedAccount({
+    creationProps: { name: "Hermes Puggington" },
+    crypto: Crypto,
+  });
+
+  const account = await node.load(accountID);
+  if (account === "unavailable") throw new Error("Account unavailable");
+
+  expect(() => account.addMember("everyone", "admin")).toThrow(
+    "Cannot add a member to an account",
+  );
+});
+
+test("throws an error if the user tried to remove a member from an account", async () => {
+  const { node, accountID } = await LocalNode.withNewlyCreatedAccount({
+    creationProps: { name: "Hermes Puggington" },
+    crypto: Crypto,
+  });
+
+  const account = await node.load(accountID);
+  if (account === "unavailable") throw new Error("Account unavailable");
+
+  expect(() => account.removeMember("everyone")).toThrow(
+    "Cannot remove a member from an account",
+  );
+});
+
+test("throws an error if the user tried to extend an account", async () => {
+  const { node, accountID } = await LocalNode.withNewlyCreatedAccount({
+    creationProps: { name: "Hermes Puggington" },
+    crypto: Crypto,
+  });
+
+  const account = await node.load(accountID);
+  if (account === "unavailable") throw new Error("Account unavailable");
+
+  expect(() => account.extend(node.createGroup())).toThrow(
+    "Cannot extend an account",
+  );
+});
+
+test("throws an error if the user tried to revoke extend from an account", async () => {
+  const { node, accountID } = await LocalNode.withNewlyCreatedAccount({
+    creationProps: { name: "Hermes Puggington" },
+    crypto: Crypto,
+  });
+
+  const account = await node.load(accountID);
+  if (account === "unavailable") throw new Error("Account unavailable");
+
+  expect(() => account.revokeExtend(node.createGroup())).toThrow(
+    "Cannot unextend an account",
+  );
+});
+
 test("throws an error if the user tried to create an invite from an account", async () => {
   const { node, accountID } = await LocalNode.withNewlyCreatedAccount({
     creationProps: { name: "Hermes Puggington" },

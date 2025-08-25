@@ -25,7 +25,7 @@ const me = await createJazzTestAccount();
 const note = co.plainText().create("Meeting notes", { owner: me });
 
 // Update the text
-note.applyDiff("Meeting notes for Tuesday");
+note.$jazz.applyDiff("Meeting notes for Tuesday");
 
 console.log(note.toString());  // "Meeting notes for Tuesday"
 ```
@@ -165,7 +165,7 @@ note.insertAfter(21, " for Monday");  // "Meeting weekly notes for Monday"
 note.deleteRange({ from: 8, to: 15 });  // "Meeting notes for Monday"
 
 // Apply a diff to update the entire text
-note.applyDiff("Team meeting notes for Tuesday");
+note.$jazz.applyDiff("Team meeting notes for Tuesday");
 ```
 </CodeGroup>
 
@@ -184,12 +184,12 @@ const me = await createJazzTestAccount();
 const minutes = co.plainText().create("Team status update", { owner: me });
 
 // Replace the entire text with a new version
-minutes.applyDiff("Weekly team status update for Project X");
+minutes.$jazz.applyDiff("Weekly team status update for Project X");
 
 // Make partial changes
 let text = minutes.toString();
 text = text.replace("Weekly", "Monday");
-minutes.applyDiff(text);  // Efficiently updates only what changed
+minutes.$jazz.applyDiff(text);  // Efficiently updates only what changed
 ```
 </CodeGroup>
 
@@ -213,7 +213,7 @@ function TextEditor({ textId }: { textId: string }) {
       value={note.toString()}
       onChange={(e) => {
         // Efficiently update only what the user changed
-        note.applyDiff(e.target.value);
+        note.$jazz.applyDiff(e.target.value);
       }}
     />
   );
@@ -240,7 +240,7 @@ textarea.value = note.toString();
 textarea.addEventListener('input', (e: Event) => {
   const target = e.target as HTMLTextAreaElement;
   // Efficiently update only what the user changed
-  note.applyDiff(target.value);
+  note.$jazz.applyDiff(target.value);
 });
 
 // Add the textarea to the document
@@ -268,7 +268,7 @@ onMounted(async () => {
 
 function updateText(e) {
   if (note.value) {
-    note.value.applyDiff(e.target.value);
+    note.value.$jazz.applyDiff(e.target.value);
     textContent.value = note.value.toString();
   }
 }
@@ -297,7 +297,7 @@ const note = co.plainText().create("", { owner: me });
 
 <textarea
   value={note.toString()}
-  oninput={e => note.applyDiff(e.target.value)}
+  oninput={e => note.$jazz.applyDiff(e.target.value)}
 />
 ```
 </CodeGroup>
@@ -388,7 +388,7 @@ function RichTextEditor() {
         viewRef.current = null;
       }
     };
-  }, [me?.profile.bio?.id]);
+  }, [me?.profile.bio?.$jazz.id]);
 
   if (!me) return null;
 

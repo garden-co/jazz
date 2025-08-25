@@ -130,8 +130,8 @@ function HomeScreen() {
 
         return (
           <Button
-            key={project.id}
-            onClick={() => navigate("/project/" + project?.id)}
+            key={project.$jazz.id}
+            onClick={() => navigate("/project/" + project.$jazz.id)}
             variant="ghost"
           >
             {project.title}

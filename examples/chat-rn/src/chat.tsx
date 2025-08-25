@@ -21,7 +21,7 @@ export function ChatScreen({ navigation }: { navigation: any }) {
   const [chatIdInput, setChatIdInput] = useState<string>();
   const loadedChat = useCoState(Chat, chatId, { resolve: { $each: true } });
   const [message, setMessage] = useState("");
-  const profile = useCoState(Profile, me._refs.profile?.id, {});
+  const profile = useCoState(Profile, me?.$jazz.refs.profile?.id, {});
 
   function handleLogOut() {
     setChatId(undefined);
@@ -35,9 +35,12 @@ export function ChatScreen({ navigation }: { navigation: any }) {
         loadedChat ? (
           <Button
             onPress={() => {
-              if (loadedChat?.id) {
-                Clipboard.setString(loadedChat.id);
-                console.log("Copied to clipboard", `Chat ID: ${loadedChat.id}`);
+              if (loadedChat?.$jazz.id) {
+                Clipboard.setString(loadedChat.$jazz.id);
+                console.log(
+                  "Copied to clipboard",
+                  `Chat ID: ${loadedChat.$jazz.id}`,
+                );
               }
             }}
             title="Share"
@@ -50,7 +53,7 @@ export function ChatScreen({ navigation }: { navigation: any }) {
     const group = Group.create({ owner: me });
     group.addMember("everyone", "writer");
     const chat = Chat.create([], { owner: group });
-    setChatId(chat.id);
+    setChatId(chat.$jazz.id);
   };
 
   const joinChat = () => {
@@ -64,10 +67,10 @@ export function ChatScreen({ navigation }: { navigation: any }) {
   const sendMessage = () => {
     if (!loadedChat) return;
     if (message.trim()) {
-      loadedChat.push(
+      loadedChat.$jazz.push(
         Message.create(
-          { text: CoPlainText.create(message, loadedChat?._owner) },
-          loadedChat?._owner,
+          { text: CoPlainText.create(message, loadedChat.$jazz.owner) },
+          loadedChat.$jazz.owner,
         ),
       );
       setMessage("");
@@ -79,7 +82,7 @@ export function ChatScreen({ navigation }: { navigation: any }) {
   }: {
     item: Loaded<typeof Message, { text: true }>;
   }) => {
-    const isMe = item._edits?.text?.by?.isMe;
+    const isMe = item.$jazz.getEdits()?.text?.by?.isMe;
     return (
       <View
         style={[
@@ -94,7 +97,7 @@ export function ChatScreen({ navigation }: { navigation: any }) {
               isMe ? styles.textRight : styles.textLeft,
             ]}
           >
-            {item?._edits?.text?.by?.profile?.name}
+            {item?.$jazz.getEdits()?.text?.by?.profile?.name}
           </Text>
         ) : null}
         <View style={styles.messageContent}>
@@ -105,10 +108,15 @@ export function ChatScreen({ navigation }: { navigation: any }) {
               !isMe ? styles.timestampOther : styles.timestampMy,
             ]}
           >
-            {item?._edits?.text?.madeAt?.getHours().toString().padStart(2, "0")}
+            {item?.$jazz
+              .getEdits()
+              ?.text?.madeAt?.getHours()
+              .toString()
+              .padStart(2, "0")}
             :
-            {item?._edits?.text?.madeAt
-              ?.getMinutes()
+            {item?.$jazz
+              .getEdits()
+              ?.text?.madeAt?.getMinutes()
               .toString()
               .padStart(2, "0")}
           </Text>
@@ -127,7 +135,7 @@ export function ChatScreen({ navigation }: { navigation: any }) {
             value={profile?.name ?? ""}
             onChangeText={(value) => {
               if (profile) {
-                profile.name = value;
+                profile.$jazz.set("name", value);
               }
             }}
             textAlignVertical="center"
@@ -162,7 +170,7 @@ export function ChatScreen({ navigation }: { navigation: any }) {
             }}
             style={styles.messageList}
             data={loadedChat}
-            keyExtractor={(item) => item.id}
+            keyExtractor={(item) => item.$jazz.id}
             renderItem={renderMessageItem}
           />
 

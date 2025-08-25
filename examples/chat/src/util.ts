@@ -5,9 +5,9 @@ import { Chat } from "@/schema.ts";
 
 export function onChatLoad(chat: Chat) {
   if (window.parent) {
-    chat.waitForSync().then(() => {
+    chat.$jazz.waitForSync().then(() => {
       window.parent.postMessage(
-        { type: "chat-load", id: "/chat/" + chat.id },
+        { type: "chat-load", id: "/chat/" + chat.$jazz.id },
         "*",
       );
     });

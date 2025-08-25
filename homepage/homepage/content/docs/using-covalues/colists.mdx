@@ -46,8 +46,8 @@ const resources = co.list(z.string()).create([]);
 
 // Create a list with initial items
 const tasks = co.list(Task).create([
-  Task.create({ title: "Prepare soil beds", status: "in-progress" }),
-  Task.create({ title: "Order compost", status: "todo" })
+  { title: "Prepare soil beds", status: "in-progress" },
+  { title: "Order compost", status: "todo" }
 ]);
 ```
 </CodeGroup>
@@ -121,7 +121,7 @@ console.log(todoTasks.length); // 1
 
 ## Updating CoLists
 
-Update `CoList`s just like you would JavaScript arrays:
+Methods to update a CoList's items are grouped inside the `$jazz` namespace:
 
 <CodeGroup>
 ```ts twoslash
@@ -141,18 +141,18 @@ const tasks = ListOfTasks.create([]);
 
 // ---cut---
 // Add items
-resources.push("Tomatoes");       // Add to end
-resources.unshift("Lettuce");     // Add to beginning
-tasks.push(Task.create({          // Add complex items
-  title: "Install irrigation",
-  status: "todo"
-}));
+resources.$jazz.push("Tomatoes");         // Add to end
+resources.$jazz.unshift("Lettuce");       // Add to beginning
+tasks.$jazz.push({                        // Add complex items
+  title: "Install irrigation",            // (Jazz will create
+  status: "todo"                          // the CoValue for you!)
+});
 
 // Replace items
-resources[0] = "Cucumber";           // Replace by index
+resources.$jazz.set(0, "Cucumber");       // Replace by index
 
 // Modify nested items
-tasks[0].status = "complete";        // Update properties of references
+tasks[0].$jazz.set("status", "complete"); // Update properties of references
 ```
 </CodeGroup>
 
@@ -182,20 +182,20 @@ export function getCurrentTasks(list: co.loaded<ListOfTasks>) {
 
 async function main() {
   const myTaskList = ListOfTasks.create([]);
-  myTaskList.push(Task.create({ 
+  myTaskList.$jazz.push({ 
     title: "Tomatoes",
     status: "todo",
     deleted: false
-  }));
-  myTaskList.push(Task.create({
+  });
+  myTaskList.$jazz.push({
     title: "Cucumbers",
     status: "todo",
     deleted: true
-  }));
-  myTaskList.push(Task.create({
+  });
+  myTaskList.$jazz.push({
     title: "Carrots",
     status: "todo"
-  }));
+  });
 
   const activeTasks = getCurrentTasks(myTaskList);
   console.log(activeTasks.map((task) => task.title));
@@ -211,7 +211,34 @@ There are several benefits to soft deletions:
 
 ### Deleting Items
 
-Remove specific items by index with `splice`, or remove the first or last item with `pop` or `shift`:
+Jazz provides two methods to retain or remove items from a CoList:
+
+<CodeGroup>
+```ts twoslash
+import { co, z } from "jazz-tools";
+
+const ListOfResources = co.list(z.string());
+
+const resources = ListOfResources.create([
+  "Tomatoes",
+  "Cucumber",
+  "Peppers",
+]);
+
+// ---cut---
+// Remove items
+resources.$jazz.remove(2);    // By index
+console.log(resources);       // ["Cucumber", "Peppers"]
+resources.$jazz.remove(item => item === "Cucumber"); // Or by predicate
+console.log(resources);       // ["Tomatoes", "Peppers"]
+
+// Keep only items matching the predicate
+resources.$jazz.retain(item => item !== "Cucumber");
+console.log(resources);       // ["Tomatoes", "Peppers"]
+```
+</CodeGroup>
+
+You can also remove specific items by index with `splice`, or remove the first or last item with `pop` or `shift`:
 
 <CodeGroup>
 ```ts twoslash
@@ -227,22 +254,23 @@ const resources = ListOfResources.create([
 
 // ---cut---
 // Remove 2 items starting at index 1
-resources.splice(1, 2);
-console.log(resources);              // ["Cucumber", "Peppers"]
+resources.$jazz.splice(1, 2);
+console.log(resources);                 // ["Tomatoes"]
 
 // Remove a single item at index 0
-resources.splice(0, 1);
-console.log(resources);              // ["Peppers"]
+resources.$jazz.splice(0, 1);
+console.log(resources);                 // ["Cucumber", "Peppers"]
 
 // Remove items
-const lastItem = resources.pop();    // Remove and return last item
-resources.shift();                   // Remove first item
+const lastItem = resources.$jazz.pop(); // Remove and return last item
+resources.$jazz.shift();                // Remove first item
 ```
 </CodeGroup>
 
 ### Array Methods
 
-`CoList`s support the standard JavaScript array methods you already know:
+`CoList`s support the standard JavaScript array methods you already know. Methods that mutate the array
+are grouped inside the `$jazz` namespace.
 
 <CodeGroup>
 ```ts twoslash
@@ -254,7 +282,7 @@ const resources = ListOfResources.create([]);
 
 // ---cut---
 // Add multiple items at once
-resources.push("Tomatoes", "Basil", "Peppers");
+resources.$jazz.push("Tomatoes", "Basil", "Peppers");
 
 // Find items
 const basil = resources.find(r => r === "Basil");
@@ -262,10 +290,6 @@ const basil = resources.find(r => r === "Basil");
 // Filter (returns regular array, not a CoList)
 const tItems = resources.filter(r => r.startsWith("T"));
 console.log(tItems); // ["Tomatoes"]
-
-// Sort (modifies the CoList in-place)
-resources.sort();
-console.log(resources); // ["Basil", "Peppers", "Tomatoes"]
 ```
 </CodeGroup>
 
@@ -289,9 +313,9 @@ const resources = ListOfResources.create([]);
 const tasks = ListOfTasks.create([]);
 // ---cut---
 // TypeScript catches type errors
-resources.push("Carrots");        // ✓ Valid string
+resources.$jazz.push("Carrots");        // ✓ Valid string
 // @errors: 2345
-resources.push(42);               // ✗ Type error: expected string
+resources.$jazz.push(42);               // ✗ Type error: expected string
 
 // For lists of references
 tasks.forEach(task => {
@@ -326,7 +350,7 @@ function TaskList({ tasks }: { tasks: co.loaded<typeof ListOfTasks> }) {
    <ul>
      {tasks.map(task => (
        task ? (
-        <li key={task.id}>
+        <li key={task.$jazz.id}>
           {task.title} - {task.status}
         </li>
       ): null
@@ -378,7 +402,7 @@ const task = Task.create({
 });
 
 // Add a task to a garden project
-project.tasks.push(task);
+project.tasks.$jazz.push(task);
 
 // Access the project from the task
 console.log(task.project); // { name: "Garden Project", tasks: [task] }

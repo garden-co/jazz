@@ -11,7 +11,7 @@ import {
 } from "../../../internal.js";
 import { CoValueUniqueness } from "cojson";
 import { AnonymousJazzAgent } from "../../anonymousJazzAgent.js";
-import { CoListInit } from "../typeConverters/CoFieldInit.js";
+import { CoListSchemaInit } from "../typeConverters/CoFieldSchemaInit.js";
 import { InstanceOrPrimitiveOfSchema } from "../typeConverters/InstanceOrPrimitiveOfSchema.js";
 import { InstanceOrPrimitiveOfSchemaCoValuesNullable } from "../typeConverters/InstanceOrPrimitiveOfSchemaCoValuesNullable.js";
 import { AnyZodOrCoValueSchema } from "../zodSchema.js";
@@ -30,12 +30,23 @@ export class CoListSchema<T extends AnyZodOrCoValueSchema>
   ) {}
 
   create(
-    items: CoListInit<T>,
+    items: CoListSchemaInit<T>,
     options?:
-      | {
-          owner: Account | Group;
-          unique?: CoValueUniqueness["uniqueness"];
-        }
+      | { owner: Group; unique?: CoValueUniqueness["uniqueness"] }
+      | Group,
+  ): CoListInstance<T>;
+  /** @deprecated Creating CoValues with an Account as owner is deprecated. Use a Group instead. */
+  create(
+    items: CoListSchemaInit<T>,
+    options?:
+      | { owner: Account | Group; unique?: CoValueUniqueness["uniqueness"] }
+      | Account
+      | Group,
+  ): CoListInstance<T>;
+  create(
+    items: CoListSchemaInit<T>,
+    options?:
+      | { owner: Account | Group; unique?: CoValueUniqueness["uniqueness"] }
       | Account
       | Group,
   ): CoListInstance<T> {
@@ -82,7 +93,7 @@ export class CoListSchema<T extends AnyZodOrCoValueSchema>
   upsertUnique<
     const R extends RefsToResolve<CoListInstanceCoValuesNullable<T>> = true,
   >(options: {
-    value: CoListInit<T>;
+    value: CoListSchemaInit<T>;
     unique: CoValueUniqueness["uniqueness"];
     owner: Account | Group;
     resolve?: RefsToResolveStrict<CoListInstanceCoValuesNullable<T>, R>;

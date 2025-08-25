@@ -109,7 +109,7 @@ export function createSyncHandlers(coRichText: CoRichText | undefined) {
       const str = proseMirrorToHtml(tr.doc);
       localChange = true;
       try {
-        coRichText.applyDiff(str);
+        coRichText.$jazz.applyDiff(str);
       } finally {
         localChange = false;
       }

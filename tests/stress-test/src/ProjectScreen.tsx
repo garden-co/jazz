@@ -42,7 +42,7 @@ export function ProjectScreen() {
       ),
     );
     if (me?.root.profilingEnabled) {
-      console.profileEnd(project.id);
+      console.profileEnd(project.$jazz.id);
     }
   }
 
@@ -109,7 +109,7 @@ export function ProjectScreen() {
       >
         {project.tasks.slice(0, visibleTasks).map((task, index) => (
           <label
-            key={task?.id ?? index}
+            key={task?.$jazz.id ?? index}
             style={{
               display: "flex",
               alignItems: "center",
@@ -135,7 +135,7 @@ export function ProjectScreen() {
               type="checkbox"
               checked={task?.done}
               onChange={(e) => {
-                if (task) task.done = e.target.checked;
+                if (task) task.$jazz.set("done", e.target.checked);
               }}
               style={{
                 width: "20px",

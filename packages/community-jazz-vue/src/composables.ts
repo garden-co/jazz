@@ -121,7 +121,11 @@ export function useAccount<
 
   const contextMe = context.value.me as InstanceOfSchema<A>;
 
-  const me = useCoState(AccountSchema as any, contextMe.id, options as any);
+  const me = useCoState(
+    AccountSchema as any,
+    toRaw(contextMe).$jazz.id,
+    options as any,
+  );
 
   return {
     me: computed(() => {

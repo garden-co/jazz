@@ -1,15 +1,12 @@
 import { useCoState } from "jazz-tools/react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { Issue } from "./schema.ts";
 
 function DescriptionVersionHistory({ id }: { id: string }) {
   const issue = useCoState(Issue, id);
   const [version, setVersion] = useState<any | undefined>();
   const [isVersionLatest, setIsVersionLatest] = useState(true);
-  const edits = useMemo(() => {
-    if (!issue) return [];
-    return issue._edits.description?.all.reverse() ?? [];
-  }, [issue?._edits]);
+  const edits = issue?.$jazz.getEdits().description?.all.reverse() ?? [];
 
   useEffect(() => {
     if (!version) {
@@ -36,7 +33,7 @@ function DescriptionVersionHistory({ id }: { id: string }) {
             {!isVersionLatest && (
               <button
                 className="bg-black text-white py-1 px-2 rounded"
-                onClick={() => (issue.description = version.value)}
+                onClick={() => issue.$jazz.set("description", version.value)}
               >
                 Restore
               </button>
@@ -64,15 +61,12 @@ function DescriptionVersionHistory({ id }: { id: string }) {
 export function IssueVersionHistory({ id }: { id: string }) {
   const issue = useCoState(Issue, id);
 
-  const edits = useMemo(() => {
-    if (!issue) return [];
-
-    return [
-      ...(issue._edits.title?.all ?? []),
-      ...(issue._edits.estimate?.all ?? []),
-      ...(issue._edits.status?.all ?? []),
-    ].sort((a, b) => (a.madeAt < b.madeAt ? -1 : a.madeAt > b.madeAt ? 1 : 0));
-  }, [issue?._edits]);
+  const issueEdits = issue?.$jazz.getEdits() ?? {};
+  const edits = [
+    ...(issueEdits.title?.all ?? []),
+    ...(issueEdits.estimate?.all ?? []),
+    ...(issueEdits.status?.all ?? []),
+  ].sort((a, b) => (a.madeAt < b.madeAt ? -1 : a.madeAt > b.madeAt ? 1 : 0));
 
   if (!issue) return;
 
@@ -106,11 +100,11 @@ export function IssueVersionHistory({ id }: { id: string }) {
       <div>
         <p>
           This issue was created at{" "}
-          {new Date(issue._createdAt).toLocaleString()}
+          {new Date(issue.$jazz.createdAt).toLocaleString()}
         </p>
         <p>
           This issue was last updated at{" "}
-          {new Date(issue._lastUpdatedAt).toLocaleString()}
+          {new Date(issue.$jazz.lastUpdatedAt).toLocaleString()}
         </p>
       </div>
     </>

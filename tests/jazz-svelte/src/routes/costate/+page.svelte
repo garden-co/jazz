@@ -19,7 +19,7 @@
 </script>
 
 <div>
-  {#each me.current?.root?.people?._refs || [] as ref, index}
+  {#each me.current?.root?.people?.$jazz.refs || [] as ref, index}
     <button
       onclick={() => {
         id = ref.id;
@@ -60,13 +60,19 @@
       Name
       <!-- Jazz values are reactive, but they are not recognized as reactive by Svelte -->
       <!-- svelte-ignore binding_property_non_reactive -->
-      <input type="text" bind:value={person.current.name} />
+      <input type="text" bind:value={
+        () => person.current!.name,
+        newValue => person.current!.$jazz.set("name", newValue)
+      } />
     </label>
     <label>
       Dog
       <!-- Jazz values are reactive, but they are not recognized as reactive by Svelte -->
       <!-- svelte-ignore binding_property_non_reactive -->
-      <input type="text" bind:value={person.current.dog.name} />
+      <input type="text" bind:value={
+        () => person.current!.dog.name,
+        newValue => person.current!.dog.$jazz.set("name", newValue)
+      } />
     </label>
     <div data-testid="person-name">{person.current.name}</div>
     <div data-testid="person-dog-name">{person.current.dog.name}</div>

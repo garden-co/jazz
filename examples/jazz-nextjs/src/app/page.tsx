@@ -31,12 +31,12 @@ export default function Home() {
               return;
             }
 
-            me.profile.name = e.target.value;
+            me.profile.$jazz.set("name", e.target.value);
           }}
         />
       </label>
       <Link
-        href={`/profile/${me?.profile.id}`}
+        href={`/profile/${me?.profile.$jazz.id}`}
         className="bg-blue-500 text-white px-4 py-2 rounded-md"
       >
         Your profile name in a Server Component

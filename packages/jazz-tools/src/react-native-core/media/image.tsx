@@ -116,7 +116,7 @@ export const Image = forwardRef<RNImage, ImageProps>(function Image(
     let lastBestImage: FileStream | string | undefined =
       image.placeholderDataURL;
 
-    const unsub = image.subscribe({}, (update) => {
+    const unsub = image.$jazz.subscribe({}, (update) => {
       if (lastBestImage === undefined && update.placeholderDataURL) {
         setSrc(update.placeholderDataURL);
         lastBestImage = update.placeholderDataURL;

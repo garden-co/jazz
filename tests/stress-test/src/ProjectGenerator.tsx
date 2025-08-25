@@ -17,7 +17,7 @@ export function ProjectGenerator() {
     setIsGenerating(true);
     const project = generateRandomProject(numTasks);
 
-    const { root } = await TodoAccount.getMe().ensureLoaded({
+    const { root } = await TodoAccount.getMe().$jazz.ensureLoaded({
       resolve: {
         root: {
           projects: true,
@@ -25,7 +25,7 @@ export function ProjectGenerator() {
       },
     });
 
-    root.projects.push(project.value);
+    root.projects.$jazz.push(project.value);
 
     await project.done;
 

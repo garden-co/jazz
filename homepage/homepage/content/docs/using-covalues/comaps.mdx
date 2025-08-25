@@ -1,4 +1,5 @@
 import { CodeGroup, ContentByFramework } from "@/components/forMdx";
+import { Alert } from "@garden-co/design-system/src/components/atoms/Alert";
 
 export const metadata = {
   description: "CoMaps are key-value objects that work like JavaScript objects. Best for structured data that needs type validation."
@@ -206,7 +207,7 @@ export type Project = co.loaded<typeof Project>;
 ```
 </CodeGroup>
 
-When the recursive references involve more complex types, it is required to specify the getter return type:
+When the recursive references involve more complex types, it is sometimes required to specify the getter return type:
 <CodeGroup>
 ```ts twoslash
 const Member = co.map({
@@ -299,7 +300,7 @@ console.log(inventory["tomatoes"]);  // 48
 
 ## Updating CoMaps
 
-Updating CoMap properties uses standard JavaScript assignment:
+To update a CoMap's properties, use the `$jazz.set` method:
 
 <CodeGroup>
 ```ts twoslash
@@ -324,10 +325,44 @@ const project = Project.create(
   },
 );
 // ---cut---
-project.name = "Spring Vegetable Garden";    // Update name
-project.startDate = new Date("2025-03-20");  // Update date
+project.$jazz.set("name", "Spring Vegetable Garden");    // Update name
+project.$jazz.set("startDate", new Date("2025-03-20"));  // Update date
 ```
 </CodeGroup>
+
+<Alert variant="info" className="flex gap-2 items-center my-4">
+The `$jazz` namespace is available on all CoValues, and provides access to methods to modify and load CoValues,
+as well as access common properties like `id` and `owner`.
+</Alert>
+
+When updating references to other CoValues, you can provide both the new CoValue or a JSON object from which the new CoValue will be created.
+<CodeGroup>
+```ts twoslash
+import { co, z } from "jazz-tools";
+// ---cut---
+const Dog = co.map({
+  name: co.plainText(),
+});
+const Person = co.map({
+  name: co.plainText(),
+  dog: Dog,
+})
+
+const person = Person.create({
+  name: "John",
+  dog: { name: "Rex" },
+});
+
+// Update the dog field using a CoValue
+person.$jazz.set('dog', Dog.create({ name: co.plainText().create("Fido") }));
+// Or use a plain JSON object
+person.$jazz.set("dog", { name: "Fido" });
+```
+</CodeGroup>
+
+When providing a JSON object, Jazz will automatically create the CoValues for you.
+To learn more about how permissions work in this case, refer to
+[Ownership on implicit CoValue creation](/docs/groups/inheritance#ownership-on-implicit-covalue-creation).
 
 ### Type Safety
 
@@ -356,9 +391,9 @@ const project = Project.create(
   },
 );
 // ---cut---
-project.name = "Spring Vegetable Planting";  // ✓ Valid string
-// @errors: 2322
-project.startDate = "2025-03-15"; // ✗ Type error: expected Date
+project.$jazz.set("name", "Spring Vegetable Planting");  // ✓ Valid string
+// @errors: 2345
+project.$jazz.set("startDate", "2025-03-15"); // ✗ Type error: expected Date
 ```
 </CodeGroup>
 
@@ -411,10 +446,10 @@ const inventory = Inventory.create({
   basil: 12
 });
 // ---cut---
-delete inventory["basil"];  // Remove a key-value pair
+inventory.$jazz.delete("basil");  // Remove a key-value pair
 
 // For optional fields in struct-like CoMaps
-project.coordinator = undefined;  // Remove the reference
+project.$jazz.set("coordinator", undefined);  // Remove the reference
 ```
 </CodeGroup>
 
@@ -440,9 +475,9 @@ const Task = co
   })
   .withMigration((task) => {
     if (task.version === 1) {
-      task.priority = "medium";
+      task.$jazz.set("priority", "medium");
       // Upgrade the version so the migration won't run again
-      task.version = 2;
+      task.$jazz.set("version", 2);
     }
   });
 ```
@@ -486,8 +521,8 @@ const TaskV2 = co.map({
 }).withMigration((task) => {
   // @ts-expect-error - check if we need to run the migration
   if (task.version === 1) {
-    task.version = 2;
-    task.priority = "medium";
+    task.$jazz.set("version", 2);
+    task.$jazz.set("priority", "medium");
   }
 });
 
@@ -607,7 +642,7 @@ const learnJazzTask = await Task.create({
   text: "Let's learn some Jazz!",
 }, {
   unique: "learning-jazz",
-  owner: project._owner, // Different owner, different id
+  owner: project.$jazz.owner, // Different owner, different id
 });
 ```
 </CodeGroup>
@@ -633,7 +668,7 @@ const project = Project.create({
 // ---cut---
 const learnJazzTask = await Task.loadUnique(
   "learning-jazz",
-  project._owner.id
+  project.$jazz.owner.$jazz.id
 );
 ```
 </CodeGroup>
@@ -663,7 +698,7 @@ const learnJazzTask = await Task.upsertUnique(
       text: "Let's learn some Jazz!",
     },
     unique: "learning-jazz",
-    owner: project._owner,
+    owner: project.$jazz.owner,
   }
 );
 ```

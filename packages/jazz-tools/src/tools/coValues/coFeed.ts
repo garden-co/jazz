@@ -10,10 +10,12 @@ import type {
   SessionID,
 } from "cojson";
 import { cojsonInternals } from "cojson";
-import type {
+import {
   AnonymousJazzAgent,
+  CoFieldInit,
   CoValue,
   CoValueClass,
+  getCoValueOwner,
   Group,
   ID,
   RefsToResolve,
@@ -23,10 +25,12 @@ import type {
   SchemaFor,
   SubscribeListenerOptions,
   SubscribeRestArgs,
+  TypeSym,
 } from "../internal.js";
 import {
   Account,
   CoValueBase,
+  CoValueJazzApi,
   ItemsSym,
   Ref,
   SchemaInit,
@@ -81,6 +85,8 @@ export { CoFeed as CoStream };
  * @category CoValues
  */
 export class CoFeed<out Item = any> extends CoValueBase implements CoValue {
+  declare $jazz: CoFeedJazzApi<this>;
+
   /**
    * Declare a `CoFeed` by subclassing `CoFeed.Of(...)` and passing the item schema using a `co` primitive or a `coField.ref`.
    *
@@ -103,36 +109,25 @@ export class CoFeed<out Item = any> extends CoValueBase implements CoValue {
     return cls;
   }
 
-  /**
-   * The ID of this `CoFeed`
-   * @category Content */
-  declare id: ID<this>;
   /** @category Type Helpers */
-  declare _type: "CoStream";
+  declare [TypeSym]: "CoStream";
   static {
-    this.prototype._type = "CoStream";
+    this.prototype[TypeSym] = "CoStream";
   }
-  /** @category Internals */
-  declare _raw: RawCoStream;
 
   /** @internal This is only a marker type and doesn't exist at runtime */
   [ItemsSym]!: Item;
   /** @internal */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   static _schema: any;
-  /** @internal */
-  get _schema(): {
-    [ItemsSym]: SchemaFor<Item> | any;
-  } {
-    return (this.constructor as typeof CoFeed)._schema;
-  }
+
   /**
    * The current account's view of this `CoFeed`
    * @category Content
    */
   get byMe(): CoFeedEntry<Item> | undefined {
-    if (this._loadedAs._type === "Account") {
-      return this.perAccount[this._loadedAs.id];
+    if (this.$jazz.loadedAs[TypeSym] === "Account") {
+      return this.perAccount[this.$jazz.loadedAs.$jazz.id];
     } else {
       return undefined;
     }
@@ -187,29 +182,23 @@ export class CoFeed<out Item = any> extends CoValueBase implements CoValue {
    * @category Content
    */
   get inCurrentSession(): CoFeedEntry<Item> | undefined {
-    if (this._loadedAs._type === "Account") {
-      return this.perSession[this._loadedAs.sessionID!];
+    if (this.$jazz.loadedAs[TypeSym] === "Account") {
+      return this.perSession[this.$jazz.loadedAs.$jazz.sessionID!];
     } else {
       return undefined;
     }
   }
 
-  constructor(
-    options:
-      | { init: Item[]; owner: Account | Group }
-      | { fromRaw: RawCoStream },
-  ) {
+  /** @internal */
+  constructor(options: { fromRaw: RawCoStream }) {
     super();
 
-    if (options && "fromRaw" in options) {
-      Object.defineProperties(this, {
-        id: {
-          value: options.fromRaw.id,
-          enumerable: false,
-        },
-        _raw: { value: options.fromRaw, enumerable: false },
-      });
-    }
+    Object.defineProperties(this, {
+      $jazz: {
+        value: new CoFeedJazzApi(this, options.fromRaw),
+        enumerable: false,
+      },
+    });
 
     return this;
   }
@@ -217,6 +206,7 @@ export class CoFeed<out Item = any> extends CoValueBase implements CoValue {
   /**
    * Create a new `CoFeed`
    * @category Creation
+   * @deprecated Use `co.feed(...).create` instead.
    */
   static create<S extends CoFeed>(
     this: CoValueClass<S>,
@@ -224,72 +214,13 @@ export class CoFeed<out Item = any> extends CoValueBase implements CoValue {
     options?: { owner: Account | Group } | Account | Group,
   ) {
     const { owner } = parseCoValueCreateOptions(options);
-    const instance = new this({ init, owner });
-    const raw = owner._raw.createStream();
-
-    Object.defineProperties(instance, {
-      id: {
-        value: raw.id,
-        enumerable: false,
-      },
-      _raw: { value: raw, enumerable: false },
-    });
+    const raw = owner.$jazz.raw.createStream();
+    const instance = new this({ fromRaw: raw });
 
     if (init) {
-      instance.push(...init);
+      instance.$jazz.push(...init);
     }
     return instance;
-  }
-
-  getItemsDescriptor() {
-    return this._schema?.[ItemsSym];
-  }
-
-  /**
-   * Push items to this `CoFeed`
-   *
-   * Items are appended to the current session's log. Each session (tab, device, app instance)
-   * maintains its own append-only log, which is then aggregated into the per-account view.
-   *
-   * @example
-   * ```ts
-   * // Adds items to current session's log
-   * feed.push("item1", "item2");
-   *
-   * // View items from current session
-   * console.log(feed.inCurrentSession);
-   *
-   * // View aggregated items from all sessions for current account
-   * console.log(feed.byMe);
-   * ```
-   *
-   * @category Content
-   */
-  push(...items: Item[]) {
-    for (const item of items) {
-      this.pushItem(item);
-    }
-  }
-
-  private pushItem(item: Item) {
-    const itemDescriptor = this._schema[ItemsSym] as Schema;
-
-    if (itemDescriptor === "json") {
-      this._raw.push(item as JsonValue);
-    } else if ("encoded" in itemDescriptor) {
-      this._raw.push(itemDescriptor.encoded.encode(item));
-    } else if (isRefEncoded(itemDescriptor)) {
-      let refId = (item as unknown as CoValue).id;
-      if (!refId) {
-        const coValue = instantiateRefEncodedWithInit(
-          itemDescriptor,
-          item,
-          this._owner,
-        );
-        refId = coValue.id;
-      }
-      this._raw.push(refId);
-    }
   }
 
   /**
@@ -297,22 +228,18 @@ export class CoFeed<out Item = any> extends CoValueBase implements CoValue {
    * @category
    */
   toJSON(): {
-    id: string;
-    _type: "CoStream";
     [key: string]: unknown;
     in: { [key: string]: unknown };
   } {
-    const itemDescriptor = this._schema[ItemsSym] as Schema;
+    const itemDescriptor = this.$jazz.schema[ItemsSym] as Schema;
     const mapper =
       itemDescriptor === "json"
         ? (v: unknown) => v
         : "encoded" in itemDescriptor
           ? itemDescriptor.encoded.encode
-          : (v: unknown) => v && (v as CoValue).id;
+          : (v: unknown) => v && (v as CoValue).$jazz.id;
 
     return {
-      id: this.id,
-      _type: this._type,
       ...Object.fromEntries(
         Object.entries(this).map(([account, entry]) => [
           account,
@@ -330,8 +257,6 @@ export class CoFeed<out Item = any> extends CoValueBase implements CoValue {
 
   /** @internal */
   [inspect](): {
-    id: string;
-    _type: "CoStream";
     [key: string]: unknown;
     in: { [key: string]: unknown };
   } {
@@ -342,7 +267,7 @@ export class CoFeed<out Item = any> extends CoValueBase implements CoValue {
   static schema<V extends CoFeed>(
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     this: { new (...args: any): V } & typeof CoFeed,
-    def: { [ItemsSym]: V["_schema"][ItemsSym] },
+    def: { [ItemsSym]: V["$jazz"]["schema"][ItemsSym] },
   ) {
     this._schema ||= {};
     Object.assign(this._schema, def);
@@ -351,6 +276,7 @@ export class CoFeed<out Item = any> extends CoValueBase implements CoValue {
   /**
    * Load a `CoFeed`
    * @category Subscription & Loading
+   * @deprecated Use `co.feed(...).load` instead.
    */
   static load<F extends CoFeed, const R extends RefsToResolve<F> = true>(
     this: CoValueClass<F>,
@@ -366,6 +292,7 @@ export class CoFeed<out Item = any> extends CoValueBase implements CoValue {
   /**
    * Subscribe to a `CoFeed`, when you have an ID but don't have a `CoFeed` instance yet
    * @category Subscription & Loading
+   * @deprecated Use `co.feed(...).subscribe` instead.
    */
   static subscribe<F extends CoFeed, const R extends RefsToResolve<F> = true>(
     this: CoValueClass<F>,
@@ -386,6 +313,77 @@ export class CoFeed<out Item = any> extends CoValueBase implements CoValue {
     const { options, listener } = parseSubscribeRestArgs(args);
     return subscribeToCoValueWithoutMe<F, R>(this, id, options, listener);
   }
+}
+
+/** @internal */
+type CoFeedItem<L> = L extends CoFeed<infer Item> ? Item : never;
+
+export class CoFeedJazzApi<F extends CoFeed> extends CoValueJazzApi<F> {
+  constructor(
+    private coFeed: F,
+    public raw: RawCoStream,
+  ) {
+    super(coFeed);
+  }
+
+  /**
+   * The ID of this `CoFeed`
+   * @category Content
+   */
+  get id(): ID<F> {
+    return this.raw.id;
+  }
+
+  get owner(): Group {
+    return getCoValueOwner(this.coFeed);
+  }
+
+  /**
+   * Push items to this `CoFeed`
+   *
+   * Items are appended to the current session's log. Each session (tab, device, app instance)
+   * maintains its own append-only log, which is then aggregated into the per-account view.
+   *
+   * @example
+   * ```ts
+   * // Adds items to current session's log
+   * feed.$jazz.push("item1", "item2");
+   *
+   * // View items from current session
+   * console.log(feed.inCurrentSession);
+   *
+   * // View aggregated items from all sessions for current account
+   * console.log(feed.byMe);
+   * ```
+   *
+   * @category Content
+   */
+  push(...items: CoFieldInit<CoFeedItem<F>>[]): void {
+    for (const item of items) {
+      this.pushItem(item);
+    }
+  }
+
+  private pushItem(item: CoFieldInit<CoFeedItem<F>>) {
+    const itemDescriptor = this.schema[ItemsSym] as Schema;
+
+    if (itemDescriptor === "json") {
+      this.raw.push(item as JsonValue);
+    } else if ("encoded" in itemDescriptor) {
+      this.raw.push(itemDescriptor.encoded.encode(item));
+    } else if (isRefEncoded(itemDescriptor)) {
+      let refId = (item as unknown as CoValue).$jazz?.id;
+      if (!refId) {
+        const coValue = instantiateRefEncodedWithInit(
+          itemDescriptor,
+          item,
+          this.owner,
+        );
+        refId = coValue.$jazz.id;
+      }
+      this.raw.push(refId);
+    }
+  }
 
   /**
    * Ensure a `CoFeed` is loaded to the specified depth
@@ -394,10 +392,10 @@ export class CoFeed<out Item = any> extends CoValueBase implements CoValue {
    * @category Subscription & Loading
    */
   ensureLoaded<F extends CoFeed, const R extends RefsToResolve<F>>(
-    this: F,
+    this: CoFeedJazzApi<F>,
     options?: { resolve?: RefsToResolveStrict<F, R> },
   ): Promise<Resolved<F, R>> {
-    return ensureCoValueLoaded(this, options);
+    return ensureCoValueLoaded(this.coFeed, options);
   }
 
   /**
@@ -407,20 +405,20 @@ export class CoFeed<out Item = any> extends CoValueBase implements CoValue {
    * @category Subscription & Loading
    */
   subscribe<F extends CoFeed, const R extends RefsToResolve<F>>(
-    this: F,
+    this: CoFeedJazzApi<F>,
     listener: (value: Resolved<F, R>, unsubscribe: () => void) => void,
   ): () => void;
   subscribe<F extends CoFeed, const R extends RefsToResolve<F>>(
-    this: F,
+    this: CoFeedJazzApi<F>,
     options: { resolve?: RefsToResolveStrict<F, R> },
     listener: (value: Resolved<F, R>, unsubscribe: () => void) => void,
   ): () => void;
   subscribe<F extends CoFeed, const R extends RefsToResolve<F>>(
-    this: F,
+    this: CoFeedJazzApi<F>,
     ...args: SubscribeRestArgs<F, R>
   ): () => void {
     const { options, listener } = parseSubscribeRestArgs(args);
-    return subscribeToExistingCoValue(this, options, listener);
+    return subscribeToExistingCoValue(this.coFeed, options, listener);
   }
 
   /**
@@ -429,7 +427,22 @@ export class CoFeed<out Item = any> extends CoValueBase implements CoValue {
    * @category Subscription & Loading
    */
   waitForSync(options?: { timeout?: number }) {
-    return this._raw.core.waitForSync(options);
+    return this.raw.core.waitForSync(options);
+  }
+
+  /**
+   * Get the descriptor for the items in the `CoFeed`
+   * @internal
+   */
+  getItemsDescriptor(): Schema | undefined {
+    return this.schema[ItemsSym];
+  }
+
+  /** @internal */
+  get schema(): {
+    [ItemsSym]: SchemaFor<CoFeedItem<F>> | any;
+  } {
+    return (this.coFeed.constructor as typeof CoFeed)._schema;
   }
 }
 
@@ -507,20 +520,22 @@ export const CoStreamPerAccountProxyHandler = (
 ): ProxyHandler<{}> => ({
   get(_target, key, receiver) {
     if (typeof key === "string" && key.startsWith("co_")) {
-      const rawEntry = innerTarget._raw.lastItemBy(key as RawAccountID);
+      const rawEntry = innerTarget.$jazz.raw.lastItemBy(key as RawAccountID);
 
       if (!rawEntry) return;
       const entry = entryFromRawEntry(
         receiver,
         rawEntry,
-        innerTarget._loadedAs,
+        innerTarget.$jazz.loadedAs,
         key as unknown as ID<Account>,
-        innerTarget._schema[ItemsSym],
+        innerTarget.$jazz.schema[ItemsSym],
       );
 
       Object.defineProperty(entry, "all", {
         get: () => {
-          const allRawEntries = innerTarget._raw.itemsBy(key as RawAccountID);
+          const allRawEntries = innerTarget.$jazz.raw.itemsBy(
+            key as RawAccountID,
+          );
           return (function* () {
             while (true) {
               const rawEntry = allRawEntries.next();
@@ -528,9 +543,9 @@ export const CoStreamPerAccountProxyHandler = (
               yield entryFromRawEntry(
                 receiver,
                 rawEntry.value,
-                innerTarget._loadedAs,
+                innerTarget.$jazz.loadedAs,
                 key as unknown as ID<Account>,
-                innerTarget._schema[ItemsSym],
+                innerTarget.$jazz.schema[ItemsSym],
               );
             }
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -544,7 +559,7 @@ export const CoStreamPerAccountProxyHandler = (
     }
   },
   ownKeys(_target) {
-    return Array.from(innerTarget._raw.accounts());
+    return Array.from(innerTarget.$jazz.raw.accounts());
   },
   getOwnPropertyDescriptor(_target, key) {
     if (typeof key === "string" && key.startsWith("co_")) {
@@ -570,7 +585,7 @@ const CoStreamPerSessionProxyHandler = (
   get(_target, key, receiver) {
     if (typeof key === "string" && key.includes("session")) {
       const sessionID = key as SessionID;
-      const rawEntry = innerTarget._raw.lastItemIn(sessionID);
+      const rawEntry = innerTarget.$jazz.raw.lastItemIn(sessionID);
 
       if (!rawEntry) return;
       const by = cojsonInternals.accountOrAgentIDfromSessionID(sessionID);
@@ -578,16 +593,16 @@ const CoStreamPerSessionProxyHandler = (
       const entry = entryFromRawEntry(
         accessFrom,
         rawEntry,
-        innerTarget._loadedAs,
+        innerTarget.$jazz.loadedAs,
         cojsonInternals.isAccountID(by)
           ? (by as unknown as ID<Account>)
           : undefined,
-        innerTarget._schema[ItemsSym],
+        innerTarget.$jazz.schema[ItemsSym],
       );
 
       Object.defineProperty(entry, "all", {
         get: () => {
-          const allRawEntries = innerTarget._raw.itemsIn(sessionID);
+          const allRawEntries = innerTarget.$jazz.raw.itemsIn(sessionID);
           return (function* () {
             while (true) {
               const rawEntry = allRawEntries.next();
@@ -595,11 +610,11 @@ const CoStreamPerSessionProxyHandler = (
               yield entryFromRawEntry(
                 accessFrom,
                 rawEntry.value,
-                innerTarget._loadedAs,
+                innerTarget.$jazz.loadedAs,
                 cojsonInternals.isAccountID(by)
                   ? (by as unknown as ID<Account>)
                   : undefined,
-                innerTarget._schema[ItemsSym],
+                innerTarget.$jazz.schema[ItemsSym],
               );
             }
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -613,7 +628,7 @@ const CoStreamPerSessionProxyHandler = (
     }
   },
   ownKeys() {
-    return innerTarget._raw.sessions();
+    return innerTarget.$jazz.raw.sessions();
   },
   getOwnPropertyDescriptor(target, key) {
     if (typeof key === "string" && key.startsWith("co_")) {
@@ -648,15 +663,10 @@ export { FileStream as BinaryCoStream };
  * @category CoValues
  */
 export class FileStream extends CoValueBase implements CoValue {
-  /**
-   * The ID of this `FileStream`
-   * @category Content
-   */
-  declare id: ID<this>;
+  declare $jazz: FileStreamJazzApi<this>;
+
   /** @category Type Helpers */
-  declare _type: "BinaryCoStream";
-  /** @internal */
-  declare _raw: RawBinaryCoStream;
+  declare [TypeSym]: "BinaryCoStream";
 
   constructor(
     options:
@@ -674,17 +684,16 @@ export class FileStream extends CoValueBase implements CoValue {
     if ("fromRaw" in options) {
       raw = options.fromRaw;
     } else {
-      const rawOwner = options.owner._raw;
+      const rawOwner = options.owner.$jazz.raw;
       raw = rawOwner.createBinaryStream();
     }
 
     Object.defineProperties(this, {
-      id: {
-        value: raw.id,
+      [TypeSym]: { value: "BinaryCoStream", enumerable: false },
+      $jazz: {
+        value: new FileStreamJazzApi(this, raw),
         enumerable: false,
       },
-      _type: { value: "BinaryCoStream", enumerable: false },
-      _raw: { value: raw, enumerable: false },
     });
   }
 
@@ -710,6 +719,7 @@ export class FileStream extends CoValueBase implements CoValue {
    * For uploading an existing file or blob, use {@link FileStream.createFromBlob} instead.
    *
    * @category Creation
+   * @deprecated Use `co.fileStream(...).create` instead.
    */
   static create<S extends FileStream>(
     this: CoValueClass<S>,
@@ -719,7 +729,7 @@ export class FileStream extends CoValueBase implements CoValue {
   }
 
   getMetadata(): BinaryStreamInfo | undefined {
-    return this._raw.getBinaryStreamInfo();
+    return this.$jazz.raw.getBinaryStreamInfo();
   }
 
   getChunks(options?: {
@@ -727,23 +737,23 @@ export class FileStream extends CoValueBase implements CoValue {
   }):
     | (BinaryStreamInfo & { chunks: Uint8Array[]; finished: boolean })
     | undefined {
-    return this._raw.getBinaryChunks(options?.allowUnfinished);
+    return this.$jazz.raw.getBinaryChunks(options?.allowUnfinished);
   }
 
   isBinaryStreamEnded(): boolean {
-    return this._raw.isBinaryStreamEnded();
+    return this.$jazz.raw.isBinaryStreamEnded();
   }
 
   start(options: BinaryStreamInfo): void {
-    this._raw.startBinaryStream(options);
+    this.$jazz.raw.startBinaryStream(options);
   }
 
   push(data: Uint8Array): void {
-    this._raw.pushBinaryStreamChunk(data);
+    this.$jazz.raw.pushBinaryStreamChunk(data);
   }
 
   end(): void {
-    this._raw.endBinaryStream();
+    this.$jazz.raw.endBinaryStream();
   }
 
   toBlob(options?: { allowUnfinished?: boolean }): Blob | undefined {
@@ -763,6 +773,7 @@ export class FileStream extends CoValueBase implements CoValue {
    * Load a `FileStream` as a `Blob`
    *
    * @category Content
+   * @deprecated Use `co.fileStream(...).loadAsBlob` instead.
    */
   static async loadAsBlob(
     id: ID<FileStream>,
@@ -826,12 +837,13 @@ export class FileStream extends CoValueBase implements CoValue {
    * const fileStream = await FileStream.createFromBlob(file, {owner: group})
    * ```
    * @category Content
+   * @deprecated Use `co.fileStream(...).createFromBlob` instead.
    */
   static async createFromBlob(
     blob: Blob | File,
     options?:
       | {
-          owner?: Group | Account;
+          owner?: Account | Group;
           onProgress?: (progress: number) => void;
         }
       | Account
@@ -856,6 +868,7 @@ export class FileStream extends CoValueBase implements CoValue {
    * const fileStream = await FileStream.createFromBlob(file, {owner: group})
    * ```
    * @category Content
+   * @deprecated Use `co.fileStream(...).createFromArrayBuffer` instead.
    */
   static async createFromArrayBuffer(
     arrayBuffer: ArrayBuffer,
@@ -863,7 +876,7 @@ export class FileStream extends CoValueBase implements CoValue {
     fileName: string | undefined,
     options?:
       | {
-          owner?: Group | Account;
+          owner?: Account | Group;
           onProgress?: (progress: number) => void;
         }
       | Account
@@ -915,8 +928,6 @@ export class FileStream extends CoValueBase implements CoValue {
    * @category Content
    */
   toJSON(): {
-    id: string;
-    _type: "BinaryCoStream";
     mimeType?: string;
     totalSizeBytes?: number;
     fileName?: string;
@@ -924,8 +935,6 @@ export class FileStream extends CoValueBase implements CoValue {
     finished?: boolean;
   } {
     return {
-      id: this.id,
-      _type: this._type,
       ...this.getChunks(),
     };
   }
@@ -938,6 +947,7 @@ export class FileStream extends CoValueBase implements CoValue {
   /**
    * Load a `FileStream`
    * @category Subscription & Loading
+   * @deprecated Use `co.fileStream(...).load` instead.
    */
   static async load<C extends FileStream>(
     this: CoValueClass<C>,
@@ -975,6 +985,7 @@ export class FileStream extends CoValueBase implements CoValue {
   /**
    * Subscribe to a `FileStream`, when you have an ID but don't have a `FileStream` instance yet
    * @category Subscription & Loading
+   * @deprecated Use `co.fileStream(...).subscribe` instead.
    */
   static subscribe<F extends FileStream, const R extends RefsToResolve<F>>(
     this: CoValueClass<F>,
@@ -995,16 +1006,37 @@ export class FileStream extends CoValueBase implements CoValue {
     const { options, listener } = parseSubscribeRestArgs(args);
     return subscribeToCoValueWithoutMe<F, R>(this, id, options, listener);
   }
+}
+
+export class FileStreamJazzApi<F extends FileStream> extends CoValueJazzApi<F> {
+  constructor(
+    private fileStream: F,
+    public raw: RawBinaryCoStream,
+  ) {
+    super(fileStream);
+  }
+
+  /**
+   * The ID of this `FileStream`
+   * @category Content
+   */
+  get id(): ID<F> {
+    return this.raw.id;
+  }
+
+  get owner(): Group {
+    return getCoValueOwner(this.fileStream);
+  }
 
   /**
    * An instance method to subscribe to an existing `FileStream`
    * @category Subscription & Loading
    */
   subscribe<B extends FileStream>(
-    this: B,
+    this: FileStreamJazzApi<B>,
     listener: (value: Resolved<B, true>) => void,
   ): () => void {
-    return subscribeToExistingCoValue(this, {}, listener);
+    return subscribeToExistingCoValue(this.fileStream, {}, listener);
   }
 
   /**
@@ -1013,6 +1045,6 @@ export class FileStream extends CoValueBase implements CoValue {
    * @category Subscription & Loading
    */
   waitForSync(options?: { timeout?: number }) {
-    return this._raw.core.waitForSync(options);
+    return this.raw.core.waitForSync(options);
   }
 }

@@ -27,7 +27,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
               className="rounded-md shadow-sm dark:bg-transparent text-sm py-1.5 px-3"
               onChange={(e) => {
                 if (me) {
-                  me.profile.name = e.target.value;
+                  me.profile.$jazz.set("name", e.target.value);
                 }
               }}
             />

@@ -1,4 +1,4 @@
-import { Group, Loaded, co } from "jazz-tools";
+import { Group, Loaded } from "jazz-tools";
 import { useAccount, useCoState } from "jazz-tools/react";
 import { useState } from "react";
 import { useNavigate } from "react-router";
@@ -6,7 +6,6 @@ import {
   DraftOrganization,
   JazzAccount,
   Organization,
-  Project,
   validateDraftOrganization,
 } from "../schema.ts";
 import { Errors } from "./Errors.tsx";
@@ -30,23 +29,26 @@ export function CreateOrganization() {
 
     const group = Group.create();
 
-    me.root.organizations.push(draft as Loaded<typeof Organization>);
+    me.root.organizations.$jazz.push(draft as Loaded<typeof Organization>);
 
-    me.root.draftOrganization = DraftOrganization.create(
-      {
-        projects: co.list(Project).create([], { owner: group }),
-      },
-      { owner: group },
+    me.root.$jazz.set(
+      "draftOrganization",
+      DraftOrganization.create(
+        {
+          projects: [],
+        },
+        { owner: group },
+      ),
     );
 
-    navigate(`/organizations/${draft.id}`);
+    navigate(`/organizations/${draft.$jazz.id}`);
   };
 
   return (
     <>
       {errors && <Errors errors={errors} />}
       <CreateOrganizationForm
-        id={me?.root?.draftOrganization?.id}
+        id={me?.root?.draftOrganization?.$jazz.id}
         onSave={onSave}
       />
     </>

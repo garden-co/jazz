@@ -73,7 +73,7 @@ const Organization = co.map({
   name: z.string(),
 });
 const organization = Organization.create({ name: "Garden Computing" });
-const organizationID = organization.id;
+const organizationID = organization.$jazz.id;
 // ---cut---
 import { useAcceptInvite } from "jazz-tools/react";
 
@@ -97,7 +97,7 @@ const Organization = co.map({
   name: z.string(),
 });
 const organization = Organization.create({ name: "Garden Computing" });
-const organizationID = organization.id;
+const organizationID = organization.$jazz.id;
 // ---cut---
 import { useAcceptInviteNative } from "jazz-tools/react-native";
 
@@ -121,7 +121,7 @@ const Organization = co.map({
   name: z.string(),
 });
 const organization = Organization.create({ name: "Garden Computing" });
-const organizationID = organization.id;
+const organizationID = organization.$jazz.id;
 // ---cut---
 import { useAcceptInviteNative } from "jazz-tools/expo";
 
@@ -145,7 +145,7 @@ const Organization = co.map({
   name: z.string(),
 });
 const organization = Organization.create({ name: "Garden Computing" });
-const organizationID = organization.id;
+const organizationID = organization.$jazz.id;
 // ---cut---
 import { InviteListener } from "jazz-tools/svelte";
 
@@ -235,10 +235,10 @@ async function sendJoinRequest(
       account,
       status: "pending",
     },
-    requestsList._owner // Inherit the access controls of the requestsList
+    requestsList.$jazz.owner // Inherit the access controls of the requestsList
   );
 
-  requestsList.push(request);
+  requestsList.$jazz.push(request);
 
   return request;
 }
@@ -271,11 +271,11 @@ async function approveJoinRequest(
   joinRequest: co.loaded<typeof JoinRequest, { account: true }>,
   targetGroup: Group,
 ) {
-  const account = await Account.load(joinRequest._refs.account.id);
+  const account = await Account.load(joinRequest.$jazz.refs.account.id);
 
   if (account) {
     targetGroup.addMember(account, "reader");
-    joinRequest.status = "approved";
+    joinRequest.$jazz.set("status", "approved");
 
     return true;
   } else {

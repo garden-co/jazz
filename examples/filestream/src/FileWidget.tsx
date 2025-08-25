@@ -30,9 +30,12 @@ export function FileWidget() {
 
     try {
       setIsUploading(true);
-      me.profile.file = await co.fileStream().createFromBlob(file, {
-        onProgress: (p) => setProgress(Math.round(p * 100)),
-      });
+      me.profile.$jazz.set(
+        "file",
+        await co.fileStream().createFromBlob(file, {
+          onProgress: (p) => setProgress(Math.round(p * 100)),
+        }),
+      );
     } catch (error) {
       setError(
         error instanceof Error ? error.message : "Failed to upload file",
@@ -45,7 +48,7 @@ export function FileWidget() {
 
   function handleDelete() {
     if (!me?.profile) return;
-    delete me.profile?.file;
+    me.profile.$jazz.delete("file");
   }
 
   async function handleDownload() {
@@ -59,7 +62,7 @@ export function FileWidget() {
       const url = URL.createObjectURL(blob || new Blob());
       const a = document.createElement("a");
       a.href = url;
-      a.download = file.id || "download";
+      a.download = file.$jazz.id || "download";
       a.click();
       URL.revokeObjectURL(url);
     } catch (error) {
@@ -125,9 +128,12 @@ export function FileWidget() {
 
     try {
       setIsUploading(true);
-      me.profile.file = await co.fileStream().createFromBlob(file, {
-        onProgress: (p) => setProgress(Math.round(p * 100)),
-      });
+      me.profile.$jazz.set(
+        "file",
+        await co.fileStream().createFromBlob(file, {
+          onProgress: (p) => setProgress(Math.round(p * 100)),
+        }),
+      );
     } catch (error) {
       setError(
         error instanceof Error ? error.message : "Failed to upload file",
@@ -211,7 +217,7 @@ export function FileWidget() {
           </div>
           <div className="flex justify-between">
             <span className="font-bold">CoValue ID</span>
-            <span>{me.profile.file.id}</span>
+            <span>{me.profile.file.$jazz.id}</span>
           </div>
         </div>
       </div>

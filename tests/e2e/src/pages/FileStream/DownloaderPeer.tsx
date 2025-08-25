@@ -21,17 +21,17 @@ export function DownloaderPeer(props: { testCoMapId: string }) {
         throw new Error("Uploaded file not found");
       }
 
-      me.waitForAllCoValuesSync().then(() => {
+      me.$jazz.waitForAllCoValuesSync().then(() => {
         setSynced(true);
       });
 
-      uploadedFile.coMapDownloaded = true;
+      uploadedFile.$jazz.set("coMapDownloaded", true);
 
-      await FileStream.loadAsBlob(uploadedFile._refs.file!.id, {
+      await FileStream.loadAsBlob(uploadedFile.$jazz.refs.file!.id, {
         loadAs: me,
       });
 
-      uploadedFile.syncCompleted = true;
+      uploadedFile.$jazz.set("syncCompleted", true);
     }
 
     run(account.me, props.testCoMapId);
@@ -43,7 +43,8 @@ export function DownloaderPeer(props: { testCoMapId: string }) {
       <div>Fetching: {props.testCoMapId}</div>
       <div>Synced: {String(synced)}</div>
       <div data-testid="result">
-        Covalue: {Boolean(testCoMap?.id) ? "Downloaded" : "Not Downloaded"}
+        Covalue:{" "}
+        {Boolean(testCoMap?.$jazz.id) ? "Downloaded" : "Not Downloaded"}
       </div>
       <div data-testid="result">
         File:{" "}

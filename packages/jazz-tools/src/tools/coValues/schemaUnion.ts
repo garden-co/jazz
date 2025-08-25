@@ -2,11 +2,12 @@ import { JsonValue, RawCoMap } from "cojson";
 import {
   Account,
   AnonymousJazzAgent,
-  CoMapInit,
+  CoMapInit_DEPRECATED,
   CoValue,
   CoValueBase,
   CoValueClass,
   CoValueFromRaw,
+  CoValueJazzApi,
   Group,
   ID,
   Resolved,
@@ -100,9 +101,11 @@ export abstract class SchemaUnion extends CoValueBase implements CoValue {
     discriminator: SchemaUnionDiscriminator<V>,
   ): SchemaUnionConcreteSubclass<V> {
     return class SchemaUnionClass extends SchemaUnion {
+      declare $jazz: CoValueJazzApi<this>;
+
       static override create<V extends CoValue>(
         this: CoValueClass<V>,
-        init: Simplify<CoMapInit<V>>,
+        init: Simplify<CoMapInit_DEPRECATED<V>>,
         owner: Account | Group,
       ): V {
         const ResolvedClass = discriminator(new Map(Object.entries(init)));
@@ -112,7 +115,7 @@ export abstract class SchemaUnion extends CoValueBase implements CoValue {
 
       static override fromRaw<T extends CoValue>(
         this: CoValueClass<T> & CoValueFromRaw<T>,
-        raw: T["_raw"],
+        raw: T["$jazz"]["raw"],
       ): T {
         const ResolvedClass = discriminator(
           raw as RawCoMap,
@@ -124,7 +127,7 @@ export abstract class SchemaUnion extends CoValueBase implements CoValue {
 
   static create<V extends CoValue>(
     this: CoValueClass<V>,
-    init: Simplify<CoMapInit<V>>,
+    init: Simplify<CoMapInit_DEPRECATED<V>>,
     owner: Account | Group,
   ): V {
     throw new Error("Not implemented");
@@ -136,7 +139,10 @@ export abstract class SchemaUnion extends CoValueBase implements CoValue {
    *
    * @internal
    */
-  static fromRaw<V extends CoValue>(this: CoValueClass<V>, raw: V["_raw"]): V {
+  static fromRaw<V extends CoValue>(
+    this: CoValueClass<V>,
+    raw: V["$jazz"]["raw"],
+  ): V {
     throw new Error("Not implemented");
   }
 

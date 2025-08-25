@@ -13,7 +13,7 @@ export function Waveform(props: {
   const { track, height } = props;
   const waveformData = useCoState(
     MusicTrackWaveform,
-    track._refs.waveform?.id,
+    track.$jazz.refs.waveform?.id,
   )?.data;
   const duration = track.duration;
 

@@ -26,6 +26,12 @@ export class PlainTextSchema implements CorePlainTextSchema {
 
   constructor(private coValueClass: typeof CoPlainText) {}
 
+  create(text: string, options?: { owner: Group } | Group): CoPlainText;
+  /** @deprecated Creating CoValues with an Account as owner is deprecated. Use a Group instead. */
+  create(
+    text: string,
+    options?: { owner: Account | Group } | Account | Group,
+  ): CoPlainText;
   create(
     text: string,
     options?: { owner: Account | Group } | Account | Group,

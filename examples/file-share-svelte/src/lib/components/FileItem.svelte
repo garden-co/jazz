@@ -16,8 +16,8 @@
     onDelete: (file: Loaded<SharedFile>) => void;
   } = $props();
 
-  const isAdmin = $derived(file._owner?.myRole() === 'admin');
-  const fileStreamId = $derived(file._refs.file?.id);
+  const isAdmin = $derived(file.$jazz.owner?.myRole() === 'admin');
+  const fileStreamId = $derived(file.$jazz.refs.file?.id);
 
   async function downloadFile() {
     if (!fileStreamId) {
@@ -41,7 +41,7 @@
 
   async function shareFile() {
     try {
-      const fileUrl = `${window.location.origin}/file/${file.id}`;
+      const fileUrl = `${window.location.origin}/file/${file.$jazz.id}`;
       await navigator.clipboard.writeText(fileUrl);
       toast.success('Share link copied to clipboard');
     } catch (error) {
@@ -61,14 +61,14 @@
     </div>
     <div class="flex-grow">
       {#if isAdmin}
-        <label class="sr-only" for={`file-name-${file.id}`}>File name</label>
+        <label class="sr-only" for={`file-name-${file.$jazz.id}`}>File name</label>
         <!-- Jazz values are reactive, but they are not recognized as reactive by Svelte -->
         <!-- svelte-ignore binding_property_non_reactive -->
         <input
           class="w-full py-1 font-medium text-gray-900"
           type="text"
-          bind:value={file.name}
-          id={`file-name-${file.id}`}
+          bind:value={() => file.name, newValue => file.$jazz.set("name", newValue)}
+          id={`file-name-${file.$jazz.id}`}
         />
       {:else}
         <h3 class="font-medium text-gray-900">{file.name}</h3>

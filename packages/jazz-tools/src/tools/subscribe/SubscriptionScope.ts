@@ -7,6 +7,7 @@ import {
   type ID,
   type RefEncoded,
   type RefsToResolve,
+  TypeSym,
   instantiateRefEncodedFromRaw,
   isRefEncoded,
 } from "../internal.js";
@@ -14,7 +15,7 @@ import { applyCoValueMigrations } from "../lib/migration.js";
 import { CoValueCoreSubscription } from "./CoValueCoreSubscription.js";
 import { JazzError, type JazzErrorIssue } from "./JazzError.js";
 import type { SubscriptionValue, Unloaded } from "./types.js";
-import { createCoValue, getOwnerFromRawValue } from "./utils.js";
+import { createCoValue, myRoleForRawValue } from "./utils.js";
 
 export class SubscriptionScope<D extends CoValue> {
   childNodes = new Map<string, SubscriptionScope<CoValue>>();
@@ -121,7 +122,7 @@ export class SubscriptionScope<D extends CoValue> {
     // Groups and accounts are accessible by everyone, for the other coValues we use the role to check access
     const hasAccess =
       ruleset.type !== "ownedByGroup" ||
-      getOwnerFromRawValue(update).myRole() !== undefined;
+      myRoleForRawValue(update) !== undefined;
 
     if (!hasAccess) {
       if (this.value.type !== "unauthorized") {
@@ -152,9 +153,9 @@ export class SubscriptionScope<D extends CoValue> {
     } else {
       const hasChanged =
         update.totalValidTransactions !== this.totalValidTransactions ||
-        // Checking the identity of the _raw value makes us cover the cases where the group
+        // Checking the identity of the raw value makes us cover the cases where the group
         // has been updated and the coValues that don't update the totalValidTransactions value (e.g. FileStream)
-        this.value.value._raw !== update;
+        this.value.value.$jazz.raw !== update;
 
       if (this.loadChildren()) {
         this.updateValue(createCoValue(this.schema, update, this));
@@ -241,7 +242,7 @@ export class SubscriptionScope<D extends CoValue> {
         // On child updates, we re-create the value instance to make the updates
         // seamless-immutable and so be compatible with React and the React compiler
         this.updateValue(
-          createCoValue(this.schema, this.value.value._raw, this),
+          createCoValue(this.schema, this.value.value.$jazz.raw, this),
         );
       }
     }
@@ -300,7 +301,7 @@ export class SubscriptionScope<D extends CoValue> {
       return false;
     }
 
-    return this.value.value._raw.core.verified.isStreaming();
+    return this.value.value.$jazz.raw.core.verified.isStreaming();
   }
 
   isFileStream() {
@@ -308,7 +309,9 @@ export class SubscriptionScope<D extends CoValue> {
       return false;
     }
 
-    return this.value.value._raw.core.verified.header.meta?.type === "binary";
+    return (
+      this.value.value.$jazz.raw.core.verified.header.meta?.type === "binary"
+    );
   }
 
   triggerUpdate() {
@@ -369,11 +372,11 @@ export class SubscriptionScope<D extends CoValue> {
     // This helps alot with correctness when triggering the autoloading while rendering components (on React and Svelte)
     this.silenceUpdates = true;
 
-    if (value._type === "CoMap" || value._type === "Account") {
+    if (value[TypeSym] === "CoMap" || value[TypeSym] === "Account") {
       const map = value as CoMap;
 
       this.loadCoMapKey(map, key, true);
-    } else if (value._type === "CoList") {
+    } else if (value[TypeSym] === "CoList") {
       const list = value as CoList;
 
       this.loadCoListKey(list, key, true);
@@ -427,12 +430,17 @@ export class SubscriptionScope<D extends CoValue> {
 
     const idsToLoad = new Set<string>(this.idsSubscribed);
 
-    const coValueType = value._type;
+    const coValueType = value[TypeSym];
 
     if (Object.keys(depth).length > 0) {
-      if (coValueType === "CoMap" || coValueType === "Account") {
+      if (
+        coValueType === "CoMap" ||
+        coValueType === "Account" ||
+        coValueType === "Group"
+      ) {
         const map = value as CoMap;
-        const keys = "$each" in depth ? map._raw.keys() : Object.keys(depth);
+        const keys =
+          "$each" in depth ? map.$jazz.raw.keys() : Object.keys(depth);
 
         for (const key of keys) {
           const id = this.loadCoMapKey(map, key, depth[key] ?? depth.$each);
@@ -441,14 +449,14 @@ export class SubscriptionScope<D extends CoValue> {
             idsToLoad.add(id);
           }
         }
-      } else if (value._type === "CoList") {
+      } else if (value[TypeSym] === "CoList") {
         const list = value as CoList;
 
-        const descriptor = list.getItemsDescriptor();
+        const descriptor = list.$jazz.getItemsDescriptor();
 
         if (descriptor && isRefEncoded(descriptor)) {
-          list._raw.processNewTransactions();
-          const entries = list._raw.entries();
+          list.$jazz.raw.processNewTransactions();
+          const entries = list.$jazz.raw.entries();
           const keys =
             "$each" in depth ? Object.keys(entries) : Object.keys(depth);
 
@@ -460,13 +468,13 @@ export class SubscriptionScope<D extends CoValue> {
             }
           }
         }
-      } else if (value._type === "CoStream") {
+      } else if (value[TypeSym] === "CoStream") {
         const stream = value as CoFeed;
-        const descriptor = stream.getItemsDescriptor();
+        const descriptor = stream.$jazz.getItemsDescriptor();
 
         if (descriptor && isRefEncoded(descriptor)) {
-          for (const session of stream._raw.sessions()) {
-            const values = stream._raw.items[session] ?? [];
+          for (const session of stream.$jazz.raw.sessions()) {
+            const values = stream.$jazz.raw.items[session] ?? [];
 
             for (const [i, item] of values.entries()) {
               const key = `${session}/${i}`;
@@ -525,8 +533,8 @@ export class SubscriptionScope<D extends CoValue> {
       return undefined;
     }
 
-    const id = map._raw.get(key) as string | undefined;
-    const descriptor = map.getDescriptor(key);
+    const id = map.$jazz.raw.get(key) as string | undefined;
+    const descriptor = map.$jazz.getDescriptor(key);
 
     if (!descriptor) {
       this.childErrors.set(
@@ -568,13 +576,13 @@ export class SubscriptionScope<D extends CoValue> {
   }
 
   loadCoListKey(list: CoList, key: string, depth: Record<string, any> | true) {
-    const descriptor = list.getItemsDescriptor();
+    const descriptor = list.$jazz.getItemsDescriptor();
 
     if (!descriptor || !isRefEncoded(descriptor)) {
       return undefined;
     }
 
-    const entries = list._raw.entries();
+    const entries = list.$jazz.raw.entries();
     const entry = entries[Number(key)];
 
     if (!entry) {

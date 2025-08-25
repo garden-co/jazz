@@ -169,7 +169,7 @@ export function MyApp ({ children }: { children: React.ReactNode }) {
 
       // Handle anonymous account data when user logs in to existing account
       onAnonymousAccountDiscarded={(account) => {
-        console.log("Anonymous account discarded", account.id);
+        console.log("Anonymous account discarded", account.$jazz.id);
         // Migrate data here
         return Promise.resolve();
       }}

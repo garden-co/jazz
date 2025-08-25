@@ -25,15 +25,32 @@ export class FileStreamSchema implements CoreFileStreamSchema {
 
   constructor(private coValueClass: typeof FileStream) {}
 
-  create(options?: { owner?: Account | Group } | Account | Group): FileStream {
+  create(options?: { owner: Group } | Group): FileStream;
+  /** @deprecated Creating CoValues with an Account as owner is deprecated. Use a Group instead. */
+  create(options?: { owner: Account | Group } | Account | Group): FileStream;
+  create(options?: { owner: Account | Group } | Account | Group): FileStream {
     return this.coValueClass.create(options);
   }
 
   createFromBlob(
     blob: Blob | File,
     options?:
+      | { owner?: Group; onProgress?: (progress: number) => void }
+      | Group,
+  ): Promise<FileStream>;
+  /** @deprecated Creating CoValues with an Account as owner is deprecated. Use a Group instead. */
+  createFromBlob(
+    blob: Blob | File,
+    options?:
+      | { owner?: Account | Group; onProgress?: (progress: number) => void }
+      | Account
+      | Group,
+  ): Promise<FileStream>;
+  createFromBlob(
+    blob: Blob | File,
+    options?:
       | {
-          owner?: Group | Account;
+          owner?: Account | Group;
           onProgress?: (progress: number) => void;
         }
       | Account

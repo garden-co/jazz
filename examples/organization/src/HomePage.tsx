@@ -30,9 +30,9 @@ export function HomePage() {
             me.root.organizations.map((project) =>
               project ? (
                 <a
-                  key={project.id}
+                  key={project.$jazz.id}
                   className="px-4 py-5 sm:px-6 font-medium block"
-                  href={`/#/organizations/${project.id}`}
+                  href={`/#/organizations/${project.$jazz.id}`}
                 >
                   <strong>{project.name}</strong>
                 </a>

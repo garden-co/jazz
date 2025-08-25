@@ -1,12 +1,5 @@
 import { CoID, RawCoValue } from "../coValue.js";
-import {
-  AvailableCoValueCore,
-  CoValueCore,
-} from "../coValueCore/coValueCore.js";
-import {
-  CoValueHeader,
-  CoValueUniqueness,
-} from "../coValueCore/verifiedState.js";
+import { CoValueHeader } from "../coValueCore/verifiedState.js";
 import {
   AgentSecret,
   CryptoProvider,
@@ -19,9 +12,9 @@ import { AgentID } from "../ids.js";
 import { JsonObject } from "../jsonValue.js";
 import { LocalNode } from "../localNode.js";
 import { logger } from "../logger.js";
-import type { AccountRole } from "../permissions.js";
+import type { AccountRole, Role } from "../permissions.js";
 import { RawCoMap } from "./coMap.js";
-import { InviteSecret, RawGroup } from "./group.js";
+import { Everyone, EVERYONE, InviteSecret, RawGroup } from "./group.js";
 
 export function accountHeaderForInitialAgentSecret(
   agentSecret: AgentSecret,
@@ -71,8 +64,41 @@ export class RawAccount<
     return agents[0]!;
   }
 
-  createInvite(_: AccountRole): InviteSecret {
+  override createInvite(_: AccountRole): InviteSecret {
     throw new Error("Cannot create invite from an account");
+  }
+
+  override roleOfInternal(
+    accountID: RawAccountID | AgentID | typeof EVERYONE,
+  ): Role | undefined {
+    if (accountID === this.id) {
+      return "admin";
+    }
+    return super.roleOfInternal(accountID);
+  }
+
+  override addMember(
+    account: RawAccount | ControlledAccountOrAgent | Everyone,
+    role: Role,
+  ) {
+    throw new Error("Cannot add a member to an account");
+  }
+
+  override removeMember(
+    account: RawAccount | ControlledAccountOrAgent | Everyone,
+  ) {
+    throw new Error("Cannot remove a member from an account");
+  }
+
+  override extend(
+    parent: RawGroup,
+    role: "reader" | "writer" | "admin" | "inherit" = "inherit",
+  ) {
+    throw new Error("Cannot extend an account");
+  }
+
+  override revokeExtend(parent: RawGroup) {
+    throw new Error("Cannot unextend an account");
   }
 }
 

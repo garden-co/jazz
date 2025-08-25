@@ -3,6 +3,7 @@ export const metadata = {
 };
 
 import { CodeGroup } from "@/components/forMdx";
+import { Alert } from "@garden-co/design-system/src/components/atoms/Alert";
 
 # Groups as permission scopes
 
@@ -10,6 +11,17 @@ Every CoValue has an owner, which can be a `Group` or an `Account`.
 
 You can use a `Group` to grant access to a CoValue to **multiple users**. These users can
 have different roles, such as "writer", "reader" or "admin".
+
+CoValues owned by an Account can only be accessed by that Account. Additional collaborators cannot be added,
+and the ownership cannot be transferred to another Account. This makes account ownership very rigid.
+
+Creating a Group for every new CoValue is a best practice, even if the Group only has a single user in it
+(this is the default behavior when creating a CoValue with no explicit owner).
+
+<Alert variant="info" className="flex gap-2 items-center my-4">
+While creating CoValues with Accounts as owners is still technically possible for backwards compatibility,
+it will be removed in a future release.
+</Alert>
 
 ## Creating a Group
 
@@ -112,7 +124,7 @@ Rules:
 
 ## Getting the Group of an existing CoValue
 
-You can get the group of an existing CoValue by using `coValue._owner`.
+You can get the group of an existing CoValue by using `coValue.$jazz.owner`.
 
 <CodeGroup>
 ```ts twoslash
@@ -125,38 +137,11 @@ const MyCoMap = co.map({
 });
 
 // ---cut---
-const group = existingCoValue._owner;
+const group = existingCoValue.$jazz.owner;
 const newValue = MyCoMap.create(
   { color: "red"},
   { owner: group }
 );
-```
-</CodeGroup>
-
-Because `._owner` can be an `co.account` or a `Group`, in cases where you specifically need to use `Group` methods (such as for adding members or getting your own role), you can cast it to assert it to be a Group:
-
-<CodeGroup>
-```ts twoslash
-import { createJazzTestAccount } from 'jazz-tools/testing';
-import { co, z } from "jazz-tools";
-const bob = await createJazzTestAccount();
-
-const MyCoMap = co.map({
-  color: z.string(),
-});
-
-const existingCoValue = MyCoMap.create(
-  { color: "red"},
-  { owner: bob }
-);
-
-// ---cut---
-import { Group } from "jazz-tools";
-
-const group = existingCoValue._owner.castAs(Group);
-group.addMember(bob, "writer");
-
-const role = group.getRoleOf(bob.id);
 ```
 </CodeGroup>
 
@@ -198,7 +183,7 @@ const MyCoMap = co.map({
   color: z.string(),
 });
 const account = await createJazzTestAccount();
-const accountID = account.id;
+const accountID = account.$jazz.id;
 // ---cut---
 const value = await MyCoMap.create({ color: "red"})
 const bob = await co.account().load(accountID);

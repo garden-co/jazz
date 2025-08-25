@@ -23,9 +23,15 @@ export const FileShareAccount = co.account({
     const publicGroup = Group.create({ owner: account });
     publicGroup.addMember('everyone', 'reader');
 
-    account.root = FileShareAccountRoot.create({
-      type: 'file-share-account',
-      sharedFiles: co.list(SharedFile).create([], publicGroup),
-    }, publicGroup);
+    account.$jazz.set(
+      'root',
+      FileShareAccountRoot.create(
+        {
+          type: 'file-share-account',
+          sharedFiles: co.list(SharedFile).create([], publicGroup)
+        },
+        publicGroup
+      )
+    );
   }
 });

@@ -37,11 +37,14 @@ export default function ImageUpload() {
 
       try {
         const startTime = performance.now();
-        me.profile.image = await createImage(file, {
-          owner: me.profile._owner,
-          progressive: true,
-          placeholder: "blur",
-        });
+        me.profile.$jazz.set(
+          "image",
+          await createImage(file, {
+            owner: me.profile.$jazz.owner,
+            progressive: true,
+            placeholder: "blur",
+          }),
+        );
         const endTime = performance.now();
         console.log(`Image upload took ${endTime - startTime} milliseconds`);
       } catch (error) {

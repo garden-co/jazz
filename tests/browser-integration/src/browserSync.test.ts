@@ -20,7 +20,7 @@ const CustomAccount = co
   })
   .withMigration((account) => {
     if (!account.root) {
-      account.root = TestMap.create({ value: "initial" }, { owner: account });
+      account.$jazz.set("root", { value: "initial" });
     }
   });
 
@@ -48,7 +48,7 @@ describe("Browser sync", () => {
     const map = TestMap.create({ value: "test data" }, group);
     group.addMember("everyone", "reader");
 
-    await map.waitForSync();
+    await map.$jazz.waitForSync();
     contextManager.done();
 
     // Clearing the credentials storage so the next auth will be a new account
@@ -62,7 +62,7 @@ describe("Browser sync", () => {
       AccountSchema: CustomAccount,
     });
     // Load map in second account
-    const loadedMap = await TestMap.load(map.id, {
+    const loadedMap = await TestMap.load(map.$jazz.id, {
       loadAs: account2,
     });
 
@@ -85,7 +85,7 @@ describe("Browser sync", () => {
     const map = TestMap.create({ value: "test data" }, group);
     group.addMember("everyone", "reader");
 
-    await map.waitForSync();
+    await map.$jazz.waitForSync();
     contextManager.done();
 
     const { account: account2 } = await createAccountContext({
@@ -96,7 +96,7 @@ describe("Browser sync", () => {
       AccountSchema: CustomAccount,
     });
 
-    expect(account1.id).toBe(account2.id);
+    expect(account1.$jazz.id).toBe(account2.$jazz.id);
   });
 
   test("syncs data between accounts through storage only", async () => {
@@ -115,7 +115,7 @@ describe("Browser sync", () => {
     const map = TestMap.create({ value: "test data" }, group);
     group.addMember("everyone", "reader");
 
-    await map.waitForSync();
+    await map.$jazz.waitForSync();
 
     // Clearing the credentials storage so the next auth will be a new account
     await contextManager.getAuthSecretStorage().clear();
@@ -129,7 +129,7 @@ describe("Browser sync", () => {
       AccountSchema: CustomAccount,
     });
 
-    const loadedMap = await TestMap.load(map.id, {
+    const loadedMap = await TestMap.load(map.$jazz.id, {
       loadAs: account2,
     });
 
@@ -153,7 +153,7 @@ describe("Browser sync", () => {
     const map = TestMap.create({ value: "test data" }, group);
     group.addMember("everyone", "reader");
 
-    await map.waitForSync();
+    await map.$jazz.waitForSync();
 
     // Clearing the credentials storage so the next auth will be a new account
     await contextManager.getAuthSecretStorage().clear();
@@ -169,7 +169,7 @@ describe("Browser sync", () => {
       AccountSchema: CustomAccount,
     });
 
-    const loadedMap = await TestMap.load(map.id, {
+    const loadedMap = await TestMap.load(map.$jazz.id, {
       loadAs: account2,
     });
 
@@ -193,7 +193,7 @@ describe("Browser sync", () => {
     const map = TestMap.create({ value: "test data" }, group);
     group.addMember("everyone", "reader");
 
-    await map.waitForSync();
+    await map.$jazz.waitForSync();
 
     await syncServer.setOnline(true);
 
@@ -213,7 +213,7 @@ describe("Browser sync", () => {
       AccountSchema: CustomAccount,
     });
 
-    const loadedMap = await TestMap.load(map.id, {
+    const loadedMap = await TestMap.load(map.$jazz.id, {
       loadAs: account2,
     });
 
@@ -260,7 +260,7 @@ describe("Browser sync", () => {
       });
 
     const group = Group.create(account1);
-    await group.waitForSync();
+    await group.$jazz.waitForSync();
     contextManager1.getAuthSecretStorage().clear();
     contextManager1.done();
 
@@ -274,11 +274,13 @@ describe("Browser sync", () => {
       });
 
       const childGroup = Group.create(account);
-      const groupToExtend = await Group.load(group.id, { loadAs: account });
+      const groupToExtend = await Group.load(group.$jazz.id, {
+        loadAs: account,
+      });
 
       assert(groupToExtend);
       childGroup.extend(groupToExtend);
-      await childGroup.waitForSync();
+      await childGroup.$jazz.waitForSync();
       contextManager.getAuthSecretStorage().clear();
       contextManager.done();
     }
@@ -297,7 +299,7 @@ describe("Browser sync", () => {
       databaseName: "jazz-storage",
     });
 
-    await Group.load(group.id, { loadAs: loadingAccount });
+    await Group.load(group.$jazz.id, { loadAs: loadingAccount });
 
     const { account: loadingRetryAccount } = await createAccountContext({
       sync: {
@@ -308,7 +310,7 @@ describe("Browser sync", () => {
       databaseName: "jazz-storage",
     });
 
-    const loadedGroup = await Group.load(group.id, {
+    const loadedGroup = await Group.load(group.$jazz.id, {
       loadAs: loadingRetryAccount,
     });
 

@@ -33,7 +33,7 @@ export default function ProfileImageImperative() {
     // });
 
     // keep it synced and return the best _loaded_ image for the given size
-    const unsub = me.profile.image.subscribe({}, (image) => {
+    const unsub = me.profile.image.$jazz.subscribe({}, (image) => {
       const bestImage = highestResAvailable(image, 1024, 1024);
       console.info(bestImage ? "Blob is ready" : "Blob is not ready");
       if (bestImage) {
@@ -51,7 +51,7 @@ export default function ProfileImageImperative() {
 
   const deleteImage = () => {
     if (!me?.profile) return;
-    me.profile.image = undefined;
+    me.profile.$jazz.delete("image");
   };
 
   if (!me?.profile?.image) {

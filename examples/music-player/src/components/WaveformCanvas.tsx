@@ -228,7 +228,7 @@ export default function WaveformCanvas({
   const audioManager = useAudioManager();
 
   const duration = track.duration;
-  const waveformId = track._refs.waveform?.id;
+  const waveformId = track.$jazz.refs.waveform?.id;
 
   // Animation effect
   useEffect(() => {

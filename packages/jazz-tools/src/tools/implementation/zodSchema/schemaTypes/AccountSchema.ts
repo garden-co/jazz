@@ -158,13 +158,13 @@ export interface CoreAccountSchema<
 }
 
 export type AccountInstance<Shape extends z.core.$ZodLooseShape> = {
-  -readonly [key in keyof Shape]: InstanceOrPrimitiveOfSchema<Shape[key]>;
+  readonly [key in keyof Shape]: InstanceOrPrimitiveOfSchema<Shape[key]>;
 } & Account;
 
 export type AccountInstanceCoValuesNullable<
   Shape extends z.core.$ZodLooseShape,
 > = {
-  -readonly [key in keyof Shape]: InstanceOrPrimitiveOfSchemaCoValuesNullable<
+  readonly [key in keyof Shape]: InstanceOrPrimitiveOfSchemaCoValuesNullable<
     Shape[key]
   >;
 } & Account;

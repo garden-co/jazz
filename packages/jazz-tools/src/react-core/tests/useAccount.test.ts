@@ -37,11 +37,8 @@ describe("useAccount", () => {
         profile: co.profile(),
       })
       .withMigration((account, creationProps) => {
-        if (!account._refs.root) {
-          account.root = AccountRoot.create(
-            { value: "123" },
-            { owner: account },
-          );
+        if (!account.$jazz.refs.root) {
+          account.$jazz.set("root", { value: "123" });
         }
       });
 
@@ -79,13 +76,13 @@ describe("useAccount", () => {
         const account = useAccount();
 
         if (account.me) {
-          if (!accounts.includes(account.me.id)) {
-            accounts.push(account.me.id);
+          if (!accounts.includes(account.me.$jazz.id)) {
+            accounts.push(account.me.$jazz.id);
           }
 
           updates.push({
             isAuthenticated,
-            accountIndex: accounts.indexOf(account.me.id),
+            accountIndex: accounts.indexOf(account.me.$jazz.id),
           });
         }
 
@@ -100,14 +97,14 @@ describe("useAccount", () => {
     expect(result.current?.isAuthenticated).toBe(true);
     expect(result.current?.account?.me).toBeDefined();
 
-    const id = result.current?.account?.me?.id;
+    const id = result.current?.account?.me?.$jazz.id;
 
     await act(async () => {
       await result.current?.account?.logOut();
     });
 
     expect(result.current?.isAuthenticated).toBe(false);
-    expect(result.current?.account?.me?.id).not.toBe(id);
+    expect(result.current?.account?.me?.$jazz.id).not.toBe(id);
 
     expect(updates).toMatchInlineSnapshot(`
       [
@@ -141,13 +138,13 @@ describe("useAccount", () => {
         const contextManager = useJazzContextManager();
 
         if (account.me) {
-          if (!accounts.includes(account.me.id)) {
-            accounts.push(account.me.id);
+          if (!accounts.includes(account.me.$jazz.id)) {
+            accounts.push(account.me.$jazz.id);
           }
 
           updates.push({
             isAuthenticated,
-            accountIndex: accounts.indexOf(account.me.id),
+            accountIndex: accounts.indexOf(account.me.$jazz.id),
           });
         }
 
@@ -162,18 +159,18 @@ describe("useAccount", () => {
     expect(result.current?.isAuthenticated).toBe(false);
     expect(result.current?.account?.me).toBeDefined();
 
-    const id = result.current?.account?.me?.id;
+    const id = result.current?.account?.me?.$jazz.id;
 
     await act(async () => {
       await result.current?.contextManager?.authenticate({
-        accountID: accountToAuthenticate.id,
+        accountID: accountToAuthenticate.$jazz.id,
         accountSecret:
-          accountToAuthenticate._raw.core.node.getCurrentAgent().agentSecret,
+          accountToAuthenticate.$jazz.localNode.getCurrentAgent().agentSecret,
       });
     });
 
     expect(result.current?.isAuthenticated).toBe(true);
-    expect(result.current?.account?.me?.id).not.toBe(id);
+    expect(result.current?.account?.me?.$jazz.id).not.toBe(id);
 
     expect(updates).toMatchInlineSnapshot(`
       [
@@ -200,11 +197,8 @@ describe("useAccount", () => {
         profile: co.profile(),
       })
       .withMigration((account, creationProps) => {
-        if (!account._refs.root) {
-          account.root = AccountRoot.create(
-            { value: "123" },
-            { owner: account },
-          );
+        if (!account.$jazz.refs.root) {
+          account.$jazz.set("root", { value: "123" });
         }
       });
 

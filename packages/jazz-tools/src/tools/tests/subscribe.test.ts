@@ -70,7 +70,7 @@ describe("subscribeToCoValue", () => {
 
     const unsubscribe = subscribeToCoValue(
       coValueClassFromCoValueClassOrSchema(ChatRoom),
-      chatRoom.id,
+      chatRoom.$jazz.id,
       { loadAs: meOnSecondPeer },
       (value) => {
         result = value;
@@ -85,7 +85,7 @@ describe("subscribeToCoValue", () => {
     });
 
     expect(result).not.toBeNull();
-    expect(result?.id).toBe(chatRoom.id);
+    expect(result?.$jazz.id).toBe(chatRoom.$jazz.id);
     expect(result?.messages).toEqual(null);
     expect(result?.name).toBe("General");
 
@@ -98,7 +98,7 @@ describe("subscribeToCoValue", () => {
     expect(result?.messages).toEqual([]);
 
     updateFn.mockClear();
-    chatRoom.name = "Lounge";
+    chatRoom.$jazz.set("name", "Lounge");
 
     await waitFor(() => {
       expect(updateFn).toHaveBeenCalled();
@@ -117,7 +117,7 @@ describe("subscribeToCoValue", () => {
 
     const unsubscribe = subscribeToCoValue(
       coValueClassFromCoValueClassOrSchema(ChatRoom),
-      chatRoom.id,
+      chatRoom.$jazz.id,
       {
         loadAs: meOnSecondPeer,
         resolve: {
@@ -138,7 +138,7 @@ describe("subscribeToCoValue", () => {
 
     expect(updateFn).toHaveBeenCalledTimes(1);
     expect(result).toMatchObject({
-      id: chatRoom.id,
+      $jazz: expect.objectContaining({ id: chatRoom.$jazz.id }),
       name: "General",
       messages: [],
     });
@@ -150,15 +150,15 @@ describe("subscribeToCoValue", () => {
     const chatRoom = createChatRoom(me, "General");
     const updateFn = vi.fn();
 
-    const { messages } = await chatRoom.ensureLoaded({
+    const { messages } = await chatRoom.$jazz.ensureLoaded({
       resolve: { messages: { $each: true } },
     });
 
-    messages.push(createMessage(me, "Hello"));
+    messages.$jazz.push(createMessage(me, "Hello"));
 
     const unsubscribe = subscribeToCoValue(
       coValueClassFromCoValueClassOrSchema(ChatRoom),
-      chatRoom.id,
+      chatRoom.$jazz.id,
       {
         loadAs: meOnSecondPeer,
         resolve: {
@@ -173,15 +173,15 @@ describe("subscribeToCoValue", () => {
     });
 
     unsubscribe();
-    chatRoom.name = "Lounge";
-    messages.push(createMessage(me, "Hello 2"));
+    chatRoom.$jazz.set("name", "Lounge");
+    messages.$jazz.push(createMessage(me, "Hello 2"));
 
     await new Promise((resolve) => setTimeout(resolve, 100));
 
     expect(updateFn).toHaveBeenCalledTimes(1);
     expect(updateFn).toHaveBeenCalledWith(
       expect.objectContaining({
-        id: chatRoom.id,
+        $jazz: expect.objectContaining({ id: chatRoom.$jazz.id }),
       }),
       expect.any(Function),
     );
@@ -195,13 +195,13 @@ describe("subscribeToCoValue", () => {
       me,
       "Hello Luigi, are you ready to save the princess?",
     );
-    chatRoom.messages?.push(message);
+    chatRoom.messages?.$jazz.push(message);
 
     const updateFn = vi.fn();
 
     const unsubscribe = subscribeToCoValue(
       coValueClassFromCoValueClassOrSchema(ChatRoom),
-      chatRoom.id,
+      chatRoom.$jazz.id,
       {
         loadAs: meOnSecondPeer,
         resolve: {
@@ -221,7 +221,7 @@ describe("subscribeToCoValue", () => {
       expect(lastValue?.messages?.[0]?.text).toBe(message.text);
     });
 
-    message.text = "Nevermind, she was gone to the supermarket";
+    message.$jazz.set("text", "Nevermind, she was gone to the supermarket");
     updateFn.mockClear();
 
     await waitFor(() => {
@@ -243,8 +243,8 @@ describe("subscribeToCoValue", () => {
       "Hello Luigi, are you ready to save the princess?",
     );
     const message2 = createMessage(me, "Let's go!");
-    chatRoom.messages?.push(message);
-    chatRoom.messages?.push(message2);
+    chatRoom.messages?.$jazz.push(message);
+    chatRoom.messages?.$jazz.push(message2);
 
     const updateFn = vi.fn();
 
@@ -261,7 +261,7 @@ describe("subscribeToCoValue", () => {
 
     const unsubscribe = subscribeToCoValue(
       coValueClassFromCoValueClassOrSchema(ChatRoom),
-      chatRoom.id,
+      chatRoom.$jazz.id,
       {
         loadAs: meOnSecondPeer,
         resolve: {
@@ -292,7 +292,7 @@ describe("subscribeToCoValue", () => {
     const initialMessage2 = initialValue?.messages[1];
     const initialMessageReactions = initialValue?.messages[0]?.reactions;
 
-    message.reactions?.push("👍");
+    message.reactions?.$jazz.push("👍");
 
     updateFn.mockClear();
 
@@ -325,14 +325,14 @@ describe("subscribeToCoValue", () => {
       "Hello Luigi, are you ready to save the princess?",
     );
     const message2 = createMessage(me, "Let's go!");
-    chatRoom.messages?.push(message);
-    chatRoom.messages?.push(message2);
+    chatRoom.messages?.$jazz.push(message);
+    chatRoom.messages?.$jazz.push(message2);
 
     const updateFn = vi.fn();
 
     const unsubscribe = subscribeToCoValue(
       coValueClassFromCoValueClassOrSchema(ChatRoom),
-      chatRoom.id,
+      chatRoom.$jazz.id,
       {
         loadAs: meOnSecondPeer,
         resolve: {
@@ -356,7 +356,7 @@ describe("subscribeToCoValue", () => {
     });
 
     const initialValue = updateFn.mock.lastCall?.[0];
-    chatRoom.name = "Me and Luigi";
+    chatRoom.$jazz.set("name", "Me and Luigi");
 
     updateFn.mockClear();
 
@@ -396,7 +396,7 @@ describe("subscribeToCoValue", () => {
 
     const unsubscribe = subscribeToCoValue(
       coValueClassFromCoValueClassOrSchema(TestList),
-      list.id,
+      list.$jazz.id,
       {
         loadAs: account,
         resolve: {
@@ -457,7 +457,7 @@ describe("subscribeToCoValue", () => {
 
     const unsubscribe = subscribeToCoValue(
       coValueClassFromCoValueClassOrSchema(TestList),
-      list.id,
+      list.$jazz.id,
       {
         loadAs: reader,
         resolve: {
@@ -503,7 +503,7 @@ describe("subscribeToCoValue", () => {
     });
 
     // Disconnect the creator from the sync server
-    creator._raw.core.node.syncManager.getPeers().forEach((peer) => {
+    creator.$jazz.localNode.syncManager.getPeers().forEach((peer) => {
       peer.gracefulShutdown();
     });
 
@@ -528,7 +528,7 @@ describe("subscribeToCoValue", () => {
 
     const unsubscribe = subscribeToCoValue(
       coValueClassFromCoValueClassOrSchema(TestList),
-      list.id,
+      list.$jazz.id,
       {
         loadAs: reader,
         resolve: {
@@ -546,7 +546,7 @@ describe("subscribeToCoValue", () => {
       expect(onUnavailable).toHaveBeenCalled();
     });
 
-    creator._raw.core.node.syncManager.addPeer(
+    creator.$jazz.localNode.syncManager.addPeer(
       getPeerConnectedToTestSyncServer(),
     );
 
@@ -603,7 +603,7 @@ describe("subscribeToCoValue", () => {
 
     const unsubscribe = subscribeToCoValue(
       coValueClassFromCoValueClassOrSchema(TestList),
-      list.id,
+      list.$jazz.id,
       {
         loadAs: reader,
         resolve: {
@@ -621,7 +621,7 @@ describe("subscribeToCoValue", () => {
       expect(onUnavailable).toHaveBeenCalled();
     });
 
-    list[0] = TestMap.create({ value: "1" }, everyone);
+    list.$jazz.set(0, TestMap.create({ value: "1" }, everyone));
 
     await waitFor(() => {
       expect(updateFn).toHaveBeenCalled();
@@ -673,7 +673,7 @@ describe("subscribeToCoValue", () => {
 
     const unsubscribe = subscribeToCoValue(
       coValueClassFromCoValueClassOrSchema(TestList),
-      list.id,
+      list.$jazz.id,
       {
         loadAs: reader,
         resolve: {
@@ -725,7 +725,7 @@ describe("subscribeToCoValue", () => {
 
     const unsubscribe = subscribeToCoValue(
       coValueClassFromCoValueClassOrSchema(TestList),
-      list.id,
+      list.$jazz.id,
       {
         loadAs: creator,
         resolve: {
@@ -749,7 +749,7 @@ describe("subscribeToCoValue", () => {
 
     updateFn.mockClear();
 
-    list[0] = undefined;
+    list.$jazz.set(0, undefined);
 
     await waitFor(() => {
       expect(updateFn).toHaveBeenCalled();
@@ -760,7 +760,7 @@ describe("subscribeToCoValue", () => {
 
     updateFn.mockClear();
 
-    firstItem.value = "3";
+    firstItem.$jazz.set("value", "3");
 
     expect(updateFn).not.toHaveBeenCalled();
   });
@@ -792,7 +792,7 @@ describe("subscribeToCoValue", () => {
 
     const unsubscribe = subscribeToCoValue(
       coValueClassFromCoValueClassOrSchema(TestList),
-      list.id,
+      list.$jazz.id,
       {
         loadAs: creator,
         resolve: {
@@ -817,7 +817,7 @@ describe("subscribeToCoValue", () => {
 
     // Replace the first item with a new map
     const newMap = TestMap.create({ value: "3" }, creator);
-    list[0] = newMap;
+    list.$jazz.set(0, newMap);
 
     await waitFor(() => {
       expect(updateFn).toHaveBeenCalled();
@@ -829,11 +829,11 @@ describe("subscribeToCoValue", () => {
 
     updateFn.mockClear();
 
-    firstItem.value = "4";
+    firstItem.$jazz.set("value", "4");
 
     expect(updateFn).not.toHaveBeenCalled();
 
-    newMap.value = "5";
+    newMap.$jazz.set("value", "5");
 
     expect(updateFn).toHaveBeenCalled();
     expect(result[0]?.value).toBe("5");
@@ -852,9 +852,9 @@ describe("subscribeToCoValue", () => {
     const reader = await createJazzTestAccount();
 
     await Promise.all([
-      writer1.waitForAllCoValuesSync(),
-      writer2.waitForAllCoValuesSync(),
-      reader.waitForAllCoValuesSync(),
+      writer1.$jazz.waitForAllCoValuesSync(),
+      writer2.$jazz.waitForAllCoValuesSync(),
+      reader.$jazz.waitForAllCoValuesSync(),
     ]);
 
     const group = Group.create(creator);
@@ -864,10 +864,10 @@ describe("subscribeToCoValue", () => {
 
     const person = Person.create({ name: "creator" }, group);
 
-    await person.waitForSync();
+    await person.$jazz.waitForSync();
 
     // Disconnect from the sync server, so we can change permissions but not sync them
-    creator._raw.core.node.syncManager.getPeers().forEach((peer) => {
+    creator.$jazz.localNode.syncManager.getPeers().forEach((peer) => {
       peer.gracefulShutdown();
     });
 
@@ -881,7 +881,7 @@ describe("subscribeToCoValue", () => {
 
     const unsubscribe = subscribeToCoValue(
       coValueClassFromCoValueClassOrSchema(Person),
-      person.id,
+      person.$jazz.id,
       {
         loadAs: reader,
       },
@@ -894,11 +894,11 @@ describe("subscribeToCoValue", () => {
     expect(spy).toHaveBeenCalledTimes(1);
     expect(value?.name).toBe("creator");
 
-    const personOnWriter1 = await Person.load(person.id, {
+    const personOnWriter1 = await Person.load(person.$jazz.id, {
       loadAs: writer1,
     });
 
-    const personOnWriter2 = await Person.load(person.id, {
+    const personOnWriter2 = await Person.load(person.$jazz.id, {
       loadAs: writer2,
     });
 
@@ -906,25 +906,25 @@ describe("subscribeToCoValue", () => {
 
     assert(personOnWriter1);
     assert(personOnWriter2);
-    personOnWriter1.name = "writer1";
-    personOnWriter2.name = "writer2";
+    personOnWriter1.$jazz.set("name", "writer1");
+    personOnWriter2.$jazz.set("name", "writer2");
 
     await waitFor(() => expect(spy).toHaveBeenCalled());
     expect(spy).toHaveBeenCalledTimes(1);
     expect(value?.name).toBe("writer1");
-    expect(value?._raw.totalValidTransactions).toBe(2);
+    expect(value?.$jazz.raw.totalValidTransactions).toBe(2);
 
     spy.mockClear();
 
     // Reconnect to the sync server
-    creator._raw.core.node.syncManager.addPeer(
+    creator.$jazz.localNode.syncManager.addPeer(
       getPeerConnectedToTestSyncServer(),
     );
 
     await waitFor(() => expect(spy).toHaveBeenCalled());
     expect(spy).toHaveBeenCalledTimes(1);
     expect(value?.name).toBe("writer2");
-    expect(value?._raw.totalValidTransactions).toBe(2);
+    expect(value?.$jazz.raw.totalValidTransactions).toBe(2);
   });
 
   it("errors on autoloaded values shouldn't block updates", async () => {
@@ -968,7 +968,7 @@ describe("subscribeToCoValue", () => {
 
     const unsubscribe = subscribeToCoValue(
       coValueClassFromCoValueClassOrSchema(TestList),
-      list.id,
+      list.$jazz.id,
       {
         loadAs: reader,
         resolve: true,
@@ -994,7 +994,7 @@ describe("subscribeToCoValue", () => {
 
     updateFn.mockClear();
 
-    list[1] = TestMap.create({ value: "updated" }, everyone);
+    list.$jazz.set(1, TestMap.create({ value: "updated" }, everyone));
 
     await waitFor(() => {
       expect(result?.[1]?.value).toBe("updated");
@@ -1055,7 +1055,7 @@ describe("subscribeToCoValue", () => {
 
     const unsubscribe = subscribeToCoValue(
       coValueClassFromCoValueClassOrSchema(PersonList),
-      list.id,
+      list.$jazz.id,
       {
         loadAs: reader,
         resolve: {
@@ -1084,13 +1084,13 @@ describe("subscribeToCoValue", () => {
       expect(result?.[2]?.dog?.name).toBe("Bella");
     });
 
-    list[0]!.dog = Dog.create({ name: "Ninja" });
+    list[0]!.$jazz.set("dog", Dog.create({ name: "Ninja" }));
 
     await waitFor(() => {
       expect(result?.[0]?.dog).toBe(null);
     });
 
-    list[1]!.dog = Dog.create({ name: "Pinkie" }, everyone);
+    list[1]!.$jazz.set("dog", Dog.create({ name: "Pinkie" }, everyone));
 
     await waitFor(() => {
       expect(result?.[1]?.dog?.name).toBe("Pinkie");
@@ -1151,7 +1151,7 @@ describe("subscribeToCoValue", () => {
 
     const unsubscribe = subscribeToCoValue(
       coValueClassFromCoValueClassOrSchema(PersonList),
-      list.id,
+      list.$jazz.id,
       {
         loadAs: reader,
         resolve: {
@@ -1219,11 +1219,11 @@ describe("subscribeToCoValue", () => {
     const value = "x".repeat(chunkSize);
 
     for (let i = 0; i < chunks; i++) {
-      largeMap.data.push(value);
+      largeMap.data.$jazz.push(value);
     }
 
     // Wait for the large coValue to be fully synced
-    await largeMap.data._raw.core.waitForSync();
+    await largeMap.data.$jazz.raw.core.waitForSync();
 
     const alice = await createJazzTestAccount();
 
@@ -1235,7 +1235,7 @@ describe("subscribeToCoValue", () => {
     // Test subscribing to the large coValue
     const unsubscribe = subscribeToCoValue(
       coValueClassFromCoValueClassOrSchema(LargeDataset),
-      largeMap.id,
+      largeMap.$jazz.id,
       {
         loadAs: alice,
         resolve: {
@@ -1260,13 +1260,13 @@ describe("subscribeToCoValue", () => {
     );
 
     expect(result.data.length).toBe(chunks);
-    expect(result.data._raw.core.knownState()).toEqual(
-      largeMap.data._raw.core.knownState(),
+    expect(result.data.$jazz.raw.core.knownState()).toEqual(
+      largeMap.data.$jazz.raw.core.knownState(),
     );
 
     // Test that updates to the large coValue are properly subscribed
     updateFn.mockClear();
-    largeMap.data.push("new entry");
+    largeMap.data.$jazz.push("new entry");
 
     await waitFor(() => {
       expect(updateFn).toHaveBeenCalled();

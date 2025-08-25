@@ -1,24 +1,24 @@
-import { RawAccount, RawCoValue } from "cojson";
+import { RawAccount, RawCoValue, Role } from "cojson";
 import { RegisteredSchemas } from "../coValues/registeredSchemas.js";
 import {
   CoValue,
   RefEncoded,
-  coValueClassFromCoValueClassOrSchema,
+  accountOrGroupToGroup,
   instantiateRefEncodedFromRaw,
 } from "../internal.js";
 import { coValuesCache } from "../lib/cache.js";
 import { SubscriptionScope } from "./SubscriptionScope.js";
 
-export function getOwnerFromRawValue(raw: RawCoValue) {
-  const owner = raw.group;
+export function myRoleForRawValue(raw: RawCoValue): Role | undefined {
+  const rawOwner = raw.group;
 
-  return coValuesCache.get(owner, () =>
-    owner instanceof RawAccount
-      ? coValueClassFromCoValueClassOrSchema(
-          RegisteredSchemas["Account"],
-        ).fromRaw(owner)
-      : RegisteredSchemas["Group"].fromRaw(owner as any),
+  const owner = coValuesCache.get(rawOwner, () =>
+    rawOwner instanceof RawAccount
+      ? RegisteredSchemas["Account"].fromRaw(rawOwner)
+      : RegisteredSchemas["Group"].fromRaw(rawOwner),
   );
+
+  return accountOrGroupToGroup(owner).myRole();
 }
 
 export function createCoValue<D extends CoValue>(
@@ -28,7 +28,7 @@ export function createCoValue<D extends CoValue>(
 ) {
   const freshValueInstance = instantiateRefEncodedFromRaw(ref, raw);
 
-  Object.defineProperty(freshValueInstance, "_subscriptionScope", {
+  Object.defineProperty(freshValueInstance.$jazz, "_subscriptionScope", {
     value: subscriptionScope,
     writable: false,
     enumerable: false,

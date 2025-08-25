@@ -13,10 +13,10 @@ export function generateRandomProject(numTasks: number) {
         done: faker.datatype.boolean(),
         text: CoPlainText.create(
           faker.lorem.sentence({ min: 3, max: 8 }),
-          tasks._owner,
+          tasks.$jazz.owner,
         ),
       });
-      tasks.push(task);
+      tasks.$jazz.push(task);
     }
   }
 

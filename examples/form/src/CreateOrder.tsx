@@ -28,12 +28,10 @@ export function CreateOrder() {
     }
 
     // turn the draft into a real order
-    me.root.orders.push(draft as BubbleTeaOrder);
+    me.root.orders.$jazz.push(draft as BubbleTeaOrder);
 
     // reset the draft
-    me.root.draft = DraftBubbleTeaOrder.create({
-      addOns: [],
-    });
+    me.root.$jazz.set("draft", { addOns: [] });
 
     router.navigate("/");
   };
@@ -48,7 +46,7 @@ export function CreateOrder() {
 
       <Errors errors={errors} />
 
-      <CreateOrderForm id={me?.root?.draft.id} onSave={onSave} />
+      <CreateOrderForm id={me?.root?.draft.$jazz.id} onSave={onSave} />
     </>
   );
 }

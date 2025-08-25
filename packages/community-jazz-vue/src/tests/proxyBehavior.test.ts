@@ -30,15 +30,10 @@ const AccountSchema = co
   })
   .withMigration((account) => {
     if (!account.root) {
-      account.root = AccountRoot.create({ value: "test" }, { owner: account });
+      account.$jazz.set("root", { value: "test" });
     }
     if (!account.profile) {
-      // Profile must be owned by a Group, not the account itself
-      const group = Group.create();
-      account.profile = AccountProfile.create(
-        { name: "Test User" },
-        { owner: group },
-      );
+      account.$jazz.set("profile", { name: "Test User" });
     }
   });
 
@@ -64,9 +59,12 @@ describe("Proxy Behavior Verification", () => {
       { owner: sharedAccount },
     );
 
-    const [result] = withJazzTestSetup(() => useCoState(TestMap, testMap.id), {
-      account: sharedAccount,
-    });
+    const [result] = withJazzTestSetup(
+      () => useCoState(TestMap, testMap.$jazz.id),
+      {
+        account: sharedAccount,
+      },
+    );
 
     // The returned value should not be a Vue proxy
     expect(isProxy(result.value)).toBe(false);
@@ -94,7 +92,7 @@ describe("Proxy Behavior Verification", () => {
     );
 
     // Update account root
-    sharedAccountWithSchema.root = rootMap;
+    sharedAccountWithSchema.$jazz.set("root", rootMap);
 
     const [accountResult] = withJazzTestSetup(
       () => useAccount(AccountSchema, { resolve: { root: { testMap: true } } }),
@@ -126,16 +124,19 @@ describe("Proxy Behavior Verification", () => {
       { owner: account },
     );
 
-    const [result] = withJazzTestSetup(() => useCoState(TestMap, testMap.id), {
-      account,
-    });
+    const [result] = withJazzTestSetup(
+      () => useCoState(TestMap, testMap.$jazz.id),
+      {
+        account,
+      },
+    );
 
     // Initial state
     expect(result.value?.content).toBe("initial content");
     expect(isProxy(result.value)).toBe(false);
 
     // Update the Jazz object
-    testMap.content = "updated content";
+    testMap.$jazz.set("content", "updated content");
     await nextTick();
 
     // Should reactively update
@@ -155,9 +156,12 @@ describe("Proxy Behavior Verification", () => {
       { owner: account },
     );
 
-    const [result] = withJazzTestSetup(() => useCoState(TestMap, testMap.id), {
-      account,
-    });
+    const [result] = withJazzTestSetup(
+      () => useCoState(TestMap, testMap.$jazz.id),
+      {
+        account,
+      },
+    );
 
     // User should be able to use the object directly without toRaw()
     const jazzObject = result.value;
@@ -189,7 +193,7 @@ describe("Proxy Behavior Verification", () => {
 
     // Should be able to access agent properties without proxy issues
     expect(() => {
-      const agentType = result.agent._type; // Access agent property
+      const agentType = result.agent.$type$; // Access agent property
       expect(agentType).toBeDefined();
     }).not.toThrow();
 
@@ -211,21 +215,24 @@ describe("Proxy Behavior Verification", () => {
       { owner: account },
     );
 
-    const [result] = withJazzTestSetup(() => useCoState(TestMap, testMap.id), {
-      account,
-    });
+    const [result] = withJazzTestSetup(
+      () => useCoState(TestMap, testMap.$jazz.id),
+      {
+        account,
+      },
+    );
 
     const initialObject = result.value;
-    const initialId = initialObject?.id;
+    const initialId = initialObject?.$jazz.id;
 
     // Update content
-    testMap.content = "updated";
+    testMap.$jazz.set("content", "updated");
     await nextTick();
 
     const updatedObject = result.value;
 
     // Object identity should be maintained (same Jazz object)
-    expect(updatedObject?.id).toBe(initialId);
+    expect(updatedObject?.$jazz.id).toBe(initialId);
     expect(isProxy(updatedObject)).toBe(false);
   });
 
@@ -248,7 +255,7 @@ describe("Proxy Behavior Verification", () => {
     );
 
     const [projectResult] = withJazzTestSetup(
-      () => useCoState(TestMap, newProject.id),
+      () => useCoState(TestMap, newProject.$jazz.id),
       {
         account,
       },
@@ -261,7 +268,7 @@ describe("Proxy Behavior Verification", () => {
     expect(isProxy(projectResult.value)).toBe(false);
 
     // Should be able to access properties without toRaw()
-    expect(accountResult.me.value?.id).toBeDefined();
+    expect(accountResult.me.value?.$jazz.id).toBeDefined();
     expect(projectResult.value?.content).toBe("new project");
   });
 });

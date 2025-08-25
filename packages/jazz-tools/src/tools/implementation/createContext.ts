@@ -271,7 +271,7 @@ export async function createJazzContext<
 
     if (!options.newAccountProps) {
       await authSecretStorage.setWithoutNotify({
-        accountID: context.account.id,
+        accountID: context.account.$jazz.id,
         secretSeed,
         accountSecret: context.node.getCurrentAgent().agentSecret,
         provider: "anonymous",

@@ -25,7 +25,7 @@ export async function generateTestFile(
 
   const url = new URL(window.location.href);
 
-  url.searchParams.set("valueId", testFile.id);
+  url.searchParams.set("valueId", testFile.$jazz.id);
 
   return testFile;
 }

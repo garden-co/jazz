@@ -1,5 +1,9 @@
 import { MusicTrack, MusicaAccount, Playlist } from "@/1_schema";
-import { addTrackToPlaylist, removeTrackFromPlaylist } from "@/4_actions";
+import {
+  addTrackToPlaylist,
+  removeTrackFromAllPlaylists,
+  removeTrackFromPlaylist,
+} from "@/4_actions";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -19,7 +23,7 @@ function isPartOfThePlaylist(
   trackId: string,
   playlist: Loaded<typeof Playlist, { tracks: true }>,
 ) {
-  return Array.from(playlist.tracks._refs).some((t) => t.id === trackId);
+  return Array.from(playlist.tracks.$jazz.refs).some((t) => t.id === trackId);
 }
 
 export function MusicTrackRow({
@@ -30,7 +34,7 @@ export function MusicTrackRow({
 }: {
   trackId: string;
   isPlaying: boolean;
-  onClick: (track: Loaded<typeof MusicTrack>) => void;
+  onClick: (track: MusicTrack) => void;
   index: number;
 }) {
   const track = useCoState(MusicTrack, trackId);
@@ -39,35 +43,33 @@ export function MusicTrackRow({
   const [isHovered, setIsHovered] = useState(false);
 
   const { me } = useAccount(MusicaAccount, {
-    resolve: { root: { playlists: { $each: { tracks: true } } } },
+    resolve: {
+      root: { playlists: { $onError: null, $each: { tracks: true } } },
+    },
   });
 
   const playlists = me?.root.playlists ?? [];
-  const isActiveTrack = trackId === me?.root._refs.activeTrack?.id;
+  const isActiveTrack = trackId === me?.root.$jazz.refs.activeTrack?.id;
 
   function handleTrackClick() {
     if (!track) return;
     onClick(track);
   }
 
-  function handleAddToPlaylist(playlist: Loaded<typeof Playlist>) {
+  function handleAddToPlaylist(playlist: Playlist) {
     if (!track) return;
     addTrackToPlaylist(playlist, track);
   }
 
-  function handleRemoveFromPlaylist(playlist: Loaded<typeof Playlist>) {
+  function handleRemoveFromPlaylist(playlist: Playlist) {
     if (!track) return;
     removeTrackFromPlaylist(playlist, track);
   }
 
   function deleteTrack() {
-    if (!me || !track) return;
-    const tracks = me.root.rootPlaylist?.tracks;
-    if (!tracks) return;
-    const index = tracks.findIndex((t) => t?.id === trackId);
-    if (index !== -1) {
-      tracks.splice(index, 1);
-    }
+    if (!track) return;
+
+    removeTrackFromAllPlaylists(track);
   }
 
   function handleEdit() {
@@ -80,6 +82,7 @@ export function MusicTrackRow({
   }, []);
 
   const showWaveform = isHovered || isActiveTrack;
+  const canEdit = track && me?.canWrite(track);
 
   return (
     <li
@@ -138,42 +141,44 @@ export function MusicTrackRow({
         </div>
       )}
 
-      <div onClick={(evt) => evt.stopPropagation()}>
-        <DropdownMenu open={isDropdownOpen} onOpenChange={setIsDropdownOpen}>
-          <DropdownMenuTrigger asChild>
-            <Button
-              variant="ghost"
-              className="h-8 w-8 p-0"
-              aria-label={`Open ${track?.title} menu`}
-            >
-              <span className="sr-only">Open menu</span>
-              <MoreHorizontal className="h-4 w-4" />
-            </Button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end">
-            <DropdownMenuItem onSelect={handleEdit}>Edit</DropdownMenuItem>
-            {playlists.filter(Boolean).map((playlist, playlistIndex) => (
-              <Fragment key={playlistIndex}>
-                {isPartOfThePlaylist(trackId, playlist) ? (
-                  <DropdownMenuItem
-                    key={`remove-${playlistIndex}`}
-                    onSelect={() => handleRemoveFromPlaylist(playlist)}
-                  >
-                    Remove from {playlist.title}
-                  </DropdownMenuItem>
-                ) : (
-                  <DropdownMenuItem
-                    key={`add-${playlistIndex}`}
-                    onSelect={() => handleAddToPlaylist(playlist)}
-                  >
-                    Add to {playlist.title}
-                  </DropdownMenuItem>
-                )}
-              </Fragment>
-            ))}
-          </DropdownMenuContent>
-        </DropdownMenu>
-      </div>
+      {canEdit && (
+        <div onClick={(evt) => evt.stopPropagation()}>
+          <DropdownMenu open={isDropdownOpen} onOpenChange={setIsDropdownOpen}>
+            <DropdownMenuTrigger asChild>
+              <Button
+                variant="ghost"
+                className="h-8 w-8 p-0"
+                aria-label={`Open ${track?.title} menu`}
+              >
+                <span className="sr-only">Open menu</span>
+                <MoreHorizontal className="h-4 w-4" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              <DropdownMenuItem onSelect={handleEdit}>Edit</DropdownMenuItem>
+              {playlists.filter(Boolean).map((playlist, playlistIndex) => (
+                <Fragment key={playlistIndex}>
+                  {isPartOfThePlaylist(trackId, playlist) ? (
+                    <DropdownMenuItem
+                      key={`remove-${playlistIndex}`}
+                      onSelect={() => handleRemoveFromPlaylist(playlist)}
+                    >
+                      Remove from {playlist.title}
+                    </DropdownMenuItem>
+                  ) : (
+                    <DropdownMenuItem
+                      key={`add-${playlistIndex}`}
+                      onSelect={() => handleAddToPlaylist(playlist)}
+                    >
+                      Add to {playlist.title}
+                    </DropdownMenuItem>
+                  )}
+                </Fragment>
+              ))}
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </div>
+      )}
       {track && isEditDialogOpen && (
         <EditTrackDialog
           track={track}

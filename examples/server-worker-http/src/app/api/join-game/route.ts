@@ -8,15 +8,18 @@ export async function POST(request: Request) {
     request,
     jazzServerAccount.worker,
     async ({ waitingRoom }, madeBy) => {
-      if (madeBy.id === waitingRoom.creator.id) {
+      if (madeBy.$jazz.id === waitingRoom.creator.$jazz.id) {
         throw new JazzRequestError("You can't join your own waiting room", 400);
       }
 
-      waitingRoom.game = createGame({
-        account1: waitingRoom.creator,
-        account2: madeBy,
-        worker: jazzServerAccount.worker,
-      });
+      waitingRoom.$jazz.set(
+        "game",
+        createGame({
+          account1: waitingRoom.creator,
+          account2: madeBy,
+          worker: jazzServerAccount.worker,
+        }),
+      );
 
       return {
         waitingRoom,

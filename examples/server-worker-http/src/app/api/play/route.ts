@@ -8,8 +8,8 @@ export async function POST(request: Request) {
     request,
     jazzServerAccount.worker,
     async ({ game, selection }, madeBy) => {
-      const isPlayer1 = game.player1.account.id === madeBy.id;
-      const isPlayer2 = game.player2.account.id === madeBy.id;
+      const isPlayer1 = game.player1.account.$jazz.id === madeBy.$jazz.id;
+      const isPlayer2 = game.player2.account.$jazz.id === madeBy.$jazz.id;
 
       if (!isPlayer1 && !isPlayer2) {
         throw new JazzRequestError("You are not a player in this game", 400);
@@ -30,15 +30,18 @@ export async function POST(request: Request) {
       );
 
       if (isPlayer1) {
-        game.player1.playSelection = playSelection;
+        game.player1.$jazz.set("playSelection", playSelection);
       } else {
-        game.player2.playSelection = playSelection;
+        game.player2.$jazz.set("playSelection", playSelection);
       }
 
       if (game.player1.playSelection && game.player2.playSelection) {
-        game.outcome = determineOutcome(
-          game.player1.playSelection.value,
-          game.player2.playSelection.value,
+        game.$jazz.set(
+          "outcome",
+          determineOutcome(
+            game.player1.playSelection.value,
+            game.player2.playSelection.value,
+          ),
         );
 
         // Reveal the play selections to the other player
@@ -52,9 +55,9 @@ export async function POST(request: Request) {
         );
 
         if (game.outcome === "player1") {
-          game.player1Score++;
+          game.$jazz.set("player1Score", game.player1Score + 1);
         } else if (game.outcome === "player2") {
-          game.player2Score++;
+          game.$jazz.set("player2Score", game.player2Score + 1);
         }
       }
 

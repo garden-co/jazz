@@ -21,7 +21,7 @@ export const ListOfBubbleTeaAddOns = co.list(
 export type ListOfBubbleTeaAddOns = co.loaded<typeof ListOfBubbleTeaAddOns>;
 
 function hasAddOnsChanges(list?: ListOfBubbleTeaAddOns | null) {
-  return list && Object.entries(list._raw.insertions).length > 0;
+  return list && Object.entries(list.$jazz.raw.insertions).length > 0;
 }
 
 export const BubbleTeaOrder = co.map({
@@ -52,7 +52,8 @@ export function validateDraftOrder(order: DraftBubbleTeaOrder) {
 export function hasChanges(order?: DraftBubbleTeaOrder | null) {
   return (
     !!order &&
-    (Object.keys(order._edits).length > 1 || hasAddOnsChanges(order.addOns))
+    (Object.keys(order.$jazz.getEdits()).length > 1 ||
+      hasAddOnsChanges(order.addOns))
   );
 }
 
@@ -70,9 +71,9 @@ export const JazzAccount = co
   })
   .withMigration((account) => {
     if (!account.root) {
-      account.root = AccountRoot.create(
-        { draft: { addOns: [], instructions: "" }, orders: [] },
-        account,
-      );
+      account.$jazz.set("root", {
+        draft: { addOns: [], instructions: "" },
+        orders: [],
+      });
     }
   });

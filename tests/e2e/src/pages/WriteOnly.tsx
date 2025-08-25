@@ -28,30 +28,30 @@ export function WriteOnlyRole() {
       writeOnly: createInviteLink(coList, "writeOnly"),
     });
 
-    await group.waitForSync();
+    await group.$jazz.waitForSync();
 
-    setId(coList.id);
+    setId(coList.$jazz.id);
   };
 
   const addNewItem = async () => {
     if (!coList) return;
 
-    const group = coList._owner as Group;
+    const group = coList.$jazz.owner as Group;
     const coMap = SharedCoMap.create({ value: "" }, { owner: group });
 
-    coList.push(coMap);
+    coList.$jazz.push(coMap);
   };
 
   const revokeAccess = () => {
     if (!coList) return;
 
-    const coListGroup = coList._owner as Group;
+    const coListGroup = coList.$jazz.owner as Group;
 
     for (const member of coListGroup.members) {
       if (
         member.account &&
         member.role !== "admin" &&
-        member.account.id !== Account.getMe().id
+        member.account.$jazz.id !== Account.getMe().$jazz.id
       ) {
         coListGroup.removeMember(member.account);
       }
@@ -68,7 +68,7 @@ export function WriteOnlyRole() {
   return (
     <div>
       <h1>Sharing</h1>
-      <p data-testid="id">{coList?.id}</p>
+      <p data-testid="id">{coList?.$jazz.id}</p>
       {Object.entries(inviteLinks).map(([role, inviteLink]) => (
         <div key={role} style={{ display: "flex", gap: 5 }}>
           <p style={{ fontWeight: "bold" }}>{role} invitation:</p>
@@ -77,7 +77,8 @@ export function WriteOnlyRole() {
       ))}
       <pre data-testid="values">
         {coList?.map(
-          (map) => map && <EditSharedCoMap key={map.id} id={map.id} />,
+          (map) =>
+            map && <EditSharedCoMap key={map.$jazz.id} id={map.$jazz.id} />,
         )}
       </pre>
       {!id && <button onClick={createCoList}>Create the list</button>}
@@ -97,7 +98,7 @@ function EditSharedCoMap(props: { id: ID<SharedCoMap> }) {
       <div>{coMap.value}</div>
       <input
         value={coMap.value}
-        onChange={(e) => (coMap.value = e.target.value)}
+        onChange={(e) => coMap.$jazz.set("value", e.target.value)}
       />
     </>
   );

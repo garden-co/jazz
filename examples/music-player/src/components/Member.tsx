@@ -39,7 +39,7 @@ export function Member({
     >
       {avatar ? (
         <Image
-          imageId={avatar.id}
+          imageId={avatar.$jazz.id}
           width={getSizePx(size)}
           height={getSizePx(size)}
           alt={`${name}'s avatar`}

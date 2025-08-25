@@ -115,6 +115,11 @@ export const docNavigationItems = [
     prefix: "/docs/upgrade",
     items: [
       {
+        name: "0.18.0 - New `$jazz` field in CoValues",
+        href: "/docs/upgrade/0-18-0",
+        done: 100,
+      },
+      {
         name: "0.17.0 - New image APIs",
         href: "/docs/upgrade/0-17-0",
         done: 100,

@@ -25,7 +25,7 @@ To update a CoValue, we simply assign the new value directly as changes happen. 
 <input
   type="text"
   value={order.name}
-  onChange={(e) => order.name = e.target.value}
+  onChange={(e) => order.$jazz.set("name", e.target.value)}
 />
 ```
 </CodeGroup>
@@ -93,7 +93,7 @@ export function OrderForm({
         <input
           type="text"
           value={order.name}
-          onChange={(e) => (order.name = e.target.value)}
+          onChange={(e) => order.$jazz.set("name", e.target.value)}
           required
         />
       </label>
@@ -137,7 +137,7 @@ export function OrderForm({
         <input
           type="text"
           value={order.name}
-          onChange={(e) => (order.name = e.target.value)}
+          onChange={(e) => (order.$jazz.set("name", e.target.value))}
           required
         />
       </label>
@@ -205,7 +205,7 @@ export function OrderForm({
         <input
           type="text"
           value={order.name}
-          onChange={(e) => (order.name = e.target.value)}
+          onChange={(e) => (order.$jazz.set("name", e.target.value))}
           required
         />
       </label>
@@ -222,7 +222,7 @@ export function CreateOrder() {
 
   useEffect(() => {
     setDraft(DraftBubbleTeaOrder.create({}));
-  }, [me?.id]);
+  }, [me?.$jazz.id]);
 
   const onSave = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
@@ -321,7 +321,7 @@ export function OrderForm({
         <input
           type="text"
           value={order.name}
-          onChange={(e) => (order.name = e.target.value)}
+          onChange={(e) => (order.$jazz.set("name", e.target.value))}
           required
         />
       </label>
@@ -338,7 +338,7 @@ export function CreateOrder() {
 
   useEffect(() => {
     setDraft(DraftBubbleTeaOrder.create({}));
-  }, [me?.id]);
+  }, [me?.$jazz.id]);
 
   const onSave = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
@@ -390,9 +390,7 @@ export const JazzAccount = co.account({
   profile: co.map({ name: z.string() }),
 }).withMigration((account, creationProps?: { name: string }) => {
   if (account.root === undefined) {
-    const draft = DraftBubbleTeaOrder.create({});
-
-    account.root = AccountRoot.create({ draft });
+    account.$jazz.set("root", { draft: {} });
   }
 });
 ```
@@ -421,9 +419,7 @@ export const JazzAccount = co.account({
   profile: co.map({ name: z.string() }),
 }).withMigration((account, creationProps?: { name: string }) => {
   if (account.root === undefined) {
-    const draft = DraftBubbleTeaOrder.create({});
-
-    account.root = AccountRoot.create({ draft });
+    account.$jazz.set("root", { draft: {} });
   }
 });
 
@@ -480,9 +476,7 @@ export const JazzAccount = co.account({
   profile: co.map({ name: z.string() }),
 }).withMigration((account, creationProps?: { name: string }) => {
   if (account.root === undefined) {
-    const draft = DraftBubbleTeaOrder.create({});
-
-    account.root = AccountRoot.create({ draft });
+    account.$jazz.set("root", { draft: {} });
   }
 });
 
@@ -506,7 +500,7 @@ export function OrderForm({
         <input
           type="text"
           value={order.name}
-          onChange={(e) => (order.name = e.target.value)}
+          onChange={(e) => (order.$jazz.set("name", e.target.value))}
           required
         />
       </label>
@@ -541,12 +535,10 @@ export function CreateOrder() {
     console.log("Order created:", order);
 
     // create a new empty draft
-    me.root.draft = DraftBubbleTeaOrder.create( // [!code ++:3]
-      {},
-    );
+    me.root.$jazz.set("draft", {}); // [!code ++]
   };
 
-  return <CreateOrderForm id={me.root.draft.id} onSave={onSave} />
+  return <CreateOrderForm id={me.root.draft.$jazz.id} onSave={onSave} />
 }
 
 function CreateOrderForm({ // [!code ++:13]
@@ -600,7 +592,7 @@ export function validateDraftOrder(draft: DraftBubbleTeaOrder) {
 };
 
 export function hasChanges(draft?: DraftBubbleTeaOrder) { // [!code ++:3]
-  return draft ? Object.keys(draft._edits).length : false;
+  return draft ? Object.keys(draft.$jazz.getEdits()).length : false;
 };
 ```
 </CodeGroup>
@@ -632,7 +624,7 @@ export function validateDraftOrder(draft: DraftBubbleTeaOrder) {
 };
 
 export function hasChanges(draft?: DraftBubbleTeaOrder) {
-  return draft ? Object.keys(draft._edits).length : false;
+  return draft ? Object.keys(draft.$jazz.getEdits()).length : false;
 };
 
 export const AccountRoot = co.map({
@@ -644,9 +636,7 @@ export const JazzAccount = co.account({
   profile: co.map({ name: z.string() }),
 }).withMigration((account, creationProps?: { name: string }) => {
   if (account.root === undefined) {
-    const draft = DraftBubbleTeaOrder.create({});
-
-    account.root = AccountRoot.create({ draft });
+    account.$jazz.set("root", { draft: {} });
   }
 });
 

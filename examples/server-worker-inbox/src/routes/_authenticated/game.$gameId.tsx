@@ -59,7 +59,7 @@ function RouteComponent() {
   useEffect(() => {
     let gameCompleted = Boolean(loaderGame.outcome);
 
-    return loaderGame.subscribe((game) => {
+    return loaderGame.$jazz.subscribe((game) => {
       if (gameCompleted && !game.outcome) {
         setPlaySelection(undefined); // Reset play selection when one player clicks on "Start a new game"
       }

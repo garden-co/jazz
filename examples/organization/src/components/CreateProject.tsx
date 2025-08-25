@@ -15,8 +15,11 @@ export function CreateProject({
     if (!organization?.projects) return;
 
     if (name.length > 0) {
-      const project = Project.create({ name }, { owner: organization._owner });
-      organization.projects.push(project);
+      const project = Project.create(
+        { name },
+        { owner: organization.$jazz.owner },
+      );
+      organization.projects.$jazz.push(project);
       setName("");
     }
   };

@@ -34,29 +34,27 @@ export const JazzAccount = co
      *  You can use it to set up the account root and any other initial CoValues you need.
      */
     if (account.root === undefined) {
-      const group = Group.create();
-
-      account.root = AccountRoot.create(
-        {
-          dateOfBirth: new Date("1/1/1990"),
-        },
-        group,
-      );
+      account.$jazz.set("root", {
+        dateOfBirth: new Date("1/1/1990"),
+      });
     }
 
     if (account.profile === undefined) {
       const group = Group.create();
       group.makePublic(); // The profile info is visible to everyone
 
-      account.profile = JazzProfile.create(
-        {
-          name: "Anonymous user",
-          firstName: "",
-          bio: co
-            .richText()
-            .create("<p>A <strong>hu<em>man</strong></em>.</p>", group),
-        },
-        group,
+      account.$jazz.set(
+        "profile",
+        JazzProfile.create(
+          {
+            name: "Anonymous user",
+            firstName: "",
+            bio: co
+              .richText()
+              .create("<p>A <strong>hu<em>man</strong></em>.</p>", group),
+          },
+          group,
+        ),
       );
     }
   });

@@ -1,4 +1,3 @@
-import { CoPlainText } from "jazz-tools";
 import { createInviteLink, useAccount } from "jazz-tools/react";
 import { useCoState } from "jazz-tools/react";
 import { IssueComponent } from "./Issue.tsx";
@@ -15,15 +14,15 @@ export function ProjectComponent({ projectID }: { projectID: string }) {
     navigator.clipboard.writeText(link);
   };
   const createAndAddIssue = () => {
-    project?.issues.push(
+    project?.issues.$jazz.push(
       Issue.create(
         {
           title: "",
-          description: CoPlainText.create("", project._owner),
+          description: "",
           estimate: 0,
           status: "backlog",
         },
-        project._owner,
+        project.$jazz.owner,
       ),
     );
   };
@@ -39,7 +38,7 @@ export function ProjectComponent({ projectID }: { projectID: string }) {
       )}
       <div className="border-r border-b">
         {project.issues.map((issue) => (
-          <IssueComponent key={issue.id} issue={issue} />
+          <IssueComponent key={issue.$jazz.id} issue={issue} />
         ))}
         <button onClick={createAndAddIssue}>Create Issue</button>
       </div>

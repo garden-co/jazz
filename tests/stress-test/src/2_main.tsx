@@ -73,7 +73,6 @@ function HomeScreen() {
       }}
     >
       <ProjectGenerator />
-
       {/* Profiling Toggle */}
       {me?.root && (
         <div
@@ -93,7 +92,7 @@ function HomeScreen() {
             id="profiling-toggle"
             checked={me.root.profilingEnabled}
             onChange={(e) => {
-              me.root.profilingEnabled = e.target.checked;
+              me.root.$jazz.set("profilingEnabled", e.target.checked);
             }}
             style={{
               width: "18px",
@@ -142,9 +141,9 @@ function HomeScreen() {
 
           return (
             <div
-              key={project.id}
+              key={project.$jazz.id}
               onClick={() => {
-                navigate(`/project/${project.id}`);
+                navigate(`/project/${project.$jazz.id}`);
               }}
               style={{
                 background: "white",

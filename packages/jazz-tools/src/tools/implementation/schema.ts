@@ -92,24 +92,24 @@ export const coField = {
 };
 
 function optionalRef<C extends CoValueClass>(
-  arg: C | ((_raw: InstanceType<C>["_raw"]) => C),
+  arg: C | ((raw: InstanceType<C>["$jazz"]["raw"]) => C),
 ): InstanceType<C> | null | undefined {
   return ref(arg, { optional: true });
 }
 
 function ref<C extends CoValueClass>(
-  arg: C | ((_raw: InstanceType<C>["_raw"]) => C),
+  arg: C | ((raw: InstanceType<C>["$jazz"]["raw"]) => C),
   options?: never,
 ): InstanceType<C> | null;
 function ref<C extends CoValueClass>(
-  arg: C | ((_raw: InstanceType<C>["_raw"]) => C),
+  arg: C | ((raw: InstanceType<C>["$jazz"]["raw"]) => C),
   options: { optional: true },
 ): InstanceType<C> | null | undefined;
 function ref<
   C extends CoValueClass,
   Options extends { optional?: boolean } | undefined,
 >(
-  arg: C | ((_raw: InstanceType<C>["_raw"]) => C),
+  arg: C | ((raw: InstanceType<C>["$jazz"]["raw"]) => C),
   options?: Options,
 ): Options extends { optional: true }
   ? InstanceType<C> | null | undefined
@@ -164,17 +164,17 @@ export function instantiateRefEncodedFromRaw<V extends CoValue>(
 export function instantiateRefEncodedWithInit<V extends CoValue>(
   schema: RefEncoded<V>,
   init: any,
-  parentOwner: Account | Group,
+  parentOwner: Group,
 ): V {
   if (!isCoValueClass<V>(schema.ref)) {
     throw Error(
       `Cannot automatically create CoValue from value: ${JSON.stringify(init)}. Use the CoValue schema's create() method instead.`,
     );
   }
-  const node = parentOwner._raw.core.node;
+  const node = parentOwner.$jazz.localNode;
   const rawGroup = node.createGroup();
   const owner = new Group({ fromRaw: rawGroup });
-  owner.addMember(parentOwner.castAs(Group));
+  owner.addMember(parentOwner);
   // @ts-expect-error - create is a static method in all CoValue classes
   return schema.ref.create(init, owner);
 }

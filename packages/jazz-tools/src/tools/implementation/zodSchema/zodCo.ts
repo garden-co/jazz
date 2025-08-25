@@ -74,10 +74,10 @@ export const coMapDefiner = <Shape extends z.core.$ZodLooseShape>(
  *   // Migration logic for existing accounts
  *   if (account.profile === undefined) {
  *     const group = Group.create();
- *     account.profile = co.profile().create(
+ *     account.$jazz.set("profile", co.profile().create(
  *       { name: getRandomUsername() },
  *       group
- *     );
+ *     ));
  *     group.addMember("everyone", "reader");
  *   }
  * });

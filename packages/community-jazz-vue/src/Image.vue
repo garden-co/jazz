@@ -95,14 +95,15 @@ const src = computed(() => {
   );
 
   if (!bestImage) return image.value.placeholderDataURL;
-  if (lastBestImage?.[0] === bestImage.image.id) return lastBestImage?.[1];
+  if (lastBestImage?.[0] === bestImage.image.$jazz.id)
+    return lastBestImage?.[1];
 
   const blob = bestImage.image.toBlob();
 
   if (blob) {
     const url = URL.createObjectURL(blob);
     revokeObjectURL(lastBestImage?.[1]);
-    lastBestImage = [bestImage.image.id, url];
+    lastBestImage = [bestImage.image.$jazz.id, url];
     return url;
   }
 

@@ -1,5 +1,5 @@
 import { getAudioFileData } from "@/lib/audio/getAudioFileData";
-import { FileStream, Group } from "jazz-tools";
+import { Group } from "jazz-tools";
 import { MusicTrack, MusicaAccount, Playlist } from "./1_schema";
 
 /**
@@ -20,7 +20,7 @@ export async function uploadMusicTracks(
   files: Iterable<File>,
   isExampleTrack: boolean = false,
 ) {
-  const { root } = await MusicaAccount.getMe().ensureLoaded({
+  const { root } = await MusicaAccount.getMe().$jazz.ensureLoaded({
     resolve: {
       root: {
         rootPlaylist: {
@@ -40,9 +40,9 @@ export async function uploadMusicTracks(
     // We transform the file blob into a FileStream
     // making it a collaborative value that is encrypted, easy
     // to share across devices and users and available offline!
-    const fileStream = await FileStream.createFromBlob(file, group);
+    const fileStream = await MusicTrack.shape.file.createFromBlob(file, group);
 
-    const musicTrack = MusicTrack.create(
+    const track = MusicTrack.create(
       {
         file: fileStream,
         duration: data.duration,
@@ -53,14 +53,13 @@ export async function uploadMusicTracks(
       group,
     );
 
-    // The newly created musicTrack can be associated to the
-    // user track list using a simple push call
-    root.rootPlaylist.tracks.push(musicTrack);
+    // We create a new music track and add it to the root playlist
+    root.rootPlaylist.tracks.$jazz.push(track);
   }
 }
 
 export async function createNewPlaylist(title: string = "New Playlist") {
-  const { root } = await MusicaAccount.getMe().ensureLoaded({
+  const { root } = await MusicaAccount.getMe().$jazz.ensureLoaded({
     resolve: {
       root: {
         playlists: true,
@@ -73,9 +72,9 @@ export async function createNewPlaylist(title: string = "New Playlist") {
     tracks: [],
   });
 
-  // Again, we associate the new playlist to the
+  // We associate the new playlist to the
   // user by pushing it into the playlists CoList
-  root.playlists.push(playlist);
+  root.playlists.$jazz.push(playlist);
 
   return playlist;
 }
@@ -84,61 +83,73 @@ export async function addTrackToPlaylist(
   playlist: Playlist,
   track: MusicTrack,
 ) {
-  const alreadyAdded = playlist.tracks?.some(
-    (t) => t?.id === track.id || t?._refs.sourceTrack?.id === track.id,
-  );
+  const { tracks } = await playlist.$jazz.ensureLoaded({
+    resolve: {
+      tracks: { $each: true },
+    },
+  });
 
-  if (alreadyAdded) return;
+  const isPartOfThePlaylist = tracks.some((t) => t.$jazz.id === track.$jazz.id);
+  if (isPartOfThePlaylist) return;
 
-  // Check if the track has been created after the Group inheritance was introduced
-  if (track._owner._type === "Group" && playlist._owner._type === "Group") {
-    /**
-     * Extending the track with the Playlist group in order to make the music track
-     * visible to the Playlist user
-     */
-    const trackGroup = track._owner;
-    trackGroup.addMember(playlist._owner);
-
-    playlist.tracks?.push(track);
-    return;
-  }
+  track.$jazz.owner.addMember(playlist.$jazz.owner);
+  tracks.$jazz.push(track);
 }
 
 export async function removeTrackFromPlaylist(
   playlist: Playlist,
   track: MusicTrack,
 ) {
-  const notAdded = !playlist.tracks?.some(
-    (t) => t?.id === track.id || t?._refs.sourceTrack?.id === track.id,
-  );
+  const { tracks } = await playlist.$jazz.ensureLoaded({
+    resolve: {
+      tracks: { $each: true },
+    },
+  });
 
-  if (notAdded) return;
+  const isPartOfThePlaylist = tracks.some((t) => t.$jazz.id === track.$jazz.id);
 
-  if (track._owner._type === "Group" && playlist._owner._type === "Group") {
-    const trackGroup = track._owner;
-    trackGroup.removeMember(playlist._owner);
+  if (!isPartOfThePlaylist) return;
 
-    const index =
-      playlist.tracks?.findIndex(
-        (t) => t?.id === track.id || t?._refs.sourceTrack?.id === track.id,
-      ) ?? -1;
-    if (index > -1) {
-      playlist.tracks?.splice(index, 1);
-    }
-    return;
+  // We remove the track before removing the access
+  // because the removeMember might remove our own access
+  tracks.$jazz.remove((t) => t.$jazz.id === track.$jazz.id);
+
+  track.$jazz.owner.removeMember(playlist.$jazz.owner);
+}
+
+export async function removeTrackFromAllPlaylists(track: MusicTrack) {
+  const { root } = await MusicaAccount.getMe().$jazz.ensureLoaded({
+    resolve: {
+      root: {
+        playlists: {
+          $each: {
+            $onError: null,
+          },
+        },
+        rootPlaylist: true,
+      },
+    },
+  });
+
+  const playlists = root.playlists;
+
+  for (const playlist of playlists) {
+    if (!playlist) continue;
+
+    removeTrackFromPlaylist(playlist, track);
   }
 }
 
 export async function updatePlaylistTitle(playlist: Playlist, title: string) {
-  playlist.title = title;
+  playlist.$jazz.set("title", title);
 }
 
 export async function updateMusicTrackTitle(track: MusicTrack, title: string) {
-  track.title = title;
+  track.$jazz.set("title", title);
 }
 
 export async function updateActivePlaylist(playlist?: Playlist) {
-  const { root } = await MusicaAccount.getMe().ensureLoaded({
+  const { root } = await MusicaAccount.getMe().$jazz.ensureLoaded({
     resolve: {
       root: {
         activePlaylist: true,
@@ -147,35 +158,36 @@ export async function updateActivePlaylist(playlist?: Playlist) {
     },
   });
 
-  root.activePlaylist = playlist ?? root.rootPlaylist;
+  root.$jazz.set("activePlaylist", playlist ?? root.rootPlaylist);
 }
 
 export async function updateActiveTrack(track: MusicTrack) {
-  const { root } = await MusicaAccount.getMe().ensureLoaded({
+  const { root } = await MusicaAccount.getMe().$jazz.ensureLoaded({
     resolve: {
       root: {},
     },
   });
 
-  root.activeTrack = track;
+  root.$jazz.set("activeTrack", track);
 }
 
 export async function onAnonymousAccountDiscarded(
   anonymousAccount: MusicaAccount,
 ) {
-  const { root: anonymousAccountRoot } = await anonymousAccount.ensureLoaded({
-    resolve: {
-      root: {
-        rootPlaylist: {
-          tracks: {
-            $each: true,
+  const { root: anonymousAccountRoot } =
+    await anonymousAccount.$jazz.ensureLoaded({
+      resolve: {
+        root: {
+          rootPlaylist: {
+            tracks: {
+              $each: true,
+            },
           },
         },
       },
-    },
-  });
+    });
 
-  const me = await MusicaAccount.getMe().ensureLoaded({
+  const me = await MusicaAccount.getMe().$jazz.ensureLoaded({
     resolve: {
       root: {
         rootPlaylist: {
@@ -188,15 +200,15 @@ export async function onAnonymousAccountDiscarded(
   for (const track of anonymousAccountRoot.rootPlaylist.tracks) {
     if (track.isExampleTrack) continue;
 
-    const trackGroup = track._owner.castAs(Group);
+    const trackGroup = track.$jazz.owner;
     trackGroup.addMember(me, "admin");
 
-    me.root.rootPlaylist.tracks.push(track);
+    me.root.rootPlaylist.tracks.$jazz.push(track);
   }
 }
 
 export async function deletePlaylist(playlistId: string) {
-  const { root } = await MusicaAccount.getMe().ensureLoaded({
+  const { root } = await MusicaAccount.getMe().$jazz.ensureLoaded({
     resolve: {
       root: {
         playlists: true,
@@ -204,8 +216,8 @@ export async function deletePlaylist(playlistId: string) {
     },
   });
 
-  const index = root.playlists.findIndex((p) => p?.id === playlistId);
+  const index = root.playlists.findIndex((p) => p?.$jazz.id === playlistId);
   if (index > -1) {
-    root.playlists.splice(index, 1);
+    root.playlists?.$jazz.splice(index, 1);
   }
 }

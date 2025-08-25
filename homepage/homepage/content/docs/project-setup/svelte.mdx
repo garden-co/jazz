@@ -72,7 +72,7 @@ export const UserAccount = co.account({
 	import { MyProfile, UserAccount } from "$lib/schema";
 
 	const me = new AccountCoState(UserAccount);
-	const profile = new CoState(MyProfile, me.current?._refs.profile?.id);
+	const profile = new CoState(MyProfile, me.current?.$jazz.refs.profile?.id);
 
   function increment() {
     if (!profile.current) return;

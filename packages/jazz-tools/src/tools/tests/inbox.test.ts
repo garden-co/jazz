@@ -11,9 +11,12 @@ describe("Inbox", () => {
   describe("Private profile", () => {
     it("Should throw if the inbox owner profile is private", async () => {
       const WorkerAccount = co.account().withMigration((account) => {
-        account.profile = co
-          .profile()
-          .create({ name: "Worker" }, Group.create({ owner: account }));
+        account.$jazz.set(
+          "profile",
+          co
+            .profile()
+            .create({ name: "Worker" }, Group.create({ owner: account })),
+        );
       });
 
       const { clientAccount: sender, serverAccount: receiver } =
@@ -22,7 +25,9 @@ describe("Inbox", () => {
             coValueClassFromCoValueClassOrSchema(WorkerAccount),
         });
 
-      await expect(() => InboxSender.load(receiver.id, sender)).rejects.toThrow(
+      await expect(() =>
+        InboxSender.load(receiver.$jazz.id, sender),
+      ).rejects.toThrow(
         "Insufficient permissions to access the inbox, make sure its user profile is publicly readable.",
       );
     });
@@ -43,7 +48,7 @@ describe("Inbox", () => {
     );
 
     // Setup inbox sender
-    const inboxSender = await InboxSender.load(receiver.id, sender);
+    const inboxSender = await InboxSender.load(receiver.$jazz.id, sender);
     inboxSender.sendMessage(message);
 
     // Track received messages
@@ -64,7 +69,7 @@ describe("Inbox", () => {
 
     expect(receivedMessages.length).toBe(1);
     expect(receivedMessages[0]?.text).toBe("Hello");
-    expect(senderAccountID).toBe(sender.id);
+    expect(senderAccountID).toBe(sender.$jazz.id);
 
     unsubscribe();
   });
@@ -86,7 +91,7 @@ describe("Inbox", () => {
     );
 
     // Setup inbox sender
-    const inboxSender = await InboxSender.load(receiver.id, sender);
+    const inboxSender = await InboxSender.load(receiver.$jazz.id, sender);
     inboxSender.sendMessage(message);
 
     // Track received messages
@@ -106,8 +111,8 @@ describe("Inbox", () => {
     await waitFor(() => receivedMessages.length === 1);
 
     expect(receivedMessages.length).toBe(1);
-    expect(receivedMessages[0]?.id).toBe(message.id);
-    expect(senderAccountID).toBe(sender.id);
+    expect(receivedMessages[0]?.$jazz.id).toBe(message.$jazz.id);
+    expect(senderAccountID).toBe(sender.$jazz.id);
 
     unsubscribe();
   });
@@ -129,7 +134,7 @@ describe("Inbox", () => {
     const unsubscribe = receiverInbox.subscribe(Message, async (message) => {
       return Message.create(
         { text: "Responded from the inbox" },
-        { owner: message._owner },
+        { owner: message.$jazz.owner },
       );
     });
 
@@ -137,7 +142,7 @@ describe("Inbox", () => {
     const inboxSender = await InboxSender.load<
       Loaded<typeof Message>,
       Loaded<typeof Message>
-    >(receiver.id, sender);
+    >(receiver.$jazz.id, sender);
     const resultId = await inboxSender.sendMessage(message);
 
     const result = await Message.load(resultId, { loadAs: receiver });
@@ -164,7 +169,7 @@ describe("Inbox", () => {
 
     // Setup inbox sender
     const inboxSender = await InboxSender.load<Loaded<typeof Message>>(
-      receiver.id,
+      receiver.$jazz.id,
       sender,
     );
     const result = await inboxSender.sendMessage(message);
@@ -196,7 +201,7 @@ describe("Inbox", () => {
 
     // Setup inbox sender
     const inboxSender = await InboxSender.load<Loaded<typeof Message>>(
-      receiver.id,
+      receiver.$jazz.id,
       sender,
     );
 
@@ -229,7 +234,7 @@ describe("Inbox", () => {
     );
 
     // Setup inbox sender
-    const inboxSender = await InboxSender.load(receiver.id, sender);
+    const inboxSender = await InboxSender.load(receiver.$jazz.id, sender);
     inboxSender.sendMessage(message);
 
     // Track received messages
@@ -269,7 +274,7 @@ describe("Inbox", () => {
     );
 
     // Setup inbox sender
-    const inboxSender = await InboxSender.load(receiver.id, sender);
+    const inboxSender = await InboxSender.load(receiver.$jazz.id, sender);
     inboxSender.sendMessage(message);
 
     // Track received messages
@@ -309,7 +314,7 @@ describe("Inbox", () => {
     const errorLogSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
     // Setup inbox sender
-    const inboxSender = await InboxSender.load(receiver.id, sender);
+    const inboxSender = await InboxSender.load(receiver.$jazz.id, sender);
     const promise = inboxSender.sendMessage(message);
 
     let failures = 0;
@@ -344,7 +349,7 @@ describe("Inbox", () => {
 
     const receiverInbox = await Inbox.load(receiver);
 
-    const inboxSender = await InboxSender.load(receiver.id, sender);
+    const inboxSender = await InboxSender.load(receiver.$jazz.id, sender);
     inboxSender.messages.push(`co_z123234` as any);
 
     const spy = vi.fn();

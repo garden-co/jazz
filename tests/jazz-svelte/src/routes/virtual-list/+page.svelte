@@ -12,9 +12,9 @@
   });
 
 
-  const keys = $derived(Object.keys(me.current?.root.people._refs ?? {}));
+  const keys = $derived(Object.keys(me.current?.root.people.$jazz.refs ?? {}));
   let currentKey = $state("");
-  const currentListId = $derived(me.current?.root.people._refs[currentKey]?.id ?? null);
+  const currentListId = $derived(me.current?.root.people.$jazz.refs[currentKey]?.id ?? null);
 
 
   const list = new CoState(People, () => currentListId, {
@@ -45,7 +45,7 @@
   <input bind:value={filter} placeholder="Filter" />
 </label>
 
-<VList {data} style="height: 100vh;" getKey={(val) => val.id}>
+<VList {data} style="height: 100vh;" getKey={(val) => val.$jazz.id}>
   {#snippet children(item)}
     <div
       style="

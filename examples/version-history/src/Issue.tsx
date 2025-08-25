@@ -10,7 +10,7 @@ export function IssueComponent({ issue }: { issue: Loaded<typeof Issue> }) {
           type="text"
           value={issue.title}
           onChange={(event) => {
-            issue.title = event.target.value;
+            issue.$jazz.set("title", event.target.value);
           }}
         />
       </label>
@@ -20,9 +20,9 @@ export function IssueComponent({ issue }: { issue: Loaded<typeof Issue> }) {
         <textarea
           value={`${issue.description}`}
           onChange={(event) => {
-            issue.description = CoPlainText.create(
-              event.target.value,
-              issue._owner,
+            issue.$jazz.set(
+              "description",
+              CoPlainText.create(event.target.value, issue.$jazz.owner),
             );
           }}
         />
@@ -34,7 +34,7 @@ export function IssueComponent({ issue }: { issue: Loaded<typeof Issue> }) {
             type="number"
             value={issue.estimate}
             onChange={(event) => {
-              issue.estimate = Number(event.target.value);
+              issue.$jazz.set("estimate", Number(event.target.value));
             }}
           />
         </label>
@@ -45,10 +45,10 @@ export function IssueComponent({ issue }: { issue: Loaded<typeof Issue> }) {
             className="flex-1"
             value={issue.status}
             onChange={(event) => {
-              issue.status = event.target.value as
-                | "backlog"
-                | "in progress"
-                | "done";
+              issue.$jazz.set(
+                "status",
+                event.target.value as "backlog" | "in progress" | "done",
+              );
             }}
           >
             <option value="backlog">Backlog</option>

@@ -19,7 +19,7 @@ export function OrganizationForm({
           value={organization.name}
           placeholder="Enter organization name..."
           className="rounded-md shadow-sm dark:bg-transparent w-full"
-          onChange={(e) => (organization.name = e.target.value)}
+          onChange={(e) => organization.$jazz.set("name", e.target.value)}
           required
         />
       </label>

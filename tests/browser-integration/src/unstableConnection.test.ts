@@ -14,7 +14,7 @@ const CustomAccount = co
   })
   .withMigration((me) => {
     if (me.root === undefined) {
-      me.root = TestMAP.create({ value: "initial" }, { owner: me });
+      me.$jazz.set("root", { value: "initial" });
     }
   });
 
@@ -53,7 +53,7 @@ describe("Browser sync on unstable connection", () => {
 
     await syncServer.disconnectAllClients();
 
-    await file.waitForSync();
+    await file.$jazz.waitForSync();
 
     contextManager.done();
     await new AuthSecretStorage().clear();
@@ -66,7 +66,7 @@ describe("Browser sync on unstable connection", () => {
       AccountSchema: CustomAccount,
     });
 
-    const promise2 = FileStream.loadAsBlob(file.id);
+    const promise2 = FileStream.loadAsBlob(file.$jazz.id);
 
     await syncServer.disconnectAllClients();
 
@@ -96,7 +96,7 @@ describe("Browser sync on unstable connection", () => {
 
     await syncServer.setOnline(true);
 
-    await map.waitForSync();
+    await map.$jazz.waitForSync();
 
     contextManager.done();
 
@@ -119,7 +119,7 @@ describe("Browser sync on unstable connection", () => {
 
     await syncServer.setOnline(false);
 
-    const promise = TestMAP.load(map.id);
+    const promise = TestMAP.load(map.$jazz.id);
 
     await new Promise((resolve) => setTimeout(resolve, 10));
     await syncServer.setOnline(true);
@@ -152,7 +152,7 @@ describe("Browser sync on unstable connection", () => {
       group,
     );
 
-    const fileStream = await file.waitForSync();
+    const fileStream = await file.$jazz.waitForSync();
 
     expect(fileStream).toBeDefined();
 
@@ -169,7 +169,7 @@ describe("Browser sync on unstable connection", () => {
       AccountSchema: CustomAccount,
     });
 
-    const fileOnSecondAccount = await FileStream.loadAsBlob(file.id);
+    const fileOnSecondAccount = await FileStream.loadAsBlob(file.$jazz.id);
 
     expect(fileOnSecondAccount?.size).toBe(bytes10MB);
   });

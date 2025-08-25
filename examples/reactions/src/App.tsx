@@ -12,7 +12,7 @@ function App() {
     const group = Group.create();
     group.addMember("everyone", "writer");
     const chat = Reactions.create([], { owner: group });
-    router.navigate("/#/reactions/" + chat.id);
+    router.navigate("/#/reactions/" + chat.$jazz.id);
   };
 
   return (

@@ -16,7 +16,7 @@ export function WelcomeScreen() {
 
   const handleCompleteSetup = () => {
     // Mark account setup as completed
-    me.root.accountSetupCompleted = true;
+    me.root.$jazz.set("accountSetupCompleted", true);
   };
 
   const handleLogin = () => {
@@ -35,7 +35,6 @@ export function WelcomeScreen() {
             headerTitle="Welcome to Music Player! 🎵"
             headerDescription="Let's set up your profile to get started"
             initialUsername={me?.profile?.name || ""}
-            initialAvatar={me?.profile?.avatar}
           />
         </div>
         <div className="lg:hidden pt-4 flex justify-end items-center w-full gap-2">

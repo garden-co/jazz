@@ -12,7 +12,7 @@ function createGroup(me: Account) {
   });
   group.addMember("everyone", "writer");
   console.log("Created group");
-  console.log(`Add "VITE_GROUP_ID=${group.id}" to your .env file`);
+  console.log(`Add "VITE_GROUP_ID=${group.$jazz.id}" to your .env file`);
   return group;
 }
 
@@ -48,14 +48,14 @@ export async function loadCursorContainer(
 
   const cursorContainer = await CursorContainer.loadUnique(
     cursorFeedID,
-    group?.id,
+    group?.$jazz.id,
     {
       resolve: {
         cursorFeed: true,
       },
     },
   );
-  console.log(`Loading cursor container: ${cursorContainer?.id}`);
+  console.log(`Loading cursor container: ${cursorContainer?.$jazz.id}`);
 
   if (cursorContainer === null || cursorContainer === undefined) {
     console.log("Global cursors does not exist, creating...");
@@ -68,16 +68,16 @@ export async function loadCursorContainer(
         unique: cursorFeedID,
       },
     );
-    console.log("Created global cursors", cursorContainer.id);
+    console.log("Created global cursors", cursorContainer.$jazz.id);
     if (cursorContainer.cursorFeed === null) {
       throw new Error("cursorFeed is null");
     }
-    return cursorContainer.cursorFeed.id;
+    return cursorContainer.cursorFeed.$jazz.id;
   } else {
     console.log(
       "Global cursors already exists, loading...",
-      cursorContainer.id,
+      cursorContainer.$jazz.id,
     );
-    return cursorContainer.cursorFeed?.id;
+    return cursorContainer.cursorFeed?.$jazz.id;
   }
 }

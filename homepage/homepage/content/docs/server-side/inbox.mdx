@@ -46,12 +46,12 @@ const {
   syncServer: "wss://cloud.jazz.tools/?key=your-api-key",
 });
 
-inbox.subscribe(
+inbox.$jazz.subscribe(
   BookTicketMessage,
   async (message, senderID) => {
     const madeBy = await co.account().load(senderID, { loadAs: worker });
 
-    const { event } = await message.ensureLoaded({
+    const { event } = await message.$jazz.ensureLoaded({
       resolve: {
         event: {
           reservations: true,
@@ -78,7 +78,7 @@ inbox.subscribe(
 
 ### Handling multiple message types
 
-`inbox.subscribe` should be called once per worker instance.
+`inbox.$jazz.subscribe` should be called once per worker instance.
 
 If you need to handle multiple message types, you can use the `co.discriminatedUnion` function to create a union of the message types.
 
@@ -103,7 +103,7 @@ And check the message type in the handler:
 ```ts
 import { InboxMessage } from "@/schema";
 
-inbox.subscribe(
+inbox.$jazz.subscribe(
   InboxMessage,
   async (message, senderID) => {
     switch (message.type) {
@@ -155,8 +155,8 @@ function EventComponent({ event }: { event: Event }) {
 </CodeGroup>
 
 The `sendInboxMessage` API returns a Promise that waits for the message to be handled by a Worker.
-A message is considered to be handled when the Promise returned by `inbox.subscribe` resolves.
-The value returned will be the id of the CoValue returned in the `inbox.subscribe` resolved promise.
+A message is considered to be handled when the Promise returned by `inbox.$jazz.subscribe` resolves.
+The value returned will be the id of the CoValue returned in the `inbox.$jazz.subscribe` resolved promise.
 
 
 ## Deployment considerations

@@ -37,7 +37,7 @@ export function InboxPage() {
       unsubscribe = inbox.subscribe(PingPong, async (message) => {
         const pingPong = PingPong.create(
           { ping: message.ping, pong: Date.now() },
-          { owner: message._owner },
+          { owner: message.$jazz.owner },
         );
         setPingPong(pingPong);
       });
@@ -76,7 +76,7 @@ export function InboxPage() {
     iframeRef.current?.remove();
 
     const url = new URL(window.location.href);
-    url.searchParams.set("id", me.id);
+    url.searchParams.set("id", me.$jazz.id);
 
     const iframe = createCredentiallessIframe(url.toString());
     document.body.appendChild(iframe);

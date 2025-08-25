@@ -51,10 +51,10 @@ function AuthStateIndicator() {
   const isAuthenticated = useIsAuthenticated();
 
   // Check if guest mode is enabled in JazzReactProvider
-  const isGuest = agent._type !== "Account"
+  const isGuest = agent.$type$ !== "Account"
 
   // Anonymous authentication: has an account but not fully authenticated
-  const isAnonymous = agent._type === "Account" && !isAuthenticated;
+  const isAnonymous = agent.$type$ === "Account" && !isAuthenticated;
   return (
     <div>
       {isGuest && <span>Guest Mode</span>}
@@ -102,7 +102,7 @@ type MusicaAccount = co.loaded<typeof MusicaAccount>
 export async function onAnonymousAccountDiscarded(
   anonymousAccount: MusicaAccount,
 ) {
-  const { root: anonymousAccountRoot } = await anonymousAccount.ensureLoaded({
+  const { root: anonymousAccountRoot } = await anonymousAccount.$jazz.ensureLoaded({
     resolve: {
       root: {
         rootPlaylist: {
@@ -114,7 +114,7 @@ export async function onAnonymousAccountDiscarded(
     },
   });
 
-  const me = await MusicaAccount.getMe().ensureLoaded({
+  const me = await MusicaAccount.getMe().$jazz.ensureLoaded({
     resolve: {
       root: {
         rootPlaylist: {
@@ -127,10 +127,10 @@ export async function onAnonymousAccountDiscarded(
   for (const track of anonymousAccountRoot.rootPlaylist.tracks) {
     if (track.isExampleTrack) continue;
 
-    const trackGroup = track._owner.castAs(Group);
+    const trackGroup = track.$jazz.owner;
     trackGroup.addMember(me, "admin");
 
-    me.root.rootPlaylist.tracks.push(track);
+    me.root.rootPlaylist.tracks.$jazz.push(track);
   }
 }
 ```

@@ -11,6 +11,6 @@
     const group = Group.create();
     group.addMember('everyone', 'writer');
     const chat = Chat.create([], group);
-    goto(`/chat/${chat.id}`);
+    goto(`/chat/${chat.$jazz.id}`);
   });
 </script>

@@ -1,7 +1,6 @@
 import { MusicTrack, MusicaAccount, Playlist } from "@/1_schema";
 import { usePlayMedia } from "@/lib/audio/usePlayMedia";
 import { usePlayState } from "@/lib/audio/usePlayState";
-import { FileStream } from "jazz-tools";
 import { useAccount } from "jazz-tools/react";
 import { useRef, useState } from "react";
 import { updateActivePlaylist, updateActiveTrack } from "./4_actions";
@@ -19,19 +18,21 @@ export function useMediaPlayer() {
 
   const [loading, setLoading] = useState<string | null>(null);
 
-  const activeTrackId = me?.root._refs.activeTrack?.id;
+  const activeTrackId = me?.root.$jazz.refs.activeTrack?.id;
 
   // Reference used to avoid out-of-order track loads
   const lastLoadedTrackId = useRef<string | null>(null);
 
   async function loadTrack(track: MusicTrack, autoPlay = true) {
-    lastLoadedTrackId.current = track.id;
+    lastLoadedTrackId.current = track.$jazz.id;
     audioManager.unloadCurrentAudio();
 
-    setLoading(track.id);
+    setLoading(track.$jazz.id);
     updateActiveTrack(track);
 
-    const file = await FileStream.loadAsBlob(track._refs.file!.id); // TODO: see if we can avoid !
+    const file = await MusicTrack.shape.file.loadAsBlob(
+      track.$jazz.refs.file!.id,
+    ); // TODO: see if we can avoid !
 
     if (!file) {
       setLoading(null);
@@ -40,7 +41,7 @@ export function useMediaPlayer() {
 
     // Check if another track has been loaded during
     // the file download
-    if (lastLoadedTrackId.current !== track.id) {
+    if (lastLoadedTrackId.current !== track.$jazz.id) {
       return;
     }
 
@@ -67,7 +68,10 @@ export function useMediaPlayer() {
   }
 
   async function setActiveTrack(track: MusicTrack, playlist?: Playlist) {
-    if (activeTrackId === track.id && lastLoadedTrackId.current !== null) {
+    if (
+      activeTrackId === track.$jazz.id &&
+      lastLoadedTrackId.current !== null
+    ) {
       playState.toggle();
       return;
     }
