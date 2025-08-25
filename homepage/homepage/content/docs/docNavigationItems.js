@@ -284,6 +284,11 @@ export const docNavigationItems = [
         done: 100,
       },
       {
+        name: "Jazz database adapter for Better Auth",
+        href: "/docs/authentication/better-auth-database-adapter",
+        done: 100,
+      },
+      {
         name: "Writing your own",
         href: "/docs/authentication/writing-your-own",
         done: 0,
