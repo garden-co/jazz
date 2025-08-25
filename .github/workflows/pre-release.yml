@@ -26,7 +26,7 @@ jobs:
         run: pnpm turbo build --filter="./packages/*"
 
       - name: Pre publish
-        run: pnpm exec pkg-pr-new publish --json output.json --comment=off "./packages/*"
+        run: pnpm exec pkg-pr-new publish --json output.json --comment=off "./crates/cojson-core-wasm" "./packages/*" 
 
       - name: Post or update comment
         uses: actions/github-script@v6
