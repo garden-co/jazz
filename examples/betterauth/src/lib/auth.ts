@@ -27,6 +27,8 @@ export const auth = await (async () => {
         console.error("Not implemented");
       },
     },
+
+    // @ts-expect-error
     socialProviders,
     user: {
       deleteUser: {
