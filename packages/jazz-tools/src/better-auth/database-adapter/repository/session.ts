@@ -23,8 +23,10 @@ export class SessionRepository extends JazzRepository {
     databaseRoot: co.loaded<Database, { group: true }>,
     worker: Account,
     betterAuthSchema: BetterAuthDbSchema = {},
+    ensureSync: boolean = false,
   ) {
-    super(databaseSchema, databaseRoot, worker, betterAuthSchema);
+    super(databaseSchema, databaseRoot, worker, betterAuthSchema, ensureSync);
+
     this.userRepository = new UserRepository(
       databaseSchema,
       databaseRoot,

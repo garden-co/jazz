@@ -9,6 +9,7 @@ import {
   it,
   test,
   beforeEach,
+  vi,
 } from "vitest";
 import { Account, co, Group, z } from "jazz-tools";
 import { createWorkerAccount, startSyncServer } from "jazz-tools/testing";
@@ -59,7 +60,7 @@ describe("JazzBetterAuthDatabaseAdapter tests", async () => {
   });
 
   describe("persistence tests", async () => {
-    let syncServer: any;
+    let syncServer: Awaited<ReturnType<typeof startSyncServer>>;
     let accountID: string;
     let accountSecret: string;
 
@@ -252,6 +253,40 @@ describe("JazzBetterAuthDatabaseAdapter tests", async () => {
       });
 
       expect(res.user.id).match(/^co_\w+$/);
+    });
+
+    it.only("should wait for sync before returning", async () => {
+      const { localNode } = syncServer;
+
+      const auth = betterAuth({
+        database: JazzBetterAuthDatabaseAdapter({
+          syncServer: `ws://localhost:${syncServer.port}`,
+          accountID,
+          accountSecret,
+        }),
+      });
+
+      const adapter = (await auth.$context).adapter;
+
+      const handleSyncMessageSpy = vi.spyOn(
+        localNode.syncManager,
+        "handleNewContent",
+      );
+
+      const user = await adapter.create({
+        model: "user",
+        data: {
+          name: "test",
+          email: "test@test.com",
+          password: "12345678",
+        },
+      });
+
+      expect(user.id).toMatch("co_");
+
+      expect(
+        handleSyncMessageSpy.mock.calls.filter(([msg]) => msg.id === user.id),
+      ).toHaveLength(3);
     });
   });
 
