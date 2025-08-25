@@ -228,8 +228,7 @@
     "queueueue": "^4.1.2",
     "tsup": "8.5.0",
     "typescript": "catalog:default",
-    "vitest": "catalog:default",
-    "ws": "^8.14.2"
+    "vitest": "catalog:default"
   },
   "peerDependencies": {
     "@bam.tech/react-native-image-resizer": "*",
