@@ -21,7 +21,11 @@ function useJazzClerkAuth(clerk: MinimalClerkClient) {
   }
 
   const authMethod = useMemo(() => {
-    return new JazzClerkAuth(context.authenticate, authSecretStorage);
+    return new JazzClerkAuth(
+      context.authenticate,
+      context.logOut,
+      authSecretStorage,
+    );
   }, []);
 
   useEffect(() => {
@@ -67,7 +71,7 @@ export const JazzReactProviderWithClerk = <
   }
 
   return (
-    <JazzReactProvider {...props} logOutReplacement={props.clerk.signOut}>
+    <JazzReactProvider {...props} onLogOut={props.clerk.signOut}>
       <RegisterClerkAuth clerk={props.clerk}>
         {props.children}
       </RegisterClerkAuth>

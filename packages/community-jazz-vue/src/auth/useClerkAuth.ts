@@ -13,7 +13,11 @@ export function useClerkAuth(clerk: MinimalClerkClient) {
   // Create auth method similar to React's useMemo pattern
   const authMethod = computed(() => {
     return markRaw(
-      new JazzClerkAuth(context.value.authenticate, authSecretStorage),
+      new JazzClerkAuth(
+        context.value.authenticate,
+        context.value.logOut,
+        authSecretStorage,
+      ),
     );
   });
 

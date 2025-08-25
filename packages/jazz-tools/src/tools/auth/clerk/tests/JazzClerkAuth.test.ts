@@ -13,6 +13,7 @@ const authSecretStorage = new AuthSecretStorage();
 
 describe("JazzClerkAuth", () => {
   const mockAuthenticate = vi.fn();
+  const mockLogOut = vi.fn();
   let auth: JazzClerkAuth;
 
   beforeEach(async () => {
@@ -21,7 +22,7 @@ describe("JazzClerkAuth", () => {
     await createJazzTestAccount({
       isCurrentActiveAccount: true,
     });
-    auth = new JazzClerkAuth(mockAuthenticate, authSecretStorage);
+    auth = new JazzClerkAuth(mockAuthenticate, mockLogOut, authSecretStorage);
   });
 
   describe("onClerkUserChange", () => {
@@ -118,6 +119,35 @@ describe("JazzClerkAuth", () => {
         provider: "clerk",
       });
     });
+
+    it("should call LogOut", async () => {
+      // Set up local auth
+      await authSecretStorage.set({
+        accountID: "xxxx" as ID<Account>,
+        secretSeed: new Uint8Array([2, 2, 2]),
+        accountSecret: "xxxx" as AgentSecret,
+        provider: "anonymous",
+      });
+
+      const mockClerk = {
+        user: {
+          fullName: "Guido",
+          unsafeMetadata: {
+            jazzAccountID: "test123",
+            jazzAccountSecret: "secret123",
+            jazzAccountSeed: [1, 2, 3],
+          },
+        },
+        signOut: vi.fn(),
+      } as unknown as MinimalClerkClient;
+
+      await auth.onClerkUserChange(mockClerk);
+
+      await auth.onClerkUserChange({ user: null });
+
+      expect(authSecretStorage.isAuthenticated).toBe(false);
+      expect(mockLogOut).toHaveBeenCalled();
+    });
   });
 
   describe("registerListener", () => {
@@ -147,7 +177,11 @@ describe("JazzClerkAuth", () => {
     it("should call onClerkUserChange on the first trigger", async () => {
       const { client, triggerUserChange } = setupMockClerk(null);
 
-      const auth = new JazzClerkAuth(mockAuthenticate, authSecretStorage);
+      const auth = new JazzClerkAuth(
+        mockAuthenticate,
+        mockLogOut,
+        authSecretStorage,
+      );
       const onClerkUserChangeSpy = vi.spyOn(auth, "onClerkUserChange");
 
       auth.registerListener(client);
@@ -160,7 +194,11 @@ describe("JazzClerkAuth", () => {
     it("should call onClerkUserChange when user changes", async () => {
       const { client, triggerUserChange } = setupMockClerk(null);
 
-      const auth = new JazzClerkAuth(mockAuthenticate, authSecretStorage);
+      const auth = new JazzClerkAuth(
+        mockAuthenticate,
+        mockLogOut,
+        authSecretStorage,
+      );
       const onClerkUserChangeSpy = vi.spyOn(auth, "onClerkUserChange");
 
       auth.registerListener(client);
@@ -181,7 +219,11 @@ describe("JazzClerkAuth", () => {
     it("should call onClerkUserChange when user passes from null to non-null", async () => {
       const { client, triggerUserChange } = setupMockClerk(null);
 
-      const auth = new JazzClerkAuth(mockAuthenticate, authSecretStorage);
+      const auth = new JazzClerkAuth(
+        mockAuthenticate,
+        mockLogOut,
+        authSecretStorage,
+      );
       const onClerkUserChangeSpy = vi.spyOn(auth, "onClerkUserChange");
 
       auth.registerListener(client);
@@ -194,7 +236,11 @@ describe("JazzClerkAuth", () => {
     it("should not call onClerkUserChange when user is the same", async () => {
       const { client, triggerUserChange } = setupMockClerk(null);
 
-      const auth = new JazzClerkAuth(mockAuthenticate, authSecretStorage);
+      const auth = new JazzClerkAuth(
+        mockAuthenticate,
+        mockLogOut,
+        authSecretStorage,
+      );
       const onClerkUserChangeSpy = vi.spyOn(auth, "onClerkUserChange");
 
       auth.registerListener(client);
@@ -221,7 +267,11 @@ describe("JazzClerkAuth", () => {
     it("should not call onClerkUserChange when user switches from undefined to null", async () => {
       const { client, triggerUserChange } = setupMockClerk(null);
 
-      const auth = new JazzClerkAuth(mockAuthenticate, authSecretStorage);
+      const auth = new JazzClerkAuth(
+        mockAuthenticate,
+        mockLogOut,
+        authSecretStorage,
+      );
       const onClerkUserChangeSpy = vi.spyOn(auth, "onClerkUserChange");
 
       auth.registerListener(client);

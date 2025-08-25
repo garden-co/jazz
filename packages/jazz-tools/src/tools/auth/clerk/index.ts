@@ -18,6 +18,7 @@ export { isClerkCredentials };
 export class JazzClerkAuth {
   constructor(
     private authenticate: AuthenticateAccountFunction,
+    private logOut: () => Promise<void> | void,
     private authSecretStorage: AuthSecretStorage,
   ) {}
 
@@ -77,6 +78,7 @@ export class JazzClerkAuth {
     if (!clerkClient.user) {
       if (isAuthenticated) {
         this.authSecretStorage.clear();
+        await this.logOut();
       }
       return;
     }
