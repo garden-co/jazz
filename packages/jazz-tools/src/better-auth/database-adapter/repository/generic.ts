@@ -1,4 +1,5 @@
 import { CleanedWhere } from "better-auth/adapters";
+import { BetterAuthDbSchema } from "better-auth/db";
 import { Account, CoList, CoMap, Group, co, z } from "jazz-tools";
 import type { Database } from "../schema.js";
 import {
@@ -7,7 +8,6 @@ import {
   paginateList,
   sortListByField,
 } from "../utils.js";
-import { BetterAuthDbSchema } from "better-auth/db";
 
 export class JazzRepository {
   protected databaseSchema: Database;
@@ -16,21 +16,39 @@ export class JazzRepository {
   protected owner: Group;
   protected betterAuthSchema: BetterAuthDbSchema;
 
+  private coValuesTracker:
+    | {
+        done: () => Set<`co_z${string}`>;
+      }
+    | undefined = undefined;
+
   constructor(
     databaseSchema: Database,
     databaseRoot: co.loaded<Database, { group: true }>,
     worker: Account,
     betterAuthSchema: BetterAuthDbSchema = {},
+    ensureSync: boolean = false,
   ) {
     this.databaseSchema = databaseSchema;
     this.databaseRoot = databaseRoot;
     this.worker = worker;
     this.owner = databaseRoot.group;
     this.betterAuthSchema = betterAuthSchema;
+
+    if (ensureSync)
+      this.coValuesTracker =
+        worker._raw.core.node.syncManager.trackDirtyCoValues();
   }
 
   ensureSync() {
-    return this.worker.waitForAllCoValuesSync();
+    if (!this.coValuesTracker)
+      throw new Error("Repository wasn't initialized with ensureSync option");
+
+    return Promise.all(
+      Array.from(this.coValuesTracker.done(), (id) =>
+        this.worker._raw.core.node.syncManager.waitForSync(id),
+      ),
+    );
   }
 
   async create<T extends z.z.core.$ZodLooseShape>(

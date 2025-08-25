@@ -95,7 +95,10 @@ export const JazzBetterAuthDatabaseAdapter = (
         return worker;
       }
 
-      async function initRepository(model: string): Promise<JazzRepository> {
+      async function initRepository(
+        model: string,
+        ensureSync: boolean = false,
+      ): Promise<JazzRepository> {
         let Repository: typeof JazzRepository | undefined = undefined;
         switch (model) {
           case "user":
@@ -123,6 +126,8 @@ export const JazzBetterAuthDatabaseAdapter = (
           JazzSchema.DatabaseRoot,
           database,
           worker,
+          schema,
+          ensureSync,
         );
 
         return repository;
@@ -131,7 +136,7 @@ export const JazzBetterAuthDatabaseAdapter = (
       return {
         create: async ({ data, model, select }) => {
           // console.log("create", { data, model, select });
-          const repository = await initRepository(model);
+          const repository = await initRepository(model, true);
 
           const created = await repository.create(model, data);
 
@@ -141,7 +146,7 @@ export const JazzBetterAuthDatabaseAdapter = (
         },
         update: async ({ model, where, update }) => {
           // console.log("update", { model, where, update });
-          const repository = await initRepository(model);
+          const repository = await initRepository(model, true);
 
           const updated = await repository.update(model, where, update);
 
@@ -155,7 +160,7 @@ export const JazzBetterAuthDatabaseAdapter = (
         },
         updateMany: async ({ model, where, update }) => {
           // console.log("updateMany", { model, where, update });
-          const repository = await initRepository(model);
+          const repository = await initRepository(model, true);
 
           const updated = await repository.update(model, where, update);
 
@@ -165,7 +170,7 @@ export const JazzBetterAuthDatabaseAdapter = (
         },
         delete: async ({ model, where }) => {
           // console.log("delete", { model, where });
-          const repository = await initRepository(model);
+          const repository = await initRepository(model, true);
 
           await repository.deleteValue(model, where);
 
@@ -183,7 +188,7 @@ export const JazzBetterAuthDatabaseAdapter = (
           return repository.findMany(model, where, limit, sortBy, offset);
         },
         deleteMany: async ({ model, where }) => {
-          const repository = await initRepository(model);
+          const repository = await initRepository(model, true);
 
           const deleted = await repository.deleteValue(model, where);
 
