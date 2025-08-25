@@ -1,9 +1,9 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { Account, co } from "jazz-tools";
-import { createWorkerAccount, startSyncServer } from "jazz-tools/testing";
 import { startWorker } from "jazz-tools/worker";
 import { JazzRepository } from "../../repository/generic";
 import { createJazzSchema, Database } from "../../schema";
+import { createWorkerAccount, startSyncServer } from "../sync-utils.js";
 
 describe("Generic Repository", () => {
   let syncServer: any;
