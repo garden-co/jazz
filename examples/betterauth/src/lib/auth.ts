@@ -1,14 +1,18 @@
 import { betterAuth } from "better-auth";
-import { getMigrations } from "better-auth/db";
-import Database from "better-sqlite3";
 import { jazzPlugin } from "jazz-betterauth-server-plugin";
+import { JazzBetterAuthDatabaseAdapter } from "jazz-tools/better-auth/database-adapter";
 import { socialProviders } from "./socialProviders";
 
 export const auth = await (async () => {
   // Configure Better Auth server
   const auth = betterAuth({
     appName: "Jazz Example: Better Auth",
-    database: new Database("sqlite.db"),
+    database: JazzBetterAuthDatabaseAdapter({
+      syncServer: process.env.SYNC_SERVER!,
+      accountID: process.env.WORKER_ACCOUNT_ID!,
+      accountSecret: process.env.WORKER_ACCOUNT_SECRET!,
+      debugLogs: true,
+    }),
     emailAndPassword: {
       enabled: true,
       async sendResetPassword({ url }) {
@@ -23,6 +27,8 @@ export const auth = await (async () => {
         console.error("Not implemented");
       },
     },
+
+    // @ts-expect-error
     socialProviders,
     user: {
       deleteUser: {
@@ -41,10 +47,6 @@ export const auth = await (async () => {
       },
     },
   });
-
-  // Run database migrations
-  const migrations = await getMigrations(auth.options);
-  await migrations.runMigrations();
 
   return auth;
 })();
