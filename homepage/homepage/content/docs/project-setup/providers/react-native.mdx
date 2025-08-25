@@ -19,6 +19,14 @@ Wrap your app components with the `<JazzReactNativeProvider />` component:
 
 <CodeGroup>
 ```tsx twoslash
+/**
+ * Use your email as a temporary key, or get a free
+ * API Key at dashboard.jazz.tools for higher limits.
+ * 
+ * @link https://dashboard.jazz.tools
+*/
+const apiKey = "you@example.com";
+// ---cut---
 // @noErrors: 2307 2686 2664
 // App.tsx
 import { JazzReactNativeProvider } from "jazz-tools/react-native";
@@ -27,7 +35,7 @@ import { MyAppAccount } from "./schema";
 export function MyJazzProvider({ children }: { children: React.ReactNode }) {
   return (
     <JazzReactNativeProvider
-      sync={{ peer: "wss://cloud.jazz.tools/?key=you@example.com" }}
+      sync={{ peer: `wss://cloud.jazz.tools/?key=${apiKey}` }}
       AccountSchema={MyAppAccount}
     >
       {children}
@@ -66,6 +74,13 @@ import React, { ReactNode } from "react";
 function SignInScreen({ auth }: { auth: any }) {
   return null;
 }
+/**
+ * Use your email as a temporary key, or get a free
+ * API Key at dashboard.jazz.tools for higher limits.
+ * 
+ * @link https://dashboard.jazz.tools
+*/
+const apiKey = "you@example.com";
 // ---cut-before---
 // Example with PassphraseAuth
 import { JazzReactNativeProvider, usePassphraseAuth } from "jazz-tools/react-native";
@@ -88,7 +103,7 @@ function JazzAuthentication({ children }: { children: ReactNode }) {
 function AuthenticatedProvider({ children }: { children: ReactNode }) {
   return (
     <JazzReactNativeProvider
-      sync={{ peer: "wss://cloud.jazz.tools/?key=your-api-key" }}
+      sync={{ peer: `wss://cloud.jazz.tools/?key=${apiKey}` }}
     >
       <JazzAuthentication>
         {children}
@@ -129,6 +144,13 @@ import React, { ReactNode } from "react";
 function SignInScreen({ auth }: { auth: any }) {
   return null;
 }
+/**
+ * Use your email as a temporary key, or get a free
+ * API Key at dashboard.jazz.tools for higher limits.
+ * 
+ * @link https://dashboard.jazz.tools
+*/
+const apiKey = "you@example.com";
 // ---cut-before---
 import { JazzReactNativeProvider } from "jazz-tools/react-native";
 import { RNQuickCrypto } from "jazz-tools/react-native/crypto";
@@ -136,7 +158,7 @@ import { RNQuickCrypto } from "jazz-tools/react-native/crypto";
 function MyJazzProvider({ children }: { children: ReactNode }) {
   return (
     <JazzReactNativeProvider
-      sync={{ peer: "wss://cloud.jazz.tools/?key=your-api-key" }}
+      sync={{ peer: `wss://cloud.jazz.tools/?key=${apiKey}` }}
       CryptoProvider={RNQuickCrypto}
     >
       {children}

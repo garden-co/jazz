@@ -429,6 +429,13 @@ export const JazzAccount = co.account({
 
 // @filename: App.tsx
 import * as React from "react";
+/**
+ * Use your email as a temporary key, or get a free
+ * API Key at dashboard.jazz.tools for higher limits.
+ * 
+ * @link https://dashboard.jazz.tools
+*/
+const apiKey = "you@example.com";
 // ---cut---
 import { JazzReactProvider } from "jazz-tools/react";
 import { JazzAccount } from "./schema"; // [!code ++]
@@ -436,7 +443,7 @@ import { JazzAccount } from "./schema"; // [!code ++]
 export function MyJazzProvider({ children }: { children: React.ReactNode }) {
     return (
         <JazzReactProvider
-            sync={{ peer: "wss://cloud.jazz.tools/?key=you@example.com" }}
+            sync={{ peer: `wss://cloud.jazz.tools/?key=${apiKey}` }}
             AccountSchema={JazzAccount} // [!code ++]
         >
             {children}
