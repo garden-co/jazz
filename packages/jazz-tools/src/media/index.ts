@@ -1,12 +1,7 @@
 import type { ImageDefinition } from "jazz-tools";
-import {
-  CreateImageOptions,
-  SourceType,
-  createImageFactory,
-} from "./create-image.js";
+import { CreateImageOptions } from "./create-image-factory";
 
-export { highestResAvailable, loadImage, loadImageBySize } from "./utils.js";
-export { createImageFactory };
+export * from "./exports";
 
 /**
  * Creates an ImageDefinition from an image file or blob with built-in UX features.
@@ -38,7 +33,20 @@ export { createImageFactory };
  *   }
  * }
  * ```
+ * ```
+ */
+export declare function createImage(
+  imageBlobOrFile: Blob | File,
+  options?: CreateImageOptions,
+): Promise<ImageDefinition>;
+
+/**
+ * Creates an ImageDefinition from an image file path with built-in UX features.
  *
+ * This function creates a specialized CoValue for managing images in Jazz applications.
+ * It supports blurry placeholders, built-in resizing, and progressive loading patterns.
+ *
+ * @returns Promise that resolves to an ImageDefinition
  * @example
  * ```ts
  * // React Native example
@@ -56,6 +64,6 @@ export { createImageFactory };
  * ```
  */
 export declare function createImage(
-  imageBlobOrFile: SourceType,
+  filePath: string,
   options?: CreateImageOptions,
 ): Promise<ImageDefinition>;
