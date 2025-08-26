@@ -1,3 +1,4 @@
+import { md5 } from "@noble/hashes/legacy";
 import { Histogram, ValueType, metrics } from "@opentelemetry/api";
 import { PeerState } from "./PeerState.js";
 import { SyncStateManager } from "./SyncStateManager.js";
@@ -8,11 +9,7 @@ import {
 } from "./coValueContentMessage.js";
 import { CoValueCore } from "./coValueCore/coValueCore.js";
 import { getDependedOnCoValuesFromRawData } from "./coValueCore/utils.js";
-import {
-  CoValueHeader,
-  Transaction,
-  VerifiedState,
-} from "./coValueCore/verifiedState.js";
+import { CoValueHeader, Transaction } from "./coValueCore/verifiedState.js";
 import { Signature } from "./crypto/crypto.js";
 import { RawCoID, SessionID, isRawCoID } from "./ids.js";
 import { LocalNode } from "./localNode.js";
@@ -947,5 +944,47 @@ function knownStateIn(msg: LoadMessage | KnownStateMessage) {
     id: msg.id,
     header: msg.header,
     sessions: msg.sessions,
+  };
+}
+
+/**
+ * Returns a ServerPeerSelector that implements the Highest Weighted Random (HWR) algorithm.
+ *
+ * The HWR algorithm deterministically selects the top `n` peers for a given CoValue ID by assigning
+ * each peer a "weight" based on the MD5 hash of the concatenation of the CoValue ID and the peer's ID.
+ * The first 4 bytes of the hash are interpreted as a 32-bit unsigned integer, which serves as the peer's weight.
+ * Peers are then sorted in descending order of weight, and the top `n` are selected.
+ */
+export function hwrServerPeerSelector(n: number): ServerPeerSelector {
+  if (n === 0) {
+    throw new Error("n must be greater than 0");
+  }
+
+  const enc = new TextEncoder();
+
+  // Take the md5 hash of the peer ID and CoValue ID and convert the first 4 bytes to a 32-bit unsigned integer
+  const getWeight = (id: RawCoID, peer: PeerState): number => {
+    const hash = md5(enc.encode(id + peer.id));
+    return (
+      ((hash[0]! << 24) | (hash[1]! << 16) | (hash[2]! << 8) | hash[3]!) >>> 0
+    );
+  };
+
+  return (id, serverPeers) => {
+    if (serverPeers.length <= n) {
+      return serverPeers;
+    }
+
+    const weightedPeers = serverPeers.map((peer) => {
+      return {
+        peer,
+        weight: getWeight(id, peer),
+      };
+    });
+
+    return weightedPeers
+      .sort((a, b) => b.weight - a.weight)
+      .slice(0, n)
+      .map((wp) => wp.peer);
   };
 }

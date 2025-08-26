@@ -1,17 +1,15 @@
 import { beforeEach, describe, expect, test } from "vitest";
-import { setCoValueLoadingRetryDelay } from "../config";
+import { Peer } from "../exports";
+import { hwrServerPeerSelector, ServerPeerSelector } from "../sync";
 import {
   SyncMessagesLog,
   TEST_NODE_CONFIG,
-  blockMessageTypeOnOutgoingPeer,
   connectedPeersWithMessagesTracking,
   getSyncServerConnectedPeer,
-  loadCoValueOrFail,
   setupTestAccount,
   setupTestNode,
 } from "./testUtils";
-import { Peer } from "../exports";
-import { ServerPeerSelector } from "../sync";
+import { PeerState } from "../PeerState";
 
 beforeEach(async () => {
   // We want to simulate a real world communication that happens asynchronously
@@ -115,5 +113,114 @@ describe("sharding", () => {
     expect(edge.syncManager.getPeers("co_z12345").length).toBe(
       2 + 1, // 2 clients + 1 selected core
     );
+  });
+
+  describe("hwrServerPeerSelector", () => {
+    const createMockPeer = (
+      id: string,
+      role: "server" | "client" = "server",
+    ): Peer => ({
+      id,
+      role,
+      incoming: {
+        close: () => {},
+        onMessage: () => {},
+        onClose: () => {},
+      },
+      outgoing: {
+        push: () => {},
+        close: () => {},
+        onClose: () => {},
+      },
+    });
+
+    test("selects top n peers by hash weight", () => {
+      const allPeers = Array.from(
+        { length: 5 },
+        (_, i) => new PeerState(createMockPeer(`peer_${i + 1}`), undefined),
+      );
+
+      // Create selector that picks top 2 peers
+      const selector = hwrServerPeerSelector(2);
+      const selectedPeers = selector("co_ztest123", allPeers);
+
+      // Should return exactly 2 peers (n=2)
+      expect(selectedPeers.length).toBe(2);
+
+      // All returned peers should be from the original set
+      expect(allPeers).toContain(selectedPeers[0]);
+      expect(allPeers).toContain(selectedPeers[1]);
+
+      // The two peers should be different
+      expect(selectedPeers[0]).not.toBe(selectedPeers[1]);
+    });
+
+    test("returns all peers when n >= total peers", () => {
+      const allPeers = Array.from(
+        { length: 3 },
+        (_, i) => new PeerState(createMockPeer(`peer_${i + 1}`), undefined),
+      );
+
+      // Create a selector that picks top 10 peers (more than we'll have)
+      const selector = hwrServerPeerSelector(10);
+      const selectedPeers = selector("co_ztest123", allPeers);
+
+      // Should return all 3 peers since n=10 > 3
+      expect(selectedPeers.length).toBe(3);
+      expect(new Set(selectedPeers.map((p) => p.id))).toEqual(
+        new Set(allPeers.map((p) => p.id)),
+      );
+    });
+
+    test("returns consistent results for same CoValue ID", () => {
+      const allPeers = Array.from(
+        { length: 5 },
+        (_, i) => new PeerState(createMockPeer(`peer_${i + 1}`), undefined),
+      );
+
+      const selector = hwrServerPeerSelector(2);
+
+      // Call the selector multiple times with the same CoValue ID
+      const result1 = selector("co_ztest123", allPeers);
+      const result2 = selector("co_ztest123", allPeers);
+      const result3 = selector("co_ztest123", allPeers);
+
+      // Results should be consistent (same peers selected each time for the same CoValue ID)
+      expect(new Set(result1.map((p) => p.id))).toEqual(
+        new Set(result2.map((p) => p.id)),
+      );
+      expect(new Set(result2.map((p) => p.id))).toEqual(
+        new Set(result3.map((p) => p.id)),
+      );
+    });
+
+    test("returns different results for different CoValue IDs", () => {
+      const allPeers = Array.from(
+        { length: 6 },
+        (_, i) => new PeerState(createMockPeer(`peer_${i + 1}`), undefined),
+      );
+
+      const selector = hwrServerPeerSelector(5);
+
+      // Call the selector with different CoValue IDs
+      const result1 = selector("co_ztest123", allPeers);
+      const result2 = selector("co_ztest456", allPeers);
+      const result3 = selector("co_ztest789", allPeers);
+
+      expect(result1.length).toBe(5);
+      expect(result2.length).toBe(5);
+      expect(result3.length).toBe(5);
+
+      // Results should all be in different orders
+      expect(result1).not.toEqual(result2);
+      expect(result1).not.toEqual(result3);
+      expect(result2).not.toEqual(result3);
+    });
+
+    test("with n=0 throws an error", () => {
+      expect(() => hwrServerPeerSelector(0)).toThrow(
+        "n must be greater than 0",
+      );
+    });
   });
 });
