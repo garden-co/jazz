@@ -197,6 +197,26 @@ function transformPropertyAccess(sourceFile: SourceFile) {
     }
   });
 
+  // Transform obj._raw to obj.$jazz.raw
+  sourceFile.forEachDescendant((node) => {
+    if (node.getKind() === SyntaxKind.PropertyAccessExpression) {
+      const propertyAccess = node as PropertyAccessExpression;
+      const propertyName = propertyAccess.getNameNode();
+
+      if (propertyName.getText() === "_raw") {
+        const object = propertyAccess.getExpression();
+        const hasOptional = hasOptionalChaining(propertyAccess);
+        let newText = createPropertyAccessText(
+          object,
+          "$jazz.raw",
+          hasOptional,
+        );
+
+        propertyAccess.replaceWithText(newText);
+      }
+    }
+  });
+
   // Transform obj._type to obj.$type$
   sourceFile.forEachDescendant((node) => {
     if (node.getKind() === SyntaxKind.PropertyAccessExpression) {
@@ -269,6 +289,7 @@ function transformDestructuringAssignments(sourceFile: SourceFile) {
                 return (
                   name === "id" ||
                   name === "_owner" ||
+                  name === "_raw" ||
                   name === "_type" ||
                   name === "_createdAt" ||
                   name === "_lastUpdatedAt"
@@ -292,6 +313,7 @@ function transformDestructuringAssignments(sourceFile: SourceFile) {
                 return (
                   name === "id" ||
                   name === "_owner" ||
+                  name === "_raw" ||
                   name === "_createdAt" ||
                   name === "_lastUpdatedAt"
                 );
@@ -317,6 +339,7 @@ function transformDestructuringAssignments(sourceFile: SourceFile) {
                   return (
                     name === "id" ||
                     name === "_owner" ||
+                    name === "_raw" ||
                     name === "_createdAt" ||
                     name === "_lastUpdatedAt"
                   );
@@ -340,6 +363,7 @@ function transformDestructuringAssignments(sourceFile: SourceFile) {
                   return ![
                     "id",
                     "_owner",
+                    "_raw",
                     "_type",
                     "_createdAt",
                     "_lastUpdatedAt",
@@ -360,6 +384,8 @@ function transformDestructuringAssignments(sourceFile: SourceFile) {
                       const propText = propertyName.getText();
                       if (propText === "_owner") {
                         return name !== "owner" ? `owner: ${name}` : "owner";
+                      } else if (propText === "_raw") {
+                        return name !== "raw" ? `raw: ${name}` : "raw";
                       } else if (propText === "_createdAt") {
                         return name !== "createdAt"
                           ? `createdAt: ${name}`
@@ -413,6 +439,8 @@ function transformDestructuringAssignments(sourceFile: SourceFile) {
                     const propText = propertyName.getText();
                     if (propText === "_owner") {
                       return name !== "owner" ? `owner: ${name}` : "owner";
+                    } else if (propText === "_raw") {
+                      return name !== "raw" ? `raw: ${name}` : "raw";
                     } else if (propText === "_createdAt") {
                       return name !== "createdAt"
                         ? `createdAt: ${name}`

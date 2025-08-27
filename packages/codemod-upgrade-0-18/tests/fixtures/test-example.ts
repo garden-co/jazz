@@ -27,6 +27,7 @@ function examplePropertyAccess() {
   const chat = Chat.create([], Group.create());
   const chatId = chat.id; // Will become: chat.$jazz.id
   const owner = chat._owner.castAs(Group); // Will become: chat.$jazz.owner
+  const raw = chat._raw; // Will become: chat.$jazz.raw
   const refs = chat._refs.messages; // Will become: chat.$jazz.refs.messages
   const edits = chat._edits.title; // Will become: chat.$jazz.getEdits().title
   const type = chat._type; // Will become: chat.$type$
@@ -39,6 +40,7 @@ function examplePropertyAccess() {
   return {
     chatId,
     owner,
+    raw,
     refs,
     edits,
     type,
@@ -187,13 +189,18 @@ function exampleDestructuring() {
   const { id } = chat; // Will become: const { id } = chat.$jazz
 
   // Multiple properties from $jazz
-  const { id: chatId, _owner, _createdAt } = chat; // Will become: const { id: chatId, owner: _owner, createdAt: _createdAt } = chat.$jazz
+  const { id: chatId, _owner, _raw, _createdAt } = chat; // Will become: const { id: chatId, owner: _owner, raw: _raw, createdAt: _createdAt } = chat.$jazz
 
   // Type property destructuring
   const { _type } = message; // Will become: const { $type$: _type } = message
 
   // Mixed properties (should split into multiple statements)
-  const { id: messageId, _type: messageType, _owner: messageOwner } = message; // Will split into separate statements
+  const {
+    id: messageId,
+    _type: messageType,
+    _owner: messageOwner,
+    _raw: messageRaw,
+  } = message; // Will split into separate statements
 
   // Regular properties should not be transformed
   const { text } = message; // Should remain unchanged
@@ -202,11 +209,13 @@ function exampleDestructuring() {
     id,
     chatId,
     _owner,
+    _raw,
     _createdAt,
     _type,
     messageId,
     messageType,
     messageOwner,
+    messageRaw,
     text,
   };
 }
