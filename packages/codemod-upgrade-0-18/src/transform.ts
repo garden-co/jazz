@@ -537,6 +537,10 @@ function transformMethodCalls(sourceFile: SourceFile) {
               callee as PropertyAccessExpression
             ).getExpression();
 
+            if (!isJazzValue(baseObject)) {
+              return;
+            }
+
             if (baseObject.getText().includes(".$jazz")) {
               return;
             }
