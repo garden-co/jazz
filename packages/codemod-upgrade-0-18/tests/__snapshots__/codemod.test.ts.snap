@@ -189,17 +189,17 @@ function exampleDestructuring() {
   const message = Message.create({ text: "Hello" }, Group.create());
 
   // Simple id destructuring
-  const { id } = chat; // Will become: const { id } = chat.$jazz
+  const { id } = chat.$jazz // Will become: const { id } = chat.$jazz
 
   // Multiple properties from $jazz
-  const { id: chatId, _owner, _raw, _createdAt } = chat.$jazz // Will become: const { id: chatId, owner: _owner, raw: _raw, createdAt: _createdAt } = chat.$jazz
+  const { id: chatId, owner: _owner, raw: _raw, createdAt: _createdAt } = chat.$jazz // Will become: const { id: chatId, owner: _owner, raw: _raw, createdAt: _createdAt } = chat.$jazz
 
   // Type property destructuring
-  const { _type } = message; // Will become: const { $type$: _type } = message
+  const { $type$: _type } = message // Will become: const { $type$: _type } = message
 
   // Mixed properties (should split into multiple statements)
   const { id: messageId, owner: messageOwner, raw: messageRaw } = message.$jazz;
-    const { $type$: messageType } = message; // Will split into separate statements
+    const { $type$: messageType } = message // Will split into separate statements
 
   // Regular properties should not be transformed
   const { text } = message; // Should remain unchanged

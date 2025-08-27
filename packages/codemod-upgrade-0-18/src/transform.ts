@@ -11,6 +11,7 @@ import {
   VariableStatement,
   VariableDeclaration,
   ObjectBindingPattern,
+  BindingElement,
 } from "ts-morph";
 import fs from "node:fs";
 
@@ -89,34 +90,37 @@ export function transformFile(sourceFile: SourceFile): string {
   // 1. Transform property access patterns
   transformPropertyAccess(sourceFile);
 
-  // 2. Transform destructuring assignments
-  transformDestructuringAssignments(sourceFile);
+  // 2. Transform destructuring assignments for Jazz properties
+  transformJazzDestructuringAssignments(sourceFile);
 
-  // 3. Transform _refs.property to $jazz.refs.property
+  // 3. Transform destructuring assignments for type properties
+  transformTypeDestructuringAssignments(sourceFile);
+
+  // 4. Transform _refs.property to $jazz.refs.property
   transformRefsAccess(sourceFile);
 
-  // 4. Transform _edits.property to $jazz.getEdits().property
+  // 5. Transform _edits.property to $jazz.getEdits().property
   transformEditsAccess(sourceFile);
 
-  // 5. Transform method calls
+  // 6. Transform method calls
   transformMethodCalls(sourceFile);
 
-  // 6. Transform array operations
+  // 7. Transform array operations
   transformArrayOperations(sourceFile);
 
-  // 7. Transform property assignments
+  // 8. Transform property assignments
   transformPropertyAssignments(sourceFile);
 
-  // 8. Transform array index assignments
+  // 9. Transform array index assignments
   transformArrayIndexAssignments(sourceFile);
 
-  // 9. Transform delete statements
+  // 10. Transform delete statements
   transformDeleteStatements(sourceFile);
 
-  // 10. Transform splice operations
+  // 11. Transform splice operations
   transformSpliceOperations(sourceFile);
 
-  // 11. Remove .castAs() calls
+  // 12. Remove .castAs() calls
   removeCastAsCalls(sourceFile);
 
   return sourceFile.getFullText();
@@ -261,8 +265,60 @@ function transformPropertyAccess(sourceFile: SourceFile) {
   });
 }
 
-function transformDestructuringAssignments(sourceFile: SourceFile) {
-  // Transform destructuring assignments like const { id } = coValue to const { id } = coValue.$jazz
+function getElementPropertyInfo(element: BindingElement) {
+  const propertyName = element.getPropertyNameNode();
+  const name = element.getName();
+  const propText = propertyName ? propertyName.getText() : null;
+  return { propertyName, name, propText };
+}
+
+function isJazzProperty(propText: string | null, name: string | null): boolean {
+  const jazzProps = ["id", "_owner", "_raw", "_createdAt", "_lastUpdatedAt"];
+  return (
+    !!(propText && jazzProps.includes(propText)) ||
+    !!(name && jazzProps.includes(name))
+  );
+}
+
+function isTypeProperty(propText: string | null, name: string | null): boolean {
+  return !!(propText && propText === "_type") || !!(name && name === "_type");
+}
+
+function transformJazzElement(element: BindingElement): string {
+  const { propertyName, name, propText } = getElementPropertyInfo(element);
+
+  if (propertyName && name) {
+    // Explicit destructuring like { _owner: someVar }
+    if (propText === "_owner") {
+      return name !== "owner" ? `owner: ${name}` : "owner";
+    } else if (propText === "_raw") {
+      return name !== "raw" ? `raw: ${name}` : "raw";
+    } else if (propText === "_createdAt") {
+      return name !== "createdAt" ? `createdAt: ${name}` : "createdAt";
+    } else if (propText === "_lastUpdatedAt") {
+      return name !== "lastUpdatedAt"
+        ? `lastUpdatedAt: ${name}`
+        : "lastUpdatedAt";
+    }
+    return element.getText();
+  } else if (name) {
+    // Shorthand destructuring like { _owner }
+    if (name === "_owner") {
+      return "owner: _owner";
+    } else if (name === "_raw") {
+      return "raw: _raw";
+    } else if (name === "_createdAt") {
+      return "createdAt: _createdAt";
+    } else if (name === "_lastUpdatedAt") {
+      return "lastUpdatedAt: _lastUpdatedAt";
+    }
+    return name; // For 'id' and other properties, keep as-is
+  }
+  return element.getText();
+}
+
+function transformJazzDestructuringAssignments(sourceFile: SourceFile) {
+  // Transform destructuring assignments for Jazz properties like const { id } = coValue to const { id } = coValue.$jazz
   sourceFile.forEachDescendant((node) => {
     if (node.getKind() === SyntaxKind.VariableStatement) {
       const variableStatement = node as VariableStatement;
@@ -279,24 +335,13 @@ function transformDestructuringAssignments(sourceFile: SourceFile) {
         ) {
           const objectPattern = nameNode as ObjectBindingPattern;
 
-          // Check if any of the destructured properties are Jazz properties we need to transform
-          const hasJazzProperties = objectPattern
-            .getElements()
-            .some((element) => {
-              const propertyName = element.getPropertyNameNode();
-              if (propertyName) {
-                const name = propertyName.getText();
-                return (
-                  name === "id" ||
-                  name === "_owner" ||
-                  name === "_raw" ||
-                  name === "_type" ||
-                  name === "_createdAt" ||
-                  name === "_lastUpdatedAt"
-                );
-              }
-              return false;
-            });
+          const elements = objectPattern.getElements();
+
+          // Check if any Jazz properties need transformation
+          const hasJazzProperties = elements.some((element) => {
+            const { propText, name } = getElementPropertyInfo(element);
+            return isJazzProperty(propText, name);
+          });
 
           if (hasJazzProperties && isJazzValue(initializer)) {
             // Check if initializer already includes $jazz
@@ -304,72 +349,22 @@ function transformDestructuringAssignments(sourceFile: SourceFile) {
               return;
             }
 
-            // Transform based on the properties being destructured
-            const elements = objectPattern.getElements();
-            const needsJazzTransform = elements.some((element) => {
-              const propertyName = element.getPropertyNameNode();
-              if (propertyName) {
-                const name = propertyName.getText();
-                return (
-                  name === "id" ||
-                  name === "_owner" ||
-                  name === "_raw" ||
-                  name === "_createdAt" ||
-                  name === "_lastUpdatedAt"
-                );
-              }
-              return false;
+            // Check if we have regular properties mixed with Jazz properties
+            const hasRegularProperties = elements.some((element) => {
+              const { propText, name } = getElementPropertyInfo(element);
+              return !isJazzProperty(propText, name);
             });
 
-            const needsTypeTransform = elements.some((element) => {
-              const propertyName = element.getPropertyNameNode();
-              if (propertyName) {
-                const name = propertyName.getText();
-                return name === "_type";
-              }
-              return false;
-            });
-
-            if (needsJazzTransform && needsTypeTransform) {
+            if (hasRegularProperties) {
               // Mixed case: split into multiple statements
               const jazzElements = elements.filter((element) => {
-                const propertyName = element.getPropertyNameNode();
-                if (propertyName) {
-                  const name = propertyName.getText();
-                  return (
-                    name === "id" ||
-                    name === "_owner" ||
-                    name === "_raw" ||
-                    name === "_createdAt" ||
-                    name === "_lastUpdatedAt"
-                  );
-                }
-                return false;
-              });
-
-              const typeElements = elements.filter((element) => {
-                const propertyName = element.getPropertyNameNode();
-                if (propertyName) {
-                  const name = propertyName.getText();
-                  return name === "_type";
-                }
-                return false;
+                const { propText, name } = getElementPropertyInfo(element);
+                return isJazzProperty(propText, name);
               });
 
               const otherElements = elements.filter((element) => {
-                const propertyName = element.getPropertyNameNode();
-                if (propertyName) {
-                  const name = propertyName.getText();
-                  return ![
-                    "id",
-                    "_owner",
-                    "_raw",
-                    "_type",
-                    "_createdAt",
-                    "_lastUpdatedAt",
-                  ].includes(name);
-                }
-                return true;
+                const { propText, name } = getElementPropertyInfo(element);
+                return !isJazzProperty(propText, name);
               });
 
               // Build new variable statements
@@ -377,43 +372,10 @@ function transformDestructuringAssignments(sourceFile: SourceFile) {
 
               if (jazzElements.length > 0) {
                 const jazzElementsText = jazzElements
-                  .map((el) => {
-                    const propertyName = el.getPropertyNameNode();
-                    const name = el.getName();
-                    if (propertyName && name) {
-                      const propText = propertyName.getText();
-                      if (propText === "_owner") {
-                        return name !== "owner" ? `owner: ${name}` : "owner";
-                      } else if (propText === "_raw") {
-                        return name !== "raw" ? `raw: ${name}` : "raw";
-                      } else if (propText === "_createdAt") {
-                        return name !== "createdAt"
-                          ? `createdAt: ${name}`
-                          : "createdAt";
-                      } else if (propText === "_lastUpdatedAt") {
-                        return name !== "lastUpdatedAt"
-                          ? `lastUpdatedAt: ${name}`
-                          : "lastUpdatedAt";
-                      }
-                      return el.getText();
-                    }
-                    return el.getText();
-                  })
+                  .map(transformJazzElement)
                   .join(", ");
                 newStatements.push(
                   `const { ${jazzElementsText} } = ${initializer.getText()}.$jazz`,
-                );
-              }
-
-              if (typeElements.length > 0) {
-                const typeElementsText = typeElements
-                  .map((el) => {
-                    const name = el.getName();
-                    return name !== "$type$" ? `$type$: ${name}` : "$type$";
-                  })
-                  .join(", ");
-                newStatements.push(
-                  `const { ${typeElementsText} } = ${initializer.getText()}`,
                 );
               }
 
@@ -429,55 +391,70 @@ function transformDestructuringAssignments(sourceFile: SourceFile) {
               variableStatement.replaceWithText(
                 newStatements.join(";\n") + ";",
               );
-            } else if (needsJazzTransform) {
-              // Transform property names for $jazz access
+            } else {
+              // Pure Jazz properties: transform property names for $jazz access
               const transformedElements = elements
-                .map((element) => {
-                  const propertyName = element.getPropertyNameNode();
-                  const name = element.getName();
-                  if (propertyName && name) {
-                    const propText = propertyName.getText();
-                    if (propText === "_owner") {
-                      return name !== "owner" ? `owner: ${name}` : "owner";
-                    } else if (propText === "_raw") {
-                      return name !== "raw" ? `raw: ${name}` : "raw";
-                    } else if (propText === "_createdAt") {
-                      return name !== "createdAt"
-                        ? `createdAt: ${name}`
-                        : "createdAt";
-                    } else if (propText === "_lastUpdatedAt") {
-                      return name !== "lastUpdatedAt"
-                        ? `lastUpdatedAt: ${name}`
-                        : "lastUpdatedAt";
-                    }
-                    return element.getText();
-                  }
-                  return element.getText();
-                })
+                .map(transformJazzElement)
                 .join(", ");
 
               const newText = `const { ${transformedElements} } = ${initializer.getText()}.$jazz`;
               variableStatement.replaceWithText(newText);
-            } else if (needsTypeTransform) {
-              // Transform _type to $type$
-              const transformedElements = elements
-                .map((element) => {
-                  const propertyName = element.getPropertyNameNode();
-                  const name = element.getName();
-                  if (propertyName && name) {
-                    const propText = propertyName.getText();
-                    if (propText === "_type") {
-                      return name !== "$type$" ? `$type$: ${name}` : "$type$";
-                    }
-                    return element.getText();
+            }
+          }
+        }
+      });
+    }
+  });
+}
+
+function transformTypeDestructuringAssignments(sourceFile: SourceFile) {
+  // Transform destructuring assignments for type properties like const { _type } = coValue to const { $type$ } = coValue
+  sourceFile.forEachDescendant((node) => {
+    if (node.getKind() === SyntaxKind.VariableStatement) {
+      const variableStatement = node as VariableStatement;
+      const declarationList = variableStatement.getDeclarationList();
+
+      declarationList.getDeclarations().forEach((declaration) => {
+        const nameNode = declaration.getNameNode();
+        const initializer = declaration.getInitializer();
+
+        // Check if this is an object destructuring pattern
+        if (
+          nameNode.getKind() === SyntaxKind.ObjectBindingPattern &&
+          initializer
+        ) {
+          const objectPattern = nameNode as ObjectBindingPattern;
+          const elements = objectPattern.getElements();
+
+          // Check if any type properties need transformation
+          const hasTypeProperties = elements.some((element) => {
+            const { propText, name } = getElementPropertyInfo(element);
+            return isTypeProperty(propText, name);
+          });
+
+          if (hasTypeProperties && isJazzValue(initializer)) {
+            // Transform _type to $type$ in place (no need to split since both are on the same object)
+            const transformedElements = elements
+              .map((element) => {
+                const { propertyName, name, propText } =
+                  getElementPropertyInfo(element);
+                if (propertyName && name) {
+                  if (propText === "_type") {
+                    return name !== "$type$" ? `$type$: ${name}` : "$type$";
                   }
                   return element.getText();
-                })
-                .join(", ");
+                } else if (name) {
+                  if (name === "_type") {
+                    return "$type$: _type";
+                  }
+                  return name;
+                }
+                return element.getText();
+              })
+              .join(", ");
 
-              const newText = `const { ${transformedElements} } = ${initializer.getText()}`;
-              variableStatement.replaceWithText(newText);
-            }
+            const newText = `const { ${transformedElements} } = ${initializer.getText()}`;
+            variableStatement.replaceWithText(newText);
           }
         }
       });
