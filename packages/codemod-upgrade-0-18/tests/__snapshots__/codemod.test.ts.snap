@@ -30,6 +30,7 @@ function examplePropertyAccess() {
   const chat = Chat.create([], Group.create());
   const chatId = chat.$jazz.id; // Will become: chat.$jazz.id
   const owner = chat.$jazz.owner; // Will become: chat.$jazz.owner
+  const raw = chat.$jazz.raw; // Will become: chat.$jazz.raw
   const refs = chat.$jazz.refs.messages; // Will become: chat.$jazz.refs.messages
   const edits = chat.$jazz.getEdits().title; // Will become: chat.$jazz.getEdits().title
   const type = chat.$type$; // Will become: chat.$type$
@@ -42,6 +43,7 @@ function examplePropertyAccess() {
   return {
     chatId,
     owner,
+    raw,
     refs,
     edits,
     type,
@@ -181,6 +183,42 @@ function exampleTimestamps() {
   const lastEdit = message?.$jazz.getEdits().text?.madeAt; // Will become: message.$jazz.getEdits()?.text?.madeAt
 }
 
+// Example 11: Destructuring assignments
+function exampleDestructuring() {
+  const chat = Chat.create([], Group.create());
+  const message = Message.create({ text: "Hello" }, Group.create());
+
+  // Simple id destructuring
+  const { id } = chat; // Will become: const { id } = chat.$jazz
+
+  // Multiple properties from $jazz
+  const { id: chatId, _owner, _raw, _createdAt } = chat.$jazz // Will become: const { id: chatId, owner: _owner, raw: _raw, createdAt: _createdAt } = chat.$jazz
+
+  // Type property destructuring
+  const { _type } = message; // Will become: const { $type$: _type } = message
+
+  // Mixed properties (should split into multiple statements)
+  const { id: messageId, owner: messageOwner, raw: messageRaw } = message.$jazz;
+    const { $type$: messageType } = message; // Will split into separate statements
+
+  // Regular properties should not be transformed
+  const { text } = message; // Should remain unchanged
+
+  return {
+    id,
+    chatId,
+    _owner,
+    _raw,
+    _createdAt,
+    _type,
+    messageId,
+    messageType,
+    messageOwner,
+    messageRaw,
+    text,
+  };
+}
+
 export {
   examplePropertyAccess,
   examplePropertyAssignments,
@@ -192,6 +230,7 @@ export {
   exampleDeleteOperations,
   exampleTypeChecking,
   exampleTimestamps,
+  exampleDestructuring,
   invalidSimilarCode,
 };
 "
