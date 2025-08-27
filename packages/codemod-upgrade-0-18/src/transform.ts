@@ -582,7 +582,20 @@ function singleRun(projectPath: string) {
     });
   } else {
     project = new Project();
-    project.addSourceFilesAtPaths(`${projectPath}/**/*.{ts,tsx,js,jsx}`);
+
+    // Check if projectPath ends with a supported file extension
+    const supportedExtensions = [".ts", ".tsx", ".js", ".jsx"];
+    const hasSupportedExtension = supportedExtensions.some((ext) =>
+      projectPath.endsWith(ext),
+    );
+
+    if (hasSupportedExtension) {
+      // If it's a specific file, add it directly
+      project.addSourceFilesAtPaths(projectPath);
+    } else {
+      // If it's a directory, add with glob pattern
+      project.addSourceFilesAtPaths(`${projectPath}/**/*.{ts,tsx,js,jsx}`);
+    }
   }
 
   const sourceFiles = project.getSourceFiles();

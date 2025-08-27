@@ -185,3 +185,27 @@ of viewing CoValues as JSON objects.
 
 #### Group Property Removal
 The `root` and `profile` fields have been removed from the Group class. These fields were not documented and were not intended to be used by users.
+
+### Codemod
+
+We provide a codemod to make the upgrade to the new `$jazz` field quicker.
+
+The codemod is type-aware, and it is required to have `jazz-tools` already upgraded to 0.18.
+
+```bash
+npx jazz-tools-codemod-0-18@latest
+```
+
+Or if you want to run it on a specific path or file:
+
+```bash
+npx jazz-tools-codemod-0-18@latest ./path/to/your/src
+```
+
+<Alert type="warning">
+Be sure to run the codemod on a clean project, without any other changes.
+</Alert>
+
+The codemod gets you through the 90% of the work, as there are some cases where it is not possible to automatically upgrade the code.
+
+Running a TypeScript check after the codemod will help you to find the remaining issues.
