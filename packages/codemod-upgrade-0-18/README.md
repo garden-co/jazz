@@ -8,7 +8,7 @@ Codemods are automated refactoring tools that help you upgrade your codebase.
 
 They rewrite your code using AST modification.
 
-We use ts-morph under the hood, so we do also some typechecks to target Jazz specific values in our migrations.
+We use `ts-morph` under the hood, to target specific Jazz types in our migrations.
 
 Codemods modify your code, not always in the correct way.
 Be sure that everything important is committed in your repo and there aren't unstaged changes that might get lost in the process.
