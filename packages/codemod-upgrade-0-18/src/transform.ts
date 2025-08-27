@@ -191,7 +191,7 @@ function transformPropertyAccess(sourceFile: SourceFile) {
     }
   });
 
-  // Transform obj._type to obj.$jazz.$type$
+  // Transform obj._type to obj.$type$
   sourceFile.forEachDescendant((node) => {
     if (node.getKind() === SyntaxKind.PropertyAccessExpression) {
       const propertyAccess = node as PropertyAccessExpression;
@@ -337,6 +337,8 @@ function transformMethodCalls(sourceFile: SourceFile) {
 }
 
 function transformArrayOperations(sourceFile: SourceFile) {
+  const arrayOperationNames = ["push", "unshift", "shift", "pop"];
+
   sourceFile.forEachDescendant((node) => {
     if (node.getKind() === SyntaxKind.CallExpression) {
       const callExpression = node as CallExpression;
@@ -344,7 +346,9 @@ function transformArrayOperations(sourceFile: SourceFile) {
 
       if (callee.getKind() === SyntaxKind.PropertyAccessExpression) {
         const property = (callee as PropertyAccessExpression).getNameNode();
-        if (property.getText() === "push") {
+        const propertyName = property.getText();
+
+        if (arrayOperationNames.includes(propertyName)) {
           const baseObject = (
             callee as PropertyAccessExpression
           ).getExpression();
@@ -368,7 +372,7 @@ function transformArrayOperations(sourceFile: SourceFile) {
           );
           const newText = createPropertyAccessText(
             baseObject,
-            `$jazz.push(${args})`,
+            `$jazz.${propertyName}(${args})`,
             hasOptional,
           );
           callExpression.replaceWithText(newText);
@@ -556,6 +560,10 @@ function removeCastAsCalls(sourceFile: SourceFile) {
       const callExpression = node as CallExpression;
       const callee = callExpression.getExpression();
 
+      if (!isJazzValue(callee)) {
+        return;
+      }
+
       if (callee.getKind() === SyntaxKind.PropertyAccessExpression) {
         const property = (callee as PropertyAccessExpression).getNameNode();
         if (property.getText() === "castAs") {
@@ -584,7 +592,7 @@ function singleRun(projectPath: string) {
     project = new Project();
 
     // Check if projectPath ends with a supported file extension
-    const supportedExtensions = [".ts", ".tsx", ".js", ".jsx"];
+    const supportedExtensions = [".ts", ".tsx"];
     const hasSupportedExtension = supportedExtensions.some((ext) =>
       projectPath.endsWith(ext),
     );
@@ -594,7 +602,7 @@ function singleRun(projectPath: string) {
       project.addSourceFilesAtPaths(projectPath);
     } else {
       // If it's a directory, add with glob pattern
-      project.addSourceFilesAtPaths(`${projectPath}/**/*.{ts,tsx,js,jsx}`);
+      project.addSourceFilesAtPaths(`${projectPath}/**/*.{ts,tsx}`);
     }
   }
 

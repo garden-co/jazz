@@ -58,9 +58,13 @@ function invalidSimilarCode() {
     name: "John",
     age: "30",
     city: "New York",
+    castAs() {
+      return this;
+    },
   };
   obj.name = "Jane";
   delete obj.age;
+  obj.castAs(Group);
 }
 
 function invalidSimilarCode2(args: { id: string; message: Message }) {
@@ -89,6 +93,9 @@ function exampleArrayOperations() {
 
   chat.push(message); // Will become: chat.messages.$jazz.push(message)
   chat.splice(0, 1); // Will become: chat.messages.$jazz.splice(0, 1)
+  chat.unshift(message); // Will become: chat.messages.$jazz.unshift(message)
+  chat.shift(); // Will become: chat.messages.$jazz.shift()
+  chat.pop(); // Will become: chat.messages.$jazz.pop()
 }
 
 // Example 4: Method calls
