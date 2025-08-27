@@ -178,6 +178,39 @@ function exampleTimestamps() {
   const lastEdit = message._edits?.text?.madeAt; // Will become: message.$jazz.getEdits()?.text?.madeAt
 }
 
+// Example 11: Destructuring assignments
+function exampleDestructuring() {
+  const chat = Chat.create([], Group.create());
+  const message = Message.create({ text: "Hello" }, Group.create());
+
+  // Simple id destructuring
+  const { id } = chat; // Will become: const { id } = chat.$jazz
+
+  // Multiple properties from $jazz
+  const { id: chatId, _owner, _createdAt } = chat; // Will become: const { id: chatId, owner: _owner, createdAt: _createdAt } = chat.$jazz
+
+  // Type property destructuring
+  const { _type } = message; // Will become: const { $type$: _type } = message
+
+  // Mixed properties (should split into multiple statements)
+  const { id: messageId, _type: messageType, _owner: messageOwner } = message; // Will split into separate statements
+
+  // Regular properties should not be transformed
+  const { text } = message; // Should remain unchanged
+
+  return {
+    id,
+    chatId,
+    _owner,
+    _createdAt,
+    _type,
+    messageId,
+    messageType,
+    messageOwner,
+    text,
+  };
+}
+
 export {
   examplePropertyAccess,
   examplePropertyAssignments,
@@ -189,5 +222,6 @@ export {
   exampleDeleteOperations,
   exampleTypeChecking,
   exampleTimestamps,
+  exampleDestructuring,
   invalidSimilarCode,
 };

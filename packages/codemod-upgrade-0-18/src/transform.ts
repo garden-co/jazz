@@ -8,6 +8,9 @@ import {
   ElementAccessExpression,
   DeleteExpression,
   SourceFile,
+  VariableStatement,
+  VariableDeclaration,
+  ObjectBindingPattern,
 } from "ts-morph";
 import fs from "node:fs";
 
@@ -86,31 +89,34 @@ export function transformFile(sourceFile: SourceFile): string {
   // 1. Transform property access patterns
   transformPropertyAccess(sourceFile);
 
-  // 2. Transform _refs.property to $jazz.refs.property
+  // 2. Transform destructuring assignments
+  transformDestructuringAssignments(sourceFile);
+
+  // 3. Transform _refs.property to $jazz.refs.property
   transformRefsAccess(sourceFile);
 
-  // 3. Transform _edits.property to $jazz.getEdits().property
+  // 4. Transform _edits.property to $jazz.getEdits().property
   transformEditsAccess(sourceFile);
 
-  // 4. Transform method calls
+  // 5. Transform method calls
   transformMethodCalls(sourceFile);
 
-  // 5. Transform array operations
+  // 6. Transform array operations
   transformArrayOperations(sourceFile);
 
-  // 6. Transform property assignments
+  // 7. Transform property assignments
   transformPropertyAssignments(sourceFile);
 
-  // 7. Transform array index assignments
+  // 8. Transform array index assignments
   transformArrayIndexAssignments(sourceFile);
 
-  // 8. Transform delete statements
+  // 9. Transform delete statements
   transformDeleteStatements(sourceFile);
 
-  // 9. Transform splice operations
+  // 10. Transform splice operations
   transformSpliceOperations(sourceFile);
 
-  // 10. Remove .castAs() calls
+  // 11. Remove .castAs() calls
   removeCastAsCalls(sourceFile);
 
   return sourceFile.getFullText();
@@ -231,6 +237,222 @@ function transformPropertyAccess(sourceFile: SourceFile) {
         );
         propertyAccess.replaceWithText(newText);
       }
+    }
+  });
+}
+
+function transformDestructuringAssignments(sourceFile: SourceFile) {
+  // Transform destructuring assignments like const { id } = coValue to const { id } = coValue.$jazz
+  sourceFile.forEachDescendant((node) => {
+    if (node.getKind() === SyntaxKind.VariableStatement) {
+      const variableStatement = node as VariableStatement;
+      const declarationList = variableStatement.getDeclarationList();
+
+      declarationList.getDeclarations().forEach((declaration) => {
+        const nameNode = declaration.getNameNode();
+        const initializer = declaration.getInitializer();
+
+        // Check if this is an object destructuring pattern
+        if (
+          nameNode.getKind() === SyntaxKind.ObjectBindingPattern &&
+          initializer
+        ) {
+          const objectPattern = nameNode as ObjectBindingPattern;
+
+          // Check if any of the destructured properties are Jazz properties we need to transform
+          const hasJazzProperties = objectPattern
+            .getElements()
+            .some((element) => {
+              const propertyName = element.getPropertyNameNode();
+              if (propertyName) {
+                const name = propertyName.getText();
+                return (
+                  name === "id" ||
+                  name === "_owner" ||
+                  name === "_type" ||
+                  name === "_createdAt" ||
+                  name === "_lastUpdatedAt"
+                );
+              }
+              return false;
+            });
+
+          if (hasJazzProperties && isJazzValue(initializer)) {
+            // Check if initializer already includes $jazz
+            if (initializer.getText().includes(".$jazz")) {
+              return;
+            }
+
+            // Transform based on the properties being destructured
+            const elements = objectPattern.getElements();
+            const needsJazzTransform = elements.some((element) => {
+              const propertyName = element.getPropertyNameNode();
+              if (propertyName) {
+                const name = propertyName.getText();
+                return (
+                  name === "id" ||
+                  name === "_owner" ||
+                  name === "_createdAt" ||
+                  name === "_lastUpdatedAt"
+                );
+              }
+              return false;
+            });
+
+            const needsTypeTransform = elements.some((element) => {
+              const propertyName = element.getPropertyNameNode();
+              if (propertyName) {
+                const name = propertyName.getText();
+                return name === "_type";
+              }
+              return false;
+            });
+
+            if (needsJazzTransform && needsTypeTransform) {
+              // Mixed case: split into multiple statements
+              const jazzElements = elements.filter((element) => {
+                const propertyName = element.getPropertyNameNode();
+                if (propertyName) {
+                  const name = propertyName.getText();
+                  return (
+                    name === "id" ||
+                    name === "_owner" ||
+                    name === "_createdAt" ||
+                    name === "_lastUpdatedAt"
+                  );
+                }
+                return false;
+              });
+
+              const typeElements = elements.filter((element) => {
+                const propertyName = element.getPropertyNameNode();
+                if (propertyName) {
+                  const name = propertyName.getText();
+                  return name === "_type";
+                }
+                return false;
+              });
+
+              const otherElements = elements.filter((element) => {
+                const propertyName = element.getPropertyNameNode();
+                if (propertyName) {
+                  const name = propertyName.getText();
+                  return ![
+                    "id",
+                    "_owner",
+                    "_type",
+                    "_createdAt",
+                    "_lastUpdatedAt",
+                  ].includes(name);
+                }
+                return true;
+              });
+
+              // Build new variable statements
+              let newStatements: string[] = [];
+
+              if (jazzElements.length > 0) {
+                const jazzElementsText = jazzElements
+                  .map((el) => {
+                    const propertyName = el.getPropertyNameNode();
+                    const name = el.getName();
+                    if (propertyName && name) {
+                      const propText = propertyName.getText();
+                      if (propText === "_owner") {
+                        return name !== "owner" ? `owner: ${name}` : "owner";
+                      } else if (propText === "_createdAt") {
+                        return name !== "createdAt"
+                          ? `createdAt: ${name}`
+                          : "createdAt";
+                      } else if (propText === "_lastUpdatedAt") {
+                        return name !== "lastUpdatedAt"
+                          ? `lastUpdatedAt: ${name}`
+                          : "lastUpdatedAt";
+                      }
+                      return el.getText();
+                    }
+                    return el.getText();
+                  })
+                  .join(", ");
+                newStatements.push(
+                  `const { ${jazzElementsText} } = ${initializer.getText()}.$jazz`,
+                );
+              }
+
+              if (typeElements.length > 0) {
+                const typeElementsText = typeElements
+                  .map((el) => {
+                    const name = el.getName();
+                    return name !== "$type$" ? `$type$: ${name}` : "$type$";
+                  })
+                  .join(", ");
+                newStatements.push(
+                  `const { ${typeElementsText} } = ${initializer.getText()}`,
+                );
+              }
+
+              if (otherElements.length > 0) {
+                const otherElementsText = otherElements
+                  .map((el) => el.getText())
+                  .join(", ");
+                newStatements.push(
+                  `const { ${otherElementsText} } = ${initializer.getText()}`,
+                );
+              }
+
+              variableStatement.replaceWithText(
+                newStatements.join(";\n") + ";",
+              );
+            } else if (needsJazzTransform) {
+              // Transform property names for $jazz access
+              const transformedElements = elements
+                .map((element) => {
+                  const propertyName = element.getPropertyNameNode();
+                  const name = element.getName();
+                  if (propertyName && name) {
+                    const propText = propertyName.getText();
+                    if (propText === "_owner") {
+                      return name !== "owner" ? `owner: ${name}` : "owner";
+                    } else if (propText === "_createdAt") {
+                      return name !== "createdAt"
+                        ? `createdAt: ${name}`
+                        : "createdAt";
+                    } else if (propText === "_lastUpdatedAt") {
+                      return name !== "lastUpdatedAt"
+                        ? `lastUpdatedAt: ${name}`
+                        : "lastUpdatedAt";
+                    }
+                    return element.getText();
+                  }
+                  return element.getText();
+                })
+                .join(", ");
+
+              const newText = `const { ${transformedElements} } = ${initializer.getText()}.$jazz`;
+              variableStatement.replaceWithText(newText);
+            } else if (needsTypeTransform) {
+              // Transform _type to $type$
+              const transformedElements = elements
+                .map((element) => {
+                  const propertyName = element.getPropertyNameNode();
+                  const name = element.getName();
+                  if (propertyName && name) {
+                    const propText = propertyName.getText();
+                    if (propText === "_type") {
+                      return name !== "$type$" ? `$type$: ${name}` : "$type$";
+                    }
+                    return element.getText();
+                  }
+                  return element.getText();
+                })
+                .join(", ");
+
+              const newText = `const { ${transformedElements} } = ${initializer.getText()}`;
+              variableStatement.replaceWithText(newText);
+            }
+          }
+        }
+      });
     }
   });
 }
