@@ -44,8 +44,8 @@ describe("createImage", async () => {
     expect(image.placeholderDataURL).not.toBeDefined();
     expect(image.progressive).toBe(false);
     expect(image.original).toBeDefined();
-    expect(image[`1x1`]).toBeDefined();
-    expect(image[`1x1`]).toStrictEqual(image.original);
+    expect(image.resolutions[`1x1`]).toBeDefined();
+    expect(image.resolutions[`1x1`]).toStrictEqual(image.original);
   });
 
   it("should create the image with original and placeholder", async () => {
@@ -95,7 +95,7 @@ describe("createImage", async () => {
     expect(image.placeholderDataURL).not.toBeDefined();
     expect(image.progressive).toBe(false);
     expect(image.original).toBeDefined();
-    expect(image[`256x53`]).toStrictEqual(image.original);
+    expect(image.resolutions[`256x53`]).toStrictEqual(image.original);
 
     expect(resize).toHaveBeenCalledWith(imageBlob, 256, 53);
   });
@@ -121,7 +121,7 @@ describe("createImage", async () => {
     expect(image.placeholderDataURL).not.toBeDefined();
     expect(image.progressive).toBe(false);
     expect(image.original).toBeDefined();
-    expect(image[`1x1`]).toStrictEqual(image.original);
+    expect(image.resolutions[`1x1`]).toStrictEqual(image.original);
 
     expect(resize).not.toHaveBeenCalled();
   });
@@ -145,9 +145,9 @@ describe("createImage", async () => {
     expect(image.originalSize).toEqual([1920, 400]);
     expect(image.placeholderDataURL).not.toBeDefined();
 
-    expect(image[`256x53`]).toBeDefined();
-    expect(image[`1024x213`]).toBeDefined();
-    expect(image[`2048x427`]).not.toBeDefined();
+    expect(image.resolutions[`256x53`]).toBeDefined();
+    expect(image.resolutions[`1024x213`]).toBeDefined();
+    expect(image.resolutions[`2048x427`]).not.toBeDefined();
 
     expect(resize).toHaveBeenCalledWith(imageBlob, 256, 53);
     expect(resize).toHaveBeenCalledWith(imageBlob, 1024, 213);
@@ -174,9 +174,9 @@ describe("createImage", async () => {
 
     expect(image.originalSize).toEqual([256, 53]);
     expect(image.placeholderDataURL).not.toBeDefined();
-    expect(image[`256x53`]).toBeDefined();
-    expect(image[`1024x213`]).not.toBeDefined();
-    expect(image[`2048x427`]).not.toBeDefined();
+    expect(image.resolutions[`256x53`]).toBeDefined();
+    expect(image.resolutions[`1024x213`]).not.toBeDefined();
+    expect(image.resolutions[`2048x427`]).not.toBeDefined();
 
     expect(resize).toHaveBeenCalledWith(imageBlob, 256, 53);
     expect(resize).not.toHaveBeenCalledWith(imageBlob, 1024, 213);

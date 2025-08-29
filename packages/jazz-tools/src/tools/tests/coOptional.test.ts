@@ -79,6 +79,7 @@ describe("co.optional", () => {
         originalSize: [1920, 1080],
         original: FileStream.create(),
         progressive: false,
+        resolutions: {},
       }),
     );
     schema.$jazz.set(

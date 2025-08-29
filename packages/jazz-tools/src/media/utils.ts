@@ -6,7 +6,7 @@ export function highestResAvailable(
   wantedWidth: number,
   wantedHeight: number,
 ): { width: number; height: number; image: FileStream } | null {
-  const availableSizes: [number, number, string][] = image.$jazz.raw
+  const availableSizes: [number, number, string][] = image.resolutions.$jazz.raw
     .keys()
     .filter((key) => /^\d+x\d+$/.test(key))
     .map((key) => {
@@ -30,7 +30,7 @@ export function highestResAvailable(
         size,
         match: sizesMatchWanted(size[0], size[1], wantedWidth, wantedHeight),
         isLoaded: isLoaded(
-          image.$jazz.raw.get(size[2]) as CoID<any> | undefined,
+          image.resolutions.$jazz.raw.get(size[2]) as CoID<any> | undefined,
         ),
       };
     })
@@ -40,19 +40,20 @@ export function highestResAvailable(
   // note: `toReversed` is not available in react-native.
   const bestLoaded = [...sortedSizes]
     .reverse()
-    .find((el) => el.isLoaded && image[el.size[2]]?.getChunks());
+    .find((el) => el.isLoaded && image.resolutions?.[el.size[2]]?.getChunks());
 
   // if I can't find a good match, let's use the highest resolution
   const bestTarget =
     sortedSizes.find((el) => el.match > 0.95) || sortedSizes.at(-1);
 
   // if the best target is already loaded, we are done
-  if (image[bestTarget!.size[2]]?.getChunks()) {
-    return image[bestTarget!.size[2]]
+  const bestTargetImage = image.resolutions?.[bestTarget!.size[2]];
+  if (bestTargetImage?.getChunks()) {
+    return bestTargetImage
       ? {
           width: bestTarget!.size[0],
           height: bestTarget!.size[1],
-          image: image[bestTarget!.size[2]]!,
+          image: bestTargetImage,
         }
       : null;
   }
@@ -60,12 +61,13 @@ export function highestResAvailable(
   // if the best already loaded is not the best target
   // let's trigger the load of the best target
   if (bestLoaded) {
-    image[bestTarget!.size[2]]?.getChunks();
-    return image[bestLoaded.size[2]]
+    bestTargetImage?.getChunks();
+    const bestLoadedImage = image.resolutions?.[bestLoaded.size[2]];
+    return bestLoadedImage
       ? {
           width: bestLoaded.size[0],
           height: bestLoaded.size[1],
-          image: image[bestLoaded.size[2]]!,
+          image: bestLoadedImage,
         }
       : null;
   }
@@ -73,7 +75,7 @@ export function highestResAvailable(
   // if nothing is loaded, then start fetching all the images till the best
   for (let size of sortedSizes) {
     if (size.match <= bestTarget!.match) {
-      image[size.size[2]]?.getChunks();
+      image.resolutions?.[size.size[2]]?.getChunks();
     }
   }
 
@@ -152,10 +154,11 @@ export async function loadImageBySize(
   wantedWidth: number,
   wantedHeight: number,
 ): Promise<{ width: number; height: number; image: FileStream } | null> {
-  // @ts-expect-error The resolved type for CoMap does not include catchall properties
   const image: ImageDefinition | null =
     typeof imageOrId === "string"
-      ? await ImageDefinition.load(imageOrId)
+      ? await ImageDefinition.load(imageOrId, {
+          resolve: { resolutions: true },
+        })
       : imageOrId;
 
   if (image === null) {
@@ -166,7 +169,7 @@ export async function loadImageBySize(
     return loadImage(imageOrId);
   }
 
-  const availableSizes: [number, number, string][] = image.$jazz.raw
+  const availableSizes: [number, number, string][] = image.resolutions.$jazz.raw
     .keys()
     .filter((key) => /^\d+x\d+$/.test(key))
     .map((key) => {
@@ -192,7 +195,7 @@ export async function loadImageBySize(
   // image[bestTarget.size[2]] returns undefined if FileStream hasn't loaded yet.
   // Since we only need the file's ID to fetch it later, we check the raw _refs
   // which contain only the linked covalue's ID.
-  const file = image.$jazz.refs[bestTarget.size[2]];
+  const file = image.resolutions?.$jazz.refs[bestTarget.size[2]];
 
   if (!file) {
     return null;

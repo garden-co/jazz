@@ -78,7 +78,9 @@ export const Image = forwardRef<HTMLImageElement, ImageProps>(function Image(
   { imageId, width, height, ...props },
   ref,
 ) {
-  const image = useCoState(ImageDefinition, imageId);
+  const image = useCoState(ImageDefinition, imageId, {
+    resolve: { resolutions: true },
+  });
   const lastBestImage = useRef<[string, string] | null>(null);
 
   /**

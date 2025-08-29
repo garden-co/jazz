@@ -44,6 +44,7 @@ async function handleFileUpload(event: React.ChangeEvent<HTMLInputElement>) {
       maxSize: 1024,
       placeholder: "blur",
       progressive: true,
+      resolutions: {},
     });
 
     // Store the image in your application data
@@ -219,6 +220,7 @@ import { ImageDefinition } from "jazz-tools";
 
 const image = await ImageDefinition.load("123", {
   resolve: {
+    resolutions: true,
     original: true,
   },
 });
@@ -285,7 +287,7 @@ import { ImageDefinition } from "jazz-tools";
 // function highestResAvailable(image: ImageDefinition, wantedWidth: number, wantedHeight: number): FileStream | null
 import { highestResAvailable } from "jazz-tools/media";
 
-const image = await ImageDefinition.load("123");
+const image = await ImageDefinition.load("123", { resolve: { resolutions: true } });
 
 image?.$jazz.subscribe({}, (image) => {
   const bestImage = highestResAvailable(image, 600, 600);

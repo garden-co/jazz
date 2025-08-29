@@ -20,8 +20,8 @@ describe("createImage - Browser Edition", async () => {
     });
 
     expect(image.originalSize).toEqual([600, 125]);
-    expect(image["600x125"]).toBeDefined();
-    expect(image["256x53"]).toBeDefined();
+    expect(image.resolutions["600x125"]).toBeDefined();
+    expect(image.resolutions["256x53"]).toBeDefined();
 
     const imgOriginal = document.createElement("img");
     imgOriginal.src = URL.createObjectURL(image.original!.toBlob()!);
@@ -34,7 +34,9 @@ describe("createImage - Browser Edition", async () => {
     URL.revokeObjectURL(imgOriginal.src);
 
     const imgResized = document.createElement("img");
-    imgResized.src = URL.createObjectURL(image["256x53"]!.toBlob()!);
+    imgResized.src = URL.createObjectURL(
+      image.resolutions["256x53"]!.toBlob()!,
+    );
 
     await new Promise((resolve) => (imgResized.onload = resolve));
 
@@ -58,7 +60,7 @@ describe("createImage - Browser Edition", async () => {
     });
 
     expect(pngImage.original!.toBlob()!.type).toBe("image/png");
-    expect(pngImage["256x53"]!.toBlob()!.type).toBe("image/png");
+    expect(pngImage.resolutions["256x53"]!.toBlob()!.type).toBe("image/png");
 
     const jpegBlob = new Blob(
       [Uint8Array.from(White1920, (c) => c.charCodeAt(0))],
@@ -73,7 +75,7 @@ describe("createImage - Browser Edition", async () => {
     });
 
     expect(jpegImage.original!.toBlob()!.type).toBe("image/jpeg");
-    expect(jpegImage["256x53"]!.toBlob()!.type).toBe("image/jpeg");
+    expect(jpegImage.resolutions["256x53"]!.toBlob()!.type).toBe("image/jpeg");
   });
 });
 

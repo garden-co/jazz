@@ -68,7 +68,9 @@ export const Image = forwardRef<RNImage, ImageProps>(function Image(
   { imageId, width, height, ...props },
   ref,
 ) {
-  const image = useCoState(ImageDefinition, imageId);
+  const image = useCoState(ImageDefinition, imageId, {
+    resolve: { resolutions: true },
+  });
   const [src, setSrc] = useState<string | undefined>(image?.placeholderDataURL);
 
   const dimensions: { width: number | undefined; height: number | undefined } =
@@ -116,29 +118,32 @@ export const Image = forwardRef<RNImage, ImageProps>(function Image(
     let lastBestImage: FileStream | string | undefined =
       image.placeholderDataURL;
 
-    const unsub = image.$jazz.subscribe({}, (update) => {
-      if (lastBestImage === undefined && update.placeholderDataURL) {
-        setSrc(update.placeholderDataURL);
-        lastBestImage = update.placeholderDataURL;
-      }
+    const unsub = image.$jazz.subscribe(
+      { resolve: { resolutions: true } },
+      (update) => {
+        if (lastBestImage === undefined && update.placeholderDataURL) {
+          setSrc(update.placeholderDataURL);
+          lastBestImage = update.placeholderDataURL;
+        }
 
-      const bestImage = highestResAvailable(
-        update,
-        dimensions.width || dimensions.height || 9999,
-        dimensions.height || dimensions.width || 9999,
-      );
+        const bestImage = highestResAvailable(
+          update,
+          dimensions.width || dimensions.height || 9999,
+          dimensions.height || dimensions.width || 9999,
+        );
 
-      if (!bestImage) return;
+        if (!bestImage) return;
 
-      if (lastBestImage === bestImage.image) return;
+        if (lastBestImage === bestImage.image) return;
 
-      const url = bestImage.image.asBase64({ dataURL: true });
+        const url = bestImage.image.asBase64({ dataURL: true });
 
-      if (url) {
-        setSrc(url);
-        lastBestImage = bestImage.image;
-      }
-    });
+        if (url) {
+          setSrc(url);
+          lastBestImage = bestImage.image;
+        }
+      },
+    );
 
     return unsub;
   }, [image]);

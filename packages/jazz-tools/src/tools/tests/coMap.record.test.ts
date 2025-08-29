@@ -383,6 +383,7 @@ describe("CoMap.Record", async () => {
         original: FileStream.create(),
         progressive: false,
         originalSize: [1920, 1080],
+        resolutions: {},
       }),
     });
 
