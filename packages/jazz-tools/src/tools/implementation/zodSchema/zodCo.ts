@@ -17,6 +17,7 @@ import {
   createCoreCoListSchema,
   createCoreCoMapSchema,
   createCoreCoPlainTextSchema,
+  createCoreCoRecordSchema,
   createCoreFileStreamSchema,
   hydrateCoreCoValueSchema,
   isAnyCoValueSchema,
@@ -130,13 +131,11 @@ export const coRecordDefiner = <
   K extends z.core.$ZodString<string>,
   V extends AnyZodOrCoValueSchema,
 >(
-  _keyType: K,
+  keyType: K,
   valueType: V,
 ): CoRecordSchema<K, V> => {
-  return coMapDefiner({}).catchall(valueType) as unknown as CoRecordSchema<
-    K,
-    V
-  >;
+  const coreSchema = createCoreCoRecordSchema(keyType, valueType);
+  return hydrateCoreCoValueSchema(coreSchema);
 };
 
 export const coListDefiner = <T extends AnyZodOrCoValueSchema>(

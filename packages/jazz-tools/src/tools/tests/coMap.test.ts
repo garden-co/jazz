@@ -412,28 +412,6 @@ describe("CoMap", async () => {
       });
     });
 
-    it("should allow extra properties when catchall is provided", () => {
-      const Person = co
-        .map({
-          name: z.string(),
-          age: z.number(),
-        })
-        .catchall(z.string());
-
-      const person = Person.create({ name: "John", age: 20 });
-      expect(person.name).toEqual("John");
-      expect(person.age).toEqual(20);
-      expect(person.extra).toBeUndefined();
-
-      person.$jazz.set("name", "Jane");
-      person.$jazz.set("age", 28);
-      person.$jazz.set("extra", "extra");
-
-      expect(person.name).toEqual("Jane");
-      expect(person.age).toEqual(28);
-      expect(person.extra).toEqual("extra");
-    });
-
     test("CoMap with reference can be created with a shallowly resolved reference", async () => {
       const Dog = co.map({
         name: z.string(),
@@ -2575,27 +2553,6 @@ describe("co.map schema", () => {
 
       expect(person.name).toEqual("John");
     });
-
-    test("the new schema does not include catchall properties", () => {
-      const Person = co
-        .map({
-          name: z.string(),
-          age: z.number(),
-        })
-        .catchall(z.string());
-
-      const PersonWithName = Person.pick({
-        name: true,
-      });
-
-      expect(PersonWithName.catchAll).toBeUndefined();
-
-      const person = PersonWithName.create({
-        name: "John",
-      });
-      // @ts-expect-error - property `extraField` does not exist in person
-      expect(person.extraField).toBeUndefined();
-    });
   });
 
   describe("partial()", () => {
@@ -2626,22 +2583,6 @@ describe("co.map schema", () => {
       expect(draftPerson.name).toEqual("John");
       expect(draftPerson.age).toEqual(20);
       expect(draftPerson.pet).toEqual(rex);
-    });
-
-    test("the new schema includes catchall properties", () => {
-      const Person = co
-        .map({
-          name: z.string(),
-          age: z.number(),
-        })
-        .catchall(z.string());
-
-      const DraftPerson = Person.partial();
-
-      const draftPerson = DraftPerson.create({});
-      draftPerson.$jazz.set("extraField", "extra");
-
-      expect(draftPerson.extraField).toEqual("extra");
     });
   });
 

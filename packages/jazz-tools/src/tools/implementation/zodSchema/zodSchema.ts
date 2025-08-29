@@ -59,8 +59,8 @@ export type CoValueSchemaFromCoreSchema<S extends CoreCoValueSchema> =
     ? AccountSchema<Shape>
     : S extends CoreCoRecordSchema<infer K, infer V>
       ? CoRecordSchema<K, V>
-      : S extends CoreCoMapSchema<infer Shape, infer Config>
-        ? CoMapSchema<Shape, Config>
+      : S extends CoreCoMapSchema<infer Shape>
+        ? CoMapSchema<Shape>
         : S extends CoreCoListSchema<infer T>
           ? CoListSchema<T>
           : S extends CoreCoFeedSchema<infer T>

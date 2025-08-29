@@ -47,8 +47,6 @@ export type CoFieldSchemaInit<S extends CoValueClass | AnyZodOrCoValueSchema> =
         ? InstanceType<S>
         : never;
 
-// Due to a TS limitation with types that contain known properties and
-// an index signature, we cannot accept catchall properties on creation
 export type CoMapSchemaInit<Shape extends z.core.$ZodLooseShape> = Simplify<
   {
     /**

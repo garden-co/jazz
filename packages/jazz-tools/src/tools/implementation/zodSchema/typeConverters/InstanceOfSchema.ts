@@ -36,17 +36,12 @@ export type InstanceOfSchema<S extends CoValueClass | AnyZodOrCoValueSchema> =
             readonly [key in z.output<K> &
               string]: InstanceOrPrimitiveOfSchema<V>;
           } & CoMap
-        : S extends CoreCoMapSchema<infer Shape, infer CatchAll>
+        : S extends CoreCoMapSchema<infer Shape>
           ? {
               readonly [key in keyof Shape]: InstanceOrPrimitiveOfSchema<
                 Shape[key]
               >;
-            } & (CatchAll extends AnyZodOrCoValueSchema
-              ? {
-                  readonly [key: string]: InstanceOrPrimitiveOfSchema<CatchAll>;
-                }
-              : {}) &
-              CoMap
+            } & CoMap
           : S extends CoreCoListSchema<infer T>
             ? CoList<InstanceOrPrimitiveOfSchema<T>>
             : S extends CoreCoFeedSchema<infer T>
