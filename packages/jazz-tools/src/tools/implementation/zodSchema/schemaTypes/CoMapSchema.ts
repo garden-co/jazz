@@ -131,6 +131,11 @@ export interface CoMapSchema<
     R
   > | null>;
 
+  /**
+   * @deprecated Use `co.map().catchall` will be removed in an upcoming version.
+   *
+   * Use a `co.record` nested inside a `co.map` if you need to store key-value properties.
+   */
   catchall<T extends AnyZodOrCoValueSchema>(schema: T): CoMapSchema<Shape, T>;
 
   withMigration(
