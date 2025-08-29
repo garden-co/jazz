@@ -1,6 +1,6 @@
 import { BetterAuthDbSchema } from "better-auth/db";
 import { CleanedWhere } from "better-auth/adapters";
-import { co, CoMap, z, Account } from "jazz-tools";
+import { co, Account } from "jazz-tools";
 import { JazzRepository } from "./generic";
 import { UserRepository } from "./user";
 import {
@@ -9,7 +9,7 @@ import {
   filterListByWhere,
   isWhereBySingleField,
 } from "../utils";
-import type { Database } from "../schema";
+import type { Database, TableItem } from "../schema";
 
 type UserSchema = co.Map<{
   sessions: co.List<co.Map<any>>;
@@ -38,32 +38,29 @@ export class SessionRepository extends JazzRepository {
   /**
    * Custom logic: sessions are stored inside the user object
    */
-  async create<T extends z.z.core.$ZodLooseShape>(
+  async create(
     model: string,
-    data: T,
+    data: Record<string, any>,
     uniqueId?: string,
-  ): Promise<{ id: string } & T> {
+  ): Promise<TableItem> {
     if (typeof data.token !== "string" || typeof data.userId !== "string") {
       throw new Error("Token and userId are required for session creation");
     }
 
-    const user = await this.userRepository.findById<co.loaded<UserSchema>>(
-      "user",
-      [
-        {
-          field: "id",
-          operator: "eq",
-          value: data.userId,
-          connector: "AND",
-        },
-      ],
-    );
+    const user = await this.userRepository.findById("user", [
+      {
+        field: "id",
+        operator: "eq",
+        value: data.userId,
+        connector: "AND",
+      },
+    ]);
 
     if (!user) {
       throw new Error("User not found");
     }
 
-    const { sessions } = await user.ensureLoaded({
+    const { sessions } = await user.$jazz.ensureLoaded({
       resolve: {
         sessions: true,
       },
@@ -74,7 +71,7 @@ export class SessionRepository extends JazzRepository {
       owner: this.owner,
     });
 
-    sessions.push(session);
+    sessions.$jazz.push(session);
 
     return session;
   }
@@ -82,21 +79,19 @@ export class SessionRepository extends JazzRepository {
   /**
    * Custom logic: sessions are stored inside the user object.
    */
-  async findMany<T extends CoMap>(
+  async findMany(
     model: string,
     where: CleanedWhere[] | undefined,
     limit?: number,
     sortBy?: { field: string; direction: "asc" | "desc" },
     offset?: number,
-  ): Promise<T[]> {
+  ): Promise<TableItem[]> {
     if (isWhereBySingleField("id", where)) {
-      return this.findById<T>(model, where).then((node) =>
-        node ? [node] : [],
-      );
+      return this.findById(model, where).then((node) => (node ? [node] : []));
     }
 
     if (isWhereBySingleField("token", where)) {
-      return this.findByUnique<T>(model, where).then((node) =>
+      return this.findByUnique(model, where).then((node) =>
         node ? [node] : [],
       );
     }
@@ -104,23 +99,20 @@ export class SessionRepository extends JazzRepository {
     if (containWhereByField("userId", where)) {
       const [userIdWhere, otherWhere] = extractWhereByField("userId", where);
 
-      const user = await this.userRepository.findById<co.loaded<UserSchema>>(
-        "user",
-        [
-          {
-            field: "id",
-            operator: "eq",
-            value: userIdWhere!.value as string,
-            connector: "AND",
-          },
-        ],
-      );
+      const user = await this.userRepository.findById("user", [
+        {
+          field: "id",
+          operator: "eq",
+          value: userIdWhere!.value as string,
+          connector: "AND",
+        },
+      ]);
 
       if (!user) {
         throw new Error("User not found");
       }
 
-      const { sessions } = await user.ensureLoaded({
+      const { sessions } = await user.$jazz.ensureLoaded({
         resolve: {
           sessions: {
             $each: true,
@@ -128,7 +120,7 @@ export class SessionRepository extends JazzRepository {
         },
       });
 
-      return this.filterSortPaginateList<T>(
+      return this.filterSortPaginateList(
         sessions,
         otherWhere,
         limit,
@@ -150,10 +142,7 @@ export class SessionRepository extends JazzRepository {
       isWhereBySingleField("token", where) ||
       isWhereBySingleField("id", where)
     ) {
-      const [item] = await this.findMany<{ userId: string } & CoMap>(
-        model,
-        where,
-      );
+      const [item] = await this.findMany(model, where);
       if (!item) {
         return 0;
       }
@@ -166,33 +155,31 @@ export class SessionRepository extends JazzRepository {
     if (containWhereByField("userId", where)) {
       const [userIdWhere, otherWhere] = extractWhereByField("userId", where);
 
-      const user = await this.userRepository.findById<co.loaded<UserSchema>>(
-        "user",
-        [
-          {
-            field: "id",
-            operator: "eq",
-            value: userIdWhere!.value as string,
-            connector: "AND",
-          },
-        ],
-      );
+      const user = await this.userRepository.findById("user", [
+        {
+          field: "id",
+          operator: "eq",
+          value: userIdWhere!.value as string,
+          connector: "AND",
+        },
+      ]);
 
       if (!user) {
         throw new Error("User not found");
       }
 
-      const { sessions } = await user.ensureLoaded({
-        resolve: {
-          sessions: {
-            $each: true,
+      const { sessions }: { sessions: TableItem[] } =
+        await user.$jazz.ensureLoaded({
+          resolve: {
+            sessions: {
+              $each: true,
+            },
           },
-        },
-      });
+        });
 
       const filteredSessions = filterListByWhere(
         sessions.filter(
-          (item) => item !== null && item._raw.get("_deleted") !== true,
+          (item) => item !== null && item.$jazz.raw.get("_deleted") !== true,
         ),
         otherWhere,
       );
@@ -205,24 +192,24 @@ export class SessionRepository extends JazzRepository {
     );
   }
 
-  private async deleteSession(userId: string, items: CoMap[]): Promise<number> {
-    const user = await this.userRepository.findById<co.loaded<UserSchema>>(
-      "user",
-      [
-        {
-          field: "id",
-          operator: "eq",
-          value: userId,
-          connector: "AND",
-        },
-      ],
-    );
+  private async deleteSession(
+    userId: string,
+    items: TableItem[],
+  ): Promise<number> {
+    const user = await this.userRepository.findById("user", [
+      {
+        field: "id",
+        operator: "eq",
+        value: userId,
+        connector: "AND",
+      },
+    ]);
 
     if (!user) {
       throw new Error("User not found");
     }
 
-    const { sessions } = await user.ensureLoaded({
+    const { sessions } = await user.$jazz.ensureLoaded({
       resolve: {
         sessions: true,
       },
@@ -231,13 +218,13 @@ export class SessionRepository extends JazzRepository {
     for (const toBeDeleted of items) {
       // Get entries without trigger the shallow load
       const index = [...sessions.entries()].findIndex(
-        ([_, value]) => value && value.id === toBeDeleted.id,
+        ([_, value]) => value && value.$jazz.id === toBeDeleted.$jazz.id,
       );
 
-      toBeDeleted._raw.set("_deleted", true);
+      toBeDeleted.$jazz.set("_deleted", true);
 
       if (index !== -1) {
-        sessions.splice(index, 1);
+        sessions.$jazz.remove(index);
       }
     }
 

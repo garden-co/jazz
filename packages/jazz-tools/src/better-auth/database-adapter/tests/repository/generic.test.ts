@@ -90,7 +90,7 @@ describe("Generic Repository", () => {
       token: "test",
     });
 
-    const { tables } = await databaseRoot.ensureLoaded({
+    const { tables } = await databaseRoot.$jazz.ensureLoaded({
       resolve: {
         tables: {
           session: {
@@ -101,7 +101,7 @@ describe("Generic Repository", () => {
     });
 
     expect(tables.session.length).toBe(1);
-    expect(tables.session[0]?.id).toBe(entity.id);
+    expect(tables.session[0]?.$jazz.id).toBe(entity.$jazz.id);
   });
 
   it("should delete an entity and remove it from the list", async () => {
@@ -116,12 +116,12 @@ describe("Generic Repository", () => {
       {
         field: "id",
         operator: "eq",
-        value: entity.id,
+        value: entity.$jazz.id,
         connector: "AND",
       },
     ]);
 
-    const { tables } = await databaseRoot.ensureLoaded({
+    const { tables } = await databaseRoot.$jazz.ensureLoaded({
       resolve: {
         tables: {
           session: {
@@ -137,7 +137,7 @@ describe("Generic Repository", () => {
       {
         field: "id",
         operator: "eq",
-        value: entity.id,
+        value: entity.$jazz.id,
         connector: "AND",
       },
     ]);
