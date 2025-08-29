@@ -123,9 +123,9 @@ const db = await DatabaseRoot.loadUnique("better-auth-root", process.env.WORKER_
 const newWorkerRef = await Account.load(process.env.NEW_WORKER_ACCOUNT_ID);
 
 // Add the new worker to the group as admin
-db.group.addMember(newWorkerRef, "admin");
+db.group.$jazz.addMember(newWorkerRef, "admin");
 
-await db.group.waitForSync();
+await db.group.$jazz.waitForSync();
 
 // Now the new worker can access the tables
 const { worker: newWorker } = await startWorker({
@@ -147,7 +147,7 @@ await DatabaseRoot.upsertUnique({
 // Now the new worker can be used for the Database Adapter.
 
 // Don't forget to remove the old worker from the group
-db.group.removeMember(worker);
+db.group.$jazz.removeMember(worker);
 ```
 </CodeGroup>
 
