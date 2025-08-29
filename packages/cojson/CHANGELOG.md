@@ -1,5 +1,11 @@
 # cojson
 
+## 0.16.7
+
+### Patch Changes
+
+- 020304f: Fix self-revoke check to correctly validate against the author of the change
+
 ## 0.16.6
 
 ### Patch Changes
