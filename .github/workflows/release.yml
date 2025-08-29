@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - backport/**
   workflow_dispatch:
     inputs:
       debug_enabled:
