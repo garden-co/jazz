@@ -1,0 +1,395 @@
+export const metadata = {
+  description: "Get started building a simple React app with Jazz."
+};
+import { CodeGroup, ContentByFramework, FileName, JazzLogo, TabbedCodeGroup, TabbedCodeGroupItem } from "@/components/forMdx";
+import { Alert } from "@garden-co/design-system/src/components/atoms/Alert";
+import { TextLink } from "@garden-co/design-system/src/components/atoms/TextLink";
+import { SvelteLogo } from "@/components/icons/SvelteLogo";
+import { ReactLogo } from "@/components/icons/ReactLogo";
+
+# Get started with <span className="sr-only">Jazz</span> <JazzLogo className="h-[41px] -ml-0.5 -mt-[3px] inline" /> in 10 minutes
+This quickstart guide will take you from an empty project to a working app with authentication and a simple data model.
+
+<ContentByFramework framework="react">
+  <Alert variant="info" className="mt-4 flex gap-2 items-center">
+    Requires Node.js 20+
+  </Alert>
+  ## Create your React App
+  We'll be using Next.js and TypeScript with `pnpm` for this guide, but Jazz works great with vanilla React too.
+
+  You can accept the defaults for all the questions, or customise the project as you like.
+
+  <TabbedCodeGroup default="pnpm" savedPreferenceKey="package-manager">
+  <TabbedCodeGroupItem label="npm">
+  ```sh
+  npx create-next-app@latest --typescript jazzfest
+  cd jazzfest
+  ```
+  </TabbedCodeGroupItem>
+  <TabbedCodeGroupItem label="pnpm">
+  ```sh
+  pnpx create-next-app@latest --typescript jazzfest
+  cd jazzfest
+  ```
+  </TabbedCodeGroupItem>
+  </TabbedCodeGroup>
+
+</ContentByFramework>
+<ContentByFramework framework="svelte">
+  <Alert variant="info" className="mt-4 flex gap-2 items-center">
+    Requires Node.js 20+
+  </Alert>
+  ## Create your Svelte App
+
+  <TabbedCodeGroup default="pnpm" savedPreferenceKey="package-manager">
+  <TabbedCodeGroupItem label="npm">
+  ```sh
+  npx sv create --types ts --template minimal jazzfest
+  cd jazzfest
+  ```
+  </TabbedCodeGroupItem>
+  <TabbedCodeGroupItem label="pnpm">
+  ```sh
+  pnpx sv create --types ts --template minimal jazzfest
+  cd jazzfest
+  ```
+  </TabbedCodeGroupItem>
+  </TabbedCodeGroup>
+</ContentByFramework>
+
+
+## Install Jazz
+
+The `jazz-tools` package includes everything you're going to need to build your first Jazz app.
+
+<TabbedCodeGroup default="pnpm" savedPreferenceKey="package-manager">
+<TabbedCodeGroupItem label="npm">
+```sh
+npm add jazz-tools
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem label="pnpm">
+```sh
+pnpm add jazz-tools
+```
+</TabbedCodeGroupItem>
+</TabbedCodeGroup>
+
+## Get your free API key
+
+Sign up for a free API key at [dashboard.jazz.tools](https://dashboard.jazz.tools) for higher limits or production use, or use your email address as a temporary key to get started quickly.
+
+<ContentByFramework framework="react">
+  <FileName>app/apiKey.ts</FileName>
+</ContentByFramework>
+<ContentByFramework framework="svelte">
+<FileName>src/lib/apiKey.ts</FileName>
+</ContentByFramework>
+<CodeGroup>
+```ts
+export const apiKey = "you@example.com"; // or your API key
+```
+</CodeGroup>
+
+## Define a Schema
+Jazz uses Zod for more simple data types (like strings, numbers, booleans), and its own schemas to create collaborative data structures known as CoValues.  CoValues are automatically persisted across your devices and the cloud and synced in real-time. Here we're defining a schema made up of both Zod types and CoValues. 
+
+Adding a `root` to the user's account gives us a container that can be used to keep a track of all the data a user might need to use the app. The migration runs when the user logs in, and ensures the account is properly set up before we try to use it.
+
+<ContentByFramework framework="react">
+  <FileName>app/schema.ts</FileName>
+</ContentByFramework>
+<ContentByFramework framework="svelte">
+<FileName>src/lib/schema.ts</FileName>
+</ContentByFramework>
+
+<CodeGroup className="[&_span]:[tab-size:2]" preferWrap>
+```ts
+import { co, z } from "jazz-tools";
+
+export const Band = co.map({
+  name: z.string(), // Zod primitive type
+});
+
+export const Festival = co.list(Band);
+
+export const JazzFestAccountRoot = co.map({
+  myFestival: Festival,
+});
+
+export const JazzFestAccount = co
+  .account({
+    root: JazzFestAccountRoot,
+    profile: co.profile(),
+  })
+  .withMigration((account) => {
+    if (!account.$jazz.has('root')) {
+      account.$jazz.set('root', {
+        myFestival: [],
+      });
+    }
+  });
+```
+</CodeGroup>
+
+## Add the Jazz Provider
+Wrap your app with a provider so components can use Jazz.
+
+<ContentByFramework framework="react">  
+  <FileName>app/layout.tsx</FileName>
+</ContentByFramework>
+<ContentByFramework framework="svelte">
+  <FileName>src/routes/+layout.svelte</FileName>
+</ContentByFramework>
+
+<TabbedCodeGroup savedPreferenceKey="framework">
+<TabbedCodeGroupItem label="React" value="react" className="[&_span]:[tab-size:2]" icon={<ReactLogo />} preferWrap>
+  ```tsx
+  "use client";
+  import { JazzReactProvider } from "jazz-tools/react";
+  import { apiKey } from "@/app/apiKey";
+  import { JazzFestAccount } from "@/app/schema";
+
+  export default function RootLayout({ 
+    children
+  }: { 
+    children: React.ReactNode 
+  }) {
+    return (
+      <html lang="en">
+        <body>
+          <JazzReactProvider
+            sync={{ peer: `wss://cloud.jazz.tools/?key=${apiKey}` }}
+            AccountSchema={JazzFestAccount}
+          >
+            {children}
+          </JazzReactProvider>
+        </body>
+      </html>
+    );
+  }
+  ```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem label="Svelte" value="svelte" className="[&_span]:[tab-size:2]" icon={<SvelteLogo />} preferWrap>
+```svelte
+<script lang="ts">
+  import { JazzSvelteProvider } from "jazz-tools/svelte";
+  import { JazzFestAccount } from "$lib/schema";
+  import { apiKey } from "$lib/apiKey";
+
+  let { children } = $props();
+  const sync = { peer: `wss://cloud.jazz.tools/?key=${apiKey}` };
+</script>
+
+<JazzSvelteProvider {sync} AccountSchema={JazzFestAccount}>
+  {@render children?.()}
+</JazzSvelteProvider>
+```
+</TabbedCodeGroupItem>
+</TabbedCodeGroup>
+
+<ContentByFramework framework="react">
+  <Alert variant="info" className="mt-4 flex gap-2 items-center">
+    `"use client";` tells Next.js that this component can't be server-side rendered. If you're not using Next.js, you can remove it.
+  </Alert>
+</ContentByFramework>
+
+## Start your app
+Moment of truth&thinsp;—&thinsp;time to start your app and see if it works.
+
+<TabbedCodeGroup default="pnpm" savedPreferenceKey="package-manager">
+<TabbedCodeGroupItem label="npm">
+```sh
+npm run dev
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem label="pnpm">
+```sh
+pnpm run dev
+```
+</TabbedCodeGroupItem>
+</TabbedCodeGroup>
+
+If everything's going according to plan, you should see a login prompt! 
+
+### No log in prompt? 
+<ContentByFramework framework="react">
+- Check you wrapped your app with the Jazz Provider in `app/layout.tsx`
+- Check your schema is properly defined in `app/schema.ts`
+</ContentByFramework>
+<ContentByFramework framework="svelte">
+- Check you wrapped your app with the Jazz Provider in `src/routes/+layout.svelte`
+- Check your schema is properly defined in `src/lib/schema.ts`
+</ContentByFramework>
+
+<Alert variant="info" title="Still stuck?">Ask for help on [Discord](https://discord.gg/utDMjHYg42).</Alert>
+
+## Create data
+Let's create a simple form to add a new band to the festival. We'll use the `useAccount` hook to get the current account and tell Jazz to load the `myFestival` CoValue by passing a `resolve` query.
+
+<ContentByFramework framework="react">
+  <FileName>app/components/NewBand.tsx</FileName>
+</ContentByFramework>
+<ContentByFramework framework="svelte">
+  <FileName>src/lib/components/NewBand.svelte</FileName>
+</ContentByFramework>
+
+<TabbedCodeGroup default="react" savedPreferenceKey="framework"
+>
+<TabbedCodeGroupItem label="React" value="react" icon={<ReactLogo />} className="[&_span]:[tab-size:2]" preferWrap>
+```tsx
+"use client";
+import { useAccount } from "jazz-tools/react";
+import { useState } from "react";
+import { Band, JazzFestAccount } from "@/app/schema";
+
+export function NewBand() {
+  const { me } = useAccount(JazzFestAccount, { resolve: { root: { myFestival: true } } });
+  const [name, setName] = useState("");
+
+  const handleSave = () => {
+    if (!me) return; // not loaded yet
+    me.root.myFestival.$jazz.push({ name });
+    setName("");
+  };
+
+  return (
+    <div>
+      <input
+        type="text"
+        value={name}
+        placeholder="Band name"
+        onChange={(e) => setName(e.target.value)}
+      />
+      <button type="button" onClick={handleSave}>Add</button>
+    </div>
+  );
+}
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem label="Svelte" value="svelte" icon={<SvelteLogo />} className="[&_span]:[tab-size:2]" preferWrap>
+```svelte
+<script lang="ts">
+	import { AccountCoState } from "jazz-tools/svelte";
+	import { JazzFestAccount } from "$lib/schema";
+  const me = new AccountCoState(JazzFestAccount, { 
+    resolve: { root: { myFestival: true } } 
+  });
+  let name = $state("");
+
+  function handleSave() {
+    if (!me.current) return; // not loaded yet
+    me.current.root.myFestival.$jazz.push({ name });
+    name = "";
+  }
+</script>
+
+<div>
+  <input type="text" bind:value={name} placeholder="Band name" />
+  <button type="button" onclick={handleSave}>Add</button>
+</div>
+```
+</TabbedCodeGroupItem>
+</TabbedCodeGroup>
+
+## Display your data
+Now we've got a way to create data, so let's add a component to display it.
+
+<ContentByFramework framework="react">
+  <FileName>app/components/MyFestival.tsx</FileName>
+</ContentByFramework>
+<ContentByFramework framework="svelte">
+  <FileName>src/lib/components/MyFestival.svelte</FileName>
+</ContentByFramework>
+
+<TabbedCodeGroup default="react" savedPreferenceKey="framework">
+<TabbedCodeGroupItem icon={<ReactLogo />} label="React" value="react" className="[&_span]:[tab-size:2]" preferWrap>
+```tsx
+"use client";
+import { useAccount } from "jazz-tools/react";
+import { JazzFestAccount } from "@/app/schema";
+
+export function MyFestival() {
+  const { me } = useAccount(JazzFestAccount, { 
+    resolve: { root: { myFestival: true } } 
+  });
+  if (!me) return null; // not loaded yet
+  return (
+    <ul>
+      {me?.root.myFestival.map((band) => band && <li key={band.$jazz.id}>{band.name}</li>)}
+    </ul>
+  );
+}
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem icon={<SvelteLogo />} label="Svelte" value="svelte" className="[&_span]:[tab-size:2]" preferWrap>
+```svelte
+<script lang="ts">
+  import { AccountCoState } from "jazz-tools/svelte";
+  import { JazzFestAccount } from "$lib/schema";
+  const me = new AccountCoState(JazzFestAccount, { 
+    resolve: { root: { myFestival: true } } 
+  });
+</script>
+
+<ul>
+  {#each me.current?.root?.myFestival || [] as band}
+    <li>{band?.name}</li>
+  {/each}
+</ul>
+```
+</TabbedCodeGroupItem>
+</TabbedCodeGroup>
+
+## Put it together
+You've built all your components, time to put them together.
+
+<ContentByFramework framework="react">
+  <FileName>app/page.tsx</FileName>
+</ContentByFramework>
+<ContentByFramework framework="svelte">
+  <FileName>src/routes/+page.svelte</FileName>
+</ContentByFramework>
+
+<TabbedCodeGroup default="react" savedPreferenceKey="framework">
+<TabbedCodeGroupItem label="React" value="react" className="[&_span]:[tab-size:2]" icon={<ReactLogo />} preferWrap>
+```tsx
+import { NewBand } from "@/app/components/NewBand";
+import { MyFestival } from "@/app/components/MyFestival";
+
+export default function Home() {
+  return (
+    <main>
+      <h1>🎶 My Bands</h1>
+      <NewBand />
+      <MyFestival />
+    </main>
+  );
+}
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem icon={<SvelteLogo />} label="Svelte" value="svelte" className="[&_span]:[tab-size:2]" preferWrap>
+```svelte
+<script lang="ts">
+  import NewBand from "$lib/components/NewBand.svelte";
+  import MyFestival from "$lib/components/MyFestival.svelte";
+</script>
+
+<main>
+  <h1>🎶 My Bands</h1>
+  <NewBand />
+  <MyFestival />
+</main>
+```
+</TabbedCodeGroupItem>
+</TabbedCodeGroup>
+
+You should now be able to add a band to your festival, and see it in the list!
+
+You've begun to scratch the surface of what's possible with Jazz! Behind the scenes, Jazz is already securely syncing your data to the cloud. 
+
+## Next steps
+- Learn how to [add authentication](/docs/authentication/overview) to your app so that you can log in to view your data wherever you are!
+- Learn more about [CoValues](/docs/schemas/covalues)
+- Learn how to edit data with [forms](/docs/design-patterns/forms)
+- Learn how to share and [collaborate on data](/docs/groups/intro)

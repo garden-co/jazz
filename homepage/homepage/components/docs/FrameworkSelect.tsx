@@ -1,5 +1,4 @@
 "use client";
-
 import { Framework, frameworkNames } from "@/content/framework";
 import { useFramework } from "@/lib/use-framework";
 import { Button } from "@garden-co/design-system/src/components/atoms/Button";
@@ -12,7 +11,9 @@ import {
 } from "@garden-co/design-system/src/components/organisms/Dropdown";
 import clsx from "clsx";
 import { usePathname, useRouter } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useState } from "react";
+
+import { TAB_CHANGE_EVENT } from "@garden-co/design-system/src/components/molecules/TabbedCodeGroup";
 
 export function FrameworkSelect({
   onSelect,
@@ -32,9 +33,42 @@ export function FrameworkSelect({
 
   const path = usePathname();
 
+  const handleFrameworkChange = (event: CustomEvent) => {
+      if (event.detail.key === 'framework') {
+        const newTab = event.detail.value;
+        selectFramework(event.detail.value);
+      }
+    };
+  
+
+  useEffect(() => {
+      window.addEventListener(
+        TAB_CHANGE_EVENT as any, // Yes, ugly type hack, because otherwise I need to create a new definition for window
+        handleFrameworkChange,
+      );
+      return () => {
+        window.removeEventListener(TAB_CHANGE_EVENT as any, handleFrameworkChange);
+      };
+    }, []);
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      window.dispatchEvent(
+        new CustomEvent(TAB_CHANGE_EVENT, {
+          detail: {
+            key: 'framework',
+            value: defaultFramework,
+          },
+        }),
+      );
+    }, 0);    
+    return () => clearTimeout(timer);
+  }, [defaultFramework]);
+
   const selectFramework = (newFramework: Framework) => {
     setSelectedFramework(newFramework);
     onSelect && onSelect(newFramework);
+    localStorage.setItem("_tcgpref_framework", newFramework);
     routerPush && router.push(path.replace(defaultFramework, newFramework));
   };
 
