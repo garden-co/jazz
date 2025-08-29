@@ -114,12 +114,12 @@ describe("SessionRepository", () => {
 
       const session = await sessionRepository.create("session", {
         token: "test",
-        userId: user.id,
+        userId: user.$jazz.id,
       });
 
       expect(session.token).toBe("test");
-      expect(session.userId).toBe(user.id);
-      expect(session.id).toBeDefined();
+      expect(session.userId).toBe(user.$jazz.id);
+      expect(session.$jazz.id).toBeDefined();
     });
 
     it("should create a session with a custom uniqueId", async () => {
@@ -140,7 +140,7 @@ describe("SessionRepository", () => {
 
       const session = await sessionRepository.create("session", {
         token: "test",
-        userId: user.id,
+        userId: user.$jazz.id,
       });
 
       const sessionByToken = await sessionRepository.findByUnique("session", [
@@ -152,7 +152,7 @@ describe("SessionRepository", () => {
         },
       ]);
 
-      expect(sessionByToken?.id).toBe(session.id);
+      expect(sessionByToken?.$jazz.id).toBe(session.$jazz.id);
     });
 
     it("should create a session inside the user object", async () => {
@@ -173,12 +173,12 @@ describe("SessionRepository", () => {
 
       const session = await sessionRepository.create("session", {
         token: "test",
-        userId: user.id,
+        userId: user.$jazz.id,
       });
 
       const { sessions } = await (
         user as unknown as co.loaded<co.Map<{ sessions: co.List<co.Map<any>> }>>
-      ).ensureLoaded({
+      ).$jazz.ensureLoaded({
         resolve: {
           sessions: {
             $each: true,
@@ -187,10 +187,10 @@ describe("SessionRepository", () => {
       });
 
       expect(sessions.length).toBe(1);
-      expect(sessions.at(0)?.id).toBe(session.id);
+      expect(sessions.at(0)?.$jazz.id).toBe(session.$jazz.id);
 
       // The generic table should be empty
-      const { tables } = await databaseRoot.ensureLoaded({
+      const { tables } = await databaseRoot.$jazz.ensureLoaded({
         resolve: {
           tables: {
             session: {

@@ -8,7 +8,7 @@ import {
   VerificationRepository,
   AccountRepository,
 } from "./repository";
-import { createJazzSchema } from "./schema.js";
+import { createJazzSchema, tableItem2Record } from "./schema.js";
 
 export interface JazzAdapterConfig {
   /**
@@ -72,7 +72,6 @@ export const JazzBetterAuthDatabaseAdapter = (
       supportsNumericIds: false, // Whether the database supports auto-incrementing numeric IDs. (Default: true)
       disableIdGeneration: true,
     },
-    // @ts-expect-error TODO: fix generic type
     adapter: ({ schema }) => {
       const JazzSchema = createJazzSchema(schema);
 
@@ -134,7 +133,7 @@ export const JazzBetterAuthDatabaseAdapter = (
       }
 
       return {
-        create: async ({ data, model, select }) => {
+        create: async ({ data, model, select }): Promise<any> => {
           // console.log("create", { data, model, select });
           const repository = await initRepository(model, true);
 
@@ -142,13 +141,17 @@ export const JazzBetterAuthDatabaseAdapter = (
 
           await repository.ensureSync();
 
-          return created;
+          return tableItem2Record(created);
         },
-        update: async ({ model, where, update }) => {
+        update: async ({ model, where, update }): Promise<any> => {
           // console.log("update", { model, where, update });
           const repository = await initRepository(model, true);
 
-          const updated = await repository.update(model, where, update);
+          const updated = await repository.update(
+            model,
+            where,
+            update as Record<string, any>,
+          );
 
           if (updated.length === 0) {
             return null;
@@ -156,7 +159,7 @@ export const JazzBetterAuthDatabaseAdapter = (
 
           await repository.ensureSync();
 
-          return updated[0]!;
+          return tableItem2Record(updated[0]!);
         },
         updateMany: async ({ model, where, update }) => {
           // console.log("updateMany", { model, where, update });
@@ -176,16 +179,32 @@ export const JazzBetterAuthDatabaseAdapter = (
 
           await repository.ensureSync();
         },
-        findOne: async ({ model, where }) => {
+        findOne: async ({ model, where }): Promise<any> => {
           // console.log("findOne", { model, where });
           const repository = await initRepository(model);
 
-          return repository.findOne(model, where);
+          const item = await repository.findOne(model, where);
+
+          return tableItem2Record(item);
         },
-        findMany: async ({ model, where, limit, sortBy, offset }) => {
+        findMany: async ({
+          model,
+          where,
+          limit,
+          sortBy,
+          offset,
+        }): Promise<any[]> => {
           const repository = await initRepository(model);
 
-          return repository.findMany(model, where, limit, sortBy, offset);
+          const items = await repository.findMany(
+            model,
+            where,
+            limit,
+            sortBy,
+            offset,
+          );
+
+          return items.map(tableItem2Record);
         },
         deleteMany: async ({ model, where }) => {
           const repository = await initRepository(model, true);

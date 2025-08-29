@@ -1,7 +1,7 @@
 import { CleanedWhere } from "better-auth/adapters";
 import { BetterAuthDbSchema } from "better-auth/db";
-import { Account, CoList, CoMap, Group, co, z } from "jazz-tools";
-import type { Database } from "../schema.js";
+import { Account, CoList, CoMap, Group, co } from "jazz-tools";
+import type { Database, TableItem } from "../schema.js";
 import {
   filterListByWhere,
   isWhereBySingleField,
@@ -37,7 +37,7 @@ export class JazzRepository {
 
     if (ensureSync)
       this.coValuesTracker =
-        worker._raw.core.node.syncManager.trackDirtyCoValues();
+        worker.$jazz.raw.core.node.syncManager.trackDirtyCoValues();
   }
 
   ensureSync() {
@@ -46,19 +46,19 @@ export class JazzRepository {
 
     return Promise.all(
       Array.from(this.coValuesTracker.done(), (id) =>
-        this.worker._raw.core.node.syncManager.waitForSync(id),
+        this.worker.$jazz.raw.core.node.syncManager.waitForSync(id),
       ),
     );
   }
 
-  async create<T extends z.z.core.$ZodLooseShape>(
+  async create(
     model: string,
-    data: T,
+    data: Record<string, any>,
     uniqueId?: string,
-  ): Promise<{ id: string } & T> {
+  ): Promise<TableItem> {
     const schema = this.getSchema(model);
 
-    const resolved = await this.databaseRoot.ensureLoaded({
+    const resolved = await this.databaseRoot.$jazz.ensureLoaded({
       resolve: {
         tables: {
           [model]: {
@@ -71,26 +71,27 @@ export class JazzRepository {
     const list = resolved.tables?.[model] as unknown as CoList<CoMap>;
 
     // Use the same owner of the table.
-    const node = schema.create(data, { owner: list._owner, unique: uniqueId });
+    const node = schema.create(data, {
+      owner: list.$jazz.owner,
+      unique: uniqueId,
+    });
 
-    list.push(node);
+    list.$jazz.push(node);
 
     return node;
   }
 
-  async findOne<T extends CoMap>(
+  async findOne(
     model: string,
     where: CleanedWhere[],
-  ): Promise<T | null> {
-    return this.findMany<T>(model, where, 1).then(
-      (users) => users?.at(0) ?? null,
-    );
+  ): Promise<TableItem | null> {
+    return this.findMany(model, where, 1).then((users) => users?.at(0) ?? null);
   }
 
-  async findById<T extends CoMap>(
+  async findById(
     model: string,
     where: [{ field: "id"; operator: "eq"; value: string; connector: "AND" }],
-  ): Promise<T | null> {
+  ): Promise<TableItem | null> {
     const id = where[0]!.value;
 
     if (!id.startsWith("co_")) {
@@ -103,51 +104,53 @@ export class JazzRepository {
       return null;
     }
 
-    if (node._raw.get("_deleted")) {
+    if (node.$jazz.raw.get("_deleted")) {
       return null;
     }
 
     return node;
   }
 
-  async findByUnique<T extends CoMap>(
+  async findByUnique(
     model: string,
     where: [{ field: string; operator: "eq"; value: string; connector: "AND" }],
-  ): Promise<T | null> {
+  ): Promise<TableItem | null> {
     const value = where[0]!.value;
 
-    const node = await this.getSchema(model).loadUnique(value, this.owner.id, {
-      loadAs: this.worker,
-    });
+    const node = await this.getSchema(model).loadUnique(
+      value,
+      this.owner.$jazz.id,
+      {
+        loadAs: this.worker,
+      },
+    );
 
     if (!node) {
       return null;
     }
 
-    if (node._raw.get("_deleted")) {
+    if (node.$jazz.raw.get("_deleted")) {
       return null;
     }
 
     return node;
   }
 
-  async findMany<T extends CoMap>(
+  async findMany(
     model: string,
     where: CleanedWhere[] | undefined,
     limit?: number,
     sortBy?: { field: string; direction: "asc" | "desc" },
     offset?: number,
-  ): Promise<T[]> {
+  ): Promise<TableItem[]> {
     // ensure schema exists
     this.getSchema(model);
 
     if (isWhereBySingleField("id", where)) {
-      return this.findById<T>(model, where).then((node) =>
-        node ? [node] : [],
-      );
+      return this.findById(model, where).then((node) => (node ? [node] : []));
     }
 
-    const resolvedRoot = await this.databaseRoot.ensureLoaded({
+    const resolvedRoot = await this.databaseRoot.$jazz.ensureLoaded({
       resolve: {
         tables: {
           [model]: {
@@ -163,15 +166,15 @@ export class JazzRepository {
       return [];
     }
 
-    return this.filterSortPaginateList<T>(list, where, limit, sortBy, offset);
+    return this.filterSortPaginateList(list, where, limit, sortBy, offset);
   }
 
-  async update<T>(
+  async update(
     model: string,
     where: CleanedWhere[],
-    update: T,
-  ): Promise<CoMap[]> {
-    const nodes = await this.findMany<CoMap>(model, where);
+    update: Record<string, any>,
+  ): Promise<TableItem[]> {
+    const nodes = await this.findMany(model, where);
 
     if (nodes.length === 0) {
       return [];
@@ -181,8 +184,7 @@ export class JazzRepository {
       for (const [key, value] of Object.entries(
         update as Record<string, any>,
       )) {
-        // @ts-expect-error Can't know keys at static time
-        node[key] = value;
+        node.$jazz.set(key, value);
       }
     }
 
@@ -190,13 +192,13 @@ export class JazzRepository {
   }
 
   async deleteValue(model: string, where: CleanedWhere[]): Promise<number> {
-    const items = await this.findMany<CoMap>(model, where);
+    const items = await this.findMany(model, where);
 
     if (items.length === 0) {
       return 0;
     }
 
-    const resolved = await this.databaseRoot.ensureLoaded({
+    const resolved = await this.databaseRoot.$jazz.ensureLoaded({
       resolve: {
         tables: {
           [model]: {
@@ -215,13 +217,13 @@ export class JazzRepository {
     for (const toBeDeleted of items) {
       // Get entries without trigger the shallow load
       const index = [...list.entries()].findIndex(
-        ([_, value]) => value && value.id === toBeDeleted.id,
+        ([_, value]) => value && value.$jazz.id === toBeDeleted.$jazz.id,
       );
 
-      toBeDeleted._raw.set("_deleted", true);
+      toBeDeleted.$jazz.raw.set("_deleted", true);
 
       if (index !== -1) {
-        list.splice(index, 1);
+        list.$jazz.splice(index, 1);
       }
     }
 
@@ -232,7 +234,7 @@ export class JazzRepository {
     model: string,
     where: CleanedWhere[] | undefined,
   ): Promise<number> {
-    return this.findMany<CoMap>(model, where).then((values) => values.length);
+    return this.findMany(model, where).then((values) => values.length);
   }
 
   protected getSchema(model: string) {
@@ -243,7 +245,7 @@ export class JazzRepository {
     return schema;
   }
 
-  protected filterSortPaginateList<T extends CoMap>(
+  protected filterSortPaginateList<T extends TableItem>(
     list: CoList<CoMap | null>,
     where: CleanedWhere[] | undefined,
     limit?: number,
@@ -253,7 +255,7 @@ export class JazzRepository {
     // ignore nullable values and soft deleted items
     return [
       list.filter(
-        (item) => item !== null && item._raw.get("_deleted") !== true,
+        (item) => item !== null && item.$jazz.raw.get("_deleted") !== true,
       ),
     ]
       .map((list) => filterListByWhere(list, where))

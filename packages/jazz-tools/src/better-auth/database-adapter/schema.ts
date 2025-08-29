@@ -2,6 +2,8 @@ import { BetterAuthDbSchema, FieldAttribute } from "better-auth/db";
 import { Group, co, z } from "jazz-tools";
 
 type TableRow = co.Map<any>;
+export type TableItem = co.loaded<TableRow>;
+
 type Table = co.List<TableRow>;
 export type Database = co.Map<{
   group: typeof Group;
@@ -43,7 +45,7 @@ export function createJazzSchema(schema: BetterAuthDbSchema): JazzSchema {
     .withMigration(async (account) => {
       const dbRoot = await DatabaseRoot.loadUnique(
         DATABASE_ROOT_ID,
-        account.id,
+        account.$jazz.id,
         {
           resolve: {
             group: true,
@@ -82,7 +84,7 @@ export function createJazzSchema(schema: BetterAuthDbSchema): JazzSchema {
           DatabaseRoot.shape.tables.shape,
         )) {
           if (dbRoot.tables[key] === undefined) {
-            dbRoot.tables[key] = value.create([], dbRoot.group);
+            dbRoot.tables.$jazz.set(key, value.create([], dbRoot.group));
           }
         }
       }
@@ -103,7 +105,7 @@ export function createJazzSchema(schema: BetterAuthDbSchema): JazzSchema {
 
       const db = (await DatabaseRoot.loadUnique(
         DATABASE_ROOT_ID,
-        account.id,
+        account.$jazz.id,
         options || {
           resolve: {
             group: true,
@@ -137,13 +139,13 @@ function generateSchemaFromBetterAuthSchema(schema: BetterAuthDbSchema) {
     const modelShape: Record<
       string,
       ZodPrimitiveSchema | ZodOptionalPrimitiveSchema
-    > = {};
+    > = {
+      _deleted: z.boolean(),
+    };
 
     for (const [fieldName, field] of Object.entries(value.fields)) {
       modelShape[field.fieldName || fieldName] = convertFieldToCoValue(field);
     }
-
-    modelShape["_deleted"] = z.boolean();
 
     const coMap = co.map(modelShape);
     tablesSchema[key] = co.list(coMap);
@@ -158,7 +160,10 @@ function generateSchemaFromBetterAuthSchema(schema: BetterAuthDbSchema) {
         })
         .withMigration((user) => {
           if (user.sessions === undefined) {
-            user.sessions = tablesSchema["session"]!.create([], user._owner);
+            user.$jazz.set(
+              "sessions",
+              tablesSchema["session"]!.create([], user.$jazz.owner),
+            );
           }
         }),
     );
@@ -196,4 +201,17 @@ function convertFieldToCoValue(field: FieldAttribute) {
   }
 
   return zodType;
+}
+
+export function tableItem2Record(
+  tableItem: TableItem | null | undefined,
+): Record<string, any> | null | undefined {
+  if (!tableItem) {
+    return tableItem;
+  }
+
+  return {
+    ...tableItem.toJSON(),
+    id: tableItem.$jazz.id,
+  };
 }

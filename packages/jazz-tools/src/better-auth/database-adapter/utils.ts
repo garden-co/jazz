@@ -19,7 +19,7 @@ export function filterListByWhere<T>(
   // Helper to evaluate a single condition
   function evaluateCondition(item: any, condition: CleanedWhere): boolean {
     const { field, operator, value } = condition;
-    const itemValue = item[field];
+    const itemValue = field === "id" ? item.$jazz.id : item[field];
 
     switch (operator) {
       case "eq":

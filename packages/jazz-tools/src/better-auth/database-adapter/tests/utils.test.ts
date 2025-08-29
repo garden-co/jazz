@@ -484,6 +484,32 @@ describe("filterListByWhere", () => {
   });
 });
 
+describe("filterListByWhere with id => $jazz.id", () => {
+  const testData = [
+    { $jazz: { id: "a1" }, name: "Alice", age: 25, active: true },
+    { $jazz: { id: "b2" }, name: "Bob", age: 30, active: false },
+    { $jazz: { id: "c3" }, name: "Charlie", age: 35, active: true },
+  ] as any[];
+
+  it("should match by $jazz.id when where field is 'id' (eq)", () => {
+    const where: CleanedWhere[] = [
+      { field: "id", operator: "eq", value: "a1", connector: "AND" },
+    ];
+    const result = filterListByWhere(testData, where);
+    expect(result).toEqual([
+      { $jazz: { id: "a1" }, name: "Alice", age: 25, active: true },
+    ]);
+  });
+
+  it("should return empty when no $jazz.id matches", () => {
+    const where: CleanedWhere[] = [
+      { field: "id", operator: "eq", value: "z9", connector: "AND" },
+    ];
+    const result = filterListByWhere(testData, where);
+    expect(result).toEqual([]);
+  });
+});
+
 describe("sortListByField", () => {
   const testData = [
     { id: 3, name: "Charlie", age: 35, score: 85.5 },
