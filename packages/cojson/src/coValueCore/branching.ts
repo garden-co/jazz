@@ -40,12 +40,23 @@ export function getBranchHeader({
 export function getBranchId(
   coValue: CoValueCore,
   name: string,
-  ownerId: RawCoID,
+  ownerId?: RawCoID,
 ): RawCoID {
   if (!coValue.verified) {
     throw new Error(
       "CoValueCore: getBranchId called on coValue without verified state",
     );
+  }
+
+  if (!ownerId) {
+    const header = coValue.verified.header;
+
+    // Group and account coValues can't have branches, so we return the source id
+    if (header.ruleset.type !== "ownedByGroup") {
+      return coValue.id;
+    }
+
+    ownerId = header.ruleset.group;
   }
 
   const header = getBranchHeader({
@@ -68,12 +79,23 @@ export type BranchCommit = {
 export function createBranch(
   coValue: CoValueCore,
   name: string,
-  ownerId: RawCoID,
+  ownerId?: RawCoID,
 ): CoValueCore {
   if (!coValue.verified) {
     throw new Error(
       "CoValueCore: createBranch called on coValue without verified state",
     );
+  }
+
+  if (!ownerId) {
+    const header = coValue.verified.header;
+
+    // Group and account coValues can't have branches, so we return the source coValue
+    if (header.ruleset.type !== "ownedByGroup") {
+      return coValue;
+    }
+
+    ownerId = header.ruleset.group;
   }
 
   const header = getBranchHeader({

@@ -329,7 +329,7 @@ describe("Branching Logic", () => {
       }
     });
 
-    test("should return unavailable when trying to checkout branch from group", async () => {
+    test("should return the source value when trying to checkout branch from group", async () => {
       const client = setupTestNode({
         connected: true,
       });
@@ -342,8 +342,11 @@ describe("Branching Logic", () => {
         "feature-branch",
       );
 
-      // Should return unavailable since groups don't support branching
-      expect(branch).toBe("unavailable");
+      expect(branch).not.toBe("unavailable");
+
+      if (branch !== "unavailable") {
+        expect(branch.id).toBe(group.id);
+      }
     });
 
     test("should return unavailable when source value is unreachable", async () => {

@@ -886,7 +886,7 @@ export class CoValueCore {
     return matchingTransactions;
   }
 
-  createBranch(name: string, ownerId: RawCoID) {
+  createBranch(name: string, ownerId?: RawCoID) {
     return createBranch(this, name, ownerId);
   }
 
@@ -894,8 +894,8 @@ export class CoValueCore {
     return mergeBranch(this);
   }
 
-  getBranchId(name: string, ownerId: RawCoID) {
-    return getBranchId(this, name, ownerId);
+  getBranch(name: string, ownerId?: RawCoID) {
+    return this.node.getCoValue(getBranchId(this, name, ownerId));
   }
 
   getValidSortedTransactions(options?: {

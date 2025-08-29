@@ -464,7 +464,7 @@ export class LocalNode {
    */
   async checkoutBranch<T extends RawCoValue>(
     id: CoID<T>,
-    branch: string,
+    branchName: string,
     branchOwnerID?: RawCoID,
   ): Promise<T | "unavailable"> {
     const source = await this.loadCoValueCore(id);
@@ -473,28 +473,22 @@ export class LocalNode {
       return "unavailable";
     }
 
-    const header = source.verified.header;
+    const branch = source.getBranch(branchName, branchOwnerID);
 
-    // Group and account coValues can't have branches
-    if (header.ruleset.type !== "ownedByGroup") {
-      logger.error("Can't checkout a branch from a group coValue", {
-        id,
-      });
-      return "unavailable";
+    if (branch.isAvailable()) {
+      return branch.getCurrentContent() as T;
     }
-
-    const ownerID = branchOwnerID || header.ruleset.group;
-
-    const branchID = source.getBranchId(branch, ownerID);
 
     // Passing skipRetry to true because otherwise creating a new branch would always take 1 retry delay
-    let branchCoValue = await this.loadCoValueCore(branchID, undefined, true);
+    await this.loadCoValueCore(branch.id, undefined, true);
 
-    if (!branchCoValue.isAvailable()) {
-      branchCoValue = source.createBranch(branch, ownerID);
+    if (!branch.isAvailable()) {
+      return source
+        .createBranch(branchName, branchOwnerID)
+        .getCurrentContent() as T;
     }
 
-    return branchCoValue.getCurrentContent() as T;
+    return branch.getCurrentContent() as T;
   }
 
   getLoaded<T extends RawCoValue>(id: CoID<T>): T | undefined {
