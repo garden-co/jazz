@@ -36,6 +36,7 @@ export class CoValueCoreSubscription {
     // If a specific branch is requested while the source is not available, attempt to checkout that branch
     if (this.branch) {
       this.handleBranchCheckout();
+      return;
     }
 
     // If we don't have a branch requested, load the CoValue
@@ -106,11 +107,11 @@ export class CoValueCoreSubscription {
     if (source.isAvailable()) {
       // This should be impossible - if source is available, branch should be too
       throw new Error("Branch is unavailable");
-    } else {
-      // Source isn't available either, subscribe to state changes and report unavailability
-      this.subscribeToUnavailableSource();
-      this.listener("unavailable");
     }
+
+    // Source isn't available either, subscribe to state changes and report unavailability
+    this.subscribeToUnavailableSource();
+    this.listener("unavailable");
   }
 
   /**
@@ -157,13 +158,14 @@ export class CoValueCoreSubscription {
 
       // Source became available, handle it appropriately
       if (source.isAvailable()) {
+        unsubFromStateChange();
+
         if (this.branch) {
           // Branch was requested, attempt checkout again
           this.handleBranchCheckout();
         } else {
           // No branch requested, subscribe directly and cleanup state subscription
           this.subscribe(source.getCurrentContent());
-          unsubFromStateChange();
         }
       }
     };

@@ -47,7 +47,7 @@ describe("CoValueCoreSubscription", async () => {
       );
 
       // Should immediately call the listener since CoValue is available
-      expect(listener).toHaveBeenCalled();
+      expect(listener).toHaveBeenCalledTimes(1);
       expect(lastResult.get("name")).toEqual("John");
 
       subscription.unsubscribe();
@@ -86,7 +86,7 @@ describe("CoValueCoreSubscription", async () => {
       );
 
       // Should immediately call the listener with branch data
-      expect(listener).toHaveBeenCalled();
+      expect(listener).toHaveBeenCalledTimes(1);
       expect(lastResult.get("name")).toEqual("Jane");
 
       subscription.unsubscribe();
@@ -782,7 +782,7 @@ describe("CoValueCoreSubscription", async () => {
       );
 
       // Wait for the async loading to complete
-      await waitFor(() => expect(listener).toHaveBeenCalledTimes(3));
+      await waitFor(() => expect(listener).toHaveBeenCalledTimes(2));
 
       // Should return the same instance of the RawCoValue
       expect(lastResultSubscription1).toBe(lastResultSubscription2);
