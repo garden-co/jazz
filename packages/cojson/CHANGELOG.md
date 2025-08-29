@@ -1,5 +1,12 @@
 # cojson
 
+## 0.17.15
+
+### Patch Changes
+
+- c9871ad: Fix self-revoke check to correctly validate against the author of the change
+  - cojson-core-wasm@0.17.15
+
 ## 0.17.14
 
 ### Patch Changes
