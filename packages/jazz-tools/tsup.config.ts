@@ -32,6 +32,7 @@ export default defineConfig([
       index: "src/media/index.ts",
       "index.browser": "src/media/index.browser.ts",
       "index.native": "src/media/index.native.ts",
+      "index.server": "src/media/index.server.ts",
     },
     outDir: "dist/media",
   },

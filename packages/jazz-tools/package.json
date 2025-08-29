@@ -19,16 +19,28 @@
       "types": "./dist/browser/index.d.ts",
       "default": "./dist/browser/index.js"
     },
-    "./browser-media-images": {
-      "@jazz-tools/source": "./src/browser-media-images/index.ts",
-      "types": "./dist/browser-media-images/index.d.ts",
-      "default": "./dist/browser-media-images/index.js"
-    },
     "./media": {
       "@jazz-tools/source": "./src/media/index.ts",
+      "react-native": {
+        "types": "./dist/media/index.native.d.ts",
+        "default": "./dist/media/index.native.js"
+      },
+      "browser": {
+        "types": "./dist/media/index.browser.d.ts",
+        "default": "./dist/media/index.browser.js"
+      },
+      "node": {
+        "@jazz-tools/source": "./src/media/index.server.ts",
+        "types": "./dist/media/index.server.d.ts",
+        "default": "./dist/media/index.server.js"
+      },
       "types": "./dist/media/index.d.ts",
-      "react-native": "./dist/media/index.native.js",
-      "default": "./dist/media/index.browser.js"
+      "default": "./dist/media/index.js"
+    },
+    "./media/server": {
+      "@jazz-tools/source": "./src/media/index.server.ts",
+      "types": "./dist/media/index.server.d.ts",
+      "default": "./dist/media/index.server.js"
     },
     "./expo": {
       "@jazz-tools/source": "./src/expo/index.ts",
@@ -220,6 +232,7 @@
     "react-native-mmkv": "^3.3.0",
     "react-native-nitro-modules": "^0.26.4",
     "react-native-quick-crypto": "^1.0.0-beta.18",
+    "sharp": "^0.33.5",
     "svelte": "^5.0.0"
   },
   "peerDependenciesMeta": {
@@ -263,6 +276,9 @@
       "optional": true
     },
     "react-native-quick-crypto": {
+      "optional": true
+    },
+    "sharp": {
       "optional": true
     },
     "svelte": {
