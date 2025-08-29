@@ -37,10 +37,10 @@ export default function Playground() {
 
   const examplePersonFeed = useMemo(() => {
     const feed = PersonFeed.create([]);
-    feed.push(Person.create({ name: "John", age: 5 }));
-    feed.push(Person.create({ name: "John", age: 10 }));
-    feed.push(Person.create({ name: "John", age: 15 }));
-    feed.push(Person.create({ name: "John", age: 20 }));
+    feed.$jazz.push(Person.create({ name: "John", age: 5 }));
+    feed.$jazz.push(Person.create({ name: "John", age: 10 }));
+    feed.$jazz.push(Person.create({ name: "John", age: 15 }));
+    feed.$jazz.push(Person.create({ name: "John", age: 20 }));
     return feed;
   }, []);
 
