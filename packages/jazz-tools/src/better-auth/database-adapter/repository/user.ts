@@ -1,7 +1,8 @@
 import { CleanedWhere } from "better-auth/adapters";
-import { co, CoMap, z } from "jazz-tools";
+import { co, z } from "jazz-tools";
 import { JazzRepository } from "./generic";
 import { isWhereBySingleField } from "../utils";
+import type { TableItem } from "../schema";
 
 const EmailIndex = co.map({ user: z.string().nullable() });
 
@@ -11,11 +12,11 @@ export class UserRepository extends JazzRepository {
    * - sessions are stored inside the user object
    * - keep sync email index
    */
-  async create<T extends z.z.core.$ZodLooseShape>(
+  async create(
     model: string,
-    data: T,
+    data: Record<string, any>,
     uniqueId?: string,
-  ): Promise<{ id: string } & T> {
+  ): Promise<TableItem> {
     const SessionListSchema = this.databaseSchema.shape.tables.shape.session;
 
     if (!SessionListSchema) {
@@ -32,10 +33,12 @@ export class UserRepository extends JazzRepository {
 
     const user = await super.create(model, data, uniqueId);
 
-    await this.updateEmailIndex(userEmail, user.id);
+    await this.updateEmailIndex(userEmail, user.$jazz.id);
 
-    // @ts-expect-error sessions is in user schema
-    user.sessions = co.list(SessionListSchema).create([], user._owner);
+    user.$jazz.set(
+      "sessions",
+      co.list(SessionListSchema).create([], user.$jazz.owner),
+    );
 
     return user;
   }
@@ -44,25 +47,25 @@ export class UserRepository extends JazzRepository {
    * Custom logic:
    * - if the email is in the where clause, find by email
    */
-  async findMany<T extends CoMap>(
+  async findMany(
     model: string,
     where: CleanedWhere[] | undefined,
     limit?: number,
     sortBy?: { field: string; direction: "asc" | "desc" },
     offset?: number,
-  ): Promise<T[]> {
+  ): Promise<TableItem[]> {
     if (isWhereBySingleField("email", where)) {
-      return this.findByEmail<T>(where[0].value as string);
+      return this.findByEmail(where[0].value as string);
     }
 
-    return super.findMany<T>(model, where, limit, sortBy, offset);
+    return super.findMany(model, where, limit, sortBy, offset);
   }
 
   private getEmailProperty(): string {
     return this.betterAuthSchema.user?.fields.email?.fieldName || "email";
   }
 
-  private async findByEmail<T extends CoMap>(email: string): Promise<T[]> {
+  private async findByEmail(email: string): Promise<TableItem[]> {
     const emailIndex = await this.loadEmailIndex(email);
 
     const user = emailIndex?.user;
@@ -71,7 +74,7 @@ export class UserRepository extends JazzRepository {
       return [];
     }
 
-    return this.findById<T>("user", [
+    return this.findById("user", [
       { field: "id", operator: "eq", value: user, connector: "AND" },
     ]).then((user) => (user ? [user] : []));
   }
@@ -80,12 +83,12 @@ export class UserRepository extends JazzRepository {
    * Custom logic:
    * - if the email is changed, update the email index
    */
-  async update<T>(
+  async update(
     model: string,
     where: CleanedWhere[],
-    update: T,
-  ): Promise<CoMap[]> {
-    const nodes = await this.findMany<CoMap>(model, where);
+    update: Record<string, any>,
+  ): Promise<TableItem[]> {
+    const nodes = await this.findMany(model, where);
     if (nodes.length === 0) {
       return [];
     }
@@ -95,14 +98,13 @@ export class UserRepository extends JazzRepository {
       | undefined;
 
     for (const node of nodes) {
-      const oldEmail = node._raw.get(this.getEmailProperty()) as
+      const oldEmail = node.$jazz.raw.get(this.getEmailProperty()) as
         | string
         | undefined;
       for (const [key, value] of Object.entries(
         update as Record<string, any>,
       )) {
-        // @ts-expect-error Can't know keys at static time
-        node[key] = value;
+        node.$jazz.set(key, value);
       }
 
       // if the email is changed, update the email index
@@ -112,7 +114,7 @@ export class UserRepository extends JazzRepository {
         newEmail !== undefined
       ) {
         await this.updateEmailIndex(oldEmail, null);
-        await this.updateEmailIndex(newEmail, node.id);
+        await this.updateEmailIndex(newEmail, node.$jazz.id);
       }
     }
 
@@ -120,12 +122,12 @@ export class UserRepository extends JazzRepository {
   }
 
   async deleteValue(model: string, where: CleanedWhere[]): Promise<number> {
-    const nodes = await this.findMany<CoMap>(model, where);
+    const nodes = await this.findMany(model, where);
 
     const deleted = await super.deleteValue(model, where);
 
     for (const node of nodes) {
-      const email = node._raw.get(this.getEmailProperty()) as
+      const email = node.$jazz.raw.get(this.getEmailProperty()) as
         | string
         | undefined;
       if (email) {
@@ -137,7 +139,7 @@ export class UserRepository extends JazzRepository {
   }
 
   private async loadEmailIndex(email: string) {
-    const emailIndex = await EmailIndex.loadUnique(email, this.owner.id, {
+    const emailIndex = await EmailIndex.loadUnique(email, this.owner.$jazz.id, {
       loadAs: this.worker,
     });
 
