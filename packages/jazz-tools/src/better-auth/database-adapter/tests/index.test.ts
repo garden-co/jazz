@@ -15,6 +15,7 @@ import { Account, co, Group } from "jazz-tools";
 import { startWorker } from "jazz-tools/worker";
 import { createWorkerAccount, startSyncServer } from "./sync-utils.js";
 import { JazzBetterAuthDatabaseAdapter } from "../index.js";
+import { TableItem } from "../schema.js";
 
 describe("JazzBetterAuthDatabaseAdapter tests", async () => {
   describe("better-auth internal tests", async () => {
@@ -214,7 +215,7 @@ describe("JazzBetterAuthDatabaseAdapter tests", async () => {
       // Remove the previous worker if you want to rotate the worker
       // db.group.removeMember(worker);
 
-      await db.group.waitForSync();
+      await db.group.$jazz.waitForSync();
 
       // Start the new worker
       const { worker: newWorker } = await startWorker({

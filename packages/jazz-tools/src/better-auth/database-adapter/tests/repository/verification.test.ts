@@ -78,7 +78,7 @@ describe("VerificationRepository", () => {
       value: "test",
     });
 
-    expect(verification.id).toBeDefined();
+    expect(verification.$jazz.id).toBeDefined();
 
     const result = await verificationRepository.findMany(
       "verification",
@@ -96,6 +96,6 @@ describe("VerificationRepository", () => {
     );
 
     expect(result.length).toBe(1);
-    expect(result[0]?.id).toBe(verification.id);
+    expect(result[0]?.$jazz.id).toBe(verification.$jazz.id);
   });
 });
