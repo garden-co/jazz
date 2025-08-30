@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ImageDefinition } from "jazz-tools";
+import { ImageDefinition, Loaded } from "jazz-tools";
 import { highestResAvailable } from "jazz-tools/media";
 import { onUnmounted, ref, watch, computed } from "vue";
 import { useCoState } from "./composables.js";
@@ -31,7 +31,9 @@ const props = withDefaults(defineProps<ImageProps>(), {
   loading: "eager",
 });
 
-const image = useCoState(ImageDefinition, props.imageId, {});
+const image = useCoState(ImageDefinition, props.imageId, {
+  resolve: { resolutions: true },
+});
 let lastBestImage: [string, string] | null = null;
 
 /**
@@ -89,7 +91,7 @@ const src = computed(() => {
   if (!image.value) return undefined;
 
   const bestImage = highestResAvailable(
-    image.value,
+    image.value as Loaded<typeof ImageDefinition, { resolutions: true }>,
     dimensions.value.width || dimensions.value.height || 9999,
     dimensions.value.height || dimensions.value.width || 9999,
   );

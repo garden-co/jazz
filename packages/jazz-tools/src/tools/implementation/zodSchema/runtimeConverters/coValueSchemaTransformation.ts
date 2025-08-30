@@ -8,6 +8,7 @@ import {
   CoListSchema,
   CoMap,
   CoPlainText,
+  CoRecordSchema,
   CoRichText,
   CoValueClass,
   FileStream,
@@ -72,6 +73,24 @@ export function hydrateCoreCoValueSchema<S extends AnyCoreCoValueSchema>(
     throw new Error(
       `co.optional() of collaborative types is not supported as top-level schema: ${JSON.stringify(schema)}`,
     );
+  } else if (schema.builtin === "CoRecord") {
+    const def = schema.getDefinition();
+    const coValueClass = class ZCoRecord extends CoMap {
+      constructor(options: { fromRaw: RawCoMap } | undefined) {
+        super(options);
+        (this as any)[coField.items] = schemaFieldToCoFieldDef(
+          def.valueType as SchemaField,
+        );
+      }
+    };
+
+    const coValueSchema = new CoRecordSchema(
+      def.keyType,
+      def.valueType,
+      coValueClass as any,
+    );
+
+    return coValueSchema as unknown as CoValueSchemaFromCoreSchema<S>;
   } else if (schema.builtin === "CoMap" || schema.builtin === "Account") {
     const def = schema.getDefinition();
     const ClassToExtend = schema.builtin === "Account" ? Account : CoMap;
@@ -82,11 +101,6 @@ export function hydrateCoreCoValueSchema<S extends AnyCoreCoValueSchema>(
         for (const [fieldName, fieldType] of Object.entries(def.shape)) {
           (this as any)[fieldName] = schemaFieldToCoFieldDef(
             fieldType as SchemaField,
-          );
-        }
-        if (def.catchall) {
-          (this as any)[coField.items] = schemaFieldToCoFieldDef(
-            def.catchall as SchemaField,
           );
         }
       }

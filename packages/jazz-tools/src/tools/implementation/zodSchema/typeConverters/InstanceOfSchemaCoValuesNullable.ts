@@ -41,20 +41,13 @@ export type InstanceOfSchemaCoValuesNullable<
                 string]: InstanceOrPrimitiveOfSchemaCoValuesNullable<V>;
             } & CoMap)
           | null
-      : S extends CoreCoMapSchema<infer Shape, infer CatchAll>
+      : S extends CoreCoMapSchema<infer Shape>
         ?
             | ({
                 readonly [key in keyof Shape]: InstanceOrPrimitiveOfSchemaCoValuesNullable<
                   Shape[key]
                 >;
-              } & (CatchAll extends AnyZodOrCoValueSchema
-                ? {
-                    readonly [
-                      key: string
-                    ]: InstanceOrPrimitiveOfSchemaCoValuesNullable<CatchAll>;
-                  }
-                : {}) &
-                CoMap)
+              } & CoMap)
             | null
         : S extends CoreCoListSchema<infer T>
           ? CoList<InstanceOrPrimitiveOfSchemaCoValuesNullable<T>> | null

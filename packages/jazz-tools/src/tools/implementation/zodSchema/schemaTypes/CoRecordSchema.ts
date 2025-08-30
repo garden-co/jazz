@@ -2,7 +2,7 @@ import { CoValueUniqueness } from "cojson";
 import {
   Account,
   type CoMap,
-  CoMapSchemaDefinition,
+  coOptionalDefiner,
   Group,
   ID,
   RefsToResolve,
@@ -27,10 +27,27 @@ type CoRecordInit<
   [key in z.output<K>]: CoFieldSchemaInit<V>;
 };
 
-export interface CoRecordSchema<
+export class CoRecordSchema<
   K extends z.core.$ZodString<string>,
   V extends AnyZodOrCoValueSchema,
-> extends CoreCoRecordSchema<K, V> {
+> implements CoreCoRecordSchema<K, V>
+{
+  collaborative = true as const;
+  builtin = "CoRecord" as const;
+
+  getDefinition(): CoRecordSchemaDefinition<K, V> {
+    return {
+      keyType: this.keyType,
+      valueType: this.valueType,
+    };
+  }
+
+  constructor(
+    private keyType: K,
+    private valueType: V,
+    private coValueClass: typeof CoMap,
+  ) {}
+
   create(
     init: Simplify<CoRecordInit<K, V>>,
     options?:
@@ -45,6 +62,10 @@ export interface CoRecordSchema<
       | Account
       | Group,
   ): CoRecordInstanceShape<K, V> & CoMap;
+  create(...args: [any, ...any[]]): CoRecordInstanceShape<K, V> & CoMap {
+    return this.coValueClass.create(...args) as CoRecordInstanceShape<K, V> &
+      CoMap;
+  }
 
   load<
     const R extends RefsToResolve<
@@ -56,7 +77,10 @@ export interface CoRecordSchema<
       resolve?: RefsToResolveStrict<CoRecordInstanceCoValuesNullable<K, V>, R>;
       loadAs?: Account | AnonymousJazzAgent;
     },
-  ): Promise<Resolved<CoRecordInstanceCoValuesNullable<K, V>, R> | null>;
+  ): Promise<Resolved<CoRecordInstanceCoValuesNullable<K, V>, R> | null> {
+    // @ts-expect-error
+    return this.coValueClass.load(id, options);
+  }
 
   subscribe<
     const R extends RefsToResolve<
@@ -72,14 +96,19 @@ export interface CoRecordSchema<
       value: Resolved<CoRecordInstanceCoValuesNullable<K, V>, R>,
       unsubscribe: () => void,
     ) => void,
-  ): () => void;
+  ): () => void {
+    // @ts-expect-error
+    return this.coValueClass.subscribe(id, options, listener);
+  }
 
   /** @deprecated Use `CoMap.upsertUnique` and `CoMap.loadUnique` instead. */
   findUnique(
     unique: CoValueUniqueness["uniqueness"],
     ownerID: ID<Account> | ID<Group>,
     as?: Account | Group | AnonymousJazzAgent,
-  ): ID<CoRecordInstanceCoValuesNullable<K, V>>;
+  ): ID<CoRecordInstanceCoValuesNullable<K, V>> {
+    return this.coValueClass.findUnique(unique, ownerID, as);
+  }
 
   upsertUnique<
     const R extends RefsToResolve<
@@ -90,7 +119,10 @@ export interface CoRecordSchema<
     unique: CoValueUniqueness["uniqueness"];
     owner: Account | Group;
     resolve?: RefsToResolveStrict<CoRecordInstanceCoValuesNullable<K, V>, R>;
-  }): Promise<Resolved<CoRecordInstanceCoValuesNullable<K, V>, R> | null>;
+  }): Promise<Resolved<CoRecordInstanceCoValuesNullable<K, V>, R> | null> {
+    // @ts-expect-error
+    return this.coValueClass.upsertUnique(options);
+  }
 
   loadUnique<
     const R extends RefsToResolve<
@@ -103,17 +135,38 @@ export interface CoRecordSchema<
       resolve?: RefsToResolveStrict<CoRecordInstanceCoValuesNullable<K, V>, R>;
       loadAs?: Account | AnonymousJazzAgent;
     },
-  ): Promise<Resolved<CoRecordInstanceCoValuesNullable<K, V>, R> | null>;
+  ): Promise<Resolved<CoRecordInstanceCoValuesNullable<K, V>, R> | null> {
+    // @ts-expect-error
+    return this.coValueClass.loadUnique(unique, ownerID, options);
+  }
 
-  getCoValueClass: () => typeof CoMap;
+  getCoValueClass(): typeof CoMap {
+    return this.coValueClass;
+  }
 
-  optional(): CoOptionalSchema<this>;
+  optional(): CoOptionalSchema<this> {
+    return coOptionalDefiner(this);
+  }
+}
+
+export function createCoreCoRecordSchema<
+  K extends z.core.$ZodString<string>,
+  V extends AnyZodOrCoValueSchema,
+>(keyType: K, valueType: V): CoreCoRecordSchema<K, V> {
+  return {
+    collaborative: true as const,
+    builtin: "CoRecord" as const,
+    getDefinition: () => ({
+      keyType,
+      valueType,
+    }),
+  };
 }
 
 type CoRecordSchemaDefinition<
   K extends z.core.$ZodString<string>,
   V extends AnyZodOrCoValueSchema,
-> = CoMapSchemaDefinition & {
+> = {
   keyType: K;
   valueType: V;
 };
@@ -123,7 +176,7 @@ export interface CoreCoRecordSchema<
   K extends z.core.$ZodString<string> = z.core.$ZodString<string>,
   V extends AnyZodOrCoValueSchema = AnyZodOrCoValueSchema,
 > extends CoreCoValueSchema {
-  builtin: "CoMap";
+  builtin: "CoRecord";
   getDefinition: () => CoRecordSchemaDefinition<K, V>;
 }
 

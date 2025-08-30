@@ -7,7 +7,7 @@ import type { ImageProps } from "./image.types.js";
 
 const { imageId, width, height, ...rest }: ImageProps = $props();
 
-const imageState = new CoState(ImageDefinition, () => imageId);
+const imageState = new CoState(ImageDefinition, () => imageId, { resolve: { resolutions: true } });
 let lastBestImage: [string, string] | null = null;
 
 /**

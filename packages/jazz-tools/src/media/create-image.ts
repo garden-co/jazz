@@ -60,7 +60,7 @@ async function createImage(
   imageBlobOrFile: SourceType,
   options: CreateImageOptions,
   impl: CreateImageImpl,
-): Promise<Loaded<typeof ImageDefinition, { $each: true }>> {
+): Promise<Loaded<typeof ImageDefinition, { resolutions: { $each: true } }>> {
   // Get the original size of the image
   const { width: originalWidth, height: originalHeight } =
     await impl.getImageSize(imageBlobOrFile);
@@ -124,7 +124,7 @@ async function createImage(
       progressive: def.progressive,
       placeholderDataURL: def.placeholderDataURL,
       original: def.original,
-      ...def.files,
+      resolutions: { ...def.files },
     },
     options?.owner,
   );
@@ -153,7 +153,7 @@ async function createImage(
       );
 
       const blob = await impl.resize(imageBlobOrFile, width, height);
-      imageCoValue.$jazz.set(
+      imageCoValue.resolutions.$jazz.set(
         `${width}x${height}`,
         await impl.createFileStreamFromSource(blob, options?.owner),
       );

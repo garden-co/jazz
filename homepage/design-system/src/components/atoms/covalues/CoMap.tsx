@@ -15,7 +15,9 @@ export function CoMapVisualizer<T extends CoMap>({
     <div className="flex justify-center">
       <div className="bg-black rounded p-2 min-w-[16px] min-h-[32px] shadow-md">
         {showMetadata && (
-          <div className="text-white/50 text-xs mb-1">coId: {instance.id}</div>
+          <div className="text-white/50 text-xs mb-1">
+            coId: {instance.$jazz.id}
+          </div>
         )}
         {showData && (
           <ul className="list-none p-0 m-0">

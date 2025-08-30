@@ -383,6 +383,7 @@ describe("CoMap.Record", async () => {
         original: FileStream.create(),
         progressive: false,
         originalSize: [1920, 1080],
+        resolutions: {},
       }),
     });
 
@@ -392,42 +393,6 @@ describe("CoMap.Record", async () => {
 
     if (record.john?.type === "repro") {
       expect(record.john.image.originalSize).toEqual([1920, 1080]);
-      expect(record.john.name).toEqual("John");
-      expect(record.john.type).toEqual("repro");
-    }
-  });
-
-  // Covers https://github.com/garden-co/jazz/issues/2385
-  test("create a Record with a discriminated union containing a co.map that uses catchall", () => {
-    const Base = co.map({
-      type: z.literal("base"),
-      name: z.string(),
-    });
-
-    const Catchall = co.map({}).catchall(z.string());
-    const IssueRepro = co.map({
-      type: z.literal("repro"),
-      catchall: Catchall,
-      name: z.string(),
-    });
-
-    const PersonRecord = co.record(
-      z.string(),
-      co.discriminatedUnion("type", [Base, IssueRepro]),
-    );
-
-    const person = IssueRepro.create({
-      type: "repro",
-      catchall: Catchall.create({}),
-      name: "John",
-    });
-
-    const record = PersonRecord.create({
-      john: person,
-    });
-
-    if (record.john?.type === "repro") {
-      expect(record.john.catchall).toEqual({});
       expect(record.john.name).toEqual("John");
       expect(record.john.type).toEqual("repro");
     }

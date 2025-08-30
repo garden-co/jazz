@@ -34,11 +34,12 @@ describe("highestResAvailable", async () => {
         originalSize: [1920, 1080],
         progressive: false,
         original,
+        resolutions: {},
       },
       { owner: account.$jazz.owner },
     );
 
-    imageDef.$jazz.set("1920x1080", original);
+    imageDef.resolutions.$jazz.set("1920x1080", original);
 
     const result = highestResAvailable(imageDef, 256, 256);
     expect(result?.image.$jazz.id).toBe(original.$jazz.id);
@@ -51,11 +52,12 @@ describe("highestResAvailable", async () => {
         originalSize: [1920, 1080],
         progressive: true,
         original,
+        resolutions: {},
       },
       { owner: account.$jazz.owner },
     );
 
-    imageDef.$jazz.set("1920x1080", original);
+    imageDef.resolutions.$jazz.set("1920x1080", original);
 
     const result = highestResAvailable(imageDef, 256, 256);
     expect(result?.image.$jazz.id).toBe(original.$jazz.id);
@@ -69,12 +71,13 @@ describe("highestResAvailable", async () => {
         originalSize: [1920, 1080],
         progressive: true,
         original,
+        resolutions: {},
       },
       { owner: account.$jazz.owner },
     );
 
-    imageDef.$jazz.set("1920x1080", original);
-    imageDef.$jazz.set("256x256", resize256);
+    imageDef.resolutions.$jazz.set("1920x1080", original);
+    imageDef.resolutions.$jazz.set("256x256", resize256);
 
     const result = highestResAvailable(imageDef, 256, 256);
     expect(result?.image.$jazz.id).toBe(resize256.$jazz.id);
@@ -87,11 +90,12 @@ describe("highestResAvailable", async () => {
         originalSize: [1024, 1024],
         progressive: true,
         original,
+        resolutions: {},
       },
       { owner: account.$jazz.owner },
     );
 
-    imageDef.$jazz.set("1024x1024", original);
+    imageDef.resolutions.$jazz.set("1024x1024", original);
 
     const result = highestResAvailable(imageDef, 1024, 1024);
     expect(result?.image.$jazz.id).toBe(original.$jazz.id);
@@ -107,13 +111,14 @@ describe("highestResAvailable", async () => {
         originalSize: [2048, 2048],
         progressive: true,
         original,
+        resolutions: {},
       },
       { owner: account.$jazz.owner },
     );
 
-    imageDef.$jazz.set("256x256", resize256);
-    imageDef.$jazz.set("1024x1024", resize1024);
-    imageDef.$jazz.set("2048x2048", resize2048);
+    imageDef.resolutions.$jazz.set("256x256", resize256);
+    imageDef.resolutions.$jazz.set("1024x1024", resize1024);
+    imageDef.resolutions.$jazz.set("2048x2048", resize2048);
 
     // Closest to 900x900 is 1024
     const result = highestResAvailable(imageDef, 900, 900);
@@ -134,12 +139,13 @@ describe("highestResAvailable", async () => {
         originalSize: [2048, 2048],
         progressive: true,
         original,
+        resolutions: {},
       },
       { owner: account.$jazz.owner },
     );
-    imageDef.$jazz.set("256x256", resize256);
-    imageDef.$jazz.set("1024x1024", resize1024);
-    imageDef.$jazz.set("2048x2048", resize2048);
+    imageDef.resolutions.$jazz.set("256x256", resize256);
+    imageDef.resolutions.$jazz.set("1024x1024", resize1024);
+    imageDef.resolutions.$jazz.set("2048x2048", resize2048);
 
     // Closest to 900x900 is 1024
     const result = highestResAvailable(imageDef, 900, 900);
@@ -153,16 +159,17 @@ describe("highestResAvailable", async () => {
         originalSize: [256, 256],
         progressive: true,
         original,
+        resolutions: {},
       },
       { owner: account.$jazz.owner },
     );
 
-    imageDef.$jazz.set("256x256", original);
+    imageDef.resolutions.$jazz.set("256x256", original);
     // 1024 is not loaded yet
     const resize1024 = FileStream.create({ owner: account.$jazz.owner });
     resize1024.start({ mimeType: "image/jpeg" });
     // Don't end resize1024, so it has no chunks
-    imageDef.$jazz.set("1024x1024", resize1024);
+    imageDef.resolutions.$jazz.set("1024x1024", resize1024);
 
     const result = highestResAvailable(imageDef, 1024, 1024);
     // Only original is valid
@@ -179,18 +186,21 @@ describe("highestResAvailable", async () => {
         originalSize: [300, 300],
         progressive: true,
         original,
+        resolutions: {},
       },
       { owner: account.$jazz.owner },
     );
 
-    imageDef.$jazz.set(
+    imageDef.resolutions.$jazz.set(
       "256x256",
       await createFileStream(account.$jazz.owner, 1),
     );
 
     const result = highestResAvailable(imageDef, 1024, 1024);
     // Only original is valid
-    expect(result?.image.$jazz.id).toBe(imageDef["256x256"]!.$jazz.id);
+    expect(result?.image.$jazz.id).toBe(
+      imageDef.resolutions["256x256"]!.$jazz.id,
+    );
   });
 
   it("returns the highest resolution if no good match is found", async () => {
@@ -201,15 +211,16 @@ describe("highestResAvailable", async () => {
         originalSize: [300, 300],
         progressive: true,
         original,
+        resolutions: {},
       },
       { owner: account.$jazz.owner },
     );
 
-    imageDef.$jazz.set(
+    imageDef.resolutions.$jazz.set(
       "256x256",
       await createFileStream(account.$jazz.owner, 1),
     );
-    imageDef.$jazz.set("300x300", original);
+    imageDef.resolutions.$jazz.set("300x300", original);
 
     const result = highestResAvailable(imageDef, 1024, 1024);
     expect(result?.image.$jazz.id).toBe(original.$jazz.id);
@@ -240,15 +251,22 @@ describe("loadImageBySize", async () => {
         originalSize,
         progressive,
         original,
+        resolutions: {},
       },
       { owner },
     );
-    imageDef.$jazz.set(`${originalSize[0]}x${originalSize[1]}`, original);
+    imageDef.resolutions.$jazz.set(
+      `${originalSize[0]}x${originalSize[1]}`,
+      original,
+    );
 
     for (const size of sizes) {
       if (!size) continue;
       const [w, h] = size;
-      imageDef.$jazz.set(`${w}x${h}`, await createFileStream(owner, 1));
+      imageDef.resolutions.$jazz.set(
+        `${w}x${h}`,
+        await createFileStream(owner, 1),
+      );
     }
     return imageDef;
   };
@@ -256,7 +274,9 @@ describe("loadImageBySize", async () => {
   it("returns original if progressive is false", async () => {
     const imageDef = await createImageDef([[1920, 1080]], false);
     const result = await loadImageBySize(imageDef, 256, 256);
-    expect(result?.image.$jazz.id).toBe(imageDef["1920x1080"]!.$jazz.id);
+    expect(result?.image.$jazz.id).toBe(
+      imageDef.resolutions["1920x1080"]!.$jazz.id,
+    );
   });
 
   it("returns the original image already loaded", async () => {
@@ -272,7 +292,9 @@ describe("loadImageBySize", async () => {
     setActiveAccount(account2);
 
     const result = await loadImageBySize(imageDef, 256, 256);
-    expect(result?.image.$jazz.id).toBe(imageDef["1920x1080"]!.$jazz.id);
+    expect(result?.image.$jazz.id).toBe(
+      imageDef.resolutions["1920x1080"]!.$jazz.id,
+    );
     expect(result?.image.isBinaryStreamEnded()).toBe(true);
     expect(result?.image.asBase64()).toStrictEqual(expect.any(String));
   });
@@ -284,6 +306,7 @@ describe("loadImageBySize", async () => {
         originalSize: [1920, 1080],
         progressive: true,
         original,
+        resolutions: {},
       },
       { owner: account.$jazz.owner },
     );
@@ -297,7 +320,9 @@ describe("loadImageBySize", async () => {
       [1920, 1080],
     ]);
     const result = await loadImageBySize(imageDef.$jazz.id, 256, 256);
-    expect(result?.image.$jazz.id).toBe(imageDef["256x256"]!.$jazz.id);
+    expect(result?.image.$jazz.id).toBe(
+      imageDef.resolutions["256x256"]!.$jazz.id,
+    );
     expect(result?.width).toBe(256);
     expect(result?.height).toBe(256);
   });
@@ -309,7 +334,9 @@ describe("loadImageBySize", async () => {
       [2048, 2048],
     ]);
     const result = await loadImageBySize(imageDef, 900, 900);
-    expect(result?.image.$jazz.id).toBe(imageDef["1024x1024"]!.$jazz.id);
+    expect(result?.image.$jazz.id).toBe(
+      imageDef.resolutions["1024x1024"]!.$jazz.id,
+    );
     expect(result?.width).toBe(1024);
     expect(result?.height).toBe(1024);
   });
@@ -320,7 +347,9 @@ describe("loadImageBySize", async () => {
       [300, 300],
     ]);
     const result = await loadImageBySize(imageDef, 1024, 1024);
-    expect(result?.image.$jazz.id).toBe(imageDef["300x300"]!.$jazz.id);
+    expect(result?.image.$jazz.id).toBe(
+      imageDef.resolutions["300x300"]!.$jazz.id,
+    );
     expect(result?.width).toBe(300);
     expect(result?.height).toBe(300);
   });
@@ -332,6 +361,7 @@ describe("loadImageBySize", async () => {
         originalSize: [256, 256],
         progressive: true,
         original,
+        resolutions: {},
       },
       { owner: account.$jazz.owner },
     );
@@ -346,7 +376,9 @@ describe("loadImageBySize", async () => {
       [1024, 1024],
     ]);
     const result = await loadImageBySize(imageDef, 1024, 1024);
-    expect(result?.image.$jazz.id).toBe(imageDef["1024x1024"]!.$jazz.id);
+    expect(result?.image.$jazz.id).toBe(
+      imageDef.resolutions["1024x1024"]!.$jazz.id,
+    );
     expect(result?.width).toBe(1024);
     expect(result?.height).toBe(1024);
   });
@@ -373,7 +405,9 @@ describe("loadImageBySize", async () => {
 
     const result = await loadImageBySize(imageDef.$jazz.id, 1024, 1024);
     expect(result).not.toBeNull();
-    expect(result?.image.$jazz.id).toBe(imageDef["1024x1024"]!.$jazz.id);
+    expect(result?.image.$jazz.id).toBe(
+      imageDef.resolutions["1024x1024"]!.$jazz.id,
+    );
     expect(result?.image.isBinaryStreamEnded()).toBe(true);
     expect(result?.image.asBase64()).toStrictEqual(expect.any(String));
   });

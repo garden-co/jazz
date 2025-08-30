@@ -36,6 +36,7 @@ describe("Image", async () => {
           original,
           originalSize: [100, 100],
           progressive: false,
+          resolutions: {},
         },
         {
           owner: account,
@@ -68,6 +69,7 @@ describe("Image", async () => {
           originalSize: [100, 100],
           progressive: false,
           placeholderDataURL: placeholderDataUrl,
+          resolutions: {},
         },
         {
           owner: account,
@@ -98,6 +100,7 @@ describe("Image", async () => {
           original: await createDummyFileStream(100, account),
           originalSize: [100, 100],
           progressive: false,
+          resolutions: {},
         },
         {
           owner: account,
@@ -123,6 +126,7 @@ describe("Image", async () => {
           original: await createDummyFileStream(100, account),
           originalSize: [100, 100],
           progressive: false,
+          resolutions: {},
         },
         {
           owner: account,
@@ -145,6 +149,7 @@ describe("Image", async () => {
           original: await createDummyFileStream(100, account),
           originalSize: [100, 100],
           progressive: false,
+          resolutions: {},
         },
         {
           owner: account,
@@ -175,6 +180,7 @@ describe("Image", async () => {
           original: await createDummyFileStream(100, account),
           originalSize: [100, 100],
           progressive: false,
+          resolutions: {},
         },
         {
           owner: account,
@@ -205,6 +211,7 @@ describe("Image", async () => {
           original: await createDummyFileStream(100, account),
           originalSize: [100, 100],
           progressive: false,
+          resolutions: {},
         },
         {
           owner: account,
@@ -228,6 +235,7 @@ describe("Image", async () => {
           original: await createDummyFileStream(100, account),
           originalSize: [100, 100],
           progressive: false,
+          resolutions: {},
         },
         {
           owner: account,
@@ -251,6 +259,7 @@ describe("Image", async () => {
           original: await createDummyFileStream(100, account),
           originalSize: [100, 100],
           progressive: false,
+          resolutions: {},
         },
         {
           owner: account,
@@ -286,14 +295,18 @@ describe("Image", async () => {
           original,
           originalSize: [500, 500],
           progressive: true,
+          resolutions: {},
         },
         {
           owner: account,
         },
       );
 
-      im.$jazz.set("500x500", original);
-      im.$jazz.set("256x256", await createDummyFileStream(256, account));
+      im.resolutions.$jazz.set("500x500", original);
+      im.resolutions.$jazz.set(
+        "256x256",
+        await createDummyFileStream(256, account),
+      );
 
       const { container } = render(
         <Image imageId={im.$jazz.id} alt="test-progressive" width={300} />,
@@ -326,14 +339,18 @@ describe("Image", async () => {
           original,
           originalSize: [1920, 1080],
           progressive: true,
+          resolutions: {},
         },
         {
           owner: account,
         },
       );
 
-      im.$jazz.set("1920x1080", original);
-      im.$jazz.set("256x256", await createDummyFileStream(256, account));
+      im.resolutions.$jazz.set("1920x1080", original);
+      im.resolutions.$jazz.set(
+        "256x256",
+        await createDummyFileStream(256, account),
+      );
 
       const { container } = render(
         <Image imageId={im.$jazz.id} alt="test-progressive" width={1024} />,
@@ -349,7 +366,10 @@ describe("Image", async () => {
       expect(createObjectURLSpy).toHaveBeenCalledTimes(1);
 
       // Load higher resolution image
-      im.$jazz.set("1024x1024", await createDummyFileStream(1024, account));
+      im.resolutions.$jazz.set(
+        "1024x1024",
+        await createDummyFileStream(1024, account),
+      );
 
       await waitFor(() => {
         expect((container.querySelector("img") as HTMLImageElement).src).toBe(
@@ -379,15 +399,22 @@ describe("Image", async () => {
           original,
           originalSize: [100, 100],
           progressive: true,
+          resolutions: {},
         },
         {
           owner: account,
         },
       );
 
-      im.$jazz.set("100x100", original);
-      im.$jazz.set("256x256", await createDummyFileStream(256, account));
-      im.$jazz.set("1024x1024", await createDummyFileStream(1024, account));
+      im.resolutions.$jazz.set("100x100", original);
+      im.resolutions.$jazz.set(
+        "256x256",
+        await createDummyFileStream(256, account),
+      );
+      im.resolutions.$jazz.set(
+        "1024x1024",
+        await createDummyFileStream(1024, account),
+      );
 
       const { container } = render(
         <Image imageId={im.$jazz.id} alt="test-progressive" width={256} />,
@@ -419,14 +446,18 @@ describe("Image", async () => {
           original,
           originalSize: [100, 100],
           progressive: true,
+          resolutions: {},
         },
         {
           owner: account,
         },
       );
 
-      im.$jazz.set("100x100", original);
-      im.$jazz.set("256x256", await createDummyFileStream(256, account));
+      im.resolutions.$jazz.set("100x100", original);
+      im.resolutions.$jazz.set(
+        "256x256",
+        await createDummyFileStream(256, account),
+      );
 
       const { container } = render(
         <Image imageId={im.$jazz.id} alt="test-progressive" width={100} />,
@@ -458,13 +489,17 @@ describe("Image", async () => {
           original,
           originalSize: [256, 256],
           progressive: true,
+          resolutions: {},
         },
         {
           owner: account,
         },
       );
-      im.$jazz.set("256x256", original);
-      im.$jazz.set("1024x1024", await createDummyFileStream(1024, account));
+      im.resolutions.$jazz.set("256x256", original);
+      im.resolutions.$jazz.set(
+        "1024x1024",
+        await createDummyFileStream(1024, account),
+      );
 
       const { container, rerender } = render(
         <Image
@@ -510,6 +545,7 @@ describe("Image", async () => {
           original: await createDummyFileStream(100, account),
           originalSize: [100, 100],
           progressive: false,
+          resolutions: {},
         },
         {
           owner: account,
@@ -536,6 +572,7 @@ describe("Image", async () => {
           original: await createDummyFileStream(100, account),
           originalSize: [100, 100],
           progressive: false,
+          resolutions: {},
         },
         {
           owner: account,
@@ -567,6 +604,7 @@ describe("Image", async () => {
           original: await createDummyFileStream(100, account),
           originalSize: [100, 100],
           progressive: false,
+          resolutions: {},
         },
         {
           owner: account,
