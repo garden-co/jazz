@@ -22,7 +22,9 @@ export function CoFeedVisualizer<T extends CoFeed>({
     <div className="flex justify-center p-4">
       <div className="bg-white rounded-lg p-6 min-w-[200px] shadow-md">
         {showMetadata && (
-          <div className="text-stone-500 text-xs mb-4">coId: {instance.id}</div>
+          <div className="text-stone-500 text-xs mb-4">
+            coId: {instance.$jazz.id}
+          </div>
         )}
 
         {showAllEntries ? (
