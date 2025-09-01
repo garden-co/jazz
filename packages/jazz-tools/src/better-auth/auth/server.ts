@@ -4,6 +4,29 @@ import { symmetricDecrypt, symmetricEncrypt } from "better-auth/crypto";
 import { BetterAuthPlugin, createAuthMiddleware } from "better-auth/plugins";
 import type { Account, AuthCredentials, ID } from "jazz-tools";
 
+// Define a type to have user fields mapped in the better-auth instance
+// It should be automatic, but it needs an hard reference to BetterAuthPlugin type
+// in order to be exported as library.
+type JazzPlugin = BetterAuthPlugin & {
+  schema: {
+    user: {
+      fields: {
+        accountID: {
+          type: "string";
+          required: false;
+          input: false;
+        };
+        encryptedCredentials: {
+          type: "string";
+          required: false;
+          input: false;
+          returned: false;
+        };
+      };
+    };
+  };
+};
+
 /**
  * @returns The BetterAuth server plugin.
  *
@@ -15,7 +38,7 @@ import type { Account, AuthCredentials, ID } from "jazz-tools";
  * });
  * ```
  */
-export const jazzPlugin = (): BetterAuthPlugin => {
+export const jazzPlugin: () => JazzPlugin = () => {
   return {
     id: "jazz-plugin",
     schema: {
@@ -206,7 +229,7 @@ export const jazzPlugin = (): BetterAuthPlugin => {
         },
       ],
     },
-  };
+  } satisfies JazzPlugin;
 };
 
 function contextContainsJazzAuth(ctx: unknown): ctx is {
