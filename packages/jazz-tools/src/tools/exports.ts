@@ -94,6 +94,7 @@ export {
   type AuthResult,
   type Credentials,
   type JazzContextWithAccount,
+  createInboxRoot,
 } from "./internal.js";
 
 export type * from "./types.js";
