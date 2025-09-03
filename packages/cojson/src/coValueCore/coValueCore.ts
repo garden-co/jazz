@@ -128,18 +128,10 @@ export class CoValueCore {
   private _cachedDependentOn?: Set<RawCoID>;
   private counter: UpDownCounter;
 
-  private constructor(
-    init: { header: CoValueHeader } | { id: RawCoID },
-    node: LocalNode,
-  ) {
+  private constructor(init: { id: RawCoID }, node: LocalNode) {
     this.crypto = node.crypto;
-    if ("header" in init) {
-      this.id = idforHeader(init.header, node.crypto);
-      this._verified = new VerifiedState(this.id, node.crypto, init.header);
-    } else {
-      this.id = init.id;
-      this._verified = null;
-    }
+    this.id = init.id;
+    this._verified = null;
     this.node = node;
 
     this.counter = metrics
@@ -155,13 +147,6 @@ export class CoValueCore {
 
   static fromID(id: RawCoID, node: LocalNode): CoValueCore {
     return new CoValueCore({ id }, node);
-  }
-
-  static fromHeader(
-    header: CoValueHeader,
-    node: LocalNode,
-  ): AvailableCoValueCore {
-    return new CoValueCore({ header }, node) as AvailableCoValueCore;
   }
 
   get loadingState() {
