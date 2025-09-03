@@ -64,7 +64,7 @@ export class SubscriptionScope<D extends CoValue> {
           return;
         }
 
-        // Need all these checks because the migration can trigger new syncronous updates
+        // Need all these checks because the migration can trigger new synchronous updates
         //
         // We want to:
         // - Run the migration only once
@@ -90,14 +90,14 @@ export class SubscriptionScope<D extends CoValue> {
     );
   }
 
-  updateValue(value: SubscriptionValue<D, any>) {
+  private updateValue(value: SubscriptionValue<D, any>) {
     this.value = value;
 
     // Flags that the value has changed and we need to trigger an update
     this.dirty = true;
   }
 
-  handleUpdate(update: RawCoValue | "unavailable") {
+  private handleUpdate(update: RawCoValue | "unavailable") {
     if (update === "unavailable") {
       if (this.value.type === "unloaded") {
         this.updateValue(
@@ -157,9 +157,7 @@ export class SubscriptionScope<D extends CoValue> {
         // has been updated and the coValues that don't update the totalValidTransactions value (e.g. FileStream)
         this.value.value.$jazz.raw !== update;
 
-      if (this.loadChildren()) {
-        this.updateValue(createCoValue(this.schema, update, this));
-      } else if (hasChanged) {
+      if (this.loadChildren() || hasChanged) {
         this.updateValue(createCoValue(this.schema, update, this));
       }
     }
@@ -170,7 +168,7 @@ export class SubscriptionScope<D extends CoValue> {
     this.triggerUpdate();
   }
 
-  computeChildErrors() {
+  private computeChildErrors() {
     let issues: JazzErrorIssue[] = [];
     let errorType: JazzError["type"] = "unavailable";
 
@@ -216,7 +214,7 @@ export class SubscriptionScope<D extends CoValue> {
     return undefined;
   }
 
-  handleChildUpdate = (
+  private handleChildUpdate = (
     id: string,
     value: SubscriptionValue<any, any> | Unloaded,
     key?: string,
@@ -250,7 +248,7 @@ export class SubscriptionScope<D extends CoValue> {
     this.triggerUpdate();
   };
 
-  shouldSendUpdates() {
+  private shouldSendUpdates() {
     if (this.value.type === "unloaded") return false;
 
     // If the value is in error, we send the update regardless of the children statuses
@@ -296,7 +294,7 @@ export class SubscriptionScope<D extends CoValue> {
     return undefined;
   }
 
-  isStreaming() {
+  private isStreaming() {
     if (this.value.type !== "loaded") {
       return false;
     }
@@ -304,7 +302,7 @@ export class SubscriptionScope<D extends CoValue> {
     return this.value.value.$jazz.raw.core.verified.isStreaming();
   }
 
-  isFileStream() {
+  private isFileStream() {
     if (this.value.type !== "loaded") {
       return false;
     }
@@ -314,7 +312,7 @@ export class SubscriptionScope<D extends CoValue> {
     );
   }
 
-  triggerUpdate() {
+  private triggerUpdate() {
     if (!this.shouldSendUpdates()) return;
     if (!this.dirty) return;
     if (this.subscribers.size === 0) return;
@@ -414,7 +412,7 @@ export class SubscriptionScope<D extends CoValue> {
     this.silenceUpdates = false;
   }
 
-  loadChildren() {
+  private loadChildren() {
     const { resolve } = this;
 
     if (this.value.type !== "loaded") {
@@ -528,7 +526,11 @@ export class SubscriptionScope<D extends CoValue> {
     return hasChanged;
   }
 
-  loadCoMapKey(map: CoMap, key: string, depth: Record<string, any> | true) {
+  private loadCoMapKey(
+    map: CoMap,
+    key: string,
+    depth: Record<string, any> | true,
+  ) {
     if (key === "$onError") {
       return undefined;
     }
@@ -575,7 +577,11 @@ export class SubscriptionScope<D extends CoValue> {
     return undefined;
   }
 
-  loadCoListKey(list: CoList, key: string, depth: Record<string, any> | true) {
+  private loadCoListKey(
+    list: CoList,
+    key: string,
+    depth: Record<string, any> | true,
+  ) {
     const descriptor = list.$jazz.getItemsDescriptor();
 
     if (!descriptor || !isRefEncoded(descriptor)) {
@@ -613,7 +619,7 @@ export class SubscriptionScope<D extends CoValue> {
     return undefined;
   }
 
-  loadChildNode(
+  private loadChildNode(
     id: string,
     query: RefsToResolve<any>,
     descriptor: RefEncoded<any>,
