@@ -120,29 +120,31 @@ export function ProjectScreen() {
         ))}
       </div>
 
-      <div
-        style={{
-          textAlign: "center",
-        }}
-      >
-        <button
-          onClick={() => setVisibleTasks(visibleTasks + 20)}
+      {visibleTasks < tasks.length && (
+        <div
           style={{
-            padding: "14px 32px",
-            backgroundColor: "#007bff",
-            color: "white",
-            border: "none",
-            borderRadius: "10px",
-            fontSize: "16px",
-            cursor: "pointer",
-            transition: "all 0.2s ease",
-            fontWeight: "600",
-            boxShadow: "0 4px 12px rgba(0, 123, 255, 0.3)",
+            textAlign: "center",
           }}
         >
-          Load more
-        </button>
-      </div>
+          <button
+            onClick={() => setVisibleTasks(visibleTasks + 20)}
+            style={{
+              padding: "14px 32px",
+              backgroundColor: "#007bff",
+              color: "white",
+              border: "none",
+              borderRadius: "10px",
+              fontSize: "16px",
+              cursor: "pointer",
+              transition: "all 0.2s ease",
+              fontWeight: "600",
+              boxShadow: "0 4px 12px rgba(0, 123, 255, 0.3)",
+            }}
+          >
+            Load more
+          </button>
+        </div>
+      )}
     </div>
   );
 }
