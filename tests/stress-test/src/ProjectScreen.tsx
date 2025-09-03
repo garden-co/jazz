@@ -1,7 +1,12 @@
 import { useAccount, useCoState } from "jazz-tools/react-core";
 import { useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router";
-import { TodoAccount, TodoProject } from "./1_schema";
+import {
+  MAX_PRIORITY,
+  MIN_PRIORITY,
+  TodoAccount,
+  TodoProject,
+} from "./1_schema";
 
 export function ProjectScreen() {
   const { projectId } = useParams();
@@ -29,6 +34,9 @@ export function ProjectScreen() {
     firstRenderMarker.current = true;
     performance.mark(`${projectId}-start`);
   }
+
+  const tasks =
+    project?.tasks.toSorted((a, b) => b.priority - a.priority) ?? [];
 
   const loadedMarker = useRef(false);
   if (!loadedMarker.current && project) {
@@ -107,8 +115,8 @@ export function ProjectScreen() {
           marginBottom: "30px",
         }}
       >
-        {project.tasks.slice(0, visibleTasks).map((task, index) => (
-          <label
+        {tasks.slice(0, visibleTasks).map((task, index) => (
+          <div
             key={task?.$jazz.id ?? index}
             style={{
               display: "flex",
@@ -120,6 +128,7 @@ export function ProjectScreen() {
               border: "1px solid #e9ecef",
               transition: "all 0.2s ease",
               cursor: "pointer",
+              gap: "16px",
             }}
             onMouseOver={(e) => {
               e.currentTarget.style.transform = "translateY(-2px)";
@@ -140,7 +149,6 @@ export function ProjectScreen() {
               style={{
                 width: "20px",
                 height: "20px",
-                marginRight: "16px",
                 accentColor: "#28a745",
                 cursor: "pointer",
               }}
@@ -157,7 +165,46 @@ export function ProjectScreen() {
             >
               {task?.text}
             </span>
-          </label>
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: "8px",
+              }}
+            >
+              <label
+                style={{
+                  fontSize: "14px",
+                  color: "#6c757d",
+                  fontWeight: "500",
+                }}
+              >
+                Priority:
+              </label>
+              <input
+                type="number"
+                value={task?.priority ?? MIN_PRIORITY}
+                onChange={(e) => {
+                  if (task) {
+                    const newPriority =
+                      parseInt(e.target.value) || MIN_PRIORITY;
+                    task.$jazz.set("priority", newPriority);
+                  }
+                }}
+                style={{
+                  width: "70px",
+                  padding: "6px 8px",
+                  fontSize: "14px",
+                  border: "1px solid #ddd",
+                  borderRadius: "6px",
+                  textAlign: "center",
+                  backgroundColor: "#f8f9fa",
+                }}
+                min={MIN_PRIORITY}
+                max={MAX_PRIORITY}
+              />
+            </div>
+          </div>
         ))}
       </div>
 
