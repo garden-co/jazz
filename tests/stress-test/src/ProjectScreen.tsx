@@ -8,15 +8,12 @@ import {
   TodoAccount,
   TodoProject,
 } from "./1_schema";
-import { Loaded } from "jazz-tools";
 
 export function ProjectScreen() {
   const { projectId } = useParams();
   const project = useCoState(TodoProject, projectId, {
     resolve: {
-      tasks: {
-        $each: true,
-      },
+      tasks: true,
     },
   });
   const { me } = useAccount(TodoAccount, {
@@ -34,9 +31,6 @@ export function ProjectScreen() {
     firstRenderMarker.current = true;
     performance.mark(`${projectId}-start`);
   }
-
-  const tasks =
-    project?.tasks.toSorted((a, b) => b.priority - a.priority) ?? [];
 
   const loadedMarker = useRef(false);
   if (!loadedMarker.current && project) {
@@ -115,12 +109,12 @@ export function ProjectScreen() {
           marginBottom: "30px",
         }}
       >
-        {tasks.slice(0, visibleTasks).map((task) => (
-          <TaskRow key={task?.$jazz.id} task={task} />
+        {[...project.tasks.$jazz.refs].slice(0, visibleTasks).map((taskRef) => (
+          <TaskRow key={taskRef.id} taskId={taskRef.id} />
         ))}
       </div>
 
-      {visibleTasks < tasks.length && (
+      {visibleTasks < project.tasks.length && (
         <div
           style={{
             textAlign: "center",
@@ -149,8 +143,8 @@ export function ProjectScreen() {
   );
 }
 
-function TaskRow({ task: taskToLoad }: { task: Loaded<typeof Task> }) {
-  const task = useCoState(Task, taskToLoad.$jazz.id, {
+function TaskRow({ taskId }: { taskId: string }) {
+  const task = useCoState(Task, taskId, {
     resolve: {
       text: true,
     },
