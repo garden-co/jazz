@@ -1,6 +1,5 @@
 import { faker } from "@faker-js/faker";
-import { CoPlainText } from "jazz-tools";
-import { Task, TodoProject } from "./1_schema";
+import { MAX_PRIORITY, MIN_PRIORITY, Task, TodoProject } from "./1_schema";
 
 export function generateRandomProject(numTasks: number) {
   // Create a list of tasks
@@ -11,10 +10,8 @@ export function generateRandomProject(numTasks: number) {
     for (let i = 0; i < numTasks; i++) {
       const task = Task.create({
         done: faker.datatype.boolean(),
-        text: CoPlainText.create(
-          faker.lorem.sentence({ min: 3, max: 8 }),
-          tasks.$jazz.owner,
-        ),
+        text: faker.lorem.sentence({ min: 3, max: 8 }),
+        priority: getRandomInt(MIN_PRIORITY, MAX_PRIORITY),
       });
       tasks.$jazz.push(task);
     }
@@ -33,4 +30,14 @@ export function generateRandomProject(numTasks: number) {
       }, 10);
     }),
   };
+}
+
+/**
+ * Get a random integer between min and max.
+ * Both the maximum and the minimum are inclusive
+ */
+function getRandomInt(min: number, max: number): number {
+  const minCeiled = Math.ceil(min);
+  const maxFloored = Math.floor(max);
+  return Math.floor(Math.random() * (maxFloored - minCeiled + 1) + minCeiled);
 }

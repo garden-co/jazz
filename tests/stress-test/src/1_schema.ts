@@ -14,7 +14,11 @@ import { co, z } from "jazz-tools";
 export const Task = co.map({
   done: z.boolean(),
   text: co.plainText(),
+  priority: z.number(),
 });
+
+export const MIN_PRIORITY = 0;
+export const MAX_PRIORITY = 100;
 
 /** Our top level object: a project with a title, referencing a list of tasks */
 export const TodoProject = co.map({
