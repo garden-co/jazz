@@ -18,9 +18,21 @@ export function CreateOrder() {
   const router = useIframeHashRouter();
   const [errors, setErrors] = useState<string[]>([]);
 
+  const draft = useCoState(DraftBubbleTeaOrder, me?.root.draft.$jazz.id, {
+    resolve: { addOns: true, instructions: true },
+  });
+
   if (!me?.root) return;
 
-  const onSave = (draft: DraftBubbleTeaOrder) => {
+  const handleCancel = () => {
+    me.root.$jazz.set("draft", { addOns: [] });
+    router.navigate("/");
+  };
+
+  const handleSave = (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    if (!draft) return;
+
     const validation = validateDraftOrder(draft);
     setErrors(validation.errors);
     if (validation.errors.length > 0) {
@@ -46,28 +58,9 @@ export function CreateOrder() {
 
       <Errors errors={errors} />
 
-      <CreateOrderForm id={me?.root?.draft.$jazz.id} onSave={onSave} />
+      {draft && (
+        <OrderForm order={draft} onSave={handleSave} onCancel={handleCancel} />
+      )}
     </>
   );
-}
-
-function CreateOrderForm({
-  id,
-  onSave,
-}: {
-  id: string;
-  onSave: (draft: DraftBubbleTeaOrder) => void;
-}) {
-  const draft = useCoState(DraftBubbleTeaOrder, id, {
-    resolve: { addOns: true, instructions: true },
-  });
-
-  if (!draft) return;
-
-  const addOrder = (e: React.FormEvent<HTMLFormElement>) => {
-    e.preventDefault();
-    onSave(draft);
-  };
-
-  return <OrderForm order={draft} onSave={addOrder} />;
 }

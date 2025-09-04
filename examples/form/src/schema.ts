@@ -15,9 +15,7 @@ export const BubbleTeaBaseTeaTypes = [
   "Thai",
 ] as const;
 
-export const ListOfBubbleTeaAddOns = co.list(
-  z.literal([...BubbleTeaAddOnTypes]),
-);
+export const ListOfBubbleTeaAddOns = co.list(z.literal(BubbleTeaAddOnTypes));
 export type ListOfBubbleTeaAddOns = co.loaded<typeof ListOfBubbleTeaAddOns>;
 
 function hasAddOnsChanges(list?: ListOfBubbleTeaAddOns | null) {
