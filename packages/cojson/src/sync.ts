@@ -777,7 +777,11 @@ export class SyncManager {
 
       // We directly forward the new content to peers that have an active subscription
       if (peer.optimisticKnownStates.has(coValue.id)) {
-        this.sendNewContentIncludingDependencies(coValue.id, peer);
+        if (peer.role === "server") {
+          this.sendNewContentWithoutDependencies(coValue.id, peer);
+        } else {
+          this.sendNewContentIncludingDependencies(coValue.id, peer);
+        }
         syncedPeers.push(peer);
       } else if (
         peer.role === "server" &&
