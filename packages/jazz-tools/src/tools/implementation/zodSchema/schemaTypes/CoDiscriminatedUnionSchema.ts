@@ -1,6 +1,7 @@
 import {
   Account,
   AnonymousJazzAgent,
+  BranchDefinition,
   InstanceOfSchema,
   InstanceOrPrimitiveOfSchemaCoValuesNullable,
   Resolved,
@@ -61,6 +62,7 @@ export class CoDiscriminatedUnionSchema<
     options?: {
       loadAs?: Account | AnonymousJazzAgent;
       skipRetry?: boolean;
+      unstable_branch?: BranchDefinition;
     },
   ): Promise<Resolved<
     CoDiscriminatedUnionInstanceCoValuesNullable<Options> & SchemaUnion,

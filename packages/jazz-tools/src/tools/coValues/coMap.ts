@@ -567,6 +567,24 @@ class CoMapJazzApi<M extends CoMap> extends CoValueJazzApi<M> {
    * @category Content
    */
   get id(): ID<M> {
+    const sourceId = this.raw.core.getCurrentBranchSourceId();
+
+    if (sourceId) {
+      return sourceId as ID<M>;
+    }
+
+    return this.raw.id;
+  }
+
+  get isBranch(): boolean {
+    return this.raw.core.isBranch();
+  }
+
+  get branchName(): string | undefined {
+    return this.raw.core.getCurrentBranchName();
+  }
+
+  get branchId(): ID<M> {
     return this.raw.id;
   }
 

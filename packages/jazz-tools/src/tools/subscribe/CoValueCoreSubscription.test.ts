@@ -92,7 +92,7 @@ describe("CoValueCoreSubscription", async () => {
       subscription.unsubscribe();
     });
 
-    test("should fall through to loading when CoValue is available but branch is not available", async () => {
+    test("should immediately load when a new branch is requested", async () => {
       const Person = co.map({
         name: z.string(),
         age: z.number(),
@@ -115,7 +115,103 @@ describe("CoValueCoreSubscription", async () => {
         { name: "main" },
       );
 
-      // Should not call listener immediately since branch isn't available
+      // Should immediately load the branch
+      expect(listener).toHaveBeenCalled();
+      expect(listener).toHaveBeenCalledTimes(1);
+
+      // Should return the branch, that contains the source data
+      expect(lastResult.get("name")).toEqual("John");
+      expect(lastResult.id).not.toBe(person.$jazz.id); // Should be a different instance
+
+      subscription.unsubscribe();
+    });
+
+    test("should fall through to loading when CoValue is not available and branch is requested", async () => {
+      const bob = await createJazzTestAccount();
+      const Person = co.map({
+        name: z.string(),
+        age: z.number(),
+      });
+
+      // Create a person that's immediately available
+      const person = Person.create(
+        { name: "John", age: 30 },
+        Group.create().makePublic("writer"),
+      );
+
+      person.$jazz.raw.core.createBranch("main");
+      person.$jazz.set("name", "Jane");
+
+      let lastResult: any = null;
+      const listener = vi.fn();
+
+      // Request a branch that doesn't exist yet
+      const subscription = new CoValueCoreSubscription(
+        bob.$jazz.localNode,
+        person.$jazz.id,
+        (result) => {
+          lastResult = result;
+          listener(result);
+        },
+        false,
+        { name: "main" },
+      );
+
+      // // Should not call listener immediately since branch isn't available
+      expect(listener).not.toHaveBeenCalled();
+
+      // Wait for the branch to be created and loaded
+      await waitFor(() => expect(listener).toHaveBeenCalled());
+
+      expect(listener).toHaveBeenCalledTimes(1);
+
+      // Should return the branch, that contains the source data
+      expect(lastResult.get("name")).toEqual("John");
+      expect(lastResult.id).not.toBe(person.$jazz.id); // Should be a different instance
+
+      subscription.unsubscribe();
+    });
+
+    test("should fall through to loading when CoValue is available and branch is not available", async () => {
+      const bob = await createJazzTestAccount();
+      const Person = co.map({
+        name: z.string(),
+        age: z.number(),
+      });
+
+      // Create a person that's immediately available
+      const person = Person.create(
+        { name: "John", age: 30 },
+        Group.create().makePublic("writer"),
+      );
+
+      const branch = person.$jazz.raw.core.createBranch("main");
+      person.$jazz.set("name", "Jane");
+
+      let lastResult: any = null;
+      const listener = vi.fn();
+
+      await Person.load(person.$jazz.id, {
+        loadAs: bob,
+      });
+
+      // Since the peer is server, we automatically get the branch
+      // so we delete it to simulate a situation where the branch is created but not available
+      bob.$jazz.localNode.internalDeleteCoValue(branch.id);
+
+      // Request a branch that doesn't exist yet
+      const subscription = new CoValueCoreSubscription(
+        bob.$jazz.localNode,
+        person.$jazz.id,
+        (result) => {
+          lastResult = result;
+          listener(result);
+        },
+        false,
+        { name: "main" },
+      );
+
+      // // Should not call listener immediately since branch isn't available
       expect(listener).not.toHaveBeenCalled();
 
       // Wait for the branch to be created and loaded
@@ -313,11 +409,8 @@ describe("CoValueCoreSubscription", async () => {
         { name: "main", owner: bob },
       );
 
-      // Should not call listener immediately since private branch needs to be created
-      expect(listener).not.toHaveBeenCalled();
-
-      // Wait for the private branch creation to complete
-      await waitFor(() => expect(listener).toHaveBeenCalled());
+      // Loads immediately, new branch is created
+      expect(listener).toHaveBeenCalled();
 
       // Should return the source data (not branch data) since it's a private branch
       expect(lastResult.get("name")).toEqual("John");

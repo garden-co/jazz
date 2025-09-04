@@ -28,6 +28,7 @@ import { getDependedOnCoValuesFromRawData } from "./utils.js";
 import { CoValueHeader, Transaction, VerifiedState } from "./verifiedState.js";
 import { SessionMap } from "./SessionMap.js";
 import {
+  BranchPointerCommit,
   MergeCommit,
   createBranch,
   getBranchId,
@@ -690,11 +691,13 @@ export class CoValueCore {
 
   // The starting point of the branch, in case this CoValue is a branch
   branchStart:
-    | { branch: CoValueKnownState["sessions"]; madeAt: number }
+    | { from: CoValueKnownState["sessions"]; madeAt: number }
     | undefined;
 
   // The list of merge commits that have been made
   mergeCommits: { commit: MergeCommit; madeAt: number }[] = [];
+
+  branches: BranchPointerCommit[] = [];
 
   // Reset the parsed transactions and branches, to validate them again from scratch when the group is updated
   resetParsedTransactions() {
@@ -794,22 +797,29 @@ export class CoValueCore {
     transaction.hasMetaBeenParsed = true;
 
     if (
-      transaction.meta?.["branch"] &&
+      this.isBranch() &&
+      transaction.meta?.from &&
       (!this.branchStart || transaction.madeAt < this.branchStart.madeAt)
     ) {
       this.branchStart = {
-        branch: transaction.meta.branch as CoValueKnownState["sessions"],
+        from: transaction.meta.from as CoValueKnownState["sessions"],
         madeAt: transaction.madeAt,
       };
     }
 
-    if (transaction.meta?.["merge"]) {
+    if (transaction.meta?.merge) {
       const mergeCommit = transaction.meta as MergeCommit;
 
       this.mergeCommits.push({
         commit: mergeCommit,
         madeAt: transaction.madeAt,
       });
+    }
+
+    if (transaction.meta?.branchId) {
+      const branch = transaction.meta as BranchPointerCommit;
+
+      this.branches.push(branch);
     }
   }
 
@@ -889,7 +899,7 @@ export class CoValueCore {
     // If this is a branch, we load the valid transactions from the source
     if (source && this.branchStart && !options?.skipBranchSource) {
       const sourceTransactions = source.getValidTransactions({
-        to: this.branchStart.branch,
+        to: this.branchStart.from,
         ignorePrivateTransactions: options?.ignorePrivateTransactions ?? false,
         knownTransactions: options?.knownTransactions,
       });

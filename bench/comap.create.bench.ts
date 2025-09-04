@@ -38,7 +38,7 @@ async function createSchema(
     creationProps: {
       name: "Test Account",
     },
-    // @ts-expect-error
+    peersToLoadFrom: [],
     crypto: await WasmCrypto.create(),
   });
 
@@ -73,14 +73,20 @@ const message = schema.Message.create(
   schema.Group.create(schema.account).makePublic(),
 );
 
-const content = await tools.exportCoValue(schema.Message, message.id, {
-  // @ts-expect-error
-  loadAs: schema.account,
-});
+const content = await tools.exportCoValue(
+  schema.Message,
+  message.$jazz.raw.id,
+  {
+    // @ts-expect-error
+    loadAs: schema.account,
+  },
+);
 tools.importContentPieces(content ?? [], schema.account as any);
 toolsLatest.importContentPieces(content ?? [], schemaLatest.account);
-schema.account._raw.core.node.internalDeleteCoValue(message.id as any);
-schemaLatest.account._raw.core.node.internalDeleteCoValue(message.id as any);
+schema.account.$jazz.localNode.internalDeleteCoValue(message.$jazz.raw.id);
+schemaLatest.account.$jazz.localNode.internalDeleteCoValue(
+  message.$jazz.raw.id,
+);
 
 describe("Message.create", () => {
   bench(
@@ -102,7 +108,7 @@ describe("Message.create", () => {
   );
 
   bench(
-    "Jazz 0.17.9",
+    "Jazz 0.18.5",
     () => {
       schemaLatest.Message.create(
         {
@@ -125,17 +131,19 @@ describe("Message import", () => {
     "current version",
     () => {
       tools.importContentPieces(content ?? [], schema.account as any);
-      schema.account._raw.core.node.internalDeleteCoValue(message.id as any);
+      schema.account.$jazz.localNode.internalDeleteCoValue(
+        message.$jazz.raw.id,
+      );
     },
     { iterations: 5000 },
   );
 
   bench(
-    "Jazz 0.17.9",
+    "Jazz 0.18.5",
     () => {
       toolsLatest.importContentPieces(content ?? [], schemaLatest.account);
-      schemaLatest.account._raw.core.node.internalDeleteCoValue(
-        message.id as any,
+      schemaLatest.account.$jazz.localNode.internalDeleteCoValue(
+        message.$jazz.raw.id,
       );
     },
     { iterations: 5000 },
@@ -148,23 +156,23 @@ describe("import+ decrypt", () => {
     () => {
       tools.importContentPieces(content ?? [], schema.account as any);
 
-      const node = schema.account._raw.core.node;
+      const node = schema.account.$jazz.localNode;
 
-      node.expectCoValueLoaded(message.id as any).getCurrentContent();
-      node.internalDeleteCoValue(message.id as any);
+      node.expectCoValueLoaded(message.$jazz.raw.id).getCurrentContent();
+      node.internalDeleteCoValue(message.$jazz.raw.id);
     },
     { iterations: 5000 },
   );
 
   bench(
-    "Jazz 0.17.9",
+    "Jazz 0.18.5",
     () => {
       toolsLatest.importContentPieces(content ?? [], schemaLatest.account);
 
-      const node = schemaLatest.account._raw.core.node;
+      const node = schemaLatest.account.$jazz.localNode;
 
-      node.expectCoValueLoaded(message.id as any).getCurrentContent();
-      node.internalDeleteCoValue(message.id as any);
+      node.expectCoValueLoaded(message.$jazz.raw.id).getCurrentContent();
+      node.internalDeleteCoValue(message.$jazz.raw.id);
     },
     { iterations: 5000 },
   );

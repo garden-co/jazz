@@ -137,16 +137,23 @@ function useCoValueSubscription<
       contextManager,
       id,
       Schema,
+      branchName: options?.unstable_branch?.name,
+      branchOwnerId: options?.unstable_branch?.owner?.$jazz.id,
     };
   };
 
   const [subscription, setSubscription] = React.useState(createSubscription);
 
+  const branchName = options?.unstable_branch?.name;
+  const branchOwnerId = options?.unstable_branch?.owner?.$jazz.id;
+
   React.useLayoutEffect(() => {
     if (
       subscription.contextManager !== contextManager ||
       subscription.id !== id ||
-      subscription.Schema !== Schema
+      subscription.Schema !== Schema ||
+      subscription.branchName !== branchName ||
+      subscription.branchOwnerId !== branchOwnerId
     ) {
       subscription.subscription?.destroy();
       setSubscription(createSubscription());
@@ -156,7 +163,7 @@ function useCoValueSubscription<
       subscription.subscription?.destroy();
       setSubscription(createSubscription());
     });
-  }, [Schema, id, contextManager]);
+  }, [Schema, id, contextManager, branchName, branchOwnerId]);
 
   return subscription.subscription;
 }
@@ -288,7 +295,6 @@ function useAccountSubscription<
   Schema: S,
   options?: {
     resolve?: ResolveQueryStrict<S, R>;
-    unstable_branch?: BranchDefinition;
   },
 ) {
   const contextManager = useJazzContextManager();
@@ -318,7 +324,6 @@ function useAccountSubscription<
       },
       false,
       false,
-      options?.unstable_branch,
     );
 
     return {
@@ -409,7 +414,6 @@ export function useAccount<
   options?: {
     /** Resolve query to specify which nested CoValues to load from the account */
     resolve?: ResolveQueryStrict<A, R>;
-    unstable_branch?: BranchDefinition;
   },
 ): {
   me: Loaded<A, R> | undefined | null;

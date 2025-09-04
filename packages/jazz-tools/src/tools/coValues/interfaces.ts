@@ -337,6 +337,8 @@ export function subscribeToExistingCoValue<
     | undefined,
   listener: SubscribeListener<V, R>,
 ): () => void {
+  const subscriptionScope = existing.$jazz._subscriptionScope;
+
   return subscribeToCoValue(
     existing.constructor as CoValueClass<V>,
     existing.$jazz.id,
@@ -345,6 +347,7 @@ export function subscribeToExistingCoValue<
       resolve: options?.resolve,
       onUnavailable: options?.onUnavailable,
       onUnauthorized: options?.onUnauthorized,
+      unstable_branch: subscriptionScope?.unstable_branch,
     },
     listener,
   );

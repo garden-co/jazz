@@ -25,7 +25,7 @@ export function CreateOrder() {
   if (!me?.root) return;
 
   const handleCancel = () => {
-    me.root.$jazz.set("draft", { addOns: [] });
+    me.root.$jazz.set("draft", { addOns: [], instructions: "" });
     router.navigate("/");
   };
 
@@ -43,7 +43,7 @@ export function CreateOrder() {
     me.root.orders.$jazz.push(draft as BubbleTeaOrder);
 
     // reset the draft
-    me.root.$jazz.set("draft", { addOns: [] });
+    me.root.$jazz.set("draft", { addOns: [], instructions: "" });
 
     router.navigate("/");
   };

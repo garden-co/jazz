@@ -1,6 +1,7 @@
 import { CoValueUniqueness } from "cojson";
 import {
   Account,
+  BranchDefinition,
   type CoMap,
   CoMapSchemaDefinition,
   Group,
@@ -55,6 +56,7 @@ export interface CoRecordSchema<
     options?: {
       resolve?: RefsToResolveStrict<CoRecordInstanceCoValuesNullable<K, V>, R>;
       loadAs?: Account | AnonymousJazzAgent;
+      unstable_branch?: BranchDefinition;
     },
   ): Promise<Resolved<CoRecordInstanceCoValuesNullable<K, V>, R> | null>;
 

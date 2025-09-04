@@ -479,6 +479,12 @@ export class LocalNode {
       return branch.getCurrentContent() as T;
     }
 
+    if (!source.branches.some((b) => b.branchId === branch.id)) {
+      return source
+        .createBranch(branchName, branchOwnerID)
+        .getCurrentContent() as T;
+    }
+
     // Passing skipRetry to true because otherwise creating a new branch would always take 1 retry delay
     await this.loadCoValueCore(branch.id, undefined, true);
 

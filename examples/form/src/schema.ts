@@ -27,11 +27,15 @@ export const BubbleTeaOrder = co.map({
   addOns: ListOfBubbleTeaAddOns,
   deliveryDate: z.date(),
   withMilk: z.boolean(),
-  instructions: co.optional(co.plainText()),
+  instructions: co.plainText(),
 });
 export type BubbleTeaOrder = co.loaded<typeof BubbleTeaOrder>;
 
-export const DraftBubbleTeaOrder = BubbleTeaOrder.partial();
+export const DraftBubbleTeaOrder = BubbleTeaOrder.partial({
+  baseTea: true,
+  deliveryDate: true,
+  withMilk: true,
+});
 export type DraftBubbleTeaOrder = co.loaded<typeof DraftBubbleTeaOrder>;
 
 export function validateDraftOrder(order: DraftBubbleTeaOrder) {

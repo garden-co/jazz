@@ -71,7 +71,13 @@ export function getBranchId(
 }
 
 export type BranchCommit = {
-  branch: CoValueKnownState["sessions"];
+  from: CoValueKnownState["sessions"];
+};
+
+export type BranchPointerCommit = {
+  branchId: RawCoID;
+  name: string;
+  ownerId?: RawCoID;
 };
 
 /**
@@ -106,14 +112,21 @@ export function createBranch(
     sourceId: coValue.id,
   });
 
-  const value = coValue.node.createCoValue(header);
+  const branch = coValue.node.createCoValue(header);
 
   // Create a branch commit to identify the starting point of the branch
-  value.makeTransaction([], "private", {
-    branch: coValue.knownState().sessions,
+  branch.makeTransaction([], "private", {
+    from: coValue.knownState().sessions,
   } satisfies BranchCommit);
 
-  return value;
+  // Create a branch pointer, to identify that we created a branch
+  coValue.makeTransaction([], "private", {
+    branchId: branch.id,
+    name,
+    ownerId,
+  } satisfies BranchPointerCommit);
+
+  return branch;
 }
 
 /**

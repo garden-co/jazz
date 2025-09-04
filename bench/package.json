@@ -5,8 +5,8 @@
   "dependencies": {
     "cojson": "workspace:*",
     "jazz-tools": "workspace:*",
-    "cojson-latest": "npm:cojson@0.17.9",
-    "jazz-tools-latest": "npm:jazz-tools@0.17.9"
+    "cojson-latest": "npm:cojson@0.18.5",
+    "jazz-tools-latest": "npm:jazz-tools@0.18.5"
   },
   "scripts": {
     "bench": "vitest bench"
