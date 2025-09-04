@@ -1355,3 +1355,32 @@ describe("lastUpdatedAt", () => {
     expect(list.$jazz.lastUpdatedAt).not.toEqual(updatedAt);
   });
 });
+
+describe("CoList indexes", () => {
+  const IndexRecord = co.record(z.string(), z.number());
+
+  test("index keeps track of CoList insertions", async () => {
+    const Score = co.map({ priority: z.number() });
+    const ItemList = co.list(Score).withIndex("priority", "asc");
+    const list = ItemList.create([]);
+    list.$jazz.push(
+      Score.create({ priority: 1 }),
+      Score.create({ priority: 2 }),
+      Score.create({ priority: 3 }),
+    );
+    const indexId = list.$jazz.raw.core.indexes[0]?.indexId;
+    assert(indexId);
+
+    // Wait for the async index update to complete
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    const indexRecord = await IndexRecord.load(indexId);
+    expect(indexRecord).toEqual(
+      expect.objectContaining({
+        [list[0]!.$jazz.id]: 1,
+        [list[1]!.$jazz.id]: 2,
+        [list[2]!.$jazz.id]: 3,
+      }),
+    );
+  });
+});
