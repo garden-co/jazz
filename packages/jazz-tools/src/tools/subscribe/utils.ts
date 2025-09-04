@@ -1,8 +1,10 @@
-import { RawAccount, RawCoValue, Role } from "cojson";
+import { RawAccount, RawCoList, RawCoMap, RawCoValue, Role } from "cojson";
 import { RegisteredSchemas } from "../coValues/registeredSchemas.js";
 import {
+  CoList,
   CoValue,
   RefEncoded,
+  TypeSym,
   accountOrGroupToGroup,
   instantiateRefEncodedFromRaw,
 } from "../internal.js";
@@ -26,7 +28,8 @@ export function createCoValue<D extends CoValue>(
   raw: RawCoValue,
   subscriptionScope: SubscriptionScope<D>,
 ) {
-  const freshValueInstance = instantiateRefEncodedFromRaw(ref, raw);
+  const isUsingIndex = !!subscriptionScope.sortByIndex;
+  let freshValueInstance = instantiateRefEncodedFromRaw(ref, raw, isUsingIndex);
 
   Object.defineProperty(freshValueInstance.$jazz, "_subscriptionScope", {
     value: subscriptionScope,
