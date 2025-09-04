@@ -1,9 +1,17 @@
-import type { CoValueUniqueness, JsonValue, RawCoID, RawCoList } from "cojson";
-import { cojsonInternals } from "cojson";
+import type {
+  CoID,
+  CoValueUniqueness,
+  JsonValue,
+  RawCoID,
+  RawCoList,
+  RawCoMap,
+} from "cojson";
+import { cojsonInternals, type IndexDefinition } from "cojson";
 import { calcPatch } from "fast-myers-diff";
 import {
   Account,
   CoFieldInit,
+  CoMap,
   CoValue,
   CoValueClass,
   CoValueJazzApi,
@@ -159,13 +167,16 @@ export class CoList<out Item = any>
     items: L[number][],
     options?:
       | {
-          owner: Account | Group;
+          owner?: Account | Group;
           unique?: CoValueUniqueness["uniqueness"];
+          indexes?: { elementField: string }[];
         }
       | Account
       | Group,
   ) {
     const { owner, uniqueness } = parseCoValueCreateOptions(options);
+    const indexes =
+      options && "indexes" in options ? (options?.indexes ?? []) : [];
     const instance = new this();
 
     Object.defineProperties(instance, {
@@ -175,12 +186,33 @@ export class CoList<out Item = any>
       },
     });
 
+    const indexRecords = indexes?.map(
+      (index) =>
+        ({
+          elementKey: index.elementField,
+          // Indexes share the same permissions as the CoList:
+          // - whoever can read the CoList can also read the index
+          // - whoever can write to the CoList can also write to the index
+          // TODO: what about people that edit the CoList content CoValues, but
+          // don't have write permissions to the CoList?
+          indexId: owner.$jazz.raw.createMap({}, null, "private").id,
+        }) satisfies IndexDefinition,
+    );
+
+    const rawItems = toRawItems(items, instance.$jazz.schema[ItemsSym], owner);
     const raw = owner.$jazz.raw.createList(
-      toRawItems(items, instance.$jazz.schema[ItemsSym], owner),
+      rawItems,
       null,
       "private",
       uniqueness,
     );
+    raw.core.makeTransaction([], "private", {
+      indexes: indexRecords,
+    });
+    // TODO link CoValue raw items with the corresponding index records
+    // rawItems.filter(isCoValue).makeTransaction([], "private", {
+    //  indexes: indexRecords,
+    // });
 
     return instance;
   }
@@ -537,8 +569,25 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
    * @category Content
    */
   push(...items: CoFieldInit<CoListItem<L>>[]): number {
+    const itemsDescriptor = this.schema[ItemsSym];
+
+    if (isRefEncoded(itemsDescriptor)) {
+      const indexes = this.raw.core.indexes;
+      for (const index of indexes) {
+        const { elementKey, indexId } = index;
+        this.raw.core.node
+          .load(indexId as CoID<RawCoMap>)
+          .then((indexRecord) => {
+            if (!indexRecord || indexRecord === "unavailable") return;
+            for (const item of items) {
+              indexRecord.set(item.$jazz.id, item[elementKey]);
+            }
+          });
+      }
+    }
+
     this.raw.appendItems(
-      toRawItems(items, this.schema[ItemsSym], this.owner),
+      toRawItems(items, itemsDescriptor, this.owner),
       undefined,
       "private",
     );
