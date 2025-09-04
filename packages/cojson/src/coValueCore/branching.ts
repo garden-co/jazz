@@ -163,6 +163,12 @@ export type MergeCommit = {
   count: number;
 };
 
+export type TxIDAlias = {
+  alias: SessionID;
+  i: number;
+  b: RawCoID;
+};
+
 /**
  * Given a branch coValue, merges the branch into the source coValue
  */
@@ -247,15 +253,12 @@ export function mergeBranch(branch: CoValueCore): CoValueCore {
       txIdx++;
     }
 
-    for (const { tx, changes } of branchValidTransactions) {
-      target.makeTransaction(
-        mapCoListChangesToTarget(
-          changes as ListOpPayload<JsonValue>[],
-          currentSessionID,
-          mapping,
-        ),
-        tx.privacy,
-      );
+    for (const { tx, changes, txID } of branchValidTransactions) {
+      target.makeTransaction(changes, tx.privacy, {
+        alias: txID.sessionID,
+        i: txID.txIndex,
+        b: txID.branch,
+      });
     }
   } else {
     for (const { tx, changes } of branchValidTransactions) {
@@ -264,70 +267,4 @@ export function mergeBranch(branch: CoValueCore): CoValueCore {
   }
 
   return target;
-}
-
-/**
- * Given a list of changes, maps the opIDs to the target transactions
- */
-function mapCoListChangesToTarget(
-  changes: ListOpPayload<JsonValue>[],
-  currentSessionID: SessionID,
-  mapping: Record<`${SessionID}:${number}`, number>,
-) {
-  return changes.map((change) => {
-    if (change.op === "app") {
-      if (change.after === "start") {
-        return change;
-      }
-
-      return {
-        ...change,
-        after: convertOpID(change.after, currentSessionID, mapping),
-      };
-    }
-
-    if (change.op === "del") {
-      return {
-        ...change,
-        insertion: convertOpID(change.insertion, currentSessionID, mapping),
-      };
-    }
-
-    if (change.op === "pre") {
-      if (change.before === "end") {
-        return change;
-      }
-
-      return {
-        ...change,
-        before: convertOpID(change.before, currentSessionID, mapping),
-      };
-    }
-
-    return change;
-  });
-}
-
-function convertOpID(
-  opID: OpID,
-  sessionID: SessionID,
-  mapping: Record<`${SessionID}:${number}`, number>,
-) {
-  // If the opID comes from the source branch, we don't need to map it
-  if (!opID.branch) {
-    return opID;
-  }
-
-  const mappedIndex = mapping[`${opID.sessionID}:${opID.txIndex}`];
-
-  // If the opID doesn't exist in the mapping, we don't need to map it
-  if (mappedIndex === undefined) {
-    return opID;
-  }
-
-  return {
-    sessionID: sessionID,
-    txIndex: mappedIndex,
-    changeIdx: opID.changeIdx,
-  };
 }
