@@ -29,9 +29,8 @@ export interface RawCoValue {
    *
    * Takes a listener function that will be called with the current state for each update.
    *
-   * Returns an unsubscribe function.
-   *
-   * Used internally by `useTelepathicData()` for reactive updates on changes to a `CoValue`. */
+   * @returns an unsubscribe function.
+   */
   subscribe(listener: (coValue: this) => void): () => void;
 
   totalValidTransactions: number;
