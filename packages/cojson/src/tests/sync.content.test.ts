@@ -1,52 +1,9 @@
-import { assert, beforeEach, describe, expect, test, vi } from "vitest";
+import { beforeEach, describe, expect, test } from "vitest";
 
-import { expectMap } from "../coValue";
-import { setMaxRecommendedTxSize } from "../config";
-import {
-  SyncMessagesLog,
-  TEST_NODE_CONFIG,
-  blockMessageTypeOnOutgoingPeer,
-  connectedPeersWithMessagesTracking,
-  loadCoValueOrFail,
-  setupTestNode,
-  waitFor,
-} from "./testUtils";
-import { stableStringify } from "../jsonStringify";
+import { SyncMessagesLog, TEST_NODE_CONFIG, setupTestNode } from "./testUtils";
 
 // We want to simulate a real world communication that happens asynchronously
 TEST_NODE_CONFIG.withAsyncPeers = true;
-
-function setupMesh() {
-  const coreServer = setupTestNode();
-
-  coreServer.addStorage({
-    ourName: "core",
-  });
-
-  const edgeItaly = setupTestNode();
-  edgeItaly.connectToSyncServer({
-    ourName: "edge-italy",
-    syncServerName: "core",
-    syncServer: coreServer.node,
-    persistent: true,
-  });
-  edgeItaly.addStorage({
-    ourName: "edge-italy",
-  });
-
-  const edgeFrance = setupTestNode();
-  edgeFrance.connectToSyncServer({
-    ourName: "edge-france",
-    syncServerName: "core",
-    syncServer: coreServer.node,
-    persistent: true,
-  });
-  edgeFrance.addStorage({
-    ourName: "edge-france",
-  });
-
-  return { coreServer, edgeItaly, edgeFrance };
-}
 
 describe("handling content messages", () => {
   beforeEach(async () => {
