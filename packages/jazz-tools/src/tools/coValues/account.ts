@@ -44,10 +44,12 @@ import {
   coValuesCache,
   createInboxRoot,
   ensureCoValueLoaded,
+  generateAuthToken,
   inspect,
   instantiateRefEncodedWithInit,
   loadCoValue,
   loadCoValueWithoutMe,
+  parseAuthToken,
   parseSubscribeRestArgs,
   subscribeToCoValueWithoutMe,
   subscribeToExistingCoValue,
@@ -327,6 +329,35 @@ export class Account extends CoValueBase implements CoValue {
     return loadCoValueWithoutMe(this, id, options);
   }
 
+  static async fromAuthToken<
+    A extends Account,
+    const R extends RefsToResolve<A> = true,
+  >(
+    this: CoValueClass<A> & typeof Account,
+    authToken: string,
+    options?: {
+      loadAs?: Account | AnonymousJazzAgent;
+      resolve?: RefsToResolveStrict<A, R>;
+      ttl?: number;
+    },
+  ): Promise<Resolved<A, R> | null> {
+    const parsedToken = await parseAuthToken(authToken, {
+      expiration: options?.ttl,
+    });
+    if (parsedToken.type === "error") {
+      throw new Error(parsedToken.error);
+    }
+    const account = await this.load(parsedToken.account.$jazz.id, {
+      resolve: options?.resolve,
+      loadAs: options?.loadAs,
+    });
+    return account;
+  }
+
+  static generateAuthToken(account?: Account): string {
+    return generateAuthToken(account);
+  }
+
   /**
    * Subscribe to an `Account`, when you have an ID but don't have an `Account` instance yet
    * @category Subscription & Loading
@@ -546,6 +577,10 @@ class AccountJazzApi<A extends Account> extends CoValueJazzApi<A> {
     }
 
     return new AnonymousJazzAgent(this.localNode);
+  }
+
+  generateAuthToken(): string {
+    return generateAuthToken(this.account);
   }
 }
 
