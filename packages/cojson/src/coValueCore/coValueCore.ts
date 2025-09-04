@@ -915,15 +915,15 @@ export class CoValueCore {
   }
 
   getCurrentBranchName() {
-    return this.verified?.header.meta?.branch as string | undefined;
+    return this.verified?.branchName;
   }
 
   getCurrentBranchSourceId() {
-    return this.verified?.header.meta?.source as RawCoID | undefined;
+    return this.verified?.branchSourceId;
   }
 
   isBranch() {
-    return Boolean(this.getCurrentBranchSourceId());
+    return Boolean(this.verified?.branchSourceId);
   }
 
   getValidSortedTransactions(options?: {

@@ -1,8 +1,8 @@
-import { CoFeed } from "./coFeed";
-import { CoList } from "./coList";
-import { CoMap, CoMapInit } from "./coMap";
-import { CoPlainText } from "./coPlainText";
-import { CoRichText } from "./coRichText";
+import { CoFeed } from "./coFeed.js";
+import { CoList } from "./coList.js";
+import { CoMap, CoMapInit } from "./coMap.js";
+import { CoPlainText } from "./coPlainText.js";
+import { CoRichText } from "./coRichText.js";
 
 /**
  * Returns the type of values that can be used to initialize a field of the provided type.

@@ -16,6 +16,7 @@ import {
   getCoValueOwner,
   Group,
   ID,
+  unstable_mergeBranch,
   PartialOnUndefined,
   RefEncoded,
   RefIfCoValue,
@@ -857,6 +858,10 @@ class CoMapJazzApi<M extends CoMap> extends CoValueJazzApi<M> {
   /** @internal */
   get schema(): CoMapFieldSchema {
     return (this.coMap.constructor as typeof CoMap)._schema;
+  }
+
+  unstable_merge() {
+    unstable_mergeBranch(this.coMap);
   }
 }
 

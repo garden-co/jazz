@@ -59,6 +59,8 @@ export class VerifiedState {
   private _cachedNewContentSinceEmpty: NewContentMessage[] | undefined;
   private streamingKnownState?: CoValueKnownState["sessions"];
   public lastAccessed: number | undefined;
+  public branchSourceId?: RawCoID;
+  public branchName?: string;
 
   constructor(
     id: RawCoID,
@@ -74,6 +76,8 @@ export class VerifiedState {
     this.streamingKnownState = streamingKnownState
       ? { ...streamingKnownState }
       : undefined;
+    this.branchSourceId = header.meta?.source as RawCoID | undefined;
+    this.branchName = header.meta?.branch as string | undefined;
   }
 
   clone(): VerifiedState {

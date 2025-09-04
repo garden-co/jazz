@@ -12,6 +12,7 @@ import {
   AnyAccountSchema,
   CoValue,
   CoValueClassOrSchema,
+  Group,
   InboxSender,
   InstanceOfSchema,
   JazzContextManager,
@@ -21,10 +22,10 @@ import {
   ResolveQueryStrict,
   SubscriptionScope,
   coValueClassFromCoValueClassOrSchema,
+  type BranchDefinition,
 } from "jazz-tools";
 import { JazzContext, JazzContextManagerContext } from "./provider.js";
 import { getCurrentAccountFromContextManager } from "./utils.js";
-import { TypeSym } from "../tools/internal.js";
 
 export function useJazzContext<Acc extends Account>() {
   const value = useContext(JazzContext) as JazzContextType<Acc>;
@@ -88,12 +89,22 @@ function useCoValueSubscription<
   id: string | undefined | null,
   options?: {
     resolve?: ResolveQueryStrict<S, R>;
+    unstable_branch?: { name: string; owner?: Account | Group | null };
   },
 ) {
   const contextManager = useJazzContextManager();
 
   const createSubscription = () => {
     if (!id) {
+      return {
+        subscription: null,
+        contextManager,
+        id,
+        Schema,
+      };
+    }
+
+    if (options?.unstable_branch?.owner === null) {
       return {
         subscription: null,
         contextManager,
@@ -111,6 +122,14 @@ function useCoValueSubscription<
         ref: coValueClassFromCoValueClassOrSchema(Schema),
         optional: true,
       },
+      false,
+      false,
+      options?.unstable_branch
+        ? {
+            name: options.unstable_branch.name,
+            owner: options.unstable_branch.owner,
+          }
+        : undefined,
     );
 
     return {
@@ -239,6 +258,7 @@ export function useCoState<
   options?: {
     /** Resolve query to specify which nested CoValues to load */
     resolve?: ResolveQueryStrict<S, R>;
+    unstable_branch?: { name: string; owner?: Account | Group | null };
   },
 ): Loaded<S, R> | undefined | null {
   const subscription = useCoValueSubscription(Schema, id, options);
@@ -268,6 +288,7 @@ function useAccountSubscription<
   Schema: S,
   options?: {
     resolve?: ResolveQueryStrict<S, R>;
+    unstable_branch?: BranchDefinition;
   },
 ) {
   const contextManager = useJazzContextManager();
@@ -275,7 +296,7 @@ function useAccountSubscription<
   const createSubscription = () => {
     const agent = getCurrentAccountFromContextManager(contextManager);
 
-    if (agent[TypeSym] === "Anonymous") {
+    if (agent.$type$ === "Anonymous") {
       return {
         subscription: null,
         contextManager,
@@ -295,6 +316,9 @@ function useAccountSubscription<
         ref: coValueClassFromCoValueClassOrSchema(Schema),
         optional: true,
       },
+      false,
+      false,
+      options?.unstable_branch,
     );
 
     return {
@@ -385,6 +409,7 @@ export function useAccount<
   options?: {
     /** Resolve query to specify which nested CoValues to load from the account */
     resolve?: ResolveQueryStrict<A, R>;
+    unstable_branch?: BranchDefinition;
   },
 ): {
   me: Loaded<A, R> | undefined | null;

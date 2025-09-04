@@ -10,6 +10,7 @@ import {
   SubscribeListenerOptions,
   SubscribeRestArgs,
   TypeSym,
+  unstable_mergeBranch,
   parseCoValueCreateOptions,
 } from "../internal.js";
 import {
@@ -275,5 +276,9 @@ export class CoTextJazzApi<T extends CoPlainText> extends CoValueJazzApi<T> {
     listener: (value: Resolved<T, true>, unsubscribe: () => void) => void,
   ): () => void {
     return subscribeToExistingCoValue(this.coText, {}, listener);
+  }
+
+  unstable_merge() {
+    unstable_mergeBranch(this.coText);
   }
 }

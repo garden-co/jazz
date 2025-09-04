@@ -18,6 +18,7 @@ import {
   getCoValueOwner,
   Group,
   ID,
+  unstable_mergeBranch,
   RefsToResolve,
   RefsToResolveStrict,
   Resolved,
@@ -446,6 +447,10 @@ export class CoFeedJazzApi<F extends CoFeed> extends CoValueJazzApi<F> {
     [ItemsSym]: SchemaFor<CoFeedItem<F>> | any;
   } {
     return (this.coFeed.constructor as typeof CoFeed)._schema;
+  }
+
+  unstable_merge() {
+    unstable_mergeBranch(this.coFeed);
   }
 }
 

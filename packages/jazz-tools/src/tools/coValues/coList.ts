@@ -10,6 +10,7 @@ import {
   getCoValueOwner,
   Group,
   ID,
+  unstable_mergeBranch,
   RefEncoded,
   RefsToResolve,
   RefsToResolveStrict,
@@ -872,6 +873,10 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
     [ItemsSym]: SchemaFor<CoListItem<L>> | any;
   } {
     return (this.coList.constructor as typeof CoList)._schema;
+  }
+
+  unstable_merge() {
+    unstable_mergeBranch(this.coList);
   }
 }
 
