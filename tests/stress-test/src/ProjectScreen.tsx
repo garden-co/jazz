@@ -13,7 +13,7 @@ export function ProjectScreen() {
   const { projectId } = useParams();
   const project = useCoState(TodoProject, projectId, {
     resolve: {
-      tasks: true,
+      tasks: { $orderBy: { priority: "desc" } },
     },
   });
   const { me } = useAccount(TodoAccount, {

@@ -1,4 +1,4 @@
-import type { LocalNode, RawCoValue } from "cojson";
+import { RawCoList, RawCoMap, type LocalNode, type RawCoValue } from "cojson";
 import {
   CoFeed,
   CoList,
@@ -48,6 +48,14 @@ export class SubscriptionScope<D extends CoValue> {
 
   silenceUpdates = false;
 
+  sortByIndex:
+    | {
+        indexId: string;
+        orderDirection: "asc" | "desc";
+        indexRecord?: CoMap;
+      }
+    | undefined;
+
   constructor(
     public node: LocalNode,
     resolve: RefsToResolve<D>,
@@ -60,6 +68,11 @@ export class SubscriptionScope<D extends CoValue> {
     this.resolve = resolve;
     this.value = { type: "unloaded", id };
 
+    const orderBy =
+      typeof this.resolve === "object" && this.resolve !== null
+        ? this.resolve["$orderBy"]
+        : undefined;
+
     let lastUpdate: RawCoValue | "unavailable" | undefined;
     this.subscription = new CoValueCoreSubscription(
       node,
@@ -71,6 +84,32 @@ export class SubscriptionScope<D extends CoValue> {
           this.handleUpdate(value);
           this.destroy();
           return;
+        }
+
+        // TODO there's surely a better place to do this
+        if (value !== "unavailable" && orderBy) {
+          const order = Object.entries(orderBy)[0];
+          const orderByField = order?.[0];
+          const orderDirection = order?.[1] as "asc" | "desc";
+          const indexDefinition =
+            orderByField !== undefined
+              ? value.core.indexes.find(
+                  (indexDef) => indexDef.elementKey === orderByField,
+                )
+              : undefined;
+
+          if (indexDefinition) {
+            this.sortByIndex = {
+              indexId: indexDefinition.indexId,
+              orderDirection,
+            };
+            this.subscribeToId(indexDefinition.indexId, {
+              ref: CoMap,
+              optional: false,
+            });
+          } else {
+            // TODO sort the list in memory
+          }
         }
 
         // Need all these checks because the migration can trigger new synchronous updates
@@ -247,10 +286,15 @@ export class SubscriptionScope<D extends CoValue> {
       this.errorFromChildren = this.computeChildErrors();
     }
 
+    // On child updates, we re-create the value instance to make the updates
+    // seamless-immutable and so be compatible with React and the React compiler
+    // TODO pass the index to createCoValue (!!!)
+    if (value.type === "loaded" && id === this.sortByIndex?.indexId) {
+      this.sortByIndex.indexRecord = value.value;
+    }
+
     if (this.shouldSendUpdates()) {
       if (this.value.type === "loaded") {
-        // On child updates, we re-create the value instance to make the updates
-        // seamless-immutable and so be compatible with React and the React compiler
         this.updateValue(
           createCoValue(this.schema, this.value.value.$jazz.raw, this),
         );
@@ -427,7 +471,12 @@ export class SubscriptionScope<D extends CoValue> {
     this.silenceUpdates = false;
   }
 
-  private loadChildren() {
+  /**
+   * Loads the children of the current value.
+   *
+   * @returns true if the list of children to load has changed.
+   */
+  private loadChildren(): boolean {
     const { resolve } = this;
 
     if (this.value.type !== "loaded") {

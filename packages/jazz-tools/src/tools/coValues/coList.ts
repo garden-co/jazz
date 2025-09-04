@@ -123,7 +123,9 @@ export class CoList<out Item = any>
     return Array;
   }
 
-  constructor(options: { fromRaw: RawCoList } | undefined) {
+  constructor(
+    options: { fromRaw: RawCoList; usingIndex: boolean } | undefined,
+  ) {
     super();
 
     const proxy = new Proxy(this, CoListProxyHandler as ProxyHandler<this>);
@@ -131,7 +133,11 @@ export class CoList<out Item = any>
     if (options && "fromRaw" in options) {
       Object.defineProperties(this, {
         $jazz: {
-          value: new CoListJazzApi(proxy, () => options.fromRaw),
+          value: new CoListJazzApi(
+            proxy,
+            () => options.fromRaw,
+            options.usingIndex,
+          ),
           enumerable: false,
         },
       });
@@ -248,8 +254,9 @@ export class CoList<out Item = any>
   static fromRaw<V extends CoList>(
     this: CoValueClass<V> & typeof CoList,
     raw: RawCoList,
+    usingIndex: boolean,
   ) {
-    return new this({ fromRaw: raw });
+    return new this({ fromRaw: raw, usingIndex });
   }
 
   /** @internal */
@@ -544,6 +551,7 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
   constructor(
     private coList: L,
     private getRaw: () => RawCoList,
+    private usingIndex: boolean = false,
   ) {
     super(coList);
   }
@@ -562,6 +570,16 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
     this.raw.replace(index, rawValue);
   }
 
+  _indexes() {
+    return this.raw.core.indexes;
+  }
+
+  _indexRecord(): RawCoMap {
+    return this.localNode
+      .expectCoValueLoaded(this.raw.core.indexes[0]?.indexId as CoID<RawCoMap>)
+      .getCurrentContent() as RawCoMap;
+  }
+
   /**
    * Appends new elements to the end of an array, and returns the new length of the array.
    * @param items New elements to add to the array.
@@ -572,8 +590,7 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
     const itemsDescriptor = this.schema[ItemsSym];
 
     if (isRefEncoded(itemsDescriptor)) {
-      const indexes = this.raw.core.indexes;
-      for (const index of indexes) {
+      for (const index of this._indexes()) {
         const { elementKey, indexId } = index;
         this.raw.core.node
           .load(indexId as CoID<RawCoMap>)
@@ -885,9 +902,24 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
         : never
     >;
   } {
+    console.log("Using index for returning refs", {
+      usingIndex: this.usingIndex,
+      indexes: this._indexes(),
+    });
+    const sortedListIndices = this.raw
+      .entries()
+      .map((entry) => entry.value as string);
+    if (this.usingIndex) {
+      const indexRecord = this._indexRecord().toJSON() as Record<
+        string,
+        number
+      >;
+      // TODO support sorting asc or desc - sorting only desc by now
+      sortedListIndices.sort((a, b) => indexRecord[b]! - indexRecord[a]!);
+    }
     return makeRefs<number>(
       this.coList,
-      (idx) => this.raw.get(idx) as unknown as ID<CoValue>,
+      (idx) => sortedListIndices[idx] as unknown as ID<CoValue>,
       () => Array.from({ length: this.raw.entries().length }, (_, idx) => idx),
       this.loadedAs,
       (_idx) => this.schema[ItemsSym] as RefEncoded<CoValue>,

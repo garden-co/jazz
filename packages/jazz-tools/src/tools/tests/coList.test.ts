@@ -1359,15 +1359,20 @@ describe("lastUpdatedAt", () => {
 describe("CoList indexes", () => {
   const IndexRecord = co.record(z.string(), z.number());
 
-  test("index keeps track of CoList insertions", async () => {
-    const Score = co.map({ priority: z.number() });
-    const ItemList = co.list(Score).withIndex("priority", "asc");
-    const list = ItemList.create([]);
+  const Score = co.map({ priority: z.number() });
+  const ItemList = co.list(Score).withIndex("priority", "asc");
+  let list: co.output<typeof ItemList>;
+
+  beforeEach(async () => {
+    list = ItemList.create([]);
     list.$jazz.push(
       Score.create({ priority: 1 }),
       Score.create({ priority: 2 }),
       Score.create({ priority: 3 }),
     );
+  });
+
+  test("the index keeps track of CoList insertions", async () => {
     const indexId = list.$jazz.raw.core.indexes[0]?.indexId;
     assert(indexId);
 
@@ -1382,5 +1387,18 @@ describe("CoList indexes", () => {
         [list[2]!.$jazz.id]: 3,
       }),
     );
+  });
+
+  test("can load a sorted CoList using the index", async () => {
+    const indexId = list.$jazz.raw.core.indexes[0]?.indexId;
+    assert(indexId);
+    const loadedList = await ItemList.load(list.$jazz.id, {
+      resolve: { $orderBy: { priority: "desc" } },
+    });
+
+    const loadedListRefs = loadedList?.$jazz.refs;
+    expect(loadedListRefs?.[0]?.id).toBe(list[3]?.$jazz.id);
+    expect(loadedListRefs?.[1]?.id).toBe(list[2]?.$jazz.id);
+    expect(loadedListRefs?.[2]?.id).toBe(list[1]?.$jazz.id);
   });
 });
