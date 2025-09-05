@@ -162,8 +162,8 @@ export async function POST(request: Request) {
 ```
 </CodeGroup>
 
-<Alert variant="info" className="mt-4">
-  **Note**: To ensure that the limit is correctly enforced, the handler should be deployed in a single worker instance (e.g. a single Cloudflare DurableObject).
+<Alert variant="info" className="mt-4" title="Note">
+  To ensure that the limit is correctly enforced, the handler should be deployed in a single worker instance (e.g. a single Cloudflare DurableObject).
   
   Details on how to deploy a single instance Worker are available in the [Deployments & Transactionality](#deployments--transactionality) section.
 </Alert>
@@ -193,8 +193,8 @@ export async function sendEventBookingRequest(event: Event) {
 ```
 </CodeGroup>
 
-<Alert variant="info" className="mt-4">
-  **Note**: The `experimental_defineRequest` API is still experimental and may change in future versions. For production applications, consider the stability implications.
+<Alert variant="info" className="mt-4" title="Note">
+  The `experimental_defineRequest` API is still experimental and may change in future versions. For production applications, consider the stability implications.
 </Alert>
 
 ## Security safeguards provided by Jazz

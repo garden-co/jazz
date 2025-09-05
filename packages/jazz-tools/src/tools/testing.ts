@@ -56,7 +56,7 @@ export function getPeerConnectedToTestSyncServer() {
     Math.random().toString(),
     Math.random().toString(),
     {
-      peer1role: "server",
+      peer1role: "client",
       peer2role: "server",
     },
   );

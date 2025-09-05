@@ -29,7 +29,7 @@ Tested with:
 
 <CodeGroup>
 ```bash
-npx create-expo-app -e with-router-tailwind my-jazz-app
+npx create-expo-app -e with-tailwindcss my-jazz-app
 cd my-jazz-app
 npx expo prebuild
 ```
@@ -43,7 +43,7 @@ npx expo prebuild
 npx expo install expo-linking expo-secure-store expo-sqlite expo-file-system @react-native-community/netinfo @bam.tech/react-native-image-resizer
 
 # React Native polyfills
-npm i -S @azure/core-asynciterator-polyfill react-native-url-polyfill readable-stream react-native-get-random-values
+npm i -S @azure/core-asynciterator-polyfill react-native-url-polyfill readable-stream react-native-get-random-values @bacons/text-decoder
 
 # Jazz dependencies
 npm i -S jazz-tools
@@ -77,12 +77,15 @@ If you are not working within a monorepo, create a new file `metro.config.js` in
 // @noErrors: 2304
 // metro.config.js
 const { getDefaultConfig } = require("expo/metro-config");
+const { withNativeWind } = require("nativewind/metro");
+
 const config = getDefaultConfig(__dirname);
 
 config.resolver.sourceExts = ["mjs", "js", "json", "ts", "tsx"];
 config.resolver.requireCycleIgnorePatterns = [/(^|\/|\\)node_modules($|\/|\\)/];
 
-module.exports = config;
+module.exports = withNativeWind(config, { input: "./src/global.css" });
+
 ```
 </CodeGroup>
 
@@ -96,6 +99,8 @@ For monorepos, use the following `metro.config.js`:
 // metro.config.js
 const { getDefaultConfig } = require("expo/metro-config");
 const { FileStore } = require("metro-cache");
+const { withNativeWind } = require("nativewind/metro");
+
 const path = require("path");
 
 // eslint-disable-next-line no-undef
@@ -117,7 +122,7 @@ config.cacheStores = [
   }),
 ];
 
-module.exports = config;
+module.exports = withNativeWind(config, { input: "./src/global.css" });
 ```
 </CodeGroup>
 
@@ -156,18 +161,19 @@ import 'react-native-get-random-values'; // polyfill getRandomValues
 ```
 </CodeGroup>
 
-Update `index.js`:
+Update `_layout.tsx`:
 
 <CodeGroup>
-```ts twoslash
-// @noErrors: 2307
-// index.js
-import { AppRegistry } from 'react-native';
-import App from './App';
-import { name as appName } from './app.json';
-import './polyfills';
+```ts
+// _layout.tsx
+import "../global.css";
+// [!code ++:1]
+import "../../polyfills";
+import { Slot } from "expo-router";
 
-AppRegistry.registerComponent(appName, () => App);
+export default function Layout() {
+	return <Slot />;
+}
 ```
 </CodeGroup>
 

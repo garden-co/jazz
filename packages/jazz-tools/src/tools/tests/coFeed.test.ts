@@ -17,8 +17,13 @@ import {
   z,
 } from "../index.js";
 import { createJazzTestAccount, setupJazzTestSync } from "../testing.js";
-import { setupTwoNodes } from "./utils.js";
-import { CoFeed, ControlledAccount, TypeSym } from "../internal.js";
+import { setupTwoNodes, waitFor } from "./utils.js";
+import {
+  CoFeed,
+  CoFeedInstanceCoValuesNullable,
+  ControlledAccount,
+  TypeSym,
+} from "../internal.js";
 
 const Crypto = await WasmCrypto.create();
 
@@ -203,7 +208,7 @@ describe("CoFeed resolution", async () => {
 
     assert(myStream);
 
-    expect(myStream.value).toBeTruthy();
+    await waitFor(() => expect(myStream.value).toBeTruthy());
 
     assert(myStream.value);
 
@@ -211,7 +216,7 @@ describe("CoFeed resolution", async () => {
 
     assert(loadedNestedStreamByMe);
 
-    expect(loadedNestedStreamByMe.value).toBeTruthy();
+    await waitFor(() => expect(loadedNestedStreamByMe.value).toBeTruthy());
 
     assert(loadedNestedStreamByMe.value);
 
@@ -220,7 +225,7 @@ describe("CoFeed resolution", async () => {
 
     assert(loadedTwiceNestedStreamByMe);
 
-    expect(loadedTwiceNestedStreamByMe.value).toBe("milk");
+    await waitFor(() => expect(loadedTwiceNestedStreamByMe.value).toBe("milk"));
 
     assert(loadedTwiceNestedStreamByMe.value);
   });
@@ -231,21 +236,24 @@ describe("CoFeed resolution", async () => {
 
     const anotherAccount = await createJazzTestAccount();
 
-    const queue = new Channel();
+    let result: CoFeedInstanceCoValuesNullable<co.Feed<co.Feed<z.z.ZodString>>>;
 
     TestStream.subscribe(
       stream.$jazz.id,
       { loadAs: anotherAccount },
       (subscribedStream) => {
-        void queue.push(subscribedStream);
+        result = subscribedStream;
       },
     );
 
-    const update1 = (await queue.next()).value;
-    expect(
-      update1.perAccount[accountId]?.value?.perAccount[accountId]?.value
-        ?.perAccount[accountId]?.value,
-    ).toBe("milk");
+    await waitFor(() => expect(result).toBeDefined());
+
+    await waitFor(() => {
+      expect(
+        result.perAccount[accountId]?.value?.perAccount[accountId]?.value
+          ?.perAccount[accountId]?.value,
+      ).toBe("milk");
+    });
 
     // When assigning a new nested stream, we get an update
     const newTwiceNested = TwiceNestedStream.create(["butter"], {
@@ -258,19 +266,22 @@ describe("CoFeed resolution", async () => {
 
     stream.$jazz.push(newNested);
 
-    const update2 = (await queue.next()).value;
-    expect(
-      update2.perAccount[me.$jazz.id]?.value?.perAccount[me.$jazz.id]?.value
-        ?.perAccount[me.$jazz.id]?.value,
-    ).toBe("butter");
+    await waitFor(() => {
+      expect(
+        result.perAccount[accountId]?.value?.perAccount[accountId]?.value
+          ?.perAccount[accountId]?.value,
+      ).toBe("butter");
+    });
 
     // we get updates when the new nested stream changes
     newTwiceNested.$jazz.push("jam");
-    const update3 = (await queue.next()).value;
-    expect(
-      update3.perAccount[me.$jazz.id]?.value?.perAccount[me.$jazz.id]?.value
-        ?.perAccount[me.$jazz.id]?.value,
-    ).toBe("jam");
+
+    await waitFor(() => {
+      expect(
+        result.perAccount[accountId]?.value?.perAccount[accountId]?.value
+          ?.perAccount[accountId]?.value,
+      ).toBe("jam");
+    });
   });
 
   test("Subscription without options", async () => {

@@ -1,9 +1,9 @@
 import { WasmCrypto } from "cojson/crypto/WasmCrypto";
 import { assert, beforeEach, describe, expect, test } from "vitest";
 import { CoMap, Group, z } from "../exports.js";
-import { Loaded, Ref, co } from "../internal.js";
+import { Account, Loaded, Ref, co } from "../internal.js";
 import { createJazzTestAccount, setupJazzTestSync } from "../testing.js";
-import { setupTwoNodes, waitFor } from "./utils.js";
+import { loadCoValueOrFail, setupTwoNodes, waitFor } from "./utils.js";
 
 const Crypto = await WasmCrypto.create();
 
@@ -272,14 +272,20 @@ describe("Group inheritance", () => {
     const bob = await createJazzTestAccount({});
     await bob.$jazz.waitForAllCoValuesSync();
 
+    const loadedAlice = await Account.load(alice.$jazz.id);
+    const loadedBob = await Account.load(bob.$jazz.id);
+
+    assert(loadedBob);
+    assert(loadedAlice);
+
     const parentGroup = Group.create();
     // `parentGroup` has `alice` as a writer
-    parentGroup.addMember(alice, "writer");
+    parentGroup.addMember(loadedAlice, "writer");
     expect(parentGroup.getRoleOf(alice.$jazz.id)).toBe("writer");
 
     const group = Group.create();
     // `group` has `bob` as a reader
-    group.addMember(bob, "reader");
+    group.addMember(loadedBob, "reader");
     expect(group.getRoleOf(bob.$jazz.id)).toBe("reader");
 
     group.addMember(parentGroup);
@@ -817,24 +823,26 @@ describe("Group.members", () => {
     childGroup.addMember(bob, "reader");
     expect(childGroup.getRoleOf(bob.$jazz.id)).toBe("reader");
 
-    expect(childGroup.members).toEqual([
-      expect.objectContaining({
-        account: expect.objectContaining({
-          $jazz: expect.objectContaining({
-            id: co.account().getMe().$jazz.id,
+    await waitFor(() => {
+      expect(childGroup.members).toEqual([
+        expect.objectContaining({
+          account: expect.objectContaining({
+            $jazz: expect.objectContaining({
+              id: co.account().getMe().$jazz.id,
+            }),
           }),
+          role: "admin",
         }),
-        role: "admin",
-      }),
-      expect.objectContaining({
-        account: expect.objectContaining({
-          $jazz: expect.objectContaining({
-            id: bob.$jazz.id,
+        expect.objectContaining({
+          account: expect.objectContaining({
+            $jazz: expect.objectContaining({
+              id: bob.$jazz.id,
+            }),
           }),
+          role: "reader",
         }),
-        role: "reader",
-      }),
-    ]);
+      ]);
+    });
   });
 
   test("should return the members of the parent group", async () => {
@@ -849,24 +857,26 @@ describe("Group.members", () => {
 
     expect(childGroup.getRoleOf(bob.$jazz.id)).toBe("reader");
 
-    expect(childGroup.members).toEqual([
-      expect.objectContaining({
-        account: expect.objectContaining({
-          $jazz: expect.objectContaining({
-            id: co.account().getMe().$jazz.id,
+    await waitFor(() => {
+      expect(childGroup.members).toEqual([
+        expect.objectContaining({
+          account: expect.objectContaining({
+            $jazz: expect.objectContaining({
+              id: co.account().getMe().$jazz.id,
+            }),
           }),
+          role: "admin",
         }),
-        role: "admin",
-      }),
-      expect.objectContaining({
-        account: expect.objectContaining({
-          $jazz: expect.objectContaining({
-            id: bob.$jazz.id,
+        expect.objectContaining({
+          account: expect.objectContaining({
+            $jazz: expect.objectContaining({
+              id: bob.$jazz.id,
+            }),
           }),
+          role: "reader",
         }),
-        role: "reader",
-      }),
-    ]);
+      ]);
+    });
   });
 
   test("should not return everyone", async () => {
@@ -926,22 +936,24 @@ describe("Group.getDirectMembers", () => {
     childGroup.addMember(parentGroup);
 
     // Child group should inherit bob through parent, but bob is not a direct member
-    expect(childGroup.members).toEqual([
-      expect.objectContaining({
-        account: expect.objectContaining({
-          $jazz: expect.objectContaining({
-            id: co.account().getMe().$jazz.id,
+    await waitFor(() => {
+      expect(childGroup.members).toEqual([
+        expect.objectContaining({
+          account: expect.objectContaining({
+            $jazz: expect.objectContaining({
+              id: co.account().getMe().$jazz.id,
+            }),
           }),
         }),
-      }),
-      expect.objectContaining({
-        account: expect.objectContaining({
-          $jazz: expect.objectContaining({
-            id: bob.$jazz.id,
+        expect.objectContaining({
+          account: expect.objectContaining({
+            $jazz: expect.objectContaining({
+              id: bob.$jazz.id,
+            }),
           }),
         }),
-      }),
-    ]);
+      ]);
+    });
 
     // directMembers should only show the admin, not the inherited bob
     expect(childGroup.getDirectMembers()).toEqual([

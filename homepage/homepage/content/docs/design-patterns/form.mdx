@@ -188,7 +188,7 @@ export const AccountRoot = co.map({
 
 export const JazzAccount = co.account({
   root: AccountRoot,
-  profile: co.map({ name: z.string() }),
+  profile: co.profile(),
 });
 
 export function OrderForm({
@@ -304,7 +304,7 @@ export const AccountRoot = co.map({
 
 export const JazzAccount = co.account({
   root: AccountRoot,
-  profile: co.map({ name: z.string() }),
+  profile: co.profile(),
 });
 
 export function OrderForm({
@@ -387,7 +387,7 @@ export const AccountRoot = co.map({ // [!code ++:15]
 
 export const JazzAccount = co.account({
   root: AccountRoot,
-  profile: co.map({ name: z.string() }),
+  profile: co.profile(),
 }).withMigration((account, creationProps?: { name: string }) => {
   if (!account.$jazz.has("root")) {
     account.$jazz.set("root", { draft: {} });
@@ -416,7 +416,7 @@ export const AccountRoot = co.map({
 
 export const JazzAccount = co.account({
   root: AccountRoot,
-  profile: co.map({ name: z.string() }),
+  profile: co.profile(),
 }).withMigration((account, creationProps?: { name: string }) => {
   if (!account.$jazz.has("root")) {
     account.$jazz.set("root", { draft: {} });
@@ -473,7 +473,7 @@ export const AccountRoot = co.map({
 
 export const JazzAccount = co.account({
   root: AccountRoot,
-  profile: co.map({ name: z.string() }),
+  profile: co.profile(),
 }).withMigration((account, creationProps?: { name: string }) => {
   if (!account.$jazz.has("root")) {
     account.$jazz.set("root", { draft: {} });
@@ -633,7 +633,7 @@ export const AccountRoot = co.map({
 
 export const JazzAccount = co.account({
   root: AccountRoot,
-  profile: co.map({ name: z.string() }),
+  profile: co.profile(),
 }).withMigration((account, creationProps?: { name: string }) => {
   if (!account.$jazz.has("root")) {
     account.$jazz.set("root", { draft: {} });

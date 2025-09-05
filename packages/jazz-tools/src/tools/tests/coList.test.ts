@@ -963,17 +963,19 @@ describe("CoList subscription", async () => {
 
     expect(spy).toHaveBeenCalledTimes(1);
 
-    expect(updates[0]?.[0]?.name).toEqual("Item 1");
-    expect(updates[0]?.[1]?.name).toEqual("Item 2");
+    await waitFor(() => {
+      expect(updates[0]?.[0]?.name).toEqual("Item 1");
+      expect(updates[0]?.[1]?.name).toEqual("Item 2");
+    });
 
     list[0]!.$jazz.set("name", "Updated Item 1");
 
-    await waitFor(() => expect(spy).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(spy).toHaveBeenCalledTimes(4));
 
     expect(updates[1]?.[0]?.name).toEqual("Updated Item 1");
     expect(updates[1]?.[1]?.name).toEqual("Item 2");
 
-    expect(spy).toHaveBeenCalledTimes(2);
+    expect(spy).toHaveBeenCalledTimes(4);
   });
 
   test("replacing list items triggers updates", async () => {
