@@ -1,0 +1,19 @@
+[package]
+name = "cojson-core-rn"
+version = "0.17.11"
+edition = "2021"
+build = "build.rs"
+
+[dependencies]
+cxx = { version = "1.0.160", features = ["alloc", "std", "c++20"] }
+cojson-core = { path = "../cojson-core" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "1.0"
+
+[build-dependencies]
+cxx-build = "1.0.160"
+
+[lib]
+name = "cojson_core_rn"
+crate-type = ["staticlib", "cdylib"]

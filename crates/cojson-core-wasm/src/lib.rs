@@ -65,14 +65,15 @@ struct PrivateTransactionResult {
 #[wasm_bindgen]
 impl SessionLog {
     #[wasm_bindgen(constructor)]
-    pub fn new(co_id: String, session_id: String, signer_id: Option<String>) -> SessionLog {
+    pub fn new(co_id: String, session_id: String, signer_id: Option<String>) -> Result<SessionLog, JsValue> {
         let co_id = CoID(co_id);
         let session_id = SessionID(session_id);
-        let signer_id = signer_id.map(|id| SignerID(id));
+        let signer_id = signer_id.map(|s| SignerID(s));
 
-        let internal = SessionLogInternal::new(co_id, session_id, signer_id);
+        let internal = SessionLogInternal::new(co_id, session_id, signer_id)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-        SessionLog { internal }
+        Ok(SessionLog { internal })
     }
 
     #[wasm_bindgen(js_name = clone)]
@@ -117,13 +118,13 @@ impl SessionLog {
         made_at: f64,
         meta: Option<String>,
     ) -> Result<String, CojsonCoreWasmError> {
-        let (signature, transaction) = self.internal.add_new_transaction(
+        let (signature, transaction) = self.internal.try_add_new_transaction(
             changes_json,
             TransactionMode::Private{key_id: KeyID(key_id), key_secret: KeySecret(encryption_key)},
             &SignerSecret(signer_secret),
             made_at as u64,
             meta,
-        );
+        )?;
 
         // Extract encrypted_changes from the private transaction
         let result = match transaction {
@@ -146,13 +147,13 @@ impl SessionLog {
         made_at: f64,
         meta: Option<String>,
     ) -> Result<String, CojsonCoreWasmError> {
-        let (signature, _) = self.internal.add_new_transaction(
+        let (signature, _) = self.internal.try_add_new_transaction(
             changes_json,
             TransactionMode::Trusting,
             &SignerSecret(signer_secret),
             made_at as u64,
             meta,
-        );
+        )?;
 
         Ok(signature.0)
     }

@@ -3,7 +3,8 @@ packages:
   - 'examples/*'
   - 'starters/*'
   - 'tests/*'
-  - 'crates/*'
+  - 'crates/cojson-core-rn/pkg'
+  - 'crates/cojson-core-wasm'
   - 'bench'
 
 minimumReleaseAge: 1440 # 24 hours
