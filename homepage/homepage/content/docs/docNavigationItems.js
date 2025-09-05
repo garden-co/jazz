@@ -52,7 +52,14 @@ export const docNavigationItems = [
           "react-native-expo": 100,
           svelte: 100,
         },
-      }
+      },
+            {
+        name: "Server-side rendering",
+        href: "/docs/project-setup/ssr",
+        done: {
+          react: 100,
+        }
+      },
     ],
   },
   {

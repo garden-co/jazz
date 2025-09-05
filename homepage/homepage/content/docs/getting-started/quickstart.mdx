@@ -142,6 +142,33 @@ export const JazzFestAccount = co
 ## Add the Jazz Provider
 Wrap your app with a provider so components can use Jazz.
 
+<ContentByFramework framework="react">
+  <FileName>app/components/JazzWrapper.tsx</FileName>
+<CodeGroup className="[&_span]:[tab-size:2]" preferWrap>
+```tsx
+"use client"; // tells Next.js that this component can't be server-side rendered. If you're not using Next.js, you can remove it.
+import { JazzReactProvider } from "jazz-tools/react";
+import { JazzFestAccount } from "@/app/schema";
+
+const apiKey = process.env.NEXT_PUBLIC_JAZZ_API_KEY;
+
+export function JazzWrapper({ children }: { 
+  children: React.ReactNode 
+}) {
+  return (
+    <JazzReactProvider
+      sync={{ 
+        peer: `wss://cloud.jazz.tools/?key=${apiKey}` 
+      }}
+      AccountSchema={JazzFestAccount}
+    >
+      {children}
+    </JazzReactProvider>
+  );
+}
+```
+</CodeGroup>
+</ContentByFramework>
 <ContentByFramework framework="react">  
   <FileName>app/layout.tsx</FileName>
 </ContentByFramework>
@@ -190,32 +217,7 @@ Wrap your app with a provider so components can use Jazz.
 </TabbedCodeGroupItem>
 </TabbedCodeGroup>
 
-<ContentByFramework framework="react">
-  <FileName>app/components/JazzWrapper.tsx</FileName>
-<CodeGroup>
-```tsx
-"use client";
-import { JazzReactProvider } from "jazz-tools/react";
-import { JazzFestAccount } from "@/app/schema";
 
-const apiKey = process.env.NEXT_PUBLIC_JAZZ_API_KEY;
-
-export function JazzWrapper({ children }: { children: React.ReactNode }) {
-  return (
-    <JazzReactProvider
-      sync={{ peer: `wss://cloud.jazz.tools/?key=${apiKey}` }}
-      AccountSchema={JazzFestAccount}
-    >
-      {children}
-    </JazzReactProvider>
-  );
-}
-```
-</CodeGroup>
-<Alert variant="info" className="mt-4 flex gap-2 items-center">
-  `"use client";` tells Next.js that this component can't be server-side rendered. If you're not using Next.js, you can remove it.
-</Alert>
-</ContentByFramework>
 
 ## Start your app
 Moment of truth&hairsp;—&hairsp;time to start your app and see if it works.
@@ -272,7 +274,7 @@ Let's create a simple form to add a new band to the festival. We'll use the `use
 "use client";
 import { useAccount } from "jazz-tools/react";
 import { useState } from "react";
-import { Band, JazzFestAccount } from "@/app/schema";
+import { JazzFestAccount } from "@/app/schema";
 
 export function NewBand() {
   const { me } = useAccount(JazzFestAccount, { resolve: { root: { myFestival: true } } });
@@ -385,8 +387,8 @@ You've built all your components, time to put them together.
 <TabbedCodeGroup default="react" savedPreferenceKey="framework">
 <TabbedCodeGroupItem label="React" value="react" className="[&_span]:[tab-size:2]" icon={<ReactLogo />} preferWrap>
 ```tsx
-import { NewBand } from "@/app/components/NewBand";
 import { MyFestival } from "@/app/components/MyFestival";
+import { NewBand } from "@/app/components/NewBand";
 
 export default function Home() {
   return (
@@ -420,6 +422,10 @@ You should now be able to add a band to your festival, and see it appear in the 
 **Congratulations! 🎉** You've built your first Jazz app!
 
 You've begun to scratch the surface of what's possible with Jazz. Behind the scenes, your local-first JazzFest app is **already** securely syncing your data to the cloud in real-time, ready for you to build more and more powerful features.
+
+<ContentByFramework framework="react">
+Psst! Got a few more minutes and want to add Server Side Rendering to your app? [We've got you covered!](/docs/project-setup/ssr/react)
+</ContentByFramework>
 
 ## Next steps
 - [Add authentication](/docs/authentication/overview) to your app so that you can log in and view your data wherever you are!
