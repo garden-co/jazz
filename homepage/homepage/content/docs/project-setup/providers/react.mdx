@@ -35,7 +35,7 @@ export const AccountRoot = co.map({
 
 export const MyAppAccount = co.account({
   root: AccountRoot,
-  profile: co.map({ name: z.string() }),
+  profile: co.profile(),
 });
 // @filename: app.tsx
 import * as React from "react";
@@ -103,7 +103,7 @@ export const AccountRoot = co.map({
 
 export const MyAppAccount = co.account({
   root: AccountRoot,
-  profile: co.map({ name: z.string() }),
+  profile: co.profile(),
 });
 
 // @filename: app.tsx
@@ -158,6 +158,9 @@ export function MyApp ({ children }: { children: React.ReactNode }) {
 
       // Enable guest mode for account-less access
       guestMode={false}
+
+      // Enable SSR mode
+      enableSSR={false}
 
       // Set default name for new user profiles
       defaultProfileName="New User"

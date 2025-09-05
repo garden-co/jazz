@@ -525,7 +525,9 @@ describe("importContentPieces", () => {
       resolve: {
         posts: {
           $each: {
-            comments: true,
+            comments: {
+              $each: true,
+            },
           },
         },
       },

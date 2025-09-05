@@ -1,6 +1,6 @@
 import { Account } from "jazz-tools";
 import { createRoot } from "react-dom/client";
-import { JazzInspectorInternal } from "./index.js";
+import { JazzInspectorInternal } from "./viewer/new-app.js";
 
 export class JazzInspectorElement extends HTMLElement {
   private root: ReturnType<typeof createRoot> | null = null;

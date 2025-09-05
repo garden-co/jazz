@@ -85,20 +85,23 @@ export const jazzPlugin: () => JazzPlugin = () => {
             },
             verification: {
               create: {
-                before: async (verification, context) => {
-                  // If a jazzAuth is provided, save it for later usage.
-                  if (contextContainsJazzAuth(context)) {
-                    const parsed = JSON.parse(verification.value);
-                    const newValue = JSON.stringify({
-                      ...parsed,
-                      jazzAuth: context.jazzAuth,
-                    });
-
-                    return {
-                      data: {
-                        value: newValue,
+                after: async (verification, context) => {
+                  /**
+                   * For: Email OTP plugin
+                   * After a verification is created, if it is from the EmailOTP plugin,
+                   * create a new verification value with the jazzAuth with the same expiration.
+                   */
+                  if (
+                    contextContainsJazzAuth(context) &&
+                    verification.identifier.startsWith("sign-in-otp-")
+                  ) {
+                    await context.context.internalAdapter.createVerificationValue(
+                      {
+                        value: JSON.stringify({ jazzAuth: context.jazzAuth }),
+                        identifier: `${verification.identifier}-jazz-auth`,
+                        expiresAt: verification.expiresAt,
                       },
-                    };
+                    );
                   }
                 },
               },
@@ -147,6 +150,7 @@ export const jazzPlugin: () => JazzPlugin = () => {
         },
 
         /**
+         * For: Social / OAuth2 plugin
          * /callback is the endpoint that BetterAuth uses to authenticate the user coming from a social provider.
          * 1. Catch the state
          * 2. Find the verification value
@@ -162,17 +166,12 @@ export const jazzPlugin: () => JazzPlugin = () => {
           handler: createAuthMiddleware(async (ctx) => {
             const state = ctx.query?.state || ctx.body?.state;
 
-            const data = await ctx.context.adapter.findOne<{ value: string }>({
-              model: ctx.context.tables.verification!.modelName,
-              where: [
-                {
-                  field: "identifier",
-                  operator: "eq",
-                  value: state,
-                },
-              ],
-              select: ["value"],
-            });
+            const identifier = `${state}-jazz-auth`;
+
+            const data =
+              await ctx.context.internalAdapter.findVerificationValue(
+                identifier,
+              );
 
             // if not found, the social plugin will throw later anyway
             if (!data) {
@@ -192,6 +191,45 @@ export const jazzPlugin: () => JazzPlugin = () => {
               };
             } else {
               throw new APIError(404, {
+                message: "JazzAuth not found in verification value",
+              });
+            }
+          }),
+        },
+        /**
+         * For: Email OTP plugin
+         * When the user sends an OTP, we try to find the jazzAuth.
+         * If it isn't a sign-up, we expect to not find a verification value.
+         */
+        {
+          matcher: (context) => {
+            return context.path.startsWith("/sign-in/email-otp");
+          },
+          handler: createAuthMiddleware(async (ctx) => {
+            const email = ctx.body.email;
+            const identifier = `sign-in-otp-${email}-jazz-auth`;
+
+            const data =
+              await ctx.context.internalAdapter.findVerificationValue(
+                identifier,
+              );
+
+            // if not found, it isn't a sign-up
+            if (!data || data.expiresAt < new Date()) {
+              return;
+            }
+
+            const parsed = JSON.parse(data.value);
+
+            if (parsed && "jazzAuth" in parsed) {
+              return {
+                context: {
+                  ...ctx,
+                  jazzAuth: parsed.jazzAuth,
+                },
+              };
+            } else {
+              throw new APIError(500, {
                 message: "JazzAuth not found in verification value",
               });
             }
@@ -224,6 +262,38 @@ export const jazzPlugin: () => JazzPlugin = () => {
             return ctx.json({
               ...returned,
               jazzAuth: jazzAuth,
+            });
+          }),
+        },
+
+        /**
+         * For: Social / OAuth2 plugin
+         * When the user sign-in via social, we create a verification value with the jazzAuth.
+         */
+        {
+          matcher: (context) => {
+            return context.path.startsWith("/sign-in/social");
+          },
+          handler: createAuthMiddleware(async (ctx) => {
+            if (!contextContainsJazzAuth(ctx)) {
+              throw new APIError(500, {
+                message: "JazzAuth not found in context",
+              });
+            }
+
+            const returned = ctx.context.returned as { url: string };
+
+            const url = new URL(returned.url);
+            const state = url.searchParams.get("state");
+
+            const value = JSON.stringify({ jazzAuth: ctx.jazzAuth });
+            const expiresAt = new Date();
+            expiresAt.setMinutes(expiresAt.getMinutes() + 10);
+
+            await ctx.context.internalAdapter.createVerificationValue({
+              value,
+              identifier: `${state}-jazz-auth`,
+              expiresAt,
             });
           }),
         },

@@ -70,7 +70,7 @@ export const JazzAccount = co
     profile: co.profile(),
   })
   .withMigration((account) => {
-    if (!account.root) {
+    if (!account.$jazz.has("root")) {
       account.$jazz.set("root", {
         draft: { addOns: [], instructions: "" },
         orders: [],

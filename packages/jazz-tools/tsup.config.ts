@@ -48,7 +48,7 @@ export default defineConfig([
   {
     ...cfg,
     entry: {
-      index: "src/inspector/index.ts",
+      index: "src/inspector/index.tsx",
     },
     outDir: "dist/inspector",
     esbuildOptions: (options) => {

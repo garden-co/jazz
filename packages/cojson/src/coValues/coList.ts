@@ -1,11 +1,7 @@
 import { CoID, RawCoValue } from "../coValue.js";
-import {
-  AvailableCoValueCore,
-  CoValueCore,
-} from "../coValueCore/coValueCore.js";
+import { AvailableCoValueCore } from "../coValueCore/coValueCore.js";
 import { AgentID, SessionID, TransactionID } from "../ids.js";
 import { JsonObject, JsonValue } from "../jsonValue.js";
-import { CoValueKnownState } from "../sync.js";
 import { accountOrAgentIDfromSessionID } from "../typeUtils/accountOrAgentIDfromSessionID.js";
 import { isCoValue } from "../typeUtils/isCoValue.js";
 import { RawAccountID } from "./account.js";
@@ -39,12 +35,14 @@ type InsertionEntry<T extends JsonValue> = {
   madeAt: number;
   predecessors: OpID[];
   successors: OpID[];
-} & InsertionOpPayload<T>;
+  change: InsertionOpPayload<T>;
+};
 
 type DeletionEntry = {
   madeAt: number;
   deletionID: OpID;
-} & DeletionOpPayload;
+  change: DeletionOpPayload;
+};
 
 export class RawCoList<
   Item extends JsonValue = JsonValue,
@@ -109,6 +107,83 @@ export class RawCoList<
     this.processNewTransactions();
   }
 
+  private getInsertionsEntry(opID: OpID) {
+    const index = getSessionIndex(opID);
+
+    const sessionEntry = this.insertions[index];
+    if (!sessionEntry) {
+      return undefined;
+    }
+
+    const txEntry = sessionEntry[opID.txIndex];
+    if (!txEntry) {
+      return undefined;
+    }
+
+    return txEntry[opID.changeIdx];
+  }
+
+  private createInsertionsEntry(opID: OpID, value: InsertionEntry<Item>) {
+    const index = getSessionIndex(opID);
+
+    let sessionEntry = this.insertions[index];
+    if (!sessionEntry) {
+      sessionEntry = {};
+      this.insertions[index] = sessionEntry;
+    }
+
+    let txEntry = sessionEntry[opID.txIndex];
+    if (!txEntry) {
+      txEntry = {};
+      sessionEntry[opID.txIndex] = txEntry;
+    }
+
+    txEntry[opID.changeIdx] = value;
+  }
+
+  private isDeleted(opID: OpID) {
+    const index = getSessionIndex(opID);
+
+    const sessionEntry = this.deletionsByInsertion[index];
+
+    if (!sessionEntry) {
+      return false;
+    }
+
+    const txEntry = sessionEntry[opID.txIndex];
+
+    if (!txEntry) {
+      return false;
+    }
+
+    return Boolean(txEntry[opID.changeIdx]?.length);
+  }
+
+  private pushDeletionsByInsertionEntry(opID: OpID, value: DeletionEntry) {
+    const index = getSessionIndex(opID);
+
+    let sessionEntry = this.deletionsByInsertion[index];
+    if (!sessionEntry) {
+      sessionEntry = {};
+      this.deletionsByInsertion[index] = sessionEntry;
+    }
+
+    let txEntry = sessionEntry[opID.txIndex];
+    if (!txEntry) {
+      txEntry = {};
+      sessionEntry[opID.txIndex] = txEntry;
+    }
+
+    let list = txEntry[opID.changeIdx];
+
+    if (!list) {
+      list = [];
+      txEntry[opID.changeIdx] = list;
+    }
+
+    list.push(value);
+  }
+
   processNewTransactions() {
     const transactions = this.core.getValidSortedTransactions({
       ignorePrivateTransactions: false,
@@ -133,87 +208,51 @@ export class RawCoList<
       for (const [changeIdx, changeUntyped] of changes.entries()) {
         const change = changeUntyped as ListOpPayload<Item>;
 
+        const opID = {
+          sessionID: txID.sessionID,
+          txIndex: txID.txIndex,
+          branch: txID.branch,
+          changeIdx,
+        };
+
         if (change.op === "pre" || change.op === "app") {
-          let sessionEntry = this.insertions[txID.sessionID];
-          if (!sessionEntry) {
-            sessionEntry = {};
-            this.insertions[txID.sessionID] = sessionEntry;
-          }
-          let txEntry = sessionEntry[txID.txIndex];
-          if (!txEntry) {
-            txEntry = {};
-            sessionEntry[txID.txIndex] = txEntry;
-          }
-          txEntry[changeIdx] = {
+          this.createInsertionsEntry(opID, {
             madeAt,
             predecessors: [],
             successors: [],
-            ...change,
-          };
+            change,
+          });
+
           if (change.op === "pre") {
             if (change.before === "end") {
-              this.beforeEnd.push({
-                ...txID,
-                changeIdx,
-              });
+              this.beforeEnd.push(opID);
             } else {
-              const beforeEntry =
-                this.insertions[change.before.sessionID]?.[
-                  change.before.txIndex
-                ]?.[change.before.changeIdx];
+              const beforeEntry = this.getInsertionsEntry(change.before);
+
               if (!beforeEntry) {
                 continue;
               }
-              beforeEntry.predecessors.splice(0, 0, {
-                ...txID,
-                changeIdx,
-              });
+
+              beforeEntry.predecessors.push(opID);
             }
           } else {
             if (change.after === "start") {
-              this.afterStart.push({
-                ...txID,
-                changeIdx,
-              });
+              this.afterStart.push(opID);
             } else {
-              const afterEntry =
-                this.insertions[change.after.sessionID]?.[
-                  change.after.txIndex
-                ]?.[change.after.changeIdx];
+              const afterEntry = this.getInsertionsEntry(change.after);
+
               if (!afterEntry) {
                 continue;
               }
-              afterEntry.successors.push({
-                ...txID,
-                changeIdx,
-              });
+
+              afterEntry.successors.push(opID);
             }
           }
         } else if (change.op === "del") {
-          let sessionEntry =
-            this.deletionsByInsertion[change.insertion.sessionID];
-          if (!sessionEntry) {
-            sessionEntry = {};
-            this.deletionsByInsertion[change.insertion.sessionID] =
-              sessionEntry;
-          }
-          let txEntry = sessionEntry[change.insertion.txIndex];
-          if (!txEntry) {
-            txEntry = {};
-            sessionEntry[change.insertion.txIndex] = txEntry;
-          }
-          let changeEntry = txEntry[change.insertion.changeIdx];
-          if (!changeEntry) {
-            changeEntry = [];
-            txEntry[change.insertion.changeIdx] = changeEntry;
-          }
-          changeEntry.push({
+          this.pushDeletionsByInsertionEntry(change.insertion, {
             madeAt,
-            deletionID: {
-              ...txID,
-              changeIdx,
-            },
-            ...change,
+            deletionID: opID,
+            change,
           });
         } else {
           throw new Error(
@@ -324,10 +363,7 @@ export class RawCoList<
     while (todo.length > 0) {
       const currentOpID = todo[todo.length - 1]!;
 
-      const entry =
-        this.insertions[currentOpID.sessionID]?.[currentOpID.txIndex]?.[
-          currentOpID.changeIdx
-        ];
+      const entry = this.getInsertionsEntry(currentOpID);
 
       if (!entry) {
         throw new Error("Missing op " + currentOpID);
@@ -338,22 +374,19 @@ export class RawCoList<
 
       // We navigate the predecessors before processing the current opID in the list
       if (shouldTraversePredecessors) {
-        for (let i = entry.predecessors.length - 1; i >= 0; i--) {
-          todo.push(entry.predecessors[i]!);
+        for (const predecessor of entry.predecessors) {
+          todo.push(predecessor);
         }
         predecessorsVisited.add(currentOpID);
       } else {
         // Remove the current opID from the todo stack to consider it processed.
         todo.pop();
 
-        const deleted =
-          (this.deletionsByInsertion[currentOpID.sessionID]?.[
-            currentOpID.txIndex
-          ]?.[currentOpID.changeIdx]?.length || 0) > 0;
+        const deleted = this.isDeleted(currentOpID);
 
         if (!deleted) {
           arr.push({
-            value: entry.value,
+            value: entry.change.value,
             madeAt: entry.madeAt,
             opID: currentOpID,
           });
@@ -628,4 +661,11 @@ export class RawCoList<
     this.deletionsByInsertion = listAfter.deletionsByInsertion;
     this._cachedEntries = undefined;
   }
+}
+
+function getSessionIndex(txID: TransactionID): SessionID {
+  if (txID.branch) {
+    return `${txID.sessionID}_branch_${txID.branch}`;
+  }
+  return txID.sessionID;
 }

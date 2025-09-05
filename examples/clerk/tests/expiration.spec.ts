@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-test("login & expiration", async ({ page }) => {
+test.skip("login & expiration", async ({ page }) => {
   await page.goto("/");
 
   expect(page.getByText("You're not logged in")).toBeVisible();

@@ -23,6 +23,7 @@ export function rawCoIDfromBytes(bytes: Uint8Array): RawCoID {
 export type TransactionID = {
   sessionID: SessionID;
   txIndex: number;
+  branch?: RawCoID;
 };
 
 export type AgentID = `sealer_z${string}/signer_z${string}`;

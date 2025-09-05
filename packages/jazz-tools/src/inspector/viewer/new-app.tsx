@@ -1,6 +1,5 @@
 import { CoID, LocalNode, RawAccount, RawCoValue } from "cojson";
 import { styled } from "goober";
-import { useJazzContext } from "jazz-tools/react-core";
 import React, { useState } from "react";
 import { Button } from "../ui/button.js";
 import { Input } from "../ui/input.js";
@@ -8,7 +7,6 @@ import { Breadcrumbs } from "./breadcrumbs.js";
 import { PageStack } from "./page-stack.js";
 import { usePagePath } from "./use-page-path.js";
 
-import { Account } from "jazz-tools";
 import { GlobalStyles } from "../ui/global-styles.js";
 import { Heading } from "../ui/heading.js";
 import { InspectorButton, type Position } from "./inpsector-button.js";
@@ -60,22 +58,6 @@ const InitialForm = styled("form")`
 const OrText = styled("p")`
   text-align: center;
 `;
-
-export function JazzInspector({ position = "right" }: { position?: Position }) {
-  const context = useJazzContext<Account>();
-  const localNode = context.node;
-  const me = "me" in context ? context.me : undefined;
-
-  if (process.env.NODE_ENV !== "development") return null;
-
-  return (
-    <JazzInspectorInternal
-      position={position}
-      localNode={localNode}
-      accountId={me?.$jazz.raw.id}
-    />
-  );
-}
 
 export function JazzInspectorInternal({
   position = "right",

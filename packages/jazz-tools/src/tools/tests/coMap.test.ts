@@ -1009,7 +1009,10 @@ describe("CoMap resolution", async () => {
     });
 
     assert(loadedPerson);
-    expect(loadedPerson.dog?.name).toEqual("Rex");
+
+    await waitFor(() => {
+      expect(loadedPerson.dog?.name).toEqual("Rex");
+    });
   });
 
   test("loading a remotely available map with skipRetry set to true", async () => {
@@ -1118,7 +1121,10 @@ describe("CoMap resolution", async () => {
 
     expect(resolved).toBe(true);
     assert(loadedPerson);
-    expect(loadedPerson.dog?.name).toEqual("Rex");
+
+    await waitFor(() => {
+      expect(loadedPerson.dog?.name).toEqual("Rex");
+    });
   });
 
   test("accessing the value refs", async () => {
@@ -1396,15 +1402,17 @@ describe("CoMap resolution", async () => {
 
     expect(spy).toHaveBeenCalledTimes(1);
 
-    expect(updates[0]?.dog?.name).toEqual("Rex");
+    await waitFor(() => {
+      expect(updates[0]?.dog?.name).toEqual("Rex");
+    });
 
     person.dog!.$jazz.set("name", "Fido");
 
-    await waitFor(() => expect(spy).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(spy).toHaveBeenCalledTimes(3));
 
     expect(updates[1]?.dog?.name).toEqual("Fido");
 
-    expect(spy).toHaveBeenCalledTimes(2);
+    expect(spy).toHaveBeenCalledTimes(3);
   });
 
   test("replacing nested object triggers updates", async () => {

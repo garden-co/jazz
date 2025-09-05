@@ -1,21 +1,9 @@
 "use client";
 
-import type { ClientOptions } from "better-auth";
 import { createAuthClient } from "better-auth/client";
-import type {
-  Account,
-  AccountClass,
-  AnyAccountSchema,
-  CoValueFromRaw,
-} from "jazz-tools";
-import {
-  type JazzProviderProps,
-  JazzReactProvider,
-  useAuthSecretStorage,
-  useJazzContext,
-} from "jazz-tools/react";
+import { useAuthSecretStorage, useJazzContext } from "jazz-tools/react-core";
 import { useEffect } from "react";
-import { type PropsWithChildren, createContext } from "react";
+import { type PropsWithChildren } from "react";
 import { jazzPluginClient } from "./client.js";
 
 type AuthClient = ReturnType<
@@ -23,8 +11,6 @@ type AuthClient = ReturnType<
     plugins: [ReturnType<typeof jazzPluginClient>];
   }>
 >;
-
-export const AuthContext = createContext<AuthClient | null>(null);
 
 /**
  * @param props.children - The children to render.
@@ -68,38 +54,3 @@ export function AuthProvider({
 
   return children;
 }
-
-/**
- * @param props - The props for the JazzReactProvider.
- * @param props.betterAuth - The options for the BetterAuth client.
- * @returns The JazzReactProvider with the BetterAuth plugin.
- *
- * @example
- * ```ts
- * <JazzReactProviderWithBetterAuth
- *  betterAuth={{
- *    baseURL: "http://localhost:3000",
- *  }}
- *  sync={{
- *    peer: "ws://localhost:4200",
- *  }}
- * >
- *   <App />
- * </JazzReactProviderWithBetterAuth>
- * ```
- */
-export const JazzReactProviderWithBetterAuth = <
-  S extends
-    | (AccountClass<Account> & CoValueFromRaw<Account>)
-    | AnyAccountSchema,
->(
-  props: { betterAuthClient: AuthClient } & JazzProviderProps<S>,
-) => {
-  return (
-    <JazzReactProvider {...props}>
-      <AuthProvider betterAuthClient={props.betterAuthClient}>
-        {props.children}
-      </AuthProvider>
-    </JazzReactProvider>
-  );
-};

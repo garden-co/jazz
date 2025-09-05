@@ -353,4 +353,50 @@ describe("startWorker integration", () => {
     await worker1.done();
     newServer.close();
   });
+
+  test("startWorker should be able to skip the inbox load", async () => {
+    const UserAccount = co.account({
+      root: co.map({}),
+      profile: co.profile(),
+    });
+
+    const syncServer = await setupSyncServer();
+    const syncServerUrl = `ws://${syncServer.host}:${syncServer.port}`;
+    const { accountID, agentSecret } = await createWorkerAccount({
+      name: "test-worker",
+      peer: syncServerUrl,
+    });
+
+    const { worker } = await startWorker({
+      AccountSchema: UserAccount,
+      syncServer: syncServerUrl,
+      accountID: accountID,
+      accountSecret: agentSecret,
+      skipInboxLoad: true,
+    });
+
+    const { profile } = await worker.$jazz.ensureLoaded({
+      resolve: { profile: true },
+    });
+
+    // Set the inbox manually, so that the inbox load would fail
+    profile.$jazz.set("inbox", "co_z3AUWm546svxm8xYEh7KnHqMpP2");
+    profile.$jazz.set(
+      "inboxInvite",
+      "https://cloud.jazz.tools/inbox/co_z3AUWm546svxm8xYEh7KnHqMpP2",
+    );
+
+    await worker.$jazz.waitForAllCoValuesSync();
+
+    let workerResult = await startWorker({
+      AccountSchema: UserAccount,
+      syncServer: syncServerUrl,
+      accountID: accountID,
+      accountSecret: agentSecret,
+      skipInboxLoad: true,
+    });
+
+    // Loads successfully even with an unavailable inbox
+    expect(workerResult.worker.$jazz.id).toBe(accountID);
+  });
 });

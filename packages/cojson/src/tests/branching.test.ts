@@ -4,7 +4,7 @@ import {
   setupTestNode,
   loadCoValueOrFail,
 } from "./testUtils.js";
-import { expectMap } from "../coValue.js";
+import { expectList, expectMap, expectPlainText } from "../coValue.js";
 
 let jazzCloud: ReturnType<typeof setupTestNode>;
 
@@ -159,6 +159,108 @@ describe("Branching Logic", () => {
       // Verify both changes are now in original map
       expect(originalMap.get("key1")).toBe("branchValue1");
       expect(originalMap.get("key2")).toBe("branchValue2");
+    });
+
+    test("should work with co.list", () => {
+      const node = createTestNode();
+      const group = node.createGroup();
+      const list = group.createList();
+
+      // Create a shopping list with grocery items
+      list.appendItems(["bread", "milk", "eggs"]);
+
+      // Remove milk from the list
+      list.delete(list.asArray().indexOf("milk"));
+
+      const branch = expectList(
+        list.core.createBranch("feature-branch", group.id).getCurrentContent(),
+      );
+
+      // Add more items to the branch
+      branch.appendItems(["cheese", "yogurt", "bananas"]);
+
+      // Remove yogurt from the branch
+      branch.delete(branch.asArray().indexOf("yogurt"));
+
+      const result = expectList(branch.core.mergeBranch().getCurrentContent());
+
+      expect(result.toJSON()).toEqual(["bread", "eggs", "cheese", "bananas"]);
+    });
+
+    test("should work with co.list when branching from different session", async () => {
+      const client = setupTestNode({
+        connected: true,
+      });
+      const group = client.node.createGroup();
+      const list = group.createList();
+
+      // Create a grocery list with initial items
+      list.appendItems(["bread", "milk"]);
+
+      const branch1 = expectList(
+        list.core.createBranch("feature-branch", group.id).getCurrentContent(),
+      );
+
+      // Add new items to first branch
+      branch1.appendItems(["cheese"]);
+
+      const branch2 = expectList(
+        list.core
+          .createBranch("feature-branch-2", group.id)
+          .getCurrentContent(),
+      );
+
+      // Add different items to second branch
+      branch2.appendItems(["apples", "oranges", "carrots"]);
+
+      const anotherSession = client.spawnNewSession();
+
+      const loadedBranch2 = await loadCoValueOrFail(
+        anotherSession.node,
+        branch2.id,
+      );
+
+      // Add more items and remove some existing ones
+      loadedBranch2.appendItems(["tomatoes", "lettuce", "cucumber"]);
+      loadedBranch2.delete(loadedBranch2.asArray().indexOf("lettuce"));
+      loadedBranch2.delete(loadedBranch2.asArray().indexOf("milk"));
+
+      loadedBranch2.core.mergeBranch();
+
+      await loadedBranch2.core.waitForSync();
+
+      branch1.core.mergeBranch();
+
+      expect(list.toJSON()).toEqual([
+        "bread",
+        "cheese",
+        "apples",
+        "oranges",
+        "carrots",
+        "tomatoes",
+        "cucumber",
+      ]);
+    });
+
+    test("should work with co.plainText when branching from different session", async () => {
+      const node = createTestNode();
+      const group = node.createGroup();
+      const plainText = group.createPlainText();
+
+      plainText.insertAfter(0, "hello");
+
+      const branch = expectPlainText(
+        plainText.core
+          .createBranch("feature-branch", group.id)
+          .getCurrentContent(),
+      );
+
+      // Add more items to the branch
+      branch.insertAfter("hello".length, "world");
+
+      branch.core.mergeBranch();
+
+      expect(plainText.toString()).toEqual("helloworld");
     });
   });
 

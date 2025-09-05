@@ -7,14 +7,19 @@ import {
 } from "jazz-tools/testing";
 import { assert, beforeEach, describe, expect, it, vi } from "vitest";
 import { jazzPluginClient } from "../client.js";
+import { emailOTPClient, genericOAuthClient } from "better-auth/client/plugins";
 
-describe("auth client", () => {
+describe("Better-Auth client plugin", () => {
   let account: Account;
   let jazzContextManager: TestJazzContextManager<Account>;
   let authSecretStorage: AuthSecretStorage;
   let authClient: ReturnType<
     typeof createAuthClient<{
-      plugins: ReturnType<typeof jazzPluginClient>[];
+      plugins: ReturnType<
+        | typeof jazzPluginClient
+        | typeof emailOTPClient
+        | typeof genericOAuthClient
+      >[];
     }>
   >;
   let customFetchImpl = vi.fn();
@@ -31,7 +36,7 @@ describe("auth client", () => {
 
     authClient = createAuthClient({
       baseURL: "http://localhost:3000",
-      plugins: [jazzPluginClient()],
+      plugins: [jazzPluginClient(), emailOTPClient(), genericOAuthClient()],
       fetchOptions: {
         customFetchImpl,
       },
@@ -245,5 +250,88 @@ describe("auth client", () => {
     expect(anonymousCredentials).not.toMatchObject(credentials!);
   });
 
-  it.todo("should logout from Better Auth after Jazz's log-out");
+  it("should send Jazz credentials using social login", async () => {
+    const credentials = await authSecretStorage.get();
+    assert(credentials, "Jazz credentials are not available");
+
+    customFetchImpl.mockResolvedValue(new Response(JSON.stringify({})));
+
+    // Sign up
+    await authClient.signIn.social({
+      provider: "github",
+    });
+
+    expect(customFetchImpl).toHaveBeenCalledTimes(1);
+    expect(customFetchImpl.mock.calls[0]![0].toString()).toBe(
+      "http://localhost:3000/api/auth/sign-in/social",
+    );
+
+    // Verify the credentials have been injected in the request body
+    expect(
+      customFetchImpl.mock.calls[0]![1].headers.get("x-jazz-auth")!,
+    ).toEqual(
+      JSON.stringify({
+        accountID: credentials!.accountID,
+        secretSeed: credentials!.secretSeed,
+        accountSecret: credentials!.accountSecret,
+      }),
+    );
+  });
+
+  it("should send Jazz credentials using oauth generic plugin", async () => {
+    const credentials = await authSecretStorage.get();
+    assert(credentials, "Jazz credentials are not available");
+
+    customFetchImpl.mockResolvedValue(new Response(JSON.stringify({})));
+
+    // Sign up
+    await authClient.signIn.oauth2({
+      providerId: "github",
+    });
+
+    expect(customFetchImpl).toHaveBeenCalledTimes(1);
+    expect(customFetchImpl.mock.calls[0]![0].toString()).toBe(
+      "http://localhost:3000/api/auth/sign-in/oauth2",
+    );
+
+    // Verify the credentials have been injected in the request body
+    expect(
+      customFetchImpl.mock.calls[0]![1].headers.get("x-jazz-auth")!,
+    ).toEqual(
+      JSON.stringify({
+        accountID: credentials!.accountID,
+        secretSeed: credentials!.secretSeed,
+        accountSecret: credentials!.accountSecret,
+      }),
+    );
+  });
+
+  it("should send Jazz credentials using email OTP", async () => {
+    const credentials = await authSecretStorage.get();
+    assert(credentials, "Jazz credentials are not available");
+
+    customFetchImpl.mockResolvedValue(new Response(JSON.stringify({})));
+
+    // Sign up
+    await authClient.emailOtp.sendVerificationOtp({
+      email: "test@jazz.dev",
+      type: "sign-in",
+    });
+
+    expect(customFetchImpl).toHaveBeenCalledTimes(1);
+    expect(customFetchImpl.mock.calls[0]![0].toString()).toBe(
+      "http://localhost:3000/api/auth/email-otp/send-verification-otp",
+    );
+
+    // Verify the credentials have been injected in the request body
+    expect(
+      customFetchImpl.mock.calls[0]![1].headers.get("x-jazz-auth")!,
+    ).toEqual(
+      JSON.stringify({
+        accountID: credentials!.accountID,
+        secretSeed: credentials!.secretSeed,
+        accountSecret: credentials!.accountSecret,
+      }),
+    );
+  });
 });
