@@ -30,6 +30,7 @@ import { SessionMap } from "./SessionMap.js";
 import {
   BranchPointerCommit,
   MergeCommit,
+  TxIDAlias,
   createBranch,
   getBranchId,
   getBranchSource,
@@ -820,6 +821,16 @@ export class CoValueCore {
       const branch = transaction.meta as BranchPointerCommit;
 
       this.branches.push(branch);
+    }
+
+    if (transaction.meta?.alias) {
+      const txIDAlias = transaction.meta as TxIDAlias;
+
+      transaction.txID = {
+        sessionID: txIDAlias.alias,
+        txIndex: txIDAlias.i,
+        branch: txIDAlias.b,
+      };
     }
   }
 

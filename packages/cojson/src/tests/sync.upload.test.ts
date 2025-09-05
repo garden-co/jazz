@@ -92,11 +92,11 @@ describe("client to server upload", () => {
         "server -> client | CONTENT Map header: true new: After: 0 New: 2",
         "client -> server | KNOWN Group sessions: header/5",
         "client -> server | KNOWN Map sessions: header/2",
-        "client -> server | LOAD Branch sessions: empty",
-        "server -> client | KNOWN Branch sessions: empty",
         "client -> server | CONTENT Branch header: true new: After: 0 New: 1",
+        "client -> server | CONTENT Map header: false new: After: 0 New: 1",
         "client -> server | CONTENT Branch header: false new: After: 1 New: 1",
         "server -> client | KNOWN Branch sessions: header/1",
+        "server -> client | KNOWN Map sessions: header/3",
         "server -> client | KNOWN Branch sessions: header/2",
       ]
     `);

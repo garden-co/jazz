@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, test } from "vitest";
+import { assert, beforeEach, describe, expect, test } from "vitest";
 import {
   createTestNode,
   setupTestNode,
@@ -242,9 +242,11 @@ describe("Branching Logic", () => {
       ]);
     });
 
-    test("should work with co.plainText when branching from different session", async () => {
-      const node = createTestNode();
-      const group = node.createGroup();
+    test("should work with co.plainText when merging the same branch twice on different sessions", async () => {
+      const client = setupTestNode({
+        connected: true,
+      });
+      const group = client.node.createGroup();
       const plainText = group.createPlainText();
 
       plainText.insertAfter(0, "hello");
@@ -255,12 +257,28 @@ describe("Branching Logic", () => {
           .getCurrentContent(),
       );
 
+      branch.insertAfter("hello".length, " world");
+
+      const anotherSession = client.spawnNewSession();
+
+      const loadedBranch = await loadCoValueOrFail(
+        anotherSession.node,
+        branch.id,
+      );
+      assert(loadedBranch);
+
+      anotherSession.connectToSyncServer().peerState.gracefulShutdown();
+
       // Add more items to the branch
-      branch.insertAfter("hello".length, "world");
+      loadedBranch.insertAfter("hello world".length, " people");
 
       branch.core.mergeBranch();
+      const loadedBranchMergeResult = loadedBranch.core.mergeBranch();
 
-      expect(plainText.toString()).toEqual("helloworld");
+      anotherSession.connectToSyncServer();
+      await loadedBranchMergeResult.waitForSync();
+
+      expect(plainText.toString()).toEqual("hello world people");
     });
   });
 
