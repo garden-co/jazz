@@ -24,7 +24,6 @@ import {
   Signature,
   SignerID,
   SignerSecret,
-  StreamingHash,
   textDecoder,
   textEncoder,
 } from "./crypto.js";
