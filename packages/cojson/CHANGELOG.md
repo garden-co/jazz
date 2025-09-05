@@ -1,5 +1,12 @@
 # cojson
 
+## 0.18.7
+
+### Patch Changes
+
+- c2d8bf7: Avoid greedily sending covalue dependencies to server peers
+  - cojson-core-wasm@0.18.7
+
 ## 0.18.6
 
 ### Patch Changes
