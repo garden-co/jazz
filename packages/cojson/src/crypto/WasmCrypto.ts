@@ -218,11 +218,16 @@ class SessionLogAdapter {
     newSignature: Signature,
     skipVerify: boolean,
   ): void {
-    this.sessionLog.tryAdd(
-      transactions.map((tx) => stableStringify(tx)),
-      newSignature,
-      skipVerify,
-    );
+    try {
+      this.sessionLog.tryAdd(
+        transactions.map((tx) => stableStringify(tx)),
+        newSignature,
+        skipVerify,
+      );
+    } catch (error) {
+      // Re-throw with a more descriptive error message
+      throw new Error(`Signature verification failed: ${error}`);
+    }
   }
 
   addNewPrivateTransaction(
