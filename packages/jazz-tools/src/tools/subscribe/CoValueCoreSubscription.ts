@@ -78,7 +78,8 @@ export class CoValueCoreSubscription {
       // Branch is available, subscribe to it
       this.subscribe(branch.getCurrentContent());
       return;
-    } else if (!this.source.branches.some((b) => b.branchId === branch.id)) {
+      // If the branch hasn't been created, we create it directly so we can syncronously subscribe to it
+    } else if (!this.source.hasBranch(this.branchName, this.branchOwnerId)) {
       this.source.createBranch(this.branchName, this.branchOwnerId);
       this.subscribe(branch.getCurrentContent());
     } else {

@@ -374,8 +374,8 @@ describe("CoList Branching", async () => {
       branch.$jazz.unstable_merge();
 
       expect(originalList[0]).toBe("Buy organic groceries");
-      expect(originalList[1]).toBe("Walk the cat");
-      expect(originalList[2]).toBe("Walk the hamster");
+      expect(originalList[1]).toBe("Walk the hamster");
+      expect(originalList[2]).toBe("Walk the cat");
       expect(originalList[3]).toBe("Finish project");
       expect(originalList[4]).toBe("Call mom");
     });

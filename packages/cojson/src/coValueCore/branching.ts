@@ -75,10 +75,25 @@ export type BranchCommit = {
 };
 
 export type BranchPointerCommit = {
-  branchId: RawCoID;
-  name: string;
+  branch: string;
   ownerId?: RawCoID;
 };
+
+export function getBranchOwnerId(coValue: CoValueCore) {
+  if (!coValue.verified) {
+    throw new Error(
+      "CoValueCore: getBranchOwnerId called on coValue without verified state",
+    );
+  }
+
+  const header = coValue.verified.header;
+
+  if (header.ruleset.type !== "ownedByGroup") {
+    return undefined;
+  }
+
+  return header.ruleset.group;
+}
 
 /**
  * Given a coValue, a branch name and an owner id, creates a new branch CoValue
@@ -94,21 +109,16 @@ export function createBranch(
     );
   }
 
-  if (!ownerId) {
-    const header = coValue.verified.header;
+  const branchOwnerId = ownerId ?? getBranchOwnerId(coValue);
 
-    // Group and account coValues can't have branches, so we return the source coValue
-    if (header.ruleset.type !== "ownedByGroup") {
-      return coValue;
-    }
-
-    ownerId = header.ruleset.group;
+  if (!branchOwnerId) {
+    return coValue;
   }
 
   const header = getBranchHeader({
     type: coValue.verified.header.type,
     branchName: name,
-    ownerId,
+    ownerId: branchOwnerId,
     sourceId: coValue.id,
   });
 
@@ -121,8 +131,7 @@ export function createBranch(
 
   // Create a branch pointer, to identify that we created a branch
   coValue.makeTransaction([], "private", {
-    branchId: branch.id,
-    name,
+    branch: name,
     ownerId,
   } satisfies BranchPointerCommit);
 
@@ -154,19 +163,18 @@ export function getBranchSource(
   return source;
 }
 
-export type MergeCommit = {
-  // The point where the branch was merged
-  merge: CoValueKnownState["sessions"];
-  // The id of the branch that was merged
-  id: RawCoID;
-  // The number of transactions that were merged, will be used in the future to handle the edits history properly
-  count: number;
+export type MergedTransactionCommit = {
+  i: number;
+  s?: SessionID;
+  b?: RawCoID;
+  mergeEnd?: 1;
 };
 
-export type TxIDAlias = {
-  alias: SessionID;
-  i: number;
+export type MergeStartCommit = {
+  merge: CoValueKnownState["sessions"];
   b: RawCoID;
+  s: SessionID;
+  i: number;
 };
 
 /**
@@ -198,8 +206,8 @@ export function mergeBranch(branch: CoValueCore): CoValueCore {
   // Look for previous merge commits, to see which transactions needs to be merged
   // Done mostly for performance reasons, as we could merge all the transactions every time and nothing would change
   const mergedTransactions = target.mergeCommits.reduce(
-    (acc, { commit }) => {
-      if (commit.id !== branch.id) {
+    (acc, commit) => {
+      if (commit.b !== branch.id) {
         return acc;
       }
 
@@ -229,42 +237,38 @@ export function mergeBranch(branch: CoValueCore): CoValueCore {
     return target;
   }
 
-  // Create a merge commit to identify the merge point
-  target.makeTransaction([], "private", {
-    merge: { ...branch.knownState().sessions },
-    id: branch.id,
-    count: branchValidTransactions.length,
-  } satisfies MergeCommit);
+  // We do track in the meta information the original txID to make sure that
+  // the CoList opid still point to the correct transaction
+  // To reduce the cost of the meta we skip the repeated information
+  let lastSessionId: string | undefined = undefined;
+  let lastBranchId: string | undefined = undefined;
+  branchValidTransactions.forEach((tx, i) => {
+    const mergeMeta: MergedTransactionCommit & Partial<MergeStartCommit> = {
+      i: tx.txID.txIndex,
+    };
 
-  const currentSessionID = target.node.currentSessionID;
-
-  if (
-    target.verified.header.type === "colist" ||
-    target.verified.header.type === "coplaintext"
-  ) {
-    const mapping: Record<`${SessionID}:${number}`, number> = {};
-
-    const session = target.verified.sessions.get(currentSessionID);
-    let txIdx = session ? session.transactions.length : 0;
-
-    // Create a mapping from the branch transactions to the target transactions
-    for (const { txID } of branchValidTransactions) {
-      mapping[`${txID.sessionID}:${txID.txIndex}`] = txIdx;
-      txIdx++;
+    if (i === 0) {
+      mergeMeta.merge = branch.knownState().sessions;
+      mergeMeta.b = branch.id;
+      mergeMeta.s = tx.txID.sessionID;
     }
 
-    for (const { tx, changes, txID } of branchValidTransactions) {
-      target.makeTransaction(changes, tx.privacy, {
-        alias: txID.sessionID,
-        i: txID.txIndex,
-        b: txID.branch,
-      });
+    if (i === branchValidTransactions.length - 1) {
+      mergeMeta.mergeEnd = 1;
     }
-  } else {
-    for (const { tx, changes } of branchValidTransactions) {
-      target.makeTransaction(changes, tx.privacy);
+
+    if (lastSessionId !== tx.txID.sessionID) {
+      mergeMeta.s = tx.txID.sessionID;
     }
-  }
+
+    if (lastBranchId !== tx.txID.branch) {
+      mergeMeta.b = branch.id;
+    }
+
+    target.makeTransaction(tx.changes, tx.tx.privacy, mergeMeta, tx.madeAt);
+    lastSessionId = tx.txID.sessionID;
+    lastBranchId = tx.txID.branch;
+  });
 
   return target;
 }

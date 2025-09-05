@@ -423,21 +423,22 @@ describe("CoMap Branching", async () => {
         group,
       );
 
-      // User 1 creates a branch and makes changes
       const branch = await Person.load(originalPerson.$jazz.id, {
         unstable_branch: { name: "conflict-branch" },
       });
 
       assert(branch);
 
+      // User 1 creates a branch and makes changes
       branch.$jazz.applyDiff({
         name: "John Smith",
         age: 31,
       });
 
+      // Wait some time to make the output deterministic and not based on the random sessionIDs
       await new Promise((resolve) => setTimeout(resolve, 10));
 
-      // Apply conflicting changes to the main branch
+      // The same field is modified after the branch on main
       originalPerson.$jazz.applyDiff({
         email: "john.doe@company.com",
         age: 32,
@@ -450,8 +451,8 @@ describe("CoMap Branching", async () => {
 
       expect(originalPerson.name).toBe("John Smith");
       expect(originalPerson.email).toBe("john.doe@company.com");
-      // Age conflict: branch had 31, main had 32 - last writer wins & merged changes madeAt value is the moment of the merge
-      expect(originalPerson.age).toBe(31);
+      // Age conflict: branch had 31, main had 32 - last writer wins so main wins
+      expect(originalPerson.age).toBe(32);
     });
 
     test("the branch always starts from the same point", async () => {

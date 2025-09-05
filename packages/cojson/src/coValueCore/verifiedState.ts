@@ -118,12 +118,14 @@ export class VerifiedState {
     signerAgent: ControlledAccountOrAgent,
     changes: JsonValue[],
     meta: JsonObject | undefined,
+    madeAt: number,
   ) {
     const result = this.sessions.makeNewTrustingTransaction(
       sessionID,
       signerAgent,
       changes,
       meta,
+      madeAt,
     );
 
     this._cachedNewContentSinceEmpty = undefined;
@@ -139,6 +141,7 @@ export class VerifiedState {
     keyID: KeyID,
     keySecret: KeySecret,
     meta: JsonObject | undefined,
+    madeAt: number,
   ) {
     const result = this.sessions.makeNewPrivateTransaction(
       sessionID,
@@ -147,6 +150,7 @@ export class VerifiedState {
       keyID,
       keySecret,
       meta,
+      madeAt,
     );
 
     this._cachedNewContentSinceEmpty = undefined;

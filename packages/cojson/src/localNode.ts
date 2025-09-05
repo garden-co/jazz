@@ -479,7 +479,7 @@ export class LocalNode {
       return branch.getCurrentContent() as T;
     }
 
-    if (!source.branches.some((b) => b.branchId === branch.id)) {
+    if (!source.hasBranch(branchName, branchOwnerID)) {
       return source
         .createBranch(branchName, branchOwnerID)
         .getCurrentContent() as T;

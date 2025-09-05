@@ -220,6 +220,9 @@ describe("Branching Logic", () => {
         branch2.id,
       );
 
+      // Wait some time to make the output deterministic and not based on the random sessionIDs
+      await new Promise((resolve) => setTimeout(resolve, 2));
+
       // Add more items and remove some existing ones
       loadedBranch2.appendItems(["tomatoes", "lettuce", "cucumber"]);
       loadedBranch2.delete(loadedBranch2.asArray().indexOf("lettuce"));
@@ -233,12 +236,12 @@ describe("Branching Logic", () => {
 
       expect(list.toJSON()).toEqual([
         "bread",
-        "cheese",
         "apples",
         "oranges",
         "carrots",
         "tomatoes",
         "cucumber",
+        "cheese",
       ]);
     });
 
@@ -543,6 +546,72 @@ describe("Branching Logic", () => {
       // Verify both branches now contain data from the other
       expect(bobBranch.get("alice")).toBe(true);
       expect(aliceBranch.get("bob")).toBe(true);
+    });
+  });
+
+  describe("hasBranch", () => {
+    test("should work when the branch owner is the source owner", () => {
+      const client = setupTestNode({
+        connected: true,
+      });
+      const group = client.node.createGroup();
+      const map = group.createMap();
+
+      map.set("key", "value");
+
+      const branch = map.core.createBranch("feature-branch", group.id);
+
+      expect(map.core.hasBranch("feature-branch")).toBe(true);
+      expect(map.core.hasBranch("feature-branch", group.id)).toBe(true);
+      expect(branch.hasBranch("feature-branch")).toBe(false);
+    });
+
+    test("should work when the branch onwer is implicit", () => {
+      const client = setupTestNode({
+        connected: true,
+      });
+      const group = client.node.createGroup();
+      const map = group.createMap();
+
+      map.set("key", "value");
+
+      const branch = map.core.createBranch("feature-branch");
+
+      expect(map.core.hasBranch("feature-branch")).toBe(true);
+      expect(map.core.hasBranch("feature-branch", group.id)).toBe(true);
+      expect(branch.hasBranch("feature-branch")).toBe(false);
+    });
+
+    test("should return false for non-existent branch name", () => {
+      const client = setupTestNode({
+        connected: true,
+      });
+      const group = client.node.createGroup();
+      const map = group.createMap();
+
+      map.set("key", "value");
+
+      expect(map.core.hasBranch("non-existent-branch")).toBe(false);
+    });
+
+    test("should work with explicit ownerId parameter", () => {
+      const client = setupTestNode({
+        connected: true,
+      });
+      const group = client.node.createGroup();
+      const map = group.createMap();
+
+      map.set("key", "value");
+
+      const differentGroup = client.node.createGroup();
+
+      map.core.createBranch("feature-branch", differentGroup.id);
+
+      // Test with explicit ownerId
+      expect(map.core.hasBranch("feature-branch", differentGroup.id)).toBe(
+        true,
+      );
+      expect(map.core.hasBranch("feature-branch")).toBe(false);
     });
   });
 });
