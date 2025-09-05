@@ -211,6 +211,6 @@ describe("WasmCrypto", () => {
         "signature_z12345678",
         false,
       ),
-    ).toThrow(expect.stringContaining("Signature verification failed"));
+    ).toThrow(/Signature verification failed/);
   });
 });
