@@ -1,7 +1,7 @@
 {
   "name": "jazz-react-passkey-auth-starter",
   "private": true,
-  "version": "0.0.165",
+  "version": "0.0.166",
   "type": "module",
   "scripts": {
     "dev": "vite",
