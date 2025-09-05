@@ -366,7 +366,7 @@ export function MyFestival() {
 </script>
 
 <ul>
-  {#each me.current?.root?.myFestival || [] as band}
+  {#each me.current?.root.myFestival || [] as band}
     <li>{band?.name}</li>
   {/each}
 </ul>
