@@ -40,6 +40,7 @@
     "estree-util-value-to-estree": "^3.3.2",
     "github-slugger": "^2.0.0",
     "jazz-tools": "link:../../packages/jazz-tools",
+    "quint-ui": "link:../../packages/quint-ui",
     "lucide-react": "^0.436.0",
     "mdast-util-from-markdown": "^2.0.0",
     "mdast-util-mdx": "^3.0.0",

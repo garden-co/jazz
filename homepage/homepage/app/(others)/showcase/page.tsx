@@ -1,5 +1,6 @@
 import { products } from "@/content/showcase";
 import { HeroHeader } from "@garden-co/design-system/src/components/molecules/HeroHeader";
+import { ContactForm } from "@/components/ContactForm";
 import type { Metadata } from "next";
 import Image from "next/image";
 import Link from "next/link";
@@ -46,6 +47,11 @@ export default function Page() {
             </div>
           </Link>
         ))}
+      </div>
+
+      {/* Contact Form Section */}
+      <div className="py-16 bg-stone-50 dark:bg-stone-900/50 rounded-lg">
+        <ContactForm />
       </div>
     </div>
   );
