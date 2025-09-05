@@ -15,14 +15,14 @@ export function QuickSearch() {
 
   return (
     <Button
-      className="group xl:min-w-48 md:mr-5"
+      className="group xl:min-w-48 "
       intent="muted"
       variant="outline"
       onClick={() => setOpen((open) => !open)}
     >
       <Icon name="search" size="xs" intent="default" />
       <span className="font-normal flex-1 text-left text-sm xl:not-sr-only">
-        Search docs
+        Search<span className="md:hidden xl:inline"> docs</span>
       </span>
       <kbd className="hidden gap-0.5 xl:text-sm lg:inline-flex">
         <kbd className="font-sans">{isMac ? "⌘" : "Ctrl"}</kbd>

@@ -3,6 +3,7 @@ export const metadata = {
 };
 
 import { CodeGroup } from "@/components/forMdx";
+import { Alert } from "@garden-co/design-system/src/components/atoms/Alert";
 
 # create-jazz-app
 
@@ -17,9 +18,13 @@ Create a new Jazz app from a starter template in seconds:
 
 <CodeGroup>
 ```bash
-npx create-jazz-app@latest --api-key you@example.com
+npx create-jazz-app@latest --api-key YOUR_API_KEY
 ```
 </CodeGroup>
+
+<Alert className="mt-4 flex gap-2 items-center" variant="info">
+**Tip**: Get a free API key from [dashboard.jazz.tools](https://dashboard.jazz.tools), or use your email as a temporary key.
+</Alert>
 
 This launches an interactive CLI that guides you through selecting:
 - Pre-configured frameworks and authentication methods (See [Available Starters](#available-starters))
@@ -34,13 +39,13 @@ If you know what you want, you can specify options directly from the command lin
 <CodeGroup>
 ```bash
 # Basic usage with project name
-npx create-jazz-app@latest my-app --framework react --api-key you@example.com
+npx create-jazz-app@latest my-app --framework react --api-key YOUR_API_KEY
 
 # Specify a starter template
-npx create-jazz-app@latest my-app --starter react-passkey-auth --api-key you@example.com
+npx create-jazz-app@latest my-app --starter react-passkey-auth --api-key YOUR_API_KEY
 
 # Specify example app
-npx create-jazz-app@latest my-app --example chat --api-key you@example.com
+npx create-jazz-app@latest my-app --example chat --api-key YOUR_API_KEY
 ```
 </CodeGroup>
 
