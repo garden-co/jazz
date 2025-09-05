@@ -1,0 +1,188 @@
+import { CodeGroup } from "@/components/forMdx";
+import { Alert } from "@garden-co/design-system/src/components/atoms/Alert";
+
+# Jazz database adapter for Better Auth
+
+The package `jazz-tools/better-auth/database-adapter` is a database adapter for Better Auth based on Jazz. Better Auth's data will be stored in CoValues encrypted by [Server Worker](../server-side/setup), synced on our distributed [cloud infrastructure](/cloud).
+
+## Getting started
+
+1. Install and configure [Better Auth](https://www.better-auth.com/docs/installation)
+2. Install Jazz package `pnpm jazz-tools`
+3. Generate a [worker's credentials](/docs/react/server-side/setup#generating-credentials)
+
+  <CodeGroup>
+  ```bash
+  npx jazz-run account create --name "Better Auth Server Worker"
+  ```
+  </CodeGroup>
+
+  <Alert variant="info" className="mt-4" title="Security">
+    Although all workers have the same capabilities, we recommend to use different workers for different purposes. As it will store user's credentials, the best practice is to keep it isolated from other workers.
+  </Alert>
+
+4. Setup the database adapter on Better Auth server instance.
+
+  <CodeGroup>
+  ```typescript
+  import { betterAuth } from "better-auth";
+  import { JazzBetterAuthDatabaseAdapter } from "jazz-tools/better-auth/database-adapter";
+
+  const auth = betterAuth({
+    database: JazzBetterAuthDatabaseAdapter({
+      syncServer: "wss://cloud.jazz.tools/?key=you@example.com",
+      accountID: "auth-worker-account-id",
+      accountSecret: "your-worker-account-secret",
+    }),
+
+    // other Better Auth settings
+  });
+  ```
+  </CodeGroup>
+
+5. You're ready to use Better Auth features without managing any database by yourself!
+
+
+## How it works
+
+The adapter automatically creates Jazz schemas from Better Auth's database schema, even if not all the SQL-like features are supported yet. The database is defined as a CoMap with two properties: `group` and `tables`. The first one contains the master Group that will own all the tables; the second one is a CoMap with table names as keys and data as values.
+
+Internally it uses specialized repository for known models like `User`, `Session` and `Verification`, to add indexes and boost performances on common operations.
+
+
+## How to access the database
+
+The easiest way to access the database is using the same Server Worker's credentials and access the table we're looking for.
+
+<CodeGroup>
+```typescript
+import { startWorker } from 'jazz-tools/worker';
+import { co, z } from 'jazz-tools';
+
+
+const worker1 = await startWorker({
+  syncServer: "wss://cloud.jazz.tools/?key=you@example.com",
+  accountID: process.env.WORKER_ACCOUNT_ID,
+  accountSecret: process.env.WORKER_ACCOUNT_SECRET,
+});
+
+const DatabaseRoot = co.map({
+  tables: co.map({
+    user: co.list(co.map({
+      name: z.string(),
+      email: z.string(),
+    }))
+  })
+});
+
+const db = await DatabaseRoot.loadUnique("better-auth-root", process.env.WORKER_ACCOUNT_ID, {
+  resolve: {
+    tables: {
+      user: {
+        $each: true,
+      }
+    }
+  }
+});
+
+console.log(db.tables.user);
+```
+</CodeGroup>
+
+
+## Rotating the worker's credentials
+
+If you need to change the worker, you can create a new one and add it to the master Group.
+
+<CodeGroup>
+```typescript
+import { Account } from 'jazz-tools';
+import { startWorker } from 'jazz-tools/worker';
+
+// Start the main worker and fetch database reference
+const { worker } = await startWorker({
+  syncServer: "wss://cloud.jazz.tools/?key=you@example.com",
+  accountID: process.env.WORKER_ACCOUNT_ID,
+  accountSecret: process.env.WORKER_ACCOUNT_SECRET,
+});
+
+const DatabaseRoot = co.map({
+  group: Group,
+  tables: co.map({}),
+});
+
+const db = await DatabaseRoot.loadUnique("better-auth-root", process.env.WORKER_ACCOUNT_ID, {
+  loadAs: worker,
+  resolve: {
+    group: true,
+    tables: true,
+  },
+});
+
+// Load the new worker account
+const newWorkerRef = await Account.load(process.env.NEW_WORKER_ACCOUNT_ID);
+
+// Add the new worker to the group as admin
+db.group.$jazz.addMember(newWorkerRef, "admin");
+
+await db.group.$jazz.waitForSync();
+
+// Now the new worker can access the tables
+const { worker: newWorker } = await startWorker({
+  syncServer: "wss://cloud.jazz.tools/?key=you@example.com",
+  accountID: process.env.NEW_WORKER_ACCOUNT_ID,
+  accountSecret: process.env.NEW_WORKER_ACCOUNT_SECRET,
+});
+
+// Create the database root on the new worker with the same group's and tables' references
+await DatabaseRoot.upsertUnique({
+  unique: "better-auth-root",
+  value: {
+    group: db.group,
+    tables: db.tables,
+  },
+  owner: newWorker,
+});
+
+// Now the new worker can be used for the Database Adapter.
+
+// Don't forget to remove the old worker from the group
+db.group.$jazz.removeMember(worker);
+```
+</CodeGroup>
+
+
+<Alert variant="warning" className="mt-4" title="Security">
+  Rotating keys means that data stored from that point forward will be encrypted with the new key, but the old worker's secret can still read data written up until the rotation. Read more about encryption in [Server Worker](../resources/encryption).
+</Alert>
+
+## Compatibility
+
+The adapter generates Jazz schemas reading from Better Auth's database schema, so it should be compatible with any plugin / user's code that introduces new tables or extends the existing ones.
+
+So far, the adapter has been tested with **Better Auth v1.3.7** with the following plugins:
+
+<table>
+  <thead>
+    <tr>
+      <th>Plugin/Feature</th>
+      <th>Compatibility</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><a href="https://www.better-auth.com/docs/authentication/email-password">Email &amp; Password auth</a></td>
+      <td>✅</td>
+    </tr>
+    <tr>
+      <td><a href="https://www.better-auth.com/docs/authentication/github">Social Provider auth</a></td>
+      <td>✅</td>
+    </tr>
+    <tr>
+      <td><a href="https://www.better-auth.com/docs/plugins/email-otp">Email OTP</a></td>
+      <td>✅</td>
+    </tr>
+  </tbody>
+</table>
+
+More features and plugins will be tested in the future.

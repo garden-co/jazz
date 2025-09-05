@@ -163,6 +163,11 @@
       "@jazz-tools/source": "./src/better-auth/auth/server.ts",
       "types": "./dist/better-auth/auth/server.d.ts",
       "default": "./dist/better-auth/auth/server.js"
+    },
+    "./better-auth/database-adapter": {
+      "@jazz-tools/source": "./src/better-auth/database-adapter/index.ts",
+      "types": "./dist/better-auth/database-adapter/index.d.ts",
+      "default": "./dist/better-auth/database-adapter/index.js"
     }
   },
   "type": "module",
@@ -222,7 +227,7 @@
     "@bam.tech/react-native-image-resizer": "*",
     "@op-engineering/op-sqlite": "*",
     "@react-native-community/netinfo": "*",
-    "better-auth": "^1.3.0",
+    "better-auth": "^1.3.2",
     "expo-file-system": "*",
     "expo-secure-store": "*",
     "expo-sqlite": "*",
