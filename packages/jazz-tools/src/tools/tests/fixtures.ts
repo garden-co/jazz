@@ -1114,7 +1114,7 @@ export const testWordlist = [
   "mention",
   "menu",
   "mercy",
-  "unstable_merge",
+  "merge",
   "merit",
   "merry",
   "mesh",
