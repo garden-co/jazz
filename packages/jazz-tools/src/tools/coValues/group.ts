@@ -1,10 +1,11 @@
-import type {
-  AccountRole,
-  AgentID,
-  Everyone,
-  RawAccountID,
+import {
+  RawAccount,
   RawGroup,
-  Role,
+  type AccountRole,
+  type AgentID,
+  type Everyone,
+  type RawAccountID,
+  type Role,
 } from "cojson";
 import {
   CoValue,
@@ -35,6 +36,7 @@ import {
   subscribeToCoValueWithoutMe,
   subscribeToExistingCoValue,
 } from "../internal.js";
+import { isCoValueId } from "../lib/id.js";
 
 type GroupMember = {
   id: string;
@@ -120,6 +122,24 @@ export class Group extends CoValueBase implements CoValue {
         member === "everyone" ? member : member.$jazz.raw,
         role,
       );
+    }
+  }
+
+  async addMemberAccountById(memberId: string, role: AccountRole) {
+    if (!isCoValueId(memberId)) throw new Error("Invalid member ID");
+
+    const coValueCore = await this.$jazz.localNode.loadCoValueCore(memberId);
+
+    if (!coValueCore.isAvailable()) {
+      throw new Error("Member not found");
+    }
+
+    const content = coValueCore.getCurrentContent();
+
+    if (content instanceof RawAccount) {
+      this.$jazz.raw.addMember(content, role);
+    } else {
+      throw new Error("The member is not an account");
     }
   }
 

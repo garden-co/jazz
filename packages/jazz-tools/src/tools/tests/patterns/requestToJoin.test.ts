@@ -1,6 +1,10 @@
 import { assert, describe, expect, test } from "vitest";
 import { Account, Group, co, z } from "../../exports";
-import { createJazzTestAccount, linkAccounts } from "../../testing";
+import {
+  createJazzTestAccount,
+  linkAccounts,
+  setupJazzTestSync,
+} from "../../testing";
 
 const RequestToJoin = co.map({
   account: Account,
@@ -24,16 +28,20 @@ const Organization = co.map({
 });
 
 async function setup() {
+  await setupJazzTestSync();
+
   const admin1 = await createJazzTestAccount();
   const admin2 = await createJazzTestAccount();
   const user1 = await createJazzTestAccount();
   const user2 = await createJazzTestAccount();
 
-  await linkAccounts(admin1, admin2);
-  await linkAccounts(admin1, user1);
-  await linkAccounts(admin1, user2);
-  await linkAccounts(admin2, user1);
-  await linkAccounts(admin2, user2);
+  // TODO: with this setting the waitForAllCoValuesSync gets stuck
+  // https://github.com/garden-co/jazz/issues/2874
+  // await linkAccounts(admin1, admin2);
+  // await linkAccounts(admin1, user1);
+  // await linkAccounts(admin1, user2);
+  // await linkAccounts(admin2, user1);
+  // await linkAccounts(admin2, user2);
 
   // The organization info are public
   const adminsGroup = Group.create(admin1);
