@@ -7,6 +7,9 @@ docsTmp
 coverage
 .direnv
 
+# C++
+compile_commands.json
+
 # Typescript
 **/*.tsbuildinfo
 

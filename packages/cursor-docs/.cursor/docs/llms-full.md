@@ -771,7 +771,7 @@ declare module "jazz-expo" {
   - `Account` (default)
 - `CryptoProvider`
   - `PureJSCrypto` (default) - Pure JavaScript crypto provider
-  - `RNQuickCrypto` - C++ accelerated crypto provider
+  - `RNCrypto` - Rust-accelerated crypto provider
 
 ## Authentication in the Provider
 
@@ -883,7 +883,7 @@ declare module "jazz-react-native" {
   - `Account` (default)
 - `CryptoProvider`
   - `PureJSCrypto` (default) - Pure JavaScript crypto provider
-  - `RNQuickCrypto` - C++ accelerated crypto provider
+  - `RNCrypto` - Rust-accelerated crypto provider
 
 ## Authentication in the Provider
 

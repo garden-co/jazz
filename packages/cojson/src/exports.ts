@@ -5,10 +5,16 @@ import {
   idforHeader,
   type AvailableCoValueCore,
 } from "./coValueCore/coValueCore.js";
-import { CoValueUniqueness } from "./coValueCore/verifiedState.js";
+import {
+  CoValueUniqueness,
+  Transaction,
+  PrivateTransaction,
+  TrustingTransaction,
+} from "./coValueCore/verifiedState.js";
 import {
   ControlledAccount,
   ControlledAgent,
+  ControlledAccountOrAgent,
   RawAccount,
   RawProfile,
   accountHeaderForInitialAgentSecret,
@@ -27,9 +33,13 @@ import { EVERYONE, RawGroup } from "./coValues/group.js";
 import type { Everyone } from "./coValues/group.js";
 import {
   CryptoProvider,
+  SessionLogImpl,
+  SignerID,
   StreamingHash,
   secretSeedLength,
   shortHashLength,
+  KeySecret,
+  Signature,
 } from "./crypto/crypto.js";
 import {
   getGroupDependentKey,
@@ -39,6 +49,7 @@ import {
   rawCoIDtoBytes,
 } from "./ids.js";
 import { Stringified, parseJSON, stableStringify } from "./jsonStringify.js";
+import { PureJSCrypto } from "./crypto/PureJSCrypto.js";
 import { LocalNode } from "./localNode.js";
 import type { AccountRole, Role } from "./permissions.js";
 import { ConnectedPeerChannel, connectedPeers } from "./streamUtils.js";
@@ -154,6 +165,10 @@ export {
   AgentSecret,
   InviteSecret,
   CryptoProvider,
+  SessionLogImpl,
+  SignerID,
+  KeySecret,
+  Signature,
   SyncMessage,
   isRawCoID,
   emptyKnownState,
@@ -163,6 +178,12 @@ export {
   LogLevel,
   base64URLtoBytes,
   bytesToBase64url,
+  stableStringify,
+  PureJSCrypto,
+  Transaction,
+  PrivateTransaction,
+  TrustingTransaction,
+  ControlledAccountOrAgent,
 };
 
 export type {
@@ -194,8 +215,11 @@ export namespace CojsonInternalTypes {
   export type SessionNewContent = import("./sync.js").SessionNewContent;
   export type CoValueHeader = import("./coValueCore/verifiedState.js").CoValueHeader;
   export type Transaction = import("./coValueCore/verifiedState.js").Transaction;
+  export type PrivateTransaction = import("./coValueCore/verifiedState.js").PrivateTransaction;
+  export type TrustingTransaction = import("./coValueCore/verifiedState.js").TrustingTransaction;
   export type TransactionID = import("./ids.js").TransactionID;
   export type Signature = import("./crypto/crypto.js").Signature;
+  export type ControlledAccountOrAgent = import("./coValues/account.js").ControlledAccountOrAgent;
   export type RawCoID = import("./ids.js").RawCoID;
   export type ProfileShape = import("./coValues/account.js").ProfileShape;
   export type SealerSecret = import("./crypto/crypto.js").SealerSecret;
