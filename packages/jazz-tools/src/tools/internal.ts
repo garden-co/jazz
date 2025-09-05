@@ -17,6 +17,8 @@ export * from "./coValues/coPlainText.js";
 export * from "./coValues/coRichText.js";
 export * from "./coValues/schemaUnion.js";
 
+export type * from "./subscribe/types.js";
+
 export * from "./coValues/deepLoading.js";
 export * from "./implementation/anonymousJazzAgent.js";
 export * from "./implementation/activeAccountContext.js";

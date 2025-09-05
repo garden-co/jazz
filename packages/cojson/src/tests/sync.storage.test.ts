@@ -238,7 +238,7 @@ describe("client with storage syncs with server", () => {
       [
         "client -> storage | LOAD Branch sessions: empty",
         "storage -> client | CONTENT Group header: true new: After: 0 New: 3",
-        "storage -> client | CONTENT Map header: true new: After: 0 New: 2",
+        "storage -> client | CONTENT Map header: true new: After: 0 New: 3",
         "storage -> client | CONTENT Branch header: true new: After: 0 New: 2",
       ]
     `);

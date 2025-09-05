@@ -12,6 +12,7 @@ import {
   AnyAccountSchema,
   CoValue,
   CoValueClassOrSchema,
+  Group,
   InboxSender,
   InstanceOfSchema,
   JazzContextManager,
@@ -21,10 +22,10 @@ import {
   ResolveQueryStrict,
   SubscriptionScope,
   coValueClassFromCoValueClassOrSchema,
+  type BranchDefinition,
 } from "jazz-tools";
 import { JazzContext, JazzContextManagerContext } from "./provider.js";
 import { getCurrentAccountFromContextManager } from "./utils.js";
-import { TypeSym } from "../tools/internal.js";
 
 export function useJazzContext<Acc extends Account>() {
   const value = useContext(JazzContext) as JazzContextType<Acc>;
@@ -88,12 +89,22 @@ function useCoValueSubscription<
   id: string | undefined | null,
   options?: {
     resolve?: ResolveQueryStrict<S, R>;
+    unstable_branch?: { name: string; owner?: Account | Group | null };
   },
 ) {
   const contextManager = useJazzContextManager();
 
   const createSubscription = () => {
     if (!id) {
+      return {
+        subscription: null,
+        contextManager,
+        id,
+        Schema,
+      };
+    }
+
+    if (options?.unstable_branch?.owner === null) {
       return {
         subscription: null,
         contextManager,
@@ -111,6 +122,14 @@ function useCoValueSubscription<
         ref: coValueClassFromCoValueClassOrSchema(Schema),
         optional: true,
       },
+      false,
+      false,
+      options?.unstable_branch
+        ? {
+            name: options.unstable_branch.name,
+            owner: options.unstable_branch.owner,
+          }
+        : undefined,
     );
 
     return {
@@ -118,16 +137,23 @@ function useCoValueSubscription<
       contextManager,
       id,
       Schema,
+      branchName: options?.unstable_branch?.name,
+      branchOwnerId: options?.unstable_branch?.owner?.$jazz.id,
     };
   };
 
   const [subscription, setSubscription] = React.useState(createSubscription);
 
+  const branchName = options?.unstable_branch?.name;
+  const branchOwnerId = options?.unstable_branch?.owner?.$jazz.id;
+
   React.useLayoutEffect(() => {
     if (
       subscription.contextManager !== contextManager ||
       subscription.id !== id ||
-      subscription.Schema !== Schema
+      subscription.Schema !== Schema ||
+      subscription.branchName !== branchName ||
+      subscription.branchOwnerId !== branchOwnerId
     ) {
       subscription.subscription?.destroy();
       setSubscription(createSubscription());
@@ -137,7 +163,7 @@ function useCoValueSubscription<
       subscription.subscription?.destroy();
       setSubscription(createSubscription());
     });
-  }, [Schema, id, contextManager]);
+  }, [Schema, id, contextManager, branchName, branchOwnerId]);
 
   return subscription.subscription;
 }
@@ -239,6 +265,7 @@ export function useCoState<
   options?: {
     /** Resolve query to specify which nested CoValues to load */
     resolve?: ResolveQueryStrict<S, R>;
+    unstable_branch?: { name: string; owner?: Account | Group | null };
   },
 ): Loaded<S, R> | undefined | null {
   const subscription = useCoValueSubscription(Schema, id, options);
@@ -275,7 +302,7 @@ function useAccountSubscription<
   const createSubscription = () => {
     const agent = getCurrentAccountFromContextManager(contextManager);
 
-    if (agent[TypeSym] === "Anonymous") {
+    if (agent.$type$ === "Anonymous") {
       return {
         subscription: null,
         contextManager,
@@ -295,6 +322,8 @@ function useAccountSubscription<
         ref: coValueClassFromCoValueClassOrSchema(Schema),
         optional: true,
       },
+      false,
+      false,
     );
 
     return {

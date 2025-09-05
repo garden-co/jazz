@@ -138,7 +138,12 @@ export class RawCoList<
       sessionEntry[opID.txIndex] = txEntry;
     }
 
+    if (txEntry[opID.changeIdx]) {
+      return false;
+    }
+
     txEntry[opID.changeIdx] = value;
+    return true;
   }
 
   private isDeleted(opID: OpID) {
@@ -216,12 +221,16 @@ export class RawCoList<
         };
 
         if (change.op === "pre" || change.op === "app") {
-          this.createInsertionsEntry(opID, {
+          const created = this.createInsertionsEntry(opID, {
             madeAt,
             predecessors: [],
             successors: [],
             change,
           });
+
+          if (!created) {
+            continue;
+          }
 
           if (change.op === "pre") {
             if (change.before === "end") {

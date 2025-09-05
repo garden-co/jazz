@@ -14,6 +14,7 @@ export const JazzProfile = co.profile({
    */
   firstName: z.string(),
   bio: co.richText(),
+  branches: co.list(z.string()),
 
   // Add public fields here
 });
@@ -52,6 +53,7 @@ export const JazzAccount = co
             bio: co
               .richText()
               .create("<p>A <strong>hu<em>man</strong></em>.</p>", group),
+            branches: JazzProfile.shape.branches.create([]), // The branch list is private to the user
           },
           group,
         ),

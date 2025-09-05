@@ -17,7 +17,7 @@ async function createSchema(
     creationProps: {
       name: "Test Account",
     },
-    // @ts-expect-error
+    peersToLoadFrom: [],
     crypto: await WasmCrypto.create(),
   });
 
@@ -64,7 +64,7 @@ describe("list loading", () => {
   bench(
     "current version",
     () => {
-      const node = schema.account.$jazz.raw.core.node;
+      const node = schema.account.$jazz.localNode;
 
       const coValue = node.expectCoValueLoaded(list.$jazz.id as any);
 
@@ -76,14 +76,14 @@ describe("list loading", () => {
   );
 
   bench(
-    "Jazz 0.17.9",
+    "Jazz 0.18.5",
     () => {
-      // @ts-expect-error
-      const node = schemaLatest.account._raw.core.node;
+      const node = schemaLatest.account.$jazz.localNode;
 
       const coValue = node.expectCoValueLoaded(list.$jazz.id as any);
 
       coValue.getCurrentContent();
+      // @ts-expect-error
       coValue._cachedContent = undefined;
     },
     { iterations: 5000 },

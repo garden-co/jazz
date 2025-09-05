@@ -1,5 +1,6 @@
 import {
   Account,
+  BranchDefinition,
   CoRichText,
   Group,
   coOptionalDefiner,
@@ -40,14 +41,20 @@ export class RichTextSchema implements CoreRichTextSchema {
 
   load(
     id: string,
-    options: { loadAs: Account | AnonymousJazzAgent },
+    options: {
+      loadAs: Account | AnonymousJazzAgent;
+      unstable_branch?: BranchDefinition;
+    },
   ): Promise<CoRichText | null> {
     return this.coValueClass.load(id, options);
   }
 
   subscribe(
     id: string,
-    options: { loadAs: Account | AnonymousJazzAgent },
+    options: {
+      loadAs: Account | AnonymousJazzAgent;
+      unstable_branch?: BranchDefinition;
+    },
     listener: (value: CoRichText, unsubscribe: () => void) => void,
   ): () => void;
   subscribe(

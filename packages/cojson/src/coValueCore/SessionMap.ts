@@ -92,12 +92,12 @@ export class SessionMap {
     keyID: KeyID,
     keySecret: KeySecret,
     meta: JsonObject | undefined,
+    madeAt: number,
   ): { signature: Signature; transaction: Transaction } {
     const sessionLog = this.getOrCreateSessionLog(
       sessionID,
       signerAgent.currentSignerID(),
     );
-    const madeAt = Date.now();
 
     const result = sessionLog.impl.addNewPrivateTransaction(
       signerAgent,
@@ -122,12 +122,12 @@ export class SessionMap {
     signerAgent: ControlledAccountOrAgent,
     changes: JsonValue[],
     meta: JsonObject | undefined,
+    madeAt: number,
   ): { signature: Signature; transaction: Transaction } {
     const sessionLog = this.getOrCreateSessionLog(
       sessionID,
       signerAgent.currentSignerID(),
     );
-    const madeAt = Date.now();
 
     const result = sessionLog.impl.addNewTrustingTransaction(
       signerAgent,

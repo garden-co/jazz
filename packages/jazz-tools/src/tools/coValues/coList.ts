@@ -10,6 +10,7 @@ import {
   getCoValueOwner,
   Group,
   ID,
+  unstable_mergeBranch,
   RefEncoded,
   RefsToResolve,
   RefsToResolveStrict,
@@ -519,6 +520,24 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
    * @category Content
    */
   get id(): ID<L> {
+    const sourceId = this.raw.core.getCurrentBranchSourceId();
+
+    if (sourceId) {
+      return sourceId as ID<L>;
+    }
+
+    return this.raw.id;
+  }
+
+  get isBranch(): boolean {
+    return this.raw.core.isBranch();
+  }
+
+  get branchName(): string | undefined {
+    return this.raw.core.getCurrentBranchName();
+  }
+
+  get branchId(): ID<L> {
     return this.raw.id;
   }
 
@@ -872,6 +891,10 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
     [ItemsSym]: SchemaFor<CoListItem<L>> | any;
   } {
     return (this.coList.constructor as typeof CoList)._schema;
+  }
+
+  unstable_merge() {
+    unstable_mergeBranch(this.coList);
   }
 }
 

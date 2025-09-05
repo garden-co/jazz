@@ -1,6 +1,7 @@
 import { CoValueUniqueness } from "cojson";
 import {
   Account,
+  BranchDefinition,
   CoMap,
   DiscriminableCoValueSchemaDefinition,
   DiscriminableCoreCoValueSchema,
@@ -63,6 +64,7 @@ export interface CoMapSchema<
       >;
       loadAs?: Account | AnonymousJazzAgent;
       skipRetry?: boolean;
+      unstable_branch?: BranchDefinition;
     },
   ): Promise<Resolved<
     Simplify<CoMapInstanceCoValuesNullable<Shape>> & CoMap,
@@ -180,7 +182,9 @@ export interface CoMapSchema<
    *
    * @returns A new CoMap schema with all fields optional.
    */
-  partial(): CoMapSchema<PartialShape<Shape>, CatchAll, Owner>;
+  partial<Keys extends keyof Shape = keyof Shape>(
+    keys?: { [key in Keys]: true },
+  ): CoMapSchema<PartialShape<Shape, Keys>, CatchAll, Owner>;
 }
 
 export function createCoreCoMapSchema<
@@ -281,10 +285,17 @@ export function enrichCoMapSchema<
 
       return coMapDefiner(pickedShape);
     },
-    partial: () => {
+    partial: <Keys extends keyof Shape = keyof Shape>(
+      keys?: { [key in Keys]: true },
+    ) => {
       const partialShape: Record<string, AnyZodOrCoValueSchema> = {};
 
       for (const [key, value] of Object.entries(coValueSchema.shape)) {
+        if (keys && !keys[key as Keys]) {
+          partialShape[key] = value;
+          continue;
+        }
+
         if (isAnyCoValueSchema(value)) {
           partialShape[key] = coOptionalDefiner(value);
         } else {
@@ -341,10 +352,15 @@ export type CoMapInstanceCoValuesNullable<Shape extends z.core.$ZodLooseShape> =
     >;
   };
 
-export type PartialShape<Shape extends z.core.$ZodLooseShape> = Simplify<{
-  -readonly [key in keyof Shape]: Shape[key] extends AnyZodSchema
-    ? z.ZodOptional<Shape[key]>
-    : Shape[key] extends CoreCoValueSchema
-      ? CoOptionalSchema<Shape[key]>
-      : never;
+export type PartialShape<
+  Shape extends z.core.$ZodLooseShape,
+  PartialKeys extends keyof Shape = keyof Shape,
+> = Simplify<{
+  -readonly [key in keyof Shape]: key extends PartialKeys
+    ? Shape[key] extends AnyZodSchema
+      ? z.ZodOptional<Shape[key]>
+      : Shape[key] extends CoreCoValueSchema
+        ? CoOptionalSchema<Shape[key]>
+        : never
+    : Shape[key];
 }>;

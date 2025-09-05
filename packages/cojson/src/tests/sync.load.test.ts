@@ -171,10 +171,10 @@ describe("loading coValues from server", () => {
       [
         "client -> server | LOAD Branch sessions: empty",
         "server -> client | CONTENT Group header: true new: After: 0 New: 5",
-        "server -> client | CONTENT Map header: true new: After: 0 New: 2",
+        "server -> client | CONTENT Map header: true new: After: 0 New: 3",
         "server -> client | CONTENT Branch header: true new: After: 0 New: 2",
         "client -> server | KNOWN Group sessions: header/5",
-        "client -> server | KNOWN Map sessions: header/2",
+        "client -> server | KNOWN Map sessions: header/3",
         "client -> server | KNOWN Branch sessions: header/2",
       ]
     `);

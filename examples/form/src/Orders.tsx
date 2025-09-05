@@ -5,8 +5,19 @@ import { JazzAccount } from "./schema.ts";
 
 export function Orders() {
   const { me } = useAccount(JazzAccount, {
-    resolve: { root: { orders: true } },
+    resolve: {
+      root: {
+        orders: {
+          $each: {
+            addOns: true,
+          },
+        },
+      },
+    },
   });
+
+  const orders = me?.root.orders;
+  const hasOrders = orders?.length;
 
   return (
     <>
@@ -24,8 +35,8 @@ export function Orders() {
             <strong>Your orders 🧋</strong>
           </h1>
 
-          {me?.root?.orders?.length ? (
-            me?.root?.orders.map((order) =>
+          {hasOrders ? (
+            orders.map((order) =>
               order ? (
                 <OrderThumbnail key={order.$jazz.id} order={order} />
               ) : null,

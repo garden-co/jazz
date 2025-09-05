@@ -59,6 +59,8 @@ export class VerifiedState {
   private _cachedNewContentSinceEmpty: NewContentMessage[] | undefined;
   private streamingKnownState?: CoValueKnownState["sessions"];
   public lastAccessed: number | undefined;
+  public branchSourceId?: RawCoID;
+  public branchName?: string;
 
   constructor(
     id: RawCoID,
@@ -74,6 +76,8 @@ export class VerifiedState {
     this.streamingKnownState = streamingKnownState
       ? { ...streamingKnownState }
       : undefined;
+    this.branchSourceId = header.meta?.source as RawCoID | undefined;
+    this.branchName = header.meta?.branch as string | undefined;
   }
 
   clone(): VerifiedState {
@@ -114,12 +118,14 @@ export class VerifiedState {
     signerAgent: ControlledAccountOrAgent,
     changes: JsonValue[],
     meta: JsonObject | undefined,
+    madeAt: number,
   ) {
     const result = this.sessions.makeNewTrustingTransaction(
       sessionID,
       signerAgent,
       changes,
       meta,
+      madeAt,
     );
 
     this._cachedNewContentSinceEmpty = undefined;
@@ -135,6 +141,7 @@ export class VerifiedState {
     keyID: KeyID,
     keySecret: KeySecret,
     meta: JsonObject | undefined,
+    madeAt: number,
   ) {
     const result = this.sessions.makeNewPrivateTransaction(
       sessionID,
@@ -143,6 +150,7 @@ export class VerifiedState {
       keyID,
       keySecret,
       meta,
+      madeAt,
     );
 
     this._cachedNewContentSinceEmpty = undefined;
