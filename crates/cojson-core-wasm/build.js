@@ -1,6 +1,12 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 
 mkdirSync("./public", { recursive: true });
+
+// Check if wasm-pack output exists (for local development)
+if (!existsSync("./pkg/cojson_core_wasm_bg.wasm")) {
+  console.log("No wasm-pack output found, using pre-built artifacts");
+  process.exit(0);
+}
 
 const wasm = readFileSync("./pkg/cojson_core_wasm_bg.wasm");
 
