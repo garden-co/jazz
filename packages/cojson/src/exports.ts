@@ -63,7 +63,12 @@ import type { JsonObject, JsonValue } from "./jsonValue.js";
 import type * as Media from "./media.js";
 import { disablePermissionErrors } from "./permissions.js";
 import type { Peer, SyncMessage } from "./sync.js";
-import { DisconnectedError, SyncManager, emptyKnownState } from "./sync.js";
+import {
+  DisconnectedError,
+  SyncManager,
+  emptyKnownState,
+  hwrServerPeerSelector,
+} from "./sync.js";
 
 import {
   getContentMessageSize,
@@ -108,6 +113,7 @@ export const cojsonInternals = {
   getGroupDependentKey,
   disablePermissionErrors,
   SyncManager,
+  hwrServerPeerSelector,
   CO_VALUE_LOADING_CONFIG,
   CO_VALUE_PRIORITY,
   setIncomingMessagesTimeBudget,
