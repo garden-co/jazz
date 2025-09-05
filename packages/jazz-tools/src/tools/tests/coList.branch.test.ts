@@ -187,7 +187,7 @@ describe("CoList Branching", async () => {
       expect(branch1[0]).toBe("Buy groceries");
       expect(branch1[1]).toBe("Walk the dog");
       expect(branch1[2]).toBe("Finish project");
-      expect(branch2[0]).toBe("Buy groceries");
+      expect(branch2[0]).toBe("Buy organic groceries");
       expect(branch2[1]).toBe("Walk the dog");
       expect(branch2[2]).toBe("Finish project");
 

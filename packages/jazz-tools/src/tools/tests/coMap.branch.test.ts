@@ -220,7 +220,7 @@ describe("CoMap Branching", async () => {
       // Both branches should have the same changes
       expect(branch1.name).toBe("John Doe");
       expect(branch1.age).toBe(30);
-      expect(branch2.name).toBe("John Doe");
+      expect(branch2.name).toBe("John Smith");
       expect(branch2.age).toBe(30);
 
       branch2.$jazz.applyDiff({

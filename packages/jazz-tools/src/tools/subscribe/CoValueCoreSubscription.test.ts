@@ -166,7 +166,12 @@ describe("CoValueCoreSubscription", async () => {
       expect(listener).toHaveBeenCalledTimes(1);
 
       // Should return the branch, that contains the source data
-      expect(lastResult.get("name")).toEqual("John");
+      expect(lastResult.core.isBranch()).toEqual(true);
+
+      await waitFor(() => {
+        expect(lastResult.get("name")).toEqual("John");
+      });
+
       expect(lastResult.id).not.toBe(person.$jazz.id); // Should be a different instance
 
       subscription.unsubscribe();
@@ -396,6 +401,11 @@ describe("CoValueCoreSubscription", async () => {
 
       // Wait for the branch to sync before subscribing
       await branch.waitForSync();
+
+      // Prefetch the person, so the branch can be created synchronously
+      await Person.load(person.$jazz.id, {
+        loadAs: bob,
+      });
 
       // Subscribe with bob's ID as the owner, creating a private branch
       const subscription = new CoValueCoreSubscription(

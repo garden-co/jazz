@@ -210,6 +210,8 @@ describe("Branching Logic", () => {
           .getCurrentContent(),
       );
 
+      await new Promise((resolve) => setTimeout(resolve, 5));
+
       // Add different items to second branch
       branch2.appendItems(["apples", "oranges", "carrots"]);
 
@@ -219,9 +221,6 @@ describe("Branching Logic", () => {
         anotherSession.node,
         branch2.id,
       );
-
-      // Wait some time to make the output deterministic and not based on the random sessionIDs
-      await new Promise((resolve) => setTimeout(resolve, 2));
 
       // Add more items and remove some existing ones
       loadedBranch2.appendItems(["tomatoes", "lettuce", "cucumber"]);
@@ -612,6 +611,25 @@ describe("Branching Logic", () => {
         true,
       );
       expect(map.core.hasBranch("feature-branch")).toBe(false);
+    });
+
+    test("should work when the transactions have not been parsed yet", async () => {
+      const client = setupTestNode({
+        connected: true,
+      });
+      const group = client.node.createGroup();
+      const map = group.createMap();
+
+      map.set("key", "value");
+
+      map.core.createBranch("feature-branch", group.id);
+
+      await map.core.waitForSync();
+
+      const newSession = client.spawnNewSession();
+      const loadedMapCore = await newSession.node.loadCoValueCore(map.core.id);
+
+      expect(loadedMapCore.hasBranch("feature-branch", group.id)).toBe(true);
     });
   });
 });

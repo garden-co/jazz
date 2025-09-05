@@ -871,7 +871,7 @@ export class CoValueCore {
    * - Decodes the changes & meta for each transaction
    * - Parses the meta information of the transaction
    */
-  private parseNewTransactions(ignorePrivateTransactions: boolean) {
+  parseNewTransactions(ignorePrivateTransactions: boolean) {
     if (!this.isAvailable()) {
       return;
     }
@@ -928,7 +928,7 @@ export class CoValueCore {
       const { txID } = transaction;
 
       const from = options?.from?.[txID.sessionID] ?? -1;
-      const to = options?.to?.[txID.sessionID] ?? Infinity;
+      const to = options?.to ? (options.to[txID.sessionID] ?? -1) : Infinity;
 
       // The txIndex starts at 0 and from/to are referring to the count of transactions
       if (from > txID.txIndex || to < txID.txIndex) {
@@ -979,6 +979,10 @@ export class CoValueCore {
   }
 
   hasBranch(name: string, ownerId?: RawCoID) {
+    // This function requires the meta information to be parsed, which might not be the case
+    // if the value content hasn't been loaded yet
+    this.parseNewTransactions(false);
+
     const currentOwnerId = getBranchOwnerId(this);
     return this.branches.some((item) => {
       if (item.branch !== name) {

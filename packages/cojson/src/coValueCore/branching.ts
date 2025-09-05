@@ -123,10 +123,11 @@ export function createBranch(
   });
 
   const branch = coValue.node.createCoValue(header);
+  const sessions = { ...coValue.knownState().sessions };
 
   // Create a branch commit to identify the starting point of the branch
   branch.makeTransaction([], "private", {
-    from: coValue.knownState().sessions,
+    from: sessions,
   } satisfies BranchCommit);
 
   // Create a branch pointer, to identify that we created a branch
