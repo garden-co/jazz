@@ -43,8 +43,9 @@ interface Props {
   latencyOverTime: [number[], number[]];
   upOverTime: [number[], number[]];
   upCountOverTime: [number[], number[]];
+  isUp?: boolean;
 }
-export default function LatencyChart({ latencyOverTime, upOverTime, upCountOverTime, intervalMin }: Props) {
+export default function LatencyChart({ latencyOverTime, upOverTime, upCountOverTime, intervalMin, isUp = true }: Props) {
   const series = useMemo(() => {
     return latencyOverTime[1].map((value, index) => ({
       ts: latencyOverTime[0][index],
@@ -71,9 +72,12 @@ export default function LatencyChart({ latencyOverTime, upOverTime, upCountOverT
           </p>
         </HoverCard.Content>
       </HoverCard.Root>
-      {series.map(({ value, ts, up, upCount }) => {
+      {series.map(({ value, ts, up, upCount }, index) => {
+        const isLast = index === series.length - 1;
         const upPercentage = up / upCount;
-        const valueClass = getClassForLatencyAndUp(value, upPercentage);
+        
+        // If this is the last bar and we're down, override the colour to red
+        const valueClass = getClassForLatencyAndUp(value, isLast && !isUp ? 0 : upPercentage);
 
         const downtimeMin = (1 - upPercentage) * intervalMin;
 
