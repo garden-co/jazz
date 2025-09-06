@@ -1,0 +1,166 @@
+import { CodeGroup } from "@/components/forMdx";
+import { Alert } from "@garden-co/design-system/src/components/atoms/Alert";
+
+# Server Side Rendering
+
+<Alert variant="info" className="mt-4 flex gap-2 items-center">
+  This guide builds on the [React Quickstart](/docs/getting-started/quickstart/react) to show you how to set up SSR to render public data on the server. Although it should be possible to follow this guide without having completed the quickstart, it's recommended to do so first.
+</Alert>
+
+With Jazz, you can also use a read-only, credential-less account known as an `agent` to render public data on the server. Because this agent can only read public data, so we can create a simple page using SSR to only render the bands on the set list which have already been announced.
+
+## Create an agent
+
+First, we need to create an agent. We'll do this as a re-usable module that can be imported into any page that needs to read public data.
+
+<CodeGroup className="mt-4 [&_span]:[tab-size:2]" preferWrap>
+```tsx
+// app/jazzSSR.ts
+import { createSSRJazzAgent } from "jazz-tools/react/ssr";
+
+export const jazzSSR = createSSRJazzAgent({
+  peer: "wss://cloud.jazz.tools/",
+});
+```
+</CodeGroup>
+
+## Extract the auth component
+
+As you work through your app, you may find that some components cannot be rendered server side. For example, we can't use passkey authentication on the server. We'll set up some conditional rendering to ensure that the auth component is only rendered when the app is not running in guest mode.
+
+<CodeGroup className="mt-4 [&_span]:[tab-size:2]" preferWrap>
+```tsx
+// app/components/Auth.tsx
+import { PasskeyAuthBasicUI, useAccount } from "jazz-tools/react";
+import { FestivalAppAccount } from "@/app/schema";
+
+export function Auth() {
+  const { agent } = useAccount(FestivalAppAccount);
+  const isGuest = agent._type !== "Account"; 
+  return isGuest ? null : <PasskeyAuthBasicUI appName="JazzFest" />;
+}
+```
+</CodeGroup>
+
+## Create a wrapper component
+
+In order to use the agent, we need to change our page structure a little.
+
+First, we're going to create a wrapper component that will allow us to render our layout on the server, while ensuring that our provider only runs on the client.
+
+<CodeGroup className="mt-4 [&_span]:[tab-size:2]" preferWrap>
+```tsx
+// app/components/JazzProviderWrapper.tsx
+"use client";
+import { JazzReactProvider } from "jazz-tools/react";
+import { apiKey } from "@/app/apiKey";
+import { Auth } from "@/app/components/Auth";
+import { FestivalAppAccount } from "@/app/schema";
+
+export function JazzProviderWrapper({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
+  return (
+    <JazzReactProvider
+      sync={{ peer: `wss://cloud.jazz.tools/?key=${apiKey}` }}
+      AccountSchema={FestivalAppAccount}
+      enableSSR
+    >
+      <Auth />
+      {children}
+    </JazzReactProvider>
+  );
+}
+```
+</CodeGroup>
+
+We can also remove `"use client";` from our layout now, and update it to use the new wrapper component.
+
+<CodeGroup className="mt-4 [&_span]:[tab-size:2]" preferWrap>
+```tsx
+// app/layout.tsx
+import "./globals.css";
+import { JazzProviderWrapper } from "@/app/components/JazzProviderWrapper";
+
+export default function RootLayout({
+  children,
+}: Readonly<{
+  children: React.ReactNode;
+}>) {
+  return (
+    <html lang="en">
+      <body>
+        <JazzProviderWrapper>
+          {children}
+        </JazzProviderWrapper>
+      </body>
+    </html>
+  );
+}
+```
+</CodeGroup>
+
+## Create your server rendered page
+
+Now we can create a page that uses the agent to load the data.
+
+<CodeGroup className="mt-4 [&_span]:[tab-size:2]" preferWrap>
+```tsx
+// app/festival/[festivalId]/page.tsx
+import { jazzSSR } from "@/app/jazzSSR";
+import { Festival } from "@/app/schema";
+
+export default async function ServerSidePage(props: {
+  params:{ festivalId: string };
+}) {
+  const { festivalId } = props.params;
+  const festival = await Festival.load(festivalId, {
+    loadAs: jazzSSR,
+    resolve: {
+      $each: {
+        $onError: null,
+      }
+    }
+  });
+
+  return (
+    <main>
+      <h1>🎪 Festival {festivalId}</h1>
+    
+      <ul>
+        {festival?.filter(Boolean).map((band) => {
+          if (!band) return null;
+          return <li key={band.id}>🎶 {band.name}</li>
+        })}
+      </ul>
+    </main>
+  );
+}
+```
+</CodeGroup>
+
+This page will be server rendered, and will only render the bands that have been announced.
+
+Lastly, we'll add a link from the festival component to its server-rendered page:
+
+<CodeGroup className="mt-4 [&_span]:[tab-size:2]" preferWrap>
+```tsx
+// app/components/MyFestival.tsx
+"use client";
+import { useAccount } from "jazz-tools/react";
+// [!code ++:1]
+import Link from "next/link";
+// ... existing code ...
+      <h1>🎪 My Festival</h1>
+      <button type="button" onClick={() => setIsEditing(!isEditing)}>
+      {isEditing ? "✅ Done" : "✏️ Edit"}
+      </button>
+      {/* [!code ++:1] */} 
+      <Link href={`/festival/${myFestival?.id}`}>Link to SSR page</Link>
+// ... existing code ...      
+```
+</CodeGroup>
+
+You should now have a working app with authentication, data creation, editing, and sharing, as well as a server-rendered page which is showing public data from your app!

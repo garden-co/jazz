@@ -27,7 +27,8 @@ const createAccountCommand = Command.make(
       if (json) {
         yield* Console.log(JSON.stringify({ accountID, agentSecret }));
       } else {
-        yield* Console.log(`# Credentials for Jazz account "${name}":
+        yield* Console.log(`
+# Credentials for Jazz account "${name}":
 JAZZ_WORKER_ACCOUNT=${accountID}
 JAZZ_WORKER_SECRET=${agentSecret}
 `);
