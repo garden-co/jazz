@@ -34,7 +34,7 @@ catalogs:
     "@react-native/typescript-config": "0.81.0"
     "@types/react": "^19.1.0"
   expo:
-    "expo": "54.0.0-preview.4"
+    "expo": "54.0.0-preview.15"
     "react": "19.1.0"
   svelte:
     "@sveltejs/kit": "^2.36.1"
