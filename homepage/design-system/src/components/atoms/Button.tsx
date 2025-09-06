@@ -42,7 +42,7 @@ export interface ButtonProps
   children?: React.ReactNode;
   className?: string;
   disabled?: boolean;
-  onClick?: () => void;
+  onClick?: React.MouseEventHandler;
 }
 
 export const Button = forwardRef<HTMLButtonElement, ButtonProps>(

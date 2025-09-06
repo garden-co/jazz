@@ -28,7 +28,7 @@ export function DocNav() {
           .map((item) => {
             if (!item.href?.startsWith("/docs")) return item;
 
-            const frameworkDone = (item.done as any)[framework] ?? 0;
+            const frameworkDone = (item.done as any)[framework ?? 'react'] ?? 0;
             let done =
               typeof item.done === "number" ? item.done : frameworkDone;
             let href = item.href.replace("/docs", `/docs/${framework}`);
