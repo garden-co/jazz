@@ -20,7 +20,7 @@ This quickstart guide will take you from an empty project to a server worker whi
 
   You can accept the defaults for all the questions, or customise the project as you like.
 
-  <TabbedCodeGroup default="pnpm" savedPreferenceKey="package-manager">
+  <TabbedCodeGroup id="create-nextjs-app" default="pnpm" savedPreferenceKey="package-manager">
   <TabbedCodeGroupItem label="npm">
   ```sh
   npx create-next-app@latest --typescript jazzfest
@@ -42,7 +42,7 @@ This quickstart guide will take you from an empty project to a server worker whi
 
   You can accept the defaults for all the questions, or customise the project as you like.
 
-  <TabbedCodeGroup default="pnpm" savedPreferenceKey="package-manager">
+  <TabbedCodeGroup id="create-sveltekit-app" default="pnpm" savedPreferenceKey="package-manager">
   <TabbedCodeGroupItem label="npm">
   ```sh
   npx sv create --types ts --template minimal jazzfest
@@ -65,7 +65,7 @@ This quickstart guide will take you from an empty project to a server worker whi
 
 The `jazz-tools` package includes everything you're going to need to build your first Jazz server worker.
 
-<TabbedCodeGroup default="pnpm" savedPreferenceKey="package-manager">
+<TabbedCodeGroup id="install-jazz" default="pnpm" savedPreferenceKey="package-manager">
 <TabbedCodeGroupItem label="npm">
 ```sh
 npm install jazz-tools
@@ -83,7 +83,7 @@ pnpm add jazz-tools
 Sign up for a free API key at [dashboard.jazz.tools](https://dashboard.jazz.tools) for higher limits or production use, or use your email address as a temporary key to get started quickly.
 
 <FileName>.env</FileName>
-<TabbedCodeGroup default="react" savedPreferenceKey="framework">
+<TabbedCodeGroup id="api-key" default="react" savedPreferenceKey="framework">
 <TabbedCodeGroupItem label="Next.js" icon={<ReactLogo />} value="react" className="[&_span]:[tab-size:2]" preferWrap>
 ```bash
 NEXT_PUBLIC_JAZZ_API_KEY=you@example.com
@@ -142,7 +142,7 @@ export const JazzFestWorkerAccount = co
 
 Jazz provides a CLI to create server workers. You can create a server worker using the following command:
 
-<TabbedCodeGroup default="pnpm" savedPreferenceKey="package-manager">
+<TabbedCodeGroup id="create-worker-account" default="pnpm" savedPreferenceKey="package-manager">
 <TabbedCodeGroupItem label="npm">
 ```sh
 npx jazz-run account create --name "JazzFest Server Worker"
@@ -158,7 +158,7 @@ pnpx jazz-run account create --name "JazzFest Server Worker"
 You can copy the output of this command and paste it directly into your `.env` file:
 
 <FileName>.env</FileName>
-<TabbedCodeGroup default="react" savedPreferenceKey="framework">
+<TabbedCodeGroup id="worker-env-vars" default="react" savedPreferenceKey="framework">
 <TabbedCodeGroupItem label="Next.js" icon={<ReactLogo />} value="react" className="[&_span]:[tab-size:2]" preferWrap>
 ```bash
 NEXT_PUBLIC_JAZZ_API_KEY=you@example.com
@@ -191,7 +191,7 @@ We also need to tell Jazz which keys should be treated as loaded in the request 
 <ContentByFramework framework="svelte" savedPreferenceKey="framework">
 <FileName>src/lib/announceBandSchema.ts</FileName>
 </ContentByFramework>
-<TabbedCodeGroup default="react" savedPreferenceKey="framework">
+<TabbedCodeGroup id="request-schema" default="react" savedPreferenceKey="framework">
 <TabbedCodeGroupItem label="Next.js" icon={<ReactLogo />} value="react" className="[&_span]:[tab-size:2]" preferWrap>
 ```ts
 import { experimental_defineRequest } from "jazz-tools";
@@ -241,7 +241,7 @@ We'll also use a `resolve` query here to make sure that the `bandList` is loaded
 <ContentByFramework framework="svelte" savedPreferenceKey="framework">
 <FileName>src/routes/api/announce-band/+server.ts</FileName>
 </ContentByFramework>
-<TabbedCodeGroup default="react" savedPreferenceKey="framework">
+<TabbedCodeGroup id="worker-config" default="react" savedPreferenceKey="framework">
 <TabbedCodeGroupItem label="Next.js" icon={<ReactLogo />} value="react" className="[&_span]:[tab-size:2]" preferWrap>
 ```ts
 import { startWorker } from "jazz-tools/worker";
@@ -317,7 +317,7 @@ export const POST: RequestHandler = async ({ request }) => {
 
 We can now start our development server to make sure everything is working.
 
-<TabbedCodeGroup default="pnpm" savedPreferenceKey="package-manager">
+<TabbedCodeGroup id="start-server" default="pnpm" savedPreferenceKey="package-manager">
 <TabbedCodeGroupItem label="npm">
 ```sh
 npm run dev
@@ -367,7 +367,7 @@ We're going to wrap our SvelteKit app in a `JazzSvelteProvider` so that we can u
   <FileName>src/routes/+layout.svelte</FileName>
 </ContentByFramework>
 
-<TabbedCodeGroup savedPreferenceKey="framework">
+<TabbedCodeGroup id="add-provider" savedPreferenceKey="framework">
 <TabbedCodeGroupItem label="React" value="react" className="[&_span]:[tab-size:2]" icon={<ReactLogo />} preferWrap>
   ```tsx
   import { JazzReactProvider } from "jazz-tools/react";
@@ -420,7 +420,7 @@ We're going to send a request to our server worker to announce a new band. Our w
 <FileName>src/routes/+page.svelte</FileName>
 </ContentByFramework>
 
-<TabbedCodeGroup default="react" savedPreferenceKey="framework">
+<TabbedCodeGroup id="page-component" default="react" savedPreferenceKey="framework">
 <TabbedCodeGroupItem label="React" value="react" className="[&_span]:[tab-size:2]" icon={<ReactLogo />} preferWrap>
 ```tsx
 "use client";

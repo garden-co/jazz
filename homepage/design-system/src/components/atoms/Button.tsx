@@ -42,6 +42,7 @@ export interface ButtonProps
   children?: React.ReactNode;
   className?: string;
   disabled?: boolean;
+  onClick?: () => void;
 }
 
 export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
@@ -60,6 +61,7 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
       icon,
       iconPosition = "left",
       type = "button",
+      onClick,
       ...buttonProps
     },
     ref,
@@ -89,6 +91,7 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
           href={href}
           target={newTab ? "_blank" : undefined}
           className={classNames}
+          onClick={onClick}
         >
           {icon && (
             <Icon

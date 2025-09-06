@@ -13,14 +13,7 @@ import clsx from "clsx";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState, useRef } from "react";
 
-import { TAB_CHANGE_EVENT } from "@garden-co/design-system/src/components/molecules/TabbedCodeGroup";
-
-// Extend the global WindowEventMap to include the TAB_CHANGE_EVENT
-declare global {
-  interface WindowEventMap {
-    [TAB_CHANGE_EVENT]: CustomEvent<{ framework: string }>; 
-  }
-}
+import { TAB_CHANGE_EVENT, isFrameworkChange, type TabChangeEventDetail } from "@garden-co/design-system/src/types/tabbed-code-group";
 
 export function FrameworkSelect({
   onSelect,
@@ -41,7 +34,7 @@ export function FrameworkSelect({
 
   const path = usePathname();
   const pathRef = useRef(path);
-  
+
   useEffect(() => {
     pathRef.current = path;
   }, [path]);
@@ -53,22 +46,16 @@ export function FrameworkSelect({
     }
   }, [defaultFramework, initialized]);
 
-  const handleFrameworkChange = (event: CustomEvent) => {
-      if (event.detail.key === 'framework') {
-        selectFramework(event.detail.value);
-      }
-    };
-  
 
   useEffect(() => {
-      window.addEventListener(
-        TAB_CHANGE_EVENT,
-        handleFrameworkChange,
-      );
-      return () => {
-        window.removeEventListener(TAB_CHANGE_EVENT, handleFrameworkChange);
-      };
-    }, []);
+    window.addEventListener(
+      TAB_CHANGE_EVENT,
+      handleTabChange,
+    );
+    return () => {
+      window.removeEventListener(TAB_CHANGE_EVENT, handleTabChange);
+    };
+  }, []);
 
   useEffect(() => {
     const timer = setTimeout(() => {
@@ -80,18 +67,22 @@ export function FrameworkSelect({
           },
         }),
       );
-    }, 0);    
+    }, 0);
     return () => clearTimeout(timer);
   }, [defaultFramework]);
 
-  const selectFramework = (newFramework: Framework) => {
+  const selectFramework = (newFramework: Framework, shouldNavigate = true) => {
     setSelectedFramework(newFramework);
     onSelect && onSelect(newFramework);
     localStorage.setItem("_tcgpref_framework", newFramework);
-    if (routerPush) {
-      const currentPath = pathRef.current;
-      const newPath = currentPath.replace(selectedFramework, newFramework);
-      router.replace(newPath, { scroll: false });
+    if (!shouldNavigate) return;
+    const newPath = path.split("/").toSpliced(2, 1, newFramework).join("/") + window.location.hash;
+    routerPush && router.replace(newPath, { scroll: true }); 
+  };
+
+  const handleTabChange = (event: CustomEvent<TabChangeEventDetail>) => {
+    if (isFrameworkChange(event.detail)) {
+      selectFramework(event.detail.value as Framework, false);
     }
   };
 
@@ -110,18 +101,18 @@ export function FrameworkSelect({
         {Object.entries(frameworkNames)
           .map(([key, framework]) => (
             <DropdownItem
-            className={clsx("items-baseline", size === "sm" && "text-xs text-nowrap", selectedFramework === key && "text-primary dark:text-primary")}
+              className={clsx("items-baseline", size === "sm" && "text-xs text-nowrap", selectedFramework === key && "text-primary dark:text-primary")}
               key={key}
               onClick={() => selectFramework(key as Framework)}
-          >
-            {framework.label}
-            {framework.experimental && (
-              <span className="ml-1 text-xs text-stone-500">
-                (experimental)
-              </span>
-            )}
-          </DropdownItem>
-        ))}
+            >
+              {framework.label}
+              {framework.experimental && (
+                <span className="ml-1 text-xs text-stone-500">
+                  (experimental)
+                </span>
+              )}
+            </DropdownItem>
+          ))}
       </DropdownMenu>
     </Dropdown>
   );

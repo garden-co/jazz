@@ -19,7 +19,7 @@ This quickstart guide will take you from an empty project to a working app with 
 
   You can accept the defaults for all the questions, or customise the project as you like.
 
-  <TabbedCodeGroup default="pnpm" savedPreferenceKey="package-manager">
+  <TabbedCodeGroup id="create-react-app" default="pnpm" savedPreferenceKey="package-manager">
   <TabbedCodeGroupItem label="npm">
   ```sh
   npx create-next-app@latest --typescript jazzfest
@@ -41,7 +41,7 @@ This quickstart guide will take you from an empty project to a working app with 
   </Alert>
   ## Create your Svelte App
 
-  <TabbedCodeGroup default="pnpm" savedPreferenceKey="package-manager">
+  <TabbedCodeGroup id="create-svelte-app" default="pnpm" savedPreferenceKey="package-manager">
   <TabbedCodeGroupItem label="npm">
   ```sh
   npx sv create --types ts --template minimal jazzfest
@@ -62,7 +62,7 @@ This quickstart guide will take you from an empty project to a working app with 
 
 The `jazz-tools` package includes everything you're going to need to build your first Jazz app.
 
-<TabbedCodeGroup default="pnpm" savedPreferenceKey="package-manager">
+<TabbedCodeGroup id="install-jazz" default="pnpm" savedPreferenceKey="package-manager">
 <TabbedCodeGroupItem label="npm">
 ```sh
 npm add jazz-tools
@@ -85,7 +85,7 @@ Sign up for a free API key at [dashboard.jazz.tools](https://dashboard.jazz.tool
 <ContentByFramework framework="svelte">
   <FileName>.env</FileName>
 </ContentByFramework>
-<TabbedCodeGroup default="react" savedPreferenceKey="framework">
+<TabbedCodeGroup id="api-key" default="react" savedPreferenceKey="framework">
 <TabbedCodeGroupItem label="React" value="react" className="[&_span]:[tab-size:2]" icon={<ReactLogo />} preferWrap>
 ```bash
 NEXT_PUBLIC_JAZZ_API_KEY="you@example.com"; // or your API key
@@ -176,7 +176,7 @@ export function JazzWrapper({ children }: {
   <FileName>src/routes/+layout.svelte</FileName>
 </ContentByFramework>
 
-<TabbedCodeGroup savedPreferenceKey="framework">
+<TabbedCodeGroup id="jazz-provider" savedPreferenceKey="framework">
 <TabbedCodeGroupItem label="React" value="react" className="[&_span]:[tab-size:2]" icon={<ReactLogo />} preferWrap>
   ```tsx
   import { JazzWrapper } from "@/app/components/JazzWrapper";
@@ -222,7 +222,7 @@ export function JazzWrapper({ children }: {
 ## Start your app
 Moment of truth&hairsp;—&hairsp;time to start your app and see if it works.
 
-<TabbedCodeGroup default="pnpm" savedPreferenceKey="package-manager">
+<TabbedCodeGroup id="start-app" default="pnpm" savedPreferenceKey="package-manager">
 <TabbedCodeGroupItem label="npm">
 ```sh
 npm run dev
@@ -267,7 +267,7 @@ Let's create a simple form to add a new band to the festival. We'll use the `use
   <FileName>src/lib/components/NewBand.svelte</FileName>
 </ContentByFramework>
 
-<TabbedCodeGroup default="react" savedPreferenceKey="framework"
+<TabbedCodeGroup id="new-band-component" default="react" savedPreferenceKey="framework"
 >
 <TabbedCodeGroupItem label="React" value="react" icon={<ReactLogo />} className="[&_span]:[tab-size:2]" preferWrap>
 ```tsx
@@ -335,7 +335,7 @@ Now we've got a way to create data, so let's add a component to display it.
   <FileName>src/lib/components/MyFestival.svelte</FileName>
 </ContentByFramework>
 
-<TabbedCodeGroup default="react" savedPreferenceKey="framework">
+<TabbedCodeGroup id="my-festival-component" default="react" savedPreferenceKey="framework">
 <TabbedCodeGroupItem icon={<ReactLogo />} label="React" value="react" className="[&_span]:[tab-size:2]" preferWrap>
 ```tsx
 "use client";
@@ -384,7 +384,7 @@ You've built all your components, time to put them together.
   <FileName>src/routes/+page.svelte</FileName>
 </ContentByFramework>
 
-<TabbedCodeGroup default="react" savedPreferenceKey="framework">
+<TabbedCodeGroup id="home-page" default="react" savedPreferenceKey="framework">
 <TabbedCodeGroupItem label="React" value="react" className="[&_span]:[tab-size:2]" icon={<ReactLogo />} preferWrap>
 ```tsx
 import { MyFestival } from "@/app/components/MyFestival";

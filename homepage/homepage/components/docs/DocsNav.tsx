@@ -5,11 +5,18 @@ import { SideNavSection } from "@/components/SideNavSection";
 import { FrameworkSelect } from "@/components/docs/FrameworkSelect";
 import { docNavigationItems } from "@/content/docs/docNavigationItems";
 import { DocNavigationSection } from "@/content/docs/docNavigationItemsTypes";
+import { Framework } from "@/content/framework";
 import { useFramework } from "@/lib/use-framework";
-import React from "react";
+import { usePathname } from "next/navigation";
+import React, { useEffect, useState } from "react";
 
 export function DocNav() {
-  const framework = useFramework();
+  const [framework, setFramework] = useState<Framework | null>(null);
+  const path = usePathname();
+  useEffect(() => {
+    const framework = path.split("/")[2];
+    setFramework(framework as Framework);
+  }, [path]);
   const items = (docNavigationItems as DocNavigationSection[]).map(
     (headerItem) => {
       return {
