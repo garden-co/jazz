@@ -120,6 +120,7 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
         disabled={disabled || loading}
         className={classNames}
         type={type}
+        onClick={onClick}
       >
         {loading ? (
           <Spinner className="size-5" />
