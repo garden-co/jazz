@@ -23,7 +23,7 @@ import { InviteButton } from "./components/InviteButton";
 /** Walkthrough: Reactively rendering a todo project as a table,
  *               adding and editing tasks
  *
- *  Here in `<TodoTable/>`, we use `useAutoSub()` for the first time,
+ *  Here in `<TodoTable/>`, we use `useCoState()` for the first time,
  *  in this case to load the CoValue for our `TodoProject` as well as
  *  the `ListOfTasks` referenced in it.
  */
@@ -31,7 +31,7 @@ import { InviteButton } from "./components/InviteButton";
 export function ProjectTodoTable() {
   const projectId = useParams<{ projectId: string }>().projectId;
 
-  // `useAutoSub()` reactively subscribes to updates to a CoValue's
+  // `useCoState()` reactively subscribes to updates to a CoValue's
   // content - whether we create edits locally, load persisted data, or receive
   // sync updates from other devices or participants!
   // It also recursively resolves and subsribes to all referenced CoValues.
@@ -54,7 +54,7 @@ export function ProjectTodoTable() {
       const task = Task.create(
         {
           done: false,
-          text: CoPlainText.create(text, project.$jazz.owner),
+          text,
           version: 1,
         },
         project.$jazz.owner,
