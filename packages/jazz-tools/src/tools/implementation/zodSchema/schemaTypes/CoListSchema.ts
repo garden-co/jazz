@@ -24,7 +24,7 @@ export class CoListSchema<T extends AnyZodOrCoValueSchema>
 {
   collaborative = true as const;
   builtin = "CoList" as const;
-  private indexes: { elementField: string; direction: "asc" | "desc" }[] = [];
+  private indexes: { elementField: string }[] = [];
 
   constructor(
     public element: T,
@@ -129,8 +129,8 @@ export class CoListSchema<T extends AnyZodOrCoValueSchema>
     return coOptionalDefiner(this);
   }
 
-  withIndex(elementField: string, direction: "asc" | "desc"): CoListSchema<T> {
-    this.indexes.push({ elementField, direction });
+  withIndex(elementField: string): CoListSchema<T> {
+    this.indexes.push({ elementField });
     return this;
   }
 }

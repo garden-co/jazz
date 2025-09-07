@@ -1360,7 +1360,7 @@ describe("CoList indexes", () => {
   const IndexRecord = co.record(z.string(), z.number());
 
   const Score = co.map({ priority: z.number() });
-  const ItemList = co.list(Score).withIndex("priority", "asc");
+  const ItemList = co.list(Score).withIndex("priority");
   let list: co.output<typeof ItemList>;
 
   beforeEach(async () => {
