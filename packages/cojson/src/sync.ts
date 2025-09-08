@@ -219,28 +219,7 @@ export class SyncManager {
     }
   }
 
-  sendNewContentIncludingDependencies(
-    id: RawCoID,
-    peer: PeerState,
-    seen: Set<RawCoID> = new Set(),
-  ) {
-    this.sendNewContent(id, peer, seen, true);
-  }
-
-  sendNewContentWithoutDependencies(
-    id: RawCoID,
-    peer: PeerState,
-    seen: Set<RawCoID> = new Set(),
-  ) {
-    this.sendNewContent(id, peer, seen, false);
-  }
-
-  private sendNewContent(
-    id: RawCoID,
-    peer: PeerState,
-    seen: Set<RawCoID> = new Set(),
-    includeDependencies: boolean,
-  ) {
+  sendNewContent(id: RawCoID, peer: PeerState, seen: Set<RawCoID> = new Set()) {
     if (seen.has(id)) {
       return;
     }
@@ -253,9 +232,10 @@ export class SyncManager {
       return;
     }
 
+    const includeDependencies = peer.role !== "server";
     if (includeDependencies) {
       for (const dependency of coValue.getDependedOnCoValues()) {
-        this.sendNewContentIncludingDependencies(dependency, peer, seen);
+        this.sendNewContent(dependency, peer, seen);
       }
     }
 
@@ -434,7 +414,7 @@ export class SyncManager {
     const coValue = this.local.getCoValue(msg.id);
 
     if (coValue.isAvailable()) {
-      this.sendNewContentIncludingDependencies(msg.id, peer);
+      this.sendNewContent(msg.id, peer);
       return;
     }
 
@@ -444,7 +424,7 @@ export class SyncManager {
 
     const handleLoadResult = () => {
       if (coValue.isAvailable()) {
-        this.sendNewContentIncludingDependencies(msg.id, peer);
+        this.sendNewContent(msg.id, peer);
         return;
       }
 
@@ -478,11 +458,7 @@ export class SyncManager {
     }
 
     if (coValue.isAvailable()) {
-      if (peer.role === "server") {
-        this.sendNewContentWithoutDependencies(msg.id, peer);
-      } else {
-        this.sendNewContentIncludingDependencies(msg.id, peer);
-      }
+      this.sendNewContent(msg.id, peer);
     }
   }
 
@@ -777,7 +753,7 @@ export class SyncManager {
 
       // We directly forward the new content to peers that have an active subscription
       if (peer.optimisticKnownStates.has(coValue.id)) {
-        this.sendNewContentIncludingDependencies(coValue.id, peer);
+        this.sendNewContent(coValue.id, peer);
         syncedPeers.push(peer);
       } else if (
         peer.role === "server" &&
@@ -808,7 +784,7 @@ export class SyncManager {
   handleCorrection(msg: KnownStateMessage, peer: PeerState) {
     peer.setKnownState(msg.id, knownStateIn(msg));
 
-    return this.sendNewContentIncludingDependencies(msg.id, peer);
+    return this.sendNewContent(msg.id, peer);
   }
 
   private syncQueue = new LocalTransactionsSyncQueue((content) =>

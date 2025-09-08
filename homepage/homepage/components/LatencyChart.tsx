@@ -82,9 +82,11 @@ export default function LatencyChart({ latencyOverTime, upOverTime, upCountOverT
 
         let fromH = Intl.DateTimeFormat("en-US", {
           hour: "numeric",
+          timeZone: "UTC",
         }).formatToParts(from);
         const toH = Intl.DateTimeFormat("en-US", {
           hour: "numeric",
+          timeZone: "UTC",
         }).formatToParts(to);
 
 
@@ -115,6 +117,7 @@ export default function LatencyChart({ latencyOverTime, upOverTime, upCountOverT
                       <span>
                         {Intl.DateTimeFormat("en-US", {
                           dateStyle: "medium",
+                          timeZone: "UTC",
                         }).format(from)}
                       </span>
 

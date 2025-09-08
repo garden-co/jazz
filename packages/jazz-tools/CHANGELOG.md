@@ -1,5 +1,21 @@
 # jazz-tools
 
+## 0.18.6
+
+### Patch Changes
+
+- 975d1c3: Fixed the startWorker type to return a shallowly-loaded worker account.
+- ccbb795: Add skipInboxLoad option to startWorker
+- 0dae338: Add concurrency limit on the Inbox subscribe, and simplify the failed messages management
+- 934679c: feat: Better Auth EmailOTP plugin is now supported
+- 28defd0: Fix peer role to be client when connecting the test accounts to the test sync server
+- e0f17ed: Fix the react dependency error when loading the inspector as custom element
+- 88ef339: fix: removed unwanted browser dependency in order to make better-auth provider works on react-native
+- Updated dependencies [9e792c7]
+  - cojson@0.18.6
+  - cojson-storage-indexeddb@0.18.6
+  - cojson-transport-ws@0.18.6
+
 ## 0.18.5
 
 ### Patch Changes

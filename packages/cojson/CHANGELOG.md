@@ -1,5 +1,12 @@
 # cojson
 
+## 0.18.6
+
+### Patch Changes
+
+- 9e792c7: Fixed the merge operation for RawCoList and RawCoPlainText and done a small performance optimization on RawCoList
+  - cojson-core-wasm@0.18.6
+
 ## 0.18.5
 
 ### Patch Changes
