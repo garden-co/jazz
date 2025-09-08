@@ -87,9 +87,6 @@ export type DecryptedTransaction = {
 
 export type AvailableCoValueCore = CoValueCore & { verified: VerifiedState };
 
-// TODO rename
-export type IndexDefinition = { elementKey: string; indexId: RawCoID };
-
 export class CoValueCore {
   // context
   readonly node: LocalNode;
@@ -697,7 +694,7 @@ export class CoValueCore {
   latestTxMadeAt: number = 0;
 
   // The list of indexes that involve this CoValue
-  indexes: IndexDefinition[] = [];
+  indexCatalogId: RawCoID | undefined;
 
   // Reset the parsed transactions and branches, to validate them again from scratch when the group is updated
   resetParsedTransactions() {
@@ -863,9 +860,10 @@ export class CoValueCore {
         });
       }
     }
-    if (transaction.meta?.["indexes"]) {
-      // TODO handle madeAt
-      this.indexes = transaction.meta.indexes as IndexDefinition[];
+
+    if (transaction.meta?.["indexCatalogId"]) {
+      // TODO handle concurrently created index catalogs
+      this.indexCatalogId = transaction.meta.indexCatalogId as RawCoID;
     }
   }
 
