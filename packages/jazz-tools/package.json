@@ -180,7 +180,6 @@
     "@tiptap/core": "^2.12.0",
     "clsx": "^2.0.0",
     "cojson": "workspace:*",
-    "cojson-core-rn": "workspace:*",
     "cojson-storage-indexeddb": "workspace:*",
     "cojson-transport-ws": "workspace:*",
     "fast-myers-diff": "^3.2.0",
@@ -231,6 +230,7 @@
     "@op-engineering/op-sqlite": "*",
     "@react-native-community/netinfo": "*",
     "better-auth": "^1.3.0",
+    "cojson-core-rn": "workspace:*",
     "expo-file-system": "*",
     "expo-secure-store": "*",
     "expo-sqlite": "*",
@@ -240,7 +240,7 @@
     "react-native-fast-encoder": "^0.2.0",
     "react-native-mmkv": "^3.3.0",
     "react-native-nitro-modules": "0.26.4",
-    "cojson-core-rn": "workspace:*",
+    "react-native-quick-crypto": "^1.0.0-beta.20",
     "svelte": "^5.0.0"
   },
   "peerDependenciesMeta": {
