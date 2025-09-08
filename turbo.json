@@ -18,7 +18,8 @@
         ".svelte-kit/output/**",
         ".next/**",
         "build/**",
-        "out/**"
+        "out/**",
+        "pkg/**"
       ],
       "inputs": [
         "src/**",

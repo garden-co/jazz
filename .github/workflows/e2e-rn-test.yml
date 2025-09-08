@@ -27,9 +27,10 @@ jobs:
       - name: Setup Source Code
         uses: ./.github/actions/source-code/
 
-      - name: Create Output Directory
+      - name: Create Directories
         run: |
           mkdir -p ~/output
+          mkdir -p ~/.maestro/tests/
 
       - name: Setup JDK
         uses: actions/setup-java@v4
@@ -37,6 +38,16 @@ jobs:
           distribution: corretto
           java-version: 22
           cache: gradle
+
+      - name: Setup Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+
+      - name: Install Android Rust Targets
+        run: |
+          rustup target add aarch64-linux-android armv7-linux-androideabi i686-linux-android x86_64-linux-android
 
       - name: Pnpm Build
         run: pnpm turbo build --filter="./packages/*"
