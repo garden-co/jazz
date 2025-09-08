@@ -32,6 +32,10 @@ export function ProjectGenerator() {
     setIsGenerating(false);
   };
 
+  const handleClear = () => {
+    TodoAccount.getMe().root?.$jazz.set("projects", []);
+  };
+
   return (
     <div
       style={{
@@ -103,6 +107,23 @@ export function ProjectGenerator() {
           }}
         >
           {isGenerating ? "Generating..." : "Generate Tasks"}
+        </button>
+        <button
+          type="button"
+          disabled={isGenerating}
+          onClick={handleClear}
+          style={{
+            padding: "0.5rem 1rem",
+            backgroundColor: isGenerating ? "#9ca3af" : "#d52929",
+            color: "white",
+            border: "none",
+            borderRadius: "4px",
+            fontSize: "0.875rem",
+            fontWeight: "500",
+            cursor: isGenerating ? "not-allowed" : "pointer",
+          }}
+        >
+          Clear Projects
         </button>
       </form>
     </div>
