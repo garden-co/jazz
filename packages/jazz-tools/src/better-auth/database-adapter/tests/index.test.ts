@@ -289,6 +289,37 @@ describe("JazzBetterAuthDatabaseAdapter tests", async () => {
         handleSyncMessageSpy.mock.calls.filter(([msg]) => msg.id === user.id),
       ).toHaveLength(3);
     });
+
+    it("should return the new entity with date objects", async () => {
+      const auth = betterAuth({
+        database: JazzBetterAuthDatabaseAdapter({
+          syncServer: `ws://localhost:${syncServer.port}`,
+          accountID,
+          accountSecret,
+        }),
+      });
+
+      const date = new Date();
+
+      await (await auth.$context).internalAdapter.createVerificationValue({
+        identifier: "test",
+        value: "test",
+        expiresAt: date,
+      });
+
+      const verification = await (
+        await auth.$context
+      ).internalAdapter.findVerificationValue("test");
+
+      expect(verification).toMatchObject({
+        id: expect.any(String),
+        identifier: "test",
+        value: "test",
+        expiresAt: date,
+        createdAt: expect.any(Date),
+        updatedAt: expect.any(Date),
+      });
+    });
   });
 
   /**
