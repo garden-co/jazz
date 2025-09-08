@@ -26,7 +26,10 @@ export class CoListSchema<T extends AnyZodOrCoValueSchema>
 {
   collaborative = true as const;
   builtin = "CoList" as const;
-  private indexes: { elementField: string }[] = [];
+  /**
+   * Names of element fields that should be indexed
+   */
+  private indexedFields: string[] = [];
 
   constructor(
     public element: T,
@@ -56,8 +59,8 @@ export class CoListSchema<T extends AnyZodOrCoValueSchema>
   ): CoListInstance<T> {
     const optionss =
       options && TypeSym in options
-        ? { owner: options, indexes: this.indexes }
-        : { ...options, indexes: this.indexes };
+        ? { owner: options, indexedFields: this.indexedFields }
+        : { ...options, indexedFields: this.indexedFields };
     return this.coValueClass.create(
       items as any,
       optionss,
@@ -147,7 +150,7 @@ export class CoListSchema<T extends AnyZodOrCoValueSchema>
   }
 
   withIndex(elementField: string): CoListSchema<T> {
-    this.indexes.push({ elementField });
+    this.indexedFields.push(elementField);
     return this;
   }
 }

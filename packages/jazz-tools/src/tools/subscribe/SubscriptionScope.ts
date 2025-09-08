@@ -91,24 +91,28 @@ export class SubscriptionScope<D extends CoValue> {
           const order = Object.entries(orderBy)[0];
           const orderByField = order?.[0];
           const orderDirection = order?.[1] as "asc" | "desc";
-          const indexDefinition =
-            orderByField !== undefined
-              ? value.core.indexes.find(
-                  (indexDef) => indexDef.elementKey === orderByField,
-                )
-              : undefined;
 
-          if (indexDefinition) {
-            this.sortByIndex = {
-              indexId: indexDefinition.indexId,
-              orderDirection,
-            };
-            this.subscribeToId(indexDefinition.indexId, {
-              ref: CoMap,
-              optional: false,
-            });
-          } else {
-            // TODO sort the list in memory
+          if (orderByField !== undefined) {
+            const indexCatalogId = value.core.indexCatalogId;
+            if (indexCatalogId) {
+              // TODO handle case where the index catalog needs to be loaded
+              const indexCatalog = value.core.node
+                .expectCoValueLoaded(indexCatalogId)
+                .getCurrentContent() as RawCoMap;
+              const indexId = indexCatalog.get(orderByField) as
+                | string
+                | undefined;
+              if (indexId) {
+                this.sortByIndex = {
+                  indexId,
+                  orderDirection,
+                };
+                this.subscribeToId(this.sortByIndex.indexId, {
+                  ref: CoMap,
+                  optional: false,
+                });
+              }
+            }
           }
         }
 

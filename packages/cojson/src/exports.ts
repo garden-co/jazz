@@ -4,7 +4,6 @@ import {
   CoValueCore,
   idforHeader,
   type AvailableCoValueCore,
-  type IndexDefinition,
 } from "./coValueCore/coValueCore.js";
 import { CoValueUniqueness } from "./coValueCore/verifiedState.js";
 import {
@@ -169,7 +168,6 @@ export {
   LogLevel,
   base64URLtoBytes,
   bytesToBase64url,
-  IndexDefinition,
   hwrServerPeerSelector,
 };
 

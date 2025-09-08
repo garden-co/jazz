@@ -1373,7 +1373,11 @@ describe("CoList indexes", () => {
   });
 
   test("the index keeps track of CoList insertions", async () => {
-    const indexId = list.$jazz.raw.core.indexes[0]?.indexId;
+    const indexCatalog = await list.$jazz._indexCatalog();
+    assert(indexCatalog);
+    const indexId = indexCatalog.get(indexCatalog.keys()[0]!) as
+      | string
+      | undefined;
     assert(indexId);
 
     // Wait for the async index update to complete

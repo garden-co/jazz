@@ -6,7 +6,7 @@ import type {
   RawCoList,
   RawCoMap,
 } from "cojson";
-import { cojsonInternals, type IndexDefinition } from "cojson";
+import { cojsonInternals } from "cojson";
 import { calcPatch } from "fast-myers-diff";
 import {
   Account,
@@ -175,14 +175,16 @@ export class CoList<out Item = any>
       | {
           owner?: Account | Group;
           unique?: CoValueUniqueness["uniqueness"];
-          indexes?: { elementField: string }[];
+          indexedFields?: string[];
         }
       | Account
       | Group,
   ) {
     const { owner, uniqueness } = parseCoValueCreateOptions(options);
-    const indexes =
-      options && "indexes" in options ? (options?.indexes ?? []) : [];
+    const indexedFields =
+      options && "indexedFields" in options
+        ? (options?.indexedFields ?? [])
+        : [];
     const instance = new this();
 
     Object.defineProperties(instance, {
@@ -192,19 +194,6 @@ export class CoList<out Item = any>
       },
     });
 
-    const indexRecords = indexes?.map(
-      (index) =>
-        ({
-          elementKey: index.elementField,
-          // Indexes share the same permissions as the CoList:
-          // - whoever can read the CoList can also read the index
-          // - whoever can write to the CoList can also write to the index
-          // TODO: what about people that edit the CoList content CoValues, but
-          // don't have write permissions to the CoList?
-          indexId: owner.$jazz.raw.createMap({}, null, "private").id,
-        }) satisfies IndexDefinition,
-    );
-
     const rawItems = toRawItems(items, instance.$jazz.schema[ItemsSym], owner);
     const raw = owner.$jazz.raw.createList(
       rawItems,
@@ -212,15 +201,28 @@ export class CoList<out Item = any>
       "private",
       uniqueness,
     );
-    raw.core.makeTransaction([], "private", {
-      indexes: indexRecords,
-    });
-    // TODO link CoValue raw items with the corresponding index records
-    // rawItems.filter(isCoValue).makeTransaction([], "private", {
-    //  indexes: indexRecords,
-    // });
+    CoList._createIndexes(instance, indexedFields);
 
     return instance;
+  }
+
+  private static _createIndexes(instance: CoList, indexedFields: string[]) {
+    const rawCoList = instance.$jazz.raw;
+    const indexRecords = indexedFields?.map((indexedField) => ({
+      indexedField,
+      // Indexes share the same permissions as the CoList:
+      // - whoever can read the CoList can also read the index
+      // - whoever can write to the CoList can also write to the index
+      indexId: rawCoList.group.createMap({}, null, "private").id,
+    }));
+    const indexCatalog = rawCoList.group.createMap({}, null, "private");
+    rawCoList.core.makeTransaction([], "private", {
+      indexCatalogId: indexCatalog.id,
+    });
+    for (const indexRecord of indexRecords) {
+      indexCatalog.set(indexRecord.indexedField, indexRecord.indexId);
+    }
+    // TODO link CoValue raw items with the corresponding index records
   }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -570,13 +572,19 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
     this.raw.replace(index, rawValue);
   }
 
-  _indexes() {
-    return this.raw.core.indexes;
+  _indexCatalog(): RawCoMap {
+    const indexCatalogId = this.raw.core.indexCatalogId;
+    return this.localNode
+      .expectCoValueLoaded(indexCatalogId!)
+      .getCurrentContent() as RawCoMap;
   }
 
   _indexRecord(): RawCoMap {
+    const indexCatalog = this._indexCatalog();
     return this.localNode
-      .expectCoValueLoaded(this.raw.core.indexes[0]?.indexId as CoID<RawCoMap>)
+      .expectCoValueLoaded(
+        indexCatalog.get(indexCatalog.keys()[0]!) as CoID<RawCoMap>,
+      )
       .getCurrentContent() as RawCoMap;
   }
 
@@ -590,14 +598,15 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
     const itemsDescriptor = this.schema[ItemsSym];
 
     if (isRefEncoded(itemsDescriptor)) {
-      for (const index of this._indexes()) {
-        const { elementKey, indexId } = index;
+      const indexCatalog = this._indexCatalog();
+      for (const indexedField of indexCatalog.keys()) {
+        const indexId = indexCatalog.get(indexedField) as CoID<RawCoMap>;
         this.raw.core.node
           .load(indexId as CoID<RawCoMap>)
           .then((indexRecord) => {
             if (!indexRecord || indexRecord === "unavailable") return;
             for (const item of items) {
-              indexRecord.set(item.$jazz.id, item[elementKey]);
+              indexRecord.set(item.$jazz.id, item[indexedField]);
             }
           });
       }
@@ -902,10 +911,6 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
         : never
     >;
   } {
-    console.log("Using index for returning refs", {
-      usingIndex: this.usingIndex,
-      indexes: this._indexes(),
-    });
     const sortedListIndices = this.raw
       .entries()
       .map((entry) => entry.value as string);
