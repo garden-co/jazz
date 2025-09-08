@@ -144,4 +144,40 @@ describe("Generic Repository", () => {
 
     expect(found).toBeNull();
   });
+
+  it("should allow recreating an entity after deletion by identifier", async () => {
+    const repository = new JazzRepository(databaseSchema, databaseRoot, worker);
+
+    const identifier = "test";
+
+    const entity = await repository.create(
+      "session",
+      {
+        userId: "test",
+        token: "test",
+      },
+      identifier,
+    );
+
+    await repository.deleteValue("session", [
+      {
+        field: "id",
+        operator: "eq",
+        value: entity.$jazz.id,
+        connector: "AND",
+      },
+    ]);
+
+    const entity2 = await repository.create(
+      "session",
+      {
+        userId: "test",
+        token: "test",
+      },
+      identifier,
+    );
+
+    expect(entity2.$jazz.id).toBe(entity.$jazz.id);
+    expect(entity2.$jazz.raw.get("_deleted")).toBe(false);
+  });
 });

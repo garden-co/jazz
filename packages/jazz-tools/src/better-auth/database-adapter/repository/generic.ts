@@ -70,11 +70,41 @@ export class JazzRepository {
 
     const list = resolved.tables?.[model] as unknown as CoList<CoMap>;
 
-    // Use the same owner of the table.
-    const node = schema.create(data, {
+    if (!uniqueId) {
+      // Use the same owner of the table.
+      const node = schema.create(data, {
+        owner: list.$jazz.owner,
+      });
+
+      list.$jazz.push(node);
+
+      return node;
+    }
+
+    // If we have a unique id, we must check for soft deleted items first
+    const existingNode = (await schema.loadUnique(
+      uniqueId,
+      list.$jazz.owner.$jazz.id,
+    )) as CoMap | null;
+
+    // if the entity exists and is not soft deleted, we must throw an error
+    if (existingNode && existingNode.$jazz?.raw.get("_deleted") !== true) {
+      throw new Error("Entity already exists");
+    }
+
+    // create the entity or update the deleted one
+    const node = await schema.upsertUnique({
+      value: {
+        ...data,
+        _deleted: false,
+      },
       owner: list.$jazz.owner,
       unique: uniqueId,
     });
+
+    if (!node) {
+      throw new Error("Unable to create entity");
+    }
 
     list.$jazz.push(node);
 
