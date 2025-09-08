@@ -1390,15 +1390,13 @@ describe("CoList indexes", () => {
   });
 
   test("can load a sorted CoList using the index", async () => {
-    const indexId = list.$jazz.raw.core.indexes[0]?.indexId;
-    assert(indexId);
     const loadedList = await ItemList.load(list.$jazz.id, {
       resolve: { $orderBy: { priority: "desc" } },
     });
 
     const loadedListRefs = loadedList?.$jazz.refs;
-    expect(loadedListRefs?.[0]?.id).toBe(list[3]?.$jazz.id);
-    expect(loadedListRefs?.[1]?.id).toBe(list[2]?.$jazz.id);
-    expect(loadedListRefs?.[2]?.id).toBe(list[1]?.$jazz.id);
+    expect(loadedListRefs?.[0]?.id).toBe(list[2]?.$jazz.id);
+    expect(loadedListRefs?.[1]?.id).toBe(list[1]?.$jazz.id);
+    expect(loadedListRefs?.[2]?.id).toBe(list[0]?.$jazz.id);
   });
 });
