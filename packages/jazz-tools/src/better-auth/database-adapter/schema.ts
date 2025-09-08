@@ -210,8 +210,11 @@ export function tableItem2Record(
     return tableItem;
   }
 
+  // tableItem.toJSON() transforms Date objects to ISO strings
+  // by returning ...rest, we keep the objects
+  const { $jazz, ...rest } = tableItem;
   return {
-    ...tableItem.toJSON(),
-    id: tableItem.$jazz.id,
+    ...rest,
+    id: $jazz.id,
   };
 }
