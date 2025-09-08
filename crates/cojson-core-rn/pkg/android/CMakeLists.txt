@@ -59,7 +59,8 @@ set_target_properties(cojson_core_rn_rust PROPERTIES IMPORTED_LOCATION ${RUST_ST
 # Find and link cxxbridge runtime library
 # Use absolute path to crates directory to work from node_modules
 set(CRATES_DIR "/Users/brad/dev/jazz/crates")
-file(GLOB CXXBRIDGE_LIB "${CRATES_DIR}/target/${RUST_TARGET}/release/build/cxx-*/out/libcxxbridge1.a")
+file(GLOB_RECURSE CXXBRIDGE_LIB "${CRATES_DIR}/target/${RUST_TARGET}/release/build/**/libcxxbridge1.a")
+message(STATUS "CXXBRIDGE_LIB: ${CXXBRIDGE_LIB}")
 if(CXXBRIDGE_LIB)
     add_library(cxxbridge1 STATIC IMPORTED)
     set_target_properties(cxxbridge1 PROPERTIES IMPORTED_LOCATION ${CXXBRIDGE_LIB})

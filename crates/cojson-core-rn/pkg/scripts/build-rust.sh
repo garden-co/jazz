@@ -184,9 +184,9 @@ $CARGO build --target "$RUST_TARGET" --release
 echo "Copying library to output directories"
 
 if [ "$PLATFORM" = "android" ]; then
-  # Android: copy .so files to android/{arch}
-  mkdir -p "$BUILD_DIR/android/$ARCHS"
-  cp "$CRATES_DIR/target/$RUST_TARGET/release/libcojson_core_rn.so" "$BUILD_DIR/android/$ARCHS/"
+  # Android: copy .a files to android directory
+  mkdir -p "$BUILD_DIR/android"
+  cp "$CRATES_DIR/target/$RUST_TARGET/release/libcojson_core_rn.a" "$BUILD_DIR/android/libcojson_core_rn.a"
 else
   # iOS: copy .a files to ios directory for vendored_libraries
   cp "$CRATES_DIR/target/$RUST_TARGET/release/libcojson_core_rn.a" "$BUILD_DIR/ios/"
