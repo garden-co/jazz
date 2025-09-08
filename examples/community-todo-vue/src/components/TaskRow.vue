@@ -10,20 +10,20 @@
     </div>
     <div class="task-content">
       <div class="task-text-container">
-        <span 
-          v-if="task?.text" 
+        <span
+          v-if="task?.text"
           :class="['task-text', { 'task-done': task?.done }]"
         >
           {{ task.text }}
         </span>
         <div v-else class="skeleton skeleton-text"></div>
-        
-        <span 
-          v-if="task?.$jazz.getEdits().text?.by?.profile?.name"
+
+        <span
+          v-if="task?.$jazz?.getEdits()?.text?.by?.profile?.name"
           class="task-author"
-          :style="getAuthorStyle(task.$jazz.getEdits().text.by?.id ?? '')"
+          :style="getAuthorStyle(task.$jazz.getEdits().text?.by?.$jazz?.id ?? '')"
         >
-          {{ task.$jazz.getEdits().text.by?.profile?.name }}
+          {{ task.$jazz.getEdits().text?.by?.profile?.name }}
         </span>
         <div v-else class="skeleton skeleton-author"></div>
       </div>
@@ -36,7 +36,7 @@ import type { Loaded } from "jazz-tools";
 import type { Task } from "../schema";
 
 interface Props {
-  task: Loaded<typeof Task> | undefined;
+  task?: Loaded<typeof Task> | null;
 }
 
 const props = defineProps<Props>();
@@ -44,7 +44,7 @@ const props = defineProps<Props>();
 const handleToggle = (event: Event) => {
   const target = event.target as HTMLInputElement;
   if (props.task) {
-    props.task.done = target.checked;
+    props.task.$jazz.set("done", target.checked);
   }
 };
 

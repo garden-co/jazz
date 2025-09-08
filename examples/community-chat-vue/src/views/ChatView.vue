@@ -2,7 +2,7 @@
   <div v-if="chat">
     <ChatBody>
       <template v-if="chat.length > 0">
-        <ChatBubble v-for="msg in displayedMessages" :key="msg.id" :msg="msg" />
+        <ChatBubble v-for="msg in displayedMessages" :key="msg?.$jazz.id" :msg="msg ?? {}" />
       </template>
       <EmptyChatMessage v-else />
       <button
@@ -20,7 +20,7 @@
 
 <script lang="ts">
 import { useCoState, createImage } from "community-jazz-vue";
-import { CoPlainText, type ID } from "jazz-tools";
+import { co, type ID } from "jazz-tools";
 import { type PropType, computed, defineComponent, ref } from "vue";
 import ChatBody from "../components/ChatBody.vue";
 import ChatBubble from "../components/ChatBubble.vue";
@@ -38,7 +38,7 @@ export default defineComponent({
   },
   props: {
     chatId: {
-      type: String as unknown as PropType<ID<Chat>>,
+      type: String as unknown as PropType<ID<typeof Chat>>,
       required: true,
     },
   },
@@ -56,10 +56,10 @@ export default defineComponent({
 
     function handleSubmit(text: string) {
       if (chat.value) {
-        chat.value.push(
+        chat.value.$jazz.push(
           Message.create(
-            { text: CoPlainText.create(text, chat.value._owner) },
-            chat.value._owner,
+            { text: co.plainText().create(text, chat.value.$jazz.owner) },
+            chat.value.$jazz.owner,
           ),
         );
       }
@@ -75,18 +75,18 @@ export default defineComponent({
 
       try {
         const image = await createImage(file, {
-          owner: chat.value._owner,
+          owner: chat.value.$jazz.owner,
           progressive: true,
           placeholder: "blur",
         });
 
-        chat.value.push(
+        chat.value.$jazz.push(
           Message.create(
             {
-              text: CoPlainText.create(file.name, chat.value._owner),
+              text: co.plainText().create(file.name, chat.value.$jazz.owner),
               image: image,
             },
-            chat.value._owner,
+            chat.value.$jazz.owner,
           ),
         );
       } catch (error) {

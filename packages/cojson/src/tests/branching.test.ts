@@ -5,6 +5,7 @@ import {
   loadCoValueOrFail,
 } from "./testUtils.js";
 import { expectList, expectMap, expectPlainText } from "../coValue.js";
+import { RawCoMap } from "../exports.js";
 
 let jazzCloud: ReturnType<typeof setupTestNode>;
 
@@ -94,7 +95,7 @@ describe("Branching Logic", () => {
       const result = expectMap(branch.core.mergeBranch().getCurrentContent());
 
       // Verify only one merge commit was created
-      expect(result.core.mergeCommits.length).toBe(1);
+      expect(branch.core.mergeCommits.length).toBe(1);
 
       // Verify source contains branch transactions
       expect(result.get("key1")).toBe("branchValue1");
@@ -154,7 +155,7 @@ describe("Branching Logic", () => {
       branch.core.mergeBranch();
 
       // Verify two merge commits exist
-      expect(originalMap.core.mergeCommits.length).toBe(2);
+      expect(branch.core.mergeCommits.length).toBe(2);
 
       // Verify both changes are now in original map
       expect(originalMap.get("key1")).toBe("branchValue1");
@@ -546,6 +547,49 @@ describe("Branching Logic", () => {
       expect(bobBranch.get("alice")).toBe(true);
       expect(aliceBranch.get("bob")).toBe(true);
     });
+  });
+
+  test("should alias the txID when a transaction comes from a merge", async () => {
+    const client = setupTestNode({
+      connected: true,
+    });
+    const group = client.node.createGroup();
+    const map = group.createMap();
+
+    map.set("key", "value");
+
+    const branch = map.core
+      .createBranch("feature-branch", group.id)
+      .getCurrentContent() as RawCoMap;
+    branch.set("branchKey", "branchValue");
+
+    const originalTxID = branch.core
+      .getValidTransactions({
+        skipBranchSource: true,
+        ignorePrivateTransactions: false,
+      })
+      .at(-1)?.txID;
+
+    branch.core.mergeBranch();
+
+    map.set("key2", "value2");
+
+    const validSortedTransactions = map.core.getValidSortedTransactions();
+
+    // Only the merged transaction should have the txId changed
+    const mergedTransactionIdx = validSortedTransactions.findIndex(
+      (tx) => tx.txID.branch,
+    );
+
+    expect(validSortedTransactions[mergedTransactionIdx - 1]?.txID.branch).toBe(
+      undefined,
+    );
+    expect(validSortedTransactions[mergedTransactionIdx]?.txID).toEqual(
+      originalTxID,
+    );
+    expect(validSortedTransactions[mergedTransactionIdx + 1]?.txID.branch).toBe(
+      undefined,
+    );
   });
 
   describe("hasBranch", () => {

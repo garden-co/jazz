@@ -138,6 +138,7 @@ export class RawCoList<
       sessionEntry[opID.txIndex] = txEntry;
     }
 
+    // Check if the change index already exists, may be the case of double merges
     if (txEntry[opID.changeIdx]) {
       return false;
     }
@@ -228,6 +229,7 @@ export class RawCoList<
             change,
           });
 
+          // If the change index already exists, we don't need to process it again
           if (!created) {
             continue;
           }

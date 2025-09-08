@@ -50,9 +50,9 @@ const handleSubmit = () => {
     { owner: projectGroup },
   );
 
-  me.value.root.projects.push(project);
+  me.value.root.projects.$jazz.push(project);
 
-  router.push(`/project/${project.id}`);
+  router.push(`/project/${project.$jazz.id}`);
   title.value = "";
 };
 </script>

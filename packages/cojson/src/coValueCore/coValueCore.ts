@@ -5,10 +5,10 @@ import type { RawCoValue } from "../coValue.js";
 import type { ControlledAccountOrAgent } from "../coValues/account.js";
 import type { RawGroup } from "../coValues/group.js";
 import { CO_VALUE_LOADING_CONFIG } from "../config.js";
+import { validateTxSizeLimitInBytes } from "../coValueContentMessage.js";
 import { coreToCoValue } from "../coreToCoValue.js";
 import {
   CryptoProvider,
-  Encrypted,
   Hash,
   KeyID,
   KeySecret,
@@ -17,7 +17,6 @@ import {
 } from "../crypto/crypto.js";
 import { AgentID, RawCoID, SessionID, TransactionID } from "../ids.js";
 import { JsonObject, JsonValue } from "../jsonValue.js";
-import { parseJSON, safeParseJSON } from "../jsonStringify.js";
 import { LocalNode, ResolveAccountAgentError } from "../localNode.js";
 import { logger } from "../logger.js";
 import { determineValidTransactions } from "../permissions.js";
@@ -28,14 +27,15 @@ import { getDependedOnCoValuesFromRawData } from "./utils.js";
 import { CoValueHeader, Transaction, VerifiedState } from "./verifiedState.js";
 import { SessionMap } from "./SessionMap.js";
 import {
+  MergeCommit,
   BranchPointerCommit,
-  MergeStartCommit,
-  MergedTransactionCommit,
+  MergedTransactionMetadata,
   createBranch,
   getBranchId,
   getBranchOwnerId,
   getBranchSource,
   mergeBranch,
+  BranchStartCommit,
 } from "./branching.js";
 import { type RawAccountID } from "../coValues/account.js";
 import { decodeTransactionChangesAndMeta } from "./decodeTransactionChangesAndMeta.js";
@@ -76,9 +76,6 @@ export type VerifiedTransaction = {
 
   // The previous verified transaction for the same session
   previous: VerifiedTransaction | undefined;
-
-  // True if the transaction has been merged from a branch
-  activeMerge: boolean;
 };
 
 export type DecryptedTransaction = {
@@ -617,6 +614,8 @@ export class CoValueCore {
       );
     }
 
+    validateTxSizeLimitInBytes(changes);
+
     // This is an ugly hack to get a unique but stable session ID for editing the current account
     const sessionID =
       this.verified.header.meta?.type === "account"
@@ -701,12 +700,10 @@ export class CoValueCore {
   }
 
   // The starting point of the branch, in case this CoValue is a branch
-  branchStart:
-    | { from: CoValueKnownState["sessions"]; madeAt: number }
-    | undefined;
+  branchStart: { from: BranchStartCommit["from"]; madeAt: number } | undefined;
 
   // The list of merge commits that have been made
-  mergeCommits: MergeStartCommit[] = [];
+  mergeCommits: MergeCommit[] = [];
   branches: BranchPointerCommit[] = [];
 
   // Reset the parsed transactions and branches, to validate them again from scratch when the group is updated
@@ -817,51 +814,51 @@ export class CoValueCore {
 
     transaction.hasMetaBeenParsed = true;
 
-    if (
-      this.isBranch() &&
-      transaction.meta?.from &&
-      (!this.branchStart || transaction.madeAt < this.branchStart.madeAt)
-    ) {
-      this.branchStart = {
-        from: transaction.meta.from as CoValueKnownState["sessions"],
-        madeAt: transaction.madeAt,
-      };
+    // Check if the transaction is a branch start
+    if (this.isBranch() && "from" in transaction.meta) {
+      if (!this.branchStart || transaction.madeAt < this.branchStart.madeAt) {
+        const commit = transaction.meta as BranchStartCommit;
+
+        this.branchStart = {
+          from: commit.from,
+          madeAt: transaction.madeAt,
+        };
+      }
     }
 
-    if (transaction.meta?.merge) {
-      const mergeCommit = transaction.meta as MergeStartCommit;
-      this.mergeCommits.push(mergeCommit);
-      transaction.activeMerge = true;
-
-      transaction.txID = {
-        sessionID: mergeCommit.s,
-        txIndex: mergeCommit.i,
-        branch: mergeCommit.b,
-      };
-    }
-
-    if (transaction.meta?.branch) {
+    // Check if the transaction is a branch pointer
+    if ("branch" in transaction.meta) {
       const branch = transaction.meta as BranchPointerCommit;
 
       this.branches.push(branch);
     }
 
-    const previousTransaction = transaction.previous;
+    // Check if the transaction has been merged from a branch
+    if ("mi" in transaction.meta) {
+      const meta = transaction.meta as MergedTransactionMetadata;
 
-    if (previousTransaction?.activeMerge) {
-      const mergeCommit = transaction.meta as MergedTransactionCommit;
+      // Check if the transaction is a merge commit
+      const previousTransaction = transaction.previous?.txID;
+      const sessionID = meta.s ?? previousTransaction?.sessionID;
 
-      transaction.txID = {
-        sessionID: mergeCommit.s ?? previousTransaction.txID.sessionID,
-        txIndex: mergeCommit.i,
-        branch: mergeCommit.b ?? previousTransaction.txID.branch,
-      };
-
-      if (mergeCommit.mergeEnd) {
-        transaction.activeMerge = false;
+      if (sessionID) {
+        transaction.txID = {
+          sessionID,
+          txIndex: meta.mi,
+          branch: meta.b ?? previousTransaction?.branch,
+        };
       } else {
-        transaction.activeMerge = true;
+        logger.error("Merge commit without session ID", {
+          txID: transaction.txID,
+          prev: previousTransaction ?? null,
+        });
       }
+    }
+
+    // Check if the transaction is a merged checkpoint for a branch
+    if ("merged" in transaction.meta) {
+      const mergeCommit = transaction.meta as MergeCommit;
+      this.mergeCommits.push(mergeCommit);
     }
   }
 
@@ -928,6 +925,8 @@ export class CoValueCore {
       const { txID } = transaction;
 
       const from = options?.from?.[txID.sessionID] ?? -1;
+
+      // Load the to filter index. Sessions that are not in the to filter will be skipped
       const to = options?.to ? (options.to[txID.sessionID] ?? -1) : Infinity;
 
       // The txIndex starts at 0 and from/to are referring to the count of transactions
@@ -1001,6 +1000,12 @@ export class CoValueCore {
         return ownerId === currentOwnerId;
       }
     });
+  }
+
+  getMergeCommits() {
+    this.parseNewTransactions(false);
+
+    return this.mergeCommits;
   }
 
   getValidSortedTransactions(options?: {

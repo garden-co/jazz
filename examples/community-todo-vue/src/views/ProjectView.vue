@@ -4,9 +4,9 @@
       <h1>
         <template v-if="project?.title !== 'Untitled'">
           {{ project?.title }}
-          <span class="project-id">({{ project?.id }})</span>
+          <span class="project-id">({{ project?.$jazz?.id }})</span>
         </template>
-        <div v-else class="skeleton skeleton-title"></div>
+        <span v-else class="skeleton skeleton-title" />
       </h1>
       <InviteButton :value="project" valueHint="project" />
     </div>
@@ -20,7 +20,7 @@
       <div class="table-body">
         <TaskRow
           v-for="task in project?.tasks || []"
-          :key="task.id"
+          :key="task?.$jazz.id"
           :task="task"
         />
         <NewTaskRow :createTask="createTask" :disabled="!project" />
@@ -31,7 +31,7 @@
 
 <script setup lang="ts">
 import { useCoState } from "community-jazz-vue";
-import { CoPlainText } from "jazz-tools";
+import { co } from "jazz-tools";
 import InviteButton from "../components/InviteButton.vue";
 import NewTaskRow from "../components/NewTaskRow.vue";
 import TaskRow from "../components/TaskRow.vue";
@@ -66,14 +66,14 @@ const createTask = (text: string) => {
   const task = Task.create(
     {
       done: false,
-      text: CoPlainText.create(text, project.value._owner),
+      text: co.plainText().create(text, project.value.$jazz.owner),
       version: 1,
     },
-    project.value._owner,
+    project.value.$jazz.owner,
   );
 
   // push will cause useCoState to rerender this component, both here and on other devices
-  project.value.tasks.push(task);
+  project.value.tasks.$jazz.push(task);
 };
 </script>
 

@@ -479,14 +479,14 @@ export class LocalNode {
       return branch.getCurrentContent() as T;
     }
 
+    // Do a synchronous check to see if the branch exists, if not we don't need to try to load the branch
     if (!source.hasBranch(branchName, branchOwnerID)) {
       return source
         .createBranch(branchName, branchOwnerID)
         .getCurrentContent() as T;
     }
 
-    // Passing skipRetry to true because otherwise creating a new branch would always take 1 retry delay
-    await this.loadCoValueCore(branch.id, undefined, true);
+    await this.loadCoValueCore(branch.id);
 
     if (!branch.isAvailable()) {
       return source

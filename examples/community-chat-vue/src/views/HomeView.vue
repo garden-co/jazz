@@ -22,7 +22,7 @@ watch(
         const group = Group.create({ owner: currentMe });
         group.addMember("everyone", "writer");
         const chat = Chat.create([], { owner: group });
-        router.push(`/chat/${chat.id}`);
+        router.push(`/chat/${chat.$jazz.id}`);
       } catch (error) {
         console.error("Failed to create chat:", error);
       }

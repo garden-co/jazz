@@ -1,7 +1,6 @@
 import {
   createContentMessage,
   exceedsRecommendedSize,
-  getTransactionSize,
 } from "../coValueContentMessage.js";
 import {
   type CoValueCore,

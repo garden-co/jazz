@@ -2,6 +2,7 @@ import { CoValueHeader, Transaction } from "./coValueCore/verifiedState.js";
 import { TRANSACTION_CONFIG } from "./config.js";
 import { Signature } from "./crypto/crypto.js";
 import { RawCoID, SessionID } from "./ids.js";
+import { JsonValue } from "./jsonValue.js";
 import { getPriorityFromHeader } from "./priority.js";
 import { NewContentMessage, emptyKnownState } from "./sync.js";
 
@@ -57,6 +58,18 @@ export function exceedsRecommendedSize(
   return (
     baseSize + transactionSize > TRANSACTION_CONFIG.MAX_RECOMMENDED_TX_SIZE
   );
+}
+
+export function validateTxSizeLimitInBytes(changes: JsonValue[]): void {
+  const serializedSize = new TextEncoder().encode(
+    JSON.stringify(changes),
+  ).length;
+  if (serializedSize > TRANSACTION_CONFIG.MAX_TX_SIZE_BYTES) {
+    throw new Error(
+      `Transaction is too large to be synced: ${serializedSize} > ${TRANSACTION_CONFIG.MAX_TX_SIZE_BYTES} bytes. ` +
+        `Consider breaking your transaction into smaller chunks.`,
+    );
+  }
 }
 
 export function knownStateFromContent(content: NewContentMessage) {

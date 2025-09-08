@@ -8,7 +8,6 @@ import {
   vi,
 } from "vitest";
 import { CoValueCore } from "../coValueCore/coValueCore.js";
-import { Transaction } from "../coValueCore/verifiedState.js";
 import { WasmCrypto } from "../crypto/WasmCrypto.js";
 import { stableStringify } from "../jsonStringify.js";
 import { LocalNode } from "../localNode.js";
@@ -24,7 +23,7 @@ import {
   tearDownTestMetricReader,
 } from "./testUtils.js";
 import { CO_VALUE_PRIORITY } from "../priority.js";
-import { determineValidTransactions } from "../permissions.js";
+import { setMaxTxSizeBytes } from "../config.js";
 
 const Crypto = await WasmCrypto.create();
 
@@ -86,6 +85,66 @@ test("transactions with wrong signature are rejected", () => {
 
   expect(result.isErr()).toBe(true);
   expect(newEntry.getValidSortedTransactions().length).toBe(0);
+});
+
+describe("transactions that exceed the byte size limit are rejected", () => {
+  beforeEach(() => {
+    setMaxTxSizeBytes(1 * 1024);
+  });
+
+  afterEach(() => {
+    setMaxTxSizeBytes(1 * 1024 * 1024);
+  });
+
+  test("makeTransaction should throw error when transaction exceeds byte size limit", () => {
+    const [agent, sessionID] = randomAgentAndSessionID();
+    const node = new LocalNode(agent.agentSecret, sessionID, Crypto);
+
+    const coValue = node.createCoValue({
+      type: "costream",
+      ruleset: { type: "unsafeAllowAll" },
+      meta: null,
+      ...Crypto.createdNowUnique(),
+    });
+
+    const largeBinaryData = "x".repeat(1024 + 100);
+
+    expect(() => {
+      coValue.makeTransaction(
+        [
+          {
+            data: largeBinaryData,
+          },
+        ],
+        "trusting",
+      );
+    }).toThrow(/Transaction is too large to be synced/);
+  });
+
+  test("makeTransaction should work for transactions under byte size limit", () => {
+    const [agent, sessionID] = randomAgentAndSessionID();
+    const node = new LocalNode(agent.agentSecret, sessionID, Crypto);
+
+    const coValue = node.createCoValue({
+      type: "costream",
+      ruleset: { type: "unsafeAllowAll" },
+      meta: null,
+      ...Crypto.createdNowUnique(),
+    });
+
+    const smallData = "Hello, world!";
+
+    const success = coValue.makeTransaction(
+      [
+        {
+          data: smallData,
+        },
+      ],
+      "trusting",
+    );
+
+    expect(success).toBe(true);
+  });
 });
 
 test("New transactions in a group correctly update owned values, including subscriptions", async () => {

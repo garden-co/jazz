@@ -7,10 +7,19 @@
 **/
 export const TRANSACTION_CONFIG = {
   MAX_RECOMMENDED_TX_SIZE: 100 * 1024,
+  /**
+   * Messages larger than this will be rejected when creating a transaction.
+   * The current limit is set at 1MB because that's the limit imposed by Cloudflare to Websocket messages.
+   */
+  MAX_TX_SIZE_BYTES: 1 * 1024 * 1024,
 };
 
 export function setMaxRecommendedTxSize(size: number) {
   TRANSACTION_CONFIG.MAX_RECOMMENDED_TX_SIZE = size;
+}
+
+export function setMaxTxSizeBytes(size: number) {
+  TRANSACTION_CONFIG.MAX_TX_SIZE_BYTES = size;
 }
 
 export const CO_VALUE_LOADING_CONFIG = {

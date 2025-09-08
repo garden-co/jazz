@@ -1,7 +1,7 @@
 <template>
   <div class="h-auto max-w-full rounded-t-xl mb-1">
     <Image
-      :image-id="image.id"
+      :image-id="image.$jazz.id"
       alt="Uploaded image"
       class-names="h-full rounded-t-xl"
       width="original"
