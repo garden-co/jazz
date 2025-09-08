@@ -10,6 +10,11 @@ const StyledHeading = styled("h1")<{ className?: string }>`
 export function Heading({
   children,
   className,
-}: React.PropsWithChildren<{ className?: string }>) {
-  return <StyledHeading className={className}>{children}</StyledHeading>;
+  id,
+}: React.PropsWithChildren<{ className?: string; id?: string }>) {
+  return (
+    <StyledHeading className={className} id={id}>
+      {children}
+    </StyledHeading>
+  );
 }
