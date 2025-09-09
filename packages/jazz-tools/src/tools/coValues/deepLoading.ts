@@ -44,6 +44,8 @@ export type RefsToResolve<
                   >;
                   // TODO tighten field's type
                   $orderBy?: { [field: string]: "asc" | "desc" };
+                  $limit?: number;
+                  $offset?: number;
                   $onError?: null;
                 }
               | boolean

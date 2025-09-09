@@ -766,6 +766,23 @@ describe("CoList resolution", async () => {
 
     expect(loadedMap).not.toBe("unavailable");
   });
+
+  describe("query modifiers", () => {
+    describe("$limit and $offset", () => {
+      test("should limit the number of items returned", async () => {
+        const TestList = co.list(z.string());
+        const list = TestList.create(["a", "b", "c", "d", "e"]);
+        const paginatedList = await TestList.load(list.$jazz.id, {
+          resolve: {
+            $limit: 2,
+            $offset: 1,
+          },
+        });
+        console.log(paginatedList!.$jazz.refs);
+        expect(paginatedList).toEqual(["b", "c"]);
+      });
+    });
+  });
 });
 
 describe("CoList subscription", async () => {
@@ -1373,7 +1390,8 @@ describe("CoList indexes", () => {
   });
 
   test("the index keeps track of CoList insertions", async () => {
-    const indexCatalog = await list.$jazz._indexCatalog();
+    // @ts-expect-error - indexCatalog is private
+    const indexCatalog = await list.$jazz.indexCatalog();
     assert(indexCatalog);
     const indexId = indexCatalog.get(indexCatalog.keys()[0]!) as
       | string
@@ -1397,10 +1415,12 @@ describe("CoList indexes", () => {
     const loadedList = await ItemList.load(list.$jazz.id, {
       resolve: { $orderBy: { priority: "desc" } },
     });
+    assert(loadedList);
 
     const loadedListRefs = loadedList?.$jazz.refs;
     expect(loadedListRefs?.[0]?.id).toBe(list[2]?.$jazz.id);
     expect(loadedListRefs?.[1]?.id).toBe(list[1]?.$jazz.id);
     expect(loadedListRefs?.[2]?.id).toBe(list[0]?.$jazz.id);
+    expect(loadedList).toEqual([list[2], list[1], list[0]]);
   });
 });
