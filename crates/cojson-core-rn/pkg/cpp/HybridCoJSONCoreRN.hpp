@@ -4,6 +4,7 @@
 #include "HybridCoJSONCoreRNSpec.hpp"
 #include "SessionLogHandle.hpp"
 #include "TransactionResult.hpp"
+#include "U8VecResult.hpp"
 
 namespace margelo::nitro::cojson_core_rn {
 
@@ -29,6 +30,10 @@ class HybridCoJSONCoreRN : public HybridCoJSONCoreRNSpec {
   TransactionResult decryptNextTransactionChangesJson(const SessionLogHandle& handle, double txIndex,
                                                       const std::shared_ptr<ArrayBuffer>& keySecret) override;
   void destroySessionLog(const SessionLogHandle& handle) override;
+  U8VecResult sealMessage(const std::shared_ptr<ArrayBuffer>& message, const std::string& senderSecret, 
+                          const std::string& recipientId, const std::shared_ptr<ArrayBuffer>& nonceMaterial) override;
+  U8VecResult unsealMessage(const std::shared_ptr<ArrayBuffer>& sealedMessage, const std::string& recipientSecret, 
+                            const std::string& senderId, const std::shared_ptr<ArrayBuffer>& nonceMaterial) override;
 };
 
 } // namespace margelo::nitro::cojson_core_rn

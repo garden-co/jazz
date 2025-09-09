@@ -1,3 +1,4 @@
+import { base64URLtoBytes } from "cojson";
 import {
   ControlledAccountOrAgent,
   JsonValue,
@@ -12,8 +13,11 @@ import {
   RawCoID,
   SessionID,
   PureJSCrypto,
+  CojsonInternalTypes,
+  bytesToBase64url,
 } from "cojson";
 import { HybridCoJSONCoreRN, SessionLogHandle } from "cojson-core-rn";
+import { textDecoder, textEncoder } from "cojson/dist/crypto/crypto.js";
 
 /**
  * React Native implementation of the CryptoProvider interface using cojson-core-rn.
@@ -31,6 +35,57 @@ export class RNCrypto extends PureJSCrypto {
 
   static async create(): Promise<RNCrypto> {
     return new RNCrypto();
+  }
+
+  seal<T extends JsonValue>({
+    message,
+    from,
+    to,
+    nOnceMaterial,
+  }: {
+    message: T;
+    from: CojsonInternalTypes.SealerSecret;
+    to: CojsonInternalTypes.SealerID;
+    nOnceMaterial: { in: RawCoID; tx: CojsonInternalTypes.TransactionID };
+  }): CojsonInternalTypes.Sealed<T> {
+    const { success, data, error } = HybridCoJSONCoreRN.sealMessage(
+      textEncoder.encode(stableStringify(message)).buffer as ArrayBuffer,
+      from,
+      to,
+      textEncoder.encode(stableStringify(nOnceMaterial)).buffer as ArrayBuffer,
+    );
+    if (!success) {
+      throw new Error(error);
+    }
+
+    return `sealed_U${bytesToBase64url(new Uint8Array(data))}` as CojsonInternalTypes.Sealed<T>;
+  }
+
+  unseal<T extends JsonValue>(
+    sealed: CojsonInternalTypes.Sealed<T>,
+    sealer: CojsonInternalTypes.SealerSecret,
+    from: CojsonInternalTypes.SealerID,
+    nOnceMaterial: { in: RawCoID; tx: CojsonInternalTypes.TransactionID },
+  ): T | undefined {
+    const { success, data, error } = HybridCoJSONCoreRN.unsealMessage(
+      base64URLtoBytes(sealed.substring("sealed_U".length))
+        .buffer as ArrayBuffer,
+      sealer,
+      from,
+      textEncoder.encode(stableStringify(nOnceMaterial)).buffer as ArrayBuffer,
+    );
+
+    if (!success) {
+      throw new Error(error);
+    }
+
+    const plaintext = textDecoder.decode(data);
+    try {
+      return JSON.parse(plaintext) as T;
+    } catch (e) {
+      console.error("Failed to decrypt/parse sealed message", { err: e });
+      return undefined;
+    }
   }
 
   createSessionLog(

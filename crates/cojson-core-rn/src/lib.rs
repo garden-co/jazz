@@ -2,6 +2,7 @@ use cojson_core::{
     CoID, KeyID, KeySecret, SessionID, SessionLogInternal, Signature, SignerID, SignerSecret,
     TransactionMode,
 };
+use cojson_core::{seal_internal, unseal_internal};
 use serde_json::value::RawValue;
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
@@ -24,6 +25,12 @@ mod ffi {
         signature: String,
         transaction: String,
         hash: String,
+    }
+
+    struct U8VecResult {
+        success: bool,
+        data: Vec<u8>,
+        error: String,
     }
 
     // Rust functions exposed to C++
@@ -65,6 +72,18 @@ mod ffi {
             tx_index: u32,
             key_secret: Vec<u8>,
         ) -> TransactionResult;
+        fn seal_message(
+            message: Vec<u8>,
+            sender_secret: String,
+            recipient_id: String,
+            nonce_material: Vec<u8>,
+        ) -> U8VecResult;
+        fn unseal_message(
+            sealed_message: Vec<u8>,
+            recipient_secret: String,
+            sender_id: String,
+            nonce_material: Vec<u8>,
+        ) -> U8VecResult;
         fn destroy_session_log(handle: &SessionLogHandle);
     }
 }
@@ -101,6 +120,24 @@ fn success_result(result: String) -> ffi::TransactionResult {
         success: true,
         result,
         error: String::new(),
+    }
+}
+
+// Helper function to create U8VecResult success
+fn u8vec_success_result(data: Vec<u8>) -> ffi::U8VecResult {
+    ffi::U8VecResult {
+        success: true,
+        data,
+        error: String::new(),
+    }
+}
+
+// Helper function to create U8VecResult error
+fn u8vec_error_result(error: String) -> ffi::U8VecResult {
+    ffi::U8VecResult {
+        success: false,
+        data: Vec::new(),
+        error,
     }
 }
 
@@ -312,4 +349,28 @@ pub fn destroy_session_log(handle: &ffi::SessionLogHandle) {
     let storage = ensure_storage();
     let mut logs = storage.lock().unwrap();
     logs.remove(&handle.id);
+}
+
+pub fn seal_message(
+    message: Vec<u8>,
+    sender_secret: String,
+    recipient_id: String,
+    nonce_material: Vec<u8>,
+) -> ffi::U8VecResult {
+    match seal_internal(&message, &sender_secret, &recipient_id, &nonce_material) {
+        Ok(sealed_data) => u8vec_success_result(sealed_data),
+        Err(e) => u8vec_error_result(format!("Failed to seal message: {}", e)),
+    }
+}
+
+pub fn unseal_message(
+    sealed_message: Vec<u8>,
+    recipient_secret: String,
+    sender_id: String,
+    nonce_material: Vec<u8>,
+) -> ffi::U8VecResult {
+    match unseal_internal(&sealed_message, &recipient_secret, &sender_id, &nonce_material) {
+        Ok(unsealed_data) => u8vec_success_result((*unsealed_data).to_vec()),
+        Err(e) => u8vec_error_result(format!("Failed to unseal message: {}", e)),
+    }
 }

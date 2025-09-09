@@ -83,4 +83,76 @@ void HybridCoJSONCoreRN::destroySessionLog(const SessionLogHandle& handle) {
   destroy_session_log(toRustHandle(handle));
 }
 
+U8VecResult HybridCoJSONCoreRN::sealMessage(const std::shared_ptr<ArrayBuffer>& message, const std::string& senderSecret, 
+                                            const std::string& recipientId, const std::shared_ptr<ArrayBuffer>& nonceMaterial) {
+  // Convert ArrayBuffer to rust::Vec<uint8_t>
+  rust::Vec<uint8_t> messageVec;
+  if (message) {
+    const uint8_t* data = message->data();
+    size_t size = message->size();
+    for (size_t i = 0; i < size; ++i) {
+      messageVec.push_back(data[i]);
+    }
+  }
+
+  rust::Vec<uint8_t> nonceMaterialVec;
+  if (nonceMaterial) {
+    const uint8_t* data = nonceMaterial->data();
+    size_t size = nonceMaterial->size();
+    for (size_t i = 0; i < size; ++i) {
+      nonceMaterialVec.push_back(data[i]);
+    }
+  }
+
+  auto result = seal_message(messageVec, rust::String(senderSecret), rust::String(recipientId), nonceMaterialVec);
+  
+  // Convert rust::Vec<uint8_t> to ArrayBuffer
+  std::shared_ptr<ArrayBuffer> dataArrayBuffer;
+  if (result.success && !result.data.empty()) {
+    dataArrayBuffer = std::make_shared<ArrayBuffer>(result.data.size());
+    uint8_t* buffer = dataArrayBuffer->data();
+    for (size_t i = 0; i < result.data.size(); ++i) {
+      buffer[i] = result.data[i];
+    }
+  }
+
+  return U8VecResult(result.success, dataArrayBuffer, std::string(result.error));
+}
+
+U8VecResult HybridCoJSONCoreRN::unsealMessage(const std::shared_ptr<ArrayBuffer>& sealedMessage, const std::string& recipientSecret, 
+                                              const std::string& senderId, const std::shared_ptr<ArrayBuffer>& nonceMaterial) {
+  // Convert ArrayBuffer to rust::Vec<uint8_t>
+  rust::Vec<uint8_t> sealedMessageVec;
+  if (sealedMessage) {
+    const uint8_t* data = sealedMessage->data();
+    size_t size = sealedMessage->size();
+    for (size_t i = 0; i < size; ++i) {
+      sealedMessageVec.push_back(data[i]);
+    }
+  }
+
+  rust::Vec<uint8_t> nonceMaterialVec;
+  if (nonceMaterial) {
+    const uint8_t* data = nonceMaterial->data();
+    size_t size = nonceMaterial->size();
+    for (size_t i = 0; i < size; ++i) {
+      nonceMaterialVec.push_back(data[i]);
+    }
+  }
+
+  auto result = unseal_message(sealedMessageVec, rust::String(recipientSecret), rust::String(senderId), nonceMaterialVec);
+  
+  // Convert rust::Vec<uint8_t> to ArrayBuffer
+  std::shared_ptr<ArrayBuffer> dataArrayBuffer;
+  if (result.success && !result.data.empty()) {
+    dataArrayBuffer = std::make_shared<ArrayBuffer>(result.data.size());
+    uint8_t* buffer = dataArrayBuffer->data();
+    for (size_t i = 0; i < result.data.size(); ++i) {
+      buffer[i] = result.data[i];
+    }
+  }
+
+  return U8VecResult(result.success, dataArrayBuffer, std::string(result.error));
+}
+
 } // namespace margelo::nitro::cojson_core_rn
