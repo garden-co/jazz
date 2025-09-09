@@ -144,11 +144,9 @@ export function isRefEncoded<V extends CoValue>(
 export function instantiateRefEncodedFromRaw<V extends CoValue>(
   schema: RefEncoded<V>,
   raw: RawCoValue,
-  isUsingIndex: boolean = false,
 ): V {
   return isCoValueClass<V>(schema.ref)
-    ? // @ts-expect-error - isUsingIndex is just a hack to make the CoList use the index
-      schema.ref.fromRaw(raw, isUsingIndex)
+    ? schema.ref.fromRaw(raw)
     : (schema.ref as (raw: RawCoValue) => CoValueClass<V> & CoValueFromRaw<V>)(
         raw,
       ).fromRaw(raw);
