@@ -1,7 +1,7 @@
 use crate::crypto::ed25519::{
     ed25519_sign_internal, ed25519_verify_internal, ed25519_verifying_key_internal,
 };
-use crate::error::CryptoError;
+use cojson_core::error::CryptoError;
 use bs58;
 use wasm_bindgen::prelude::*;
 
