@@ -14,6 +14,7 @@ import {
   coOptionalDefiner,
   hydrateCoreCoValueSchema,
   isAnyCoValueSchema,
+  pick,
 } from "../../../internal.js";
 import { AnonymousJazzAgent } from "../../anonymousJazzAgent.js";
 import { removeGetters } from "../../schemaUtils.js";
@@ -272,15 +273,7 @@ export function enrichCoMapSchema<
       return coOptionalDefiner(coValueSchema);
     },
     pick: <Keys extends keyof Shape>(keys: { [key in Keys]: true }) => {
-      const keysSet = new Set(Object.keys(keys));
-      const pickedShape: Record<string, AnyZodOrCoValueSchema> = {};
-
-      for (const [key, value] of Object.entries(coValueSchema.shape)) {
-        if (keysSet.has(key)) {
-          pickedShape[key] = value;
-        }
-      }
-
+      const pickedShape = pick(coValueSchema.shape, Object.keys(keys));
       return coMapDefiner(pickedShape);
     },
     partial: <Keys extends keyof Shape = keyof Shape>(
