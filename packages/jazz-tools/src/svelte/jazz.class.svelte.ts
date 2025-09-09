@@ -2,6 +2,7 @@ import type {
   Account,
   AccountClass,
   AnyAccountSchema,
+  BranchDefinition,
   CoValueClassOrSchema,
   CoValueFromRaw,
   InstanceOfSchema,
@@ -27,13 +28,15 @@ export class CoState<
   #id: string | undefined | null;
   #subscribe: () => void;
   #update = () => {};
+  #options: { resolve?: ResolveQueryStrict<V, R>, unstable_branch?: BranchDefinition } | undefined;
 
   constructor(
     Schema: V,
     id: string | undefined | null | (() => string | undefined | null),
-    options?: { resolve?: ResolveQueryStrict<V, R> },
+    options?: { resolve?: ResolveQueryStrict<V, R>, unstable_branch?: BranchDefinition } | (() => { resolve?: ResolveQueryStrict<V, R>, unstable_branch?: BranchDefinition }),
   ) {
     this.#id = $derived.by(typeof id === "function" ? id : () => id);
+    this.#options = $derived.by(typeof options === "function" ? options : () => options);
 
     this.#subscribe = createSubscriber((update) => {
       this.#update = update;
@@ -42,12 +45,15 @@ export class CoState<
     $effect.pre(() => {
       const ctx = this.#ctx.current;
       const id = this.#id;
+      const options = this.#options;
 
       return untrack(() => {
         if (!ctx || !id) {
           return this.update(undefined);
         }
         const agent = "me" in ctx ? ctx.me : ctx.guest;
+
+        console.log("options?.unstable_branch", options);
 
         const unsubscribe = subscribeToCoValue(
           coValueClassFromCoValueClassOrSchema(Schema),
@@ -63,6 +69,7 @@ export class CoState<
               this.update(null);
             },
             syncResolution: true,
+            unstable_branch: options?.unstable_branch,
           },
           (value) => {
             this.update(value as Loaded<V, R>);
