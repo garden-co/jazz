@@ -7,31 +7,28 @@ import { OrderForm } from "./OrderForm.tsx";
 import {
   BubbleTeaOrder,
   DraftBubbleTeaOrder,
+  getLastDraftId,
+  hasChanges,
   JazzAccount,
   validateDraftOrder,
 } from "./schema.ts";
 
-export function CreateOrder() {
+export function CreateOrder(props: { id: string }) {
   const { me } = useAccount(JazzAccount, {
     resolve: { root: { draft: true, orders: true } },
   });
   const router = useIframeHashRouter();
   const [errors, setErrors] = useState<string[]>([]);
 
-  const draft = useCoState(DraftBubbleTeaOrder, me?.root.draft.$jazz.id, {
+  const draft = useCoState(DraftBubbleTeaOrder, props.id, {
     resolve: { addOns: true, instructions: true },
   });
 
-  if (!me?.root) return;
-
-  const handleCancel = () => {
-    me.root.$jazz.set("draft", { addOns: [], instructions: "" });
-    router.navigate("/");
-  };
+  if (!draft) return;
 
   const handleSave = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
-    if (!draft) return;
+    if (!me) return;
 
     const validation = validateDraftOrder(draft);
     setErrors(validation.errors);
@@ -43,9 +40,20 @@ export function CreateOrder() {
     me.root.orders.$jazz.push(draft as BubbleTeaOrder);
 
     // reset the draft
-    me.root.$jazz.set("draft", { addOns: [], instructions: "" });
+    me.root.$jazz.set("draft", undefined);
 
     router.navigate("/");
+  };
+
+  const handleReset = () => {
+    if (!me) return;
+
+    if (!hasChanges(draft)) {
+      return;
+    }
+
+    me.root.$jazz.set("draft", undefined);
+    router.navigate("/#/new-order/" + getLastDraftId(me.root));
   };
 
   return (
@@ -59,7 +67,7 @@ export function CreateOrder() {
       <Errors errors={errors} />
 
       {draft && (
-        <OrderForm order={draft} onSave={handleSave} onCancel={handleCancel} />
+        <OrderForm order={draft} onSave={handleSave} onReset={handleReset} />
       )}
     </>
   );

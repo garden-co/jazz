@@ -14,12 +14,14 @@ export function OrderForm({
   order,
   onSave,
   onCancel,
+  onReset,
 }: {
   order:
     | co.loaded<typeof BubbleTeaOrder, ResolveQuery>
     | co.loaded<typeof DraftBubbleTeaOrder, ResolveQuery>;
   onSave: (e: React.FormEvent<HTMLFormElement>) => void;
-  onCancel: () => void;
+  onCancel?: () => void;
+  onReset?: () => void;
 }) {
   // Handles updates to the instructions field of the order.
   // If instructions already exist, applyDiff updates them incrementally.
@@ -66,12 +68,12 @@ export function OrderForm({
               value={addOn}
               name={addOn}
               id={addOn}
-              checked={order.addOns?.includes(addOn) || false}
+              checked={order.addOns.includes(addOn) || false}
               onChange={(e) => {
                 if (e.target.checked) {
-                  order.addOns?.$jazz.push(addOn);
+                  order.addOns.$jazz.push(addOn);
                 } else {
-                  order.addOns?.$jazz.remove((item) => item === addOn);
+                  order.addOns.$jazz.remove((item) => item === addOn);
                 }
               }}
             />
@@ -117,13 +119,24 @@ export function OrderForm({
         ></textarea>
       </div>
       <div className="flex gap-2 justify-end">
-        <button
-          type="button"
-          onClick={onCancel}
-          className="bg-gray-500 hover:bg-gray-700 text-white font-bold py-2 px-4 rounded cursor-pointer"
-        >
-          Cancel
-        </button>
+        {onCancel && (
+          <button
+            type="button"
+            onClick={onCancel}
+            className="bg-gray-500 hover:bg-gray-700 text-white font-bold py-2 px-4 rounded cursor-pointer"
+          >
+            Cancel
+          </button>
+        )}
+        {onReset && (
+          <button
+            type="button"
+            onClick={onReset}
+            className="bg-gray-500 hover:bg-gray-700 text-white font-bold py-2 px-4 rounded cursor-pointer"
+          >
+            Reset
+          </button>
+        )}
         <button
           type="submit"
           className="bg-blue-500 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded cursor-pointer"
