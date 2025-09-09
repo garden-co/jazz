@@ -16,6 +16,12 @@ export interface MakeTransactionResult {
   transaction: string;
 }
 
+export interface U8VecResult {
+  success: boolean;
+  data: ArrayBuffer;
+  error: string;
+}
+
 export interface CoJSONCoreRN
   extends HybridObject<{ ios: "c++"; android: "c++" }> {
   // Create a new session log instance
@@ -71,4 +77,20 @@ export interface CoJSONCoreRN
 
   // Destroy a session log instance to free memory
   destroySessionLog(handle: SessionLogHandle): void;
+
+  // Seal a message
+  sealMessage(
+    message: ArrayBuffer,
+    senderSecret: string,
+    recipientId: string,
+    nonceMaterial: ArrayBuffer,
+  ): U8VecResult;
+
+  // Unseal a message
+  unsealMessage(
+    sealedMessage: ArrayBuffer,
+    recipientSecret: string,
+    senderId: string,
+    nonceMaterial: ArrayBuffer,
+  ): U8VecResult;
 }
