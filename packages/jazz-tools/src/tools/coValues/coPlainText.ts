@@ -296,6 +296,11 @@ export class CoTextJazzApi<T extends CoPlainText> extends CoValueJazzApi<T> {
     return subscribeToExistingCoValue(this.coText, {}, listener);
   }
 
+  /**
+   * Merges a branch into their main CoValue.
+   *
+   * Doesn't have any effect when there are no changes to merge, or the current CoValue is not a branch
+   */
   unstable_merge() {
     unstable_mergeBranch(this.coText);
   }

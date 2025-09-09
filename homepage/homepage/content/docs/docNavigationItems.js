@@ -219,6 +219,11 @@ export const docNavigationItems = [
         done: 80,
       },
       {
+        name: "Version control",
+        href: "/docs/using-covalues/version-control",
+        done: 80,
+      },
+      {
         name: "History",
         href: "/docs/using-covalues/history",
         done: 100,

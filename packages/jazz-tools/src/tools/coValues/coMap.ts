@@ -878,6 +878,11 @@ class CoMapJazzApi<M extends CoMap> extends CoValueJazzApi<M> {
     return (this.coMap.constructor as typeof CoMap)._schema;
   }
 
+  /**
+   * Deeply merge the current branch into the main CoValues.
+   *
+   * Doesn't have any effect when there are no changes to merge, or the current CoValue is not a branch
+   */
   unstable_merge() {
     unstable_mergeBranch(this.coMap);
   }

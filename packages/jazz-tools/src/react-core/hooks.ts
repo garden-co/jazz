@@ -265,6 +265,58 @@ export function useCoState<
   options?: {
     /** Resolve query to specify which nested CoValues to load */
     resolve?: ResolveQueryStrict<S, R>;
+    /**
+     * Create a branch for version control and collaborative editing.
+     *
+     * Branches allow you to work on CoValues in isolation before merging changes back.
+     * This is useful for implementing features like drafts, collaborative editing,
+     * or any scenario where you want to make changes without immediately affecting
+     * the main version.
+     *
+     * The checkout of the branch is applied on all the resolved values.
+     *
+     * @param name - A unique name for the branch. This identifies the branch
+     *   and can be used to switch between different branches of the same CoValue.
+     * @param owner - The owner of the branch. Determines who can access and modify
+     *   the branch. If not provided, the branch is owned by the current user.
+     *
+     * @example
+     * ```tsx
+     * // Create a private branch for temporary edits
+     * const owner = useMemo(() => Group.create(), []);
+     * const order = useCoState(BubbleTeaOrder, orderId, {
+     *   unstable_branch: {
+     *     name: "edit-order",
+     *     owner, // Private group - only accessible to this component instance
+     *   },
+     * });
+     *
+     * // Changes are isolated until explicitly merged
+     * order?.$jazz.unstable_merge();
+     * ```
+     *
+     * @example
+     * ```tsx
+     * // Branch management with dynamic branch switching
+     * const [currentBranch, setCurrentBranch] = useState<string | undefined>();
+     *
+     * const document = useCoState(Document, documentId, {
+     *   unstable_branch: currentBranch ? {
+     *     name: currentBranch, // No owner, the branch has same permissions as the main
+     *   } : undefined,
+     * });
+     *
+     * // Switch between branches
+     * const switchToBranch = (branchName: string) => {
+     *   setCurrentBranch(branchName);
+     * };
+     *
+     * // Work on main branch
+     * const workOnMain = () => {
+     *   setCurrentBranch(undefined);
+     * };
+     * ```
+     */
     unstable_branch?: { name: string; owner?: Account | Group | null };
   },
 ): Loaded<S, R> | undefined | null {
