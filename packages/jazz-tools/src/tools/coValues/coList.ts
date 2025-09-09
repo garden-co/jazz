@@ -584,11 +584,10 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
    * Returns a specific index for this CoList
    * @internal
    */
-  private indexRecord(): RawCoMap {
-    const indexCatalog = this.indexCatalog();
+  private indexRecord(indexedField: string): RawCoMap {
     return this.localNode
       .expectCoValueLoaded(
-        indexCatalog.get(indexCatalog.keys()[0]!) as CoID<RawCoMap>,
+        this.indexCatalog().get(indexedField) as CoID<RawCoMap>,
       )
       .getCurrentContent() as RawCoMap;
   }
@@ -900,6 +899,10 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
   }
 
   /**
+   * A CoList's items can be filtered, sorted and paginated when loading it.
+   * This means the indexes in the CoList may differ from the indexes in the
+   * underlying RawCoList. This mapping is used to map the indexes in the CoList
+   * to the indexes in the RawCoList.
    * @internal
    */
   private get indexMapping(): Record<number, number> | null {
@@ -909,16 +912,20 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
     const { limit = Infinity, offset = 0, orderBy } = this.queryModifiers;
     let allArrayIndexes = this.raw.entries().map((_entry, idx) => idx);
     if (orderBy !== undefined) {
+      const { indexedField, orderDirection } = orderBy;
       const valuesWithIndexes = this.raw.entries().map((entry, idx) => ({
         originalArrayIdx: idx,
         indexedValue: entry.value as string,
       }));
-      // TODO fetch index record for orderBy field
-      const indexRecord = this.indexRecord().toJSON() as Record<string, number>;
-      // TODO support sorting asc or desc - sorting only desc by now
+      const indexRecord = this.indexRecord(indexedField).toJSON() as Record<
+        string,
+        number
+      >;
       allArrayIndexes = valuesWithIndexes
-        .toSorted(
-          (a, b) => indexRecord[b.indexedValue]! - indexRecord[a.indexedValue]!,
+        .toSorted((a, b) =>
+          orderDirection === "desc"
+            ? indexRecord[b.indexedValue]! - indexRecord[a.indexedValue]!
+            : indexRecord[a.indexedValue]! - indexRecord[b.indexedValue]!,
         )
         .map((valueWithIndex) => valueWithIndex.originalArrayIdx);
     }

@@ -778,7 +778,6 @@ describe("CoList resolution", async () => {
             $offset: 1,
           },
         });
-        console.log(paginatedList!.$jazz.refs);
         expect(paginatedList).toEqual(["b", "c"]);
       });
     });
@@ -1383,8 +1382,8 @@ describe("CoList indexes", () => {
   beforeEach(async () => {
     list = ItemList.create([]);
     list.$jazz.push(
-      Score.create({ priority: 1 }),
       Score.create({ priority: 2 }),
+      Score.create({ priority: 1 }),
       Score.create({ priority: 3 }),
     );
   });
@@ -1404,14 +1403,14 @@ describe("CoList indexes", () => {
     const indexRecord = await IndexRecord.load(indexId);
     expect(indexRecord).toEqual(
       expect.objectContaining({
-        [list[0]!.$jazz.id]: 1,
-        [list[1]!.$jazz.id]: 2,
+        [list[0]!.$jazz.id]: 2,
+        [list[1]!.$jazz.id]: 1,
         [list[2]!.$jazz.id]: 3,
       }),
     );
   });
 
-  test("can load a sorted CoList using the index", async () => {
+  test("can load a sorted CoList in descending order using the index", async () => {
     const loadedList = await ItemList.load(list.$jazz.id, {
       resolve: { $orderBy: { priority: "desc" } },
     });
@@ -1419,8 +1418,16 @@ describe("CoList indexes", () => {
 
     const loadedListRefs = loadedList?.$jazz.refs;
     expect(loadedListRefs?.[0]?.id).toBe(list[2]?.$jazz.id);
-    expect(loadedListRefs?.[1]?.id).toBe(list[1]?.$jazz.id);
-    expect(loadedListRefs?.[2]?.id).toBe(list[0]?.$jazz.id);
-    expect(loadedList).toEqual([list[2], list[1], list[0]]);
+    expect(loadedListRefs?.[1]?.id).toBe(list[0]?.$jazz.id);
+    expect(loadedListRefs?.[2]?.id).toBe(list[1]?.$jazz.id);
+    expect(loadedList).toEqual([list[2], list[0], list[1]]);
+  });
+
+  test("can load a sorted CoList in ascending order using the index", async () => {
+    const loadedList = await ItemList.load(list.$jazz.id, {
+      resolve: { $orderBy: { priority: "asc" } },
+    });
+    assert(loadedList);
+    expect(loadedList).toEqual([list[1], list[0], list[2]]);
   });
 });
