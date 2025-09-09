@@ -228,16 +228,15 @@ export class CoList<out Item = any>
   toJSON(_key?: string, seenAbove?: ID<CoValue>[]): any[] {
     const itemDescriptor = this.$jazz.schema[ItemsSym] as Schema;
     if (itemDescriptor === "json") {
-      return this.$jazz.raw.asArray();
+      return this.$jazz.asArray();
     } else if ("encoded" in itemDescriptor) {
-      return this.$jazz.raw
-        .asArray()
-        .map((e) => itemDescriptor.encoded.encode(e));
+      return this.$jazz.asArray().map((e) => itemDescriptor.encoded.encode(e));
     } else if (isRefEncoded(itemDescriptor)) {
       return this.map((item, idx) =>
         seenAbove?.includes((item as CoValue)?.$jazz.id)
           ? { _circular: (item as CoValue).$jazz.id }
-          : (item as unknown as CoValue)?.toJSON(idx + "", [
+          : // TODO take index mapping into account?
+            (item as unknown as CoValue)?.toJSON(idx + "", [
               ...(seenAbove || []),
               this.$jazz.id,
             ]),
@@ -567,18 +566,26 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
     if (rawValue === null && !itemDescriptor.optional) {
       throw new Error(`Cannot set required reference ${index} to undefined`);
     }
-    this.raw.replace(index, rawValue);
+    this.raw.replace(this.toRawIndex(index), rawValue);
   }
 
-  _indexCatalog(): RawCoMap {
+  /**
+   * Returns a CoMap that contains all indexes that involve this CoList
+   * @internal
+   */
+  private indexCatalog(): RawCoMap {
     const indexCatalogId = this.raw.core.indexCatalogId;
     return this.localNode
       .expectCoValueLoaded(indexCatalogId!)
       .getCurrentContent() as RawCoMap;
   }
 
-  _indexRecord(): RawCoMap {
-    const indexCatalog = this._indexCatalog();
+  /**
+   * Returns a specific index for this CoList
+   * @internal
+   */
+  private indexRecord(): RawCoMap {
+    const indexCatalog = this.indexCatalog();
     return this.localNode
       .expectCoValueLoaded(
         indexCatalog.get(indexCatalog.keys()[0]!) as CoID<RawCoMap>,
@@ -596,7 +603,7 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
     const itemsDescriptor = this.schema[ItemsSym];
 
     if (isRefEncoded(itemsDescriptor)) {
-      const indexCatalog = this._indexCatalog();
+      const indexCatalog = this.indexCatalog();
       for (const indexedField of indexCatalog.keys()) {
         const indexId = indexCatalog.get(indexedField) as CoID<RawCoMap>;
         this.raw.core.node
@@ -646,7 +653,7 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
   pop(): CoListItem<L> | undefined {
     const last = this.coList[this.coList.length - 1];
 
-    this.raw.delete(this.coList.length - 1);
+    this.raw.delete(this.toRawIndex(this.coList.length - 1));
 
     return last;
   }
@@ -660,7 +667,7 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
   shift(): CoListItem<L> | undefined {
     const first = this.coList[0];
 
-    this.raw.delete(0);
+    this.raw.delete(this.toRawIndex(0));
 
     return first;
   }
@@ -686,7 +693,7 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
       idxToDelete >= start;
       idxToDelete--
     ) {
-      this.raw.delete(idxToDelete);
+      this.raw.delete(this.toRawIndex(idxToDelete));
     }
 
     const rawItems = toRawItems(
@@ -707,7 +714,7 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
       if (start === 0) {
         this.raw.prepend(item);
       } else {
-        this.raw.append(item, Math.max(start - 1, 0));
+        this.raw.append(item, this.toRawIndex(Math.max(start - 1, 0)));
       }
       return deleted;
     }
@@ -724,7 +731,7 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
       let appendAfter = Math.max(start - 1, 0);
       for (const item of rawItems) {
         if (item === undefined) continue;
-        this.raw.append(item, appendAfter);
+        this.raw.append(item, this.toRawIndex(appendAfter));
         appendAfter++;
       }
     }
@@ -771,7 +778,7 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
     }
     const deletedItems = indices.map((index) => this.coList[index]);
     for (const index of indices.reverse()) {
-      this.raw.delete(index);
+      this.raw.delete(this.toRawIndex(index));
     }
     return deletedItems;
   }
@@ -800,7 +807,7 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
    * @category Content
    */
   applyDiff(result: CoFieldInit<CoListItem<L>>[]): L {
-    const current = this.raw.asArray() as CoFieldInit<CoListItem<L>>[];
+    const current = this.asArray() as CoFieldInit<CoListItem<L>>[];
     const comparator = isRefEncoded(this.schema[ItemsSym])
       ? (aIdx: number, bIdx: number) => {
           const oldCoValueId = (current[aIdx] as CoValue)?.$jazz?.id;
@@ -881,11 +888,58 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
     return this.schema[ItemsSym];
   }
 
-  get usingIndex(): boolean {
+  /**
+   * Returns the query modifiers ($orderBy, $limit, $offset) used to load the CoList
+   * @internal
+   */
+  private get queryModifiers() {
     const subscriptionScope: SubscriptionScope<CoList> | undefined =
       // @ts-expect-error - _subscriptionScope is not defined in CoValueJazzApi but is set using Object.defineProperty
       this._subscriptionScope;
-    return !!subscriptionScope?.sortByIndex;
+    return subscriptionScope?.queryModifiers ?? {};
+  }
+
+  /**
+   * @internal
+   */
+  private get indexMapping(): Record<number, number> | null {
+    if (Object.keys(this.queryModifiers).length === 0) {
+      return null;
+    }
+    const { limit = Infinity, offset = 0, orderBy } = this.queryModifiers;
+    let allArrayIndexes = this.raw.entries().map((_entry, idx) => idx);
+    if (orderBy !== undefined) {
+      const valuesWithIndexes = this.raw.entries().map((entry, idx) => ({
+        originalArrayIdx: idx,
+        indexedValue: entry.value as string,
+      }));
+      // TODO fetch index record for orderBy field
+      const indexRecord = this.indexRecord().toJSON() as Record<string, number>;
+      // TODO support sorting asc or desc - sorting only desc by now
+      allArrayIndexes = valuesWithIndexes
+        .toSorted(
+          (a, b) => indexRecord[b.indexedValue]! - indexRecord[a.indexedValue]!,
+        )
+        .map((valueWithIndex) => valueWithIndex.originalArrayIdx);
+    }
+    return Object.fromEntries(
+      allArrayIndexes
+        .slice(offset, offset + limit)
+        .map((originalIdx, idx) => [idx, originalIdx]),
+    );
+  }
+
+  /**
+   * Converts a CoList index into an index in the raw CoList
+   * @param index - The index in the CoList
+   * @returns The index in the raw CoList
+   * @internal
+   */
+  toRawIndex(index: number): number {
+    const idxMapping = this.indexMapping;
+    return !idxMapping || idxMapping[index] === undefined
+      ? index
+      : idxMapping[index];
   }
 
   /**
@@ -916,21 +970,13 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
         : never
     >;
   } {
-    const sortedListIndices = this.raw
-      .entries()
-      .map((entry) => entry.value as string);
-    if (this.usingIndex) {
-      const indexRecord = this._indexRecord().toJSON() as Record<
-        string,
-        number
-      >;
-      // TODO support sorting asc or desc - sorting only desc by now
-      sortedListIndices.sort((a, b) => indexRecord[b]! - indexRecord[a]!);
-    }
     return makeRefs<number>(
       this.coList,
-      (idx) => sortedListIndices[idx] as unknown as ID<CoValue>,
-      () => Array.from({ length: this.raw.entries().length }, (_, idx) => idx),
+      (idx) => {
+        const rawIdx = this.toRawIndex(Number(idx));
+        return this.raw.get(rawIdx) as unknown as ID<CoValue>;
+      },
+      () => Array.from({ length: this.length }, (_, idx) => idx),
       this.loadedAs,
       (_idx) => this.schema[ItemsSym] as RefEncoded<CoValue>,
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -956,6 +1002,24 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
   /** @internal */
   get raw(): RawCoList {
     return this.getRaw();
+  }
+
+  /** @internal */
+  get length(): number {
+    return this.indexMapping
+      ? Object.keys(this.indexMapping).length
+      : this.raw.entries().length;
+  }
+
+  /** @internal */
+  asArray(): JsonValue[] {
+    const rawArray = this.raw.asArray();
+    if (!this.indexMapping) {
+      return rawArray;
+    }
+    return Object.values(this.indexMapping).map(
+      (originalIndex) => rawArray[originalIndex]!,
+    );
   }
 
   /** @internal */
@@ -1009,7 +1073,8 @@ const CoListProxyHandler: ProxyHandler<CoList> = {
   get(target, key, receiver) {
     if (typeof key === "string" && !isNaN(+key)) {
       const itemDescriptor = target.$jazz.schema[ItemsSym] as Schema;
-      const rawValue = target.$jazz.raw.get(Number(key));
+      const rawIdx = target.$jazz.toRawIndex(Number(key));
+      const rawValue = target.$jazz.raw.get(rawIdx);
       if (itemDescriptor === "json") {
         return rawValue;
       } else if ("encoded" in itemDescriptor) {
@@ -1019,10 +1084,10 @@ const CoListProxyHandler: ProxyHandler<CoList> = {
       } else if (isRefEncoded(itemDescriptor)) {
         return rawValue === undefined || rawValue === null
           ? undefined
-          : accessChildByKey(target, rawValue as string, key);
+          : accessChildByKey(target, rawValue as string, String(rawIdx));
       }
     } else if (key === "length") {
-      return target.$jazz.raw.entries().length;
+      return target.$jazz.length;
     } else {
       return Reflect.get(target, key, receiver);
     }
@@ -1057,7 +1122,7 @@ const CoListProxyHandler: ProxyHandler<CoList> = {
   },
   has(target, key) {
     if (typeof key === "string" && !isNaN(+key)) {
-      return Number(key) < target.$jazz.raw.entries().length;
+      return Number(key) < target.$jazz.length;
     } else {
       return Reflect.has(target, key);
     }
@@ -1065,7 +1130,9 @@ const CoListProxyHandler: ProxyHandler<CoList> = {
   ownKeys(target) {
     const keys = Reflect.ownKeys(target);
     // Add numeric indices for all entries in the list
-    const indexKeys = target.$jazz.raw.entries().map((_entry, i) => String(i));
+    const indexKeys = Array.from({ length: target.$jazz.length }, (_, i) =>
+      String(i),
+    );
     keys.push(...indexKeys);
     return keys;
   },
@@ -1082,7 +1149,7 @@ const CoListProxyHandler: ProxyHandler<CoList> = {
       return Reflect.getOwnPropertyDescriptor(target, key);
     } else if (typeof key === "string" && !isNaN(+key)) {
       const index = Number(key);
-      if (index >= 0 && index < target.$jazz.raw.entries().length) {
+      if (index >= 0 && index < target.$jazz.length) {
         return {
           enumerable: true,
           configurable: true,

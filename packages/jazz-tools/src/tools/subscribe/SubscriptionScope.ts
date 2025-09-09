@@ -10,6 +10,7 @@ import {
   TypeSym,
   instantiateRefEncodedFromRaw,
   isRefEncoded,
+  pick,
 } from "../internal.js";
 import { applyCoValueMigrations } from "../lib/migration.js";
 import { CoValueCoreSubscription } from "./CoValueCoreSubscription.js";
@@ -48,14 +49,16 @@ export class SubscriptionScope<D extends CoValue> {
 
   silenceUpdates = false;
 
-  sortByIndex:
-    | {
-        indexedField: string;
-        indexId: string;
-        orderDirection: "asc" | "desc";
-        indexRecord?: CoMap;
-      }
-    | undefined;
+  queryModifiers: {
+    orderBy?: {
+      indexedField: string;
+      indexId: string;
+      orderDirection: "asc" | "desc";
+      indexRecord?: CoMap;
+    };
+    limit?: number;
+    offset?: number;
+  } = {};
 
   constructor(
     public node: LocalNode,
@@ -69,10 +72,12 @@ export class SubscriptionScope<D extends CoValue> {
     this.resolve = resolve;
     this.value = { type: "unloaded", id };
 
-    const orderBy =
+    const queryModifiers =
       typeof this.resolve === "object" && this.resolve !== null
-        ? this.resolve["$orderBy"]
+        ? pick(this.resolve, ["$orderBy", "$limit", "$offset"])
         : undefined;
+    this.queryModifiers.limit = queryModifiers?.$limit;
+    this.queryModifiers.offset = queryModifiers?.$offset;
 
     let lastUpdate: RawCoValue | "unavailable" | undefined;
     this.subscription = new CoValueCoreSubscription(
@@ -88,8 +93,8 @@ export class SubscriptionScope<D extends CoValue> {
         }
 
         // TODO there's surely a better place to do this
-        if (value !== "unavailable" && orderBy) {
-          const order = Object.entries(orderBy)[0];
+        if (value !== "unavailable" && queryModifiers?.$orderBy) {
+          const order = Object.entries(queryModifiers.$orderBy)[0];
           const orderByField = order?.[0];
           const orderDirection = order?.[1] as "asc" | "desc";
 
@@ -104,12 +109,12 @@ export class SubscriptionScope<D extends CoValue> {
                 | string
                 | undefined;
               if (indexId) {
-                this.sortByIndex = {
+                this.queryModifiers.orderBy = {
                   indexedField: orderByField,
                   orderDirection,
                   indexId,
                 };
-                this.subscribeToId(this.sortByIndex.indexId, {
+                this.subscribeToId(indexId, {
                   ref: CoMap,
                   optional: false,
                 });
@@ -292,8 +297,11 @@ export class SubscriptionScope<D extends CoValue> {
       this.errorFromChildren = this.computeChildErrors();
     }
 
-    if (value.type === "loaded" && id === this.sortByIndex?.indexId) {
-      this.sortByIndex.indexRecord = value.value;
+    if (
+      value.type === "loaded" &&
+      id === this.queryModifiers.orderBy?.indexId
+    ) {
+      this.queryModifiers.orderBy.indexRecord = value.value;
     }
 
     // On child updates, we re-create the value instance to make the updates
