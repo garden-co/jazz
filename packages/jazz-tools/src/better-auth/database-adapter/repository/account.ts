@@ -4,6 +4,11 @@ import { JazzRepository } from "./generic";
 import { isWhereBySingleField } from "../utils";
 import type { TableItem } from "../schema";
 
+/**
+ * This list stores an array of covalues ID
+ * mapped by the accountID property.
+ * Because accountId is not unique, and it is used on every social login
+ */
 const AccountIdIndex = co.list(z.string());
 
 export class AccountRepository extends JazzRepository {
@@ -19,8 +24,8 @@ export class AccountRepository extends JazzRepository {
     const account = await super.create(model, data, uniqueId);
 
     await this.updateAccountIdIndex(
+      account[this.getAccountIdProperty()],
       account.$jazz.id,
-      this.getAccountIdProperty(),
     );
 
     return account;
@@ -38,9 +43,7 @@ export class AccountRepository extends JazzRepository {
     offset?: number,
   ): Promise<TableItem[]> {
     if (isWhereBySingleField(this.getAccountIdProperty(), where)) {
-      const accountIdIndex = await this.getAccountIdIndex(
-        this.getAccountIdProperty(),
-      );
+      const accountIdIndex = await this.getAccountIdIndex(where[0].value);
 
       const ids = accountIdIndex ?? [];
 
@@ -73,6 +76,7 @@ export class AccountRepository extends JazzRepository {
       const accountId = node.$jazz.raw.get(this.getAccountIdProperty()) as
         | string
         | undefined;
+
       if (accountId) {
         await this.deleteAccountIdIndex(accountId, node.$jazz.id);
       }
@@ -80,9 +84,12 @@ export class AccountRepository extends JazzRepository {
 
     return deleted;
   }
-  private async getAccountIdIndex(accountIdProperty: string) {
+
+  private async getAccountIdIndex(accountId: string) {
+    const indexUnique = this.getAccountIdProperty() + "_" + accountId;
+
     const accountIdIndex = await AccountIdIndex.loadUnique(
-      accountIdProperty,
+      indexUnique,
       this.owner.$jazz.id,
       {
         loadAs: this.worker,
@@ -92,32 +99,26 @@ export class AccountRepository extends JazzRepository {
     return accountIdIndex;
   }
 
-  private async updateAccountIdIndex(
-    accountId: string,
-    accountIdProperty: string,
-  ) {
-    const accountIdIndex = await this.getAccountIdIndex(accountIdProperty);
+  private async updateAccountIdIndex(accountId: string, entityId: string) {
+    const accountIdIndex = await this.getAccountIdIndex(accountId);
 
     const ids = accountIdIndex ?? [];
 
     await AccountIdIndex.upsertUnique({
-      value: [...ids, accountId],
-      unique: accountIdProperty,
+      value: [...ids, entityId],
+      unique: this.getAccountIdProperty() + "_" + accountId,
       owner: this.owner,
     });
   }
 
-  private async deleteAccountIdIndex(
-    accountId: string,
-    accountIdProperty: string,
-  ) {
-    const accountIdIndex = await this.getAccountIdIndex(accountIdProperty);
+  private async deleteAccountIdIndex(accountId: string, entityId: string) {
+    const accountIdIndex = await this.getAccountIdIndex(accountId);
 
     const ids = accountIdIndex ?? [];
 
     await AccountIdIndex.upsertUnique({
-      value: ids.filter((id) => id !== accountId),
-      unique: accountIdProperty,
+      value: ids.filter((id) => id !== entityId),
+      unique: this.getAccountIdProperty() + "_" + accountId,
       owner: this.owner,
     });
   }
