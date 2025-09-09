@@ -23,6 +23,7 @@ const branch = await Project.load(projectId, {
 ```
 </CodeGroup>
 
+<ContentByFramework framework={["react", "react-native", "expo"]}>
 You can also create a branch via the `useCoState` hook:
 
 <CodeGroup>
@@ -32,12 +33,25 @@ const branch = useCoState(Project, projectId, {
 });
 ```
 </CodeGroup>
+</ContentByFramework>
+<ContentByFramework framework={["svelte"]}>
+You can also create a branch via `CoState`:
+
+<CodeGroup>
+```ts
+const branch = new CoState(Project, projectId, {
+  unstable_branch: { name: "feature-branch" }
+});
+```
+</CodeGroup>
+</ContentByFramework>
 
 
 ### Making Changes
 
 Once you have a branch, you can make changes using the same methods as the original CoValue:
 
+<ContentByFramework framework={["react", "react-native", "expo", "vue", "vanilla"]}>  
 <CodeGroup>
 ```tsx 
 function EditProject({ projectId, currentBranchName }) {
@@ -72,6 +86,60 @@ function EditProject({ projectId, currentBranchName }) {
 }
 ```
 </CodeGroup>
+</ContentByFramework>
+<ContentByFramework framework={["svelte"]}>
+<CodeGroup>
+```svelte
+<script lang="ts">
+  import { CoState } from 'jazz-tools/svelte';
+  import { Project } from './schema.js';
+
+  let projectId = $state<string>();
+  let currentBranchName = $state<string>('main');
+
+  const project = new CoState(Project, () => projectId, () => ({
+    resolve: {
+      tasks: { $each: true }
+    },
+    unstable_branch: currentBranchName === 'main' ? undefined : { name: currentBranchName }
+  }));
+
+  function handleTitleChange(e: Event) {
+    const target = e.target as HTMLInputElement;
+    // Won't be visible on main until merged
+    project.current?.$jazz.set("title", target.value);
+  }
+
+  function handleTaskTitleChange(index: number, e: Event) {
+    const target = e.target as HTMLInputElement;
+    const task = project.current?.tasks[index];
+
+    // The task is also part of the branch because we used the `resolve` option
+    // with `tasks: { $each: true }`
+    // so the changes won't be visible on main until merged
+    task?.$jazz.set("title", target.value);
+  }
+</script>
+
+<form>
+  <!-- Edit form fields -->
+  <input 
+    type="text" 
+    value={project.current?.title || ''} 
+    oninput={handleTitleChange}
+  />
+  
+  {#each project.current?.tasks || [] as task, index}
+    <input 
+      type="text" 
+      value={task.title || ''} 
+      oninput={(e) => handleTaskTitleChange(index, e)}
+    />
+  {/each}
+</form>
+```
+</CodeGroup>
+</ContentByFramework>
 
 ### Merging
 
