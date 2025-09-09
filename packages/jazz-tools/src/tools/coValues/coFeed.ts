@@ -344,6 +344,14 @@ export class CoFeedJazzApi<F extends CoFeed> extends CoValueJazzApi<F> {
     return this.raw.id;
   }
 
+  get branchId(): ID<F> {
+    return this.raw.id;
+  }
+
+  get branchName(): string | undefined {
+    return this.raw.core.getCurrentBranchName();
+  }
+
   get isBranch(): boolean {
     return this.raw.core.isBranch();
   }

@@ -1,9 +1,10 @@
 import { cojsonInternals } from "cojson";
 import { WasmCrypto } from "cojson/crypto/WasmCrypto";
-import { assert, beforeEach, describe, expect, test } from "vitest";
+import { assert, beforeEach, describe, expect, test, vi } from "vitest";
 import { Group, co, subscribeToCoValue, z } from "../exports.js";
 
 import { createJazzTestAccount, setupJazzTestSync } from "../testing.js";
+import { waitFor } from "./utils.js";
 
 beforeEach(async () => {
   cojsonInternals.CO_VALUE_LOADING_CONFIG.RETRY_DELAY = 1000;
@@ -605,6 +606,187 @@ describe("CoMap Branching", async () => {
       expect(loadedLargeDoc.tags).toContain("updated");
       expect(loadedLargeDoc.tags).toContain("in-review");
       expect(loadedLargeDoc.content).toContain("updated version");
+    });
+  });
+
+  describe("subscription & loading", () => {
+    test("should carry the selected branch when calling value.subscribe", async () => {
+      const Person = co.map({
+        name: z.string(),
+        age: z.number(),
+        email: z.string(),
+        dog: co.map({
+          name: z.string(),
+          breed: z.string(),
+        }),
+      });
+
+      const group = Group.create();
+      group.addMember("everyone", "writer");
+
+      const originalPerson = Person.create(
+        {
+          name: "John Doe",
+          age: 30,
+          email: "john@example.com",
+          dog: { name: "Rex", breed: "Labrador" },
+        },
+        group,
+      );
+
+      // Create a branch and make changes
+      const branch = await Person.load(originalPerson.$jazz.id, {
+        unstable_branch: { name: "subscribe-branch" },
+      });
+
+      assert(branch);
+
+      const spy = vi.fn();
+      const unsubscribe = branch.$jazz.subscribe(
+        { resolve: { dog: true } },
+        (person) => {
+          expect(person.$jazz.branchName).toBe("subscribe-branch");
+          expect(person.$jazz.isBranch).toBe(true);
+          expect(person.dog.$jazz.branchName).toBe("subscribe-branch");
+          spy();
+        },
+      );
+
+      branch.$jazz.applyDiff({
+        name: "John Smith",
+        age: 31,
+        email: "john.smith@example.com",
+      });
+
+      // Wait for initial subscription
+      await waitFor(() => expect(spy).toHaveBeenCalled());
+
+      unsubscribe();
+    });
+
+    test("should carry the selected branch when calling value.ensureLoaded", async () => {
+      const Person = co.map({
+        name: z.string(),
+        age: z.number(),
+        email: z.string(),
+        dog: co.map({
+          name: z.string(),
+          breed: z.string(),
+        }),
+      });
+
+      const group = Group.create();
+      group.addMember("everyone", "writer");
+
+      const originalPerson = Person.create(
+        {
+          name: "John Doe",
+          age: 30,
+          email: "john@example.com",
+          dog: { name: "Rex", breed: "Labrador" },
+        },
+        group,
+      );
+
+      // Create a branch and make changes
+      const branch = await Person.load(originalPerson.$jazz.id, {
+        unstable_branch: { name: "ensure-loaded-branch" },
+      });
+
+      assert(branch);
+
+      branch.$jazz.applyDiff({
+        name: "John Smith",
+        age: 31,
+        email: "john.smith@example.com",
+      });
+
+      // Load the branch using ensureLoaded
+      const loadedPerson = await branch.$jazz.ensureLoaded({
+        resolve: { dog: true },
+      });
+
+      assert(loadedPerson);
+
+      expect(loadedPerson.$jazz.branchName).toBe("ensure-loaded-branch");
+      expect(loadedPerson.$jazz.isBranch).toBe(true);
+      expect(loadedPerson.dog.$jazz.branchName).toBe("ensure-loaded-branch");
+      expect(loadedPerson.dog.$jazz.isBranch).toBe(true);
+
+      // Verify we get the branch data, not the original data
+      expect(loadedPerson.name).toBe("John Smith");
+      expect(loadedPerson.age).toBe(31);
+      expect(loadedPerson.email).toBe("john.smith@example.com");
+    });
+
+    test("should checkout the branch when calling Schema.subscribe", async () => {
+      const Person = co.map({
+        name: z.string(),
+        age: z.number(),
+        email: z.string(),
+      });
+
+      const group = Group.create();
+      group.addMember("everyone", "writer");
+
+      const originalPerson = Person.create(
+        {
+          name: "John Doe",
+          age: 30,
+          email: "john@example.com",
+        },
+        group,
+      );
+
+      // Create a branch and make changes
+      const branch = await Person.load(originalPerson.$jazz.id, {
+        unstable_branch: { name: "schema-subscribe-branch" },
+      });
+
+      assert(branch);
+
+      branch.$jazz.applyDiff({
+        name: "John Smith",
+        age: 31,
+        email: "john.smith@example.com",
+      });
+
+      // Subscribe using Schema.subscribe with branch
+      const updates: co.loaded<typeof Person, true>[] = [];
+      const unsubscribe = Person.subscribe(
+        originalPerson.$jazz.id,
+        {
+          unstable_branch: { name: "schema-subscribe-branch" },
+        },
+        (person) => {
+          expect(person.$jazz.branchName).toBe("schema-subscribe-branch");
+          expect(person.$jazz.isBranch).toBe(true);
+          updates.push(person);
+        },
+      );
+
+      await waitFor(() => expect(updates).toHaveLength(1));
+      expect(updates[0]?.name).toBe("John Smith");
+      expect(updates[0]?.age).toBe(31);
+      expect(updates[0]?.email).toBe("john.smith@example.com");
+
+      // Make additional changes to the branch
+      branch.$jazz.applyDiff({
+        name: "John Updated",
+      });
+
+      // Verify we get the updated branch data
+      expect(updates).toHaveLength(2);
+      expect(updates[1]?.name).toBe("John Updated");
+      expect(updates[1]?.age).toBe(31);
+      expect(updates[1]?.email).toBe("john.smith@example.com");
+
+      // Verify original is still unchanged
+      expect(originalPerson.name).toBe("John Doe");
+      expect(originalPerson.age).toBe(30);
+      expect(originalPerson.email).toBe("john@example.com");
+
+      unsubscribe();
     });
   });
 });

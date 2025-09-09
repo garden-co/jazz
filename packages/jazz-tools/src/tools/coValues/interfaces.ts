@@ -156,12 +156,15 @@ export async function ensureCoValueLoaded<
   existing: V,
   options?: { resolve?: RefsToResolveStrict<V, R> } | undefined,
 ): Promise<Resolved<V, R>> {
+  const subscriptionScope = getSubscriptionScope<V>(existing);
+
   const response = await loadCoValue(
     existing.constructor as CoValueClass<V>,
     existing.$jazz.id,
     {
       loadAs: existing.$jazz.loadedAs,
       resolve: options?.resolve,
+      unstable_branch: subscriptionScope?.unstable_branch,
     },
   );
 

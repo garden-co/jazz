@@ -778,7 +778,6 @@ export class CoValueCore {
           hasInvalidChanges: false,
           hasInvalidMeta: false,
           hasMetaBeenParsed: false,
-          activeMerge: false,
           tx,
           previous: this.lastVerifiedTransactionBySessionID[sessionID],
         };
@@ -868,7 +867,7 @@ export class CoValueCore {
    * - Decodes the changes & meta for each transaction
    * - Parses the meta information of the transaction
    */
-  parseNewTransactions(ignorePrivateTransactions: boolean) {
+  private parseNewTransactions(ignorePrivateTransactions: boolean) {
     if (!this.isAvailable()) {
       return;
     }

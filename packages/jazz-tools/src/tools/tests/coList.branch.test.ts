@@ -1,9 +1,9 @@
 import { cojsonInternals } from "cojson";
-import { WasmCrypto } from "cojson/crypto/WasmCrypto";
-import { assert, beforeEach, describe, expect, test } from "vitest";
-import { Group, co, subscribeToCoValue, z } from "../exports.js";
+import { assert, beforeEach, describe, expect, test, vi } from "vitest";
+import { Group, co, z } from "../exports.js";
 
 import { createJazzTestAccount, setupJazzTestSync } from "../testing.js";
+import { waitFor } from "./utils.js";
 
 beforeEach(async () => {
   cojsonInternals.CO_VALUE_LOADING_CONFIG.RETRY_DELAY = 1000;
@@ -510,6 +510,214 @@ describe("CoList Branching", async () => {
       expect(loadedTaskList[3]!.title).toBe("Schedule dentist");
       expect(loadedTaskList[4]!.title).toBe("Review code");
       expect(loadedTaskList.length).toBe(5);
+    });
+  });
+
+  describe("subscription & loading", () => {
+    test("should carry the selected branch when calling value.subscribe", async () => {
+      const Task = co.map({
+        title: z.string(),
+        completed: z.boolean(),
+        priority: z.enum(["low", "medium", "high"]),
+      });
+
+      const TaskList = co.list(Task);
+
+      const group = Group.create();
+      group.addMember("everyone", "writer");
+
+      const originalTaskList = TaskList.create(
+        [
+          { title: "Buy groceries", completed: false, priority: "medium" },
+          { title: "Walk the dog", completed: false, priority: "high" },
+          { title: "Finish project", completed: true, priority: "high" },
+        ],
+        group,
+      );
+
+      // Create a branch and make changes
+      const branch = await TaskList.load(originalTaskList.$jazz.id, {
+        resolve: {
+          $each: true,
+        },
+        unstable_branch: { name: "subscribe-branch" },
+      });
+
+      assert(branch);
+
+      const spy = vi.fn();
+      const unsubscribe = branch.$jazz.subscribe(
+        { resolve: { $each: true } },
+        (taskList) => {
+          expect(taskList.$jazz.branchName).toBe("subscribe-branch");
+          expect(taskList.$jazz.isBranch).toBe(true);
+          expect(taskList[0]?.$jazz.branchName).toBe("subscribe-branch");
+          spy();
+        },
+      );
+
+      branch.$jazz.set(0, {
+        title: "Buy organic groceries",
+        completed: false,
+        priority: "high",
+      });
+      branch.$jazz.push({
+        title: "Call mom",
+        completed: false,
+        priority: "low",
+      });
+
+      // Wait for initial subscription
+      await waitFor(() => expect(spy).toHaveBeenCalled());
+
+      unsubscribe();
+    });
+
+    test("should carry the selected branch when calling value.ensureLoaded", async () => {
+      const Task = co.map({
+        title: z.string(),
+        completed: z.boolean(),
+        priority: z.enum(["low", "medium", "high"]),
+      });
+
+      const TaskList = co.list(Task);
+
+      const group = Group.create();
+      group.addMember("everyone", "writer");
+
+      const originalTaskList = TaskList.create(
+        [
+          { title: "Buy groceries", completed: false, priority: "medium" },
+          { title: "Walk the dog", completed: false, priority: "high" },
+          { title: "Finish project", completed: true, priority: "high" },
+        ],
+        group,
+      );
+
+      // Create a branch and make changes
+      const branch = await TaskList.load(originalTaskList.$jazz.id, {
+        resolve: {
+          $each: true,
+        },
+        unstable_branch: { name: "ensure-loaded-branch" },
+      });
+
+      assert(branch);
+
+      branch.$jazz.set(0, {
+        title: "Buy organic groceries",
+        completed: false,
+        priority: "high",
+      });
+      branch.$jazz.push({
+        title: "Call mom",
+        completed: false,
+        priority: "low",
+      });
+
+      // Load the branch using ensureLoaded
+      const loadedTaskList = await branch.$jazz.ensureLoaded({
+        resolve: { $each: true },
+      });
+
+      assert(loadedTaskList);
+
+      expect(loadedTaskList.$jazz.branchName).toBe("ensure-loaded-branch");
+      expect(loadedTaskList.$jazz.isBranch).toBe(true);
+      expect(loadedTaskList[0]?.$jazz.branchName).toBe("ensure-loaded-branch");
+      expect(loadedTaskList[0]?.$jazz.isBranch).toBe(true);
+
+      // Verify we get the branch data, not the original data
+      expect(loadedTaskList[0]?.title).toBe("Buy organic groceries");
+      expect(loadedTaskList[0]?.priority).toBe("high");
+      expect(loadedTaskList[3]?.title).toBe("Call mom");
+      expect(loadedTaskList[3]?.priority).toBe("low");
+    });
+
+    test("should checkout the branch when calling Schema.subscribe", async () => {
+      const Task = co.map({
+        title: z.string(),
+        completed: z.boolean(),
+        priority: z.enum(["low", "medium", "high"]),
+      });
+
+      const TaskList = co.list(Task);
+
+      const group = Group.create();
+      group.addMember("everyone", "writer");
+
+      const originalTaskList = TaskList.create(
+        [
+          { title: "Buy groceries", completed: false, priority: "medium" },
+          { title: "Walk the dog", completed: false, priority: "high" },
+          { title: "Finish project", completed: true, priority: "high" },
+        ],
+        group,
+      );
+
+      // Create a branch and make changes
+      const branch = await TaskList.load(originalTaskList.$jazz.id, {
+        resolve: {
+          $each: true,
+        },
+        unstable_branch: { name: "schema-subscribe-branch" },
+      });
+
+      assert(branch);
+
+      branch.$jazz.set(0, {
+        title: "Buy organic groceries",
+        completed: false,
+        priority: "high",
+      });
+      branch.$jazz.push({
+        title: "Call mom",
+        completed: false,
+        priority: "low",
+      });
+
+      // Subscribe using Schema.subscribe with branch
+      const updates: co.loaded<typeof TaskList, true>[] = [];
+      const unsubscribe = TaskList.subscribe(
+        originalTaskList.$jazz.id,
+        {
+          resolve: {
+            $each: true,
+          },
+          unstable_branch: { name: "schema-subscribe-branch" },
+        },
+        (taskList) => {
+          expect(taskList.$jazz.branchName).toBe("schema-subscribe-branch");
+          expect(taskList.$jazz.isBranch).toBe(true);
+          updates.push(taskList);
+        },
+      );
+
+      await waitFor(() => expect(updates).toHaveLength(1));
+      expect(updates[0]?.[0]?.title).toBe("Buy organic groceries");
+      expect(updates[0]?.[0]?.priority).toBe("high");
+      expect(updates[0]?.[3]?.title).toBe("Call mom");
+      expect(updates[0]?.[3]?.priority).toBe("low");
+
+      // Make additional changes to the branch
+      branch.$jazz.set(1, {
+        title: "Walk the cat",
+        completed: false,
+        priority: "medium",
+      });
+
+      // Verify we get the updated branch data
+      expect(updates[1]?.[1]?.title).toBe("Walk the cat");
+      expect(updates[1]?.[1]?.priority).toBe("medium");
+
+      // Verify original is still unchanged
+      expect(originalTaskList[0]?.title).toBe("Buy groceries");
+      expect(originalTaskList[0]?.priority).toBe("medium");
+      expect(originalTaskList[1]?.title).toBe("Walk the dog");
+      expect(originalTaskList[1]?.priority).toBe("high");
+      expect(originalTaskList.length).toBe(3);
+
+      unsubscribe();
     });
   });
 });
