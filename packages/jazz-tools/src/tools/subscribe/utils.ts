@@ -28,8 +28,7 @@ export function createCoValue<D extends CoValue>(
   raw: RawCoValue,
   subscriptionScope: SubscriptionScope<D>,
 ) {
-  const isUsingIndex = !!subscriptionScope.sortByIndex;
-  let freshValueInstance = instantiateRefEncodedFromRaw(ref, raw, isUsingIndex);
+  let freshValueInstance = instantiateRefEncodedFromRaw(ref, raw);
 
   Object.defineProperty(freshValueInstance.$jazz, "_subscriptionScope", {
     value: subscriptionScope,

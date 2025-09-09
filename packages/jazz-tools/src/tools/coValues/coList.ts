@@ -27,6 +27,7 @@ import {
   SchemaFor,
   SubscribeListenerOptions,
   SubscribeRestArgs,
+  SubscriptionScope,
   TypeSym,
   BranchDefinition,
 } from "../internal.js";
@@ -49,6 +50,10 @@ import {
   subscribeToCoValueWithoutMe,
   subscribeToExistingCoValue,
 } from "../internal.js";
+
+type CoValueView = {
+  orderBy: { [indexField: string]: "asc" | "desc" };
+};
 
 /**
  * CoLists are collaborative versions of plain arrays.
@@ -123,9 +128,7 @@ export class CoList<out Item = any>
     return Array;
   }
 
-  constructor(
-    options: { fromRaw: RawCoList; usingIndex: boolean } | undefined,
-  ) {
+  constructor(options: { fromRaw: RawCoList } | undefined) {
     super();
 
     const proxy = new Proxy(this, CoListProxyHandler as ProxyHandler<this>);
@@ -133,11 +136,7 @@ export class CoList<out Item = any>
     if (options && "fromRaw" in options) {
       Object.defineProperties(this, {
         $jazz: {
-          value: new CoListJazzApi(
-            proxy,
-            () => options.fromRaw,
-            options.usingIndex,
-          ),
+          value: new CoListJazzApi(proxy, () => options.fromRaw),
           enumerable: false,
         },
       });
@@ -258,7 +257,7 @@ export class CoList<out Item = any>
     raw: RawCoList,
     usingIndex: boolean,
   ) {
-    return new this({ fromRaw: raw, usingIndex });
+    return new this({ fromRaw: raw });
   }
 
   /** @internal */
@@ -553,7 +552,6 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
   constructor(
     private coList: L,
     private getRaw: () => RawCoList,
-    private usingIndex: boolean = false,
   ) {
     super(coList);
   }
@@ -881,6 +879,13 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
    */
   getItemsDescriptor(): Schema | undefined {
     return this.schema[ItemsSym];
+  }
+
+  get usingIndex(): boolean {
+    const subscriptionScope: SubscriptionScope<CoList> | undefined =
+      // @ts-expect-error - _subscriptionScope is not defined in CoValueJazzApi but is set using Object.defineProperty
+      this._subscriptionScope;
+    return !!subscriptionScope?.sortByIndex;
   }
 
   /**

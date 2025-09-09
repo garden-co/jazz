@@ -50,6 +50,7 @@ export class SubscriptionScope<D extends CoValue> {
 
   sortByIndex:
     | {
+        indexedField: string;
         indexId: string;
         orderDirection: "asc" | "desc";
         indexRecord?: CoMap;
@@ -104,8 +105,9 @@ export class SubscriptionScope<D extends CoValue> {
                 | undefined;
               if (indexId) {
                 this.sortByIndex = {
-                  indexId,
+                  indexedField: orderByField,
                   orderDirection,
+                  indexId,
                 };
                 this.subscribeToId(this.sortByIndex.indexId, {
                   ref: CoMap,
@@ -290,13 +292,12 @@ export class SubscriptionScope<D extends CoValue> {
       this.errorFromChildren = this.computeChildErrors();
     }
 
-    // On child updates, we re-create the value instance to make the updates
-    // seamless-immutable and so be compatible with React and the React compiler
-    // TODO pass the index to createCoValue (!!!)
     if (value.type === "loaded" && id === this.sortByIndex?.indexId) {
       this.sortByIndex.indexRecord = value.value;
     }
 
+    // On child updates, we re-create the value instance to make the updates
+    // seamless-immutable and so be compatible with React and the React compiler
     if (this.shouldSendUpdates()) {
       if (this.value.type === "loaded") {
         this.updateValue(
