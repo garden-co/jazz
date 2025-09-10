@@ -545,6 +545,10 @@ export class CoList<out Item = any>
 type CoListItem<L> = L extends CoList<unknown> ? L[number] : never;
 
 export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
+  private cachedQueryView: {
+    queryView: Record<number, number>;
+    rawLength: number;
+  } | null = null;
   constructor(
     private coList: L,
     private getRaw: () => RawCoList,
@@ -926,8 +930,12 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
     if (Object.keys(this.queryModifiers).length === 0) {
       return null;
     }
+    const rawLength = this.raw.entries().length;
+    if (this.cachedQueryView && this.cachedQueryView.rawLength === rawLength) {
+      return this.cachedQueryView.queryView;
+    }
     const { limit = Infinity, offset = 0, orderBy } = this.queryModifiers;
-    let allArrayIndexes = this.raw.entries().map((_entry, idx) => idx);
+    let allArrayIndexes = Array.from({ length: rawLength }, (_, idx) => idx);
     if (orderBy !== undefined) {
       const { indexedField, orderDirection } = orderBy;
       const valuesWithIndexes = this.raw.entries().map((entry, idx) => ({
@@ -951,11 +959,13 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
         )
         .map((valueWithIndex) => valueWithIndex.originalArrayIdx);
     }
-    return Object.fromEntries(
+    const view = Object.fromEntries(
       allArrayIndexes
         .slice(offset, offset + limit)
         .map((originalIdx, idx) => [idx, originalIdx]),
     );
+    this.cachedQueryView = { queryView: view, rawLength };
+    return view;
   }
 
   /**

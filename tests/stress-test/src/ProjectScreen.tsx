@@ -21,8 +21,12 @@ export function ProjectScreen() {
       root: true,
     },
   });
+  const [visibleTasks, setVisibleTasks] = useState(20);
+  const navigate = useNavigate();
 
   const firstRenderMarker = useRef(false);
+  const loadedMarker = useRef(false);
+
   if (!firstRenderMarker.current) {
     if (me?.root.profilingEnabled) {
       console.profile(projectId);
@@ -32,8 +36,9 @@ export function ProjectScreen() {
     performance.mark(`${projectId}-start`);
   }
 
-  const loadedMarker = useRef(false);
-  if (!loadedMarker.current && project) {
+  if (!project) return null;
+
+  if (!loadedMarker.current) {
     loadedMarker.current = true;
     performance.mark(`${projectId}-loaded`);
     console.log(
@@ -47,11 +52,6 @@ export function ProjectScreen() {
       console.profileEnd(project.$jazz.id);
     }
   }
-
-  const [visibleTasks, setVisibleTasks] = useState(20);
-  const navigate = useNavigate();
-
-  if (!project) return null;
 
   return (
     <div
