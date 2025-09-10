@@ -53,8 +53,6 @@ export class CoState<
         }
         const agent = "me" in ctx ? ctx.me : ctx.guest;
 
-        console.log("options?.unstable_branch", options);
-
         const unsubscribe = subscribeToCoValue(
           coValueClassFromCoValueClassOrSchema(Schema),
           id,
