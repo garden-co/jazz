@@ -169,6 +169,12 @@ if [ "$PLATFORM" = "android" ]; then
   esac
 fi
 
+# Check if cxxbridge is available, install if not
+if ! command -v cxxbridge &> /dev/null; then
+  echo "cxxbridge not found, installing..."
+  cargo install cxxbridge-cmd
+fi
+
 # perform builds from crate root
 pushd $CRATE_DIR
 
