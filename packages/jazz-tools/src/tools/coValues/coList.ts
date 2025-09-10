@@ -11,7 +11,6 @@ import { calcPatch } from "fast-myers-diff";
 import {
   Account,
   CoFieldInit,
-  CoMap,
   CoValue,
   CoValueClass,
   CoValueJazzApi,
@@ -50,10 +49,6 @@ import {
   subscribeToCoValueWithoutMe,
   subscribeToExistingCoValue,
 } from "../internal.js";
-
-type CoValueView = {
-  orderBy: { [indexField: string]: "asc" | "desc" };
-};
 
 /**
  * CoLists are collaborative versions of plain arrays.
@@ -206,6 +201,9 @@ export class CoList<out Item = any>
   }
 
   private static _createIndexes(instance: CoList, indexedFields: string[]) {
+    if (indexedFields.length === 0) {
+      return;
+    }
     const rawCoList = instance.$jazz.raw;
     const indexRecords = indexedFields?.map((indexedField) => ({
       indexedField,
@@ -572,8 +570,11 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
    * Returns a CoMap that contains all indexes that involve this CoList
    * @internal
    */
-  private indexCatalog(): RawCoMap {
+  private indexCatalog(): RawCoMap | null {
     const indexCatalogId = this.raw.core.indexCatalogId;
+    if (!indexCatalogId) {
+      return null;
+    }
     return this.localNode
       .expectCoValueLoaded(indexCatalogId!)
       .getCurrentContent() as RawCoMap;
@@ -583,12 +584,30 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
    * Returns a specific index for this CoList
    * @internal
    */
-  private indexRecord(indexedField: string): RawCoMap {
+  private indexRecord(indexedField: string): RawCoMap | null {
+    const indexRecordId = this.indexCatalog()?.get(
+      indexedField,
+    ) as CoID<RawCoMap>;
+    if (!indexRecordId) {
+      return null;
+    }
     return this.localNode
-      .expectCoValueLoaded(
-        this.indexCatalog().get(indexedField) as CoID<RawCoMap>,
-      )
+      .expectCoValueLoaded(indexRecordId)
       .getCurrentContent() as RawCoMap;
+  }
+
+  private async indexRecordAsync(
+    indexedField: string,
+  ): Promise<RawCoMap | null> {
+    const indexRecordId = this.indexCatalog()?.get(
+      indexedField,
+    ) as CoID<RawCoMap>;
+    if (!indexRecordId) {
+      return null;
+    }
+    return this.localNode
+      .load(indexRecordId)
+      .then((result) => (result === "unavailable" ? null : result));
   }
 
   /**
@@ -602,16 +621,15 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
 
     if (isRefEncoded(itemsDescriptor)) {
       const indexCatalog = this.indexCatalog();
-      for (const indexedField of indexCatalog.keys()) {
-        const indexId = indexCatalog.get(indexedField) as CoID<RawCoMap>;
-        this.raw.core.node
-          .load(indexId as CoID<RawCoMap>)
-          .then((indexRecord) => {
-            if (!indexRecord || indexRecord === "unavailable") return;
+      if (indexCatalog) {
+        for (const indexedField of indexCatalog.keys()) {
+          this.indexRecordAsync(indexedField).then((indexRecord) => {
+            if (!indexRecord) return;
             for (const item of items) {
               indexRecord.set(item.$jazz.id, item[indexedField]);
             }
           });
+        }
       }
     }
 
@@ -916,10 +934,15 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
         originalArrayIdx: idx,
         indexedValue: entry.value as string,
       }));
-      const indexRecord = this.indexRecord(indexedField).toJSON() as Record<
+      const indexRecord = this.indexRecord(indexedField)?.toJSON() as Record<
         string,
         number
       >;
+      if (!indexRecord) {
+        throw new Error(
+          `Query modifiers on non-indexed CoLists are not yet supported. ${indexedField} is not indexed`,
+        );
+      }
       allArrayIndexes = valuesWithIndexes
         .toSorted((a, b) =>
           orderDirection === "desc"
