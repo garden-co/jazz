@@ -780,6 +780,22 @@ describe("CoList resolution", async () => {
         });
         expect(paginatedList).toEqual(["b", "c"]);
       });
+
+      test("operations on the CoList should apply to the query view", async () => {
+        const TestList = co.list(z.string());
+        const list = TestList.create(["a", "b", "c", "d", "e"]);
+        const paginatedList = await TestList.load(list.$jazz.id, {
+          resolve: { $limit: 2, $offset: 1 },
+        });
+
+        assert(paginatedList);
+        const mapped = paginatedList.map((item) => item.toUpperCase());
+        const filtered = paginatedList.filter((item) => item > "b");
+        const json = paginatedList.toJSON();
+        expect(mapped).toEqual(["B", "C"]);
+        expect(filtered).toEqual(["c"]);
+        expect(json).toEqual(["b", "c"]);
+      });
     });
   });
 });
