@@ -13,6 +13,8 @@ blake3 = "1.5.1"
 salsa20 = "0.10.2"
 base64 = "0.22.1"
 thiserror = "1.0"
+x25519-dalek = { version = "2.0", features = ["getrandom", "static_secrets"] }
+crypto_secretbox = { version = "0.1.1", features = ["getrandom"] }
 
 [dev-dependencies]
 rand_core = { version = "0.6", features = ["getrandom"] }

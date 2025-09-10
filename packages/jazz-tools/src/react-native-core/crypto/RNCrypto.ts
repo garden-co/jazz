@@ -1,3 +1,4 @@
+import { base64URLtoBytes } from "cojson";
 import {
   ControlledAccountOrAgent,
   JsonValue,
@@ -12,8 +13,18 @@ import {
   RawCoID,
   SessionID,
   PureJSCrypto,
+  CojsonInternalTypes,
+  bytesToBase64url,
 } from "cojson";
 import { HybridCoJSONCoreRN, SessionLogHandle } from "cojson-core-rn";
+import { textDecoder, textEncoder } from "cojson/dist/crypto/crypto.js";
+
+function typedArrayToBuffer(array: Uint8Array): ArrayBuffer {
+  return array.buffer.slice(
+    array.byteOffset,
+    array.byteLength + array.byteOffset,
+  ) as ArrayBuffer;
+}
 
 /**
  * React Native implementation of the CryptoProvider interface using cojson-core-rn.
@@ -31,6 +42,57 @@ export class RNCrypto extends PureJSCrypto {
 
   static async create(): Promise<RNCrypto> {
     return new RNCrypto();
+  }
+
+  seal<T extends JsonValue>({
+    message,
+    from,
+    to,
+    nOnceMaterial,
+  }: {
+    message: T;
+    from: CojsonInternalTypes.SealerSecret;
+    to: CojsonInternalTypes.SealerID;
+    nOnceMaterial: { in: RawCoID; tx: CojsonInternalTypes.TransactionID };
+  }): CojsonInternalTypes.Sealed<T> {
+    const { success, data, error } = HybridCoJSONCoreRN.sealMessage(
+      typedArrayToBuffer(textEncoder.encode(stableStringify(message))),
+      from,
+      to,
+      typedArrayToBuffer(textEncoder.encode(stableStringify(nOnceMaterial))),
+    );
+
+    if (!success) {
+      throw new Error(error);
+    }
+
+    return `sealed_U${bytesToBase64url(new Uint8Array(data))}` as CojsonInternalTypes.Sealed<T>;
+  }
+
+  unseal<T extends JsonValue>(
+    sealed: CojsonInternalTypes.Sealed<T>,
+    sealer: CojsonInternalTypes.SealerSecret,
+    from: CojsonInternalTypes.SealerID,
+    nOnceMaterial: { in: RawCoID; tx: CojsonInternalTypes.TransactionID },
+  ): T | undefined {
+    const { success, data, error } = HybridCoJSONCoreRN.unsealMessage(
+      typedArrayToBuffer(base64URLtoBytes(sealed.substring("sealed_U".length))),
+      sealer,
+      from,
+      typedArrayToBuffer(textEncoder.encode(stableStringify(nOnceMaterial))),
+    );
+
+    if (!success) {
+      throw new Error(error);
+    }
+
+    const plaintext = textDecoder.decode(data);
+    try {
+      return JSON.parse(plaintext) as T;
+    } catch (e) {
+      console.error("Failed to decrypt/parse sealed message", { err: e });
+      return undefined;
+    }
   }
 
   createSessionLog(
@@ -144,22 +206,13 @@ class RNSessionLog implements SessionLogImpl {
     tx_index: number,
     key_secret: KeySecret,
   ): string {
-    // Convert KeySecret string to ArrayBuffer for the native layer
-    // KeySecret is a base58-encoded string, we need to decode it to bytes
-    const keyBytes = new TextEncoder().encode(key_secret); // Temporary - may need proper base58 decoding
-    const arrayBuffer =
-      keyBytes.buffer instanceof ArrayBuffer
-        ? keyBytes.buffer.slice(
-            keyBytes.byteOffset,
-            keyBytes.byteOffset + keyBytes.byteLength,
-          )
-        : new ArrayBuffer(keyBytes.byteLength);
+    const keyBytes = typedArrayToBuffer(new TextEncoder().encode(key_secret));
 
     const { success, result, error } =
       HybridCoJSONCoreRN.decryptNextTransactionChangesJson(
         this.handle,
         tx_index,
-        arrayBuffer,
+        keyBytes,
       );
     if (!success) {
       throw new Error(error);

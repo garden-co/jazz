@@ -203,6 +203,7 @@ dependencies = [
  "base64",
  "blake3",
  "bs58",
+ "crypto_secretbox",
  "ed25519-dalek",
  "lzy",
  "rand_core",
@@ -210,6 +211,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+ "x25519-dalek",
 ]
 
 [[package]]

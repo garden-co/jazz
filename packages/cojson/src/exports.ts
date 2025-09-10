@@ -228,5 +228,7 @@ export namespace CojsonInternalTypes {
   export type JsonObject = import("./jsonValue.js").JsonObject;
   export type OutgoingPeerChannel = import("./sync.js").OutgoingPeerChannel;
   export type IncomingPeerChannel = import("./sync.js").IncomingPeerChannel;
+  export type Sealed<T> = import("./crypto/crypto.js").Sealed<T>;
+  export type SealerID = import("./crypto/crypto.js").SealerID;
 }
 // biome-ignore format: on

@@ -6,8 +6,6 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use wasm_bindgen::prelude::*;
 
-mod error;
-pub use error::CryptoError;
 
 pub mod hash {
     pub mod blake3;

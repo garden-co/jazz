@@ -22,6 +22,8 @@ namespace margelo::nitro::cojson_core_rn {
       prototype.registerHybridMethod("testExpectedHashAfter", &HybridCoJSONCoreRNSpec::testExpectedHashAfter);
       prototype.registerHybridMethod("decryptNextTransactionChangesJson", &HybridCoJSONCoreRNSpec::decryptNextTransactionChangesJson);
       prototype.registerHybridMethod("destroySessionLog", &HybridCoJSONCoreRNSpec::destroySessionLog);
+      prototype.registerHybridMethod("sealMessage", &HybridCoJSONCoreRNSpec::sealMessage);
+      prototype.registerHybridMethod("unsealMessage", &HybridCoJSONCoreRNSpec::unsealMessage);
     });
   }
 

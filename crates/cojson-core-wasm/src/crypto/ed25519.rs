@@ -1,4 +1,4 @@
-use crate::error::CryptoError;
+use cojson_core::error::CryptoError;
 use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
 use rand::rngs::OsRng;
 use wasm_bindgen::prelude::*;

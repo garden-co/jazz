@@ -19,12 +19,15 @@ namespace margelo::nitro::cojson_core_rn { struct SessionLogHandle; }
 namespace margelo::nitro::cojson_core_rn { struct TransactionResult; }
 // Forward declaration of `ArrayBuffer` to properly resolve imports.
 namespace NitroModules { class ArrayBuffer; }
+// Forward declaration of `U8VecResult` to properly resolve imports.
+namespace margelo::nitro::cojson_core_rn { struct U8VecResult; }
 
 #include "SessionLogHandle.hpp"
 #include <string>
 #include "TransactionResult.hpp"
 #include <vector>
 #include <NitroModules/ArrayBuffer.hpp>
+#include "U8VecResult.hpp"
 
 namespace margelo::nitro::cojson_core_rn {
 
@@ -65,6 +68,8 @@ namespace margelo::nitro::cojson_core_rn {
       virtual TransactionResult testExpectedHashAfter(const SessionLogHandle& handle, const std::vector<std::string>& transactionsJson) = 0;
       virtual TransactionResult decryptNextTransactionChangesJson(const SessionLogHandle& handle, double txIndex, const std::shared_ptr<ArrayBuffer>& keySecret) = 0;
       virtual void destroySessionLog(const SessionLogHandle& handle) = 0;
+      virtual U8VecResult sealMessage(const std::shared_ptr<ArrayBuffer>& message, const std::string& senderSecret, const std::string& recipientId, const std::shared_ptr<ArrayBuffer>& nonceMaterial) = 0;
+      virtual U8VecResult unsealMessage(const std::shared_ptr<ArrayBuffer>& sealedMessage, const std::string& recipientSecret, const std::string& senderId, const std::shared_ptr<ArrayBuffer>& nonceMaterial) = 0;
 
     protected:
       // Hybrid Setup

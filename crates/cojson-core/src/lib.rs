@@ -13,6 +13,17 @@ use thiserror::Error;
 #[cfg(feature = "lzy")]
 pub use lzy;
 
+// Re-export crypto modules
+pub mod crypto;
+pub mod error;
+pub mod hash;
+
+// Re-export specific functions for convenience
+pub use crypto::seal::{seal_internal, unseal_internal};
+pub use crypto::x25519::{x25519_public_key, x25519_diffie_hellman, get_sealer_id_internal};
+pub use crypto::xsalsa20::{encrypt_xsalsa20, decrypt_xsalsa20, encrypt_xsalsa20_poly1305, decrypt_xsalsa20_poly1305};
+pub use error::CryptoError;
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SessionID(pub String);
 
