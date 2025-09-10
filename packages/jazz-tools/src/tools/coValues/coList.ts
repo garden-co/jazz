@@ -225,7 +225,7 @@ export class CoList<out Item = any>
   }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  toJSON(_key?: string, seenAbove?: ID<CoValue>[]): any[] {
+  toJSON(seenAbove?: ID<CoValue>[]): any[] {
     const itemDescriptor = this.$jazz.schema[ItemsSym] as Schema;
     if (itemDescriptor === "json") {
       return this.$jazz.asArray();
@@ -235,8 +235,7 @@ export class CoList<out Item = any>
       return this.map((item, idx) =>
         seenAbove?.includes((item as CoValue)?.$jazz.id)
           ? { _circular: (item as CoValue).$jazz.id }
-          : // TODO take index mapping into account?
-            (item as unknown as CoValue)?.toJSON(idx + "", [
+          : (item as unknown as CoValue)?.toJSON([
               ...(seenAbove || []),
               this.$jazz.id,
             ]),
