@@ -19,6 +19,13 @@ import {
 import { HybridCoJSONCoreRN, SessionLogHandle } from "cojson-core-rn";
 import { textDecoder, textEncoder } from "cojson/dist/crypto/crypto.js";
 
+function typedArrayToBuffer(array: Uint8Array): ArrayBuffer {
+  return array.buffer.slice(
+    array.byteOffset,
+    array.byteLength + array.byteOffset,
+  ) as ArrayBuffer;
+}
+
 /**
  * React Native implementation of the CryptoProvider interface using cojson-core-rn.
  * This provides the primary implementation using Rust cojson-core-rn crate for optimal performance, offering:
@@ -49,11 +56,12 @@ export class RNCrypto extends PureJSCrypto {
     nOnceMaterial: { in: RawCoID; tx: CojsonInternalTypes.TransactionID };
   }): CojsonInternalTypes.Sealed<T> {
     const { success, data, error } = HybridCoJSONCoreRN.sealMessage(
-      textEncoder.encode(stableStringify(message)).buffer as ArrayBuffer,
+      typedArrayToBuffer(textEncoder.encode(stableStringify(message))),
       from,
       to,
-      textEncoder.encode(stableStringify(nOnceMaterial)).buffer as ArrayBuffer,
+      typedArrayToBuffer(textEncoder.encode(stableStringify(nOnceMaterial))),
     );
+
     if (!success) {
       throw new Error(error);
     }
@@ -68,11 +76,10 @@ export class RNCrypto extends PureJSCrypto {
     nOnceMaterial: { in: RawCoID; tx: CojsonInternalTypes.TransactionID },
   ): T | undefined {
     const { success, data, error } = HybridCoJSONCoreRN.unsealMessage(
-      base64URLtoBytes(sealed.substring("sealed_U".length))
-        .buffer as ArrayBuffer,
+      typedArrayToBuffer(base64URLtoBytes(sealed.substring("sealed_U".length))),
       sealer,
       from,
-      textEncoder.encode(stableStringify(nOnceMaterial)).buffer as ArrayBuffer,
+      typedArrayToBuffer(textEncoder.encode(stableStringify(nOnceMaterial))),
     );
 
     if (!success) {
@@ -199,22 +206,13 @@ class RNSessionLog implements SessionLogImpl {
     tx_index: number,
     key_secret: KeySecret,
   ): string {
-    // Convert KeySecret string to ArrayBuffer for the native layer
-    // KeySecret is a base58-encoded string, we need to decode it to bytes
-    const keyBytes = new TextEncoder().encode(key_secret); // Temporary - may need proper base58 decoding
-    const arrayBuffer =
-      keyBytes.buffer instanceof ArrayBuffer
-        ? keyBytes.buffer.slice(
-            keyBytes.byteOffset,
-            keyBytes.byteOffset + keyBytes.byteLength,
-          )
-        : new ArrayBuffer(keyBytes.byteLength);
+    const keyBytes = typedArrayToBuffer(new TextEncoder().encode(key_secret));
 
     const { success, result, error } =
       HybridCoJSONCoreRN.decryptNextTransactionChangesJson(
         this.handle,
         tx_index,
-        arrayBuffer,
+        keyBytes,
       );
     if (!success) {
       throw new Error(error);

@@ -8,5 +8,4 @@ export const HybridCoJSONCoreRN =
 export type {
   SessionLogHandle,
   TransactionResult,
-  MakeTransactionResult,
 } from "./cojson-core-rn.nitro";
