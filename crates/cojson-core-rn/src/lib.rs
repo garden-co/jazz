@@ -20,13 +20,6 @@ mod ffi {
         error: String,
     }
 
-    #[derive(Serialize)]
-    struct MakeTransactionResult {
-        signature: String,
-        transaction: String,
-        hash: String,
-    }
-
     struct U8VecResult {
         success: bool,
         data: Vec<u8>,

@@ -11,11 +11,6 @@ export interface TransactionResult {
   error: string;
 }
 
-export interface MakeTransactionResult {
-  signature: string;
-  transaction: string;
-}
-
 export interface U8VecResult {
   success: boolean;
   data: ArrayBuffer;
