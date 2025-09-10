@@ -109,7 +109,7 @@ U8VecResult HybridCoJSONCoreRN::sealMessage(const std::shared_ptr<ArrayBuffer>& 
   // Convert rust::Vec<uint8_t> to ArrayBuffer
   std::shared_ptr<ArrayBuffer> dataArrayBuffer;
   if (result.success && !result.data.empty()) {
-    dataArrayBuffer = std::make_shared<ArrayBuffer>(result.data.size());
+    dataArrayBuffer = ArrayBuffer::allocate(result.data.size());
     uint8_t* buffer = dataArrayBuffer->data();
     for (size_t i = 0; i < result.data.size(); ++i) {
       buffer[i] = result.data[i];
@@ -145,7 +145,7 @@ U8VecResult HybridCoJSONCoreRN::unsealMessage(const std::shared_ptr<ArrayBuffer>
   // Convert rust::Vec<uint8_t> to ArrayBuffer
   std::shared_ptr<ArrayBuffer> dataArrayBuffer;
   if (result.success && !result.data.empty()) {
-    dataArrayBuffer = std::make_shared<ArrayBuffer>(result.data.size());
+    dataArrayBuffer = ArrayBuffer::allocate(result.data.size());
     uint8_t* buffer = dataArrayBuffer->data();
     for (size_t i = 0; i < result.data.size(); ++i) {
       buffer[i] = result.data[i];
