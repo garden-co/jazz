@@ -901,11 +901,11 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
   /**
    * A CoList's items can be filtered, sorted and paginated when loading it.
    * This means the indexes in the CoList may differ from the indexes in the
-   * underlying RawCoList. This mapping is used to map the indexes in the CoList
-   * to the indexes in the RawCoList.
+   * underlying RawCoList. The query view is a mapping used to link the indexes
+   * in the CoList query view to the indexes in the RawCoList.
    * @internal
    */
-  private get indexMapping(): Record<number, number> | null {
+  private get queryView(): Record<number, number> | null {
     if (Object.keys(this.queryModifiers).length === 0) {
       return null;
     }
@@ -943,7 +943,7 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
    * @internal
    */
   toRawIndex(index: number): number {
-    const idxMapping = this.indexMapping;
+    const idxMapping = this.queryView;
     return !idxMapping || idxMapping[index] === undefined
       ? index
       : idxMapping[index];
@@ -1013,18 +1013,18 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
 
   /** @internal */
   get length(): number {
-    return this.indexMapping
-      ? Object.keys(this.indexMapping).length
+    return this.queryView
+      ? Object.keys(this.queryView).length
       : this.raw.entries().length;
   }
 
   /** @internal */
   asArray(): JsonValue[] {
     const rawArray = this.raw.asArray();
-    if (!this.indexMapping) {
+    if (!this.queryView) {
       return rawArray;
     }
-    return Object.values(this.indexMapping).map(
+    return Object.values(this.queryView).map(
       (originalIndex) => rawArray[originalIndex]!,
     );
   }
