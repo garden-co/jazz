@@ -139,6 +139,67 @@ function TaskList({ tasks }: { tasks: ReadonlyArray<co.loaded<typeof Task>> }) {
 
 The `useCoState` hook handles subscribing when the component mounts and unsubscribing when it unmounts, making it easy to keep your UI in sync with the underlying data.
 
+### `useCoStateWithSelector`
+
+The `useCoStateWithSelector` hook is similar to `useCoState`, but allows you to select only specific parts of the CoValue data through a selector function.
+This helps reduce unnecessary re-renders by narrowing down the returned data. You can also pass a custom equality function other than the default `Object.is`.
+
+<CodeGroup>
+```tsx twoslash
+import React from "react";
+import { co, z } from "jazz-tools";
+
+const Task = co.map({
+  title: z.string(),
+  status: z.literal(["todo", "in-progress", "completed"]),
+});
+const Project = co.map({
+  name: z.string(),
+  tasks: co.list(Task),
+});
+// ---cut-before---
+import { useCoStateWithSelector } from "jazz-tools/react";
+
+function GardenPlanner({ projectId }: { projectId: string }) {
+  // Subscribe to a project and its tasks
+  const project = useCoStateWithSelector(Project, projectId, {
+    resolve: {
+      tasks: { $each: true },
+    },
+    select: (project) => {
+      if (!project) return project;
+      return {
+        name: project.name,
+        taskCount: project.tasks.length,
+        lastTaskTitle: project.tasks.at(-1)?.title,
+      };
+    },
+    equalityFn: (a, b) =>
+      a?.name === b?.name &&
+      a?.taskCount === b?.taskCount &&
+      a?.lastTaskTitle === b?.lastTaskTitle,
+  });
+
+  if (!project) {
+    return project === null
+      ? "Project not found or not accessible"
+      : "Loading project ...";
+  }
+
+  return (
+    <div>
+      <h1>{project.name}</h1>
+      <p>Number of tasks: {project.taskCount}</p>
+      <p>Last task: {project.lastTaskTitle}</p>
+    </div>
+  );
+}
+```
+</CodeGroup>
+
+The `useCoStateWithSelector` hook will subscribe to all data updates just like `useCoState`, but will only re-render when equalityFn returns `false`.
+In the above example, the `select` function will be called for all changes to all tasks, but the component will only re-render when a new task is added or when the last task's title changes.
+
 ### `useAccount`
 
 `useAccount` is used to access the current user's account.

@@ -1,5 +1,16 @@
 # cojson
 
+## 0.18.7
+
+### Patch Changes
+
+- c2d8bf7: Avoid greedily sending covalue dependencies to server peers
+- dccb464: Optimize seal and unseal in PureJSCrypto by caching the shared key generation
+- a3cd9c8: Add lastUpdatedAt & createdAt properties to $jazz in all the coValue types
+- e8e7bf8: Enforce a 1MB size limit for transactions
+- 51d3558: Export the highest weighted random server peer selector
+  - cojson-core-wasm@0.18.7
+
 ## 0.18.6
 
 ### Patch Changes

@@ -1,5 +1,22 @@
 # jazz-tools
 
+## 0.18.7
+
+### Patch Changes
+
+- cf26739: Add `useCoStateWithSelector` for granular reactivity
+- a3cd9c8: Add lastUpdatedAt & createdAt properties to $jazz in all the coValue types
+- ca5cd26: Make CoLists structurally equal to arrays
+- 32d1444: fix: ensure better-auth email-otp verification uniqueness
+- Updated dependencies [c2d8bf7]
+- Updated dependencies [dccb464]
+- Updated dependencies [a3cd9c8]
+- Updated dependencies [e8e7bf8]
+- Updated dependencies [51d3558]
+  - cojson@0.18.7
+  - cojson-storage-indexeddb@0.18.7
+  - cojson-transport-ws@0.18.7
+
 ## 0.18.6
 
 ### Patch Changes

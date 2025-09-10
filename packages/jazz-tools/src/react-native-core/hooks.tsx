@@ -13,6 +13,7 @@ export {
   useAuthSecretStorage,
   useIsAuthenticated,
   useAccount,
+  useCoStateWithSelector,
 } from "jazz-tools/react-core";
 
 export function useAcceptInviteNative<S extends CoValueClassOrSchema>({

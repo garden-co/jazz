@@ -293,7 +293,7 @@ describe("Better-Auth server plugin", async () => {
 
       expect(verificationCreationSpy).toHaveBeenCalledTimes(2);
       expect(verificationCreationSpy.mock.calls[1]?.[0]).toMatchObject({
-        identifier: expect.stringMatching("-jazz-auth"),
+        identifier: expect.stringMatching("jazz-auth-"),
         value: expect.stringContaining('"accountID":"123"'),
       });
     });
@@ -412,7 +412,7 @@ describe("Better-Auth server plugin", async () => {
       expect(verificationCreationSpy).toHaveBeenCalledTimes(2);
       expect(verificationCreationSpy.mock.calls[0]?.[0]).toMatchObject(
         expect.objectContaining({
-          identifier: "sign-in-otp-email@email.it-jazz-auth",
+          identifier: "jazz-auth-sign-in-otp-email@email.it",
           value: expect.stringContaining('"accountID":"123"'),
         }),
       );

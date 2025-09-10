@@ -95,10 +95,14 @@ export const jazzPlugin: () => JazzPlugin = () => {
                     contextContainsJazzAuth(context) &&
                     verification.identifier.startsWith("sign-in-otp-")
                   ) {
+                    const identifier = `jazz-auth-${verification.identifier}`;
+                    await context.context.internalAdapter.deleteVerificationValue(
+                      identifier,
+                    );
                     await context.context.internalAdapter.createVerificationValue(
                       {
                         value: JSON.stringify({ jazzAuth: context.jazzAuth }),
-                        identifier: `${verification.identifier}-jazz-auth`,
+                        identifier: identifier,
                         expiresAt: verification.expiresAt,
                       },
                     );
@@ -166,7 +170,7 @@ export const jazzPlugin: () => JazzPlugin = () => {
           handler: createAuthMiddleware(async (ctx) => {
             const state = ctx.query?.state || ctx.body?.state;
 
-            const identifier = `${state}-jazz-auth`;
+            const identifier = `jazz-auth-${state}`;
 
             const data =
               await ctx.context.internalAdapter.findVerificationValue(
@@ -207,7 +211,7 @@ export const jazzPlugin: () => JazzPlugin = () => {
           },
           handler: createAuthMiddleware(async (ctx) => {
             const email = ctx.body.email;
-            const identifier = `sign-in-otp-${email}-jazz-auth`;
+            const identifier = `jazz-auth-sign-in-otp-${email}`;
 
             const data =
               await ctx.context.internalAdapter.findVerificationValue(
@@ -292,7 +296,7 @@ export const jazzPlugin: () => JazzPlugin = () => {
 
             await ctx.context.internalAdapter.createVerificationValue({
               value,
-              identifier: `${state}-jazz-auth`,
+              identifier: `jazz-auth-${state}`,
               expiresAt,
             });
           }),
