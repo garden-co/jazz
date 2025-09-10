@@ -46,6 +46,11 @@ const branch = new CoState(Project, projectId, {
 </CodeGroup>
 </ContentByFramework>
 
+You can also include nested CoValues in your branch by using a [`resolve` query](/docs/using-covalues/subscription-and-loading#resolve-queries). All of the nested CoValues will have their own branched versions created, and you can access them in the same way you would normally access a deeply loaded property.
+
+<Alert variant="info" className="mt-4 flex gap-2 items-center">
+  In case you create a separate reference to a nested CoValue (for example by loading it by its ID), you will need to specify the branch you wish to load.
+</Alert>
 
 ### Making Changes
 
@@ -217,7 +222,6 @@ const privateBranch = useCoState(Project, projectId, {
 ```
 </CodeGroup>
 
-When a private branch is merged, the changes are merged into the main values, which keeps the privacy of the branch.
 
 You can use private branches both to make the changes to the branches "private" until merged, or to give controlled write access to a group of users.
 
