@@ -1,4 +1,4 @@
-import { RawCoList, RawCoMap, type LocalNode, type RawCoValue } from "cojson";
+import { type LocalNode, type RawCoValue } from "cojson";
 import {
   CoFeed,
   CoList,
@@ -101,24 +101,51 @@ export class SubscriptionScope<D extends CoValue> {
           if (orderByField !== undefined) {
             const indexCatalogId = value.core.indexCatalogId;
             if (indexCatalogId) {
-              // TODO handle case where the index catalog needs to be loaded
-              const indexCatalog = value.core.node
-                .expectCoValueLoaded(indexCatalogId)
-                .getCurrentContent() as RawCoMap;
-              const indexId = indexCatalog.get(orderByField) as
-                | string
-                | undefined;
-              if (indexId) {
-                this.queryModifiers.orderBy = {
-                  indexedField: orderByField,
-                  orderDirection,
-                  indexId,
-                };
-                this.subscribeToId(indexId, {
+              this.subscribeToId(
+                indexCatalogId,
+                {
                   ref: CoMap,
                   optional: false,
-                });
-              }
+                },
+                false,
+                (indexCatalog) => {
+                  if (
+                    indexCatalog.type === "unavailable" ||
+                    this.queryModifiers.orderBy?.indexId
+                  ) {
+                    return;
+                  }
+                  const indexId = indexCatalog.value.$jazz.raw.get(
+                    orderByField,
+                  ) as string | undefined;
+                  if (indexId) {
+                    this.queryModifiers.orderBy = {
+                      indexedField: orderByField,
+                      orderDirection,
+                      indexId,
+                    };
+                    this.subscribeToId(
+                      indexId,
+                      {
+                        ref: CoMap,
+                        optional: false,
+                      },
+                      false,
+                      (indexRecord) => {
+                        if (
+                          indexRecord.type === "loaded" &&
+                          this.queryModifiers.orderBy
+                        ) {
+                          this.queryModifiers.orderBy.indexRecord =
+                            indexRecord.value;
+                        }
+                      },
+                    );
+                  } else {
+                    // TODO: Load all children so that the CoList can be sorted
+                  }
+                },
+              );
             }
           }
         }
@@ -297,13 +324,6 @@ export class SubscriptionScope<D extends CoValue> {
       this.errorFromChildren = this.computeChildErrors();
     }
 
-    if (
-      value.type === "loaded" &&
-      id === this.queryModifiers.orderBy?.indexId
-    ) {
-      this.queryModifiers.orderBy.indexRecord = value.value;
-    }
-
     // On child updates, we re-create the value instance to make the updates
     // seamless-immutable and so be compatible with React and the React compiler
     if (this.shouldSendUpdates()) {
@@ -453,13 +473,20 @@ export class SubscriptionScope<D extends CoValue> {
     );
   }
 
-  subscribeToId(id: string, descriptor: RefEncoded<any>) {
+  subscribeToId(
+    id: string,
+    descriptor: RefEncoded<any>,
+    autoloaded = true,
+    onLoad?: (value: any) => void,
+  ) {
     if (this.isSubscribedToId(id)) {
       return;
     }
 
     this.idsSubscribed.add(id);
-    this.autoloaded.add(id);
+    if (autoloaded) {
+      this.autoloaded.add(id);
+    }
 
     // We don't want to trigger an update when autoloading available children
     // because on userland it looks like nothing has changed since the value
@@ -479,7 +506,10 @@ export class SubscriptionScope<D extends CoValue> {
       this.unstable_branch,
     );
     this.childNodes.set(id, child);
-    child.setListener((value) => this.handleChildUpdate(id, value));
+    child.setListener((value) => {
+      onLoad?.(value);
+      this.handleChildUpdate(id, value);
+    });
 
     this.silenceUpdates = false;
   }
