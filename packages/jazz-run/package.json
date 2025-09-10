@@ -18,6 +18,7 @@
     "format-and-lint": "biome check .",
     "format-and-lint:fix": "biome check . --write",
     "build": "rm -rf ./dist && tsc --sourceMap --outDir dist && chmod +x ./dist/index.js",
+    "test": "vitest --run --root ../../ --project jazz-run",
     "dev": "tsc --watch --sourceMap --outDir dist",
     "build-and-run": "pnpm turbo build && ./dist/index.js sync --in-memory"
   },

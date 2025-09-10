@@ -31,6 +31,10 @@ type WorkerOptions<
    * If true, the inbox will not be loaded.
    */
   skipInboxLoad?: boolean;
+  /**
+   * If false, the worker will not set in the global account context
+   */
+  asActiveAccount?: boolean;
 };
 
 /** @category Context Creation */
@@ -45,6 +49,7 @@ export async function startWorker<
     syncServer = "wss://cloud.jazz.tools",
     AccountSchema = Account as unknown as S,
     skipInboxLoad = false,
+    asActiveAccount = true,
   } = options;
 
   let node: LocalNode | undefined = undefined;
@@ -90,6 +95,7 @@ export async function startWorker<
     sessionProvider: randomSessionProvider,
     peersToLoadFrom,
     crypto: options.crypto ?? (await WasmCrypto.create()),
+    asActiveAccount,
   });
 
   const account = context.account as InstanceOfSchema<S>;

@@ -705,6 +705,8 @@ export class CoValueCore {
   // The list of merge commits that have been made
   mergeCommits: MergeCommit[] = [];
   branches: BranchPointerCommit[] = [];
+  earliestTxMadeAt: number = Number.MAX_SAFE_INTEGER;
+  latestTxMadeAt: number = 0;
 
   // Reset the parsed transactions and branches, to validate them again from scratch when the group is updated
   resetParsedTransactions() {
@@ -782,6 +784,14 @@ export class CoValueCore {
           previous: this.lastVerifiedTransactionBySessionID[sessionID],
         };
 
+        if (verifiedTransaction.madeAt > this.latestTxMadeAt) {
+          this.latestTxMadeAt = verifiedTransaction.madeAt;
+        }
+
+        if (verifiedTransaction.madeAt < this.earliestTxMadeAt) {
+          this.earliestTxMadeAt = verifiedTransaction.madeAt;
+        }
+
         this.verifiedTransactions.push(verifiedTransaction);
         this.lastVerifiedTransactionBySessionID[sessionID] =
           verifiedTransaction;
@@ -813,15 +823,24 @@ export class CoValueCore {
 
     transaction.hasMetaBeenParsed = true;
 
-    // Check if the transaction is a branch start
-    if (this.isBranch() && "from" in transaction.meta) {
-      if (!this.branchStart || transaction.madeAt < this.branchStart.madeAt) {
-        const commit = transaction.meta as BranchStartCommit;
+    // Branch related meta information
+    if (this.isBranch()) {
+      // Check if the transaction is a branch start
+      if ("from" in transaction.meta) {
+        if (!this.branchStart || transaction.madeAt < this.branchStart.madeAt) {
+          const commit = transaction.meta as BranchStartCommit;
 
-        this.branchStart = {
-          from: commit.from,
-          madeAt: transaction.madeAt,
-        };
+          this.branchStart = {
+            from: commit.from,
+            madeAt: transaction.madeAt,
+          };
+        }
+      }
+
+      // Check if the transaction is a merged checkpoint for a branch
+      if ("merged" in transaction.meta) {
+        const mergeCommit = transaction.meta as MergeCommit;
+        this.mergeCommits.push(mergeCommit);
       }
     }
 
@@ -852,12 +871,6 @@ export class CoValueCore {
           prev: previousTransaction ?? null,
         });
       }
-    }
-
-    // Check if the transaction is a merged checkpoint for a branch
-    if ("merged" in transaction.meta) {
-      const mergeCommit = transaction.meta as MergeCommit;
-      this.mergeCommits.push(mergeCommit);
     }
   }
 

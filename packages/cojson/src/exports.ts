@@ -63,7 +63,12 @@ import type { JsonObject, JsonValue } from "./jsonValue.js";
 import type * as Media from "./media.js";
 import { disablePermissionErrors } from "./permissions.js";
 import type { Peer, SyncMessage } from "./sync.js";
-import { DisconnectedError, SyncManager, emptyKnownState } from "./sync.js";
+import {
+  DisconnectedError,
+  SyncManager,
+  emptyKnownState,
+  hwrServerPeerSelector,
+} from "./sync.js";
 
 import {
   getContentMessageSize,
@@ -163,6 +168,7 @@ export {
   LogLevel,
   base64URLtoBytes,
   bytesToBase64url,
+  hwrServerPeerSelector,
 };
 
 export type {

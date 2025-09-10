@@ -96,6 +96,7 @@ export async function createJazzContextFromExistingCredentials<
   AccountSchema: PropsAccountSchema,
   sessionProvider,
   onLogOut,
+  asActiveAccount,
 }: {
   credentials: Credentials;
   peersToLoadFrom: Peer[];
@@ -104,6 +105,7 @@ export async function createJazzContextFromExistingCredentials<
   sessionProvider: SessionProvider;
   onLogOut?: () => void;
   storage?: StorageAPI;
+  asActiveAccount: boolean;
 }): Promise<JazzContextWithAccount<InstanceOfSchema<S>>> {
   const { sessionID, sessionDone } = await sessionProvider(
     credentials.accountID,
@@ -125,14 +127,18 @@ export async function createJazzContextFromExistingCredentials<
     storage,
     migration: async (rawAccount, _node, creationProps) => {
       const account = AccountClass.fromRaw(rawAccount) as InstanceOfSchema<S>;
-      activeAccountContext.set(account);
+      if (asActiveAccount) {
+        activeAccountContext.set(account);
+      }
 
       await account.applyMigration(creationProps);
     },
   });
 
   const account = AccountClass.fromNode(node);
-  activeAccountContext.set(account);
+  if (asActiveAccount) {
+    activeAccountContext.set(account);
+  }
 
   return {
     node,
@@ -245,6 +251,7 @@ export async function createJazzContext<
         authSecretStorage.clearWithoutNotify();
       },
       storage: options.storage,
+      asActiveAccount: true,
     });
   } else {
     const secretSeed = options.crypto.newRandomSecretSeed();

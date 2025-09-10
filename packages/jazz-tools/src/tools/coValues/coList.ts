@@ -999,4 +999,39 @@ const CoListProxyHandler: ProxyHandler<CoList> = {
       return Reflect.has(target, key);
     }
   },
+  ownKeys(target) {
+    const keys = Reflect.ownKeys(target);
+    // Add numeric indices for all entries in the list
+    const indexKeys = target.$jazz.raw.entries().map((_entry, i) => String(i));
+    keys.push(...indexKeys);
+    return keys;
+  },
+  getOwnPropertyDescriptor(target, key) {
+    if (key === TypeSym) {
+      // Make TypeSym non-enumerable so it doesn't show up in Object.keys()
+      return {
+        enumerable: false,
+        configurable: true,
+        writable: false,
+        value: target[TypeSym],
+      };
+    } else if (key in target) {
+      return Reflect.getOwnPropertyDescriptor(target, key);
+    } else if (typeof key === "string" && !isNaN(+key)) {
+      const index = Number(key);
+      if (index >= 0 && index < target.$jazz.raw.entries().length) {
+        return {
+          enumerable: true,
+          configurable: true,
+          writable: true,
+        };
+      }
+    } else if (key === "length") {
+      return {
+        enumerable: false,
+        configurable: false,
+        writable: false,
+      };
+    }
+  },
 };

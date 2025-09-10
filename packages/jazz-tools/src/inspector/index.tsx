@@ -23,7 +23,7 @@ import { useJazzContext } from "jazz-tools/react-core";
 import { Account } from "jazz-tools";
 
 import { JazzInspectorInternal } from "./viewer/new-app.js";
-import { Position } from "./viewer/inpsector-button.js";
+import { Position } from "./viewer/inspector-button.js";
 
 export function JazzInspector({ position = "right" }: { position?: Position }) {
   const context = useJazzContext<Account>();

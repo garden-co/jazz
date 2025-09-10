@@ -9,8 +9,9 @@ import { usePagePath } from "./use-page-path.js";
 
 import { GlobalStyles } from "../ui/global-styles.js";
 import { Heading } from "../ui/heading.js";
-import { InspectorButton, type Position } from "./inpsector-button.js";
+import { InspectorButton, type Position } from "./inspector-button.js";
 import { useOpenInspector } from "./use-open-inspector.js";
+import { DeleteLocalData } from "./delete-local-data.js";
 
 const InspectorContainer = styled("div")`
   position: fixed;
@@ -102,6 +103,7 @@ export function JazzInspectorInternal({
             />
           )}
         </Form>
+        <DeleteLocalData />
         <Button variant="plain" type="button" onClick={() => setOpen(false)}>
           Close
         </Button>

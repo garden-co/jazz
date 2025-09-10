@@ -77,4 +77,36 @@ export abstract class CoValueJazzApi<V extends CoValue> {
 
     return new AnonymousJazzAgent(this.localNode);
   }
+
+  /**
+   * The timestamp of the creation time of the CoValue
+   *
+   * @category Content
+   */
+  get createdAt(): number {
+    const createdAt = this.raw.core.verified.header.meta?.createdAt;
+
+    if (typeof createdAt === "string") {
+      return new Date(createdAt).getTime();
+    }
+
+    return this.raw.core.earliestTxMadeAt;
+  }
+
+  /**
+   * The timestamp of the last updated time of the CoValue
+   *
+   * Returns the creation time if there are no updates.
+   *
+   * @category Content
+   */
+  get lastUpdatedAt(): number {
+    const value = this.raw.core.latestTxMadeAt;
+
+    if (value === 0) {
+      return this.createdAt;
+    }
+
+    return value;
+  }
 }

@@ -30,13 +30,13 @@ async function setup<
   S extends
     | (AccountClass<Account> & CoValueFromRaw<Account>)
     | AnyAccountSchema,
->(AccountSchema?: S) {
+>(AccountSchema?: S, activeAccount = true) {
   const { server, port, host } = await setupSyncServer();
 
   const syncServer = `ws://${host}:${port}`;
 
   const { worker, done, waitForConnection, subscribeToConnectionChange } =
-    await setupWorker(syncServer, AccountSchema);
+    await setupWorker(syncServer, AccountSchema, activeAccount);
 
   return {
     worker,
@@ -74,7 +74,7 @@ async function setupWorker<
   S extends
     | (AccountClass<Account> & CoValueFromRaw<Account>)
     | AnyAccountSchema,
->(syncServer: string, AccountSchema?: S) {
+>(syncServer: string, AccountSchema?: S, activeAccount = true) {
   const { accountID, agentSecret } = await createWorkerAccount({
     name: "test-worker",
     peer: syncServer,
@@ -85,6 +85,7 @@ async function setupWorker<
     accountSecret: agentSecret,
     syncServer,
     AccountSchema,
+    asActiveAccount: activeAccount,
   });
 }
 
@@ -398,5 +399,11 @@ describe("startWorker integration", () => {
 
     // Loads successfully even with an unavailable inbox
     expect(workerResult.worker.$jazz.id).toBe(accountID);
+  });
+
+  test("startWorker should be able to not set the active account", async () => {
+    const worker1 = await setup(undefined, false);
+
+    expect(Account.getMe().$jazz.id).not.toBe(worker1.worker.$jazz.id);
   });
 });

@@ -54,6 +54,7 @@ describe("createContext methods", () => {
         peersToLoadFrom: [getPeerConnectedToTestSyncServer()],
         crypto: Crypto,
         sessionProvider: randomSessionProvider,
+        asActiveAccount: true,
       });
 
       expect(context.node).toBeDefined();
@@ -86,6 +87,7 @@ describe("createContext methods", () => {
         crypto: Crypto,
         AccountSchema: CustomAccount,
         sessionProvider: randomSessionProvider,
+        asActiveAccount: true,
       });
 
       expect(context.account).toBeInstanceOf(
@@ -109,6 +111,7 @@ describe("createContext methods", () => {
         crypto: Crypto,
         sessionProvider: randomSessionProvider,
         onLogOut,
+        asActiveAccount: true,
       });
 
       context.logOut();
@@ -131,6 +134,7 @@ describe("createContext methods", () => {
         peersToLoadFrom: [getPeerConnectedToTestSyncServer()],
         crypto: Crypto,
         sessionProvider: randomSessionProvider,
+        asActiveAccount: true,
       });
 
       const loadedMap = await loadCoValueOrFail(context.node, coMap.id);
@@ -151,9 +155,29 @@ describe("createContext methods", () => {
         peersToLoadFrom: [getPeerConnectedToTestSyncServer()],
         crypto: Crypto,
         sessionProvider: randomSessionProvider,
+        asActiveAccount: true,
       });
 
       expect(activeAccountContext.get()).toBe(context.account);
+    });
+
+    test("does not set the active account when asActiveAccount is false", async () => {
+      const account = await createJazzTestAccount({
+        isCurrentActiveAccount: false,
+      });
+
+      const context = await createJazzContextFromExistingCredentials({
+        credentials: {
+          accountID: account.$jazz.id,
+          secret: account.$jazz.localNode.getCurrentAgent().agentSecret,
+        },
+        peersToLoadFrom: [getPeerConnectedToTestSyncServer()],
+        crypto: Crypto,
+        sessionProvider: randomSessionProvider,
+        asActiveAccount: false,
+      });
+
+      expect(activeAccountContext.get()).not.toBe(context.account);
     });
   });
 

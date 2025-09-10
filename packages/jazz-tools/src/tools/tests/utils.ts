@@ -40,6 +40,7 @@ export async function setupAccount() {
       sessionProvider: randomSessionProvider,
       peersToLoadFrom: [initialAsPeer],
       crypto: Crypto,
+      asActiveAccount: true,
     });
 
   return { me, meOnSecondPeer };

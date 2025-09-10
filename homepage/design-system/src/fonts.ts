@@ -3,32 +3,32 @@ import localFont from "next/font/local";
 const manrope = localFont({
   src: [
     {
-      path: "../fonts/Manrope-Bold.woff2",
+      path: "../../public/fonts/Manrope-Bold.woff2",
       weight: "700",
       style: "normal",
     },
     {
-      path: "../fonts/Manrope-Bold.woff",
+      path: "../../public/fonts/Manrope-Bold.woff",
       weight: "700",
       style: "normal",
     },
     {
-      path: "../fonts/Manrope-Medium.woff2",
+      path: "../../public/fonts/Manrope-Medium.woff2",
       weight: "500",
       style: "normal",
     },
     {
-      path: "../fonts/Manrope-Medium.woff",
+      path: "../../public/fonts/Manrope-Medium.woff",
       weight: "500",
       style: "normal",
     },
     {
-      path: "../fonts/Manrope-SemiBold.woff2",
+      path: "../../public/fonts/Manrope-SemiBold.woff2",
       weight: "600",
       style: "normal",
     },
     {
-      path: "../fonts/Manrope-SemiBold.woff",
+      path: "../../public/fonts/Manrope-SemiBold.woff",
       weight: "600",
       style: "normal",
     },
@@ -40,32 +40,32 @@ const manrope = localFont({
 const inter = localFont({
   src: [
     {
-      path: "../fonts/Inter-Medium.woff2",
+      path: "../../public/fonts/Inter-Medium.woff2",
       weight: "500",
       style: "normal",
     },
     {
-      path: "../fonts/Inter-Medium.woff",
+      path: "../../public/fonts/Inter-Medium.woff",
       weight: "500",
       style: "normal",
     },
     {
-      path: "../fonts/Inter-Regular.woff2",
+      path: "../../public/fonts/Inter-Regular.woff2",
       weight: "400",
       style: "normal",
     },
     {
-      path: "../fonts/Inter-Regular.woff",
+      path: "../../public/fonts/Inter-Regular.woff",
       weight: "400",
       style: "normal",
     },
     {
-      path: "../fonts/Inter-SemiBold.woff2",
+      path: "../../public/fonts/Inter-SemiBold.woff2",
       weight: "600",
       style: "normal",
     },
     {
-      path: "../fonts/Inter-SemiBold.woff",
+      path: "../../public/fonts/Inter-SemiBold.woff",
       weight: "600",
       style: "normal",
     },
@@ -77,12 +77,12 @@ const inter = localFont({
 const commitMono = localFont({
   src: [
     {
-      path: "../fonts/CommitMono-Regular.woff2",
+      path: "../../public/fonts/CommitMono-Regular.woff2",
       weight: "400",
       style: "normal",
     },
     {
-      path: "../fonts/CommitMono-Regular.woff",
+      path: "../../public/fonts/CommitMono-Regular.woff",
       weight: "400",
       style: "normal",
     },

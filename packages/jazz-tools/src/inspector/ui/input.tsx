@@ -27,7 +27,7 @@ const StyledInput = styled("input")`
   box-shadow: var(--j-shadow-sm);
   font-weight: 500;
   background-color: white;
-  color: var(--text-color-strong);
+  color: var(--j-text-color-strong);
 
   @media (prefers-color-scheme: dark) {
     background-color: var(--j-foreground);
@@ -41,7 +41,11 @@ export const Input = forwardRef<HTMLInputElement, InputProps>(
 
     return (
       <Container className={className}>
-        <label htmlFor={id} className={hideLabel ? "j-sr-only" : ""}>
+        <label
+          htmlFor={id}
+          className={hideLabel ? "j-sr-only" : ""}
+          style={{ color: "var(--j-text-color)" }}
+        >
           {label}
         </label>
         <StyledInput ref={ref} {...inputProps} id={id} />

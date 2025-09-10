@@ -57,6 +57,7 @@ describe("Deep loading with depth arg", async () => {
       sessionProvider: randomSessionProvider,
       peersToLoadFrom: [initialAsPeer],
       crypto: Crypto,
+      asActiveAccount: true,
     });
 
   const ownership = { owner: me };
@@ -287,6 +288,7 @@ test("Deep loading a record-like coMap", async () => {
       sessionProvider: randomSessionProvider,
       peersToLoadFrom: [initialAsPeer],
       crypto: Crypto,
+      asActiveAccount: true,
     });
 
   const record = RecordLike.create(

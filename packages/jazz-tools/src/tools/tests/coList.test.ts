@@ -122,6 +122,25 @@ describe("Simple CoList operations", async () => {
     expect(list[0]).toEqual("milk");
   });
 
+  test("CoList keys can be iterated over just like an array's", () => {
+    const TestList = co.list(z.string());
+    const list = ["a", "b", "c", "d", "e"];
+    const coList = TestList.create(list);
+    const keys = [];
+    for (const key in coList) {
+      keys.push(key);
+    }
+    expect(keys).toEqual(Object.keys(list));
+    expect(Object.keys(coList)).toEqual(Object.keys(list));
+  });
+
+  test("a CoList is structurally equal to an array", () => {
+    const TestList = co.list(z.string());
+    const list = ["a", "b", "c", "d", "e"];
+    const coList = TestList.create(list);
+    expect(coList).toEqual(list);
+  });
+
   describe("Mutation", () => {
     test("assignment", () => {
       const list = TestList.create(["bread", "butter", "onion"], {
@@ -1312,5 +1331,27 @@ describe("co.list schema", () => {
 
     expect(keywords[0]?.toString()).toEqual("hello");
     expect(keywords[1]?.toString()).toEqual("world");
+  });
+});
+
+describe("lastUpdatedAt", () => {
+  test("empty list last updated time", () => {
+    const emptyList = co.list(z.number()).create([]);
+
+    expect(emptyList.$jazz.lastUpdatedAt).not.toEqual(0);
+    expect(emptyList.$jazz.lastUpdatedAt).toEqual(emptyList.$jazz.createdAt);
+  });
+
+  test("last update should change on push", async () => {
+    const list = co.list(z.string()).create(["John"]);
+
+    expect(list.$jazz.lastUpdatedAt).not.toEqual(0);
+
+    const updatedAt = list.$jazz.lastUpdatedAt;
+
+    await new Promise((r) => setTimeout(r, 10));
+    list.$jazz.push("Jane");
+
+    expect(list.$jazz.lastUpdatedAt).not.toEqual(updatedAt);
   });
 });

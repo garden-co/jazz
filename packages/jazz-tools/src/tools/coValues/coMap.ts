@@ -855,24 +855,6 @@ class CoMapJazzApi<M extends CoMap> extends CoValueJazzApi<M> {
     return this.getRaw();
   }
 
-  /**
-   * The timestamp of the creation time of the CoMap
-   *
-   * @category Content
-   */
-  get createdAt(): number {
-    return this.raw.earliestTxMadeAt ?? Number.MAX_SAFE_INTEGER;
-  }
-
-  /**
-   * The timestamp of the last updated time of the CoMap
-   *
-   * @category Content
-   */
-  get lastUpdatedAt(): number {
-    return this.raw.latestTxMadeAt;
-  }
-
   /** @internal */
   get schema(): CoMapFieldSchema {
     return (this.coMap.constructor as typeof CoMap)._schema;

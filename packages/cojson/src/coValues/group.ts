@@ -1070,6 +1070,9 @@ export class RawGroup<
 
     if (init) {
       map.assign(init, initPrivacy);
+    } else if (!uniqueness.createdAt) {
+      // If the createdAt is not set, we need to make a trusting transaction to set the createdAt
+      map.core.makeTransaction([], "trusting");
     }
 
     return map;
@@ -1101,6 +1104,9 @@ export class RawGroup<
 
     if (init?.length) {
       list.appendItems(init, undefined, initPrivacy);
+    } else if (!uniqueness.createdAt) {
+      // If the createdAt is not set, we need to make a trusting transaction to set the createdAt
+      list.core.makeTransaction([], "trusting");
     }
 
     return list;
@@ -1141,7 +1147,7 @@ export class RawGroup<
     meta?: C["headerMeta"],
     uniqueness: CoValueUniqueness = this.crypto.createdNowUnique(),
   ): C {
-    return this.core.node
+    const stream = this.core.node
       .createCoValue({
         type: "costream",
         ruleset: {
@@ -1152,6 +1158,13 @@ export class RawGroup<
         ...uniqueness,
       })
       .getCurrentContent() as C;
+
+    if (!uniqueness.createdAt) {
+      // If the createdAt is not set, we need to make a trusting transaction to set the createdAt
+      stream.core.makeTransaction([], "trusting");
+    }
+
+    return stream;
   }
 
   /** @category 3. Value creation */

@@ -1,5 +1,7 @@
 import { ImageResponse } from "next/og";
 import { JazzLogo } from "../atoms/logos/JazzLogo";
+import { readFileSync } from "fs";
+import { join } from "path";
 
 export const imageSize = {
   width: 1200,
@@ -8,21 +10,18 @@ export const imageSize = {
 
 export const imageContentType = "image/png";
 
-async function loadManropeGoogleFont() {
-  const url = `https://fonts.googleapis.com/css2?family=Manrope:wght@600`;
-  const css = await (await fetch(url)).text();
-  const resource = css.match(
-    /src: url\((.+)\) format\('(opentype|truetype)'\)/,
-  );
-
-  if (resource) {
-    const response = await fetch(resource[1]);
-    if (response.status == 200) {
-      return await response.arrayBuffer();
-    }
+function loadManropeLocalFont() {
+  try {
+    const fontPath = join(
+      process.cwd(),
+      "../public/fonts/Manrope-SemiBold.ttf",
+    );
+    const fontData = readFileSync(fontPath);
+    return fontData.buffer;
+  } catch (error) {
+    console.error("Failed to load local Manrope font:", error);
+    throw new Error("failed to load local font data");
   }
-
-  throw new Error("failed to load font data");
 }
 
 export async function OpenGraphImage({
@@ -123,7 +122,7 @@ export async function OpenGraphImage({
       fonts: [
         {
           name: "Manrope",
-          data: await loadManropeGoogleFont(),
+          data: loadManropeLocalFont(),
           style: "normal",
           weight: 600,
         },

@@ -71,6 +71,8 @@ It will implicitly become the current account, and you can avoid mentioning it i
 
 For this reason we also recommend running a single worker instance per server, because it makes your code much more predictable.
 
+In case you want to avoid setting the current account, you can pass `asActiveAccount: false` to `startWorker`.
+
 ## Storing & providing credentials
 
 Server Worker credentials are typically stored and provided as environment variables.

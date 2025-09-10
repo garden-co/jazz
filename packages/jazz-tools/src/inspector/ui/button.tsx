@@ -2,7 +2,7 @@ import { styled } from "goober";
 import { forwardRef } from "react";
 
 interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
-  variant?: "primary" | "secondary" | "link" | "plain";
+  variant?: "primary" | "secondary" | "link" | "plain" | "destructive";
   children?: React.ReactNode;
   className?: string;
   disabled?: boolean;
@@ -29,6 +29,9 @@ const StyledButton = styled("button")<{ variant: string; disabled?: boolean }>`
           border-color: var(--j-primary-color);
           color: white;
           font-weight: 500;
+          &:hover {
+            opacity: 0.8;
+          }
         `;
       case "secondary":
         return `
@@ -45,6 +48,17 @@ const StyledButton = styled("button")<{ variant: string; disabled?: boolean }>`
           color: var(--j-link-color);
           &:hover {
             text-decoration: underline;
+          }
+        `;
+      case "destructive":
+        return `
+          padding: 0.375rem 0.75rem;
+          background-color: var(--j-destructive-color);
+          border-color: var(--j-destructive-color);
+          color: white;
+          font-weight: 500;
+          &:hover {
+            opacity: 0.8;
           }
         `;
       default:
