@@ -328,5 +328,63 @@ describe("CoList", () => {
 
       matches(loadedPerson);
     });
+
+    describe("query modifiers", () => {
+      describe("$orderBy", () => {
+        test("cannot sort a CoList that does not contain a CoMap", () => {
+          const Score = z.object({
+            priority: z.number(),
+          });
+          const ItemList = co.list(Score);
+
+          const list = ItemList.create([
+            { priority: 2 },
+            { priority: 1 },
+            { priority: 3 },
+          ]);
+
+          ItemList.load(list.$jazz.id, {
+            // @ts-expect-error - Score is not a CoMap
+            resolve: { $orderBy: { priority: "desc" } },
+          });
+        });
+
+        test("cannot sort a CoList by a collaborative field", () => {
+          const Score = co.map({
+            priority: co.plainText(),
+          });
+          const ItemList = co.list(Score);
+
+          const list = ItemList.create([
+            { priority: "2" },
+            { priority: "1" },
+            { priority: "3" },
+          ]);
+
+          ItemList.load(list.$jazz.id, {
+            // @ts-expect-error - Score is a CoMap
+            resolve: { $orderBy: { priority: "desc" } },
+          });
+        });
+
+        test("cannot sort a CoList by a non-scalar field", () => {
+          const Score = co.map({
+            priorities: z.array(z.number()),
+          });
+          const ItemList = co.list(Score);
+
+          const list = ItemList.create([
+            { priorities: [2] },
+            { priorities: [1] },
+            { priorities: [3] },
+          ]);
+
+          ItemList.load(list.$jazz.id, {
+            // @ts-expect-error - Score is a CoMap
+            resolve: { $orderBy: { priorities: "desc" } },
+          });
+        });
+      });
+    });
   });
 });

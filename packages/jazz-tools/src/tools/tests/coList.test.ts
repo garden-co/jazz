@@ -768,6 +768,44 @@ describe("CoList resolution", async () => {
   });
 
   describe("query modifiers", () => {
+    describe("$orderBy", () => {
+      const Score = co.map({
+        priority: z.number(),
+      });
+      const ItemList = co.list(Score).withIndex("priority");
+      let list: co.output<typeof ItemList>;
+
+      beforeEach(async () => {
+        list = ItemList.create([]);
+        list.$jazz.push(
+          Score.create({ priority: 2 }),
+          Score.create({ priority: 1 }),
+          Score.create({ priority: 3 }),
+        );
+      });
+
+      test("sorts CoList in descending order", async () => {
+        const loadedList = await ItemList.load(list.$jazz.id, {
+          resolve: { $orderBy: { priority: "desc" } },
+        });
+        assert(loadedList);
+
+        const loadedListRefs = loadedList?.$jazz.refs;
+        expect(loadedListRefs?.[0]?.id).toBe(list[2]?.$jazz.id);
+        expect(loadedListRefs?.[1]?.id).toBe(list[0]?.$jazz.id);
+        expect(loadedListRefs?.[2]?.id).toBe(list[1]?.$jazz.id);
+        expect(loadedList).toEqual([list[2], list[0], list[1]]);
+      });
+
+      test("sorts CoList in ascending order", async () => {
+        const loadedList = await ItemList.load(list.$jazz.id, {
+          resolve: { $orderBy: { priority: "asc" } },
+        });
+        assert(loadedList);
+        expect(loadedList).toEqual([list[1], list[0], list[2]]);
+      });
+    });
+
     describe("$limit and $offset", () => {
       test("should limit the number of items returned", async () => {
         const TestList = co.list(z.string());
@@ -1391,7 +1429,10 @@ describe("lastUpdatedAt", () => {
 describe("CoList indexes", () => {
   const IndexRecord = co.record(z.string(), z.number());
 
-  const Score = co.map({ priority: z.number() });
+  const Score = co.map({
+    priority: z.number(),
+    numbers: z.array(z.number()).optional(),
+  });
   const ItemList = co.list(Score).withIndex("priority");
   let list: co.output<typeof ItemList>;
 
@@ -1424,26 +1465,5 @@ describe("CoList indexes", () => {
         [list[2]!.$jazz.id]: 3,
       }),
     );
-  });
-
-  test("can load a sorted CoList in descending order using the index", async () => {
-    const loadedList = await ItemList.load(list.$jazz.id, {
-      resolve: { $orderBy: { priority: "desc" } },
-    });
-    assert(loadedList);
-
-    const loadedListRefs = loadedList?.$jazz.refs;
-    expect(loadedListRefs?.[0]?.id).toBe(list[2]?.$jazz.id);
-    expect(loadedListRefs?.[1]?.id).toBe(list[0]?.$jazz.id);
-    expect(loadedListRefs?.[2]?.id).toBe(list[1]?.$jazz.id);
-    expect(loadedList).toEqual([list[2], list[0], list[1]]);
-  });
-
-  test("can load a sorted CoList in ascending order using the index", async () => {
-    const loadedList = await ItemList.load(list.$jazz.id, {
-      resolve: { $orderBy: { priority: "asc" } },
-    });
-    assert(loadedList);
-    expect(loadedList).toEqual([list[1], list[0], list[2]]);
   });
 });

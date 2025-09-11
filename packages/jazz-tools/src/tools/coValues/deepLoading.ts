@@ -22,6 +22,22 @@ type IsUnion<T, U = T> = (T extends any ? (x: T) => void : never) extends (
   ? false
   : true;
 
+/**
+ * Any top-level, non-collaborative scalar CoMap field (string, number, Date, boolean) can be used
+ * to sort a CoList
+ */
+type OrderByOptions<T> = T extends { [TypeSym]: "CoMap" }
+  ? {
+      [K in keyof T]?: NonNullable<T[K]> extends
+        | string
+        | number
+        | Date
+        | boolean
+        ? "asc" | "desc"
+        : never;
+    }
+  : never;
+
 export type RefsToResolve<
   V,
   DepthLimit extends number = 10,
@@ -42,8 +58,7 @@ export type RefsToResolve<
                     DepthLimit,
                     [0, ...CurrentDepth]
                   >;
-                  // TODO tighten field's type
-                  $orderBy?: { [field: string]: "asc" | "desc" };
+                  $orderBy?: OrderByOptions<Item>;
                   $limit?: number;
                   $offset?: number;
                   $onError?: null;
