@@ -1,32 +1,38 @@
 import { SessionID } from "cojson";
-import { ItemsSym, TypeSym } from "../internal.js";
+import {
+  IsUnion,
+  ItemsSym,
+  NotNull,
+  RequireExactlyOne,
+  TypeSym,
+  WhereOperator,
+} from "../internal.js";
 import { type Account } from "./account.js";
 import { CoFeedEntry } from "./coFeed.js";
 import { type CoKeys } from "./coMap.js";
 import { type CoValue, type ID } from "./interfaces.js";
 
 /**
- * Similar to {@link NonNullable}, but removes only `null` and preserves `undefined`.
+ * Any top-level, non-collaborative scalar CoMap field (string, number, Date, boolean) can be used
+ * to sort a CoList
  */
-export type NotNull<T> = Exclude<T, null>;
-
-/**
- * Used to check if T is a union type.
- *
- * If T is a union type, the left hand side of the extends becomes a union of function types.
- * The right hand side is always a single function type.
- */
-type IsUnion<T, U = T> = (T extends any ? (x: T) => void : never) extends (
-  x: U,
-) => void
-  ? false
-  : true;
+export type WhereOptions<T> = T extends { [TypeSym]: "CoMap" }
+  ? {
+      [K in keyof T]?: NonNullable<T[K]> extends
+        | string
+        | number
+        | Date
+        | boolean
+        ? T[K] | RequireExactlyOne<Record<WhereOperator, T[K]>>
+        : never;
+    }
+  : never;
 
 /**
  * Any top-level, non-collaborative scalar CoMap field (string, number, Date, boolean) can be used
  * to sort a CoList
  */
-type OrderByOptions<T> = T extends { [TypeSym]: "CoMap" }
+export type OrderByOptions<T> = T extends { [TypeSym]: "CoMap" }
   ? {
       [K in keyof T]?: NonNullable<T[K]> extends
         | string
@@ -58,6 +64,7 @@ export type RefsToResolve<
                     DepthLimit,
                     [0, ...CurrentDepth]
                   >;
+                  $where?: WhereOptions<Item>;
                   $orderBy?: OrderByOptions<Item>;
                   $limit?: number;
                   $offset?: number;

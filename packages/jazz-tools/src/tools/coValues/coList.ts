@@ -934,14 +934,21 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
     if (this.cachedQueryView && this.cachedQueryView.rawLength === rawLength) {
       return this.cachedQueryView.queryView;
     }
-    const { limit = Infinity, offset = 0, orderBy } = this.queryModifiers;
-    let allArrayIndexes = Array.from({ length: rawLength }, (_, idx) => idx);
-    if (orderBy !== undefined) {
-      const { indexedField, orderDirection } = orderBy;
-      const valuesWithIndexes = this.raw.entries().map((entry, idx) => ({
+    const {
+      limit = Infinity,
+      offset = 0,
+      orderBy,
+      where,
+    } = this.queryModifiers;
+    const allArrayIndexesWithIndexedValues = this.raw
+      .entries()
+      .map((entry, idx) => ({
         originalArrayIdx: idx,
         indexedValue: entry.value as string,
       }));
+    let sortedArrayIndexes = allArrayIndexesWithIndexedValues;
+    if (orderBy !== undefined) {
+      const { indexedField, orderDirection } = orderBy;
       const indexRecord = this.indexRecord(indexedField)?.toJSON() as Record<
         string,
         number
@@ -951,19 +958,46 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
           `Query modifiers on non-indexed CoLists are not yet supported. ${indexedField} is not indexed`,
         );
       }
-      allArrayIndexes = valuesWithIndexes
-        .toSorted((a, b) =>
-          orderDirection === "desc"
-            ? indexRecord[b.indexedValue]! - indexRecord[a.indexedValue]!
-            : indexRecord[a.indexedValue]! - indexRecord[b.indexedValue]!,
-        )
-        .map((valueWithIndex) => valueWithIndex.originalArrayIdx);
+      sortedArrayIndexes = allArrayIndexesWithIndexedValues.toSorted((a, b) =>
+        orderDirection === "desc"
+          ? indexRecord[b.indexedValue]! - indexRecord[a.indexedValue]!
+          : indexRecord[a.indexedValue]! - indexRecord[b.indexedValue]!,
+      );
     }
-    const view = Object.fromEntries(
-      allArrayIndexes
-        .slice(offset, offset + limit)
-        .map((originalIdx, idx) => [idx, originalIdx]),
-    );
+    let filteredArrayIndexes = sortedArrayIndexes;
+    if (where?.length) {
+      filteredArrayIndexes = sortedArrayIndexes.filter((element) => {
+        return where.every(({ indexedField, operator, value }) => {
+          const indexRecord = this.indexRecord(
+            indexedField,
+          )?.toJSON() as Record<string, number>;
+          if (!indexRecord) {
+            throw new Error(
+              `Query modifiers on non-indexed CoLists are not yet supported. ${indexedField} is not indexed`,
+            );
+          }
+          const value2 = indexRecord[element.indexedValue] as any;
+          switch (operator) {
+            case "$eq":
+              return value2 === value;
+            case "$ne":
+              return value2 !== value;
+            case "$gt":
+              return value2 > value;
+            case "$gte":
+              return value2 >= value;
+            case "$lt":
+              return value2 < value;
+            case "$lte":
+              return value2 <= value;
+          }
+        });
+      });
+    }
+    const paginatedArrayIndexes = filteredArrayIndexes
+      .slice(offset, offset + limit)
+      .map(({ originalArrayIdx }, idx) => [idx, originalArrayIdx]);
+    const view = Object.fromEntries(paginatedArrayIndexes);
     this.cachedQueryView = { queryView: view, rawLength };
     return view;
   }

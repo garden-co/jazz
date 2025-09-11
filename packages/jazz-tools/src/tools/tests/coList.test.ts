@@ -768,22 +768,72 @@ describe("CoList resolution", async () => {
   });
 
   describe("query modifiers", () => {
+    const Score = co.map({
+      priority: z.number(),
+    });
+    const ItemList = co.list(Score).withIndex("priority");
+    let list: co.output<typeof ItemList>;
+
+    beforeEach(async () => {
+      list = ItemList.create([]);
+      list.$jazz.push(
+        Score.create({ priority: 2 }),
+        Score.create({ priority: 1 }),
+        Score.create({ priority: 3 }),
+      );
+    });
+
+    describe("$where", () => {
+      test("filters elements with a field equal to a specific value", async () => {
+        const loadedList = await ItemList.load(list.$jazz.id, {
+          resolve: { $where: { priority: 2 } },
+        });
+        assert(loadedList);
+        expect(loadedList).toEqual([list[0]]);
+      });
+
+      test("filters elements with a field not equal to a specific value", async () => {
+        const loadedList = await ItemList.load(list.$jazz.id, {
+          resolve: { $where: { priority: { $ne: 2 } } },
+        });
+        assert(loadedList);
+        expect(loadedList).toEqual([list[1], list[2]]);
+      });
+
+      test("filters elements with a field greater than a specific value", async () => {
+        const loadedList = await ItemList.load(list.$jazz.id, {
+          resolve: { $where: { priority: { $gt: 2 } } },
+        });
+        assert(loadedList);
+        expect(loadedList).toEqual([list[2]]);
+      });
+
+      test("filters elements with a field greater than or equal to a specific value", async () => {
+        const loadedList = await ItemList.load(list.$jazz.id, {
+          resolve: { $where: { priority: { $gte: 2 } } },
+        });
+        assert(loadedList);
+        expect(loadedList).toEqual([list[0], list[2]]);
+      });
+
+      test("filters elements with a field less than a specific value", async () => {
+        const loadedList = await ItemList.load(list.$jazz.id, {
+          resolve: { $where: { priority: { $lt: 2 } } },
+        });
+        assert(loadedList);
+        expect(loadedList).toEqual([list[1]]);
+      });
+
+      test("filters elements with a field less than or equal to a specific value", async () => {
+        const loadedList = await ItemList.load(list.$jazz.id, {
+          resolve: { $where: { priority: { $lte: 2 } } },
+        });
+        assert(loadedList);
+        expect(loadedList).toEqual([list[0], list[1]]);
+      });
+    });
+
     describe("$orderBy", () => {
-      const Score = co.map({
-        priority: z.number(),
-      });
-      const ItemList = co.list(Score).withIndex("priority");
-      let list: co.output<typeof ItemList>;
-
-      beforeEach(async () => {
-        list = ItemList.create([]);
-        list.$jazz.push(
-          Score.create({ priority: 2 }),
-          Score.create({ priority: 1 }),
-          Score.create({ priority: 3 }),
-        );
-      });
-
       test("sorts CoList in descending order", async () => {
         const loadedList = await ItemList.load(list.$jazz.id, {
           resolve: { $orderBy: { priority: "desc" } },

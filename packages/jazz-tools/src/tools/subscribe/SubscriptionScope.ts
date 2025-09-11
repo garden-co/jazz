@@ -18,6 +18,23 @@ import { JazzError, type JazzErrorIssue } from "./JazzError.js";
 import type { BranchDefinition, SubscriptionValue, Unloaded } from "./types.js";
 import { createCoValue, myRoleForRawValue } from "./utils.js";
 
+export type WhereOperator = (typeof WhereOperators)[number];
+const WhereOperators = ["$eq", "$ne", "$gt", "$gte", "$lt", "$lte"] as const;
+
+type QueryModifiers = {
+  where?: {
+    indexedField: string;
+    operator: WhereOperator;
+    value: any;
+  }[];
+  orderBy?: {
+    indexedField: string;
+    orderDirection: "asc" | "desc";
+  };
+  limit?: number;
+  offset?: number;
+};
+
 export class SubscriptionScope<D extends CoValue> {
   childNodes = new Map<string, SubscriptionScope<CoValue>>();
   childValues: Map<string, SubscriptionValue<any, any>> = new Map<
@@ -49,16 +66,7 @@ export class SubscriptionScope<D extends CoValue> {
 
   silenceUpdates = false;
 
-  queryModifiers: {
-    orderBy?: {
-      indexedField: string;
-      indexId: string;
-      orderDirection: "asc" | "desc";
-      indexRecord?: CoMap;
-    };
-    limit?: number;
-    offset?: number;
-  } = {};
+  queryModifiers: QueryModifiers = {};
 
   constructor(
     public node: LocalNode,
@@ -74,10 +82,16 @@ export class SubscriptionScope<D extends CoValue> {
 
     const queryModifiers =
       typeof this.resolve === "object" && this.resolve !== null
-        ? pick(this.resolve, ["$orderBy", "$limit", "$offset"])
+        ? pick(this.resolve, ["$where", "$orderBy", "$limit", "$offset"])
         : undefined;
     this.queryModifiers.limit = queryModifiers?.$limit;
     this.queryModifiers.offset = queryModifiers?.$offset;
+    this.queryModifiers.where = parseWhere(queryModifiers?.$where);
+    this.queryModifiers.orderBy = parseOrderBy(queryModifiers?.$orderBy);
+    const indexedFields = [
+      this.queryModifiers.orderBy?.indexedField,
+      ...(this.queryModifiers?.where?.map((where) => where.indexedField) ?? []),
+    ].filter((field): field is string => field !== undefined);
 
     let lastUpdate: RawCoValue | "unavailable" | undefined;
     this.subscription = new CoValueCoreSubscription(
@@ -93,37 +107,25 @@ export class SubscriptionScope<D extends CoValue> {
         }
 
         // TODO there's surely a better place to do this
-        if (value !== "unavailable" && queryModifiers?.$orderBy) {
-          const order = Object.entries(queryModifiers.$orderBy)[0];
-          const orderByField = order?.[0];
-          const orderDirection = order?.[1] as "asc" | "desc";
-
-          if (orderByField !== undefined) {
-            const indexCatalogId = value.core.indexCatalogId;
-            if (indexCatalogId) {
-              this.subscribeToId(
-                indexCatalogId,
-                {
-                  ref: CoMap,
-                  optional: false,
-                },
-                false,
-                (indexCatalog) => {
-                  if (
-                    indexCatalog.type === "unavailable" ||
-                    this.queryModifiers.orderBy?.indexId
-                  ) {
-                    return;
-                  }
-                  const indexId = indexCatalog.value.$jazz.raw.get(
-                    orderByField,
-                  ) as string | undefined;
+        if (value !== "unavailable" && indexedFields.length > 0) {
+          const indexCatalogId = value.core.indexCatalogId;
+          if (indexCatalogId) {
+            this.subscribeToId(
+              indexCatalogId,
+              {
+                ref: CoMap,
+                optional: false,
+              },
+              false,
+              (indexCatalog) => {
+                if (indexCatalog.type === "unavailable") {
+                  return;
+                }
+                const indexIds = indexedFields.map((indexedField) =>
+                  indexCatalog.value.$jazz.raw.get(indexedField),
+                ) as string[];
+                for (const indexId of indexIds) {
                   if (indexId) {
-                    this.queryModifiers.orderBy = {
-                      indexedField: orderByField,
-                      orderDirection,
-                      indexId,
-                    };
                     this.subscribeToId(
                       indexId,
                       {
@@ -131,22 +133,13 @@ export class SubscriptionScope<D extends CoValue> {
                         optional: false,
                       },
                       false,
-                      (indexRecord) => {
-                        if (
-                          indexRecord.type === "loaded" &&
-                          this.queryModifiers.orderBy
-                        ) {
-                          this.queryModifiers.orderBy.indexRecord =
-                            indexRecord.value;
-                        }
-                      },
                     );
                   } else {
                     // TODO: Load all children so that the CoList can be sorted
                   }
-                },
-              );
-            }
+                }
+              },
+            );
           }
         }
 
@@ -781,4 +774,41 @@ export class SubscriptionScope<D extends CoValue> {
     this.subscribers.clear();
     this.childNodes.forEach((child) => child.destroy());
   }
+}
+
+function parseWhere(where: any): QueryModifiers["where"] {
+  const whereClauses = Object.entries(where ?? {});
+  return whereClauses.map(([indexedField, filter]) => {
+    const containsWhereOperator =
+      typeof filter === "object" &&
+      WhereOperators.includes(Object.keys(filter ?? {})[0] as WhereOperator);
+    let operator: WhereOperator;
+    let value: any;
+    if (containsWhereOperator) {
+      operator = Object.keys(filter ?? {})[0] as WhereOperator;
+      // @ts-expect-error TODO fix type error
+      value = filter[operator];
+    } else {
+      operator = "$eq";
+      value = filter;
+    }
+    return {
+      indexedField,
+      operator,
+      value,
+    };
+  });
+}
+
+function parseOrderBy(orderBy: any): QueryModifiers["orderBy"] {
+  const order = Object.entries(orderBy ?? {})[0];
+  const orderByField = order?.[0];
+  const orderDirection = order?.[1] as "asc" | "desc";
+  if (!orderByField) {
+    return undefined;
+  }
+  return {
+    indexedField: orderByField,
+    orderDirection,
+  };
 }
