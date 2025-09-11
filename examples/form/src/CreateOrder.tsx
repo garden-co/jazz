@@ -7,20 +7,29 @@ import { OrderForm } from "./OrderForm.tsx";
 import {
   BubbleTeaOrder,
   DraftBubbleTeaOrder,
+  getLastDraftId,
+  hasChanges,
   JazzAccount,
   validateDraftOrder,
 } from "./schema.ts";
 
-export function CreateOrder() {
+export function CreateOrder(props: { id: string }) {
   const { me } = useAccount(JazzAccount, {
     resolve: { root: { draft: true, orders: true } },
   });
   const router = useIframeHashRouter();
   const [errors, setErrors] = useState<string[]>([]);
 
-  if (!me?.root) return;
+  const draft = useCoState(DraftBubbleTeaOrder, props.id, {
+    resolve: { addOns: true, instructions: true },
+  });
 
-  const onSave = (draft: DraftBubbleTeaOrder) => {
+  if (!draft) return;
+
+  const handleSave = (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    if (!me) return;
+
     const validation = validateDraftOrder(draft);
     setErrors(validation.errors);
     if (validation.errors.length > 0) {
@@ -31,9 +40,20 @@ export function CreateOrder() {
     me.root.orders.$jazz.push(draft as BubbleTeaOrder);
 
     // reset the draft
-    me.root.$jazz.set("draft", { addOns: [] });
+    me.root.$jazz.set("draft", undefined);
 
     router.navigate("/");
+  };
+
+  const handleReset = () => {
+    if (!me) return;
+
+    if (!hasChanges(draft)) {
+      return;
+    }
+
+    me.root.$jazz.set("draft", undefined);
+    router.navigate("/#/new-order/" + getLastDraftId(me.root));
   };
 
   return (
@@ -46,28 +66,9 @@ export function CreateOrder() {
 
       <Errors errors={errors} />
 
-      <CreateOrderForm id={me?.root?.draft.$jazz.id} onSave={onSave} />
+      {draft && (
+        <OrderForm order={draft} onSave={handleSave} onReset={handleReset} />
+      )}
     </>
   );
-}
-
-function CreateOrderForm({
-  id,
-  onSave,
-}: {
-  id: string;
-  onSave: (draft: DraftBubbleTeaOrder) => void;
-}) {
-  const draft = useCoState(DraftBubbleTeaOrder, id, {
-    resolve: { addOns: true, instructions: true },
-  });
-
-  if (!draft) return;
-
-  const addOrder = (e: React.FormEvent<HTMLFormElement>) => {
-    e.preventDefault();
-    onSave(draft);
-  };
-
-  return <OrderForm order={draft} onSave={addOrder} />;
 }

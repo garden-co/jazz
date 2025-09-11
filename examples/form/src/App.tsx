@@ -11,7 +11,7 @@ function App() {
       <main className="max-w-xl mx-auto px-3 py-8 space-y-8">
         {router.route({
           "/": () => <Orders />,
-          "/order": () => <CreateOrder />,
+          "/new-order/:id": (id) => <CreateOrder id={id} />,
           "/order/:id": (id) => <EditOrder id={id} />,
         })}
       </main>

@@ -17,7 +17,7 @@ createRoot(document.getElementById("root")!).render(
   <StrictMode>
     <JazzReactProvider
       sync={{
-        peer: `ws://localhost:4200/?key=${apiKey}`,
+        peer: `wss://cloud.jazz.tools/?key=${apiKey}`,
       }}
       AccountSchema={JazzAccount}
     >

@@ -15,25 +15,23 @@ export const BubbleTeaBaseTeaTypes = [
   "Thai",
 ] as const;
 
-export const ListOfBubbleTeaAddOns = co.list(
-  z.literal([...BubbleTeaAddOnTypes]),
-);
+export const ListOfBubbleTeaAddOns = co.list(z.literal(BubbleTeaAddOnTypes));
 export type ListOfBubbleTeaAddOns = co.loaded<typeof ListOfBubbleTeaAddOns>;
-
-function hasAddOnsChanges(list?: ListOfBubbleTeaAddOns | null) {
-  return list && Object.entries(list.$jazz.raw.insertions).length > 0;
-}
 
 export const BubbleTeaOrder = co.map({
   baseTea: z.literal([...BubbleTeaBaseTeaTypes]),
   addOns: ListOfBubbleTeaAddOns,
   deliveryDate: z.date(),
   withMilk: z.boolean(),
-  instructions: co.optional(co.plainText()),
+  instructions: co.plainText(),
 });
 export type BubbleTeaOrder = co.loaded<typeof BubbleTeaOrder>;
 
-export const DraftBubbleTeaOrder = BubbleTeaOrder.partial();
+export const DraftBubbleTeaOrder = BubbleTeaOrder.partial({
+  baseTea: true,
+  deliveryDate: true,
+  withMilk: true,
+});
 export type DraftBubbleTeaOrder = co.loaded<typeof DraftBubbleTeaOrder>;
 
 export function validateDraftOrder(order: DraftBubbleTeaOrder) {
@@ -49,20 +47,43 @@ export function validateDraftOrder(order: DraftBubbleTeaOrder) {
   return { errors };
 }
 
-export function hasChanges(order?: DraftBubbleTeaOrder | null) {
+export function getLastDraftId(root: AccountRoot) {
+  if (root.$jazz.refs.draft?.id) return root.$jazz.refs.draft.id;
+
+  const draft = DraftBubbleTeaOrder.create({
+    addOns: [],
+    instructions: "",
+  });
+
+  root.$jazz.set("draft", draft);
+
+  return draft.$jazz.id;
+}
+
+export function hasChanges(
+  order?: co.loaded<
+    typeof DraftBubbleTeaOrder,
+    { addOns: true; instructions: true }
+  > | null,
+) {
+  if (!order) return false;
+
   return (
-    !!order &&
-    (Object.keys(order.$jazz.getEdits()).length > 1 ||
-      hasAddOnsChanges(order.addOns))
+    order.addOns.length > 0 ||
+    order.instructions.length > 0 ||
+    order.baseTea ||
+    order.deliveryDate ||
+    order.withMilk
   );
 }
 
 /** The root is an app-specific per-user private `CoMap`
  *  where you can store top-level objects for that user */
 export const AccountRoot = co.map({
-  draft: DraftBubbleTeaOrder,
+  draft: DraftBubbleTeaOrder.optional(),
   orders: co.list(BubbleTeaOrder),
 });
+export type AccountRoot = co.loaded<typeof AccountRoot>;
 
 export const JazzAccount = co
   .account({
@@ -72,7 +93,6 @@ export const JazzAccount = co
   .withMigration((account) => {
     if (!account.$jazz.has("root")) {
       account.$jazz.set("root", {
-        draft: { addOns: [], instructions: "" },
         orders: [],
       });
     }
