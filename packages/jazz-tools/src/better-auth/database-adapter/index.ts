@@ -87,6 +87,8 @@ export const JazzBetterAuthDatabaseAdapter = (
           syncServer: config.syncServer,
           accountID: config.accountID,
           accountSecret: config.accountSecret,
+          skipInboxLoad: true,
+          asActiveAccount: false,
         });
 
         worker = result.worker;

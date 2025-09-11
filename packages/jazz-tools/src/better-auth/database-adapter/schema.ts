@@ -106,11 +106,13 @@ export function createJazzSchema(schema: BetterAuthDbSchema): JazzSchema {
       const db = (await DatabaseRoot.loadUnique(
         DATABASE_ROOT_ID,
         account.$jazz.id,
-        options || {
+        {
           resolve: {
             group: true,
             tables: true,
           },
+          loadAs: account,
+          ...options,
         },
       )) as co.loaded<Database, { group: true }>;
 
