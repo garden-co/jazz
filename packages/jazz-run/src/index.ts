@@ -6,6 +6,7 @@ import { Console, Effect } from "effect";
 import { createWorkerAccount } from "./createWorkerAccount.js";
 import { startSyncServer } from "./startSyncServer.js";
 import { serverDefaults } from "./config.js";
+import { rotateWorkerInbox } from "./rotateWorkerInbox.js";
 
 const jazzTools = Command.make("jazz-tools");
 
@@ -32,6 +33,18 @@ JAZZ_WORKER_ACCOUNT=${accountID}
 JAZZ_WORKER_SECRET=${agentSecret}
 `);
       }
+    });
+  },
+);
+
+const rotateWorkerInboxCommand = Command.make(
+  "rotate-worker-inbox",
+  { peer: peerOption },
+  ({ peer }) => {
+    return Effect.gen(function* () {
+      yield* Effect.promise(() => rotateWorkerInbox({ peer }));
+
+      yield* Console.log("A new inbox has been created for the worker");
     });
   },
 );
@@ -106,7 +119,11 @@ const startSyncServerCommand = Command.make(
 );
 
 const command = jazzTools.pipe(
-  Command.withSubcommands([accountCommand, startSyncServerCommand]),
+  Command.withSubcommands([
+    accountCommand,
+    startSyncServerCommand,
+    rotateWorkerInboxCommand,
+  ]),
 );
 
 const cli = Command.run(command, {
