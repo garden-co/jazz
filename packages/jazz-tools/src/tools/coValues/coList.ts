@@ -643,7 +643,7 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
       "private",
     );
 
-    return this.raw.entries().length;
+    return this.length;
   }
 
   /**
@@ -661,7 +661,7 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
       this.raw.prepend(item);
     }
 
-    return this.raw.entries().length;
+    return this.length;
   }
 
   /**
