@@ -1,6 +1,7 @@
 import { CoValueUniqueness } from "cojson";
 import {
   Account,
+  BranchDefinition,
   CoMap,
   DiscriminableCoValueSchemaDefinition,
   DiscriminableCoreCoValueSchema,
@@ -63,6 +64,7 @@ export interface CoMapSchema<
       >;
       loadAs?: Account | AnonymousJazzAgent;
       skipRetry?: boolean;
+      unstable_branch?: BranchDefinition;
     },
   ): Promise<Resolved<
     Simplify<CoMapInstanceCoValuesNullable<Shape>> & CoMap,

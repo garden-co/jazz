@@ -1,5 +1,6 @@
 import {
   Account,
+  BranchDefinition,
   CoList,
   Group,
   ID,
@@ -58,6 +59,7 @@ export class CoListSchema<T extends AnyZodOrCoValueSchema>
     options?: {
       resolve?: RefsToResolveStrict<CoListInstanceCoValuesNullable<T>, R>;
       loadAs?: Account | AnonymousJazzAgent;
+      unstable_branch?: BranchDefinition;
     },
   ): Promise<Resolved<CoListInstanceCoValuesNullable<T>, R> | null> {
     // @ts-expect-error

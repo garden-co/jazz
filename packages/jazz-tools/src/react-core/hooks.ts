@@ -13,6 +13,7 @@ import {
   AnyAccountSchema,
   CoValue,
   CoValueClassOrSchema,
+  Group,
   InboxSender,
   InstanceOfSchema,
   JazzContextManager,
@@ -22,10 +23,10 @@ import {
   ResolveQueryStrict,
   SubscriptionScope,
   coValueClassFromCoValueClassOrSchema,
+  type BranchDefinition,
 } from "jazz-tools";
 import { JazzContext, JazzContextManagerContext } from "./provider.js";
 import { getCurrentAccountFromContextManager } from "./utils.js";
-import { TypeSym } from "../tools/internal.js";
 
 export function useJazzContext<Acc extends Account>() {
   const value = useContext(JazzContext) as JazzContextType<Acc>;
@@ -89,12 +90,22 @@ function useCoValueSubscription<
   id: string | undefined | null,
   options?: {
     resolve?: ResolveQueryStrict<S, R>;
+    unstable_branch?: BranchDefinition;
   },
 ) {
   const contextManager = useJazzContextManager();
 
   const createSubscription = () => {
     if (!id) {
+      return {
+        subscription: null,
+        contextManager,
+        id,
+        Schema,
+      };
+    }
+
+    if (options?.unstable_branch?.owner === null) {
       return {
         subscription: null,
         contextManager,
@@ -112,6 +123,9 @@ function useCoValueSubscription<
         ref: coValueClassFromCoValueClassOrSchema(Schema),
         optional: true,
       },
+      false,
+      false,
+      options?.unstable_branch,
     );
 
     return {
@@ -119,16 +133,23 @@ function useCoValueSubscription<
       contextManager,
       id,
       Schema,
+      branchName: options?.unstable_branch?.name,
+      branchOwnerId: options?.unstable_branch?.owner?.$jazz.id,
     };
   };
 
   const [subscription, setSubscription] = React.useState(createSubscription);
 
+  const branchName = options?.unstable_branch?.name;
+  const branchOwnerId = options?.unstable_branch?.owner?.$jazz.id;
+
   React.useLayoutEffect(() => {
     if (
       subscription.contextManager !== contextManager ||
       subscription.id !== id ||
-      subscription.Schema !== Schema
+      subscription.Schema !== Schema ||
+      subscription.branchName !== branchName ||
+      subscription.branchOwnerId !== branchOwnerId
     ) {
       subscription.subscription?.destroy();
       setSubscription(createSubscription());
@@ -138,7 +159,7 @@ function useCoValueSubscription<
       subscription.subscription?.destroy();
       setSubscription(createSubscription());
     });
-  }, [Schema, id, contextManager]);
+  }, [Schema, id, contextManager, branchName, branchOwnerId]);
 
   return subscription.subscription;
 }
@@ -240,6 +261,22 @@ export function useCoState<
   options?: {
     /** Resolve query to specify which nested CoValues to load */
     resolve?: ResolveQueryStrict<S, R>;
+    /**
+     * Create or load a branch for isolated editing.
+     *
+     * Branching lets you take a snapshot of the current state and start modifying it without affecting the canonical/shared version.
+     * It's a fork of your data graph: the same schema, but with diverging values.
+     *
+     * The checkout of the branch is applied on all the resolved values.
+     *
+     * @param name - A unique name for the branch. This identifies the branch
+     *   and can be used to switch between different branches of the same CoValue.
+     * @param owner - The owner of the branch. Determines who can access and modify
+     *   the branch. If not provided, the branch is owned by the current user.
+     *
+     * For more info see the [branching](https://jazz.tools/docs/react/using-covalues/version-control) documentation.
+     */
+    unstable_branch?: BranchDefinition;
   },
 ): Loaded<S, R> | undefined | null {
   const subscription = useCoValueSubscription(Schema, id, options);
@@ -398,6 +435,22 @@ export function useCoStateWithSelector<
     select: (value: Loaded<S, R> | undefined | null) => TSelectorReturn;
     /** Equality function to determine if the selected value has changed, defaults to `Object.is` */
     equalityFn?: (a: TSelectorReturn, b: TSelectorReturn) => boolean;
+    /**
+     * Create or load a branch for isolated editing.
+     *
+     * Branching lets you take a snapshot of the current state and start modifying it without affecting the canonical/shared version.
+     * It's a fork of your data graph: the same schema, but with diverging values.
+     *
+     * The checkout of the branch is applied on all the resolved values.
+     *
+     * @param name - A unique name for the branch. This identifies the branch
+     *   and can be used to switch between different branches of the same CoValue.
+     * @param owner - The owner of the branch. Determines who can access and modify
+     *   the branch. If not provided, the branch is owned by the current user.
+     *
+     * For more info see the [branching](https://jazz.tools/docs/react/using-covalues/version-control) documentation.
+     */
+    unstable_branch?: BranchDefinition;
   },
 ): TSelectorReturn {
   const subscription = useCoValueSubscription(Schema, id, options);
@@ -430,6 +483,7 @@ function useAccountSubscription<
   Schema: S,
   options?: {
     resolve?: ResolveQueryStrict<S, R>;
+    unstable_branch?: BranchDefinition;
   },
 ) {
   const contextManager = useJazzContextManager();
@@ -437,7 +491,7 @@ function useAccountSubscription<
   const createSubscription = () => {
     const agent = getCurrentAccountFromContextManager(contextManager);
 
-    if (agent[TypeSym] === "Anonymous") {
+    if (agent.$type$ === "Anonymous") {
       return {
         subscription: null,
         contextManager,
@@ -457,21 +511,31 @@ function useAccountSubscription<
         ref: coValueClassFromCoValueClassOrSchema(Schema),
         optional: true,
       },
+      false,
+      false,
+      options?.unstable_branch,
     );
 
     return {
       subscription,
       contextManager,
       Schema,
+      branchName: options?.unstable_branch?.name,
+      branchOwnerId: options?.unstable_branch?.owner?.$jazz.id,
     };
   };
 
   const [subscription, setSubscription] = React.useState(createSubscription);
 
+  const branchName = options?.unstable_branch?.name;
+  const branchOwnerId = options?.unstable_branch?.owner?.$jazz.id;
+
   React.useLayoutEffect(() => {
     if (
       subscription.contextManager !== contextManager ||
-      subscription.Schema !== Schema
+      subscription.Schema !== Schema ||
+      subscription.branchName !== options?.unstable_branch?.name ||
+      subscription.branchOwnerId !== options?.unstable_branch?.owner?.$jazz.id
     ) {
       subscription.subscription?.destroy();
       setSubscription(createSubscription());
@@ -481,7 +545,7 @@ function useAccountSubscription<
       subscription.subscription?.destroy();
       setSubscription(createSubscription());
     });
-  }, [Schema, contextManager]);
+  }, [Schema, contextManager, branchName, branchOwnerId]);
 
   return subscription.subscription;
 }
@@ -547,6 +611,22 @@ export function useAccount<
   options?: {
     /** Resolve query to specify which nested CoValues to load from the account */
     resolve?: ResolveQueryStrict<A, R>;
+    /**
+     * Create or load a branch for isolated editing.
+     *
+     * Branching lets you take a snapshot of the current state and start modifying it without affecting the canonical/shared version.
+     * It's a fork of your data graph: the same schema, but with diverging values.
+     *
+     * The checkout of the branch is applied on all the resolved values.
+     *
+     * @param name - A unique name for the branch. This identifies the branch
+     *   and can be used to switch between different branches of the same CoValue.
+     * @param owner - The owner of the branch. Determines who can access and modify
+     *   the branch. If not provided, the branch is owned by the current user.
+     *
+     * For more info see the [branching](https://jazz.tools/docs/react/using-covalues/version-control) documentation.
+     */
+    unstable_branch?: BranchDefinition;
   },
 ): {
   me: Loaded<A, R> | undefined | null;

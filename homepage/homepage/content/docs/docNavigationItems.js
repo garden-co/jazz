@@ -218,6 +218,11 @@ export const docNavigationItems = [
         href: "/docs/using-covalues/subscription-and-loading",
         done: 80,
       },
+      // {
+      //   name: "Version control",
+      //   href: "/docs/using-covalues/version-control",
+      //   done: 100,
+      // },
       {
         name: "History",
         href: "/docs/using-covalues/history",

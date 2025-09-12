@@ -10,6 +10,7 @@ import {
   getCoValueOwner,
   Group,
   ID,
+  unstable_mergeBranch,
   RefEncoded,
   RefsToResolve,
   RefsToResolveStrict,
@@ -512,14 +513,6 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
     private getRaw: () => RawCoList,
   ) {
     super(coList);
-  }
-
-  /**
-   * The ID of this `CoList`
-   * @category Content
-   */
-  get id(): ID<L> {
-    return this.raw.id;
   }
 
   /** @category Collaboration */

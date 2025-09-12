@@ -39,6 +39,7 @@ import { StorageAPI } from "./storage/index.js";
 import { Peer, PeerID, SyncManager } from "./sync.js";
 import { accountOrAgentIDfromSessionID } from "./typeUtils/accountOrAgentIDfromSessionID.js";
 import { expectGroup } from "./typeUtils/expectGroup.js";
+import { canBeBranched } from "./coValueCore/branching.js";
 
 /** A `LocalNode` represents a local view of a set of loaded `CoValue`s, from the perspective of a particular account (or primitive cryptographic agent).
 
@@ -475,6 +476,10 @@ export class LocalNode {
 
     if (!source.isAvailable()) {
       return "unavailable";
+    }
+
+    if (!canBeBranched(source)) {
+      return source.getCurrentContent() as T;
     }
 
     const branch = source.getBranch(branchName, branchOwnerID);

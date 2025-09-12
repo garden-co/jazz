@@ -14,7 +14,7 @@ import {
 import { applyCoValueMigrations } from "../lib/migration.js";
 import { CoValueCoreSubscription } from "./CoValueCoreSubscription.js";
 import { JazzError, type JazzErrorIssue } from "./JazzError.js";
-import type { SubscriptionValue, Unloaded } from "./types.js";
+import type { BranchDefinition, SubscriptionValue, Unloaded } from "./types.js";
 import { createCoValue, myRoleForRawValue } from "./utils.js";
 
 export class SubscriptionScope<D extends CoValue> {
@@ -47,6 +47,7 @@ export class SubscriptionScope<D extends CoValue> {
     public schema: RefEncoded<D>,
     public skipRetry = false,
     public bestEffortResolution = false,
+    public unstable_branch?: BranchDefinition,
   ) {
     this.resolve = resolve;
     this.value = { type: "unloaded", id };
@@ -87,6 +88,7 @@ export class SubscriptionScope<D extends CoValue> {
         this.handleUpdate(value);
       },
       skipRetry,
+      this.unstable_branch,
     );
   }
 
@@ -407,6 +409,7 @@ export class SubscriptionScope<D extends CoValue> {
       descriptor,
       this.skipRetry,
       this.bestEffortResolution,
+      this.unstable_branch,
     );
     this.childNodes.set(id, child);
     child.setListener((value) => this.handleChildUpdate(id, value));
@@ -649,6 +652,7 @@ export class SubscriptionScope<D extends CoValue> {
       descriptor,
       this.skipRetry,
       this.bestEffortResolution,
+      this.unstable_branch,
     );
     this.childNodes.set(id, child);
     child.setListener((value) => this.handleChildUpdate(id, value, key));

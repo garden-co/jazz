@@ -16,6 +16,7 @@ import {
   getCoValueOwner,
   Group,
   ID,
+  unstable_mergeBranch,
   PartialOnUndefined,
   RefEncoded,
   RefIfCoValue,
@@ -559,14 +560,6 @@ class CoMapJazzApi<M extends CoMap> extends CoValueJazzApi<M> {
     private getRaw: () => RawCoMap,
   ) {
     super(coMap);
-  }
-
-  /**
-   * The ID of this `CoMap`
-   * @category Content
-   */
-  get id(): ID<M> {
-    return this.raw.id;
   }
 
   get owner(): Group {

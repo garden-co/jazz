@@ -496,56 +496,61 @@ describe("Branching Logic", () => {
 
   describe("Branch Conflict Resolution", () => {
     test("should successfully handle concurrent branch creation on different nodes", async () => {
-      const bob = setupTestNode();
-      const { peer: bobPeer } = bob.connectToSyncServer();
       const alice = setupTestNode({
         connected: true,
       });
 
-      const client = setupTestNode();
+      const bob = setupTestNode();
+      let { peerState: bobPeer } = bob.connectToSyncServer();
+
       const group = jazzCloud.node.createGroup();
       group.addMember("everyone", "writer");
 
       // Create map without any branches
-      const originalMap = group.createMap();
+      const map = group.createMap();
 
-      const originalMapOnBob = await loadCoValueOrFail(
-        bob.node,
-        originalMap.id,
-      );
+      const bobMap = await loadCoValueOrFail(bob.node, map.id);
 
       // Disconnect bob from sync server to create isolation
-      bobPeer.outgoing.close();
+      bobPeer.gracefulShutdown();
+
+      bobMap.set("bob", "main");
+      map.set("alice", "main");
 
       // Create branches on different nodes
       const aliceBranch = await alice.node.checkoutBranch(
-        originalMap.id,
+        map.id,
         "feature-branch",
       );
-      const bobBranch = expectMap(
-        originalMapOnBob.core
-          .createBranch("feature-branch", group.id)
-          .getCurrentContent(),
-      );
+      const bobBranch = await bob.node.checkoutBranch(map.id, "feature-branch");
 
-      if (aliceBranch === "unavailable") {
-        throw new Error("Alice branch is unavailable");
+      if (aliceBranch === "unavailable" || bobBranch === "unavailable") {
+        throw new Error("Alice or bob branch is unavailable");
       }
 
-      // Add different data to each branch
-      bobBranch.set("bob", true);
-      aliceBranch.set("alice", true);
+      // The branch start should be different
+      expect(aliceBranch.get("alice")).toBe("main");
+      expect(aliceBranch.get("bob")).toBe(undefined);
+      expect(bobBranch.get("alice")).toBe(undefined);
+      expect(bobBranch.get("bob")).toBe("main");
+
+      expect(aliceBranch.core.branchStart).not.toEqual(
+        bobBranch.core.branchStart,
+      );
 
       // Reconnect bob to sync server
-      bob.connectToSyncServer();
+      bobPeer = bob.connectToSyncServer().peerState;
 
-      // Wait for sync to complete
-      await bobBranch.core.waitForSync();
       await aliceBranch.core.waitForSync();
+      await bobBranch.core.waitForSync();
 
-      // Verify both branches now contain data from the other
-      expect(bobBranch.get("alice")).toBe(true);
-      expect(aliceBranch.get("bob")).toBe(true);
+      // The branch start from both branches should be aligned now
+      expect(aliceBranch.get("alice")).toBe("main");
+      expect(aliceBranch.get("bob")).toBe("main");
+      expect(bobBranch.get("alice")).toBe("main");
+      expect(bobBranch.get("bob")).toBe("main");
+
+      expect(aliceBranch.core.branchStart).toEqual(bobBranch.core.branchStart);
     });
   });
 

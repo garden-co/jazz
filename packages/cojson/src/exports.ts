@@ -85,6 +85,7 @@ import {
 import { LogLevel, logger } from "./logger.js";
 import { CO_VALUE_PRIORITY, getPriorityFromHeader } from "./priority.js";
 import { getDependedOnCoValues } from "./storage/syncUtils.js";
+import { canBeBranched } from "./coValueCore/branching.js";
 
 type Value = JsonValue | AnyRawCoValue;
 
@@ -124,6 +125,7 @@ export const cojsonInternals = {
   getContentMessageSize,
   TRANSACTION_CONFIG,
   setMaxRecommendedTxSize,
+  canBeBranched,
 };
 
 export {

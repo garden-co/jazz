@@ -18,6 +18,7 @@ import {
   getCoValueOwner,
   Group,
   ID,
+  unstable_mergeBranch,
   RefsToResolve,
   RefsToResolveStrict,
   Resolved,
@@ -327,14 +328,6 @@ export class CoFeedJazzApi<F extends CoFeed> extends CoValueJazzApi<F> {
     public raw: RawCoStream,
   ) {
     super(coFeed);
-  }
-
-  /**
-   * The ID of this `CoFeed`
-   * @category Content
-   */
-  get id(): ID<F> {
-    return this.raw.id;
   }
 
   get owner(): Group {
@@ -1019,14 +1012,6 @@ export class FileStreamJazzApi<F extends FileStream> extends CoValueJazzApi<F> {
     public raw: RawBinaryCoStream,
   ) {
     super(fileStream);
-  }
-
-  /**
-   * The ID of this `FileStream`
-   * @category Content
-   */
-  get id(): ID<F> {
-    return this.raw.id;
   }
 
   get owner(): Group {

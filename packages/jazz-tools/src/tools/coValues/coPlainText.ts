@@ -10,6 +10,7 @@ import {
   SubscribeListenerOptions,
   SubscribeRestArgs,
   TypeSym,
+  unstable_mergeBranch,
   parseCoValueCreateOptions,
 } from "../internal.js";
 import {
@@ -224,10 +225,6 @@ export class CoTextJazzApi<T extends CoPlainText> extends CoValueJazzApi<T> {
     public raw: RawCoPlainText,
   ) {
     super(coText);
-  }
-
-  get id(): ID<T> {
-    return this.raw.id;
   }
 
   get owner(): Group {

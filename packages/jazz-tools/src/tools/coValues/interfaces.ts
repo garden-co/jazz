@@ -21,8 +21,10 @@ import {
   TypeSym,
   activeAccountContext,
   coValueClassFromCoValueClassOrSchema,
+  getSubscriptionScope,
   inspect,
 } from "../internal.js";
+import type { BranchDefinition } from "../subscribe/types.js";
 
 /** @category Abstract interfaces */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -53,6 +55,9 @@ export interface CoValue {
     raw: RawCoValue;
     /** @internal */
     _subscriptionScope?: SubscriptionScope<CoValue>;
+    isBranched: boolean;
+    branchName: string | undefined;
+    unstable_merge: () => void;
   };
 
   /** @category Stringifying & Inspection */
@@ -99,11 +104,13 @@ export function loadCoValueWithoutMe<
     resolve?: RefsToResolveStrict<V, R>;
     loadAs?: Account | AnonymousJazzAgent;
     skipRetry?: boolean;
+    unstable_branch?: BranchDefinition;
   },
 ): Promise<Resolved<V, R> | null> {
   return loadCoValue(cls, id, {
     ...options,
     loadAs: options?.loadAs ?? activeAccountContext.get(),
+    unstable_branch: options?.unstable_branch,
   });
 }
 
@@ -117,6 +124,7 @@ export function loadCoValue<
     resolve?: RefsToResolveStrict<V, R>;
     loadAs: Account | AnonymousJazzAgent;
     skipRetry?: boolean;
+    unstable_branch?: BranchDefinition;
   },
 ): Promise<Resolved<V, R> | null> {
   return new Promise((resolve) => {
@@ -134,6 +142,7 @@ export function loadCoValue<
         onUnauthorized: () => {
           resolve(null);
         },
+        unstable_branch: options.unstable_branch,
       },
       (value, unsubscribe) => {
         resolve(value);
@@ -150,12 +159,15 @@ export async function ensureCoValueLoaded<
   existing: V,
   options?: { resolve?: RefsToResolveStrict<V, R> } | undefined,
 ): Promise<Resolved<V, R>> {
+  const subscriptionScope = getSubscriptionScope<V>(existing);
+
   const response = await loadCoValue(
     existing.constructor as CoValueClass<V>,
     existing.$jazz.id,
     {
       loadAs: existing.$jazz.loadedAs,
       resolve: options?.resolve,
+      unstable_branch: subscriptionScope?.unstable_branch,
     },
   );
 
@@ -179,6 +191,7 @@ export type SubscribeListenerOptions<
   loadAs?: Account | AnonymousJazzAgent;
   onUnauthorized?: () => void;
   onUnavailable?: () => void;
+  unstable_branch?: BranchDefinition;
 };
 
 export type SubscribeRestArgs<V extends CoValue, R extends RefsToResolve<V>> =
@@ -206,6 +219,7 @@ export function parseSubscribeRestArgs<
           loadAs: args[0].loadAs,
           onUnauthorized: args[0].onUnauthorized,
           onUnavailable: args[0].onUnavailable,
+          unstable_branch: args[0].unstable_branch,
         },
         listener: args[1],
       };
@@ -254,6 +268,7 @@ export function subscribeToCoValue<
     onUnauthorized?: () => void;
     syncResolution?: boolean;
     skipRetry?: boolean;
+    unstable_branch?: BranchDefinition;
   },
   listener: SubscribeListener<V, R>,
 ): () => void {
@@ -273,6 +288,8 @@ export function subscribeToCoValue<
       optional: false,
     },
     options.skipRetry,
+    false,
+    options.unstable_branch,
   );
 
   const handleUpdate = (value: SubscriptionValue<V, any>) => {
@@ -326,6 +343,8 @@ export function subscribeToExistingCoValue<
     | undefined,
   listener: SubscribeListener<V, R>,
 ): () => void {
+  const subscriptionScope = existing.$jazz._subscriptionScope;
+
   return subscribeToCoValue(
     existing.constructor as CoValueClass<V>,
     existing.$jazz.id,
@@ -334,6 +353,7 @@ export function subscribeToExistingCoValue<
       resolve: options?.resolve,
       onUnavailable: options?.onUnavailable,
       onUnauthorized: options?.onUnauthorized,
+      unstable_branch: subscriptionScope?.unstable_branch,
     },
     listener,
   );
@@ -475,6 +495,7 @@ export async function exportCoValue<
     loadAs: Account | AnonymousJazzAgent;
     skipRetry?: boolean;
     bestEffortResolution?: boolean;
+    unstable_branch?: BranchDefinition;
   },
 ) {
   const loadAs = options.loadAs ?? activeAccountContext.get();
@@ -492,6 +513,7 @@ export async function exportCoValue<
     },
     options.skipRetry,
     options.bestEffortResolution,
+    options.unstable_branch,
   );
 
   const value = await new Promise<Loaded<S, R> | null>((resolve) => {
@@ -586,4 +608,24 @@ export function importContentPieces(
   for (const piece of contentPieces) {
     node.syncManager.handleNewContent(piece, "import");
   }
+}
+
+export function unstable_mergeBranch(
+  subscriptionScope: SubscriptionScope<CoValue>,
+) {
+  if (!subscriptionScope.unstable_branch) {
+    return;
+  }
+
+  function handleMerge(subscriptionNode: SubscriptionScope<CoValue>) {
+    if (subscriptionNode.value.type === "loaded") {
+      subscriptionNode.value.value.$jazz.raw.core.mergeBranch();
+    }
+
+    for (const childNode of subscriptionNode.childNodes.values()) {
+      handleMerge(childNode);
+    }
+  }
+
+  handleMerge(subscriptionScope);
 }

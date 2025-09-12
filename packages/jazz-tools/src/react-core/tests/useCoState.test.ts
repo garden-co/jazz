@@ -559,4 +559,78 @@ describe("useCoState", () => {
 
     expect(renderings).toEqual([true]);
   });
+
+  it("should work with branches - create branch, edit and merge", async () => {
+    const Person = co.map({
+      name: z.string(),
+      age: z.number(),
+      email: z.string(),
+    });
+
+    const group = Group.create();
+    group.addMember("everyone", "writer");
+
+    const originalPerson = Person.create(
+      {
+        name: "John Doe",
+        age: 30,
+        email: "john@example.com",
+      },
+      group,
+    );
+
+    const account = await createJazzTestAccount({
+      isCurrentActiveAccount: true,
+    });
+
+    // Use useCoState with the branch
+    const { result } = renderHook(
+      () => {
+        const branch = useCoState(Person, originalPerson.$jazz.id, {
+          unstable_branch: { name: "feature-branch" },
+        });
+
+        const main = useCoState(Person, originalPerson.$jazz.id);
+
+        return { branch, main };
+      },
+      {
+        account,
+      },
+    );
+
+    await waitFor(() => {
+      expect(result.current).not.toBeNull();
+    });
+
+    const branchPerson = result.current.branch;
+
+    assert(branchPerson);
+
+    act(() => {
+      branchPerson.$jazz.applyDiff({
+        name: "John Smith",
+        age: 31,
+        email: "john.smith@example.com",
+      });
+    });
+
+    // Verify the branch has the changes
+    expect(result.current?.branch?.name).toBe("John Smith");
+    expect(result.current?.branch?.age).toBe(31);
+    expect(result.current?.branch?.email).toBe("john.smith@example.com");
+
+    // Verify the original is unchanged
+    expect(result.current?.main?.name).toBe("John Doe");
+    expect(result.current?.main?.age).toBe(30);
+    expect(result.current?.main?.email).toBe("john@example.com");
+
+    // Merge the branch back
+    await branchPerson.$jazz.unstable_merge();
+
+    // Verify the original now has the merged changes
+    expect(result.current?.main?.name).toBe("John Smith");
+    expect(result.current?.main?.age).toBe(31);
+    expect(result.current?.main?.email).toBe("john.smith@example.com");
+  });
 });

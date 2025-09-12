@@ -57,7 +57,13 @@ export function createJazzPlugin(
       setView(editorView);
 
       if (coRichText) {
-        coRichText.$jazz.subscribe(handleCoRichTextChange);
+        const unsubscribe = coRichText.$jazz.subscribe(handleCoRichTextChange);
+        return {
+          destroy() {
+            setView(undefined);
+            unsubscribe();
+          },
+        };
       }
 
       return {

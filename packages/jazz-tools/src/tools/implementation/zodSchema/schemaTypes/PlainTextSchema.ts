@@ -1,6 +1,7 @@
 import { RawCoPlainText } from "cojson";
 import {
   Account,
+  BranchDefinition,
   CoPlainText,
   Group,
   coOptionalDefiner,
@@ -41,14 +42,20 @@ export class PlainTextSchema implements CorePlainTextSchema {
 
   load(
     id: string,
-    options: { loadAs: Account | AnonymousJazzAgent },
+    options: {
+      loadAs: Account | AnonymousJazzAgent;
+      unstable_branch?: BranchDefinition;
+    },
   ): Promise<CoPlainText | null> {
     return this.coValueClass.load(id, options);
   }
 
   subscribe(
     id: string,
-    options: { loadAs: Account | AnonymousJazzAgent },
+    options: {
+      loadAs: Account | AnonymousJazzAgent;
+      unstable_branch?: BranchDefinition;
+    },
     listener: (value: CoPlainText, unsubscribe: () => void) => void,
   ): () => void;
   subscribe(

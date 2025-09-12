@@ -1,6 +1,7 @@
 import {
   Account,
   AnyZodOrCoValueSchema,
+  BranchDefinition,
   CoFeed,
   Group,
   RefsToResolve,
@@ -48,6 +49,7 @@ export class CoFeedSchema<T extends AnyZodOrCoValueSchema>
     options?: {
       resolve?: RefsToResolveStrict<CoFeedInstanceCoValuesNullable<T>, R>;
       loadAs?: Account | AnonymousJazzAgent;
+      unstable_branch?: BranchDefinition;
     },
   ): Promise<Resolved<CoFeedInstanceCoValuesNullable<T>, R> | null> {
     // @ts-expect-error

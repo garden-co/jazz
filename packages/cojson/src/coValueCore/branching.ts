@@ -3,6 +3,7 @@ import type { RawCoID, SessionID } from "../ids.js";
 import { type AvailableCoValueCore, idforHeader } from "./coValueCore.js";
 import type { CoValueHeader } from "./verifiedState.js";
 import type { CoValueKnownState } from "../sync.js";
+import { combineKnownStateSessions } from "../knownState.js";
 
 /**
  * Commit to identify the starting point of the branch
@@ -65,6 +66,13 @@ export function getBranchHeader({
     // The meta is enough to have reproducible unique id for the branch
     uniqueness: "",
   };
+}
+
+/**
+ * Checks if the coValue can be branched
+ */
+export function canBeBranched(coValue: CoValueCore): boolean {
+  return coValue.verified?.header.ruleset.type === "ownedByGroup";
 }
 
 /**
@@ -192,7 +200,7 @@ export function mergeBranch(branch: CoValueCore): CoValueCore {
     );
   }
 
-  if (branch.verified.header.ruleset.type !== "ownedByGroup") {
+  if (!canBeBranched(branch)) {
     return branch;
   }
 
@@ -204,19 +212,10 @@ export function mergeBranch(branch: CoValueCore): CoValueCore {
 
   // Look for previous merge commits, to see which transactions needs to be merged
   // Done mostly for performance reasons, as we could merge all the transactions every time and nothing would change
-  const mergedTransactions = branch.getMergeCommits().reduce(
-    (acc, { merged }) => {
-      for (const [sessionID, count] of Object.entries(merged) as [
-        SessionID,
-        number,
-      ][]) {
-        acc[sessionID] = Math.max(acc[sessionID] ?? 0, count);
-      }
-
-      return acc;
-    },
-    {} as CoValueKnownState["sessions"],
-  );
+  const mergedTransactions = branch
+    .getMergeCommits()
+    .map(({ merged }) => merged)
+    .reduce(combineKnownStateSessions, {} as CoValueKnownState["sessions"]);
 
   // Get the valid transactions from the branch, skipping the branch source and the previously merged transactions
   const branchValidTransactions = branch

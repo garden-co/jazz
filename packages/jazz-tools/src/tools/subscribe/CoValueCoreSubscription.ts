@@ -1,7 +1,11 @@
-import { CoValueCore, LocalNode, RawCoID, RawCoValue } from "cojson";
-import type { Account, Group } from "../internal.js";
-
-export type BranchDefinition = { name: string; owner?: Group | Account };
+import {
+  cojsonInternals,
+  CoValueCore,
+  LocalNode,
+  RawCoID,
+  RawCoValue,
+} from "cojson";
+import type { BranchDefinition } from "./types.js";
 
 /**
  * Manages subscriptions to CoValue cores, handling both direct subscriptions
@@ -46,7 +50,7 @@ export class CoValueCoreSubscription {
 
     // If the CoValue is already available, handle it immediately
     if (source.isAvailable()) {
-      this.handleAvailableSource(source);
+      this.handleAvailableSource();
       return;
     }
 
@@ -64,19 +68,23 @@ export class CoValueCoreSubscription {
    * Handles the case where the CoValue source is immediately available.
    * Either subscribes directly or attempts to get the requested branch.
    */
-  private handleAvailableSource(source: CoValueCore): void {
-    if (!this.branchName) {
-      this.subscribe(source.getCurrentContent());
+  private handleAvailableSource(): void {
+    if (!this.branchName || !cojsonInternals.canBeBranched(this.source)) {
+      this.subscribe(this.source.getCurrentContent());
       return;
     }
 
     // Try to get the specific branch from the available source
-    const branch = source.getBranch(this.branchName, this.branchOwnerId);
+    const branch = this.source.getBranch(this.branchName, this.branchOwnerId);
 
     if (branch.isAvailable()) {
       // Branch is available, subscribe to it
       this.subscribe(branch.getCurrentContent());
       return;
+      // If the branch hasn't been created, we create it directly so we can syncronously subscribe to it
+    } else if (!this.source.hasBranch(this.branchName, this.branchOwnerId)) {
+      this.source.createBranch(this.branchName, this.branchOwnerId);
+      this.subscribe(branch.getCurrentContent());
     } else {
       // Branch not available, fall through to checkout logic
       this.handleBranchCheckout();

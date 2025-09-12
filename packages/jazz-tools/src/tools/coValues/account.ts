@@ -377,14 +377,6 @@ class AccountJazzApi<A extends Account> extends CoValueJazzApi<A> {
   }
 
   /**
-   * The ID of this `Account`
-   * @category Content
-   */
-  get id(): ID<A> {
-    return this.raw.id;
-  }
-
-  /**
    * Accounts have no owner. They can be accessed by everyone.
    */
   get owner(): undefined {
