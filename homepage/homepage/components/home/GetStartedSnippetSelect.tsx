@@ -4,7 +4,7 @@ import { Framework } from "@/content/framework";
 import { useFramework } from "@/lib/use-framework";
 import NpxCreateJazzApp from "@/components/home/NpxCreateJazzApp.mdx";
 import { CopyButton } from "@garden-co/design-system/src/components/molecules/CodeGroup";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Button } from "@garden-co/design-system/src/components/atoms/Button";
 import Link from "next/link";
 import { FrameworkSelect } from "../docs/FrameworkSelect";
@@ -16,6 +16,10 @@ export function GetStartedSnippetSelect() {
   const defaultFramework = useFramework();
   const [selectedFramework, setSelectedFramework] =
     useState<Framework>(defaultFramework);
+
+  useEffect(() => {
+    setSelectedFramework(defaultFramework);
+  }, [defaultFramework]);
 
   return (
     <GappedGrid>
