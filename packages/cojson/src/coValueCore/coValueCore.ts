@@ -337,6 +337,12 @@ export class CoValueCore {
   ) {
     const previousState = this.loadingState;
 
+    const expectedId = idforHeader(header, this.node.crypto);
+
+    if (this.id !== expectedId) {
+      return false;
+    }
+
     if (this._verified?.sessions.size) {
       throw new Error(
         "CoValueCore: provideHeader called on coValue with verified sessions present!",
@@ -354,6 +360,8 @@ export class CoValueCore {
 
     this.updateCounter(previousState);
     this.notifyUpdate("immediate");
+
+    return true;
   }
 
   internalMarkMagicallyAvailable(

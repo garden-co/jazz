@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, test } from "vitest";
+import { assert, beforeEach, describe, expect, test } from "vitest";
 
 import { expectList, expectMap } from "../coValue";
 import { WasmCrypto } from "../crypto/WasmCrypto";
@@ -10,6 +10,7 @@ import {
   waitFor,
 } from "./testUtils";
 import { determineValidTransactions } from "../permissions";
+import { RawCoMap } from "../coValues/coMap";
 
 // We want to simulate a real world communication that happens asynchronously
 TEST_NODE_CONFIG.withAsyncPeers = true;
@@ -444,5 +445,31 @@ describe("client to server upload", () => {
         "client -> server | KNOWN Map sessions: header/1024",
       ]
     `);
+  });
+
+  test("uploading a coValue with a non-matching header", async () => {
+    const client = setupTestNode({
+      connected: false,
+    });
+
+    const coValue = client.node.createCoValue({
+      type: "comap",
+      ruleset: { type: "unsafeAllowAll" },
+      meta: null,
+      ...Crypto.createdNowUnique(),
+    });
+
+    const map = coValue.getCurrentContent() as RawCoMap;
+    map.set("hello", "world", "trusting");
+
+    const content = map.core.verified.newContentSince(undefined)?.[0];
+    assert(content);
+
+    // Simulate a mismatch between the header and the coValue id
+    content.id = "co_ztest123";
+
+    jazzCloud.node.syncManager.handleNewContent(content, "import");
+
+    expect(jazzCloud.node.getCoValue(content.id).isAvailable()).toBe(false);
   });
 });

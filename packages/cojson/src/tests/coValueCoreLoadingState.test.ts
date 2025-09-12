@@ -1,11 +1,12 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { PeerState } from "../PeerState";
-import { CoValueCore } from "../coValueCore/coValueCore";
+import { CoValueCore, idforHeader } from "../coValueCore/coValueCore";
 import { CoValueHeader, VerifiedState } from "../coValueCore/verifiedState";
 import { RawCoID } from "../ids";
 import { LocalNode } from "../localNode";
 import { Peer } from "../sync";
 import { createTestMetricReader, tearDownTestMetricReader } from "./testUtils";
+import { WasmCrypto } from "../crypto/WasmCrypto";
 
 let metricReader: ReturnType<typeof createTestMetricReader>;
 
@@ -17,10 +18,21 @@ afterEach(() => {
   tearDownTestMetricReader();
 });
 
-const mockNode = {} as LocalNode;
+const mockNode = {
+  crypto: await WasmCrypto.create(),
+} as unknown as LocalNode;
+
+const testCoValueHeader = {
+  type: "comap",
+  ruleset: { type: "ownedByGroup", group: "co_ztest123" },
+  meta: null,
+  uniqueness: null,
+} as CoValueHeader;
+
+const testCoValueId = idforHeader(testCoValueHeader, mockNode.crypto);
 
 describe("CoValueCore loading state", () => {
-  const mockCoValueId = "co_test123" as RawCoID;
+  const mockCoValueId = testCoValueId;
 
   test("should create unknown state", async () => {
     const state = CoValueCore.fromID(mockCoValueId, mockNode);
@@ -195,7 +207,7 @@ describe("CoValueCore loading state", () => {
         role: "server",
       },
       async () => {
-        state.provideHeader({} as CoValueHeader, "peer1");
+        state.provideHeader(testCoValueHeader, "peer1");
       },
     );
     const peer2 = createMockPeerState(
@@ -248,7 +260,7 @@ describe("CoValueCore loading state", () => {
         role: "server",
       },
       async () => {
-        state.provideHeader({} as CoValueHeader, "peer2");
+        state.provideHeader(testCoValueHeader, "peer2");
       },
     );
 

@@ -594,12 +594,21 @@ export class SyncManager {
         }
       }
 
-      peer?.updateHeader(msg.id, true);
-      coValue.provideHeader(
+      const success = coValue.provideHeader(
         msg.header,
         peer?.id ?? "storage",
         msg.expectContentUntil,
       );
+
+      if (!success) {
+        logger.error("Failed to provide header", {
+          id: msg.id,
+          header: msg.header,
+        });
+        return;
+      }
+
+      peer?.updateHeader(msg.id, true);
 
       if (msg.expectContentUntil) {
         peer?.combineWith(msg.id, {

@@ -7,7 +7,7 @@ import {
   test,
   vi,
 } from "vitest";
-import { CoValueCore } from "../coValueCore/coValueCore.js";
+import { CoValueCore, idforHeader } from "../coValueCore/coValueCore.js";
 import { WasmCrypto } from "../crypto/WasmCrypto.js";
 import { stableStringify } from "../jsonStringify.js";
 import { LocalNode } from "../localNode.js";
@@ -519,10 +519,46 @@ describe("markErrored and isErroredInPeer", () => {
     // Mark peer as unavailable
     coValue.markNotFoundInPeer(peerId);
     expect(coValue.isErroredInPeer(peerId)).toBe(false);
+  });
 
-    // Mark peer as available
-    coValue.provideHeader({} as any, peerId);
-    expect(coValue.isErroredInPeer(peerId)).toBe(false);
+  test("provideHeader should work", () => {
+    const [agent, sessionID] = randomAgentAndSessionID();
+    const node = new LocalNode(agent.agentSecret, sessionID, Crypto);
+
+    const header = {
+      type: "costream",
+      ruleset: { type: "unsafeAllowAll" },
+      meta: null,
+      ...Crypto.createdNowUnique(),
+    } as const;
+
+    const coValue = node.getCoValue(idforHeader(header, Crypto));
+
+    expect(coValue.isAvailable()).toBe(false);
+
+    const success = coValue.provideHeader(header, "peerId");
+    expect(success).toBe(true);
+    expect(coValue.isAvailable()).toBe(true);
+  });
+
+  test("provideHeader should return false if the header hash doesn't match the coValue id", () => {
+    const [agent, sessionID] = randomAgentAndSessionID();
+    const node = new LocalNode(agent.agentSecret, sessionID, Crypto);
+
+    const header = {
+      type: "costream",
+      ruleset: { type: "unsafeAllowAll" },
+      meta: null,
+      ...Crypto.createdNowUnique(),
+    } as const;
+
+    const coValue = node.getCoValue("co_ztest123");
+
+    expect(coValue.isAvailable()).toBe(false);
+
+    const success = coValue.provideHeader(header, "peerId");
+    expect(success).toBe(false);
+    expect(coValue.isAvailable()).toBe(false);
   });
 
   test("markErrored should work with multiple peers", () => {
