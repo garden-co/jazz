@@ -19,7 +19,7 @@ import { type CoValue, type ID } from "./interfaces.js";
  */
 export type WhereOptions<T> = T extends { [TypeSym]: "CoMap" }
   ? {
-      [K in keyof T]?: NonNullable<T[K]> extends
+      [K in CoKeys<T>]?: NonNullable<T[K]> extends
         | string
         | number
         | Date
@@ -35,7 +35,7 @@ export type WhereOptions<T> = T extends { [TypeSym]: "CoMap" }
  */
 export type OrderByOptions<T> = T extends { [TypeSym]: "CoMap" }
   ? {
-      [K in keyof T]?: NonNullable<T[K]> extends
+      [K in CoKeys<T>]?: NonNullable<T[K]> extends
         | string
         | number
         | Date
