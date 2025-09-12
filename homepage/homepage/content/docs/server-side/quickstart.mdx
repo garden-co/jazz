@@ -1,0 +1,516 @@
+export const metadata = {
+  description: "Get started building a simple server worker with Jazz in 10 minutes."
+};
+
+import { CodeGroup, ContentByFramework, FileName, TabbedCodeGroup, TabbedCodeGroupItem, StuckCTA } from "@/components/forMdx";
+import { Alert } from "@garden-co/design-system/src/components/atoms/Alert";
+import { TextLink } from "@garden-co/design-system/src/components/atoms/TextLink";
+import { ReactLogo } from "@/components/icons/ReactLogo";
+import { SvelteLogo } from "@/components/icons/SvelteLogo";
+
+# Get started with Server Workers in 10 minutes
+This quickstart guide will take you from an empty project to a server worker which can interact with your Jazz application. 
+
+- You'll get the most out of this guide if you complete [the frontend quickstart guide](/docs/getting-started/quickstart) first. 
+- If you've already completed the frontend quickstart, you can skip straight to [extending your schema](#define-your-schema).
+
+<ContentByFramework framework="react">
+  ## Create your Next.js App
+  We'll be using Next.js for simplicity, but you can use any framework you like.
+
+  You can accept the defaults for all the questions, or customise the project as you like.
+
+  <TabbedCodeGroup id="create-nextjs-app" default="pnpm" savedPreferenceKey="package-manager">
+  <TabbedCodeGroupItem label="npm">
+  ```sh
+  npx create-next-app@latest --typescript jazzfest
+  cd jazzfest
+  ```
+  </TabbedCodeGroupItem>
+  <TabbedCodeGroupItem label="pnpm">
+  ```sh
+  pnpx create-next-app@latest --typescript jazzfest
+  cd jazzfest
+  ```
+  </TabbedCodeGroupItem>
+  </TabbedCodeGroup>
+
+</ContentByFramework>
+<ContentByFramework framework="svelte">
+  ## Create your SvelteKit App
+  We'll be using SvelteKit for simplicity, but you can use any framework you like.
+
+  You can accept the defaults for all the questions, or customise the project as you like.
+
+  <TabbedCodeGroup id="create-sveltekit-app" default="pnpm" savedPreferenceKey="package-manager">
+  <TabbedCodeGroupItem label="npm">
+  ```sh
+  npx sv create --types ts --template minimal jazzfest
+  cd jazzfest
+  ```
+  </TabbedCodeGroupItem>
+  <TabbedCodeGroupItem label="pnpm">
+  ```sh
+  pnpx sv create --types ts --template minimal jazzfest
+  cd jazzfest
+  ```
+  </TabbedCodeGroupItem>
+  </TabbedCodeGroup>
+</ContentByFramework>
+
+<Alert variant="info" className="mt-4 flex gap-2 items-center">
+  Requires Node.js 20+
+</Alert>
+## Install Jazz
+
+The `jazz-tools` package includes everything you're going to need to build your first Jazz server worker.
+
+<TabbedCodeGroup id="install-jazz" default="pnpm" savedPreferenceKey="package-manager">
+<TabbedCodeGroupItem label="npm">
+```sh
+npm install jazz-tools
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem label="pnpm">
+```sh
+pnpm add jazz-tools
+```
+</TabbedCodeGroupItem>
+</TabbedCodeGroup>
+
+## Get your free API key
+
+Sign up for a free API key at [dashboard.jazz.tools](https://dashboard.jazz.tools) for higher limits or production use, or use your email address as a temporary key to get started quickly.
+
+<FileName>.env</FileName>
+<TabbedCodeGroup id="api-key" default="react" savedPreferenceKey="framework">
+<TabbedCodeGroupItem label="Next.js" icon={<ReactLogo />} value="react" className="[&_span]:[tab-size:2]" preferWrap>
+```bash
+NEXT_PUBLIC_JAZZ_API_KEY=you@example.com
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem label="SvelteKit" icon={<SvelteLogo />} value="svelte" className="[&_span]:[tab-size:2]" preferWrap>
+```bash
+PUBLIC_JAZZ_API_KEY=you@example.com
+```
+</TabbedCodeGroupItem>
+</TabbedCodeGroup>
+
+## Define your schema
+We're going to define a simple schema for our server worker. We'll use the `root` on the worker to store a list of bands. We're also going to add a migration to initialise the `root` if it doesn't exist.
+
+<ContentByFramework framework="react" savedPreferenceKey="framework">
+<FileName>app/schema.ts</FileName>
+</ContentByFramework>
+<ContentByFramework framework="svelte" savedPreferenceKey="framework">
+<FileName>src/lib/schema.ts</FileName>
+</ContentByFramework>
+
+<CodeGroup>
+```ts
+import { co, z } from "jazz-tools";
+
+export const Band = co.map({
+  name: z.string(),
+});
+
+export const BandList = co.list(Band);
+
+export const JazzFestWorkerAccount = co
+  .account({
+    root: co.map({
+      bandList: BandList,
+    }),
+    profile: co.profile(),
+  })
+  .withMigration((account) => {
+    if (!account.$jazz.has("root")) {
+      account.$jazz.set("root", {
+        bandList: [],
+      });
+      account.root?.$jazz.owner.makePublic();
+    }
+  });
+```
+</CodeGroup>
+
+<Alert variant="info" className="mt-4 flex gap-2 items-center">
+  If you're continuing from the [front-end Quickstart](/docs/getting-started/quickstart), you can extend your existing schema.
+</Alert>
+
+## Create a Server Worker
+
+Jazz provides a CLI to create server workers. You can create a server worker using the following command:
+
+<TabbedCodeGroup id="create-worker-account" default="pnpm" savedPreferenceKey="package-manager">
+<TabbedCodeGroupItem label="npm">
+```sh
+npx jazz-run account create --name "JazzFest Server Worker"
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem label="pnpm">
+```sh
+pnpx jazz-run account create --name "JazzFest Server Worker"
+```
+</TabbedCodeGroupItem>
+</TabbedCodeGroup>
+
+You can copy the output of this command and paste it directly into your `.env` file:
+
+<FileName>.env</FileName>
+<TabbedCodeGroup id="worker-env-vars" default="react" savedPreferenceKey="framework">
+<TabbedCodeGroupItem label="Next.js" icon={<ReactLogo />} value="react" className="[&_span]:[tab-size:2]" preferWrap>
+```bash
+NEXT_PUBLIC_JAZZ_API_KEY=you@example.com
+#[!code ++:2]
+NEXT_PUBLIC_JAZZ_WORKER_ACCOUNT=co_z...
+JAZZ_WORKER_SECRET=sealerSecret_z.../signerSecret_z...
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem label="SvelteKit" icon={<SvelteLogo />} value="svelte" className="[&_span]:[tab-size:2]" preferWrap>
+```bash
+PUBLIC_JAZZ_API_KEY=you@example.com
+#[!code ++:2]
+PUBLIC_JAZZ_WORKER_ACCOUNT=co_z...
+JAZZ_WORKER_SECRET=sealerSecret_z.../signerSecret_z...
+```
+</TabbedCodeGroupItem>
+</TabbedCodeGroup>
+<Alert variant="warning" className="mt-4 flex gap-2 items-center">
+  Your `JAZZ_WORKER_SECRET` should **never** be exposed to the client.
+</Alert>
+
+## Defining your HTTP request schema
+
+Next, we're going to set up an HTTP request schema to define our request and response. Here, we tell Jazz that we will send a `Band` under the key `band` and expect a `bandList` in response, which is a list of `Band`s. 
+
+We also need to tell Jazz which keys should be treated as loaded in the request and response using the `resolve` query.
+<ContentByFramework framework="react" savedPreferenceKey="framework">
+<FileName>app/announceBandSchema.ts</FileName>
+</ContentByFramework>
+<ContentByFramework framework="svelte" savedPreferenceKey="framework">
+<FileName>src/lib/announceBandSchema.ts</FileName>
+</ContentByFramework>
+<TabbedCodeGroup id="request-schema" default="react" savedPreferenceKey="framework">
+<TabbedCodeGroupItem label="Next.js" icon={<ReactLogo />} value="react" className="[&_span]:[tab-size:2]" preferWrap>
+```ts
+import { experimental_defineRequest } from "jazz-tools";
+import { Band, BandList } from "./schema";
+
+const workerId = process.env.NEXT_PUBLIC_JAZZ_WORKER_ACCOUNT;
+
+if (!workerId) throw new Error("NEXT_PUBLIC_JAZZ_WORKER_ACCOUNT is not set");
+
+export const announceBand = experimental_defineRequest({
+  url: "/api/announce-band",
+  workerId: workerId,
+  request: { schema: { band: Band }, resolve: { band: true } },
+  response: { schema: { bandList: BandList }, resolve: { bandList: true } },
+});
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem label="SvelteKit" icon={<SvelteLogo />} value="svelte" className="[&_span]:[tab-size:2]" preferWrap>
+```ts
+import { experimental_defineRequest } from "jazz-tools";
+import { Band, BandList } from "./schema";
+import { PUBLIC_JAZZ_WORKER_ACCOUNT } from "$env/static/public";
+
+const workerId = PUBLIC_JAZZ_WORKER_ACCOUNT;
+
+if (!workerId) throw new Error("PUBLIC_JAZZ_WORKER_ACCOUNT is not set");
+
+export const announceBand = experimental_defineRequest({
+  url: "/api/announce-band",
+  workerId: workerId,
+  request: { schema: { band: Band }, resolve: { band: true } },
+  response: { schema: { bandList: BandList }, resolve: { bandList: true } },
+});
+```
+</TabbedCodeGroupItem>
+</TabbedCodeGroup>
+
+## Configure your Server Worker
+
+We're going to use the `startWorker` function to start our server worker, and register a `POST` handler, which will listen for the requests being sent to our server worker.
+
+We'll also use a `resolve` query here to make sure that the `bandList` is loaded on the worker's root.
+
+<ContentByFramework framework="react" savedPreferenceKey="framework">
+<FileName>app/api/announce-band/route.ts</FileName>
+</ContentByFramework>
+<ContentByFramework framework="svelte" savedPreferenceKey="framework">
+<FileName>src/routes/api/announce-band/+server.ts</FileName>
+</ContentByFramework>
+<TabbedCodeGroup id="worker-config" default="react" savedPreferenceKey="framework">
+<TabbedCodeGroupItem label="Next.js" icon={<ReactLogo />} value="react" className="[&_span]:[tab-size:2]" preferWrap>
+```ts
+import { startWorker } from "jazz-tools/worker";
+import { announceBand } from "@/app/announceBandSchema";
+import { JazzFestWorkerAccount } from "@/app/schema";
+
+const { worker } = await startWorker({
+  syncServer: `wss://cloud.jazz.tools/?key=${process.env.NEXT_PUBLIC_JAZZ_API_KEY}`,
+  accountID: process.env.NEXT_PUBLIC_JAZZ_WORKER_ACCOUNT,
+  accountSecret: process.env.JAZZ_WORKER_SECRET,
+  AccountSchema: JazzFestWorkerAccount,
+});
+
+export async function POST(request: Request) {
+  return announceBand.handle(request, worker, async ({ band }) => {
+    if (!band) {
+      throw new Error("Band is required");
+    }
+    const {
+      root: { bandList },
+    } = await worker.$jazz.ensureLoaded({
+      resolve: {
+        root: {
+          bandList: true,
+        },
+      },
+    });
+    bandList.$jazz.push(band);
+    return { bandList: worker.root.bandList };
+  });
+}
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem label="SvelteKit" icon={<SvelteLogo />} value="svelte" className="[&_span]:[tab-size:2]" preferWrap>
+```ts
+import { startWorker } from "jazz-tools/worker";
+import { announceBand } from "$lib/announceBandSchema";
+import { JazzFestWorkerAccount } from "$lib/schema";
+import { PUBLIC_JAZZ_API_KEY, PUBLIC_JAZZ_WORKER_ACCOUNT } from "$env/static/public";
+import { JAZZ_WORKER_SECRET } from "$env/static/private";
+import type { RequestHandler } from './$types';
+
+const { worker } = await startWorker({
+  syncServer: `wss://cloud.jazz.tools/?key=${PUBLIC_JAZZ_API_KEY}`,
+  accountID: PUBLIC_JAZZ_WORKER_ACCOUNT,
+  accountSecret: JAZZ_WORKER_SECRET,
+  AccountSchema: JazzFestWorkerAccount,
+});
+
+export const POST: RequestHandler = async ({ request }) => {
+  return announceBand.handle(request, worker, async ({ band }) => {
+    if (!band) {
+      throw new Error("Band is required");
+    }
+    const {
+      root: { bandList },
+    } = await worker.$jazz.ensureLoaded({
+      resolve: {
+        root: {
+          bandList: true,
+        },
+      },
+    });
+    bandList.$jazz.push(band);
+    return { bandList: worker.root.bandList };
+  });
+}
+```
+</TabbedCodeGroupItem>
+</TabbedCodeGroup>
+
+## Start your server worker
+
+We can now start our development server to make sure everything is working.
+
+<TabbedCodeGroup id="start-server" default="pnpm" savedPreferenceKey="package-manager">
+<TabbedCodeGroupItem label="npm">
+```sh
+npm run dev
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem label="pnpm">
+```sh
+pnpm run dev
+```
+</TabbedCodeGroupItem>
+</TabbedCodeGroup>
+
+<ContentByFramework framework="react">
+If you open your browser, you should see the default Next.js welcome page.
+</ContentByFramework>
+<ContentByFramework framework="svelte">
+If you open your browser, you should see the default SvelteKit welcome page.
+</ContentByFramework>
+
+### Not working? 
+<ContentByFramework framework="react">
+- Check you set up your `.env` file correctly with `NEXT_PUBLIC_` where necessary
+</ContentByFramework>
+<ContentByFramework framework="svelte">
+- Check you set up your `.env` file correctly with `PUBLIC_` where necessary
+</ContentByFramework>
+- Check you're importing `startWorker` from `jazz-tools/worker`
+
+<StuckCTA />
+
+## Send requests to your server worker
+
+### Creating a Jazz Client
+*If you already have a working provider from the frontend quickstart, you can skip this step.*
+
+<ContentByFramework framework="react">
+We're going to wrap our Next.js app in a `JazzReactProvider` so that we can use Jazz on our client.
+</ContentByFramework>
+<ContentByFramework framework="svelte">
+We're going to wrap our SvelteKit app in a `JazzSvelteProvider` so that we can use Jazz on our client.
+</ContentByFramework>
+
+<ContentByFramework framework="react">  
+  <FileName>app/layout.tsx</FileName>
+</ContentByFramework>
+<ContentByFramework framework="svelte">
+  <FileName>src/routes/+layout.svelte</FileName>
+</ContentByFramework>
+
+<TabbedCodeGroup id="add-provider" savedPreferenceKey="framework">
+<TabbedCodeGroupItem label="React" value="react" className="[&_span]:[tab-size:2]" icon={<ReactLogo />} preferWrap>
+  ```tsx
+  import { JazzReactProvider } from "jazz-tools/react";
+
+  const apiKey = process.env.NEXT_PUBLIC_JAZZ_API_KEY;
+
+  export default function RootLayout({ 
+    children
+  }: { 
+    children: React.ReactNode 
+  }) {
+    return (
+      <html lang="en">
+        <body>
+          <JazzReactProvider
+            sync={{ peer: `wss://cloud.jazz.tools/?key=${apiKey}` }}
+          >
+            {children}
+          </JazzReactProvider>
+        </body>
+      </html>
+    );
+  }
+  ```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem label="Svelte" value="svelte" className="[&_span]:[tab-size:2]" icon={<SvelteLogo />} preferWrap>
+```svelte
+<script lang="ts">
+  import { JazzSvelteProvider } from "jazz-tools/svelte";
+	import { PUBLIC_JAZZ_API_KEY } from "$env/static/public";
+  let { children } = $props();
+  const sync = { peer: `wss://cloud.jazz.tools/?key=${PUBLIC_JAZZ_API_KEY}` };
+</script>
+
+<JazzSvelteProvider {sync}>
+  {@render children?.()}
+</JazzSvelteProvider>
+```
+</TabbedCodeGroupItem>
+</TabbedCodeGroup>
+
+### Creating your page component
+
+We're going to send a request to our server worker to announce a new band. Our worker will respond with a list of bands that we can display on our page.
+
+<ContentByFramework framework="react">
+<FileName>app/page.tsx</FileName>
+</ContentByFramework>
+<ContentByFramework framework="svelte">
+<FileName>src/routes/+page.svelte</FileName>
+</ContentByFramework>
+
+<TabbedCodeGroup id="page-component" default="react" savedPreferenceKey="framework">
+<TabbedCodeGroupItem label="React" value="react" className="[&_span]:[tab-size:2]" icon={<ReactLogo />} preferWrap>
+```tsx
+"use client";
+import type { co } from "jazz-tools";
+import { useState } from "react";
+import { announceBand } from "@/app/announceBandSchema";
+import type { BandList } from "@/app/schema";
+
+export default function Home() {
+  const [bandName, setBandName] = useState("");
+  const [bandList, setBandList] = useState<co.loaded<typeof BandList>>();
+  const handleAnnounceBand = async () => {
+    const bandListResponse = await announceBand.send({
+      band: { name: bandName },
+    });
+    setBandName("");
+    if (bandListResponse.bandList) {
+      setBandList(bandListResponse.bandList);
+    }
+  };
+
+  return (
+    <div>
+      <input
+        type="text"
+        value={bandName}
+        onChange={(e) => setBandName(e.target.value)}
+      />
+      <button type="button" onClick={handleAnnounceBand}>
+        Announce Band
+      </button>
+      <div>
+        {bandList?.map(
+          (band) => band && <div key={band?.$jazz.id}>{band?.name}</div>,
+        )}
+      </div>
+    </div>
+  );
+}
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem label="Svelte" value="svelte" className="[&_span]:[tab-size:2]" icon={<SvelteLogo />} preferWrap>
+```svelte
+<script lang="ts">
+  import type { co } from "jazz-tools";
+  import { announceBand } from "$lib/announceBandSchema";
+  import type { BandList } from "$lib/schema";
+  let bandName = $state("");
+  let bandList = $state<co.loaded<typeof BandList>>();
+  async function handleAnnounceBand() {
+    const bandListResponse = await announceBand.send({
+      band: { name: bandName },
+    });
+    bandName = "";
+    if (bandListResponse.bandList) {
+      bandList = bandListResponse.bandList;
+    }
+  }
+</script>
+
+<div>
+  <input type="text" bind:value={bandName} />
+  <button type="button" onclick={handleAnnounceBand}> Announce Band </button>
+  <div>
+    {#each bandList || [] as band (band?.$jazz.id)}
+      <div>{band?.name}</div>
+    {/each}
+  </div>
+</div>
+```
+</TabbedCodeGroupItem>
+</TabbedCodeGroup>
+
+## Try it out!
+Your browser should now be showing you a page with an input field and a button. If you enter a band name and click the button, your server worker will receive the request and add the band to the list.
+
+**Congratulations! 🎉** You've just built your first Jazz server worker! 
+
+This simple pattern is the foundation for building powerful, real-time applications. 
+
+Here are some ideas about what you could use your server worker for:
+
+- integrating with payment providers
+- sending emails/SMSes
+- gathering data from external APIs
+- managing authoritative state
+
+Looking forward to seeing what you build!
+
+## Next steps
+- Complete the [front-end quickstart](/docs/getting-started/quickstart) to learn more about how to build real-time UIs using Jazz
+- Find out how to [handle errors](/docs/server-side/http-requests#error-handling) gracefully in your server worker
+- Learn how to share and [collaborate on data](/docs/groups/intro) in groups with complex permissions
