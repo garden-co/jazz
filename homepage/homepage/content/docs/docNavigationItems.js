@@ -10,19 +10,10 @@ export const docNavigationItems = [
         href: "/docs",
         done: 100,
         excludeFromNavigation: true,
-      },
-      // {
-      //   name: "Guide",
-      //   href: "/docs/guide",
-      //   done: {
-      //     react: 100,
-      //   },
-      // },
-      {
-        name: "Example apps",
-        href: "/examples",
-        done: 30,
-        excludeFromNavigation: true,
+      }, {
+        name: "Quickstart",
+        href: "/docs/getting-started/quickstart",
+        done: 100,
       },
       { name: "FAQs", href: "/docs/faq", done: 100 },
       {
@@ -61,6 +52,13 @@ export const docNavigationItems = [
           "react-native-expo": 100,
           svelte: 100,
         },
+      },
+            {
+        name: "Server-side rendering",
+        href: "/docs/project-setup/ssr",
+        done: {
+          react: 100,
+        }
       },
     ],
   },
@@ -248,6 +246,11 @@ export const docNavigationItems = [
   {
     name: "Authentication",
     items: [
+      { 
+        name: "Quickstart",
+        href: "/docs/authentication/quickstart",
+        done: 100,
+      },
       {
         name: "Overview",
         href: "/docs/authentication/overview",
@@ -296,7 +299,11 @@ export const docNavigationItems = [
   },
   {
     name: "Server-side",
-    items: [
+    items: [{
+        name: "Quickstart",
+        href: "/docs/server-side/quickstart",
+        done: 100,
+      },
       {
         name: "Setup",
         href: "/docs/server-side/setup",

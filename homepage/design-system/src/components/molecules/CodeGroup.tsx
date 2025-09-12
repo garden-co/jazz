@@ -86,12 +86,14 @@ export function CodeGroup({
   size = "md",
   className,
   onCopy,
+  preferWrap = false,
 }: {
   children?: React.ReactNode;
   text?: string;
   size?: "md" | "lg";
   className?: string;
   onCopy?: () => void;
+  preferWrap?: boolean;
 }) {
   const textRef = useRef<HTMLPreElement | null>(null);
   const [code, setCode] = useState<string>();
@@ -121,7 +123,10 @@ export function CodeGroup({
     <div className={clsx(className, "not-prose group relative")}>
       <pre
         className={clsx(
-          "h-full overflow-x-auto",
+          "h-full",
+          preferWrap
+            ? "overflow-x-visible break-words whitespace-pre-wrap [&_.line]:whitespace-pre-wrap"
+            : "overflow-x-auto",
           "border rounded-md p-0 bg-stone-50 dark:bg-stone-925",
           "text-black dark:text-white",
           {

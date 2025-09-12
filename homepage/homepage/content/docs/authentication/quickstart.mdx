@@ -1,0 +1,699 @@
+import { Alert } from "@garden-co/design-system/src/components/atoms/Alert";
+import { CodeGroup, ContentByFramework, FileName, TabbedCodeGroup, TabbedCodeGroupItem } from "@/components/forMdx";
+import { SvelteLogo } from "@/components/icons/SvelteLogo";
+import { ReactLogo } from "@/components/icons/ReactLogo";
+import RunDevServer from "@/components/docs/snippets/RunDevServer.mdx";
+import StuckCTA from "@/components/docs/snippets/StuckCTA.mdx";
+
+export const metadata = {
+  description: "Add authentication to your Jazz app."
+};
+
+# Add Authentication to your App
+
+This guide will take your festival app even further by showing you how to authenticate users and collaborate with others.
+
+<Alert variant="info" className="mt-4 flex gap-2 items-center">
+  If you haven't gone through the [front-end Quickstart](/docs/getting-started/quickstart), you might find this guide a bit confusing. If you're looking for a quick reference, you might find [this page](/docs/authentication/overview) or our [Passkey Auth example app](https://github.com/gardencmp/jazz/tree/main/starters/react-passkey-auth) more helpful!
+</Alert>
+
+## Add passkey authentication
+Jazz has a built-in passkey authentication component that you can use to add authentication to your app. This is the easiest way to get started with securely authenticating users into your application. By adding this component, when users access your app, they'll be greeted with an input where they can enter their name, and create a passkey.
+
+<ContentByFramework framework="react">
+  <FileName>app/components/JazzWrapper.tsx</FileName>
+</ContentByFramework>
+<ContentByFramework framework="svelte">
+  <FileName>src/routes/+layout.svelte</FileName>
+</ContentByFramework>
+
+<TabbedCodeGroup savedPreferenceKey="framework" id="add-passkey-auth">
+<TabbedCodeGroupItem label="React" value="react" className="[&_span]:[tab-size:2]" icon={<ReactLogo />} preferWrap>
+  ```tsx
+  "use client"; // tells Next.js that this component can't be server-side rendered. If you're not using Next.js, you can remove it.
+  // [!code --:1]
+  import { JazzReactProvider } from "jazz-tools/react";
+  // [!code ++:1]
+import { JazzReactProvider, PasskeyAuthBasicUI } from "jazz-tools/react";
+import { JazzFestAccount } from "@/app/schema";
+
+const apiKey = process.env.NEXT_PUBLIC_JAZZ_API_KEY;
+
+export function JazzWrapper({ children }: { 
+  children: React.ReactNode 
+}) {
+  return (
+    <JazzReactProvider
+      sync={{ 
+        peer: `wss://cloud.jazz.tools/?key=${apiKey}` 
+      }}
+      AccountSchema={JazzFestAccount}
+    >
+      {/* [!code ++:1] */}
+      <PasskeyAuthBasicUI appName="JazzFest">
+        {children}
+      {/* [!code ++:1] */}
+      </PasskeyAuthBasicUI>
+    </JazzReactProvider>
+  );
+}
+  ```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem label="Svelte" value="svelte" className="[&_span]:[tab-size:2]" icon={<SvelteLogo />} preferWrap>
+```svelte
+<script lang="ts">
+  // [!code --:1]
+  import { JazzSvelteProvider } from "jazz-tools/svelte";
+  // [!code ++:1]
+  import { JazzSvelteProvider, PasskeyAuthBasicUI } from "jazz-tools/svelte";
+  import { JazzFestAccount } from "$lib/schema";
+	import { PUBLIC_JAZZ_API_KEY } from "$env/static/public";
+
+  const apiKey = PUBLIC_JAZZ_API_KEY;
+  let { children } = $props();
+  const sync = { peer: `wss://cloud.jazz.tools/?key=${apiKey}` };
+</script>
+
+<JazzSvelteProvider {sync} AccountSchema={JazzFestAccount}>
+  <!-- [!code ++:1] -->
+  <PasskeyAuthBasicUI appName="JazzFest" />
+  {@render children?.()}
+</JazzSvelteProvider>
+```
+</TabbedCodeGroupItem>
+</TabbedCodeGroup>
+
+## Give it a go!
+... what, already?! Yes! Run your app and try creating a passkey and logging in!
+
+<RunDevServer />
+
+### Not working?
+- Did you add `<PasskeyAuthBasicUI>` *inside* your provider?
+- Does it wrap all the children?
+- Are you running your app in a <a href="https://developer.mozilla.org/en-US/docs/Web/Security/Secure_Contexts" target="_blank" rel="noopener noreferrer">secure context</a> (either HTTPS or localhost)?
+
+<StuckCTA />
+
+## Create an invite link
+Now we're logged in, we can create an invite link that others can use to access our data. We'll create an invite link that allows others to collaborate on our festival.
+
+<ContentByFramework framework="react">
+  <FileName>app/components/Festival.tsx</FileName>
+</ContentByFramework>
+<ContentByFramework framework="svelte">
+  <FileName>src/lib/components/Festival.svelte</FileName>
+</ContentByFramework>
+
+<TabbedCodeGroup default="react" savedPreferenceKey="framework" id="create-invite-link">
+<TabbedCodeGroupItem icon={<ReactLogo />} label="React" value="react" className="[&_span]:[tab-size:2]" preferWrap>
+```tsx
+"use client";
+// [!code --:1]
+import { useAccount } from "jazz-tools/react";
+// [!code ++:1]
+import { createInviteLink, useAccount } from "jazz-tools/react";
+// [!code ++:1]
+import { useState } from "react";
+import { JazzFestAccount } from "@/app/schema";
+
+export function Festival() {
+  // [!code ++:1]
+  const [inviteLink, setInviteLink] = useState<string>("");
+  const { me } = useAccount(JazzFestAccount, { 
+    resolve: { root: { myFestival: true } } 
+  });
+  if (!me) return null; // not loaded yet
+  // [!code ++:4]
+  const inviteLinkClickHandler = () => {
+    const link = createInviteLink(me.root.myFestival, "writer")
+    setInviteLink(link);
+  };
+  return (
+    // [!code ++:1]
+    <>
+      <ul>
+        {me.root.myFestival.map((band) => band && <li key={band.$jazz.id}>{band.name}</li>)}
+      </ul>
+      {/* [!code ++:5] */}
+      <input type="text" value={inviteLink} readOnly />
+      <button onClick={inviteLinkClickHandler}>
+        Create Invite Link
+      </button>
+    </>
+  );
+}
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem icon={<SvelteLogo />} label="Svelte" value="svelte" className="[&_span]:[tab-size:2]" preferWrap>
+```svelte
+<script lang="ts">
+  // [!code --:1]
+  import { AccountCoState } from "jazz-tools/svelte";
+  // [!code ++:1]
+  import { AccountCoState, createInviteLink } from "jazz-tools/svelte";
+  import { JazzFestAccount } from "$lib/schema";
+
+  const me = new AccountCoState(JazzFestAccount, { 
+    resolve: { root: { myFestival: true } } 
+  });
+  // [!code ++:7]
+  let inviteLink = $state<string | null>(null);
+
+  function inviteLinkClickHandler() {
+    if (!me.current) return; // not loaded yet
+    const link = createInviteLink(me.current?.root.myFestival, "writer")
+    inviteLink = link;
+  }
+</script>
+
+<ul>
+  {#each me.current?.root?.myFestival || [] as band}
+    <li>{band?.name}</li>
+  {/each}
+</ul>
+
+<input type="text" bind:value={inviteLink} readonly />
+<button onclick={inviteLinkClickHandler}>
+  Create Invite Link
+</button>
+```
+</TabbedCodeGroupItem>
+</TabbedCodeGroup>
+
+## Accept an invite
+Now we need to handle the invite link and accept it as the current user. We can add a handler to our `Festival` component to accept the invite.
+
+<ContentByFramework framework="react">
+  <FileName>app/components/Festival.tsx</FileName>
+</ContentByFramework>
+<ContentByFramework framework="svelte">
+  <FileName>src/lib/components/Festival.svelte</FileName>
+</ContentByFramework>
+
+<TabbedCodeGroup savedPreferenceKey="framework" id="accept-invite">
+<TabbedCodeGroupItem icon={<ReactLogo />} label="React" value="react" className="[&_span]:[tab-size:2]" preferWrap>
+```tsx
+"use client";
+// [!code --:1]
+import { createInviteLink, useAccount } from "jazz-tools/react";
+// [!code ++:2]
+import { createInviteLink, useAcceptInvite, useAccount } from "jazz-tools/react";
+import { useRouter } from "next/navigation";
+import { useState } from "react";
+// [!code --:1]
+import { JazzFestAccount } from "@/app/schema";
+// [!code ++:2]
+// We need to alias the schema because our component is also named Festival
+import { Festival as FestivalSchema, JazzFestAccount } from "@/app/schema";
+
+export function Festival() {
+  const [inviteLink, setInviteLink] = useState<string>("");
+  const { me } = useAccount(JazzFestAccount, { 
+    resolve: { root: { myFestival: true } } 
+  });
+  // [!code ++:7]
+  const router = useRouter();
+  useAcceptInvite({
+    invitedObjectSchema: FestivalSchema,
+    onAccept: (festivalID: string) => {
+      router.push(`/festival/${festivalID}`);
+    },
+  });
+  if (!me) return null; // not loaded yet
+
+  const inviteLinkClickHandler = () => {
+    const link = createInviteLink(me.root.myFestival, "writer")
+    setInviteLink(link);
+  };
+  return (
+    <>
+      <ul>
+        {me.root.myFestival.map((band) => band && <li key={band.$jazz.id}>{band.name}</li>)}
+      </ul>
+      <input type="text" value={inviteLink} readOnly />
+      <button onClick={inviteLinkClickHandler}>
+        Create Invite Link
+      </button>
+    </>
+  );
+}
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem icon={<SvelteLogo />} label="Svelte" value="svelte" className="[&_span]:[tab-size:2]" preferWrap>
+```svelte
+<script lang="ts">
+  // [!code --:2]
+  import { AccountCoState, createInviteLink } from "jazz-tools/svelte";
+  import { JazzFestAccount } from "$lib/schema";
+  // [!code ++:3]
+  import { AccountCoState, createInviteLink, InviteListener } from "jazz-tools/svelte";
+  import { goto } from "$app/navigation";
+  import { Festival, JazzFestAccount } from "$lib/schema";
+
+  const me = new AccountCoState(JazzFestAccount, { 
+    resolve: { root: { myFestival: true } } 
+  });
+  let inviteLink = $state<string | null>(null);
+
+  // [!code ++:6]
+  new InviteListener({
+		invitedObjectSchema: Festival,
+		onAccept: (festivalID) => {
+			goto(`/festival/${festivalID}`);
+		}
+	});
+
+  function inviteLinkClickHandler() {
+    if (!me.current) return; // not loaded yet
+    const link = createInviteLink(me.current?.root.myFestival, "writer")
+    inviteLink = link;
+  }
+</script>
+
+<ul>
+  {#each me.current?.root?.myFestival || [] as band}
+    <li>{band?.name}</li>
+  {/each}
+</ul>
+
+<input type="text" bind:value={inviteLink} readonly />
+<button onclick={inviteLinkClickHandler}>
+  Create Invite Link
+</button>
+```
+</TabbedCodeGroupItem>
+</TabbedCodeGroup>  
+
+## Create the festival page
+Now we need to create the festival page, so that we can view other people's festivals and collaborate with them.
+
+### Update our Festival component
+We're going to continue updating our existing `Festival` component so that it can optionally take a prop for the festival ID.
+
+<ContentByFramework framework="react">
+  <FileName>app/components/Festival.tsx</FileName>
+</ContentByFramework>
+<ContentByFramework framework="svelte">
+  <FileName>src/lib/components/Festival.svelte</FileName>
+</ContentByFramework>
+
+<TabbedCodeGroup default="react" savedPreferenceKey="framework">
+<TabbedCodeGroupItem icon={<ReactLogo />} label="React" value="react" className="[&_span]:[tab-size:2]" preferWrap>
+```tsx
+"use client";
+import {
+  createInviteLink,
+  useAcceptInvite,
+  useAccount,
+// [!code ++:1]
+  useCoState
+} from "jazz-tools/react";
+import { useRouter } from "next/navigation";
+import { useState } from "react";
+// We need to alias the schema because our component is also named Festival
+import { Festival as FestivalSchema, JazzFestAccount } from "@/app/schema";
+
+// [!code --:1]
+export function Festival() {
+// [!code ++:1]
+export function Festival({id}: {id?: string}) {
+  const [inviteLink, setInviteLink] = useState<string>("");
+  const { me } = useAccount(JazzFestAccount, {
+    resolve: { root: { myFestival: true } },
+  });
+  const router = useRouter();
+  useAcceptInvite({
+    invitedObjectSchema: FestivalSchema,
+    onAccept: (festivalID: string) => {
+      router.push(`/festival/${festivalID}`);
+    },
+  });
+  // [!code ++:2]
+  const festivalId = id ?? me?.root.myFestival.$jazz.id;
+  const festival = useCoState(FestivalSchema, festivalId);
+  // [!code --:1]
+  if (!me) return null; // not loaded yet
+  // [!code ++:1]
+  if (!festival) return null; // not loaded yet
+  const inviteLinkClickHandler = () => {
+    // [!code --:1]
+    const link = createInviteLink(me.root.myFestival, "writer");
+    // [!code ++:1]
+    const link = createInviteLink(festival, "writer");
+    setInviteLink(link);
+  };
+  return (
+    <>
+      <ul>
+        {/* [!code --:1] */}
+        {me.root.myFestival.map(
+        {/* [!code ++:1] */}  
+        {festival.map(
+          (band) => band && <li key={band.$jazz.id}>{band.name}</li>,
+        )}
+      </ul>
+      <input type="text" value={inviteLink} readOnly />
+      <button type="button" onClick={inviteLinkClickHandler}>
+        Create Invite Link
+      </button>
+    </>
+  );
+}
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem label="Svelte" value="svelte" icon={<SvelteLogo />} className="[&_span]:[tab-size:2]" preferWrap>
+```svelte
+<script lang="ts">
+  // [!code --:1]
+  import { AccountCoState, createInviteLink, InviteListener } from "jazz-tools/svelte";
+  // [!code ++:1]
+  import { AccountCoState, CoState, createInviteLink, InviteListener } from "jazz-tools/svelte";
+  import { goto } from "$app/navigation";
+  import { Festival, JazzFestAccount } from "$lib/schema";
+
+  // [!code ++:1]
+	const { id }: { id?: string } = $props();
+  const me = new AccountCoState(JazzFestAccount, { 
+    resolve: { root: { myFestival: true } } 
+  });
+  // [!code ++:2]
+  const festivalId = $derived(id ?? me.current?.root.myFestival.$jazz.id);
+	const festival = $derived(new CoState(Festival, festivalId));
+  let inviteLink = $state<string | null>(null);
+
+  new InviteListener({
+		invitedObjectSchema: Festival,
+		onAccept: (festivalID) => {
+			goto(`/festival/${festivalID}`);
+		}
+	});
+
+  function inviteLinkClickHandler() {
+    if (!me.current) return; // not loaded yet
+    const link = createInviteLink(me.current?.root.myFestival, "writer")
+    inviteLink = link;
+  }
+</script>
+
+<ul>
+  <!-- [!code --:1] -->
+  {#each me.current?.root?.myFestival || [] as band}
+  <!-- [!code ++:1] -->
+  {#each festival?.current || [] as band}
+    <li>{band?.name}</li>
+  {/each}
+</ul>
+
+<input type="text" bind:value={inviteLink} readonly />
+<button onclick={inviteLinkClickHandler}>
+  Create Invite Link
+</button>
+```
+</TabbedCodeGroupItem>
+</TabbedCodeGroup>
+
+### Update our New Band component
+
+We'll also update our `NewBand` component so that it can take a prop for the festival ID, which will make it reusable on our home page and the new festival page.
+
+<ContentByFramework framework="react">
+  <FileName>app/components/NewBand.tsx</FileName>
+</ContentByFramework>
+<ContentByFramework framework="svelte">
+  <FileName>src/lib/components/NewBand.svelte</FileName>
+</ContentByFramework>
+
+<TabbedCodeGroup default="react" savedPreferenceKey="framework"
+>
+<TabbedCodeGroupItem label="React" value="react" icon={<ReactLogo />} className="[&_span]:[tab-size:2]" preferWrap>
+```tsx
+"use client";
+// [!code --:2]
+import { useAccount } from "jazz-tools/react";
+import { JazzFestAccount } from "@/app/schema";
+// [!code ++:3]
+import { useAccount, useCoState } from "jazz-tools/react";
+import { useState } from "react";
+import { JazzFestAccount, Festival } from "@/app/schema";
+
+// [!code --:1]
+export function NewBand() {
+// [!code ++:1]
+export function NewBand({ id }: { id?: string }) {
+  const { me } = useAccount(JazzFestAccount, {
+      resolve: { root: { myFestival: true } }
+    });
+  const [name, setName] = useState("");
+
+  // [!code ++:2]
+  const festivalId = $derived(id ?? me.current?.root.myFestival.$jazz.id);
+	const festival = $derived(new CoState(Festival, festivalId));
+  
+  const handleSave = () => {
+    // [!code --:2]
+    if (!me) return; // not loaded yet
+    me.root.myFestival.$jazz.push({ name });
+    // [!code ++:2]
+    if (!festival) return; // not loaded yet
+    festival.$jazz.push({ name });
+    setName("");
+  };
+
+  return (
+    <div>
+      <input
+        type="text"
+        value={name}
+        placeholder="Band name"
+        onChange={(e) => setName(e.target.value)}
+      />
+      <button type="button" onClick={handleSave}>Add</button>
+    </div>
+  );
+}
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem label="Svelte" value="svelte" icon={<SvelteLogo />} className="[&_span]:[tab-size:2]" preferWrap>
+```svelte
+<script lang="ts">
+  // [!code --:2]
+	import { AccountCoState } from "jazz-tools/svelte";
+	import { JazzFestAccount } from "$lib/schema";
+  // [!code ++:2]
+  import { AccountCoState, CoState } from "jazz-tools/svelte";
+  import { JazzFestAccount, Festival } from "$lib/schema";
+
+	const { id }: { id?: string } = $props();
+  const me = new AccountCoState(JazzFestAccount, { 
+    resolve: { root: { myFestival: true } } 
+  });
+  let name = $state("");
+
+    // [!code ++:2]
+  const festivalId = $derived(id ?? me.current?.root.myFestival.$jazz.id);
+	const festival = $derived(new CoState(Festival, festivalId));
+
+  function handleSave() {
+    // [!code --:2]
+    if (!me.current) return; // not loaded yet
+    me.current.root.myFestival.$jazz.push({ name });
+    // [!code ++:2]
+    if (!festival.current) return; // not loaded yet
+    festival.current.$jazz.push({ name });
+    name = "";
+  }
+</script>
+
+<div>
+  <input type="text" bind:value={name} placeholder="Band name" />
+  <button type="button" onclick={handleSave}>Add</button>
+</div>
+```
+</TabbedCodeGroupItem>
+</TabbedCodeGroup>
+
+### Create a route
+
+<ContentByFramework framework="react">
+  <FileName>app/festival/[festivalId]/page.tsx</FileName>
+</ContentByFramework>
+<ContentByFramework framework="svelte">
+  <FileName>src/routes/festival/[festivalId]/+page.svelte</FileName>
+</ContentByFramework>
+
+<TabbedCodeGroup savedPreferenceKey="framework" id="create-festival-page">
+<TabbedCodeGroupItem icon={<ReactLogo />} label="React" value="react" className="[&_span]:[tab-size:2]" preferWrap>
+```tsx
+"use client";
+import { use } from "react";
+import { Festival } from "@/app/components/Festival";
+import { NewBand } from "@/app/components/NewBand";
+
+export default function FestivalPage(props: {
+  params: Promise<{ festivalId: string }>;
+}) {
+  const { festivalId } = use(props.params);
+
+  return (
+    <main>
+      <h1>🎪 Festival {festivalId}</h1>
+      <Festival id={festivalId} />
+      <NewBand id={festivalId} />
+    </main>
+  );
+}
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem icon={<SvelteLogo />} label="Svelte" value="svelte" className="[&_span]:[tab-size:2]" preferWrap>
+```svelte
+<script lang="ts">
+	import { page } from '$app/state';
+	import Festival from '$lib/components/Festival.svelte';
+	import NewBand from '$lib/components/NewBand.svelte';
+	const { festivalId } = page.params;
+</script>
+
+<main>
+  <h1>🎪 Festival {festivalId}</h1>
+  <Festival id={festivalId} />
+  <NewBand id={festivalId} />
+</main>
+```
+</TabbedCodeGroupItem>
+</TabbedCodeGroup>
+
+<ContentByFramework framework="react">
+<details>
+<summary>Already completed the server-side rendering guide?</summary>
+
+You'll need to make a couple of small changes to your structure in order for the festival to be rendered on the server, and then hydrated on the client.
+
+<FileName>app/components/JazzWrapper.tsx</FileName>
+<CodeGroup className="[&_span]:[tab-size:2]" preferWrap>
+```tsx
+"use client"; // tells Next.js that this component can't be server-side rendered. If you're not using Next.js, you can remove it.
+// [!code --:1]
+import { JazzReactProvider, PasskeyAuthBasicUI } from "jazz-tools/react"; 
+// [!code ++:1]
+import { JazzReactProvider, PasskeyAuthBasicUI, useAccount } from "jazz-tools/react"; 
+import { JazzFestAccount } from "@/app/schema";
+
+const apiKey = process.env.NEXT_PUBLIC_JAZZ_API_KEY;
+
+export function JazzWrapper({ children }: {
+  children: React.ReactNode
+}) {
+
+  return (
+    <JazzReactProvider
+      sync={{
+        peer: `wss://cloud.jazz.tools/?key=${apiKey}`
+      }}
+      AccountSchema={JazzFestAccount}
+      enableSSR
+    >
+    {/* [!code --:3] */}
+      <PasskeyAuthBasicUI appName="JazzFest">
+        {children}
+      </PasskeyAuthBasicUI>
+    {/* [!code ++:1] */}
+      <Auth>{children}</Auth>
+    </JazzReactProvider>
+  );
+}
+
+// [!code ++:10]
+export function Auth({ children }: { children: React.ReactNode }) {
+  const { agent } = useAccount();
+  const isGuest = agent.$type$ !== "Account"
+  if (isGuest) return children;
+  return (
+    <PasskeyAuthBasicUI appName="JazzFest">
+      {children}
+    </PasskeyAuthBasicUI>
+  )
+}
+```
+</CodeGroup>
+
+<FileName>app/components/Festival.tsx</FileName>
+<CodeGroup>
+```tsx
+"use client";
+import {
+  createInviteLink,
+  useAcceptInvite,
+  useAccount,
+  useCoState
+} from "jazz-tools/react";
+import { useRouter } from "next/navigation";
+import { useState } from "react";
+import { Festival as FestivalSchema, JazzFestAccount } from "@/app/schema";
+
+export function Festival({id}: {id?: string}) {
+  const [inviteLink, setInviteLink] = useState<string>("");
+  // [!code --:1]
+  const { me } = useAccount(JazzFestAccount, {
+  // [!code ++:1]
+  const { me, agent } = useAccount(JazzFestAccount, {
+    resolve: { root: { myFestival: true } },
+  });
+  const router = useRouter();
+  // [!code ++:2]
+  const isGuest = agent.$type$ !== "Account"
+  if (!isGuest) {
+    useAcceptInvite({
+      invitedObjectSchema: FestivalSchema,
+      onAccept: (festivalID: string) => {
+        router.push(`/festival/${festivalID}`);
+      },
+    });
+  // [!code ++:1]
+  }
+  
+  const festivalId = id ?? me?.root.myFestival.$jazz.id;
+  const festival = useCoState(FestivalSchema, festivalId);
+  if (!festival) return null; // not loaded yet
+  const inviteLinkClickHandler = () => {
+    const link = createInviteLink(festival, "writer");
+    setInviteLink(link);
+  };
+  return (
+    <>
+      <ul>
+        {festival.map(
+          (band) => band && <li key={band.$jazz.id}>{band.name}</li>,
+        )}
+      </ul>
+      <input type="text" value={inviteLink} readOnly />
+      <button type="button" onClick={inviteLinkClickHandler}>
+        Create Invite Link
+      </button>
+    </>
+  );
+}
+```
+</CodeGroup>
+
+You'll also need to be aware that the server agent can only render public CoValues, and the schema above does not publicly share any data (neither bands nor festivals).
+
+</details>
+</ContentByFramework>
+
+## Put it all together
+
+Now we can test it out by inviting someone to collaborate on our festival.
+
+1. Open your app and sign in.
+2. Open a new incognito window and sign up with a new passkey.
+3. From your first browser tab, create an invite link for the festival.
+4. You should be able to invite someone to collaborate on the festival.
+5. Paste the invite link into the incognito window. You should be able to add bands to the festival!
+
+**Congratulations! 🎉** You've added authentication and public sharing to your app! You've also learned about how to migrate data from anonymous to authenticated accounts, and have begun to see how you can use groups and permissions to control access to your data.
+
+## Next steps
+- Check out how to [use other types of authentication](/docs/authentication/overview#available-authentication-methods)
+- Learn more about how to [manage complex permissions](/docs/groups/intro) using groups and roles
+- Find out how to [use server workers](/docs/server-side/quickstart) to build more complex applications

@@ -1,0 +1,25 @@
+import { ContentByFramework, FileName, TabbedCodeGroup, TabbedCodeGroupItem } from "@/components/forMdx";
+import { ReactLogo } from "@/components/icons/ReactLogo";
+import { SvelteLogo } from "@/components/icons/SvelteLogo";
+
+Sign up for a free API key at [dashboard.jazz.tools](https://dashboard.jazz.tools) for higher limits or production use, or use your email address as a temporary key to get started quickly.
+
+<ContentByFramework framework="react">
+  <FileName>.env</FileName>
+</ContentByFramework>
+<ContentByFramework framework="svelte">
+  <FileName>.env</FileName>
+</ContentByFramework>
+
+<TabbedCodeGroup default="react" savedPreferenceKey="framework" id="get-api-key">
+<TabbedCodeGroupItem label="React" value="react" className="[&_span]:[tab-size:2]" icon={<ReactLogo />} preferWrap>
+```bash
+NEXT_PUBLIC_JAZZ_API_KEY="you@example.com"; // or your API key
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem label="Svelte" value="svelte" className="[&_span]:[tab-size:2]" icon={<SvelteLogo />} preferWrap>
+```bash
+PUBLIC_JAZZ_API_KEY="you@example.com"; // or your API key
+```
+</TabbedCodeGroupItem>
+</TabbedCodeGroup>
