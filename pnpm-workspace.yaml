@@ -5,6 +5,7 @@ packages:
   - 'tests/*'
   - 'crates/*'
   - 'bench'
+  - 'homepage'
 
 catalogs:
   default:
