@@ -18,6 +18,7 @@ import { JazzError, type JazzErrorIssue } from "./JazzError.js";
 import type { BranchDefinition, SubscriptionValue, Unloaded } from "./types.js";
 import { createCoValue, myRoleForRawValue } from "./utils.js";
 
+export type OrderByDirection = "asc" | "desc";
 export type WhereOperator = (typeof WhereOperators)[number];
 const WhereOperators = ["$eq", "$ne", "$gt", "$gte", "$lt", "$lte"] as const;
 
@@ -29,8 +30,8 @@ type QueryModifiers = {
   }[];
   orderBy?: {
     indexedField: string;
-    orderDirection: "asc" | "desc";
-  };
+    orderDirection: OrderByDirection;
+  }[];
   limit?: number;
   offset?: number;
 };
@@ -89,7 +90,8 @@ export class SubscriptionScope<D extends CoValue> {
     this.queryModifiers.where = parseWhere(queryModifiers?.$where);
     this.queryModifiers.orderBy = parseOrderBy(queryModifiers?.$orderBy);
     const indexedFields = [
-      this.queryModifiers.orderBy?.indexedField,
+      ...(this.queryModifiers.orderBy?.map((orderBy) => orderBy.indexedField) ??
+        []),
       ...(this.queryModifiers?.where?.map((where) => where.indexedField) ?? []),
     ].filter((field): field is string => field !== undefined);
 
@@ -801,14 +803,11 @@ function parseWhere(where: any): QueryModifiers["where"] {
 }
 
 function parseOrderBy(orderBy: any): QueryModifiers["orderBy"] {
-  const order = Object.entries(orderBy ?? {})[0];
-  const orderByField = order?.[0];
-  const orderDirection = order?.[1] as "asc" | "desc";
-  if (!orderByField) {
-    return undefined;
-  }
-  return {
-    indexedField: orderByField,
-    orderDirection,
-  };
+  const orderClauses = Object.entries(orderBy ?? {});
+  return orderClauses.map(([indexedField, orderDirection]) => {
+    return {
+      indexedField,
+      orderDirection: orderDirection as OrderByDirection,
+    };
+  });
 }

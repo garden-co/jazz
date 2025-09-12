@@ -770,8 +770,12 @@ describe("CoList resolution", async () => {
   describe("query modifiers", () => {
     const Score = co.map({
       priority: z.number(),
+      secondaryPriority: z.number().optional(),
     });
-    const ItemList = co.list(Score).withIndex("priority");
+    const ItemList = co
+      .list(Score)
+      .withIndex("priority")
+      .withIndex("secondaryPriority");
     let list: co.output<typeof ItemList>;
 
     beforeEach(async () => {
@@ -864,6 +868,14 @@ describe("CoList resolution", async () => {
         });
         assert(loadedList);
         expect(loadedList).toEqual([list[1], list[3], list[0], list[2]]);
+      });
+
+      test("supports multiple order by clauses", async () => {
+        const loadedList = await ItemList.load(list.$jazz.id, {
+          resolve: { $orderBy: { priority: "asc", secondaryPriority: "desc" } },
+        });
+        assert(loadedList);
+        expect(loadedList).toEqual([list[3], list[1], list[0], list[2]]);
       });
     });
 

@@ -3,6 +3,7 @@ import {
   IsUnion,
   ItemsSym,
   NotNull,
+  OrderByDirection,
   RequireExactlyOne,
   TypeSym,
   WhereOperator,
@@ -39,7 +40,7 @@ export type OrderByOptions<T> = T extends { [TypeSym]: "CoMap" }
         | number
         | Date
         | boolean
-        ? "asc" | "desc"
+        ? OrderByDirection
         : never;
     }
   : never;

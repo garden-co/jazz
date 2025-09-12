@@ -919,6 +919,19 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
     return subscriptionScope?.queryModifiers ?? {};
   }
 
+  private indexValueFor(indexedField: string, rawElementId: string): number {
+    const indexRecord = this.indexRecord(indexedField)?.toJSON() as Record<
+      string,
+      number
+    >;
+    if (!indexRecord) {
+      throw new Error(
+        `Query modifiers on non-indexed CoLists are not yet supported. ${indexedField} is not indexed`,
+      );
+    }
+    return indexRecord[rawElementId]!;
+  }
+
   /**
    * A CoList's items can be filtered, sorted and paginated when loading it.
    * This means the indexes in the CoList may differ from the indexes in the
@@ -931,6 +944,7 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
       return null;
     }
     const rawLength = this.raw.entries().length;
+    // TODO we should take the known state of the CoList and its children into account
     if (this.cachedQueryView && this.cachedQueryView.rawLength === rawLength) {
       return this.cachedQueryView.queryView;
     }
@@ -947,49 +961,45 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
         indexedValue: entry.value as string,
       }));
     let sortedArrayIndexes = allArrayIndexesWithIndexedValues;
-    if (orderBy !== undefined) {
-      const { indexedField, orderDirection } = orderBy;
-      const indexRecord = this.indexRecord(indexedField)?.toJSON() as Record<
-        string,
-        number
-      >;
-      if (!indexRecord) {
-        throw new Error(
-          `Query modifiers on non-indexed CoLists are not yet supported. ${indexedField} is not indexed`,
-        );
-      }
-      sortedArrayIndexes = allArrayIndexesWithIndexedValues.toSorted((a, b) =>
-        orderDirection === "desc"
-          ? indexRecord[b.indexedValue]! - indexRecord[a.indexedValue]!
-          : indexRecord[a.indexedValue]! - indexRecord[b.indexedValue]!,
-      );
+    if (orderBy?.length) {
+      sortedArrayIndexes = allArrayIndexesWithIndexedValues.toSorted((a, b) => {
+        for (const { indexedField, orderDirection } of orderBy) {
+          const dir = orderDirection === "desc" ? -1 : 1;
+          if (
+            this.indexValueFor(indexedField, a.indexedValue) <
+            this.indexValueFor(indexedField, b.indexedValue)
+          )
+            return -1 * dir;
+          if (
+            this.indexValueFor(indexedField, a.indexedValue) >
+            this.indexValueFor(indexedField, b.indexedValue)
+          )
+            return 1 * dir;
+        }
+        return 0;
+      });
     }
     let filteredArrayIndexes = sortedArrayIndexes;
     if (where?.length) {
       filteredArrayIndexes = sortedArrayIndexes.filter((element) => {
         return where.every(({ indexedField, operator, value }) => {
-          const indexRecord = this.indexRecord(
+          const valueToFilter = this.indexValueFor(
             indexedField,
-          )?.toJSON() as Record<string, number>;
-          if (!indexRecord) {
-            throw new Error(
-              `Query modifiers on non-indexed CoLists are not yet supported. ${indexedField} is not indexed`,
-            );
-          }
-          const value2 = indexRecord[element.indexedValue] as any;
+            element.indexedValue,
+          );
           switch (operator) {
             case "$eq":
-              return value2 === value;
+              return valueToFilter === value;
             case "$ne":
-              return value2 !== value;
+              return valueToFilter !== value;
             case "$gt":
-              return value2 > value;
+              return valueToFilter > value;
             case "$gte":
-              return value2 >= value;
+              return valueToFilter >= value;
             case "$lt":
-              return value2 < value;
+              return valueToFilter < value;
             case "$lte":
-              return value2 <= value;
+              return valueToFilter <= value;
           }
         });
       });
