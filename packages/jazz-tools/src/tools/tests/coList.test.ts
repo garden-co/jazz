@@ -778,8 +778,9 @@ describe("CoList resolution", async () => {
       list = ItemList.create([]);
       list.$jazz.push(
         Score.create({ priority: 2 }),
-        Score.create({ priority: 1 }),
+        Score.create({ priority: 1, secondaryPriority: 2 }),
         Score.create({ priority: 3 }),
+        Score.create({ priority: 1, secondaryPriority: 3 }),
       );
     });
 
@@ -797,7 +798,7 @@ describe("CoList resolution", async () => {
           resolve: { $where: { priority: { $ne: 2 } } },
         });
         assert(loadedList);
-        expect(loadedList).toEqual([list[1], list[2]]);
+        expect(loadedList).toEqual([list[1], list[2], list[3]]);
       });
 
       test("filters elements with a field greater than a specific value", async () => {
@@ -821,7 +822,7 @@ describe("CoList resolution", async () => {
           resolve: { $where: { priority: { $lt: 2 } } },
         });
         assert(loadedList);
-        expect(loadedList).toEqual([list[1]]);
+        expect(loadedList).toEqual([list[1], list[3]]);
       });
 
       test("filters elements with a field less than or equal to a specific value", async () => {
@@ -829,7 +830,17 @@ describe("CoList resolution", async () => {
           resolve: { $where: { priority: { $lte: 2 } } },
         });
         assert(loadedList);
-        expect(loadedList).toEqual([list[0], list[1]]);
+        expect(loadedList).toEqual([list[0], list[1], list[3]]);
+      });
+
+      test("supports multiple where clauses", async () => {
+        const loadedList = await ItemList.load(list.$jazz.id, {
+          resolve: {
+            $where: { priority: { $eq: 1 }, secondaryPriority: { $eq: 3 } },
+          },
+        });
+        assert(loadedList);
+        expect(loadedList).toEqual([list[3]]);
       });
     });
 
@@ -844,7 +855,7 @@ describe("CoList resolution", async () => {
         expect(loadedListRefs?.[0]?.id).toBe(list[2]?.$jazz.id);
         expect(loadedListRefs?.[1]?.id).toBe(list[0]?.$jazz.id);
         expect(loadedListRefs?.[2]?.id).toBe(list[1]?.$jazz.id);
-        expect(loadedList).toEqual([list[2], list[0], list[1]]);
+        expect(loadedList).toEqual([list[2], list[0], list[1], list[3]]);
       });
 
       test("sorts CoList in ascending order", async () => {
@@ -852,7 +863,7 @@ describe("CoList resolution", async () => {
           resolve: { $orderBy: { priority: "asc" } },
         });
         assert(loadedList);
-        expect(loadedList).toEqual([list[1], list[0], list[2]]);
+        expect(loadedList).toEqual([list[1], list[3], list[0], list[2]]);
       });
     });
 
