@@ -793,7 +793,6 @@ describe("CoList resolution", async () => {
         const loadedList = await ItemList.load(list.$jazz.id, {
           resolve: { $where: { priority: 2 } },
         });
-        assert(loadedList);
         expect(loadedList).toEqual([list[0]]);
       });
 
@@ -801,7 +800,6 @@ describe("CoList resolution", async () => {
         const loadedList = await ItemList.load(list.$jazz.id, {
           resolve: { $where: { priority: { $ne: 2 } } },
         });
-        assert(loadedList);
         expect(loadedList).toEqual([list[1], list[2], list[3]]);
       });
 
@@ -809,7 +807,6 @@ describe("CoList resolution", async () => {
         const loadedList = await ItemList.load(list.$jazz.id, {
           resolve: { $where: { priority: { $gt: 2 } } },
         });
-        assert(loadedList);
         expect(loadedList).toEqual([list[2]]);
       });
 
@@ -817,7 +814,6 @@ describe("CoList resolution", async () => {
         const loadedList = await ItemList.load(list.$jazz.id, {
           resolve: { $where: { priority: { $gte: 2 } } },
         });
-        assert(loadedList);
         expect(loadedList).toEqual([list[0], list[2]]);
       });
 
@@ -825,7 +821,6 @@ describe("CoList resolution", async () => {
         const loadedList = await ItemList.load(list.$jazz.id, {
           resolve: { $where: { priority: { $lt: 2 } } },
         });
-        assert(loadedList);
         expect(loadedList).toEqual([list[1], list[3]]);
       });
 
@@ -833,7 +828,6 @@ describe("CoList resolution", async () => {
         const loadedList = await ItemList.load(list.$jazz.id, {
           resolve: { $where: { priority: { $lte: 2 } } },
         });
-        assert(loadedList);
         expect(loadedList).toEqual([list[0], list[1], list[3]]);
       });
 
@@ -843,7 +837,6 @@ describe("CoList resolution", async () => {
             $where: { priority: { $eq: 1 }, secondaryPriority: { $eq: 3 } },
           },
         });
-        assert(loadedList);
         expect(loadedList).toEqual([list[3]]);
       });
     });
@@ -866,7 +859,6 @@ describe("CoList resolution", async () => {
         const loadedList = await ItemList.load(list.$jazz.id, {
           resolve: { $orderBy: { priority: "asc" } },
         });
-        assert(loadedList);
         expect(loadedList).toEqual([list[1], list[3], list[0], list[2]]);
       });
 
@@ -874,7 +866,6 @@ describe("CoList resolution", async () => {
         const loadedList = await ItemList.load(list.$jazz.id, {
           resolve: { $orderBy: { priority: "asc", secondaryPriority: "desc" } },
         });
-        assert(loadedList);
         expect(loadedList).toEqual([list[3], list[1], list[0], list[2]]);
       });
     });
@@ -891,22 +882,35 @@ describe("CoList resolution", async () => {
         });
         expect(paginatedList).toEqual(["b", "c"]);
       });
+    });
 
-      test("operations on the CoList should apply to the query view", async () => {
-        const TestList = co.list(z.string());
-        const list = TestList.create(["a", "b", "c", "d", "e"]);
-        const paginatedList = await TestList.load(list.$jazz.id, {
-          resolve: { $limit: 2, $offset: 1 },
-        });
-
-        assert(paginatedList);
-        const mapped = paginatedList.map((item) => item.toUpperCase());
-        const filtered = paginatedList.filter((item) => item > "b");
-        const json = paginatedList.toJSON();
-        expect(mapped).toEqual(["B", "C"]);
-        expect(filtered).toEqual(["c"]);
-        expect(json).toEqual(["b", "c"]);
+    test("operations on the CoList should apply to the query view", async () => {
+      const TestList = co.list(z.string());
+      const list = TestList.create(["a", "b", "c", "d", "e"]);
+      const paginatedList = await TestList.load(list.$jazz.id, {
+        resolve: { $limit: 2, $offset: 1 },
       });
+
+      assert(paginatedList);
+      const mapped = paginatedList.map((item) => item.toUpperCase());
+      const filtered = paginatedList.filter((item) => item > "b");
+      const json = paginatedList.toJSON();
+      expect(mapped).toEqual(["B", "C"]);
+      expect(filtered).toEqual(["c"]);
+      expect(json).toEqual(["b", "c"]);
+    });
+
+    test("operations can be applied to nested CoLists", async () => {
+      const TestList = co.list(z.string());
+      const ParentCoMap = co.map({
+        children: TestList,
+      });
+      const map = ParentCoMap.create({ children: ["a", "b", "c", "d"] });
+      const loadedMap = await ParentCoMap.load(map.$jazz.id, {
+        resolve: { children: { $limit: 2, $offset: 1 } },
+      });
+      assert(loadedMap);
+      expect(loadedMap.children).toEqual(["b", "c"]);
     });
   });
 });

@@ -909,7 +909,7 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
   }
 
   /**
-   * Returns the query modifiers ($orderBy, $limit, $offset) used to load the CoList
+   * Returns the query modifiers ($where, $orderBy, $limit, $offset) used to load the CoList
    * @internal
    */
   private get queryModifiers() {

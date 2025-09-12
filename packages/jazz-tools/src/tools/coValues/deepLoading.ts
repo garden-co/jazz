@@ -152,8 +152,13 @@ export type DeeplyLoaded<
   CurrentDepth extends number[] = [],
 > = DepthLimit extends CurrentDepth["length"]
   ? V
-  : // TODO tighten the type of $orderBy
-    Depth extends boolean | undefined | { $orderBy: any } // Checking against boolean instead of true because the inference from RefsToResolveStrict transforms true into boolean
+  : Depth extends
+        | boolean // Checking against boolean instead of true because the inference from RefsToResolveStrict transforms true into boolean
+        | undefined
+        | { $limit: unknown }
+        | { $offset: unknown }
+        | { $orderBy: unknown }
+        | { $where: unknown }
     ? V
     : // Basically V extends CoList - but if we used that we'd introduce circularity into the definition of CoList itself
       [V] extends [ReadonlyArray<infer Item>]
