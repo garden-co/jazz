@@ -85,6 +85,9 @@ export class JazzRepository {
     const existingNode = (await schema.loadUnique(
       uniqueId,
       list.$jazz.owner.$jazz.id,
+      {
+        loadAs: this.worker,
+      },
     )) as CoMap | null;
 
     // if the entity exists and is not soft deleted, we must throw an error
