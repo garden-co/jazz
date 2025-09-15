@@ -109,7 +109,8 @@ export class SessionRepository extends JazzRepository {
       ]);
 
       if (!user) {
-        throw new Error("User not found");
+        console.warn("Trying to find user's sessions, but user not found");
+        return [];
       }
 
       const { sessions } = await user.$jazz.ensureLoaded({
@@ -138,58 +139,14 @@ export class SessionRepository extends JazzRepository {
    * Custom logic: sessions are stored inside the user object.
    */
   async deleteValue(model: string, where: CleanedWhere[]): Promise<number> {
-    if (
-      isWhereBySingleField("token", where) ||
-      isWhereBySingleField("id", where)
-    ) {
-      const [item] = await this.findMany(model, where);
-      if (!item) {
-        return 0;
-      }
-
-      const userId = item.userId;
-
-      return this.deleteSession(userId, [item]);
+    const items = await this.findMany(model, where);
+    if (items.length === 0) {
+      return 0;
     }
 
-    if (containWhereByField("userId", where)) {
-      const [userIdWhere, otherWhere] = extractWhereByField("userId", where);
+    const userId = items[0]!.userId;
 
-      const user = await this.userRepository.findById("user", [
-        {
-          field: "id",
-          operator: "eq",
-          value: userIdWhere!.value as string,
-          connector: "AND",
-        },
-      ]);
-
-      if (!user) {
-        throw new Error("User not found");
-      }
-
-      const { sessions }: { sessions: TableItem[] } =
-        await user.$jazz.ensureLoaded({
-          resolve: {
-            sessions: {
-              $each: true,
-            },
-          },
-        });
-
-      const filteredSessions = filterListByWhere(
-        sessions.filter(
-          (item) => item !== null && item.$jazz.raw.get("_deleted") !== true,
-        ),
-        otherWhere,
-      );
-
-      return this.deleteSession(userIdWhere!.value as string, filteredSessions);
-    }
-
-    throw new Error(
-      "Unable to delete session with where: " + JSON.stringify(where),
-    );
+    return this.deleteSession(userId, items);
   }
 
   private async deleteSession(
