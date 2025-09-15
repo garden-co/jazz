@@ -8,12 +8,13 @@ import {
   TodoAccount,
   TodoProject,
 } from "./1_schema";
+import { OrderByDirection } from "jazz-tools";
 
 export function ProjectScreen() {
   const { projectId } = useParams();
   const project = useCoState(TodoProject, projectId, {
     resolve: {
-      tasks: { $orderBy: { priority: "desc" } },
+      tasks: { $orderBy: { priority: OrderByDirection.DESC } },
     },
   });
   const { me } = useAccount(TodoAccount, {

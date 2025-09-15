@@ -52,6 +52,7 @@ export {
   loadCoValue,
   subscribeToCoValue,
   ImageDefinition,
+  OrderByDirection,
   SubscriptionScope,
   exportCoValue,
   importContentPieces,

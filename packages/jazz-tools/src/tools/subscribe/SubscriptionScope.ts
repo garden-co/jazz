@@ -18,7 +18,9 @@ import { JazzError, type JazzErrorIssue } from "./JazzError.js";
 import type { BranchDefinition, SubscriptionValue, Unloaded } from "./types.js";
 import { createCoValue, myRoleForRawValue } from "./utils.js";
 
-export type OrderByDirection = "asc" | "desc";
+export const OrderByDirection = { ASC: "asc", DESC: "desc" } as const;
+export type OrderByDirection =
+  (typeof OrderByDirection)[keyof typeof OrderByDirection];
 export type WhereOperator = (typeof WhereOperators)[number];
 const WhereOperators = ["$eq", "$ne", "$gt", "$gte", "$lt", "$lte"] as const;
 

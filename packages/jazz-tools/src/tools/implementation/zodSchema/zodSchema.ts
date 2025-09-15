@@ -10,7 +10,6 @@ import {
   RefsToResolve,
   RefsToResolveStrict,
   Resolved,
-  Simplify,
 } from "../../internal.js";
 import {
   AccountSchema,
