@@ -250,10 +250,10 @@ export class JazzRepository {
         ([_, value]) => value && value.$jazz.id === toBeDeleted.$jazz.id,
       );
 
-      toBeDeleted.$jazz.raw.set("_deleted", true);
+      toBeDeleted.$jazz.set("_deleted", true);
 
       if (index !== -1) {
-        list.$jazz.splice(index, 1);
+        list.$jazz.remove(index);
       }
     }
 
