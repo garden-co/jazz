@@ -123,6 +123,7 @@ export class SubscriptionScope<D extends CoValue> {
               false,
               (indexCatalog) => {
                 if (indexCatalog.type === "unavailable") {
+                  this.requestCoListChildrenLoad();
                   return;
                 }
                 const indexIds = indexedFields.map((indexedField) =>
@@ -139,11 +140,13 @@ export class SubscriptionScope<D extends CoValue> {
                       false,
                     );
                   } else {
-                    // TODO: Load all children so that the CoList can be sorted
+                    this.requestCoListChildrenLoad();
                   }
                 }
               },
             );
+          } else {
+            this.requestCoListChildrenLoad();
           }
         }
 
@@ -509,6 +512,13 @@ export class SubscriptionScope<D extends CoValue> {
     });
 
     this.silenceUpdates = false;
+  }
+
+  private requestCoListChildrenLoad() {
+    if (this.resolve === true || !this.resolve) {
+      this.resolve = {};
+    }
+    this.resolve["$each"] = true;
   }
 
   /**

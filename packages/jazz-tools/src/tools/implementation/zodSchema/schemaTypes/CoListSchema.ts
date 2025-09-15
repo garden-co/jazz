@@ -29,7 +29,7 @@ export class CoListSchema<T extends AnyZodOrCoValueSchema>
   /**
    * Names of element fields that should be indexed
    */
-  private indexedFields: string[] = [];
+  private indexedFields: Set<string> = new Set();
 
   constructor(
     public element: T,
@@ -57,14 +57,11 @@ export class CoListSchema<T extends AnyZodOrCoValueSchema>
       | Account
       | Group,
   ): CoListInstance<T> {
-    const optionss =
+    const opts =
       options && TypeSym in options
-        ? { owner: options, indexedFields: this.indexedFields }
-        : { ...options, indexedFields: this.indexedFields };
-    return this.coValueClass.create(
-      items as any,
-      optionss,
-    ) as CoListInstance<T>;
+        ? { owner: options, indexedFields: Array.from(this.indexedFields) }
+        : { ...options, indexedFields: Array.from(this.indexedFields) };
+    return this.coValueClass.create(items as any, opts) as CoListInstance<T>;
   }
 
   load<const R extends RefsToResolve<CoListInstanceCoValuesNullable<T>> = true>(
@@ -150,7 +147,7 @@ export class CoListSchema<T extends AnyZodOrCoValueSchema>
   }
 
   withIndex(elementField: string): CoListSchema<T> {
-    this.indexedFields.push(elementField);
+    this.indexedFields.add(elementField);
     return this;
   }
 }

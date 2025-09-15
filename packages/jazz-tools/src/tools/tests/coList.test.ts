@@ -767,73 +767,97 @@ describe("CoList resolution", async () => {
     expect(loadedMap).not.toBe("unavailable");
   });
 
-  describe("query modifiers", () => {
+  describe.each([
+    { name: "with indexes", useIndexes: true },
+    { name: "without indexes", useIndexes: false },
+  ])("query modifiers ($name)", ({ useIndexes }) => {
     const Score = co.map({
       priority: z.number(),
       secondaryPriority: z.number().optional(),
     });
-    const ItemList = co
-      .list(Score)
-      .withIndex("priority")
-      .withIndex("secondaryPriority");
+    let ItemList: co.List<typeof Score>;
     let list: co.output<typeof ItemList>;
+    let account: Account;
 
     beforeEach(async () => {
-      list = ItemList.create([]);
+      ItemList = co.list(Score);
+      if (useIndexes) {
+        ItemList.withIndex("priority").withIndex("secondaryPriority");
+      }
+      const { clientAccount, serverAccount } = await setupTwoNodes();
+      account = clientAccount;
+
+      const publicGroup = Group.create(serverAccount).makePublic("writer");
+      list = ItemList.create([], { owner: publicGroup });
       list.$jazz.push(
-        Score.create({ priority: 2 }),
-        Score.create({ priority: 1, secondaryPriority: 2 }),
-        Score.create({ priority: 3 }),
-        Score.create({ priority: 1, secondaryPriority: 3 }),
+        Score.create({ priority: 2 }, { owner: publicGroup }),
+        Score.create(
+          { priority: 1, secondaryPriority: 2 },
+          { owner: publicGroup },
+        ),
+        Score.create({ priority: 3 }, { owner: publicGroup }),
+        Score.create(
+          { priority: 1, secondaryPriority: 3 },
+          { owner: publicGroup },
+        ),
       );
+      await list.$jazz.waitForSync({ timeout: 1000 });
     });
 
     describe("$where", () => {
       test("filters elements with a field equal to a specific value", async () => {
         const loadedList = await ItemList.load(list.$jazz.id, {
-          resolve: { $where: { priority: 2 } },
+          loadAs: account,
+          resolve: { $each: true, $where: { priority: 2 } },
         });
         expect(loadedList).toEqual([list[0]]);
       });
 
       test("filters elements with a field not equal to a specific value", async () => {
         const loadedList = await ItemList.load(list.$jazz.id, {
-          resolve: { $where: { priority: { $ne: 2 } } },
+          loadAs: account,
+          resolve: { $each: true, $where: { priority: { $ne: 2 } } },
         });
         expect(loadedList).toEqual([list[1], list[2], list[3]]);
       });
 
       test("filters elements with a field greater than a specific value", async () => {
         const loadedList = await ItemList.load(list.$jazz.id, {
-          resolve: { $where: { priority: { $gt: 2 } } },
+          loadAs: account,
+          resolve: { $each: true, $where: { priority: { $gt: 2 } } },
         });
         expect(loadedList).toEqual([list[2]]);
       });
 
       test("filters elements with a field greater than or equal to a specific value", async () => {
         const loadedList = await ItemList.load(list.$jazz.id, {
-          resolve: { $where: { priority: { $gte: 2 } } },
+          loadAs: account,
+          resolve: { $each: true, $where: { priority: { $gte: 2 } } },
         });
         expect(loadedList).toEqual([list[0], list[2]]);
       });
 
       test("filters elements with a field less than a specific value", async () => {
         const loadedList = await ItemList.load(list.$jazz.id, {
-          resolve: { $where: { priority: { $lt: 2 } } },
+          loadAs: account,
+          resolve: { $each: true, $where: { priority: { $lt: 2 } } },
         });
         expect(loadedList).toEqual([list[1], list[3]]);
       });
 
       test("filters elements with a field less than or equal to a specific value", async () => {
         const loadedList = await ItemList.load(list.$jazz.id, {
-          resolve: { $where: { priority: { $lte: 2 } } },
+          loadAs: account,
+          resolve: { $each: true, $where: { priority: { $lte: 2 } } },
         });
         expect(loadedList).toEqual([list[0], list[1], list[3]]);
       });
 
       test("supports multiple where clauses", async () => {
         const loadedList = await ItemList.load(list.$jazz.id, {
+          loadAs: account,
           resolve: {
+            $each: true,
             $where: { priority: { $eq: 1 }, secondaryPriority: { $eq: 3 } },
           },
         });
@@ -844,7 +868,8 @@ describe("CoList resolution", async () => {
     describe("$orderBy", () => {
       test("sorts CoList in descending order", async () => {
         const loadedList = await ItemList.load(list.$jazz.id, {
-          resolve: { $orderBy: { priority: "desc" } },
+          loadAs: account,
+          resolve: { $each: true, $orderBy: { priority: "desc" } },
         });
         assert(loadedList);
 
@@ -857,14 +882,19 @@ describe("CoList resolution", async () => {
 
       test("sorts CoList in ascending order", async () => {
         const loadedList = await ItemList.load(list.$jazz.id, {
-          resolve: { $orderBy: { priority: "asc" } },
+          loadAs: account,
+          resolve: { $each: true, $orderBy: { priority: "asc" } },
         });
         expect(loadedList).toEqual([list[1], list[3], list[0], list[2]]);
       });
 
       test("supports multiple order by clauses", async () => {
         const loadedList = await ItemList.load(list.$jazz.id, {
-          resolve: { $orderBy: { priority: "asc", secondaryPriority: "desc" } },
+          loadAs: account,
+          resolve: {
+            $each: true,
+            $orderBy: { priority: "asc", secondaryPriority: "desc" },
+          },
         });
         expect(loadedList).toEqual([list[3], list[1], list[0], list[2]]);
       });

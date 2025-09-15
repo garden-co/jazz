@@ -561,6 +561,36 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
     return getCoValueOwner(this.coList);
   }
 
+  /**
+   * Returns the item at the specified index.
+   * @param index The index to get the value at.
+   * @returns The item at the specified index, or undefined if the index is out of bounds.
+   * @category Content
+   */
+  get(index: number): CoListItem<L> | undefined {
+    const itemDescriptor = this.schema[ItemsSym] as Schema;
+    const rawIdx = this.toRawIndex(index);
+    const rawValue = this.raw.get(rawIdx);
+    if (itemDescriptor === "json") {
+      return rawValue as CoListItem<L> | undefined;
+    } else if ("encoded" in itemDescriptor) {
+      return rawValue === undefined
+        ? undefined
+        : itemDescriptor.encoded.decode(rawValue);
+    } else if (isRefEncoded(itemDescriptor)) {
+      return rawValue === undefined || rawValue === null
+        ? undefined
+        : accessChildByKey(this.coList, rawValue as string, String(rawIdx));
+    }
+    return this.coList[index];
+  }
+
+  /**
+   * Inserts a value at the specified index.
+   * @param index The index to set the value at.
+   * @param value The value to set.
+   * @category Content
+   */
   set(index: number, value: CoFieldInit<CoListItem<L>>): void {
     const itemDescriptor = this.schema[ItemsSym];
     const rawValue = toRawItems([value], itemDescriptor, this.owner)[0]!;
@@ -630,6 +660,7 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
           this.indexRecordAsync(indexedField).then((indexRecord) => {
             if (!indexRecord) return;
             for (const item of items) {
+              // TODO handle JSON inputs
               indexRecord.set(item.$jazz.id, item[indexedField]);
             }
           });
@@ -919,15 +950,25 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
     return subscriptionScope?.queryModifiers ?? {};
   }
 
-  private indexValueFor(indexedField: string, rawElementId: string): number {
+  private indexValueFor(
+    indexedField: string,
+    rawElementId: string,
+    originalArrayIdx: number,
+  ): number {
     const indexRecord = this.indexRecord(indexedField)?.toJSON() as Record<
       string,
       number
     >;
     if (!indexRecord) {
-      throw new Error(
-        `Query modifiers on non-indexed CoLists are not yet supported. ${indexedField} is not indexed`,
+      const child = accessChildByKey(
+        this.coList,
+        rawElementId,
+        String(originalArrayIdx),
       );
+      if (!child) {
+        // TODO handle rawElementId being null/undefined, or the viewer not having access to the child
+      }
+      return child[indexedField];
     }
     return indexRecord[rawElementId]!;
   }
@@ -966,13 +1007,21 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
         for (const { indexedField, orderDirection } of orderBy) {
           const dir = orderDirection === "desc" ? -1 : 1;
           if (
-            this.indexValueFor(indexedField, a.indexedValue) <
-            this.indexValueFor(indexedField, b.indexedValue)
+            this.indexValueFor(
+              indexedField,
+              a.indexedValue,
+              a.originalArrayIdx,
+            ) <
+            this.indexValueFor(indexedField, b.indexedValue, b.originalArrayIdx)
           )
             return -1 * dir;
           if (
-            this.indexValueFor(indexedField, a.indexedValue) >
-            this.indexValueFor(indexedField, b.indexedValue)
+            this.indexValueFor(
+              indexedField,
+              a.indexedValue,
+              a.originalArrayIdx,
+            ) >
+            this.indexValueFor(indexedField, b.indexedValue, b.originalArrayIdx)
           )
             return 1 * dir;
         }
@@ -986,6 +1035,7 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
           const valueToFilter = this.indexValueFor(
             indexedField,
             element.indexedValue,
+            element.originalArrayIdx,
           );
           switch (operator) {
             case "$eq":
@@ -1155,20 +1205,7 @@ function toRawItems<Item>(
 const CoListProxyHandler: ProxyHandler<CoList> = {
   get(target, key, receiver) {
     if (typeof key === "string" && !isNaN(+key)) {
-      const itemDescriptor = target.$jazz.schema[ItemsSym] as Schema;
-      const rawIdx = target.$jazz.toRawIndex(Number(key));
-      const rawValue = target.$jazz.raw.get(rawIdx);
-      if (itemDescriptor === "json") {
-        return rawValue;
-      } else if ("encoded" in itemDescriptor) {
-        return rawValue === undefined
-          ? undefined
-          : itemDescriptor.encoded.decode(rawValue);
-      } else if (isRefEncoded(itemDescriptor)) {
-        return rawValue === undefined || rawValue === null
-          ? undefined
-          : accessChildByKey(target, rawValue as string, String(rawIdx));
-      }
+      return target.$jazz.get(Number(key));
     } else if (key === "length") {
       return target.$jazz.length;
     } else {
