@@ -587,3 +587,73 @@ export function importContentPieces(
     node.syncManager.handleNewContent(piece, "import");
   }
 }
+
+export function generateAuthToken(owner?: Account) {
+  const me = owner ?? Account.getMe();
+  const node = me.$jazz.localNode;
+  const crypto = node.crypto;
+
+  const agent = node.getCurrentAgent();
+  const signerSecret = agent.currentSignerSecret();
+
+  const createdAt = Date.now();
+
+  const signPayload = crypto.secureHash({
+    id: me.$jazz.id,
+    createdAt,
+  });
+
+  const authToken = crypto.sign(signerSecret, signPayload);
+
+  return `${authToken}|${me.$jazz.id}|${createdAt}`;
+}
+
+export async function parseAuthToken(
+  authToken: string,
+  options?: { loadAs?: Account; expiration?: number },
+) {
+  const expiration = options?.expiration ?? 1000 * 60; // 1 minute
+  const [signature, id, createdAt] = authToken.split("|");
+
+  if (Number(createdAt) + expiration < Date.now()) {
+    return {
+      type: "error",
+      error: "Token expired",
+    } as const;
+  }
+
+  const account = await Account.load(id, { loadAs: options?.loadAs });
+
+  if (!account) {
+    return {
+      type: "error",
+      error: "Failed to load account",
+    } as const;
+  }
+
+  const node = account.$jazz.localNode;
+  const crypto = node.crypto;
+
+  // Verify the signature of the message to prevent tampering
+  const signPayload = crypto.secureHash({
+    id: account.$jazz.id,
+    createdAt,
+  });
+
+  const agentID = account.$jazz.raw.currentAgentID();
+  const signerID = crypto.getAgentSignerID(agentID);
+
+  if (
+    !crypto.verify(signature as `signature_z${string}`, signPayload, signerID)
+  ) {
+    return {
+      type: "error",
+      error: "Invalid signature",
+    } as const;
+  }
+
+  return {
+    type: "success",
+    account,
+  } as const;
+}
