@@ -83,14 +83,18 @@ export class SubscriptionScope<D extends CoValue> {
     this.resolve = resolve;
     this.value = { type: "unloaded", id };
 
-    const queryModifiers =
+    const queryModifiers: Record<string, any> =
       typeof this.resolve === "object" && this.resolve !== null
         ? pick(this.resolve, ["$where", "$orderBy", "$limit", "$offset"])
-        : undefined;
-    this.queryModifiers.limit = queryModifiers?.$limit;
-    this.queryModifiers.offset = queryModifiers?.$offset;
-    this.queryModifiers.where = parseWhere(queryModifiers?.$where);
-    this.queryModifiers.orderBy = parseOrderBy(queryModifiers?.$orderBy);
+        : {};
+    if (Object.keys(queryModifiers).length > 0) {
+      this.queryModifiers.limit = queryModifiers?.$limit;
+      this.queryModifiers.offset = queryModifiers?.$offset;
+      this.queryModifiers.where = parseWhere(queryModifiers?.$where);
+      this.queryModifiers.orderBy = parseOrderBy(queryModifiers?.$orderBy);
+    } else {
+      this.queryModifiers = {};
+    }
     const indexedFields = [
       ...(this.queryModifiers.orderBy?.map((orderBy) => orderBy.indexedField) ??
         []),
@@ -425,7 +429,10 @@ export class SubscriptionScope<D extends CoValue> {
     this.triggerUpdate();
   }
 
-  subscribeToKey(key: string) {
+  subscribeToKey(key: string): void {
+    if (this.childValues.has(key)) {
+      return;
+    }
     if (this.resolve === true || !this.resolve) {
       this.resolve = {};
     }
@@ -518,7 +525,7 @@ export class SubscriptionScope<D extends CoValue> {
     if (this.resolve === true || !this.resolve) {
       this.resolve = {};
     }
-    this.resolve["$each"] = true;
+    this.resolve["$each"] ||= { $onError: null };
   }
 
   /**

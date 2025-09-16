@@ -9,6 +9,7 @@ import type {
 import { cojsonInternals } from "cojson";
 import { calcPatch } from "fast-myers-diff";
 import {
+  accessChildLoadingStateByKey,
   Account,
   CoFieldInit,
   CoValue,
@@ -965,10 +966,7 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
         rawElementId,
         String(originalArrayIdx),
       );
-      if (!child) {
-        // TODO handle rawElementId being null/undefined, or the viewer not having access to the child
-      }
-      return child[indexedField];
+      return child?.[indexedField];
     }
     return indexRecord[rawElementId]!;
   }
@@ -1000,7 +998,25 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
       .map((entry, idx) => ({
         originalArrayIdx: idx,
         indexedValue: entry.value as string,
-      }));
+      }))
+      .filter((entry) => {
+        if (!isRefEncoded(this.schema[ItemsSym])) {
+          return true;
+        }
+        // Omit null references
+        if (entry.indexedValue === null) {
+          return false;
+        }
+        // CoList elements have already been loaded by the subscription scope.
+        // Omit inaccessible elements from the query view.
+        const isLoaded =
+          accessChildLoadingStateByKey(
+            this.coList,
+            entry.indexedValue,
+            String(entry.originalArrayIdx),
+          )?.type === "loaded";
+        return isLoaded;
+      });
     let sortedArrayIndexes = allArrayIndexesWithIndexedValues;
     if (orderBy?.length) {
       sortedArrayIndexes = allArrayIndexesWithIndexedValues.toSorted((a, b) => {

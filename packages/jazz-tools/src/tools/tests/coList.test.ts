@@ -778,15 +778,18 @@ describe("CoList resolution", async () => {
     });
     let ItemList: co.List<typeof Score>;
     let list: co.output<typeof ItemList>;
-    let account: Account;
+    let clientAccount: Account;
+    let serverAccount: Account;
 
     beforeEach(async () => {
       ItemList = co.list(Score);
       if (useIndexes) {
         ItemList.withIndex("priority").withIndex("secondaryPriority");
       }
-      const { clientAccount, serverAccount } = await setupTwoNodes();
-      account = clientAccount;
+      const { clientAccount: clientAcc, serverAccount: serverAcc } =
+        await setupTwoNodes();
+      clientAccount = clientAcc;
+      serverAccount = serverAcc;
 
       const publicGroup = Group.create(serverAccount).makePublic("writer");
       list = ItemList.create([], { owner: publicGroup });
@@ -809,7 +812,7 @@ describe("CoList resolution", async () => {
       describe("$eq", () => {
         test("filters elements with a field equal to a specific value", async () => {
           const loadedList = await ItemList.load(list.$jazz.id, {
-            loadAs: account,
+            loadAs: clientAccount,
             resolve: { $each: true, $where: { priority: { $eq: 2 } } },
           });
           expect(loadedList).toEqual([list[0]]);
@@ -817,7 +820,7 @@ describe("CoList resolution", async () => {
 
         test("the $eq operator can be omitted", async () => {
           const loadedList = await ItemList.load(list.$jazz.id, {
-            loadAs: account,
+            loadAs: clientAccount,
             resolve: { $each: true, $where: { priority: 2 } },
           });
           expect(loadedList).toEqual([list[0]]);
@@ -825,7 +828,7 @@ describe("CoList resolution", async () => {
 
         test("can filter elements equal to undefined on optional fields", async () => {
           const loadedList = await ItemList.load(list.$jazz.id, {
-            loadAs: account,
+            loadAs: clientAccount,
             resolve: {
               $each: true,
               $where: { secondaryPriority: { $eq: undefined } },
@@ -838,7 +841,7 @@ describe("CoList resolution", async () => {
       describe("$ne", () => {
         test("filters elements with a field not equal to a specific value", async () => {
           const loadedList = await ItemList.load(list.$jazz.id, {
-            loadAs: account,
+            loadAs: clientAccount,
             resolve: { $each: true, $where: { priority: { $ne: 2 } } },
           });
           expect(loadedList).toEqual([list[1], list[2], list[3]]);
@@ -846,7 +849,7 @@ describe("CoList resolution", async () => {
 
         test("elements with undefined fields are included", async () => {
           const loadedList = await ItemList.load(list.$jazz.id, {
-            loadAs: account,
+            loadAs: clientAccount,
             resolve: {
               $each: true,
               $where: { secondaryPriority: { $ne: 2 } },
@@ -860,7 +863,7 @@ describe("CoList resolution", async () => {
       describe("$gt", () => {
         test("filters elements with a field greater than a specific value", async () => {
           const loadedList = await ItemList.load(list.$jazz.id, {
-            loadAs: account,
+            loadAs: clientAccount,
             resolve: { $each: true, $where: { priority: { $gt: 2 } } },
           });
           expect(loadedList).toEqual([list[2]]);
@@ -868,7 +871,7 @@ describe("CoList resolution", async () => {
 
         test("elements with undefined fields are not included", async () => {
           const loadedList = await ItemList.load(list.$jazz.id, {
-            loadAs: account,
+            loadAs: clientAccount,
             resolve: {
               $each: true,
               $where: { secondaryPriority: { $gt: 0 } },
@@ -881,7 +884,7 @@ describe("CoList resolution", async () => {
       describe("$gte", () => {
         test("filters elements with a field greater than or equal to a specific value", async () => {
           const loadedList = await ItemList.load(list.$jazz.id, {
-            loadAs: account,
+            loadAs: clientAccount,
             resolve: { $each: true, $where: { priority: { $gte: 2 } } },
           });
           expect(loadedList).toEqual([list[0], list[2]]);
@@ -889,7 +892,7 @@ describe("CoList resolution", async () => {
 
         test("elements with undefined fields are not included", async () => {
           const loadedList = await ItemList.load(list.$jazz.id, {
-            loadAs: account,
+            loadAs: clientAccount,
             resolve: {
               $each: true,
               $where: { secondaryPriority: { $gte: 0 } },
@@ -902,7 +905,7 @@ describe("CoList resolution", async () => {
       describe("$lt", () => {
         test("filters elements with a field less than a specific value", async () => {
           const loadedList = await ItemList.load(list.$jazz.id, {
-            loadAs: account,
+            loadAs: clientAccount,
             resolve: { $each: true, $where: { priority: { $lt: 2 } } },
           });
           expect(loadedList).toEqual([list[1], list[3]]);
@@ -910,8 +913,11 @@ describe("CoList resolution", async () => {
 
         test("elements with undefined fields are not included", async () => {
           const loadedList = await ItemList.load(list.$jazz.id, {
-            loadAs: account,
-            resolve: { $each: true, $where: { secondaryPriority: { $lt: 4 } } },
+            loadAs: clientAccount,
+            resolve: {
+              $each: true,
+              $where: { secondaryPriority: { $lt: 4 } },
+            },
           });
           expect(loadedList).toEqual([list[1], list[3]]);
         });
@@ -920,7 +926,7 @@ describe("CoList resolution", async () => {
       describe("$lte", () => {
         test("filters elements with a field less than or equal to a specific value", async () => {
           const loadedList = await ItemList.load(list.$jazz.id, {
-            loadAs: account,
+            loadAs: clientAccount,
             resolve: { $each: true, $where: { priority: { $lte: 2 } } },
           });
           expect(loadedList).toEqual([list[0], list[1], list[3]]);
@@ -928,7 +934,7 @@ describe("CoList resolution", async () => {
 
         test("elements with undefined fields are not included", async () => {
           const loadedList = await ItemList.load(list.$jazz.id, {
-            loadAs: account,
+            loadAs: clientAccount,
             resolve: {
               $each: true,
               $where: { secondaryPriority: { $lte: 3 } },
@@ -940,7 +946,7 @@ describe("CoList resolution", async () => {
 
       test("supports multiple where clauses", async () => {
         const loadedList = await ItemList.load(list.$jazz.id, {
-          loadAs: account,
+          loadAs: clientAccount,
           resolve: {
             $each: true,
             $where: { priority: { $eq: 1 }, secondaryPriority: { $eq: 3 } },
@@ -954,7 +960,7 @@ describe("CoList resolution", async () => {
       describe("DESC", () => {
         test("sorts CoList in descending order", async () => {
           const loadedList = await ItemList.load(list.$jazz.id, {
-            loadAs: account,
+            loadAs: clientAccount,
             resolve: {
               $each: true,
               $orderBy: { priority: OrderByDirection.DESC },
@@ -971,7 +977,7 @@ describe("CoList resolution", async () => {
 
         test("elements with undefined fields appear last", async () => {
           const loadedList = await ItemList.load(list.$jazz.id, {
-            loadAs: account,
+            loadAs: clientAccount,
             resolve: {
               $each: true,
               $orderBy: { secondaryPriority: OrderByDirection.DESC },
@@ -984,7 +990,7 @@ describe("CoList resolution", async () => {
       describe("ASC", () => {
         test("sorts CoList in ascending order", async () => {
           const loadedList = await ItemList.load(list.$jazz.id, {
-            loadAs: account,
+            loadAs: clientAccount,
             resolve: {
               $each: true,
               $orderBy: { priority: OrderByDirection.ASC },
@@ -995,7 +1001,7 @@ describe("CoList resolution", async () => {
 
         test("elements with undefined fields appear last", async () => {
           const loadedList = await ItemList.load(list.$jazz.id, {
-            loadAs: account,
+            loadAs: clientAccount,
             resolve: {
               $each: true,
               $orderBy: { secondaryPriority: OrderByDirection.ASC },
@@ -1007,7 +1013,7 @@ describe("CoList resolution", async () => {
 
       test("supports multiple order by clauses", async () => {
         const loadedList = await ItemList.load(list.$jazz.id, {
-          loadAs: account,
+          loadAs: clientAccount,
           resolve: {
             $each: true,
             $orderBy: {
@@ -1061,6 +1067,36 @@ describe("CoList resolution", async () => {
       });
       assert(loadedMap);
       expect(loadedMap.children).toEqual(["b", "c"]);
+    });
+
+    test("undefined CoList elements are not included when using query modifiers", async () => {
+      const TestList = co.list(Score.optional());
+      if (useIndexes) {
+        ItemList.withIndex("priority").withIndex("secondaryPriority");
+      }
+      const list = TestList.create([
+        { priority: 1 },
+        { priority: 2 },
+        undefined,
+        { priority: 4 },
+      ]);
+      const paginatedList = await TestList.load(list.$jazz.id, {
+        resolve: { $limit: 2, $offset: 1 },
+      });
+      expect(paginatedList).toEqual([list[1], list[3]]);
+    });
+
+    test("CoList elements returned as null by $onError are not included when using query modifiers", async () => {
+      list.$jazz.push(Score.create({ priority: 5 }, { owner: serverAccount }));
+
+      const loadedList = await ItemList.load(list.$jazz.id, {
+        loadAs: clientAccount,
+        resolve: {
+          $each: { $onError: null },
+          $orderBy: { priority: OrderByDirection.DESC },
+        },
+      });
+      expect(loadedList).toEqual([list[2], list[0], list[1], list[3]]);
     });
   });
 });

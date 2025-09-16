@@ -1,4 +1,9 @@
-import type { CoValue, CoValueClass, RefEncoded } from "../internal.js";
+import type {
+  CoValue,
+  CoValueClass,
+  MaybeLoaded,
+  RefEncoded,
+} from "../internal.js";
 import { SubscriptionScope } from "./SubscriptionScope.js";
 
 export function getSubscriptionScope<D extends CoValue>(value: D) {
@@ -30,7 +35,25 @@ export function getSubscriptionScope<D extends CoValue>(value: D) {
 /** Autoload internals */
 
 /**
- * Given a coValue, access a child coValue by key
+ * Given a coValue, access a child coValue by key.
+ * Returns the current loading state of the child CoValue.
+ *
+ * By subscribing to a given key, the subscription will automatically react to the id changes
+ * on that key (e.g. deleting the key value will result on unsubscribing from the id)
+ */
+export function accessChildLoadingStateByKey<D extends CoValue>(
+  parent: D,
+  childId: string,
+  key: string,
+) {
+  const subscriptionScope = getSubscriptionScope(parent);
+  subscriptionScope.subscribeToKey(key);
+  return subscriptionScope.childValues.get(childId);
+}
+
+/**
+ * Given a coValue, access a child coValue by key.
+ * Returns the current value of the child CoValue, or null if the CoValue is not loaded.
  *
  * By subscribing to a given key, the subscription will automatically react to the id changes
  * on that key (e.g. deleting the key value will result on unsubscribing from the id)
@@ -40,13 +63,7 @@ export function accessChildByKey<D extends CoValue>(
   childId: string,
   key: string,
 ) {
-  const subscriptionScope = getSubscriptionScope(parent);
-
-  if (!subscriptionScope.isSubscribedToId(childId)) {
-    subscriptionScope.subscribeToKey(key);
-  }
-
-  const value = subscriptionScope.childValues.get(childId);
+  const value = accessChildLoadingStateByKey(parent, childId, key);
 
   if (value?.type === "loaded") {
     return value.value;
