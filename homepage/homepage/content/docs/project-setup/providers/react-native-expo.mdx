@@ -19,6 +19,14 @@ Wrap your app components with the `<JazzExpoProvider />` component:
 
 <CodeGroup>
 ```tsx twoslash
+/**
+ * Use your email as a temporary key, or get a free
+ * API Key at dashboard.jazz.tools for higher limits.
+ * 
+ * @link https://dashboard.jazz.tools
+*/
+const apiKey = "you@example.com";
+// ---cut---
 // @noErrors: 2307 7031 2304 2686 2664
 // App.tsx
 import { JazzExpoProvider } from "jazz-tools/expo";
@@ -27,7 +35,7 @@ import { MyAppAccount } from "./schema";
 export function MyJazzProvider({ children }: { children: React.ReactNode }) {
   return (
     <JazzExpoProvider
-      sync={{ peer: "wss://cloud.jazz.tools/?key=you@example.com" }}
+      sync={{ peer: `wss://cloud.jazz.tools/?key=${apiKey}` }}
       AccountSchema={MyAppAccount}
     >
       {children}
@@ -66,6 +74,13 @@ import React, { ReactNode } from "react";
 function SignInScreen({ auth }: { auth: any }) {
   return null;
 }
+/**
+ * Use your email as a temporary key, or get a free
+ * API Key at dashboard.jazz.tools for higher limits.
+ * 
+ * @link https://dashboard.jazz.tools
+*/
+const apiKey = "you@example.com";
 // ---cut-before---
 // Example with PassphraseAuth
 import { JazzExpoProvider, usePassphraseAuth } from "jazz-tools/expo";
@@ -88,7 +103,7 @@ function JazzAuthentication({ children }: { children: ReactNode }) {
 function AuthenticatedProvider({ children }: { children: ReactNode }) {
   return (
     <JazzExpoProvider
-      sync={{ peer: "wss://cloud.jazz.tools/?key=your-api-key" }}
+      sync={{ peer: `wss://cloud.jazz.tools/?key=${apiKey}` }}
     >
       <JazzAuthentication>
         {children}

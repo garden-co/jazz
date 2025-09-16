@@ -7,9 +7,134 @@ export const metadata = {
 
 # Sync and storage: Jazz Cloud or self-hosted
 
+For sync and storage, you can either use Jazz Cloud for zero-config magic, or run your own sync server.
+
 ## Using Jazz Cloud
 
-Simply use `wss://cloud.jazz.tools/?key=...` as the sync server URL.
+To get your Jazz Cloud API key, create an account on [dashboard.jazz.tools](https://dashboard.jazz.tools).
+
+It will generate an app with an API key for you.
+
+<ContentByFramework framework={["vanilla"]}>
+
+  Replace the API key in the sync server URL with your API key.
+  <CodeGroup>
+  ```
+  wss://cloud.jazz.tools/?key=YOUR_API_KEY
+  ```
+  </CodeGroup>
+</ContentByFramework>
+
+<ContentByFramework framework={["react", "react-native", "react-native-expo", "svelte"]}>
+  Replace the API key in the Jazz provider sync server URL with your API key:
+</ContentByFramework>
+
+<ContentByFramework framework="react">
+  <CodeGroup>
+  ```tsx twoslash
+  import * as React from "react";
+  import { JazzReactProvider } from "jazz-tools/react";
+  /**
+   * Get a free API Key at dashboard.jazz.tools, or use your email as a temporary key.
+   * 
+   * @link https://dashboard.jazz.tools
+  */
+  const apiKey = "you@example.com";
+  
+  // ---cut---
+  export function MyApp({ children }: { children: React.ReactNode }) {
+    return (
+      <JazzReactProvider
+        sync={{
+          peer: `wss://cloud.jazz.tools/?key=${apiKey}`,
+          // ...
+        }}
+      >
+        {children}
+      </JazzReactProvider>
+    );
+  }
+  ```
+  </CodeGroup>
+</ContentByFramework>
+
+<ContentByFramework framework="react-native">
+  <CodeGroup>
+  ```tsx twoslash
+  import * as React from "react";
+  import { JazzReactNativeProvider } from "jazz-tools/react-native";
+  /**
+   * Get a free API Key at dashboard.jazz.tools, or use your email as a temporary key.
+   * 
+   * @link https://dashboard.jazz.tools
+  */
+  const apiKey = "you@example.com";  
+  // ---cut---
+  export function MyApp({ children }: { children: React.ReactNode }) {
+    return (
+      <JazzReactNativeProvider
+        sync={{
+          peer: `wss://cloud.jazz.tools/?key=${apiKey}`,
+          // ...
+        }}
+      >
+        {children}
+      </JazzReactNativeProvider>
+    );
+  }
+  ```
+  </CodeGroup>
+</ContentByFramework>
+
+<ContentByFramework framework="react-native-expo">
+  <CodeGroup>
+  ```tsx twoslash
+  import * as React from "react";
+  import { JazzExpoProvider } from "jazz-tools/expo";
+  /**
+   * Get a free API Key at dashboard.jazz.tools, or use your email as a temporary key.
+   * 
+   * @link https://dashboard.jazz.tools
+  */
+  const apiKey = "you@example.com";  
+  // ---cut---
+  export function MyApp({ children }: { children: React.ReactNode }) {
+    return (
+      <JazzExpoProvider
+        sync={{
+          peer: `wss://cloud.jazz.tools/?key=${apiKey}`,
+          // ...
+        }}
+      >
+        {children}
+      </JazzExpoProvider>
+    );
+  }
+  ```
+  </CodeGroup>
+</ContentByFramework>
+
+<ContentByFramework framework="svelte">
+  <CodeGroup>
+  ```svelte twoslash
+  <script lang="ts">
+    import { JazzSvelteProvider } from "jazz-tools/svelte";
+    import { MyAppAccount } from "$lib/schema";
+    let { children } = $props();
+    let apiKey = "Get a free API Key at dashboard.jazz.tools, or use your email as a temporary key.";
+  </script>
+
+  <JazzSvelteProvider
+    sync={{ 
+      peer: `wss://cloud.jazz.tools/?key=${apiKey}`,
+    }}
+    AccountSchema={MyAppAccount}
+  >
+    {@render children()}
+  </JazzSvelteProvider>
+  ```
+  </CodeGroup>
+</ContentByFramework>
 
 Jazz Cloud will
 - sync CoValues in real-time between users and devices
@@ -21,14 +146,6 @@ Jazz Cloud will
 - Jazz Cloud is free during the public alpha, with no strict usage limits
 - We plan to keep a free tier, so you'll always be able to get started with zero setup
 - See [Jazz Cloud pricing](/cloud#pricing) for more details
-- ⚠️ Please use a valid email address as your API key.
-
-    Your full sync server URL should look something like
-
-    ```wss://cloud.jazz.tools/?key=you@example.com```
-
-    Once we support per-app API keys, we'll email you an API key you can use instead.
-
 
 ## Self-hosting your sync server
 

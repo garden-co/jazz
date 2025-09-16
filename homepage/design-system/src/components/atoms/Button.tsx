@@ -98,9 +98,7 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
           )}
           {children}
           {newTab ? (
-            <span
-              className={`inline-block relative -top-0.5 -left-2 -mr-2 ${styleToTextMap[intent as keyof typeof styleToTextMap]}`}
-            >
+            <span className="inline-block relative -top-0.5 -left-2 -mr-2">
               ⌝
             </span>
           ) : (

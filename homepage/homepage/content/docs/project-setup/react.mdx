@@ -79,6 +79,13 @@ export const MyAppAccount = co.account({
 // @filename: app.tsx
 import * as React from "react";
 import { createRoot } from 'react-dom/client';
+/**
+ * Use your email as a temporary key, or get a free
+ * API Key at dashboard.jazz.tools for higher limits.
+ * 
+ * @link https://dashboard.jazz.tools
+*/
+const apiKey = "you@example.com";
 
 function App() {
     return <div>Hello, world!</div>;
@@ -90,7 +97,7 @@ import { MyAppAccount } from "./schema";
 
 createRoot(document.getElementById("root")!).render(
   <JazzReactProvider
-    sync={{ peer: "wss://cloud.jazz.tools/?key=you@example.com" }}
+    sync={{ peer: `wss://cloud.jazz.tools/?key=${apiKey}` }}
     AccountSchema={MyAppAccount}
   >
     <App />
@@ -98,6 +105,10 @@ createRoot(document.getElementById("root")!).render(
 );
 ```
 </CodeGroup>
+
+<Alert className="mt-4 flex gap-2 items-center" variant="info">
+**Tip**: Get a free API key from [dashboard.jazz.tools](https://dashboard.jazz.tools), or use your email as a temporary key.
+</Alert>
 
 This setup handles:
 - Connection to the Jazz sync server
@@ -133,6 +144,13 @@ export const MyAppAccount = co.account({
 });
 // @filename: app.tsx
 import * as React from "react";
+/**
+ * Use your email as a temporary key, or get a free
+ * API Key at dashboard.jazz.tools for higher limits.
+ * 
+ * @link https://dashboard.jazz.tools
+*/
+const apiKey = "you@example.com";
 // ---cut---
 import { JazzReactProvider } from "jazz-tools/react";
 import { MyAppAccount } from "./schema";
@@ -141,7 +159,7 @@ export function JazzWrapper({ children }: { children: React.ReactNode }) {
   return (
     <JazzReactProvider
       enableSSR // Renders the components tree in the server using an agent
-      sync={{ peer: "wss://cloud.jazz.tools/?key=you@example.com" }}
+      sync={{ peer: `wss://cloud.jazz.tools/?key=${apiKey}` }}
       AccountSchema={MyAppAccount}
     >
       {children}
@@ -175,13 +193,20 @@ export const MyAppAccount = co.account({
 });
 // @filename: app.tsx
 import * as React from "react";
+/**
+ * Use your email as a temporary key, or get a free
+ * API Key at dashboard.jazz.tools for higher limits.
+ * 
+ * @link https://dashboard.jazz.tools
+*/
+const apiKey = "you@example.com";
 // ---cut---
 import { createSSRJazzAgent } from "jazz-tools/react/ssr";
 import { TodoItem } from "./schema";
 
 // This can be created in a centralized module, to reuse the same agent in all the server components
 export const jazzSSR = createSSRJazzAgent({
-  peer: "wss://cloud.jazz.tools/",
+  peer: `wss://cloud.jazz.tools/?key=${apiKey}`,
 });
 
 export default async function ServerSidePage(props: {
