@@ -11,5 +11,8 @@ export type SubscriptionValue<D extends CoValue, R extends RefsToResolve<D>> =
   | { type: "loaded"; value: Resolved<D, R>; id: string }
   | JazzError;
 export type Unloaded = { type: "unloaded"; id: string };
+export type MaybeLoaded<D extends CoValue, R extends RefsToResolve<D>> =
+  | SubscriptionValue<D, R>
+  | Unloaded;
 
 export type BranchDefinition = { name: string; owner?: Group | Account | null };

@@ -15,7 +15,7 @@ import {
 import { applyCoValueMigrations } from "../lib/migration.js";
 import { CoValueCoreSubscription } from "./CoValueCoreSubscription.js";
 import { JazzError, type JazzErrorIssue } from "./JazzError.js";
-import type { BranchDefinition, SubscriptionValue, Unloaded } from "./types.js";
+import type { BranchDefinition, MaybeLoaded, SubscriptionValue } from "./types.js";
 import { createCoValue, myRoleForRawValue } from "./utils.js";
 
 export const OrderByDirection = { ASC: "asc", DESC: "desc" } as const;
@@ -52,7 +52,7 @@ export class SubscriptionScope<D extends CoValue> {
    * Autoloaded child ids that are unloaded
    */
   pendingAutoloadedChildren: Set<string> = new Set();
-  value: SubscriptionValue<D, any> | Unloaded;
+  value: MaybeLoaded<D, any>;
   childErrors: Map<string, JazzError> = new Map();
   validationErrors: Map<string, JazzError> = new Map();
   errorFromChildren: JazzError | undefined;
@@ -303,7 +303,7 @@ export class SubscriptionScope<D extends CoValue> {
 
   private handleChildUpdate = (
     id: string,
-    value: SubscriptionValue<any, any> | Unloaded,
+    value: MaybeLoaded<any, any>,
     key?: string,
   ) => {
     if (value.type === "unloaded") {
