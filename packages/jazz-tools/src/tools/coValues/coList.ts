@@ -1006,24 +1006,24 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
       sortedArrayIndexes = allArrayIndexesWithIndexedValues.toSorted((a, b) => {
         for (const { indexedField, orderDirection } of orderBy) {
           const dir = orderDirection === "desc" ? -1 : 1;
-          if (
-            this.indexValueFor(
-              indexedField,
-              a.indexedValue,
-              a.originalArrayIdx,
-            ) <
-            this.indexValueFor(indexedField, b.indexedValue, b.originalArrayIdx)
-          )
-            return -1 * dir;
-          if (
-            this.indexValueFor(
-              indexedField,
-              a.indexedValue,
-              a.originalArrayIdx,
-            ) >
-            this.indexValueFor(indexedField, b.indexedValue, b.originalArrayIdx)
-          )
-            return 1 * dir;
+          const aValue = this.indexValueFor(
+            indexedField,
+            a.indexedValue,
+            a.originalArrayIdx,
+          );
+          const bValue = this.indexValueFor(
+            indexedField,
+            b.indexedValue,
+            b.originalArrayIdx,
+          );
+
+          // Undefined values go last, regardless of order direction
+          if (aValue === undefined && bValue === undefined) continue;
+          if (aValue === undefined) return 1;
+          if (bValue === undefined) return -1;
+
+          if (aValue < bValue) return -1 * dir;
+          if (aValue > bValue) return 1 * dir;
         }
         return 0;
       });
