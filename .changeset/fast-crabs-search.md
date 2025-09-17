@@ -5,4 +5,4 @@
 
 Introducing version control APIs, unstable_branch and unstable_merge
 
-Flagged as unstable because no finalized yet.
+Flagged as unstable because the branch and merge "scope" management needs validation.
