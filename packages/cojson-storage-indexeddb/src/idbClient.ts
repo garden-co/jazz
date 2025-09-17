@@ -13,7 +13,6 @@ import {
   putIndexedDbStore,
   queryIndexedDbStore,
 } from "./CoJsonIDBTransaction.js";
-import { StoreName } from "./CoJsonIDBTransaction.js";
 
 export class IDBClient implements DBClientInterfaceAsync {
   private db;
@@ -21,8 +20,64 @@ export class IDBClient implements DBClientInterfaceAsync {
   activeTransaction: CoJsonIDBTransaction | undefined;
   autoBatchingTransaction: CoJsonIDBTransaction | undefined;
 
+  coValues = new Map<RawCoID, StoredCoValueRow>();
+  sessions = new Map<number, StoredSessionRow[]>();
+  signatureAfter = new Map<number, SignatureAfterRow[]>();
+
   constructor(db: IDBDatabase) {
     this.db = db;
+
+    /**
+     * Preloads the coValues, sessions and signatureAfter into memory
+     *
+     * In the browsers context, this take a few milliseconds an it makes the coValue loads
+     * shaving off around the 25% of the load time
+     *
+     * The memory allocated is limited, because the header, sessions and signatureAfter sizes are somewhat fixed
+     * because they don't contain any user data
+     *
+     * IndexedDB is slow at doing many small queries, even slower when accessing an index.
+     *
+     * This preload works around the issue, making the load reaching only the transactions store.
+     */
+    queryIndexedDbStore(this.db, "coValues", (store) =>
+      store.index("coValuesById").getAll(),
+    ).then((rows) => {
+      for (const row of rows) {
+        this.coValues.set(row.id, row);
+      }
+    });
+
+    queryIndexedDbStore(this.db, "sessions", (store) =>
+      store.index("sessionsByCoValue").getAll(),
+    ).then((rows) => {
+      if (rows.length === 0) {
+        return;
+      }
+
+      let currentCoValue = rows[0].coValue;
+      let currentSessions: StoredSessionRow[] = [];
+
+      for (const row of rows) {
+        if (row.coValue !== currentCoValue) {
+          this.sessions.set(currentCoValue, currentSessions);
+          currentCoValue = row.coValue;
+          currentSessions = [];
+        }
+
+        currentSessions.push(row);
+      }
+
+      this.sessions.set(currentCoValue, currentSessions);
+    });
+
+    queryIndexedDbStore(this.db, "signatureAfter", (store) =>
+      store.getAll(),
+    ).then((rows) => {
+      for (const row of rows) {
+        this.signatureAfter.set(row.ses, row);
+      }
+    });
   }
 
   makeRequest<T>(
@@ -44,6 +99,11 @@ export class IDBClient implements DBClientInterfaceAsync {
   }
 
   async getCoValue(coValueId: RawCoID): Promise<StoredCoValueRow | undefined> {
+    const coValue = this.coValues.get(coValueId);
+    if (coValue) {
+      return coValue;
+    }
+
     return queryIndexedDbStore(this.db, "coValues", (store) =>
       store.index("coValuesById").get(coValueId),
     );
@@ -54,6 +114,11 @@ export class IDBClient implements DBClientInterfaceAsync {
   }
 
   async getCoValueSessions(coValueRowId: number): Promise<StoredSessionRow[]> {
+    const sessions = this.sessions.get(coValueRowId);
+    if (sessions) {
+      return sessions;
+    }
+
     return queryIndexedDbStore(this.db, "sessions", (store) =>
       store.index("sessionsByCoValue").getAll(coValueRowId),
     );
@@ -80,14 +145,16 @@ export class IDBClient implements DBClientInterfaceAsync {
     );
   }
 
-  async getSignatures(
-    sessionRowId: number,
-    firstNewTxIdx: number,
-  ): Promise<SignatureAfterRow[]> {
+  async getSignatures(sessionRowId: number): Promise<SignatureAfterRow[]> {
+    const signatures = this.signatureAfter.get(sessionRowId);
+    if (signatures) {
+      return signatures;
+    }
+
     return queryIndexedDbStore(this.db, "signatureAfter", (store) =>
       store.getAll(
         IDBKeyRange.bound(
-          [sessionRowId, firstNewTxIdx],
+          [sessionRowId, 0],
           [sessionRowId, Number.POSITIVE_INFINITY],
         ),
       ),
@@ -102,6 +169,8 @@ export class IDBClient implements DBClientInterfaceAsync {
       return this.getCoValueRowID(id);
     }
 
+    this.coValues.delete(id);
+
     return putIndexedDbStore<CoValueRow, number>(this.db, "coValues", {
       id,
       header,
@@ -115,6 +184,8 @@ export class IDBClient implements DBClientInterfaceAsync {
     sessionUpdate: SessionRow;
     sessionRow?: StoredSessionRow;
   }): Promise<number> {
+    this.sessions.delete(sessionUpdate.coValue);
+
     return this.makeRequest<number>(
       (tx) =>
         tx.getObjectStore("sessions").put(
@@ -151,6 +222,8 @@ export class IDBClient implements DBClientInterfaceAsync {
     idx: number;
     signature: CojsonInternalTypes.Signature;
   }) {
+    this.signatureAfter.delete(sessionRowID);
+
     return this.makeRequest((tx) =>
       tx.getObjectStore("signatureAfter").put({
         ses: sessionRowID,
