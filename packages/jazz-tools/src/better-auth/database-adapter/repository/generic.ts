@@ -61,9 +61,7 @@ export class JazzRepository {
     const resolved = await this.databaseRoot.$jazz.ensureLoaded({
       resolve: {
         tables: {
-          [model]: {
-            $each: true,
-          },
+          [model]: true,
         },
       },
     });
