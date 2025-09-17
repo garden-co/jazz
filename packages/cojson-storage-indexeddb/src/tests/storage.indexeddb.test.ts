@@ -487,7 +487,6 @@ test("large coValue upload streaming", async () => {
     largeMap.set(key, value, "trusting");
   }
 
-  // TODO: Wait for storage to be updated
   await largeMap.core.waitForSync();
 
   const knownState = largeMap.core.knownState();

@@ -74,8 +74,21 @@ export class IDBClient implements DBClientInterfaceAsync {
     queryIndexedDbStore(this.db, "signatureAfter", (store) =>
       store.getAll(),
     ).then((rows) => {
+      if (rows.length === 0) {
+        return;
+      }
+
+      let currentSession = rows[0].ses;
+      let currentSignatures: SignatureAfterRow[] = [];
+
       for (const row of rows) {
-        this.signatureAfter.set(row.ses, row);
+        if (row.ses !== currentSession) {
+          this.signatureAfter.set(currentSession, currentSignatures);
+          currentSession = row.ses;
+          currentSignatures = [];
+        }
+
+        currentSignatures.push(row);
       }
     });
   }
