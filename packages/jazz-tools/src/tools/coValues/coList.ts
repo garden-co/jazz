@@ -953,11 +953,8 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
     indexedField: string,
     rawElementId: string,
     originalArrayIdx: number,
-  ): number {
-    const indexRecord = this.indexRecord(indexedField)?.toJSON() as Record<
-      string,
-      number
-    >;
+  ): number | undefined {
+    const indexRecord = this.indexRecord(indexedField);
     if (!indexRecord) {
       const child = accessChildByKey(
         this.coList,
@@ -966,7 +963,7 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
       );
       return child?.[indexedField];
     }
-    return indexRecord[rawElementId]!;
+    return indexRecord?.get(rawElementId) as number | undefined;
   }
 
   /**
@@ -1056,6 +1053,9 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
               return valueToFilter === value;
             case "$ne":
               return valueToFilter !== value;
+          }
+          if (valueToFilter === undefined) return false;
+          switch (operator) {
             case "$gt":
               return valueToFilter > value;
             case "$gte":
