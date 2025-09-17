@@ -119,3 +119,5 @@ export {
   isJazzRequestError,
   type HttpRoute,
 } from "./coValues/request.js";
+
+export { structuralEquals } from "./internal.js";
