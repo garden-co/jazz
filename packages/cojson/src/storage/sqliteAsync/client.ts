@@ -31,6 +31,7 @@ export function getErrorMessage(error: unknown) {
   return error instanceof Error ? error.message : "Unknown error";
 }
 
+// @ts-expect-error
 export class SQLiteClientAsync implements DBClientInterfaceAsync {
   private readonly db: SQLiteDatabaseDriverAsync;
 
@@ -92,6 +93,7 @@ export class SQLiteClientAsync implements DBClientInterfaceAsync {
     );
 
     try {
+      // @ts-expect-error
       return txs.map((transactionRow) => ({
         ...transactionRow,
         tx: JSON.parse(transactionRow.tx) as Transaction,

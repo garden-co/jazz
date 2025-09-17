@@ -52,6 +52,9 @@ export type TransactionRow = {
   ses: number;
   idx: number;
   tx: Transaction;
+  signature?: Signature;
+  sessionID: SessionID;
+  coValue: number;
 };
 
 export type SignatureAfterRow = {
@@ -71,6 +74,7 @@ export interface DBClientInterfaceAsync {
   ): Promise<number | undefined>;
 
   getCoValueSessions(coValueRowId: number): Promise<StoredSessionRow[]>;
+  getCoValueTransactions(coValueRowId: number): Promise<TransactionRow[]>;
 
   getSingleCoValueSession(
     coValueRowId: number,
@@ -100,6 +104,9 @@ export interface DBClientInterfaceAsync {
     sessionRowID: number,
     idx: number,
     newTransaction: Transaction,
+    sessionID: SessionID,
+    coValue: number,
+    signature?: Signature,
   ): Promise<number> | undefined | unknown;
 
   addSignatureAfter({

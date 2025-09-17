@@ -1,7 +1,7 @@
 export type StoreName =
   | "coValues"
   | "sessions"
-  | "transactions"
+  | "transactions_v2"
   | "signatureAfter";
 
 // A access unit for the IndexedDB Jazz database
@@ -28,7 +28,7 @@ export class CoJsonIDBTransaction {
 
   refresh() {
     this.tx = this.db.transaction(
-      ["coValues", "sessions", "transactions", "signatureAfter"],
+      ["coValues", "sessions", "transactions_v2", "signatureAfter"],
       "readwrite",
     );
 

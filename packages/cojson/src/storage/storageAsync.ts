@@ -16,23 +16,46 @@ import {
   emptyKnownState,
 } from "../sync.js";
 import { StorageKnownState } from "./knownState.js";
-import {
-  collectNewTxs,
-  getDependedOnCoValues,
-  getNewTransactionsSize,
-} from "./syncUtils.js";
+import { getDependedOnCoValues, getNewTransactionsSize } from "./syncUtils.js";
 import type {
   CorrectionCallback,
   DBClientInterfaceAsync,
-  SignatureAfterRow,
   StoredCoValueRow,
   StoredSessionRow,
 } from "./types.js";
+
+class Semaphore {
+  private permits: number;
+  private waitingQueue: Array<() => void> = [];
+
+  constructor(permits: number) {
+    this.permits = permits;
+  }
+
+  acquire(callback: () => void): void {
+    if (this.permits > 0) {
+      this.permits--;
+      callback();
+    } else {
+      this.waitingQueue.push(callback);
+    }
+  }
+
+  release(): void {
+    if (this.waitingQueue.length > 0) {
+      const next = this.waitingQueue.pop();
+      next?.();
+    } else {
+      this.permits++;
+    }
+  }
+}
 
 export class StorageApiAsync implements StorageAPI {
   private readonly dbClient: DBClientInterfaceAsync;
 
   private loadedCoValues = new Set<RawCoID>();
+  private loadCoValueSemaphore = new Semaphore(10);
 
   constructor(dbClient: DBClientInterfaceAsync) {
     this.dbClient = dbClient;
@@ -57,6 +80,19 @@ export class StorageApiAsync implements StorageAPI {
     callback: (data: NewContentMessage) => void,
     done: (found: boolean) => void,
   ) {
+    this.loadCoValueSemaphore.acquire(() => {
+      this._loadCoValueInternal(id, callback, (found) => {
+        this.loadCoValueSemaphore.release();
+        done(found);
+      });
+    });
+  }
+
+  private async _loadCoValueInternal(
+    id: string,
+    callback: (data: NewContentMessage) => void,
+    done: (found: boolean) => void,
+  ) {
     const coValueRow = await this.dbClient.getCoValue(id);
 
     if (!coValueRow) {
@@ -64,104 +100,49 @@ export class StorageApiAsync implements StorageAPI {
       return;
     }
 
-    const allCoValueSessions = await this.dbClient.getCoValueSessions(
+    const allCoValueSessions = await this.dbClient.getCoValueTransactions(
       coValueRow.rowID,
-    );
-
-    const signaturesBySession = new Map<
-      SessionID,
-      Pick<SignatureAfterRow, "idx" | "signature">[]
-    >();
-
-    let contentStreaming = false;
-
-    await Promise.all(
-      allCoValueSessions.map(async (sessionRow) => {
-        const signatures = await this.dbClient.getSignatures(
-          sessionRow.rowID,
-          0,
-        );
-
-        if (signatures.length > 0) {
-          contentStreaming = true;
-          signaturesBySession.set(sessionRow.sessionID, signatures);
-        }
-      }),
     );
 
     const knownState = this.knwonStates.getKnownState(coValueRow.id);
     knownState.header = true;
 
-    for (const sessionRow of allCoValueSessions) {
-      knownState.sessions[sessionRow.sessionID] = sessionRow.lastIdx;
-    }
-
     this.loadedCoValues.add(coValueRow.id);
 
     let contentMessage = createContentMessage(coValueRow.id, coValueRow.header);
 
-    if (contentStreaming) {
-      contentMessage.expectContentUntil = knownState["sessions"];
-    }
+    for (const tx of allCoValueSessions) {
+      let sessionEntry = contentMessage.new[tx.sessionID];
 
-    for (const sessionRow of allCoValueSessions) {
-      const signatures = signaturesBySession.get(sessionRow.sessionID) || [];
-
-      let idx = 0;
-
-      const lastSignature = signatures[signatures.length - 1];
-
-      if (lastSignature?.signature !== sessionRow.lastSignature) {
-        signatures.push({
-          idx: sessionRow.lastIdx,
-          signature: sessionRow.lastSignature,
-        });
+      if (!sessionEntry) {
+        sessionEntry = {
+          after: tx.idx,
+          // @ts-expect-error
+          lastSignature: null,
+          newTransactions: [],
+        };
+        // @ts-expect-error
+        contentMessage.new[tx.sessionID] = sessionEntry;
       }
 
-      for (const signature of signatures) {
-        const newTxsInSession = await this.dbClient.getNewTransactionInSession(
-          sessionRow.rowID,
-          idx,
-          signature.idx,
-        );
+      if (tx.signature) {
+        sessionEntry!.lastSignature = tx.signature;
+      }
 
-        collectNewTxs({
-          newTxsInSession,
-          contentMessage,
-          sessionRow,
-          firstNewTxIdx: idx,
-          signature: signature.signature,
-        });
+      sessionEntry!.newTransactions.push(tx.tx);
 
-        idx = signature.idx + 1;
-
-        if (signatures.length > 1) {
-          // Having more than one signature means that the content needs streaming
-          // So we start pushing the content to the client, and start a new content message
-          await this.pushContentWithDependencies(
-            coValueRow,
-            contentMessage,
-            callback,
-          );
-          contentMessage = createContentMessage(
-            coValueRow.id,
-            coValueRow.header,
-          );
-        }
+      if (knownState.sessions[tx.sessionID] ?? 0 < tx.idx) {
+        knownState.sessions[tx.sessionID] = tx.idx;
       }
     }
-
-    const hasNewContent = Object.keys(contentMessage.new).length > 0;
 
     // If there is no new content but steaming is not active, it's the case for a coValue with the header but no transactions
     // For streaming the push has already been done in the loop above
-    if (hasNewContent || !contentStreaming) {
-      await this.pushContentWithDependencies(
-        coValueRow,
-        contentMessage,
-        callback,
-      );
-    }
+    await this.pushContentWithDependencies(
+      coValueRow,
+      contentMessage,
+      callback,
+    );
 
     this.knwonStates.handleUpdate(coValueRow.id, knownState);
     done?.(true);
@@ -186,7 +167,7 @@ export class StorageApiAsync implements StorageAPI {
 
       promises.push(
         new Promise((resolve) => {
-          this.loadCoValue(dependedOnCoValue, pushCallback, resolve);
+          this._loadCoValueInternal(dependedOnCoValue, pushCallback, resolve);
         }),
       );
     }
@@ -360,17 +341,27 @@ export class StorageApiAsync implements StorageAPI {
       sessionRow,
     });
 
+    const signatureIdx = newLastIdx - 1;
+    const signature = msg.new[sessionID].lastSignature;
+
     if (shouldWriteSignature) {
       await this.dbClient.addSignatureAfter({
         sessionRowID,
-        idx: newLastIdx - 1,
-        signature: msg.new[sessionID].lastSignature,
+        idx: signatureIdx,
+        signature,
       });
     }
 
     await Promise.all(
       actuallyNewTransactions.map((newTransaction, i) =>
-        this.dbClient.addTransaction(sessionRowID, nextIdx + i, newTransaction),
+        this.dbClient.addTransaction(
+          sessionRowID,
+          nextIdx + i,
+          newTransaction,
+          sessionID,
+          storedCoValueRowID,
+          nextIdx + i === signatureIdx ? signature : undefined,
+        ),
       ),
     );
 

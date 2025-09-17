@@ -1265,7 +1265,7 @@ export class CoValueCore {
         ) {
           this.listeners.delete(listener);
           removeCloseListener?.();
-          clearTimeout(timeout);
+          // clearTimeout(timeout);
           resolve();
         }
       };

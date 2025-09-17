@@ -92,6 +92,7 @@ export class SQLiteClient implements DBClientInterfaceSync {
     ) as RawTransactionRow[];
 
     try {
+      // @ts-expect-error
       return txs.map((transactionRow) => ({
         ...transactionRow,
         tx: JSON.parse(transactionRow.tx) as Transaction,

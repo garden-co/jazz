@@ -21,5 +21,6 @@ export async function getSqliteStorageAsync(db: SQLiteDatabaseDriverAsync) {
     await db.run(migration, []);
   }
 
+  // @ts-expect-error
   return new StorageApiAsync(new SQLiteClientAsync(db));
 }

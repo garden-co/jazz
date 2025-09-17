@@ -226,7 +226,6 @@ export class SyncManager {
       return;
     }
 
-    // TODO: validate
     switch (msg.action) {
       case "load":
         return this.handleLoad(msg, peer);
