@@ -946,10 +946,7 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
    * @internal
    */
   private get queryModifiers() {
-    const subscriptionScope: SubscriptionScope<CoList> | undefined =
-      // @ts-expect-error - _subscriptionScope is not defined in CoValueJazzApi but is set using Object.defineProperty
-      this._subscriptionScope;
-    return subscriptionScope?.queryModifiers ?? {};
+    return this._subscriptionScope?.queryModifiers ?? {};
   }
 
   private indexValueFor(
