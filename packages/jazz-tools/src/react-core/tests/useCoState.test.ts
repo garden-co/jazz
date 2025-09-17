@@ -10,6 +10,7 @@ import {
   Loaded,
   co,
   z,
+  ResolveQuery,
 } from "jazz-tools";
 import { assert, beforeEach, describe, expect, expectTypeOf, it } from "vitest";
 import { useCoState } from "../index.js";
@@ -91,6 +92,31 @@ describe("useCoState", () => {
     });
 
     expect(result.current?.value).toBe("456");
+  });
+
+  it("should update the value when the resolve query changes", async () => {
+    const TestList = co.list(z.number());
+
+    const account = await createJazzTestAccount({
+      isCurrentActiveAccount: true,
+    });
+
+    const list = TestList.create([1, 2, 3]);
+
+    const resolve: ResolveQuery<typeof TestList> = { $limit: 1 };
+    const { result, rerender } = renderHook(
+      ({ resolve }) => useCoState(TestList, list.$jazz.id, { resolve }),
+      {
+        account,
+        initialProps: { resolve },
+      },
+    );
+
+    expect(result.current?.[0]).toBe(1);
+
+    rerender({ resolve: { $offset: 1, $limit: 1 } });
+
+    expect(result.current?.[0]).toBe(2);
   });
 
   it("should load nested values if requested", async () => {

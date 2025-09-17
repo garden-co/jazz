@@ -550,6 +550,7 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
     queryView: Record<number, number>;
     rawLength: number;
   } | null = null;
+
   constructor(
     private coList: L,
     private getRaw: () => RawCoList,
