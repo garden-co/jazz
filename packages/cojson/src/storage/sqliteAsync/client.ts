@@ -102,13 +102,10 @@ export class SQLiteClientAsync implements DBClientInterfaceAsync {
     }
   }
 
-  async getSignatures(
-    sessionRowId: number,
-    firstNewTxIdx: number,
-  ): Promise<SignatureAfterRow[]> {
+  async getSignatures(sessionRowId: number): Promise<SignatureAfterRow[]> {
     return this.db.query<SignatureAfterRow>(
-      "SELECT * FROM signatureAfter WHERE ses = ? AND idx >= ?",
-      [sessionRowId, firstNewTxIdx],
+      "SELECT * FROM signatureAfter WHERE ses = ?",
+      [sessionRowId],
     );
   }
 

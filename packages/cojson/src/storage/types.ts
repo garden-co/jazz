@@ -83,10 +83,7 @@ export interface DBClientInterfaceAsync {
     toIdx: number,
   ): Promise<TransactionRow[]>;
 
-  getSignatures(
-    sessionRowId: number,
-    firstNewTxIdx: number,
-  ): Promise<SignatureAfterRow[]>;
+  getSignatures(sessionRowId: number): Promise<SignatureAfterRow[]>;
 
   addSessionUpdate({
     sessionUpdate,
@@ -135,7 +132,6 @@ export interface DBClientInterfaceSync {
 
   getSignatures(
     sessionRowId: number,
-    firstNewTxIdx: number,
   ): Pick<SignatureAfterRow, "idx" | "signature">[];
 
   addSessionUpdate({
