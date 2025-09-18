@@ -14,6 +14,7 @@ interface PreviousNextLinksProps {
 
 export function PreviousNextLinks({ slug, framework }: PreviousNextLinksProps) {
   const currentItem = flatItemsWithNavLinks.find((item) => {
+    if (!item.href) return false;
     const itemPath = item.href.replace("/docs", `/docs/${framework}`);
     const currentPath = slug
       ? `/docs/${framework}/${slug.join("/")}`
@@ -31,7 +32,7 @@ export function PreviousNextLinks({ slug, framework }: PreviousNextLinksProps) {
   return (
     <>
       <div className="flex justify-evenly gap-3 not-prose">
-        {currentItem.previous && (
+        {currentItem.previous && currentItem.previous.href && (
           <Link
             href={currentItem.previous.href.replace(
               "/docs",
@@ -46,7 +47,7 @@ export function PreviousNextLinks({ slug, framework }: PreviousNextLinksProps) {
             </div>
           </Link>
         )}
-        {currentItem.next && (
+        {currentItem.next && currentItem.next.href && (
           <Link
             href={currentItem.next.href.replace("/docs", `/docs/${framework}`)}
             className="group text-right ml-auto py-5 xl:pl-12"
