@@ -956,14 +956,19 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
   ): number | undefined {
     const indexRecord = this.indexRecord(indexedField);
     if (!indexRecord) {
-      const child = accessChildByKey(
-        this.coList,
-        rawElementId,
-        String(originalArrayIdx),
-      );
-      return child?.[indexedField];
+      return this.childValueFor(rawElementId)?.[indexedField];
     }
     return indexRecord?.get(rawElementId) as number | undefined;
+  }
+
+  private childValueFor(
+    rawElementId: string,
+  ): Record<string, number> | undefined {
+    const child = this._subscriptionScope?.childValues.get(rawElementId);
+    if (child?.type !== "loaded") {
+      return undefined;
+    }
+    return child.value;
   }
 
   /**
