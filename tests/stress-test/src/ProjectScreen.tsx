@@ -1,4 +1,8 @@
-import { useAccount, useCoState } from "jazz-tools/react-core";
+import {
+  useAccount,
+  useCoState,
+  useCoStateWithSelector,
+} from "jazz-tools/react-core";
 import { useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router";
 import {
@@ -12,17 +16,26 @@ import { OrderByDirection } from "jazz-tools";
 
 export function ProjectScreen() {
   const { projectId } = useParams();
+  const [visibleTasks, setVisibleTasks] = useState(20);
   const project = useCoState(TodoProject, projectId, {
     resolve: {
-      tasks: { $orderBy: { priority: OrderByDirection.DESC } },
+      tasks: {
+        $orderBy: { priority: OrderByDirection.DESC },
+        $limit: visibleTasks,
+      },
     },
+  });
+  const totalTaskCount = useCoStateWithSelector(TodoProject, projectId, {
+    resolve: {
+      tasks: true,
+    },
+    select: (project) => project?.tasks.length ?? 0,
   });
   const { me } = useAccount(TodoAccount, {
     resolve: {
       root: true,
     },
   });
-  const [visibleTasks, setVisibleTasks] = useState(20);
   const navigate = useNavigate();
 
   const firstRenderMarker = useRef(false);
@@ -82,7 +95,7 @@ export function ProjectScreen() {
             color: "#2c3e50",
           }}
         >
-          {project.tasks.length} tasks
+          {totalTaskCount} tasks
         </h1>
         <button
           onClick={() => navigate("/")}
@@ -110,12 +123,12 @@ export function ProjectScreen() {
           marginBottom: "30px",
         }}
       >
-        {[...project.tasks.$jazz.refs].slice(0, visibleTasks).map((taskRef) => (
+        {[...project.tasks.$jazz.refs].map((taskRef) => (
           <TaskRow key={taskRef.id} taskId={taskRef.id} />
         ))}
       </div>
 
-      {visibleTasks < project.tasks.length && (
+      {visibleTasks < totalTaskCount && (
         <div
           style={{
             textAlign: "center",
