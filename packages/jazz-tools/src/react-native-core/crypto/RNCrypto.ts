@@ -16,6 +16,7 @@ import {
   CojsonInternalTypes,
   bytesToBase64url,
 } from "cojson";
+import { base58 } from "@scure/base";
 import { HybridCoJSONCoreRN, SessionLogHandle } from "cojson-core-rn";
 import { textDecoder, textEncoder } from "cojson/dist/crypto/crypto.js";
 
@@ -206,7 +207,11 @@ class RNSessionLog implements SessionLogImpl {
     tx_index: number,
     key_secret: KeySecret,
   ): string {
-    const keyBytes = typedArrayToBuffer(new TextEncoder().encode(key_secret));
+    // Decode the base58-encoded KeySecret to raw bytes
+    const keySecretBytes = base58.decode(
+      key_secret.substring("keySecret_z".length),
+    );
+    const keyBytes = typedArrayToBuffer(keySecretBytes);
 
     const { success, result, error } =
       HybridCoJSONCoreRN.decryptNextTransactionChangesJson(
