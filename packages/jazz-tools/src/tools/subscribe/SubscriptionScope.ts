@@ -11,6 +11,9 @@ import {
   instantiateRefEncodedFromRaw,
   isRefEncoded,
   pick,
+  WhereFieldCondition,
+  WhereFieldConditions,
+  WhereOptions,
 } from "../internal.js";
 import { applyCoValueMigrations } from "../lib/migration.js";
 import { CoValueCoreSubscription } from "./CoValueCoreSubscription.js";
@@ -25,17 +28,33 @@ import { createCoValue, myRoleForRawValue } from "./utils.js";
 export const OrderByDirection = { ASC: "asc", DESC: "desc" } as const;
 export type OrderByDirection =
   (typeof OrderByDirection)[keyof typeof OrderByDirection];
-export type WhereOperator = (typeof WhereOperators)[number];
-const WhereOperators = ["$eq", "$ne", "$gt", "$gte", "$lt", "$lte"] as const;
+export type WhereComparisonOperator = (typeof WhereComparisonOperators)[number];
+const WhereComparisonOperators = [
+  "$eq",
+  "$ne",
+  "$gt",
+  "$gte",
+  "$lt",
+  "$lte",
+] as const;
+export type WhereLogicalOperator = (typeof WhereLogicalOperators)[number];
+const WhereLogicalOperators = ["$and", "$or", "$not"] as const;
+
+export type WhereClause =
+  | {
+      field: string;
+      operator: WhereComparisonOperator;
+      value: any;
+    }
+  | {
+      combinator: WhereLogicalOperator;
+      conditions: WhereClause[];
+    };
 
 type QueryModifiers = {
-  where?: {
-    indexedField: string;
-    operator: WhereOperator;
-    value: any;
-  }[];
+  where?: WhereClause;
   orderBy?: {
-    indexedField: string;
+    field: string;
     orderDirection: OrderByDirection;
   }[];
   limit?: number;
@@ -89,7 +108,12 @@ export class SubscriptionScope<D extends CoValue> {
 
     const queryModifiers: Record<string, any> =
       typeof this.resolve === "object" && this.resolve !== null
-        ? pick(this.resolve, ["$where", "$orderBy", "$limit", "$offset"])
+        ? pick(this.resolve, [
+            "$where",
+            "$orderBy",
+            "$limit",
+            "$offset",
+          ] as const)
         : {};
     if (Object.keys(queryModifiers).length > 0) {
       this.queryModifiers.limit = queryModifiers?.$limit;
@@ -100,9 +124,10 @@ export class SubscriptionScope<D extends CoValue> {
       this.queryModifiers = {};
     }
     const indexedFields = [
-      ...(this.queryModifiers.orderBy?.map((orderBy) => orderBy.indexedField) ??
-        []),
-      ...(this.queryModifiers?.where?.map((where) => where.indexedField) ?? []),
+      ...(this.queryModifiers.orderBy?.map((orderBy) => orderBy.field) ?? []),
+      ...(this.queryModifiers?.where
+        ? indexedFieldsFromWhereClause(this.queryModifiers?.where)
+        : []),
     ].filter((field): field is string => field !== undefined);
 
     let lastUpdate: RawCoValue | "unavailable" | undefined;
@@ -802,34 +827,124 @@ export class SubscriptionScope<D extends CoValue> {
 }
 
 function parseWhere(where: any): QueryModifiers["where"] {
-  const whereClauses = Object.entries(where ?? {});
-  return whereClauses.map(([indexedField, filter]) => {
-    const containsWhereOperator =
-      typeof filter === "object" &&
-      WhereOperators.includes(Object.keys(filter ?? {})[0] as WhereOperator);
-    let operator: WhereOperator;
-    let value: any;
-    if (containsWhereOperator) {
-      operator = Object.keys(filter ?? {})[0] as WhereOperator;
-      // @ts-expect-error TODO fix type error
-      value = filter[operator];
+  if (!where) return undefined;
+
+  const topLevelKeys = Object.keys(where);
+
+  const logicalOperatorKeys = topLevelKeys.filter((key) =>
+    WhereLogicalOperators.includes(key as WhereLogicalOperator),
+  );
+  const logicalConditions = logicalOperatorKeys.map((key) => {
+    const combinator = key as WhereLogicalOperator;
+    const conditions = where[combinator];
+
+    if (combinator === "$not") {
+      const negatedCondition = parseWhere(conditions as WhereOptions<any>);
+      return {
+        combinator,
+        conditions: negatedCondition ? [negatedCondition] : [],
+      };
     } else {
-      operator = "$eq";
-      value = filter;
+      return {
+        combinator,
+        conditions: (conditions as WhereOptions<any>[])
+          .map((cond) => parseWhere(cond))
+          .filter((cond) => cond !== undefined),
+      };
     }
-    return {
-      indexedField,
-      operator,
-      value,
-    };
   });
+
+  const fieldConditionsKeys = topLevelKeys.filter(
+    (key) => !WhereLogicalOperators.includes(key as WhereLogicalOperator),
+  );
+  const fieldConditions = Object.entries(
+    pick(where, fieldConditionsKeys),
+  ).flatMap(([field, filter]) => parseFieldConditions(field, filter));
+
+  const allConditions = [...logicalConditions, ...fieldConditions];
+
+  if (allConditions.length === 1) {
+    return allConditions[0];
+  }
+  return {
+    combinator: "$and",
+    conditions: allConditions,
+  };
+}
+
+function parseFieldConditions(
+  field: string,
+  filter: WhereFieldCondition<any>,
+): WhereClause {
+  if (typeof filter !== "object") {
+    return {
+      field,
+      operator: "$eq",
+      value: filter,
+    };
+  }
+
+  const filterKeys = Object.keys(filter);
+
+  const logicalFilters = filterKeys
+    .filter((key) =>
+      WhereLogicalOperators.includes(key as WhereLogicalOperator),
+    )
+    .map((key) => {
+      const logicalOperator = key as WhereLogicalOperator;
+      const conditions = filter[logicalOperator];
+
+      if (logicalOperator === "$not") {
+        return {
+          combinator: logicalOperator,
+          conditions: [parseFieldConditions(field, conditions)],
+        };
+      } else {
+        const fieldConditions = conditions.map((cond: any) =>
+          parseFieldConditions(field, cond),
+        );
+        return {
+          combinator: logicalOperator,
+          conditions: fieldConditions,
+        };
+      }
+    });
+
+  const comparisonFilters = filterKeys
+    .filter((key) =>
+      WhereComparisonOperators.includes(key as WhereComparisonOperator),
+    )
+    .map((key) => ({
+      field,
+      operator: key as WhereComparisonOperator,
+      value: filter[key],
+    }));
+
+  const allFilters = [...logicalFilters, ...comparisonFilters];
+  if (allFilters.length === 1) {
+    return allFilters[0]!;
+  }
+  return {
+    combinator: "$and",
+    conditions: allFilters,
+  };
+}
+
+function indexedFieldsFromWhereClause(where: WhereClause): string[] {
+  if ("field" in where) {
+    return [where.field];
+  } else {
+    return where.conditions.flatMap((condition) =>
+      indexedFieldsFromWhereClause(condition),
+    );
+  }
 }
 
 function parseOrderBy(orderBy: any): QueryModifiers["orderBy"] {
   const orderClauses = Object.entries(orderBy ?? {});
-  return orderClauses.map(([indexedField, orderDirection]) => {
+  return orderClauses.map(([field, orderDirection]) => {
     return {
-      indexedField,
+      field,
       orderDirection: orderDirection as OrderByDirection,
     };
   });

@@ -33,10 +33,3 @@ export type IsUnion<T, U = T> = (
 ) extends (x: U) => void
   ? false
   : true;
-
-/**
- * Require exactly one key to be present in the object
- */
-export type RequireExactlyOne<T> = {
-  [K in keyof T]: { [P in K]: T[P] } & { [Q in Exclude<keyof T, K>]?: never };
-}[keyof T];

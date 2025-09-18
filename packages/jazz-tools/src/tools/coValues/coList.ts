@@ -30,6 +30,7 @@ import {
   SubscriptionScope,
   TypeSym,
   BranchDefinition,
+  type WhereClause,
 } from "../internal.js";
 import {
   AnonymousJazzAgent,
@@ -949,6 +950,65 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
     return this._subscriptionScope?.queryModifiers ?? {};
   }
 
+  private evaluateWhereClause(
+    whereClause: WhereClause,
+    element: { originalArrayIdx: number; indexedValue: string },
+  ): boolean {
+    if ("field" in whereClause) {
+      const valueToFilter = this.indexValueFor(
+        whereClause.field,
+        element.indexedValue,
+        element.originalArrayIdx,
+      );
+      return this.evaluateFieldCondition(
+        whereClause.operator,
+        valueToFilter,
+        whereClause.value,
+      );
+    } else {
+      switch (whereClause.combinator) {
+        case "$and":
+          return whereClause.conditions.every((condition) =>
+            this.evaluateWhereClause(condition, element),
+          );
+        case "$or":
+          return whereClause.conditions.some((condition) =>
+            this.evaluateWhereClause(condition, element),
+          );
+        case "$not":
+          return !this.evaluateWhereClause(whereClause.conditions[0]!, element);
+        default:
+          return true;
+      }
+    }
+  }
+
+  private evaluateFieldCondition(
+    operator: string,
+    valueToFilter: any,
+    value: any,
+  ): boolean {
+    switch (operator) {
+      case "$eq":
+        return valueToFilter === value;
+      case "$ne":
+        return valueToFilter !== value;
+    }
+    if (valueToFilter === undefined) return false;
+    switch (operator) {
+      case "$gt":
+        return valueToFilter > value;
+      case "$gte":
+        return valueToFilter >= value;
+      case "$lt":
+        return valueToFilter < value;
+      case "$lte":
+        return valueToFilter <= value;
+      default:
+        return true;
+    }
+  }
+
   private indexValueFor(
     indexedField: string,
     rawElementId: string,
@@ -1020,7 +1080,7 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
     let sortedArrayIndexes = allArrayIndexesWithIndexedValues;
     if (orderBy?.length) {
       sortedArrayIndexes = allArrayIndexesWithIndexedValues.toSorted((a, b) => {
-        for (const { indexedField, orderDirection } of orderBy) {
+        for (const { field: indexedField, orderDirection } of orderBy) {
           const dir = orderDirection === "desc" ? -1 : 1;
           const aValue = this.indexValueFor(
             indexedField,
@@ -1045,32 +1105,9 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
       });
     }
     let filteredArrayIndexes = sortedArrayIndexes;
-    if (where?.length) {
+    if (where) {
       filteredArrayIndexes = sortedArrayIndexes.filter((element) => {
-        return where.every(({ indexedField, operator, value }) => {
-          const valueToFilter = this.indexValueFor(
-            indexedField,
-            element.indexedValue,
-            element.originalArrayIdx,
-          );
-          switch (operator) {
-            case "$eq":
-              return valueToFilter === value;
-            case "$ne":
-              return valueToFilter !== value;
-          }
-          if (valueToFilter === undefined) return false;
-          switch (operator) {
-            case "$gt":
-              return valueToFilter > value;
-            case "$gte":
-              return valueToFilter >= value;
-            case "$lt":
-              return valueToFilter < value;
-            case "$lte":
-              return valueToFilter <= value;
-          }
-        });
+        return this.evaluateWhereClause(where, element);
       });
     }
     const paginatedArrayIndexes = filteredArrayIndexes

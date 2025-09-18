@@ -4,30 +4,63 @@ import {
   ItemsSym,
   NotNull,
   OrderByDirection,
-  RequireExactlyOne,
   TypeSym,
-  WhereOperator,
+  WhereComparisonOperator,
+  WhereLogicalOperator,
 } from "../internal.js";
 import { type Account } from "./account.js";
 import { CoFeedEntry } from "./coFeed.js";
 import { type CoKeys } from "./coMap.js";
 import { type CoValue, type ID } from "./interfaces.js";
 
+export type WhereOptions<T> = T extends { [TypeSym]: "CoMap" }
+  ? WhereFieldConditions<T> | WhereWithCombinators<T>
+  : never;
+
+type WhereFieldComparisonOperators<FieldType> = Partial<
+  Record<WhereComparisonOperator, FieldType>
+>;
+
+export type WhereFieldCondition<FieldType> =
+  | FieldType
+  | WhereFieldComparisonOperators<FieldType>
+  | WhereFieldWithCombinators<FieldType>;
+
 /**
  * Any top-level, non-collaborative scalar CoMap field (string, number, Date, boolean) can be used
- * to sort a CoList
+ * to filter a CoList
  */
-export type WhereOptions<T> = T extends { [TypeSym]: "CoMap" }
+export type WhereFieldConditions<T> = T extends { [TypeSym]: "CoMap" }
   ? {
       [K in CoKeys<T>]?: NonNullable<T[K]> extends
         | string
         | number
         | Date
         | boolean
-        ? T[K] | RequireExactlyOne<Record<WhereOperator, T[K]>>
+        ? WhereFieldCondition<T[K]>
         : never;
     }
   : never;
+
+type WhereWithCombinators<T> = Partial<{
+  $and: WhereOptions<T>[];
+  $or: WhereOptions<T>[];
+  $not: WhereOptions<T>;
+}>;
+
+type WhereFieldWithCombinators<FieldType> = Partial<{
+  $and: (
+    | WhereFieldComparisonOperators<FieldType>
+    | WhereFieldWithCombinators<FieldType>
+  )[];
+  $or: (
+    | WhereFieldComparisonOperators<FieldType>
+    | WhereFieldWithCombinators<FieldType>
+  )[];
+  $not:
+    | WhereFieldComparisonOperators<FieldType>
+    | WhereFieldWithCombinators<FieldType>;
+}>;
 
 /**
  * Any top-level, non-collaborative scalar CoMap field (string, number, Date, boolean) can be used
