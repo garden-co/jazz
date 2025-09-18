@@ -34,6 +34,8 @@ pub fn decrypt_xsalsa20_wasm(
 
 #[cfg(test)]
 mod tests {
+    use cojson_core::{decrypt_xsalsa20_poly1305, encrypt_xsalsa20_poly1305};
+
     use super::*;
 
     #[test]
