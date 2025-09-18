@@ -8,7 +8,7 @@
  * Returns the encrypted bytes or throws a JsError if encryption fails.
  * Note: This function does not provide authentication. Use encrypt_xsalsa20_poly1305 for authenticated encryption.
  */
-export function encrypt_xsalsa20_wasm(key: Uint8Array, nonce_material: Uint8Array, plaintext: Uint8Array): Uint8Array;
+export function encrypt_xsalsa20(key: Uint8Array, nonce_material: Uint8Array, plaintext: Uint8Array): Uint8Array;
 /**
  * WASM-exposed function for XSalsa20 decryption without authentication.
  * - `key`: 32-byte key for decryption (must match encryption key)
@@ -17,7 +17,7 @@ export function encrypt_xsalsa20_wasm(key: Uint8Array, nonce_material: Uint8Arra
  * Returns the decrypted bytes or throws a JsError if decryption fails.
  * Note: This function does not provide authentication. Use decrypt_xsalsa20_poly1305 for authenticated decryption.
  */
-export function decrypt_xsalsa20_wasm(key: Uint8Array, nonce_material: Uint8Array, ciphertext: Uint8Array): Uint8Array;
+export function decrypt_xsalsa20(key: Uint8Array, nonce_material: Uint8Array, ciphertext: Uint8Array): Uint8Array;
 /**
  * WASM-exposed function for sealing a message using X25519 + XSalsa20-Poly1305.
  * Provides authenticated encryption with perfect forward secrecy.
@@ -38,47 +38,6 @@ export function seal(message: Uint8Array, sender_secret: string, recipient_id: s
  * Returns unsealed bytes or throws JsError if unsealing fails.
  */
 export function unseal(sealed_message: Uint8Array, recipient_secret: string, sender_id: string, nonce_material: Uint8Array): Uint8Array;
-/**
- * Generate a 24-byte nonce from input material using BLAKE3.
- * - `nonce_material`: Raw bytes to derive the nonce from
- * Returns 24 bytes suitable for use as a nonce in cryptographic operations.
- * This function is deterministic - the same input will produce the same nonce.
- */
-export function generate_nonce(nonce_material: Uint8Array): Uint8Array;
-/**
- * Hash data once using BLAKE3.
- * - `data`: Raw bytes to hash
- * Returns 32 bytes of hash output.
- * This is the simplest way to compute a BLAKE3 hash of a single piece of data.
- */
-export function blake3_hash_once(data: Uint8Array): Uint8Array;
-/**
- * Hash data once using BLAKE3 with a context prefix.
- * - `data`: Raw bytes to hash
- * - `context`: Context bytes to prefix to the data
- * Returns 32 bytes of hash output.
- * This is useful for domain separation - the same data hashed with different contexts will produce different outputs.
- */
-export function blake3_hash_once_with_context(data: Uint8Array, context: Uint8Array): Uint8Array;
-/**
- * Get an empty BLAKE3 state for incremental hashing.
- * Returns a new Blake3Hasher instance for incremental hashing.
- */
-export function blake3_empty_state(): Blake3Hasher;
-/**
- * Update a BLAKE3 state with new data for incremental hashing.
- * - `state`: Current Blake3Hasher instance
- * - `data`: New data to incorporate into the hash
- * Returns the updated Blake3Hasher.
- */
-export function blake3_update_state(state: Blake3Hasher, data: Uint8Array): void;
-/**
- * Get the final hash from a BLAKE3 state.
- * - `state`: The Blake3Hasher to finalize
- * Returns 32 bytes of hash output.
- * This finalizes an incremental hashing operation.
- */
-export function blake3_digest_for_state(state: Blake3Hasher): Uint8Array;
 /**
  * Generate a new Ed25519 signing key using secure random number generation.
  * Returns 32 bytes of raw key material suitable for use with other Ed25519 functions.
@@ -158,6 +117,72 @@ export function verify(signature: Uint8Array, message: Uint8Array, id: Uint8Arra
  */
 export function get_signer_id(secret: Uint8Array): string;
 /**
+ * Generate a 24-byte nonce from input material using BLAKE3.
+ * - `nonce_material`: Raw bytes to derive the nonce from
+ * Returns 24 bytes suitable for use as a nonce in cryptographic operations.
+ * This function is deterministic - the same input will produce the same nonce.
+ */
+export function generate_nonce(nonce_material: Uint8Array): Uint8Array;
+/**
+ * Hash data once using BLAKE3.
+ * - `data`: Raw bytes to hash
+ * Returns 32 bytes of hash output.
+ * This is the simplest way to compute a BLAKE3 hash of a single piece of data.
+ */
+export function blake3_hash_once(data: Uint8Array): Uint8Array;
+/**
+ * Hash data once using BLAKE3 with a context prefix.
+ * - `data`: Raw bytes to hash
+ * - `context`: Context bytes to prefix to the data
+ * Returns 32 bytes of hash output.
+ * This is useful for domain separation - the same data hashed with different contexts will produce different outputs.
+ */
+export function blake3_hash_once_with_context(data: Uint8Array, context: Uint8Array): Uint8Array;
+/**
+ * Get an empty BLAKE3 state for incremental hashing.
+ * Returns a new Blake3Hasher instance for incremental hashing.
+ */
+export function blake3_empty_state(): Blake3Hasher;
+/**
+ * Update a BLAKE3 state with new data for incremental hashing.
+ * - `state`: Current Blake3Hasher instance
+ * - `data`: New data to incorporate into the hash
+ * Returns the updated Blake3Hasher.
+ */
+export function blake3_update_state(state: Blake3Hasher, data: Uint8Array): void;
+/**
+ * Get the final hash from a BLAKE3 state.
+ * - `state`: The Blake3Hasher to finalize
+ * Returns 32 bytes of hash output.
+ * This finalizes an incremental hashing operation.
+ */
+export function blake3_digest_for_state(state: Blake3Hasher): Uint8Array;
+/**
+ * Generate a new X25519 private key using secure random number generation.
+ * Returns 32 bytes of raw key material suitable for use with other X25519 functions.
+ * This key can be reused for multiple Diffie-Hellman exchanges.
+ */
+export function new_x25519_private_key(): Uint8Array;
+/**
+ * WASM-exposed function to derive an X25519 public key from a private key.
+ * - `private_key`: 32 bytes of private key material
+ * Returns 32 bytes of public key material or throws JsError if key is invalid.
+ */
+export function x25519_public_key(private_key: Uint8Array): Uint8Array;
+/**
+ * WASM-exposed function to perform X25519 Diffie-Hellman key exchange.
+ * - `private_key`: 32 bytes of private key material
+ * - `public_key`: 32 bytes of public key material
+ * Returns 32 bytes of shared secret material or throws JsError if key exchange fails.
+ */
+export function x25519_diffie_hellman(private_key: Uint8Array, public_key: Uint8Array): Uint8Array;
+/**
+ * WASM-exposed function to derive a sealer ID from a sealer secret.
+ * - `secret`: Raw bytes of the sealer secret
+ * Returns a base58-encoded sealer ID with "sealer_z" prefix or throws JsError if derivation fails.
+ */
+export function get_sealer_id(secret: Uint8Array): string;
+/**
  * WASM-exposed function to encrypt bytes with a key secret and nonce material.
  * - `value`: The raw bytes to encrypt
  * - `key_secret`: A base58-encoded key secret with "keySecret_z" prefix
@@ -173,31 +198,6 @@ export function encrypt(value: Uint8Array, key_secret: string, nonce_material: U
  * Returns the decrypted bytes or throws a JsError if decryption fails.
  */
 export function decrypt(ciphertext: Uint8Array, key_secret: string, nonce_material: Uint8Array): Uint8Array;
-/**
- * Generate a new X25519 private key using secure random number generation.
- * Returns 32 bytes of raw key material suitable for use with other X25519 functions.
- * This key can be reused for multiple Diffie-Hellman exchanges.
- */
-export function new_x25519_private_key(): Uint8Array;
-/**
- * WASM-exposed function to derive an X25519 public key from a private key.
- * - `private_key`: 32 bytes of private key material
- * Returns 32 bytes of public key material or throws JsError if key is invalid.
- */
-export function x25519_public_key_wasm(private_key: Uint8Array): Uint8Array;
-/**
- * WASM-exposed function to perform X25519 Diffie-Hellman key exchange.
- * - `private_key`: 32 bytes of private key material
- * - `public_key`: 32 bytes of public key material
- * Returns 32 bytes of shared secret material or throws JsError if key exchange fails.
- */
-export function x25519_diffie_hellman_wasm(private_key: Uint8Array, public_key: Uint8Array): Uint8Array;
-/**
- * WASM-exposed function to derive a sealer ID from a sealer secret.
- * - `secret`: Raw bytes of the sealer secret
- * Returns a base58-encoded sealer ID with "sealer_z" prefix or throws JsError if derivation fails.
- */
-export function get_sealer_id(secret: Uint8Array): string;
 export class Blake3Hasher {
   free(): void;
   constructor();
@@ -228,21 +228,10 @@ export interface InitOutput {
   readonly sessionlog_addNewTrustingTransaction: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
   readonly sessionlog_decryptNextTransactionChangesJson: (a: number, b: number, c: number, d: number) => [number, number, number, number];
   readonly sessionlog_decryptNextTransactionMetaJson: (a: number, b: number, c: number, d: number) => [number, number, number, number];
-  readonly encrypt_xsalsa20_wasm: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
-  readonly decrypt_xsalsa20_wasm: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
+  readonly decrypt_xsalsa20: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
+  readonly encrypt_xsalsa20: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
   readonly seal: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
   readonly unseal: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
-  readonly generate_nonce: (a: number, b: number) => [number, number];
-  readonly blake3_hash_once: (a: number, b: number) => [number, number];
-  readonly blake3_hash_once_with_context: (a: number, b: number, c: number, d: number) => [number, number];
-  readonly __wbg_blake3hasher_free: (a: number, b: number) => void;
-  readonly blake3hasher_finalize: (a: number) => [number, number];
-  readonly blake3hasher_clone: (a: number) => number;
-  readonly blake3_empty_state: () => number;
-  readonly blake3_update_state: (a: number, b: number, c: number) => void;
-  readonly blake3_digest_for_state: (a: number) => [number, number];
-  readonly blake3hasher_update: (a: number, b: number, c: number) => void;
-  readonly blake3hasher_new: () => number;
   readonly new_ed25519_signing_key: () => [number, number];
   readonly ed25519_sign: (a: number, b: number, c: number, d: number) => [number, number, number, number];
   readonly ed25519_verify: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number];
@@ -255,12 +244,23 @@ export interface InitOutput {
   readonly sign: (a: number, b: number, c: number, d: number) => [number, number, number, number];
   readonly verify: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number];
   readonly get_signer_id: (a: number, b: number) => [number, number, number, number];
+  readonly generate_nonce: (a: number, b: number) => [number, number];
+  readonly blake3_hash_once: (a: number, b: number) => [number, number];
+  readonly blake3_hash_once_with_context: (a: number, b: number, c: number, d: number) => [number, number];
+  readonly __wbg_blake3hasher_free: (a: number, b: number) => void;
+  readonly blake3hasher_finalize: (a: number) => [number, number];
+  readonly blake3hasher_clone: (a: number) => number;
+  readonly blake3_empty_state: () => number;
+  readonly blake3_update_state: (a: number, b: number, c: number) => void;
+  readonly blake3_digest_for_state: (a: number) => [number, number];
+  readonly blake3hasher_update: (a: number, b: number, c: number) => void;
+  readonly blake3hasher_new: () => number;
+  readonly new_x25519_private_key: () => [number, number];
+  readonly x25519_public_key: (a: number, b: number) => [number, number, number, number];
+  readonly x25519_diffie_hellman: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+  readonly get_sealer_id: (a: number, b: number) => [number, number, number, number];
   readonly encrypt: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
   readonly decrypt: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
-  readonly new_x25519_private_key: () => [number, number];
-  readonly x25519_public_key_wasm: (a: number, b: number) => [number, number, number, number];
-  readonly x25519_diffie_hellman_wasm: (a: number, b: number, c: number, d: number) => [number, number, number, number];
-  readonly get_sealer_id: (a: number, b: number) => [number, number, number, number];
   readonly __wbindgen_malloc: (a: number, b: number) => number;
   readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
   readonly __wbindgen_exn_store: (a: number) => void;
