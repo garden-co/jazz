@@ -38,8 +38,8 @@ pub fn unseal(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cojson_core::crypto::x25519::{new_x25519_private_key, x25519_public_key_internal};
     use bs58;
+    use cojson_core::crypto::x25519::{new_x25519_private_key, x25519_public_key_internal};
 
     #[test]
     fn test_seal_unseal() {

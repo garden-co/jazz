@@ -1,4 +1,6 @@
-use cojson_core::crypto::x25519::{x25519_public_key, x25519_diffie_hellman, get_sealer_id_internal};
+use cojson_core::crypto::x25519::{
+    get_sealer_id_internal, x25519_diffie_hellman, x25519_public_key,
+};
 use wasm_bindgen::prelude::*;
 use x25519_dalek::StaticSecret;
 
@@ -24,7 +26,10 @@ pub fn x25519_public_key_wasm(private_key: &[u8]) -> Result<Vec<u8>, JsError> {
 /// - `public_key`: 32 bytes of public key material
 /// Returns 32 bytes of shared secret material or throws JsError if key exchange fails.
 #[wasm_bindgen]
-pub fn x25519_diffie_hellman_wasm(private_key: &[u8], public_key: &[u8]) -> Result<Vec<u8>, JsError> {
+pub fn x25519_diffie_hellman_wasm(
+    private_key: &[u8],
+    public_key: &[u8],
+) -> Result<Vec<u8>, JsError> {
     Ok(x25519_diffie_hellman(private_key, public_key)?.to_vec())
 }
 
@@ -41,8 +46,10 @@ pub fn get_sealer_id(secret: &[u8]) -> Result<String, JsError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cojson_core::crypto::x25519::{x25519_public_key, x25519_diffie_hellman, get_sealer_id_internal};
     use bs58;
+    use cojson_core::crypto::x25519::{
+        get_sealer_id_internal, x25519_diffie_hellman, x25519_public_key,
+    };
 
     #[test]
     fn test_x25519_key_generation() {
@@ -71,10 +78,8 @@ mod tests {
         let recipient_public = x25519_public_key(&recipient_private).unwrap();
 
         // Test properties we expect from the shared secret
-        let shared_secret1 =
-            x25519_diffie_hellman(&sender_private, &recipient_public).unwrap();
-        let shared_secret2 =
-            x25519_diffie_hellman(&recipient_private, &sender_public).unwrap();
+        let shared_secret1 = x25519_diffie_hellman(&sender_private, &recipient_public).unwrap();
+        let shared_secret2 = x25519_diffie_hellman(&recipient_private, &sender_public).unwrap();
 
         // Both sides should arrive at the same shared secret
         assert_eq!(shared_secret1, shared_secret2);

@@ -1,8 +1,8 @@
 use crate::crypto::ed25519::{
     ed25519_sign_internal, ed25519_verify_internal, ed25519_verifying_key_internal,
 };
-use cojson_core::error::CryptoError;
 use bs58;
+use cojson_core::error::CryptoError;
 use wasm_bindgen::prelude::*;
 
 /// Internal function to sign a message using Ed25519.

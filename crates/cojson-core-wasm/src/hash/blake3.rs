@@ -1,4 +1,8 @@
-use cojson_core::hash::blake3::{generate_nonce as core_generate_nonce, blake3_hash_once as core_blake3_hash_once, blake3_hash_once_with_context as core_blake3_hash_once_with_context};
+use cojson_core::hash::blake3::{
+    blake3_hash_once as core_blake3_hash_once,
+    blake3_hash_once_with_context as core_blake3_hash_once_with_context,
+    generate_nonce as core_generate_nonce,
+};
 use wasm_bindgen::prelude::*;
 
 /// Generate a 24-byte nonce from input material using BLAKE3.
@@ -7,7 +11,9 @@ use wasm_bindgen::prelude::*;
 /// This function is deterministic - the same input will produce the same nonce.
 #[wasm_bindgen]
 pub fn generate_nonce(nonce_material: &[u8]) -> Box<[u8]> {
-    core_generate_nonce(nonce_material).to_vec().into_boxed_slice()
+    core_generate_nonce(nonce_material)
+        .to_vec()
+        .into_boxed_slice()
 }
 
 /// Hash data once using BLAKE3.
@@ -26,7 +32,9 @@ pub fn blake3_hash_once(data: &[u8]) -> Box<[u8]> {
 /// This is useful for domain separation - the same data hashed with different contexts will produce different outputs.
 #[wasm_bindgen]
 pub fn blake3_hash_once_with_context(data: &[u8], context: &[u8]) -> Box<[u8]> {
-    core_blake3_hash_once_with_context(data, context).to_vec().into_boxed_slice()
+    core_blake3_hash_once_with_context(data, context)
+        .to_vec()
+        .into_boxed_slice()
 }
 
 #[wasm_bindgen]

@@ -1,8 +1,8 @@
+use cojson_core::{seal_internal, unseal_internal};
 use cojson_core::{
     CoID, KeyID, KeySecret, SessionID, SessionLogInternal, Signature, SignerID, SignerSecret,
     TransactionMode,
 };
-use cojson_core::{seal_internal, unseal_internal};
 use serde_json::value::RawValue;
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
@@ -215,7 +215,7 @@ pub fn add_new_private_transaction(
     meta: String,
 ) -> ffi::TransactionResult {
     let storage = ensure_storage();
-    
+
     // Use safe lock handling to prevent panic on poisoned mutex
     let mut logs = match storage.lock() {
         Ok(logs) => logs,
@@ -260,7 +260,7 @@ pub fn add_new_trusting_transaction(
     meta: String,
 ) -> ffi::TransactionResult {
     let storage = ensure_storage();
-    
+
     // Use safe lock handling to prevent panic on poisoned mutex
     let mut logs = match storage.lock() {
         Ok(logs) => logs,
@@ -362,7 +362,12 @@ pub fn unseal_message(
     sender_id: String,
     nonce_material: Vec<u8>,
 ) -> ffi::U8VecResult {
-    match unseal_internal(&sealed_message, &recipient_secret, &sender_id, &nonce_material) {
+    match unseal_internal(
+        &sealed_message,
+        &recipient_secret,
+        &sender_id,
+        &nonce_material,
+    ) {
         Ok(unsealed_data) => u8vec_success_result((*unsealed_data).to_vec()),
         Err(e) => u8vec_error_result(format!("Failed to unseal message: {}", e)),
     }

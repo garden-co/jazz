@@ -1,4 +1,4 @@
-use cojson_core::crypto::xsalsa20::{encrypt_xsalsa20, decrypt_xsalsa20};
+use cojson_core::crypto::xsalsa20::{decrypt_xsalsa20, encrypt_xsalsa20};
 use wasm_bindgen::prelude::*;
 
 /// WASM-exposed function for XSalsa20 encryption without authentication.
@@ -30,7 +30,6 @@ pub fn decrypt_xsalsa20_wasm(
 ) -> Result<Box<[u8]>, JsError> {
     Ok(decrypt_xsalsa20(key, nonce_material, ciphertext)?.into())
 }
-
 
 #[cfg(test)]
 mod tests {

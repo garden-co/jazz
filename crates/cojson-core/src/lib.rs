@@ -20,8 +20,10 @@ pub mod hash;
 
 // Re-export specific functions for convenience
 pub use crypto::seal::{seal_internal, unseal_internal};
-pub use crypto::x25519::{x25519_public_key, x25519_diffie_hellman, get_sealer_id_internal};
-pub use crypto::xsalsa20::{encrypt_xsalsa20, decrypt_xsalsa20, encrypt_xsalsa20_poly1305, decrypt_xsalsa20_poly1305};
+pub use crypto::x25519::{get_sealer_id_internal, x25519_diffie_hellman, x25519_public_key};
+pub use crypto::xsalsa20::{
+    decrypt_xsalsa20, decrypt_xsalsa20_poly1305, encrypt_xsalsa20, encrypt_xsalsa20_poly1305,
+};
 pub use error::CryptoError;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -415,15 +417,16 @@ impl SessionLogInternal {
 
             match &self.public_key {
                 Some(public_key) => {
-                    let ed25519_signature = new_signature.try_into_ed25519_signature()
-                        .map_err(|_| CoJsonCoreError::SignatureVerification(
-                            new_hash_encoded_stringified.replace("\"", "")
-                        ))?;
-                    
-                    match public_key.verify(
-                        new_hash_encoded_stringified.as_bytes(),
-                        &ed25519_signature,
-                    ) {
+                    let ed25519_signature =
+                        new_signature.try_into_ed25519_signature().map_err(|_| {
+                            CoJsonCoreError::SignatureVerification(
+                                new_hash_encoded_stringified.replace("\"", ""),
+                            )
+                        })?;
+
+                    match public_key
+                        .verify(new_hash_encoded_stringified.as_bytes(), &ed25519_signature)
+                    {
                         Ok(()) => {}
                         Err(_) => {
                             return Err(CoJsonCoreError::SignatureVerification(
@@ -854,7 +857,7 @@ mod tests {
         // 1. Check that we successfully created a transaction
         assert_eq!(session.transactions_json.len(), 1);
         let created_tx_json = &session.transactions_json[0];
-        
+
         // Parse the created transaction to verify it has the expected structure
         let created_tx: serde_json::Value = serde_json::from_str(created_tx_json).unwrap();
         assert!(created_tx.get("encryptedChanges").is_some());
@@ -887,7 +890,8 @@ mod tests {
             CoID(root["coID"].as_str().unwrap().to_string()),
             SessionID("co_zkNajJ1BhLzR962jpzvXxx917ZB_session_zXzrQLTtp8rR".to_string()),
             Some(public_key.into()),
-        ).expect("Failed to create SessionLogInternal in test");
+        )
+        .expect("Failed to create SessionLogInternal in test");
 
         session2
             .try_add(

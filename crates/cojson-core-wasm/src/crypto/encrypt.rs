@@ -1,7 +1,7 @@
-use cojson_core::crypto::xsalsa20::{encrypt_xsalsa20_raw_internal, decrypt_xsalsa20_raw_internal};
-use cojson_core::hash::blake3::generate_nonce;
-use cojson_core::error::CryptoError;
+use crate::hash::blake3::generate_nonce;
 use bs58;
+use cojson_core::crypto::xsalsa20::{decrypt_xsalsa20_raw_internal, encrypt_xsalsa20_raw_internal};
+use cojson_core::error::CryptoError;
 use wasm_bindgen::prelude::*;
 
 /// Internal function to encrypt bytes with a key secret and nonce material.
