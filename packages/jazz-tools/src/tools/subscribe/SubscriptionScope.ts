@@ -15,7 +15,11 @@ import {
 import { applyCoValueMigrations } from "../lib/migration.js";
 import { CoValueCoreSubscription } from "./CoValueCoreSubscription.js";
 import { JazzError, type JazzErrorIssue } from "./JazzError.js";
-import type { BranchDefinition, MaybeLoaded, SubscriptionValue } from "./types.js";
+import type {
+  BranchDefinition,
+  MaybeLoaded,
+  SubscriptionValue,
+} from "./types.js";
 import { createCoValue, myRoleForRawValue } from "./utils.js";
 
 export const OrderByDirection = { ASC: "asc", DESC: "desc" } as const;
@@ -430,7 +434,7 @@ export class SubscriptionScope<D extends CoValue> {
   }
 
   subscribeToKey(key: string): void {
-    if (this.childValues.has(key)) {
+    if (this.isSubscribedToId(key)) {
       return;
     }
     if (this.resolve === true || !this.resolve) {
