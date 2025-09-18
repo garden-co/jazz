@@ -22,7 +22,7 @@
     "expo-web-browser": "14.2.0",
     "jazz-tools": "workspace:*",
     "react": "catalog:expo",
-    "react-native": "0.81.0",
+    "react-native": "catalog:expo",
     "react-native-get-random-values": "^1.11.0",
     "readable-stream": "^4.7.0"
   },

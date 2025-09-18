@@ -10,7 +10,7 @@
     "pods": "pod-install"
   },
   "dependencies": {
-    "@azure/core-asynciterator-polyfill": "^1.0.2",
+    "@azure/core-asynciterator-polyfill": "1.0.2",
     "@bacons/text-decoder": "0.0.0",
     "@op-engineering/op-sqlite": "14.1.4",
     "@react-native-clipboard/clipboard": "1.16.3",
@@ -21,9 +21,9 @@
     "jazz-tools": "workspace:*",
     "react": "catalog:rn",
     "react-native": "catalog:rn",
-    "react-native-get-random-values": "^1.11.0",
+    "react-native-get-random-values": "1.11.0",
     "react-native-mmkv": "3.3.0",
-    "react-native-nitro-modules": "0.26.4",
+    "react-native-nitro-modules": "0.29.3",
     "react-native-safe-area-context": "5.6.1",
     "react-native-screens": "4.16.0",
     "readable-stream": "4.7.0"

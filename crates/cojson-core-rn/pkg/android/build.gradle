@@ -70,12 +70,10 @@ android {
     }
   }
 
-  // Build Rust static libraries before native build
+  // Build Rust static libraries before native build (but not during clean)
   tasks.whenTaskAdded { task ->
-    if (task.name.contains('externalNativeBuild')) {
+    if (task.name.contains('externalNativeBuild') && !gradle.startParameter.taskNames.any { it.contains('clean') }) {
       task.dependsOn 'buildRustStaticLibs'
-      // Ensure NitroModules is built first
-      task.dependsOn ':react-native-nitro-modules:externalNativeBuildDebug'
     }
   }
 
@@ -133,16 +131,43 @@ android {
 }
 
 task buildRustStaticLibs {
+  description 'Build Rust static libraries for all Android architectures'
+  group 'build'
+  
   doLast {
+    // Skip Rust build during clean operations
+    if (gradle.startParameter.taskNames.any { it.contains('clean') }) {
+      println "Skipping Rust build during clean operation"
+      return
+    }
+    
     def architectures = reactNativeArchitectures()
     architectures.each { arch ->
       println "Building Rust static library for Android architecture: ${arch}"
+      // Pin NDK used by Rust to the same version Gradle/AGP uses
+      def ndkVersion = getExtOrDefault("ndkVersion")
+      def sdkRoot = System.getenv("ANDROID_SDK_ROOT") ?: System.getenv("ANDROID_HOME") ?: System.getProperty("user.home") + "/Library/Android/sdk"
+      def ndkRoot = sdkRoot + "/ndk/" + ndkVersion
+
       exec {
         workingDir '../'
         environment 'ANDROID_ABI', arch
+        environment 'PLATFORM', 'android'
+        environment 'ANDROID_NDK_ROOT', ndkRoot
         commandLine './scripts/build-rust.sh'
       }
     }
+  }
+}
+
+// Hook task ordering once the project is evaluated
+afterEvaluate {
+  // Ensure buildRustStaticLibs runs before native build tasks in this module
+  tasks.matching { task ->
+    task.name.contains('externalNativeBuild') ||
+    task.name.contains('buildCMake')
+  }.configureEach { task ->
+    task.dependsOn buildRustStaticLibs
   }
 }
 

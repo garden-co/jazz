@@ -16,4 +16,4 @@ cxx-build = "1.0.160"
 
 [lib]
 name = "cojson_core_rn"
-crate-type = ["staticlib", "cdylib"]
+crate-type = ["staticlib"]

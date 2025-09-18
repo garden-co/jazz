@@ -5,13 +5,13 @@
     "build": "expo prebuild",
     "build:clean": "expo prebuild --clean",
     "start": "expo start",
-    "android": "expo run:android",
+    "android": "expo run:android --active-arch-only",
     "ios": "expo run:ios",
     "web": "expo start --web"
   },
   "dependencies": {
-    "@azure/core-asynciterator-polyfill": "^1.0.2",
-    "@bacons/text-decoder": "^0.0.0",
+    "@azure/core-asynciterator-polyfill": "1.0.2",
+    "@bacons/text-decoder": "0.0.0",
     "@react-native-community/netinfo": "11.4.1",
     "cojson-core-rn": "workspace:*",
     "expo": "catalog:expo",
@@ -20,14 +20,14 @@
     "expo-sqlite": "16.0.3",
     "jazz-tools": "workspace:*",
     "react": "catalog:expo",
-    "react-native": "0.81.1",
-    "react-native-get-random-values": "^1.11.0",
-    "react-native-nitro-modules": "0.26.4",
+    "react-native": "catalog:expo",
+    "react-native-get-random-values": "1.11.0",
+    "react-native-nitro-modules": "0.29.3",
     "react-native-quick-crypto": "1.0.0-beta.20",
-    "readable-stream": "^4.7.0"
+    "readable-stream": "4.7.0"
   },
   "devDependencies": {
-    "@babel/core": "^7.25.2",
+    "@babel/core": "7.25.2",
     "@types/react": "19.1.10",
     "typescript": "~5.9.2"
   },

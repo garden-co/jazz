@@ -50,23 +50,23 @@ elseif(ANDROID_ABI STREQUAL "x86_64")
     set(RUST_TARGET "x86_64-linux-android")
 endif()
 
-# Import Rust static library (after RUST_TARGET is defined)
-set(CRATES_DIR "/Users/brad/dev/jazz/crates")
-set(RUST_STATIC_LIB_PATH "${CRATES_DIR}/target/${RUST_TARGET}/release/libcojson_core_rn.a")
+# Import Rust static library from build directory (copied by build-rust.sh)
+set(BUILD_DIR "${CMAKE_SOURCE_DIR}/../build")
+set(RUST_STATIC_LIB_PATH "${BUILD_DIR}/android/${RUST_TARGET_ARCH}/libcojson_core_rn.a")
 add_library(cojson_core_rn_rust STATIC IMPORTED)
 set_target_properties(cojson_core_rn_rust PROPERTIES IMPORTED_LOCATION ${RUST_STATIC_LIB_PATH})
 
 # Find and link cxxbridge runtime library
-# Use absolute path to crates directory to work from node_modules
-set(CRATES_DIR "/Users/brad/dev/jazz/crates")
-file(GLOB_RECURSE CXXBRIDGE_LIB "${CRATES_DIR}/target/${RUST_TARGET}/release/build/**/libcxxbridge1.a")
+file(GLOB_RECURSE CXXBRIDGE_LIB "${CMAKE_SOURCE_DIR}/../../target/${RUST_TARGET}/release/build/**/libcxxbridge1.a")
 message(STATUS "CXXBRIDGE_LIB: ${CXXBRIDGE_LIB}")
 if(CXXBRIDGE_LIB)
     add_library(cxxbridge1 STATIC IMPORTED)
     set_target_properties(cxxbridge1 PROPERTIES IMPORTED_LOCATION ${CXXBRIDGE_LIB})
     message(STATUS "Found cxxbridge library: ${CXXBRIDGE_LIB}")
 else()
-    message(FATAL_ERROR "Could not find cxxbridge library for target ${RUST_TARGET}")
+    message(STATUS "cxxbridge library not found, will be available after Gradle buildRustStaticLibs")
+    add_library(cxxbridge1 STATIC IMPORTED)
+    set_target_properties(cxxbridge1 PROPERTIES IMPORTED_LOCATION "${CMAKE_SOURCE_DIR}/../../target/${RUST_TARGET}/release/build/dummy/libcxxbridge1.a")
 endif()
 
 # Link NitroModules shared library
@@ -81,9 +81,13 @@ target_link_libraries(
   ${LOG_LIB}                               # <-- Logcat logger
   android                                  # <-- Android core
   cojson_core_rn_rust                      # <-- Rust library
-  cxxbridge1                               # <-- cxxbridge runtime
   NitroModules                             # <-- NitroModules shared library
 )
+
+# Link cxxbridge if it exists
+if(CXXBRIDGE_LIB)
+  target_link_libraries(${PACKAGE_NAME} cxxbridge1)
+endif()
 
 # Uncomment if you want to try with earlier RN versions... gl;hf!
 # # Link all required libraries with proper React Native version handling

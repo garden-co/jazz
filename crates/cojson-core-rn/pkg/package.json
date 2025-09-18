@@ -18,12 +18,17 @@
     "specs": "nitro-codegen"
   },
   "dependencies": {
-    "react-native-nitro-modules": "0.26.4"
+    "react-native-nitro-modules": "0.29.3"
   },
   "devDependencies": {
-    "nitro-codegen": "0.26.4"
+    "nitro-codegen": "0.29.3"
   },
   "peerDependencies": {
     "react-native": "*"
+  },
+  "react-native": {
+    "android": {
+      "sourceDir": "./android"
+    }
   }
 }

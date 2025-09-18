@@ -1,4 +1,5 @@
 .cache
+.cargo
 compile_commands.json
 pkg/android/.cxx
 pkg/android/build
