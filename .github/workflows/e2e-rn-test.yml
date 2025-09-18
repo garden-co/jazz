@@ -83,7 +83,7 @@ jobs:
       - name: Copy Maestro Output
         if: steps.e2e_test.outcome != 'success'
         run: |
-          cp -r ~/.maestro/tests/* ~/output
+          cp -r ~/.maestro/tests/* ~/output || true
 
       - name: Upload Output Files
         if: steps.e2e_test.outcome != 'success'
