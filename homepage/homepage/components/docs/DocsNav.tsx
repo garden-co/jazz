@@ -22,29 +22,52 @@ export function DocNav() {
 
     setFramework(validFramework);
   }, [path]);
+  // Recursive function to process nested items
+  const processNavigationItem = (item: any): any => {
+    const validFramework = framework ?? DEFAULT_FRAMEWORK;
+
+    // Filter by framework if specified
+    if ("framework" in item && item.framework !== framework) {
+      return null;
+    }
+
+    // Process href and done status
+    let processedItem = { ...item };
+
+    if (item.href?.startsWith("/docs")) {
+      const frameworkDone = (item.done as any)?.[validFramework] ?? 0;
+      const done = typeof item.done === "number" ? item.done : frameworkDone;
+      const href = item.href.replace("/docs", `/docs/${validFramework}`);
+
+
+      processedItem = {
+        ...processedItem,
+        href,
+        done,
+      };
+    }
+
+    // Recursively process nested items
+    if (item.items && item.items.length > 0) {
+      const processedItems = item.items
+        .map(processNavigationItem)
+        .filter(Boolean); // Remove null items (filtered out by framework)
+
+      processedItem = {
+        ...processedItem,
+        items: processedItems,
+      };
+    }
+
+    return processedItem;
+  };
   const items = (docNavigationItems as DocNavigationSection[]).map(
     (headerItem) => {
       return {
         ...headerItem,
         items: headerItem.items
-          .filter(
-            (item) => !("framework" in item) || item.framework === framework,
-          )
-          .map((item) => {
-            if (!item.href?.startsWith("/docs")) return item;
-
-            const validFramework = framework ?? DEFAULT_FRAMEWORK;
-            const frameworkDone = (item.done as any)[validFramework] ?? 0;
-            let done =
-              typeof item.done === "number" ? item.done : frameworkDone;
-            let href = item.href.replace("/docs", `/docs/${validFramework}`);
-
-            return {
-              ...item,
-              href,
-              done,
-            };
-          }),
+          .map(processNavigationItem)
+          .filter(Boolean), // Remove null items (filtered out by framework)
       };
     },
   );

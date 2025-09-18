@@ -33,25 +33,34 @@ export async function generateStaticParams() {
     framework: Framework;
   }> = [];
 
-  for (const framework of frameworks) {
-    for (const heading of docNavigationItems) {
-      for (const item of heading?.items) {
-        if (item.href && item.href.startsWith("/docs")) {
-          const [topic, subtopic] = item.href
-            .replace("/docs", "")
-            .split("/")
-            .filter(Boolean);
-          if (topic && subtopic) {
-            paths.push({
-              topic,
-              subtopic,
-              framework,
-            });
-          }
+  const processItem = (item: any) => {
+    if (item.href && item.href.startsWith("/docs")) {
+      const [topic, subtopic] = item.href
+        .replace("/docs", "")
+        .split("/")
+        .filter(Boolean);
+      if (topic && subtopic) {
+        for (const framework of frameworks) {
+          paths.push({
+            topic,
+            subtopic,
+            framework,
+          });
         }
       }
     }
-  }
 
-  return paths;
+    // Recursively process nested items
+    if (item.items && item.items.length > 0) {
+      item.items.forEach(processItem);
+    }
+  };
+
+  for (const heading of docNavigationItems) {
+    for (const item of heading?.items) {
+      processItem(item);
+    }
+
+    return paths;
+  }
 }
