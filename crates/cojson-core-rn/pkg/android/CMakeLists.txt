@@ -69,19 +69,14 @@ else()
     set_target_properties(cxxbridge1 PROPERTIES IMPORTED_LOCATION "${CMAKE_SOURCE_DIR}/../../target/${RUST_TARGET}/release/build/dummy/libcxxbridge1.a")
 endif()
 
-# Link NitroModules shared library
-set(PROJECT_ROOT "${CMAKE_SOURCE_DIR}/../../../..")
-set(NITRO_LIB_PATH "${PROJECT_ROOT}/node_modules/react-native-nitro-modules/android/build/intermediates/cmake/debug/obj/${ANDROID_ABI}/libNitroModules.so")
-add_library(NitroModules SHARED IMPORTED)
-set_target_properties(NitroModules PROPERTIES IMPORTED_LOCATION ${NITRO_LIB_PATH})
+# NitroModules library is handled by autolinking.cmake
 
-# Link all libraries together
+# Link our custom libraries (Rust and cxxbridge)
 target_link_libraries(
   ${PACKAGE_NAME}
   ${LOG_LIB}                               # <-- Logcat logger
   android                                  # <-- Android core
   cojson_core_rn_rust                      # <-- Rust library
-  NitroModules                             # <-- NitroModules shared library
 )
 
 # Link cxxbridge if it exists
