@@ -1,3 +1,4 @@
+import { calcPatch } from "fast-myers-diff";
 import type {
   CoID,
   CoValueUniqueness,
@@ -7,51 +8,49 @@ import type {
   RawCoMap,
 } from "cojson";
 import { cojsonInternals } from "cojson";
-import { calcPatch } from "fast-myers-diff";
 import {
+  accessChildByKey,
   accessChildLoadingStateByKey,
   Account,
+  activeAccountContext,
+  AnonymousJazzAgent,
+  BranchDefinition,
+  coField,
   CoFieldInit,
   CoValue,
   CoValueClass,
   CoValueJazzApi,
+  ensureCoValueLoaded,
   getCoValueOwner,
   Group,
   ID,
+  inspect,
+  instantiateRefEncodedWithInit,
+  isRefEncoded,
+  ItemsSym,
+  loadCoValueWithoutMe,
+  makeRefs,
   unstable_mergeBranch,
+  parseCoValueCreateOptions,
+  parseSubscribeRestArgs,
+  queryModifierFields,
+  Ref,
   RefEncoded,
   RefsToResolve,
   RefsToResolveStrict,
   Resolved,
   Schema,
   SchemaFor,
+  SchemaInit,
+  subscribeToCoValueWithoutMe,
+  subscribeToExistingCoValue,
   SubscribeListenerOptions,
   SubscribeRestArgs,
   SubscriptionScope,
   TypeSym,
-  BranchDefinition,
   type WhereClause,
   WhereComparisonOperators,
   WhereLogicalOperators,
-} from "../internal.js";
-import {
-  AnonymousJazzAgent,
-  ItemsSym,
-  Ref,
-  SchemaInit,
-  accessChildByKey,
-  activeAccountContext,
-  coField,
-  ensureCoValueLoaded,
-  inspect,
-  instantiateRefEncodedWithInit,
-  isRefEncoded,
-  loadCoValueWithoutMe,
-  makeRefs,
-  parseCoValueCreateOptions,
-  parseSubscribeRestArgs,
-  subscribeToCoValueWithoutMe,
-  subscribeToExistingCoValue,
 } from "../internal.js";
 
 /**
@@ -538,16 +537,9 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
     return getCoValueOwner(this.coList);
   }
 
-  /**
-   * Returns the item at the specified index.
-   * @param index The index to get the value at.
-   * @returns The item at the specified index, or undefined if the index is out of bounds.
-   * @category Content
-   */
-  get(index: number): CoListItem<L> | undefined {
+  private rawGet(rawIndex: number): CoListItem<L> | undefined {
     const itemDescriptor = this.schema[ItemsSym] as Schema;
-    const rawIdx = this.toRawIndex(index);
-    const rawValue = this.raw.get(rawIdx);
+    const rawValue = this.raw.get(rawIndex);
     if (itemDescriptor === "json") {
       return rawValue as CoListItem<L> | undefined;
     } else if ("encoded" in itemDescriptor) {
@@ -557,9 +549,19 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
     } else if (isRefEncoded(itemDescriptor)) {
       return rawValue === undefined || rawValue === null
         ? undefined
-        : accessChildByKey(this.coList, rawValue as string, String(rawIdx));
+        : accessChildByKey(this.coList, rawValue as string, String(rawIndex));
     }
-    return this.coList[index];
+  }
+
+  /**
+   * Returns the item at the specified index.
+   * @param index The index to get the value at.
+   * @returns The item at the specified index, or undefined if the index is out of bounds.
+   * @category Content
+   */
+  get(index: number): CoListItem<L> | undefined {
+    const rawIdx = this.toRawIndex(index);
+    return this.rawGet(rawIdx);
   }
 
   /**
@@ -867,14 +869,10 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
 
   private evaluateWhereClause(
     whereClause: WhereClause,
-    element: { originalArrayIdx: number; indexedValue: string },
+    rawIndex: number,
   ): boolean {
     if ("field" in whereClause) {
-      const valueToFilter = this.indexValueFor(
-        whereClause.field,
-        element.indexedValue,
-        element.originalArrayIdx,
-      );
+      const valueToFilter = this.getChildField(rawIndex, whereClause.field);
       return this.evaluateFieldCondition(
         whereClause.operator,
         valueToFilter,
@@ -884,16 +882,17 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
       switch (whereClause.combinator) {
         case WhereLogicalOperators.$and:
           return whereClause.conditions.every((condition) =>
-            this.evaluateWhereClause(condition, element),
+            this.evaluateWhereClause(condition, rawIndex),
           );
         case WhereLogicalOperators.$or:
           return whereClause.conditions.some((condition) =>
-            this.evaluateWhereClause(condition, element),
+            this.evaluateWhereClause(condition, rawIndex),
           );
         case WhereLogicalOperators.$not:
-          return !this.evaluateWhereClause(whereClause.conditions[0]!, element);
-        default:
-          return true;
+          return !this.evaluateWhereClause(
+            whereClause.conditions[0]!,
+            rawIndex,
+          );
       }
     }
   }
@@ -924,22 +923,38 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
     }
   }
 
-  private indexValueFor(
-    indexedField: string,
-    rawElementId: string,
-    originalArrayIdx: number,
-  ): number | undefined {
-    return this.childValueFor(rawElementId)?.[indexedField];
+  private getChildField<K extends keyof CoListItem<L>>(
+    rawIndex: number,
+    field: K,
+  ): CoListItem<L>[K] | undefined {
+    return this.rawGet(rawIndex)?.[field];
   }
 
-  private childValueFor(
-    rawElementId: string,
-  ): Record<string, number> | undefined {
-    const child = this._subscriptionScope?.childValues.get(rawElementId);
-    if (child?.type !== "loaded") {
-      return undefined;
+  /**
+   * Get the raw indexes of the CoList items that are loaded and accessible.
+   */
+  private accessibleRawIndexes(): number[] {
+    const rawIndexes: number[] = [];
+    const rawEntries = this.raw.entries();
+    for (let rawIndex = 0; rawIndex < rawEntries.length; rawIndex++) {
+      if (isRefEncoded(this.schema[ItemsSym])) {
+        const rawValue = rawEntries[rawIndex]?.value as string;
+        // Omit null references
+        if (rawValue === null) {
+          continue;
+        }
+        // CoList elements have already been loaded by the subscription scope.
+        // Omit inaccessible elements from the query view.
+        const isLoaded =
+          accessChildLoadingStateByKey(this.coList, rawValue, String(rawIndex))
+            ?.type === "loaded";
+        if (!isLoaded) {
+          continue;
+        }
+      }
+      rawIndexes.push(rawIndex);
     }
-    return child.value;
+    return rawIndexes;
   }
 
   /**
@@ -964,45 +979,20 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
       orderBy,
       where,
     } = this.queryModifiers;
-    const allArrayIndexesWithIndexedValues = this.raw
-      .entries()
-      .map((entry, idx) => ({
-        originalArrayIdx: idx,
-        indexedValue: entry.value as string,
-      }))
-      .filter((entry) => {
-        if (!isRefEncoded(this.schema[ItemsSym])) {
-          return true;
-        }
-        // Omit null references
-        if (entry.indexedValue === null) {
-          return false;
-        }
-        // CoList elements have already been loaded by the subscription scope.
-        // Omit inaccessible elements from the query view.
-        const isLoaded =
-          accessChildLoadingStateByKey(
-            this.coList,
-            entry.indexedValue,
-            String(entry.originalArrayIdx),
-          )?.type === "loaded";
-        return isLoaded;
-      });
-    let sortedArrayIndexes = allArrayIndexesWithIndexedValues;
+
+    let filteredArrayIndexes = this.accessibleRawIndexes();
+    if (where) {
+      filteredArrayIndexes = filteredArrayIndexes.filter((rawIndex) =>
+        this.evaluateWhereClause(where, rawIndex),
+      );
+    }
+    let sortedArrayIndexes = filteredArrayIndexes;
     if (orderBy?.length) {
-      sortedArrayIndexes = allArrayIndexesWithIndexedValues.toSorted((a, b) => {
-        for (const { field: indexedField, orderDirection } of orderBy) {
+      sortedArrayIndexes = sortedArrayIndexes.toSorted((rawIdxA, rawIdxB) => {
+        for (const { field, orderDirection } of orderBy) {
           const dir = orderDirection === "desc" ? -1 : 1;
-          const aValue = this.indexValueFor(
-            indexedField,
-            a.indexedValue,
-            a.originalArrayIdx,
-          );
-          const bValue = this.indexValueFor(
-            indexedField,
-            b.indexedValue,
-            b.originalArrayIdx,
-          );
+          const aValue = this.getChildField(rawIdxA, field);
+          const bValue = this.getChildField(rawIdxB, field);
 
           // Undefined values go last, regardless of order direction
           if (aValue === undefined && bValue === undefined) continue;
@@ -1015,15 +1005,9 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
         return 0;
       });
     }
-    let filteredArrayIndexes = sortedArrayIndexes;
-    if (where) {
-      filteredArrayIndexes = sortedArrayIndexes.filter((element) => {
-        return this.evaluateWhereClause(where, element);
-      });
-    }
-    const paginatedArrayIndexes = filteredArrayIndexes
+    const paginatedArrayIndexes = sortedArrayIndexes
       .slice(offset, offset + limit)
-      .map(({ originalArrayIdx }, idx) => [idx, originalArrayIdx]);
+      .map((rawIndex, idx) => [idx, rawIndex]);
     const view = Object.fromEntries(paginatedArrayIndexes);
     this.cachedQueryView = { queryView: view, rawLength };
     return view;
