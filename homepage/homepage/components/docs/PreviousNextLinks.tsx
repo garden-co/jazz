@@ -14,6 +14,7 @@ interface PreviousNextLinksProps {
 
 export function PreviousNextLinks({ slug, framework }: PreviousNextLinksProps) {
   const currentItem = flatItemsWithNavLinks.find((item) => {
+    if (!item.href) return false;
     const itemPath = item.href.replace("/docs", `/docs/${framework}`);
     const currentPath = slug
       ? `/docs/${framework}/${slug.join("/")}`
@@ -31,32 +32,30 @@ export function PreviousNextLinks({ slug, framework }: PreviousNextLinksProps) {
   return (
     <>
       <div className="flex justify-evenly gap-3 not-prose">
-        {currentItem.previous && (
-          <Link
-            href={currentItem.previous.href.replace(
-              "/docs",
-              `/docs/${framework}`,
-            )}
-            className="group py-5 xl:pr-12"
-          >
-            <span className="hidden text-sm mb-1 sm:block">Previous</span>
-            <div className="text-sm text-highlight font-medium inline-flex gap-1 items-center group-hover:text-blue sm:text-base">
-              <Icon name="previous" size="xs" className="sm:hidden" />
-              {currentItem.previous.name}
-            </div>
-          </Link>
+        {currentItem.previous && currentItem.previous.href && (<Link
+          href={currentItem.previous.href.replace(
+            "/docs",
+            `/docs/${framework}`,
+          )}
+          className="group py-5 xl:pr-12"
+        >
+          <span className="hidden text-sm mb-1 sm:block">Previous</span>
+          <div className="text-sm text-highlight font-medium inline-flex gap-1 items-center group-hover:text-blue sm:text-base">
+            <Icon name="previous" size="xs" className="sm:hidden" />
+            {currentItem.previous.name}
+          </div>
+        </Link>
         )}
-        {currentItem.next && (
-          <Link
-            href={currentItem.next.href.replace("/docs", `/docs/${framework}`)}
-            className="group text-right ml-auto py-5 xl:pl-12"
-          >
-            <span className="hidden text-sm mb-1 sm:block">Next</span>
-            <div className="text-sm text-highlight font-medium inline-flex gap-1 items-center group-hover:text-blue sm:text-base">
-              {currentItem.next.name}
-              <Icon name="next" size="xs" className="sm:hidden" />
-            </div>
-          </Link>
+        {currentItem.next && currentItem.next.href && (<Link
+          href={currentItem.next.href.replace("/docs", `/docs/${framework}`)}
+          className="group text-right ml-auto py-5 xl:pl-12"
+        >
+          <span className="hidden text-sm mb-1 sm:block">Next</span>
+          <div className="text-sm text-highlight font-medium inline-flex gap-1 items-center group-hover:text-blue sm:text-base">
+            {currentItem.next.name}
+            <Icon name="next" size="xs" className="sm:hidden" />
+          </div>
+        </Link>
         )}
       </div>
     </>
