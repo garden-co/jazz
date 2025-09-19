@@ -56,6 +56,8 @@ async function setupPeers(options: BaseReactNativeContextOptions) {
   if (options.sync.when === "never") {
     return {
       toggleNetwork: () => {},
+      addConnectionListener: () => () => {},
+      connected: () => false,
       peersToLoadFrom,
       setNode: () => {},
       crypto,
@@ -96,6 +98,14 @@ async function setupPeers(options: BaseReactNativeContextOptions) {
 
   return {
     toggleNetwork,
+    addConnectionListener(listener: (connected: boolean) => void) {
+      wsPeer.subscribe(listener);
+
+      return () => {
+        wsPeer.unsubscribe(listener);
+      };
+    },
+    connected: () => !wsPeer.closed,
     peersToLoadFrom,
     setNode,
     crypto,
@@ -106,8 +116,15 @@ async function setupPeers(options: BaseReactNativeContextOptions) {
 export async function createJazzReactNativeGuestContext(
   options: BaseReactNativeContextOptions,
 ) {
-  const { toggleNetwork, peersToLoadFrom, setNode, crypto, storage } =
-    await setupPeers(options);
+  const {
+    toggleNetwork,
+    peersToLoadFrom,
+    setNode,
+    crypto,
+    storage,
+    addConnectionListener,
+    connected,
+  } = await setupPeers(options);
 
   const context = createAnonymousJazzContext({
     crypto,
@@ -130,6 +147,8 @@ export async function createJazzReactNativeGuestContext(
     logOut: () => {
       return context.logOut();
     },
+    addConnectionListener,
+    connected,
   };
 }
 
@@ -149,8 +168,15 @@ export async function createJazzReactNativeContext<
     | (AccountClass<Account> & CoValueFromRaw<Account>)
     | AnyAccountSchema,
 >(options: ReactNativeContextOptions<S>) {
-  const { toggleNetwork, peersToLoadFrom, setNode, crypto, storage } =
-    await setupPeers(options);
+  const {
+    toggleNetwork,
+    peersToLoadFrom,
+    setNode,
+    crypto,
+    storage,
+    addConnectionListener,
+    connected,
+  } = await setupPeers(options);
 
   let unsubscribeAuthUpdate = () => {};
 
@@ -201,6 +227,8 @@ export async function createJazzReactNativeContext<
       unsubscribeAuthUpdate();
       return context.logOut();
     },
+    addConnectionListener,
+    connected,
   };
 }
 

@@ -783,3 +783,20 @@ export function experimental_useInboxSender<
 
   return sendMessage;
 }
+
+export function useConnectionStatus() {
+  const context = useJazzContext();
+
+  const connected = useSyncExternalStore(
+    useCallback(
+      (callback) => {
+        return context.addConnectionListener(callback);
+      },
+      [context],
+    ),
+    () => context.connected(),
+    () => context.connected(),
+  );
+
+  return connected;
+}

@@ -26,6 +26,8 @@ type PlatformSpecificAuthContext<Acc extends Account> = {
   node: LocalNode;
   logOut: () => Promise<void>;
   done: () => void;
+  addConnectionListener: (listener: (connected: boolean) => void) => () => void;
+  connected: () => boolean;
 };
 
 type PlatformSpecificGuestContext = {
@@ -33,6 +35,8 @@ type PlatformSpecificGuestContext = {
   node: LocalNode;
   logOut: () => Promise<void>;
   done: () => void;
+  addConnectionListener: (listener: (connected: boolean) => void) => () => void;
+  connected: () => boolean;
 };
 
 type PlatformSpecificContext<Acc extends Account> =
@@ -52,6 +56,8 @@ function getAnonymousFallback() {
     logOut: async () => {},
     isAuthenticated: false,
     authenticate: async () => {},
+    addConnectionListener: () => () => {},
+    connected: () => false,
     register: async () => {
       throw new Error("Not implemented");
     },
@@ -134,6 +140,8 @@ export class JazzContextManager<
       authenticate: this.authenticate,
       register: this.register,
       logOut: this.logOut,
+      addConnectionListener: context.addConnectionListener,
+      connected: context.connected,
     };
 
     if (authProps?.credentials) {

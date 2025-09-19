@@ -249,6 +249,8 @@ export class TestJazzContextManager<
           await storage.clear();
           node.gracefulShutdown();
         },
+        addConnectionListener: () => () => {},
+        connected: () => false,
       },
       {
         credentials,
@@ -274,6 +276,8 @@ export class TestJazzContextManager<
       logOut: async () => {
         node.gracefulShutdown();
       },
+      addConnectionListener: () => () => {},
+      connected: () => false,
     });
 
     return context;
@@ -309,6 +313,8 @@ export class TestJazzContextManager<
       logOut: () => {
         return context.logOut();
       },
+      addConnectionListener: () => () => {},
+      connected: () => false,
     };
   }
 }

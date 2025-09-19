@@ -3,6 +3,7 @@ import { CursorFeed } from "../schema";
 import { getColor } from "../utils/getColor.ts";
 import { getName } from "../utils/getName";
 import Canvas from "./Canvas";
+import { useConnectionStatus } from "jazz-tools/react-core";
 
 const OLD_CURSOR_AGE_SECONDS = Number(
   import.meta.env.VITE_OLD_CURSOR_AGE_SECONDS,
@@ -36,6 +37,8 @@ function Container({ cursorFeedID }: { cursorFeedID: string }) {
   const { me } = useAccount();
   const cursors = useCoState(CursorFeed, cursorFeedID, { resolve: true });
 
+  const connected = useConnectionStatus();
+
   const remoteCursors = Object.values(cursors?.perSession ?? {})
     .map((entry) => ({
       entry,
@@ -65,6 +68,19 @@ function Container({ cursorFeedID }: { cursorFeedID: string }) {
             />
           ))}
         </div>
+      </div>
+      <div className="absolute top-16 right-4 bg-white p-2 rounded-lg shadow">
+        {connected ? (
+          <div className="flex items-center gap-2">
+            <div className="w-2 h-2 bg-green-500 rounded-full"></div>
+            <span className="text-sm text-gray-700">Connected</span>
+          </div>
+        ) : (
+          <div className="flex items-center gap-2">
+            <div className="w-2 h-2 border-2 border-gray-400 border-t-transparent rounded-full animate-spin"></div>
+            <span className="text-sm text-gray-700">Connecting...</span>
+          </div>
+        )}
       </div>
 
       <Canvas

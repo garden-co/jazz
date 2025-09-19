@@ -72,12 +72,9 @@ export async function loadCursorContainer(
     }
 
     return cursorContainer.cursorFeed.$jazz.id;
+  } else if (cursorContainer.$jazz.refs.cursorFeed) {
+    return cursorContainer.$jazz.refs.cursorFeed.id;
   } else {
-    const { cursorFeed } = await cursorContainer.$jazz.ensureLoaded({
-      resolve: {
-        cursorFeed: true,
-      },
-    });
-    return cursorFeed.$jazz.id;
+    throw new Error("Cursor feed not found");
   }
 }

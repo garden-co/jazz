@@ -59,6 +59,8 @@ async function setupPeers(options: BaseBrowserContextOptions) {
 
   if (options.sync.when === "never") {
     return {
+      addConnectionListener: () => () => {},
+      connected: () => false,
       toggleNetwork: () => {},
       peersToLoadFrom,
       storage,
@@ -100,6 +102,16 @@ async function setupPeers(options: BaseBrowserContextOptions) {
 
   return {
     toggleNetwork,
+    addConnectionListener(listener: (connected: boolean) => void) {
+      wsPeer.subscribe(listener);
+
+      return () => {
+        wsPeer.unsubscribe(listener);
+      };
+    },
+    connected() {
+      return !wsPeer.closed;
+    },
     peersToLoadFrom,
     storage,
     setNode,
@@ -110,8 +122,15 @@ async function setupPeers(options: BaseBrowserContextOptions) {
 export async function createJazzBrowserGuestContext(
   options: BaseBrowserContextOptions,
 ) {
-  const { toggleNetwork, peersToLoadFrom, setNode, crypto, storage } =
-    await setupPeers(options);
+  const {
+    toggleNetwork,
+    peersToLoadFrom,
+    setNode,
+    crypto,
+    storage,
+    addConnectionListener,
+    connected,
+  } = await setupPeers(options);
 
   const context = await createAnonymousJazzContext({
     crypto,
@@ -134,6 +153,8 @@ export async function createJazzBrowserGuestContext(
     logOut: () => {
       return context.logOut();
     },
+    addConnectionListener,
+    connected,
   };
 }
 
@@ -153,8 +174,15 @@ export async function createJazzBrowserContext<
     | (AccountClass<Account> & CoValueFromRaw<Account>)
     | AnyAccountSchema,
 >(options: BrowserContextOptions<S>) {
-  const { toggleNetwork, peersToLoadFrom, setNode, crypto, storage } =
-    await setupPeers(options);
+  const {
+    toggleNetwork,
+    peersToLoadFrom,
+    setNode,
+    crypto,
+    storage,
+    addConnectionListener,
+    connected,
+  } = await setupPeers(options);
 
   let unsubscribeAuthUpdate = () => {};
 
@@ -202,6 +230,8 @@ export async function createJazzBrowserContext<
       unsubscribeAuthUpdate();
       return context.logOut();
     },
+    addConnectionListener,
+    connected,
   };
 }
 
