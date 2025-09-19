@@ -71,7 +71,7 @@ declare function createImage(
   image: Blob | File | string,
   options: {
     owner?: Group | Account;
-    placeholder?: "blur" | false;
+    placeholder?: false | "blur";
     maxSize?: number;
     progressive?: boolean;
   }): Promise<ImageDefinition>
@@ -88,7 +88,7 @@ The owner of the `ImageDefinition`. This is used to control access to the image.
 
 #### `placeholder`
 
-Sometimes the wanted image is not loaded yet. The placeholder is a base64 encoded image that is displayed while the image is loading. Currently, only `"blur"` is a supported.
+Disabled by default. This option allows you to automatically generate a low resolution preview for use while the image is loading. Currently, only `"blur"` is a supported.
 
 #### `maxSize`
 
@@ -233,6 +233,10 @@ Let's say we have an image with a width of 1920px and a height of 1080px.
 </CodeGroup>
 
 If the image was generated with progressive loading, the `width` and `height` props will determine the best resolution to use.
+
+#### Custom Placeholders
+
+You may choose to display a custom placeholder while your image is loading. You can do this by specifying a `customPlaceholder` string. This will be passed directly to the `src` property of the img element, which makes it suitable for data URLs. If you use a custom placeholder, any existing placeholders for your image will be ignored.
 
 ### Imperative usage
 

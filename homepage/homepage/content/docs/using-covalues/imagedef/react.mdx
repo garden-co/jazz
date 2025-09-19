@@ -57,7 +57,7 @@ async function handleFileUpload(event: React.ChangeEvent<HTMLInputElement>) {
 
 The `createImage()` function:
 - Creates an `ImageDefinition` with the right properties
-- Generates a small placeholder for immediate display
+- Optionally generates a small placeholder for immediate display
 - Creates multiple resolution variants of your image
 - Returns the created `ImageDefinition`
 
@@ -71,7 +71,7 @@ declare function createImage(
   image: Blob | File | string,
   options: {
     owner?: Group | Account;
-    placeholder?: "blur" | false;
+    placeholder?: false | "blur";
     maxSize?: number;
     progressive?: boolean;
   }): Promise<ImageDefinition>
@@ -88,12 +88,11 @@ The owner of the `ImageDefinition`. This is used to control access to the image.
 
 #### `placeholder`
 
-Sometimes the wanted image is not loaded yet. The placeholder is a base64 encoded image that is displayed while the image is loading. Currently, only `"blur"` is a supported.
+Disabled by default. This option allows you to automatically generate a low resolution preview for use while the image is loading. Currently, only `"blur"` is a supported.
 
 #### `maxSize`
 
 The image generation process includes a maximum size setting that controls the longest side of the image. A built-in resizing feature is applied based on this setting.
-
 
 #### `progressive`
 
@@ -204,6 +203,7 @@ export type ImageProps = Omit<
   imageId: string;
   width?: number | "original";
   height?: number | "original";
+  customPlaceholder?: string;
 };
 ```
 </CodeGroup>
@@ -248,6 +248,17 @@ The `Image` component supports lazy loading based on [browser's strategy](https:
 <Image imageId="123" width="original" height="original" loading="lazy" />
 ```
 </CodeGroup>
+
+#### Custom Placeholders
+
+You may choose to display a custom placeholder while your image is loading. You can do this by specifying a `customPlaceholder` string. This will be passed directly to the `src` property of the img element, which makes it suitable for data URLs. If you use a custom placeholder, any existing placeholders for your image will be ignored.
+
+<CodeGroup>
+```tsx
+<Image imageId="123" customPlaceholder={myCustomDataURL} />
+```
+</CodeGroup>
+
 
 ### Imperative usage
 
