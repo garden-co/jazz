@@ -48,7 +48,7 @@ export class IDBClient implements DBClientInterfaceAsync {
       }
     });
 
-    queryIndexedDbStore(this.db, "sessions", (store) =>
+    const sessionsPreload = queryIndexedDbStore(this.db, "sessions", (store) =>
       store.index("sessionsByCoValue").getAll(),
     ).then((rows) => {
       if (rows.length === 0) {
@@ -65,32 +65,37 @@ export class IDBClient implements DBClientInterfaceAsync {
           currentSessions = [];
         }
 
+        this.signatureAfter.set(row.rowID, []);
         currentSessions.push(row);
       }
 
       this.sessions.set(currentCoValue, currentSessions);
     });
 
-    queryIndexedDbStore(this.db, "signatureAfter", (store) =>
-      store.getAll(),
-    ).then((rows) => {
-      if (rows.length === 0) {
-        return;
-      }
-
-      let currentSession = rows[0].ses;
-      let currentSignatures: SignatureAfterRow[] = [];
-
-      for (const row of rows) {
-        if (row.ses !== currentSession) {
-          this.signatureAfter.set(currentSession, currentSignatures);
-          currentSession = row.ses;
-          currentSignatures = [];
+    sessionsPreload
+      .then(() =>
+        queryIndexedDbStore(this.db, "signatureAfter", (store) =>
+          store.getAll(),
+        ),
+      )
+      .then((rows) => {
+        if (rows.length === 0) {
+          return;
         }
 
-        currentSignatures.push(row);
-      }
-    });
+        let currentSession = rows[0].ses;
+        let currentSignatures: SignatureAfterRow[] = [];
+
+        for (const row of rows) {
+          if (row.ses !== currentSession) {
+            this.signatureAfter.set(currentSession, currentSignatures);
+            currentSession = row.ses;
+            currentSignatures = [];
+          }
+
+          currentSignatures.push(row);
+        }
+      });
   }
 
   makeRequest<T>(
