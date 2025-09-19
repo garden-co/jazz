@@ -41,6 +41,7 @@ export class CoVector extends Float32Array implements CoValue {
 
   protected static requiredDimensionsCount: number | undefined = undefined;
   private declare _loadedVector: Float32Array | null;
+  private declare _requiredDimensionsCount: number;
 
   constructor(
     options:
@@ -52,6 +53,15 @@ export class CoVector extends Float32Array implements CoValue {
         },
   ) {
     super();
+
+    const dimensionsCount = (this.constructor as typeof CoVector)
+      .requiredDimensionsCount;
+
+    if (dimensionsCount === undefined) {
+      throw new Error(
+        "Instantiating CoVector without a dimensions count is not allowed. Use co.vector(...).create() instead.",
+      );
+    }
 
     const proxy = new Proxy(this, CoVectorProxyHandler as ProxyHandler<this>);
 
@@ -71,6 +81,11 @@ export class CoVector extends Float32Array implements CoValue {
         enumerable: false,
       },
       _loadedVector: { value: null, enumerable: false, writable: true },
+      _requiredDimensionsCount: {
+        value: dimensionsCount,
+        enumerable: false,
+        writable: false,
+      },
     });
 
     return proxy;
@@ -160,10 +175,6 @@ export class CoVector extends Float32Array implements CoValue {
     return new Float32Array(u8.buffer, u8.byteOffset, total / 4);
   }
 
-  private get requiredDimensionsCount(): number | undefined {
-    return (this.constructor as typeof CoVector).requiredDimensionsCount;
-  }
-
   get vector(): Float32Array {
     if (this._loadedVector !== null) {
       return this._loadedVector;
@@ -178,12 +189,9 @@ export class CoVector extends Float32Array implements CoValue {
 
     const vector = CoVector.fromByteArray(chunks.chunks);
 
-    if (
-      this.requiredDimensionsCount !== undefined &&
-      vector.length !== this.requiredDimensionsCount
-    ) {
+    if (vector.length !== this._requiredDimensionsCount) {
       throw new Error(
-        `Vector dimension mismatch! CoVector '${this.$jazz.raw.id}' loaded with ${vector.length} dimensions, but the schema requires ${this.requiredDimensionsCount} dimensions`,
+        `Vector dimension mismatch! CoVector '${this.$jazz.raw.id}' loaded with ${vector.length} dimensions, but the schema requires ${this._requiredDimensionsCount} dimensions`,
       );
     }
 

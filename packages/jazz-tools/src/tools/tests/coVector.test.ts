@@ -79,6 +79,12 @@ describe("Creating a CoVector", async () => {
     );
   });
 
+  test("directly instantiating CoVector.create • throws an error", () => {
+    expect(() => CoVector.create([1, 2, 3])).toThrow(
+      "Instantiating CoVector without a dimensions count is not allowed. Use co.vector(...).create() instead.",
+    );
+  });
+
   test("given a Array<number> with valid dimensions count • creates a CoVector", () => {
     const embedding = EmbeddingSchema.create([1, 2, 3]);
     expect(embedding).toBeInstanceOf(CoVector);
