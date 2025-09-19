@@ -1,10 +1,8 @@
-import { RawAccount, RawCoList, RawCoMap, RawCoValue, Role } from "cojson";
+import { RawAccount, RawCoValue, Role } from "cojson";
 import { RegisteredSchemas } from "../coValues/registeredSchemas.js";
 import {
-  CoList,
   CoValue,
   RefEncoded,
-  TypeSym,
   accountOrGroupToGroup,
   instantiateRefEncodedFromRaw,
 } from "../internal.js";
