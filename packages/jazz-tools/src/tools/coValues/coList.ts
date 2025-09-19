@@ -31,6 +31,8 @@ import {
   TypeSym,
   BranchDefinition,
   type WhereClause,
+  WhereComparisonOperators,
+  WhereLogicalOperators,
 } from "../internal.js";
 import {
   AnonymousJazzAgent,
@@ -967,15 +969,15 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
       );
     } else {
       switch (whereClause.combinator) {
-        case "$and":
+        case WhereLogicalOperators.$and:
           return whereClause.conditions.every((condition) =>
             this.evaluateWhereClause(condition, element),
           );
-        case "$or":
+        case WhereLogicalOperators.$or:
           return whereClause.conditions.some((condition) =>
             this.evaluateWhereClause(condition, element),
           );
-        case "$not":
+        case WhereLogicalOperators.$not:
           return !this.evaluateWhereClause(whereClause.conditions[0]!, element);
         default:
           return true;
@@ -989,20 +991,20 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
     value: any,
   ): boolean {
     switch (operator) {
-      case "$eq":
+      case WhereComparisonOperators.$eq:
         return valueToFilter === value;
-      case "$ne":
+      case WhereComparisonOperators.$ne:
         return valueToFilter !== value;
     }
     if (valueToFilter === undefined) return false;
     switch (operator) {
-      case "$gt":
+      case WhereComparisonOperators.$gt:
         return valueToFilter > value;
-      case "$gte":
+      case WhereComparisonOperators.$gte:
         return valueToFilter >= value;
-      case "$lt":
+      case WhereComparisonOperators.$lt:
         return valueToFilter < value;
-      case "$lte":
+      case WhereComparisonOperators.$lte:
         return valueToFilter <= value;
       default:
         return true;

@@ -7,6 +7,7 @@ import {
   TypeSym,
   WhereComparisonOperator,
   WhereLogicalOperator,
+  WhereLogicalOperators,
 } from "../internal.js";
 import { type Account } from "./account.js";
 import { CoFeedEntry } from "./coFeed.js";
@@ -43,21 +44,21 @@ export type WhereFieldConditions<T> = T extends { [TypeSym]: "CoMap" }
   : never;
 
 type WhereWithCombinators<T> = Partial<{
-  $and: WhereOptions<T>[];
-  $or: WhereOptions<T>[];
-  $not: WhereOptions<T>;
+  [WhereLogicalOperators.$and]: WhereOptions<T>[];
+  [WhereLogicalOperators.$or]: WhereOptions<T>[];
+  [WhereLogicalOperators.$not]: WhereOptions<T>;
 }>;
 
 type WhereFieldWithCombinators<FieldType> = Partial<{
-  $and: (
+  [WhereLogicalOperators.$and]: (
     | WhereFieldComparisonOperators<FieldType>
     | WhereFieldWithCombinators<FieldType>
   )[];
-  $or: (
+  [WhereLogicalOperators.$or]: (
     | WhereFieldComparisonOperators<FieldType>
     | WhereFieldWithCombinators<FieldType>
   )[];
-  $not:
+  [WhereLogicalOperators.$not]:
     | WhereFieldComparisonOperators<FieldType>
     | WhereFieldWithCombinators<FieldType>;
 }>;

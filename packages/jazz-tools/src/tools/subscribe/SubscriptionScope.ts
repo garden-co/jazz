@@ -28,17 +28,22 @@ import { createCoValue, myRoleForRawValue } from "./utils.js";
 export const OrderByDirection = { ASC: "asc", DESC: "desc" } as const;
 export type OrderByDirection =
   (typeof OrderByDirection)[keyof typeof OrderByDirection];
-export type WhereComparisonOperator = (typeof WhereComparisonOperators)[number];
-const WhereComparisonOperators = [
-  "$eq",
-  "$ne",
-  "$gt",
-  "$gte",
-  "$lt",
-  "$lte",
-] as const;
-export type WhereLogicalOperator = (typeof WhereLogicalOperators)[number];
-const WhereLogicalOperators = ["$and", "$or", "$not"] as const;
+export const WhereComparisonOperators = {
+  $eq: "$eq",
+  $ne: "$ne",
+  $gt: "$gt",
+  $gte: "$gte",
+  $lt: "$lt",
+  $lte: "$lte",
+} as const;
+export type WhereComparisonOperator = keyof typeof WhereComparisonOperators;
+
+export const WhereLogicalOperators = {
+  $and: "$and",
+  $or: "$or",
+  $not: "$not",
+} as const;
+export type WhereLogicalOperator = keyof typeof WhereLogicalOperators;
 
 export type WhereClause =
   | {
@@ -831,14 +836,14 @@ function parseWhere(where: any): QueryModifiers["where"] {
 
   const topLevelKeys = Object.keys(where);
 
-  const logicalOperatorKeys = topLevelKeys.filter((key) =>
-    WhereLogicalOperators.includes(key as WhereLogicalOperator),
+  const logicalOperatorKeys = topLevelKeys.filter(
+    (key) => key in WhereLogicalOperators,
   );
   const logicalConditions = logicalOperatorKeys.map((key) => {
     const combinator = key as WhereLogicalOperator;
     const conditions = where[combinator];
 
-    if (combinator === "$not") {
+    if (combinator === WhereLogicalOperators.$not) {
       const negatedCondition = parseWhere(conditions as WhereOptions<any>);
       return {
         combinator,
@@ -855,7 +860,7 @@ function parseWhere(where: any): QueryModifiers["where"] {
   });
 
   const fieldConditionsKeys = topLevelKeys.filter(
-    (key) => !WhereLogicalOperators.includes(key as WhereLogicalOperator),
+    (key) => !(key in WhereLogicalOperators),
   );
   const fieldConditions = Object.entries(
     pick(where, fieldConditionsKeys),
@@ -867,7 +872,7 @@ function parseWhere(where: any): QueryModifiers["where"] {
     return allConditions[0];
   }
   return {
-    combinator: "$and",
+    combinator: WhereLogicalOperators.$and,
     conditions: allConditions,
   };
 }
@@ -879,7 +884,7 @@ function parseFieldConditions(
   if (typeof filter !== "object") {
     return {
       field,
-      operator: "$eq",
+      operator: WhereComparisonOperators.$eq,
       value: filter,
     };
   }
@@ -887,14 +892,12 @@ function parseFieldConditions(
   const filterKeys = Object.keys(filter);
 
   const logicalFilters = filterKeys
-    .filter((key) =>
-      WhereLogicalOperators.includes(key as WhereLogicalOperator),
-    )
+    .filter((key) => key in WhereLogicalOperators)
     .map((key) => {
       const logicalOperator = key as WhereLogicalOperator;
       const conditions = filter[logicalOperator];
 
-      if (logicalOperator === "$not") {
+      if (logicalOperator === WhereLogicalOperators.$not) {
         return {
           combinator: logicalOperator,
           conditions: [parseFieldConditions(field, conditions)],
@@ -911,9 +914,7 @@ function parseFieldConditions(
     });
 
   const comparisonFilters = filterKeys
-    .filter((key) =>
-      WhereComparisonOperators.includes(key as WhereComparisonOperator),
-    )
+    .filter((key) => key in WhereComparisonOperators)
     .map((key) => ({
       field,
       operator: key as WhereComparisonOperator,
@@ -925,7 +926,7 @@ function parseFieldConditions(
     return allFilters[0]!;
   }
   return {
-    combinator: "$and",
+    combinator: WhereLogicalOperators.$and,
     conditions: allFilters,
   };
 }
