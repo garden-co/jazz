@@ -129,7 +129,7 @@ export function hydrateCoreCoValueSchema<S extends AnyCoreCoValueSchema>(
     const dimensions = schema.dimensions;
 
     const coValueClass = class CoVectorWithDimensions extends CoVector {
-      static requiredDimensionsCount = dimensions;
+      protected static requiredDimensionsCount = dimensions;
     };
 
     return new CoVectorSchema(

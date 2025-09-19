@@ -39,8 +39,8 @@ export class CoVector extends Float32Array implements CoValue {
     return Float32Array;
   }
 
-  static requiredDimensionsCount: number | undefined = undefined;
-  declare _loadedVector: Float32Array | null;
+  protected static requiredDimensionsCount: number | undefined = undefined;
+  private declare _loadedVector: Float32Array | null;
 
   constructor(
     options:
@@ -91,7 +91,7 @@ export class CoVector extends Float32Array implements CoValue {
    * @deprecated Use `co.vector(...).create` instead.
    */
   static create<S extends CoVector>(
-    this: CoValueClass<S> & { requiredDimensionsCount: number | undefined },
+    this: CoValueClass<S> & typeof CoVector,
     vector: number[] | Float32Array,
     options?: { owner?: Account | Group } | Account | Group,
   ) {
@@ -160,7 +160,7 @@ export class CoVector extends Float32Array implements CoValue {
     return new Float32Array(u8.buffer, u8.byteOffset, total / 4);
   }
 
-  get requiredDimensionsCount(): number | undefined {
+  private get requiredDimensionsCount(): number | undefined {
     return (this.constructor as typeof CoVector).requiredDimensionsCount;
   }
 
