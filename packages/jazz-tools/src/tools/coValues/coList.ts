@@ -173,16 +173,11 @@ export class CoList<out Item = any>
       | {
           owner?: Account | Group;
           unique?: CoValueUniqueness["uniqueness"];
-          indexedFields?: string[];
         }
       | Account
       | Group,
   ) {
     const { owner, uniqueness } = parseCoValueCreateOptions(options);
-    const indexedFields =
-      options && "indexedFields" in options
-        ? (options?.indexedFields ?? [])
-        : [];
     const instance = new this();
 
     Object.defineProperties(instance, {
@@ -199,31 +194,8 @@ export class CoList<out Item = any>
       "private",
       uniqueness,
     );
-    CoList._createIndexes(instance, indexedFields);
 
     return instance;
-  }
-
-  private static _createIndexes(instance: CoList, indexedFields: string[]) {
-    if (indexedFields.length === 0) {
-      return;
-    }
-    const rawCoList = instance.$jazz.raw;
-    const indexRecords = indexedFields?.map((indexedField) => ({
-      indexedField,
-      // Indexes share the same permissions as the CoList:
-      // - whoever can read the CoList can also read the index
-      // - whoever can write to the CoList can also write to the index
-      indexId: rawCoList.group.createMap({}, null, "private").id,
-    }));
-    const indexCatalog = rawCoList.group.createMap({}, null, "private");
-    rawCoList.core.makeTransaction([], "private", {
-      indexCatalogId: indexCatalog.id,
-    });
-    for (const indexRecord of indexRecords) {
-      indexCatalog.set(indexRecord.indexedField, indexRecord.indexId);
-    }
-    // TODO link CoValue raw items with the corresponding index records
   }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -606,50 +578,6 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
   }
 
   /**
-   * Returns a CoMap that contains all indexes that involve this CoList
-   * @internal
-   */
-  private indexCatalog(): RawCoMap | null {
-    const indexCatalogId = this.raw.core.indexCatalogId;
-    if (!indexCatalogId) {
-      return null;
-    }
-    return this.localNode
-      .expectCoValueLoaded(indexCatalogId!)
-      .getCurrentContent() as RawCoMap;
-  }
-
-  /**
-   * Returns a specific index for this CoList
-   * @internal
-   */
-  private indexRecord(indexedField: string): RawCoMap | null {
-    const indexRecordId = this.indexCatalog()?.get(
-      indexedField,
-    ) as CoID<RawCoMap>;
-    if (!indexRecordId) {
-      return null;
-    }
-    return this.localNode
-      .expectCoValueLoaded(indexRecordId)
-      .getCurrentContent() as RawCoMap;
-  }
-
-  private async indexRecordAsync(
-    indexedField: string,
-  ): Promise<RawCoMap | null> {
-    const indexRecordId = this.indexCatalog()?.get(
-      indexedField,
-    ) as CoID<RawCoMap>;
-    if (!indexRecordId) {
-      return null;
-    }
-    return this.localNode
-      .load(indexRecordId)
-      .then((result) => (result === "unavailable" ? null : result));
-  }
-
-  /**
    * Appends new elements to the end of an array, and returns the new length of the array.
    * @param items New elements to add to the array.
    *
@@ -657,21 +585,6 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
    */
   push(...items: CoFieldInit<CoListItem<L>>[]): number {
     const itemsDescriptor = this.schema[ItemsSym];
-
-    if (isRefEncoded(itemsDescriptor)) {
-      const indexCatalog = this.indexCatalog();
-      if (indexCatalog) {
-        for (const indexedField of indexCatalog.keys()) {
-          this.indexRecordAsync(indexedField).then((indexRecord) => {
-            if (!indexRecord) return;
-            for (const item of items) {
-              // TODO handle JSON inputs
-              indexRecord.set(item.$jazz.id, item[indexedField]);
-            }
-          });
-        }
-      }
-    }
 
     this.raw.appendItems(
       toRawItems(items, itemsDescriptor, this.owner),
@@ -1016,11 +929,7 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
     rawElementId: string,
     originalArrayIdx: number,
   ): number | undefined {
-    const indexRecord = this.indexRecord(indexedField);
-    if (!indexRecord) {
-      return this.childValueFor(rawElementId)?.[indexedField];
-    }
-    return indexRecord?.get(rawElementId) as number | undefined;
+    return this.childValueFor(rawElementId)?.[indexedField];
   }
 
   private childValueFor(

@@ -20,7 +20,7 @@ export const Task = co.map({
 export const MIN_PRIORITY = 0;
 export const MAX_PRIORITY = 100;
 
-const TaskList = co.list(Task).withIndex("priority");
+const TaskList = co.list(Task);
 
 /** Our top level object: a project with a title, referencing a list of tasks */
 export const TodoProject = co.map({

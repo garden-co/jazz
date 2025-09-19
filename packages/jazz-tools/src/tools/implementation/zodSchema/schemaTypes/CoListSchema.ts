@@ -8,7 +8,6 @@ import {
   RefsToResolveStrict,
   Resolved,
   SubscribeListenerOptions,
-  TypeSym,
   coOptionalDefiner,
   unstable_mergeBranchWithResolve,
 } from "../../../internal.js";
@@ -26,10 +25,6 @@ export class CoListSchema<T extends AnyZodOrCoValueSchema>
 {
   collaborative = true as const;
   builtin = "CoList" as const;
-  /**
-   * Names of element fields that should be indexed
-   */
-  private indexedFields: Set<string> = new Set();
 
   constructor(
     public element: T,
@@ -57,11 +52,7 @@ export class CoListSchema<T extends AnyZodOrCoValueSchema>
       | Account
       | Group,
   ): CoListInstance<T> {
-    const opts =
-      options && TypeSym in options
-        ? { owner: options, indexedFields: Array.from(this.indexedFields) }
-        : { ...options, indexedFields: Array.from(this.indexedFields) };
-    return this.coValueClass.create(items as any, opts) as CoListInstance<T>;
+    return this.coValueClass.create(items as any, options) as CoListInstance<T>;
   }
 
   load<const R extends RefsToResolve<CoListInstanceCoValuesNullable<T>> = true>(
@@ -144,11 +135,6 @@ export class CoListSchema<T extends AnyZodOrCoValueSchema>
 
   optional(): CoOptionalSchema<this> {
     return coOptionalDefiner(this);
-  }
-
-  withIndex(elementField: string): CoListSchema<T> {
-    this.indexedFields.add(elementField);
-    return this;
   }
 }
 

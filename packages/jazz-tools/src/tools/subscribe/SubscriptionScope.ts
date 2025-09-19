@@ -148,44 +148,9 @@ export class SubscriptionScope<D extends CoValue> {
           return;
         }
 
-        // TODO there's surely a better place to do this
-        if (value !== "unavailable" && indexedFields.length > 0) {
-          const indexCatalogId = value.core.indexCatalogId;
-          if (indexCatalogId) {
-            this.subscribeToId(
-              indexCatalogId,
-              {
-                ref: CoMap,
-                optional: false,
-              },
-              false,
-              (indexCatalog) => {
-                if (indexCatalog.type === "unavailable") {
-                  this.requestCoListChildrenLoad();
-                  return;
-                }
-                const indexIds = indexedFields.map((indexedField) =>
-                  indexCatalog.value.$jazz.raw.get(indexedField),
-                ) as string[];
-                for (const indexId of indexIds) {
-                  if (indexId) {
-                    this.subscribeToId(
-                      indexId,
-                      {
-                        ref: CoMap,
-                        optional: false,
-                      },
-                      false,
-                    );
-                  } else {
-                    this.requestCoListChildrenLoad();
-                  }
-                }
-              },
-            );
-          } else {
-            this.requestCoListChildrenLoad();
-          }
+        // TODO rename variable
+        if (indexedFields.length > 0 && value !== "unavailable") {
+          this.requestCoListChildrenLoad();
         }
 
         // Need all these checks because the migration can trigger new synchronous updates
@@ -362,10 +327,10 @@ export class SubscriptionScope<D extends CoValue> {
       this.errorFromChildren = this.computeChildErrors();
     }
 
-    // On child updates, we re-create the value instance to make the updates
-    // seamless-immutable and so be compatible with React and the React compiler
     if (this.shouldSendUpdates()) {
       if (this.value.type === "loaded") {
+        // On child updates, we re-create the value instance to make the updates
+        // seamless-immutable and so be compatible with React and the React compiler
         this.updateValue(
           createCoValue(this.schema, this.value.value.$jazz.raw, this),
         );
@@ -514,20 +479,13 @@ export class SubscriptionScope<D extends CoValue> {
     );
   }
 
-  subscribeToId(
-    id: string,
-    descriptor: RefEncoded<any>,
-    autoloaded = true,
-    onLoad?: (value: any) => void,
-  ) {
+  subscribeToId(id: string, descriptor: RefEncoded<any>) {
     if (this.isSubscribedToId(id)) {
       return;
     }
 
     this.idsSubscribed.add(id);
-    if (autoloaded) {
-      this.autoloaded.add(id);
-    }
+    this.autoloaded.add(id);
 
     // We don't want to trigger an update when autoloading available children
     // because on userland it looks like nothing has changed since the value
@@ -547,10 +505,7 @@ export class SubscriptionScope<D extends CoValue> {
       this.unstable_branch,
     );
     this.childNodes.set(id, child);
-    child.setListener((value) => {
-      onLoad?.(value);
-      this.handleChildUpdate(id, value);
-    });
+    child.setListener((value) => this.handleChildUpdate(id, value));
 
     this.silenceUpdates = false;
   }

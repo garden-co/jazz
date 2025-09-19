@@ -768,10 +768,7 @@ describe("CoList resolution", async () => {
     expect(loadedMap).not.toBe("unavailable");
   });
 
-  describe.each([
-    { name: "with indexes", useIndexes: true },
-    { name: "without indexes", useIndexes: false },
-  ])("query modifiers ($name)", ({ useIndexes }) => {
+  describe("query modifiers", () => {
     const Score = co.map({
       priority: z.number(),
       secondaryPriority: z.number().optional(),
@@ -783,9 +780,6 @@ describe("CoList resolution", async () => {
 
     beforeEach(async () => {
       ItemList = co.list(Score);
-      if (useIndexes) {
-        ItemList.withIndex("priority").withIndex("secondaryPriority");
-      }
       const { clientAccount: clientAcc, serverAccount: serverAcc } =
         await setupTwoNodes();
       clientAccount = clientAcc;
@@ -1220,9 +1214,6 @@ describe("CoList resolution", async () => {
 
     test("undefined CoList elements are not included when using query modifiers", async () => {
       const TestList = co.list(Score.optional());
-      if (useIndexes) {
-        ItemList.withIndex("priority").withIndex("secondaryPriority");
-      }
       const list = TestList.create([
         { priority: 1 },
         { priority: 2 },
@@ -1835,47 +1826,5 @@ describe("lastUpdatedAt", () => {
     list.$jazz.push("Jane");
 
     expect(list.$jazz.lastUpdatedAt).not.toEqual(updatedAt);
-  });
-});
-
-describe("CoList indexes", () => {
-  const IndexRecord = co.record(z.string(), z.number());
-
-  const Score = co.map({
-    priority: z.number(),
-    numbers: z.array(z.number()).optional(),
-  });
-  const ItemList = co.list(Score).withIndex("priority");
-  let list: co.output<typeof ItemList>;
-
-  beforeEach(async () => {
-    list = ItemList.create([]);
-    list.$jazz.push(
-      Score.create({ priority: 2 }),
-      Score.create({ priority: 1 }),
-      Score.create({ priority: 3 }),
-    );
-  });
-
-  test("the index keeps track of CoList insertions", async () => {
-    // @ts-expect-error - indexCatalog is private
-    const indexCatalog = await list.$jazz.indexCatalog();
-    assert(indexCatalog);
-    const indexId = indexCatalog.get(indexCatalog.keys()[0]!) as
-      | string
-      | undefined;
-    assert(indexId);
-
-    // Wait for the async index update to complete
-    await new Promise((resolve) => setTimeout(resolve, 100));
-
-    const indexRecord = await IndexRecord.load(indexId);
-    expect(indexRecord).toEqual(
-      expect.objectContaining({
-        [list[0]!.$jazz.id]: 2,
-        [list[1]!.$jazz.id]: 1,
-        [list[2]!.$jazz.id]: 3,
-      }),
-    );
   });
 });

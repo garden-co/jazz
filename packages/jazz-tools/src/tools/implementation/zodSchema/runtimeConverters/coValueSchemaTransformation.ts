@@ -103,9 +103,7 @@ export function hydrateCoreCoValueSchema<S extends AnyCoreCoValueSchema>(
   } else if (schema.builtin === "CoList") {
     const element = schema.element;
     const coValueClass = class ZCoList extends CoList {
-      constructor(
-        options: { fromRaw: RawCoList; usingIndex: boolean } | undefined,
-      ) {
+      constructor(options: { fromRaw: RawCoList } | undefined) {
         super(options);
         (this as any)[coField.items] = schemaFieldToCoFieldDef(
           element as SchemaField,
