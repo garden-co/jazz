@@ -1,5 +1,5 @@
-use crate::error::CryptoError;
 use bs58;
+use cojson_core::error::CryptoError;
 use wasm_bindgen::prelude::*;
 use x25519_dalek::{PublicKey, StaticSecret};
 

@@ -1,6 +1,7 @@
-use crate::error::CryptoError;
 use crate::hash::blake3::generate_nonce;
 use bs58;
+use cojson_core::crypto::xsalsa20::{decrypt_xsalsa20_raw_internal, encrypt_xsalsa20_raw_internal};
+use cojson_core::error::CryptoError;
 use wasm_bindgen::prelude::*;
 
 /// Internal function to encrypt bytes with a key secret and nonce material.
@@ -23,7 +24,7 @@ pub fn encrypt_internal(
     let nonce = generate_nonce(nonce_material);
 
     // Encrypt using XSalsa20
-    Ok(super::xsalsa20::encrypt_xsalsa20_raw_internal(&key, &nonce, plaintext)?.into())
+    Ok(encrypt_xsalsa20_raw_internal(&key, &nonce, plaintext)?.into())
 }
 
 /// Internal function to decrypt bytes with a key secret and nonce material.
@@ -46,7 +47,7 @@ pub fn decrypt_internal(
     let nonce = generate_nonce(nonce_material);
 
     // Decrypt using XSalsa20
-    Ok(super::xsalsa20::decrypt_xsalsa20_raw_internal(&key, &nonce, ciphertext)?.into())
+    Ok(decrypt_xsalsa20_raw_internal(&key, &nonce, ciphertext)?.into())
 }
 
 /// WASM-exposed function to encrypt bytes with a key secret and nonce material.

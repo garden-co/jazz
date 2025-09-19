@@ -1,5 +1,5 @@
-use crate::error::CryptoError;
 use crate::hash::blake3::generate_nonce;
+use cojson_core::error::CryptoError;
 use crypto_secretbox::{
     aead::{Aead, KeyInit},
     XSalsa20Poly1305,

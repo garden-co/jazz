@@ -14,6 +14,8 @@ const extraNodeModules = {
 const watchFolders = [
   path.resolve(workspaceRoot, "node_modules"),
   path.resolve(workspaceRoot, "packages"),
+  // required for this monorepo, but not for a regular app
+  path.resolve(workspaceRoot, "crates", "cojson-core-rn", "pkg"),
 ];
 
 const nodeModulesPaths = [
