@@ -122,9 +122,10 @@ export const jazzPluginClient = () => {
             if (context.request.url.toString().includes("/get-session")) {
               if (context.data === null) {
                 if (authSecretStorage.isAuthenticated === true) {
-                  console.warn(
-                    "Jazz is authenticated, but the session is null",
+                  console.info(
+                    "Jazz is authenticated, but the session is null. Logging out",
                   );
+                  await jazzContext.logOut();
                 }
                 return;
               }
