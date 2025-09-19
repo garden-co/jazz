@@ -30,6 +30,11 @@ static ::SessionLogHandle toRustHandle(const SessionLogHandle& nitroHandle) {
 
 // Helper function to convert Rust uint64_t ID to Nitro SessionLogHandle with precision validation
 static SessionLogHandle fromRustHandle(const ::SessionLogHandle& rustHandle) {
+  // Check for error condition first - Rust functions return ID = 0 to signal errors
+  if (rustHandle.id == 0) {
+    throw std::runtime_error("Failed to create or clone SessionLog - invalid handle returned from Rust");
+  }
+  
   // Convert uint64_t to double - check for precision loss
   double id_as_double = static_cast<double>(rustHandle.id);
   
