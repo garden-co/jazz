@@ -89,7 +89,7 @@ export default function Products() {
             </div>
           </GridCard> */}
 
-        <GridCard>
+        {/* <GridCard>
           <H3>Humanity needs simulation.</H3>
           <P>
             Complex systems rule our world. Simulation makes time, space and
@@ -100,7 +100,7 @@ export default function Products() {
             <div className="flex items-center justify-between gap-4">
               <TilescapeLogo className="h-10 w-auto" />
               <div>
-                <ComingSoon>Coming 2025</ComingSoon>
+                <ComingSoon>Coming 2026</ComingSoon>
               </div>
             </div>
             <P>
@@ -108,7 +108,7 @@ export default function Products() {
               infinitely scalable simulations.
             </P>
           </div>
-        </GridCard>
+        </GridCard> */}
       </GappedGrid>
     </div>
   );
