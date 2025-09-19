@@ -611,14 +611,6 @@ export class CoVectorJazzApi<V extends CoVector> extends CoValueJazzApi<V> {
     super(coVector);
   }
 
-  /**
-   * The ID of this `CoVector`
-   * @category Content
-   */
-  get id(): ID<V> {
-    return this.raw.id;
-  }
-
   get owner(): Group {
     return getCoValueOwner(this.coVector);
   }
