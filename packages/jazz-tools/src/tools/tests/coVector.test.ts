@@ -82,11 +82,17 @@ describe("Creating a CoVector", async () => {
   test("given a Array<number> with valid dimensions count • creates a CoVector", () => {
     const embedding = EmbeddingSchema.create([1, 2, 3]);
     expect(embedding).toBeInstanceOf(CoVector);
+    expect(embedding[0]).toBe(1);
+    expect(embedding[1]).toBe(2);
+    expect(embedding[2]).toBe(3);
   });
 
   test("given a Float32Array with valid dimensions count • creates a CoVector", () => {
     const embedding = EmbeddingSchema.create(new Float32Array([1, 2, 3]));
     expect(embedding).toBeInstanceOf(CoVector);
+    expect(embedding[0]).toBe(1);
+    expect(embedding[1]).toBe(2);
+    expect(embedding[2]).toBe(3);
   });
 
   test("given Account as owner • creates a CoVector", () => {
