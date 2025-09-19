@@ -289,14 +289,16 @@ export class CoVector extends Float32Array implements CoValue {
    * Calculate the magnitude of a vector.
    */
   static magnitude(vector: Float32Array | CoVector): number {
-    return Math.sqrt(vector.reduce((s, x) => s + x * x, 0));
+    return VectorCalculation.magnitude(
+      vector instanceof CoVector ? vector.vector : vector,
+    );
   }
 
   /**
    * Calculate the magnitude of this vector.
    */
   magnitude(): number {
-    return CoVector.magnitude(this.vector);
+    return VectorCalculation.magnitude(this.vector);
   }
 
   /**
@@ -304,13 +306,9 @@ export class CoVector extends Float32Array implements CoValue {
    * @returns A new instance of a normalized vector.
    */
   static normalize(vector: Float32Array | CoVector): Float32Array {
-    const mag = CoVector.magnitude(vector);
-
-    if (mag === 0) {
-      return new Float32Array(vector.length).fill(0);
-    }
-
-    return vector.map((v) => v / mag);
+    return VectorCalculation.normalize(
+      vector instanceof CoVector ? vector.vector : vector,
+    );
   }
 
   /**
@@ -318,7 +316,7 @@ export class CoVector extends Float32Array implements CoValue {
    * @returns A new instance of a normalized vector.
    */
   normalize(): Float32Array {
-    return CoVector.normalize(this.vector);
+    return VectorCalculation.normalize(this.vector);
   }
 
   /**
@@ -328,21 +326,20 @@ export class CoVector extends Float32Array implements CoValue {
     vectorA: Float32Array | CoVector,
     vectorB: Float32Array | CoVector,
   ): number {
-    if (vectorA.length !== vectorB.length) {
-      throw new Error(
-        `Vector dimensions don't match: ${vectorA.length} vs ${vectorB.length}`,
-      );
-    }
-
-    // @ts-expect-error vectorB[i] is not undefined because of the previous check
-    return vectorA.reduce((sum, a, i) => sum + a * vectorB[i], 0);
+    return VectorCalculation.dotProduct(
+      vectorA instanceof CoVector ? vectorA.vector : vectorA,
+      vectorB instanceof CoVector ? vectorB.vector : vectorB,
+    );
   }
 
   /**
    * Calculate the dot product of this vector and another vector.
    */
   dotProduct(otherVector: CoVector | Float32Array): number {
-    return CoVector.dotProduct(this.vector, otherVector);
+    return VectorCalculation.dotProduct(
+      this.vector,
+      otherVector instanceof CoVector ? otherVector.vector : otherVector,
+    );
   }
 
   /**
@@ -357,15 +354,10 @@ export class CoVector extends Float32Array implements CoValue {
     vectorA: CoVector | Float32Array,
     vectorB: CoVector | Float32Array,
   ): number {
-    const magnitudeA = CoVector.magnitude(vectorA);
-    const magnitudeB = CoVector.magnitude(vectorB);
-
-    if (magnitudeA === 0 || magnitudeB === 0) {
-      return 0;
-    }
-
-    const dotProductAB = CoVector.dotProduct(vectorA, vectorB);
-    return dotProductAB / (magnitudeA * magnitudeB);
+    return VectorCalculation.cosineSimilarity(
+      vectorA instanceof CoVector ? vectorA.vector : vectorA,
+      vectorB instanceof CoVector ? vectorB.vector : vectorB,
+    );
   }
 
   /**
@@ -377,7 +369,10 @@ export class CoVector extends Float32Array implements CoValue {
    * - `-1` means the vectors are opposite direction (perfectly dissimilar)
    */
   cosineSimilarity(otherVector: CoVector | Float32Array): number {
-    return CoVector.cosineSimilarity(this.vector, otherVector);
+    return VectorCalculation.cosineSimilarity(
+      this.vector,
+      otherVector instanceof CoVector ? otherVector.vector : otherVector,
+    );
   }
 
   /**
@@ -700,5 +695,40 @@ const CoVectorProxyHandler: ProxyHandler<CoVector> = {
     } else if (key in target) {
       return Reflect.getOwnPropertyDescriptor(target, key);
     }
+  },
+};
+
+const VectorCalculation = {
+  magnitude: (vector: Float32Array) => {
+    return Math.sqrt(vector.reduce((s, x) => s + x * x, 0));
+  },
+  normalize: (vector: Float32Array) => {
+    const mag = VectorCalculation.magnitude(vector);
+
+    if (mag === 0) {
+      return new Float32Array(vector.length).fill(0);
+    }
+
+    return vector.map((v) => v / mag);
+  },
+  dotProduct: (vectorA: Float32Array, vectorB: Float32Array) => {
+    if (vectorA.length !== vectorB.length) {
+      throw new Error(
+        `Vector dimensions don't match: ${vectorA.length} vs ${vectorB.length}`,
+      );
+    }
+
+    return vectorA.reduce((sum, a, i) => sum + a * vectorB[i]!, 0);
+  },
+  cosineSimilarity: (vectorA: Float32Array, vectorB: Float32Array) => {
+    const magnitudeA = VectorCalculation.magnitude(vectorA);
+    const magnitudeB = VectorCalculation.magnitude(vectorB);
+
+    if (magnitudeA === 0 || magnitudeB === 0) {
+      return 0;
+    }
+
+    const dotProductAB = VectorCalculation.dotProduct(vectorA, vectorB);
+    return dotProductAB / (magnitudeA * magnitudeB);
   },
 };
