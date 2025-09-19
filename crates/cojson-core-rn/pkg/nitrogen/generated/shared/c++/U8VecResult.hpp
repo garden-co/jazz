@@ -44,20 +44,18 @@ namespace margelo::nitro::cojson_core_rn {
 
 namespace margelo::nitro {
 
-  using namespace margelo::nitro::cojson_core_rn;
-
   // C++ U8VecResult <> JS U8VecResult (object)
   template <>
-  struct JSIConverter<U8VecResult> final {
-    static inline U8VecResult fromJSI(jsi::Runtime& runtime, const jsi::Value& arg) {
+  struct JSIConverter<margelo::nitro::cojson_core_rn::U8VecResult> final {
+    static inline margelo::nitro::cojson_core_rn::U8VecResult fromJSI(jsi::Runtime& runtime, const jsi::Value& arg) {
       jsi::Object obj = arg.asObject(runtime);
-      return U8VecResult(
+      return margelo::nitro::cojson_core_rn::U8VecResult(
         JSIConverter<bool>::fromJSI(runtime, obj.getProperty(runtime, "success")),
         JSIConverter<std::shared_ptr<ArrayBuffer>>::fromJSI(runtime, obj.getProperty(runtime, "data")),
         JSIConverter<std::string>::fromJSI(runtime, obj.getProperty(runtime, "error"))
       );
     }
-    static inline jsi::Value toJSI(jsi::Runtime& runtime, const U8VecResult& arg) {
+    static inline jsi::Value toJSI(jsi::Runtime& runtime, const margelo::nitro::cojson_core_rn::U8VecResult& arg) {
       jsi::Object obj(runtime);
       obj.setProperty(runtime, "success", JSIConverter<bool>::toJSI(runtime, arg.success));
       obj.setProperty(runtime, "data", JSIConverter<std::shared_ptr<ArrayBuffer>>::toJSI(runtime, arg.data));

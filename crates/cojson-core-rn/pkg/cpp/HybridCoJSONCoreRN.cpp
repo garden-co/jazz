@@ -106,19 +106,9 @@ TransactionResult HybridCoJSONCoreRN::testExpectedHashAfter(const SessionLogHand
 }
 
 TransactionResult HybridCoJSONCoreRN::decryptNextTransactionChangesJson(const SessionLogHandle& handle, double txIndex,
-                                                                        const std::shared_ptr<margelo::nitro::ArrayBuffer>& keySecret) {
-  // Convert ArrayBuffer to rust::Vec<uint8_t>
-  rust::Vec<uint8_t> keySecretVec;
-  if (keySecret) {
-    const uint8_t* data = keySecret->data();
-    size_t size = keySecret->size();
-    for (size_t i = 0; i < size; ++i) {
-      keySecretVec.push_back(data[i]);
-    }
-  }
-
+                                                                        const std::string& keySecret) {
   auto rustHandle = toRustHandle(handle);
-  auto result = decrypt_next_transaction_changes_json(rustHandle, static_cast<uint32_t>(txIndex), keySecretVec);
+  auto result = decrypt_next_transaction_changes_json(rustHandle, static_cast<uint32_t>(txIndex), rust::String(keySecret));
   return TransactionResult(result.success, std::string(result.result), std::string(result.error));
 }
 

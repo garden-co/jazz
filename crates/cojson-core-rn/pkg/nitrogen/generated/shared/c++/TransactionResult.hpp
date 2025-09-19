@@ -42,20 +42,18 @@ namespace margelo::nitro::cojson_core_rn {
 
 namespace margelo::nitro {
 
-  using namespace margelo::nitro::cojson_core_rn;
-
   // C++ TransactionResult <> JS TransactionResult (object)
   template <>
-  struct JSIConverter<TransactionResult> final {
-    static inline TransactionResult fromJSI(jsi::Runtime& runtime, const jsi::Value& arg) {
+  struct JSIConverter<margelo::nitro::cojson_core_rn::TransactionResult> final {
+    static inline margelo::nitro::cojson_core_rn::TransactionResult fromJSI(jsi::Runtime& runtime, const jsi::Value& arg) {
       jsi::Object obj = arg.asObject(runtime);
-      return TransactionResult(
+      return margelo::nitro::cojson_core_rn::TransactionResult(
         JSIConverter<bool>::fromJSI(runtime, obj.getProperty(runtime, "success")),
         JSIConverter<std::string>::fromJSI(runtime, obj.getProperty(runtime, "result")),
         JSIConverter<std::string>::fromJSI(runtime, obj.getProperty(runtime, "error"))
       );
     }
-    static inline jsi::Value toJSI(jsi::Runtime& runtime, const TransactionResult& arg) {
+    static inline jsi::Value toJSI(jsi::Runtime& runtime, const margelo::nitro::cojson_core_rn::TransactionResult& arg) {
       jsi::Object obj(runtime);
       obj.setProperty(runtime, "success", JSIConverter<bool>::toJSI(runtime, arg.success));
       obj.setProperty(runtime, "result", JSIConverter<std::string>::toJSI(runtime, arg.result));

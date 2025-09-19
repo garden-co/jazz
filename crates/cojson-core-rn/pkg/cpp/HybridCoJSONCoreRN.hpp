@@ -28,7 +28,7 @@ class HybridCoJSONCoreRN : public HybridCoJSONCoreRNSpec {
                                               const std::string& signerSecret, double madeAt, const std::string& meta) override;
   TransactionResult testExpectedHashAfter(const SessionLogHandle& handle, const std::vector<std::string>& transactionsJson) override;
   TransactionResult decryptNextTransactionChangesJson(const SessionLogHandle& handle, double txIndex,
-                                                      const std::shared_ptr<ArrayBuffer>& keySecret) override;
+                                                      const std::string& keySecret) override;
   void destroySessionLog(const SessionLogHandle& handle) override;
   U8VecResult sealMessage(const std::shared_ptr<ArrayBuffer>& message, const std::string& senderSecret, 
                           const std::string& recipientId, const std::shared_ptr<ArrayBuffer>& nonceMaterial) override;

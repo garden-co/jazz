@@ -40,18 +40,16 @@ namespace margelo::nitro::cojson_core_rn {
 
 namespace margelo::nitro {
 
-  using namespace margelo::nitro::cojson_core_rn;
-
   // C++ SessionLogHandle <> JS SessionLogHandle (object)
   template <>
-  struct JSIConverter<SessionLogHandle> final {
-    static inline SessionLogHandle fromJSI(jsi::Runtime& runtime, const jsi::Value& arg) {
+  struct JSIConverter<margelo::nitro::cojson_core_rn::SessionLogHandle> final {
+    static inline margelo::nitro::cojson_core_rn::SessionLogHandle fromJSI(jsi::Runtime& runtime, const jsi::Value& arg) {
       jsi::Object obj = arg.asObject(runtime);
-      return SessionLogHandle(
+      return margelo::nitro::cojson_core_rn::SessionLogHandle(
         JSIConverter<double>::fromJSI(runtime, obj.getProperty(runtime, "id"))
       );
     }
-    static inline jsi::Value toJSI(jsi::Runtime& runtime, const SessionLogHandle& arg) {
+    static inline jsi::Value toJSI(jsi::Runtime& runtime, const margelo::nitro::cojson_core_rn::SessionLogHandle& arg) {
       jsi::Object obj(runtime);
       obj.setProperty(runtime, "id", JSIConverter<double>::toJSI(runtime, arg.id));
       return obj;

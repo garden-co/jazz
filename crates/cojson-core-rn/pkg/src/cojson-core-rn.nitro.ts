@@ -67,7 +67,7 @@ export interface CoJSONCoreRN
   decryptNextTransactionChangesJson(
     handle: SessionLogHandle,
     txIndex: number,
-    keySecret: ArrayBuffer,
+    keySecret: string,
   ): TransactionResult;
 
   // Destroy a session log instance to free memory

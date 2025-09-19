@@ -63,7 +63,7 @@ mod ffi {
         fn decrypt_next_transaction_changes_json(
             handle: &SessionLogHandle,
             tx_index: u32,
-            key_secret: Vec<u8>,
+            key_secret: String,
         ) -> TransactionResult;
         fn seal_message(
             message: Vec<u8>,
@@ -322,13 +322,14 @@ pub fn test_expected_hash_after(
 pub fn decrypt_next_transaction_changes_json(
     handle: &ffi::SessionLogHandle,
     tx_index: u32,
-    key_secret: Vec<u8>,
+    key_secret: String,
 ) -> ffi::TransactionResult {
     let storage = ensure_storage();
     let logs = storage.lock().unwrap();
 
     if let Some(log) = logs.get(&handle.id) {
-        let key_secret = KeySecret(String::from_utf8_lossy(&key_secret).to_string());
+        let key_secret = KeySecret(key_secret);
+        
         match log.decrypt_next_transaction_changes_json(tx_index, key_secret) {
             Ok(changes) => success_result(changes),
             Err(e) => error_result(format!("Failed to decrypt transaction: {}", e)),

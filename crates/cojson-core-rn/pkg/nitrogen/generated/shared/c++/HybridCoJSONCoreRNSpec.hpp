@@ -17,17 +17,17 @@
 namespace margelo::nitro::cojson_core_rn { struct SessionLogHandle; }
 // Forward declaration of `TransactionResult` to properly resolve imports.
 namespace margelo::nitro::cojson_core_rn { struct TransactionResult; }
-// Forward declaration of `ArrayBuffer` to properly resolve imports.
-namespace NitroModules { class ArrayBuffer; }
 // Forward declaration of `U8VecResult` to properly resolve imports.
 namespace margelo::nitro::cojson_core_rn { struct U8VecResult; }
+// Forward declaration of `ArrayBuffer` to properly resolve imports.
+namespace NitroModules { class ArrayBuffer; }
 
 #include "SessionLogHandle.hpp"
 #include <string>
 #include "TransactionResult.hpp"
 #include <vector>
-#include <NitroModules/ArrayBuffer.hpp>
 #include "U8VecResult.hpp"
+#include <NitroModules/ArrayBuffer.hpp>
 
 namespace margelo::nitro::cojson_core_rn {
 
@@ -66,7 +66,7 @@ namespace margelo::nitro::cojson_core_rn {
       virtual TransactionResult addNewPrivateTransaction(const SessionLogHandle& handle, const std::string& changesJson, const std::string& signerSecret, const std::string& encryptionKey, const std::string& keyId, double madeAt, const std::string& meta) = 0;
       virtual TransactionResult addNewTrustingTransaction(const SessionLogHandle& handle, const std::string& changesJson, const std::string& signerSecret, double madeAt, const std::string& meta) = 0;
       virtual TransactionResult testExpectedHashAfter(const SessionLogHandle& handle, const std::vector<std::string>& transactionsJson) = 0;
-      virtual TransactionResult decryptNextTransactionChangesJson(const SessionLogHandle& handle, double txIndex, const std::shared_ptr<ArrayBuffer>& keySecret) = 0;
+      virtual TransactionResult decryptNextTransactionChangesJson(const SessionLogHandle& handle, double txIndex, const std::string& keySecret) = 0;
       virtual void destroySessionLog(const SessionLogHandle& handle) = 0;
       virtual U8VecResult sealMessage(const std::shared_ptr<ArrayBuffer>& message, const std::string& senderSecret, const std::string& recipientId, const std::shared_ptr<ArrayBuffer>& nonceMaterial) = 0;
       virtual U8VecResult unsealMessage(const std::shared_ptr<ArrayBuffer>& sealedMessage, const std::string& recipientSecret, const std::string& senderId, const std::shared_ptr<ArrayBuffer>& nonceMaterial) = 0;

@@ -207,17 +207,11 @@ class RNSessionLog implements SessionLogImpl {
     tx_index: number,
     key_secret: KeySecret,
   ): string {
-    // Decode the base58-encoded KeySecret to raw bytes
-    const keySecretBytes = base58.decode(
-      key_secret.substring("keySecret_z".length),
-    );
-    const keyBytes = typedArrayToBuffer(keySecretBytes);
-
     const { success, result, error } =
       HybridCoJSONCoreRN.decryptNextTransactionChangesJson(
         this.handle,
         tx_index,
-        keyBytes,
+        key_secret,
       );
     if (!success) {
       throw new Error(error);
