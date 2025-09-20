@@ -32,7 +32,6 @@ export function DocNav() {
           )
           .map((item) => {
             if (!item.href?.startsWith("/docs")) return item;
-
             const validFramework = framework ?? DEFAULT_FRAMEWORK;
             const frameworkDone = (item.done as any)[validFramework] ?? 0;
             let done =
