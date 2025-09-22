@@ -848,7 +848,7 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
    * Get the raw indexes of the CoList items that are loaded and accessible.
    * @internal
    */
-  accessibleRawIndexes(): number[] {
+  private accessibleRawIndexes(): number[] {
     const rawIndexes: number[] = [];
     const rawEntries = this.raw.entries();
     for (let rawIndex = 0; rawIndex < rawEntries.length; rawIndex++) {
@@ -892,6 +892,16 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
         },
         has(target, key) {
           return accessibleRawIdxs.includes(Number(key));
+        },
+        ownKeys(target) {
+          return accessibleRawIdxs.map(String);
+        },
+        getOwnPropertyDescriptor(target, key) {
+          return {
+            enumerable: true,
+            configurable: true,
+            writable: true,
+          };
         },
       },
     );

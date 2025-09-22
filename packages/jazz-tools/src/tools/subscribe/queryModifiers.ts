@@ -224,7 +224,11 @@ export function computeQueryView(
   const fieldAccessors = Object.fromEntries(
     queriedFields.map((field) => [field, coList.$jazz.fieldAccessor(field)]),
   );
-  let filteredArrayIndexes = coList.$jazz.accessibleRawIndexes();
+  const rawIndexes =
+    queriedFields.length > 0
+      ? Object.keys(fieldAccessors[queriedFields[0]!]!).map(Number)
+      : coList.$jazz.raw.entries().map((entry, i) => i);
+  let filteredArrayIndexes = rawIndexes;
   if (where) {
     filteredArrayIndexes = filteredArrayIndexes.filter((rawIndex) =>
       evaluateWhereClause(where, rawIndex, fieldAccessors),
