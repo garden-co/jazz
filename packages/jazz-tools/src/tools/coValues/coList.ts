@@ -17,6 +17,7 @@ import {
   BranchDefinition,
   coField,
   CoFieldInit,
+  CoKeys,
   CoValue,
   CoValueClass,
   CoValueJazzApi,
@@ -870,9 +871,10 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
   private evaluateWhereClause(
     whereClause: WhereClause,
     rawIndex: number,
+    fieldAccessors: Record<string, Record<number, any>>,
   ): boolean {
     if ("field" in whereClause) {
-      const valueToFilter = this.getChildField(rawIndex, whereClause.field);
+      const valueToFilter = fieldAccessors[whereClause.field]?.[rawIndex];
       return this.evaluateFieldCondition(
         whereClause.operator,
         valueToFilter,
@@ -882,16 +884,17 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
       switch (whereClause.combinator) {
         case WhereLogicalOperators.$and:
           return whereClause.conditions.every((condition) =>
-            this.evaluateWhereClause(condition, rawIndex),
+            this.evaluateWhereClause(condition, rawIndex, fieldAccessors),
           );
         case WhereLogicalOperators.$or:
           return whereClause.conditions.some((condition) =>
-            this.evaluateWhereClause(condition, rawIndex),
+            this.evaluateWhereClause(condition, rawIndex, fieldAccessors),
           );
         case WhereLogicalOperators.$not:
           return !this.evaluateWhereClause(
             whereClause.conditions[0]!,
             rawIndex,
+            fieldAccessors,
           );
       }
     }
@@ -923,15 +926,9 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
     }
   }
 
-  private getChildField<K extends keyof CoListItem<L>>(
-    rawIndex: number,
-    field: K,
-  ): CoListItem<L>[K] | undefined {
-    return this.rawGet(rawIndex)?.[field];
-  }
-
   /**
    * Get the raw indexes of the CoList items that are loaded and accessible.
+   * @internal
    */
   private accessibleRawIndexes(): number[] {
     const rawIndexes: number[] = [];
@@ -958,6 +955,31 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
   }
 
   /**
+   * Accessor for a specific field of the CoList items.
+   * @param fieldName - The field to access.
+   * @returns An accessor for the values of the CoList items for the given field.
+   * It maps raw CoList indexes to the field values.
+   * @internal
+   */
+  fieldAccessor<T extends CoKeys<CoListItem<L>>>(
+    fieldName: string,
+  ): Record<number, CoListItem<L>[T]> {
+    const accessibleRawIdxs = this.accessibleRawIndexes();
+    const coListJazzApi = this;
+    return new Proxy(
+      {},
+      {
+        get(target, key) {
+          return coListJazzApi.rawGet(Number(key))?.[fieldName];
+        },
+        has(target, key) {
+          return accessibleRawIdxs.includes(Number(key));
+        },
+      },
+    );
+  }
+
+  /**
    * A CoList's items can be filtered, sorted and paginated when loading it.
    * This means the indexes in the CoList may differ from the indexes in the
    * underlying RawCoList. The query view is a mapping used to link the indexes
@@ -969,7 +991,7 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
       return null;
     }
     const rawLength = this.raw.entries().length;
-    // TODO we should take the known state of the CoList and its children into account
+    // TODO we should invalidate the cached query view if the CoList elements change
     if (this.cachedQueryView && this.cachedQueryView.rawLength === rawLength) {
       return this.cachedQueryView.queryView;
     }
@@ -979,11 +1001,14 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
       orderBy,
       where,
     } = this.queryModifiers;
-
+    const queriedFields = queryModifierFields(this.queryModifiers);
+    const fieldAccessors = Object.fromEntries(
+      queriedFields.map((field) => [field, this.fieldAccessor(field)]),
+    );
     let filteredArrayIndexes = this.accessibleRawIndexes();
     if (where) {
       filteredArrayIndexes = filteredArrayIndexes.filter((rawIndex) =>
-        this.evaluateWhereClause(where, rawIndex),
+        this.evaluateWhereClause(where, rawIndex, fieldAccessors),
       );
     }
     let sortedArrayIndexes = filteredArrayIndexes;
@@ -991,8 +1016,8 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
       sortedArrayIndexes = sortedArrayIndexes.toSorted((rawIdxA, rawIdxB) => {
         for (const { field, orderDirection } of orderBy) {
           const dir = orderDirection === "desc" ? -1 : 1;
-          const aValue = this.getChildField(rawIdxA, field);
-          const bValue = this.getChildField(rawIdxB, field);
+          const aValue = fieldAccessors[field]?.[rawIdxA];
+          const bValue = fieldAccessors[field]?.[rawIdxB];
 
           // Undefined values go last, regardless of order direction
           if (aValue === undefined && bValue === undefined) continue;
