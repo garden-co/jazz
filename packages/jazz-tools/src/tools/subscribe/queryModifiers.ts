@@ -210,3 +210,103 @@ function whereClauseFields(where: WhereClause): string[] {
 function orderByClauseFields(orderBy: OrderByClause[]): string[] {
   return orderBy.map((orderBy) => orderBy.field);
 }
+
+/**
+ * Computes the query view for a CoList based on the query modifiers.
+ * The query view is a mapping from the raw indexes to the queried indexes.
+ */
+export function computeQueryView(
+  coList: CoList,
+  queryModifiers: QueryModifiers,
+): Record<number, number> {
+  const { limit = Infinity, offset = 0, orderBy, where } = queryModifiers;
+  const queriedFields = queryModifierFields(queryModifiers);
+  const fieldAccessors = Object.fromEntries(
+    queriedFields.map((field) => [field, coList.$jazz.fieldAccessor(field)]),
+  );
+  let filteredArrayIndexes = coList.$jazz.accessibleRawIndexes();
+  if (where) {
+    filteredArrayIndexes = filteredArrayIndexes.filter((rawIndex) =>
+      evaluateWhereClause(where, rawIndex, fieldAccessors),
+    );
+  }
+  let sortedArrayIndexes = filteredArrayIndexes;
+  if (orderBy?.length) {
+    sortedArrayIndexes = sortedArrayIndexes.toSorted((rawIdxA, rawIdxB) => {
+      for (const { field, orderDirection } of orderBy) {
+        const dir = orderDirection === "desc" ? -1 : 1;
+        const aValue = fieldAccessors[field]?.[rawIdxA];
+        const bValue = fieldAccessors[field]?.[rawIdxB];
+
+        // Undefined values go last, regardless of order direction
+        if (aValue === undefined && bValue === undefined) continue;
+        if (aValue === undefined) return 1;
+        if (bValue === undefined) return -1;
+
+        if (aValue < bValue) return -1 * dir;
+        if (aValue > bValue) return 1 * dir;
+      }
+      return 0;
+    });
+  }
+  const paginatedArrayIndexes = sortedArrayIndexes
+    .slice(offset, offset + limit)
+    .map((rawIndex, idx) => [idx, rawIndex]);
+  return Object.fromEntries(paginatedArrayIndexes);
+}
+
+function evaluateWhereClause(
+  whereClause: WhereClause,
+  coListRawIndex: number,
+  fieldAccessors: Record<string, Record<number, any>>,
+): boolean {
+  if ("field" in whereClause) {
+    const valueToFilter = fieldAccessors[whereClause.field]?.[coListRawIndex];
+    return evaluateWhereFieldCondition(
+      whereClause.operator,
+      valueToFilter,
+      whereClause.value,
+    );
+  } else {
+    switch (whereClause.combinator) {
+      case WhereLogicalOperators.$and:
+        return whereClause.conditions.every((condition) =>
+          evaluateWhereClause(condition, coListRawIndex, fieldAccessors),
+        );
+      case WhereLogicalOperators.$or:
+        return whereClause.conditions.some((condition) =>
+          evaluateWhereClause(condition, coListRawIndex, fieldAccessors),
+        );
+      case WhereLogicalOperators.$not:
+        return !evaluateWhereClause(
+          whereClause.conditions[0]!,
+          coListRawIndex,
+          fieldAccessors,
+        );
+    }
+  }
+}
+
+function evaluateWhereFieldCondition(
+  operator: WhereComparisonOperator,
+  valueToFilter: any,
+  value: any,
+): boolean {
+  switch (operator) {
+    case WhereComparisonOperators.$eq:
+      return valueToFilter === value;
+    case WhereComparisonOperators.$ne:
+      return valueToFilter !== value;
+  }
+  if (valueToFilter === undefined) return false;
+  switch (operator) {
+    case WhereComparisonOperators.$gt:
+      return valueToFilter > value;
+    case WhereComparisonOperators.$gte:
+      return valueToFilter >= value;
+    case WhereComparisonOperators.$lt:
+      return valueToFilter < value;
+    case WhereComparisonOperators.$lte:
+      return valueToFilter <= value;
+  }
+}

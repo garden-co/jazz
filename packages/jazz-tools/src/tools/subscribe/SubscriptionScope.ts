@@ -10,10 +10,6 @@ import {
   TypeSym,
   instantiateRefEncodedFromRaw,
   isRefEncoded,
-  pick,
-  WhereFieldCondition,
-  WhereFieldConditions,
-  WhereOptions,
 } from "../internal.js";
 import { applyCoValueMigrations } from "../lib/migration.js";
 import { CoValueCoreSubscription } from "./CoValueCoreSubscription.js";
@@ -25,6 +21,7 @@ import type {
 } from "./types.js";
 import { createCoValue, myRoleForRawValue } from "./utils.js";
 import {
+  computeQueryView,
   parseQueryModifiers,
   queryModifierFields,
   QueryModifiers,
@@ -61,7 +58,11 @@ export class SubscriptionScope<D extends CoValue> {
 
   silenceUpdates = false;
 
-  queryModifiers: QueryModifiers = {};
+  private queryModifiers: QueryModifiers = {};
+  private cachedQueryView: {
+    queryView: Record<number, number>;
+    rawLength: number;
+  } | null = null;
 
   constructor(
     public node: LocalNode,
@@ -719,6 +720,35 @@ export class SubscriptionScope<D extends CoValue> {
     );
     this.childNodes.set(id, child);
     child.setListener((value) => this.handleChildUpdate(id, value, key));
+  }
+
+  /**
+   * A CoList's items can be filtered, sorted and paginated when loading it.
+   * This means the indexes in the CoList may differ from the indexes in the
+   * underlying RawCoList. The query view is a mapping used to link the indexes
+   * in the CoList query view to the indexes in the RawCoList.
+   * @internal
+   */
+  get queryView(): Record<string, number> | null {
+    if (
+      this.value.type !== "loaded" ||
+      this.value.value[TypeSym] !== "CoList"
+    ) {
+      return null;
+    }
+
+    const coList = this.value.value as CoList;
+
+    if (Object.keys(this.queryModifiers).length === 0) {
+      return null;
+    }
+    const rawLength = coList.$jazz.raw.entries().length;
+    // TODO we should invalidate the cached query view if the CoList elements change
+    if (this.cachedQueryView && this.cachedQueryView.rawLength === rawLength) {
+      return this.cachedQueryView.queryView;
+    }
+    this.cachedQueryView = computeQueryView(coList, this.queryModifiers);
+    return this.cachedQueryView;
   }
 
   destroy() {
