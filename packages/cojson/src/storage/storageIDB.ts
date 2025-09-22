@@ -98,7 +98,8 @@ export class IndexedDBStorageApi implements StorageAPI {
     callback: (data: NewContentMessage) => void,
     done: (found: boolean) => void,
   ) {
-    const firstBlock = await this.dbClient.getBlock(id);
+    const cachedBlock = this.dbClient.getCachedBlock(id);
+    const firstBlock = cachedBlock || (await this.dbClient.getBlock(id));
 
     const entry = firstBlock?.values[id];
 
@@ -274,6 +275,10 @@ export class IndexedDBStorageApi implements StorageAPI {
       const actuallyNewTransactions =
         sessionNewContent.newTransactions.slice(actuallyNewOffset);
 
+      if (actuallyNewTransactions.length === 0) {
+        continue;
+      }
+
       size += getNewTransactionsSize(actuallyNewTransactions);
       knownSessions[sessionID] = after + actuallyNewTransactions.length;
 
@@ -282,6 +287,10 @@ export class IndexedDBStorageApi implements StorageAPI {
         newTransactions: actuallyNewTransactions,
         lastSignature: sessionNewContent.lastSignature,
       };
+    }
+
+    if (Object.keys(content).length === 0 && !msg.header) {
+      return true;
     }
 
     const block = loadedBlock

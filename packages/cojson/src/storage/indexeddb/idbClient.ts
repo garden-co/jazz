@@ -32,12 +32,11 @@ export class IDBClient {
     );
   }
 
-  async getBlock(coValueId: string): Promise<CoValuesStoredBlock | undefined> {
-    const cachedBlock = this.blocks.get(coValueId);
-    if (cachedBlock) {
-      return cachedBlock;
-    }
+  getCachedBlock(coValueId: string): CoValuesStoredBlock | undefined {
+    return this.blocks.get(coValueId);
+  }
 
+  async getBlock(coValueId: string): Promise<CoValuesStoredBlock | undefined> {
     const block = await queryIndexedDbStore<CoValuesStoredBlock>(
       this.db,
       "coValueBlocks",
@@ -73,6 +72,10 @@ export class IDBClient {
   }
 
   async storeBlock(block: CoValuesStoredBlock): Promise<void> {
+    for (const id of block.id) {
+      this.blocks.delete(id);
+    }
+
     await putIndexedDbStore(this.db, "coValueBlocks", block);
   }
 
