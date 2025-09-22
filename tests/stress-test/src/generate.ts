@@ -9,13 +9,16 @@ export function generateRandomProject(numTasks: number) {
   // Generate random tasks
   function populateTasks() {
     for (let i = 0; i < numTasks; i++) {
-      const task = Task.create({
-        done: faker.datatype.boolean(),
-        text: CoPlainText.create(
-          faker.lorem.sentence({ min: 3, max: 8 }),
-          tasks.$jazz.owner,
-        ),
-      });
+      const task = Task.create(
+        {
+          done: faker.datatype.boolean(),
+          text: CoPlainText.create(
+            faker.lorem.sentence({ min: 3, max: 8 }),
+            tasks.$jazz.owner,
+          ),
+        },
+        tasks.$jazz.owner,
+      );
       tasks.$jazz.push(task);
     }
   }
