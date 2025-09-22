@@ -23,10 +23,12 @@ class MyAccount extends Account {
 }
 
 export const runtime = "edge"; // 'nodejs' is the default
+
 const syncServer = "wss://cloud.jazz.tools/?key=jazz@jazz.tools";
 
 export async function GET(request: Request) {
   const crypto = await WasmCrypto.create();
+
   const peer = createWebSocketPeer({
     id: "upstream",
     websocket: new WebSocket(syncServer),

@@ -10,6 +10,7 @@ export default defineConfig({
       "tests/browser-integration",
       "tests/cloudflare-workers",
       "tests/vercel-functions",
+      "crates/cojson-core-napi",
     ],
     maxConcurrency: 5,
   },
