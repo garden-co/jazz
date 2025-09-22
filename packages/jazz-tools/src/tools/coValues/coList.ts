@@ -214,7 +214,6 @@ export class CoList<out Item = any>
   static fromRaw<V extends CoList>(
     this: CoValueClass<V> & typeof CoList,
     raw: RawCoList,
-    usingIndex: boolean,
   ) {
     return new this({ fromRaw: raw });
   }
@@ -520,6 +519,9 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
     return getCoValueOwner(this.coList);
   }
 
+  /**
+   * Get an item from the raw CoList, ignoring filtering, sorting and pagination.
+   */
   private rawGet(rawIndex: number): CoListItem<L> | undefined {
     const itemDescriptor = this.schema[ItemsSym] as Schema;
     const rawValue = this.raw.get(rawIndex);
