@@ -59,10 +59,7 @@ export class SubscriptionScope<D extends CoValue> {
   silenceUpdates = false;
 
   private queryModifiers: QueryModifiers = {};
-  private cachedQueryView: {
-    queryView: Record<number, number>;
-    rawLength: number;
-  } | null = null;
+  private cachedQueryView: Record<number, number> | null = null;
 
   constructor(
     public node: LocalNode,
@@ -354,6 +351,9 @@ export class SubscriptionScope<D extends CoValue> {
       this.subscribers.forEach((listener) => listener(value));
     }
 
+    // Invalidation could be more granular: if a CoList element is updated, the cached query view
+    // should only be invalidated if the update affected a field that is used by the resolve query
+    this.cachedQueryView = null;
     this.dirty = false;
   }
 
@@ -742,12 +742,7 @@ export class SubscriptionScope<D extends CoValue> {
     if (Object.keys(this.queryModifiers).length === 0) {
       return null;
     }
-    const rawLength = coList.$jazz.raw.entries().length;
-    // TODO we should invalidate the cached query view if the CoList elements change
-    if (this.cachedQueryView && this.cachedQueryView.rawLength === rawLength) {
-      return this.cachedQueryView.queryView;
-    }
-    this.cachedQueryView = computeQueryView(coList, this.queryModifiers);
+    this.cachedQueryView ||= computeQueryView(coList, this.queryModifiers);
     return this.cachedQueryView;
   }
 
