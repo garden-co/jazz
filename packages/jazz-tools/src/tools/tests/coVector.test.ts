@@ -134,15 +134,16 @@ describe("CoVector structure", async () => {
     expect(new Float32Array(coVector)).toEqual(vector);
   });
 
-  test("a CoVector is NOT structurally equal to a Float32Array", () => {
-    // Since CoVector is a proxy, it will never pass the equality check with a Float32Array (TypedArray)
+  test("a CoVector is structurally equal to a Float32Array", () => {
+    expect([...coVector]).toEqual([...vector]);
+  });
+
+  test("a CoVector identity is NOT equal to a Float32Array", () => {
     expect(coVector).not.toEqual(vector);
-    // but
-    expect(coVector.vector).toEqual(vector);
   });
 });
 
-describe("CoVector methods & properties (Float32Array-like)", async () => {
+describe("CoVector reader methods & properties (Float32Array-like)", async () => {
   const EmbeddingSchema = co.vector(5);
 
   const { me, coVector } = await initNodeAndVector(
@@ -225,12 +226,15 @@ describe("CoVector methods & properties (Float32Array-like)", async () => {
     expect(iterationFn).toHaveBeenCalledTimes(5);
 
     const f32 = new Float32Array([1, 2, 3, 4, 5]);
-
-    expect(iterationFn).toHaveBeenCalledWith(1, 0, f32);
-    expect(iterationFn).toHaveBeenCalledWith(2, 1, f32);
-    expect(iterationFn).toHaveBeenCalledWith(3, 2, f32);
-    expect(iterationFn).toHaveBeenCalledWith(4, 3, f32);
-    expect(iterationFn).toHaveBeenCalledWith(5, 4, f32);
+    const calls = iterationFn.mock.calls;
+    expect(calls.length).toBe(5);
+    const expectedValue = [1, 2, 3, 4, 5];
+    for (let i = 0; i < 5; i++) {
+      const [value, index, arrayArg] = calls[i]!;
+      expect(value).toBe(expectedValue[i]);
+      expect(index).toBe(i);
+      expect(Array.from(arrayArg as any)).toEqual(Array.from(f32));
+    }
   });
 
   test("supports .includes", () => {
@@ -269,13 +273,18 @@ describe("CoVector methods & properties (Float32Array-like)", async () => {
     expect(coVector.reduce(reducerFn, 0)).toEqual(15);
 
     const f32 = new Float32Array([1, 2, 3, 4, 5]);
-
-    expect(reducerFn).toHaveBeenCalledTimes(5);
-    expect(reducerFn).toHaveBeenCalledWith(0, 1, 0, f32);
-    expect(reducerFn).toHaveBeenCalledWith(1, 2, 1, f32);
-    expect(reducerFn).toHaveBeenCalledWith(3, 3, 2, f32);
-    expect(reducerFn).toHaveBeenCalledWith(6, 4, 3, f32);
-    expect(reducerFn).toHaveBeenCalledWith(10, 5, 4, f32);
+    const calls = (reducerFn as any).mock.calls as any[];
+    expect(calls.length).toBe(5);
+    const expectedAcc = [0, 1, 3, 6, 10];
+    const expectedVal = [1, 2, 3, 4, 5];
+    const expectedIdx = [0, 1, 2, 3, 4];
+    for (let i = 0; i < 5; i++) {
+      const call = calls[i] as any[];
+      expect(call[0]).toBe(expectedAcc[i]);
+      expect(call[1]).toBe(expectedVal[i]);
+      expect(call[2]).toBe(expectedIdx[i]);
+      expect(Array.from(call[3] as any)).toEqual(Array.from(f32));
+    }
   });
 
   test("supports .reduceRight", () => {
@@ -284,13 +293,18 @@ describe("CoVector methods & properties (Float32Array-like)", async () => {
     expect(coVector.reduceRight(reducerFn, 0)).toEqual(15);
 
     const f32 = new Float32Array([1, 2, 3, 4, 5]);
-
-    expect(reducerFn).toHaveBeenCalledTimes(5);
-    expect(reducerFn).toHaveBeenCalledWith(0, 5, 4, f32);
-    expect(reducerFn).toHaveBeenCalledWith(5, 4, 3, f32);
-    expect(reducerFn).toHaveBeenCalledWith(9, 3, 2, f32);
-    expect(reducerFn).toHaveBeenCalledWith(12, 2, 1, f32);
-    expect(reducerFn).toHaveBeenCalledWith(14, 1, 0, f32);
+    const calls = (reducerFn as any).mock.calls as any[];
+    expect(calls.length).toBe(5);
+    const expectedAcc = [0, 5, 9, 12, 14];
+    const expectedVal = [5, 4, 3, 2, 1];
+    const expectedIdx = [4, 3, 2, 1, 0];
+    for (let i = 0; i < 5; i++) {
+      const call = calls[i] as any[];
+      expect(call[0]).toBe(expectedAcc[i]);
+      expect(call[1]).toBe(expectedVal[i]);
+      expect(call[2]).toBe(expectedIdx[i]);
+      expect(Array.from(call[3] as any)).toEqual(Array.from(f32));
+    }
   });
 
   test("supports .slice", () => {
@@ -333,42 +347,63 @@ describe("CoVector methods & properties (Float32Array-like)", async () => {
   });
 });
 
-describe("CoVector setters & mutators", async () => {
+describe("CoVector setters & mutators (Float32Array-like)", async () => {
   const EmbeddingSchema = co.vector(5);
-  const { me, coVector } = await initNodeAndVector(
-    EmbeddingSchema,
-    new Float32Array([1, 2, 3, 4, 5]),
-  );
 
-  const expectedErrorMessage = /Cannot mutate a CoVector/i;
+  test("supports updating value at index", () => {
+    const coVector = EmbeddingSchema.create([1, 2, 3, 4, 5]);
+    coVector[0] = 6;
+    expect(coVector.toString()).toEqual("6,2,3,4,5");
+  });
 
-  test("updating value at index • throws an error", () => {
-    expect(() => {
-      coVector[0] = 6;
-    }).toThrow(expectedErrorMessage);
+  test("supports .copyWithin", () => {
+    const coVector = EmbeddingSchema.create([1, 2, 3, 4, 5]);
+    coVector.copyWithin(3, 0, 2);
+    expect(coVector.toString()).toEqual("1,2,3,1,2");
   });
-  test("calling .copyWithin • throws an error", () => {
-    expect(() => coVector.copyWithin(1, 2)).toThrow(expectedErrorMessage);
+
+  test("supports .fill", () => {
+    const coVector = EmbeddingSchema.create([1, 2, 3, 4, 5]);
+    coVector.fill(6);
+    expect(coVector.toString()).toEqual("6,6,6,6,6");
+
+    const coVector2 = EmbeddingSchema.create([1, 2, 3, 4, 5]);
+    coVector2.fill(6, 2);
+    expect(coVector2.toString()).toEqual("1,2,6,6,6");
   });
-  test("calling .fill • throws an error", () => {
-    expect(() => coVector.fill(1)).toThrow(expectedErrorMessage);
+
+  test("supports .reverse", () => {
+    const coVector = EmbeddingSchema.create([1, 2, 3, 4, 5]);
+    coVector.reverse();
+    expect(coVector.toString()).toEqual("5,4,3,2,1");
   });
-  test("calling .reverse • throws an error", () => {
-    expect(() => coVector.reverse()).toThrow(expectedErrorMessage);
+
+  test("supports .set", () => {
+    const coVector = EmbeddingSchema.create([1, 2, 3, 4, 5]);
+    coVector.set(new Float32Array([6, 7, 8]));
+    expect(coVector.toString()).toEqual("6,7,8,4,5");
   });
-  test("calling .set • throws an error", () => {
-    expect(() => coVector.set(new Float32Array([6, 7, 8]))).toThrow(
-      expectedErrorMessage,
-    );
+
+  test("supports .sort", () => {
+    const coVector = EmbeddingSchema.create([3, 1, 2, 5, 4]);
+    coVector.sort();
+    expect(coVector.toString()).toEqual("1,2,3,4,5");
   });
-  test("calling .sort • throws an error", () => {
-    expect(() => coVector.sort()).toThrow(expectedErrorMessage);
+
+  test("supports .subarray", () => {
+    const coVector = EmbeddingSchema.create([1, 2, 3, 4, 5]);
+    expect(coVector.subarray().toString()).toEqual("1,2,3,4,5");
+
+    const coVector2 = EmbeddingSchema.create([1, 2, 3, 4, 5]);
+    expect(coVector2.subarray(2).toString()).toEqual("3,4,5");
+
+    const coVector3 = EmbeddingSchema.create([1, 2, 3, 4, 5]);
+    expect(coVector3.subarray(2, 4).toString()).toEqual("3,4");
   });
-  test("calling .subarray • throws an error", () => {
-    expect(() => coVector.subarray()).toThrow(expectedErrorMessage);
-  });
-  test("calling .with • throws an error", () => {
-    expect(() => coVector.with(1, 2)).toThrow(expectedErrorMessage);
+
+  test("supports .with", () => {
+    const coVector = EmbeddingSchema.create([1, 2, 3, 4, 5]);
+    expect(coVector.with(4, 2).toString()).toEqual("1,2,3,4,2");
   });
 });
 
@@ -384,14 +419,6 @@ describe("Vector calculations", async () => {
   describe("magnitude", () => {
     const magnitudeApprox: [number, number] = [7.4162, 4];
 
-    test("schema method", () => {
-      expect(VectorSchema.magnitude(vecA)).toBeCloseTo(...magnitudeApprox);
-      expect(VectorSchema.magnitude(coVectorA)).toBeCloseTo(...magnitudeApprox);
-    });
-    test("static method", () => {
-      expect(CoVector.magnitude(vecA)).toBeCloseTo(...magnitudeApprox);
-      expect(CoVector.magnitude(coVectorA)).toBeCloseTo(...magnitudeApprox);
-    });
     test("instance method", () => {
       expect(coVectorA.magnitude()).toBeCloseTo(...magnitudeApprox);
     });
@@ -403,16 +430,6 @@ describe("Vector calculations", async () => {
       0.5393598675727844, 0.6741998791694641,
     ]);
 
-    test("schema method", () => {
-      expect(VectorSchema.normalize(vecA)).toEqual(normalized);
-      expect(VectorSchema.normalize(coVectorA)).toEqual(normalized);
-    });
-
-    test("static method", () => {
-      expect(CoVector.normalize(vecA)).toEqual(normalized);
-      expect(CoVector.normalize(coVectorA)).toEqual(normalized);
-    });
-
     test("instance method", () => {
       expect(coVectorA.normalize()).toEqual(normalized);
     });
@@ -420,20 +437,6 @@ describe("Vector calculations", async () => {
 
   describe("dot product", () => {
     const dotProduct = 35;
-
-    test("schema method", () => {
-      expect(VectorSchema.dotProduct(vecA, vecB)).toBe(dotProduct);
-      expect(VectorSchema.dotProduct(vecA, coVectorB)).toBe(dotProduct);
-      expect(VectorSchema.dotProduct(coVectorA, vecB)).toBe(dotProduct);
-      expect(VectorSchema.dotProduct(coVectorA, coVectorB)).toBe(dotProduct);
-    });
-
-    test("static method", () => {
-      expect(CoVector.dotProduct(vecA, vecB)).toBe(dotProduct);
-      expect(CoVector.dotProduct(vecA, coVectorB)).toBe(dotProduct);
-      expect(CoVector.dotProduct(coVectorA, vecB)).toBe(dotProduct);
-      expect(CoVector.dotProduct(coVectorA, coVectorB)).toBe(dotProduct);
-    });
 
     test("instance method", () => {
       expect(coVectorA.dotProduct(vecB)).toBe(dotProduct);
@@ -444,48 +447,12 @@ describe("Vector calculations", async () => {
   describe("cosine similarity", () => {
     const similarityApprox: [number, number] = [0.6364, 4];
 
-    test("schema method", () => {
-      expect(VectorSchema.cosineSimilarity(vecA, vecB)).toBeCloseTo(
-        ...similarityApprox,
-      );
-      expect(VectorSchema.cosineSimilarity(vecA, coVectorB)).toBeCloseTo(
-        ...similarityApprox,
-      );
-      expect(VectorSchema.cosineSimilarity(coVectorA, vecB)).toBeCloseTo(
-        ...similarityApprox,
-      );
-      expect(VectorSchema.cosineSimilarity(coVectorA, coVectorB)).toBeCloseTo(
-        ...similarityApprox,
-      );
-    });
-
-    test("static method", () => {
-      expect(CoVector.cosineSimilarity(vecA, vecB)).toBeCloseTo(
-        ...similarityApprox,
-      );
-      expect(CoVector.cosineSimilarity(vecA, coVectorB)).toBeCloseTo(
-        ...similarityApprox,
-      );
-      expect(CoVector.cosineSimilarity(coVectorA, vecB)).toBeCloseTo(
-        ...similarityApprox,
-      );
-      expect(CoVector.cosineSimilarity(coVectorA, coVectorB)).toBeCloseTo(
-        ...similarityApprox,
-      );
-    });
-
     test("instance method", () => {
       expect(coVectorA.cosineSimilarity(vecB)).toBeCloseTo(...similarityApprox);
       expect(coVectorA.cosineSimilarity(coVectorB)).toBeCloseTo(
         ...similarityApprox,
       );
     });
-  });
-
-  test("equals", () => {
-    expect(coVectorA.equals(vecA)).toBe(true);
-    expect(coVectorA.equals(coVectorA)).toBe(true);
-    expect(coVectorA.equals(vecB)).toBe(false);
   });
 });
 
@@ -908,18 +875,18 @@ describe("CoVector in subscription", async () => {
 });
 
 describe("CoVector dimension mismatch after loading", async () => {
-  test("accessing CoVector loaded with an incompatible schema • throws an error", async () => {
+  test("loading a CoVector with an incompatible schema • throws an error", async () => {
     const { coVector } = await initNodeAndVector(
       co.vector(3),
       new Float32Array([1, 2, 3]),
     );
 
-    const loadedVector = await co.vector(9).load(coVector.$jazz.id);
-    expect(loadedVector).toBeInstanceOf(CoVector);
-    expect(() => loadedVector?.vector).toThrow(/Vector dimension mismatch/);
+    await expect(co.vector(9).load(coVector.$jazz.id)).rejects.toThrow(
+      /Vector dimension mismatch/,
+    );
   });
 
-  test("accessing CoVector from subscription, loaded with an incompatible schema • throws an error", async () => {
+  test("subscribing to a CoVector with an incompatible schema • throws an error", async () => {
     const EmbeddingSchema = co.vector(3);
 
     const { coVector } = await initNodeAndVector(
@@ -930,11 +897,10 @@ describe("CoVector dimension mismatch after loading", async () => {
     const updates: Loaded<typeof EmbeddingSchema>[] = [];
     const updatesCallback = vi.fn((embedding) => updates.push(embedding));
 
-    co.vector(5).subscribe(coVector.$jazz.id, updatesCallback);
+    expect(() =>
+      co.vector(5).subscribe(coVector.$jazz.id, updatesCallback),
+    ).toThrow(/Vector dimension mismatch/);
 
-    await waitFor(() => expect(updatesCallback).toHaveBeenCalled());
-
-    expect(updates[0]).toBeInstanceOf(CoVector);
-    expect(() => updates[0]?.vector).toThrow(/Vector dimension mismatch/);
+    expect(updatesCallback).not.toHaveBeenCalled();
   });
 });

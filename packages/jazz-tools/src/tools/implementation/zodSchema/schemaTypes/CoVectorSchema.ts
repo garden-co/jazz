@@ -89,45 +89,4 @@ export class CoVectorSchema implements CoreCoVectorSchema {
   optional(): CoOptionalSchema<this> {
     return coOptionalDefiner(this);
   }
-
-  // Vector operations
-  /**
-   * Calculate the magnitude of a vector.
-   */
-  magnitude(vector: Float32Array | CoVector): number {
-    return this.coValueClass.magnitude(vector);
-  }
-
-  /**
-   * Normalize a vector.
-   * @returns A new instance of a normalized vector.
-   */
-  normalize(vector: Float32Array | CoVector): Float32Array {
-    return this.coValueClass.normalize(vector);
-  }
-
-  /**
-   * Calculate the dot product of two vectors.
-   */
-  dotProduct(
-    vectorA: Float32Array | CoVector,
-    vectorB: Float32Array | CoVector,
-  ): number {
-    return this.coValueClass.dotProduct(vectorA, vectorB);
-  }
-
-  /**
-   * Calculate the cosine similarity between two vectors.
-   *
-   * @returns A value between `-1` and `1`:
-   * - `1` means the vectors are identical
-   * - `0` means the vectors are orthogonal (i.e. no similarity)
-   * - `-1` means the vectors are opposite direction (perfectly dissimilar)
-   */
-  cosineSimilarity(
-    vectorA: CoVector | Float32Array,
-    vectorB: CoVector | Float32Array,
-  ): number {
-    return this.coValueClass.cosineSimilarity(vectorA, vectorB);
-  }
 }

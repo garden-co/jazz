@@ -40,7 +40,7 @@ export class CoVector extends Float32Array implements CoValue {
   }
 
   protected static requiredDimensionsCount: number | undefined = undefined;
-  private declare _loadedVector: Float32Array | null;
+  private declare _isVectorLoaded: boolean;
   private declare _requiredDimensionsCount: number;
 
   constructor(
@@ -52,9 +52,7 @@ export class CoVector extends Float32Array implements CoValue {
           fromRaw: RawBinaryCoStream;
         },
   ) {
-    super();
-
-    const dimensionsCount = (this.constructor as typeof CoVector)
+    const dimensionsCount = (new.target as typeof CoVector)
       .requiredDimensionsCount;
 
     if (dimensionsCount === undefined) {
@@ -63,24 +61,23 @@ export class CoVector extends Float32Array implements CoValue {
       );
     }
 
-    const proxy = new Proxy(this, CoVectorProxyHandler as ProxyHandler<this>);
+    // Initialize empty Float32Array buffer with the expected vector length
+    // to be filled with the vector data later
+    super(dimensionsCount);
 
-    let raw: RawBinaryCoStream;
+    const isFromRaw = "fromRaw" in options;
 
-    if ("fromRaw" in options) {
-      raw = options.fromRaw;
-    } else {
-      const rawOwner = options.owner.$jazz.raw;
-      raw = rawOwner.createBinaryStream();
-    }
+    const raw: RawBinaryCoStream = isFromRaw
+      ? options.fromRaw
+      : options.owner.$jazz.raw.createBinaryStream();
 
     Object.defineProperties(this, {
       [TypeSym]: { value: "BinaryCoStream", enumerable: false },
       $jazz: {
-        value: new CoVectorJazzApi(proxy, raw),
+        value: new CoVectorJazzApi(this, raw),
         enumerable: false,
       },
-      _loadedVector: { value: null, enumerable: false, writable: true },
+      _isVectorLoaded: { value: false, enumerable: false, writable: true },
       _requiredDimensionsCount: {
         value: dimensionsCount,
         enumerable: false,
@@ -88,7 +85,9 @@ export class CoVector extends Float32Array implements CoValue {
       },
     });
 
-    return proxy;
+    if (isFromRaw) {
+      this.loadVectorData();
+    }
   }
 
   /** @category Internals */
@@ -128,7 +127,8 @@ export class CoVector extends Float32Array implements CoValue {
     }
 
     const coVector = new this(parseCoValueCreateOptions(options));
-    coVector._loadedVector = vectorAsFloat32Array;
+    coVector.set(vectorAsFloat32Array, 0);
+    coVector._isVectorLoaded = true;
 
     const byteArray = CoVector.toByteArray(vectorAsFloat32Array);
 
@@ -153,12 +153,12 @@ export class CoVector extends Float32Array implements CoValue {
     return coVector;
   }
 
-  static toByteArray(vector: Float32Array): Uint8Array {
+  private static toByteArray(vector: Float32Array): Uint8Array {
     // zero copy view of the vector bytes
     return new Uint8Array(vector.buffer, vector.byteOffset, vector.byteLength);
   }
 
-  static fromByteArray(bytesChunks: Uint8Array[]): Float32Array {
+  private static fromByteArray(bytesChunks: Uint8Array[]): Float32Array {
     const total = bytesChunks.reduce((acc, c) => acc + c.byteLength, 0);
 
     if (total % 4 !== 0)
@@ -175,9 +175,9 @@ export class CoVector extends Float32Array implements CoValue {
     return new Float32Array(u8.buffer, u8.byteOffset, total / 4);
   }
 
-  get vector(): Float32Array {
-    if (this._loadedVector !== null) {
-      return this._loadedVector;
+  private loadVectorData(): void {
+    if (this._isVectorLoaded === true) {
+      return;
     }
 
     const chunks = this.$jazz.raw.getBinaryChunks();
@@ -195,9 +195,10 @@ export class CoVector extends Float32Array implements CoValue {
       );
     }
 
-    this._loadedVector = vector;
+    super.set(vector, 0);
+    this._isVectorLoaded = true;
 
-    return vector;
+    return;
   }
 
   /**
@@ -205,20 +206,12 @@ export class CoVector extends Float32Array implements CoValue {
    * @category Content
    */
   toJSON(): Array<number> {
-    return Array.from(this.vector);
-  }
-
-  valueOf() {
-    return this.vector as this;
+    return Array.from(this);
   }
 
   /** @internal */
   [inspect]() {
     return this.toJSON();
-  }
-
-  [Symbol.toPrimitive]() {
-    return this.vector;
   }
 
   /**
@@ -256,6 +249,7 @@ export class CoVector extends Float32Array implements CoValue {
       });
     }
 
+    coVector.loadVectorData();
     return coVector;
   }
 
@@ -286,29 +280,10 @@ export class CoVector extends Float32Array implements CoValue {
 
   // Vector operations
   /**
-   * Calculate the magnitude of a vector.
-   */
-  static magnitude(vector: Float32Array | CoVector): number {
-    return VectorCalculation.magnitude(
-      vector instanceof CoVector ? vector.vector : vector,
-    );
-  }
-
-  /**
    * Calculate the magnitude of this vector.
    */
   magnitude(): number {
-    return VectorCalculation.magnitude(this.vector);
-  }
-
-  /**
-   * Normalize a vector.
-   * @returns A new instance of a normalized vector.
-   */
-  static normalize(vector: Float32Array | CoVector): Float32Array {
-    return VectorCalculation.normalize(
-      vector instanceof CoVector ? vector.vector : vector,
-    );
+    return VectorCalculation.magnitude(this);
   }
 
   /**
@@ -316,48 +291,14 @@ export class CoVector extends Float32Array implements CoValue {
    * @returns A new instance of a normalized vector.
    */
   normalize(): Float32Array {
-    return VectorCalculation.normalize(this.vector);
-  }
-
-  /**
-   * Calculate the dot product of two vectors.
-   */
-  static dotProduct(
-    vectorA: Float32Array | CoVector,
-    vectorB: Float32Array | CoVector,
-  ): number {
-    return VectorCalculation.dotProduct(
-      vectorA instanceof CoVector ? vectorA.vector : vectorA,
-      vectorB instanceof CoVector ? vectorB.vector : vectorB,
-    );
+    return VectorCalculation.normalize(this);
   }
 
   /**
    * Calculate the dot product of this vector and another vector.
    */
   dotProduct(otherVector: CoVector | Float32Array): number {
-    return VectorCalculation.dotProduct(
-      this.vector,
-      otherVector instanceof CoVector ? otherVector.vector : otherVector,
-    );
-  }
-
-  /**
-   * Calculate the cosine similarity between two vectors.
-   *
-   * @returns A value between `-1` and `1`:
-   * - `1` means the vectors are identical
-   * - `0` means the vectors are orthogonal (i.e. no similarity)
-   * - `-1` means the vectors are opposite direction (perfectly dissimilar)
-   */
-  static cosineSimilarity(
-    vectorA: CoVector | Float32Array,
-    vectorB: CoVector | Float32Array,
-  ): number {
-    return VectorCalculation.cosineSimilarity(
-      vectorA instanceof CoVector ? vectorA.vector : vectorA,
-      vectorB instanceof CoVector ? vectorB.vector : vectorB,
-    );
+    return VectorCalculation.dotProduct(this, otherVector);
   }
 
   /**
@@ -369,237 +310,7 @@ export class CoVector extends Float32Array implements CoValue {
    * - `-1` means the vectors are opposite direction (perfectly dissimilar)
    */
   cosineSimilarity(otherVector: CoVector | Float32Array): number {
-    return VectorCalculation.cosineSimilarity(
-      this.vector,
-      otherVector instanceof CoVector ? otherVector.vector : otherVector,
-    );
-  }
-
-  /**
-   * Check if this vector is equal to another vector.
-   */
-  equals(otherVector: CoVector | Float32Array): boolean {
-    return this.vector.every((value, index) => value === otherVector[index]);
-  }
-
-  // CoVector instance properties
-  get length(): number {
-    return this.vector.length;
-  }
-  get buffer(): ArrayBuffer {
-    return this.vector.buffer as ArrayBuffer;
-  }
-  get byteOffset(): number {
-    return this.vector.byteOffset;
-  }
-  get byteLength(): number {
-    return this.vector.byteLength;
-  }
-  [Symbol.iterator](): ArrayIterator<number> {
-    return this.vector[Symbol.iterator]();
-  }
-
-  // CoVector getters & Float32Array-like allowed methods
-  override at(index: number): number | undefined {
-    return this.vector.at(index);
-  }
-
-  override entries() {
-    return this.vector.entries();
-  }
-
-  override every(
-    predicate: (value: number, index: number, array: this) => unknown,
-    thisArg?: any,
-  ): boolean {
-    return this.vector.every(predicate as any, thisArg);
-  }
-
-  override filter(
-    predicate: (value: number, index: number, array: this) => boolean,
-    thisArg?: any,
-  ) {
-    return this.vector.filter(predicate as any, thisArg);
-  }
-
-  override find(
-    predicate: (value: number, index: number, array: this) => boolean,
-    thisArg?: any,
-  ): number | undefined {
-    return this.vector.find(predicate as any, thisArg);
-  }
-
-  override findIndex(
-    predicate: (value: number, index: number, array: this) => boolean,
-    thisArg?: any,
-  ): number {
-    return this.vector.findIndex(predicate as any, thisArg);
-  }
-
-  override findLast(
-    predicate: (value: number, index: number, array: this) => boolean,
-    thisArg?: any,
-  ): number | undefined {
-    return this.vector.findLast(predicate as any, thisArg);
-  }
-
-  override findLastIndex(
-    predicate: (value: number, index: number, array: this) => boolean,
-    thisArg?: any,
-  ): number {
-    return this.vector.findLastIndex(predicate as any, thisArg);
-  }
-
-  override forEach(
-    callbackFn: (value: number, index: number, array: this) => void,
-    thisArg?: any,
-  ): void {
-    return this.vector.forEach(callbackFn as any, thisArg);
-  }
-
-  override includes(value: number): boolean {
-    return this.vector.includes(value);
-  }
-
-  override indexOf(value: number): number {
-    return this.vector.indexOf(value);
-  }
-
-  override join(value?: string): string {
-    return this.vector.join(value);
-  }
-
-  override keys(): ArrayIterator<number> {
-    return this.vector.keys();
-  }
-
-  override lastIndexOf(value: number): number {
-    return this.vector.lastIndexOf(value);
-  }
-
-  override map(
-    callbackfn: (value: number, index: number, array: this) => number,
-    thisArg?: any,
-  ) {
-    return this.vector.map(callbackfn as any, thisArg);
-  }
-
-  reduce(
-    callbackfn: (
-      previousValue: number,
-      currentValue: number,
-      currentIndex: number,
-      array: this,
-    ) => number,
-    initialValue?: number,
-  ): number {
-    return (this.vector as any).reduce(
-      callbackfn as any,
-      initialValue as any,
-    ) as number;
-  }
-
-  reduceRight(
-    callbackfn: (
-      previousValue: number,
-      currentValue: number,
-      currentIndex: number,
-      array: this,
-    ) => number,
-    initialValue?: number,
-  ): number {
-    return (this.vector as any).reduceRight(
-      callbackfn as any,
-      initialValue as any,
-    ) as number;
-  }
-
-  override slice(start?: number, end?: number) {
-    return this.vector.slice(start, end);
-  }
-
-  override some(
-    predicate: (value: number, index: number, array: this) => unknown,
-    thisArg?: any,
-  ): boolean {
-    return this.vector.some(predicate as any, thisArg);
-  }
-
-  override toLocaleString(
-    locales?: string | string[],
-    options?: Intl.NumberFormatOptions,
-  ): string {
-    if (locales === undefined) {
-      return this.vector.toLocaleString();
-    }
-    return this.vector.toLocaleString(locales, options);
-  }
-
-  override toReversed() {
-    return this.vector.toReversed();
-  }
-
-  override toSorted(compareFn?: (a: number, b: number) => number) {
-    return this.vector.toSorted(compareFn);
-  }
-
-  override toString(): string {
-    return this.vector.toString();
-  }
-
-  override values(): ArrayIterator<number> {
-    return this.vector.values();
-  }
-
-  // CoVector setters & mutators overrides, as CoVectors aren't meant to be mutated
-  /**
-   * Calling `copyWithin` on a CoVector is forbidden. CoVectors are immutable.
-   * @deprecated If you want to change the vector, replace the former instance of CoVector with a new one.
-   */
-  override copyWithin(target: number, start: number, end?: number): never {
-    throw new Error("Cannot mutate a CoVector using `copyWithin`");
-  }
-  /**
-   * Calling `fill` on a CoVector is forbidden. CoVectors are immutable.
-   * @deprecated If you want to change the vector, replace the former instance of CoVector with a new one.
-   */
-  override fill(value: number, start?: number, end?: number): never {
-    throw new Error("Cannot mutate a CoVector using `fill`");
-  }
-  /**
-   * Calling `reverse` on a CoVector is forbidden. CoVectors are immutable.
-   * @deprecated If you want to change the vector, replace the former instance of CoVector with a new one.
-   */
-  override reverse(): never {
-    throw new Error("Cannot mutate a CoVector using `reverse`");
-  }
-  /**
-   * Calling `set` on a CoVector is forbidden. CoVectors are immutable.
-   * @deprecated If you want to change the vector, replace the former instance of CoVector with a new one.
-   */
-  override set(array: ArrayLike<number>, offset?: number): never {
-    throw new Error("Cannot mutate a CoVector using `set`");
-  }
-  /**
-   * Calling `sort` on a CoVector is forbidden. CoVectors are immutable.
-   * @deprecated If you want to change the vector, replace the former instance of CoVector with a new one.
-   */
-  override sort(compareFn?: (a: number, b: number) => number): never {
-    throw new Error("Cannot mutate a CoVector using `sort`");
-  }
-  /**
-   * Calling `subarray` on a CoVector is forbidden. CoVectors are immutable.
-   * @deprecated If you want to change the vector, replace the former instance of CoVector with a new one.
-   */
-  override subarray(begin?: number, end?: number): never {
-    throw new Error("Cannot mutate a CoVector using `subarray`");
-  }
-  /**
-   * Calling `with` on a CoVector is forbidden. CoVectors are immutable.
-   * @deprecated If you want to change the vector, replace the former instance of CoVector with a new one.
-   */
-  override with(index: number, value: number): never {
-    throw new Error("Cannot mutate a CoVector using `with`");
+    return VectorCalculation.cosineSimilarity(this, otherVector);
   }
 }
 
@@ -635,60 +346,6 @@ export class CoVectorJazzApi<V extends CoVector> extends CoValueJazzApi<V> {
     return this.raw.core.waitForSync(options);
   }
 }
-
-const CoVectorProxyHandler: ProxyHandler<CoVector> = {
-  get(target, key, receiver) {
-    if (typeof key === "string" && !isNaN(+key)) {
-      return target.at(Number(key));
-    } else {
-      return Reflect.get(target, key, receiver);
-    }
-  },
-  set(target, key, value, receiver) {
-    if (typeof key === "string" && !isNaN(+key)) {
-      throw new Error("Cannot mutate a CoVector.");
-    } else {
-      return Reflect.set(target, key, value, receiver);
-    }
-  },
-  has(target, key) {
-    if (typeof key === "string" && !isNaN(+key)) {
-      const length = target.length;
-      return Number(key) >= 0 && Number(key) < length;
-    } else {
-      return Reflect.has(target, key);
-    }
-  },
-  ownKeys(target) {
-    const keys = Reflect.ownKeys(target);
-
-    const data = target.vector;
-    if (data) {
-      // Add numeric indices for all entries in the vector
-      const indexKeys = Array.from({ length: data.length }, (_, i) =>
-        String(i),
-      );
-      keys.push(...indexKeys);
-    }
-
-    return keys;
-  },
-  getOwnPropertyDescriptor(target, key) {
-    if (typeof key === "string" && !isNaN(+key)) {
-      const i = +key;
-      if (i >= 0 && i < target.length) {
-        return {
-          value: target.vector[i],
-          enumerable: true,
-          configurable: true,
-          writable: false, // CoVectors are immutable
-        };
-      }
-    } else if (key in target) {
-      return Reflect.getOwnPropertyDescriptor(target, key);
-    }
-  },
-};
 
 const VectorCalculation = {
   magnitude: (vector: Float32Array) => {
