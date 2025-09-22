@@ -372,9 +372,6 @@ export class SubscriptionScope<D extends CoValue> {
   }
 
   subscribeToKey(key: string): void {
-    if (this.isSubscribedToId(key)) {
-      return;
-    }
     if (this.resolve === true || !this.resolve) {
       this.resolve = {};
     }

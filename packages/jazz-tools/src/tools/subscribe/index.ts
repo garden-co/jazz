@@ -47,7 +47,9 @@ export function accessChildLoadingStateByKey<D extends CoValue>(
   key: string,
 ) {
   const subscriptionScope = getSubscriptionScope(parent);
-  subscriptionScope.subscribeToKey(key);
+  if (!subscriptionScope.isSubscribedToId(childId)) {
+    subscriptionScope.subscribeToKey(key);
+  }
   return subscriptionScope.childValues.get(childId);
 }
 
