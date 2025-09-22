@@ -702,9 +702,6 @@ export class CoValueCore {
   earliestTxMadeAt: number = Number.MAX_SAFE_INTEGER;
   latestTxMadeAt: number = 0;
 
-  // The list of indexes that involve this CoValue
-  indexCatalogId: RawCoID | undefined;
-
   // Reset the parsed transactions and branches, to validate them again from scratch when the group is updated
   resetParsedTransactions() {
     this.branchStart = undefined;
@@ -870,11 +867,6 @@ export class CoValueCore {
           prev: previousTransaction ?? null,
         });
       }
-    }
-
-    if (transaction.meta?.["indexCatalogId"]) {
-      // TODO handle concurrently created index catalogs
-      this.indexCatalogId = transaction.meta.indexCatalogId as RawCoID;
     }
   }
 
