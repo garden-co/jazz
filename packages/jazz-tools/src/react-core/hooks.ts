@@ -117,12 +117,18 @@ function useCoValueSubscription<
     }
 
     const node = contextManager.getCurrentValue()!.node;
-    const subscription = new SubscriptionScope<any>(node, resolveQuery, id, {
-      ref: coValueClassFromCoValueClassOrSchema(Schema),
-      optional: true,
-    }, false,
+    const subscription = new SubscriptionScope<any>(
+      node,
+      resolveQuery,
+      id,
+      {
+        ref: coValueClassFromCoValueClassOrSchema(Schema),
+        optional: true,
+      },
       false,
-      options?.unstable_branch);
+      false,
+      options?.unstable_branch,
+    );
 
     return {
       subscription,
@@ -481,13 +487,19 @@ export function useCoStateWithSelector<
  * @returns The memoized value.
  */
 function useStructuralMemo<T>(factory: () => T): T {
-  const valueRef = React.useRef<T>(null);
+  const valueRef = React.useRef<{ value: T; initialized: boolean }>({
+    value: undefined as T,
+    initialized: false,
+  });
 
-  if (!valueRef.current || !structuralEquals(valueRef.current, factory())) {
-    valueRef.current = factory();
+  if (
+    !valueRef.current.initialized ||
+    !structuralEquals(valueRef.current.value, factory())
+  ) {
+    valueRef.current = { value: factory(), initialized: true };
   }
 
-  return valueRef.current;
+  return valueRef.current.value;
 }
 
 function useAccountSubscription<
@@ -550,7 +562,8 @@ function useAccountSubscription<
       subscription.contextManager !== contextManager ||
       subscription.Schema !== Schema ||
       subscription.branchName !== options?.unstable_branch?.name ||
-      subscription.branchOwnerId !== options?.unstable_branch?.owner?.$jazz.id ||
+      subscription.branchOwnerId !==
+        options?.unstable_branch?.owner?.$jazz.id ||
       (subscription.subscription &&
         subscription.subscription.resolve !== resolveQuery)
     ) {
