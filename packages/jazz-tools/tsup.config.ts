@@ -136,6 +136,7 @@ export default defineConfig([
     entry: {
       index: "src/worker/index.ts",
       "edge-wasm": "src/worker/edge-wasm.ts",
+      "napi-crypto": "src/worker/napi-crypto.ts",
     },
     outDir: "dist/worker",
   },

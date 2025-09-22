@@ -6,7 +6,8 @@
     "packages/*",
     "examples/*",
     "starters/*",
-    "crates/*"
+    "crates/*",
+    "crates/cojson-core-napi/npm/*"
   ],
   "packageManager": "pnpm@10.16.1",
   "engines": {
@@ -14,7 +15,7 @@
   },
   "devDependencies": {
     "@biomejs/biome": "catalog:default",
-    "@changesets/cli": "^2.27.10",
+    "@changesets/cli": "^2.29.7",
     "@playwright/test": "^1.50.1",
     "@vitejs/plugin-react": "^4.5.1",
     "@vitest/browser": "catalog:default",
@@ -37,15 +38,17 @@
     "dev": "turbo dev",
     "build": "turbo build && cd homepage/homepage && turbo build",
     "build:packages": "turbo build --filter='./packages/*'",
+    "build:napi": "turbo build:napi --",
     "lint": "turbo lint && cd homepage/homepage && pnpm run lint",
-    "test": "vitest",
+    "test": "vitest --project=!cojson-core-napi",
     "test:ci": "vitest run --watch=false",
     "test:coverage": "vitest --ui --coverage.enabled=true",
+    "test:napi": "vitest --project=cojson-core-napi",
     "format-and-lint": "biome check .",
     "format-and-lint:fix": "biome check . --write",
     "changeset": "changeset",
     "changeset-version": "changeset version && pnpm i --no-frozen-lockfile",
-    "release": "turbo run build --filter='./packages/*' && pnpm changeset publish && git push --follow-tags",
+    "release": "turbo run build:napi && turbo run build --filter='./packages/*' && pnpm changeset publish && git push --follow-tags",
     "release:backports": "turbo run build --filter='./packages/*' && pnpm changeset publish --tag backport && git push --follow-tags",
     "clean": "rm -rf ./packages/*/dist && rm -rf ./packages/*/node_modules && rm -rf ./examples/*/node_modules && rm -rf ./examples/*/dist",
     "postinstall": "lefthook install"

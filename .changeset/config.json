@@ -12,7 +12,21 @@
       "cojson-transport-ws",
       "jazz-run",
       "jazz-tools",
-      "community-jazz-vue"
+      "community-jazz-vue",
+      "cojson-core-napi",
+      "@cojson-core-napi/binary-win32-x64-msvc",
+      "@cojson-core-napi/binary-darwin-x64",
+      "@cojson-core-napi/binary-linux-x64-gnu",
+      "@cojson-core-napi/binary-linux-x64-musl",
+      "@cojson-core-napi/binary-linux-arm64-gnu",
+      "@cojson-core-napi/binary-win32-ia32-msvc",
+      "@cojson-core-napi/binary-linux-arm-gnueabihf",
+      "@cojson-core-napi/binary-darwin-arm64",
+      "@cojson-core-napi/binary-android-arm64",
+      "@cojson-core-napi/binary-freebsd-x64",
+      "@cojson-core-napi/binary-linux-arm64-musl",
+      "@cojson-core-napi/binary-win32-arm64-msvc",
+      "@cojson-core-napi/binary-android-arm-eabi"
     ]
   ],
   "access": "public",

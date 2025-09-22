@@ -18,7 +18,8 @@
         ".svelte-kit/output/**",
         ".next/**",
         "build/**",
-        "out/**"
+        "out/**",
+        "!*.node"
       ],
       "inputs": [
         "src/**",
@@ -43,7 +44,38 @@
         ".env*",
         "!node_modules/**",
         "!dist/**",
-        "!.turbo/**"
+        "!.turbo/**",
+        "!*.node"
+      ]
+    },
+    "build:napi": {
+      "env": ["ANDROID_NDK_LATEST_HOME"],
+      "outputs": ["dist/**", "!*.node"],
+      "inputs": [
+        "src/**",
+        "lib/**",
+        "pages/**",
+        "app/**",
+        "public/**",
+        "index.ts",
+        "index.js",
+        "*.ts",
+        "*.tsx",
+        "*.js",
+        "*.jsx",
+        "README.md",
+        "CHANGELOG.md",
+        "components.json",
+        "package.json",
+        "tsconfig*.json",
+        "*.config.*",
+        "postcss.config.*",
+        "tailwind.config.*",
+        ".env*",
+        "!node_modules/**",
+        "!dist/**",
+        "!.turbo/**",
+        "!*.node"
       ]
     },
     "dev": {

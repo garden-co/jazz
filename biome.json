@@ -9,6 +9,8 @@
     "ignoreUnknown": false,
     "includes": [
       "**",
+      "crates/cojson-core-napi/__test__/**",
+      "crates/cojson-core-napi/index.js",
       "!crates/**",
       "!**/jazz-tools.json",
       "!**/ios/**",

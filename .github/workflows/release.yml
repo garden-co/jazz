@@ -12,6 +12,9 @@ jobs:
   release:
     name: Release
     runs-on: blacksmith-4vcpu-ubuntu-2404
+    outputs:
+      hasChangesets:  ${{ steps.changesets.outputs.hasChangesets }}
+      hasChangesetsBackport:  ${{ steps.changesets-backport.outputs.hasChangesets }}
     steps:
       - name: Checkout Repo
         uses: actions/checkout@v4
@@ -22,7 +25,65 @@ jobs:
       - name: Build packages
         run: pnpm exec turbo run build --filter='./packages/*'
 
-      - name: Create Release Pull Request or Publish to npm
+      # Here we use changesets/action just to create the PR without publishing
+
+      - name: Create Release Pull Request
+        id: changesets
+        if: github.ref_name == 'main'
+        uses: changesets/action@v1
+        with:
+          version: pnpm changeset-version
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create Release Pull Request (backports)
+        id: changesets-backport
+        if: startsWith(github.ref_name, 'backport/')
+        uses: changesets/action@v1
+        with:
+          version: pnpm changeset-version
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    # This job will return hasChangesets and hasChangesetsBackport, if one of these is set to false than we have to publish
+  
+  # We run the NAPI build only if we have to publish
+  build_napi:
+    name: Build NAPI
+    needs: [release]
+    uses: ./.github/workflows/napi-build-reusable.yml
+    if: ${{ needs.release.outputs.hasChangesets != 'true' && needs.release.outputs.hasChangesetsBackport != 'true' }}
+
+  publish:
+    name: publish
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    needs: [build_napi, release]
+    # Here we publish only if hasChangesets is false
+    if: ${{ needs.release.outputs.hasChangesets != 'true' && needs.release.outputs.hasChangesetsBackport != 'true' }}
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v4
+
+      - name: Setup Source Code
+        uses: ./.github/actions/source-code/
+      
+      - name: Build packages
+        run: pnpm exec turbo run build --filter='./packages/*'
+            
+      - name: Download NAPI Artifacts (binaries) from build_napi workflow
+        uses: actions/download-artifact@v5
+        with:
+          path: crates/cojson-core-napi/artifacts
+
+      - name: Move artifacts and copy binaries into corresponding binary package inside npm directory
+        run: pnpm artifacts
+        working-directory: crates/cojson-core-napi/artifacts
+      
+      - name: List packages NAPI
+        run: ls -R ./npm
+        shell: bash
+        working-directory: crates/cojson-core-napi/artifacts
+
+      - name: Publish
         id: changesets
         if: github.ref_name == 'main'
         uses: changesets/action@v1
@@ -32,8 +93,8 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
-
-      - name: Create Release Pull Request or Publish to npm (backports)
+      
+      - name: Publish (Backport)
         id: changesets-backport
         if: startsWith(github.ref_name, 'backport/')
         uses: changesets/action@v1

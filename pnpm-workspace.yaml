@@ -4,6 +4,7 @@ packages:
   - 'starters/*'
   - 'tests/*'
   - 'crates/*'
+  - 'crates/cojson-core-napi/npm/*'
   - 'bench'
 
 minimumReleaseAge: 1440 # 24 hours
