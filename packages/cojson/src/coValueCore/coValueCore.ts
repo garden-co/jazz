@@ -1183,11 +1183,11 @@ export class CoValueCore {
         node.syncManager.handleNewContent(data, "storage");
       },
       (found) => {
+        done?.(found);
+
         if (!found) {
           this.markNotFoundInPeer("storage");
         }
-
-        done?.(found);
       },
     );
   }

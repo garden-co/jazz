@@ -1,9 +1,10 @@
 import { type Account } from "../coValues/account.js";
-import type {
+import {
   AnonymousJazzAgent,
   CoValue,
   ID,
   RefEncoded,
+  SubscriptionScope,
 } from "../internal.js";
 import {
   accessChildById,
@@ -26,9 +27,28 @@ export class Ref<out V extends CoValue> {
   async load(): Promise<V | null> {
     const subscriptionScope = getSubscriptionScope(this.parent);
 
-    subscriptionScope.subscribeToId(this.id, this.schema);
+    let node: SubscriptionScope<CoValue> | undefined | null;
 
-    const node = subscriptionScope.childNodes.get(this.id);
+    /**
+     * If the parent subscription scope is closed, we can't use it
+     * to subscribe to the child id, so we create a detached subscription scope
+     * that is going to be destroyed immediately after the load
+     */
+    if (subscriptionScope.closed) {
+      node = new SubscriptionScope<CoValue>(
+        subscriptionScope.node,
+        true,
+        this.id,
+        this.schema,
+        subscriptionScope.skipRetry,
+        subscriptionScope.bestEffortResolution,
+        subscriptionScope.unstable_branch,
+      );
+    } else {
+      subscriptionScope.subscribeToId(this.id, this.schema);
+
+      node = subscriptionScope.childNodes.get(this.id);
+    }
 
     if (!node) {
       return null;
@@ -50,6 +70,10 @@ export class Ref<out V extends CoValue> {
           } else if (value?.type === "unauthorized") {
             unsubscribe();
             resolve(null);
+          }
+
+          if (subscriptionScope.closed) {
+            node.destroy();
           }
         });
       });

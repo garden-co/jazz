@@ -1,13 +1,14 @@
 {
   "name": "cojson-core-wasm",
   "type": "module",
-  "version": "0.18.15",
+  "version": "0.18.17",
   "files": [
     "public/cojson_core_wasm.js",
     "public/cojson_core_wasm.d.ts",
     "public/cojson_core_wasm.wasm.js",
     "public/cojson_core_wasm.wasm.d.ts",
     "public/cojson_core_wasm.wasm",
+    "edge-lite.js",
     "index.js",
     "index.d.ts"
   ],

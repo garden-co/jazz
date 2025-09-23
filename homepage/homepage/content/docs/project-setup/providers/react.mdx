@@ -3,6 +3,7 @@ export const metadata = {
 };
 
 import { CodeGroup } from "@/components/forMdx";
+import { Alert } from "@garden-co/design-system/src/components/atoms/Alert";
 
 # Providers
 
@@ -39,6 +40,13 @@ export const MyAppAccount = co.account({
 });
 // @filename: app.tsx
 import * as React from "react";
+/**
+ * Use your email as a temporary key, or get a free
+ * API Key at dashboard.jazz.tools for higher limits.
+ * 
+ * @link https://dashboard.jazz.tools
+*/
+const apiKey = "you@example.com";
 // ---cut---
 // App.tsx
 import { JazzReactProvider } from "jazz-tools/react";
@@ -48,7 +56,7 @@ export function MyApp({ children }: { children: React.ReactNode }) {
   return (
     <JazzReactProvider
       sync={{
-        peer: "wss://cloud.jazz.tools/?key=your-api-key",
+        peer: `wss://cloud.jazz.tools/?key=${apiKey}`,
         when: "always" // When to sync: "always", "never", or "signedUp"
       }}
       AccountSchema={MyAppAccount}
@@ -60,6 +68,10 @@ export function MyApp({ children }: { children: React.ReactNode }) {
 ```
 </CodeGroup>
 
+<Alert className="mt-4 flex gap-2 items-center" variant="info">
+**Tip**: Get a free API key from [dashboard.jazz.tools](https://dashboard.jazz.tools), or use your email as a temporary key.
+</Alert>
+
 ## Provider Options
 
 ### Sync Options
@@ -68,11 +80,19 @@ The `sync` property configures how your application connects to the Jazz network
 
 <CodeGroup>
 ```tsx twoslash
+/**
+ * Use your email as a temporary key, or get a free
+ * API Key at dashboard.jazz.tools for higher limits.
+ * 
+ * @link https://dashboard.jazz.tools
+*/
+const apiKey = "you@example.com";
+// ---cut---
 import { type SyncConfig } from "jazz-tools";
 
 const syncConfig: SyncConfig = {
   // Connection to Jazz Cloud or your own sync server
-  peer: "wss://cloud.jazz.tools/?key=your-api-key",
+  peer: `wss://cloud.jazz.tools/?key=${apiKey}`,
 
   // When to sync: "always" (default), "never", or "signedUp"
   when: "always",
@@ -112,7 +132,7 @@ import { JazzReactProvider } from "jazz-tools/react";
 import { SyncConfig } from "jazz-tools";
 
 const syncConfig: SyncConfig = {
-  peer: "wss://cloud.jazz.tools/?key=your-api-key",
+  peer: "wss://cloud.jazz.tools/?key=YOUR_API_KEY",
   when: "always",
 }
 
@@ -140,12 +160,19 @@ The provider accepts these additional options:
 
 <CodeGroup>
 ```tsx twoslash
+/**
+ * Get a free API Key at dashboard.jazz.tools, or use your email as a temporary key.
+ * 
+ * @link https://dashboard.jazz.tools
+*/
+const apiKey = "you@example.com";
+// ---cut---
 import * as React from "react";
 import { JazzReactProvider } from "jazz-tools/react";
 import { SyncConfig } from "jazz-tools";
 
 const syncConfig: SyncConfig = {
-  peer: "wss://cloud.jazz.tools/?key=your-api-key",
+  peer: `wss://cloud.jazz.tools/?key=${apiKey}`,
   when: "always",
 }
 

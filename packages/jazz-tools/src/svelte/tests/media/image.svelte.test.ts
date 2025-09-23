@@ -15,7 +15,7 @@ describe("Image", async () => {
     render(Image, props, { account });
 
   describe("initial rendering", () => {
-    it("should render nothing if coValue is not found", async () => {
+    it("should render a blank placeholder while waiting for the coValue to load", async () => {
       const { container } = renderWithAccount({
         imageId: "co_zMTubMby3QiKDYnW9e2BEXW7Xaq",
         alt: "test",
@@ -26,7 +26,23 @@ describe("Image", async () => {
       expect(img!.getAttribute("width")).toBe(null);
       expect(img!.getAttribute("height")).toBe(null);
       expect(img!.alt).toBe("test");
-      expect(img!.src).toBe("");
+      expect(img!.src).toBe("data:image/gif;base64,R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==");
+    });
+
+    it("should render nothing if coValue is not found", async () => {
+      const { container } = renderWithAccount({
+        imageId: "co_zMTubMby3QiKDYnW9e2BEXW7Xaq",
+        alt: "test",
+      });
+
+      await waitFor(() => {
+        const img = container.querySelector("img");
+        expect(img).toBeDefined();
+        expect(img!.getAttribute("width")).toBe(null);
+        expect(img!.getAttribute("height")).toBe(null);
+        expect(img!.alt).toBe("test");
+        expect(img!.src).toBe("");
+      });
     });
 
     it("should render an empty image if the image is not loaded yet", async () => {

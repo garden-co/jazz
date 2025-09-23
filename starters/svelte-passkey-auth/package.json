@@ -1,6 +1,6 @@
 {
   "name": "svelte-passkey-auth",
-  "version": "0.0.148",
+  "version": "0.0.150",
   "type": "module",
   "private": true,
   "scripts": {

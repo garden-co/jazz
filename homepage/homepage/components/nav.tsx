@@ -2,6 +2,7 @@ import { ThemeToggle } from "@/components/ThemeToggle";
 import { QuickSearch } from "@/components/quick-search";
 import { navigationItems } from "@/content/navigation-items";
 import { socials } from "@/content/socials";
+import { Button } from "@garden-co/design-system/src/components/atoms/Button";
 import { JazzLogo } from "@garden-co/design-system/src/components/atoms/logos/JazzLogo";
 import {
   MobileNav,
@@ -21,7 +22,17 @@ export function JazzNav({
       items={navigationItems}
       socials={socials}
       hideMobileNav={hideMobileNav}
-      cta={<QuickSearch />}
+      cta={<div className="flex items-center gap-3 md:mr-2">
+        <QuickSearch />
+        <Button
+          intent="primary"
+          href="https://dashboard.jazz.tools"
+          newTab
+        >
+          Dashboard
+        </Button>
+      </div>
+    }
     ></Nav>
   );
 }
@@ -35,7 +46,16 @@ export function JazzMobileNav({ sections }: { sections?: NavSection[] }) {
       themeToggle={ThemeToggle}
       items={navigationItems}
       socials={socials}
-      cta={<QuickSearch />}
+      cta={<div className="flex items-center gap-2">
+        <QuickSearch />
+        <Button
+          intent="primary"
+          href="https://dashboard.jazz.tools"
+          newTab
+        >
+          Dashboard
+        </Button>
+      </div>}
     />
   );
 }

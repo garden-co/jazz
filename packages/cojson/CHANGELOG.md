@@ -1,5 +1,19 @@
 # cojson
 
+## 0.18.17
+
+### Patch Changes
+
+- 925da72: Fix unavailable state emitted when a load operation falls back from storage to network
+  - cojson-core-wasm@0.18.17
+
+## 0.18.16
+
+### Patch Changes
+
+- Updated dependencies [629c275]
+  - cojson-core-wasm@0.18.16
+
 ## 0.18.15
 
 ### Patch Changes

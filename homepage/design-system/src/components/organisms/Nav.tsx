@@ -368,6 +368,7 @@ export function Nav(props: NavProps) {
 
           <SocialLinks
             {...props.socials}
+            hideBlueSkyOnMDViewport
             className={
               !items.find((item) => item.firstOnRight) ? "ml-auto" : ""
             }

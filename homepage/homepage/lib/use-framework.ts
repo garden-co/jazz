@@ -1,6 +1,7 @@
 import { DEFAULT_FRAMEWORK, Framework, isValidFramework } from "@/content/framework";
 import { useParams } from "next/navigation";
 import { useEffect, useState } from "react";
+import { TAB_CHANGE_EVENT, isFrameworkChange } from "@garden-co/design-system/src/types/tabbed-code-group";
 
 export const useFramework = () => {
   const { framework } = useParams<{ framework?: string }>();
@@ -18,13 +19,31 @@ export const useFramework = () => {
     }
   }, []);
 
-  if (framework && isValidFramework(framework)) {
-    return framework;
-  }
+  useEffect(() => {
+    const handleTabChange = (event: CustomEvent) => {
+      if (isFrameworkChange(event.detail)) {
+        const newFramework = event.detail.value;
+        if (isValidFramework(newFramework)) {
+          setSavedFramework(newFramework as Framework);
+        }
+      }
+    };
 
-  // Use saved framework if available and component is mounted
+    if (typeof window !== "undefined") {
+      window.addEventListener(TAB_CHANGE_EVENT as any, handleTabChange);
+      return () => {
+        window.removeEventListener(TAB_CHANGE_EVENT as any, handleTabChange);
+      };
+    }
+  }, []);
+
+  // Prioritize savedFramework (from events) over URL parameters
   if (mounted && savedFramework) {
     return savedFramework;
+  }
+
+  if (framework && isValidFramework(framework)) {
+    return framework;
   }
 
   return DEFAULT_FRAMEWORK;

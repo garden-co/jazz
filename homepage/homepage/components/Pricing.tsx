@@ -3,17 +3,14 @@ import { clsx } from "clsx";
 import {
   CircleCheckIcon,
   LucideBuilding2,
-  LucideChevronUp,
   LucideChevronsUp,
   LucideCloudDownload,
   LucideDatabase,
   LucideHandshake,
   LucideIcon,
-  LucideInfinity,
   LucideServer,
   LucideUsers,
 } from "lucide-react";
-import { FakeGetStartedButton } from "./FakeGetStartedButton";
 import { IndieTierLogo, ProTierLogo, StarterTierLogo } from "./TierLogos";
 
 export function ListItem({
@@ -88,7 +85,14 @@ export function Pricing() {
             </ul>
           </div>
 
-          <FakeGetStartedButton tier="starter" />
+          <Button
+            href="https://dashboard.jazz.tools?utm_source=cloud_cta_starter"
+            newTab
+            variant="outline"
+            intent="primary"
+          >
+            Get Starter API key
+          </Button>
 
           <p className="text-sm">No credit card required. Takes 20s.</p>
         </div>
@@ -133,8 +137,13 @@ export function Pricing() {
             </ul>
           </div>
 
-          <FakeGetStartedButton tier="indie" />
-
+          <Button
+            href="https://dashboard.jazz.tools?utm_source=cloud_cta_indie"
+            newTab
+            intent="primary"
+          >
+            Get Indie API key
+          </Button>
           <p className="text-sm">
             One month free trial. Unlimited projects. Takes 1min.
           </p>

@@ -140,6 +140,8 @@ export const Image = forwardRef<HTMLImageElement, ImageProps>(function Image(
       return lazyPlaceholder;
     }
 
+    if (image === undefined)
+      return "data:image/gif;base64,R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==";
     if (!image) return undefined;
 
     const bestImage = highestResAvailable(

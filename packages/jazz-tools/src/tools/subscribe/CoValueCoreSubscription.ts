@@ -36,6 +36,20 @@ export class CoValueCoreSubscription {
   }
 
   /**
+   * Rehydrates the subscription by resetting the unsubscribed flag and initializing the subscription again
+   */
+  pullValue() {
+    if (!this.unsubscribed) {
+      return;
+    }
+
+    // Reset the unsubscribed flag so we can initialize the subscription again
+    this.unsubscribed = false;
+    this.initializeSubscription();
+    this.unsubscribe();
+  }
+
+  /**
    * Main entry point for subscription initialization.
    * Determines the subscription strategy based on current availability and branch requirements.
    */

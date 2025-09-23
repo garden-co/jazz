@@ -1,5 +1,6 @@
 import { products } from "@/content/showcase";
 import { HeroHeader } from "@garden-co/design-system/src/components/molecules/HeroHeader";
+import { ContactForm } from "@/components/ContactForm";
 import type { Metadata } from "next";
 import Image from "next/image";
 import Link from "next/link";
@@ -47,6 +48,9 @@ export default function Page() {
           </Link>
         ))}
       </div>
+
+      {/* Contact Form Section */}
+      <ContactForm />
     </div>
   );
 }

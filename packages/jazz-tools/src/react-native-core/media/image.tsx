@@ -69,7 +69,10 @@ export const Image = forwardRef<RNImage, ImageProps>(function Image(
   ref,
 ) {
   const image = useCoState(ImageDefinition, imageId);
-  const [src, setSrc] = useState<string | undefined>(image?.placeholderDataURL);
+  const [src, setSrc] = useState<string | undefined>(
+    image?.placeholderDataURL ??
+      "data:image/gif;base64,R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==",
+  );
 
   const dimensions: { width: number | undefined; height: number | undefined } =
     useMemo(() => {

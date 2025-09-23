@@ -697,4 +697,64 @@ describe("client syncs with a server with storage", () => {
       ]
     `);
   });
+
+  test("when falling back to network, we should never emit unavailable", async () => {
+    const client = setupTestNode({
+      connected: true,
+    });
+
+    const group = client.node.createGroup();
+    const map = group.createMap();
+    group.addMember("everyone", "reader");
+    map.set("hello", "world");
+
+    await map.core.waitForSync();
+
+    const newSession = client.spawnNewSession();
+    newSession.addStorage({
+      ourName: "newSession",
+    });
+
+    const coValue = newSession.node.getCoValue(map.id);
+    const spy = vi.fn();
+    coValue.subscribe((core) => {
+      spy(core.loadingState);
+    });
+
+    await newSession.node.loadCoValueCore(map.id, undefined, true);
+
+    expect(spy).not.toHaveBeenCalledWith("unavailable");
+    expect(coValue.loadingState).toBe("available");
+
+    expect(
+      SyncMessagesLog.getMessages({
+        Group: group.core,
+        Map: map.core,
+      }),
+    ).toMatchInlineSnapshot(`
+      [
+        "client -> server | CONTENT Group header: true new: After: 0 New: 3",
+        "client -> server | CONTENT Map header: true new: ",
+        "client -> server | CONTENT Group header: false new: After: 3 New: 2",
+        "client -> server | CONTENT Map header: false new: After: 0 New: 1",
+        "server -> client | KNOWN Group sessions: header/3",
+        "server -> storage | CONTENT Group header: true new: After: 0 New: 3",
+        "server -> client | KNOWN Map sessions: header/0",
+        "server -> storage | CONTENT Map header: true new: ",
+        "server -> client | KNOWN Group sessions: header/5",
+        "server -> storage | CONTENT Group header: false new: After: 3 New: 2",
+        "server -> client | KNOWN Map sessions: header/1",
+        "server -> storage | CONTENT Map header: false new: After: 0 New: 1",
+        "newSession -> storage | LOAD Map sessions: empty",
+        "storage -> newSession | KNOWN Map sessions: empty",
+        "client -> server | LOAD Map sessions: empty",
+        "server -> client | CONTENT Group header: true new: After: 0 New: 5",
+        "server -> client | CONTENT Map header: true new: After: 0 New: 1",
+        "client -> server | KNOWN Group sessions: header/5",
+        "newSession -> storage | CONTENT Group header: true new: After: 0 New: 5",
+        "client -> server | KNOWN Map sessions: header/1",
+        "newSession -> storage | CONTENT Map header: true new: After: 0 New: 1",
+      ]
+    `);
+  });
 });
