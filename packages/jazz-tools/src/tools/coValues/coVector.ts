@@ -281,41 +281,6 @@ export class CoVector extends Float32Array implements CoValue {
     return subscribeToCoValueWithoutMe<V, R>(this, id, options, listener);
   }
 
-  // Vector operations
-  /**
-   * Calculate the magnitude of this vector.
-   */
-  magnitude(): number {
-    return VectorCalculation.magnitude(this);
-  }
-
-  /**
-   * Normalize this vector.
-   * @returns A new instance of a normalized vector.
-   */
-  normalize(): Float32Array {
-    return VectorCalculation.normalize(this);
-  }
-
-  /**
-   * Calculate the dot product of this vector and another vector.
-   */
-  dotProduct(otherVector: CoVector | Float32Array): number {
-    return VectorCalculation.dotProduct(this, otherVector);
-  }
-
-  /**
-   * Calculate the cosine similarity between this vector and another vector.
-   *
-   * @returns A value between `-1` and `1`:
-   * - `1` means the vectors are identical
-   * - `0` means the vectors are orthogonal (i.e. no similarity)
-   * - `-1` means the vectors are opposite direction (perfectly dissimilar)
-   */
-  cosineSimilarity(otherVector: CoVector | Float32Array): number {
-    return VectorCalculation.cosineSimilarity(this, otherVector);
-  }
-
   // CoVector mutation method overrides, as CoVectors aren't meant to be mutated
   /**
    * Calling `copyWithin` on a CoVector is forbidden. CoVectors are immutable.
@@ -384,6 +349,41 @@ export class CoVectorJazzApi<V extends CoVector> extends CoValueJazzApi<V> {
    */
   waitForSync(options?: { timeout?: number }) {
     return this.raw.core.waitForSync(options);
+  }
+
+  // Vector operations
+  /**
+   * Calculate the magnitude of this vector.
+   */
+  magnitude(): number {
+    return VectorCalculation.magnitude(this.coVector);
+  }
+
+  /**
+   * Normalize this vector.
+   * @returns A new instance of a normalized vector.
+   */
+  normalize(): Float32Array {
+    return VectorCalculation.normalize(this.coVector);
+  }
+
+  /**
+   * Calculate the dot product of this vector and another vector.
+   */
+  dotProduct(otherVector: CoVector | Float32Array): number {
+    return VectorCalculation.dotProduct(this.coVector, otherVector);
+  }
+
+  /**
+   * Calculate the cosine similarity between this vector and another vector.
+   *
+   * @returns A value between `-1` and `1`:
+   * - `1` means the vectors are identical
+   * - `0` means the vectors are orthogonal (i.e. no similarity)
+   * - `-1` means the vectors are opposite direction (perfectly dissimilar)
+   */
+  cosineSimilarity(otherVector: CoVector | Float32Array): number {
+    return VectorCalculation.cosineSimilarity(this.coVector, otherVector);
   }
 }
 

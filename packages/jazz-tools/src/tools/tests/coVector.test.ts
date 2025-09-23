@@ -385,7 +385,7 @@ describe("CoVector mutation methods", async () => {
   });
 });
 
-describe("Vector calculations", async () => {
+describe("Vector calculations on .$jazz", async () => {
   const VectorSchema = co.vector(5);
 
   const vecA = new Float32Array([1, 2, 3, 4, 5]);
@@ -397,8 +397,8 @@ describe("Vector calculations", async () => {
   describe("magnitude", () => {
     const magnitudeApprox: [number, number] = [7.4162, 4];
 
-    test("instance method", () => {
-      expect(coVectorA.magnitude()).toBeCloseTo(...magnitudeApprox);
+    test("returns the magnitude of the vector", () => {
+      expect(coVectorA.$jazz.magnitude()).toBeCloseTo(...magnitudeApprox);
     });
   });
 
@@ -408,26 +408,28 @@ describe("Vector calculations", async () => {
       0.5393598675727844, 0.6741998791694641,
     ]);
 
-    test("instance method", () => {
-      expect(coVectorA.normalize()).toEqual(normalized);
+    test("returns the normalized vector", () => {
+      expect(coVectorA.$jazz.normalize()).toEqual(normalized);
     });
   });
 
   describe("dot product", () => {
     const dotProduct = 35;
 
-    test("instance method", () => {
-      expect(coVectorA.dotProduct(vecB)).toBe(dotProduct);
-      expect(coVectorA.dotProduct(coVectorB)).toBe(dotProduct);
+    test("returns the dot product of the 2 vectors", () => {
+      expect(coVectorA.$jazz.dotProduct(vecB)).toBe(dotProduct);
+      expect(coVectorA.$jazz.dotProduct(coVectorB)).toBe(dotProduct);
     });
   });
 
   describe("cosine similarity", () => {
     const similarityApprox: [number, number] = [0.6364, 4];
 
-    test("instance method", () => {
-      expect(coVectorA.cosineSimilarity(vecB)).toBeCloseTo(...similarityApprox);
-      expect(coVectorA.cosineSimilarity(coVectorB)).toBeCloseTo(
+    test("returns the cosine similarity of the 2 vectors", () => {
+      expect(coVectorA.$jazz.cosineSimilarity(vecB)).toBeCloseTo(
+        ...similarityApprox,
+      );
+      expect(coVectorA.$jazz.cosineSimilarity(coVectorB)).toBeCloseTo(
         ...similarityApprox,
       );
     });
