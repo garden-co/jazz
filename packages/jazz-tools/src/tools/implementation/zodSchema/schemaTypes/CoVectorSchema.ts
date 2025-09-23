@@ -3,6 +3,8 @@ import {
   AnonymousJazzAgent,
   CoVector,
   Group,
+  InstanceOrPrimitiveOfSchema,
+  InstanceOrPrimitiveOfSchemaCoValuesNullable,
   coOptionalDefiner,
 } from "../../../internal.js";
 import { CoOptionalSchema } from "./CoOptionalSchema.js";
@@ -38,7 +40,7 @@ export class CoVectorSchema implements CoreCoVectorSchema {
   create(
     vector: number[] | Float32Array,
     options?: { owner: Group } | Group,
-  ): CoVector;
+  ): CoVectorInstance;
   /**
    * Create a `CoVector` from a given vector.
    *
@@ -47,11 +49,11 @@ export class CoVectorSchema implements CoreCoVectorSchema {
   create(
     vector: number[] | Float32Array,
     options?: { owner: Account | Group } | Account | Group,
-  ): CoVector;
+  ): CoVectorInstance;
   create(
     vector: number[] | Float32Array,
     options?: { owner: Account | Group } | Account | Group,
-  ): CoVector {
+  ): CoVectorInstance {
     return this.coValueClass.create(vector, options);
   }
 
@@ -61,7 +63,7 @@ export class CoVectorSchema implements CoreCoVectorSchema {
   load(
     id: string,
     options?: { loadAs: Account | AnonymousJazzAgent },
-  ): Promise<CoVector | null> {
+  ): Promise<CoVectorInstanceNullable> {
     return this.coValueClass.load(id, options);
   }
 
@@ -71,11 +73,17 @@ export class CoVectorSchema implements CoreCoVectorSchema {
   subscribe(
     id: string,
     options: { loadAs: Account | AnonymousJazzAgent },
-    listener: (value: CoVector, unsubscribe: () => void) => void,
+    listener: (
+      value: CoVectorInstanceNullable,
+      unsubscribe: () => void,
+    ) => void,
   ): () => void;
   subscribe(
     id: string,
-    listener: (value: CoVector, unsubscribe: () => void) => void,
+    listener: (
+      value: CoVectorInstanceNullable,
+      unsubscribe: () => void,
+    ) => void,
   ): () => void;
   subscribe(...args: [any, ...any[]]) {
     // @ts-expect-error
@@ -90,3 +98,8 @@ export class CoVectorSchema implements CoreCoVectorSchema {
     return coOptionalDefiner(this);
   }
 }
+
+export type CoVectorInstance = InstanceOrPrimitiveOfSchema<CoVectorSchema>;
+
+export type CoVectorInstanceNullable =
+  InstanceOrPrimitiveOfSchemaCoValuesNullable<CoVectorSchema>;

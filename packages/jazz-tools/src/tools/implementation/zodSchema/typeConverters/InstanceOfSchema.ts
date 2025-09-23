@@ -66,7 +66,7 @@ export type InstanceOfSchema<S extends CoValueClass | AnyZodOrCoValueSchema> =
                     : S extends CoreFileStreamSchema
                       ? FileStream
                       : S extends CoreCoVectorSchema
-                        ? CoVector
+                        ? Readonly<CoVector>
                         : S extends CoreCoOptionalSchema<infer T>
                           ? InstanceOrPrimitiveOfSchema<T> | undefined
                           : S extends CoDiscriminatedUnionSchema<infer Members>

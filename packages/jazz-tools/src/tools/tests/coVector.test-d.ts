@@ -16,7 +16,7 @@ describe("CoVector types", () => {
   test("co.vector().create() • creates a CoVector with Float32Array-like typing", () => {
     const embedding = co.vector(3).create([1, 2, 3]);
 
-    type ExpectedType = Float32Array;
+    type ExpectedType = Readonly<Float32Array>;
 
     function matches(value: ExpectedType) {
       return value;
@@ -29,5 +29,12 @@ describe("CoVector types", () => {
     const embedding = co.vector(3).create([1, 2, 3]);
 
     expectTypeOf(embedding.$jazz.owner).toEqualTypeOf<Group>();
+  });
+
+  test("setting a value via index access • is a type error", () => {
+    const embedding = co.vector(3).create([1, 2, 3]);
+
+    // @ts-expect-error: assignment to index should be disallowed
+    embedding[0] = 6;
   });
 });

@@ -7,7 +7,6 @@ import {
   getCoValueOwner,
   Group,
   ID,
-  RefsToResolve,
   Resolved,
   SubscribeListenerOptions,
   SubscribeRestArgs,
@@ -29,7 +28,10 @@ import {
  *
  * @category CoValues
  */
-export class CoVector extends Float32Array implements CoValue {
+export class CoVector
+  extends Float32Array
+  implements Readonly<Float32Array>, CoValue
+{
   declare $jazz: CoVectorJazzApi<this>;
 
   /** @category Type Helpers */
@@ -229,7 +231,7 @@ export class CoVector extends Float32Array implements CoValue {
     options?: {
       loadAs?: Account | AnonymousJazzAgent;
     },
-  ): Promise<CoVector | null> {
+  ): Promise<C | null> {
     const coVector = await loadCoValueWithoutMe(this, id, options);
 
     /**
@@ -237,7 +239,7 @@ export class CoVector extends Float32Array implements CoValue {
      * we can wait for the stream to be complete before returning the vector
      */
     if (!coVector?.$jazz.raw.isBinaryStreamEnded()) {
-      return new Promise<CoVector>((resolve) => {
+      return new Promise<C | null>((resolve) => {
         subscribeToCoValueWithoutMe(
           this,
           id,
@@ -261,24 +263,24 @@ export class CoVector extends Float32Array implements CoValue {
    * @category Subscription & Loading
    * @deprecated Use `co.vector(...).subscribe` instead.
    */
-  static subscribe<V extends CoVector, const R extends RefsToResolve<V>>(
+  static subscribe<V extends CoVector>(
     this: CoValueClass<V>,
     id: ID<V>,
-    listener: (value: Resolved<V, R>, unsubscribe: () => void) => void,
+    listener: (value: Resolved<V, true>, unsubscribe: () => void) => void,
   ): () => void;
-  static subscribe<V extends CoVector, const R extends RefsToResolve<V>>(
+  static subscribe<V extends CoVector>(
     this: CoValueClass<V>,
     id: ID<V>,
-    options: SubscribeListenerOptions<V, R>,
-    listener: (value: Resolved<V, R>, unsubscribe: () => void) => void,
+    options: SubscribeListenerOptions<V, true>,
+    listener: (value: Resolved<V, true>, unsubscribe: () => void) => void,
   ): () => void;
-  static subscribe<V extends CoVector, const R extends RefsToResolve<V>>(
+  static subscribe<V extends CoVector>(
     this: CoValueClass<V>,
     id: ID<V>,
-    ...args: SubscribeRestArgs<V, R>
+    ...args: SubscribeRestArgs<V, true>
   ): () => void {
     const { options, listener } = parseSubscribeRestArgs(args);
-    return subscribeToCoValueWithoutMe<V, R>(this, id, options, listener);
+    return subscribeToCoValueWithoutMe<V, true>(this, id, options, listener);
   }
 
   // CoVector mutation method overrides, as CoVectors aren't meant to be mutated

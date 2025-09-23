@@ -73,7 +73,7 @@ export type InstanceOfSchemaCoValuesNullable<
                   : S extends CoreFileStreamSchema
                     ? FileStream | null
                     : S extends CoreCoVectorSchema
-                      ? CoVector | null
+                      ? Readonly<CoVector> | null
                       : S extends CoreCoOptionalSchema<infer Inner>
                         ?
                             | InstanceOrPrimitiveOfSchemaCoValuesNullable<Inner>
