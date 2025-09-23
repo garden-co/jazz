@@ -28,8 +28,8 @@ pub(crate) fn x25519_public_key_internal(private_key: &[u8]) -> Result<[u8; 32],
 /// - `private_key`: 32 bytes of private key material
 /// Returns 32 bytes of public key material or throws JsError if key is invalid.
 #[napi]
-pub fn x25519_public_key(private_key: &[u8]) -> napi::Result<Vec<u8>> {
-    napi::Result::Ok(x25519_public_key_internal(private_key)?.to_vec())
+pub fn x25519_public_key(private_key: &[u8]) -> napi::Result<Uint8Array> {
+    napi::Result::Ok(x25519_public_key_internal(private_key)?.into())
 }
 
 /// Internal function to perform X25519 Diffie-Hellman key exchange.
@@ -55,8 +55,8 @@ pub(crate) fn x25519_diffie_hellman_internal(
 /// - `public_key`: 32 bytes of public key material
 /// Returns 32 bytes of shared secret material or throws JsError if key exchange fails.
 #[napi]
-pub fn x25519_diffie_hellman(private_key: &[u8], public_key: &[u8]) -> napi::Result<Vec<u8>> {
-    Ok(x25519_diffie_hellman_internal(private_key, public_key)?.to_vec())
+pub fn x25519_diffie_hellman(private_key: &[u8], public_key: &[u8]) -> napi::Result<Uint8Array> {
+    Ok(x25519_diffie_hellman_internal(private_key, public_key)?.into())
 }
 
 /// Internal function to derive a sealer ID from a sealer secret.

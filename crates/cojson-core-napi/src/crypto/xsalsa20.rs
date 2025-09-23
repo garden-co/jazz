@@ -21,9 +21,9 @@ pub fn encrypt_xsalsa20(
   nonce_material: &[u8],
   plaintext: &[u8],
 ) -> napi::Result<Uint8Array> {
-  let nonce = generate_nonce(nonce_material);
-  encrypt_xsalsa20_raw_internal(&key, &nonce, &plaintext)
-    .map(|b| Uint8Array::from(b.as_ref()))
+  let nonce: Uint8Array = generate_nonce(nonce_material);
+  encrypt_xsalsa20_raw_internal(key, &nonce, plaintext)
+    .map(|b| b.into())
     .map_err(|e| e.into())
 }
 
@@ -40,9 +40,21 @@ pub fn decrypt_xsalsa20(
   ciphertext: &[u8],
 ) -> napi::Result<Uint8Array> {
   let nonce = generate_nonce(nonce_material);
-  decrypt_xsalsa20_raw_internal(&key, &nonce, &ciphertext)
-    .map(|v| Uint8Array::from(v))
+  decrypt_xsalsa20_raw_internal(key, &nonce, ciphertext)
+    .map(|v| v.into())
     .map_err(|e| e.into())
+}
+
+pub fn cast_key_and_nonce(key: &[u8], nonce: &[u8]) -> Result<([u8; 32], [u8; 24]), CryptoError> {
+  let key_bytes: [u8; 32] = key
+    .try_into()
+    .map_err(|_| CryptoError::InvalidKeyLength(32, key.len()))?;
+
+  let nonce_bytes: [u8; 24] = nonce
+    .try_into()
+    .map_err(|_| CryptoError::InvalidNonceLength)?;
+
+  Ok((key_bytes, nonce_bytes))
 }
 
 /// Internal function for raw XSalsa20 encryption without nonce generation.
@@ -53,14 +65,7 @@ pub fn encrypt_xsalsa20_raw_internal(
   nonce: &[u8],
   plaintext: &[u8],
 ) -> Result<Box<[u8]>, CryptoError> {
-  // Key must be 32 bytes
-  let key_bytes: [u8; 32] = key
-    .try_into()
-    .map_err(|_| CryptoError::InvalidKeyLength(32, key.len()))?;
-  // Nonce must be 24 bytes
-  let nonce_bytes: [u8; 24] = nonce
-    .try_into()
-    .map_err(|_| CryptoError::InvalidNonceLength)?;
+  let (key_bytes, nonce_bytes) = cast_key_and_nonce(key, nonce)?;
 
   // Create cipher instance and encrypt
   let mut cipher =
@@ -78,14 +83,7 @@ pub fn decrypt_xsalsa20_raw_internal(
   nonce: &[u8],
   ciphertext: &[u8],
 ) -> Result<Box<[u8]>, CryptoError> {
-  // Key must be 32 bytes
-  let key_bytes: [u8; 32] = key
-    .try_into()
-    .map_err(|_| CryptoError::InvalidKeyLength(32, key.len()))?;
-  // Nonce must be 24 bytes
-  let nonce_bytes: [u8; 24] = nonce
-    .try_into()
-    .map_err(|_| CryptoError::InvalidNonceLength)?;
+  let (key_bytes, nonce_bytes) = cast_key_and_nonce(key, nonce)?;
 
   // Create cipher instance and decrypt (XSalsa20 is symmetric)
   let mut cipher =

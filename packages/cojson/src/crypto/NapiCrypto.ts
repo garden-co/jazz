@@ -13,6 +13,7 @@ import {
   sign,
   unseal,
   verify,
+  isActive,
 } from "cojson-core-napi";
 import { base64URLtoBytes, bytesToBase64url } from "../base64url.js";
 import { RawCoID, SessionID, TransactionID } from "../ids.js";
@@ -35,6 +36,8 @@ import {
   textEncoder,
 } from "./crypto.js";
 import { ControlledAccountOrAgent } from "../coValues/account.js";
+import { WasmCrypto } from "./WasmCrypto.js";
+
 import {
   PrivateTransaction,
   Transaction,
@@ -56,8 +59,14 @@ export class NapiCrypto extends CryptoProvider<Blake3State> {
     super();
   }
 
-  static async create(): Promise<NapiCrypto | PureJSCrypto> {
-    return new NapiCrypto();
+  static async create(): Promise<NapiCrypto | PureJSCrypto | WasmCrypto> {
+    if (isActive) {
+      return new NapiCrypto();
+    }
+    logger.warn(
+      "NapiCrypto: Native binding is not active, falling back to WasmCrypto",
+    );
+    return WasmCrypto.create();
   }
 
   blake3HashOnce(data: Uint8Array) {

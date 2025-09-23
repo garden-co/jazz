@@ -1,6 +1,6 @@
 {
   "name": "cojson-core-napi",
-  "version": "1.0.0",
+  "version": "0.1.0",
   "description": "Template project for writing node package with napi-rs",
   "main": "index.js",
   "repository": {
@@ -8,7 +8,6 @@
     "url": "git+ssh://git@github.com/napi-rs/package-template.git"
   },
   "license": "MIT",
-  "browser": "browser.js",
   "keywords": [
     "napi-rs",
     "NAPI",
@@ -19,11 +18,12 @@
   ],
   "files": [
     "index.d.ts",
-    "index.js",
-    "browser.js"
+    "index.js"
   ],
   "napi": {
+    "dtsHeader": "export const isActive: boolean;\n",
     "binaryName": "cojson-core-napi",
+    "packageName": "@cojson-core-napi/binary",
     "targets": [
       "x86_64-pc-windows-msvc",
       "x86_64-apple-darwin",
@@ -37,8 +37,7 @@
       "x86_64-unknown-freebsd",
       "aarch64-unknown-linux-musl",
       "aarch64-pc-windows-msvc",
-      "armv7-linux-androideabi",
-      "wasm32-wasip1-threads"
+      "armv7-linux-androideabi"
     ]
   },
   "engines": {
@@ -51,7 +50,8 @@
   "scripts": {
     "artifacts": "napi artifacts",
     "bench": "node --import @oxc-node/core/register benchmark/bench.ts",
-    "build": "napi build --platform --release",
+    "build": "napi build --platform --release --no-js",
+    "build:jsBinding": "napi build --platform --release && node --import @oxc-node/core/register scripts/build.ts",
     "build:debug": "napi build --platform",
     "format": "run-p format:prettier format:rs format:toml",
     "format:prettier": "prettier . -w",
@@ -69,6 +69,7 @@
     "@emnapi/runtime": "^1.5.0",
     "@napi-rs/cli": "^3.2.0",
     "@oxc-node/core": "^0.0.32",
+    "@scure/base": "1.2.1",
     "@taplo/cli": "^0.7.0",
     "@tybys/wasm-util": "^0.10.0",
     "chalk": "^5.6.2",
@@ -78,8 +79,8 @@
     "oxlint": "^1.14.0",
     "prettier": "^3.6.2",
     "tinybench": "^5.0.1",
-    "vitest": "catalog:default",
-    "typescript": "^5.9.2"
+    "typescript": "^5.9.2",
+    "vitest": "catalog:default"
   },
   "lint-staged": {
     "*.@(js|ts|tsx)": [

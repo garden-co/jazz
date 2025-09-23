@@ -18,7 +18,8 @@
         ".svelte-kit/output/**",
         ".next/**",
         "build/**",
-        "out/**"
+        "out/**",
+        "!*.node"
       ],
       "inputs": [
         "src/**",
@@ -43,7 +44,8 @@
         ".env*",
         "!node_modules/**",
         "!dist/**",
-        "!.turbo/**"
+        "!.turbo/**",
+        "!*.node"
       ]
     },
     "dev": {
