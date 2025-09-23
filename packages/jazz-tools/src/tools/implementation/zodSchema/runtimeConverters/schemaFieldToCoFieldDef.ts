@@ -1,4 +1,5 @@
 import { CoValueClass, isCoValueClass } from "../../../internal.js";
+import { registeredInstanceEncoders } from "../../registeredEncoders.js";
 import { coField } from "../../schema.js";
 import { CoreCoValueSchema } from "../schemaTypes/CoValueSchema.js";
 import { isUnionOfPrimitivesDeeply } from "../unionUtils.js";
@@ -32,8 +33,8 @@ export type SchemaField =
   | z.core.$ZodLazy<z.core.$ZodType>
   | z.core.$ZodTemplateLiteral<any>
   | z.core.$ZodLiteral<any>
-  | z.core.$ZodCatch<z.core.$ZodType>
   | z.core.$ZodEnum<any>
+  | z.core.$ZodCustom<any, any>
   | z.core.$ZodDefault<z.core.$ZodType>
   | z.core.$ZodCatch<z.core.$ZodType>;
 
@@ -54,7 +55,9 @@ export function schemaFieldToCoFieldDef(schema: SchemaField) {
         zodSchemaDef.type === "optional" ||
         zodSchemaDef.type === "nullable"
       ) {
-        const inner = zodSchemaDef.innerType as ZodPrimitiveSchema;
+        const inner = zodSchemaDef.innerType as
+          | ZodPrimitiveSchema
+          | z.core.$ZodCustom<any, any>;
         const coFieldDef: any = schemaFieldToCoFieldDef(inner);
         if (
           zodSchemaDef.type === "nullable" &&
@@ -137,6 +140,22 @@ export function schemaFieldToCoFieldDef(schema: SchemaField) {
             "z.union()/z.discriminatedUnion() of collaborative types is not supported. Use co.discriminatedUnion() instead.",
           );
         }
+      } else if (zodSchemaDef.type === "custom") {
+        const cls = schema._zod.bag.Class;
+
+        if (!cls || !(cls instanceof Function)) {
+          throw new Error(
+            "z.custom() is not supported. Only z.instanceof() is supported.",
+          );
+        }
+
+        if (!registeredInstanceEncoders.has(cls as any)) {
+          throw new Error(
+            `z.instanceof() of ${cls.name} is not supported. Please register an encoder for this class using registerInstanceEncoder().`,
+          );
+        }
+
+        return registeredInstanceEncoders.get(cls as any);
       } else {
         throw new Error(
           `Unsupported zod type: ${(schema._zod?.def as any)?.type || JSON.stringify(schema)}`,

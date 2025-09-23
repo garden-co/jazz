@@ -1,5 +1,14 @@
-import { beforeAll, describe, expect, it, vi } from "vitest";
-import { z } from "../exports.js";
+import {
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
+import { z as _z } from "zod/v4";
+import { encoders, z } from "../exports.js";
 import { co } from "../internal.js";
 import { createJazzTestAccount, setupJazzTestSync } from "../testing.js";
 
@@ -509,6 +518,131 @@ describe("co.map and Zod schema compatibility", () => {
       const account = await createJazzTestAccount();
       const map = schema.create({ readonly: { name: "John" } }, account);
       expect(map.readonly).toEqual({ name: "John" });
+    });
+  });
+
+  describe("Class types", () => {
+    class DateRange {
+      constructor(
+        public start: Date,
+        public end: Date,
+      ) {}
+
+      isDateInRange(date: Date) {
+        return date >= this.start && date <= this.end;
+      }
+    }
+
+    beforeEach(() => {
+      encoders.register(DateRange, {
+        encode: (value) => {
+          return [value.start.toISOString(), value.end.toISOString()];
+        },
+        decode: (value) => {
+          const [start, end] = value as [string, string];
+          return new DateRange(new Date(start), new Date(end));
+        },
+      });
+    });
+
+    afterEach(() => {
+      encoders.unregisterAll();
+    });
+
+    it("should handle registered instanceof fields", async () => {
+      const schema = co.map({
+        range: z.instanceof(DateRange),
+      });
+
+      const map = schema.create({
+        range: new DateRange(new Date("2025-01-01"), new Date("2025-01-31")),
+      });
+
+      expect(map.range.isDateInRange(new Date("2025-01-15"))).toEqual(true);
+    });
+
+    it("should handle optional registered instanceof fields", async () => {
+      const schema = co.map({
+        range: z.instanceof(DateRange).optional(),
+      });
+      const map = schema.create({});
+
+      expect(map.range).toBeUndefined();
+      expect(map.$jazz.has("range")).toEqual(false);
+    });
+
+    it("should handle nullable registered instanceof fields", async () => {
+      const schema = co.map({
+        range: z.instanceof(DateRange).nullable(),
+      });
+      const map = schema.create({ range: null });
+
+      expect(map.range).toBeNull();
+
+      map.$jazz.set(
+        "range",
+        new DateRange(new Date("2025-01-01"), new Date("2025-01-31")),
+      );
+      expect(map.range?.isDateInRange(new Date("2025-01-15"))).toEqual(true);
+    });
+
+    it("should handle nullish registered instanceof fields", async () => {
+      const schema = co.map({
+        range: z.instanceof(DateRange).nullish(),
+      });
+
+      const map = schema.create({});
+      expect(map.range).toBeUndefined();
+      expect(map.$jazz.has("range")).toEqual(false);
+
+      map.$jazz.set("range", undefined);
+      expect(map.range).toBeUndefined();
+      expect(map.$jazz.has("range")).toEqual(true);
+
+      map.$jazz.set("range", null);
+      expect(map.range).toBeNull();
+
+      map.$jazz.set(
+        "range",
+        new DateRange(new Date("2025-01-01"), new Date("2025-01-31")),
+      );
+      expect(map.range?.isDateInRange(new Date("2025-01-15"))).toEqual(true);
+    });
+
+    it("should not handle never registered instanceof fields", () => {
+      const schema = co.map({
+        buffer: z.instanceof(Buffer),
+      });
+
+      expect(() => schema.create({ buffer: Buffer.from("test") })).toThrow(
+        "z.instanceof() of Buffer is not supported. Please register an encoder for this class using registerInstanceEncoder().",
+      );
+    });
+
+    it("should not handle unregistered instanceof fields", () => {
+      encoders.unregister(DateRange);
+
+      const schema = co.map({
+        range: z.instanceof(DateRange),
+      });
+
+      expect(() =>
+        schema.create({
+          range: new DateRange(new Date("2025-01-01"), new Date("2025-01-31")),
+        }),
+      ).toThrow(
+        "z.instanceof() of DateRange is not supported. Please register an encoder for this class using registerInstanceEncoder().",
+      );
+    });
+
+    it("should not handle z.custom() fields", () => {
+      const schema = co.map({
+        coId: _z.custom<`co_z${string}`>(),
+      });
+
+      expect(() => schema.create({ coId: "co_z1234567890" })).toThrow(
+        "z.custom() is not supported. Only z.instanceof() is supported.",
+      );
     });
   });
 });

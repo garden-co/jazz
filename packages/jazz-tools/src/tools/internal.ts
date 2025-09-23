@@ -24,6 +24,8 @@ export * from "./implementation/anonymousJazzAgent.js";
 export * from "./implementation/activeAccountContext.js";
 export * from "./implementation/errors.js";
 export * from "./implementation/refs.js";
+export * from "./implementation/registeredEncoders.js";
+export * as encoders from "./implementation/registeredEncodersExport.js";
 export * from "./implementation/schema.js";
 export * from "./subscribe/SubscriptionScope.js";
 export * from "./subscribe/types.js";
