@@ -105,7 +105,7 @@ function parseWhere(
   });
 
   const fieldConditionsKeys = topLevelKeys.filter(
-    (key): key is WhereLogicalOperator => !(key in WhereLogicalOperators),
+    (key): key is keyof typeof where => !(key in WhereLogicalOperators),
   );
   const fieldConditions = Object.entries(
     pick(where, fieldConditionsKeys),
