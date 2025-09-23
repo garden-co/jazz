@@ -1,0 +1,77 @@
+import { CodeGroup } from "@/components/forMdx";
+
+export const metadata = {
+  description:
+    "Use custom encoders to store class instances with z.instanceof in your schemas.",
+};
+
+# Custom Encoders
+
+You can use custom encoders to store class instances within CoValues by defining an encoder for the class. You can then refer to them in your schemas using `z.instanceof(MyClass)`.
+This allows you to directly store and retrieve instances of your classes within CoValues without having to manually serialize and deserialize them.
+
+## Creating and registering encoders
+
+Before creating or loading custom encoded data in Jazz make sure the encoders are registered through `encoders.register(...)`.
+
+<CodeGroup>
+```ts twoslash
+import { co, z, encoders } from "jazz-tools";
+
+class DateRange {
+  constructor(
+    public start: Date,
+    public end: Date,
+  ) {}
+
+  isDateInRange(date: Date) {
+    return date >= this.start && date <= this.end;
+  }
+}
+
+encoders.register(DateRange, {
+  encode: (value) => [value.start.toISOString(), value.end.toISOString()],
+  decode: (value) => {
+    const [start, end] = value as [string, string];
+    return new DateRange(new Date(start), new Date(end));
+  },
+});
+```
+</CodeGroup>
+
+## Using the z.instanceof() schema
+
+As long as the instance encoder has been registered in the code, you can now use `z.instanceof()` in any of your Jazz schemas.
+
+<CodeGroup>
+```ts twoslash
+import { co, z } from "jazz-tools";
+
+class DateRange {
+  constructor(
+    public start: Date,
+    public end: Date,
+  ) {}
+
+  isDateInRange(date: Date) {
+    return date >= this.start && date <= this.end;
+  }
+}
+// ---cut---
+const Calendar = co.map({
+  availability: z.instanceof(DateRange),
+  outOfOffice: z.instanceof(DateRange).optional(),
+});
+
+const cal = Calendar.create({
+  availability: new DateRange(new Date("2025-01-01"), new Date("2025-01-31")),
+});
+
+const isAvailable = cal.availability.isDateInRange(new Date("2025-01-15"));
+```
+</CodeGroup>
+
+## Cleaning up registered encoders
+
+You can remove a registered encoder using `encoders.unregister()`, or remove all registered encoders using `encoders.unregisterAll()`.
+
