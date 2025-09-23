@@ -2,7 +2,9 @@ export const metadata = {
   description: "Passkey authentication is fully local-first and the most secure of the auth methods that Jazz provides because keys are managed by the device/operating system itself."
 };
 
-import { CodeGroup, ContentByFramework } from "@/components/forMdx";
+import { TabbedCodeGroup, TabbedCodeGroupItem, ContentByFramework } from "@/components/forMdx";
+import { SvelteLogo } from "@/components/icons/SvelteLogo";
+import { ReactLogo } from "@/components/icons/ReactLogo";
 
 # Passkey Authentication
 
@@ -22,10 +24,10 @@ Passkey authentication is based on the [Web Authentication API](https://develope
 
 ## Implementation
 
-<ContentByFramework framework="react">
 Using passkeys in Jazz is as easy as this:
 
-<CodeGroup>
+<TabbedCodeGroup default="react" savedPreferenceKey="framework" id="use-passkey-auth">
+<TabbedCodeGroupItem icon={<ReactLogo />} label="React" value="react" className="[&_span]:[tab-size:2]" preferWrap>
 ```tsx twoslash
 import * as React from "react";
 import { useState } from "react";
@@ -65,8 +67,31 @@ export function AuthModal({ open, onOpenChange }: AuthModalProps) {
   );
 }
 ```
-</CodeGroup>
-</ContentByFramework>
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem icon={<SvelteLogo />} label="Svelte" value="svelte" className="[&_span]:[tab-size:2]" preferWrap>
+```svelte
+<script lang="ts">
+  import { usePasskeyAuth } from 'jazz-tools/svelte';
+  const auth = usePasskeyAuth({ appName: 'My super-cool web app' });
+  let username = $state('');
+
+  async function handleSignUp(e: Event) {
+    await auth.current.signUp(username);
+  }
+
+  asyn function handleLogIn(e: Event) {
+    await auth.current.logIn();
+  }
+</script>
+
+<div>
+  <button onclick={handleLogIn}>Log in</button>
+  <input type="text" bind:value={username} />
+  <button onclick={handleSignUp}>Sign up</button>
+</div>
+```
+</TabbedCodeGroupItem>
+</TabbedCodeGroup>
 
 ## Examples
 

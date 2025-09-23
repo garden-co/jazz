@@ -1,0 +1,158 @@
+import { Alert } from "@garden-co/design-system/src/components/atoms/Alert";
+import { CodeGroup, ContentByFramework, FileName, TabbedCodeGroup, TabbedCodeGroupItem } from "@/components/forMdx";
+import { SvelteLogo } from "@/components/icons/SvelteLogo";
+import { ReactLogo } from "@/components/icons/ReactLogo";
+import RunDevServer from "@/components/docs/snippets/RunDevServer.mdx";
+import StuckCTA from "@/components/docs/snippets/StuckCTA.mdx";
+
+export const metadata = {
+  description: "Add authentication to your Jazz app."
+};
+
+# Add Authentication to your App
+
+This guide will show you how you can access your data on multiple devices by signing in to your app.
+
+<Alert variant="info" className="mt-4 flex gap-2 items-center">
+  If you haven't gone through the [front-end Quickstart](/docs/getting-started/quickstart), you might find this guide a bit confusing. If you're looking for a quick reference, you might find [this page](/docs/authentication/overview) or our [Passkey Auth example app](https://github.com/gardencmp/jazz/tree/main/starters/react-passkey-auth) more helpful!
+</Alert>
+
+## Add passkey authentication
+Jazz has a built-in passkey authentication component that you can use to add authentication to your app. This is the easiest way to get started with securely authenticating users into your application. By adding this component, when users access your app, they'll be greeted with an input where they can enter their name, and create a passkey.
+
+<ContentByFramework framework="react">
+  <FileName>app/components/JazzWrapper.tsx</FileName>
+</ContentByFramework>
+<ContentByFramework framework="svelte">
+  <FileName>src/routes/+layout.svelte</FileName>
+</ContentByFramework>
+
+<TabbedCodeGroup savedPreferenceKey="framework" id="add-passkey-auth">
+<TabbedCodeGroupItem label="React" value="react" className="[&_span]:[tab-size:2]" icon={<ReactLogo />} preferWrap>
+  ```tsx
+  "use client"; // tells Next.js that this component can't be server-side rendered. If you're not using Next.js, you can remove it.
+  // [!code --:1]
+  import { JazzReactProvider } from "jazz-tools/react";
+  // [!code ++:1]
+import { JazzReactProvider, PasskeyAuthBasicUI } from "jazz-tools/react";
+import { JazzFestAccount } from "@/app/schema";
+
+const apiKey = process.env.NEXT_PUBLIC_JAZZ_API_KEY;
+
+export function JazzWrapper({ children }: { 
+  children: React.ReactNode 
+}) {
+  return (
+    <JazzReactProvider
+      sync={{ 
+        peer: `wss://cloud.jazz.tools/?key=${apiKey}` 
+      }}
+      AccountSchema={JazzFestAccount}
+    >
+      {/* [!code ++:1] */}
+      <PasskeyAuthBasicUI appName="JazzFest">
+        {children}
+      {/* [!code ++:1] */}
+      </PasskeyAuthBasicUI>
+    </JazzReactProvider>
+  );
+}
+  ```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem label="Svelte" value="svelte" className="[&_span]:[tab-size:2]" icon={<SvelteLogo />} preferWrap>
+```svelte
+<script lang="ts">
+  // [!code --:1]
+  import { JazzSvelteProvider } from "jazz-tools/svelte";
+  // [!code ++:1]
+  import { JazzSvelteProvider, PasskeyAuthBasicUI } from "jazz-tools/svelte";
+  import { JazzFestAccount } from "$lib/schema";
+	import { PUBLIC_JAZZ_API_KEY } from "$env/static/public";
+
+  const apiKey = PUBLIC_JAZZ_API_KEY;
+  let { children } = $props();
+  const sync = { peer: `wss://cloud.jazz.tools/?key=${apiKey}` };
+</script>
+
+<JazzSvelteProvider {sync} AccountSchema={JazzFestAccount}>
+  <!-- [!code ++:1] -->
+  <PasskeyAuthBasicUI appName="JazzFest" />
+  {@render children?.()}
+</JazzSvelteProvider>
+```
+</TabbedCodeGroupItem>
+</TabbedCodeGroup>
+
+<ContentByFramework framework="react">
+<details>
+<summary>Already completed the server-side rendering guide?</summary>
+
+You'll need to make a couple of small changes to your structure in order for this to work on the server.
+
+<FileName>app/components/JazzWrapper.tsx</FileName>
+<CodeGroup className="[&_span]:[tab-size:2]" preferWrap>
+```tsx
+"use client"; // tells Next.js that this component can't be server-side rendered. If you're not using Next.js, you can remove it.
+// [!code --:1]
+import { JazzReactProvider, PasskeyAuthBasicUI } from "jazz-tools/react"; 
+// [!code ++:1]
+import { JazzReactProvider, PasskeyAuthBasicUI, useAccount } from "jazz-tools/react"; 
+import { JazzFestAccount } from "@/app/schema";
+
+const apiKey = process.env.NEXT_PUBLIC_JAZZ_API_KEY;
+
+export function JazzWrapper({ children }: {
+  children: React.ReactNode
+}) {
+
+  return (
+    <JazzReactProvider
+      sync={{
+        peer: `wss://cloud.jazz.tools/?key=${apiKey}`
+      }}
+      AccountSchema={JazzFestAccount}
+      enableSSR
+    >
+    {/* [!code --:3] */}
+      <PasskeyAuthBasicUI appName="JazzFest">
+        {children}
+      </PasskeyAuthBasicUI>
+    {/* [!code ++:1] */}
+      <Auth>{children}</Auth>
+    </JazzReactProvider>
+  );
+}
+
+// [!code ++:10]
+export function Auth({ children }: { children: React.ReactNode }) {
+  const { agent } = useAccount();
+  const isGuest = agent.$type$ !== "Account"
+  if (isGuest) return children;
+  return (
+    <PasskeyAuthBasicUI appName="JazzFest">
+      {children}
+    </PasskeyAuthBasicUI>
+  )
+}
+```
+</CodeGroup>
+You'll also need to be aware that the server agent can only render public CoValues.
+</details>
+</ContentByFramework>
+
+## Give it a go!
+... what, already?! Yes! Run your app and try creating a passkey and logging in!
+
+<RunDevServer />
+
+### Not working?
+- Did you add `<PasskeyAuthBasicUI>` *inside* your provider?
+- Does it wrap all the children?
+- Are you running your app in a <a href="https://developer.mozilla.org/en-US/docs/Web/Security/Secure_Contexts" target="_blank" rel="noopener noreferrer">secure context</a> (either HTTPS or localhost)?
+
+<StuckCTA />
+
+## Next steps
+- Learn more about how to [customise the Passkey Auth UI](/docs/authentication/passkey) using the `usePasskeyAuth` hook
+- Check out how to [use other types of authentication](/docs/authentication/overview#available-authentication-methods)
+- Find out how to [use server workers](/docs/server-side/quickstart) to build more complex applications

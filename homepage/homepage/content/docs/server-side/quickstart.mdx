@@ -2,11 +2,15 @@ export const metadata = {
   description: "Get started building a simple server worker with Jazz in 10 minutes."
 };
 
-import { CodeGroup, ContentByFramework, FileName, TabbedCodeGroup, TabbedCodeGroupItem, StuckCTA } from "@/components/forMdx";
+import { CodeGroup, ContentByFramework, FileName, TabbedCodeGroup, TabbedCodeGroupItem } from "@/components/forMdx";
 import { Alert } from "@garden-co/design-system/src/components/atoms/Alert";
 import { TextLink } from "@garden-co/design-system/src/components/atoms/TextLink";
 import { ReactLogo } from "@/components/icons/ReactLogo";
 import { SvelteLogo } from "@/components/icons/SvelteLogo";
+import GetAPIKey from "@/components/docs/snippets/GetAPIKey.mdx";
+import InstallJazz from "@/components/docs/snippets/InstallJazz.mdx";
+import RunDevServer from "@/components/docs/snippets/RunDevServer.mdx";
+import StuckCTA from "@/components/docs/snippets/StuckCTA.mdx";
 
 # Get started with Server Workers in 10 minutes
 This quickstart guide will take you from an empty project to a server worker which can interact with your Jazz application. 
@@ -61,40 +65,16 @@ This quickstart guide will take you from an empty project to a server worker whi
 <Alert variant="info" className="mt-4 flex gap-2 items-center">
   Requires Node.js 20+
 </Alert>
+
 ## Install Jazz
 
 The `jazz-tools` package includes everything you're going to need to build your first Jazz server worker.
 
-<TabbedCodeGroup id="install-jazz" default="pnpm" savedPreferenceKey="package-manager">
-<TabbedCodeGroupItem label="npm">
-```sh
-npm install jazz-tools
-```
-</TabbedCodeGroupItem>
-<TabbedCodeGroupItem label="pnpm">
-```sh
-pnpm add jazz-tools
-```
-</TabbedCodeGroupItem>
-</TabbedCodeGroup>
+<InstallJazz />
 
-## Get your free API key
+## Set your API key
 
-Sign up for a free API key at [dashboard.jazz.tools](https://dashboard.jazz.tools) for higher limits or production use, or use your email address as a temporary key to get started quickly.
-
-<FileName>.env</FileName>
-<TabbedCodeGroup id="api-key" default="react" savedPreferenceKey="framework">
-<TabbedCodeGroupItem label="Next.js" icon={<ReactLogo />} value="react" className="[&_span]:[tab-size:2]" preferWrap>
-```bash
-NEXT_PUBLIC_JAZZ_API_KEY=you@example.com
-```
-</TabbedCodeGroupItem>
-<TabbedCodeGroupItem label="SvelteKit" icon={<SvelteLogo />} value="svelte" className="[&_span]:[tab-size:2]" preferWrap>
-```bash
-PUBLIC_JAZZ_API_KEY=you@example.com
-```
-</TabbedCodeGroupItem>
-</TabbedCodeGroup>
+<GetAPIKey />
 
 ## Define your schema
 We're going to define a simple schema for our server worker. We'll use the `root` on the worker to store a list of bands. We're also going to add a migration to initialise the `root` if it doesn't exist.
@@ -317,18 +297,8 @@ export const POST: RequestHandler = async ({ request }) => {
 
 We can now start our development server to make sure everything is working.
 
-<TabbedCodeGroup id="start-server" default="pnpm" savedPreferenceKey="package-manager">
-<TabbedCodeGroupItem label="npm">
-```sh
-npm run dev
-```
-</TabbedCodeGroupItem>
-<TabbedCodeGroupItem label="pnpm">
-```sh
-pnpm run dev
-```
-</TabbedCodeGroupItem>
-</TabbedCodeGroup>
+<RunDevServer />
+
 
 <ContentByFramework framework="react">
 If you open your browser, you should see the default Next.js welcome page.
