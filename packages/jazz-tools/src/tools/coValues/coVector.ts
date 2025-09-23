@@ -127,8 +127,7 @@ export class CoVector extends Float32Array implements CoValue {
     }
 
     const coVector = new this(parseCoValueCreateOptions(options));
-    coVector.set(vectorAsFloat32Array, 0);
-    coVector._isVectorLoaded = true;
+    coVector.setVectorData(vectorAsFloat32Array);
 
     const byteArray = CoVector.toByteArray(vectorAsFloat32Array);
 
@@ -195,10 +194,14 @@ export class CoVector extends Float32Array implements CoValue {
       );
     }
 
-    super.set(vector, 0);
-    this._isVectorLoaded = true;
+    this.setVectorData(vector);
 
     return;
+  }
+
+  private setVectorData(vector: Float32Array): void {
+    super.set(vector, 0);
+    this._isVectorLoaded = true;
   }
 
   /**
@@ -311,6 +314,43 @@ export class CoVector extends Float32Array implements CoValue {
    */
   cosineSimilarity(otherVector: CoVector | Float32Array): number {
     return VectorCalculation.cosineSimilarity(this, otherVector);
+  }
+
+  // CoVector mutation method overrides, as CoVectors aren't meant to be mutated
+  /**
+   * Calling `copyWithin` on a CoVector is forbidden. CoVectors are immutable.
+   * @deprecated If you want to change the vector, replace the former instance of CoVector with a new one.
+   */
+  override copyWithin(target: number, start: number, end?: number): never {
+    throw new Error("Cannot mutate a CoVector using `copyWithin`");
+  }
+  /**
+   * Calling `fill` on a CoVector is forbidden. CoVectors are immutable.
+   * @deprecated If you want to change the vector, replace the former instance of CoVector with a new one.
+   */
+  override fill(value: number, start?: number, end?: number): never {
+    throw new Error("Cannot mutate a CoVector using `fill`");
+  }
+  /**
+   * Calling `reverse` on a CoVector is forbidden. CoVectors are immutable.
+   * @deprecated If you want to change the vector, replace the former instance of CoVector with a new one.
+   */
+  override reverse(): never {
+    throw new Error("Cannot mutate a CoVector using `reverse`");
+  }
+  /**
+   * Calling `set` on a CoVector is forbidden. CoVectors are immutable.
+   * @deprecated If you want to change the vector, replace the former instance of CoVector with a new one.
+  //  */
+  override set(array: ArrayLike<number>, offset?: number): never {
+    throw new Error("Cannot mutate a CoVector using `set`");
+  }
+  /**
+   * Calling `sort` on a CoVector is forbidden. CoVectors are immutable.
+   * @deprecated If you want to change the vector, replace the former instance of CoVector with a new one.
+   */
+  override sort(compareFn?: (a: number, b: number) => number): never {
+    throw new Error("Cannot mutate a CoVector using `sort`");
   }
 }
 

@@ -318,6 +318,12 @@ describe("CoVector reader methods & properties (Float32Array-like)", async () =>
     expect(coVector.some((item) => item > 5)).toBe(false);
   });
 
+  test("supports .subarray", () => {
+    expect(coVector.subarray().toString()).toEqual("1,2,3,4,5");
+    expect(coVector.subarray(2).toString()).toEqual("3,4,5");
+    expect(coVector.subarray(2, 4).toString()).toEqual("3,4");
+  });
+
   test("supports .toJSON (JSON.stringify)", () => {
     expect(JSON.stringify(coVector)).toEqual(`[1,2,3,4,5]`);
   });
@@ -345,65 +351,37 @@ describe("CoVector reader methods & properties (Float32Array-like)", async () =>
   test("supports .values", () => {
     expect(Array.from(coVector.values())).toEqual([1, 2, 3, 4, 5]);
   });
-});
-
-describe("CoVector setters & mutators (Float32Array-like)", async () => {
-  const EmbeddingSchema = co.vector(5);
-
-  test("supports updating value at index", () => {
-    const coVector = EmbeddingSchema.create([1, 2, 3, 4, 5]);
-    coVector[0] = 6;
-    expect(coVector.toString()).toEqual("6,2,3,4,5");
-  });
-
-  test("supports .copyWithin", () => {
-    const coVector = EmbeddingSchema.create([1, 2, 3, 4, 5]);
-    coVector.copyWithin(3, 0, 2);
-    expect(coVector.toString()).toEqual("1,2,3,1,2");
-  });
-
-  test("supports .fill", () => {
-    const coVector = EmbeddingSchema.create([1, 2, 3, 4, 5]);
-    coVector.fill(6);
-    expect(coVector.toString()).toEqual("6,6,6,6,6");
-
-    const coVector2 = EmbeddingSchema.create([1, 2, 3, 4, 5]);
-    coVector2.fill(6, 2);
-    expect(coVector2.toString()).toEqual("1,2,6,6,6");
-  });
-
-  test("supports .reverse", () => {
-    const coVector = EmbeddingSchema.create([1, 2, 3, 4, 5]);
-    coVector.reverse();
-    expect(coVector.toString()).toEqual("5,4,3,2,1");
-  });
-
-  test("supports .set", () => {
-    const coVector = EmbeddingSchema.create([1, 2, 3, 4, 5]);
-    coVector.set(new Float32Array([6, 7, 8]));
-    expect(coVector.toString()).toEqual("6,7,8,4,5");
-  });
-
-  test("supports .sort", () => {
-    const coVector = EmbeddingSchema.create([3, 1, 2, 5, 4]);
-    coVector.sort();
-    expect(coVector.toString()).toEqual("1,2,3,4,5");
-  });
-
-  test("supports .subarray", () => {
-    const coVector = EmbeddingSchema.create([1, 2, 3, 4, 5]);
-    expect(coVector.subarray().toString()).toEqual("1,2,3,4,5");
-
-    const coVector2 = EmbeddingSchema.create([1, 2, 3, 4, 5]);
-    expect(coVector2.subarray(2).toString()).toEqual("3,4,5");
-
-    const coVector3 = EmbeddingSchema.create([1, 2, 3, 4, 5]);
-    expect(coVector3.subarray(2, 4).toString()).toEqual("3,4");
-  });
 
   test("supports .with", () => {
-    const coVector = EmbeddingSchema.create([1, 2, 3, 4, 5]);
     expect(coVector.with(4, 2).toString()).toEqual("1,2,3,4,2");
+  });
+});
+
+describe("CoVector mutation methods", async () => {
+  const EmbeddingSchema = co.vector(5);
+  const { coVector } = await initNodeAndVector(
+    EmbeddingSchema,
+    new Float32Array([1, 2, 3, 4, 5]),
+  );
+
+  const expectedErrorMessage = /Cannot mutate a CoVector/i;
+
+  test("calling .copyWithin • throws an error", () => {
+    expect(() => coVector.copyWithin(1, 2)).toThrow(expectedErrorMessage);
+  });
+  test("calling .fill • throws an error", () => {
+    expect(() => coVector.fill(1)).toThrow(expectedErrorMessage);
+  });
+  test("calling .reverse • throws an error", () => {
+    expect(() => coVector.reverse()).toThrow(expectedErrorMessage);
+  });
+  test("calling .set • throws an error", () => {
+    expect(() => coVector.set(new Float32Array([6, 7, 8]))).toThrow(
+      expectedErrorMessage,
+    );
+  });
+  test("calling .sort • throws an error", () => {
+    expect(() => coVector.sort()).toThrow(expectedErrorMessage);
   });
 });
 
