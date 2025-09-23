@@ -385,6 +385,57 @@ describe("CoList", () => {
           });
         });
       });
+
+      describe("CoList is shallowly loaded", () => {
+        test("when using query modifier inside a CoMap", async () => {
+          const Score = co.map({
+            priority: z.number(),
+          });
+          const ItemList = co.list(Score);
+          const Project = co.map({ items: ItemList });
+
+          const list = Project.create({
+            items: [{ priority: 2 }, { priority: 1 }, { priority: 3 }],
+          });
+
+          const loadedProject = await Project.load(list.$jazz.id, {
+            resolve: { items: { $orderBy: { priority: "desc" } } },
+          });
+
+          type ExpectedType = CoList<({ priority: number } & CoMap) | null>;
+          function matches(value: ExpectedType) {
+            return value;
+          }
+          assert(loadedProject);
+          matches(loadedProject.items);
+        });
+
+        test("when using query modifier inside a CoList", async () => {
+          const Score = co.map({
+            priority: z.number(),
+          });
+          const ItemList = co.list(Score);
+          const ItemLists = co.list(ItemList);
+
+          const list = ItemLists.create([
+            [{ priority: 2 }, { priority: 1 }, { priority: 3 }],
+          ]);
+
+          const loadedItemLists = await ItemLists.load(list.$jazz.id, {
+            resolve: { $each: { $orderBy: { priority: "desc" } } },
+          });
+
+          type ExpectedType = ReadonlyArray<
+            CoList<({ readonly priority: number } & CoMap) | null>
+          > &
+            CoList;
+          function matches(value: ExpectedType) {
+            return value;
+          }
+          assert(loadedItemLists);
+          matches(loadedItemLists);
+        });
+      });
     });
   });
 });

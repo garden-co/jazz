@@ -206,23 +206,7 @@ export type DeeplyLoaded<
               | onErrorNullEnabled<Depth["$each"]>
             > &
               V // the CoList base type needs to be intersected after so that built-in methods return the correct narrowed array type
-          : Depth extends
-                | { $orderBy: unknown }
-                | { $where: unknown }
-                | { $limit: unknown }
-                | { $offset: unknown }
-            ? // Shallowly loaded CoList
-              ReadonlyArray<
-                NotNull<Item> &
-                  DeeplyLoaded<
-                    NotNull<Item>,
-                    true,
-                    DepthLimit,
-                    [0, ...CurrentDepth]
-                  >
-              > &
-                V
-            : V
+          : V
         : V
       : // Basically V extends CoMap | Group | Account - but if we used that we'd introduce circularity into the definition of CoMap itself
         [V] extends [{ [TypeSym]: "CoMap" | "Group" | "Account" }]
