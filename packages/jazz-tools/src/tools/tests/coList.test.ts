@@ -1097,6 +1097,35 @@ describe("CoList resolution", async () => {
         });
         expect(loadedList).toEqual([list[0]]);
       });
+
+      test("undefined CoList elements are not included", async () => {
+        const TestList = co.list(Score.optional());
+        const list = TestList.create([
+          { priority: 1 },
+          { priority: 2 },
+          undefined,
+          { priority: 4 },
+        ]);
+        const paginatedList = await TestList.load(list.$jazz.id, {
+          resolve: { $where: { priority: { $eq: 1 } } },
+        });
+        expect(paginatedList).toEqual([list[0]]);
+      });
+
+      test("CoList elements returned as null by $onError are not included", async () => {
+        list.$jazz.push(
+          Score.create({ priority: 5 }, { owner: serverAccount }),
+        );
+
+        const loadedList = await ItemList.load(list.$jazz.id, {
+          loadAs: clientAccount,
+          resolve: {
+            $each: { $onError: null },
+            $where: { priority: { $eq: 1 } },
+          },
+        });
+        expect(loadedList).toEqual([list[1], list[3]]);
+      });
     });
 
     describe("$orderBy", () => {
@@ -1167,6 +1196,35 @@ describe("CoList resolution", async () => {
         });
         expect(loadedList).toEqual([list[3], list[1], list[0], list[2]]);
       });
+
+      test("undefined CoList elements are not included", async () => {
+        const TestList = co.list(Score.optional());
+        const list = TestList.create([
+          { priority: 1 },
+          { priority: 2 },
+          undefined,
+          { priority: 4 },
+        ]);
+        const paginatedList = await TestList.load(list.$jazz.id, {
+          resolve: { $orderBy: { priority: OrderByDirection.DESC } },
+        });
+        expect(paginatedList).toEqual([list[3], list[1], list[0]]);
+      });
+
+      test("CoList elements returned as null by $onError are not included", async () => {
+        list.$jazz.push(
+          Score.create({ priority: 5 }, { owner: serverAccount }),
+        );
+
+        const loadedList = await ItemList.load(list.$jazz.id, {
+          loadAs: clientAccount,
+          resolve: {
+            $each: { $onError: null },
+            $orderBy: { priority: OrderByDirection.DESC },
+          },
+        });
+        expect(loadedList).toEqual([list[2], list[0], list[1], list[3]]);
+      });
     });
 
     describe("$limit and $offset", () => {
@@ -1210,33 +1268,6 @@ describe("CoList resolution", async () => {
       });
       assert(loadedMap);
       expect(loadedMap.children).toEqual(["b", "c"]);
-    });
-
-    test("undefined CoList elements are not included when using query modifiers", async () => {
-      const TestList = co.list(Score.optional());
-      const list = TestList.create([
-        { priority: 1 },
-        { priority: 2 },
-        undefined,
-        { priority: 4 },
-      ]);
-      const paginatedList = await TestList.load(list.$jazz.id, {
-        resolve: { $limit: 2, $offset: 1 },
-      });
-      expect(paginatedList).toEqual([list[1], list[3]]);
-    });
-
-    test("CoList elements returned as null by $onError are not included when using query modifiers", async () => {
-      list.$jazz.push(Score.create({ priority: 5 }, { owner: serverAccount }));
-
-      const loadedList = await ItemList.load(list.$jazz.id, {
-        loadAs: clientAccount,
-        resolve: {
-          $each: { $onError: null },
-          $orderBy: { priority: OrderByDirection.DESC },
-        },
-      });
-      expect(loadedList).toEqual([list[2], list[0], list[1], list[3]]);
     });
   });
 });
