@@ -8,7 +8,7 @@ use napi_derive::napi;
 #[napi]
 pub fn generate_nonce(nonce_material: &[u8]) -> Uint8Array {
   let mut hasher = blake3::Hasher::new();
-  hasher.update(&nonce_material);
+  hasher.update(nonce_material);
   hasher.finalize().as_bytes()[..24].into()
 }
 
@@ -19,7 +19,7 @@ pub fn generate_nonce(nonce_material: &[u8]) -> Uint8Array {
 #[napi]
 pub fn blake3_hash_once(data: &[u8]) -> Uint8Array {
   let mut hasher = blake3::Hasher::new();
-  hasher.update(&data);
+  hasher.update(data);
   hasher.finalize().as_bytes().into()
 }
 
@@ -31,19 +31,20 @@ pub fn blake3_hash_once(data: &[u8]) -> Uint8Array {
 #[napi]
 pub fn blake3_hash_once_with_context(data: &[u8], context: &[u8]) -> Uint8Array {
   let mut hasher = blake3::Hasher::new();
-  hasher.update(&context);
-  hasher.update(&data);
+  hasher.update(context);
+  hasher.update(data);
   hasher.finalize().as_bytes().into()
 }
 
 #[napi]
+#[derive(Default)]
 pub struct Blake3Hasher(blake3::Hasher);
 
 #[napi]
 impl Blake3Hasher {
   #[napi(constructor)]
   pub fn new() -> Self {
-    Blake3Hasher(blake3::Hasher::new())
+    Default::default()
   }
 
   #[napi]

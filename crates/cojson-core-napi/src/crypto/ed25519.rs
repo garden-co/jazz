@@ -90,7 +90,7 @@ pub fn ed25519_verify(
   message: &[u8],
   signature: &[u8],
 ) -> napi::Result<bool> {
-  napi::Result::Ok(ed25519_verify_internal(verifying_key, message, signature)?.into())
+  napi::Result::Ok(ed25519_verify_internal(verifying_key, message, signature)?)
 }
 
 /// WASM-exposed function to validate and copy Ed25519 signing key bytes.

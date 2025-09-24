@@ -77,11 +77,11 @@ pub fn sign(message: &[u8], secret: &[u8]) -> napi::Result<String> {
   let secret_str = std::str::from_utf8(secret).map_err(|e| {
     napi::Error::new(
       napi::Status::GenericFailure,
-      &format!("Invalid UTF-8 in secret: {:?}", e),
+      format!("Invalid UTF-8 in secret: {:?}", e),
     )
   })?;
   sign_internal(message, secret_str)
-    .map_err(|e| napi::Error::new(napi::Status::GenericFailure, &e.to_string()))
+    .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e.to_string()))
 }
 
 /// WASM-exposed function to verify an Ed25519 signature.
@@ -94,17 +94,17 @@ pub fn verify(signature: &[u8], message: &[u8], id: &[u8]) -> napi::Result<bool>
   let signature_str = std::str::from_utf8(signature).map_err(|e| {
     napi::Error::new(
       napi::Status::GenericFailure,
-      &format!("Invalid UTF-8 in signature: {:?}", e),
+      format!("Invalid UTF-8 in signature: {:?}", e),
     )
   })?;
   let id_str = std::str::from_utf8(id).map_err(|e| {
     napi::Error::new(
       napi::Status::GenericFailure,
-      &format!("Invalid UTF-8 in id: {:?}", e),
+      format!("Invalid UTF-8 in id: {:?}", e),
     )
   })?;
   verify_internal(signature_str, message, id_str)
-    .map_err(|e| napi::Error::new(napi::Status::GenericFailure, &e.to_string()))
+    .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e.to_string()))
 }
 
 /// WASM-exposed function to derive a signer ID from a signing key.
@@ -115,11 +115,11 @@ pub fn get_signer_id(secret: &[u8]) -> napi::Result<String> {
   let secret_str = std::str::from_utf8(secret).map_err(|e| {
     napi::Error::new(
       napi::Status::GenericFailure,
-      &format!("Invalid UTF-8 in secret: {:?}", e),
+      format!("Invalid UTF-8 in secret: {:?}", e),
     )
   })?;
   get_signer_id_internal(secret_str)
-    .map_err(|e| napi::Error::new(napi::Status::GenericFailure, &e.to_string()))
+    .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e.to_string()))
 }
 
 #[cfg(test)]

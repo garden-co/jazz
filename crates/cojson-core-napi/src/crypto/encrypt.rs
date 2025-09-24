@@ -21,10 +21,10 @@ pub fn encrypt_internal(
     .map_err(|e| CryptoError::Base58Error(e.to_string()))?;
 
   // Generate nonce from nonce material
-  let nonce = generate_nonce(nonce_material.into());
+  let nonce = generate_nonce(nonce_material);
 
   // Encrypt using XSalsa20
-  Ok(super::xsalsa20::encrypt_xsalsa20_raw_internal(&key, &nonce, plaintext)?.into())
+  super::xsalsa20::encrypt_xsalsa20_raw_internal(&key, &nonce, plaintext)
 }
 
 /// Internal function to decrypt bytes with a key secret and nonce material.
@@ -44,10 +44,10 @@ pub fn decrypt_internal(
     .map_err(|e| CryptoError::Base58Error(e.to_string()))?;
 
   // Generate nonce from nonce material
-  let nonce = generate_nonce(nonce_material.into());
+  let nonce = generate_nonce(nonce_material);
 
   // Decrypt using XSalsa20
-  Ok(super::xsalsa20::decrypt_xsalsa20_raw_internal(&key, &nonce, ciphertext)?.into())
+  super::xsalsa20::decrypt_xsalsa20_raw_internal(&key, &nonce, ciphertext)
 }
 
 /// WASM-exposed function to encrypt bytes with a key secret and nonce material.

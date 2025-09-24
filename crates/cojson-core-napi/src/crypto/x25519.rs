@@ -86,7 +86,7 @@ pub fn get_sealer_id(secret: &[u8]) -> napi::Result<String> {
   let secret_str = std::str::from_utf8(secret).map_err(|e| {
     napi::Error::new(
       napi::Status::GenericFailure,
-      &format!("Invalid UTF-8 in secret: {:?}", e),
+      format!("Invalid UTF-8 in secret: {:?}", e),
     )
   })?;
   get_sealer_id_internal(secret_str).map_err(|e| e.into())

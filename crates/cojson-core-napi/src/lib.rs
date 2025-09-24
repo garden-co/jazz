@@ -67,7 +67,7 @@ impl SessionLog {
   pub fn new(co_id: String, session_id: String, signer_id: Option<String>) -> SessionLog {
     let co_id = CoID(co_id);
     let session_id = SessionID(session_id);
-    let signer_id = signer_id.map(|id| SignerID(id));
+    let signer_id = signer_id.map(SignerID);
 
     let internal = SessionLogInternal::new(co_id, session_id, signer_id);
 
@@ -89,12 +89,8 @@ impl SessionLog {
     let transactions: Vec<Box<RawValue>> = transactions_json
       .into_iter()
       .map(|s| {
-        serde_json::from_str(&s).map_err(|e| {
-          CojsonCoreError::Js(String::from(format!(
-            "Failed to parse transaction string: {}",
-            e
-          )))
-        })
+        serde_json::from_str(&s)
+          .map_err(|e| CojsonCoreError::Js(format!("Failed to parse transaction string: {}", e)))
       })
       .collect::<Result<Vec<_>, _>>()
       .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e.to_string()))?;
@@ -173,12 +169,10 @@ impl SessionLog {
     tx_index: u32,
     encryption_key: String,
   ) -> napi::Result<String> {
-    Ok(
-      self
-        .internal
-        .decrypt_next_transaction_changes_json(tx_index, KeySecret(encryption_key))
-        .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e.to_string()))?,
-    )
+    self
+      .internal
+      .decrypt_next_transaction_changes_json(tx_index, KeySecret(encryption_key))
+      .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e.to_string()))
   }
 
   #[napi]
@@ -187,11 +181,9 @@ impl SessionLog {
     tx_index: u32,
     encryption_key: String,
   ) -> napi::Result<Option<String>> {
-    Ok(
-      self
-        .internal
-        .decrypt_next_transaction_meta_json(tx_index, KeySecret(encryption_key))
-        .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e.to_string()))?,
-    )
+    self
+      .internal
+      .decrypt_next_transaction_meta_json(tx_index, KeySecret(encryption_key))
+      .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e.to_string()))
   }
 }

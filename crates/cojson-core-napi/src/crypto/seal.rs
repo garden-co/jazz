@@ -44,7 +44,7 @@ pub fn seal_internal(
     .into_vec()
     .map_err(|e| CryptoError::Base58Error(e.to_string()))?;
 
-  let nonce = generate_nonce(nonce_material.into());
+  let nonce = generate_nonce(nonce_material);
 
   // Generate shared secret using X25519
   let shared_secret = x25519_diffie_hellman_internal(&sender_private_key, &recipient_public_key)?;
@@ -91,13 +91,13 @@ fn unseal_internal(
     .into_vec()
     .map_err(|e| CryptoError::Base58Error(e.to_string()))?;
 
-  let nonce = generate_nonce(nonce_material.into());
+  let nonce = generate_nonce(nonce_material);
 
   // Generate shared secret using X25519
   let shared_secret = x25519_diffie_hellman_internal(&recipient_private_key, &sender_public_key)?;
 
   // Decrypt message using XSalsa20-Poly1305
-  Ok(decrypt_xsalsa20_poly1305(&shared_secret, &nonce, sealed_message)?.into())
+  decrypt_xsalsa20_poly1305(&shared_secret, &nonce, sealed_message)
 }
 
 /// WASM-exposed function for sealing a message using X25519 + XSalsa20-Poly1305.
