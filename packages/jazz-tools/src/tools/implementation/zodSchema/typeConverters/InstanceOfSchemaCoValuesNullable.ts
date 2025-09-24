@@ -13,6 +13,8 @@ import {
   CoreCoListSchema,
   CoreCoMapSchema,
   CoreCoRecordSchema,
+  CoreCoVectorSchema,
+  CoVector,
   FileStream,
   Group,
 } from "../../../internal.js";
@@ -70,15 +72,19 @@ export type InstanceOfSchemaCoValuesNullable<
                   ? CoRichText | null
                   : S extends CoreFileStreamSchema
                     ? FileStream | null
-                    : S extends CoreCoOptionalSchema<infer Inner>
-                      ?
-                          | InstanceOrPrimitiveOfSchemaCoValuesNullable<Inner>
-                          | undefined
-                      : S extends CoreCoDiscriminatedUnionSchema<infer Members>
-                        ? InstanceOrPrimitiveOfSchemaCoValuesNullable<
-                            Members[number]
-                          >
-                        : never
+                    : S extends CoreCoVectorSchema
+                      ? Readonly<CoVector> | null
+                      : S extends CoreCoOptionalSchema<infer Inner>
+                        ?
+                            | InstanceOrPrimitiveOfSchemaCoValuesNullable<Inner>
+                            | undefined
+                        : S extends CoreCoDiscriminatedUnionSchema<
+                              infer Members
+                            >
+                          ? InstanceOrPrimitiveOfSchemaCoValuesNullable<
+                              Members[number]
+                            >
+                          : never
   : S extends CoValueClass
     ? InstanceType<S> | null
     : never;
