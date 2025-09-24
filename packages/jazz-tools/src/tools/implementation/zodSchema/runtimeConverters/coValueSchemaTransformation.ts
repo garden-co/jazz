@@ -12,12 +12,14 @@ import {
   CoValueClass,
   FileStream,
   FileStreamSchema,
+  CoVectorSchema,
   PlainTextSchema,
   SchemaUnion,
   enrichAccountSchema,
   enrichCoMapSchema,
   isCoValueClass,
   Group,
+  CoVector,
 } from "../../../internal.js";
 import { coField } from "../../schema.js";
 
@@ -123,6 +125,17 @@ export function hydrateCoreCoValueSchema<S extends AnyCoreCoValueSchema>(
   } else if (schema.builtin === "FileStream") {
     const coValueClass = FileStream;
     return new FileStreamSchema(coValueClass) as CoValueSchemaFromCoreSchema<S>;
+  } else if (schema.builtin === "CoVector") {
+    const dimensions = schema.dimensions;
+
+    const coValueClass = class CoVectorWithDimensions extends CoVector {
+      protected static requiredDimensionsCount = dimensions;
+    };
+
+    return new CoVectorSchema(
+      dimensions,
+      coValueClass,
+    ) as CoValueSchemaFromCoreSchema<S>;
   } else if (schema.builtin === "CoPlainText") {
     const coValueClass = CoPlainText;
     return new PlainTextSchema(coValueClass) as CoValueSchemaFromCoreSchema<S>;

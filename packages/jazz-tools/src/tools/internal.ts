@@ -16,6 +16,7 @@ export * from "./coValues/inbox.js";
 export * from "./coValues/coPlainText.js";
 export * from "./coValues/coRichText.js";
 export * from "./coValues/schemaUnion.js";
+export * from "./coValues/coVector.js";
 
 export type * from "./subscribe/types.js";
 
@@ -43,6 +44,7 @@ export * from "./implementation/zodSchema/schemaTypes/CoListSchema.js";
 export * from "./implementation/zodSchema/schemaTypes/CoFeedSchema.js";
 export * from "./implementation/zodSchema/schemaTypes/AccountSchema.js";
 export * from "./implementation/zodSchema/schemaTypes/FileStreamSchema.js";
+export * from "./implementation/zodSchema/schemaTypes/CoVectorSchema.js";
 export * from "./implementation/zodSchema/schemaTypes/PlainTextSchema.js";
 export * from "./implementation/zodSchema/typeConverters/InstanceOrPrimitiveOfSchema.js";
 export * from "./implementation/zodSchema/typeConverters/InstanceOrPrimitiveOfSchemaCoValuesNullable.js";

@@ -9,6 +9,7 @@ import {
   type CoRecordSchema,
   type DefaultProfileShape,
   type FileStreamSchema,
+  type CoVectorSchema,
   ImageDefinition,
   type PlainTextSchema,
   type Simplify,
@@ -18,6 +19,7 @@ import {
   createCoreCoMapSchema,
   createCoreCoPlainTextSchema,
   createCoreFileStreamSchema,
+  createCoreCoVectorSchema,
   hydrateCoreCoValueSchema,
   isAnyCoValueSchema,
   isCoValueClass,
@@ -190,6 +192,19 @@ export const coFeedDefiner = <T extends AnyZodOrCoValueSchema>(
 
 export const coFileStreamDefiner = (): FileStreamSchema => {
   const coreSchema = createCoreFileStreamSchema();
+  return hydrateCoreCoValueSchema(coreSchema);
+};
+
+export const coVectorDefiner = (dimensions: number): CoVectorSchema => {
+  const isPositiveInteger = Number.isInteger(dimensions) && dimensions > 0;
+
+  if (!isPositiveInteger) {
+    throw new Error(
+      "co.vector() expects the vector dimensions count to be a positive integer",
+    );
+  }
+
+  const coreSchema = createCoreCoVectorSchema(dimensions);
   return hydrateCoreCoValueSchema(coreSchema);
 };
 
