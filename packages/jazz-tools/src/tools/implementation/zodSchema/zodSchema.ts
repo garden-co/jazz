@@ -34,6 +34,10 @@ import {
   FileStreamSchema,
 } from "./schemaTypes/FileStreamSchema.js";
 import {
+  CoreCoVectorSchema,
+  CoVectorSchema,
+} from "./schemaTypes/CoVectorSchema.js";
+import {
   CorePlainTextSchema,
   PlainTextSchema,
 } from "./schemaTypes/PlainTextSchema.js";
@@ -75,11 +79,15 @@ export type CoValueSchemaFromCoreSchema<S extends CoreCoValueSchema> =
                   ? RichTextSchema
                   : S extends CoreFileStreamSchema
                     ? FileStreamSchema
-                    : S extends CoreCoOptionalSchema<infer Inner>
-                      ? CoOptionalSchema<Inner>
-                      : S extends CoreCoDiscriminatedUnionSchema<infer Members>
-                        ? CoDiscriminatedUnionSchema<Members>
-                        : never;
+                    : S extends CoreCoVectorSchema
+                      ? CoVectorSchema
+                      : S extends CoreCoOptionalSchema<infer Inner>
+                        ? CoOptionalSchema<Inner>
+                        : S extends CoreCoDiscriminatedUnionSchema<
+                              infer Members
+                            >
+                          ? CoDiscriminatedUnionSchema<Members>
+                          : never;
 
 export type CoValueClassFromAnySchema<S extends CoValueClassOrSchema> =
   S extends CoValueClass<any>
@@ -104,7 +112,8 @@ export type AnyCoreCoValueSchema =
   | CoreCoOptionalSchema
   | CorePlainTextSchema
   | CoreRichTextSchema
-  | CoreFileStreamSchema;
+  | CoreFileStreamSchema
+  | CoreCoVectorSchema;
 
 export type AnyZodSchema = z.core.$ZodType;
 

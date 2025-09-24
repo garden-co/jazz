@@ -7,9 +7,11 @@ import {
   CoMap,
   CoPlainText,
   CoRichText,
+  CoVector,
   CoValueClass,
   CoreAccountSchema,
   CoreCoRecordSchema,
+  CoreCoVectorSchema,
   FileStream,
   Group,
 } from "../../../internal.js";
@@ -63,11 +65,13 @@ export type InstanceOfSchema<S extends CoValueClass | AnyZodOrCoValueSchema> =
                     ? CoRichText
                     : S extends CoreFileStreamSchema
                       ? FileStream
-                      : S extends CoreCoOptionalSchema<infer T>
-                        ? InstanceOrPrimitiveOfSchema<T> | undefined
-                        : S extends CoDiscriminatedUnionSchema<infer Members>
-                          ? InstanceOrPrimitiveOfSchema<Members[number]>
-                          : never
+                      : S extends CoreCoVectorSchema
+                        ? Readonly<CoVector>
+                        : S extends CoreCoOptionalSchema<infer T>
+                          ? InstanceOrPrimitiveOfSchema<T> | undefined
+                          : S extends CoDiscriminatedUnionSchema<infer Members>
+                            ? InstanceOrPrimitiveOfSchema<Members[number]>
+                            : never
     : S extends CoValueClass
       ? InstanceType<S>
       : never;
