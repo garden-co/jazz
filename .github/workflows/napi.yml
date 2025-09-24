@@ -103,8 +103,8 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             ~/.napi-rs
-            .cargo-cache
-            target/
+            ${{ env.PATH_BUILD }}/.cargo-cache
+            ${{ env.PATH_BUILD }}/target/
           key: ${{ matrix.settings.target }}-cargo-${{ matrix.settings.host }}
       - uses: mlugg/setup-zig@v2
         if: ${{ contains(matrix.settings.target, 'musl') }}
@@ -221,7 +221,7 @@ jobs:
         uses: actions/download-artifact@v5
         with:
           name: bindings-${{ matrix.settings.target }}
-          path: .
+          path: ${{ env.PATH_BUILD }}/.
       - name: List packages
         run: ls -R .
         shell: bash
@@ -281,7 +281,7 @@ jobs:
         uses: actions/download-artifact@v5
         with:
           name: bindings-${{ matrix.target }}
-          path: .
+          path: ${{ env.PATH_BUILD }}/.
       - name: List packages
         run: ls -R .
         shell: bash
