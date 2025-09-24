@@ -1,5 +1,5 @@
 import { beforeAll, describe, expect, it, vi } from "vitest";
-import { encoders, z } from "../exports.js";
+import { z } from "../exports.js";
 import { co } from "../internal.js";
 import { createJazzTestAccount, setupJazzTestSync } from "../testing.js";
 
