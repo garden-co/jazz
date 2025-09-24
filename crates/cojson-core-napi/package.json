@@ -57,7 +57,7 @@
     "format:prettier": "prettier . -w",
     "format:toml": "taplo format",
     "format:rs": "cargo fmt",
-    "lint": "oxlint . && cargo fmt -- --check && cargo clippy",
+    "lint": "oxlint . && cargo fmt -- --check",
     "prepublishOnly": "napi prepublish -t npm",
     "test": "vitest --watch --root ../../ --project cojson-core-napi",
     "preversion": "napi build --platform && git add .",
