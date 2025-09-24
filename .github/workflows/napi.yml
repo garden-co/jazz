@@ -14,13 +14,11 @@ env:
       - main
     tags-ignore:
       - '**'
-    paths-ignore:
-      - '**/*.md'
-      - LICENSE
-      - '**/*.gitignore'
-      - .editorconfig
-      - docs/**
-  pull_request: null
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - 'crates/cojson-core-napi/**'
+      - '.github/workflows/napi.yml'
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -38,12 +36,8 @@ jobs:
           components: clippy, rustfmt
       - name: Install dependencies
         run: pnpm install
-      - name: Oxlint
-        run: pnpm lint
-      - name: Cargo fmt
-        run: cargo fmt -- --check
-      - name: Clippy
-        run: cargo clippy
+      - name: Linting
+        run: pnpm exec turbo lint --filter=cojson-core-napi
   build:
     strategy:
       fail-fast: false
