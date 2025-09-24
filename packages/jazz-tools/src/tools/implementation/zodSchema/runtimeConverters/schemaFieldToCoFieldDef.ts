@@ -1,5 +1,5 @@
+import type { JsonValue } from "cojson";
 import { CoValueClass, isCoValueClass } from "../../../internal.js";
-import { registeredInstanceEncoders } from "../../registeredEncoders.js";
 import { coField } from "../../schema.js";
 import { CoreCoValueSchema } from "../schemaTypes/CoValueSchema.js";
 import { isUnionOfPrimitivesDeeply } from "../unionUtils.js";
@@ -34,9 +34,29 @@ export type SchemaField =
   | z.core.$ZodTemplateLiteral<any>
   | z.core.$ZodLiteral<any>
   | z.core.$ZodEnum<any>
-  | z.core.$ZodCustom<any, any>
+  | z.core.$ZodCodec<z.core.$ZodType, z.core.$ZodType>
   | z.core.$ZodDefault<z.core.$ZodType>
   | z.core.$ZodCatch<z.core.$ZodType>;
+
+function makeCodecCoField(
+  codec: z.core.$ZodCodec<z.core.$ZodType, z.core.$ZodType>,
+) {
+  return coField.optional.encoded({
+    encode: (value: any) => {
+      if (value === undefined) return undefined as unknown as JsonValue;
+      if (value === null) return null;
+      return codec._zod.def.reverseTransform(value, {
+        value,
+        issues: [],
+      }) as JsonValue;
+    },
+    decode: (value) => {
+      if (value === null) return null;
+      if (value === undefined) return undefined;
+      return codec._zod.def.transform(value, { value, issues: [] });
+    },
+  });
+}
 
 export function schemaFieldToCoFieldDef(schema: SchemaField) {
   if (isCoValueClass(schema)) {
@@ -55,9 +75,7 @@ export function schemaFieldToCoFieldDef(schema: SchemaField) {
         zodSchemaDef.type === "optional" ||
         zodSchemaDef.type === "nullable"
       ) {
-        const inner = zodSchemaDef.innerType as
-          | ZodPrimitiveSchema
-          | z.core.$ZodCustom<any, any>;
+        const inner = zodSchemaDef.innerType as SchemaField;
         const coFieldDef: any = schemaFieldToCoFieldDef(inner);
         if (
           zodSchemaDef.type === "nullable" &&
@@ -140,22 +158,30 @@ export function schemaFieldToCoFieldDef(schema: SchemaField) {
             "z.union()/z.discriminatedUnion() of collaborative types is not supported. Use co.discriminatedUnion() instead.",
           );
         }
-      } else if (zodSchemaDef.type === "custom") {
-        const cls = schema._zod.bag.Class;
+      } else if (zodSchemaDef.type === "pipe") {
+        const isCodec =
+          zodSchemaDef.transform !== undefined &&
+          zodSchemaDef.reverseTransform !== undefined;
 
-        if (!cls || !(cls instanceof Function)) {
+        if (!isCodec) {
           throw new Error(
-            "z.custom() is not supported. Only z.instanceof() is supported.",
+            "z.pipe() is not supported. Only z.codec() is supported.",
           );
         }
 
-        if (!registeredInstanceEncoders.has(cls as any)) {
-          throw new Error(
-            `z.instanceof() of ${cls.name} is not supported. Please register an encoder for this class using registerInstanceEncoder().`,
-          );
+        try {
+          schemaFieldToCoFieldDef(zodSchemaDef.in as SchemaField);
+        } catch (error) {
+          if (error instanceof Error) {
+            error.message = `z.codec() is only supported if the input schema is already supported: ${error.message}`;
+          }
+
+          throw error;
         }
 
-        return registeredInstanceEncoders.get(cls as any);
+        return makeCodecCoField(
+          schema as z.core.$ZodCodec<z.core.$ZodType, z.core.$ZodType>,
+        );
       } else {
         throw new Error(
           `Unsupported zod type: ${(schema._zod?.def as any)?.type || JSON.stringify(schema)}`,

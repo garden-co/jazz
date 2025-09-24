@@ -1,13 +1,4 @@
-import {
-  afterEach,
-  beforeAll,
-  beforeEach,
-  describe,
-  expect,
-  it,
-  vi,
-} from "vitest";
-import { z as _z } from "zod/v4";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 import { encoders, z } from "../exports.js";
 import { co } from "../internal.js";
 import { createJazzTestAccount, setupJazzTestSync } from "../testing.js";
@@ -521,7 +512,7 @@ describe("co.map and Zod schema compatibility", () => {
     });
   });
 
-  describe("Class types", () => {
+  describe("Codec types", () => {
     class DateRange {
       constructor(
         public start: Date,
@@ -533,25 +524,24 @@ describe("co.map and Zod schema compatibility", () => {
       }
     }
 
-    beforeEach(() => {
-      encoders.register(DateRange, {
-        encode: (value) => {
-          return [value.start.toISOString(), value.end.toISOString()];
-        },
-        decode: (value) => {
-          const [start, end] = value as [string, string];
+    const dateRangeCodec = z.codec(
+      z.tuple([z.string(), z.string()]),
+      z.z.instanceof(DateRange),
+      {
+        encode: (value) =>
+          [value.start.toISOString(), value.end.toISOString()] as [
+            string,
+            string,
+          ],
+        decode: ([start, end]) => {
           return new DateRange(new Date(start), new Date(end));
         },
-      });
-    });
+      },
+    );
 
-    afterEach(() => {
-      encoders.unregisterAll();
-    });
-
-    it("should handle registered instanceof fields", async () => {
+    it("should handle codec field", async () => {
       const schema = co.map({
-        range: z.instanceof(DateRange),
+        range: dateRangeCodec,
       });
 
       const map = schema.create({
@@ -561,9 +551,9 @@ describe("co.map and Zod schema compatibility", () => {
       expect(map.range.isDateInRange(new Date("2025-01-15"))).toEqual(true);
     });
 
-    it("should handle optional registered instanceof fields", async () => {
+    it("should handle optional codec field", async () => {
       const schema = co.map({
-        range: z.instanceof(DateRange).optional(),
+        range: dateRangeCodec.optional(),
       });
       const map = schema.create({});
 
@@ -571,9 +561,9 @@ describe("co.map and Zod schema compatibility", () => {
       expect(map.$jazz.has("range")).toEqual(false);
     });
 
-    it("should handle nullable registered instanceof fields", async () => {
+    it("should handle nullable codec field", async () => {
       const schema = co.map({
-        range: z.instanceof(DateRange).nullable(),
+        range: dateRangeCodec.nullable(),
       });
       const map = schema.create({ range: null });
 
@@ -586,9 +576,9 @@ describe("co.map and Zod schema compatibility", () => {
       expect(map.range?.isDateInRange(new Date("2025-01-15"))).toEqual(true);
     });
 
-    it("should handle nullish registered instanceof fields", async () => {
+    it("should handle nullish codec field", async () => {
       const schema = co.map({
-        range: z.instanceof(DateRange).nullish(),
+        range: dateRangeCodec.nullish(),
       });
 
       const map = schema.create({});
@@ -609,39 +599,27 @@ describe("co.map and Zod schema compatibility", () => {
       expect(map.range?.isDateInRange(new Date("2025-01-15"))).toEqual(true);
     });
 
-    it("should not handle never registered instanceof fields", () => {
+    it("should not handle codec field with unsupported inner field", async () => {
       const schema = co.map({
-        buffer: z.instanceof(Buffer),
-      });
-
-      expect(() => schema.create({ buffer: Buffer.from("test") })).toThrow(
-        "z.instanceof() of Buffer is not supported. Please register an encoder for this class using registerInstanceEncoder().",
-      );
-    });
-
-    it("should not handle unregistered instanceof fields", () => {
-      encoders.unregister(DateRange);
-
-      const schema = co.map({
-        range: z.instanceof(DateRange),
+        record: z.codec(
+          z.z.map(z.string(), z.string()),
+          z.z.record(z.string(), z.string()),
+          {
+            encode: (value) => new Map(Object.entries(value)),
+            decode: (value) => Object.fromEntries(value.entries()),
+          },
+        ),
       });
 
       expect(() =>
         schema.create({
-          range: new DateRange(new Date("2025-01-01"), new Date("2025-01-31")),
+          record: {
+            key1: "value1",
+            key2: "value2",
+          },
         }),
       ).toThrow(
-        "z.instanceof() of DateRange is not supported. Please register an encoder for this class using registerInstanceEncoder().",
-      );
-    });
-
-    it("should not handle z.custom() fields", () => {
-      const schema = co.map({
-        coId: _z.custom<`co_z${string}`>(),
-      });
-
-      expect(() => schema.create({ coId: "co_z1234567890" })).toThrow(
-        "z.custom() is not supported. Only z.instanceof() is supported.",
+        "z.codec() is only supported if the input schema is already supported: Unsupported zod type: map",
       );
     });
   });

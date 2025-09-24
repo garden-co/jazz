@@ -196,7 +196,7 @@
     "prosemirror-state": "^1.4.3",
     "prosemirror-transform": "^1.9.0",
     "use-sync-external-store": "^1.5.0",
-    "zod": "3.25.76"
+    "zod": "4.1.11"
   },
   "scripts": {
     "check": "tsc --noEmit",

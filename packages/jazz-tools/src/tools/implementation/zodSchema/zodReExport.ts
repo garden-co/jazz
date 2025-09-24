@@ -35,7 +35,7 @@ export {
   // record,
   // intersection,
   int,
-  instanceof,
+  codec,
   optional,
   array,
   tuple,
