@@ -36,7 +36,7 @@
     "bench": "vitest bench",
     "dev": "turbo dev",
     "build": "turbo build && cd homepage/homepage && turbo build",
-    "build:packages": "turbo build --filter='./packages/*'",
+    "build:packages": "turbo build --filter='./packages/*' --filter='./crates/cojson-core-napi'",
     "build:napi": "turbo build --filter='cojson-core-napi' --",
     "lint": "turbo lint && cd homepage/homepage && pnpm run lint",
     "test": "vitest",

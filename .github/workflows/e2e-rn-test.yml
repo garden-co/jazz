@@ -18,7 +18,7 @@ on:
 
 jobs:
   e2e-tests:
-    runs-on: blacksmith-4vcpu-ubuntu-2204
+    runs-on: blacksmith-4vcpu-ubuntu-2404
 
     steps:
       - name: Checkout
