@@ -637,7 +637,7 @@ export async function parseAuthToken(
   // Verify the signature of the message to prevent tampering
   const signPayload = crypto.secureHash({
     id: account.$jazz.id,
-    createdAt,
+    createdAt: Number(createdAt),
   });
 
   const agentID = account.$jazz.raw.currentAgentID();
