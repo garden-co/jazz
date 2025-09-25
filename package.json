@@ -38,6 +38,7 @@
     "build": "turbo build && cd homepage/homepage && turbo build",
     "build:packages": "turbo build --filter='./packages/*' --filter='./crates/cojson-core-napi'",
     "build:napi": "turbo build --filter=cojson-core-napi --",
+    "test:napi": "turbo test --filter=cojson-core-napi --",
     "lint": "turbo lint && cd homepage/homepage && pnpm run lint",
     "test": "vitest",
     "test:ci": "vitest run --watch=false",

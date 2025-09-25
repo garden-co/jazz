@@ -5,6 +5,7 @@ env:
   APP_NAME: cojson-core-napi
   MACOSX_DEPLOYMENT_TARGET: '10.13'
   CARGO_INCREMENTAL: '1'
+  TARGET_CC: 'clang'
 'on':
   push:
     paths:
@@ -69,10 +70,10 @@ jobs:
             build: pnpm build:napi --target armv7-unknown-linux-gnueabihf --use-napi-cross
           - host: ubuntu-latest
             target: aarch64-linux-android
-            build: pnpm build:napi --target aarch64-linux-android
+            build: pnpm --shell-emulator build:napi --target aarch64-linux-android
           - host: ubuntu-latest
             target: armv7-linux-androideabi
-            build: pnpm build:napi --target armv7-linux-androideabi
+            build: pnpm --shell-emulator build:napi --target armv7-linux-androideabi
           - host: ubuntu-latest
             target: aarch64-unknown-linux-musl
             build: pnpm build:napi --target aarch64-unknown-linux-musl -x
@@ -126,60 +127,14 @@ jobs:
       - name: Build
         run: ${{ matrix.settings.build }}
         shell: bash
+        env:
+          ANDROID_NDK_LATEST_HOME: /usr/local/lib/android/sdk/ndk/28.2.13676358
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: bindings-${{ matrix.settings.target }}
           path: |
             ${{ env.PATH_BUILD }}/${{ env.APP_NAME }}.*.node
-          if-no-files-found: error
-  build-freebsd:
-    runs-on: ubuntu-latest
-    name: Build FreeBSD
-    steps:
-      - uses: actions/checkout@v5
-      - name: setup pnpm
-        uses: pnpm/action-setup@v4
-      - name: Build
-        id: build
-        uses: cross-platform-actions/action@v0.29.0
-        env:
-          DEBUG: napi:*
-          RUSTUP_IO_THREADS: 1
-        with:
-          operating_system: freebsd
-          version: '14.2'
-          memory: 8G
-          cpu_count: 3
-          environment_variables: DEBUG RUSTUP_IO_THREADS
-          shell: bash
-          run: |
-            sudo pkg install -y -f curl node libnghttp2 npm cmake
-            sudo npm install -g pnpm --ignore-scripts
-            curl https://sh.rustup.rs -sSf --output rustup.sh
-            sh rustup.sh -y --profile minimal --default-toolchain stable
-            source "$HOME/.cargo/env"
-            echo "~~~~ rustc --version ~~~~"
-            rustc --version
-            echo "~~~~ node -v ~~~~"
-            node -v
-            echo "~~~~ pnpm --version ~~~~"
-            pnpm --version
-            pwd
-            ls -lah
-            whoami
-            env
-            freebsd-version
-            pnpm install
-            pnpm build:napi
-            rm -rf node_modules
-            rm -rf target
-            rm -rf .pnpm/cache
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: bindings-freebsd
-          path: ${{ env.PATH_BUILD }}/${{ env.APP_NAME }}.*.node
           if-no-files-found: error
   test-macOS-windows-binding:
     name: Test bindings on ${{ matrix.settings.target }} - node@${{ matrix.node }}
@@ -192,9 +147,10 @@ jobs:
           - host: windows-latest
             target: x86_64-pc-windows-msvc
             architecture: x64
-          - host: windows-11-arm
-            target: aarch64-pc-windows-msvc
-            architecture: arm64
+          # Skipping ARM Windows for now as wasmPack doesn't support it yet
+          # - host: windows-11-arm
+          #   target: aarch64-pc-windows-msvc
+          #   architecture: arm64
           - host: macos-latest
             target: aarch64-apple-darwin
             architecture: arm64
@@ -223,10 +179,11 @@ jobs:
           name: bindings-${{ matrix.settings.target }}
           path: ${{ env.PATH_BUILD }}/.
       - name: List packages
-        run: ls -R .
+        run: ls -R ${{ env.PATH_BUILD }}
         shell: bash
       - name: Test bindings
-        run: pnpm test
+        run: cd ${{ env.PATH_BUILD }} && pnpm test:ci && cd -
+        shell: bash
   test-linux-binding:
     name: Test ${{ matrix.target }} - node@${{ matrix.node }}
     needs:
@@ -272,11 +229,9 @@ jobs:
               console.log('IMAGE=node:${{ matrix.node }}-slim')
             }
           " >> $GITHUB_OUTPUT
+          echo "PNPM_STORE_PATH=$(pnpm store path --silent)" >> $GITHUB_OUTPUT
       - name: Install dependencies
-        run: |
-          pnpm config set --json supportedArchitectures.cpu '["current", "arm64", "x64", "arm"]'
-          pnpm config set --json supportedArchitectures.libc '["current", "musl", "gnu"]'
-          pnpm install
+        run: pnpm install --force
       - name: Download artifacts
         uses: actions/download-artifact@v5
         with:
@@ -297,7 +252,7 @@ jobs:
         with:
           image: ${{ steps.docker.outputs.IMAGE }}
           options: '-v ${{ github.workspace }}:${{ github.workspace }} -w ${{ github.workspace }} --platform ${{ steps.docker.outputs.PLATFORM }}'
-          run: pnpm test
+          run: cd ${{ env.PATH_BUILD }} && npm run test:ci && cd -
   publish:
     name: Publish
     runs-on: ubuntu-latest
@@ -306,7 +261,6 @@ jobs:
       id-token: write
     needs:
       - lint
-      - build-freebsd
       - test-macOS-windows-binding
       - test-linux-binding
     steps:

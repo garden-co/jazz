@@ -59,7 +59,8 @@
     "format:rs": "cargo fmt",
     "lint": "oxlint . && cargo fmt -- --check",
     "prepublishOnly": "napi prepublish -t npm",
-    "test": "vitest --watch --root ../../ --project cojson-core-napi",
+    "test": "vitest --watch --project cojson-core-napi",
+    "test:ci": "vitest run --watch=false",
     "preversion": "napi build --platform && git add .",
     "version": "napi version",
     "prepare": "husky"

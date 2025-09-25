@@ -10,7 +10,8 @@
         "RESEND_AUDIENCE_ID",
         "GRAFANA_SERVICE_ACCOUNT",
         "NODE_ENV",
-        "APP_NAME"
+        "APP_NAME",
+        "ANDROID_NDK_LATEST_HOME"
       ],
       "dependsOn": ["^build"],
       "outputs": [
