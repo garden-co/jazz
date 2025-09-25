@@ -22,9 +22,6 @@ jobs:
       - name: Build packages
         run: pnpm exec turbo run build --filter='./packages/*'
 
-      - name: Build NAPI packages
-        run: pnpm exec turbo run build:napi --filter='./crates/*'
-
       - name: Create Release Pull Request or Publish to npm
         id: changesets
         if: github.ref_name == 'main'
