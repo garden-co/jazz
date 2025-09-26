@@ -1,9 +1,8 @@
 import { Group, co, z } from "jazz-tools";
-import { coV } from "jazz-vector";
 
 export const JazzProfile = co.profile();
 
-export const Embedding = coV.vector(384); // <- 384-dim CoVector schema
+export const Embedding = co.vector(384); // <- 384-dim vector schema
 
 export const JournalEntry = co.map({
   text: z.string(),
