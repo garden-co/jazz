@@ -19,7 +19,10 @@ export type VectorSearchOutcomeItem<Value> = {
  * - `undefined`/`null` (which extends the default loading behavior)
  */
 export type VectorSearchOutcome<L extends CoList> =
-  | { results: Array<VectorSearchOutcomeItem<L[number]>> }
+  | {
+      results: Array<VectorSearchOutcomeItem<L[number]>>;
+      durationMs?: number;
+    }
   | undefined
   | null;
 
@@ -101,6 +104,8 @@ export const searchSimilar = async <L extends CoList>(
   const queryVector =
     query instanceof Float32Array ? query : new Float32Array(query);
 
+  const startTime = performance.now();
+
   const similarityResults = await Promise.all(
     wrappedList.map(async (listItem) => {
       if (options.$abortSignal?.aborted) return listItem;
@@ -143,8 +148,11 @@ export const searchSimilar = async <L extends CoList>(
     .filter((value) => typeof value.similarity === "number")
     .sort((a, b) => (b.similarity ?? 0) - (a.similarity ?? 0));
 
+  const durationMs = Math.ceil(performance.now() - startTime);
+
   return {
     results: filterResults(results, options),
+    durationMs,
   };
 };
 

@@ -68,6 +68,7 @@ describe("Vector search (rank CoList items by similarity)", () => {
       $orderBy: { embedding: { $similarity: null } },
     });
 
+    expect(res?.durationMs).toBeUndefined();
     expect(res?.results.length).toBe(list.length);
     expect(res?.results.every((r) => typeof r.similarity === "undefined")).toBe(
       true,
@@ -91,6 +92,8 @@ describe("Vector search (rank CoList items by similarity)", () => {
     });
 
     assert(res);
+    expect(res?.durationMs).toBeDefined();
+    expect(res?.durationMs).toBeGreaterThan(0);
     expect(res.results.length).toBe(list.length);
 
     const expectedResultsRanking = [
@@ -184,6 +187,7 @@ describe("Vector search (rank CoList items by similarity)", () => {
     });
 
     assert(res);
+    expect(res.durationMs).toBeUndefined();
     expect(res.results.length).toBe(list.length);
     expect(res.results.every((r) => typeof r.similarity === "undefined")).toBe(
       true,
