@@ -12,6 +12,9 @@ export type DocNavigationItem = {
   next?: DocNavigationItem | null;
   previous?: DocNavigationItem | null;
   excludeFromNavigation?: boolean;
+  items?: DocNavigationItem[];
+  collapse?: boolean;
+  startClosed?: boolean;
 };
 
 export type DocNavigationSection = {

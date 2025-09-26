@@ -1,20 +1,19 @@
 import { SideNavItem } from "@/components/SideNavItem";
-import { Framework } from "@/content/framework";
+import { DoneStatus } from "@/content/docs/docNavigationItemsTypes";
 import { clsx } from "clsx";
 import Link from "next/link";
 import React from "react";
+import { SideNavSection } from "./SideNavSection";
 
 export interface SideNavItem {
   name: string;
   href?: string;
-  done?:
-    | number
-    | {
-        [key in Framework]: number;
-      };
+  done?: DoneStatus;
   items?: SideNavItem[];
   collapse?: boolean;
   prefix?: string;
+  excludeFromNavigation?: boolean;
+  startClosed?: boolean;
 }
 export function SideNav({
   children,
@@ -34,16 +33,37 @@ export function SideNavSectionList({ items }: { items?: SideNavItem[] }) {
   return (
     !!items?.length && (
       <ul>
-        {items.map(({ name, href, items, done }) => (
-          <li key={name}>
-            <SideNavItem href={href}>
-              <span className={done === 0 ? "text-muted" : ""}>
-                {name}
-                {done === 0 && <span className="text-stone-800 text-[0.5rem]"> (docs coming soon)</span>}
-              </span>
-            </SideNavItem>
-          </li>
-        ))}
+        {items.map((item) => {
+          const { name, href, items: childItems, done, excludeFromNavigation } = item;
+
+          // Skip items that are excluded from navigation
+          if (excludeFromNavigation) {
+            return null;
+          }
+
+          // If item has child items, render as a section with potential nesting
+          if (childItems && childItems.length > 0) {
+            return (
+              <li key={name}>
+                <div className="ms-2">
+                  <SideNavSection item={item} />
+                </div>
+              </li>
+            );
+          }
+
+          // If item has no child items, render as a simple link
+          return (
+            <li key={name}>
+              <SideNavItem href={href}>
+                <span className={done === 0 ? "text-muted" : ""}>
+                  {name}
+                  {done === 0 && <span className="text-stone-800 text-[0.5rem]"> (docs coming soon)</span>}
+                </span>
+              </SideNavItem>
+            </li>
+          );
+        })}
       </ul>
     )
   );

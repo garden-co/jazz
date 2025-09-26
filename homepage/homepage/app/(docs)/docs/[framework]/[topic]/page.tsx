@@ -29,22 +29,31 @@ export const dynamic = "force-static";
 export async function generateStaticParams() {
   const paths: Array<{ topic?: string; framework: Framework }> = [];
 
-  for (const framework of frameworks) {
-    for (const heading of docNavigationItems) {
-      for (const item of heading?.items) {
-        if (item.href && item.href.startsWith("/docs")) {
-          const [topic] = item.href
-            .replace("/docs", "")
-            .split("/")
-            .filter(Boolean);
-          if (topic) {
-            paths.push({
-              topic,
-              framework,
-            });
-          }
+  const processItem = (item: any) => {
+    if (item.href && item.href.startsWith("/docs")) {
+      const [topic] = item.href
+        .replace("/docs", "")
+        .split("/")
+        .filter(Boolean);
+      if (topic) {
+        for (const framework of frameworks) {
+          paths.push({
+            topic,
+            framework,
+          });
         }
       }
+    }
+
+    // Recursively process nested items
+    if (item.items && item.items.length > 0) {
+      item.items.forEach(processItem);
+    }
+  };
+
+  for (const heading of docNavigationItems) {
+    for (const item of heading?.items) {
+      processItem(item);
     }
   }
 
