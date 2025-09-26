@@ -132,6 +132,62 @@ describe("loading coValues from server", () => {
     `);
   });
 
+  test("new dependencies coming from updates should be pushed", async () => {
+    const client = setupTestNode({
+      connected: true,
+    });
+    const client2 = setupTestNode();
+
+    client2.connectToSyncServer({
+      ourName: "client2",
+    });
+
+    const group = client.node.createGroup();
+    group.addMember("everyone", "reader");
+    const map = group.createMap();
+    map.set("hello", "world", "trusting");
+
+    await map.core.waitForSync();
+
+    await loadCoValueOrFail(client2.node, map.id);
+
+    const parentGroup = client.node.createGroup();
+    group.extend(parentGroup);
+
+    await group.core.waitForSync();
+    await jazzCloud.node.syncManager.waitForAllCoValuesSync();
+
+    const messagesLog = SyncMessagesLog.getMessages({
+      ParentGroup: parentGroup.core,
+      Group: group.core,
+      Map: map.core,
+    });
+
+    expect(messagesLog).toMatchInlineSnapshot(`
+      [
+        "client -> server | CONTENT Group header: true new: After: 0 New: 5",
+        "client -> server | CONTENT Map header: true new: After: 0 New: 1",
+        "server -> client | KNOWN Group sessions: header/5",
+        "server -> client | KNOWN Map sessions: header/1",
+        "client2 -> server | LOAD Map sessions: empty",
+        "server -> client2 | CONTENT Group header: true new: After: 0 New: 5",
+        "server -> client2 | CONTENT Map header: true new: After: 0 New: 1",
+        "client2 -> server | KNOWN Group sessions: header/5",
+        "client2 -> server | KNOWN Map sessions: header/1",
+        "client -> server | CONTENT ParentGroup header: true new: After: 0 New: 4",
+        "client -> server | CONTENT Group header: false new: After: 5 New: 2",
+        "server -> client | KNOWN ParentGroup sessions: header/4",
+        "server -> client | KNOWN Group sessions: header/7",
+        "server -> client2 | CONTENT ParentGroup header: true new: After: 0 New: 4",
+        "server -> client2 | CONTENT Group header: false new: After: 5 New: 2",
+        "client2 -> server | KNOWN ParentGroup sessions: header/4",
+        "client2 -> server | KNOWN Group sessions: header/7",
+      ]
+    `);
+
+    expect(client2.node.expectCoValueLoaded(parentGroup.id)).toBeTruthy();
+  });
+
   test("loading a branch", async () => {
     const client = setupTestNode({
       connected: true,
