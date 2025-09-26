@@ -1,5 +1,4 @@
-import { CoList } from "../tools";
-import { CoVector } from "../tools/coValues/coVector";
+import { CoList, CoVector } from "../tools";
 
 /**
  * An item in the search outcome.
@@ -61,7 +60,7 @@ type Filter =
     }
   | {};
 
-type VectorSearchOptions<L extends CoList> = {
+export type VectorSearchOptions<L extends CoList> = {
   $orderBy: OrderBy<L>;
   $abortSignal?: AbortSignal;
 } & Filter;

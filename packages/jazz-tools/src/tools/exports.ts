@@ -45,6 +45,7 @@ export {
   CoFeed,
   CoStream,
   FileStream,
+  CoVector,
   CoPlainText,
   CoRichText,
   Account,
