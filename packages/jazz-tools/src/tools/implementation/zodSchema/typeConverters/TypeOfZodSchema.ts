@@ -71,8 +71,13 @@ export type TypeOfZodSchema<S extends z.core.$ZodType> =
                                       infer Default extends z.core.$ZodType
                                     >
                                   ? TypeOfZodSchema<Default>
-                                  : S extends z.core.$ZodCatch<
-                                        infer Catch extends z.core.$ZodType
+                                  : S extends z.core.$ZodCodec<
+                                        any,
+                                        infer Out extends z.core.$ZodType
                                       >
-                                    ? TypeOfZodSchema<Catch>
-                                    : never;
+                                    ? Out["_zod"]["output"]
+                                    : S extends z.core.$ZodCatch<
+                                          infer Catch extends z.core.$ZodType
+                                        >
+                                      ? TypeOfZodSchema<Catch>
+                                      : never;

@@ -1,3 +1,4 @@
+import type { JsonValue } from "cojson";
 import { CoValueClass, isCoValueClass } from "../../../internal.js";
 import { coField } from "../../schema.js";
 import { CoreCoValueSchema } from "../schemaTypes/CoValueSchema.js";
@@ -32,10 +33,30 @@ export type SchemaField =
   | z.core.$ZodLazy<z.core.$ZodType>
   | z.core.$ZodTemplateLiteral<any>
   | z.core.$ZodLiteral<any>
-  | z.core.$ZodCatch<z.core.$ZodType>
   | z.core.$ZodEnum<any>
+  | z.core.$ZodCodec<z.core.$ZodType, z.core.$ZodType>
   | z.core.$ZodDefault<z.core.$ZodType>
   | z.core.$ZodCatch<z.core.$ZodType>;
+
+function makeCodecCoField(
+  codec: z.core.$ZodCodec<z.core.$ZodType, z.core.$ZodType>,
+) {
+  return coField.optional.encoded({
+    encode: (value: any) => {
+      if (value === undefined) return undefined as unknown as JsonValue;
+      if (value === null) return null;
+      return codec._zod.def.reverseTransform(value, {
+        value,
+        issues: [],
+      }) as JsonValue;
+    },
+    decode: (value) => {
+      if (value === null) return null;
+      if (value === undefined) return undefined;
+      return codec._zod.def.transform(value, { value, issues: [] });
+    },
+  });
+}
 
 export function schemaFieldToCoFieldDef(schema: SchemaField) {
   if (isCoValueClass(schema)) {
@@ -54,7 +75,7 @@ export function schemaFieldToCoFieldDef(schema: SchemaField) {
         zodSchemaDef.type === "optional" ||
         zodSchemaDef.type === "nullable"
       ) {
-        const inner = zodSchemaDef.innerType as ZodPrimitiveSchema;
+        const inner = zodSchemaDef.innerType as SchemaField;
         const coFieldDef: any = schemaFieldToCoFieldDef(inner);
         if (
           zodSchemaDef.type === "nullable" &&
@@ -137,6 +158,30 @@ export function schemaFieldToCoFieldDef(schema: SchemaField) {
             "z.union()/z.discriminatedUnion() of collaborative types is not supported. Use co.discriminatedUnion() instead.",
           );
         }
+      } else if (zodSchemaDef.type === "pipe") {
+        const isCodec =
+          zodSchemaDef.transform !== undefined &&
+          zodSchemaDef.reverseTransform !== undefined;
+
+        if (!isCodec) {
+          throw new Error(
+            "z.pipe() is not supported. Only z.codec() is supported.",
+          );
+        }
+
+        try {
+          schemaFieldToCoFieldDef(zodSchemaDef.in as SchemaField);
+        } catch (error) {
+          if (error instanceof Error) {
+            error.message = `z.codec() is only supported if the input schema is already supported: ${error.message}`;
+          }
+
+          throw error;
+        }
+
+        return makeCodecCoField(
+          schema as z.core.$ZodCodec<z.core.$ZodType, z.core.$ZodType>,
+        );
       } else {
         throw new Error(
           `Unsupported zod type: ${(schema._zod?.def as any)?.type || JSON.stringify(schema)}`,

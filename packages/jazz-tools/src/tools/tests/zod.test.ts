@@ -511,6 +511,118 @@ describe("co.map and Zod schema compatibility", () => {
       expect(map.readonly).toEqual({ name: "John" });
     });
   });
+
+  describe("Codec types", () => {
+    class DateRange {
+      constructor(
+        public start: Date,
+        public end: Date,
+      ) {}
+
+      isDateInRange(date: Date) {
+        return date >= this.start && date <= this.end;
+      }
+    }
+
+    const dateRangeCodec = z.codec(
+      z.tuple([z.string(), z.string()]),
+      z.z.instanceof(DateRange),
+      {
+        encode: (value) =>
+          [value.start.toISOString(), value.end.toISOString()] as [
+            string,
+            string,
+          ],
+        decode: ([start, end]) => {
+          return new DateRange(new Date(start), new Date(end));
+        },
+      },
+    );
+
+    it("should handle codec field", async () => {
+      const schema = co.map({
+        range: dateRangeCodec,
+      });
+
+      const map = schema.create({
+        range: new DateRange(new Date("2025-01-01"), new Date("2025-01-31")),
+      });
+
+      expect(map.range.isDateInRange(new Date("2025-01-15"))).toEqual(true);
+    });
+
+    it("should handle optional codec field", async () => {
+      const schema = co.map({
+        range: dateRangeCodec.optional(),
+      });
+      const map = schema.create({});
+
+      expect(map.range).toBeUndefined();
+      expect(map.$jazz.has("range")).toEqual(false);
+    });
+
+    it("should handle nullable codec field", async () => {
+      const schema = co.map({
+        range: dateRangeCodec.nullable(),
+      });
+      const map = schema.create({ range: null });
+
+      expect(map.range).toBeNull();
+
+      map.$jazz.set(
+        "range",
+        new DateRange(new Date("2025-01-01"), new Date("2025-01-31")),
+      );
+      expect(map.range?.isDateInRange(new Date("2025-01-15"))).toEqual(true);
+    });
+
+    it("should handle nullish codec field", async () => {
+      const schema = co.map({
+        range: dateRangeCodec.nullish(),
+      });
+
+      const map = schema.create({});
+      expect(map.range).toBeUndefined();
+      expect(map.$jazz.has("range")).toEqual(false);
+
+      map.$jazz.set("range", undefined);
+      expect(map.range).toBeUndefined();
+      expect(map.$jazz.has("range")).toEqual(true);
+
+      map.$jazz.set("range", null);
+      expect(map.range).toBeNull();
+
+      map.$jazz.set(
+        "range",
+        new DateRange(new Date("2025-01-01"), new Date("2025-01-31")),
+      );
+      expect(map.range?.isDateInRange(new Date("2025-01-15"))).toEqual(true);
+    });
+
+    it("should not handle codec field with unsupported inner field", async () => {
+      const schema = co.map({
+        record: z.codec(
+          z.z.map(z.string(), z.string()),
+          z.z.record(z.string(), z.string()),
+          {
+            encode: (value) => new Map(Object.entries(value)),
+            decode: (value) => Object.fromEntries(value.entries()),
+          },
+        ),
+      });
+
+      expect(() =>
+        schema.create({
+          record: {
+            key1: "value1",
+            key2: "value2",
+          },
+        }),
+      ).toThrow(
+        "z.codec() is only supported if the input schema is already supported: Unsupported zod type: map",
+      );
+    });
+  });
 });
 
 describe("z.object() and CoValue schema compatibility", () => {

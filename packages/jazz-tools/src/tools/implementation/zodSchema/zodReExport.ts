@@ -35,6 +35,7 @@ export {
   // record,
   // intersection,
   int,
+  codec,
   optional,
   array,
   tuple,
