@@ -75,7 +75,13 @@ const makeSearchKey = <L extends CoList>(
   const queryKey = Object.entries(options.$orderBy)
     .map(([key, orderBy]) => {
       const orderByKey = Object.entries(orderBy ?? {})
-        .map(([key, value]) => `${key}::${value?.slice(0, 3).join(":")}`)
+        .map(([key, value]) =>
+          value == null
+            ? `${key}::null`
+            : Array.isArray(value)
+              ? `${key}::${value.slice(0, 3).join(":")}`
+              : `${key}::${String(value)}`,
+        )
         .join("|");
       return `${key}<>${orderByKey}`;
     })
