@@ -113,7 +113,13 @@ export const searchSimilar = async <L extends CoList>(
 
       if (!vector) return listItem;
 
-      if (!(vector instanceof CoVector)) {
+      if (
+        !(
+          typeof vector === "object" &&
+          "$jazz" in vector &&
+          "cosineSimilarity" in vector.$jazz
+        )
+      ) {
         throw new Error(
           `Cannot use '${SimilarityOp}' with non-vector field '${String(listItemVectorParam)}'`,
         );
