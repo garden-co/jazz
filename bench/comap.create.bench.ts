@@ -3,6 +3,7 @@ import * as tools from "jazz-tools";
 import * as toolsLatest from "jazz-tools-latest";
 import { WasmCrypto } from "cojson/crypto/WasmCrypto";
 import { WasmCrypto as WasmCryptoLatest } from "cojson-latest/crypto/WasmCrypto";
+import { NapiCrypto } from "cojson/crypto/NapiCrypto";
 import { PureJSCrypto } from "cojson/crypto/PureJSCrypto";
 import { PureJSCrypto as PureJSCryptoLatest } from "cojson-latest/crypto/PureJSCrypto";
 
@@ -61,6 +62,12 @@ const schemaLatest = await createSchema(
   PUREJS ? PureJSCryptoLatest : WasmCryptoLatest,
 );
 
+const schemaNapi = await createSchema(
+  toolsLatest,
+  // @ts-expect-error
+  NapiCrypto,
+);
+
 const message = schema.Message.create(
   {
     content: "A".repeat(1024),
@@ -108,6 +115,24 @@ describe("Message.create", () => {
   );
 
   bench(
+    "current version (N-API)",
+    () => {
+      schemaNapi.Message.create(
+        {
+          content: "A".repeat(1024),
+          createdAt: new Date(),
+          updatedAt: new Date(),
+          hiddenIn: sampleHiddenIn,
+          reactions: sampleReactions,
+          author: "user123",
+        },
+        schema.Group.create(schemaNapi.account),
+      );
+    },
+    { iterations: 1000 },
+  );
+
+  bench(
     "Jazz 0.18.5",
     () => {
       schemaLatest.Message.create(
@@ -139,6 +164,17 @@ describe("Message import", () => {
   );
 
   bench(
+    "current version (N-API)",
+    () => {
+      tools.importContentPieces(content ?? [], schemaNapi.account as any);
+      schemaNapi.account.$jazz.localNode.internalDeleteCoValue(
+        message.$jazz.raw.id,
+      );
+    },
+    { iterations: 5000 },
+  );
+
+  bench(
     "Jazz 0.18.5",
     () => {
       toolsLatest.importContentPieces(content ?? [], schemaLatest.account);
@@ -157,6 +193,19 @@ describe("import+ decrypt", () => {
       tools.importContentPieces(content ?? [], schema.account as any);
 
       const node = schema.account.$jazz.localNode;
+
+      node.expectCoValueLoaded(message.$jazz.raw.id).getCurrentContent();
+      node.internalDeleteCoValue(message.$jazz.raw.id);
+    },
+    { iterations: 5000 },
+  );
+
+  bench(
+    "current version (N-API)",
+    () => {
+      tools.importContentPieces(content ?? [], schemaNapi.account as any);
+
+      const node = schemaNapi.account.$jazz.localNode;
 
       node.expectCoValueLoaded(message.$jazz.raw.id).getCurrentContent();
       node.internalDeleteCoValue(message.$jazz.raw.id);

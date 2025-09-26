@@ -1,0 +1,41 @@
+name: Napi CI
+env:
+  DEBUG: napi:*
+  PATH_BUILD: crates/cojson-core-napi
+  APP_NAME: cojson-core-napi
+  MACOSX_DEPLOYMENT_TARGET: '10.13'
+  CARGO_INCREMENTAL: '1'
+  TARGET_CC: 'clang'
+'on':
+  push:
+    paths:
+      - 'crates/cojson-core-napi/**'
+      - '.github/workflows/napi.yml'
+    branches:
+      - main
+    tags-ignore:
+      - '**'
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - 'crates/cojson-core-napi/**'
+      - '.github/workflows/napi.yml'
+      - '.github/workflows/reusable-napi.yml'
+jobs:
+  napi-build:
+    name: NAPI Build and Test Bindings
+    uses: ./.github/workflows/napi-build-reusable.yml
+  use-artifacts:
+    name: Using artifacts
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    needs: napi-build
+    steps:  
+      - uses: actions/download-artifact@v5
+        with:
+          path: artifacts
+      - name: Print artifact files
+        run: ls -lR
+  
+  # napi-build:
+  #   name: NAPI Build and Test Bindings
+  #   uses: ./.github/workflows/napi-build-reusable.yml

@@ -3,6 +3,7 @@ import * as tools from "jazz-tools";
 import * as toolsLatest from "jazz-tools-latest";
 import { WasmCrypto } from "cojson/crypto/WasmCrypto";
 import { WasmCrypto as WasmCryptoLatest } from "cojson-latest/crypto/WasmCrypto";
+import { NapiCrypto } from "cojson/crypto/NapiCrypto";
 import { PureJSCrypto } from "cojson/crypto/PureJSCrypto";
 import { PureJSCrypto as PureJSCryptoLatest } from "cojson-latest/crypto/PureJSCrypto";
 
@@ -37,6 +38,11 @@ const schemaLatest = await createSchema(
   // @ts-expect-error
   PUREJS ? PureJSCryptoLatest : WasmCryptoLatest,
 );
+const schemaNapi = await createSchema(
+  toolsLatest as any,
+  // @ts-expect-error
+  NapiCrypto,
+);
 
 const list = schema.List.create(
   [],
@@ -59,12 +65,27 @@ const content = await tools.exportCoValue(schema.List, list.$jazz.id, {
 });
 tools.importContentPieces(content ?? [], schema.account as any);
 toolsLatest.importContentPieces(content ?? [], schemaLatest.account as any);
+toolsLatest.importContentPieces(content ?? [], schemaNapi.account as any);
 
 describe("list loading", () => {
   bench(
     "current version",
     () => {
       const node = schema.account.$jazz.localNode;
+
+      const coValue = node.expectCoValueLoaded(list.$jazz.id as any);
+
+      coValue.getCurrentContent();
+      // @ts-expect-error
+      coValue._cachedContent = undefined;
+    },
+    { iterations: 5000 },
+  );
+
+  bench(
+    "current version (N-API)",
+    () => {
+      const node = schemaNapi.account.$jazz.localNode;
 
       const coValue = node.expectCoValueLoaded(list.$jazz.id as any);
 

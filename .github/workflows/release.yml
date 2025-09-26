@@ -12,6 +12,9 @@ jobs:
   release:
     name: Release
     runs-on: blacksmith-4vcpu-ubuntu-2404
+    outputs:
+      hasChangesets:  ${{ steps.changesets.outputs.hasChangesets }}
+      hasChangesetsBackport:  ${{ steps.changesets-backport.outputs.hasChangesets }}
     steps:
       - name: Checkout Repo
         uses: actions/checkout@v4
@@ -28,7 +31,6 @@ jobs:
         uses: changesets/action@v1
         with:
           version: pnpm changeset-version
-          publish: pnpm release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
@@ -39,7 +41,68 @@ jobs:
         uses: changesets/action@v1
         with:
           version: pnpm changeset-version
-          publish: pnpm release:backports
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+      
+  build_napi:
+    name: Build NAPI
+    needs: [release]
+    uses: ./.github/workflows/napi-build-reusable.yml
+    if: ${{ needs.release.outputs.hasChangesets != 'true' && needs.release.outputs.hasChangesetsBackport != 'true' }}
+
+  publish:
+    name: publish
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    needs: [build_napi, release]
+    if: ${{ needs.release.outputs.hasChangesets != 'true' && needs.release.outputs.hasChangesetsBackport != 'true' }}
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v4
+
+      - name: Setup Source Code
+        uses: ./.github/actions/source-code/
+      
+      - name: Build packages
+        run: pnpm exec turbo run build --filter='./packages/*'
+      
+      - name: Create Release Pull Request or Publish to npm
+        id: changesets
+        if: github.ref_name == 'main'
+        uses: changesets/action@v1
+        with:
+          version: pnpm changeset-version
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+      
+      - name: Create Release Pull Request or Publish to npm (backports)
+        id: changesets-backport
+        if: startsWith(github.ref_name, 'backport/')
+        uses: changesets/action@v1
+        with:
+          version: pnpm changeset-version
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+      
+      - name: create npm dirs
+        run: pnpm napi create-npm-dirs
+        working-directory: crates/cojson-core-napi/artifacts
+      
+      - name: Download NAPI Artifacts
+        uses: actions/download-artifact@v5
+        with:
+          path: crates/cojson-core-napi/artifacts
+        
+      - name: Move artifacts
+        run: pnpm artifacts
+        working-directory: crates/cojson-core-napi/artifacts
+
+      - name: List packages
+        run: ls -R ./npm
+        shell: bash
+        working-directory: crates/cojson-core-napi/artifacts
+      
+      - name: publishing
+        run: pnpm release
