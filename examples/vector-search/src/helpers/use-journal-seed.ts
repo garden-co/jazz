@@ -42,6 +42,8 @@ export const useJournalSeed = ({
         if (owner?.root?.journalEntries) {
           owner.root.journalEntries.$jazz.push(journalEntry);
         }
+
+        await new Promise((resolve) => setTimeout(resolve, 0));
       }
     } catch (error) {
       console.error(error);
