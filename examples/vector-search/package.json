@@ -12,7 +12,6 @@
   "dependencies": {
     "@huggingface/transformers": "^3.7.3",
     "jazz-tools": "workspace:*",
-    "jazz-vector": "0.1.2",
     "react": "catalog:react",
     "react-dom": "catalog:react"
   },
