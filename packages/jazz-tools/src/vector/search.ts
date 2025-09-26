@@ -108,7 +108,7 @@ export const searchSimilar = async <L extends CoList>(
 
       const vector =
         "_refs" in listItem.value
-          ? await (listItem.value?._refs[listItemVectorParam]).load()
+          ? await listItem.value?._refs[listItemVectorParam]?.load()
           : listItem.value?.[listItemVectorParam];
 
       if (!vector) return listItem;
