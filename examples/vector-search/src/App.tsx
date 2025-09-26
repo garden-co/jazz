@@ -1,5 +1,5 @@
 import { useRef, useState } from "react";
-import { useAccount, useCoState } from "jazz-tools/react";
+import { useAccount, useCoState, useVectorSearch } from "jazz-tools/react";
 
 import { Header } from "./components/Header";
 import { EmbeddingPill } from "./components/EmbeddingPill";
@@ -11,8 +11,6 @@ import { useCreateEmbedding } from "./helpers/use-create-embedding";
 import { useLocalEmbeddings, DEFAULT_MODEL } from "./embeddings";
 
 import { JazzAccount, JournalEntry, JournalEntryList } from "./schema";
-import { useCoVectorSearch } from "jazz-vector/react";
-import { CoVectorSearchResultItem } from "jazz-vector";
 import { useCreateEntry } from "./helpers/use-create-entry";
 import { useDeleteEntries } from "./helpers/use-delete-entries";
 import { Footer } from "./components/Footer";
@@ -39,12 +37,12 @@ function App() {
   const { queryEmbedding, isCreatingEmbedding, createQueryEmbedding } =
     useCreateEmbedding({ createEmbedding });
 
-  const { search, isSearching } = useCoVectorSearch(
-    journalEntries,
-    (entry) => entry.embedding,
-    queryEmbedding,
-    { similarityTopPercent: 0.15 },
-  );
+  const { search, isSearching } = useVectorSearch(journalEntries, {
+    $orderBy: {
+      embedding: { $similarity: queryEmbedding },
+    },
+    $similarityTopPercent: 0.15,
+  });
 
   // -- Helpers for creating new entries
   const isLoading = journalEntries === undefined;
@@ -178,7 +176,7 @@ function App() {
 function JournalEntryCard({
   entry,
 }: {
-  entry: CoVectorSearchResultItem<JournalEntry>;
+  entry: VectorSearchOutcomeItem<JournalEntry>;
 }) {
   const [rotation, _] = useState(() => Math.random() * 4 - 2);
 
