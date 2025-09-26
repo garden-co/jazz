@@ -42,7 +42,7 @@ type OrderBy<L extends CoList> = {
 };
 
 // Only one of the three filter options can be present at a time (or none)
-type Filter =
+export type VectorSearchFilter =
   | {
       $similarityTopPercent: number;
       $similarityThreshold?: never;
@@ -63,9 +63,9 @@ type Filter =
 export type VectorSearchOptions<L extends CoList> = {
   $orderBy: OrderBy<L>;
   $abortSignal?: AbortSignal;
-} & Filter;
+} & VectorSearchFilter;
 
-const DEFAULT_FILTER_OPTION: Filter = { $limit: 25 };
+const DEFAULT_FILTER_OPTION: VectorSearchFilter = { $limit: 25 };
 
 /**
  * Search a list of items for the most similar items to a given query.
@@ -144,7 +144,7 @@ export const searchSimilar = async <L extends CoList>(
 
 const filterResults = <L extends CoList>(
   results: VectorSearchOutcomeItem<L[number]>[],
-  filter: Filter,
+  filter: VectorSearchFilter,
 ) => {
   if ("$limit" in filter) {
     return results.slice(0, filter.$limit);
