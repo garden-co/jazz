@@ -119,3 +119,11 @@ export {
   isJazzRequestError,
   type HttpRoute,
 } from "./coValues/request.js";
+
+export {
+  searchSimilar,
+  type VectorSearchOutcomeItem,
+  type VectorSearchOutcome,
+  type VectorSearchFilter,
+  type VectorSearchOptions,
+} from "./vector/search.js";

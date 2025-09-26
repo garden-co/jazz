@@ -1,11 +1,11 @@
-import { CoList } from "jazz-tools";
-import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  CoList,
   VectorSearchFilter,
   VectorSearchOptions,
   VectorSearchOutcome,
   searchSimilar,
-} from "../../vector";
+} from "jazz-tools";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 export type VectorSearchHookOptions<L extends CoList> = {
   $orderBy: VectorSearchOptions<L>["$orderBy"];

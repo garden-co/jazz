@@ -1,4 +1,4 @@
-import { CoList, CoVector } from "../tools";
+import { CoList } from "../internal.js";
 
 /**
  * An item in the search outcome.

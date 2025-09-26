@@ -1,5 +1,5 @@
 import { assert, describe, expect, test } from "vitest";
-import { co, Group, z } from "../index.js";
+import { co, Group, z } from "../exports.js";
 import { createJazzTestAccount } from "../testing.js";
 import { searchSimilar } from "./search.js";
 import { EMBEDDING } from "./testing.js";

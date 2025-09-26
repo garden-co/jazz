@@ -4,8 +4,8 @@ import { Group, co, z } from "jazz-tools";
 import { describe, expect, it } from "vitest";
 import { createJazzTestAccount } from "../../testing.js";
 import { renderHook, waitFor } from "../testUtils.js";
-import { useVectorSearch } from "../../vector/useVectorSearch.js";
-import { EMBEDDING } from "../../../vector/testing.js";
+import { useVectorSearch } from "../../index.js";
+import { EMBEDDING } from "../../../tools/vector/testing.js";
 
 const Embedding = co.vector(50);
 const ListItem = co.map({
