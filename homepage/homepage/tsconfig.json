@@ -29,6 +29,6 @@
     ".next/types/**/*.ts",
     "mdx.d.ts",
     "lib/docNavigationItems.js"
-  ],
+, "app/api/opengraph-image/route.ts"  ],
   "exclude": ["node_modules"]
 }

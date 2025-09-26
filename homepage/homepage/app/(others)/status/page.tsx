@@ -4,14 +4,27 @@ import { clsx } from "clsx";
 import type { Metadata } from "next";
 import { Fragment } from "react";
 
-const title = "Status";
+const metaTags = {
+  title: "Status",
+  description: "View Jazz system status and latency across probes",
+  url: "https://jazz.tools",
+}
 
 export const dynamic = "force-static";
 
 export const metadata: Metadata = {
-  title,
+  title: metaTags.title,
+  description: metaTags.description,
   openGraph: {
-    title,
+    title: metaTags.title,
+    description: metaTags.description,
+    images: [
+      {
+        url: `${metaTags.url}/opengraph-image`,
+        height: 630,
+        alt: metaTags.title,
+      },
+    ],
   },
 };
 

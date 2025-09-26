@@ -31,6 +31,13 @@ export const metadata: Metadata = {
     description: metaTags.description,
     url: metaTags.url,
     siteName: "Jazz",
+    images: [
+      {
+        url: `${metaTags.url}/opengraph-image`,
+        height: 630,
+        alt: metaTags.title,
+      },
+    ],
   },
 };
 

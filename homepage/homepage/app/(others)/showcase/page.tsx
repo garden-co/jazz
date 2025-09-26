@@ -5,15 +5,25 @@ import type { Metadata } from "next";
 import Image from "next/image";
 import Link from "next/link";
 
-const title = "Built with Jazz";
-const description = "Great apps by smart people.";
+const metaTags = {
+  title: "Built with Jazz",
+  description: "Great apps by smart people.",
+  url:  "https://jazz.tools",
+}
 
 export const metadata: Metadata = {
-  title,
-  description,
+  title: metaTags.title,
+  description: metaTags.description,
   openGraph: {
-    title,
-    description,
+    title: metaTags.title,
+    description: metaTags.description,
+    images: [
+      {
+        url: `${metaTags.url}/opengraph-image`,
+        height: 630,
+        alt: metaTags.title,
+      },
+    ],
   },
 };
 

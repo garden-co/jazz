@@ -11,16 +11,25 @@ import { HeroHeader } from "@garden-co/design-system/src/components/molecules/He
 import { clsx } from "clsx";
 import type { Metadata } from "next";
 
-const title = "Examples";
-const description =
-  "Find an example app with code most similar to what you want to build.";
+const metaTags = {
+  title: "Examples",
+  description: "Find an example app with code most similar to what you want to build.",
+  url: "https://jazz.tools",
+}
 
 export const metadata: Metadata = {
-  title,
-  description,
+  title: metaTags.title,
+  description: metaTags.description,
   openGraph: {
-    title,
-    description,
+    title: metaTags.title,
+    description: metaTags.description,
+    images: [
+      {
+        url: `${metaTags.url}/opengraph-image`,
+        height: 630,
+        alt: metaTags.title,
+      },
+    ],
   },
 };
 
