@@ -10,6 +10,7 @@ import { ChatScreen } from "./chatScreen.tsx";
 import { Chat } from "./schema.ts";
 import { ThemeProvider } from "./themeProvider.tsx";
 import { AppContainer, TopBar } from "./ui.tsx";
+import { Button } from "quint-ui";
 
 export function App() {
   const { me, logOut } = useAccount();
@@ -39,7 +40,11 @@ export function App() {
           }}
           placeholder="Set username"
         />
-        {!inIframe && <button onClick={logOut}>Log out</button>}
+        {!inIframe && (
+          <Button intent="danger" onClick={logOut}>
+            Log out
+          </Button>
+        )}
       </TopBar>
       {router.route({
         "/": () => createChat() as never,
