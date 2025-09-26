@@ -1,5 +1,6 @@
 import { useRef, useState } from "react";
 import { useAccount, useCoState, useVectorSearch } from "jazz-tools/react";
+import { type VectorSearchOutcomeItem } from "jazz-tools";
 
 import { Header } from "./components/Header";
 import { EmbeddingPill } from "./components/EmbeddingPill";
@@ -110,7 +111,7 @@ function App() {
               <>Loading...</>
             ) : isSearchingGlobally ? (
               <>Searching...</>
-            ) : search && search.didSearch ? (
+            ) : search && search.durationMs !== undefined ? (
               <div>
                 Found {search.results.length} journal entries relatable to{" "}
                 <span className="inline-block rounded-full py-px px-2 bg-zinc-200">

@@ -25,7 +25,7 @@ export function useCreateEntry({
         text,
         feelings: [],
         topics: [],
-        embedding: await Embedding.createFrom(embedding),
+        embedding: Embedding.create(embedding),
       });
 
       if (owner?.root?.journalEntries) {
