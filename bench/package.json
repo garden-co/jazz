@@ -4,9 +4,7 @@
   "type": "module",
   "dependencies": {
     "cojson": "workspace:*",
-    "jazz-tools": "workspace:*",
-    "cojson-latest": "npm:cojson@0.18.5",
-    "jazz-tools-latest": "npm:jazz-tools@0.18.5"
+    "cojson-latest": "npm:cojson@0.18.18"
   },
   "scripts": {
     "bench": "vitest bench"
