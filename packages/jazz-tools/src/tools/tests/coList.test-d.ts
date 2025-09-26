@@ -328,5 +328,114 @@ describe("CoList", () => {
 
       matches(loadedPerson);
     });
+
+    describe("query modifiers", () => {
+      describe("$orderBy", () => {
+        test("cannot sort a CoList that does not contain a CoMap", () => {
+          const Score = z.object({
+            priority: z.number(),
+          });
+          const ItemList = co.list(Score);
+
+          const list = ItemList.create([
+            { priority: 2 },
+            { priority: 1 },
+            { priority: 3 },
+          ]);
+
+          ItemList.load(list.$jazz.id, {
+            // @ts-expect-error - Score is not a CoMap
+            resolve: { $orderBy: { priority: "desc" } },
+          });
+        });
+
+        test("cannot sort a CoList by a collaborative field", () => {
+          const Score = co.map({
+            priority: co.plainText(),
+          });
+          const ItemList = co.list(Score);
+
+          const list = ItemList.create([
+            { priority: "2" },
+            { priority: "1" },
+            { priority: "3" },
+          ]);
+
+          ItemList.load(list.$jazz.id, {
+            // @ts-expect-error - Score is a CoMap
+            resolve: { $orderBy: { priority: "desc" } },
+          });
+        });
+
+        test("cannot sort a CoList by a non-scalar field", () => {
+          const Score = co.map({
+            priorities: z.array(z.number()),
+          });
+          const ItemList = co.list(Score);
+
+          const list = ItemList.create([
+            { priorities: [2] },
+            { priorities: [1] },
+            { priorities: [3] },
+          ]);
+
+          ItemList.load(list.$jazz.id, {
+            // @ts-expect-error - Score is a CoMap
+            resolve: { $orderBy: { priorities: "desc" } },
+          });
+        });
+      });
+
+      describe("CoList is shallowly loaded", () => {
+        test("when using query modifier inside a CoMap", async () => {
+          const Score = co.map({
+            priority: z.number(),
+          });
+          const ItemList = co.list(Score);
+          const Project = co.map({ items: ItemList });
+
+          const list = Project.create({
+            items: [{ priority: 2 }, { priority: 1 }, { priority: 3 }],
+          });
+
+          const loadedProject = await Project.load(list.$jazz.id, {
+            resolve: { items: { $orderBy: { priority: "desc" } } },
+          });
+
+          type ExpectedType = CoList<({ priority: number } & CoMap) | null>;
+          function matches(value: ExpectedType) {
+            return value;
+          }
+          assert(loadedProject);
+          matches(loadedProject.items);
+        });
+
+        test("when using query modifier inside a CoList", async () => {
+          const Score = co.map({
+            priority: z.number(),
+          });
+          const ItemList = co.list(Score);
+          const ItemLists = co.list(ItemList);
+
+          const list = ItemLists.create([
+            [{ priority: 2 }, { priority: 1 }, { priority: 3 }],
+          ]);
+
+          const loadedItemLists = await ItemLists.load(list.$jazz.id, {
+            resolve: { $each: { $orderBy: { priority: "desc" } } },
+          });
+
+          type ExpectedType = ReadonlyArray<
+            CoList<({ readonly priority: number } & CoMap) | null>
+          > &
+            CoList;
+          function matches(value: ExpectedType) {
+            return value;
+          }
+          assert(loadedItemLists);
+          matches(loadedItemLists);
+        });
+      });
+    });
   });
 });

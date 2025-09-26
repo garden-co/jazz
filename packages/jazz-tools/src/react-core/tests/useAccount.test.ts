@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 
-import { Group, RefsToResolve, co, z } from "jazz-tools";
+import { Group, RefsToResolve, co, z, ResolveQuery } from "jazz-tools";
 import { assert, beforeEach, describe, expect, it } from "vitest";
 import { useAccount, useJazzContextManager } from "../hooks.js";
 import { useIsAuthenticated } from "../index.js";
@@ -62,6 +62,47 @@ describe("useAccount", () => {
     );
 
     expect(result.current?.me?.root?.value).toBe("123");
+  });
+
+  it("should update the value when the resolve query changes", async () => {
+    const AccountRoot = co.map({
+      list: co.list(z.number()),
+    });
+
+    const AccountSchema = co
+      .account({
+        root: AccountRoot,
+        profile: co.profile(),
+      })
+      .withMigration((account, creationProps) => {
+        if (!account.$jazz.refs.root) {
+          account.$jazz.set("root", { list: [1, 2, 3] });
+        }
+      });
+
+    const account = await createJazzTestAccount({
+      AccountSchema,
+    });
+
+    const resolve: ResolveQuery<typeof AccountSchema> = {
+      root: { list: { $limit: 1 } },
+    };
+    const { result, rerender } = renderHook(
+      ({ resolve }) =>
+        useAccount(AccountSchema, {
+          resolve,
+        }),
+      {
+        account,
+        initialProps: { resolve },
+      },
+    );
+
+    expect(result.current?.me?.root?.list?.[0]).toBe(1);
+
+    rerender({ resolve: { root: { list: { $offset: 1, $limit: 1 } } } });
+
+    expect(result.current?.me?.root?.list?.[0]).toBe(2);
   });
 
   it("should be in sync with useIsAuthenticated when logOut is called", async () => {

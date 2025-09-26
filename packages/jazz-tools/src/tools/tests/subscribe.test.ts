@@ -1278,6 +1278,154 @@ describe("subscribeToCoValue", () => {
     expect(result.data.length).toBe(chunks + 1);
     expect(result.data[chunks]).toBe("new entry");
   });
+
+  describe("when using query modifiers", () => {
+    it("should update the query view on each update", async () => {
+      const Item = co.map({
+        name: z.string(),
+        priority: z.number(),
+      });
+
+      const ItemList = co.list(Item);
+
+      const { me, meOnSecondPeer } = await setupAccount();
+
+      const list = ItemList.create(
+        [
+          { name: "item1", priority: 1 },
+          { name: "item2", priority: 2 },
+          { name: "item3", priority: 3 },
+        ],
+        { owner: me },
+      );
+
+      const resolveQuery = {
+        $where: { priority: { $gt: 1 } },
+        $orderBy: { priority: "desc" },
+        $limit: 2,
+      } as const;
+      let result = null as Loaded<typeof ItemList, typeof resolveQuery> | null;
+
+      const updateFn = vi.fn().mockImplementation((value) => {
+        result = value;
+      });
+
+      const unsubscribe = subscribeToCoValue(
+        coValueClassFromCoValueClassOrSchema(ItemList),
+        list.$jazz.id,
+        {
+          loadAs: meOnSecondPeer,
+          resolve: resolveQuery,
+        },
+        updateFn,
+      );
+
+      onTestFinished(unsubscribe);
+
+      await waitFor(() => {
+        expect(updateFn).toHaveBeenCalled();
+      });
+
+      assert(result);
+      expect(result.length).toBe(2);
+      expect(result[0]?.name).toBe("item3");
+      expect(result[1]?.name).toBe("item2");
+
+      updateFn.mockClear();
+
+      // Add a new item with higher priority
+      list.$jazz.push({ name: "item4", priority: 4 });
+
+      await waitFor(() => {
+        expect(updateFn).toHaveBeenCalled();
+      });
+
+      assert(result);
+      expect(result.length).toBe(2);
+      expect(result[0]?.name).toBe("item4");
+      expect(result[1]?.name).toBe("item3");
+
+      updateFn.mockClear();
+
+      // Modify an existing item's priority to change the order
+      list[0]!.$jazz.set("priority", 5);
+
+      await waitFor(() => {
+        expect(updateFn).toHaveBeenCalled();
+      });
+
+      assert(result);
+      expect(result.length).toBe(2);
+      expect(result[0]?.name).toBe("item1");
+      expect(result[1]?.name).toBe("item4");
+    });
+
+    it("should cache the query view if the loaded CoList or its children are not updated", async () => {
+      const Item = co.map({
+        name: z.string(),
+        priority: z.number(),
+      });
+
+      const ItemList = co.list(Item);
+
+      const { me, meOnSecondPeer } = await setupAccount();
+
+      const list = ItemList.create(
+        [
+          { name: "item1", priority: 1 },
+          { name: "item2", priority: 2 },
+          { name: "item3", priority: 3 },
+        ],
+        { owner: me },
+      );
+
+      const resolveQuery = {
+        $where: { priority: { $gt: 1 } },
+        $orderBy: { priority: "desc" },
+        $limit: 2,
+      } as const;
+
+      let result = null as Loaded<typeof ItemList, typeof resolveQuery> | null;
+
+      const updateFn = vi.fn().mockImplementation((value) => {
+        result = value;
+      });
+
+      const computeQueryViewSpy = vi.spyOn(
+        await import("../subscribe/queryModifiers.js"),
+        "computeQueryView",
+      );
+
+      const unsubscribe = subscribeToCoValue(
+        coValueClassFromCoValueClassOrSchema(ItemList),
+        list.$jazz.id,
+        {
+          loadAs: meOnSecondPeer,
+          resolve: resolveQuery,
+        },
+        updateFn,
+      );
+
+      onTestFinished(unsubscribe);
+
+      await waitFor(() => {
+        expect(updateFn).toHaveBeenCalled();
+      });
+
+      assert(result);
+
+      computeQueryViewSpy.mockClear();
+
+      // CoList.$jazz.length depends on the query view
+      expect(result.$jazz.length).toBe(2);
+      expect(result.$jazz.length).toBe(2);
+      expect(result.$jazz.length).toBe(2);
+
+      expect(computeQueryViewSpy).toHaveBeenCalledTimes(1);
+
+      computeQueryViewSpy.mockRestore();
+    });
+  });
 });
 
 describe("getSubscriptionScope", () => {

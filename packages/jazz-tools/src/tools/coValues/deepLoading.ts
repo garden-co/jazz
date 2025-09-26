@@ -1,26 +1,83 @@
 import { SessionID } from "cojson";
-import { ItemsSym, TypeSym } from "../internal.js";
+import {
+  IsUnion,
+  ItemsSym,
+  NotNull,
+  OrderByDirection,
+  TypeSym,
+  WhereComparisonOperator,
+  WhereLogicalOperator,
+  WhereLogicalOperators,
+} from "../internal.js";
 import { type Account } from "./account.js";
 import { CoFeedEntry } from "./coFeed.js";
 import { type CoKeys } from "./coMap.js";
 import { type CoValue, type ID } from "./interfaces.js";
 
-/**
- * Similar to {@link NonNullable}, but removes only `null` and preserves `undefined`.
- */
-export type NotNull<T> = Exclude<T, null>;
+export type WhereOptions<T> = T extends { [TypeSym]: "CoMap" }
+  ? WhereFieldConditions<T> | WhereWithCombinators<T>
+  : never;
+
+type WhereFieldComparisonOperators<FieldType> = Partial<
+  Record<WhereComparisonOperator, FieldType>
+>;
+
+export type WhereFieldCondition<FieldType> =
+  | FieldType
+  | WhereFieldComparisonOperators<FieldType>
+  | WhereFieldWithCombinators<FieldType>;
 
 /**
- * Used to check if T is a union type.
- *
- * If T is a union type, the left hand side of the extends becomes a union of function types.
- * The right hand side is always a single function type.
+ * Any top-level, non-collaborative scalar CoMap field (string, number, Date, boolean) can be used
+ * to filter a CoList
  */
-type IsUnion<T, U = T> = (T extends any ? (x: T) => void : never) extends (
-  x: U,
-) => void
-  ? false
-  : true;
+export type WhereFieldConditions<T> = T extends { [TypeSym]: "CoMap" }
+  ? {
+      [K in CoKeys<T>]?: NonNullable<T[K]> extends
+        | string
+        | number
+        | Date
+        | boolean
+        ? WhereFieldCondition<T[K]>
+        : never;
+    }
+  : never;
+
+type WhereWithCombinators<T> = Partial<{
+  [WhereLogicalOperators.$and]: WhereOptions<T>[];
+  [WhereLogicalOperators.$or]: WhereOptions<T>[];
+  [WhereLogicalOperators.$not]: WhereOptions<T>;
+}>;
+
+type WhereFieldWithCombinators<FieldType> = Partial<{
+  [WhereLogicalOperators.$and]: (
+    | WhereFieldComparisonOperators<FieldType>
+    | WhereFieldWithCombinators<FieldType>
+  )[];
+  [WhereLogicalOperators.$or]: (
+    | WhereFieldComparisonOperators<FieldType>
+    | WhereFieldWithCombinators<FieldType>
+  )[];
+  [WhereLogicalOperators.$not]:
+    | WhereFieldComparisonOperators<FieldType>
+    | WhereFieldWithCombinators<FieldType>;
+}>;
+
+/**
+ * Any top-level, non-collaborative scalar CoMap field (string, number, Date, boolean) can be used
+ * to sort a CoList
+ */
+export type OrderByOptions<T> = T extends { [TypeSym]: "CoMap" }
+  ? {
+      [K in CoKeys<T>]?: NonNullable<T[K]> extends
+        | string
+        | number
+        | Date
+        | boolean
+        ? OrderByDirection
+        : never;
+    }
+  : never;
 
 export type RefsToResolve<
   V,
@@ -42,6 +99,10 @@ export type RefsToResolve<
                     DepthLimit,
                     [0, ...CurrentDepth]
                   >;
+                  $where?: WhereOptions<Item>;
+                  $orderBy?: OrderByOptions<Item>;
+                  $limit?: number;
+                  $offset?: number;
                   $onError?: null;
                 }
               | boolean
@@ -125,7 +186,9 @@ export type DeeplyLoaded<
   CurrentDepth extends number[] = [],
 > = DepthLimit extends CurrentDepth["length"]
   ? V
-  : Depth extends boolean | undefined // Checking against boolean instead of true because the inference from RefsToResolveStrict transforms true into boolean
+  : Depth extends
+        | boolean // Checking against boolean instead of true because the inference from RefsToResolveStrict transforms true into boolean
+        | undefined
     ? V
     : // Basically V extends CoList - but if we used that we'd introduce circularity into the definition of CoList itself
       [V] extends [ReadonlyArray<infer Item>]
@@ -143,7 +206,7 @@ export type DeeplyLoaded<
               | onErrorNullEnabled<Depth["$each"]>
             > &
               V // the CoList base type needs to be intersected after so that built-in methods return the correct narrowed array type
-          : never
+          : V
         : V
       : // Basically V extends CoMap | Group | Account - but if we used that we'd introduce circularity into the definition of CoMap itself
         [V] extends [{ [TypeSym]: "CoMap" | "Group" | "Account" }]

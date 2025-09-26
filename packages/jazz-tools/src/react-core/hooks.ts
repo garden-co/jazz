@@ -24,6 +24,7 @@ import {
   SubscriptionScope,
   coValueClassFromCoValueClassOrSchema,
   type BranchDefinition,
+  structuralEquals,
 } from "jazz-tools";
 import { JazzContext, JazzContextManagerContext } from "./provider.js";
 import { getCurrentAccountFromContextManager } from "./utils.js";
@@ -94,6 +95,7 @@ function useCoValueSubscription<
   },
 ) {
   const contextManager = useJazzContextManager();
+  const resolveQuery = useStructuralMemo(() => options?.resolve ?? true);
 
   const createSubscription = () => {
     if (!id) {
@@ -117,7 +119,7 @@ function useCoValueSubscription<
     const node = contextManager.getCurrentValue()!.node;
     const subscription = new SubscriptionScope<any>(
       node,
-      options?.resolve ?? true,
+      resolveQuery,
       id,
       {
         ref: coValueClassFromCoValueClassOrSchema(Schema),
@@ -149,7 +151,9 @@ function useCoValueSubscription<
       subscription.id !== id ||
       subscription.Schema !== Schema ||
       subscription.branchName !== branchName ||
-      subscription.branchOwnerId !== branchOwnerId
+      subscription.branchOwnerId !== branchOwnerId ||
+      (subscription.subscription &&
+        subscription.subscription.resolve !== resolveQuery)
     ) {
       subscription.subscription?.destroy();
       setSubscription(createSubscription());
@@ -159,7 +163,7 @@ function useCoValueSubscription<
       subscription.subscription?.destroy();
       setSubscription(createSubscription());
     });
-  }, [Schema, id, contextManager, branchName, branchOwnerId]);
+  }, [Schema, id, contextManager, branchName, branchOwnerId, resolveQuery]);
 
   return subscription.subscription;
 }
@@ -476,6 +480,28 @@ export function useCoStateWithSelector<
   );
 }
 
+/**
+ * Memoizes a value based on its structural equality.
+ *
+ * @param factory - A function that returns the value to memoize.
+ * @returns The memoized value.
+ */
+function useStructuralMemo<T>(factory: () => T): T {
+  const valueRef = React.useRef<{ value: T; initialized: boolean }>({
+    value: undefined as T,
+    initialized: false,
+  });
+
+  if (
+    !valueRef.current.initialized ||
+    !structuralEquals(valueRef.current.value, factory())
+  ) {
+    valueRef.current = { value: factory(), initialized: true };
+  }
+
+  return valueRef.current.value;
+}
+
 function useAccountSubscription<
   S extends AccountClass<Account> | AnyAccountSchema,
   const R extends ResolveQuery<S>,
@@ -487,6 +513,7 @@ function useAccountSubscription<
   },
 ) {
   const contextManager = useJazzContextManager();
+  const resolveQuery = useStructuralMemo(() => options?.resolve ?? true);
 
   const createSubscription = () => {
     const agent = getCurrentAccountFromContextManager(contextManager);
@@ -500,7 +527,7 @@ function useAccountSubscription<
     }
 
     // We don't need type validation here, since it's mostly to help users on public API
-    const resolve: any = options?.resolve ?? true;
+    const resolve: any = resolveQuery;
 
     const node = contextManager.getCurrentValue()!.node;
     const subscription = new SubscriptionScope<any>(
@@ -535,7 +562,10 @@ function useAccountSubscription<
       subscription.contextManager !== contextManager ||
       subscription.Schema !== Schema ||
       subscription.branchName !== options?.unstable_branch?.name ||
-      subscription.branchOwnerId !== options?.unstable_branch?.owner?.$jazz.id
+      subscription.branchOwnerId !==
+        options?.unstable_branch?.owner?.$jazz.id ||
+      (subscription.subscription &&
+        subscription.subscription.resolve !== resolveQuery)
     ) {
       subscription.subscription?.destroy();
       setSubscription(createSubscription());
@@ -545,7 +575,7 @@ function useAccountSubscription<
       subscription.subscription?.destroy();
       setSubscription(createSubscription());
     });
-  }, [Schema, contextManager, branchName, branchOwnerId]);
+  }, [Schema, contextManager, branchName, branchOwnerId, resolveQuery]);
 
   return subscription.subscription;
 }
