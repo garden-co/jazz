@@ -36,7 +36,7 @@ export const useJournalSeed = ({
           text: entry.c,
           feelings: entry.f,
           topics: entry.t,
-          embedding: await Embedding.createFrom(embedding),
+          embedding: Embedding.create(embedding),
         });
 
         if (owner?.root?.journalEntries) {
