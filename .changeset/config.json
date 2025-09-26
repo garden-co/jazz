@@ -7,6 +7,7 @@
     [
       "cojson",
       "cojson-core-wasm",
+      "cojson-core-napi",
       "cojson-storage-indexeddb",
       "cojson-storage-sqlite",
       "cojson-transport-ws",

@@ -40,6 +40,9 @@ jobs:
 
       - name: Pnpm Build
         run: pnpm turbo build --filter="./packages/*"
+      
+      - name: Build NAPI packages
+        run: pnpm exec turbo run build:napi --filter='./crates/*'
 
       - name: chat-rn-expo App Pre Build
         working-directory: ./examples/chat-rn-expo

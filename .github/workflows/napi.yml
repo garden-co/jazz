@@ -25,3 +25,17 @@ jobs:
   napi-build:
     name: NAPI Build and Test Bindings
     uses: ./.github/workflows/napi-build-reusable.yml
+  use-artifacts:
+    name: Using artifacts
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    needs: napi-build
+    steps:  
+      - uses: actions/download-artifact@v5
+        with:
+          path: artifacts
+      - name: Print artifact files
+        run: ls -lR
+  
+  # napi-build:
+  #   name: NAPI Build and Test Bindings
+  #   uses: ./.github/workflows/napi-build-reusable.yml
