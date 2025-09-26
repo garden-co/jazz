@@ -1,20 +1,20 @@
-import { MusicTrack, MusicaAccount } from "@/1_schema";
+import { MusicTrack } from "@/1_schema";
 import { MediaPlayer } from "@/5_useMediaPlayer";
 import { useMediaEndListener } from "@/lib/audio/useMediaEndListener";
 import { usePlayState } from "@/lib/audio/usePlayState";
 import { useKeyboardListener } from "@/lib/useKeyboardListener";
-import { useAccountWithSelector, useCoState } from "jazz-tools/react";
+import { useCoState } from "jazz-tools/react";
 import { Pause, Play, SkipBack, SkipForward } from "lucide-react";
 import WaveformCanvas from "./WaveformCanvas";
 import { Button } from "./ui/button";
+import { useAccountSelector } from "@/components/AccountProvider.tsx";
 
 export function PlayerControls({ mediaPlayer }: { mediaPlayer: MediaPlayer }) {
   const playState = usePlayState();
   const isPlaying = playState.value === "play";
 
-  const activePlaylist = useAccountWithSelector(MusicaAccount, {
-    resolve: { root: { activePlaylist: true } },
-    select: (me) => me?.root.activePlaylist,
+  const activePlaylistTitle = useAccountSelector({
+    select: (me) => me.root.activePlaylist?.title ?? "All tracks",
   });
 
   const activeTrack = useCoState(MusicTrack, mediaPlayer.activeTrackId);
@@ -72,7 +72,7 @@ export function PlayerControls({ mediaPlayer }: { mediaPlayer: MediaPlayer }) {
           {activeTrackTitle}
         </h4>
         <p className="hidden sm:block text-xs sm:text-sm text-gray-600 truncate sm:max-w-80">
-          {activePlaylist?.title || "All tracks"}
+          {activePlaylistTitle || "All tracks"}
         </p>
       </div>
     </footer>

@@ -1,7 +1,7 @@
 import { useToast } from "@/hooks/use-toast";
-import { createInviteLink, useAccount, useCoState } from "jazz-tools/react";
+import { createInviteLink, useCoState } from "jazz-tools/react";
 import { useParams } from "react-router";
-import { MusicaAccount, Playlist } from "./1_schema";
+import { Playlist } from "./1_schema";
 import { uploadMusicTracks } from "./4_actions";
 import { MediaPlayer } from "./5_useMediaPlayer";
 import { FileUploadButton } from "./components/FileUploadButton";
@@ -14,16 +14,9 @@ import { Button } from "./components/ui/button";
 import { SidebarInset, SidebarTrigger } from "./components/ui/sidebar";
 import { usePlayState } from "./lib/audio/usePlayState";
 import { useState } from "react";
+import { useAccountSelector } from "@/components/AccountProvider.tsx";
 
 export function HomePage({ mediaPlayer }: { mediaPlayer: MediaPlayer }) {
-  /**
-   * `me` represents the current user account, which will determine
-   *  access rights to CoValues. We get it from the top-level provider `<WithJazz/>`.
-   */
-  const { me } = useAccount(MusicaAccount, {
-    resolve: { root: { rootPlaylist: true, playlists: true } },
-  });
-
   const playState = usePlayState();
   const isPlaying = playState.value === "play";
   const { toast } = useToast();
@@ -38,7 +31,9 @@ export function HomePage({ mediaPlayer }: { mediaPlayer: MediaPlayer }) {
   }
 
   const params = useParams<{ playlistId: string }>();
-  const playlistId = params.playlistId ?? me?.root.$jazz.refs.rootPlaylist.id;
+  const playlistId = useAccountSelector({
+    select: (me) => params.playlistId ?? me.root.$jazz.refs.rootPlaylist.id,
+  });
 
   const playlist = useCoState(Playlist, playlistId, {
     resolve: {
@@ -50,11 +45,15 @@ export function HomePage({ mediaPlayer }: { mediaPlayer: MediaPlayer }) {
 
   const membersIds = playlist?.$jazz.owner.members.map((member) => member.id);
   const isRootPlaylist = !params.playlistId;
-  const isPlaylistOwner = playlist && me?.canAdmin(playlist);
-  const isActivePlaylist = playlistId === me?.root.activePlaylist?.$jazz.id;
+  const isPlaylistOwner = useAccountSelector({
+    select: (me) => Boolean(playlist && me.canAdmin(playlist)),
+  });
+  const isActivePlaylist = useAccountSelector({
+    select: (me) => playlistId === me.root.activePlaylist?.$jazz.id,
+  });
 
   const handlePlaylistShareClick = async () => {
-    if (!isPlaylistOwner) return;
+    if (!isPlaylistOwner || !playlist) return;
 
     const inviteLink = createInviteLink(playlist, "reader");
 

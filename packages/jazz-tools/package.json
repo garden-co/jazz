@@ -203,6 +203,7 @@
     "format-and-lint": "biome check .",
     "format-and-lint:fix": "biome check . --write",
     "dev": "tsup --watch --dts",
+    "bench": "vitest bench --run --root ../../ --project jazz-tools",
     "test": "vitest --run --root ../../ --project jazz-tools",
     "test:watch": "vitest --watch --root ../../ --project jazz-tools",
     "types": "tsc --outDir dist",

@@ -13,7 +13,6 @@ import {
   AnyAccountSchema,
   CoValue,
   CoValueClassOrSchema,
-  Group,
   InboxSender,
   InstanceOfSchema,
   JazzContextManager,
@@ -27,6 +26,7 @@ import {
 } from "jazz-tools";
 import { JazzContext, JazzContextManagerContext } from "./provider.js";
 import { getCurrentAccountFromContextManager } from "./utils.js";
+import { CoValueSubscription } from "./types.js";
 
 export function useJazzContext<Acc extends Account>() {
   const value = useContext(JazzContext) as JazzContextType<Acc>;
@@ -82,7 +82,7 @@ export function useIsAuthenticated() {
   );
 }
 
-function useCoValueSubscription<
+export function useCoValueSubscription<
   S extends CoValueClassOrSchema,
   const R extends ResolveQuery<S>,
 >(
@@ -161,7 +161,7 @@ function useCoValueSubscription<
     });
   }, [Schema, id, contextManager, branchName, branchOwnerId]);
 
-  return subscription.subscription;
+  return subscription.subscription as CoValueSubscription<S, R>;
 }
 
 /**
@@ -476,7 +476,39 @@ export function useCoStateWithSelector<
   );
 }
 
-function useAccountSubscription<
+export function useSubscriptionSelector<
+  S extends CoValueClassOrSchema,
+  R extends ResolveQuery<S>,
+  TSelectorReturn = Loaded<S, R> | undefined | null,
+>(
+  subscription: CoValueSubscription<S, R>,
+  options?: {
+    select?: (value: Loaded<S, R> | undefined | null) => TSelectorReturn;
+    equalityFn?: (a: TSelectorReturn, b: TSelectorReturn) => boolean;
+  },
+) {
+  return useSyncExternalStoreWithSelector<
+    Loaded<S, R> | undefined | null,
+    TSelectorReturn
+  >(
+    React.useCallback(
+      (callback) => {
+        if (!subscription) {
+          return () => {};
+        }
+
+        return subscription.subscribe(callback);
+      },
+      [subscription],
+    ),
+    () => (subscription ? subscription.getCurrentValue() : null),
+    () => (subscription ? subscription.getCurrentValue() : null),
+    options?.select ?? ((value) => value as TSelectorReturn),
+    options?.equalityFn ?? Object.is,
+  );
+}
+
+export function useAccountSubscription<
   S extends AccountClass<Account> | AnyAccountSchema,
   const R extends ResolveQuery<S>,
 >(
@@ -547,7 +579,7 @@ function useAccountSubscription<
     });
   }, [Schema, contextManager, branchName, branchOwnerId]);
 
-  return subscription.subscription;
+  return subscription.subscription as CoValueSubscription<S, R>;
 }
 
 /**
