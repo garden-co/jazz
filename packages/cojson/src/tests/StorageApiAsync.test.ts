@@ -134,7 +134,12 @@ describe("StorageApiAsync", () => {
       const initialKnownState = storage.getKnownState(id);
       expect(initialKnownState).toEqual(emptyKnownState(id as `co_z${string}`));
 
-      await storage.load(id, callback, done);
+      await new Promise<void>((r) => {
+        storage.load(id, callback, (found) => {
+          done(found);
+          r();
+        });
+      });
 
       expect(done).toHaveBeenCalledWith(false);
       expect(callback).not.toHaveBeenCalled();
@@ -160,7 +165,12 @@ describe("StorageApiAsync", () => {
       const initialKnownState = storage.getKnownState(group.id);
       expect(initialKnownState).toEqual(emptyKnownState(group.id));
 
-      await storage.load(group.id, callback, done);
+      await new Promise<void>((r) => {
+        storage.load(group.id, callback, (found) => {
+          done(found);
+          r();
+        });
+      });
 
       expect(callback).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -199,7 +209,12 @@ describe("StorageApiAsync", () => {
       const initialKnownState = storage.getKnownState(group.id);
       expect(initialKnownState).toEqual(emptyKnownState(group.id));
 
-      await storage.load(group.id, callback, done);
+      await new Promise<void>((r) => {
+        storage.load(group.id, callback, (found) => {
+          done(found);
+          r();
+        });
+      });
 
       expect(callback).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -704,7 +719,12 @@ describe("StorageApiAsync", () => {
       expect(initialMapKnownState).toEqual(emptyKnownState(map.id));
 
       // Load the map, which should also load the group dependency first
-      await storage.load(map.id, callback, done);
+      await new Promise<void>((r) => {
+        storage.load(map.id, callback, (found) => {
+          done(found);
+          r();
+        });
+      });
 
       expect(callback).toHaveBeenCalledTimes(2); // Group first, then map
       expect(callback).toHaveBeenNthCalledWith(
@@ -756,7 +776,12 @@ describe("StorageApiAsync", () => {
       expect(initialMapKnownState).toEqual(emptyKnownState(map.id));
 
       // First load the group
-      await storage.load(group.id, callback, done);
+      await new Promise<void>((r) => {
+        storage.load(group.id, callback, (found) => {
+          done(found);
+          r();
+        });
+      });
       callback.mockClear();
       done.mockClear();
 
@@ -765,7 +790,12 @@ describe("StorageApiAsync", () => {
       expect(afterGroupLoad).toEqual(group.core.verified.knownState());
 
       // Then load the map - the group dependency should already be loaded
-      await storage.load(map.id, callback, done);
+      await new Promise<void>((r) => {
+        storage.load(map.id, callback, (found) => {
+          done(found);
+          r();
+        });
+      });
 
       // Should only call callback once for the map since group is already loaded
       expect(callback).toHaveBeenCalledTimes(1);
