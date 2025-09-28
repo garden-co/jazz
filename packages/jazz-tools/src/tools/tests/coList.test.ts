@@ -1180,7 +1180,6 @@ describe("CoList subscription", async () => {
 
       const Person = co.map({
         name: z.string(),
-        age: z.number(),
         dogs: co.list(Dog),
       });
 
@@ -1188,7 +1187,6 @@ describe("CoList subscription", async () => {
       const person = Person.create(
         {
           name: "John",
-          age: 20,
           dogs: Person.shape.dogs.create(
             [
               // Skipped because it's not accessible
@@ -1229,14 +1227,12 @@ describe("CoList subscription", async () => {
 
       const Person = co.map({
         name: z.string(),
-        age: z.number(),
         dogs: co.list(Dog),
       });
 
       const person = Person.create(
         {
           name: "John",
-          age: 20,
           dogs: Person.shape.dogs.create(
             [
               Dog.create({ name: "Rex", breed: "Labrador" }),
@@ -1258,6 +1254,67 @@ describe("CoList subscription", async () => {
       assert(loadedPerson);
       expect(loadedPerson.name).toBe("John");
       expect(loadedPerson.dogs).toEqual([null, null]);
+
+      skipErrorsInLists(false);
+    });
+
+    test("returns previously inaccessible elements when the viewer gets acess to them", async () => {
+      skipErrorsInLists(true);
+
+      const Dog = co.map({
+        name: z.string(),
+        breed: z.string(),
+      });
+
+      const Person = co.map({
+        name: z.string(),
+        dogs: co.list(Dog),
+      });
+
+      const publicGroup = Group.create().makePublic();
+      const privateGroup = Group.create();
+      const person = Person.create(
+        {
+          name: "John",
+          dogs: Person.shape.dogs.create(
+            [Dog.create({ name: "Rex", breed: "Labrador" }, privateGroup)],
+            publicGroup,
+          ),
+        },
+        publicGroup,
+      );
+
+      const bob = await createJazzTestAccount();
+
+      let loadedPerson = await Person.load(person.$jazz.id, {
+        resolve: { dogs: { $each: true } },
+        loadAs: bob,
+      });
+
+      assert(loadedPerson);
+      expect(loadedPerson.dogs).toEqual([]);
+
+      privateGroup.addMember(bob, "reader");
+      await privateGroup.$jazz.waitForSync();
+
+      loadedPerson = await Person.load(person.$jazz.id, {
+        resolve: { dogs: { $each: true } },
+        loadAs: bob,
+      });
+
+      assert(loadedPerson);
+      expect(loadedPerson.dogs).toEqual([{ name: "Rex", breed: "Labrador" }]);
+
+      privateGroup.removeMember(bob);
+      await privateGroup.$jazz.waitForSync();
+
+      loadedPerson = await Person.load(person.$jazz.id, {
+        resolve: { dogs: { $each: true } },
+        loadAs: bob,
+      });
+
+      assert(loadedPerson);
+      expect(loadedPerson.dogs).toEqual([]);
 
       skipErrorsInLists(false);
     });
