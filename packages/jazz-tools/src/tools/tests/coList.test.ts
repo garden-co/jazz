@@ -6,6 +6,7 @@ import {
   activeAccountContext,
   co,
   coValueClassFromCoValueClassOrSchema,
+  skipErrorsInLists,
 } from "../internal.js";
 import {
   createJazzTestAccount,
@@ -1093,7 +1094,7 @@ describe("CoList subscription", async () => {
     expect(spy).toHaveBeenCalledTimes(2);
   });
 
-  test("loading a nested list with deep resolve and $onError", async () => {
+  test("replaces inaccessible CoList with null when loading a nested list with deep resolve and $onError: null", async () => {
     const Dog = co.map({
       name: z.string(),
       breed: z.string(),
@@ -1127,6 +1128,139 @@ describe("CoList subscription", async () => {
     assert(loadedPerson);
     expect(loadedPerson.name).toBe("John");
     expect(loadedPerson.dogs).toBeNull();
+  });
+
+  test("replaces inaccessible items with null when loading a nested list with deep resolve and $each: { $onError: null }", async () => {
+    const Dog = co.map({
+      name: z.string(),
+      breed: z.string(),
+    });
+
+    const Person = co.map({
+      name: z.string(),
+      age: z.number(),
+      dogs: co.list(Dog),
+    });
+
+    const person = Person.create(
+      {
+        name: "John",
+        age: 20,
+        dogs: Person.shape.dogs.create(
+          [
+            Dog.create({ name: "Rex", breed: "Labrador" }),
+            Dog.create({ name: "Fido", breed: "Poodle" }),
+          ],
+          Group.create().makePublic(),
+        ),
+      },
+      Group.create().makePublic(),
+    );
+
+    const bob = await createJazzTestAccount();
+
+    const loadedPerson = await Person.load(person.$jazz.id, {
+      resolve: { dogs: { $each: { $onError: null } } },
+      loadAs: bob,
+    });
+
+    assert(loadedPerson);
+    expect(loadedPerson.name).toBe("John");
+    expect(loadedPerson.dogs).toEqual([null, null]);
+  });
+
+  describe("skipErrorsInLists", () => {
+    test("skips inaccessible items when loading a nested list with skipErrorsInLists", async () => {
+      skipErrorsInLists(true);
+
+      const Dog = co.map({
+        name: co.plainText(),
+        breed: z.string(),
+      });
+
+      const Person = co.map({
+        name: z.string(),
+        age: z.number(),
+        dogs: co.list(Dog),
+      });
+
+      const publicGroup = Group.create().makePublic();
+      const person = Person.create(
+        {
+          name: "John",
+          age: 20,
+          dogs: Person.shape.dogs.create(
+            [
+              // Skipped because it's not accessible
+              Dog.create({ name: "Rex", breed: "Labrador" }),
+              // Skipped because its name is not accesible
+              Dog.create(
+                { name: co.plainText().create("Fido"), breed: "Poodle" },
+                publicGroup,
+              ),
+            ],
+            publicGroup,
+          ),
+        },
+        publicGroup,
+      );
+
+      const bob = await createJazzTestAccount();
+
+      const loadedPerson = await Person.load(person.$jazz.id, {
+        resolve: { dogs: { $each: { name: true } } },
+        loadAs: bob,
+      });
+
+      assert(loadedPerson);
+      expect(loadedPerson.name).toBe("John");
+      expect(loadedPerson.dogs).toEqual([]);
+
+      skipErrorsInLists(false);
+    });
+
+    test("$each: { $onError: null } takes precedence over skipErrorsInLists", async () => {
+      skipErrorsInLists(true);
+
+      const Dog = co.map({
+        name: z.string(),
+        breed: z.string(),
+      });
+
+      const Person = co.map({
+        name: z.string(),
+        age: z.number(),
+        dogs: co.list(Dog),
+      });
+
+      const person = Person.create(
+        {
+          name: "John",
+          age: 20,
+          dogs: Person.shape.dogs.create(
+            [
+              Dog.create({ name: "Rex", breed: "Labrador" }),
+              Dog.create({ name: "Fido", breed: "Poodle" }),
+            ],
+            Group.create().makePublic(),
+          ),
+        },
+        Group.create().makePublic(),
+      );
+
+      const bob = await createJazzTestAccount();
+
+      const loadedPerson = await Person.load(person.$jazz.id, {
+        resolve: { dogs: { $each: { $onError: null } } },
+        loadAs: bob,
+      });
+
+      assert(loadedPerson);
+      expect(loadedPerson.name).toBe("John");
+      expect(loadedPerson.dogs).toEqual([null, null]);
+
+      skipErrorsInLists(false);
+    });
   });
 });
 
