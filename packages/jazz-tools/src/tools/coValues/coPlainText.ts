@@ -246,6 +246,9 @@ export class CoTextJazzApi<T extends CoPlainText> extends CoValueJazzApi<T> {
     // Calculate the diff on grapheme arrays
     const patches = [...calcPatch(currentGraphemes, otherGraphemes)];
 
+    // Turns off updates in the middle of applyDiff to improve the performance
+    this.raw.pauseTransactionProcessing();
+
     // Apply patches in reverse order to avoid index shifting issues
     for (const [from, to, insert] of patches.reverse()) {
       if (to > from) {
@@ -256,6 +259,8 @@ export class CoTextJazzApi<T extends CoPlainText> extends CoValueJazzApi<T> {
         this.coText.insertBefore(from, this.raw.fromGraphemes(insert));
       }
     }
+
+    this.raw.resumeTransactionProcessing();
   }
 
   /**

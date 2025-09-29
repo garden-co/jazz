@@ -1,12 +1,9 @@
 import { beforeEach, describe, expect, test } from "vitest";
 import { expectList } from "../coValue.js";
 import { WasmCrypto } from "../crypto/WasmCrypto.js";
-import { LocalNode } from "../localNode.js";
-import { expectGroup } from "../typeUtils/expectGroup.js";
 import {
   loadCoValueOrFail,
   nodeWithRandomAgentAndSessionID,
-  randomAgentAndSessionID,
   setupTestNode,
   waitFor,
 } from "./testUtils.js";
@@ -955,4 +952,38 @@ describe("CoList Branching", () => {
       ]
     `);
   });
+});
+
+test("pauseTransactionProcessing and resumeTransactionProcessing should control transaction processing", () => {
+  const node = nodeWithRandomAgentAndSessionID();
+
+  const coValue = node.createCoValue({
+    type: "colist",
+    ruleset: { type: "unsafeAllowAll" },
+    meta: null,
+    ...Crypto.createdNowUnique(),
+  });
+
+  const content = expectList(coValue.getCurrentContent());
+
+  // Add initial items
+  content.append("first", 0, "trusting");
+  content.append("second", 0, "trusting");
+  expect(content.toJSON()).toEqual(["first", "second"]);
+
+  // Pause transaction processing
+  content.pauseTransactionProcessing();
+
+  // Add more items - these should not be processed immediately
+  content.append("third", 0, "trusting");
+  content.append("fourth", 0, "trusting");
+
+  // List should still show the old state
+  expect(content.toJSON()).toEqual(["first", "second"]);
+
+  // Resume transaction processing - should process all pending transactions
+  content.resumeTransactionProcessing();
+
+  // All items should now be visible
+  expect(content.toJSON()).toEqual(["first", "second", "third", "fourth"]);
 });

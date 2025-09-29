@@ -190,7 +190,22 @@ export class RawCoList<
     list.push(value);
   }
 
+  // Helps us to off updates in the middle of applyDiff to improve the performance
+  private shouldProcessNewTransactions = true;
+  pauseTransactionProcessing() {
+    this.shouldProcessNewTransactions = false;
+  }
+
+  resumeTransactionProcessing() {
+    this.shouldProcessNewTransactions = true;
+    this.processNewTransactions();
+  }
+
   processNewTransactions() {
+    if (!this.shouldProcessNewTransactions) {
+      return;
+    }
+
     const transactions = this.core.getValidSortedTransactions({
       ignorePrivateTransactions: false,
       knownTransactions: this.knownTransactions,
