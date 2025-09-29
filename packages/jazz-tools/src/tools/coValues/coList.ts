@@ -612,6 +612,10 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
    * @category Content
    */
   pop(): CoListItem<L> | undefined {
+    if (this.coList.length === 0) {
+      return undefined;
+    }
+
     const last = this.coList[this.coList.length - 1];
 
     this.raw.delete(this.toRawIndex(this.coList.length - 1));
@@ -626,6 +630,10 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
    * @category Content
    */
   shift(): CoListItem<L> | undefined {
+    if (this.coList.length === 0) {
+      return undefined;
+    }
+
     const first = this.coList[0];
 
     this.raw.delete(this.toRawIndex(0));

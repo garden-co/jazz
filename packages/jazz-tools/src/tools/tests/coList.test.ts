@@ -316,22 +316,40 @@ describe("Simple CoList operations", async () => {
       });
     });
 
-    test("pop", () => {
-      const list = TestList.create(["bread", "butter", "onion"], {
-        owner: me,
+    describe("pop", () => {
+      test("removes the last element from the list and returns it", () => {
+        const list = TestList.create(["bread", "butter", "onion"], {
+          owner: me,
+        });
+        expect(list.$jazz.pop()).toBe("onion");
+        expect(list.length).toBe(2);
+        expect(list.$jazz.raw.asArray()).toEqual(["bread", "butter"]);
       });
-      expect(list.$jazz.pop()).toBe("onion");
-      expect(list.length).toBe(2);
-      expect(list.$jazz.raw.asArray()).toEqual(["bread", "butter"]);
+
+      test("returns undefined if the list is empty", () => {
+        const list = TestList.create([], { owner: me });
+        expect(list.$jazz.pop()).toBeUndefined();
+        expect(list.length).toBe(0);
+        expect(list.$jazz.raw.asArray()).toEqual([]);
+      });
     });
 
-    test("shift", () => {
-      const list = TestList.create(["bread", "butter", "onion"], {
-        owner: me,
+    describe("shift", () => {
+      test("removes the first element from the list and returns it", () => {
+        const list = TestList.create(["bread", "butter", "onion"], {
+          owner: me,
+        });
+        expect(list.$jazz.shift()).toBe("bread");
+        expect(list.length).toBe(2);
+        expect(list.$jazz.raw.asArray()).toEqual(["butter", "onion"]);
       });
-      expect(list.$jazz.shift()).toBe("bread");
-      expect(list.length).toBe(2);
-      expect(list.$jazz.raw.asArray()).toEqual(["butter", "onion"]);
+
+      test("returns undefined if the list is empty", () => {
+        const list = TestList.create([], { owner: me });
+        expect(list.$jazz.shift()).toBeUndefined();
+        expect(list.length).toBe(0);
+        expect(list.$jazz.raw.asArray()).toEqual([]);
+      });
     });
 
     describe("splice", () => {
