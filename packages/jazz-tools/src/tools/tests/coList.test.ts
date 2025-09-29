@@ -6,6 +6,7 @@ import {
   activeAccountContext,
   co,
   coValueClassFromCoValueClassOrSchema,
+  getSubscriptionScope,
   skipErrorsInLists,
 } from "../internal.js";
 import {
@@ -1508,6 +1509,114 @@ describe("CoList unique methods", () => {
     expect(result?.length).toBe(1);
     expect(result?.[0]?.name).toBe("Item 1");
     expect(result?.[0]?.category?.title).toBe("Category 1");
+  });
+});
+
+describe("CoList query view", () => {
+  const TestList = co.list(co.plainText());
+  let list: co.loaded<typeof TestList, { $each: true }>;
+
+  beforeEach(() => {
+    list = TestList.create(["bread", "butter", "onion", "cheese", "pasta"], {
+      owner: me,
+    });
+    const queryView = {
+      0: 2,
+      1: 4,
+      2: 1,
+    };
+
+    // @ts-expect-error - Mock the private queryView getter
+    vi.spyOn(list.$jazz, "queryView", "get").mockReturnValue(queryView);
+  });
+
+  test("only returns items included in the query view", () => {
+    expect(list[0]?.toString()).toBe("onion");
+    expect(list[1]?.toString()).toBe("pasta");
+    expect(list[2]?.toString()).toBe("butter");
+    // TODO expect(list[3]).toBeUndefined();
+  });
+
+  test("updates items included in the query view", () => {
+    const newElement = co.plainText().create("meat");
+    list.$jazz.set(0, newElement);
+
+    expect(list[0]?.toString()).toBe("meat");
+    expect(list.$jazz.raw.get(2)).toEqual(newElement.$jazz.id);
+  });
+
+  test("length is the length of the query view", () => {
+    expect(list.length).toBe(3);
+  });
+
+  test("refs only returns items included in the query view", () => {
+    const refs = list.$jazz.refs;
+    expect(refs[0]?.id).toBe(list[0]!.$jazz.id);
+    expect(refs[1]?.id).toBe(list[1]!.$jazz.id);
+    expect(refs[2]?.id).toBe(list[2]!.$jazz.id);
+    // TODO expect(refs[3]).toBeUndefined();
+  });
+
+  test("toJSON only returns items included in the query view", () => {
+    expect(list.toJSON()).toEqual(["onion", "pasta", "butter"]);
+  });
+
+  test("pop returns the last item from the query view", () => {
+    const lastItem = list.$jazz.pop();
+    expect(lastItem?.toString()).toBe("butter");
+  });
+
+  test("shift returns the first item from the query view", () => {
+    const firstItem = list.$jazz.shift();
+    expect(firstItem?.toString()).toBe("onion");
+  });
+
+  test("array methods take the query view into account", () => {
+    expect(list.map((element) => element.toUpperCase())).toEqual([
+      "ONION",
+      "PASTA",
+      "BUTTER",
+    ]);
+
+    const butter = list[2];
+    expect(list.filter((element) => element.startsWith("b"))).toEqual([butter]);
+  });
+
+  test("remove affects only items included in the query view", () => {
+    const removedItems = list.$jazz.remove((element) =>
+      element.startsWith("b"),
+    );
+    expect(removedItems.length).toEqual(1);
+    expect(removedItems[0]?.toString()).toEqual("butter");
+  });
+
+  test("retain affects only items included in the query view", () => {
+    const removedItems = list.$jazz.retain((element) =>
+      element.startsWith("b"),
+    );
+    expect(removedItems.length).toEqual(2);
+    expect(removedItems[0]?.toString()).toEqual("onion");
+    expect(removedItems[1]?.toString()).toEqual("pasta");
+  });
+
+  test.skip("splice takes the query view into account", () => {
+    // TODO we need to update the query view synchronously for this to work
+    const removedItems = list.$jazz.splice(1, 2);
+    expect(removedItems.length).toEqual(2);
+    expect(removedItems[0]?.toString()).toEqual("pasta");
+    expect(removedItems[1]?.toString()).toEqual("butter");
+  });
+
+  test.skip("applyDiff applies changes to the query view", () => {
+    // TODO we need to update the query view synchronously for this to work
+    const onion = list[0]!;
+    const butter = list[2]!;
+    const meat = co.plainText().create("meat");
+    const updatedList = list.$jazz.applyDiff([onion, meat, butter]);
+
+    expect(updatedList[0]?.toString()).toEqual("onion");
+    expect(updatedList[1]?.toString()).toEqual("meat");
+    expect(updatedList[2]?.toString()).toEqual("butter");
   });
 });
 
