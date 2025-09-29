@@ -1,5 +1,13 @@
 import { WasmCrypto } from "cojson/crypto/WasmCrypto";
-import { assert, beforeEach, describe, expect, test, vi } from "vitest";
+import {
+  afterEach,
+  assert,
+  beforeEach,
+  describe,
+  expect,
+  test,
+  vi,
+} from "vitest";
 import { Account, Group, subscribeToCoValue, z } from "../index.js";
 import {
   Loaded,
@@ -20,6 +28,11 @@ const Crypto = await WasmCrypto.create();
 
 let me = await Account.create({
   creationProps: { name: "Hermes Puggington" },
+  crypto: Crypto,
+});
+
+const otherAccount = await Account.create({
+  creationProps: { name: "Other Owner" },
   crypto: Crypto,
 });
 
@@ -1196,9 +1209,15 @@ describe("CoList subscription", async () => {
   });
 
   describe("skipErrorsInLists", () => {
-    test("skips inaccessible items when loading a nested list with skipErrorsInLists", async () => {
+    beforeEach(() => {
       skipErrorsInLists(true);
+    });
 
+    afterEach(() => {
+      skipErrorsInLists(false);
+    });
+
+    test("skips inaccessible items when loading a nested list with skipErrorsInLists", async () => {
       const Dog = co.map({
         name: co.plainText(),
         breed: z.string(),
@@ -1239,13 +1258,9 @@ describe("CoList subscription", async () => {
       assert(loadedPerson);
       expect(loadedPerson.name).toBe("John");
       expect(loadedPerson.dogs).toEqual([]);
-
-      skipErrorsInLists(false);
     });
 
     test("$each: { $onError: null } takes precedence over skipErrorsInLists", async () => {
-      skipErrorsInLists(true);
-
       const Dog = co.map({
         name: z.string(),
         breed: z.string(),
@@ -1280,13 +1295,9 @@ describe("CoList subscription", async () => {
       assert(loadedPerson);
       expect(loadedPerson.name).toBe("John");
       expect(loadedPerson.dogs).toEqual([null, null]);
-
-      skipErrorsInLists(false);
     });
 
     test("returns previously inaccessible elements when the viewer gets acess to them", async () => {
-      skipErrorsInLists(true);
-
       const Dog = co.map({
         name: z.string(),
         breed: z.string(),
@@ -1341,8 +1352,6 @@ describe("CoList subscription", async () => {
 
       assert(loadedPerson);
       expect(loadedPerson.dogs).toEqual([]);
-
-      skipErrorsInLists(false);
     });
   });
 });
@@ -1541,33 +1550,46 @@ describe("CoList query view", () => {
   const TestList = co.list(co.plainText());
   let list: co.loaded<typeof TestList, { $each: true }>;
 
-  beforeEach(() => {
-    list = TestList.create(["bread", "butter", "onion", "cheese", "pasta"], {
-      owner: me,
-    });
-    const queryView = {
-      0: 2,
-      1: 4,
-      2: 1,
-    };
+  beforeEach(async () => {
+    const inaccessibleItem = co
+      .plainText()
+      .create("inaccessible", otherAccount);
+    const createdList = TestList.create(
+      [inaccessibleItem, "butter", "onion", "cheese", inaccessibleItem],
+      {
+        owner: me,
+      },
+    );
 
-    // @ts-expect-error - Mock the private queryView getter
-    vi.spyOn(list.$jazz, "queryView", "get").mockReturnValue(queryView);
+    skipErrorsInLists(true);
+    const loadedList = await TestList.load(createdList.$jazz.id, {
+      resolve: { $each: true },
+    });
+    assert(loadedList);
+    list = loadedList;
+  });
+
+  afterEach(() => {
+    skipErrorsInLists(false);
   });
 
   test("only returns items included in the query view", () => {
-    expect(list[0]?.toString()).toBe("onion");
-    expect(list[1]?.toString()).toBe("pasta");
-    expect(list[2]?.toString()).toBe("butter");
+    expect(list[0]?.toString()).toBe("butter");
+    expect(list[1]?.toString()).toBe("onion");
+    expect(list[2]?.toString()).toBe("cheese");
     expect(list[3]).toBeUndefined();
   });
 
   test("updates items included in the query view", () => {
     const newElement = co.plainText().create("meat");
     list.$jazz.set(0, newElement);
-
     expect(list[0]?.toString()).toBe("meat");
-    expect(list.$jazz.raw.get(2)).toEqual(newElement.$jazz.id);
+  });
+
+  test("does not update items not included in the query view", () => {
+    const newElement = co.plainText().create("meat");
+    list.$jazz.set(3, newElement);
+    expect(list[3]).toBeUndefined();
   });
 
   test("length is the length of the query view", () => {
@@ -1583,27 +1605,27 @@ describe("CoList query view", () => {
   });
 
   test("toJSON only returns items included in the query view", () => {
-    expect(list.toJSON()).toEqual(["onion", "pasta", "butter"]);
+    expect(list.toJSON()).toEqual(["butter", "onion", "cheese"]);
   });
 
   test("pop returns the last item from the query view", () => {
     const lastItem = list.$jazz.pop();
-    expect(lastItem?.toString()).toBe("butter");
+    expect(lastItem?.toString()).toBe("cheese");
   });
 
   test("shift returns the first item from the query view", () => {
     const firstItem = list.$jazz.shift();
-    expect(firstItem?.toString()).toBe("onion");
+    expect(firstItem?.toString()).toBe("butter");
   });
 
   test("array methods take the query view into account", () => {
     expect(list.map((element) => element.toUpperCase())).toEqual([
-      "ONION",
-      "PASTA",
       "BUTTER",
+      "ONION",
+      "CHEESE",
     ]);
 
-    const butter = list[2];
+    const butter = list[0];
     expect(list.filter((element) => element.startsWith("b"))).toEqual([butter]);
   });
 
@@ -1621,27 +1643,25 @@ describe("CoList query view", () => {
     );
     expect(removedItems.length).toEqual(2);
     expect(removedItems[0]?.toString()).toEqual("onion");
-    expect(removedItems[1]?.toString()).toEqual("pasta");
+    expect(removedItems[1]?.toString()).toEqual("cheese");
   });
 
-  test.skip("splice takes the query view into account", () => {
-    // TODO we need to update the query view synchronously for this to work
+  test("splice takes the query view into account", () => {
     const removedItems = list.$jazz.splice(1, 2);
     expect(removedItems.length).toEqual(2);
-    expect(removedItems[0]?.toString()).toEqual("pasta");
-    expect(removedItems[1]?.toString()).toEqual("butter");
+    expect(removedItems[0]?.toString()).toEqual("onion");
+    expect(removedItems[1]?.toString()).toEqual("cheese");
   });
 
-  test.skip("applyDiff applies changes to the query view", () => {
-    // TODO we need to update the query view synchronously for this to work
-    const onion = list[0]!;
-    const butter = list[2]!;
+  test("applyDiff takes the query view into account", () => {
+    const butter = list[0]!;
+    const cheese = list[2]!;
     const meat = co.plainText().create("meat");
-    const updatedList = list.$jazz.applyDiff([onion, meat, butter]);
+    const updatedList = list.$jazz.applyDiff([butter, meat, cheese]);
 
-    expect(updatedList[0]?.toString()).toEqual("onion");
+    expect(updatedList[0]?.toString()).toEqual("butter");
     expect(updatedList[1]?.toString()).toEqual("meat");
-    expect(updatedList[2]?.toString()).toEqual("butter");
+    expect(updatedList[2]?.toString()).toEqual("cheese");
   });
 });
 

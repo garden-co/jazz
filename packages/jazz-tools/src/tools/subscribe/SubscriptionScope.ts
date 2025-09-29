@@ -132,6 +132,9 @@ export class SubscriptionScope<D extends CoValue> {
 
     // Flags that the value has changed and we need to trigger an update
     this.dirty = true;
+
+    // Reset the cached query view so it's computed again on the next access
+    this.cachedQueryView = null;
   }
 
   handleUpdate(update: RawCoValue | "unavailable") {
@@ -361,8 +364,6 @@ export class SubscriptionScope<D extends CoValue> {
     }
 
     this.dirty = false;
-
-    this.cachedQueryView = null;
   }
 
   subscribers = new Set<(value: SubscriptionValue<D, any>) => void>();

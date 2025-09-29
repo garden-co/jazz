@@ -11,6 +11,7 @@ import {
   coField,
   CoFieldInit,
   CoKeys,
+  computeQueryView,
   CoValue,
   CoValueClass,
   CoValueJazzApi,
@@ -509,6 +510,8 @@ export class CoList<out Item = any>
 type CoListItem<L> = L extends CoList<unknown> ? L[number] : never;
 
 export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
+  private _queryView: QueryView | null = null;
+
   constructor(
     private coList: L,
     private getRaw: () => RawCoList,
@@ -574,6 +577,7 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
       return;
     }
     this.raw.replace(rawIdx, rawValue);
+    this.syncQueryView();
   }
 
   /**
@@ -590,6 +594,7 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
       undefined,
       "private",
     );
+    this.syncQueryView();
 
     return this.length;
   }
@@ -608,6 +613,7 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
     )) {
       this.raw.prepend(item);
     }
+    this.syncQueryView();
 
     return this.length;
   }
@@ -626,6 +632,7 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
     const last = this.coList[this.coList.length - 1];
 
     this.raw.delete(this.toRawIndex(this.coList.length - 1)!);
+    this.syncQueryView();
 
     return last;
   }
@@ -644,6 +651,7 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
     const first = this.coList[0];
 
     this.raw.delete(this.toRawIndex(0)!);
+    this.syncQueryView();
 
     return first;
   }
@@ -670,10 +678,11 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
       idxToDelete--
     ) {
       const rawIdx = this.toRawIndex(idxToDelete);
-      if (rawIdx === undefined || rawIdx >= this.coList.length) {
+      if (idxToDelete >= this.coList.length || rawIdx === undefined) {
         continue;
       }
       this.raw.delete(rawIdx);
+      this.syncQueryView();
     }
 
     const rawItems = toRawItems(
@@ -696,6 +705,7 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
       } else {
         this.raw.append(item, this.toRawIndex(Math.max(start - 1, 0)));
       }
+      this.syncQueryView();
       return deleted;
     }
 
@@ -706,12 +716,14 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
         const item = rawItems[i];
         if (item === undefined) continue;
         this.raw.prepend(item);
+        this.syncQueryView();
       }
     } else {
       let appendAfter = Math.max(start - 1, 0);
       for (const item of rawItems) {
         if (item === undefined) continue;
         this.raw.append(item, this.toRawIndex(appendAfter));
+        this.syncQueryView();
         appendAfter++;
       }
     }
@@ -763,6 +775,7 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
         continue;
       }
       this.raw.delete(rawIdx);
+      this.syncQueryView();
     }
     return deletedItems;
   }
@@ -794,7 +807,7 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
     const current = this.asArray() as CoFieldInit<CoListItem<L>>[];
     const comparator = isRefEncoded(this.schema[ItemsSym])
       ? (aIdx: number, bIdx: number) => {
-          const oldCoValueId = (current[aIdx] as CoValue)?.$jazz?.id;
+          const oldCoValueId = current[aIdx];
           const newCoValueId = (result[bIdx] as CoValue)?.$jazz?.id;
           const isSame =
             !!oldCoValueId && !!newCoValueId && oldCoValueId === newCoValueId;
@@ -880,7 +893,16 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
    * @internal
    */
   private get queryView(): QueryView | null {
-    return this._subscriptionScope?.queryView ?? null;
+    // The query view is obtained from the subscription scope when the CoList is loaded,
+    // and then updated synchronously when the CoList is modified locally.
+    this._queryView ||= this._subscriptionScope?.queryView ?? null;
+    return this._queryView;
+  }
+
+  private syncQueryView() {
+    if (this._queryView && this._subscriptionScope?.queryView) {
+      this._queryView = computeQueryView(this.coList);
+    }
   }
 
   /**
