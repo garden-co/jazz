@@ -425,6 +425,13 @@ describe("Simple CoList operations", async () => {
         list.$jazz.splice(1, 0, "lettuce");
         expect(list[1]?.toString()).toBe("lettuce");
       });
+
+      test("ignore out-of-bound indices", () => {
+        const Schema = co.list(co.plainText());
+        const list = Schema.create(["bread", "butter", "onion"]);
+        list.$jazz.splice(2, 3, "lettuce");
+        expect(list[2]?.toString()).toBe("lettuce");
+      });
     });
 
     describe("remove", () => {
@@ -1552,7 +1559,7 @@ describe("CoList query view", () => {
     expect(list[0]?.toString()).toBe("onion");
     expect(list[1]?.toString()).toBe("pasta");
     expect(list[2]?.toString()).toBe("butter");
-    // TODO expect(list[3]).toBeUndefined();
+    expect(list[3]).toBeUndefined();
   });
 
   test("updates items included in the query view", () => {
@@ -1572,7 +1579,7 @@ describe("CoList query view", () => {
     expect(refs[0]?.id).toBe(list[0]!.$jazz.id);
     expect(refs[1]?.id).toBe(list[1]!.$jazz.id);
     expect(refs[2]?.id).toBe(list[2]!.$jazz.id);
-    // TODO expect(refs[3]).toBeUndefined();
+    expect(refs[3]).toBeUndefined();
   });
 
   test("toJSON only returns items included in the query view", () => {

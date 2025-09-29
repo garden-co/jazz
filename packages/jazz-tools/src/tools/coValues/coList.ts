@@ -551,6 +551,9 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
    */
   get(index: number): CoListItem<L> | undefined {
     const rawIdx = this.toRawIndex(index);
+    if (rawIdx === undefined) {
+      return undefined;
+    }
     return this.rawGet(rawIdx);
   }
 
@@ -566,7 +569,11 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
     if (rawValue === null && !itemDescriptor.optional) {
       throw new Error(`Cannot set required reference ${index} to undefined`);
     }
-    this.raw.replace(this.toRawIndex(index), rawValue);
+    const rawIdx = this.toRawIndex(index);
+    if (rawIdx === undefined) {
+      return;
+    }
+    this.raw.replace(rawIdx, rawValue);
   }
 
   /**
@@ -618,7 +625,7 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
 
     const last = this.coList[this.coList.length - 1];
 
-    this.raw.delete(this.toRawIndex(this.coList.length - 1));
+    this.raw.delete(this.toRawIndex(this.coList.length - 1)!);
 
     return last;
   }
@@ -636,7 +643,7 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
 
     const first = this.coList[0];
 
-    this.raw.delete(this.toRawIndex(0));
+    this.raw.delete(this.toRawIndex(0)!);
 
     return first;
   }
@@ -662,7 +669,11 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
       idxToDelete >= start;
       idxToDelete--
     ) {
-      this.raw.delete(this.toRawIndex(idxToDelete));
+      const rawIdx = this.toRawIndex(idxToDelete);
+      if (rawIdx === undefined || rawIdx >= this.coList.length) {
+        continue;
+      }
+      this.raw.delete(rawIdx);
     }
 
     const rawItems = toRawItems(
@@ -747,7 +758,11 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
     }
     const deletedItems = indices.map((index) => this.coList[index]);
     for (const index of indices.reverse()) {
-      this.raw.delete(this.toRawIndex(index));
+      const rawIdx = this.toRawIndex(index);
+      if (rawIdx === undefined) {
+        continue;
+      }
+      this.raw.delete(rawIdx);
     }
     return deletedItems;
   }
@@ -871,14 +886,19 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
   /**
    * Converts a CoList index into an index in the raw CoList
    * @param index - The index in the CoList
-   * @returns The index in the raw CoList
+   * @returns The index in the raw CoList, or undefined if the index is not in the query view
    * @internal
    */
-  toRawIndex(index: number): number {
+  private toRawIndex(index: number): number | undefined {
     const idxMapping = this.queryView;
-    return !idxMapping || idxMapping[index] === undefined
-      ? index
-      : idxMapping[index];
+    if (!idxMapping) {
+      return index;
+    }
+    const rawIndex = idxMapping[index];
+    if (rawIndex === undefined) {
+      return undefined;
+    }
+    return rawIndex;
   }
 
   /**
@@ -913,7 +933,10 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
       this.coList,
       (idx) => {
         const rawIdx = this.toRawIndex(Number(idx));
-        return this.raw.get(rawIdx) as unknown as ID<CoValue>;
+        if (rawIdx === undefined) {
+          return undefined;
+        }
+        return this.raw.get(rawIdx) as ID<CoValue>;
       },
       () => Array.from({ length: this.length }, (_, idx) => idx),
       this.loadedAs,
