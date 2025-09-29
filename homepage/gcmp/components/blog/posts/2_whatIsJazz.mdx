@@ -1,11 +1,35 @@
 export const meta = {
   slug: "what-is-jazz",
   title: "What is Jazz?",
-  subtitle: "(A framework for local-first state & permissions)",
-  date: "2024-12-27",
+  subtitle: "(A fresh take on databases)",
+  date: "2025-09-26",
   coverImage: "/posts/post2.svg",
   author: {
     name: "Anselm Eickhoff",
     image: "/team/anselm.jpg",
   },
 };
+
+When I started building Jazz, I didn’t mean to build a new database. I was radicalized by local-first, ready to get rid of the entire idea of a backend stack.
+
+This is the story of how I slowly de-radicalized myself and shaped the ideas I came across into something that has all the parts of a database, but looks very different. Something that makes building apps fun again.
+
+## Trigger 1: having to re-invent the data layer for each app
+
+For most of my professional life, I worked as a one-man army for full-stack dev and product design. As such, I’ve helped lots of companies take apps from zero to one.
+
+I always liked building apps by starting with the data schema. Even before mocking up any UI you typically know what kinds of things people will be handling in your app and how they relate to each other.
+
+> Show me your flowcharts and conceal your tables, and I shall continue to be mystified. Show me your tables, and I won't usually need your flowcharts
+
+Everything after that, everything between the UI and the data schema “should be” easy.<br/>But it isn’t.
+
+
+
+## Trigger 2: a new class of high-fidelity apps
+
+I started building Jazz soon after I started using Notion and Figma. It was immediately clear to me…
+
+In the rest of the post, I will lay out different facets of what make Jazz different - roughly in the order I encountered and designed them, and roughly in the order I think they matter to you if you’re curious to learn Jazz.
+
+## Globally Reactive

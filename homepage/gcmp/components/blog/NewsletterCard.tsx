@@ -18,19 +18,6 @@ export function NewsletterCard() {
         </div>
 
         <p>
-          <SiBluesky className="inline-block w-3.5 h-3.5 relative -top-px" />{" "}
-          follow{" "}
-          <Link className="underline" href="https://bsky.app/profile/garden.co">
-            @garden.co
-          </Link>{" "}
-          &{" "}
-          <Link
-            className="underline"
-            href="https://bsky.app/profile/jazz.tools"
-          >
-            @jazz.tools
-          </Link>
-          <br />
           <SiX className="inline-block w-3 h-3 relative -top-px" /> follow{" "}
           <Link className="underline" href="https://x.com/gardendotco">
             @gardendotco
