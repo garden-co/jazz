@@ -8,7 +8,7 @@ import {
   createJazzContextFromExistingCredentials,
   randomSessionProvider,
 } from "../index";
-import { CoValueFromRaw } from "../internal";
+import { CoValueFromRaw, CoValueLoadingState } from "../internal";
 
 const Crypto = await WasmCrypto.create();
 
@@ -133,7 +133,7 @@ export async function loadCoValueOrFail<V extends RawCoValue>(
   id: CoID<V>,
 ): Promise<V> {
   const value = await node.load(id);
-  if (value === "unavailable") {
+  if (value === CoValueLoadingState.UNAVAILABLE) {
     throw new Error("CoValue not found");
   }
   return value;

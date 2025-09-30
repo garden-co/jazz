@@ -7,6 +7,7 @@ import {
   setupJazzTestSync,
 } from "../testing.js";
 import { setupTwoNodes } from "./utils.js";
+import { CoValueLoadingState } from "../internal.js";
 
 beforeEach(async () => {
   await setupJazzTestSync();
@@ -32,7 +33,7 @@ test("waitForAllCoValuesSync should resolve when all the values are synced", asy
 
   for (const map of maps) {
     const loadedMap = await serverNode.load(map.$jazz.raw.id);
-    expect(loadedMap).not.toBe("unavailable");
+    expect(loadedMap).not.toBe(CoValueLoadingState.UNAVAILABLE);
   }
 });
 
@@ -46,7 +47,7 @@ test("waitForSync should resolve when the value is uploaded", async () => {
 
   const loadedAccount = await serverNode.load(clientAccount.$jazz.raw.id);
 
-  expect(loadedAccount).not.toBe("unavailable");
+  expect(loadedAccount).not.toBe(CoValueLoadingState.UNAVAILABLE);
 });
 
 test("isMe gets updated correctly when switching accounts", async () => {

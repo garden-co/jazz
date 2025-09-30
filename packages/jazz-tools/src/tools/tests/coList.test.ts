@@ -6,6 +6,7 @@ import {
   activeAccountContext,
   co,
   coValueClassFromCoValueClassOrSchema,
+  CoValueLoadingState,
 } from "../internal.js";
 import {
   createJazzTestAccount,
@@ -798,7 +799,7 @@ describe("CoList resolution", async () => {
 
     const loadedMap = await serverNode.load(list.$jazz.raw.id);
 
-    expect(loadedMap).not.toBe("unavailable");
+    expect(loadedMap).not.toBe(CoValueLoadingState.UNAVAILABLE);
   });
 });
 

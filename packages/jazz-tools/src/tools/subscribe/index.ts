@@ -1,5 +1,6 @@
 import type { CoValue, CoValueClass, RefEncoded } from "../internal.js";
 import { SubscriptionScope } from "./SubscriptionScope.js";
+import { CoValueLoadingState } from "./types.js";
 
 export function getSubscriptionScope<D extends CoValue>(value: D) {
   const subscriptionScope = value.$jazz._subscriptionScope;
@@ -56,7 +57,7 @@ export function accessChildByKey<D extends CoValue>(
 
   const value = subscriptionScope.childValues.get(childId);
 
-  if (value?.type === "loaded") {
+  if (value?.type === CoValueLoadingState.LOADED) {
     return value.value;
   } else {
     return null;
@@ -82,7 +83,7 @@ export function accessChildById<D extends CoValue>(
 
   const value = subscriptionScope.childValues.get(childId);
 
-  if (value?.type === "loaded") {
+  if (value?.type === CoValueLoadingState.LOADED) {
     return value.value;
   } else {
     return null;

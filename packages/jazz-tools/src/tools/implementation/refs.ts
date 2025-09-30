@@ -8,6 +8,7 @@ import {
 } from "../internal.js";
 import {
   accessChildById,
+  CoValueLoadingState,
   getSubscriptionScope,
   isRefEncoded,
 } from "../internal.js";
@@ -56,18 +57,18 @@ export class Ref<out V extends CoValue> {
 
     const value = node.value;
 
-    if (value?.type === "loaded") {
+    if (value?.type === CoValueLoadingState.LOADED) {
       return value.value as V;
     } else {
       return new Promise((resolve) => {
         const unsubscribe = node.subscribe((value) => {
-          if (value?.type === "loaded") {
+          if (value?.type === CoValueLoadingState.LOADED) {
             unsubscribe();
             resolve(value.value as V);
-          } else if (value?.type === "unavailable") {
+          } else if (value?.type === CoValueLoadingState.UNAVAILABLE) {
             unsubscribe();
             resolve(null);
-          } else if (value?.type === "unauthorized") {
+          } else if (value?.type === CoValueLoadingState.UNAUTHORIZED) {
             unsubscribe();
             resolve(null);
           }

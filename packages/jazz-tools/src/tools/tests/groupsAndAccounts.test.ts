@@ -1,7 +1,7 @@
 import { WasmCrypto } from "cojson/crypto/WasmCrypto";
 import { assert, beforeEach, describe, expect, test } from "vitest";
 import { CoMap, Group, z } from "../exports.js";
-import { Account, Loaded, Ref, co } from "../internal.js";
+import { Account, Loaded, Ref, co, CoValueLoadingState } from "../internal.js";
 import { createJazzTestAccount, setupJazzTestSync } from "../testing.js";
 import { loadCoValueOrFail, setupTwoNodes, waitFor } from "./utils.js";
 
@@ -196,7 +196,7 @@ describe("Group inheritance", () => {
 
     const loadedGroup = await serverNode.load(group.$jazz.raw.id);
 
-    expect(loadedGroup).not.toBe("unavailable");
+    expect(loadedGroup).not.toBe(CoValueLoadingState.UNAVAILABLE);
   });
 
   test("everyone is valid only for reader, writer and writeOnly roles", () => {
