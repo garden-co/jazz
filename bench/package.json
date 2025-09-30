@@ -4,9 +4,13 @@
   "type": "module",
   "dependencies": {
     "cojson": "workspace:*",
-    "cojson-latest": "npm:cojson@0.18.18"
+    "cojson-latest": "npm:cojson@0.18.18",
+    "vitest": "catalog:default"
   },
   "scripts": {
     "bench": "vitest bench"
+  },
+  "devDependencies": {
+    "vitest": "catalog:default"
   }
 }

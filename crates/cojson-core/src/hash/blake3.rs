@@ -1,23 +1,23 @@
-use cojson_core::hash;
-use napi::bindgen_prelude::Uint8Array;
-use napi_derive::napi;
+use blake3::*;
 
 /// Generate a 24-byte nonce from input material using BLAKE3.
 /// - `nonce_material`: Raw bytes to derive the nonce from
 /// Returns 24 bytes suitable for use as a nonce in cryptographic operations.
 /// This function is deterministic - the same input will produce the same nonce.
-#[napi]
-pub fn generate_nonce(nonce_material: &[u8]) -> Uint8Array {
-  hash::blake3::generate_nonce(nonce_material).into()
+pub fn generate_nonce(nonce_material: &[u8]) -> Box<[u8]> {
+  let mut hasher = Hasher::new();
+  hasher.update(nonce_material);
+  hasher.finalize().as_bytes()[..24].into()
 }
 
 /// Hash data once using BLAKE3.
 /// - `data`: Raw bytes to hash
 /// Returns 32 bytes of hash output.
 /// This is the simplest way to compute a BLAKE3 hash of a single piece of data.
-#[napi]
-pub fn blake3_hash_once(data: &[u8]) -> Uint8Array {
-  hash::blake3::blake3_hash_once(data).into()
+pub fn blake3_hash_once(data: &[u8]) -> Box<[u8]> {
+  let mut hasher = Blake3Hasher::new();
+  hasher.update(data);
+  hasher.finalize()
 }
 
 /// Hash data once using BLAKE3 with a context prefix.
@@ -25,35 +25,32 @@ pub fn blake3_hash_once(data: &[u8]) -> Uint8Array {
 /// - `context`: Context bytes to prefix to the data
 /// Returns 32 bytes of hash output.
 /// This is useful for domain separation - the same data hashed with different contexts will produce different outputs.
-#[napi]
-pub fn blake3_hash_once_with_context(data: &[u8], context: &[u8]) -> Uint8Array {
-  hash::blake3::blake3_hash_once_with_context(data, context).into()
+pub fn blake3_hash_once_with_context(data: &[u8], context: &[u8]) -> Box<[u8]> {
+  let mut hasher = Blake3Hasher::new();
+  hasher.update(context);
+  hasher.update(data);
+  hasher.finalize()
 }
 
-#[napi]
 #[derive(Default)]
-pub struct Blake3Hasher(blake3::Hasher);
+pub struct Blake3Hasher(Hasher);
 
-#[napi]
 impl Blake3Hasher {
-  #[napi(constructor)]
   pub fn new() -> Self {
     Default::default()
   }
 
-  #[napi]
   pub fn update(&mut self, data: &[u8]) {
     self.0.update(data);
   }
 
-  #[napi]
-  pub fn finalize(&self) -> Uint8Array {
-    self.0.finalize().as_bytes().into()
+  pub fn finalize(&self) -> Box<[u8]> {
+    self.0.finalize().as_bytes().to_vec().into_boxed_slice()
   }
+}
 
-  #[napi]
-  pub fn clone(&self) -> Self {
-    // The blake3::Hasher type implements Clone
+impl Clone for Blake3Hasher {
+  fn clone(&self) -> Self {
     Blake3Hasher(self.0.clone())
   }
 }
@@ -70,7 +67,7 @@ mod tests {
     assert_eq!(nonce.len(), 24);
 
     // Same input should produce same nonce
-    let nonce2: Uint8Array = generate_nonce(INPUT_STR);
+    let nonce2 = generate_nonce(INPUT_STR);
 
     assert_eq!(nonce.to_vec(), nonce2.to_vec());
 

@@ -16,19 +16,21 @@
   "types": "index.d.ts",
   "scripts": {
     "build:wasm": "wasm-pack build --release --target web && node build.js",
-    "build:dev": "wasm-pack build --dev --target web && node build.js"
+    "build:dev": "wasm-pack build --dev --target web && node build.js",
+    "test": "vitest --watch --project cojson-core-wasm"
   },
   "exports": {
     ".": {
-      "default": "./index.js",
-      "types": "./index.d.ts"
+      "types": "./index.d.ts",
+      "default": "./index.js"
     },
     "./edge-lite": {
-      "default": "./edge-lite.js",
-      "types": "./index.d.ts"
+      "types": "./index.d.ts",
+      "default": "./edge-lite.js"
     }
   },
   "devDependencies": {
-    "wasm-pack": "^0.13.1"
+    "wasm-pack": "^0.13.1",
+    "vitest": "catalog:default"
   }
 }

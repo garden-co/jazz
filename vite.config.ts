@@ -11,6 +11,7 @@ export default defineConfig({
       "tests/cloudflare-workers",
       "tests/vercel-functions",
       "crates/cojson-core-napi",
+      "crates/cojson-core-wasm",
     ],
     maxConcurrency: 5,
   },
