@@ -5,6 +5,7 @@ import {
   CoValue,
   CoValueClass,
   CoValueJazzApi,
+  CoValueLoadingState,
   ID,
   Resolved,
   SubscribeListenerOptions,
@@ -12,8 +13,6 @@ import {
   TypeSym,
   unstable_mergeBranch,
   parseCoValueCreateOptions,
-} from "../internal.js";
-import {
   inspect,
   loadCoValueWithoutMe,
   parseSubscribeRestArgs,
@@ -29,6 +28,7 @@ export class CoPlainText extends String implements CoValue {
   declare [TypeSym]: "CoPlainText";
 
   declare $jazz: CoTextJazzApi<this>;
+  declare $jazzState: typeof CoValueLoadingState.LOADED;
 
   /** @internal */
   constructor(
@@ -51,6 +51,7 @@ export class CoPlainText extends String implements CoValue {
           value: new CoTextJazzApi(this, raw),
           enumerable: false,
         },
+        $jazzState: { value: CoValueLoadingState.LOADED, enumerable: false },
       });
       return;
     }
@@ -64,6 +65,7 @@ export class CoPlainText extends String implements CoValue {
           value: new CoTextJazzApi(this, raw),
           enumerable: false,
         },
+        $jazzState: { value: CoValueLoadingState.LOADED, enumerable: false },
       });
       return;
     }

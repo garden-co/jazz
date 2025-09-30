@@ -21,6 +21,7 @@ import {
   SubscribeRestArgs,
   TypeSym,
   BranchDefinition,
+  CoValueLoadingState,
 } from "../internal.js";
 import {
   AnonymousJazzAgent,
@@ -69,6 +70,7 @@ export class CoList<out Item = any>
   implements ReadonlyArray<Item>, CoValue
 {
   declare $jazz: CoListJazzApi<this>;
+  declare $jazzState: typeof CoValueLoadingState.LOADED;
 
   /**
    * Declare a `CoList` by subclassing `CoList.Of(...)` and passing the item schema using `co`.
@@ -126,6 +128,7 @@ export class CoList<out Item = any>
           value: new CoListJazzApi(proxy, () => options.fromRaw),
           enumerable: false,
         },
+        $jazzState: { value: CoValueLoadingState.LOADED, enumerable: false },
       });
     }
 
@@ -173,6 +176,7 @@ export class CoList<out Item = any>
         value: new CoListJazzApi(instance, () => raw),
         enumerable: false,
       },
+      $jazzState: { value: CoValueLoadingState.LOADED, enumerable: false },
     });
 
     const raw = owner.$jazz.raw.createList(
