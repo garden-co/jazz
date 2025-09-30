@@ -1,3 +1,3 @@
-# `@cojson-core-napi/binary-darwin-arm64`
+# `cojson-core-napi-darwin-arm64`
 
-This is the **aarch64-apple-darwin** binary for `@cojson-core-napi/binary`
+This is the **aarch64-apple-darwin** binary for `cojson-core-napi`

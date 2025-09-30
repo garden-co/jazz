@@ -1,7 +1,7 @@
 {
   "name": "cojson-core-napi",
   "version": "0.18.16",
-  "description": "Template project for writing node package with napi-rs",
+  "description": "Node.js N-API bindings for the cojson-core Rust library, providing high-performance.",
   "main": "index.js",
   "license": "MIT",
   "keywords": [
@@ -17,9 +17,8 @@
     "index.js"
   ],
   "napi": {
-    "dtsHeader": "export const isActive: boolean;\n",
     "binaryName": "cojson-core-napi",
-    "packageName": "@cojson-core-napi/binary",
+    "packageName": "cojson-core-napi",
     "targets": [
       "x86_64-pc-windows-msvc",
       "x86_64-apple-darwin",
@@ -111,18 +110,18 @@
     "arrowParens": "always"
   },
   "optionalDependencies": {
-    "@cojson-core-napi/binary-win32-x64-msvc": "workspace:*",
-    "@cojson-core-napi/binary-darwin-x64": "workspace:*",
-    "@cojson-core-napi/binary-linux-x64-gnu": "workspace:*",
-    "@cojson-core-napi/binary-linux-x64-musl": "workspace:*",
-    "@cojson-core-napi/binary-linux-arm64-gnu": "workspace:*",
-    "@cojson-core-napi/binary-win32-ia32-msvc": "workspace:*",
-    "@cojson-core-napi/binary-linux-arm-gnueabihf": "workspace:*",
-    "@cojson-core-napi/binary-darwin-arm64": "workspace:*",
-    "@cojson-core-napi/binary-android-arm64": "workspace:*",
-    "@cojson-core-napi/binary-freebsd-x64": "workspace:*",
-    "@cojson-core-napi/binary-linux-arm64-musl": "workspace:*",
-    "@cojson-core-napi/binary-win32-arm64-msvc": "workspace:*",
-    "@cojson-core-napi/binary-android-arm-eabi": "workspace:*"
+    "cojson-core-napi-win32-x64-msvc": "workspace:*",
+    "cojson-core-napi-darwin-x64": "workspace:*",
+    "cojson-core-napi-linux-x64-gnu": "workspace:*",
+    "cojson-core-napi-linux-x64-musl": "workspace:*",
+    "cojson-core-napi-linux-arm64-gnu": "workspace:*",
+    "cojson-core-napi-win32-ia32-msvc": "workspace:*",
+    "cojson-core-napi-linux-arm-gnueabihf": "workspace:*",
+    "cojson-core-napi-darwin-arm64": "workspace:*",
+    "cojson-core-napi-android-arm64": "workspace:*",
+    "cojson-core-napi-freebsd-x64": "workspace:*",
+    "cojson-core-napi-linux-arm64-musl": "workspace:*",
+    "cojson-core-napi-win32-arm64-msvc": "workspace:*",
+    "cojson-core-napi-android-arm-eabi": "workspace:*"
   }
 }
