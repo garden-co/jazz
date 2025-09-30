@@ -17,6 +17,7 @@ import {
   TypeSym,
   activeAccountContext,
   coValueClassFromCoValueClassOrSchema,
+  CoValueLoadingState,
 } from "../internal.js";
 import {
   createJazzTestAccount,
@@ -1831,7 +1832,7 @@ describe("CoMap Typescript validation", async () => {
 
     const loadedMap = await serverNode.load(map.$jazz.raw.id);
 
-    expect(loadedMap).not.toBe("unavailable");
+    expect(loadedMap).not.toBe(CoValueLoadingState.UNAVAILABLE);
   });
 });
 

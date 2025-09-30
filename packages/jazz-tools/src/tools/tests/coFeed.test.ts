@@ -22,6 +22,7 @@ import {
   CoFeed,
   CoFeedInstanceCoValuesNullable,
   ControlledAccount,
+  CoValueLoadingState,
   TypeSym,
 } from "../internal.js";
 
@@ -844,7 +845,7 @@ describe("waitForSync", async () => {
 
     const loadedStream = await serverNode.load(stream.$jazz.raw.id);
 
-    expect(loadedStream).not.toBe("unavailable");
+    expect(loadedStream).not.toBe(CoValueLoadingState.UNAVAILABLE);
   });
 
   test("FileStream: should resolve when the value is uploaded", async () => {
@@ -863,7 +864,7 @@ describe("waitForSync", async () => {
 
     const loadedStream = await serverNode.load(stream.$jazz.raw.id);
 
-    expect(loadedStream).not.toBe("unavailable");
+    expect(loadedStream).not.toBe(CoValueLoadingState.UNAVAILABLE);
   });
 
   test("should rely on the current active account if no account is provided", async () => {

@@ -8,6 +8,7 @@ import {
   Account,
   AnonymousJazzAgent,
   CoValueClassOrSchema,
+  CoValueLoadingState,
   type Group,
   Loaded,
   RefsToResolve,
@@ -298,15 +299,15 @@ export function subscribeToCoValue<
   const handleUpdate = (value: SubscriptionValue<V, any>) => {
     if (unsubscribed) return;
 
-    if (value.type === "unavailable") {
+    if (value.type === CoValueLoadingState.UNAVAILABLE) {
       options.onUnavailable?.();
 
       console.error(value.toString());
-    } else if (value.type === "unauthorized") {
+    } else if (value.type === CoValueLoadingState.UNAUTHORIZED) {
       options.onUnauthorized?.();
 
       console.error(value.toString());
-    } else if (value.type === "loaded") {
+    } else if (value.type === CoValueLoadingState.LOADED) {
       listener(value.value as Resolved<V, R>, unsubscribe);
     }
   };
@@ -520,13 +521,13 @@ export async function exportCoValue<
 
   const value = await new Promise<Loaded<S, R> | null>((resolve) => {
     rootNode.setListener((value) => {
-      if (value.type === "unavailable") {
+      if (value.type === CoValueLoadingState.UNAVAILABLE) {
         resolve(null);
         console.error(value.toString());
-      } else if (value.type === "unauthorized") {
+      } else if (value.type === CoValueLoadingState.UNAUTHORIZED) {
         resolve(null);
         console.error(value.toString());
-      } else if (value.type === "loaded") {
+      } else if (value.type === CoValueLoadingState.LOADED) {
         resolve(value.value as Loaded<S, R>);
       }
 
@@ -620,7 +621,7 @@ export function unstable_mergeBranch(
   }
 
   function handleMerge(subscriptionNode: SubscriptionScope<CoValue>) {
-    if (subscriptionNode.value.type === "loaded") {
+    if (subscriptionNode.value.type === CoValueLoadingState.LOADED) {
       subscriptionNode.value.value.$jazz.raw.core.mergeBranch();
     }
 
@@ -664,11 +665,11 @@ export async function unstable_mergeBranchWithResolve<
 
   await new Promise<void>((resolve, reject) => {
     rootNode.setListener((value) => {
-      if (value.type === "unavailable") {
+      if (value.type === CoValueLoadingState.UNAVAILABLE) {
         reject(new Error("Unable to load the branch. " + value.toString()));
-      } else if (value.type === "unauthorized") {
+      } else if (value.type === CoValueLoadingState.UNAUTHORIZED) {
         reject(new Error("Unable to load the branch. " + value.toString()));
-      } else if (value.type === "loaded") {
+      } else if (value.type === CoValueLoadingState.LOADED) {
         resolve();
       }
 

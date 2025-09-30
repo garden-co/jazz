@@ -7,6 +7,7 @@ import {
   setupJazzTestSync,
 } from "../testing.js";
 import { waitFor } from "../tests/utils.js";
+import { CoValueLoadingState } from "./types.js";
 
 beforeEach(async () => {
   await setupJazzTestSync();
@@ -461,7 +462,7 @@ describe("CoValueCoreSubscription", async () => {
       await waitFor(() => expect(listener).toHaveBeenCalled());
 
       // Should report unavailable when loading fails
-      expect(lastResult).toBe("unavailable");
+      expect(lastResult).toBe(CoValueLoadingState.UNAVAILABLE);
 
       subscription.unsubscribe();
     });
@@ -492,7 +493,7 @@ describe("CoValueCoreSubscription", async () => {
       await waitFor(() => expect(listener).toHaveBeenCalled());
 
       // Should report unavailable when loading fails
-      expect(lastResult).toBe("unavailable");
+      expect(lastResult).toBe(CoValueLoadingState.UNAVAILABLE);
 
       subscription.unsubscribe();
     });
@@ -541,7 +542,7 @@ describe("CoValueCoreSubscription", async () => {
       await waitFor(() => expect(listener).toHaveBeenCalled());
 
       // Should report unavailable when loading fails
-      expect(lastResult).toBe("unavailable");
+      expect(lastResult).toBe(CoValueLoadingState.UNAVAILABLE);
 
       subscription.unsubscribe();
     });

@@ -11,6 +11,7 @@ import {
   type Account,
   CoValue,
   CoValueClassOrSchema,
+  CoValueLoadingState,
   ID,
   InstanceOfSchema,
   activeAccountContext,
@@ -224,7 +225,7 @@ export class Inbox {
       messageId: CoID<InboxMessage<CoValue, any>>,
     ) => {
       const message = await node.load(messageId);
-      if (message === "unavailable") {
+      if (message === CoValueLoadingState.UNAVAILABLE) {
         throw new Error(`Inbox: message ${messageId} is unavailable`);
       }
 
@@ -342,7 +343,7 @@ export class Inbox {
 
     const root = await node.load(profile.inbox as CoID<InboxRoot>);
 
-    if (root === "unavailable") {
+    if (root === CoValueLoadingState.UNAVAILABLE) {
       throw new Error("Inbox not found");
     }
 
@@ -353,9 +354,9 @@ export class Inbox {
     ]);
 
     if (
-      messages === "unavailable" ||
-      processed === "unavailable" ||
-      failed === "unavailable"
+      messages === CoValueLoadingState.UNAVAILABLE ||
+      processed === CoValueLoadingState.UNAVAILABLE ||
+      failed === CoValueLoadingState.UNAVAILABLE
     ) {
       throw new Error("Inbox not found");
     }
@@ -420,13 +421,13 @@ export class InboxSender<I extends CoValue, O extends CoValue | undefined> {
       inboxOwnerID as unknown as CoID<RawAccount>,
     );
 
-    if (inboxOwnerRaw === "unavailable") {
+    if (inboxOwnerRaw === CoValueLoadingState.UNAVAILABLE) {
       throw new Error("Failed to load the inbox owner");
     }
 
     const inboxOwnerProfileRaw = await node.load(inboxOwnerRaw.get("profile")!);
 
-    if (inboxOwnerProfileRaw === "unavailable") {
+    if (inboxOwnerProfileRaw === CoValueLoadingState.UNAVAILABLE) {
       throw new Error("Failed to load the inbox owner profile");
     }
 
@@ -452,7 +453,7 @@ export class InboxSender<I extends CoValue, O extends CoValue | undefined> {
 
     const messages = await node.load(id);
 
-    if (messages === "unavailable") {
+    if (messages === CoValueLoadingState.UNAVAILABLE) {
       throw new Error("Inbox not found");
     }
 
