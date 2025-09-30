@@ -197,13 +197,16 @@ dependencies = [
  "base64",
  "blake3",
  "bs58",
+ "crypto_secretbox",
  "ed25519-dalek",
  "lzy",
+ "rand",
  "rand_core",
  "salsa20",
  "serde",
  "serde_json",
  "thiserror",
+ "x25519-dalek",
 ]
 
 [[package]]
@@ -234,23 +237,15 @@ name = "cojson_core_napi"
 version = "0.1.0"
 dependencies = [
  "blake3",
- "bs58",
  "cojson-core",
  "console_error_panic_hook",
- "crypto_secretbox",
- "ed25519-dalek",
  "getrandom",
- "hex",
- "js-sys",
  "napi",
  "napi-build",
  "napi-derive",
- "rand",
- "salsa20",
  "serde",
  "serde_json",
  "thiserror",
- "x25519-dalek",
 ]
 
 [[package]]

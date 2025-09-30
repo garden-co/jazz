@@ -13,6 +13,28 @@ use thiserror::Error;
 #[cfg(feature = "lzy")]
 pub use lzy;
 
+pub mod error;
+pub use error::*;
+pub mod hash {
+    pub mod blake3;
+    pub use blake3::*;
+}
+pub mod crypto {
+    pub mod ed25519;
+    pub mod x25519;
+    pub mod seal;
+    pub mod encrypt;
+    pub mod signature;
+    pub mod xsalsa20;
+
+    pub use ed25519::*;
+    pub use x25519::*;
+    pub use seal::*;
+    pub use encrypt::*;
+    pub use signature::*;
+    pub use xsalsa20::*;
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SessionID(pub String);
 
