@@ -2098,6 +2098,9 @@ importers:
       '@scure/bip39':
         specifier: ^1.3.0
         version: 1.5.0
+      '@tanstack/db-ivm':
+        specifier: 0.1.8
+        version: 0.1.8(typescript@5.6.2)
       '@tiptap/core':
         specifier: ^2.12.0
         version: 2.12.0(@tiptap/pm@2.12.0)
@@ -7542,6 +7545,11 @@ packages:
     peerDependencies:
       vite: 6.3.5
 
+  '@tanstack/db-ivm@0.1.8':
+    resolution: {integrity: sha512-JX7T+uv8iecz+R4ZeW3VA+U2c3TVz5yPmQUIzNGT16ftdoHF0G0Pfpbk/27HnZ/6jpTawXXEt9NyqZZwpxta7g==}
+    peerDependencies:
+      typescript: '>=4.7'
+
   '@tanstack/history@1.121.34':
     resolution: {integrity: sha512-YL8dGi5ZU+xvtav2boRlw4zrRghkY6hvdcmHhA0RGSJ/CBgzv+cbADW9eYJLx74XMZvIQ1pp6VMbrpXnnM5gHA==}
     engines: {node: '>=12'}
@@ -10500,6 +10508,10 @@ packages:
   forwarded@0.2.0:
     resolution: {integrity: sha512-buRG0fpBtRHSTCOASe6hD258tEubFoRLb4ZNA6NxMVHNw2gOcwHo9wyablzMzOA5z9xA9L1KNjk/Nt6MT9aYow==}
     engines: {node: '>= 0.6'}
+
+  fractional-indexing@3.2.0:
+    resolution: {integrity: sha512-PcOxmqwYCW7O2ovKRU8OoQQj2yqTfEB/yeTYk4gPid6dN5ODRfU1hXd9tTVZzax/0NkO7AxpHykvZnT1aYp/BQ==}
+    engines: {node: ^14.13.1 || >=16.0.0}
 
   freeport-async@2.0.0:
     resolution: {integrity: sha512-K7od3Uw45AJg00XUmy15+Hae2hOcgKcmN3/EF6Y7i01O0gaqiRx8sUSpsb9+BRNL8RPBrhzPsVfy8q9ADlJuWQ==}
@@ -14241,6 +14253,9 @@ packages:
     peerDependencies:
       react: 19.1.0
       react-dom: 19.1.0
+
+  sorted-btree@1.8.1:
+    resolution: {integrity: sha512-395+XIP+wqNn3USkFSrNz7G3Ss/MXlZEqesxvzCRFwL14h6e8LukDHdLBePn5pwbm5OQ9vGu8mDyz2lLDIqamQ==}
 
   source-map-js@1.2.1:
     resolution: {integrity: sha512-UXWMKhLOwVKb728IUtQPXxfYU+usdybtUrK/8uGE8CQMvrhOpwvzDBwj0QhSL7MQc7vIsISBG8VQ8+IDQxpfQA==}
@@ -22767,6 +22782,12 @@ snapshots:
       tailwindcss: 4.1.10
       vite: 6.3.5(@types/node@24.3.0)(jiti@2.5.1)(lightningcss@1.30.1)(terser@5.43.1)(tsx@4.20.3)(yaml@2.6.1)
 
+  '@tanstack/db-ivm@0.1.8(typescript@5.6.2)':
+    dependencies:
+      fractional-indexing: 3.2.0
+      sorted-btree: 1.8.1
+      typescript: 5.6.2
+
   '@tanstack/history@1.121.34': {}
 
   '@tanstack/react-router-devtools@1.129.4(@tanstack/react-router@1.129.4(react-dom@19.1.0(react@19.1.0))(react@19.1.0))(@tanstack/router-core@1.129.4)(csstype@3.1.3)(react-dom@19.1.0(react@19.1.0))(react@19.1.0)(solid-js@1.9.5)(tiny-invariant@1.3.3)':
@@ -26809,6 +26830,8 @@ snapshots:
       fetch-blob: 3.2.0
 
   forwarded@0.2.0: {}
+
+  fractional-indexing@3.2.0: {}
 
   freeport-async@2.0.0: {}
 
@@ -31391,6 +31414,8 @@ snapshots:
     dependencies:
       react: 19.1.0
       react-dom: 19.1.0(react@19.1.0)
+
+  sorted-btree@1.8.1: {}
 
   source-map-js@1.2.1: {}
 

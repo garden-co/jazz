@@ -182,6 +182,7 @@
     "@manuscripts/prosemirror-recreate-steps": "^0.1.4",
     "@scure/base": "1.2.1",
     "@scure/bip39": "^1.3.0",
+    "@tanstack/db-ivm": "0.1.8",
     "@tiptap/core": "^2.12.0",
     "clsx": "^2.0.0",
     "cojson": "workspace:*",
