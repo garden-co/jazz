@@ -1,6 +1,5 @@
 import { useRef, useState } from "react";
-import { useAccount, useCoState, useVectorSearch } from "jazz-tools/react";
-import { type VectorSearchOutcomeItem } from "jazz-tools";
+import { useAccount, useCoStateWithSelector } from "jazz-tools/react";
 
 import { Header } from "./components/Header";
 import { EmbeddingPill } from "./components/EmbeddingPill";
@@ -26,32 +25,39 @@ function App() {
   const searchInputRef = useRef<HTMLInputElement>(null);
 
   const { createEmbedding, modelStatus } = useLocalEmbeddings({ modelName });
-
-  // 2) Load a list of elements containing embeddings
-  const journalEntries = useCoState(
-    JournalEntryList,
-    me?.root.journalEntries?.$jazz.id,
-    { resolve: { $each: true, $onError: null } },
-  );
-
-  // 3) Search the loaded list of elements using the vectors
   const { queryEmbedding, isCreatingEmbedding, createQueryEmbedding } =
     useCreateEmbedding({ createEmbedding });
 
-  const { search, isSearching } = useVectorSearch(journalEntries, {
-    $orderBy: {
-      embedding: { $similarity: queryEmbedding },
+  // 2) Load a list of elements containing embeddings
+  const journalEntries = useCoStateWithSelector(
+    JournalEntryList,
+    me?.root.journalEntries?.$jazz.id,
+    {
+      resolve: { $each: { embedding: true } },
+      select(journalEntries) {
+        if (!journalEntries) return;
+
+        // If no query embedding, return all entries
+        if (!queryEmbedding) return journalEntries.map((value) => ({ value }));
+
+        return journalEntries
+          .map((value) => ({
+            value,
+            similarity: value.embedding.$jazz.cosineSimilarity(queryEmbedding),
+          }))
+          .sort((a, b) => b.similarity - a.similarity)
+          .filter((result) => result.similarity > 0.5);
+      },
     },
-    $similarityTopPercent: 0.15,
-  });
+  );
 
   // -- Helpers for creating new entries
   const isLoading = journalEntries === undefined;
   const isEmptyState =
     journalEntries !== undefined &&
     journalEntries !== null &&
-    journalEntries.length === 0;
-  const isSearchingGlobally = isCreatingEmbedding || isSearching;
+    journalEntries.length === 0 &&
+    queryEmbedding === null;
   const { isSeeding, seedJournal } = useJournalSeed({
     createEmbedding,
     owner: me as JazzAccount,
@@ -95,9 +101,9 @@ function App() {
                 <button
                   type="submit"
                   className="absolute top-2.5 right-2.5 px-5 py-3  rounded-full shadow-lg bg-linear-to-t from-blue-700 to-blue-600 hover:to-blue-700 text-white cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
-                  disabled={isSearchingGlobally || isLoading}
+                  disabled={isCreatingEmbedding || isLoading}
                 >
-                  {isSearchingGlobally ? "Searching" : "Search"}
+                  {isCreatingEmbedding ? "Searching" : "Search"}
                 </button>
               </div>
             </form>
@@ -107,17 +113,14 @@ function App() {
         {/* Status line */}
         {!isEmptyState && (
           <div className="px-4 flex flex-row gap-2 justify-between items-center text-sm text-zinc-500">
-            {journalEntries === undefined ? (
-              <>Loading...</>
-            ) : isSearchingGlobally ? (
-              <>Searching...</>
-            ) : search && search.durationMs !== undefined ? (
+            {isLoading ? (
+              <>&nbsp;</>
+            ) : queryEmbedding && journalEntries !== undefined ? (
               <div>
-                Found {search.results.length} journal entries relatable to{" "}
+                Found {journalEntries.length} journal entries relatable to{" "}
                 <span className="inline-block rounded-full py-px px-2 bg-zinc-200">
                   {searchInputRef.current?.value}
-                </span>{" "}
-                in {search.durationMs}ms
+                </span>
               </div>
             ) : journalEntries && journalEntries.length > 0 ? (
               <>
@@ -156,7 +159,7 @@ function App() {
           </div>
         ) : (
           <div className="grid md:grid-cols-2 gap-8 items-center">
-            {search?.results?.map(
+            {journalEntries.map(
               (entry) =>
                 entry && (
                   <JournalEntryCard entry={entry} key={entry.value.$jazz.id} />
@@ -177,7 +180,7 @@ function App() {
 function JournalEntryCard({
   entry,
 }: {
-  entry: VectorSearchOutcomeItem<JournalEntry>;
+  entry: { value: JournalEntry; similarity?: number };
 }) {
   const [rotation, _] = useState(() => Math.random() * 4 - 2);
 
