@@ -50,15 +50,14 @@
     },
     "build:napi": {
       "env": ["ANDROID_NDK_LATEST_HOME"],
-      "outputs": ["dist/**", "!*.node"],
+      "outputs": ["*.node", "index.d.ts", "index.js", "npm/**/*.node"],
       "inputs": [
         "src/**",
         "lib/**",
         "pages/**",
         "app/**",
         "public/**",
-        "index.ts",
-        "index.js",
+        "*.rs",
         "*.ts",
         "*.tsx",
         "*.js",
@@ -69,11 +68,13 @@
         "package.json",
         "tsconfig*.json",
         "*.config.*",
-        "postcss.config.*",
-        "tailwind.config.*",
         ".env*",
         "!node_modules/**",
+        "!*.node",
         "!dist/**",
+        "!index.d.ts",
+        "!index.js",
+        "!npm/**/*.node",
         "!.turbo/**"
       ]
     },
