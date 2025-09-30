@@ -60,6 +60,7 @@ export interface CoValue {
     branchName: string | undefined;
     unstable_merge: () => void;
   };
+  $jazzState: typeof CoValueLoadingState.LOADED;
 
   /** @category Stringifying & Inspection */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
