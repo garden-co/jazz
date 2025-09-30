@@ -1,4 +1,5 @@
-name: Napi Build and Test Workflow
+# This workflow builds and tests the cojson-core-napi package using NAPI across multiple platforms.
+name: Build and Test cojson-core-napi (NAPI)
 env:
   DEBUG: napi:*
   PATH_BUILD: crates/cojson-core-napi

@@ -1,3 +1,9 @@
+# Release workflow for publishing packages and binaries
+# This workflow:
+# 1. Creates a release PR using Changesets (on main or backport branches)
+# 2. Builds NAPI binaries only if a publish is needed
+# 3. Publishes packages and NAPI binaries to npm if there are no pending changesets
+
 name: Release
 
 on:
@@ -9,25 +15,25 @@ on:
 concurrency: ${{ github.workflow }}-${{ github.ref }}
 
 jobs:
+  # Step 1: Prepare release PR (does not publish)
   release:
-    name: Release
+    name: Prepare Release PR
     runs-on: blacksmith-4vcpu-ubuntu-2404
     outputs:
-      hasChangesets:  ${{ steps.changesets.outputs.hasChangesets }}
-      hasChangesetsBackport:  ${{ steps.changesets-backport.outputs.hasChangesets }}
+      hasChangesets: ${{ steps.changesets.outputs.hasChangesets }}
+      hasChangesetsBackport: ${{ steps.changesets-backport.outputs.hasChangesets }}
     steps:
-      - name: Checkout Repo
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Source Code
+      - name: Setup source code
         uses: ./.github/actions/source-code/
 
-      - name: Build packages
+      - name: Build all packages
         run: pnpm exec turbo run build --filter='./packages/*'
 
-      # Here we use changesets/action just to create the PR without publishing
-
-      - name: Create Release Pull Request
+      # Create a release PR on main branch if there are unpublished changesets
+      - name: Create Release Pull Request (main)
         id: changesets
         if: github.ref_name == 'main'
         uses: changesets/action@v1
@@ -36,6 +42,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      # Create a release PR on backport branches if there are unpublished changesets
       - name: Create Release Pull Request (backports)
         id: changesets-backport
         if: startsWith(github.ref_name, 'backport/')
@@ -44,29 +51,31 @@ jobs:
           version: pnpm changeset-version
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-    # This job will return hasChangesets and hasChangesetsBackport, if one of these is set to false than we have to publish
-  
-  # We run the NAPI build only if we have to publish
+    # The outputs hasChangesets and hasChangesetsBackport determine if we need to publish
+
+  # Step 2: Build NAPI binaries only if a publish is needed
   build_napi:
-    name: Build NAPI
+    name: Build NAPI Binaries
     needs: [release]
     uses: ./.github/workflows/napi-build-reusable.yml
+    # Only run if there are no pending changesets (i.e., ready to publish)
     if: ${{ needs.release.outputs.hasChangesets != 'true' && needs.release.outputs.hasChangesetsBackport != 'true' }}
 
+  # Step 3: Publish packages and NAPI binaries to npm
   publish:
-    name: publish
+    name: Publish to npm
     runs-on: blacksmith-4vcpu-ubuntu-2404
     needs: [build_napi, release]
-    # Here we publish only if hasChangesets is false
+    # Only publish if there are no pending changesets
     if: ${{ needs.release.outputs.hasChangesets != 'true' && needs.release.outputs.hasChangesetsBackport != 'true' }}
     steps:
-      - name: Checkout Repo
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Source Code
+      - name: Setup source code
         uses: ./.github/actions/source-code/
       
-      - name: Build packages
+      - name: Build all packages
         run: pnpm exec turbo run build --filter='./packages/*'
             
       - name: Download NAPI Artifacts (binaries) from build_napi workflow
@@ -78,12 +87,13 @@ jobs:
         run: pnpm artifacts
         working-directory: crates/cojson-core-napi/artifacts
       
-      - name: List packages NAPI
+      - name: List NAPI packages and binaries
         run: ls -R ./npm
         shell: bash
         working-directory: crates/cojson-core-napi/artifacts
 
-      - name: Publish
+      # Publish to npm on main branch
+      - name: Publish (main)
         id: changesets
         if: github.ref_name == 'main'
         uses: changesets/action@v1
@@ -94,7 +104,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
       
-      - name: Publish (Backport)
+      # Publish to npm on backport branches
+      - name: Publish (backport)
         id: changesets-backport
         if: startsWith(github.ref_name, 'backport/')
         uses: changesets/action@v1
