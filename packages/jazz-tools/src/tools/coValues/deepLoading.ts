@@ -1,5 +1,5 @@
 import { SessionID } from "cojson";
-import { ItemsSym, TypeSym } from "../internal.js";
+import { CoValueLoadingState, ItemsSym, TypeSym } from "../internal.js";
 import { type Account } from "./account.js";
 import { CoFeedEntry } from "./coFeed.js";
 import { type CoKeys } from "./coMap.js";
@@ -21,6 +21,16 @@ type IsUnion<T, U = T> = (T extends any ? (x: T) => void : never) extends (
 ) => void
   ? false
   : true;
+
+export type MaybeLoaded<T extends CoValue | null> = T | Unloaded<T>;
+
+type Unloaded<T> = {
+  $jazzState:
+    | typeof CoValueLoadingState.UNLOADED
+    | typeof CoValueLoadingState.UNAVAILABLE
+    | typeof CoValueLoadingState.UNAUTHORIZED;
+  $jazz: { id: ID<T> };
+};
 
 export type RefsToResolve<
   V,
