@@ -1,7 +1,7 @@
 use crate::hash::blake3::generate_nonce;
+use cojson_core::crypto::xsalsa20;
 use napi::bindgen_prelude::Uint8Array;
 use napi_derive::napi;
-use cojson_core::crypto::xsalsa20;
 
 /// NAPI-exposed function for XSalsa20 encryption without authentication.
 /// - `key`: 32-byte key for encryption

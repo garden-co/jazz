@@ -4,7 +4,6 @@ use blake3::*;
 /// - `nonce_material`: Raw bytes to derive the nonce from
 /// Returns 24 bytes suitable for use as a nonce in cryptographic operations.
 /// This function is deterministic - the same input will produce the same nonce.
-
 pub fn generate_nonce(nonce_material: &[u8]) -> Box<[u8]> {
   let mut hasher = Hasher::new();
   hasher.update(nonce_material);
@@ -45,14 +44,13 @@ impl Blake3Hasher {
     self.0.update(data);
   }
 
-
   pub fn finalize(&self) -> Box<[u8]> {
     self.0.finalize().as_bytes().to_vec().into_boxed_slice()
   }
+}
 
-
-  pub fn clone(&self) -> Self {
-    // The blake3::Hasher type implements Clone
+impl Clone for Blake3Hasher {
+  fn clone(&self) -> Self {
     Blake3Hasher(self.0.clone())
   }
 }

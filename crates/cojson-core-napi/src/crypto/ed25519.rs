@@ -1,6 +1,6 @@
+use cojson_core::crypto::ed25519;
 use napi::bindgen_prelude::Uint8Array;
 use napi_derive::napi;
-use cojson_core::crypto::ed25519;
 
 /// Generate a new Ed25519 signing key using secure random number generation.
 /// Returns 32 bytes of raw key material suitable for use with other Ed25519 functions.
@@ -42,7 +42,6 @@ pub fn ed25519_verify(
   signature: &[u8],
 ) -> napi::Result<bool> {
   ed25519::ed25519_verify(verifying_key, message, signature)
-    .map(|valid| valid.into())
     .map_err(|err| napi::Error::new(napi::Status::GenericFailure, err.to_string()))
 }
 
@@ -54,7 +53,7 @@ pub fn ed25519_signing_key_from_bytes(bytes: &[u8]) -> napi::Result<Uint8Array> 
   let key_bytes: [u8; 32] = bytes
     .try_into()
     .map_err(|_| napi::Error::new(napi::Status::GenericFailure, "Invalid signing key length"))?;
-  napi::Result::Ok(key_bytes.into())
+  Ok(key_bytes.into())
 }
 
 /// NAPI-exposed function to derive the public key from an Ed25519 signing key.

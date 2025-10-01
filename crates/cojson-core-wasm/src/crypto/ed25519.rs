@@ -1,15 +1,12 @@
 use crate::error::CryptoError;
 use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
-use rand::rngs::OsRng;
 use wasm_bindgen::prelude::*;
-
+use cojson_core::crypto::ed25519;
 /// Generate a new Ed25519 signing key using secure random number generation.
 /// Returns 32 bytes of raw key material suitable for use with other Ed25519 functions.
 #[wasm_bindgen]
 pub fn new_ed25519_signing_key() -> Box<[u8]> {
-    let mut rng = OsRng;
-    let signing_key = SigningKey::generate(&mut rng);
-    signing_key.to_bytes().into()
+  ed25519::new_ed25519_signing_key()
 }
 
 /// Internal function to derive an Ed25519 verifying key from a signing key.

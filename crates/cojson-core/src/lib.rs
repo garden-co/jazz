@@ -1,5 +1,4 @@
 use base64::{engine::general_purpose::URL_SAFE, Engine as _};
-use bs58;
 use ed25519_dalek::{Signature as Ed25519Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use salsa20::{
     cipher::{KeyIvInit, StreamCipher},
@@ -64,9 +63,9 @@ impl From<SigningKey> for SignerSecret {
     }
 }
 
-impl Into<SigningKey> for &SignerSecret {
-    fn into(self) -> SigningKey {
-        let key_bytes = decode_z(&self.0).expect("Invalid key secret");
+impl From<&SignerSecret> for SigningKey {
+    fn from(val: &SignerSecret) -> Self {
+        let key_bytes = decode_z(&val.0).expect("Invalid key secret");
         SigningKey::from_bytes(&key_bytes.try_into().expect("Invalid key secret length"))
     }
 }
@@ -84,9 +83,9 @@ impl From<Ed25519Signature> for Signature {
     }
 }
 
-impl Into<Ed25519Signature> for &Signature {
-    fn into(self) -> Ed25519Signature {
-        let signature_bytes = decode_z(&self.0).expect("Invalid signature");
+impl From<&Signature> for Ed25519Signature {
+    fn from(val: &Signature) -> Self {
+        let signature_bytes = decode_z(&val.0).expect("Invalid signature");
         Ed25519Signature::from_bytes(
             &signature_bytes
                 .try_into()
@@ -116,9 +115,9 @@ pub struct KeyID(pub String);
 #[serde(transparent)]
 pub struct KeySecret(pub String);
 
-impl Into<[u8; 32]> for &KeySecret {
-    fn into(self) -> [u8; 32] {
-        let key_bytes = decode_z(&self.0).expect("Invalid key secret");
+impl From<&KeySecret> for [u8; 32] {
+    fn from(val: &KeySecret) -> Self {
+        let key_bytes = decode_z(&val.0).expect("Invalid key secret");
         key_bytes.try_into().expect("Invalid key secret length")
     }
 }
@@ -327,10 +326,10 @@ impl SessionLogInternal {
 
                     let encrypted_meta = format!("encrypted_U{}", URL_SAFE.encode(&ciphertext));
 
-                    return Encrypted {
+                    Encrypted {
                         value: encrypted_meta,
                         _phantom: std::marker::PhantomData,
-                    };
+                    }
                 });
 
                 Transaction::Private(PrivateTransaction {
@@ -347,7 +346,7 @@ impl SessionLogInternal {
             TransactionMode::Trusting => Transaction::Trusting(TrustingTransaction {
                 changes: changes_json.to_string(),
                 made_at: Number::from(made_at),
-                meta: meta,
+                meta,
                 privacy: "trusting".to_string(),
             }),
         };
@@ -446,7 +445,7 @@ impl SessionLogInternal {
     }
 
     fn generate_nonce_material(&self, tx_index: u32) -> JsonValue {
-        let nonce_material = JsonValue::Object(serde_json::Map::from_iter(vec![
+        JsonValue::Object(serde_json::Map::from_iter(vec![
             ("in".to_string(), JsonValue::String(self.co_id.0.clone())),
             (
                 "tx".to_string(),
@@ -456,9 +455,7 @@ impl SessionLogInternal {
                 })
                 .unwrap(),
             ),
-        ]));
-
-        return nonce_material;
+        ]))
     }
 
     fn generate_nonce(&self, material: &[u8]) -> [u8; 24] {
@@ -674,8 +671,8 @@ mod tests {
         let (new_signature, _new_tx) = session.add_new_transaction(
             changes_json,
             TransactionMode::Private {
-                key_id: key_id,
-                key_secret: key_secret,
+                key_id,
+                key_secret,
             },
             &signing_key.into(),
             made_at,

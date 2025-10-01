@@ -1,6 +1,6 @@
+use cojson_core::crypto::seal as seal_crypto;
 use napi::bindgen_prelude::Uint8Array;
 use napi_derive::napi;
-use cojson_core::crypto::seal as seal_crypto;
 
 /// NAPI-exposed function for sealing a message using X25519 + XSalsa20-Poly1305.
 /// Provides authenticated encryption with perfect forward secrecy.
@@ -16,9 +16,9 @@ pub fn seal(
   recipient_id: String,
   nonce_material: &[u8],
 ) -> napi::Result<Uint8Array> {
-  napi::Result::Ok(seal_crypto::seal(message, &sender_secret, &recipient_id, nonce_material)
-    .map(|sealed| sealed.into())
-    .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e.to_string()))?)
+    seal_crypto::seal(message, &sender_secret, &recipient_id, nonce_material)
+      .map(|sealed| sealed.into())
+      .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e.to_string()))
 }
 
 /// NAPI-exposed function for unsealing a message using X25519 + XSalsa20-Poly1305.
@@ -35,7 +35,6 @@ pub fn unseal(
   sender_id: String,
   nonce_material: &[u8],
 ) -> napi::Result<Uint8Array> {
-  napi::Result::Ok(
     seal_crypto::unseal(
       sealed_message,
       &recipient_secret,
@@ -43,6 +42,5 @@ pub fn unseal(
       nonce_material,
     )
     .map(|unsealed| unsealed.into())
-    .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e.to_string()))?
-  )
+    .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e.to_string()))
 }

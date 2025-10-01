@@ -7,9 +7,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use thiserror::Error;
 
-mod error;
-pub use error::CryptoError;
-
 pub mod hash {
   pub mod blake3;
   pub use blake3::*;

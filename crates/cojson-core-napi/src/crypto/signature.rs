@@ -1,5 +1,5 @@
-use napi_derive::napi;
 use cojson_core::crypto::signature;
+use napi_derive::napi;
 
 /// NAPI-exposed function to sign a message using Ed25519.
 /// - `message`: Raw bytes to sign

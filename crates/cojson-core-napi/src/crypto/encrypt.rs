@@ -1,7 +1,6 @@
+use cojson_core::crypto::encrypt as encrypt_crypto;
 use napi::bindgen_prelude::Uint8Array;
 use napi_derive::napi;
-use cojson_core::crypto::encrypt as encrypt_crypto;
-
 
 /// NAPI-exposed function to encrypt bytes with a key secret and nonce material.
 /// - `value`: The raw bytes to encrypt
@@ -14,9 +13,9 @@ pub fn encrypt(
   key_secret: String,
   nonce_material: &[u8],
 ) -> napi::Result<Uint8Array> {
-  napi::Result::Ok(encrypt_crypto::encrypt(value, &key_secret, nonce_material)
-    .map(|encrypted| encrypted.into())
-    .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e.to_string()))?)
+    encrypt_crypto::encrypt(value, &key_secret, nonce_material)
+      .map(|encrypted| encrypted.into())
+      .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e.to_string()))
 }
 
 /// NAPI-exposed function to decrypt bytes with a key secret and nonce material.
@@ -30,8 +29,7 @@ pub fn decrypt(
   key_secret: String,
   nonce_material: &[u8],
 ) -> napi::Result<Uint8Array> {
-  napi::Result::Ok(encrypt_crypto::decrypt(ciphertext, &key_secret, nonce_material)
-    .map(|decrypted| decrypted.into())
-    .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e.to_string()))?)
+    encrypt_crypto::decrypt(ciphertext, &key_secret, nonce_material)
+      .map(|decrypted| decrypted.into())
+      .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e.to_string()))
 }
-
