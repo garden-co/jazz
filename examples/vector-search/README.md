@@ -2,7 +2,8 @@
 
 Live version: [https://vector-search.jazz.tools](https://vector-search.jazz.tools)
 
-A simple demo of vector search: personal journal app that lets you retrieve relatable journal entries.
+**A simple demo of vector search: personal journal app that lets you retrieve relatable journal entries.** 
+
 Built with [Jazz](https://jazz.tools), [Transformers.js](https://huggingface.co/docs/transformers.js) and React.
 
 ## Getting started
