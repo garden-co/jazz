@@ -16,9 +16,9 @@ pub fn seal(
   recipient_id: String,
   nonce_material: &[u8],
 ) -> napi::Result<Uint8Array> {
-    seal_crypto::seal(message, &sender_secret, &recipient_id, nonce_material)
-      .map(|sealed| sealed.into())
-      .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e.to_string()))
+  seal_crypto::seal(message, &sender_secret, &recipient_id, nonce_material)
+    .map(|sealed| sealed.into())
+    .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e.to_string()))
 }
 
 /// NAPI-exposed function for unsealing a message using X25519 + XSalsa20-Poly1305.
@@ -35,12 +35,12 @@ pub fn unseal(
   sender_id: String,
   nonce_material: &[u8],
 ) -> napi::Result<Uint8Array> {
-    seal_crypto::unseal(
-      sealed_message,
-      &recipient_secret,
-      &sender_id,
-      nonce_material,
-    )
-    .map(|unsealed| unsealed.into())
-    .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e.to_string()))
+  seal_crypto::unseal(
+    sealed_message,
+    &recipient_secret,
+    &sender_id,
+    nonce_material,
+  )
+  .map(|unsealed| unsealed.into())
+  .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e.to_string()))
 }

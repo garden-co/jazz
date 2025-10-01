@@ -2,7 +2,11 @@ import { beforeAll, describe, expect, test } from "vitest";
 import { base58 } from "@scure/base";
 
 import {
-  blake3HashOnce, generateNonce, Blake3Hasher, newEd25519SigningKey, ed25519VerifyingKey,
+  blake3HashOnce, 
+  generateNonce, 
+  Blake3Hasher, 
+  newEd25519SigningKey,
+  ed25519VerifyingKey,
   ed25519Sign,
   ed25519Verify,
   ed25519SigningKeyFromBytes,

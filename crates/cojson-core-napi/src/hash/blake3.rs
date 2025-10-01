@@ -1,6 +1,6 @@
+use cojson_core::hash;
 use napi::bindgen_prelude::Uint8Array;
 use napi_derive::napi;
-use cojson_core::hash;
 
 /// Generate a 24-byte nonce from input material using BLAKE3.
 /// - `nonce_material`: Raw bytes to derive the nonce from
