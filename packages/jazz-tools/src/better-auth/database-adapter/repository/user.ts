@@ -1,5 +1,5 @@
 import { CleanedWhere } from "better-auth/adapters";
-import { co, z } from "jazz-tools";
+import { co, z, CoValueLoadingState } from "jazz-tools";
 import { JazzRepository } from "./generic";
 import { isWhereBySingleField } from "../utils";
 import type { TableItem } from "../schema";
@@ -27,7 +27,11 @@ export class UserRepository extends JazzRepository {
 
     const emailIndex = await this.loadEmailIndex(userEmail);
 
-    if (emailIndex?.user) {
+    if (emailIndex.$jazzState !== CoValueLoadingState.LOADED) {
+      throw new Error("Cannot check if email exists");
+    }
+
+    if (emailIndex.user) {
       throw new Error("Email already exists");
     }
 
@@ -67,6 +71,10 @@ export class UserRepository extends JazzRepository {
 
   private async findByEmail(email: string): Promise<TableItem[]> {
     const emailIndex = await this.loadEmailIndex(email);
+
+    if (emailIndex.$jazzState !== CoValueLoadingState.LOADED) {
+      return [];
+    }
 
     const user = emailIndex?.user;
 

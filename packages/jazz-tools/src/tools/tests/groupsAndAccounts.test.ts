@@ -1,9 +1,21 @@
 import { WasmCrypto } from "cojson/crypto/WasmCrypto";
 import { assert, beforeEach, describe, expect, test } from "vitest";
 import { CoMap, Group, z } from "../exports.js";
-import { Account, Loaded, Ref, co, CoValueLoadingState } from "../internal.js";
+import {
+  Account,
+  Loaded,
+  MaybeLoaded,
+  Ref,
+  co,
+  CoValueLoadingState,
+} from "../internal.js";
 import { createJazzTestAccount, setupJazzTestSync } from "../testing.js";
-import { loadCoValueOrFail, setupTwoNodes, waitFor } from "./utils.js";
+import {
+  assertLoaded,
+  loadCoValueOrFail,
+  setupTwoNodes,
+  waitFor,
+} from "./utils.js";
 
 const Crypto = await WasmCrypto.create();
 
@@ -31,9 +43,9 @@ describe("Custom accounts and groups", async () => {
       .withMigration((account, creationProps?: { name: string }) => {
         // making sure that the inferred type of account.root & account.profile considers the root/profile not being loaded
         type R = typeof account.root;
-        const _r: R = {} as Loaded<typeof Root> | null;
+        const _r: R = {} as MaybeLoaded<Loaded<typeof Root>>;
         type P = typeof account.profile;
-        const _p: P = {} as Loaded<typeof CustomProfile> | null;
+        const _p: P = {} as MaybeLoaded<Loaded<typeof CustomProfile>>;
         if (creationProps) {
           const profileGroup = Group.create({ owner: account });
           profileGroup.addMember("everyone", "reader");
@@ -65,8 +77,10 @@ describe("Custom accounts and groups", async () => {
     const meAsMember = group.members.find(
       (member) => member.id === me.$jazz.id,
     );
-    assert(meAsMember?.account);
-    expect((meAsMember?.account).profile?.name).toBe("Hermes Puggington");
+    const memberAccount = meAsMember?.account;
+    assert(memberAccount);
+    assertLoaded(memberAccount.profile);
+    expect(memberAccount.profile.name).toBe("Hermes Puggington");
   });
 });
 
@@ -97,7 +111,8 @@ describe("Group inheritance", () => {
     const mapAsReader = await TestMap.load(mapInChild.$jazz.id, {
       loadAs: reader,
     });
-    expect(mapAsReader?.title).toBe("In Child");
+    assertLoaded(mapAsReader);
+    expect(mapAsReader.title).toBe("In Child");
 
     await parentGroup.removeMember(reader);
 
@@ -138,7 +153,8 @@ describe("Group inheritance", () => {
     const mapAsReader = await TestMap.load(mapInGrandChild.$jazz.id, {
       loadAs: reader,
     });
-    expect(mapAsReader?.title).toBe("In Grand Child");
+    assertLoaded(mapAsReader);
+    expect(mapAsReader.title).toBe("In Grand Child");
 
     await grandParentGroup.removeMember(reader);
 
@@ -275,8 +291,8 @@ describe("Group inheritance", () => {
     const loadedAlice = await Account.load(alice.$jazz.id);
     const loadedBob = await Account.load(bob.$jazz.id);
 
-    assert(loadedBob);
-    assert(loadedAlice);
+    assertLoaded(loadedBob);
+    assertLoaded(loadedAlice);
 
     const parentGroup = Group.create();
     // `parentGroup` has `alice` as a writer
@@ -331,8 +347,10 @@ describe("Group inheritance", () => {
       const task = board.columns[0]![0]!;
 
       const boardAsWriter = await Board.load(board.$jazz.id, { loadAs: me });
-      expect(boardAsWriter?.title).toEqual("My board");
+      assertLoaded(boardAsWriter);
+      expect(boardAsWriter.title).toEqual("My board");
       const taskAsWriter = await Task.load(task.$jazz.id, { loadAs: me });
+      // TODO check why assertLoaded is not being required here
       expect(taskAsWriter?.toString()).toEqual("Task 1.1");
     });
 

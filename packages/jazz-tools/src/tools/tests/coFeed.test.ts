@@ -17,10 +17,10 @@ import {
   z,
 } from "../index.js";
 import { createJazzTestAccount, setupJazzTestSync } from "../testing.js";
-import { setupTwoNodes, waitFor } from "./utils.js";
+import { assertLoaded, setupTwoNodes, waitFor } from "./utils.js";
 import {
   CoFeed,
-  CoFeedInstanceCoValuesNullable,
+  CoFeedInstanceCoValuesMaybeLoaded,
   ControlledAccount,
   CoValueLoadingState,
   TypeSym,
@@ -188,10 +188,13 @@ describe("CoFeed resolution", async () => {
     // TODO: fix this
     // expectTypeOf(stream[me.id]).not.toBeAny();
 
-    expect(
-      stream.perAccount[me.$jazz.id]?.value?.perAccount[me.$jazz.id]?.value
-        ?.perAccount[me.$jazz.id]?.value,
-    ).toEqual("milk");
+    const myTopLevelStream = stream.perAccount[me.$jazz.id];
+    assert(myTopLevelStream);
+    assertLoaded(myTopLevelStream.value);
+    const myNestedStream = myTopLevelStream.value.perAccount[me.$jazz.id];
+    assert(myNestedStream);
+    assertLoaded(myNestedStream.value);
+    expect(myNestedStream.value.perAccount[me.$jazz.id]?.value).toEqual("milk");
   });
 
   test("Loading and availability", async () => {
@@ -203,7 +206,7 @@ describe("CoFeed resolution", async () => {
       loadAs: anotherAccount,
     });
 
-    assert(loadedStream);
+    assertLoaded(loadedStream);
 
     const myStream = loadedStream.perAccount[me.$jazz.id];
 
@@ -211,7 +214,7 @@ describe("CoFeed resolution", async () => {
 
     await waitFor(() => expect(myStream.value).toBeTruthy());
 
-    assert(myStream.value);
+    assertLoaded(myStream.value);
 
     const loadedNestedStreamByMe = myStream.value.perAccount[me.$jazz.id];
 
@@ -219,7 +222,7 @@ describe("CoFeed resolution", async () => {
 
     await waitFor(() => expect(loadedNestedStreamByMe.value).toBeTruthy());
 
-    assert(loadedNestedStreamByMe.value);
+    assertLoaded(loadedNestedStreamByMe.value);
 
     const loadedTwiceNestedStreamByMe =
       loadedNestedStreamByMe.value.perAccount[me.$jazz.id];
@@ -237,7 +240,9 @@ describe("CoFeed resolution", async () => {
 
     const anotherAccount = await createJazzTestAccount();
 
-    let result: CoFeedInstanceCoValuesNullable<co.Feed<co.Feed<z.z.ZodString>>>;
+    let result: CoFeedInstanceCoValuesMaybeLoaded<
+      co.Feed<co.Feed<z.z.ZodString>>
+    >;
 
     TestStream.subscribe(
       stream.$jazz.id,
@@ -250,10 +255,13 @@ describe("CoFeed resolution", async () => {
     await waitFor(() => expect(result).toBeDefined());
 
     await waitFor(() => {
-      expect(
-        result.perAccount[accountId]?.value?.perAccount[accountId]?.value
-          ?.perAccount[accountId]?.value,
-      ).toBe("milk");
+      const myTopLevelStream = result.perAccount[accountId];
+      assert(myTopLevelStream);
+      assertLoaded(myTopLevelStream.value);
+      const myNestedStream = myTopLevelStream.value.perAccount[accountId];
+      assert(myNestedStream);
+      assertLoaded(myNestedStream.value);
+      expect(myNestedStream.value.perAccount[accountId]?.value).toBe("milk");
     });
 
     // When assigning a new nested stream, we get an update
@@ -268,20 +276,26 @@ describe("CoFeed resolution", async () => {
     stream.$jazz.push(newNested);
 
     await waitFor(() => {
-      expect(
-        result.perAccount[accountId]?.value?.perAccount[accountId]?.value
-          ?.perAccount[accountId]?.value,
-      ).toBe("butter");
+      const myTopLevelStream = result.perAccount[accountId];
+      assert(myTopLevelStream);
+      assertLoaded(myTopLevelStream.value);
+      const myNestedStream = myTopLevelStream.value.perAccount[accountId];
+      assert(myNestedStream);
+      assertLoaded(myNestedStream.value);
+      expect(myNestedStream.value.perAccount[accountId]?.value).toBe("butter");
     });
 
     // we get updates when the new nested stream changes
     newTwiceNested.$jazz.push("jam");
 
     await waitFor(() => {
-      expect(
-        result.perAccount[accountId]?.value?.perAccount[accountId]?.value
-          ?.perAccount[accountId]?.value,
-      ).toBe("jam");
+      const myTopLevelStream = result.perAccount[accountId];
+      assert(myTopLevelStream);
+      assertLoaded(myTopLevelStream.value);
+      const myNestedStream = myTopLevelStream.value.perAccount[accountId];
+      assert(myNestedStream);
+      assertLoaded(myNestedStream.value);
+      expect(myNestedStream.value.perAccount[accountId]?.value).toBe("jam");
     });
   });
 
@@ -300,9 +314,13 @@ describe("CoFeed resolution", async () => {
         ?.perAccount[me.$jazz.id]?.value,
     ).toBe("milk");
 
-    stream.perAccount[me.$jazz.id]!.value!.perAccount[
-      me.$jazz.id
-    ]!.value!.$jazz.push("bread");
+    const myTopLevelStream = stream.perAccount[me.$jazz.id];
+    assert(myTopLevelStream);
+    assertLoaded(myTopLevelStream.value);
+    const myNestedStream = myTopLevelStream.value.perAccount[me.$jazz.id];
+    assert(myNestedStream);
+    assertLoaded(myNestedStream.value);
+    myNestedStream.value.$jazz.push("bread");
 
     const update2 = (await queue.next()).value;
     expect(
@@ -418,7 +436,8 @@ describe("FileStream loading & Subscription", async () => {
       loadAs: anotherAccount,
     });
 
-    expect(loadedStream?.getChunks()).toEqual({
+    assertLoaded(loadedStream);
+    expect(loadedStream.getChunks()).toEqual({
       mimeType: "text/plain",
       chunks: [new Uint8Array([1, 2, 3]), new Uint8Array([4, 5, 6])],
       finished: true,
@@ -558,6 +577,7 @@ describe("FileStream.load", async () => {
 
     const blob = await promise;
 
+    assertLoaded(blob);
     // The promise resolves only when the stream is ended
     // so we get a blob with all the chunks
     expect(blob?.getChunks()?.finished).toBe(true);
@@ -576,6 +596,7 @@ describe("FileStream.load", async () => {
 
     stream.push(new Uint8Array([2]));
 
+    assertLoaded(blob);
     // The promise resolves before the stream is ended
     // so we get a blob only with the first chunk
     expect(blob?.getChunks({ allowUnfinished: true })?.finished).toBe(false);
@@ -770,7 +791,7 @@ describe("FileStream large file loading", async () => {
       allowUnfinished: true,
     });
 
-    assert(loadedStream);
+    assertLoaded(loadedStream);
 
     const loadedChunks = loadedStream.getChunks({ allowUnfinished: true });
     expect(loadedChunks).not.toBeNull();
@@ -817,7 +838,7 @@ describe("FileStream large file loading", async () => {
       allowUnfinished: false,
     });
 
-    assert(loadedStream);
+    assertLoaded(loadedStream);
 
     const loadedChunks = loadedStream.getChunks();
     expect(loadedChunks).not.toBeNull();

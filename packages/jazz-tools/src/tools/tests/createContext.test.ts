@@ -23,7 +23,7 @@ import {
   getPeerConnectedToTestSyncServer,
   setupJazzTestSync,
 } from "../testing";
-import { loadCoValueOrFail } from "./utils";
+import { assertLoaded, loadCoValueOrFail } from "./utils";
 const Crypto = await WasmCrypto.create();
 
 KvStoreContext.getInstance().initialize(new InMemoryKVStore());
@@ -190,7 +190,8 @@ describe("createContext methods", () => {
       });
 
       expect(context.account).toBeDefined();
-      expect(context.account.profile?.name).toBe("New User");
+      assertLoaded(context.account.profile);
+      expect(context.account.profile.name).toBe("New User");
     });
 
     test("uses initial agent secret when provided", async () => {
@@ -322,7 +323,8 @@ describe("createContext methods", () => {
         sessionProvider: randomSessionProvider,
       });
 
-      expect(context.account.profile?.name).toBe("Custom User");
+      assertLoaded(context.account.profile);
+      expect(context.account.profile.name).toBe("Custom User");
     });
 
     test("uses initial agent secret when provided", async () => {

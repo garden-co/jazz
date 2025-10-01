@@ -18,6 +18,7 @@ import {
   createJazzContext,
   randomSessionProvider,
 } from "./internal.js";
+export { assertLoaded } from "./tests/utils.js";
 
 const syncServer: { current: LocalNode | null; asyncPeers: boolean } = {
   current: null,

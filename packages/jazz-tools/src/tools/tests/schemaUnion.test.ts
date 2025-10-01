@@ -10,6 +10,7 @@ import {
   z,
 } from "../exports.js";
 import { createJazzTestAccount } from "../testing.js";
+import { assertLoaded } from "./utils.js";
 
 const RedButtonWidget = co.map({
   type: z.literal("button"),
@@ -87,9 +88,12 @@ describe("SchemaUnion", () => {
       },
     );
 
-    expect(loadedButtonWidget?.type).toBe("button");
-    expect(loadedSliderWidget?.type).toBe("slider");
-    expect(loadedCheckboxWidget?.type).toBe("checkbox");
+    assertLoaded(loadedButtonWidget);
+    expect(loadedButtonWidget.type).toBe("button");
+    assertLoaded(loadedSliderWidget);
+    expect(loadedSliderWidget.type).toBe("slider");
+    assertLoaded(loadedCheckboxWidget);
+    expect(loadedCheckboxWidget.type).toBe("checkbox");
   });
 
   it("should integrate with subscribeToCoValue correctly", async () => {

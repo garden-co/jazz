@@ -5,12 +5,13 @@ import {
   ID,
   RefEncoded,
   SubscriptionScope,
-} from "../internal.js";
-import {
+  LoadedAndRequired,
   accessChildById,
   CoValueLoadingState,
   getSubscriptionScope,
   isRefEncoded,
+  createUnloadedCoValue,
+  MaybeLoaded,
 } from "../internal.js";
 
 export class Ref<out V extends CoValue> {
@@ -25,10 +26,10 @@ export class Ref<out V extends CoValue> {
     }
   }
 
-  async load(): Promise<V | null> {
+  async load(): Promise<MaybeLoaded<V>> {
     const subscriptionScope = getSubscriptionScope(this.parent);
 
-    let node: SubscriptionScope<CoValue> | undefined | null;
+    let node: SubscriptionScope<CoValue> | undefined;
 
     /**
      * If the parent subscription scope is closed, we can't use it
@@ -52,7 +53,7 @@ export class Ref<out V extends CoValue> {
     }
 
     if (!node) {
-      return null;
+      return createUnloadedCoValue(this.id, CoValueLoadingState.UNLOADED);
     }
 
     const value = node.value;
@@ -67,10 +68,14 @@ export class Ref<out V extends CoValue> {
             resolve(value.value as V);
           } else if (value?.type === CoValueLoadingState.UNAVAILABLE) {
             unsubscribe();
-            resolve(null);
+            resolve(
+              createUnloadedCoValue(this.id, CoValueLoadingState.UNAVAILABLE),
+            );
           } else if (value?.type === CoValueLoadingState.UNAUTHORIZED) {
             unsubscribe();
-            resolve(null);
+            resolve(
+              createUnloadedCoValue(this.id, CoValueLoadingState.UNAUTHORIZED),
+            );
           }
 
           if (subscriptionScope.closed) {
@@ -145,6 +150,6 @@ export function makeRefs<Keys extends string | number>(
   });
 }
 
-export type RefIfCoValue<V> = NonNullable<V> extends CoValue
-  ? Ref<NonNullable<V>>
+export type RefIfCoValue<V> = LoadedAndRequired<V> extends CoValue
+  ? Ref<LoadedAndRequired<V>>
   : never;

@@ -1,6 +1,13 @@
 import { CleanedWhere } from "better-auth/adapters";
 import { BetterAuthDbSchema } from "better-auth/db";
-import { Account, CoList, CoMap, Group, co } from "jazz-tools";
+import {
+  Account,
+  CoList,
+  CoMap,
+  Group,
+  co,
+  CoValueLoadingState,
+} from "jazz-tools";
 import type { Database, TableItem } from "../schema.js";
 import {
   filterListByWhere,
@@ -103,7 +110,7 @@ export class JazzRepository {
       unique: uniqueId,
     });
 
-    if (!node) {
+    if (node.$jazzState !== CoValueLoadingState.LOADED) {
       throw new Error("Unable to create entity");
     }
 
@@ -131,7 +138,7 @@ export class JazzRepository {
 
     const node = await this.getSchema(model).load(id, { loadAs: this.worker });
 
-    if (!node) {
+    if (node.$jazzState !== CoValueLoadingState.LOADED) {
       return null;
     }
 
@@ -156,7 +163,7 @@ export class JazzRepository {
       },
     );
 
-    if (!node) {
+    if (node.$jazzState !== CoValueLoadingState.LOADED) {
       return null;
     }
 

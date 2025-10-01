@@ -2,7 +2,8 @@ import { assert, describe, expectTypeOf, test } from "vitest";
 import { ZodNumber, ZodOptional, ZodString } from "zod/v4";
 import { Group, co, z } from "../exports.js";
 import { Account } from "../index.js";
-import { CoMap, Loaded } from "../internal.js";
+import { CoMap, Loaded, MaybeLoaded } from "../internal.js";
+import { assertLoaded } from "./utils.js";
 
 describe("CoMap", async () => {
   describe("init", () => {
@@ -562,12 +563,12 @@ describe("CoMap resolution", async () => {
       },
     });
 
-    type ExpectedType = {
+    type ExpectedType = MaybeLoaded<{
       name: string;
       age: number;
       dog1: Loaded<typeof Dog>;
-      dog2: Loaded<typeof Dog> | null;
-    } | null;
+      dog2: MaybeLoaded<Loaded<typeof Dog>>;
+    }>;
 
     function matches(value: ExpectedType) {
       return value;
@@ -575,11 +576,11 @@ describe("CoMap resolution", async () => {
 
     matches(loadedPerson);
 
-    assert(loadedPerson);
+    assertLoaded(loadedPerson);
     expectTypeOf<typeof loadedPerson.dog1.name>().toEqualTypeOf<string>();
-    expectTypeOf<typeof loadedPerson.dog2>().toEqualTypeOf<Loaded<
-      typeof Dog
-    > | null>();
+    expectTypeOf<typeof loadedPerson.dog2>().branded.toEqualTypeOf<
+      MaybeLoaded<Loaded<typeof Dog>>
+    >();
   });
 
   test("partial loading a map with string resolve", async () => {
@@ -610,12 +611,12 @@ describe("CoMap resolution", async () => {
       },
     });
 
-    type ExpectedType = {
+    type ExpectedType = MaybeLoaded<{
       name: string;
       age: number;
-      dog1: Loaded<typeof Dog> | null;
-      dog2: Loaded<typeof Dog> | null;
-    } | null;
+      dog1: MaybeLoaded<Loaded<typeof Dog>>;
+      dog2: MaybeLoaded<Loaded<typeof Dog>>;
+    }>;
 
     function matches(value: ExpectedType) {
       return value;
@@ -623,13 +624,13 @@ describe("CoMap resolution", async () => {
 
     matches(loadedPerson);
 
-    assert(loadedPerson);
-    expectTypeOf<typeof loadedPerson.dog1>().toEqualTypeOf<Loaded<
-      typeof Dog
-    > | null>();
-    expectTypeOf<typeof loadedPerson.dog2>().toEqualTypeOf<Loaded<
-      typeof Dog
-    > | null>();
+    assertLoaded(loadedPerson);
+    expectTypeOf<typeof loadedPerson.dog1>().branded.toEqualTypeOf<
+      MaybeLoaded<Loaded<typeof Dog>>
+    >();
+    expectTypeOf<typeof loadedPerson.dog2>().branded.toEqualTypeOf<
+      MaybeLoaded<Loaded<typeof Dog>>
+    >();
   });
 
   test("loading a map with deep resolve and $onError", async () => {
@@ -659,12 +660,12 @@ describe("CoMap resolution", async () => {
       },
     });
 
-    type ExpectedType = {
+    type ExpectedType = MaybeLoaded<{
       name: string;
       age: number;
       dog1: Loaded<typeof Dog>;
-      dog2: Loaded<typeof Dog> | null;
-    } | null;
+      dog2: MaybeLoaded<Loaded<typeof Dog>>;
+    }>;
 
     function matches(value: ExpectedType) {
       return value;
@@ -672,11 +673,12 @@ describe("CoMap resolution", async () => {
 
     matches(loadedPerson);
 
-    assert(loadedPerson);
+    assertLoaded(loadedPerson);
     expectTypeOf<typeof loadedPerson.dog1.name>().toEqualTypeOf<string>();
-    expectTypeOf<typeof loadedPerson.dog2>().branded.toEqualTypeOf<Loaded<
-      typeof Dog
-    > | null>();
+    expectTypeOf<typeof loadedPerson.dog2>().branded.toEqualTypeOf<
+      // @ts-expect-error TODO make $onError return an Unloaded CoValue
+      MaybeLoaded<Loaded<typeof Dog>>
+    >();
   });
 
   test("loading a map with a nullable field", async () => {
@@ -698,11 +700,12 @@ describe("CoMap resolution", async () => {
 
     const loadedPerson = await Person.load(person.$jazz.id);
 
-    expectTypeOf(loadedPerson!).toEqualTypeOf<
+    assertLoaded(loadedPerson);
+    expectTypeOf(loadedPerson).branded.toEqualTypeOf<
       {
         readonly name: string;
         readonly age: number | null;
-        readonly dog: Loaded<typeof Dog> | null;
+        readonly dog: MaybeLoaded<Loaded<typeof Dog>>;
       } & CoMap
     >();
   });

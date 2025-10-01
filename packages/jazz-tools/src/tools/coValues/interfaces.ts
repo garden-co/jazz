@@ -11,6 +11,7 @@ import {
   CoValueLoadingState,
   type Group,
   Loaded,
+  MaybeLoaded,
   RefsToResolve,
   RefsToResolveStrict,
   RegisteredSchemas,
@@ -20,6 +21,7 @@ import {
   SubscriptionScope,
   type SubscriptionValue,
   TypeSym,
+  Unloaded2,
   activeAccountContext,
   coValueClassFromCoValueClassOrSchema,
   getSubscriptionScope,
@@ -96,6 +98,19 @@ export function isCoValueClass<V extends CoValue>(
  */
 export type ID<T> = string;
 
+export function createUnloadedCoValue<T extends CoValue>(
+  id: ID<T>,
+  jazzState:
+    | typeof CoValueLoadingState.UNLOADED
+    | typeof CoValueLoadingState.UNAVAILABLE
+    | typeof CoValueLoadingState.UNAUTHORIZED,
+): Unloaded2<T> {
+  return {
+    $jazz: { id },
+    $jazzState: jazzState,
+  };
+}
+
 export function loadCoValueWithoutMe<
   V extends CoValue,
   const R extends RefsToResolve<V>,
@@ -108,7 +123,7 @@ export function loadCoValueWithoutMe<
     skipRetry?: boolean;
     unstable_branch?: BranchDefinition;
   },
-): Promise<Resolved<V, R> | null> {
+): Promise<MaybeLoaded<Resolved<V, R>>> {
   return loadCoValue(cls, id, {
     ...options,
     loadAs: options?.loadAs ?? activeAccountContext.get(),
@@ -128,7 +143,7 @@ export function loadCoValue<
     skipRetry?: boolean;
     unstable_branch?: BranchDefinition;
   },
-): Promise<Resolved<V, R> | null> {
+): Promise<MaybeLoaded<Resolved<V, R>>> {
   return new Promise((resolve) => {
     subscribeToCoValue<V, R>(
       cls,
@@ -139,10 +154,10 @@ export function loadCoValue<
         syncResolution: true,
         skipRetry: options.skipRetry,
         onUnavailable: () => {
-          resolve(null);
+          resolve(createUnloadedCoValue(id, CoValueLoadingState.UNAVAILABLE));
         },
         onUnauthorized: () => {
-          resolve(null);
+          resolve(createUnloadedCoValue(id, CoValueLoadingState.UNAUTHORIZED));
         },
         unstable_branch: options.unstable_branch,
       },
@@ -176,7 +191,7 @@ export async function ensureCoValueLoaded<
     },
   );
 
-  if (!response) {
+  if (response.$jazzState !== CoValueLoadingState.LOADED) {
     throw new Error("Failed to deeply load CoValue " + existing.$jazz.id);
   }
 

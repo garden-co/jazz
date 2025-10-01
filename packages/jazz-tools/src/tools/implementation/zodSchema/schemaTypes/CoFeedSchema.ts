@@ -4,6 +4,7 @@ import {
   BranchDefinition,
   CoFeed,
   Group,
+  MaybeLoaded,
   RefsToResolve,
   RefsToResolveStrict,
   Resolved,
@@ -14,7 +15,7 @@ import {
 import { AnonymousJazzAgent } from "../../anonymousJazzAgent.js";
 import { CoFeedSchemaInit } from "../typeConverters/CoFieldSchemaInit.js";
 import { InstanceOrPrimitiveOfSchema } from "../typeConverters/InstanceOrPrimitiveOfSchema.js";
-import { InstanceOrPrimitiveOfSchemaCoValuesNullable } from "../typeConverters/InstanceOrPrimitiveOfSchemaCoValuesNullable.js";
+import { InstanceOrPrimitiveOfSchemaCoValuesMaybeLoaded } from "../typeConverters/InstanceOrPrimitiveOfSchemaCoValuesMaybeLoaded.js";
 import { CoOptionalSchema } from "./CoOptionalSchema.js";
 import { CoreCoValueSchema } from "./CoValueSchema.js";
 
@@ -45,24 +46,26 @@ export class CoFeedSchema<T extends AnyZodOrCoValueSchema>
     return this.coValueClass.create(init as any, options) as CoFeedInstance<T>;
   }
 
-  load<const R extends RefsToResolve<CoFeedInstanceCoValuesNullable<T>> = true>(
+  load<
+    const R extends RefsToResolve<CoFeedInstanceCoValuesMaybeLoaded<T>> = true,
+  >(
     id: string,
     options?: {
-      resolve?: RefsToResolveStrict<CoFeedInstanceCoValuesNullable<T>, R>;
+      resolve?: RefsToResolveStrict<CoFeedInstanceCoValuesMaybeLoaded<T>, R>;
       loadAs?: Account | AnonymousJazzAgent;
       unstable_branch?: BranchDefinition;
     },
-  ): Promise<Resolved<CoFeedInstanceCoValuesNullable<T>, R> | null> {
+  ): Promise<MaybeLoaded<Resolved<CoFeedInstanceCoValuesMaybeLoaded<T>, R>>> {
     // @ts-expect-error
     return this.coValueClass.load(id, options);
   }
 
   unstable_merge<
-    const R extends RefsToResolve<CoFeedInstanceCoValuesNullable<T>> = true,
+    const R extends RefsToResolve<CoFeedInstanceCoValuesMaybeLoaded<T>> = true,
   >(
     id: string,
     options?: {
-      resolve?: RefsToResolveStrict<CoFeedInstanceCoValuesNullable<T>, R>;
+      resolve?: RefsToResolveStrict<CoFeedInstanceCoValuesMaybeLoaded<T>, R>;
       loadAs?: Account | AnonymousJazzAgent;
       branch: BranchDefinition;
     },
@@ -74,17 +77,17 @@ export class CoFeedSchema<T extends AnyZodOrCoValueSchema>
   subscribe(
     id: string,
     listener: (
-      value: Resolved<CoFeedInstanceCoValuesNullable<T>, true>,
+      value: Resolved<CoFeedInstanceCoValuesMaybeLoaded<T>, true>,
       unsubscribe: () => void,
     ) => void,
   ): () => void;
   subscribe<
-    const R extends RefsToResolve<CoFeedInstanceCoValuesNullable<T>> = true,
+    const R extends RefsToResolve<CoFeedInstanceCoValuesMaybeLoaded<T>> = true,
   >(
     id: string,
-    options: SubscribeListenerOptions<CoFeedInstanceCoValuesNullable<T>, R>,
+    options: SubscribeListenerOptions<CoFeedInstanceCoValuesMaybeLoaded<T>, R>,
     listener: (
-      value: Resolved<CoFeedInstanceCoValuesNullable<T>, R>,
+      value: Resolved<CoFeedInstanceCoValuesMaybeLoaded<T>, R>,
       unsubscribe: () => void,
     ) => void,
   ): () => void;
@@ -124,5 +127,5 @@ export type CoFeedInstance<T extends AnyZodOrCoValueSchema> = CoFeed<
   InstanceOrPrimitiveOfSchema<T>
 >;
 
-export type CoFeedInstanceCoValuesNullable<T extends AnyZodOrCoValueSchema> =
-  CoFeed<InstanceOrPrimitiveOfSchemaCoValuesNullable<T>>;
+export type CoFeedInstanceCoValuesMaybeLoaded<T extends AnyZodOrCoValueSchema> =
+  CoFeed<InstanceOrPrimitiveOfSchemaCoValuesMaybeLoaded<T>>;

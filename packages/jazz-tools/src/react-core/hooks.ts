@@ -629,6 +629,7 @@ export function useAccount<
     unstable_branch?: BranchDefinition;
   },
 ): {
+  // TODO return MaybeLoaded
   me: Loaded<A, R> | undefined | null;
   agent: AnonymousJazzAgent | Loaded<A, true>;
   logOut: () => void;
