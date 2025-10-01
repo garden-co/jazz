@@ -8,7 +8,7 @@ use cojson_core::crypto::xsalsa20 as xsalsa20_crypto;
 /// - `plaintext`: Raw bytes to encrypt
 /// Returns the encrypted bytes or throws a JsError if encryption fails.
 /// Note: This function does not provide authentication. Use encrypt_xsalsa20_poly1305 for authenticated encryption.
-#[wasm_bindgen]
+#[wasm_bindgen(js_name = encryptXsalsa20)]
 pub fn encrypt_xsalsa20(
     key: &[u8],
     nonce_material: &[u8],
@@ -24,7 +24,7 @@ pub fn encrypt_xsalsa20(
 /// - `ciphertext`: Encrypted bytes to decrypt
 /// Returns the decrypted bytes or throws a JsError if decryption fails.
 /// Note: This function does not provide authentication. Use decrypt_xsalsa20_poly1305 for authenticated decryption.
-#[wasm_bindgen]
+#[wasm_bindgen(js_name = decryptXsalsa20)]
 pub fn decrypt_xsalsa20(
     key: &[u8],
     nonce_material: &[u8],

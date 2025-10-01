@@ -29,7 +29,7 @@ pub fn verify(signature: &[u8], message: &[u8], id: &[u8]) -> Result<bool, JsErr
 /// WASM-exposed function to derive a signer ID from a signing key.
 /// - `secret`: Raw Ed25519 signing key bytes
 /// Returns base58-encoded verifying key with "signer_z" prefix or throws JsError if derivation fails.
-#[wasm_bindgen(js_name = get_signer_id)]
+#[wasm_bindgen(js_name = getSignerId)]
 pub fn get_signer_id(secret: &[u8]) -> Result<String, JsError> {
     let secret_str = std::str::from_utf8(secret)
         .map_err(|e| JsError::new(&format!("Invalid UTF-8 in secret: {:?}", e)))?;

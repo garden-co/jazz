@@ -2,14 +2,14 @@ import {
   SessionLog,
   initialize,
   Blake3Hasher,
-  blake3_hash_once,
-  blake3_hash_once_with_context,
+  blake3HashOnce,
+  blake3HashOnceWithContext,
   decrypt,
   encrypt,
-  get_sealer_id,
-  get_signer_id,
-  new_ed25519_signing_key,
-  new_x25519_private_key,
+  getSealerId,
+  getSignerId,
+  newEd25519SigningKey,
+  newX25519PrivateKey,
   seal,
   sign,
   unseal,
@@ -77,22 +77,22 @@ export class WasmCrypto extends CryptoProvider<Blake3State> {
   }
 
   blake3HashOnce(data: Uint8Array) {
-    return blake3_hash_once(data);
+    return blake3HashOnce(data);
   }
 
   blake3HashOnceWithContext(
     data: Uint8Array,
     { context }: { context: Uint8Array },
   ) {
-    return blake3_hash_once_with_context(data, context);
+    return blake3HashOnceWithContext(data, context);
   }
 
   newEd25519SigningKey(): Uint8Array {
-    return new_ed25519_signing_key();
+    return newEd25519SigningKey();
   }
 
   getSignerID(secret: SignerSecret): SignerID {
-    return get_signer_id(textEncoder.encode(secret)) as SignerID;
+    return getSignerId(textEncoder.encode(secret)) as SignerID;
   }
 
   sign(secret: SignerSecret, message: JsonValue): Signature {
@@ -113,11 +113,11 @@ export class WasmCrypto extends CryptoProvider<Blake3State> {
   }
 
   newX25519StaticSecret(): Uint8Array {
-    return new_x25519_private_key();
+    return newX25519PrivateKey();
   }
 
   getSealerID(secret: SealerSecret): SealerID {
-    return get_sealer_id(textEncoder.encode(secret)) as SealerID;
+    return getSealerId(textEncoder.encode(secret)) as SealerID;
   }
 
   encrypt<T extends JsonValue, N extends JsonValue>(

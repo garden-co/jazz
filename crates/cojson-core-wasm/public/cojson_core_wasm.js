@@ -243,13 +243,13 @@ export function verify(signature, message, id) {
  * @param {Uint8Array} secret
  * @returns {string}
  */
-export function get_signer_id(secret) {
+export function getSignerId(secret) {
     let deferred3_0;
     let deferred3_1;
     try {
         const ptr0 = passArray8ToWasm0(secret, wasm.__wbindgen_malloc);
         const len0 = WASM_VECTOR_LEN;
-        const ret = wasm.get_signer_id(ptr0, len0);
+        const ret = wasm.getSignerId(ptr0, len0);
         var ptr2 = ret[0];
         var len2 = ret[1];
         if (ret[3]) {
@@ -286,10 +286,10 @@ function getArrayU8FromWasm0(ptr, len) {
  * @param {Uint8Array} nonce_material
  * @returns {Uint8Array}
  */
-export function generate_nonce(nonce_material) {
+export function generateNonce(nonce_material) {
     const ptr0 = passArray8ToWasm0(nonce_material, wasm.__wbindgen_malloc);
     const len0 = WASM_VECTOR_LEN;
-    const ret = wasm.generate_nonce(ptr0, len0);
+    const ret = wasm.generateNonce(ptr0, len0);
     var v2 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
     wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
     return v2;
@@ -303,10 +303,10 @@ export function generate_nonce(nonce_material) {
  * @param {Uint8Array} data
  * @returns {Uint8Array}
  */
-export function blake3_hash_once(data) {
+export function blake3HashOnce(data) {
     const ptr0 = passArray8ToWasm0(data, wasm.__wbindgen_malloc);
     const len0 = WASM_VECTOR_LEN;
-    const ret = wasm.blake3_hash_once(ptr0, len0);
+    const ret = wasm.blake3HashOnce(ptr0, len0);
     var v2 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
     wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
     return v2;
@@ -322,12 +322,12 @@ export function blake3_hash_once(data) {
  * @param {Uint8Array} context
  * @returns {Uint8Array}
  */
-export function blake3_hash_once_with_context(data, context) {
+export function blake3HashOnceWithContext(data, context) {
     const ptr0 = passArray8ToWasm0(data, wasm.__wbindgen_malloc);
     const len0 = WASM_VECTOR_LEN;
     const ptr1 = passArray8ToWasm0(context, wasm.__wbindgen_malloc);
     const len1 = WASM_VECTOR_LEN;
-    const ret = wasm.blake3_hash_once_with_context(ptr0, len0, ptr1, len1);
+    const ret = wasm.blake3HashOnceWithContext(ptr0, len0, ptr1, len1);
     var v3 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
     wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
     return v3;
@@ -345,14 +345,14 @@ export function blake3_hash_once_with_context(data, context) {
  * @param {Uint8Array} plaintext
  * @returns {Uint8Array}
  */
-export function encrypt_xsalsa20(key, nonce_material, plaintext) {
+export function encryptXsalsa20(key, nonce_material, plaintext) {
     const ptr0 = passArray8ToWasm0(key, wasm.__wbindgen_malloc);
     const len0 = WASM_VECTOR_LEN;
     const ptr1 = passArray8ToWasm0(nonce_material, wasm.__wbindgen_malloc);
     const len1 = WASM_VECTOR_LEN;
     const ptr2 = passArray8ToWasm0(plaintext, wasm.__wbindgen_malloc);
     const len2 = WASM_VECTOR_LEN;
-    const ret = wasm.encrypt_xsalsa20(ptr0, len0, ptr1, len1, ptr2, len2);
+    const ret = wasm.encryptXsalsa20(ptr0, len0, ptr1, len1, ptr2, len2);
     if (ret[3]) {
         throw takeFromExternrefTable0(ret[2]);
     }
@@ -373,14 +373,14 @@ export function encrypt_xsalsa20(key, nonce_material, plaintext) {
  * @param {Uint8Array} ciphertext
  * @returns {Uint8Array}
  */
-export function decrypt_xsalsa20(key, nonce_material, ciphertext) {
+export function decryptXsalsa20(key, nonce_material, ciphertext) {
     const ptr0 = passArray8ToWasm0(key, wasm.__wbindgen_malloc);
     const len0 = WASM_VECTOR_LEN;
     const ptr1 = passArray8ToWasm0(nonce_material, wasm.__wbindgen_malloc);
     const len1 = WASM_VECTOR_LEN;
     const ptr2 = passArray8ToWasm0(ciphertext, wasm.__wbindgen_malloc);
     const len2 = WASM_VECTOR_LEN;
-    const ret = wasm.decrypt_xsalsa20(ptr0, len0, ptr1, len1, ptr2, len2);
+    const ret = wasm.decryptXsalsa20(ptr0, len0, ptr1, len1, ptr2, len2);
     if (ret[3]) {
         throw takeFromExternrefTable0(ret[2]);
     }
@@ -395,8 +395,8 @@ export function decrypt_xsalsa20(key, nonce_material, ciphertext) {
  * This key can be reused for multiple Diffie-Hellman exchanges.
  * @returns {Uint8Array}
  */
-export function new_x25519_private_key() {
-    const ret = wasm.new_x25519_private_key();
+export function newX25519PrivateKey() {
+    const ret = wasm.newX25519PrivateKey();
     var v1 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
     wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
     return v1;
@@ -409,10 +409,10 @@ export function new_x25519_private_key() {
  * @param {Uint8Array} private_key
  * @returns {Uint8Array}
  */
-export function x25519_public_key(private_key) {
+export function x25519PublicKey(private_key) {
     const ptr0 = passArray8ToWasm0(private_key, wasm.__wbindgen_malloc);
     const len0 = WASM_VECTOR_LEN;
-    const ret = wasm.x25519_public_key(ptr0, len0);
+    const ret = wasm.x25519PublicKey(ptr0, len0);
     if (ret[3]) {
         throw takeFromExternrefTable0(ret[2]);
     }
@@ -430,12 +430,12 @@ export function x25519_public_key(private_key) {
  * @param {Uint8Array} public_key
  * @returns {Uint8Array}
  */
-export function x25519_diffie_hellman(private_key, public_key) {
+export function x25519DiffieHellman(private_key, public_key) {
     const ptr0 = passArray8ToWasm0(private_key, wasm.__wbindgen_malloc);
     const len0 = WASM_VECTOR_LEN;
     const ptr1 = passArray8ToWasm0(public_key, wasm.__wbindgen_malloc);
     const len1 = WASM_VECTOR_LEN;
-    const ret = wasm.x25519_diffie_hellman(ptr0, len0, ptr1, len1);
+    const ret = wasm.x25519DiffieHellman(ptr0, len0, ptr1, len1);
     if (ret[3]) {
         throw takeFromExternrefTable0(ret[2]);
     }
@@ -451,13 +451,13 @@ export function x25519_diffie_hellman(private_key, public_key) {
  * @param {Uint8Array} secret
  * @returns {string}
  */
-export function get_sealer_id(secret) {
+export function getSealerId(secret) {
     let deferred3_0;
     let deferred3_1;
     try {
         const ptr0 = passArray8ToWasm0(secret, wasm.__wbindgen_malloc);
         const len0 = WASM_VECTOR_LEN;
-        const ret = wasm.get_sealer_id(ptr0, len0);
+        const ret = wasm.getSealerId(ptr0, len0);
         var ptr2 = ret[0];
         var len2 = ret[1];
         if (ret[3]) {
@@ -595,8 +595,8 @@ export function unseal(sealed_message, recipient_secret, sender_id, nonce_materi
  * Returns 32 bytes of raw key material suitable for use with other Ed25519 functions.
  * @returns {Uint8Array}
  */
-export function new_ed25519_signing_key() {
-    const ret = wasm.new_ed25519_signing_key();
+export function newEd25519SigningKey() {
+    const ret = wasm.newEd25519SigningKey();
     var v1 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
     wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
     return v1;
@@ -609,10 +609,10 @@ export function new_ed25519_signing_key() {
  * @param {Uint8Array} signing_key
  * @returns {Uint8Array}
  */
-export function ed25519_verifying_key(signing_key) {
+export function newEd25519VerifyingKey(signing_key) {
     const ptr0 = passArray8ToWasm0(signing_key, wasm.__wbindgen_malloc);
     const len0 = WASM_VECTOR_LEN;
-    const ret = wasm.ed25519_verifying_key(ptr0, len0);
+    const ret = wasm.newEd25519VerifyingKey(ptr0, len0);
     if (ret[3]) {
         throw takeFromExternrefTable0(ret[2]);
     }
@@ -630,12 +630,12 @@ export function ed25519_verifying_key(signing_key) {
  * @param {Uint8Array} message
  * @returns {Uint8Array}
  */
-export function ed25519_sign(signing_key, message) {
+export function ed25519Sign(signing_key, message) {
     const ptr0 = passArray8ToWasm0(signing_key, wasm.__wbindgen_malloc);
     const len0 = WASM_VECTOR_LEN;
     const ptr1 = passArray8ToWasm0(message, wasm.__wbindgen_malloc);
     const len1 = WASM_VECTOR_LEN;
-    const ret = wasm.ed25519_sign(ptr0, len0, ptr1, len1);
+    const ret = wasm.ed25519Sign(ptr0, len0, ptr1, len1);
     if (ret[3]) {
         throw takeFromExternrefTable0(ret[2]);
     }
@@ -655,14 +655,14 @@ export function ed25519_sign(signing_key, message) {
  * @param {Uint8Array} signature
  * @returns {boolean}
  */
-export function ed25519_verify(verifying_key, message, signature) {
+export function ed25519Verify(verifying_key, message, signature) {
     const ptr0 = passArray8ToWasm0(verifying_key, wasm.__wbindgen_malloc);
     const len0 = WASM_VECTOR_LEN;
     const ptr1 = passArray8ToWasm0(message, wasm.__wbindgen_malloc);
     const len1 = WASM_VECTOR_LEN;
     const ptr2 = passArray8ToWasm0(signature, wasm.__wbindgen_malloc);
     const len2 = WASM_VECTOR_LEN;
-    const ret = wasm.ed25519_verify(ptr0, len0, ptr1, len1, ptr2, len2);
+    const ret = wasm.ed25519Verify(ptr0, len0, ptr1, len1, ptr2, len2);
     if (ret[2]) {
         throw takeFromExternrefTable0(ret[1]);
     }
@@ -676,10 +676,10 @@ export function ed25519_verify(verifying_key, message, signature) {
  * @param {Uint8Array} bytes
  * @returns {Uint8Array}
  */
-export function ed25519_signing_key_from_bytes(bytes) {
+export function ed25519SigningKeyFromBytes(bytes) {
     const ptr0 = passArray8ToWasm0(bytes, wasm.__wbindgen_malloc);
     const len0 = WASM_VECTOR_LEN;
-    const ret = wasm.ed25519_signing_key_from_bytes(ptr0, len0);
+    const ret = wasm.ed25519SigningKeyFromBytes(ptr0, len0);
     if (ret[3]) {
         throw takeFromExternrefTable0(ret[2]);
     }
@@ -695,10 +695,10 @@ export function ed25519_signing_key_from_bytes(bytes) {
  * @param {Uint8Array} signing_key
  * @returns {Uint8Array}
  */
-export function ed25519_signing_key_to_public(signing_key) {
+export function ed25519SigningKeyToPublic(signing_key) {
     const ptr0 = passArray8ToWasm0(signing_key, wasm.__wbindgen_malloc);
     const len0 = WASM_VECTOR_LEN;
-    const ret = wasm.ed25519_signing_key_to_public(ptr0, len0);
+    const ret = wasm.ed25519SigningKeyToPublic(ptr0, len0);
     if (ret[3]) {
         throw takeFromExternrefTable0(ret[2]);
     }
@@ -716,12 +716,12 @@ export function ed25519_signing_key_to_public(signing_key) {
  * @param {Uint8Array} message
  * @returns {Uint8Array}
  */
-export function ed25519_signing_key_sign(signing_key, message) {
+export function ed25519SigningKeySign(signing_key, message) {
     const ptr0 = passArray8ToWasm0(signing_key, wasm.__wbindgen_malloc);
     const len0 = WASM_VECTOR_LEN;
     const ptr1 = passArray8ToWasm0(message, wasm.__wbindgen_malloc);
     const len1 = WASM_VECTOR_LEN;
-    const ret = wasm.ed25519_signing_key_sign(ptr0, len0, ptr1, len1);
+    const ret = wasm.ed25519SigningKeySign(ptr0, len0, ptr1, len1);
     if (ret[3]) {
         throw takeFromExternrefTable0(ret[2]);
     }
@@ -737,10 +737,10 @@ export function ed25519_signing_key_sign(signing_key, message) {
  * @param {Uint8Array} bytes
  * @returns {Uint8Array}
  */
-export function ed25519_verifying_key_from_bytes(bytes) {
+export function ed25519VerifyingKeyFromBytes(bytes) {
     const ptr0 = passArray8ToWasm0(bytes, wasm.__wbindgen_malloc);
     const len0 = WASM_VECTOR_LEN;
-    const ret = wasm.ed25519_verifying_key_from_bytes(ptr0, len0);
+    const ret = wasm.ed25519VerifyingKeyFromBytes(ptr0, len0);
     if (ret[3]) {
         throw takeFromExternrefTable0(ret[2]);
     }
@@ -756,10 +756,10 @@ export function ed25519_verifying_key_from_bytes(bytes) {
  * @param {Uint8Array} bytes
  * @returns {Uint8Array}
  */
-export function ed25519_signature_from_bytes(bytes) {
+export function ed25519SignatureFromBytes(bytes) {
     const ptr0 = passArray8ToWasm0(bytes, wasm.__wbindgen_malloc);
     const len0 = WASM_VECTOR_LEN;
-    const ret = wasm.ed25519_signature_from_bytes(ptr0, len0);
+    const ret = wasm.ed25519SignatureFromBytes(ptr0, len0);
     if (ret[3]) {
         throw takeFromExternrefTable0(ret[2]);
     }

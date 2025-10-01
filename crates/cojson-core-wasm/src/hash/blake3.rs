@@ -5,7 +5,7 @@ use cojson_core::hash::blake3 as blake3_crypto;
 /// - `nonce_material`: Raw bytes to derive the nonce from
 /// Returns 24 bytes suitable for use as a nonce in cryptographic operations.
 /// This function is deterministic - the same input will produce the same nonce.
-#[wasm_bindgen]
+#[wasm_bindgen(js_name = generateNonce)]
 pub fn generate_nonce(nonce_material: &[u8]) -> Box<[u8]> {
     blake3_crypto::generate_nonce(nonce_material)
 }
@@ -14,7 +14,7 @@ pub fn generate_nonce(nonce_material: &[u8]) -> Box<[u8]> {
 /// - `data`: Raw bytes to hash
 /// Returns 32 bytes of hash output.
 /// This is the simplest way to compute a BLAKE3 hash of a single piece of data.
-#[wasm_bindgen]
+#[wasm_bindgen(js_name = blake3HashOnce)]
 pub fn blake3_hash_once(data: &[u8]) -> Box<[u8]> {
     blake3_crypto::blake3_hash_once(data)
 }
@@ -24,7 +24,7 @@ pub fn blake3_hash_once(data: &[u8]) -> Box<[u8]> {
 /// - `context`: Context bytes to prefix to the data
 /// Returns 32 bytes of hash output.
 /// This is useful for domain separation - the same data hashed with different contexts will produce different outputs.
-#[wasm_bindgen]
+#[wasm_bindgen(js_name = blake3HashOnceWithContext)]
 pub fn blake3_hash_once_with_context(data: &[u8], context: &[u8]) -> Box<[u8]> {
     blake3_crypto::blake3_hash_once_with_context(data, context)
 }
