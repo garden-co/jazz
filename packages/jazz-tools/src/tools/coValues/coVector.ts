@@ -372,7 +372,7 @@ export class CoVectorJazzApi<V extends CoVector> extends CoValueJazzApi<V> {
   /**
    * Calculate the dot product of this vector and another vector.
    */
-  dotProduct(otherVector: CoVector | Float32Array): number {
+  dotProduct(otherVector: CoVector | Float32Array | number[]): number {
     return VectorCalculation.dotProduct(this.coVector, otherVector);
   }
 
@@ -384,14 +384,18 @@ export class CoVectorJazzApi<V extends CoVector> extends CoValueJazzApi<V> {
    * - `0` means the vectors are orthogonal (i.e. no similarity)
    * - `-1` means the vectors are opposite direction (perfectly dissimilar)
    */
-  cosineSimilarity(otherVector: CoVector | Float32Array): number {
+  cosineSimilarity(otherVector: CoVector | Float32Array | number[]): number {
     return VectorCalculation.cosineSimilarity(this.coVector, otherVector);
   }
 }
 
 const VectorCalculation = {
-  magnitude: (vector: Float32Array) => {
-    return Math.sqrt(vector.reduce((s, x) => s + x * x, 0));
+  magnitude: (vector: Float32Array | number[]) => {
+    let sum = 0;
+    for (const v of vector) {
+      sum += v * v;
+    }
+    return Math.sqrt(sum);
   },
   normalize: (vector: Float32Array) => {
     const mag = VectorCalculation.magnitude(vector);
@@ -402,7 +406,7 @@ const VectorCalculation = {
 
     return vector.map((v) => v / mag);
   },
-  dotProduct: (vectorA: Float32Array, vectorB: Float32Array) => {
+  dotProduct: (vectorA: Float32Array, vectorB: Float32Array | number[]) => {
     if (vectorA.length !== vectorB.length) {
       throw new Error(
         `Vector dimensions don't match: ${vectorA.length} vs ${vectorB.length}`,
@@ -411,7 +415,10 @@ const VectorCalculation = {
 
     return vectorA.reduce((sum, a, i) => sum + a * vectorB[i]!, 0);
   },
-  cosineSimilarity: (vectorA: Float32Array, vectorB: Float32Array) => {
+  cosineSimilarity: (
+    vectorA: Float32Array,
+    vectorB: Float32Array | number[],
+  ) => {
     const magnitudeA = VectorCalculation.magnitude(vectorA);
     const magnitudeB = VectorCalculation.magnitude(vectorB);
 

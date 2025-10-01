@@ -390,6 +390,7 @@ describe("Vector calculations on .$jazz", async () => {
 
   const vecA = new Float32Array([1, 2, 3, 4, 5]);
   const vecB = new Float32Array([5, 4, 3, 2, 1]);
+  const arrB = [5, 4, 3, 2, 1];
 
   const coVectorA = VectorSchema.create(vecA);
   const coVectorB = VectorSchema.create(vecB);
@@ -417,6 +418,7 @@ describe("Vector calculations on .$jazz", async () => {
     const dotProduct = 35;
 
     test("returns the dot product of the 2 vectors", () => {
+      expect(coVectorA.$jazz.dotProduct(arrB)).toBe(dotProduct);
       expect(coVectorA.$jazz.dotProduct(vecB)).toBe(dotProduct);
       expect(coVectorA.$jazz.dotProduct(coVectorB)).toBe(dotProduct);
     });
@@ -426,6 +428,9 @@ describe("Vector calculations on .$jazz", async () => {
     const similarityApprox: [number, number] = [0.6364, 4];
 
     test("returns the cosine similarity of the 2 vectors", () => {
+      expect(coVectorA.$jazz.cosineSimilarity(arrB)).toBeCloseTo(
+        ...similarityApprox,
+      );
       expect(coVectorA.$jazz.cosineSimilarity(vecB)).toBeCloseTo(
         ...similarityApprox,
       );
