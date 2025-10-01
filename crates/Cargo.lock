@@ -214,22 +214,14 @@ name = "cojson-core-wasm"
 version = "0.1.0"
 dependencies = [
  "blake3",
- "bs58",
  "cojson-core",
  "console_error_panic_hook",
- "crypto_secretbox",
- "ed25519-dalek",
  "getrandom",
- "hex",
- "js-sys",
- "rand",
- "salsa20",
  "serde",
  "serde-wasm-bindgen",
  "serde_json",
  "thiserror",
  "wasm-bindgen",
- "x25519-dalek",
 ]
 
 [[package]]
@@ -535,12 +527,6 @@ name = "hermit-abi"
 version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc0fef456e4baa96da950455cd02c081ca953b141298e41db3fc7e36b1da849c"
-
-[[package]]
-name = "hex"
-version = "0.4.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
 name = "inout"

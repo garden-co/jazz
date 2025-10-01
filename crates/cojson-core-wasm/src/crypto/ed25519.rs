@@ -11,7 +11,7 @@ pub fn new_ed25519_signing_key() -> Box<[u8]> {
 /// WASM-exposed function to derive an Ed25519 verifying key from a signing key.
 /// - `signing_key`: 32 bytes of signing key material
 /// Returns 32 bytes of verifying key material or throws JsError if key is invalid.
-#[wasm_bindgen(js_name = newEd25519VerifyingKey)]
+#[wasm_bindgen(js_name = ed25519VerifyingKey)]
 pub fn ed25519_verifying_key(signing_key: &[u8]) -> Result<Box<[u8]>, JsError> {
     ed25519::ed25519_verifying_key(signing_key).map_err(|e| JsError::new(&e.to_string()))
 }

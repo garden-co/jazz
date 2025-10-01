@@ -609,10 +609,10 @@ export function newEd25519SigningKey() {
  * @param {Uint8Array} signing_key
  * @returns {Uint8Array}
  */
-export function newEd25519VerifyingKey(signing_key) {
+export function ed25519VerifyingKey(signing_key) {
     const ptr0 = passArray8ToWasm0(signing_key, wasm.__wbindgen_malloc);
     const len0 = WASM_VECTOR_LEN;
-    const ret = wasm.newEd25519VerifyingKey(ptr0, len0);
+    const ret = wasm.ed25519VerifyingKey(ptr0, len0);
     if (ret[3]) {
         throw takeFromExternrefTable0(ret[2]);
     }

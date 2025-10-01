@@ -1,4 +1,4 @@
-import { describe, expect, test } from "vitest";
+import { beforeAll, describe, expect, test } from "vitest";
 import { base58 } from "@scure/base";
 
 import {
@@ -23,7 +23,12 @@ import {
   x25519DiffieHellman,
   decryptXsalsa20,
   encryptXsalsa20,
+  initialize
 } from '../index';
+
+beforeAll(async () => {
+  await initialize()
+})
 
 describe("blake3", () => {
 

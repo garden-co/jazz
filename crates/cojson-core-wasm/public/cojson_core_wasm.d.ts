@@ -132,7 +132,7 @@ export function newEd25519SigningKey(): Uint8Array;
  * - `signing_key`: 32 bytes of signing key material
  * Returns 32 bytes of verifying key material or throws JsError if key is invalid.
  */
-export function newEd25519VerifyingKey(signing_key: Uint8Array): Uint8Array;
+export function ed25519VerifyingKey(signing_key: Uint8Array): Uint8Array;
 /**
  * WASM-exposed function to sign a message using Ed25519.
  * - `signing_key`: 32 bytes of signing key material
@@ -231,7 +231,7 @@ export interface InitOutput {
   readonly seal: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
   readonly unseal: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
   readonly newEd25519SigningKey: () => [number, number];
-  readonly newEd25519VerifyingKey: (a: number, b: number) => [number, number, number, number];
+  readonly ed25519VerifyingKey: (a: number, b: number) => [number, number, number, number];
   readonly ed25519Sign: (a: number, b: number, c: number, d: number) => [number, number, number, number];
   readonly ed25519Verify: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number];
   readonly ed25519SigningKeyFromBytes: (a: number, b: number) => [number, number, number, number];
