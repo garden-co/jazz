@@ -191,6 +191,11 @@ export const docNavigationItems = [
         done: 80,
       },
       {
+        name: "CoVectors",
+        href: "/docs/using-covalues/covectors",
+        done: 100,
+      },
+      {
         name: "ImageDefinition",
         href: "/docs/using-covalues/imagedef",
         done: {
