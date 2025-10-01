@@ -20,11 +20,10 @@ function App() {
     resolve: { root: { journalEntries: true } },
   });
 
-  // 1) Prepare local embeddings model (for search text)
-  const modelName = DEFAULT_MODEL;
-  const searchInputRef = useRef<HTMLInputElement>(null);
-
-  const { createEmbedding, modelStatus } = useLocalEmbeddings({ modelName });
+  // 1) Prepare local embeddings model (for query text embedding)
+  const { createEmbedding, modelStatus } = useLocalEmbeddings({
+    modelName: DEFAULT_MODEL,
+  });
   const { queryEmbedding, isCreatingEmbedding, createQueryEmbedding } =
     useCreateEmbedding({ createEmbedding });
 
@@ -51,7 +50,8 @@ function App() {
     },
   );
 
-  // -- Helpers for creating new entries
+  // -- Helpers
+  const searchInputRef = useRef<HTMLInputElement>(null);
   const isLoading = journalEntries === undefined;
   const isEmptyState =
     journalEntries !== undefined &&
@@ -79,7 +79,10 @@ function App() {
         {!isEmptyState && (
           <>
             <div className="flex flex-row flex-wrap gap-2">
-              <ModelStatus modelName={modelName} modelStatus={modelStatus} />
+              <ModelStatus
+                modelName={DEFAULT_MODEL}
+                modelStatus={modelStatus}
+              />
               {queryEmbedding && <EmbeddingPill embedding={queryEmbedding} />}
             </div>
 
@@ -146,7 +149,7 @@ function App() {
           <EmptyState
             isSeeding={isSeeding}
             seedJournal={seedJournal}
-            modelName={modelName}
+            modelName={DEFAULT_MODEL}
             modelStatus={modelStatus}
           />
         ) : isLoading ? (

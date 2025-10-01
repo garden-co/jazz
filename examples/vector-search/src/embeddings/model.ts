@@ -1,13 +1,15 @@
 import { pipeline, ProgressInfo } from "@huggingface/transformers";
 
-export const MODELS = [
-  "Xenova/all-MiniLM-L6-v2",
-  "mixedbread-ai/mxbai-embed-large-v1",
-  "jinaai/jina-clip-v2",
+const MODELS = [
+  "Xenova/all-MiniLM-L6-v2", // 384 dimensions, ~23 MB
+  "Xenova/paraphrase-multilingual-mpnet-base-v2", // 768 dimensions, ~279 MB
+  "mixedbread-ai/mxbai-embed-large-v1", // 1024 dimensions, ~337 MB
 ] as const;
 
 export type ModelName = (typeof MODELS)[number];
 
+// Note that changing the model requires updating the dimensions count
+// in the `schema.ts` file as well
 export const DEFAULT_MODEL = MODELS[0];
 
 type DownloadingModel = { status: "downloading"; progress: number };
