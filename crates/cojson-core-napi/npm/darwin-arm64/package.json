@@ -1,0 +1,31 @@
+{
+  "name": "cojson-core-napi-darwin-arm64",
+  "version": "0.18.16",
+  "cpu": [
+    "arm64"
+  ],
+  "main": "cojson-core-napi.darwin-arm64.node",
+  "files": [
+    "cojson-core-napi.darwin-arm64.node"
+  ],
+  "description": "Node.js N-API bindings for the cojson-core Rust library, providing high-performance.",
+  "keywords": [
+    "napi-rs",
+    "NAPI",
+    "N-API",
+    "Rust",
+    "node-addon",
+    "node-addon-api"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">= 12.22.0 < 13 || >= 14.17.0 < 15 || >= 15.12.0 < 16 || >= 16.0.0"
+  },
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/",
+    "access": "public"
+  },
+  "os": [
+    "darwin"
+  ]
+}

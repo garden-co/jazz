@@ -18,7 +18,7 @@ on:
 
 jobs:
   e2e-tests:
-    runs-on: blacksmith-4vcpu-ubuntu-2204
+    runs-on: blacksmith-4vcpu-ubuntu-2404
 
     steps:
       - name: Checkout
@@ -40,6 +40,9 @@ jobs:
 
       - name: Pnpm Build
         run: pnpm turbo build --filter="./packages/*"
+      
+      - name: Build NAPI packages
+        run: pnpm exec turbo run build:napi --filter='./crates/*'
 
       - name: chat-rn-expo App Pre Build
         working-directory: ./examples/chat-rn-expo
