@@ -189,9 +189,11 @@ pub struct SessionLogInternal {
 }
 
 impl SessionLogInternal {
+    /// Create a new session log, optionally with a public key for signature verification.
     pub fn new(co_id: CoID, session_id: SessionID, signer_id: Option<SignerID>) -> Self {
         let hasher = blake3::Hasher::new();
 
+        // If a signer_id is provided, decode and parse it as a VerifyingKey.
         let public_key = match signer_id {
             Some(signer_id) => Some(
                 VerifyingKey::try_from(
@@ -214,23 +216,29 @@ impl SessionLogInternal {
         }
     }
 
+    /// Get a reference to the list of serialized transaction JSON strings.
     pub fn transactions_json(&self) -> &Vec<String> {
         &self.transactions_json
     }
 
+    /// Get the last signature, if any.
     pub fn last_signature(&self) -> Option<&Signature> {
         self.last_signature.as_ref()
     }
 
+    /// Compute the hash that would result after adding the given transactions.
+    /// This is used for signature verification.
     fn expected_hash_after(&self, transactions: &[Box<RawValue>]) -> blake3::Hasher {
         let mut hasher = self.hasher.clone();
         for tx in transactions {
             hasher.update(tx.get().as_bytes());
         }
-
         hasher
     }
 
+    /// Try to add a batch of transactions, verifying the signature if required.
+    /// If skip_verify is false, checks the signature against the expected hash.
+    /// Updates the internal hash state and transaction log if successful.
     pub fn try_add(
         &mut self,
         transactions: Vec<Box<RawValue>>,
@@ -238,16 +246,18 @@ impl SessionLogInternal {
         skip_verify: bool,
     ) -> Result<(), CoJsonCoreError> {
         if !skip_verify {
+            // Compute the hash after adding the new transactions.
             let hasher = self.expected_hash_after(&transactions);
             let new_hash_encoded_stringified = format!(
                 "\"hash_z{}\"",
                 bs58::encode(hasher.finalize().as_bytes()).into_string()
             );
 
+            // Verify the signature using the public key, if present.
             if let Some(public_key) = self.public_key {
                 match public_key.verify(
                     new_hash_encoded_stringified.as_bytes(),
-                    &(new_signature).into(),
+                    &(new_signature.into()),
                 ) {
                     Ok(()) => {}
                     Err(_) => {
@@ -257,23 +267,29 @@ impl SessionLogInternal {
                     }
                 }
             } else {
+                // No public key available for verification.
                 return Err(CoJsonCoreError::SignatureVerification(
                     new_hash_encoded_stringified.replace("\"", ""),
                 ));
             }
 
+            // Update the internal hasher state to the new hash.
             self.hasher = hasher;
         }
 
+        // Add the new transactions to the log.
         for tx in transactions {
             self.transactions_json.push(tx.get().to_string());
         }
 
+        // Update the last signature.
         self.last_signature = Some(new_signature.clone());
 
         Ok(())
     }
 
+    /// Add a new transaction (private or trusting), encrypting as needed, and sign the new hash.
+    /// Returns the new signature and the transaction object.
     pub fn add_new_transaction(
         &mut self,
         changes_json: &str,
@@ -282,21 +298,26 @@ impl SessionLogInternal {
         made_at: u64,
         meta: Option<String>,
     ) -> (Signature, Transaction) {
+        // Build the transaction object depending on the mode.
         let new_tx = match mode {
             TransactionMode::Private { key_id, key_secret } => {
+                // For private transactions, encrypt the changes and meta fields.
                 let tx_index = self.transactions_json.len() as u32;
 
+                // Generate a unique nonce for this transaction.
                 let nonce_material = self.generate_nonce_material(tx_index);
-
                 let nonce = self.generate_json_nonce(&nonce_material);
 
+                // Prepare the secret key bytes for encryption.
                 let secret_key_bytes: [u8; 32] = (&key_secret).into();
 
+                // Encrypt the changes JSON.
                 let mut ciphertext = changes_json.as_bytes().to_vec();
                 let mut cipher = XSalsa20::new(&secret_key_bytes.into(), &nonce.into());
                 cipher.apply_keystream(&mut ciphertext);
                 let encrypted_str = format!("encrypted_U{}", URL_SAFE.encode(&ciphertext));
 
+                // Optionally encrypt the meta field.
                 let encrypted_meta = meta.map(|meta| {
                     let mut ciphertext = meta.as_bytes().to_vec();
                     let mut cipher = XSalsa20::new(&secret_key_bytes.into(), &nonce.into());
@@ -310,6 +331,7 @@ impl SessionLogInternal {
                     }
                 });
 
+                // Build the private transaction.
                 Transaction::Private(PrivateTransaction {
                     encrypted_changes: Encrypted {
                         value: encrypted_str,
@@ -321,18 +343,23 @@ impl SessionLogInternal {
                     privacy: "private".to_string(),
                 })
             }
-            TransactionMode::Trusting => Transaction::Trusting(TrustingTransaction {
-                changes: changes_json.to_string(),
-                made_at: Number::from(made_at),
-                meta,
-                privacy: "trusting".to_string(),
-            }),
+            TransactionMode::Trusting => {
+                // For trusting transactions, just store the changes as plain text.
+                Transaction::Trusting(TrustingTransaction {
+                    changes: changes_json.to_string(),
+                    made_at: Number::from(made_at),
+                    meta,
+                    privacy: "trusting".to_string(),
+                })
+            }
         };
 
+        // Serialize the transaction to JSON and update the hash state.
         let tx_json = serde_json::to_string(&new_tx).unwrap();
         self.hasher.update(tx_json.as_bytes());
         self.transactions_json.push(tx_json);
 
+        // Compute the new hash and sign it.
         let new_hash = self.hasher.finalize();
         let new_hash_encoded_stringified = format!(
             "\"hash_z{}\"",
@@ -343,16 +370,20 @@ impl SessionLogInternal {
             .sign(new_hash_encoded_stringified.as_bytes())
             .into();
 
+        // Update the last signature.
         self.last_signature = Some(new_signature.clone());
 
         (new_signature, new_tx)
     }
 
+    /// Decrypt the changes JSON for the transaction at the given index.
+    /// Returns the decrypted string, or an error if decryption fails.
     pub fn decrypt_next_transaction_changes_json(
         &self,
         tx_index: u32,
         key_secret: KeySecret,
     ) -> Result<String, CoJsonCoreError> {
+        // Get the transaction JSON string at the given index.
         let tx_json = self
             .transactions_json
             .get(tx_index as usize)
@@ -361,6 +392,7 @@ impl SessionLogInternal {
 
         match tx {
             Transaction::Private(private_tx) => {
+                // For private transactions, decrypt the encrypted_changes field.
                 let nonce_material = self.generate_nonce_material(tx_index);
                 let nonce = self.generate_json_nonce(&nonce_material);
 
@@ -370,24 +402,30 @@ impl SessionLogInternal {
                     return Err(CoJsonCoreError::InvalidEncryptedPrefix);
                 }
 
+                // Decode the base64-encoded ciphertext.
                 let ciphertext_b64 = &encrypted_val[prefix.len()..];
                 let mut ciphertext = URL_SAFE.decode(ciphertext_b64)?;
 
+                // Decrypt using XSalsa20.
                 let secret_key_bytes: [u8; 32] = (&key_secret).into();
                 let mut cipher = XSalsa20::new((&secret_key_bytes).into(), &nonce.into());
                 cipher.apply_keystream(&mut ciphertext);
 
                 Ok(String::from_utf8(ciphertext)?)
             }
+            // For trusting transactions, just return the plain changes.
             Transaction::Trusting(trusting_tx) => Ok(trusting_tx.changes),
         }
     }
 
+    /// Decrypt the meta JSON for the transaction at the given index, if present.
+    /// Returns the decrypted string, or None if no meta, or an error if decryption fails.
     pub fn decrypt_next_transaction_meta_json(
         &self,
         tx_index: u32,
         key_secret: KeySecret,
     ) -> Result<Option<String>, CoJsonCoreError> {
+        // Get the transaction JSON string at the given index.
         let tx_json = self
             .transactions_json
             .get(tx_index as usize)
@@ -396,6 +434,7 @@ impl SessionLogInternal {
 
         match tx {
             Transaction::Private(private_tx) => {
+                // If meta is present, decrypt it.
                 if let Some(encrypted_meta) = private_tx.meta {
                     let nonce_material = self.generate_nonce_material(tx_index);
                     let nonce = self.generate_json_nonce(&nonce_material);
@@ -406,9 +445,11 @@ impl SessionLogInternal {
                         return Err(CoJsonCoreError::InvalidEncryptedPrefix);
                     }
 
+                    // Decode the base64-encoded ciphertext.
                     let ciphertext_b64 = &encrypted_val[prefix.len()..];
                     let mut ciphertext = URL_SAFE.decode(ciphertext_b64)?;
 
+                    // Decrypt using XSalsa20.
                     let secret_key_bytes: [u8; 32] = (&key_secret).into();
                     let mut cipher = XSalsa20::new((&secret_key_bytes).into(), &nonce.into());
                     cipher.apply_keystream(&mut ciphertext);
@@ -418,10 +459,13 @@ impl SessionLogInternal {
                     Ok(None)
                 }
             }
+            // For trusting transactions, just return the plain meta field.
             Transaction::Trusting(trusting_tx) => Ok(trusting_tx.meta),
         }
     }
 
+    /// Generate the nonce material (as JSON) for a given transaction index.
+    /// This ensures each transaction gets a unique nonce based on session and index.
     fn generate_nonce_material(&self, tx_index: u32) -> JsonValue {
         JsonValue::Object(serde_json::Map::from_iter(vec![
             ("in".to_string(), JsonValue::String(self.co_id.0.clone())),
@@ -436,6 +480,7 @@ impl SessionLogInternal {
         ]))
     }
 
+    /// Generate a 24-byte nonce from arbitrary bytes using blake3.
     fn generate_nonce(&self, material: &[u8]) -> [u8; 24] {
         let mut hasher = blake3::Hasher::new();
         hasher.update(material);
@@ -445,12 +490,15 @@ impl SessionLogInternal {
         output
     }
 
+    /// Generate a 24-byte nonce from a JSON value by serializing it and hashing.
     fn generate_json_nonce(&self, material: &JsonValue) -> [u8; 24] {
         let stable_json = serde_json::to_string(&material).unwrap();
         self.generate_nonce(stable_json.as_bytes())
     }
 }
 
+/// Decode a base58 string with a "_z" prefix.
+/// Used for decoding keys and other encoded values.
 pub fn decode_z(value: &str) -> Result<Vec<u8>, String> {
     let prefix_end = value.find("_z").ok_or("Invalid prefix")? + 2;
     bs58::decode(&value[prefix_end..])
