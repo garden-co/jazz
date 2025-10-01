@@ -10,7 +10,7 @@
     "format-and-lint:fix": "biome check . --write"
   },
   "dependencies": {
-    "@huggingface/transformers": "^3.7.3",
+    "@huggingface/transformers": "^3.7.4",
     "jazz-tools": "workspace:*",
     "react": "catalog:react",
     "react-dom": "catalog:react"
@@ -22,8 +22,7 @@
     "@types/react-dom": "catalog:react",
     "@vitejs/plugin-react": "^4.5.1",
     "globals": "^15.11.0",
-    "is-ci": "^3.0.1",
-    "postcss": "^8.5.3",
+    "postcss": "^8.4.40",
     "tailwindcss": "^4.1.10",
     "typescript": "catalog:default",
     "vite": "catalog:default"
