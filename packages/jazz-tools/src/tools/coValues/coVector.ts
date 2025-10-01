@@ -392,8 +392,7 @@ export class CoVectorJazzApi<V extends CoVector> extends CoValueJazzApi<V> {
 const VectorCalculation = {
   magnitude: (vector: Float32Array | number[]) => {
     let sum = 0;
-    for (let i = 0; i < vector.length; i++) {
-      const v = vector[i]!;
+    for (const v of vector) {
       sum += v * v;
     }
     return Math.sqrt(sum);
