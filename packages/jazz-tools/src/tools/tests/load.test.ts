@@ -7,6 +7,7 @@ import {
   getPeerConnectedToTestSyncServer,
   setupJazzTestSync,
 } from "../testing.js";
+import { assertLoaded } from "./utils.js";
 
 cojsonInternals.CO_VALUE_LOADING_CONFIG.RETRY_DELAY = 10;
 
@@ -29,7 +30,7 @@ test("load a value", async () => {
   const alice = await createJazzTestAccount();
 
   const john = await Person.load(map.$jazz.id, { loadAs: alice });
-  expect(john).not.toBeNull();
+  assertLoaded(john);
   expect(john?.name).toBe("John");
 });
 
@@ -63,8 +64,7 @@ test("load a missing optional value (co.optional)", async () => {
     resolve: { dog: true },
   });
 
-  assert(john);
-
+  assertLoaded(john);
   expect(john.name).toBe("John");
   expect(john.dog).toBeUndefined();
 });
@@ -90,8 +90,7 @@ test("load a missing optional value (Schema.optional)", async () => {
     resolve: { dog: true },
   });
 
-  assert(john);
-
+  assertLoaded(john);
   expect(john.name).toBe("John");
   expect(john.dog).toBeUndefined();
 });
@@ -123,8 +122,7 @@ test("load a missing optional value (optional discrminatedUnion)", async () => {
     resolve: { pet: true },
   });
 
-  assert(john);
-
+  assertLoaded(john);
   expect(john.name).toBe("John");
   expect(john.pet).toBeUndefined();
 });
@@ -159,8 +157,8 @@ test("retry an unavailable value", async () => {
   );
 
   const john = await promise;
-  expect(john).not.toBeNull();
-  expect(john?.name).toBe("John");
+  assertLoaded(john);
+  expect(john.name).toBe("John");
 });
 
 test("returns null if the value is unavailable after retries", async () => {
@@ -203,8 +201,8 @@ test("load works even when the coValue access is granted after the creation", as
 
   const mapOnBob = await Person.load(map.$jazz.id, { loadAs: bob });
 
-  expect(mapOnBob).not.toBeNull();
-  expect(mapOnBob?.name).toBe("John");
+  assertLoaded(mapOnBob);
+  expect(mapOnBob.name).toBe("John");
 });
 
 test("load a large coValue", async () => {
@@ -258,8 +256,7 @@ test("load a large coValue", async () => {
     },
   });
 
-  assert(loadedDataset);
-
+  assertLoaded(loadedDataset);
   expect(loadedDataset.metadata.name).toBe("Large Dataset");
   expect(loadedDataset.metadata.description).toBe(
     "A dataset with many entries for testing large coValue loading",

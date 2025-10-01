@@ -9,7 +9,12 @@ import {
   isJazzRequestError,
 } from "../coValues/request.js";
 import { Account, CoPlainText, Group, co } from "../index.js";
-import { exportCoValue, importContentPieces } from "../internal.js";
+import {
+  createUnloadedCoValue,
+  CoValueLoadingState,
+  exportCoValue,
+  importContentPieces,
+} from "../internal.js";
 import { createJazzTestAccount, linkAccounts } from "../testing.js";
 
 const server = setupServer();
@@ -654,7 +659,12 @@ describe("JazzRequestError handling", () => {
 
       server.use(
         http.post("https://api.example.com/api/user", async ({ request }) => {
-          vi.spyOn(Account, "load").mockResolvedValue(null);
+          vi.spyOn(Account, "load").mockResolvedValue(
+            createUnloadedCoValue(
+              "some-covalue-id",
+              CoValueLoadingState.UNAVAILABLE,
+            ),
+          );
 
           return userRequest.handle(request, worker, async () => {
             return { bio: "test" };

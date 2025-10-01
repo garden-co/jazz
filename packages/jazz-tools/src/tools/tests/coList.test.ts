@@ -13,7 +13,7 @@ import {
   runWithoutActiveAccount,
   setupJazzTestSync,
 } from "../testing.js";
-import { setupTwoNodes, waitFor } from "./utils.js";
+import { assertLoaded, setupTwoNodes, waitFor } from "./utils.js";
 
 const Crypto = await WasmCrypto.create();
 
@@ -276,8 +276,8 @@ describe("Simple CoList operations", async () => {
           resolve: { $each: { title: true } },
         });
 
-        assert(loadedTask);
-        assert(loadedTaskList);
+        assertLoaded(loadedTask);
+        assertLoaded(loadedTaskList);
         // @ts-expect-error loadedTask may not have its `title` loaded
         loadedTaskList.$jazz.push(loadedTask);
         // In this case the title is loaded, so the assertion passes
@@ -468,7 +468,7 @@ describe("Simple CoList operations", async () => {
         const onion = list[2];
 
         const shallowlyLoadedList = await NestedList.load(list.$jazz.id);
-        assert(shallowlyLoadedList);
+        assertLoaded(shallowlyLoadedList);
 
         const loadedList = await shallowlyLoadedList.$jazz.ensureLoaded({
           resolve: { $each: true },
@@ -772,16 +772,15 @@ describe("CoList resolution", async () => {
       loadAs: userB,
     });
 
-    assert(loadedPets);
+    assertLoaded(loadedPets);
 
     const petReference = loadedPets.$jazz.refs[0];
-    expect(petReference).toBeDefined();
-    expect(petReference?.id).toBe(pets[0]?.$jazz.id);
+    assert(petReference);
+    expect(petReference.id).toBe(pets[0]?.$jazz.id);
 
-    const dog = await petReference?.load();
+    const dog = await petReference.load();
 
-    assert(dog);
-
+    assertLoaded(dog);
     expect(dog.name).toEqual("Rex");
   });
 
@@ -871,15 +870,23 @@ describe("CoList subscription", async () => {
 
     expect(spy).toHaveBeenCalledTimes(1);
 
-    expect(updates[0]?.[0]?.name).toEqual("Item 1");
+    assert(updates[0]?.[0]);
+    assertLoaded(updates[0][0]);
+    expect(updates[0][0].name).toEqual("Item 1");
+    assert(updates[0]?.[1]);
+    assertLoaded(updates[0][1]);
     expect(updates[0]?.[1]?.name).toEqual("Item 2");
 
     list[0]!.$jazz.set("name", "Updated Item 1");
 
     await waitFor(() => expect(spy).toHaveBeenCalledTimes(2));
 
-    expect(updates[1]?.[0]?.name).toEqual("Updated Item 1");
-    expect(updates[1]?.[1]?.name).toEqual("Item 2");
+    assert(updates[1]?.[0]);
+    assertLoaded(updates[1][0]);
+    expect(updates[1][0].name).toEqual("Updated Item 1");
+    assert(updates[1]?.[1]);
+    assertLoaded(updates[1][1]);
+    expect(updates[1][1].name).toEqual("Item 2");
 
     expect(spy).toHaveBeenCalledTimes(2);
   });
@@ -912,8 +919,12 @@ describe("CoList subscription", async () => {
     expect(spy).toHaveBeenCalled();
     expect(spy).toHaveBeenCalledTimes(1);
 
-    expect(updates[0]?.[0]?.name).toEqual("Item 1");
-    expect(updates[0]?.[1]?.name).toEqual("Item 2");
+    assert(updates[0]?.[0]);
+    assertLoaded(updates[0][0]);
+    expect(updates[0][0].name).toEqual("Item 1");
+    assert(updates[0]?.[1]);
+    assertLoaded(updates[0][1]);
+    expect(updates[0][1].name).toEqual("Item 2");
 
     expect(spy).toHaveBeenCalledTimes(1);
 
@@ -921,8 +932,12 @@ describe("CoList subscription", async () => {
 
     expect(spy).toHaveBeenCalledTimes(2);
 
-    expect(updates[1]?.[0]?.name).toEqual("Updated Item 1");
-    expect(updates[1]?.[1]?.name).toEqual("Item 2");
+    assert(updates[1]?.[0]);
+    assertLoaded(updates[1][0]);
+    expect(updates[1][0].name).toEqual("Updated Item 1");
+    assert(updates[1]?.[1]);
+    assertLoaded(updates[1][1]);
+    expect(updates[1][1].name).toEqual("Item 2");
 
     expect(spy).toHaveBeenCalledTimes(2);
   });
@@ -1018,16 +1033,24 @@ describe("CoList subscription", async () => {
     expect(spy).toHaveBeenCalledTimes(1);
 
     await waitFor(() => {
-      expect(updates[0]?.[0]?.name).toEqual("Item 1");
-      expect(updates[0]?.[1]?.name).toEqual("Item 2");
+      assert(updates[0]?.[0]);
+      assertLoaded(updates[0][0]);
+      expect(updates[0][0].name).toEqual("Item 1");
+      assert(updates[0]?.[1]);
+      assertLoaded(updates[0][1]);
+      expect(updates[0][1].name).toEqual("Item 2");
     });
 
     list[0]!.$jazz.set("name", "Updated Item 1");
 
     await waitFor(() => expect(spy).toHaveBeenCalledTimes(4));
 
-    expect(updates[1]?.[0]?.name).toEqual("Updated Item 1");
-    expect(updates[1]?.[1]?.name).toEqual("Item 2");
+    assert(updates[1]?.[0]);
+    assertLoaded(updates[1][0]);
+    expect(updates[1][0].name).toEqual("Updated Item 1");
+    assert(updates[1]?.[1]);
+    assertLoaded(updates[1][1]);
+    expect(updates[1][1].name).toEqual("Item 2");
 
     expect(spy).toHaveBeenCalledTimes(4);
   });
@@ -1159,8 +1182,10 @@ describe("CoList subscription", async () => {
       loadAs: bob,
     });
 
-    assert(loadedPerson);
+    assertLoaded(loadedPerson);
+    // @ts-expect-error TODO make $onError return an Unloaded CoValue
     expect(loadedPerson.name).toBe("John");
+    // @ts-expect-error TODO make $onError return an Unloaded CoValue
     expect(loadedPerson.dogs).toBeNull();
   });
 });
@@ -1176,6 +1201,7 @@ describe("CoList unique methods", () => {
     });
 
     const foundList = await ItemList.loadUnique("test-list", group.$jazz.id);
+    assertLoaded(foundList);
     expect(foundList).toEqual(originalList);
     expect(foundList?.length).toBe(3);
     expect(foundList?.[0]).toBe("item1");
@@ -1201,11 +1227,11 @@ describe("CoList unique methods", () => {
       owner: group,
     });
 
-    expect(result).not.toBeNull();
-    expect(result?.length).toBe(3);
-    expect(result?.[0]).toBe("item1");
-    expect(result?.[1]).toBe("item2");
-    expect(result?.[2]).toBe("item3");
+    assertLoaded(result);
+    expect(result.length).toBe(3);
+    expect(result[0]).toBe("item1");
+    expect(result[1]).toBe("item2");
+    expect(result[2]).toBe("item3");
   });
 
   test("upsertUnique without an active account", async () => {
@@ -1222,11 +1248,11 @@ describe("CoList unique methods", () => {
       });
     });
 
-    expect(result).not.toBeNull();
-    expect(result?.length).toBe(3);
-    expect(result?.[0]).toBe("item1");
-    expect(result?.[1]).toBe("item2");
-    expect(result?.[2]).toBe("item3");
+    assertLoaded(result);
+    expect(result.length).toBe(3);
+    expect(result[0]).toBe("item1");
+    expect(result[1]).toBe("item2");
+    expect(result[2]).toBe("item3");
 
     expect(result?.$jazz.owner).toEqual(account);
   });
@@ -1248,11 +1274,12 @@ describe("CoList unique methods", () => {
       owner: group,
     });
 
+    assertLoaded(updatedList);
     expect(updatedList).toEqual(originalList); // Should be the same instance
-    expect(updatedList?.length).toBe(3);
-    expect(updatedList?.[0]).toBe("updated1");
-    expect(updatedList?.[1]).toBe("updated2");
-    expect(updatedList?.[2]).toBe("updated3");
+    expect(updatedList.length).toBe(3);
+    expect(updatedList[0]).toBe("updated1");
+    expect(updatedList[1]).toBe("updated2");
+    expect(updatedList[2]).toBe("updated3");
   });
 
   test("upsertUnique with CoValue items", async () => {
@@ -1275,10 +1302,10 @@ describe("CoList unique methods", () => {
       resolve: { $each: true },
     });
 
-    expect(result).not.toBeNull();
-    expect(result?.length).toBe(2);
-    expect(result?.[0]?.name).toBe("First");
-    expect(result?.[1]?.name).toBe("Second");
+    assertLoaded(result);
+    expect(result.length).toBe(2);
+    expect(result[0]?.name).toBe("First");
+    expect(result[1]?.name).toBe("Second");
   });
 
   test("upsertUnique updates list with CoValue items", async () => {
@@ -1309,10 +1336,11 @@ describe("CoList unique methods", () => {
       resolve: { $each: true },
     });
 
+    assertLoaded(updatedList);
     expect(updatedList).toEqual(originalList); // Should be the same instance
-    expect(updatedList?.length).toBe(2);
-    expect(updatedList?.[0]?.name).toBe("Updated");
-    expect(updatedList?.[1]?.name).toBe("Added");
+    expect(updatedList.length).toBe(2);
+    expect(updatedList[0]?.name).toBe("Updated");
+    expect(updatedList[1]?.name).toBe("Added");
   });
 
   test("findUnique returns correct ID", async () => {
@@ -1348,10 +1376,10 @@ describe("CoList unique methods", () => {
       resolve: { $each: { category: true } },
     });
 
-    expect(result).not.toBeNull();
-    expect(result?.length).toBe(1);
-    expect(result?.[0]?.name).toBe("Item 1");
-    expect(result?.[0]?.category?.title).toBe("Category 1");
+    assertLoaded(result);
+    expect(result.length).toBe(1);
+    expect(result[0]?.name).toBe("Item 1");
+    expect(result[0]?.category?.title).toBe("Category 1");
   });
 });
 

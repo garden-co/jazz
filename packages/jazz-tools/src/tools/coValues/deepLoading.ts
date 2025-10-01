@@ -6,11 +6,6 @@ import { type CoKeys } from "./coMap.js";
 import { type CoValue, type ID } from "./interfaces.js";
 
 /**
- * Similar to {@link NonNullable}, but removes only `null` and preserves `undefined`.
- */
-export type NotNull<T> = Exclude<T, null>;
-
-/**
  * Used to check if T is a union type.
  *
  * If T is a union type, the left hand side of the extends becomes a union of function types.
@@ -22,15 +17,41 @@ type IsUnion<T, U = T> = (T extends any ? (x: T) => void : never) extends (
   ? false
   : true;
 
-export type MaybeLoaded<T extends CoValue | null> = T | Unloaded<T>;
+/**
+ * A CoValue that may or may not be loaded.
+ */
+// T should extend CoValue. We can't enforce this because it would introduce circularity
+// into the definition of CoValues.
+export type MaybeLoaded<T> = T | Unloaded2<T>;
 
-type Unloaded<T> = {
+/**
+ * A CoValue that is not loaded.
+ */
+// TODO rename to Unloaded
+export type Unloaded2<T> = {
   $jazzState:
     | typeof CoValueLoadingState.UNLOADED
     | typeof CoValueLoadingState.UNAVAILABLE
     | typeof CoValueLoadingState.UNAUTHORIZED;
   $jazz: { id: ID<T> };
 };
+
+/**
+ * Narrows a maybe-loaded, optional CoValue to a loaded and required CoValue.
+ */
+// TODO is this adding $jazzState to non-CoValues?
+export type LoadedAndRequired<T> = Exclude<T, undefined> & {
+  $jazzState: typeof CoValueLoadingState.LOADED;
+};
+
+/**
+ * Narrows a maybe-loaded, optional CoValue to a loaded and optional CoValue
+ */
+export type AsLoaded<T> = LoadedAndRequired<T> extends CoValue
+  ? T extends undefined
+    ? LoadedAndRequired<T> | undefined
+    : LoadedAndRequired<T>
+  : T;
 
 export type RefsToResolve<
   V,
@@ -41,14 +62,14 @@ export type RefsToResolve<
   | (DepthLimit extends CurrentDepth["length"]
       ? // eslint-disable-next-line @typescript-eslint/no-explicit-any
         any
-      : IsUnion<NonNullable<V>> extends true
+      : IsUnion<LoadedAndRequired<V>> extends true
         ? true
         : // Basically V extends CoList - but if we used that we'd introduce circularity into the definition of CoList itself
           V extends ReadonlyArray<infer Item>
           ?
               | {
                   $each?: RefsToResolve<
-                    NotNull<Item>,
+                    AsLoaded<Item>,
                     DepthLimit,
                     [0, ...CurrentDepth]
                   >;
@@ -59,10 +80,12 @@ export type RefsToResolve<
             V extends { [TypeSym]: "CoMap" | "Group" | "Account" }
             ?
                 | ({
-                    [Key in CoKeys<V> as NonNullable<V[Key]> extends CoValue
+                    [Key in CoKeys<V> as LoadedAndRequired<
+                      V[Key]
+                    > extends CoValue
                       ? Key
                       : never]?: RefsToResolve<
-                      NonNullable<V[Key]>,
+                      LoadedAndRequired<V[Key]>,
                       DepthLimit,
                       [0, ...CurrentDepth]
                     >;
@@ -70,7 +93,7 @@ export type RefsToResolve<
                 | (ItemsSym extends keyof V
                     ? {
                         $each: RefsToResolve<
-                          NonNullable<V[ItemsSym]>,
+                          LoadedAndRequired<V[ItemsSym]>,
                           DepthLimit,
                           [0, ...CurrentDepth]
                         >;
@@ -85,7 +108,7 @@ export type RefsToResolve<
               ?
                   | {
                       $each: RefsToResolve<
-                        NotNull<Item>,
+                        AsLoaded<Item>,
                         DepthLimit,
                         [0, ...CurrentDepth]
                       >;
@@ -114,10 +137,10 @@ type CoMapLikeLoaded<
   CurrentDepth extends number[],
 > = {
   readonly [Key in keyof Omit<Depth, "$onError">]-?: Key extends CoKeys<V>
-    ? NonNullable<V[Key]> extends CoValue
+    ? LoadedAndRequired<V[Key]> extends CoValue
       ?
           | DeeplyLoaded<
-              NonNullable<V[Key]>,
+              LoadedAndRequired<V[Key]>,
               Depth[Key],
               DepthLimit,
               [0, ...CurrentDepth]
@@ -139,13 +162,13 @@ export type DeeplyLoaded<
     ? V
     : // Basically V extends CoList - but if we used that we'd introduce circularity into the definition of CoList itself
       [V] extends [ReadonlyArray<infer Item>]
-      ? NotNull<Item> extends CoValue
+      ? AsLoaded<Item> extends CoValue
         ? Depth extends { $each: infer ItemDepth }
           ? // Deeply loaded CoList
             ReadonlyArray<
-              | (NotNull<Item> &
+              | (AsLoaded<Item> &
                   DeeplyLoaded<
-                    NotNull<Item>,
+                    AsLoaded<Item>,
                     ItemDepth,
                     DepthLimit,
                     [0, ...CurrentDepth]
@@ -167,7 +190,7 @@ export type DeeplyLoaded<
               ? {
                   readonly [key: string]:
                     | DeeplyLoaded<
-                        NonNullable<V[ItemsSym]>,
+                        LoadedAndRequired<V[ItemsSym]>,
                         ItemDepth,
                         DepthLimit,
                         [0, ...CurrentDepth]
@@ -190,12 +213,12 @@ export type DeeplyLoaded<
             ]
           ? // Deeply loaded CoStream
             {
-              byMe?: { value: NotNull<Item> };
-              inCurrentSession?: { value: NotNull<Item> };
+              byMe?: { value: AsLoaded<Item> };
+              inCurrentSession?: { value: AsLoaded<Item> };
               perSession: {
-                [key: SessionID]: { value: NotNull<Item> };
+                [key: SessionID]: { value: AsLoaded<Item> };
               };
-            } & { [key: ID<Account>]: { value: NotNull<Item> } } & V // same reason as in CoList
+            } & { [key: ID<Account>]: { value: AsLoaded<Item> } } & V // same reason as in CoList
           : [V] extends [
                 {
                   [TypeSym]: "BinaryCoStream";

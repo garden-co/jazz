@@ -1,7 +1,8 @@
 import { describe, expectTypeOf, test } from "vitest";
 import { Group, co, z } from "../exports.js";
 import { Account } from "../index.js";
-import { Loaded } from "../internal.js";
+import { Loaded, MaybeLoaded, LoadedAndRequired } from "../internal.js";
+import { assertLoaded } from "./utils.js";
 
 describe("CoMap.Record", () => {
   describe("init", () => {
@@ -180,9 +181,9 @@ describe("CoMap.Record", () => {
         },
       });
 
-      type ExpectedType = {
+      type ExpectedType = MaybeLoaded<{
         [key: string]: Loaded<typeof Dog>;
-      } | null;
+      }>;
 
       function matches(value: ExpectedType) {
         return value;
@@ -210,17 +211,16 @@ describe("CoMap.Record", () => {
         },
       });
 
-      type Expect = NonNullable<typeof loadedPerson> extends never
+      type Expect = LoadedAndRequired<typeof loadedPerson> extends never
         ? "error: is never"
         : "ok";
 
       expectTypeOf("ok" as const).toEqualTypeOf<Expect>();
 
-      expectTypeOf(loadedPerson?.pet1).toEqualTypeOf<
-        Loaded<typeof Dog> | undefined
-      >();
-      expectTypeOf(loadedPerson?.pet3).toEqualTypeOf<
-        Loaded<typeof Dog> | undefined | null
+      assertLoaded(loadedPerson);
+      expectTypeOf(loadedPerson.pet1).toEqualTypeOf<Loaded<typeof Dog>>();
+      expectTypeOf(loadedPerson.pet3).branded.toEqualTypeOf<
+        MaybeLoaded<Loaded<typeof Dog>> | undefined
       >();
     });
 
@@ -250,19 +250,20 @@ describe("CoMap.Record", () => {
         },
       });
 
-      type Expect = NonNullable<typeof loadedPerson> extends never
+      type Expect = LoadedAndRequired<typeof loadedPerson> extends never
         ? "error: is never"
         : "ok";
 
       expectTypeOf("ok" as const).toEqualTypeOf<Expect>();
 
-      expectTypeOf(loadedPerson?.pet1).toEqualTypeOf<
-        Loaded<typeof Dog> | undefined | null
+      assertLoaded(loadedPerson);
+      expectTypeOf(loadedPerson.pet1).toEqualTypeOf<
+        Loaded<typeof Dog> | undefined
       >();
-      expectTypeOf(loadedPerson?.pet2).toEqualTypeOf<
-        Loaded<typeof Dog> | undefined | null
+      expectTypeOf(loadedPerson.pet2).toEqualTypeOf<
+        Loaded<typeof Dog> | undefined
       >();
-      expectTypeOf(loadedPerson?.pet3).toEqualTypeOf<
+      expectTypeOf(loadedPerson.pet3).toEqualTypeOf<
         Loaded<typeof Dog> | undefined | null
       >();
     });
@@ -282,17 +283,18 @@ describe("CoMap.Record", () => {
 
       const loadedPerson = await Person.load(person.$jazz.id);
 
-      type Expect = NonNullable<typeof loadedPerson> extends never
+      type Expect = LoadedAndRequired<typeof loadedPerson> extends never
         ? "error: is never"
         : "ok";
 
       expectTypeOf("ok" as const).toEqualTypeOf<Expect>();
 
-      expectTypeOf(loadedPerson?.pet1).toEqualTypeOf<
-        Loaded<typeof Dog> | undefined | null
+      assertLoaded(loadedPerson);
+      expectTypeOf(loadedPerson.pet1).branded.toEqualTypeOf<
+        MaybeLoaded<Loaded<typeof Dog>> | undefined
       >();
-      expectTypeOf(loadedPerson?.pet3).toEqualTypeOf<
-        Loaded<typeof Dog> | undefined | null
+      expectTypeOf(loadedPerson.pet3).branded.toEqualTypeOf<
+        MaybeLoaded<Loaded<typeof Dog>> | undefined
       >();
     });
 
@@ -315,9 +317,9 @@ describe("CoMap.Record", () => {
         },
       });
 
-      type ExpectedType = {
+      type ExpectedType = MaybeLoaded<{
         [key: string]: Loaded<typeof Dog> | null;
-      } | null;
+      }>;
 
       function matches(value: ExpectedType) {
         return value;

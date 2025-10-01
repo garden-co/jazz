@@ -8,7 +8,13 @@ import {
   createJazzContextFromExistingCredentials,
   randomSessionProvider,
 } from "../index";
-import { CoValueFromRaw, CoValueLoadingState } from "../internal";
+import {
+  CoValue,
+  CoValueFromRaw,
+  CoValueLoadingState,
+  MaybeLoaded,
+  LoadedAndRequired,
+} from "../internal";
 
 const Crypto = await WasmCrypto.create();
 
@@ -137,4 +143,12 @@ export async function loadCoValueOrFail<V extends RawCoValue>(
     throw new Error("CoValue not found");
   }
   return value;
+}
+
+export function assertLoaded<T extends MaybeLoaded<CoValue>>(
+  coValue: T,
+): asserts coValue is LoadedAndRequired<T> {
+  if (coValue.$jazzState !== CoValueLoadingState.LOADED) {
+    throw new Error("CoValue is not loaded");
+  }
 }

@@ -102,8 +102,10 @@ export type * from "./types.js";
 export {
   coValueClassFromCoValueClassOrSchema,
   type InstanceOfSchema,
-  type InstanceOfSchemaCoValuesNullable,
+  type InstanceOfSchemaCoValuesMaybeLoaded,
   type CoValueClassOrSchema,
+  CoValueLoadingState,
+  type MaybeLoaded,
   type Loaded,
   type BaseAccountShape,
   type DefaultAccountShape,

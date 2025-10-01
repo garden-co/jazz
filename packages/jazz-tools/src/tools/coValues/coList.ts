@@ -10,6 +10,8 @@ import {
   getCoValueOwner,
   Group,
   ID,
+  AsLoaded,
+  MaybeLoaded,
   unstable_mergeBranch,
   RefEncoded,
   RefsToResolve,
@@ -264,7 +266,7 @@ export class CoList<out Item = any>
       resolve?: RefsToResolveStrict<L, R>;
       loadAs?: Account | AnonymousJazzAgent;
     },
-  ): Promise<Resolved<L, R> | null> {
+  ): Promise<MaybeLoaded<Resolved<L, R>>> {
     return loadCoValueWithoutMe(this, id, options);
   }
 
@@ -381,17 +383,21 @@ export class CoList<out Item = any>
       owner: Account | Group;
       resolve?: RefsToResolveStrict<L, R>;
     },
-  ): Promise<Resolved<L, R> | null> {
+  ): Promise<MaybeLoaded<Resolved<L, R>>> {
     const listId = CoList._findUnique(
       options.unique,
       options.owner.$jazz.id,
       options.owner.$jazz.loadedAs,
     );
-    let list: Resolved<L, R> | null = await loadCoValueWithoutMe(this, listId, {
-      ...options,
-      loadAs: options.owner.$jazz.loadedAs,
-      skipRetry: true,
-    });
+    let list: MaybeLoaded<Resolved<L, R>> = await loadCoValueWithoutMe(
+      this,
+      listId,
+      {
+        ...options,
+        loadAs: options.owner.$jazz.loadedAs,
+        skipRetry: true,
+      },
+    );
     if (!list) {
       list = (this as any).create(options.value, {
         owner: options.owner,
@@ -423,7 +429,7 @@ export class CoList<out Item = any>
       resolve?: RefsToResolveStrict<L, R>;
       loadAs?: Account | AnonymousJazzAgent;
     },
-  ): Promise<Resolved<L, R> | null> {
+  ): Promise<MaybeLoaded<Resolved<L, R>>> {
     return loadCoValueWithoutMe(
       this,
       CoList._findUnique(unique, ownerID, options?.loadAs),
@@ -840,14 +846,14 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
    * @category Content
    **/
   get refs(): {
-    [idx: number]: Exclude<CoListItem<L>, null> extends CoValue
-      ? Ref<Exclude<CoListItem<L>, null>>
+    [idx: number]: AsLoaded<CoListItem<L>> extends CoValue
+      ? Ref<AsLoaded<CoListItem<L>>>
       : never;
   } & {
     length: number;
     [Symbol.iterator](): IterableIterator<
-      Exclude<CoListItem<L>, null> extends CoValue
-        ? Ref<Exclude<CoListItem<L>, null>>
+      AsLoaded<CoListItem<L>> extends CoValue
+        ? Ref<AsLoaded<CoListItem<L>>>
         : never
     >;
   } {

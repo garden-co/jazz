@@ -13,6 +13,7 @@ import {
   CoValueClass,
   CoValueLoadingState,
   ID,
+  MaybeLoaded,
   RefEncoded,
   RefsToResolve,
   RefsToResolveStrict,
@@ -275,7 +276,7 @@ export class Group extends CoValueBase implements CoValue {
     this: CoValueClass<G>,
     id: ID<G>,
     options?: { resolve?: RefsToResolveStrict<G, R>; loadAs?: Account },
-  ): Promise<Resolved<G, R> | null> {
+  ): Promise<MaybeLoaded<Resolved<G, R>>> {
     return loadCoValueWithoutMe(this, id, options);
   }
 

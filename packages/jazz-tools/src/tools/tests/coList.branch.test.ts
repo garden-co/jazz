@@ -3,7 +3,7 @@ import { assert, beforeEach, describe, expect, test, vi } from "vitest";
 import { Group, co, z } from "../exports.js";
 
 import { createJazzTestAccount, setupJazzTestSync } from "../testing.js";
-import { waitFor } from "./utils.js";
+import { assertLoaded, waitFor } from "./utils.js";
 
 beforeEach(async () => {
   cojsonInternals.CO_VALUE_LOADING_CONFIG.RETRY_DELAY = 1000;
@@ -36,7 +36,7 @@ describe("CoList Branching", async () => {
         unstable_branch: { name: "feature-branch" },
       });
 
-      assert(branchList);
+      assertLoaded(branchList);
 
       // Edit the branch
       branchList.$jazz.set(0, "Buy organic groceries");
@@ -83,7 +83,7 @@ describe("CoList Branching", async () => {
         unstable_branch: { name: "feature-branch" },
       });
 
-      assert(branchList);
+      assertLoaded(branchList);
 
       // Edit the branch
       branchList.$jazz.set(0, "Buy organic groceries");
@@ -130,7 +130,7 @@ describe("CoList Branching", async () => {
         unstable_branch: { name: "no-changes-branch" },
       });
 
-      assert(branchList);
+      assertLoaded(branchList);
 
       // Verify branch has same values as original
       expect(branchList[0]).toBe("Buy groceries");
@@ -164,7 +164,7 @@ describe("CoList Branching", async () => {
         unstable_branch: { name: "shared-branch" },
       });
 
-      assert(branch1);
+      assertLoaded(branch1);
 
       branch1.$jazz.set(0, "Buy organic groceries");
       branch1.$jazz.push("Call mom");
@@ -174,7 +174,7 @@ describe("CoList Branching", async () => {
         unstable_branch: { name: "shared-branch" },
       });
 
-      assert(branch2);
+      assertLoaded(branch2);
 
       // Both branches should have the same changes
       expect(branch1[0]).toBe("Buy organic groceries");
@@ -219,7 +219,7 @@ describe("CoList Branching", async () => {
         loadAs: alice,
       });
 
-      assert(branch1);
+      assertLoaded(branch1);
 
       originalList.$jazz.set(0, "Buy organic groceries");
       originalList.$jazz.push("Call mom");
@@ -230,7 +230,7 @@ describe("CoList Branching", async () => {
         loadAs: bob,
       });
 
-      assert(branch2);
+      assertLoaded(branch2);
 
       // Both branches should have the same changes
       expect(branch1[0]).toBe("Buy groceries");
@@ -280,7 +280,7 @@ describe("CoList Branching", async () => {
         unstable_branch: { name: "double-merge-branch" },
       });
 
-      assert(branch);
+      assertLoaded(branch);
 
       branch.$jazz.set(0, "Buy organic groceries");
       branch.$jazz.push("Call mom");
@@ -324,7 +324,7 @@ describe("CoList Branching", async () => {
         loadAs: alice,
       });
 
-      assert(branch1);
+      assertLoaded(branch1);
 
       branch1.$jazz.set(0, "Buy organic groceries");
 
@@ -334,7 +334,7 @@ describe("CoList Branching", async () => {
         loadAs: bob,
       });
 
-      assert(branch2);
+      assertLoaded(branch2);
 
       branch2.$jazz.set(1, "Walk the cat");
       branch2.$jazz.push("Schedule dentist");
@@ -385,7 +385,7 @@ describe("CoList Branching", async () => {
         unstable_branch: { name: "load-by-id-branch" },
       });
 
-      assert(branch);
+      assertLoaded(branch);
 
       expect(branch.$jazz.id).toBe(originalList.$jazz.id);
     });
@@ -406,7 +406,7 @@ describe("CoList Branching", async () => {
         unstable_branch: { name: "conflict-branch" },
       });
 
-      assert(branch);
+      assertLoaded(branch);
 
       branch.$jazz.set(0, "Buy organic groceries");
       branch.$jazz.set(1, "Walk the cat");
@@ -445,7 +445,7 @@ describe("CoList Branching", async () => {
         unstable_branch: { name: "align-branch" },
       });
 
-      assert(branch);
+      assertLoaded(branch);
 
       branch.$jazz.set(0, "Buy organic groceries");
 
@@ -463,7 +463,7 @@ describe("CoList Branching", async () => {
         unstable_branch: { name: "align-branch" },
       });
 
-      assert(loadedBranch);
+      assertLoaded(loadedBranch);
 
       expect(loadedBranch[0]).toBe("Buy organic groceries");
       expect(loadedBranch[1]).toBe("Walk the dog");
@@ -503,7 +503,7 @@ describe("CoList Branching", async () => {
         unstable_branch: { name: "task-list-edit" },
       });
 
-      assert(branch);
+      assertLoaded(branch);
 
       // Make extensive changes to the branch
       branch.$jazz.set(0, {
@@ -529,7 +529,7 @@ describe("CoList Branching", async () => {
         },
       });
 
-      assert(loadedTaskList);
+      assertLoaded(loadedTaskList);
 
       // Verify original is unchanged
       expect(loadedTaskList[0]!.title).toBe("Buy groceries");
@@ -592,7 +592,7 @@ describe("CoList Branching", async () => {
         unstable_branch: { name: "subscribe-branch" },
       });
 
-      assert(branch);
+      assertLoaded(branch);
 
       const spy = vi.fn();
       branch.$jazz.subscribe(
@@ -666,7 +666,7 @@ describe("CoList Branching", async () => {
         unstable_branch: { name: "ensure-loaded-branch" },
       });
 
-      assert(branch);
+      assertLoaded(branch);
 
       branch.$jazz.set(0, {
         title: "Buy organic groceries",
@@ -737,7 +737,7 @@ describe("CoList Branching", async () => {
         unstable_branch: { name: "schema-subscribe-branch" },
       });
 
-      assert(branch);
+      assertLoaded(branch);
 
       branch.$jazz.set(0, {
         title: "Buy organic groceries",
@@ -751,7 +751,7 @@ describe("CoList Branching", async () => {
       });
 
       // Subscribe using Schema.subscribe with branch
-      const updates: co.loaded<typeof TaskList, true>[] = [];
+      const updates: co.loaded<typeof TaskList, { $each: true }>[] = [];
       const unsubscribe = TaskList.subscribe(
         originalTaskList.$jazz.id,
         {

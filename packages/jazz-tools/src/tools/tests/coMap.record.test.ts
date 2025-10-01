@@ -12,7 +12,7 @@ import { FileStream, Group, co, z } from "../exports.js";
 import { Loaded } from "../implementation/zodSchema/zodSchema.js";
 import { Account } from "../index.js";
 import { createJazzTestAccount, setupJazzTestSync } from "../testing.js";
-import { waitFor } from "./utils.js";
+import { assertLoaded, waitFor } from "./utils.js";
 import { TypeSym } from "../internal.js";
 
 const Crypto = await WasmCrypto.create();
@@ -216,7 +216,7 @@ describe("CoMap.Record", async () => {
         },
       });
 
-      assert(loadedPerson);
+      assertLoaded(loadedPerson);
       expect(loadedPerson.pet1?.name).toEqual("Rex");
       expect(loadedPerson.pet2?.name).toEqual("Fido");
     });
@@ -240,7 +240,7 @@ describe("CoMap.Record", async () => {
         },
       });
 
-      assert(loadedPerson);
+      assertLoaded(loadedPerson);
       expect(loadedPerson.pet1?.name).toEqual("Rex");
     });
 
@@ -281,8 +281,12 @@ describe("CoMap.Record", async () => {
 
       const loadedPerson = await Person.load(person.$jazz.id);
 
-      assert(loadedPerson);
+      assertLoaded(loadedPerson);
+      assert(loadedPerson.pet1);
+      assertLoaded(loadedPerson.pet1);
       expect(loadedPerson.pet1?.name).toEqual("Rex");
+      assert(loadedPerson.pet2);
+      assertLoaded(loadedPerson.pet2);
       expect(loadedPerson.pet2?.name).toEqual("Fido");
     });
 
@@ -484,9 +488,10 @@ describe("CoRecord unique methods", () => {
       "test-record",
       group.$jazz.id,
     );
+    assertLoaded(foundRecord);
     expect(foundRecord).toEqual(originalRecord);
-    expect(foundRecord?.item1).toBe(1);
-    expect(foundRecord?.item2).toBe(2);
+    expect(foundRecord.item1).toBe(1);
+    expect(foundRecord.item2).toBe(2);
   });
 
   test("loadUnique returns null for non-existent record", async () => {
@@ -512,10 +517,10 @@ describe("CoRecord unique methods", () => {
       owner: group,
     });
 
-    expect(result).not.toBeNull();
-    expect(result?.item1).toBe(1);
-    expect(result?.item2).toBe(2);
-    expect(result?.item3).toBe(3);
+    assertLoaded(result);
+    expect(result.item1).toBe(1);
+    expect(result.item2).toBe(2);
+    expect(result.item3).toBe(3);
   });
 
   test("upsertUnique updates existing record", async () => {
@@ -535,10 +540,11 @@ describe("CoRecord unique methods", () => {
       owner: group,
     });
 
+    assertLoaded(updatedRecord);
     expect(updatedRecord).toEqual(originalRecord); // Should be the same instance
-    expect(updatedRecord?.updated1).toBe(10);
-    expect(updatedRecord?.updated2).toBe(20);
-    expect(updatedRecord?.updated3).toBe(30);
+    expect(updatedRecord.updated1).toBe(10);
+    expect(updatedRecord.updated2).toBe(20);
+    expect(updatedRecord.updated3).toBe(30);
   });
 
   test("upsertUnique with CoValue items", async () => {
@@ -561,9 +567,9 @@ describe("CoRecord unique methods", () => {
       resolve: { first: true, second: true },
     });
 
-    expect(result).not.toBeNull();
-    expect(result?.first?.name).toBe("First");
-    expect(result?.second?.name).toBe("Second");
+    assertLoaded(result);
+    expect(result.first?.name).toBe("First");
+    expect(result.second?.name).toBe("Second");
   });
 
   test("findUnique returns correct ID", async () => {

@@ -10,6 +10,7 @@ import {
 import { Account, Group, cojsonInternals, z } from "../index.js";
 import {
   Loaded,
+  MaybeLoaded,
   co,
   coValueClassFromCoValueClassOrSchema,
   subscribeToCoValue,
@@ -19,7 +20,7 @@ import {
   getPeerConnectedToTestSyncServer,
   setupJazzTestSync,
 } from "../testing.js";
-import { setupAccount, waitFor } from "./utils.js";
+import { assertLoaded, setupAccount, waitFor } from "./utils.js";
 import { getSubscriptionScope } from "../subscribe/index.js";
 
 cojsonInternals.setCoValueLoadingRetryDelay(300);
@@ -85,7 +86,6 @@ describe("subscribeToCoValue", () => {
       expect(updateFn).toHaveBeenCalled();
     });
 
-    expect(result).not.toBeNull();
     expect(result?.$jazz.id).toBe(chatRoom.$jazz.id);
     expect(result?.messages).toEqual(null);
     expect(result?.name).toBe("General");
@@ -906,8 +906,8 @@ describe("subscribeToCoValue", () => {
 
     spy.mockClear();
 
-    assert(personOnWriter1);
-    assert(personOnWriter2);
+    assertLoaded(personOnWriter1);
+    assertLoaded(personOnWriter2);
     personOnWriter1.$jazz.set("name", "writer1");
     personOnWriter2.$jazz.set("name", "writer2");
 
@@ -1072,18 +1072,24 @@ describe("subscribeToCoValue", () => {
     onTestFinished(unsubscribe);
 
     await waitFor(() => {
-      expect(result?.[0]?.name).toBe("Guido");
-      expect(result?.[0]?.dog?.name).toBe("Giggino");
+      assert(result?.[0]);
+      expect(result[0].name).toBe("Guido");
+      assertLoaded(result[0].dog);
+      expect(result[0].dog.name).toBe("Giggino");
     });
 
     await waitFor(() => {
-      expect(result?.[1]?.name).toBe("John");
-      expect(result?.[1]?.dog?.name).toBe("Rex");
+      assert(result?.[1]);
+      expect(result[1].name).toBe("John");
+      assertLoaded(result[1].dog);
+      expect(result[1].dog.name).toBe("Rex");
     });
 
     await waitFor(() => {
-      expect(result?.[2]?.name).toBe("Jane");
-      expect(result?.[2]?.dog?.name).toBe("Bella");
+      assert(result?.[2]);
+      expect(result[2].name).toBe("Jane");
+      assertLoaded(result[2].dog);
+      expect(result[2].dog.name).toBe("Bella");
     });
 
     list[0]!.$jazz.set("dog", Dog.create({ name: "Ninja" }));
@@ -1095,7 +1101,9 @@ describe("subscribeToCoValue", () => {
     list[1]!.$jazz.set("dog", Dog.create({ name: "Pinkie" }, everyone));
 
     await waitFor(() => {
-      expect(result?.[1]?.dog?.name).toBe("Pinkie");
+      assert(result?.[1]);
+      assertLoaded(result[1].dog);
+      expect(result[1].dog.name).toBe("Pinkie");
     });
 
     expect(onUnavailable).not.toHaveBeenCalled();
@@ -1168,18 +1176,24 @@ describe("subscribeToCoValue", () => {
     onTestFinished(unsubscribe);
 
     await waitFor(() => {
-      expect(result?.[0]?.name).toBe("Guido");
-      expect(result?.[0]?.dog?.name).toBe("Giggino");
+      assert(result?.[0]);
+      expect(result[0].name).toBe("Guido");
+      assertLoaded(result[0].dog);
+      expect(result[0].dog.name).toBe("Giggino");
     });
 
     await waitFor(() => {
-      expect(result?.[1]?.name).toBe("John");
-      expect(result?.[1]?.dog?.name).toBe("Rex");
+      assert(result?.[1]);
+      expect(result[1].name).toBe("John");
+      assertLoaded(result[1].dog);
+      expect(result[1].dog.name).toBe("Rex");
     });
 
     await waitFor(() => {
-      expect(result?.[2]?.name).toBe("Jane");
-      expect(result?.[2]?.dog?.name).toBe("Bella");
+      assert(result?.[2]);
+      expect(result[2].name).toBe("Jane");
+      assertLoaded(result[2].dog);
+      expect(result[2].dog.name).toBe("Bella");
     });
 
     expect(onUnavailable).not.toHaveBeenCalled();
@@ -1312,7 +1326,7 @@ describe("getSubscriptionScope", () => {
   describe("when the coValue already has a subscription scope", () => {
     it("returns that subscription scope", async () => {
       const loadedPerson = await Person.load(person.$jazz.id);
-      assert(loadedPerson);
+      assertLoaded(loadedPerson);
       const subscriptionScope = loadedPerson.$jazz._subscriptionScope;
       expect(subscriptionScope).toBeDefined();
       expect(getSubscriptionScope(loadedPerson)).toBe(subscriptionScope);

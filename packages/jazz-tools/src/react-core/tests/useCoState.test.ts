@@ -11,6 +11,7 @@ import {
   co,
   z,
 } from "jazz-tools";
+import { assertLoaded } from "jazz-tools/testing";
 import { assert, beforeEach, describe, expect, expectTypeOf, it } from "vitest";
 import { useCoState } from "../index.js";
 import { createJazzTestAccount, setupJazzTestSync } from "../testing.js";
@@ -491,7 +492,7 @@ describe("useCoState", () => {
       loadAs: john,
     });
 
-    assert(janeOnJohn);
+    assertLoaded(janeOnJohn);
 
     const group = Group.create(john);
     group.addMember(janeOnJohn, "reader");

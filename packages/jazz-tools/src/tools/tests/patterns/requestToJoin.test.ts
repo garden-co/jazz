@@ -5,6 +5,7 @@ import {
   linkAccounts,
   setupJazzTestSync,
 } from "../../testing";
+import { assertLoaded } from "../utils.js";
 
 const RequestToJoin = co.map({
   account: Account,
@@ -98,9 +99,7 @@ async function sendRequestToJoin(organizationId: string, account: Account) {
     loadAs: account,
   });
 
-  if (!organization) {
-    throw new Error("RequestsMap not found");
-  }
+  assertLoaded(organization);
 
   const group = Group.create(account);
   group.addMember(organization.adminsGroup);
@@ -130,9 +129,7 @@ async function approveRequest(
     resolve: { statuses: true, requests: { $each: true }, mainGroup: true },
   });
 
-  if (!organization) {
-    throw new Error("Organization not found");
-  }
+  assertLoaded(organization);
 
   const request = organization.requests[user.$jazz.id];
 
@@ -165,9 +162,7 @@ async function rejectRequest(
     resolve: { statuses: true, requests: { $each: true } },
   });
 
-  if (!organization) {
-    throw new Error("Organization not found");
-  }
+  assertLoaded(organization);
 
   const request = organization.requests[user.$jazz.id];
 
@@ -201,7 +196,7 @@ describe("Request to join", () => {
       },
     });
 
-    assert(organization);
+    assertLoaded(organization);
 
     await sendRequestToJoin(organizationId, user1);
 
@@ -213,7 +208,7 @@ describe("Request to join", () => {
         loadAs: user1,
       });
 
-    assert(projectsOnUser);
+    assertLoaded(projectsOnUser);
 
     projectsOnUser.$jazz.push("project1");
 
@@ -232,7 +227,7 @@ describe("Request to join", () => {
       },
     });
 
-    assert(organization);
+    assertLoaded(organization);
 
     await sendRequestToJoin(organizationId, user1);
     await rejectRequest(organizationId, admin1, user1);
@@ -257,12 +252,12 @@ describe("Request to join", () => {
       resolve: { requests: { $each: true }, statuses: { $each: true } },
     });
 
-    assert(organization);
+    assertLoaded(organization);
     expect(organization.statuses[user1.$jazz.id]).toBe("approved");
     const requestOnAdmin2 = await RequestToJoin.load(request.$jazz.id, {
       loadAs: admin2,
     });
-    assert(requestOnAdmin2);
+    assertLoaded(requestOnAdmin2);
     expect(requestOnAdmin2.status).toBe("approved");
   });
 

@@ -1,5 +1,5 @@
 import { BetterAuthDbSchema, FieldAttribute } from "better-auth/db";
-import { Group, co, z } from "jazz-tools";
+import { Group, co, z, CoValueLoadingState } from "jazz-tools";
 
 type TableRow = co.Map<any>;
 export type TableItem = co.loaded<TableRow>;
@@ -55,7 +55,7 @@ export function createJazzSchema(schema: BetterAuthDbSchema): JazzSchema {
         },
       );
 
-      if (!dbRoot) {
+      if (dbRoot.$jazzState !== CoValueLoadingState.LOADED) {
         // Create a group for the first time
         // it will be the owner of the all tables and data
         const adminGroup = Group.create({ owner: account });

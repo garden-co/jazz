@@ -1,5 +1,11 @@
 import type { CoID } from "cojson";
-import { Account, FileStream, ImageDefinition } from "jazz-tools";
+import {
+  Account,
+  CoValueLoadingState,
+  FileStream,
+  ImageDefinition,
+  MaybeLoaded,
+} from "jazz-tools";
 
 export function highestResAvailable(
   image: ImageDefinition,
@@ -15,7 +21,7 @@ export function highestResAvailable(
     });
 
   if (availableSizes.length === 0) {
-    return image.original
+    return image.original.$jazzState === CoValueLoadingState.LOADED
       ? {
           width: image.originalSize[0],
           height: image.originalSize[1],
@@ -40,19 +46,20 @@ export function highestResAvailable(
   // note: `toReversed` is not available in react-native.
   const bestLoaded = [...sortedSizes]
     .reverse()
-    .find((el) => el.isLoaded && image[el.size[2]]?.getChunks());
+    .find((el) => el.isLoaded && getImageChunks(image[el.size[2]]));
 
   // if I can't find a good match, let's use the highest resolution
   const bestTarget =
     sortedSizes.find((el) => el.match > 0.95) || sortedSizes.at(-1);
 
   // if the best target is already loaded, we are done
-  if (image[bestTarget!.size[2]]?.getChunks()) {
-    return image[bestTarget!.size[2]]
+  const bestLoadedTargetImage = image[bestTarget!.size[2]];
+  if (getImageChunks(bestLoadedTargetImage)) {
+    return bestLoadedTargetImage?.$jazzState === CoValueLoadingState.LOADED
       ? {
           width: bestTarget!.size[0],
           height: bestTarget!.size[1],
-          image: image[bestTarget!.size[2]]!,
+          image: bestLoadedTargetImage,
         }
       : null;
   }
@@ -60,12 +67,13 @@ export function highestResAvailable(
   // if the best already loaded is not the best target
   // let's trigger the load of the best target
   if (bestLoaded) {
-    image[bestTarget!.size[2]]?.getChunks();
-    return image[bestLoaded.size[2]]
+    const bestTargetImage = image[bestTarget!.size[2]];
+    getImageChunks(bestTargetImage);
+    return bestTargetImage?.$jazzState === CoValueLoadingState.LOADED
       ? {
           width: bestLoaded.size[0],
           height: bestLoaded.size[1],
-          image: image[bestLoaded.size[2]]!,
+          image: bestTargetImage,
         }
       : null;
   }
@@ -73,11 +81,18 @@ export function highestResAvailable(
   // if nothing is loaded, then start fetching all the images till the best
   for (let size of sortedSizes) {
     if (size.match <= bestTarget!.match) {
-      image[size.size[2]]?.getChunks();
+      getImageChunks(image[size.size[2]]);
     }
   }
 
   return null;
+}
+
+function getImageChunks(file: MaybeLoaded<FileStream> | undefined) {
+  if (!file || file.$jazzState !== CoValueLoadingState.LOADED) {
+    return undefined;
+  }
+  return file.getChunks();
 }
 
 function sizesMatchWanted(
@@ -117,7 +132,7 @@ export async function loadImage(
       },
     });
 
-    if (image === null || image.original === null) {
+    if (image.$jazzState !== CoValueLoadingState.LOADED) {
       return null;
     }
 
@@ -135,7 +150,7 @@ export async function loadImage(
 
   const loadedOriginal = await FileStream.load(imageOrId.original.$jazz.id);
 
-  if (!loadedOriginal) {
+  if (loadedOriginal.$jazzState !== CoValueLoadingState.LOADED) {
     console.warn("Unable to find the original image");
     return null;
   }
@@ -200,7 +215,7 @@ export async function loadImageBySize(
 
   const loadedFile = await FileStream.load(file.id);
 
-  if (!loadedFile) {
+  if (loadedFile.$jazzState !== CoValueLoadingState.LOADED) {
     return null;
   }
 

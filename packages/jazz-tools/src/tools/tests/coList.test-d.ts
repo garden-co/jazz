@@ -1,7 +1,8 @@
 import { assert, describe, expectTypeOf, test } from "vitest";
 import { Group, co, z } from "../exports.js";
 import { Account } from "../index.js";
-import { CoList, CoMap, Loaded } from "../internal.js";
+import { CoList, CoMap, Loaded, MaybeLoaded } from "../internal.js";
+import { assertLoaded } from "./utils.js";
 
 describe("CoList", () => {
   describe("init", () => {
@@ -199,7 +200,7 @@ describe("CoList", () => {
         },
       });
 
-      type ExpectedType = ReadonlyArray<Loaded<typeof Dog>> | null;
+      type ExpectedType = MaybeLoaded<ReadonlyArray<Loaded<typeof Dog>>>;
 
       function matches(value: ExpectedType) {
         return value;
@@ -207,7 +208,7 @@ describe("CoList", () => {
 
       matches(loadedList);
 
-      assert(loadedList);
+      assertLoaded(loadedList);
       const firstDog = loadedList[0];
       assert(firstDog);
       expectTypeOf(firstDog.name).toEqualTypeOf<string>();
@@ -232,7 +233,7 @@ describe("CoList", () => {
         },
       });
 
-      type ExpectedType = ReadonlyArray<Loaded<typeof Dog> | null> | null;
+      type ExpectedType = MaybeLoaded<ReadonlyArray<Loaded<typeof Dog> | null>>;
 
       function matches(value: ExpectedType) {
         return value;
@@ -265,9 +266,9 @@ describe("CoList", () => {
         },
       });
 
-      type ExpectedType = ReadonlyArray<
-        ReadonlyArray<Loaded<typeof Dog>>
-      > | null;
+      type ExpectedType = MaybeLoaded<
+        ReadonlyArray<ReadonlyArray<Loaded<typeof Dog>>>
+      >;
 
       function matches(value: ExpectedType) {
         return value;
@@ -275,7 +276,7 @@ describe("CoList", () => {
 
       matches(loadedList);
 
-      assert(loadedList);
+      assertLoaded(loadedList);
       const firstList = loadedList[0];
       assert(firstList);
       const firstDog = firstList[0];
@@ -304,23 +305,24 @@ describe("CoList", () => {
         ],
       });
 
+      // TODO this is being inferred as Unloaded<never>!
       const loadedPerson = await Person.load(person.$jazz.id, {
         resolve: { dogs: { $onError: null } },
       });
 
-      type ExpectedType =
-        | ({
-            name: string;
-            age: number;
-            dogs: CoList<
-              | ({
-                  name: string;
-                  breed: string;
-                } & CoMap)
-              | null
-            > | null;
-          } & CoMap)
-        | null;
+      type ExpectedType = MaybeLoaded<
+        {
+          name: string;
+          age: number;
+          dogs: CoList<
+            | ({
+                name: string;
+                breed: string;
+              } & CoMap)
+            | null
+          > | null;
+        } & CoMap
+      >;
 
       function matches(value: ExpectedType) {
         return value;

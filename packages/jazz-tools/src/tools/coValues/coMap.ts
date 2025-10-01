@@ -10,12 +10,15 @@ import {
 } from "cojson";
 import {
   AnonymousJazzAgent,
+  AsLoaded,
+  LoadedAndRequired,
   CoFieldInit,
   CoValue,
   CoValueClass,
   getCoValueOwner,
   Group,
   ID,
+  MaybeLoaded,
   PartialOnUndefined,
   RefEncoded,
   RefIfCoValue,
@@ -34,7 +37,6 @@ import {
   CoValueBase,
   CoValueJazzApi,
   ItemsSym,
-  NotNull,
   Ref,
   RegisteredSchemas,
   SchemaInit,
@@ -374,7 +376,7 @@ export class CoMap extends CoValueBase implements CoValue {
       loadAs?: Account | AnonymousJazzAgent;
       skipRetry?: boolean;
     },
-  ): Promise<Resolved<M, R> | null> {
+  ): Promise<MaybeLoaded<Resolved<M, R>>> {
     return loadCoValueWithoutMe(this, id, options);
   }
 
@@ -496,17 +498,21 @@ export class CoMap extends CoValueBase implements CoValue {
       owner: Account | Group;
       resolve?: RefsToResolveStrict<M, R>;
     },
-  ): Promise<Resolved<M, R> | null> {
+  ): Promise<MaybeLoaded<Resolved<M, R>>> {
     const mapId = CoMap._findUnique(
       options.unique,
       options.owner.$jazz.id,
       options.owner.$jazz.loadedAs,
     );
-    let map: Resolved<M, R> | null = await loadCoValueWithoutMe(this, mapId, {
-      ...options,
-      loadAs: options.owner.$jazz.loadedAs,
-      skipRetry: true,
-    });
+    let map: MaybeLoaded<Resolved<M, R>> = await loadCoValueWithoutMe(
+      this,
+      mapId,
+      {
+        ...options,
+        loadAs: options.owner.$jazz.loadedAs,
+        skipRetry: true,
+      },
+    );
     if (!map) {
       const instance = new this();
       map = CoMap._createCoMap(instance, options.value, {
@@ -543,7 +549,7 @@ export class CoMap extends CoValueBase implements CoValue {
       resolve?: RefsToResolveStrict<M, R>;
       loadAs?: Account | AnonymousJazzAgent;
     },
-  ): Promise<Resolved<M, R> | null> {
+  ): Promise<MaybeLoaded<Resolved<M, R>>> {
     return loadCoValueWithoutMe(
       this,
       CoMap._findUnique(unique, ownerID, options?.loadAs),
@@ -757,12 +763,12 @@ class CoMapJazzApi<M extends CoMap> extends CoValueJazzApi<M> {
    **/
   get refs(): Simplify<
     {
-      [Key in CoKeys<M> as NonNullable<M[Key]> extends CoValue
+      [Key in CoKeys<M> as LoadedAndRequired<M[Key]> extends CoValue
         ? Key
         : never]?: RefIfCoValue<M[Key]>;
     } & {
       // Non-loaded CoValue refs (i.e. refs with type CoValue | null) are still required refs
-      [Key in CoKeys<M> as NotNull<M[Key]> extends CoValue
+      [Key in CoKeys<M> as AsLoaded<M[Key]> extends CoValue
         ? Key
         : never]: RefIfCoValue<M[Key]>;
     }
