@@ -1,6 +1,6 @@
 # Vector search example with Jazz and Transformers.js
 
-Live version: [https://vector-search.jazz.tools](https://vector-search.jazz.tools)
+Live version: [https://vector-search.demo.jazz.tools](https://vector-search.demo.jazz.tools)
 
 **A simple demo of vector search: personal journal app that lets you retrieve relatable journal entries.** 
 
