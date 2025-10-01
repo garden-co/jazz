@@ -162,7 +162,7 @@ describe("Group.removeMember", () => {
       expect(loadedGroup.roleOf(reader.accountID)).toEqual("reader");
       expect(loadedGroup.roleOf(writer.accountID)).toEqual("writer");
       expect(loadedGroup.roleOf(writeOnly.accountID)).toEqual("writeOnly");
-      expect(loadedGroup.roleOf(admin.accountID)).toEqual("admin");
+      expect(loadedGroup.roleOf(admin.accountID)).toEqual("super-admin");
 
       await loadedGroup.core.waitForSync();
 
@@ -176,7 +176,7 @@ describe("Group.removeMember", () => {
         (await loadCoValueOrFail(writeOnly.node, group.id)).myRole(),
       ).toEqual("writeOnly");
       expect((await loadCoValueOrFail(admin.node, group.id)).myRole()).toEqual(
-        "admin",
+        "super-admin",
       );
     });
   }
@@ -202,12 +202,12 @@ describe("Group.removeMember", () => {
       await loadCoValueOrFail(client.node, admin.accountID),
     );
 
-    expect(loadedGroup.roleOf(admin.accountID)).toEqual("admin");
+    expect(loadedGroup.roleOf(admin.accountID)).toEqual("super-admin");
 
     await loadedGroup.core.waitForSync();
 
     expect((await loadCoValueOrFail(admin.node, group.id)).myRole()).toEqual(
-      "admin",
+      "super-admin",
     );
   });
 

@@ -614,6 +614,7 @@ export class LocalNode {
     const existingRole = group.get(account.id);
 
     if (
+      existingRole === "super-admin" ||
       existingRole === "admin" ||
       (existingRole === "writer" && inviteRole === "writerInvite") ||
       (existingRole === "writer" && inviteRole === "reader") ||
@@ -732,7 +733,7 @@ export class LocalNode {
 
     const group = expectGroup(groupCoValue.getCurrentContent());
 
-    group.set(account.id, "admin", "trusting");
+    group.set(account.id, "super-admin", "trusting");
 
     const readKey = this.crypto.newRandomKeySecret();
 

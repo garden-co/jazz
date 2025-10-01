@@ -25,6 +25,13 @@ function expectGroup(content: RawCoValue): RawGroup {
   return content as RawGroup;
 }
 
+test("User is super-admin of a group he created", () => {
+  const node = nodeWithRandomAgentAndSessionID();
+  const group = node.createGroup();
+
+  expect(group.myRole()).toEqual("super-admin");
+});
+
 test("Can create a RawCoMap in a group", () => {
   const node = nodeWithRandomAgentAndSessionID();
 
