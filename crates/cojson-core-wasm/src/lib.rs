@@ -6,9 +6,6 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use wasm_bindgen::prelude::*;
 
-mod error;
-pub use error::CryptoError;
-
 pub mod hash {
     pub mod blake3;
     pub use blake3::*;
@@ -18,14 +15,14 @@ pub mod crypto {
     pub mod ed25519;
     pub mod encrypt;
     pub mod seal;
-    pub mod sign;
+    pub mod signature;
     pub mod x25519;
     pub mod xsalsa20;
 
     pub use ed25519::*;
     pub use encrypt::*;
     pub use seal::*;
-    pub use sign::*;
+    pub use signature::*;
     pub use x25519::*;
     pub use xsalsa20::*;
 }
@@ -68,7 +65,7 @@ impl SessionLog {
     pub fn new(co_id: String, session_id: String, signer_id: Option<String>) -> SessionLog {
         let co_id = CoID(co_id);
         let session_id = SessionID(session_id);
-        let signer_id = signer_id.map(|id| SignerID(id));
+        let signer_id = signer_id.map(SignerID);
 
         let internal = SessionLogInternal::new(co_id, session_id, signer_id);
 

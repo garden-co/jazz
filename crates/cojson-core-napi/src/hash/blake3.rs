@@ -1,5 +1,6 @@
 use napi::bindgen_prelude::Uint8Array;
 use napi_derive::napi;
+use cojson_core::hash;
 
 /// Generate a 24-byte nonce from input material using BLAKE3.
 /// - `nonce_material`: Raw bytes to derive the nonce from
@@ -7,9 +8,7 @@ use napi_derive::napi;
 /// This function is deterministic - the same input will produce the same nonce.
 #[napi]
 pub fn generate_nonce(nonce_material: &[u8]) -> Uint8Array {
-  let mut hasher = blake3::Hasher::new();
-  hasher.update(nonce_material);
-  hasher.finalize().as_bytes()[..24].into()
+  hash::blake3::generate_nonce(nonce_material).into()
 }
 
 /// Hash data once using BLAKE3.
@@ -18,9 +17,7 @@ pub fn generate_nonce(nonce_material: &[u8]) -> Uint8Array {
 /// This is the simplest way to compute a BLAKE3 hash of a single piece of data.
 #[napi]
 pub fn blake3_hash_once(data: &[u8]) -> Uint8Array {
-  let mut hasher = blake3::Hasher::new();
-  hasher.update(data);
-  hasher.finalize().as_bytes().into()
+  hash::blake3::blake3_hash_once(data).into()
 }
 
 /// Hash data once using BLAKE3 with a context prefix.
@@ -30,10 +27,7 @@ pub fn blake3_hash_once(data: &[u8]) -> Uint8Array {
 /// This is useful for domain separation - the same data hashed with different contexts will produce different outputs.
 #[napi]
 pub fn blake3_hash_once_with_context(data: &[u8], context: &[u8]) -> Uint8Array {
-  let mut hasher = blake3::Hasher::new();
-  hasher.update(context);
-  hasher.update(data);
-  hasher.finalize().as_bytes().into()
+  hash::blake3::blake3_hash_once_with_context(data, context).into()
 }
 
 #[napi]

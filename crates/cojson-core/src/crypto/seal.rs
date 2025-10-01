@@ -21,7 +21,7 @@ pub fn seal(
   sender_secret: &str,
   recipient_id: &str,
   nonce_material: &[u8],
-) -> Result<Vec<u8>, CryptoError> {
+) -> Result<Box<[u8]>, CryptoError> {
   // Decode the base58 sender secret (removing the "sealerSecret_z" prefix)
   let sender_secret =
     sender_secret
@@ -48,7 +48,7 @@ pub fn seal(
   let shared_secret = x25519_diffie_hellman(&sender_private_key, &recipient_public_key)?;
 
   // Encrypt message using XSalsa20-Poly1305
-  Ok(encrypt_xsalsa20_poly1305(&shared_secret, &nonce, message)?.into())
+  encrypt_xsalsa20_poly1305(&shared_secret, &nonce, message)
 }
 
 /// Internal function to unseal a message using X25519 + XSalsa20-Poly1305.
