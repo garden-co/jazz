@@ -71,13 +71,17 @@ export class JazzContextManager<
   protected value: JazzContextType<Acc> | undefined;
   protected context: PlatformSpecificContext<Acc> | undefined;
   protected props: P | undefined;
-  protected authSecretStorage = new AuthSecretStorage();
+  protected authSecretStorage;
   protected keepContextOpen = false;
   contextPromise: Promise<void> | undefined;
   protected authenticatingAccountID: string | null = null;
 
-  constructor(opts?: { useAnonymousFallback?: boolean }) {
+  constructor(opts?: {
+    useAnonymousFallback?: boolean;
+    authSecretStorageKey?: string;
+  }) {
     KvStoreContext.getInstance().initialize(this.getKvStore());
+    this.authSecretStorage = new AuthSecretStorage(opts?.authSecretStorageKey);
 
     if (opts?.useAnonymousFallback) {
       this.value = getAnonymousFallback();

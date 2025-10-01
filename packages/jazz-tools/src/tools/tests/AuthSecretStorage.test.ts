@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthSecretStorage } from "../auth/AuthSecretStorage";
 import { InMemoryKVStore } from "../auth/InMemoryKVStore.js";
 import KvStoreContext from "../auth/KvStoreContext";
@@ -425,6 +425,64 @@ describe("AuthSecretStorage", () => {
         await authSecretStorage.clearWithoutNotify();
 
         expect(handler).not.toHaveBeenCalled();
+      });
+    });
+  });
+
+  describe("configurable secret storage key", () => {
+    const KEY = "test-auth-secret";
+    beforeEach(() => {
+      kvStore.clearAll();
+      authSecretStorage = new AuthSecretStorage(KEY);
+    });
+
+    afterAll(() => {
+      // Restore the default storage key
+      authSecretStorage = new AuthSecretStorage();
+    });
+
+    it("should throw an error if the storage key is empty", () => {
+      expect(() => new AuthSecretStorage("")).toThrow(
+        "Too small: expected string to have >=1 characters",
+      );
+    });
+
+    it("should use the configured storage key on get", async () => {
+      const credentials = {
+        accountID: "test123",
+        secretSeed: [1, 2, 3],
+        accountSecret: "secret123",
+        provider: "anonymous",
+      };
+      await kvStore.set(KEY, JSON.stringify(credentials));
+
+      const result = await authSecretStorage.get();
+
+      expect(result).toEqual({
+        accountID: "test123",
+        secretSeed: new Uint8Array([1, 2, 3]),
+        accountSecret: "secret123",
+        provider: "anonymous",
+      });
+    });
+
+    it("should use the configured storage key on set", async () => {
+      const payload = {
+        accountID: "test123" as ID<Account>,
+        secretSeed: new Uint8Array([1, 2, 3]),
+        accountSecret:
+          "secret123" as `sealerSecret_z${string}/signerSecret_z${string}`,
+        provider: "passphrase",
+      };
+
+      await authSecretStorage.set(payload);
+
+      const stored = JSON.parse((await kvStore.get(KEY))!);
+      expect(stored).toEqual({
+        accountID: "test123",
+        secretSeed: [1, 2, 3],
+        accountSecret: "secret123",
+        provider: "passphrase",
       });
     });
   });

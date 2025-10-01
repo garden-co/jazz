@@ -541,6 +541,16 @@ describe("ContextManager", () => {
     ).rejects.toThrow("Props required");
   });
 
+  describe("configurable storage key", () => {
+    test("uses the configured storage key", async () => {
+      const KEY = "test-auth-secret";
+      const manager = new TestJazzContextManager<Account>({
+        authSecretStorageKey: KEY,
+      });
+      expect(manager.getAuthSecretStorage().getStorageKey()).toBe(KEY);
+    });
+  });
+
   describe("Race condition handling", () => {
     test("prevents concurrent authentication attempts", async () => {
       const account = await createJazzTestAccount();
