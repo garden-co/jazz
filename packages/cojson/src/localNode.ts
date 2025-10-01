@@ -447,7 +447,7 @@ export class LocalNode {
 
   /**
    * Loads a CoValue's content, syncing from peers as necessary and resolving the returned
-   * promise once a first version has been loaded. See `coValue.subscribe()` and `node.useTelepathicData()`
+   * promise once a first version has been loaded. See `coValue.subscribe()`
    * for listening to subsequent updates to the CoValue.
    *
    * @category 3. Low-level

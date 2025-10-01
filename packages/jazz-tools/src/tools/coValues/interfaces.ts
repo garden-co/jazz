@@ -62,7 +62,7 @@ export interface CoValue {
 
   /** @category Stringifying & Inspection */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  toJSON(key?: string, seenAbove?: ID<CoValue>[]): any[] | object | string;
+  toJSON(seenAbove?: ID<CoValue>[]): any[] | object | string;
   /** @category Stringifying & Inspection */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   [inspect](): any;

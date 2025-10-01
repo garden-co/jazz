@@ -14,12 +14,18 @@ import { co, z } from "jazz-tools";
 export const Task = co.map({
   done: z.boolean(),
   text: co.plainText(),
+  priority: z.number(),
 });
+
+export const MIN_PRIORITY = 0;
+export const MAX_PRIORITY = 100;
+
+const TaskList = co.list(Task);
 
 /** Our top level object: a project with a title, referencing a list of tasks */
 export const TodoProject = co.map({
   title: z.string(),
-  tasks: co.list(Task),
+  tasks: TaskList,
 });
 
 /** The account root is an app-specific per-user private `CoMap`

@@ -1,4 +1,4 @@
-import type { LocalNode, RawCoValue } from "cojson";
+import { type LocalNode, type RawCoValue } from "cojson";
 import {
   CoFeed,
   CoList,
@@ -14,8 +14,18 @@ import {
 import { applyCoValueMigrations } from "../lib/migration.js";
 import { CoValueCoreSubscription } from "./CoValueCoreSubscription.js";
 import { JazzError, type JazzErrorIssue } from "./JazzError.js";
-import type { BranchDefinition, SubscriptionValue, Unloaded } from "./types.js";
+import type {
+  BranchDefinition,
+  MaybeLoaded,
+  SubscriptionValue,
+} from "./types.js";
 import { createCoValue, myRoleForRawValue } from "./utils.js";
+import {
+  computeQueryView,
+  parseQueryModifiers,
+  queryModifierFields,
+  QueryModifiers,
+} from "./queryModifiers.js";
 
 export class SubscriptionScope<D extends CoValue> {
   childNodes = new Map<string, SubscriptionScope<CoValue>>();
@@ -31,7 +41,7 @@ export class SubscriptionScope<D extends CoValue> {
    * Autoloaded child ids that are unloaded
    */
   pendingAutoloadedChildren: Set<string> = new Set();
-  value: SubscriptionValue<D, any> | Unloaded;
+  value: MaybeLoaded<D, any>;
   childErrors: Map<string, JazzError> = new Map();
   validationErrors: Map<string, JazzError> = new Map();
   errorFromChildren: JazzError | undefined;
@@ -49,6 +59,9 @@ export class SubscriptionScope<D extends CoValue> {
 
   silenceUpdates = false;
 
+  private queryModifiers: QueryModifiers = {};
+  private cachedQueryView: Record<number, number> | null = null;
+
   constructor(
     public node: LocalNode,
     resolve: RefsToResolve<D>,
@@ -60,6 +73,9 @@ export class SubscriptionScope<D extends CoValue> {
   ) {
     this.resolve = resolve;
     this.value = { type: "unloaded", id };
+
+    this.queryModifiers = parseQueryModifiers(this.resolve);
+    const queryFields = queryModifierFields(this.queryModifiers);
 
     let lastUpdate: RawCoValue | "unavailable" | undefined;
     this.subscription = new CoValueCoreSubscription(
@@ -73,7 +89,11 @@ export class SubscriptionScope<D extends CoValue> {
           return;
         }
 
-        // Need all these checks because the migration can trigger new syncronous updates
+        if (queryFields.length > 0 && value !== "unavailable") {
+          this.requestCoListChildrenLoad();
+        }
+
+        // Need all these checks because the migration can trigger new synchronous updates
         //
         // We want to:
         // - Run the migration only once
@@ -104,14 +124,14 @@ export class SubscriptionScope<D extends CoValue> {
     );
   }
 
-  updateValue(value: SubscriptionValue<D, any>) {
+  private updateValue(value: SubscriptionValue<D, any>) {
     this.value = value;
 
     // Flags that the value has changed and we need to trigger an update
     this.dirty = true;
   }
 
-  handleUpdate(update: RawCoValue | "unavailable") {
+  private handleUpdate(update: RawCoValue | "unavailable") {
     if (update === "unavailable") {
       if (this.value.type === "unloaded") {
         this.updateValue(
@@ -171,9 +191,7 @@ export class SubscriptionScope<D extends CoValue> {
         // has been updated and the coValues that don't update the totalValidTransactions value (e.g. FileStream)
         this.value.value.$jazz.raw !== update;
 
-      if (this.loadChildren()) {
-        this.updateValue(createCoValue(this.schema, update, this));
-      } else if (hasChanged) {
+      if (this.loadChildren() || hasChanged) {
         this.updateValue(createCoValue(this.schema, update, this));
       }
     }
@@ -184,7 +202,7 @@ export class SubscriptionScope<D extends CoValue> {
     this.triggerUpdate();
   }
 
-  computeChildErrors() {
+  private computeChildErrors() {
     let issues: JazzErrorIssue[] = [];
     let errorType: JazzError["type"] = "unavailable";
 
@@ -232,7 +250,7 @@ export class SubscriptionScope<D extends CoValue> {
 
   handleChildUpdate = (
     id: string,
-    value: SubscriptionValue<any, any> | Unloaded,
+    value: MaybeLoaded<any, any>,
     key?: string,
   ) => {
     if (value.type === "unloaded") {
@@ -266,7 +284,7 @@ export class SubscriptionScope<D extends CoValue> {
     this.triggerUpdate();
   };
 
-  shouldSendUpdates() {
+  private shouldSendUpdates() {
     if (this.value.type === "unloaded") return false;
 
     // If the value is in error, we send the update regardless of the children statuses
@@ -304,7 +322,7 @@ export class SubscriptionScope<D extends CoValue> {
     return undefined;
   }
 
-  isStreaming() {
+  private isStreaming() {
     if (this.value.type !== "loaded") {
       return false;
     }
@@ -312,7 +330,7 @@ export class SubscriptionScope<D extends CoValue> {
     return this.value.value.$jazz.raw.core.verified.isStreaming();
   }
 
-  isFileStream() {
+  private isFileStream() {
     if (this.value.type !== "loaded") {
       return false;
     }
@@ -322,7 +340,7 @@ export class SubscriptionScope<D extends CoValue> {
     );
   }
 
-  triggerUpdate() {
+  private triggerUpdate() {
     if (!this.shouldSendUpdates()) return;
     if (!this.dirty) return;
     if (this.subscribers.size === 0) return;
@@ -337,6 +355,9 @@ export class SubscriptionScope<D extends CoValue> {
       this.subscribers.forEach((listener) => listener(value));
     }
 
+    // Invalidation could be more granular: if a CoList element is updated, the cached query view
+    // should only be invalidated if the update affected a field that is used by the resolve query
+    this.cachedQueryView = null;
     this.dirty = false;
   }
 
@@ -354,7 +375,7 @@ export class SubscriptionScope<D extends CoValue> {
     this.triggerUpdate();
   }
 
-  subscribeToKey(key: string) {
+  subscribeToKey(key: string): void {
     if (this.resolve === true || !this.resolve) {
       this.resolve = {};
     }
@@ -484,7 +505,19 @@ export class SubscriptionScope<D extends CoValue> {
     this.silenceUpdates = false;
   }
 
-  loadChildren() {
+  private requestCoListChildrenLoad() {
+    if (this.resolve === true || !this.resolve) {
+      this.resolve = {};
+    }
+    this.resolve["$each"] ||= { $onError: null };
+  }
+
+  /**
+   * Loads the children of the current value.
+   *
+   * @returns true if the list of children to load has changed.
+   */
+  private loadChildren(): boolean {
     const { resolve } = this;
 
     if (this.value.type !== "loaded") {
@@ -600,7 +633,11 @@ export class SubscriptionScope<D extends CoValue> {
     return hasChanged;
   }
 
-  loadCoMapKey(map: CoMap, key: string, depth: Record<string, any> | true) {
+  private loadCoMapKey(
+    map: CoMap,
+    key: string,
+    depth: Record<string, any> | true,
+  ) {
     if (key === "$onError") {
       return undefined;
     }
@@ -647,7 +684,11 @@ export class SubscriptionScope<D extends CoValue> {
     return undefined;
   }
 
-  loadCoListKey(list: CoList, key: string, depth: Record<string, any> | true) {
+  private loadCoListKey(
+    list: CoList,
+    key: string,
+    depth: Record<string, any> | true,
+  ) {
     const descriptor = list.$jazz.getItemsDescriptor();
 
     if (!descriptor || !isRefEncoded(descriptor)) {
@@ -685,7 +726,7 @@ export class SubscriptionScope<D extends CoValue> {
     return undefined;
   }
 
-  loadChildNode(
+  private loadChildNode(
     id: string,
     query: RefsToResolve<any>,
     descriptor: RefEncoded<any>,
@@ -739,6 +780,30 @@ export class SubscriptionScope<D extends CoValue> {
     if (this.closed) {
       child.destroy();
     }
+  }
+
+  /**
+   * A CoList's items can be filtered, sorted and paginated when loading it.
+   * This means the indexes in the CoList may differ from the indexes in the
+   * underlying RawCoList. The query view is a mapping used to link the indexes
+   * in the CoList query view to the indexes in the RawCoList.
+   * @internal
+   */
+  get queryView(): Record<string, number> | null {
+    if (
+      this.value.type !== "loaded" ||
+      this.value.value[TypeSym] !== "CoList"
+    ) {
+      return null;
+    }
+
+    const coList = this.value.value as CoList;
+
+    if (Object.keys(this.queryModifiers).length === 0) {
+      return null;
+    }
+    this.cachedQueryView ||= computeQueryView(coList, this.queryModifiers);
+    return this.cachedQueryView;
   }
 
   destroy() {

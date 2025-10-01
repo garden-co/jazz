@@ -20,20 +20,14 @@ export class CoValueCoreSubscription {
   private branchOwnerId?: RawCoID;
   private branchName?: string;
   private source: CoValueCore;
-  private localNode: LocalNode;
-  private listener: (value: RawCoValue | "unavailable") => void;
-  private skipRetry?: boolean;
 
   constructor(
-    localNode: LocalNode,
+    private localNode: LocalNode,
     id: string,
-    listener: (value: RawCoValue | "unavailable") => void,
-    skipRetry?: boolean,
+    private listener: (value: RawCoValue | "unavailable") => void,
+    private skipRetry?: boolean,
     branch?: BranchDefinition,
   ) {
-    this.localNode = localNode;
-    this.listener = listener;
-    this.skipRetry = skipRetry;
     this.branchName = branch?.name;
     this.branchOwnerId = branch?.owner?.$jazz.raw.id;
     this.source = localNode.getCoValue(id as RawCoID);
