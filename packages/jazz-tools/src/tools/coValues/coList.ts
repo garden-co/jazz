@@ -376,7 +376,6 @@ export class CoList<out Item = any>
       unique: CoValueUniqueness["uniqueness"];
       owner: Account | Group;
       resolve?: RefsToResolveStrict<L, R>;
-      ifExists?: "create" | "return";
     },
   ): Promise<Resolved<L, R> | null> {
     const listId = CoList._findUnique(
@@ -394,7 +393,7 @@ export class CoList<out Item = any>
         owner: options.owner,
         unique: options.unique,
       }) as Resolved<L, R>;
-    } else if (options.ifExists !== "return") {
+    } else {
       (list as L).$jazz.applyDiff(options.value);
     }
 
@@ -438,9 +437,26 @@ export class CoList<out Item = any>
       resolve?: RefsToResolveStrict<L, R>;
     },
   ): Promise<Resolved<L, R> | null> {
-    return (this as any).upsertUnique({
+    const listId = CoList._findUnique(
+      options.unique,
+      options.owner.$jazz.id,
+      options.owner.$jazz.loadedAs,
+    );
+    let list: Resolved<L, R> | null = await loadCoValueWithoutMe(this, listId, {
       ...options,
-      ifExists: "return",
+      loadAs: options.owner.$jazz.loadedAs,
+      skipRetry: true,
+    });
+    if (!list) {
+      list = (this as any).create(options.value, {
+        owner: options.owner,
+        unique: options.unique,
+      }) as Resolved<L, R>;
+    }
+    return await loadCoValueWithoutMe(this, listId, {
+      ...options,
+      loadAs: options.owner.$jazz.loadedAs,
+      skipRetry: true,
     });
   }
 
