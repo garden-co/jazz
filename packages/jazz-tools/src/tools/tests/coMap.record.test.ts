@@ -541,29 +541,6 @@ describe("CoRecord unique methods", () => {
     expect(updatedRecord?.updated3).toBe(30);
   });
 
-  test("upsertUnique returns existing record unchanged when ifExists: return", async () => {
-    const ItemRecord = co.record(z.string(), z.number());
-    const group = Group.create();
-
-    // Create initial record
-    const originalRecord = ItemRecord.create(
-      { original1: 1, original2: 2 },
-      { owner: group, unique: "update-record" },
-    );
-
-    // Upsert with new data
-    const updatedRecord = await ItemRecord.upsertUnique({
-      value: { updated1: 10, updated2: 20, updated3: 30 },
-      unique: "update-record",
-      owner: group,
-      ifExists: "return",
-    });
-
-    expect(updatedRecord).toEqual(originalRecord); // Should be the same instance
-    expect(updatedRecord?.original1).toBe(1);
-    expect(updatedRecord?.original2).toBe(2);
-  });
-
   test("upsertUnique with CoValue items", async () => {
     const Item = co.map({
       name: z.string(),
@@ -589,45 +566,7 @@ describe("CoRecord unique methods", () => {
     expect(result?.second?.name).toBe("Second");
   });
 
-  test("upsertUnique returns existing record with CoValues unchanged when ifExists: return", async () => {
-    const Item = co.map({
-      name: z.string(),
-      value: z.number(),
-    });
-    const ItemRecord = co.record(z.string(), Item);
-    const group = Group.create();
-    const items = {
-      first: Item.create({ name: "First", value: 1 }, group),
-      second: Item.create({ name: "Second", value: 2 }, group),
-    };
-
-    const result = await ItemRecord.upsertUnique({
-      value: items,
-      unique: "item-record",
-      owner: group,
-      ifExists: "return",
-      resolve: { first: true, second: true },
-    });
-
-    const updatedItems = {
-      first: Item.create({ name: "Third", value: 3 }, group),
-      second: Item.create({ name: "Fourth", value: 4 }, group),
-    };
-    const updated = await ItemRecord.upsertUnique({
-      value: items,
-      unique: "item-record",
-      owner: group,
-      ifExists: "return",
-      resolve: { first: true, second: true },
-    });
-
-    expect(updated).not.toBeNull();
-    expect(updated).toEqual(result);
-    expect(updated?.first?.name).toBe("First");
-    expect(updated?.second?.name).toBe("Second");
-  });
-
-  test("getOrCreateUnique returns existing record unchanged (equivalent to upsertUnique with ifExists: return)", async () => {
+  test("getOrCreateUnique returns existing record unchanged", async () => {
     const ItemRecord = co.record(z.string(), z.number());
     const group = Group.create();
 
@@ -647,6 +586,22 @@ describe("CoRecord unique methods", () => {
     expect(resultRecord).toEqual(originalRecord); // Should be the same instance
     expect(resultRecord?.original1).toBe(1);
     expect(resultRecord?.original2).toBe(2);
+  });
+
+  test("getOrCreateUnique creates new record if none exists", async () => {
+    const ItemRecord = co.record(z.string(), z.number());
+    const group = Group.create();
+
+    const resultRecord = await ItemRecord.getOrCreateUnique({
+      value: { original1: 1, original2: 2, original3: 3 },
+      unique: "get-or-create-record",
+      owner: group,
+    });
+
+    expect(resultRecord).not.toBe(null);
+    expect(resultRecord?.original1).toBe(1);
+    expect(resultRecord?.original2).toBe(2);
+    expect(resultRecord?.original3).toBe(3);
   });
 
   test("findUnique returns correct ID", async () => {

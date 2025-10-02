@@ -1254,30 +1254,6 @@ describe("CoList unique methods", () => {
     expect(updatedList?.[2]).toBe("updated3");
   });
 
-  test("upsertUnique returns existing list unchanged when ifExists: return", async () => {
-    const ItemList = co.list(z.string());
-    const group = Group.create();
-
-    // Create initial list
-    const originalList = ItemList.create(["original1", "original2"], {
-      owner: group,
-      unique: "update-list",
-    });
-
-    // Return if list exists
-    const updatedList = await ItemList.upsertUnique({
-      value: ["updated1", "updated2", "updated3"],
-      unique: "update-list",
-      owner: group,
-      ifExists: "return",
-    });
-
-    expect(updatedList).toEqual(originalList); // Should be the same instance
-    expect(updatedList?.length).toBe(2);
-    expect(updatedList?.[0]).toBe("original1");
-    expect(updatedList?.[1]).toBe("original2");
-  });
-
   test("upsertUnique with CoValue items", async () => {
     const Item = co.map({
       name: z.string(),
@@ -1338,41 +1314,25 @@ describe("CoList unique methods", () => {
     expect(updatedList?.[1]?.name).toBe("Added");
   });
 
-  test("upsertUnique returns existing list with CoValue items unchanged when ifExists: return", async () => {
-    const Item = co.map({
-      name: z.string(),
-      value: z.number(),
-    });
-    const ItemList = co.list(Item);
+  test("getOrCreateUnique creates new list if none exists", async () => {
+    const ItemList = co.list(z.string());
     const group = Group.create();
 
-    // Create initial list
-    const initialItems = [Item.create({ name: "Initial", value: 0 }, group)];
-    const originalList = ItemList.create(initialItems, {
+    // getOrCreateUnique should return the existing list unchanged
+    const resultList = await ItemList.getOrCreateUnique({
+      value: ["original1", "original2", "original3"],
+      unique: "get-or-create-list",
       owner: group,
-      unique: "updateable-item-list",
     });
 
-    // Upsert with new items
-    const newItems = [
-      Item.create({ name: "Updated", value: 1 }, group),
-      Item.create({ name: "Added", value: 2 }, group),
-    ];
-
-    const updatedList = await ItemList.upsertUnique({
-      value: newItems,
-      unique: "updateable-item-list",
-      owner: group,
-      ifExists: "return",
-      resolve: { $each: true },
-    });
-
-    expect(updatedList).toEqual(originalList); // Should be the same instance
-    expect(updatedList?.length).toBe(1);
-    expect(updatedList?.[0]?.name).toBe("Initial");
+    expect(resultList).not.toBe(null);
+    expect(resultList?.length).toBe(3);
+    expect(resultList?.[0]).toBe("original1");
+    expect(resultList?.[1]).toBe("original2");
+    expect(resultList?.[2]).toBe("original3");
   });
 
-  test("getOrCreateUnique returns existing list unchanged (equivalent to upsertUnique with ifExists: return)", async () => {
+  test("getOrCreateUnique returns existing list unchanged", async () => {
     const ItemList = co.list(z.string());
     const group = Group.create();
 
