@@ -53,13 +53,13 @@ export function highestResAvailable(
     sortedSizes.find((el) => el.match > 0.95) || sortedSizes.at(-1);
 
   // if the best target is already loaded, we are done
-  const bestLoadedTargetImage = image[bestTarget!.size[2]];
-  if (getImageChunks(bestLoadedTargetImage)) {
-    return bestLoadedTargetImage?.$jazzState === CoValueLoadingState.LOADED
+  const bestTargetImage = image[bestTarget!.size[2]];
+  if (getImageChunks(bestTargetImage)) {
+    return bestTargetImage?.$jazzState === CoValueLoadingState.LOADED
       ? {
           width: bestTarget!.size[0],
           height: bestTarget!.size[1],
-          image: bestLoadedTargetImage,
+          image: bestTargetImage,
         }
       : null;
   }
@@ -67,13 +67,13 @@ export function highestResAvailable(
   // if the best already loaded is not the best target
   // let's trigger the load of the best target
   if (bestLoaded) {
-    const bestTargetImage = image[bestTarget!.size[2]];
     getImageChunks(bestTargetImage);
-    return bestTargetImage?.$jazzState === CoValueLoadingState.LOADED
+    const bestLoadedImage = image[bestLoaded.size[2]];
+    return bestLoadedImage?.$jazzState === CoValueLoadingState.LOADED
       ? {
           width: bestLoaded.size[0],
           height: bestLoaded.size[1],
-          image: bestTargetImage,
+          image: bestLoadedImage,
         }
       : null;
   }
