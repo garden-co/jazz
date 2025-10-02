@@ -2,7 +2,6 @@ import { UpDownCounter, metrics } from "@opentelemetry/api";
 import {
   createContentMessage,
   exceedsRecommendedSize,
-  getTransactionSize,
 } from "../coValueContentMessage.js";
 import {
   CoValueCore,
@@ -84,7 +83,7 @@ export class StorageApiSync implements StorageAPI {
 
     let contentStreaming = false;
     for (const sessionRow of allCoValueSessions) {
-      const signatures = this.dbClient.getSignatures(sessionRow.rowID, 0);
+      const signatures = this.dbClient.getSignatures(sessionRow.rowID);
 
       if (signatures.length > 0) {
         contentStreaming = true;

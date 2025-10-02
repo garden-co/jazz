@@ -9,6 +9,7 @@ import {
   type StorageAPI,
   logger,
 } from "../exports.js";
+import { Semaphore } from "../queue/Semaphore.js";
 import { StoreQueue } from "../queue/StoreQueue.js";
 import {
   CoValueKnownState,
@@ -33,6 +34,7 @@ export class StorageApiAsync implements StorageAPI {
   private readonly dbClient: DBClientInterfaceAsync;
 
   private loadedCoValues = new Set<RawCoID>();
+  private semaphore = new Semaphore(10);
 
   constructor(dbClient: DBClientInterfaceAsync) {
     this.dbClient = dbClient;
@@ -44,12 +46,19 @@ export class StorageApiAsync implements StorageAPI {
     return this.knwonStates.getKnownState(id);
   }
 
-  async load(
+  load(
     id: string,
     callback: (data: NewContentMessage) => void,
     done: (found: boolean) => void,
   ) {
-    await this.loadCoValue(id, callback, done);
+    // Limit the parallel loading of coValues to balance the load on the database
+    // and the data processing
+    this.semaphore.acquire(() => {
+      this.loadCoValue(id, callback, (found) => {
+        this.semaphore.release();
+        done(found);
+      });
+    });
   }
 
   async loadCoValue(
@@ -77,10 +86,7 @@ export class StorageApiAsync implements StorageAPI {
 
     await Promise.all(
       allCoValueSessions.map(async (sessionRow) => {
-        const signatures = await this.dbClient.getSignatures(
-          sessionRow.rowID,
-          0,
-        );
+        const signatures = await this.dbClient.getSignatures(sessionRow.rowID);
 
         if (signatures.length > 0) {
           contentStreaming = true;
