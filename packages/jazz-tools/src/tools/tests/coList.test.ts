@@ -1207,12 +1207,12 @@ describe("CoList unique methods", () => {
     expect(foundList?.[0]).toBe("item1");
   });
 
-  test("loadUnique returns null for non-existent list", async () => {
+  test("loadUnique returns 'unavailable' for non-existent list", async () => {
     const ItemList = co.list(z.string());
     const group = Group.create();
 
     const foundList = await ItemList.loadUnique("non-existent", group.$jazz.id);
-    expect(foundList).toBeNull();
+    expect(foundList.$jazzState).toBe(CoValueLoadingState.UNAVAILABLE);
   });
 
   test("upsertUnique creates new list when none exists", async () => {

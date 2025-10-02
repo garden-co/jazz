@@ -398,13 +398,13 @@ export class CoList<out Item = any>
         skipRetry: true,
       },
     );
-    if (!list) {
+    if (list.$jazzState !== CoValueLoadingState.LOADED) {
       list = (this as any).create(options.value, {
         owner: options.owner,
         unique: options.unique,
       }) as Resolved<L, R>;
     } else {
-      (list as L).$jazz.applyDiff(options.value);
+      list.$jazz.applyDiff(options.value);
     }
 
     return await loadCoValueWithoutMe(this, listId, {

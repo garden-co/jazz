@@ -1086,7 +1086,7 @@ describe("CoMap resolution", async () => {
       skipRetry: true,
     });
 
-    expect(loadedPerson).toBeNull();
+    expect(loadedPerson.$jazzState).toBe(CoValueLoadingState.UNAVAILABLE);
   });
 
   test("loading a remotely available map with skipRetry set to false", async () => {

@@ -31,11 +31,10 @@ import {
   SubscribeRestArgs,
   TypeSym,
   BranchDefinition,
-} from "../internal.js";
-import {
   Account,
   CoValueBase,
   CoValueJazzApi,
+  CoValueLoadingState,
   ItemsSym,
   Ref,
   RegisteredSchemas,
@@ -513,16 +512,14 @@ export class CoMap extends CoValueBase implements CoValue {
         skipRetry: true,
       },
     );
-    if (!map) {
+    if (map.$jazzState !== CoValueLoadingState.LOADED) {
       const instance = new this();
       map = CoMap._createCoMap(instance, options.value, {
         owner: options.owner,
         unique: options.unique,
       }) as Resolved<M, R>;
     } else {
-      (map as M).$jazz.applyDiff(
-        options.value as unknown as Partial<CoMapInit<M>>,
-      );
+      map.$jazz.applyDiff(options.value as unknown as Partial<CoMapInit<M>>);
     }
 
     return await loadCoValueWithoutMe(this, mapId, {

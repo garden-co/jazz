@@ -1,5 +1,6 @@
 import { assert, describe, expect, test } from "vitest";
 import { Account, Group, co, z } from "../../exports";
+import { CoValueLoadingState } from "../../internal.js";
 import {
   createJazzTestAccount,
   linkAccounts,
@@ -238,7 +239,7 @@ describe("Request to join", () => {
         loadAs: user1,
       });
 
-    expect(projectsOnUser).toBeNull();
+    expect(projectsOnUser.$jazzState).toBe(CoValueLoadingState.UNAUTHORIZED);
   });
 
   test("admin2 can see the status of the requests", async () => {
@@ -271,7 +272,7 @@ describe("Request to join", () => {
     });
 
     // With the writeOnly permission, the user can download the request
-    // but not it's content
-    expect(requestOnUser2).toBeNull();
+    // but not its content
+    expect(requestOnUser2.$jazzState).toBe(CoValueLoadingState.UNAUTHORIZED);
   });
 });
