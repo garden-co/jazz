@@ -569,6 +569,7 @@ export class CoMap extends CoValueBase implements CoValue {
       loadAs: options.owner.$jazz.loadedAs,
       skipRetry: true,
     });
+
     if (!map) {
       const instance = new this();
       map = CoMap._createCoMap(instance, options.value, {

@@ -453,6 +453,7 @@ export class CoList<out Item = any>
         unique: options.unique,
       }) as Resolved<L, R>;
     }
+
     return await loadCoValueWithoutMe(this, listId, {
       ...options,
       loadAs: options.owner.$jazz.loadedAs,
