@@ -58,7 +58,11 @@ function App() {
     journalEntries !== null &&
     journalEntries.length === 0 &&
     queryEmbedding === null;
-  const { isSeeding, seedJournal } = useJournalSeed({
+  const {
+    isSeeding,
+    seedJournal,
+    progress: seedingProgress,
+  } = useJournalSeed({
     createEmbedding,
     owner: me as JazzAccount,
   });
@@ -123,6 +127,13 @@ function App() {
                 Found {journalEntries.length} journal entries relatable to{" "}
                 <span className="inline-block rounded-full py-px px-2 bg-zinc-200">
                   {searchInputRef.current?.value}
+                </span>
+              </div>
+            ) : isSeeding ? (
+              <div>
+                Creating testing dataset:{" "}
+                <span className="tabular-nums">
+                  {seedingProgress.seededCount} / {seedingProgress.targetCount}
                 </span>
               </div>
             ) : journalEntries && journalEntries.length > 0 ? (
