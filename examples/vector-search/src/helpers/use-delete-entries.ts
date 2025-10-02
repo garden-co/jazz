@@ -12,7 +12,6 @@ export function useDeleteEntries({ owner }: { owner: JazzAccount }) {
     try {
       if (owner?.root?.journalEntries) {
         owner.root.$jazz.set("journalEntries", JournalEntryList.create([]));
-        window.location.reload();
       }
     } catch (error) {
       console.error(error);
