@@ -105,18 +105,6 @@ export interface CoRecordSchema<
     unique: CoValueUniqueness["uniqueness"];
     owner: Account | Group;
     resolve?: RefsToResolveStrict<CoRecordInstanceCoValuesNullable<K, V>, R>;
-    ifExists?: "create" | "return";
-  }): Promise<Resolved<CoRecordInstanceCoValuesNullable<K, V>, R> | null>;
-
-  getOrCreateUnique<
-    const R extends RefsToResolve<
-      CoRecordInstanceCoValuesNullable<K, V>
-    > = true,
-  >(options: {
-    value: Simplify<CoRecordInit<K, V>>;
-    unique: CoValueUniqueness["uniqueness"];
-    owner: Account | Group;
-    resolve?: RefsToResolveStrict<CoRecordInstanceCoValuesNullable<K, V>, R>;
   }): Promise<Resolved<CoRecordInstanceCoValuesNullable<K, V>, R> | null>;
 
   loadUnique<
