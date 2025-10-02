@@ -114,9 +114,22 @@ export class CoListSchema<T extends AnyZodOrCoValueSchema>
     unique: CoValueUniqueness["uniqueness"];
     owner: Account | Group;
     resolve?: RefsToResolveStrict<CoListInstanceCoValuesNullable<T>, R>;
+    ifExists?: "create" | "return";
   }): Promise<Resolved<CoListInstanceCoValuesNullable<T>, R> | null> {
     // @ts-expect-error
     return this.coValueClass.upsertUnique(options);
+  }
+
+  getOrCreateUnique<
+    const R extends RefsToResolve<CoListInstanceCoValuesNullable<T>> = true,
+  >(options: {
+    value: CoListSchemaInit<T>;
+    unique: CoValueUniqueness["uniqueness"];
+    owner: Account | Group;
+    resolve?: RefsToResolveStrict<CoListInstanceCoValuesNullable<T>, R>;
+  }): Promise<Resolved<CoListInstanceCoValuesNullable<T>, R> | null> {
+    // @ts-expect-error
+    return this.coValueClass.getOrCreateUnique(options);
   }
 
   loadUnique<
