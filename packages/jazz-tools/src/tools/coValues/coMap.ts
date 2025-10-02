@@ -495,6 +495,7 @@ export class CoMap extends CoValueBase implements CoValue {
       unique: CoValueUniqueness["uniqueness"];
       owner: Account | Group;
       resolve?: RefsToResolveStrict<M, R>;
+      ifExists?: "create" | "return";
     },
   ): Promise<Resolved<M, R> | null> {
     const mapId = CoMap._findUnique(
@@ -513,16 +514,59 @@ export class CoMap extends CoValueBase implements CoValue {
         owner: options.owner,
         unique: options.unique,
       }) as Resolved<M, R>;
-    } else {
+    } else if (options.ifExists !== "return") {
       (map as M).$jazz.applyDiff(
         options.value as unknown as Partial<CoMapInit<M>>,
       );
+    }
+
+    if (map && options.ifExists === "return") {
+      return map;
     }
 
     return await loadCoValueWithoutMe(this, mapId, {
       ...options,
       loadAs: options.owner.$jazz.loadedAs,
       skipRetry: true,
+    });
+  }
+
+  /**
+   * Given some data, gets an existing CoMap or creates a new one if none exists.
+   * This method will not modify an existing CoMap - it will only return it as-is.
+   *
+   * Note: This method respects resolve options, and thus can return `null` if the references cannot be resolved.
+   *
+   * @example
+   * ```ts
+   * const activeEvent = await Event.getOrCreateUnique(
+   *   {
+   *     value: { title: "Meeting", date: "2024-01-01" },
+   *     unique: sourceData.identifier,
+   *     owner: workspace,
+   *   }
+   * );
+   * ```
+   *
+   * @param options The options for creating or loading the CoMap. This includes the intended state of the CoMap, its unique identifier, its owner, and the references to resolve.
+   * @returns Either an existing CoMap (unchanged), or a new initialised CoMap if none exists.
+   * @category Subscription & Loading
+   */
+  static async getOrCreateUnique<
+    M extends CoMap,
+    const R extends RefsToResolve<M> = true,
+  >(
+    this: CoValueClass<M>,
+    options: {
+      value: Simplify<CoMapInit_DEPRECATED<M>>;
+      unique: CoValueUniqueness["uniqueness"];
+      owner: Account | Group;
+      resolve?: RefsToResolveStrict<M, R>;
+    },
+  ): Promise<Resolved<M, R> | null> {
+    return (this as any).upsertUnique({
+      ...options,
+      ifExists: "return",
     });
   }
 

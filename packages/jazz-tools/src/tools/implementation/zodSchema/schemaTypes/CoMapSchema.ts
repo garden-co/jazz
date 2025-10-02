@@ -126,6 +126,24 @@ export interface CoMapSchema<
       Simplify<CoMapInstanceCoValuesNullable<Shape>> & CoMap,
       R
     >;
+    ifExists?: "create" | "return";
+  }) => Promise<Resolved<
+    Simplify<CoMapInstanceCoValuesNullable<Shape>> & CoMap,
+    R
+  > | null>;
+
+  getOrCreateUnique: <
+    const R extends RefsToResolve<
+      Simplify<CoMapInstanceCoValuesNullable<Shape>> & CoMap
+    > = true,
+  >(options: {
+    value: Simplify<CoMapSchemaInit<Shape>>;
+    unique: CoValueUniqueness["uniqueness"];
+    owner: Owner;
+    resolve?: RefsToResolveStrict<
+      Simplify<CoMapInstanceCoValuesNullable<Shape>> & CoMap,
+      R
+    >;
   }) => Promise<Resolved<
     Simplify<CoMapInstanceCoValuesNullable<Shape>> & CoMap,
     R
@@ -266,6 +284,10 @@ export function enrichCoMapSchema<
     upsertUnique: (...args: [any, ...any[]]) => {
       // @ts-expect-error
       return coValueClass.upsertUnique(...args);
+    },
+    getOrCreateUnique: (...args: [any, ...any[]]) => {
+      // @ts-expect-error
+      return coValueClass.getOrCreateUnique(...args);
     },
     loadUnique: (...args: [any, ...any[]]) => {
       // @ts-expect-error
