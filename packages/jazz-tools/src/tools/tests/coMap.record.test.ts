@@ -566,6 +566,44 @@ describe("CoRecord unique methods", () => {
     expect(result?.second?.name).toBe("Second");
   });
 
+  test("getOrCreateUnique returns existing record unchanged", async () => {
+    const ItemRecord = co.record(z.string(), z.number());
+    const group = Group.create();
+
+    // Create initial record
+    const originalRecord = ItemRecord.create(
+      { original1: 1, original2: 2 },
+      { owner: group, unique: "get-or-create-record" },
+    );
+
+    // getOrCreateUnique should return the existing record unchanged
+    const resultRecord = await ItemRecord.getOrCreateUnique({
+      value: { updated1: 10, updated2: 20, updated3: 30 },
+      unique: "get-or-create-record",
+      owner: group,
+    });
+
+    expect(resultRecord).toEqual(originalRecord); // Should be the same instance
+    expect(resultRecord?.original1).toBe(1);
+    expect(resultRecord?.original2).toBe(2);
+  });
+
+  test("getOrCreateUnique creates new record if none exists", async () => {
+    const ItemRecord = co.record(z.string(), z.number());
+    const group = Group.create();
+
+    const resultRecord = await ItemRecord.getOrCreateUnique({
+      value: { original1: 1, original2: 2, original3: 3 },
+      unique: "get-or-create-record",
+      owner: group,
+    });
+
+    expect(resultRecord).not.toBe(null);
+    expect(resultRecord?.original1).toBe(1);
+    expect(resultRecord?.original2).toBe(2);
+    expect(resultRecord?.original3).toBe(3);
+  });
+
   test("findUnique returns correct ID", async () => {
     const ItemRecord = co.record(z.string(), z.string());
     const group = Group.create();
