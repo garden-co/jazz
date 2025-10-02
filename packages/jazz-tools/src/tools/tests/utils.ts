@@ -1,3 +1,4 @@
+import { assert } from "vitest";
 import { AccountClass, isControlledAccount } from "../coValues/account";
 
 import { CoID, LocalNode, RawCoValue } from "cojson";
@@ -148,7 +149,8 @@ export async function loadCoValueOrFail<V extends RawCoValue>(
 export function assertLoaded<T extends MaybeLoaded<CoValue>>(
   coValue: T,
 ): asserts coValue is LoadedAndRequired<T> {
-  if (coValue.$jazzState !== CoValueLoadingState.LOADED) {
-    throw new Error("CoValue is not loaded");
-  }
+  assert(
+    coValue.$jazzState === CoValueLoadingState.LOADED,
+    "CoValue is not loaded",
+  );
 }
