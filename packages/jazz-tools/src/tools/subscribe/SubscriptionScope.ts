@@ -16,6 +16,18 @@ import { CoValueCoreSubscription } from "./CoValueCoreSubscription.js";
 import { JazzError, type JazzErrorIssue } from "./JazzError.js";
 import type { BranchDefinition, SubscriptionValue, Unloaded } from "./types.js";
 import { createCoValue, myRoleForRawValue } from "./utils.js";
+import { computeQueryView, type QueryView } from "./queryView.js";
+
+let SKIP_ERRORS_IN_COLISTS = false;
+
+/**
+ * If set to true, inaccessible items in a CoList will be skipped when loading the CoList.
+ * This setting is disabled by default, so CoLists with inaccessible items will not be
+ * loaded unless `$onError: null` is provided in the resolve query.
+ */
+export function skipErrorsInLists(skip: boolean) {
+  SKIP_ERRORS_IN_COLISTS = skip;
+}
 
 export class SubscriptionScope<D extends CoValue> {
   childNodes = new Map<string, SubscriptionScope<CoValue>>();
@@ -37,7 +49,7 @@ export class SubscriptionScope<D extends CoValue> {
   errorFromChildren: JazzError | undefined;
   subscription: CoValueCoreSubscription;
   dirty = false;
-  resolve: RefsToResolve<any>;
+  resolve: Exclude<RefsToResolve<any>, true | false>;
   idsSubscribed = new Set<string>();
   autoloaded = new Set<string>();
   autoloadedKeys = new Set<string>();
@@ -49,6 +61,8 @@ export class SubscriptionScope<D extends CoValue> {
 
   silenceUpdates = false;
 
+  private cachedQueryView: QueryView | null = null;
+
   constructor(
     public node: LocalNode,
     resolve: RefsToResolve<D>,
@@ -58,7 +72,16 @@ export class SubscriptionScope<D extends CoValue> {
     public bestEffortResolution = false,
     public unstable_branch?: BranchDefinition,
   ) {
-    this.resolve = resolve;
+    this.resolve = resolve === true || !resolve ? {} : resolve;
+    if (SKIP_ERRORS_IN_COLISTS) {
+      if (this.resolve.$each === true) {
+        this.resolve.$each = {};
+      }
+      if (this.resolve.$each && this.resolve.$each.$onError !== null) {
+        // @ts-expect-error 'skip' is only used internally, it's not part of the resolve query API
+        this.resolve.$each.$onError = "skip";
+      }
+    }
     this.value = { type: "unloaded", id };
 
     let lastUpdate: RawCoValue | "unavailable" | undefined;
@@ -109,6 +132,9 @@ export class SubscriptionScope<D extends CoValue> {
 
     // Flags that the value has changed and we need to trigger an update
     this.dirty = true;
+
+    // Reset the cached query view so it's computed again on the next access
+    this.cachedQueryView = null;
   }
 
   handleUpdate(update: RawCoValue | "unavailable") {
@@ -355,10 +381,6 @@ export class SubscriptionScope<D extends CoValue> {
   }
 
   subscribeToKey(key: string) {
-    if (this.resolve === true || !this.resolve) {
-      this.resolve = {};
-    }
-
     if (!this.resolve.$each && !(key in this.resolve)) {
       const resolve = this.resolve as Record<string, any>;
 
@@ -700,7 +722,9 @@ export class SubscriptionScope<D extends CoValue> {
       this.autoloaded.add(id);
     }
 
-    const skipInvalid = typeof query === "object" && query.$onError === null;
+    const skipInvalid =
+      typeof query === "object" &&
+      (query.$onError === null || query.$onError === "skip");
 
     if (skipInvalid) {
       if (key) {
@@ -739,6 +763,30 @@ export class SubscriptionScope<D extends CoValue> {
     if (this.closed) {
       child.destroy();
     }
+  }
+
+  /**
+   * When loading a CoValue, the view over it can be different from the actual CoValue's content.
+   * The query view is a mapping that links the keys in the CoValue query view to the keys in the raw CoValue.
+   * @internal
+   */
+  get queryView(): QueryView | null {
+    if (
+      this.value.type !== "loaded" ||
+      this.value.value[TypeSym] !== "CoList"
+    ) {
+      return null;
+    }
+
+    if (
+      typeof this.resolve.$each !== "object" ||
+      // @ts-expect-error 'skip' is only used internally, it's not part of the resolve query API
+      this.resolve.$each.$onError !== "skip"
+    ) {
+      return null;
+    }
+    this.cachedQueryView ||= computeQueryView(this.value.value as CoList);
+    return this.cachedQueryView;
   }
 
   destroy() {

@@ -1,11 +1,21 @@
 import { WasmCrypto } from "cojson/crypto/WasmCrypto";
-import { assert, beforeEach, describe, expect, test, vi } from "vitest";
+import {
+  afterEach,
+  assert,
+  beforeEach,
+  describe,
+  expect,
+  test,
+  vi,
+} from "vitest";
 import { Account, Group, subscribeToCoValue, z } from "../index.js";
 import {
   Loaded,
   activeAccountContext,
   co,
   coValueClassFromCoValueClassOrSchema,
+  getSubscriptionScope,
+  skipErrorsInLists,
 } from "../internal.js";
 import {
   createJazzTestAccount,
@@ -18,6 +28,11 @@ const Crypto = await WasmCrypto.create();
 
 let me = await Account.create({
   creationProps: { name: "Hermes Puggington" },
+  crypto: Crypto,
+});
+
+const otherAccount = await Account.create({
+  creationProps: { name: "Other Owner" },
   crypto: Crypto,
 });
 
@@ -314,22 +329,40 @@ describe("Simple CoList operations", async () => {
       });
     });
 
-    test("pop", () => {
-      const list = TestList.create(["bread", "butter", "onion"], {
-        owner: me,
+    describe("pop", () => {
+      test("removes the last element from the list and returns it", () => {
+        const list = TestList.create(["bread", "butter", "onion"], {
+          owner: me,
+        });
+        expect(list.$jazz.pop()).toBe("onion");
+        expect(list.length).toBe(2);
+        expect(list.$jazz.raw.asArray()).toEqual(["bread", "butter"]);
       });
-      expect(list.$jazz.pop()).toBe("onion");
-      expect(list.length).toBe(2);
-      expect(list.$jazz.raw.asArray()).toEqual(["bread", "butter"]);
+
+      test("returns undefined if the list is empty", () => {
+        const list = TestList.create([], { owner: me });
+        expect(list.$jazz.pop()).toBeUndefined();
+        expect(list.length).toBe(0);
+        expect(list.$jazz.raw.asArray()).toEqual([]);
+      });
     });
 
-    test("shift", () => {
-      const list = TestList.create(["bread", "butter", "onion"], {
-        owner: me,
+    describe("shift", () => {
+      test("removes the first element from the list and returns it", () => {
+        const list = TestList.create(["bread", "butter", "onion"], {
+          owner: me,
+        });
+        expect(list.$jazz.shift()).toBe("bread");
+        expect(list.length).toBe(2);
+        expect(list.$jazz.raw.asArray()).toEqual(["butter", "onion"]);
       });
-      expect(list.$jazz.shift()).toBe("bread");
-      expect(list.length).toBe(2);
-      expect(list.$jazz.raw.asArray()).toEqual(["butter", "onion"]);
+
+      test("returns undefined if the list is empty", () => {
+        const list = TestList.create([], { owner: me });
+        expect(list.$jazz.shift()).toBeUndefined();
+        expect(list.length).toBe(0);
+        expect(list.$jazz.raw.asArray()).toEqual([]);
+      });
     });
 
     describe("splice", () => {
@@ -404,6 +437,13 @@ describe("Simple CoList operations", async () => {
         const list = Schema.create(["bread", "butter", "onion"]);
         list.$jazz.splice(1, 0, "lettuce");
         expect(list[1]?.toString()).toBe("lettuce");
+      });
+
+      test("ignore out-of-bound indices", () => {
+        const Schema = co.list(co.plainText());
+        const list = Schema.create(["bread", "butter", "onion"]);
+        list.$jazz.splice(2, 3, "lettuce");
+        expect(list[2]?.toString()).toBe("lettuce");
       });
     });
 
@@ -1127,7 +1167,7 @@ describe("CoList subscription", async () => {
     expect(spy).toHaveBeenCalledTimes(2);
   });
 
-  test("loading a nested list with deep resolve and $onError", async () => {
+  test("replaces inaccessible CoList with null when loading a nested list with deep resolve and $onError: null", async () => {
     const Dog = co.map({
       name: z.string(),
       breed: z.string(),
@@ -1161,6 +1201,192 @@ describe("CoList subscription", async () => {
     assert(loadedPerson);
     expect(loadedPerson.name).toBe("John");
     expect(loadedPerson.dogs).toBeNull();
+  });
+
+  test("replaces inaccessible items with null when loading a nested list with deep resolve and $each: { $onError: null }", async () => {
+    const Dog = co.map({
+      name: z.string(),
+      breed: z.string(),
+    });
+
+    const Person = co.map({
+      name: z.string(),
+      age: z.number(),
+      dogs: co.list(Dog),
+    });
+
+    const person = Person.create(
+      {
+        name: "John",
+        age: 20,
+        dogs: Person.shape.dogs.create(
+          [
+            Dog.create({ name: "Rex", breed: "Labrador" }),
+            Dog.create({ name: "Fido", breed: "Poodle" }),
+          ],
+          Group.create().makePublic(),
+        ),
+      },
+      Group.create().makePublic(),
+    );
+
+    const bob = await createJazzTestAccount();
+
+    const loadedPerson = await Person.load(person.$jazz.id, {
+      resolve: { dogs: { $each: { $onError: null } } },
+      loadAs: bob,
+    });
+
+    assert(loadedPerson);
+    expect(loadedPerson.name).toBe("John");
+    expect(loadedPerson.dogs).toEqual([null, null]);
+  });
+
+  describe("skipErrorsInLists", () => {
+    beforeEach(() => {
+      skipErrorsInLists(true);
+    });
+
+    afterEach(() => {
+      skipErrorsInLists(false);
+    });
+
+    test("skips inaccessible items when loading a nested list with skipErrorsInLists", async () => {
+      const Dog = co.map({
+        name: co.plainText(),
+        breed: z.string(),
+      });
+
+      const Person = co.map({
+        name: z.string(),
+        dogs: co.list(Dog),
+      });
+
+      const publicGroup = Group.create().makePublic();
+      const person = Person.create(
+        {
+          name: "John",
+          dogs: Person.shape.dogs.create(
+            [
+              // Skipped because it's not accessible
+              Dog.create({ name: "Rex", breed: "Labrador" }),
+              // Skipped because its name is not accesible
+              Dog.create(
+                { name: co.plainText().create("Fido"), breed: "Poodle" },
+                publicGroup,
+              ),
+            ],
+            publicGroup,
+          ),
+        },
+        publicGroup,
+      );
+
+      const bob = await createJazzTestAccount();
+
+      const loadedPerson = await Person.load(person.$jazz.id, {
+        resolve: { dogs: { $each: { name: true } } },
+        loadAs: bob,
+      });
+
+      assert(loadedPerson);
+      expect(loadedPerson.name).toBe("John");
+      expect(loadedPerson.dogs).toEqual([]);
+    });
+
+    test("$each: { $onError: null } takes precedence over skipErrorsInLists", async () => {
+      const Dog = co.map({
+        name: z.string(),
+        breed: z.string(),
+      });
+
+      const Person = co.map({
+        name: z.string(),
+        dogs: co.list(Dog),
+      });
+
+      const person = Person.create(
+        {
+          name: "John",
+          dogs: Person.shape.dogs.create(
+            [
+              Dog.create({ name: "Rex", breed: "Labrador" }),
+              Dog.create({ name: "Fido", breed: "Poodle" }),
+            ],
+            Group.create().makePublic(),
+          ),
+        },
+        Group.create().makePublic(),
+      );
+
+      const bob = await createJazzTestAccount();
+
+      const loadedPerson = await Person.load(person.$jazz.id, {
+        resolve: { dogs: { $each: { $onError: null } } },
+        loadAs: bob,
+      });
+
+      assert(loadedPerson);
+      expect(loadedPerson.name).toBe("John");
+      expect(loadedPerson.dogs).toEqual([null, null]);
+    });
+
+    test("returns previously inaccessible elements when the viewer gets acess to them", async () => {
+      const Dog = co.map({
+        name: z.string(),
+        breed: z.string(),
+      });
+
+      const Person = co.map({
+        name: z.string(),
+        dogs: co.list(Dog),
+      });
+
+      const publicGroup = Group.create().makePublic();
+      const privateGroup = Group.create();
+      const person = Person.create(
+        {
+          name: "John",
+          dogs: Person.shape.dogs.create(
+            [Dog.create({ name: "Rex", breed: "Labrador" }, privateGroup)],
+            publicGroup,
+          ),
+        },
+        publicGroup,
+      );
+
+      const bob = await createJazzTestAccount();
+
+      let loadedPerson = await Person.load(person.$jazz.id, {
+        resolve: { dogs: { $each: true } },
+        loadAs: bob,
+      });
+
+      assert(loadedPerson);
+      expect(loadedPerson.dogs).toEqual([]);
+
+      privateGroup.addMember(bob, "reader");
+      await privateGroup.$jazz.waitForSync();
+
+      loadedPerson = await Person.load(person.$jazz.id, {
+        resolve: { dogs: { $each: true } },
+        loadAs: bob,
+      });
+
+      assert(loadedPerson);
+      expect(loadedPerson.dogs).toEqual([{ name: "Rex", breed: "Labrador" }]);
+
+      privateGroup.removeMember(bob);
+      await privateGroup.$jazz.waitForSync();
+
+      loadedPerson = await Person.load(person.$jazz.id, {
+        resolve: { dogs: { $each: true } },
+        loadAs: bob,
+      });
+
+      assert(loadedPerson);
+      expect(loadedPerson.dogs).toEqual([]);
+    });
   });
 });
 
@@ -1351,6 +1577,125 @@ describe("CoList unique methods", () => {
     expect(result?.length).toBe(1);
     expect(result?.[0]?.name).toBe("Item 1");
     expect(result?.[0]?.category?.title).toBe("Category 1");
+  });
+});
+
+describe("CoList query view", () => {
+  const TestList = co.list(co.plainText());
+  let list: co.loaded<typeof TestList, { $each: true }>;
+
+  beforeEach(async () => {
+    const inaccessibleItem = co
+      .plainText()
+      .create("inaccessible", otherAccount);
+    const createdList = TestList.create(
+      [inaccessibleItem, "butter", "onion", "cheese", inaccessibleItem],
+      {
+        owner: me,
+      },
+    );
+
+    skipErrorsInLists(true);
+    const loadedList = await TestList.load(createdList.$jazz.id, {
+      resolve: { $each: true },
+    });
+    assert(loadedList);
+    list = loadedList;
+  });
+
+  afterEach(() => {
+    skipErrorsInLists(false);
+  });
+
+  test("only returns items included in the query view", () => {
+    expect(list[0]?.toString()).toBe("butter");
+    expect(list[1]?.toString()).toBe("onion");
+    expect(list[2]?.toString()).toBe("cheese");
+    expect(list[3]).toBeUndefined();
+  });
+
+  test("updates items included in the query view", () => {
+    const newElement = co.plainText().create("meat");
+    list.$jazz.set(0, newElement);
+    expect(list[0]?.toString()).toBe("meat");
+  });
+
+  test("does not update items not included in the query view", () => {
+    const newElement = co.plainText().create("meat");
+    list.$jazz.set(3, newElement);
+    expect(list[3]).toBeUndefined();
+  });
+
+  test("length is the length of the query view", () => {
+    expect(list.length).toBe(3);
+  });
+
+  test("refs only returns items included in the query view", () => {
+    const refs = list.$jazz.refs;
+    expect(refs[0]?.id).toBe(list[0]!.$jazz.id);
+    expect(refs[1]?.id).toBe(list[1]!.$jazz.id);
+    expect(refs[2]?.id).toBe(list[2]!.$jazz.id);
+    expect(refs[3]).toBeUndefined();
+  });
+
+  test("toJSON only returns items included in the query view", () => {
+    expect(list.toJSON()).toEqual(["butter", "onion", "cheese"]);
+  });
+
+  test("pop returns the last item from the query view", () => {
+    const lastItem = list.$jazz.pop();
+    expect(lastItem?.toString()).toBe("cheese");
+  });
+
+  test("shift returns the first item from the query view", () => {
+    const firstItem = list.$jazz.shift();
+    expect(firstItem?.toString()).toBe("butter");
+  });
+
+  test("array methods take the query view into account", () => {
+    expect(list.map((element) => element.toUpperCase())).toEqual([
+      "BUTTER",
+      "ONION",
+      "CHEESE",
+    ]);
+
+    const butter = list[0];
+    expect(list.filter((element) => element.startsWith("b"))).toEqual([butter]);
+  });
+
+  test("remove affects only items included in the query view", () => {
+    const removedItems = list.$jazz.remove((element) =>
+      element.startsWith("b"),
+    );
+    expect(removedItems.length).toEqual(1);
+    expect(removedItems[0]?.toString()).toEqual("butter");
+  });
+
+  test("retain affects only items included in the query view", () => {
+    const removedItems = list.$jazz.retain((element) =>
+      element.startsWith("b"),
+    );
+    expect(removedItems.length).toEqual(2);
+    expect(removedItems[0]?.toString()).toEqual("onion");
+    expect(removedItems[1]?.toString()).toEqual("cheese");
+  });
+
+  test("splice takes the query view into account", () => {
+    const removedItems = list.$jazz.splice(1, 2);
+    expect(removedItems.length).toEqual(2);
+    expect(removedItems[0]?.toString()).toEqual("onion");
+    expect(removedItems[1]?.toString()).toEqual("cheese");
+  });
+
+  test("applyDiff takes the query view into account", () => {
+    const butter = list[0]!;
+    const cheese = list[2]!;
+    const meat = co.plainText().create("meat");
+    const updatedList = list.$jazz.applyDiff([butter, meat, cheese]);
+
+    expect(updatedList[0]?.toString()).toEqual("butter");
+    expect(updatedList[1]?.toString()).toEqual("meat");
+    expect(updatedList[2]?.toString()).toEqual("cheese");
   });
 });
 
