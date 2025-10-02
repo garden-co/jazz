@@ -171,7 +171,9 @@ export type DeeplyLoaded<
     ? V
     : // Basically V extends CoList - but if we used that we'd introduce circularity into the definition of CoList itself
       [V] extends [ReadonlyArray<infer Item>]
-      ? AsLoaded<Item> extends CoValue
+      ? // `& {}` forces TypeScript to simplify the type before performing the `extends CoValue` check.
+        // Without it, the check would fail even when it should succeed.
+        AsLoaded<Item & {}> extends CoValue
         ? Depth extends { $each: infer ItemDepth }
           ? // Deeply loaded CoList
             ReadonlyArray<
