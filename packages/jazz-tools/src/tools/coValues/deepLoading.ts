@@ -130,6 +130,15 @@ type onErrorNullEnabled<Depth> = Depth extends { $onError: null }
   ? null
   : never;
 
+type UndefinedIfOptionalKey<V, Key extends keyof V> = undefined extends V[Key]
+  ? undefined
+  : // Special case for CoRecord-like types with index signatures.
+    // We return undefined for index signatures even if noUncheckedIndexedAccess is disabled,
+    // to ensure type safety for loaded CoRecords
+    V extends { [k: string]: any }
+    ? undefined
+    : never;
+
 type CoMapLikeLoaded<
   V extends object,
   Depth,
@@ -145,7 +154,7 @@ type CoMapLikeLoaded<
               DepthLimit,
               [0, ...CurrentDepth]
             >
-          | (undefined extends V[Key] ? undefined : never)
+          | UndefinedIfOptionalKey<V, Key>
           | onErrorNullEnabled<Depth[Key]>
       : never
     : never;

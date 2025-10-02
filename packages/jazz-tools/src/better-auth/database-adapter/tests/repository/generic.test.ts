@@ -100,8 +100,8 @@ describe("Generic Repository", () => {
       },
     });
 
-    expect(tables.session.length).toBe(1);
-    expect(tables.session[0]?.$jazz.id).toBe(entity.$jazz.id);
+    expect(tables.session?.length).toBe(1);
+    expect(tables.session?.[0]?.$jazz.id).toBe(entity.$jazz.id);
   });
 
   it("should delete an entity and remove it from the list", async () => {
@@ -131,7 +131,7 @@ describe("Generic Repository", () => {
       },
     });
 
-    expect(tables.session.length).toBe(0);
+    expect(tables.session?.length).toBe(0);
 
     const found = await repository.findOne("session", [
       {
