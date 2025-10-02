@@ -12,6 +12,12 @@ const fetchJournalEntries = async () => {
   }>;
 };
 
+type SeedProgress = {
+  targetCount: number;
+  seededCount: number;
+};
+const SEED_PROGRESS_START: SeedProgress = { targetCount: 0, seededCount: 0 };
+
 /**
  * Creates journal entries from the dataset.
  */
@@ -23,13 +29,16 @@ export const useJournalSeed = ({
   owner: JazzAccount;
 }) => {
   const [isSeeding, setIsSeeding] = useState(false);
+  const [progress, setProgress] = useState<SeedProgress>(SEED_PROGRESS_START);
 
   const seedJournal = useCallback(async () => {
     setIsSeeding(true);
+    setProgress(SEED_PROGRESS_START);
     try {
       const journalEntries = await fetchJournalEntries();
+      setProgress({ targetCount: journalEntries.length, seededCount: 0 });
 
-      for (const entry of journalEntries.slice(0, 10000)) {
+      for (const entry of journalEntries) {
         const embedding = await createEmbedding(entry.c);
 
         const journalEntry = JournalEntry.create({
@@ -43,6 +52,11 @@ export const useJournalSeed = ({
           owner.root.journalEntries.$jazz.push(journalEntry);
         }
 
+        setProgress((progress) => ({
+          targetCount: progress.targetCount,
+          seededCount: progress.seededCount + 1,
+        }));
+
         await new Promise((resolve) => setTimeout(resolve, 0));
       }
     } catch (error) {
@@ -52,5 +66,5 @@ export const useJournalSeed = ({
     }
   }, [createEmbedding, owner]);
 
-  return { isSeeding, seedJournal };
+  return { isSeeding, progress, seedJournal };
 };
