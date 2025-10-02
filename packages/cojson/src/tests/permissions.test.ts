@@ -81,10 +81,10 @@ test("Admins can't demote other admins in a group (high level)", async () => {
   );
 
   expect(() => groupAsOtherAdmin.addMemberInternal(admin.id, "writer")).toThrow(
-    "Administrators cannot demote other administrators in a group",
+    "Super-admins cannot demote other super-admins in a group",
   );
 
-  expect(groupAsOtherAdmin.get(admin.id)).toEqual("admin");
+  expect(groupAsOtherAdmin.get(admin.id)).toEqual("super-admin");
 });
 
 test("Admins an add writers to a group, who can't add admins, writers, or readers", async () => {
@@ -1997,7 +1997,7 @@ test("Member roles are inherited by child groups (except invites)", () => {
   parentGroup.addMember(writerInvite, "writerInvite");
   parentGroup.addMember(readerInvite, "readerInvite");
 
-  expect(group.roleOfInternal(admin.id)).toEqual("admin");
+  expect(group.roleOfInternal(admin.id)).toEqual("super-admin");
 
   expect(group.roleOf(writer.id)).toEqual("writer");
 
@@ -2030,7 +2030,7 @@ test("Member roles are inherited by grand-children groups (except invites)", () 
   grandParentGroup.addMember(writerInvite, "writerInvite");
   grandParentGroup.addMember(readerInvite, "readerInvite");
 
-  expect(group.roleOfInternal(admin.id)).toEqual("admin");
+  expect(group.roleOfInternal(admin.id)).toEqual("super-admin");
 
   expect(group.roleOf(writer.id)).toEqual("writer");
 

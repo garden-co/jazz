@@ -46,7 +46,8 @@ export type ParentGroupReferenceRole =
   | "extend"
   | "reader"
   | "writer"
-  | "admin";
+  | "admin"
+  | "super-admin";
 
 export type GroupShape = {
   profile: CoID<RawCoMap> | null;
@@ -328,11 +329,28 @@ export class RawGroup<
         // 2. The current user is an administrator but something has gone wrong with the role assignment
         // 3. The current user is not an administrator and does not have sufficient permissions to set the role
         const myRole = this.myRole();
+
+        if (myRole === "admin" && this.get(account) === "admin") {
+          throw new Error(
+            "Administrators cannot demote other administrators in a group",
+          );
+        }
+
+        if (myRole === "super-admin" && this.get(account) === "super-admin") {
+          throw new Error(
+            "Super-admins cannot demote other super-admins in a group",
+          );
+        }
+
+        if (myRole === "admin" && this.get(account) === "super-admin") {
+          throw new Error(
+            "Administrators cannot demote super-admins in a group",
+          );
+        }
+
         throw new Error(
-          myRole === "admin"
-            ? this.get(account) === "admin"
-              ? "Administrators cannot demote other administrators in a group"
-              : "Failed to set role"
+          myRole === "super-admin"
+            ? "Failed to set role"
             : `Failed to set role due to insufficient permissions (role of current account is ${myRole})`,
         );
       }
@@ -382,7 +400,8 @@ export class RawGroup<
       if (
         previousRole === "reader" ||
         previousRole === "writer" ||
-        previousRole === "admin"
+        previousRole === "admin" ||
+        previousRole === "super-admin"
       ) {
         this.rotateReadKey(memberKey);
       }
@@ -400,11 +419,28 @@ export class RawGroup<
 
       if (this.get(memberKey) !== role) {
         const myRole = this.myRole();
+
+        if (myRole === "admin" && this.get(memberKey) === "admin") {
+          throw new Error(
+            "Administrators cannot demote other administrators in a group",
+          );
+        }
+
+        if (myRole === "super-admin" && this.get(memberKey) === "super-admin") {
+          throw new Error(
+            "Super-admins cannot demote other super-admins in a group",
+          );
+        }
+
+        if (myRole === "admin" && this.get(memberKey) === "super-admin") {
+          throw new Error(
+            "Administrators cannot demote super-admins in a group",
+          );
+        }
+
         throw new Error(
-          myRole === "admin"
-            ? this.get(memberKey) === "admin"
-              ? "Administrators cannot demote other administrators in a group"
-              : "Failed to set role"
+          myRole === "super-admin"
+            ? "Failed to set role"
             : `Failed to set role due to insufficient permissions (role of current account is ${myRole})`,
         );
       }
@@ -451,6 +487,7 @@ export class RawGroup<
         memberRole === "reader" ||
         memberRole === "writer" ||
         memberRole === "admin" ||
+        memberRole === "super-admin" ||
         memberRole === "readerInvite" ||
         memberRole === "writerInvite" ||
         memberRole === "adminInvite"
@@ -915,13 +952,13 @@ export class RawGroup<
 
   extend(
     parent: RawGroup,
-    role: "reader" | "writer" | "admin" | "inherit" = "inherit",
+    role: "reader" | "writer" | "admin" | "super-admin" | "inherit" = "inherit",
   ) {
     if (this.isSelfExtension(parent)) {
       return;
     }
 
-    if (this.myRole() !== "admin") {
+    if (this.myRole() !== "admin" && this.myRole() !== "super-admin") {
       throw new Error(
         "To extend a group, the current account must be an admin in the child group",
       );
@@ -934,6 +971,7 @@ export class RawGroup<
 
     if (
       parent.myRole() !== "admin" &&
+      parent.myRole() !== "super-admin" &&
       parent.myRole() !== "writer" &&
       parent.myRole() !== "reader" &&
       parent.myRole() !== "writeOnly"
@@ -975,7 +1013,7 @@ export class RawGroup<
   }
 
   revokeExtend(parent: RawGroup) {
-    if (this.myRole() !== "admin") {
+    if (this.myRole() !== "admin" && this.myRole() !== "super-admin") {
       throw new Error(
         "To unextend a group, the current account must be an admin in the child group",
       );
@@ -983,6 +1021,7 @@ export class RawGroup<
 
     if (
       parent.myRole() !== "admin" &&
+      parent.myRole() !== "super-admin" &&
       parent.myRole() !== "writer" &&
       parent.myRole() !== "reader" &&
       parent.myRole() !== "writeOnly"
@@ -1019,7 +1058,7 @@ export class RawGroup<
   removeMember(account: RawAccount | ControlledAccountOrAgent | Everyone) {
     const memberKey = typeof account === "string" ? account : account.id;
 
-    if (this.myRole() === "admin") {
+    if (this.myRole() === "admin" || this.myRole() === "super-admin") {
       this.rotateReadKey(memberKey);
     }
 
@@ -1188,21 +1227,28 @@ export class RawGroup<
 
 export function isInheritableRole(
   roleInParent: Role | undefined,
-): roleInParent is "revoked" | "admin" | "writer" | "reader" {
+): roleInParent is "revoked" | "admin" | "super-admin" | "writer" | "reader" {
   return (
     roleInParent === "revoked" ||
     roleInParent === "admin" ||
+    roleInParent === "super-admin" ||
     roleInParent === "writer" ||
     roleInParent === "reader"
   );
 }
 
 function isMorePermissiveAndShouldInherit(
-  roleInParent: "revoked" | "admin" | "writer" | "reader",
+  roleInParent: "revoked" | "admin" | "super-admin" | "writer" | "reader",
   roleInChild: Role | undefined,
 ) {
   if (roleInParent === "revoked") {
     return true;
+  }
+
+  if (roleInParent === "super-admin") {
+    return (
+      !roleInChild || (roleInChild !== "super-admin" && roleInChild !== "admin")
+    );
   }
 
   if (roleInParent === "admin") {
@@ -1248,6 +1294,7 @@ const canRead = (
   const role = group.get(key);
   return (
     role === "admin" ||
+    role === "super-admin" ||
     role === "writer" ||
     role === "reader" ||
     role === "adminInvite" ||

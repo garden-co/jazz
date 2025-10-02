@@ -238,7 +238,7 @@ export function groupWithTwoAdminsHighLevel() {
 
   const otherAdmin = createAccountInNode(node);
 
-  group.addMember(otherAdmin, "admin");
+  group.addMember(otherAdmin, "super-admin");
 
   return { admin, node, group, otherAdmin };
 }
