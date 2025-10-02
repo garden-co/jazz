@@ -2028,6 +2028,57 @@ describe("Creating and finding unique CoMaps", async () => {
     expect(activeEvent).not.toEqual(oldActiveEvent);
   });
 
+  test("upsertUnique returns existing value unchanged when ifExists: return", async () => {
+    // Schema
+    const Event = co.map({
+      title: z.string(),
+      identifier: z.string(),
+      external_id: z.string(),
+    });
+
+    // Data
+    const oldSourceData = {
+      title: "Old Event Title",
+      identifier: "test-event-identifier",
+      _id: "test-event-external-id",
+    };
+    const newSourceData = {
+      title: "New Event Title",
+      identifier: "test-event-identifier",
+      _id: "test-event-external-id",
+    };
+    expect(oldSourceData.identifier).toEqual(newSourceData.identifier);
+    const workspace = Group.create();
+    const oldActiveEvent = Event.create(
+      {
+        title: oldSourceData.title,
+        identifier: oldSourceData.identifier,
+        external_id: oldSourceData._id,
+      },
+      { unique: oldSourceData.identifier, owner: workspace },
+    );
+
+    // Upserting with ifExists: 'return' should return the existing value unchanged
+    const activeEvent = await Event.upsertUnique({
+      value: {
+        title: newSourceData.title,
+        identifier: newSourceData.identifier,
+        external_id: newSourceData._id,
+      },
+      unique: newSourceData.identifier,
+      owner: workspace,
+      ifExists: "return",
+    });
+
+    expect(activeEvent).toEqual({
+      title: oldSourceData.title,
+      identifier: oldSourceData.identifier,
+      external_id: oldSourceData._id,
+    });
+
+    expect(activeEvent).toEqual(oldActiveEvent);
+  });
+
   test("upserting a non-existent value with resolve", async () => {
     const Project = co.map({
       name: z.string(),
@@ -2265,6 +2316,241 @@ describe("Creating and finding unique CoMaps", async () => {
     expect(updatedOrg.projects.length).toBe(1);
     expect(updatedOrg.projects.at(0)?.name).toEqual("My project");
     expect(updatedOrg.$jazz.id).toEqual(myOrg.$jazz.id);
+  });
+
+  test("upsertUnique returns existing value unchanged with ifExists: return", async () => {
+    // Schema
+    const Event = co.map({
+      title: z.string(),
+      identifier: z.string(),
+      external_id: z.string(),
+    });
+
+    // Data
+    const oldSourceData = {
+      title: "Old Event Title",
+      identifier: "test-event-identifier",
+      _id: "test-event-external-id",
+    };
+    const newSourceData = {
+      title: "New Event Title",
+      identifier: "test-event-identifier",
+      _id: "test-event-external-id",
+    };
+    expect(oldSourceData.identifier).toEqual(newSourceData.identifier);
+    const workspace = Group.create();
+    const oldActiveEvent = Event.create(
+      {
+        title: oldSourceData.title,
+        identifier: oldSourceData.identifier,
+        external_id: oldSourceData._id,
+      },
+      { unique: oldSourceData.identifier, owner: workspace },
+    );
+
+    // Upserting with ifExists: 'return'
+    const activeEvent = await Event.upsertUnique({
+      value: {
+        title: newSourceData.title,
+        identifier: newSourceData.identifier,
+        external_id: newSourceData._id,
+      },
+      unique: newSourceData.identifier,
+      owner: workspace,
+      ifExists: "return",
+    });
+    expect(activeEvent).toEqual({
+      title: oldSourceData.title,
+      identifier: oldSourceData.identifier,
+      external_id: oldSourceData._id,
+    });
+    expect(activeEvent).toEqual(oldActiveEvent);
+  });
+
+  test("upsertUnique returns existing value unchanged with resolve and ifExists: return", async () => {
+    const Project = co.map({
+      name: z.string(),
+    });
+    const Organisation = co.map({
+      name: z.string(),
+      projects: co.list(Project),
+    });
+    const workspace = Group.create();
+    const initialProject = await Project.upsertUnique({
+      value: {
+        name: "My project",
+      },
+      unique: "first-project",
+      owner: workspace,
+    });
+    assert(initialProject);
+    expect(initialProject).not.toBeNull();
+    expect(initialProject.name).toEqual("My project");
+
+    const myOrg = await Organisation.upsertUnique({
+      value: {
+        name: "My organisation",
+        projects: co.list(Project).create([initialProject], workspace),
+      },
+      unique: "my-org",
+      owner: workspace,
+      resolve: {
+        projects: {
+          $each: true,
+        },
+      },
+    });
+    assert(myOrg);
+    expect(myOrg).not.toBeNull();
+    expect(myOrg.name).toEqual("My organisation");
+    expect(myOrg.projects.length).toBe(1);
+    expect(myOrg.projects.at(0)?.name).toEqual("My project");
+
+    const updatedProject = await Project.upsertUnique({
+      value: {
+        name: "My updated project",
+      },
+      unique: "first-project",
+      owner: workspace,
+      ifExists: "return",
+    });
+
+    assert(updatedProject);
+    expect(updatedProject).not.toBeNull();
+    expect(updatedProject).toEqual(initialProject);
+    expect(updatedProject.name).toEqual("My project");
+    expect(myOrg.projects.length).toBe(1);
+    expect(myOrg.projects.at(0)?.name).toEqual("My project");
+  });
+  test("upsertUnique returns existing partially loaded value unchanged with resolve and ifExists: return", async () => {
+    const Project = co.map({
+      name: z.string(),
+    });
+    const Organisation = co.map({
+      name: z.string(),
+      projects: co.list(Project),
+    });
+    const publicAccess = Group.create();
+    publicAccess.addMember("everyone", "writer");
+
+    const initialProject = await Project.upsertUnique({
+      value: {
+        name: "My project",
+      },
+      unique: "this-project",
+      owner: publicAccess,
+    });
+    assert(initialProject);
+    expect(initialProject).not.toBeNull();
+    expect(initialProject.name).toEqual("My project");
+    const fullProjectList = co.list(Project).create([initialProject], {
+      unique: "my-project-list",
+      owner: publicAccess,
+    });
+
+    const myOrg = await Organisation.upsertUnique({
+      value: {
+        name: "My organisation",
+        projects: fullProjectList,
+      },
+      unique: "my-org",
+      owner: publicAccess,
+      resolve: {
+        projects: {
+          $each: true,
+        },
+      },
+    });
+    assert(myOrg);
+
+    const account = await createJazzTestAccount({
+      isCurrentActiveAccount: true,
+    });
+
+    const shallowProjectList = await co
+      .list(Project)
+      .load(fullProjectList.$jazz.id, {
+        loadAs: account,
+      });
+    assert(shallowProjectList);
+
+    const publicAccessAsNewAccount = await Group.load(publicAccess.$jazz.id, {
+      loadAs: account,
+    });
+    assert(publicAccessAsNewAccount);
+
+    const updatedOrg = await Organisation.upsertUnique({
+      value: {
+        name: "My organisation",
+        projects: shallowProjectList,
+      },
+      unique: "my-org",
+      owner: publicAccessAsNewAccount,
+      resolve: {
+        projects: {
+          $each: true,
+        },
+      },
+      ifExists: "return",
+    });
+
+    assert(updatedOrg);
+
+    expect(updatedOrg.projects.$jazz.id).toEqual(fullProjectList.$jazz.id);
+    expect(updatedOrg.projects.length).toBe(1);
+    expect(updatedOrg.projects.at(0)?.name).toEqual("My project");
+    expect(updatedOrg.$jazz.id).toEqual(myOrg.$jazz.id);
+  });
+
+  test("getOrCreateUnique returns existing value unchanged (equivalent to upsertUnique with ifExists: return)", async () => {
+    // Schema
+    const Event = co.map({
+      title: z.string(),
+      identifier: z.string(),
+      external_id: z.string(),
+    });
+
+    // Data
+    const oldSourceData = {
+      title: "Old Event Title",
+      identifier: "test-event-identifier",
+      _id: "test-event-external-id",
+    };
+    const newSourceData = {
+      title: "New Event Title",
+      identifier: "test-event-identifier",
+      _id: "test-event-external-id",
+    };
+    expect(oldSourceData.identifier).toEqual(newSourceData.identifier);
+    const workspace = Group.create();
+    const oldActiveEvent = Event.create(
+      {
+        title: oldSourceData.title,
+        identifier: oldSourceData.identifier,
+        external_id: oldSourceData._id,
+      },
+      {
+        unique: oldSourceData.identifier,
+        owner: workspace,
+      },
+    );
+
+    // getOrCreateUnique should return the existing value unchanged
+    const activeEvent = await Event.getOrCreateUnique({
+      value: {
+        title: newSourceData.title,
+        identifier: newSourceData.identifier,
+        external_id: newSourceData._id,
+      },
+      unique: oldSourceData.identifier,
+      owner: workspace,
+    });
+    expect(activeEvent).toEqual({
+      title: oldSourceData.title,
+      identifier: oldSourceData.identifier,
+      external_id: oldSourceData._id,
+    });
+    expect(activeEvent).toEqual(oldActiveEvent);
   });
 
   test("complex discriminated union", () => {
