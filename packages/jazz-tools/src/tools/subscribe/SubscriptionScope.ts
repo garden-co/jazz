@@ -17,7 +17,7 @@ import { applyCoValueMigrations } from "../lib/migration.js";
 import { CoValueCoreSubscription } from "./CoValueCoreSubscription.js";
 import { JazzError, type JazzErrorIssue } from "./JazzError.js";
 import type { BranchDefinition, SubscriptionValue, Unloaded } from "./types.js";
-import { CoValueLoadingState } from "./types.js";
+import { CoValueLoadingState, CoValueUnloadedState } from "./types.js";
 import { createCoValue, myRoleForRawValue } from "./utils.js";
 
 export class SubscriptionScope<D extends CoValue> {
@@ -288,29 +288,29 @@ export class SubscriptionScope<D extends CoValue> {
     return this.pendingLoadedChildren.size === 0;
   }
 
-  getCurrentValue(): MaybeLoaded<D> {
+  getCurrentValue(): D | CoValueUnloadedState {
     if (
       this.value.type === CoValueLoadingState.UNAUTHORIZED ||
       this.value.type === CoValueLoadingState.UNAVAILABLE
     ) {
       console.error(this.value.toString());
-      return createUnloadedCoValue(this.id, this.value.type);
+      return this.value.type;
     }
 
     if (!this.shouldSendUpdates()) {
-      return createUnloadedCoValue(this.id, CoValueLoadingState.UNLOADED);
+      return CoValueLoadingState.UNLOADED;
     }
 
     if (this.errorFromChildren) {
       console.error(this.errorFromChildren.toString());
-      return createUnloadedCoValue(this.id, this.errorFromChildren.type);
+      return this.errorFromChildren.type;
     }
 
     if (this.value.type === CoValueLoadingState.LOADED) {
       return this.value.value;
     }
 
-    return createUnloadedCoValue(this.id, CoValueLoadingState.UNLOADED);
+    return CoValueLoadingState.UNLOADED;
   }
 
   isStreaming() {
@@ -433,7 +433,7 @@ export class SubscriptionScope<D extends CoValue> {
     const value = this.getCurrentValue();
 
     // If the value is available, trigger the listener
-    if (value.$jazzState === CoValueLoadingState.LOADED) {
+    if (typeof value !== "string") {
       listener({
         type: CoValueLoadingState.LOADED,
         value,

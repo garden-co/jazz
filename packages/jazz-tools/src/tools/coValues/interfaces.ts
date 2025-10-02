@@ -9,6 +9,7 @@ import {
   AnonymousJazzAgent,
   CoValueClassOrSchema,
   CoValueLoadingState,
+  CoValueUnloadedState,
   type Group,
   Loaded,
   MaybeLoaded,
@@ -100,10 +101,7 @@ export type ID<T> = string;
 
 export function createUnloadedCoValue<T extends CoValue>(
   id: ID<T>,
-  jazzState:
-    | typeof CoValueLoadingState.UNLOADED
-    | typeof CoValueLoadingState.UNAVAILABLE
-    | typeof CoValueLoadingState.UNAUTHORIZED,
+  jazzState: CoValueUnloadedState,
 ): Unloaded2<T> {
   return {
     $jazz: { id },
@@ -576,7 +574,7 @@ function loadContentPiecesFromSubscription(
 
   const currentValue = subscription.getCurrentValue();
 
-  if (currentValue.$jazzState === CoValueLoadingState.LOADED) {
+  if (typeof currentValue !== "string") {
     const core = currentValue.$jazz.raw.core as AvailableCoValueCore;
     loadContentPiecesFromCoValue(core, valuesExported, contentPieces);
   }

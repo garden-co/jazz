@@ -13,15 +13,20 @@ import {
   AnyAccountSchema,
   CoValue,
   CoValueClassOrSchema,
+  CoValueLoadingState,
+  CoValueUnloadedState,
   InboxSender,
   InstanceOfSchema,
   JazzContextManager,
   JazzContextType,
   Loaded,
+  MaybeLoaded,
+  Unloaded2,
   ResolveQuery,
   ResolveQueryStrict,
   SubscriptionScope,
   coValueClassFromCoValueClassOrSchema,
+  createUnloadedCoValue,
   type BranchDefinition,
 } from "jazz-tools";
 import { JazzContext, JazzContextManagerContext } from "./provider.js";
@@ -164,6 +169,32 @@ export function useCoValueSubscription<
   return subscription.subscription as CoValueSubscription<S, R>;
 }
 
+const unloadedCoValueCache = new Map<string, Unloaded2<CoValue>>();
+function unavailableCoValue(id: string, jazzState: CoValueUnloadedState) {
+  const coValueId = id ?? "";
+  const cacheKey = `${id}-${jazzState}`;
+  const cachedUnloadedCoValue = unloadedCoValueCache.get(cacheKey);
+  if (cachedUnloadedCoValue) {
+    return cachedUnloadedCoValue;
+  }
+  const unloadedCoValue = createUnloadedCoValue(coValueId, jazzState);
+  unloadedCoValueCache.set(cacheKey, unloadedCoValue);
+  return unloadedCoValue;
+}
+
+function getCurrentValue<C extends CoValue>(
+  subscription: SubscriptionScope<C> | null,
+): MaybeLoaded<C> {
+  if (!subscription) {
+    return unavailableCoValue("", CoValueLoadingState.UNAVAILABLE);
+  }
+  const value = subscription.getCurrentValue();
+  if (typeof value === "string") {
+    return unavailableCoValue(subscription.id, value);
+  }
+  return value;
+}
+
 /**
  * React hook for subscribing to CoValues and handling loading states.
  *
@@ -278,10 +309,10 @@ export function useCoState<
      */
     unstable_branch?: BranchDefinition;
   },
-): Loaded<S, R> | undefined | null {
+): MaybeLoaded<Loaded<S, R>> {
   const subscription = useCoValueSubscription(Schema, id, options);
 
-  const value = React.useSyncExternalStore<Loaded<S, R> | undefined | null>(
+  const value = React.useSyncExternalStore<MaybeLoaded<Loaded<S, R>>>(
     React.useCallback(
       (callback) => {
         if (!subscription) {
@@ -292,8 +323,8 @@ export function useCoState<
       },
       [subscription],
     ),
-    () => (subscription ? subscription.getCurrentValue() : null),
-    () => (subscription ? subscription.getCurrentValue() : null),
+    () => getCurrentValue(subscription),
+    () => getCurrentValue(subscription),
   );
 
   return value;
@@ -432,7 +463,7 @@ export function useCoStateWithSelector<
     /** Resolve query to specify which nested CoValues to load */
     resolve?: ResolveQueryStrict<S, R>;
     /** Select which value to return */
-    select: (value: Loaded<S, R> | undefined | null) => TSelectorReturn;
+    select: (value: MaybeLoaded<Loaded<S, R>>) => TSelectorReturn;
     /** Equality function to determine if the selected value has changed, defaults to `Object.is` */
     equalityFn?: (a: TSelectorReturn, b: TSelectorReturn) => boolean;
     /**
@@ -456,7 +487,7 @@ export function useCoStateWithSelector<
   const subscription = useCoValueSubscription(Schema, id, options);
 
   return useSyncExternalStoreWithSelector<
-    Loaded<S, R> | undefined | null,
+    MaybeLoaded<Loaded<S, R>>,
     TSelectorReturn
   >(
     React.useCallback(
@@ -469,8 +500,8 @@ export function useCoStateWithSelector<
       },
       [subscription],
     ),
-    () => (subscription ? subscription.getCurrentValue() : null),
-    () => (subscription ? subscription.getCurrentValue() : null),
+    () => getCurrentValue(subscription),
+    () => getCurrentValue(subscription),
     options.select,
     options.equalityFn ?? Object.is,
   );
@@ -661,8 +692,7 @@ export function useAccount<
     unstable_branch?: BranchDefinition;
   },
 ): {
-  // TODO return MaybeLoaded
-  me: Loaded<A, R> | undefined | null;
+  me: MaybeLoaded<Loaded<A, R>>;
   agent: AnonymousJazzAgent | Loaded<A, true>;
   logOut: () => void;
 } {
@@ -671,7 +701,7 @@ export function useAccount<
 
   const agent = getCurrentAccountFromContextManager(contextManager);
 
-  const value = React.useSyncExternalStore<Loaded<A, R> | undefined | null>(
+  const value = React.useSyncExternalStore<MaybeLoaded<Loaded<A, R>>>(
     React.useCallback(
       (callback) => {
         if (!subscription) {
@@ -682,8 +712,8 @@ export function useAccount<
       },
       [subscription],
     ),
-    () => (subscription ? subscription.getCurrentValue() : null),
-    () => (subscription ? subscription.getCurrentValue() : null),
+    () => getCurrentValue(subscription),
+    () => getCurrentValue(subscription),
   );
 
   return {
@@ -749,7 +779,7 @@ export function useAccountWithSelector<
     /** Resolve query to specify which nested CoValues to load from the account */
     resolve?: ResolveQueryStrict<A, R>;
     /** Select which value to return from the account data */
-    select: (account: Loaded<A, R> | undefined | null) => TSelectorReturn;
+    select: (account: MaybeLoaded<Loaded<A, R>>) => TSelectorReturn;
     /** Equality function to determine if the selected value has changed, defaults to `Object.is` */
     equalityFn?: (a: TSelectorReturn, b: TSelectorReturn) => boolean;
     /**
@@ -773,7 +803,7 @@ export function useAccountWithSelector<
   const subscription = useAccountSubscription(AccountSchema, options);
 
   return useSyncExternalStoreWithSelector<
-    Loaded<A, R> | undefined | null,
+    MaybeLoaded<Loaded<A, R>>,
     TSelectorReturn
   >(
     React.useCallback(
@@ -786,8 +816,8 @@ export function useAccountWithSelector<
       },
       [subscription],
     ),
-    () => (subscription ? subscription.getCurrentValue() : null),
-    () => (subscription ? subscription.getCurrentValue() : null),
+    () => getCurrentValue(subscription),
+    () => getCurrentValue(subscription),
     options.select,
     options.equalityFn ?? Object.is,
   );

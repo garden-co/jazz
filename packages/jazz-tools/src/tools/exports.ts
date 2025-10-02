@@ -56,6 +56,7 @@ export {
   exportCoValue,
   importContentPieces,
   Ref,
+  createUnloadedCoValue,
 } from "./internal.js";
 
 export {
@@ -105,7 +106,9 @@ export {
   type InstanceOfSchemaCoValuesMaybeLoaded,
   type CoValueClassOrSchema,
   CoValueLoadingState,
+  CoValueUnloadedState,
   type MaybeLoaded,
+  type Unloaded2,
   type Loaded,
   type BaseAccountShape,
   type DefaultAccountShape,

@@ -1,6 +1,7 @@
 // @vitest-environment happy-dom
 
-import { Group, RefsToResolve, co, z } from "jazz-tools";
+import { CoValueLoadingState, Group, RefsToResolve, co, z } from "jazz-tools";
+import { assertLoaded } from "jazz-tools/testing";
 import { assert, beforeEach, describe, expect, it } from "vitest";
 import { useAccount, useJazzContextManager } from "../hooks.js";
 import { useIsAuthenticated } from "../index.js";
@@ -61,7 +62,10 @@ describe("useAccount", () => {
       },
     );
 
-    expect(result.current?.me?.root?.value).toBe("123");
+    assertLoaded(result.current.me);
+    // @ts-expect-error TODO fix: profile and root are marked as MaybeLoaded in Account, and thus not narrowed
+    // down by deep loading
+    expect(result.current.me.root.value).toBe("123");
   });
 
   it("should be in sync with useIsAuthenticated when logOut is called", async () => {
@@ -216,7 +220,7 @@ describe("useAccount", () => {
       },
     );
 
-    expect(result.current.me).toBe(null);
+    expect(result.current.me.$jazzState).toBe(CoValueLoadingState.UNAVAILABLE);
     expect(result.current.agent).toBe(account.guest);
   });
 
@@ -279,14 +283,14 @@ describe("useAccount", () => {
 
     expect(result.current).not.toBeNull();
 
-    const branchAccount = result.current.branchAccount;
-    const mainAccount = result.current.mainAccount;
+    const branchAccount = result.current.branchAccount.me;
+    const mainAccount = result.current.mainAccount.me;
 
-    assert(branchAccount?.me);
-    assert(mainAccount?.me);
+    assertLoaded(branchAccount);
+    assertLoaded(mainAccount);
 
     act(() => {
-      branchAccount.me?.root.$jazz.applyDiff({
+      branchAccount.root.$jazz.applyDiff({
         name: "John Smith",
         age: 31,
         email: "john.smith@example.com",
@@ -294,21 +298,21 @@ describe("useAccount", () => {
     });
 
     // Verify the branch has the changes
-    expect(branchAccount.me.root?.name).toBe("John Smith");
-    expect(branchAccount.me.root?.age).toBe(31);
-    expect(branchAccount.me.root?.email).toBe("john.smith@example.com");
+    expect(branchAccount.root.name).toBe("John Smith");
+    expect(branchAccount.root.age).toBe(31);
+    expect(branchAccount.root.email).toBe("john.smith@example.com");
 
     // Verify the original is unchanged
-    expect(mainAccount.me.root?.name).toBe("John Doe");
-    expect(mainAccount.me.root?.age).toBe(30);
-    expect(mainAccount.me.root?.email).toBe("john@example.com");
+    expect(mainAccount.root.name).toBe("John Doe");
+    expect(mainAccount.root.age).toBe(30);
+    expect(mainAccount.root.email).toBe("john@example.com");
 
     // Merge the branch back
-    branchAccount.me.root.$jazz.unstable_merge();
+    branchAccount.root.$jazz.unstable_merge();
 
     // Verify the original now has the merged changes
-    expect(mainAccount.me.root?.name).toBe("John Smith");
-    expect(mainAccount.me.root?.age).toBe(31);
-    expect(mainAccount.me.root?.email).toBe("john.smith@example.com");
+    expect(mainAccount.root.name).toBe("John Smith");
+    expect(mainAccount.root.age).toBe(31);
+    expect(mainAccount.root.email).toBe("john.smith@example.com");
   });
 });
