@@ -495,7 +495,6 @@ export class CoMap extends CoValueBase implements CoValue {
       unique: CoValueUniqueness["uniqueness"];
       owner: Account | Group;
       resolve?: RefsToResolveStrict<M, R>;
-      ifExists?: "create" | "return";
     },
   ): Promise<Resolved<M, R> | null> {
     const mapId = CoMap._findUnique(
@@ -514,14 +513,10 @@ export class CoMap extends CoValueBase implements CoValue {
         owner: options.owner,
         unique: options.unique,
       }) as Resolved<M, R>;
-    } else if (options.ifExists !== "return") {
+    } else {
       (map as M).$jazz.applyDiff(
         options.value as unknown as Partial<CoMapInit<M>>,
       );
-    }
-
-    if (map && options.ifExists === "return") {
-      return map;
     }
 
     return await loadCoValueWithoutMe(this, mapId, {
@@ -564,9 +559,28 @@ export class CoMap extends CoValueBase implements CoValue {
       resolve?: RefsToResolveStrict<M, R>;
     },
   ): Promise<Resolved<M, R> | null> {
-    return (this as any).upsertUnique({
+    const mapId = CoMap._findUnique(
+      options.unique,
+      options.owner.$jazz.id,
+      options.owner.$jazz.loadedAs,
+    );
+    let map: Resolved<M, R> | null = await loadCoValueWithoutMe(this, mapId, {
       ...options,
-      ifExists: "return",
+      loadAs: options.owner.$jazz.loadedAs,
+      skipRetry: true,
+    });
+    if (!map) {
+      const instance = new this();
+      map = CoMap._createCoMap(instance, options.value, {
+        owner: options.owner,
+        unique: options.unique,
+      }) as Resolved<M, R>;
+    }
+
+    return await loadCoValueWithoutMe(this, mapId, {
+      ...options,
+      loadAs: options.owner.$jazz.loadedAs,
+      skipRetry: true,
     });
   }
 
