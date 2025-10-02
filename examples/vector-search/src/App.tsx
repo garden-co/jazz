@@ -45,7 +45,7 @@ function App() {
             similarity: value.embedding.$jazz.cosineSimilarity(queryEmbedding),
           }))
           .sort((a, b) => b.similarity - a.similarity)
-          .filter((result) => result.similarity > 0.5);
+          .slice(0, 5);
       },
     },
   );
