@@ -1,7 +1,7 @@
 use base64::{engine::general_purpose::URL_SAFE, Engine as _};
 use ed25519_dalek::{Signature as Ed25519Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use salsa20::{
-    cipher::{KeyIvInit, StreamCipher},
+    cipher::{Key, KeyIvInit, StreamCipher},
     XSalsa20,
 };
 use serde::{Deserialize, Serialize};
@@ -10,6 +10,12 @@ use serde_json::{value::RawValue, Number, Value as JsonValue};
 // Re-export lzy for convenience
 #[cfg(feature = "lzy")]
 pub use lzy;
+
+pub mod nonce;
+pub use nonce::*;
+
+pub mod cache;
+pub use cache::*;
 
 pub mod error;
 pub use error::*;
@@ -180,12 +186,12 @@ pub enum TransactionMode {
 
 #[derive(Clone)]
 pub struct SessionLogInternal {
-    co_id: CoID,
-    session_id: SessionID,
     public_key: Option<VerifyingKey>,
     hasher: blake3::Hasher,
     transactions_json: Vec<String>,
     last_signature: Option<Signature>,
+    nonce_generator: NonceGenerator,
+    crypto_cache: CryptoCache,
 }
 
 impl SessionLogInternal {
@@ -207,12 +213,12 @@ impl SessionLogInternal {
         };
 
         Self {
-            co_id,
-            session_id,
             public_key,
             hasher,
             transactions_json: Vec::new(),
             last_signature: None,
+            nonce_generator: NonceGenerator::new(co_id, session_id),
+            crypto_cache: CryptoCache::new(),
         }
     }
 
@@ -305,22 +311,21 @@ impl SessionLogInternal {
                 let tx_index = self.transactions_json.len() as u32;
 
                 // Generate a unique nonce for this transaction.
-                let nonce_material = self.generate_nonce_material(tx_index);
-                let nonce = self.generate_json_nonce(&nonce_material);
+                let nonce = self.nonce_generator.get_nonce(tx_index);
 
                 // Prepare the secret key bytes for encryption.
-                let secret_key_bytes: [u8; 32] = (&key_secret).into();
+                let key: Key<XSalsa20> = self.crypto_cache.get_xsalsa20_key(&key_secret);
 
                 // Encrypt the changes JSON.
                 let mut ciphertext = changes_json.as_bytes().to_vec();
-                let mut cipher = XSalsa20::new(&secret_key_bytes.into(), &nonce.into());
+                let mut cipher = XSalsa20::new(&key, &nonce.into());
                 cipher.apply_keystream(&mut ciphertext);
                 let encrypted_str = format!("encrypted_U{}", URL_SAFE.encode(&ciphertext));
 
                 // Optionally encrypt the meta field.
                 let encrypted_meta = meta.map(|meta| {
                     let mut ciphertext = meta.as_bytes().to_vec();
-                    let mut cipher = XSalsa20::new(&secret_key_bytes.into(), &nonce.into());
+                    let mut cipher = XSalsa20::new(&key, &nonce.into());
                     cipher.apply_keystream(&mut ciphertext);
 
                     let encrypted_meta = format!("encrypted_U{}", URL_SAFE.encode(&ciphertext));
@@ -365,7 +370,7 @@ impl SessionLogInternal {
             "\"hash_z{}\"",
             bs58::encode(new_hash.as_bytes()).into_string()
         );
-        let signing_key: SigningKey = signer_secret.into();
+        let signing_key: SigningKey = self.crypto_cache.get_ed25519_signing_key(signer_secret);
         let new_signature: Signature = signing_key
             .sign(new_hash_encoded_stringified.as_bytes())
             .into();
@@ -393,8 +398,7 @@ impl SessionLogInternal {
         match tx {
             Transaction::Private(private_tx) => {
                 // For private transactions, decrypt the encrypted_changes field.
-                let nonce_material = self.generate_nonce_material(tx_index);
-                let nonce = self.generate_json_nonce(&nonce_material);
+                let nonce = self.nonce_generator.get_nonce(tx_index);
 
                 let encrypted_val = private_tx.encrypted_changes.value;
                 let prefix = "encrypted_U";
@@ -407,8 +411,9 @@ impl SessionLogInternal {
                 let mut ciphertext = URL_SAFE.decode(ciphertext_b64)?;
 
                 // Decrypt using XSalsa20.
-                let secret_key_bytes: [u8; 32] = (&key_secret).into();
-                let mut cipher = XSalsa20::new((&secret_key_bytes).into(), &nonce.into());
+                let key = self.crypto_cache.get_xsalsa20_key(&key_secret);
+
+                let mut cipher = XSalsa20::new(&key, &nonce.into());
                 cipher.apply_keystream(&mut ciphertext);
 
                 Ok(String::from_utf8(ciphertext)?)
@@ -436,8 +441,7 @@ impl SessionLogInternal {
             Transaction::Private(private_tx) => {
                 // If meta is present, decrypt it.
                 if let Some(encrypted_meta) = private_tx.meta {
-                    let nonce_material = self.generate_nonce_material(tx_index);
-                    let nonce = self.generate_json_nonce(&nonce_material);
+                    let nonce = self.nonce_generator.get_nonce(tx_index);
 
                     let encrypted_val = encrypted_meta.value;
                     let prefix = "encrypted_U";
@@ -450,8 +454,8 @@ impl SessionLogInternal {
                     let mut ciphertext = URL_SAFE.decode(ciphertext_b64)?;
 
                     // Decrypt using XSalsa20.
-                    let secret_key_bytes: [u8; 32] = (&key_secret).into();
-                    let mut cipher = XSalsa20::new((&secret_key_bytes).into(), &nonce.into());
+                    let key: Key<XSalsa20> = self.crypto_cache.get_xsalsa20_key(&key_secret);
+                    let mut cipher = XSalsa20::new(&key, &nonce.into());
                     cipher.apply_keystream(&mut ciphertext);
 
                     Ok(Some(String::from_utf8(ciphertext)?))
@@ -462,38 +466,6 @@ impl SessionLogInternal {
             // For trusting transactions, just return the plain meta field.
             Transaction::Trusting(trusting_tx) => Ok(trusting_tx.meta),
         }
-    }
-
-    /// Generate the nonce material (as JSON) for a given transaction index.
-    /// This ensures each transaction gets a unique nonce based on session and index.
-    fn generate_nonce_material(&self, tx_index: u32) -> JsonValue {
-        JsonValue::Object(serde_json::Map::from_iter(vec![
-            ("in".to_string(), JsonValue::String(self.co_id.0.clone())),
-            (
-                "tx".to_string(),
-                serde_json::to_value(TransactionID {
-                    session_id: self.session_id.clone(),
-                    tx_index,
-                })
-                .unwrap(),
-            ),
-        ]))
-    }
-
-    /// Generate a 24-byte nonce from arbitrary bytes using blake3.
-    fn generate_nonce(&self, material: &[u8]) -> [u8; 24] {
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(material);
-        let mut output = [0u8; 24];
-        let mut output_reader = hasher.finalize_xof();
-        output_reader.fill(&mut output);
-        output
-    }
-
-    /// Generate a 24-byte nonce from a JSON value by serializing it and hashing.
-    fn generate_json_nonce(&self, material: &JsonValue) -> [u8; 24] {
-        let stable_json = serde_json::to_string(&material).unwrap();
-        self.generate_nonce(stable_json.as_bytes())
     }
 }
 
