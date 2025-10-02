@@ -16,9 +16,12 @@ import {
   coValueClassFromCoValueClassOrSchema,
   createAnonymousJazzContext,
   createJazzContext,
+  CoValue,
+  LoadedAndRequired,
+  MaybeLoaded,
+  CoValueLoadingState,
   randomSessionProvider,
 } from "./internal.js";
-export { assertLoaded } from "./tests/utils.js";
 
 const syncServer: { current: LocalNode | null; asyncPeers: boolean } = {
   current: null,
@@ -385,4 +388,12 @@ export async function setupJazzTestSync({
   syncServer.asyncPeers = asyncPeers;
 
   return account;
+}
+
+export function assertLoaded<T extends MaybeLoaded<CoValue>>(
+  coValue: T,
+): asserts coValue is LoadedAndRequired<T> {
+  if (coValue.$jazzState !== CoValueLoadingState.LOADED) {
+    throw new Error("CoValue is not loaded");
+  }
 }
