@@ -1,5 +1,14 @@
 # jazz-tools
 
+## 0.18.21
+
+### Patch Changes
+
+- 6819f20: Implements SSR options for SvelteKit
+  - cojson@0.18.21
+  - cojson-storage-indexeddb@0.18.21
+  - cojson-transport-ws@0.18.21
+
 ## 0.18.20
 
 ### Patch Changes
