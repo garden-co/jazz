@@ -1,4 +1,4 @@
-import { ImageDefinition } from "jazz-tools";
+import { CoValueLoadingState, ImageDefinition } from "jazz-tools";
 import {
   type JSX,
   forwardRef,
@@ -9,7 +9,8 @@ import {
   useState,
 } from "react";
 import { highestResAvailable } from "../../media/index.js";
-import { useCoState } from "../hooks.js";
+import { useCoStateWithSelector } from "../hooks.js";
+import e from "cors";
 
 export type ImageProps = Omit<
   JSX.IntrinsicElements["img"],
@@ -78,7 +79,15 @@ export const Image = forwardRef<HTMLImageElement, ImageProps>(function Image(
   { imageId, width, height, ...props },
   ref,
 ) {
-  const image = useCoState(ImageDefinition, imageId);
+  const image = useCoStateWithSelector(ImageDefinition, imageId, {
+    select: (image) => {
+      if (image.$jazzState === CoValueLoadingState.LOADED) {
+        return image;
+      } else if (image.$jazzState === CoValueLoadingState.UNLOADED) {
+        return undefined;
+      } else return null;
+    },
+  });
   const lastBestImage = useRef<[string, string] | null>(null);
 
   /**

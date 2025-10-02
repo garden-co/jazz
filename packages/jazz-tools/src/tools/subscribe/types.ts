@@ -17,6 +17,11 @@ export const CoValueLoadingState = {
 export type CoValueLoadingState =
   (typeof CoValueLoadingState)[keyof typeof CoValueLoadingState];
 
+export type CoValueUnloadedState =
+  | typeof CoValueLoadingState.UNLOADED
+  | typeof CoValueLoadingState.UNAUTHORIZED
+  | typeof CoValueLoadingState.UNAVAILABLE;
+
 export type SubscriptionValue<D extends CoValue, R extends RefsToResolve<D>> =
   | {
       type: typeof CoValueLoadingState.LOADED;
