@@ -2007,7 +2007,10 @@ describe("Creating and finding unique CoMaps", async () => {
         identifier: oldSourceData.identifier,
         external_id: oldSourceData._id,
       },
-      workspace,
+      {
+        unique: oldSourceData.identifier,
+        owner: workspace,
+      },
     );
 
     // Upserting
@@ -2025,7 +2028,6 @@ describe("Creating and finding unique CoMaps", async () => {
       identifier: newSourceData.identifier,
       external_id: newSourceData._id,
     });
-    expect(activeEvent).not.toEqual(oldActiveEvent);
   });
 
   test("upserting a non-existent value with resolve", async () => {
