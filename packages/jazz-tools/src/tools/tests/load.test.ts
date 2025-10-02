@@ -2,6 +2,7 @@ import { waitFor } from "@testing-library/dom";
 import { cojsonInternals, emptyKnownState } from "cojson";
 import { assert, beforeEach, expect, test } from "vitest";
 import { Account, Group, co, z } from "../exports.js";
+import { CoValueLoadingState } from "../internal.js";
 import {
   createJazzTestAccount,
   getPeerConnectedToTestSyncServer,
@@ -34,13 +35,13 @@ test("load a value", async () => {
   expect(john?.name).toBe("John");
 });
 
-test("return null if id is invalid", async () => {
+test("return 'unavailable' if id is invalid", async () => {
   const Person = co.map({
     name: z.string(),
   });
 
   const john = await Person.load("test");
-  expect(john).toBeNull();
+  expect(john.$jazzState).toBe(CoValueLoadingState.UNAVAILABLE);
 });
 
 test("load a missing optional value (co.optional)", async () => {
@@ -161,7 +162,7 @@ test("retry an unavailable value", async () => {
   expect(john.name).toBe("John");
 });
 
-test("returns null if the value is unavailable after retries", async () => {
+test("returns 'unavailable' if the value is unavailable after retries", async () => {
   const Person = co.map({
     name: z.string(),
   });
@@ -183,7 +184,7 @@ test("returns null if the value is unavailable after retries", async () => {
 
   const john = await Person.load(map.$jazz.id, { loadAs: alice });
 
-  expect(john).toBeNull();
+  expect(john.$jazzState).toBe(CoValueLoadingState.UNAVAILABLE);
 });
 
 test("load works even when the coValue access is granted after the creation", async () => {

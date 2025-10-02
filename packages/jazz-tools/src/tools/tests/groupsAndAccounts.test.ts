@@ -122,7 +122,9 @@ describe("Group inheritance", () => {
       const mapAsReaderAfterUpdate = await TestMap.load(mapInChild.$jazz.id, {
         loadAs: reader,
       });
-      expect(mapAsReaderAfterUpdate).toBe(null);
+      expect(mapAsReaderAfterUpdate.$jazzState).toBe(
+        CoValueLoadingState.UNAUTHORIZED,
+      );
     });
   });
 
@@ -168,7 +170,9 @@ describe("Group inheritance", () => {
         loadAs: reader,
       },
     );
-    expect(mapAsReaderAfterUpdate).toBe(null);
+    expect(mapAsReaderAfterUpdate.$jazzState).toBe(
+      CoValueLoadingState.UNAUTHORIZED,
+    );
   });
 
   test("Group.getParentGroups should return the parent groups", async () => {
@@ -369,7 +373,7 @@ describe("Group inheritance", () => {
       const boardAsReader = await Board.load(board.$jazz.id, {
         loadAs: reader,
       });
-      expect(boardAsReader).toBeNull();
+      expect(boardAsReader.$jazzState).toBe(CoValueLoadingState.UNAUTHORIZED);
     });
   });
 });

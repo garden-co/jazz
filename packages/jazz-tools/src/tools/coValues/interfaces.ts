@@ -574,10 +574,10 @@ function loadContentPiecesFromSubscription(
 
   valuesExported.add(subscription.id);
 
-  const core = subscription.getCurrentValue()?.$jazz.raw
-    .core as AvailableCoValueCore;
+  const currentValue = subscription.getCurrentValue();
 
-  if (core) {
+  if (currentValue.$jazzState === CoValueLoadingState.LOADED) {
+    const core = currentValue.$jazz.raw.core as AvailableCoValueCore;
     loadContentPiecesFromCoValue(core, valuesExported, contentPieces);
   }
 

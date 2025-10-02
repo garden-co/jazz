@@ -13,7 +13,7 @@ import { Loaded } from "../implementation/zodSchema/zodSchema.js";
 import { Account } from "../index.js";
 import { createJazzTestAccount, setupJazzTestSync } from "../testing.js";
 import { assertLoaded, waitFor } from "./utils.js";
-import { TypeSym } from "../internal.js";
+import { CoValueLoadingState, TypeSym } from "../internal.js";
 
 const Crypto = await WasmCrypto.create();
 
@@ -263,7 +263,7 @@ describe("CoMap.Record", async () => {
         },
       });
 
-      expect(loadedPerson).toEqual(null);
+      expect(loadedPerson.$jazzState).toBe(CoValueLoadingState.UNAVAILABLE);
     });
 
     test("loading a locally available record using autoload for the refs", async () => {
@@ -494,7 +494,7 @@ describe("CoRecord unique methods", () => {
     expect(foundRecord.item2).toBe(2);
   });
 
-  test("loadUnique returns null for non-existent record", async () => {
+  test("loadUnique returns 'unavailable' for non-existent record", async () => {
     const ItemRecord = co.record(z.string(), z.number());
     const group = Group.create();
 
@@ -502,7 +502,7 @@ describe("CoRecord unique methods", () => {
       "non-existent",
       group.$jazz.id,
     );
-    expect(foundRecord).toBeNull();
+    expect(foundRecord.$jazzState).toBe(CoValueLoadingState.UNAVAILABLE);
   });
 
   test("upsertUnique creates new record when none exists", async () => {

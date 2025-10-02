@@ -474,7 +474,7 @@ describe("Deep loading with unauthorized account", async () => {
 
     const mapOnAlice = await TestMap.load(map.$jazz.id, { loadAs: alice });
 
-    expect(mapOnAlice).toBe(null);
+    expect(mapOnAlice.$jazzState).toBe(CoValueLoadingState.UNAUTHORIZED);
 
     expect(errorSpy).toHaveBeenCalledWith(
       `The current user (${alice.$jazz.id}) is not authorized to access this value from ${map.$jazz.id}`,
@@ -496,7 +496,9 @@ describe("Deep loading with unauthorized account", async () => {
       loadAs: alice,
     });
 
-    expect(mapWithListOnAlice).toBe(null);
+    expect(mapWithListOnAlice.$jazzState).toBe(
+      CoValueLoadingState.UNAUTHORIZED,
+    );
 
     expect(errorSpy).toHaveBeenCalledWith(
       `The current user (${alice.$jazz.id}) is not authorized to access this value from ${map.$jazz.id} on path list`,
@@ -530,7 +532,7 @@ describe("Deep loading with unauthorized account", async () => {
       loadAs: alice,
     });
 
-    expect(mapOnAlice).toBe(null);
+    expect(mapOnAlice.$jazzState).toBe(CoValueLoadingState.UNAUTHORIZED);
 
     expect(errorSpy).toHaveBeenCalledWith(
       `The current user (${alice.$jazz.id}) is not authorized to access this value from ${map.$jazz.id} on path list.0`,
@@ -612,7 +614,7 @@ describe("Deep loading with unauthorized account", async () => {
       loadAs: alice,
     });
 
-    expect(mapOnAlice).toBe(null);
+    expect(mapOnAlice.$jazzState).toBe(CoValueLoadingState.UNAUTHORIZED);
 
     expect(errorSpy).toHaveBeenCalledWith(
       `The current user (${alice.$jazz.id}) is not authorized to access this value from ${map.$jazz.id} on path list.0.stream`,
@@ -648,7 +650,7 @@ describe("Deep loading with unauthorized account", async () => {
       loadAs: alice,
     });
 
-    expect(mapOnAlice).toBe(null);
+    expect(mapOnAlice.$jazzState).toBe(CoValueLoadingState.UNAUTHORIZED);
 
     expect(errorSpy).toHaveBeenCalledWith(
       `The current user (${alice.$jazz.id}) is not authorized to access this value from ${map.$jazz.id} on path list.0.stream.${value.$jazz.id}`,
@@ -936,7 +938,7 @@ describe("Deep loading with unauthorized account", async () => {
       loadAs: alice,
     });
 
-    expect(user).toBeNull();
+    expect(user.$jazzState).toBe(CoValueLoadingState.UNAUTHORIZED);
   });
 });
 

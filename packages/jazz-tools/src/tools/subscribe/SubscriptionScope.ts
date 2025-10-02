@@ -5,11 +5,13 @@ import {
   CoMap,
   type CoValue,
   type ID,
+  MaybeLoaded,
   type RefEncoded,
   type RefsToResolve,
   TypeSym,
   instantiateRefEncodedFromRaw,
   isRefEncoded,
+  createUnloadedCoValue,
 } from "../internal.js";
 import { applyCoValueMigrations } from "../lib/migration.js";
 import { CoValueCoreSubscription } from "./CoValueCoreSubscription.js";
@@ -286,29 +288,29 @@ export class SubscriptionScope<D extends CoValue> {
     return this.pendingLoadedChildren.size === 0;
   }
 
-  getCurrentValue() {
+  getCurrentValue(): MaybeLoaded<D> {
     if (
       this.value.type === CoValueLoadingState.UNAUTHORIZED ||
       this.value.type === CoValueLoadingState.UNAVAILABLE
     ) {
       console.error(this.value.toString());
-      return null;
+      return createUnloadedCoValue(this.id, this.value.type);
     }
 
     if (!this.shouldSendUpdates()) {
-      return undefined;
+      return createUnloadedCoValue(this.id, CoValueLoadingState.UNLOADED);
     }
 
     if (this.errorFromChildren) {
       console.error(this.errorFromChildren.toString());
-      return null;
+      return createUnloadedCoValue(this.id, this.errorFromChildren.type);
     }
 
     if (this.value.type === CoValueLoadingState.LOADED) {
       return this.value.value;
     }
 
-    return undefined;
+    return createUnloadedCoValue(this.id, CoValueLoadingState.UNLOADED);
   }
 
   isStreaming() {
@@ -431,7 +433,7 @@ export class SubscriptionScope<D extends CoValue> {
     const value = this.getCurrentValue();
 
     // If the value is available, trigger the listener
-    if (value) {
+    if (value.$jazzState === CoValueLoadingState.LOADED) {
       listener({
         type: CoValueLoadingState.LOADED,
         value,
