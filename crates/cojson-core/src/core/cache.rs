@@ -3,7 +3,7 @@ use lru::LruCache;
 use salsa20::{cipher::Key, XSalsa20};
 use std::{cell::RefCell, num::NonZero};
 
-use crate::{KeySecret, SignerSecret};
+use crate::core::{KeySecret, SignerSecret};
 
 #[derive(Debug, Clone)]
 pub struct CryptoCache {
@@ -23,12 +23,12 @@ impl CryptoCache {
     pub fn get_xsalsa20_key(&self, key_secret: &KeySecret) -> Key<XSalsa20> {
         let mut cache = self.xsalsa20_key_cache.borrow_mut();
         if let Some(key) = cache.get(key_secret) {
-            return key.clone();
+            return *key;
         }
 
         let bytes: [u8; 32] = key_secret.into();
         let key: Key<XSalsa20> = bytes.into();
-        cache.put(key_secret.to_owned(), key.clone());
+        cache.put(key_secret.to_owned(), key);
         key
     }
 
@@ -42,5 +42,29 @@ impl CryptoCache {
         let signing_key: SigningKey = signer_secret.into();
         cache.put(signer_secret.to_owned(), signing_key.clone());
         signing_key
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_crypto_cache_different_keys() {
+        let crypto_cache = CryptoCache::new();
+        let key_secret = KeySecret(String::from("signer_z3FdM2ucYXUkbJQgPRf8R4Di6exd2sNPVaHaJHhQ8WAqi"));
+        let key = crypto_cache.get_xsalsa20_key(&key_secret);
+        let key2 = crypto_cache.get_xsalsa20_key(&key_secret);
+        assert_eq!(key, key2);
+    }
+
+    #[test]
+    fn test_crypto_cache_different_signer_secrets() {
+        let crypto_cache = CryptoCache::new();
+        let signer_secret = SignerSecret(String::from("signer_z3FdM2ucYXUkbJQgPRf8R4Di6exd2sNPVaHaJHhQ8WAqi"));
+        let signing_key = crypto_cache.get_ed25519_signing_key(&signer_secret);
+        let signing_key2 = crypto_cache.get_ed25519_signing_key(&signer_secret);
+        assert_eq!(signing_key, signing_key2);
     }
 }

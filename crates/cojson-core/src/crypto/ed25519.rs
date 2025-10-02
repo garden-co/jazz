@@ -1,4 +1,4 @@
-use crate::error::CryptoError;
+use crate::crypto::error::CryptoError;
 use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
 use rand::rngs::OsRng;
 

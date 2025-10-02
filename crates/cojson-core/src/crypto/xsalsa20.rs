@@ -1,4 +1,4 @@
-use crate::error::CryptoError;
+use crate::crypto::error::CryptoError;
 use crypto_secretbox::{
   aead::{Aead, KeyInit},
   XSalsa20Poly1305,

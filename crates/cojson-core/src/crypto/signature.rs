@@ -1,7 +1,7 @@
 use crate::crypto::ed25519::{
   ed25519_sign, ed25519_verify, ed25519_verifying_key,
 };
-use crate::error::CryptoError;
+use crate::crypto::error::CryptoError;
 use bs58;
 
 /// Internal function to sign a message using Ed25519.

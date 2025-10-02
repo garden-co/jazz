@@ -1,4 +1,4 @@
-use crate::{CoID, SessionID};
+use crate::core::{CoID, SessionID};
 use serde_json::Value as JsonValue;
 
 #[derive(Clone)]
@@ -52,4 +52,38 @@ impl NonceGenerator {
         let stable_json = serde_json::to_string(&material).unwrap();
         self.generate_nonce(stable_json.as_bytes())
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_nonce_generator() {
+        let nonce_generator = NonceGenerator::new(CoID(String::from("test_co_id")), SessionID(String::from("test_session_id")));
+        let nonce = nonce_generator.get_nonce(0);
+        assert_eq!(nonce.len(), 24);
+    }
+
+    #[test]
+    fn test_nonce_generator_different_transactions() {
+        let nonce_generator = NonceGenerator::new(CoID(String::from("test_co_id")), SessionID(String::from("test_session_id")));
+        let nonce = nonce_generator.get_nonce(0);
+        let nonce2 = nonce_generator.get_nonce(1);
+        assert_ne!(nonce.to_vec(), nonce2.to_vec());
+        assert_eq!(nonce.len(), 24);
+        assert_eq!(nonce2.len(), 24);
+    }
+
+    #[test]
+    fn test_nonce_generator_different_sessions() {
+        let nonce_generator = NonceGenerator::new(CoID(String::from("test_co_id")), SessionID(String::from("test_session_id")));
+        let nonce_generator2 = NonceGenerator::new(CoID(String::from("test_co_id")), SessionID(String::from("test_session_id_2")));
+        let nonce = nonce_generator.get_nonce(0);
+        let nonce2 = nonce_generator2.get_nonce(0);
+        assert_ne!(nonce.to_vec(), nonce2.to_vec());
+        assert_eq!(nonce.len(), 24);
+        assert_eq!(nonce2.len(), 24);
+    }
+
 }

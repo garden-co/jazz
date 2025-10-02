@@ -1,4 +1,4 @@
-use crate::error::CryptoError;
+use crate::crypto::error::CryptoError;
 use bs58;
 use x25519_dalek::{PublicKey, StaticSecret};
 

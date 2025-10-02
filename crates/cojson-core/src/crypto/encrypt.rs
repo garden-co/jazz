@@ -1,4 +1,4 @@
-use crate::error::CryptoError;
+use crate::crypto::error::CryptoError;
 use crate::hash::blake3::generate_nonce;
 use bs58;
 

@@ -1,6 +1,6 @@
-use cojson_core::{
+use cojson_core::core::{
   CoID, CoJsonCoreError, KeyID, KeySecret, SessionID, SessionLogInternal, Signature, SignerID,
-  SignerSecret, TransactionMode,
+  SignerSecret, TransactionMode, Transaction,
 };
 use napi_derive::napi;
 use serde::{Deserialize, Serialize};
@@ -125,7 +125,7 @@ impl SessionLog {
 
     // Extract encrypted_changes from the private transaction
     let result = match transaction {
-      cojson_core::Transaction::Private(private_tx) => PrivateTransactionResult {
+      Transaction::Private(private_tx) => PrivateTransactionResult {
         signature: signature.0,
         encrypted_changes: private_tx.encrypted_changes.value,
         meta: private_tx.meta.map(|meta| meta.value),

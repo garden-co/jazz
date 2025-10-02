@@ -1,6 +1,6 @@
 use crate::crypto::x25519::x25519_diffie_hellman;
 use crate::crypto::xsalsa20::{decrypt_xsalsa20_poly1305, encrypt_xsalsa20_poly1305};
-use crate::error::CryptoError;
+use crate::crypto::error::CryptoError;
 use crate::hash::blake3::generate_nonce;
 use bs58;
 
