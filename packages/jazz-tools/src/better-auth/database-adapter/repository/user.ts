@@ -27,11 +27,10 @@ export class UserRepository extends JazzRepository {
 
     const emailIndex = await this.loadEmailIndex(userEmail);
 
-    if (emailIndex.$jazzState !== CoValueLoadingState.LOADED) {
-      throw new Error("Cannot check if email exists");
-    }
-
-    if (emailIndex.user) {
+    if (
+      emailIndex.$jazzState === CoValueLoadingState.LOADED &&
+      emailIndex.user
+    ) {
       throw new Error("Email already exists");
     }
 
