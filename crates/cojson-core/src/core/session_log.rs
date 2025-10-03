@@ -1,6 +1,6 @@
 
 use base64::{engine::general_purpose::URL_SAFE, Engine as _};
-use ed25519_dalek::{Signature as Ed25519Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
 use salsa20::{
     cipher::{Key, KeyIvInit, StreamCipher},
     XSalsa20,
@@ -8,98 +8,10 @@ use salsa20::{
 use serde::{Deserialize, Serialize};
 use serde_json::{value::RawValue, Number, Value as JsonValue};
 use crate::core::{CryptoCache, NonceGenerator, CoJsonCoreError};
+use crate::core::keys::{SignerID, SignerSecret, Signature, KeyID, KeySecret, CoID, decode_z};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SessionID(pub String);
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct SignerID(pub String);
-
-impl From<VerifyingKey> for SignerID {
-    fn from(key: VerifyingKey) -> Self {
-        SignerID(format!(
-            "signer_z{}",
-            bs58::encode(key.to_bytes()).into_string()
-        ))
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct SignerSecret(pub String);
-
-impl From<SigningKey> for SignerSecret {
-    fn from(key: SigningKey) -> Self {
-        SignerSecret(format!(
-            "signerSecret_z{}",
-            bs58::encode(key.to_bytes()).into_string()
-        ))
-    }
-}
-
-impl From<&SignerSecret> for SigningKey {
-    fn from(val: &SignerSecret) -> Self {
-        let key_bytes = decode_z(&val.0).expect("Invalid key secret");
-        SigningKey::from_bytes(&key_bytes.try_into().expect("Invalid key secret length"))
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct Signature(pub String);
-
-impl From<Ed25519Signature> for Signature {
-    fn from(signature: Ed25519Signature) -> Self {
-        Signature(format!(
-            "signature_z{}",
-            bs58::encode(signature.to_bytes()).into_string()
-        ))
-    }
-}
-
-impl From<&Signature> for Ed25519Signature {
-    fn from(val: &Signature) -> Self {
-        let signature_bytes = decode_z(&val.0).expect("Invalid signature");
-        Ed25519Signature::from_bytes(
-            &signature_bytes
-                .try_into()
-                .expect("Invalid signature length"),
-        )
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct Hash(pub String);
-
-impl From<blake3::Hash> for Hash {
-    fn from(hash: blake3::Hash) -> Self {
-        Hash(format!(
-            "hash_z{}",
-            bs58::encode(hash.as_bytes()).into_string()
-        ))
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct KeyID(pub String);
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct KeySecret(pub String);
-
-impl From<&KeySecret> for [u8; 32] {
-    fn from(val: &KeySecret) -> Self {
-        let key_bytes = decode_z(&val.0).expect("Invalid key secret");
-        key_bytes.try_into().expect("Invalid key secret length")
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct CoID(pub String);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransactionID {
@@ -236,7 +148,7 @@ impl SessionLogInternal {
             if let Some(public_key) = self.public_key {
                 match public_key.verify(
                     new_hash_encoded_stringified.as_bytes(),
-                    &(new_signature.into()),
+                    &(new_signature.try_into()?),
                 ) {
                     Ok(()) => {}
                     Err(_) => {
@@ -276,7 +188,7 @@ impl SessionLogInternal {
         signer_secret: &SignerSecret,
         made_at: u64,
         meta: Option<String>,
-    ) -> (Signature, Transaction) {
+    ) -> Result<(Signature, Transaction), CoJsonCoreError> {
         // Build the transaction object depending on the mode.
         let new_tx = match mode {
             TransactionMode::Private { key_id, key_secret } => {
@@ -287,7 +199,7 @@ impl SessionLogInternal {
                 let nonce = self.nonce_generator.get_nonce(tx_index);
 
                 // Prepare the secret key bytes for encryption.
-                let key: Key<XSalsa20> = self.crypto_cache.get_xsalsa20_key(&key_secret);
+                let key: Key<XSalsa20> = self.crypto_cache.get_xsalsa20_key(&key_secret)?;
 
                 // Encrypt the changes JSON.
                 let mut ciphertext = changes_json.as_bytes().to_vec();
@@ -343,7 +255,7 @@ impl SessionLogInternal {
             "\"hash_z{}\"",
             bs58::encode(new_hash.as_bytes()).into_string()
         );
-        let signing_key: SigningKey = self.crypto_cache.get_ed25519_signing_key(signer_secret);
+        let signing_key: SigningKey = self.crypto_cache.get_ed25519_signing_key(signer_secret)?;
         let new_signature: Signature = signing_key
             .sign(new_hash_encoded_stringified.as_bytes())
             .into();
@@ -351,7 +263,7 @@ impl SessionLogInternal {
         // Update the last signature.
         self.last_signature = Some(new_signature.clone());
 
-        (new_signature, new_tx)
+        Ok((new_signature, new_tx))
     }
 
     /// Decrypt the changes JSON for the transaction at the given index.
@@ -384,7 +296,7 @@ impl SessionLogInternal {
                 let mut ciphertext = URL_SAFE.decode(ciphertext_b64)?;
 
                 // Decrypt using XSalsa20.
-                let key = self.crypto_cache.get_xsalsa20_key(&key_secret);
+                let key = self.crypto_cache.get_xsalsa20_key(&key_secret)?;
 
                 let mut cipher = XSalsa20::new(&key, &nonce.into());
                 cipher.apply_keystream(&mut ciphertext);
@@ -427,7 +339,7 @@ impl SessionLogInternal {
                     let mut ciphertext = URL_SAFE.decode(ciphertext_b64)?;
 
                     // Decrypt using XSalsa20.
-                    let key: Key<XSalsa20> = self.crypto_cache.get_xsalsa20_key(&key_secret);
+                    let key: Key<XSalsa20> = self.crypto_cache.get_xsalsa20_key(&key_secret)?;
                     let mut cipher = XSalsa20::new(&key, &nonce.into());
                     cipher.apply_keystream(&mut ciphertext);
 
@@ -442,14 +354,6 @@ impl SessionLogInternal {
     }
 }
 
-/// Decode a base58 string with a "_z" prefix.
-/// Used for decoding keys and other encoded values.
-pub fn decode_z(value: &str) -> Result<Vec<u8>, String> {
-    let prefix_end = value.find("_z").ok_or("Invalid prefix")? + 2;
-    bs58::decode(&value[prefix_end..])
-        .into_vec()
-        .map_err(|e| e.to_string())
-}
 
 #[cfg(test)]
 mod tests {
@@ -648,7 +552,7 @@ mod tests {
             &signing_key.into(),
             made_at,
             None,
-        );
+        ).unwrap();
 
         // 1. Check that the transaction we created matches the one in the file
         let created_tx_json = &session.transactions_json[0];
@@ -674,7 +578,7 @@ mod tests {
             .expect("Public key should be present")
             .verify(
                 final_hash_encoded_stringified.as_bytes(),
-                &(&new_signature).into()
+                &(&new_signature).try_into().unwrap()
             )
             .is_ok());
         assert_eq!(session.last_signature, Some(new_signature.clone()));

@@ -19,4 +19,13 @@ pub enum CoJsonCoreError {
 
     #[error("Signature verification failed: (hash: {0})")]
     SignatureVerification(String),
+
+    #[error("Invalid decoding prefix")] 
+    InvalidDecodingPrefix,
+
+    #[error("Invalid key length")] 
+    InvalidKeyLength(usize, usize),
+
+    #[error("Invalid base58")] 
+    InvalidBase58(#[from] bs58::decode::Error),
 }

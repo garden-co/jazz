@@ -5,8 +5,10 @@ pub use lzy;
 pub mod core {
     pub mod nonce;
     pub mod session_log;
+    pub mod keys;
     pub use session_log::*;
     pub use nonce::*;
+    pub use keys::*;
     pub mod cache;
     pub use cache::*;
     pub mod error;

@@ -1,6 +1,6 @@
 use cojson_core::core::{
   CoID, CoJsonCoreError, KeyID, KeySecret, SessionID, SessionLogInternal, Signature, SignerID,
-  SignerSecret, TransactionMode, Transaction,
+  SignerSecret, Transaction, TransactionMode,
 };
 use napi_derive::napi;
 use serde::{Deserialize, Serialize};
@@ -112,16 +112,19 @@ impl SessionLog {
     made_at: f64,
     meta: Option<String>,
   ) -> napi::Result<String> {
-    let (signature, transaction) = self.internal.add_new_transaction(
-      &changes_json,
-      TransactionMode::Private {
-        key_id: KeyID(key_id),
-        key_secret: KeySecret(encryption_key),
-      },
-      &SignerSecret(signer_secret),
-      made_at as u64,
-      meta,
-    );
+    let (signature, transaction) = self
+      .internal
+      .add_new_transaction(
+        &changes_json,
+        TransactionMode::Private {
+          key_id: KeyID(key_id),
+          key_secret: KeySecret(encryption_key),
+        },
+        &SignerSecret(signer_secret),
+        made_at as u64,
+        meta,
+      )
+      .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e.to_string()))?;
 
     // Extract encrypted_changes from the private transaction
     let result = match transaction {
@@ -149,13 +152,16 @@ impl SessionLog {
     made_at: f64,
     meta: Option<String>,
   ) -> napi::Result<String> {
-    let (signature, _) = self.internal.add_new_transaction(
-      &changes_json,
-      TransactionMode::Trusting,
-      &SignerSecret(signer_secret),
-      made_at as u64,
-      meta,
-    );
+    let (signature, _) = self
+      .internal
+      .add_new_transaction(
+        &changes_json,
+        TransactionMode::Trusting,
+        &SignerSecret(signer_secret),
+        made_at as u64,
+        meta,
+      )
+      .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e.to_string()))?;
 
     Ok(signature.0)
   }
