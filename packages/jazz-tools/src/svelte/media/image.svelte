@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { ImageDefinition } from "jazz-tools";
+  import { CoValueLoadingState, ImageDefinition } from "jazz-tools";
   import { highestResAvailable } from "jazz-tools/media";
   import { onDestroy } from "svelte";
   import { CoState } from "../jazz.class.svelte";
@@ -25,8 +25,9 @@
     width: number | undefined;
     height: number | undefined;
   }>(() => {
-    const originalWidth = imageState.current?.originalSize?.[0];
-    const originalHeight = imageState.current?.originalSize?.[1];
+    const originalSize = imageState.current.$jazzState === CoValueLoadingState.LOADED ? imageState.current.originalSize : undefined;
+    const originalWidth = originalSize?.[0];
+    const originalHeight = originalSize?.[1];
 
     // Both width and height are "original"
     if (width === "original" && height === "original") {
@@ -68,10 +69,10 @@
     }
 
     const image = imageState.current;
-    if (image === undefined)
+    if (image.$jazzState === CoValueLoadingState.UNLOADED)
       return "data:image/gif;base64,R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==";
 
-    if (!image) return undefined;
+    if (image.$jazzState !== CoValueLoadingState.LOADED) return undefined;
 
     const bestImage = highestResAvailable(
       image,
