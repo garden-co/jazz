@@ -1,4 +1,5 @@
 import type { CoValue, CoValueClass, RefEncoded } from "../internal.js";
+import { createUnloadedCoValue } from "../internal.js";
 import { SubscriptionScope } from "./SubscriptionScope.js";
 import { CoValueLoadingState } from "./types.js";
 
@@ -60,7 +61,7 @@ export function accessChildByKey<D extends CoValue>(
   if (value?.type === CoValueLoadingState.LOADED) {
     return value.value;
   } else {
-    return null;
+    return createUnloadedCoValue(childId, CoValueLoadingState.UNLOADED);
   }
 }
 
@@ -86,6 +87,6 @@ export function accessChildById<D extends CoValue>(
   if (value?.type === CoValueLoadingState.LOADED) {
     return value.value;
   } else {
-    return null;
+    return createUnloadedCoValue(childId, CoValueLoadingState.UNLOADED);
   }
 }

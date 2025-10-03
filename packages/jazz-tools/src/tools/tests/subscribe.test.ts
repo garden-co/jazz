@@ -9,8 +9,8 @@ import {
 } from "vitest";
 import { Account, Group, cojsonInternals, z } from "../index.js";
 import {
+  CoValueLoadingState,
   Loaded,
-  MaybeLoaded,
   co,
   coValueClassFromCoValueClassOrSchema,
   subscribeToCoValue,
@@ -87,7 +87,7 @@ describe("subscribeToCoValue", () => {
     });
 
     expect(result?.$jazz.id).toBe(chatRoom.$jazz.id);
-    expect(result?.messages).toEqual(null);
+    expect(result?.messages.$jazzState).toEqual(CoValueLoadingState.UNLOADED);
     expect(result?.name).toBe("General");
 
     updateFn.mockClear();
@@ -992,7 +992,7 @@ describe("subscribeToCoValue", () => {
     });
 
     assert(result);
-    expect(result[0]).toBe(null);
+    expect(result[0]?.$jazzState).toBe(CoValueLoadingState.UNLOADED);
 
     updateFn.mockClear();
 
@@ -1095,7 +1095,7 @@ describe("subscribeToCoValue", () => {
     list[0]!.$jazz.set("dog", Dog.create({ name: "Ninja" }));
 
     await waitFor(() => {
-      expect(result?.[0]?.dog).toBe(null);
+      expect(result?.[0]?.dog.$jazzState).toBe(CoValueLoadingState.UNLOADED);
     });
 
     list[1]!.$jazz.set("dog", Dog.create({ name: "Pinkie" }, everyone));
