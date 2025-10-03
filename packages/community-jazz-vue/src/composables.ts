@@ -16,8 +16,7 @@ import {
   type Unloaded2,
   type CoValueUnloadedState,
   CoValueLoadingState,
-  type RefsToResolve,
-  ResolveQuery,
+  type ResolveQuery,
   ResolveQueryStrict,
   coValueClassFromCoValueClassOrSchema,
   subscribeToCoValue,
@@ -158,7 +157,7 @@ export function useAccount<
 
 export function useCoState<
   S extends CoValueClassOrSchema,
-  const R extends RefsToResolve<S> = true,
+  const R extends ResolveQuery<S> = true,
 >(
   Schema: S,
   id: string | undefined,
