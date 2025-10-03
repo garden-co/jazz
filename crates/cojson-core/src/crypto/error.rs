@@ -1,5 +1,6 @@
 use std::fmt;
 
+
 #[derive(Debug)]
 pub enum CryptoError {
   InvalidKeyLength(usize, usize),
@@ -14,10 +15,10 @@ pub enum CryptoError {
   Base58Error(String),
 }
 
-impl From<CryptoError> for napi::Error {
-  fn from(err: CryptoError) -> Self {
-    napi::Error::new(napi::Status::GenericFailure, err.to_string())
-  }
+impl From<CryptoError> for String {
+    fn from(err: CryptoError) -> Self {
+      err.to_string()
+    }
 }
 
 impl fmt::Display for CryptoError {
@@ -47,3 +48,5 @@ impl fmt::Display for CryptoError {
 }
 
 impl std::error::Error for CryptoError {}
+
+

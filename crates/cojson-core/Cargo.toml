@@ -9,10 +9,15 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["raw_value"] }
 ed25519-dalek = { version = "2.2.0", features = ["rand_core"] }
 bs58 = "0.5.1"
-blake3 = "1.5.1"
-salsa20 = "0.10.2"
 base64 = "0.22.1"
 thiserror = "1.0"
+blake3 = "1.8.2"
+crypto_secretbox = { version = "0.1.1", features = ["getrandom"] }
+salsa20 = "0.10.2"
+rand = "0.8"
+x25519-dalek = { version = "2.0", features = ["getrandom", "static_secrets"] }
+lru = "0.16.1"
 
 [dev-dependencies]
 rand_core = { version = "0.6", features = ["getrandom"] }
+cargo-tarpaulin = "0.32.8"

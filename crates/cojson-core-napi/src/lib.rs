@@ -1,14 +1,11 @@
-use cojson_core::{
+use cojson_core::core::{
   CoID, CoJsonCoreError, KeyID, KeySecret, SessionID, SessionLogInternal, Signature, SignerID,
-  SignerSecret, TransactionMode,
+  SignerSecret, Transaction, TransactionMode,
 };
 use napi_derive::napi;
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use thiserror::Error;
-
-mod error;
-pub use error::CryptoError;
 
 pub mod hash {
   pub mod blake3;
@@ -19,14 +16,14 @@ pub mod crypto {
   pub mod ed25519;
   pub mod encrypt;
   pub mod seal;
-  pub mod sign;
+  pub mod signature;
   pub mod x25519;
   pub mod xsalsa20;
 
   pub use ed25519::*;
   pub use encrypt::*;
   pub use seal::*;
-  pub use sign::*;
+  pub use signature::*;
   pub use x25519::*;
   pub use xsalsa20::*;
 }
@@ -115,20 +112,23 @@ impl SessionLog {
     made_at: f64,
     meta: Option<String>,
   ) -> napi::Result<String> {
-    let (signature, transaction) = self.internal.add_new_transaction(
-      &changes_json,
-      TransactionMode::Private {
-        key_id: KeyID(key_id),
-        key_secret: KeySecret(encryption_key),
-      },
-      &SignerSecret(signer_secret),
-      made_at as u64,
-      meta,
-    );
+    let (signature, transaction) = self
+      .internal
+      .add_new_transaction(
+        &changes_json,
+        TransactionMode::Private {
+          key_id: KeyID(key_id),
+          key_secret: KeySecret(encryption_key),
+        },
+        &SignerSecret(signer_secret),
+        made_at as u64,
+        meta,
+      )
+      .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e.to_string()))?;
 
     // Extract encrypted_changes from the private transaction
     let result = match transaction {
-      cojson_core::Transaction::Private(private_tx) => PrivateTransactionResult {
+      Transaction::Private(private_tx) => PrivateTransactionResult {
         signature: signature.0,
         encrypted_changes: private_tx.encrypted_changes.value,
         meta: private_tx.meta.map(|meta| meta.value),
@@ -152,13 +152,16 @@ impl SessionLog {
     made_at: f64,
     meta: Option<String>,
   ) -> napi::Result<String> {
-    let (signature, _) = self.internal.add_new_transaction(
-      &changes_json,
-      TransactionMode::Trusting,
-      &SignerSecret(signer_secret),
-      made_at as u64,
-      meta,
-    );
+    let (signature, _) = self
+      .internal
+      .add_new_transaction(
+        &changes_json,
+        TransactionMode::Trusting,
+        &SignerSecret(signer_secret),
+        made_at as u64,
+        meta,
+      )
+      .map_err(|e| napi::Error::new(napi::Status::GenericFailure, e.to_string()))?;
 
     Ok(signature.0)
   }
