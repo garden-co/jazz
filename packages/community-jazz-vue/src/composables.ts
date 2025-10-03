@@ -12,11 +12,16 @@ import {
   JazzContextManager,
   type JazzContextType,
   type Loaded,
+  type MaybeLoaded,
+  type Unloaded2,
+  type CoValueUnloadedState,
+  CoValueLoadingState,
   type RefsToResolve,
   ResolveQuery,
   ResolveQueryStrict,
   coValueClassFromCoValueClassOrSchema,
   subscribeToCoValue,
+  createUnloadedCoValue,
 } from "jazz-tools";
 import { consumeInviteLinkFromWindowLocation } from "jazz-tools/browser";
 import {
@@ -88,6 +93,19 @@ export function useAuthSecretStorage() {
   return context;
 }
 
+const unloadedCoValueCache = new Map<string, Unloaded2<CoValue>>();
+function unavailableCoValue(id: string, jazzState: CoValueUnloadedState) {
+  const coValueId = id ?? "";
+  const cacheKey = `${id}-${jazzState}`;
+  const cachedUnloadedCoValue = unloadedCoValueCache.get(cacheKey);
+  if (cachedUnloadedCoValue) {
+    return cachedUnloadedCoValue;
+  }
+  const unloadedCoValue = createUnloadedCoValue(coValueId, jazzState);
+  unloadedCoValueCache.set(cacheKey, unloadedCoValue);
+  return unloadedCoValue;
+}
+
 export function useAccount<
   A extends AccountClass<Account> | AnyAccountSchema = typeof Account,
   R extends ResolveQuery<A> = true,
@@ -97,7 +115,7 @@ export function useAccount<
     resolve?: ResolveQueryStrict<A, R>;
   },
 ): {
-  me: ComputedRef<Loaded<A, R> | undefined | null>;
+  me: ComputedRef<MaybeLoaded<Loaded<A, R>>>;
   agent: AnonymousJazzAgent | Loaded<A, true>;
   logOut: () => void;
 } {
@@ -145,9 +163,10 @@ export function useCoState<
   Schema: S,
   id: string | undefined,
   options?: { resolve?: ResolveQueryStrict<S, R> },
-): Ref<Loaded<S, R> | undefined | null> {
-  const state: ShallowRef<Loaded<S, R> | undefined | null> =
-    shallowRef(undefined);
+): Ref<MaybeLoaded<Loaded<S, R>>> {
+  const state: ShallowRef<MaybeLoaded<Loaded<S, R>>> = shallowRef(
+    unavailableCoValue(id ?? "", CoValueLoadingState.UNLOADED),
+  );
   const context = useJazzContext();
 
   if (!context.value) {
@@ -165,14 +184,20 @@ export function useCoState<
       }
 
       if (!currentId || !currentContext) {
-        state.value = undefined;
+        state.value = unavailableCoValue(
+          currentId ?? "",
+          CoValueLoadingState.UNAVAILABLE,
+        );
         return;
       }
 
       const loadAsAgent =
         "me" in currentContext ? currentContext.me : currentContext.guest;
       if (!loadAsAgent) {
-        state.value = undefined;
+        state.value = unavailableCoValue(
+          currentId,
+          CoValueLoadingState.UNAVAILABLE,
+        );
         return;
       }
 
@@ -186,10 +211,16 @@ export function useCoState<
             resolve: options?.resolve as any,
             loadAs: safeLoadAsAgent,
             onUnavailable: () => {
-              state.value = null;
+              state.value = unavailableCoValue(
+                currentId,
+                CoValueLoadingState.UNAVAILABLE,
+              );
             },
             onUnauthorized: () => {
-              state.value = null;
+              state.value = unavailableCoValue(
+                currentId,
+                CoValueLoadingState.UNAUTHORIZED,
+              );
             },
             syncResolution: true,
           },
@@ -201,7 +232,10 @@ export function useCoState<
         );
       } catch (error) {
         console.error("Error in useCoState subscription:", error);
-        state.value = null;
+        state.value = unavailableCoValue(
+          currentId,
+          CoValueLoadingState.UNAVAILABLE,
+        );
       }
     },
     { immediate: true },
