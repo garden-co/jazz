@@ -8,9 +8,21 @@ import type {
 import type { JazzError } from "./JazzError.js";
 
 export const CoValueLoadingState = {
+  /**
+   * The coValue is loaded.
+   */
   LOADED: "loaded",
+  /**
+   * The coValue has not been loaded yet.
+   */
   UNLOADED: "unloaded",
+  /**
+   * The coValue was loaded but the account is not authorized to access it.
+   */
   UNAUTHORIZED: "unauthorized",
+  /**
+   * Tried to load the coValue but failed.
+   */
   UNAVAILABLE: "unavailable",
 } as const;
 
