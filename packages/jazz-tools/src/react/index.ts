@@ -10,7 +10,16 @@ export {
   useCoStateWithSelector,
   useAccountWithSelector,
   useSyncConnectionStatus,
+  useCoValueSubscription,
+  useAccountSubscription,
+  useSubscriptionSelector,
 } from "./hooks.js";
+
+export {
+  createCoValueSubscriptionContext,
+  createAccountSubscriptionContext,
+  type CoValueSubscription,
+} from "jazz-tools/react-core";
 
 export { createInviteLink, parseInviteLink } from "jazz-tools/browser";
 

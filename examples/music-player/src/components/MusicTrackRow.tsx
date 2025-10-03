@@ -18,6 +18,7 @@ import { Fragment, useCallback, useState } from "react";
 import { EditTrackDialog } from "./RenameTrackDialog";
 import { Waveform } from "./Waveform";
 import { Button } from "./ui/button";
+import { useAccountSelector } from "@/components/AccountProvider.tsx";
 
 function isPartOfThePlaylist(
   trackId: string,
@@ -49,13 +50,12 @@ export function MusicTrackRow({
     select: (account) => account?.root.playlists,
   });
 
-  const isActiveTrack = useAccountWithSelector(MusicaAccount, {
-    resolve: { root: { activeTrack: true } },
-    select: (account) => account?.root.activeTrack?.$jazz.id === trackId,
+  const isActiveTrack = useAccountSelector({
+    select: (me) => me.root.activeTrack?.$jazz.id === trackId,
   });
 
-  const canEditTrack = useAccountWithSelector(MusicaAccount, {
-    select: (account) => Boolean(track && account?.canWrite(track)),
+  const canEditTrack = useAccountSelector({
+    select: (me) => Boolean(track && me.canWrite(track)),
   });
 
   function handleTrackClick() {

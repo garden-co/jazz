@@ -53,4 +53,7 @@ export {
   useCoStateWithSelector,
   useAccountWithSelector,
   useSyncConnectionStatus,
+  useCoValueSubscription,
+  useAccountSubscription,
+  useSubscriptionSelector,
 } from "jazz-tools/react-core";

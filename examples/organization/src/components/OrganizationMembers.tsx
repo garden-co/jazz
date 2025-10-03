@@ -1,13 +1,11 @@
-import { Account, Group, Loaded } from "jazz-tools";
+import { Account, Group } from "jazz-tools";
 import { useAccount } from "jazz-tools/react";
-import { Organization } from "../schema.ts";
+import { useOrganizationSelector } from "./OrganizationProvider.ts";
 
-export function OrganizationMembers({
-  organization,
-}: {
-  organization: Loaded<typeof Organization>;
-}) {
-  const group = organization.$jazz.owner;
+export function OrganizationMembers() {
+  const group = useOrganizationSelector({
+    select: (organization) => organization.$jazz.owner,
+  });
 
   return (
     <>

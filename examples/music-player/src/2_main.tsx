@@ -13,10 +13,14 @@ import "./index.css";
 import { MusicaAccount } from "@/1_schema";
 import { apiKey } from "@/apiKey.ts";
 import { SidebarProvider } from "@/components/ui/sidebar";
-import { JazzReactProvider, useAccountWithSelector } from "jazz-tools/react";
+import { JazzReactProvider } from "jazz-tools/react";
 import { onAnonymousAccountDiscarded } from "./4_actions";
 import { KeyboardListener } from "./components/PlayerControls";
 import { usePrepareAppState } from "./lib/usePrepareAppState";
+import {
+  AccountProvider,
+  useAccountSelector,
+} from "@/components/AccountProvider.tsx";
 
 /**
  * Walkthrough: The top-level provider `<JazzReactProvider/>`
@@ -33,9 +37,8 @@ function AppContent({
 }: {
   mediaPlayer: ReturnType<typeof useMediaPlayer>;
 }) {
-  const showWelcomeScreen = useAccountWithSelector(MusicaAccount, {
-    resolve: { root: true },
-    select: (me) => Boolean(me && !me.root.accountSetupCompleted),
+  const showWelcomeScreen = useAccountSelector({
+    select: (me) => !me.root.accountSetupCompleted,
   });
 
   const isReady = usePrepareAppState(mediaPlayer);
@@ -99,7 +102,9 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
       onAnonymousAccountDiscarded={onAnonymousAccountDiscarded}
     >
       <SidebarProvider>
-        <Main />
+        <AccountProvider>
+          <Main />
+        </AccountProvider>
         <JazzInspector />
       </SidebarProvider>
     </JazzReactProvider>
