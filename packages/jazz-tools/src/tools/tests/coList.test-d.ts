@@ -233,7 +233,9 @@ describe("CoList", () => {
         },
       });
 
-      type ExpectedType = MaybeLoaded<ReadonlyArray<Loaded<typeof Dog> | null>>;
+      type ExpectedType = MaybeLoaded<
+        ReadonlyArray<MaybeLoaded<Loaded<typeof Dog>>>
+      >;
 
       function matches(value: ExpectedType) {
         return value;
@@ -305,7 +307,6 @@ describe("CoList", () => {
         ],
       });
 
-      // TODO this is being inferred as Unloaded<never>!
       const loadedPerson = await Person.load(person.$jazz.id, {
         resolve: { dogs: { $onError: null } },
       });
@@ -314,13 +315,14 @@ describe("CoList", () => {
         {
           name: string;
           age: number;
-          dogs: CoList<
-            | ({
+          dogs: MaybeLoaded<
+            CoList<
+              {
                 name: string;
                 breed: string;
-              } & CoMap)
-            | null
-          > | null;
+              } & CoMap
+            >
+          >;
         } & CoMap
       >;
 

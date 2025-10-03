@@ -318,7 +318,7 @@ describe("CoMap.Record", () => {
       });
 
       type ExpectedType = MaybeLoaded<{
-        [key: string]: Loaded<typeof Dog> | null;
+        [key: string]: MaybeLoaded<Loaded<typeof Dog>>;
       }>;
 
       function matches(value: ExpectedType) {

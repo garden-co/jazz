@@ -126,8 +126,8 @@ export type Resolved<
   R extends RefsToResolve<T> | undefined = true,
 > = DeeplyLoaded<T, R, 10, []>;
 
-type onErrorNullEnabled<Depth> = Depth extends { $onError: null }
-  ? null
+type onErrorNullEnabled<V, Depth> = Depth extends { $onError: null }
+  ? Unloaded2<V>
   : never;
 
 type CoMapLikeLoaded<
@@ -146,7 +146,7 @@ type CoMapLikeLoaded<
               [0, ...CurrentDepth]
             >
           | (undefined extends V[Key] ? undefined : never)
-          | onErrorNullEnabled<Depth[Key]>
+          | onErrorNullEnabled<V[Key], Depth[Key]>
       : never
     : never;
 } & V;
@@ -175,7 +175,7 @@ export type DeeplyLoaded<
                     DepthLimit,
                     [0, ...CurrentDepth]
                   >)
-              | onErrorNullEnabled<Depth["$each"]>
+              | onErrorNullEnabled<AsLoaded<Item>, Depth["$each"]>
             > &
               V // the CoList base type needs to be intersected after so that built-in methods return the correct narrowed array type
           : never
@@ -197,7 +197,10 @@ export type DeeplyLoaded<
                         DepthLimit,
                         [0, ...CurrentDepth]
                       >
-                    | onErrorNullEnabled<Depth["$each"]>;
+                    | onErrorNullEnabled<
+                        LoadedAndRequired<V[ItemsSym]>,
+                        Depth["$each"]
+                      >;
                 } & V // same reason as in CoList
               : // 1.2. Deeply loaded Record-like CoMap with { [key: string]: true }
                 string extends keyof Depth
