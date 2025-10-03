@@ -200,7 +200,7 @@ describe("SessionRepository", () => {
         },
       });
 
-      expect(tables.session?.length).toBe(0);
+      expect(tables.session.length).toBe(0);
     });
   });
 

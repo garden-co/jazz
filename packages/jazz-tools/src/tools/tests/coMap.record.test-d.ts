@@ -218,9 +218,7 @@ describe("CoMap.Record", () => {
       expectTypeOf("ok" as const).toEqualTypeOf<Expect>();
 
       assertLoaded(loadedPerson);
-      expectTypeOf(loadedPerson.pet1).toEqualTypeOf<
-        Loaded<typeof Dog> | undefined
-      >();
+      expectTypeOf(loadedPerson.pet1).toEqualTypeOf<Loaded<typeof Dog>>();
       expectTypeOf(loadedPerson.pet3).branded.toEqualTypeOf<
         MaybeLoaded<Loaded<typeof Dog>> | undefined
       >();
