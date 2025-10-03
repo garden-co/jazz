@@ -96,7 +96,7 @@ describe("Deep loading with depth arg", async () => {
 
     assertLoaded(map1);
 
-    expect(map1.list).toBe(null);
+    expect(map1.list.$jazzState).toBe(CoValueLoadingState.UNLOADED);
   });
 
   test("load with resolve { list: true }", async () => {
@@ -113,7 +113,7 @@ describe("Deep loading with depth arg", async () => {
     >();
     assertLoaded(map2);
     assertLoaded(map2.list);
-    expect(map2.list[0]).toBe(null);
+    expect(map2.list[0]?.$jazzState).toBe(CoValueLoadingState.UNLOADED);
   });
 
   test("load with resolve { list: { $each: true } }", async () => {
@@ -131,7 +131,7 @@ describe("Deep loading with depth arg", async () => {
     // >();
     assertLoaded(map3);
     assert(map3.list[0]);
-    expect(map3.list[0].stream).toBe(null);
+    expect(map3.list[0].stream.$jazzState).toBe(CoValueLoadingState.UNLOADED);
   });
 
   test("load with resolve { optionalRef: true }", async () => {
@@ -169,7 +169,9 @@ describe("Deep loading with depth arg", async () => {
     assertLoaded(map4);
     expect(map4.list[0]?.stream).toBeTruthy();
     expect(map4.list[0]?.stream?.perAccount[me.$jazz.id]).toBeTruthy();
-    expect(map4.list[0]?.stream?.byMe?.value).toBe(null);
+    expect(map4.list[0]?.stream?.byMe?.value.$jazzState).toBe(
+      CoValueLoadingState.UNLOADED,
+    );
   });
 
   test("load with resolve { list: { $each: { stream: { $each: true } } } }", async () => {
@@ -580,14 +582,15 @@ describe("Deep loading with unauthorized account", async () => {
 
     assertLoaded(mapOnAlice);
 
-    const result = await new Promise((resolve) => {
-      const unsub = mapOnAlice.$jazz.subscribe((value) => {
-        resolve(value.optionalRef);
-        unsub();
+    const result: MaybeLoaded<Loaded<typeof InnermostMap>> | undefined =
+      await new Promise((resolve) => {
+        const unsub = mapOnAlice.$jazz.subscribe((value) => {
+          resolve(value.optionalRef);
+          unsub();
+        });
       });
-    });
 
-    expect(result).toBe(null);
+    expect(result?.$jazzState).toBe(CoValueLoadingState.UNLOADED);
   });
 
   test("unaccessible stream", async () => {
@@ -708,8 +711,8 @@ describe("Deep loading with unauthorized account", async () => {
 
     assertLoaded(friendsOnAlice);
 
-    expect(friendsOnAlice.jane).toBeNull();
-    expect(friendsOnAlice.alice).not.toBeNull();
+    expect(friendsOnAlice.jane?.$jazzState).toBe(CoValueLoadingState.UNLOADED);
+    expect(friendsOnAlice.alice?.name).toBe("Alice");
   });
 
   test("unaccessible nested record element with $onError", async () => {
@@ -744,8 +747,8 @@ describe("Deep loading with unauthorized account", async () => {
 
     assertLoaded(user);
 
-    expect(user.friends.jane).toBeNull();
-    expect(user.friends.alice).not.toBeNull();
+    expect(user.friends.jane?.$jazzState).toBe(CoValueLoadingState.UNLOADED);
+    expect(user.friends.alice?.name).toBe("Alice");
   });
 
   test("unaccessible element down the chain with $onError on a record", async () => {
@@ -795,8 +798,10 @@ describe("Deep loading with unauthorized account", async () => {
 
     assertLoaded(user);
 
-    expect(user.friends.jane).toBeNull(); // jane is null because her dog is inaccessible
-    expect(user.friends.alice?.dog).not.toBeNull(); // alice is not null because we have read access to her and her dog
+    // jane is unloaded because her dog is inaccessible
+    expect(user.friends.jane?.$jazzState).toBe(CoValueLoadingState.UNLOADED);
+    // alice is loaded because we have read access to her and her dog
+    expect(user.friends.alice?.dog.name).toBe("Giggino");
   });
 
   test("unaccessible list element with $onError and $each with depth", async () => {
@@ -843,10 +848,8 @@ describe("Deep loading with unauthorized account", async () => {
 
     assertLoaded(listOnAlice);
 
-    expect(listOnAlice[0]).toBeNull();
-    expect(listOnAlice[1]).not.toBeNull();
+    expect(listOnAlice[0]?.$jazzState).toBe(CoValueLoadingState.UNLOADED);
     expect(listOnAlice[1]?.name).toBe("Alice");
-    expect(listOnAlice[1]?.friends).not.toBeNull();
     expect(listOnAlice[1]?.friends?.[0]?.name).toBe("Bob");
     expect(listOnAlice).toHaveLength(2);
   });
@@ -872,8 +875,8 @@ describe("Deep loading with unauthorized account", async () => {
 
     assertLoaded(friendsOnAlice);
 
-    expect(friendsOnAlice.jane).toBeNull();
-    expect(friendsOnAlice.alice).not.toBeNull();
+    expect(friendsOnAlice.jane?.$jazzState).toBe(CoValueLoadingState.UNLOADED);
+    expect(friendsOnAlice.alice?.name).toBe("Alice");
   });
 
   test("unaccessible ref catched with $onError", async () => {
@@ -923,8 +926,12 @@ describe("Deep loading with unauthorized account", async () => {
 
     assertLoaded(user);
 
-    expect(user.friends.jane?.dog).toBeNull(); // jane is null because her dog is inaccessible
-    expect(user.friends.alice?.dog?.name).toBe("Giggino"); // alice is not null because we have read access to her and her dog
+    // jane's dog is unloaded because it is inaccessible
+    expect(user.friends.jane?.dog.$jazzState).toBe(
+      CoValueLoadingState.UNLOADED,
+    );
+    // we have read access to alice and her dog
+    expect(user.friends.alice?.dog?.name).toBe("Giggino");
   });
 
   test("using $onError on the resolve root", async () => {

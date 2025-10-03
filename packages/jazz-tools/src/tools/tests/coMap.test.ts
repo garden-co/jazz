@@ -850,7 +850,7 @@ describe("CoMap", async () => {
 
       assertLoaded(loadedPerson);
       expect(loadedPerson.$jazz.has("name")).toBe(true);
-      expect(loadedPerson.name).toBeNull();
+      expect(loadedPerson.name.$jazzState).toBe(CoValueLoadingState.UNLOADED);
     });
 
     test("should return true even if the viewer doesn't have access to the referenced CoValue", async () => {
@@ -874,7 +874,7 @@ describe("CoMap", async () => {
 
       assertLoaded(loadedPerson);
       expect(loadedPerson.$jazz.has("name")).toBe(true);
-      expect(loadedPerson.name).toBeNull();
+      expect(loadedPerson.name.$jazzState).toBe(CoValueLoadingState.UNLOADED);
     });
   });
 
