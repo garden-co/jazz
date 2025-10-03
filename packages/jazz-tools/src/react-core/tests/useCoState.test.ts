@@ -167,8 +167,7 @@ describe("useCoState", () => {
     expect(result.current.nested.value).toBe("456");
   });
 
-  // TODO should this be an 'unavailable' value?
-  it("should return an 'unloaded' value if the coValue is not found", async () => {
+  it("should return an 'unavailable' value if the coValue is not found", async () => {
     const TestMap = co.map({
       value: z.string(),
     });
@@ -177,20 +176,20 @@ describe("useCoState", () => {
       value: "123",
     });
 
-    const account = await createJazzTestAccount({
-      isCurrentActiveAccount: true,
-    });
+    const viewerAccount = await createJazzTestAccount();
 
-    for (const peer of account.$jazz.localNode.syncManager.getClientPeers()) {
+    for (const peer of viewerAccount.$jazz.localNode.syncManager.getServerPeers(
+      viewerAccount.$jazz.raw.id,
+    )) {
       peer.gracefulShutdown();
     }
 
     const { result } = renderHook(() => useCoState(TestMap, map.$jazz.id), {
-      account,
+      account: viewerAccount,
     });
 
     await waitFor(() => {
-      expect(result.current.$jazzState).toBe(CoValueLoadingState.UNLOADED);
+      expect(result.current.$jazzState).toBe(CoValueLoadingState.UNAVAILABLE);
     });
   });
 
