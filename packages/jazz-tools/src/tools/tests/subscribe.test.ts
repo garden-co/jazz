@@ -1095,7 +1095,9 @@ describe("subscribeToCoValue", () => {
     list[0]!.$jazz.set("dog", Dog.create({ name: "Ninja" }));
 
     await waitFor(() => {
-      expect(result?.[0]?.dog.$jazzState).toBe(CoValueLoadingState.UNLOADED);
+      expect(result?.[0]?.dog.$jazzState).toBe(
+        CoValueLoadingState.UNAUTHORIZED,
+      );
     });
 
     list[1]!.$jazz.set("dog", Dog.create({ name: "Pinkie" }, everyone));

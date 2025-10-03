@@ -676,7 +676,6 @@ describe("CoMap resolution", async () => {
     assertLoaded(loadedPerson);
     expectTypeOf<typeof loadedPerson.dog1.name>().toEqualTypeOf<string>();
     expectTypeOf<typeof loadedPerson.dog2>().branded.toEqualTypeOf<
-      // @ts-expect-error TODO make $onError return an Unloaded CoValue
       MaybeLoaded<Loaded<typeof Dog>>
     >();
   });

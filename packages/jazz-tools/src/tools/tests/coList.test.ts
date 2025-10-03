@@ -1183,10 +1183,8 @@ describe("CoList subscription", async () => {
     });
 
     assertLoaded(loadedPerson);
-    // @ts-expect-error TODO make $onError return an Unloaded CoValue
     expect(loadedPerson.name).toBe("John");
-    // @ts-expect-error TODO make $onError return an Unloaded CoValue
-    expect(loadedPerson.dogs.$jazzState).toBe(CoValueLoadingState.UNLOADED);
+    expect(loadedPerson.dogs.$jazzState).toBe(CoValueLoadingState.UNAUTHORIZED);
   });
 });
 
