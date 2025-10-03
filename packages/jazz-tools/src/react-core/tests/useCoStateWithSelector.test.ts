@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 
 import { cojsonInternals } from "cojson";
-import { Account, co, Loaded, z } from "jazz-tools";
+import { Account, co, CoValueLoadingState, Loaded, z } from "jazz-tools";
 import { beforeEach, describe, expect, expectTypeOf, it } from "vitest";
 import { useCoStateWithSelector } from "../index.js";
 import { createJazzTestAccount, setupJazzTestSync } from "../testing.js";
@@ -50,7 +50,12 @@ describe("useCoStateWithSelector", () => {
           resolve: {
             nested: true,
           },
-          select: (v) => v?.value,
+          select: (v) => {
+            if (v.$jazzState !== CoValueLoadingState.LOADED) {
+              return undefined;
+            }
+            return v.value;
+          },
         }),
       ),
     );
@@ -89,7 +94,12 @@ describe("useCoStateWithSelector", () => {
           resolve: {
             nested: true,
           },
-          select: (v) => v?.nested?.value,
+          select: (v) => {
+            if (v.$jazzState !== CoValueLoadingState.LOADED) {
+              return undefined;
+            }
+            return v.nested?.value;
+          },
         }),
       ),
     );
@@ -132,7 +142,12 @@ describe("useCoStateWithSelector", () => {
           resolve: {
             nested: true,
           },
-          select: (v) => v?.nested?.value,
+          select: (v) => {
+            if (v.$jazzState !== CoValueLoadingState.LOADED) {
+              return undefined;
+            }
+            return v.nested?.value;
+          },
           equalityFn: () => true,
         }),
       ),

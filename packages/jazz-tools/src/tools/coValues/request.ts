@@ -14,6 +14,8 @@ import {
   CoMapSchemaInit,
   CoValueClass,
   CoreCoMapSchema,
+  CoValueLoadingState,
+  createUnloadedCoValue,
   Group,
   Loaded,
   ResolveQuery,
@@ -286,7 +288,7 @@ async function handleMessagePayload({
     loadAs,
   });
 
-  if (!madeBy) {
+  if (madeBy.$jazzState !== CoValueLoadingState.LOADED) {
     throw new JazzRequestError("Creator account not found", 400);
   }
 
@@ -298,7 +300,7 @@ async function handleMessagePayload({
     loadAs,
   });
 
-  if (!value) {
+  if (value.$jazzState !== CoValueLoadingState.LOADED) {
     throw new JazzRequestError("Value not found", 400);
   }
 
@@ -372,7 +374,7 @@ export class HttpRoute<
     const as = options?.owner ?? Account.getMe();
 
     const target = await loadWorkerAccountOrGroup(this.workerId, as);
-    if (!target) {
+    if (target.$jazzState !== CoValueLoadingState.LOADED) {
       throw new JazzRequestError("Worker account not found", 400);
     }
 
@@ -616,7 +618,7 @@ async function loadWorkerAccountOrGroup(id: string, loadAs: Account) {
   const coValue = await node.loadCoValueCore(id as `co_z${string}`);
 
   if (!coValue.isAvailable()) {
-    return null;
+    return createUnloadedCoValue(id, CoValueLoadingState.UNAVAILABLE);
   }
 
   const content = coValue.getCurrentContent();

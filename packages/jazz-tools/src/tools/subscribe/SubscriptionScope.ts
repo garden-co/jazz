@@ -5,16 +5,19 @@ import {
   CoMap,
   type CoValue,
   type ID,
+  MaybeLoaded,
   type RefEncoded,
   type RefsToResolve,
   TypeSym,
   instantiateRefEncodedFromRaw,
   isRefEncoded,
+  createUnloadedCoValue,
 } from "../internal.js";
 import { applyCoValueMigrations } from "../lib/migration.js";
 import { CoValueCoreSubscription } from "./CoValueCoreSubscription.js";
 import { JazzError, type JazzErrorIssue } from "./JazzError.js";
 import type { BranchDefinition, SubscriptionValue, Unloaded } from "./types.js";
+import { CoValueLoadingState, CoValueUnloadedState } from "./types.js";
 import { createCoValue, myRoleForRawValue } from "./utils.js";
 
 export class SubscriptionScope<D extends CoValue> {
@@ -59,16 +62,19 @@ export class SubscriptionScope<D extends CoValue> {
     public unstable_branch?: BranchDefinition,
   ) {
     this.resolve = resolve;
-    this.value = { type: "unloaded", id };
+    this.value = { type: CoValueLoadingState.UNLOADED, id };
 
-    let lastUpdate: RawCoValue | "unavailable" | undefined;
+    let lastUpdate:
+      | RawCoValue
+      | typeof CoValueLoadingState.UNAVAILABLE
+      | undefined;
     this.subscription = new CoValueCoreSubscription(
       node,
       id,
       (value) => {
         lastUpdate = value;
 
-        if (skipRetry && value === "unavailable") {
+        if (skipRetry && value === CoValueLoadingState.UNAVAILABLE) {
           this.handleUpdate(value);
           return;
         }
@@ -81,7 +87,7 @@ export class SubscriptionScope<D extends CoValue> {
         // - Trigger handleUpdate only with the final value
         if (
           !this.migrated &&
-          value !== "unavailable" &&
+          value !== CoValueLoadingState.UNAVAILABLE &&
           !value.core.verified.isStreaming()
         ) {
           if (this.migrating) {
@@ -111,13 +117,13 @@ export class SubscriptionScope<D extends CoValue> {
     this.dirty = true;
   }
 
-  handleUpdate(update: RawCoValue | "unavailable") {
-    if (update === "unavailable") {
-      if (this.value.type === "unloaded") {
+  handleUpdate(update: RawCoValue | typeof CoValueLoadingState.UNAVAILABLE) {
+    if (update === CoValueLoadingState.UNAVAILABLE) {
+      if (this.value.type === CoValueLoadingState.UNLOADED) {
         this.updateValue(
-          new JazzError(this.id, "unavailable", [
+          new JazzError(this.id, CoValueLoadingState.UNAVAILABLE, [
             {
-              code: "unavailable",
+              code: CoValueLoadingState.UNAVAILABLE,
               message: "The value is unavailable",
               params: {
                 id: this.id,
@@ -139,11 +145,11 @@ export class SubscriptionScope<D extends CoValue> {
       myRoleForRawValue(update) !== undefined;
 
     if (!hasAccess) {
-      if (this.value.type !== "unauthorized") {
+      if (this.value.type !== CoValueLoadingState.UNAUTHORIZED) {
         this.updateValue(
-          new JazzError(this.id, "unauthorized", [
+          new JazzError(this.id, CoValueLoadingState.UNAUTHORIZED, [
             {
-              code: "unauthorized",
+              code: CoValueLoadingState.UNAUTHORIZED,
               message: `The current user (${this.node.getCurrentAgent().id}) is not authorized to access this value`,
               params: {
                 id: this.id,
@@ -161,7 +167,7 @@ export class SubscriptionScope<D extends CoValue> {
     // after loading all the children, not one per children
     this.silenceUpdates = true;
 
-    if (this.value.type !== "loaded") {
+    if (this.value.type !== CoValueLoadingState.LOADED) {
       this.updateValue(createCoValue(this.schema, update, this));
       this.loadChildren();
     } else {
@@ -186,7 +192,7 @@ export class SubscriptionScope<D extends CoValue> {
 
   computeChildErrors() {
     let issues: JazzErrorIssue[] = [];
-    let errorType: JazzError["type"] = "unavailable";
+    let errorType: JazzError["type"] = CoValueLoadingState.UNAVAILABLE;
 
     if (this.childErrors.size === 0 && this.validationErrors.size === 0) {
       return undefined;
@@ -235,7 +241,7 @@ export class SubscriptionScope<D extends CoValue> {
     value: SubscriptionValue<any, any> | Unloaded,
     key?: string,
   ) => {
-    if (value.type === "unloaded") {
+    if (value.type === CoValueLoadingState.UNLOADED) {
       return;
     }
 
@@ -243,7 +249,10 @@ export class SubscriptionScope<D extends CoValue> {
     this.pendingAutoloadedChildren.delete(id);
     this.childValues.set(id, value);
 
-    if (value.type === "unavailable" || value.type === "unauthorized") {
+    if (
+      value.type === CoValueLoadingState.UNAVAILABLE ||
+      value.type === CoValueLoadingState.UNAUTHORIZED
+    ) {
       this.childErrors.set(id, value.prependPath(key ?? id));
 
       this.errorFromChildren = this.computeChildErrors();
@@ -254,7 +263,7 @@ export class SubscriptionScope<D extends CoValue> {
     }
 
     if (this.shouldSendUpdates()) {
-      if (this.value.type === "loaded") {
+      if (this.value.type === CoValueLoadingState.LOADED) {
         // On child updates, we re-create the value instance to make the updates
         // seamless-immutable and so be compatible with React and the React compiler
         this.updateValue(
@@ -267,10 +276,10 @@ export class SubscriptionScope<D extends CoValue> {
   };
 
   shouldSendUpdates() {
-    if (this.value.type === "unloaded") return false;
+    if (this.value.type === CoValueLoadingState.UNLOADED) return false;
 
     // If the value is in error, we send the update regardless of the children statuses
-    if (this.value.type !== "loaded") return true;
+    if (this.value.type !== CoValueLoadingState.LOADED) return true;
 
     if (this.isStreaming() && !this.isFileStream()) {
       return false;
@@ -279,33 +288,33 @@ export class SubscriptionScope<D extends CoValue> {
     return this.pendingLoadedChildren.size === 0;
   }
 
-  getCurrentValue() {
+  getCurrentValue(): D | CoValueUnloadedState {
     if (
-      this.value.type === "unauthorized" ||
-      this.value.type === "unavailable"
+      this.value.type === CoValueLoadingState.UNAUTHORIZED ||
+      this.value.type === CoValueLoadingState.UNAVAILABLE
     ) {
       console.error(this.value.toString());
-      return null;
+      return this.value.type;
     }
 
     if (!this.shouldSendUpdates()) {
-      return undefined;
+      return CoValueLoadingState.UNLOADED;
     }
 
     if (this.errorFromChildren) {
       console.error(this.errorFromChildren.toString());
-      return null;
+      return this.errorFromChildren.type;
     }
 
-    if (this.value.type === "loaded") {
+    if (this.value.type === CoValueLoadingState.LOADED) {
       return this.value.value;
     }
 
-    return undefined;
+    return CoValueLoadingState.UNLOADED;
   }
 
   isStreaming() {
-    if (this.value.type !== "loaded") {
+    if (this.value.type !== CoValueLoadingState.LOADED) {
       return false;
     }
 
@@ -313,7 +322,7 @@ export class SubscriptionScope<D extends CoValue> {
   }
 
   isFileStream() {
-    if (this.value.type !== "loaded") {
+    if (this.value.type !== CoValueLoadingState.LOADED) {
       return false;
     }
 
@@ -333,7 +342,7 @@ export class SubscriptionScope<D extends CoValue> {
 
     if (error) {
       this.subscribers.forEach((listener) => listener(error));
-    } else if (value.type !== "unloaded") {
+    } else if (value.type !== CoValueLoadingState.UNLOADED) {
       this.subscribers.forEach((listener) => listener(value));
     }
 
@@ -368,7 +377,7 @@ export class SubscriptionScope<D extends CoValue> {
       this.autoloadedKeys.add(key);
     }
 
-    if (this.value.type !== "loaded") {
+    if (this.value.type !== CoValueLoadingState.LOADED) {
       return;
     }
 
@@ -412,7 +421,7 @@ export class SubscriptionScope<D extends CoValue> {
       throw new Error("Cannot pull a non-closed subscription scope");
     }
 
-    if (this.value.type === "loaded") {
+    if (this.value.type === CoValueLoadingState.LOADED) {
       return;
     }
 
@@ -424,9 +433,9 @@ export class SubscriptionScope<D extends CoValue> {
     const value = this.getCurrentValue();
 
     // If the value is available, trigger the listener
-    if (value) {
+    if (typeof value !== "string") {
       listener({
-        type: "loaded",
+        type: CoValueLoadingState.LOADED,
         value,
         id: this.id,
       });
@@ -487,7 +496,7 @@ export class SubscriptionScope<D extends CoValue> {
   loadChildren() {
     const { resolve } = this;
 
-    if (this.value.type !== "loaded") {
+    if (this.value.type !== CoValueLoadingState.LOADED) {
       return false;
     }
 
@@ -562,7 +571,7 @@ export class SubscriptionScope<D extends CoValue> {
               } else if (!descriptor.optional) {
                 this.validationErrors.set(
                   key,
-                  new JazzError(undefined, "unavailable", [
+                  new JazzError(undefined, CoValueLoadingState.UNAVAILABLE, [
                     {
                       code: "validationError",
                       message: `The ref on position ${key} requested on ${stream.constructor.name} is missing`,
@@ -611,7 +620,7 @@ export class SubscriptionScope<D extends CoValue> {
     if (!descriptor) {
       this.childErrors.set(
         key,
-        new JazzError(undefined, "unavailable", [
+        new JazzError(undefined, CoValueLoadingState.UNAVAILABLE, [
           {
             code: "validationError",
             message: `The ref ${key} requested on ${map.constructor.name} is not defined in the schema`,
@@ -632,7 +641,7 @@ export class SubscriptionScope<D extends CoValue> {
       } else if (!descriptor.optional) {
         this.validationErrors.set(
           key,
-          new JazzError(undefined, "unavailable", [
+          new JazzError(undefined, CoValueLoadingState.UNAVAILABLE, [
             {
               code: "validationError",
               message: `The ref ${key} requested on ${map.constructor.name} is missing`,
@@ -671,7 +680,7 @@ export class SubscriptionScope<D extends CoValue> {
     } else if (!descriptor.optional) {
       this.validationErrors.set(
         key,
-        new JazzError(undefined, "unavailable", [
+        new JazzError(undefined, CoValueLoadingState.UNAVAILABLE, [
           {
             code: "validationError",
             message: `The ref on position ${key} requested on ${list.constructor.name} is missing`,

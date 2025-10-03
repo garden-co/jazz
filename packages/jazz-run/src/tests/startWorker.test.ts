@@ -13,6 +13,7 @@ import {
   co,
   z,
 } from "jazz-tools";
+import { assertLoaded } from "jazz-tools/testing";
 import { startWorker } from "jazz-tools/worker";
 import { afterAll, describe, expect, onTestFinished, test } from "vitest";
 import { createWorkerAccount } from "../createWorkerAccount.js";
@@ -114,7 +115,8 @@ describe("startWorker integration", () => {
       loadAs: worker2.worker,
     });
 
-    expect(mapOnWorker2?.value).toBe("test");
+    assertLoaded(mapOnWorker2);
+    expect(mapOnWorker2.value).toBe("test");
 
     await worker1.done();
     await worker2.done();
@@ -194,7 +196,8 @@ describe("startWorker integration", () => {
       loadAs: worker2.worker,
     });
 
-    expect(mapOnWorker2?.value).toBe("test");
+    assertLoaded(mapOnWorker2);
+    expect(mapOnWorker2.value).toBe("test");
 
     await worker2.done();
   });
@@ -229,7 +232,8 @@ describe("startWorker integration", () => {
 
     const result = await TestMap.load(resultId, { loadAs: worker2.worker });
 
-    expect(result?.value).toEqual("Hello! Responded from the inbox");
+    assertLoaded(result);
+    expect(result.value).toEqual("Hello! Responded from the inbox");
 
     await worker1.done();
     await worker2.done();
@@ -282,8 +286,10 @@ describe("startWorker integration", () => {
       loadAs: worker2.worker,
     });
 
-    expect(mapOnWorker2?.value).toBe("updated while offline");
-    expect(map2OnWorker2?.value).toBe("created while offline");
+    assertLoaded(mapOnWorker2);
+    assertLoaded(map2OnWorker2);
+    expect(mapOnWorker2.value).toBe("updated while offline");
+    expect(map2OnWorker2.value).toBe("created while offline");
 
     // Cleanup
     await worker2.done();

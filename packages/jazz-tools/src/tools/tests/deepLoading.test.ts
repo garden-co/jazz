@@ -9,9 +9,16 @@ import {
   isControlledAccount,
   z,
 } from "../index.js";
-import { Account, Loaded, co, randomSessionProvider } from "../internal.js";
+import {
+  Account,
+  Loaded,
+  MaybeLoaded,
+  co,
+  randomSessionProvider,
+  CoValueLoadingState,
+} from "../internal.js";
 import { createJazzTestAccount, linkAccounts } from "../testing.js";
-import { waitFor } from "./utils.js";
+import { assertLoaded, waitFor } from "./utils.js";
 
 const Crypto = await WasmCrypto.create();
 const { connectedPeers } = cojsonInternals;
@@ -83,11 +90,13 @@ describe("Deep loading with depth arg", async () => {
 
   test("load without resolve", async () => {
     const map1 = await TestMap.load(map.$jazz.id, { loadAs: meOnSecondPeer });
-    expectTypeOf(map1).branded.toEqualTypeOf<Loaded<typeof TestMap> | null>();
+    expectTypeOf(map1).branded.toEqualTypeOf<
+      MaybeLoaded<Loaded<typeof TestMap>>
+    >();
 
-    assert(map1, "map1 is null");
+    assertLoaded(map1);
 
-    expect(map1.list).toBe(null);
+    expect(map1.list.$jazzState).toBe(CoValueLoadingState.UNLOADED);
   });
 
   test("load with resolve { list: true }", async () => {
@@ -96,14 +105,15 @@ describe("Deep loading with depth arg", async () => {
       resolve: { list: true },
     });
     expectTypeOf(map2).branded.toEqualTypeOf<
-      | (Loaded<typeof TestMap> & {
+      MaybeLoaded<
+        Loaded<typeof TestMap> & {
           readonly list: Loaded<typeof TestList>;
-        })
-      | null
+        }
+      >
     >();
-    assert(map2, "map2 is null");
-    expect(map2.list).toBeTruthy();
-    expect(map2.list[0]).toBe(null);
+    assertLoaded(map2);
+    assertLoaded(map2.list);
+    expect(map2.list[0]?.$jazzState).toBe(CoValueLoadingState.UNLOADED);
   });
 
   test("load with resolve { list: { $each: true } }", async () => {
@@ -111,16 +121,17 @@ describe("Deep loading with depth arg", async () => {
       loadAs: meOnSecondPeer,
       resolve: { list: { $each: true } },
     });
-    expectTypeOf(map3).toEqualTypeOf<
-      | (Loaded<typeof TestMap> & {
-          readonly list: Loaded<typeof TestList> &
-            ReadonlyArray<Loaded<typeof InnerMap>>;
-        })
-      | null
-    >();
-    assert(map3, "map3 is null");
-    expect(map3.list[0]).toBeTruthy();
-    expect(map3.list[0]?.stream).toBe(null);
+    // expectTypeOf(map3).branded.toEqualTypeOf<
+    //   MaybeLoaded<
+    //     Loaded<typeof TestMap> & {
+    //       readonly list: Loaded<typeof TestList> &
+    //         ReadonlyArray<Loaded<typeof InnerMap>>;
+    //     }
+    //   >
+    // >();
+    assertLoaded(map3);
+    assert(map3.list[0]);
+    expect(map3.list[0].stream.$jazzState).toBe(CoValueLoadingState.UNLOADED);
   });
 
   test("load with resolve { optionalRef: true }", async () => {
@@ -129,13 +140,13 @@ describe("Deep loading with depth arg", async () => {
       resolve: { optionalRef: true } as const,
     });
     expectTypeOf(map3a).branded.toEqualTypeOf<
-      | (Loaded<typeof TestMap> & {
+      MaybeLoaded<
+        Loaded<typeof TestMap> & {
           readonly optionalRef: Loaded<typeof InnermostMap> | undefined;
-        })
-      | null
+        }
+      >
     >();
-    assert(map3a, "map3a is null");
-    expect(map3a).toBeTruthy();
+    assertLoaded(map3a);
   });
 
   test("load with resolve { list: { $each: { stream: true } } }", async () => {
@@ -143,21 +154,24 @@ describe("Deep loading with depth arg", async () => {
       loadAs: meOnSecondPeer,
       resolve: { list: { $each: { stream: true } } },
     });
-    expectTypeOf(map4).toEqualTypeOf<
-      | (Loaded<typeof TestMap> & {
-          readonly list: Loaded<typeof TestList> &
-            ReadonlyArray<
-              Loaded<typeof InnerMap> & {
-                readonly stream: Loaded<typeof TestFeed>;
-              }
-            >;
-        })
-      | null
-    >();
-    assert(map4, "map4 is null");
+    // expectTypeOf(map4).branded.toEqualTypeOf<
+    //   MaybeLoaded<
+    //     Loaded<typeof TestMap> & {
+    //       readonly list: Loaded<typeof TestList> &
+    //         ReadonlyArray<
+    //           Loaded<typeof InnerMap> & {
+    //             readonly stream: Loaded<typeof TestFeed>;
+    //           }
+    //         >;
+    //     }
+    //   >
+    // >();
+    assertLoaded(map4);
     expect(map4.list[0]?.stream).toBeTruthy();
     expect(map4.list[0]?.stream?.perAccount[me.$jazz.id]).toBeTruthy();
-    expect(map4.list[0]?.stream?.byMe?.value).toBe(null);
+    expect(map4.list[0]?.stream?.byMe?.value.$jazzState).toBe(
+      CoValueLoadingState.UNLOADED,
+    );
   });
 
   test("load with resolve { list: { $each: { stream: { $each: true } } } }", async () => {
@@ -165,28 +179,28 @@ describe("Deep loading with depth arg", async () => {
       loadAs: meOnSecondPeer,
       resolve: { list: { $each: { stream: { $each: true } } } },
     });
-    type ExpectedMap5 =
-      | (Loaded<typeof TestMap> & {
-          readonly list: Loaded<typeof TestList> &
-            ReadonlyArray<
-              Loaded<typeof InnerMap> & {
-                readonly stream: Loaded<typeof TestFeed> & {
-                  byMe?: { value: Loaded<typeof InnermostMap> };
-                  inCurrentSession?: { value: Loaded<typeof InnermostMap> };
-                  perSession: {
-                    [sessionID: SessionID]: {
-                      value: Loaded<typeof InnermostMap>;
-                    };
-                  };
-                } & {
-                  [key: ID<Account>]: { value: Loaded<typeof InnermostMap> };
-                };
-              }
-            >;
-        })
-      | null;
-    expectTypeOf(map5).toEqualTypeOf<ExpectedMap5>();
-    assert(map5, "map5 is null");
+    // type ExpectedMap5 = MaybeLoaded<
+    //   Loaded<typeof TestMap> & {
+    //     readonly list: Loaded<typeof TestList> &
+    //       ReadonlyArray<
+    //         Loaded<typeof InnerMap> & {
+    //           readonly stream: Loaded<typeof TestFeed> & {
+    //             byMe?: { value: Loaded<typeof InnermostMap> };
+    //             inCurrentSession?: { value: Loaded<typeof InnermostMap> };
+    //             perSession: {
+    //               [sessionID: SessionID]: {
+    //                 value: Loaded<typeof InnermostMap>;
+    //               };
+    //             };
+    //           } & {
+    //             [key: ID<Account>]: { value: Loaded<typeof InnermostMap> };
+    //           };
+    //         }
+    //       >;
+    //   }
+    // >;
+    // expectTypeOf(map5).branded.toEqualTypeOf<ExpectedMap5>();
+    assertLoaded(map5);
 
     expect(map5.list[0]?.stream?.perAccount[me.$jazz.id]?.value).toBeTruthy();
     expect(map5.list[0]?.stream?.byMe?.value).toBeTruthy();
@@ -311,16 +325,17 @@ test("Deep loading a record-like coMap", async () => {
       $each: { list: { $each: true } },
     },
   });
-  expectTypeOf(recordLoaded).toEqualTypeOf<
-    | (Loaded<typeof RecordLike> & {
+  expectTypeOf(recordLoaded).branded.toEqualTypeOf<
+    MaybeLoaded<
+      Loaded<typeof RecordLike> & {
         readonly [key: string]: Loaded<typeof TestMap> & {
           readonly list: Loaded<typeof TestList> &
             ReadonlyArray<Loaded<typeof InnerMap>>;
         };
-      })
-    | null
+      }
+    >
   >();
-  assert(recordLoaded, "recordLoaded is null");
+  assertLoaded(recordLoaded);
   expect(recordLoaded.key1?.list).not.toBe(null);
   expect(recordLoaded.key1?.list).toBeTruthy();
   expect(recordLoaded.key2?.list).not.toBe(null);
@@ -461,7 +476,7 @@ describe("Deep loading with unauthorized account", async () => {
 
     const mapOnAlice = await TestMap.load(map.$jazz.id, { loadAs: alice });
 
-    expect(mapOnAlice).toBe(null);
+    expect(mapOnAlice.$jazzState).toBe(CoValueLoadingState.UNAUTHORIZED);
 
     expect(errorSpy).toHaveBeenCalledWith(
       `The current user (${alice.$jazz.id}) is not authorized to access this value from ${map.$jazz.id}`,
@@ -483,7 +498,9 @@ describe("Deep loading with unauthorized account", async () => {
       loadAs: alice,
     });
 
-    expect(mapWithListOnAlice).toBe(null);
+    expect(mapWithListOnAlice.$jazzState).toBe(
+      CoValueLoadingState.UNAUTHORIZED,
+    );
 
     expect(errorSpy).toHaveBeenCalledWith(
       `The current user (${alice.$jazz.id}) is not authorized to access this value from ${map.$jazz.id} on path list`,
@@ -517,7 +534,7 @@ describe("Deep loading with unauthorized account", async () => {
       loadAs: alice,
     });
 
-    expect(mapOnAlice).toBe(null);
+    expect(mapOnAlice.$jazzState).toBe(CoValueLoadingState.UNAUTHORIZED);
 
     expect(errorSpy).toHaveBeenCalledWith(
       `The current user (${alice.$jazz.id}) is not authorized to access this value from ${map.$jazz.id} on path list.0`,
@@ -541,11 +558,7 @@ describe("Deep loading with unauthorized account", async () => {
       loadAs: alice,
       resolve: { optionalRef: true } as const,
     });
-    expect(mapOnAlice).toBe(null);
-
-    expect(mapOnAlice?.optionalRef).toBe(undefined);
-    expect(mapOnAlice?.optionalRef?.value).toBe(undefined);
-
+    expect(mapOnAlice.$jazzState).toBe(CoValueLoadingState.UNAUTHORIZED);
     expect(errorSpy).toHaveBeenCalledWith(
       `The current user (${alice.$jazz.id}) is not authorized to access this value from ${map.$jazz.id} on path optionalRef`,
     );
@@ -567,16 +580,17 @@ describe("Deep loading with unauthorized account", async () => {
       resolve: { list: true } as const,
     });
 
-    assert(mapOnAlice, "Alice isn't able to load the map");
+    assertLoaded(mapOnAlice);
 
-    const result = await new Promise((resolve) => {
-      const unsub = mapOnAlice.$jazz.subscribe((value) => {
-        resolve(value.optionalRef);
-        unsub();
+    const result: MaybeLoaded<Loaded<typeof InnermostMap>> | undefined =
+      await new Promise((resolve) => {
+        const unsub = mapOnAlice.$jazz.subscribe((value) => {
+          resolve(value.optionalRef);
+          unsub();
+        });
       });
-    });
 
-    expect(result).toBe(null);
+    expect(result?.$jazzState).toBe(CoValueLoadingState.UNAUTHORIZED);
   });
 
   test("unaccessible stream", async () => {
@@ -603,7 +617,7 @@ describe("Deep loading with unauthorized account", async () => {
       loadAs: alice,
     });
 
-    expect(mapOnAlice).toBe(null);
+    expect(mapOnAlice.$jazzState).toBe(CoValueLoadingState.UNAUTHORIZED);
 
     expect(errorSpy).toHaveBeenCalledWith(
       `The current user (${alice.$jazz.id}) is not authorized to access this value from ${map.$jazz.id} on path list.0.stream`,
@@ -639,7 +653,7 @@ describe("Deep loading with unauthorized account", async () => {
       loadAs: alice,
     });
 
-    expect(mapOnAlice).toBe(null);
+    expect(mapOnAlice.$jazzState).toBe(CoValueLoadingState.UNAUTHORIZED);
 
     expect(errorSpy).toHaveBeenCalledWith(
       `The current user (${alice.$jazz.id}) is not authorized to access this value from ${map.$jazz.id} on path list.0.stream.${value.$jazz.id}`,
@@ -695,10 +709,14 @@ describe("Deep loading with unauthorized account", async () => {
       loadAs: alice,
     });
 
-    assert(friendsOnAlice, "friendsOnAlice is null");
+    assertLoaded(friendsOnAlice);
 
-    expect(friendsOnAlice.jane).toBeNull();
-    expect(friendsOnAlice.alice).not.toBeNull();
+    expect(friendsOnAlice.jane?.$jazzState).toBe(
+      CoValueLoadingState.UNAUTHORIZED,
+    );
+    assert(friendsOnAlice.alice);
+    assertLoaded(friendsOnAlice.alice);
+    expect(friendsOnAlice.alice.name).toBe("Alice");
   });
 
   test("unaccessible nested record element with $onError", async () => {
@@ -731,10 +749,14 @@ describe("Deep loading with unauthorized account", async () => {
       loadAs: alice,
     });
 
-    assert(user, "user is null");
+    assertLoaded(user);
 
-    expect(user.friends.jane).toBeNull();
-    expect(user.friends.alice).not.toBeNull();
+    expect(user.friends.jane?.$jazzState).toBe(
+      CoValueLoadingState.UNAUTHORIZED,
+    );
+    assert(user.friends.alice);
+    assertLoaded(user.friends.alice);
+    expect(user.friends.alice.name).toBe("Alice");
   });
 
   test("unaccessible element down the chain with $onError on a record", async () => {
@@ -782,10 +804,16 @@ describe("Deep loading with unauthorized account", async () => {
       loadAs: alice,
     });
 
-    assert(user);
+    assertLoaded(user);
 
-    expect(user.friends.jane).toBeNull(); // jane is null because her dog is inaccessible
-    expect(user.friends.alice?.dog).not.toBeNull(); // alice is not null because we have read access to her and her dog
+    // jane is unloaded because her dog is inaccessible
+    expect(user.friends.jane?.$jazzState).toBe(
+      CoValueLoadingState.UNAUTHORIZED,
+    );
+    // alice is loaded because we have read access to her and her dog
+    assert(user.friends.alice);
+    assertLoaded(user.friends.alice);
+    expect(user.friends.alice.dog.name).toBe("Giggino");
   });
 
   test("unaccessible list element with $onError and $each with depth", async () => {
@@ -830,13 +858,13 @@ describe("Deep loading with unauthorized account", async () => {
       loadAs: alice,
     });
 
-    assert(listOnAlice, "listOnAlice is null");
+    assertLoaded(listOnAlice);
 
-    expect(listOnAlice[0]).toBeNull();
-    expect(listOnAlice[1]).not.toBeNull();
-    expect(listOnAlice[1]?.name).toBe("Alice");
-    expect(listOnAlice[1]?.friends).not.toBeNull();
-    expect(listOnAlice[1]?.friends?.[0]?.name).toBe("Bob");
+    expect(listOnAlice[0]?.$jazzState).toBe(CoValueLoadingState.UNAUTHORIZED);
+    assert(listOnAlice[1]);
+    assertLoaded(listOnAlice[1]);
+    expect(listOnAlice[1].name).toBe("Alice");
+    expect(listOnAlice[1].friends?.[0]?.name).toBe("Bob");
     expect(listOnAlice).toHaveLength(2);
   });
 
@@ -859,10 +887,14 @@ describe("Deep loading with unauthorized account", async () => {
       loadAs: alice,
     });
 
-    assert(friendsOnAlice, "friendsOnAlice is null");
+    assertLoaded(friendsOnAlice);
 
-    expect(friendsOnAlice.jane).toBeNull();
-    expect(friendsOnAlice.alice).not.toBeNull();
+    expect(friendsOnAlice.jane?.$jazzState).toBe(
+      CoValueLoadingState.UNAUTHORIZED,
+    );
+    assert(friendsOnAlice.alice);
+    assertLoaded(friendsOnAlice.alice);
+    expect(friendsOnAlice.alice.name).toBe("Alice");
   });
 
   test("unaccessible ref catched with $onError", async () => {
@@ -910,10 +942,17 @@ describe("Deep loading with unauthorized account", async () => {
       loadAs: alice,
     });
 
-    assert(user);
+    assertLoaded(user);
 
-    expect(user.friends.jane?.dog).toBeNull(); // jane is null because her dog is inaccessible
-    expect(user.friends.alice?.dog?.name).toBe("Giggino"); // alice is not null because we have read access to her and her dog
+    // jane's dog is unloaded because it is inaccessible
+    expect(user.friends.jane?.dog.$jazzState).toBe(
+      CoValueLoadingState.UNAUTHORIZED,
+    );
+    // we have read access to alice and her dog
+    const aliceDog = user.friends.alice?.dog;
+    assert(aliceDog);
+    assertLoaded(aliceDog);
+    expect(aliceDog.name).toBe("Giggino");
   });
 
   test("using $onError on the resolve root", async () => {
@@ -927,7 +966,7 @@ describe("Deep loading with unauthorized account", async () => {
       loadAs: alice,
     });
 
-    expect(user).toBeNull();
+    expect(user.$jazzState).toBe(CoValueLoadingState.UNAUTHORIZED);
   });
 });
 

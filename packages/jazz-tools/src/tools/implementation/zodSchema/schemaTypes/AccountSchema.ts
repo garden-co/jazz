@@ -8,7 +8,7 @@ import {
 } from "../../../internal.js";
 import { AnonymousJazzAgent } from "../../anonymousJazzAgent.js";
 import { InstanceOrPrimitiveOfSchema } from "../typeConverters/InstanceOrPrimitiveOfSchema.js";
-import { InstanceOrPrimitiveOfSchemaCoValuesNullable } from "../typeConverters/InstanceOrPrimitiveOfSchemaCoValuesNullable.js";
+import { InstanceOrPrimitiveOfSchemaCoValuesMaybeLoaded } from "../typeConverters/InstanceOrPrimitiveOfSchemaCoValuesMaybeLoaded.js";
 import { z } from "../zodReExport.js";
 import { AnyZodOrCoValueSchema, Loaded, ResolveQuery } from "../zodSchema.js";
 import {
@@ -77,7 +77,7 @@ export interface AccountSchema<
     },
   ) => Promise<void>;
 
-  getMe: () => AccountInstanceCoValuesNullable<Shape>;
+  getMe: () => AccountInstanceCoValuesMaybeLoaded<Shape>;
 
   withMigration(
     migration: (
@@ -175,10 +175,10 @@ export type AccountInstance<Shape extends z.core.$ZodLooseShape> = {
   readonly [key in keyof Shape]: InstanceOrPrimitiveOfSchema<Shape[key]>;
 } & Account;
 
-export type AccountInstanceCoValuesNullable<
+export type AccountInstanceCoValuesMaybeLoaded<
   Shape extends z.core.$ZodLooseShape,
 > = {
-  readonly [key in keyof Shape]: InstanceOrPrimitiveOfSchemaCoValuesNullable<
+  readonly [key in keyof Shape]: InstanceOrPrimitiveOfSchemaCoValuesMaybeLoaded<
     Shape[key]
   >;
 } & Account;

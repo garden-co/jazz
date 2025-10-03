@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ImageDefinition } from "jazz-tools";
+import { CoValueLoadingState, ImageDefinition } from "jazz-tools";
 import { highestResAvailable } from "jazz-tools/media";
 import { onUnmounted, ref, watch, computed } from "vue";
 import { useCoState } from "./composables.js";
@@ -44,8 +44,12 @@ const lazyPlaceholder = computed(() =>
 );
 
 const dimensions = computed(() => {
-  const originalWidth = image.value?.originalSize?.[0];
-  const originalHeight = image.value?.originalSize?.[1];
+  const originalSize =
+    image.value.$jazzState === CoValueLoadingState.LOADED
+      ? image.value.originalSize
+      : undefined;
+  const originalWidth = originalSize?.[0];
+  const originalHeight = originalSize?.[1];
 
   // Both width and height are "original"
   if (props.width === "original" && props.height === "original") {
@@ -86,7 +90,7 @@ const src = computed(() => {
     return lazyPlaceholder.value;
   }
 
-  if (!image.value) return undefined;
+  if (image.value.$jazzState !== CoValueLoadingState.LOADED) return undefined;
 
   const bestImage = highestResAvailable(
     image.value,

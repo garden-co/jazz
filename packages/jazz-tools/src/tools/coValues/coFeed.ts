@@ -15,9 +15,12 @@ import {
   CoFieldInit,
   CoValue,
   CoValueClass,
+  CoValueLoadingState,
   getCoValueOwner,
   Group,
   ID,
+  MaybeLoaded,
+  LoadedAndRequired,
   unstable_mergeBranch,
   RefsToResolve,
   RefsToResolveStrict,
@@ -60,8 +63,12 @@ export type CoFeedEntry<Item> = SingleCoFeedEntry<Item> & {
 export type SingleCoStreamEntry<Item> = SingleCoFeedEntry<Item>;
 
 export type SingleCoFeedEntry<Item> = {
-  value: NonNullable<Item> extends CoValue ? NonNullable<Item> | null : Item;
-  ref: NonNullable<Item> extends CoValue ? Ref<NonNullable<Item>> : never;
+  value: LoadedAndRequired<Item> extends CoValue
+    ? MaybeLoaded<LoadedAndRequired<Item>>
+    : Item;
+  ref: LoadedAndRequired<Item> extends CoValue
+    ? Ref<LoadedAndRequired<Item>>
+    : never;
   by: Account | null;
   madeAt: Date;
   tx: CojsonInternalTypes.TransactionID;
@@ -290,7 +297,7 @@ export class CoFeed<out Item = any> extends CoValueBase implements CoValue {
       resolve?: RefsToResolveStrict<F, R>;
       loadAs?: Account | AnonymousJazzAgent;
     },
-  ): Promise<Resolved<F, R> | null> {
+  ): Promise<MaybeLoaded<Resolved<F, R>>> {
     return loadCoValueWithoutMe(this, id, options);
   }
 
@@ -466,12 +473,12 @@ function entryFromRawEntry<Item>(
   itemField: Schema,
 ): Omit<CoFeedEntry<Item>, "all"> {
   return {
-    get value(): NonNullable<Item> extends CoValue
-      ? (CoValue & Item) | null
+    get value(): LoadedAndRequired<Item> extends CoValue
+      ? MaybeLoaded<CoValue & Item>
       : Item {
       if (itemField === "json") {
-        return rawEntry.value as NonNullable<Item> extends CoValue
-          ? (CoValue & Item) | null
+        return rawEntry.value as LoadedAndRequired<Item> extends CoValue
+          ? MaybeLoaded<CoValue & Item>
           : Item;
       } else if ("encoded" in itemField) {
         return itemField.encoded.decode(rawEntry.value);
@@ -480,13 +487,15 @@ function entryFromRawEntry<Item>(
           accessFrom,
           rawEntry.value as string,
           itemField,
-        ) as NonNullable<Item> extends CoValue ? (CoValue & Item) | null : Item;
+        ) as LoadedAndRequired<Item> extends CoValue
+          ? MaybeLoaded<CoValue & Item>
+          : Item;
       } else {
         throw new Error("Invalid item field schema");
       }
     },
-    get ref(): NonNullable<Item> extends CoValue
-      ? Ref<NonNullable<Item>>
+    get ref(): LoadedAndRequired<Item> extends CoValue
+      ? Ref<LoadedAndRequired<Item>>
       : never {
       if (itemField !== "json" && isRefEncoded(itemField)) {
         const rawId = rawEntry.value;
@@ -495,7 +504,9 @@ function entryFromRawEntry<Item>(
           loadedAs,
           itemField,
           accessFrom,
-        ) as NonNullable<Item> extends CoValue ? Ref<NonNullable<Item>> : never;
+        ) as LoadedAndRequired<Item> extends CoValue
+          ? Ref<LoadedAndRequired<Item>>
+          : never;
       } else {
         return undefined as never;
       }
@@ -787,7 +798,11 @@ export class FileStream extends CoValueBase implements CoValue {
   ): Promise<Blob | undefined> {
     let stream = await this.load(id, options);
 
-    return stream?.toBlob({
+    if (stream.$jazzState !== CoValueLoadingState.LOADED) {
+      return undefined;
+    }
+
+    return stream.toBlob({
       allowUnfinished: options?.allowUnfinished,
     });
   }
@@ -802,7 +817,11 @@ export class FileStream extends CoValueBase implements CoValue {
   ): Promise<string | undefined> {
     const stream = await this.load(id, options);
 
-    return stream?.asBase64(options);
+    if (stream.$jazzState !== CoValueLoadingState.LOADED) {
+      return undefined;
+    }
+
+    return stream.asBase64(options);
   }
 
   asBase64(options?: {
@@ -961,14 +980,18 @@ export class FileStream extends CoValueBase implements CoValue {
       loadAs?: Account | AnonymousJazzAgent;
       allowUnfinished?: boolean;
     },
-  ): Promise<FileStream | null> {
+  ): Promise<MaybeLoaded<FileStream>> {
     const stream = await loadCoValueWithoutMe(this, id, options);
 
     /**
      * If the user hasn't requested an incomplete blob and the
      * stream isn't complete wait for the stream download before progressing
      */
-    if (!options?.allowUnfinished && !stream?.isBinaryStreamEnded()) {
+    if (
+      !options?.allowUnfinished &&
+      stream.$jazzState === CoValueLoadingState.LOADED &&
+      !stream.isBinaryStreamEnded()
+    ) {
       return new Promise<FileStream>((resolve) => {
         subscribeToCoValueWithoutMe(
           this,

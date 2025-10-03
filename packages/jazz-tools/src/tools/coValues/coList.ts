@@ -10,6 +10,8 @@ import {
   getCoValueOwner,
   Group,
   ID,
+  AsLoaded,
+  MaybeLoaded,
   unstable_mergeBranch,
   RefEncoded,
   RefsToResolve,
@@ -21,6 +23,7 @@ import {
   SubscribeRestArgs,
   TypeSym,
   BranchDefinition,
+  CoValueLoadingState,
 } from "../internal.js";
 import {
   AnonymousJazzAgent,
@@ -69,6 +72,7 @@ export class CoList<out Item = any>
   implements ReadonlyArray<Item>, CoValue
 {
   declare $jazz: CoListJazzApi<this>;
+  declare $jazzState: typeof CoValueLoadingState.LOADED;
 
   /**
    * Declare a `CoList` by subclassing `CoList.Of(...)` and passing the item schema using `co`.
@@ -126,6 +130,7 @@ export class CoList<out Item = any>
           value: new CoListJazzApi(proxy, () => options.fromRaw),
           enumerable: false,
         },
+        $jazzState: { value: CoValueLoadingState.LOADED, enumerable: false },
       });
     }
 
@@ -173,6 +178,7 @@ export class CoList<out Item = any>
         value: new CoListJazzApi(instance, () => raw),
         enumerable: false,
       },
+      $jazzState: { value: CoValueLoadingState.LOADED, enumerable: false },
     });
 
     const raw = owner.$jazz.raw.createList(
@@ -260,7 +266,7 @@ export class CoList<out Item = any>
       resolve?: RefsToResolveStrict<L, R>;
       loadAs?: Account | AnonymousJazzAgent;
     },
-  ): Promise<Resolved<L, R> | null> {
+  ): Promise<MaybeLoaded<Resolved<L, R>>> {
     return loadCoValueWithoutMe(this, id, options);
   }
 
@@ -377,24 +383,28 @@ export class CoList<out Item = any>
       owner: Account | Group;
       resolve?: RefsToResolveStrict<L, R>;
     },
-  ): Promise<Resolved<L, R> | null> {
+  ): Promise<MaybeLoaded<Resolved<L, R>>> {
     const listId = CoList._findUnique(
       options.unique,
       options.owner.$jazz.id,
       options.owner.$jazz.loadedAs,
     );
-    let list: Resolved<L, R> | null = await loadCoValueWithoutMe(this, listId, {
-      ...options,
-      loadAs: options.owner.$jazz.loadedAs,
-      skipRetry: true,
-    });
-    if (!list) {
+    let list: MaybeLoaded<Resolved<L, R>> = await loadCoValueWithoutMe(
+      this,
+      listId,
+      {
+        ...options,
+        loadAs: options.owner.$jazz.loadedAs,
+        skipRetry: true,
+      },
+    );
+    if (list.$jazzState !== CoValueLoadingState.LOADED) {
       list = (this as any).create(options.value, {
         owner: options.owner,
         unique: options.unique,
       }) as Resolved<L, R>;
     } else {
-      (list as L).$jazz.applyDiff(options.value);
+      list.$jazz.applyDiff(options.value);
     }
 
     return await loadCoValueWithoutMe(this, listId, {
@@ -419,7 +429,7 @@ export class CoList<out Item = any>
       resolve?: RefsToResolveStrict<L, R>;
       loadAs?: Account | AnonymousJazzAgent;
     },
-  ): Promise<Resolved<L, R> | null> {
+  ): Promise<MaybeLoaded<Resolved<L, R>>> {
     return loadCoValueWithoutMe(
       this,
       CoList._findUnique(unique, ownerID, options?.loadAs),
@@ -836,14 +846,14 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
    * @category Content
    **/
   get refs(): {
-    [idx: number]: Exclude<CoListItem<L>, null> extends CoValue
-      ? Ref<Exclude<CoListItem<L>, null>>
+    [idx: number]: AsLoaded<CoListItem<L>> extends CoValue
+      ? Ref<AsLoaded<CoListItem<L>>>
       : never;
   } & {
     length: number;
     [Symbol.iterator](): IterableIterator<
-      Exclude<CoListItem<L>, null> extends CoValue
-        ? Ref<Exclude<CoListItem<L>, null>>
+      AsLoaded<CoListItem<L>> extends CoValue
+        ? Ref<AsLoaded<CoListItem<L>>>
         : never
     >;
   } {

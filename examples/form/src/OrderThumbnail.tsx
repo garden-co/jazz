@@ -1,6 +1,11 @@
+import { co } from "jazz-tools";
 import { BubbleTeaOrder } from "./schema.ts";
 
-export function OrderThumbnail({ order }: { order: BubbleTeaOrder }) {
+export function OrderThumbnail({
+  order,
+}: {
+  order: co.loaded<typeof BubbleTeaOrder, { addOns: true; instructions: true }>;
+}) {
   const { baseTea, addOns, instructions, deliveryDate, withMilk } = order;
   const date = deliveryDate.toLocaleDateString();
 
@@ -13,12 +18,12 @@ export function OrderThumbnail({ order }: { order: BubbleTeaOrder }) {
         <strong>
           {baseTea} {withMilk ? "milk " : ""} tea
         </strong>
-        {addOns && addOns?.length > 0 && (
+        {addOns.length > 0 && (
           <p className="text-sm text-stone-600">
-            with {addOns?.join(", ").toLowerCase()}
+            with {addOns.join(", ").toLowerCase()}
           </p>
         )}
-        {instructions && (
+        {instructions.length > 0 && (
           <p className="text-sm text-stone-600 italic">{instructions}</p>
         )}
       </div>

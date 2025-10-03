@@ -3,24 +3,33 @@ import type {
   AccountClass,
   AnyAccountSchema,
   BranchDefinition,
+  CoValue,
   CoValueClassOrSchema,
   CoValueFromRaw,
+  CoValueUnloadedState,
   InstanceOfSchema,
   Loaded,
+  MaybeLoaded,
+  Unloaded2,
   ResolveQuery,
   ResolveQueryStrict,
 } from "jazz-tools";
 import {
   coValueClassFromCoValueClassOrSchema,
   subscribeToCoValue,
+  createUnloadedCoValue,
+  CoValueLoadingState,
 } from "jazz-tools";
 import { untrack } from "svelte";
 import { createSubscriber } from "svelte/reactivity";
 import { useIsAuthenticated } from "./auth/useIsAuthenticated.svelte.js";
 import { getJazzContext } from "./jazz.svelte";
 
-type CoStateOptions<V extends CoValueClassOrSchema, R extends ResolveQuery<V>> = { 
-  resolve?: ResolveQueryStrict<V, R>,
+type CoStateOptions<
+  V extends CoValueClassOrSchema,
+  R extends ResolveQuery<V>,
+> = {
+  resolve?: ResolveQueryStrict<V, R>;
   /**
    * Create or load a branch for isolated editing.
    *
@@ -35,17 +44,33 @@ type CoStateOptions<V extends CoValueClassOrSchema, R extends ResolveQuery<V>> =
    *   the branch. If not provided, the branch is owned by the current user.
    *
    * For more info see the [branching](https://jazz.tools/docs/svelte/using-covalues/version-control) documentation.
-  */
-  unstable_branch?: BranchDefinition
+   */
+  unstable_branch?: BranchDefinition;
 };
 
 type CoStateId = string | undefined | null;
+
+const unloadedCoValueCache = new Map<string, Unloaded2<CoValue>>();
+function unavailableCoValue(id: string, jazzState: CoValueUnloadedState) {
+  const coValueId = id ?? "";
+  const cacheKey = `${id}-${jazzState}`;
+  const cachedUnloadedCoValue = unloadedCoValueCache.get(cacheKey);
+  if (cachedUnloadedCoValue) {
+    return cachedUnloadedCoValue;
+  }
+  const unloadedCoValue = createUnloadedCoValue(coValueId, jazzState);
+  unloadedCoValueCache.set(cacheKey, unloadedCoValue);
+  return unloadedCoValue;
+}
 
 export class CoState<
   V extends CoValueClassOrSchema,
   R extends ResolveQuery<V> = true,
 > {
-  #value: Loaded<V, R> | undefined | null = undefined;
+  #value: MaybeLoaded<Loaded<V, R>> = unavailableCoValue(
+    "",
+    CoValueLoadingState.UNLOADED,
+  );
   #ctx = getJazzContext<InstanceOfSchema<AccountClass<Account>>>();
   #id: CoStateId;
   #subscribe: () => void;
@@ -58,7 +83,9 @@ export class CoState<
     options?: CoStateOptions<V, R> | (() => CoStateOptions<V, R>),
   ) {
     this.#id = $derived.by(typeof id === "function" ? id : () => id);
-    this.#options = $derived.by(typeof options === "function" ? options : () => options);
+    this.#options = $derived.by(
+      typeof options === "function" ? options : () => options,
+    );
 
     this.#subscribe = createSubscriber((update) => {
       this.#update = update;
@@ -71,7 +98,9 @@ export class CoState<
 
       return untrack(() => {
         if (!ctx || !id) {
-          return this.update(undefined);
+          return this.update(
+            unavailableCoValue(id ?? "", CoValueLoadingState.UNAVAILABLE),
+          );
         }
         const agent = "me" in ctx ? ctx.me : ctx.guest;
 
@@ -83,10 +112,14 @@ export class CoState<
             resolve: options?.resolve,
             loadAs: agent,
             onUnavailable: () => {
-              this.update(null);
+              this.update(
+                unavailableCoValue(id, CoValueLoadingState.UNAVAILABLE),
+              );
             },
             onUnauthorized: () => {
-              this.update(null);
+              this.update(
+                unavailableCoValue(id, CoValueLoadingState.UNAUTHORIZED),
+              );
             },
             syncResolution: true,
             unstable_branch: options?.unstable_branch,
@@ -103,7 +136,7 @@ export class CoState<
     });
   }
 
-  update(value: Loaded<V, R> | undefined | null) {
+  update(value: MaybeLoaded<Loaded<V, R>>) {
     if (this.#value === value) return;
     this.#value = value;
     this.#update();
@@ -117,18 +150,26 @@ export class CoState<
 
 export class AccountCoState<
   A extends
-  | (AccountClass<Account> & CoValueFromRaw<Account>)
-  | AnyAccountSchema,
+    | (AccountClass<Account> & CoValueFromRaw<Account>)
+    | AnyAccountSchema,
   R extends ResolveQuery<A> = true,
 > {
-  #value: Loaded<A, R> | undefined | null = undefined;
+  #value: MaybeLoaded<Loaded<A, R>> = unavailableCoValue(
+    "",
+    CoValueLoadingState.UNLOADED,
+  );
   #ctx = getJazzContext<InstanceOfSchema<A>>();
   #subscribe: () => void;
   #options: CoStateOptions<A, R> | undefined;
-  #update = () => { };
+  #update = () => {};
 
-  constructor(Schema: A, options?: CoStateOptions<A, R> | (() => CoStateOptions<A, R>)) {
-    this.#options = $derived.by(typeof options === "function" ? options : () => options);
+  constructor(
+    Schema: A,
+    options?: CoStateOptions<A, R> | (() => CoStateOptions<A, R>),
+  ) {
+    this.#options = $derived.by(
+      typeof options === "function" ? options : () => options,
+    );
 
     this.#subscribe = createSubscriber((update) => {
       this.#update = update;
@@ -140,7 +181,9 @@ export class AccountCoState<
 
       return untrack(() => {
         if (!ctx || !("me" in ctx)) {
-          return this.update(undefined);
+          return this.update(
+            unavailableCoValue("", CoValueLoadingState.UNAVAILABLE),
+          );
         }
 
         const me = ctx.me;
@@ -153,10 +196,20 @@ export class AccountCoState<
             resolve: options?.resolve,
             loadAs: me,
             onUnavailable: () => {
-              this.update(null);
+              this.update(
+                unavailableCoValue(
+                  me.$jazz.id,
+                  CoValueLoadingState.UNAVAILABLE,
+                ),
+              );
             },
             onUnauthorized: () => {
-              this.update(null);
+              this.update(
+                unavailableCoValue(
+                  me.$jazz.id,
+                  CoValueLoadingState.UNAUTHORIZED,
+                ),
+              );
             },
             syncResolution: true,
             unstable_branch: options?.unstable_branch,
@@ -173,7 +226,7 @@ export class AccountCoState<
     });
   }
 
-  update(value: Loaded<A, R> | undefined | null) {
+  update(value: MaybeLoaded<Loaded<A, R>>) {
     if (this.#value === value) return;
     this.#value = value;
     this.#update();
