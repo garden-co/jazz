@@ -1,8 +1,10 @@
+import { CautionIcon } from "./icons/caution.js";
 import { ChevronDownIcon } from "./icons/chevron-down-icon.js";
 import { DeleteIcon } from "./icons/delete-icon.js";
 import { LinkIcon } from "./icons/link-icon.js";
 
 const icons = {
+  caution: CautionIcon,
   chevronDown: ChevronDownIcon,
   delete: DeleteIcon,
   link: LinkIcon,

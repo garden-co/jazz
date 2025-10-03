@@ -16,6 +16,7 @@ import {
   TableRow,
 } from "../ui/table.js";
 import { Text } from "../ui/text.js";
+import { Icon } from "../ui/icon.js";
 
 const PaginationContainer = styled("div")`
   padding: 1rem 0;
@@ -23,6 +24,38 @@ const PaginationContainer = styled("div")`
   align-items: center;
   justify-content: space-between;
   gap: 0.5rem;
+`;
+
+const RedTooltip = styled("span")`
+  position:relative; /* making the .tooltip span a container for the tooltip text */
+  border-bottom:1px dashed #000; /* little indicater to indicate it's hoverable */
+
+  &:before {
+    content: attr(data-text);
+    background-color: red;
+    position:absolute;
+
+    /* vertically center */
+    top:50%;
+    transform:translateY(-50%);
+
+    /* move to right */
+    left:100%;
+    margin-left:15px; /* and add a small left margin */
+
+    /* basic styles */
+    width:200px;
+    padding:10px;
+    border-radius:10px;
+    color: #fff;
+    text-align:center;
+
+    display:none; /* hide by default */
+  }
+
+  &:hover:before {
+    display:block;
+  }
 `;
 
 function CoValuesTableView({
@@ -61,7 +94,11 @@ function CoValuesTableView({
   }
 
   const keys = Array.from(
-    new Set(resolvedRows.flatMap((item) => Object.keys(item.snapshot || {}))),
+    new Set(
+      resolvedRows
+        .filter((item) => item.snapshot !== "unavailable")
+        .flatMap((item) => Object.keys(item.snapshot || {})),
+    ),
   );
 
   const loadMore = () => {
@@ -73,7 +110,7 @@ function CoValuesTableView({
       <Table>
         <TableHead>
           <TableRow>
-            {[...keys, "Action"].map((key) => (
+            {["ID", ...keys, "Action"].map((key) => (
               <TableHeader key={key}>{key}</TableHeader>
             ))}
             {onRemove && <TableHeader></TableHeader>}
@@ -82,27 +119,48 @@ function CoValuesTableView({
         <TableBody>
           {resolvedRows.slice(0, visibleRowsCount).map((item, index) => (
             <TableRow key={index}>
+              <TableCell>
+                <Text mono>
+                  {item.snapshot === "unavailable" ? (
+                    <RedTooltip data-text="Unavailable">
+                      <Icon
+                        name="caution"
+                        color="red"
+                        style={{
+                          display: "inline-block",
+                          marginRight: "0.5rem",
+                        }}
+                      />
+                      {visibleRows[index]}
+                    </RedTooltip>
+                  ) : (
+                    visibleRows[index]
+                  )}
+                </Text>
+              </TableCell>
               {keys.map((key) => (
                 <TableCell key={key}>
-                  <ValueRenderer
-                    json={(item.snapshot as JsonObject)[key]}
-                    onCoIDClick={(coId) => {
-                      async function handleClick() {
-                        onNavigate([
-                          {
-                            coId: item.value!.id,
-                            name: index.toString(),
-                          },
-                          {
-                            coId: coId,
-                            name: key,
-                          },
-                        ]);
-                      }
+                  {item.snapshot !== "unavailable" && (
+                    <ValueRenderer
+                      json={item.snapshot[key]}
+                      onCoIDClick={(coId) => {
+                        async function handleClick() {
+                          onNavigate([
+                            {
+                              coId: item.value!.id,
+                              name: index.toString(),
+                            },
+                            {
+                              coId: coId,
+                              name: key,
+                            },
+                          ]);
+                        }
 
-                      handleClick();
-                    }}
-                  />
+                        handleClick();
+                      }}
+                    />
+                  )}
                 </TableCell>
               ))}
 
