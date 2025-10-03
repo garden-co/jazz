@@ -64,8 +64,8 @@ describe("createImage (server)", async () => {
       ),
     ).toEqual([8, 2]);
     expect(await getImageSize(original.toBlob()!)).toEqual([1920, 400]);
-    expect(await getImageSize(s1?.toBlob()!)).toEqual([256, 53]);
-    expect(await getImageSize(s2?.toBlob()!)).toEqual([1024, 213]);
+    expect(await getImageSize(s1.toBlob()!)).toEqual([256, 53]);
+    expect(await getImageSize(s2.toBlob()!)).toEqual([1024, 213]);
   });
 });
 
