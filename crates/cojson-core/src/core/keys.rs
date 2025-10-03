@@ -108,7 +108,7 @@ pub struct CoID(pub String);
 
 /// Decode a base58 string with a "_z" prefix.
 /// Used for decoding keys and other encoded values.
-pub fn decode_z(value: &str) -> Result<Vec<u8>, CoJsonCoreError> {
+pub(crate) fn decode_z(value: &str) -> Result<Vec<u8>, CoJsonCoreError> {
     let prefix_end = value
         .find("_z")
         .ok_or(CoJsonCoreError::InvalidDecodingPrefix)?

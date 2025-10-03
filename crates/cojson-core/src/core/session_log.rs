@@ -667,4 +667,160 @@ mod tests {
             r#"[{"after":"start","op":"app","value":"co_zMphsnYN6GU8nn2HDY5suvyGufY"}]"#
         );
     }
+
+    #[test]
+    fn test_decrypt_meta_from_example_json() {
+        #[derive(Deserialize, Debug)]
+        struct KnownKey {
+            secret: String,
+        }
+
+        #[derive(Deserialize, Debug)]
+        #[serde(rename_all = "camelCase")]
+        #[serde(bound(deserialize = "'de: 'a"))]
+        struct TestSession<'a> {
+            last_signature: String,
+            #[serde(borrow)]
+            transactions: Vec<&'a RawValue>,
+        }
+
+        #[derive(Deserialize, Debug)]
+        #[serde(rename_all = "camelCase")]
+        #[serde(bound(deserialize = "'de: 'a"))]
+        struct Root<'a> {
+            #[serde(borrow)]
+            example_base: HashMap<String, TestSession<'a>>,
+            #[serde(rename = "signerID")]
+            signer_id: SignerID,
+            known_keys: Vec<KnownKey>,
+            #[serde(rename = "coID")]
+            co_id: CoID,
+        }
+
+        let data = fs::read_to_string("data/singleTxSessionMeta.json")
+            .expect("Unable to read singleTxSessionMeta.json");
+        let root: Root = serde_json::from_str(&data).unwrap();
+
+        let (session_id_str, example) = root.example_base.into_iter().next().unwrap();
+        let session_id = SessionID(session_id_str.clone());
+
+        let public_key =
+            VerifyingKey::from_bytes(&decode_z(&root.signer_id.0).unwrap().try_into().unwrap())
+                .unwrap();
+
+        let mut session = SessionLogInternal::new(root.co_id, session_id, Some(public_key.into()));
+
+        let new_signature = Signature(example.last_signature);
+
+        session
+            .try_add(
+                example
+                    .transactions
+                    .into_iter()
+                    .map(|v| v.to_owned())
+                    .collect(),
+                &new_signature,
+                true, // Skipping verification because we don't have the right initial state
+            )
+            .unwrap();
+
+        let key_secret = KeySecret(root.known_keys[0].secret.clone());
+
+        let decrypted = session
+            .decrypt_next_transaction_meta_json(0, key_secret)
+            .unwrap();
+
+        assert_eq!(
+            decrypted,
+            Some(r#"{"meta":{"test":"test"}}"#.to_string())
+        );
+    }
+
+
+    #[test]
+    fn test_add_new_transaction_meta() {
+        const META_JSON: &str = r#"{"meta":{"test":"test"}}"#;
+        const CHANGES_JSON: &str = r#"[]"#;
+        const SESSION_ID: &str = "co_ziwYjGfPdBjvc1bnCufaVdWLozm_session_zj5NjtJL6s5p";
+
+        // Load the example data to get all the pieces we need
+        let data = fs::read_to_string("data/singleTxSessionMeta.json")
+            .expect("Unable to read singleTxSession.json");
+        let root: serde_json::Value = serde_json::from_str(&data).unwrap();
+        let session_data =
+            &root["exampleBase"][SESSION_ID];
+        let tx_from_example = &session_data["transactions"][0];
+        let known_key = &root["knownKeys"][0];
+
+        // Since we don't have the original private key, we generate a new one for this test.
+        let mut csprng = OsRng;
+        let signing_key = SigningKey::generate(&mut csprng);
+        let public_key = signing_key.verifying_key();
+
+        // Initialize an empty session
+        let mut session = SessionLogInternal::new(
+            CoID(root["coID"].as_str().unwrap().to_string()),
+            SessionID(SESSION_ID.to_string()),
+            Some(public_key.into()),
+        );
+
+        // Extract all the necessary components from the example data
+        let key_secret = KeySecret(known_key["secret"].as_str().unwrap().to_string());
+        let key_id = KeyID(known_key["id"].as_str().unwrap().to_string());
+        let made_at = tx_from_example["madeAt"].as_u64().unwrap();
+
+        // Call the function we are testing
+        let (new_signature, _new_tx) = session.add_new_transaction(
+            CHANGES_JSON,
+            TransactionMode::Private {
+                key_id,
+                key_secret,
+            },
+            &signing_key.into(),
+            made_at,
+            Some(META_JSON.to_string()),
+        ).unwrap();
+
+        // 1. Check that the transaction we created matches the one in the file
+        let created_tx_json = &session.transactions_json[0];
+        let expected_tx_json = serde_json::to_string(tx_from_example).unwrap();
+        assert_eq!(created_tx_json, &expected_tx_json);
+
+        // 2. Check that the final hash of the session matches the one in the file
+        let final_hash = session.hasher.finalize();
+        let final_hash_encoded = format!(
+            "hash_z{}",
+            bs58::encode(final_hash.as_bytes()).into_string()
+        );
+
+        let final_hash_encoded_stringified = format!("\"{}\"", final_hash_encoded);
+
+        // 3. Check that the signature is valid for our generated key
+        assert!(session
+            .public_key
+            .expect("Public key should be present")
+            .verify(
+                final_hash_encoded_stringified.as_bytes(),
+                &(&new_signature).try_into().unwrap()
+            )
+            .is_ok());
+        assert_eq!(session.last_signature, Some(new_signature.clone()));
+
+        let mut session2 = SessionLogInternal::new(
+            CoID(root["coID"].as_str().unwrap().to_string()),
+            SessionID("co_ziwYjGfPdBjvc1bnCufaVdWLozm_session_zj5NjtJL6s5p".to_string()),
+            Some(public_key.into()),
+        );
+
+        session2
+            .try_add(
+                vec![serde_json::from_str(&created_tx_json).unwrap()],
+                &new_signature,
+                false,
+            )
+            .unwrap();
+
+        assert_eq!(session2.transactions_json, session.transactions_json);
+    }
+    
 }

@@ -20,3 +20,4 @@ lru = "0.16.1"
 
 [dev-dependencies]
 rand_core = { version = "0.6", features = ["getrandom"] }
+cargo-tarpaulin = "0.32.8"

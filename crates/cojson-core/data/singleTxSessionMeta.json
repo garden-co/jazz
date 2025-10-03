@@ -1,0 +1,6 @@
+{
+    "coID": "co_zCwu65svAPV9DBTY12PLhR18cXQ",
+    "signerID":"signer_z3FdM2ucYXUkbJQgPRf8R4Di6exd2sNPVaHaJHhQ8WAqi",
+    "knownKeys":[{"secret":"keySecret_z2rbcohZcR5y9c89hDC5hryL8Sqc6xtvksC4SzsDLGaoW","id":"key_z2hYY5dPyCFWUthjDq"}],
+    "exampleBase":{"co_ziwYjGfPdBjvc1bnCufaVdWLozm_session_zj5NjtJL6s5p":{"signerID":"signer_zCTvvz8DmbfRDrfXKfNubb4RREEmr9KTK7i9EEXSXJwx1","transactions":[{"encryptedChanges": "encrypted_U0yE=","keyUsed":"key_z2hYY5dPyCFWUthjDq","madeAt":1759497467243,"privacy":"private","meta":"encrypted_U816h1NtTjB2XCUpKQdNNz7v8vlDPE69b"}],"lastSignature":"signature_z4RX2xmaUjCVEX6M3JB25A3d62insEVTepkrpDpjnhSG9ii95kNZNMn2XfgPFUEevay89QeXyWbnqkJeG3hGnR5Vk","signatureAfter":{}}}
+}
