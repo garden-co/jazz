@@ -205,7 +205,9 @@ Jazz provides a built-in `$jazz.cosineSimilarity` method to calculate this for y
 
 CoVectors handles storage and search, you provide the vectors. Generate embeddings with any model you prefer (Hugging Face, OpenAI, custom, etc).
 
-**Recommended:** Run models locally for privacy and offline support using [Transformers.js](https://huggingface.co/docs/transformers.js):
+**Recommended:** Run models locally for privacy and offline support using [Transformers.js](https://huggingface.co/docs/transformers.js). Check our [Journal app example](https://github.com/garden-co/jazz/tree/main/examples/vector-search) to see how to do this.
+
+The following models offer a good balance between accuracy and performance:
 
 - [Xenova/all-MiniLM-L6-v2](https://huggingface.co/Xenova/all-MiniLM-L6-v2) — 384 dimensions, ~23 MB
 - [Xenova/paraphrase-multilingual-mpnet-base-v2](https://huggingface.co/Xenova/paraphrase-multilingual-mpnet-base-v2) — 768 dimensions, ~279 MB
