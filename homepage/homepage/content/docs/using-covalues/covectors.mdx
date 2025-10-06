@@ -190,11 +190,15 @@ Wrapping each item with its similarity score makes it easy to sort, filter, and 
 
 ### Cosine Similarity
 
-The `$jazz.cosineSimilarity` method returns a similarity of CoVector to another vector. Cosine similarity returns a value between `-1` and `1`:
+To compare how similar two vectors are, we use their [cosine similarity](https://en.wikipedia.org/wiki/Cosine_similarity). This returns a value between `-1` and `1`, describing how similar the vectors are:
 
 - `1` means the vectors are identical
 - `0` means the vectors are orthogonal (i.e. no similarity)
 - `-1` means the vectors are opposite direction (perfectly dissimilar).
+
+If you sort items by their cosine similarity, the ones which are most similar will appear at the top of the list.
+
+Jazz provides a built-in `$jazz.cosineSimilarity` method to calculate this for you.
 
 
 ## Embedding Models
