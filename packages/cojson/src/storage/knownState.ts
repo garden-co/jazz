@@ -59,10 +59,13 @@ export class StorageKnownState {
     this.waitForSyncRequests.set(id, requests);
 
     return new Promise<void>((resolve) => {
-      const unsubscribe = coValue.subscribe((coValue) => {
-        req.knownState = coValue.knownState();
-        this.handleUpdate(id, this.getKnownState(id));
-      }, false);
+      const unsubscribe = coValue.subscribe(
+        (coValue) => {
+          req.knownState = coValue.knownState();
+          this.handleUpdate(id, this.getKnownState(id));
+        },
+        { skipInitial: true },
+      );
 
       const handleResolve = () => {
         resolve();
