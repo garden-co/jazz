@@ -95,6 +95,12 @@ export type DecryptedTransaction = {
   tx: Transaction;
 };
 
+export type CoValueCoreCallback = (
+  core: CoValueCore,
+  unsub: () => void,
+  diffs: JsonValue[] | "initial",
+) => void;
+
 export type AvailableCoValueCore = CoValueCore & { verified: VerifiedState };
 
 export class CoValueCore {
@@ -132,8 +138,10 @@ export class CoValueCore {
 
   // cached state and listeners
   private _cachedContent?: RawCoValue;
-  readonly listeners: Set<(core: CoValueCore, unsub: () => void) => void> =
-    new Set();
+  readonly listeners: Map<
+    CoValueCoreCallback,
+    { diffs: boolean; pendingDiffs: JsonValue[] }
+  > = new Map();
   private counter: UpDownCounter;
 
   private constructor(
@@ -208,43 +216,34 @@ export class CoValueCore {
 
   waitForAvailableOrUnavailable(): Promise<CoValueCore> {
     return new Promise<CoValueCore>((resolve) => {
-      const listener = (core: CoValueCore) => {
+      this.subscribe((core, unsub) => {
         if (core.isAvailable() || core.loadingState === "unavailable") {
           resolve(core);
-          this.listeners.delete(listener);
+          unsub();
         }
-      };
-
-      this.listeners.add(listener);
-      listener(this);
+      });
     });
   }
 
   waitForAvailable(): Promise<CoValueCore> {
     return new Promise<CoValueCore>((resolve) => {
-      const listener = (core: CoValueCore) => {
+      this.subscribe((core, unsub) => {
         if (core.isAvailable()) {
           resolve(core);
-          this.listeners.delete(listener);
+          unsub();
         }
-      };
-
-      this.listeners.add(listener);
-      listener(this);
+      });
     });
   }
 
   waitForFullStreaming(): Promise<CoValueCore> {
     return new Promise<CoValueCore>((resolve) => {
-      const listener = (core: CoValueCore) => {
+      this.subscribe((core, unsub) => {
         if (core.isAvailable() && !core.verified.isStreaming()) {
           resolve(core);
-          this.listeners.delete(listener);
+          unsub();
         }
-      };
-
-      this.listeners.add(listener);
-      listener(this);
+      });
     });
   }
 
@@ -439,11 +438,14 @@ export class CoValueCore {
       const entry = this.node.getCoValue(groupId);
 
       if (entry.isAvailable()) {
-        this.groupInvalidationSubscription = entry.subscribe((_groupUpdate) => {
-          // When the group is updated, we need to reset the cached content because the transactions validity might have changed
-          this.resetParsedTransactions();
-          this.scheduleNotifyUpdate();
-        }, false);
+        this.groupInvalidationSubscription = entry.subscribe(
+          (_groupUpdate) => {
+            // When the group is updated, we need to reset the cached content because the transactions validity might have changed
+            this.resetParsedTransactions();
+            this.scheduleNotifyUpdate();
+          },
+          { skipInitial: true },
+        );
       } else {
         logger.error("CoValueCore: Owner group not available", {
           id: this.id,
@@ -562,7 +564,14 @@ export class CoValueCore {
         "processNewTransactions" in this._cachedContent &&
         typeof this._cachedContent.processNewTransactions === "function"
       ) {
-        this._cachedContent.processNewTransactions();
+        const newDiffs = this._cachedContent.processNewTransactions();
+        if (Array.isArray(newDiffs)) {
+          for (const listenerSettings of this.listeners.values()) {
+            if (listenerSettings.diffs) {
+              listenerSettings.pendingDiffs.push(...newDiffs);
+            }
+          }
+        }
       } else {
         this._cachedContent = undefined;
       }
@@ -610,11 +619,16 @@ export class CoValueCore {
 
     this.#batchedUpdates = false;
 
-    for (const listener of this.listeners) {
+    for (const [listener, listenerSettings] of this.listeners.entries()) {
       try {
-        listener(this, () => {
-          this.listeners.delete(listener);
-        });
+        listener(
+          this,
+          () => {
+            this.listeners.delete(listener);
+          },
+          listenerSettings.pendingDiffs,
+        );
+        listenerSettings.pendingDiffs = [];
       } catch (e) {
         logger.error("Error in listener for coValue " + this.id, { err: e });
       }
@@ -622,15 +636,22 @@ export class CoValueCore {
   }
 
   subscribe(
-    listener: (core: CoValueCore, unsub: () => void) => void,
-    immediateInvoke = true,
+    listener: CoValueCoreCallback,
+    options?: { diffs?: boolean; skipInitial?: boolean },
   ): () => void {
-    this.listeners.add(listener);
+    this.listeners.set(listener, {
+      diffs: options?.diffs ?? false,
+      pendingDiffs: [],
+    });
 
-    if (immediateInvoke) {
-      listener(this, () => {
-        this.listeners.delete(listener);
-      });
+    if (!options?.skipInitial) {
+      listener(
+        this,
+        () => {
+          this.listeners.delete(listener);
+        },
+        "initial",
+      );
     }
 
     return () => {
@@ -1327,7 +1348,7 @@ export class CoValueCore {
         }
       };
 
-      this.listeners.add(listener);
+      this.listeners.set(listener, { diffs: false, pendingDiffs: [] });
       listener(this);
     });
   }
