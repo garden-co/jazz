@@ -2,7 +2,7 @@ import clsx from "clsx";
 import type { ReactNode } from "react";
 import { Icon } from "./Icon";
 
-interface Props {
+export interface AlertProps {
   children: ReactNode;
   variant?: "warning" | "info";
   title: string;
@@ -14,7 +14,7 @@ export function Alert({
   variant = "warning",
   title,
   className,
-}: Props) {
+}: AlertProps) {
   return (
     <div
       className={clsx(
