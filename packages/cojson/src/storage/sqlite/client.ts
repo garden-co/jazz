@@ -102,13 +102,10 @@ export class SQLiteClient implements DBClientInterfaceSync {
     }
   }
 
-  getSignatures(
-    sessionRowId: number,
-    firstNewTxIdx: number,
-  ): SignatureAfterRow[] {
+  getSignatures(sessionRowId: number): SignatureAfterRow[] {
     return this.db.query<SignatureAfterRow>(
-      "SELECT * FROM signatureAfter WHERE ses = ? AND idx >= ?",
-      [sessionRowId, firstNewTxIdx],
+      "SELECT * FROM signatureAfter WHERE ses = ?",
+      [sessionRowId],
     ) as SignatureAfterRow[];
   }
 
