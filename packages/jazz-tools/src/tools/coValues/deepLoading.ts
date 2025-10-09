@@ -168,13 +168,12 @@ export type DeeplyLoaded<
         ? Depth extends { $each: infer ItemDepth }
           ? // Deeply loaded CoList
             ReadonlyArray<
-              | (AsLoaded<Item> &
-                  DeeplyLoaded<
-                    AsLoaded<Item>,
-                    ItemDepth,
-                    DepthLimit,
-                    [0, ...CurrentDepth]
-                  >)
+              | DeeplyLoaded<
+                  AsLoaded<Item>,
+                  ItemDepth,
+                  DepthLimit,
+                  [0, ...CurrentDepth]
+                >
               | onErrorNullEnabled<AsLoaded<Item>, Depth["$each"]>
             > &
               V // the CoList base type needs to be intersected after so that built-in methods return the correct narrowed array type

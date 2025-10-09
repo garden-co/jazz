@@ -213,8 +213,9 @@ describe("deeply resolved coMaps", async () => {
           return null;
         }
         return account.root.organizations.flatMap((org) =>
-          // @ts-expect-error fix inferred ReadonlyArray type
-          org.projects.flatMap((project) => project?.[taskListType]?.flatten()),
+          org.projects.flatMap((project) =>
+            project[taskListType].flatMap((task) => task),
+          ),
         );
       },
     });
@@ -299,8 +300,9 @@ describe("deeply resolved coMaps", async () => {
           return null;
         }
         return account.root.organizations.flatMap((org) =>
-          // @ts-expect-error fix inferred ReadonlyArray type
-          org.projects.flatMap((project) => project?.[taskListType]?.flatten()),
+          org.projects.flatMap((project) =>
+            project[taskListType].flatMap((task) => task),
+          ),
         );
       },
     });
