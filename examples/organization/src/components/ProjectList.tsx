@@ -1,3 +1,4 @@
+import { CoValueLoadingState } from "jazz-tools";
 import { useOrganizationSelector } from "./OrganizationProvider.ts";
 
 export function ProjectList() {
@@ -18,7 +19,7 @@ export function ProjectList() {
   return (
     <>
       {projects.map((project) =>
-        project ? (
+        project.$jazzState === CoValueLoadingState.LOADED ? (
           <strong
             key={project.$jazz.id}
             className="px-4 py-5 sm:px-6 font-medium block"
