@@ -1,3 +1,4 @@
+import { CoValueLoadingState } from "jazz-tools";
 import { createJazzPlugin } from "jazz-tools/prosemirror";
 import { useAccount, useCoState } from "jazz-tools/react";
 import { exampleSetup } from "prosemirror-example-setup";
@@ -16,17 +17,26 @@ export function Editor() {
   });
   const editorRef = useRef<HTMLDivElement>(null);
 
+  const bioId =
+    me.$jazzState === CoValueLoadingState.LOADED
+      ? me.profile.$jazz.refs.bio.id
+      : undefined;
   const [branch, setBranch] = useState<string | undefined>(undefined);
-  const bio = useCoState(
-    JazzProfile.shape.bio,
-    me?.profile.$jazz.refs.bio?.id,
-    {
-      unstable_branch: branch ? { name: branch, owner: me } : undefined,
-    },
-  );
+  const bio = useCoState(JazzProfile.shape.bio, bioId, {
+    unstable_branch:
+      branch && me.$jazzState === CoValueLoadingState.LOADED
+        ? { name: branch, owner: me }
+        : undefined,
+  });
 
+  const bioBranchName =
+    bio.$jazzState === CoValueLoadingState.LOADED
+      ? bio.$jazz.branchName
+      : undefined;
   useEffect(() => {
-    if (!editorRef.current || !bio) return;
+    if (!editorRef.current || bio.$jazzState !== CoValueLoadingState.LOADED) {
+      return;
+    }
 
     const schema = new Schema({
       nodes: addListNodes(basicSchema.spec.nodes, "paragraph block*", "block"),
@@ -47,9 +57,13 @@ export function Editor() {
     return () => {
       view.destroy();
     };
-  }, [bio?.$jazz.id, bio?.$jazz.branchName]); // Only recreate if the account or the branch changes
+  }, [bioId, bioBranchName]); // Only recreate if the account or the branch change
 
-  if (!me || !bio) return null;
+  if (
+    me.$jazzState !== CoValueLoadingState.LOADED ||
+    bio.$jazzState !== CoValueLoadingState.LOADED
+  )
+    return null;
 
   return (
     <div className="flex flex-col">
@@ -57,7 +71,7 @@ export function Editor() {
         <BranchManagement
           currentBranch={branch}
           onBranchChange={setBranch}
-          onBranchMerge={() => bio?.$jazz.unstable_merge()}
+          onBranchMerge={() => bio.$jazz.unstable_merge()}
         />
         <div className="flex-1 flex flex-col gap-2">
           <label className="text-sm font-medium text-stone-600">Richtext</label>

@@ -1,3 +1,4 @@
+import { CoValueLoadingState } from "jazz-tools";
 import { useAccount } from "jazz-tools/react";
 import { JazzAccount } from "./schema";
 
@@ -6,7 +7,7 @@ export function Form() {
     resolve: { profile: true, root: true },
   });
 
-  if (!me) return null;
+  if (me.$jazzState !== CoValueLoadingState.LOADED) return null;
 
   return (
     <div className="grid gap-4 border p-8 border-stone-200">
