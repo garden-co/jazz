@@ -510,16 +510,16 @@ export function useCoStateWithSelector<
 export function useSubscriptionSelector<
   S extends CoValueClassOrSchema,
   R extends ResolveQuery<S>,
-  TSelectorReturn = Loaded<S, R> | undefined | null,
+  TSelectorReturn = MaybeLoaded<Loaded<S, R>>,
 >(
   subscription: CoValueSubscription<S, R>,
   options?: {
-    select?: (value: Loaded<S, R> | undefined | null) => TSelectorReturn;
+    select?: (value: MaybeLoaded<Loaded<S, R>>) => TSelectorReturn;
     equalityFn?: (a: TSelectorReturn, b: TSelectorReturn) => boolean;
   },
 ) {
   return useSyncExternalStoreWithSelector<
-    Loaded<S, R> | undefined | null,
+    MaybeLoaded<Loaded<S, R>>,
     TSelectorReturn
   >(
     React.useCallback(
@@ -532,8 +532,8 @@ export function useSubscriptionSelector<
       },
       [subscription],
     ),
-    () => (subscription ? subscription.getCurrentValue() : null),
-    () => (subscription ? subscription.getCurrentValue() : null),
+    () => getCurrentValue(subscription),
+    () => getCurrentValue(subscription),
     options?.select ?? ((value) => value as TSelectorReturn),
     options?.equalityFn ?? Object.is,
   );

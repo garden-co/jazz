@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 
 import { cojsonInternals } from "cojson";
-import { co, z } from "jazz-tools";
+import { co, z, CoValueLoadingState } from "jazz-tools";
 import { describe, bench } from "vitest";
 import {
   useAccountSubscription,
@@ -27,7 +27,12 @@ const AccountName = () => {
     resolve: {
       profile: true,
     },
-    select: (account) => account?.profile?.name,
+    select: (account) => {
+      if (account.$jazzState !== CoValueLoadingState.LOADED) {
+        return null;
+      }
+      return account.profile.name;
+    },
   });
 
   if (!name) return null;
@@ -41,7 +46,12 @@ const AccountNameFromSubscription = ({
   subscription: CoValueSubscription<typeof AccountSchema, { profile: true }>;
 }) => {
   const name = useSubscriptionSelector(subscription, {
-    select: (account) => account?.profile?.name,
+    select: (account) => {
+      if (account.$jazzState !== CoValueLoadingState.LOADED) {
+        return null;
+      }
+      return account.profile.name;
+    },
   });
 
   if (!name) return null;
@@ -199,10 +209,12 @@ describe("deeply resolved coMaps", async () => {
   }) => {
     const allProjectsTasks = useSubscriptionSelector(subscription, {
       select: (account) => {
-        return account?.root.organizations.flatMap((org) =>
-          org?.projects.flatMap((project) =>
-            project?.[taskListType]?.flatMap((task) => task),
-          ),
+        if (account.$jazzState !== CoValueLoadingState.LOADED) {
+          return null;
+        }
+        return account.root.organizations.flatMap((org) =>
+          // @ts-expect-error fix inferred ReadonlyArray type
+          org.projects.flatMap((project) => project?.[taskListType]?.flatten()),
         );
       },
     });
@@ -210,7 +222,7 @@ describe("deeply resolved coMaps", async () => {
     return (
       <div>
         {allProjectsTasks?.map((task) => (
-          <div key={task?.$jazz.id}>{task?.title}</div>
+          <div key={task.$jazz.id}>{task.title}</div>
         ))}
       </div>
     );
@@ -282,18 +294,21 @@ describe("deeply resolved coMaps", async () => {
           },
         },
       },
-      select: (account) =>
-        account?.root.organizations.flatMap((org) =>
-          org?.projects.flatMap((project) =>
-            project?.[taskListType]?.flatMap((task) => task),
-          ),
-        ),
+      select: (account) => {
+        if (account.$jazzState !== CoValueLoadingState.LOADED) {
+          return null;
+        }
+        return account.root.organizations.flatMap((org) =>
+          // @ts-expect-error fix inferred ReadonlyArray type
+          org.projects.flatMap((project) => project?.[taskListType]?.flatten()),
+        );
+      },
     });
 
     return (
       <div>
         {subscription?.map((task) => (
-          <div key={task?.$jazz.id}>{task?.title}</div>
+          <div key={task.$jazz.id}>{task.title}</div>
         ))}
       </div>
     );
