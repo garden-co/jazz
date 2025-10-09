@@ -1,6 +1,49 @@
 /* tslint:disable */
 /* eslint-disable */
 /**
+ * WASM-exposed function to sign a message using Ed25519.
+ * - `message`: Raw bytes to sign
+ * - `secret`: Raw Ed25519 signing key bytes
+ * Returns base58-encoded signature with "signature_z" prefix or throws JsError if signing fails.
+ */
+export function sign(message: Uint8Array, secret: Uint8Array): string;
+/**
+ * WASM-exposed function to verify an Ed25519 signature.
+ * - `signature`: Raw signature bytes
+ * - `message`: Raw bytes that were signed
+ * - `id`: Raw Ed25519 verifying key bytes
+ * Returns true if signature is valid, false otherwise, or throws JsError if verification fails.
+ */
+export function verify(signature: Uint8Array, message: Uint8Array, id: Uint8Array): boolean;
+/**
+ * WASM-exposed function to derive a signer ID from a signing key.
+ * - `secret`: Raw Ed25519 signing key bytes
+ * Returns base58-encoded verifying key with "signer_z" prefix or throws JsError if derivation fails.
+ */
+export function getSignerId(secret: Uint8Array): string;
+/**
+ * Generate a 24-byte nonce from input material using BLAKE3.
+ * - `nonce_material`: Raw bytes to derive the nonce from
+ * Returns 24 bytes suitable for use as a nonce in cryptographic operations.
+ * This function is deterministic - the same input will produce the same nonce.
+ */
+export function generateNonce(nonce_material: Uint8Array): Uint8Array;
+/**
+ * Hash data once using BLAKE3.
+ * - `data`: Raw bytes to hash
+ * Returns 32 bytes of hash output.
+ * This is the simplest way to compute a BLAKE3 hash of a single piece of data.
+ */
+export function blake3HashOnce(data: Uint8Array): Uint8Array;
+/**
+ * Hash data once using BLAKE3 with a context prefix.
+ * - `data`: Raw bytes to hash
+ * - `context`: Context bytes to prefix to the data
+ * Returns 32 bytes of hash output.
+ * This is useful for domain separation - the same data hashed with different contexts will produce different outputs.
+ */
+export function blake3HashOnceWithContext(data: Uint8Array, context: Uint8Array): Uint8Array;
+/**
  * WASM-exposed function for XSalsa20 encryption without authentication.
  * - `key`: 32-byte key for encryption
  * - `nonce_material`: Raw bytes used to generate a 24-byte nonce via BLAKE3
@@ -79,49 +122,6 @@ export function seal(message: Uint8Array, sender_secret: string, recipient_id: s
  * Returns unsealed bytes or throws JsError if unsealing fails.
  */
 export function unseal(sealed_message: Uint8Array, recipient_secret: string, sender_id: string, nonce_material: Uint8Array): Uint8Array;
-/**
- * Generate a 24-byte nonce from input material using BLAKE3.
- * - `nonce_material`: Raw bytes to derive the nonce from
- * Returns 24 bytes suitable for use as a nonce in cryptographic operations.
- * This function is deterministic - the same input will produce the same nonce.
- */
-export function generateNonce(nonce_material: Uint8Array): Uint8Array;
-/**
- * Hash data once using BLAKE3.
- * - `data`: Raw bytes to hash
- * Returns 32 bytes of hash output.
- * This is the simplest way to compute a BLAKE3 hash of a single piece of data.
- */
-export function blake3HashOnce(data: Uint8Array): Uint8Array;
-/**
- * Hash data once using BLAKE3 with a context prefix.
- * - `data`: Raw bytes to hash
- * - `context`: Context bytes to prefix to the data
- * Returns 32 bytes of hash output.
- * This is useful for domain separation - the same data hashed with different contexts will produce different outputs.
- */
-export function blake3HashOnceWithContext(data: Uint8Array, context: Uint8Array): Uint8Array;
-/**
- * WASM-exposed function to sign a message using Ed25519.
- * - `message`: Raw bytes to sign
- * - `secret`: Raw Ed25519 signing key bytes
- * Returns base58-encoded signature with "signature_z" prefix or throws JsError if signing fails.
- */
-export function sign(message: Uint8Array, secret: Uint8Array): string;
-/**
- * WASM-exposed function to verify an Ed25519 signature.
- * - `signature`: Raw signature bytes
- * - `message`: Raw bytes that were signed
- * - `id`: Raw Ed25519 verifying key bytes
- * Returns true if signature is valid, false otherwise, or throws JsError if verification fails.
- */
-export function verify(signature: Uint8Array, message: Uint8Array, id: Uint8Array): boolean;
-/**
- * WASM-exposed function to derive a signer ID from a signing key.
- * - `secret`: Raw Ed25519 signing key bytes
- * Returns base58-encoded verifying key with "signer_z" prefix or throws JsError if derivation fails.
- */
-export function getSignerId(secret: Uint8Array): string;
 /**
  * Generate a new Ed25519 signing key using secure random number generation.
  * Returns 32 bytes of raw key material suitable for use with other Ed25519 functions.
@@ -209,6 +209,17 @@ export interface InitOutput {
   readonly sessionlog_addNewTrustingTransaction: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
   readonly sessionlog_decryptNextTransactionChangesJson: (a: number, b: number, c: number, d: number) => [number, number, number, number];
   readonly sessionlog_decryptNextTransactionMetaJson: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+  readonly sign: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+  readonly verify: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number];
+  readonly getSignerId: (a: number, b: number) => [number, number, number, number];
+  readonly generateNonce: (a: number, b: number) => [number, number];
+  readonly blake3HashOnce: (a: number, b: number) => [number, number];
+  readonly blake3HashOnceWithContext: (a: number, b: number, c: number, d: number) => [number, number];
+  readonly __wbg_blake3hasher_free: (a: number, b: number) => void;
+  readonly blake3hasher_new: () => number;
+  readonly blake3hasher_update: (a: number, b: number, c: number) => void;
+  readonly blake3hasher_finalize: (a: number) => [number, number];
+  readonly blake3hasher_clone: (a: number) => number;
   readonly encryptXsalsa20: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
   readonly decryptXsalsa20: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
   readonly newX25519PrivateKey: () => [number, number];
@@ -219,17 +230,6 @@ export interface InitOutput {
   readonly decrypt: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
   readonly seal: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
   readonly unseal: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
-  readonly generateNonce: (a: number, b: number) => [number, number];
-  readonly blake3HashOnce: (a: number, b: number) => [number, number];
-  readonly blake3HashOnceWithContext: (a: number, b: number, c: number, d: number) => [number, number];
-  readonly __wbg_blake3hasher_free: (a: number, b: number) => void;
-  readonly blake3hasher_new: () => number;
-  readonly blake3hasher_update: (a: number, b: number, c: number) => void;
-  readonly blake3hasher_finalize: (a: number) => [number, number];
-  readonly blake3hasher_clone: (a: number) => number;
-  readonly sign: (a: number, b: number, c: number, d: number) => [number, number, number, number];
-  readonly verify: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number];
-  readonly getSignerId: (a: number, b: number) => [number, number, number, number];
   readonly newEd25519SigningKey: () => [number, number];
   readonly ed25519VerifyingKey: (a: number, b: number) => [number, number, number, number];
   readonly ed25519Sign: (a: number, b: number, c: number, d: number) => [number, number, number, number];

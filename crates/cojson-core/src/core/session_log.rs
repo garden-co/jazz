@@ -1,3 +1,5 @@
+use std::sync::{Mutex};
+use once_cell::sync::Lazy;
 
 use base64::{engine::general_purpose::URL_SAFE, Engine as _};
 use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
@@ -8,7 +10,7 @@ use salsa20::{
 use serde::{Deserialize, Serialize};
 use serde_json::{value::RawValue, Number, Value as JsonValue};
 use crate::core::{CryptoCache, NonceGenerator, CoJsonCoreError};
-use crate::core::keys::{SignerID, SignerSecret, Signature, KeyID, KeySecret, CoID, decode_z};
+use crate::core::keys::{SignerID, SignerSecret, Signature, KeyID, KeySecret, CoID};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SessionID(pub String);
@@ -74,10 +76,10 @@ pub struct SessionLogInternal {
     hasher: blake3::Hasher,
     transactions_json: Vec<String>,
     last_signature: Option<Signature>,
-    nonce_generator: NonceGenerator,
-    crypto_cache: CryptoCache,
+    nonce_generator: NonceGenerator,    
 }
 
+static CRYPTO_CACHE: Lazy<Mutex<CryptoCache>> = Lazy::new(|| Mutex::new(CryptoCache::new()));
 
 impl SessionLogInternal {
     /// Create a new session log, optionally with a public key for signature verification.
@@ -87,12 +89,7 @@ impl SessionLogInternal {
         // If a signer_id is provided, decode and parse it as a VerifyingKey.
         let public_key = match signer_id {
             Some(signer_id) => Some(
-                VerifyingKey::try_from(
-                    decode_z(&signer_id.0)
-                        .expect("Invalid public key")
-                        .as_slice(),
-                )
-                .expect("Invalid public key"),
+                CRYPTO_CACHE.lock().unwrap().get_verifying_key(&signer_id).expect("Invalid public key"),
             ),
             None => None,
         };
@@ -103,7 +100,6 @@ impl SessionLogInternal {
             transactions_json: Vec::new(),
             last_signature: None,
             nonce_generator: NonceGenerator::new(co_id, session_id),
-            crypto_cache: CryptoCache::new(),
         }
     }
 
@@ -199,7 +195,7 @@ impl SessionLogInternal {
                 let nonce = self.nonce_generator.get_nonce(tx_index);
 
                 // Prepare the secret key bytes for encryption.
-                let key: Key<XSalsa20> = self.crypto_cache.get_xsalsa20_key(&key_secret)?;
+                let key: Key<XSalsa20> = CRYPTO_CACHE.lock().unwrap().get_xsalsa20_key(&key_secret)?;
 
                 // Encrypt the changes JSON.
                 let mut ciphertext = changes_json.as_bytes().to_vec();
@@ -255,7 +251,7 @@ impl SessionLogInternal {
             "\"hash_z{}\"",
             bs58::encode(new_hash.as_bytes()).into_string()
         );
-        let signing_key: SigningKey = self.crypto_cache.get_ed25519_signing_key(signer_secret)?;
+        let signing_key: SigningKey = CRYPTO_CACHE.lock().unwrap().get_ed25519_signing_key(signer_secret)?;
         let new_signature: Signature = signing_key
             .sign(new_hash_encoded_stringified.as_bytes())
             .into();
@@ -296,7 +292,7 @@ impl SessionLogInternal {
                 let mut ciphertext = URL_SAFE.decode(ciphertext_b64)?;
 
                 // Decrypt using XSalsa20.
-                let key = self.crypto_cache.get_xsalsa20_key(&key_secret)?;
+                let key = CRYPTO_CACHE.lock().unwrap().get_xsalsa20_key(&key_secret)?;
 
                 let mut cipher = XSalsa20::new(&key, &nonce.into());
                 cipher.apply_keystream(&mut ciphertext);
@@ -339,7 +335,7 @@ impl SessionLogInternal {
                     let mut ciphertext = URL_SAFE.decode(ciphertext_b64)?;
 
                     // Decrypt using XSalsa20.
-                    let key: Key<XSalsa20> = self.crypto_cache.get_xsalsa20_key(&key_secret)?;
+                    let key: Key<XSalsa20> = CRYPTO_CACHE.lock().unwrap().get_xsalsa20_key(&key_secret)?;
                     let mut cipher = XSalsa20::new(&key, &nonce.into());
                     cipher.apply_keystream(&mut ciphertext);
 
@@ -360,6 +356,7 @@ mod tests {
     use super::*;
     use rand_core::OsRng;
     use std::{collections::HashMap, fs};
+    use crate::core::keys::decode_z;
 
     #[test]
     fn it_works() {
@@ -825,7 +822,7 @@ mod tests {
 
     #[test]
     fn test_transaction_not_found_error() {
-        let session = SessionLogInternal::new(
+        let mut session = SessionLogInternal::new(
             CoID("co_test".to_string()),
             SessionID("session_test".to_string()),
             None,
