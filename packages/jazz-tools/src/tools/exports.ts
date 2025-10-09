@@ -31,6 +31,8 @@ export type {
   RefsToResolve,
   RefsToResolveStrict,
   CoMapInit_DEPRECATED as CoMapInit,
+  CoMapEdit,
+  CoMapEdits,
   CoFeedEntry,
   TextPos,
   AccountClass,

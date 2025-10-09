@@ -54,7 +54,7 @@ import {
   subscribeToExistingCoValue,
 } from "../internal.js";
 
-type CoMapEdit<V> = {
+export type CoMapEdit<V> = {
   value?: V;
   ref?: RefIfCoValue<V>;
   by: Account | null;
@@ -64,7 +64,7 @@ type CoMapEdit<V> = {
 
 type LastAndAllCoMapEdits<V> = CoMapEdit<V> & { all: CoMapEdit<V>[] };
 
-type CoMapEdits<M extends CoMap> = {
+export type CoMapEdits<M extends CoMap> = {
   [Key in CoKeys<M>]?: LastAndAllCoMapEdits<M[Key]>;
 };
 
