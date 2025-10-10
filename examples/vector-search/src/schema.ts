@@ -1,4 +1,4 @@
-import { Group, co, z } from "jazz-tools";
+import { co, z } from "jazz-tools";
 
 export const JazzProfile = co.profile();
 
