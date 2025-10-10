@@ -28,7 +28,7 @@ export const JazzAccount = co
   .withMigration(async (account) => {
     if (!account.$jazz.has("root")) {
       account.$jazz.set("root", {
-        journalEntries: JournalEntryList.create([]),
+        journalEntries: [],
       });
     }
   });
