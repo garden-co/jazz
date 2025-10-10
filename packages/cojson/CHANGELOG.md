@@ -1,5 +1,13 @@
 # cojson
 
+## 0.18.25
+
+### Patch Changes
+
+- 4036737: "peersToLoadFrom" renamed to only "peers"
+  - cojson-core-wasm@0.18.25
+  - cojson-core-napi@0.18.25
+
 ## 0.18.24
 
 ### Patch Changes
