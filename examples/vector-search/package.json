@@ -7,7 +7,9 @@
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "format-and-lint": "biome check .",
-    "format-and-lint:fix": "biome check . --write"
+    "format-and-lint:fix": "biome check . --write",
+    "test:e2e": "playwright test",
+    "test:e2e:ui": "playwright test --ui"
   },
   "dependencies": {
     "@huggingface/transformers": "^3.7.4",
@@ -16,11 +18,13 @@
     "react-dom": "catalog:react"
   },
   "devDependencies": {
+    "@playwright/test": "^1.50.1",
     "@biomejs/biome": "catalog:default",
     "@tailwindcss/postcss": "^4.1.10",
     "@types/react": "catalog:react",
     "@types/react-dom": "catalog:react",
     "@vitejs/plugin-react": "^4.5.1",
+    "is-ci": "^3.0.1",
     "globals": "^15.11.0",
     "postcss": "^8.4.40",
     "tailwindcss": "^4.1.10",

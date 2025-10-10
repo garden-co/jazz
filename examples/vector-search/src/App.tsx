@@ -134,7 +134,13 @@ function App() {
 
         {/* Footer */}
         <div className="mt-12">
-          <Footer deleteEntries={deleteEntries} />
+          <Footer
+            deleteEntries={deleteEntries}
+            promptNewEntry={promptNewEntry}
+            isCreatingEntry={isCreatingEntry}
+            isLoading={isLoading}
+            showCreateNew={isEmptyState}
+          />
         </div>
       </main>
     </>
@@ -150,7 +156,7 @@ function JournalEntryCard({
 
   return (
     <div
-      className="flex flex-col gap-2"
+      className="journal-entry-card flex flex-col gap-2"
       style={{ transform: `rotate(${rotation}deg)` }}
     >
       <div className="bg-white shadow-lg p-6 rounded-xl max-h-min flex flex-col gap-2">

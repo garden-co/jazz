@@ -39,6 +39,7 @@ export function SearchBar({
             className="w-full pl-5 pr-32 py-5 text-lg rounded-full bg-white shadow-lg border border-zinc-200 focus:outline-none focus:ring-2 focus:ring-blue-500"
             ref={searchInputRef}
             disabled={isLoading}
+            role="searchbox"
           />
           <button
             type="submit"
