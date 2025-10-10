@@ -1,3 +1,4 @@
+import { CoValueLoadingState } from "jazz-tools";
 import { createImage } from "jazz-tools/media";
 import { useAccount } from "jazz-tools/react";
 import { ChangeEvent, useEffect, useRef, useState } from "react";
@@ -27,7 +28,7 @@ export default function ImageUpload() {
   }, [imagePreviewUrl]);
 
   const onImageChange = async (event: ChangeEvent<HTMLInputElement>) => {
-    if (!me) return;
+    if (me.$jazzState !== CoValueLoadingState.LOADED) return;
 
     const file = event.currentTarget.files?.[0];
 

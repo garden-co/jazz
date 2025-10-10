@@ -1,6 +1,7 @@
 import { assert, beforeEach, describe, expect, test } from "vitest";
 import { co, z } from "../../exports.js";
 import { createJazzTestAccount, setupJazzTestSync } from "../../testing.js";
+import { assertLoaded } from "../utils.js";
 
 // Define the difficulty levels enum
 const difficultyLevels = ["easy", "medium", "hard"] as const;
@@ -51,7 +52,7 @@ describe("QuestSchema", () => {
 
     // Load the quest to trigger the migration
     const loadedQuest = await QuestSchema.load(quest.$jazz.id);
-    assert(loadedQuest);
+    assertLoaded(loadedQuest);
 
     // After loading, the migration should have run and filled categories
     expect(loadedQuest.categories).toEqual(["adventure"]);
@@ -76,7 +77,7 @@ describe("QuestSchema", () => {
 
     // Load the quest to ensure migration doesn't change existing categories
     const loadedQuest = await QuestSchema.load(quest.$jazz.id);
-    assert(loadedQuest);
+    assertLoaded(loadedQuest);
 
     // Categories should remain unchanged after migration
     expect(loadedQuest.categories).toEqual(["combat", "boss-fight", "endgame"]);

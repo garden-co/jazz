@@ -1,6 +1,6 @@
 import { StorageAPI } from "cojson";
 import { WasmCrypto } from "cojson/crypto/WasmCrypto";
-import { beforeEach, describe, expect, test, vi } from "vitest";
+import { assert, beforeEach, describe, expect, test, vi } from "vitest";
 import {
   Account,
   AccountClass,
@@ -28,6 +28,7 @@ import {
   coValueClassFromCoValueClassOrSchema,
 } from "../internal";
 import {
+  assertLoaded,
   createJazzTestAccount,
   getPeerConnectedToTestSyncServer,
   setupJazzTestSync,
@@ -101,7 +102,8 @@ describe("ContextManager", () => {
 
     const context = getCurrentValue();
 
-    expect(context.me.profile?.name).toBe("Anonymous user");
+    assertLoaded(context.me.profile);
+    expect(context.me.profile.name).toBe("Anonymous user");
     expect(context.node).toBeDefined();
     expect(manager.getCurrentValue()).toBeDefined();
   });
@@ -113,7 +115,8 @@ describe("ContextManager", () => {
 
     const context = getCurrentValue();
 
-    expect(context.me.profile?.name).toBe("Test User");
+    assertLoaded(context.me.profile);
+    expect(context.me.profile.name).toBe("Test User");
     expect(context.node).toBeDefined();
     expect(manager.getCurrentValue()).toBeDefined();
   });
@@ -489,7 +492,10 @@ describe("ContextManager", () => {
       },
     });
 
-    expect(me.root.transferredRoot?.value).toBe("Hello");
+    const transferredRoot = me.root.transferredRoot;
+    assert(transferredRoot);
+    assertLoaded(transferredRoot);
+    expect(transferredRoot.value).toBe("Hello");
   });
 
   test("handles registration of new account", async () => {
@@ -501,7 +507,8 @@ describe("ContextManager", () => {
 
     expect(accountId).toBeDefined();
     const context = getCurrentValue();
-    expect(context.me.profile?.name).toBe("Test User");
+    assertLoaded(context.me.profile);
+    expect(context.me.profile.name).toBe("Test User");
     expect(context.me.$jazz.id).toBe(accountId);
   });
 

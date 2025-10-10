@@ -1,3 +1,4 @@
+import { CoValueLoadingState } from "jazz-tools";
 import { useCoState } from "jazz-tools/react";
 import { Group } from "jazz-tools";
 import { LinkToHome } from "./LinkToHome.tsx";
@@ -26,19 +27,19 @@ export function EditOrder(props: { id: string }) {
     },
   });
 
+  if (order.$jazzState !== CoValueLoadingState.LOADED) return;
+  const loadedOrder = order;
+
   function handleSave(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
-    if (!order) return;
 
-    order.$jazz.unstable_merge();
+    loadedOrder.$jazz.unstable_merge();
     router.navigate("/");
   }
 
   function handleCancel() {
     router.navigate("/");
   }
-
-  if (!order) return;
 
   return (
     <>

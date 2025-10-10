@@ -1,8 +1,8 @@
-import { FileStream, ImageDefinition } from "jazz-tools";
+import { CoValueLoadingState, FileStream, ImageDefinition } from "jazz-tools";
 import { highestResAvailable } from "jazz-tools/media";
 import { forwardRef, useEffect, useMemo, useState } from "react";
 import { Image as RNImage, ImageProps as RNImageProps } from "react-native";
-import { useCoState } from "../hooks.js";
+import { useCoStateWithSelector } from "../hooks.js";
 
 export type ImageProps = Omit<RNImageProps, "width" | "height" | "source"> & {
   /** The ID of the ImageDefinition to display */
@@ -68,7 +68,10 @@ export const Image = forwardRef<RNImage, ImageProps>(function Image(
   { imageId, width, height, ...props },
   ref,
 ) {
-  const image = useCoState(ImageDefinition, imageId);
+  const image = useCoStateWithSelector(ImageDefinition, imageId, {
+    select: (image) =>
+      image.$jazzState === CoValueLoadingState.LOADED ? image : null,
+  });
   const [src, setSrc] = useState<string | undefined>(
     image?.placeholderDataURL ??
       "data:image/gif;base64,R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==",

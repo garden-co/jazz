@@ -1,3 +1,4 @@
+import { CoValueLoadingState, CoMapEdit, MaybeLoaded } from "jazz-tools";
 import { useCoState } from "jazz-tools/react";
 import { useEffect, useState } from "react";
 import { Issue } from "./schema.ts";
@@ -6,7 +7,10 @@ function DescriptionVersionHistory({ id }: { id: string }) {
   const issue = useCoState(Issue, id);
   const [version, setVersion] = useState<any | undefined>();
   const [isVersionLatest, setIsVersionLatest] = useState(true);
-  const edits = issue?.$jazz.getEdits().description?.all.reverse() ?? [];
+  const edits =
+    issue.$jazzState === CoValueLoadingState.LOADED
+      ? (issue.$jazz.getEdits().description?.all.reverse() ?? [])
+      : [];
 
   useEffect(() => {
     if (!version) {
@@ -15,7 +19,8 @@ function DescriptionVersionHistory({ id }: { id: string }) {
     }
   }, [edits]);
 
-  if (!issue) return <div>Loading...</div>;
+  if (issue.$jazzState !== CoValueLoadingState.LOADED)
+    return <div>Loading...</div>;
 
   const selectVersion = (version: any, isLatest: boolean) => {
     setVersion(version);
@@ -49,7 +54,7 @@ function DescriptionVersionHistory({ id }: { id: string }) {
             >
               {i == 0 ? "(Latest)" : ""}
               <div className="font-medium">{edit.madeAt.toLocaleString()}</div>
-              <div className="text-stone-500">{edit.by?.profile?.name}</div>
+              <div className="text-stone-500">{getEditorName(edit)}</div>
             </button>
           ))}
         </div>
@@ -61,14 +66,14 @@ function DescriptionVersionHistory({ id }: { id: string }) {
 export function IssueVersionHistory({ id }: { id: string }) {
   const issue = useCoState(Issue, id);
 
-  const issueEdits = issue?.$jazz.getEdits() ?? {};
+  if (issue.$jazzState !== CoValueLoadingState.LOADED) return;
+
+  const issueEdits = issue.$jazz.getEdits();
   const edits = [
     ...(issueEdits.title?.all ?? []),
     ...(issueEdits.estimate?.all ?? []),
     ...(issueEdits.status?.all ?? []),
   ].sort((a, b) => (a.madeAt < b.madeAt ? -1 : a.madeAt > b.madeAt ? 1 : 0));
-
-  if (!issue) return;
 
   return (
     <>
@@ -81,7 +86,7 @@ export function IssueVersionHistory({ id }: { id: string }) {
             </p>
             <p className="text-stone-600" key={i}>
               <span className="font-medium text-stone-800">
-                {edit.by?.profile?.name}
+                {getEditorName(edit)}
               </span>{" "}
               changed{" "}
               <span className="font-medium text-stone-800">{edit.key}</span> to{" "}
@@ -109,4 +114,14 @@ export function IssueVersionHistory({ id }: { id: string }) {
       </div>
     </>
   );
+}
+
+function getEditorName(
+  edit: CoMapEdit<MaybeLoaded<unknown>>,
+): string | undefined {
+  const maybeProfile = edit.by?.profile;
+  if (!maybeProfile || maybeProfile.$jazzState !== CoValueLoadingState.LOADED) {
+    return undefined;
+  }
+  return maybeProfile.name;
 }

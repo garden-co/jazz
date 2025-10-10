@@ -1,5 +1,11 @@
 import * as Clipboard from "expo-clipboard";
-import { Account, Group } from "jazz-tools";
+import {
+  Account,
+  CoMapEdit,
+  CoValueLoadingState,
+  Group,
+  MaybeLoaded,
+} from "jazz-tools";
 import { useState } from "react";
 import React, {
   Button,
@@ -49,7 +55,7 @@ export default function ChatScreen() {
   };
 
   const sendMessage = () => {
-    if (!loadedChat) return;
+    if (loadedChat.$jazzState !== CoValueLoadingState.LOADED) return;
     if (message.trim()) {
       loadedChat.$jazz.push(
         Message.create({ text: message }, { owner: loadedChat?.$jazz.owner }),
@@ -74,7 +80,7 @@ export default function ChatScreen() {
               { textAlign: isMe ? "right" : "left" },
             ]}
           >
-            {item?.$jazz.getEdits()?.text?.by?.profile?.name}
+            {getEditorName(item?.$jazz.getEdits()?.text)}
           </Text>
         ) : null}
         <View style={styles.messageContent}>
@@ -99,14 +105,18 @@ export default function ChatScreen() {
 
   return (
     <View style={styles.container}>
-      {!loadedChat ? (
+      {loadedChat.$jazzState !== CoValueLoadingState.LOADED ? (
         <View style={styles.welcomeContainer}>
           <Text style={styles.usernameTitle}>Username</Text>
           <TextInput
             style={styles.usernameInput}
-            value={me?.profile.name ?? ""}
+            value={
+              me.$jazzState === CoValueLoadingState.LOADED
+                ? me.profile.name
+                : ""
+            }
             onChangeText={(value) => {
-              if (me?.profile) {
+              if (me.$jazzState === CoValueLoadingState.LOADED) {
                 me.profile.$jazz.set("name", value);
               }
             }}
@@ -202,6 +212,18 @@ export default function ChatScreen() {
       )}
     </View>
   );
+}
+
+function getEditorName(
+  edit?: CoMapEdit<MaybeLoaded<unknown>>,
+): string | undefined {
+  if (
+    !edit?.by?.profile ||
+    edit.by.profile.$jazzState !== CoValueLoadingState.LOADED
+  ) {
+    return;
+  }
+  return edit.by.profile.name;
 }
 
 const styles = StyleSheet.create({

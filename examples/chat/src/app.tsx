@@ -1,7 +1,7 @@
 import { apiKey } from "@/apiKey.ts";
 import { getRandomUsername, inIframe, onChatLoad } from "@/util.ts";
 import { useIframeHashRouter } from "hash-slash";
-import { Group } from "jazz-tools";
+import { CoValueLoadingState, Group } from "jazz-tools";
 import { JazzInspector } from "jazz-tools/inspector";
 import { JazzReactProvider, useAccount } from "jazz-tools/react";
 import { StrictMode } from "react";
@@ -12,8 +12,15 @@ import { ThemeProvider } from "./themeProvider.tsx";
 import { AppContainer, TopBar } from "./ui.tsx";
 
 export function App() {
-  const { me, logOut } = useAccount();
+  const { me, logOut } = useAccount(undefined, {
+    resolve: {
+      profile: true,
+    },
+  });
   const router = useIframeHashRouter();
+
+  const profile =
+    me.$jazzState === CoValueLoadingState.LOADED ? me.profile : undefined;
 
   const createChat = () => {
     if (!me) return;
@@ -31,11 +38,11 @@ export function App() {
       <TopBar>
         <input
           type="text"
-          value={me?.profile?.name ?? ""}
+          value={profile?.name ?? ""}
           className="bg-transparent"
           onChange={(e) => {
-            if (!me?.profile) return;
-            me.profile.$jazz.set("name", e.target.value);
+            if (!profile) return;
+            profile.$jazz.set("name", e.target.value);
           }}
           placeholder="Set username"
         />

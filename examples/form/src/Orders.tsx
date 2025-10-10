@@ -1,3 +1,4 @@
+import { CoValueLoadingState } from "jazz-tools";
 import { useAccountWithSelector } from "jazz-tools/react";
 import { OrderThumbnail } from "./OrderThumbnail.tsx";
 import { JazzAccount, PartialBubbleTeaOrder } from "./schema.ts";
@@ -17,10 +18,15 @@ export function Orders() {
         },
       },
     },
-    select: (me) => me?.root.orders,
+    select: (me) => {
+      if (me.$jazzState !== CoValueLoadingState.LOADED) {
+        return [];
+      }
+      return me.root.orders;
+    },
   });
 
-  const hasOrders = !!orders?.length;
+  const hasOrders = orders.length > 0;
   const createButtonText = hasOrders
     ? "Create a new order"
     : "Create your first order";

@@ -3,6 +3,7 @@ import {
   AnonymousJazzAgent,
   FileStream,
   Group,
+  MaybeLoaded,
   coOptionalDefiner,
   unstable_mergeBranchWithResolve,
 } from "../../../internal.js";
@@ -79,7 +80,7 @@ export class FileStreamSchema implements CoreFileStreamSchema {
   load(
     id: string,
     options: { loadAs: Account | AnonymousJazzAgent },
-  ): Promise<FileStream | null> {
+  ): Promise<MaybeLoaded<FileStream>> {
     return this.coValueClass.load(id, options);
   }
 

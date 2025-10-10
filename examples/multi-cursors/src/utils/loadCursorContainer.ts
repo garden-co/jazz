@@ -1,4 +1,4 @@
-import { Account, Group, type ID } from "jazz-tools";
+import { Account, CoValueLoadingState, Group, type ID } from "jazz-tools";
 import { CursorContainer, CursorFeed } from "../schema";
 
 /**
@@ -42,9 +42,10 @@ export async function loadCursorContainer(
   cursorFeedID = "cursor-feed",
   groupID: string,
 ): Promise<string | undefined> {
-  if (!me) return;
+  if (me.$jazzState !== CoValueLoadingState.LOADED) return;
 
   const group = await loadGroup(me, groupID);
+  if (group.$jazzState !== CoValueLoadingState.LOADED) return;
 
   // Using the origin as part of the unique identifier
   // to have different cursors for different origins
@@ -55,7 +56,7 @@ export async function loadCursorContainer(
     group?.$jazz.id,
   );
 
-  if (cursorContainer === null || cursorContainer === undefined) {
+  if (cursorContainer.$jazzState !== CoValueLoadingState.LOADED) {
     console.log("Global cursors does not exist, creating...");
     const cursorContainer = await CursorContainer.upsertUnique({
       value: {
@@ -67,7 +68,7 @@ export async function loadCursorContainer(
       unique: cursorUID,
       owner: group,
     });
-    if (cursorContainer === null) {
+    if (cursorContainer.$jazzState !== CoValueLoadingState.LOADED) {
       throw new Error("Unable to create global cursors");
     }
 

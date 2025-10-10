@@ -1,21 +1,23 @@
+import { CoValueLoadingState } from "jazz-tools";
 import { Image, useAccount } from "jazz-tools/react";
 import { JazzAccount } from "./schema";
 
 export default function ProfileImage() {
-  const { me } = useAccount(JazzAccount, { resolve: { profile: true } });
+  const { me } = useAccount(JazzAccount, {
+    resolve: { profile: { image: true } },
+  });
 
-  const deleteImage = () => {
-    if (!me?.profile) return;
-    me.profile.$jazz.delete("image");
-  };
-
-  if (!me?.profile?.image) {
+  if (me.$jazzState !== CoValueLoadingState.LOADED || !me.profile.image) {
     return (
       <div className="flex items-center justify-center h-64 bg-gray-100 rounded-lg">
         <p className="text-gray-500">No profile image</p>
       </div>
     );
   }
+
+  const deleteImage = () => {
+    me.profile.$jazz.delete("image");
+  };
 
   return (
     <div className="space-y-4">
