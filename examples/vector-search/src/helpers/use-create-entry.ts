@@ -17,16 +17,23 @@ export function useCreateEntry({
       return;
     }
 
+    if (!journalEntries) return;
+
     try {
       setIsCreating(true);
       const embedding = await createEmbedding(text);
 
-      const journalEntry = JournalEntry.create({
-        text,
-        feelings: [],
-        topics: [],
-        embedding: Embedding.create(embedding),
-      });
+      const journalEntry = JournalEntry.create(
+        {
+          text,
+          feelings: [],
+          topics: [],
+          embedding: Embedding.create(embedding, {
+            owner: journalEntries?.$jazz.owner,
+          }),
+        },
+        { owner: journalEntries?.$jazz.owner },
+      );
 
       if (journalEntries) {
         journalEntries.$jazz.unshift(journalEntry);

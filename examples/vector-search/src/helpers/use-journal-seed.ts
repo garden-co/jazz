@@ -32,6 +32,8 @@ export const useJournalSeed = ({
   const [progress, setProgress] = useState<SeedProgress>(SEED_PROGRESS_START);
 
   const seedJournal = useCallback(async () => {
+    if (!journalEntries) return;
+
     setIsSeeding(true);
     setProgress(SEED_PROGRESS_START);
     try {
@@ -41,12 +43,17 @@ export const useJournalSeed = ({
       for (const entry of journalEntriesData) {
         const embedding = await createEmbedding(entry.c);
 
-        const journalEntry = JournalEntry.create({
-          text: entry.c,
-          feelings: entry.f,
-          topics: entry.t,
-          embedding: Embedding.create(embedding),
-        });
+        const journalEntry = JournalEntry.create(
+          {
+            text: entry.c,
+            feelings: entry.f,
+            topics: entry.t,
+            embedding: Embedding.create(embedding, {
+              owner: journalEntries?.$jazz.owner,
+            }),
+          },
+          { owner: journalEntries?.$jazz.owner },
+        );
 
         if (journalEntries) {
           journalEntries.$jazz.push(journalEntry);
