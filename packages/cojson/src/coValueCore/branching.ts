@@ -27,6 +27,7 @@ export type BranchPointerCommit = {
  */
 export type MergedTransactionMetadata = {
   mi: number; // Transaction index and marker of a merge commit
+  t?: number;
   s?: SessionID;
   b?: RawCoID;
 };
@@ -242,11 +243,20 @@ export function mergeBranch(branch: CoValueCore): CoValueCore {
   // To reduce the cost of the meta we skip the repeated information
   let lastSessionId: string | undefined = undefined;
   let lastBranchId: string | undefined = undefined;
+  let lastOriginalMadeAt: number = 0;
+
+  const now = Date.now();
 
   for (const tx of branchValidTransactions) {
     const mergeMeta: MergedTransactionMetadata = {
       mi: tx.txID.txIndex,
     };
+
+    // We compress the original made at, to reduce the size of the meta information
+    if (tx.madeAt !== lastOriginalMadeAt) {
+      // Storing the diff with madeAt to consume less bytes in the meta information
+      mergeMeta.t = now - tx.madeAt;
+    }
 
     if (lastSessionId !== tx.txID.sessionID) {
       mergeMeta.s = tx.txID.sessionID;
@@ -256,9 +266,10 @@ export function mergeBranch(branch: CoValueCore): CoValueCore {
       mergeMeta.b = tx.txID.branch;
     }
 
-    target.makeTransaction(tx.changes, tx.tx.privacy, mergeMeta, tx.madeAt);
+    target.makeTransaction(tx.changes, tx.tx.privacy, mergeMeta, now);
     lastSessionId = tx.txID.sessionID;
     lastBranchId = tx.txID.branch;
+    lastOriginalMadeAt = tx.madeAt;
   }
 
   // Track the merged transactions for the branch, so future merges will know which transactions have already been merged

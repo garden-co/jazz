@@ -118,9 +118,9 @@ export function determineValidTransactions(coValue: CoValueCore) {
       }
 
       tx.isValidated = true;
-      const wasValid = tx.isValid;
-
-      const groupAtTime = groupContent.atTime(tx.madeAt);
+      // We use the original made at to get the group at the original time when the transaction was made
+      // madeAt might be changed by the meta field (e.g. merged transactions), and so can't be used for permissions checks
+      const groupAtTime = groupContent.atTime(tx.originalMadeAt);
       const effectiveTransactor = agentInAccountOrMemberInGroup(
         tx.author,
         groupAtTime,
@@ -220,13 +220,10 @@ function determineValidTransactionsForGroup(
   initialAdmin: RawAccountID | AgentID,
   extendChain?: Set<CoValueCore["id"]>,
 ): { memberState: MemberState } {
-  coValue.verifiedTransactions.sort((a, b) => {
-    return a.madeAt - b.madeAt;
-  });
+  coValue.verifiedTransactions.sort(coValue.compareTransactions);
 
   const memberState: MemberState = {};
   const writeOnlyKeys: Record<RawAccountID | AgentID, KeyID> = {};
-  const validTransactions: ValidTransactionsResult[] = [];
 
   const writeKeys = new Set<string>();
 

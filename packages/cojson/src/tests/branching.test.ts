@@ -1,11 +1,20 @@
-import { assert, beforeEach, describe, expect, test } from "vitest";
+import {
+  assert,
+  beforeEach,
+  describe,
+  expect,
+  onTestFinished,
+  test,
+  vi,
+} from "vitest";
 import {
   createTestNode,
   setupTestNode,
   loadCoValueOrFail,
+  setupTestAccount,
 } from "./testUtils.js";
 import { expectList, expectMap, expectPlainText } from "../coValue.js";
-import { RawCoMap } from "../exports.js";
+import { RawAccount, RawCoMap } from "../exports.js";
 
 let jazzCloud: ReturnType<typeof setupTestNode>;
 
@@ -237,6 +246,7 @@ describe("Branching Logic", () => {
       loadedBranch2.core.mergeBranch();
 
       await loadedBranch2.core.waitForSync();
+      await new Promise((resolve) => setTimeout(resolve, 5));
 
       branch1.core.mergeBranch();
 
@@ -288,6 +298,174 @@ describe("Branching Logic", () => {
       await loadedBranchMergeResult.waitForSync();
 
       expect(plainText.toString()).toEqual("hello world people");
+    });
+
+    test("should preserve the conflict resolution that was applied to the branch", async () => {
+      const dateNowMock = vi.spyOn(Date, "now");
+
+      dateNowMock.mockReturnValue(1);
+
+      const client = setupTestNode({
+        connected: true,
+      });
+      const group = client.node.createGroup();
+      const map = group.createMap();
+      const branchName = "feature-branch";
+
+      onTestFinished(() => {
+        dateNowMock.mockRestore();
+      });
+
+      // Add initial transactions to original map
+      map.set("value", 1, "trusting");
+
+      // Create branch from original map
+      const branch = expectMap(
+        map.core.createBranch(branchName, group.id).getCurrentContent(),
+      );
+
+      dateNowMock.mockReturnValue(2);
+
+      // Add new transaction to branch
+      branch.set("value", 2, "trusting");
+
+      const newSession = client.spawnNewSession();
+
+      const loadedBranch = await loadCoValueOrFail(newSession.node, branch.id);
+
+      dateNowMock.mockReturnValue(3);
+
+      loadedBranch.set("value", 3, "trusting");
+
+      expect(loadedBranch.get("value")).toBe(3);
+
+      await loadedBranch.core.waitForSync();
+
+      // Push back the change, so it doesn't win the conflict
+      dateNowMock.mockReturnValue(1);
+
+      branch.set("value", 4, "trusting");
+
+      expect(branch.get("value")).toBe(3);
+
+      dateNowMock.mockReturnValue(4);
+      branch.core.mergeBranch();
+
+      // The conflict resolution should be preserved, so we should have 3 and not 4
+      expect(map.get("value")).toBe(3);
+    });
+
+    test("should preserve the original madeAt of the branch", async () => {
+      const client = setupTestNode();
+      const group = client.node.createGroup();
+      const map = group.createMap();
+
+      // Add initial transactions to original map
+      map.set("value", 1, "trusting");
+
+      // Create branch from original map
+      const branch = expectMap(
+        map.core.createBranch("feature-branch", group.id).getCurrentContent(),
+      );
+
+      // Add new transaction to branch
+      branch.set("value", 2, "trusting");
+
+      await new Promise((resolve) => setTimeout(resolve, 5));
+
+      const result = branch.core.mergeBranch();
+
+      // The merge should be successful
+      expect(map.get("value")).toBe(2);
+
+      const lastBranchTransaction = branch.core
+        .getValidSortedTransactions()
+        .at(-1);
+      const lastMapTransaction = result
+        .getValidSortedTransactions()
+        .findLast((tx) => tx.txID.branch === branch.id);
+
+      expect(lastMapTransaction?.originalMadeAt).not.toBe(
+        lastMapTransaction?.madeAt,
+      );
+
+      expect(lastBranchTransaction?.madeAt).toBe(lastMapTransaction?.madeAt);
+    });
+
+    test("should not load the merged transactions into the branch (regression test)", async () => {
+      const client = setupTestNode();
+      const group = client.node.createGroup();
+      const map = group.createMap();
+
+      // Add initial transactions to original map
+      map.set("value", 1, "trusting");
+
+      // Create branch from original map
+      const branch = expectMap(
+        map.core.createBranch("feature-branch", group.id).getCurrentContent(),
+      );
+
+      await new Promise((resolve) => setTimeout(resolve, 5));
+
+      // Add new transaction to branch
+      branch.set("value", 2, "trusting");
+
+      await new Promise((resolve) => setTimeout(resolve, 5));
+
+      const result = branch.core.mergeBranch();
+
+      // The merge should be successful
+      expect(map.get("value")).toBe(2);
+
+      const lastBranchTransaction = branch.core
+        .getValidSortedTransactions()
+        .at(-1);
+      expect(lastBranchTransaction?.madeAt).toBe(
+        lastBranchTransaction?.originalMadeAt,
+      );
+
+      const lastMapTransaction = result
+        .getValidSortedTransactions()
+        .findLast((tx) => tx.txID.branch === branch.id);
+      expect(lastMapTransaction?.madeAt).not.toBe(
+        lastMapTransaction?.originalMadeAt,
+      );
+    });
+
+    test("write permissions should be validated against the time of the merge and not the original madeAt", async () => {
+      const alice = setupTestNode({
+        connected: true,
+      });
+      const bob = await setupTestAccount({
+        connected: true,
+      });
+      const group = alice.node.createGroup();
+      const map = group.createMap();
+      const branchName = "feature-branch";
+
+      map.set("value", 1, "trusting");
+
+      const branch = expectMap(
+        map.core.createBranch(branchName, group.id).getCurrentContent(),
+      );
+
+      branch.set("value", 2, "trusting");
+
+      await new Promise((resolve) => setTimeout(resolve, 5));
+
+      // Grant writer rights to bob after the changes inside the branche
+      group.addMember(
+        await loadCoValueOrFail(alice.node, bob.accountID),
+        "writer",
+      );
+
+      const loadedBranch = await loadCoValueOrFail(bob.node, branch.id);
+
+      // Bob merges the branch
+      const mergeResult = loadedBranch.core.mergeBranch();
+
+      // The merge should be successful
+      expect(expectMap(mergeResult.getCurrentContent()).get("value")).toBe(2);
     });
   });
 

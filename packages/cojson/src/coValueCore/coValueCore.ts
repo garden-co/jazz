@@ -63,9 +63,12 @@ export type VerifiedTransaction = {
   author: RawAccountID | AgentID;
   // An object containing the session ID and the transaction index
   txID: TransactionID;
+  // The unmodified TxID that refers to the current position in the session map
+  orginalTxID: TransactionID;
   tx: Transaction;
   // The Unix time when the transaction was made
   madeAt: number;
+  originalMadeAt: number;
   // Whether the transaction has been validated, used to track if determinedValidTransactions needs to be check this
   isValidated: boolean;
   // The decoded changes of the transaction
@@ -92,6 +95,7 @@ export type DecryptedTransaction = {
   txID: TransactionID;
   changes: JsonValue[];
   madeAt: number;
+  originalMadeAt: number;
   tx: Transaction;
 };
 
@@ -834,6 +838,8 @@ export class CoValueCore {
         const verifiedTransaction = {
           author: accountOrAgentIDfromSessionID(sessionID),
           txID,
+          orginalTxID: txID,
+          originalMadeAt: tx.madeAt,
           madeAt: tx.madeAt,
           isValidated: false,
           isValid: false,
@@ -920,14 +926,20 @@ export class CoValueCore {
       const meta = transaction.meta as MergedTransactionMetadata;
 
       // Check if the transaction is a merge commit
-      const previousTransaction = transaction.previous?.txID;
-      const sessionID = meta.s ?? previousTransaction?.sessionID;
+      const previousTransaction = transaction.previous;
+      const sessionID = meta.s ?? previousTransaction?.txID.sessionID;
+
+      if (meta.t) {
+        transaction.madeAt = transaction.madeAt - meta.t;
+      } else if (previousTransaction) {
+        transaction.madeAt = previousTransaction.madeAt;
+      }
 
       if (sessionID) {
         transaction.txID = {
           sessionID,
           txIndex: meta.mi,
-          branch: meta.b ?? previousTransaction?.branch,
+          branch: meta.b ?? previousTransaction?.txID.branch,
         };
       } else {
         logger.error("Merge commit without session ID", {
@@ -998,7 +1010,8 @@ export class CoValueCore {
 
       options?.knownTransactions?.add(transaction.tx);
 
-      const { txID } = transaction;
+      // Using the orginalTxID to filter the transactions, because the TxID is modified by the merge meta
+      const txID = transaction.orginalTxID;
 
       const from = options?.from?.[txID.sessionID] ?? -1;
 
