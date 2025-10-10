@@ -2,9 +2,10 @@ import { useRef, useState } from "react";
 import { useAccount, useCoStateWithSelector } from "jazz-tools/react";
 
 import { Header } from "./components/Header";
-import { EmbeddingPill } from "./components/EmbeddingPill";
-import { ModelStatus } from "./components/ModelStatus";
 import { EmptyState } from "./components/EmptyState";
+import { SearchBar } from "./components/SearchBar";
+import { StatusBar } from "./components/StatusBar";
+import { Footer } from "./components/Footer";
 
 import { useJournalSeed } from "./helpers/use-journal-seed";
 import { useCreateEmbedding } from "./helpers/use-create-embedding";
@@ -13,7 +14,6 @@ import { useLocalEmbeddings, DEFAULT_MODEL } from "./embeddings";
 import { JazzAccount, JournalEntry, JournalEntryList } from "./schema";
 import { useCreateEntry } from "./helpers/use-create-entry";
 import { useDeleteEntries } from "./helpers/use-delete-entries";
-import { Footer } from "./components/Footer";
 
 function App() {
   const { me } = useAccount(JazzAccount, {
@@ -81,80 +81,28 @@ function App() {
       <main className="max-w-2xl mx-auto px-3 pt-8 pb-10 flex flex-col gap-2">
         <h2 className="text-4xl font-bold text-zinc-800 mb-8">Journal</h2>
 
-        {/* Search UI */}
         {!isEmptyState && (
           <>
-            <div className="flex flex-row flex-wrap gap-2">
-              <ModelStatus
-                modelName={DEFAULT_MODEL}
-                modelStatus={modelStatus}
-              />
-              {queryEmbedding && <EmbeddingPill embedding={queryEmbedding} />}
-            </div>
+            <SearchBar
+              modelStatus={modelStatus}
+              queryEmbedding={queryEmbedding}
+              createQueryEmbedding={createQueryEmbedding}
+              searchInputRef={searchInputRef}
+              isLoading={isLoading}
+              isCreatingEmbedding={isCreatingEmbedding}
+            />
 
-            <form
-              className="sticky top-3 flex flex-col gap-2 z-30 mb-10"
-              onSubmit={(e) => (
-                e.preventDefault(),
-                createQueryEmbedding(searchInputRef.current?.value)
-              )}
-            >
-              <div className="relative flex flex-row">
-                <input
-                  type="search"
-                  placeholder="Search relatable moments in the journal"
-                  className="w-full pl-5 pr-32 py-5 text-lg rounded-full bg-white shadow-lg border border-zinc-200 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  ref={searchInputRef}
-                  disabled={isLoading}
-                />
-                <button
-                  type="submit"
-                  className="absolute top-2.5 right-2.5 px-5 py-3  rounded-full shadow-lg bg-linear-to-t from-blue-700 to-blue-600 hover:to-blue-700 text-white cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
-                  disabled={isCreatingEmbedding || isLoading}
-                >
-                  {isCreatingEmbedding ? "Searching" : "Search"}
-                </button>
-              </div>
-            </form>
+            <StatusBar
+              isLoading={isLoading}
+              queryEmbedding={queryEmbedding}
+              journalEntries={journalEntries}
+              searchInputRef={searchInputRef}
+              isSeeding={isSeeding}
+              seedingProgress={seedingProgress}
+              isCreatingEntry={isCreatingEntry}
+              promptNewEntry={promptNewEntry}
+            />
           </>
-        )}
-
-        {/* Status line */}
-        {!isEmptyState && (
-          <div className="px-4 flex flex-row gap-2 justify-between items-center text-sm text-zinc-500">
-            {isLoading ? (
-              <>&nbsp;</>
-            ) : queryEmbedding && journalEntries !== undefined ? (
-              <div>
-                Found {journalEntries.length} journal entries relatable to{" "}
-                <span className="inline-block rounded-full py-px px-2 bg-zinc-200">
-                  {searchInputRef.current?.value}
-                </span>
-              </div>
-            ) : isSeeding ? (
-              <div>
-                Creating testing dataset:{" "}
-                <span className="tabular-nums">
-                  {seedingProgress.seededCount} / {seedingProgress.targetCount}
-                </span>
-              </div>
-            ) : journalEntries && journalEntries.length > 0 ? (
-              <>
-                <div>
-                  Showing{" "}
-                  <span className="tabular-nums">{journalEntries.length}</span>{" "}
-                  journal entries.
-                </div>
-                <button
-                  className="bg-zinc-200 px-2 rounded cursor-pointer hover:bg-zinc-300 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                  onClick={promptNewEntry}
-                  disabled={isCreatingEntry || isLoading}
-                >
-                  {isCreatingEntry ? "Creating..." : "+ New entry"}
-                </button>
-              </>
-            ) : null}
-          </div>
         )}
 
         {/* Journal entries */}
