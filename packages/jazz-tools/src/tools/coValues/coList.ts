@@ -405,6 +405,63 @@ export class CoList<out Item = any>
   }
 
   /**
+   * Given some data, gets an existing CoList or creates a new one if none exists.
+   * This method will not modify an existing CoList - it will only return it as-is.
+   *
+   * Note: This method respects resolve options, and thus can return `null` if the references cannot be resolved.
+   *
+   * @example
+   * ```ts
+   * const activeItems = await ItemList.getOrCreateUnique(
+   *   {
+   *     value: [item1, item2, item3],
+   *     unique: sourceData.identifier,
+   *     owner: workspace,
+   *   }
+   * );
+   * ```
+   *
+   * @param options The options for creating or loading the CoList. This includes the intended state of the CoList, its unique identifier, its owner, and the references to resolve.
+   * @returns Either an existing CoList (unchanged), or a new initialised CoList if none exists.
+   * @category Subscription & Loading
+   */
+  static async getOrCreateUnique<
+    L extends CoList,
+    const R extends RefsToResolve<L> = true,
+  >(
+    this: CoValueClass<L>,
+    options: {
+      value: L[number][];
+      unique: CoValueUniqueness["uniqueness"];
+      owner: Account | Group;
+      resolve?: RefsToResolveStrict<L, R>;
+    },
+  ): Promise<Resolved<L, R> | null> {
+    const listId = CoList._findUnique(
+      options.unique,
+      options.owner.$jazz.id,
+      options.owner.$jazz.loadedAs,
+    );
+    let list: Resolved<L, R> | null = await loadCoValueWithoutMe(this, listId, {
+      ...options,
+      loadAs: options.owner.$jazz.loadedAs,
+      skipRetry: true,
+    });
+    if (!list) {
+      list = (this as any).create(options.value, {
+        owner: options.owner,
+        unique: options.unique,
+      }) as Resolved<L, R>;
+    }
+
+    return await loadCoValueWithoutMe(this, listId, {
+      ...options,
+      loadAs: options.owner.$jazz.loadedAs,
+      skipRetry: true,
+    });
+  }
+
+  /**
    * Loads a CoList by its unique identifier and owner's ID.
    * @param unique The unique identifier of the CoList to load.
    * @param ownerID The ID of the owner of the CoList.

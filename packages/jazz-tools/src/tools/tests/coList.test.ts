@@ -1314,6 +1314,47 @@ describe("CoList unique methods", () => {
     expect(updatedList?.[1]?.name).toBe("Added");
   });
 
+  test("getOrCreateUnique creates new list if none exists", async () => {
+    const ItemList = co.list(z.string());
+    const group = Group.create();
+
+    // getOrCreateUnique should return the existing list unchanged
+    const resultList = await ItemList.getOrCreateUnique({
+      value: ["original1", "original2", "original3"],
+      unique: "get-or-create-list",
+      owner: group,
+    });
+
+    expect(resultList).not.toBe(null);
+    expect(resultList?.length).toBe(3);
+    expect(resultList?.[0]).toBe("original1");
+    expect(resultList?.[1]).toBe("original2");
+    expect(resultList?.[2]).toBe("original3");
+  });
+
+  test("getOrCreateUnique returns existing list unchanged", async () => {
+    const ItemList = co.list(z.string());
+    const group = Group.create();
+
+    // Create initial list
+    const originalList = ItemList.create(["original1", "original2"], {
+      owner: group,
+      unique: "get-or-create-list",
+    });
+
+    // getOrCreateUnique should return the existing list unchanged
+    const resultList = await ItemList.getOrCreateUnique({
+      value: ["updated1", "updated2", "updated3"],
+      unique: "get-or-create-list",
+      owner: group,
+    });
+
+    expect(resultList).toEqual(originalList); // Should be the same instance
+    expect(resultList?.length).toBe(2);
+    expect(resultList?.[0]).toBe("original1");
+    expect(resultList?.[1]).toBe("original2");
+  });
+
   test("findUnique returns correct ID", async () => {
     const ItemList = co.list(z.string());
     const group = Group.create();
