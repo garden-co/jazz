@@ -20,15 +20,13 @@ export abstract class CoValueBase implements CoValue {
 
   declare abstract $jazz: CoValueJazzApi<this>;
   declare $jazzState: typeof CoValueLoadingState.LOADED;
+  declare $isLoaded: true;
 
   constructor() {
     Object.defineProperties(this, {
       $jazzState: { value: CoValueLoadingState.LOADED, enumerable: false },
+      $isLoaded: { value: true, enumerable: false },
     });
-  }
-
-  $isLoaded(): this is CoValue {
-    return true;
   }
 
   /** @category Internals */

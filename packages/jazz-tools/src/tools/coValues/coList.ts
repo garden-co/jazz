@@ -73,9 +73,7 @@ export class CoList<out Item = any>
 {
   declare $jazz: CoListJazzApi<this>;
   declare $jazzState: typeof CoValueLoadingState.LOADED;
-  $isLoaded(): this is CoValue {
-    return true;
-  }
+  declare $isLoaded: true;
 
   /**
    * Declare a `CoList` by subclassing `CoList.Of(...)` and passing the item schema using `co`.
@@ -134,6 +132,7 @@ export class CoList<out Item = any>
           enumerable: false,
         },
         $jazzState: { value: CoValueLoadingState.LOADED, enumerable: false },
+        $isLoaded: { value: true, enumerable: false },
       });
     }
 
@@ -182,6 +181,7 @@ export class CoList<out Item = any>
         enumerable: false,
       },
       $jazzState: { value: CoValueLoadingState.LOADED, enumerable: false },
+      $isLoaded: { value: true, enumerable: false },
     });
 
     const raw = owner.$jazz.raw.createList(
@@ -401,7 +401,7 @@ export class CoList<out Item = any>
         skipRetry: true,
       },
     );
-    if (list.$jazzState !== CoValueLoadingState.LOADED) {
+    if (!list.$isLoaded) {
       list = (this as any).create(options.value, {
         owner: options.owner,
         unique: options.unique,

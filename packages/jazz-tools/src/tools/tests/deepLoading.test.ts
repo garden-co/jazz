@@ -1101,7 +1101,7 @@ test("should not throw when calling ensureLoaded a record with a deleted ref", a
   unsub();
 });
 
-describe("$isLoaded type guard", async () => {
+describe("$isLoaded", async () => {
   const me = await Account.create({
     creationProps: { name: "Hermes Puggington" },
     crypto: Crypto,
@@ -1114,8 +1114,8 @@ describe("$isLoaded type guard", async () => {
       loadAs: me,
     });
 
-    expect(maybeLoadedMap.$isLoaded()).toBe(true);
-    if (maybeLoadedMap.$isLoaded()) {
+    expect(maybeLoadedMap.$isLoaded).toBe(true);
+    if (maybeLoadedMap.$isLoaded) {
       expect(maybeLoadedMap.$jazzState).toBe(CoValueLoadingState.LOADED);
       expect(maybeLoadedMap.$jazz.id).toBe(map.$jazz.id);
       expect(maybeLoadedMap.list).toEqual([]);
@@ -1136,8 +1136,8 @@ describe("$isLoaded type guard", async () => {
       { loadAs: otherAccount },
     );
 
-    expect(unloadedMap.$isLoaded()).toBe(false);
-    if (!unloadedMap.$isLoaded()) {
+    expect(unloadedMap.$isLoaded).toBe(false);
+    if (!unloadedMap.$isLoaded) {
       expect(unloadedMap.$jazzState).toBe(CoValueLoadingState.UNAVAILABLE);
       expect(unloadedMap.$jazz.id).toBe(map.$jazz.id);
       // @ts-expect-error - list should not be accessible on Unloaded2

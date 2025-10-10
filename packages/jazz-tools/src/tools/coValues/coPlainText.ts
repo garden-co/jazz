@@ -30,10 +30,7 @@ export class CoPlainText extends String implements CoValue {
 
   declare $jazz: CoTextJazzApi<this>;
   declare $jazzState: typeof CoValueLoadingState.LOADED;
-
-  $isLoaded(): this is CoValue {
-    return true;
-  }
+  declare $isLoaded: true;
 
   /** @internal */
   constructor(
@@ -57,6 +54,7 @@ export class CoPlainText extends String implements CoValue {
           enumerable: false,
         },
         $jazzState: { value: CoValueLoadingState.LOADED, enumerable: false },
+        $isLoaded: { value: true, enumerable: false },
       });
       return;
     }
@@ -71,6 +69,7 @@ export class CoPlainText extends String implements CoValue {
           enumerable: false,
         },
         $jazzState: { value: CoValueLoadingState.LOADED, enumerable: false },
+        $isLoaded: { value: true, enumerable: false },
       });
       return;
     }

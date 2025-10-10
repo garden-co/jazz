@@ -64,7 +64,7 @@ export interface CoValue {
     unstable_merge: () => void;
   };
   $jazzState: typeof CoValueLoadingState.LOADED;
-  $isLoaded(): this is CoValue;
+  $isLoaded: true;
 
   /** @category Stringifying & Inspection */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -107,9 +107,7 @@ export function createUnloadedCoValue<T extends CoValue>(
   return {
     $jazz: { id },
     $jazzState: jazzState,
-    $isLoaded() {
-      return false;
-    },
+    $isLoaded: false,
   };
 }
 
