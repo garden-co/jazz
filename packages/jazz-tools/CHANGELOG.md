@@ -1,5 +1,17 @@
 # jazz-tools
 
+## 0.18.25
+
+### Patch Changes
+
+- 4036737: "peersToLoadFrom" renamed to only "peers"
+- 8ae7d71: feat: AuthSecretStorage's key is now configurable to handle multiple Jazz's apps on the same origin
+- 36a5c58: Don't log unavailable errors when `loadUnique` or `upsertUnique` are used
+- Updated dependencies [4036737]
+  - cojson@0.18.25
+  - cojson-storage-indexeddb@0.18.25
+  - cojson-transport-ws@0.18.25
+
 ## 0.18.24
 
 ### Patch Changes
