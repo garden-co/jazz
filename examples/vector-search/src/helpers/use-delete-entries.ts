@@ -1,5 +1,5 @@
 import { useCallback } from "react";
-import { JazzAccount, JournalEntryList } from "../schema";
+import { JazzAccount } from "../schema";
 
 export function useDeleteEntries({ owner }: { owner: JazzAccount }) {
   const deleteEntries = useCallback(async () => {
@@ -11,7 +11,7 @@ export function useDeleteEntries({ owner }: { owner: JazzAccount }) {
 
     try {
       if (owner?.root?.journalEntries) {
-        owner.root.$jazz.set("journalEntries", JournalEntryList.create([]));
+        owner.root.$jazz.set("journalEntries", []);
       }
     } catch (error) {
       console.error(error);
