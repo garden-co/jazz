@@ -2,7 +2,7 @@ import { useIsAuthenticated } from "jazz-tools/react";
 import { AuthButton } from "./AuthButton";
 import { Logo } from "./Logo";
 
-export function Header() {
+export function Header({ isSeeding }: { isSeeding: boolean }) {
   const isAuthenticated = useIsAuthenticated();
 
   return (
@@ -30,7 +30,12 @@ export function Header() {
         </span>
       </div>
 
-      <nav className="flex flex-col gap-2 md:flex-row md:items-center justify-between border-t border-zinc-200 pt-2 md:pt-0 md:border-t-0">
+      <nav
+        className={[
+          "flex flex-col gap-2 md:flex-row md:items-center justify-between border-t border-zinc-200 pt-2 md:pt-0 md:border-t-0 transition-opacity",
+          isSeeding && "opacity-0 pointer-events-none",
+        ].join(" ")}
+      >
         <div className="text-xs text-zinc-500">
           {isAuthenticated ? (
             <>You're logged in.</>

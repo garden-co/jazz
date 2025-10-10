@@ -74,7 +74,7 @@ function App() {
 
   return (
     <>
-      <Header />
+      <Header isSeeding={isSeeding} />
 
       <main className="max-w-2xl mx-auto px-3 pt-8 pb-10 flex flex-col gap-2">
         <h2 className="text-4xl font-bold text-zinc-800 mb-8">Journal</h2>
