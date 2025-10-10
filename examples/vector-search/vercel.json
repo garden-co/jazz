@@ -2,7 +2,7 @@
   "ignoreCommand": "npx turbo-ignore",
   "headers": [
     {
-      "source": "/data-hou8Ux.json",
+      "source": "/datasets/journal/data-hou8Ux.json",
       "headers": [
         {
           "key": "Cache-Control",
