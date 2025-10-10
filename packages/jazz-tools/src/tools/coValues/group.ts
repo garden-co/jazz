@@ -54,7 +54,11 @@ export class Group extends CoValueBase implements CoValue {
   declare $jazz: GroupJazzApi<this>;
 
   /** @deprecated Don't use constructor directly, use .create */
-  constructor(options: { fromRaw: RawGroup } | { owner: Account }) {
+  constructor(
+    options:
+      | { fromRaw: RawGroup }
+      | { owner: Account; role?: "superAdmin" | "admin" },
+  ) {
     super();
     let raw: RawGroup;
 
@@ -65,7 +69,7 @@ export class Group extends CoValueBase implements CoValue {
       if (!initOwner) throw new Error("No owner provided");
       if (initOwner[TypeSym] === "Account" && isControlledAccount(initOwner)) {
         const rawOwner = initOwner.$jazz.raw;
-        raw = rawOwner.core.node.createGroup();
+        raw = rawOwner.core.node.createGroup(undefined, options.role);
       } else {
         throw new Error("Can only construct group as a controlled account");
       }
@@ -88,7 +92,7 @@ export class Group extends CoValueBase implements CoValue {
 
   static create<G extends Group>(
     this: CoValueClass<G>,
-    options?: { owner: Account } | Account,
+    options?: { owner?: Account; role?: "superAdmin" | "admin" } | Account,
   ) {
     return new this(parseGroupCreateOptions(options));
   }
@@ -106,13 +110,16 @@ export class Group extends CoValueBase implements CoValue {
    */
   addMember(
     member: Group,
-    role?: "reader" | "writer" | "admin" | "inherit",
+    role?: "reader" | "writer" | "admin" | "superAdmin" | "inherit",
   ): void;
-  addMember(member: Group | Account, role: "reader" | "writer" | "admin"): void;
+  addMember(
+    member: Group | Account,
+    role: "reader" | "writer" | "admin" | "superAdmin",
+  ): void;
   addMember(
     member: Group | Everyone | Account,
     role?: AccountRole | "inherit",
-  ) {
+  ): void {
     if (isGroupValue(member)) {
       if (role === "writeOnly")
         throw new Error("Cannot add group as member with write-only role");
@@ -157,6 +164,7 @@ export class Group extends CoValueBase implements CoValue {
       const role = this.$jazz.raw.roleOf(accountID);
 
       if (
+        role === "superAdmin" ||
         role === "admin" ||
         role === "writer" ||
         role === "reader" ||
@@ -247,9 +255,12 @@ export class Group extends CoValueBase implements CoValue {
    */
   extend(
     parent: Group,
-    roleMapping?: "reader" | "writer" | "admin" | "inherit",
+    roleMapping?: "reader" | "writer" | "admin" | "superAdmin" | "inherit",
   ): this {
-    this.$jazz.raw.extend(parent.$jazz.raw, roleMapping);
+    this.$jazz.raw.extend(
+      parent.$jazz.raw,
+      roleMapping as "reader" | "writer" | "admin" | "superAdmin" | "inherit",
+    );
     return this;
   }
 

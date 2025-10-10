@@ -167,6 +167,7 @@ export class Account extends CoValueBase implements CoValue {
     const role = valueOwner.getRoleOf(this.$jazz.id);
 
     return (
+      role === "superAdmin" ||
       role === "admin" ||
       role === "writer" ||
       role === "reader" ||
@@ -179,7 +180,11 @@ export class Account extends CoValueBase implements CoValue {
     if (!valueOwner) {
       if (value[TypeSym] === "Group") {
         const roleInGroup = (value as Group).getRoleOf(this.$jazz.id);
-        return roleInGroup === "admin" || roleInGroup === "writer";
+        return (
+          roleInGroup === "superAdmin" ||
+          roleInGroup === "admin" ||
+          roleInGroup === "writer"
+        );
       }
       if (value[TypeSym] === "Account") {
         return value.$jazz.id === this.$jazz.id;
@@ -188,7 +193,12 @@ export class Account extends CoValueBase implements CoValue {
     }
     const role = valueOwner.getRoleOf(this.$jazz.id);
 
-    return role === "admin" || role === "writer" || role === "writeOnly";
+    return (
+      role === "superAdmin" ||
+      role === "admin" ||
+      role === "writer" ||
+      role === "writeOnly"
+    );
   }
 
   canAdmin(value: CoValue): boolean {
@@ -196,14 +206,18 @@ export class Account extends CoValueBase implements CoValue {
     if (!valueOwner) {
       if (value[TypeSym] === "Group") {
         const roleInGroup = (value as Group).getRoleOf(this.$jazz.id);
-        return roleInGroup === "admin";
+        return roleInGroup === "superAdmin" || roleInGroup === "admin";
       }
       if (value[TypeSym] === "Account") {
         return value.$jazz.id === this.$jazz.id;
       }
       return false;
     }
-    return valueOwner.getRoleOf(this.$jazz.id) === "admin";
+
+    return (
+      valueOwner.getRoleOf(this.$jazz.id) === "admin" ||
+      valueOwner.getRoleOf(this.$jazz.id) === "superAdmin"
+    );
   }
 
   /** @private */

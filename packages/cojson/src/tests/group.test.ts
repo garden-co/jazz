@@ -3,7 +3,7 @@ import { RawCoList } from "../coValues/coList.js";
 import { RawCoMap } from "../coValues/coMap.js";
 import { RawCoStream } from "../coValues/coStream.js";
 import { RawBinaryCoStream } from "../coValues/coStream.js";
-import type { RawCoValue, RawGroup } from "../exports.js";
+import type { RawCoValue, RawGroup, Role } from "../exports.js";
 import type { NewContentMessage } from "../sync.js";
 import {
   createThreeConnectedNodes,
@@ -24,6 +24,37 @@ function expectGroup(content: RawCoValue): RawGroup {
 
   return content as RawGroup;
 }
+
+test("User is admin of a group he created", () => {
+  const node = nodeWithRandomAgentAndSessionID();
+  const group = node.createGroup();
+
+  expect(group.myRole()).toEqual("admin");
+});
+
+test("User can set itself as super-admin of a group he created", () => {
+  const node = nodeWithRandomAgentAndSessionID();
+  const group = node.createGroup(undefined, "superAdmin");
+
+  expect(group.myRole()).toEqual("superAdmin");
+});
+
+test("User can set itself as admin of a group he created", () => {
+  const node = nodeWithRandomAgentAndSessionID();
+  const group = node.createGroup(undefined, "admin");
+
+  expect(group.myRole()).toEqual("admin");
+});
+
+test.each(["writer", "reader", "writeOnly"] as Role[])(
+  "User can't set itself as %s of a group he created",
+  (role) => {
+    const node = nodeWithRandomAgentAndSessionID();
+    expect(() => {
+      node.createGroup(undefined, role as any);
+    }).toThrow("Initial role must be admin or superAdmin");
+  },
+);
 
 test("Can create a RawCoMap in a group", () => {
   const node = nodeWithRandomAgentAndSessionID();

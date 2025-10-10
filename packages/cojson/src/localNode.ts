@@ -617,6 +617,7 @@ export class LocalNode {
     const existingRole = group.get(account.id);
 
     if (
+      existingRole === "superAdmin" ||
       existingRole === "admin" ||
       (existingRole === "writer" && inviteRole === "writerInvite") ||
       (existingRole === "writer" && inviteRole === "reader") ||
@@ -638,13 +639,15 @@ export class LocalNode {
 
     groupAsInvite.addMemberInternal(
       account,
-      inviteRole === "adminInvite"
-        ? "admin"
-        : inviteRole === "writerInvite"
-          ? "writer"
-          : inviteRole === "writeOnlyInvite"
-            ? "writeOnly"
-            : "reader",
+      inviteRole === "superAdminInvite"
+        ? "superAdmin"
+        : inviteRole === "adminInvite"
+          ? "admin"
+          : inviteRole === "writerInvite"
+            ? "writer"
+            : inviteRole === "writeOnlyInvite"
+              ? "writeOnly"
+              : "reader",
     );
 
     const contentPieces =
@@ -725,7 +728,12 @@ export class LocalNode {
 
   createGroup(
     uniqueness: CoValueUniqueness = this.crypto.createdNowUnique(),
+    role: "admin" | "superAdmin" = "admin",
   ): RawGroup {
+    if (role !== "admin" && role !== "superAdmin") {
+      throw new Error("Initial role must be admin or superAdmin");
+    }
+
     const account = this.getCurrentAgent();
 
     const groupCoValue = this.createCoValue({
@@ -737,7 +745,7 @@ export class LocalNode {
 
     const group = expectGroup(groupCoValue.getCurrentContent());
 
-    group.set(account.id, "admin", "trusting");
+    group.set(account.id, role, "trusting");
 
     const readKey = this.crypto.newRandomKeySecret();
 
