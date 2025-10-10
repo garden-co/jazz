@@ -1,0 +1,38 @@
+export const metadata = {
+  description: "Advanced performance tips for using Jazz."
+};
+
+# Tips for maximising Jazz performance
+
+## Use the best crypto implementation for your platform
+The fastest implementations are (in order):
+
+1. [Node-API crypto](/docs/server-side/setup#node-api) (only available in some Node/Deno environments) or [RNQuickCrypto on React Native](/docs/react-native/project-setup/providers#quick-crypto)
+2. [WASM crypto](/docs/server-side/setup#wasm-on-edge-runtimes) (default)
+3. JavaScript fallback (slowest, but most compatible)
+
+## Minimise group extensions
+Group extensions are exceptionally powerful for cascading permissions and are performant enough for the vast majority of use cases. However, if huge numbers of parent groups need to be loaded as part of the dependency chain, there can be a performance impact. 
+
+You can optimise performance by manually creating groups, reusing groups where the permissions will be the same on both CoValues throughout the lifetime of the CoValue.
+
+**Note**: Implicit CoValue creation extends groups automatically. Be careful about how you create nested CoValues if you are likely to build long dependency chains.
+
+## Choose simple datatypes where possible
+CoValues will always be slightly slower to load than their primitive counterparts.
+
+### `z.string()` vs CoTexts
+In case you use a CoText, Jazz will enable character-by-character collaboration possibilities for you. However, in many cases, users do not expect to be able to collaborate on the text itself, and are happy with replacing the whole string at once, especially shorter strings. In this case, you could use a `z.string()` for better performance.
+
+Examples:
+  - names
+  - URLs
+  - phone numbers
+
+### `z.object()` vs CoMaps
+CoMaps allow granular updates to objects based on individual keys. If you expect your whole object to be updated at once, you could consider using the `z.object()` type.
+
+Examples:
+ - locations/co-ordinates
+ - data coming from external sources
+ - data which is rarely changed after it is created

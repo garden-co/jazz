@@ -370,7 +370,15 @@ export const docNavigationItems = [
           name: "Encryption",
           href: "/docs/resources/encryption",
           done: 100,
-        }, { name: "FAQs", href: "/docs/faq", done: 100 }, {
+        }, { 
+          name: "FAQs", 
+          href: "/docs/faq", 
+          done: 100 
+        }, {
+          name: "Performance tips",
+          href: "/docs/performance",
+          done: 100,
+        }, {
           name: "Design patterns",
           collapse: true,
           items: [
