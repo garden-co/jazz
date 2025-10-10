@@ -13,9 +13,12 @@ import {
   Account,
   Loaded,
   MaybeLoaded,
+  Unloaded2,
   co,
   randomSessionProvider,
   CoValueLoadingState,
+  CoValueUnloadedState,
+  createUnloadedCoValue,
 } from "../internal.js";
 import { createJazzTestAccount, linkAccounts } from "../testing.js";
 import { assertLoaded, waitFor } from "./utils.js";
@@ -1096,4 +1099,53 @@ test("should not throw when calling ensureLoaded a record with a deleted ref", a
   expect(value.profile).toBeUndefined();
 
   unsub();
+});
+
+describe("$isLoaded type guard", async () => {
+  const me = await Account.create({
+    creationProps: { name: "Hermes Puggington" },
+    crypto: Crypto,
+  });
+
+  const map = TestMap.create({ list: [] }, { owner: me });
+
+  test("$isLoaded narrows MaybeLoaded to loaded CoValue", async () => {
+    const maybeLoadedMap = await TestMap.load(map.$jazz.id, {
+      loadAs: me,
+    });
+
+    expect(maybeLoadedMap.$isLoaded()).toBe(true);
+    if (maybeLoadedMap.$isLoaded()) {
+      expect(maybeLoadedMap.$jazzState).toBe(CoValueLoadingState.LOADED);
+      expect(maybeLoadedMap.$jazz.id).toBe(map.$jazz.id);
+      expect(maybeLoadedMap.list).toEqual([]);
+    } else {
+      expectTypeOf(
+        maybeLoadedMap.$jazzState,
+      ).toEqualTypeOf<CoValueUnloadedState>();
+    }
+  });
+
+  test("$isLoaded narrows MaybeLoaded to unloaded CoValue", async () => {
+    const otherAccount = await Account.create({
+      creationProps: { name: "Other Account" },
+      crypto: Crypto,
+    });
+    const unloadedMap: MaybeLoaded<Loaded<typeof TestMap>> = await TestMap.load(
+      map.$jazz.id,
+      { loadAs: otherAccount },
+    );
+
+    expect(unloadedMap.$isLoaded()).toBe(false);
+    if (!unloadedMap.$isLoaded()) {
+      expect(unloadedMap.$jazzState).toBe(CoValueLoadingState.UNAVAILABLE);
+      expect(unloadedMap.$jazz.id).toBe(map.$jazz.id);
+      // @ts-expect-error - list should not be accessible on Unloaded2
+      unloadedMap.list;
+    } else {
+      expectTypeOf(unloadedMap.$jazzState).toEqualTypeOf<
+        typeof CoValueLoadingState.LOADED
+      >();
+    }
+  });
 });

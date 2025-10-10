@@ -73,6 +73,9 @@ export class CoList<out Item = any>
 {
   declare $jazz: CoListJazzApi<this>;
   declare $jazzState: typeof CoValueLoadingState.LOADED;
+  $isLoaded(): this is CoValue {
+    return true;
+  }
 
   /**
    * Declare a `CoList` by subclassing `CoList.Of(...)` and passing the item schema using `co`.

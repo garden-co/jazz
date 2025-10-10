@@ -34,6 +34,7 @@ export type Unloaded2<T> = {
     | typeof CoValueLoadingState.UNAVAILABLE
     | typeof CoValueLoadingState.UNAUTHORIZED;
   $jazz: { id: ID<T> };
+  $isLoaded(): false;
 };
 
 /**

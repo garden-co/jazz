@@ -27,6 +27,10 @@ export abstract class CoValueBase implements CoValue {
     });
   }
 
+  $isLoaded(): this is CoValue {
+    return true;
+  }
+
   /** @category Internals */
   static fromRaw<V extends CoValue>(this: CoValueClass<V>, raw: RawCoValue): V {
     return new this({ fromRaw: raw });

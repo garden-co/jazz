@@ -31,6 +31,10 @@ export class CoPlainText extends String implements CoValue {
   declare $jazz: CoTextJazzApi<this>;
   declare $jazzState: typeof CoValueLoadingState.LOADED;
 
+  $isLoaded(): this is CoValue {
+    return true;
+  }
+
   /** @internal */
   constructor(
     options:
