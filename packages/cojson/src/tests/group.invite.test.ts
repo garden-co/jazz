@@ -8,13 +8,67 @@ import {
   setupTestNode,
   waitFor,
 } from "./testUtils.js";
+import { AccountRole } from "../permissions.js";
 
 beforeEach(async () => {
   SyncMessagesLog.clear();
   setupTestNode({ isSyncServer: true });
 });
 
+const CAN_CREATE_INVITE_MATRIX: [AccountRole, AccountRole, boolean][] = [
+  ["superAdmin", "superAdmin", true],
+  ["superAdmin", "admin", true],
+  ["superAdmin", "writer", true],
+  ["superAdmin", "reader", true],
+  ["superAdmin", "writeOnly", true],
+  ["admin", "superAdmin", false],
+  ["admin", "admin", true],
+  ["admin", "writer", true],
+  ["admin", "reader", true],
+  ["admin", "writeOnly", true],
+  ["writer", "superAdmin", false],
+  ["writer", "admin", false],
+  ["writer", "writer", false],
+  ["writer", "reader", false],
+  ["writer", "writeOnly", false],
+  ["reader", "superAdmin", false],
+  ["reader", "admin", false],
+  ["reader", "writer", false],
+  ["reader", "reader", false],
+  ["reader", "writeOnly", false],
+  ["writeOnly", "superAdmin", false],
+  ["writeOnly", "admin", false],
+  ["writeOnly", "writer", false],
+  ["writeOnly", "reader", false],
+  ["writeOnly", "writeOnly", false],
+];
+
 describe("Group invites", () => {
+  for (const [fromRole, toRole, canCreateInvite] of CAN_CREATE_INVITE_MATRIX) {
+    test(`${fromRole} should ${canCreateInvite ? "be able" : "not be able"} to create an invite for ${toRole}`, async () => {
+      const admin = await setupTestAccount({
+        connected: true,
+      });
+
+      const group = admin.node.createGroup(undefined, "superAdmin");
+
+      const adminOnAdminNode = await loadCoValueOrFail(
+        admin.node,
+        admin.accountID,
+      );
+
+      group.addMember(adminOnAdminNode, fromRole);
+
+      if (canCreateInvite) {
+        expect(group.createInvite(toRole)).toBeDefined();
+      } else {
+        expect(() => {
+          group.createInvite(toRole);
+        }).toThrow(`Failed to set role ${toRole}Invite to`);
+      }
+    });
+  }
+
   test("should be able to accept a reader invite", async () => {
     const admin = await setupTestAccount({
       connected: true,
@@ -172,6 +226,66 @@ describe("Group invites", () => {
     );
 
     expect(groupOnNewMemberNode.roleOf(newMember.accountID)).toEqual("admin");
+
+    // Verify admin access by adding another member
+    const reader = await setupTestAccount({
+      connected: true,
+    });
+
+    const readerOnNewMemberNode = await loadCoValueOrFail(
+      newMember.node,
+      reader.accountID,
+    );
+    groupOnNewMemberNode.addMember(readerOnNewMemberNode, "reader");
+
+    const personOnReaderNode = await loadCoValueOrFail(reader.node, person.id);
+
+    await waitFor(() => {
+      expect(
+        expectMap(personOnReaderNode.core.getCurrentContent()).get("name"),
+      ).toEqual("John Doe");
+    });
+  });
+
+  test("should be able to accept a super-admin invite", async () => {
+    const admin = await setupTestAccount({
+      connected: true,
+    });
+
+    const newMember = await setupTestAccount({
+      connected: true,
+    });
+
+    const group = admin.node.createGroup(undefined, "superAdmin");
+
+    const person = group.createMap({
+      name: "John Doe",
+    });
+
+    const inviteSecret = group.createInvite("superAdmin");
+
+    const personOnNewMemberNode = await loadCoValueOrFail(
+      newMember.node,
+      person.id,
+    );
+    expect(personOnNewMemberNode.get("name")).toEqual(undefined);
+
+    await newMember.node.acceptInvite(group.id, inviteSecret);
+
+    await waitFor(() => {
+      expect(
+        expectMap(personOnNewMemberNode.core.getCurrentContent()).get("name"),
+      ).toEqual("John Doe");
+    });
+
+    const groupOnNewMemberNode = await loadCoValueOrFail(
+      newMember.node,
+      group.id,
+    );
+
+    expect(groupOnNewMemberNode.roleOf(newMember.accountID)).toEqual(
+      "superAdmin",
+    );
 
     // Verify admin access by adding another member
     const reader = await setupTestAccount({

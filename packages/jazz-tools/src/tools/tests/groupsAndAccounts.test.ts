@@ -361,6 +361,15 @@ describe("Group.getRoleOf", () => {
     await createJazzTestAccount({ isCurrentActiveAccount: true });
   });
 
+  test("returns correct role for super-admin", async () => {
+    const group = Group.create();
+    const admin = await createJazzTestAccount({});
+    await admin.$jazz.waitForAllCoValuesSync();
+    group.addMember(admin, "admin");
+    expect(group.getRoleOf(admin.$jazz.id)).toBe("admin");
+    expect(group.getRoleOf("me")).toBe("admin");
+  });
+
   test("returns correct role for admin", async () => {
     const group = Group.create();
     const admin = await createJazzTestAccount({});
@@ -411,6 +420,10 @@ describe("Group.getRoleOf with 'me' parameter", () => {
     expect(group.getRoleOf("me")).toBe("admin");
   });
 
+  test("returns correct role for 'me' when current account is super-admin", async () => {
+    const group = Group.create({ role: "superAdmin" });
+    expect(group.getRoleOf("me")).toBe("superAdmin");
+  });
   test("returns correct role for 'me' when current account is writer", async () => {
     const account = await createJazzTestAccount();
     await account.$jazz.waitForAllCoValuesSync();
@@ -473,14 +486,17 @@ describe("Account permissions", () => {
 describe("Account permissions", () => {
   test("canRead permissions for different roles", async () => {
     // Create test accounts
-    const admin = await co.account().create({
+    const superAdmin = await co.account().create({
       creationProps: { name: "Admin" },
       crypto: Crypto,
     });
 
-    const group = Group.create({ owner: admin });
+    const group = Group.create({ owner: superAdmin, role: "superAdmin" });
     const testObject = CoMap.create({}, { owner: group });
 
+    const admin = await co.account().createAs(superAdmin, {
+      creationProps: { name: "Writer" },
+    });
     const writer = await co.account().createAs(admin, {
       creationProps: { name: "Writer" },
     });
@@ -492,11 +508,13 @@ describe("Account permissions", () => {
     });
 
     // Set up roles
+    group.addMember(admin, "admin");
     group.addMember(writer, "writer");
     group.addMember(reader, "reader");
     group.addMember(writeOnly, "writeOnly");
 
     // Test canRead permissions
+    expect(superAdmin.canRead(testObject)).toBe(true);
     expect(admin.canRead(testObject)).toBe(true);
     expect(writer.canRead(testObject)).toBe(true);
     expect(reader.canRead(testObject)).toBe(true);
@@ -505,14 +523,17 @@ describe("Account permissions", () => {
 
   test("canWrite permissions for different roles", async () => {
     // Create test accounts
-    const admin = await co.account().create({
-      creationProps: { name: "Admin" },
+    const superAdmin = await co.account().create({
+      creationProps: { name: "Super Admin" },
       crypto: Crypto,
     });
 
-    const group = Group.create({ owner: admin });
+    const group = Group.create({ owner: superAdmin, role: "superAdmin" });
     const testObject = CoMap.create({}, { owner: group });
 
+    const admin = await co.account().createAs(superAdmin, {
+      creationProps: { name: "Admin" },
+    });
     const writer = await co.account().createAs(admin, {
       creationProps: { name: "Writer" },
     });
@@ -524,11 +545,13 @@ describe("Account permissions", () => {
     });
 
     // Set up roles
+    group.addMember(admin, "admin");
     group.addMember(writer, "writer");
     group.addMember(reader, "reader");
     group.addMember(writeOnly, "writeOnly");
 
     // Test canWrite permissions
+    expect(superAdmin.canWrite(testObject)).toBe(true);
     expect(admin.canWrite(testObject)).toBe(true);
     expect(writer.canWrite(testObject)).toBe(true);
     expect(reader.canWrite(testObject)).toBe(false);
@@ -537,13 +560,17 @@ describe("Account permissions", () => {
 
   test("canAdmin permissions for different roles", async () => {
     // Create test accounts
-    const admin = await co.account().create({
-      creationProps: { name: "Admin" },
+    const superAdmin = await co.account().create({
+      creationProps: { name: "Super Admin" },
       crypto: Crypto,
     });
 
-    const group = Group.create({ owner: admin });
+    const group = Group.create({ owner: superAdmin, role: "superAdmin" });
     const testObject = CoMap.create({}, { owner: group });
+
+    const admin = await co.account().createAs(superAdmin, {
+      creationProps: { name: "Admin" },
+    });
 
     const writer = await co.account().createAs(admin, {
       creationProps: { name: "Writer" },
@@ -556,11 +583,13 @@ describe("Account permissions", () => {
     });
 
     // Set up roles
+    group.addMember(admin, "admin");
     group.addMember(writer, "writer");
     group.addMember(reader, "reader");
     group.addMember(writeOnly, "writeOnly");
 
     // Test canAdmin permissions
+    expect(superAdmin.canAdmin(testObject)).toBe(true);
     expect(admin.canAdmin(testObject)).toBe(true);
     expect(writer.canAdmin(testObject)).toBe(false);
     expect(reader.canAdmin(testObject)).toBe(false);

@@ -433,17 +433,24 @@ export function parseGroupCreateOptions(
   options:
     | {
         owner?: Account;
+        role?: "superAdmin" | "admin";
       }
     | Account
     | undefined,
-) {
+): {
+  owner: Account;
+  role?: "superAdmin" | "admin";
+} {
   if (!options) {
     return { owner: activeAccountContext.get() };
   }
 
   return TypeSym in options && isAccountInstance(options)
     ? { owner: options }
-    : { owner: options.owner ?? activeAccountContext.get() };
+    : {
+        owner: options.owner ?? activeAccountContext.get(),
+        role: options.role,
+      };
 }
 
 /**
