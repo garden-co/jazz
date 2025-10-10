@@ -31,20 +31,5 @@ export const JazzAccount = co
         journalEntries: JournalEntryList.create([]),
       });
     }
-
-    if (!account.$jazz.has("profile")) {
-      const profileGroup = Group.create();
-      profileGroup.makePublic();
-
-      account.$jazz.set(
-        "profile",
-        JazzProfile.create(
-          {
-            name: "Anonymous",
-          },
-          profileGroup,
-        ),
-      );
-    }
   });
 export type JazzAccount = co.loaded<typeof JazzAccount>;
