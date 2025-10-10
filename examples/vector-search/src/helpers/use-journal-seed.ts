@@ -24,9 +24,11 @@ const SEED_PROGRESS_START: SeedProgress = { targetCount: 0, seededCount: 0 };
 export const useJournalSeed = ({
   createEmbedding,
   journalEntries,
+  batchSize = 10,
 }: {
   createEmbedding: (text: string) => Promise<number[]>;
   journalEntries?: JournalEntryList;
+  batchSize?: number;
 }) => {
   const [isSeeding, setIsSeeding] = useState(false);
   const [progress, setProgress] = useState<SeedProgress>(SEED_PROGRESS_START);
@@ -40,30 +42,37 @@ export const useJournalSeed = ({
       const journalEntriesData = await fetchJournalEntries();
       setProgress({ targetCount: journalEntriesData.length, seededCount: 0 });
 
-      for (const entry of journalEntriesData) {
-        const embedding = await createEmbedding(entry.c);
+      for (let i = 0; i < journalEntriesData.length; i += batchSize) {
+        const entriesDataBatch = journalEntriesData.slice(i, i + batchSize);
 
-        const journalEntry = JournalEntry.create(
-          {
-            text: entry.c,
-            feelings: entry.f,
-            topics: entry.t,
-            embedding: Embedding.create(embedding, {
-              owner: journalEntries?.$jazz.owner,
-            }),
-          },
-          { owner: journalEntries?.$jazz.owner },
-        );
+        const newEntriesBatch = [];
 
-        if (journalEntries) {
-          journalEntries.$jazz.push(journalEntry);
+        for (const entry of entriesDataBatch) {
+          const embedding = await createEmbedding(entry.c);
+
+          const journalEntry = JournalEntry.create(
+            {
+              text: entry.c,
+              feelings: entry.f,
+              topics: entry.t,
+              embedding: Embedding.create(embedding, {
+                owner: journalEntries?.$jazz.owner,
+              }),
+            },
+            { owner: journalEntries?.$jazz.owner },
+          );
+
+          newEntriesBatch.push(journalEntry);
         }
 
         setProgress((progress) => ({
           targetCount: progress.targetCount,
-          seededCount: progress.seededCount + 1,
+          seededCount: progress.seededCount + newEntriesBatch.length,
         }));
 
+        if (journalEntries) {
+          journalEntries.$jazz.push(...newEntriesBatch);
+        }
         await new Promise((resolve) => setTimeout(resolve, 0));
       }
     } catch (error) {
