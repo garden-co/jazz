@@ -1,5 +1,5 @@
 import { useCallback, useState } from "react";
-import { Embedding, type JazzAccount, JournalEntry } from "../schema";
+import { Embedding, JournalEntry, JournalEntryList } from "../schema";
 
 const fetchJournalEntries = async () => {
   const response = await fetch("/datasets/journal/data-hou8Ux.json");
@@ -23,10 +23,10 @@ const SEED_PROGRESS_START: SeedProgress = { targetCount: 0, seededCount: 0 };
  */
 export const useJournalSeed = ({
   createEmbedding,
-  owner,
+  journalEntries,
 }: {
   createEmbedding: (text: string) => Promise<number[]>;
-  owner: JazzAccount;
+  journalEntries?: JournalEntryList;
 }) => {
   const [isSeeding, setIsSeeding] = useState(false);
   const [progress, setProgress] = useState<SeedProgress>(SEED_PROGRESS_START);
@@ -35,10 +35,10 @@ export const useJournalSeed = ({
     setIsSeeding(true);
     setProgress(SEED_PROGRESS_START);
     try {
-      const journalEntries = await fetchJournalEntries();
-      setProgress({ targetCount: journalEntries.length, seededCount: 0 });
+      const journalEntriesData = await fetchJournalEntries();
+      setProgress({ targetCount: journalEntriesData.length, seededCount: 0 });
 
-      for (const entry of journalEntries) {
+      for (const entry of journalEntriesData) {
         const embedding = await createEmbedding(entry.c);
 
         const journalEntry = JournalEntry.create({
@@ -48,8 +48,8 @@ export const useJournalSeed = ({
           embedding: Embedding.create(embedding),
         });
 
-        if (owner?.root?.journalEntries) {
-          owner.root.journalEntries.$jazz.push(journalEntry);
+        if (journalEntries) {
+          journalEntries.$jazz.push(journalEntry);
         }
 
         setProgress((progress) => ({
@@ -64,7 +64,7 @@ export const useJournalSeed = ({
     } finally {
       setIsSeeding(false);
     }
-  }, [createEmbedding, owner]);
+  }, [createEmbedding, journalEntries]);
 
   return { isSeeding, progress, seedJournal };
 };

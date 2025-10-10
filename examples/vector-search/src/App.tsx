@@ -64,13 +64,15 @@ function App() {
     progress: seedingProgress,
   } = useJournalSeed({
     createEmbedding,
-    owner: me as JazzAccount,
+    journalEntries: me?.root.journalEntries,
   });
   const { isCreatingEntry, promptNewEntry } = useCreateEntry({
     createEmbedding,
-    owner: me as JazzAccount,
+    journalEntries: me?.root.journalEntries,
   });
-  const { deleteEntries } = useDeleteEntries({ owner: me as JazzAccount });
+  const { deleteEntries } = useDeleteEntries({
+    journalEntries: me?.root.journalEntries,
+  });
 
   return (
     <>

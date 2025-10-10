@@ -1,12 +1,12 @@
 import { useCallback, useState } from "react";
-import { Embedding, JazzAccount, JournalEntry } from "../schema";
+import { Embedding, JournalEntry, JournalEntryList } from "../schema";
 
 export function useCreateEntry({
   createEmbedding,
-  owner,
+  journalEntries,
 }: {
   createEmbedding: (text: string) => Promise<number[]>;
-  owner: JazzAccount;
+  journalEntries?: JournalEntryList;
 }) {
   const [isCreating, setIsCreating] = useState(false);
 
@@ -28,15 +28,15 @@ export function useCreateEntry({
         embedding: Embedding.create(embedding),
       });
 
-      if (owner?.root?.journalEntries) {
-        owner.root.journalEntries.$jazz.unshift(journalEntry);
+      if (journalEntries) {
+        journalEntries.$jazz.unshift(journalEntry);
       }
     } catch (error) {
       console.error(error);
     } finally {
       setIsCreating(false);
     }
-  }, [createEmbedding, owner]);
+  }, [createEmbedding, journalEntries]);
 
   return { isCreatingEntry: isCreating, promptNewEntry };
 }

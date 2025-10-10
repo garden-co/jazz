@@ -1,7 +1,11 @@
 import { useCallback } from "react";
-import { JazzAccount } from "../schema";
+import { JournalEntryList } from "../schema";
 
-export function useDeleteEntries({ owner }: { owner: JazzAccount }) {
+export function useDeleteEntries({
+  journalEntries,
+}: {
+  journalEntries?: JournalEntryList;
+}) {
   const deleteEntries = useCallback(async () => {
     const confirmed = confirm("Are you sure you want to delete all entries?");
 
@@ -10,13 +14,13 @@ export function useDeleteEntries({ owner }: { owner: JazzAccount }) {
     }
 
     try {
-      if (owner?.root?.journalEntries) {
-        owner.root.$jazz.set("journalEntries", []);
+      if (journalEntries) {
+        journalEntries.$jazz.applyDiff([]);
       }
     } catch (error) {
       console.error(error);
     }
-  }, [owner]);
+  }, [journalEntries]);
 
   return { deleteEntries };
 }
