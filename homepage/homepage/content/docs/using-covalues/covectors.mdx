@@ -1,0 +1,262 @@
+import { CodeGroup, ContentByFramework, TabbedCodeGroup, TabbedCodeGroupItem } from "@/components/forMdx";
+import { JavascriptLogo } from "@/components/icons/JavascriptLogo";
+import { SvelteLogo } from "@/components/icons/SvelteLogo";
+import { ReactLogo } from "@/components/icons/ReactLogo";
+
+
+export const metadata = {
+  description: "CoVectors store high-dimensional vectors on-device and enable local-first semantic search and similarity operations."
+};
+
+# CoVectors
+
+CoVectors let you store and query high‑dimensional vectors directly in Jazz apps. They are ideal for semantic search, or personalization features that work offline, sync across devices, and remain end‑to‑end encrypted.
+
+
+The [Journal example](https://github.com/garden-co/jazz/tree/main/examples/vector-search) demonstrates semantic search using of CoVector.
+
+CoVectors are defined using `co.vector()`, and are often used as fields in a CoMap within a CoList (making it easy to perform vector search across list items).
+
+<CodeGroup>
+```ts twoslash
+import { co, z } from "jazz-tools";
+
+const Embedding = co.vector(384); // Define 384-dimensional embedding
+
+const Document = co.map({
+  content: z.string(),
+  embedding: Embedding,
+});
+
+export const DocumentsList = co.list(Document);
+```
+</CodeGroup>
+
+The number of dimensions matches the embedding model used in your app. Many small sentence transformers produce 384‑dim vectors; others use 512, 768, 1024 or more.
+
+
+## Creating CoVectors
+
+You can create vectors in your Jazz application from an array of numbers, or Float32Array instance.
+
+<CodeGroup>
+```ts twoslash
+import { co, z } from "jazz-tools";
+const Embedding = co.vector(384); 
+const Document = co.map({
+  content: z.string(),
+  embedding: Embedding,
+});
+export const DocumentsList = co.list(Document);
+const documents = DocumentsList.create([]);
+const createEmbedding: (text: string) => Promise<number[]> = async () => ([]);
+
+// ---cut---
+// Generate embeddings (bring your own embeddings model)
+const vectorData = await createEmbedding("Text");
+
+const newDocument = Document.create({
+  content: "Text",
+  embedding: Embedding.create(vectorData),
+});
+
+documents.$jazz.push(newDocument);
+```
+</CodeGroup>
+
+### Ownership
+
+Like other CoValues, you can specify ownership when creating CoVectors.
+
+<CodeGroup>
+```ts twoslash
+import { Group, co, z } from "jazz-tools";
+import { createJazzTestAccount } from 'jazz-tools/testing';
+const me = await createJazzTestAccount();
+const colleagueAccount = await createJazzTestAccount();
+const vector: number[] = [];
+
+// ---cut---
+// Create with shared ownership
+const teamGroup = Group.create();
+teamGroup.addMember(colleagueAccount, "writer");
+
+const teamList = co.vector(384).create(vector, { owner: teamGroup });
+```
+</CodeGroup>
+
+See [Groups as permission scopes](/docs/groups/intro) for more information on how to use groups to control access to CoVectors.
+
+### Immutability
+
+CoVectors cannot be changed after creation. Instead, create a new CoVector with the updated values and replace the previous one.
+
+
+## Semantic Search
+
+Semantic search lets you find data based on meaning, not just keywords. In Jazz, you can easily sort results by how similar they are to your search query.
+
+<ContentByFramework framework="react">
+Use the `useCoStateWithSelector` hook to load your data and sort it by similarity to your query embedding:
+</ContentByFramework>
+<ContentByFramework framework="vanilla">
+You can load your data using the `.load` method, then compute and sort the results by similarity to your query embedding:
+</ContentByFramework>
+
+<TabbedCodeGroup id="vectorsearch" default="react" savedPreferenceKey="framework">
+<TabbedCodeGroupItem label="React" value="react" className="[&_span]:[tab-size:2]" icon={<ReactLogo />} preferWrap>
+```ts twoslash
+import { co, z } from "jazz-tools";
+const Document = co.map({
+  content: z.string(),
+  embedding: co.vector(384),
+});
+export const DocumentsList = co.list(Document);
+const documents = DocumentsList.create([]);
+const documentsListId: string = 'co_876TBN';
+
+type YourCustomHook = { queryEmbedding: number[] | null; createQueryEmbedding: (text: string) => Promise<number[]> }
+const useCreateEmbedding: () => YourCustomHook =
+  () => ({
+    queryEmbedding: null,
+    createQueryEmbedding: async (s) => ([]),
+  });
+
+// ---cut---
+import { useCoStateWithSelector } from "jazz-tools/react";
+
+const { queryEmbedding, createQueryEmbedding } = useCreateEmbedding();
+
+const foundDocuments = useCoStateWithSelector(
+  DocumentsList,
+  documentsListId,
+  {
+    resolve: { 
+      $each: { embedding: true }
+    },
+    select(documents) {
+      if (!documents) return;
+
+      // If no query embedding, return all entries
+      if (!queryEmbedding) return documents.map((value) => ({ value }));
+
+      return documents
+        .map((value) => ({
+          value,
+          similarity: value.embedding.$jazz.cosineSimilarity(queryEmbedding), // [!code ++]
+        }))
+        .sort((a, b) => b.similarity - a.similarity)
+        .filter((result) => result.similarity > 0.5);
+    },
+  },
+);
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem label="VanillaJS" value="vanilla" className="[&_span]:[tab-size:2]" icon={<JavascriptLogo />} preferWrap>
+```ts twoslash
+import { co, z } from "jazz-tools";
+const Document = co.map({
+  content: z.string(),
+  embedding: co.vector(384),
+});
+export const DocumentsList = co.list(Document);
+const documentsListId: string = 'co_876TBN';
+const createEmbedding: (text: string) => Promise<number[]> = async () => ([]);
+
+// ---cut---
+// 1) Load your documents
+const documents = await DocumentsList.load(documentsListId, {
+  resolve: { 
+    $each: { embedding: true }
+  }
+})
+
+// 2) Obtain vector for your search query
+const queryEmbedding = await createEmbedding("search query");
+
+// 3) Sort documents by vector similarity
+const similarDocuments = documents
+  ?.map((value) => ({
+    value,
+    similarity: value.embedding.$jazz.cosineSimilarity(queryEmbedding), // [!code ++]
+  }))
+  .sort((a, b) => b.similarity - a.similarity)
+  .filter((result) => result.similarity > 0.5);
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem label="Svelte" value="svelte" className="[&_span]:[tab-size:2]" icon={<SvelteLogo />} preferWrap>
+```svelte
+<script lang="ts">
+  import { CoState } from "jazz-tools/svelte";
+
+  export let queryEmbedding: number[] | null;
+  export let documentsListId: string;
+
+  // 1) Load your documents
+  const documents = new CoState(DocumentsList, documentsListId, {
+    resolve: {
+      $each: { embedding: true },
+    }
+  });
+
+  // 2) Sort documents by vector similarity
+  const foundDocuments = $derived((() => {
+    const docs = documents.current;
+    if (!docs) return;
+
+    if (!queryEmbedding) {
+      return docs.map((value) => ({ value }));
+    }
+
+    return docs
+      .map((value) => ({
+        value,
+        similarity: value.embedding.$jazz.cosineSimilarity(queryEmbedding), // [!code ++]
+      }))
+      .sort((a, b) => b.similarity - a.similarity)
+      .filter((result) => result.similarity > 0.5);
+  })());
+</script>
+```
+</TabbedCodeGroupItem>
+</TabbedCodeGroup>
+
+Wrapping each item with its similarity score makes it easy to sort, filter, and display the most relevant results. This approach is widely used in vector search and recommendation systems, since it keeps both the data and its relevance together for further processing or display.
+
+
+### Cosine Similarity
+
+To compare how similar two vectors are, we use their [cosine similarity](https://en.wikipedia.org/wiki/Cosine_similarity). This returns a value between `-1` and `1`, describing how similar the vectors are:
+
+- `1` means the vectors are identical
+- `0` means the vectors are orthogonal (i.e. no similarity)
+- `-1` means the vectors are opposite direction (perfectly dissimilar).
+
+If you sort items by their cosine similarity, the ones which are most similar will appear at the top of the list.
+
+Jazz provides a built-in `$jazz.cosineSimilarity` method to calculate this for you.
+
+
+## Embedding Models
+
+CoVectors handles storage and search, you provide the vectors. Generate embeddings with any model you prefer (Hugging Face, OpenAI, custom, etc).
+
+**Recommended:** Run models locally for privacy and offline support using [Transformers.js](https://huggingface.co/docs/transformers.js). Check our [Journal app example](https://github.com/garden-co/jazz/tree/main/examples/vector-search) to see how to do this.
+
+The following models offer a good balance between accuracy and performance:
+
+- [Xenova/all-MiniLM-L6-v2](https://huggingface.co/Xenova/all-MiniLM-L6-v2) — 384 dimensions, ~23 MB
+- [Xenova/paraphrase-multilingual-mpnet-base-v2](https://huggingface.co/Xenova/paraphrase-multilingual-mpnet-base-v2) — 768 dimensions, ~279 MB
+- [mixedbread-ai/mxbai-embed-large-v1](https://huggingface.co/mixedbread-ai/mxbai-embed-large-v1) — 1024 dimensions, ~337 MB
+- [Browse more models →](https://huggingface.co/models?pipeline_tag=feature-extraction&library=transformers.js)
+
+Alternatively, you can generate embeddings using server-side or commercial APIs (such as OpenAI or Anthropic).
+
+## Best Practices
+
+### Changing embedding models
+
+**Always use the same embedding model for all vectors you intend to compare.**  
+Mixing vectors from different models (or even different versions of the same model) will result in meaningless similarity scores, as the vector spaces are not compatible.
+
+If you need to switch models, consider storing the model identifier alongside each vector, and re-embedding your data as needed.
