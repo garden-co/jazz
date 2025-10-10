@@ -1,4 +1,3 @@
-import { CoValueLoadingState } from "jazz-tools";
 import { useCoState } from "jazz-tools/react";
 import { Group } from "jazz-tools";
 import { LinkToHome } from "./LinkToHome.tsx";
@@ -27,7 +26,7 @@ export function EditOrder(props: { id: string }) {
     },
   });
 
-  if (order.$jazzState !== CoValueLoadingState.LOADED) return;
+  if (!order.$isLoaded) return;
   const loadedOrder = order;
 
   function handleSave(e: React.FormEvent<HTMLFormElement>) {

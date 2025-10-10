@@ -1,4 +1,3 @@
-import { CoValueLoadingState } from "jazz-tools";
 import { createJazzPlugin } from "jazz-tools/prosemirror";
 import { useAccount, useCoState } from "jazz-tools/react";
 import { exampleSetup } from "prosemirror-example-setup";
@@ -17,24 +16,16 @@ export function Editor() {
   });
   const editorRef = useRef<HTMLDivElement>(null);
 
-  const bioId =
-    me.$jazzState === CoValueLoadingState.LOADED
-      ? me.profile.$jazz.refs.bio.id
-      : undefined;
+  const bioId = me.$isLoaded ? me.profile.$jazz.refs.bio.id : undefined;
   const [branch, setBranch] = useState<string | undefined>(undefined);
   const bio = useCoState(JazzProfile.shape.bio, bioId, {
     unstable_branch:
-      branch && me.$jazzState === CoValueLoadingState.LOADED
-        ? { name: branch, owner: me }
-        : undefined,
+      branch && me.$isLoaded ? { name: branch, owner: me } : undefined,
   });
 
-  const bioBranchName =
-    bio.$jazzState === CoValueLoadingState.LOADED
-      ? bio.$jazz.branchName
-      : undefined;
+  const bioBranchName = bio.$isLoaded ? bio.$jazz.branchName : undefined;
   useEffect(() => {
-    if (!editorRef.current || bio.$jazzState !== CoValueLoadingState.LOADED) {
+    if (!editorRef.current || !bio.$isLoaded) {
       return;
     }
 
@@ -59,11 +50,7 @@ export function Editor() {
     };
   }, [bioId, bioBranchName]); // Only recreate if the account or the branch change
 
-  if (
-    me.$jazzState !== CoValueLoadingState.LOADED ||
-    bio.$jazzState !== CoValueLoadingState.LOADED
-  )
-    return null;
+  if (!me.$isLoaded || !bio.$isLoaded) return null;
 
   return (
     <div className="flex flex-col">

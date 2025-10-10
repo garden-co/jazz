@@ -512,7 +512,7 @@ export class CoMap extends CoValueBase implements CoValue {
         skipRetry: true,
       },
     );
-    if (map.$jazzState !== CoValueLoadingState.LOADED) {
+    if (!map.$isLoaded) {
       const instance = new this();
       map = CoMap._createCoMap(instance, options.value, {
         owner: options.owner,

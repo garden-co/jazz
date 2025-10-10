@@ -1,4 +1,3 @@
-import { CoValueLoadingState } from "jazz-tools";
 import { useAcceptInvite, useAccount } from "jazz-tools/react";
 import { useNavigate } from "react-router";
 import { JazzAccount, Organization } from "./schema.ts";
@@ -10,7 +9,7 @@ export function AcceptInvitePage() {
   });
 
   const onAccept = (organizationId: string) => {
-    if (me.$jazzState === CoValueLoadingState.LOADED) {
+    if (me.$isLoaded) {
       Organization.load(organizationId).then((organization) => {
         if (organization) {
           // avoid duplicates

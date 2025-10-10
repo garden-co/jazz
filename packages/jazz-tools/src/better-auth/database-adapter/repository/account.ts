@@ -1,5 +1,5 @@
 import { CleanedWhere } from "better-auth/adapters";
-import { co, z, CoValueLoadingState } from "jazz-tools";
+import { co, z } from "jazz-tools";
 import { JazzRepository } from "./generic";
 import { isWhereBySingleField } from "../utils";
 import type { TableItem } from "../schema";
@@ -45,10 +45,7 @@ export class AccountRepository extends JazzRepository {
     if (isWhereBySingleField(this.getAccountIdProperty(), where)) {
       const accountIdIndex = await this.getAccountIdIndex(where[0].value);
 
-      const ids =
-        accountIdIndex.$jazzState === CoValueLoadingState.LOADED
-          ? accountIdIndex
-          : [];
+      const ids = accountIdIndex.$isLoaded ? accountIdIndex : [];
 
       if (ids.length === 0) {
         return [];
@@ -105,10 +102,7 @@ export class AccountRepository extends JazzRepository {
   private async updateAccountIdIndex(accountId: string, entityId: string) {
     const accountIdIndex = await this.getAccountIdIndex(accountId);
 
-    const ids =
-      accountIdIndex.$jazzState === CoValueLoadingState.LOADED
-        ? accountIdIndex
-        : [];
+    const ids = accountIdIndex.$isLoaded ? accountIdIndex : [];
 
     await AccountIdIndex.upsertUnique({
       value: [...ids, entityId],
@@ -120,10 +114,7 @@ export class AccountRepository extends JazzRepository {
   private async deleteAccountIdIndex(accountId: string, entityId: string) {
     const accountIdIndex = await this.getAccountIdIndex(accountId);
 
-    const ids =
-      accountIdIndex.$jazzState === CoValueLoadingState.LOADED
-        ? accountIdIndex
-        : [];
+    const ids = accountIdIndex.$isLoaded ? accountIdIndex : [];
 
     await AccountIdIndex.upsertUnique({
       value: ids.filter((id) => id !== entityId),

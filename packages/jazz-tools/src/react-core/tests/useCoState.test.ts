@@ -520,7 +520,7 @@ describe("useCoState", () => {
     const { result } = renderHook(
       () => {
         const loadedDog = useCoState(Dog, dog.$jazz.id);
-        if (loadedDog.$jazzState !== CoValueLoadingState.LOADED) {
+        if (!loadedDog.$isLoaded) {
           return undefined;
         }
         return loadedDog.$jazz.owner.members;

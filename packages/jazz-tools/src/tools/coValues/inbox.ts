@@ -331,7 +331,7 @@ export class Inbox {
   static async load(account: Account) {
     const profile = account.profile;
 
-    if (profile.$jazzState !== CoValueLoadingState.LOADED) {
+    if (!profile.$isLoaded) {
       throw new Error("Account profile should already be loaded");
     }
 

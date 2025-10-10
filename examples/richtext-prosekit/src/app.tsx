@@ -1,4 +1,4 @@
-import { CoRichText, CoValueLoadingState } from "jazz-tools";
+import { CoRichText } from "jazz-tools";
 import { useAccount, useIsAuthenticated } from "jazz-tools/react";
 import { useMemo } from "react";
 import { Logo } from "./app-logo.tsx";
@@ -15,13 +15,10 @@ function App() {
   const isAuthenticated = useIsAuthenticated();
 
   const accountId = me.$jazz.id;
-  const bioId =
-    me.$jazzState === CoValueLoadingState.LOADED
-      ? me.profile.bio?.$jazz.id
-      : undefined;
+  const bioId = me.$isLoaded ? me.profile.bio?.$jazz.id : undefined;
   const memoCoRichText: CoRichText | undefined = useMemo(() => {
     console.log("memoCoRichText");
-    if (me.$jazzState !== CoValueLoadingState.LOADED) return undefined;
+    if (!me.$isLoaded) return undefined;
     return me.profile.bio;
   }, [accountId, bioId]);
   // Only recreate if the account or the bio change
@@ -45,21 +42,14 @@ function App() {
         <div className="text-center">
           <h1>
             Welcome
-            {me.$jazzState === CoValueLoadingState.LOADED ? (
-              <>, {me.profile.firstName}</>
-            ) : (
-              ""
-            )}
-            !
+            {me.$isLoaded ? <>, {me.profile.firstName}</> : ""}!
           </h1>
         </div>
 
         <div className="flex flex-col gap-4">
           <Editor coRichText={memoCoRichText} />
           <Editor coRichText={memoCoRichText} />
-          {me.$jazzState === CoValueLoadingState.LOADED && (
-            <Textarea coRichText={me.profile.bio} />
-          )}
+          {me.$isLoaded && <Textarea coRichText={me.profile.bio} />}
         </div>
       </main>
     </>

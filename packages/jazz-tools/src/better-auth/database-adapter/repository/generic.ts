@@ -1,13 +1,6 @@
 import { CleanedWhere } from "better-auth/adapters";
 import { BetterAuthDbSchema } from "better-auth/db";
-import {
-  Account,
-  CoList,
-  CoMap,
-  Group,
-  co,
-  CoValueLoadingState,
-} from "jazz-tools";
+import { Account, CoList, CoMap, Group, co } from "jazz-tools";
 import type { Database, TableItem } from "../schema.js";
 import {
   filterListByWhere,
@@ -97,7 +90,7 @@ export class JazzRepository {
 
     // if the entity exists and is not soft deleted, we must throw an error
     if (
-      existingNode.$jazzState === CoValueLoadingState.LOADED &&
+      existingNode.$isLoaded &&
       existingNode.$jazz.raw.get("_deleted") !== true
     ) {
       throw new Error("Entity already exists");
@@ -113,7 +106,7 @@ export class JazzRepository {
       unique: uniqueId,
     });
 
-    if (node.$jazzState !== CoValueLoadingState.LOADED) {
+    if (!node.$isLoaded) {
       throw new Error("Unable to create entity");
     }
 
@@ -141,7 +134,7 @@ export class JazzRepository {
 
     const node = await this.getSchema(model).load(id, { loadAs: this.worker });
 
-    if (node.$jazzState !== CoValueLoadingState.LOADED) {
+    if (!node.$isLoaded) {
       return null;
     }
 
@@ -166,7 +159,7 @@ export class JazzRepository {
       },
     );
 
-    if (node.$jazzState !== CoValueLoadingState.LOADED) {
+    if (!node.$isLoaded) {
       return null;
     }
 

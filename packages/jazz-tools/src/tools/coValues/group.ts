@@ -11,7 +11,6 @@ import {
   BranchDefinition,
   CoValue,
   CoValueClass,
-  CoValueLoadingState,
   ID,
   MaybeLoaded,
   RefEncoded,

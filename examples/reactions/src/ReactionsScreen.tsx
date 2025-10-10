@@ -1,4 +1,4 @@
-import { CoValueLoadingState, Loaded, CoFeedEntry } from "jazz-tools";
+import { Loaded, CoFeedEntry } from "jazz-tools";
 import { useCoState } from "jazz-tools/react";
 import { ReactionType, ReactionTypes, Reactions } from "./schema.ts";
 
@@ -16,7 +16,7 @@ const reactionEmojiMap: {
 export function ReactionsScreen(props: { id: string }) {
   const reactions = useCoState(Reactions, props.id);
 
-  if (reactions.$jazzState !== CoValueLoadingState.LOADED) return;
+  if (!reactions.$isLoaded) return;
 
   return (
     <>
@@ -75,7 +75,6 @@ function getReactorName(
   reaction: CoFeedEntry<ReactionType>,
 ): string | undefined {
   const maybeReactor = reaction.by?.profile;
-  if (!maybeReactor || maybeReactor.$jazzState !== CoValueLoadingState.LOADED)
-    return;
+  if (!maybeReactor || !maybeReactor.$isLoaded) return;
   return maybeReactor.name;
 }

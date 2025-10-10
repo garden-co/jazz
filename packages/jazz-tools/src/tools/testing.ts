@@ -19,7 +19,6 @@ import {
   CoValue,
   LoadedAndRequired,
   MaybeLoaded,
-  CoValueLoadingState,
   randomSessionProvider,
 } from "./internal.js";
 
@@ -393,7 +392,7 @@ export async function setupJazzTestSync({
 export function assertLoaded<T extends MaybeLoaded<CoValue>>(
   coValue: T,
 ): asserts coValue is LoadedAndRequired<T> {
-  if (coValue.$jazzState !== CoValueLoadingState.LOADED) {
+  if (!coValue.$isLoaded) {
     throw new Error("CoValue is not loaded");
   }
 }

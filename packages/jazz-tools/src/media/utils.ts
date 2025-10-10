@@ -1,11 +1,5 @@
 import type { CoID } from "cojson";
-import {
-  Account,
-  CoValueLoadingState,
-  FileStream,
-  ImageDefinition,
-  MaybeLoaded,
-} from "jazz-tools";
+import { Account, FileStream, ImageDefinition, MaybeLoaded } from "jazz-tools";
 
 export function highestResAvailable(
   image: ImageDefinition,
@@ -21,7 +15,7 @@ export function highestResAvailable(
     });
 
   if (availableSizes.length === 0) {
-    return image.original.$jazzState === CoValueLoadingState.LOADED
+    return image.original.$isLoaded
       ? {
           width: image.originalSize[0],
           height: image.originalSize[1],
@@ -55,7 +49,7 @@ export function highestResAvailable(
   // if the best target is already loaded, we are done
   const bestTargetImage = image[bestTarget!.size[2]];
   if (getImageChunks(bestTargetImage)) {
-    return bestTargetImage?.$jazzState === CoValueLoadingState.LOADED
+    return bestTargetImage?.$isLoaded
       ? {
           width: bestTarget!.size[0],
           height: bestTarget!.size[1],
@@ -69,7 +63,7 @@ export function highestResAvailable(
   if (bestLoaded) {
     getImageChunks(bestTargetImage);
     const bestLoadedImage = image[bestLoaded.size[2]];
-    return bestLoadedImage?.$jazzState === CoValueLoadingState.LOADED
+    return bestLoadedImage?.$isLoaded
       ? {
           width: bestLoaded.size[0],
           height: bestLoaded.size[1],
@@ -89,7 +83,7 @@ export function highestResAvailable(
 }
 
 function getImageChunks(file: MaybeLoaded<FileStream> | undefined) {
-  if (!file || file.$jazzState !== CoValueLoadingState.LOADED) {
+  if (!file || !file.$isLoaded) {
     return undefined;
   }
   return file.getChunks();
@@ -132,7 +126,7 @@ export async function loadImage(
       },
     });
 
-    if (image.$jazzState !== CoValueLoadingState.LOADED) {
+    if (!image.$isLoaded) {
       return null;
     }
 
@@ -150,7 +144,7 @@ export async function loadImage(
 
   const loadedOriginal = await FileStream.load(imageOrId.original.$jazz.id);
 
-  if (loadedOriginal.$jazzState !== CoValueLoadingState.LOADED) {
+  if (!loadedOriginal.$isLoaded) {
     console.warn("Unable to find the original image");
     return null;
   }
@@ -215,7 +209,7 @@ export async function loadImageBySize(
 
   const loadedFile = await FileStream.load(file.id);
 
-  if (loadedFile.$jazzState !== CoValueLoadingState.LOADED) {
+  if (!loadedFile.$isLoaded) {
     return null;
   }
 

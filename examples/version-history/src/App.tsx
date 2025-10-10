@@ -1,4 +1,4 @@
-import { Account, CoPlainText, CoValueLoadingState, Group } from "jazz-tools";
+import { Account, CoPlainText, Group } from "jazz-tools";
 import { useAccount, useCoState } from "jazz-tools/react";
 import { useState } from "react";
 import { IssueComponent } from "./Issue.tsx";
@@ -17,7 +17,7 @@ function App() {
 
   const issue = useCoState(Issue, issueID);
 
-  if (me.$jazzState !== CoValueLoadingState.LOADED) {
+  if (!me.$isLoaded) {
     return (
       <div className="flex-1 flex justify-center items-center">Loading...</div>
     );
@@ -59,7 +59,7 @@ function App() {
         </nav>
       </header>
       <main className="max-w-3xl mx-auto px-3 my-8 flex flex-col gap-8">
-        {issue.$jazzState === CoValueLoadingState.LOADED ? (
+        {issue.$isLoaded ? (
           <>
             <h1 className="sr-only">Issue: {issue.title}</h1>
             <IssueComponent issue={issue} />

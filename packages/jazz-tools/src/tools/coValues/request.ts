@@ -288,7 +288,7 @@ async function handleMessagePayload({
     loadAs,
   });
 
-  if (madeBy.$jazzState !== CoValueLoadingState.LOADED) {
+  if (!madeBy.$isLoaded) {
     throw new JazzRequestError("Creator account not found", 400);
   }
 
@@ -300,7 +300,7 @@ async function handleMessagePayload({
     loadAs,
   });
 
-  if (value.$jazzState !== CoValueLoadingState.LOADED) {
+  if (!value.$isLoaded) {
     throw new JazzRequestError("Value not found", 400);
   }
 
@@ -374,7 +374,7 @@ export class HttpRoute<
     const as = options?.owner ?? Account.getMe();
 
     const target = await loadWorkerAccountOrGroup(this.workerId, as);
-    if (target.$jazzState !== CoValueLoadingState.LOADED) {
+    if (!target.$isLoaded) {
       throw new JazzRequestError("Worker account not found", 400);
     }
 

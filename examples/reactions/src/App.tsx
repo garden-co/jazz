@@ -1,5 +1,5 @@
 import { useIframeHashRouter } from "hash-slash";
-import { Account, CoValueLoadingState, Group } from "jazz-tools";
+import { Account, Group } from "jazz-tools";
 import { useAccount } from "jazz-tools/react";
 import { ReactionsScreen } from "./ReactionsScreen.tsx";
 import { Reactions } from "./schema.ts";
@@ -19,7 +19,7 @@ function App() {
     router.navigate("/#/reactions/" + chat.$jazz.id);
   };
 
-  if (me.$jazzState !== CoValueLoadingState.LOADED) {
+  if (!me.$isLoaded) {
     return (
       <div className="flex-1 flex justify-center items-center">Loading...</div>
     );

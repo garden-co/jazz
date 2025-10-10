@@ -1,11 +1,5 @@
 import * as Clipboard from "expo-clipboard";
-import {
-  Account,
-  CoMapEdit,
-  CoValueLoadingState,
-  Group,
-  MaybeLoaded,
-} from "jazz-tools";
+import { Account, CoMapEdit, Group, MaybeLoaded } from "jazz-tools";
 import { useState } from "react";
 import React, {
   Button,
@@ -55,7 +49,7 @@ export default function ChatScreen() {
   };
 
   const sendMessage = () => {
-    if (loadedChat.$jazzState !== CoValueLoadingState.LOADED) return;
+    if (!loadedChat.$isLoaded) return;
     if (message.trim()) {
       loadedChat.$jazz.push(
         Message.create({ text: message }, { owner: loadedChat?.$jazz.owner }),
@@ -105,18 +99,14 @@ export default function ChatScreen() {
 
   return (
     <View style={styles.container}>
-      {loadedChat.$jazzState !== CoValueLoadingState.LOADED ? (
+      {!loadedChat.$isLoaded ? (
         <View style={styles.welcomeContainer}>
           <Text style={styles.usernameTitle}>Username</Text>
           <TextInput
             style={styles.usernameInput}
-            value={
-              me.$jazzState === CoValueLoadingState.LOADED
-                ? me.profile.name
-                : ""
-            }
+            value={me.$isLoaded ? me.profile.name : ""}
             onChangeText={(value) => {
-              if (me.$jazzState === CoValueLoadingState.LOADED) {
+              if (me.$isLoaded) {
                 me.profile.$jazz.set("name", value);
               }
             }}
@@ -217,10 +207,7 @@ export default function ChatScreen() {
 function getEditorName(
   edit?: CoMapEdit<MaybeLoaded<unknown>>,
 ): string | undefined {
-  if (
-    !edit?.by?.profile ||
-    edit.by.profile.$jazzState !== CoValueLoadingState.LOADED
-  ) {
+  if (!edit?.by?.profile || !edit.by.profile.$isLoaded) {
     return;
   }
   return edit.by.profile.name;

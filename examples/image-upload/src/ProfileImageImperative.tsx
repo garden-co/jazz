@@ -1,4 +1,3 @@
-import { CoValueLoadingState } from "jazz-tools";
 import {
   highestResAvailable,
   // loadImage,
@@ -15,7 +14,7 @@ export default function ProfileImageImperative() {
   });
 
   useEffect(() => {
-    if (me.$jazzState !== CoValueLoadingState.LOADED || !me.profile.image) {
+    if (!me.$isLoaded || !me.profile.image) {
       return;
     }
 
@@ -55,11 +54,11 @@ export default function ProfileImageImperative() {
   }, [me]);
 
   const deleteImage = () => {
-    if (me.$jazzState !== CoValueLoadingState.LOADED) return;
+    if (!me.$isLoaded) return;
     me.profile.$jazz.delete("image");
   };
 
-  if (me.$jazzState !== CoValueLoadingState.LOADED) {
+  if (!me.$isLoaded) {
     return (
       <div className="flex items-center justify-center h-64 bg-gray-100 rounded-lg">
         <p className="text-gray-500">No profile image</p>

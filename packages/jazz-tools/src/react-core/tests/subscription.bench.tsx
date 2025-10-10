@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 
 import { cojsonInternals } from "cojson";
-import { co, z, CoValueLoadingState } from "jazz-tools";
+import { co, z } from "jazz-tools";
 import { describe, bench } from "vitest";
 import {
   useAccountSubscription,
@@ -28,7 +28,7 @@ const AccountName = () => {
       profile: true,
     },
     select: (account) => {
-      if (account.$jazzState !== CoValueLoadingState.LOADED) {
+      if (!account.$isLoaded) {
         return null;
       }
       return account.profile.name;
@@ -47,7 +47,7 @@ const AccountNameFromSubscription = ({
 }) => {
   const name = useSubscriptionSelector(subscription, {
     select: (account) => {
-      if (account.$jazzState !== CoValueLoadingState.LOADED) {
+      if (!account.$isLoaded) {
         return null;
       }
       return account.profile.name;
@@ -209,7 +209,7 @@ describe("deeply resolved coMaps", async () => {
   }) => {
     const allProjectsTasks = useSubscriptionSelector(subscription, {
       select: (account) => {
-        if (account.$jazzState !== CoValueLoadingState.LOADED) {
+        if (!account.$isLoaded) {
           return null;
         }
         return account.root.organizations.flatMap((org) =>
@@ -296,7 +296,7 @@ describe("deeply resolved coMaps", async () => {
         },
       },
       select: (account) => {
-        if (account.$jazzState !== CoValueLoadingState.LOADED) {
+        if (!account.$isLoaded) {
           return null;
         }
         return account.root.organizations.flatMap((org) =>

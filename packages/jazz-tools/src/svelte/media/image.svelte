@@ -25,7 +25,7 @@
     width: number | undefined;
     height: number | undefined;
   }>(() => {
-    const originalSize = imageState.current.$jazzState === CoValueLoadingState.LOADED ? imageState.current.originalSize : undefined;
+    const originalSize = imageState.current.$isLoaded ? imageState.current.originalSize : undefined;
     const originalWidth = originalSize?.[0];
     const originalHeight = originalSize?.[1];
 
@@ -72,7 +72,7 @@
     if (image.$jazzState === CoValueLoadingState.UNLOADED)
       return "data:image/gif;base64,R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==";
 
-    if (image.$jazzState !== CoValueLoadingState.LOADED) return undefined;
+    if (!image.$isLoaded) return undefined;
 
     const bestImage = highestResAvailable(
       image,

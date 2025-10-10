@@ -1,4 +1,4 @@
-import { CoValueLoadingState, CoMapEdit, MaybeLoaded } from "jazz-tools";
+import { CoMapEdit, MaybeLoaded } from "jazz-tools";
 import { useCoState } from "jazz-tools/react";
 import { useEffect, useState } from "react";
 import { Issue } from "./schema.ts";
@@ -7,10 +7,9 @@ function DescriptionVersionHistory({ id }: { id: string }) {
   const issue = useCoState(Issue, id);
   const [version, setVersion] = useState<any | undefined>();
   const [isVersionLatest, setIsVersionLatest] = useState(true);
-  const edits =
-    issue.$jazzState === CoValueLoadingState.LOADED
-      ? (issue.$jazz.getEdits().description?.all.reverse() ?? [])
-      : [];
+  const edits = issue.$isLoaded
+    ? (issue.$jazz.getEdits().description?.all.reverse() ?? [])
+    : [];
 
   useEffect(() => {
     if (!version) {
@@ -19,8 +18,7 @@ function DescriptionVersionHistory({ id }: { id: string }) {
     }
   }, [edits]);
 
-  if (issue.$jazzState !== CoValueLoadingState.LOADED)
-    return <div>Loading...</div>;
+  if (!issue.$isLoaded) return <div>Loading...</div>;
 
   const selectVersion = (version: any, isLatest: boolean) => {
     setVersion(version);
@@ -66,7 +64,7 @@ function DescriptionVersionHistory({ id }: { id: string }) {
 export function IssueVersionHistory({ id }: { id: string }) {
   const issue = useCoState(Issue, id);
 
-  if (issue.$jazzState !== CoValueLoadingState.LOADED) return;
+  if (!issue.$isLoaded) return;
 
   const issueEdits = issue.$jazz.getEdits();
   const edits = [
@@ -120,7 +118,7 @@ function getEditorName(
   edit: CoMapEdit<MaybeLoaded<unknown>>,
 ): string | undefined {
   const maybeProfile = edit.by?.profile;
-  if (!maybeProfile || maybeProfile.$jazzState !== CoValueLoadingState.LOADED) {
+  if (!maybeProfile || !maybeProfile.$isLoaded) {
     return undefined;
   }
   return maybeProfile.name;

@@ -1,4 +1,4 @@
-import { Account, CoValueLoadingState, Group } from "jazz-tools";
+import { Account, Group } from "jazz-tools";
 import { useAccount } from "jazz-tools/react";
 import { useOrganizationSelector } from "./OrganizationProvider.ts";
 
@@ -41,10 +41,7 @@ function MemberItem({
     }
   }
 
-  const name =
-    account.profile.$jazzState === CoValueLoadingState.LOADED
-      ? account.profile.name
-      : undefined;
+  const name = account.profile.$isLoaded ? account.profile.name : undefined;
   return (
     <div className="px-4 py-5 sm:px-6 flex justify-between items-center">
       <div>

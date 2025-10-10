@@ -125,7 +125,7 @@ describe("useSubscriptionSelector", () => {
       const subscription = useCoValueSubscription(TestMap, map.$jazz.id);
       return useSubscriptionSelector(subscription, {
         select: (v) => {
-          if (v.$jazzState !== CoValueLoadingState.LOADED) {
+          if (!v.$isLoaded) {
             return "Loading...";
           }
           return v.value;
@@ -150,7 +150,7 @@ describe("useSubscriptionSelector", () => {
         });
         return useSubscriptionSelector(subscription, {
           select: (v) => {
-            if (v.$jazzState !== CoValueLoadingState.LOADED) {
+            if (!v.$isLoaded) {
               return "Loading...";
             }
             return v.profile.name;
@@ -178,7 +178,7 @@ describe("useSubscriptionSelector", () => {
       const subscription = useCoValueSubscription(TestMap, map.$jazz.id);
       return useSubscriptionSelector(subscription, {
         select: (v) => {
-          if (v.$jazzState !== CoValueLoadingState.LOADED) {
+          if (!v.$isLoaded) {
             return "Loading...";
           }
           return v.value;
@@ -211,7 +211,7 @@ describe("useSubscriptionSelector", () => {
         const subscription = useCoValueSubscription(TestMap, map.$jazz.id);
         return useSubscriptionSelector(subscription, {
           select: (v) => {
-            if (v.$jazzState !== CoValueLoadingState.LOADED) {
+            if (!v.$isLoaded) {
               return "Loading...";
             }
             return v.value;
@@ -247,7 +247,7 @@ describe("useSubscriptionSelector", () => {
         const subscription = useCoValueSubscription(TestMap, map.$jazz.id);
         return useSubscriptionSelector(subscription, {
           select: (v) => {
-            if (v.$jazzState !== CoValueLoadingState.LOADED) {
+            if (!v.$isLoaded) {
               return [];
             }
             return v

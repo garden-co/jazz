@@ -1,7 +1,7 @@
 import { apiKey } from "@/apiKey.ts";
 import { getRandomUsername, inIframe, onChatLoad } from "@/util.ts";
 import { useIframeHashRouter } from "hash-slash";
-import { CoValueLoadingState, Group } from "jazz-tools";
+import { Group } from "jazz-tools";
 import { JazzInspector } from "jazz-tools/inspector";
 import { JazzReactProvider, useAccount } from "jazz-tools/react";
 import { StrictMode } from "react";
@@ -19,8 +19,7 @@ export function App() {
   });
   const router = useIframeHashRouter();
 
-  const profile =
-    me.$jazzState === CoValueLoadingState.LOADED ? me.profile : undefined;
+  const profile = me.$isLoaded ? me.profile : undefined;
 
   const createChat = () => {
     if (!me) return;

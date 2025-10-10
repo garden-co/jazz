@@ -1,11 +1,11 @@
-import { Account, CoValueLoadingState } from "jazz-tools";
+import { Account } from "jazz-tools";
 import { useAccount, useIsAuthenticated } from "jazz-tools/react";
 
 export function Home() {
   const { me, logOut } = useAccount(Account, { resolve: { profile: true } });
   const isAuthenticated = useIsAuthenticated();
 
-  if (me.$jazzState !== CoValueLoadingState.LOADED) return;
+  if (!me.$isLoaded) return;
   if (!isAuthenticated) return;
 
   return (

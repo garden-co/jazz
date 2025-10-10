@@ -1,4 +1,3 @@
-import { CoValueLoadingState } from "jazz-tools";
 import { useAccount, useIsAuthenticated } from "jazz-tools/react";
 import { AuthButton } from "./AuthButton.tsx";
 import { Form } from "./Form.tsx";
@@ -30,14 +29,9 @@ function App() {
         <div className="text-center">
           <h1>
             Welcome
-            {me.$jazzState === CoValueLoadingState.LOADED ? (
-              <>, {me.profile.firstName}</>
-            ) : (
-              ""
-            )}
-            !
+            {me.$isLoaded ? <>, {me.profile.firstName}</> : ""}!
           </h1>
-          {me.$jazzState === CoValueLoadingState.LOADED && (
+          {me.$isLoaded && (
             <p>As of today, you are {getUserAge(me.root)} years old.</p>
           )}
         </div>

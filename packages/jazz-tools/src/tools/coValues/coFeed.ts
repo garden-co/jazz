@@ -798,7 +798,7 @@ export class FileStream extends CoValueBase implements CoValue {
   ): Promise<Blob | undefined> {
     let stream = await this.load(id, options);
 
-    if (stream.$jazzState !== CoValueLoadingState.LOADED) {
+    if (!stream.$isLoaded) {
       return undefined;
     }
 
@@ -817,7 +817,7 @@ export class FileStream extends CoValueBase implements CoValue {
   ): Promise<string | undefined> {
     const stream = await this.load(id, options);
 
-    if (stream.$jazzState !== CoValueLoadingState.LOADED) {
+    if (!stream.$isLoaded) {
       return undefined;
     }
 
@@ -989,7 +989,7 @@ export class FileStream extends CoValueBase implements CoValue {
      */
     if (
       !options?.allowUnfinished &&
-      stream.$jazzState === CoValueLoadingState.LOADED &&
+      stream.$isLoaded &&
       !stream.isBinaryStreamEnded()
     ) {
       return new Promise<FileStream>((resolve) => {

@@ -1,4 +1,3 @@
-import { CoValueLoadingState } from "jazz-tools";
 import { Image, useAccount } from "jazz-tools/react";
 import { JazzAccount } from "./schema";
 
@@ -7,7 +6,7 @@ export default function ProfileImage() {
     resolve: { profile: { image: true } },
   });
 
-  if (me.$jazzState !== CoValueLoadingState.LOADED || !me.profile.image) {
+  if (!me.$isLoaded || !me.profile.image) {
     return (
       <div className="flex items-center justify-center h-64 bg-gray-100 rounded-lg">
         <p className="text-gray-500">No profile image</p>

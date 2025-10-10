@@ -1,4 +1,3 @@
-import { CoValueLoadingState } from "jazz-tools";
 import { useAccount } from "jazz-tools/react";
 import { UsersIcon } from "lucide-react";
 import { useEffect, useState } from "react";
@@ -35,8 +34,7 @@ export function OrganizationSelector({ className }: { className?: string }) {
     navigate(`/organizations/${value}`);
   };
 
-  const organizations =
-    me.$jazzState === CoValueLoadingState.LOADED ? me.root.organizations : null;
+  const organizations = me.$isLoaded ? me.root.organizations : null;
 
   return (
     <div className={[className, "flex items-center gap-3"].join(" ")}>
@@ -51,7 +49,7 @@ export function OrganizationSelector({ className }: { className?: string }) {
         className="rounded-md shadow-sm dark:bg-transparent w-full"
       >
         {organizations?.map((organization) => {
-          if (organization.$jazzState !== CoValueLoadingState.LOADED) {
+          if (!organization.$isLoaded) {
             return null;
           }
 

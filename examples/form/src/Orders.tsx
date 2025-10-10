@@ -1,4 +1,3 @@
-import { CoValueLoadingState } from "jazz-tools";
 import { useAccountWithSelector } from "jazz-tools/react";
 import { OrderThumbnail } from "./OrderThumbnail.tsx";
 import { JazzAccount, PartialBubbleTeaOrder } from "./schema.ts";
@@ -19,7 +18,7 @@ export function Orders() {
       },
     },
     select: (me) => {
-      if (me.$jazzState !== CoValueLoadingState.LOADED) {
+      if (!me.$isLoaded) {
         return [];
       }
       return me.root.orders;

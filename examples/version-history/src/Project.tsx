@@ -1,4 +1,3 @@
-import { CoValueLoadingState } from "jazz-tools";
 import { createInviteLink, useAccount } from "jazz-tools/react";
 import { useCoState } from "jazz-tools/react";
 import { IssueComponent } from "./Issue.tsx";
@@ -10,10 +9,7 @@ export function ProjectComponent({ projectID }: { projectID: string }) {
     resolve: { issues: { $each: true } },
   });
 
-  if (
-    me.$jazzState !== CoValueLoadingState.LOADED ||
-    project.$jazzState !== CoValueLoadingState.LOADED
-  ) {
+  if (!me.$isLoaded || !project.$isLoaded) {
     return <div>Loading project...</div>;
   }
 

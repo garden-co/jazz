@@ -81,7 +81,7 @@ export const Image = forwardRef<HTMLImageElement, ImageProps>(function Image(
 ) {
   const image = useCoStateWithSelector(ImageDefinition, imageId, {
     select: (image) => {
-      if (image.$jazzState === CoValueLoadingState.LOADED) {
+      if (image.$isLoaded) {
         return image;
       } else if (image.$jazzState === CoValueLoadingState.UNLOADED) {
         return undefined;

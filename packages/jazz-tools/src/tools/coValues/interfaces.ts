@@ -63,7 +63,13 @@ export interface CoValue {
     branchName: string | undefined;
     unstable_merge: () => void;
   };
+  /**
+   * CoValue loading state. Can be used to distinguish between loaded and {@link Unloaded2} CoValues.
+   */
   $jazzState: typeof CoValueLoadingState.LOADED;
+  /**
+   * Whether the CoValue is loaded. Can be used to distinguish between loaded and {@link Unloaded2} CoValues.
+   */
   $isLoaded: true;
 
   /** @category Stringifying & Inspection */
@@ -191,7 +197,7 @@ export async function ensureCoValueLoaded<
     },
   );
 
-  if (response.$jazzState !== CoValueLoadingState.LOADED) {
+  if (!response.$isLoaded) {
     throw new Error("Failed to deeply load CoValue " + existing.$jazz.id);
   }
 

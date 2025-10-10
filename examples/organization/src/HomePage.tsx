@@ -1,4 +1,3 @@
-import { CoValueLoadingState } from "jazz-tools";
 import { useAccount } from "jazz-tools/react";
 import { Layout } from "./Layout.tsx";
 import { CreateOrganization } from "./components/CreateOrganization.tsx";
@@ -16,7 +15,7 @@ export function HomePage() {
     },
   });
 
-  if (me.$jazzState !== CoValueLoadingState.LOADED) return;
+  if (!me.$isLoaded) return;
 
   return (
     <Layout>
@@ -29,7 +28,7 @@ export function HomePage() {
         <div className="divide-y">
           {me.root.organizations.length > 0 ? (
             me.root.organizations.map((project) =>
-              project.$jazzState === CoValueLoadingState.LOADED ? (
+              project.$isLoaded ? (
                 <a
                   key={project.$jazz.id}
                   className="px-4 py-5 sm:px-6 font-medium block"

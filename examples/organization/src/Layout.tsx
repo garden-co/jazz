@@ -1,4 +1,3 @@
-import { CoValueLoadingState } from "jazz-tools";
 import { useAccount } from "jazz-tools/react";
 import { UserIcon } from "lucide-react";
 import { JazzAccount } from "./schema";
@@ -24,14 +23,10 @@ export function Layout({ children }: { children: React.ReactNode }) {
             <input
               id="profile-name"
               type="text"
-              value={
-                me.$jazzState === CoValueLoadingState.LOADED
-                  ? me.profile.name
-                  : ""
-              }
+              value={me.$isLoaded ? me.profile.name : ""}
               className="rounded-md shadow-sm dark:bg-transparent text-sm py-1.5 px-3"
               onChange={(e) => {
-                if (me.$jazzState === CoValueLoadingState.LOADED) {
+                if (me.$isLoaded) {
                   me.profile.$jazz.set("name", e.target.value);
                 }
               }}

@@ -1901,7 +1901,7 @@ describe("Creating and finding unique CoMaps", async () => {
       { identifier: sourceData.identifier },
       workspace.$jazz.id,
     );
-    if (activeEvent.$jazzState !== CoValueLoadingState.LOADED) {
+    if (!activeEvent.$isLoaded) {
       activeEvent = Event.create(
         {
           title: sourceData.title,

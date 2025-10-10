@@ -1,5 +1,4 @@
 import { useIframeHashRouter } from "hash-slash";
-import { CoValueLoadingState } from "jazz-tools";
 import { useAccountWithSelector, useCoState } from "jazz-tools/react";
 import { useState } from "react";
 import { Errors } from "./Errors.tsx";
@@ -16,7 +15,7 @@ export function CreateOrder(props: { id: string }) {
   const orders = useAccountWithSelector(JazzAccount, {
     resolve: { root: { orders: true } },
     select: (account) => {
-      if (account.$jazzState !== CoValueLoadingState.LOADED) {
+      if (!account.$isLoaded) {
         return undefined;
       }
       return account.root.orders;
@@ -29,7 +28,7 @@ export function CreateOrder(props: { id: string }) {
     resolve: { addOns: true, instructions: true },
   });
 
-  if (newOrder.$jazzState !== CoValueLoadingState.LOADED) return;
+  if (!newOrder.$isLoaded) return;
 
   const handleSave = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();

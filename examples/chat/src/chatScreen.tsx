@@ -1,4 +1,4 @@
-import { Account, co, CoValueLoadingState } from "jazz-tools";
+import { Account, co } from "jazz-tools";
 import { createImage } from "jazz-tools/media";
 import { useAccount, useCoState } from "jazz-tools/react";
 import { useEffect, useState } from "react";
@@ -30,11 +30,7 @@ export function ChatScreen(props: { chatID: string }) {
   );
   const isLoading = useMessagesPreload(props.chatID);
 
-  if (
-    me.$jazzState !== CoValueLoadingState.LOADED ||
-    chat.$jazzState !== CoValueLoadingState.LOADED ||
-    isLoading
-  )
+  if (!me.$isLoaded || !chat.$isLoaded || isLoading)
     return (
       <div className="flex-1 flex justify-center items-center">Loading...</div>
     );
@@ -80,7 +76,7 @@ export function ChatScreen(props: { chatID: string }) {
             // Reverse plus flex-col-reverse on ChatBody gives us scroll-to-bottom behavior
             .reverse()
             .map((msg) =>
-              msg.text.$jazzState === CoValueLoadingState.LOADED ? (
+              msg.text.$isLoaded ? (
                 <ChatBubble me={me} msg={msg} key={msg.$jazz.id} />
               ) : null,
             )
@@ -134,17 +130,12 @@ function ChatBubble({
   const lastEdit = msg.$jazz.getEdits().text;
   const fromMe = lastEdit?.by?.isMe;
   const lastEditor = lastEdit?.by?.profile;
-  const lastEditorName =
-    lastEditor?.$jazzState === CoValueLoadingState.LOADED
-      ? lastEditor.name
-      : undefined;
+  const lastEditorName = lastEditor?.$isLoaded ? lastEditor.name : undefined;
 
   return (
     <BubbleContainer fromMe={fromMe}>
       <BubbleBody fromMe={fromMe}>
-        {image?.$jazzState === CoValueLoadingState.LOADED ? (
-          <BubbleImage image={image} />
-        ) : null}
+        {image?.$isLoaded ? <BubbleImage image={image} /> : null}
         <BubbleText text={text} />
       </BubbleBody>
       {lastEdit && <BubbleInfo by={lastEditorName} madeAt={lastEdit.madeAt} />}
@@ -171,7 +162,7 @@ function useMessagesPreload(chatID: string) {
 async function preloadChatMessages(chatID: string) {
   const chat = await Chat.load(chatID);
 
-  if (chat.$jazzState !== CoValueLoadingState.LOADED) return;
+  if (!chat.$isLoaded) return;
 
   const promises = Array.from(chat.$jazz.refs)
     .reverse()

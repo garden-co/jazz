@@ -1,13 +1,6 @@
 // @vitest-environment happy-dom
 
-import {
-  Account,
-  CoValueLoadingState,
-  RefsToResolve,
-  co,
-  z,
-  Group,
-} from "jazz-tools";
+import { Account, RefsToResolve, co, z, Group } from "jazz-tools";
 import { assert, beforeEach, describe, expect, it } from "vitest";
 import { useAccountWithSelector, useJazzContextManager } from "../hooks.js";
 import { useIsAuthenticated } from "../index.js";
@@ -61,7 +54,7 @@ describe("useAccountWithSelector", () => {
             root: true,
           },
           select: (account) => {
-            if (account.$jazzState !== CoValueLoadingState.LOADED) {
+            if (!account.$isLoaded) {
               return "Loading...";
             }
             return account.root.value;
@@ -117,7 +110,7 @@ describe("useAccountWithSelector", () => {
             },
           },
           select: (account) => {
-            if (account.$jazzState !== CoValueLoadingState.LOADED) {
+            if (!account.$isLoaded) {
               return "Loading...";
             }
             return account.root.nested.nestedValue;
@@ -178,7 +171,7 @@ describe("useAccountWithSelector", () => {
               },
             },
             select: (account) => {
-              if (account.$jazzState !== CoValueLoadingState.LOADED) {
+              if (!account.$isLoaded) {
                 return "Loading...";
               }
               return account.root.value;
@@ -247,7 +240,7 @@ describe("useAccountWithSelector", () => {
               },
             },
             select: (account) => {
-              if (account.$jazzState !== CoValueLoadingState.LOADED) {
+              if (!account.$isLoaded) {
                 return "Loading...";
               }
               return account.root.nested?.nestedValue ?? "Loading...";
@@ -316,7 +309,7 @@ describe("useAccountWithSelector", () => {
               },
             },
             select: (account) => {
-              if (account.$jazzState !== CoValueLoadingState.LOADED) {
+              if (!account.$isLoaded) {
                 return "Loading...";
               }
               return account.root.nested?.nestedValue ?? "Loading...";
@@ -364,7 +357,7 @@ describe("useAccountWithSelector", () => {
             root: true,
           },
           select: (account) => {
-            if (account.$jazzState !== CoValueLoadingState.LOADED) {
+            if (!account.$isLoaded) {
               return "Guest";
             }
             return account.root.value;
@@ -385,7 +378,7 @@ describe("useAccountWithSelector", () => {
       () =>
         useAccountWithSelector(Account, {
           select: (account) => {
-            if (account.$jazzState !== CoValueLoadingState.LOADED) {
+            if (!account.$isLoaded) {
               return "No account";
             }
             return account.$jazz.id;
@@ -430,7 +423,7 @@ describe("useAccountWithSelector", () => {
             },
             select: (account) => {
               let baseValue: string;
-              if (account.$jazzState !== CoValueLoadingState.LOADED) {
+              if (!account.$isLoaded) {
                 baseValue = "loading";
               } else {
                 baseValue = account.root.value;
@@ -490,7 +483,7 @@ describe("useAccountWithSelector", () => {
             root: true,
           },
           select: (account) => {
-            if (account.$jazzState !== CoValueLoadingState.LOADED) {
+            if (!account.$isLoaded) {
               return undefined;
             }
             return account.root;
@@ -503,7 +496,7 @@ describe("useAccountWithSelector", () => {
             root: true,
           },
           select: (account) => {
-            if (account.$jazzState !== CoValueLoadingState.LOADED) {
+            if (!account.$isLoaded) {
               return undefined;
             }
             return account.root;

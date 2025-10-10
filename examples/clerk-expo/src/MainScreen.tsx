@@ -1,5 +1,5 @@
 import { useClerk } from "@clerk/clerk-expo";
-import { Account, CoValueLoadingState } from "jazz-tools";
+import { Account } from "jazz-tools";
 import { useAccount } from "jazz-tools/expo";
 import { StyleSheet, Text, TouchableOpacity, View } from "react-native";
 
@@ -11,7 +11,7 @@ export function MainScreen() {
     await signOut();
   };
 
-  if (me.$jazzState !== CoValueLoadingState.LOADED) {
+  if (!me.$isLoaded) {
     return <Text>Loading...</Text>;
   }
 

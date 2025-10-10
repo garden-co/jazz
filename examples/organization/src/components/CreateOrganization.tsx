@@ -1,4 +1,4 @@
-import { CoValueLoadingState, Group, Loaded } from "jazz-tools";
+import { Group, Loaded } from "jazz-tools";
 import { useAccount, useCoState } from "jazz-tools/react";
 import { useState } from "react";
 import { useNavigate } from "react-router";
@@ -18,7 +18,7 @@ export function CreateOrganization() {
   const [errors, setErrors] = useState<string[]>([]);
   const navigate = useNavigate();
 
-  if (me.$jazzState !== CoValueLoadingState.LOADED) return;
+  if (!me.$isLoaded) return;
 
   const onSave = (draft: Loaded<typeof DraftOrganization>) => {
     const validation = validateDraftOrganization(draft);
@@ -64,7 +64,7 @@ function CreateOrganizationForm({
 }) {
   const draft = useCoState(DraftOrganization, id);
 
-  if (draft.$jazzState !== CoValueLoadingState.LOADED) return;
+  if (!draft.$isLoaded) return;
 
   const addOrganization = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
