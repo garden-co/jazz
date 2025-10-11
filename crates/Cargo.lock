@@ -438,6 +438,7 @@ dependencies = [
  "ed25519-dalek",
  "lru",
  "lzy",
+ "once_cell",
  "rand",
  "rand_core",
  "salsa20",
