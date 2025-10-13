@@ -142,6 +142,9 @@ importers:
       cojson:
         specifier: workspace:*
         version: link:../packages/cojson
+      cojson-latest:
+        specifier: npm:cojson@0.18.24
+        version: cojson@0.18.24
       vitest:
         specifier: catalog:default
         version: 3.2.4(@types/debug@4.1.12)(@types/node@24.3.0)(@vitest/browser@3.2.4)(@vitest/ui@3.2.4)(happy-dom@17.4.4)(jiti@2.5.1)(jsdom@25.0.1)(lightningcss@1.30.1)(msw@2.10.4(@types/node@24.3.0)(typescript@5.9.2))(terser@5.43.1)(tsx@4.20.3)(yaml@2.8.1)
@@ -10039,6 +10042,62 @@ packages:
 
   code-block-writer@13.0.3:
     resolution: {integrity: sha512-Oofo0pq3IKnsFtuHqSF7TqBfr71aeyZDVJ0HpmqB7FBM2qEigL0iPONSCZSO9pE9dZTAxANe5XHG9Uy0YMv8cg==}
+
+  cojson-core-napi-darwin-arm64@0.18.24:
+    resolution: {integrity: sha512-vBKmxS+g9zTuhCO7TP99DLL8iREwsnk5O5o//DTzyA4Jmh1cnZR1zYdtFdN/8WMtYxbz5P3cNYos71SvNQ/fMg==}
+    engines: {node: '>= 12.22.0 < 13 || >= 14.17.0 < 15 || >= 15.12.0 < 16 || >= 16.0.0'}
+    cpu: [arm64]
+    os: [darwin]
+
+  cojson-core-napi-darwin-x64@0.18.24:
+    resolution: {integrity: sha512-Dnt+c6MroUxUoyDVW9tF8EXnkiEy4pRmcUFtSaFFGdwJChgkwYXFW/tRiZEjxcZnR/OCSPG7XXqKKqvu5PygVw==}
+    engines: {node: '>= 12.22.0 < 13 || >= 14.17.0 < 15 || >= 15.12.0 < 16 || >= 16.0.0'}
+    cpu: [x64]
+    os: [darwin]
+
+  cojson-core-napi-linux-arm-gnueabihf@0.18.24:
+    resolution: {integrity: sha512-b0FArE4syXrTAZzXdGYI9WwSr37+70BCigFHi8Qf/cWoV/E9JvqQXmiHzmkLfZxLhdJo90ZmNo8hvSXJSIpaGQ==}
+    engines: {node: '>= 12.22.0 < 13 || >= 14.17.0 < 15 || >= 15.12.0 < 16 || >= 16.0.0'}
+    cpu: [arm]
+    os: [linux]
+
+  cojson-core-napi-linux-arm64-gnu@0.18.24:
+    resolution: {integrity: sha512-Zf8mTtBizGtDzIcaFjeMZRpKoWit3pCSQkrmPxxw70by1/jvEeYiR8ccdzunelsa+az1bDJCoY6feRaXGbIf4g==}
+    engines: {node: '>= 12.22.0 < 13 || >= 14.17.0 < 15 || >= 15.12.0 < 16 || >= 16.0.0'}
+    cpu: [arm64]
+    os: [linux]
+    libc: [glibc]
+
+  cojson-core-napi-linux-arm64-musl@0.18.24:
+    resolution: {integrity: sha512-mIYfdNxM+6CUiaRIQwrMbaMyeeK0uOA83mHzduNLeRziRMW/qYj6DRC5CVPOH0QuyUP48VN6Mhbsq0Fl9Dy+fA==}
+    engines: {node: '>= 12.22.0 < 13 || >= 14.17.0 < 15 || >= 15.12.0 < 16 || >= 16.0.0'}
+    cpu: [arm64]
+    os: [linux]
+    libc: [musl]
+
+  cojson-core-napi-linux-x64-gnu@0.18.24:
+    resolution: {integrity: sha512-L1tANGahO8uf2l/GutDLIhjdUyQ+8HVPKs484pHVqwYVSn2jFkhTu3fayjdkgbK/f4si9QSQ1/tVFthh1pIz1w==}
+    engines: {node: '>= 12.22.0 < 13 || >= 14.17.0 < 15 || >= 15.12.0 < 16 || >= 16.0.0'}
+    cpu: [x64]
+    os: [linux]
+    libc: [glibc]
+
+  cojson-core-napi-linux-x64-musl@0.18.24:
+    resolution: {integrity: sha512-XHWiOhTAspFfHTwGa8yKPO5gTXbRZY5UHOQojvC+yTeE4QL2EveBpZk+pjy7PSNt7MjLhtGViR15HIJL2MOzMQ==}
+    engines: {node: '>= 12.22.0 < 13 || >= 14.17.0 < 15 || >= 15.12.0 < 16 || >= 16.0.0'}
+    cpu: [x64]
+    os: [linux]
+    libc: [musl]
+
+  cojson-core-napi@0.18.24:
+    resolution: {integrity: sha512-E02HaC8Vd2sYNX3zXGpqO1bnm0J6nZ+PRCAkqK1n8NizBbnS/xV/ru2Ppukg96CqeBijQVQPU/518eAKwR3vgQ==}
+    engines: {node: '>= 12.22.0 < 13 || >= 14.17.0 < 15 || >= 15.12.0 < 16 || >= 16.0.0'}
+
+  cojson-core-wasm@0.18.24:
+    resolution: {integrity: sha512-jYSeSBF8ZM6RUEfGG2Gq2za/hxD9IchXosQ1cvXm/LPVtHQMPEQ7uByXrf90oLxEFDIKIvNRcYOk0yq/sy4+NQ==}
+
+  cojson@0.18.24:
+    resolution: {integrity: sha512-/w6PDzQK6ijKrsoLFwXi3vu0LMfO5MQqKzjbdEEMK83iqqvmvoa9OBU+wxoc4VWaVBpQr9BOv7WEDscH6i7Lrg==}
 
   collect-v8-coverage@1.0.2:
     resolution: {integrity: sha512-lHl4d5/ONEbLlJvaJNtsF/Lz+WvB07u2ycqTYbdrq7UypDXailES4valYb2eWiJFxZlVmpGekfqoxQhzyFdT4Q==}
@@ -26411,6 +26470,51 @@ snapshots:
     optional: true
 
   code-block-writer@13.0.3: {}
+
+  cojson-core-napi-darwin-arm64@0.18.24:
+    optional: true
+
+  cojson-core-napi-darwin-x64@0.18.24:
+    optional: true
+
+  cojson-core-napi-linux-arm-gnueabihf@0.18.24:
+    optional: true
+
+  cojson-core-napi-linux-arm64-gnu@0.18.24:
+    optional: true
+
+  cojson-core-napi-linux-arm64-musl@0.18.24:
+    optional: true
+
+  cojson-core-napi-linux-x64-gnu@0.18.24:
+    optional: true
+
+  cojson-core-napi-linux-x64-musl@0.18.24:
+    optional: true
+
+  cojson-core-napi@0.18.24:
+    optionalDependencies:
+      cojson-core-napi-darwin-arm64: 0.18.24
+      cojson-core-napi-darwin-x64: 0.18.24
+      cojson-core-napi-linux-arm-gnueabihf: 0.18.24
+      cojson-core-napi-linux-arm64-gnu: 0.18.24
+      cojson-core-napi-linux-arm64-musl: 0.18.24
+      cojson-core-napi-linux-x64-gnu: 0.18.24
+      cojson-core-napi-linux-x64-musl: 0.18.24
+
+  cojson-core-wasm@0.18.24: {}
+
+  cojson@0.18.24:
+    dependencies:
+      '@noble/ciphers': 1.3.0
+      '@noble/curves': 1.9.1
+      '@noble/hashes': 1.8.0
+      '@opentelemetry/api': 1.9.0
+      '@scure/base': 1.2.1
+      cojson-core-napi: 0.18.24
+      cojson-core-wasm: 0.18.24
+      neverthrow: 7.2.0
+      unicode-segmenter: 0.12.0
 
   collect-v8-coverage@1.0.2:
     optional: true
