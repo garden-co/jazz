@@ -36,6 +36,9 @@ type InsertionEntry<T extends JsonValue> = {
   predecessors: OpID[];
   successors: OpID[];
   change: InsertionOpPayload<T>;
+  // Chain optimization fields
+  chainNodes?: OpID[]; // All nodes in chain (only set on chain start) - enables fast traversal without lookups
+  chainStart?: OpID; // Points to the start of the chain this node belongs to (for all nodes in chain)
 };
 
 type DeletionEntry = {
@@ -86,18 +89,6 @@ export class RawCoList<
   }[];
   /** @internal */
   knownTransactions: Set<Transaction>;
-  /** @internal - Map from chain start key to chain info */
-  _linearChains: Map<
-    string,
-    {
-      opIDs: OpID[];
-      lastOpID: OpID;
-    }
-  >;
-  /** @internal - Map from OpID key to chain start key */
-  _opIDToChain: Map<string, string>;
-  /** @internal - Set of chain start keys */
-  _chainStarts: Set<string>;
 
   get totalValidTransactions() {
     return this.knownTransactions.size;
@@ -115,9 +106,6 @@ export class RawCoList<
     this.afterStart = [];
     this.beforeEnd = [];
     this.knownTransactions = new Set<Transaction>();
-    this._linearChains = new Map();
-    this._opIDToChain = new Map();
-    this._chainStarts = new Set();
 
     this.processNewTransactions();
   }
@@ -259,9 +247,9 @@ export class RawCoList<
                 continue;
               }
 
-              beforeEntry.predecessors.push(opID);
-              // Update chains incrementally
+              // Update chains BEFORE modifying the graph
               this.updateChainsAfterInsertion(change.before, opID, "pre");
+              beforeEntry.predecessors.push(opID);
             }
           } else {
             if (change.after === "start") {
@@ -273,9 +261,9 @@ export class RawCoList<
                 continue;
               }
 
-              afterEntry.successors.push(opID);
-              // Update chains incrementally
+              // Update chains BEFORE modifying the graph
               this.updateChainsAfterInsertion(change.after, opID, "app");
+              afterEntry.successors.push(opID);
             }
           }
         } else if (change.op === "del") {
@@ -309,9 +297,10 @@ export class RawCoList<
   }
 
   /**
-   * Analizza la struttura del grafo per identificare opportunità di compattazione.
-   * Utile per debugging e ottimizzazione.
-   * Le catene lineari vengono mantenute incrementalmente per performance ottimali.
+   /**
+   * Analyzes the graph structure to identify compaction opportunities.
+   * Useful for debugging and optimization.
+   * Linear chains are maintained incrementally for optimal performance.
    *
    * @category 6. Meta
    */
@@ -323,26 +312,28 @@ export class RawCoList<
     maxChainLength: number;
     compactionRatio: number;
   } {
-    // Count total nodes by iterating through insertions
+    // Count total nodes and find chain starts by iterating through insertions
     let totalNodes = 0;
+    let linearChains = 0;
+    let compactableNodes = 0;
+    let maxChainLength = 0;
+
     for (const sessionID in this.insertions) {
       const sessionEntry = this.insertions[sessionID as SessionID];
       for (const txIdx in sessionEntry) {
         const txEntry = sessionEntry[Number(txIdx)];
         for (const changeIdx in txEntry) {
+          const entry = txEntry[Number(changeIdx)];
           totalNodes++;
+
+          // Check if this is a chain start (has chainNodes array)
+          if (entry && entry.chainNodes && entry.chainNodes.length >= 3) {
+            linearChains++;
+            compactableNodes += entry.chainNodes.length;
+            maxChainLength = Math.max(maxChainLength, entry.chainNodes.length);
+          }
         }
       }
-    }
-
-    // Use pre-computed chains
-    const linearChains = this._linearChains.size;
-    let compactableNodes = 0;
-    let maxChainLength = 0;
-
-    for (const chain of this._linearChains.values()) {
-      compactableNodes += chain.opIDs.length;
-      maxChainLength = Math.max(maxChainLength, chain.opIDs.length);
     }
 
     return {
@@ -428,6 +419,29 @@ export class RawCoList<
     return arr;
   }
 
+  /** @internal - Break a chain at the given OpID (invalidate all chain info) */
+  private breakChainAt(opID: OpID) {
+    const entry = this.getInsertionsEntry(opID);
+    if (!entry) return;
+
+    // Find the chain start
+    const chainStartOpID =
+      entry.chainStart || (entry.chainNodes ? opID : undefined);
+    if (!chainStartOpID) return;
+
+    const chainStartEntry = this.getInsertionsEntry(chainStartOpID);
+    if (!chainStartEntry || !chainStartEntry.chainNodes) return;
+
+    // Clear chain info from all nodes in the chain
+    for (const nodeOpID of chainStartEntry.chainNodes) {
+      const nodeEntry = this.getInsertionsEntry(nodeOpID);
+      if (nodeEntry) {
+        nodeEntry.chainNodes = undefined;
+        nodeEntry.chainStart = undefined;
+      }
+    }
+  }
+
   /** @internal - Update chains incrementally when a new insertion happens */
   private updateChainsAfterInsertion(
     adjacentOpID: OpID,
@@ -441,113 +455,50 @@ export class RawCoList<
 
     // Check if we can form/extend a chain
     // IMPORTANT: Only form chains for append operations to avoid issues with mixed prepend/append
+    // NOTE: This is called BEFORE the new node is added to successors/predecessors
     const canFormChain =
       insertionType === "app"
-        ? // For append: adjacent should have only this as successor, new should have no other predecessors
-          // AND adjacent should not be a predecessor of other nodes (which would make topology complex)
-          adjacentEntry.successors.length === 1 &&
-          newEntry.predecessors.length === 0 && // Stricter: new node must have NO predecessors
-          newEntry.successors.length === 0 // And NO successors initially
+        ? // For append: adjacent should have NO successors yet (we're adding the first/only one)
+          // new node should have no predecessors or successors
+          adjacentEntry.successors.length === 0 &&
+          newEntry.predecessors.length === 0 &&
+          newEntry.successors.length === 0
         : // For prepend: DISABLED - don't create chains with prepend to avoid topology issues
           false;
 
     if (!canFormChain) {
-      // Can't form a chain, remove any existing chains that are broken
-      this.removeFromChain(adjacentOpID);
+      // Can't form a chain, break any existing chain at adjacentOpID
+      this.breakChainAt(adjacentOpID);
       return;
     }
 
-    const adjacentKey = opIDKey(adjacentOpID);
-    const newKey = opIDKey(newOpID);
-
     if (insertionType === "app") {
       // We're appending newOpID after adjacentOpID
-      const existingChainKey = this._opIDToChain.get(adjacentKey);
 
-      if (existingChainKey) {
-        // Adjacent is in a chain, extend it
-        const chain = this._linearChains.get(existingChainKey);
-        if (chain) {
-          chain.opIDs.push(newOpID);
-          chain.lastOpID = newOpID;
-          this._opIDToChain.set(newKey, existingChainKey);
+      if (adjacentEntry.chainStart) {
+        // Adjacent is part of an existing chain, extend it
+        const chainStartEntry = this.getInsertionsEntry(
+          adjacentEntry.chainStart,
+        );
+        if (chainStartEntry && chainStartEntry.chainNodes) {
+          // Extend the chain array
+          chainStartEntry.chainNodes.push(newOpID);
+
+          // Mark new node as part of this chain
+          newEntry.chainStart = adjacentEntry.chainStart;
         }
+      } else if (adjacentEntry.chainNodes) {
+        // Adjacent is itself a chain start, extend it
+        adjacentEntry.chainNodes.push(newOpID);
+        newEntry.chainStart = adjacentOpID;
       } else {
-        // Start a new chain - use adjacent key as the chain key
-        const chainKey = adjacentKey;
-        this._linearChains.set(chainKey, {
-          opIDs: [adjacentOpID, newOpID],
-          lastOpID: newOpID,
-        });
-        this._opIDToChain.set(adjacentKey, chainKey);
-        this._opIDToChain.set(newKey, chainKey);
-        this._chainStarts.add(chainKey);
-      }
-    } else {
-      // insertionType === "pre"
-      // We're prepending newOpID before adjacentOpID
-      const existingChainKey = this._opIDToChain.get(adjacentKey);
-
-      if (existingChainKey) {
-        // Adjacent is in a chain
-        const chain = this._linearChains.get(existingChainKey);
-        if (chain) {
-          // If adjacent is the first node of the chain, we need to create a new chain
-          if (opIDKey(chain.opIDs[0]!) === adjacentKey) {
-            // Create new chain with newOpID as first
-            const newChainKey = newKey;
-            this._linearChains.set(newChainKey, {
-              opIDs: [newOpID, ...chain.opIDs],
-              lastOpID: chain.lastOpID,
-            });
-
-            // Update all mappings
-            for (const opID of chain.opIDs) {
-              this._opIDToChain.set(opIDKey(opID), newChainKey);
-            }
-            this._opIDToChain.set(newKey, newChainKey);
-
-            // Update chain starts
-            this._chainStarts.delete(existingChainKey);
-            this._chainStarts.add(newChainKey);
-
-            // Remove old chain
-            this._linearChains.delete(existingChainKey);
-          } else {
-            // Adjacent is not the first, chain is broken
-            this.removeFromChain(adjacentOpID);
-          }
-        }
-      } else {
-        // Start a new chain (prepend order) - use new key as the chain key
-        const chainKey = newKey;
-        this._linearChains.set(chainKey, {
-          opIDs: [newOpID, adjacentOpID],
-          lastOpID: adjacentOpID,
-        });
-        this._opIDToChain.set(newKey, chainKey);
-        this._opIDToChain.set(adjacentKey, chainKey);
-        this._chainStarts.add(chainKey);
+        // Start a new chain: [adjacent, new]
+        adjacentEntry.chainNodes = [adjacentOpID, newOpID];
+        adjacentEntry.chainStart = adjacentOpID;
+        newEntry.chainStart = adjacentOpID;
       }
     }
-  }
-
-  /** @internal - Remove an OpID from its chain */
-  private removeFromChain(opID: OpID) {
-    const key = opIDKey(opID);
-    const chainKey = this._opIDToChain.get(key);
-
-    if (chainKey) {
-      const chain = this._linearChains.get(chainKey);
-      if (chain) {
-        // Remove all OpIDs from the chain
-        for (const chainOpID of chain.opIDs) {
-          this._opIDToChain.delete(opIDKey(chainOpID));
-        }
-        this._linearChains.delete(chainKey);
-        this._chainStarts.delete(chainKey);
-      }
-    }
+    // For prepend: do nothing (disabled)
   }
 
   /** @internal */
@@ -560,8 +511,7 @@ export class RawCoList<
     }[],
   ) {
     const todo = [opID]; // a stack with the next item to do at the end
-    const predecessorsVisited = new Set<string>();
-    const processedChains = new Set<string>();
+    const predecessorsVisited = new Set<OpID>();
 
     while (todo.length > 0) {
       const currentOpID = todo[todo.length - 1]!;
@@ -572,29 +522,23 @@ export class RawCoList<
         throw new Error("Missing op " + opIDKey(currentOpID));
       }
 
-      const currentKey = opIDKey(currentOpID);
       const shouldTraversePredecessors =
-        entry.predecessors.length > 0 && !predecessorsVisited.has(currentKey);
+        entry.predecessors.length > 0 && !predecessorsVisited.has(currentOpID);
 
       // We navigate the predecessors before processing the current opID in the list
       if (shouldTraversePredecessors) {
         for (const predecessor of entry.predecessors) {
           todo.push(predecessor);
         }
-        predecessorsVisited.add(currentKey);
+        predecessorsVisited.add(currentOpID);
       } else {
         // Remove the current opID from the todo stack to consider it processed.
         todo.pop();
 
-        // Check if this opID is the start of a pre-computed chain (fast O(1) lookup)
-        const isChainStart = this._chainStarts.has(currentKey);
-
-        if (isChainStart && !processedChains.has(currentKey)) {
-          // Process entire chain at once
-          const chain = this._linearChains.get(currentKey)!;
-          processedChains.add(currentKey);
-
-          for (const chainOpID of chain.opIDs) {
+        // Check if this is the start of a chain (has chainNodes array)
+        if (entry.chainNodes && entry.chainNodes.length >= 3) {
+          // Process entire chain at once using the pre-computed array (fast path!)
+          for (const chainOpID of entry.chainNodes) {
             const chainEntry = this.getInsertionsEntry(chainOpID);
             if (!chainEntry) continue;
 
@@ -609,20 +553,17 @@ export class RawCoList<
           }
 
           // Add successors of the last node in the chain
-          const lastEntry = this.getInsertionsEntry(chain.lastOpID);
-          if (lastEntry) {
-            for (const successor of lastEntry.successors) {
-              todo.push(successor);
+          const lastOpID = entry.chainNodes[entry.chainNodes.length - 1];
+          if (lastOpID) {
+            const lastEntry = this.getInsertionsEntry(lastOpID);
+            if (lastEntry) {
+              for (const successor of lastEntry.successors) {
+                todo.push(successor);
+              }
             }
           }
         } else {
-          // Check if this node is part of a chain that was already processed
-          const chainKey = this._opIDToChain.get(currentKey);
-          if (chainKey && processedChains.has(chainKey)) {
-            // Skip, already processed as part of a chain
-            continue;
-          }
-          // Single node (not in a chain, or chain already processed)
+          // Single node (not a chain start, or chain too short)
           const deleted = this.isDeleted(currentOpID);
 
           if (!deleted) {
@@ -901,9 +842,6 @@ export class RawCoList<
     this.lastValidTransaction = listAfter.lastValidTransaction;
     this.knownTransactions = listAfter.knownTransactions;
     this.deletionsByInsertion = listAfter.deletionsByInsertion;
-    this._linearChains = listAfter._linearChains;
-    this._opIDToChain = listAfter._opIDToChain;
-    this._chainStarts = listAfter._chainStarts;
     this._cachedEntries = undefined;
   }
 }
