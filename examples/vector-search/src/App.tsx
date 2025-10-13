@@ -27,7 +27,7 @@ function App() {
   const { queryEmbedding, isCreatingEmbedding, createQueryEmbedding } =
     useCreateEmbedding({ createEmbedding });
 
-  // 2) Load a list of elements containing embeddings
+  // 2) Load a CoList and sort the results by similarity to the query embedding
   const journalEntries = useCoStateWithSelector(
     JournalEntryList,
     me?.root.journalEntries?.$jazz.id,
@@ -46,6 +46,16 @@ function App() {
           }))
           .sort((a, b) => b.similarity - a.similarity)
           .slice(0, 5);
+      },
+      equalityFn(a, b) {
+        // Re-render only when the results change
+        if (!a || !b || a.length !== b.length) return false;
+
+        return (
+          a.every(
+            (entry, ix) => entry?.value.$jazz.id === b[ix].value?.$jazz.id,
+          ) ?? false
+        );
       },
     },
   );
