@@ -1,4 +1,6 @@
 import { docNavigationItems } from "../../content/docs/docNavigationItems.js";
+// Can't import from framework.ts because node doesn't support enum types
+export const FRAMEWORKS = ["react", "react-native", "react-native-expo", "svelte", "vanilla"];
 
 // Recursively collect all pages from an item and its nested items
 function collectPages(item) {

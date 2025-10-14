@@ -1,12 +1,118 @@
 // llms-full.mjs
 import { promises as fs } from "fs";
 import path from "path";
-import { DOC_SECTIONS } from "./utils/config.mjs";
+import { DOC_SECTIONS, FRAMEWORKS } from "./utils/config.mjs";
 import { writeDocsFile } from "./utils/index.mjs";
 import { mdxToMd } from "./utils/mdx-processor.mjs";
 
 const exclude = [/\/upgrade\//];
 const CWD = process.cwd();
+
+async function walkDocsDirectory(dir, basePath = "") {
+  const results = [];
+  const entries = await fs.readdir(dir, { withFileTypes: true });
+
+  for (const entry of entries) {
+    const fullPath = path.join(dir, entry.name);
+    const relativePath = path.join(basePath, entry.name);
+
+    // Skip upgrade guides and other excluded paths
+    if (exclude.some((pattern) => pattern.test(fullPath))) continue;
+
+    if (entry.isDirectory()) {
+      results.push(...(await walkDocsDirectory(fullPath, relativePath)));
+    } else if (entry.isFile() && entry.name.endsWith(".mdx")) {
+      results.push({ fullPath, relativePath });
+    }
+  }
+
+  return results;
+}
+
+async function generateMarkdownFiles() {
+  const docsDir = path.join(CWD, "content/docs");
+  const mdxFiles = await walkDocsDirectory(docsDir);
+
+  console.log(`${mdxFiles.length} source files`);
+
+  let indexContent = null;
+
+  for (const { fullPath, relativePath } of mdxFiles) {
+    try {
+      const filename = path.basename(relativePath, ".mdx");
+      const dirPath = path.dirname(relativePath);
+      const isFrameworkSpecific = FRAMEWORKS.includes(filename);
+
+      if (isFrameworkSpecific) {
+        // Framework-specific file: project-setup/providers/react.mdx
+        // Output: react/project-setup/providers.md
+        const framework = filename;
+        const content = await mdxToMd(fullPath);
+        
+        const outputPath = path.join(
+          CWD,
+          "public/docs",
+          framework,
+          dirPath + ".md"
+        );
+
+        await fs.mkdir(path.dirname(outputPath), { recursive: true });
+        await fs.writeFile(outputPath, content);
+        console.log(`Generated: ${path.relative(CWD, outputPath)}`);
+      } else {
+        // Generic file: troubleshooting.mdx
+        // Output: troubleshooting.md (generic)
+        // AND: {framework}/troubleshooting.md (for each framework for fallback)
+        // This is necessary in order to serve static files
+        // If I don't do this redundant file generation, I need to do routing
+        // Which results in extremely long compilation times because we're
+        // adding hundreds of extra routes
+        const content = await mdxToMd(fullPath);
+        
+        // Handle index separately
+        if (relativePath === "index.mdx") {
+          indexContent = content;
+        }
+
+        const genericPath = path.join(
+          CWD,
+          "public/docs",
+          relativePath.replace(/\.mdx$/, ".md")
+        );
+        await fs.mkdir(path.dirname(genericPath), { recursive: true });
+        await fs.writeFile(genericPath, content);
+
+        for (const framework of FRAMEWORKS) {
+          const frameworkPath = path.join(
+            CWD,
+            "public/docs",
+            framework,
+            relativePath.replace(/\.mdx$/, ".md")
+          );
+
+          await fs.mkdir(path.dirname(frameworkPath), { recursive: true });
+          await fs.writeFile(frameworkPath, content);
+        }
+      }
+    } catch (error) {
+      console.warn(`Error processing ${relativePath}:`, error.message);
+    }
+  }
+
+  // Handle the intro page
+  if (indexContent) {
+    for (const framework of FRAMEWORKS) {
+      const frameworkIndexPath = path.join(
+        CWD,
+        "public/docs",
+        `${framework}.md`
+      );
+
+      await fs.writeFile(frameworkIndexPath, indexContent);
+      console.log(`Generated: ${path.relative(CWD, frameworkIndexPath)}`);
+    }
+  }
+}
 
 async function readMdxContent(url) {
   try {
@@ -33,6 +139,7 @@ async function readMdxContent(url) {
         const contents = await Promise.all(
           mdxFiles.map((file) => mdxToMd(path.join(fullPath, file)))
         );
+        // Write out this content to a file.
         return contents.join("\n\n---\n\n");
       }
     } catch (err) {
@@ -87,6 +194,10 @@ async function appendMusicExample(output) {
 }
 
 async function generateDocs() {
+  // Generate the directory structure of markdown files
+  await generateMarkdownFiles();
+
+  // Generate the combined LLM documentation files
   const output = ["# Jazz\n"];
 
   for (const section of DOC_SECTIONS) {
