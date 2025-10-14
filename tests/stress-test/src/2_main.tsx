@@ -15,6 +15,7 @@ import { ProjectScreen } from "./ProjectScreen";
 function JazzAndAuth({ children }: { children: React.ReactNode }) {
   return (
     <JazzReactProvider
+      authSecretStorageKey="stress-test"
       sync={{
         peer: `ws://localhost:4200`,
       }}

@@ -44,6 +44,38 @@ type DeletionEntry = {
   change: DeletionOpPayload;
 };
 
+/** @internal */
+type TodoNode = {
+  value: OpID;
+  predecessorsVisited: boolean;
+  next: TodoNode | null;
+};
+
+/** @internal */
+class CoListTraversalLinkedList {
+  private garbage: TodoNode | null = null;
+
+  /** Get an object from the pool or create a new one, initialized with the provided values */
+  newNode(value: OpID, next: TodoNode | null = null): TodoNode {
+    if (this.garbage) {
+      const item = this.garbage;
+      this.garbage = this.garbage.next;
+      this.garbage = null;
+      item.value = value;
+      item.predecessorsVisited = false;
+      item.next = next;
+      return item;
+    }
+    return { value, predecessorsVisited: false, next };
+  }
+
+  /** Return an object to the pool for reuse */
+  recycleNode(item: TodoNode): void {
+    item.next = this.garbage;
+    this.garbage = item;
+  }
+}
+
 export class RawCoList<
   Item extends JsonValue = JsonValue,
   Meta extends JsonObject | null = null,
@@ -92,6 +124,8 @@ export class RawCoList<
   }
 
   lastValidTransaction: number | undefined;
+
+  #insertionsLookup: Map<OpID, InsertionEntry<Item>> = new Map();
 
   /** @internal */
   constructor(core: AvailableCoValueCore) {
@@ -144,6 +178,7 @@ export class RawCoList<
     }
 
     txEntry[opID.changeIdx] = value;
+    this.#insertionsLookup.set(opID, value);
     return true;
   }
 
@@ -202,7 +237,8 @@ export class RawCoList<
 
     let lastValidTransaction: number | undefined = undefined;
     let oldestValidTransaction: number | undefined = undefined;
-    this._cachedEntries = undefined;
+    this.#cachedArray = undefined;
+    this.#cachedOpIDs = undefined;
 
     for (const { txID, changes, madeAt } of transactions) {
       lastValidTransaction = Math.max(lastValidTransaction ?? 0, madeAt);
@@ -309,12 +345,11 @@ export class RawCoList<
    * @category 1. Reading
    */
   get(idx: number): Item | undefined {
-    const entry = this.entries()[idx];
-    if (!entry) {
-      return undefined;
-    }
-    return entry.value;
+    return this.asArray()[idx];
   }
+
+  #cachedArray: Item[] | undefined;
+  #cachedOpIDs: OpID[] | undefined;
 
   /**
    * Returns the current items in the CoList as an array.
@@ -322,90 +357,82 @@ export class RawCoList<
    * @category 1. Reading
    **/
   asArray(): Item[] {
-    return this.entries().map((entry) => entry.value);
-  }
-
-  /** @internal */
-  entries(): {
-    value: Item;
-    madeAt: number;
-    opID: OpID;
-  }[] {
-    if (this._cachedEntries) {
-      return this._cachedEntries;
+    if (this.#cachedArray) {
+      return this.#cachedArray;
     }
-    const arr = this.entriesUncached();
-    this._cachedEntries = arr;
-    return arr;
+
+    this.buildEntries();
+
+    return this.#cachedArray!;
+  }
+
+  getOpIDs(): OpID[] {
+    if (this.#cachedOpIDs) {
+      return this.#cachedOpIDs;
+    }
+    this.buildEntries();
+    return this.#cachedOpIDs!;
   }
 
   /** @internal */
-  entriesUncached(): {
-    value: Item;
-    madeAt: number;
-    opID: OpID;
-  }[] {
-    const arr: {
-      value: Item;
-      madeAt: number;
-      opID: OpID;
-    }[] = [];
+  buildEntries() {
+    const values: Item[] = [];
+    const opIDs: OpID[] = [];
+
     for (const opID of this.afterStart) {
-      this.fillArrayFromOpID(opID, arr);
+      this.fillArrayFromOpID(opID, values, opIDs);
     }
     for (const opID of this.beforeEnd) {
-      this.fillArrayFromOpID(opID, arr);
+      this.fillArrayFromOpID(opID, values, opIDs);
     }
-    return arr;
+
+    this.#cachedArray = values;
+    this.#cachedOpIDs = opIDs;
   }
 
   /** @internal */
-  private fillArrayFromOpID(
-    opID: OpID,
-    arr: {
-      value: Item;
-      madeAt: number;
-      opID: OpID;
-    }[],
-  ) {
-    const todo = [opID]; // a stack with the next item to do at the end
-    const predecessorsVisited = new Set<OpID>();
+  private fillArrayFromOpID(opID: OpID, values: Item[], opIDs: OpID[]) {
+    const todoList = new CoListTraversalLinkedList();
+    let head: TodoNode | null = todoList.newNode(opID);
 
-    while (todo.length > 0) {
-      const currentOpID = todo[todo.length - 1]!;
+    while (head !== null) {
+      const todo = head;
+      const currentOpID = todo.value;
 
-      const entry = this.getInsertionsEntry(currentOpID);
+      const entry =
+        this.#insertionsLookup.get(currentOpID) ??
+        this.getInsertionsEntry(currentOpID);
 
       if (!entry) {
         throw new Error("Missing op " + currentOpID);
       }
 
+      const predecessorsVisited = todo.predecessorsVisited;
       const shouldTraversePredecessors =
-        entry.predecessors.length > 0 && !predecessorsVisited.has(currentOpID);
+        entry.predecessors.length > 0 && !predecessorsVisited;
 
       // We navigate the predecessors before processing the current opID in the list
       if (shouldTraversePredecessors) {
+        todo.predecessorsVisited = true;
+
         for (const predecessor of entry.predecessors) {
-          todo.push(predecessor);
+          head = todoList.newNode(predecessor, head);
         }
-        predecessorsVisited.add(currentOpID);
       } else {
         // Remove the current opID from the todo stack to consider it processed.
-        todo.pop();
+        todoList.recycleNode(head);
+        head = head.next;
 
         const deleted = this.isDeleted(currentOpID);
 
         if (!deleted) {
-          arr.push({
-            value: entry.change.value,
-            madeAt: entry.madeAt,
-            opID: currentOpID,
-          });
+          values.push(entry.change.value);
+          opIDs.push(currentOpID);
         }
 
         // traverse successors in reverse for correct insertion behavior
         for (const successor of entry.successors) {
-          todo.push(successor);
+          head = todoList.newNode(successor, head);
         }
       }
     }
@@ -418,70 +445,6 @@ export class RawCoList<
    */
   toJSON(): Item[] {
     return this.asArray();
-  }
-
-  /** @category 5. Edit history */
-  editAt(idx: number):
-    | {
-        by: RawAccountID | AgentID;
-        tx: TransactionID;
-        at: Date;
-        value: Item;
-      }
-    | undefined {
-    const entry = this.entries()[idx];
-    if (!entry) {
-      return undefined;
-    }
-    const madeAt = new Date(entry.madeAt);
-    const by = accountOrAgentIDfromSessionID(entry.opID.sessionID);
-    const value = entry.value;
-    return {
-      by,
-      tx: {
-        sessionID: entry.opID.sessionID,
-        txIndex: entry.opID.txIndex,
-      },
-      at: madeAt,
-      value,
-    };
-  }
-
-  /** @category 5. Edit history */
-  deletionEdits(): {
-    by: RawAccountID | AgentID;
-    tx: TransactionID;
-    at: Date;
-    // TODO: add indices that are now before and after the deleted item
-  }[] {
-    const edits: {
-      by: RawAccountID | AgentID;
-      tx: TransactionID;
-      at: Date;
-    }[] = [];
-
-    for (const sessionID in this.deletionsByInsertion) {
-      const sessionEntry = this.deletionsByInsertion[sessionID as SessionID];
-      for (const txIdx in sessionEntry) {
-        const txEntry = sessionEntry[Number(txIdx)];
-        for (const changeIdx in txEntry) {
-          const changeEntry = txEntry[Number(changeIdx)];
-          for (const deletion of changeEntry || []) {
-            const madeAt = new Date(deletion.madeAt);
-            const by = accountOrAgentIDfromSessionID(
-              deletion.deletionID.sessionID,
-            );
-            edits.push({
-              by,
-              tx: deletion.deletionID,
-              at: madeAt,
-            });
-          }
-        }
-      }
-    }
-
-    return edits;
   }
 
   /** @category 3. Subscription */
@@ -521,7 +484,7 @@ export class RawCoList<
     after?: number,
     privacy: "private" | "trusting" = "private",
   ) {
-    const entries = this.entries();
+    const entries = this.getOpIDs();
     after =
       after === undefined
         ? entries.length > 0
@@ -534,7 +497,7 @@ export class RawCoList<
       if (!entryBefore) {
         throw new Error("Invalid index " + after);
       }
-      opIDBefore = entryBefore.opID;
+      opIDBefore = entryBefore;
     } else {
       if (after !== 0) {
         throw new Error("Invalid index " + after);
@@ -572,13 +535,13 @@ export class RawCoList<
     before?: number,
     privacy: "private" | "trusting" = "private",
   ) {
-    const entries = this.entries();
+    const entries = this.getOpIDs();
     before = before === undefined ? 0 : before;
     let opIDAfter;
     if (entries.length > 0) {
       const entryAfter = entries[before];
       if (entryAfter) {
-        opIDAfter = entryAfter.opID;
+        opIDAfter = entryAfter;
       } else {
         if (before !== entries.length) {
           throw new Error("Invalid index " + before);
@@ -614,7 +577,7 @@ export class RawCoList<
    * @category 2. Editing
    **/
   delete(at: number, privacy: "private" | "trusting" = "private") {
-    const entries = this.entries();
+    const entries = this.getOpIDs();
     const entry = entries[at];
     if (!entry) {
       throw new Error("Invalid index " + at);
@@ -623,7 +586,7 @@ export class RawCoList<
       [
         {
           op: "del",
-          insertion: entry.opID,
+          insertion: entry,
         },
       ],
       privacy,
@@ -637,7 +600,7 @@ export class RawCoList<
     newItem: Item,
     privacy: "private" | "trusting" = "private",
   ) {
-    const entries = this.entries();
+    const entries = this.getOpIDs();
     const entry = entries[at];
     if (!entry) {
       throw new Error("Invalid index " + at);
@@ -648,11 +611,11 @@ export class RawCoList<
         {
           op: "app",
           value: isCoValue(newItem) ? newItem.id : newItem,
-          after: entry.opID,
+          after: entry,
         },
         {
           op: "del",
-          insertion: entry.opID,
+          insertion: entry,
         },
       ],
       privacy,

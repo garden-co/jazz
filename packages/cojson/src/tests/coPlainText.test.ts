@@ -332,17 +332,17 @@ test("chunks transactions when when the chars are longer than MAX_RECOMMENDED_TX
   const content = expectPlainText(coValue.getCurrentContent());
 
   content.insertAfter(
-    content.entries().length,
+    content.asArray().length,
     "I'm writing you to test that coplaintext",
     "trusting",
   );
   content.insertAfter(
-    content.entries().length,
+    content.asArray().length,
     " chunks transactions when when the chars are longer than MAX_RECOMMENDED_TX_SIZE.",
     "trusting",
   );
   content.insertAfter(
-    content.entries().length,
+    content.asArray().length,
     "This is required because when a user paste 1Mb of text, we can split it in multiple websocket messages.",
     "trusting",
   );

@@ -526,7 +526,7 @@ export class SubscriptionScope<D extends CoValue> {
 
         if (descriptor && isRefEncoded(descriptor)) {
           list.$jazz.raw.processNewTransactions();
-          const entries = list.$jazz.raw.entries();
+          const entries = list.$jazz.raw.asArray();
           const keys =
             "$each" in depth ? Object.keys(entries) : Object.keys(depth);
 
@@ -654,14 +654,14 @@ export class SubscriptionScope<D extends CoValue> {
       return undefined;
     }
 
-    const entries = list.$jazz.raw.entries();
+    const entries = list.$jazz.raw.asArray();
     const entry = entries[Number(key)];
 
     if (!entry) {
       return undefined;
     }
 
-    const id = entry.value as string | undefined;
+    const id = entry as string | undefined;
 
     if (id) {
       this.loadChildNode(id, depth, descriptor, key);

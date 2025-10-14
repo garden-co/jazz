@@ -543,7 +543,7 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
       "private",
     );
 
-    return this.raw.entries().length;
+    return this.raw.asArray().length;
   }
 
   /**
@@ -561,7 +561,7 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
       this.raw.prepend(item);
     }
 
-    return this.raw.entries().length;
+    return this.raw.asArray().length;
   }
 
   /**
@@ -850,7 +850,7 @@ export class CoListJazzApi<L extends CoList> extends CoValueJazzApi<L> {
     return makeRefs<number>(
       this.coList,
       (idx) => this.raw.get(idx) as unknown as ID<CoValue>,
-      () => Array.from({ length: this.raw.entries().length }, (_, idx) => idx),
+      () => Array.from({ length: this.raw.asArray().length }, (_, idx) => idx),
       this.loadedAs,
       (_idx) => this.schema[ItemsSym] as RefEncoded<CoValue>,
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -942,7 +942,7 @@ const CoListProxyHandler: ProxyHandler<CoList> = {
           : accessChildByKey(target, rawValue as string, key);
       }
     } else if (key === "length") {
-      return target.$jazz.raw.entries().length;
+      return target.$jazz.raw.asArray().length;
     } else {
       return Reflect.get(target, key, receiver);
     }
@@ -977,7 +977,7 @@ const CoListProxyHandler: ProxyHandler<CoList> = {
   },
   has(target, key) {
     if (typeof key === "string" && !isNaN(+key)) {
-      return Number(key) < target.$jazz.raw.entries().length;
+      return Number(key) < target.$jazz.raw.asArray().length;
     } else {
       return Reflect.has(target, key);
     }
@@ -985,7 +985,7 @@ const CoListProxyHandler: ProxyHandler<CoList> = {
   ownKeys(target) {
     const keys = Reflect.ownKeys(target);
     // Add numeric indices for all entries in the list
-    const indexKeys = target.$jazz.raw.entries().map((_entry, i) => String(i));
+    const indexKeys = target.$jazz.raw.asArray().map((_entry, i) => String(i));
     keys.push(...indexKeys);
     return keys;
   },
@@ -1002,7 +1002,7 @@ const CoListProxyHandler: ProxyHandler<CoList> = {
       return Reflect.getOwnPropertyDescriptor(target, key);
     } else if (typeof key === "string" && !isNaN(+key)) {
       const index = Number(key);
-      if (index >= 0 && index < target.$jazz.raw.entries().length) {
+      if (index >= 0 && index < target.$jazz.raw.asArray().length) {
         return {
           enumerable: true,
           configurable: true,

@@ -50,10 +50,7 @@ export class RawCoPlainText<
   /** @category 6. Meta */
   type = "coplaintext" as const;
 
-  _cachedMapping: WeakMap<
-    NonNullable<typeof this._cachedEntries>,
-    PlaintextIdxMapping
-  >;
+  _cachedMapping: WeakMap<NonNullable<OpID[]>, PlaintextIdxMapping>;
 
   constructor(core: AvailableCoValueCore) {
     super(core);
@@ -61,7 +58,7 @@ export class RawCoPlainText<
   }
 
   get mapping() {
-    const entries = this.entries();
+    const entries = this.getOpIDs();
     let mapping = this._cachedMapping.get(entries);
     if (mapping) {
       return mapping;
@@ -79,10 +76,10 @@ export class RawCoPlainText<
     for (const entry of entries) {
       const idxAfter = idxBefore + 1;
 
-      mapping.opIDafterIdx[idxBefore] = entry.opID;
-      mapping.opIDbeforeIdx[idxAfter] = entry.opID;
-      mapping.idxAfterOpID[stringifyOpID(entry.opID)] = idxAfter;
-      mapping.idxBeforeOpID[stringifyOpID(entry.opID)] = idxBefore;
+      mapping.opIDafterIdx[idxBefore] = entry;
+      mapping.opIDbeforeIdx[idxAfter] = entry;
+      mapping.idxAfterOpID[stringifyOpID(entry)] = idxAfter;
+      mapping.idxBeforeOpID[stringifyOpID(entry)] = idxBefore;
 
       idxBefore = idxAfter;
     }
@@ -92,9 +89,7 @@ export class RawCoPlainText<
   }
 
   toString() {
-    return this.entries()
-      .map((entry) => entry.value)
-      .join("");
+    return this.asArray().join("");
   }
 
   /**
@@ -157,7 +152,7 @@ export class RawCoPlainText<
   ) {
     const graphemes = Array.from(splitGraphemes(text));
 
-    if (idx >= this.entries().length) {
+    if (idx >= this.asArray().length) {
       this.appendChars(graphemes, idx - 1, privacy);
     } else {
       this.appendChars(graphemes, idx, privacy);
