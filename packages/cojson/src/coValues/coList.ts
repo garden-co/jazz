@@ -39,6 +39,7 @@ type InsertionEntry<T extends JsonValue> = {
   // Chain optimization fields
   chainNodes?: OpID[]; // All nodes in chain (only set on chain start) - enables fast traversal without lookups
   chainStart?: OpID; // Points to the start of the chain this node belongs to (for all nodes in chain)
+  chainCachedValues?: { value: T; madeAt: number; opID: OpID }[]; // Cached materialized values (only on chain start) - invalidated on delete
 };
 
 type DeletionEntry = {
@@ -270,6 +271,7 @@ export class RawCoList<
             deletionID: opID,
             change,
           });
+          this.invalidateChainsAfterDeletion(change.insertion);
         } else {
           throw new Error(
             "Unknown list operation " + (change as { op: unknown }).op,
@@ -286,6 +288,18 @@ export class RawCoList<
       this.rebuildFromCore();
     } else {
       this.lastValidTransaction = lastValidTransaction;
+    }
+  }
+
+  private invalidateChainsAfterDeletion(opID: OpID) {
+    const entry = this.getInsertionsEntry(opID);
+    if (entry?.chainStart) {
+      const chainStartEntry = this.getInsertionsEntry(entry.chainStart);
+      if (chainStartEntry) {
+        chainStartEntry.chainCachedValues = undefined;
+      }
+    } else if (entry?.chainNodes) {
+      entry.chainCachedValues = undefined;
     }
   }
 
@@ -438,6 +452,7 @@ export class RawCoList<
       if (nodeEntry) {
         nodeEntry.chainNodes = undefined;
         nodeEntry.chainStart = undefined;
+        nodeEntry.chainCachedValues = undefined; // Clear cache
       }
     }
 
@@ -452,14 +467,29 @@ export class RawCoList<
         this.getInsertionsEntry(continueChainStart);
       if (!continueChainStartEntry) return;
 
+      continueChainStartEntry.chainCachedValues = [];
+
       continueChainStartEntry.chainNodes = secondPart;
+      continueChainStartEntry.chainCachedValues.push({
+        value: continueChainStartEntry.change.value,
+        madeAt: continueChainStartEntry.madeAt,
+        opID: continueChainStart,
+      });
       for (const nodeOpID of secondPart.slice(1, secondPart.length)) {
         const nodeEntry = this.getInsertionsEntry(nodeOpID);
         if (nodeEntry) {
           nodeEntry.chainNodes = undefined;
           nodeEntry.chainStart = continueChainStart;
+          if (!this.isDeleted(nodeOpID)) {
+            continueChainStartEntry.chainCachedValues.push({
+              value: nodeEntry.change.value,
+              madeAt: nodeEntry.madeAt,
+              opID: nodeOpID,
+            });
+          }
         }
       }
+
       continueChainStartEntry.chainStart = continueChainStart;
     }
 
@@ -469,14 +499,30 @@ export class RawCoList<
       const firstPartStartEntry = this.getInsertionsEntry(firstPartStart);
       if (!firstPartStartEntry) return;
 
+      firstPartStartEntry.chainCachedValues = [];
+
       firstPartStartEntry.chainNodes = firstPart;
+      firstPartStartEntry.chainCachedValues.push({
+        value: firstPartStartEntry.change.value,
+        madeAt: firstPartStartEntry.madeAt,
+        opID: firstPartStart,
+      });
       for (const nodeOpID of firstPart.slice(1, firstPart.length)) {
         const nodeEntry = this.getInsertionsEntry(nodeOpID);
         if (nodeEntry) {
           nodeEntry.chainNodes = undefined;
           nodeEntry.chainStart = firstPartStart;
+          if (!this.isDeleted(nodeOpID)) {
+            firstPartStartEntry.chainCachedValues?.push({
+              value: nodeEntry.change.value,
+              madeAt: nodeEntry.madeAt,
+              opID: nodeOpID,
+            });
+          }
         }
       }
+
+      firstPartStartEntry.chainStart = firstPartStart;
     }
   }
 
@@ -524,16 +570,50 @@ export class RawCoList<
 
           // Mark new node as part of this chain
           newEntry.chainStart = adjacentEntry.chainStart;
+
+          // Extend cache if it exists
+          if (chainStartEntry.chainCachedValues && !this.isDeleted(newOpID)) {
+            chainStartEntry.chainCachedValues.push({
+              value: newEntry.change.value,
+              madeAt: newEntry.madeAt,
+              opID: newOpID,
+            });
+          }
         }
       } else if (adjacentEntry.chainNodes) {
         // Adjacent is itself a chain start, extend it
         adjacentEntry.chainNodes.push(newOpID);
         newEntry.chainStart = adjacentOpID;
+
+        // Extend cache if it exists
+        if (adjacentEntry.chainCachedValues && !this.isDeleted(newOpID)) {
+          adjacentEntry.chainCachedValues.push({
+            value: newEntry.change.value,
+            madeAt: newEntry.madeAt,
+            opID: newOpID,
+          });
+        }
       } else {
         // Start a new chain: [adjacent, new]
         adjacentEntry.chainNodes = [adjacentOpID, newOpID];
         adjacentEntry.chainStart = adjacentOpID;
         newEntry.chainStart = adjacentOpID;
+
+        // Initialize cache for new chain
+        if (!this.isDeleted(adjacentOpID) && !this.isDeleted(newOpID)) {
+          adjacentEntry.chainCachedValues = [
+            {
+              value: adjacentEntry.change.value,
+              madeAt: adjacentEntry.madeAt,
+              opID: adjacentOpID,
+            },
+            {
+              value: newEntry.change.value,
+              madeAt: newEntry.madeAt,
+              opID: newOpID,
+            },
+          ];
+        }
       }
     }
     // For prepend: do nothing (disabled)
@@ -575,18 +655,22 @@ export class RawCoList<
 
         // Check if this is the start of a chain (has chainNodes array)
         if (entry.chainNodes && entry.chainNodes.length >= 3) {
-          // Process entire chain at once using the pre-computed array (fast path!)
-          for (const chainOpID of entry.chainNodes) {
-            const chainEntry = this.getInsertionsEntry(chainOpID);
-            if (!chainEntry) continue;
+          if (entry.chainCachedValues) {
+            arr.push(...entry.chainCachedValues);
+          } else {
+            // Process entire chain at once using the pre-computed array (fast path!)
+            for (const chainOpID of entry.chainNodes) {
+              const chainEntry = this.getInsertionsEntry(chainOpID);
+              if (!chainEntry) continue;
 
-            const deleted = this.isDeleted(chainOpID);
-            if (!deleted) {
-              arr.push({
-                value: chainEntry.change.value,
-                madeAt: chainEntry.madeAt,
-                opID: chainOpID,
-              });
+              const deleted = this.isDeleted(chainOpID);
+              if (!deleted) {
+                arr.push({
+                  value: chainEntry.change.value,
+                  madeAt: chainEntry.madeAt,
+                  opID: chainOpID,
+                });
+              }
             }
           }
 
