@@ -418,7 +418,7 @@ export class RawCoList<
   }
 
   /** @internal - Break a chain at the given OpID (invalidate all chain info) */
-  private breakChainAt(opID: OpID) {
+  private breakOrSplit(opID: OpID) {
     const entry = this.getInsertionsEntry(opID);
     if (!entry) return;
 
@@ -463,7 +463,7 @@ export class RawCoList<
       continueChainStartEntry.chainStart = continueChainStart;
     }
 
-    const firstPart = chainNodes.slice(0, index + 1);
+    const firstPart = chainNodes.slice(0, index);
     if (firstPart.length >= 3) {
       const firstPartStart = firstPart[0]!;
       const firstPartStartEntry = this.getInsertionsEntry(firstPartStart);
@@ -506,7 +506,7 @@ export class RawCoList<
 
     if (!canFormChain) {
       // Can't form a chain, break any existing chain at adjacentOpID
-      this.breakChainAt(adjacentOpID);
+      this.breakOrSplit(adjacentOpID);
       return;
     }
 

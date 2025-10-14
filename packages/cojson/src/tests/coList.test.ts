@@ -1070,13 +1070,18 @@ describe("Chain Compaction with Out-of-Order Operations", () => {
     list.append(3, undefined, "trusting");
     list.append(4, undefined, "trusting");
     list.append(5, undefined, "trusting");
+    list.append(6, undefined, "trusting");
+    list.append(7, undefined, "trusting");
+    list.append(8, undefined, "trusting");
+    list.append(9, undefined, "trusting");
+    list.append(10, undefined, "trusting");
 
     const statsBefore = list.getCompactionStats();
 
     // Should have a chain of 5 nodes
     expect(statsBefore.linearChains).toBe(1);
-    expect(statsBefore.compactableNodes).toBe(5);
-    expect(statsBefore.maxChainLength).toBe(5);
+    expect(statsBefore.compactableNodes).toBe(10);
+    expect(statsBefore.maxChainLength).toBe(10);
 
     // append(999, 1) will insert 999 after index 1 (after "2")
     // This will give node "3" multiple predecessors
@@ -1094,8 +1099,101 @@ describe("Chain Compaction with Out-of-Order Operations", () => {
       statsBefore.compactableNodes,
     );
 
+    expect(statsAfter.compactableNodes).toBe(8);
+
     // Verify the list has correct content
-    expect(list.toJSON()).toEqual([1, 2, 999, 3, 4, 5]);
+    expect(list.toJSON()).toEqual([1, 2, 999, 3, 4, 5, 6, 7, 8, 9, 10]);
+  });
+
+  test("insertAfter breaks chain in two parts", () => {
+    const node = nodeWithRandomAgentAndSessionID();
+
+    const coValue = node.createCoValue({
+      type: "colist",
+      ruleset: { type: "unsafeAllowAll" },
+      meta: null,
+      ...Crypto.createdNowUnique(),
+    });
+
+    const list = expectList(coValue.getCurrentContent());
+
+    // Build a chain: append 1, 2, 3, 4, 5
+    list.append(1, undefined, "trusting");
+    list.append(2, undefined, "trusting");
+    list.append(3, undefined, "trusting");
+    list.append(4, undefined, "trusting");
+    list.append(5, undefined, "trusting");
+    list.append(6, undefined, "trusting");
+    list.append(7, undefined, "trusting");
+    list.append(8, undefined, "trusting");
+    list.append(9, undefined, "trusting");
+    list.append(10, undefined, "trusting");
+
+    const statsBefore = list.getCompactionStats();
+
+    // Should have a chain of 10 nodes
+    expect(statsBefore.linearChains).toBe(1);
+    expect(statsBefore.compactableNodes).toBe(10);
+    expect(statsBefore.maxChainLength).toBe(10);
+
+    list.append(999, 6, "trusting");
+
+    const statsAfter = list.getCompactionStats();
+
+    // The chain should be split in two
+    console.log("Stats before insertAfter:", statsBefore);
+    console.log("Stats after insertAfter:", statsAfter);
+
+    expect(statsAfter.linearChains).toBe(2);
+
+    // Verify the list has correct content
+    expect(list.toJSON()).toEqual([1, 2, 3, 4, 5, 6, 7, 999, 8, 9, 10]);
+  });
+
+  test("prepend breaks chain in two parts", () => {
+    const node = nodeWithRandomAgentAndSessionID();
+
+    const coValue = node.createCoValue({
+      type: "colist",
+      ruleset: { type: "unsafeAllowAll" },
+      meta: null,
+      ...Crypto.createdNowUnique(),
+    });
+
+    const list = expectList(coValue.getCurrentContent());
+
+    // Build a chain: append 1, 2, 3, 4, 5
+    list.append(1, undefined, "trusting");
+    list.append(2, undefined, "trusting");
+    list.append(3, undefined, "trusting");
+    list.append(4, undefined, "trusting");
+    list.append(5, undefined, "trusting");
+    list.append(6, undefined, "trusting");
+    list.append(7, undefined, "trusting");
+    list.append(8, undefined, "trusting");
+    list.append(9, undefined, "trusting");
+    list.append(10, undefined, "trusting");
+
+    const statsBefore = list.getCompactionStats();
+
+    // Should have a chain of 10 nodes
+    expect(statsBefore.linearChains).toBe(1);
+    expect(statsBefore.compactableNodes).toBe(10);
+    expect(statsBefore.maxChainLength).toBe(10);
+
+    list.prepend(999, 6, "trusting");
+
+    const statsAfter = list.getCompactionStats();
+
+    // The chain should be split in two
+    console.log("Stats before prepend:", statsBefore);
+    console.log("Stats after prepend:", statsAfter);
+
+    expect(statsAfter.linearChains).toBe(2);
+    expect(statsAfter.compactableNodes).toBe(9);
+
+    // Verify the list has correct content
+    expect(list.toJSON()).toEqual([1, 2, 3, 4, 5, 6, 999, 7, 8, 9, 10]);
   });
 
   test("chains can reform after being broken", () => {
