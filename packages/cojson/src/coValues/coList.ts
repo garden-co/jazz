@@ -1,5 +1,8 @@
 import { CoID, RawCoValue } from "../coValue.js";
-import { AvailableCoValueCore } from "../coValueCore/coValueCore.js";
+import {
+  AvailableCoValueCore,
+  CoValueCore,
+} from "../coValueCore/coValueCore.js";
 import { AgentID, SessionID, TransactionID } from "../ids.js";
 import { JsonObject, JsonValue } from "../jsonValue.js";
 import { accountOrAgentIDfromSessionID } from "../typeUtils/accountOrAgentIDfromSessionID.js";
@@ -33,9 +36,10 @@ export type ListOpPayload<T extends JsonValue> =
 
 type InsertionEntry<T extends JsonValue> = {
   madeAt: number;
-  predecessors: OpID[];
-  successors: OpID[];
+  predecessors: { opID: OpID; madeAt: number; txID: TransactionID }[];
+  successors: { opID: OpID; madeAt: number; txID: TransactionID }[];
   change: InsertionOpPayload<T>;
+  parsed: boolean;
 };
 
 type DeletionEntry = {
@@ -141,45 +145,45 @@ export class RawCoList<
     this.processNewTransactions();
   }
 
-  private getInsertionsEntry(opID: OpID) {
-    const index = getSessionIndex(opID);
-
-    const sessionEntry = this.insertions[index];
-    if (!sessionEntry) {
-      return undefined;
-    }
-
-    const txEntry = sessionEntry[opID.txIndex];
-    if (!txEntry) {
-      return undefined;
-    }
-
-    return txEntry[opID.changeIdx];
-  }
-
-  private createInsertionsEntry(opID: OpID, value: InsertionEntry<Item>) {
+  private getInsertionsEntry(opID: OpID, madeAt?: number) {
     const index = getSessionIndex(opID);
 
     let sessionEntry = this.insertions[index];
     if (!sessionEntry) {
+      if (madeAt === undefined) {
+        return undefined;
+      }
       sessionEntry = {};
       this.insertions[index] = sessionEntry;
     }
 
     let txEntry = sessionEntry[opID.txIndex];
     if (!txEntry) {
+      if (madeAt === undefined) {
+        return undefined;
+      }
       txEntry = {};
       sessionEntry[opID.txIndex] = txEntry;
     }
 
-    // Check if the change index already exists, may be the case of double merges
-    if (txEntry[opID.changeIdx]) {
-      return false;
+    let entry = txEntry[opID.changeIdx];
+    if (!entry) {
+      if (madeAt === undefined) {
+        return undefined;
+      }
+      // Create the entry with parsed: false
+      entry = {
+        madeAt,
+        predecessors: [],
+        successors: [],
+        change: undefined as any, // Will be set by caller
+        parsed: false,
+      };
+      txEntry[opID.changeIdx] = entry;
+      this.#insertionsLookup.set(opID, entry);
     }
 
-    txEntry[opID.changeIdx] = value;
-    this.#insertionsLookup.set(opID, value);
-    return true;
+    return entry;
   }
 
   private isDeleted(opID: OpID) {
@@ -226,7 +230,7 @@ export class RawCoList<
   }
 
   processNewTransactions() {
-    const transactions = this.core.getValidSortedTransactions({
+    const transactions = this.core.getValidTransactions({
       ignorePrivateTransactions: false,
       knownTransactions: this.knownTransactions,
     });
@@ -235,18 +239,14 @@ export class RawCoList<
       return;
     }
 
-    let lastValidTransaction: number | undefined = undefined;
-    let oldestValidTransaction: number | undefined = undefined;
     this.#cachedArray = undefined;
     this.#cachedOpIDs = undefined;
 
-    for (const { txID, changes, madeAt } of transactions) {
-      lastValidTransaction = Math.max(lastValidTransaction ?? 0, madeAt);
-      oldestValidTransaction = Math.min(
-        oldestValidTransaction ?? Infinity,
-        madeAt,
-      );
+    const entriesToSort = new Set<
+      { opID: OpID; madeAt: number; txID: TransactionID }[]
+    >();
 
+    for (const { txID, changes, madeAt } of transactions) {
       for (const [changeIdx, changeUntyped] of changes.entries()) {
         const change = changeUntyped as ListOpPayload<Item>;
 
@@ -258,17 +258,19 @@ export class RawCoList<
         };
 
         if (change.op === "pre" || change.op === "app") {
-          const created = this.createInsertionsEntry(opID, {
-            madeAt,
-            predecessors: [],
-            successors: [],
-            change,
-          });
+          const entry = this.getInsertionsEntry(opID, madeAt);
 
-          // If the change index already exists, we don't need to process it again
-          if (!created) {
+          if (!entry) {
+            throw new Error("Failed to create insertion entry");
+          }
+
+          // If the entry was already parsed, we don't need to process it again
+          if (entry.parsed) {
             continue;
           }
+
+          entry.change = change;
+          entry.parsed = true;
 
           if (change.op === "pre") {
             if (change.before === "end") {
@@ -280,7 +282,11 @@ export class RawCoList<
                 continue;
               }
 
-              beforeEntry.predecessors.push(opID);
+              beforeEntry.predecessors.push({ opID, madeAt, txID });
+
+              if (beforeEntry.predecessors.length > 1) {
+                entriesToSort.add(beforeEntry.predecessors);
+              }
             }
           } else {
             if (change.after === "start") {
@@ -292,7 +298,11 @@ export class RawCoList<
                 continue;
               }
 
-              afterEntry.successors.push(opID);
+              afterEntry.successors.push({ opID, madeAt, txID });
+
+              if (afterEntry.successors.length > 1) {
+                entriesToSort.add(afterEntry.successors);
+              }
             }
           }
         } else if (change.op === "del") {
@@ -309,14 +319,8 @@ export class RawCoList<
       }
     }
 
-    if (
-      this.lastValidTransaction &&
-      oldestValidTransaction &&
-      oldestValidTransaction < this.lastValidTransaction
-    ) {
-      this.rebuildFromCore();
-    } else {
-      this.lastValidTransaction = lastValidTransaction;
+    for (const entry of entriesToSort) {
+      entry.sort(this.core.compareTransactions);
     }
   }
 
@@ -416,7 +420,7 @@ export class RawCoList<
         todo.predecessorsVisited = true;
 
         for (const predecessor of entry.predecessors) {
-          head = todoList.newNode(predecessor, head);
+          head = todoList.newNode(predecessor.opID, head);
         }
       } else {
         // Remove the current opID from the todo stack to consider it processed.
@@ -432,7 +436,7 @@ export class RawCoList<
 
         // traverse successors in reverse for correct insertion behavior
         for (const successor of entry.successors) {
-          head = todoList.newNode(successor, head);
+          head = todoList.newNode(successor.opID, head);
         }
       }
     }
