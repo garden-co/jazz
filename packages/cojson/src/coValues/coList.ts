@@ -63,7 +63,6 @@ class CoListTraversalLinkedList {
   newNode(value: OpID, next: TodoNode | null = null): TodoNode {
     if (this.garbage) {
       const item = this.garbage;
-      this.garbage = this.garbage.next;
       this.garbage = null;
       item.value = value;
       item.predecessorsVisited = false;
@@ -75,7 +74,6 @@ class CoListTraversalLinkedList {
 
   /** Return an object to the pool for reuse */
   recycleNode(item: TodoNode): void {
-    item.next = this.garbage;
     this.garbage = item;
   }
 }
@@ -92,9 +90,9 @@ export class RawCoList<
   /** @category 6. Meta */
   core: AvailableCoValueCore;
   /** @internal */
-  afterStart: OpID[];
+  afterStart: { opID: OpID; madeAt: number; txID: TransactionID }[];
   /** @internal */
-  beforeEnd: OpID[];
+  beforeEnd: { opID: OpID; madeAt: number; txID: TransactionID }[];
   /** @internal */
   insertions: {
     [sessionID: SessionID]: {
@@ -129,8 +127,6 @@ export class RawCoList<
 
   lastValidTransaction: number | undefined;
 
-  #insertionsLookup: Map<OpID, InsertionEntry<Item>> = new Map();
-
   /** @internal */
   constructor(core: AvailableCoValueCore) {
     this.id = core.id as CoID<this>;
@@ -145,42 +141,32 @@ export class RawCoList<
     this.processNewTransactions();
   }
 
-  private getInsertionsEntry(opID: OpID, madeAt?: number) {
+  private getInsertionsEntry(opID: OpID) {
     const index = getSessionIndex(opID);
 
     let sessionEntry = this.insertions[index];
     if (!sessionEntry) {
-      if (madeAt === undefined) {
-        return undefined;
-      }
       sessionEntry = {};
       this.insertions[index] = sessionEntry;
     }
 
     let txEntry = sessionEntry[opID.txIndex];
     if (!txEntry) {
-      if (madeAt === undefined) {
-        return undefined;
-      }
       txEntry = {};
       sessionEntry[opID.txIndex] = txEntry;
     }
 
     let entry = txEntry[opID.changeIdx];
     if (!entry) {
-      if (madeAt === undefined) {
-        return undefined;
-      }
       // Create the entry with parsed: false
       entry = {
-        madeAt,
+        madeAt: 0,
         predecessors: [],
         successors: [],
         change: undefined as any, // Will be set by caller
         parsed: false,
       };
       txEntry[opID.changeIdx] = entry;
-      this.#insertionsLookup.set(opID, entry);
     }
 
     return entry;
@@ -258,7 +244,7 @@ export class RawCoList<
         };
 
         if (change.op === "pre" || change.op === "app") {
-          const entry = this.getInsertionsEntry(opID, madeAt);
+          const entry = this.getInsertionsEntry(opID);
 
           if (!entry) {
             throw new Error("Failed to create insertion entry");
@@ -269,18 +255,16 @@ export class RawCoList<
             continue;
           }
 
+          entry.madeAt = madeAt;
           entry.change = change;
           entry.parsed = true;
 
           if (change.op === "pre") {
             if (change.before === "end") {
-              this.beforeEnd.push(opID);
+              this.beforeEnd.push({ opID, madeAt, txID });
+              entriesToSort.add(this.beforeEnd);
             } else {
               const beforeEntry = this.getInsertionsEntry(change.before);
-
-              if (!beforeEntry) {
-                continue;
-              }
 
               beforeEntry.predecessors.push({ opID, madeAt, txID });
 
@@ -290,13 +274,10 @@ export class RawCoList<
             }
           } else {
             if (change.after === "start") {
-              this.afterStart.push(opID);
+              this.afterStart.push({ opID, madeAt, txID });
+              entriesToSort.add(this.afterStart);
             } else {
               const afterEntry = this.getInsertionsEntry(change.after);
-
-              if (!afterEntry) {
-                continue;
-              }
 
               afterEntry.successors.push({ opID, madeAt, txID });
 
@@ -320,7 +301,13 @@ export class RawCoList<
     }
 
     for (const entry of entriesToSort) {
-      entry.sort(this.core.compareTransactions);
+      entry.sort((a, b) => {
+        const cmp = this.core.compareTransactions(a, b);
+        if (cmp !== 0) {
+          return cmp;
+        }
+        return a.opID.changeIdx - b.opID.changeIdx;
+      });
     }
   }
 
@@ -383,10 +370,10 @@ export class RawCoList<
     const values: Item[] = [];
     const opIDs: OpID[] = [];
 
-    for (const opID of this.afterStart) {
+    for (const { opID } of this.afterStart) {
       this.fillArrayFromOpID(opID, values, opIDs);
     }
-    for (const opID of this.beforeEnd) {
+    for (const { opID } of this.beforeEnd) {
       this.fillArrayFromOpID(opID, values, opIDs);
     }
 
@@ -400,32 +387,31 @@ export class RawCoList<
     let head: TodoNode | null = todoList.newNode(opID);
 
     while (head !== null) {
-      const todo = head;
-      const currentOpID = todo.value;
+      const currentOpID = head.value;
 
-      const entry =
-        this.#insertionsLookup.get(currentOpID) ??
-        this.getInsertionsEntry(currentOpID);
+      const entry = this.getInsertionsEntry(currentOpID);
 
       if (!entry) {
         throw new Error("Missing op " + currentOpID);
       }
 
-      const predecessorsVisited = todo.predecessorsVisited;
+      const predecessorsVisited = head.predecessorsVisited;
       const shouldTraversePredecessors =
         entry.predecessors.length > 0 && !predecessorsVisited;
 
       // We navigate the predecessors before processing the current opID in the list
       if (shouldTraversePredecessors) {
-        todo.predecessorsVisited = true;
+        head.predecessorsVisited = true;
 
         for (const predecessor of entry.predecessors) {
           head = todoList.newNode(predecessor.opID, head);
         }
       } else {
         // Remove the current opID from the todo stack to consider it processed.
-        todoList.recycleNode(head);
+        const current = head;
         head = head.next;
+
+        todoList.recycleNode(current);
 
         const deleted = this.isDeleted(currentOpID);
 
