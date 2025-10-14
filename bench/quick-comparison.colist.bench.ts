@@ -3,6 +3,8 @@
  * NEW (with chain splitting) vs OLD (v0.18.24)
  */
 
+import { Bench } from "tinybench";
+import { formatTime, displayBenchmarkResults } from "./utils.js";
 import { WasmCrypto as WasmCryptoNew } from "cojson/src/crypto/WasmCrypto.js";
 import { LocalNode as LocalNodeNew } from "cojson/src/localNode.js";
 import { RawCoList as RawCoListNew } from "cojson/src/coValues/coList.js";
@@ -11,19 +13,9 @@ import { WasmCrypto as WasmCryptoOld } from "cojson-latest/src/crypto/WasmCrypto
 import { LocalNode as LocalNodeOld } from "cojson-latest/src/localNode.js";
 import { RawCoList as RawCoListOld } from "cojson-latest/src/coValues/coList.js";
 
-function mean(arr: number[]): number {
-  return arr.reduce((a, b) => a + b, 0) / arr.length;
-}
-
-function formatTime(ms: number): string {
-  if (ms < 1) return `${(ms * 1000).toFixed(2)}µs`;
-  if (ms < 1000) return `${ms.toFixed(2)}ms`;
-  return `${(ms / 1000).toFixed(2)}s`;
-}
-
 async function main() {
   console.log("\n╔════════════════════════════════════════════════════════╗");
-  console.log("║   QUICK COMPARISON: NEW vs OLD                         ║");
+  console.log("║   QUICK COMPARISON: NEW vs OLD (tinybench)             ║");
   console.log("╚════════════════════════════════════════════════════════╝\n");
 
   const cryptoNew = await WasmCryptoNew.create();
@@ -33,28 +25,28 @@ async function main() {
     {
       name: "10000 sequential appends",
       size: 10000,
-      type: "sequential",
+      type: "sequential" as const,
     },
     {
       name: "1000 sequential appends",
       size: 1000,
-      type: "sequential",
+      type: "sequential" as const,
     },
     {
       name: "500 sequential appends",
       size: 500,
-      type: "sequential",
+      type: "sequential" as const,
     },
     {
-      name: "100 random inserts",
-      size: 100,
-      type: "random",
+      name: "1000 random inserts",
+      size: 1000,
+      type: "random" as const,
     },
     {
       name: "500 seq + 50 random (mixed)",
       size: 500,
       random: 50,
-      type: "mixed",
+      type: "mixed" as const,
     },
   ];
 
@@ -63,18 +55,16 @@ async function main() {
     console.log(`📊 ${test.name}`);
     console.log("=".repeat(56));
 
-    const iterations = 10;
+    const bench = new Bench({ iterations: 10 });
+    let stats: any = null;
 
-    // OLD version
-    const oldTimes: number[] = [];
-    for (let i = 0; i < iterations; i++) {
+    // OLD version task
+    bench.add("OLD (v0.18.24)", () => {
       const account = LocalNodeOld.internalCreateAccount({ crypto: cryptoOld });
       const list = account.core.node
         .createGroup()
         .createList() as RawCoListOld<number>;
 
-      const start = performance.now();
-
       if (test.type === "sequential") {
         for (let j = 0; j < test.size; j++) {
           list.append(j);
@@ -97,22 +87,16 @@ async function main() {
         }
       }
 
-      const items = list.asArray();
-      const end = performance.now();
-      oldTimes.push(end - start);
-    }
+      list.asArray(); // Force materialization
+    });
 
-    // NEW version
-    const newTimes: number[] = [];
-    let stats: any = null;
-    for (let i = 0; i < iterations; i++) {
+    // NEW version task
+    bench.add("NEW (current)", () => {
       const account = LocalNodeNew.internalCreateAccount({ crypto: cryptoNew });
       const list = account.core.node
         .createGroup()
         .createList() as RawCoListNew<number>;
 
-      const start = performance.now();
-
       if (test.type === "sequential") {
         for (let j = 0; j < test.size; j++) {
           list.append(j);
@@ -135,35 +119,54 @@ async function main() {
         }
       }
 
-      const items = list.asArray();
-      const end = performance.now();
-      newTimes.push(end - start);
+      list.asArray(); // Force materialization
 
-      if (i === 0) {
+      // Capture stats on first iteration
+      if (!stats) {
         stats = (list as any).getCompactionStats?.();
       }
-    }
+    });
 
-    const oldAvg = mean(oldTimes);
-    const newAvg = mean(newTimes);
-    const speedup = oldAvg / newAvg;
-    const improvement = ((oldAvg - newAvg) / oldAvg) * 100;
+    await bench.run();
 
-    console.log(`\n  OLD: ${formatTime(oldAvg)}`);
-    console.log(`  NEW: ${formatTime(newAvg)}`);
+    const results = bench.tasks.map((task) => ({
+      name: task.name,
+      mean: task.result?.mean || 0,
+      hz: task.result?.hz || 0,
+      p75: task.result?.p75,
+      p99: task.result?.p99,
+      p995: task.result?.p995,
+      p999: task.result?.p999,
+    }));
 
-    if (speedup > 1) {
+    const oldResult = results.find((r) => r.name === "OLD (v0.18.24)");
+    const newResult = results.find((r) => r.name === "NEW (current)");
+
+    if (oldResult && newResult) {
+      const speedup = oldResult.mean / newResult.mean;
+      const improvement =
+        ((oldResult.mean - newResult.mean) / oldResult.mean) * 100;
+
       console.log(
-        `  ✅ ${speedup.toFixed(2)}x FASTER (+${improvement.toFixed(1)}%)`,
+        `\n  OLD: ${formatTime(oldResult.mean)} (p99: ${formatTime(oldResult.p99 || 0)})`,
       );
-    } else if (speedup < 0.95) {
       console.log(
-        `  ❌ ${(1 / speedup).toFixed(2)}x SLOWER (${improvement.toFixed(1)}%)`,
+        `  NEW: ${formatTime(newResult.mean)} (p99: ${formatTime(newResult.p99 || 0)})`,
       );
-    } else {
-      console.log(
-        `  ⚖️  Similar performance (${improvement > 0 ? "+" : ""}${improvement.toFixed(1)}%)`,
-      );
+
+      if (speedup > 1) {
+        console.log(
+          `  ✅ ${speedup.toFixed(2)}x FASTER (+${improvement.toFixed(1)}%)`,
+        );
+      } else if (speedup < 0.95) {
+        console.log(
+          `  ❌ ${(1 / speedup).toFixed(2)}x SLOWER (${improvement.toFixed(1)}%)`,
+        );
+      } else {
+        console.log(
+          `  ⚖️  Similar performance (${improvement > 0 ? "+" : ""}${improvement.toFixed(1)}%)`,
+        );
+      }
     }
 
     if (stats) {
@@ -178,6 +181,9 @@ async function main() {
         console.log(`      Max chain: ${stats.maxChainLength} nodes`);
       }
     }
+
+    console.log("\n  📈 Detailed Results:");
+    displayBenchmarkResults(bench, true);
   }
 
   console.log("\n" + "=".repeat(56));

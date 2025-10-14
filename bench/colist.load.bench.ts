@@ -1,4 +1,5 @@
-import { describe, bench } from "vitest";
+import { Bench } from "tinybench";
+import { displayBenchmarkResults } from "./utils.js";
 
 import * as cojson from "cojson";
 import * as cojsonFromNpm from "cojson-latest";
@@ -43,7 +44,6 @@ function generateFixtures(module: typeof cojson, crypto: any) {
 
 const list = generateFixtures(cojson, crypto);
 const listNAPI = generateFixtures(cojson, napiCrypto);
-// @ts-expect-error
 const listFromNpm = generateFixtures(cojsonFromNpm, cryptoFromNpm);
 
 const content = list.core.verified?.newContentSince(undefined) ?? [];
@@ -51,7 +51,7 @@ const contentNAPI = listNAPI.core.verified?.newContentSince(undefined) ?? [];
 const contentFromNpm =
   listFromNpm.core.verified?.newContentSince(undefined) ?? [];
 
-describe("list import", () => {
+async function runListImportBench() {
   function importList(list: any, content: any) {
     list.core.node.getCoValue(list.id).unmount();
     for (const msg of content) {
@@ -59,32 +59,27 @@ describe("list import", () => {
     }
   }
 
-  bench(
-    "current version",
-    () => {
+  console.log("\n📦 List Import Benchmark");
+  console.log("=".repeat(50));
+
+  const bench = new Bench({ iterations: 500 });
+
+  bench
+    .add("current version", () => {
       importList(list, content);
-    },
-    { iterations: 500 },
-  );
-
-  bench(
-    "current version (NAPI)",
-    () => {
+    })
+    .add("current version (NAPI)", () => {
       importList(listNAPI, contentNAPI);
-    },
-    { iterations: 500 },
-  );
-
-  bench(
-    "Jazz 0.18.18",
-    () => {
+    })
+    .add("Jazz 0.18.18", () => {
       importList(listFromNpm, contentFromNpm);
-    },
-    { iterations: 500 },
-  );
-});
+    });
 
-describe("list import + content load", () => {
+  await bench.run();
+  displayBenchmarkResults(bench);
+}
+
+async function runListImportAndLoadBench() {
   function loadList(list: any, content: any) {
     list.core.node.getCoValue(list.id).unmount();
     for (const msg of content) {
@@ -94,58 +89,62 @@ describe("list import + content load", () => {
     coValue.getCurrentContent();
   }
 
-  bench(
-    "current version",
-    () => {
+  console.log("\n📦 List Import + Content Load Benchmark");
+  console.log("=".repeat(50));
+
+  const bench = new Bench({ iterations: 500 });
+
+  bench
+    .add("current version", () => {
       loadList(list, content);
-    },
-    { iterations: 500 },
-  );
-
-  bench(
-    "current version (NAPI)",
-    () => {
+    })
+    .add("current version (NAPI)", () => {
       loadList(listNAPI, contentNAPI);
-    },
-    { iterations: 500 },
-  );
-
-  bench(
-    "Jazz 0.18.18",
-    () => {
+    })
+    .add("Jazz 0.18.18", () => {
       loadList(listFromNpm, contentFromNpm);
-    },
-    { iterations: 500 },
-  );
-});
+    });
 
-describe("list updating", () => {
+  await bench.run();
+  displayBenchmarkResults(bench);
+}
+
+async function runListUpdatingBench() {
   const list = generateFixtures(cojson, crypto);
   const listNAPI = generateFixtures(cojson, napiCrypto);
-  // @ts-expect-error
   const listFromNpm = generateFixtures(cojsonFromNpm, cryptoFromNpm);
 
-  bench(
-    "current version",
-    () => {
+  console.log("\n📝 List Updating Benchmark");
+  console.log("=".repeat(50));
+
+  const bench = new Bench({ iterations: 5000 });
+
+  bench
+    .add("current version", () => {
       list.append("A");
-    },
-    { iterations: 5000 },
-  );
-
-  bench(
-    "current version (NAPI)",
-    () => {
+    })
+    .add("current version (NAPI)", () => {
       listNAPI.append("A");
-    },
-    { iterations: 5000 },
-  );
-
-  bench(
-    "Jazz 0.18.18",
-    () => {
+    })
+    .add("Jazz 0.18.18", () => {
       listFromNpm.append("A");
-    },
-    { iterations: 5000 },
-  );
-});
+    });
+
+  await bench.run();
+  displayBenchmarkResults(bench);
+}
+
+// Run all benchmarks
+async function main() {
+  console.log("\n╔════════════════════════════════════════════════════════╗");
+  console.log("║            CoList Benchmarks (tinybench)               ║");
+  console.log("╚════════════════════════════════════════════════════════╝");
+
+  await runListImportBench();
+  await runListImportAndLoadBench();
+  await runListUpdatingBench();
+
+  console.log("\n✅ All benchmarks completed!\n");
+}
+
+main().catch(console.error);

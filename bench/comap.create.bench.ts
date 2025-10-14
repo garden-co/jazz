@@ -1,4 +1,5 @@
-import { describe, bench } from "vitest";
+import { Bench } from "tinybench";
+import { displayBenchmarkResults } from "./utils.js";
 
 import * as cojson from "cojson";
 import * as cojsonFromNpm from "cojson-latest";
@@ -38,7 +39,6 @@ function generateFixtures(module: typeof cojson, crypto: any) {
 
 const map = generateFixtures(cojson, crypto);
 const napiMap = generateFixtures(cojson, napiCrypto);
-// @ts-expect-error
 const mapFromNpm = generateFixtures(cojsonFromNpm, cryptoFromNpm);
 
 const content = map.core.verified?.newContentSince(undefined) ?? [];
@@ -46,7 +46,7 @@ const contentNAPI = napiMap.core.verified?.newContentSince(undefined) ?? [];
 const contentFromNpm =
   mapFromNpm.core.verified?.newContentSince(undefined) ?? [];
 
-describe("map import", () => {
+async function runMapImportBench() {
   function importMap(map: any, content: any) {
     map.core.node.getCoValue(map.id).unmount();
     for (const msg of content) {
@@ -54,32 +54,27 @@ describe("map import", () => {
     }
   }
 
-  bench(
-    "current version",
-    () => {
+  console.log("\n📦 Map Import Benchmark");
+  console.log("=".repeat(50));
+
+  const bench = new Bench({ iterations: 500 });
+
+  bench
+    .add("current version", () => {
       importMap(map, content);
-    },
-    { iterations: 500 },
-  );
-
-  bench(
-    "current version (NAPI)",
-    () => {
+    })
+    .add("current version (NAPI)", () => {
       importMap(napiMap, contentNAPI);
-    },
-    { iterations: 500 },
-  );
-
-  bench(
-    "Jazz 0.18.18",
-    () => {
+    })
+    .add("Jazz 0.18.18", () => {
       importMap(mapFromNpm, contentFromNpm);
-    },
-    { iterations: 500 },
-  );
-});
+    });
 
-describe("list import + content load", () => {
+  await bench.run();
+  displayBenchmarkResults(bench);
+}
+
+async function runMapImportAndLoadBench() {
   function loadMap(map: any, content: any) {
     map.core.node.getCoValue(map.id).unmount();
     for (const msg of content) {
@@ -89,57 +84,62 @@ describe("list import + content load", () => {
     coValue.getCurrentContent();
   }
 
-  bench(
-    "current version",
-    () => {
+  console.log("\n📦 Map Import + Content Load Benchmark");
+  console.log("=".repeat(50));
+
+  const bench = new Bench({ iterations: 500 });
+
+  bench
+    .add("current version", () => {
       loadMap(map, content);
-    },
-    { iterations: 500 },
-  );
-
-  bench(
-    "current version (NAPI)",
-    () => {
+    })
+    .add("current version (NAPI)", () => {
       loadMap(napiMap, contentNAPI);
-    },
-    { iterations: 500 },
-  );
-
-  bench(
-    "Jazz 0.18.18",
-    () => {
+    })
+    .add("Jazz 0.18.18", () => {
       loadMap(mapFromNpm, contentFromNpm);
-    },
-    { iterations: 500 },
-  );
-});
+    });
 
-describe("map updating", () => {
+  await bench.run();
+  displayBenchmarkResults(bench);
+}
+
+async function runMapUpdatingBench() {
   const map = generateFixtures(cojson, crypto);
   const mapNAPI = generateFixtures(cojson, napiCrypto);
-  // @ts-expect-error
   const mapFromNpm = generateFixtures(cojsonFromNpm, cryptoFromNpm);
-  bench(
-    "current version",
-    () => {
+
+  console.log("\n📝 Map Updating Benchmark");
+  console.log("=".repeat(50));
+
+  const bench = new Bench({ iterations: 5000 });
+
+  bench
+    .add("current version", () => {
       map.set("A", Math.random().toString(), "private");
-    },
-    { iterations: 5000 },
-  );
-
-  bench(
-    "current version (NAPI)",
-    () => {
+    })
+    .add("current version (NAPI)", () => {
       mapNAPI.set("A", Math.random().toString(), "private");
-    },
-    { iterations: 5000 },
-  );
-
-  bench(
-    "Jazz 0.18.18",
-    () => {
+    })
+    .add("Jazz 0.18.18", () => {
       mapFromNpm.set("A", Math.random().toString(), "private");
-    },
-    { iterations: 5000 },
-  );
-});
+    });
+
+  await bench.run();
+  displayBenchmarkResults(bench);
+}
+
+// Run all benchmarks
+async function main() {
+  console.log("\n╔════════════════════════════════════════════════════════╗");
+  console.log("║            CoMap Benchmarks (tinybench)                ║");
+  console.log("╚════════════════════════════════════════════════════════╝");
+
+  await runMapImportBench();
+  await runMapImportAndLoadBench();
+  await runMapUpdatingBench();
+
+  console.log("\n✅ All benchmarks completed!\n");
+}
+
+main().catch(console.error);
