@@ -247,9 +247,8 @@ export class RawCoList<
                 continue;
               }
 
-              // Update chains BEFORE modifying the graph
-              this.updateChainsAfterInsertion(change.before, opID, "pre");
               beforeEntry.predecessors.push(opID);
+              this.updateChainsAfterInsertion(change.before, opID, "pre");
             }
           } else {
             if (change.after === "start") {
@@ -261,9 +260,8 @@ export class RawCoList<
                 continue;
               }
 
-              // Update chains BEFORE modifying the graph
-              this.updateChainsAfterInsertion(change.after, opID, "app");
               afterEntry.successors.push(opID);
+              this.updateChainsAfterInsertion(change.after, opID, "app");
             }
           }
         } else if (change.op === "del") {
@@ -432,12 +430,52 @@ export class RawCoList<
     const chainStartEntry = this.getInsertionsEntry(chainStartOpID);
     if (!chainStartEntry || !chainStartEntry.chainNodes) return;
 
+    const chainNodes = chainStartEntry.chainNodes;
+
     // Clear chain info from all nodes in the chain
     for (const nodeOpID of chainStartEntry.chainNodes) {
       const nodeEntry = this.getInsertionsEntry(nodeOpID);
       if (nodeEntry) {
         nodeEntry.chainNodes = undefined;
         nodeEntry.chainStart = undefined;
+      }
+    }
+
+    const index = chainNodes.indexOf(opID);
+    if (index === -1) return;
+
+    const secondPart = chainNodes.slice(index + 1, chainNodes.length);
+
+    if (secondPart.length >= 3) {
+      const continueChainStart = secondPart[0]!;
+      const continueChainStartEntry =
+        this.getInsertionsEntry(continueChainStart);
+      if (!continueChainStartEntry) return;
+
+      continueChainStartEntry.chainNodes = secondPart;
+      for (const nodeOpID of secondPart.slice(1, secondPart.length)) {
+        const nodeEntry = this.getInsertionsEntry(nodeOpID);
+        if (nodeEntry) {
+          nodeEntry.chainNodes = undefined;
+          nodeEntry.chainStart = continueChainStart;
+        }
+      }
+      continueChainStartEntry.chainStart = continueChainStart;
+    }
+
+    const firstPart = chainNodes.slice(0, index + 1);
+    if (firstPart.length >= 3) {
+      const firstPartStart = firstPart[0]!;
+      const firstPartStartEntry = this.getInsertionsEntry(firstPartStart);
+      if (!firstPartStartEntry) return;
+
+      firstPartStartEntry.chainNodes = firstPart;
+      for (const nodeOpID of firstPart.slice(1, firstPart.length)) {
+        const nodeEntry = this.getInsertionsEntry(nodeOpID);
+        if (nodeEntry) {
+          nodeEntry.chainNodes = undefined;
+          nodeEntry.chainStart = firstPartStart;
+        }
       }
     }
   }
@@ -460,7 +498,7 @@ export class RawCoList<
       insertionType === "app"
         ? // For append: adjacent should have NO successors yet (we're adding the first/only one)
           // new node should have no predecessors or successors
-          adjacentEntry.successors.length === 0 &&
+          adjacentEntry.successors.length === 1 &&
           newEntry.predecessors.length === 0 &&
           newEntry.successors.length === 0
         : // For prepend: DISABLED - don't create chains with prepend to avoid topology issues

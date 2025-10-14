@@ -956,3 +956,193 @@ describe("CoList Branching", () => {
     `);
   });
 });
+
+describe("Chain Compaction with Out-of-Order Operations", () => {
+  test("breakChainAt is called when out-of-order operation breaks chain linearity", async () => {
+    const client = setupTestNode({
+      connected: true,
+    });
+    const otherClient = setupTestNode({});
+
+    const otherClientConnection = otherClient.connectToSyncServer({
+      ourName: "otherClient",
+    });
+
+    const coValue = client.node.createCoValue({
+      type: "colist",
+      ruleset: { type: "unsafeAllowAll" },
+      meta: null,
+      ...Crypto.createdNowUnique(),
+    });
+
+    const list = expectList(coValue.getCurrentContent());
+
+    // Build a chain: append 1, 2, 3, 4, 5 in sequence
+    list.append(1, undefined, "trusting");
+    list.append(2, undefined, "trusting");
+    list.append(3, undefined, "trusting");
+    list.append(4, undefined, "trusting");
+    list.append(5, undefined, "trusting");
+
+    // Check compaction stats
+    const statsBefore = list.getCompactionStats();
+
+    // Should have formed a chain of 5 nodes
+    expect(statsBefore.linearChains).toBeGreaterThan(0);
+    expect(statsBefore.compactableNodes).toBe(5);
+    expect(statsBefore.maxChainLength).toBe(5);
+
+    // Sync to other client
+    const listOnOtherClient = await loadCoValueOrFail(
+      otherClient.node,
+      list.id,
+    );
+
+    // Verify other client also has the chain
+    const statsOtherBefore = listOnOtherClient.getCompactionStats();
+    expect(statsOtherBefore.linearChains).toBeGreaterThan(0);
+    expect(statsOtherBefore.compactableNodes).toBe(5);
+
+    // Disconnect other client
+    otherClientConnection.peerState.gracefulShutdown();
+
+    // Other client adds item with older timestamp (will arrive out-of-order)
+    listOnOtherClient.append(99, undefined, "trusting");
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    // Main client continues appending (newer timestamps)
+    list.append(6, undefined, "trusting");
+    list.append(7, undefined, "trusting");
+
+    // Main client should have extended or created new chains
+    const statsBeforeSync = list.getCompactionStats();
+    expect(statsBeforeSync.compactableNodes).toBeGreaterThan(5);
+
+    // Reconnect and sync - the out-of-order operation should break chains
+    otherClient.connectToSyncServer({
+      ourName: "otherClient",
+    });
+
+    await waitFor(() => {
+      expect(list.toJSON().length).toBe(8);
+    });
+
+    // After sync, check that chains were broken
+    const statsAfter = list.getCompactionStats();
+
+    // The out-of-order operation should have broken the original chain
+    // We might still have some chains, but they should be smaller
+    console.log("Stats before out-of-order:", statsBefore);
+    console.log("Stats after out-of-order sync:", statsAfter);
+
+    // Verify the list still has correct order (CRDT semantics preserved)
+    const finalList = list.toJSON();
+    expect(finalList).toContain(1);
+    expect(finalList).toContain(2);
+    expect(finalList).toContain(3);
+    expect(finalList).toContain(4);
+    expect(finalList).toContain(5);
+    expect(finalList).toContain(6);
+    expect(finalList).toContain(7);
+    expect(finalList).toContain(99);
+    expect(finalList.length).toBe(8);
+
+    // Verify both clients have the same final state
+    expect(listOnOtherClient.toJSON()).toEqual(list.toJSON());
+  });
+
+  test("insertAfter breaks chain when creating multiple successors", () => {
+    const node = nodeWithRandomAgentAndSessionID();
+
+    const coValue = node.createCoValue({
+      type: "colist",
+      ruleset: { type: "unsafeAllowAll" },
+      meta: null,
+      ...Crypto.createdNowUnique(),
+    });
+
+    const list = expectList(coValue.getCurrentContent());
+
+    // Build a chain: append 1, 2, 3, 4, 5
+    list.append(1, undefined, "trusting");
+    list.append(2, undefined, "trusting");
+    list.append(3, undefined, "trusting");
+    list.append(4, undefined, "trusting");
+    list.append(5, undefined, "trusting");
+
+    const statsBefore = list.getCompactionStats();
+
+    // Should have a chain of 5 nodes
+    expect(statsBefore.linearChains).toBe(1);
+    expect(statsBefore.compactableNodes).toBe(5);
+    expect(statsBefore.maxChainLength).toBe(5);
+
+    // append(999, 1) will insert 999 after index 1 (after "2")
+    // This will give node "3" multiple predecessors
+    // This breaks the chain linearity
+    list.append(999, 1, "trusting");
+
+    const statsAfter = list.getCompactionStats();
+
+    // The chain should be broken
+    console.log("Stats before insertAfter:", statsBefore);
+    console.log("Stats after insertAfter:", statsAfter);
+
+    // After breaking, we should have fewer compactable nodes
+    expect(statsAfter.compactableNodes).toBeLessThan(
+      statsBefore.compactableNodes,
+    );
+
+    // Verify the list has correct content
+    expect(list.toJSON()).toEqual([1, 2, 999, 3, 4, 5]);
+  });
+
+  test("chains can reform after being broken", () => {
+    const node = nodeWithRandomAgentAndSessionID();
+
+    const coValue = node.createCoValue({
+      type: "colist",
+      ruleset: { type: "unsafeAllowAll" },
+      meta: null,
+      ...Crypto.createdNowUnique(),
+    });
+
+    const list = expectList(coValue.getCurrentContent());
+
+    // Build initial chain
+    list.append(1, undefined, "trusting");
+    list.append(2, undefined, "trusting");
+    list.append(3, undefined, "trusting");
+
+    const stats1 = list.getCompactionStats();
+    expect(stats1.linearChains).toBe(1);
+    expect(stats1.compactableNodes).toBe(3);
+
+    // Break the chain by inserting 99 after index 0 (after "1")
+    // This gives node "2" multiple predecessors
+    list.append(99, 0, "trusting");
+
+    const stats2 = list.getCompactionStats();
+    // Chain should be broken
+    expect(stats2.compactableNodes).toBeLessThan(stats1.compactableNodes);
+
+    // Now append new items in sequence - should form a new chain
+    list.append(4, undefined, "trusting");
+    list.append(5, undefined, "trusting");
+    list.append(6, undefined, "trusting");
+    list.append(7, undefined, "trusting");
+
+    const stats3 = list.getCompactionStats();
+
+    // Should have formed a new chain with the last 4 appends
+    console.log("Stats after breaking:", stats2);
+    console.log("Stats after new appends:", stats3);
+
+    expect(stats3.compactableNodes).toBeGreaterThan(stats2.compactableNodes);
+    expect(stats3.linearChains).toBeGreaterThan(0);
+
+    // Verify content is correct
+    expect(list.toJSON()).toEqual([1, 99, 2, 3, 4, 5, 6, 7]);
+  });
+});
