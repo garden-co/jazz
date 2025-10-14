@@ -1,21 +1,21 @@
+"use client";
 import { DEFAULT_FRAMEWORK, Framework, isValidFramework } from "@/content/framework";
-import { useParams } from "next/navigation";
+import { useParams, usePathname, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { TAB_CHANGE_EVENT, isFrameworkChange } from "@garden-co/design-system/src/types/tabbed-code-group";
 
 export const useFramework = () => {
+  const pathname = usePathname();
+  const router = useRouter();
   const { framework } = useParams<{ framework?: string }>();
   const [savedFramework, setSavedFramework] = useState<Framework | null>(null);
   const [mounted, setMounted] = useState(false);
 
   useEffect(() => {
     setMounted(true);
-    // Check localStorage after mounting
-    if (typeof window !== "undefined") {
-      const stored = window.localStorage.getItem("_tcgpref_framework");
-      if (stored && isValidFramework(stored)) {
-        setSavedFramework(stored as Framework);
-      }
+    const stored = window.localStorage.getItem("_tcgpref_framework");
+    if (stored && isValidFramework(stored)) {
+      setSavedFramework(stored as Framework);
     }
   }, []);
 
@@ -28,23 +28,21 @@ export const useFramework = () => {
         }
       }
     };
-
-    if (typeof window !== "undefined") {
-      window.addEventListener(TAB_CHANGE_EVENT as any, handleTabChange);
-      return () => {
-        window.removeEventListener(TAB_CHANGE_EVENT as any, handleTabChange);
-      };
-    }
+    window.addEventListener(TAB_CHANGE_EVENT as any, handleTabChange);
+    return () => window.removeEventListener(TAB_CHANGE_EVENT as any, handleTabChange);
   }, []);
 
-  // Prioritize savedFramework (from events) over URL parameters
-  if (mounted && savedFramework) {
-    return savedFramework;
-  }
+  useEffect(() => {
+    if (!mounted || !savedFramework || !pathname.startsWith('/docs')) return;
+    const parts = pathname.split("/");
+    if (parts[2] !== savedFramework) {
+      const newPath = parts.toSpliced(2, 1, savedFramework).join("/");
+      router.replace(newPath, { scroll: false });
+    }
+  }, [mounted, savedFramework, pathname]);
 
-  if (framework && isValidFramework(framework)) {
-    return framework;
-  }
 
+  if (mounted && savedFramework) return savedFramework;
+  if (framework && isValidFramework(framework)) return framework;
   return DEFAULT_FRAMEWORK;
 };
