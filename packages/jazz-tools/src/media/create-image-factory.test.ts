@@ -24,6 +24,24 @@ describe("createImage", async () => {
     vi.clearAllMocks();
   });
 
+  it("should return a loaded image definition", async () => {
+    const imageBlob = new Blob(
+      [Uint8Array.from(OnePixel, (c) => c.charCodeAt(0))],
+      { type: "image/png" },
+    );
+
+    getImageSize.mockResolvedValue({ width: 1, height: 1 });
+
+    const image = await createImage(imageBlob, { owner: account });
+
+    // ensure `original` is loaded
+    function typeMatch(value: { original: FileStream }) {
+      return value;
+    }
+
+    typeMatch(image);
+  });
+
   it("should create a single original image if all settings are off", async () => {
     const imageBlob = new Blob(
       [Uint8Array.from(OnePixel, (c) => c.charCodeAt(0))],

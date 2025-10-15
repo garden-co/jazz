@@ -37,6 +37,11 @@ export type CreateImageOptions = {
   progressive?: boolean;
 };
 
+export type CreateImageReturnType = Loaded<
+  typeof ImageDefinition,
+  { original: true }
+>;
+
 export type CreateImageImpl<
   TSourceType = SourceType,
   TResizeOutput = ResizeOutput,
@@ -70,7 +75,7 @@ async function createImage<TSourceType, TResizeOutput>(
   imageBlobOrFile: TSourceType,
   options: CreateImageOptions,
   impl: CreateImageImpl<TSourceType, TResizeOutput>,
-): Promise<Loaded<typeof ImageDefinition, { $each: true }>> {
+): Promise<CreateImageReturnType> {
   // Get the original size of the image
   const { width: originalWidth, height: originalHeight } =
     await impl.getImageSize(imageBlobOrFile);
