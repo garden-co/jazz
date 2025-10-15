@@ -1,4 +1,4 @@
-import { describe, bench } from "vitest";
+import { bench, group, run, summary } from "mitata";
 
 import * as cojson from "cojson";
 import * as cojsonFromNpm from "cojson-latest";
@@ -46,40 +46,29 @@ const contentNAPI = napiMap.core.verified?.newContentSince(undefined) ?? [];
 const contentFromNpm =
   mapFromNpm.core.verified?.newContentSince(undefined) ?? [];
 
-describe("map import", () => {
+group("map import", () => {
   function importMap(map: any, content: any) {
     map.core.node.getCoValue(map.id).unmount();
     for (const msg of content) {
       map.core.node.syncManager.handleNewContent(msg, "storage");
     }
   }
-
-  bench(
-    "current version",
-    () => {
+  summary(() => {
+    bench("current version", () => {
       importMap(map, content);
-    },
-    { iterations: 500 },
-  );
+    });
 
-  bench(
-    "current version (NAPI)",
-    () => {
+    bench("current version (NAPI)", () => {
       importMap(napiMap, contentNAPI);
-    },
-    { iterations: 500 },
-  );
+    });
 
-  bench(
-    "Jazz 0.18.18",
-    () => {
+    bench("Jazz 0.18.18", () => {
       importMap(mapFromNpm, contentFromNpm);
-    },
-    { iterations: 500 },
-  );
+    });
+  });
 });
 
-describe("list import + content load", () => {
+group("list import + content load", () => {
   function loadMap(map: any, content: any) {
     map.core.node.getCoValue(map.id).unmount();
     for (const msg of content) {
@@ -88,58 +77,35 @@ describe("list import + content load", () => {
     const coValue = map.core.node.getCoValue(map.id);
     coValue.getCurrentContent();
   }
-
-  bench(
-    "current version",
-    () => {
+  summary(() => {
+    bench("current version", () => {
       loadMap(map, content);
-    },
-    { iterations: 500 },
-  );
+    });
 
-  bench(
-    "current version (NAPI)",
-    () => {
+    bench("current version (NAPI)", () => {
       loadMap(napiMap, contentNAPI);
-    },
-    { iterations: 500 },
-  );
+    });
 
-  bench(
-    "Jazz 0.18.18",
-    () => {
+    bench("Jazz 0.18.18", () => {
       loadMap(mapFromNpm, contentFromNpm);
-    },
-    { iterations: 500 },
-  );
+    });
+  });
 });
 
-describe("map updating", () => {
-  const map = generateFixtures(cojson, crypto);
-  const mapNAPI = generateFixtures(cojson, napiCrypto);
-  // @ts-expect-error
-  const mapFromNpm = generateFixtures(cojsonFromNpm, cryptoFromNpm);
-  bench(
-    "current version",
-    () => {
+group("map updating", () => {
+  summary(() => {
+    bench("current version", () => {
       map.set("A", Math.random().toString(), "private");
-    },
-    { iterations: 5000 },
-  );
+    });
 
-  bench(
-    "current version (NAPI)",
-    () => {
-      mapNAPI.set("A", Math.random().toString(), "private");
-    },
-    { iterations: 5000 },
-  );
+    bench("current version (NAPI)", () => {
+      napiMap.set("A", Math.random().toString(), "private");
+    });
 
-  bench(
-    "Jazz 0.18.18",
-    () => {
+    bench("Jazz 0.18.18", () => {
       mapFromNpm.set("A", Math.random().toString(), "private");
-    },
-    { iterations: 5000 },
-  );
+    });
+  });
 });
+
+await run();
