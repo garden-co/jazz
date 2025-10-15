@@ -4,6 +4,7 @@ packages:
   - 'starters/*'
   - 'tests/*'
   - 'crates/*'
+  - 'bots/*'
   - 'crates/cojson-core-napi/npm/*'
   - 'bench'
 
