@@ -2,7 +2,7 @@ export const meta = {
   slug: "what-is-jazz",
   title: "What is Jazz?",
   subtitle: "(A fresh take on databases)",
-  date: "2025-09-26",
+  date: "2025-10-10",
   coverImage: "/posts/post2.svg",
   author: {
     name: "Anselm Eickhoff",
@@ -10,23 +10,25 @@ export const meta = {
   },
 };
 
-When I started building Jazz, I didn’t mean to build a new database. I was radicalized by local-first, ready to get rid of the entire idea of a backend stack.
+When I started building Jazz, I didn’t mean to build a new database. I was radicalized by the new movement of “local-first”, ready to get rid of the entire idea of a backend stack.
 
-This is the story of how I slowly de-radicalized myself and shaped the ideas I came across into something that has all the parts of a database, but looks very different. Something that makes building apps fun again.
+This is the story of how I discovered local-first and then slowly de-radicalized myself, re-shaping the ideas I had come across into a what I now call a new database.
 
 ## Trigger 1: having to re-invent the data layer for each app
 
-For most of my professional life, I worked as a one-man army for full-stack dev and product design. As such, I’ve helped lots of companies take apps from zero to one.
+For most of my professional life, I helped companies with full-stack work and product design, often taking whole apps from zero to one.
 
-I always liked building apps by starting with the data schema. Even before mocking up any UI you typically know what kinds of things people will be handling in your app and how they relate to each other.
+I always start building apps by defining the data schema. Even before mocking up any UI you typically know what things people will be handling in your app and how they relate to each other.
 
 > Show me your flowcharts and conceal your tables, and I shall continue to be mystified. Show me your tables, and I won't usually need your flowcharts
 
-Everything after that, everything between the UI and the data schema “should be” easy.<br/>But it isn’t.
+Everything after that, the stuff between the UI and the data schema “should be” easy. But it isn’t.
 
+What typically follows is an overwhelming puzzle of tech choices and deployment worries just to assemble your stack.
 
+And even if you "just use Postgres for everything" there are so many implementation details to decide. At the most extreme, I've routinely worked with PostGraphile to standardize away as much of the backend as possible
 
-## Trigger 2: a new class of high-fidelity apps
+## Trigger 2: a new class of apps raising the bar
 
 I started building Jazz soon after I started using Notion and Figma. It was immediately clear to me…
 
