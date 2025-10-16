@@ -1,4 +1,4 @@
-import { describe, bench } from "vitest";
+import { bench, group, run, summary } from "mitata";
 
 import * as cojson from "cojson";
 import * as cojsonFromNpm from "cojson-latest";
@@ -51,40 +51,29 @@ const contentNAPI = listNAPI.core.verified?.newContentSince(undefined) ?? [];
 const contentFromNpm =
   listFromNpm.core.verified?.newContentSince(undefined) ?? [];
 
-describe("list import", () => {
+group("list import", () => {
   function importList(list: any, content: any) {
     list.core.node.getCoValue(list.id).unmount();
     for (const msg of content) {
       list.core.node.syncManager.handleNewContent(msg, "storage");
     }
   }
-
-  bench(
-    "current version",
-    () => {
+  summary(() => {
+    bench("current version", () => {
       importList(list, content);
-    },
-    { iterations: 500 },
-  );
+    });
 
-  bench(
-    "current version (NAPI)",
-    () => {
+    bench("current version (NAPI)", () => {
       importList(listNAPI, contentNAPI);
-    },
-    { iterations: 500 },
-  );
+    });
 
-  bench(
-    "Jazz 0.18.18",
-    () => {
+    bench("Jazz 0.18.18", () => {
       importList(listFromNpm, contentFromNpm);
-    },
-    { iterations: 500 },
-  );
+    });
+  });
 });
 
-describe("list import + content load", () => {
+group("list import + content load", () => {
   function loadList(list: any, content: any) {
     list.core.node.getCoValue(list.id).unmount();
     for (const msg of content) {
@@ -94,58 +83,39 @@ describe("list import + content load", () => {
     coValue.getCurrentContent();
   }
 
-  bench(
-    "current version",
-    () => {
+  summary(() => {
+    bench("current version", () => {
       loadList(list, content);
-    },
-    { iterations: 500 },
-  );
+    });
 
-  bench(
-    "current version (NAPI)",
-    () => {
+    bench("current version (NAPI)", () => {
       loadList(listNAPI, contentNAPI);
-    },
-    { iterations: 500 },
-  );
+    });
 
-  bench(
-    "Jazz 0.18.18",
-    () => {
+    bench("Jazz 0.18.18", () => {
       loadList(listFromNpm, contentFromNpm);
-    },
-    { iterations: 500 },
-  );
+    });
+  });
 });
 
-describe("list updating", () => {
+group("list updating", () => {
   const list = generateFixtures(cojson, crypto);
   const listNAPI = generateFixtures(cojson, napiCrypto);
   // @ts-expect-error
   const listFromNpm = generateFixtures(cojsonFromNpm, cryptoFromNpm);
-
-  bench(
-    "current version",
-    () => {
+  summary(() => {
+    bench("current version", () => {
       list.append("A");
-    },
-    { iterations: 5000 },
-  );
+    }).gc("once");
 
-  bench(
-    "current version (NAPI)",
-    () => {
+    bench("current version (NAPI)", () => {
       listNAPI.append("A");
-    },
-    { iterations: 5000 },
-  );
+    }).gc("once");
 
-  bench(
-    "Jazz 0.18.18",
-    () => {
+    bench("Jazz 0.18.18", () => {
       listFromNpm.append("A");
-    },
-    { iterations: 5000 },
-  );
+    }).gc("once");
+  });
 });
+
+await run({});
