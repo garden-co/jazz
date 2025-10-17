@@ -78,9 +78,15 @@ describe("Group.removeMember", () => {
     expect(mapOnAliceNode.get("test")).toEqual("test");
   });
 
-  for (const member of ["writer", "reader", "writeOnly", "admin"] as const) {
+  for (const member of [
+    "writer",
+    "reader",
+    "writeOnly",
+    "manager",
+    "admin",
+  ] as const) {
     test(`${member} member should be able to revoke themselves`, async () => {
-      const admin = await setupTestAccount({
+      const superAdmin = await setupTestAccount({
         connected: true,
       });
 
@@ -88,9 +94,9 @@ describe("Group.removeMember", () => {
         connected: true,
       });
 
-      const group = admin.node.createGroup();
+      const group = superAdmin.node.createGroup();
       group.addMember(
-        await loadCoValueOrFail(admin.node, client.accountID),
+        await loadCoValueOrFail(superAdmin.node, client.accountID),
         member,
       );
 
@@ -116,6 +122,10 @@ describe("Group.removeMember", () => {
         connected: true,
       });
 
+      const manager = await setupTestAccount({
+        connected: true,
+      });
+
       const writer = await setupTestAccount({
         connected: true,
       });
@@ -133,6 +143,10 @@ describe("Group.removeMember", () => {
       });
 
       const group = admin.node.createGroup();
+      group.addMember(
+        await loadCoValueOrFail(admin.node, manager.accountID),
+        "manager",
+      );
       group.addMember(
         await loadCoValueOrFail(admin.node, writer.accountID),
         "writer",
@@ -152,23 +166,50 @@ describe("Group.removeMember", () => {
 
       const loadedGroup = await loadCoValueOrFail(client.node, group.id);
 
-      loadedGroup.removeMember(
-        await loadCoValueOrFail(client.node, reader.accountID),
-      );
-      loadedGroup.removeMember(
-        await loadCoValueOrFail(client.node, writeOnly.accountID),
-      );
-      loadedGroup.removeMember(
-        await loadCoValueOrFail(client.node, writer.accountID),
-      );
-      loadedGroup.removeMember(
-        await loadCoValueOrFail(client.node, admin.accountID),
+      expect(async () => {
+        loadedGroup.removeMember(
+          await loadCoValueOrFail(client.node, reader.accountID),
+        );
+      }).rejects.toThrow(
+        `Failed to revoke role to ${reader.accountID} (role of current account is ${member})`,
       );
 
+      expect(async () => {
+        loadedGroup.removeMember(
+          await loadCoValueOrFail(client.node, writeOnly.accountID),
+        );
+      }).rejects.toThrow(
+        `Failed to revoke role to ${writeOnly.accountID} (role of current account is ${member})`,
+      );
+
+      expect(async () => {
+        loadedGroup.removeMember(
+          await loadCoValueOrFail(client.node, writer.accountID),
+        );
+      }).rejects.toThrow(
+        `Failed to revoke role to ${writer.accountID} (role of current account is ${member})`,
+      );
+
+      expect(async () => {
+        loadedGroup.removeMember(
+          await loadCoValueOrFail(client.node, admin.accountID),
+        );
+      }).rejects.toThrow(
+        `Failed to revoke role to ${admin.accountID} (role of current account is ${member})`,
+      );
+
+      expect(async () => {
+        loadedGroup.removeMember(
+          await loadCoValueOrFail(client.node, manager.accountID),
+        );
+      }).rejects.toThrow(
+        `Failed to revoke role to ${manager.accountID} (role of current account is ${member})`,
+      );
       expect(loadedGroup.roleOf(reader.accountID)).toEqual("reader");
       expect(loadedGroup.roleOf(writer.accountID)).toEqual("writer");
       expect(loadedGroup.roleOf(writeOnly.accountID)).toEqual("writeOnly");
       expect(loadedGroup.roleOf(admin.accountID)).toEqual("admin");
+      expect(loadedGroup.roleOf(manager.accountID)).toEqual("manager");
 
       await loadedGroup.core.waitForSync();
 
@@ -184,6 +225,9 @@ describe("Group.removeMember", () => {
       expect((await loadCoValueOrFail(admin.node, group.id)).myRole()).toEqual(
         "admin",
       );
+      expect(
+        (await loadCoValueOrFail(manager.node, group.id)).myRole(),
+      ).toEqual("manager");
     });
   }
 
@@ -203,9 +247,15 @@ describe("Group.removeMember", () => {
     );
 
     const loadedGroup = await loadCoValueOrFail(client.node, group.id);
+    const adminOnClientNode = await loadCoValueOrFail(
+      client.node,
+      admin.accountID,
+    );
 
-    loadedGroup.removeMember(
-      await loadCoValueOrFail(client.node, admin.accountID),
+    expect(() => {
+      loadedGroup.removeMember(adminOnClientNode);
+    }).toThrow(
+      `Failed to revoke role to ${admin.accountID} (role of current account is admin)`,
     );
 
     expect(loadedGroup.roleOf(admin.accountID)).toEqual("admin");
@@ -215,6 +265,38 @@ describe("Group.removeMember", () => {
     expect((await loadCoValueOrFail(admin.node, group.id)).myRole()).toEqual(
       "admin",
     );
+  });
+
+  test(`managers can remove other managers`, async () => {
+    const admin = await setupTestAccount({
+      connected: true,
+    });
+
+    const client = await setupTestAccount({
+      connected: true,
+    });
+
+    const group = admin.node.createGroup();
+    // downgrade admin to manager
+    group.addMember(
+      await loadCoValueOrFail(admin.node, admin.accountID),
+      "manager",
+    );
+    group.addMember(
+      await loadCoValueOrFail(admin.node, client.accountID),
+      "manager",
+    );
+
+    const loadedGroup = await loadCoValueOrFail(client.node, group.id);
+
+    const adminOnClientNode = await loadCoValueOrFail(
+      client.node,
+      admin.accountID,
+    );
+
+    loadedGroup.removeMember(adminOnClientNode);
+
+    expect(loadedGroup.roleOf(admin.accountID)).toEqual(undefined);
   });
 
   test("removing a member when inheriting a group where the user lacks read rights", async () => {

@@ -12,6 +12,7 @@ import {
   RawCoValue,
   SessionID,
   cojsonInternals,
+  isAccountRole,
 } from "cojson";
 import {
   AnonymousJazzAgent,
@@ -166,12 +167,7 @@ export class Account extends CoValueBase implements CoValue {
     }
     const role = valueOwner.getRoleOf(this.$jazz.id);
 
-    return (
-      role === "admin" ||
-      role === "writer" ||
-      role === "reader" ||
-      role === "writeOnly"
-    );
+    return isAccountRole(role);
   }
 
   canWrite(value: CoValue): boolean {
@@ -179,7 +175,11 @@ export class Account extends CoValueBase implements CoValue {
     if (!valueOwner) {
       if (value[TypeSym] === "Group") {
         const roleInGroup = (value as Group).getRoleOf(this.$jazz.id);
-        return roleInGroup === "admin" || roleInGroup === "writer";
+        return (
+          roleInGroup === "admin" ||
+          roleInGroup === "manager" ||
+          roleInGroup === "writer"
+        );
       }
       if (value[TypeSym] === "Account") {
         return value.$jazz.id === this.$jazz.id;
@@ -188,7 +188,12 @@ export class Account extends CoValueBase implements CoValue {
     }
     const role = valueOwner.getRoleOf(this.$jazz.id);
 
-    return role === "admin" || role === "writer" || role === "writeOnly";
+    return (
+      role === "admin" ||
+      role === "manager" ||
+      role === "writer" ||
+      role === "writeOnly"
+    );
   }
 
   canAdmin(value: CoValue): boolean {
@@ -196,14 +201,18 @@ export class Account extends CoValueBase implements CoValue {
     if (!valueOwner) {
       if (value[TypeSym] === "Group") {
         const roleInGroup = (value as Group).getRoleOf(this.$jazz.id);
-        return roleInGroup === "admin";
+        return roleInGroup === "manager" || roleInGroup === "admin";
       }
       if (value[TypeSym] === "Account") {
         return value.$jazz.id === this.$jazz.id;
       }
       return false;
     }
-    return valueOwner.getRoleOf(this.$jazz.id) === "admin";
+
+    return (
+      valueOwner.getRoleOf(this.$jazz.id) === "admin" ||
+      valueOwner.getRoleOf(this.$jazz.id) === "manager"
+    );
   }
 
   /** @private */

@@ -60,7 +60,7 @@ import { AgentSecret, textDecoder, textEncoder } from "./crypto/crypto.js";
 import type { AgentID, RawCoID, SessionID } from "./ids.js";
 import type { JsonObject, JsonValue } from "./jsonValue.js";
 import type * as Media from "./media.js";
-import { disablePermissionErrors } from "./permissions.js";
+import { disablePermissionErrors, isAccountRole } from "./permissions.js";
 import type { Peer, SyncMessage } from "./sync.js";
 import {
   DisconnectedError,
@@ -169,6 +169,7 @@ export {
   base64URLtoBytes,
   bytesToBase64url,
   hwrServerPeerSelector,
+  isAccountRole,
 };
 
 export type {

@@ -640,11 +640,13 @@ export class LocalNode {
       account,
       inviteRole === "adminInvite"
         ? "admin"
-        : inviteRole === "writerInvite"
-          ? "writer"
-          : inviteRole === "writeOnlyInvite"
-            ? "writeOnly"
-            : "reader",
+        : inviteRole === "managerInvite"
+          ? "manager"
+          : inviteRole === "writerInvite"
+            ? "writer"
+            : inviteRole === "writeOnlyInvite"
+              ? "writeOnly"
+              : "reader",
     );
 
     const contentPieces =

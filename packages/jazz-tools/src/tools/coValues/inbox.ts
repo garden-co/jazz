@@ -430,12 +430,12 @@ export class InboxSender<I extends CoValue, O extends CoValue | undefined> {
       throw new Error("Failed to load the inbox owner profile");
     }
 
+    const inboxOwnerRole = inboxOwnerProfileRaw.group.roleOf(
+      currentAccount.$jazz.raw.id,
+    );
+
     if (
-      inboxOwnerProfileRaw.group.roleOf(currentAccount.$jazz.raw.id) !==
-        "reader" &&
-      inboxOwnerProfileRaw.group.roleOf(currentAccount.$jazz.raw.id) !==
-        "writer" &&
-      inboxOwnerProfileRaw.group.roleOf(currentAccount.$jazz.raw.id) !== "admin"
+      !["reader", "writer", "admin", "manager"].includes(inboxOwnerRole ?? "")
     ) {
       throw new Error(
         "Insufficient permissions to access the inbox, make sure its user profile is publicly readable.",

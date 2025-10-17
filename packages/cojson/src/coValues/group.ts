@@ -51,6 +51,7 @@ export type ParentGroupReferenceRole =
   | "extend"
   | "reader"
   | "writer"
+  | "manager"
   | "admin";
 
 export type GroupShape = {
@@ -311,7 +312,15 @@ export class RawGroup<
     account: RawAccount | ControlledAccountOrAgent | AgentID | Everyone,
     role: Role,
   ) {
-    if (account === EVERYONE) {
+    const memberKey = typeof account === "string" ? account : account.id;
+    const previousRole = this.get(memberKey);
+
+    // if the role is the same, we don't need to do anything
+    if (previousRole === role) {
+      return;
+    }
+
+    if (memberKey === EVERYONE) {
       if (!(role === "reader" || role === "writer" || role === "writeOnly")) {
         throw new Error(
           "Can't make everyone something other than reader, writer or writeOnly",
@@ -323,22 +332,13 @@ export class RawGroup<
         throw new Error("Can't add member without read key secret");
       }
 
-      const previousRole = this.get(account);
+      const previousRole = this.get(memberKey);
 
-      this.set(account, role, "trusting");
+      this.set(memberKey, role, "trusting");
 
-      if (this.get(account) !== role) {
-        // The role was not set correctly; this presents three scenarios:
-        // 1. The current user is an administrator trying to set another administrator to a lower role
-        // 2. The current user is an administrator but something has gone wrong with the role assignment
-        // 3. The current user is not an administrator and does not have sufficient permissions to set the role
-        const myRole = this.myRole();
+      if (this.get(memberKey) !== role) {
         throw new Error(
-          myRole === "admin"
-            ? this.get(account) === "admin"
-              ? "Administrators cannot demote other administrators in a group"
-              : "Failed to set role"
-            : `Failed to set role due to insufficient permissions (role of current account is ${myRole})`,
+          `Failed to set role ${role} to ${memberKey} (role of current account is ${this.myRole()})`,
         );
       }
 
@@ -359,9 +359,12 @@ export class RawGroup<
       return;
     }
 
-    const memberKey = typeof account === "string" ? account : account.id;
     const agent =
       typeof account === "string" ? account : account.currentAgentID();
+
+    if (agent === EVERYONE) {
+      throw new Error("Agent should not be everyone");
+    }
 
     /**
      * WriteOnly members can only see their own changes.
@@ -374,26 +377,23 @@ export class RawGroup<
      * invite.
      */
     if (role === "writeOnly" || role === "writeOnlyInvite") {
-      const previousRole = this.get(memberKey);
-
-      if (
-        previousRole === "admin" &&
-        memberKey !== this.core.node.getCurrentAgent().id
-      ) {
-        throw new Error(
-          "Administrators cannot demote other administrators in a group",
-        );
-      }
-
       if (
         previousRole === "reader" ||
         previousRole === "writer" ||
+        previousRole === "manager" ||
         previousRole === "admin"
       ) {
         this.rotateReadKey(memberKey);
       }
 
       this.set(memberKey, role, "trusting");
+
+      if (this.get(memberKey) !== role) {
+        throw new Error(
+          `Failed to set role ${role} to ${memberKey} (role of current account is ${this.myRole()})`,
+        );
+      }
+
       this.internalCreateWriteOnlyKeyForMember(memberKey, agent);
     } else {
       const currentReadKey = this.getCurrentReadKey();
@@ -405,13 +405,8 @@ export class RawGroup<
       this.set(memberKey, role, "trusting");
 
       if (this.get(memberKey) !== role) {
-        const myRole = this.myRole();
         throw new Error(
-          myRole === "admin"
-            ? this.get(memberKey) === "admin"
-              ? "Administrators cannot demote other administrators in a group"
-              : "Failed to set role"
-            : `Failed to set role due to insufficient permissions (role of current account is ${myRole})`,
+          `Failed to set role ${role} to ${memberKey} (role of current account is ${this.myRole()})`,
         );
       }
 
@@ -458,6 +453,7 @@ export class RawGroup<
         memberRole === "reader" ||
         memberRole === "writer" ||
         memberRole === "admin" ||
+        memberRole === "manager" ||
         memberRole === "readerInvite" ||
         memberRole === "writerInvite" ||
         memberRole === "adminInvite"
@@ -960,7 +956,7 @@ export class RawGroup<
 
   extend(
     parent: RawGroup,
-    role: "reader" | "writer" | "admin" | "inherit" = "inherit",
+    role: "reader" | "writer" | "manager" | "admin" | "inherit" = "inherit",
   ) {
     if (this.isSelfExtension(parent)) {
       return;
@@ -1085,11 +1081,17 @@ export class RawGroup<
   removeMember(account: RawAccount | ControlledAccountOrAgent | Everyone) {
     const memberKey = typeof account === "string" ? account : account.id;
 
-    if (this.myRole() === "admin") {
+    if (this.myRole() === "admin" || this.myRole() === "manager") {
       this.rotateReadKey(memberKey);
     }
 
     this.set(memberKey, "revoked", "trusting");
+
+    if (this.get(memberKey) !== "revoked") {
+      throw new Error(
+        `Failed to revoke role to ${memberKey} (role of current account is ${this.myRole()})`,
+      );
+    }
   }
 
   /**
@@ -1254,21 +1256,28 @@ export class RawGroup<
 
 export function isInheritableRole(
   roleInParent: Role | undefined,
-): roleInParent is "revoked" | "admin" | "writer" | "reader" {
+): roleInParent is "revoked" | "admin" | "manager" | "writer" | "reader" {
   return (
     roleInParent === "revoked" ||
     roleInParent === "admin" ||
+    roleInParent === "manager" ||
     roleInParent === "writer" ||
     roleInParent === "reader"
   );
 }
 
 function isMorePermissiveAndShouldInherit(
-  roleInParent: "revoked" | "admin" | "writer" | "reader",
+  roleInParent: "revoked" | "admin" | "manager" | "writer" | "reader",
   roleInChild: Role | undefined,
 ) {
   if (roleInParent === "revoked") {
     return true;
+  }
+
+  if (roleInParent === "manager") {
+    return (
+      !roleInChild || (roleInChild !== "manager" && roleInChild !== "admin")
+    );
   }
 
   if (roleInParent === "admin") {
@@ -1314,6 +1323,7 @@ const canRead = (
   const role = group.get(key);
   return (
     role === "admin" ||
+    role === "manager" ||
     role === "writer" ||
     role === "reader" ||
     role === "adminInvite" ||

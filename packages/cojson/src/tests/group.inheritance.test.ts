@@ -1040,6 +1040,39 @@ describe("extend with role mapping", () => {
     expect(childGroupOnNode2.roleOf(node3.accountID)).toEqual("reader");
   });
 
+  test("mapping to manager should add the ability to add members", async () => {
+    const { node1, node2, node3 } = await createThreeConnectedNodes(
+      "server",
+      "server",
+      "server",
+    );
+
+    const group = node1.node.createGroup();
+    group.addMember(
+      await loadCoValueOrFail(node1.node, node2.accountID),
+      "reader",
+    );
+
+    const childGroup = node1.node.createGroup();
+    childGroup.extend(group, "manager");
+
+    expect(childGroup.roleOf(node2.accountID)).toEqual("manager");
+
+    await childGroup.core.waitForSync();
+
+    const childGroupOnNode2 = await loadCoValueOrFail(
+      node2.node,
+      childGroup.id,
+    );
+
+    childGroupOnNode2.addMember(
+      await loadCoValueOrFail(node2.node, node3.accountID),
+      "reader",
+    );
+
+    expect(childGroupOnNode2.roleOf(node3.accountID)).toEqual("reader");
+  });
+
   test("mapping to reader should remove the ability to add members", async () => {
     const { node1, node2, node3 } = await createThreeConnectedNodes(
       "server",
