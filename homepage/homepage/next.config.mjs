@@ -35,6 +35,12 @@ const config = {
         destination: "/docs/react",
         permanent: false,
       },
+      {
+        source: "/cloud",
+        destination: "/",
+        permanent: true,
+      },
+
     ];
   },
 };

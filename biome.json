@@ -19,7 +19,6 @@
       "!**/examples/**/*svelte*/**",
       "!**/starters/**/*svelte*/**",
       "!**/examples/server-worker-inbox/src/routeTree.gen.ts",
-      "!**/homepage/homepage/**",
       "!**/package.json",
       "!**/*svelte*/**"
     ]
@@ -28,7 +27,13 @@
     "enabled": true,
     "indentStyle": "space"
   },
-  "assist": { "actions": { "source": { "organizeImports": "off" } } },
+  "assist": {
+    "actions": {
+      "source": {
+        "organizeImports": "off"
+      }
+    }
+  },
   "linter": {
     "enabled": false,
     "rules": {

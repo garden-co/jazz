@@ -3,9 +3,7 @@ import { CollaborationFeaturesSection } from "@/components/home/CollaborationFea
 import { EarlyAdopterSection } from "@/components/home/EarlyAdopterSection";
 import { EncryptionSection } from "@/components/home/EncryptionSection";
 import { FeaturesSection } from "@/components/home/FeaturesSection";
-import { GetStartedSnippetSelect } from "@/components/home/GetStartedSnippetSelect";
 import { HeroSection } from "@/components/home/HeroSection";
-import { HowJazzWorksSection } from "@/components/home/HowJazzWorksSection";
 import { LocalFirstFeaturesSection } from "@/components/home/LocalFirstFeaturesSection";
 import ProblemStatementSection from "@/components/home/ProblemStatementSection";
 import { SupportedEnvironmentsSection } from "@/components/home/SupportedEnvironmentsSection";
@@ -14,12 +12,9 @@ import { Testimonial } from "@garden-co/design-system/src/components/molecules/T
 export default function Home() {
   return (
     <>
-        <HeroSection />
+      <HeroSection />
       <div className="container flex flex-col gap-12 lg:gap-20">
-
-        <GetStartedSnippetSelect />
         <SupportedEnvironmentsSection />
-        <HowJazzWorksSection />
 
         <Testimonial name="Spreadsheet app (stealth)" role="CTO">
           <p>
