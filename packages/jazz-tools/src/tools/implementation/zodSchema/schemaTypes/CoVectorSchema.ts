@@ -4,7 +4,7 @@ import {
   CoVector,
   Group,
   InstanceOrPrimitiveOfSchema,
-  InstanceOrPrimitiveOfSchemaCoValuesNullable,
+  InstanceOrPrimitiveOfSchemaCoValuesMaybeLoaded,
   coOptionalDefiner,
 } from "../../../internal.js";
 import { CoOptionalSchema } from "./CoOptionalSchema.js";
@@ -63,7 +63,7 @@ export class CoVectorSchema implements CoreCoVectorSchema {
   load(
     id: string,
     options?: { loadAs: Account | AnonymousJazzAgent },
-  ): Promise<CoVectorInstanceNullable> {
+  ): Promise<MaybeLoadedCoVectorInstance> {
     return this.coValueClass.load(id, options);
   }
 
@@ -74,14 +74,14 @@ export class CoVectorSchema implements CoreCoVectorSchema {
     id: string,
     options: { loadAs: Account | AnonymousJazzAgent },
     listener: (
-      value: CoVectorInstanceNullable,
+      value: MaybeLoadedCoVectorInstance,
       unsubscribe: () => void,
     ) => void,
   ): () => void;
   subscribe(
     id: string,
     listener: (
-      value: CoVectorInstanceNullable,
+      value: MaybeLoadedCoVectorInstance,
       unsubscribe: () => void,
     ) => void,
   ): () => void;
@@ -101,5 +101,5 @@ export class CoVectorSchema implements CoreCoVectorSchema {
 
 export type CoVectorInstance = InstanceOrPrimitiveOfSchema<CoVectorSchema>;
 
-export type CoVectorInstanceNullable =
-  InstanceOrPrimitiveOfSchemaCoValuesNullable<CoVectorSchema>;
+export type MaybeLoadedCoVectorInstance =
+  InstanceOrPrimitiveOfSchemaCoValuesMaybeLoaded<CoVectorSchema>;

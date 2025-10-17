@@ -46,10 +46,10 @@ import { JazzFestAccount } from "@/app/schema";
 export function Festival() {
   // [!code ++:1]
   const [inviteLink, setInviteLink] = useState<string>("");
-  const { me } = useAccount(JazzFestAccount, { 
-    resolve: { root: { myFestival: true } } 
+  const me = useAccount(JazzFestAccount, { 
+    resolve: { root: { myFestival: { $each: true } } } 
   });
-  if (!me) return null; // not loaded yet
+  if (!me.$isLoaded) return null;
   // [!code ++:4]
   const inviteLinkClickHandler = () => {
     const link = createInviteLink(me.root.myFestival, "writer")
@@ -59,7 +59,7 @@ export function Festival() {
     // [!code ++:1]
     <>
       <ul>
-        {me.root.myFestival.map((band) => band && <li key={band.$jazz.id}>{band.name}</li>)}
+        {me.root.myFestival.map((band) => <li key={band.$jazz.id}>{band.name}</li>)}
       </ul>
       {/* [!code ++:5] */}
       <input type="text" value={inviteLink} readOnly />
@@ -81,22 +81,24 @@ export function Festival() {
   import { JazzFestAccount } from "$lib/schema";
 
   const me = new AccountCoState(JazzFestAccount, { 
-    resolve: { root: { myFestival: true } } 
+    resolve: { root: { myFestival: { $each: true } } } 
   });
   // [!code ++:7]
   let inviteLink = $state<string | null>(null);
 
   function inviteLinkClickHandler() {
-    if (!me.current) return; // not loaded yet
+    if (!me.current.$isLoaded) return;
     const link = createInviteLink(me.current?.root.myFestival, "writer")
     inviteLink = link;
   }
 </script>
 
 <ul>
-  {#each me.current?.root?.myFestival || [] as band}
-    <li>{band?.name}</li>
-  {/each}
+  {#if me.current.$isLoaded}
+    {#each me.current.root.myFestival as band}
+      <li>{band.name}</li>
+    {/each}
+  {/if}
 </ul>
 
 <input type="text" bind:value={inviteLink} readonly />
@@ -137,8 +139,8 @@ import { Festival as FestivalSchema, JazzFestAccount } from "@/app/schema";
 
 export function Festival() {
   const [inviteLink, setInviteLink] = useState<string>("");
-  const { me } = useAccount(JazzFestAccount, { 
-    resolve: { root: { myFestival: true } } 
+  const me = useAccount(JazzFestAccount, { 
+    resolve: { root: { myFestival: { $each: true } } } 
   });
   // [!code ++:7]
   const router = useRouter();
@@ -148,7 +150,7 @@ export function Festival() {
       router.push(`/festival/${festivalID}`);
     },
   });
-  if (!me) return null; // not loaded yet
+  if (!me.$isLoaded) return null;
 
   const inviteLinkClickHandler = () => {
     const link = createInviteLink(me.root.myFestival, "writer")
@@ -157,7 +159,7 @@ export function Festival() {
   return (
     <>
       <ul>
-        {me.root.myFestival.map((band) => band && <li key={band.$jazz.id}>{band.name}</li>)}
+        {me.root.myFestival.map((band) => <li key={band.$jazz.id}>{band.name}</li>)}
       </ul>
       <input type="text" value={inviteLink} readOnly />
       <button onClick={inviteLinkClickHandler}>
@@ -180,7 +182,7 @@ export function Festival() {
   import { Festival, JazzFestAccount } from "$lib/schema";
 
   const me = new AccountCoState(JazzFestAccount, { 
-    resolve: { root: { myFestival: true } } 
+    resolve: { root: { myFestival: { $each: true } } } 
   });
   let inviteLink = $state<string | null>(null);
 
@@ -193,16 +195,18 @@ export function Festival() {
 	});
 
   function inviteLinkClickHandler() {
-    if (!me.current) return; // not loaded yet
+    if (!me.current.$isLoaded) return;
     const link = createInviteLink(me.current?.root.myFestival, "writer")
     inviteLink = link;
   }
 </script>
 
 <ul>
-  {#each me.current?.root?.myFestival || [] as band}
-    <li>{band?.name}</li>
-  {/each}
+  {#if me.current.$isLoaded}
+    {#each me.current.root.myFestival as band}
+      <li>{band.name}</li>
+    {/each}
+  {/if}
 </ul>
 
 <input type="text" bind:value={inviteLink} readonly />
@@ -227,7 +231,8 @@ import {
   createInviteLink,
   useAcceptInvite,
   useAccount,
-  useCoState
+  useAgent,
+  useCoState,
 } from "jazz-tools/react";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
@@ -235,10 +240,9 @@ import { Festival as FestivalSchema, JazzFestAccount } from "@/app/schema";
 
 export function Festival({id}: {id?: string}) {
   const [inviteLink, setInviteLink] = useState<string>("");
-  // [!code --:1]
-  const { me } = useAccount(JazzFestAccount, {
   // [!code ++:1]
-  const { me, agent } = useAccount(JazzFestAccount, {
+  const agent = useAgent();
+  const me = useAccount(JazzFestAccount, {
     resolve: { root: { myFestival: true } },
   });
   const router = useRouter();
@@ -256,7 +260,7 @@ export function Festival({id}: {id?: string}) {
   
   const festivalId = id ?? me?.root.myFestival.$jazz.id;
   const festival = useCoState(FestivalSchema, festivalId);
-  if (!festival) return null; // not loaded yet
+  if (!festival.$isLoaded) return null;
   const inviteLinkClickHandler = () => {
     const link = createInviteLink(festival, "writer");
     setInviteLink(link);
@@ -317,7 +321,7 @@ export function Festival() {
 // [!code ++:1]
 export function Festival({id}: {id?: string}) {
   const [inviteLink, setInviteLink] = useState<string>("");
-  const { me } = useAccount(JazzFestAccount, {
+  const me = useAccount(JazzFestAccount, {
     resolve: { root: { myFestival: true } },
   });
   const router = useRouter();
@@ -328,12 +332,12 @@ export function Festival({id}: {id?: string}) {
     },
   });
   // [!code ++:2]
-  const festivalId = id ?? me?.root.myFestival.$jazz.id;
+  const festivalId = id ?? (me.$isLoaded ? me.root.myFestival.$jazz.id : undefined);
   const festival = useCoState(FestivalSchema, festivalId);
   // [!code --:1]
-  if (!me) return null; // not loaded yet
+  if (!me.$isLoaded) return null;
   // [!code ++:1]
-  if (!festival) return null; // not loaded yet
+  if (!festival.$isLoaded) return null;
   const inviteLinkClickHandler = () => {
     // [!code --:1]
     const link = createInviteLink(me.root.myFestival, "writer");
@@ -348,10 +352,10 @@ export function Festival({id}: {id?: string}) {
         {me.root.myFestival.map(
         {/* [!code ++:1] */}  
         {festival.map(
-          (band) => band && <li key={band.$jazz.id}>{band.name}</li>,
+          (band) => band.$isLoaded && <li key={band.$jazz.id}>{band.name}</li>,
         )}
       </ul>
-      {me?.canAdmin(festival) && (
+      {me.canAdmin(festival) && (
         <input type="text" value={inviteLink} readOnly />
         <button type="button" onClick={inviteLinkClickHandler}>
           Create Invite Link
@@ -378,7 +382,7 @@ export function Festival({id}: {id?: string}) {
     resolve: { root: { myFestival: true } } 
   });
   // [!code ++:2]
-  const festivalId = $derived(id ?? me.current?.root.myFestival.$jazz.id);
+  const festivalId = $derived(id ?? (me.current.$isLoaded ? me.current.root.myFestival.$jazz.id : undefined));
 	const festival = $derived(new CoState(Festival, festivalId));
   let inviteLink = $state<string | null>(null);
 
@@ -390,19 +394,21 @@ export function Festival({id}: {id?: string}) {
 	});
 
   function inviteLinkClickHandler() {
-    if (!me.current) return; // not loaded yet
+    if (!me.current.$isLoaded) return;
     const link = createInviteLink(me.current?.root.myFestival, "writer")
     inviteLink = link;
   }
 </script>
 
 <ul>
-  <!-- [!code --:1] -->
-  {#each me.current?.root?.myFestival || [] as band}
-  <!-- [!code ++:1] -->
-  {#each festival?.current || [] as band}
-    <li>{band?.name}</li>
-  {/each}
+  {#if me.current.$isLoaded}
+    <!-- [!code --:1] -->
+    {#each me.current.root.myFestival as band}
+    <!-- [!code ++:1] -->
+    {#each festival.current as band}
+      <li>{band.$isLoaded ? band.name : null}</li>
+    {/each}
+  {/if}
 </ul>
 
 {#if me.current?.canAdmin(festival.current)}
@@ -443,21 +449,21 @@ import { JazzFestAccount, Festival } from "@/app/schema";
 export function NewBand() {
 // [!code ++:1]
 export function NewBand({ id }: { id?: string }) {
-  const { me } = useAccount(JazzFestAccount, {
+  const me = useAccount(JazzFestAccount, {
       resolve: { root: { myFestival: true } }
     });
   const [name, setName] = useState("");
 
   // [!code ++:2]
-  const festivalId = id ?? me?.root.myFestival.$jazz.id;
+  const festivalId = id ?? me.$isLoaded ? me.root.myFestival.$jazz.id : undefined;
   const festival = useCoState(Festival, festivalId);
   
   const handleSave = () => {
     // [!code --:2]
-    if (!me) return; // not loaded yet
+    if (!me.$isLoaded) return;
     me.root.myFestival.$jazz.push({ name });
     // [!code ++:2]
-    if (!festival) return; // not loaded yet
+    if (!festival.$isLoaded) return;
     festival.$jazz.push({ name });
     setName("");
   };
@@ -493,15 +499,15 @@ export function NewBand({ id }: { id?: string }) {
   let name = $state("");
 
     // [!code ++:2]
-  const festivalId = $derived(id ?? me.current?.root.myFestival.$jazz.id);
+  const festivalId = $derived(id ?? me.current.$isLoaded ? me.current.root.myFestival.$jazz.id : undefined);
 	const festival = $derived(new CoState(Festival, festivalId));
 
   function handleSave() {
     // [!code --:2]
-    if (!me.current) return; // not loaded yet
+    if (!me.current.$isLoaded) return;
     me.current.root.myFestival.$jazz.push({ name });
     // [!code ++:2]
-    if (!festival.current) return; // not loaded yet
+    if (!festival.current.$isLoaded) return;
     festival.current.$jazz.push({ name });
     name = "";
   }

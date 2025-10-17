@@ -299,7 +299,7 @@ async function approveJoinRequest(
 ) {
   const account = await Account.load(joinRequest.$jazz.refs.account.id);
 
-  if (account) {
+  if (account.$isLoaded) {
     targetGroup.addMember(account, "reader");
     joinRequest.$jazz.set("status", "approved");
 

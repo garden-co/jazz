@@ -68,11 +68,12 @@ main {
 </style>
 
 <script setup lang="ts">
-import { useAcceptInvite, useAccount } from "community-jazz-vue";
+import { useAcceptInvite, useAccount, useLogOut } from "community-jazz-vue";
 import { useRouter } from "vue-router";
 import { TodoProject } from "./schema";
 
-const { me, logOut } = useAccount();
+const me = useAccount();
+const logOut = useLogOut();
 const router = useRouter();
 
 async function logoutHandler() {

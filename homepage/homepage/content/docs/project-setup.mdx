@@ -210,7 +210,7 @@ export default async function ServerSidePage(props: {
         This is a server component!
       </div>
       <label>
-        <div className="text-sm">Item title "{item?.title}"</div>
+        {item.$isLoaded && <div className="text-sm">Item title "{item.title}"</div>}
       </label>
     </div>
   );
@@ -240,7 +240,7 @@ export default async function ServerSidePage(props: {
     This component can render on the server!
   </div>
   <label>
-    <div class="text-sm">Item title {#await item then item}"{item?.title}"{/await}</div>
+    <div class="text-sm">Item title {#await item then item}"{item.$isLoaded ? item.title : ""}"{/await}</div>
   </label>
 </div>
 ```

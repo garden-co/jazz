@@ -3,6 +3,7 @@ import {
   AnonymousJazzAgent,
   CoValue,
   CoValueClass,
+  CoValueLoadingState,
   ID,
   RegisteredSchemas,
   type SubscriptionScope,
@@ -18,6 +19,13 @@ export abstract class CoValueBase implements CoValue {
   declare [TypeSym]: string;
 
   declare abstract $jazz: CoValueJazzApi<this>;
+  declare $isLoaded: true;
+
+  constructor() {
+    Object.defineProperties(this, {
+      $isLoaded: { value: true, enumerable: false },
+    });
+  }
 
   /** @category Internals */
   static fromRaw<V extends CoValue>(this: CoValueClass<V>, raw: RawCoValue): V {
@@ -58,6 +66,10 @@ export abstract class CoValueJazzApi<V extends CoValue> {
     }
 
     return this.raw.id;
+  }
+
+  get loadingState(): typeof CoValueLoadingState.LOADED {
+    return CoValueLoadingState.LOADED;
   }
 
   abstract get raw(): RawCoValue;

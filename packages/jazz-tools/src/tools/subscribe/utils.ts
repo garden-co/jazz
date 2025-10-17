@@ -8,6 +8,7 @@ import {
 } from "../internal.js";
 import { coValuesCache } from "../lib/cache.js";
 import { SubscriptionScope } from "./SubscriptionScope.js";
+import { CoValueLoadingState } from "./types.js";
 
 export function myRoleForRawValue(raw: RawCoValue): Role | undefined {
   const rawOwner = raw.group;
@@ -36,7 +37,7 @@ export function createCoValue<D extends CoValue>(
   });
 
   return {
-    type: "loaded" as const,
+    type: CoValueLoadingState.LOADED,
     value: freshValueInstance,
     id: subscriptionScope.id,
   };

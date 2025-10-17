@@ -5,15 +5,15 @@ import {
   CoValue,
   CoValueClass,
   CoValueJazzApi,
+  CoValueLoadingState,
   ID,
+  MaybeLoaded,
   Resolved,
   SubscribeListenerOptions,
   SubscribeRestArgs,
   TypeSym,
   unstable_mergeBranch,
   parseCoValueCreateOptions,
-} from "../internal.js";
-import {
   inspect,
   loadCoValueWithoutMe,
   parseSubscribeRestArgs,
@@ -29,6 +29,7 @@ export class CoPlainText extends String implements CoValue {
   declare [TypeSym]: "CoPlainText";
 
   declare $jazz: CoTextJazzApi<this>;
+  declare $isLoaded: true;
 
   /** @internal */
   constructor(
@@ -51,6 +52,7 @@ export class CoPlainText extends String implements CoValue {
           value: new CoTextJazzApi(this, raw),
           enumerable: false,
         },
+        $isLoaded: { value: true, enumerable: false },
       });
       return;
     }
@@ -64,6 +66,7 @@ export class CoPlainText extends String implements CoValue {
           value: new CoTextJazzApi(this, raw),
           enumerable: false,
         },
+        $isLoaded: { value: true, enumerable: false },
       });
       return;
     }
@@ -161,7 +164,7 @@ export class CoPlainText extends String implements CoValue {
     this: CoValueClass<T>,
     id: ID<T>,
     options?: { loadAs?: Account | AnonymousJazzAgent },
-  ): Promise<T | null> {
+  ): Promise<MaybeLoaded<T>> {
     return loadCoValueWithoutMe(this, id, options);
   }
 

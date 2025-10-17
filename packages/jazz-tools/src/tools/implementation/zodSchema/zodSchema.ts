@@ -2,6 +2,7 @@ import { LocalNode, RawAccount } from "cojson";
 import {
   Account,
   AccountClass,
+  LoadedAndRequired,
   CoRecordSchema,
   CoValueClass,
   CoValueFromRaw,
@@ -45,7 +46,7 @@ import {
   CoreRichTextSchema,
   RichTextSchema,
 } from "./schemaTypes/RichTextSchema.js";
-import { InstanceOfSchemaCoValuesNullable } from "./typeConverters/InstanceOfSchemaCoValuesNullable.js";
+import { InstanceOfSchemaCoValuesMaybeLoaded } from "./typeConverters/InstanceOfSchemaCoValuesMaybeLoaded.js";
 import { z } from "./zodReExport.js";
 import { CoreGroupSchema } from "./schemaTypes/GroupSchema.js";
 import { GroupSchema } from "./schemaTypes/GroupSchema.js";
@@ -92,8 +93,8 @@ export type CoValueSchemaFromCoreSchema<S extends CoreCoValueSchema> =
 export type CoValueClassFromAnySchema<S extends CoValueClassOrSchema> =
   S extends CoValueClass<any>
     ? S
-    : CoValueClass<NonNullable<InstanceOfSchema<S>>> &
-        CoValueFromRaw<NonNullable<InstanceOfSchema<S>>> &
+    : CoValueClass<LoadedAndRequired<InstanceOfSchema<S>>> &
+        CoValueFromRaw<LoadedAndRequired<InstanceOfSchema<S>>> &
         (S extends CoreAccountSchema ? AccountClassEssentials : {});
 
 type AccountClassEssentials = {
@@ -122,13 +123,16 @@ export type AnyZodOrCoValueSchema = AnyZodSchema | CoreCoValueSchema;
 export type Loaded<
   T extends CoValueClassOrSchema,
   R extends ResolveQuery<T> = true,
-> = Resolved<NonNullable<InstanceOfSchemaCoValuesNullable<T>>, R>;
+> = Resolved<LoadedAndRequired<InstanceOfSchemaCoValuesMaybeLoaded<T>>, R>;
 
 export type ResolveQuery<T extends CoValueClassOrSchema> = RefsToResolve<
-  NonNullable<InstanceOfSchemaCoValuesNullable<T>>
+  LoadedAndRequired<InstanceOfSchemaCoValuesMaybeLoaded<T>>
 >;
 
 export type ResolveQueryStrict<
   T extends CoValueClassOrSchema,
   R extends ResolveQuery<T>,
-> = RefsToResolveStrict<NonNullable<InstanceOfSchemaCoValuesNullable<T>>, R>;
+> = RefsToResolveStrict<
+  LoadedAndRequired<InstanceOfSchemaCoValuesMaybeLoaded<T>>,
+  R
+>;

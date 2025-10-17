@@ -10,12 +10,12 @@
   const fileId = $page.params.fileId;
 
   const file = $derived(new CoState(SharedFile, fileId));
-  const isAdmin = $derived(file.current?.$jazz.owner.myRole() === 'admin');
+  const isAdmin = $derived(file.current.$isLoaded && file.current.$jazz.owner.myRole() === 'admin');
 
-  const fileStreamId = $derived(file.current?.$jazz.refs.file?.id);
+  const fileStreamId = $derived(file.current?.$isLoaded ? file.current.$jazz.refs.file.id : null);
 
   async function downloadFile() {
-    if (!fileStreamId || !file.current) {
+    if (!fileStreamId || !file.current.$isLoaded) {
       toast.error('Failed to download file');
       return;
     }
@@ -36,7 +36,7 @@
 
   async function shareFile() {
     try {
-      const fileUrl = `${window.location.origin}/file/${file.current?.$jazz.id}`;
+      const fileUrl = `${window.location.origin}/file/${file.current.$jazz.id}`;
       await navigator.clipboard.writeText(fileUrl);
       toast.success('Share link copied to clipboard');
     } catch (error) {
@@ -44,10 +44,12 @@
       toast.error('Failed to copy share link');
     }
   }
+
+  const fileName = $derived(file.current?.$isLoaded ? file.current.name : '');
 </script>
 
 <svelte:head>
-  <title>{file.current?.name} | File Share</title>
+  <title>{fileName} | File Share</title>
 </svelte:head>
 
 {#if file.current}
@@ -56,7 +58,7 @@
       <div class="mb-6 flex items-center justify-between">
         <div class="flex items-center gap-3">
           <File class="h-6 w-6" />
-          <h1 class="text-2xl font-semibold">{file.current.name}</h1>
+          <h1 class="text-2xl font-semibold">{fileName}</h1>
         </div>
         <div class="flex gap-2">
           {#if isAdmin}
@@ -68,7 +70,7 @@
               Share
             </button>
           {/if}
-          {#if file.current.$jazz.refs.file}
+          {#if file.current.$isLoaded && file.current.$jazz.refs.file}
             <button
               onclick={downloadFile}
               class="flex items-center gap-2 rounded-md bg-blue-600 px-4 py-2 text-white hover:bg-blue-700"
@@ -82,7 +84,7 @@
 
       <p class="text-gray-600">
         {isAdmin ? 'You own this file' : 'Shared with you'} • Uploaded {new Date(
-          file.current.createdAt || 0
+          file.current.$isLoaded ? file.current.createdAt : 0
         ).toLocaleDateString()}
       </p>
     </div>

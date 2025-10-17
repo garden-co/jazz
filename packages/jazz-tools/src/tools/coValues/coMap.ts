@@ -10,12 +10,15 @@ import {
 } from "cojson";
 import {
   AnonymousJazzAgent,
+  AsLoaded,
+  LoadedAndRequired,
   CoFieldInit,
   CoValue,
   CoValueClass,
   getCoValueOwner,
   Group,
   ID,
+  MaybeLoaded,
   PartialOnUndefined,
   RefEncoded,
   RefIfCoValue,
@@ -28,13 +31,11 @@ import {
   SubscribeRestArgs,
   TypeSym,
   BranchDefinition,
-} from "../internal.js";
-import {
   Account,
   CoValueBase,
   CoValueJazzApi,
+  CoValueLoadingState,
   ItemsSym,
-  NotNull,
   Ref,
   RegisteredSchemas,
   SchemaInit,
@@ -53,7 +54,7 @@ import {
   subscribeToExistingCoValue,
 } from "../internal.js";
 
-type CoMapEdit<V> = {
+export type CoMapEdit<V> = {
   value?: V;
   ref?: RefIfCoValue<V>;
   by: Account | null;
@@ -61,9 +62,9 @@ type CoMapEdit<V> = {
   key?: string;
 };
 
-type LastAndAllCoMapEdits<V> = CoMapEdit<V> & { all: CoMapEdit<V>[] };
+export type LastAndAllCoMapEdits<V> = CoMapEdit<V> & { all: CoMapEdit<V>[] };
 
-type CoMapEdits<M extends CoMap> = {
+export type CoMapEdits<M extends CoMap> = {
   [Key in CoKeys<M>]?: LastAndAllCoMapEdits<M[Key]>;
 };
 
@@ -374,7 +375,7 @@ export class CoMap extends CoValueBase implements CoValue {
       loadAs?: Account | AnonymousJazzAgent;
       skipRetry?: boolean;
     },
-  ): Promise<Resolved<M, R> | null> {
+  ): Promise<MaybeLoaded<Resolved<M, R>>> {
     return loadCoValueWithoutMe(this, id, options);
   }
 
@@ -463,7 +464,7 @@ export class CoMap extends CoValueBase implements CoValue {
   /**
    * Given some data, updates an existing CoMap or initialises a new one if none exists.
    *
-   * Note: This method respects resolve options, and thus can return `null` if the references cannot be resolved.
+   * Note: This method respects resolve options, and thus can return a not-loaded value if the references cannot be resolved.
    *
    * @example
    * ```ts
@@ -496,27 +497,29 @@ export class CoMap extends CoValueBase implements CoValue {
       owner: Account | Group;
       resolve?: RefsToResolveStrict<M, R>;
     },
-  ): Promise<Resolved<M, R> | null> {
+  ): Promise<MaybeLoaded<Resolved<M, R>>> {
     const mapId = CoMap._findUnique(
       options.unique,
       options.owner.$jazz.id,
       options.owner.$jazz.loadedAs,
     );
-    let map: Resolved<M, R> | null = await loadCoValueWithoutMe(this, mapId, {
-      ...options,
-      loadAs: options.owner.$jazz.loadedAs,
-      skipRetry: true,
-    });
-    if (!map) {
+    let map: MaybeLoaded<Resolved<M, R>> = await loadCoValueWithoutMe(
+      this,
+      mapId,
+      {
+        ...options,
+        loadAs: options.owner.$jazz.loadedAs,
+        skipRetry: true,
+      },
+    );
+    if (!map.$isLoaded) {
       const instance = new this();
       map = CoMap._createCoMap(instance, options.value, {
         owner: options.owner,
         unique: options.unique,
       }) as Resolved<M, R>;
     } else {
-      (map as M).$jazz.applyDiff(
-        options.value as unknown as Partial<CoMapInit<M>>,
-      );
+      map.$jazz.applyDiff(options.value as unknown as Partial<CoMapInit<M>>);
     }
 
     return await loadCoValueWithoutMe(this, mapId, {
@@ -531,7 +534,7 @@ export class CoMap extends CoValueBase implements CoValue {
    * @param unique The unique identifier of the CoMap to load.
    * @param ownerID The ID of the owner of the CoMap.
    * @param options Additional options for loading the CoMap.
-   * @returns The loaded CoMap, or null if unavailable.
+   * @returns The loaded CoMap, or an not-loaded value if unavailable.
    *
    * @deprecated Use `co.map(...).loadUnique` instead.
    */
@@ -543,7 +546,7 @@ export class CoMap extends CoValueBase implements CoValue {
       resolve?: RefsToResolveStrict<M, R>;
       loadAs?: Account | AnonymousJazzAgent;
     },
-  ): Promise<Resolved<M, R> | null> {
+  ): Promise<MaybeLoaded<Resolved<M, R>>> {
     return loadCoValueWithoutMe(
       this,
       CoMap._findUnique(unique, ownerID, options?.loadAs),
@@ -757,12 +760,12 @@ class CoMapJazzApi<M extends CoMap> extends CoValueJazzApi<M> {
    **/
   get refs(): Simplify<
     {
-      [Key in CoKeys<M> as NonNullable<M[Key]> extends CoValue
+      [Key in CoKeys<M> as LoadedAndRequired<M[Key]> extends CoValue
         ? Key
         : never]?: RefIfCoValue<M[Key]>;
     } & {
       // Non-loaded CoValue refs (i.e. refs with type CoValue | null) are still required refs
-      [Key in CoKeys<M> as NotNull<M[Key]> extends CoValue
+      [Key in CoKeys<M> as AsLoaded<M[Key]> extends CoValue
         ? Key
         : never]: RefIfCoValue<M[Key]>;
     }

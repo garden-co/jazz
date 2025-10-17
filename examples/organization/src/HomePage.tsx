@@ -5,17 +5,17 @@ import { Heading } from "./components/Heading.tsx";
 import { JazzAccount } from "./schema";
 
 export function HomePage() {
-  const { me } = useAccount(JazzAccount, {
+  const me = useAccount(JazzAccount, {
     resolve: {
       root: {
         organizations: {
-          $each: { $onError: null },
+          $each: { $onError: "catch" },
         },
       },
     },
   });
 
-  if (!me?.root.organizations) return;
+  if (!me.$isLoaded) return;
 
   return (
     <Layout>
@@ -28,7 +28,7 @@ export function HomePage() {
         <div className="divide-y">
           {me.root.organizations.length > 0 ? (
             me.root.organizations.map((project) =>
-              project ? (
+              project.$isLoaded ? (
                 <a
                   key={project.$jazz.id}
                   className="px-4 py-5 sm:px-6 font-medium block"

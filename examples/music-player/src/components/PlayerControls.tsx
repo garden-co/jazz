@@ -14,12 +14,15 @@ export function PlayerControls({ mediaPlayer }: { mediaPlayer: MediaPlayer }) {
   const isPlaying = playState.value === "play";
 
   const activePlaylistTitle = useAccountSelector({
-    select: (me) => me.root.activePlaylist?.title ?? "All tracks",
+    select: (me) =>
+      me.$isLoaded && me.root.activePlaylist?.$isLoaded
+        ? (me.root.activePlaylist.title ?? "All tracks")
+        : "All tracks",
   });
 
   const activeTrack = useCoState(MusicTrack, mediaPlayer.activeTrackId);
 
-  if (!activeTrack) return null;
+  if (!activeTrack.$isLoaded) return null;
 
   const activeTrackTitle = activeTrack.title;
 

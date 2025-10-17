@@ -32,7 +32,9 @@ export function HomePage({ mediaPlayer }: { mediaPlayer: MediaPlayer }) {
 
   const params = useParams<{ playlistId: string }>();
   const playlistId = useAccountSelector({
-    select: (me) => params.playlistId ?? me.root.$jazz.refs.rootPlaylist.id,
+    select: (me) =>
+      params.playlistId ??
+      (me.$isLoaded ? me.root.$jazz.refs.rootPlaylist.id : undefined),
   });
 
   const playlist = useCoState(Playlist, playlistId, {
@@ -41,16 +43,19 @@ export function HomePage({ mediaPlayer }: { mediaPlayer: MediaPlayer }) {
         $each: true,
       },
     },
+    select: (playlist) => (playlist.$isLoaded ? playlist : undefined),
+  });
+
+  const isPlaylistOwner = useAccountSelector({
+    select: (me) => playlist && me.$isLoaded && me.canAdmin(playlist),
+  });
+  const isActivePlaylist = useAccountSelector({
+    select: (me) =>
+      me.$isLoaded && playlistId === me.root.activePlaylist?.$jazz.id,
   });
 
   const membersIds = playlist?.$jazz.owner.members.map((member) => member.id);
   const isRootPlaylist = !params.playlistId;
-  const isPlaylistOwner = useAccountSelector({
-    select: (me) => Boolean(playlist && me.canAdmin(playlist)),
-  });
-  const isActivePlaylist = useAccountSelector({
-    select: (me) => playlistId === me.root.activePlaylist?.$jazz.id,
-  });
 
   const handlePlaylistShareClick = async () => {
     if (!isPlaylistOwner || !playlist) return;

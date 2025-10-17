@@ -124,7 +124,7 @@ const thumbnail = await createImage(myBlob, {
 });
 
 // or, in case of migration, you can use the original stored image.
-const newThumb = await createImage(mainImage!.original!.toBlob()!, {
+const newThumb = await createImage(mainImage.original.toBlob()!, {
   maxSize: 100,
 });
 
@@ -174,7 +174,7 @@ const image = await ImageDefinition.load("123", {
   },
 });
 
-if(image) {
+if(image.$isLoaded) {
   console.log({
     originalSize: image.originalSize,
     placeholderDataUrl: image.placeholderDataURL,
@@ -238,7 +238,7 @@ import { highestResAvailable } from "jazz-tools/media";
 
 const image = await ImageDefinition.load(imageId);
 
-if(image === null) {
+if(!image.$isLoaded) {
   throw new Error("Image not found");
 }
 

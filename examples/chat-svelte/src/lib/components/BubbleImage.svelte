@@ -5,7 +5,7 @@
 </script>
 
 <Image
-  imageId={image.id}
+  imageId={image.$jazz.id}
   alt=""
   class="h-auto max-h-[20rem] max-w-full rounded-t-xl mb-1"
 />

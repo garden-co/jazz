@@ -9,7 +9,7 @@ import { getDownloaderPeerUrl } from "./lib/getDownloaderPeerUrl";
 import { getDefaultFileSize, getIsAutoUpload } from "./lib/searchParams";
 import { UploadedFile } from "./schema";
 export function UploaderPeer() {
-  const account = useAccount();
+  const me = useAccount();
   const [uploadedFileId, setUploadedFileId] = useState<string | undefined>(
     undefined,
   );
@@ -20,7 +20,7 @@ export function UploaderPeer() {
   const testFile = useCoState(UploadedFile, uploadedFileId, {});
 
   async function uploadTestFile() {
-    if (!account.me) return;
+    if (!me.$isLoaded) return;
 
     setUploadedFileId(undefined);
     setSynced(false);
@@ -28,7 +28,7 @@ export function UploaderPeer() {
     // Mark the sync start
     performance.mark("sync-start");
 
-    const file = await generateTestFile(account.me, bytes);
+    const file = await generateTestFile(me, bytes);
 
     // Create a credential-less iframe to spawn the downloader peer
     const iframe = createCredentiallessIframe(getDownloaderPeerUrl(file));
@@ -37,7 +37,7 @@ export function UploaderPeer() {
     setSyncDuration(null);
     setUploadedFileId(file.$jazz.id);
 
-    account.me.$jazz.waitForAllCoValuesSync().then(() => {
+    me.$jazz.waitForAllCoValuesSync().then(() => {
       setSynced(true);
     });
 
@@ -47,7 +47,7 @@ export function UploaderPeer() {
       coValueClassFromCoValueClassOrSchema(UploadedFile),
       file.$jazz.id,
       (value) => value.syncCompleted,
-      { loadAs: account.me },
+      { loadAs: me },
     );
 
     iframe.remove();
@@ -88,7 +88,7 @@ export function UploaderPeer() {
           Two way sync completed: {String(Boolean(syncDuration))}
         </div>
       )}
-      {testFile?.coMapDownloaded && (
+      {testFile.$isLoaded && testFile.coMapDownloaded && (
         <div data-testid="co-map-downloaded">CoMap synced!</div>
       )}
     </>

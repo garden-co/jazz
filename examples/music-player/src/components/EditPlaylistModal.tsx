@@ -22,8 +22,8 @@ export function EditPlaylistModal({
 
   // Reset local title when modal opens or playlist changes
   useEffect(() => {
-    if (isOpen && playlist) {
-      setLocalPlaylistTitle(playlist.title ?? "");
+    if (isOpen && playlist.$isLoaded) {
+      setLocalPlaylistTitle(playlist.title);
     }
   }, [isOpen, playlist]);
 
@@ -32,14 +32,14 @@ export function EditPlaylistModal({
   }
 
   function handleSave() {
-    if (playlist && localPlaylistTitle.trim()) {
+    if (playlist.$isLoaded && localPlaylistTitle.trim()) {
       updatePlaylistTitle(playlist, localPlaylistTitle.trim());
       onClose();
     }
   }
 
   function handleCancel() {
-    setLocalPlaylistTitle(playlist?.title ?? "");
+    setLocalPlaylistTitle(playlist.$isLoaded ? playlist.title : "");
     onClose();
   }
 

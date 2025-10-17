@@ -15,7 +15,8 @@ export function useMediaPlayer() {
   const [loading, setLoading] = useState<string | null>(null);
 
   const activeTrackId = useAccountSelector({
-    select: (me) => me.root.$jazz.refs.activeTrack?.id,
+    select: (me) =>
+      me.$isLoaded ? me.root.$jazz.refs.activeTrack?.id : undefined,
   });
   // Reference used to avoid out-of-order track loads
   const lastLoadedTrackId = useRef<string | null>(null);
@@ -28,8 +29,8 @@ export function useMediaPlayer() {
     updateActiveTrack(track);
 
     const file = await MusicTrack.shape.file.loadAsBlob(
-      track.$jazz.refs.file!.id,
-    ); // TODO: see if we can avoid !
+      track.$jazz.refs.file.id,
+    );
 
     if (!file) {
       setLoading(null);
@@ -50,7 +51,7 @@ export function useMediaPlayer() {
   async function playNextTrack() {
     const track = await getNextTrack();
 
-    if (track) {
+    if (track.$isLoaded) {
       updateActiveTrack(track);
       await loadTrack(track);
     }
@@ -59,7 +60,7 @@ export function useMediaPlayer() {
   async function playPrevTrack() {
     const track = await getPrevTrack();
 
-    if (track) {
+    if (track.$isLoaded) {
       await loadTrack(track);
     }
   }

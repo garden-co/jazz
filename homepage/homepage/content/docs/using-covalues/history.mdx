@@ -50,8 +50,8 @@ task.$jazz.getEdits().status?.all
 
 // Check if edits exist
 const statusEdits = task.$jazz.getEdits().status;
-if (statusEdits) {
-  const name = statusEdits.by?.profile?.name;
+if (statusEdits && statusEdits.by?.profile.$isLoaded) {
+  const name = statusEdits.by.profile.name;
   console.log(`Last changed by ${name}`);
 }
 ```

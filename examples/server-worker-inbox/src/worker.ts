@@ -24,7 +24,7 @@ const {
 
 inbox.subscribe(InboxMessage, async (message, senderID) => {
   const playerAccount = await co.account().load(senderID, { loadAs: worker });
-  if (!playerAccount) {
+  if (!playerAccount.$isLoaded) {
     return;
   }
 
@@ -59,7 +59,7 @@ inbox.subscribe(InboxMessage, async (message, senderID) => {
       }
 
       // @ts-expect-error - https://github.com/garden-co/jazz/issues/1332
-      joinGameRequest.waitingRoom.account2 = playerAccount;
+      joinGameRequest.waitingRoom.$jazz.set("account2", playerAccount);
 
       const game = await createGame({
         account1: joinGameRequest.waitingRoom.account1,
@@ -131,7 +131,7 @@ async function handleNewGameIntent(_: string, message: NewGameIntent) {
     },
   });
 
-  if (!game) {
+  if (!game.$isLoaded) {
     throw new Error("Game not found");
   }
 
@@ -161,7 +161,7 @@ async function handlePlayIntent(_: string, message: PlayIntent) {
     },
   });
 
-  if (!game) {
+  if (!game.$isLoaded) {
     throw new Error("Game not found");
   }
 

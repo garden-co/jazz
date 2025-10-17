@@ -4,7 +4,7 @@ import { mnemonicToEntropy } from "@scure/bip39";
 import { AuthSecretStorage, KvStoreContext } from "jazz-tools";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { usePassphraseAuth } from "../auth/PassphraseAuth";
-import { useAccount } from "../hooks";
+import { useAccount, useLogOut } from "../hooks";
 import {
   createJazzTestAccount,
   createJazzTestGuest,
@@ -116,20 +116,21 @@ describe("usePassphraseAuth", () => {
     const { result } = renderHook(
       () => {
         const passphraseAuth = usePassphraseAuth({ wordlist: testWordlist });
-        const account = useAccount();
+        const me = useAccount();
+        const logOut = useLogOut();
 
-        if (account.me) {
-          if (!accounts.includes(account.me.$jazz.id)) {
-            accounts.push(account.me.$jazz.id);
+        if (me) {
+          if (!accounts.includes(me.$jazz.id)) {
+            accounts.push(me.$jazz.id);
           }
 
           updates.push({
             state: passphraseAuth.state,
-            accountIndex: accounts.indexOf(account.me.$jazz.id),
+            accountIndex: accounts.indexOf(me.$jazz.id),
           });
         }
 
-        return { passphraseAuth, account };
+        return { passphraseAuth, me, logOut };
       },
       {
         account,
@@ -138,23 +139,23 @@ describe("usePassphraseAuth", () => {
     );
 
     expect(result.current?.passphraseAuth.state).toBe("anonymous");
-    expect(result.current?.account?.me).toBeDefined();
+    expect(result.current?.me).toBeDefined();
 
-    const id = result.current?.account?.me?.$jazz.id;
+    const id = result.current?.me?.$jazz.id;
 
     await act(async () => {
       await result.current?.passphraseAuth.signUp();
     });
 
     expect(result.current?.passphraseAuth.state).toBe("signedIn");
-    expect(result.current?.account?.me?.$jazz.id).toBe(id);
+    expect(result.current?.me?.$jazz.id).toBe(id);
 
     await act(async () => {
-      await result.current?.account?.logOut();
+      await result.current?.logOut();
     });
 
     expect(result.current?.passphraseAuth.state).toBe("anonymous");
-    expect(result.current?.account?.me?.$jazz.id).not.toBe(id);
+    expect(result.current?.me?.$jazz.id).not.toBe(id);
 
     expect(updates).toMatchInlineSnapshot(`
       [

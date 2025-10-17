@@ -10,15 +10,19 @@ export function FileWidget() {
   const [isUploading, setIsUploading] = useState(false);
   const [progress, setProgress] = useState(0);
   const [error, setError] = useState<string | null>(null);
-  const { me } = useAccount(JazzAccount, { resolve: { profile: true } });
+  const me = useAccount(JazzAccount, { resolve: { profile: true } });
+
+  if (!me.$isLoaded) {
+    return (
+      <div className="flex-1 flex justify-center items-center">Loading...</div>
+    );
+  }
+
+  const profile = me.profile;
 
   async function handleUpload(event: React.FormEvent) {
     event.preventDefault();
     setError(null);
-    if (!me?.profile) {
-      setError("User profile not found");
-      return;
-    }
 
     setProgress(0);
 
@@ -30,7 +34,7 @@ export function FileWidget() {
 
     try {
       setIsUploading(true);
-      me.profile.$jazz.set(
+      profile.$jazz.set(
         "file",
         await co.fileStream().createFromBlob(file, {
           onProgress: (p) => setProgress(Math.round(p * 100)),
@@ -47,15 +51,12 @@ export function FileWidget() {
   }
 
   function handleDelete() {
-    if (!me?.profile) return;
-    me.profile.$jazz.delete("file");
+    profile.$jazz.delete("file");
   }
 
   async function handleDownload() {
-    if (!me?.profile) return;
-
-    const file = me.profile.file;
-    if (!file) return;
+    const file = profile.file;
+    if (!file?.$isLoaded) return;
 
     try {
       const blob = file.toBlob();
@@ -113,11 +114,6 @@ export function FileWidget() {
       "border-stone-400",
     );
 
-    if (!me?.profile) {
-      setError("User profile not found");
-      return;
-    }
-
     const droppedFiles = e.dataTransfer.files;
     if (!droppedFiles || droppedFiles.length === 0) {
       return;
@@ -128,7 +124,7 @@ export function FileWidget() {
 
     try {
       setIsUploading(true);
-      me.profile.$jazz.set(
+      profile.$jazz.set(
         "file",
         await co.fileStream().createFromBlob(file, {
           onProgress: (p) => setProgress(Math.round(p * 100)),
@@ -144,7 +140,7 @@ export function FileWidget() {
     }
   };
 
-  if (me?.profile?.file == null) {
+  if (!profile.file?.$isLoaded) {
     return (
       <div className="flex flex-col gap-4">
         <div
@@ -196,7 +192,7 @@ export function FileWidget() {
     );
   }
 
-  const fileData = me?.profile?.file?.getMetadata();
+  const fileData = profile.file.getMetadata();
   const mimeType = fileData?.mimeType || "unknown";
 
   return (
@@ -217,7 +213,7 @@ export function FileWidget() {
           </div>
           <div className="flex justify-between">
             <span className="font-bold">CoValue ID</span>
-            <span>{me.profile.file.$jazz.id}</span>
+            <span>{profile.file.$jazz.id}</span>
           </div>
         </div>
       </div>
@@ -239,36 +235,30 @@ export function FileWidget() {
       </div>
 
       <div className="w-full justify-center pt-8">
-        {fileData?.mimeType?.startsWith("image/") && (
+        {mimeType.startsWith("image/") && (
           <div className="flex justify-center">
             <img
-              src={URL.createObjectURL(
-                me?.profile?.file?.toBlob() || new Blob(),
-              )}
+              src={URL.createObjectURL(profile.file.toBlob() || new Blob())}
               alt="File preview"
               className="max-w-xs mb-4"
             />
           </div>
         )}
 
-        {fileData?.mimeType?.startsWith("audio/") && (
+        {mimeType.startsWith("audio/") && (
           <div className="flex justify-center">
             <audio
-              src={URL.createObjectURL(
-                me?.profile?.file?.toBlob() || new Blob(),
-              )}
+              src={URL.createObjectURL(profile.file.toBlob() || new Blob())}
               controls
               className="w-full mb-4"
             />
           </div>
         )}
 
-        {fileData?.mimeType?.startsWith("video/") && (
+        {mimeType.startsWith("video/") && (
           <div className="flex justify-center">
             <video
-              src={URL.createObjectURL(
-                me?.profile?.file?.toBlob() || new Blob(),
-              )}
+              src={URL.createObjectURL(profile.file.toBlob() || new Blob())}
               controls
               className="w-full mb-4"
             />

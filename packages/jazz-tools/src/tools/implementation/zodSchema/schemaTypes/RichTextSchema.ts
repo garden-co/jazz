@@ -3,6 +3,7 @@ import {
   BranchDefinition,
   CoRichText,
   Group,
+  MaybeLoaded,
   coOptionalDefiner,
   unstable_mergeBranchWithResolve,
 } from "../../../internal.js";
@@ -46,7 +47,7 @@ export class RichTextSchema implements CoreRichTextSchema {
       loadAs: Account | AnonymousJazzAgent;
       unstable_branch?: BranchDefinition;
     },
-  ): Promise<CoRichText | null> {
+  ): Promise<MaybeLoaded<CoRichText>> {
     return this.coValueClass.load(id, options);
   }
 
