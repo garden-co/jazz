@@ -52,31 +52,37 @@ describe("PeerState", () => {
       sessions: {},
     });
 
-    const newPeerState = new PeerState(mockPeer, peerState.knownStates);
+    peerState.combineOptimisticWith("co_z1", {
+      id: "co_z1",
+      header: true,
+      sessions: {
+        "session-1": 1,
+      } as KnownStateSessions,
+    });
 
-    expect(newPeerState.knownStates).toEqual(peerState.knownStates);
-    expect(newPeerState.optimisticKnownStates).toEqual(peerState.knownStates);
+    const newPeerState = peerState.newStateFrom(mockPeer);
+
+    expect(newPeerState.getKnownState("co_z1")).toEqual(
+      peerState.getKnownState("co_z1"),
+    );
+    expect(newPeerState.getOptimisticKnownState("co_z1")).toEqual(
+      peerState.getKnownState("co_z1"),
+    );
   });
 
   test("should dispatch to both states", () => {
     const { peerState } = setup();
-    const knownStatesSpy = vi.spyOn(peerState._knownStates, "set");
-
-    const optimisticKnownStatesSpy = vi.spyOn(
-      peerState._optimisticKnownStates,
-      "set",
-    );
 
     const state: CoValueKnownState = {
       id: "co_z1",
-      header: false,
+      header: true,
       sessions: {},
     };
 
     peerState.setKnownState("co_z1", state);
 
-    expect(knownStatesSpy).toHaveBeenCalledWith("co_z1", state);
-    expect(optimisticKnownStatesSpy).toHaveBeenCalledWith("co_z1", state);
+    expect(peerState.getKnownState("co_z1")).toEqual(state);
+    expect(peerState.getOptimisticKnownState("co_z1")).toEqual(state);
   });
 
   test("dispatching an optimistic update should not affect the known states", () => {
@@ -100,16 +106,7 @@ describe("PeerState", () => {
 
     peerState.combineOptimisticWith("co_z1", optimisticState);
 
-    expect(peerState.knownStates.get("co_z1")).not.toEqual(optimisticState);
-    expect(peerState.optimisticKnownStates.get("co_z1")).toEqual(
-      optimisticState,
-    );
-  });
-
-  test("should use separate references for knownStates and optimisticKnownStates for non-storage peers", () => {
-    const { peerState } = setup(); // Uses a regular peer
-
-    // Verify they are different references
-    expect(peerState.knownStates).not.toBe(peerState.optimisticKnownStates);
+    expect(peerState.getKnownState("co_z1")).not.toEqual(optimisticState);
+    expect(peerState.getOptimisticKnownState("co_z1")).toEqual(optimisticState);
   });
 });

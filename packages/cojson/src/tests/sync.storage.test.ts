@@ -436,7 +436,7 @@ describe("client syncs with a server with storage", () => {
     expect(streamingCounterDuringLoad).toBe(1);
 
     const mapOnClient2 = await promise;
-    await mapOnClient2.core.waitForSync();
+    await mapOnClient2.core.waitForFullStreaming();
 
     // Test streaming counter after loading is complete (should be 0)
     await waitFor(async () => {
@@ -649,8 +649,9 @@ describe("client syncs with a server with storage", () => {
   });
 
   test("should store values with no transactions", async () => {
-    const alice = setupTestNode({
-      connected: true,
+    const alice = setupTestNode();
+    alice.connectToSyncServer({
+      ourName: "alice",
     });
     const group = alice.node.createGroup();
     group.addMember("everyone", "writer");
@@ -665,8 +666,6 @@ describe("client syncs with a server with storage", () => {
     const { storage } = bob.addStorage({
       ourName: "bob",
     });
-
-    SyncMessagesLog.clear(); // We want to focus on the sync messages happening from now
 
     await loadCoValueOrFail(bob.node, map.id);
 
@@ -684,9 +683,15 @@ describe("client syncs with a server with storage", () => {
       }),
     ).toMatchInlineSnapshot(`
       [
+        "alice -> server | CONTENT Group header: true new: After: 0 New: 5",
+        "alice -> server | CONTENT Map header: true new: ",
         "bob -> storage | LOAD Map sessions: empty",
         "storage -> bob | KNOWN Map sessions: empty",
         "bob -> server | LOAD Map sessions: empty",
+        "server -> alice | KNOWN Group sessions: header/5",
+        "server -> storage | CONTENT Group header: true new: After: 0 New: 5",
+        "server -> alice | KNOWN Map sessions: header/0",
+        "server -> storage | CONTENT Map header: true new: ",
         "server -> bob | CONTENT Group header: true new: After: 0 New: 5",
         "server -> bob | CONTENT Map header: true new: ",
         "bob -> server | KNOWN Group sessions: header/5",

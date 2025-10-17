@@ -43,11 +43,11 @@ describe("SyncStateManager", () => {
         .uploaded;
     });
 
+    const newPeerState = client.node.syncManager.peers[peerState.id]!;
+
     expect(updateSpy).toHaveBeenCalledWith(
       peerState.id,
-      client.node.syncManager.peers[peerState.id]!.knownStates.get(
-        map.core.id,
-      )!,
+      newPeerState.getKnownState(map.core.id)!,
       { uploaded: true },
     );
 
@@ -96,9 +96,7 @@ describe("SyncStateManager", () => {
     });
 
     expect(updateToJazzCloudSpy).toHaveBeenLastCalledWith(
-      client.node.syncManager.peers[peerState.id]!.knownStates.get(
-        map.core.id,
-      )!,
+      peerState.getKnownState(map.core.id)!,
       { uploaded: true },
     );
 

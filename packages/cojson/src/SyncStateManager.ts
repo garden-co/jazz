@@ -56,21 +56,9 @@ export class SyncStateManager {
   }
 
   getCurrentSyncState(peerId: PeerID, id: RawCoID) {
-    // Build a lazy sync state object to process the isUploaded info
-    // only when requested
-    const syncState = {} as SyncState;
-
-    const getIsUploaded = () =>
-      this.getIsCoValueFullyUploadedIntoPeer(peerId, id);
-
-    Object.defineProperties(syncState, {
-      uploaded: {
-        enumerable: true,
-        get: getIsUploaded,
-      },
-    });
-
-    return syncState;
+    return {
+      uploaded: this.getIsCoValueFullyUploadedIntoPeer(peerId, id),
+    };
   }
 
   triggerUpdate(peerId: PeerID, id: RawCoID) {
@@ -87,7 +75,7 @@ export class SyncStateManager {
       return;
     }
 
-    const knownState = peer.knownStates.get(id) ?? emptyKnownState(id);
+    const knownState = peer.getKnownState(id) ?? emptyKnownState(id);
     const syncState = this.getCurrentSyncState(peerId, id);
 
     for (const listener of this.listeners) {
@@ -101,40 +89,27 @@ export class SyncStateManager {
     }
   }
 
-  private getKnownStateSessions(peerId: PeerID, id: RawCoID) {
+  private getIsCoValueFullyUploadedIntoPeer(peerId: PeerID, id: RawCoID) {
     const peer = this.syncManager.peers[peerId];
 
     if (!peer) {
-      return undefined;
+      return false;
     }
 
-    const peerSessions = peer.knownStates.get(id)?.sessions;
+    const peerSessions = peer.getKnownState(id)?.sessions;
 
     if (!peerSessions) {
-      return undefined;
+      return false;
     }
 
     const entry = this.syncManager.local.getCoValue(id);
 
     if (!entry.isAvailable()) {
-      return undefined;
+      return false;
     }
 
     const coValueSessions = entry.knownState().sessions;
 
-    return {
-      peer: peerSessions,
-      coValue: coValueSessions,
-    };
-  }
-
-  private getIsCoValueFullyUploadedIntoPeer(peerId: PeerID, id: RawCoID) {
-    const sessions = this.getKnownStateSessions(peerId, id);
-
-    if (!sessions) {
-      return false;
-    }
-
-    return areLocalSessionsUploaded(sessions.coValue, sessions.peer);
+    return areLocalSessionsUploaded(coValueSessions, peerSessions);
   }
 }

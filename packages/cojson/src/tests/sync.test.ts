@@ -608,13 +608,13 @@ describe("SyncManager - knownStates vs optimisticKnownStates", () => {
 
     // The optimisticKnownStates should be the same as the knownStates after the full sync is complete
     expect(
-      peerStateClient.optimisticKnownStates.get(mapOnClient.core.id),
-    ).toEqual(peerStateClient.knownStates.get(mapOnClient.core.id));
+      peerStateClient.getOptimisticKnownState(mapOnClient.core.id),
+    ).toEqual(peerStateClient.getKnownState(mapOnClient.core.id));
 
     // On the other node the knownStates should be updated correctly based on the messages we received
     expect(
-      peerStateJazzCloud.optimisticKnownStates.get(mapOnClient.core.id),
-    ).toEqual(peerStateJazzCloud.knownStates.get(mapOnClient.core.id));
+      peerStateJazzCloud.getOptimisticKnownState(mapOnClient.core.id),
+    ).toEqual(peerStateJazzCloud.getKnownState(mapOnClient.core.id));
   });
 
   test("optimisticKnownStates is updated as new transactions are sent, while knownStates only when the updates are acknowledged", async () => {
@@ -642,8 +642,8 @@ describe("SyncManager - knownStates vs optimisticKnownStates", () => {
 
     await new Promise<void>(queueMicrotask);
 
-    expect(peerState.optimisticKnownStates.get(map.core.id)).not.toEqual(
-      peerState.knownStates.get(map.core.id),
+    expect(peerState.getOptimisticKnownState(map.core.id)).not.toEqual(
+      peerState.getKnownState(map.core.id),
     );
 
     // Restore the implementation of push and send the blocked messages
@@ -654,45 +654,13 @@ describe("SyncManager - knownStates vs optimisticKnownStates", () => {
 
     await map.core.waitForSync();
 
-    expect(peerState.optimisticKnownStates.get(map.core.id)).toEqual(
-      peerState.knownStates.get(map.core.id),
+    expect(peerState.getOptimisticKnownState(map.core.id)).toEqual(
+      peerState.getKnownState(map.core.id),
     );
   });
 });
 
 describe("SyncManager.addPeer", () => {
-  test("new peer gets a copy of previous peer's knownStates when replacing it", async () => {
-    const client = await setupTestAccount();
-
-    const { peerState: firstPeerState, getCurrentPeerState } =
-      client.connectToSyncServer();
-
-    // Create test data
-    const group = client.node.createGroup();
-    const map = group.createMap();
-    map.set("key1", "value1", "trusting");
-
-    // Wait for initial sync
-    await map.core.waitForSync();
-
-    // Store the initial known states
-    const initialKnownStates = firstPeerState.knownStates;
-
-    // Create new connection with same ID
-    client.connectToSyncServer();
-
-    // Wait for the new peer to be added
-    await waitFor(() => expect(getCurrentPeerState()).not.toBe(firstPeerState));
-
-    // Verify that the new peer has a copy of the previous known states
-    const newPeerKnownStates = getCurrentPeerState().knownStates;
-
-    expect(newPeerKnownStates).not.toBe(initialKnownStates); // Should be a different instance
-    expect(newPeerKnownStates.get(map.core.id)).toEqual(
-      initialKnownStates.get(map.core.id),
-    );
-  });
-
   test("new peer with new ID starts with empty knownStates", async () => {
     const client = await setupTestAccount({
       connected: true,
@@ -716,9 +684,8 @@ describe("SyncManager.addPeer", () => {
     client.node.syncManager.addPeer(brandNewPeer);
 
     // Verify that the new peer starts with empty known states
-    const newPeerKnownStates =
-      client.node.syncManager.peers["brandNewPeer"]!.knownStates;
-    expect(newPeerKnownStates.get(map.core.id)).toBe(undefined);
+    const newPeerState = client.node.syncManager.peers["brandNewPeer"];
+    expect(newPeerState?.getKnownState(map.core.id)).toBe(undefined);
   });
 
   test("when adding a peer with the same ID as a previous peer, the previous peer is closed", async () => {
@@ -1071,8 +1038,10 @@ describe("SyncManager.handleSyncMessage", () => {
     await client.node.syncManager.handleSyncMessage(invalidMessage, peerState);
 
     // Verify that no state changes occurred
-    expect(peerState.knownStates.has(invalidMessage.id)).toBe(false);
-    expect(peerState.optimisticKnownStates.has(invalidMessage.id)).toBe(false);
+    expect(peerState.getKnownState(invalidMessage.id)).toBe(undefined);
+    expect(peerState.getOptimisticKnownState(invalidMessage.id)).toBe(
+      undefined,
+    );
   });
 
   test("should ignore messages with invalid ID format", async () => {
@@ -1091,8 +1060,10 @@ describe("SyncManager.handleSyncMessage", () => {
     client.node.syncManager.handleSyncMessage(invalidMessage, peerState);
 
     // Verify that no state changes occurred
-    expect(peerState.knownStates.has(invalidMessage.id)).toBe(false);
-    expect(peerState.optimisticKnownStates.has(invalidMessage.id)).toBe(false);
+    expect(peerState.getKnownState(invalidMessage.id)).toBe(undefined);
+    expect(peerState.getOptimisticKnownState(invalidMessage.id)).toBe(
+      undefined,
+    );
   });
 
   test("should ignore messages for errored coValues", async () => {
@@ -1116,8 +1087,8 @@ describe("SyncManager.handleSyncMessage", () => {
     await client.node.syncManager.handleSyncMessage(message, peerState);
 
     // Verify that no state changes occurred
-    expect(peerState.knownStates.has(message.id)).toBe(false);
-    expect(peerState.optimisticKnownStates.has(message.id)).toBe(false);
+    expect(peerState.getKnownState(message.id)).toBe(undefined);
+    expect(peerState.getOptimisticKnownState(message.id)).toBe(undefined);
   });
 
   test("should process valid messages", async () => {
@@ -1137,7 +1108,7 @@ describe("SyncManager.handleSyncMessage", () => {
     await client.node.syncManager.handleSyncMessage(validMessage, peerState);
 
     // Verify that the message was processed
-    expect(peerState.knownStates.has(group.id)).toBe(true);
+    expect(peerState.getKnownState(group.id)).toBeDefined();
   });
 });
 
