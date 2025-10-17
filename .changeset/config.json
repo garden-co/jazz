@@ -12,6 +12,7 @@
       "cojson-transport-ws",
       "jazz-run",
       "jazz-tools",
+      "jazz-webhook",
       "community-jazz-vue",
       "cojson-core-napi",
       "cojson-core-napi-darwin-x64",

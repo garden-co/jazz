@@ -34,6 +34,7 @@
     "cojson-transport-ws": "workspace:0.18.27",
     "effect": "^3.6.5",
     "jazz-tools": "workspace:0.18.27",
+    "jazz-webhook": "workspace:0.18.27",
     "ws": "^8.14.2"
   },
   "devDependencies": {
