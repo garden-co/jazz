@@ -1,5 +1,15 @@
 # jazz-tools
 
+## 0.18.28
+
+### Patch Changes
+
+- Updated dependencies [e8880dc]
+- Updated dependencies [d83b5e3]
+  - cojson@0.18.28
+  - cojson-storage-indexeddb@0.18.28
+  - cojson-transport-ws@0.18.28
+
 ## 0.18.27
 
 ### Patch Changes

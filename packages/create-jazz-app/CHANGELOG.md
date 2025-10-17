@@ -1,5 +1,11 @@
 # create-jazz-app
 
+## 0.2.1
+
+### Patch Changes
+
+- 4b8d29f: Fetch only the appropriate llms-full.txt for the framework
+
 ## 0.2.0
 
 ### Minor Changes
