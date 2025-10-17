@@ -187,7 +187,7 @@
   },
   "type": "module",
   "license": "MIT",
-  "version": "0.18.27",
+  "version": "0.18.28",
   "dependencies": {
     "@manuscripts/prosemirror-recreate-steps": "^0.1.4",
     "@scure/base": "1.2.1",
