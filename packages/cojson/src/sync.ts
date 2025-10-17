@@ -740,11 +740,11 @@ export class SyncManager {
         peer.role === "server" &&
         !peer.loadRequestSent.has(coValue.id)
       ) {
-        const state = coValue.getStateForPeer(peer.id)?.type;
+        const state = coValue.getLoadingStateForPeer(peer.id);
 
         // Check if there is a inflight load operation and we
         // are waiting for other peers to send the load request
-        if (state === "unknown" || state === undefined) {
+        if (state === "unknown") {
           // Sending a load message to the peer to get to know how much content is missing
           // before sending the new content
           this.trySendToPeer(peer, {

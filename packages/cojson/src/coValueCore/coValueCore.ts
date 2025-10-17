@@ -181,8 +181,9 @@ export class CoValueCore {
   get verified() {
     return this._verified;
   }
-  private readonly peers = new Map<
-    PeerID,
+
+  private readonly loadingStatuses = new Map<
+    string,
     | {
         type: "unknown" | "pending" | "available" | "unavailable";
       }
@@ -237,11 +238,11 @@ export class CoValueCore {
   get loadingState() {
     if (this.verified) {
       return "available";
-    } else if (this.peers.size === 0) {
+    } else if (this.loadingStatuses.size === 0) {
       return "unknown";
     }
 
-    for (const peer of this.peers.values()) {
+    for (const peer of this.loadingStatuses.values()) {
       if (peer.type === "pending") {
         return "loading";
       } else if (peer.type === "unknown") {
@@ -265,53 +266,38 @@ export class CoValueCore {
   }
 
   isErroredInPeer(peerId: PeerID) {
-    return this.peers.get(peerId)?.type === "errored";
+    return this.getLoadingStateForPeer(peerId) === "errored";
+  }
+
+  waitFor(callback: (value: CoValueCore) => boolean) {
+    return new Promise<CoValueCore>((resolve) => {
+      this.subscribe((core, unsubscribe) => {
+        if (callback(core)) {
+          unsubscribe();
+          resolve(core);
+        }
+      }, true);
+    });
   }
 
   waitForAvailableOrUnavailable(): Promise<CoValueCore> {
-    return new Promise<CoValueCore>((resolve) => {
-      const listener = (core: CoValueCore) => {
-        if (core.isAvailable() || core.loadingState === "unavailable") {
-          resolve(core);
-          this.listeners.delete(listener);
-        }
-      };
-
-      this.listeners.add(listener);
-      listener(this);
-    });
+    return this.waitFor(
+      (core) => core.isAvailable() || core.loadingState === "unavailable",
+    );
   }
 
   waitForAvailable(): Promise<CoValueCore> {
-    return new Promise<CoValueCore>((resolve) => {
-      const listener = (core: CoValueCore) => {
-        if (core.isAvailable()) {
-          resolve(core);
-          this.listeners.delete(listener);
-        }
-      };
-
-      this.listeners.add(listener);
-      listener(this);
-    });
+    return this.waitFor((core) => core.isAvailable());
   }
 
   waitForFullStreaming(): Promise<CoValueCore> {
-    return new Promise<CoValueCore>((resolve) => {
-      const listener = (core: CoValueCore) => {
-        if (core.isAvailable() && !core.verified.isStreaming()) {
-          resolve(core);
-          this.listeners.delete(listener);
-        }
-      };
-
-      this.listeners.add(listener);
-      listener(this);
-    });
+    return this.waitFor(
+      (core) => core.isAvailable() && !core.verified.isStreaming(),
+    );
   }
 
-  getStateForPeer(peerId: PeerID) {
-    return this.peers.get(peerId);
+  getLoadingStateForPeer(peerId: PeerID) {
+    return this.loadingStatuses.get(peerId)?.type ?? "unknown";
   }
 
   private updateCounter(previousState: string | null) {
@@ -351,13 +337,13 @@ export class CoValueCore {
 
   markNotFoundInPeer(peerId: PeerID) {
     const previousState = this.loadingState;
-    this.peers.set(peerId, { type: "unavailable" });
+    this.loadingStatuses.set(peerId, { type: "unavailable" });
     this.updateCounter(previousState);
     this.scheduleNotifyUpdate();
   }
 
   markFoundInPeer(peerId: PeerID, previousState: string) {
-    this.peers.set(peerId, { type: "available" });
+    this.loadingStatuses.set(peerId, { type: "available" });
     this.updateCounter(previousState);
     this.scheduleNotifyUpdate();
   }
@@ -470,14 +456,14 @@ export class CoValueCore {
 
   markErrored(peerId: PeerID, error: TryAddTransactionsError) {
     const previousState = this.loadingState;
-    this.peers.set(peerId, { type: "errored", error });
+    this.loadingStatuses.set(peerId, { type: "errored", error });
     this.updateCounter(previousState);
     this.scheduleNotifyUpdate();
   }
 
   markPending(peerId: PeerID) {
     const previousState = this.loadingState;
-    this.peers.set(peerId, { type: "pending" });
+    this.loadingStatuses.set(peerId, { type: "pending" });
     this.updateCounter(previousState);
     this.scheduleNotifyUpdate();
   }
@@ -1313,10 +1299,34 @@ export class CoValueCore {
       return;
     }
 
-    const currentState = this.peers.get("storage");
+    const currentState = this.getLoadingStateForPeer("storage");
 
-    if (currentState && currentState.type !== "unknown") {
-      done?.(currentState.type === "available");
+    if (currentState === "pending") {
+      if (!done) {
+        // We don't need to notify the result to anyone, so we can return early
+        return;
+      }
+
+      // Loading the value
+      this.subscribe((state, unsubscribe) => {
+        const updatedState = state.getLoadingStateForPeer("storage");
+
+        if (updatedState === "available" || state.isAvailable()) {
+          unsubscribe();
+          done(true);
+        } else if (
+          updatedState === "errored" ||
+          updatedState === "unavailable"
+        ) {
+          unsubscribe();
+          done(false);
+        }
+      });
+      return;
+    }
+
+    if (currentState !== "unknown") {
+      done?.(currentState === "available");
       return;
     }
 
@@ -1342,7 +1352,7 @@ export class CoValueCore {
     }
 
     for (const peer of peers) {
-      const currentState = this.peers.get(peer.id)?.type ?? "unknown";
+      const currentState = this.getLoadingStateForPeer(peer.id);
 
       if (currentState === "unknown" || currentState === "unavailable") {
         this.markPending(peer.id);
@@ -1369,40 +1379,34 @@ export class CoValueCore {
       peer.trackLoadRequestSent(this.id);
     }
 
-    return new Promise<void>((resolve) => {
-      const markNotFound = () => {
-        if (this.peers.get(peer.id)?.type === "pending") {
-          logger.warn("Timeout waiting for peer to load coValue", {
-            id: this.id,
-            peerID: peer.id,
-          });
-          this.markNotFoundInPeer(peer.id);
-        }
-      };
+    const markNotFound = () => {
+      if (this.getLoadingStateForPeer(peer.id) === "pending") {
+        logger.warn("Timeout waiting for peer to load coValue", {
+          id: this.id,
+          peerID: peer.id,
+        });
+        this.markNotFoundInPeer(peer.id);
+      }
+    };
 
-      const timeout = setTimeout(markNotFound, CO_VALUE_LOADING_CONFIG.TIMEOUT);
-      const removeCloseListener = peer.persistent
-        ? undefined
-        : peer.addCloseListener(markNotFound);
+    const timeout = setTimeout(markNotFound, CO_VALUE_LOADING_CONFIG.TIMEOUT);
+    const removeCloseListener = peer.persistent
+      ? undefined
+      : peer.addCloseListener(markNotFound);
 
-      const listener = (state: CoValueCore) => {
-        const peerState = state.peers.get(peer.id);
-        if (
-          state.isAvailable() || // might have become available from another peer e.g. through handleNewContent
-          peerState?.type === "available" ||
-          peerState?.type === "errored" ||
-          peerState?.type === "unavailable"
-        ) {
-          this.listeners.delete(listener);
-          removeCloseListener?.();
-          clearTimeout(timeout);
-          resolve();
-        }
-      };
-
-      this.listeners.add(listener);
-      listener(this);
-    });
+    this.subscribe((state, unsubscribe) => {
+      const peerState = state.getLoadingStateForPeer(peer.id);
+      if (
+        state.isAvailable() || // might have become available from another peer e.g. through handleNewContent
+        peerState === "available" ||
+        peerState === "errored" ||
+        peerState === "unavailable"
+      ) {
+        unsubscribe();
+        removeCloseListener?.();
+        clearTimeout(timeout);
+      }
+    }, true);
   }
 }
 

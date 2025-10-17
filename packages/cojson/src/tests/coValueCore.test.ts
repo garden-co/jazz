@@ -451,9 +451,7 @@ describe("markErrored and isErroredInPeer", () => {
     expect(coValue.isErroredInPeer(peerId)).toBe(true);
 
     // Verify the peer state contains the error
-    const peerState = coValue.getStateForPeer(peerId);
-    expect(peerState).toBeDefined();
-    expect(peerState?.type).toBe("errored");
+    expect(coValue.getLoadingStateForPeer(peerId)).toBe("errored");
   });
 
   test("markErrored should update loading state and notify listeners", () => {
@@ -632,8 +630,7 @@ describe("markErrored and isErroredInPeer", () => {
     // Verify the peer is now errored
     expect(coValue.isErroredInPeer(peerId)).toBe(true);
 
-    const peerState = coValue.getStateForPeer(peerId);
-    expect(peerState?.type).toBe("errored");
+    expect(coValue.getLoadingStateForPeer(peerId)).toBe("errored");
   });
 
   test("markErrored should work with different error types", () => {
