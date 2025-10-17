@@ -527,6 +527,65 @@ export class CoMap extends CoValueBase implements CoValue {
   }
 
   /**
+   * Given some data, gets an existing CoMap or creates a new one if none exists.
+   * This method will not modify an existing CoMap - it will only return it as-is.
+   *
+   * Note: This method respects resolve options, and thus can return `null` if the references cannot be resolved.
+   *
+   * @example
+   * ```ts
+   * const activeEvent = await Event.getOrCreateUnique(
+   *   {
+   *     value: { title: "Meeting", date: "2024-01-01" },
+   *     unique: sourceData.identifier,
+   *     owner: workspace,
+   *   }
+   * );
+   * ```
+   *
+   * @param options The options for creating or loading the CoMap. This includes the intended state of the CoMap, its unique identifier, its owner, and the references to resolve.
+   * @returns Either an existing CoMap (unchanged), or a new initialised CoMap if none exists.
+   * @category Subscription & Loading
+   */
+  static async getOrCreateUnique<
+    M extends CoMap,
+    const R extends RefsToResolve<M> = true,
+  >(
+    this: CoValueClass<M>,
+    options: {
+      value: Simplify<CoMapInit_DEPRECATED<M>>;
+      unique: CoValueUniqueness["uniqueness"];
+      owner: Account | Group;
+      resolve?: RefsToResolveStrict<M, R>;
+    },
+  ): Promise<Resolved<M, R> | null> {
+    const mapId = CoMap._findUnique(
+      options.unique,
+      options.owner.$jazz.id,
+      options.owner.$jazz.loadedAs,
+    );
+    let map: Resolved<M, R> | null = await loadCoValueWithoutMe(this, mapId, {
+      ...options,
+      loadAs: options.owner.$jazz.loadedAs,
+      skipRetry: true,
+    });
+
+    if (!map) {
+      const instance = new this();
+      map = CoMap._createCoMap(instance, options.value, {
+        owner: options.owner,
+        unique: options.unique,
+      }) as Resolved<M, R>;
+    }
+
+    return await loadCoValueWithoutMe(this, mapId, {
+      ...options,
+      loadAs: options.owner.$jazz.loadedAs,
+      skipRetry: true,
+    });
+  }
+
+  /**
    * Loads a CoMap by its unique identifier and owner's ID.
    * @param unique The unique identifier of the CoMap to load.
    * @param ownerID The ID of the owner of the CoMap.
