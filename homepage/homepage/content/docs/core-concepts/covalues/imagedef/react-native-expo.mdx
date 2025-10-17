@@ -1,0 +1,384 @@
+import { CodeGroup } from "@/components/forMdx";
+
+export const metadata = {
+  description: "ImageDefinition is a CoValue for storing images with built-in UX features."
+};
+
+# ImageDefinition
+
+`ImageDefinition` is a specialized CoValue designed specifically for managing images in Jazz applications. It extends beyond basic file storage by supporting a blurry placeholder, built-in resizing, and progressive loading patterns.
+
+**Note**: This guide applies to both Expo and framework-less React Native implementations.
+
+Beyond ImageDefinition, Jazz offers higher-level functions and components that make it easier to use images:
+- [`createImage()`](#creating-images) - function to create an `ImageDefinition` from a file
+- [`Image`](#displaying-images) - React Native component to display a stored image
+
+For examples of use, see our example apps:
+- [React Native Chat](https://github.com/gardencmp/jazz/tree/main/examples/chat-rn) (Framework-less implementation)
+- [Expo Chat](https://github.com/gardencmp/jazz/tree/main/examples/chat-rn-expo) (Expo implementation)
+- [Expo Clerk](https://github.com/gardencmp/jazz/tree/main/examples/clerk-expo) (Expo with Clerk-based authentication)
+
+## Installation
+
+The Jazz's images implementation is based on `expo-image-manipulator`. Check the [installation guide](/docs/react-native-expo/project-setup#install-dependencies) for more details.
+
+## Creating Images
+
+The easiest way to create and use images in your Jazz application is with the `createImage()` function:
+
+<CodeGroup>
+```ts
+import { Account, Group, ImageDefinition } from "jazz-tools";
+
+declare const me: {
+  $jazz: {
+    owner: Account | Group;
+  };
+  profile: {
+    image: ImageDefinition;
+  };
+};
+
+// ---cut---
+
+import { createImage } from "jazz-tools/media";
+import { launchImageLibrary } from 'react-native-image-picker';
+
+async function handleImagePicker() {
+  // Use your favorite image picker library to get the image URI
+  const result = await launchImageLibrary({
+    mediaType: 'photo',
+    quality: 1,
+  });
+
+  if (!result.didCancel && result.assets && result.assets.length > 0) {
+    // Creates ImageDefinition with a blurry placeholder, limited to 1024px on the longest side, and multiple resolutions automatically.
+    // See the options below for more details.
+    const image = await createImage(result.assets[0].uri, {
+      owner: me.$jazz.owner,
+      maxSize: 1024,
+      placeholder: "blur",
+      progressive: true,
+    });
+
+    // Store the image
+    me.profile.image = image;
+  }
+}
+```
+</CodeGroup>
+
+**Note:** `createImage()` currently supports browser and react-native environments.
+
+The `createImage()` function:
+- Creates an `ImageDefinition` with the right properties
+- Generates a small placeholder for immediate display
+- Creates multiple resolution variants of your image
+- Returns the created `ImageDefinition`
+
+### Configuration Options
+
+<CodeGroup>
+```ts twoslash
+import type { ImageDefinition, Group, Account } from "jazz-tools";
+// ---cut---
+declare function createImage(
+  image: Blob | File | string,
+  options: {
+    owner?: Group | Account;
+    placeholder?: "blur" | false;
+    maxSize?: number;
+    progressive?: boolean;
+  }): Promise<ImageDefinition>
+```
+</CodeGroup>
+
+#### `image`
+
+The image to create an `ImageDefinition` from. On browser environments, this can be a `Blob` or a `File`. On React Native, this must be a `string` with the file path.
+
+#### `owner`
+
+The owner of the `ImageDefinition`. This is used to control access to the image. See [Groups as permission scopes](/docs/permissions-and-sharing/overview) for more information on how to use groups to control access to images.
+
+#### `placeholder`
+
+Sometimes the wanted image is not loaded yet. The placeholder is a base64 encoded image that is displayed while the image is loading. Currently, only `"blur"` is a supported.
+
+#### `maxSize`
+
+The image generation process includes a maximum size setting that controls the longest side of the image. A built-in resizing feature is applied based on this setting.
+
+
+#### `progressive`
+
+The progressive loading pattern is a technique that allows images to load incrementally, starting with a small version and gradually replacing it with a larger version as it becomes available. This is useful for improving the user experience by showing a placeholder while the image is loading.
+
+Passing `progressive: true` to `createImage()` will create internal smaller versions of the image for future uses.
+
+### Create multiple resized copies
+
+To create multiple resized copies of an original image for better layout control, you can utilize the `createImage` function multiple times with different parameters for each desired size. Here’s an example of how you might implement this:
+
+<CodeGroup>
+```ts twoslash
+declare const myFile: string;
+// ---cut---
+import { co } from "jazz-tools";
+import { createImage } from "jazz-tools/media";
+
+// Jazz Schema
+const ProductImage = co.map({
+  image: co.image(),
+  thumbnail: co.image(),
+});
+
+const mainImage = await createImage(myFile);
+const thumbnail = await createImage(myFile, {
+  maxSize: 100,
+});
+
+// or, in case of migration, you can use the original stored image.
+const newThumb = await createImage(mainImage!.original!.toBlob()!, {
+  maxSize: 100,
+});
+
+const imageSet = ProductImage.create({
+  image: mainImage,
+  thumbnail,
+});
+```
+</CodeGroup>
+
+### Creating images from server side
+
+We provide a `createImage` function to create images from server side using the same options as the browser version, using the package `jazz-tools/media/server`. Check the [server worker](/docs/server-side/setup) documentation to learn more.
+
+The resize features are based on the `sharp` library, then it is requested as peer dependency in order to use it.
+
+<CodeGroup>
+```bash
+pnpm install sharp
+```
+</CodeGroup>
+
+<CodeGroup>
+```ts
+import fs from "node:fs";
+import { createImage } from "jazz-tools/media/server";
+
+const image = fs.readFileSync(new URL("./image.jpg", import.meta.url));
+
+await createImage(image, {
+  // options
+});
+```
+</CodeGroup>
+
+## Displaying Images
+
+The Image component is the best way to let Jazz handle the image loading.
+
+
+<CodeGroup>
+```tsx
+import { Image } from "jazz-tools/expo";
+import { StyleSheet } from "react-native";
+
+function GalleryView({ image }) {
+  return (
+    <Image
+      imageId={image.id}
+      style={styles.galleryImage}
+      width={400}
+      resizeMode="cover"
+    />
+  );
+}
+
+const styles = StyleSheet.create({
+  galleryImage: {
+    width: '100%',
+    height: 200,
+    borderRadius: 8,
+  }
+});
+```
+</CodeGroup>
+
+
+The `Image` component handles:
+- Showing a placeholder while loading, if generated
+- Automatically selecting the appropriate resolution, if generated with progressive loading
+- Progressive enhancement as higher resolutions become available, if generated with progressive loading
+- Determining the correct width/height attributes to avoid layout shifting
+- Cleaning up resources when unmounted
+
+The component's props are:
+
+<CodeGroup>
+```ts
+export type ImageProps = Omit<
+  RNImageProps,
+  "width" | "height" | "source"
+> & {
+  imageId: string;
+  width?: number | "original";
+  height?: number | "original";
+};
+```
+</CodeGroup>
+
+
+#### Width and Height props
+
+The `width` and `height` props are used to control the best resolution to use but also the width and height attributes of the image tag.
+
+Let's say we have an image with a width of 1920px and a height of 1080px.
+
+<CodeGroup>
+```tsx
+<Image imageId="123" />
+// <RNImage src={...} /> with the highest resolution available
+
+<Image imageId="123" width="original" height="original" />
+// <RNImage width="1920" height="1080" />
+
+<Image imageId="123" width="600" />
+// <RNImage width="600" /> BAD! See https://reactnative.dev/docs/images#network-images
+
+<Image imageId="123" width="600" height="original" />
+// <RNImage width="600" height="338" /> keeping the aspect ratio
+
+<Image imageId="123" width="original" height="600" />
+// <RNImage width="1067" height="600" /> keeping the aspect ratio
+
+<Image imageId="123" width="600" height="600" />
+// <RNImage width="600" height="600" />
+```
+</CodeGroup>
+
+If the image was generated with progressive loading, the `width` and `height` props will determine the best resolution to use.
+
+### Imperative usage
+
+Like other CoValues, `ImageDefinition` can be used to load the object.
+
+<CodeGroup>
+```tsx twoslash
+import { ImageDefinition } from "jazz-tools";
+
+const image = await ImageDefinition.load("123", {
+  resolve: {
+    original: true,
+  },
+});
+
+if(image) {
+  console.log({
+    originalSize: image.originalSize,
+    placeholderDataUrl: image.placeholderDataURL,
+    original: image.original, // this FileStream may be not loaded yet
+  });
+}
+```
+</CodeGroup>
+
+`image.original` is a `FileStream` and its content can be read as described in the [FileStream](/docs/core-concepts/covalues/filestreams#reading-from-filestreams) documentation.
+
+Since FileStream objects are also CoValues, they must be loaded before use. To simplify loading, if you want to load the binary data saved as Original, you can use the `loadImage` function.
+
+<CodeGroup>
+```ts twoslash
+declare const imageDefinitionOrId: string;
+// ---cut---
+import { loadImage } from "jazz-tools/media";
+
+const image = await loadImage(imageDefinitionOrId);
+if(image) {
+  console.log({
+    width: image.width,
+    height: image.height,
+    image: image.image,
+  });
+}
+```
+</CodeGroup>
+
+If the image was generated with progressive loading, and you want to access the best-fit resolution, use `loadImageBySize`. It will load the image of the best resolution that fits the wanted width and height.
+
+<CodeGroup>
+```ts twoslash
+declare const imageDefinitionOrId: string;
+// ---cut---
+import { loadImageBySize } from "jazz-tools/media";
+
+const image = await loadImageBySize(imageDefinitionOrId, 600, 600); // 600x600
+
+if(image) {
+
+  console.log({
+    width: image.width,
+    height: image.height,
+    image: image.image,
+  });
+}
+```
+</CodeGroup>
+
+
+If want to dynamically listen to the _loaded_ resolution that best fits the wanted width and height, you can use the `$jazz.subscribe` and the `highestResAvailable` function.
+
+<CodeGroup>
+```ts
+import { ImageDefinition } from "jazz-tools";
+// ---cut---
+// function highestResAvailable(image: ImageDefinition, wantedWidth: number, wantedHeight: number): FileStream | null
+import { highestResAvailable } from "jazz-tools/media";
+
+const image = await ImageDefinition.load("123");
+
+image?.$jazz.subscribe({}, (image) => {
+  const bestImage = highestResAvailable(image, 600, 600);
+
+  if(bestImage) {
+    // bestImage is again a FileStream
+    const blob = bestImage.image.toBlob();
+    if(blob) {
+      const url = URL.createObjectURL(blob);
+      // ...
+    }
+  }
+});
+```
+</CodeGroup>
+
+
+
+## Image manipulation custom implementation
+
+As mentioned, to manipulate the images (like placeholders, resizing, etc.), `createImage()` uses different implementations depending on the environment. Currently, the image manipulation is supported on browser and react-native environments.
+
+On react-native, the image manipulation is done using the `@bam.tech/react-native-image-resizer` library. If you want to use a custom implementation, you can use the `createImageFactory` function in order create your own `createImage` function and use your preferred image manipulation library.
+
+<CodeGroup>
+```ts
+import { createImageFactory } from "jazz-tools/media";
+
+const createImage = createImageFactory({
+    createFileStreamFromSource: async (source, owner) => {
+        // ...
+    },
+    getImageSize: async (image) => {
+        // ...
+    },
+    getPlaceholderBase64: async (image) => {
+        // ...
+    },
+    resize: async (image, width, height) => {
+        // ...
+    },
+});
+```
+</CodeGroup>

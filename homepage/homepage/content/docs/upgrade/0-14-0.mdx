@@ -57,18 +57,18 @@ You now define CoValue schemas using two new exports from `jazz-tools`:
   - `co.account()`, `co.profile()`
   - `co.plainText()`, `co.richText()`,
   - `co.fileStream()`, `co.image()`
-  - see the updated [Defining CoValue Schemas](/docs/schemas/covalues)
+  - see the updated [Defining CoValue Schemas](/docs/core-concepts/covalues/overview)
 - `z` re-exported from Zod v4
   - primitives like `z.string()`, `z.number()`, `z.literal()`
     - **note**: additional constraints like `z.min()` and `z.max()` are not yet enforced, we'll add validation in future releases
   - complex types like `z.object()` and `z.array()` to define JSON-like fields without internal collaboration
   - combinators like `z.optional()` and `z.discriminatedUnion()`
     - these also work on CoValue types!
-  - see the updated [Docs on Primitive Fields](/docs/schemas/covalues#primitive-fields),
-    [Docs on Optional References](/docs/schemas/covalues#optional-references)
-    and [Docs on Unions of CoMaps](/docs/schemas/covalues#unions-of-comaps-declaration)
+  - see the updated [Docs on Primitive Fields](/docs/core-concepts/covalues/overview#primitive-fields),
+    [Docs on Optional References](/docs/core-concepts/covalues/overview#optional-references)
+    and [Docs on Unions of CoMaps](/docs/core-concepts/covalues/overview#unions-of-comaps-declaration)
 
-Similar to Zod v4's new object syntax, recursive and mutually recursive types are now [much easier to express](/docs/react/schemas/covalues#recursive-references).
+Similar to Zod v4's new object syntax, recursive and mutually recursive types are now [much easier to express](/docs/react/core-concepts/covalues/overview#recursive-references).
 
 ### How to pass loaded CoValues
 
@@ -371,7 +371,7 @@ export const MyAppAccount = co.account({
 ### Defining Schema helper methods
 
 You can no longer define helper methods directly within your schema, create standalone functions instead. See
-[Docs on Helper methods](/docs/schemas/covalues#helper-methods) for an example.
+[Docs on Helper methods](/docs/core-concepts/covalues/overview#helper-methods) for an example.
 
 ## Minor breaking changes
 

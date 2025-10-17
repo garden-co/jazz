@@ -93,4 +93,4 @@ export const FileDownloadLink = ({ children, href }) => {
 
 // Just don't render these at all
 const emptyElement = () => null;
-export { emptyElement as ReactLogo, emptyElement as SvelteLogo, emptyElement as JazzLogo, emptyElement as JazzIcon };
+export { emptyElement as ReactLogo, emptyElement as SvelteLogo, emptyElement as JazzLogo, emptyElement as JazzIcon, emptyElement as VanillaLogo };

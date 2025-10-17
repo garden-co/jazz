@@ -1,0 +1,57 @@
+export const metadata = {
+  description: "How to send data to Server Workers, set permissions and subscriptions."
+};
+
+import { Alert, CodeGroup } from "@/components/forMdx";
+
+# Communicating with Server Workers
+
+Server Workers in Jazz can receive data from clients through two different APIs, each with their own characteristics and use cases.
+This guide covers the key properties of each approach to help you choose the right one for your application.
+
+## Overview
+
+Jazz provides three ways to communicate with Server Workers:
+
+1. **JazzRPC** - A simple, yet powerful RPC system that allows you to call functions on Server Workers from the client side.
+1. **HTTP Requests** - The easiest to work with and deploy, ideal for simple communication with workers.
+1. **Inbox** - Fully built using the Jazz data model with offline support
+
+## JazzRPC (Recommended)
+
+JazzRPC is the most straightforward way to communicate with Server Workers. It works well with any framework or runtime that supports standard Request and Response objects, can be scaled horizontally, and put clients and workers in direct communication.
+
+### When to use JazzRPC
+
+Use JazzRPC when you need immediate responses, are deploying to serverless environments, need horizontal scaling, or are working with standard web frameworks.
+
+It's also a good solution when using full-stack frameworks like Next.js, where you can use the API routes to handle the server-side logic.
+
+[Learn more about JazzRPC →](/docs/server-side/jazz-rpc)
+
+## HTTP Requests
+
+If all you need is basic authentication when communicating with a worker, you can use Regular HTTP requests. They are the easiest to work with and deploy, ideal for simple communication with workers.
+
+HTTP requests are the easiest way to communicate with Server Workers. They don't come with any of the benefits of JazzRPC, but are a good solution for simple communication with workers.
+
+### When to use HTTP Requests
+
+Use HTTP requests when you don't need the advanced features of JazzRPC, but you need to communicate with a worker from a serverless environment or a standard web framework and need basic authentication.
+
+[Learn more about HTTP Requests →](/docs/server-side/communicating-with-workers/http-requests)
+
+## Inbox
+
+The Inbox API is fully built using the Jazz data model and provides offline support. Requests and responses are synced as soon as the device becomes online, but require the Worker to always be online to work properly.
+
+### When to use Inbox
+
+Use Inbox when you need offline support, want to leverage the Jazz data model, can ensure the worker stays online, need persistent message storage, or want to review message history.
+
+It works great when you don't want to expose your server with a public address, because it uses Jazz's sync to make the communication happen.
+
+Since Jazz handles all the network communication, the entire class of network errors that usually come with traditional HTTP requests are not a problem when
+using the Inbox API.
+
+[Learn more about Inbox →](/docs/server-side/communicating-with-workers/inbox)

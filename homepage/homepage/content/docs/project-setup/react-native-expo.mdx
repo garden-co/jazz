@@ -52,7 +52,7 @@ npm i -S jazz-tools
 <Alert variant="info" className="mt-4" title="Note">
   - Requires at least Node.js v20. 
   - Hermes has added support for `atob` and `btoa` in React Native 0.74. If you are using earlier versions, you may also need to polyfill `atob` and `btoa` in your `package.json`. Packages to try include `text-encoding` and `base-64`, and you can drop `@bacons/text-decoder`.
-   See our [Troubleshooting Guide](https://jazz.tools/docs/troubleshooting) for quick fixes.
+   See our [Troubleshooting Guide](/docs/troubleshooting) for quick fixes.
 </Alert>
 
 #### Fix incompatible dependencies
@@ -190,15 +190,15 @@ Lastly, ensure that the `"main"` field in your `package.json` points to `index.j
 
 ## Authentication
 
-Jazz provides authentication to help users access their data across multiple devices. For details on implementing authentication with Expo, check our [Authentication Overview](/docs/authentication/overview) guide and see the [Expo Clerk Demo](https://github.com/garden-co/jazz/tree/main/examples/clerk-expo) for a complete example.
+Jazz provides authentication to help users access their data across multiple devices. For details on implementing authentication with Expo, check our [Authentication Overview](/docs/key-features/authentication/overview) guide and see the [Expo Clerk Demo](https://github.com/garden-co/jazz/tree/main/examples/clerk-expo) for a complete example.
 
 ## Next Steps
 
 Now that you've set up your Expo project for Jazz, you'll need to:
 
-1. [Set up the Jazz Provider](/docs/react-native-expo/project-setup/providers) - Configure how your app connects to Jazz
-2. [Add authentication](/docs/authentication/overview) (optional) - Enable users to access data across devices
-3. Define your schema - See the [schema docs](/docs/schemas/covalues) for more information
+1. [Set up the Jazz Provider](/docs/project-setup/providers) - Configure how your app connects to Jazz
+2. [Add authentication](/docs/key-features/authentication/overview) (optional) - Enable users to access data across devices
+3. Define your schema - See the [schema docs](/docs/core-concepts/covalues/overview) for more information
 4. Run your app:
 
 <CodeGroup>

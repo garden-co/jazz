@@ -1,0 +1,109 @@
+import { CodeGroup, ComingSoon, ContentByFramework } from "@/components/forMdx";
+
+export const metadata = { 
+  description: "The basics of creating CoValues, defining schemas, and managing permissions."
+};
+
+# Creation & Ownership
+
+CoValues are collaborative by nature - anything you create can be shared and synced with others. Who gets to read or change each CoValue is controlled by its owner - either an individual `Account` or a shared `Group`. This foundation of ownership is what enables Jazz applications to support real-time collaboration while maintaining proper access control. Understanding how to create and manage ownership of CoValues is essential for building effectively with Jazz.
+
+## Creating CoValues
+
+Every CoValue starts with a [schema](/docs/core-concepts/covalues/overview#start-your-app-with-a-schema). From there you can create CoValues with the `create` method. Creating CoValues is straightforward - you define the structure in your schema and then instantiate instances with initial values. These newly created CoValues automatically sync across devices and users who have access to them.
+
+Here's a simple example:
+
+<CodeGroup>
+```ts
+class Task extends CoMap {
+  title = coField.string;
+  description = coField.string;
+  status = coField.literal("todo", "in-progress", "completed");
+}
+
+// Create a new task
+const task = Task.create({
+  title: "Plant spring vegetables",
+  description: "Plant peas, carrots, and lettuce",
+  status: "todo",
+});
+```
+</CodeGroup>
+
+When you create a CoValue, you provide its initial data and optionally specify who owns it. The data must match the schema you defined - TypeScript will help ensure you get this right.
+
+For more examples of creating different types of CoValues:
+
+<CodeGroup>
+```ts
+// Creating a CoFeed for activity notifications
+class ActivityNotification extends CoMap {
+  message = coField.string;
+  type = coField.literal("info", "warning", "success");
+  timestamp = coField.Date;
+}
+
+class ActivityFeed extends CoFeed.Of(coField.ref(ActivityNotification)) {}
+
+const feed = ActivityFeed.create();
+
+// Adding an item to the feed
+feed.addItem(ActivityNotification.create({
+  message: "New task created",
+  type: "info",
+  timestamp: new Date()
+}));
+```
+</CodeGroup>
+
+## Ownership & Access Control
+
+Every CoValue needs an owner to control who can access it. An owner can be an individual `Account`, but it's usually a `Group` since that lets you share with multiple people. The ownership model in Jazz provides fine-grained control over who can read, write, or administer your collaborative data. This system makes it easy to implement common patterns like shared workspaces, personal data, or public resources.
+
+### Groups & Roles
+
+Groups have members with different roles that control what they can do. These roles provide a permission system that's both simple to understand and powerful enough for complex collaboration scenarios. By assigning appropriate roles, you can control exactly who can view, edit, or manage access to your data.
+
+<CodeGroup>
+```ts
+// Create a group
+const gardenTeam = Group.create();
+
+// Add garden members with different roles
+gardenTeam.addMember(coordinator, "admin");     // Garden coordinator manages everything
+gardenTeam.addMember(gardener, "writer");       // Gardeners can update tasks
+gardenTeam.addMember(visitor, "reader");        // Visitors can view progress
+
+// Create a list of tasks with the same owner
+const taskList = ListOfTasks.create([]);
+
+// Create a garden project with nested tasks, all with the same ownership
+const springProject = Project.create({
+  name: "Spring Planting",
+  description: "Preparing the community garden for spring vegetables",
+  tasks: taskList
+});
+
+// Add tasks to the list
+taskList.push(Task.create({
+  title: "Start tomato seedlings",
+  description: "Plant Roma and Cherry varieties in seed trays",
+  status: "todo"
+});
+
+taskList.push(Task.create({
+  title: "Prepare herb garden",
+  description: "Clear old growth and add fresh compost",
+  status: "todo"
+});
+```
+</CodeGroup>
+
+Each role has specific permissions:
+- `admin`: Full control including managing members
+- `writer`: Can modify content
+- `reader`: Can only read content
+- `writeOnly`: Can only write to the CoValue, not read it
+
+For more information on groups and roles, see the [Groups](/docs/permissions-and-sharing/overview) documentation.

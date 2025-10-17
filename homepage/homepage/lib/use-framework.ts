@@ -6,16 +6,23 @@ import { TAB_CHANGE_EVENT, isFrameworkChange } from "@garden-co/design-system/sr
 
 export const useFramework = () => {
   const pathname = usePathname();
-  const router = useRouter();
   const { framework } = useParams<{ framework?: string }>();
   const [savedFramework, setSavedFramework] = useState<Framework | null>(null);
   const [mounted, setMounted] = useState(false);
+  const router = useRouter();
 
   useEffect(() => {
     setMounted(true);
-    const stored = window.localStorage.getItem("_tcgpref_framework");
-    if (stored && isValidFramework(stored)) {
-      setSavedFramework(stored as Framework);
+    // Check localStorage after mounting
+    if (typeof window !== "undefined") {
+      const stored = window.localStorage.getItem("_tcgpref_framework");
+      if (stored && isValidFramework(stored)) {
+        setSavedFramework(stored as Framework);
+        // If the currently loaded page is a docs page, make sure that URL matches the selected framework.
+        if (!pathname.startsWith('/docs')) return;
+        const newPath = pathname.split("/").toSpliced(2, 1, stored).join("/") + window.location.hash;
+        router.replace(newPath, { scroll: true });
+      }
     }
   }, []);
 

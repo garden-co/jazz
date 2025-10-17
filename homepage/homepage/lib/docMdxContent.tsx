@@ -194,7 +194,7 @@ export function generateOGMetadata(
       title,
       description,
       type: "article",
-      url: `https://jazz.tools/docs/${[framework, ...slug].join("/")}`,
+      url: `/docs/${[framework, ...slug].join("/")}`,
       images: [{ url: imageUrl, width: 1200, height: 630, alt: title }],
     },
     twitter: { card: "summary_large_image", title, description, images: [imageUrl] },

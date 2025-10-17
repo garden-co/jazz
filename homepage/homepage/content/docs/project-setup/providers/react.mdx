@@ -11,7 +11,7 @@ import GetAPIKey from "@/components/docs/snippets/GetAPIKey.mdx";
 
 - **Data Synchronization**: Manages connections to peers and the Jazz cloud
 - **Local Storage**: Persists data locally between app sessions
-- **Schema Types**: Provides APIs for the [AccountSchema](/docs/schemas/accounts-and-migrations)
+- **Schema Types**: Provides APIs for the [AccountSchema](/docs/core-concepts/schemas/accounts-and-migrations)
 - **Authentication**: Connects your authentication system to Jazz
 
 Our [Chat example app](https://jazz.tools/examples#chat) provides a complete implementation of JazzReactProvider with authentication and real-time data sync.
@@ -100,7 +100,7 @@ const syncConfig: SyncConfig = {
 ```
 </CodeGroup>
 
-See [Authentication States](/docs/authentication/authentication-states#controlling-sync-for-different-authentication-states) for more details on how the `when` property affects synchronization based on authentication state.
+See [Authentication States](/docs/key-features/authentication/authentication-states#controlling-sync-for-different-authentication-states) for more details on how the `when` property affects synchronization based on authentication state.
 
 ### Account Schema
 
@@ -214,11 +214,11 @@ export function MyApp ({ children }: { children: React.ReactNode }) {
 ```
 </CodeGroup>
 
-See [Authentication States](/docs/authentication/authentication-states) for more information on authentication states, guest mode, and handling anonymous accounts.
+See [Authentication States](/docs/key-features/authentication/authentication-states) for more information on authentication states, guest mode, and handling anonymous accounts.
 
 ## Authentication
 
-`<JazzReactProvider />` works with various authentication methods to enable users to access their data across multiple devices. For a complete guide to authentication, see our [Authentication Overview](/docs/authentication/overview).
+`<JazzReactProvider />` works with various authentication methods to enable users to access their data across multiple devices. For a complete guide to authentication, see our [Authentication Overview](/docs/key-features/authentication/overview).
 
 ## Need Help?
 

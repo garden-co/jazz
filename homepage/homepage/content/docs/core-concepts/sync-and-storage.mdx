@@ -1,0 +1,176 @@
+import { Alert, ContentByFramework, CodeGroup } from '@/components/forMdx'
+import GetAPIKey from "@/components/docs/snippets/GetAPIKey.mdx";
+
+export const metadata = { 
+  description: "Learn how to sync and persist your data using Jazz Cloud, or run your own sync server."
+};
+
+# Sync and storage: Jazz Cloud or self-hosted
+
+For sync and storage, you can either use Jazz Cloud for zero-config magic, or run your own sync server.
+
+## Using Jazz Cloud
+
+<GetAPIKey hideFileName={true} hideCodeGroup={true} />
+
+<ContentByFramework framework={["vanilla"]}>
+  Replace the API key in the sync server URL with your API key.
+  <CodeGroup>
+  ```
+  wss://cloud.jazz.tools/?key=YOUR_API_KEY
+  ```
+  </CodeGroup>
+</ContentByFramework>
+
+<ContentByFramework framework={["react", "react-native", "react-native-expo", "svelte"]}>
+  Replace the API key in the Jazz provider sync server URL with your API key:
+</ContentByFramework>
+
+<ContentByFramework framework="react">
+  <CodeGroup>
+  ```tsx twoslash
+  import * as React from "react";
+  import { JazzReactProvider } from "jazz-tools/react";
+  /**
+   * Get a free API Key at dashboard.jazz.tools, or use your email as a temporary key.
+   * 
+   * @link https://dashboard.jazz.tools
+  */
+  const apiKey = "you@example.com";
+  
+  // ---cut---
+  export function MyApp({ children }: { children: React.ReactNode }) {
+    return (
+      <JazzReactProvider
+        sync={{
+          peer: `wss://cloud.jazz.tools/?key=${apiKey}`,
+          // ...
+        }}
+      >
+        {children}
+      </JazzReactProvider>
+    );
+  }
+  ```
+  </CodeGroup>
+</ContentByFramework>
+
+<ContentByFramework framework="react-native">
+  <CodeGroup>
+  ```tsx twoslash
+  import * as React from "react";
+  import { JazzReactNativeProvider } from "jazz-tools/react-native";
+  /**
+   * Get a free API Key at dashboard.jazz.tools, or use your email as a temporary key.
+   * 
+   * @link https://dashboard.jazz.tools
+  */
+  const apiKey = "you@example.com";  
+  // ---cut---
+  export function MyApp({ children }: { children: React.ReactNode }) {
+    return (
+      <JazzReactNativeProvider
+        sync={{
+          peer: `wss://cloud.jazz.tools/?key=${apiKey}`,
+          // ...
+        }}
+      >
+        {children}
+      </JazzReactNativeProvider>
+    );
+  }
+  ```
+  </CodeGroup>
+</ContentByFramework>
+
+<ContentByFramework framework="react-native-expo">
+  <CodeGroup>
+  ```tsx twoslash
+  import * as React from "react";
+  import { JazzExpoProvider } from "jazz-tools/expo";
+  /**
+   * Get a free API Key at dashboard.jazz.tools, or use your email as a temporary key.
+   * 
+   * @link https://dashboard.jazz.tools
+  */
+  const apiKey = "you@example.com";  
+  // ---cut---
+  export function MyApp({ children }: { children: React.ReactNode }) {
+    return (
+      <JazzExpoProvider
+        sync={{
+          peer: `wss://cloud.jazz.tools/?key=${apiKey}`,
+          // ...
+        }}
+      >
+        {children}
+      </JazzExpoProvider>
+    );
+  }
+  ```
+  </CodeGroup>
+</ContentByFramework>
+
+<ContentByFramework framework="svelte">
+  <CodeGroup>
+  ```svelte twoslash
+  <script lang="ts">
+    import { JazzSvelteProvider } from "jazz-tools/svelte";
+    import { MyAppAccount } from "$lib/schema";
+    let { children } = $props();
+    let apiKey = "Get a free API Key at dashboard.jazz.tools, or use your email as a temporary key.";
+  </script>
+
+  <JazzSvelteProvider
+    sync={{ 
+      peer: `wss://cloud.jazz.tools/?key=${apiKey}`,
+    }}
+    AccountSchema={MyAppAccount}
+  >
+    {@render children()}
+  </JazzSvelteProvider>
+  ```
+  </CodeGroup>
+</ContentByFramework>
+
+Jazz Cloud will
+- sync CoValues in real-time between users and devices
+- safely persist CoValues on redundant storage nodes with additional backups
+- make use of geographically distributed cache nodes for low latency
+
+### Free public alpha
+
+- Jazz Cloud is free during the public alpha, with no strict usage limits
+- We plan to keep a free tier, so you'll always be able to get started with zero setup
+- See [Jazz Cloud pricing](/cloud#pricing) for more details
+
+## Self-hosting your sync server
+
+You can run your own sync server using:
+
+<CodeGroup>
+```sh
+npx jazz-run sync
+```
+</CodeGroup>
+
+And then use `ws://localhost:4200` as the sync server URL.
+
+You can also run this simple sync server behind a proxy that supports WebSockets, for example to provide TLS.
+In this case, provide the WebSocket endpoint your proxy exposes as the sync server URL.
+
+<Alert variant="info" className="mt-4 flex gap-2 items-center">
+ Requires at least Node.js v20.
+ See our [Troubleshooting Guide](/docs/troubleshooting) for quick fixes.
+</Alert>
+
+### Command line options:
+
+- `--host` / `-h` - the host to run the sync server on. Defaults to 127.0.0.1.
+- `--port` / `-p` - the port to run the sync server on. Defaults to 4200.
+- `--in-memory` - keep CoValues in-memory only and do sync only, no persistence. Persistence is enabled by default.
+- `--db` - the path to the file where to store the data (SQLite). Defaults to `sync-db/storage.db`.
+
+### Source code
+
+The implementation of this simple sync server is available open-source [on GitHub](https://github.com/garden-co/jazz/blob/main/packages/jazz-run/src/startSyncServer.ts).

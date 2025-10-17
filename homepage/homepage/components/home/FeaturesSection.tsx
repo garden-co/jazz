@@ -149,7 +149,7 @@ export function FeaturesSection() {
 
               <Prose size="sm">
                 or{" "}
-                <Link href="/docs/react/sync-and-storage#running-your-own-sync-server">
+                <Link href="/docs/core-concepts/sync-and-storage#running-your-own-sync-server">
                   self-host
                 </Link>
                 .

@@ -1,0 +1,313 @@
+export const metadata = {
+  description: "Share CoValues in Jazz through public sharing and invite links. Enable collaboration by granting access to everyone or specific users with different permission levels."
+};
+
+import { Alert, CodeGroup, ContentByFramework } from '@/components/forMdx';
+
+# Public sharing and invites
+
+## Public sharing
+
+You can share CoValues publicly by setting the `owner` to a `Group`, and granting access to "everyone".
+
+<CodeGroup>
+```ts twoslash
+import { Group } from "jazz-tools";
+// ---cut---
+const group = Group.create();
+group.addMember("everyone", "writer");
+```
+</CodeGroup>
+
+You can also use `makePublic(role)` alias to grant access to everyone with a specific role (defaults to `reader`).
+
+<CodeGroup>
+```ts twoslash
+import { Group } from "jazz-tools";
+// ---cut---
+const group = Group.create();
+group.addMember("everyone", "writer"); // [!code --]
+group.makePublic("writer"); // [!code ++]
+// group.makePublic(); // Defaults to "reader" access
+```
+</CodeGroup>
+
+This is done in the [chat example](https://github.com/garden-co/jazz/tree/main/examples/chat) where anyone can join the chat, and send messages.
+
+You can also [add members by Account ID](/docs/permissions-and-sharing/overview#adding-group-members-by-id).
+
+## Invites
+
+You can grant users access to a CoValue by sending them an invite link.
+
+This is used in the [todo example](https://github.com/garden-co/jazz/tree/main/examples/todo).
+
+<ContentByFramework framework={["react", "react-native", "react-native-expo", "vue", "svelte"]}>
+<CodeGroup>
+```ts twoslash
+import { co, z } from "jazz-tools";
+
+const Organization = co.map({
+  name: z.string(),
+});
+const organization = Organization.create({ name: "Garden Computing" });
+// ---cut---
+import { createInviteLink } from "jazz-tools/react";
+
+createInviteLink(organization, "writer"); // or reader, admin, writeOnly
+```
+</CodeGroup>
+</ContentByFramework>
+
+It generates a URL that looks like `.../invite/[CoValue ID]/[inviteSecret]`
+
+In your app, you need to handle this route, and let the user accept the invitation,
+as done [here](https://github.com/garden-co/jazz/tree/main/examples/todo/src/2_main.tsx).
+
+<ContentByFramework framework={["react"]}>
+<CodeGroup>
+```ts twoslash
+import { co, z } from "jazz-tools";
+
+const Organization = co.map({
+  name: z.string(),
+});
+const organization = Organization.create({ name: "Garden Computing" });
+const organizationID = organization.$jazz.id;
+// ---cut---
+import { useAcceptInvite } from "jazz-tools/react";
+
+useAcceptInvite({
+  invitedObjectSchema: Organization,
+  onAccept: (organizationID) => {
+    console.log("Accepted invite!")
+    // navigate to the organization page
+  },
+});
+```
+</CodeGroup>
+</ContentByFramework>
+
+<ContentByFramework framework={["react-native"]}>
+<CodeGroup>
+```ts twoslash
+import { co, z } from "jazz-tools";
+
+const Organization = co.map({
+  name: z.string(),
+});
+const organization = Organization.create({ name: "Garden Computing" });
+const organizationID = organization.$jazz.id;
+// ---cut---
+import { useAcceptInviteNative } from "jazz-tools/react-native";
+
+useAcceptInviteNative({
+  invitedObjectSchema: Organization,
+  onAccept: (organizationID) => {
+    console.log("Accepted invite!")
+    // navigate to the organization page
+  },
+});
+```
+</CodeGroup>
+</ContentByFramework>
+
+<ContentByFramework framework={["react-native-expo"]}>
+<CodeGroup>
+```ts twoslash
+import { co, z } from "jazz-tools";
+
+const Organization = co.map({
+  name: z.string(),
+});
+const organization = Organization.create({ name: "Garden Computing" });
+const organizationID = organization.$jazz.id;
+// ---cut---
+import { useAcceptInviteNative } from "jazz-tools/expo";
+
+useAcceptInviteNative({
+  invitedObjectSchema: Organization,
+  onAccept: (organizationID) => {
+    console.log("Accepted invite!")
+    // navigate to the organization page
+  },
+});
+```
+</CodeGroup>
+</ContentByFramework>
+
+<ContentByFramework framework={["svelte"]}>
+<CodeGroup>
+```ts twoslash
+import { co, z } from "jazz-tools";
+
+const Organization = co.map({
+  name: z.string(),
+});
+const organization = Organization.create({ name: "Garden Computing" });
+const organizationID = organization.$jazz.id;
+// ---cut---
+import { InviteListener } from "jazz-tools/svelte";
+
+new InviteListener({
+  invitedObjectSchema: Organization,
+  onAccept: (organizationID) => {
+    console.log("Accepted invite!")
+    // navigate to the organization page
+  },
+});
+```
+</CodeGroup>
+</ContentByFramework>
+
+You can accept an invitation programmatically by using the `acceptInvite` method on an account.
+Pass the ID of the CoValue you're being invited to, the secret from the invite link, and the schema of the CoValue.
+
+<CodeGroup>
+```ts twoslash
+import { co, z, Account } from "jazz-tools";
+
+const Organization = co.map({
+  name: z.string(),
+});
+const account = {} as unknown as Account;
+const organizationId = "";
+const inviteSecret = "inviteSecret_z";
+// ---cut---
+await account.acceptInvite(
+  organizationId,
+  inviteSecret,
+  Organization
+);
+```
+</CodeGroup>
+
+### Invite Secrets
+The invite links generated by Jazz are convenient ways of handling invites.
+
+In case you would prefer more direct control over the invite, you can create an invite to a `Group` using `Group.createInvite(id, role)` or `group.$jazz.createInvite(role)`.
+
+This will generate a string starting with `inviteSecret_`. You can then accept this invite using `acceptInvite`, with the group ID as the first argument, and the invite secret as the second.
+
+<CodeGroup preferWrap>
+```ts
+const group = Group.create();
+const readerInvite = group.$jazz.createInvite('reader'); 
+// `inviteSecret_`
+
+await account.acceptInvite(
+  group.$jazz.id,
+  readerInvite
+);
+```
+</CodeGroup>
+
+<Alert variant="warning" title="Security Note" className="mt-4">
+  **Invites do not expire and cannot be revoked.** If you choose to generate your own secrets in this way, take care that they are not shared in plain text over an insecure channel. 
+  
+  One particularly tempting mistake is passing the secret as a route parameter or a query. However, this will cause your secret to appear in server logs. You should only ever use fragment identifiers (i.e. parts after the hash in the URL) to share secrets, as these are not sent to the server (see the `createInviteLink` implementation).
+</Alert>
+
+### Requesting Invites
+
+To allow a non-group member to request an invitation to a group you can use the `writeOnly` role.
+This means that users only have write access to a specific requests list (they can't read other requests). 
+However, Administrators can review and approve these requests.
+
+Create the data models.
+
+<CodeGroup>
+```ts twoslash
+import { co, z } from "jazz-tools";
+// ---cut---
+const JoinRequest = co.map({
+  account: co.account,
+  status: z.literal(["pending", "approved", "rejected"]),
+});
+
+const RequestsList = co.list(JoinRequest);
+```
+</CodeGroup>
+
+Set up the request system with appropriate access controls.
+
+<CodeGroup>
+```ts twoslash
+import { co, z, Group } from "jazz-tools";
+
+const JoinRequest = co.map({
+  account: co.account(),
+  status: z.literal(["pending", "approved", "rejected"]),
+});
+
+const RequestsList = co.list(JoinRequest);
+const Account = co.account();
+type Account = co.loaded<typeof Account>;
+
+// ---cut-before---
+function createRequestsToJoin() {
+  const requestsGroup = Group.create();
+  requestsGroup.addMember("everyone", "writeOnly");
+
+  return RequestsList.create([], requestsGroup);
+}
+
+async function sendJoinRequest(
+  requestsList: co.loaded<typeof RequestsList>,
+  account: Account,
+) {
+  const request = JoinRequest.create(
+    {
+      account,
+      status: "pending",
+    },
+    requestsList.$jazz.owner // Inherit the access controls of the requestsList
+  );
+
+  requestsList.$jazz.push(request);
+
+  return request;
+}
+```
+</CodeGroup>
+
+Using the write-only access users can submit requests that only administrators can review and approve.
+
+<CodeGroup>
+```ts twoslash
+import { co, z, Group, } from "jazz-tools";
+
+const Account = co.account();
+type Account = co.loaded<typeof Account>;
+
+const JoinRequest = co.map({
+  account: Account,
+  status: z.literal(["pending", "approved", "rejected"]),
+});
+
+const RequestsList = co.list(JoinRequest);
+
+const RequestsToJoin = co.map({
+  writeOnlyInvite: z.string(),
+  requests: RequestsList,
+});
+
+// ---cut-before---
+async function approveJoinRequest(
+  joinRequest: co.loaded<typeof JoinRequest, { account: true }>,
+  targetGroup: Group,
+) {
+  const account = await Account.load(joinRequest.$jazz.refs.account.id);
+
+  if (account) {
+    targetGroup.addMember(account, "reader");
+    joinRequest.$jazz.set("status", "approved");
+
+    return true;
+  } else {
+    return false;
+  }
+}
+```
+</CodeGroup>
+

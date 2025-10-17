@@ -1,0 +1,165 @@
+export const metadata = {
+  description: "How to use the Inbox API to communicate with Server Workers using experimental_useInboxSender and inbox.subscribe."
+};
+
+import { Alert, CodeGroup } from "@/components/forMdx";
+
+# Inbox API with Server Workers
+
+The Inbox API provides a message-based communication system for Server Workers in Jazz.
+
+It works on top of the Jazz APIs and uses sync to transfer messages between the client and the server.
+
+## Setting up the Inbox API
+
+### Define the inbox message schema
+
+Define the inbox message schema in your schema file:
+
+<CodeGroup>
+```ts
+export const BookTicketMessage = co.map({
+  type: co.literal("bookTicket"),
+  event: Event,
+})
+```
+</CodeGroup>
+
+Any kind of CoMap is valid as an inbox message.
+
+### Setting up the Server Worker
+
+Run a server worker and subscribe to the `inbox`:
+
+<CodeGroup>
+```ts
+import { startWorker } from "jazz-tools/worker";
+import { BookTicketMessage } from "@/schema";
+
+const {
+  worker,
+  experimental: { inbox },
+} = await startWorker({
+  accountID: process.env.JAZZ_WORKER_ACCOUNT,
+  accountSecret: process.env.JAZZ_WORKER_SECRET,
+  syncServer: "wss://cloud.jazz.tools/?key=your-api-key",
+});
+
+inbox.$jazz.subscribe(
+  BookTicketMessage,
+  async (message, senderID) => {
+    const madeBy = await co.account().load(senderID, { loadAs: worker });
+
+    const { event } = await message.$jazz.ensureLoaded({
+      resolve: {
+        event: {
+          reservations: true,
+        },
+      },
+    });
+
+    const ticketGroup = Group.create(jazzServer.worker);
+    const ticket = Ticket.create({
+      account: madeBy,
+      event,
+    });
+
+    // Give access to the ticket to the client
+    ticketGroup.addMember(madeBy, "reader");
+
+    event.reservations.push(ticket);
+
+    return ticket;
+  },
+);
+```
+</CodeGroup>
+
+### Handling multiple message types
+
+`inbox.$jazz.subscribe` should be called once per worker instance.
+
+If you need to handle multiple message types, you can use the `co.discriminatedUnion` function to create a union of the message types.
+
+<CodeGroup>
+```ts
+const CancelReservationMessage = co.map({
+  type: co.literal("cancelReservation"),
+  event: Event,
+  ticket: Ticket,
+});
+
+export const InboxMessage = co.discriminatedUnion("type", [
+  BookTicketMessage,
+  CancelReservationMessage
+]);
+```
+</CodeGroup>
+
+And check the message type in the handler:
+
+<CodeGroup>
+```ts
+import { InboxMessage } from "@/schema";
+
+inbox.$jazz.subscribe(
+  InboxMessage,
+  async (message, senderID) => {
+    switch (message.type) {
+      case "bookTicket":
+        return await handleBookTicket(message, senderID);
+      case "cancelReservation":
+        return await handleCancelReservation(message, senderID);
+    }
+  },
+);
+```
+</CodeGroup>
+
+## Sending messages from the client
+
+### Using the Inbox Sender hook
+
+Use `experimental_useInboxSender` to send messages from React components:
+
+<CodeGroup>
+```ts
+import { experimental_useInboxSender } from "jazz-tools/react";
+import { BookTicketMessage, Event } from "@/schema";
+
+function EventComponent({ event }: { event: Event }) {
+  const sendInboxMessage = experimental_useInboxSender(WORKER_ID);
+  const [isLoading, setIsLoading] = useState(false);
+
+  const onBookTicketClick = async () => {
+    setIsLoading(true);
+
+    const ticketId = await sendInboxMessage(
+      BookTicketMessage.create({
+        type: "bookTicket",
+        event: event,
+      }),
+    );
+
+    alert(`Ticket booked: ${ticketId}`);
+  };
+
+  return (
+    <Button onClick={onBookTicketClick} loading={isLoading}>
+      Book Ticket
+    </Button>
+  );
+}
+```
+</CodeGroup>
+
+The `sendInboxMessage` API returns a Promise that waits for the message to be handled by a Worker.
+A message is considered to be handled when the Promise returned by `inbox.$jazz.subscribe` resolves.
+The value returned will be the id of the CoValue returned in the `inbox.$jazz.subscribe` resolved promise.
+
+
+## Deployment considerations
+
+Multi-region deployments are not supported when using the Inbox API.
+
+If you need to split the workload across multiple regions, you can use the [HTTP API](/docs/server-side/communicating-with-workers/http-requests) instead.

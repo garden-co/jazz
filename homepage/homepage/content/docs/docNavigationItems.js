@@ -12,7 +12,7 @@ export const docNavigationItems = [
         done: 100,
       }, {
         name: "Quickstart",
-        href: "/docs/getting-started/quickstart",
+        href: "/docs/quickstart",
         done: 100,
       },
       {
@@ -85,7 +85,7 @@ export const docNavigationItems = [
       // },
       // {
       //   // upgrade guides
-      //   name: "0.10.0 - New authentication flow",
+      //   name: "0.10.0 - New key-features/authentication flow",
       //   href: "/docs/upgrade/0-10-0",
       //   done: 100,
       // },
@@ -121,49 +121,49 @@ export const docNavigationItems = [
   {
     name: "Core Concepts",
     done: 100,
+    prefix: "/docs/core-concepts",
     items: [
       {
         name: "CoValues",
-        href: '/docs/schemas/covalues',
         done: 100,
         collapse: true,
         startClosed: true,
         items: [{
           name: "Overview",
-          href: '/docs/schemas/covalues',
+          href: '/docs/core-concepts/covalues/overview',
           done: 100,
         }, {
           name: "CoMaps",
-          href: "/docs/using-covalues/comaps",
+          href: "/docs/core-concepts/covalues/comaps",
           done: 100,
         }, {
           name: "CoLists",
-          href: "/docs/using-covalues/colists",
+          href: "/docs/core-concepts/covalues/colists",
           done: 100,
         },
         {
           name: "CoFeeds",
-          href: "/docs/using-covalues/cofeeds",
+          href: "/docs/core-concepts/covalues/cofeeds",
           done: 100,
         },
         {
           name: "CoTexts",
-          href: "/docs/using-covalues/cotexts",
+          href: "/docs/core-concepts/covalues/cotexts",
           done: 100,
         },
         {
           name: "FileStreams",
-          href: "/docs/using-covalues/filestreams",
+          href: "/docs/core-concepts/covalues/filestreams",
           done: 80,
         },
         {
           name: "CoVectors",
-          href: "/docs/using-covalues/covectors",
+          href: "/docs/core-concepts/covalues/covectors",
           done: 100,
         },
         {
           name: "ImageDefinitions",
-          href: "/docs/using-covalues/imagedef",
+          href: "/docs/core-concepts/covalues/imagedef",
           done: {
             react: 100,
             "react-native": 100,
@@ -178,90 +178,80 @@ export const docNavigationItems = [
         collapse: true,
         items: [{
           name: "Connecting CoValues",
-          href: "/docs/using-covalues/connecting-covalues",
+          href: "/docs/core-concepts/schemas/connecting-covalues",
           done: 100,
         },
         {
           name: "Accounts & migrations",
-          href: "/docs/schemas/accounts-and-migrations",
+          href: "/docs/core-concepts/schemas/accounts-and-migrations",
           done: 20,
         },
         {
           name: "Schema Unions",
-          href: "/docs/using-covalues/schemaunions",
+          href: "/docs/core-concepts/schemas/schemaunions",
           done: 100,
         }]
       },
-    {
-      name: "Subscriptions & Deep Loading",
-      href: "/docs/using-covalues/subscription-and-loading",
-      done: 100,
-    }, {
+      {
+        name: "Subscriptions & Deep Loading",
+        href: "/docs/core-concepts/subscription-and-loading",
+        done: 100,
+      }, {
         // jazz mesh, setting api key, free plan, unlimited
         name: "Sync and storage",
-        href: "/docs/sync-and-storage",
+        href: "/docs/core-concepts/sync-and-storage",
         done: 100,
       },
     ],
   },
-
   {
     name: "Key Features",
     done: 100,
+    prefix: "/docs/key-features",
     items: [{
       name: 'Authentication',
       startClosed: true,
       collapse: true,
-      href: "/docs/authentication/overview",
       items: [
         {
           name: "Overview",
-          href: "/docs/authentication/overview",
+          href: "/docs/key-features/authentication/overview",
           done: 100,
         },
         {
           name: "Quickstart",
-          href: "/docs/authentication/quickstart",
+          href: "/docs/key-features/authentication/quickstart",
           done: 100,
         },
 
         {
           name: "Authentication States",
-          href: "/docs/authentication/authentication-states",
+          href: "/docs/key-features/authentication/authentication-states",
           done: 100,
         },
-        // {
-        //   name: "Jazz Cloud",
-        //   href: "/docs/authentication/jazz-cloud",
-        //   done: {
-        //     react: 100,
-        //     vanilla: 100,
-        //     "react-native-expo": 100,
-        //   },
-        // },
         {
           name: "Passkey",
-          href: "/docs/authentication/passkey",
+          href: "/docs/key-features/authentication/passkey",
           done: 100,
         },
         {
           name: "Passphrase",
-          href: "/docs/authentication/passphrase",
+          href: "/docs/key-features/authentication/passphrase",
           done: 100,
         },
         {
           name: "Clerk",
-          href: "/docs/authentication/clerk",
+          href: "/docs/key-features/authentication/clerk",
           done: 100,
         },
         {
           name: "Better Auth",
-          href: "/docs/authentication/better-auth",
+          href: "/docs/key-features/authentication/better-auth",
           done: 100,
         },
         {
           name: "Better Auth Database Adapter",
-          href: "/docs/authentication/better-auth-database-adapter",
+          href: "/docs/key-features/authentication/better-auth-database-adapter",
           done: 100,
         },
       ]
@@ -271,36 +261,42 @@ export const docNavigationItems = [
       startClosed: true,
       items: [
         {
-          name: "Groups",
-          href: "/docs/groups/intro",
-          done: 10,
+          name: "Overview",
+          href: "/docs/permissions-and-sharing/overview",
+          done: 100,
+        },
+        {
+          name: "Quickstart",
+          href: "/docs/permissions-and-sharing/quickstart",
+          done: 100,
         },
         {
           name: "Sharing",
-          href: "/docs/groups/sharing",
-          done: 10,
+          href: "/docs/permissions-and-sharing/sharing",
+          done: 100,
         },
         {
           name: "Cascading Permissions",
-          href: "/docs/groups/inheritance",
+          href: "/docs/permissions-and-sharing/cascading-permissions",
           done: 100,
         },
       ],
     },
     {
       name: "Version control",
-      href: "/docs/using-covalues/version-control",
+      href: "/docs/key-features/version-control",
       done: 100,
     },
     {
       name: "History",
-      href: "/docs/using-covalues/history",
+      href: "/docs/key-features/history",
       done: 100,
     },
     ]
   },
   {
     name: "Server-Side Development",
+    prefix: "/docs/server-side",
     items: [{
       name: "Quickstart",
       href: "/docs/server-side/quickstart",
@@ -313,34 +309,39 @@ export const docNavigationItems = [
     },
     {
       name: "Communicating with workers",
-      href: "/docs/server-side/communicating-with-workers",
       done: 100,
+      prefix: "/docs/server-side/communicating-with-workers",
       startClosed: true,
       collapse: true,
       items: [{
+        name: "Overview",
+        href: "/docs/server-side/communicating-with-workers/overview",
+        done: 100,
+      },{
         name: "JazzRPC",
         href: "/docs/server-side/jazz-rpc",
         done: 100,
       },
       {
         name: "HTTP requests",
-        href: "/docs/server-side/http-requests",
+        href: "/docs/server-side/communicating-with-workers/http-requests",
         done: 100,
       },
       {
         name: "Inbox API",
-        href: "/docs/server-side/inbox",
+        href: "/docs/server-side/communicating-with-workers/inbox",
         done: 100,
       }]
     }, {
       name: "Server-side rendering",
-      href: "/docs/project-setup/ssr",
+      href: "/docs/server-side/ssr",
       done: 100
     },
     ],
   },
   {
     name: "Project setup",
+    prefix: "/docs/project-setup",
     items: [
       {
         name: "Providers",
@@ -356,55 +357,58 @@ export const docNavigationItems = [
   },
   {
     name: "Tooling & Resources",
+    prefix: "/docs/tooling-and-resources",
     items: [
       {
         name: "Developer Tools",
         items: [{
           name: "create-jazz-app",
-          href: "/docs/tools/create-jazz-app",
+          href: "/docs/tooling-and-resources/create-jazz-app",
           done: 100,
         },
         {
           name: "Inspector",
-          href: "/docs/inspector",
+          href: "/docs/tooling-and-resources/inspector",
           done: 100,
         }, {
           name: "AI tools (llms.txt)",
-          href: "/docs/ai-tools",
+          href: "/docs/tooling-and-resources/ai-tools",
           done: 100,
         }]
       },
-    {
+      {
         name: "Reference",
+        prefix: '/docs/reference',
         items: [{
           name: "Encryption",
-          href: "/docs/resources/encryption",
+          href: "/docs/reference/encryption",
           done: 100,
         }, {
           name: "FAQs",
-          href: "/docs/faq",
+          href: "/docs/reference/faq",
           done: 100
         }, {
           name: "Performance tips",
-          href: "/docs/performance",
+          href: "/docs/reference/performance",
           done: 100,
         }, {
           name: "Design patterns",
           collapse: true,
+          prefix: '/docs/reference/design-patterns',
           items: [
             {
               name: "Forms",
-              href: "/docs/design-patterns/form",
+              href: "/docs/reference/design-patterns/form",
               done: 100,
             },
             {
               name: "Organization/Team",
-              href: "/docs/design-patterns/organization",
-              done: 80,
+              href: "/docs/reference/design-patterns/organization",
+              done: 100,
             },
             {
               name: "History Patterns",
-              href: "/docs/design-patterns/history-patterns",
+              href: "/docs/reference/design-patterns/history-patterns",
               done: 100,
             },
           ],

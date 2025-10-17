@@ -11,7 +11,7 @@ import GetAPIKey from "@/components/docs/snippets/GetAPIKey.mdx";
 
 - **Data Synchronization**: Manages connections to peers and the Jazz cloud
 - **Local Storage**: Persists data locally between app sessions
-- **Schema Types**: Provides APIs for the [AccountSchema](/docs/schemas/accounts-and-migrations)
+- **Schema Types**: Provides APIs for the [AccountSchema](/docs/core-concepts/schemas/accounts-and-migrations)
 - **Authentication**: Connects your authentication system to Jazz
 
 ## Setting up the provider
@@ -62,7 +62,7 @@ export function MyJazzProvider({ children }: { children: React.ReactNode }) {
 
 ## Authentication in the Provider
 
-`<JazzExpoProvider />` works with various authentication methods, with PassphraseAuth being the easiest way to get started for development and testing. For authentication details, refer to our [Authentication Overview](/docs/authentication/overview) guide.
+`<JazzExpoProvider />` works with various authentication methods, with PassphraseAuth being the easiest way to get started for development and testing. For authentication details, refer to our [Authentication Overview](/docs/key-features/authentication/overview) guide.
 
 The authentication hooks must always be used inside the `<JazzExpoProvider />` component.
 
