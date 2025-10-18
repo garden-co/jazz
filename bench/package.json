@@ -4,12 +4,18 @@
   "type": "module",
   "dependencies": {
     "cojson": "workspace:*",
-    "vitest": "catalog:default"
+    "cojson-latest": "npm:cojson@0.18.24",
+    "tinybench": "^2.9.0"
   },
   "scripts": {
-    "bench": "vitest bench"
+    "bench": "tsx colist.load.bench.ts && tsx comap.create.bench.ts",
+    "bench:colist": "tsx colist.load.bench.ts",
+    "bench:comap": "tsx comap.create.bench.ts",
+    "bench:comparison": "tsx quick-comparison.colist.bench.ts",
+    "stats": "tsx compaction-stats.ts"
   },
   "devDependencies": {
-    "vitest": "catalog:default"
+    "tsx": "^4.7.0",
+    "@types/node": "^20.0.0"
   }
 }

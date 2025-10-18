@@ -36,6 +36,10 @@ type InsertionEntry<T extends JsonValue> = {
   predecessors: OpID[];
   successors: OpID[];
   change: InsertionOpPayload<T>;
+  // Chain optimization fields
+  chainNodes?: OpID[]; // All nodes in chain (only set on chain start) - enables fast traversal without lookups
+  chainStart?: OpID; // Points to the start of the chain this node belongs to (for all nodes in chain)
+  chainCachedValues?: { value: T; madeAt: number; opID: OpID }[]; // Cached materialized values (only on chain start) - invalidated on delete
 };
 
 type DeletionEntry = {
@@ -245,6 +249,7 @@ export class RawCoList<
               }
 
               beforeEntry.predecessors.push(opID);
+              this.updateChainsAfterInsertion(change.before, opID, "pre");
             }
           } else {
             if (change.after === "start") {
@@ -257,6 +262,7 @@ export class RawCoList<
               }
 
               afterEntry.successors.push(opID);
+              this.updateChainsAfterInsertion(change.after, opID, "app");
             }
           }
         } else if (change.op === "del") {
@@ -265,6 +271,7 @@ export class RawCoList<
             deletionID: opID,
             change,
           });
+          this.invalidateChainsAfterDeletion(change.insertion);
         } else {
           throw new Error(
             "Unknown list operation " + (change as { op: unknown }).op,
@@ -284,9 +291,74 @@ export class RawCoList<
     }
   }
 
+  private invalidateChainsAfterDeletion(opID: OpID) {
+    const entry = this.getInsertionsEntry(opID);
+    if (entry?.chainStart) {
+      const chainStartEntry = this.getInsertionsEntry(entry.chainStart);
+      if (chainStartEntry) {
+        chainStartEntry.chainCachedValues = undefined;
+      }
+    } else if (entry?.chainNodes) {
+      entry.chainCachedValues = undefined;
+    }
+  }
+
   /** @category 6. Meta */
   get headerMeta(): Meta {
     return this.core.verified.header.meta as Meta;
+  }
+
+  /**
+   /**
+   * Analyzes the graph structure to identify compaction opportunities.
+   * Useful for debugging and optimization.
+   * Linear chains are maintained incrementally for optimal performance.
+   *
+   * @category 6. Meta
+   */
+  getCompactionStats(): {
+    totalNodes: number;
+    linearChains: number;
+    compactableNodes: number;
+    avgChainLength: number;
+    maxChainLength: number;
+    compactionRatio: number;
+  } {
+    // Count total nodes and find chain starts by iterating through insertions
+    let totalNodes = 0;
+    let linearChains = 0;
+    let compactableNodes = 0;
+    let maxChainLength = 0;
+
+    for (const sessionID in this.insertions) {
+      const sessionEntry = this.insertions[sessionID as SessionID];
+      for (const txIdx in sessionEntry) {
+        const txEntry = sessionEntry[Number(txIdx)];
+        for (const changeIdx in txEntry) {
+          const entry = txEntry[Number(changeIdx)];
+          totalNodes++;
+
+          // Check if this is a chain start (has chainNodes array)
+          if (entry && entry.chainNodes && entry.chainNodes.length >= 3) {
+            linearChains++;
+            compactableNodes += entry.chainNodes.length;
+            maxChainLength = Math.max(maxChainLength, entry.chainNodes.length);
+          }
+        }
+      }
+    }
+
+    return {
+      totalNodes,
+      linearChains,
+      compactableNodes,
+      avgChainLength: linearChains > 0 ? compactableNodes / linearChains : 0,
+      maxChainLength,
+      compactionRatio:
+        totalNodes > 0
+          ? (totalNodes - compactableNodes + linearChains) / totalNodes
+          : 1,
+    };
   }
 
   /** @category 6. Meta */
@@ -359,6 +431,194 @@ export class RawCoList<
     return arr;
   }
 
+  /** @internal - Break a chain at the given OpID (invalidate all chain info) */
+  private breakOrSplit(opID: OpID) {
+    const entry = this.getInsertionsEntry(opID);
+    if (!entry) return;
+
+    // Find the chain start
+    const chainStartOpID =
+      entry.chainStart || (entry.chainNodes ? opID : undefined);
+    if (!chainStartOpID) return;
+
+    const chainStartEntry = this.getInsertionsEntry(chainStartOpID);
+    if (!chainStartEntry || !chainStartEntry.chainNodes) return;
+
+    const chainNodes = chainStartEntry.chainNodes;
+
+    // Clear chain info from all nodes in the chain
+    for (const nodeOpID of chainStartEntry.chainNodes) {
+      const nodeEntry = this.getInsertionsEntry(nodeOpID);
+      if (nodeEntry) {
+        nodeEntry.chainNodes = undefined;
+        nodeEntry.chainStart = undefined;
+        nodeEntry.chainCachedValues = undefined; // Clear cache
+      }
+    }
+
+    const index = chainNodes.indexOf(opID);
+    if (index === -1) return;
+
+    const secondPart = chainNodes.slice(index + 1, chainNodes.length);
+
+    if (secondPart.length >= 3) {
+      const continueChainStart = secondPart[0]!;
+      const continueChainStartEntry =
+        this.getInsertionsEntry(continueChainStart);
+      if (!continueChainStartEntry) return;
+
+      continueChainStartEntry.chainCachedValues = [];
+
+      continueChainStartEntry.chainNodes = secondPart;
+      continueChainStartEntry.chainCachedValues.push({
+        value: continueChainStartEntry.change.value,
+        madeAt: continueChainStartEntry.madeAt,
+        opID: continueChainStart,
+      });
+      for (const nodeOpID of secondPart.slice(1, secondPart.length)) {
+        const nodeEntry = this.getInsertionsEntry(nodeOpID);
+        if (nodeEntry) {
+          nodeEntry.chainNodes = undefined;
+          nodeEntry.chainStart = continueChainStart;
+          if (!this.isDeleted(nodeOpID)) {
+            continueChainStartEntry.chainCachedValues.push({
+              value: nodeEntry.change.value,
+              madeAt: nodeEntry.madeAt,
+              opID: nodeOpID,
+            });
+          }
+        }
+      }
+
+      continueChainStartEntry.chainStart = continueChainStart;
+    }
+
+    const firstPart = chainNodes.slice(0, index);
+    if (firstPart.length >= 3) {
+      const firstPartStart = firstPart[0]!;
+      const firstPartStartEntry = this.getInsertionsEntry(firstPartStart);
+      if (!firstPartStartEntry) return;
+
+      firstPartStartEntry.chainCachedValues = [];
+
+      firstPartStartEntry.chainNodes = firstPart;
+      firstPartStartEntry.chainCachedValues.push({
+        value: firstPartStartEntry.change.value,
+        madeAt: firstPartStartEntry.madeAt,
+        opID: firstPartStart,
+      });
+      for (const nodeOpID of firstPart.slice(1, firstPart.length)) {
+        const nodeEntry = this.getInsertionsEntry(nodeOpID);
+        if (nodeEntry) {
+          nodeEntry.chainNodes = undefined;
+          nodeEntry.chainStart = firstPartStart;
+          if (!this.isDeleted(nodeOpID)) {
+            firstPartStartEntry.chainCachedValues?.push({
+              value: nodeEntry.change.value,
+              madeAt: nodeEntry.madeAt,
+              opID: nodeOpID,
+            });
+          }
+        }
+      }
+
+      firstPartStartEntry.chainStart = firstPartStart;
+    }
+  }
+
+  /** @internal - Update chains incrementally when a new insertion happens */
+  private updateChainsAfterInsertion(
+    adjacentOpID: OpID,
+    newOpID: OpID,
+    insertionType: "pre" | "app",
+  ) {
+    const adjacentEntry = this.getInsertionsEntry(adjacentOpID);
+    const newEntry = this.getInsertionsEntry(newOpID);
+
+    if (!adjacentEntry || !newEntry) return;
+
+    // Check if we can form/extend a chain
+    // IMPORTANT: Only form chains for append operations to avoid issues with mixed prepend/append
+    // NOTE: This is called BEFORE the new node is added to successors/predecessors
+    const canFormChain =
+      insertionType === "app"
+        ? // For append: adjacent should have NO successors yet (we're adding the first/only one)
+          // new node should have no predecessors or successors
+          adjacentEntry.successors.length === 1 &&
+          newEntry.predecessors.length === 0 &&
+          newEntry.successors.length === 0
+        : // For prepend: DISABLED - don't create chains with prepend to avoid topology issues
+          false;
+
+    if (!canFormChain) {
+      // Can't form a chain, break any existing chain at adjacentOpID
+      this.breakOrSplit(adjacentOpID);
+      return;
+    }
+
+    if (insertionType === "app") {
+      // We're appending newOpID after adjacentOpID
+
+      if (adjacentEntry.chainStart) {
+        // Adjacent is part of an existing chain, extend it
+        const chainStartEntry = this.getInsertionsEntry(
+          adjacentEntry.chainStart,
+        );
+        if (chainStartEntry && chainStartEntry.chainNodes) {
+          // Extend the chain array
+          chainStartEntry.chainNodes.push(newOpID);
+
+          // Mark new node as part of this chain
+          newEntry.chainStart = adjacentEntry.chainStart;
+
+          // Extend cache if it exists
+          if (chainStartEntry.chainCachedValues && !this.isDeleted(newOpID)) {
+            chainStartEntry.chainCachedValues.push({
+              value: newEntry.change.value,
+              madeAt: newEntry.madeAt,
+              opID: newOpID,
+            });
+          }
+        }
+      } else if (adjacentEntry.chainNodes) {
+        // Adjacent is itself a chain start, extend it
+        adjacentEntry.chainNodes.push(newOpID);
+        newEntry.chainStart = adjacentOpID;
+
+        // Extend cache if it exists
+        if (adjacentEntry.chainCachedValues && !this.isDeleted(newOpID)) {
+          adjacentEntry.chainCachedValues.push({
+            value: newEntry.change.value,
+            madeAt: newEntry.madeAt,
+            opID: newOpID,
+          });
+        }
+      } else {
+        // Start a new chain: [adjacent, new]
+        adjacentEntry.chainNodes = [adjacentOpID, newOpID];
+        adjacentEntry.chainStart = adjacentOpID;
+        newEntry.chainStart = adjacentOpID;
+
+        // Initialize cache for new chain
+        if (!this.isDeleted(adjacentOpID) && !this.isDeleted(newOpID)) {
+          adjacentEntry.chainCachedValues = [
+            {
+              value: adjacentEntry.change.value,
+              madeAt: adjacentEntry.madeAt,
+              opID: adjacentOpID,
+            },
+            {
+              value: newEntry.change.value,
+              madeAt: newEntry.madeAt,
+              opID: newOpID,
+            },
+          ];
+        }
+      }
+    }
+    // For prepend: do nothing (disabled)
+  }
+
   /** @internal */
   private fillArrayFromOpID(
     opID: OpID,
@@ -377,7 +637,7 @@ export class RawCoList<
       const entry = this.getInsertionsEntry(currentOpID);
 
       if (!entry) {
-        throw new Error("Missing op " + currentOpID);
+        throw new Error("Missing op " + opIDKey(currentOpID));
       }
 
       const shouldTraversePredecessors =
@@ -393,19 +653,53 @@ export class RawCoList<
         // Remove the current opID from the todo stack to consider it processed.
         todo.pop();
 
-        const deleted = this.isDeleted(currentOpID);
+        // Check if this is the start of a chain (has chainNodes array)
+        if (entry.chainNodes && entry.chainNodes.length >= 3) {
+          if (entry.chainCachedValues) {
+            arr.push(...entry.chainCachedValues);
+          } else {
+            // Process entire chain at once using the pre-computed array (fast path!)
+            for (const chainOpID of entry.chainNodes) {
+              const chainEntry = this.getInsertionsEntry(chainOpID);
+              if (!chainEntry) continue;
 
-        if (!deleted) {
-          arr.push({
-            value: entry.change.value,
-            madeAt: entry.madeAt,
-            opID: currentOpID,
-          });
-        }
+              const deleted = this.isDeleted(chainOpID);
+              if (!deleted) {
+                arr.push({
+                  value: chainEntry.change.value,
+                  madeAt: chainEntry.madeAt,
+                  opID: chainOpID,
+                });
+              }
+            }
+          }
 
-        // traverse successors in reverse for correct insertion behavior
-        for (const successor of entry.successors) {
-          todo.push(successor);
+          // Add successors of the last node in the chain
+          const lastOpID = entry.chainNodes[entry.chainNodes.length - 1];
+          if (lastOpID) {
+            const lastEntry = this.getInsertionsEntry(lastOpID);
+            if (lastEntry) {
+              for (const successor of lastEntry.successors) {
+                todo.push(successor);
+              }
+            }
+          }
+        } else {
+          // Single node (not a chain start, or chain too short)
+          const deleted = this.isDeleted(currentOpID);
+
+          if (!deleted) {
+            arr.push({
+              value: entry.change.value,
+              madeAt: entry.madeAt,
+              opID: currentOpID,
+            });
+          }
+
+          // traverse successors in reverse for correct insertion behavior
+          for (const successor of entry.successors) {
+            todo.push(successor);
+          }
         }
       }
     }
@@ -679,4 +973,9 @@ function getSessionIndex(txID: TransactionID): SessionID {
     return `${txID.sessionID}_branch_${txID.branch}`;
   }
   return txID.sessionID;
+}
+
+function opIDKey(opID: OpID): string {
+  const sessionIndex = getSessionIndex(opID);
+  return `${sessionIndex}_${opID.txIndex}_${opID.changeIdx}`;
 }
