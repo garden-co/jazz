@@ -1,4 +1,4 @@
-import { beforeEach, expect, test } from "vitest";
+import { beforeEach, expect, test, vi } from "vitest";
 import { expectMap } from "../coValue.js";
 import { operationToEditEntry } from "../coValues/coMap.js";
 import { WasmCrypto } from "../crypto/WasmCrypto.js";
@@ -278,4 +278,68 @@ test("totalValidTransactions should return the number of valid transactions proc
   expect(
     mapOnOtherClient.core.getCurrentContent().totalValidTransactions,
   ).toEqual(2);
+});
+
+test("Can subscribe to a CoMap", () => {
+  const node = nodeWithRandomAgentAndSessionID();
+
+  const coMap = expectMap(
+    node
+      .createCoValue({
+        type: "comap",
+        ruleset: { type: "unsafeAllowAll" },
+        meta: null,
+        ...Crypto.createdNowUnique(),
+      })
+      .getCurrentContent(),
+  );
+
+  const callback = vi.fn();
+
+  const unsub = coMap.subscribe(callback);
+
+  expect(callback).toHaveBeenCalledExactlyOnceWith(coMap);
+
+  coMap.set("key1", "value1", "trusting");
+  expect(coMap.toJSON()).toEqual({ key1: "value1" });
+  expect(callback).toHaveBeenNthCalledWith(2, coMap);
+
+  unsub();
+});
+
+test("Can subscribe to a CoMap and get diffs", () => {
+  const node = nodeWithRandomAgentAndSessionID();
+
+  const coMap = expectMap(
+    node
+      .createCoValue({
+        type: "comap",
+        ruleset: { type: "unsafeAllowAll" },
+        meta: null,
+        ...Crypto.createdNowUnique(),
+      })
+      .getCurrentContent(),
+  );
+
+  const callback = vi.fn();
+
+  coMap.set("key1", "initial value", "trusting");
+
+  const unsub = coMap.subscribe(callback, { diffs: true });
+
+  expect(callback).toHaveBeenCalledExactlyOnceWith(coMap, [
+    { op: "set", key: "key1", value: "initial value" },
+  ]);
+
+  coMap.set("key1", "value1", "trusting");
+  expect(coMap.toJSON()).toEqual({ key1: "value1" });
+  expect(callback).toHaveBeenNthCalledWith(2, coMap, [
+    { op: "set", key: "key1", value: "value1" },
+  ]);
+
+  coMap.delete("key1", "trusting");
+  expect(coMap.toJSON()).toEqual({});
+  expect(callback).toHaveBeenNthCalledWith(3, coMap, [
+    { op: "del", key: "key1" },
+  ]);
 });
