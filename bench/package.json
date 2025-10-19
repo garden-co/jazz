@@ -4,12 +4,15 @@
   "type": "module",
   "dependencies": {
     "cojson": "workspace:*",
-    "vitest": "catalog:default"
+    "cojson-latest": "npm:cojson@0.18.25"
   },
   "scripts": {
-    "bench": "vitest bench"
+    "bench": "pnpm bench:comap && pnpm bench:colist",
+    "bench:comap": "node --import @oxc-node/core/register --expose-gc comap.create.bench.ts",
+    "bench:colist": "node --import @oxc-node/core/register --expose-gc colist.load.bench.ts"
   },
   "devDependencies": {
-    "vitest": "catalog:default"
+    "mitata": "^1.0.34",
+    "@oxc-node/core": "^0.0.32"
   }
 }
