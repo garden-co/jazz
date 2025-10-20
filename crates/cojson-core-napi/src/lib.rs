@@ -113,6 +113,7 @@ impl SessionLog {
     key_id: String,
     made_at: f64,
     meta: Option<String>,
+    encoding: Option<String>,
   ) -> napi::Result<String> {
     let (signature, transaction) = self
       .internal
@@ -121,6 +122,7 @@ impl SessionLog {
         TransactionMode::Private {
           key_id: KeyID(key_id),
           key_secret: KeySecret(encryption_key),
+          encoding: encoding.map_or_else(|| None, |encoding| encoding.try_into().ok()),
         },
         &SignerSecret(signer_secret),
         made_at as u64,

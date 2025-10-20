@@ -23,6 +23,7 @@ import { logger } from "../logger.js";
 import { PureJSCrypto } from "./PureJSCrypto.js";
 import {
   CryptoProvider,
+  EncodingType,
   Encrypted,
   KeyID,
   KeySecret,
@@ -218,6 +219,7 @@ class SessionLogAdapter {
     keySecret: KeySecret,
     madeAt: number,
     meta: JsonObject | undefined,
+    encoding?: EncodingType,
   ): { signature: Signature; transaction: PrivateTransaction } {
     const output = this.sessionLog.addNewPrivateTransaction(
       stableStringify(changes),
@@ -226,6 +228,7 @@ class SessionLogAdapter {
       keyID,
       madeAt,
       meta ? stableStringify(meta) : undefined,
+      encoding,
     );
     const parsedOutput = JSON.parse(output);
     const transaction: PrivateTransaction = {

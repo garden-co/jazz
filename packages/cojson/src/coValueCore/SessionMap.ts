@@ -2,6 +2,7 @@ import { Result, err, ok } from "neverthrow";
 import { ControlledAccountOrAgent } from "../coValues/account.js";
 import type {
   CryptoProvider,
+  EncodingType,
   Hash,
   KeyID,
   KeySecret,
@@ -93,6 +94,7 @@ export class SessionMap {
     keySecret: KeySecret,
     meta: JsonObject | undefined,
     madeAt: number,
+    encoding?: EncodingType,
   ): { signature: Signature; transaction: Transaction } {
     const sessionLog = this.getOrCreateSessionLog(
       sessionID,
@@ -106,6 +108,7 @@ export class SessionMap {
       keySecret,
       madeAt,
       meta,
+      encoding,
     );
 
     this.addTransactionsToJsLog(

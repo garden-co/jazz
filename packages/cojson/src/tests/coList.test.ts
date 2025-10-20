@@ -956,3 +956,223 @@ describe("CoList Branching", () => {
     `);
   });
 });
+
+describe("CoList Compression", () => {
+  test("should append items with compression enabled", () => {
+    const node = nodeWithRandomAgentAndSessionID();
+
+    const coValue = node.createCoValue({
+      type: "colist",
+      ruleset: { type: "unsafeAllowAll" },
+      meta: null,
+      ...Crypto.createdNowUnique(),
+    });
+
+    const list = expectList(coValue.getCurrentContent());
+
+    // Append with compression
+    list.append("first", undefined, "trusting", { compress: true });
+    list.append("second", undefined, "trusting", { compress: true });
+    list.append("third", undefined, "trusting", { compress: true });
+
+    expect(list.toJSON()).toEqual(["first", "second", "third"]);
+  });
+
+  test("should append multiple items with compression enabled", () => {
+    const node = nodeWithRandomAgentAndSessionID();
+
+    const coValue = node.createCoValue({
+      type: "colist",
+      ruleset: { type: "unsafeAllowAll" },
+      meta: null,
+      ...Crypto.createdNowUnique(),
+    });
+
+    const list = expectList(coValue.getCurrentContent());
+
+    // Append multiple items with compression
+    list.appendItems(
+      ["item1", "item2", "item3", "item4", "item5"],
+      undefined,
+      "trusting",
+      { compress: true },
+    );
+
+    expect(list.toJSON()).toEqual([
+      "item1",
+      "item2",
+      "item3",
+      "item4",
+      "item5",
+    ]);
+  });
+
+  test("should handle mix of compressed and uncompressed appends", () => {
+    const node = nodeWithRandomAgentAndSessionID();
+
+    const coValue = node.createCoValue({
+      type: "colist",
+      ruleset: { type: "unsafeAllowAll" },
+      meta: null,
+      ...Crypto.createdNowUnique(),
+    });
+
+    const list = expectList(coValue.getCurrentContent());
+
+    // Mix compressed and uncompressed
+    list.append("uncompressed1", undefined, "trusting");
+    list.append("compressed1", undefined, "trusting", { compress: true });
+    list.append("uncompressed2", undefined, "trusting");
+    list.append("compressed2", undefined, "trusting", { compress: true });
+
+    expect(list.toJSON()).toEqual([
+      "uncompressed1",
+      "compressed1",
+      "uncompressed2",
+      "compressed2",
+    ]);
+  });
+
+  test("should sync compressed list items between nodes", async () => {
+    const client = setupTestNode({
+      connected: true,
+    });
+    const otherClient = setupTestNode({});
+
+    otherClient.connectToSyncServer();
+
+    const coValue = client.node.createCoValue({
+      type: "colist",
+      ruleset: { type: "unsafeAllowAll" },
+      meta: null,
+      ...Crypto.createdNowUnique(),
+    });
+
+    const list = expectList(coValue.getCurrentContent());
+
+    // Append with compression
+    list.append("item1", undefined, "trusting", { compress: true });
+    list.append("item2", undefined, "trusting", { compress: true });
+    list.appendItems(["item3", "item4"], undefined, "trusting", {
+      compress: true,
+    });
+
+    const listOnOtherClient = await loadCoValueOrFail(
+      otherClient.node,
+      list.id,
+    );
+
+    await waitFor(() => {
+      expect(listOnOtherClient.toJSON()).toEqual([
+        "item1",
+        "item2",
+        "item3",
+        "item4",
+      ]);
+    });
+
+    expect(list.toJSON()).toEqual(listOnOtherClient.toJSON());
+  });
+
+  test("should handle large compressed items correctly", () => {
+    const node = nodeWithRandomAgentAndSessionID();
+
+    const coValue = node.createCoValue({
+      type: "colist",
+      ruleset: { type: "unsafeAllowAll" },
+      meta: null,
+      ...Crypto.createdNowUnique(),
+    });
+
+    const list = expectList(coValue.getCurrentContent());
+
+    // Create a large item that would benefit from compression
+    const largeItem = "x".repeat(1000);
+    const anotherLargeItem = "y".repeat(1000);
+
+    list.append(largeItem, undefined, "trusting", { compress: true });
+    list.append(anotherLargeItem, undefined, "trusting", { compress: true });
+
+    expect(list.toJSON()).toEqual([largeItem, anotherLargeItem]);
+    expect(list.get(0)).toEqual(largeItem);
+    expect(list.get(1)).toEqual(anotherLargeItem);
+  });
+
+  test("should delete compressed items correctly", () => {
+    const node = nodeWithRandomAgentAndSessionID();
+
+    const coValue = node.createCoValue({
+      type: "colist",
+      ruleset: { type: "unsafeAllowAll" },
+      meta: null,
+      ...Crypto.createdNowUnique(),
+    });
+
+    const list = expectList(coValue.getCurrentContent());
+
+    // Append with compression
+    list.append("first", undefined, "trusting", { compress: true });
+    list.append("second", undefined, "trusting", { compress: true });
+    list.append("third", undefined, "trusting", { compress: true });
+
+    expect(list.toJSON()).toEqual(["first", "second", "third"]);
+
+    // Delete a compressed item
+    list.delete(1, "trusting");
+
+    expect(list.toJSON()).toEqual(["first", "third"]);
+  });
+
+  test("should replace compressed items correctly", () => {
+    const node = nodeWithRandomAgentAndSessionID();
+
+    const coValue = node.createCoValue({
+      type: "colist",
+      ruleset: { type: "unsafeAllowAll" },
+      meta: null,
+      ...Crypto.createdNowUnique(),
+    });
+
+    const list = expectList(coValue.getCurrentContent());
+
+    // Append with compression
+    list.append("first", undefined, "trusting", { compress: true });
+    list.append("second", undefined, "trusting", { compress: true });
+    list.append("third", undefined, "trusting", { compress: true });
+
+    expect(list.toJSON()).toEqual(["first", "second", "third"]);
+
+    // Replace a compressed item
+    list.replace(1, "replaced", "trusting");
+
+    expect(list.toJSON()).toEqual(["first", "replaced", "third"]);
+  });
+
+  test("should handle compressed items in branches", async () => {
+    const client1 = setupTestNode({
+      connected: true,
+    });
+
+    const group = client1.node.createGroup();
+    group.addMember("everyone", "writer");
+
+    const list = group.createList(["initial"]);
+
+    // Create a branch
+    const branch = expectList(
+      list.core.createBranch("test-branch", group.id).getCurrentContent(),
+    );
+
+    // Append compressed items to branch
+    branch.append("branch-item1", undefined, "trusting", { compress: true });
+    branch.append("branch-item2", undefined, "trusting", { compress: true });
+
+    // Merge branch back
+    branch.core.mergeBranch();
+
+    // Wait for sync
+    await list.core.waitForSync();
+
+    expect(list.toJSON()).toEqual(["initial", "branch-item1", "branch-item2"]);
+  });
+});

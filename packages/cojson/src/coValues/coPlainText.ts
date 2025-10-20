@@ -137,7 +137,7 @@ export class RawCoPlainText<
   ) {
     const chunks = splitIntoChunks(text);
     for (const chunk of chunks) {
-      this.appendItems(chunk, position, privacy);
+      this.appendItems(chunk, position, privacy, { compress: true });
       position += chunk.length;
     }
   }

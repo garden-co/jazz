@@ -23,6 +23,8 @@ export type SealerSecret = `sealerSecret_z${string}`;
 export type SealerID = `sealer_z${string}`;
 export type Sealed<T> = `sealed_U${string}` & { __type: T };
 
+export type EncodingType = "snappy" | "zstd" | "lz4";
+
 export type AgentSecret = `${SealerSecret}/${SignerSecret}`;
 
 export const textEncoder = new TextEncoder();
@@ -285,6 +287,7 @@ export interface SessionLogImpl {
     keySecret: KeySecret,
     madeAt: number,
     meta: JsonObject | undefined,
+    encoding?: EncodingType,
   ): { signature: Signature; transaction: PrivateTransaction };
   addNewTrustingTransaction(
     signerAgent: ControlledAccountOrAgent,

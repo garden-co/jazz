@@ -11,7 +11,7 @@ export declare class SessionLog {
   constructor(coId: string, sessionId: string, signerId?: string | undefined | null)
   clone(): SessionLog
   tryAdd(transactionsJson: Array<string>, newSignatureStr: string, skipVerify: boolean): void
-  addNewPrivateTransaction(changesJson: string, signerSecret: string, encryptionKey: string, keyId: string, madeAt: number, meta?: string | undefined | null): string
+  addNewPrivateTransaction(changesJson: string, signerSecret: string, encryptionKey: string, keyId: string, madeAt: number, meta?: string | undefined | null, encoding?: string | undefined | null): string
   addNewTrustingTransaction(changesJson: string, signerSecret: string, madeAt: number, meta?: string | undefined | null): string
   decryptNextTransactionChangesJson(txIndex: number, encryptionKey: string): string
   decryptNextTransactionMetaJson(txIndex: number, encryptionKey: string): string | null

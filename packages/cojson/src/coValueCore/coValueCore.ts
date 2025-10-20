@@ -9,6 +9,7 @@ import { validateTxSizeLimitInBytes } from "../coValueContentMessage.js";
 import { coreToCoValue } from "../coreToCoValue.js";
 import {
   CryptoProvider,
+  EncodingType,
   Hash,
   KeyID,
   KeySecret,
@@ -643,6 +644,7 @@ export class CoValueCore {
     privacy: "private" | "trusting",
     meta?: JsonObject,
     madeAt?: number,
+    encoding?: EncodingType,
   ): boolean {
     if (!this.verified) {
       throw new Error(
@@ -680,6 +682,7 @@ export class CoValueCore {
         keySecret,
         meta,
         madeAt ?? Date.now(),
+        encoding,
       );
     } else {
       result = this.verified.makeNewTrustingTransaction(

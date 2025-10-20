@@ -10,6 +10,7 @@
     "bench": "vitest bench"
   },
   "devDependencies": {
+    "@faker-js/faker": "^9.7.0",
     "vitest": "catalog:default"
   }
 }

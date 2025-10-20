@@ -59,7 +59,7 @@ struct PrivateTransactionResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     meta: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    encoding: Option<String>
+    encoding: Option<String>,
 }
 
 #[wasm_bindgen]
@@ -116,6 +116,7 @@ impl SessionLog {
         key_id: String,
         made_at: f64,
         meta: Option<String>,
+        encoding: Option<String>,
     ) -> Result<String, CojsonCoreWasmError> {
         let (signature, transaction) = self
             .internal
@@ -124,6 +125,7 @@ impl SessionLog {
                 TransactionMode::Private {
                     key_id: KeyID(key_id),
                     key_secret: KeySecret(encryption_key),
+                    encoding: encoding.map_or_else(|| None, |encoding| encoding.try_into().ok()),
                 },
                 &SignerSecret(signer_secret),
                 made_at as u64,

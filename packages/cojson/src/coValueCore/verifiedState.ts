@@ -7,6 +7,7 @@ import {
 } from "../coValueContentMessage.js";
 import {
   CryptoProvider,
+  EncodingType,
   Encrypted,
   KeyID,
   KeySecret,
@@ -143,6 +144,7 @@ export class VerifiedState {
     keySecret: KeySecret,
     meta: JsonObject | undefined,
     madeAt: number,
+    encoding?: EncodingType,
   ) {
     const result = this.sessions.makeNewPrivateTransaction(
       sessionID,
@@ -152,6 +154,7 @@ export class VerifiedState {
       keySecret,
       meta,
       madeAt,
+      encoding,
     );
 
     this._cachedNewContentSinceEmpty = undefined;

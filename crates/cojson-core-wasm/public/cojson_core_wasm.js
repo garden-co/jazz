@@ -897,11 +897,12 @@ export class SessionLog {
      * @param {string} key_id
      * @param {number} made_at
      * @param {string | null} [meta]
+     * @param {string | null} [encoding]
      * @returns {string}
      */
-    addNewPrivateTransaction(changes_json, signer_secret, encryption_key, key_id, made_at, meta) {
-        let deferred7_0;
-        let deferred7_1;
+    addNewPrivateTransaction(changes_json, signer_secret, encryption_key, key_id, made_at, meta, encoding) {
+        let deferred8_0;
+        let deferred8_1;
         try {
             const ptr0 = passStringToWasm0(changes_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
             const len0 = WASM_VECTOR_LEN;
@@ -913,18 +914,20 @@ export class SessionLog {
             const len3 = WASM_VECTOR_LEN;
             var ptr4 = isLikeNone(meta) ? 0 : passStringToWasm0(meta, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
             var len4 = WASM_VECTOR_LEN;
-            const ret = wasm.sessionlog_addNewPrivateTransaction(this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3, made_at, ptr4, len4);
-            var ptr6 = ret[0];
-            var len6 = ret[1];
+            var ptr5 = isLikeNone(encoding) ? 0 : passStringToWasm0(encoding, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            var len5 = WASM_VECTOR_LEN;
+            const ret = wasm.sessionlog_addNewPrivateTransaction(this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3, made_at, ptr4, len4, ptr5, len5);
+            var ptr7 = ret[0];
+            var len7 = ret[1];
             if (ret[3]) {
-                ptr6 = 0; len6 = 0;
+                ptr7 = 0; len7 = 0;
                 throw takeFromExternrefTable0(ret[2]);
             }
-            deferred7_0 = ptr6;
-            deferred7_1 = len6;
-            return getStringFromWasm0(ptr6, len6);
+            deferred8_0 = ptr7;
+            deferred8_1 = len7;
+            return getStringFromWasm0(ptr7, len7);
         } finally {
-            wasm.__wbindgen_free(deferred7_0, deferred7_1, 1);
+            wasm.__wbindgen_free(deferred8_0, deferred8_1, 1);
         }
     }
     /**

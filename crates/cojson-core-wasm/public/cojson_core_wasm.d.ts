@@ -191,7 +191,7 @@ export class SessionLog {
   constructor(co_id: string, session_id: string, signer_id?: string | null);
   clone(): SessionLog;
   tryAdd(transactions_json: string[], new_signature_str: string, skip_verify: boolean): void;
-  addNewPrivateTransaction(changes_json: string, signer_secret: string, encryption_key: string, key_id: string, made_at: number, meta?: string | null): string;
+  addNewPrivateTransaction(changes_json: string, signer_secret: string, encryption_key: string, key_id: string, made_at: number, meta?: string | null, encoding?: string | null): string;
   addNewTrustingTransaction(changes_json: string, signer_secret: string, made_at: number, meta?: string | null): string;
   decryptNextTransactionChangesJson(tx_index: number, encryption_key: string): string;
   decryptNextTransactionMetaJson(tx_index: number, encryption_key: string): string | undefined;
@@ -205,7 +205,7 @@ export interface InitOutput {
   readonly sessionlog_new: (a: number, b: number, c: number, d: number, e: number, f: number) => number;
   readonly sessionlog_clone: (a: number) => number;
   readonly sessionlog_tryAdd: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number];
-  readonly sessionlog_addNewPrivateTransaction: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number) => [number, number, number, number];
+  readonly sessionlog_addNewPrivateTransaction: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number) => [number, number, number, number];
   readonly sessionlog_addNewTrustingTransaction: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
   readonly sessionlog_decryptNextTransactionChangesJson: (a: number, b: number, c: number, d: number) => [number, number, number, number];
   readonly sessionlog_decryptNextTransactionMetaJson: (a: number, b: number, c: number, d: number) => [number, number, number, number];

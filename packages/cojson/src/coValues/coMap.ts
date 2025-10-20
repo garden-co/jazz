@@ -379,6 +379,9 @@ export class RawCoMap<
     key: K,
     value: Shape[K],
     privacy: "private" | "trusting" = "private",
+    options?: {
+      compress?: boolean;
+    },
   ): void {
     if (this.isTimeTravelEntity()) {
       throw new Error("Cannot set value on a time travel entity");
@@ -393,6 +396,9 @@ export class RawCoMap<
         },
       ],
       privacy,
+      undefined,
+      undefined,
+      options?.compress ? "lz4" : undefined,
     );
 
     this.processNewTransactions();

@@ -55,9 +55,33 @@ pub enum EncodingType {
     Lz4,
 }
 
-impl Into<String> for EncodingType {
-    fn into(self) -> String {
-        match self {
+impl TryFrom<String> for EncodingType {
+    type Error = CoJsonCoreError;
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        match &s[..] {
+            "snappy" => Ok(EncodingType::Snappy),
+            "zstd" => Ok(EncodingType::Zstd),
+            "lz4" => Ok(EncodingType::Lz4),
+            _ => Err(CoJsonCoreError::InvalidEncoding),
+        }
+    }
+}
+
+impl TryFrom<&str> for EncodingType {
+    type Error = CoJsonCoreError;
+    fn try_from(s: &str) -> Result<Self, Self::Error> {
+        match s {
+            "snappy" => Ok(EncodingType::Snappy),
+            "zstd" => Ok(EncodingType::Zstd),
+            "lz4" => Ok(EncodingType::Lz4),
+            _ => Err(CoJsonCoreError::InvalidEncoding),
+        }
+    }
+}
+
+impl From<EncodingType> for String {
+    fn from(encoding: EncodingType) -> String {
+        match encoding {
             EncodingType::Snappy => "snappy".to_string(),
             EncodingType::Zstd => "zstd".to_string(),
             EncodingType::Lz4 => "lz4".to_string(),
@@ -89,6 +113,7 @@ pub enum TransactionMode {
     Private {
         key_id: KeyID,
         key_secret: KeySecret,
+        encoding: Option<EncodingType>,
     },
     Trusting,
 }
@@ -216,7 +241,7 @@ impl SessionLogInternal {
     ) -> Result<(Signature, Transaction), CoJsonCoreError> {
         // Build the transaction object depending on the mode.
         let new_tx = match mode {
-            TransactionMode::Private { key_id, key_secret } => {
+            TransactionMode::Private { key_id, key_secret, encoding } => {
                 // For private transactions, encrypt the changes and meta fields.
                 let tx_index = self.transactions_json.len() as u32;
 
@@ -229,13 +254,14 @@ impl SessionLogInternal {
                 // Encrypt the changes JSON.
                 let mut ciphertext = changes_json.as_bytes().to_vec();
 
-                let encoding = if ciphertext.len() > COMPRESSION_THRESHOLD {
-                    let compressed = lz4_flex::compress_prepend_size(&ciphertext);
-                    ciphertext = compressed;
-                    Option::Some(EncodingType::Lz4)
-                } else {
-                    Option::None
-                };
+                if let Some(enc) = &encoding {
+                    match *enc {
+                        EncodingType::Lz4 => {
+                            ciphertext = lz4_flex::compress_prepend_size(&ciphertext);
+                        }
+                        _ => unimplemented!("Encoding type not implemented"),
+                    }
+                }
 
                 let mut cipher = XSalsa20::new(&key, &nonce.into());
                 cipher.apply_keystream(&mut ciphertext);
@@ -456,6 +482,7 @@ mod tests_encoding {
                 TransactionMode::Private {
                     key_id: key_id.clone(),
                     key_secret: key_secret.clone(),
+                    encoding: Some(EncodingType::Lz4),
                 },
                 &signer_secret,
                 0,
@@ -491,6 +518,7 @@ mod tests_encoding {
                 TransactionMode::Private {
                     key_id: key_id.clone(),
                     key_secret: key_secret.clone(),
+                    encoding: None,
                 },
                 &signer_secret,
                 0,
@@ -536,6 +564,7 @@ mod tests_encoding {
                 TransactionMode::Private {
                     key_id: key_id.clone(),
                     key_secret: key_secret.clone(),
+                    encoding: Some(EncodingType::Lz4),
                 },
                 &signer_secret,
                 0,
@@ -592,6 +621,7 @@ mod tests_encoding {
                 TransactionMode::Private {
                     key_id: key_id.clone(),
                     key_secret: key_secret.clone(),
+                    encoding: None,
                 },
                 &signer_secret,
                 0,
@@ -652,6 +682,7 @@ mod tests_encoding {
                 TransactionMode::Private {
                     key_id: key_id.clone(),
                     key_secret: key_secret.clone(),
+                    encoding: None,
                 },
                 &signer_secret,
                 0,
@@ -882,7 +913,7 @@ mod tests {
         let (new_signature, _new_tx) = session
             .add_new_transaction(
                 changes_json,
-                TransactionMode::Private { key_id, key_secret },
+                TransactionMode::Private { key_id, key_secret, encoding: None },
                 &signing_key.into(),
                 made_at,
                 None,
@@ -1103,7 +1134,7 @@ mod tests {
         let (new_signature, _new_tx) = session
             .add_new_transaction(
                 CHANGES_JSON,
-                TransactionMode::Private { key_id, key_secret },
+                TransactionMode::Private { key_id, key_secret, encoding: None },
                 &signing_key.into(),
                 made_at,
                 Some(META_JSON.to_string()),
@@ -1482,6 +1513,7 @@ mod tests {
                 TransactionMode::Private {
                     key_id: key_id.clone(),
                     key_secret: key_secret.clone(),
+                    encoding: None,
                 },
                 &signing_key.into(),
                 1234567890,
@@ -1594,6 +1626,7 @@ mod tests {
                 TransactionMode::Private {
                     key_id: key_id.clone(),
                     key_secret: key_secret.clone(),
+                    encoding: None,
                 },
                 &signing_key.into(),
                 1234567890,

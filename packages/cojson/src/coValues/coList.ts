@@ -7,6 +7,7 @@ import { isCoValue } from "../typeUtils/isCoValue.js";
 import { RawAccountID } from "./account.js";
 import { RawGroup } from "./group.js";
 import { Transaction } from "../coValueCore/verifiedState.js";
+import { EncodingType } from "../crypto/crypto.js";
 
 export type OpID = TransactionID & { changeIdx: number };
 
@@ -503,8 +504,11 @@ export class RawCoList<
     item: Item,
     after?: number,
     privacy: "private" | "trusting" = "private",
+    options?: {
+      compress?: boolean;
+    },
   ) {
-    this.appendItems([item], after, privacy);
+    this.appendItems([item], after, privacy, options);
   }
 
   /**
@@ -520,6 +524,9 @@ export class RawCoList<
     items: Item[],
     after?: number,
     privacy: "private" | "trusting" = "private",
+    options?: {
+      compress?: boolean;
+    },
   ) {
     const entries = this.entries();
     after =
@@ -554,7 +561,13 @@ export class RawCoList<
       changes.reverse();
     }
 
-    this.core.makeTransaction(changes, privacy);
+    this.core.makeTransaction(
+      changes,
+      privacy,
+      undefined,
+      undefined,
+      options?.compress ? "lz4" : undefined,
+    );
     this.processNewTransactions();
   }
 
@@ -571,6 +584,9 @@ export class RawCoList<
     item: Item,
     before?: number,
     privacy: "private" | "trusting" = "private",
+    options?: {
+      encoding?: EncodingType;
+    },
   ) {
     const entries = this.entries();
     before = before === undefined ? 0 : before;
@@ -600,6 +616,9 @@ export class RawCoList<
         },
       ],
       privacy,
+      undefined,
+      undefined,
+      options?.encoding,
     );
 
     this.processNewTransactions();
