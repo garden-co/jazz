@@ -93,7 +93,7 @@ export class RawCoMapView<
     this.processNewTransactions();
   }
 
-  processNewTransactions() {
+  processNewTransactions(): JsonValue[] {
     if (this.isTimeTravelEntity()) {
       throw new Error("Cannot process transactions on a time travel entity");
     }
@@ -104,8 +104,10 @@ export class RawCoMapView<
     });
 
     if (newValidTransactions.length === 0) {
-      return;
+      return [];
     }
+
+    const diffs: JsonValue[] = [];
 
     const { ops } = this;
 
@@ -146,7 +148,19 @@ export class RawCoMapView<
 
     for (const [key, entries] of changedEntries.entries()) {
       this.latest[key] = entries[entries.length - 1];
+      const latestChange = this.latest[key]!.change;
+      if (latestChange.op === "set") {
+        diffs.push({
+          op: "set",
+          key: latestChange.key,
+          value: latestChange.value,
+        });
+      } else if (latestChange.op === "del") {
+        diffs.push({ op: "del", key: latestChange.key });
+      }
     }
+
+    return diffs;
   }
 
   isTimeTravelEntity() {
@@ -346,9 +360,48 @@ export class RawCoMapView<
   }
 
   /** @category 3. Subscription */
-  subscribe(listener: (coMap: this) => void): () => void {
-    return this.core.subscribe((core) => {
-      listener(core.getCurrentContent() as this);
+  subscribe(
+    listener: (coMap: this, diffs?: JsonValue[]) => void,
+    options?: { diffs: boolean },
+  ): () => void {
+    if (options?.diffs) {
+      return this.core.subscribe(
+        (core, _unsub, diffs) => {
+          const effectiveDiffs =
+            diffs === "initial" ? this.initialDiffs() : diffs;
+          listener(core.getCurrentContent() as this, effectiveDiffs);
+        },
+        { diffs: true },
+      );
+    } else {
+      return this.core.subscribe(
+        (core, _unsub) => {
+          listener(core.getCurrentContent() as this);
+        },
+        { diffs: false },
+      );
+    }
+  }
+
+  private initialDiffs() {
+    return Object.values(this.ops).flatMap((entries) => {
+      if (!entries || entries.length === 0) {
+        return [];
+      }
+      const lastChange = entries[entries.length - 1]!;
+      if (lastChange.change.op === "set") {
+        return [
+          {
+            op: "set",
+            key: lastChange.change.key,
+            value: lastChange.change.value,
+          },
+        ];
+      } else if (lastChange.change.op === "del") {
+        return [{ op: "del", key: lastChange.change.key }];
+      } else {
+        return [];
+      }
     });
   }
 }
