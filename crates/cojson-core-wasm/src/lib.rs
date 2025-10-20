@@ -58,6 +58,8 @@ struct PrivateTransactionResult {
     encrypted_changes: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     meta: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    encoding: Option<String>
 }
 
 #[wasm_bindgen]
@@ -135,6 +137,7 @@ impl SessionLog {
                 signature: signature.0,
                 encrypted_changes: private_tx.encrypted_changes.value,
                 meta: private_tx.meta.map(|meta| meta.value),
+                encoding: private_tx.encoding.map(|encoding| encoding.into()),
             },
             _ => {
                 return Err(CojsonCoreWasmError::Js(JsValue::from_str(

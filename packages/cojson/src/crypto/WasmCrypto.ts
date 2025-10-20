@@ -234,6 +234,7 @@ class SessionLogAdapter {
       encryptedChanges: parsedOutput.encrypted_changes,
       keyUsed: keyID,
       meta: parsedOutput.meta,
+      encoding: parsedOutput.encoding,
     };
     return { signature: parsedOutput.signature, transaction };
   }

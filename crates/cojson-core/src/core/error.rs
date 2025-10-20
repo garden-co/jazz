@@ -28,4 +28,7 @@ pub enum CoJsonCoreError {
 
     #[error("Invalid base58")] 
     InvalidBase58(#[from] bs58::decode::Error),
+
+    #[error("Invalid encoding")]
+    InvalidEncoding,
 }
