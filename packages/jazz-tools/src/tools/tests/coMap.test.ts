@@ -2007,7 +2007,10 @@ describe("Creating and finding unique CoMaps", async () => {
         identifier: oldSourceData.identifier,
         external_id: oldSourceData._id,
       },
-      workspace,
+      {
+        unique: oldSourceData.identifier,
+        owner: workspace,
+      },
     );
 
     // Upserting
@@ -2025,7 +2028,6 @@ describe("Creating and finding unique CoMaps", async () => {
       identifier: newSourceData.identifier,
       external_id: newSourceData._id,
     });
-    expect(activeEvent).not.toEqual(oldActiveEvent);
   });
 
   test("upserting a non-existent value with resolve", async () => {
@@ -2420,6 +2422,85 @@ describe("Creating and finding unique CoMaps", async () => {
         "Network Error",
       );
     }
+  });
+
+  test("loadOrCreateUnique prevents race condition on concurrent calls", async () => {
+    const group = Group.create();
+
+    const Person = co.map({
+      name: z.string(),
+      age: z.number(),
+    });
+
+    const promises = [];
+    for (let i = 0; i < 5; i++) {
+      promises.push(
+        Person.loadOrCreateUnique({
+          value: { name: "Alice", age: 30 + i },
+          unique: "concurrent",
+          owner: group,
+        }),
+      );
+    }
+
+    const results = await Promise.all(promises);
+
+    expect(results[0]).toBe(results[1]);
+    expect(results[1]).toBe(results[2]);
+    expect(results[2]).toBe(results[3]);
+    expect(results[3]).toBe(results[4]);
+
+    expect(results[0]).not.toBeNull();
+    expect(results[0]?.name).toBe("Alice");
+    expect(results[0]?.age).toBe(30);
+
+    const expectedId = results[0]?.$jazz.id;
+    results.forEach((result) => {
+      expect(result?.$jazz.id).toBe(expectedId);
+    });
+  });
+
+  test("loadOrCreateUnique returns existing map without modification", async () => {
+    const group = Group.create();
+
+    const Person = co.map({
+      name: z.string(),
+      age: z.number(),
+    });
+
+    const originalPerson = Person.create(
+      { name: "Bob", age: 25 },
+      { owner: group, unique: "existing" },
+    );
+
+    const result = await Person.loadOrCreateUnique({
+      value: { name: "Charlie", age: 40 },
+      unique: "existing",
+      owner: group,
+    });
+
+    expect(result).toEqual(originalPerson);
+    expect(result?.name).toBe("Bob");
+    expect(result?.age).toBe(25);
+  });
+
+  test("loadOrCreateUnique creates new map when none exists", async () => {
+    const group = Group.create();
+
+    const Person = co.map({
+      name: z.string(),
+      age: z.number(),
+    });
+
+    const result = await Person.loadOrCreateUnique({
+      value: { name: "Diana", age: 35 },
+      unique: "new",
+      owner: group,
+    });
+
+    expect(result).not.toBeNull();
+    expect(result?.name).toBe("Diana");
+    expect(result?.age).toBe(35);
   });
 });
 
