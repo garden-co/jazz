@@ -131,7 +131,7 @@ export interface CoMapSchema<
     R
   > | null>;
 
-  getOrCreateUnique: <
+  loadOrCreateUnique: <
     const R extends RefsToResolve<
       Simplify<CoMapInstanceCoValuesNullable<Shape>> & CoMap
     > = true,
@@ -139,10 +139,7 @@ export interface CoMapSchema<
     value: Simplify<CoMapSchemaInit<Shape>>;
     unique: CoValueUniqueness["uniqueness"];
     owner: Owner;
-    resolve?: RefsToResolveStrict<
-      Simplify<CoMapInstanceCoValuesNullable<Shape>> & CoMap,
-      R
-    >;
+    resolve?: never;
   }) => Promise<Resolved<
     Simplify<CoMapInstanceCoValuesNullable<Shape>> & CoMap,
     R
@@ -284,9 +281,9 @@ export function enrichCoMapSchema<
       // @ts-expect-error
       return coValueClass.upsertUnique(...args);
     },
-    getOrCreateUnique: (...args: [any, ...any[]]) => {
+    loadOrCreateUnique: (...args: [any, ...any[]]) => {
       // @ts-expect-error
-      return coValueClass.getOrCreateUnique(...args);
+      return coValueClass.loadOrCreateUnique(...args);
     },
     loadUnique: (...args: [any, ...any[]]) => {
       // @ts-expect-error

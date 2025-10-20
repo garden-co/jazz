@@ -53,6 +53,12 @@ import {
   subscribeToExistingCoValue,
 } from "../internal.js";
 
+/**
+ * Map to deduplicate concurrent loadOrCreateUnique calls.
+ * Key: CoMap ID, Value: in-flight Promise
+ */
+const loadOrCreateUniquePromises = new Map<string, Promise<unknown>>();
+
 type CoMapEdit<V> = {
   value?: V;
   ref?: RefIfCoValue<V>;
@@ -534,7 +540,7 @@ export class CoMap extends CoValueBase implements CoValue {
    *
    * @example
    * ```ts
-   * const activeEvent = await Event.getOrCreateUnique(
+   * const activeEvent = await Event.loadOrCreateUnique(
    *   {
    *     value: { title: "Meeting", date: "2024-01-01" },
    *     unique: sourceData.identifier,
@@ -547,7 +553,7 @@ export class CoMap extends CoValueBase implements CoValue {
    * @returns Either an existing CoMap (unchanged), or a new initialised CoMap if none exists.
    * @category Subscription & Loading
    */
-  static async getOrCreateUnique<
+  static async loadOrCreateUnique<
     M extends CoMap,
     const R extends RefsToResolve<M> = true,
   >(
@@ -556,33 +562,50 @@ export class CoMap extends CoValueBase implements CoValue {
       value: Simplify<CoMapInit_DEPRECATED<M>>;
       unique: CoValueUniqueness["uniqueness"];
       owner: Account | Group;
-      resolve?: RefsToResolveStrict<M, R>;
+      resolve?: never;
     },
   ): Promise<Resolved<M, R> | null> {
+    if (options.resolve)
+      throw new Error("loadOrCreateUnique does not support resolve queries");
     const mapId = CoMap._findUnique(
       options.unique,
       options.owner.$jazz.id,
       options.owner.$jazz.loadedAs,
     );
-    let map: Resolved<M, R> | null = await loadCoValueWithoutMe(this, mapId, {
-      ...options,
-      loadAs: options.owner.$jazz.loadedAs,
-      skipRetry: true,
-    });
 
-    if (!map) {
-      const instance = new this();
-      map = CoMap._createCoMap(instance, options.value, {
-        owner: options.owner,
-        unique: options.unique,
-      }) as Resolved<M, R>;
+    const existingPromise = loadOrCreateUniquePromises.get(mapId);
+    if (existingPromise) {
+      return existingPromise as Promise<Resolved<M, R> | null>;
     }
 
-    return await loadCoValueWithoutMe(this, mapId, {
-      ...options,
-      loadAs: options.owner.$jazz.loadedAs,
-      skipRetry: true,
-    });
+    const promise = (async (): Promise<Resolved<M, R> | null> => {
+      try {
+        let map = await loadCoValueWithoutMe(this, mapId, {
+          ...options,
+          loadAs: options.owner.$jazz.loadedAs,
+          skipRetry: true,
+        });
+
+        if (!map) {
+          const instance = new this();
+          map = CoMap._createCoMap(instance, options.value, {
+            owner: options.owner,
+            unique: options.unique,
+          }) as Resolved<M, R>;
+        }
+
+        return (await loadCoValueWithoutMe(this, mapId, {
+          ...options,
+          loadAs: options.owner.$jazz.loadedAs,
+          skipRetry: true,
+        })) as Resolved<M, R> | null;
+      } finally {
+        loadOrCreateUniquePromises.delete(mapId);
+      }
+    })();
+
+    loadOrCreateUniquePromises.set(mapId, promise);
+    return promise;
   }
 
   /**

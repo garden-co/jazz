@@ -43,6 +43,12 @@ import {
 } from "../internal.js";
 
 /**
+ * Map to deduplicate concurrent loadOrCreateUnique calls.
+ * Key: CoList ID, Value: in-flight Promise
+ */
+const loadOrCreateUniquePromises = new Map<string, Promise<unknown>>();
+
+/**
  * CoLists are collaborative versions of plain arrays.
  *
  * @categoryDescription Content
@@ -412,7 +418,7 @@ export class CoList<out Item = any>
    *
    * @example
    * ```ts
-   * const activeItems = await ItemList.getOrCreateUnique(
+   * const activeItems = await ItemList.loadOrCreateUnique(
    *   {
    *     value: [item1, item2, item3],
    *     unique: sourceData.identifier,
@@ -421,11 +427,11 @@ export class CoList<out Item = any>
    * );
    * ```
    *
-   * @param options The options for creating or loading the CoList. This includes the intended state of the CoList, its unique identifier, its owner, and the references to resolve.
+   * @param options The options for creating or loading the CoList. This includes the intended state of the CoList, its unique identifier and its owner.
    * @returns Either an existing CoList (unchanged), or a new initialised CoList if none exists.
    * @category Subscription & Loading
    */
-  static async getOrCreateUnique<
+  static async loadOrCreateUnique<
     L extends CoList,
     const R extends RefsToResolve<L> = true,
   >(
@@ -434,31 +440,48 @@ export class CoList<out Item = any>
       value: L[number][];
       unique: CoValueUniqueness["uniqueness"];
       owner: Account | Group;
-      resolve?: RefsToResolveStrict<L, R>;
+      resolve?: never; // Cannot use resolve query here
     },
   ): Promise<Resolved<L, R> | null> {
+    if (options.resolve)
+      throw new Error("loadOrCreateUnique does not support resolve queries");
     const listId = CoList._findUnique(
       options.unique,
       options.owner.$jazz.id,
       options.owner.$jazz.loadedAs,
     );
-    let list: Resolved<L, R> | null = await loadCoValueWithoutMe(this, listId, {
-      ...options,
-      loadAs: options.owner.$jazz.loadedAs,
-      skipRetry: true,
-    });
-    if (!list) {
-      list = (this as any).create(options.value, {
-        owner: options.owner,
-        unique: options.unique,
-      }) as Resolved<L, R>;
+
+    const existingPromise = loadOrCreateUniquePromises.get(listId);
+    if (existingPromise) {
+      return existingPromise as Promise<Resolved<L, R> | null>;
     }
 
-    return await loadCoValueWithoutMe(this, listId, {
-      ...options,
-      loadAs: options.owner.$jazz.loadedAs,
-      skipRetry: true,
-    });
+    const promise = (async (): Promise<Resolved<L, R> | null> => {
+      try {
+        let list = await loadCoValueWithoutMe(this, listId, {
+          ...options,
+          loadAs: options.owner.$jazz.loadedAs,
+          skipRetry: true,
+        });
+        if (!list) {
+          list = (this as any).create(options.value, {
+            owner: options.owner,
+            unique: options.unique,
+          }) as Resolved<L, R>;
+        }
+
+        return (await loadCoValueWithoutMe(this, listId, {
+          ...options,
+          loadAs: options.owner.$jazz.loadedAs,
+          skipRetry: true,
+        })) as Resolved<L, R> | null;
+      } finally {
+        loadOrCreateUniquePromises.delete(listId);
+      }
+    })();
+
+    loadOrCreateUniquePromises.set(listId, promise);
+    return promise;
   }
 
   /**

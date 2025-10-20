@@ -1314,12 +1314,11 @@ describe("CoList unique methods", () => {
     expect(updatedList?.[1]?.name).toBe("Added");
   });
 
-  test("getOrCreateUnique creates new list if none exists", async () => {
+  test("loadOrCreateUnique creates new list if none exists", async () => {
     const ItemList = co.list(z.string());
     const group = Group.create();
 
-    // getOrCreateUnique should return the existing list unchanged
-    const resultList = await ItemList.getOrCreateUnique({
+    const resultList = await ItemList.loadOrCreateUnique({
       value: ["original1", "original2", "original3"],
       unique: "get-or-create-list",
       owner: group,
@@ -1332,18 +1331,16 @@ describe("CoList unique methods", () => {
     expect(resultList?.[2]).toBe("original3");
   });
 
-  test("getOrCreateUnique returns existing list unchanged", async () => {
+  test("loadOrCreateUnique returns existing list unchanged", async () => {
     const ItemList = co.list(z.string());
     const group = Group.create();
 
-    // Create initial list
     const originalList = ItemList.create(["original1", "original2"], {
       owner: group,
       unique: "get-or-create-list",
     });
 
-    // getOrCreateUnique should return the existing list unchanged
-    const resultList = await ItemList.getOrCreateUnique({
+    const resultList = await ItemList.loadOrCreateUnique({
       value: ["updated1", "updated2", "updated3"],
       unique: "get-or-create-list",
       owner: group,
@@ -1353,6 +1350,38 @@ describe("CoList unique methods", () => {
     expect(resultList?.length).toBe(2);
     expect(resultList?.[0]).toBe("original1");
     expect(resultList?.[1]).toBe("original2");
+  });
+
+  test("loadOrCreateUnique prevents race condition on concurrent calls", async () => {
+    const ItemList = co.list(z.string());
+    const group = Group.create();
+
+    const promises = [];
+    for (let i = 0; i < 5; i++) {
+      promises.push(
+        ItemList.loadOrCreateUnique({
+          value: ["item1", "item2", "item3"],
+          unique: "race",
+          owner: group,
+        }),
+      );
+    }
+
+    const results = await Promise.all(promises);
+
+    expect(results[0]).toBe(results[1]);
+    expect(results[1]).toBe(results[2]);
+    expect(results[2]).toBe(results[3]);
+    expect(results[3]).toBe(results[4]);
+
+    expect(results[0]).not.toBeNull();
+    expect(results[0]?.length).toBe(3);
+    expect(results[0]?.[0]).toBe("item1");
+
+    const expectedId = results[0]?.$jazz.id;
+    results.forEach((result) => {
+      expect(result?.$jazz.id).toBe(expectedId);
+    });
   });
 
   test("findUnique returns correct ID", async () => {

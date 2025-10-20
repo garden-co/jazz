@@ -566,18 +566,16 @@ describe("CoRecord unique methods", () => {
     expect(result?.second?.name).toBe("Second");
   });
 
-  test("getOrCreateUnique returns existing record unchanged", async () => {
+  test("loadOrCreateUnique returns existing record unchanged", async () => {
     const ItemRecord = co.record(z.string(), z.number());
     const group = Group.create();
 
-    // Create initial record
     const originalRecord = ItemRecord.create(
       { original1: 1, original2: 2 },
       { owner: group, unique: "get-or-create-record" },
     );
 
-    // getOrCreateUnique should return the existing record unchanged
-    const resultRecord = await ItemRecord.getOrCreateUnique({
+    const resultRecord = await ItemRecord.loadOrCreateUnique({
       value: { updated1: 10, updated2: 20, updated3: 30 },
       unique: "get-or-create-record",
       owner: group,
@@ -588,11 +586,11 @@ describe("CoRecord unique methods", () => {
     expect(resultRecord?.original2).toBe(2);
   });
 
-  test("getOrCreateUnique creates new record if none exists", async () => {
+  test("loadOrCreateUnique creates new record if none exists", async () => {
     const ItemRecord = co.record(z.string(), z.number());
     const group = Group.create();
 
-    const resultRecord = await ItemRecord.getOrCreateUnique({
+    const resultRecord = await ItemRecord.loadOrCreateUnique({
       value: { original1: 1, original2: 2, original3: 3 },
       unique: "get-or-create-record",
       owner: group,
@@ -602,6 +600,39 @@ describe("CoRecord unique methods", () => {
     expect(resultRecord?.original1).toBe(1);
     expect(resultRecord?.original2).toBe(2);
     expect(resultRecord?.original3).toBe(3);
+  });
+
+  test("loadOrCreateUnique prevents race condition on concurrent calls", async () => {
+    const ItemRecord = co.record(z.string(), z.number());
+    const group = Group.create();
+
+    const promises = [];
+    for (let i = 0; i < 5; i++) {
+      promises.push(
+        ItemRecord.loadOrCreateUnique({
+          value: { item1: 1, item2: 2, item3: 3 },
+          unique: "concurrent-test-record",
+          owner: group,
+        }),
+      );
+    }
+
+    const results = await Promise.all(promises);
+
+    expect(results[0]).toBe(results[1]);
+    expect(results[1]).toBe(results[2]);
+    expect(results[2]).toBe(results[3]);
+    expect(results[3]).toBe(results[4]);
+
+    expect(results[0]).not.toBeNull();
+    expect(results[0]?.item1).toBe(1);
+    expect(results[0]?.item2).toBe(2);
+    expect(results[0]?.item3).toBe(3);
+
+    const expectedId = results[0]?.$jazz.id;
+    results.forEach((result) => {
+      expect(result?.$jazz.id).toBe(expectedId);
+    });
   });
 
   test("findUnique returns correct ID", async () => {
