@@ -53,6 +53,7 @@ export {
   subscribeToCoValue,
   ImageDefinition,
   SubscriptionScope,
+  skipErrorsInLists,
   exportCoValue,
   importContentPieces,
   Ref,

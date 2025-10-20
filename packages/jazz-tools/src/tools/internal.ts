@@ -26,6 +26,7 @@ export * from "./implementation/activeAccountContext.js";
 export * from "./implementation/errors.js";
 export * from "./implementation/refs.js";
 export * from "./implementation/schema.js";
+export * from "./subscribe/queryView.js";
 export * from "./subscribe/SubscriptionScope.js";
 export * from "./subscribe/types.js";
 export * from "./subscribe/index.js";
