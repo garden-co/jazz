@@ -1,4 +1,5 @@
-
+use crate::core::keys::{decode_z, CoID, KeyID, KeySecret, Signature, SignerID, SignerSecret};
+use crate::core::{CoJsonCoreError, CryptoCache, NonceGenerator};
 use base64::{engine::general_purpose::URL_SAFE, Engine as _};
 use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
 use salsa20::{
@@ -7,8 +8,6 @@ use salsa20::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{value::RawValue, Number, Value as JsonValue};
-use crate::core::{CryptoCache, NonceGenerator, CoJsonCoreError};
-use crate::core::keys::{SignerID, SignerSecret, Signature, KeyID, KeySecret, CoID, decode_z};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SessionID(pub String);
@@ -21,6 +20,8 @@ pub struct TransactionID {
     pub tx_index: u32,
 }
 
+static COMPRESSION_THRESHOLD: usize = 1024;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Encrypted<T> {
@@ -28,8 +29,11 @@ pub struct Encrypted<T> {
     _phantom: std::marker::PhantomData<T>,
 }
 
+// NOTE: The order of fields in this struct is important for the signing of the transaction.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PrivateTransaction {
+    #[serde(rename = "encoding", skip_serializing_if = "Option::is_none")]
+    pub encoding: Option<EncodingType>,
     #[serde(rename = "encryptedChanges")]
     pub encrypted_changes: Encrypted<JsonValue>,
     #[serde(rename = "keyUsed")]
@@ -42,8 +46,31 @@ pub struct PrivateTransaction {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EncodingType {
+    #[serde(rename = "snappy")]
+    Snappy,
+    #[serde(rename = "zstd")]
+    Zstd,
+    #[serde(rename = "lz4")]
+    Lz4,
+}
+
+impl Into<String> for EncodingType {
+    fn into(self) -> String {
+        match self {
+            EncodingType::Snappy => "snappy".to_string(),
+            EncodingType::Zstd => "zstd".to_string(),
+            EncodingType::Lz4 => "lz4".to_string(),
+        }
+    }
+}
+
+// NOTE: The order of fields in this struct is important for the signing of the transaction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TrustingTransaction {
     pub changes: String,
+    #[serde(rename = "encoding", skip_serializing_if = "Option::is_none")]
+    pub encoding: Option<EncodingType>,
     #[serde(rename = "madeAt")]
     pub made_at: Number,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -65,8 +92,6 @@ pub enum TransactionMode {
     },
     Trusting,
 }
-
-
 
 #[derive(Clone)]
 pub struct SessionLogInternal {
@@ -203,6 +228,15 @@ impl SessionLogInternal {
 
                 // Encrypt the changes JSON.
                 let mut ciphertext = changes_json.as_bytes().to_vec();
+
+                let encoding = if ciphertext.len() > COMPRESSION_THRESHOLD {
+                    let compressed = lz4_flex::compress_prepend_size(&ciphertext);
+                    ciphertext = compressed;
+                    Option::Some(EncodingType::Lz4)
+                } else {
+                    Option::None
+                };
+
                 let mut cipher = XSalsa20::new(&key, &nonce.into());
                 cipher.apply_keystream(&mut ciphertext);
                 let encrypted_str = format!("encrypted_U{}", URL_SAFE.encode(&ciphertext));
@@ -231,6 +265,7 @@ impl SessionLogInternal {
                     made_at: Number::from(made_at),
                     meta: encrypted_meta,
                     privacy: "private".to_string(),
+                    encoding,
                 })
             }
             TransactionMode::Trusting => {
@@ -240,6 +275,7 @@ impl SessionLogInternal {
                     made_at: Number::from(made_at),
                     meta,
                     privacy: "trusting".to_string(),
+                    encoding: Option::None,
                 })
             }
         };
@@ -301,6 +337,15 @@ impl SessionLogInternal {
                 let mut cipher = XSalsa20::new(&key, &nonce.into());
                 cipher.apply_keystream(&mut ciphertext);
 
+                if let Some(encoding) = private_tx.encoding {
+                    match encoding {
+                        EncodingType::Lz4 => {
+                            ciphertext = lz4_flex::decompress_size_prepended(&ciphertext)
+                                .map_err(|_| CoJsonCoreError::InvalidEncoding)?;
+                        }
+                        _ => unimplemented!("Encoding type not implemented"),
+                    }
+                }
                 Ok(String::from_utf8(ciphertext)?)
             }
             // For trusting transactions, just return the plain changes.
@@ -354,6 +399,297 @@ impl SessionLogInternal {
     }
 }
 
+#[cfg(test)]
+mod tests_encoding {
+    use super::*;
+    use rand::rngs::OsRng;
+    use rand::RngCore;
+
+    fn random_key_secret() -> KeySecret {
+        let mut key_bytes = [0u8; 32];
+        OsRng.fill_bytes(&mut key_bytes);
+        KeySecret(format!(
+            "keySecret_z{}",
+            bs58::encode(key_bytes).into_string()
+        ))
+    }
+
+    fn random_key_id() -> KeyID {
+        let mut id_bytes = [0u8; 12];
+        OsRng.fill_bytes(&mut id_bytes);
+        KeyID(format!("key_z{}", bs58::encode(id_bytes).into_string()))
+    }
+
+    fn random_signer_secret() -> SignerSecret {
+        let signing_key = ed25519_dalek::SigningKey::generate(&mut OsRng);
+        SignerSecret::from(signing_key)
+    }
+
+    fn get_signer_id_from_secret(signer_secret: &SignerSecret) -> SignerID {
+        let signing_key: SigningKey = signer_secret.try_into().expect("invalid signer secret");
+        SignerID::from(signing_key.verifying_key())
+    }
+
+    fn new_session_log() -> SessionLogInternal {
+        let co_id = CoID("co_zTEST".to_string());
+        let session_id = SessionID("sealer_zTEST/signer_zTEST_session_zTEST".to_string());
+        SessionLogInternal::new(co_id, session_id, None)
+    }
+
+    #[test]
+    fn private_tx_large_changes_are_lz4_compressed_and_roundtrip() {
+        let mut log = new_session_log();
+        let key_secret = random_key_secret();
+        let key_id = random_key_id();
+        let signer_secret = random_signer_secret();
+
+        // Build a JSON changes payload larger than COMPRESSION_THRESHOLD
+        let large_value = "x".repeat(COMPRESSION_THRESHOLD + 200);
+        let changes_json = format!(
+            "[{{\"op\":\"set\",\"key\":\"k\",\"value\":\"{}\"}}]",
+            large_value
+        );
+
+        let (_sig, tx) = log
+            .add_new_transaction(
+                &changes_json,
+                TransactionMode::Private {
+                    key_id: key_id.clone(),
+                    key_secret: key_secret.clone(),
+                },
+                &signer_secret,
+                0,
+                None,
+            )
+            .expect("failed to add tx");
+
+        match tx {
+            Transaction::Private(p) => {
+                assert_eq!(p.encoding, Some(EncodingType::Lz4));
+            }
+            _ => panic!("expected private tx"),
+        }
+
+        let decrypted = log
+            .decrypt_next_transaction_changes_json(0, key_secret)
+            .expect("failed to decrypt");
+        assert_eq!(decrypted, changes_json);
+    }
+
+    #[test]
+    fn private_tx_small_changes_are_not_compressed_and_roundtrip() {
+        let mut log = new_session_log();
+        let key_secret = random_key_secret();
+        let key_id = random_key_id();
+        let signer_secret = random_signer_secret();
+
+        let changes_json = "[{\"op\":\"set\",\"key\":\"k\",\"value\":\"v\"}]";
+
+        let (_sig, tx) = log
+            .add_new_transaction(
+                changes_json,
+                TransactionMode::Private {
+                    key_id: key_id.clone(),
+                    key_secret: key_secret.clone(),
+                },
+                &signer_secret,
+                0,
+                None,
+            )
+            .expect("failed to add tx");
+
+        match tx {
+            Transaction::Private(p) => {
+                assert_eq!(p.encoding, None);
+            }
+            _ => panic!("expected private tx"),
+        }
+
+        let decrypted = log
+            .decrypt_next_transaction_changes_json(0, key_secret)
+            .expect("failed to decrypt");
+        assert_eq!(decrypted, changes_json);
+    }
+
+    #[test]
+    fn signature_verification_works_with_compressed_transactions() {
+        let co_id = CoID("co_zTEST".to_string());
+        let session_id = SessionID("sealer_zTEST/signer_zTEST_session_zTEST".to_string());
+        let signer_secret = random_signer_secret();
+        let signer_id = get_signer_id_from_secret(&signer_secret);
+
+        // Create session log with signer ID for verification
+        let mut log = SessionLogInternal::new(co_id, session_id, Some(signer_id.clone()));
+        let key_secret = random_key_secret();
+        let key_id = random_key_id();
+
+        // Add a large transaction that will be compressed
+        let large_value = "x".repeat(COMPRESSION_THRESHOLD + 200);
+        let changes_json = format!(
+            "[{{\"op\":\"set\",\"key\":\"k\",\"value\":\"{}\"}}]",
+            large_value
+        );
+
+        let (signature, tx) = log
+            .add_new_transaction(
+                &changes_json,
+                TransactionMode::Private {
+                    key_id: key_id.clone(),
+                    key_secret: key_secret.clone(),
+                },
+                &signer_secret,
+                0,
+                None,
+            )
+            .expect("failed to add tx");
+
+        // Verify the transaction was compressed
+        match &tx {
+            Transaction::Private(p) => {
+                assert_eq!(p.encoding, Some(EncodingType::Lz4));
+            }
+            _ => panic!("expected private tx"),
+        }
+
+        // Create a new session log to simulate verification
+        let mut verify_log = SessionLogInternal::new(
+            CoID("co_zTEST".to_string()),
+            SessionID("sealer_zTEST/signer_zTEST_session_zTEST".to_string()),
+            Some(signer_id),
+        );
+
+        // Serialize the transaction for verification
+        let tx_json = serde_json::to_string(&tx).expect("failed to serialize tx");
+        let tx_raw =
+            serde_json::value::RawValue::from_string(tx_json).expect("failed to create raw value");
+
+        // Verify the signature works with compressed transaction
+        let result = verify_log.try_add(vec![tx_raw], &signature, false);
+        assert!(
+            result.is_ok(),
+            "signature verification should succeed with compressed transaction"
+        );
+    }
+
+    #[test]
+    fn signature_verification_works_with_uncompressed_transactions() {
+        let co_id = CoID("co_zTEST".to_string());
+        let session_id = SessionID("sealer_zTEST/signer_zTEST_session_zTEST".to_string());
+        let signer_secret = random_signer_secret();
+        let signer_id = get_signer_id_from_secret(&signer_secret);
+
+        // Create session log with signer ID for verification
+        let mut log = SessionLogInternal::new(co_id, session_id, Some(signer_id.clone()));
+        let key_secret = random_key_secret();
+        let key_id = random_key_id();
+
+        // Add a small transaction that won't be compressed
+        let changes_json = "[{\"op\":\"set\",\"key\":\"k\",\"value\":\"v\"}]";
+
+        let (signature, tx) = log
+            .add_new_transaction(
+                changes_json,
+                TransactionMode::Private {
+                    key_id: key_id.clone(),
+                    key_secret: key_secret.clone(),
+                },
+                &signer_secret,
+                0,
+                None,
+            )
+            .expect("failed to add tx");
+
+        // Verify the transaction was not compressed
+        match &tx {
+            Transaction::Private(p) => {
+                assert_eq!(p.encoding, None);
+            }
+            _ => panic!("expected private tx"),
+        }
+
+        // Create a new session log to simulate verification
+        let mut verify_log = SessionLogInternal::new(
+            CoID("co_zTEST".to_string()),
+            SessionID("sealer_zTEST/signer_zTEST_session_zTEST".to_string()),
+            Some(signer_id),
+        );
+
+        // Serialize the transaction for verification
+        let tx_json = serde_json::to_string(&tx).expect("failed to serialize tx");
+        let tx_raw =
+            serde_json::value::RawValue::from_string(tx_json).expect("failed to create raw value");
+
+        // Verify the signature works with uncompressed transaction
+        let result = verify_log.try_add(vec![tx_raw], &signature, false);
+        assert!(
+            result.is_ok(),
+            "signature verification should succeed with uncompressed transaction"
+        );
+    }
+
+    #[test]
+    fn signature_verification_fails_with_wrong_signature() {
+        let co_id = CoID("co_zTEST".to_string());
+        let session_id = SessionID("sealer_zTEST/signer_zTEST_session_zTEST".to_string());
+        let signer_secret = random_signer_secret();
+        let signer_id = get_signer_id_from_secret(&signer_secret);
+
+        // Create session log with signer ID for verification
+        let mut log = SessionLogInternal::new(co_id, session_id, Some(signer_id.clone()));
+        let key_secret = random_key_secret();
+        let key_id = random_key_id();
+
+        // Add a large transaction that will be compressed
+        let large_value = "x".repeat(COMPRESSION_THRESHOLD + 200);
+        let changes_json = format!(
+            "[{{\"op\":\"set\",\"key\":\"k\",\"value\":\"{}\"}}]",
+            large_value
+        );
+
+        let (_, tx) = log
+            .add_new_transaction(
+                &changes_json,
+                TransactionMode::Private {
+                    key_id: key_id.clone(),
+                    key_secret: key_secret.clone(),
+                },
+                &signer_secret,
+                0,
+                None,
+            )
+            .expect("failed to add tx");
+
+        println!("tx: {:?}", tx);
+
+        // Create a new session log to simulate verification
+        let mut verify_log = SessionLogInternal::new(
+            CoID("co_zTEST".to_string()),
+            SessionID("sealer_zTEST/signer_zTEST_session_zTEST".to_string()),
+            Some(signer_id),
+        );
+
+        // Serialize the transaction for verification
+        let tx_json = serde_json::to_string(&tx).expect("failed to serialize tx");
+        let tx_raw =
+            serde_json::value::RawValue::from_string(tx_json).expect("failed to create raw value");
+
+        println!("tx_raw: {:?}", tx_raw);
+
+        // Create a wrong signature
+        let wrong_signer_secret = random_signer_secret();
+        let wrong_signing_key: SigningKey = (&wrong_signer_secret)
+            .try_into()
+            .expect("invalid signer secret");
+        let wrong_signature = Signature::from(wrong_signing_key.sign(b"wrong message"));
+
+        // Verify the signature verification fails with wrong signature
+        let result = verify_log.try_add(vec![tx_raw], &wrong_signature, false);
+        assert!(
+            result.is_err(),
+            "signature verification should fail with wrong signature"
+        );
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -543,16 +879,15 @@ mod tests {
         let made_at = tx_from_example["madeAt"].as_u64().unwrap();
 
         // Call the function we are testing
-        let (new_signature, _new_tx) = session.add_new_transaction(
-            changes_json,
-            TransactionMode::Private {
-                key_id,
-                key_secret,
-            },
-            &signing_key.into(),
-            made_at,
-            None,
-        ).unwrap();
+        let (new_signature, _new_tx) = session
+            .add_new_transaction(
+                changes_json,
+                TransactionMode::Private { key_id, key_secret },
+                &signing_key.into(),
+                made_at,
+                None,
+            )
+            .unwrap();
 
         // 1. Check that the transaction we created matches the one in the file
         let created_tx_json = &session.transactions_json[0];
@@ -730,12 +1065,8 @@ mod tests {
             .decrypt_next_transaction_meta_json(0, key_secret)
             .unwrap();
 
-        assert_eq!(
-            decrypted,
-            Some(r#"{"meta":{"test":"test"}}"#.to_string())
-        );
+        assert_eq!(decrypted, Some(r#"{"meta":{"test":"test"}}"#.to_string()));
     }
-
 
     #[test]
     fn test_add_new_transaction_meta() {
@@ -747,8 +1078,7 @@ mod tests {
         let data = fs::read_to_string("data/singleTxSessionMeta.json")
             .expect("Unable to read singleTxSession.json");
         let root: serde_json::Value = serde_json::from_str(&data).unwrap();
-        let session_data =
-            &root["exampleBase"][SESSION_ID];
+        let session_data = &root["exampleBase"][SESSION_ID];
         let tx_from_example = &session_data["transactions"][0];
         let known_key = &root["knownKeys"][0];
 
@@ -770,16 +1100,15 @@ mod tests {
         let made_at = tx_from_example["madeAt"].as_u64().unwrap();
 
         // Call the function we are testing
-        let (new_signature, _new_tx) = session.add_new_transaction(
-            CHANGES_JSON,
-            TransactionMode::Private {
-                key_id,
-                key_secret,
-            },
-            &signing_key.into(),
-            made_at,
-            Some(META_JSON.to_string()),
-        ).unwrap();
+        let (new_signature, _new_tx) = session
+            .add_new_transaction(
+                CHANGES_JSON,
+                TransactionMode::Private { key_id, key_secret },
+                &signing_key.into(),
+                made_at,
+                Some(META_JSON.to_string()),
+            )
+            .unwrap();
 
         // 1. Check that the transaction we created matches the one in the file
         let created_tx_json = &session.transactions_json[0];
@@ -832,13 +1161,19 @@ mod tests {
         );
 
         let key_secret = KeySecret("test_key".to_string());
-        
+
         // Try to decrypt from non-existent transaction index
         let result = session.decrypt_next_transaction_changes_json(999, key_secret.clone());
-        assert!(matches!(result, Err(CoJsonCoreError::TransactionNotFound(999))));
+        assert!(matches!(
+            result,
+            Err(CoJsonCoreError::TransactionNotFound(999))
+        ));
 
         let result = session.decrypt_next_transaction_meta_json(999, key_secret);
-        assert!(matches!(result, Err(CoJsonCoreError::TransactionNotFound(999))));
+        assert!(matches!(
+            result,
+            Err(CoJsonCoreError::TransactionNotFound(999))
+        ));
     }
 
     #[test]
@@ -859,15 +1194,19 @@ mod tests {
             made_at: Number::from(1234567890),
             meta: None,
             privacy: "private".to_string(),
+            encoding: Option::None,
         });
 
         let tx_json = serde_json::to_string(&invalid_tx).unwrap();
         session.transactions_json.push(tx_json);
 
         let key_secret = KeySecret("test_key".to_string());
-        
+
         let result = session.decrypt_next_transaction_changes_json(0, key_secret.clone());
-        assert!(matches!(result, Err(CoJsonCoreError::InvalidEncryptedPrefix)));
+        assert!(matches!(
+            result,
+            Err(CoJsonCoreError::InvalidEncryptedPrefix)
+        ));
     }
 
     #[test]
@@ -888,6 +1227,7 @@ mod tests {
             made_at: Number::from(1234567890),
             meta: None,
             privacy: "trusting".to_string(),
+            encoding: None,
         });
 
         let tx_json = serde_json::to_string(&tx).unwrap();
@@ -898,7 +1238,10 @@ mod tests {
         let wrong_signature: Signature = wrong_signing_key.sign(b"wrong data").into();
 
         let result = session.try_add(transactions, &wrong_signature, false);
-        assert!(matches!(result, Err(CoJsonCoreError::SignatureVerification(_))));
+        assert!(matches!(
+            result,
+            Err(CoJsonCoreError::SignatureVerification(_))
+        ));
     }
 
     #[test]
@@ -914,6 +1257,7 @@ mod tests {
             made_at: Number::from(1234567890),
             meta: None,
             privacy: "trusting".to_string(),
+            encoding: Option::None,
         });
 
         let tx_json = serde_json::to_string(&tx).unwrap();
@@ -925,7 +1269,10 @@ mod tests {
 
         let mut session = session;
         let result = session.try_add(transactions, &signature, false);
-        assert!(matches!(result, Err(CoJsonCoreError::SignatureVerification(_))));
+        assert!(matches!(
+            result,
+            Err(CoJsonCoreError::SignatureVerification(_))
+        ));
     }
 
     #[test]
@@ -944,13 +1291,15 @@ mod tests {
         let meta_json = Some(r#"{"meta": "test"}"#.to_string());
         let made_at = 1234567890;
 
-        let (signature, transaction) = session.add_new_transaction(
-            changes_json,
-            TransactionMode::Trusting,
-            &signing_key.into(),
-            made_at,
-            meta_json.clone(),
-        ).unwrap();
+        let (signature, transaction) = session
+            .add_new_transaction(
+                changes_json,
+                TransactionMode::Trusting,
+                &signing_key.into(),
+                made_at,
+                meta_json.clone(),
+            )
+            .unwrap();
 
         // Verify the transaction is a TrustingTransaction
         match transaction {
@@ -964,11 +1313,15 @@ mod tests {
         }
 
         // Verify we can decrypt the changes (should return plain text for trusting transactions)
-        let decrypted = session.decrypt_next_transaction_changes_json(0, KeySecret("dummy".to_string())).unwrap();
+        let decrypted = session
+            .decrypt_next_transaction_changes_json(0, KeySecret("dummy".to_string()))
+            .unwrap();
         assert_eq!(decrypted, changes_json);
 
         // Verify we can decrypt the meta (should return plain text for trusting transactions)
-        let decrypted_meta = session.decrypt_next_transaction_meta_json(0, KeySecret("dummy".to_string())).unwrap();
+        let decrypted_meta = session
+            .decrypt_next_transaction_meta_json(0, KeySecret("dummy".to_string()))
+            .unwrap();
         assert_eq!(decrypted_meta, meta_json);
 
         // Verify signature is valid
@@ -1051,6 +1404,7 @@ mod tests {
             made_at: Number::from(1234567890),
             meta: None,
             privacy: "trusting".to_string(),
+            encoding: None,
         });
 
         let tx_json = serde_json::to_string(&tx).unwrap();
@@ -1058,7 +1412,7 @@ mod tests {
 
         // Use a completely wrong signature but skip verification
         let wrong_signature: Signature = signing_key.sign(b"completely wrong data").into();
-        
+
         let result = session.try_add(transactions, &wrong_signature, true);
         assert!(result.is_ok());
         assert_eq!(session.transactions_json.len(), 1);
@@ -1081,13 +1435,15 @@ mod tests {
         // Add multiple transactions
         for i in 0..3 {
             let changes_json = format!(r#"{{"test": "data_{}"}}"#, i);
-            let (_, _) = session.add_new_transaction(
-                &changes_json,
-                TransactionMode::Trusting,
-                &signer_secret,
-                1234567890 + i,
-                None,
-            ).unwrap();
+            let (_, _) = session
+                .add_new_transaction(
+                    &changes_json,
+                    TransactionMode::Trusting,
+                    &signer_secret,
+                    1234567890 + i,
+                    None,
+                )
+                .unwrap();
         }
 
         assert_eq!(session.transactions_json.len(), 3);
@@ -1095,7 +1451,9 @@ mod tests {
         // Verify we can decrypt each transaction
         for i in 0..3 {
             let expected_changes = format!(r#"{{"test": "data_{}"}}"#, i);
-            let decrypted = session.decrypt_next_transaction_changes_json(i, KeySecret("dummy".to_string())).unwrap();
+            let decrypted = session
+                .decrypt_next_transaction_changes_json(i, KeySecret("dummy".to_string()))
+                .unwrap();
             assert_eq!(decrypted, expected_changes);
         }
     }
@@ -1118,16 +1476,18 @@ mod tests {
         let key_id = KeyID("test_key_id".to_string());
         let changes_json = r#"{"test": "data"}"#;
 
-        let (_, transaction) = session.add_new_transaction(
-            changes_json,
-            TransactionMode::Private {
-                key_id: key_id.clone(),
-                key_secret: key_secret.clone(),
-            },
-            &signing_key.into(),
-            1234567890,
-            None, // No meta
-        ).unwrap();
+        let (_, transaction) = session
+            .add_new_transaction(
+                changes_json,
+                TransactionMode::Private {
+                    key_id: key_id.clone(),
+                    key_secret: key_secret.clone(),
+                },
+                &signing_key.into(),
+                1234567890,
+                None, // No meta
+            )
+            .unwrap();
 
         // Verify it's a private transaction
         match transaction {
@@ -1141,11 +1501,15 @@ mod tests {
         }
 
         // Verify we can decrypt the changes
-        let decrypted = session.decrypt_next_transaction_changes_json(0, key_secret.clone()).unwrap();
+        let decrypted = session
+            .decrypt_next_transaction_changes_json(0, key_secret.clone())
+            .unwrap();
         assert_eq!(decrypted, changes_json);
 
         // Verify meta decryption returns None
-        let decrypted_meta = session.decrypt_next_transaction_meta_json(0, key_secret).unwrap();
+        let decrypted_meta = session
+            .decrypt_next_transaction_meta_json(0, key_secret)
+            .unwrap();
         assert!(decrypted_meta.is_none());
     }
 
@@ -1161,7 +1525,7 @@ mod tests {
         session.transactions_json.push("invalid json".to_string());
 
         let key_secret = KeySecret("test_key".to_string());
-        
+
         let result = session.decrypt_next_transaction_changes_json(0, key_secret.clone());
         assert!(matches!(result, Err(CoJsonCoreError::Json(_))));
 
@@ -1187,13 +1551,14 @@ mod tests {
             made_at: Number::from(1234567890),
             meta: None,
             privacy: "private".to_string(),
+            encoding: Option::None,
         });
 
         let tx_json = serde_json::to_string(&invalid_tx).unwrap();
         session.transactions_json.push(tx_json);
 
         let key_secret = KeySecret("test_key".to_string());
-        
+
         let result = session.decrypt_next_transaction_changes_json(0, key_secret.clone());
         assert!(matches!(result, Err(CoJsonCoreError::Base64Decode(_))));
     }
@@ -1223,22 +1588,27 @@ mod tests {
         );
 
         // Add a valid transaction
-        let (_, _) = session_with_tx.add_new_transaction(
-            r#"{"test": "data"}"#,
-            TransactionMode::Private {
-                key_id: key_id.clone(),
-                key_secret: key_secret.clone(),
-            },
-            &signing_key.into(),
-            1234567890,
-            None,
-        ).unwrap();
+        let (_, _) = session_with_tx
+            .add_new_transaction(
+                r#"{"test": "data"}"#,
+                TransactionMode::Private {
+                    key_id: key_id.clone(),
+                    key_secret: key_secret.clone(),
+                },
+                &signing_key.into(),
+                1234567890,
+                None,
+            )
+            .unwrap();
 
         // Now try to decrypt with a different key (this will result in garbage UTF-8)
         let wrong_key_bytes = [2u8; 32]; // Different 32 bytes
-        let wrong_key = KeySecret(format!("key_z{}", bs58::encode(wrong_key_bytes).into_string()));
+        let wrong_key = KeySecret(format!(
+            "key_z{}",
+            bs58::encode(wrong_key_bytes).into_string()
+        ));
         let result = session_with_tx.decrypt_next_transaction_changes_json(0, wrong_key);
-        
+
         // This should fail with UTF-8 error since decryption with wrong key produces garbage
         assert!(matches!(result, Err(CoJsonCoreError::Utf8(_))));
     }
@@ -1280,7 +1650,7 @@ mod tests {
         // We can't call it directly since it's private, but we can test it through try_add
         let mut test_session = session.clone();
         let signature: Signature = SigningKey::generate(&mut OsRng).sign(b"test").into();
-        
+
         // This should work with skip_verify = true
         let result = test_session.try_add(transactions, &signature, true);
         assert!(result.is_ok());
@@ -1333,6 +1703,7 @@ mod tests {
             made_at: Number::from(1234567890),
             meta: None,
             privacy: "private".to_string(),
+            encoding: Option::None,
         });
 
         let serialized = serde_json::to_string(&private_tx).unwrap();
@@ -1345,11 +1716,11 @@ mod tests {
             made_at: Number::from(1234567890),
             meta: None,
             privacy: "trusting".to_string(),
+            encoding: Option::None,
         });
 
         let serialized = serde_json::to_string(&trusting_tx).unwrap();
         assert!(serialized.contains("\"privacy\":\"trusting\""));
         assert!(serialized.contains("\"changes\":\"{\\\"test\\\": \\\"data\\\"}\""));
     }
-    
 }

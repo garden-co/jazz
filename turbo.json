@@ -52,6 +52,7 @@
       "env": ["ANDROID_NDK_LATEST_HOME"],
       "outputs": ["*.node", "index.d.ts", "index.js", "npm/**/*.node"],
       "inputs": [
+        "../cojson-core/**",
         "src/**",
         "lib/**",
         "pages/**",

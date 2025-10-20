@@ -12,7 +12,8 @@ export function generateRandomProject(numTasks: number) {
       const task = Task.create({
         done: faker.datatype.boolean(),
         text: CoPlainText.create(
-          faker.lorem.sentence({ min: 3, max: 8 }),
+          // In order to test the compression of the text, we generate a long sentence.
+          faker.lorem.sentence({ min: 10, max: 20 }),
           tasks.$jazz.owner,
         ),
       });
