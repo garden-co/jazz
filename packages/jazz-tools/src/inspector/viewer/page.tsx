@@ -1,4 +1,11 @@
-import { CoID, LocalNode, RawCoList, RawCoStream, RawCoValue } from "cojson";
+import {
+  CoID,
+  LocalNode,
+  RawCoList,
+  RawCoStream,
+  RawCoValue,
+  RawGroup,
+} from "cojson";
 import { styled } from "goober";
 import React from "react";
 import { Badge } from "../ui/badge.js";
@@ -117,7 +124,14 @@ function View(
   }
 
   if (extendedType === "group") {
-    return <GroupView data={snapshot} node={node} onNavigate={onNavigate} />;
+    return (
+      <GroupView
+        coValue={value}
+        data={snapshot}
+        node={node}
+        onNavigate={onNavigate}
+      />
+    );
   }
 
   if (extendedType === "account") {

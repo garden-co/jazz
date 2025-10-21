@@ -18,6 +18,7 @@ import { AccountOrGroupText } from "./account-or-group-text.js";
 import { RawDataCard } from "./raw-data-card.js";
 import { PageInfo, isCoId } from "./types.js";
 import { Button } from "../ui/button.js";
+import { Icon } from "../ui/icon.js";
 
 function partitionMembers(data: Record<string, string>) {
   const everyone = Object.entries(data)
@@ -52,10 +53,12 @@ function partitionMembers(data: Record<string, string>) {
 }
 
 export function GroupView({
+  coValue,
   data,
   onNavigate,
   node,
 }: {
+  coValue: RawCoValue;
   data: JsonObject;
   onNavigate: (pages: PageInfo[]) => void;
   node: LocalNode;
@@ -64,6 +67,45 @@ export function GroupView({
     data as Record<string, string>,
   );
 
+  const onRemoveMember = async (id: CoID<RawCoValue>) => {
+    if (confirm("Are you sure you want to remove this member?") === false) {
+      return;
+    }
+    try {
+      const group = await node.load(coValue.id);
+      if (group === "unavailable") {
+        throw new Error("Group not found");
+      }
+      const rawGroup = group as RawGroup;
+      rawGroup.removeMember(id as any);
+    } catch (error) {
+      console.error(error);
+      throw error;
+    }
+  };
+
+  const onRemoveGroup = async (id: CoID<RawCoValue>) => {
+    if (confirm("Are you sure you want to remove this group?") === false) {
+      return;
+    }
+    try {
+      const group = await node.load(coValue.id);
+      if (group === "unavailable") {
+        throw new Error("Group not found");
+      }
+      const rawGroup = group as RawGroup;
+      const targetGroup = await node.load(id);
+      if (targetGroup === "unavailable") {
+        throw new Error("Group not found");
+      }
+      const rawTargetGroup = targetGroup as RawGroup;
+      rawGroup.revokeExtend(rawTargetGroup);
+    } catch (error) {
+      console.error(error);
+      throw error;
+    }
+  };
+
   return (
     <>
       <Table>
@@ -71,6 +113,7 @@ export function GroupView({
           <TableRow>
             <TableHeader>Member</TableHeader>
             <TableHeader>Permission</TableHeader>
+            <TableHeader></TableHeader>
           </TableRow>
         </TableHead>
         <TableBody>
@@ -78,12 +121,21 @@ export function GroupView({
             <TableRow key={member.id}>
               <TableCell>{member.id}</TableCell>
               <TableCell>{member.role}</TableCell>
+              <TableCell>
+                {member.role !== "revoked" && (
+                  <Button
+                    variant="secondary"
+                    onClick={() => onRemoveMember(member.id)}
+                  >
+                    <Icon name="delete" />
+                  </Button>
+                )}
+              </TableCell>
             </TableRow>
           ))}
           {members.map((member) => (
             <TableRow key={member.id}>
               <TableCell>
-                <span title="Account">👤</span>{" "}
                 <AccountOrGroupText
                   coId={member.id}
                   node={node}
@@ -99,17 +151,26 @@ export function GroupView({
           {parentGroups.map((group) => (
             <TableRow key={group.id}>
               <TableCell>
-                <span title="Group">👥</span>{" "}
-                <Button
-                  variant="link"
+                <AccountOrGroupText
+                  coId={group.id}
+                  node={node}
+                  showId
                   onClick={() => {
                     onNavigate([{ coId: group.id, name: group.id }]);
                   }}
-                >
-                  {group.id}
-                </Button>
+                />
               </TableCell>
               <TableCell>{group.role}</TableCell>
+              <TableCell>
+                {group.role !== "revoked" && (
+                  <Button
+                    variant="secondary"
+                    onClick={() => onRemoveGroup(group.id)}
+                  >
+                    <Icon name="delete" />
+                  </Button>
+                )}
+              </TableCell>
             </TableRow>
           ))}
         </TableBody>
@@ -126,15 +187,14 @@ export function GroupView({
             {childGroups.map((group) => (
               <TableRow key={group.id}>
                 <TableCell>
-                  <span title="Group">👥</span>{" "}
-                  <Button
-                    variant="link"
+                  <AccountOrGroupText
+                    coId={group.id}
+                    node={node}
+                    showId
                     onClick={() => {
                       onNavigate([{ coId: group.id, name: group.id }]);
                     }}
-                  >
-                    {group.id}
-                  </Button>
+                  />
                 </TableCell>
               </TableRow>
             ))}
