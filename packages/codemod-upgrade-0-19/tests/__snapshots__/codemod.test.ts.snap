@@ -29,6 +29,15 @@ const MyAccount = co
     }
   });
 
+// $onError: 'catch' should become $onError: 'catch'
+function ExampleOnErrorNull() {
+  const todo = useAccount(MyAccount, todoId, {
+    resolve: { root: { todos: { $each: { $onError: 'catch' } } } },
+  });
+
+  return <div>{todo?.text}</div>;
+}
+
 // useCoStateWithSelector should become useCoState
 function ExampleCoState({ todoId }: { todoId: string }) {
   // Should be transformed to useCoState
@@ -49,12 +58,16 @@ function ExampleCoState({ todoId }: { todoId: string }) {
 function ExampleAccount() {
   // Should be transformed to useAccount
   const todos = useAccount(MyAccount, {
-    resolve: { root: { todos: { $each: { $onError: null } } } },
+    resolve: { root: { todos: { $each: { $onError: 'catch' } } } },
     select: (me) => me?.root.todos,
   });
 
   return (
-    <ul>{todos?.map((todo) => <li key={todo.$jazz.id}>{todo.text}</li>)}</ul>
+    <ul>
+      {todos?.map((todo) => (
+        <li key={todo.$jazz.id}>{todo.text}</li>
+      ))}
+    </ul>
   );
 }
 
@@ -158,6 +171,7 @@ function NoDestructuringWithAccountAgentLogOut() {
 }
 
 export {
+  ExampleOnErrorNull,
   ExampleCoState,
   ExampleAccount,
   ComplexComponent,

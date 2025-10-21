@@ -11,11 +11,24 @@ import {
 import fs from "node:fs";
 
 export function transformFile(sourceFile: SourceFile): string {
+  migrateOnError(sourceFile);
+
   migrateUseAccount(sourceFile);
 
   renameHooks(sourceFile);
 
   return sourceFile.getFullText();
+}
+
+function migrateOnError(sourceFile: SourceFile) {
+  const fullText = sourceFile.getFullText();
+
+  // Simple text replacement: $onError: null -> $onError: 'catch'
+  const newText = fullText.replace(/\$onError:\s*null/g, "$onError: 'catch'");
+
+  if (newText !== fullText) {
+    sourceFile.replaceWithText(newText);
+  }
 }
 
 function migrateUseAccount(sourceFile: SourceFile) {

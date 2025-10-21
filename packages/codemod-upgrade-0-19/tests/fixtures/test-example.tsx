@@ -28,6 +28,15 @@ const MyAccount = co
     }
   });
 
+// $onError: null should become $onError: 'catch'
+function ExampleOnErrorNull() {
+  const todo = useAccount(MyAccount, todoId, {
+    resolve: { root: { todos: { $each: { $onError: null } } } },
+  });
+
+  return <div>{todo?.text}</div>;
+}
+
 // useCoStateWithSelector should become useCoState
 function ExampleCoState({ todoId }: { todoId: string }) {
   // Should be transformed to useCoState
@@ -155,6 +164,7 @@ function NoDestructuringWithAccountAgentLogOut() {
 }
 
 export {
+  ExampleOnErrorNull,
   ExampleCoState,
   ExampleAccount,
   ComplexComponent,
