@@ -17,6 +17,8 @@ export function transformFile(sourceFile: SourceFile): string {
 
   renameHooks(sourceFile);
 
+  migrateLoadingStateHandling(sourceFile);
+
   return sourceFile.getFullText();
 }
 
@@ -344,6 +346,122 @@ function transformHookCalls(sourceFile: SourceFile) {
         } else if (functionName === "useAccountWithSelector") {
           expression.replaceWithText("useAccount");
         }
+      }
+    }
+  });
+}
+
+function migrateLoadingStateHandling(sourceFile: SourceFile) {
+  const fullText = sourceFile.getFullText();
+
+  // Find all useAccount and useCoState calls
+  sourceFile.forEachDescendant((node) => {
+    if (Node.isCallExpression(node)) {
+      const expression = node.getExpression();
+      if (!Node.isIdentifier(expression)) return;
+
+      const functionName = expression.getText();
+      if (functionName !== "useAccount" && functionName !== "useCoState") {
+        return;
+      }
+
+      // Find the options argument
+      // useAccount(Schema, options) - 2 args, options is args[1]
+      // useCoState(Schema, id, options) - 3 args, options is args[2]
+      const args = node.getArguments();
+      let optionsArg = args.find((arg) => Node.isObjectLiteralExpression(arg));
+
+      // Determine the parameter name from existing selector, variable name, or use default
+      let paramName = functionName === "useAccount" ? "account" : "value";
+
+      // Try to get the variable name from the declaration
+      const parent = node.getParent();
+      if (Node.isVariableDeclaration(parent)) {
+        const nameNode = parent.getNameNode();
+        if (Node.isIdentifier(nameNode)) {
+          paramName = nameNode.getText();
+        }
+      }
+
+      // Handle case where there's no options argument
+      if (!optionsArg) {
+        // Add options argument with select property
+        const newSelector = `(${paramName}) => ${paramName}.$isLoaded ? ${paramName} : ${paramName}.$jazz.loadingState === "loading" ? undefined : null`;
+
+        if (functionName === "useAccount") {
+          // For useAccount:
+          // useAccount() -> useAccount(undefined, { select: ... })
+          // useAccount(Schema) -> useAccount(Schema, { select: ... })
+
+          if (args.length === 0) {
+            // No arguments at all, add undefined as schema
+            node.addArgument("undefined");
+          }
+          // Add options as second argument
+          node.addArgument(`{ select: ${newSelector} }`);
+        } else if (functionName === "useCoState") {
+          // For useCoState, we need: useCoState(Schema, id) -> useCoState(Schema, id, { select: ... })
+          node.addArgument(`{ select: ${newSelector} }`);
+        }
+        return;
+      }
+
+      // Find the select property
+      const selectProperty = optionsArg
+        .getProperties()
+        .find(
+          (prop) =>
+            Node.isPropertyAssignment(prop) && prop.getName() === "select",
+        );
+
+      if (selectProperty && Node.isPropertyAssignment(selectProperty)) {
+        // Hook WITH existing selector
+        const initializer = selectProperty.getInitializer();
+        if (!initializer) {
+          return;
+        }
+
+        // Extract parameter name from arrow function or function expression
+        if (
+          Node.isArrowFunction(initializer) ||
+          Node.isFunctionExpression(initializer)
+        ) {
+          const params = initializer.getParameters();
+          if (params.length > 0) {
+            paramName = params[0].getName();
+          }
+
+          // Get the body of the selector
+          const body = initializer.getBody();
+          let selectorBody: string;
+
+          if (Node.isBlock(body)) {
+            // Function body with braces
+            selectorBody = body.getFullText();
+          } else {
+            // Arrow function without braces
+            selectorBody = body.getText();
+          }
+
+          // Remove optional chaining from the selector body since we're checking $isLoaded
+          // Convert account?.profile?.name to account.profile.name
+          const cleanedSelectorBody = selectorBody.replace(/\?\.(?=\w)/g, ".");
+
+          // Create the new selector with loading state handling (single line for better formatting)
+          const newSelector = `(${paramName}) => ${paramName}.$isLoaded ? ${cleanedSelectorBody} : ${paramName}.$jazz.loadingState === "loading" ? undefined : null`;
+
+          selectProperty.setInitializer(newSelector);
+        }
+      } else {
+        // Hook WITHOUT existing selector - add one
+        // But first check if the parameter name from existing selector should be used
+        const newSelector = `(${paramName}) => ${paramName}.$isLoaded ? ${paramName} : ${paramName}.$jazz.loadingState === "loading" ? undefined : null`;
+
+        // Add the select property to the options object
+        optionsArg.addPropertyAssignment({
+          name: "select",
+          initializer: newSelector,
+        });
       }
     }
   });

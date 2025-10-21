@@ -30,11 +30,11 @@ const MyAccount = co
 
 // $onError: null should become $onError: 'catch'
 function ExampleOnErrorNull() {
-  const todo = useAccount(MyAccount, todoId, {
+  const { me } = useAccount(MyAccount, {
     resolve: { root: { todos: { $each: { $onError: null } } } },
   });
 
-  return <div>{todo?.text}</div>;
+  return <div>{me?.root.todos[0]?.text}</div>;
 }
 
 // useCoStateWithSelector should become useCoState
@@ -42,7 +42,7 @@ function ExampleCoState({ todoId }: { todoId: string }) {
   // Should be transformed to useCoState
   const todo = useCoStateWithSelector(TodoItem, todoId, {
     resolve: { text: true, done: true },
-    select: (todo) => (todo.$isLoaded ? todo : undefined),
+    select: (todo) => todo,
   });
 
   return (
@@ -163,6 +163,57 @@ function NoDestructuringWithAccountAgentLogOut() {
   );
 }
 
+// Hook without existing selector
+function HookWithoutExistingSelector() {
+  // const account = useAccount(MyAccount, {
+  //   resolve: { profile: true },
+  //   select: (account) => account.$isLoaded
+  //    ? account
+  //    : account.$jazz.loadingState === "loading"
+  //      ? undefined
+  //      : null
+  // });
+  const account = useAccount(MyAccount, {
+    resolve: { profile: true },
+  });
+
+  return <div>{account?.profile?.name}</div>;
+}
+
+// Hook with existing selector
+function HookWithExistingSelector() {
+  // const profileName = useAccount(MyAccount, {
+  //   resolve: { profile: true },
+  //   select: (account) => account.$isLoaded
+  //    ? account.profile.name
+  //    : account.$jazz.loadingState === "loading"
+  //      ? undefined
+  //      : null
+  // });
+  const profileName = useAccount(MyAccount, {
+    resolve: { profile: true },
+    select: (account) => account?.profile?.name,
+  });
+
+  return <div>{profileName}</div>;
+}
+
+// Hook with no options argument at all
+function HookWithNoOptions() {
+  // Should add: useAccount() -> useAccount(undefined, { select: (me) => ... })
+  const me = useAccount();
+
+  return <div>{me?.profile?.name}</div>;
+}
+
+// Hook with schema but no options
+function HookWithSchemaNoOptions() {
+  // Should add: useAccount(MyAccount) -> useAccount(undefined, { select: (account) => ... })
+  const account = useAccount(MyAccount);
+
+  return <div>{account?.profile?.name}</div>;
+}
+
 export {
   ExampleOnErrorNull,
   ExampleCoState,
@@ -174,4 +225,8 @@ export {
   AliasedPattern,
   NoDestructuringPattern,
   NoDestructuringWithAccountAgentLogOut,
+  HookWithoutExistingSelector,
+  HookWithExistingSelector,
+  HookWithNoOptions,
+  HookWithSchemaNoOptions,
 };
