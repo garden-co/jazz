@@ -4,6 +4,7 @@
 // This file shows examples of what the codemod will transform
 
 import {
+  useAccount,
   useCoStateWithSelector,
   useAccountWithSelector,
 } from "jazz-tools/react";
@@ -27,8 +28,9 @@ const MyAccount = co
     }
   });
 
-// Example 1: useCoStateWithSelector should become useCoState
+// useCoStateWithSelector should become useCoState
 function ExampleCoState({ todoId }: { todoId: string }) {
+  // Should be transformed to useCoState
   const todo = useCoStateWithSelector(TodoItem, todoId, {
     resolve: { text: true, done: true },
     select: (todo) => (todo.$isLoaded ? todo : undefined),
@@ -42,8 +44,9 @@ function ExampleCoState({ todoId }: { todoId: string }) {
   );
 }
 
-// Example 2: useAccountWithSelector should become useAccount
+// useAccountWithSelector should become useAccount
 function ExampleAccount() {
+  // Should be transformed to useAccount
   const todos = useAccountWithSelector(MyAccount, {
     resolve: { root: { todos: { $each: { $onError: null } } } },
     select: (me) => me?.root.todos,
@@ -58,13 +61,15 @@ function ExampleAccount() {
   );
 }
 
-// Example 3: Multiple usages in same component
+// Multiple usages in same component
 function ComplexComponent({ itemId }: { itemId: string }) {
+  // Should be transformed to useCoState
   const item = useCoStateWithSelector(TodoItem, itemId, {
     resolve: { text: true },
     select: (item) => item,
   });
 
+  // Should be transformed to useAccount
   const account = useAccountWithSelector(MyAccount, {
     resolve: { root: true },
     select: (me) => me,
@@ -78,4 +83,85 @@ function ComplexComponent({ itemId }: { itemId: string }) {
   );
 }
 
-export { ExampleCoState, ExampleAccount, ComplexComponent };
+// Old useAccount pattern with destructuring { me, agent, logOut }
+function OldUseAccountPattern() {
+  // const me = useAccount();
+  // const agent = useAgent();
+  // const logOut = useLogOut();
+  const { me, agent, logOut } = useAccount();
+
+  return (
+    <div>
+      <p>User: {me?.profile?.name}</p>
+      <button onClick={logOut}>Log out</button>
+      <pre>{JSON.stringify(agent, null, 2)}</pre>
+    </div>
+  );
+}
+
+// Old useAccount pattern with only some properties
+function PartialUseAccountPattern() {
+  // const me = useAccount();
+  // const logOut = useLogOut();
+  const { me, logOut } = useAccount();
+
+  return (
+    <div>
+      <p>User: {me?.profile?.name}</p>
+      <button onClick={logOut}>Log out</button>
+    </div>
+  );
+}
+
+// Old useAccount pattern with only me
+function OnlyMePattern() {
+  // const me = useAccount();
+  const { me } = useAccount();
+
+  return <div>{me?.profile?.name}</div>;
+}
+
+// Old useAccount pattern with aliasing
+function AliasedPattern() {
+  // const currentUser = useAccount();
+  // const myAgent = useAgent();
+  const { me: currentUser, agent: myAgent } = useAccount();
+
+  return (
+    <div>
+      <p>{currentUser?.profile?.name}</p>
+      <pre>{JSON.stringify(myAgent, null, 2)}</pre>
+    </div>
+  );
+}
+
+// Old useAccount non-destructured pattern with account, agent and logOut
+function NoDestructuringWithAccountAgentLogOut() {
+  // const account = useAccount();
+  // const agent = useAgent();
+  // const logOut = useLogOut();
+  const account = useAccount();
+
+  return (
+    <div>
+      {/* account?.profile?.name */}
+      <p>{account.me?.profile?.name}</p>
+      {/* logOut */}
+      <button onClick={account.logOut}>Log out</button>
+      {/* agent */}
+      <pre>{JSON.stringify(account.agent, null, 2)}</pre>
+    </div>
+  );
+}
+
+export {
+  ExampleCoState,
+  ExampleAccount,
+  ComplexComponent,
+  OldUseAccountPattern,
+  PartialUseAccountPattern,
+  OnlyMePattern,
+  AliasedPattern,
+  NoDestructuringPattern,
+  NoDestructuringWithAccountAgentLogOut,
+};
