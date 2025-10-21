@@ -17,10 +17,28 @@ Be sure that everything important is committed in your repo and there aren't uns
 
 The Jazz 0.19 upgrade codemod performs the following transformations:
 
-1. **Renames `useCoStateWithSelector` to `useCoState`** - The hooks are now polymorphic and support the selector pattern natively
-2. **Renames `useAccountWithSelector` to `useAccount`** - The hooks are now polymorphic and support the selector pattern natively
+### 1. **Migrates `useAccount` Destructuring Pattern**
 
-These hooks maintain the same API and functionality, they just have simplified names since all hooks now support the selector pattern.
+The old `useAccount` hook returned an object with `{ me, agent, logOut }`. Now it returns the account directly.
+
+- Splits `{ me, agent, logOut } = useAccount()` into separate hook calls
+- Replaces `account.me` property accesses with just `account`
+- Adds `useAgent()` and `useLogOut()` imports when needed
+
+### 2. **Renames Hook Functions**
+
+- `useCoStateWithSelector` → `useCoState`
+- `useAccountWithSelector` → `useAccount`
+
+The hooks are now polymorphic and support the selector pattern natively.
+
+### 3. **Migrates Error Handling**
+
+- `$onError: null` → `$onError: 'catch'`
+
+### 4. **Backwards-compatible Loading State Handling**
+
+Updates `useAccount` and `useCoState` hooks to convert the new explicit loading states into `null | undefined`, maintaining backward compatibility in existing React components that use Jazz.
 
 ## Usage
 
@@ -56,42 +74,47 @@ If you want to run the codemod on specific files or directories, you can pass th
 npx jazz-tools-codemod-0-19 src/
 ```
 
-## Examples
+## Example
 
-### Before (0.18)
+This example demonstrates all the transformations the codemod performs:
 
+**Before (0.18)**
 ```typescript
 import { useCoStateWithSelector, useAccountWithSelector } from "jazz-tools/react";
 
-function MyComponent() {
-  const todo = useCoStateWithSelector(TodoItem, todoId, {
-    resolve: { text: true },
-    select: (todo) => todo,
-  });
-
+function MyComponent({ todoId }) {
+  const { me, logOut } = useAccount();
   const todos = useAccountWithSelector(MyAccount, {
-    resolve: { root: { todos: { $each: true } } },
+    resolve: { root: { todos: { $each: { $onError: null } } } },
     select: (me) => me?.root.todos,
   });
-
+  const todoText = useCoStateWithSelector(TodoItem, todoId, {
+    resolve: { text: true },
+    select: (todo) => todo.text,
+  });
+  
   // ...
 }
 ```
 
-### After (0.19)
-
+**After (0.19)**
 ```typescript
-import { useCoState, useAccount } from "jazz-tools/react";
+import { useCoState, useAccount, useLogOut } from "jazz-tools/react";
 
-function MyComponent() {
-  const todo = useCoState(TodoItem, todoId, {
-    resolve: { text: true },
-    select: (todo) => todo,
+function MyComponent({ todoId }) {
+  const me = useAccount(undefined, {
+    select: (me) => me.$isLoaded ? me : me.$jazz.loadingState === "loading" ? undefined : null
+  });
+  const logOut = useLogOut();
+  
+  const todos = useAccount(MyAccount, {
+    resolve: { root: { todos: { $each: { $onError: 'catch' } } } },
+    select: (me) => me.$isLoaded ? me.root.todos : me.$jazz.loadingState === "loading" ? undefined : null,
   });
 
-  const todos = useAccount(MyAccount, {
-    resolve: { root: { todos: { $each: true } } },
-    select: (me) => me?.root.todos,
+  const todoText = useCoState(TodoItem, todoId, {
+    resolve: { text: true },
+    select: (todo) => todo.$isLoaded ? todo.text : todo.$jazz.loadingState === "loading" ? undefined : null,
   });
 
   // ...
