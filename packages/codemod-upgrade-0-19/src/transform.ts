@@ -15,7 +15,7 @@ export function transformFile(sourceFile: SourceFile): string {
 
   migrateUseAccount(sourceFile);
 
-  renameHooks(sourceFile);
+  renameWithSelectorHooks(sourceFile);
 
   migrateLoadingStateHandling(sourceFile);
 
@@ -290,7 +290,7 @@ function addJazzToolsImports(
 /**
  * Renames useAccountWithSelector to useAccount and useCoStateWithSelector to useCoState
  */
-function renameHooks(sourceFile: SourceFile) {
+function renameWithSelectorHooks(sourceFile: SourceFile) {
   transformHookImports(sourceFile);
   transformHookCalls(sourceFile);
 }
@@ -477,7 +477,7 @@ export function runTransform(projectPath: string) {
   } else {
     project = new Project();
 
-    const supportedExtensions = [".tsx"];
+    const supportedExtensions = [".ts", ".tsx"];
     const hasSupportedExtension = supportedExtensions.some((ext) =>
       projectPath.endsWith(ext),
     );
@@ -485,7 +485,7 @@ export function runTransform(projectPath: string) {
     if (hasSupportedExtension) {
       project.addSourceFilesAtPaths(projectPath);
     } else {
-      project.addSourceFilesAtPaths(`${projectPath}/**/*.tsx`);
+      project.addSourceFilesAtPaths(`${projectPath}/**/*.{ts,tsx}`);
     }
   }
 
