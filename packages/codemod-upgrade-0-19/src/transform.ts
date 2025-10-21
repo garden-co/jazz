@@ -473,9 +473,12 @@ export function runTransform(projectPath: string) {
   if (fs.existsSync(`${projectPath}/tsconfig.json`)) {
     project = new Project({
       tsConfigFilePath: `${projectPath}/tsconfig.json`,
+      skipFileDependencyResolution: true, // Skip resolving dependencies to save memory
     });
   } else {
-    project = new Project();
+    project = new Project({
+      skipFileDependencyResolution: true, // Skip resolving dependencies to save memory
+    });
 
     const supportedExtensions = [".ts", ".tsx"];
     const hasSupportedExtension = supportedExtensions.some((ext) =>
@@ -489,15 +492,13 @@ export function runTransform(projectPath: string) {
     }
   }
 
-  const sourceFiles = project.getSourceFiles();
+  const sourceFiles = project.getSourceFiles().filter((sourceFile) => {
+    return !sourceFile.getFilePath().includes("node_modules");
+  });
 
   let changed = false;
 
   sourceFiles.forEach((sourceFile) => {
-    if (sourceFile.getFilePath().includes("node_modules")) {
-      return;
-    }
-
     try {
       const originalText = sourceFile.getFullText();
       const transformedText = transformFile(sourceFile);
@@ -507,6 +508,10 @@ export function runTransform(projectPath: string) {
         console.log(`Transformed: ${sourceFile.getFilePath()}`);
         changed = true;
       }
+
+      // Free memory by forgetting the source file after processing
+      // This helps prevent OOM errors on large projects
+      sourceFile.forget();
     } catch (error) {
       console.error(`Error transforming ${sourceFile.getFilePath()}:`, error);
     }

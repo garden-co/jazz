@@ -50,6 +50,12 @@ To run the Jazz 0.19 codemod, first upgrade the jazz-tools version to 0.19 and t
 npx jazz-tools-codemod-0-19
 ```
 
+For large projects, you may need to increase Node.js heap size:
+
+```bash
+NODE_OPTIONS="--max-old-space-size=8192" npx jazz-tools-codemod-0-19
+```
+
 ### How it Works
 
 By default, the codemod will:
