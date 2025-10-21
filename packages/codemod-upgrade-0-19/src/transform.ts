@@ -5,13 +5,271 @@ import {
   CallExpression,
   PropertyAccessExpression,
   ImportDeclaration,
+  VariableDeclaration,
+  Node,
 } from "ts-morph";
 import fs from "node:fs";
 
 export function transformFile(sourceFile: SourceFile): string {
+  migrateUseAccount(sourceFile);
+
   renameHooks(sourceFile);
 
   return sourceFile.getFullText();
+}
+
+function migrateUseAccount(sourceFile: SourceFile) {
+  const fullText = sourceFile.getFullText();
+
+  const replacementsToMake: Array<{
+    start: number;
+    end: number;
+    replacement: string;
+  }> = [];
+
+  // Track non-destructured useAccount calls to replace property accesses
+  const nonDestructuredAccounts: Array<{
+    varName: string;
+    needsAgent: boolean;
+    needsLogOut: boolean;
+    variableStatement: any;
+  }> = [];
+
+  // Find all useAccount calls
+  sourceFile.forEachDescendant((node) => {
+    if (Node.isVariableDeclaration(node)) {
+      const initializer = node.getInitializer();
+      if (
+        initializer &&
+        Node.isCallExpression(initializer) &&
+        initializer.getExpression().getText() === "useAccount"
+      ) {
+        const nameNode = node.getNameNode();
+
+        // Handle destructuring pattern
+        if (Node.isObjectBindingPattern(nameNode)) {
+          const properties = new Map<string, string>();
+          nameNode.getElements().forEach((element) => {
+            const propertyName =
+              element.getPropertyNameNode()?.getText() || element.getName();
+            const localName = element.getName();
+            properties.set(propertyName, localName);
+          });
+
+          if (properties.size > 0) {
+            const variableStatement = node.getVariableStatement();
+            if (variableStatement) {
+              const declarationKind = variableStatement.getDeclarationKind();
+              const useAccountCall = initializer.getText();
+
+              // Get the statement's position in the source
+              const statementStart = variableStatement.getStart();
+              const statementEnd = variableStatement.getEnd();
+
+              // Calculate indentation - look back from statement start to find the line start
+              let lineStart = statementStart;
+              while (lineStart > 0 && fullText[lineStart - 1] !== "\n") {
+                lineStart--;
+              }
+              const indentation = fullText.substring(lineStart, statementStart);
+
+              // Build replacement statements
+              const statementsToInsert: string[] = [];
+
+              if (properties.has("me")) {
+                const meName = properties.get("me")!;
+                statementsToInsert.push(
+                  `${indentation}${declarationKind} ${meName} = ${useAccountCall};`,
+                );
+              }
+
+              if (properties.has("agent")) {
+                const agentName = properties.get("agent")!;
+                statementsToInsert.push(
+                  `${indentation}${declarationKind} ${agentName} = useAgent();`,
+                );
+              }
+
+              if (properties.has("logOut")) {
+                const logOutName = properties.get("logOut")!;
+                statementsToInsert.push(
+                  `${indentation}${declarationKind} ${logOutName} = useLogOut();`,
+                );
+              }
+
+              const replacement = statementsToInsert.join("\n");
+
+              // Replace from the start of the indentation to the end of the statement
+              replacementsToMake.push({
+                start: lineStart,
+                end: statementEnd,
+                replacement,
+              });
+            }
+          }
+        } else if (Node.isIdentifier(nameNode)) {
+          // Handle non-destructured pattern: const account = useAccount()
+          const varName = nameNode.getText();
+          const variableStatement = node.getVariableStatement();
+          if (variableStatement) {
+            nonDestructuredAccounts.push({
+              varName,
+              needsAgent: false,
+              needsLogOut: false,
+              variableStatement,
+            });
+          }
+        }
+      }
+    }
+  });
+
+  // Find all property accesses on non-destructured accounts
+  for (const info of nonDestructuredAccounts) {
+    const varName = info.varName;
+    const scope = info.variableStatement.getParent();
+
+    scope.forEachDescendant((node: Node) => {
+      if (Node.isPropertyAccessExpression(node)) {
+        const expression = node.getExpression();
+
+        // Check if this is a direct property access on our variable (e.g., account.me, account.agent)
+        if (Node.isIdentifier(expression) && expression.getText() === varName) {
+          const propertyName = node.getName();
+
+          if (propertyName === "me") {
+            // Replace account.me with just account
+            // But we need to replace only the .me part, keeping any chained access
+            // For "account.me?.profile", we want to replace "account.me" with "account"
+            replacementsToMake.push({
+              start: expression.getEnd(), // Start after "account"
+              end: node.getEnd(), // End after "me"
+              replacement: "", // Remove ".me"
+            });
+          } else if (propertyName === "agent") {
+            info.needsAgent = true;
+            // Replace account.agent with agent
+            replacementsToMake.push({
+              start: node.getStart(),
+              end: node.getEnd(),
+              replacement: "agent",
+            });
+          } else if (propertyName === "logOut") {
+            info.needsLogOut = true;
+            // Replace account.logOut with logOut
+            replacementsToMake.push({
+              start: node.getStart(),
+              end: node.getEnd(),
+              replacement: "logOut",
+            });
+          }
+        }
+      }
+    });
+
+    // Add new variable declarations for agent/logOut if needed
+    if (info.needsAgent || info.needsLogOut) {
+      const variableStatement = info.variableStatement;
+      const statementStart = variableStatement.getStart();
+      const statementEnd = variableStatement.getEnd();
+
+      // Calculate indentation
+      let lineStart = statementStart;
+      while (lineStart > 0 && fullText[lineStart - 1] !== "\n") {
+        lineStart--;
+      }
+      const indentation = fullText.substring(lineStart, statementStart);
+
+      const declarationKind = variableStatement.getDeclarationKind();
+      const statementsToInsert: string[] = [];
+
+      // Keep the original useAccount line
+      statementsToInsert.push(fullText.substring(lineStart, statementEnd));
+
+      if (info.needsAgent) {
+        statementsToInsert.push(
+          `${indentation}${declarationKind} agent = useAgent();`,
+        );
+      }
+
+      if (info.needsLogOut) {
+        statementsToInsert.push(
+          `${indentation}${declarationKind} logOut = useLogOut();`,
+        );
+      }
+
+      const replacement = statementsToInsert.join("\n");
+      replacementsToMake.push({
+        start: lineStart,
+        end: statementEnd,
+        replacement,
+      });
+    }
+  }
+
+  if (replacementsToMake.length === 0) {
+    return;
+  }
+
+  // Apply replacements in reverse order to avoid position shifts
+  // IMPORTANT: Do this BEFORE adding imports, otherwise positions will be shifted!
+  replacementsToMake.sort((a, b) => b.start - a.start);
+
+  for (const { start, end, replacement } of replacementsToMake) {
+    sourceFile.replaceText([start, end], replacement);
+  }
+
+  // Now add necessary imports (after replacements so we don't shift positions)
+  let needsUseAgentImport = false;
+  let needsUseLogOutImport = false;
+
+  for (const r of replacementsToMake) {
+    if (r.replacement.includes("useAgent()")) {
+      needsUseAgentImport = true;
+    }
+    if (r.replacement.includes("useLogOut()")) {
+      needsUseLogOutImport = true;
+    }
+  }
+
+  if (needsUseAgentImport || needsUseLogOutImport) {
+    addJazzToolsImports(sourceFile, needsUseAgentImport, needsUseLogOutImport);
+  }
+}
+
+function addJazzToolsImports(
+  sourceFile: SourceFile,
+  needsUseAgent: boolean,
+  needsUseLogOut: boolean,
+) {
+  const jazzToolsImport = sourceFile
+    .getImportDeclarations()
+    .find((importDecl) => {
+      const moduleSpecifier = importDecl.getModuleSpecifierValue();
+      const namedImports = importDecl.getNamedImports();
+      const existingImportNames = new Set(
+        namedImports.map((ni) => ni.getName()),
+      );
+      return (
+        moduleSpecifier.includes("jazz-tools") &&
+        existingImportNames.has("useAccount")
+      );
+    });
+
+  if (!jazzToolsImport) {
+    return;
+  }
+
+  const namedImports = jazzToolsImport.getNamedImports();
+  const existingImportNames = new Set(namedImports.map((ni) => ni.getName()));
+
+  if (needsUseAgent && !existingImportNames.has("useAgent")) {
+    jazzToolsImport.addNamedImport("useAgent");
+  }
+
+  if (needsUseLogOut && !existingImportNames.has("useLogOut")) {
+    jazzToolsImport.addNamedImport("useLogOut");
+  }
 }
 
 /**
@@ -32,13 +290,25 @@ function transformHookImports(sourceFile: SourceFile) {
       if (moduleSpecifier.includes("jazz-tools")) {
         const namedImports = importDecl.getNamedImports();
 
+        const existingImportNames = new Set(
+          namedImports.map((ni) => ni.getName()),
+        );
+
         namedImports.forEach((namedImport) => {
           const importName = namedImport.getName();
           if (importName === "useCoStateWithSelector") {
-            namedImport.setName("useCoState");
+            if (existingImportNames.has("useCoState")) {
+              namedImport.remove();
+            } else {
+              namedImport.setName("useCoState");
+            }
           }
           if (importName === "useAccountWithSelector") {
-            namedImport.setName("useAccount");
+            if (existingImportNames.has("useAccount")) {
+              namedImport.remove();
+            } else {
+              namedImport.setName("useAccount");
+            }
           }
         });
       }
@@ -66,8 +336,7 @@ function transformHookCalls(sourceFile: SourceFile) {
   });
 }
 
-// Main function to run the transform
-function singleRun(projectPath: string) {
+export function runTransform(projectPath: string) {
   let project: Project;
 
   if (fs.existsSync(`${projectPath}/tsconfig.json`)) {
@@ -77,7 +346,7 @@ function singleRun(projectPath: string) {
   } else {
     project = new Project();
 
-    const supportedExtensions = [".ts", ".tsx"];
+    const supportedExtensions = [".tsx"];
     const hasSupportedExtension = supportedExtensions.some((ext) =>
       projectPath.endsWith(ext),
     );
@@ -85,7 +354,7 @@ function singleRun(projectPath: string) {
     if (hasSupportedExtension) {
       project.addSourceFilesAtPaths(projectPath);
     } else {
-      project.addSourceFilesAtPaths(`${projectPath}/**/*.{ts,tsx}`);
+      project.addSourceFilesAtPaths(`${projectPath}/**/*.tsx`);
     }
   }
 
@@ -113,20 +382,4 @@ function singleRun(projectPath: string) {
   });
 
   return changed;
-}
-
-// Run multiple times, because the resolved types gets fixed after each run
-export function runTransform(projectPath: string): void {
-  let runCount = 1;
-
-  while (singleRun(projectPath)) {
-    runCount++;
-
-    if (runCount > 5) {
-      console.log("Ran 5 times, stopping");
-      break;
-    }
-  }
-
-  console.log(`Ran ${runCount} times`);
 }
