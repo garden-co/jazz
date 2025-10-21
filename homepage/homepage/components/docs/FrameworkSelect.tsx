@@ -58,18 +58,22 @@ export function FrameworkSelect({
   }, []);
 
   useEffect(() => {
+    // Dispatch framework event once after initialization completes
+    // to sync tabbed code groups with the current framework
+    if (!initialized) return;
+
     const timer = setTimeout(() => {
       window.dispatchEvent(
         new CustomEvent(TAB_CHANGE_EVENT, {
           detail: {
             key: 'framework',
-            value: defaultFramework,
+            value: selectedFramework,
           },
         }),
       );
     }, 0);
     return () => clearTimeout(timer);
-  }, [defaultFramework]);
+  }, [initialized]); // Only run once when initialized becomes true
 
   const selectFramework = (newFramework: Framework, shouldNavigate = true) => {
     setSelectedFramework(newFramework);
@@ -77,7 +81,7 @@ export function FrameworkSelect({
     localStorage.setItem("_tcgpref_framework", newFramework);
     if (!shouldNavigate) return;
     const newPath = path.split("/").toSpliced(2, 1, newFramework).join("/") + window.location.hash;
-    routerPush && router.replace(newPath, { scroll: true }); 
+    routerPush && router.replace(newPath, { scroll: true });
   };
 
   const handleTabChange = (event: CustomEvent<TabChangeEventDetail>) => {
