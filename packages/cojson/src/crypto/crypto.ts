@@ -23,7 +23,7 @@ export type SealerSecret = `sealerSecret_z${string}`;
 export type SealerID = `sealer_z${string}`;
 export type Sealed<T> = `sealed_U${string}` & { __type: T };
 
-export type EncodingType = "snappy" | "zstd" | "lz4";
+export type EncodingType = "snappy" | "zstd" | "lz4" | "lzy";
 
 export type AgentSecret = `${SealerSecret}/${SignerSecret}`;
 

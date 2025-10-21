@@ -53,6 +53,8 @@ pub enum EncodingType {
     Zstd,
     #[serde(rename = "lz4")]
     Lz4,
+    #[serde(rename = "lzy")]
+    Lzy,
 }
 
 impl TryFrom<String> for EncodingType {
@@ -62,6 +64,7 @@ impl TryFrom<String> for EncodingType {
             "snappy" => Ok(EncodingType::Snappy),
             "zstd" => Ok(EncodingType::Zstd),
             "lz4" => Ok(EncodingType::Lz4),
+            "lzy" => Ok(EncodingType::Lzy),
             _ => Err(CoJsonCoreError::InvalidEncoding),
         }
     }
@@ -74,6 +77,7 @@ impl TryFrom<&str> for EncodingType {
             "snappy" => Ok(EncodingType::Snappy),
             "zstd" => Ok(EncodingType::Zstd),
             "lz4" => Ok(EncodingType::Lz4),
+            "lzy" => Ok(EncodingType::Lzy),
             _ => Err(CoJsonCoreError::InvalidEncoding),
         }
     }
@@ -85,6 +89,7 @@ impl From<EncodingType> for String {
             EncodingType::Snappy => "snappy".to_string(),
             EncodingType::Zstd => "zstd".to_string(),
             EncodingType::Lz4 => "lz4".to_string(),
+            EncodingType::Lzy => "lzy".to_string(),
         }
     }
 }
@@ -269,6 +274,15 @@ impl SessionLogInternal {
                                 None
                             }
                         }
+                        EncodingType::Lzy => {
+                            let compressed_ciphertext = lzy::compress(&ciphertext);
+                            if compressed_ciphertext.len() < ciphertext.len() {
+                                ciphertext = compressed_ciphertext;
+                                Some(EncodingType::Lzy)
+                            } else {
+                                None
+                            }
+                        }
                         _ => unimplemented!("Encoding type not implemented"),
                     }
                 } else {
@@ -380,6 +394,9 @@ impl SessionLogInternal {
                         EncodingType::Lz4 => {
                             ciphertext = lz4_flex::decompress_size_prepended(&ciphertext)
                                 .map_err(|_| CoJsonCoreError::InvalidEncoding)?;
+                        }
+                        EncodingType::Lzy => {
+                            ciphertext = lzy::decompress(&ciphertext).map_err(|_| CoJsonCoreError::InvalidEncoding)?;
                         }
                         _ => unimplemented!("Encoding type not implemented"),
                     }

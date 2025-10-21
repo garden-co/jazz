@@ -41,7 +41,7 @@ export type PrivateTransaction = {
   keyUsed: KeyID;
   encryptedChanges: Encrypted<JsonValue[], { in: RawCoID; tx: TransactionID }>;
   meta?: Encrypted<JsonObject, { in: RawCoID; tx: TransactionID }>;
-  encoding?: "snappy" | "zstd" | "lz4";
+  encoding?: "snappy" | "zstd" | "lz4" | "lzy";
 };
 export type TrustingTransaction = {
   privacy: "trusting";
