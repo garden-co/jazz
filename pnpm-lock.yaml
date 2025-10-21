@@ -2305,8 +2305,8 @@ importers:
         specifier: ^3.2.0
         version: 3.2.0
       goober:
-        specifier: ^2.1.16
-        version: 2.1.16(csstype@3.1.3)
+        specifier: ^2.1.18
+        version: 2.1.18(csstype@3.1.3)
       prosemirror-example-setup:
         specifier: ^1.2.2
         version: 1.2.3
@@ -11828,8 +11828,8 @@ packages:
     resolution: {integrity: sha512-jhIXaOzy1sb8IyocaruWSn1TjmnBVs8Ayhcy83rmxNJ8q2uWKCAj3CnJY+KpGSXCueAPc0i05kVvVKtP1t9S3g==}
     engines: {node: '>=10'}
 
-  goober@2.1.16:
-    resolution: {integrity: sha512-erjk19y1U33+XAMe1VTvIONHYoSqE4iS7BYUZfHaqeohLmnC0FdxEh7rQU+6MZ4OajItzjZFSRtVANrQwNq6/g==}
+  goober@2.1.18:
+    resolution: {integrity: sha512-2vFqsaDVIT9Gz7N6kAL++pLpp41l3PfDuusHcjnGLfR6+huZkl6ziX+zgVC3ZxpqWhzH6pyDdGrCeDhMIvwaxw==}
     peerDependencies:
       csstype: ^3.0.10
 
@@ -24532,7 +24532,7 @@ snapshots:
     dependencies:
       '@tanstack/router-core': 1.129.4
       clsx: 2.1.1
-      goober: 2.1.16(csstype@3.1.3)
+      goober: 2.1.18(csstype@3.1.3)
       solid-js: 1.9.5
       tiny-invariant: 1.3.3
     optionalDependencies:
@@ -28708,7 +28708,7 @@ snapshots:
       merge2: 1.4.1
       slash: 3.0.0
 
-  goober@2.1.16(csstype@3.1.3):
+  goober@2.1.18(csstype@3.1.3):
     dependencies:
       csstype: 3.1.3
 

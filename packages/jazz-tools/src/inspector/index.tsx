@@ -1,5 +1,3 @@
-import React from "react";
-
 export { JazzInspectorInternal } from "./viewer/new-app.js";
 export { PageStack } from "./viewer/page-stack.js";
 export { Breadcrumbs } from "./viewer/breadcrumbs.js";
@@ -18,7 +16,6 @@ export {
 
 export type { PageInfo } from "./viewer/types.js";
 
-import { setup } from "goober";
 import { useJazzContext } from "jazz-tools/react-core";
 import { Account } from "jazz-tools";
 
@@ -30,8 +27,6 @@ export function JazzInspector({ position = "right" }: { position?: Position }) {
   const localNode = context.node;
   const me = "me" in context ? context.me : undefined;
 
-  if (process.env.NODE_ENV !== "development") return null;
-
   return (
     <JazzInspectorInternal
       position={position}
@@ -40,5 +35,3 @@ export function JazzInspector({ position = "right" }: { position?: Position }) {
     />
   );
 }
-
-setup(React.createElement);

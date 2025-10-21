@@ -198,7 +198,7 @@
     "cojson-storage-indexeddb": "workspace:*",
     "cojson-transport-ws": "workspace:*",
     "fast-myers-diff": "^3.2.0",
-    "goober": "^2.1.16",
+    "goober": "^2.1.18",
     "prosemirror-example-setup": "^1.2.2",
     "prosemirror-menu": "^1.2.4",
     "prosemirror-model": "^1.21.1",
