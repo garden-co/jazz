@@ -128,7 +128,6 @@ pub struct SessionLogInternal {
     crypto_cache: CryptoCache,
 }
 
-
 impl SessionLogInternal {
     /// Create a new session log, optionally with a public key for signature verification.
     pub fn new(co_id: CoID, session_id: SessionID, signer_id: Option<SignerID>) -> Self {
@@ -241,7 +240,11 @@ impl SessionLogInternal {
     ) -> Result<(Signature, Transaction), CoJsonCoreError> {
         // Build the transaction object depending on the mode.
         let new_tx = match mode {
-            TransactionMode::Private { key_id, key_secret, encoding } => {
+            TransactionMode::Private {
+                key_id,
+                key_secret,
+                encoding,
+            } => {
                 // For private transactions, encrypt the changes and meta fields.
                 let tx_index = self.transactions_json.len() as u32;
 
@@ -254,14 +257,23 @@ impl SessionLogInternal {
                 // Encrypt the changes JSON.
                 let mut ciphertext = changes_json.as_bytes().to_vec();
 
-                if let Some(enc) = &encoding {
+                let encoding: Option<EncodingType> = if let Some(enc) = &encoding {
                     match *enc {
                         EncodingType::Lz4 => {
-                            ciphertext = lz4_flex::compress_prepend_size(&ciphertext);
+                            let compressed_ciphertext =
+                                lz4_flex::compress_prepend_size(&ciphertext);
+                            if compressed_ciphertext.len() < ciphertext.len() {
+                                ciphertext = compressed_ciphertext;
+                                Some(EncodingType::Lz4)
+                            } else {
+                                None
+                            }
                         }
                         _ => unimplemented!("Encoding type not implemented"),
                     }
-                }
+                } else {
+                    None
+                };
 
                 let mut cipher = XSalsa20::new(&key, &nonce.into());
                 cipher.apply_keystream(&mut ciphertext);
@@ -913,7 +925,11 @@ mod tests {
         let (new_signature, _new_tx) = session
             .add_new_transaction(
                 changes_json,
-                TransactionMode::Private { key_id, key_secret, encoding: None },
+                TransactionMode::Private {
+                    key_id,
+                    key_secret,
+                    encoding: None,
+                },
                 &signing_key.into(),
                 made_at,
                 None,
@@ -1134,7 +1150,11 @@ mod tests {
         let (new_signature, _new_tx) = session
             .add_new_transaction(
                 CHANGES_JSON,
-                TransactionMode::Private { key_id, key_secret, encoding: None },
+                TransactionMode::Private {
+                    key_id,
+                    key_secret,
+                    encoding: None,
+                },
                 &signing_key.into(),
                 made_at,
                 Some(META_JSON.to_string()),
