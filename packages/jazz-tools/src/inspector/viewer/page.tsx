@@ -205,7 +205,7 @@ export function Page(props: PageProps) {
         <TitleContainer>
           <Title>
             <span>
-              {name === coId ? "" : name}
+              {name}
               {typeof snapshot === "object" && "name" in snapshot ? (
                 <span style={{ color: "#57534e", fontWeight: 500 }}>
                   {" "}
