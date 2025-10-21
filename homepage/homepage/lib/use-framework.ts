@@ -4,6 +4,11 @@ import { useParams, usePathname, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { TAB_CHANGE_EVENT, isFrameworkChange } from "@garden-co/design-system/src/types/tabbed-code-group";
 
+// Global tracking to prevent multiple simultaneous redirects
+// (since useFramework is called by multiple components on the same page)
+let isRedirecting = false;
+let lastRedirectedTo = "";
+
 export const useFramework = () => {
   const pathname = usePathname();
   const { framework } = useParams<{ framework?: string }>();
@@ -18,10 +23,6 @@ export const useFramework = () => {
       const stored = window.localStorage.getItem("_tcgpref_framework");
       if (stored && isValidFramework(stored)) {
         setSavedFramework(stored as Framework);
-        // If the currently loaded page is a docs page, make sure that URL matches the selected framework.
-        if (!pathname.startsWith('/docs')) return;
-        const newPath = pathname.split("/").toSpliced(2, 1, stored).join("/") + window.location.hash;
-        router.replace(newPath, { scroll: true });
       }
     }
   }, []);
@@ -41,12 +42,23 @@ export const useFramework = () => {
 
   useEffect(() => {
     if (!mounted || !savedFramework || !pathname.startsWith('/docs')) return;
+
     const parts = pathname.split("/");
+    const newPath = parts.toSpliced(2, 1, savedFramework).join("/");
+
+    // Don't redirect if already redirecting or if we just redirected to this path
+    if (isRedirecting || lastRedirectedTo === newPath) return;
+
     if (parts[2] !== savedFramework) {
-      const newPath = parts.toSpliced(2, 1, savedFramework).join("/");
+      isRedirecting = true;
+      lastRedirectedTo = newPath;
       router.replace(newPath, { scroll: false });
+      // Reset the flag after navigation completes
+      setTimeout(() => {
+        isRedirecting = false;
+      }, 200);
     }
-  }, [mounted, savedFramework, pathname]);
+  }, [mounted, savedFramework, pathname, router]);
 
 
   if (mounted && savedFramework) return savedFramework;
