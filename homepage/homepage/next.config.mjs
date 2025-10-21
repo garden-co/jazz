@@ -16,6 +16,7 @@ const nextConfig = {
   // Configure `pageExtensions`` to include MDX files
   pageExtensions: ["js", "jsx", "mdx", "ts", "tsx"],
   transpilePackages: ["@garden-co/design-system"],
+  experimental: { mdxRs: true }
 };
 
 const withMDX = createMDX({
