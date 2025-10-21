@@ -3,7 +3,7 @@
 import { cojsonInternals } from "cojson";
 import { Account, co, Loaded, z } from "jazz-tools";
 import { beforeEach, describe, expect, expectTypeOf, it } from "vitest";
-import { useCoStateWithSelector } from "../index.js";
+import { useCoState } from "../index.js";
 import { createJazzTestAccount, setupJazzTestSync } from "../testing.js";
 import { renderHook, waitFor } from "./testUtils.js";
 import { useRef } from "react";
@@ -28,7 +28,7 @@ const useRenderCount = <T>(hook: () => T) => {
   };
 };
 
-describe("useCoStateWithSelector", () => {
+describe("useCoState", () => {
   it("should not re-render when a nested coValue is updated and not selected", async () => {
     const TestMap = co.map({
       value: z.string(),
@@ -46,11 +46,16 @@ describe("useCoStateWithSelector", () => {
 
     const { result } = renderHook(() =>
       useRenderCount(() =>
-        useCoStateWithSelector(TestMap, map.$jazz.id, {
+        useCoState(TestMap, map.$jazz.id, {
           resolve: {
             nested: true,
           },
-          select: (v) => v?.value,
+          select: (v) => {
+            if (!v.$isLoaded) {
+              return undefined;
+            }
+            return v.value;
+          },
         }),
       ),
     );
@@ -85,11 +90,16 @@ describe("useCoStateWithSelector", () => {
 
     const { result } = renderHook(() =>
       useRenderCount(() =>
-        useCoStateWithSelector(TestMap, map.$jazz.id, {
+        useCoState(TestMap, map.$jazz.id, {
           resolve: {
             nested: true,
           },
-          select: (v) => v?.nested?.value,
+          select: (v) => {
+            if (!v.$isLoaded) {
+              return undefined;
+            }
+            return v.nested?.value;
+          },
         }),
       ),
     );
@@ -128,11 +138,16 @@ describe("useCoStateWithSelector", () => {
 
     const { result } = renderHook(() =>
       useRenderCount(() =>
-        useCoStateWithSelector(TestMap, map.$jazz.id, {
+        useCoState(TestMap, map.$jazz.id, {
           resolve: {
             nested: true,
           },
-          select: (v) => v?.nested?.value,
+          select: (v) => {
+            if (!v.$isLoaded) {
+              return undefined;
+            }
+            return v.nested?.value;
+          },
           equalityFn: () => true,
         }),
       ),

@@ -6,6 +6,7 @@ import {
   DiscriminableCoValueSchemaDefinition,
   DiscriminableCoreCoValueSchema,
   Group,
+  MaybeLoaded,
   RefsToResolve,
   RefsToResolveStrict,
   Resolved,
@@ -21,7 +22,7 @@ import { AnonymousJazzAgent } from "../../anonymousJazzAgent.js";
 import { removeGetters } from "../../schemaUtils.js";
 import { CoMapSchemaInit } from "../typeConverters/CoFieldSchemaInit.js";
 import { InstanceOrPrimitiveOfSchema } from "../typeConverters/InstanceOrPrimitiveOfSchema.js";
-import { InstanceOrPrimitiveOfSchemaCoValuesNullable } from "../typeConverters/InstanceOrPrimitiveOfSchemaCoValuesNullable.js";
+import { InstanceOrPrimitiveOfSchemaCoValuesMaybeLoaded } from "../typeConverters/InstanceOrPrimitiveOfSchemaCoValuesMaybeLoaded.js";
 import { z } from "../zodReExport.js";
 import { AnyZodOrCoValueSchema, AnyZodSchema } from "../zodSchema.js";
 import { CoOptionalSchema } from "./CoOptionalSchema.js";
@@ -54,33 +55,34 @@ export interface CoMapSchema<
 
   load<
     const R extends RefsToResolve<
-      Simplify<CoMapInstanceCoValuesNullable<Shape>> & CoMap
+      Simplify<CoMapInstanceCoValuesMaybeLoaded<Shape>> & CoMap
     > = true,
   >(
     id: string,
     options?: {
       resolve?: RefsToResolveStrict<
-        Simplify<CoMapInstanceCoValuesNullable<Shape>> & CoMap,
+        Simplify<CoMapInstanceCoValuesMaybeLoaded<Shape>> & CoMap,
         R
       >;
       loadAs?: Account | AnonymousJazzAgent;
       skipRetry?: boolean;
       unstable_branch?: BranchDefinition;
     },
-  ): Promise<Resolved<
-    Simplify<CoMapInstanceCoValuesNullable<Shape>> & CoMap,
-    R
-  > | null>;
+  ): Promise<
+    MaybeLoaded<
+      Resolved<Simplify<CoMapInstanceCoValuesMaybeLoaded<Shape>> & CoMap, R>
+    >
+  >;
 
   unstable_merge<
     const R extends RefsToResolve<
-      Simplify<CoMapInstanceCoValuesNullable<Shape>> & CoMap
+      Simplify<CoMapInstanceCoValuesMaybeLoaded<Shape>> & CoMap
     > = true,
   >(
     id: string,
     options?: {
       resolve?: RefsToResolveStrict<
-        Simplify<CoMapInstanceCoValuesNullable<Shape>> & CoMap,
+        Simplify<CoMapInstanceCoValuesMaybeLoaded<Shape>> & CoMap,
         R
       >;
       loadAs?: Account | AnonymousJazzAgent;
@@ -90,17 +92,17 @@ export interface CoMapSchema<
 
   subscribe<
     const R extends RefsToResolve<
-      Simplify<CoMapInstanceCoValuesNullable<Shape>> & CoMap
+      Simplify<CoMapInstanceCoValuesMaybeLoaded<Shape>> & CoMap
     > = true,
   >(
     id: string,
     options: SubscribeListenerOptions<
-      Simplify<CoMapInstanceCoValuesNullable<Shape>> & CoMap,
+      Simplify<CoMapInstanceCoValuesMaybeLoaded<Shape>> & CoMap,
       R
     >,
     listener: (
       value: Resolved<
-        Simplify<CoMapInstanceCoValuesNullable<Shape>> & CoMap,
+        Simplify<CoMapInstanceCoValuesMaybeLoaded<Shape>> & CoMap,
         R
       >,
       unsubscribe: () => void,
@@ -116,39 +118,41 @@ export interface CoMapSchema<
 
   upsertUnique: <
     const R extends RefsToResolve<
-      Simplify<CoMapInstanceCoValuesNullable<Shape>> & CoMap
+      Simplify<CoMapInstanceCoValuesMaybeLoaded<Shape>> & CoMap
     > = true,
   >(options: {
     value: Simplify<CoMapSchemaInit<Shape>>;
     unique: CoValueUniqueness["uniqueness"];
     owner: Owner;
     resolve?: RefsToResolveStrict<
-      Simplify<CoMapInstanceCoValuesNullable<Shape>> & CoMap,
+      Simplify<CoMapInstanceCoValuesMaybeLoaded<Shape>> & CoMap,
       R
     >;
-  }) => Promise<Resolved<
-    Simplify<CoMapInstanceCoValuesNullable<Shape>> & CoMap,
-    R
-  > | null>;
+  }) => Promise<
+    MaybeLoaded<
+      Resolved<Simplify<CoMapInstanceCoValuesMaybeLoaded<Shape>> & CoMap, R>
+    >
+  >;
 
   loadUnique<
     const R extends RefsToResolve<
-      Simplify<CoMapInstanceCoValuesNullable<Shape>> & CoMap
+      Simplify<CoMapInstanceCoValuesMaybeLoaded<Shape>> & CoMap
     > = true,
   >(
     unique: CoValueUniqueness["uniqueness"],
     ownerID: string,
     options?: {
       resolve?: RefsToResolveStrict<
-        Simplify<CoMapInstanceCoValuesNullable<Shape>> & CoMap,
+        Simplify<CoMapInstanceCoValuesMaybeLoaded<Shape>> & CoMap,
         R
       >;
       loadAs?: Account | AnonymousJazzAgent;
     },
-  ): Promise<Resolved<
-    Simplify<CoMapInstanceCoValuesNullable<Shape>> & CoMap,
-    R
-  > | null>;
+  ): Promise<
+    MaybeLoaded<
+      Resolved<Simplify<CoMapInstanceCoValuesMaybeLoaded<Shape>> & CoMap, R>
+    >
+  >;
 
   /**
    * @deprecated Use `co.map().catchall` will be removed in an upcoming version.
@@ -174,7 +178,7 @@ export interface CoMapSchema<
   withMigration(
     migration: (
       value: Resolved<
-        Simplify<CoMapInstanceCoValuesNullable<Shape>> & CoMap,
+        Simplify<CoMapInstanceCoValuesMaybeLoaded<Shape>> & CoMap,
         true
       >,
     ) => undefined,
@@ -200,7 +204,9 @@ export interface CoMapSchema<
    * @returns A new CoMap schema with all fields optional.
    */
   partial<Keys extends keyof Shape = keyof Shape>(
-    keys?: { [key in Keys]: true },
+    keys?: {
+      [key in Keys]: true;
+    },
   ): CoMapSchema<PartialShape<Shape, Keys>, CatchAll, Owner>;
 }
 
@@ -307,7 +313,9 @@ export function enrichCoMapSchema<
       return coMapDefiner(pickedShape);
     },
     partial: <Keys extends keyof Shape = keyof Shape>(
-      keys?: { [key in Keys]: true },
+      keys?: {
+        [key in Keys]: true;
+      },
     ) => {
       const partialShape: Record<string, AnyZodOrCoValueSchema> = {};
 
@@ -366,12 +374,13 @@ export type CoMapInstanceShape<
     }
   : {});
 
-export type CoMapInstanceCoValuesNullable<Shape extends z.core.$ZodLooseShape> =
-  {
-    readonly [key in keyof Shape]: InstanceOrPrimitiveOfSchemaCoValuesNullable<
-      Shape[key]
-    >;
-  };
+export type CoMapInstanceCoValuesMaybeLoaded<
+  Shape extends z.core.$ZodLooseShape,
+> = {
+  readonly [key in keyof Shape]: InstanceOrPrimitiveOfSchemaCoValuesMaybeLoaded<
+    Shape[key]
+  >;
+};
 
 export type PartialShape<
   Shape extends z.core.$ZodLooseShape,

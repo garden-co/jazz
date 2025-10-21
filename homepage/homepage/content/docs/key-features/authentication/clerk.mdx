@@ -156,10 +156,10 @@ export default function RootLayout() {
 import * as React from "react";
 // ---cut---
 import { SignInButton } from "@clerk/clerk-react";
-import { useAccount, useIsAuthenticated } from "jazz-tools/react";
+import { useIsAuthenticated, useLogOut } from "jazz-tools/react";
 
 export function AuthButton() {
-  const { logOut } = useAccount();
+  const logOut = useLogOut();
 
   const isAuthenticated = useIsAuthenticated();
 
@@ -179,11 +179,11 @@ export function AuthButton() {
 import * as React from "react";
 // ---cut---
 import { useSignIn } from "@clerk/clerk-expo";
-import { useAccount, useIsAuthenticated } from "jazz-tools/expo";
+import { useIsAuthenticated, useLogOut } from "jazz-tools/expo";
 import { Button, Text } from 'react-native';
 
 export function AuthButton() {
-  const { logOut } = useAccount();
+  const logOut = useLogOut();
   const { signIn, setActive, isLoaded } = useSignIn();
   const isAuthenticated = useIsAuthenticated();
 

@@ -2,7 +2,7 @@
 
 import { Account, RefsToResolve, co, z, Group } from "jazz-tools";
 import { assert, beforeEach, describe, expect, it } from "vitest";
-import { useAccountWithSelector, useJazzContextManager } from "../hooks.js";
+import { useAccount, useJazzContextManager } from "../hooks.js";
 import { useIsAuthenticated } from "../index.js";
 import {
   createJazzTestAccount,
@@ -26,7 +26,7 @@ const useRenderCount = <T>(hook: () => T) => {
   };
 };
 
-describe("useAccountWithSelector", () => {
+describe("useAccount", () => {
   it("should return the correct selected value", async () => {
     const AccountRoot = co.map({
       value: z.string(),
@@ -49,11 +49,16 @@ describe("useAccountWithSelector", () => {
 
     const { result } = renderHook(
       () =>
-        useAccountWithSelector(AccountSchema, {
+        useAccount(AccountSchema, {
           resolve: {
             root: true,
           },
-          select: (account) => account?.root.value ?? "Loading...",
+          select: (account) => {
+            if (!account.$isLoaded) {
+              return "Loading...";
+            }
+            return account.root.value;
+          },
         }),
       {
         account,
@@ -98,13 +103,18 @@ describe("useAccountWithSelector", () => {
 
     const { result } = renderHook(
       () =>
-        useAccountWithSelector(AccountSchema, {
+        useAccount(AccountSchema, {
           resolve: {
             root: {
               nested: true,
             },
           },
-          select: (account) => account?.root.nested.nestedValue ?? "Loading...",
+          select: (account) => {
+            if (!account.$isLoaded) {
+              return "Loading...";
+            }
+            return account.root.nested.nestedValue;
+          },
         }),
       {
         account,
@@ -154,13 +164,18 @@ describe("useAccountWithSelector", () => {
     const { result } = renderHook(
       () =>
         useRenderCount(() =>
-          useAccountWithSelector(AccountSchema, {
+          useAccount(AccountSchema, {
             resolve: {
               root: {
                 nested: true,
               },
             },
-            select: (account) => account?.root.value ?? "Loading...",
+            select: (account) => {
+              if (!account.$isLoaded) {
+                return "Loading...";
+              }
+              return account.root.value;
+            },
           }),
         ),
       {
@@ -218,14 +233,18 @@ describe("useAccountWithSelector", () => {
     const { result } = renderHook(
       () =>
         useRenderCount(() =>
-          useAccountWithSelector(AccountSchema, {
+          useAccount(AccountSchema, {
             resolve: {
               root: {
                 nested: true,
               },
             },
-            select: (account) =>
-              account?.root?.nested?.nestedValue ?? "Loading...",
+            select: (account) => {
+              if (!account.$isLoaded) {
+                return "Loading...";
+              }
+              return account.root.nested?.nestedValue ?? "Loading...";
+            },
           }),
         ),
       {
@@ -283,14 +302,18 @@ describe("useAccountWithSelector", () => {
     const { result } = renderHook(
       () =>
         useRenderCount(() =>
-          useAccountWithSelector(AccountSchema, {
+          useAccount(AccountSchema, {
             resolve: {
               root: {
                 nested: true,
               },
             },
-            select: (account) =>
-              account?.root?.nested?.nestedValue ?? "Loading...",
+            select: (account) => {
+              if (!account.$isLoaded) {
+                return "Loading...";
+              }
+              return account.root.nested?.nestedValue ?? "Loading...";
+            },
             equalityFn: () => true, // Always return true to prevent re-renders
           }),
         ),
@@ -329,11 +352,16 @@ describe("useAccountWithSelector", () => {
 
     const { result } = renderHook(
       () =>
-        useAccountWithSelector(AccountSchema, {
+        useAccount(AccountSchema, {
           resolve: {
             root: true,
           },
-          select: (account) => account?.root?.value ?? "Guest",
+          select: (account) => {
+            if (!account.$isLoaded) {
+              return "Guest";
+            }
+            return account.root.value;
+          },
         }),
       {
         account,
@@ -348,8 +376,13 @@ describe("useAccountWithSelector", () => {
 
     const { result } = renderHook(
       () =>
-        useAccountWithSelector(Account, {
-          select: (account) => account?.$jazz.id ?? "No account",
+        useAccount(Account, {
+          select: (account) => {
+            if (!account.$isLoaded) {
+              return "No account";
+            }
+            return account.$jazz.id;
+          },
         }),
       {
         account,
@@ -384,12 +417,17 @@ describe("useAccountWithSelector", () => {
     const { result, rerender } = renderHook(
       () =>
         useRenderCount(() =>
-          useAccountWithSelector(AccountSchema, {
+          useAccount(AccountSchema, {
             resolve: {
               root: true,
             },
             select: (account) => {
-              const baseValue = account?.root?.value ?? "loading";
+              let baseValue: string;
+              if (!account.$isLoaded) {
+                baseValue = "loading";
+              } else {
+                baseValue = account.root.value;
+              }
               return `${baseValue}-${externalProp}`;
             },
           }),
@@ -440,19 +478,29 @@ describe("useAccountWithSelector", () => {
     group.addMember("everyone", "writer");
     const { result } = renderHook(
       () => {
-        const branchAccountRoot = useAccountWithSelector(AccountSchema, {
+        const branchAccountRoot = useAccount(AccountSchema, {
           resolve: {
             root: true,
           },
-          select: (account) => account?.root,
+          select: (account) => {
+            if (!account.$isLoaded) {
+              return undefined;
+            }
+            return account.root;
+          },
           unstable_branch: { name: "feature-branch" },
         });
 
-        const mainAccountRoot = useAccountWithSelector(AccountSchema, {
+        const mainAccountRoot = useAccount(AccountSchema, {
           resolve: {
             root: true,
           },
-          select: (account) => account?.root,
+          select: (account) => {
+            if (!account.$isLoaded) {
+              return undefined;
+            }
+            return account.root;
+          },
         });
 
         return {

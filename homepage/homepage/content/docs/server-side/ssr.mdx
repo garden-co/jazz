@@ -157,7 +157,7 @@ export default async function ServerSidePage(props: {
     loadAs: jazzSSR,
     resolve: {
       $each: {
-        $onError: null,
+        $onError: 'catch',
       },
     },
   });
@@ -167,8 +167,8 @@ export default async function ServerSidePage(props: {
       <h1>🎪 Server-rendered Festival {festivalId}</h1>
 
       <ul>
-        {festival?.filter(Boolean).map((band) => {
-          if (!band) return null;
+        {festival.$isLoaded && festival.map((band) => {
+          if (!band.$isLoaded) return null;
           return <li key={band.$jazz.id}>🎶 {band.name}</li>;
         })}
       </ul>
@@ -190,7 +190,7 @@ export default async function ServerSidePage(props: {
     loadAs: jazzSSR,
     resolve: {
       $each: {
-        $onError: null,
+        $onError: 'catch',
       },
     },
   }));
@@ -200,8 +200,10 @@ export default async function ServerSidePage(props: {
   <h1>🎪 Server-rendered Festival {festivalId}</h1>
   <ul>
     {#await festival then festival}
-      {#each festival?.filter(Boolean) || [] as band (band.$jazz.id)} 
-        <li>🎶 {band.name}</li>;
+      {#each festival.$isLoaded ? festival : [] as band (band.$jazz.id)} 
+        {#if band.$isLoaded}
+          <li>🎶 {band.name}</li>
+        {/if}
       {/each}
     {/await}
   </ul>
@@ -239,15 +241,16 @@ import Link from "next/link";
 import { JazzFestAccount } from "@/app/schema";
 
 export function Festival() {
-  const { me } = useAccount(JazzFestAccount, {
-    resolve: { root: { myFestival: true } },
+  const me = useAccount(JazzFestAccount, {
+    resolve: { root: { myFestival: { $each: { $onError: 'catch' } } } },
   });
-  if (!me) return null; // not loaded yet
+  if (!me.$isLoaded) return null; 
   return (
     <>
       <ul>
-        {me?.root.myFestival.map(
-          (band) => band && <li key={band.$jazz.id}>{band.name}</li>,
+        {me.root.myFestival.map((band) => {
+          if (!band.$isLoaded) return null;
+          return <li key={band.$jazz.id}>{band.name}</li>;
         )}
       </ul>
       {/* [!code ++:3] */}
@@ -270,8 +273,10 @@ export function Festival() {
 </script>
 
 <ul>
-  {#each me.current?.root.myFestival || [] as band}
-    <li>{band?.name}</li>
+  {#each me.current.$isLoaded ? me.current.root.myFestival : [] as band}
+    {#if band.$isLoaded}
+      <li>{band.name}</li>
+    {/if}
   {/each}
 </ul>
 <!-- [!code ++:3] -->

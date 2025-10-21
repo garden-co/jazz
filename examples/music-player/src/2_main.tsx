@@ -38,7 +38,7 @@ function AppContent({
   mediaPlayer: ReturnType<typeof useMediaPlayer>;
 }) {
   const showWelcomeScreen = useAccountSelector({
-    select: (me) => !me.root.accountSetupCompleted,
+    select: (me) => !me.$isLoaded || !me.root.accountSetupCompleted,
   });
 
   const isReady = usePrepareAppState(mediaPlayer);

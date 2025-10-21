@@ -1,6 +1,7 @@
 // @vitest-environment happy-dom
 
 import { CoMap, Group, Inbox, type Loaded, co, z } from "jazz-tools";
+import { assertLoaded } from "jazz-tools/testing";
 import { describe, expect, it } from "vitest";
 import { experimental_useInboxSender } from "../composables.js";
 import { createJazzTestAccount, linkAccounts } from "../testing.js";
@@ -56,6 +57,7 @@ describe("useInboxSender", () => {
       loadAs: account,
     });
 
-    expect(responseMap!.value).toEqual("got it");
+    assertLoaded(responseMap);
+    expect(responseMap.value).toEqual("got it");
   });
 });

@@ -18,7 +18,7 @@ export function ProjectList() {
   return (
     <>
       {projects.map((project) =>
-        project ? (
+        project.$isLoaded ? (
           <strong
             key={project.$jazz.id}
             className="px-4 py-5 sm:px-6 font-medium block"

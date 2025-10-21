@@ -1,11 +1,16 @@
 import { useIframeHashRouter } from "hash-slash";
-import { Group } from "jazz-tools";
-import { useAccount } from "jazz-tools/react";
+import { Account, Group } from "jazz-tools";
+import { useAccount, useLogOut } from "jazz-tools/react";
 import { ReactionsScreen } from "./ReactionsScreen.tsx";
 import { Reactions } from "./schema.ts";
 
 function App() {
-  const { me, logOut } = useAccount();
+  const me = useAccount(Account, {
+    resolve: {
+      profile: true,
+    },
+  });
+  const logOut = useLogOut();
   const router = useIframeHashRouter();
 
   const createReactions = () => {
@@ -14,6 +19,12 @@ function App() {
     const chat = Reactions.create([], { owner: group });
     router.navigate("/#/reactions/" + chat.$jazz.id);
   };
+
+  if (!me.$isLoaded) {
+    return (
+      <div className="flex-1 flex justify-center items-center">Loading...</div>
+    );
+  }
 
   return (
     <>

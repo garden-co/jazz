@@ -1,6 +1,7 @@
 import { cojsonInternals } from "cojson";
 import { assert, beforeEach, describe, expect, test } from "vitest";
 import {
+  assertLoaded,
   setupJazzTestSync,
   createJazzTestAccount,
   runWithoutActiveAccount,
@@ -68,7 +69,7 @@ describe("Creating and finding unique CoMaps", async () => {
       { identifier: sourceData.identifier },
       workspace.$jazz.id,
     );
-    if (!activeEvent) {
+    if (!activeEvent.$isLoaded) {
       activeEvent = Event.create(
         {
           title: sourceData.title,
@@ -159,7 +160,7 @@ describe("Creating and finding unique CoMaps", async () => {
       external_id: sourceData._id,
     });
 
-    assert(activeEvent);
+    assertLoaded(activeEvent);
 
     expect(activeEvent.$jazz.owner).toEqual(account);
   });
@@ -245,8 +246,7 @@ describe("Creating and finding unique CoMaps", async () => {
         },
       },
     });
-    assert(myOrg);
-    expect(myOrg).not.toBeNull();
+    assertLoaded(myOrg);
     expect(myOrg.name).toEqual("My organisation");
     expect(myOrg.projects.length).toBe(1);
     expect(myOrg.projects[0]).toMatchObject({
@@ -270,8 +270,7 @@ describe("Creating and finding unique CoMaps", async () => {
       unique: { unique: "First project" },
       owner: workspace,
     });
-    assert(initialProject);
-    expect(initialProject).not.toBeNull();
+    assertLoaded(initialProject);
     expect(initialProject.name).toEqual("My project");
 
     const myOrg = await Organisation.upsertUnique({
@@ -287,8 +286,7 @@ describe("Creating and finding unique CoMaps", async () => {
         },
       },
     });
-    assert(myOrg);
-    expect(myOrg).not.toBeNull();
+    assertLoaded(myOrg);
     expect(myOrg.name).toEqual("My organisation");
     expect(myOrg.projects.length).toBe(1);
     expect(myOrg.projects.at(0)?.name).toEqual("My project");
@@ -301,8 +299,7 @@ describe("Creating and finding unique CoMaps", async () => {
       owner: workspace,
     });
 
-    assert(updatedProject);
-    expect(updatedProject).not.toBeNull();
+    assertLoaded(updatedProject);
     expect(updatedProject).toEqual(initialProject);
     expect(updatedProject.name).toEqual("My updated project");
     expect(myOrg.projects.length).toBe(1);
@@ -327,8 +324,7 @@ describe("Creating and finding unique CoMaps", async () => {
       unique: { unique: "First project" },
       owner: publicAccess,
     });
-    assert(initialProject);
-    expect(initialProject).not.toBeNull();
+    assertLoaded(initialProject);
     expect(initialProject.name).toEqual("My project");
 
     const fullProjectList = co
@@ -344,12 +340,12 @@ describe("Creating and finding unique CoMaps", async () => {
       .load(fullProjectList.$jazz.id, {
         loadAs: account,
       });
-    assert(shallowProjectList);
+    assertLoaded(shallowProjectList);
 
     const publicAccessAsNewAccount = await Group.load(publicAccess.$jazz.id, {
       loadAs: account,
     });
-    assert(publicAccessAsNewAccount);
+    assertLoaded(publicAccessAsNewAccount);
 
     const updatedOrg = await Organisation.upsertUnique({
       value: {
@@ -365,7 +361,7 @@ describe("Creating and finding unique CoMaps", async () => {
       },
     });
 
-    assert(updatedOrg);
+    assertLoaded(updatedOrg);
 
     expect(updatedOrg.projects.$jazz.id).toEqual(fullProjectList.$jazz.id);
     expect(updatedOrg.projects.length).toBe(1);
@@ -390,7 +386,7 @@ describe("Creating and finding unique CoMaps", async () => {
       unique: { unique: "First project" },
       owner: publicAccess,
     });
-    assert(initialProject);
+    assertLoaded(initialProject);
 
     const myOrg = await Organisation.upsertUnique({
       value: {
@@ -405,7 +401,7 @@ describe("Creating and finding unique CoMaps", async () => {
         },
       },
     });
-    assert(myOrg);
+    assertLoaded(myOrg);
 
     const fullProjectList = co
       .list(Project)
@@ -420,12 +416,12 @@ describe("Creating and finding unique CoMaps", async () => {
       .load(fullProjectList.$jazz.id, {
         loadAs: account,
       });
-    assert(shallowProjectList);
+    assertLoaded(shallowProjectList);
 
     const publicAccessAsNewAccount = await Group.load(publicAccess.$jazz.id, {
       loadAs: account,
     });
-    assert(publicAccessAsNewAccount);
+    assertLoaded(publicAccessAsNewAccount);
 
     const updatedOrg = await Organisation.upsertUnique({
       value: {
@@ -441,7 +437,7 @@ describe("Creating and finding unique CoMaps", async () => {
       },
     });
 
-    assert(updatedOrg);
+    assertLoaded(updatedOrg);
 
     expect(updatedOrg.projects.$jazz.id).toEqual(fullProjectList.$jazz.id);
     expect(updatedOrg.projects.length).toBe(1);
@@ -467,7 +463,7 @@ describe("Creating and finding unique CoMaps", async () => {
     await Promise.all(promises);
 
     const result = await Project.loadUnique("concurrent", owner.$jazz.id);
-    assert(result);
+    assertLoaded(result);
 
     expect(result.name).toBe(`Project 2`);
   });

@@ -27,7 +27,7 @@ export class UserRepository extends JazzRepository {
 
     const emailIndex = await this.loadEmailIndex(userEmail);
 
-    if (emailIndex?.user) {
+    if (emailIndex.$isLoaded && emailIndex.user) {
       throw new Error("Email already exists");
     }
 
@@ -67,6 +67,10 @@ export class UserRepository extends JazzRepository {
 
   private async findByEmail(email: string): Promise<TableItem[]> {
     const emailIndex = await this.loadEmailIndex(email);
+
+    if (!emailIndex.$isLoaded) {
+      return [];
+    }
 
     const user = emailIndex?.user;
 

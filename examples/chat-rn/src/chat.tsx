@@ -1,6 +1,12 @@
 import Clipboard from "@react-native-clipboard/clipboard";
-import { CoPlainText, Group, ID, Loaded, Profile } from "jazz-tools";
-import { useAccount, useCoState } from "jazz-tools/react-native";
+import {
+  CoPlainText,
+  Group,
+  ID,
+  LastAndAllCoMapEdits,
+  Loaded,
+} from "jazz-tools";
+import { useAccount, useCoState, useLogOut } from "jazz-tools/react-native";
 import { useEffect, useState } from "react";
 import {
   Button,
@@ -16,12 +22,15 @@ import {
 import { Chat, Message } from "./schema";
 
 export function ChatScreen({ navigation }: { navigation: any }) {
-  const { me, logOut } = useAccount();
+  const me = useAccount();
+  const logOut = useLogOut();
   const [chatId, setChatId] = useState<string>();
   const [chatIdInput, setChatIdInput] = useState<string>();
-  const loadedChat = useCoState(Chat, chatId, { resolve: { $each: true } });
+  const loadedChat = useCoState(Chat, chatId, {
+    resolve: { $each: { text: true } },
+  });
   const [message, setMessage] = useState("");
-  const profile = useCoState(Profile, me?.$jazz.refs.profile?.id, {});
+  const profile = me.$isLoaded ? me.profile : undefined;
 
   function handleLogOut() {
     setChatId(undefined);
@@ -50,6 +59,7 @@ export function ChatScreen({ navigation }: { navigation: any }) {
   }, [navigation, loadedChat]);
 
   const createChat = () => {
+    if (!me.$isLoaded) return;
     const group = Group.create({ owner: me });
     group.addMember("everyone", "writer");
     const chat = Chat.create([], { owner: group });
@@ -58,14 +68,14 @@ export function ChatScreen({ navigation }: { navigation: any }) {
 
   const joinChat = () => {
     if (chatIdInput) {
-      setChatId(chatIdInput as ID<Chat>);
+      setChatId(chatIdInput as ID<typeof Chat>);
     } else {
       console.warn("Error: Chat ID cannot be empty.");
     }
   };
 
   const sendMessage = () => {
-    if (!loadedChat) return;
+    if (!loadedChat.$isLoaded) return;
     if (message.trim()) {
       loadedChat.$jazz.push(
         Message.create(
@@ -97,7 +107,7 @@ export function ChatScreen({ navigation }: { navigation: any }) {
               isMe ? styles.textRight : styles.textLeft,
             ]}
           >
-            {item?.$jazz.getEdits()?.text?.by?.profile?.name}
+            {getEditorName(item?.$jazz.getEdits()?.text)}
           </Text>
         ) : null}
         <View style={styles.messageContent}>
@@ -127,14 +137,14 @@ export function ChatScreen({ navigation }: { navigation: any }) {
 
   return (
     <SafeAreaView style={styles.container}>
-      {!loadedChat ? (
+      {!loadedChat.$isLoaded ? (
         <View style={styles.welcomeContainer}>
           <Text style={styles.usernameLabel}>Username</Text>
           <TextInput
             style={styles.usernameInput}
-            value={profile?.name ?? ""}
+            value={profile?.$isLoaded ? profile.name : ""}
             onChangeText={(value) => {
-              if (profile) {
+              if (profile?.$isLoaded) {
                 profile.$jazz.set("name", value);
               }
             }}
@@ -202,6 +212,15 @@ export function ChatScreen({ navigation }: { navigation: any }) {
       )}
     </SafeAreaView>
   );
+}
+
+function getEditorName(
+  edit?: LastAndAllCoMapEdits<CoPlainText>,
+): string | undefined {
+  if (!edit?.by?.profile || !edit.by.profile.$isLoaded) {
+    return;
+  }
+  return edit.by.profile.name;
 }
 
 const styles = StyleSheet.create({

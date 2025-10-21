@@ -12,9 +12,12 @@
   });
 
 
-  const keys = $derived(Object.keys(me.current?.root.people.$jazz.refs ?? {}));
+  const keys = $derived(Object.keys(me.current.$isLoaded ? me.current.root.people.$jazz.refs : {}));
   let currentKey = $state("");
-  const currentListId = $derived(me.current?.root.people.$jazz.refs[currentKey]?.id ?? null);
+  const currentListId = $derived(me.current.$isLoaded
+    ? me.current.root.people.$jazz.refs[currentKey]?.id
+    : null
+  );
 
 
   const list = new CoState(People, () => currentListId, {
@@ -27,7 +30,10 @@
 
   let filter = $state<string>('');
 
-  const data = $derived(list.current?.filter(item => item.name.toLowerCase().includes(filter.toLowerCase())) ?? []);
+  const data = $derived(list.current.$isLoaded
+    ? list.current.filter(item => item.name.toLowerCase().includes(filter.toLowerCase()))
+    : []
+  );
 </script>
 
 <label>

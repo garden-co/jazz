@@ -23,7 +23,7 @@ interface MemberAccessModalProps {
 export function MemberAccessModal(props: MemberAccessModalProps) {
   const group = useCoState(Group, props.group.$jazz.id);
 
-  if (!group) return null;
+  if (!group.$isLoaded) return null;
 
   // Get all members from the group
   const members = group.members.map((m) => m.account);
@@ -129,7 +129,11 @@ export function MemberAccessModal(props: MemberAccessModalProps) {
                       />
                       <div className="flex-1">
                         <p className="font-medium text-gray-900">
-                          {isCurrentUser ? "You" : member.profile?.name}
+                          {isCurrentUser
+                            ? "You"
+                            : member.profile.$isLoaded
+                              ? member.profile.name
+                              : "Loading..."}
                         </p>
                         <div className="flex items-center gap-2 mt-1">
                           {getRoleIcon(currentRole)}

@@ -8,7 +8,7 @@ import {
   co,
 } from "../internal.js";
 import { createJazzTestAccount, setupJazzTestSync } from "../testing.js";
-import { setupTwoNodes, waitFor } from "./utils.js";
+import { assertLoaded, setupTwoNodes, waitFor } from "./utils.js";
 
 let me: ControlledAccount;
 
@@ -508,7 +508,7 @@ describe("CoVector loading & availability", async () => {
       loadAs: alice,
     });
 
-    assert(loadedVector);
+    assertLoaded(loadedVector);
     expect(loadedVector.length).toBe(3);
     expect(loadedVector[0]).toBe(9);
     expect(loadedVector[1]).toBe(8);
@@ -541,7 +541,7 @@ describe("CoVector loading & availability", async () => {
       loadAs: alice,
     });
 
-    assert(loadedVector);
+    assertLoaded(loadedVector);
     expect(loadedVector).toBeInstanceOf(CoVector);
     expect(loadedVector.length).toBe(elementsForKb(kb));
     expect(loadedVector.every((item) => item === 0.5)).toBe(true);
@@ -696,14 +696,16 @@ describe("CoVector in subscription", async () => {
 
         expect(updatesCallback).toHaveBeenCalledTimes(1);
 
-        expect(updates[0]?.[0]?.content).toEqual(
-          "Call GET to retrieve document",
-        );
-        expect(updates[0]?.[1]?.content).toEqual(
+        assert(updates[0]?.[0]);
+        assertLoaded(updates[0][0]);
+        assert(updates[0]?.[1]);
+        assertLoaded(updates[0][1]);
+        expect(updates[0][0].content).toEqual("Call GET to retrieve document");
+        expect(updates[0][1].content).toEqual(
           "Call POST to create a new document",
         );
-        expect(updates[0]?.[0]?.embedding?.toString()).toBe("1,2,3");
-        expect(updates[0]?.[1]?.embedding?.toString()).toBe("4,5,6");
+        expect(updates[0][0].embedding?.toString()).toBe("1,2,3");
+        expect(updates[0][1].embedding?.toString()).toBe("4,5,6");
 
         // Update the second document's embedding
         docs[1]!.$jazz.set(
@@ -713,8 +715,12 @@ describe("CoVector in subscription", async () => {
 
         await waitFor(() => expect(updatesCallback).toHaveBeenCalledTimes(2));
 
-        expect(updates[1]?.[0]?.embedding?.toString()).toBe("1,2,3");
-        expect(updates[1]?.[1]?.embedding?.toString()).toBe("7,8,9");
+        assert(updates[1]?.[0]);
+        assertLoaded(updates[1][0]);
+        assert(updates[1]?.[1]);
+        assertLoaded(updates[1][1]);
+        expect(updates[1][0].embedding?.toString()).toBe("1,2,3");
+        expect(updates[1][1].embedding?.toString()).toBe("7,8,9");
 
         expect(updatesCallback).toHaveBeenCalledTimes(2);
       });
@@ -838,8 +844,12 @@ describe("CoVector in subscription", async () => {
         await waitFor(() => expect(updatesCallback).toHaveBeenCalled());
 
         await waitFor(() => {
-          expect(updates[0]?.[0]?.embedding?.toString()).toBe("1,2,3");
-          expect(updates[0]?.[1]?.embedding?.toString()).toBe("4,5,6");
+          assert(updates[0]?.[0]);
+          assertLoaded(updates[0][0]);
+          assert(updates[0]?.[1]);
+          assertLoaded(updates[0][1]);
+          expect(updates[0][0].embedding?.toString()).toBe("1,2,3");
+          expect(updates[0][1].embedding?.toString()).toBe("4,5,6");
         });
 
         // Update the second document's embedding
@@ -850,8 +860,12 @@ describe("CoVector in subscription", async () => {
 
         await waitFor(() => expect(updatesCallback).toHaveBeenCalledTimes(7));
 
-        expect(updates[1]?.[0]?.embedding?.toString()).toBe("1,2,3");
-        expect(updates[1]?.[1]?.embedding?.toString()).toBe("7,8,9");
+        assert(updates[1]?.[0]);
+        assertLoaded(updates[1][0]);
+        assert(updates[1]?.[1]);
+        assertLoaded(updates[1][1]);
+        expect(updates[1][0].embedding?.toString()).toBe("1,2,3");
+        expect(updates[1][1].embedding?.toString()).toBe("7,8,9");
 
         expect(updatesCallback).toHaveBeenCalledTimes(7);
       });

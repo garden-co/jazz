@@ -11,11 +11,11 @@ export const { Provider: AccountProvider, useSelector: useAccountSelector } =
       },
       playlists: {
         $each: {
-          $onError: null,
+          $onError: "catch",
         },
       },
-      activeTrack: { $onError: null },
-      activePlaylist: { $onError: null },
+      activeTrack: { $onError: "catch" },
+      activePlaylist: { $onError: "catch" },
     },
     profile: true,
   });

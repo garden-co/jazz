@@ -1,9 +1,9 @@
-import { Loaded } from "jazz-tools";
+import { Loaded, CoFeedEntry } from "jazz-tools";
 import { useCoState } from "jazz-tools/react";
 import { ReactionType, ReactionTypes, Reactions } from "./schema.ts";
 
 const reactionEmojiMap: {
-  [reaction in (typeof ReactionTypes)[number]]: string;
+  [reaction in ReactionType]: string;
 } = {
   aww: "😍",
   love: "❤️",
@@ -16,7 +16,7 @@ const reactionEmojiMap: {
 export function ReactionsScreen(props: { id: string }) {
   const reactions = useCoState(Reactions, props.id);
 
-  if (!reactions) return;
+  if (!reactions.$isLoaded) return;
 
   return (
     <>
@@ -65,8 +65,16 @@ const ReactionOverview = ({
     {Object.values(reactions.perAccount).map((reaction) => (
       <div key={reaction.by?.$jazz.id} className="reaction-row">
         {reactionEmojiMap[reaction.value as ReactionType]}{" "}
-        {reaction.by?.profile?.name}
+        {getReactorName(reaction)}
       </div>
     ))}
   </>
 );
+
+function getReactorName(
+  reaction: CoFeedEntry<ReactionType>,
+): string | undefined {
+  const maybeReactor = reaction.by?.profile;
+  if (!maybeReactor || !maybeReactor.$isLoaded) return;
+  return maybeReactor.name;
+}

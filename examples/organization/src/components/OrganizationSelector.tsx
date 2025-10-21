@@ -5,8 +5,8 @@ import { useNavigate, useParams } from "react-router";
 import { JazzAccount } from "../schema.ts";
 
 export function OrganizationSelector({ className }: { className?: string }) {
-  const { me } = useAccount(JazzAccount, {
-    resolve: { root: { organizations: { $each: { $onError: null } } } },
+  const me = useAccount(JazzAccount, {
+    resolve: { root: { organizations: { $each: { $onError: "catch" } } } },
   });
 
   const navigate = useNavigate();
@@ -34,6 +34,8 @@ export function OrganizationSelector({ className }: { className?: string }) {
     navigate(`/organizations/${value}`);
   };
 
+  const organizations = me.$isLoaded ? me.root.organizations : null;
+
   return (
     <div className={[className, "flex items-center gap-3"].join(" ")}>
       <label htmlFor="organization" className="md:sr-only">
@@ -46,8 +48,8 @@ export function OrganizationSelector({ className }: { className?: string }) {
         onChange={onSelectOrganization}
         className="rounded-md shadow-sm dark:bg-transparent w-full"
       >
-        {me?.root.organizations.map((organization) => {
-          if (!organization) {
+        {organizations?.map((organization) => {
+          if (!organization.$isLoaded) {
             return null;
           }
 

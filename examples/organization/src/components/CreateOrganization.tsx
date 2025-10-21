@@ -12,13 +12,13 @@ import { Errors } from "./Errors.tsx";
 import { OrganizationForm } from "./OrganizationForm.tsx";
 
 export function CreateOrganization() {
-  const { me } = useAccount(JazzAccount, {
+  const me = useAccount(JazzAccount, {
     resolve: { root: { draftOrganization: true, organizations: true } },
   });
   const [errors, setErrors] = useState<string[]>([]);
   const navigate = useNavigate();
 
-  if (!me?.root?.organizations) return;
+  if (!me.$isLoaded) return;
 
   const onSave = (draft: Loaded<typeof DraftOrganization>) => {
     const validation = validateDraftOrganization(draft);
@@ -64,7 +64,7 @@ function CreateOrganizationForm({
 }) {
   const draft = useCoState(DraftOrganization, id);
 
-  if (!draft) return;
+  if (!draft.$isLoaded) return;
 
   const addOrganization = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();

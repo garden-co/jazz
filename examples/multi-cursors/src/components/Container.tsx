@@ -1,5 +1,5 @@
 import { useAccount, useCoState } from "jazz-tools/react";
-import { CursorFeed } from "../schema";
+import { CursorAccount, CursorFeed } from "../schema";
 import { getColor } from "../utils/getColor.ts";
 import { getName } from "../utils/getName";
 import Canvas from "./Canvas";
@@ -34,22 +34,27 @@ function Avatar({
 
 /** A higher order component that wraps the canvas. */
 function Container({ cursorFeedID }: { cursorFeedID: string }) {
-  const { me } = useAccount();
+  const me = useAccount(CursorAccount, { resolve: { profile: true } });
   const cursors = useCoState(CursorFeed, cursorFeedID, { resolve: true });
 
   const connected = useSyncConnectionStatus();
 
-  const remoteCursors = Object.values(cursors?.perSession ?? {})
+  const remoteCursors = Object.values(
+    cursors.$isLoaded ? cursors.perSession : {},
+  )
     .map((entry) => ({
       entry,
       position: entry.value.position,
       color: getColor(entry.tx.sessionID),
-      name: getName(entry.by?.profile?.name, entry.tx.sessionID),
+      name: getName(
+        entry.by?.profile.$isLoaded ? entry.by.profile.name : undefined,
+        entry.tx.sessionID,
+      ),
       age: new Date().getTime() - new Date(entry.madeAt).getTime(),
       active:
         !OLD_CURSOR_AGE_SECONDS ||
         entry.madeAt >= new Date(Date.now() - 1000 * OLD_CURSOR_AGE_SECONDS),
-      isMe: entry.tx.sessionID === me?.$jazz.sessionID,
+      isMe: me.$isLoaded && entry.tx.sessionID === me.$jazz.sessionID,
     }))
     .sort((a, b) => {
       return b.entry.madeAt.getTime() - a.entry.madeAt.getTime();
@@ -80,7 +85,7 @@ function Container({ cursorFeedID }: { cursorFeedID: string }) {
 
       <Canvas
         onCursorMove={(move) => {
-          if (!(cursors && me)) return;
+          if (!cursors.$isLoaded || !me.$isLoaded) return;
 
           cursors.$jazz.push({
             position: {
@@ -90,7 +95,10 @@ function Container({ cursorFeedID }: { cursorFeedID: string }) {
           });
         }}
         remoteCursors={remoteCursors}
-        name={getName(me?.profile?.name, me?.$jazz.sessionID)}
+        name={getName(
+          me.$isLoaded ? me.profile.name : undefined,
+          me.$isLoaded ? me.$jazz.sessionID : undefined,
+        )}
       />
     </>
   );
