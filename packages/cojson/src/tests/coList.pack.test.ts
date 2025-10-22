@@ -110,9 +110,9 @@ describe("CoListPackImplementation", () => {
 
       const result = packer.packChanges(changes);
 
-      // Single operation still gets packed format
+      // Single operation doesn't get packed
       expect(result.length).toBe(1);
-      expect((result[0] as any).compacted).toBe(true);
+      expect((result[0] as any).compacted).toBeUndefined();
     });
 
     test("should handle empty array", () => {

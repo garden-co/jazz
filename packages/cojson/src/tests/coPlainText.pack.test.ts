@@ -137,11 +137,10 @@ describe("CoPlainTextPackImplementation", () => {
 
       const result = packer.packChanges(changes);
 
-      // Single operation still gets packed format, but with empty string
-      expect(result.length).toBe(2);
-      expect((result[0] as any).compacted).toBe(true);
+      // Single operation doesn't get packed
+      expect(result.length).toBe(1);
+      expect((result[0] as any).compacted).toBeUndefined();
       expect((result[0] as any).value).toBe("a");
-      expect(result[1]).toBe("");
     });
 
     test("should handle empty array", () => {

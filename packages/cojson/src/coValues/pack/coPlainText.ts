@@ -17,6 +17,10 @@ export class CoPlainTextPackImplementation
   packChanges(
     changes: ListOpPayload<string>[],
   ): PackedChangesCoPlainText | ListOpPayload<string>[] {
+    if (changes.length === 0 || changes.length === 1) {
+      return changes as ListOpPayload<string>[];
+    }
+
     const firstElement = changes[0];
 
     if (firstElement?.op !== "app") {
@@ -49,6 +53,10 @@ export class CoPlainTextPackImplementation
   unpackChanges(
     changes: PackedChangesCoPlainText | ListOpPayload<string>[],
   ): ListOpPayload<string>[] {
+    if (changes.length === 0 || changes.length === 1) {
+      return changes as ListOpPayload<string>[];
+    }
+
     // Check if the first element is compacted
     const firstElement = changes[0] as AppOpPayload<string> & {
       compacted: true;

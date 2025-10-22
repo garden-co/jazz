@@ -28,6 +28,10 @@ export class CoListPackImplementation<Item extends JsonValue>
   packChanges(
     changes: ListOpPayload<Item>[],
   ): PackedChanges<Item> | ListOpPayload<Item>[] {
+    if (changes.length === 0 || changes.length === 1) {
+      return changes;
+    }
+
     const firstElement = changes[0];
 
     if (firstElement?.op !== "app") {
@@ -59,6 +63,10 @@ export class CoListPackImplementation<Item extends JsonValue>
   unpackChanges(
     changes: PackedChanges<Item> | ListOpPayload<Item>[],
   ): ListOpPayload<Item>[] {
+    if (changes.length === 0 || changes.length === 1) {
+      return changes as ListOpPayload<Item>[];
+    }
+
     // Get the first element and the values
     const [firstElement, ...values] = changes as [
       AppOpPayload<Item> & { compacted: true },
