@@ -554,7 +554,10 @@ export function runTransform(projectPath: string) {
     if (hasSupportedExtension) {
       project.addSourceFilesAtPaths(projectPath);
     } else {
-      project.addSourceFilesAtPaths(`${projectPath}/**/*.{ts,tsx}`);
+      project.addSourceFilesAtPaths([
+        `${projectPath}/**/*.{ts,tsx}`,
+        `!${projectPath}/**/node_modules/**`,
+      ]);
     }
   }
 
@@ -566,6 +569,7 @@ export function runTransform(projectPath: string) {
 
   sourceFiles.forEach((sourceFile) => {
     try {
+      console.log(`Transforming: ${sourceFile.getFilePath()}`);
       const originalText = sourceFile.getFullText();
       const transformedText = transformFile(sourceFile);
 
