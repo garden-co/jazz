@@ -214,6 +214,19 @@ function HookWithSchemaNoOptions() {
   return <div>{account?.profile?.name}</div>;
 }
 
+// Nullability check on MaybeLoaded value
+async function MaybeLoadedCoValueIfCheck() {
+  const account = await Account.load("account-id", {
+    resolve: { profile: true },
+  });
+
+  if (!account) {
+    return "Loading...";
+  }
+
+  return account.profile.name;
+}
+
 export {
   ExampleOnErrorNull,
   ExampleCoState,
@@ -229,4 +242,5 @@ export {
   HookWithExistingSelector,
   HookWithNoOptions,
   HookWithSchemaNoOptions,
+  MaybeLoadedCoValueIfCheck,
 };
