@@ -110,6 +110,9 @@ export class RawCoPlainText<
     idx: number,
     text: string,
     privacy: "private" | "trusting" = "private",
+    options?: {
+      pack?: boolean;
+    },
   ) {
     const graphemes = Array.from(splitGraphemes(text));
 
@@ -122,11 +125,11 @@ export class RawCoPlainText<
       }
 
       if (graphemes.length > 1) {
-        this.appendChars(graphemes.slice(1), 0, privacy);
+        this.appendChars(graphemes.slice(1), 0, privacy, options);
       }
     } else {
       // For other insertions, append after the previous character
-      this.appendChars(graphemes, idx - 1, privacy);
+      this.appendChars(graphemes, idx - 1, privacy, options);
     }
   }
 
@@ -134,10 +137,13 @@ export class RawCoPlainText<
     text: string[],
     position: number,
     privacy: "private" | "trusting" = "private",
+    options?: {
+      pack?: boolean;
+    },
   ) {
     const chunks = splitIntoChunks(text);
     for (const chunk of chunks) {
-      this.appendItems(chunk, position, privacy);
+      this.appendItems(chunk, position, privacy, options);
       position += chunk.length;
     }
   }
@@ -154,13 +160,16 @@ export class RawCoPlainText<
     idx: number,
     text: string,
     privacy: "private" | "trusting" = "private",
+    options?: {
+      pack?: boolean;
+    },
   ) {
     const graphemes = Array.from(splitGraphemes(text));
 
     if (idx >= this.entries().length) {
-      this.appendChars(graphemes, idx - 1, privacy);
+      this.appendChars(graphemes, idx - 1, privacy, options);
     } else {
-      this.appendChars(graphemes, idx, privacy);
+      this.appendChars(graphemes, idx, privacy, options);
     }
   }
 

@@ -581,6 +581,9 @@ export class RawCoList<
     items: Item[],
     after?: number,
     privacy: "private" | "trusting" = "private",
+    options?: {
+      pack?: boolean;
+    },
   ) {
     const entries = this.entries();
     after =
@@ -615,9 +618,14 @@ export class RawCoList<
       changes.reverse();
     }
 
-    const changesCompacted = this.packChanges(changes as ListOpPayload<Item>[]);
-
-    this.core.makeTransaction(changesCompacted, privacy);
+    if (options?.pack) {
+      const changesCompacted = this.packChanges(
+        changes as ListOpPayload<Item>[],
+      );
+      this.core.makeTransaction(changesCompacted, privacy);
+    } else {
+      this.core.makeTransaction(changes, privacy);
+    }
     this.processNewTransactions();
   }
 
