@@ -26,6 +26,7 @@
     "next-env.d.ts",
     "**/*.ts",
     "**/*.tsx",
+    "**/*.svelte",
     ".next/types/**/*.ts",
     "mdx.d.ts",
     "lib/docNavigationItems.js"
