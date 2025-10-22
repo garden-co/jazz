@@ -10,17 +10,26 @@ import { Transaction } from "../coValueCore/verifiedState.js";
 
 export type OpID = TransactionID & { changeIdx: number };
 
+export type AppOpPayload<T extends JsonValue> = {
+  op: "app";
+  value: T;
+  after: OpID | "start";
+};
+
+export type PreOpPayload<T extends JsonValue> = {
+  op: "pre";
+  value: T;
+  before: OpID | "end";
+};
+
 export type InsertionOpPayload<T extends JsonValue> =
-  | {
-      op: "pre";
-      value: T;
-      before: OpID | "end";
-    }
-  | {
-      op: "app";
-      value: T;
-      after: OpID | "start";
-    };
+  | AppOpPayload<T>
+  | PreOpPayload<T>;
+
+export type PackedChanges<T extends JsonValue> = [
+  AppOpPayload<T> & { compacted: true },
+  ...T[],
+];
 
 export type DeletionOpPayload = {
   op: "del";
@@ -190,6 +199,56 @@ export class RawCoList<
     list.push(value);
   }
 
+  protected packChanges(
+    changes: ListOpPayload<Item>[],
+  ): PackedChanges<Item> | ListOpPayload<Item>[] {
+    const firstElement = changes[0];
+
+    if (firstElement?.op !== "app") {
+      return changes;
+    }
+
+    for (const change of changes) {
+      if (change.op !== "app" || change.after !== firstElement.after) {
+        return changes;
+      }
+    }
+
+    const firstElementCompacted = firstElement as AppOpPayload<Item> & {
+      compacted: true;
+    };
+    firstElementCompacted.compacted = true;
+
+    return [
+      firstElementCompacted,
+      ...(changes as AppOpPayload<Item>[])
+        .slice(1)
+        .map((change) => change.value),
+    ];
+  }
+
+  protected unpackChanges(
+    changes: PackedChanges<Item> | ListOpPayload<Item>[],
+  ): ListOpPayload<Item>[] {
+    const [firstElement, ...values] = changes as [
+      AppOpPayload<Item> & { compacted: true },
+      ...Item[],
+    ];
+
+    if (!firstElement?.compacted) {
+      return changes as ListOpPayload<Item>[];
+    }
+
+    return [
+      firstElement as AppOpPayload<Item>,
+      ...values.map((value) => ({
+        op: "app" as const,
+        value,
+        after: firstElement.after as OpID | "start",
+      })),
+    ];
+  }
+
   processNewTransactions() {
     const transactions = this.core.getValidSortedTransactions({
       ignorePrivateTransactions: false,
@@ -211,9 +270,11 @@ export class RawCoList<
         madeAt,
       );
 
-      for (const [changeIdx, changeUntyped] of changes.entries()) {
-        const change = changeUntyped as ListOpPayload<Item>;
+      const changesDecompacted = this.unpackChanges(
+        changes as PackedChanges<Item> | ListOpPayload<Item>[],
+      );
 
+      for (const [changeIdx, change] of changesDecompacted.entries()) {
         const opID = {
           sessionID: txID.sessionID,
           txIndex: txID.txIndex,
@@ -554,7 +615,9 @@ export class RawCoList<
       changes.reverse();
     }
 
-    this.core.makeTransaction(changes, privacy);
+    const changesCompacted = this.packChanges(changes as ListOpPayload<Item>[]);
+
+    this.core.makeTransaction(changesCompacted, privacy);
     this.processNewTransactions();
   }
 
