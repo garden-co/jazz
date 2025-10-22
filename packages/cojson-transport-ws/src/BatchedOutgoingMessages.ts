@@ -1,4 +1,4 @@
-import { ValueType, metrics } from "@opentelemetry/api";
+import { createNoopMeter, type Meter, ValueType } from "@opentelemetry/api";
 import type { DisconnectedError, SyncMessage } from "cojson";
 import type { Peer } from "cojson";
 import {
@@ -27,13 +27,7 @@ export class BatchedOutgoingMessages
   private queue: PriorityBasedMessageQueue;
   private processing = false;
   private closed = false;
-  private counter = metrics
-    .getMeter("cojson-transport-ws")
-    .createCounter("jazz.usage.egress", {
-      description: "Total egress bytes",
-      unit: "bytes",
-      valueType: ValueType.INT,
-    });
+  private counter;
 
   constructor(
     private websocket: AnyWebSocket,
@@ -43,7 +37,17 @@ export class BatchedOutgoingMessages
      * Additional key-value pair of attributes to add to the egress metric.
      */
     private meta?: Record<string, string | number>,
+    meter?: Meter,
   ) {
+    this.counter = (meter ?? createNoopMeter()).createCounter(
+      "jazz.usage.egress",
+      {
+        description: "Total egress bytes",
+        unit: "bytes",
+        valueType: ValueType.INT,
+      },
+    );
+
     this.queue = new PriorityBasedMessageQueue(
       CO_VALUE_PRIORITY.HIGH,
       "outgoing",

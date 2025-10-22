@@ -35,7 +35,7 @@ export class SessionMap {
   sessions: Map<SessionID, SessionLog> = new Map();
 
   // Known state related properies, mutated when adding transactions to the session map
-  knownState: CoValueKnownState = { id: this.id, header: true, sessions: {} };
+  knownState: CoValueKnownState;
   knownStateWithStreaming: CoValueKnownState | undefined;
   streamingKnownState?: KnownStateSessions;
 
@@ -44,6 +44,7 @@ export class SessionMap {
     private readonly crypto: CryptoProvider,
     streamingKnownState?: KnownStateSessions,
   ) {
+    this.knownState = { id: this.id, header: true, sessions: {} };
     if (streamingKnownState) {
       this.streamingKnownState = { ...streamingKnownState };
       this.knownStateWithStreaming = {
