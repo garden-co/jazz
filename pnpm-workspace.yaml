@@ -6,6 +6,7 @@ packages:
   - 'crates/*'
   - 'crates/cojson-core-napi/npm/*'
   - 'bench'
+  - 'vibecheck'
 
 minimumReleaseAge: 1440 # 24 hours
 catalogs:
