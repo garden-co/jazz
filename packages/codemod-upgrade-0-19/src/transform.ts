@@ -7,6 +7,8 @@ import {
   ImportDeclaration,
   VariableDeclaration,
   Node,
+  Type,
+  Symbol,
 } from "ts-morph";
 import fs from "node:fs";
 
@@ -18,6 +20,8 @@ export function transformFile(sourceFile: SourceFile): string {
   renameWithSelectorHooks(sourceFile);
 
   migrateLoadingStateHandling(sourceFile);
+
+  migrateMaybeLoadedIfStatements(sourceFile);
 
   return sourceFile.getFullText();
 }
@@ -464,6 +468,68 @@ function migrateLoadingStateHandling(sourceFile: SourceFile) {
         });
       }
     }
+  });
+}
+
+/**
+ * Migrates if statements that check MaybeLoaded values directly
+ * Transforms: if (account) -> if (account.$isLoaded)
+ */
+function migrateMaybeLoadedIfStatements(sourceFile: SourceFile) {
+  function isMaybeLoadedType(type: Type): boolean {
+    const properties = type.getProperties();
+    const propertyNames = properties.map((p: Symbol) => p.getName());
+    return (
+      propertyNames.includes("$isLoaded") && propertyNames.includes("$jazz")
+    );
+  }
+
+  const replacements: Array<{ node: Node; newText: string }> = [];
+
+  // Find if statements that check MaybeLoaded values
+  sourceFile.forEachDescendant((node) => {
+    if (Node.isIfStatement(node)) {
+      const expression = node.getExpression();
+
+      // Check for direct variable reference: if (account)
+      if (Node.isIdentifier(expression)) {
+        const varName = expression.getText();
+        const type = expression.getType();
+
+        if (isMaybeLoadedType(type)) {
+          // Replace 'account' with 'account.$isLoaded'
+          replacements.push({
+            node: expression,
+            newText: `${varName}.$isLoaded`,
+          });
+        }
+      }
+
+      // Check for negation: if (!account)
+      if (Node.isPrefixUnaryExpression(expression)) {
+        const operator = expression.getOperatorToken();
+        if (operator === SyntaxKind.ExclamationToken) {
+          const operand = expression.getOperand();
+          if (Node.isIdentifier(operand)) {
+            const varName = operand.getText();
+            const type = operand.getType();
+
+            if (isMaybeLoadedType(type)) {
+              // Replace 'account' in '!account' with 'account.$isLoaded'
+              replacements.push({
+                node: operand,
+                newText: `${varName}.$isLoaded`,
+              });
+            }
+          }
+        }
+      }
+    }
+  });
+
+  // Apply replacements in reverse order to avoid position shifts
+  replacements.reverse().forEach(({ node, newText }) => {
+    node.replaceWithText(newText);
   });
 }
 

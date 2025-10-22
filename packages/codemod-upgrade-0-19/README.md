@@ -40,6 +40,28 @@ The hooks are now polymorphic and support the selector pattern natively.
 
 Updates `useAccount` and `useCoState` hooks to convert the new explicit loading states into `null | undefined`, maintaining backward compatibility in existing React components that use Jazz.
 
+### 5. **Migrates MaybeLoaded If Statements**
+
+The codemod automatically transforms `if` statements that directly check MaybeLoaded values:
+
+```typescript
+const account = await Account.load("account-id", {
+  resolve: { profile: true },
+});
+
+// Before
+if (!account) {
+  return "Loading...";
+}
+
+// After
+if (!account.$isLoaded) {
+  return "Loading...";
+}
+```
+
+This uses TypeScript's type system to detect variables with the `MaybeLoaded<T>` type and adds the `.$isLoaded` property access. Note: This only works on files with valid TypeScript types (files with `@ts-nocheck` or type errors won't be transformed).
+
 ## Usage
 
 ### Running the Jazz 0.19 Codemod
