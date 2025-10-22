@@ -17,6 +17,18 @@ impl From<VerifyingKey> for SignerID {
     }
 }
 
+impl TryFrom<&SignerID> for VerifyingKey {
+    type Error = CoJsonCoreError;
+    fn try_from(val: &SignerID) -> Result<Self, Self::Error> {
+        let key_bytes = decode_z(&val.0)?;
+
+        key_bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| CoJsonCoreError::InvalidKeyLength(32, key_bytes.len()))
+    }
+}
+
 /// A secret signing key, encoded as "signerSecret_z" followed by base58-encoded private key bytes.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
