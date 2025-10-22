@@ -3,7 +3,7 @@ import { AvailableCoValueCore } from "../coValueCore/coValueCore.js";
 import { TRANSACTION_CONFIG } from "../config.js";
 import { JsonObject } from "../jsonValue.js";
 import { DeletionOpPayload, OpID, RawCoList } from "./coList.js";
-import { CoListPackImplementation } from "./pack/coList.js";
+import { CoPlainTextPackImplementation } from "./pack/coPlainText.js";
 
 export type StringifiedOpID = string & { __stringifiedOpID: true };
 
@@ -57,7 +57,7 @@ export class RawCoPlainText<
   >;
 
   constructor(core: AvailableCoValueCore) {
-    super(core, new CoListPackImplementation());
+    super(core, new CoPlainTextPackImplementation());
     this._cachedMapping = new WeakMap();
   }
 
