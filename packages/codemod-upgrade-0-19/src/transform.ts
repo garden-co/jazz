@@ -474,6 +474,7 @@ function migrateLoadingStateHandling(sourceFile: SourceFile) {
 /**
  * Migrates if statements that check MaybeLoaded values directly
  * Transforms: if (account) -> if (account.$isLoaded)
+ * Or: if (account) -> if (account?.$isLoaded) for optional types
  */
 function migrateMaybeLoadedIfStatements(sourceFile: SourceFile) {
   function isMaybeLoadedType(type: Type): boolean {
@@ -496,11 +497,12 @@ function migrateMaybeLoadedIfStatements(sourceFile: SourceFile) {
         const varName = expression.getText();
         const type = expression.getType();
 
-        if (isMaybeLoadedType(type)) {
-          // Replace 'account' with 'account.$isLoaded'
+        if (isMaybeLoadedType(type.getNonNullableType())) {
+          const accessor = type.isNullable() ? "?." : ".";
+          // Replace 'account' with 'account.$isLoaded' or 'account?.$isLoaded'
           replacements.push({
             node: expression,
-            newText: `${varName}.$isLoaded`,
+            newText: `${varName}${accessor}$isLoaded`,
           });
         }
       }
@@ -514,11 +516,12 @@ function migrateMaybeLoadedIfStatements(sourceFile: SourceFile) {
             const varName = operand.getText();
             const type = operand.getType();
 
-            if (isMaybeLoadedType(type)) {
-              // Replace 'account' in '!account' with 'account.$isLoaded'
+            if (isMaybeLoadedType(type.getNonNullableType())) {
+              const accessor = type.isNullable() ? "?." : ".";
+              // Replace 'account' in '!account' with 'account.$isLoaded' or 'account?.$isLoaded'
               replacements.push({
                 node: operand,
-                newText: `${varName}.$isLoaded`,
+                newText: `${varName}${accessor}$isLoaded`,
               });
             }
           }
@@ -540,10 +543,16 @@ export function runTransform(projectPath: string) {
     project = new Project({
       tsConfigFilePath: `${projectPath}/tsconfig.json`,
       skipFileDependencyResolution: true, // Skip resolving dependencies to save memory
+      compilerOptions: {
+        strictNullChecks: true,
+      },
     });
   } else {
     project = new Project({
       skipFileDependencyResolution: true, // Skip resolving dependencies to save memory
+      compilerOptions: {
+        strictNullChecks: true,
+      },
     });
 
     const supportedExtensions = [".ts", ".tsx"];

@@ -220,11 +220,32 @@ async function MaybeLoadedCoValueIfCheck() {
     resolve: { profile: true },
   });
 
+  // if (!account.$isLoaded)
   if (!account) {
     return "Loading...";
   }
 
   return account.profile.name;
+}
+
+// Nullability check on optional MaybeLoaded value
+async function OptionalMaybeLoadedCoValueIfCheck({
+  accountId,
+}: {
+  accountId?: string;
+}) {
+  const optionalAccount = accountId
+    ? await Account.load("account-id", {
+        resolve: { profile: true },
+      })
+    : undefined;
+
+  // if (!optionalAccount?.$isLoaded)
+  if (!optionalAccount) {
+    return "Loading...";
+  }
+
+  return optionalAccount.profile.name;
 }
 
 export {
@@ -243,4 +264,5 @@ export {
   HookWithNoOptions,
   HookWithSchemaNoOptions,
   MaybeLoadedCoValueIfCheck,
+  OptionalMaybeLoadedCoValueIfCheck,
 };
