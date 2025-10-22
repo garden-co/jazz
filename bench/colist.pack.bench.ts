@@ -53,7 +53,9 @@ describe("CoList - Pack ON vs Pack OFF comparison\n", () => {
 
     // Measure with pack enabled
     const listPack = group.createList();
-    listPack.appendItems(taskStrings10, undefined, "private", { pack: true });
+    listPack.appendItems(taskStrings10, undefined, "private", {
+      disablePacking: false,
+    });
     const contentPack =
       listPack.core.verified?.newContentSince(undefined) ?? [];
     const packedSize = measureContentSize(contentPack);
@@ -61,7 +63,7 @@ describe("CoList - Pack ON vs Pack OFF comparison\n", () => {
     // Measure with pack disabled
     const listNoPack = group.createList();
     listNoPack.appendItems(taskStrings10, undefined, "private", {
-      pack: false,
+      disablePacking: true,
     });
     const contentNoPack =
       listNoPack.core.verified?.newContentSince(undefined) ?? [];
@@ -75,7 +77,7 @@ describe("CoList - Pack ON vs Pack OFF comparison\n", () => {
         () => {
           const tempList = group.createList();
           tempList.appendItems(taskStrings10, undefined, "private", {
-            pack: true,
+            disablePacking: false,
           });
         },
         { iterations: 1000 },
@@ -86,7 +88,7 @@ describe("CoList - Pack ON vs Pack OFF comparison\n", () => {
         () => {
           const tempList = group.createList();
           tempList.appendItems(taskStrings10, undefined, "private", {
-            pack: false,
+            disablePacking: true,
           });
         },
         { iterations: 1000 },
@@ -125,7 +127,9 @@ describe("CoList - Pack ON vs Pack OFF comparison\n", () => {
 
     // Measure with pack enabled
     const listPack = group.createList();
-    listPack.appendItems(taskStrings50, undefined, "private", { pack: true });
+    listPack.appendItems(taskStrings50, undefined, "private", {
+      disablePacking: false,
+    });
     const contentPack =
       listPack.core.verified?.newContentSince(undefined) ?? [];
     const packedSize = measureContentSize(contentPack);
@@ -133,7 +137,7 @@ describe("CoList - Pack ON vs Pack OFF comparison\n", () => {
     // Measure with pack disabled
     const listNoPack = group.createList();
     listNoPack.appendItems(taskStrings50, undefined, "private", {
-      pack: false,
+      disablePacking: true,
     });
     const contentNoPack =
       listNoPack.core.verified?.newContentSince(undefined) ?? [];
@@ -147,7 +151,7 @@ describe("CoList - Pack ON vs Pack OFF comparison\n", () => {
         () => {
           const tempList = group.createList();
           tempList.appendItems(taskStrings50, undefined, "private", {
-            pack: true,
+            disablePacking: false,
           });
         },
         { iterations: 500 },
@@ -158,7 +162,7 @@ describe("CoList - Pack ON vs Pack OFF comparison\n", () => {
         () => {
           const tempList = group.createList();
           tempList.appendItems(taskStrings50, undefined, "private", {
-            pack: false,
+            disablePacking: true,
           });
         },
         { iterations: 500 },
@@ -197,7 +201,9 @@ describe("CoList - Pack ON vs Pack OFF comparison\n", () => {
 
     // Measure with pack enabled
     const listPack = group.createList();
-    listPack.appendItems(taskStrings100, undefined, "private", { pack: true });
+    listPack.appendItems(taskStrings100, undefined, "private", {
+      disablePacking: false,
+    });
     const contentPack =
       listPack.core.verified?.newContentSince(undefined) ?? [];
     const packedSize = measureContentSize(contentPack);
@@ -205,7 +211,7 @@ describe("CoList - Pack ON vs Pack OFF comparison\n", () => {
     // Measure with pack disabled
     const listNoPack = group.createList();
     listNoPack.appendItems(taskStrings100, undefined, "private", {
-      pack: false,
+      disablePacking: true,
     });
     const contentNoPack =
       listNoPack.core.verified?.newContentSince(undefined) ?? [];
@@ -219,7 +225,7 @@ describe("CoList - Pack ON vs Pack OFF comparison\n", () => {
         () => {
           const tempList = group.createList();
           tempList.appendItems(taskStrings100, undefined, "private", {
-            pack: true,
+            disablePacking: false,
           });
         },
         { iterations: 200 },
@@ -230,7 +236,7 @@ describe("CoList - Pack ON vs Pack OFF comparison\n", () => {
         () => {
           const tempList = group.createList();
           tempList.appendItems(taskStrings100, undefined, "private", {
-            pack: false,
+            disablePacking: true,
           });
         },
         { iterations: 200 },
@@ -279,14 +285,18 @@ describe("CoList - Pack comparison with different item sizes\n", () => {
 
     // Pack enabled
     const listPack = group.createList();
-    listPack.appendItems(smallItems, undefined, "private", { pack: true });
+    listPack.appendItems(smallItems, undefined, "private", {
+      disablePacking: false,
+    });
     const contentPack =
       listPack.core.verified?.newContentSince(undefined) ?? [];
     const packedSize = measureContentSize(contentPack);
 
     // Pack disabled
     const listNoPack = group.createList();
-    listNoPack.appendItems(smallItems, undefined, "private", { pack: false });
+    listNoPack.appendItems(smallItems, undefined, "private", {
+      disablePacking: true,
+    });
     const contentNoPack =
       listNoPack.core.verified?.newContentSince(undefined) ?? [];
     const noPackSize = measureContentSize(contentNoPack);
@@ -299,7 +309,7 @@ describe("CoList - Pack comparison with different item sizes\n", () => {
         () => {
           const tempList = group.createList();
           tempList.appendItems(smallItems, undefined, "private", {
-            pack: true,
+            disablePacking: false,
           });
         },
         { iterations: 500 },
@@ -310,7 +320,7 @@ describe("CoList - Pack comparison with different item sizes\n", () => {
         () => {
           const tempList = group.createList();
           tempList.appendItems(smallItems, undefined, "private", {
-            pack: false,
+            disablePacking: true,
           });
         },
         { iterations: 500 },
@@ -351,14 +361,18 @@ describe("CoList - Pack comparison with different item sizes\n", () => {
 
     // Pack enabled
     const listPack = group.createList();
-    listPack.appendItems(largeItems, undefined, "private", { pack: true });
+    listPack.appendItems(largeItems, undefined, "private", {
+      disablePacking: false,
+    });
     const contentPack =
       listPack.core.verified?.newContentSince(undefined) ?? [];
     const packedSize = measureContentSize(contentPack);
 
     // Pack disabled
     const listNoPack = group.createList();
-    listNoPack.appendItems(largeItems, undefined, "private", { pack: false });
+    listNoPack.appendItems(largeItems, undefined, "private", {
+      disablePacking: true,
+    });
     const contentNoPack =
       listNoPack.core.verified?.newContentSince(undefined) ?? [];
     const noPackSize = measureContentSize(contentNoPack);
@@ -371,7 +385,7 @@ describe("CoList - Pack comparison with different item sizes\n", () => {
         () => {
           const tempList = group.createList();
           tempList.appendItems(largeItems, undefined, "private", {
-            pack: true,
+            disablePacking: false,
           });
         },
         { iterations: 200 },
@@ -382,7 +396,7 @@ describe("CoList - Pack comparison with different item sizes\n", () => {
         () => {
           const tempList = group.createList();
           tempList.appendItems(largeItems, undefined, "private", {
-            pack: false,
+            disablePacking: true,
           });
         },
         { iterations: 200 },
@@ -434,14 +448,16 @@ describe("CoList - Performance scaling with pack ON vs OFF\n", () => {
     describe(`Batch size: ${size} items\n`, () => {
       // Measure sizes
       const listPack = group.createList();
-      listPack.appendItems(taskStrings, undefined, "private", { pack: true });
+      listPack.appendItems(taskStrings, undefined, "private", {
+        disablePacking: false,
+      });
       const contentPack =
         listPack.core.verified?.newContentSince(undefined) ?? [];
       const packedSize = measureContentSize(contentPack);
 
       const listNoPack = group.createList();
       listNoPack.appendItems(taskStrings, undefined, "private", {
-        pack: false,
+        disablePacking: true,
       });
       const contentNoPack =
         listNoPack.core.verified?.newContentSince(undefined) ?? [];
@@ -456,7 +472,7 @@ describe("CoList - Performance scaling with pack ON vs OFF\n", () => {
           () => {
             const tempList = group.createList();
             tempList.appendItems(taskStrings, undefined, "private", {
-              pack: true,
+              disablePacking: false,
             });
           },
           { iterations },
@@ -467,7 +483,7 @@ describe("CoList - Performance scaling with pack ON vs OFF\n", () => {
           () => {
             const tempList = group.createList();
             tempList.appendItems(taskStrings, undefined, "private", {
-              pack: false,
+              disablePacking: true,
             });
           },
           { iterations },
@@ -493,13 +509,17 @@ describe("CoList - NAPI Crypto with pack ON vs OFF\n", () => {
   describe("NAPI: 100 items comparison\n", () => {
     // Measure sizes
     const listPack = groupNapi.createList();
-    listPack.appendItems(taskStrings, undefined, "private", { pack: true });
+    listPack.appendItems(taskStrings, undefined, "private", {
+      disablePacking: false,
+    });
     const contentPack =
       listPack.core.verified?.newContentSince(undefined) ?? [];
     const packedSize = measureContentSize(contentPack);
 
     const listNoPack = groupNapi.createList();
-    listNoPack.appendItems(taskStrings, undefined, "private", { pack: false });
+    listNoPack.appendItems(taskStrings, undefined, "private", {
+      disablePacking: true,
+    });
     const contentNoPack =
       listNoPack.core.verified?.newContentSince(undefined) ?? [];
     const noPackSize = measureContentSize(contentNoPack);
@@ -511,7 +531,9 @@ describe("CoList - NAPI Crypto with pack ON vs OFF\n", () => {
         "NAPI: append with pack=true",
         () => {
           const list = groupNapi.createList();
-          list.appendItems(taskStrings, undefined, "private", { pack: true });
+          list.appendItems(taskStrings, undefined, "private", {
+            disablePacking: false,
+          });
         },
         { iterations: 100 },
       );
@@ -520,7 +542,9 @@ describe("CoList - NAPI Crypto with pack ON vs OFF\n", () => {
         "NAPI: append with pack=false",
         () => {
           const list = groupNapi.createList();
-          list.appendItems(taskStrings, undefined, "private", { pack: false });
+          list.appendItems(taskStrings, undefined, "private", {
+            disablePacking: true,
+          });
         },
         { iterations: 100 },
       );
@@ -568,14 +592,14 @@ describe("CoPlainText - Pack ON vs Pack OFF comparison\n", () => {
 
     // Pack enabled
     const textPack = group.createPlainText("", null, "private");
-    textPack.insertAfter(-1, sentence, "private", { pack: true });
+    textPack.insertAfter(-1, sentence, "private", { disablePacking: false });
     const contentPack =
       textPack.core.verified?.newContentSince(undefined) ?? [];
     const packedSize = measureContentSize(contentPack);
 
     // Pack disabled
     const textNoPack = group.createPlainText("", null, "private");
-    textNoPack.insertAfter(-1, sentence, "private", { pack: false });
+    textNoPack.insertAfter(-1, sentence, "private", { disablePacking: true });
     const contentNoPack =
       textNoPack.core.verified?.newContentSince(undefined) ?? [];
     const noPackSize = measureContentSize(contentNoPack);
@@ -587,7 +611,9 @@ describe("CoPlainText - Pack ON vs Pack OFF comparison\n", () => {
         "insertAfter with pack=true",
         () => {
           const tempText = group.createPlainText("", null, "private");
-          tempText.insertAfter(-1, sentence, "private", { pack: true });
+          tempText.insertAfter(-1, sentence, "private", {
+            disablePacking: false,
+          });
         },
         { iterations: 1000 },
       );
@@ -596,7 +622,9 @@ describe("CoPlainText - Pack ON vs Pack OFF comparison\n", () => {
         "insertAfter with pack=false",
         () => {
           const tempText = group.createPlainText("", null, "private");
-          tempText.insertAfter(-1, sentence, "private", { pack: false });
+          tempText.insertAfter(-1, sentence, "private", {
+            disablePacking: true,
+          });
         },
         { iterations: 1000 },
       );
@@ -635,14 +663,14 @@ describe("CoPlainText - Pack ON vs Pack OFF comparison\n", () => {
 
     // Pack enabled
     const textPack = group.createPlainText("", null, "private");
-    textPack.insertAfter(-1, paragraph, "private", { pack: true });
+    textPack.insertAfter(-1, paragraph, "private", { disablePacking: false });
     const contentPack =
       textPack.core.verified?.newContentSince(undefined) ?? [];
     const packedSize = measureContentSize(contentPack);
 
     // Pack disabled
     const textNoPack = group.createPlainText("", null, "private");
-    textNoPack.insertAfter(-1, paragraph, "private", { pack: false });
+    textNoPack.insertAfter(-1, paragraph, "private", { disablePacking: true });
     const contentNoPack =
       textNoPack.core.verified?.newContentSince(undefined) ?? [];
     const noPackSize = measureContentSize(contentNoPack);
@@ -654,7 +682,9 @@ describe("CoPlainText - Pack ON vs Pack OFF comparison\n", () => {
         "insert 500 chars with pack=true",
         () => {
           const tempText = group.createPlainText("", null, "private");
-          tempText.insertAfter(-1, paragraph, "private", { pack: true });
+          tempText.insertAfter(-1, paragraph, "private", {
+            disablePacking: false,
+          });
         },
         { iterations: 500 },
       );
@@ -663,7 +693,9 @@ describe("CoPlainText - Pack ON vs Pack OFF comparison\n", () => {
         "insert 500 chars with pack=false",
         () => {
           const tempText = group.createPlainText("", null, "private");
-          tempText.insertAfter(-1, paragraph, "private", { pack: false });
+          tempText.insertAfter(-1, paragraph, "private", {
+            disablePacking: true,
+          });
         },
         { iterations: 500 },
       );
@@ -701,14 +733,18 @@ describe("CoPlainText - Pack ON vs Pack OFF comparison\n", () => {
 
     // Pack enabled
     const textPack = group.createPlainText("", null, "private");
-    textPack.insertAfter(-1, largeArticle, "private", { pack: true });
+    textPack.insertAfter(-1, largeArticle, "private", {
+      disablePacking: false,
+    });
     const contentPack =
       textPack.core.verified?.newContentSince(undefined) ?? [];
     const packedSize = measureContentSize(contentPack);
 
     // Pack disabled
     const textNoPack = group.createPlainText("", null, "private");
-    textNoPack.insertAfter(-1, largeArticle, "private", { pack: false });
+    textNoPack.insertAfter(-1, largeArticle, "private", {
+      disablePacking: true,
+    });
     const contentNoPack =
       textNoPack.core.verified?.newContentSince(undefined) ?? [];
     const noPackSize = measureContentSize(contentNoPack);
@@ -720,7 +756,9 @@ describe("CoPlainText - Pack ON vs Pack OFF comparison\n", () => {
         "insert 2000 chars with pack=true",
         () => {
           const tempText = group.createPlainText("", null, "private");
-          tempText.insertAfter(-1, largeArticle, "private", { pack: true });
+          tempText.insertAfter(-1, largeArticle, "private", {
+            disablePacking: false,
+          });
         },
         { iterations: 200 },
       );
@@ -729,7 +767,9 @@ describe("CoPlainText - Pack ON vs Pack OFF comparison\n", () => {
         "insert 2000 chars with pack=false",
         () => {
           const tempText = group.createPlainText("", null, "private");
-          tempText.insertAfter(-1, largeArticle, "private", { pack: false });
+          tempText.insertAfter(-1, largeArticle, "private", {
+            disablePacking: true,
+          });
         },
         { iterations: 200 },
       );
@@ -785,14 +825,18 @@ describe("Summary - Pack ON vs Pack OFF space savings\n", () => {
 
     // Pack ON
     const listPack = group.createList();
-    listPack.appendItems(taskStrings, undefined, "private", { pack: true });
+    listPack.appendItems(taskStrings, undefined, "private", {
+      disablePacking: false,
+    });
     const contentPack =
       listPack.core.verified?.newContentSince(undefined) ?? [];
     const packedSize = measureContentSize(contentPack);
 
     // Pack OFF
     const listNoPack = group.createList();
-    listNoPack.appendItems(taskStrings, undefined, "private", { pack: false });
+    listNoPack.appendItems(taskStrings, undefined, "private", {
+      disablePacking: true,
+    });
     const contentNoPack =
       listNoPack.core.verified?.newContentSince(undefined) ?? [];
     const noPackSize = measureContentSize(contentNoPack);
@@ -816,14 +860,14 @@ describe("Summary - Pack ON vs Pack OFF space savings\n", () => {
 
     // Pack ON
     const textPack = group.createPlainText("", null, "private");
-    textPack.insertAfter(-1, text, "private", { pack: true });
+    textPack.insertAfter(-1, text, "private", { disablePacking: false });
     const contentPack =
       textPack.core.verified?.newContentSince(undefined) ?? [];
     const packedSize = measureContentSize(contentPack);
 
     // Pack OFF
     const textNoPack = group.createPlainText("", null, "private");
-    textNoPack.insertAfter(-1, text, "private", { pack: false });
+    textNoPack.insertAfter(-1, text, "private", { disablePacking: true });
     const contentNoPack =
       textNoPack.core.verified?.newContentSince(undefined) ?? [];
     const noPackSize = measureContentSize(contentNoPack);

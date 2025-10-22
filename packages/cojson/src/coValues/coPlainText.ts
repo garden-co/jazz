@@ -3,6 +3,7 @@ import { AvailableCoValueCore } from "../coValueCore/coValueCore.js";
 import { TRANSACTION_CONFIG } from "../config.js";
 import { JsonObject } from "../jsonValue.js";
 import { DeletionOpPayload, OpID, RawCoList } from "./coList.js";
+import { CoListPackImplementation } from "./pack/coList.js";
 
 export type StringifiedOpID = string & { __stringifiedOpID: true };
 
@@ -56,7 +57,7 @@ export class RawCoPlainText<
   >;
 
   constructor(core: AvailableCoValueCore) {
-    super(core);
+    super(core, new CoListPackImplementation());
     this._cachedMapping = new WeakMap();
   }
 
@@ -111,7 +112,7 @@ export class RawCoPlainText<
     text: string,
     privacy: "private" | "trusting" = "private",
     options?: {
-      pack?: boolean;
+      disablePacking?: boolean;
     },
   ) {
     const graphemes = Array.from(splitGraphemes(text));
@@ -138,7 +139,7 @@ export class RawCoPlainText<
     position: number,
     privacy: "private" | "trusting" = "private",
     options?: {
-      pack?: boolean;
+      disablePacking?: boolean;
     },
   ) {
     const chunks = splitIntoChunks(text);
@@ -161,7 +162,7 @@ export class RawCoPlainText<
     text: string,
     privacy: "private" | "trusting" = "private",
     options?: {
-      pack?: boolean;
+      disablePacking?: boolean;
     },
   ) {
     const graphemes = Array.from(splitGraphemes(text));

@@ -7,6 +7,7 @@ import { isCoValue } from "../typeUtils/isCoValue.js";
 import { RawAccountID } from "./account.js";
 import { RawGroup } from "./group.js";
 import { Transaction } from "../coValueCore/verifiedState.js";
+import { CoListPack, PackedChanges } from "./pack/coList.js";
 
 export type OpID = TransactionID & { changeIdx: number };
 
@@ -25,11 +26,6 @@ export type PreOpPayload<T extends JsonValue> = {
 export type InsertionOpPayload<T extends JsonValue> =
   | AppOpPayload<T>
   | PreOpPayload<T>;
-
-export type PackedChanges<T extends JsonValue> = [
-  AppOpPayload<T> & { compacted: true },
-  ...T[],
-];
 
 export type DeletionOpPayload = {
   op: "del";
@@ -102,8 +98,13 @@ export class RawCoList<
 
   lastValidTransaction: number | undefined;
 
+  pack: CoListPack<Item, PackedChanges<Item>>;
+
   /** @internal */
-  constructor(core: AvailableCoValueCore) {
+  constructor(
+    core: AvailableCoValueCore,
+    pack: CoListPack<Item, PackedChanges<Item>>,
+  ) {
     this.id = core.id as CoID<this>;
     this.core = core;
 
@@ -112,7 +113,7 @@ export class RawCoList<
     this.afterStart = [];
     this.beforeEnd = [];
     this.knownTransactions = new Set<Transaction>();
-
+    this.pack = pack;
     this.processNewTransactions();
   }
 
@@ -199,56 +200,6 @@ export class RawCoList<
     list.push(value);
   }
 
-  protected packChanges(
-    changes: ListOpPayload<Item>[],
-  ): PackedChanges<Item> | ListOpPayload<Item>[] {
-    const firstElement = changes[0];
-
-    if (firstElement?.op !== "app") {
-      return changes;
-    }
-
-    for (const change of changes) {
-      if (change.op !== "app" || change.after !== firstElement.after) {
-        return changes;
-      }
-    }
-
-    const firstElementCompacted = firstElement as AppOpPayload<Item> & {
-      compacted: true;
-    };
-    firstElementCompacted.compacted = true;
-
-    return [
-      firstElementCompacted,
-      ...(changes as AppOpPayload<Item>[])
-        .slice(1)
-        .map((change) => change.value),
-    ];
-  }
-
-  protected unpackChanges(
-    changes: PackedChanges<Item> | ListOpPayload<Item>[],
-  ): ListOpPayload<Item>[] {
-    const [firstElement, ...values] = changes as [
-      AppOpPayload<Item> & { compacted: true },
-      ...Item[],
-    ];
-
-    if (!firstElement?.compacted) {
-      return changes as ListOpPayload<Item>[];
-    }
-
-    return [
-      firstElement as AppOpPayload<Item>,
-      ...values.map((value) => ({
-        op: "app" as const,
-        value,
-        after: firstElement.after as OpID | "start",
-      })),
-    ];
-  }
-
   processNewTransactions() {
     const transactions = this.core.getValidSortedTransactions({
       ignorePrivateTransactions: false,
@@ -270,7 +221,7 @@ export class RawCoList<
         madeAt,
       );
 
-      const changesDecompacted = this.unpackChanges(
+      const changesDecompacted = this.pack.unpackChanges(
         changes as PackedChanges<Item> | ListOpPayload<Item>[],
       );
 
@@ -582,7 +533,7 @@ export class RawCoList<
     after?: number,
     privacy: "private" | "trusting" = "private",
     options?: {
-      pack?: boolean;
+      disablePacking?: boolean;
     },
   ) {
     const entries = this.entries();
@@ -618,8 +569,8 @@ export class RawCoList<
       changes.reverse();
     }
 
-    if (options?.pack) {
-      const changesCompacted = this.packChanges(
+    if (!options?.disablePacking) {
+      const changesCompacted = this.pack.packChanges(
         changes as ListOpPayload<Item>[],
       );
       this.core.makeTransaction(changesCompacted, privacy);
@@ -733,7 +684,7 @@ export class RawCoList<
 
   /** @internal */
   rebuildFromCore() {
-    const listAfter = new RawCoList(this.core) as this;
+    const listAfter = new RawCoList(this.core, this.pack) as this;
 
     this.afterStart = listAfter.afterStart;
     this.beforeEnd = listAfter.beforeEnd;
