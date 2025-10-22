@@ -7,6 +7,10 @@ export type PackedChangesCoPlainText = [
   string,
 ];
 
+/**
+ * This class is used to pack and unpack changes for a CoPlainText.
+ * It is used to reduce the storage size of the CoPlainText.
+ */
 export class CoPlainTextPackImplementation
   implements CoListPack<string, PackedChangesCoPlainText>
 {
@@ -19,6 +23,7 @@ export class CoPlainTextPackImplementation
       return changes;
     }
 
+    // Check if all changes are app operations with the same after reference
     for (const change of changes) {
       if (change.op !== "app" || change.after !== firstElement.after) {
         return changes;
@@ -28,8 +33,10 @@ export class CoPlainTextPackImplementation
     const firstElementCompacted = firstElement as AppOpPayload<string> & {
       compacted: true;
     };
+    // Set the compacted flag to true
     firstElementCompacted.compacted = true;
 
+    // Return the compacted changes and the joined string
     return [
       firstElementCompacted,
       (changes as AppOpPayload<string>[])
@@ -42,14 +49,17 @@ export class CoPlainTextPackImplementation
   unpackChanges(
     changes: PackedChangesCoPlainText | ListOpPayload<string>[],
   ): ListOpPayload<string>[] {
+    // Check if the first element is compacted
     const firstElement = changes[0] as AppOpPayload<string> & {
       compacted: true;
     };
 
+    // Check if the first element is compacted
     if (!firstElement?.compacted) {
       return changes as ListOpPayload<string>[];
     }
 
+    // Get the joined string
     const elementsString = changes[1] as string;
 
     return [

@@ -18,6 +18,10 @@ export interface CoListPack<
   ): ListOpPayload<Item>[];
 }
 
+/**
+ * This class is used to pack and unpack changes for a CoList.
+ * It is used to reduce the storage size of the CoList.
+ */
 export class CoListPackImplementation<Item extends JsonValue>
   implements CoListPack<Item, PackedChanges<Item>>
 {
@@ -30,17 +34,20 @@ export class CoListPackImplementation<Item extends JsonValue>
       return changes;
     }
 
+    // Check if all changes are app operations with the same after reference
     for (const change of changes) {
       if (change.op !== "app" || change.after !== firstElement.after) {
         return changes;
       }
     }
 
+    // Set the compacted flag to true
     const firstElementCompacted = firstElement as AppOpPayload<Item> & {
       compacted: true;
     };
     firstElementCompacted.compacted = true;
 
+    // Return the compacted changes and the values
     return [
       firstElementCompacted,
       ...(changes as AppOpPayload<Item>[])
@@ -52,15 +59,18 @@ export class CoListPackImplementation<Item extends JsonValue>
   unpackChanges(
     changes: PackedChanges<Item> | ListOpPayload<Item>[],
   ): ListOpPayload<Item>[] {
+    // Get the first element and the values
     const [firstElement, ...values] = changes as [
       AppOpPayload<Item> & { compacted: true },
       ...Item[],
     ];
 
+    // Check if the first element is compacted
     if (!firstElement?.compacted) {
       return changes as ListOpPayload<Item>[];
     }
 
+    // Return the unpacked changes and the values
     return [
       firstElement as AppOpPayload<Item>,
       ...values.map((value) => ({
