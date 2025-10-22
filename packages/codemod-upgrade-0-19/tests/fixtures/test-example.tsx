@@ -180,8 +180,8 @@ function HookWithoutExistingSelector() {
   return <div>{account?.profile?.name}</div>;
 }
 
-// Hook with existing selector
-function HookWithExistingSelector() {
+// Hook with existing expression selector
+function HookWithExistingExpressionSelector() {
   // const profileName = useAccount(MyAccount, {
   //   resolve: { profile: true },
   //   select: (account) => account.$isLoaded
@@ -193,6 +193,19 @@ function HookWithExistingSelector() {
   const profileName = useAccount(MyAccount, {
     resolve: { profile: true },
     select: (account) => account?.profile?.name,
+  });
+
+  return <div>{profileName}</div>;
+}
+
+// Hook with existing block selector
+function HookWithExistingBlockSelector() {
+  // Skip migration for block body selectors
+  const profileName = useAccount(MyAccount, {
+    resolve: { profile: true },
+    select: (account) => {
+      return account?.profile.name;
+    },
   });
 
   return <div>{profileName}</div>;
@@ -260,7 +273,8 @@ export {
   NoDestructuringPattern,
   NoDestructuringWithAccountAgentLogOut,
   HookWithoutExistingSelector,
-  HookWithExistingSelector,
+  HookWithExistingExpressionSelector,
+  HookWithExistingBlockSelector,
   HookWithNoOptions,
   HookWithSchemaNoOptions,
   MaybeLoadedCoValueIfCheck,

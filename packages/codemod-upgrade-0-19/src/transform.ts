@@ -437,15 +437,14 @@ function migrateLoadingStateHandling(sourceFile: SourceFile) {
 
           // Get the body of the selector
           const body = initializer.getBody();
-          let selectorBody: string;
 
           if (Node.isBlock(body)) {
-            // Function body with braces
-            selectorBody = body.getFullText();
-          } else {
-            // Arrow function without braces
-            selectorBody = body.getText();
+            // Skip transformation for block body selectors - they're too complex
+            return;
           }
+
+          // Arrow function without braces - safe to transform
+          const selectorBody = body.getText();
 
           // Remove optional chaining from the selector body since we're checking $isLoaded
           // Convert account?.profile?.name to account.profile.name
