@@ -7,8 +7,7 @@
     "test:v0": "pnpm test -t '\\[v0\\]'",
     "test:claude": "pnpm test -t '\\[claude\\]'",
     "test": "ID=$(pnpm -s id) vitest run",
-    "id": "node -e 'import { generateReadableId } from \"./lib/generate-readable-id.ts\"; console.log(generateReadableId())'",
-    "postinstall": "npm rebuild node-pty"
+    "id": "node -e 'import { generateReadableId } from \"./lib/generate-readable-id.ts\"; console.log(generateReadableId())'"
   },
   "devDependencies": {
     "@anthropic-ai/claude-code": "^2.0.23",
