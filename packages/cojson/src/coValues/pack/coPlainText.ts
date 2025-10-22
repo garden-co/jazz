@@ -1,5 +1,4 @@
 import { splitGraphemes } from "unicode-segmenter/grapheme";
-import { JsonValue } from "../../jsonValue";
 import { AppOpPayload, ListOpPayload, OpID } from "../coList";
 import { CoListPack } from "./coList";
 
