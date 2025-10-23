@@ -84,7 +84,7 @@ export class CoListPackImplementation<Item extends JsonValue>
       ...values.map((value) => ({
         op: "app" as const,
         value,
-        after: firstElement.after as OpID | "start",
+        after: firstElement.after,
       })),
     ];
   }

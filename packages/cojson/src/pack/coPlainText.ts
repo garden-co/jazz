@@ -126,7 +126,7 @@ export class CoPlainTextPackImplementation
       ...Array.from(splitGraphemes(elementsString)).map((grapheme) => ({
         op: "app" as const,
         value: grapheme,
-        after: firstElement.after as OpID | "start",
+        after: firstElement.after,
       })),
     ];
   }
