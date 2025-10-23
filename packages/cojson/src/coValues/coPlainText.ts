@@ -180,6 +180,9 @@ export class RawCoPlainText<
   deleteRange(
     { from, to }: { from: number; to: number },
     privacy: "private" | "trusting" = "private",
+    options?: {
+      disablePacking?: boolean;
+    },
   ) {
     const ops: DeletionOpPayload[] = [];
     for (let idx = from; idx < to; ) {
@@ -197,7 +200,10 @@ export class RawCoPlainText<
       }
       idx = nextIdx;
     }
-    this.core.makeTransaction(ops, privacy);
+    this.core.makeTransaction(
+      options?.disablePacking ? ops : this.pack.packChanges(ops),
+      privacy,
+    );
     this.processNewTransactions();
   }
 
