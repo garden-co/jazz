@@ -219,11 +219,11 @@ export class RawCoList<
         madeAt,
       );
 
-      const changesDecompacted = this.pack.unpackChanges(
+      const changesUnpacked = this.pack.unpackChanges(
         changes as Packed | ListOpPayload<Item>[],
       );
 
-      for (const [changeIdx, change] of changesDecompacted.entries()) {
+      for (const [changeIdx, change] of changesUnpacked.entries()) {
         const opID = {
           sessionID: txID.sessionID,
           txIndex: txID.txIndex,
