@@ -902,3 +902,381 @@ describe("Summary - Pack ON vs Pack OFF space savings\n", () => {
     bench("baseline - show summary", () => {});
   });
 });
+
+// ============================================================================
+// SECTION 7: COPLAINTEXT DELETE OPERATIONS - Pack ON vs OFF comparison
+// ============================================================================
+
+describe("CoPlainText - Delete Operations Pack ON vs Pack OFF\n", () => {
+  const account = cojson.LocalNode.internalCreateAccount({ crypto });
+  const group = account.core.node.createGroup();
+
+  describe("Delete 10 characters from text\n", () => {
+    const initialText = "The quick brown fox jumps over the lazy dog";
+
+    // Delete with pack enabled
+    const textPack = group.createPlainText("", null, "private");
+    textPack.insertAfter(-1, initialText, "private", {
+      disablePacking: false,
+    });
+    textPack.deleteRange({ from: 0, to: 10 }, "private");
+    const contentPack =
+      textPack.core.verified?.newContentSince(undefined) ?? [];
+    const packedSize = measureContentSize(contentPack);
+
+    // Delete with pack disabled
+    const textNoPack = group.createPlainText("", null, "private");
+    textNoPack.insertAfter(-1, initialText, "private", {
+      disablePacking: true,
+    });
+    textNoPack.deleteRange({ from: 0, to: 10 }, "private", {
+      disablePacking: true,
+    });
+
+    const contentNoPack =
+      textNoPack.core.verified?.newContentSince(undefined) ?? [];
+    const noPackSize = measureContentSize(contentNoPack);
+
+    const savings = calculateSavings(noPackSize, packedSize);
+
+    describe(`Delete Pack ON: ${packedSize}b | Pack OFF: ${noPackSize}b | Savings: ${savings}%\n`, () => {
+      bench(
+        "delete 10 chars with pack=true",
+        () => {
+          const tempText = group.createPlainText("", null, "private");
+          tempText.insertAfter(-1, initialText, "private", {
+            disablePacking: false,
+          });
+          tempText.deleteRange({ from: 0, to: 10 }, "private");
+        },
+        { iterations: 1000 },
+      );
+
+      bench(
+        "delete 10 chars with pack=false",
+        () => {
+          const tempText = group.createPlainText("", null, "private");
+          tempText.insertAfter(-1, initialText, "private", {
+            disablePacking: true,
+          });
+          tempText.deleteRange({ from: 0, to: 10 }, "private", {
+            disablePacking: true,
+          });
+        },
+        { iterations: 1000 },
+      );
+    });
+  });
+
+  describe("Delete 50 characters from text\n", () => {
+    const article = generateRealisticArticle(5);
+    const initialText = article.slice(0, 200);
+
+    // Delete with pack enabled
+    const textPack = group.createPlainText("", null, "private");
+    textPack.insertAfter(-1, initialText, "private", {
+      disablePacking: false,
+    });
+    textPack.deleteRange({ from: 20, to: 70 }, "private");
+    const contentPack =
+      textPack.core.verified?.newContentSince(undefined) ?? [];
+    const packedSize = measureContentSize(contentPack);
+
+    // Delete with pack disabled
+    const textNoPack = group.createPlainText("", null, "private");
+    textNoPack.insertAfter(-1, initialText, "private", {
+      disablePacking: true,
+    });
+    textNoPack.deleteRange({ from: 20, to: 70 }, "private", {
+      disablePacking: true,
+    });
+
+    const contentNoPack =
+      textNoPack.core.verified?.newContentSince(undefined) ?? [];
+    const noPackSize = measureContentSize(contentNoPack);
+
+    const savings = calculateSavings(noPackSize, packedSize);
+
+    describe(`Delete Pack ON: ${packedSize}b | Pack OFF: ${noPackSize}b | Savings: ${savings}%\n`, () => {
+      bench(
+        "delete 50 chars with pack=true",
+        () => {
+          const tempText = group.createPlainText("", null, "private");
+          tempText.insertAfter(-1, initialText, "private", {
+            disablePacking: false,
+          });
+          tempText.deleteRange({ from: 20, to: 70 }, "private");
+        },
+        { iterations: 500 },
+      );
+
+      bench(
+        "delete 50 chars with pack=false",
+        () => {
+          const tempText = group.createPlainText("", null, "private");
+          tempText.insertAfter(-1, initialText, "private", {
+            disablePacking: true,
+          });
+          tempText.deleteRange({ from: 20, to: 70 }, "private", {
+            disablePacking: true,
+          });
+        },
+        { iterations: 500 },
+      );
+    });
+  });
+
+  describe("Delete 100 characters from text\n", () => {
+    const article = generateRealisticArticle(10);
+    const initialText = article.slice(0, 500);
+
+    // Delete with pack enabled
+    const textPack = group.createPlainText("", null, "private");
+    textPack.insertAfter(-1, initialText, "private", {
+      disablePacking: false,
+    });
+    textPack.deleteRange({ from: 50, to: 150 }, "private");
+    const contentPack =
+      textPack.core.verified?.newContentSince(undefined) ?? [];
+    const packedSize = measureContentSize(contentPack);
+
+    // Delete with pack disabled
+    const textNoPack = group.createPlainText("", null, "private");
+    textNoPack.insertAfter(-1, initialText, "private", {
+      disablePacking: true,
+    });
+    textNoPack.deleteRange({ from: 50, to: 150 }, "private", {
+      disablePacking: true,
+    });
+
+    const contentNoPack =
+      textNoPack.core.verified?.newContentSince(undefined) ?? [];
+    const noPackSize = measureContentSize(contentNoPack);
+
+    const savings = calculateSavings(noPackSize, packedSize);
+
+    describe(`Delete Pack ON: ${packedSize}b | Pack OFF: ${noPackSize}b | Savings: ${savings}%\n`, () => {
+      bench(
+        "delete 100 chars with pack=true",
+        () => {
+          const tempText = group.createPlainText("", null, "private");
+          tempText.insertAfter(-1, initialText, "private", {
+            disablePacking: false,
+          });
+          tempText.deleteRange({ from: 50, to: 150 }, "private");
+        },
+        { iterations: 500 },
+      );
+
+      bench(
+        "delete 100 chars with pack=false",
+        () => {
+          const tempText = group.createPlainText("", null, "private");
+          tempText.insertAfter(-1, initialText, "private", {
+            disablePacking: true,
+          });
+          tempText.deleteRange({ from: 50, to: 150 }, "private", {
+            disablePacking: true,
+          });
+        },
+        { iterations: 500 },
+      );
+    });
+  });
+
+  describe("Delete 250 characters from large text\n", () => {
+    const article = generateRealisticArticle(20);
+    const initialText = article.slice(0, 1000);
+
+    // Delete with pack enabled
+    const textPack = group.createPlainText("", null, "private");
+    textPack.insertAfter(-1, initialText, "private", {
+      disablePacking: false,
+    });
+    textPack.deleteRange({ from: 100, to: 350 }, "private");
+    const contentPack =
+      textPack.core.verified?.newContentSince(undefined) ?? [];
+    const packedSize = measureContentSize(contentPack);
+
+    // Delete with pack disabled
+    const textNoPack = group.createPlainText("", null, "private");
+    textNoPack.insertAfter(-1, initialText, "private", {
+      disablePacking: true,
+    });
+    textNoPack.deleteRange({ from: 100, to: 350 }, "private", {
+      disablePacking: true,
+    });
+
+    const contentNoPack =
+      textNoPack.core.verified?.newContentSince(undefined) ?? [];
+    const noPackSize = measureContentSize(contentNoPack);
+
+    const savings = calculateSavings(noPackSize, packedSize);
+
+    describe(`Delete Pack ON: ${packedSize}b | Pack OFF: ${noPackSize}b | Savings: ${savings}%\n`, () => {
+      bench(
+        "delete 250 chars with pack=true",
+        () => {
+          const tempText = group.createPlainText("", null, "private");
+          tempText.insertAfter(-1, initialText, "private", {
+            disablePacking: false,
+          });
+          tempText.deleteRange({ from: 100, to: 350 }, "private");
+        },
+        { iterations: 200 },
+      );
+
+      bench(
+        "delete 250 chars with pack=false",
+        () => {
+          const tempText = group.createPlainText("", null, "private");
+          tempText.insertAfter(-1, initialText, "private", {
+            disablePacking: true,
+          });
+          tempText.deleteRange({ from: 100, to: 350 }, "private", {
+            disablePacking: true,
+          });
+        },
+        { iterations: 200 },
+      );
+    });
+  });
+
+  describe("Multiple small deletes (5 deletes of 10 chars each)\n", () => {
+    const initialText = generateRealisticArticle(5).slice(0, 300);
+
+    // Multiple deletes with pack enabled
+    const textPack = group.createPlainText("", null, "private");
+    textPack.insertAfter(-1, initialText, "private", {
+      disablePacking: false,
+    });
+
+    // Perform 5 delete operations
+    for (let i = 0; i < 5; i++) {
+      textPack.deleteRange({ from: 20, to: 30 }, "private");
+    }
+
+    const contentPack =
+      textPack.core.verified?.newContentSince(undefined) ?? [];
+    const packedSize = measureContentSize(contentPack);
+
+    // Multiple deletes with pack disabled
+    const textNoPack = group.createPlainText("", null, "private");
+    textNoPack.insertAfter(-1, initialText, "private", {
+      disablePacking: true,
+    });
+
+    // Perform 5 delete operations
+    for (let i = 0; i < 5; i++) {
+      textNoPack.deleteRange({ from: 20, to: 30 }, "private", {
+        disablePacking: true,
+      });
+    }
+
+    const contentNoPack =
+      textNoPack.core.verified?.newContentSince(undefined) ?? [];
+    const noPackSize = measureContentSize(contentNoPack);
+
+    const savings = calculateSavings(noPackSize, packedSize);
+
+    describe(`Multiple Delete Pack ON: ${packedSize}b | Pack OFF: ${noPackSize}b | Savings: ${savings}%\n`, () => {
+      bench(
+        "5 deletes with pack=true",
+        () => {
+          const tempText = group.createPlainText("", null, "private");
+          tempText.insertAfter(-1, initialText, "private", {
+            disablePacking: false,
+          });
+          for (let i = 0; i < 5; i++) {
+            tempText.deleteRange({ from: 20, to: 30 }, "private");
+          }
+        },
+        { iterations: 200 },
+      );
+
+      bench(
+        "5 deletes with pack=false",
+        () => {
+          const tempText = group.createPlainText("", null, "private");
+          tempText.insertAfter(-1, initialText, "private", {
+            disablePacking: true,
+          });
+          for (let i = 0; i < 5; i++) {
+            tempText.deleteRange({ from: 20, to: 30 }, "private", {
+              disablePacking: true,
+            });
+          }
+        },
+        { iterations: 200 },
+      );
+    });
+  });
+});
+
+// ============================================================================
+// SECTION 8: COPLAINTEXT DELETE SUMMARY
+// ============================================================================
+
+describe("Summary - CoPlainText Delete Operations space savings\n", () => {
+  const account = cojson.LocalNode.internalCreateAccount({ crypto });
+  const group = account.core.node.createGroup();
+
+  const deleteScenarios = [
+    { name: "10 chars", from: 0, to: 10, textSize: 100 },
+    { name: "50 chars", from: 20, to: 70, textSize: 200 },
+    { name: "100 chars", from: 50, to: 150, textSize: 500 },
+    { name: "250 chars", from: 100, to: 350, textSize: 1000 },
+  ];
+
+  const deleteResults = deleteScenarios.map(({ name, from, to, textSize }) => {
+    const article = generateRealisticArticle(20);
+    const initialText = article.slice(0, textSize);
+
+    // Delete with pack ON
+    const textPack = group.createPlainText("", null, "private");
+    textPack.insertAfter(-1, initialText, "private", {
+      disablePacking: false,
+    });
+    textPack.deleteRange({ from, to }, "private");
+    const contentPack =
+      textPack.core.verified?.newContentSince(undefined) ?? [];
+    const packedSize = measureContentSize(contentPack);
+
+    // Delete with pack OFF
+    const textNoPack = group.createPlainText("", null, "private");
+    textNoPack.insertAfter(-1, initialText, "private", {
+      disablePacking: true,
+    });
+    textNoPack.deleteRange({ from, to }, "private", {
+      disablePacking: true,
+    });
+
+    const contentNoPack =
+      textNoPack.core.verified?.newContentSince(undefined) ?? [];
+    const noPackSize = measureContentSize(contentNoPack);
+
+    const savings = calculateSavings(noPackSize, packedSize);
+
+    return { name, packedSize, noPackSize, savings };
+  });
+
+  const summaryLines = [
+    "=== CoPlainText Delete Operations - Space Savings Summary ===",
+    "",
+    "Delete operations (deleteRange):",
+    ...deleteResults.map(
+      ({ name, noPackSize, packedSize, savings }) =>
+        `  ${name.padEnd(12)}: Pack OFF ${noPackSize.toString().padStart(6)}b → Pack ON ${packedSize.toString().padStart(6)}b (${savings}% savings)`,
+    ),
+    "",
+    "Key Findings:",
+    "- Delete packing significantly reduces transaction size",
+    "- Larger delete ranges show more substantial savings",
+    "- Pack format: [first_delete_op, ...insertion_ids] vs individual delete ops",
+    "- Critical for collaborative editing with frequent deletions",
+  ].join("\n");
+
+  describe(`${summaryLines}\n`, () => {
+    bench("baseline - show delete summary", () => {});
+  });
+});

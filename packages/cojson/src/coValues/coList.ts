@@ -52,6 +52,7 @@ type DeletionEntry = {
 export class RawCoList<
   Item extends JsonValue = JsonValue,
   Meta extends JsonObject | null = null,
+  Packed extends JsonValue[] = PackedChanges<Item>,
 > implements RawCoValue
 {
   /** @category 6. Meta */
@@ -98,13 +99,10 @@ export class RawCoList<
 
   lastValidTransaction: number | undefined;
 
-  pack: CoListPack<Item, PackedChanges<Item>>;
+  pack: CoListPack<Item, Packed>;
 
   /** @internal */
-  constructor(
-    core: AvailableCoValueCore,
-    pack: CoListPack<Item, PackedChanges<Item>>,
-  ) {
+  constructor(core: AvailableCoValueCore, pack: CoListPack<Item, Packed>) {
     this.id = core.id as CoID<this>;
     this.core = core;
 
@@ -221,11 +219,11 @@ export class RawCoList<
         madeAt,
       );
 
-      const changesDecompacted = this.pack.unpackChanges(
-        changes as PackedChanges<Item> | ListOpPayload<Item>[],
+      const changesUnpacked = this.pack.unpackChanges(
+        changes as Packed | ListOpPayload<Item>[],
       );
 
-      for (const [changeIdx, change] of changesDecompacted.entries()) {
+      for (const [changeIdx, change] of changesUnpacked.entries()) {
         const opID = {
           sessionID: txID.sessionID,
           txIndex: txID.txIndex,
