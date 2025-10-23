@@ -44,7 +44,9 @@ function partitionMembers(data: Record<string, string>) {
     }));
 
   const childGroups = Object.entries(data)
-    .filter(([key]) => key.startsWith("child_co_"))
+    .filter(
+      ([key, value]) => key.startsWith("child_co_") && value !== "revoked",
+    )
     .map(([key, value]) => ({
       id: key.slice(6) as CoID<RawCoValue>,
       role: value,
