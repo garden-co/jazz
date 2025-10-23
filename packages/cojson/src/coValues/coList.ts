@@ -7,7 +7,7 @@ import { isCoValue } from "../typeUtils/isCoValue.js";
 import { RawAccountID } from "./account.js";
 import { RawGroup } from "./group.js";
 import { Transaction } from "../coValueCore/verifiedState.js";
-import { CoListPack, PackedChanges } from "./pack/coList.js";
+import type { CoListPack, PackedChanges } from "../pack/coList.js";
 
 export type OpID = TransactionID & { changeIdx: number };
 

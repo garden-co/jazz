@@ -1,6 +1,6 @@
 import { splitGraphemes } from "unicode-segmenter/grapheme";
-import { AppOpPayload, ListOpPayload, OpID } from "../coList";
-import { CoListPack } from "./coList";
+import { AppOpPayload, ListOpPayload, OpID } from "../coValues/coList.js";
+import { CoListPack } from "./coList.js";
 
 export type PackedChangesCoPlainText = [
   AppOpPayload<string> & { compacted: true },

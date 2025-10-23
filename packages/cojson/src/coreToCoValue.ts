@@ -6,7 +6,7 @@ import { RawCoMap } from "./coValues/coMap.js";
 import { RawCoPlainText } from "./coValues/coPlainText.js";
 import { RawBinaryCoStream, RawCoStream } from "./coValues/coStream.js";
 import { RawGroup } from "./coValues/group.js";
-import { CoListPackImplementation } from "./coValues/pack/coList.js";
+import { CoListPackImplementation } from "./pack/coList.js";
 
 export function coreToCoValue(
   core: AvailableCoValueCore,

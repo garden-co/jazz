@@ -1,5 +1,5 @@
-import { JsonValue } from "../../jsonValue";
-import { AppOpPayload, ListOpPayload, OpID } from "../coList";
+import { JsonValue } from "../jsonValue";
+import { AppOpPayload, ListOpPayload, OpID } from "../coValues/coList.js";
 
 export type PackedChanges<T extends JsonValue> = [
   AppOpPayload<T> & { compacted: true },

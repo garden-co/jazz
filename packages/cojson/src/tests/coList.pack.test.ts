@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { CoListPackImplementation } from "../coValues/pack/coList.js";
+import { CoListPackImplementation } from "../pack/coList.js";
 import type { AppOpPayload, ListOpPayload, OpID } from "../coValues/coList.js";
 
 describe("CoListPackImplementation", () => {

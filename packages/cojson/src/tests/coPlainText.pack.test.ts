@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { CoPlainTextPackImplementation } from "../coValues/pack/coPlainText.js";
+import { CoPlainTextPackImplementation } from "../pack/coPlainText.js";
 import type { AppOpPayload, ListOpPayload, OpID } from "../coValues/coList.js";
 
 describe("CoPlainTextPackImplementation", () => {

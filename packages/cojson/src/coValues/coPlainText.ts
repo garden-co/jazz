@@ -3,7 +3,7 @@ import { AvailableCoValueCore } from "../coValueCore/coValueCore.js";
 import { TRANSACTION_CONFIG } from "../config.js";
 import { JsonObject } from "../jsonValue.js";
 import { DeletionOpPayload, OpID, RawCoList } from "./coList.js";
-import { CoPlainTextPackImplementation } from "./pack/coPlainText.js";
+import { CoPlainTextPackImplementation } from "../pack/coPlainText.js";
 
 export type StringifiedOpID = string & { __stringifiedOpID: true };
 
