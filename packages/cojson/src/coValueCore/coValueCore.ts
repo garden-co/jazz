@@ -757,7 +757,11 @@ export class CoValueCore {
     }
   }
 
-  getCurrentContent(options?: { ignorePrivateTransactions: true }): RawCoValue {
+  getCurrentContent(options?: {
+    ignorePrivateTransactions: true;
+    appendOnly?: boolean;
+    unordered?: boolean;
+  }): RawCoValue {
     if (!this.verified) {
       throw new Error(
         "CoValueCore: getCurrentContent called on coValue without verified state",

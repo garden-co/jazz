@@ -9,7 +9,11 @@ import { RawGroup } from "./coValues/group.js";
 
 export function coreToCoValue(
   core: AvailableCoValueCore,
-  options?: { ignorePrivateTransactions: true },
+  options?: {
+    ignorePrivateTransactions: true;
+    appendOnly?: boolean;
+    unordered?: boolean;
+  },
 ) {
   if (core.verified.header.type === "comap") {
     if (core.verified.header.ruleset.type === "group") {
@@ -27,7 +31,7 @@ export function coreToCoValue(
   } else if (core.verified.header.type === "coplaintext") {
     return new RawCoPlainText(core);
   } else if (core.verified.header.type === "colist") {
-    return new RawCoList(core);
+    return new RawCoList(core, options);
   } else if (core.verified.header.type === "costream") {
     if (
       core.verified.header.meta &&
