@@ -1,6 +1,11 @@
 import { describe, expect, test } from "vitest";
 import { CoPlainTextPackImplementation } from "../pack/coPlainText.js";
-import type { AppOpPayload, ListOpPayload, OpID } from "../coValues/coList.js";
+import type {
+  AppOpPayload,
+  DeletionOpPayload,
+  ListOpPayload,
+  OpID,
+} from "../coValues/coList.js";
 
 describe("CoPlainTextPackImplementation", () => {
   const packer = new CoPlainTextPackImplementation();
@@ -476,6 +481,351 @@ describe("CoPlainTextPackImplementation", () => {
         .map((op) => (op as AppOpPayload<string>).value)
         .join("");
       expect(reconstructedText).toBe(text);
+    });
+  });
+
+  describe("packChanges - deletion operations", () => {
+    test("should pack multiple sequential deletion operations", () => {
+      const opID1 = createOpID("session1", 0);
+      const opID2 = createOpID("session1", 1);
+      const opID3 = createOpID("session1", 2);
+      const opID4 = createOpID("session1", 3);
+
+      const changes: ListOpPayload<string>[] = [
+        { op: "del", insertion: opID1 },
+        { op: "del", insertion: opID2 },
+        { op: "del", insertion: opID3 },
+        { op: "del", insertion: opID4 },
+      ];
+
+      const result = packer.packChanges(changes);
+
+      expect(Array.isArray(result)).toBe(true);
+      expect(result.length).toBe(4); // first element + 3 OpIDs
+      expect((result[0] as any).compacted).toBe(true);
+      expect((result[0] as any).op).toBe("del");
+      expect((result[0] as any).insertion).toBe(opID1);
+      expect(result[1]).toBe(opID2);
+      expect(result[2]).toBe(opID3);
+      expect(result[3]).toBe(opID4);
+    });
+
+    test("should pack two deletion operations", () => {
+      const opID1 = createOpID("session1", 5);
+      const opID2 = createOpID("session1", 6);
+
+      const changes: ListOpPayload<string>[] = [
+        { op: "del", insertion: opID1 },
+        { op: "del", insertion: opID2 },
+      ];
+
+      const result = packer.packChanges(changes);
+
+      expect(result.length).toBe(2);
+      expect((result[0] as any).compacted).toBe(true);
+      expect((result[0] as any).op).toBe("del");
+      expect((result[0] as any).insertion).toBe(opID1);
+      expect(result[1]).toBe(opID2);
+    });
+
+    test("should NOT pack single deletion operation", () => {
+      const opID = createOpID("session1", 0);
+      const changes: ListOpPayload<string>[] = [{ op: "del", insertion: opID }];
+
+      const result = packer.packChanges(changes);
+
+      expect(result).toBe(changes); // Returns original array
+      expect((result[0] as any).compacted).toBeUndefined();
+    });
+
+    test("should NOT pack mixed deletion and insertion operations", () => {
+      const opID1 = createOpID("session1", 0);
+      const opID2 = createOpID("session1", 1);
+
+      const changes: ListOpPayload<string>[] = [
+        { op: "del", insertion: opID1 },
+        { op: "app", value: "a", after: "start" },
+        { op: "del", insertion: opID2 },
+      ];
+
+      const result = packer.packChanges(changes);
+
+      expect(result).toBe(changes); // Returns original array
+      expect((result[0] as any).compacted).toBeUndefined();
+    });
+
+    test("should NOT pack when first operation is deletion but others are insertions", () => {
+      const opID = createOpID("session1", 0);
+
+      const changes: ListOpPayload<string>[] = [
+        { op: "del", insertion: opID },
+        { op: "app", value: "a", after: "start" },
+        { op: "app", value: "b", after: "start" },
+      ];
+
+      const result = packer.packChanges(changes);
+
+      expect(result).toBe(changes);
+      expect((result[0] as any).compacted).toBeUndefined();
+    });
+
+    test("should pack large batch of deletions", () => {
+      const changes: ListOpPayload<string>[] = [];
+      const opIDs: OpID[] = [];
+
+      for (let i = 0; i < 50; i++) {
+        const opID = createOpID(`session${i}`, i);
+        opIDs.push(opID);
+        changes.push({ op: "del", insertion: opID });
+      }
+
+      const result = packer.packChanges(changes);
+
+      expect(result.length).toBe(50); // first element + 49 OpIDs
+      expect((result[0] as any).compacted).toBe(true);
+      expect((result[0] as any).insertion).toBe(opIDs[0]);
+
+      for (let i = 1; i < 50; i++) {
+        expect(result[i]).toBe(opIDs[i]);
+      }
+    });
+
+    test("should handle empty deletions array", () => {
+      const changes: ListOpPayload<string>[] = [];
+      const result = packer.packChanges(changes);
+      expect(result).toEqual([]);
+    });
+  });
+
+  describe("unpackChanges - deletion operations", () => {
+    test("should unpack packed deletion operations correctly", () => {
+      const opID1 = createOpID("session1", 0);
+      const opID2 = createOpID("session1", 1);
+      const opID3 = createOpID("session1", 2);
+
+      const firstDel: DeletionOpPayload & { compacted: true } = {
+        op: "del",
+        insertion: opID1,
+        compacted: true,
+      };
+
+      const packed = [firstDel, opID2, opID3];
+
+      const result = packer.unpackChanges(packed as any);
+
+      expect(result.length).toBe(3);
+      expect(result[0]?.op).toBe("del");
+      expect((result[0] as DeletionOpPayload).insertion).toBe(opID1);
+      expect(result[1]).toEqual({ op: "del", insertion: opID2 });
+      expect(result[2]).toEqual({ op: "del", insertion: opID3 });
+    });
+
+    test("should unpack two deletion operations", () => {
+      const opID1 = createOpID("session1", 5);
+      const opID2 = createOpID("session1", 6);
+
+      const firstDel: DeletionOpPayload & { compacted: true } = {
+        op: "del",
+        insertion: opID1,
+        compacted: true,
+      };
+
+      const packed = [firstDel, opID2];
+
+      const result = packer.unpackChanges(packed as any);
+
+      expect(result.length).toBe(2);
+      expect((result[0] as DeletionOpPayload).insertion).toBe(opID1);
+      expect((result[1] as DeletionOpPayload).insertion).toBe(opID2);
+    });
+
+    test("should handle single packed deletion", () => {
+      const opID = createOpID("session1", 0);
+
+      const firstDel: DeletionOpPayload & { compacted: true } = {
+        op: "del",
+        insertion: opID,
+        compacted: true,
+      };
+
+      const packed = [firstDel];
+
+      const result = packer.unpackChanges(packed as any);
+
+      // Single operation - should still work
+      expect(result.length).toBe(1);
+      expect((result[0] as DeletionOpPayload).insertion).toBe(opID);
+    });
+
+    test("should pass through unpacked deletion operations unchanged", () => {
+      const opID1 = createOpID("session1", 0);
+      const opID2 = createOpID("session1", 1);
+
+      const changes: ListOpPayload<string>[] = [
+        { op: "del", insertion: opID1 },
+        { op: "del", insertion: opID2 },
+      ];
+
+      const result = packer.unpackChanges(changes);
+
+      expect(result).toBe(changes);
+    });
+
+    test("should unpack large batch of deletions", () => {
+      const opIDs: OpID[] = [];
+      for (let i = 0; i < 50; i++) {
+        opIDs.push(createOpID(`session${i}`, i));
+      }
+
+      const firstDel: DeletionOpPayload & { compacted: true } = {
+        op: "del",
+        insertion: opIDs[0]!,
+        compacted: true,
+      };
+
+      const packed = [firstDel, ...opIDs.slice(1)];
+
+      const result = packer.unpackChanges(packed as any);
+
+      expect(result.length).toBe(50);
+      for (let i = 0; i < 50; i++) {
+        expect(result[i]?.op).toBe("del");
+        expect((result[i] as DeletionOpPayload).insertion).toBe(opIDs[i]);
+      }
+    });
+  });
+
+  describe("pack/unpack roundtrip - deletion operations", () => {
+    test("should maintain deletion operations integrity through pack/unpack cycle", () => {
+      const opIDs = [
+        createOpID("session1", 0),
+        createOpID("session1", 1),
+        createOpID("session1", 2),
+        createOpID("session1", 3),
+      ];
+
+      const original: ListOpPayload<string>[] = opIDs.map((opID) => ({
+        op: "del",
+        insertion: opID,
+      }));
+
+      const packed = packer.packChanges(original);
+      const unpacked = packer.unpackChanges(packed as any);
+
+      expect(unpacked.length).toBe(original.length);
+      for (let i = 0; i < original.length; i++) {
+        expect(unpacked[i]?.op).toBe("del");
+        expect((unpacked[i] as DeletionOpPayload).insertion).toBe(opIDs[i]);
+      }
+    });
+
+    test("should work with multiple pack/unpack cycles for deletions", () => {
+      const opIDs = [
+        createOpID("session1", 0),
+        createOpID("session1", 1),
+        createOpID("session1", 2),
+      ];
+
+      const original: ListOpPayload<string>[] = opIDs.map((opID) => ({
+        op: "del",
+        insertion: opID,
+      }));
+
+      const packed1 = packer.packChanges(original);
+      const unpacked1 = packer.unpackChanges(packed1 as any);
+      const packed2 = packer.packChanges(unpacked1);
+      const unpacked2 = packer.unpackChanges(packed2 as any);
+
+      expect(unpacked2.length).toBe(original.length);
+      for (let i = 0; i < original.length; i++) {
+        expect(unpacked2[i]?.op).toBe("del");
+        expect((unpacked2[i] as DeletionOpPayload).insertion).toBe(opIDs[i]);
+      }
+    });
+
+    test("should handle mixed pack/unpack with both insertions and deletions separately", () => {
+      // Test insertions
+      const insertions: ListOpPayload<string>[] = [
+        { op: "app", value: "a", after: "start" },
+        { op: "app", value: "b", after: "start" },
+      ];
+
+      const packedInsertions = packer.packChanges(insertions);
+      const unpackedInsertions = packer.unpackChanges(packedInsertions as any);
+
+      expect(unpackedInsertions.length).toBe(2);
+      expect((unpackedInsertions[0] as AppOpPayload<string>).value).toBe("a");
+      expect((unpackedInsertions[1] as AppOpPayload<string>).value).toBe("b");
+
+      // Test deletions
+      const opIDs = [createOpID("session1", 0), createOpID("session1", 1)];
+      const deletions: ListOpPayload<string>[] = opIDs.map((opID) => ({
+        op: "del",
+        insertion: opID,
+      }));
+
+      const packedDeletions = packer.packChanges(deletions);
+      const unpackedDeletions = packer.unpackChanges(packedDeletions as any);
+
+      expect(unpackedDeletions.length).toBe(2);
+      expect((unpackedDeletions[0] as DeletionOpPayload).insertion).toBe(
+        opIDs[0],
+      );
+      expect((unpackedDeletions[1] as DeletionOpPayload).insertion).toBe(
+        opIDs[1],
+      );
+    });
+  });
+
+  describe("space efficiency - deletion operations", () => {
+    test("packed deletion format should be more compact than unpacked", () => {
+      const opIDs: OpID[] = [];
+      for (let i = 0; i < 100; i++) {
+        opIDs.push(createOpID(`session${i}`, i));
+      }
+
+      const changes: ListOpPayload<string>[] = opIDs.map((opID) => ({
+        op: "del",
+        insertion: opID,
+      }));
+
+      const packed = packer.packChanges(changes);
+      const unpackedSize = JSON.stringify(changes).length;
+      const packedSize = JSON.stringify(packed).length;
+
+      // Packed should be smaller (removes repeated "op":"del" for each operation)
+      expect(packedSize).toBeLessThan(unpackedSize);
+    });
+
+    test("deletion packing efficiency increases with more operations", () => {
+      const batchSizes = [5, 10, 20, 50];
+
+      const savings = batchSizes.map((size) => {
+        const opIDs: OpID[] = [];
+        for (let i = 0; i < size; i++) {
+          opIDs.push(createOpID(`session${i}`, i));
+        }
+
+        const changes: ListOpPayload<string>[] = opIDs.map((opID) => ({
+          op: "del",
+          insertion: opID,
+        }));
+
+        const packed = packer.packChanges(changes);
+        const unpackedSize = JSON.stringify(changes).length;
+        const packedSize = JSON.stringify(packed).length;
+
+        return ((unpackedSize - packedSize) / unpackedSize) * 100;
+      });
+
+      // Savings should generally increase with batch size
+      for (let i = 1; i < savings.length; i++) {
+        const currentSaving = savings[i];
+        const previousSaving = savings[i - 1];
+        if (currentSaving !== undefined && previousSaving !== undefined) {
+          expect(currentSaving).toBeGreaterThanOrEqual(previousSaving * 0.9); // Allow small variance
+        }
+      }
     });
   });
 

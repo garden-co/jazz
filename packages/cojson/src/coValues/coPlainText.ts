@@ -3,7 +3,10 @@ import { AvailableCoValueCore } from "../coValueCore/coValueCore.js";
 import { TRANSACTION_CONFIG } from "../config.js";
 import { JsonObject } from "../jsonValue.js";
 import { DeletionOpPayload, OpID, RawCoList } from "./coList.js";
-import { CoPlainTextPackImplementation } from "../pack/coPlainText.js";
+import {
+  CoPlainTextPackImplementation,
+  PackedChangesCoPlainText,
+} from "../pack/coPlainText.js";
 
 export type StringifiedOpID = string & { __stringifiedOpID: true };
 
@@ -47,7 +50,7 @@ type PlaintextIdxMapping = {
  */
 export class RawCoPlainText<
   Meta extends JsonObject | null = JsonObject | null,
-> extends RawCoList<string, Meta> {
+> extends RawCoList<string, Meta, PackedChangesCoPlainText> {
   /** @category 6. Meta */
   type = "coplaintext" as const;
 

@@ -8,7 +8,7 @@ export type PackedChanges<T extends JsonValue> = [
 
 export interface CoListPack<
   Item extends JsonValue,
-  PackedItems extends JsonValue[],
+  PackedItems extends JsonValue[] = PackedChanges<Item>,
 > {
   packChanges(
     changes: ListOpPayload<Item>[],
