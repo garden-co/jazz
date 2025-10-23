@@ -67,16 +67,16 @@ export class CoListPackImplementation<Item extends JsonValue>
       return changes as ListOpPayload<Item>[];
     }
 
+    // Check if the first element is compacted
+    if (!(changes[0] as AppOpPayload<Item> & { compacted: true })?.compacted) {
+      return changes as ListOpPayload<Item>[];
+    }
+
     // Get the first element and the values
     const [firstElement, ...values] = changes as [
       AppOpPayload<Item> & { compacted: true },
       ...Item[],
     ];
-
-    // Check if the first element is compacted
-    if (!firstElement?.compacted) {
-      return changes as ListOpPayload<Item>[];
-    }
 
     // Return the unpacked changes and the values
     return [
