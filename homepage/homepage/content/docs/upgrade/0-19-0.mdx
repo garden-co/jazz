@@ -1,0 +1,213 @@
+import { Alert, CodeGroup } from '@/components/forMdx'
+
+# Jazz 0.19.0 - Explicit CoValue loading states
+
+This release introduces explicit loading states when loading CoValues.
+
+## Motivation
+
+Previously, APIs that loaded CoValues returned `undefined` to represent values that were still loading, and `null` for values that couldn't be loaded due to authorization or network errors.
+
+This approach had several problems:
+- **Lack of diagnostic information**: It's difficult to distinguish between different failure modes (authorization error vs. network error).
+- **Ambiguous nullable values**: It's easy to confuse unset CoValue properties with not-loaded CoValues, since both are represented as nullable values.
+- **Implicit error handling**: Unloaded values are typically handled with null-checks or optional chaining, which conflate multiple distinct states into a single code path. This often causes unexpected behavior when apps are deployed and used collaboratively.
+
+In this release, we're introducing a new way to represent loading states:
+<CodeGroup>
+```ts
+// APIs that load a CoValue now return a "maybe loaded" CoValue:
+type MaybeLoaded<C extends CoValue> = CoValue | NotLoaded<CoValue>;
+
+type NotLoaded<C extends CoValue> = { 
+  $isLoaded: false;
+  $jazz: {    
+    id: ID<C>;  
+    loadingState: "loading" | "unauthorized" | "unavailable";  
+  };
+};
+
+type CoValue = {
+  $isLoaded: true;
+  $jazz: {
+    id: ID<CoValue>;
+    loadingState: "loaded";
+  } & CoValueAPI<CoValue>; // the whole `$jazz` API
+  ... // all other properties from that CoValue
+};
+```
+</CodeGroup>
+
+The goal of explicit loading states is to encourage developers to think more carefully about CoValue resolution depth and loading states when building their apps, ensuring all cases are properly handled.
+
+## Changes
+
+### The new `$isLoaded` field
+
+Before consuming a CoValue, you must check whether it's loaded and handle the case where it's not. Use the `$isLoaded` field to perform this check.
+
+<CodeGroup>
+```ts
+const Person = co.map({
+  name: z.string(),
+  address: co.map({
+    street: z.string(),
+  }),
+});
+
+const person = await Person.load(id, {
+  resolve: { address: true },
+});
+
+if (!person.$isLoaded) {
+  // Handle the case where the CoValue is not loaded
+  throw new Error("Person not found or not accessible");
+}
+
+// Thanks to the resolve query, we know that if person is loaded, so is address
+console.log(person.address.street); // "123 Fake Street" 
+```
+</CodeGroup>
+
+### `$jazz.loadingState` provides additional information
+
+To handle different loading states more granularly, use the `$jazz.loadingState` field.
+
+<CodeGroup>
+```tsx
+const person = useCoState(Person, id, {
+  resolve: { address: true },
+});
+
+if (!person.$isLoaded) {
+  switch (person.$jazz.loadingState) {
+    case "loading":
+      return "Loading...";
+    case "unauthorized":
+      return "Person not accessible";
+    case "unavailable":
+      return "Person not found";
+  }
+}
+```
+</CodeGroup>
+
+### All hooks now accept selector functions
+
+The `useAccountWithSelector` and `useCoStateWithSelector` hooks have seen widespread adoption, allowing you to select a subset of a CoValue's properties to return.
+
+This prevents unnecessary re-renders, as components only re-render when the data you're interested in changes.
+
+In this release, we've added the `select` functionality directly to the `useAccount` and `useCoState` hooks.
+
+<CodeGroup>
+```tsx
+const profileName = useAccount(Account, {
+  resolve: { profile: true },
+  select: (account) => 
+    account.$isLoaded
+      ? account.profile.name 
+      : "Unavailable",
+});
+```
+</CodeGroup>
+
+## Breaking Changes
+
+### Return types when loading CoValues
+
+All methods and functions that load CoValues now return a `MaybeLoaded<CoValue>` instead of `CoValue | null | undefined`.
+
+You'll need to update your code to check the `$isLoaded` field instead of checking for `null` or `undefined`.
+
+<CodeGroup>
+```ts
+const person = await Person.load(id, {
+  resolve: { address: true },
+});
+
+if (!person) { // [!code --]
+if (!person.$isLoaded) { // [!code ++]
+  return;
+}
+```
+</CodeGroup>
+
+### Renamed `$onError: null` to `$onError: "catch"`
+
+Since `null` is no longer used to represent a not-loaded CoValue, we've renamed the `$onError: null` option in resolve queries to `$onError: "catch"`.
+
+For more information about `$onError`, see the [Catching loading errors](/docs/core-concepts/subscription-and-loading#catching-loading-errors) documentation.
+
+### Split the `useAccount` hook into three separate hooks
+
+Previously, `useAccount` returned an object containing the current account, the current agent, and a logout function.
+
+This caused confusion for users who only needed the current agent or the logout function.
+
+To address this, we've split `useAccount` into three separate hooks:
+- `useAccount`: now returns only the current account
+- `useAgent`: returns the current agent
+- `useLogOut`: returns a function for logging out of the current account
+
+### Removed the `useAccountWithSelector` and `useCoStateWithSelector` hooks
+
+Now that `useAccount` and `useCoState` accept selector functions, the `useAccountWithSelector` and `useCoStateWithSelector` hooks are no longer needed.
+
+The APIs are equivalent, so you can use `useAccount` and `useCoState` in place of the `-WithSelector` variants.
+
+## Codemod
+
+We provide a codemod to make the upgrade to explicit loading states quicker.
+
+The codemod is type-aware, so you must upgrade `jazz-tools` to 0.19 before running it.
+
+<CodeGroup>
+```bash
+npx jazz-tools-codemod-0-19@latest
+```
+</CodeGroup>
+
+Or if you want to run it on a specific path or file:
+
+<CodeGroup>
+```bash
+npx jazz-tools-codemod-0-19@latest ./path/to/your/src
+```
+</CodeGroup>
+
+The goal of this codemod is to get you through 80% of the work quickly. After running it, perform a TypeScript type check to identify the remaining issues.
+
+Note that some edge cases may be migrated incorrectly, and some code patterns (e.g. optional chaining) may not be detected by the codemod.
+
+## Known Issue: TypeScript Iterator Bug
+
+While introducing explicit loading states, we discovered [a TypeScript bug](https://github.com/microsoft/TypeScript/issues/62462) that prevents iterating over CoLists using methods that require an iterator, when these CoLists are loaded inside other CoValues (CoMaps, other CoLists, or CoFeeds).
+
+We've submitted [a fix](https://github.com/microsoft/TypeScript/pull/62661) for this bug. Until it's released, use one of the following workarounds if you encounter this issue:
+
+```ts
+const Pet = co.map({
+  name: z.string(),
+});
+const Person = co.map({
+  pets: co.list(Pet),
+});
+
+if (!person.$isLoaded) {
+  return;
+}
+
+// Use `.values()` to explicitly get the iterator
+const [firstPet] = person.pets; // [!code --]
+const [firstPet] = person.pets.values(); // [!code ++]
+
+// Array iteration methods (like `forEach` and `map`) work as expected
+for (const pet of person.pets) { // [!code --]
+person.pets.forEach(pet => { // [!code ++]
+  console.log(pet.name);
+} // [!code --]
+}); // [!code ++]
+```
+
+Alternatively, you can suppress the TypeScript error by adding a `@ts-expect-error` comment, since this is purely a type-level issue.

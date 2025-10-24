@@ -42,6 +42,11 @@ export const docNavigationItems = [
     prefix: "/docs/upgrade",
     items: [
       {
+        name: "0.19.0 - Explicit loading states",
+        href: "/docs/upgrade/0-19-0",
+        done: 100,
+      },
+      {
         name: "0.18.0 - New `$jazz` field in CoValues",
         href: "/docs/upgrade/0-18-0",
         done: 100,
