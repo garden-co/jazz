@@ -1,5 +1,13 @@
 # cojson
 
+## 0.18.30
+
+### Patch Changes
+
+- d08b7e2: feat: introduced new "manager" role who can invite and remove members, and being removed by admins.
+  - cojson-core-wasm@0.18.30
+  - cojson-core-napi@0.18.30
+
 ## 0.18.29
 
 ### Patch Changes

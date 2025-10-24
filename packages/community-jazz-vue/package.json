@@ -1,6 +1,6 @@
 {
   "name": "community-jazz-vue",
-  "version": "0.18.29",
+  "version": "0.18.30",
   "type": "module",
   "main": "dist/index.js",
   "types": "src/index.ts",
