@@ -186,6 +186,7 @@ While introducing explicit loading states, we discovered [a TypeScript bug](http
 
 We've submitted [a fix](https://github.com/microsoft/TypeScript/pull/62661) for this bug. Until it's released, use one of the following workarounds if you encounter this issue:
 
+<CodeGroup>
 ```ts
 const Pet = co.map({
   name: z.string(),
@@ -209,5 +210,6 @@ person.pets.forEach(pet => { // [!code ++]
 } // [!code --]
 }); // [!code ++]
 ```
+</CodeGroup>
 
 Alternatively, you can suppress the TypeScript error by adding a `@ts-expect-error` comment, since this is purely a type-level issue.
