@@ -7,9 +7,11 @@
     "vitest": "catalog:default"
   },
   "scripts": {
-    "bench": "vitest bench"
+    "bench": "vitest bench",
+    "bench:pack": "vitest bench colist.pack.bench.ts"
   },
   "devDependencies": {
+    "@faker-js/faker": "^9.7.0",
     "vitest": "catalog:default"
   }
 }

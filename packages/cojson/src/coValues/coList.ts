@@ -7,20 +7,25 @@ import { isCoValue } from "../typeUtils/isCoValue.js";
 import { RawAccountID } from "./account.js";
 import { RawGroup } from "./group.js";
 import { Transaction } from "../coValueCore/verifiedState.js";
+import type { CoListPack, PackedChanges } from "../pack/coList.js";
 
 export type OpID = TransactionID & { changeIdx: number };
 
+export type AppOpPayload<T extends JsonValue> = {
+  op: "app";
+  value: T;
+  after: OpID | "start";
+};
+
+export type PreOpPayload<T extends JsonValue> = {
+  op: "pre";
+  value: T;
+  before: OpID | "end";
+};
+
 export type InsertionOpPayload<T extends JsonValue> =
-  | {
-      op: "pre";
-      value: T;
-      before: OpID | "end";
-    }
-  | {
-      op: "app";
-      value: T;
-      after: OpID | "start";
-    };
+  | AppOpPayload<T>
+  | PreOpPayload<T>;
 
 export type DeletionOpPayload = {
   op: "del";
@@ -47,6 +52,7 @@ type DeletionEntry = {
 export class RawCoList<
   Item extends JsonValue = JsonValue,
   Meta extends JsonObject | null = null,
+  Packed extends JsonValue[] = PackedChanges<Item>,
 > implements RawCoValue
 {
   /** @category 6. Meta */
@@ -93,8 +99,10 @@ export class RawCoList<
 
   lastValidTransaction: number | undefined;
 
+  pack: CoListPack<Item, Packed>;
+
   /** @internal */
-  constructor(core: AvailableCoValueCore) {
+  constructor(core: AvailableCoValueCore, pack: CoListPack<Item, Packed>) {
     this.id = core.id as CoID<this>;
     this.core = core;
 
@@ -103,7 +111,7 @@ export class RawCoList<
     this.afterStart = [];
     this.beforeEnd = [];
     this.knownTransactions = new Set<Transaction>();
-
+    this.pack = pack;
     this.processNewTransactions();
   }
 
@@ -211,9 +219,11 @@ export class RawCoList<
         madeAt,
       );
 
-      for (const [changeIdx, changeUntyped] of changes.entries()) {
-        const change = changeUntyped as ListOpPayload<Item>;
+      const changesUnpacked = this.pack.unpackChanges(
+        changes as Packed | ListOpPayload<Item>[],
+      );
 
+      for (const [changeIdx, change] of changesUnpacked.entries()) {
         const opID = {
           sessionID: txID.sessionID,
           txIndex: txID.txIndex,
@@ -520,6 +530,9 @@ export class RawCoList<
     items: Item[],
     after?: number,
     privacy: "private" | "trusting" = "private",
+    options?: {
+      disablePacking?: boolean;
+    },
   ) {
     const entries = this.entries();
     after =
@@ -554,7 +567,14 @@ export class RawCoList<
       changes.reverse();
     }
 
-    this.core.makeTransaction(changes, privacy);
+    if (!options?.disablePacking) {
+      const changesCompacted = this.pack.packChanges(
+        changes as ListOpPayload<Item>[],
+      );
+      this.core.makeTransaction(changesCompacted, privacy);
+    } else {
+      this.core.makeTransaction(changes, privacy);
+    }
     this.processNewTransactions();
   }
 
@@ -662,7 +682,7 @@ export class RawCoList<
 
   /** @internal */
   rebuildFromCore() {
-    const listAfter = new RawCoList(this.core) as this;
+    const listAfter = new RawCoList(this.core, this.pack) as this;
 
     this.afterStart = listAfter.afterStart;
     this.beforeEnd = listAfter.beforeEnd;

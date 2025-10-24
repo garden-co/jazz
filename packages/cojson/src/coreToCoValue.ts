@@ -6,6 +6,7 @@ import { RawCoMap } from "./coValues/coMap.js";
 import { RawCoPlainText } from "./coValues/coPlainText.js";
 import { RawBinaryCoStream, RawCoStream } from "./coValues/coStream.js";
 import { RawGroup } from "./coValues/group.js";
+import { CoListPackImplementation } from "./pack/coList.js";
 
 export function coreToCoValue(
   core: AvailableCoValueCore,
@@ -27,7 +28,7 @@ export function coreToCoValue(
   } else if (core.verified.header.type === "coplaintext") {
     return new RawCoPlainText(core);
   } else if (core.verified.header.type === "colist") {
-    return new RawCoList(core);
+    return new RawCoList(core, new CoListPackImplementation());
   } else if (core.verified.header.type === "costream") {
     if (
       core.verified.header.meta &&
