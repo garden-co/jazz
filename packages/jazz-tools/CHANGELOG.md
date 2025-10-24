@@ -1,5 +1,19 @@
 # jazz-tools
 
+## 0.18.30
+
+### Patch Changes
+
+- b3dbcaa: feat: inspector's group view now shows parents/children groups, with addMember/removeMember features
+- 75d452e: Allow users to specify custom placeholders to be used while images are loading
+- 346c5fb: Add `.optional()` method to Account schema
+- 162757c: Export `z.record` and `z.intersection` as part of jazz-tools
+- d08b7e2: feat: introduced new "manager" role who can invite and remove members, and being removed by admins.
+- Updated dependencies [d08b7e2]
+  - cojson@0.18.30
+  - cojson-storage-indexeddb@0.18.30
+  - cojson-transport-ws@0.18.30
+
 ## 0.18.29
 
 ### Patch Changes
