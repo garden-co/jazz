@@ -8,6 +8,7 @@ import {
   randomAgentAndSessionID,
   waitFor,
 } from "./testUtils";
+import { expectMap } from "../coValue";
 
 describe("roleOf", () => {
   test("returns direct role assignments", () => {
@@ -326,7 +327,11 @@ describe("roleOf", () => {
       mapOnNode2.set("test", "Updated after the downgrade");
 
       expect(mapOnNode2.get("test")).toEqual("Written from everyone");
-      expect(mapOnNode2.get("fromAdmin")).toEqual("Written from admin");
+
+      await waitFor(async () => {
+        const updatedMap = expectMap(mapOnNode2.core.getCurrentContent());
+        expect(updatedMap.get("fromAdmin")).toEqual("Written from admin");
+      });
     });
 
     test("switching from everyone writeOnly to writer", async () => {
@@ -347,7 +352,7 @@ describe("roleOf", () => {
 
       expect(groupOnNode2.myRole()).toEqual("writeOnly");
 
-      const mapOnNode2 = await loadCoValueOrFail(node2.node, map.id);
+      let mapOnNode2 = await loadCoValueOrFail(node2.node, map.id);
 
       expect(mapOnNode2.get("test")).toEqual(undefined);
 
@@ -360,12 +365,19 @@ describe("roleOf", () => {
 
       group.addMember("everyone", "writer");
 
-      await group.core.waitForSync();
+      await waitFor(async () => {
+        expect(groupOnNode2.core.knownState()).toEqual(group.core.knownState());
+      });
 
       mapOnNode2.set("test", "Updated after the upgrade");
 
       expect(mapOnNode2.get("test")).toEqual("Updated after the upgrade");
-      expect(mapOnNode2.get("fromAdmin")).toEqual("Written from admin");
+
+      await waitFor(async () => {
+        const updatedMap = expectMap(mapOnNode2.core.getCurrentContent());
+        // Get the new content after the invalidation caused by group update
+        expect(updatedMap.get("fromAdmin")).toEqual("Written from admin");
+      });
     });
 
     test("adding a reader member after writeOnly", async () => {

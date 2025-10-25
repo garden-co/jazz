@@ -1,12 +1,11 @@
 import { CoID, RawCoValue } from "../coValue.js";
 import { AvailableCoValueCore } from "../coValueCore/coValueCore.js";
-import { AgentID, TransactionID } from "../ids.js";
+import { AgentID, RawCoID, TransactionID } from "../ids.js";
 import { JsonObject, JsonValue } from "../jsonValue.js";
 import { accountOrAgentIDfromSessionID } from "../typeUtils/accountOrAgentIDfromSessionID.js";
 import { isCoValue } from "../typeUtils/isCoValue.js";
 import { RawAccountID } from "./account.js";
 import type { RawGroup } from "./group.js";
-import { Transaction } from "../coValueCore/verifiedState.js";
 
 type MapOp<K extends string, V extends JsonValue | undefined> = {
   txID: TransactionID;
@@ -61,7 +60,7 @@ export class RawCoMapView<
     [Key in keyof Shape & string]?: MapOp<Key, Shape[Key]>[];
   };
   /** @internal */
-  knownTransactions: Set<Transaction>;
+  knownTransactions: Record<RawCoID, number>;
 
   /** @internal */
   ignorePrivateTransactions: boolean;
@@ -70,9 +69,7 @@ export class RawCoMapView<
   /** @category 6. Meta */
   readonly _shape!: Shape;
 
-  get totalValidTransactions() {
-    return this.knownTransactions.size;
-  }
+  totalValidTransactions: number = 0;
 
   /** @internal */
   constructor(
@@ -88,7 +85,7 @@ export class RawCoMapView<
       options?.ignorePrivateTransactions ?? false;
     this.ops = {};
     this.latest = {};
-    this.knownTransactions = new Set<Transaction>();
+    this.knownTransactions = { [core.id]: 0 };
 
     this.processNewTransactions();
   }
@@ -147,6 +144,8 @@ export class RawCoMapView<
     for (const [key, entries] of changedEntries.entries()) {
       this.latest[key] = entries[entries.length - 1];
     }
+
+    this.totalValidTransactions += newValidTransactions.length;
   }
 
   isTimeTravelEntity() {

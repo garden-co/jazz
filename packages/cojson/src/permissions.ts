@@ -120,12 +120,7 @@ export function determineValidTransactions(coValue: CoValueCore): void {
       throw new Error("Group must be a map");
     }
 
-    for (const tx of coValue.verifiedTransactions) {
-      if (tx.isValidated) {
-        continue;
-      }
-
-      tx.isValidated = true;
+    for (const tx of coValue.toValidateTransactions) {
       // We use the original made at to get the group at the original time when the transaction was made
       // madeAt might be changed by the meta field (e.g. merged transactions), and so can't be used for permissions checks
       const groupAtTime = groupContent.atTime(tx.currentMadeAt);
@@ -135,7 +130,7 @@ export function determineValidTransactions(coValue: CoValueCore): void {
       );
 
       if (!effectiveTransactor) {
-        tx.isValid = false;
+        tx.markInvalid();
         continue;
       }
 
@@ -153,7 +148,7 @@ export function determineValidTransactions(coValue: CoValueCore): void {
           ownerId: tx.meta.ownerId,
         };
         tx.changes = [];
-        tx.isValid = true;
+        tx.markValid();
         continue;
       }
 
@@ -163,11 +158,11 @@ export function determineValidTransactions(coValue: CoValueCore): void {
         transactorRoleAtTxTime !== "writer" &&
         transactorRoleAtTxTime !== "writeOnly"
       ) {
-        tx.isValid = false;
+        tx.markInvalid();
         continue;
       }
 
-      tx.isValid = true;
+      tx.markValid();
     }
     return;
   }
@@ -175,8 +170,7 @@ export function determineValidTransactions(coValue: CoValueCore): void {
   // The CoValue has unsafeAllowAll ruleset
   if (coValue.verified.header.ruleset.type === "unsafeAllowAll") {
     for (const tx of coValue.verifiedTransactions) {
-      tx.isValid = true;
-      tx.isValidated = true;
+      tx.markValid();
     }
     return;
   }
@@ -262,13 +256,11 @@ function determineValidTransactionsForGroup(
     const transactor = transaction.author;
     const transactorRole = memberState[transactor];
 
-    transaction.isValidated = true;
-
     const tx = transaction.tx;
 
     if (tx.privacy === "private") {
       if (memberState[transactor] === "admin") {
-        transaction.isValid = true;
+        transaction.markValid();
         continue;
       } else {
         logPermissionError(
@@ -294,33 +286,33 @@ function determineValidTransactionsForGroup(
 
     if (changes.length !== 1) {
       logPermissionError("Group transaction must have exactly one change");
-      transaction.isValid = false;
+      transaction.markInvalid();
       continue;
     }
 
     if (change.op !== "set") {
       logPermissionError("Group transaction must set a role or readKey");
-      transaction.isValid = false;
+      transaction.markInvalid();
       continue;
     }
 
     if (change.key === "readKey") {
       if (!canAdmin(transactorRole)) {
         logPermissionError("Only admins can set readKeys");
-        transaction.isValid = false;
+        transaction.markInvalid();
         continue;
       }
 
-      transaction.isValid = true;
+      transaction.markValid();
       continue;
     } else if (change.key === "profile") {
       if (!canAdmin(transactorRole)) {
         logPermissionError("Only admins can set profile");
-        transaction.isValid = false;
+        transaction.markInvalid();
         continue;
       }
 
-      transaction.isValid = true;
+      transaction.markValid();
       continue;
     } else if (change.key === "root") {
       if (!canAdmin(transactorRole)) {
@@ -328,7 +320,7 @@ function determineValidTransactionsForGroup(
         continue;
       }
 
-      transaction.isValid = true;
+      transaction.markValid();
       continue;
     } else if (
       isKeyForKeyField(change.key) ||
@@ -345,19 +337,19 @@ function determineValidTransactionsForGroup(
         !isOwnWriteKeyRevelation(change.key, transactor, writeOnlyKeys)
       ) {
         logPermissionError("Only admins and managers can reveal keys");
-        transaction.isValid = false;
+        transaction.markInvalid();
         continue;
       }
 
       // TODO: check validity of agents who the key is revealed to?
-      transaction.isValid = true;
+      transaction.markValid();
       continue;
     } else if (isParentExtension(change.key)) {
       if (!canAdmin(transactorRole)) {
         logPermissionError(
           "Only admins and managers can set parent extensions",
         );
-        transaction.isValid = false;
+        transaction.markInvalid();
         continue;
       }
 
@@ -376,14 +368,14 @@ function determineValidTransactionsForGroup(
         logPermissionError(
           "Circular extend detected, dropping the transaction",
         );
-        transaction.isValid = false;
+        transaction.markInvalid();
         continue;
       }
 
-      transaction.isValid = true;
+      transaction.markValid();
       continue;
     } else if (isChildExtension(change.key)) {
-      transaction.isValid = true;
+      transaction.markValid();
       continue;
     } else if (isWriteKeyForMember(change.key)) {
       const memberKey = getAccountOrAgentFromWriteKeyForMember(change.key);
@@ -395,7 +387,7 @@ function determineValidTransactionsForGroup(
         memberKey !== transactor
       ) {
         logPermissionError("Only admins and managers can set writeKeys");
-        transaction.isValid = false;
+        transaction.markInvalid();
         continue;
       }
 
@@ -413,13 +405,13 @@ function determineValidTransactionsForGroup(
         logPermissionError(
           "Write key already exists and can't be overridden by invite",
         );
-        transaction.isValid = false;
+        transaction.markInvalid();
         continue;
       }
 
       writeKeys.add(change.key);
 
-      transaction.isValid = true;
+      transaction.markValid();
       continue;
     }
 
@@ -440,7 +432,7 @@ function determineValidTransactionsForGroup(
       assignedRole !== "writeOnlyInvite"
     ) {
       logPermissionError("Group transaction must set a valid role");
-      transaction.isValid = false;
+      transaction.markInvalid();
       continue;
     }
 
@@ -456,7 +448,7 @@ function determineValidTransactionsForGroup(
       logPermissionError(
         "Everyone can only be set to reader, writer, writeOnly or revoked",
       );
-      transaction.isValid = false;
+      transaction.markInvalid();
       continue;
     }
 
@@ -468,12 +460,12 @@ function determineValidTransactionsForGroup(
       }
 
       memberState[change.key] = change.value;
-      transaction.isValid = true;
+      transaction.markValid();
     }
 
     function markTransactionAsInvalid(message: string) {
       logPermissionError(message);
-      transaction.isValid = false;
+      transaction.markInvalid();
     }
 
     // is first self promotion to admin
@@ -545,7 +537,7 @@ function determineValidTransactionsForGroup(
     if (transactorRole === "adminInvite") {
       if (change.value !== "admin") {
         logPermissionError("AdminInvites can only create admins.");
-        transaction.isValid = false;
+        transaction.markInvalid();
         continue;
       }
     } else if (transactorRole === "managerInvite") {
@@ -576,7 +568,7 @@ function determineValidTransactionsForGroup(
     }
 
     memberState[affectedMember] = change.value;
-    transaction.isValid = true;
+    transaction.markValid();
   }
 
   return { memberState };

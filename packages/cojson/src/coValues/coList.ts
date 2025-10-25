@@ -1,6 +1,6 @@
 import { CoID, RawCoValue } from "../coValue.js";
 import { AvailableCoValueCore } from "../coValueCore/coValueCore.js";
-import { AgentID, SessionID, TransactionID } from "../ids.js";
+import { AgentID, SessionID, TransactionID, RawCoID } from "../ids.js";
 import { JsonObject, JsonValue } from "../jsonValue.js";
 import { accountOrAgentIDfromSessionID } from "../typeUtils/accountOrAgentIDfromSessionID.js";
 import { isCoValue } from "../typeUtils/isCoValue.js";
@@ -85,11 +85,8 @@ export class RawCoList<
     opID: OpID;
   }[];
   /** @internal */
-  knownTransactions: Set<Transaction>;
-
-  get totalValidTransactions() {
-    return this.knownTransactions.size;
-  }
+  knownTransactions: Record<RawCoID, number>;
+  totalValidTransactions: number = 0;
 
   lastValidTransaction: number | undefined;
 
@@ -102,7 +99,7 @@ export class RawCoList<
     this.deletionsByInsertion = {};
     this.afterStart = [];
     this.beforeEnd = [];
-    this.knownTransactions = new Set<Transaction>();
+    this.knownTransactions = { [core.id]: 0 };
 
     this.processNewTransactions();
   }
@@ -282,6 +279,8 @@ export class RawCoList<
     } else {
       this.lastValidTransaction = lastValidTransaction;
     }
+
+    this.totalValidTransactions += transactions.length;
   }
 
   /** @category 6. Meta */
@@ -669,6 +668,7 @@ export class RawCoList<
     this.insertions = listAfter.insertions;
     this.lastValidTransaction = listAfter.lastValidTransaction;
     this.knownTransactions = listAfter.knownTransactions;
+    this.totalValidTransactions = listAfter.totalValidTransactions;
     this.deletionsByInsertion = listAfter.deletionsByInsertion;
     this._cachedEntries = undefined;
   }
