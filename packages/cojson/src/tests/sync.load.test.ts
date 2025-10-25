@@ -174,13 +174,13 @@ describe("loading coValues from server", () => {
         "server -> client2 | CONTENT Map header: true new: After: 0 New: 1",
         "client2 -> server | KNOWN Group sessions: header/5",
         "client2 -> server | KNOWN Map sessions: header/1",
-        "client -> server | CONTENT ParentGroup header: true new: After: 0 New: 4",
+        "client -> server | CONTENT ParentGroup header: true new: After: 0 New: 3",
         "client -> server | CONTENT Group header: false new: After: 5 New: 2",
-        "server -> client | KNOWN ParentGroup sessions: header/4",
+        "server -> client | KNOWN ParentGroup sessions: header/3",
         "server -> client | KNOWN Group sessions: header/7",
-        "server -> client2 | CONTENT ParentGroup header: true new: After: 0 New: 4",
+        "server -> client2 | CONTENT ParentGroup header: true new: After: 0 New: 3",
         "server -> client2 | CONTENT Group header: false new: After: 5 New: 2",
-        "client2 -> server | KNOWN ParentGroup sessions: header/4",
+        "client2 -> server | KNOWN ParentGroup sessions: header/3",
         "client2 -> server | KNOWN Group sessions: header/7",
       ]
     `);
@@ -356,10 +356,10 @@ describe("loading coValues from server", () => {
     ).toMatchInlineSnapshot(`
       [
         "client -> server | LOAD Map sessions: empty",
-        "server -> client | CONTENT ParentGroup header: true new: After: 0 New: 6",
+        "server -> client | CONTENT ParentGroup header: true new: After: 0 New: 5",
         "server -> client | CONTENT Group header: true new: After: 0 New: 5",
         "server -> client | CONTENT Map header: true new: After: 0 New: 1",
-        "client -> server | KNOWN ParentGroup sessions: header/6",
+        "client -> server | KNOWN ParentGroup sessions: header/5",
         "client -> server | KNOWN Group sessions: header/5",
         "client -> server | KNOWN Map sessions: header/1",
       ]
@@ -738,9 +738,9 @@ describe("loading coValues from server", () => {
     ).toMatchInlineSnapshot(`
       [
         "client -> server | LOAD Map sessions: empty",
-        "server -> client | CONTENT ParentGroup header: true new: After: 0 New: 6",
+        "server -> client | CONTENT ParentGroup header: true new: After: 0 New: 5",
         "server -> client | CONTENT Map header: true new: After: 0 New: 1",
-        "client -> server | KNOWN ParentGroup sessions: header/6",
+        "client -> server | KNOWN ParentGroup sessions: header/5",
         "client -> server | LOAD Group sessions: empty",
         "server -> client | CONTENT Group header: true new: After: 0 New: 5",
         "client -> server | KNOWN Group sessions: header/5",
@@ -786,9 +786,9 @@ describe("loading coValues from server", () => {
         "server -> client | CONTENT Map header: true new: After: 0 New: 1",
         "client -> server | LOAD ParentGroup sessions: empty",
         "client -> server | LOAD Group sessions: empty",
-        "server -> client | CONTENT ParentGroup header: true new: After: 0 New: 6",
+        "server -> client | CONTENT ParentGroup header: true new: After: 0 New: 5",
         "server -> client | CONTENT Group header: true new: After: 0 New: 5",
-        "client -> server | KNOWN ParentGroup sessions: header/6",
+        "client -> server | KNOWN ParentGroup sessions: header/5",
         "client -> server | KNOWN Group sessions: header/5",
         "client -> server | KNOWN Map sessions: header/1",
       ]
@@ -1176,18 +1176,18 @@ describe("loading coValues from server", () => {
       }),
     ).toMatchInlineSnapshot(`
       [
-        "newSession -> core | CONTENT ParentGroup header: true new: After: 0 New: 4",
+        "newSession -> core | CONTENT ParentGroup header: true new: After: 0 New: 3",
         "newSession -> core | CONTENT Group header: false new: After: 0 New: 2",
-        "core -> newSession | KNOWN ParentGroup sessions: header/4",
+        "core -> newSession | KNOWN ParentGroup sessions: header/3",
         "core -> newSession | KNOWN Group sessions: header/5",
         "core -> edge | CONTENT Group header: false new: After: 0 New: 2",
         "edge -> core | LOAD ParentGroup sessions: empty",
-        "core -> edge | CONTENT ParentGroup header: true new: After: 0 New: 4",
-        "edge -> core | KNOWN ParentGroup sessions: header/4",
+        "core -> edge | CONTENT ParentGroup header: true new: After: 0 New: 3",
+        "edge -> core | KNOWN ParentGroup sessions: header/3",
         "edge -> core | KNOWN Group sessions: header/5",
-        "edge -> client | CONTENT ParentGroup header: true new: After: 0 New: 4",
+        "edge -> client | CONTENT ParentGroup header: true new: After: 0 New: 3",
         "edge -> client | CONTENT Group header: false new: After: 0 New: 2",
-        "client -> edge | KNOWN ParentGroup sessions: header/4",
+        "client -> edge | KNOWN ParentGroup sessions: header/3",
         "client -> edge | KNOWN Group sessions: header/5",
       ]
     `);
@@ -1312,14 +1312,14 @@ describe("loading coValues from server", () => {
     ).toMatchInlineSnapshot(`
       [
         "client -> server | CONTENT Group header: true new: After: 0 New: 3",
-        "client -> server | CONTENT ParentGroup header: true new: After: 0 New: 6",
-        "client -> server | CONTENT Group header: false new: After: 3 New: 3",
-        "client -> server | CONTENT ParentGroup header: false new: After: 6 New: 2",
+        "client -> server | CONTENT ParentGroup header: true new: After: 0 New: 5",
+        "client -> server | CONTENT Group header: false new: After: 3 New: 2",
+        "client -> server | CONTENT ParentGroup header: false new: After: 5 New: 2",
         "client -> server | CONTENT Map header: true new: After: 0 New: 1",
         "server -> client | KNOWN Group sessions: header/3",
-        "server -> client | KNOWN ParentGroup sessions: header/6",
-        "server -> client | KNOWN Group sessions: header/6",
-        "server -> client | KNOWN ParentGroup sessions: header/8",
+        "server -> client | KNOWN ParentGroup sessions: header/5",
+        "server -> client | KNOWN Group sessions: header/5",
+        "server -> client | KNOWN ParentGroup sessions: header/7",
         "server -> client | KNOWN Map sessions: header/1",
       ]
     `);

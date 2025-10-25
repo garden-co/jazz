@@ -180,7 +180,7 @@ test("should load dependencies correctly (group inheritance)", async () => {
   ).toMatchInlineSnapshot(`
     [
       "client -> CONTENT Group header: true new: After: 0 New: 3",
-      "client -> CONTENT ParentGroup header: true new: After: 0 New: 4",
+      "client -> CONTENT ParentGroup header: true new: After: 0 New: 3",
       "client -> CONTENT Group header: false new: After: 3 New: 2",
       "client -> CONTENT Map header: true new: After: 0 New: 1",
     ]
@@ -215,7 +215,7 @@ test("should load dependencies correctly (group inheritance)", async () => {
   ).toMatchInlineSnapshot(`
     [
       "client -> LOAD Map sessions: empty",
-      "storage -> CONTENT ParentGroup header: true new: After: 0 New: 4",
+      "storage -> CONTENT ParentGroup header: true new: After: 0 New: 3",
       "storage -> CONTENT Group header: true new: After: 0 New: 5",
       "storage -> CONTENT Map header: true new: After: 0 New: 1",
     ]
@@ -279,7 +279,7 @@ test("should not send the same dependency value twice", async () => {
   ).toMatchInlineSnapshot(`
     [
       "client -> LOAD Map sessions: empty",
-      "storage -> CONTENT ParentGroup header: true new: After: 0 New: 4",
+      "storage -> CONTENT ParentGroup header: true new: After: 0 New: 3",
       "storage -> CONTENT Group header: true new: After: 0 New: 5",
       "storage -> CONTENT Map header: true new: After: 0 New: 1",
       "client -> LOAD MapFromParent sessions: empty",

@@ -8,6 +8,7 @@ import {
   setupTestNode,
   waitFor,
 } from "./testUtils.js";
+import { expectGroup } from "../typeUtils/expectGroup.js";
 
 setCoValueLoadingRetryDelay(10);
 
@@ -400,7 +401,7 @@ describe("Group.removeMember", () => {
 
     const group = admin.node.createGroup();
 
-    const childGroup = bob.node.createGroup();
+    let childGroup = bob.node.createGroup();
     group.addMember(bobOnAdminNode, "reader");
     group.addMember(aliceOnAdminNode, "reader");
 
@@ -413,8 +414,11 @@ describe("Group.removeMember", () => {
     group.removeMember(aliceOnAdminNode);
 
     // Rotating the child group keys is async when the child group is not loaded
-    await admin.node.getCoValue(childGroup.id).waitForAvailableOrUnavailable();
     await admin.node.syncManager.waitForAllCoValuesSync();
+
+    // Reload the group the trigger the loading checks
+    childGroup.core.resetParsedTransactions();
+    childGroup = expectGroup(childGroup.core.getCurrentContent());
 
     const map = childGroup.createMap();
     map.set("test", "Not readable by alice");

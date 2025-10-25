@@ -1744,69 +1744,12 @@ test("Writers, readers and invitees can not set parent extensions", async () => 
   expect(groupAsReaderInvite.get(`parent_${parentGroup.id}`)).toBeUndefined();
 });
 
-test("Admins can set child extensions", () => {
+test("Child extensions are ignored", () => {
   const { group, node } = newGroupHighLevel();
   const childGroup = node.createGroup();
 
   group.set(`child_${childGroup.id}`, "extend", "trusting");
-  expect(group.get(`child_${childGroup.id}`)).toEqual("extend");
-});
-
-test("Admins can set child extensions when the admin role is inherited", async () => {
-  const { node1, node2 } = await createTwoConnectedNodes("server", "server");
-
-  const node2AccountOnNode1 = await loadCoValueOrFail(
-    node1.node,
-    node2.accountID,
-  );
-
-  const group = node1.node.createGroup();
-
-  group.addMember(node2AccountOnNode1, "admin");
-
-  const groupOnNode2 = await loadCoValueOrFail(node2.node, group.id);
-
-  const childGroup = node2.node.createGroup();
-  childGroup.extend(groupOnNode2);
-
-  const childGroupOnNode1 = await loadCoValueOrFail(node1.node, childGroup.id);
-
-  const grandChildGroup = node2.node.createGroup();
-  grandChildGroup.extend(childGroupOnNode1);
-
-  expect(childGroupOnNode1.get(`child_${grandChildGroup.id}`)).toEqual(
-    "extend",
-  );
-  expect(grandChildGroup.get(`parent_${childGroupOnNode1.id}`)).toEqual(
-    "extend",
-  );
-});
-
-test("Writers, readers and writeOnly can set child extensions", async () => {
-  const { group, node } = newGroupHighLevel();
-  const childGroup = node.createGroup();
-
-  const writer = createAccountInNode(node);
-  const reader = createAccountInNode(node);
-  const writeOnly = createAccountInNode(node);
-
-  group.addMember(writer, "writer");
-  group.addMember(reader, "reader");
-  group.addMember(writeOnly, "writeOnly");
-
-  const groupAsWriter = expectGroup(
-    await group.core.contentInClonedNodeWithDifferentAccount(writer),
-  );
-
-  groupAsWriter.set(`child_${childGroup.id}`, "extend", "trusting");
-  expect(groupAsWriter.get(`child_${childGroup.id}`)).toEqual("extend");
-
-  const groupAsReader = expectGroup(
-    await group.core.contentInClonedNodeWithDifferentAccount(reader),
-  );
-
-  groupAsReader.set(`child_${childGroup.id}`, "extend", "trusting");
-  expect(groupAsReader.get(`child_${childGroup.id}`)).toEqual("extend");
+  expect(group.get(`child_${childGroup.id}`)).toEqual(undefined);
 });
 
 test("Member roles are inherited by child groups (except invites)", () => {
@@ -2205,11 +2148,10 @@ test("When rotating the key of a child group, the new child key is exposed to th
   expect(group.get(`${newReadKeyID}_for_${parentReadKeyID}`)).toBeDefined();
 });
 
-test("When rotating the key of a parent group, the keys of all child groups are also rotated", () => {
+test("When rotating the key of a parent group, the keys of all loaded child groups are also rotated", () => {
   const { group, node } = newGroupHighLevel();
   const parentGroup = node.createGroup();
 
-  parentGroup.set(`child_${group.id}`, "extend", "trusting");
   group.set(`parent_${parentGroup.id}`, "extend", "trusting");
 
   group.rotateReadKey();
@@ -2269,8 +2211,6 @@ test("When rotating the key of a grand-parent group, the keys of all child and g
   const grandParentGroup = node.createGroup();
   const parentGroup = node.createGroup();
 
-  grandParentGroup.set(`child_${parentGroup.id}`, "extend", "trusting");
-  parentGroup.set(`child_${group.id}`, "extend", "trusting");
   parentGroup.set(`parent_${grandParentGroup.id}`, "extend", "trusting");
   group.set(`parent_${grandParentGroup.id}`, "extend", "trusting");
 
@@ -2324,7 +2264,7 @@ test("Calling extend on group sets up parent and child references and reveals ch
   group.extend(parentGroup);
 
   expect(group.get(`parent_${parentGroup.id}`)).toEqual("extend");
-  expect(parentGroup.get(`child_${group.id}`)).toEqual("extend");
+  expect(parentGroup.get(`child_${group.id}`)).toEqual(undefined);
 
   const parentReadKeyID = parentGroup.get("readKey");
   if (!parentReadKeyID) {
@@ -2368,8 +2308,8 @@ test("Calling extend to create grand-child groups parent and child references an
 
   expect(group.get(`parent_${parentGroup.id}`)).toEqual("extend");
   expect(parentGroup.get(`parent_${grandParentGroup.id}`)).toEqual("extend");
-  expect(parentGroup.get(`child_${group.id}`)).toEqual("extend");
-  expect(grandParentGroup.get(`child_${parentGroup.id}`)).toEqual("extend");
+  expect(parentGroup.get(`child_${group.id}`)).toEqual(undefined);
+  expect(grandParentGroup.get(`child_${parentGroup.id}`)).toEqual(undefined);
 
   const reader = createAccountInNode(node);
   grandParentGroup.addMember(reader, "reader");
@@ -2698,7 +2638,6 @@ test("High-level permissions work correctly when a group is extended", async () 
 test("self-extensions should not break the permissions checks", () => {
   const { group } = newGroupHighLevel();
 
-  group.set(`child_${group.id}`, "extend", "trusting");
   group.set(`parent_${group.id}`, "extend", "trusting");
 
   const map = group.createMap();
@@ -2712,10 +2651,6 @@ test("extend cycles should not break the permissions checks", () => {
 
   const group2 = node.createGroup();
   const group3 = node.createGroup();
-
-  group.set(`child_${group2.id}`, "extend", "trusting");
-  group2.set(`child_${group3.id}`, "extend", "trusting");
-  group3.set(`child_${group.id}`, "extend", "trusting");
 
   group.set(`parent_${group2.id}`, "extend", "trusting");
   group2.set(`parent_${group3.id}`, "extend", "trusting");
@@ -2732,10 +2667,6 @@ test("extend cycles should not break the keys rotation", () => {
 
   const group2 = node.createGroup();
   const group3 = node.createGroup();
-
-  group.set(`child_${group2.id}`, "extend", "trusting");
-  group2.set(`child_${group3.id}`, "extend", "trusting");
-  group3.set(`child_${group.id}`, "extend", "trusting");
 
   group.set(`parent_${group2.id}`, "extend", "trusting");
   group2.set(`parent_${group3.id}`, "extend", "trusting");

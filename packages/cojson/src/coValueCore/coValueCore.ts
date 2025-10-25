@@ -1147,12 +1147,14 @@ export class CoValueCore {
 
     const dependencyCoValue = this.node.getCoValue(dependency);
 
-    if (
-      !dependencyCoValue.isAvailable() &&
-      !this.isCircularMissingDependency(dependencyCoValue)
-    ) {
-      this.missingDependencies.add(dependency);
+    if (this.isCircularMissingDependency(dependencyCoValue)) {
+      return true;
+    }
 
+    dependencyCoValue.addDependant(this.id);
+
+    if (!dependencyCoValue.isAvailable()) {
+      this.missingDependencies.add(dependency);
       dependencyCoValue.subscribe((dependencyCoValue, unsubscribe) => {
         if (dependencyCoValue.isAvailable()) {
           unsubscribe();
@@ -1161,6 +1163,27 @@ export class CoValueCore {
       });
       return false;
     }
+  }
+
+  dependant: Set<RawCoID> = new Set();
+  private addDependant(dependant: RawCoID) {
+    this.dependant.add(dependant);
+  }
+
+  isGroup() {
+    if (!this.verified) {
+      return false;
+    }
+
+    if (this.verified.header.ruleset.type !== "group") {
+      return false;
+    }
+
+    if (this.verified.header.meta?.type === "account") {
+      return false;
+    }
+
+    return true;
   }
 
   createBranch(name: string, ownerId?: RawCoID) {

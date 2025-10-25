@@ -16,10 +16,8 @@ import {
   AgentID,
   ChildGroupReference,
   ParentGroupReference,
-  getChildGroupId,
   getParentGroupId,
   isAgentID,
-  isChildGroupReference,
   isParentGroupReference,
 } from "../ids.js";
 import { JsonObject } from "../jsonValue.js";
@@ -124,6 +122,38 @@ function healMissingKeyForEveryone(group: RawGroup) {
   }
 }
 
+function needsKeyRotation(group: RawGroup) {
+  const currentReadKeyId = group.get("readKey");
+
+  if (!currentReadKeyId) {
+    return false;
+  }
+
+  for (const parentGroup of group.getParentGroups()) {
+    const parentReadKeyId = parentGroup.get("readKey");
+
+    if (!parentReadKeyId) {
+      continue;
+    }
+
+    const hasKeyRevelation = group.get(
+      `${currentReadKeyId}_for_${parentReadKeyId}`,
+    );
+
+    if (!hasKeyRevelation) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function rotateReadKeyIfNeeded(group: RawGroup) {
+  if (needsKeyRotation(group)) {
+    group.rotateReadKey();
+  }
+}
+
 /** A `Group` is a scope for permissions of its members (`"reader" | "writer" | "admin"`), applying to objects owned by that group.
  *
  *  A `Group` object exposes methods for permission management and allows you to create new CoValues owned by that group.
@@ -161,7 +191,10 @@ export class RawGroup<
     super(core, options);
     this.crypto = core.node.crypto;
 
-    healMissingKeyForEveryone(this);
+    if (core.isGroup()) {
+      rotateReadKeyIfNeeded(this);
+      healMissingKeyForEveryone(this);
+    }
   }
 
   /**
@@ -260,27 +293,18 @@ export class RawGroup<
   }
 
   forEachChildGroup(callback: (child: RawGroup) => void) {
-    for (const key of this.keys()) {
-      if (isChildGroupReference(key)) {
-        // Check if the child group reference is revoked
-        if (this.get(key) === "revoked") {
-          continue;
-        }
+    for (const id of this.core.dependant) {
+      const dependant = this.core.node.getCoValue(id);
 
-        const id = getChildGroupId(key);
-        const child = this.core.node.getCoValue(id);
+      if (!dependant.isGroup()) {
+        continue;
+      }
 
-        if (child.isAvailable()) {
-          callback(expectGroup(child.getCurrentContent()));
-        } else {
-          this.core.node.load(id).then((child) => {
-            if (child !== "unavailable") {
-              callback(expectGroup(child));
-            } else {
-              logger.warn(`Unable to load child group ${id}, skipping`);
-            }
-          });
-        }
+      const childGroup = expectGroup(dependant.getCurrentContent());
+      const reference = childGroup.get(`parent_${this.id}`);
+
+      if (reference && reference !== "revoked") {
+        callback(childGroup);
       }
     }
   }
@@ -970,7 +994,6 @@ export class RawGroup<
 
     const value = role === "inherit" ? "extend" : role;
 
-    parent.set(`child_${this.id}`, "extend", "trusting");
     this.set(`parent_${parent.id}`, value, "trusting");
 
     const { id: childReadKeyID, secret: childReadKeySecret } =
@@ -1065,7 +1088,9 @@ export class RawGroup<
     this.set(`parent_${parent.id}`, "revoked", "trusting");
 
     // Set the child key on the parent group to `revoked`
-    parent.set(`child_${this.id}`, "revoked", "trusting");
+    if (parent.get(`child_${this.id}`)) {
+      parent.set(`child_${this.id}`, "revoked", "trusting");
+    }
 
     // Rotate the keys on the child group
     this.rotateReadKey();

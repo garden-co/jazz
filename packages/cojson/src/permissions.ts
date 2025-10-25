@@ -375,7 +375,8 @@ function determineValidTransactionsForGroup(
       transaction.markValid();
       continue;
     } else if (isChildExtension(change.key)) {
-      transaction.markValid();
+      logPermissionError("Child extensions are not allowed anymore");
+      transaction.markInvalid();
       continue;
     } else if (isWriteKeyForMember(change.key)) {
       const memberKey = getAccountOrAgentFromWriteKeyForMember(change.key);
