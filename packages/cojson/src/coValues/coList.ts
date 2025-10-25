@@ -92,11 +92,28 @@ export class RawCoList<
   }
 
   lastValidTransaction: number | undefined;
+  appendOnly: boolean;
+  unordered: boolean;
+
+  values?: {
+    value: Item;
+    madeAt: number;
+    opID: OpID;
+  }[];
 
   /** @internal */
-  constructor(core: AvailableCoValueCore) {
+  constructor(
+    core: AvailableCoValueCore,
+    opts?: {
+      appendOnly?: boolean;
+      unordered?: boolean;
+    },
+  ) {
     this.id = core.id as CoID<this>;
     this.core = core;
+
+    this.appendOnly = Boolean(opts?.appendOnly);
+    this.unordered = Boolean(opts?.unordered || this.appendOnly);
 
     this.insertions = {};
     this.deletionsByInsertion = {};
@@ -221,7 +238,21 @@ export class RawCoList<
           changeIdx,
         };
 
-        if (change.op === "pre" || change.op === "app") {
+        if (change.op === "del") {
+          if (!this.appendOnly) {
+            this.pushDeletionsByInsertionEntry(change.insertion, {
+              madeAt,
+              deletionID: opID,
+              change,
+            });
+          }
+        } else if (this.unordered) {
+          this.values?.push({
+            value: change.value,
+            madeAt,
+            opID,
+          });
+        } else if (change.op === "pre" || change.op === "app") {
           const created = this.createInsertionsEntry(opID, {
             madeAt,
             predecessors: [],
@@ -259,12 +290,6 @@ export class RawCoList<
               afterEntry.successors.push(opID);
             }
           }
-        } else if (change.op === "del") {
-          this.pushDeletionsByInsertionEntry(change.insertion, {
-            madeAt,
-            deletionID: opID,
-            change,
-          });
         } else {
           throw new Error(
             "Unknown list operation " + (change as { op: unknown }).op,
@@ -345,6 +370,16 @@ export class RawCoList<
     madeAt: number;
     opID: OpID;
   }[] {
+    if (this.unordered) {
+      const values = this.values ?? [];
+
+      if (this.appendOnly) {
+        return values;
+      }
+
+      return values.filter((value) => !this.isDeleted(value.opID));
+    }
+
     const arr: {
       value: Item;
       madeAt: number;
