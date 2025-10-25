@@ -21,6 +21,8 @@ import {
   AccountProvider,
   useAccountSelector,
 } from "@/components/AccountProvider.tsx";
+import { KvStoreContext } from "jazz-tools";
+import { EncryptedLocalStorageKVStore } from "jazz-tools/browser";
 
 /**
  * Walkthrough: The top-level provider `<JazzReactProvider/>`
@@ -89,6 +91,8 @@ const peer =
   (new URL(window.location.href).searchParams.get(
     "peer",
   ) as `ws://${string}`) ?? `wss://cloud.jazz.tools/?key=${apiKey}`;
+
+KvStoreContext.getInstance().initialize(new EncryptedLocalStorageKVStore());
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
