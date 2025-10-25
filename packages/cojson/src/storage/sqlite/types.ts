@@ -4,4 +4,6 @@ export interface SQLiteDatabaseDriver {
   query<T>(sql: string, params: unknown[]): T[];
   transaction(callback: () => unknown): void;
   closeDb(): void;
+  getMigrationVersion?(): number;
+  saveMigrationVersion?(version: number): void;
 }

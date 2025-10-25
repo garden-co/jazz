@@ -8,6 +8,7 @@ export default defineConfig({
       "bench",
       "packages/*",
       "tests/browser-integration",
+      "tests/cloudflare-do-storage",
       "tests/cloudflare-workers",
       "tests/vercel-functions",
       "crates/cojson-core-napi",

@@ -1,0 +1,25 @@
+{
+  "name": "cloudflare-do-storage",
+  "version": "0.0.0",
+  "private": true,
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev",
+    "start": "wrangler dev",
+    "test": "vitest --watch --root ../../ --project cloudflare-do-storage",
+    "cf-typegen": "wrangler types"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250214.0",
+    "@cloudflare/vitest-pool-workers": "^0.9.10",
+    "execa": "^9.5.2",
+    "typescript": "catalog:default",
+    "wrangler": "^4.37.0"
+  },
+  "dependencies": {
+    "cojson": "workspace:*",
+    "cojson-transport-ws": "workspace:*",
+    "cojson-storage-do-sqlite": "workspace:*",
+    "jazz-tools": "workspace:*"
+  }
+}

@@ -5,4 +5,6 @@ export interface SQLiteDatabaseDriverAsync {
   get<T>(sql: string, params: unknown[]): Promise<T | undefined>;
   transaction(callback: () => unknown): Promise<unknown>;
   closeDb(): Promise<unknown>;
+  getMigrationVersion?(): Promise<number>;
+  saveMigrationVersion?(version: number): Promise<void>;
 }
