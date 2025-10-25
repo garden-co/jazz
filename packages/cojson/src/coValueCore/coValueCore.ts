@@ -243,6 +243,31 @@ export class CoValueCore {
     return this.hasVerifiedContent();
   }
 
+  /**
+   * True if the coValue is completely downloaded:
+   * - the current coValue is available and not streaming
+   * - the group is available and not streaming
+   * - TODO: all the parent groups are available and not streaming
+   */
+  isCompletelyDownloaded(): this is AvailableCoValueCore {
+    if (!this.hasVerifiedContent()) {
+      return false;
+    }
+
+    if (this.verified.isStreaming()) {
+      return false;
+    }
+
+    const group = this.safeGetGroup();
+
+    // TODO: Group coValues should be completely downloaded when all their parent groups are completely downloaded
+    if (!group) {
+      return true;
+    }
+
+    return group.core.isCompletelyDownloaded();
+  }
+
   hasVerifiedContent(): this is AvailableCoValueCore {
     return !!this.verified;
   }
@@ -804,9 +829,9 @@ export class CoValueCore {
       return this._cachedContent;
     }
 
-    this.subscribeToGroupInvalidation();
-
     const newContent = coreToCoValue(this as AvailableCoValueCore, options);
+
+    this.subscribeToGroupInvalidation();
 
     if (!options?.ignorePrivateTransactions) {
       this._cachedContent = newContent;

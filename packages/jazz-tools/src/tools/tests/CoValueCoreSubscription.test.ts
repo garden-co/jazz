@@ -1,8 +1,9 @@
-import { beforeEach, describe, expect, test, vi } from "vitest";
-import { Group, co, z } from "../exports.js";
-import { CoValueCoreSubscription } from "./CoValueCoreSubscription.js";
+import { assert, beforeEach, describe, expect, test, vi } from "vitest";
+import { Group, co, exportCoValue, z } from "../exports.js";
+import { CoValueCoreSubscription } from "../subscribe/CoValueCoreSubscription.js";
 import {
   createJazzTestAccount,
+  disableJazzTestSync,
   getPeerConnectedToTestSyncServer,
   setupJazzTestSync,
 } from "../testing.js";
@@ -1099,5 +1100,234 @@ describe("CoValueCoreSubscription", async () => {
 
       subscription.unsubscribe();
     });
+  });
+
+  test("should wait for the full streaming", async () => {
+    disableJazzTestSync();
+
+    const alice = await createJazzTestAccount({
+      isCurrentActiveAccount: true,
+      creationProps: { name: "Hermes Puggington" },
+    });
+
+    const Person = co.map({
+      name: z.string(),
+      update: z.number(),
+    });
+
+    const group = Group.create();
+
+    const person = Person.create(
+      {
+        name: "Bob",
+        update: 1,
+      },
+      group,
+    );
+
+    for (let i = 0; i <= 100; i++) {
+      person.$jazz.applyDiff({
+        name: "1".repeat(1024),
+        update: i,
+      });
+    }
+
+    const bob = await createJazzTestAccount({
+      isCurrentActiveAccount: true,
+    });
+
+    const personContent = await exportCoValue(Person, person.$jazz.id, {
+      loadAs: alice,
+    });
+    assert(personContent);
+
+    const lastPiece = personContent.pop();
+    assert(lastPiece);
+
+    for (const content of personContent) {
+      bob.$jazz.localNode.syncManager.handleNewContent(content, "import");
+    }
+
+    // Simulate the streaming delay on the last piece of the group
+    setTimeout(() => {
+      bob.$jazz.localNode.syncManager.handleNewContent(lastPiece, "import");
+    }, 10);
+
+    // Load the value and expect the migration to run only once
+    // Subscribe to the person
+    let lastResult: any = null;
+    const listener = vi.fn();
+    const subscription = new CoValueCoreSubscription(
+      person.$jazz.localNode,
+      person.$jazz.id,
+      (result) => {
+        lastResult = result;
+        listener(result);
+      },
+    );
+
+    await waitFor(() => expect(listener).toHaveBeenCalled());
+
+    expect(lastResult.core.isCompletelyDownloaded()).toBe(true);
+
+    subscription.unsubscribe();
+  });
+
+  test("should wait for the full streaming of the group", async () => {
+    disableJazzTestSync();
+
+    const alice = await createJazzTestAccount({
+      isCurrentActiveAccount: true,
+      creationProps: { name: "Hermes Puggington" },
+    });
+
+    const Person = co.map({
+      name: z.string(),
+      update: z.number(),
+    });
+
+    const group = Group.create();
+
+    const person = Person.create(
+      {
+        name: "Bob",
+        update: 1,
+      },
+      group,
+    );
+
+    // Make the group to grow big enough to trigger the streaming
+    for (let i = 0; i <= 300; i++) {
+      group.$jazz.raw.rotateReadKey();
+    }
+
+    group.addMember("everyone", "reader");
+
+    const bob = await createJazzTestAccount({
+      isCurrentActiveAccount: true,
+    });
+
+    const personContent = await exportCoValue(Person, person.$jazz.id, {
+      loadAs: alice,
+    });
+    assert(personContent);
+
+    const lastGroupPiece = personContent.findLast(
+      (content) => content.id === group.$jazz.id,
+    );
+    assert(lastGroupPiece);
+
+    for (const content of personContent.filter(
+      (content) => content !== lastGroupPiece,
+    )) {
+      bob.$jazz.localNode.syncManager.handleNewContent(content, "import");
+    }
+
+    // Simulate the streaming delay on the last piece of the group
+    setTimeout(() => {
+      bob.$jazz.localNode.syncManager.handleNewContent(
+        lastGroupPiece,
+        "import",
+      );
+    }, 10);
+
+    // Load the value and expect the migration to run only once
+    // Subscribe to the person
+    let lastResult: any = null;
+    const listener = vi.fn();
+    const subscription = new CoValueCoreSubscription(
+      person.$jazz.localNode,
+      person.$jazz.id,
+      (result) => {
+        lastResult = result;
+        listener(result);
+      },
+    );
+
+    await waitFor(() => expect(listener).toHaveBeenCalled());
+
+    expect(lastResult.core.isCompletelyDownloaded()).toBe(true);
+
+    subscription.unsubscribe();
+  });
+
+  test.skip("should wait for the full streaming of the parent group", async () => {
+    disableJazzTestSync();
+
+    const alice = await createJazzTestAccount({
+      isCurrentActiveAccount: true,
+      creationProps: { name: "Hermes Puggington" },
+    });
+
+    const Person = co.map({
+      name: z.string(),
+      update: z.number(),
+    });
+
+    const group = Group.create();
+    const parentGroup = Group.create();
+
+    const person = Person.create(
+      {
+        name: "Bob",
+        update: 1,
+      },
+      group,
+    );
+
+    // Make the parent group to grow big enough to trigger the streaming
+    for (let i = 0; i <= 300; i++) {
+      parentGroup.$jazz.raw.rotateReadKey();
+    }
+
+    group.addMember(parentGroup);
+    parentGroup.addMember("everyone", "reader");
+
+    const bob = await createJazzTestAccount({
+      isCurrentActiveAccount: true,
+    });
+
+    const personContent = await exportCoValue(Person, person.$jazz.id, {
+      loadAs: alice,
+    });
+    assert(personContent);
+
+    const lastGroupPiece = personContent.findLast(
+      (content) => content.id === parentGroup.$jazz.id,
+    );
+    assert(lastGroupPiece);
+
+    for (const content of personContent.filter(
+      (content) => content !== lastGroupPiece,
+    )) {
+      bob.$jazz.localNode.syncManager.handleNewContent(content, "import");
+    }
+
+    // Simulate the streaming delay on the last piece of the group
+    setTimeout(() => {
+      bob.$jazz.localNode.syncManager.handleNewContent(
+        lastGroupPiece,
+        "import",
+      );
+    }, 10);
+
+    // Load the value and expect the migration to run only once
+    // Subscribe to the person
+    let lastResult: any = null;
+    const listener = vi.fn();
+    const subscription = new CoValueCoreSubscription(
+      person.$jazz.localNode,
+      person.$jazz.id,
+      (result) => {
+        lastResult = result;
+        listener(result);
+      },
+    );
+
+    await waitFor(() => expect(listener).toHaveBeenCalled());
+
+    expect(lastResult.core.isCompletelyDownloaded()).toBe(true);
+
+    subscription.unsubscribe();
   });
 });

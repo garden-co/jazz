@@ -220,6 +220,9 @@ export class CoValueCoreSubscription {
 
   emit(value: RawCoValue | "unavailable"): void {
     if (this.unsubscribed) return;
+    if (!isReadyForEmit(value)) {
+      return;
+    }
 
     this.listener(value);
   }
@@ -233,4 +236,18 @@ export class CoValueCoreSubscription {
     this.unsubscribed = true;
     this._unsubscribe();
   }
+}
+
+/**
+ * This is true if the value is unavailable, or if the value is a binary coValue or a completely downloaded coValue.
+ */
+function isReadyForEmit(value: RawCoValue | "unavailable") {
+  if (value === "unavailable") {
+    return true;
+  }
+
+  return (
+    value.core.verified?.header.meta?.type === "binary" ||
+    value.core.isCompletelyDownloaded()
+  );
 }

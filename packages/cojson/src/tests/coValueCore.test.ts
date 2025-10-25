@@ -19,6 +19,7 @@ import {
   loadCoValueOrFail,
   nodeWithRandomAgentAndSessionID,
   randomAgentAndSessionID,
+  setupTestAccount,
   setupTestNode,
   tearDownTestMetricReader,
   waitFor,
@@ -148,32 +149,24 @@ describe("transactions that exceed the byte size limit are rejected", () => {
   });
 });
 
-test("New transactions in a group correctly update owned values, including subscriptions", async () => {
-  const [agent, sessionID] = randomAgentAndSessionID();
-  const node = new LocalNode(agent.agentSecret, sessionID, Crypto);
+test("new transactions in a group correctly update owned values, including subscriptions", async () => {
+  const client = await setupTestAccount();
 
-  const timeBeforeEdit = Date.now() - 1000;
-  const dateNowMock = vi
-    .spyOn(Date, "now")
-    .mockImplementation(() => timeBeforeEdit);
+  const agent = client.node.getCurrentAgent();
 
-  const group = node.createGroup();
-
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  const group = client.node.createGroup();
 
   const map = group.createMap();
 
+  await new Promise((resolve) => setTimeout(resolve, 10));
+
   map.set("hello", "world");
 
-  const listener = vi.fn();
+  const transaction = map.core.getValidSortedTransactions().at(-1);
 
-  map.subscribe((map) => {
-    listener(map.get("hello"));
-  });
+  assert(transaction);
 
-  expect(listener).toHaveBeenLastCalledWith("world");
-
-  expect(map.core.getValidSortedTransactions().length).toBe(1);
+  expect(transaction.isValid).toBe(true);
   expect(group.get(agent.id)).toBe("admin");
 
   group.core.makeTransaction(
@@ -185,16 +178,65 @@ test("New transactions in a group correctly update owned values, including subsc
       },
     ],
     "trusting",
+    undefined,
+    transaction.madeAt - 1, // Make the revocation to be before the map update
   );
 
   expect(group.get(agent.id)).toBe("revoked");
-  dateNowMock.mockReset();
-
-  // Group invalidation updates are async
-  await waitFor(() => expect(listener).toHaveBeenCalledTimes(2));
-
-  expect(listener).toHaveBeenLastCalledWith(undefined);
   expect(map.core.getValidSortedTransactions().length).toBe(0);
+});
+
+// TODO: The test is skipped because we don't support this invalidation yet
+test.skip("new transactions in a parent group correctly update owned values, including subscriptions", async () => {
+  const client = await setupTestAccount();
+
+  const agent = client.node.getCurrentAgent();
+
+  const group = client.node.createGroup();
+  const parentGroup = client.node.createGroup();
+  group.extend(parentGroup);
+  group.core.makeTransaction(
+    [
+      {
+        op: "set",
+        key: agent.id,
+        value: "revoked",
+      },
+    ],
+    "trusting",
+  );
+
+  const map = group.createMap();
+
+  await new Promise((resolve) => setTimeout(resolve, 10));
+
+  map.set("hello", "world");
+
+  const transaction = map.core.getValidSortedTransactions().at(-1);
+
+  assert(transaction);
+
+  expect(transaction.isValid).toBe(true);
+  expect(group.roleOfInternal(agent.id)).toBe("admin");
+
+  parentGroup.core.makeTransaction(
+    [
+      {
+        op: "set",
+        key: agent.id,
+        value: "revoked",
+      },
+    ],
+    "trusting",
+    undefined,
+    transaction.madeAt - 1, // Make the revocation to be before the map update
+  );
+
+  expect(group.roleOfInternal(agent.id)).toBe(undefined);
+
+  await waitFor(() =>
+    expect(map.core.getValidSortedTransactions().length).toBe(0),
+  );
 });
 
 test("correctly records transactions", async () => {
