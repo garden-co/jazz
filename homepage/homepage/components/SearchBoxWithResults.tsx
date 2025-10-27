@@ -2,7 +2,7 @@
 
 import { Framework, frameworkNames, frameworks } from "@/content/framework";
 import { useFramework } from "@/lib/use-framework";
-import { Input } from "quint-ui";
+import { Input } from "@/components/ui/input";
 import React, { useState, useEffect } from "react";
 import Pagination from "./Pagination";
 
@@ -107,14 +107,14 @@ function HighlightedText({ text }: { text: string }) {
   const parts = decodedText.split(/(<mark>.*?<\/mark>)/g);
 
   return (
-    <p className="mt-1 text-sm line-clamp-2">
+    <p className="mt-1 line-clamp-2 text-sm">
       {parts.map((part, i) => {
         if (part.startsWith("<mark>")) {
           const content = part.replace(/<\/?mark>/g, "");
           return (
             <mark
               key={i}
-              className="bg-transparent text-primary dark:text-white dark:text-underline dark:bg-highlight"
+              className="dark:text-underline bg-transparent text-primary dark:bg-highlight dark:text-white"
             >
               {content}
             </mark>
@@ -165,7 +165,7 @@ export function SearchBoxWithResults({ searchTerms }: { searchTerms: string }) {
           console.warn("Failed to load Pagefind:", e);
           window.pagefind = {
             search: async () => ({ results: [] }),
-            options: async () => { },
+            options: async () => {},
           };
         }
       }
@@ -197,67 +197,79 @@ export function SearchBoxWithResults({ searchTerms }: { searchTerms: string }) {
   if (loading) return null;
   return (
     <>
-      <Input value={query} onChange={(e) => handleSearch(e.target.value)} placeholder="Search" id="search-in-searchbox" />
+      <Input
+        value={query}
+        onChange={(e) => handleSearch(e.target.value)}
+        placeholder="Search"
+        id="search-in-searchbox"
+      />
 
       <div className="mt-4">
         {results.length > 0 ? (
           <>
-            <small>Page {page + 1} of {Math.ceil(results.length / PAGE_LENGTH)}</small>
+            <small>
+              Page {page + 1} of {Math.ceil(results.length / PAGE_LENGTH)}
+            </small>
             <ul>
-              {results.slice((page) * PAGE_LENGTH, (page + 1) * PAGE_LENGTH).map((result) => (
-                <li className="cursor-default flex flex-col group data-[focus]:bg-stone-100 dark:data-[focus]:bg-stone-900" key={result.id}>
-                  <div>
-                    <p className="font-bold text-highlight line-clamp-1 border-b">
-                      <a href={processUrl(result.url)}>
-                        {result.meta?.title || "No title"}{" "}
-                        {result.meta?.framework ? (
-                          <span className="text-stone-600 dark:text-stone-400 font-normal">
-                            (
-                            {
-                              frameworkNames[
-                                result.meta?.framework as Framework
-                              ].label
-                            }
-                            )
+              {results
+                .slice(page * PAGE_LENGTH, (page + 1) * PAGE_LENGTH)
+                .map((result) => (
+                  <li
+                    className="group flex cursor-default flex-col data-[focus]:bg-stone-100 dark:data-[focus]:bg-stone-900"
+                    key={result.id}
+                  >
+                    <div>
+                      <p className="line-clamp-1 border-b font-bold text-highlight">
+                        <a href={processUrl(result.url)}>
+                          {result.meta?.title || "No title"}{" "}
+                          {result.meta?.framework ? (
+                            <span className="font-normal text-stone-600 dark:text-stone-400">
+                              (
+                              {
+                                frameworkNames[
+                                  result.meta?.framework as Framework
+                                ].label
+                              }
+                              )
+                            </span>
+                          ) : null}
+                        </a>
+                      </p>
 
-                          </span>
-                        ) : null}
-                      </a>
-                    </p>
-
-
-                    {result.sub_results?.length ? null : (
-                      <HighlightedText text={result.excerpt || ""} />
-                    )}
-                  </div>
-                  <ul>
-                    {result.sub_results?.map((subResult) =>
-                      subResult.anchor?.element === "h1" ? null : (
-                        <li
-                          key={subResult.id}
-                          className="group cursor-pointer group data-[focus]:bg-stone-100 rounded-lg p-2 dark:data-[focus]:bg-stone-900"
-                        >
-                          <a href={processUrl(subResult.url)}>
-                            <p className="text-sm text-highlight font-bold">
-                              {subResult.title?.replace("#", "") ||
-                                "No title"}
-                            </p>
-                            <HighlightedText text={subResult.excerpt || ""} />
-                          </a>
-                        </li>
-
-                      ),
-                    )}
-                  </ul>
-                </li>
-              ))}
+                      {result.sub_results?.length ? null : (
+                        <HighlightedText text={result.excerpt || ""} />
+                      )}
+                    </div>
+                    <ul>
+                      {result.sub_results?.map((subResult) =>
+                        subResult.anchor?.element === "h1" ? null : (
+                          <li
+                            key={subResult.id}
+                            className="group cursor-pointer rounded-lg p-2 data-[focus]:bg-stone-100 dark:data-[focus]:bg-stone-900"
+                          >
+                            <a href={processUrl(subResult.url)}>
+                              <p className="text-sm font-bold text-highlight">
+                                {subResult.title?.replace("#", "") ||
+                                  "No title"}
+                              </p>
+                              <HighlightedText text={subResult.excerpt || ""} />
+                            </a>
+                          </li>
+                        ),
+                      )}
+                    </ul>
+                  </li>
+                ))}
             </ul>
-            <Pagination pages={Math.ceil(results.length / PAGE_LENGTH)} page={page} setPage={setPage} />
+            <Pagination
+              pages={Math.ceil(results.length / PAGE_LENGTH)}
+              page={page}
+              setPage={setPage}
+            />
           </>
-        ) : query && <p className="mt-2">
-          Sorry, no results for "{query}".
-        </p>
-        }
+        ) : (
+          query && <p className="mt-2">Sorry, no results for "{query}".</p>
+        )}
       </div>
     </>
   );
