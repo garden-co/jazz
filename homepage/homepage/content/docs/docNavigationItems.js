@@ -3,14 +3,15 @@ export const docNavigationItems = [
   {
     // welcome to jazz
     name: "Getting started",
-    href: '/docs',
+    href: "/docs",
     items: [
       {
         // what is jazz, supported environments, where to start (guide, examples, project setup)
         name: "Overview",
         href: "/docs",
         done: 100,
-      }, {
+      },
+      {
         name: "Quickstart",
         href: "/docs/quickstart",
         done: {
@@ -131,75 +132,88 @@ export const docNavigationItems = [
         done: 100,
         collapse: true,
         startClosed: true,
-        items: [{
-          name: "Overview",
-          href: '/docs/core-concepts/covalues/overview',
-          done: 100,
-        }, {
-          name: "CoMaps",
-          href: "/docs/core-concepts/covalues/comaps",
-          done: 100,
-        }, {
-          name: "CoLists",
-          href: "/docs/core-concepts/covalues/colists",
-          done: 100,
-        },
-        {
-          name: "CoFeeds",
-          href: "/docs/core-concepts/covalues/cofeeds",
-          done: 100,
-        },
-        {
-          name: "CoTexts",
-          href: "/docs/core-concepts/covalues/cotexts",
-          done: 100,
-        },
-        {
-          name: "FileStreams",
-          href: "/docs/core-concepts/covalues/filestreams",
-          done: 80,
-        },
-        {
-          name: "CoVectors",
-          href: "/docs/core-concepts/covalues/covectors",
-          done: 100,
-        },
-        {
-          name: "ImageDefinitions",
-          href: "/docs/core-concepts/covalues/imagedef",
-          done: {
-            react: 100,
-            "react-native": 100,
-            "react-native-expo": 100,
-            vanilla: 100,
-            svelte: 100,
-          }
-        }],
-      }, {
-        name: 'Schemas',
+        items: [
+          {
+            name: "Overview",
+            href: "/docs/core-concepts/covalues/overview",
+            done: 100,
+          },
+          {
+            name: "CoMaps",
+            href: "/docs/core-concepts/covalues/comaps",
+            done: 100,
+          },
+          {
+            name: "CoLists",
+            href: "/docs/core-concepts/covalues/colists",
+            done: 100,
+          },
+          {
+            name: "CoFeeds",
+            href: "/docs/core-concepts/covalues/cofeeds",
+            done: 100,
+          },
+          {
+            name: "CoTexts",
+            href: "/docs/core-concepts/covalues/cotexts",
+            done: 100,
+          },
+          {
+            name: "FileStreams",
+            href: "/docs/core-concepts/covalues/filestreams",
+            done: 80,
+          },
+          {
+            name: "CoVectors",
+            href: "/docs/core-concepts/covalues/covectors",
+            done: 100,
+          },
+          {
+            name: "ImageDefinitions",
+            href: "/docs/core-concepts/covalues/imagedef",
+            done: {
+              react: 100,
+              "react-native": 100,
+              "react-native-expo": 100,
+              vanilla: 100,
+              svelte: 100,
+            },
+          },
+        ],
+      },
+      {
+        name: "Schemas",
         done: 100,
         collapse: true,
-        items: [{
-          name: "Connecting CoValues",
-          href: "/docs/core-concepts/schemas/connecting-covalues",
-          done: 100,
-        },
-        {
-          name: "Accounts & migrations",
-          href: "/docs/core-concepts/schemas/accounts-and-migrations",
-          done: 20,
-        },
-        {
-          name: "Schema Unions",
-          href: "/docs/core-concepts/schemas/schemaunions",
-          done: 100,
-        }]
+        items: [
+          {
+            name: "Connecting CoValues",
+            href: "/docs/core-concepts/schemas/connecting-covalues",
+            done: 100,
+          },
+          {
+            name: "Accounts & migrations",
+            href: "/docs/core-concepts/schemas/accounts-and-migrations",
+            done: 20,
+          },
+          {
+            name: "Schema Unions",
+            href: "/docs/core-concepts/schemas/schemaunions",
+            done: 100,
+          },
+          {
+            name: "Codecs",
+            href: "/docs/core-concepts/schemas/codecs",
+            done: 100,
+          },
+        ],
       },
       {
         name: "Subscriptions & Deep Loading",
         href: "/docs/core-concepts/subscription-and-loading",
         done: 100,
-      }, {
+      },
+      {
         // jazz mesh, setting api key, free plan, unlimited
         name: "Sync and storage",
         href: "/docs/core-concepts/sync-and-storage",
@@ -211,22 +225,23 @@ export const docNavigationItems = [
     name: "Key Features",
     done: 100,
     prefix: "/docs/key-features",
-    items: [{
-      name: 'Authentication',
-      startClosed: true,
-      collapse: true,
-      items: [
-        {
-          name: "Overview",
-          href: "/docs/key-features/authentication/overview",
-          done: 100,
-        },
-        {
-          name: "Quickstart",
-          href: "/docs/key-features/authentication/quickstart",
-          done: {
+    items: [
+      {
+        name: "Authentication",
+        startClosed: true,
+        collapse: true,
+        items: [
+          {
+            name: "Overview",
+            href: "/docs/key-features/authentication/overview",
+            done: 100,
+          },
+          {
+            name: "Quickstart",
+            href: "/docs/key-features/authentication/quickstart",
+            done: {
             react: 100,
-            svelte: 100
+              svelte: 100
           },
         },
 
@@ -373,20 +388,23 @@ export const docNavigationItems = [
     items: [
       {
         name: "Developer Tools",
-        items: [{
-          name: "create-jazz-app",
-          href: "/docs/tooling-and-resources/create-jazz-app",
-          done: 100,
-        },
-        {
-          name: "Inspector",
-          href: "/docs/tooling-and-resources/inspector",
-          done: 100,
-        }, {
-          name: "AI tools (llms.txt)",
-          href: "/docs/tooling-and-resources/ai-tools",
-          done: 100,
-        }]
+        items: [
+          {
+            name: "create-jazz-app",
+            href: "/docs/tooling-and-resources/create-jazz-app",
+            done: 100,
+          },
+          {
+            name: "Inspector",
+            href: "/docs/tooling-and-resources/inspector",
+            done: 100,
+          },
+          {
+            name: "AI tools (llms.txt)",
+            href: "/docs/tooling-and-resources/ai-tools",
+            done: 100,
+          },
+        ],
       },
       {
         name: "Reference",

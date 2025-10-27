@@ -1,29 +1,16 @@
 {
   "extends": "./tsconfig.json",
   "compilerOptions": {
+    "target": "es2015",
     "baseUrl": ".",
     "paths": {
-      "$lib/*": [
-        "./content/docs/code-snippets/quickstart/*"
-      ],
-      "$lib/components/*": [
-        "./content/docs/code-snippets/quickstart/*"
-      ],
-      "@/app/*": [
-        "./content/docs/code-snippets/quickstart/*"
-      ],
-      "@/*": [
-        "./content/docs/code-snippets/quickstart/*"
-      ],
-      "@/app/components/*": [
-        "./content/docs/code-snippets/quickstart/*"
-      ]
+      "$lib/*": ["./content/docs/code-snippets/quickstart/*"],
+      "$lib/components/*": ["./content/docs/code-snippets/quickstart/*"],
+      "@/app/*": ["./content/docs/code-snippets/quickstart/*"],
+      "@/*": ["./content/docs/code-snippets/quickstart/*"],
+      "@/app/components/*": ["./content/docs/code-snippets/quickstart/*"]
     }
   },
-  "include": [
-    "content/docs/code-snippets/**/*"
-  ],
-  "exclude": [
-    "node_modules"
-  ]
+  "include": ["content/docs/code-snippets/**/*"],
+  "exclude": ["node_modules"]
 }
