@@ -20,7 +20,10 @@ function createMultiStylePattern(pattern: string, flags = ""): RegExp[] {
   ];
 }
 
-function matchesAnyPattern(line: string, patterns: RegExp[]): RegExpMatchArray | null {
+function matchesAnyPattern(
+  line: string,
+  patterns: RegExp[],
+): RegExpMatchArray | null {
   for (const pattern of patterns) {
     const match = line.match(pattern);
     if (match) return match;
@@ -30,7 +33,7 @@ function matchesAnyPattern(line: string, patterns: RegExp[]): RegExpMatchArray |
 
 /**
  * Remark plugin to import and process code snippets from external files.
- * 
+ *
  * @description
  * This plugin enables importing code from external source files into markdown code blocks,
  * with support for:
@@ -38,30 +41,30 @@ function matchesAnyPattern(line: string, patterns: RegExp[]): RegExpMatchArray |
  * - Hiding lines with `[!code hide]` or `[!code hide:N]` sentinels
  * - Marking diff additions/removals with `[!code ++:N]` or `[!code --:N]`
  * - Stripping region markers and sentinel comments from output
- * 
+ *
  * @param {Options} options - Configuration options
  * @param {string} options.dir - Base directory to resolve snippet file paths from
- * 
+ *
  * @returns {Function} A remark transformer function
- * 
+ *
  * @example
  * Basic usage:
  * ```ts snippet=examples/hello.ts
  * ```
- * 
+ *
  * @example
  * With region extraction:
  * ```tsx snippet=components/Button.tsx#PropsType
  * ```
- * 
+ *
  * @example
  * With key-value syntax:
  * ```ts snippet=utils/auth.ts region=LoginFunction
  * ```
- * 
+ *
  * @remarks
  * Supported languages: `ts`, `tsx`, `svelte`
- * 
+ *
  * Supported sentinels:
  * - `// [!code hide]` or `// [!code hide:N]` - Hide lines from output
  * - `// [!code ++:N]` or `// [!code --:N]` - Mark diff additions/removals
@@ -69,7 +72,7 @@ function matchesAnyPattern(line: string, patterns: RegExp[]): RegExpMatchArray |
  * - `// @ts-expect-error`, `// @ts-ignore`, `// @ts-nocheck` - Automatically hidden
  * - HTML-style comments (`<!-- ... -->`) also supported for Svelte files
  * - JSX comments (curly-brace-slash-star format) also supported for React/TSX files
- * 
+ *
  * All sentinel comments are automatically stripped from the final output.
  */
 export function codeSnippets(options: Options): Function {
@@ -114,7 +117,7 @@ function parseMeta(meta: string | undefined) {
   if (!meta) return result;
 
   // Remove twoslash keyword if present (backwards compatibility)
-  meta = meta.replace(/\btwoslash\b/g, '').trim();
+  meta = meta.replace(/\btwoslash\b/g, "").trim();
 
   // Compact form: examples/foo.ts#Bar or test/example.tsx#Region
   const direct = meta.match(/^([\w./-]+\.\w+)(?:#([\w-]+))?$/);
@@ -131,11 +134,15 @@ function parseMeta(meta: string | undefined) {
   return result;
 }
 
-function extractRegion(content: string, region: string, filePath: string): string {
+function extractRegion(
+  content: string,
+  region: string,
+  filePath: string,
+): string {
   const regionPatterns = [
-    `${COMMENT_STYLES.jsStyle(`#region\\s*${region}`)}[\\s\\S]*?${COMMENT_STYLES.jsStyle('#endregion')}`,
-    `${COMMENT_STYLES.htmlStyle(`#region\\s*${region}`)}[\\s\\S]*?${COMMENT_STYLES.htmlStyle('#endregion')}`,
-    `${COMMENT_STYLES.jsxStyle(`#region\\s*${region}`)}[\\s\\S]*?${COMMENT_STYLES.jsxStyle('#endregion')}`,
+    `${COMMENT_STYLES.jsStyle(`#region\\s*${region}`)}[\\s\\S]*?${COMMENT_STYLES.jsStyle("#endregion")}`,
+    `${COMMENT_STYLES.htmlStyle(`#region\\s*${region}`)}[\\s\\S]*?${COMMENT_STYLES.htmlStyle("#endregion")}`,
+    `${COMMENT_STYLES.jsxStyle(`#region\\s*${region}`)}[\\s\\S]*?${COMMENT_STYLES.jsxStyle("#endregion")}`,
   ];
 
   for (const pattern of regionPatterns) {
@@ -150,9 +157,18 @@ function extractRegion(content: string, region: string, filePath: string): strin
 
 function stripRegionMarkers(source: string, region: string) {
   const markerPatterns = [
-    [new RegExp(`${COMMENT_STYLES.jsStyle(`#region\\s*${region}`)}`), new RegExp(COMMENT_STYLES.jsStyle('#endregion'))],
-    [new RegExp(COMMENT_STYLES.htmlStyle(`#region\\s*${region}`)), new RegExp(COMMENT_STYLES.htmlStyle('#endregion'))],
-    [new RegExp(COMMENT_STYLES.jsxStyle(`#region\\s*${region}`)), new RegExp(COMMENT_STYLES.jsxStyle('#endregion'))],
+    [
+      new RegExp(`${COMMENT_STYLES.jsStyle(`#region\\s*${region}`)}`),
+      new RegExp(COMMENT_STYLES.jsStyle("#endregion")),
+    ],
+    [
+      new RegExp(COMMENT_STYLES.htmlStyle(`#region\\s*${region}`)),
+      new RegExp(COMMENT_STYLES.htmlStyle("#endregion")),
+    ],
+    [
+      new RegExp(COMMENT_STYLES.jsxStyle(`#region\\s*${region}`)),
+      new RegExp(COMMENT_STYLES.jsxStyle("#endregion")),
+    ],
   ];
 
   let result = source;
@@ -167,11 +183,17 @@ function processAnnotations(source: string) {
   const highlights: number[] = [];
   const diff: { line: number; type: "add" | "remove" }[] = [];
 
-  const hideWithCountPatterns = createMultiStylePattern(`\\[!code\\s*hide:\\s*(\\d+)\\s*\\]`);
+  const hideWithCountPatterns = createMultiStylePattern(
+    `\\[!code\\s*hide:\\s*(\\d+)\\s*\\]`,
+  );
   const hidePatterns = createMultiStylePattern(`\\[!code\\s*hide\\s*\\]`);
-  const diffPatterns = createMultiStylePattern(`\\[!code\\s*(\\+\\+|--):\\s*(\\d+)\\s*\\]`);
+  const diffPatterns = createMultiStylePattern(
+    `\\[!code\\s*(\\+\\+|--):\\s*(\\d+)\\s*\\]`,
+  );
   const regionPatterns = createMultiStylePattern(`#(?:region|endregion)`);
-  const tsDirectivePatterns = createMultiStylePattern(`@ts-(?:expect-error|ignore|nocheck)`);
+  const tsDirectivePatterns = createMultiStylePattern(
+    `@ts-(?:expect-error|ignore|nocheck)`,
+  );
 
   let inHighlightBlock = false;
   let pendingDiff: { type: "add" | "remove"; count: number } | null = null;
@@ -262,5 +284,6 @@ function processAnnotations(source: string) {
     }
   }
 
+  if (cleanLines[cleanLines.length - 1] == "") cleanLines.pop(); // If the last line is blank, pop it off.
   return { clean: cleanLines.join("\n"), highlights, diff };
 }

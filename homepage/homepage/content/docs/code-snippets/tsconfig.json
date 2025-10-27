@@ -1,0 +1,23 @@
+{
+  "extends": "../../../tsconfig.snippets.json",
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "$lib/*": [
+        "./quickstart/*"
+      ],
+      "$lib/components/*": [
+        "./quickstart/*"
+      ],
+      "@/app/*": [
+        "./quickstart/*"
+      ],
+      "@/*": [
+        "./quickstart/*"
+      ],
+      "@/app/components/*": [
+        "./quickstart/*"
+      ]
+    }
+  }
+}
