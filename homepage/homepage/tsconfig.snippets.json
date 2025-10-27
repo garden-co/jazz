@@ -1,0 +1,4 @@
+{
+  "extends": "./tsconfig.json",
+  "include": ["content/docs/code-snippets/**/*"]
+}

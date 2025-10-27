@@ -6,6 +6,28 @@ interface Options {
   dir: string;
 }
 
+const COMMENT_STYLES = {
+  jsStyle: (pattern: string) => `//\\s*${pattern}`,
+  htmlStyle: (pattern: string) => `<!--\\s*${pattern}\\s*-->`,
+  jsxStyle: (pattern: string) => `\\{\\s*\\/\\*\\s*${pattern}\\s*\\*\\/\\s*\\}`,
+} as const;
+
+function createMultiStylePattern(pattern: string, flags = ""): RegExp[] {
+  return [
+    new RegExp(`^\\s*${COMMENT_STYLES.jsStyle(pattern)}`, flags),
+    new RegExp(`^\\s*${COMMENT_STYLES.htmlStyle(pattern)}`, flags),
+    new RegExp(`^\\s*${COMMENT_STYLES.jsxStyle(pattern)}`, flags),
+  ];
+}
+
+function matchesAnyPattern(line: string, patterns: RegExp[]): RegExpMatchArray | null {
+  for (const pattern of patterns) {
+    const match = line.match(pattern);
+    if (match) return match;
+  }
+  return null;
+}
+
 /**
  * Remark plugin to import and process code snippets from external files.
  * 
@@ -46,6 +68,7 @@ interface Options {
  * - `// #region Name` / `// #endregion` - Define extractable regions
  * - `// @ts-expect-error`, `// @ts-ignore`, `// @ts-nocheck` - Automatically hidden
  * - HTML-style comments (`<!-- ... -->`) also supported for Svelte files
+ * - JSX comments (curly-brace-slash-star format) also supported for React/TSX files
  * 
  * All sentinel comments are automatically stripped from the final output.
  */
@@ -67,24 +90,7 @@ export function codeSnippets(options: Options): Function {
       let content = fs.readFileSync(filePath, "utf8");
 
       if (params.region) {
-        let regionRegex = new RegExp(
-          `//\\s*#region\\s*${params.region}[\\s\\S]*?//\\s*#endregion`,
-          "m"
-        );
-        let match = content.match(regionRegex);
-
-        if (!match) {
-          regionRegex = new RegExp(
-            `<!--\\s*#region\\s*${params.region}\\s*-->[\\s\\S]*?<!--\\s*#endregion\\s*-->`,
-            "m"
-          );
-          match = content.match(regionRegex);
-        }
-
-        if (!match) {
-          throw new Error(`Region "${params.region}" not found in ${filePath}`);
-        }
-        content = stripRegionMarkers(match[0], params.region);
+        content = extractRegion(content, params.region, filePath);
       }
 
       const { clean, highlights, diff } = processAnnotations(content);
@@ -125,19 +131,47 @@ function parseMeta(meta: string | undefined) {
   return result;
 }
 
+function extractRegion(content: string, region: string, filePath: string): string {
+  const regionPatterns = [
+    `${COMMENT_STYLES.jsStyle(`#region\\s*${region}`)}[\\s\\S]*?${COMMENT_STYLES.jsStyle('#endregion')}`,
+    `${COMMENT_STYLES.htmlStyle(`#region\\s*${region}`)}[\\s\\S]*?${COMMENT_STYLES.htmlStyle('#endregion')}`,
+    `${COMMENT_STYLES.jsxStyle(`#region\\s*${region}`)}[\\s\\S]*?${COMMENT_STYLES.jsxStyle('#endregion')}`,
+  ];
+
+  for (const pattern of regionPatterns) {
+    const match = content.match(new RegExp(pattern, "m"));
+    if (match) {
+      return stripRegionMarkers(match[0], region);
+    }
+  }
+
+  throw new Error(`Region "${region}" not found in ${filePath}`);
+}
+
 function stripRegionMarkers(source: string, region: string) {
-  return source
-    .replace(new RegExp(`//\\s*#region\\s*${region}`), "")
-    .replace(/\/\/\s*#endregion/, "")
-    .replace(new RegExp(`<!--\\s*#region\\s*${region}\\s*-->`), "")
-    .replace(/<!--\s*#endregion\s*-->/, "")
-    .trim();
+  const markerPatterns = [
+    [new RegExp(`${COMMENT_STYLES.jsStyle(`#region\\s*${region}`)}`), new RegExp(COMMENT_STYLES.jsStyle('#endregion'))],
+    [new RegExp(COMMENT_STYLES.htmlStyle(`#region\\s*${region}`)), new RegExp(COMMENT_STYLES.htmlStyle('#endregion'))],
+    [new RegExp(COMMENT_STYLES.jsxStyle(`#region\\s*${region}`)), new RegExp(COMMENT_STYLES.jsxStyle('#endregion'))],
+  ];
+
+  let result = source;
+  for (const [startPattern, endPattern] of markerPatterns) {
+    result = result.replace(startPattern, "").replace(endPattern, "");
+  }
+  return result.trim();
 }
 
 function processAnnotations(source: string) {
   const lines = source.split("\n");
   const highlights: number[] = [];
   const diff: { line: number; type: "add" | "remove" }[] = [];
+
+  const hideWithCountPatterns = createMultiStylePattern(`\\[!code\\s*hide:\\s*(\\d+)\\s*\\]`);
+  const hidePatterns = createMultiStylePattern(`\\[!code\\s*hide\\s*\\]`);
+  const diffPatterns = createMultiStylePattern(`\\[!code\\s*(\\+\\+|--):\\s*(\\d+)\\s*\\]`);
+  const regionPatterns = createMultiStylePattern(`#(?:region|endregion)`);
+  const tsDirectivePatterns = createMultiStylePattern(`@ts-(?:expect-error|ignore|nocheck)`);
 
   let inHighlightBlock = false;
   let pendingDiff: { type: "add" | "remove"; count: number } | null = null;
@@ -151,48 +185,50 @@ function processAnnotations(source: string) {
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
 
-    const hideMatch = line.match(/^\s*\/\/\s*\[!code\s*hide:\s*(\d+)\s*\]/)
-      || line.match(/^\s*<!--\s*\[!code\s*hide:\s*(\d+)\s*\]\s*-->/);
+    // Check for hide with count: [!code hide:N]
+    const hideMatch = matchesAnyPattern(line, hideWithCountPatterns);
     if (hideMatch) {
       hideCount = +hideMatch[1];
       continue; // Skip sentinel line
     }
 
-    if (/^\s*\/\/\s*\[!code\s*hide\s*\]/.test(line) || /^\s*<!--\s*\[!code\s*hide\s*\]\s*-->/.test(line)) {
+    // Check for single line hide: [!code hide]
+    if (matchesAnyPattern(line, hidePatterns)) {
       hideNextLine = true;
       continue; // Skip sentinel line
     }
 
-    const bracketDiffMatch = line.match(/^\s*\/\/\s*\[!code\s*(\+\+|--):\s*(\d+)\s*\]/)
-      || line.match(/^\s*<!--\s*\[!code\s*(\+\+|--):\s*(\d+)\s*\]\s*-->/);
+    // Check for diff markers: [!code ++:N] or [!code --:N]
+    const bracketDiffMatch = matchesAnyPattern(line, diffPatterns);
     if (bracketDiffMatch) {
       const [, op, countStr] = bracketDiffMatch;
       pendingDiff = { type: op === "++" ? "add" : "remove", count: +countStr };
       continue; // Skip sentinel line
     }
 
-    if (/^\s*\/\/\s*#region/.test(line) || /^\s*\/\/\s*#endregion/.test(line)) {
-      continue; // Skip JS/TS region markers
+    // Skip region markers
+    if (matchesAnyPattern(line, regionPatterns)) {
+      continue;
     }
 
-    if (/^\s*<!--\s*#region/.test(line) || /^\s*<!--\s*#endregion/.test(line)) {
-      continue; // Skip Svelte/HTML region markers
+    // Skip TypeScript compiler directives
+    if (matchesAnyPattern(line, tsDirectivePatterns)) {
+      continue;
     }
 
-    if (/^\s*\/\/\s*@ts-(expect-error|ignore|nocheck)/.test(line)) {
-      continue; // Skip TypeScript compiler directives
-    }
-
+    // Apply hide count
     if (hideCount > 0) {
       hideCount--;
       continue;
     }
 
+    // Apply hide next line
     if (hideNextLine) {
       hideNextLine = false;
       continue;
     }
 
+    // Handle pending diff
     if (pendingDiff) {
       cleanLines.push(line);
       const cleanLineNum = cleanLines.length;
@@ -203,6 +239,7 @@ function processAnnotations(source: string) {
       continue;
     }
 
+    // Handle diff next line
     if (diffNextLine) {
       cleanLines.push(line);
       const cleanLineNum = cleanLines.length;
@@ -211,9 +248,11 @@ function processAnnotations(source: string) {
       continue;
     }
 
+    // Add line to clean output
     cleanLines.push(line);
     const cleanLineNum = cleanLines.length;
 
+    // Apply highlights
     if (highlightNextLine) {
       highlights.push(cleanLineNum);
       highlightNextLine = false;
