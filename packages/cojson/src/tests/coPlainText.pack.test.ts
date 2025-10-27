@@ -5,6 +5,7 @@ import type {
   DeletionOpPayload,
   ListOpPayload,
   OpID,
+  PreOpPayload,
 } from "../coValues/coList.js";
 
 describe("CoPlainTextPackImplementation", () => {
@@ -224,6 +225,38 @@ describe("CoPlainTextPackImplementation", () => {
       expect((result[0] as any)[1]).toBe("こ"); // value at index 1
       expect(result[1]).toBe("んにちは");
     });
+
+    test("should NOT pack prepend operations", () => {
+      const changes: ListOpPayload<string>[] = [
+        { op: "pre", value: "a", before: "end" },
+        { op: "pre", value: "b", before: "end" },
+        { op: "pre", value: "c", before: "end" },
+      ];
+
+      const result = packer.packChanges(changes);
+
+      // Prepend operations are not compacted, returns array of arrays
+      expect(Array.isArray(result)).toBe(true);
+      expect(result.length).toBe(3);
+      expect(Array.isArray(result[0])).toBe(true);
+      expect((result[0] as any)[0]).toBe("pre");
+      expect((result[0] as any)[3]).toBeUndefined(); // no compacted flag
+    });
+
+    test("should NOT pack when mixing prepend with append", () => {
+      const changes: ListOpPayload<string>[] = [
+        { op: "pre", value: "a", before: "end" },
+        { op: "app", value: "b", after: "start" },
+      ];
+
+      const result = packer.packChanges(changes);
+
+      // Mixed operations - returns array of arrays
+      expect(Array.isArray(result)).toBe(true);
+      expect(result.length).toBe(2);
+      expect((result[0] as any)[0]).toBe("pre");
+      expect((result[1] as any)[0]).toBe("app");
+    });
   });
 
   describe("unpackChanges", () => {
@@ -373,6 +406,17 @@ describe("CoPlainTextPackImplementation", () => {
       expect((result[0] as AppOpPayload<string>).value).toBe("e");
       expect((result[1] as AppOpPayload<string>).value).toBe("\u0301");
     });
+
+    test("should pass through prepend operations unchanged", () => {
+      const changes: ListOpPayload<string>[] = [
+        { op: "pre", value: "a", before: "end" },
+        { op: "pre", value: "b", before: "end" },
+      ];
+
+      const result = packer.unpackChanges(changes);
+
+      expect(result).toBe(changes);
+    });
   });
 
   describe("pack/unpack roundtrip", () => {
@@ -461,6 +505,30 @@ describe("CoPlainTextPackImplementation", () => {
         .map((op) => (op as AppOpPayload<string>).value)
         .join("");
       expect(reconstructedText).toBe(text);
+    });
+
+    test("should maintain prepend operations through pack/unpack cycle", () => {
+      const opID = createOpID("session1", 0);
+      const original: ListOpPayload<string>[] = [
+        { op: "pre", value: "a", before: "end" },
+        { op: "pre", value: "b", before: opID },
+        { op: "pre", value: "c", before: "end" },
+      ];
+
+      const packed = packer.packChanges(original);
+      const unpacked = packer.unpackChanges(packed as any);
+
+      // Check that all values are correct
+      expect(unpacked.length).toBe(original.length);
+      for (let i = 0; i < unpacked.length; i++) {
+        expect(unpacked[i]?.op).toBe(original[i]?.op);
+        expect((unpacked[i] as PreOpPayload<string>).value).toBe(
+          (original[i] as PreOpPayload<string>).value,
+        );
+        expect((unpacked[i] as PreOpPayload<string>).before).toBe(
+          (original[i] as PreOpPayload<string>).before,
+        );
+      }
     });
   });
 

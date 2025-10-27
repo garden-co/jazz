@@ -3,7 +3,6 @@ import {
   AppOpPayload,
   DeletionOpPayload,
   ListOpPayload,
-  OpID,
   PreOpPayload,
 } from "../coValues/coList.js";
 import {
@@ -12,19 +11,8 @@ import {
   packObjectToArr,
   unpackArrToObject,
   unpackArrOfObjectsCoList,
+  LIST_TO_KEYS_MAP,
 } from "./objToArr.js";
-
-/**
- * Ordered keys for insertion operations (append/prepend).
- * Used to convert operation objects into compact array format.
- */
-export const LIST_KEYS_INSERTION = ["op", "value", "after", "compacted"];
-
-/**
- * Ordered keys for deletion operations.
- * Used to convert deletion operation objects into compact array format.
- */
-export const LIST_KEYS_DELETION = ["op", "insertion", "compacted"];
 
 /**
  * Type representing compacted changes for CoList operations.
@@ -162,7 +150,7 @@ export class CoListPackImplementation<Item extends JsonValue>
 
     // Return: packed first operation + raw values of remaining operations
     return [
-      packObjectToArr(LIST_KEYS_INSERTION, firstElementCompacted),
+      packObjectToArr(LIST_TO_KEYS_MAP["app"], firstElementCompacted),
       ...(changes as AppOpPayload<Item>[])
         .slice(1)
         .map((change) => change.value),
@@ -213,24 +201,13 @@ export class CoListPackImplementation<Item extends JsonValue>
       ) as ListOpPayload<Item>[];
     }
 
-    // Unpack the first element to check if it's compacted
     const op = getOperationType(changes[0] as JsonValue[]);
-    let firstElement:
-      | (AppOpPayload<Item> & { compacted?: true })
-      | (PreOpPayload<Item> & { compacted?: true })
-      | (DeletionOpPayload & { compacted?: true })
-      | undefined;
-    if (op === "del") {
-      firstElement = unpackArrToObject(
-        LIST_KEYS_DELETION,
-        changes[0],
-      ) as DeletionOpPayload;
-    } else {
-      firstElement = unpackArrToObject(
-        LIST_KEYS_INSERTION,
-        changes[0],
-      ) as AppOpPayload<Item>;
-    }
+
+    // Unpack the first element to check if it's compacted
+    const firstElement = unpackArrToObject(
+      LIST_TO_KEYS_MAP[op],
+      changes[0],
+    ) as ListOpPayload<Item> & { compacted?: true };
 
     // Not compacted - unpack each operation individually
     if (!firstElement?.compacted) {

@@ -5,7 +5,19 @@ import { JsonObject, JsonValue } from "../jsonValue.js";
  * Defines the structure: ["op", "value", "after", "compacted"]
  * Used to convert append/prepend operation objects into compact arrays.
  */
-export const LIST_KEYS_INSERTION = ["op", "value", "after", "compacted"];
+export const LIST_KEYS_INSERTION_APPEND = ["op", "value", "after", "compacted"];
+
+/**
+ * Ordered keys to represent prepend operations in array format.
+ * Defines the structure: ["op", "value", "before", "compacted"]
+ * Used to convert prepend operation objects into compact arrays.
+ */
+export const LIST_KEYS_INSERTION_PREPEND = [
+  "op",
+  "value",
+  "before",
+  "compacted",
+];
 
 /**
  * Ordered keys to represent deletion operations in array format.
@@ -13,6 +25,12 @@ export const LIST_KEYS_INSERTION = ["op", "value", "after", "compacted"];
  * Used to convert delete operation objects into compact arrays.
  */
 export const LIST_KEYS_DELETION = ["op", "insertion", "compacted"];
+
+export const LIST_TO_KEYS_MAP = {
+  app: LIST_KEYS_INSERTION_APPEND,
+  pre: LIST_KEYS_INSERTION_PREPEND,
+  del: LIST_KEYS_DELETION,
+} as const;
 
 /**
  * Extracts the operation type from the first element of an array.
@@ -128,13 +146,7 @@ export function unpackArrToObject(keys: string[], arr: JsonValue[]) {
 export function unpackArrOfObjectsCoList<T extends JsonValue>(arr: T[][]) {
   return arr.map((item) => {
     const operationType = getOperationType(item);
-    if (operationType === "del") {
-      // Deletion operation: use deletion keys
-      return unpackArrToObject(LIST_KEYS_DELETION, item);
-    } else {
-      // Insertion operations (app/pre): use insertion keys
-      return unpackArrToObject(LIST_KEYS_INSERTION, item);
-    }
+    return unpackArrToObject(LIST_TO_KEYS_MAP[operationType], item);
   });
 }
 
@@ -165,13 +177,6 @@ export function packArrOfObjectsCoList<T extends JsonObject>(
   arr: (T & { op: "app" | "del" | "pre" })[],
 ) {
   return arr.map((item) => {
-    const operationType = item.op;
-    if (operationType === "del") {
-      // Deletion operation: use deletion keys
-      return packObjectToArr(LIST_KEYS_DELETION, item);
-    } else {
-      // Insertion operations (app/pre): use insertion keys
-      return packObjectToArr(LIST_KEYS_INSERTION, item);
-    }
+    return packObjectToArr(LIST_TO_KEYS_MAP[item.op], item);
   });
 }

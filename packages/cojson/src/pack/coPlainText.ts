@@ -5,7 +5,7 @@ import {
   ListOpPayload,
   OpID,
 } from "../coValues/coList.js";
-import { CoListPack, LIST_KEYS_INSERTION } from "./coList.js";
+import { CoListPack } from "./coList.js";
 import { JsonValue } from "../jsonValue.js";
 import {
   getOperationType,
@@ -14,6 +14,7 @@ import {
   packObjectToArr,
   unpackArrToObject,
   unpackArrOfObjectsCoList,
+  LIST_TO_KEYS_MAP,
 } from "./objToArr.js";
 
 /**
@@ -147,7 +148,7 @@ export class CoPlainTextPackImplementation
 
       // Join all subsequent character values into a single string
       return [
-        packObjectToArr(LIST_KEYS_INSERTION, firstElementCompacted),
+        packObjectToArr(LIST_TO_KEYS_MAP["app"], firstElementCompacted),
         (changes as AppOpPayload<string>[])
           .slice(1)
           .map((change) => change.value)
@@ -171,7 +172,7 @@ export class CoPlainTextPackImplementation
       firstElementCompacted.compacted = true;
 
       return [
-        packObjectToArr(LIST_KEYS_DELETION, firstElementCompacted),
+        packObjectToArr(LIST_TO_KEYS_MAP["del"], firstElementCompacted),
         ...(changes as DeletionOpPayload[])
           .slice(1)
           .map((change) => change.insertion),
@@ -236,21 +237,10 @@ export class CoPlainTextPackImplementation
 
     // Unpack first element to check if it's compacted
     const op = getOperationType(changes[0] as JsonValue[]);
-    let firstElement:
-      | (AppOpPayload<string> & { compacted?: true })
-      | (DeletionOpPayload & { compacted?: true })
-      | undefined;
-    if (op === "del") {
-      firstElement = unpackArrToObject(
-        LIST_KEYS_DELETION,
-        changes[0],
-      ) as DeletionOpPayload;
-    } else {
-      firstElement = unpackArrToObject(
-        LIST_KEYS_INSERTION,
-        changes[0],
-      ) as AppOpPayload<string>;
-    }
+    const firstElement = unpackArrToObject(
+      LIST_TO_KEYS_MAP[op],
+      changes[0],
+    ) as ListOpPayload<string> & { compacted?: true };
 
     // Not compacted - unpack each operation individually
     if (!firstElement?.compacted) {
@@ -263,7 +253,7 @@ export class CoPlainTextPackImplementation
     if (firstElement?.op === "del") {
       return [
         unpackArrToObject(
-          LIST_KEYS_DELETION,
+          LIST_TO_KEYS_MAP["del"],
           changes[0] as JsonValue[],
         ) as DeletionOpPayload,
         ...changes.slice(1).map((insertion) => {
@@ -284,7 +274,7 @@ export class CoPlainTextPackImplementation
       ...Array.from(splitGraphemes(elementsString)).map((grapheme) => ({
         op: "app" as const,
         value: grapheme,
-        after: firstElement.after,
+        after: (firstElement as AppOpPayload<string>).after,
       })),
     ];
   }
