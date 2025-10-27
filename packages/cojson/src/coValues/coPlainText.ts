@@ -3,6 +3,10 @@ import { AvailableCoValueCore } from "../coValueCore/coValueCore.js";
 import { TRANSACTION_CONFIG } from "../config.js";
 import { JsonObject } from "../jsonValue.js";
 import { DeletionOpPayload, OpID, RawCoList } from "./coList.js";
+import {
+  CoPlainTextPackImplementation,
+  PackedChangesCoPlainText,
+} from "../pack/coPlainText.js";
 
 export type StringifiedOpID = string & { __stringifiedOpID: true };
 
@@ -46,7 +50,7 @@ type PlaintextIdxMapping = {
  */
 export class RawCoPlainText<
   Meta extends JsonObject | null = JsonObject | null,
-> extends RawCoList<string, Meta> {
+> extends RawCoList<string, Meta, PackedChangesCoPlainText> {
   /** @category 6. Meta */
   type = "coplaintext" as const;
 
@@ -56,7 +60,7 @@ export class RawCoPlainText<
   >;
 
   constructor(core: AvailableCoValueCore) {
-    super(core);
+    super(core, new CoPlainTextPackImplementation());
     this._cachedMapping = new WeakMap();
   }
 
@@ -110,6 +114,9 @@ export class RawCoPlainText<
     idx: number,
     text: string,
     privacy: "private" | "trusting" = "private",
+    options?: {
+      disablePacking?: boolean;
+    },
   ) {
     const graphemes = Array.from(splitGraphemes(text));
 
@@ -122,11 +129,11 @@ export class RawCoPlainText<
       }
 
       if (graphemes.length > 1) {
-        this.appendChars(graphemes.slice(1), 0, privacy);
+        this.appendChars(graphemes.slice(1), 0, privacy, options);
       }
     } else {
       // For other insertions, append after the previous character
-      this.appendChars(graphemes, idx - 1, privacy);
+      this.appendChars(graphemes, idx - 1, privacy, options);
     }
   }
 
@@ -134,10 +141,13 @@ export class RawCoPlainText<
     text: string[],
     position: number,
     privacy: "private" | "trusting" = "private",
+    options?: {
+      disablePacking?: boolean;
+    },
   ) {
     const chunks = splitIntoChunks(text);
     for (const chunk of chunks) {
-      this.appendItems(chunk, position, privacy);
+      this.appendItems(chunk, position, privacy, options);
       position += chunk.length;
     }
   }
@@ -154,19 +164,25 @@ export class RawCoPlainText<
     idx: number,
     text: string,
     privacy: "private" | "trusting" = "private",
+    options?: {
+      disablePacking?: boolean;
+    },
   ) {
     const graphemes = Array.from(splitGraphemes(text));
 
     if (idx >= this.entries().length) {
-      this.appendChars(graphemes, idx - 1, privacy);
+      this.appendChars(graphemes, idx - 1, privacy, options);
     } else {
-      this.appendChars(graphemes, idx, privacy);
+      this.appendChars(graphemes, idx, privacy, options);
     }
   }
 
   deleteRange(
     { from, to }: { from: number; to: number },
     privacy: "private" | "trusting" = "private",
+    options?: {
+      disablePacking?: boolean;
+    },
   ) {
     const ops: DeletionOpPayload[] = [];
     for (let idx = from; idx < to; ) {
@@ -184,7 +200,10 @@ export class RawCoPlainText<
       }
       idx = nextIdx;
     }
-    this.core.makeTransaction(ops, privacy);
+    this.core.makeTransaction(
+      options?.disablePacking ? ops : this.pack.packChanges(ops),
+      privacy,
+    );
     this.processNewTransactions();
   }
 
