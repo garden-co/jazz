@@ -38,7 +38,7 @@ type CoValue = {
 ```
 </CodeGroup>
 
-The goal of explicit loading states is to encourage developers to think more carefully about CoValue resolution depth and loading states when building their apps, ensuring all cases are properly handled.
+The goal of explicit loading states is to make it easier for developers to build apps which handle all kinds of loading states properly.
 
 ## Changes
 
@@ -92,9 +92,9 @@ if (!person.$isLoaded) {
 ```
 </CodeGroup>
 
-### All hooks now accept selector functions
+### All React hooks now accept selector functions
 
-The `useAccountWithSelector` and `useCoStateWithSelector` hooks have seen widespread adoption, allowing you to select a subset of a CoValue's properties to return.
+The `useAccountWithSelector` and `useCoStateWithSelector` React hooks have seen widespread adoption, allowing you to select a subset of a CoValue's properties to return.
 
 This prevents unnecessary re-renders, as components only re-render when the data you're interested in changes.
 
