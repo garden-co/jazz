@@ -97,27 +97,7 @@ CoFeeds are append-only; you can add new items, but not modify existing ones. Th
 ### Adding Items
 
 <CodeGroup>
-```ts twoslash
-import { co, z } from "jazz-tools";
-import { createJazzTestAccount } from 'jazz-tools/testing';
-const me = await createJazzTestAccount();
-
-const Activity = co.map({
-  timestamp: z.date(),
-  action: z.literal(["watering", "planting", "harvesting", "maintenance"]),
-  notes: z.optional(z.string()),
-});
-
-const ActivityFeed = co.feed(Activity);
-const activityFeed = ActivityFeed.create([]);
-
-// ---cut---
-// Log a new activity
-activityFeed.$jazz.push(Activity.create({
-  timestamp: new Date(),
-  action: "watering",
-  notes: "Extra water for new seedlings"
-}));
+```ts snippet=core-concepts/covalues/cofeeds/index.ts region=PushToFeed
 ```
 </CodeGroup>
 
@@ -128,37 +108,7 @@ Each item is automatically associated with the current user's session. You don't
 Each entry is automatically added to the current session's feed. When a user has multiple open sessions (like both a mobile app and web browser), each session creates its own separate entries:
 
 <CodeGroup>
-```ts twoslash
-import { co, z } from "jazz-tools";
-import { createJazzTestAccount } from 'jazz-tools/testing';
-const me = await createJazzTestAccount();
-
-const Activity = co.map({
-  timestamp: z.date(),
-  action: z.literal(["watering", "planting", "harvesting", "maintenance"]),
-  notes: z.optional(z.string()),
-});
-
-const ActivityFeed = co.feed(Activity);
-const fromMobileFeed = ActivityFeed.create([]);
-const fromBrowserFeed = ActivityFeed.create([]);
-
-// ---cut---
-// On mobile device:
-fromMobileFeed.$jazz.push(Activity.create({
-  timestamp: new Date(),
-  action: "harvesting",
-  notes: "Vegetable patch"
-}));
-
-// On web browser (same user):
-fromBrowserFeed.$jazz.push(Activity.create({
-  timestamp: new Date(),
-  action: "planting",
-  notes: "Flower bed"
-}));
-
-// These are separate entries in the same feed, from the same account
+```ts snippet=core-concepts/covalues/cofeeds/index.ts region=MultiFeed
 ```
 </CodeGroup>
 
@@ -171,26 +121,7 @@ CoFeeds support metadata, which is useful for tracking information about the fee
 The `by` property is the account that made the entry.
 
 <CodeGroup>
-```ts twoslash
-import { co, z } from "jazz-tools";
-import { createJazzTestAccount } from 'jazz-tools/testing';
-const me = await createJazzTestAccount();
-
-const Activity = co.map({
-  timestamp: z.date(),
-  action: z.literal(["watering", "planting", "harvesting", "maintenance"]),
-  notes: z.optional(z.string()),
-});
-
-const ActivityFeed = co.feed(Activity);
-const activityFeed = ActivityFeed.create([]);
-const accountId = me.$jazz.id;
-
-// ---cut---
-const accountFeed = activityFeed.perAccount[accountId];
-
-// Get the account that made the last entry
-console.log(accountFeed?.by);
+```ts snippet=core-concepts/covalues/cofeeds/index.ts region=By
 ```
 </CodeGroup>
 
@@ -199,31 +130,7 @@ console.log(accountFeed?.by);
 The `madeAt` property is a timestamp of when the entry was added to the feed.
 
 <CodeGroup>
-```ts twoslash
-import { co, z } from "jazz-tools";
-import { createJazzTestAccount } from 'jazz-tools/testing';
-const me = await createJazzTestAccount();
-
-const Activity = co.map({
-  timestamp: z.date(),
-  action: z.literal(["watering", "planting", "harvesting", "maintenance"]),
-  notes: z.optional(z.string()),
-});
-
-const ActivityFeed = co.feed(Activity);
-const activityFeed = ActivityFeed.create([]);
-const accountId = me.$jazz.id;
-
-// ---cut---
-const accountFeed = activityFeed.perAccount[accountId];
-
-// Get the timestamp of the last update
-console.log(accountFeed?.madeAt);
-
-// Get the timestamp of each entry
-for (const entry of accountFeed.all) {
-  console.log(entry.madeAt);
-}
+```ts snippet=core-concepts/covalues/cofeeds/index.ts region=MadeAt
 ```
 </CodeGroup>
 
