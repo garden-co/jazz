@@ -3,7 +3,6 @@ import {
   AppOpPayload,
   DeletionOpPayload,
   ListOpPayload,
-  PreOpPayload,
 } from "../coValues/coList.js";
 import {
   getOperationType,
@@ -13,6 +12,8 @@ import {
   unpackArrOfObjectsCoList,
   LIST_TO_KEYS_MAP,
 } from "./objToArr.js";
+
+export type Operations<T extends JsonValue> = ListOpPayload<T>["op"];
 
 /**
  * Type representing compacted changes for CoList operations.
@@ -201,7 +202,7 @@ export class CoListPackImplementation<Item extends JsonValue>
       ) as ListOpPayload<Item>[];
     }
 
-    const op = getOperationType(changes[0] as JsonValue[]);
+    const op: Operations<Item> = getOperationType(changes[0] as JsonValue[]);
 
     // Unpack the first element to check if it's compacted
     const firstElement = unpackArrToObject(

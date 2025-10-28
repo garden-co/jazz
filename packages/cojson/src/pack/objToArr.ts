@@ -42,8 +42,8 @@ export const LIST_TO_KEYS_MAP = {
  * getOperationType(["app", "value", "after"]) // returns "app"
  * getOperationType(["del", "insertionId"]) // returns "del"
  */
-export function getOperationType(arr: JsonValue[]): "app" | "del" | "pre" {
-  return arr[0] as "app" | "del" | "pre";
+export function getOperationType<T extends string>(arr: JsonValue[]): T {
+  return arr[0] as T;
 }
 
 /**
@@ -145,7 +145,7 @@ export function unpackArrToObject(keys: string[], arr: JsonValue[]) {
  */
 export function unpackArrOfObjectsCoList<T extends JsonValue>(arr: T[][]) {
   return arr.map((item) => {
-    const operationType = getOperationType(item);
+    const operationType = getOperationType<"app" | "pre" | "del">(item);
     return unpackArrToObject(LIST_TO_KEYS_MAP[operationType], item);
   });
 }

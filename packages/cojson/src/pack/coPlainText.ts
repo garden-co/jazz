@@ -5,11 +5,10 @@ import {
   ListOpPayload,
   OpID,
 } from "../coValues/coList.js";
-import { CoListPack } from "./coList.js";
+import { CoListPack, Operations } from "./coList.js";
 import { JsonValue } from "../jsonValue.js";
 import {
   getOperationType,
-  LIST_KEYS_DELETION,
   packArrOfObjectsCoList,
   packObjectToArr,
   unpackArrToObject,
@@ -236,7 +235,7 @@ export class CoPlainTextPackImplementation
     }
 
     // Unpack first element to check if it's compacted
-    const op = getOperationType(changes[0] as JsonValue[]);
+    const op = getOperationType<Operations<string>>(changes[0] as JsonValue[]);
     const firstElement = unpackArrToObject(
       LIST_TO_KEYS_MAP[op],
       changes[0],

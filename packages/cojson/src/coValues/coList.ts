@@ -669,25 +669,29 @@ export class RawCoList<
     at: number,
     newItem: Item,
     privacy: "private" | "trusting" = "private",
+    options?: {
+      disablePacking?: boolean;
+    },
   ) {
     const entries = this.entries();
     const entry = entries[at];
     if (!entry) {
       throw new Error("Invalid index " + at);
     }
+    const changes: ListOpPayload<Item>[] = [
+      {
+        op: "app",
+        value: isCoValue(newItem) ? newItem.id : newItem,
+        after: entry.opID,
+      },
+      {
+        op: "del",
+        insertion: entry.opID,
+      },
+    ];
 
     this.core.makeTransaction(
-      [
-        {
-          op: "app",
-          value: isCoValue(newItem) ? newItem.id : newItem,
-          after: entry.opID,
-        },
-        {
-          op: "del",
-          insertion: entry.opID,
-        },
-      ],
+      options?.disablePacking ? changes : this.pack.packChanges(changes),
       privacy,
     );
     this.processNewTransactions();
