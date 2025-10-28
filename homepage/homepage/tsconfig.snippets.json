@@ -4,6 +4,10 @@
     "target": "es2017",
     "baseUrl": ".",
     "paths": {
+      "@/*": [
+        "./content/docs/code-snippets/core-concepts/covalues/imagedef/*",
+        "./content/docs/code-snippets/quickstart/*"
+      ],
       "$lib/*": [
         "./content/docs/code-snippets/quickstart/*"
       ],
@@ -11,9 +15,6 @@
         "./content/docs/code-snippets/quickstart/*"
       ],
       "@/app/*": [
-        "./content/docs/code-snippets/quickstart/*"
-      ],
-      "@/*": [
         "./content/docs/code-snippets/quickstart/*"
       ],
       "@/app/components/*": [

@@ -188,7 +188,7 @@ export type DeeplyLoaded<
       : // Basically V extends CoMap | Group | Account - but if we used that we'd introduce circularity into the definition of CoMap itself
         [V] extends [{ [TypeSym]: "CoMap" | "Group" | "Account" }]
         ? // If Depth = {} return V in any case
-          keyof Depth extends never
+          [Depth] extends [Record<string, never>]
           ? V
           : // 1. Record-like CoMap
             ItemsSym extends keyof V
