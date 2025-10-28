@@ -1,4 +1,4 @@
-// [!code hide:4]
+// [!code hide:5]
 import { Account, co, Group, z, type SessionID, type ID } from "jazz-tools";
 const accountId = "co_z" as ID<Account>;
 const colleagueAccount = Group.create();
@@ -28,7 +28,7 @@ const teamFeed = ActivityFeed.create([], { owner: teamGroup });
 
 // #region SessionFeed
 // Get the feed for a specific session
-// @ts-expect-error already declared
+// @ts-expect-error multiple declarations
 const sessionFeed = activityFeed.perSession[sessionId];
 
 // Latest entry from a session
@@ -45,8 +45,7 @@ console.log(currentSessionFeed?.value?.action); // "harvesting"
 
 // #region AccountFeed
 // Get the feed for a specific session
-// @ts-expect-error already declared
-
+// @ts-expect-error multiple declarations
 const accountFeed = activityFeed.perAccount[accountId];
 
 // Latest entry from an account
@@ -63,9 +62,9 @@ console.log(myLatestEntry?.value?.action); // "harvesting"
 
 // #region AllEntries
 // Get the feeds for a specific account and session
-// @ts-expect-error already declared
+// @ts-expect-error multiple declarations
 const accountFeed = activityFeed.perAccount[accountId];
-// @ts-expect-error already declared
+// @ts-expect-error multiple declarations
 const sessionFeed = activityFeed.perSession[sessionId];
 
 // Iterate over all entries from the account
@@ -132,7 +131,7 @@ fromBrowserFeed.$jazz.push(
 // #endregion
 
 // #region By
-// @ts-expect-error Already declared
+// @ts-expect-error multiple declarations
 const accountFeed = activityFeed.perAccount[accountId];
 
 // Get the account that made the last entry
@@ -140,7 +139,7 @@ console.log(accountFeed?.by);
 // #endregion
 
 // #region MadeAt
-// @ts-expect-error Already declared
+// @ts-expect-error multiple declarations
 const accountFeed = activityFeed.perAccount[accountId];
 
 // Get the timestamp of the last update
