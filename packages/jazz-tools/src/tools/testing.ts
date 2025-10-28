@@ -16,6 +16,9 @@ import {
   coValueClassFromCoValueClassOrSchema,
   createAnonymousJazzContext,
   createJazzContext,
+  CoValue,
+  LoadedAndRequired,
+  MaybeLoaded,
   randomSessionProvider,
 } from "./internal.js";
 
@@ -391,4 +394,12 @@ export function disableJazzTestSync() {
     syncServer.current.gracefulShutdown();
   }
   syncServer.current = null;
+}
+
+export function assertLoaded<T extends MaybeLoaded<CoValue>>(
+  coValue: T,
+): asserts coValue is LoadedAndRequired<T> {
+  if (!coValue.$isLoaded) {
+    throw new Error("CoValue is not loaded");
+  }
 }

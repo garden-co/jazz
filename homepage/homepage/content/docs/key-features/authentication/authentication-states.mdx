@@ -37,17 +37,17 @@ When a user loads a Jazz application for the first time, we create a new Account
 
 ## Detecting Authentication State
 
-You can detect the current authentication state using `useAccount` and `useIsAuthenticated`.
+You can detect the current authentication state using `useAgent` and `useIsAuthenticated`.
 
 <ContentByFramework framework="react">
 <CodeGroup>
 ```tsx twoslash
 import * as React from "react";
 // ---cut---
-import { useAccount, useIsAuthenticated } from "jazz-tools/react";
+import { useAgent, useIsAuthenticated } from "jazz-tools/react";
 
 function AuthStateIndicator() {
-  const { agent } = useAccount();
+  const agent = useAgent();
   const isAuthenticated = useIsAuthenticated();
 
   // Check if guest mode is enabled in JazzReactProvider
@@ -124,6 +124,7 @@ export async function onAnonymousAccountDiscarded(
     },
   });
 
+  // @ts-expect-error TODO: fix issue that prevents iterating CoLists inside loaded CoMaps 
   for (const track of anonymousAccountRoot.rootPlaylist.tracks) {
     if (track.isExampleTrack) continue;
 

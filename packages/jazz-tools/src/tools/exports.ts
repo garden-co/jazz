@@ -31,6 +31,9 @@ export type {
   RefsToResolve,
   RefsToResolveStrict,
   CoMapInit_DEPRECATED as CoMapInit,
+  CoMapEdit,
+  CoMapEdits,
+  LastAndAllCoMapEdits,
   CoFeedEntry,
   TextPos,
   AccountClass,
@@ -56,6 +59,7 @@ export {
   exportCoValue,
   importContentPieces,
   Ref,
+  createUnloadedCoValue,
   unstable_loadUnique,
 } from "./internal.js";
 
@@ -103,8 +107,11 @@ export type * from "./types.js";
 export {
   coValueClassFromCoValueClassOrSchema,
   type InstanceOfSchema,
-  type InstanceOfSchemaCoValuesNullable,
+  type InstanceOfSchemaCoValuesMaybeLoaded,
   type CoValueClassOrSchema,
+  CoValueLoadingState,
+  type MaybeLoaded,
+  type NotLoaded,
   type Loaded,
   type BaseAccountShape,
   type DefaultAccountShape,

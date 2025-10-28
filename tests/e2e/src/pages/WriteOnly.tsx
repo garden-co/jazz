@@ -34,7 +34,7 @@ export function WriteOnlyRole() {
   };
 
   const addNewItem = async () => {
-    if (!coList) return;
+    if (!coList.$isLoaded) return;
 
     const group = coList.$jazz.owner as Group;
     const coMap = SharedCoMap.create({ value: "" }, { owner: group });
@@ -43,7 +43,7 @@ export function WriteOnlyRole() {
   };
 
   const revokeAccess = () => {
-    if (!coList) return;
+    if (!coList.$isLoaded) return;
 
     const coListGroup = coList.$jazz.owner as Group;
 
@@ -68,7 +68,7 @@ export function WriteOnlyRole() {
   return (
     <div>
       <h1>Sharing</h1>
-      <p data-testid="id">{coList?.$jazz.id}</p>
+      <p data-testid="id">{coList.$jazz.id}</p>
       {Object.entries(inviteLinks).map(([role, inviteLink]) => (
         <div key={role} style={{ display: "flex", gap: 5 }}>
           <p style={{ fontWeight: "bold" }}>{role} invitation:</p>
@@ -76,10 +76,12 @@ export function WriteOnlyRole() {
         </div>
       ))}
       <pre data-testid="values">
-        {coList?.map(
-          (map) =>
-            map && <EditSharedCoMap key={map.$jazz.id} id={map.$jazz.id} />,
-        )}
+        {coList.$isLoaded
+          ? coList.map(
+              (map) =>
+                map && <EditSharedCoMap key={map.$jazz.id} id={map.$jazz.id} />,
+            )
+          : null}
       </pre>
       {!id && <button onClick={createCoList}>Create the list</button>}
       {id && <button onClick={addNewItem}>Add a new item</button>}
@@ -91,7 +93,7 @@ export function WriteOnlyRole() {
 function EditSharedCoMap(props: { id: ID<SharedCoMap> }) {
   const coMap = useCoState(SharedCoMap, props.id, {});
 
-  if (!coMap) return null;
+  if (!coMap.$isLoaded) return null;
 
   return (
     <>

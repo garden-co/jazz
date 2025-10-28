@@ -556,7 +556,7 @@ const image = await ImageDefinition.load("123", {
   },
 });
 
-if(image) {
+if(image.$isLoaded) {
   console.log({
     originalSize: image.originalSize,
     placeholderDataUrl: image.placeholderDataURL,

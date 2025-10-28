@@ -1,14 +1,14 @@
 "use client";
 
 import { Button } from "@/components/ui/button";
-import { useAccount, useIsAuthenticated } from "jazz-tools/react";
+import { useLogOut, useIsAuthenticated } from "jazz-tools/react";
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { AuthModal } from "./AuthModal";
 
 export function AuthButton() {
   const [open, setOpen] = useState(false);
-  const { logOut } = useAccount();
+  const logOut = useLogOut();
   const navigate = useNavigate();
 
   const isAuthenticated = useIsAuthenticated();

@@ -19,7 +19,7 @@ export function InvitePage() {
             root: {
               playlists: {
                 $each: {
-                  $onError: null,
+                  $onError: "catch",
                 },
               },
             },

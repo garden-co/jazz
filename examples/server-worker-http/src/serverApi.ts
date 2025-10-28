@@ -70,10 +70,10 @@ const newGameRequest = experimental_defineRequest({
     resolve: {
       game: {
         player1State: {
-          $onError: null,
+          $onError: "catch",
         },
         player2State: {
-          $onError: null,
+          $onError: "catch",
         },
         player1: true,
         player2: true,

@@ -1,7 +1,8 @@
 import { assert, describe, expectTypeOf, test } from "vitest";
 import { Group, co, z } from "../exports.js";
 import { Account } from "../index.js";
-import { CoFeed, FileStream, Loaded } from "../internal.js";
+import { CoFeed, FileStream, Loaded, MaybeLoaded } from "../internal.js";
+import { assertLoaded } from "./utils.js";
 
 describe("CoFeed", () => {
   describe("init", () => {
@@ -39,7 +40,7 @@ describe("CoFeed", () => {
         Dog.create({ name: "Rex", breed: "Labrador" }),
       ]);
 
-      type ExpectedType = Loaded<typeof Dog> | undefined | null;
+      type ExpectedType = MaybeLoaded<Loaded<typeof Dog>> | undefined;
 
       function matches(value: ExpectedType) {
         return value;
@@ -60,7 +61,7 @@ describe("CoFeed", () => {
         Dog.create({ name: "Rex", breed: "Labrador" }),
       ]);
 
-      type ExpectedType = Loaded<typeof Dog> | undefined | null;
+      type ExpectedType = MaybeLoaded<Loaded<typeof Dog>> | undefined;
 
       function matches(value: ExpectedType) {
         return value;
@@ -89,7 +90,7 @@ describe("CoFeed", () => {
 
       const feed = DogFeed.create([dog, undefined]);
 
-      type ExpectedType = Loaded<typeof Dog> | undefined | null;
+      type ExpectedType = MaybeLoaded<Loaded<typeof Dog>> | undefined;
 
       function matches(value: ExpectedType) {
         return value;
@@ -103,7 +104,7 @@ describe("CoFeed", () => {
 
       const feed = NestedFeed.create([co.feed(z.string()).create(["milk"])]);
 
-      type ExpectedType = CoFeed<string> | undefined | null;
+      type ExpectedType = MaybeLoaded<CoFeed<string>> | undefined;
 
       function matches(value: ExpectedType) {
         return value;
@@ -144,17 +145,19 @@ describe("CoFeed", () => {
         resolve: true,
       });
 
-      type ExpectedType = Loaded<typeof Dog> | null | undefined;
+      type ExpectedType = MaybeLoaded<Loaded<typeof Dog>> | undefined;
 
       function matches(value: ExpectedType) {
         return value;
       }
 
+      assertLoaded(loadedFeed);
       matches(loadedFeed?.perAccount[Account.getMe().$jazz.id]?.value);
 
       assert(loadedFeed);
       const dog = loadedFeed.perAccount[Account.getMe().$jazz.id]?.value;
       assert(dog);
+      assertLoaded(dog);
       expectTypeOf(dog.name).toEqualTypeOf<string>();
     });
 
@@ -171,16 +174,17 @@ describe("CoFeed", () => {
       ]);
 
       const loadedFeed = await DogFeed.load(feed.$jazz.id, {
-        resolve: { $each: { $onError: null } },
+        resolve: { $each: { $onError: "catch" } },
       });
 
-      type ExpectedType = Loaded<typeof Dog> | null | undefined;
+      type ExpectedType = MaybeLoaded<Loaded<typeof Dog>> | undefined;
 
       function matches(value: ExpectedType) {
         return value;
       }
 
-      matches(loadedFeed?.perAccount[Account.getMe().$jazz.id]?.value);
+      assertLoaded(loadedFeed);
+      matches(loadedFeed.perAccount[Account.getMe().$jazz.id]?.value);
     });
 
     test("loading a nested feed with deep resolve", async () => {
@@ -202,20 +206,23 @@ describe("CoFeed", () => {
         },
       });
 
-      type ExpectedType = Loaded<typeof Dog> | null | undefined;
+      type ExpectedType = MaybeLoaded<Loaded<typeof Dog>> | undefined;
 
       function matches(value: ExpectedType) {
         return value;
       }
 
+      assertLoaded(loadedFeed);
       const nestedFeed =
         loadedFeed?.perAccount[Account.getMe().$jazz.id]?.value;
       assert(nestedFeed);
+      assertLoaded(nestedFeed);
       matches(nestedFeed.perAccount[Account.getMe().$jazz.id]?.value);
 
       assert(loadedFeed);
       const dog = nestedFeed.perAccount[Account.getMe().$jazz.id]?.value;
       assert(dog);
+      assertLoaded(dog);
       expectTypeOf(dog.name).toEqualTypeOf<string>();
     });
   });

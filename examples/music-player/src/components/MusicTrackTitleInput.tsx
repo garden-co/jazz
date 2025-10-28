@@ -12,22 +12,24 @@ export function MusicTrackTitleInput({
   const [isEditing, setIsEditing] = useState(false);
   const [localTrackTitle, setLocalTrackTitle] = useState("");
 
+  const trackTitle = track.$isLoaded ? track.title : "";
+
   function handleTitleChange(evt: ChangeEvent<HTMLInputElement>) {
     setLocalTrackTitle(evt.target.value);
   }
 
   function handleFoucsIn() {
     setIsEditing(true);
-    setLocalTrackTitle(track?.title ?? "");
+    setLocalTrackTitle(trackTitle);
   }
 
   function handleFocusOut() {
     setIsEditing(false);
     setLocalTrackTitle("");
-    track && updateMusicTrackTitle(track, localTrackTitle);
+    track.$isLoaded && updateMusicTrackTitle(track, localTrackTitle);
   }
 
-  const inputValue = isEditing ? localTrackTitle : (track?.title ?? "");
+  const inputValue = isEditing ? localTrackTitle : trackTitle;
 
   return (
     <div
@@ -41,7 +43,7 @@ export function MusicTrackTitleInput({
         spellCheck="false"
         onFocus={handleFoucsIn}
         onBlur={handleFocusOut}
-        aria-label={`Edit track title: ${track?.title}`}
+        aria-label={`Edit track title: ${trackTitle}`}
       />
       <span className="opacity-0 px-1 w-fit pointer-events-none whitespace-pre">
         {inputValue}

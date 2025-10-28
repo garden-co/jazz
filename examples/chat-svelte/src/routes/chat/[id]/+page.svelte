@@ -36,7 +36,7 @@
   const sendImage = (event: Event & { currentTarget: HTMLInputElement }) => {
     const file = event.currentTarget.files?.[0];
 
-    if (!file || !chat.current) return;
+    if (!file || !chat.current.$isLoaded) return;
 
     if (file.size > 5000000) {
       alert('Please upload an image less than 5MB.');
@@ -44,7 +44,7 @@
     }
 
     createImage(file, { owner: chat.current.$jazz.owner }).then((image) => {
-      if (!chat.current) return;
+      if (!chat.current.$isLoaded) return;
       chat.current.$jazz.push(
         Message.create(
           {
@@ -62,10 +62,10 @@
   <TopBar>
     <input
       type="text"
-      value={me?.profile?.name ?? ''}
+      value={me.$isLoaded ? me.profile.name : ''}
       class="bg-transparent"
       onchange={(e) => {
-        if (!me?.profile) return;
+        if (!me.$isLoaded) return;
         const target = e.target as HTMLInputElement;
         me.profile.$jazz.set('name', target.value);
       }}
@@ -82,14 +82,14 @@
     <div class="flex items-center justify-center flex-1">Loading...</div>
   {:else}
     <ChatBody>
-      {#if chat.current && chat.current.length > 0}
+      {#if chat.current.$isLoaded && chat.current.length > 0}
         {#each chat.current.slice(-showNLastMessages).reverse() as msg (msg.$jazz.id)}
           <ChatBubble {me} {msg} />
         {/each}
       {:else}
         <EmptyChatMessage />
       {/if}
-      {#if chat.current && chat.current.length > showNLastMessages}
+      {#if chat.current.$isLoaded && chat.current.length > showNLastMessages}
         <button
           class="block px-4 py-1 mx-auto my-2 border rounded"
           onclick={() => (showNLastMessages += 10)}
@@ -103,7 +103,7 @@
       <TextInput
         onSubmit={(text: string) => {
           console.log({text})
-          if (!chat.current) return;
+          if (!chat.current.$isLoaded) return;
           chat.current.$jazz.push(
             Message.create(
               { text: CoPlainText.create(text, chat.current.$jazz.owner) },

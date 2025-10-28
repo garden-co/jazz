@@ -27,6 +27,7 @@ import {
   Group,
   ID,
   InstanceOrPrimitiveOfSchema,
+  MaybeLoaded,
   Profile,
   Ref,
   type RefEncoded,
@@ -53,6 +54,8 @@ import {
   parseSubscribeRestArgs,
   subscribeToCoValueWithoutMe,
   subscribeToExistingCoValue,
+  InstanceOfSchemaCoValuesMaybeLoaded,
+  LoadedAndRequired,
 } from "../internal.js";
 
 export type AccountCreationProps = {
@@ -84,8 +87,8 @@ export class Account extends CoValueBase implements CoValue {
     } satisfies RefEncoded<CoMap>,
   };
 
-  declare readonly profile: Profile | null;
-  declare readonly root: CoMap | null;
+  declare readonly profile: MaybeLoaded<Profile>;
+  declare readonly root: MaybeLoaded<CoMap>;
 
   constructor(options: { fromRaw: RawAccount }) {
     super();
@@ -128,7 +131,9 @@ export class Account extends CoValueBase implements CoValue {
     valueID: string,
     inviteSecret: InviteSecret,
     coValueClass?: S,
-  ): Promise<Resolved<InstanceOrPrimitiveOfSchema<S>, true> | null> {
+  ): Promise<
+    MaybeLoaded<Resolved<InstanceOfSchemaCoValuesMaybeLoaded<S>, true>>
+  > {
     if (!this.$jazz.isLocalNodeOwner) {
       throw new Error("Only a controlled account can accept invites");
     }
@@ -144,7 +149,7 @@ export class Account extends CoValueBase implements CoValue {
       {
         loadAs: this,
       },
-    ) as Resolved<InstanceOrPrimitiveOfSchema<S>, true> | null;
+    ) as Resolved<InstanceOfSchemaCoValuesMaybeLoaded<S>, true>;
   }
 
   getRoleOf(member: Everyone | ID<Account> | "me"): "admin" | undefined {
@@ -351,7 +356,7 @@ export class Account extends CoValueBase implements CoValue {
       resolve?: RefsToResolveStrict<A, R>;
       loadAs?: Account | AnonymousJazzAgent;
     },
-  ): Promise<Resolved<A, R> | null> {
+  ): Promise<MaybeLoaded<Resolved<A, R>>> {
     return loadCoValueWithoutMe(this, id, options);
   }
 
@@ -419,7 +424,7 @@ class AccountJazzApi<A extends Account> extends CoValueJazzApi<A> {
    */
   set<K extends "root" | "profile">(
     key: K,
-    value: CoFieldInit<NonNullable<A[K]>>,
+    value: CoFieldInit<LoadedAndRequired<A[K]>>,
   ) {
     if (value) {
       let refId = (value as unknown as CoValue).$jazz?.id as
@@ -470,10 +475,10 @@ class AccountJazzApi<A extends Account> extends CoValueJazzApi<A> {
     root: RefIfCoValue<CoMap> | undefined;
   } {
     const profileID = this.raw.get("profile") as unknown as
-      | ID<NonNullable<(typeof this.account)["profile"]>>
+      | ID<LoadedAndRequired<(typeof this.account)["profile"]>>
       | undefined;
     const rootID = this.raw.get("root") as unknown as
-      | ID<NonNullable<(typeof this.account)["root"]>>
+      | ID<LoadedAndRequired<(typeof this.account)["root"]>>
       | undefined;
 
     return {
@@ -482,20 +487,20 @@ class AccountJazzApi<A extends Account> extends CoValueJazzApi<A> {
             profileID,
             this.loadedAs,
             this.schema.profile as RefEncoded<
-              NonNullable<(typeof this.account)["profile"]> & CoValue
+              LoadedAndRequired<(typeof this.account)["profile"]> & CoValue
             >,
             this.account,
-          ) as unknown as RefIfCoValue<(typeof this.account)["profile"]>)
+          ) as unknown as RefIfCoValue<Profile> | undefined)
         : undefined,
       root: rootID
         ? (new Ref(
             rootID,
             this.loadedAs,
             this.schema.root as RefEncoded<
-              NonNullable<(typeof this.account)["root"]> & CoValue
+              LoadedAndRequired<(typeof this.account)["root"]> & CoValue
             >,
             this.account,
-          ) as unknown as RefIfCoValue<(typeof this.account)["root"]>)
+          ) as unknown as RefIfCoValue<CoMap> | undefined)
         : undefined,
     };
   }

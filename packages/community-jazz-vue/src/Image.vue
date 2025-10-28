@@ -44,8 +44,11 @@ const lazyPlaceholder = computed(() =>
 );
 
 const dimensions = computed(() => {
-  const originalWidth = image.value?.originalSize?.[0];
-  const originalHeight = image.value?.originalSize?.[1];
+  const originalSize = image.value.$isLoaded
+    ? image.value.originalSize
+    : undefined;
+  const originalWidth = originalSize?.[0];
+  const originalHeight = originalSize?.[1];
 
   // Both width and height are "original"
   if (props.width === "original" && props.height === "original") {
@@ -86,7 +89,7 @@ const src = computed(() => {
     return lazyPlaceholder.value;
   }
 
-  if (!image.value) return undefined;
+  if (!image.value.$isLoaded) return undefined;
 
   const bestImage = highestResAvailable(
     image.value,

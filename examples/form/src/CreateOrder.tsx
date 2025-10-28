@@ -1,5 +1,5 @@
 import { useIframeHashRouter } from "hash-slash";
-import { useAccountWithSelector, useCoState } from "jazz-tools/react";
+import { useAccount, useCoState } from "jazz-tools/react";
 import { useState } from "react";
 import { Errors } from "./Errors.tsx";
 import { LinkToHome } from "./LinkToHome.tsx";
@@ -12,9 +12,14 @@ import {
 } from "./schema.ts";
 
 export function CreateOrder(props: { id: string }) {
-  const orders = useAccountWithSelector(JazzAccount, {
+  const orders = useAccount(JazzAccount, {
     resolve: { root: { orders: true } },
-    select: (account) => account?.root.orders,
+    select: (account) => {
+      if (!account.$isLoaded) {
+        return undefined;
+      }
+      return account.root.orders;
+    },
   });
   const router = useIframeHashRouter();
   const [errors, setErrors] = useState<string[]>([]);
@@ -23,7 +28,7 @@ export function CreateOrder(props: { id: string }) {
     resolve: { addOns: true, instructions: true },
   });
 
-  if (!newOrder) return;
+  if (!newOrder.$isLoaded) return;
 
   const handleSave = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();

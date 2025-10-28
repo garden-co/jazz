@@ -26,19 +26,19 @@ export function EditOrder(props: { id: string }) {
     },
   });
 
+  if (!order.$isLoaded) return;
+  const loadedOrder = order;
+
   function handleSave(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
-    if (!order) return;
 
-    order.$jazz.unstable_merge();
+    loadedOrder.$jazz.unstable_merge();
     router.navigate("/");
   }
 
   function handleCancel() {
     router.navigate("/");
   }
-
-  if (!order) return;
 
   return (
     <>

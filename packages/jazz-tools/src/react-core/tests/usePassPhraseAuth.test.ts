@@ -107,7 +107,7 @@ describe("usePassphraseAuth", () => {
     expect(await result.current.signUp()).toBe(passphrase);
   });
 
-  it("should be able to logout after sign up using useAccount.logOut", async () => {
+  it("should be able to logout after sign up", async () => {
     const account = await createJazzTestAccount({});
 
     const accounts: string[] = [];
@@ -116,92 +116,21 @@ describe("usePassphraseAuth", () => {
     const { result } = renderHook(
       () => {
         const passphraseAuth = usePassphraseAuth({ wordlist: testWordlist });
-        const account = useAccount();
-
-        if (account.me) {
-          if (!accounts.includes(account.me.$jazz.id)) {
-            accounts.push(account.me.$jazz.id);
-          }
-
-          updates.push({
-            state: passphraseAuth.state,
-            accountIndex: accounts.indexOf(account.me.$jazz.id),
-          });
-        }
-
-        return { passphraseAuth, account };
-      },
-      {
-        account,
-        isAuthenticated: false,
-      },
-    );
-
-    expect(result.current?.passphraseAuth.state).toBe("anonymous");
-    expect(result.current?.account?.me).toBeDefined();
-
-    const id = result.current?.account?.me?.$jazz.id;
-
-    await act(async () => {
-      await result.current?.passphraseAuth.signUp();
-    });
-
-    expect(result.current?.passphraseAuth.state).toBe("signedIn");
-    expect(result.current?.account?.me?.$jazz.id).toBe(id);
-
-    await act(async () => {
-      await result.current?.account?.logOut();
-    });
-
-    expect(result.current?.passphraseAuth.state).toBe("anonymous");
-    expect(result.current?.account?.me?.$jazz.id).not.toBe(id);
-
-    expect(updates).toMatchInlineSnapshot(`
-      [
-        {
-          "accountIndex": 0,
-          "state": "anonymous",
-        },
-        {
-          "accountIndex": 0,
-          "state": "signedIn",
-        },
-        {
-          "accountIndex": 0,
-          "state": "anonymous",
-        },
-        {
-          "accountIndex": 1,
-          "state": "anonymous",
-        },
-      ]
-    `);
-  });
-
-  it("should be able to logout after sign up using useLogout", async () => {
-    const account = await createJazzTestAccount({});
-
-    const accounts: string[] = [];
-    const updates: { state: string; accountIndex: number }[] = [];
-
-    const { result } = renderHook(
-      () => {
-        const passphraseAuth = usePassphraseAuth({ wordlist: testWordlist });
-        const account = useAccount();
+        const me = useAccount();
         const logOut = useLogOut();
 
-        if (account.me) {
-          if (!accounts.includes(account.me.$jazz.id)) {
-            accounts.push(account.me.$jazz.id);
+        if (me) {
+          if (!accounts.includes(me.$jazz.id)) {
+            accounts.push(me.$jazz.id);
           }
 
           updates.push({
             state: passphraseAuth.state,
-            accountIndex: accounts.indexOf(account.me.$jazz.id),
+            accountIndex: accounts.indexOf(me.$jazz.id),
           });
         }
 
-        return { passphraseAuth, account, logOut };
+        return { passphraseAuth, me, logOut };
       },
       {
         account,
@@ -210,23 +139,23 @@ describe("usePassphraseAuth", () => {
     );
 
     expect(result.current?.passphraseAuth.state).toBe("anonymous");
-    expect(result.current?.account?.me).toBeDefined();
+    expect(result.current?.me).toBeDefined();
 
-    const id = result.current?.account?.me?.$jazz.id;
+    const id = result.current?.me?.$jazz.id;
 
     await act(async () => {
       await result.current?.passphraseAuth.signUp();
     });
 
     expect(result.current?.passphraseAuth.state).toBe("signedIn");
-    expect(result.current?.account?.me?.$jazz.id).toBe(id);
+    expect(result.current?.me?.$jazz.id).toBe(id);
 
     await act(async () => {
       await result.current?.logOut();
     });
 
     expect(result.current?.passphraseAuth.state).toBe("anonymous");
-    expect(result.current?.account?.me?.$jazz.id).not.toBe(id);
+    expect(result.current?.me?.$jazz.id).not.toBe(id);
 
     expect(updates).toMatchInlineSnapshot(`
       [

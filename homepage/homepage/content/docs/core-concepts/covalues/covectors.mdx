@@ -94,7 +94,7 @@ CoVectors cannot be changed after creation. Instead, create a new CoVector with 
 Semantic search lets you find data based on meaning, not just keywords. In Jazz, you can easily sort results by how similar they are to your search query.
 
 <ContentByFramework framework="react">
-Use the `useCoStateWithSelector` hook to load your data and sort it by similarity to your query embedding:
+Use the `useCoState` hook to load your data and sort it by similarity to your query embedding:
 </ContentByFramework>
 <ContentByFramework framework="vanilla">
 You can load your data using the `.load` method, then compute and sort the results by similarity to your query embedding:
@@ -120,11 +120,11 @@ const useCreateEmbedding: () => YourCustomHook =
   });
 
 // ---cut---
-import { useCoStateWithSelector } from "jazz-tools/react";
+import { useCoState } from "jazz-tools/react";
 
 const { queryEmbedding, createQueryEmbedding } = useCreateEmbedding();
 
-const foundDocuments = useCoStateWithSelector(
+const foundDocuments = useCoState(
   DocumentsList,
   documentsListId,
   {
@@ -132,7 +132,7 @@ const foundDocuments = useCoStateWithSelector(
       $each: { embedding: true }
     },
     select(documents) {
-      if (!documents) return;
+      if (!documents.$isLoaded) return;
 
       // If no query embedding, return all entries
       if (!queryEmbedding) return documents.map((value) => ({ value }));
@@ -172,13 +172,15 @@ const documents = await DocumentsList.load(documentsListId, {
 const queryEmbedding = await createEmbedding("search query");
 
 // 3) Sort documents by vector similarity
-const similarDocuments = documents
-  ?.map((value) => ({
-    value,
-    similarity: value.embedding.$jazz.cosineSimilarity(queryEmbedding), // [!code ++]
-  }))
-  .sort((a, b) => b.similarity - a.similarity)
-  .filter((result) => result.similarity > 0.5);
+const similarDocuments = documents.$isLoaded
+  ? documents
+      .map((value) => ({
+        value,
+        similarity: value.embedding.$jazz.cosineSimilarity(queryEmbedding), // [!code ++]
+      }))
+      .sort((a, b) => b.similarity - a.similarity)
+      .filter((result) => result.similarity > 0.5)
+  : undefined;
 ```
 </TabbedCodeGroupItem>
 <TabbedCodeGroupItem label="Svelte" value="svelte" className="[&_span]:[tab-size:2]" icon={<SvelteLogo />} preferWrap>
@@ -199,7 +201,7 @@ const similarDocuments = documents
   // 2) Sort documents by vector similarity
   const foundDocuments = $derived((() => {
     const docs = documents.current;
-    if (!docs) return;
+    if (!docs.$isLoaded) return;
 
     if (!queryEmbedding) {
       return docs.map((value) => ({ value }));

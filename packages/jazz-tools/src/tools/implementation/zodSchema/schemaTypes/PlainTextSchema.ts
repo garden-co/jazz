@@ -4,6 +4,7 @@ import {
   BranchDefinition,
   CoPlainText,
   Group,
+  MaybeLoaded,
   coOptionalDefiner,
   unstable_mergeBranchWithResolve,
 } from "../../../internal.js";
@@ -47,7 +48,7 @@ export class PlainTextSchema implements CorePlainTextSchema {
       loadAs: Account | AnonymousJazzAgent;
       unstable_branch?: BranchDefinition;
     },
-  ): Promise<CoPlainText | null> {
+  ): Promise<MaybeLoaded<CoPlainText>> {
     return this.coValueClass.load(id, options);
   }
 

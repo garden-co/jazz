@@ -123,18 +123,18 @@ export async function removeTrackFromAllPlaylists(track: MusicTrack) {
       root: {
         playlists: {
           $each: {
-            $onError: null,
+            $onError: "catch",
           },
         },
-        rootPlaylist: true,
       },
     },
   });
 
   const playlists = root.playlists;
 
+  // @ts-expect-error - https://github.com/microsoft/TypeScript/issues/62621
   for (const playlist of playlists) {
-    if (!playlist) continue;
+    if (!playlist.$isLoaded) continue;
 
     removeTrackFromPlaylist(playlist, track);
   }
@@ -196,6 +196,7 @@ export async function onAnonymousAccountDiscarded(
     },
   });
 
+  // @ts-expect-error - https://github.com/microsoft/TypeScript/issues/62621
   for (const track of anonymousAccountRoot.rootPlaylist.tracks) {
     if (track.isExampleTrack) continue;
 

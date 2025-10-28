@@ -1,14 +1,14 @@
 import { MusicaAccount, MusicaAccountRoot } from "@/1_schema";
 import { MediaPlayer } from "@/5_useMediaPlayer";
 import { co } from "jazz-tools";
-import { useAccount } from "jazz-tools/react";
+import { useAgent } from "jazz-tools/react";
 import { useEffect, useState } from "react";
 import { uploadMusicTracks } from "../4_actions";
 
 export function usePrepareAppState(mediaPlayer: MediaPlayer) {
   const [isReady, setIsReady] = useState(false);
 
-  const { agent } = useAccount();
+  const agent = useAgent();
 
   useEffect(() => {
     loadInitialData(mediaPlayer).then(() => {
@@ -23,7 +23,7 @@ async function loadInitialData(mediaPlayer: MediaPlayer) {
   const me = await MusicaAccount.getMe().$jazz.ensureLoaded({
     resolve: {
       root: {
-        activeTrack: { $onError: null },
+        activeTrack: { $onError: "catch" },
       },
     },
   });
@@ -31,7 +31,7 @@ async function loadInitialData(mediaPlayer: MediaPlayer) {
   uploadOnboardingData(me.root);
 
   // Load the active track in the AudioManager
-  if (me.root.activeTrack) {
+  if (me.root.activeTrack?.$isLoaded) {
     mediaPlayer.loadTrack(me.root.activeTrack, false);
   }
 }

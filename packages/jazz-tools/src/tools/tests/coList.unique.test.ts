@@ -2,12 +2,14 @@ import { WasmCrypto } from "cojson/crypto/WasmCrypto";
 import { assert, beforeEach, describe, expect, test, vi } from "vitest";
 import { Account, Group, subscribeToCoValue, z } from "../index.js";
 import {
+  CoValueLoadingState,
   Loaded,
   activeAccountContext,
   co,
   coValueClassFromCoValueClassOrSchema,
 } from "../internal.js";
 import {
+  assertLoaded,
   createJazzTestAccount,
   runWithoutActiveAccount,
   setupJazzTestSync,
@@ -41,17 +43,18 @@ describe("CoList unique methods", () => {
     });
 
     const foundList = await ItemList.loadUnique("test-list", group.$jazz.id);
+    assertLoaded(foundList);
     expect(foundList).toEqual(originalList);
     expect(foundList?.length).toBe(3);
     expect(foundList?.[0]).toBe("item1");
   });
 
-  test("loadUnique returns null for non-existent list", async () => {
+  test("loadUnique returns 'unavailable' for non-existent list", async () => {
     const ItemList = co.list(z.string());
     const group = Group.create();
 
     const foundList = await ItemList.loadUnique("non-existent", group.$jazz.id);
-    expect(foundList).toBeNull();
+    expect(foundList.$jazz.loadingState).toBe(CoValueLoadingState.UNAVAILABLE);
   });
 
   test("upsertUnique creates new list when none exists", async () => {
@@ -66,11 +69,11 @@ describe("CoList unique methods", () => {
       owner: group,
     });
 
-    expect(result).not.toBeNull();
-    expect(result?.length).toBe(3);
-    expect(result?.[0]).toBe("item1");
-    expect(result?.[1]).toBe("item2");
-    expect(result?.[2]).toBe("item3");
+    assertLoaded(result);
+    expect(result.length).toBe(3);
+    expect(result[0]).toBe("item1");
+    expect(result[1]).toBe("item2");
+    expect(result[2]).toBe("item3");
   });
 
   test("upsertUnique without an active account", async () => {
@@ -87,13 +90,13 @@ describe("CoList unique methods", () => {
       });
     });
 
-    expect(result).not.toBeNull();
-    expect(result?.length).toBe(3);
-    expect(result?.[0]).toBe("item1");
-    expect(result?.[1]).toBe("item2");
-    expect(result?.[2]).toBe("item3");
+    assertLoaded(result);
+    expect(result.length).toBe(3);
+    expect(result[0]).toBe("item1");
+    expect(result[1]).toBe("item2");
+    expect(result[2]).toBe("item3");
 
-    expect(result?.$jazz.owner).toEqual(account);
+    expect(result.$jazz.owner).toEqual(account);
   });
 
   test("upsertUnique updates existing list", async () => {
@@ -113,11 +116,12 @@ describe("CoList unique methods", () => {
       owner: group,
     });
 
+    assertLoaded(updatedList);
     expect(updatedList).toEqual(originalList); // Should be the same instance
-    expect(updatedList?.length).toBe(3);
-    expect(updatedList?.[0]).toBe("updated1");
-    expect(updatedList?.[1]).toBe("updated2");
-    expect(updatedList?.[2]).toBe("updated3");
+    expect(updatedList.length).toBe(3);
+    expect(updatedList[0]).toBe("updated1");
+    expect(updatedList[1]).toBe("updated2");
+    expect(updatedList[2]).toBe("updated3");
   });
 
   test("upsertUnique with CoValue items", async () => {
@@ -140,10 +144,10 @@ describe("CoList unique methods", () => {
       resolve: { $each: true },
     });
 
-    expect(result).not.toBeNull();
-    expect(result?.length).toBe(2);
-    expect(result?.[0]?.name).toBe("First");
-    expect(result?.[1]?.name).toBe("Second");
+    assertLoaded(result);
+    expect(result.length).toBe(2);
+    expect(result[0]?.name).toBe("First");
+    expect(result[1]?.name).toBe("Second");
   });
 
   test("upsertUnique updates list with CoValue items", async () => {
@@ -174,10 +178,11 @@ describe("CoList unique methods", () => {
       resolve: { $each: true },
     });
 
+    assertLoaded(updatedList);
     expect(updatedList).toEqual(originalList); // Should be the same instance
-    expect(updatedList?.length).toBe(2);
-    expect(updatedList?.[0]?.name).toBe("Updated");
-    expect(updatedList?.[1]?.name).toBe("Added");
+    expect(updatedList.length).toBe(2);
+    expect(updatedList[0]?.name).toBe("Updated");
+    expect(updatedList[1]?.name).toBe("Added");
   });
 
   test("findUnique returns correct ID", async () => {
@@ -213,10 +218,10 @@ describe("CoList unique methods", () => {
       resolve: { $each: { category: true } },
     });
 
-    expect(result).not.toBeNull();
-    expect(result?.length).toBe(1);
-    expect(result?.[0]?.name).toBe("Item 1");
-    expect(result?.[0]?.category?.title).toBe("Category 1");
+    assertLoaded(result);
+    expect(result.length).toBe(1);
+    expect(result[0]?.name).toBe("Item 1");
+    expect(result[0]?.category?.title).toBe("Category 1");
   });
 
   test("concurrently upserting the same value", async () => {
@@ -235,7 +240,7 @@ describe("CoList unique methods", () => {
     await Promise.all(promises);
 
     const result = await ItemList.loadUnique("concurrent", owner.$jazz.id);
-    assert(result);
+    assertLoaded(result);
 
     expect(result.length).toBe(2);
     expect(result[0]).toBe(`Item 2`);

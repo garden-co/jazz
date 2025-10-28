@@ -6,6 +6,7 @@ import {
   CoMapSchemaDefinition,
   Group,
   ID,
+  MaybeLoaded,
   RefsToResolve,
   RefsToResolveStrict,
   Resolved,
@@ -15,7 +16,7 @@ import {
 import { AnonymousJazzAgent } from "../../anonymousJazzAgent.js";
 import { CoFieldSchemaInit } from "../typeConverters/CoFieldSchemaInit.js";
 import { InstanceOrPrimitiveOfSchema } from "../typeConverters/InstanceOrPrimitiveOfSchema.js";
-import { InstanceOrPrimitiveOfSchemaCoValuesNullable } from "../typeConverters/InstanceOrPrimitiveOfSchemaCoValuesNullable.js";
+import { InstanceOrPrimitiveOfSchemaCoValuesMaybeLoaded } from "../typeConverters/InstanceOrPrimitiveOfSchemaCoValuesMaybeLoaded.js";
 import { z } from "../zodReExport.js";
 import { AnyZodOrCoValueSchema } from "../zodSchema.js";
 import { CoOptionalSchema } from "./CoOptionalSchema.js";
@@ -49,25 +50,33 @@ export interface CoRecordSchema<
 
   load<
     const R extends RefsToResolve<
-      CoRecordInstanceCoValuesNullable<K, V>
+      CoRecordInstanceCoValuesMaybeLoaded<K, V>
     > = true,
   >(
-    id: ID<CoRecordInstanceCoValuesNullable<K, V>>,
+    id: ID<CoRecordInstanceCoValuesMaybeLoaded<K, V>>,
     options?: {
-      resolve?: RefsToResolveStrict<CoRecordInstanceCoValuesNullable<K, V>, R>;
+      resolve?: RefsToResolveStrict<
+        CoRecordInstanceCoValuesMaybeLoaded<K, V>,
+        R
+      >;
       loadAs?: Account | AnonymousJazzAgent;
       unstable_branch?: BranchDefinition;
     },
-  ): Promise<Resolved<CoRecordInstanceCoValuesNullable<K, V>, R> | null>;
+  ): Promise<
+    MaybeLoaded<Resolved<CoRecordInstanceCoValuesMaybeLoaded<K, V>, R>>
+  >;
 
   unstable_merge<
     const R extends RefsToResolve<
-      CoRecordInstanceCoValuesNullable<K, V>
+      CoRecordInstanceCoValuesMaybeLoaded<K, V>
     > = true,
   >(
     id: string,
     options?: {
-      resolve?: RefsToResolveStrict<CoRecordInstanceCoValuesNullable<K, V>, R>;
+      resolve?: RefsToResolveStrict<
+        CoRecordInstanceCoValuesMaybeLoaded<K, V>,
+        R
+      >;
       loadAs?: Account | AnonymousJazzAgent;
       branch: BranchDefinition;
     },
@@ -75,16 +84,16 @@ export interface CoRecordSchema<
 
   subscribe<
     const R extends RefsToResolve<
-      CoRecordInstanceCoValuesNullable<K, V>
+      CoRecordInstanceCoValuesMaybeLoaded<K, V>
     > = true,
   >(
-    id: ID<CoRecordInstanceCoValuesNullable<K, V>>,
+    id: ID<CoRecordInstanceCoValuesMaybeLoaded<K, V>>,
     options: SubscribeListenerOptions<
-      CoRecordInstanceCoValuesNullable<K, V>,
+      CoRecordInstanceCoValuesMaybeLoaded<K, V>,
       R
     >,
     listener: (
-      value: Resolved<CoRecordInstanceCoValuesNullable<K, V>, R>,
+      value: Resolved<CoRecordInstanceCoValuesMaybeLoaded<K, V>, R>,
       unsubscribe: () => void,
     ) => void,
   ): () => void;
@@ -94,31 +103,38 @@ export interface CoRecordSchema<
     unique: CoValueUniqueness["uniqueness"],
     ownerID: ID<Account> | ID<Group>,
     as?: Account | Group | AnonymousJazzAgent,
-  ): ID<CoRecordInstanceCoValuesNullable<K, V>>;
+  ): ID<CoRecordInstanceCoValuesMaybeLoaded<K, V>>;
 
   upsertUnique<
     const R extends RefsToResolve<
-      CoRecordInstanceCoValuesNullable<K, V>
+      CoRecordInstanceCoValuesMaybeLoaded<K, V>
     > = true,
   >(options: {
     value: Simplify<CoRecordInit<K, V>>;
     unique: CoValueUniqueness["uniqueness"];
     owner: Account | Group;
-    resolve?: RefsToResolveStrict<CoRecordInstanceCoValuesNullable<K, V>, R>;
-  }): Promise<Resolved<CoRecordInstanceCoValuesNullable<K, V>, R> | null>;
+    resolve?: RefsToResolveStrict<CoRecordInstanceCoValuesMaybeLoaded<K, V>, R>;
+  }): Promise<
+    MaybeLoaded<Resolved<CoRecordInstanceCoValuesMaybeLoaded<K, V>, R>>
+  >;
 
   loadUnique<
     const R extends RefsToResolve<
-      CoRecordInstanceCoValuesNullable<K, V>
+      CoRecordInstanceCoValuesMaybeLoaded<K, V>
     > = true,
   >(
     unique: CoValueUniqueness["uniqueness"],
     ownerID: ID<Account> | ID<Group>,
     options?: {
-      resolve?: RefsToResolveStrict<CoRecordInstanceCoValuesNullable<K, V>, R>;
+      resolve?: RefsToResolveStrict<
+        CoRecordInstanceCoValuesMaybeLoaded<K, V>,
+        R
+      >;
       loadAs?: Account | AnonymousJazzAgent;
     },
-  ): Promise<Resolved<CoRecordInstanceCoValuesNullable<K, V>, R> | null>;
+  ): Promise<
+    MaybeLoaded<Resolved<CoRecordInstanceCoValuesMaybeLoaded<K, V>, R>>
+  >;
 
   getCoValueClass: () => typeof CoMap;
 
@@ -149,11 +165,11 @@ export type CoRecordInstance<
   [key in z.output<K>]: InstanceOrPrimitiveOfSchema<V>;
 } & CoMap;
 
-export type CoRecordInstanceCoValuesNullable<
+export type CoRecordInstanceCoValuesMaybeLoaded<
   K extends z.core.$ZodString<string>,
   V extends AnyZodOrCoValueSchema,
 > = {
-  readonly [key in z.output<K>]: InstanceOrPrimitiveOfSchemaCoValuesNullable<V>;
+  readonly [key in z.output<K>]: InstanceOrPrimitiveOfSchemaCoValuesMaybeLoaded<V>;
 } & CoMap;
 
 export type CoRecordInstanceShape<

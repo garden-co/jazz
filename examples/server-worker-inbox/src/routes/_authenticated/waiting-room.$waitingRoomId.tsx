@@ -22,13 +22,14 @@ export const Route = createFileRoute(
     const waitingRoom = await WaitingRoom.load(waitingRoomId, {
       resolve: {
         game: true,
+        account1: true,
       },
     });
 
-    if (!waitingRoom) {
+    if (!waitingRoom.$isLoaded) {
       throw redirect({ to: "/" });
     }
-    if (!waitingRoom?.account1?.isMe) {
+    if (!waitingRoom.account1.isMe) {
       const sender = await InboxSender.load<JoinGameRequest, WaitingRoom>(
         WORKER_ID,
         me,
@@ -41,7 +42,7 @@ export const Route = createFileRoute(
         ),
       );
       // If the waiting room already has a game, redirect to the game
-      if (waitingRoom?.game) {
+      if (waitingRoom.game) {
         throw redirect({ to: `/game/${waitingRoom.game.$jazz.id}` as string });
       }
     }

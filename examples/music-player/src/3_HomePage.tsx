@@ -32,7 +32,9 @@ export function HomePage({ mediaPlayer }: { mediaPlayer: MediaPlayer }) {
 
   const params = useParams<{ playlistId: string }>();
   const playlistId = useAccountSelector({
-    select: (me) => params.playlistId ?? me.root.$jazz.refs.rootPlaylist.id,
+    select: (me) =>
+      params.playlistId ??
+      (me.$isLoaded ? me.root.$jazz.refs.rootPlaylist.id : undefined),
   });
 
   const playlist = useCoState(Playlist, playlistId, {
@@ -41,6 +43,7 @@ export function HomePage({ mediaPlayer }: { mediaPlayer: MediaPlayer }) {
         $each: true,
       },
     },
+    select: (playlist) => (playlist.$isLoaded ? playlist : undefined),
   });
 
   const membersIds = playlist?.$jazz.owner.members.map((member) => member.id);
@@ -49,7 +52,8 @@ export function HomePage({ mediaPlayer }: { mediaPlayer: MediaPlayer }) {
     select: (me) => Boolean(playlist && me.canWrite(playlist)),
   });
   const isActivePlaylist = useAccountSelector({
-    select: (me) => playlistId === me.root.activePlaylist?.$jazz.id,
+    select: (me) =>
+      me.$isLoaded && playlistId === me.root.activePlaylist?.$jazz.id,
   });
 
   const handlePlaylistShareClick = () => {
