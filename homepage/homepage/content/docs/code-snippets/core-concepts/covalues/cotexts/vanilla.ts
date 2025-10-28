@@ -56,3 +56,4 @@ const cleanup = setupRichTextEditor(doc, editorContainer);
 
 // Later when done with the editor
 cleanup();
+// #endregion

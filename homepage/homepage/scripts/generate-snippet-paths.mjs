@@ -11,7 +11,6 @@ const verbose = false;
 const ROOT = path.resolve(__dirname, "..");
 const SNIPPETS_DIR = path.join(ROOT, "content/docs/code-snippets");
 const TSCONFIG_PATH = path.join(ROOT, "tsconfig.snippets.json");
-const SNIPPETS_TSCONFIG_PATH = path.join(SNIPPETS_DIR, "tsconfig.json");
 
 function extractAliasImports(source) {
   const regex = /(?:from\s+['"]|import\s*\(\s*['"])([^'"]+)['"]/g;
@@ -56,68 +55,113 @@ function findAliasesInDir(dirPath) {
 }
 
 function collectPathMappings() {
-  const mappings = {};
+  const mappingsByDir = {};
+  const allSnippetDirs = new Set();
 
   if (!fs.existsSync(SNIPPETS_DIR)) {
     console.warn("Snippets directory not found:", SNIPPETS_DIR);
-    return mappings;
+    return { mappingsByDir, allSnippetDirs };
   }
 
-  const snippetDirs = fs
-    .readdirSync(SNIPPETS_DIR)
-    .filter((name) => fs.statSync(path.join(SNIPPETS_DIR, name)).isDirectory());
+  // Recursively find all directories containing code files
+  function findCodeDirs(dir, relativePath = "") {
+    const entries = fs.readdirSync(dir);
+    let hasCodeFiles = false;
 
-  for (const dirName of snippetDirs) {
-    const aliases = findAliasesInDir(path.join(SNIPPETS_DIR, dirName));
-    verbose && console.log(`Found ${aliases.size} aliases in ${dirName}`);
+    for (const entry of entries) {
+      const fullPath = path.join(dir, entry);
+      const stat = fs.statSync(fullPath);
 
-    for (const alias of aliases) {
-      mappings[alias] ??= new Set();
-      mappings[alias].add(`./content/docs/code-snippets/${dirName}/*`);
+      if (stat.isDirectory()) {
+        const newRelative = relativePath ? `${relativePath}/${entry}` : entry;
+        findCodeDirs(fullPath, newRelative);
+      } else if (/\.(ts|tsx|js|jsx|svelte)$/.test(entry)) {
+        hasCodeFiles = true;
+      }
+    }
+
+    if (hasCodeFiles && relativePath) {
+      allSnippetDirs.add(relativePath);
+      const aliases = findAliasesInDir(dir);
+      if (aliases.size > 0) {
+        mappingsByDir[relativePath] = aliases;
+        verbose && console.log(`Found ${aliases.size} aliases in ${relativePath}`);
+      }
     }
   }
 
-  return mappings;
+  findCodeDirs(SNIPPETS_DIR);
+  return { mappingsByDir, allSnippetDirs };
 }
 
 function stripJsonComments(text) {
   return text.replace(/\/\/.*$/gm, "");
 }
 
-function updateRootTsconfig(pathMappings) {
+function updateRootTsconfig(mappingsByDir) {
   const config = JSON.parse(
     stripJsonComments(fs.readFileSync(TSCONFIG_PATH, "utf-8")),
   );
+
+  // Aggregate all aliases across all directories for the root config
+  const allPaths = {};
+  for (const [dirName, aliases] of Object.entries(mappingsByDir)) {
+    for (const alias of aliases) {
+      allPaths[alias] ??= [];
+      allPaths[alias].push(`./content/docs/code-snippets/${dirName}/*`);
+    }
+  }
+
   config.compilerOptions ??= {};
-  config.compilerOptions.paths = Object.fromEntries(
-    Object.entries(pathMappings).map(([k, v]) => [k, [...v]]),
-  );
+  config.compilerOptions.paths = allPaths;
   config.exclude = ["node_modules"];
   fs.writeFileSync(TSCONFIG_PATH, JSON.stringify(config, null, 2) + "\n");
 }
 
-function writeSnippetsTsconfig(pathMappings) {
-  const relativePaths = Object.fromEntries(
-    Object.entries(pathMappings).map(([alias, paths]) => [
-      alias,
-      [...paths].map((p) => p.replace("./content/docs/code-snippets/", "./")),
-    ]),
-  );
+function writeLocalTsconfigs(mappingsByDir, allSnippetDirs) {
+  // Write tsconfig for every snippet directory (not just ones with aliases)
+  for (const dirName of allSnippetDirs) {
+    const aliases = mappingsByDir[dirName] || new Set();
 
-  const snippetsConfig = {
-    extends: "../../../tsconfig.snippets.json",
-    compilerOptions: { baseUrl: ".", paths: relativePaths },
-  };
+    // Each directory gets its own tsconfig with local path mappings
+    const localPaths = Object.fromEntries(
+      [...aliases].map(alias => [alias, ["./*"]])
+    );
 
-  fs.writeFileSync(
-    SNIPPETS_TSCONFIG_PATH,
-    JSON.stringify(snippetsConfig, null, 2) + "\n",
-  );
-  verbose && console.log("Wrote", SNIPPETS_TSCONFIG_PATH);
+    // Calculate relative depth to root tsconfig
+    const depth = dirName.split("/").length;
+    const relativeRoot = "../".repeat(depth + 3); // +3 for content/docs/code-snippets
+
+    const localConfig = {
+      extends: `${relativeRoot}tsconfig.json`,
+      compilerOptions: {
+        baseUrl: ".",
+        paths: Object.keys(localPaths).length > 0 ? localPaths : undefined,
+        target: "ES2020",
+        module: "ESNext",
+        lib: ["ES2020", "DOM"],
+        downlevelIteration: true,
+      },
+      include: ["./**/*"],
+      exclude: [],
+    };
+
+    // Remove undefined values
+    if (!localConfig.compilerOptions.paths) {
+      delete localConfig.compilerOptions.paths;
+    }
+
+    const tsconfigPath = path.join(SNIPPETS_DIR, dirName, "tsconfig.json");
+    fs.writeFileSync(
+      tsconfigPath,
+      JSON.stringify(localConfig, null, 2) + "\n",
+    );
+    verbose && console.log(`Wrote ${tsconfigPath}`);
+  }
 }
 
 console.log("Generating TypeScript path mappings for code snippets...");
-const mappings = collectPathMappings();
-updateRootTsconfig(mappings);
-writeSnippetsTsconfig(mappings);
+const { mappingsByDir, allSnippetDirs } = collectPathMappings();
+updateRootTsconfig(mappingsByDir);
+writeLocalTsconfigs(mappingsByDir, allSnippetDirs);
 console.log("✅ Done!");
