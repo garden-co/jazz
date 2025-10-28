@@ -44,8 +44,8 @@ describe("objToArr utilities", () => {
       const result = packObjectToArr(keys, obj);
 
       // Should only have name and age, trailing nulls removed one by one
-      // The implementation only removes the last null, so we get [name, age, null]
-      expect(result).toEqual(["Charlie", 25, null]);
+      // The implementation removes all trailing nulls, so we get [name, age]
+      expect(result).toEqual(["Charlie", 25]);
     });
 
     test("should preserve null in middle positions", () => {
@@ -66,8 +66,8 @@ describe("objToArr utilities", () => {
 
       const result = packObjectToArr(keys, obj);
 
-      // Empty object results in [null] because only the last null is removed
-      expect(result).toEqual([null]);
+      // Empty object results in [] because all trailing nulls are removed
+      expect(result).toEqual([]);
     });
 
     test("should handle object with all null values", () => {
@@ -80,7 +80,7 @@ describe("objToArr utilities", () => {
 
       const result = packObjectToArr(keys, obj);
 
-      expect(result).toEqual([null, null]);
+      expect(result).toEqual([]);
     });
 
     test("should handle nested objects as values", () => {
@@ -603,10 +603,10 @@ describe("objToArr utilities", () => {
 
       const packed = packObjectToArr(keys, objWithTrailingNulls);
 
-      // Only the last null is removed, so we get [1, 2, null, null]
-      expect(packed.length).toBe(4);
-      expect(JSON.stringify(packed).length).toBeLessThan(
-        JSON.stringify([1, 2, null, null, null]).length,
+      // All trailing nulls are removed, so we get [1, 2]
+      expect(packed.length).toBe(2);
+      expect(JSON.stringify(packed).length).equal(
+        JSON.stringify([1, 2]).length,
       );
     });
   });

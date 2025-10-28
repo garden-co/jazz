@@ -73,10 +73,14 @@ export function packObjectToArr(keys: string[], json: JsonObject) {
   const arr = new Array<JsonValue>(keys.length);
   for (let i = 0; i < keys.length; i++) {
     arr[i] = json[keys[i]!] ?? null;
+  }
 
-    // Remove the last element if it's null to save storage space
-    if (arr[i] === null && i + 1 === keys.length) {
+  // remove trailing nulls
+  for (let i = arr.length - 1; i >= 0; i--) {
+    if (arr[i] === null) {
       arr.pop();
+    } else {
+      break;
     }
   }
   return arr;
