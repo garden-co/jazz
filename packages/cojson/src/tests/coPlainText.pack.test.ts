@@ -7,6 +7,7 @@ import type {
   OpID,
   PreOpPayload,
 } from "../coValues/coList.js";
+import { ENCODING_MAP_PRIMITIVES_VALUES } from "../pack/objToArr.js";
 
 describe("CoPlainTextPackImplementation", () => {
   const packer = new CoPlainTextPackImplementation();
@@ -33,11 +34,11 @@ describe("CoPlainTextPackImplementation", () => {
       expect(Array.isArray(result)).toBe(true);
       expect(result.length).toBe(2); // first element array + concatenated string
       expect(Array.isArray(result[0])).toBe(true);
-      // First element is now packed as ["app", "H", "start", true]
-      expect((result[0] as any)[0]).toBe("app"); // op
-      expect((result[0] as any)[1]).toBe("H"); // value
-      expect((result[0] as any)[2]).toBe("start"); // after
-      expect((result[0] as any)[3]).toBe(true); // compacted
+      // First element is now packed as ["H", "start", 1, true]
+      expect((result[0] as any)[0]).toBe("H"); // value
+      expect((result[0] as any)[1]).toBe("start"); // after
+      expect((result[0] as any)[2]).toBe(0); // op (0 is null so we use the default value = "app")
+      expect((result[0] as any)[3]).toBe(ENCODING_MAP_PRIMITIVES_VALUES.true); // compacted
       expect(result[1]).toBe("ello"); // Remaining characters concatenated
     });
 
@@ -53,10 +54,10 @@ describe("CoPlainTextPackImplementation", () => {
 
       expect(result.length).toBe(2);
       expect(Array.isArray(result[0])).toBe(true);
-      expect((result[0] as any)[0]).toBe("app");
-      expect((result[0] as any)[1]).toBe("a");
-      expect((result[0] as any)[2]).toBe(opID);
-      expect((result[0] as any)[3]).toBe(true); // compacted
+      expect((result[0] as any)[0]).toBe("a"); // value
+      expect((result[0] as any)[1]).toBe(opID); // after
+      expect((result[0] as any)[2]).toBe(0); // op (1 = "app")
+      expect((result[0] as any)[3]).toBe(ENCODING_MAP_PRIMITIVES_VALUES.true); // compacted
       expect(result[1]).toBe("bc");
     });
 
@@ -71,7 +72,7 @@ describe("CoPlainTextPackImplementation", () => {
 
       expect(result.length).toBe(2);
       expect(Array.isArray(result[0])).toBe(true);
-      expect((result[0] as any)[1]).toBe("👋"); // value at index 1
+      expect((result[0] as any)[0]).toBe("👋"); // value at index 0
       expect(result[1]).toBe("🌍✨");
     });
 
@@ -86,7 +87,7 @@ describe("CoPlainTextPackImplementation", () => {
 
       expect(result.length).toBe(2);
       expect(Array.isArray(result[0])).toBe(true);
-      expect((result[0] as any)[1]).toBe("a"); // value at index 1
+      expect((result[0] as any)[0]).toBe("a"); // value at index 0
       expect(result[1]).toBe("👨‍👩‍👧‍👦b");
     });
 
@@ -165,8 +166,9 @@ describe("CoPlainTextPackImplementation", () => {
       // Single operation is packed as array of arrays
       expect(result.length).toBe(1);
       expect(Array.isArray(result[0])).toBe(true);
-      expect((result[0] as any)[0]).toBe("app");
-      expect((result[0] as any)[1]).toBe("a");
+      expect((result[0] as any)[0]).toBe("a"); // value
+      expect((result[0] as any)[1]).toBe("start"); // after
+      expect((result[0] as any)[2]).toBeUndefined(); // op (0 is null so we use the default value = "app")
       expect((result[0] as any)[3]).toBeUndefined(); // no compacted flag for single operation
     });
 
@@ -188,7 +190,7 @@ describe("CoPlainTextPackImplementation", () => {
 
       expect(result.length).toBe(2);
       expect(Array.isArray(result[0])).toBe(true);
-      expect((result[0] as any)[1]).toBe("T"); // value at index 1
+      expect((result[0] as any)[0]).toBe("T"); // value at index 0
       expect(result[1]).toBe(text.slice(1));
     });
 
@@ -205,7 +207,7 @@ describe("CoPlainTextPackImplementation", () => {
 
       expect(result.length).toBe(2);
       expect(Array.isArray(result[0])).toBe(true);
-      expect((result[0] as any)[1]).toBe("a"); // value at index 1
+      expect((result[0] as any)[0]).toBe("a"); // value at index 0
       expect(result[1]).toBe(" \t\nb");
     });
 
@@ -222,7 +224,7 @@ describe("CoPlainTextPackImplementation", () => {
 
       expect(result.length).toBe(2);
       expect(Array.isArray(result[0])).toBe(true);
-      expect((result[0] as any)[1]).toBe("こ"); // value at index 1
+      expect((result[0] as any)[0]).toBe("こ"); // value at index 0
       expect(result[1]).toBe("んにちは");
     });
 
@@ -239,7 +241,7 @@ describe("CoPlainTextPackImplementation", () => {
       expect(Array.isArray(result)).toBe(true);
       expect(result.length).toBe(3);
       expect(Array.isArray(result[0])).toBe(true);
-      expect((result[0] as any)[0]).toBe("pre");
+      expect((result[0] as any)[2]).toBe(2); // op (2 = "pre")
       expect((result[0] as any)[3]).toBeUndefined(); // no compacted flag
     });
 
@@ -254,15 +256,15 @@ describe("CoPlainTextPackImplementation", () => {
       // Mixed operations - returns array of arrays
       expect(Array.isArray(result)).toBe(true);
       expect(result.length).toBe(2);
-      expect((result[0] as any)[0]).toBe("pre");
-      expect((result[1] as any)[0]).toBe("app");
+      expect((result[0] as any)[2]).toBe(2); // op (2 = "pre")
+      expect((result[1] as any)[2]).toBeUndefined(); // op (0 is null so we use the default value = "app")
     });
   });
 
   describe("unpackChanges", () => {
     test("should unpack packed text changes correctly", () => {
-      // First element is now an array: ["app", "H", "start", true]
-      const packed = [["app", "H", "start", true], "ello"];
+      // First element is now an array: ["H", "start", 1, true]
+      const packed = [["H", "start", 1, true], "ello"];
 
       const result = packer.unpackChanges(packed as any);
 
@@ -280,7 +282,7 @@ describe("CoPlainTextPackImplementation", () => {
     test("should unpack with OpID as 'after' reference", () => {
       const opID = createOpID("session1", 5);
       // First element is now an array
-      const packed = [["app", "a", opID, true], "bcd"];
+      const packed = [["a", opID, 1, true], "bcd"];
 
       const result = packer.unpackChanges(packed as any);
 
@@ -296,7 +298,7 @@ describe("CoPlainTextPackImplementation", () => {
 
     test("should correctly unpack emoji graphemes", () => {
       // First element is now an array
-      const packed = [["app", "👋", "start", true], "🌍✨"];
+      const packed = [["👋", "start", 1, true], "🌍✨"];
 
       const result = packer.unpackChanges(packed as any);
 
@@ -308,7 +310,7 @@ describe("CoPlainTextPackImplementation", () => {
 
     test("should correctly unpack complex grapheme clusters", () => {
       // First element is now an array
-      const packed = [["app", "a", "start", true], "👨‍👩‍👧‍👦b"];
+      const packed = [["a", "start", 1, true], "👨‍👩‍👧‍👦b"];
 
       const result = packer.unpackChanges(packed as any);
 
@@ -320,7 +322,7 @@ describe("CoPlainTextPackImplementation", () => {
 
     test("should handle empty string in packed format", () => {
       // First element is now an array
-      const packed = [["app", "a", "start", true], ""];
+      const packed = [["a", "start", 1, true], ""];
 
       const result = packer.unpackChanges(packed as any);
 
@@ -358,7 +360,7 @@ describe("CoPlainTextPackImplementation", () => {
     test("should unpack long text correctly", () => {
       const text = "The quick brown fox jumps over the lazy dog";
       // First element is now an array
-      const packed = [["app", "T", "start", true], text.slice(1)];
+      const packed = [["T", "start", 1, true], text.slice(1)];
 
       const result = packer.unpackChanges(packed as any);
 
@@ -370,7 +372,7 @@ describe("CoPlainTextPackImplementation", () => {
 
     test("should unpack whitespace characters correctly", () => {
       // First element is now an array
-      const packed = [["app", "a", "start", true], " \t\nb"];
+      const packed = [["a", "start", 1, true], " \t\nb"];
 
       const result = packer.unpackChanges(packed as any);
 
@@ -384,7 +386,7 @@ describe("CoPlainTextPackImplementation", () => {
 
     test("should unpack Unicode characters correctly", () => {
       // First element is now an array
-      const packed = [["app", "こ", "start", true], "んにちは"];
+      const packed = [["こ", "start", 1, true], "んにちは"];
 
       const result = packer.unpackChanges(packed as any);
 
@@ -397,7 +399,7 @@ describe("CoPlainTextPackImplementation", () => {
     test("should handle combining diacritics correctly", () => {
       // First element is now an array
       // é as combining characters (e + combining acute)
-      const packed = [["app", "e", "start", true], "\u0301"];
+      const packed = [["e", "start", 1, true], "\u0301"];
 
       const result = packer.unpackChanges(packed as any);
 
@@ -551,10 +553,10 @@ describe("CoPlainTextPackImplementation", () => {
       expect(Array.isArray(result)).toBe(true);
       expect(result.length).toBe(4); // first element array + 3 OpIDs
       expect(Array.isArray(result[0])).toBe(true);
-      // First element is now packed as ["del", opID1, true]
-      expect((result[0] as any)[0]).toBe("del"); // op
-      expect((result[0] as any)[1]).toBe(opID1); // insertion
-      expect((result[0] as any)[2]).toBe(true); // compacted
+      // First element is now packed as [opID1, true, 3]
+      expect((result[0] as any)[0]).toBe(opID1); // insertion
+      expect((result[0] as any)[1]).toBe(ENCODING_MAP_PRIMITIVES_VALUES.true); // compacted
+      expect((result[0] as any)[2]).toBe(3); // op (3 = "del")
       expect(result[1]).toBe(opID2);
       expect(result[2]).toBe(opID3);
       expect(result[3]).toBe(opID4);
@@ -573,9 +575,9 @@ describe("CoPlainTextPackImplementation", () => {
 
       expect(result.length).toBe(2);
       expect(Array.isArray(result[0])).toBe(true);
-      expect((result[0] as any)[0]).toBe("del"); // op
-      expect((result[0] as any)[1]).toBe(opID1); // insertion
-      expect((result[0] as any)[2]).toBe(true); // compacted
+      expect((result[0] as any)[0]).toBe(opID1); // insertion
+      expect((result[0] as any)[1]).toBe(ENCODING_MAP_PRIMITIVES_VALUES.true); // compacted
+      expect((result[0] as any)[2]).toBe(3); // op (3 = "del")
       expect(result[1]).toBe(opID2);
     });
 
@@ -589,9 +591,9 @@ describe("CoPlainTextPackImplementation", () => {
       expect(Array.isArray(result)).toBe(true);
       expect(result.length).toBe(1);
       expect(Array.isArray(result[0])).toBe(true);
-      expect((result[0] as any)[0]).toBe("del");
-      expect((result[0] as any)[1]).toBe(opID);
-      expect((result[0] as any)[2]).toBeUndefined(); // no compacted flag for single operation
+      expect((result[0] as any)[0]).toBe(opID); // insertion
+      expect((result[0] as any)[1]).toBe(0); // no compacted flag (trailing)
+      expect((result[0] as any)[2]).toBe(3); // op (3 = "del")
     });
 
     test("should NOT pack mixed deletion and insertion operations", () => {
@@ -610,7 +612,7 @@ describe("CoPlainTextPackImplementation", () => {
       expect(Array.isArray(result)).toBe(true);
       expect(result.length).toBe(3);
       expect(Array.isArray(result[0])).toBe(true);
-      expect((result[0] as any)[2]).toBeUndefined(); // no compacted flag
+      expect((result[0] as any)[2]).toBe(3); // op (3 = "del")
     });
 
     test("should NOT pack when first operation is deletion but others are insertions", () => {
@@ -628,7 +630,7 @@ describe("CoPlainTextPackImplementation", () => {
       expect(Array.isArray(result)).toBe(true);
       expect(result.length).toBe(3);
       expect(Array.isArray(result[0])).toBe(true);
-      expect((result[0] as any)[2]).toBeUndefined(); // no compacted flag
+      expect((result[0] as any)[2]).toBe(3); // op (3 = "del")
     });
 
     test("should pack large batch of deletions", () => {
@@ -645,9 +647,9 @@ describe("CoPlainTextPackImplementation", () => {
 
       expect(result.length).toBe(50); // first element array + 49 OpIDs
       expect(Array.isArray(result[0])).toBe(true);
-      expect((result[0] as any)[0]).toBe("del");
-      expect((result[0] as any)[1]).toBe(opIDs[0]);
-      expect((result[0] as any)[2]).toBe(true); // compacted
+      expect((result[0] as any)[0]).toBe(opIDs[0]); // insertion
+      expect((result[0] as any)[1]).toBe(ENCODING_MAP_PRIMITIVES_VALUES.true); // compacted
+      expect((result[0] as any)[2]).toBe(3); // op (3 = "del")
 
       for (let i = 1; i < 50; i++) {
         expect(result[i]).toBe(opIDs[i]);
@@ -668,7 +670,7 @@ describe("CoPlainTextPackImplementation", () => {
       const opID3 = createOpID("session1", 2);
 
       // First element is now an array: ["del", opID1, true]
-      const packed = [["del", opID1, true], opID2, opID3];
+      const packed = [[opID1, true, 3], opID2, opID3];
 
       const result = packer.unpackChanges(packed as any);
 
@@ -684,7 +686,7 @@ describe("CoPlainTextPackImplementation", () => {
       const opID2 = createOpID("session1", 6);
 
       // First element is now an array
-      const packed = [["del", opID1, true], opID2];
+      const packed = [[opID1, true, 3], opID2];
 
       const result = packer.unpackChanges(packed as any);
 
@@ -697,7 +699,7 @@ describe("CoPlainTextPackImplementation", () => {
       const opID = createOpID("session1", 0);
 
       // First element is now an array
-      const packed = [["del", opID, true]];
+      const packed = [[opID, true, 3]];
 
       const result = packer.unpackChanges(packed as any);
 
@@ -727,7 +729,7 @@ describe("CoPlainTextPackImplementation", () => {
       }
 
       // First element is now an array
-      const packed = [["del", opIDs[0]!, true], ...opIDs.slice(1)];
+      const packed = [[opIDs[0]!, true, 3], ...opIDs.slice(1)];
 
       const result = packer.unpackChanges(packed as any);
 

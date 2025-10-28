@@ -4,6 +4,7 @@ import {
   unpackArrToObject,
   unpackArrOfObjectsCoList,
   packArrOfObjectsCoList,
+  ENCODING_MAP_PRIMITIVES_VALUES,
 } from "../pack/objToArr.js";
 import type { JsonObject, JsonValue } from "../jsonValue.js";
 
@@ -22,7 +23,7 @@ describe("objToArr utilities", () => {
       expect(result).toEqual(["Alice", 30, "NYC"]);
     });
 
-    test("should handle missing keys with null", () => {
+    test("should handle missing keys with null converted to 0", () => {
       const keys = ["name", "age", "city"];
       const obj: JsonObject = {
         name: "Bob",
@@ -31,7 +32,7 @@ describe("objToArr utilities", () => {
 
       const result = packObjectToArr(keys, obj);
 
-      expect(result).toEqual(["Bob", null, "LA"]);
+      expect(result).toEqual(["Bob", 0, "LA"]);
     });
 
     test("should remove trailing nulls to save space", () => {
@@ -48,7 +49,7 @@ describe("objToArr utilities", () => {
       expect(result).toEqual(["Charlie", 25]);
     });
 
-    test("should preserve null in middle positions", () => {
+    test("should convert intermediate nulls to 0", () => {
       const keys = ["name", "age", "city"];
       const obj: JsonObject = {
         name: "David",
@@ -57,7 +58,7 @@ describe("objToArr utilities", () => {
 
       const result = packObjectToArr(keys, obj);
 
-      expect(result).toEqual(["David", null, "Chicago"]);
+      expect(result).toEqual(["David", 0, "Chicago"]);
     });
 
     test("should handle empty object", () => {
@@ -121,7 +122,7 @@ describe("objToArr utilities", () => {
 
       // Note: The implementation uses || operator which converts falsy values to null
       // So count: 0 becomes null
-      expect(result).toEqual([true, 0, 99.5]);
+      expect(result).toEqual([ENCODING_MAP_PRIMITIVES_VALUES.true, 0, 99.5]);
     });
 
     test("should handle string values with special characters", () => {
@@ -175,7 +176,7 @@ describe("objToArr utilities", () => {
 
       // Note: The implementation uses || operator which converts all falsy values to null
       // So 0, "", false all become null, and the trailing null is removed
-      expect(result).toEqual([0, "", false]);
+      expect(result).toEqual([0, "", ENCODING_MAP_PRIMITIVES_VALUES.false]);
     });
   });
 
@@ -193,9 +194,9 @@ describe("objToArr utilities", () => {
       });
     });
 
-    test("should skip null values", () => {
+    test("should skip null and 0 values", () => {
       const keys = ["name", "age", "city"];
-      const arr: JsonValue[] = ["Bob", null, "LA"];
+      const arr: JsonValue[] = ["Bob", 0, "LA"];
 
       const result = unpackArrToObject(keys, arr);
 
@@ -264,14 +265,13 @@ describe("objToArr utilities", () => {
       });
     });
 
-    test("should preserve falsy values except null and undefined", () => {
+    test("should preserve falsy values except null, undefined, and 0", () => {
       const keys = ["zero", "emptyString", "falseBool"];
       const arr: JsonValue[] = [0, "", false];
 
       const result = unpackArrToObject(keys, arr);
 
       expect(result).toEqual({
-        zero: 0,
         emptyString: "",
         falseBool: false,
       });
@@ -367,8 +367,8 @@ describe("objToArr utilities", () => {
   describe("unpackArrToObjectWithKeys", () => {
     test("should unpack array of app operations", () => {
       const arr: JsonValue[][] = [
-        ["app", "value1", "after1"],
-        ["app", "value2", "after2"],
+        ["value1", "after1", 1],
+        ["value2", "after2", 1],
       ];
 
       const result = unpackArrOfObjectsCoList(arr);
@@ -389,8 +389,8 @@ describe("objToArr utilities", () => {
 
     test("should unpack array of del operations", () => {
       const arr: JsonValue[][] = [
-        ["del", "insertion1"],
-        ["del", "insertion2"],
+        ["insertion1", 0, 3],
+        ["insertion2", 0, 3],
       ];
 
       const result = unpackArrOfObjectsCoList(arr);
@@ -403,8 +403,8 @@ describe("objToArr utilities", () => {
 
     test("should handle mixed operations", () => {
       const arr: JsonValue[][] = [
-        ["app", "value1", "after1"],
-        ["del", "insertion1"],
+        ["value1", "after1", 1],
+        ["insertion1", 0, 3],
       ];
 
       const result = unpackArrOfObjectsCoList(arr);
@@ -417,8 +417,8 @@ describe("objToArr utilities", () => {
 
     test("should handle operations with compacted flag", () => {
       const arr: JsonValue[][] = [
-        ["app", "value1", "after1", true],
-        ["del", "insertion1", true],
+        ["value1", "after1", 1, true],
+        ["insertion1", true, 3],
       ];
 
       const result = unpackArrOfObjectsCoList(arr);
@@ -440,8 +440,8 @@ describe("objToArr utilities", () => {
       const result = packArrOfObjectsCoList(arr);
 
       expect(result).toEqual([
-        ["app", "value1", "after1"],
-        ["app", "value2", "after2"],
+        ["value1", "after1"],
+        ["value2", "after2"],
       ]);
     });
 
@@ -462,8 +462,8 @@ describe("objToArr utilities", () => {
       const result = packArrOfObjectsCoList(arr);
 
       expect(result).toEqual([
-        ["del", "insertion1"],
-        ["del", "insertion2"],
+        ["insertion1", 0, 3],
+        ["insertion2", 0, 3],
       ]);
     });
 
@@ -476,8 +476,8 @@ describe("objToArr utilities", () => {
       const result = packArrOfObjectsCoList(arr);
 
       expect(result).toEqual([
-        ["app", "value1", "after1"],
-        ["del", "insertion1"],
+        ["value1", "after1"],
+        ["insertion1", 0, 3],
       ]);
     });
 
@@ -495,8 +495,8 @@ describe("objToArr utilities", () => {
       const result = packArrOfObjectsCoList(arr);
 
       expect(result).toEqual([
-        ["app", "value1", "after1", true],
-        ["del", "insertion1", true],
+        ["value1", "after1", 0, ENCODING_MAP_PRIMITIVES_VALUES.true],
+        ["insertion1", ENCODING_MAP_PRIMITIVES_VALUES.true, 3],
       ]);
     });
 
@@ -514,8 +514,8 @@ describe("objToArr utilities", () => {
       const result = packArrOfObjectsCoList(arr);
 
       expect(result).toEqual([
-        ["app", "value1", "after1"],
-        ["app", "value2", "after2", true],
+        ["value1", "after1"],
+        ["value2", "after2", 0, ENCODING_MAP_PRIMITIVES_VALUES.true],
       ]);
     });
   });
