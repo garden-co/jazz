@@ -1,36 +1,49 @@
 import { FormattedDate } from "@/components/FormattedDate";
+import { NewsletterCard } from "@/components/blog/NewsletterCard";
 import PostCoverImage from "@/components/blog/PostCoverImage";
 import { PostJsonLd } from "@/components/blog/PostJsonLd";
+import { BigGrass } from "@/components/blog/Swishes";
 import { getPostBySlug, posts } from "@/lib/posts";
-import { H1 } from "gcmp-design-system/src/app/components/atoms/Headings";
-import { Prose } from "gcmp-design-system/src/app/components/molecules/Prose";
+import { H1, H2 } from "@garden-co/design-system/src/components/atoms/Headings";
+import { Prose } from "@garden-co/design-system/src/components/molecules/Prose";
 import { Metadata } from "next";
 import Image from "next/image";
 import { notFound } from "next/navigation";
 
+type Params = {
+  params: Promise<{
+    slug: string;
+  }>;
+};
+
 export default async function Post({ params }: Params) {
-  const post = getPostBySlug(params.slug);
+  const { slug } = await params;
+  const post = getPostBySlug(slug);
 
   if (!post) {
     return notFound();
   }
 
-  const { title, coverImage, date, author, excerpt } = post.meta;
+  const { title, subtitle, coverImage, date, author } = post.meta;
   const content = post.default({});
 
   return (
     <>
       <PostJsonLd
         title={title}
-        image={coverImage}
+        subtitle={subtitle}
+        image={coverImage.replace(".svg", ".png")}
         author={author.name}
         datePublished={date}
-        description={excerpt}
       />
       <article className="container max-w-3xl flex flex-col gap-8 py-8 lg:py-16 lg:gap-12">
-        <div className="flex flex-col gap-2">
-          <H1>{title}</H1>
+        <div>
+          <H1 className="mb-2">{title}</H1>
+          <H2>{subtitle}</H2>
+        </div>
 
+        <PostCoverImage src={coverImage} title={title} className="rounded-lg" />
+        <div className="flex flex-col gap-2">
           <div className="flex items-center gap-3">
             <Image
               width={100}
@@ -40,43 +53,45 @@ export default async function Post({ params }: Params) {
               alt=""
             />
             <div>
-              <p className="text-stone-900 dark:text-white">{author.name}</p>
-              <p className="text-sm text-stone-600 dark:text-stone-400">
+              <p className="text-highlight">{author.name}</p>
+              <p className="text-sm text-stone-600 ">
                 <FormattedDate date={date} />
               </p>
             </div>
           </div>
         </div>
 
-        <PostCoverImage src={coverImage} title={title} />
+        <Prose size="md" className="text-stone-900 dark:text-stone-50">
+          {content}
+          <BigGrass />
+        </Prose>
 
-        <Prose>{content}</Prose>
+        <NewsletterCard />
       </article>
     </>
   );
 }
 
-type Params = {
-  params: {
-    slug: string;
-  };
-};
-
-export function generateMetadata({ params }: Params): Metadata {
-  const post = getPostBySlug(params.slug);
+export async function generateMetadata({ params }: Params): Promise<Metadata> {
+  const { slug } = await params;
+  const post = getPostBySlug(slug);
 
   if (!post) {
     return notFound();
   }
 
-  const { title, excerpt, coverImage } = post.meta;
+  const { title, subtitle, coverImage } = post.meta;
 
   return {
-    title,
-    description: excerpt,
+    title: title,
+    description: subtitle,
     openGraph: {
-      title,
-      images: [coverImage],
+      title: title,
+      images: [coverImage.replace(".svg", ".png")],
+    },
+    twitter: {
+      title: title + " " + subtitle,
+      images: [coverImage.replace(".svg", ".png")],
     },
   };
 }

@@ -1,0 +1,158 @@
+import { CodeGroup } from '@/components/forMdx'
+
+# Jazz 0.16.0 - Cleaner separation between Zod and CoValue schemas
+
+This release introduces a cleaner separation between Zod and CoValue schemas, improves type inference with circular references, and simplifies how you access internal schemas.
+While most applications won't require extensive refactors, some breaking changes will require action.
+
+## Motivation
+
+Before 0.16.0, CoValue schemas were a thin wrapper around Zod schemas. This made it easy to use Zod methods on CoValue schemas,
+but it also prevented the type checker from detecting issues when combining Zod and CoValue schemas.
+
+For example, the following code would previously compile without errors, but would have severe limitations:
+
+<CodeGroup>
+```tsx
+import { co, z } from "jazz-tools";
+
+const Dog = co.map({
+  breed: z.string(),
+});
+const Person = co.map({
+  pets: z.array(Dog),
+});
+
+// You can create a CoMap with a z.array field that contains another CoMap
+const map = Person.create({
+  pets: [Dog.create({ breed: "Labrador" })],
+});
+
+// But then you cannot eagerly load the nested CoMap, because
+// there's a plain JS object in between. So this would fail:
+Person.load(map.id, { resolve: { pets: { $each: true } } });
+```
+</CodeGroup>
+
+Schema composition rules are now stricter: Zod schemas can only be composed with other Zod schemas.
+CoValue schemas can be composed with either Zod or other CoValue schemas. These rules are enforced at the type level, to make it easier
+to spot errors in schema definitions and avoid possible footguns when mixing Zod and CoValue schemas.
+
+Having a stricter separation between Zod and CoValue schemas also allowed us to improve type inference with circular references.
+Previously, the type checker would not be able to infer types for even simple circular references, but now it can!
+<CodeGroup>
+```tsx
+import { co, z } from "jazz-tools";
+
+const Person = co.map({
+  name: z.string(),
+  get friends(): CoListSchema<typeof Person> { // [!code --]
+  get friends() { // [!code ++]
+    return co.list(Person);
+  },
+});
+```
+</CodeGroup>
+
+There are some scenarios where recursive type inference can still fail due to TypeScript limitations, but these should be rare.
+
+## Breaking changes
+
+### The Account root id is now discoverable
+
+In prior Jazz releases, the Account root id was stored encrypted and accessible only by the account owner.
+
+This made it impossible to load the account root this way:
+
+<CodeGroup>
+```tsx
+const bob = MyAppAccount.load(bobId, { resolve: { root: true }, loadAs: me });
+```
+</CodeGroup>
+
+So we changed Account root id to be discoverable by everyone.
+**This doesn't affect the visibility of the account root**, which still follows the permissions defined in its group.
+
+For existing accounts, the change is applied the next time the user loads their account.
+
+No action is required on your side, but we preferred to mark this as a breaking change because it
+minimally affects access to the account root. (e.g., if in your app the root is public, now users can access other users' root by knowing their account ID)
+
+### `z.optional()` and `z.discriminatedUnion()` no longer work with CoValue schemas
+
+You'll now need to use the `co.optional()` and `co.discriminatedUnion()` equivalents.
+This change may require you to update any explicitly typed cyclic references.
+
+<CodeGroup>
+```tsx
+import { co, z } from "jazz-tools";
+
+const Person = co.map({
+  name: z.string(),
+  get bestFriend(): z.ZodOptional<typeof Person> { // [!code --]
+    return z.optional(Person); // [!code --]
+  get bestFriend(): co.Optional<typeof Person> { // [!code ++]
+    return co.optional(Person); // [!code ++]
+  }
+});
+```
+</CodeGroup>
+
+### CoValue schema types are now under the `co.` namespace
+
+All CoValue schema types are now accessed via the `co.` namespace. If you're using explicit types (especially in recursive schemas), you'll need to update them accordingly.
+
+<CodeGroup>
+```tsx
+import { co, z } from "jazz-tools";
+
+const Person = co.map({
+  name: z.string(),
+  get friends(): CoListSchema<typeof Person> { // [!code --]
+  get friends(): co.List<typeof Person> { // [!code ++]
+    return co.list(Person);
+  }
+});
+```
+</CodeGroup>
+
+### Unsupported Zod methods have been removed from CoMap schemas
+
+CoMap schemas no longer incorrectly inherit Zod methods like `.extend()` and `.partial()`. These methods previously appeared to work but could behave unpredictably. They have now been disabled.
+
+We're keeping `.optional()` and plan to introduce more Zod-like methods in future releases.
+
+### Internal schema access is now simpler
+
+You no longer need to use Zod's `.def` to access schema internals. Instead, you can directly use methods like `CoMapSchema.shape`, `CoListSchema.element`, and `CoOptionalSchema.innerType`.
+
+<CodeGroup>
+```tsx
+import { co, z } from "jazz-tools";
+
+const Message = co.map({
+  content: co.richText(),
+});
+
+const Thread = co.map({
+  messages: co.list(Message),
+});
+
+const thread = Thread.create({
+  messages: Thread.def.shape.messages.create([ // [!code --]
+  messages: Thread.shape.messages.create([ // [!code ++]
+    Message.create({
+      content: co.richText().create("Hi!"),
+    }),
+    Message.create({
+      content: co.richText().create("What's up?"),
+    }),
+  ]),
+});
+```
+</CodeGroup>
+
+### Removed the deprecated `withHelpers` method from CoValue schemas
+
+The deprecated `withHelpers()` method has been removed from CoValue schemas. You can define helper functions manually to encapsulate CoValue-related logic.
+[Learn how to define helper methods](/docs/vanilla/core-concepts/covalues/overview#helper-methods).

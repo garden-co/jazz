@@ -1,6 +1,6 @@
 import { CoID, RawCoValue } from "../coValue.js";
-import { CoValueCore } from "../coValueCore.js";
-import { AgentID, TransactionID } from "../ids.js";
+import { AvailableCoValueCore } from "../coValueCore/coValueCore.js";
+import { AgentID, RawCoID, TransactionID } from "../ids.js";
 import { JsonObject, JsonValue } from "../jsonValue.js";
 import { accountOrAgentIDfromSessionID } from "../typeUtils/accountOrAgentIDfromSessionID.js";
 import { isCoValue } from "../typeUtils/isCoValue.js";
@@ -12,6 +12,7 @@ type MapOp<K extends string, V extends JsonValue | undefined> = {
   madeAt: number;
   changeIdx: number;
   change: MapOpPayload<K, V>;
+  trusting?: boolean;
 };
 // TODO: add after TransactionID[] for conflicts/ordering
 
@@ -38,120 +39,125 @@ export class RawCoMapView<
   /** @category 6. Meta */
   type = "comap" as const;
   /** @category 6. Meta */
-  core: CoValueCore;
+  core: AvailableCoValueCore;
   /** @internal */
   latest: {
     [Key in keyof Shape & string]?: MapOp<Key, Shape[Key]>;
   };
+
   /** @internal */
-  latestTxMadeAt: number;
+  get latestTxMadeAt(): number {
+    return this.core.latestTxMadeAt;
+  }
+
   /** @internal */
-  cachedOps?: {
+  get earliestTxMadeAt(): number {
+    return this.core.earliestTxMadeAt;
+  }
+
+  /** @internal */
+  ops: {
     [Key in keyof Shape & string]?: MapOp<Key, Shape[Key]>[];
   };
   /** @internal */
-  options?: { ignorePrivateTransactions: boolean; atTime?: number };
+  knownTransactions: Record<RawCoID, number>;
+
+  /** @internal */
+  ignorePrivateTransactions: boolean;
   /** @internal */
   atTimeFilter?: number = undefined;
   /** @category 6. Meta */
   readonly _shape!: Shape;
 
+  totalValidTransactions: number = 0;
+
   /** @internal */
   constructor(
-    core: CoValueCore,
-    options?: { ignorePrivateTransactions: boolean; atTime?: number },
+    core: AvailableCoValueCore,
+    options?: {
+      ignorePrivateTransactions: boolean;
+    },
   ) {
     this.id = core.id as CoID<this>;
     this.core = core;
-    this.latest = {};
-    this.latestTxMadeAt = 0;
-    this.options = options;
 
-    this.processLatestTransactions();
+    this.ignorePrivateTransactions =
+      options?.ignorePrivateTransactions ?? false;
+    this.ops = {};
+    this.latest = {};
+
+    // We track the knownTransacions in multiple CoValues because branches
+    // need to retrieve the transactions from both the source and the branch
+    this.knownTransactions = { [core.id]: 0 };
+
+    this.processNewTransactions();
   }
 
-  processLatestTransactions() {
-    this.latest = {};
-    this.latestTxMadeAt = 0;
+  processNewTransactions() {
+    if (this.isTimeTravelEntity()) {
+      throw new Error("Cannot process transactions on a time travel entity");
+    }
 
-    const { core, options, latest } = this;
+    const newValidTransactions = this.core.getValidTransactions({
+      ignorePrivateTransactions: this.ignorePrivateTransactions,
+      knownTransactions: this.knownTransactions,
+    });
 
-    for (const { txID, changes, madeAt } of core.getValidSortedTransactions({
-      ignorePrivateTransactions: options?.ignorePrivateTransactions ?? false,
-    })) {
-      if (options?.atTime && madeAt > options.atTime) {
-        continue;
-      }
+    if (newValidTransactions.length === 0) {
+      return;
+    }
 
-      if (madeAt > this.latestTxMadeAt) {
-        this.latestTxMadeAt = madeAt;
-      }
+    const { ops } = this;
 
+    const changedEntries = new Map<
+      keyof typeof ops,
+      NonNullable<(typeof ops)[keyof typeof ops]>
+    >();
+
+    for (const { txID, changes, madeAt, tx } of newValidTransactions) {
       for (let changeIdx = 0; changeIdx < changes.length; changeIdx++) {
         const change = changes[changeIdx] as MapOpPayload<
           keyof Shape & string,
           Shape[keyof Shape & string]
         >;
-        let entry = latest[change.key];
-        if (!entry) {
-          entry = {
-            txID,
-            madeAt,
-            changeIdx,
-            change,
-          };
-          latest[change.key] = entry;
-        } else if (madeAt >= entry.madeAt) {
-          entry.txID = txID;
-          entry.madeAt = madeAt;
-          entry.changeIdx = changeIdx;
-          entry.change = change;
-        }
-      }
-    }
-  }
-
-  private getOps() {
-    if (this.cachedOps) {
-      return this.cachedOps;
-    }
-
-    const ops: {
-      [Key in keyof Shape & string]?: MapOp<Key, Shape[Key]>[];
-    } = {};
-
-    for (const {
-      txID,
-      changes,
-      madeAt,
-    } of this.core.getValidSortedTransactions(this.options)) {
-      for (let changeIdx = 0; changeIdx < changes.length; changeIdx++) {
-        const change = changes[changeIdx] as MapOpPayload<
-          keyof Shape & string,
-          Shape[keyof Shape & string]
-        >;
-        let entries = ops[change.key];
-        if (!entries) {
-          entries = [];
-          ops[change.key] = entries;
-        }
-        entries.push({
+        const entry = {
           txID,
           madeAt,
           changeIdx,
           change,
-        });
+          trusting: tx.privacy === "trusting",
+        };
+
+        const entries = ops[change.key];
+        if (!entries) {
+          const entries = [entry];
+          ops[change.key] = entries;
+          changedEntries.set(change.key, entries);
+        } else {
+          entries.push(entry);
+          changedEntries.set(change.key, entries);
+        }
       }
     }
 
-    this.cachedOps = ops;
+    for (const entries of changedEntries.values()) {
+      entries.sort(this.core.compareTransactions);
+    }
 
-    return ops;
+    for (const [key, entries] of changedEntries.entries()) {
+      this.latest[key] = entries[entries.length - 1];
+    }
+
+    this.totalValidTransactions += newValidTransactions.length;
+  }
+
+  isTimeTravelEntity() {
+    return Boolean(this.atTimeFilter);
   }
 
   /** @category 6. Meta */
   get headerMeta(): Meta {
-    return this.core.header.meta as Meta;
+    return this.core.verified.header.meta as Meta;
   }
 
   /** @category 6. Meta */
@@ -164,12 +170,11 @@ export class RawCoMapView<
     if (time >= this.latestTxMadeAt) {
       return this;
     } else {
-      const clone = new RawCoMapView(this.core, {
-        ignorePrivateTransactions:
-          this.options?.ignorePrivateTransactions ?? false,
-        atTime: time,
-      });
-      Object.setPrototypeOf(clone, this);
+      const clone = Object.create(this) as RawCoMapView<Shape, Meta>;
+
+      clone.atTimeFilter = time;
+      clone.latest = {};
+
       return clone as this;
     }
   }
@@ -182,12 +187,12 @@ export class RawCoMapView<
       return undefined;
     }
 
-    if (this.atTimeFilter) {
-      return this.getOps()[key]?.filter(
-        (op) => op.madeAt <= this.atTimeFilter!,
-      );
+    const atTimeFilter = this.atTimeFilter;
+
+    if (atTimeFilter) {
+      return this.ops[key]?.filter((op) => op.madeAt <= atTimeFilter);
     } else {
-      return this.getOps()[key];
+      return this.ops[key];
     }
   }
 
@@ -196,23 +201,46 @@ export class RawCoMapView<
    *
    * @category 1. Reading */
   keys<K extends keyof Shape & string = keyof Shape & string>(): K[] {
-    return (Object.keys(this.latest) as K[]).filter((key) => {
-      const latest = this.latest[key];
-      if (!latest) {
+    return (Object.keys(this.ops) as K[]).filter((key) => {
+      const entry = this.getRaw(key);
+
+      if (entry === undefined) {
+        return false;
+      }
+
+      if (entry.change.op === "del") {
+        return false;
+      }
+
+      return true;
+    });
+  }
+
+  getRaw<K extends keyof Shape & string>(key: K) {
+    let latestChange = this.latest[key];
+
+    if (latestChange === undefined) {
+      const entries = this.ops[key];
+
+      // Time travel values are lazily computed
+      if (entries && !(key in this.latest)) {
+        const atTimeFilter = this.atTimeFilter;
+
+        if (!atTimeFilter) {
+          latestChange = entries[entries.length - 1];
+        } else {
+          latestChange = entries.findLast((op) => op.madeAt <= atTimeFilter);
+        }
+
+        this.latest[key] = latestChange;
+      }
+
+      if (latestChange === undefined) {
         return undefined;
       }
+    }
 
-      const includeUntil = this.atTimeFilter;
-      const lastEntry = includeUntil
-        ? this.getOps()[key]?.findLast((entry) => entry.madeAt <= includeUntil)
-        : latest!;
-
-      if (lastEntry?.change.op === "del") {
-        return false;
-      } else {
-        return true;
-      }
-    });
+    return latestChange;
   }
 
   /**
@@ -221,22 +249,16 @@ export class RawCoMapView<
    * @category 1. Reading
    **/
   get<K extends keyof Shape & string>(key: K): Shape[K] | undefined {
-    const latest = this.latest[key];
-    if (!latest) {
+    const entry = this.getRaw(key);
+
+    if (entry?.change === undefined) {
       return undefined;
     }
 
-    const includeUntil = this.atTimeFilter;
-    const lastEntry = includeUntil
-      ? this.timeFilteredOps(key)?.findLast(
-          (entry) => entry.madeAt <= includeUntil,
-        )
-      : latest;
-
-    if (lastEntry?.change.op === "del") {
+    if (entry.change.op === "del") {
       return undefined;
     } else {
-      return lastEntry?.change.value;
+      return entry.change.value as Shape[K];
     }
   }
 
@@ -248,7 +270,7 @@ export class RawCoMapView<
       [K in keyof Shape & string]: Shape[K];
     }> = {};
 
-    for (const key of this.keys()) {
+    for (const key of Object.keys(this.ops) as (keyof Shape & string)[]) {
       const value = this.get(key);
       if (value !== undefined) {
         object[key] = value;
@@ -268,34 +290,21 @@ export class RawCoMapView<
   }
 
   /** @category 5. Edit history */
-  nthEditAt<K extends keyof Shape & string>(
-    key: K,
-    n: number,
-  ):
-    | {
-        by: RawAccountID | AgentID;
-        tx: TransactionID;
-        at: Date;
-        value?: Shape[K];
-      }
-    | undefined {
-    const ops = this.timeFilteredOps(key);
-    if (!ops || ops.length <= n) {
+  nthEditAt<K extends keyof Shape & string>(key: K, n: number) {
+    const ops = this.ops[key];
+
+    const atTimeFilter = this.atTimeFilter;
+    const entry = ops?.[n];
+
+    if (!entry) {
       return undefined;
     }
 
-    const entry = ops[n]!;
-
-    if (this.atTimeFilter && entry.madeAt > this.atTimeFilter) {
+    if (atTimeFilter && entry.madeAt > atTimeFilter) {
       return undefined;
     }
 
-    return {
-      by: accountOrAgentIDfromSessionID(entry.txID.sessionID),
-      tx: entry.txID,
-      at: new Date(entry.madeAt),
-      value: entry.change.op === "del" ? undefined : entry.change.value,
-    };
+    return operationToEditEntry(entry);
   }
 
   /** @category 5. Edit history */
@@ -309,29 +318,39 @@ export class RawCoMapView<
         value?: Shape[K];
       }
     | undefined {
-    const ops = this.timeFilteredOps(key);
-    if (!ops || ops.length === 0) {
+    const entry = this.getRaw(key);
+
+    if (!entry) {
       return undefined;
     }
-    return this.nthEditAt(key, ops.length - 1);
+
+    return operationToEditEntry(entry);
   }
 
   /** @category 5. Edit history */
   *editsAt<K extends keyof Shape & string>(key: K) {
-    const ops = this.timeFilteredOps(key);
-    if (!ops) {
+    const entries = this.ops[key];
+
+    if (!entries) {
       return;
     }
 
-    for (let i = 0; i < ops.length; i++) {
-      yield this.nthEditAt(key, i)!;
+    const atTimeFilter = this.atTimeFilter;
+
+    for (const entry of entries) {
+      // Entries are sorted by madeAt
+      if (atTimeFilter && entry.madeAt > atTimeFilter) {
+        return;
+      }
+
+      yield operationToEditEntry(entry);
     }
   }
 
   /** @category 3. Subscription */
   subscribe(listener: (coMap: this) => void): () => void {
-    return this.core.subscribe((content) => {
-      listener(content as this);
+    return this.core.subscribe((core) => {
+      listener(core.getCurrentContent() as this);
     });
   }
 }
@@ -359,6 +378,10 @@ export class RawCoMap<
     value: Shape[K],
     privacy: "private" | "trusting" = "private",
   ): void {
+    if (this.isTimeTravelEntity()) {
+      throw new Error("Cannot set value on a time travel entity");
+    }
+
     this.core.makeTransaction(
       [
         {
@@ -370,8 +393,27 @@ export class RawCoMap<
       privacy,
     );
 
-    this.processLatestTransactions();
-    this.cachedOps = undefined;
+    this.processNewTransactions();
+  }
+
+  assign(
+    entries: Partial<Shape>,
+    privacy: "private" | "trusting" = "private",
+  ): void {
+    if (this.isTimeTravelEntity()) {
+      throw new Error("Cannot set value on a time travel entity");
+    }
+
+    this.core.makeTransaction(
+      Object.entries(entries).map(([key, value]) => ({
+        op: "set",
+        key,
+        value: isCoValue(value) ? value.id : value,
+      })),
+      privacy,
+    );
+
+    this.processNewTransactions();
   }
 
   /** Delete the given key (setting it to undefined).
@@ -386,6 +428,10 @@ export class RawCoMap<
     key: keyof Shape & string,
     privacy: "private" | "trusting" = "private",
   ) {
+    if (this.isTimeTravelEntity()) {
+      throw new Error("Cannot delete value on a time travel entity");
+    }
+
     this.core.makeTransaction(
       [
         {
@@ -396,7 +442,18 @@ export class RawCoMap<
       privacy,
     );
 
-    this.processLatestTransactions();
-    this.cachedOps = undefined;
+    this.processNewTransactions();
   }
+}
+
+export function operationToEditEntry<
+  K extends string,
+  V extends JsonValue | undefined,
+>(op: MapOp<K, V>) {
+  return {
+    by: accountOrAgentIDfromSessionID(op.txID.sessionID),
+    tx: op.txID,
+    at: new Date(op.madeAt),
+    value: op.change.op === "del" ? undefined : op.change.value,
+  };
 }

@@ -1,20 +1,22 @@
 export function PostJsonLd({
   title,
+  subtitle,
   image,
   author,
   datePublished,
   description,
 }: {
   title: string;
+  subtitle: string;
   image: string;
   author: string;
   datePublished: string;
-  description: string;
+  description?: string;
 }) {
   const jsonLd = {
     "@context": "https://schema.org",
     "@type": "Article",
-    headline: title,
+    headline: title + " " + subtitle,
     image,
     author: {
       "@type": "Person",
@@ -25,7 +27,7 @@ export function PostJsonLd({
       name: "Garden Computing",
     },
     datePublished,
-    description,
+    description: description || subtitle,
   };
 
   return (

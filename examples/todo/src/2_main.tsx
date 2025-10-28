@@ -6,68 +6,65 @@ import {
 } from "react-router-dom";
 import "./index.css";
 
+import { JazzInspector } from "jazz-tools/inspector";
 import {
-  PasskeyAuthBasicUI,
-  createJazzReactApp,
-  usePasskeyAuth,
-} from "jazz-react";
-
+  JazzReactProvider,
+  PassphraseAuthBasicUI,
+  useAcceptInvite,
+  useAccount,
+} from "jazz-tools/react";
 import React from "react";
 import { TodoAccount, TodoProject } from "./1_schema.ts";
 import { NewProjectForm } from "./3_NewProjectForm.tsx";
 import { ProjectTodoTable } from "./4_ProjectTodoTable.tsx";
+import { apiKey } from "./apiKey.ts";
 import {
   Button,
   ThemeProvider,
   TitleAndLogo,
 } from "./basicComponents/index.ts";
+import { wordlist } from "./wordlist.ts";
 
 /**
- * Walkthrough: The top-level provider `<Jazz.Provider/>`
+ * Walkthrough: The top-level provider `<JazzReactProvider/>`
  *
- * This shows how to use the top-level provider `<Jazz.Provider/>`,
+ * This shows how to use the top-level provider `<JazzReactProvider/>`,
  * which provides the rest of the app with a controlled account (used through `useAccount` later).
  * Here we use `PasskeyAuth`, which uses Passkeys (aka WebAuthn) to store a user's account secret
  * - no backend needed.
  *
- * `<Jazz.Provider/>` also runs our account migration
+ * `<JazzReactProvider/>` also runs our account migration
  */
-
 const appName = "Jazz Todo List Example";
 
-const Jazz = createJazzReactApp<TodoAccount>({
-  AccountSchema: TodoAccount,
-});
-// eslint-disable-next-line react-refresh/only-export-components
-export const { useAccount, useCoState, useAcceptInvite } = Jazz;
-
 function JazzAndAuth({ children }: { children: React.ReactNode }) {
-  const [passkeyAuth, passKeyState] = usePasskeyAuth({ appName });
-
   return (
-    <>
-      <Jazz.Provider
-        auth={passkeyAuth}
-        peer="wss://cloud.jazz.tools/?key=todo-example-jazz@garden.co"
-      >
+    <JazzReactProvider
+      sync={{
+        peer: `wss://cloud.jazz.tools/?key=${apiKey}`,
+      }}
+      AccountSchema={TodoAccount}
+    >
+      <PassphraseAuthBasicUI appName={appName} wordlist={wordlist}>
         {children}
-      </Jazz.Provider>
-      <PasskeyAuthBasicUI state={passKeyState} />
-    </>
+      </PassphraseAuthBasicUI>
+    </JazzReactProvider>
   );
 }
 
+// http://localhost:5173/#/project/co_znUD6vciCQazKwAKi4hFwRodxEk
+
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
-    <ThemeProvider>
-      <TitleAndLogo name={appName} />
-      <div className="flex flex-col h-full items-center justify-start gap-10 pt-10 pb-10 px-5">
-        <JazzAndAuth>
+    <JazzAndAuth>
+      <ThemeProvider>
+        <TitleAndLogo name={appName} />
+        <div className="flex flex-col h-full items-center justify-start gap-10 pt-10 pb-10 px-5">
           <App />
-        </JazzAndAuth>
-      </div>
-    </ThemeProvider>
-    ,
+        </div>
+      </ThemeProvider>
+      <JazzInspector />
+    </JazzAndAuth>
   </React.StrictMode>,
 );
 
@@ -79,7 +76,7 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
  * - which can also contain invite links.
  */
 export default function App() {
-  // logOut logs out the AuthProvider passed to `<Jazz.Provider/>` above.
+  // logOut logs out the AuthProvider passed to `<JazzReactProvider/>` above.
   const { logOut } = useAccount();
 
   const router = createHashRouter([
@@ -120,8 +117,8 @@ export default function App() {
 }
 
 function HomeScreen() {
-  const { me } = useAccount({
-    root: { projects: [{}] },
+  const { me } = useAccount(TodoAccount, {
+    resolve: { root: { projects: { $each: { $onError: null } } } },
   });
   const navigate = useNavigate();
 
@@ -129,10 +126,12 @@ function HomeScreen() {
     <>
       {me?.root.projects.length ? <h1>My Projects</h1> : null}
       {me?.root.projects.map((project) => {
+        if (!project) return null;
+
         return (
           <Button
-            key={project.id}
-            onClick={() => navigate("/project/" + project?.id)}
+            key={project.$jazz.id}
+            onClick={() => navigate("/project/" + project.$jazz.id)}
             variant="ghost"
           >
             {project.title}

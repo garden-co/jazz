@@ -2,29 +2,29 @@
   "$schema": "https://unpkg.com/@changesets/config@2.3.1/schema.json",
   "changelog": "@changesets/cli/changelog",
   "commit": false,
-  "fixed": [],
-  "linked": [
+  "linked": [],
+  "fixed": [
     [
       "cojson",
-      "jazz-tools",
-      "jazz-browser",
-      "jazz-browser-media-images",
-      "jazz-browser-auth-clerk",
-      "jazz-react-auth-clerk",
-      "jazz-react",
-      "jazz-react-native",
-      "jazz-nodejs",
-      "jazz-run",
-      "cojson-transport-ws",
+      "cojson-core-wasm",
       "cojson-storage-indexeddb",
-      "cojson-storage-sqlite"
+      "cojson-storage-sqlite",
+      "cojson-transport-ws",
+      "jazz-run",
+      "jazz-tools",
+      "jazz-webhook",
+      "community-jazz-vue",
+      "cojson-core-napi",
+      "cojson-core-napi-darwin-x64",
+      "cojson-core-napi-linux-x64-gnu",
+      "cojson-core-napi-linux-x64-musl",
+      "cojson-core-napi-linux-arm64-gnu",
+      "cojson-core-napi-linux-arm-gnueabihf",
+      "cojson-core-napi-darwin-arm64",
+      "cojson-core-napi-linux-arm64-musl"
     ]
   ],
   "access": "public",
   "baseBranch": "main",
-  "updateInternalDependencies": "patch",
-  "ignore": [],
-  "___experimentalUnsafeOptions_WILL_CHANGE_IN_PATCH": {
-    "onlyUpdatePeerDependentsWhenOutOfRange": true
-  }
+  "updateInternalDependencies": "minor"
 }

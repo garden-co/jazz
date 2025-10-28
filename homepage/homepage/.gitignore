@@ -34,5 +34,12 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 
-typedoc
 codeSamples
+# Turborepo
+.turbo
+
+.env
+
+# LLM docs
+public/**/llms*.txt
+public/docs

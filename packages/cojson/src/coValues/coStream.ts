@@ -1,13 +1,16 @@
 import { base64URLtoBytes, bytesToBase64url } from "../base64url.js";
 import { CoID, RawCoValue } from "../coValue.js";
-import { CoValueCore } from "../coValueCore.js";
+import { AvailableCoValueCore } from "../coValueCore/coValueCore.js";
 import { AgentID, SessionID, TransactionID } from "../ids.js";
 import { JsonObject, JsonValue } from "../jsonValue.js";
+import { logger } from "../logger.js";
 import { accountOrAgentIDfromSessionID } from "../typeUtils/accountOrAgentIDfromSessionID.js";
 import { isAccountID } from "../typeUtils/isAccountID.js";
 import { isCoValue } from "../typeUtils/isCoValue.js";
 import { RawAccountID } from "./account.js";
 import { RawGroup } from "./group.js";
+import { Transaction } from "../coValueCore/verifiedState.js";
+import { RawCoID } from "../ids.js";
 
 export type BinaryStreamInfo = {
   mimeType: string;
@@ -48,21 +51,26 @@ export class RawCoStreamView<
 {
   id: CoID<this>;
   type = "costream" as const;
-  core: CoValueCore;
+  core: AvailableCoValueCore;
   items: {
     [key: SessionID]: CoStreamItem<Item>[];
   };
+  /** @internal */
+  knownTransactions: Record<RawCoID, number>;
   readonly _item!: Item;
 
-  constructor(core: CoValueCore) {
+  totalValidTransactions: number = 0;
+
+  constructor(core: AvailableCoValueCore) {
     this.id = core.id as CoID<this>;
     this.core = core;
     this.items = {};
-    this.fillFromCoValue();
+    this.knownTransactions = { [core.id]: 0 };
+    this.processNewTransactions();
   }
 
   get headerMeta(): Meta {
-    return this.core.header.meta as Meta;
+    return this.core.verified.header.meta as Meta;
   }
 
   get group(): RawGroup {
@@ -75,14 +83,35 @@ export class RawCoStreamView<
   }
 
   /** @internal */
-  protected fillFromCoValue() {
-    this.items = {};
+  protected compareStreamItems(
+    a: CoStreamItem<Item>,
+    b: CoStreamItem<Item>,
+  ): number {
+    return (
+      a.madeAt - b.madeAt ||
+      (a.tx.sessionID === b.tx.sessionID
+        ? 0
+        : a.tx.sessionID < b.tx.sessionID
+          ? -1
+          : 1) ||
+      a.tx.txIndex - b.tx.txIndex
+    );
+  }
 
-    for (const {
-      txID,
-      madeAt,
-      changes,
-    } of this.core.getValidSortedTransactions()) {
+  /** @internal */
+  processNewTransactions() {
+    const changeEntries = new Set<CoStreamItem<Item>[]>();
+
+    const newValidTransactions = this.core.getValidTransactions({
+      ignorePrivateTransactions: false,
+      knownTransactions: this.knownTransactions,
+    });
+
+    if (newValidTransactions.length === 0) {
+      return;
+    }
+
+    for (const { txID, madeAt, changes } of newValidTransactions) {
       for (const changeUntyped of changes) {
         const change = changeUntyped as Item;
         let entries = this.items[txID.sessionID];
@@ -91,8 +120,15 @@ export class RawCoStreamView<
           this.items[txID.sessionID] = entries;
         }
         entries.push({ value: change, madeAt, tx: txID });
+        changeEntries.add(entries);
       }
     }
+
+    for (const entries of changeEntries) {
+      entries.sort(this.compareStreamItems);
+    }
+
+    this.totalValidTransactions += newValidTransactions.length;
   }
 
   getSingleStream(): Item[] | undefined {
@@ -240,8 +276,8 @@ export class RawCoStreamView<
   }
 
   subscribe(listener: (coStream: this) => void): () => void {
-    return this.core.subscribe((content) => {
-      listener(content as this);
+    return this.core.subscribe((core) => {
+      listener(core.getCurrentContent() as this);
     });
   }
 }
@@ -255,7 +291,7 @@ export class RawCoStream<
 {
   push(item: Item, privacy: "private" | "trusting" = "private"): void {
     this.core.makeTransaction([isCoValue(item) ? item.id : item], privacy);
-    this.fillFromCoValue();
+    this.processNewTransactions();
   }
 }
 
@@ -279,6 +315,26 @@ export class RawBinaryCoStreamView<
     return lastItem?.type === "end";
   }
 
+  getBinaryStreamInfo(): BinaryStreamInfo | undefined {
+    const items = this.getSingleStream();
+
+    // No active streams
+    if (!items) return;
+
+    const start = items[0];
+
+    if (start?.type !== "start") {
+      logger.error("Invalid binary stream start", start);
+      return;
+    }
+
+    return {
+      mimeType: start.mimeType,
+      fileName: start.fileName,
+      totalSizeBytes: start.totalSizeBytes,
+    };
+  }
+
   getBinaryChunks(
     allowUnfinished?: boolean,
   ):
@@ -289,12 +345,9 @@ export class RawBinaryCoStreamView<
     // No active streams
     if (!items) return;
 
-    const start = items[0];
+    const info = this.getBinaryStreamInfo();
 
-    if (start?.type !== "start") {
-      console.error("Invalid binary stream start", start);
-      return;
-    }
+    if (!info) return;
 
     const end = items[items.length - 1];
 
@@ -311,7 +364,7 @@ export class RawBinaryCoStreamView<
       }
 
       if (item.type !== "chunk") {
-        console.error("Invalid binary stream chunk", item);
+        logger.error("Invalid binary stream chunk", item);
         return undefined;
       }
 
@@ -320,9 +373,7 @@ export class RawBinaryCoStreamView<
     }
 
     return {
-      mimeType: start.mimeType,
-      fileName: start.fileName,
-      totalSizeBytes: start.totalSizeBytes,
+      ...info,
       chunks,
       finished,
     };
@@ -343,7 +394,7 @@ export class RawBinaryCoStream<
   ): void {
     this.core.makeTransaction([item], privacy);
     if (updateView) {
-      this.fillFromCoValue();
+      this.processNewTransactions();
     }
   }
 
@@ -365,7 +416,6 @@ export class RawBinaryCoStream<
     chunk: Uint8Array,
     privacy: "private" | "trusting" = "private",
   ): void {
-    // const before = performance.now();
     this.push(
       {
         type: "chunk",
@@ -374,11 +424,6 @@ export class RawBinaryCoStream<
       privacy,
       false,
     );
-    // const after = performance.now();
-    // console.log(
-    //     "pushBinaryStreamChunk bandwidth in MB/s",
-    //     (1000 * chunk.length) / (after - before) / (1024 * 1024)
-    // );
   }
 
   endBinaryStream(privacy: "private" | "trusting" = "private") {

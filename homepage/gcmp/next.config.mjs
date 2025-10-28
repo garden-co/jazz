@@ -6,7 +6,7 @@ import { SKIP, visit } from "unist-util-visit";
 const nextConfig = {
   // Configure `pageExtensions`` to include MDX files
   pageExtensions: ["js", "jsx", "mdx", "ts", "tsx"],
-  transpilePackages: ["gcmp-design-system"],
+  transpilePackages: ["@garden-co/design-system"],
 };
 
 const withMDX = createMDX({
@@ -49,7 +49,7 @@ function highlightPlugin() {
             token.content.includes("// old"),
           );
           const isBinnedLine = line.some((token) =>
-            token.content.includes("// *bin*"),
+            token.content.includes("// [!code --]"),
           );
           const isHighlighted = line.some((token) =>
             token.content.includes("// *highlight*"),
@@ -62,7 +62,7 @@ function highlightPlugin() {
             lineClassName = "bg-red-100 dark:bg-red-800";
           } else if (isHighlighted) {
             lineClassName =
-              "my-0.5 bg-blue-50 text-blue dark:bg-stone-900 dark:text-blue-300";
+              "my-0.5 bg-blue-50 text-primary dark:bg-stone-900 dark:text-blue-300";
           }
 
           return (
@@ -70,7 +70,7 @@ function highlightPlugin() {
             line
               .map((token) => {
                 let color = isHighlighted ? "currentColor" : token.color;
-                return `<span style="color: ${color};${isSubduedLine ? "opacity: 0.4;" : ""}">${escape(token.content.replace("// old", "").replace("// *bin*", "").replace("// *highlight*", ""))}</span>`;
+                return `<span style="color: ${color};${isSubduedLine ? "opacity: 0.4;" : ""}">${escape(token.content.replace("// old", "").replace("// [!code --]", "").replace("// *highlight*", ""))}</span>`;
               })
               .join("") +
             "</span>"

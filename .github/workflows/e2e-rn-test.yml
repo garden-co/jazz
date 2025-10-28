@@ -1,0 +1,93 @@
+name: End-to-End Tests for React Native
+
+concurrency:
+  # For pushes, this lets concurrent runs happen, so each push gets a result.
+  # But for other events (e.g. PRs), we can cancel the previous runs.
+  group: ${{ github.workflow }}-${{ github.event_name == 'push' && github.sha || github.ref }}
+  cancel-in-progress: true
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - ".github/actions/android-emulator/**"
+      - ".github/actions/source-code/**"
+      - ".github/workflows/e2e-rn-test.yml"
+      - "examples/chat-rn-expo/**"
+      - "packages/**"
+
+jobs:
+  e2e-tests:
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Source Code
+        uses: ./.github/actions/source-code/
+
+      - name: Create Output Directory
+        run: |
+          mkdir -p ~/output
+
+      - name: Setup JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: corretto
+          java-version: 22
+          cache: gradle
+
+      - name: Pnpm Build
+        run: pnpm turbo build --filter="./packages/*"
+      
+      - name: Build NAPI packages
+        run: pnpm exec turbo run build:napi --filter='./crates/*'
+
+      - name: chat-rn-expo App Pre Build
+        working-directory: ./examples/chat-rn-expo
+        run: |
+          pnpm expo prebuild --clean
+
+      - name: Install Maestro
+        run: |
+          curl -fsSL "https://get.maestro.mobile.dev" | bash
+
+      - name: Setup Android Emulator
+        id: android-emulator
+        uses: ./.github/actions/android-emulator/
+        with:
+          api-level: 29
+
+      - name: Test App
+        uses: reactivecircus/android-emulator-runner@v2
+        id: e2e_test
+        continue-on-error: true
+        with:
+          api-level: 29
+          force-avd-creation: false
+          emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -no-metrics
+          disable-animations: true
+          working-directory: ./examples/chat-rn-expo/
+          # killall due to this issue: https://github.com/ReactiveCircus/android-emulator-runner/issues/385
+          script: ./test/e2e/run.sh && ( killall -INT crashpad_handler || true )
+
+      - name: Copy Maestro Output
+        if: steps.e2e_test.outcome != 'success'
+        run: |
+          cp -r ~/.maestro/tests/* ~/output
+
+      - name: Upload Output Files
+        if: steps.e2e_test.outcome != 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-test-output
+          path: ~/output/*
+          retention-days: 5
+
+      - name: Exit with Test Result
+        if: always()
+        run: |
+          if [ "${{ steps.e2e_test.outcome }}" != "success" ]; then
+            exit 1
+          fi

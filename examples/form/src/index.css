@@ -1,0 +1,26 @@
+@import "tailwindcss";
+@plugin "@tailwindcss/forms";
+
+@layer base {
+  :root {
+    --border-default: var(--color-stone-200);
+  }
+
+  .dark {
+    --border-default: var(--color-stone-900);
+  }
+
+  *,
+  ::after,
+  ::before,
+  ::backdrop,
+  ::file-selector-button {
+    border-color: var(--border-default, currentColor);
+  }
+}
+
+@layer components {
+  strong {
+    @apply font-semibold text-stone-900 dark:text-white;
+  }
+}

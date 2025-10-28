@@ -1,13 +1,13 @@
 import harmonyPalette from "@evilmartians/harmony/tailwind";
 import typography from "@tailwindcss/typography";
 import tailwindCSSAnimate from "tailwindcss-animate";
-const colors = require("tailwindcss/colors");
-const plugin = require("tailwindcss/plugin");
+import colors from "tailwindcss/colors";
+import plugin from "tailwindcss/plugin";
+import { COLORS } from "./colors/colors";
 
 const stonePalette = {
   50: "oklch(0.988281 0.002 75)",
-  75: "oklch(0.980563 0.002 75)",
-  100: "oklch(0.964844 0.002 75)",
+  100: "oklch(0.980563 0.002 75)",
   200: "oklch(0.917969 0.002 75)",
   300: "oklch(0.853516 0.002 75)",
   400: "oklch(0.789063 0.002 75)",
@@ -20,6 +20,46 @@ const stonePalette = {
   950: "oklch(0.193359 0.002 75)",
 };
 
+const jazzBlue = {
+  ...colors.indigo,
+  500: "#5870F1",
+  600: "#3651E7",
+  700: "#3313F7",
+  800: "#2A12BE",
+  900: "#12046A",
+  DEFAULT: COLORS.BLUE,
+};
+
+const green = {
+  ...colors.green,
+  DEFAULT: COLORS.FOREST,
+};
+
+const cyan = {
+  ...colors.cyan,
+  DEFAULT: COLORS.TURQUOISE,
+};
+
+const red = {
+  ...colors.red,
+  DEFAULT: COLORS.RED,
+};
+
+const yellow = {
+  ...colors.yellow,
+  DEFAULT: COLORS.YELLOW,
+};
+
+const orange = {
+  ...colors.orange,
+  DEFAULT: COLORS.ORANGE,
+};
+
+const purple = {
+  ...colors.purple,
+  DEFAULT: COLORS.PURPLE,
+};
+
 const stonePaletteWithAlpha = { ...stonePalette };
 
 Object.keys(stonePalette).forEach((key) => {
@@ -30,32 +70,121 @@ Object.keys(stonePalette).forEach((key) => {
 });
 
 /** @type {import('tailwindcss').Config} */
-const config = {
+export const preset = {
   content: [
     "./src/pages/**/*.{js,ts,jsx,tsx,mdx}",
     "./src/components/**/*.{js,ts,jsx,tsx,mdx}",
     "./src/app/**/*.{js,ts,jsx,tsx,mdx}",
+    "./src/utils/**/*.{js,ts,jsx,tsx,mdx}",
   ],
   theme: {
-    colors: {
-      ...harmonyPalette,
-      stone: stonePaletteWithAlpha,
-      blue: {
-        ...colors.indigo,
-        500: "#5870F1",
-        600: "#3651E7",
-        700: "#3313F7",
-        800: "#2A12BE",
-        900: "#12046A",
-        DEFAULT: "#3313F7",
-      },
-      green: colors.green,
-      red: colors.red,
-    },
     extend: {
+      colors: {
+        ...harmonyPalette,
+        stone: stonePaletteWithAlpha,
+        blue: jazzBlue,
+        green,
+        cyan,
+        red,
+        yellow,
+        purple,
+        orange,
+        muted: "var(--color-muted)",
+        strong: "var(--color-strong)",
+        primary: {
+          DEFAULT: "var(--color-primary)",
+          transparent: "var(--color-transparent-primary)",
+          dark: "var(--color-primary-dark)",
+          light:
+            "lch(from var(--color-primary) calc(l + 10) calc(c + 1) calc(h - 5))",
+          brightLight:
+            "lch(from var(--color-primary) calc(l - 1) calc(c + 20) calc(h + 5))",
+          brightDark:
+            "lch(from var(--color-primary) calc(l - 6) calc(c + 20) calc(h + 5))",
+        },
+        success: {
+          DEFAULT: "var(--color-success)",
+          transparent: "lch(from var(--color-success) l c h / 0.3)",
+          dark: "lch(from var(--color-success) calc(l - 7) calc(c - 1) calc(h + 5))",
+          light:
+            "lch(from var(--color-success) calc(l + 4) calc(c + 1) calc(h - 5))",
+          brightLight:
+            "lch(from var(--color-success) calc(l - 1) calc(c + 20) calc(h + 10))",
+          brightDark:
+            "lch(from var(--color-success) calc(l - 6) calc(c + 20) calc(h + 10))",
+        },
+        info: {
+          DEFAULT: "var(--color-info)",
+          transparent: "lch(from var(--color-info) l c h / 0.3)",
+          dark: "lch(from var(--color-info) calc(l - 7) calc(c - 1) calc(h + 5))",
+          light:
+            "lch(from var(--color-info) calc(l + 4) calc(c + 1) calc(h - 5))",
+          brightLight:
+            "lch(from var(--color-info) calc(l - 1) calc(c + 20) calc(h + 5))",
+          brightDark:
+            "lch(from var(--color-info) calc(l - 4) calc(c + 20) calc(h + 5))",
+        },
+        warning: {
+          DEFAULT: "var(--color-warning)",
+          transparent: "lch(from var(--color-warning) l c h / 0.3)",
+          dark: "lch(from var(--color-warning) calc(l - 7) calc(c - 1) calc(h + 5))",
+          light:
+            "lch(from var(--color-warning) calc(l + 4) calc(c + 1) calc(h - 5))",
+          brightLight:
+            "lch(from var(--color-warning) calc(l - 1) calc(c + 30) calc(h + 15))",
+          brightDark:
+            "lch(from var(--color-warning) calc(l - 4) calc(c + 30) calc(h + 15))",
+        },
+        danger: {
+          DEFAULT: "var(--color-danger)",
+          transparent: "lch(from var(--color-danger) l c h / 0.3)",
+          dark: "lch(from var(--color-danger) calc(l - 7) calc(c - 1) calc(h + 5))",
+          light:
+            "lch(from var(--color-danger) calc(l + 4) calc(c + 1) calc(h - 5))",
+          brightLight:
+            "lch(from var(--color-danger) calc(l - 2) calc(c + 20) calc(h + 10))",
+          brightDark:
+            "lch(from var(--color-danger) calc(l - 6) calc(c + 10) calc(h + 10))",
+        },
+        tip: {
+          DEFAULT: "var(--color-tip)",
+          transparent: "lch(from var(--color-tip) l c h / 0.3)",
+          dark: "lch(from var(--color-tip) calc(l - 7) calc(c - 1) calc(h + 5))",
+          light:
+            "lch(from var(--color-tip) calc(l + 4) calc(c + 1) calc(h - 5))",
+          brightLight:
+            "lch(from var(--color-tip) calc(l - 1) calc(c + 20) calc(h + 10))",
+          brightDark:
+            "lch(from var(--color-tip) calc(l - 4) calc(c + 20) calc(h + 10))",
+        },
+        alert: {
+          DEFAULT: "var(--color-alert)",
+          transparent: "lch(from var(--color-alert) l c h / 0.3)",
+          dark: "lch(from var(--color-alert) calc(l - 7) calc(c - 1) calc(h + 5))",
+          light:
+            "lch(from var(--color-alert) calc(l + 4) calc(c + 1) calc(h - 5))",
+          brightLight:
+            "lch(from var(--color-alert) calc(l - 1) calc(c + 50) calc(h + 15))",
+          brightDark:
+            "lch(from var(--color-alert) calc(l - 5) calc(c + 50) calc(h + 15))",
+        },
+      },
+      textColor: {
+        default: "var(--color-default)",
+        highlight: "var(--color-highlight)",
+        strong: "var(--color-strong)",
+        muted: "var(--color-muted)",
+      },
+      borderColor: {
+        DEFAULT: "var(--color-border-default)",
+      },
+      backgroundColor: {
+        highlight: "var(--color-background-highlight)",
+      },
       fontFamily: {
         display: ["var(--font-manrope)"],
         mono: ["var(--font-commit-mono)"],
+        sans: ["var(--font-inter)"],
       },
       fontSize: {
         "2xs": ["0.75rem", { lineHeight: "1.25rem" }],
@@ -67,7 +196,6 @@ const config = {
           sm: "1rem",
         },
         screens: {
-          md: "960px",
           lg: "1276px",
         },
       },
@@ -86,8 +214,8 @@ const config = {
             "--tw-prose-invert-headings": theme("colors.white"),
             "--tw-prose-code": stonePalette[900],
             "--tw-prose-invert-code": stonePalette[50],
-            "--tw-prose-links": theme("colors.blue.DEFAULT"),
-            "--tw-prose-invert-links": theme("colors.blue.500"),
+            "--tw-prose-links": theme("colors.primary"),
+            "--tw-prose-invert-links": theme("colors.primary"),
             maxWidth: null,
             strong: {
               color: "var(--tw-prose-bold)",
@@ -100,30 +228,33 @@ const config = {
             a: {
               fontWeight: theme("fontWeight.normal"),
               textUnderlineOffset: "4px",
+              "&:hover": {
+                color: "var(--color-primary-dark)",
+              },
             },
             h1: {
               fontFamily: theme("fontFamily.display"),
               letterSpacing: theme("letterSpacing.tight"),
               fontWeight: theme("fontWeight.semibold"),
-              fontSize: theme("fontSize.4xl"),
+              fontSize: theme("fontSize.3xl"),
             },
             h2: {
               fontFamily: theme("fontFamily.display"),
               letterSpacing: theme("letterSpacing.tight"),
               fontWeight: theme("fontWeight.semibold"),
-              fontSize: theme("fontSize.3xl"),
+              fontSize: theme("fontSize.2xl"),
             },
             h3: {
               fontFamily: theme("fontFamily.display"),
               letterSpacing: theme("letterSpacing.tight"),
               fontWeight: theme("fontWeight.semibold"),
-              fontSize: theme("fontSize.2xl"),
+              fontSize: theme("fontSize.xl"),
             },
             h4: {
               fontFamily: theme("fontFamily.display"),
               letterSpacing: theme("letterSpacing.tight"),
               fontWeight: theme("fontWeight.semibold"),
-              fontSize: theme("fontSize.xl"),
+              fontSize: theme("fontSize.lg"),
             },
             "code::before": {
               content: "none",
@@ -136,6 +267,7 @@ const config = {
               padding: "0.15rem 0.25rem",
               borderRadius: "2px",
               whiteSpace: "nowrap",
+              fontWeight: 400,
             },
             p: {
               marginBottom: theme("spacing.3"),
@@ -166,23 +298,12 @@ const config = {
         },
       }),
     ),
-    plugin(({ addBase }) =>
-      addBase({
-        ":root": {
-          "--gcmp-border-color": stonePalette[200],
-          "--gcmp-invert-border-color": stonePalette[900],
-        },
-        "*": {
-          borderColor: "var(--gcmp-border-color)",
-        },
-        ".dark *": {
-          borderColor: "var(--gcmp-invert-border-color)",
-        },
-        "*:focus": {
-          outline: "none",
-        },
-      }),
-    ),
   ],
+};
+
+const config = {
+  presets: [preset],
+  darkMode: ["class"],
+  content: ["./src/**/*.{js,ts,jsx,tsx,mdx}"],
 };
 export default config;

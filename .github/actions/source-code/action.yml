@@ -1,0 +1,36 @@
+name: Get and Build Source Code
+
+runs:
+  using: "composite"
+  steps:
+    - name: Enable latestcorepack
+      shell: bash
+      run: |
+        echo "Before: corepack version => $(corepack --version || echo 'not installed')"
+        npm install -g corepack@latest
+        echo "After : corepack version => $(corepack --version)"
+        corepack enable
+        pnpm --version
+
+    - name: Install Node.js
+      uses: useblacksmith/setup-node@v5
+      with:
+        node-version-file: '.node-version'
+        cache: 'pnpm'
+
+    - name: Get pnpm store directory
+      shell: bash
+      run: |
+        echo "STORE_PATH=$(pnpm store path --silent)" >> $GITHUB_ENV
+
+    - uses: useblacksmith/cache@v5
+      name: Setup pnpm cache
+      with:
+        path: ${{ env.STORE_PATH }}
+        key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+        restore-keys: |
+          ${{ runner.os }}-pnpm-store-
+
+    - name: Install dependencies
+      shell: bash
+      run: pnpm install --frozen-lockfile

@@ -48,11 +48,14 @@ export default function MapTooltip() {
       <iframe
         className="w-full aspect-[12/4] dark:hidden"
         src="/api/latencyMap?spacing=1.5&dark=false&mouse=true"
+          title="Interactive latency map light mode"
+
       />
       <iframe
         className="w-full aspect-[12/4] hidden dark:block"
         src="/api/latencyMap?spacing=1.5&dark=true&mouse=true"
         style={{ colorScheme: "light" }}
+        title="Interactive latency map dark mode"
       />
       <div
         className="hidden map-tooltip absolute pointer-events-none text-xs bg-stone-925 text-stone-50 p-2 rounded-lg gap-1 items-center"

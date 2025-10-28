@@ -1,56 +1,87 @@
-import { createImage } from "jazz-browser-media-images";
-import { ProgressiveImg } from "jazz-react";
-import { ImageDefinition } from "jazz-tools";
-import { ChangeEvent, useRef } from "react";
-import { useAccount } from "./main.tsx";
-
-function Image({ image }: { image: ImageDefinition }) {
-  return (
-    <ProgressiveImg image={image}>
-      {({ src }) => <img src={src} />}
-    </ProgressiveImg>
-  );
-}
+import { createImage } from "jazz-tools/media";
+import { useAccount } from "jazz-tools/react";
+import { ChangeEvent, useEffect, useRef, useState } from "react";
+import { JazzAccount } from "./schema";
 
 export default function ImageUpload() {
-  const { me } = useAccount();
-
+  const { me } = useAccount(JazzAccount, { resolve: { profile: true } });
+  const [imagePreviewUrl, setImagePreviewUrl] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
+  useEffect(() => {
+    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+      if (imagePreviewUrl) {
+        e.preventDefault();
+        return "Upload in progress. Are you sure you want to leave?";
+      }
+    };
+
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    return () => {
+      window.removeEventListener("beforeunload", handleBeforeUnload);
+
+      if (imagePreviewUrl) {
+        URL.revokeObjectURL(imagePreviewUrl);
+      }
+    };
+  }, [imagePreviewUrl]);
+
   const onImageChange = async (event: ChangeEvent<HTMLInputElement>) => {
-    if (!me?.profile) return;
+    if (!me) return;
 
     const file = event.currentTarget.files?.[0];
 
     if (file) {
-      me.profile.image = await createImage(file, {
-        owner: me.profile._owner,
-      });
+      const objectUrl = URL.createObjectURL(file);
+      setImagePreviewUrl(objectUrl);
+
+      try {
+        const startTime = performance.now();
+        me.profile.$jazz.set(
+          "image",
+          await createImage(file, {
+            owner: me.profile.$jazz.owner,
+            progressive: true,
+            placeholder: "blur",
+          }),
+        );
+        const endTime = performance.now();
+        console.log(`Image upload took ${endTime - startTime} milliseconds`);
+      } catch (error) {
+        console.error("Error uploading image:", error);
+      } finally {
+        URL.revokeObjectURL(objectUrl);
+        setImagePreviewUrl(null);
+      }
     }
   };
 
-  const deleteImage = () => {
-    if (!me?.profile) return;
-
-    me.profile.image = null;
-  };
+  if (imagePreviewUrl) {
+    return (
+      <div className="relative">
+        <p className="z-10 absolute font-semibold text-gray-900 inset-0 flex items-center justify-center">
+          Uploading image...
+        </p>
+        <img
+          src={imagePreviewUrl}
+          alt="Preview"
+          className="opacity-50 w-full h-auto"
+        />
+      </div>
+    );
+  }
 
   return (
-    <>
-      <div>{me?.profile?.image && <Image image={me.profile.image} />}</div>
-
-      <div>
-        {me?.profile?.image ? (
-          <button type="button" onClick={deleteImage}>
-            Delete image
-          </button>
-        ) : (
-          <div>
-            <label>Upload image</label>
-            <input ref={inputRef} type="file" onChange={onImageChange} />
-          </div>
-        )}
-      </div>
-    </>
+    <div className="flex flex-col gap-3">
+      <label htmlFor="image">Image</label>
+      <input
+        id="image"
+        name="image"
+        ref={inputRef}
+        type="file"
+        accept="image/png, image/jpeg, image/gif, image/bmp"
+        onChange={onImageChange}
+      />
+    </div>
   );
 }

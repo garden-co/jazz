@@ -1,146 +1,83 @@
-import { SyncMessage } from "cojson";
-import { CoValueKnownState } from "cojson/src/sync.js";
-import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import {
-  BatchedOutgoingMessages,
-  MAX_OUTGOING_MESSAGES_CHUNK_BYTES,
-} from "../BatchedOutgoingMessages.js";
-
-beforeEach(() => {
-  vi.useFakeTimers();
-});
-
-afterEach(() => {
-  vi.useRealTimers();
-});
+import type { SyncMessage } from "cojson";
+import { type Mocked, afterEach, describe, expect, test, vi } from "vitest";
+import { BatchedOutgoingMessages } from "../BatchedOutgoingMessages";
+import type { AnyWebSocket } from "../types";
+import { createTestMetricReader, tearDownTestMetricReader } from "./utils.js";
 
 describe("BatchedOutgoingMessages", () => {
-  function setup() {
-    const sendMock = vi.fn();
-    const batchedMessages = new BatchedOutgoingMessages(sendMock);
-    return { sendMock, batchedMessages };
-  }
+  describe("telemetry", () => {
+    afterEach(() => {
+      tearDownTestMetricReader();
+    });
 
-  test("should batch messages and send them after a timeout", () => {
-    const { sendMock, batchedMessages } = setup();
-    const message1: SyncMessage = {
-      action: "known",
-      id: "co_z1",
-      header: false,
-      sessions: {},
-    };
-    const message2: SyncMessage = {
-      action: "known",
-      id: "co_z2",
-      header: false,
-      sessions: {},
-    };
+    test("should correctly measure egress", async () => {
+      const metricReader = createTestMetricReader();
 
-    batchedMessages.push(message1);
-    batchedMessages.push(message2);
+      const mockWebSocket = {
+        readyState: 1,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        close: vi.fn(),
+        send: vi.fn(),
+      } as unknown as Mocked<AnyWebSocket>;
 
-    expect(sendMock).not.toHaveBeenCalled();
+      const outgoing = new BatchedOutgoingMessages(
+        mockWebSocket,
+        true,
+        "server",
+        { test: "test" },
+      );
 
-    vi.runAllTimers();
+      const encryptedChanges = "Hello, world!";
+      vi.useFakeTimers();
+      outgoing.push({
+        action: "content",
+        new: {
+          someSessionId: {
+            newTransactions: [
+              {
+                privacy: "private",
+                encryptedChanges,
+              },
+            ],
+          },
+        },
+      } as unknown as SyncMessage);
 
-    expect(sendMock).toHaveBeenCalledTimes(1);
-    expect(sendMock).toHaveBeenCalledWith(
-      `${JSON.stringify(message1)}\n${JSON.stringify(message2)}`,
-    );
-  });
+      await vi.runAllTimersAsync();
+      vi.useRealTimers();
 
-  test("should send messages immediately when reaching MAX_OUTGOING_MESSAGES_CHUNK_BYTES", () => {
-    const { sendMock, batchedMessages } = setup();
-    const largeMessage: SyncMessage = {
-      action: "known",
-      id: "co_z_large",
-      header: false,
-      sessions: {
-        // Add a large payload to exceed MAX_OUTGOING_MESSAGES_CHUNK_BYTES
-        payload: "x".repeat(MAX_OUTGOING_MESSAGES_CHUNK_BYTES),
-      } as CoValueKnownState["sessions"],
-    };
+      expect(
+        await metricReader.getMetricValue("jazz.usage.egress", {
+          test: "test",
+        }),
+      ).toBe(encryptedChanges.length);
 
-    batchedMessages.push(largeMessage);
+      const trustingChanges = "Jazz is great!";
+      vi.useFakeTimers();
+      outgoing.push({
+        action: "content",
+        new: {
+          someSessionId: {
+            after: 0,
+            newTransactions: [
+              {
+                privacy: "trusting",
+                changes: trustingChanges,
+              },
+            ],
+          },
+        },
+      } as unknown as SyncMessage);
 
-    expect(sendMock).toHaveBeenCalledTimes(1);
-    expect(sendMock).toHaveBeenCalledWith(JSON.stringify(largeMessage));
-  });
+      await vi.runAllTimersAsync();
+      vi.useRealTimers();
 
-  test("should send accumulated messages before a large message", () => {
-    const { sendMock, batchedMessages } = setup();
-    const smallMessage: SyncMessage = {
-      action: "known",
-      id: "co_z_small",
-      header: false,
-      sessions: {},
-    };
-    const largeMessage: SyncMessage = {
-      action: "known",
-      id: "co_z_large",
-      header: false,
-      sessions: {
-        // Add a large payload to exceed MAX_OUTGOING_MESSAGES_CHUNK_BYTES
-        payload: "x".repeat(MAX_OUTGOING_MESSAGES_CHUNK_BYTES),
-      } as CoValueKnownState["sessions"],
-    };
-
-    batchedMessages.push(smallMessage);
-    batchedMessages.push(largeMessage);
-
-    vi.runAllTimers();
-
-    expect(sendMock).toHaveBeenCalledTimes(2);
-    expect(sendMock).toHaveBeenNthCalledWith(1, JSON.stringify(smallMessage));
-    expect(sendMock).toHaveBeenNthCalledWith(2, JSON.stringify(largeMessage));
-  });
-
-  test("should send remaining messages on close", () => {
-    const { sendMock, batchedMessages } = setup();
-    const message: SyncMessage = {
-      action: "known",
-      id: "co_z_test",
-      header: false,
-      sessions: {},
-    };
-
-    batchedMessages.push(message);
-    expect(sendMock).not.toHaveBeenCalled();
-
-    batchedMessages.close();
-
-    expect(sendMock).toHaveBeenCalledTimes(1);
-    expect(sendMock).toHaveBeenCalledWith(JSON.stringify(message));
-  });
-
-  test("should clear timeout when pushing new messages", () => {
-    const { sendMock, batchedMessages } = setup();
-    const message1: SyncMessage = {
-      action: "known",
-      id: "co_z1",
-      header: false,
-      sessions: {},
-    };
-    const message2: SyncMessage = {
-      action: "known",
-      id: "co_z2",
-      header: false,
-      sessions: {},
-    };
-
-    batchedMessages.push(message1);
-
-    const clearTimeoutSpy = vi.spyOn(global, "clearTimeout");
-
-    batchedMessages.push(message2);
-
-    expect(clearTimeoutSpy).toHaveBeenCalled();
-
-    vi.runAllTimers();
-
-    expect(sendMock).toHaveBeenCalledTimes(1);
-    expect(sendMock).toHaveBeenCalledWith(
-      `${JSON.stringify(message1)}\n${JSON.stringify(message2)}`,
-    );
+      expect(
+        await metricReader.getMetricValue("jazz.usage.egress", {
+          test: "test",
+        }),
+      ).toBe(encryptedChanges.length + trustingChanges.length);
+    });
   });
 });

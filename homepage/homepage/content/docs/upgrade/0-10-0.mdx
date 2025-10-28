@@ -1,0 +1,365 @@
+import { ContentByFramework, CodeGroup } from '@/components/forMdx'
+
+# Jazz 0.10.0 is out!
+
+For Jazz 0.10.0 we have been focusing on enhancing authentication to make it optional, more flexible and easier to use.
+
+The default is now anonymous auth, which means that you can build the functionality of your app first and figure out auth later. For users this means that they can start using your app right away on one device -- and once you integrate an auth method, users can sign up and their anonymous accounts are transparently upgraded to authenticated accounts that work across devices.
+
+There are also some other minor improvements that will make your Jazz experience even better!
+
+## What's new?
+Here is what's changed in this release:
+- [New authentication flow](#new-authentication-flow): Now with anonymous auth, redesigned to make Jazz easier to start with and be more flexible.
+- [Local-only mode](#local-only-mode): Users can now explore your app in local-only mode before signing up.
+- [Improvements on the loading APIs](#improved-loading-api); `ensureLoaded` now always returns a value and `useCoState` now returns `null` if the value is not found.
+- [Jazz Workers on native WebSockets](#native-websocket-for-jazz-workers): Improves compatibility with a wider set of Javascript runtimes.
+- [Group inheritance with role mapping](#group-inheritance): Groups can now inherit members from other groups with a fixed role.
+- Support for Node 14 dropped on cojson.
+- Bugfix: `Group.removeMember` now returns a promise.
+- Now `cojson` and `jazz-tools` don't export directly the crypto providers anymore. Replace the import with `cojson/crypto/WasmCrypto` or `cojson/crypto/PureJSCrypto` depending on your use case.
+
+## New authentication flow
+    Up until now authentication has been the first part to figure out when building a Jazz app, and this was a stumbling block for many.
+
+    Now it is no longer required and setting up a Jazz app is as easy as writing this:
+<CodeGroup>
+{/* prettier-ignore */}
+```tsx
+<JazzProvider
+    auth={authMethod} // removed  // [!code --]
+    peer="wss://cloud.jazz.tools/?key=you@example.com"  // moved into sync // [!code --]
+    sync={{ peer: "wss://cloud.jazz.tools/?key=you@example.com" }}  // [!code ++]
+>
+    <App />
+</JazzProvider>
+```
+</CodeGroup>
+
+New users are initially authenticated as "anonymous" and you can sign them up later with the hooks/providers of your chosen auth method.
+
+Your auth code can now blend into your component tree:
+<ContentByFramework framework="react">
+<CodeGroup>
+{/* prettier-ignore */}
+```tsx
+export function AuthModal({ open, onOpenChange }: AuthModalProps) {
+  const [username, setUsername] = useState("");
+  const [isSignUp, setIsSignUp] = useState(true);
+
+  const auth = usePasskeyAuth({ // Must be inside the JazzProvider!
+    appName: "My super-cool web app",
+  });
+
+  const handleViewChange = () => {
+    setIsSignUp(!isSignUp);
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+
+    if (isSignUp) {
+      await auth.signUp(username);
+    } else {
+      await auth.logIn();
+    }
+    onOpenChange(false);
+};
+```
+</CodeGroup>
+</ContentByFramework>
+<ContentByFramework framework="react-native">
+<CodeGroup>
+{/* prettier-ignore */}
+```tsx
+export function AuthModal({ open, onOpenChange }: AuthModalProps) {
+  const [username, setUsername] = useState("");
+  const [isSignUp, setIsSignUp] = useState(true);
+  const [loginPassphrase, setLoginPassphrase] = useState("");
+
+  const auth = usePassphraseAuth({ // Must be inside the JazzProvider!
+    wordlist,
+  });
+
+  const handleViewChange = () => {
+    setIsSignUp(!isSignUp);
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+
+    if (isSignUp) {
+      await auth.signUp();
+    } else {
+      await auth.logIn(loginPassphrase);
+    }
+    onOpenChange(false);
+};
+```
+</CodeGroup>
+</ContentByFramework>
+<ContentByFramework framework="svelte">
+<CodeGroup>
+{/* prettier-ignore */}
+```tsx
+import { usePasskeyAuth } from 'jazz-svelte';
+
+const auth = usePasskeyAuth({ appName: "My super-cool web app" });
+
+let error = $state<string | undefined>(undefined);
+
+function signUp(e: Event) {
+  const formData = new FormData(e.currentTarget as HTMLFormElement);
+  const name = formData.get('name') as string;
+
+  if (!name) {
+    error = 'Name is required';
+    return;
+  }
+  e.preventDefault();
+  error = undefined;
+  auth.current.signUp(name).catch((e) => {
+    error = e.message;
+  });
+}
+
+function logIn() {
+  error = undefined;
+  auth.current.logIn().catch((e) => {
+    error = e.message;
+  });
+}
+```
+</CodeGroup>
+</ContentByFramework>
+<ContentByFramework framework="vue">
+<CodeGroup>
+{/* prettier-ignore */}
+```tsx
+import { usePasskeyAuth } from 'jazz-vue';
+import { ref } from 'vue';
+
+const auth = usePasskeyAuth({ appName: "My super-cool web app" });
+const error = ref<string | undefined>(undefined);
+
+function signUp(e: Event) {
+  const formData = new FormData(e.currentTarget as HTMLFormElement);
+  const name = formData.get('name') as string;
+
+  if (!name) {
+    error.value = 'Name is required';
+    return;
+  }
+  e.preventDefault();
+  error.value = undefined;
+  auth.value.signUp(name).catch((e) => {
+    error.value = e.message;
+  });
+}
+
+function logIn(e: Event) {
+  error.value = undefined;
+  e.preventDefault();
+  auth.value.logIn().catch((e) => {
+    error.value = e.message;
+  });
+}
+```
+</CodeGroup>
+</ContentByFramework>
+
+When a user signs up with one of the auth methods we upgrade the current anonymous account to an authenticated account by storing the account's secret keys in the auth method.
+
+<ContentByFramework framework={["react"]}>
+To check if the user has registered you can use the new `useIsAuthenticated` hook:
+<CodeGroup>
+{/* prettier-ignore */}
+```tsx
+export function AuthButton() {
+  const isAuthenticated = useIsAuthenticated();
+  const { logOut } = useAccount();
+  const [open, setOpen] = useState(false);
+
+  if (isAuthenticated) {
+    return (
+      <Button
+        variant="outline"
+        onClick={logOut}
+      >
+        Sign out
+      </Button>
+    );
+  }
+
+  return (
+    <>
+      <Button onClick={() => setOpen(true)}>
+        Sign up
+      </Button>
+      <AuthModal open={open} onOpenChange={setOpen} />
+    </>
+  );
+}
+```
+</CodeGroup>
+</ContentByFramework>
+<ContentByFramework framework={["react-native"]}>
+To check if the user has registered you can use the new `useIsAuthenticated` hook:
+<CodeGroup>
+{/* prettier-ignore */}
+```tsx
+export function AuthButton() {
+  const isAuthenticated = useIsAuthenticated();
+  const { logOut } = useAccount();
+  const [open, setOpen] = useState(false);
+
+  if (isAuthenticated) {
+    return (
+      <Button
+        variant="outline"
+        onPress={logOut}
+      >
+        Sign out
+      </Button>
+    );
+  }
+
+  return (
+    <>
+      <Button onPress={() => setOpen(true)}>
+        Sign up
+      </Button>
+      <AuthModal open={open} onOpenChange={setOpen} />
+    </>
+  );
+}
+```
+</CodeGroup>
+</ContentByFramework>
+
+<ContentByFramework framework={["react"]}>
+If you do want to require your users to register before using your app, you can do it by moving the auth code outside of your app and conditionally rendering your app as a child -- or apply this pattern for specific parts of the app you'd like to gate behind authentication.
+
+Our provided "Basic UIs" for the different auth methods render their children conditionally by default, so you can either nest them in your app without children, or nest your app or gated parts of your app inside *them*, depending on the desired behavior.
+<CodeGroup>
+{/* prettier-ignore */}
+```tsx
+import { JazzProvider, PasskeyAuthBasicUI } from "jazz-react";
+
+ReactDOM.createRoot(document.getElementById("root")!).render(
+    <JazzProvider
+      sync={{ peer: "wss://cloud.jazz.tools/?key=you@example.com" }}
+    >
+      <PasskeyAuthBasicUI appName="My super-cool web app">
+        <App />
+      </PasskeyAuthBasicUI>
+    </JazzProvider>
+);
+```
+</CodeGroup>
+</ContentByFramework>
+
+For the changes related to the specific auth providers see the updated [authentication docs](/docs/key-features/authentication/overview).
+
+## Local-only mode
+
+If you are ok with data not being persisted on the sync server for anonymous users, you can now set your app to local-only depending on the user's authentication state.
+
+With `sync.when` set to `"signedUp"` the app will work in local-only mode when the user is anonymous and unlock the multiplayer/multi-device features and cloud persistence when they sign up:
+<CodeGroup>
+```tsx
+<JazzProvider
+  sync={{
+    peer: `wss://cloud.jazz.tools/?key=${apiKey}`,
+     // This makes the app work in local mode when the user is anonymous
+    when: "signedUp",
+  }}
+>
+  <App />
+</JazzProvider>
+```
+</CodeGroup>
+
+You can control when Jazz will sync by switching the `when` config to `"always"` or `"never"`.
+
+## Improvements on the loading APIs
+
+Before 0.10.0 `ensureLoaded` was returning a nullable value forcing the Typescript code to always include null checks:
+<CodeGroup>
+```ts
+export async function updateActiveTrack(track: MusicTrack) { // No need to pass the account
+  const me = await MusicaAccount.getMe().ensureLoaded({
+    root: {},
+  });
+
+  if (!me) { // Technically can never happen
+    throw new Error("User not found");
+  }
+
+  me.root.activeTrack = track;
+}
+```
+</CodeGroup>
+
+Now `ensureLoaded` always returns a value, making it's usage leaner:
+<CodeGroup>
+```ts
+export async function updateActiveTrack(track: MusicTrack) { // No need to pass the account
+  const { root } = await MusicaAccount.getMe().ensureLoaded({
+    root: {},
+  });
+
+  // Null checks are no more required
+  root.activeTrack = track;
+}
+```
+</CodeGroup>
+
+It will throw if the value is not found, which can happen if the user tries to resolve a value that is not available.
+
+`useCoState` now returns `null` if the value is not found, making it now possible to check against not-found values:
+<CodeGroup>
+```ts
+const value = useCoState(MusicTrack, id, {});
+
+if (value === null) {
+  return <div>Track not found</div>;
+}
+```
+</CodeGroup>
+
+## Jazz Workers on native WebSockets
+
+We have removed the dependency on `ws` and switched to the native WebSocket API for Jazz Workers.
+
+This improves the compatibility with a wider set of Javascript runtimes adding drop-in support for Deno, Bun, Browsers and Cloudflare Durable Objects.
+
+If you are using a Node.js version lower than 22 you will need to install the `ws` package and provide the WebSocket constructor:
+
+<CodeGroup>
+```ts
+import { WebSocket } from "ws";
+import { startWorker } from "jazz-nodejs";
+
+const { worker } = await startWorker({
+  WebSocket,
+});
+```
+</CodeGroup>
+
+## Group inheritance with role mapping
+You can override the inherited role by passing a second argument to `extend`.
+
+This can be used to give users limited access to a child group:
+<CodeGroup>
+```ts
+const organization = Group.create();
+const billing = Group.create();
+
+billing.extend(organization, "reader");
+```
+</CodeGroup>
+
+This way the members of the organization can only read the billing data, even if they are admins in the organization group.
+
+More about the group inheritance can be found in the [dedicated docs page](/docs/permissions-and-sharing/cascading-permissions).

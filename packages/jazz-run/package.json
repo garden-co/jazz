@@ -3,13 +3,24 @@
   "bin": "./dist/index.js",
   "type": "module",
   "license": "MIT",
-  "version": "0.8.36",
+  "version": "0.18.31",
+  "exports": {
+    "./startSyncServer": {
+      "types": "./dist/startSyncServer.d.ts",
+      "default": "./dist/startSyncServer.js"
+    },
+    "./createWorkerAccount": {
+      "types": "./dist/createWorkerAccount.d.ts",
+      "default": "./dist/createWorkerAccount.js"
+    }
+  },
   "scripts": {
     "format-and-lint": "biome check .",
     "format-and-lint:fix": "biome check . --write",
     "build": "rm -rf ./dist && tsc --sourceMap --outDir dist && chmod +x ./dist/index.js",
-    "build-and-run": "pnpm turbo build && ./dist/index.js sync --in-memory",
-    "prepublishOnly": "npm run build"
+    "test": "vitest --run --root ../../ --project jazz-run",
+    "dev": "tsc --watch --sourceMap --outDir dist",
+    "build-and-run": "pnpm turbo build && ./dist/index.js sync --in-memory"
   },
   "dependencies": {
     "@effect/cli": "^0.41.2",
@@ -18,15 +29,16 @@
     "@effect/printer-ansi": "^0.34.5",
     "@effect/schema": "^0.71.1",
     "@effect/typeclass": "^0.25.5",
-    "cojson": "workspace:0.8.36",
-    "cojson-storage-sqlite": "workspace:0.8.36",
-    "cojson-transport-ws": "workspace:0.8.36",
+    "cojson": "workspace:0.18.31",
+    "cojson-storage-sqlite": "workspace:0.18.31",
+    "cojson-transport-ws": "workspace:0.18.31",
     "effect": "^3.6.5",
-    "jazz-tools": "workspace:0.8.36",
+    "jazz-tools": "workspace:0.18.31",
+    "jazz-webhook": "workspace:0.18.31",
     "ws": "^8.14.2"
   },
   "devDependencies": {
     "@types/ws": "8.5.10",
-    "typescript": "^5.3.3"
+    "typescript": "catalog:default"
   }
 }

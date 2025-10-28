@@ -1,4 +1,4 @@
-import { Account, CoList, CoMap, FileStream, Profile, co } from "jazz-tools";
+import { co, Group, z } from "jazz-tools";
 
 /** Walkthrough: Defining the data model with CoJSON
  *
@@ -10,23 +10,23 @@ import { Account, CoList, CoMap, FileStream, Profile, co } from "jazz-tools";
  *  - other CoValues
  **/
 
-export class MusicTrack extends CoMap {
+export const MusicTrackWaveform = co.map({
+  data: z.array(z.number()),
+});
+export type MusicTrackWaveform = co.loaded<typeof MusicTrackWaveform>;
+
+export const MusicTrack = co.map({
   /**
-   *  Attributes are defined as class properties
-   *  and you can get the types from the `co` module
-   *  here we are defining the title and duration for our music track
-   *
-   *  Tip: try to follow the co.string defintion to discover the other available primitives!
+   *  Attributes are defined using zod schemas
    */
-  title = co.string;
-  duration = co.number;
+  title: z.string(),
+  duration: z.number(),
 
   /**
-   * With `co.ref` you can define relations between your coValues.
-   *
-   * Attributes are required by default unless you mark them as optional.
+   * You can define relations between coValues using the other CoValue schema
+   * You can mark them optional using z.optional()
    */
-  sourceTrack = co.optional.ref(MusicTrack);
+  waveform: MusicTrackWaveform,
 
   /**
    * In Jazz you can upload files using FileStream.
@@ -34,84 +34,88 @@ export class MusicTrack extends CoMap {
    * As for any other coValue the music files we put inside FileStream
    * is available offline and end-to-end encrypted 😉
    */
-  file = co.ref(FileStream);
-  waveform = co.ref(MusicTrackWaveform);
-}
+  file: co.fileStream(),
 
-export class MusicTrackWaveform extends CoMap {
-  data = co.json<number[]>();
-}
+  isExampleTrack: z.optional(z.boolean()),
+});
+export type MusicTrack = co.loaded<typeof MusicTrack>;
 
-/**
- * CoList is the collaborative version of Array
- *
- * They are strongly typed and accept only the type you define here
- * as "CoList.Of" argument
- */
-export class ListOfTracks extends CoList.Of(co.ref(MusicTrack)) {}
-
-export class Playlist extends CoMap {
-  title = co.string;
-  tracks = co.ref(ListOfTracks);
-}
-
-export class ListOfPlaylists extends CoList.Of(co.ref(Playlist)) {}
-
+export const Playlist = co.map({
+  title: z.string(),
+  tracks: co.list(MusicTrack), // CoList is the collaborative version of Array
+});
+export type Playlist = co.loaded<typeof Playlist>;
 /** The account root is an app-specific per-user private `CoMap`
  *  where you can store top-level objects for that user */
-export class MusicaAccountRoot extends CoMap {
+export const MusicaAccountRoot = co.map({
   // The root playlist works as container for the tracks that
   // the user has uploaded
-  rootPlaylist = co.ref(Playlist);
+  rootPlaylist: Playlist,
   // Here we store the list of playlists that the user has created
   // or that has been invited to
-  playlists = co.ref(ListOfPlaylists);
+  playlists: co.list(Playlist),
   // We store the active track and playlist as coValue here
   // so when the user reloads the page can see the last played
   // track and playlist
   // You can also add the position in time if you want make it possible
   // to resume the song
-  activeTrack = co.optional.ref(MusicTrack);
-  activePlaylist = co.ref(Playlist);
+  activeTrack: co.optional(MusicTrack),
+  activePlaylist: Playlist,
 
-  exampleDataLoaded = co.optional.boolean;
-}
+  exampleDataLoaded: z.optional(z.boolean()),
+  accountSetupCompleted: z.optional(z.boolean()),
+});
+export type MusicaAccountRoot = co.loaded<typeof MusicaAccountRoot>;
 
-export class MusicaAccount extends Account {
-  profile = co.ref(Profile);
-  root = co.ref(MusicaAccountRoot);
+export const MusicaAccountProfile = co
+  .profile({
+    avatar: co.optional(co.image()),
+  })
+  .withMigration((profile) => {
+    if (profile.$jazz.owner.getRoleOf("everyone") !== "reader") {
+      profile.$jazz.owner.addMember("everyone", "reader");
+    }
+  });
+export type MusicaAccountProfile = co.loaded<typeof MusicaAccountProfile>;
 
-  /**
-   *  The account migration is run on account creation and on every log-in.
-   *  You can use it to set up the account root and any other initial CoValues you need.
-   */
-  async migrate(creationProps?: { name: string }) {
-    super.migrate(creationProps);
+export const MusicaAccount = co
+  .account({
+    /** the default user profile with a name */
+    profile: MusicaAccountProfile,
+    root: MusicaAccountRoot,
+  })
+  .withMigration(async (account) => {
+    /**
+     *  The account migration is run on account creation and on every log-in.
+     *  You can use it to set up the account root and any other initial CoValues you need.
+     */
+    if (!account.$jazz.has("root")) {
+      const rootPlaylist = Playlist.create({
+        tracks: [],
+        title: "",
+      });
 
-    if (!this._refs.root) {
-      const ownership = { owner: this };
+      account.$jazz.set("root", {
+        rootPlaylist,
+        playlists: [],
+        activeTrack: undefined,
+        activePlaylist: rootPlaylist,
+        exampleDataLoaded: false,
+      });
+    }
 
-      const tracks = ListOfTracks.create([], ownership);
-      const rootPlaylist = Playlist.create(
-        {
-          tracks,
-          title: "",
-        },
-        ownership,
-      );
-
-      this.root = MusicaAccountRoot.create(
-        {
-          rootPlaylist,
-          playlists: ListOfPlaylists.create([], ownership),
-          activeTrack: null,
-          activePlaylist: rootPlaylist,
-          exampleDataLoaded: false,
-        },
-        ownership,
+    if (!account.$jazz.has("profile")) {
+      account.$jazz.set(
+        "profile",
+        MusicaAccountProfile.create(
+          {
+            name: "",
+          },
+          Group.create().makePublic(),
+        ),
       );
     }
-  }
-}
+  });
+export type MusicaAccount = co.loaded<typeof MusicaAccount>;
 
 /** Walkthrough: Continue with ./2_main.tsx */

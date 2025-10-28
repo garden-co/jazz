@@ -1,13 +1,13 @@
 {
   "name": "cojson-transport-ws",
   "type": "module",
-  "version": "0.8.36",
+  "version": "0.18.31",
   "main": "dist/index.js",
-  "types": "src/index.ts",
+  "types": "dist/index.d.ts",
   "license": "MIT",
   "dependencies": {
-    "cojson": "workspace:0.8.36",
-    "typescript": "^5.3.3"
+    "@opentelemetry/api": "^1.9.0",
+    "cojson": "workspace:*"
   },
   "scripts": {
     "dev": "tsc --watch --sourceMap --outDir dist",
@@ -15,10 +15,12 @@
     "format-and-lint:fix": "biome check . --write",
     "test": "vitest --run --root ../../ --project cojson-transport-ws",
     "test:watch": "vitest --watch --root ../../ --project cojson-transport-ws",
-    "build": "rm -rf ./dist && tsc --sourceMap --outDir dist",
-    "prepublishOnly": "npm run build"
+    "build": "rm -rf ./dist && tsc --sourceMap --outDir dist"
   },
   "devDependencies": {
-    "@types/ws": "8.5.10"
+    "@opentelemetry/sdk-metrics": "^2.0.0",
+    "@types/ws": "8.5.10",
+    "typescript": "catalog:default",
+    "ws": "^8.14.2"
   }
 }

@@ -1,33 +1,35 @@
 import { MusicTrack, Playlist } from "@/1_schema";
 import { usePlayMedia } from "@/lib/audio/usePlayMedia";
 import { usePlayState } from "@/lib/audio/usePlayState";
-import { FileStream, ID } from "jazz-tools";
 import { useRef, useState } from "react";
-import { useAccount } from "./2_main";
 import { updateActivePlaylist, updateActiveTrack } from "./4_actions";
+import { useAudioManager } from "./lib/audio/AudioManager";
 import { getNextTrack, getPrevTrack } from "./lib/getters";
+import { useAccountSelector } from "@/components/AccountProvider.tsx";
 
 export function useMediaPlayer() {
-  const { me } = useAccount();
-
+  const audioManager = useAudioManager();
   const playState = usePlayState();
   const playMedia = usePlayMedia();
 
-  const [loading, setLoading] = useState<ID<MusicTrack> | null>(null);
+  const [loading, setLoading] = useState<string | null>(null);
 
-  const activeTrackId = me?.root?._refs.activeTrack?.id;
-
+  const activeTrackId = useAccountSelector({
+    select: (me) => me.root.$jazz.refs.activeTrack?.id,
+  });
   // Reference used to avoid out-of-order track loads
-  const lastLoadedTrackId = useRef<ID<MusicTrack> | null>(null);
+  const lastLoadedTrackId = useRef<string | null>(null);
 
-  async function loadTrack(track: MusicTrack) {
-    if (!me.root) return;
+  async function loadTrack(track: MusicTrack, autoPlay = true) {
+    lastLoadedTrackId.current = track.$jazz.id;
+    audioManager.unloadCurrentAudio();
 
-    lastLoadedTrackId.current = track.id;
+    setLoading(track.$jazz.id);
+    updateActiveTrack(track);
 
-    setLoading(track.id);
-
-    const file = await FileStream.loadAsBlob(track._refs.file.id, me);
+    const file = await MusicTrack.shape.file.loadAsBlob(
+      track.$jazz.refs.file!.id,
+    ); // TODO: see if we can avoid !
 
     if (!file) {
       setLoading(null);
@@ -36,32 +38,26 @@ export function useMediaPlayer() {
 
     // Check if another track has been loaded during
     // the file download
-    if (lastLoadedTrackId.current !== track.id) {
+    if (lastLoadedTrackId.current !== track.$jazz.id) {
       return;
     }
 
-    updateActiveTrack(track, me);
-
-    await playMedia(file);
+    await playMedia(file, autoPlay);
 
     setLoading(null);
   }
 
   async function playNextTrack() {
-    if (!me?.root) return;
-
-    const track = await getNextTrack(me);
+    const track = await getNextTrack();
 
     if (track) {
-      updateActiveTrack(track, me);
+      updateActiveTrack(track);
       await loadTrack(track);
     }
   }
 
   async function playPrevTrack() {
-    if (!me?.root) return;
-
-    const track = await getPrevTrack(me);
+    const track = await getPrevTrack();
 
     if (track) {
       await loadTrack(track);
@@ -69,14 +65,15 @@ export function useMediaPlayer() {
   }
 
   async function setActiveTrack(track: MusicTrack, playlist?: Playlist) {
-    if (!me?.root) return;
-
-    if (activeTrackId === track.id && lastLoadedTrackId.current !== null) {
+    if (
+      activeTrackId === track.$jazz.id &&
+      lastLoadedTrackId.current !== null
+    ) {
       playState.toggle();
       return;
     }
 
-    updateActivePlaylist(playlist!, me);
+    updateActivePlaylist(playlist);
 
     await loadTrack(track);
 
@@ -91,6 +88,7 @@ export function useMediaPlayer() {
     playNextTrack,
     playPrevTrack,
     loading,
+    loadTrack,
   };
 }
 

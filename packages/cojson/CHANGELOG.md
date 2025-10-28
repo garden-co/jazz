@@ -1,5 +1,921 @@
 # cojson
 
+## 0.18.31
+
+### Patch Changes
+
+- 7c2b7b8: Bugfix: diable the progressive child rotation
+  - cojson-core-wasm@0.18.31
+  - cojson-core-napi@0.18.31
+
+## 0.18.30
+
+### Patch Changes
+
+- ad83da2: Optimize the parsing of large CoValues by switching to stages containers
+- d08b7e2: feat: introduced new "manager" role who can invite and remove members, and being removed by admins.
+  - cojson-core-wasm@0.18.30
+  - cojson-core-napi@0.18.30
+
+## 0.18.29
+
+### Patch Changes
+
+- cojson-core-wasm@0.18.29
+- cojson-core-napi@0.18.29
+
+## 0.18.28
+
+### Patch Changes
+
+- e8880dc: Fix write permissions checks on merged transactions by checking membership on merge time instead of original transaction time
+- d83b5e3: Allow the creation of branch pointers to accounts with reader access
+- 5320349: Fix concurrent loading from storage
+  - cojson-core-wasm@0.18.28
+  - cojson-core-napi@0.18.28
+
+## 0.18.27
+
+### Patch Changes
+
+- cojson-core-wasm@0.18.27
+- cojson-core-napi@0.18.27
+
+## 0.18.26
+
+### Patch Changes
+
+- f956cd3: Fix validation for self-revocation in groups. Now self-revocation will be considered as valid also by other accounts.
+  - cojson-core-wasm@0.18.26
+  - cojson-core-napi@0.18.26
+
+## 0.18.25
+
+### Patch Changes
+
+- 4036737: "peersToLoadFrom" renamed to only "peers"
+  - cojson-core-wasm@0.18.25
+  - cojson-core-napi@0.18.25
+
+## 0.18.24
+
+### Patch Changes
+
+- b09785e: fix: reveal child groups' writeOnly keys to parent groups
+  - cojson-core-wasm@0.18.24
+  - cojson-core-napi@0.18.24
+
+## 0.18.23
+
+### Patch Changes
+
+- cojson-core-wasm@0.18.23
+- cojson-core-napi@0.18.23
+
+## 0.18.22
+
+### Patch Changes
+
+- 1e20db6: Added cojson-core-napi
+- Updated dependencies [1e20db6]
+  - cojson-core-napi@0.18.22
+  - cojson-core-wasm@0.18.22
+
+## 0.18.21
+
+### Patch Changes
+
+- cojson-core-wasm@0.18.21
+
+## 0.18.20
+
+### Patch Changes
+
+- e75b3d6: Stop new content processing until all the dependencies are available, preventing inconsistent statuses on sync.
+
+  This targets a bug that would show up only after we roll out the sync server sharding features.
+
+- ecf4967: Add garbageCollectGroups option to enableGarbageCollector
+- d0e2210: Batch subscribe updates during the applyDiff execution
+  - cojson-core-wasm@0.18.20
+
+## 0.18.19
+
+### Patch Changes
+
+- cojson-core-wasm@0.18.19
+
+## 0.18.18
+
+### Patch Changes
+
+- ed7e353: Add batching on per-coValue updates when the update doesn't come from a local change
+  - cojson-core-wasm@0.18.18
+
+## 0.18.17
+
+### Patch Changes
+
+- 925da72: Fix unavailable state emitted when a load operation falls back from storage to network
+  - cojson-core-wasm@0.18.17
+
+## 0.18.16
+
+### Patch Changes
+
+- Updated dependencies [629c275]
+  - cojson-core-wasm@0.18.16
+
+## 0.18.15
+
+### Patch Changes
+
+- a584ab3: Add WasmCrypto support for Cloudflare Workers and edge runtimes by importing `jazz-tools/load-edge-wasm`.
+
+  - Enable WasmCrypto functionality by initializing the WebAssembly environment with the import: `import "jazz-tools/load-edge-wasm"` in edge runtimes.
+  - Guarantee compatibility across Cloudflare Workers and other edge runtime environments.
+
+- Updated dependencies [a584ab3]
+  - cojson-core-wasm@0.18.15
+
+## 0.18.14
+
+### Patch Changes
+
+- cojson-core-wasm@0.18.14
+
+## 0.18.13
+
+### Patch Changes
+
+- 48837f2: Validate incoming id/header to ensure that the id matches the header hash
+- 2ddf4d9: Introducing version control APIs, unstable_branch and unstable_merge
+
+  Flagged as unstable because branch & merge scope & propagation needs to be validated.
+
+  - cojson-core-wasm@0.18.13
+
+## 0.18.12
+
+### Patch Changes
+
+- cojson-core-wasm@0.18.12
+
+## 0.18.11
+
+### Patch Changes
+
+- a4a9a1e: Fix CoPlainText applyDiff chunking to ensure we fit in the TRANSACTION_CONFIG.MAX_RECOMMENDED_TX_SIZE for each transaction
+  - cojson-core-wasm@0.18.11
+
+## 0.18.10
+
+### Patch Changes
+
+- cojson-core-wasm@0.18.10
+
+## 0.18.9
+
+### Patch Changes
+
+- f058875: Add removePeer() method to SyncManager
+  - cojson-core-wasm@0.18.9
+
+## 0.18.8
+
+### Patch Changes
+
+- 9a4caf2: Ability for SyncManager to ignore unknown covalues arriving from server peers
+  - cojson-core-wasm@0.18.8
+
+## 0.18.7
+
+### Patch Changes
+
+- c2d8bf7: Avoid greedily sending covalue dependencies to server peers
+- dccb464: Optimize seal and unseal in PureJSCrypto by caching the shared key generation
+- a3cd9c8: Add lastUpdatedAt & createdAt properties to $jazz in all the coValue types
+- e8e7bf8: Enforce a 1MB size limit for transactions
+- 51d3558: Export the highest weighted random server peer selector
+  - cojson-core-wasm@0.18.7
+
+## 0.18.6
+
+### Patch Changes
+
+- 9e792c7: Fixed the merge operation for RawCoList and RawCoPlainText and done a small performance optimization on RawCoList
+  - cojson-core-wasm@0.18.6
+
+## 0.18.5
+
+### Patch Changes
+
+- cojson-core-wasm@0.18.5
+
+## 0.18.4
+
+### Patch Changes
+
+- Updated dependencies [e5283c2]
+  - cojson-core-wasm@0.18.4
+
+## 0.18.3
+
+### Patch Changes
+
+- cojson-core-wasm@0.18.3
+
+## 0.18.2
+
+### Patch Changes
+
+- 82ba2dd: Add basic branching system for single CoValues with createBranch, checkoutBranch, and mergeBranch
+- 01f4889: Fix self-revoke check to correctly validate against the author of the change
+  - cojson-core-wasm@0.18.2
+
+## 0.18.1
+
+### Patch Changes
+
+- cojson-core-wasm@0.18.1
+
+## 0.18.0
+
+### Minor Changes
+
+- f263856: Add `$jazz` field to CoValues:
+  - This field contains Jazz methods that cluttered CoValues' API, as well as Jazz internal properties. This field is not enumerable, to allow CoValues to behave similarly to JSON objects.
+  - Added a `$jazz.set` method to update a CoValue's fields. When updating collaborative fields, you can pass in JSON objects instead of CoValues and Jazz will create
+    the CoValues automatically (similarly to CoValue `create` methods).
+  - All CoMap methods have been moved into `$jazz`, to allow defining any arbitrary key in the CoMap (except for `$jazz`) without conflicts.
+    - For CoMaps created with `co.map`, fields are now `readonly` to prevent setting properties directly. Use the `$jazz.set` method instead.
+    - CoMaps created with class schemas don't get type errors on direct property assignments, but they get a runtime errors prompting indicating to use `$jazz.set`.
+    - the `delete` operator can no longer be used to delete CoRecord properties. Use `$jazz.delete` instead.
+  - CoList's array-mutation methods have been moved into `$jazz`, in order to prevent using methods
+    - CoLists are now readonly arrays. Trying to use any mutation method yields a type error.
+    - `$jazz.set` can be used in place of direct element assignments.
+    - Added two new utility methods: `$jazz.remove` and `$jazz.retain`. They allow editing a CoList in-place with a simpler API than `$jazz.splice`.
+    - `sort`, `reverse`, `fill` and `copyWithin` have been deprecated, given that they could behave inconsistently with CoLists. `$jazz` replacements may be introduced
+      in future releases.
+  - `.$jazz.owner` now always returns a Group (instead of a Group or an Account). We'll be migrating away of having Accounts as CoValue owners in future releases.
+  - Removed `castAs`, since it's an inherently unsafe operation that bypassed typechecking and enabled using CoValues in unsupported ways.
+  - Removed the `id` and `_type` fields from `toJSON()`'s output in Account, CoMap, CoFeed & FileStream, to make CoValues behave more similarly to JSON objects.
+  - Removed the `root` and `profile` fields from Group.
+
+### Patch Changes
+
+- b709494: Allow adding server peers without reconciliation
+  - cojson-core-wasm@0.18.0
+
+## 0.17.14
+
+### Patch Changes
+
+- 1094b7c: Prevent adding and removing members from Account owners.
+- 6378ad5: Expose a server peer selector that implements the Highest Weighted Random algorithm.
+  - cojson-core-wasm@0.17.14
+
+## 0.17.13
+
+### Patch Changes
+
+- 7dc3160: Apply `serverPeerSelector` in all the peers getters
+- 474881d: Add support for meta field in transactions and ignore all unkonwn meta when getting valid transactions
+  - cojson-core-wasm@0.17.13
+
+## 0.17.12
+
+### Patch Changes
+
+- c2daf3e: Don't greedily send dependencies to servers in "known" replies
+- 72a63bf: Ability to filter getServerPeers() result based on covalue id
+- 234bf91: Correctly wait for updated CoValues when handling HTTP requests on server workers before sending the response
+  - cojson-core-wasm@0.17.12
+
+## 0.17.11
+
+### Patch Changes
+
+- 68b2f37: Only request covalue dependencies when transaction verification is enabled
+- 257ded3: Fix admin permission downgrade to writeOnly
+  - Allow admin to self-downgrade to writeOnly
+  - Prevent admin from downgrading other admins to writeOnly
+- e301ad6: Skip agent resolution when skipVerify is true
+  - cojson-core-wasm@0.17.11
+
+## 0.17.10
+
+### Patch Changes
+
+- c55297c: Move the session log management into WASM
+  - cojson-core-wasm@0.17.10
+
+## 0.17.9
+
+### Patch Changes
+
+- 7586c3b: Adds disableTransactionVerification() method to SyncManager
+
+## 0.17.8
+
+## 0.17.7
+
+## 0.17.6
+
+## 0.17.5
+
+### Patch Changes
+
+- 71c1411: Removed some unnecessary content messages sent after a local transaction when sending a value as dependency before the ack response
+- 2d11d44: Make the CoValueCore.unmount function detach the CoValue from LocalNode
+
+## 0.17.4
+
+## 0.17.3
+
+### Patch Changes
+
+- f0c73d9: Allow storing empty content with header in handleNewContent
+
+## 0.17.2
+
+### Patch Changes
+
+- 5b2b16a: Filter invalid sessions when storing a content message
+
+## 0.17.1
+
+### Patch Changes
+
+- 2fd88b9: Add debug info to sync correction errors
+
+## 0.17.0
+
+## 0.16.6
+
+### Patch Changes
+
+- 67e0968: Fix content streaming chunking, now chunks should be splitted always respecting the MAX_RECOMMENDED_TX_SIZE
+- ce9ca54: Chunk CoPlainText content to avoid generating bg messages when the user past a megabytes of text
+- 4b99ff1: Add a multi-storage scheduler to avoid conflicting store operations when having multiple storage instances open on the same database
+- ac5d20d: Add ingress and egress metering
+- 9bf7946: Added a TTL based optional garbage collection for covalues
+
+## 0.16.5
+
+### Patch Changes
+
+- 3cd1586: Makes the key rotation not fail when child groups are unavailable or their readkey is not accessible.
+
+  Also changes the Group.removeMember method to not return a Promise, because:
+
+  - All the locally available child groups are rotated immediately
+  - All the remote child groups are rotated in background, but since they are not locally available the user won't need the new key immediately
+
+- 267f689: Groups: fix the readkey not being revealed to everyone when doing a key rotation
+
+## 0.16.4
+
+### Patch Changes
+
+- f9d538f: Fix the error raised when extending a group without having child groups loaded
+- 802b5a3: Refactor local updates sync to ensure that the changes are synced respecting the insertion order
+
+## 0.16.3
+
+## 0.16.2
+
+## 0.16.1
+
+## 0.16.0
+
+### Minor Changes
+
+- c09dcdf: Change the root attribute to be public on Account. The root content will still follow the visiblity rules specified in their group.
+
+  Existing accounts will be gradually migrated as they are loaded.
+
+## 0.15.16
+
+## 0.15.15
+
+## 0.15.14
+
+### Patch Changes
+
+- 70ce7c5: Introduce the persistent peers. Used to mark the WebSocket connections to the server as persistent, and wait for reconnection before failing load.
+
+## 0.15.13
+
+## 0.15.12
+
+## 0.15.11
+
+## 0.15.10
+
+## 0.15.9
+
+### Patch Changes
+
+- 27b4837: Wait for the full streaming before return values in load and subscribe
+- 2776263: - Refactored the Peer incoming/outgoing channels to be syncronous
+  - Changed the storage communication to work with an explicit API and removed the storage role on peers
+  - Added scheduling of the incoming messages using a round-robin over the peers and a timer to do collaborative scheduling with the event loop
+  - Added expectContentUntil on the content messages to optimize content syncing with servers during streaming
+
+## 0.15.8
+
+## 0.15.7
+
+## 0.15.6
+
+## 0.15.5
+
+## 0.15.4
+
+### Patch Changes
+
+- 277e4d4: Fix sync with circular deps
+
+## 0.15.3
+
+## 0.15.2
+
+### Patch Changes
+
+- 4b964ed: Add debug code on transactions parsing
+
+## 0.15.1
+
+### Patch Changes
+
+- b110f00: Added `CoMap.upsertUnique` & `CoMap.loadUnique` methods (deprecating `CoMap.findUnique`) and added `skipRetry` option to `CoMap.load`
+
+## 0.15.0
+
+## 0.14.28
+
+## 0.14.27
+
+## 0.14.26
+
+### Patch Changes
+
+- e74a077: Improve the missing dependencies recovery & management
+
+## 0.14.25
+
+## 0.14.24
+
+## 0.14.23
+
+### Patch Changes
+
+- 1ca9299: Adds grapheme split helpers for coText
+
+## 0.14.22
+
+### Patch Changes
+
+- 57fb69f: fix: clarify `Group.addMember` error message when attempting to set roles with insufficient permissions
+
+## 0.14.21
+
+### Patch Changes
+
+- c3d8779: Fix setting latestTxMadeAt when the transaction is empty. (can happen when calling assign with an empty object)
+
+## 0.14.20
+
+## 0.14.19
+
+## 0.14.18
+
+### Patch Changes
+
+- 0d5ee3e: Enable react-native-quick-crypto xsalsa20 accelerated algorithm for encrypt/decrypt functions
+
+## 0.14.16
+
+### Patch Changes
+
+- 5e253cc: Version bump
+
+## 0.14.15
+
+### Patch Changes
+
+- 23daa7c: Align the processing of the group dependencies between LocalNode and Storage.
+
+## 0.14.1
+
+### Patch Changes
+
+- c8b33ad: Force sync of the group after acceptInvite
+
+## 0.14.0
+
+### Minor Changes
+
+- 5835ed1: Type-level changes to support Zod schemas in jazz-tools
+
+## 0.13.31
+
+### Patch Changes
+
+- d63716a: Fix removing members when the admin doesn't have access to the parent group readkeys
+- d5edad7: Group invites: restore support for role upgrades and inviting revoked members
+
+## 0.13.30
+
+### Patch Changes
+
+- 07dd2c5: Restore the longer timeout for the storage loading
+
+## 0.13.29
+
+### Patch Changes
+
+- eef1a5d: Load: increase the coValue retry delay and stop waiting as soon as the value becomes available
+- 191ae38: Upgrade @noble/ciphers to 1.3.0, @noble/curves to 1.9.1 and @noble/hashes to 1.8.0
+- daee7b9: Correctly rotate the readKey when downgrading a member to writeOnly
+
+## 0.13.28
+
+### Patch Changes
+
+- e7ccb2c: Recover missing dependencies when getting new content
+
+## 0.13.27
+
+### Patch Changes
+
+- 6357052: Allow accounts to self-remove from groups
+
+## 0.13.25
+
+### Patch Changes
+
+- a846e07: Block load of invalid ids on a lower level and do not break sync when getting invalid ids
+
+## 0.13.23
+
+### Patch Changes
+
+- 6b781cf: Add getBinaryStreamInfo to RawBinaryCoStreamView to make it possible to retrieve file info without processing all the chunks
+
+## 0.13.21
+
+### Patch Changes
+
+- e14e61f: Optimized the acceptInvite flow
+
+## 0.13.20
+
+### Patch Changes
+
+- adfc9a6: Make waitForSync work on storage peers by handling optimistic/known states
+- 1389207: Removed throw error when the profile is unavailable after a login
+- d6e143e: Wait for storage sync before resolving new account creation
+- 3e6229d: Skip closed and unsubscribed peers when calling waitForSync
+
+## 0.13.18
+
+### Patch Changes
+
+- 9089252: Optimized and simplified LocalNode account creation flow
+- b470f63: Optimize the sync protocol to reduce the amount of messages exchanged during the applications bootstrap
+- 66373ba: Fix an error when trying to call sendNewContentIncludingDependencies without all the dependencies loaded
+- f24cad1: Skip self-sync on storage peers when getting new content
+
+## 0.13.17
+
+### Patch Changes
+
+- 9fb98e2: Resolve CoValue load as soon as the core is available
+- 0b89fad: Re-introduce incremental processing on RawCoList
+
+## 0.13.16
+
+### Patch Changes
+
+- c6fb8dc: Handle null values in msg.id
+
+## 0.13.15
+
+### Patch Changes
+
+- c712ef2: Revert the RawCoList incremental processing
+
+## 0.13.14
+
+### Patch Changes
+
+- 5c2c7d4: Make the incoming messages handling in the sync manager syncronous
+
+## 0.13.13
+
+### Patch Changes
+
+- ec9cb40: Remove .every() call on iterator to fix compat issues with React Native
+
+## 0.13.12
+
+### Patch Changes
+
+- 65719f2: Simplified CoValue loading state management
+
+## 0.13.11
+
+### Patch Changes
+
+- 17273a6: Adds locale support to Segmenter for CoPlainText
+  Adds insertAfter to CoPlainText
+- 3396ed4: Simplify unknown value management on handleNewContent
+- 267ea4c: Fix max recursion error happening on large colists
+
+## 0.13.10
+
+### Patch Changes
+
+- f837cfe: Fix fatal errors happening when loading a CoValueCore without having the dependencies
+
+## 0.13.7
+
+### Patch Changes
+
+- bc3d7bb: Allow to assign the writeOnly role to everyone
+- 4e9aae1: Remove risky awaits from handleSyncMessage code path
+- 21c935c: Improved the management of peer reconnection and optimized the sync messages
+- aa1c80e: feat: add transactions size histogram & loaded covalues gauges
+- 13074be: Skip loading from closed peers as early as possible
+
+## 0.13.5
+
+### Patch Changes
+
+- e090b39: Bump crypto version to remove WASM init warning
+
+## 0.13.2
+
+### Patch Changes
+
+- c551839: Add jazz.messagequeue.pushed/pulled counters, remove jazz.messagequeue.size gauge
+
+## 0.13.0
+
+### Minor Changes
+
+- bce3bcc: Version bump. Release focused on React Native.
+
+### Patch Changes
+
+- a013538: Correctly load CoValues after they are marked as unavailable and improve timeout management
+
+## 0.12.2
+
+### Patch Changes
+
+- c2f4827: StreamingHash: Remove redundant clone and skip double hash generation when creating a local transaction
+
+## 0.12.1
+
+### Patch Changes
+
+- 5a00fe0: Re-introducing linked lists on PriorityBasedMessageQueue
+
+## 0.12.0
+
+### Minor Changes
+
+- 01523dc: Check CoValue access permissions when loading
+- 01523dc: Return the EVERYONE role if the account is not direct a member of the group
+
+## 0.11.8
+
+### Patch Changes
+
+- 6c86c4f: Fix "Expected header to be sent in first message error" on sync
+- 9d0c9dc: Update @opentelemetry/api dependency
+
+## 0.11.7
+
+### Patch Changes
+
+- 2b94bc8: Performance: optimize Group.roleOf getter and made the transactions validation incremental for CoMap and CoFeed
+- 2957362: Throw an error when the user tries to load an invalid or undefined id
+
+## 0.11.6
+
+### Patch Changes
+
+- 8ed144e: Fix transaction sorting when the timestamps are equal
+
+## 0.11.5
+
+### Patch Changes
+
+- 60f5b3f: Downgrade the WasmCrypto initialization error logging to a warning
+
+## 0.11.4
+
+### Patch Changes
+
+- 7f036c1: Use PureJSCrypto as fallback when WasmCrypto fails to initialize
+
+## 0.11.3
+
+### Patch Changes
+
+- 68b0242: Improve the error logging to have more information on errors leveraging the pino err serializer
+
+## 0.11.0
+
+### Minor Changes
+
+- e22de9f: Fix roleOf resolution for "everyone"
+- 34cbdc3: Added revokeExtend method to Group
+
+### Patch Changes
+
+- b9d194a: Added getAllMemberKeysSet method on RawGroup
+  Add everyone to the possible inputs of Group.roleOf
+- a4713df: Moving to the d.ts files for the exported type definitions
+- 0f67e0a: Allow optional fields in types passed to coField.json
+
+## 0.10.15
+
+### Patch Changes
+
+- f86e278: Downgrade the permissions error logs to debug
+
+## 0.10.8
+
+### Patch Changes
+
+- 153dc99: Catch errors on CoValueCore subscribers to avoid effects on the sync
+
+## 0.10.7
+
+### Patch Changes
+
+- 0f83320: Use jazz-crypto-rs isomorphic bundle
+- 012022d: Improve error logging on sync errors
+
+## 0.10.6
+
+### Patch Changes
+
+- 5c76e37: Ports Wasm crypto functions to use exported library `jazz-crypto-rs`
+
+## 0.10.4
+
+### Patch Changes
+
+- 1af6072: Revert PriorityBasedMessageQueue to use an array-based queue
+
+## 0.10.2
+
+### Patch Changes
+
+- cae3a9e: Add debug info to load failure end missing header errors
+
+## 0.10.1
+
+### Patch Changes
+
+- 5a63cba: Crypto packages must now be imported from cojson/crypto/WasmCrypto or cojson/crypto/PureJSCrypto
+  Removed the separated dists for React Native.
+
+## 0.10.0
+
+### Minor Changes
+
+- 498954f: Introducing the new auth system!
+
+### Patch Changes
+
+- b426342: Export the coValue loading config to reduce the timeout on tests
+- 8217981: Drop node 14 polyfill for globalThis.crypto
+- ac3d9fa: Reduce the retries on coValue not found to two
+- 610543c: Add role mapping to Group.extend
+
+## 0.9.23
+
+### Patch Changes
+
+- 70c9a5d: Rotate keys before revoking access, so when admins remove themselves the keys are successfully rotated
+
+## 0.9.19
+
+### Patch Changes
+
+- 6ad0a9f: Export Json types
+
+## 0.9.18
+
+### Patch Changes
+
+- 8898b10: Export AccountRole type
+
+## 0.9.13
+
+### Patch Changes
+
+- 8d29e50: Restore the logger wrapper and adapt the API to pino
+
+## 0.9.12
+
+### Patch Changes
+
+- 15d4b2a: Revert the custom logger
+
+## 0.9.11
+
+### Patch Changes
+
+- efbf3d8: Optimize queue management
+- 5863bad: Wrap all the console logs with a logger class to make possible to customize the logger
+
+## 0.9.10
+
+### Patch Changes
+
+- 4aa377d: Handle unkown coValue content type and optimize content access
+
+## 0.9.9
+
+### Patch Changes
+
+- 8eb9247: Add CoPlainText and CoRichText covalues
+
+## 0.9.0
+
+### Patch Changes
+
+- 8eda792: Add a crypto entry to optionally import the crypto modules
+- 1ef3226: Add the assign method to RawCoMap to create bulk transactions and optimize RawCoMap init
+
+## 0.8.50
+
+### Patch Changes
+
+- 43378ef: Handle circular references in group inheritance
+
+## 0.8.49
+
+### Patch Changes
+
+- 25dfd90: Fixes the transactions collection on permissions to avoid RangeError issues
+
+## 0.8.48
+
+### Patch Changes
+
+- 10ea733: Give the ability to extend a group to accounts with reader, writer and writeOnly access level to the parent group and not only admins. The account still needs to be an admin on the child group to be able to extend it.
+
+## 0.8.45
+
+### Patch Changes
+
+- 6f0bd7f: Throw an error if an invite is created from an account owned coValue
+- fca6a0b: skip verify step when creating a new local transaction
+- 88d7d9a: Add Inbox a new experimental API to simplfy the initial handshake between accounts
+
+## 0.8.44
+
+### Patch Changes
+
+- 5d20c81: Add an internal API to disable the permission errors logs
+
+## 0.8.41
+
+### Patch Changes
+
+- 3252502: Optimize the transactions processing on CoMap and CoStream
+- 6370348: Remove @opentelemetry/api as a peer dependency and add it as a dependency
+- ac216b9: Add a new writeOnly role, to limit access only to their own changes. Useful to push objects into lists of moderated content.
+
+## 0.8.39
+
+### Patch Changes
+
+- 249eecb: Added new APIs to wait for CoValue sync
+- 3121551: Add connected peers gauge metric
+
+## 0.8.38
+
+### Patch Changes
+
+- b00ee91: Apply time travel when checking the roles on a parent group
+- f488c09: Add message queue size metrics
+
+## 0.8.37
+
+### Patch Changes
+
+- 3d9f12e: Optimize the atTime processing on CoMap
+
 ## 0.8.36
 
 ### Patch Changes
@@ -113,7 +1029,7 @@
 ### Patch Changes
 
 - c3f4e6b: Fix order of exports fields in package.json
-- d9152ed: Allow interface types as generic argument in co.json
+- d9152ed: Allow interface types as generic argument in coField.json
 
 ## 0.8.3
 

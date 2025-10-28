@@ -1,0 +1,118 @@
+import { ContentByFramework, CodeGroup } from '@/components/forMdx'
+
+# Upgrade to Jazz 0.9.0
+
+Version 0.9.0 simplifies the application setup and makes Jazz more intellisense friendly by
+replacing the `createJazzReactApp` API with top-level imports.
+
+We have also introduced some new API to make testing Jazz components a breeze. 🌬️
+
+## New provider setup
+
+The `JazzProvider` is now imported from `jazz-react` instead of `createJazzReactApp`.
+
+While `createJazzReactApp` was originally designed to setup strong typing for custom Account schemas in `useAccount`,
+we found that this approach made the Jazz setup awkward and confusing for some users.
+
+So we decided to remove `createJazzReactApp` step and to provide the types through namespace declarations:
+
+  <CodeGroup>
+      {/* prettier-ignore */}
+      ```tsx
+      import { JazzProvider, usePasskeyAuth, PasskeyAuthBasicUI } from "jazz-react";
+      import { MyAppAccount } from "./schema";
+
+      // Remove these lines  // [!code --]
+      const Jazz = createJazzReactApp({ AccountSchema: MyAppAccount }); // [!code --]
+      export const { useAccount, useCoState } = Jazz; // [!code --]
+
+      export function JazzAndAuth({ children }: { children: React.ReactNode }) {  // old
+          const [passkeyAuth, passKeyState] = usePasskeyAuth({ appName });  // old
+
+          return (
+              <>
+                  {/* Replace Jazz.Provider with provider from jazz-react */}
+                  <JazzProvider
+                      auth={passkeyAuth} // old
+                      peer="wss://cloud.jazz.tools/?key=you@example.com" // old
+                      AccountSchema={MyAppAccount} {/* The custom Account schema is passed here */} // [!code ++]
+                  >
+                      {children} // old
+                  </JazzProvider>
+                  <PasskeyAuthBasicUI state={passKeyState} /> // old
+              </> // old
+          );
+      }
+
+      // Register the Account schema so `useAccount` returns our custom `MyAppAccount`
+      declare module "jazz-react" { // [!code ++]
+          interface Register { // [!code ++]
+              Account: MyAppAccount; // [!code ++]
+          } // [!code ++]
+      } // [!code ++]
+      ```
+  </CodeGroup>
+
+## Top level imports for hooks
+
+All Jazz hooks are now available as top-level imports from the `jazz-react` package.
+
+This change improves IDE intellisense support and simplifies imports:
+
+  <CodeGroup>
+    {/* prettier-ignore */}
+    ```tsx
+    // Replace local imports with "jazz-react" imports
+    import { useAccount } from "./main"; // [!code --]
+    import { useAccount } from "jazz-react"; // [!code ++]
+
+    export function Hello() {
+        const { me } = useAccount();
+
+        return (
+            <>
+              Hello {me.profile?.name}
+            </>
+        );
+    }
+    ```
+  </CodeGroup>
+
+## New testing utilities
+
+Removing `createJazzReactApp` also makes testing way easier!
+
+We can now use `createJazzTestAccount` to setup accounts and testing data and pass it to
+your components and hooks using `JazzTestProvider`:
+
+  <CodeGroup>
+      {/* prettier-ignore */}
+      ```tsx
+      import { createJazzTestAccount, JazzTestProvider } from "jazz-react/testing";
+      import { renderHook } from "@testing-library/react"; // old
+      import { usePlaylist } from "./usePlaylist"; // old
+      import { Playlist, MusicAccount } from "./schema"; // old
+
+      test("should load the playlist", async () => {
+        // ✅ Create a test account with your schema
+        const account = await createJazzTestAccount({ AccountSchema: MusicAccount });
+
+        // ✅ Set up test data
+        const playlist = Playlist.create({
+          name: "My playlist",
+        }, account);
+
+        // ✅ Use JazzTestProvider in your tests
+        const { result } = renderHook(() => usePlaylist(playlist.id), {
+          wrapper: ({ children }) => (
+            <JazzTestProvider account={account}>
+              {children}
+            </JazzTestProvider>
+          ),
+        });
+
+        // The result is resolved synchronously, so you can assert the value immediately
+        expect(result.current?.name).toBe("My playlist");
+      });
+      ```
+  </CodeGroup>

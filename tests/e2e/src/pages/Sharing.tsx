@@ -1,11 +1,11 @@
-import { createInviteLink } from "jazz-react";
-import { CoMap, Group, ID, co } from "jazz-tools";
+import { CoMap, Group, ID, coField } from "jazz-tools";
+import { createInviteLink } from "jazz-tools/react";
+import { useAcceptInvite, useAccount, useCoState } from "jazz-tools/react";
 import { useState } from "react";
-import { useAcceptInvite, useAccount, useCoState } from "../jazz";
 
 class SharedCoMap extends CoMap {
-  value = co.string;
-  child = co.optional.ref(SharedCoMap);
+  value = coField.string;
+  child = coField.optional.ref(SharedCoMap);
 }
 
 export function Sharing() {
@@ -15,7 +15,7 @@ export function Sharing() {
   const [inviteLinks, setInviteLinks] = useState<Record<string, string>>({});
   const coMap = useCoState(SharedCoMap, id, {});
 
-  const createCoMap = () => {
+  const createCoMap = async () => {
     if (!me || id) return;
 
     const group = Group.create({ owner: me });
@@ -33,19 +33,22 @@ export function Sharing() {
       admin: createInviteLink(coMap, "admin"),
     });
 
-    setId(coMap.id);
+    await group.$jazz.waitForSync();
+    await group.$jazz.waitForSync();
+
+    setId(coMap.$jazz.id);
   };
 
   const revokeAccess = () => {
     if (!coMap) return;
 
-    const coMapGroup = coMap._owner as Group;
+    const coMapGroup = coMap.$jazz.owner as Group;
 
     for (const member of coMapGroup.members) {
       if (
         member.account &&
         member.role !== "admin" &&
-        member.account.id !== me.id
+        member.account.$jazz.id !== me?.$jazz.id
       ) {
         coMapGroup.removeMember(member.account);
       }
@@ -62,7 +65,7 @@ export function Sharing() {
   return (
     <div>
       <h1>Sharing</h1>
-      <p data-testid="id">{coMap?.id}</p>
+      <p data-testid="id">{coMap?.$jazz.id}</p>
       {Object.entries(inviteLinks).map(([role, inviteLink]) => (
         <div key={role} style={{ display: "flex", gap: 5 }}>
           <p style={{ fontWeight: "bold" }}>{role} invitation:</p>
@@ -72,7 +75,7 @@ export function Sharing() {
       <pre data-testid="values">
         {coMap?.value && (
           <SharedCoMapWithChildren
-            id={coMap.id}
+            id={coMap.$jazz.id}
             level={0}
             revealLevels={revealLevels}
           />
@@ -92,34 +95,33 @@ function SharedCoMapWithChildren(props: {
   level: number;
   revealLevels: number;
 }) {
-  const coMap = useCoState(SharedCoMap, props.id, {});
-  const { me } = useAccount();
+  const coMap = useCoState(SharedCoMap, props.id);
   const nextLevel = props.level + 1;
 
   const addChild = () => {
-    if (!me || !coMap) return;
+    if (!coMap) return;
 
-    const group = Group.create({ owner: me });
+    const group = Group.create();
 
     const child = SharedCoMap.create(
       { value: "CoValue child " + nextLevel },
       { owner: group },
     );
-    coMap.child = child;
+    coMap.$jazz.set("child", child);
   };
 
   const extendParentGroup = async () => {
     if (!coMap || !coMap.child) return;
 
-    let node: SharedCoMap | undefined = coMap;
+    let node: SharedCoMap | null = coMap;
 
-    while (node?._refs.child?.id) {
-      const parentGroup = node._owner as Group;
-      node = await SharedCoMap.load(node._refs.child.id, me, {});
+    while (node?.$jazz.refs.child?.id) {
+      const parentGroup = node.$jazz.owner as Group;
+      node = await SharedCoMap.load(node.$jazz.refs.child.id);
 
       if (node) {
-        const childGroup = node._owner as Group;
-        childGroup.extend(parentGroup);
+        const childGroup = node.$jazz.owner as Group;
+        childGroup.addMember(parentGroup);
       }
     }
   };
@@ -131,12 +133,12 @@ function SharedCoMapWithChildren(props: {
   return (
     <>
       {coMap.value}
-      {coMap._refs.child ? (
+      {coMap.$jazz.refs.child ? (
         shouldRenderChild ? (
           <>
             {" ---> "}
             <SharedCoMapWithChildren
-              id={coMap._refs.child.id}
+              id={coMap.$jazz.refs.child.id}
               level={nextLevel}
               revealLevels={props.revealLevels}
             />

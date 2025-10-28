@@ -1,0 +1,77 @@
+name: Test `create-jazz-app` Distribution
+
+concurrency:
+  # For pushes, this lets concurrent runs happen, so each push gets a result.
+  # But for other events (e.g. PRs), we can cancel the previous runs.
+  group: ${{ github.workflow }}-${{ github.event_name == 'push' && github.sha || github.ref }}
+  cancel-in-progress: true
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - 'packages/create-jazz-app/**'
+
+jobs:
+  test-create-jazz-app-distribution:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Source Code
+        uses: ./.github/actions/source-code/
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: latest
+
+      - name: Build create-jazz-app
+        run: pnpm build
+        working-directory: packages/create-jazz-app
+
+      - name: Pack create-jazz-app
+        run: pnpm pack
+        working-directory: packages/create-jazz-app
+
+      - name: Create test directory
+        run: mkdir -p /tmp/test-create-jazz-app
+
+      - name: Initialize test package
+        run: |
+          cd /tmp/test-create-jazz-app
+          bun init -y
+
+      - name: Install packed create-jazz-app
+        run: |
+          cd /tmp/test-create-jazz-app
+          bun install ${{ github.workspace }}/packages/create-jazz-app/create-jazz-app-*.tgz
+
+      - name: Test basic functionality
+        run: |
+          cd /tmp/test-create-jazz-app
+          bunx create-jazz-app --help
+
+      - name: Create test project and validate catalog resolution
+        run: |
+          cd /tmp/test-create-jazz-app
+          mkdir test-project
+          cd test-project
+          echo -e "\n\n\n\n\n\n\n\n" | bunx create-jazz-app . --framework react --starter react-passkey-auth --package-manager bun --git false
+
+      - name: Validate no unresolved catalog references
+        run: |
+          cd /tmp/test-create-jazz-app/test-project
+          # Check for unresolved catalog: references in package.json
+          if grep -r "catalog:" package.json; then
+            echo "❌ Found unresolved catalog: references in generated project"
+            exit 1
+          fi
+          # Check for unresolved workspace: references
+          if grep -r "workspace:" package.json; then
+            echo "❌ Found unresolved workspace: references in generated project"
+            exit 1
+          fi
+          echo "✅ All catalog and workspace references resolved successfully"

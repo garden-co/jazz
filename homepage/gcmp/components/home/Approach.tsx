@@ -1,13 +1,21 @@
-import { GridCard } from "gcmp-design-system/src/app/components/atoms/GridCard";
-import { H2, H3 } from "gcmp-design-system/src/app/components/atoms/Headings";
-import { P } from "gcmp-design-system/src/app/components/atoms/Paragraph";
-import { GappedGrid } from "gcmp-design-system/src/app/components/molecules/GappedGrid";
+import { GridCard } from "@garden-co/design-system/src/components/atoms/GridCard";
+import { H2, H3 } from "@garden-co/design-system/src/components/atoms/Headings";
+import { P } from "@garden-co/design-system/src/components/atoms/Paragraph";
+import { GappedGrid } from "@garden-co/design-system/src/components/molecules/GappedGrid";
 
 export default function Approach() {
   return (
     <div className="grid gap-5">
       <H2>Approach</H2>
       <GappedGrid>
+        <GridCard>
+          <H3>Find tall abstractions</H3>
+
+          <P>
+            In a world drowning in complexity, we need to invent tools that let
+            us do more with less.
+          </P>
+        </GridCard>
         <GridCard>
           <H3>Grow open ecosystems</H3>
 

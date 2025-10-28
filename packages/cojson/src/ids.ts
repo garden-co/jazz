@@ -1,8 +1,8 @@
 import { base58 } from "@scure/base";
-import { CoID } from "./coValue.js";
-import { RawAccountID } from "./coValues/account.js";
+import type { CoID } from "./coValue.js";
+import type { RawAccountID } from "./coValues/account.js";
+import type { RawGroup } from "./coValues/group.js";
 import { shortHashLength } from "./crypto/crypto.js";
-import { RawGroup } from "./exports.js";
 
 export type RawCoID = `co_z${string}`;
 export type ParentGroupReference = `parent_${CoID<RawGroup>}`;
@@ -20,7 +20,11 @@ export function rawCoIDfromBytes(bytes: Uint8Array): RawCoID {
   return `co_z${base58.encode(bytes.slice(0, shortHashLength))}` as RawCoID;
 }
 
-export type TransactionID = { sessionID: SessionID; txIndex: number };
+export type TransactionID = {
+  sessionID: SessionID;
+  txIndex: number;
+  branch?: RawCoID;
+};
 
 export type AgentID = `sealer_z${string}/signer_z${string}`;
 

@@ -1,26 +1,22 @@
+import { Button } from "@garden-co/design-system/src/components/atoms/Button";
 import { clsx } from "clsx";
-import { Button } from "gcmp-design-system/src/app/components/atoms/Button";
 import {
   CircleCheckIcon,
   LucideBuilding2,
-  LucideCheck,
+  LucideChevronsUp,
   LucideCloudDownload,
-  LucideCrown,
   LucideDatabase,
-  LucideDatabaseZap,
-  LucideHammer,
   LucideHandshake,
   LucideIcon,
-  LucideMessageCircle,
-  LucideMicroscope,
-  LucidePhone,
-  LucideSearch,
-  LucideTicketCheck,
+  LucideServer,
   LucideUsers,
-  LucideZap,
+  LucideCloud,
+  LucideDatabaseZap,
+  LucideImagePlay,
 } from "lucide-react";
-import { FakeGetStartedButton } from "./FakeGetStartedButton";
 import { IndieTierLogo, ProTierLogo, StarterTierLogo } from "./TierLogos";
+import { Icon } from "@garden-co/design-system/src/components/atoms/Icon";
+import { H2 } from "@garden-co/design-system/src/components/atoms/Headings";
 
 export function ListItem({
   variant = "blue",
@@ -36,11 +32,11 @@ export function ListItem({
   const iconSize = 16;
 
   const iconVariants = {
-    gray: <Icon size={iconSize} className="text-stone-500 shrink-0" />,
+    gray: <Icon size={iconSize} className="mt-1 shrink-0 text-stone-500" />,
     blue: (
       <Icon
         size={iconSize}
-        className="text-blue-500 dark:text-white shrink-0"
+        className="mt-1 shrink-0 text-primary dark:text-white"
       />
     ),
   };
@@ -48,7 +44,7 @@ export function ListItem({
   return (
     <li
       className={clsx(
-        "inline-flex items-center gap-2 text-stone-800 dark:text-stone-200 py-2",
+        "inline-flex gap-3 py-2 text-stone-800 dark:text-stone-200",
         className,
       )}
     >
@@ -60,224 +56,195 @@ export function ListItem({
 
 export function Pricing() {
   return (
-    <div className="flex flex-col sm:max-w-lg mx-auto md:max-w-none md:flex-row md:items-start gap-4">
-      <div className="md:flex-1 flex flex-col gap-3 overflow-hidden rounded-xl p-6 shadow-lg shadow-gray-900/5 bg-white dark:bg-stone-925">
-        <h3 className="flex justify-between items-center font-semibold text-stone-900 text-xl dark:text-white">
-          <div className="flex items-center gap-1.5">
-            <StarterTierLogo />
-            Starter
-          </div>
-          <div className="text-stone-900 dark:text-white">
-            <span className="text-2xl font-light tabular-nums tracking-tighter">
-              $0
-            </span>
-            <span className="text-sm font-normal text-stone-600 dark:text-stone-500">
-              /mo
-            </span>
-          </div>
-        </h3>
+    <>
+      <H2>Pricing</H2>
+      {/* Self-hosted option banner */}
+      <div className="rounded-xl border bg-gradient-to-r from-stone-50 to-gray-50 p-6 shadow-sm shadow-gray-900/5 dark:from-stone-925 dark:to-stone-950">
+        <div className="flex items-start gap-4">
+          <div className="grid w-full items-center gap-4 md:flex">
+            <div className="grid flex-grow gap-2">
+              <h3 className="flex w-full items-center justify-between text-xl font-semibold text-stone-900 dark:text-white">
+                <span className="flex items-center gap-1.5">
+                  <Icon name="server" />
+                  Self-Hosted
+                </span>
+              </h3>
 
-        <p className="text-sm">Everything you need for brand new projects.</p>
-
-        <div>
-          <h4 className="text-sm font-semibold text-stone-900 dark:text-white">
-            Limits (lifted during public alpha)
-          </h4>
-          <ul className="flex flex-col divide-y text-sm lg:text-base dark:divide-stone-900">
-            <ListItem icon={LucideUsers} variant="gray">
-              <s className="text-stone-500">max. 100 monthly active users</s>
-            </ListItem>
-            <ListItem icon={LucideDatabase} variant="gray">
-              <s className="text-stone-500">max. 10 GB storage</s>
-            </ListItem>
-            <ListItem icon={LucideCloudDownload} variant="gray">
-              <s className="text-stone-500">max. 2 GB egress/mo</s>
-            </ListItem>
-          </ul>
-        </div>
-
-        <div>
-          <h4 className="text-sm font-semibold text-stone-900 dark:text-white">
-            Cloud features
-          </h4>
-          <ul className="flex flex-col divide-y text-sm lg:text-base dark:divide-stone-900">
-            <ListItem icon={LucideCheck}>Real-time sync</ListItem>
-            <ListItem icon={LucideDatabase}>Cloud storage</ListItem>
-          </ul>
-        </div>
-
-        <div>
-          <h4 className="text-sm font-semibold text-stone-900 dark:text-white">
-            Support
-          </h4>
-          <ul className="flex flex-col divide-y text-sm lg:text-base dark:divide-stone-900">
-            <ListItem icon={LucideMessageCircle}>Community support</ListItem>
-          </ul>
-        </div>
-
-        <FakeGetStartedButton />
-
-        <p className="text-sm">No credit card required.</p>
-      </div>
-      <div className="md:flex-1 flex flex-col gap-3 overflow-hidden rounded-xl p-6 shadow-lg shadow-gray-900/5 bg-white dark:bg-stone-925">
-        <div>
-          <h3 className="flex justify-between items-center font-semibold text-stone-900 text-xl dark:text-white">
-            <div className="flex items-center gap-1.5">
-              <IndieTierLogo />
-              Indie
+              <p className="text-base text-stone-600 dark:text-stone-400">
+                Self-host Jazz for complete control. From hybrid to fully
+                private deployments — it's your infrastructure.
+              </p>
             </div>
-            <div className="text-stone-900 dark:text-white">
+
+            <Button
+              href="/docs/react/core-concepts/sync-and-storage#self-hosting-your-sync-server"
+              variant="outline"
+              intent="primary"
+              className="whitespace-nowrap"
+            >
+              Learn more
+              <Icon name="chevronRight" intent="primary" />
+            </Button>
+          </div>
+        </div>
+      </div>
+
+      <div className="mb-10 grid gap-4 md:grid-cols-3">
+        <div className="flex flex-col items-start gap-3 rounded-xl border bg-stone-100 p-6 shadow-sm shadow-gray-900/5 dark:bg-stone-925">
+          <h3 className="flex w-full items-center justify-between text-xl font-semibold text-stone-900 dark:text-white">
+            <span className="flex items-center gap-1.5">
+              <StarterTierLogo />
+              Starter
+            </span>
+            <span className="ml-auto text-highlight">
               <span className="text-2xl font-light tabular-nums tracking-tighter">
-                $19
+                $0
               </span>
               <span className="text-sm font-normal text-stone-600 dark:text-stone-500">
                 /mo
               </span>
-            </div>
+            </span>
           </h3>
-        </div>
 
-        <p className="text-sm">
-          Get robust real-time infra at predictable costs.
-        </p>
+          <p className="text-sm">Everything you need to get started.</p>
 
-        <div>
-          <h4 className="text-sm font-semibold text-stone-900 dark:text-white">
-            Limits & extra usage
-          </h4>
-          <ul className="flex flex-col divide-y text-sm lg:text-base dark:divide-stone-900">
+          <ul className="my-4 mb-auto flex w-full flex-col text-sm lg:text-base">
+            <ListItem icon={LucideCloud}>Optimal cloud routing</ListItem>
+            <ListItem icon={LucideDatabaseZap}>Smart caching</ListItem>
+            <ListItem icon={LucideImagePlay}>
+              Blob storage & media streaming
+            </ListItem>
+            <li aria-hidden="true" className="my-2 list-none border-t-2" />
             <ListItem icon={LucideUsers}>
-              max. 10,000 monthly active users
+              <span className="tabular-nums">100</span> monthly active users
             </ListItem>
             <ListItem icon={LucideDatabase}>
-              incl. 500 GB storage{" "}
-              <span className="text-sm text-stone-900 dark:text-white">
-                (then $0.02 per GB)
-              </span>
+              <span className="tabular-nums">10</span> GB storage
             </ListItem>
             <ListItem icon={LucideCloudDownload}>
-              incl. 100 GB egress/mo{" "}
-              <span className="text-sm text-stone-900 dark:text-white">
-                (then $0.1 per GB)
+              <span className="tabular-nums">2</span> GB egress/mo
+            </ListItem>
+          </ul>
+
+          <Button
+            href="https://dashboard.jazz.tools?utm_source=cloud_cta_starter"
+            newTab
+            variant="outline"
+            intent="primary"
+          >
+            Get Starter API key
+          </Button>
+
+          <p className="text-sm">No credit card required. Takes 20s.</p>
+        </div>
+        <div className="flex flex-col items-start gap-3 rounded-xl border bg-stone-100 p-6 shadow-sm shadow-gray-900/5 dark:bg-stone-925">
+          <h3 className="flex w-full items-center justify-between text-xl font-semibold text-stone-900 dark:text-white">
+            <span className="flex items-center gap-1.5">
+              <IndieTierLogo />
+              Indie
+            </span>
+            <span className="text-highlight">
+              <span className="text-2xl font-light tabular-nums tracking-tighter">
+                $4
               </span>
-            </ListItem>
-          </ul>
-        </div>
-
-        <div>
-          <h4 className="text-sm font-semibold text-stone-900 dark:text-white">
-            Cloud features
-          </h4>
-          <ul className="flex flex-col divide-y text-sm lg:text-base dark:divide-stone-900">
-            <ListItem icon={LucideZap}>Priority real-time sync</ListItem>
-            <ListItem icon={LucideDatabaseZap}>
-              SSD cloud storage & daily backups
-            </ListItem>
-            <ListItem icon={LucideSearch}>Basic user analytics</ListItem>
-          </ul>
-        </div>
-
-        <div>
-          <h4 className="text-sm font-semibold text-stone-900 dark:text-white">
-            Support
-          </h4>
-          <ul className="flex flex-col divide-y text-sm lg:text-base dark:divide-stone-900">
-            <ListItem icon={LucideMessageCircle}>Community support</ListItem>
-            <ListItem icon={LucideTicketCheck}>
-              Prioritised feature requests
-            </ListItem>
-          </ul>
-        </div>
-
-        <Button size="md" variant="secondary" disabled>
-          Coming soon
-        </Button>
-
-        <p className="text-sm">
-          We&apos;ve designed this tier to be affordable but also
-          self-sustaining, so you can rely on it long-term.
-        </p>
-      </div>
-      <div className="md:flex-1 flex flex-col gap-3 overflow-hidden rounded-xl p-6 shadow-lg shadow-gray-900/5 bg-white dark:bg-stone-925 pb-6">
-        <h3 className="flex justify-between items-center font-semibold text-stone-900 text-xl dark:text-white">
-          <div className="flex items-center gap-1.5">
-            <ProTierLogo />
-            Pro
-          </div>
-          <div className="text-stone-900 dark:text-white">
-            <span className="text-lg font-normal">from</span>{" "}
-            <span className="text-2xl font-light tabular-nums tracking-tighter">
-              $199
+              <span className="text-sm font-normal text-stone-600 dark:text-stone-500">
+                /mo
+              </span>
             </span>
-            <span className="text-sm font-normal text-stone-600 dark:text-stone-500">
-              /mo
+          </h3>
+
+          <p className="text-sm">
+            Get robust real-time infra at predictable costs.
+          </p>
+
+          <ul className="my-4 mb-auto flex w-full flex-col text-sm lg:text-base">
+            <ListItem icon={LucideCloud}>Optimal cloud routing</ListItem>
+            <ListItem icon={LucideDatabaseZap}>Smart caching</ListItem>
+            <ListItem icon={LucideImagePlay}>
+              Blob storage & media streaming
+            </ListItem>
+            <li aria-hidden="true" className="my-2 list-none border-t-2" />
+            <ListItem icon={LucideUsers}>
+              <span className="tabular-nums">10,000</span> monthly active users
+            </ListItem>
+            <ListItem icon={LucideDatabase}>
+              <span className="tabular-nums">100</span> GB storage incl.{" "}
+              <span className="text-sm">(then $0.02 per GB)</span>
+            </ListItem>
+            <ListItem icon={LucideCloudDownload}>
+              <span className="tabular-nums">20</span> GB egress/mo incl.{" "}
+              <span className="text-sm">(then $0.1 per GB)</span>
+            </ListItem>
+            <li aria-hidden="true" className="my-2 list-none border-t-2" />
+            <ListItem icon={LucideChevronsUp}>High-priority sync</ListItem>
+          </ul>
+
+          <Button
+            href="https://dashboard.jazz.tools?utm_source=cloud_cta_indie"
+            newTab
+            intent="primary"
+          >
+            Get Indie API key
+          </Button>
+          <p className="text-sm">
+            One month free trial. Unlimited projects. Takes 1min.
+          </p>
+        </div>
+        <div className="flex flex-col items-start gap-3 rounded-xl border bg-stone-100 p-6 shadow-sm shadow-gray-900/5 dark:bg-stone-925">
+          <h3 className="flex w-full items-center justify-between text-xl font-semibold text-stone-900 dark:text-white">
+            <span className="flex items-center gap-1.5">
+              <ProTierLogo />
+              Pro
             </span>
-          </div>
-        </h3>
+            <span className="text-highlight">
+              <span className="text-lg font-normal">from</span>{" "}
+              <span className="text-2xl font-light tabular-nums tracking-tighter">
+                $199
+              </span>
+              <span className="text-sm font-normal text-stone-600 dark:text-stone-500">
+                /mo
+              </span>
+            </span>
+          </h3>
 
-        <p className="text-sm">
-          Get our best infra and move quickly with our help.
-        </p>
+          <p className="text-sm">
+            Get our best infra and move quickly with our help.
+          </p>
 
-        <div>
-          <h4 className="text-sm font-semibold text-stone-900 dark:text-white">
-            Limits
-          </h4>
-          <ul className="flex flex-col divide-y text-sm lg:text-base dark:divide-stone-900">
+          <ul className="my-4 flex w-full flex-col text-sm lg:text-base">
+            <ListItem icon={LucideCloud}>Optimal cloud routing</ListItem>
+            <ListItem icon={LucideDatabaseZap}>Smart caching</ListItem>
+            <ListItem icon={LucideImagePlay}>
+              Blob storage & media streaming
+            </ListItem>
+            <li aria-hidden="true" className="my-2 list-none border-t-2" />
             <ListItem icon={LucideUsers}>Custom monthly active users</ListItem>
             <ListItem icon={LucideDatabase}>Custom storage</ListItem>
-            <ListItem icon={LucideCloudDownload}>Custom egress</ListItem>
-          </ul>
-        </div>
-
-        <div>
-          <h4 className="text-sm font-semibold text-stone-900 dark:text-white">
-            Cloud features
-          </h4>
-          <ul className="flex flex-col divide-y text-sm lg:text-base dark:divide-stone-900">
-            <ListItem icon={LucideCrown}>
-              Highest-priority real-time sync
-            </ListItem>
-            <ListItem icon={LucideDatabaseZap}>
-              SSD cloud storage & custom backups
-            </ListItem>
-            <ListItem icon={LucideMicroscope}>Advanced user analytics</ListItem>
-          </ul>
-        </div>
-
-        <div>
-          <h4 className="text-sm font-semibold text-stone-900 dark:text-white">
-            Support
-          </h4>
-          <ul className="flex flex-col divide-y text-sm lg:text-base dark:divide-stone-900">
-            <ListItem icon={LucidePhone}>Dedicated support</ListItem>
-            <ListItem icon={LucideHammer}>Custom feature development</ListItem>
+            <ListItem icon={LucideCloudDownload}>Custom egress/mo</ListItem>
+            <li aria-hidden="true" className="my-2 list-none border-t-2" />
             <ListItem icon={LucideHandshake}>
-              Rapid integration & premium onboarding
+              Rapid integration &amp premium onboarding
             </ListItem>
-          </ul>
-        </div>
-
-        <div>
-          <h4 className="text-sm font-semibold text-stone-900 dark:text-white">
-            Enterprise needs
-          </h4>
-          <ul className="flex flex-col divide-y text-sm lg:text-base dark:divide-stone-900">
             <ListItem icon={LucideBuilding2}>
-              SLAs, on-prem & certifications
+              SLAs, certifications, dedicated support
+            </ListItem>
+            <ListItem icon={LucideServer}>
+              Dedicated / on-prem infrastructure
             </ListItem>
           </ul>
+
+          <Button
+            href="https://cal.com/anselm-io/cloud-pro-intro"
+            intent="primary"
+          >
+            Schedule intro call
+          </Button>
+
+          <p className="text-sm">
+            Our engineering team will get you going for free.
+          </p>
         </div>
-
-        <Button href="https://cal.com/anselm-io/cloud-pro-intro" size="md">
-          Book intro call
-        </Button>
-
-        <p className="text-sm">
-          Our team of devs & product experts will get you going for free. Then
-          we&apos;ll make a deal just for you.
-        </p>
       </div>
-    </div>
+    </>
   );
 }

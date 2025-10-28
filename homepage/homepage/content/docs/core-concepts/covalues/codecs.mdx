@@ -1,0 +1,48 @@
+import { Alert, CodeGroup } from "@/components/forMdx";
+
+export const metadata = {
+  description:
+    "Use z.codec to store arbitrary data types or classes in your schemas.",
+};
+
+# Codecs
+
+You can use Zod `z.codec()` schemas to store arbitrary data types such as class instances within CoValues by defining custom encoders.
+This allows you to directly use these data types within CoValues without having to do an extra manual conversion step.
+
+## Using Zod codecs
+
+To use a Zod `z.codec()` with Jazz, your encoder must encode the data into a JSON-compatible format.
+This is means that the `Input` type shall map to the JSON-compatible type, and `Output` will map to your custom type.
+
+<CodeGroup>
+```ts twoslash
+import { co, z } from "jazz-tools";
+// ---cut---
+class Greeter {
+  constructor(public name: string) {}
+
+  greet() {
+    console.log(`Hello, ${this.name}!`);
+  }
+}
+
+const schema = co.map({
+  greeter: z.codec(z.string(), z.z.instanceof(Greeter), {
+    encode: (value) => value.name,
+    decode: (value) => new Greeter(value),
+  }),
+});
+
+const porter = schema.create({
+  greeter: new Greeter("Alice"),
+});
+
+porter.greeter.greet();
+```
+</CodeGroup>
+
+<Alert className="mt-4 flex gap-2 items-center" variant="info">
+Schemas that are not directly supported by Jazz such as `z.instanceof` are not re-exported by Jazz under the `z` object.
+The full Zod API is exported under `z.z` if you need to use any of these schemas as part of a codec.
+</Alert>

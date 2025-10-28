@@ -1,10 +1,7 @@
-import { ID } from "jazz-tools";
-import { UploadedFile } from "../schema";
-
 export function getValueId() {
   return (
     (new URLSearchParams(location.search).get("valueId") as
-      | ID<UploadedFile>
+      | string
       | undefined) ?? undefined
   );
 }

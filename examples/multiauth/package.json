@@ -1,0 +1,28 @@
+{
+  "name": "multiauth",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "format-and-lint": "biome check .",
+    "format-and-lint:fix": "biome check . --write"
+  },
+  "dependencies": {
+    "@clerk/clerk-react": "^5.4.1",
+    "jazz-tools": "workspace:*",
+    "react": "catalog:react",
+    "react-dom": "catalog:react",
+    "tailwindcss": "^4.1.10"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "catalog:default",
+    "@types/react": "catalog:react",
+    "@types/react-dom": "catalog:react",
+    "@vitejs/plugin-react": "^4.5.1",
+    "globals": "^15.11.0",
+    "typescript": "catalog:default",
+    "vite": "catalog:default"
+  }
+}

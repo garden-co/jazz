@@ -1,6 +1,6 @@
 # Jazz Inspector
 
-Live address: https://inspector.jazz.tools
+Live address: [https://inspector.jazz.tools](https://inspector.jazz.tools)
 
 Use this to visually inspect a Jazz account or other CoValue.
 

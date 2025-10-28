@@ -2,22 +2,12 @@
 // This is NOT needed to make the chat work
 
 import { Chat } from "@/schema.ts";
-import { Account, CoValue, ID } from "jazz-tools";
 
-export function waitForUpload(id: ID<CoValue>, me: Account) {
-  const syncManager = me._raw.core.node.syncManager;
-  const peers = syncManager.getPeers();
-
-  return Promise.all(
-    peers.map((peer) => syncManager.waitForUploadIntoPeer(peer.id, id)),
-  );
-}
-
-export function onChatLoad(chat: Chat, me: Account) {
+export function onChatLoad(chat: Chat) {
   if (window.parent) {
-    waitForUpload(chat.id, me).then(() => {
+    chat.$jazz.waitForSync().then(() => {
       window.parent.postMessage(
-        { type: "chat-load", id: "/chat/" + chat.id },
+        { type: "chat-load", id: "/chat/" + chat.$jazz.id },
         "*",
       );
     });
@@ -25,3 +15,20 @@ export function onChatLoad(chat: Chat, me: Account) {
 }
 
 export const inIframe = window.self !== window.top;
+
+const animals = [
+  "elephant",
+  "penguin",
+  "giraffe",
+  "octopus",
+  "kangaroo",
+  "dolphin",
+  "cheetah",
+  "koala",
+  "platypus",
+  "pangolin",
+];
+
+export function getRandomUsername() {
+  return `Anonymous ${animals[Math.floor(Math.random() * animals.length)]}`;
+}

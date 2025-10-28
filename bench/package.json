@@ -1,0 +1,15 @@
+{
+  "name": "jazz-tools-benchmark",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "cojson": "workspace:*",
+    "vitest": "catalog:default"
+  },
+  "scripts": {
+    "bench": "vitest bench"
+  },
+  "devDependencies": {
+    "vitest": "catalog:default"
+  }
+}

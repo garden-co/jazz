@@ -1,50 +1,316 @@
 {
   "name": "jazz-tools",
-  "module": "dist/web/index.web.js",
-  "main": "dist/web/index.web.js",
-  "types": "src/index.web.ts",
-  "react-native": "dist/native/index.native.js",
+  "module": "dist/index.js",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
   "exports": {
     ".": {
-      "react-native": "./dist/native/index.native.js",
-      "types": "./src/index.web.ts",
-      "default": "./dist/web/index.web.js"
+      "@jazz-tools/source": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
     },
-    "./native": {
-      "react-native": "./dist/native/index.native.js",
-      "types": "./src/index.native.ts",
-      "default": "./dist/native/index.native.js"
+    "./testing": {
+      "@jazz-tools/source": "./src/testing.ts",
+      "types": "./dist/testing.d.ts",
+      "default": "./dist/testing.js"
     },
-    "./src/*": "./src/*"
+    "./ssr": {
+      "@jazz-tools/source": "./src/tools/ssr/index.ts",
+      "types": "./dist/tools/ssr/ssr.d.ts",
+      "default": "./dist/tools/ssr.js"
+    },
+    "./browser": {
+      "@jazz-tools/source": "./src/browser/index.ts",
+      "types": "./dist/browser/index.d.ts",
+      "default": "./dist/browser/index.js"
+    },
+    "./media": {
+      "@jazz-tools/source": "./src/media/index.ts",
+      "react-native": {
+        "types": "./dist/media/index.native.d.ts",
+        "default": "./dist/media/index.native.js"
+      },
+      "browser": {
+        "types": "./dist/media/index.browser.d.ts",
+        "default": "./dist/media/index.browser.js"
+      },
+      "node": {
+        "@jazz-tools/source": "./src/media/index.server.ts",
+        "types": "./dist/media/index.server.d.ts",
+        "default": "./dist/media/index.server.js"
+      },
+      "types": "./dist/media/index.d.ts",
+      "default": "./dist/media/index.js"
+    },
+    "./media/server": {
+      "@jazz-tools/source": "./src/media/index.server.ts",
+      "types": "./dist/media/index.server.d.ts",
+      "default": "./dist/media/index.server.js"
+    },
+    "./expo": {
+      "@jazz-tools/source": "./src/expo/index.ts",
+      "types": "./dist/expo/index.d.ts",
+      "default": "./dist/expo/index.js"
+    },
+    "./expo/crypto": {
+      "@jazz-tools/source": "./src/expo/crypto.ts",
+      "types": "./dist/expo/crypto.d.ts",
+      "default": "./dist/expo/crypto.js"
+    },
+    "./expo/testing": {
+      "@jazz-tools/source": "./src/expo/testing.tsx",
+      "types": "./dist/expo/testing.d.ts",
+      "default": "./dist/expo/testing.js"
+    },
+    "./inspector": {
+      "@jazz-tools/source": "./src/inspector/index.ts",
+      "types": "./dist/inspector/index.d.ts",
+      "default": "./dist/inspector/index.js"
+    },
+    "./inspector/register-custom-element": {
+      "@jazz-tools/source": "./src/inspector/register-custom-element.ts",
+      "types": "./dist/inspector/register-custom-element.d.ts",
+      "default": "./dist/inspector/register-custom-element.js"
+    },
+    "./prosemirror": {
+      "@jazz-tools/source": "./src/prosemirror/index.ts",
+      "types": "./dist/prosemirror/index.d.ts",
+      "default": "./dist/prosemirror/index.js"
+    },
+    "./react": {
+      "@jazz-tools/source": "./src/react/index.ts",
+      "types": "./dist/react/index.d.ts",
+      "default": "./dist/react/index.js"
+    },
+    "./react/ssr": {
+      "@jazz-tools/source": "./src/react/ssr.ts",
+      "types": "./dist/react/ssr.d.ts",
+      "default": "./dist/react/ssr.js"
+    },
+    "./react/testing": {
+      "@jazz-tools/source": "./src/react/testing.tsx",
+      "types": "./dist/react/testing.d.ts",
+      "default": "./dist/react/testing.js"
+    },
+    "./react-core": {
+      "@jazz-tools/source": "./src/react-core/index.ts",
+      "types": "./dist/react-core/index.d.ts",
+      "default": "./dist/react-core/index.js"
+    },
+    "./react-core/testing": {
+      "@jazz-tools/source": "./src/react-core/testing.tsx",
+      "types": "./dist/react-core/testing.d.ts",
+      "default": "./dist/react-core/testing.js"
+    },
+    "./react-native": {
+      "@jazz-tools/source": "./src/react-native/index.ts",
+      "types": "./dist/react-native/index.d.ts",
+      "default": "./dist/react-native/index.js"
+    },
+    "./react-native/crypto": {
+      "@jazz-tools/source": "./src/react-native/crypto.ts",
+      "types": "./dist/react-native/crypto.d.ts",
+      "default": "./dist/react-native/crypto.js"
+    },
+    "./react-native/testing": {
+      "@jazz-tools/source": "./src/react-native/testing.tsx",
+      "types": "./dist/react-native/testing.d.ts",
+      "default": "./dist/react-native/testing.js"
+    },
+    "./react-native-core": {
+      "@jazz-tools/source": "./src/react-native-core/index.ts",
+      "types": "./dist/react-native-core/index.d.ts",
+      "default": "./dist/react-native-core/index.js"
+    },
+    "./react-native-core/crypto": {
+      "@jazz-tools/source": "./src/react-native-core/crypto/index.ts",
+      "types": "./dist/react-native-core/crypto.d.ts",
+      "default": "./dist/react-native-core/crypto.js"
+    },
+    "./react-native-core/testing": {
+      "@jazz-tools/source": "./src/react-native-core/testing.tsx",
+      "types": "./dist/react-native-core/testing.d.ts",
+      "default": "./dist/react-native-core/testing.js"
+    },
+    "./svelte": {
+      "svelte": "./dist/svelte/index.js",
+      "@jazz-tools/source": "./src/svelte/index.ts",
+      "types": "./dist/svelte/index.d.ts",
+      "default": "./dist/svelte/index.js"
+    },
+    "./svelte/testing": {
+      "svelte": "./dist/svelte/testing.js",
+      "@jazz-tools/source": "./src/svelte/testing.ts",
+      "types": "./dist/svelte/testing.d.ts",
+      "default": "./dist/svelte/testing.js"
+    },
+    "./tiptap": {
+      "@jazz-tools/source": "./src/tiptap/index.ts",
+      "types": "./dist/tiptap/index.d.ts",
+      "default": "./dist/tiptap/index.js"
+    },
+    "./worker": {
+      "@jazz-tools/source": "./src/worker/index.ts",
+      "types": "./dist/worker/index.d.ts",
+      "default": "./dist/worker/index.js"
+    },
+    "./better-auth/auth/client": {
+      "@jazz-tools/source": "./src/better-auth/auth/client.ts",
+      "types": "./dist/better-auth/auth/client.d.ts",
+      "default": "./dist/better-auth/auth/client.js"
+    },
+    "./better-auth/auth/react": {
+      "@jazz-tools/source": "./src/better-auth/auth/react.tsx",
+      "types": "./dist/better-auth/auth/react.d.ts",
+      "default": "./dist/better-auth/auth/react.js"
+    },
+    "./better-auth/auth/server": {
+      "@jazz-tools/source": "./src/better-auth/auth/server.ts",
+      "types": "./dist/better-auth/auth/server.d.ts",
+      "default": "./dist/better-auth/auth/server.js"
+    },
+    "./better-auth/database-adapter": {
+      "@jazz-tools/source": "./src/better-auth/database-adapter/index.ts",
+      "types": "./dist/better-auth/database-adapter/index.d.ts",
+      "default": "./dist/better-auth/database-adapter/index.js"
+    },
+    "./load-edge-wasm": {
+      "@jazz-tools/source": "./src/worker/edge-wasm.ts",
+      "types": "./dist/worker/edge-wasm.d.ts",
+      "default": "./dist/worker/edge-wasm.js"
+    },
+    "./napi": {
+      "@jazz-tools/source": "./src/worker/napi-crypto.ts",
+      "types": "./dist/worker/napi-crypto.d.ts",
+      "default": "./dist/worker/napi-crypto.js"
+    }
   },
   "type": "module",
   "license": "MIT",
-  "version": "0.8.36",
+  "version": "0.18.31",
   "dependencies": {
+    "@manuscripts/prosemirror-recreate-steps": "^0.1.4",
+    "@scure/base": "1.2.1",
+    "@scure/bip39": "^1.3.0",
+    "@tiptap/core": "^2.12.0",
+    "clsx": "^2.0.0",
     "cojson": "workspace:*",
-    "fast-check": "^3.17.2"
+    "cojson-storage-indexeddb": "workspace:*",
+    "cojson-transport-ws": "workspace:*",
+    "fast-myers-diff": "^3.2.0",
+    "goober": "^2.1.18",
+    "prosemirror-example-setup": "^1.2.2",
+    "prosemirror-menu": "^1.2.4",
+    "prosemirror-model": "^1.21.1",
+    "prosemirror-schema-basic": "^1.2.2",
+    "prosemirror-state": "^1.4.3",
+    "prosemirror-transform": "^1.9.0",
+    "use-sync-external-store": "^1.5.0",
+    "zod": "4.1.11"
   },
   "scripts": {
+    "check": "tsc --noEmit",
     "format-and-lint": "biome check .",
     "format-and-lint:fix": "biome check . --write",
-    "dev:web": "tsc --sourceMap --watch --outDir dist/web -p tsconfig.web.json",
-    "dev:native": "tsc --sourceMap --watch --outDir dist/native -p tsconfig.native.json",
+    "dev": "tsup --watch --dts",
+    "bench": "vitest bench --run --root ../../ --project jazz-tools",
     "test": "vitest --run --root ../../ --project jazz-tools",
     "test:watch": "vitest --watch --root ../../ --project jazz-tools",
-    "build:web": "tsc --sourceMap --outDir dist/web -p tsconfig.web.json",
-    "build:native": "tsc --sourceMap --outDir dist/native -p tsconfig.native.json",
-    "build": "rm -rf ./dist && pnpm run build:web && pnpm run build:native",
-    "prepublishOnly": "npm run build"
+    "types": "tsc --outDir dist",
+    "build:svelte": "rm -rf dist/svelte && svelte-package -i src/svelte -o dist/svelte --tsconfig tsconfig.svelte.json",
+    "build": "tsup && pnpm types && pnpm build:svelte"
   },
   "devDependencies": {
-    "typescript": "^5.3.3",
-    "vitest": "1.5.3"
+    "@scure/bip39": "^1.3.0",
+    "@sveltejs/package": "^2.0.0",
+    "@sveltejs/vite-plugin-svelte": "^6.1.0",
+    "@testing-library/dom": "^10.4.0",
+    "@testing-library/jest-dom": "^6.6.3",
+    "@testing-library/react": "16.2.0",
+    "@testing-library/svelte": "^5.2.6",
+    "@types/react": "19.1.0",
+    "@types/react-dom": "19.1.0",
+    "@types/use-sync-external-store": "^1.5.0",
+    "@vitest/browser": "^3.2.4",
+    "msw": "^2.10.3",
+    "oauth2-mock-server": "^8.1.0",
+    "playwright": "^1.50.1",
+    "queueueue": "^4.1.2",
+    "tsup": "8.5.0",
+    "typescript": "catalog:default",
+    "vitest": "catalog:default",
+    "ws": "^8.14.2"
   },
-  "madge": {
-    "detectiveOptions": {
-      "ts": {
-        "skipTypeImports": true
-      }
+  "peerDependencies": {
+    "@bam.tech/react-native-image-resizer": "*",
+    "@op-engineering/op-sqlite": "*",
+    "@react-native-community/netinfo": "*",
+    "better-auth": "^1.3.2",
+    "expo-image-manipulator": "*",
+    "expo-file-system": "*",
+    "expo-secure-store": "*",
+    "expo-sqlite": "*",
+    "react": "*",
+    "react-dom": "*",
+    "react-native": "*",
+    "react-native-fast-encoder": "^0.2.0",
+    "react-native-mmkv": "^3.3.0",
+    "react-native-nitro-modules": "^0.26.4",
+    "react-native-quick-crypto": "^1.0.0-beta.18",
+    "sharp": "^0.33.5",
+    "svelte": "^5.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@bam.tech/react-native-image-resizer": {
+      "optional": true
+    },
+    "@op-engineering/op-sqlite": {
+      "optional": true
+    },
+    "@react-native-community/netinfo": {
+      "optional": true
+    },
+    "better-auth": {
+      "optional": true
+    },
+    "expo-image-manipulator": {
+      "optional": true
+    },
+    "expo-file-system": {
+      "optional": true
+    },
+    "expo-secure-store": {
+      "optional": true
+    },
+    "expo-sqlite": {
+      "optional": true
+    },
+    "react": {
+      "optional": true
+    },
+    "react-dom": {
+      "optional": true
+    },
+    "react-native": {
+      "optional": true
+    },
+    "react-native-fast-encoder": {
+      "optional": true
+    },
+    "react-native-mmkv": {
+      "optional": true
+    },
+    "react-native-nitro-modules": {
+      "optional": true
+    },
+    "react-native-quick-crypto": {
+      "optional": true
+    },
+    "sharp": {
+      "optional": true
+    },
+    "svelte": {
+      "optional": true
     }
   }
 }

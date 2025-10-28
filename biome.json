@@ -1,5 +1,5 @@
 {
-  "$schema": "https://biomejs.dev/schemas/1.9.4/schema.json",
+  "$schema": "https://biomejs.dev/schemas/2.1.3/schema.json",
   "vcs": {
     "enabled": true,
     "clientKind": "git",
@@ -7,25 +7,95 @@
   },
   "files": {
     "ignoreUnknown": false,
-    "ignore": [
-      "jazz-tools.json",
-      "**/ios/**",
-      "**/android/**",
-      "packages/jazz-svelte/**",
-      "examples/*svelte*/**"
+    "includes": [
+      "**",
+      "crates/cojson-core-napi/__test__/**",
+      "crates/cojson-core-napi/index.js",
+      "!crates/**",
+      "!**/jazz-tools.json",
+      "!**/ios/**",
+      "!**/android/**",
+      "!**/tests/jazz-svelte/src/**",
+      "!**/examples/**/*svelte*/**",
+      "!**/starters/**/*svelte*/**",
+      "!**/examples/server-worker-inbox/src/routeTree.gen.ts",
+      "!**/homepage/homepage/**",
+      "!**/package.json",
+      "!**/*svelte*/**"
     ]
   },
   "formatter": {
     "enabled": true,
     "indentStyle": "space"
   },
-  "organizeImports": {
-    "enabled": true
+  "assist": {
+    "actions": {
+      "source": {
+        "organizeImports": "off"
+      }
+    }
   },
   "linter": {
     "enabled": false,
     "rules": {
-      "recommended": true
+      "recommended": true,
+      "correctness": {
+        "useExhaustiveDependencies": "off",
+        "useImportExtensions": {
+          "level": "error",
+          "options": {
+            "forceJsExtensions": true
+          }
+        }
+      }
     }
-  }
+  },
+  "overrides": [
+    {
+      "includes": ["packages/community-jazz-vue/src/**"],
+      "linter": {
+        "enabled": true,
+        "rules": {
+          "recommended": true
+        }
+      }
+    },
+    {
+      "includes": ["**/packages/**/src/**"],
+      "linter": {
+        "enabled": true,
+        "rules": {
+          "recommended": false
+        }
+      }
+    },
+    {
+      "includes": [
+        "**/packages/cojson/src/storage/**/*/**",
+        "**/cojson-transport-ws/**"
+      ],
+      "linter": {
+        "enabled": true,
+        "rules": {
+          "recommended": true
+        }
+      }
+    },
+    {
+      "includes": ["**/tests/**"],
+      "linter": {
+        "rules": {
+          "correctness": {
+            "useImportExtensions": "off"
+          },
+          "style": {
+            "noNonNullAssertion": "off"
+          },
+          "suspicious": {
+            "noExplicitAny": "off"
+          }
+        }
+      }
+    }
+  ]
 }

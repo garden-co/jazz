@@ -1,0 +1,437 @@
+import { Alert, ContentByFramework, CodeGroup } from '@/components/forMdx'
+
+# Jazz 0.14.0 Introducing Zod-based schemas
+
+We're excited to move from our own schema syntax to using Zod v4.
+
+This is the first step in a series of releases to make Jazz more familiar and to make CoValues look more like regular data structures.
+
+## Overview:
+
+So far, Jazz has relied on our own idiosyncratic schema definition syntax where you had to extend classes and be careful to use `co.ref` for references.
+
+<CodeGroup>
+```ts
+// BEFORE
+import { co, CoMap, CoList, CoPlainText, ImageDefinition } from "jazz-tools";
+
+export class Message extends CoMap {
+  text = co.ref(CoPlainText);
+  image = co.optional.ref(ImageDefinition);
+  important = co.boolean;
+}
+
+export class Chat extends CoList.Of(co.ref(Message)) {}
+```
+</CodeGroup>
+
+While this had certain ergonomic benefits it relied on unclean hacks to work.
+
+In addition, many of our adopters expressed a preference for avoiding class syntax, and LLMs consistently expected to be able to use Zod.
+
+For this reason, we completely overhauled how you define and use CoValue schemas:
+
+<CodeGroup>
+```ts
+// AFTER
+import { co, z } from "jazz-tools";
+
+export const Message = co.map({
+  text: co.plainText(),
+  image: z.optional(co.image()),
+  important: z.boolean(),
+});
+
+export const Chat = co.list(Message);
+```
+</CodeGroup>
+
+## Major breaking changes
+
+### Schema definitions
+
+You now define CoValue schemas using two new exports from `jazz-tools`:
+
+- a new `co` definer that mirrors Zod's object/record/array syntax to define CoValue types
+  - `co.map()`, `co.record()`, `co.list()`, `co.feed()`
+  - `co.account()`, `co.profile()`
+  - `co.plainText()`, `co.richText()`,
+  - `co.fileStream()`, `co.image()`
+  - see the updated [Defining CoValue Schemas](/docs/core-concepts/covalues/overview)
+- `z` re-exported from Zod v4
+  - primitives like `z.string()`, `z.number()`, `z.literal()`
+    - **note**: additional constraints like `z.min()` and `z.max()` are not yet enforced, we'll add validation in future releases
+  - complex types like `z.object()` and `z.array()` to define JSON-like fields without internal collaboration
+  - combinators like `z.optional()` and `z.discriminatedUnion()`
+    - these also work on CoValue types!
+  - see the updated [Docs on Primitive Fields](/docs/core-concepts/covalues/overview#primitive-fields),
+    [Docs on Optional References](/docs/core-concepts/covalues/overview#optional-references)
+    and [Docs on Unions of CoMaps](/docs/core-concepts/covalues/overview#unions-of-comaps-declaration)
+
+Similar to Zod v4's new object syntax, recursive and mutually recursive types are now [much easier to express](/docs/react/core-concepts/covalues/overview#recursive-references).
+
+### How to pass loaded CoValues
+
+<ContentByFramework framework={["react", "react-native", "vue", "vanilla", "react-native-expo"]}>
+Calls to `useCoState()` work just the same, but they return a slightly different type than before.
+
+And while you can still read from the type just as before...
+
+<CodeGroup>
+```tsx
+import { z, co } from "jazz-tools";
+import { useCoState } from "jazz-react";
+
+const Pet = co.map({
+  name: z.string(),
+  age: z.number(),
+});
+type Pet = co.loaded<typeof Pet>;
+
+const Person = co.map({
+  name: z.string(),
+  age: z.number(),
+  pets: co.list(Pet),
+});
+type Person = co.loaded<typeof Person>;
+
+function MyComponent({ id }: { id: string }) {
+  const person = useCoState(Person, id);
+
+  return person && <PersonName person={person} />;
+}
+
+function PersonName({ person }: {
+  person: Person
+}) {
+  return <div>{person.name}</div>;
+}
+```
+</CodeGroup>
+
+`co.loaded` can also take a second argument to specify the loading depth of the expected CoValue, mirroring the `resolve` options for `useCoState`, `load`, `subscribe`, etc.
+
+<CodeGroup>
+```tsx
+import { z, co } from "jazz-tools";
+import { useCoState } from "jazz-react";
+
+const Pet = co.map({
+  name: z.string(),
+  age: z.number(),
+});
+type Pet = co.loaded<typeof Pet>;
+
+const Person = co.map({
+  name: z.string(),
+  age: z.number(),
+  pets: co.list(Pet),
+});
+type Person = co.loaded<typeof Person>;
+
+function MyComponent({ id }: { id: string }) {
+  const personWithPets = useCoState(Person, id, {
+    resolve: { pets: { $each: true } }  // [!code ++]
+  });
+
+  return personWithPets && <PersonAndFirstPetName person={personWithPets} />;
+}
+
+function PersonAndFirstPetName({ person }: {
+  person: co.loaded<typeof Person, { pets: { $each: true } }> // [!code ++]
+}) {
+  return <div>{person.name} & {person.pets[0].name}</div>;
+}
+```
+</CodeGroup>
+</ContentByFramework>
+<ContentByFramework framework="svelte">
+We've removed the `useCoState`, `useAccount` and `useAccountOrGuest` hooks.
+
+You should now use the `CoState` and `AccountCoState` reactive classes instead. These provide greater stability and are significantly easier to work with.
+
+Calls to `new CoState()` work just the same, but they return a slightly different type than before.
+
+And while you can still read from the type just as before...
+
+<CodeGroup>
+```ts
+// @filename: schema.ts
+import { z, co } from "jazz-tools";
+
+const Pet = co.map({
+  name: z.string(),
+  age: z.number(),
+});
+type Pet = co.loaded<typeof Pet>;
+
+const Person = co.map({
+  name: z.string(),
+  age: z.number(),
+  pets: co.list(Pet),
+});
+type Person = co.loaded<typeof Person>;
+``` 
+```svelte
+// @filename: app.svelte
+<script lang="ts">
+import { CoState } from "jazz-svelte";
+import { Person } from "./schema";
+
+const person = new CoState(Person, id);
+</script>
+
+<div>
+  {person.current?.name}
+</div>
+```
+</CodeGroup>
+
+`co.loaded` can also take a second argument to specify the loading depth of the expected CoValue, mirroring the `resolve` options for `CoState`, `load`, `subscribe`, etc.
+
+<CodeGroup>
+```svelte
+<script lang="ts" module>
+  export type Props = {
+    person: co.loaded<typeof Person, { pets: { $each: true } }>;  // [!code ++]
+  };
+</script>
+
+<script lang="ts">
+  import { Person } from './schema';
+  
+  let props: Props = $props();
+</script>
+
+<div>
+  {props.person.name}
+</div>
+<ul>
+  {#each props.person.pets as pet}
+    <li>{pet.name}</li>
+  {/each}
+</ul>
+```
+</CodeGroup>
+</ContentByFramework>
+
+### Removing AccountSchema registration
+
+We have removed the Typescript AccountSchema registration.
+
+It was causing some deal of confusion to new adopters so we have decided to replace the magic inference with a more explicit approach.
+
+<Alert variant="warning" className="flex gap-2 items-center my-4">
+You still need to pass your custom AccountSchema to your provider!
+</Alert>
+
+<ContentByFramework framework={["react", "react-native", "vue", "vanilla", "react-native-expo"]}>
+<CodeGroup>
+```tsx
+import { JazzProvider } from "jazz-react";
+import { MyAccount } from "./schema";
+
+declare module "jazz-react" { // [!code --]
+  interface Register {  // [!code --]
+    Account: MyAccount; // [!code --]
+  }  // [!code --]
+}  // [!code --]
+
+export function MyApp({ children }: { children: React.ReactNode }) {
+  return (
+    <JazzProvider
+      sync={{
+        peer: "wss://cloud.jazz.tools/?key=your-api-key",
+      }}
+      AccountSchema={MyAccount}
+    >
+      {children}
+    </JazzProvider>
+  );
+}
+```
+</CodeGroup>
+
+When using `useAccount` you should now pass the `Account` schema directly:
+
+<CodeGroup>
+```tsx
+import { useAccount } from "jazz-react";
+import { MyAccount } from "./schema";
+
+function MyComponent() {
+  const { me } = useAccount(MyAccount, {
+    resolve: {
+      profile: true,
+    },
+  });
+
+  return <div>{me?.profile.name}</div>;
+}
+```
+</CodeGroup>
+</ContentByFramework>
+
+<ContentByFramework framework="svelte">
+<CodeGroup>
+```svelte
+<!-- src/routes/+layout.svelte -->
+<script lang="ts" module>
+  declare module 'jazz-svelte' {  // [!code --]
+    interface Register {  // [!code --]
+      Account: MyAppAccount; // [!code --]
+    }  // [!code --]
+  }  // [!code --]
+</script> // [!code --]
+
+<script lang="ts">
+  import { JazzProvider } from "jazz-svelte";
+  import { MyAppAccount } from "$lib/schema";
+  let { children } = $props();
+</script>
+
+<JazzProvider
+  sync={{ 
+    peer: "wss://cloud.jazz.tools/?key=your-api-key",
+    when: "always" // When to sync: "always", "never", or "signedUp"
+  }}
+  AccountSchema={MyAppAccount}
+>
+  {@render children()}
+</JazzProvider>
+```
+</CodeGroup>
+
+When using `AccountCoState` you should now pass the `Account` schema directly:
+
+<CodeGroup>
+```svelte
+<script lang="ts">
+import { AccountCoState } from "jazz-svelte";
+import { MyAccount } from "./schema";
+
+const account = new AccountCoState(MyAccount, {
+  resolve: {
+    profile: true,
+  },
+});
+</script>
+
+<div>
+  {account.current?.profile.name}
+</div>
+```
+</CodeGroup>
+</ContentByFramework>
+
+### Defining migrations
+
+Now account schemas need to be defined with `co.account()` and migrations can be declared using `withMigration()`:
+
+<CodeGroup>
+```ts
+import { co, z, Group } from "jazz-tools";
+
+const Pet = co.map({
+  name: z.string(),
+  age: z.number(),
+});
+
+const MyAppRoot = co.map({
+  pets: co.list(Pet),
+});
+
+const MyAppProfile = co.profile({
+  name: z.string(),
+  age: z.number().optional(),
+});
+
+export const MyAppAccount = co.account({
+  root: MyAppRoot,
+  profile: MyAppProfile,
+}).withMigration((account, creationProps?: { name: string }) => {
+  if (account.root === undefined) {
+    account.root = MyAppRoot.create({
+      pets: co.list(Pet).create([]),
+    });
+  }
+
+  if (account.profile === undefined) {
+    const profileGroup = Group.create();
+    profileGroup.addMember("everyone", "reader");
+
+    account.profile = MyAppProfile.create({
+      name: creationProps?.name ?? "New user",
+    }, profileGroup);
+  }
+});
+```
+</CodeGroup>
+
+### Defining Schema helper methods
+
+You can no longer define helper methods directly within your schema, create standalone functions instead. See
+[Docs on Helper methods](/docs/core-concepts/covalues/overview#helper-methods) for an example.
+
+## Minor breaking changes
+
+### `_refs` and `_edits` are now potentially null
+
+The type of `_refs` and `_edits` is now nullable.
+
+<CodeGroup>
+```ts 
+const Person = co.map({
+  name: z.string(),
+  age: z.number(),
+});
+
+const person = Person.create({ name: "John", age: 30 });
+
+person._refs; // now nullable
+person._edits; // now nullable
+``` 
+</CodeGroup>
+
+### `members` and `by` now return basic `Account`
+
+We have removed the Account schema registration, so now `members` and `by` methods now always return basic `Account`.
+
+This means that you now need to rely on `useCoState` on them to load their using your account schema.
+
+<CodeGroup>
+```tsx
+function GroupMembers({ group }: { group: Group }) {
+  const members = group.members;
+
+  return (
+    <div>
+      {members.map((member) => (
+        <GroupMemberDetails
+          accountId={member.account.id}
+          key={member.account.id}
+        />
+      ))}
+    </div>
+  );
+}
+
+function GroupMemberDetails({ accountId }: { accountId: string }) {
+  const account = useCoState(MyAppAccount, accountId, {
+    resolve: {
+      profile: true,
+      root: {
+        pets: { $each: true },
+      },
+    },
+  });
+
+  return (
+    <div>
+      <div>{account?.profile.name}</div>
+      <ul>{account?.root.pets.map((pet) => <li>{pet.name}</li>)}</ul>
+    </div>
+  );
+}
+```
+</CodeGroup>

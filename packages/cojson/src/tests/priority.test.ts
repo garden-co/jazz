@@ -1,8 +1,10 @@
 import { describe, expect, test } from "vitest";
 import { WasmCrypto } from "../crypto/WasmCrypto.js";
-import { LocalNode } from "../localNode.js";
 import { CO_VALUE_PRIORITY, getPriorityFromHeader } from "../priority.js";
-import { randomAnonymousAccountAndSessionID } from "./testUtils.js";
+import {
+  createAccountInNode,
+  nodeWithRandomAgentAndSessionID,
+} from "./testUtils.js";
 
 const Crypto = await WasmCrypto.create();
 
@@ -14,7 +16,7 @@ describe("getPriorityFromHeader", () => {
   });
 
   test("returns MEDIUM priority for costream type", () => {
-    const node = new LocalNode(...randomAnonymousAccountAndSessionID(), Crypto);
+    const node = nodeWithRandomAgentAndSessionID();
     const costream = node.createCoValue({
       type: "costream",
       ruleset: { type: "unsafeAllowAll" },
@@ -22,13 +24,13 @@ describe("getPriorityFromHeader", () => {
       ...Crypto.createdNowUnique(),
     });
 
-    expect(getPriorityFromHeader(costream.header)).toEqual(
+    expect(getPriorityFromHeader(costream.verified.header)).toEqual(
       CO_VALUE_PRIORITY.MEDIUM,
     );
   });
 
   test("returns LOW priority for binary costream type", () => {
-    const node = new LocalNode(...randomAnonymousAccountAndSessionID(), Crypto);
+    const node = nodeWithRandomAgentAndSessionID();
     const costream = node.createCoValue({
       type: "costream",
       ruleset: { type: "unsafeAllowAll" },
@@ -36,32 +38,32 @@ describe("getPriorityFromHeader", () => {
       ...Crypto.createdNowUnique(),
     });
 
-    expect(getPriorityFromHeader(costream.header)).toEqual(
+    expect(getPriorityFromHeader(costream.verified.header)).toEqual(
       CO_VALUE_PRIORITY.LOW,
     );
   });
 
   test("returns HIGH priority for account type", async () => {
-    const node = new LocalNode(...randomAnonymousAccountAndSessionID(), Crypto);
+    const node = nodeWithRandomAgentAndSessionID();
 
-    const account = node.createAccount(node.crypto.newRandomAgentSecret());
+    const account = createAccountInNode(node);
 
-    expect(getPriorityFromHeader(account.core.header)).toEqual(
+    expect(getPriorityFromHeader(account.account.core.verified.header)).toEqual(
       CO_VALUE_PRIORITY.HIGH,
     );
   });
 
   test("returns HIGH priority for group type", () => {
-    const node = new LocalNode(...randomAnonymousAccountAndSessionID(), Crypto);
+    const node = nodeWithRandomAgentAndSessionID();
     const group = node.createGroup();
 
-    expect(getPriorityFromHeader(group.core.header)).toEqual(
+    expect(getPriorityFromHeader(group.core.verified.header)).toEqual(
       CO_VALUE_PRIORITY.HIGH,
     );
   });
 
   test("returns MEDIUM priority for other types", () => {
-    const node = new LocalNode(...randomAnonymousAccountAndSessionID(), Crypto);
+    const node = nodeWithRandomAgentAndSessionID();
 
     const comap = node.createCoValue({
       type: "comap",
@@ -77,10 +79,10 @@ describe("getPriorityFromHeader", () => {
       ...Crypto.createdNowUnique(),
     });
 
-    expect(getPriorityFromHeader(comap.header)).toEqual(
+    expect(getPriorityFromHeader(comap.verified.header)).toEqual(
       CO_VALUE_PRIORITY.MEDIUM,
     );
-    expect(getPriorityFromHeader(colist.header)).toEqual(
+    expect(getPriorityFromHeader(colist.verified.header)).toEqual(
       CO_VALUE_PRIORITY.MEDIUM,
     );
   });

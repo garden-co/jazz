@@ -1,0 +1,35 @@
+{
+  "name": "clerk-expo",
+  "main": "index.ts",
+  "scripts": {
+    "build": "expo prebuild",
+    "start": "expo start",
+    "android": "expo run:android",
+    "ios": "expo run:ios",
+    "web": "expo start --web"
+  },
+  "dependencies": {
+    "@azure/core-asynciterator-polyfill": "^1.0.2",
+    "@bacons/text-decoder": "^0.0.0",
+    "@bam.tech/react-native-image-resizer": "^3.0.11",
+    "@clerk/clerk-expo": "^2.13.1",
+    "@react-native-community/netinfo": "11.4.1",
+    "expo": "catalog:expo",
+    "expo-crypto": "15.0.2",
+    "expo-linking": "8.0.2",
+    "expo-secure-store": "15.0.2",
+    "expo-sqlite": "16.0.3",
+    "expo-web-browser": "14.2.0",
+    "jazz-tools": "workspace:*",
+    "react": "catalog:expo",
+    "react-native": "0.81.0",
+    "react-native-get-random-values": "^1.11.0",
+    "readable-stream": "^4.7.0"
+  },
+  "devDependencies": {
+    "@babel/core": "^7.25.2",
+    "@types/react": "19.1.10",
+    "typescript": "~5.9.2"
+  },
+  "private": true
+}

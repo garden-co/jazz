@@ -1,7 +1,7 @@
-import { CoList, CoMap, co } from "jazz-tools";
+import { co } from "jazz-tools";
 
-export class Message extends CoMap {
-  text = co.string;
-}
+export const Message = co.map({
+  text: co.plainText(),
+});
 
-export class Chat extends CoList.Of(co.ref(Message)) {}
+export const Chat = co.list(Message);

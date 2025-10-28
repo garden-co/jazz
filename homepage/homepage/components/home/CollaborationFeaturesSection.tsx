@@ -1,7 +1,7 @@
-import { Card } from "gcmp-design-system/src/app/components/atoms/Card";
-import { GappedGrid } from "gcmp-design-system/src/app/components/molecules/GappedGrid";
-import { Prose } from "gcmp-design-system/src/app/components/molecules/Prose";
-import { SectionHeader } from "gcmp-design-system/src/app/components/molecules/SectionHeader";
+import { Card } from "@garden-co/design-system/src/components/atoms/Card";
+import { GappedGrid } from "@garden-co/design-system/src/components/molecules/GappedGrid";
+import { Prose } from "@garden-co/design-system/src/components/molecules/Prose";
+import { SectionHeader } from "@garden-co/design-system/src/components/molecules/SectionHeader";
 import CollaborationInvite from "./CollaborationInvite.mdx";
 import CollaborationPrivate from "./CollaborationPrivate.mdx";
 import CollaborationPublic from "./CollaborationPublic.mdx";
@@ -9,19 +9,17 @@ import CollaborationPublic from "./CollaborationPublic.mdx";
 const data = [
   {
     title: "Private",
-    description:
-      "Create a CoValue visible only to you by assigning your Account as an owner.",
+    description: "By default, CoValues are visible only to you.",
     codeSample: CollaborationPrivate,
   },
   {
-    title: "Public",
-    description: "Start collaborating by giving write access to everyone.",
+    title: "Shared",
+    description: "Use Groups for precise access control.",
     codeSample: CollaborationPublic,
   },
   {
-    title: "Invite-only",
-    description:
-      "Generate an invite link, and share only with people you want to collaborate with.",
+    title: "By Invitation",
+    description: "Create links that allow anyone to join.",
     codeSample: CollaborationInvite,
   },
 ];
@@ -34,9 +32,8 @@ export function CollaborationFeaturesSection() {
         title="Making secure collaboration the default"
         slogan={
           <>
-            Every piece of data is assigned a role-based permission on creation
-            &mdash; reader, writer, or admin. These permissions are defined in
-            an <code>Account</code> or <code>Group</code>.
+            Every CoValue belongs to a <code>Group</code>, where you can assign
+            roles to users to control access &mdash; all from the client.
           </>
         }
       ></SectionHeader>

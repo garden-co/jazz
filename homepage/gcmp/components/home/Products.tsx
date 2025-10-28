@@ -1,11 +1,11 @@
 import { TilescapeLogo } from "@/components/TilescapeLogo";
-import { Button } from "gcmp-design-system/src/app/components/atoms/Button";
-import { GridCard } from "gcmp-design-system/src/app/components/atoms/GridCard";
-import { H2, H3 } from "gcmp-design-system/src/app/components/atoms/Headings";
-import { P } from "gcmp-design-system/src/app/components/atoms/Paragraph";
-import { GcmpLogo } from "gcmp-design-system/src/app/components/atoms/logos/GcmpLogo";
-import { JazzLogo } from "gcmp-design-system/src/app/components/atoms/logos/JazzLogo";
-import { GappedGrid } from "gcmp-design-system/src/app/components/molecules/GappedGrid";
+import { Button } from "@garden-co/design-system/src/components/atoms/Button";
+import { GridCard } from "@garden-co/design-system/src/components/atoms/GridCard";
+import { H2, H3 } from "@garden-co/design-system/src/components/atoms/Headings";
+import { P } from "@garden-co/design-system/src/components/atoms/Paragraph";
+import { GardenLogo } from "@garden-co/design-system/src/components/atoms/logos/GardenLogo";
+import { JazzLogo } from "@garden-co/design-system/src/components/atoms/logos/JazzLogo";
+import { GappedGrid } from "@garden-co/design-system/src/components/molecules/GappedGrid";
 
 function ComingSoon({ children }: { children: React.ReactNode }) {
   return (
@@ -31,7 +31,11 @@ export default function Products() {
             <div className="flex items-center justify-between gap-4">
               <JazzLogo className="h-10 w-auto" />
               <div>
-                <Button href="https://jazz.tools" variant="secondary">
+                <Button
+                  href="https://jazz.tools"
+                  intent="primary"
+                  variant="outline"
+                >
                   Go to jazz.tools
                 </Button>
               </div>
@@ -52,9 +56,9 @@ export default function Products() {
 
           <div className="mt-8 space-y-3">
             <div className="flex items-center justify-between gap-4">
-              <GcmpLogo className="h-10 w-auto" />
+              <GardenLogo className="h-11 w-auto" />
               <div>
-                <ComingSoon>Coming 2024</ComingSoon>
+                <ComingSoon>Coming 2025</ComingSoon>
               </div>
             </div>
             <P>
@@ -64,10 +68,31 @@ export default function Products() {
           </div>
         </GridCard>
 
-        <GridCard>
+        {/* <GridCard>
+            <H3>AI is an essence, not a feature.</H3>
+            <P>
+              People inhabit software. This means we can architect virtual places
+              to be fit for humans.
+            </P>
+
+            <div className="mt-8 space-y-3">
+              <div className="flex items-center justify-between gap-4">
+                <GardenLogo className="h-10 w-auto" />
+                <div>
+                  <ComingSoon>Coming 2025</ComingSoon>
+                </div>
+              </div>
+              <P>
+                Garden is a home to think in. A note-taking space for your
+                thoughts, projects and dreams.
+              </P>
+            </div>
+          </GridCard> */}
+
+        {/* <GridCard>
           <H3>Humanity needs simulation.</H3>
           <P>
-            Complex systems make up our world. Simulation makes time, space and
+            Complex systems rule our world. Simulation makes time, space and
             possibilities visceral.
           </P>
 
@@ -75,7 +100,7 @@ export default function Products() {
             <div className="flex items-center justify-between gap-4">
               <TilescapeLogo className="h-10 w-auto" />
               <div>
-                <ComingSoon>Coming 2024</ComingSoon>
+                <ComingSoon>Coming 2026</ComingSoon>
               </div>
             </div>
             <P>
@@ -83,7 +108,7 @@ export default function Products() {
               infinitely scalable simulations.
             </P>
           </div>
-        </GridCard>
+        </GridCard> */}
       </GappedGrid>
     </div>
   );

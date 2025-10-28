@@ -1,38 +1,49 @@
-import { ID } from "jazz-tools";
+import { useAcceptInvite, useIsAuthenticated } from "jazz-tools/react";
 import { useCallback } from "react";
 import { useNavigate } from "react-router-dom";
-import { Playlist } from "./1_schema";
-import { useAcceptInvite, useAccount } from "./2_main";
+import { MusicaAccount, Playlist } from "./1_schema";
 
 export function InvitePage() {
   const navigate = useNavigate();
 
-  const { me } = useAccount({
-    root: {
-      playlists: [],
-    },
-  });
+  const isAuthenticated = useIsAuthenticated();
 
   useAcceptInvite({
     invitedObjectSchema: Playlist,
     onAccept: useCallback(
-      async (playlistId: ID<Playlist>) => {
-        if (!me) return;
+      async (playlistId: string) => {
+        const playlist = await Playlist.load(playlistId, {});
 
-        const playlist = await Playlist.load(playlistId, me, {});
+        const me = await MusicaAccount.getMe().$jazz.ensureLoaded({
+          resolve: {
+            root: {
+              playlists: {
+                $each: {
+                  $onError: null,
+                },
+              },
+            },
+          },
+        });
 
         if (
           playlist &&
-          !me.root.playlists.some((item) => playlist.id === item?.id)
+          !me.root.playlists.some(
+            (item) => playlist.$jazz.id === item?.$jazz.id,
+          )
         ) {
-          me.root.playlists.push(playlist);
+          me.root.playlists.$jazz.push(playlist);
         }
 
         navigate("/playlist/" + playlistId);
       },
-      [navigate, me],
+      [navigate],
     ),
   });
 
-  return <p>Accepting invite....</p>;
+  return isAuthenticated ? (
+    <p>Accepting invite....</p>
+  ) : (
+    <p>Please sign in to accept the invite.</p>
+  );
 }

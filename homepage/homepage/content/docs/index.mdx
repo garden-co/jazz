@@ -1,0 +1,62 @@
+import { Alert, CodeGroup, ContentByFramework, JazzLogo } from "@/components/forMdx";
+
+export const metadata = {
+  title: "Documentation",
+};
+
+# Learn some <span className="sr-only">Jazz</span> <JazzLogo className="h-[41px] -ml-0.5 -mt-[3px] inline" />
+
+**Jazz is a new kind of database** that's **distributed** across your frontend, containers, serverless functions and its own storage cloud.
+
+It syncs structured data, files and LLM streams instantly, and looks like local reactive JSON state.
+
+It also provides auth, orgs & teams, real-time multiplayer, edit histories, permissions, E2E encryption and offline-support out of the box.
+
+---
+
+## Quickstart
+
+**Want to learn the basics?** Check out our [quickstart guide](/docs/quickstart) for a step-by-step guide to building a simple app with Jazz.
+
+**Just want to get started?** You can use [`create-jazz-app`](/docs/tooling-and-resources/create-jazz-app) to create a new Jazz project from one of our starter templates or example apps:
+
+<CodeGroup>
+  ```sh
+    npx create-jazz-app@latest --api-key you@example.com
+  ```
+</CodeGroup>
+
+**Using an LLM?** <a href="https://jazz.tools/llms-full.txt" download>Add our llms.txt</a> to your context window!
+
+
+<Alert variant="info" className="mt-4 flex gap-2 items-center">
+ Requires at least Node.js v20.
+ See our [Troubleshooting Guide](/docs/troubleshooting) for quick fixes.
+</Alert>
+
+## How it works
+
+1. **Define your data** with CoValues schemas
+2. **Connect to storage infrastructure** (Jazz Cloud or self-hosted)
+3. **Create and edit CoValues** like normal objects
+4. **Get automatic sync and persistence** across all devices and users
+
+Your UI updates instantly on every change, everywhere. It's like having reactive local state that happens to be shared with the world.
+
+## Ready to see Jazz in action?
+
+Have a look at our [example apps](/examples) for inspiration and to see what's possible with Jazz. From real-time chat and collaborative editors to file sharing and social features — these are just the beginning of what you can build.
+
+## Core concepts
+
+Learn how to structure your data using [collaborative values](/docs/core-concepts/covalues/overview) — the building blocks that make Jazz apps work.
+
+## Sync and storage
+
+Sync and persist your data by setting up [sync and storage infrastructure](/docs/core-concepts/sync-and-storage) using Jazz Cloud, or host it yourself.
+
+## Going deeper
+
+Get better results with AI by [importing the Jazz docs](/docs/tooling-and-resources/ai-tools) into your context window.
+
+If you have any questions or need assistance, please don't hesitate to reach out to us on [Discord](https://discord.gg/utDMjHYg42). We'd love to help you get started.

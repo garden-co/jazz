@@ -1,45 +1,136 @@
-import { PeerKnownStateActions, PeerKnownStates } from "./PeerKnownStates.js";
-import {
-  PriorityBasedMessageQueue,
-  QueueEntry,
-} from "./PriorityBasedMessageQueue.js";
-import { TryAddTransactionsError } from "./coValueCore.js";
-import { RawCoID } from "./ids.js";
-import { CO_VALUE_PRIORITY } from "./priority.js";
+import { PeerKnownState } from "./coValueCore/PeerKnownState.js";
+import { RawCoID, SessionID } from "./ids.js";
+import { CoValueKnownState } from "./knownState.js";
+import { logger } from "./logger.js";
 import { Peer, SyncMessage } from "./sync.js";
 
 export class PeerState {
-  constructor(
-    private peer: Peer,
-    knownStates: PeerKnownStates | undefined,
-  ) {
-    this.optimisticKnownStates = knownStates?.clone() ?? new PeerKnownStates();
-    this.knownStates = knownStates?.clone() ?? new PeerKnownStates();
-  }
-
   /**
    * Here we to collect all the known states that a given peer has told us about.
    *
    * This can be used to safely track the sync state of a coValue in a given peer.
    */
-  readonly knownStates: PeerKnownStates;
+  private readonly _knownStates: Map<RawCoID, PeerKnownState>;
 
-  /**
-   * This one collects the known states "optimistically".
-   * We use it to keep track of the content we have sent to a given peer.
-   *
-   * The main difference with knownState is that this is updated when the content is sent to the peer without
-   * waiting for any acknowledgement from the peer.
-   */
-  readonly optimisticKnownStates: PeerKnownStates;
-  readonly toldKnownState: Set<RawCoID> = new Set();
-
-  dispatchToKnownStates(action: PeerKnownStateActions) {
-    this.knownStates.dispatch(action);
-    this.optimisticKnownStates.dispatch(action);
+  constructor(
+    private peer: Peer,
+    knownStates: Map<RawCoID, PeerKnownState> | undefined,
+  ) {
+    this._knownStates = knownStates ?? new Map();
   }
 
-  readonly erroredCoValues: Map<RawCoID, TryAddTransactionsError> = new Map();
+  getKnownState(id: RawCoID) {
+    return this._knownStates.get(id)?.value();
+  }
+
+  getOptimisticKnownState(id: RawCoID) {
+    return this._knownStates.get(id)?.optimisticValue();
+  }
+
+  isCoValueSubscribedToPeer(id: RawCoID) {
+    return this._knownStates.has(id);
+  }
+
+  /**
+   * Closes the current peer state and creates a new one from a given peer,
+   * keeping the same known states.
+   *
+   * This is used to create a new peer state when a peer reconnects.
+   */
+  newPeerStateFrom(peer: Peer) {
+    if (!this.closed) {
+      this.gracefulShutdown();
+    }
+
+    const knownStates = new Map<RawCoID, PeerKnownState>();
+    // On reconnect, we reset all the optimistic known states
+    // because we can't know if those syncs were successful or not
+    for (const knownState of this._knownStates.values()) {
+      knownStates.set(knownState.id, knownState.cloneWithoutOptimistic());
+    }
+
+    return new PeerState(peer, knownStates);
+  }
+
+  readonly toldKnownState: Set<RawCoID> = new Set();
+  readonly loadRequestSent: Set<RawCoID> = new Set();
+
+  trackLoadRequestSent(id: RawCoID) {
+    this.toldKnownState.add(id);
+    this.loadRequestSent.add(id);
+  }
+
+  trackToldKnownState(id: RawCoID) {
+    this.toldKnownState.add(id);
+  }
+
+  private getOrCreateKnownState(id: RawCoID) {
+    let knownState = this._knownStates.get(id);
+
+    if (!knownState) {
+      knownState = new PeerKnownState(id, this.peer.id);
+      this._knownStates.set(id, knownState);
+    }
+
+    return knownState;
+  }
+
+  updateHeader(id: RawCoID, header: boolean) {
+    const knownState = this.getOrCreateKnownState(id);
+    knownState.updateHeader(header);
+    this.triggerUpdate(id, knownState);
+  }
+
+  combineWith(id: RawCoID, value: CoValueKnownState) {
+    const knownState = this.getOrCreateKnownState(id);
+    knownState.combineWith(value);
+    this.triggerUpdate(id, knownState);
+  }
+
+  combineOptimisticWith(id: RawCoID, value: CoValueKnownState) {
+    const knownState = this.getOrCreateKnownState(id);
+    knownState.combineOptimisticWith(value);
+    this.triggerUpdate(id, knownState);
+  }
+
+  setKnownState(id: RawCoID, payload: CoValueKnownState | "empty") {
+    const knownState = this.getOrCreateKnownState(id);
+    knownState.set(payload);
+    this.triggerUpdate(id, knownState);
+  }
+
+  /**
+   * Emit a change event for a given coValue.
+   *
+   * This is used to notify subscribers that the known state of a coValue has changed,
+   * but the known state of the peer has not.
+   */
+  emitCoValueChange(id: RawCoID) {
+    if (this.peer.role === "client" && !this.isCoValueSubscribedToPeer(id)) {
+      return;
+    }
+
+    const knownState = this.getOrCreateKnownState(id);
+    this.triggerUpdate(id, knownState);
+  }
+
+  listeners = new Set<(id: RawCoID, value: PeerKnownState) => void>();
+
+  private triggerUpdate(id: RawCoID, value: PeerKnownState) {
+    for (const listener of this.listeners) {
+      listener(id, value);
+    }
+  }
+
+  subscribeToKnownStatesUpdates(
+    listener: (id: RawCoID, value: PeerKnownState) => void,
+  ) {
+    this.listeners.add(listener);
+
+    return () => {
+      this.listeners.delete(listener);
+    };
+  }
 
   get id() {
     return this.peer.id;
@@ -53,83 +144,57 @@ export class PeerState {
     return this.peer.priority;
   }
 
-  get crashOnClose() {
-    return this.peer.crashOnClose;
-  }
-
-  shouldRetryUnavailableCoValues() {
-    return this.peer.role === "server";
-  }
-
-  isServerOrStoragePeer() {
-    return this.peer.role === "server" || this.peer.role === "storage";
-  }
-
-  /**
-   * We set as default priority HIGH to handle all the messages without a
-   * priority property as HIGH priority.
-   *
-   * This way we consider all the non-content messsages as HIGH priority.
-   */
-  private queue = new PriorityBasedMessageQueue(CO_VALUE_PRIORITY.HIGH);
-  private processing = false;
   public closed = false;
 
-  async processQueue() {
-    if (this.processing) {
-      return;
-    }
-
-    this.processing = true;
-
-    let entry: QueueEntry | undefined;
-    while ((entry = this.queue.pull())) {
-      // Awaiting the push to send one message at a time
-      // This way when the peer is "under pressure" we can enqueue all
-      // the coming messages and organize them by priority
-      await this.peer.outgoing
-        .push(entry.msg)
-        .then(entry.resolve)
-        .catch(entry.reject);
-    }
-
-    this.processing = false;
-  }
-
-  pushOutgoingMessage(msg: SyncMessage) {
-    if (this.closed) {
-      return Promise.resolve();
-    }
-
-    const promise = this.queue.push(msg);
-
-    void this.processQueue();
-
-    return promise;
-  }
-
   get incoming() {
-    if (this.closed) {
-      return (async function* () {
-        yield "Disconnected" as const;
-      })();
-    }
-
     return this.peer.incoming;
   }
 
-  private closeQueue() {
-    let entry: QueueEntry | undefined;
-    while ((entry = this.queue.pull())) {
-      // Using resolve here to avoid unnecessary noise in the logs
-      entry.resolve();
+  get persistent() {
+    return this.peer.persistent;
+  }
+
+  pushOutgoingMessage(msg: SyncMessage) {
+    this.peer.outgoing.push(msg);
+  }
+
+  closeListeners = new Set<() => void>();
+
+  addCloseListener(listener: () => void) {
+    if (this.closed) {
+      listener();
+      return () => {};
     }
+
+    this.closeListeners.add(listener);
+
+    return () => {
+      this.closeListeners.delete(listener);
+    };
+  }
+
+  emitClose() {
+    for (const listener of this.closeListeners) {
+      listener();
+    }
+
+    this.closeListeners.clear();
   }
 
   gracefulShutdown() {
-    console.debug("Gracefully closing", this.id);
-    this.closeQueue();
-    this.peer.outgoing.close();
+    if (this.closed) {
+      return;
+    }
+
+    logger.debug("Gracefully closing", {
+      peerId: this.id,
+      peerRole: this.role,
+    });
+
     this.closed = true;
+    this.peer.outgoing.push("Disconnected");
+    this.peer.outgoing.close();
+    this.peer.incoming.close();
+    this.emitClose();
   }
 }

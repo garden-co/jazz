@@ -1,15 +1,16 @@
 import { CoID, RawCoValue } from "../coValue.js";
-import { CoValueCore } from "../coValueCore.js";
-import { AgentID, SessionID, TransactionID } from "../ids.js";
+import { AvailableCoValueCore } from "../coValueCore/coValueCore.js";
+import { AgentID, SessionID, TransactionID, RawCoID } from "../ids.js";
 import { JsonObject, JsonValue } from "../jsonValue.js";
 import { accountOrAgentIDfromSessionID } from "../typeUtils/accountOrAgentIDfromSessionID.js";
 import { isCoValue } from "../typeUtils/isCoValue.js";
 import { RawAccountID } from "./account.js";
 import { RawGroup } from "./group.js";
+import { Transaction } from "../coValueCore/verifiedState.js";
 
-type OpID = TransactionID & { changeIdx: number };
+export type OpID = TransactionID & { changeIdx: number };
 
-type InsertionOpPayload<T extends JsonValue> =
+export type InsertionOpPayload<T extends JsonValue> =
   | {
       op: "pre";
       value: T;
@@ -21,7 +22,7 @@ type InsertionOpPayload<T extends JsonValue> =
       after: OpID | "start";
     };
 
-type DeletionOpPayload = {
+export type DeletionOpPayload = {
   op: "del";
   insertion: OpID;
 };
@@ -34,14 +35,16 @@ type InsertionEntry<T extends JsonValue> = {
   madeAt: number;
   predecessors: OpID[];
   successors: OpID[];
-} & InsertionOpPayload<T>;
+  change: InsertionOpPayload<T>;
+};
 
 type DeletionEntry = {
   madeAt: number;
   deletionID: OpID;
-} & DeletionOpPayload;
+  change: DeletionOpPayload;
+};
 
-export class RawCoListView<
+export class RawCoList<
   Item extends JsonValue = JsonValue,
   Meta extends JsonObject | null = null,
 > implements RawCoValue
@@ -49,9 +52,9 @@ export class RawCoListView<
   /** @category 6. Meta */
   id: CoID<this>;
   /** @category 6. Meta */
-  type = "colist" as const;
+  type: "colist" | "coplaintext" = "colist" as const;
   /** @category 6. Meta */
-  core: CoValueCore;
+  core: AvailableCoValueCore;
   /** @internal */
   afterStart: OpID[];
   /** @internal */
@@ -81,117 +84,183 @@ export class RawCoListView<
     madeAt: number;
     opID: OpID;
   }[];
+  /** @internal */
+  knownTransactions: Record<RawCoID, number>;
+  totalValidTransactions: number = 0;
+
+  lastValidTransaction: number | undefined;
 
   /** @internal */
-  constructor(core: CoValueCore) {
+  constructor(core: AvailableCoValueCore) {
     this.id = core.id as CoID<this>;
     this.core = core;
-    this.afterStart = [];
-    this.beforeEnd = [];
-    this.insertions = {};
-    this.deletionsByInsertion = {};
 
     this.insertions = {};
     this.deletionsByInsertion = {};
     this.afterStart = [];
     this.beforeEnd = [];
+    this.knownTransactions = { [core.id]: 0 };
 
-    for (const {
-      txID,
-      changes,
-      madeAt,
-    } of this.core.getValidSortedTransactions()) {
+    this.processNewTransactions();
+  }
+
+  private getInsertionsEntry(opID: OpID) {
+    const index = getSessionIndex(opID);
+
+    const sessionEntry = this.insertions[index];
+    if (!sessionEntry) {
+      return undefined;
+    }
+
+    const txEntry = sessionEntry[opID.txIndex];
+    if (!txEntry) {
+      return undefined;
+    }
+
+    return txEntry[opID.changeIdx];
+  }
+
+  private createInsertionsEntry(opID: OpID, value: InsertionEntry<Item>) {
+    const index = getSessionIndex(opID);
+
+    let sessionEntry = this.insertions[index];
+    if (!sessionEntry) {
+      sessionEntry = {};
+      this.insertions[index] = sessionEntry;
+    }
+
+    let txEntry = sessionEntry[opID.txIndex];
+    if (!txEntry) {
+      txEntry = {};
+      sessionEntry[opID.txIndex] = txEntry;
+    }
+
+    // Check if the change index already exists, may be the case of double merges
+    if (txEntry[opID.changeIdx]) {
+      return false;
+    }
+
+    txEntry[opID.changeIdx] = value;
+    return true;
+  }
+
+  private isDeleted(opID: OpID) {
+    const index = getSessionIndex(opID);
+
+    const sessionEntry = this.deletionsByInsertion[index];
+
+    if (!sessionEntry) {
+      return false;
+    }
+
+    const txEntry = sessionEntry[opID.txIndex];
+
+    if (!txEntry) {
+      return false;
+    }
+
+    return Boolean(txEntry[opID.changeIdx]?.length);
+  }
+
+  private pushDeletionsByInsertionEntry(opID: OpID, value: DeletionEntry) {
+    const index = getSessionIndex(opID);
+
+    let sessionEntry = this.deletionsByInsertion[index];
+    if (!sessionEntry) {
+      sessionEntry = {};
+      this.deletionsByInsertion[index] = sessionEntry;
+    }
+
+    let txEntry = sessionEntry[opID.txIndex];
+    if (!txEntry) {
+      txEntry = {};
+      sessionEntry[opID.txIndex] = txEntry;
+    }
+
+    let list = txEntry[opID.changeIdx];
+
+    if (!list) {
+      list = [];
+      txEntry[opID.changeIdx] = list;
+    }
+
+    list.push(value);
+  }
+
+  processNewTransactions() {
+    const transactions = this.core.getValidSortedTransactions({
+      ignorePrivateTransactions: false,
+      knownTransactions: this.knownTransactions,
+    });
+
+    if (transactions.length === 0) {
+      return;
+    }
+
+    let lastValidTransaction: number | undefined = undefined;
+    let oldestValidTransaction: number | undefined = undefined;
+    this._cachedEntries = undefined;
+
+    for (const { txID, changes, madeAt } of transactions) {
+      lastValidTransaction = Math.max(lastValidTransaction ?? 0, madeAt);
+      oldestValidTransaction = Math.min(
+        oldestValidTransaction ?? Infinity,
+        madeAt,
+      );
+
       for (const [changeIdx, changeUntyped] of changes.entries()) {
         const change = changeUntyped as ListOpPayload<Item>;
 
+        const opID = {
+          sessionID: txID.sessionID,
+          txIndex: txID.txIndex,
+          branch: txID.branch,
+          changeIdx,
+        };
+
         if (change.op === "pre" || change.op === "app") {
-          let sessionEntry = this.insertions[txID.sessionID];
-          if (!sessionEntry) {
-            sessionEntry = {};
-            this.insertions[txID.sessionID] = sessionEntry;
-          }
-          let txEntry = sessionEntry[txID.txIndex];
-          if (!txEntry) {
-            txEntry = {};
-            sessionEntry[txID.txIndex] = txEntry;
-          }
-          txEntry[changeIdx] = {
+          const created = this.createInsertionsEntry(opID, {
             madeAt,
             predecessors: [],
             successors: [],
-            ...change,
-          };
+            change,
+          });
+
+          // If the change index already exists, we don't need to process it again
+          if (!created) {
+            continue;
+          }
+
           if (change.op === "pre") {
             if (change.before === "end") {
-              this.beforeEnd.push({
-                ...txID,
-                changeIdx,
-              });
+              this.beforeEnd.push(opID);
             } else {
-              const beforeEntry =
-                this.insertions[change.before.sessionID]?.[
-                  change.before.txIndex
-                ]?.[change.before.changeIdx];
+              const beforeEntry = this.getInsertionsEntry(change.before);
+
               if (!beforeEntry) {
-                // console.error(
-                //     "Insertion before missing op " +
-                //         change.before
-                // );
                 continue;
               }
-              beforeEntry.predecessors.splice(0, 0, {
-                ...txID,
-                changeIdx,
-              });
+
+              beforeEntry.predecessors.push(opID);
             }
           } else {
             if (change.after === "start") {
-              this.afterStart.push({
-                ...txID,
-                changeIdx,
-              });
+              this.afterStart.push(opID);
             } else {
-              const afterEntry =
-                this.insertions[change.after.sessionID]?.[
-                  change.after.txIndex
-                ]?.[change.after.changeIdx];
+              const afterEntry = this.getInsertionsEntry(change.after);
+
               if (!afterEntry) {
-                // console.error(
-                //     "Insertion after missing op " + change.after
-                // );
                 continue;
               }
-              afterEntry.successors.push({
-                ...txID,
-                changeIdx,
-              });
+
+              afterEntry.successors.push(opID);
             }
           }
         } else if (change.op === "del") {
-          let sessionEntry =
-            this.deletionsByInsertion[change.insertion.sessionID];
-          if (!sessionEntry) {
-            sessionEntry = {};
-            this.deletionsByInsertion[change.insertion.sessionID] =
-              sessionEntry;
-          }
-          let txEntry = sessionEntry[change.insertion.txIndex];
-          if (!txEntry) {
-            txEntry = {};
-            sessionEntry[change.insertion.txIndex] = txEntry;
-          }
-          let changeEntry = txEntry[change.insertion.changeIdx];
-          if (!changeEntry) {
-            changeEntry = [];
-            txEntry[change.insertion.changeIdx] = changeEntry;
-          }
-          changeEntry.push({
+          this.pushDeletionsByInsertionEntry(change.insertion, {
             madeAt,
-            deletionID: {
-              ...txID,
-              changeIdx,
-            },
-            ...change,
+            deletionID: opID,
+            change,
           });
         } else {
           throw new Error(
@@ -200,11 +269,23 @@ export class RawCoListView<
         }
       }
     }
+
+    if (
+      this.lastValidTransaction &&
+      oldestValidTransaction &&
+      oldestValidTransaction < this.lastValidTransaction
+    ) {
+      this.rebuildFromCore();
+    } else {
+      this.lastValidTransaction = lastValidTransaction;
+    }
+
+    this.totalValidTransactions += transactions.length;
   }
 
   /** @category 6. Meta */
   get headerMeta(): Meta {
-    return this.core.header.meta as Meta;
+    return this.core.verified.header.meta as Meta;
   }
 
   /** @category 6. Meta */
@@ -286,29 +367,46 @@ export class RawCoListView<
       opID: OpID;
     }[],
   ) {
-    const entry =
-      this.insertions[opID.sessionID]?.[opID.txIndex]?.[opID.changeIdx];
-    if (!entry) {
-      throw new Error("Missing op " + opID);
-    }
-    for (const predecessor of entry.predecessors) {
-      this.fillArrayFromOpID(predecessor, arr);
-    }
-    const deleted =
-      (this.deletionsByInsertion[opID.sessionID]?.[opID.txIndex]?.[
-        opID.changeIdx
-      ]?.length || 0) > 0;
-    if (!deleted) {
-      arr.push({
-        value: entry.value,
-        madeAt: entry.madeAt,
-        opID,
-      });
-    }
-    // traverse successors in reverse for correct insertion behavior
-    for (let i = entry.successors.length - 1; i >= 0; i--) {
-      const successor = entry.successors[i]!;
-      this.fillArrayFromOpID(successor, arr);
+    const todo = [opID]; // a stack with the next item to do at the end
+    const predecessorsVisited = new Set<OpID>();
+
+    while (todo.length > 0) {
+      const currentOpID = todo[todo.length - 1]!;
+
+      const entry = this.getInsertionsEntry(currentOpID);
+
+      if (!entry) {
+        throw new Error("Missing op " + currentOpID);
+      }
+
+      const shouldTraversePredecessors =
+        entry.predecessors.length > 0 && !predecessorsVisited.has(currentOpID);
+
+      // We navigate the predecessors before processing the current opID in the list
+      if (shouldTraversePredecessors) {
+        for (const predecessor of entry.predecessors) {
+          todo.push(predecessor);
+        }
+        predecessorsVisited.add(currentOpID);
+      } else {
+        // Remove the current opID from the todo stack to consider it processed.
+        todo.pop();
+
+        const deleted = this.isDeleted(currentOpID);
+
+        if (!deleted) {
+          arr.push({
+            value: entry.change.value,
+            madeAt: entry.madeAt,
+            opID: currentOpID,
+          });
+        }
+
+        // traverse successors in reverse for correct insertion behavior
+        for (const successor of entry.successors) {
+          todo.push(successor);
+        }
+      }
     }
   }
 
@@ -387,19 +485,11 @@ export class RawCoListView<
 
   /** @category 3. Subscription */
   subscribe(listener: (coList: this) => void): () => void {
-    return this.core.subscribe((content) => {
-      listener(content as this);
+    return this.core.subscribe((core) => {
+      listener(core.getCurrentContent() as this);
     });
   }
-}
 
-export class RawCoList<
-    Item extends JsonValue = JsonValue,
-    Meta extends JsonObject | null = JsonObject | null,
-  >
-  extends RawCoListView<Item, Meta>
-  implements RawCoValue
-{
   /** Appends `item` after the item currently at index `after`.
    *
    * If `privacy` is `"private"` **(default)**, `item` is encrypted in the transaction, only readable by other members of the group this `CoList` belongs to. Not even sync servers can see the content in plaintext.
@@ -413,14 +503,31 @@ export class RawCoList<
     after?: number,
     privacy: "private" | "trusting" = "private",
   ) {
+    this.appendItems([item], after, privacy);
+  }
+
+  /**
+   * Appends `items` to the list at index `after`. If `after` is negative, it is treated as `0`.
+   *
+   * If `privacy` is `"private"` **(default)**, `items` are encrypted in the transaction, only readable by other members of the group this `CoList` belongs to. Not even sync servers can see the content in plaintext.
+   *
+   * If `privacy` is `"trusting"`, `items` are stored in plaintext in the transaction, visible to everyone who gets a hold of it, including sync servers.
+   *
+   * @category 2. Editing
+   */
+  appendItems(
+    items: Item[],
+    after?: number,
+    privacy: "private" | "trusting" = "private",
+  ) {
     const entries = this.entries();
     after =
       after === undefined
         ? entries.length > 0
           ? entries.length - 1
           : 0
-        : after;
-    let opIDBefore;
+        : Math.max(0, after);
+    let opIDBefore: OpID | "start";
     if (entries.length > 0) {
       const entryBefore = entries[after];
       if (!entryBefore) {
@@ -433,24 +540,21 @@ export class RawCoList<
       }
       opIDBefore = "start";
     }
-    this.core.makeTransaction(
-      [
-        {
-          op: "app",
-          value: isCoValue(item) ? item.id : item,
-          after: opIDBefore,
-        },
-      ],
-      privacy,
-    );
 
-    const listAfter = new RawCoList(this.core) as this;
+    const changes = items.map((item) => ({
+      op: "app",
+      value: isCoValue(item) ? item.id : item,
+      after: opIDBefore,
+    }));
 
-    this.afterStart = listAfter.afterStart;
-    this.beforeEnd = listAfter.beforeEnd;
-    this.insertions = listAfter.insertions;
-    this.deletionsByInsertion = listAfter.deletionsByInsertion;
-    this._cachedEntries = undefined;
+    if (opIDBefore !== "start") {
+      // When added as successors we need to reverse the items
+      // to keep the same insertion order
+      changes.reverse();
+    }
+
+    this.core.makeTransaction(changes, privacy);
+    this.processNewTransactions();
   }
 
   /**
@@ -497,13 +601,7 @@ export class RawCoList<
       privacy,
     );
 
-    const listAfter = new RawCoList(this.core) as this;
-
-    this.afterStart = listAfter.afterStart;
-    this.beforeEnd = listAfter.beforeEnd;
-    this.insertions = listAfter.insertions;
-    this.deletionsByInsertion = listAfter.deletionsByInsertion;
-    this._cachedEntries = undefined;
+    this.processNewTransactions();
   }
 
   /** Deletes the item at index `at`.
@@ -530,13 +628,7 @@ export class RawCoList<
       privacy,
     );
 
-    const listAfter = new RawCoList(this.core) as this;
-
-    this.afterStart = listAfter.afterStart;
-    this.beforeEnd = listAfter.beforeEnd;
-    this.insertions = listAfter.insertions;
-    this.deletionsByInsertion = listAfter.deletionsByInsertion;
-    this._cachedEntries = undefined;
+    this.processNewTransactions();
   }
 
   replace(
@@ -564,12 +656,27 @@ export class RawCoList<
       ],
       privacy,
     );
+    this.processNewTransactions();
+  }
+
+  /** @internal */
+  rebuildFromCore() {
     const listAfter = new RawCoList(this.core) as this;
 
     this.afterStart = listAfter.afterStart;
     this.beforeEnd = listAfter.beforeEnd;
     this.insertions = listAfter.insertions;
+    this.lastValidTransaction = listAfter.lastValidTransaction;
+    this.knownTransactions = listAfter.knownTransactions;
+    this.totalValidTransactions = listAfter.totalValidTransactions;
     this.deletionsByInsertion = listAfter.deletionsByInsertion;
     this._cachedEntries = undefined;
   }
+}
+
+function getSessionIndex(txID: TransactionID): SessionID {
+  if (txID.branch) {
+    return `${txID.sessionID}_branch_${txID.branch}`;
+  }
+  return txID.sessionID;
 }

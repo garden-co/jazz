@@ -3,36 +3,40 @@ import {
   useNavigationContainerRef,
 } from "@react-navigation/native";
 import { createNativeStackNavigator } from "@react-navigation/native-stack";
-import * as Linking from "expo-linking";
+import { JazzReactNativeProvider } from "jazz-tools/react-native";
 import React, { StrictMode, useEffect, useState } from "react";
-import HandleInviteScreen from "./invite";
+import { Linking } from "react-native";
+import { apiKey } from "./apiKey";
+import { ChatScreen } from "./chat";
+import { HandleInviteScreen } from "./invite";
+import { theme } from "./theme";
 
-import { DemoAuthBasicUI, useDemoAuth } from "jazz-react-native";
-import ChatScreen from "./chat";
-import { Jazz } from "./jazz";
-
-const Stack = createNativeStackNavigator();
-
-const prefix = Linking.createURL("/");
-
-const linking = {
-  prefixes: [prefix],
-  config: {
-    screens: {
-      HandleInviteScreen: {
-        path: "router/invite/:valueHint?/:valueID/:inviteSecret",
-      },
-    },
-  },
+type RootStackParamList = {
+  ChatScreen: undefined;
+  HandleInviteScreen: undefined;
 };
 
+// Create the stack navigator with proper typing
+const Stack = createNativeStackNavigator<RootStackParamList>();
+
+// const prefix = Linking.createURL("/");
+
+// const linking = {
+//   prefixes: [prefix],
+//   config: {
+//     screens: {
+//       HandleInviteScreen: {
+//         path: "router/invite/:valueHint?/:valueID/:inviteSecret",
+//       },
+//     },
+//   },
+// };
+
 function App() {
-  const [auth, state] = useDemoAuth();
   const [initialRoute, setInitialRoute] = useState<
     "ChatScreen" | "HandleInviteScreen"
   >("ChatScreen");
   const navigationRef = useNavigationContainerRef();
-
   useEffect(() => {
     Linking.getInitialURL().then((url) => {
       if (url) {
@@ -43,23 +47,18 @@ function App() {
     });
   }, []);
 
-  if (!auth) {
-    return null;
-  }
-
   return (
     <StrictMode>
-      <Jazz.Provider
-        auth={auth}
-        peer="wss://cloud.jazz.tools/?key=chat-rn-example-jazz@garden.co"
-        storage={undefined}
+      <JazzReactNativeProvider
+        sync={{
+          peer: `wss://cloud.jazz.tools/?key=${apiKey}`,
+        }}
       >
-        <NavigationContainer linking={linking} ref={navigationRef}>
+        <NavigationContainer ref={navigationRef} theme={theme}>
           <Stack.Navigator initialRouteName={initialRoute}>
             <Stack.Screen
               options={{ title: "Jazz Chat" }}
               name="ChatScreen"
-              // @ts-ignore
               component={ChatScreen}
             />
             <Stack.Screen
@@ -68,10 +67,7 @@ function App() {
             />
           </Stack.Navigator>
         </NavigationContainer>
-      </Jazz.Provider>
-      {state.state !== "signedIn" ? (
-        <DemoAuthBasicUI appName="Jazz Chat" state={state} />
-      ) : null}
+      </JazzReactNativeProvider>
     </StrictMode>
   );
 }

@@ -1,7 +1,7 @@
-import { CoMap, FileStream, co } from "jazz-tools";
+import { co, z } from "jazz-tools";
 
-export class UploadedFile extends CoMap {
-  file = co.ref(FileStream);
-  syncCompleted = co.boolean;
-  coMapDownloaded = co.boolean;
-}
+export const UploadedFile = co.map({
+  file: co.fileStream(),
+  syncCompleted: z.boolean(),
+  coMapDownloaded: z.boolean(),
+});

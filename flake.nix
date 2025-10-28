@@ -2,7 +2,7 @@
   description = "Jazz development environment";
 
   inputs = {
-    nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
+    nixpkgs.url = "nixpkgs/nixos-25.05";
     flake-utils.url = "github:numtide/flake-utils";
   };
 
@@ -16,13 +16,20 @@
       {
         devShells.default = pkgs.mkShell {
           buildInputs = with pkgs; [
+            # General development
+            git
+            turbo
+            
+            # JS development
             nodejs_22
-            nodePackages.pnpm
+            pnpm_9
           ];
 
           shellHook = ''
+            echo ""
             echo "Welcome to the Jazz development environment!"
-            echo "Run 'pnpm install' to install the dependencies."
+            echo "Run 'pnpm install' to install dependencies."
+            echo ""
           '';
         };
       });

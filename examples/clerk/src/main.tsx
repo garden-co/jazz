@@ -1,10 +1,12 @@
-import { ClerkProvider, SignInButton, useClerk } from "@clerk/clerk-react";
-import { createJazzReactApp } from "jazz-react";
-import { useJazzClerkAuth } from "jazz-react-auth-clerk";
+import { ClerkProvider, SignOutButton, useClerk } from "@clerk/clerk-react";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import App from "./App.tsx";
 import "./index.css";
+import { JazzInspector } from "jazz-tools/inspector";
+import { JazzReactProviderWithClerk } from "jazz-tools/react";
+import { ReactNode } from "react";
+import { apiKey } from "./apiKey";
 
 // Import your publishable key
 const PUBLISHABLE_KEY = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY;
@@ -13,38 +15,40 @@ if (!PUBLISHABLE_KEY) {
   throw new Error("Add your Clerk publishable key to the .env.local file");
 }
 
-const Jazz = createJazzReactApp();
-export const { useAccount, useCoState } = Jazz;
-
-function JazzAndAuth({ children }: { children: React.ReactNode }) {
+function JazzProvider({ children }: { children: ReactNode }) {
   const clerk = useClerk();
-  const [auth, state] = useJazzClerkAuth(clerk);
 
   return (
-    <main className="container">
-      {state?.errors?.map((error) => (
-        <div key={error}>{error}</div>
-      ))}
-      {clerk.user && auth ? (
-        <Jazz.Provider
-          auth={auth}
-          peer="wss://cloud.jazz.tools/?key=minimal-auth-clerk-example@garden.co"
-        >
-          {children}
-        </Jazz.Provider>
-      ) : (
-        <SignInButton />
-      )}
-    </main>
+    <JazzReactProviderWithClerk
+      clerk={clerk}
+      sync={{
+        peer: `wss://cloud.jazz.tools/?key=${apiKey}`,
+      }}
+      fallback={<p>Loading...</p>}
+    >
+      {children}
+    </JazzReactProviderWithClerk>
   );
 }
 
-createRoot(document.getElementById("root")!).render(
-  <StrictMode>
-    <ClerkProvider publishableKey={PUBLISHABLE_KEY} afterSignOutUrl="/">
-      <JazzAndAuth>
-        <App />
-      </JazzAndAuth>
-    </ClerkProvider>
-  </StrictMode>,
-);
+// Route to test that when the Clerk user expires, the app is logged out
+if (location.search.includes("expirationTest")) {
+  createRoot(document.getElementById("root")!).render(
+    <StrictMode>
+      <ClerkProvider publishableKey={PUBLISHABLE_KEY} afterSignOutUrl="/">
+        <SignOutButton>Simulate expiration</SignOutButton>
+      </ClerkProvider>
+    </StrictMode>,
+  );
+} else {
+  createRoot(document.getElementById("root")!).render(
+    <StrictMode>
+      <ClerkProvider publishableKey={PUBLISHABLE_KEY} afterSignOutUrl="/">
+        <JazzProvider>
+          <App />
+          <JazzInspector />
+        </JazzProvider>
+      </ClerkProvider>
+    </StrictMode>,
+  );
+}

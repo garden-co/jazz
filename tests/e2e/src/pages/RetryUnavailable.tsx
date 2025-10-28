@@ -1,9 +1,9 @@
-import { CoMap, Group, ID, co } from "jazz-tools";
+import { CoMap, Group, ID, coField } from "jazz-tools";
+import { useAccount, useCoState } from "jazz-tools/react";
 import { useEffect, useState } from "react";
-import { useAccount, useCoState } from "../jazz";
 
 export class RetryUnavailableCoMap extends CoMap {
-  value = co.string;
+  value = coField.string;
 }
 
 function getIdParam() {
@@ -32,14 +32,15 @@ export function RetryUnavailable() {
     group.addMember("everyone", "writer");
 
     setId(
-      RetryUnavailableCoMap.create({ value: "Hello!" }, { owner: group }).id,
+      RetryUnavailableCoMap.create({ value: "Hello!" }, { owner: group }).$jazz
+        .id,
     );
   };
 
   return (
     <div>
       <h1>Retry Unavailable</h1>
-      <p data-testid="id">{coMap?.id}</p>
+      <p data-testid="id">{coMap?.$jazz.id}</p>
       <button onClick={createCoMap}>Create a new value!</button>
     </div>
   );

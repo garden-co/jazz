@@ -7,7 +7,7 @@ import { pingColorThresholds } from "../../../components/cloud/pingColorThreshol
 // generated with: globalping ping cloud.jazz.tools from world --limit 500 --packets 16 --json | jq "del(.results[].result.rawOutput)" > pings.json
 import pings from "../../../components/cloud/pings.json";
 
-export const revalidate = 2 * 60 * 60; // 2 hours
+export const revalidate = 7200; // 2 hours
 
 export async function GET(req: NextRequest) {
   const spacing = parseFloat(req.nextUrl.searchParams.get("spacing") || "1.5");
@@ -227,6 +227,9 @@ export async function GET(req: NextRequest) {
     </svg>`;
 
   return new Response(svg, {
-    headers: { "Content-Type": "image/svg+xml" },
+    headers: {
+      "Content-Type": "image/svg+xml",
+      "Cache-Control": "public, s-maxage=7200, stale-while-revalidate=3600",
+    },
   });
 }

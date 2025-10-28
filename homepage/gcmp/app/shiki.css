@@ -247,7 +247,13 @@ data-lsp {
 }
 .tag-container .twoslash-annotation {
   position: absolute;
-  font-family: "JetBrains Mono", Menlo, Monaco, Consolas, Courier New, monospace;
+  font-family:
+    "JetBrains Mono",
+    Menlo,
+    Monaco,
+    Consolas,
+    Courier New,
+    monospace;
   right: -10px;
   /** Default annotation text to 200px */
   width: 200px;

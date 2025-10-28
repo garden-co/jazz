@@ -15,6 +15,7 @@ export class AudioManager {
     if (this.audioObjectURL) {
       URL.revokeObjectURL(this.audioObjectURL);
       this.audioObjectURL = null;
+      this.mediaElement.src = "";
     }
   }
 

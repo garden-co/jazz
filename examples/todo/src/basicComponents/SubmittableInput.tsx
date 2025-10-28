@@ -25,17 +25,13 @@ export function SubmittableInput({
       }}
     >
       <Input
-        className="-ml-3 -my-2 flex-grow flex-3 text-base"
+        className="-ml-3 -my-2 grow flex-3 text-base"
         name="text"
         placeholder={placeholder}
         autoComplete="off"
         disabled={disabled}
       />
-      <Button
-        asChild
-        type="submit"
-        className="flex-shrink flex-1 cursor-pointer"
-      >
+      <Button asChild type="submit" className="shrink flex-1 cursor-pointer">
         <Input type="submit" value={label} disabled={disabled} />
       </Button>
     </form>

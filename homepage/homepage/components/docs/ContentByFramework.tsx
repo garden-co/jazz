@@ -1,6 +1,9 @@
 "use client";
 
 import { useFramework } from "@/lib/use-framework";
+import { useEffect, useState } from "react";
+import { TAB_CHANGE_EVENT } from "@garden-co/design-system/src/types/tabbed-code-group";
+
 
 export interface ContentByFrameworkProps {
   framework: string;
@@ -15,7 +18,7 @@ export interface ContentByFrameworkProps {
  */
 
 export function ContentByFramework(props: {
-  framework: string;
+  framework: string | string[];
   children: React.ReactNode;
 }) {
   const framework = useFramework();
@@ -23,4 +26,10 @@ export function ContentByFramework(props: {
   if (framework == props.framework) {
     return props.children;
   }
+
+  if (Array.isArray(props.framework) && props.framework.includes(framework)) {
+    return props.children;
+  }
+
+  return null;
 }

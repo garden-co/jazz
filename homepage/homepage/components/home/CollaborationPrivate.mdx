@@ -1,8 +1,5 @@
 ```tsx
-const { me } = useAccount();
-
-Message.create(
-  { text: ... },
-  { owner: me }
-);
+Message.create({
+  text: "Private message to myself."
+});
 ```

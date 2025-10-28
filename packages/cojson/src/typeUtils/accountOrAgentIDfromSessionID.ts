@@ -1,5 +1,5 @@
-import { RawAccountID } from "../coValues/account.js";
-import { AgentID, SessionID } from "../ids.js";
+import type { RawAccountID } from "../coValues/account.js";
+import type { AgentID, SessionID } from "../ids.js";
 
 export function accountOrAgentIDfromSessionID(
   sessionID: SessionID,

@@ -1,4 +1,4 @@
-import { Example } from "@/lib/example";
+import { Example } from "@/content/example";
 
 export function ExampleTags({ example }: { example: Example }) {
   const { tech, features } = example;

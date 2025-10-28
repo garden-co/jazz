@@ -1,6 +1,6 @@
 import { ExampleLinks } from "@/components/examples/ExampleLinks";
 import { ExampleTags } from "@/components/examples/ExampleTags";
-import { Example } from "@/lib/example";
+import { Example } from "@/content/example";
 import { clsx } from "clsx";
 
 export function ExampleCard({

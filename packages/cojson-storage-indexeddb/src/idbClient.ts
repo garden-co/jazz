@@ -1,142 +1,81 @@
-import { CojsonInternalTypes } from "cojson";
-import { SyncPromise } from "./syncPromises";
-import RawCoID = CojsonInternalTypes.RawCoID;
-import Transaction = CojsonInternalTypes.Transaction;
-import Signature = CojsonInternalTypes.Signature;
-import {
+import type { CojsonInternalTypes, RawCoID, SessionID } from "cojson";
+import type {
   CoValueRow,
-  DBClientInterface,
+  DBClientInterfaceAsync,
   SessionRow,
   SignatureAfterRow,
   StoredCoValueRow,
   StoredSessionRow,
   TransactionRow,
-} from "cojson-storage";
+} from "cojson";
+import {
+  CoJsonIDBTransaction,
+  putIndexedDbStore,
+  queryIndexedDbStore,
+} from "./CoJsonIDBTransaction.js";
+import { StoreName } from "./CoJsonIDBTransaction.js";
 
-export class IDBClient implements DBClientInterface {
+export class IDBClient implements DBClientInterfaceAsync {
   private db;
 
-  currentTx:
-    | {
-        id: number;
-        tx: IDBTransaction;
-        stores: {
-          coValues: IDBObjectStore;
-          sessions: IDBObjectStore;
-          transactions: IDBObjectStore;
-          signatureAfter: IDBObjectStore;
-        };
-        startedAt: number;
-        pendingRequests: ((txEntry: {
-          stores: {
-            coValues: IDBObjectStore;
-            sessions: IDBObjectStore;
-            transactions: IDBObjectStore;
-            signatureAfter: IDBObjectStore;
-          };
-        }) => void)[];
-      }
-    | undefined;
-
-  currentTxID = 0;
+  activeTransaction: CoJsonIDBTransaction | undefined;
+  autoBatchingTransaction: CoJsonIDBTransaction | undefined;
 
   constructor(db: IDBDatabase) {
     this.db = db;
   }
 
   makeRequest<T>(
-    handler: (stores: {
-      coValues: IDBObjectStore;
-      sessions: IDBObjectStore;
-      transactions: IDBObjectStore;
-      signatureAfter: IDBObjectStore;
-    }) => IDBRequest,
-  ): SyncPromise<T> {
-    return new SyncPromise((resolve, reject) => {
-      let txEntry = this.currentTx;
+    handler: (txEntry: CoJsonIDBTransaction) => IDBRequest<T>,
+  ): Promise<T> {
+    if (this.activeTransaction) {
+      return this.activeTransaction.handleRequest<T>(handler);
+    }
 
-      const requestEntry = ({
-        stores,
-      }: {
-        stores: {
-          coValues: IDBObjectStore;
-          sessions: IDBObjectStore;
-          transactions: IDBObjectStore;
-          signatureAfter: IDBObjectStore;
-        };
-      }) => {
-        const request = handler(stores);
-        request.onerror = () => {
-          console.error("Error in request", request.error);
-          this.currentTx = undefined;
-          reject(request.error);
-        };
-        request.onsuccess = () => {
-          const value = request.result as T;
-          resolve(value);
+    if (this.autoBatchingTransaction?.isReusable()) {
+      return this.autoBatchingTransaction.handleRequest<T>(handler);
+    }
 
-          const next = txEntry!.pendingRequests.shift();
+    const tx = new CoJsonIDBTransaction(this.db);
 
-          if (next) {
-            next({ stores });
-          } else {
-            if (this.currentTx === txEntry) {
-              this.currentTx = undefined;
-            }
-          }
-        };
-      };
+    this.autoBatchingTransaction = tx;
 
-      // Transaction batching
-      if (!txEntry || performance.now() - txEntry.startedAt > 20) {
-        const tx = this.db.transaction(
-          ["coValues", "sessions", "transactions", "signatureAfter"],
-          "readwrite",
-        );
-        txEntry = {
-          id: this.currentTxID++,
-          tx,
-          stores: {
-            coValues: tx.objectStore("coValues"),
-            sessions: tx.objectStore("sessions"),
-            transactions: tx.objectStore("transactions"),
-            signatureAfter: tx.objectStore("signatureAfter"),
-          },
-          startedAt: performance.now(),
-          pendingRequests: [],
-        };
-
-        this.currentTx = txEntry;
-
-        requestEntry(txEntry);
-      } else {
-        txEntry.pendingRequests.push(requestEntry);
-      }
-    });
+    return tx.handleRequest<T>(handler);
   }
 
   async getCoValue(coValueId: RawCoID): Promise<StoredCoValueRow | undefined> {
-    return this.makeRequest<StoredCoValueRow | undefined>(({ coValues }) =>
-      coValues.index("coValuesById").get(coValueId),
+    return queryIndexedDbStore(this.db, "coValues", (store) =>
+      store.index("coValuesById").get(coValueId),
     );
   }
 
+  async getCoValueRowID(coValueId: RawCoID): Promise<number | undefined> {
+    return this.getCoValue(coValueId).then((row) => row?.rowID);
+  }
+
   async getCoValueSessions(coValueRowId: number): Promise<StoredSessionRow[]> {
-    return this.makeRequest<StoredSessionRow[]>(({ sessions }) =>
-      sessions.index("sessionsByCoValue").getAll(coValueRowId),
+    return queryIndexedDbStore(this.db, "sessions", (store) =>
+      store.index("sessionsByCoValue").getAll(coValueRowId),
+    );
+  }
+
+  async getSingleCoValueSession(
+    coValueRowId: number,
+    sessionID: SessionID,
+  ): Promise<StoredSessionRow | undefined> {
+    return queryIndexedDbStore(this.db, "sessions", (store) =>
+      store.index("uniqueSessions").get([coValueRowId, sessionID]),
     );
   }
 
   async getNewTransactionInSession(
     sessionRowId: number,
-    firstNewTxIdx: number,
+    fromIdx: number,
+    toIdx: number,
   ): Promise<TransactionRow[]> {
-    return this.makeRequest<TransactionRow[]>(({ transactions }) =>
-      transactions.getAll(
-        IDBKeyRange.bound(
-          [sessionRowId, firstNewTxIdx],
-          [sessionRowId, Infinity],
-        ),
+    return queryIndexedDbStore(this.db, "transactions", (store) =>
+      store.getAll(
+        IDBKeyRange.bound([sessionRowId, fromIdx], [sessionRowId, toIdx]),
       ),
     );
   }
@@ -145,30 +84,28 @@ export class IDBClient implements DBClientInterface {
     sessionRowId: number,
     firstNewTxIdx: number,
   ): Promise<SignatureAfterRow[]> {
-    return this.makeRequest<SignatureAfterRow[]>(
-      ({ signatureAfter }: { signatureAfter: IDBObjectStore }) =>
-        signatureAfter.getAll(
-          IDBKeyRange.bound(
-            [sessionRowId, firstNewTxIdx],
-            [sessionRowId, Infinity],
-          ),
+    return queryIndexedDbStore(this.db, "signatureAfter", (store) =>
+      store.getAll(
+        IDBKeyRange.bound(
+          [sessionRowId, firstNewTxIdx],
+          [sessionRowId, Number.POSITIVE_INFINITY],
         ),
+      ),
     );
   }
 
-  async addCoValue(
-    msg: CojsonInternalTypes.NewContentMessage,
-  ): Promise<number> {
-    if (!msg.header) {
-      throw new Error("Header is required, coId: " + msg.id);
+  async upsertCoValue(
+    id: RawCoID,
+    header?: CojsonInternalTypes.CoValueHeader,
+  ): Promise<number | undefined> {
+    if (!header) {
+      return this.getCoValueRowID(id);
     }
 
-    return (await this.makeRequest<IDBValidKey>(({ coValues }) =>
-      coValues.put({
-        id: msg.id,
-        header: msg.header!,
-      } satisfies CoValueRow),
-    )) as number;
+    return putIndexedDbStore<CoValueRow, number>(this.db, "coValues", {
+      id,
+      header,
+    }).catch(() => this.getCoValueRowID(id));
   }
 
   async addSessionUpdate({
@@ -178,25 +115,26 @@ export class IDBClient implements DBClientInterface {
     sessionUpdate: SessionRow;
     sessionRow?: StoredSessionRow;
   }): Promise<number> {
-    return this.makeRequest<number>(({ sessions }) =>
-      sessions.put(
-        sessionRow?.rowID
-          ? {
-              rowID: sessionRow.rowID,
-              ...sessionUpdate,
-            }
-          : sessionUpdate,
-      ),
+    return this.makeRequest<number>(
+      (tx) =>
+        tx.getObjectStore("sessions").put(
+          sessionRow?.rowID
+            ? {
+                rowID: sessionRow.rowID,
+                ...sessionUpdate,
+              }
+            : sessionUpdate,
+        ) as IDBRequest<number>,
     );
   }
 
-  addTransaction(
+  async addTransaction(
     sessionRowID: number,
     idx: number,
-    newTransaction: Transaction,
+    newTransaction: CojsonInternalTypes.Transaction,
   ) {
-    return this.makeRequest(({ transactions }) =>
-      transactions.add({
+    await this.makeRequest((tx) =>
+      tx.getObjectStore("transactions").add({
         ses: sessionRowID,
         idx,
         tx: newTransaction,
@@ -208,17 +146,38 @@ export class IDBClient implements DBClientInterface {
     sessionRowID,
     idx,
     signature,
-  }: { sessionRowID: number; idx: number; signature: Signature }) {
-    return this.makeRequest(({ signatureAfter }) =>
-      signatureAfter.put({
+  }: {
+    sessionRowID: number;
+    idx: number;
+    signature: CojsonInternalTypes.Signature;
+  }) {
+    return this.makeRequest((tx) =>
+      tx.getObjectStore("signatureAfter").put({
         ses: sessionRowID,
         idx,
         signature,
-      } satisfies SignatureAfterRow),
+      }),
     );
   }
 
-  async unitOfWork(operationsCallback: () => unknown[]) {
-    return Promise.all(operationsCallback());
+  closeTransaction(tx: CoJsonIDBTransaction) {
+    tx.commit();
+
+    if (tx === this.activeTransaction) {
+      this.activeTransaction = undefined;
+    }
+  }
+
+  async transaction(operationsCallback: () => unknown) {
+    const tx = new CoJsonIDBTransaction(this.db);
+
+    this.activeTransaction = tx;
+
+    try {
+      await operationsCallback();
+      tx.commit(); // Tells the browser to not wait for another possible request and commit the transaction immediately
+    } finally {
+      this.activeTransaction = undefined;
+    }
   }
 }

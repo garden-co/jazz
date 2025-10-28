@@ -1,0 +1,269 @@
+export const metadata = {
+  description: "Learn how to set up Jazz in your application."
+};
+
+import { Alert, CodeGroup, ContentByFramework, FileName, ReactLogo, SvelteLogo, TabbedCodeGroup, TabbedCodeGroupItem } from "@/components/forMdx";
+import InstallJazz from '@/components/docs/snippets/InstallJazz.mdx';
+import GetAPIKey from '@/components/docs/snippets/GetAPIKey.mdx';
+
+# Installation and Setup
+
+Add Jazz to your application in minutes. This setup covers standard front-end set up, and gives an overview of experimental SSR approaches.
+
+Integrating Jazz with your existing app is straightforward. You'll define data schemas that describe your application's structure, then wrap your app with a provider that handles sync and storage. The whole process takes just three steps:
+
+1. [Install dependencies](#install-dependencies)
+2. [Write your schema](#write-your-schema)
+3. [Wrap your app in a provider](#standard-setup)
+
+Looking for complete examples? Check out our [example applications](/examples) for chat apps, collaborative editors, and more.
+
+## Install dependencies
+
+First, install the required packages:
+
+<InstallJazz />
+
+## Write your schema
+
+Define your data schema using [CoValues](/docs/core-concepts/covalues/overview) from `jazz-tools`.
+
+<ContentByFramework framework="react">
+<FileName>app/schema.ts</FileName>
+</ContentByFramework>
+<ContentByFramework framework="svelte">
+<FileName>src/lib/schema.ts</FileName>
+</ContentByFramework>
+<CodeGroup>
+```ts
+import { co, z } from "jazz-tools";
+
+export const TodoItem = co.map({
+  title: z.string(),
+  completed: z.boolean(),
+});
+
+export const AccountRoot = co.map({
+  todos: co.list(TodoItem),
+});
+
+export const MyAppAccount = co.account({
+  root: AccountRoot,
+  profile: co.profile(),
+});
+```
+</CodeGroup>
+
+See [CoValues](/docs/core-concepts/covalues/overview) for more information on how to define your schema.
+
+## Standard Setup
+
+Wrap your application with a provider to connect to the Jazz network and define your data schema:
+
+<ContentByFramework framework="react">
+<FileName>app.tsx</FileName>
+</ContentByFramework>
+<ContentByFramework framework="svelte">
+<FileName>src/routes/+layout.svelte</FileName>
+</ContentByFramework>
+
+<TabbedCodeGroup savedPreferenceKey="framework" id="add-provider">
+<TabbedCodeGroupItem label="React" value="react" icon={<ReactLogo />} preferWrap>
+```tsx
+import { JazzReactProvider } from "jazz-tools/react";
+import { MyAppAccount } from "./schema";
+
+createRoot(document.getElementById("root")!).render(
+  <JazzReactProvider
+    sync={{ peer: `wss://cloud.jazz.tools/?key=${apiKey}` }}
+    AccountSchema={MyAppAccount}
+  >
+    <App />
+  </JazzReactProvider>
+);
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem label="Svelte" value="svelte" icon={<SvelteLogo />} preferWrap>
+```svelte
+<script lang="ts">
+  import { JazzSvelteProvider } from "jazz-tools/svelte";
+  let { children } = $props();
+
+  // Example configuration for authentication and peer connection
+  let sync = { peer: `wss://cloud.jazz.tools/?key=${apiKey}` };
+</script>
+
+<JazzSvelteProvider {sync} AccountSchema={MyAccount}>
+  {@render children?.()}
+</JazzSvelteProvider>
+```
+</TabbedCodeGroupItem>
+</TabbedCodeGroup>
+
+<Alert className="mt-4" variant="info" title="Tip">
+<GetAPIKey hideCodeGroup={true} hideFileName={true} />
+</Alert>    
+
+This setup handles:
+- Connection to the Jazz sync server
+- Schema registration for type-safe data handling
+- Local storage configuration
+
+With this in place, you're ready to start using Jazz hooks in your components. [Learn how to access and update your data](/docs/core-concepts/subscription-and-loading#subscription-hooks).
+
+## SSR Integration
+
+Jazz's default behaviour is to wait until the user's account is loaded before rendering the provider's children. This can be problematic on the server, where no account is available. 
+
+We can solve this by asking Jazz to render the children using an a read-only account that can be used without credentials, known as an 'agent'.
+
+Agents can access any data which is available to the public.
+
+### Enabling Provider rendering on the server
+
+In order to tell Jazz to allow children to be loaded even in an account-less context, we can set the `enableSSR` setting on the provider.
+
+<ContentByFramework framework="react">
+<FileName>app/components/JazzWrapper.tsx</FileName>
+</ContentByFramework>
+<ContentByFramework framework="svelte">
+<FileName>src/routes/layout.svelte</FileName>
+</ContentByFramework>
+
+<TabbedCodeGroup savedPreferenceKey="framework" id="add-ssr">
+<TabbedCodeGroupItem label="React" value="react" icon={<ReactLogo />} preferWrap>
+```tsx
+import { JazzReactProvider } from "jazz-tools/react";
+import { MyAppAccount } from "./schema";
+
+export function JazzWrapper({ children }: { children: React.ReactNode }) {
+  return (
+    <JazzReactProvider
+      enableSSR // Renders the components tree in the server using an agent
+      sync={{ peer: `wss://cloud.jazz.tools/?key=${apiKey}` }}
+      AccountSchema={MyAppAccount}
+    >
+      {children}
+    </JazzReactProvider>
+  );
+}
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem label="Svelte" value="svelte" icon={<SvelteLogo />} preferWrap>
+```svelte
+<script lang="ts">
+  import { JazzSvelteProvider } from "jazz-tools/svelte";
+  import { apiKey } from "$lib/apiKey";
+
+  let { children } = $props();
+  const sync = { peer: `wss://cloud.jazz.tools/?key=${apiKey}` };
+</script>
+
+<JazzSvelteProvider {sync} enableSSR>
+  {@render children?.()}
+</JazzSvelteProvider>
+```
+</TabbedCodeGroupItem>
+</TabbedCodeGroup>
+
+<ContentByFramework framework="react">
+Since the provider is running without an authenticated user, all the `useCoState` and `useAccount` hooks will return null.
+</ContentByFramework>
+<ContentByFramework framework="svelte">
+Since the provider is running without an authenticated user, all the `CoState` and `AccountCoState` instances will return null.
+</ContentByFramework>
+
+### Load data with an agent
+
+In order to actually load and render data, you need to tell Jazz how to do this without an account. We can use the `loadAs` option in our `.load` call, combined with an agent, generated using `createSSRJazzAgent`.
+
+<ContentByFramework framework="react">
+<FileName>app/todo/[item]/page.tsx</FileName>
+</ContentByFramework>
+<ContentByFramework framework="svelte">
+<FileName>src/routes/todo/[item]/+page.svelte</FileName>
+</ContentByFramework>
+
+<TabbedCodeGroup savedPreferenceKey="framework" id="ssr-page">
+<TabbedCodeGroupItem label="React" value="react" icon={<ReactLogo />} preferWrap>
+```tsx
+import { createSSRJazzAgent } from "jazz-tools/ssr";
+import { TodoItem } from "./schema";
+
+// In order to avoid creating a new agent for every page, if you have more than one page which will be rendered server-side, the agent can be exported from a single centralised module.
+export const jazzSSR = createSSRJazzAgent({
+  peer: `wss://cloud.jazz.tools/?key=${apiKey}`,
+});
+
+export default async function ServerSidePage(props: {
+  params: Promise<{ itemId: string }>;
+}) {
+  const { itemId } = await props.params;
+  const item = await TodoItem.load(itemId, {
+    loadAs: jazzSSR,
+  });
+
+  return (
+    <div className="flex flex-col items-center justify-center h-screen gap-4">
+      <h1 className="text-2xl font-bold">SSR rendering example with Jazz</h1>
+      <div className="text-sm text-gray-500 w-1/2 text-center">
+        This is a server component!
+      </div>
+      <label>
+        <div className="text-sm">Item title "{item?.title}"</div>
+      </label>
+    </div>
+  );
+}
+```
+</TabbedCodeGroupItem>
+<TabbedCodeGroupItem label="Svelte" value="svelte" icon={<SvelteLogo />} preferWrap>
+```svelte
+<script lang="ts">
+  import { page } from '$app/state';
+  import { createSSRJazzAgent } from "jazz-tools/ssr";
+  import { TodoItem } from "./schema";
+
+  const itemId = $derived(page.params.itemId);
+  // In order to avoid creating a new agent for every page, if you have more than one page which will be rendered server-side, the agent can be exported from a single centralised module.
+  const jazzSSR = createSSRJazzAgent({
+    peer: `wss://cloud.jazz.tools/?key=${apiKey}`,
+  });
+  const item = $derived(TodoItem.load(itemId, {
+    loadAs: jazzSSR,
+  }));
+</script>
+
+<div class="flex flex-col items-center justify-center h-screen gap-4">
+  <h1 class="text-2xl font-bold">SSR rendering example with Jazz</h1>
+  <div class="text-sm text-gray-500 w-1/2 text-center">
+    This component can render on the server!
+  </div>
+  <label>
+    <div class="text-sm">Item title {#await item then item}"{item?.title}"{/await}</div>
+  </label>
+</div>
+```
+</TabbedCodeGroupItem>
+</TabbedCodeGroup>
+
+<Alert variant="info" title="Use .load()" className="mt-4">
+  Because subscription hooks can't run on the server, you need to use the `.load()` static method to load data on the server.
+</Alert>
+
+<ContentByFramework framework="react">
+Take a look at our [Next.js example](https://github.com/garden-co/jazz/tree/main/examples/jazz-nextjs) to see a complete example of how to use SSR with Jazz.
+</ContentByFramework>
+
+<ContentByFramework framework="svelte">
+Take a look at our [SvelteKit example](https://github.com/garden-co/jazz/tree/main/examples/jazz-sveltekit) to see a complete example of how to use SSR with Jazz.
+
+For a complete example of Jazz with Svelte, check out our [file sharing example](https://github.com/gardencmp/jazz/tree/main/examples/file-share-svelte) which demonstrates Passkey authentication, file uploads and access control.
+</ContentByFramework>
+
+## Further Reading
+
+- [Schemas](/docs/core-concepts/covalues/overview) - Learn about defining your data model
+- [Provider Configuration](/docs/project-setup/providers) - Learn about other configuration options for Providers
+- [Authentication](/docs/key-features/authentication/overview) - Set up user authentication
+- [Sync and Storage](/docs/core-concepts/sync-and-storage) - Learn about data persistence

@@ -1,5 +1,11 @@
 name: Jazz Run Tests
 
+concurrency:
+  # For pushes, this lets concurrent runs happen, so each push gets a result.
+  # But for other events (e.g. PRs), we can cancel the previous runs.
+  group: ${{ github.workflow }}-${{ github.event_name == 'push' && github.sha || github.ref }}
+  cancel-in-progress: true
+
 on:
   push:
     branches: ["main"]
@@ -8,38 +14,16 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 5
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
         with:
           submodules: true
 
-      - name: Enable corepack
-        run: corepack enable
-
-      - name: Install Node.js
-        uses: actions/setup-node@v3
-        with:
-          node-version-file: '.node-version'
-          cache: 'pnpm'
-
-      - name: Get pnpm store directory
-        shell: bash
-        run: |
-          echo "STORE_PATH=$(pnpm store path --silent)" >> $GITHUB_ENV
-
-      - uses: actions/cache@v3
-        name: Setup pnpm cache
-        with:
-          path: ${{ env.STORE_PATH }}
-          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
-          restore-keys: |
-            ${{ runner.os }}-pnpm-store-
-      
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+      - name: Setup Source Code
+        uses: ./.github/actions/source-code/
 
       - name: Build jazz-run
         run: pnpm exec turbo build && chmod +x dist/index.js;
@@ -48,4 +32,3 @@ jobs:
       - name: Run create account
         run: ./dist/index.js account create --name "Jazz Run CI test"
         working-directory: ./packages/jazz-run
-  

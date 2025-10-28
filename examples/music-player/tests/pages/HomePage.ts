@@ -1,19 +1,31 @@
-import { Page, expect } from "@playwright/test";
+import { type Locator, type Page, expect } from "@playwright/test";
 
 export class HomePage {
-  constructor(public page: Page) {}
+  page: Page;
+  newPlaylistButton: Locator;
+  playlistTitleInput: Locator;
+  loginButton: Locator;
+  logoutButton: Locator;
 
-  newPlaylistButton = this.page.getByRole("button", {
-    name: "New Playlist",
-  });
+  constructor(page: Page) {
+    this.page = page;
+    this.newPlaylistButton = this.page.getByRole("button", {
+      name: "New Playlist",
+    });
+    this.playlistTitleInput = this.page.getByRole("textbox", {
+      name: "Playlist title",
+    });
+    this.loginButton = this.page.getByRole("button", {
+      name: "Sign up",
+    });
+    this.logoutButton = this.page.getByRole("button", {
+      name: "Sign out",
+    });
+  }
 
-  playlistTitleInput = this.page.getByRole("textbox", {
-    name: "Playlist title",
-  });
-
-  logoutButton = this.page.getByRole("button", {
-    name: "Logout",
-  });
+  async fillUsername(username: string) {
+    await this.page.getByRole("textbox", { name: "Username" }).fill(username);
+  }
 
   async expectActiveTrackPlaying() {
     await expect(
@@ -33,6 +45,14 @@ export class HomePage {
     ).toBeVisible();
   }
 
+  async notExpectMusicTrack(trackName: string) {
+    await expect(
+      this.page.getByRole("button", {
+        name: `Play ${trackName}`,
+      }),
+    ).not.toBeVisible();
+  }
+
   async playMusicTrack(trackName: string) {
     await this.page
       .getByRole("button", {
@@ -43,32 +63,67 @@ export class HomePage {
 
   async editTrackTitle(trackTitle: string, newTitle: string) {
     await this.page
-      .getByRole("textbox", {
-        name: `Edit track title: ${trackTitle}`,
+      .getByRole("button", {
+        name: `Open ${trackTitle} menu`,
       })
-      .fill(newTitle);
+      .click();
+
+    await this.page
+      .getByRole("menuitem", {
+        name: `Edit`,
+      })
+      .click();
+
+    await this.page.getByPlaceholder("Enter track name...").fill(newTitle);
+
+    await this.page.getByRole("button", { name: "Save" }).click();
   }
 
-  async createPlaylist() {
+  async createPlaylist(playlistTitle: string) {
     await this.newPlaylistButton.click();
-  }
-
-  async editPlaylistTitle(playlistTitle: string) {
     await this.playlistTitleInput.fill(playlistTitle);
+    await this.page.getByRole("button", { name: "Create Playlist" }).click();
   }
 
   async navigateToPlaylist(playlistTitle: string) {
     await this.page
-      .getByRole("link", {
+      .getByRole("button", {
         name: playlistTitle,
       })
       .click();
   }
 
-  async getShareLink() {
+  async assertPlaylistNotExists(playlistTitle: string) {
+    await expect(
+      this.page.getByRole("button", { name: playlistTitle }),
+    ).not.toBeVisible();
+  }
+
+  async navigateToHome() {
     await this.page
       .getByRole("button", {
-        name: "Share playlist",
+        name: "Go to all tracks",
+      })
+      .click();
+  }
+
+  async getShareLink(role: string = "reader") {
+    await this.page
+      .getByRole("button", {
+        name: "Share",
+      })
+      .click();
+
+    await this.page
+      .getByRole("dialog")
+      .locator("section")
+      .filter({ hasText: `Invite new members` })
+      .getByRole("button", { name: role })
+      .click();
+
+    await this.page
+      .getByRole("button", {
+        name: "Get invite link",
       })
       .click();
 
@@ -78,7 +133,47 @@ export class HomePage {
 
     expect(inviteUrl).toBeTruthy();
 
+    await this.page
+      .getByRole("button", {
+        name: "Close",
+      })
+      .first()
+      .click();
+
     return inviteUrl;
+  }
+
+  async removeMember(index: number) {
+    await this.page
+      .getByRole("button", {
+        name: "Share",
+      })
+      .click();
+
+    const countBefore = await this.page
+      .getByRole("dialog")
+      .getByRole("button", { name: "Remove" })
+      .count();
+
+    await this.page
+      .getByRole("dialog")
+      .getByRole("button", { name: "Remove" })
+      .nth(index)
+      .click();
+
+    expect(
+      await this.page
+        .getByRole("dialog")
+        .getByRole("button", { name: "Remove" })
+        .count(),
+    ).toBe(countBefore - 1);
+
+    await this.page
+      .getByRole("button", {
+        name: "Close",
+      })
+      .first()
+      .click();
   }
 
   async addTrackToPlaylist(trackTitle: string, playlistTitle: string) {
@@ -95,7 +190,42 @@ export class HomePage {
       .click();
   }
 
-  async logout() {
+  async removeTrackFromPlaylist(trackTitle: string, playlistTitle: string) {
+    await this.page
+      .getByRole("button", {
+        name: `Open ${trackTitle} menu`,
+      })
+      .click();
+
+    await this.page
+      .getByRole("menuitem", {
+        name: `Remove from ${playlistTitle}`,
+      })
+      .click();
+  }
+
+  async signUp() {
+    await this.page.getByRole("button", { name: "Sign up" }).click();
+    await this.page
+      .getByRole("button", { name: "Sign up with passkey" })
+      .click();
+
+    await this.logoutButton.waitFor({
+      state: "visible",
+    });
+
+    await expect(this.logoutButton).toBeVisible();
+  }
+
+  async logOut() {
     await this.logoutButton.click();
+
+    await this.page.getByRole("textbox", { name: "Username" }).waitFor({
+      state: "visible",
+    });
+
+    await expect(
+      this.page.getByRole("textbox", { name: "Username" }),
+    ).toBeVisible();
   }
 }

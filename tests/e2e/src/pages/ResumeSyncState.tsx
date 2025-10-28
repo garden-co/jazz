@@ -1,9 +1,9 @@
-import { CoMap, Group, ID, co } from "jazz-tools";
+import { CoMap, Group, ID, coField } from "jazz-tools";
+import { useAccount, useCoState } from "jazz-tools/react";
 import { useEffect, useState } from "react";
-import { useAccount, useCoState } from "../jazz";
 
 export class ResumeSyncCoMap extends CoMap {
-  value = co.string;
+  value = coField.string;
 }
 
 function getIdParam() {
@@ -31,7 +31,7 @@ export function ResumeSyncState() {
 
     group.addMember("everyone", "writer");
 
-    setId(ResumeSyncCoMap.create({ value: "" }, { owner: group }).id);
+    setId(ResumeSyncCoMap.create({ value: "" }, { owner: group }).$jazz.id);
   }, [me]);
 
   if (!coMap) return null;
@@ -39,7 +39,7 @@ export function ResumeSyncState() {
   return (
     <div>
       <h1>Resume Sync State</h1>
-      <p data-testid="id">{coMap.id}</p>
+      <p data-testid="id">{coMap.$jazz.id}</p>
       <label htmlFor="value">Value</label>
       <input
         id="value"

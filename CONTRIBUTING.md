@@ -36,7 +36,7 @@ We welcome all ideas! If you have suggestions, feel free to open an issue marked
 
 ### 5. Local Setup
 
-You'll need Node.js 20.x or 22.x installed (we're working on support for 23.x), and pnpm 9.x installed. If you're using nix, run `nix develop` to get a shell with the correct versions of everything installed.
+You'll need Node.js 22.x installed (we're working on support for 23.x), and pnpm 9.x installed. If you're using nix, run `nix develop` to get a shell with the correct versions of everything installed.
 
 1. **Clone the repository**:
    ```bash
@@ -48,7 +48,25 @@ You'll need Node.js 20.x or 22.x installed (we're working on support for 23.x), 
    pnpm install
    ```
 
-3. **Run tests** to verify everything is working:
+3. **Install homepage dependencies**:
+
+   ```bash
+   cd homepage && pnpm install
+   ```
+
+4. **Go back to the project root**:
+
+   ```bash
+   cd ..
+   ```
+
+4. **Build the packages**:
+
+   ```bash
+   pnpm build:packages
+   ```
+
+5. **Run tests** to verify everything is working:
    ```bash
    pnpm test
    ```

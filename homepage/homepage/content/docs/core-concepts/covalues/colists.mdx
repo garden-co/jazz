@@ -1,0 +1,412 @@
+import { CodeGroup, ContentByFramework } from "@/components/forMdx";
+
+export const metadata = {
+  description: "CoLists are ordered collections that work like JavaScript arrays. They provide indexed access, iteration methods, and length properties."
+};
+
+# CoLists
+
+CoLists are ordered collections that work like JavaScript arrays. They provide indexed access, iteration methods, and length properties, making them perfect for managing sequences of items.
+
+## Creating CoLists
+
+CoLists are defined by specifying the type of items they contain:
+
+<CodeGroup>
+```ts twoslash
+const Task = co.map({
+  title: z.string(),
+  status: z.literal(["todo", "in-progress", "complete"]),
+});
+
+// ---cut---
+import { co, z } from "jazz-tools";
+
+const ListOfResources = co.list(z.string());
+export type ListOfResources = co.loaded<typeof ListOfResources>;
+
+const ListOfTasks = co.list(Task);
+export type ListOfTasks = co.loaded<typeof ListOfTasks>;
+export type ListOfTasksInitShape = co.input<typeof ListOfTasks>; // type accepted by `ListOfTasks.create`
+```
+</CodeGroup>
+
+To create a `CoList`:
+
+<CodeGroup>
+```ts twoslash
+import { co, z } from "jazz-tools";
+
+const Task = co.map({
+  title: z.string(),
+  status: z.literal(["todo", "in-progress", "complete"]),
+});
+// ---cut---
+// Create an empty list
+const resources = co.list(z.string()).create([]);
+
+// Create a list with initial items
+const tasks = co.list(Task).create([
+  { title: "Prepare soil beds", status: "in-progress" },
+  { title: "Order compost", status: "todo" }
+]);
+```
+</CodeGroup>
+
+### Ownership
+
+Like other CoValues, you can specify ownership when creating CoLists.
+
+<CodeGroup>
+```ts twoslash
+import { Group, co, z } from "jazz-tools";
+import { createJazzTestAccount } from 'jazz-tools/testing';
+const me = await createJazzTestAccount();
+const colleagueAccount = await createJazzTestAccount();
+const Task = co.map({
+  title: z.string(),
+  status: z.string(),
+});
+
+// ---cut---
+// Create with shared ownership
+const teamGroup = Group.create();
+teamGroup.addMember(colleagueAccount, "writer");
+
+const teamList = co.list(Task).create([], { owner: teamGroup });
+```
+</CodeGroup>
+
+See [Groups as permission scopes](/docs/permissions-and-sharing/overview) for more information on how to use groups to control access to CoLists.
+
+## Reading from CoLists
+
+CoLists support standard array access patterns:
+
+<CodeGroup>
+```ts twoslash
+
+import { co, z } from "jazz-tools";
+
+const Task = co.map({
+  title: z.string(),
+  status: z.literal(["todo", "in-progress", "complete"]),
+});
+
+const ListOfTasks = co.list(Task);
+
+const tasks = ListOfTasks.create([
+  Task.create({ title: "Prepare soil beds", status: "todo" }),
+  Task.create({ title: "Order compost", status: "todo" }),
+]);
+// ---cut---
+// Access by index
+const firstTask = tasks[0];
+console.log(firstTask.title);  // "Prepare soil beds"
+
+// Get list length
+console.log(tasks.length);     // 2
+
+// Iteration
+tasks.forEach(task => {
+  console.log(task.title);
+  // "Prepare soil beds"
+  // "Order compost"
+});
+
+// Array methods
+const todoTasks = tasks.filter(task => task.status === "todo");
+console.log(todoTasks.length); // 1
+```
+</CodeGroup>
+
+## Updating CoLists
+
+Methods to update a CoList's items are grouped inside the `$jazz` namespace:
+
+<CodeGroup>
+```ts twoslash
+import { co, z } from "jazz-tools";
+
+const Task = co.map({
+  title: z.string(),
+  status: z.literal(["todo", "in-progress", "complete"]),
+});
+
+const ListOfTasks = co.list(Task);
+
+const ListOfResources = co.list(z.string());
+
+const resources = ListOfResources.create([]);
+const tasks = ListOfTasks.create([]);
+
+// ---cut---
+// Add items
+resources.$jazz.push("Tomatoes");         // Add to end
+resources.$jazz.unshift("Lettuce");       // Add to beginning
+tasks.$jazz.push({                        // Add complex items
+  title: "Install irrigation",            // (Jazz will create
+  status: "todo"                          // the CoValue for you!)
+});
+
+// Replace items
+resources.$jazz.set(0, "Cucumber");       // Replace by index
+
+// Modify nested items
+tasks[0].$jazz.set("status", "complete"); // Update properties of references
+```
+</CodeGroup>
+
+### Soft Deletion
+You can do a soft deletion by using a deleted flag, then creating a helper method that explicitly filters out items where the deleted property is true.
+
+<CodeGroup>
+```ts twoslash
+import { co, z } from "jazz-tools";
+
+// ---cut---
+const Task = co.map({
+  title: z.string(),
+  status: z.literal(["todo", "in-progress", "complete"]),
+  deleted: z.optional(z.boolean()) // [!code ++]
+});
+type Task = typeof Task;
+
+const ListOfTasks = co.list(Task);
+type ListOfTasks = typeof ListOfTasks;
+
+export function getCurrentTasks(list: co.loaded<ListOfTasks>) {
+  return list.filter(
+    (task): task is co.loaded<Task> => !task?.deleted
+  );
+}
+
+async function main() {
+  const myTaskList = ListOfTasks.create([]);
+  myTaskList.$jazz.push({ 
+    title: "Tomatoes",
+    status: "todo",
+    deleted: false
+  });
+  myTaskList.$jazz.push({
+    title: "Cucumbers",
+    status: "todo",
+    deleted: true
+  });
+  myTaskList.$jazz.push({
+    title: "Carrots",
+    status: "todo"
+  });
+
+  const activeTasks = getCurrentTasks(myTaskList);
+  console.log(activeTasks.map((task) => task.title));
+  // Output: ["Tomatoes", "Carrots"]
+}
+```
+</CodeGroup>
+
+There are several benefits to soft deletions:
+- **recoverablity** - Nothing is truly deleted, so recovery is possible in the future
+- **data integrity** - Relationships can be maintained between current and deleted values
+- **auditable** - The data can still be accessed, good for audit trails and checking compliance
+
+### Deleting Items
+
+Jazz provides two methods to retain or remove items from a CoList:
+
+<CodeGroup>
+```ts twoslash
+import { co, z } from "jazz-tools";
+
+const ListOfResources = co.list(z.string());
+
+const resources = ListOfResources.create([
+  "Tomatoes",
+  "Cucumber",
+  "Peppers",
+]);
+
+// ---cut---
+// Remove items
+resources.$jazz.remove(2);    // By index
+console.log(resources);       // ["Cucumber", "Peppers"]
+resources.$jazz.remove(item => item === "Cucumber"); // Or by predicate
+console.log(resources);       // ["Tomatoes", "Peppers"]
+
+// Keep only items matching the predicate
+resources.$jazz.retain(item => item !== "Cucumber");
+console.log(resources);       // ["Tomatoes", "Peppers"]
+```
+</CodeGroup>
+
+You can also remove specific items by index with `splice`, or remove the first or last item with `pop` or `shift`:
+
+<CodeGroup>
+```ts twoslash
+import { co, z } from "jazz-tools";
+
+const ListOfResources = co.list(z.string());
+
+const resources = ListOfResources.create([
+  "Tomatoes",
+  "Cucumber",
+  "Peppers",
+]);
+
+// ---cut---
+// Remove 2 items starting at index 1
+resources.$jazz.splice(1, 2);
+console.log(resources);                 // ["Tomatoes"]
+
+// Remove a single item at index 0
+resources.$jazz.splice(0, 1);
+console.log(resources);                 // ["Cucumber", "Peppers"]
+
+// Remove items
+const lastItem = resources.$jazz.pop(); // Remove and return last item
+resources.$jazz.shift();                // Remove first item
+```
+</CodeGroup>
+
+### Array Methods
+
+`CoList`s support the standard JavaScript array methods you already know. Methods that mutate the array
+are grouped inside the `$jazz` namespace.
+
+<CodeGroup>
+```ts twoslash
+import { co, z } from "jazz-tools";
+
+const ListOfResources = co.list(z.string());
+
+const resources = ListOfResources.create([]);
+
+// ---cut---
+// Add multiple items at once
+resources.$jazz.push("Tomatoes", "Basil", "Peppers");
+
+// Find items
+const basil = resources.find(r => r === "Basil");
+
+// Filter (returns regular array, not a CoList)
+const tItems = resources.filter(r => r.startsWith("T"));
+console.log(tItems); // ["Tomatoes"]
+```
+</CodeGroup>
+
+### Type Safety
+
+CoLists maintain type safety for their items:
+
+<CodeGroup>
+```ts twoslash
+import { co, z } from "jazz-tools";
+
+const Task = co.map({
+  title: z.string(),
+  status: z.literal(["todo", "in-progress", "complete"]),
+});
+
+const ListOfTasks = co.list(Task);
+const ListOfResources = co.list(z.string());
+
+const resources = ListOfResources.create([]);
+const tasks = ListOfTasks.create([]);
+// ---cut---
+// TypeScript catches type errors
+resources.$jazz.push("Carrots");        // ✓ Valid string
+// @errors: 2345
+resources.$jazz.push(42);               // ✗ Type error: expected string
+
+// For lists of references
+tasks.forEach(task => {
+  console.log(task.title);        // TypeScript knows task has title
+});
+```
+</CodeGroup>
+## Best Practices
+
+### Common Patterns
+
+#### List Rendering
+
+CoLists work well with UI rendering libraries:
+
+<CodeGroup>
+```tsx twoslash
+import * as React from "react";
+
+const Task = co.map({
+  title: z.string(),
+  status: z.literal(["todo", "in-progress", "complete"]),
+});
+
+// ---cut---
+import { co, z } from "jazz-tools";
+const ListOfTasks = co.list(Task);
+
+// React example
+function TaskList({ tasks }: { tasks: co.loaded<typeof ListOfTasks> }) {
+  return  (
+   <ul>
+     {tasks.map(task => (
+       task ? (
+        <li key={task.$jazz.id}>
+          {task.title} - {task.status}
+        </li>
+      ): null
+     ))}
+   </ul>
+  );
+}
+```
+</CodeGroup>
+
+#### Managing Relations
+
+CoLists can be used to create one-to-many relationships:
+
+<CodeGroup>
+```ts twoslash
+import { co, z } from "jazz-tools";
+
+const Task = co.map({
+  title: z.string(),
+  status: z.literal(["todo", "in-progress", "complete"]),
+
+  get project(): co.Optional<typeof Project> {
+    return co.optional(Project);
+  }
+});
+
+const ListOfTasks = co.list(Task);
+
+const Project = co.map({
+  name: z.string(),
+
+  get tasks(): co.List<typeof Task> {
+    return ListOfTasks;
+  }
+});
+
+const project = Project.create(
+  {
+    name: "Garden Project",
+    tasks: ListOfTasks.create([]),
+  },
+);
+
+const task = Task.create({
+  title: "Plant seedlings",
+  status: "todo",
+  project: project, // Add a reference to the project
+});
+
+// Add a task to a garden project
+project.tasks.$jazz.push(task);
+
+// Access the project from the task
+console.log(task.project); // { name: "Garden Project", tasks: [task] }
+```
+</CodeGroup>
+

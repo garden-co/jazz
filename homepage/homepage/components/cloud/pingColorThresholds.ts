@@ -1,80 +1,63 @@
-export const pingColorThresholds = [
-  {
-    ping: 5,
-    bgClass: "dark:bg-[hsl(248,50%,100%)] bg-[hsl(260,100%,53%)]",
-    fill: "hsl(260,100%,53%)",
-    darkFill: "hsl(248,50%,100%)",
+export const pingColorMap = {
+  5: {
+    light: "hsl(220,100%,55%)",
+    dark: "hsl(220,100%,100%)",
   },
-  {
-    ping: 10,
-    bgClass: "dark:bg-[hsl(248,50%,80%)] bg-[hsl(258,95%,56%)]",
-    fill: "hsl(258,95%,56%)",
-    darkFill: "hsl(248,50%,80%)",
+  10: {
+    light: "hsl(220,95%,58%)",
+    dark: "hsl(220,100%,85%)",
   },
-  {
-    ping: 15,
-    bgClass: "dark:bg-[hsl(248,50%,72%)] bg-[hsl(256,93%,59%)]",
-    fill: "hsl(256,93%,59%)",
-    darkFill: "hsl(248,50%,72%)",
+  15: {
+    light: "hsl(220,93%,61%)",
+    dark: "hsl(220,100%,75%)",
   },
-  {
-    ping: 25,
-    bgClass: "dark:bg-[hsl(248,50%,62%)] bg-[hsl(252,90%,62%)]",
-    fill: "hsl(252,90%,62%)",
-    darkFill: "hsl(248,50%,62%)",
+  25: {
+    light: "hsl(220,90%,64%)",
+    dark: "hsl(220,100%,65%)",
   },
-  {
-    ping: 35,
-    bgClass: "dark:bg-[hsl(248,50%,54%)] bg-[hsl(250,88%,65%)]",
-    fill: "hsl(250,88%,65%)",
-    darkFill: "hsl(248,50%,54%)",
+  35: {
+    light: "hsl(220,88%,67%)",
+    dark: "hsl(220,100%,58%)",
   },
-  {
-    ping: 45,
-    bgClass: "dark:bg-[hsl(248,50%,49%)] bg-[hsl(245,87%,68%)]",
-    fill: "hsl(245,87%,68%)",
-    darkFill: "hsl(248,50%,49%)",
+  45: {
+    light: "hsl(220,85%,70%)",
+    dark: "hsl(220,100%,51%)",
   },
-  {
-    ping: 55,
-    bgClass: "dark:bg-[hsl(248,50%,43%)] bg-[hsl(240,86%,71%)]",
-    fill: "hsl(240,86%,71%)",
-    darkFill: "hsl(248,50%,43%)",
+  55: {
+    light: "hsl(220,82%,73%)",
+    dark: "hsl(220,100%,44%)",
   },
-  {
-    ping: 65,
-    bgClass: "dark:bg-[hsl(248,50%,39%)] bg-[hsl(238,84%,74%)]",
-    fill: "hsl(238,84%,74%)",
-    darkFill: "hsl(248,50%,39%)",
+  65: {
+    light: "hsl(220,80%,76%)",
+    dark: "hsl(220,100%,39%)",
   },
-  {
-    ping: 100,
-    bgClass: "dark:bg-[hsl(248,50%,35%)] bg-[hsl(235,80%,77%)]",
-    fill: "hsl(235,80%,77%)",
-    darkFill: "hsl(248,50%,35%)",
+  100: {
+    light: "hsl(220,75%,79%)",
+    dark: "hsl(220,100%,35%)",
   },
-  {
-    ping: 150,
-    bgClass: "dark:bg-[hsl(248,50%,28%)] bg-[hsl(232,73%,80%)]",
-    fill: "hsl(232,73%,80%)",
-    darkFill: "hsl(248,50%,28%)",
+  150: {
+    light: "hsl(220,70%,82%)",
+    dark: "hsl(220,100%,28%)",
   },
-  {
-    ping: 200,
-    bgClass: "dark:bg-[hsl(248,50%,23%)] bg-[hsl(230,69%,83%)]",
-    fill: "hsl(230,69%,83%)",
-    darkFill: "hsl(248,50%,23%)",
+  200: {
+    light: "hsl(220,67%,85%)",
+    dark: "hsl(220,100%,23%)",
   },
-  {
-    ping: 300,
-    bgClass: "dark:bg-[hsl(248,50%,20%)] bg-[hsl(230,65%,88%)]",
-    fill: "hsl(230,65%,88%)",
-    darkFill: "hsl(248,50%,20%)",
+  300: {
+    light: "hsl(220,63%,89%)",
+    dark: "hsl(220,100%,19%)",
   },
-  {
-    ping: 1000,
-    bgClass: "dark:bg-[hsl(248,50%,16%)] bg-[hsl(220,60%,92%)]",
-    fill: "hsl(220,60%,92%)",
-    darkFill: "hsl(248,50%,16%)",
+  1000: {
+    light: "hsl(220,60%,93%)",
+    dark: "hsl(220,100%,15%)",
   },
-];
+};
+
+export const pingColorThresholds = Object.entries(pingColorMap).map(
+  ([ping, { light, dark }]) => ({
+    ping: Number(ping),
+    bgClass: `dark:bg-[${dark}] bg-[${light}]`,
+    fill: light,
+    darkFill: dark,
+  }),
+);

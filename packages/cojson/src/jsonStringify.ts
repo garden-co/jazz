@@ -66,3 +66,11 @@ export function stableStringify<T>(
 export function parseJSON<T>(json: Stringified<T>): T {
   return JSON.parse(json);
 }
+
+export function safeParseJSON<T>(json: Stringified<T>): T | undefined {
+  try {
+    return JSON.parse(json);
+  } catch (e) {
+    return undefined;
+  }
+}

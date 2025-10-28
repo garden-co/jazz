@@ -2,30 +2,32 @@ import { useState } from "react";
 
 import QRCode from "qrcode";
 
-import { createInviteLink } from "jazz-react";
 import { CoValue } from "jazz-tools";
+import { createInviteLink, useAccount } from "jazz-tools/react";
 import { Button, useToast } from "../basicComponents";
 
 export function InviteButton<T extends CoValue>({
   value,
   valueHint,
 }: {
-  value?: T;
+  value?: T | null;
   valueHint?: string;
 }) {
   const [existingInviteLink, setExistingInviteLink] = useState<string>();
   const { toast } = useToast();
+  const { me } = useAccount();
 
   return (
-    value?._owner?.myRole() === "admin" && (
+    value &&
+    me?.canAdmin(value) && (
       <Button
         size="sm"
         className="py-0"
-        disabled={!value._owner || !value.id}
+        disabled={!value.$jazz.owner || !value.$jazz.id}
         variant="outline"
         onClick={async () => {
           let inviteLink = existingInviteLink;
-          if (value._owner && value.id && !inviteLink) {
+          if (value.$jazz.owner && value.$jazz.id && !inviteLink) {
             inviteLink = createInviteLink(value, "writer", {
               valueHint,
             });

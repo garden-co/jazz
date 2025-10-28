@@ -1,7 +1,7 @@
-import { Card } from "gcmp-design-system/src/app/components/atoms/Card";
-import { H3 } from "gcmp-design-system/src/app/components/atoms/Headings";
-import { Prose } from "gcmp-design-system/src/app/components/molecules/Prose";
-import { LockKeyholeIcon } from "lucide-react";
+import { Card } from "@garden-co/design-system/src/components/atoms/Card";
+import { H3 } from "@garden-co/design-system/src/components/atoms/Headings";
+import { Icon } from "@garden-co/design-system/src/components/atoms/Icon";
+import { Prose } from "@garden-co/design-system/src/components/molecules/Prose";
 
 const randomChars = [
   "SFPOHVKNPDKETOMQLMJKX#QDI=TFFFMRJDSJ",
@@ -41,19 +41,27 @@ function Illustration() {
           index % 2 === 0 ? (
             <span key={index}>{char}</span>
           ) : (
-            <span key={index} className="text-stone-600 dark:text-stone-700">
+            <span key={index} className="text-stone-600 dark:text-muted">
               {char}
             </span>
           ),
         )}
       </div>
 
-      <LockKeyholeIcon
-        strokeWidth={1.5}
-        strokeLinecap="butt"
-        size={80}
-        className="z-30 size-8 text-blue p-1.5 rounded-lg bg-blue-50 dark:text-blue-500 dark:bg-stone-900 md:size-10"
+      <Icon
+        name="encryption"
+        size="3xl"
+        className="z-30 p-1.5 rounded-lg"
+        intent="primary"
+        hasBackground
       />
+
+      {/*<LockKeyholeIcon*/}
+      {/*  strokeWidth={1.5}*/}
+      {/*  strokeLinecap="butt"*/}
+      {/*  size={80}*/}
+      {/*  className="z-30 size-8 text-primary p-1.5 rounded-lg bg-highlight dark:bg-stone-900 md:size-10"*/}
+      {/*/>*/}
 
       <div className="w-20 h-full bg-gradient-to-r from-white to-transparent absolute top-0 left-0 z-10 dark:from-stone-925"></div>
       <div className="hidden md:block h-20 w-full bg-gradient-to-b from-white to-transparent absolute top-0 left-0 z-10 dark:from-stone-925"></div>
@@ -66,7 +74,7 @@ function Illustration() {
 export function EncryptionSection() {
   return (
     <Card className="overflow-hidden dark:bg-stone-925">
-      <div className="flex grid md:grid-cols-3 md:gap-3">
+      <div className="grid md:grid-cols-3 md:gap-3">
         <div className="md:col-span-2 px-4 pb-4 md:p-8">
           <H3 className="mb-0 text-balance">
             End-to-end encrypted and tamper-proof

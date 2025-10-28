@@ -1,0 +1,269 @@
+import { Alert, CodeGroup, ContentByFramework } from "@/components/forMdx";
+
+export const metadata = {
+  description: "Schema unions allow you to create types that can be one of several different schemas, similar to TypeScript union types."
+};
+
+# Schema Unions
+
+Schema unions allow you to create types that can be one of several different schemas, similar to TypeScript union types.
+They use a discriminator field to determine which specific schema an instance represents at runtime, enabling type-safe polymorphism in your Jazz applications.
+
+The following operations are not available in schema unions:
+
+* `$jazz.ensureLoaded`&hairsp;—&hairsp;use the union schema's `load` method, or narrow the type first
+* `$jazz.subscribe`&hairsp;—&hairsp;use the union schema's `subscribe` method
+* `$jazz.set`&hairsp;—&hairsp;use `$jazz.applyDiff`
+
+## Creating schema unions
+
+Schema unions are defined with `co.discriminatedUnion()` by providing an array of schemas and a discriminator field.
+The discriminator field must be a `z.literal()`.
+
+<CodeGroup>
+```ts twoslash
+import { co, z } from "jazz-tools";
+// ---cut---
+const ButtonWidget = co.map({
+  type: z.literal("button"),
+  label: z.string(),
+}); 
+
+const SliderWidget = co.map({
+  type: z.literal("slider"),
+  min: z.number(),
+  max: z.number(),
+});
+
+const Widget = co.discriminatedUnion("type", [ButtonWidget, SliderWidget]);
+
+const Dashboard = co.map({
+  widgets: co.list(Widget),
+});
+```
+</CodeGroup>
+
+To instantiate a schema union, just use the `create` method of one of the member schemas:
+
+<CodeGroup>
+```ts twoslash
+import { co, z } from "jazz-tools";
+
+const ButtonWidget = co.map({
+  type: z.literal("button"),
+  label: z.string(),
+}); 
+
+const SliderWidget = co.map({
+  type: z.literal("slider"),
+  min: z.number(),
+  max: z.number(),
+});
+
+const Widget = co.discriminatedUnion("type", [ButtonWidget, SliderWidget]);
+
+const Dashboard = co.map({
+  widgets: co.list(Widget),
+});
+// ---cut---
+const dashboard = Dashboard.create({
+  widgets: [
+    ButtonWidget.create({ type: "button", label: "Click me" }),
+    SliderWidget.create({ type: "slider", min: 0, max: 100 })
+  ]
+});
+```
+</CodeGroup>
+
+You can also use plain JSON objects, and let Jazz infer the concrete type from the discriminator field:
+
+<CodeGroup>
+```ts twoslash
+import { co, z } from "jazz-tools";
+
+const ButtonWidget = co.map({
+  type: z.literal("button"),
+  label: z.string(),
+}); 
+
+const SliderWidget = co.map({
+  type: z.literal("slider"),
+  min: z.number(),
+  max: z.number(),
+});
+
+const Widget = co.discriminatedUnion("type", [ButtonWidget, SliderWidget]);
+
+const Dashboard = co.map({
+  widgets: co.list(Widget),
+});
+// ---cut---
+const dashboard = Dashboard.create({
+  widgets: [
+    { type: "button", label: "Click me" },
+    { type: "slider", min: 0, max: 100 }
+  ]
+});
+```
+</CodeGroup>
+
+## Narrowing unions
+
+When working with schema unions, you can access any property that is common to all members of the union.
+To access properties specific to a particular union member, you need to narrow the type.
+You can do this using a [TypeScript type guard](https://www.typescriptlang.org/docs/handbook/2/narrowing.html) on the discriminator field:
+
+<CodeGroup>
+```ts twoslash
+import { co, z } from "jazz-tools";
+// ---cut---
+const ButtonWidget = co.map({
+  type: z.literal("button"),
+  label: z.string(),
+}); 
+
+const SliderWidget = co.map({
+  type: z.literal("slider"),
+  min: z.number(),
+  max: z.number(),
+});
+
+const Widget = co.discriminatedUnion("type", [ButtonWidget, SliderWidget]);
+
+const Dashboard = co.map({
+  widgets: co.list(Widget),
+});
+
+const dashboard = Dashboard.create({
+  widgets: [
+    { type: "button", label: "Click me" },
+    { type: "slider", min: 0, max: 100 }
+  ]
+});
+// ---cut---
+dashboard.widgets.forEach((widget) => {
+  if (widget.type === "button") {
+    console.log(`Button: ${widget.label}`);
+  } else if (widget.type === "slider") {
+    console.log(`Slider: ${widget.min} to ${widget.max}`);
+  }
+});
+```
+</CodeGroup>
+
+## Loading schema unions
+
+You can load an instance of a schema union using its ID, without having to know its concrete type:
+
+<CodeGroup>
+```ts twoslash
+import { co, z } from "jazz-tools";
+
+const ButtonWidget = co.map({
+  type: z.literal("button"),
+  label: z.string(),
+}); 
+
+const SliderWidget = co.map({
+  type: z.literal("slider"),
+  min: z.number(),
+  max: z.number(),
+});
+
+const Widget = co.discriminatedUnion("type", [ButtonWidget, SliderWidget]);
+
+const widgetId = "widgetId";
+// ---cut---
+// Load a widget by ID
+const widget = await Widget.load(widgetId);
+
+// Subscribe to updates
+const unsubscribe = Widget.subscribe(widgetId, {}, (widget) => {
+  console.log("Widget updated:", widget);
+});
+```
+</CodeGroup>
+
+<Alert variant="info" className="mt-4 flex gap-2 items-center">
+ Resolve queries are not supported in schema unions yet. If you need to [deeply load](/docs/core-concepts/subscription-and-loading#deep-loading) a schema union,
+ you'll need to first shallowly load the union, and then load the nested properties after narrowing the union type (using `$jazz.ensureLoaded` or `useCoState`).
+</Alert>
+
+## Nested schema unions
+
+You can create complex hierarchies by nesting discriminated unions within other unions:
+
+<CodeGroup>
+```ts twoslash
+import { co, z } from "jazz-tools";
+// ---cut---
+// Define error types  
+const BadRequestError = co.map({
+  status: z.literal("failed"),
+  code: z.literal(400),
+  message: z.string(),
+});
+
+const UnauthorizedError = co.map({
+  status: z.literal("failed"),
+  code: z.literal(401),
+  message: z.string(),
+});
+
+const InternalServerError = co.map({
+  status: z.literal("failed"),
+  code: z.literal(500),
+  message: z.string(),
+});
+
+// Create a union of error types
+const ErrorResponse = co.discriminatedUnion("code", [
+  BadRequestError,
+  UnauthorizedError,
+  InternalServerError,
+]);
+
+// Define success type
+const SuccessResponse = co.map({
+  status: z.literal("success"),
+  data: z.string(),
+});
+
+// Create a top-level union that includes the error union
+const ApiResponse = co.discriminatedUnion("status", [
+  SuccessResponse,
+  ErrorResponse,
+]);
+
+function handleResponse(response: co.loaded<typeof ApiResponse>) {
+  if (response.status === "success") {
+    console.log("Success:", response.data);
+  } else {
+    // This is an error - narrow further by error code
+    if (response.code === 400) {
+      console.log("Bad request:", response.message);
+    } else if (response.code === 401) {
+      console.log("Unauthorized:", response.message);
+    } else if (response.code === 500) {
+      console.log("Server error:", response.message);
+    }
+  }
+}
+```
+</CodeGroup>
+
+## Limitations with schema unions
+
+Schema unions have some limitations that you should be aware of. They are due to TypeScript behaviour with type unions: when the type members of the union have methods with generic parameters, TypeScript will not allow calling those methods on the union type. This affects some of the methods on the `$jazz` namespace.
+
+Note that these methods may still work at runtime, but their use is not recommended as you will lose type safety.
+
+### `$jazz.ensureLoaded` and `$jazz.subscribe` not supported
+
+The `$jazz.ensureLoaded` and `$jazz.subscribe` methods are not available in schema unions.
+Instead, use the union schema's `load` and `subscribe` methods.
+
+### Updating union fields
+
+You can't use `$jazz.set` to modify a schema union's fields (even if the field is present in all the union members).
+Use `$jazz.applyDiff` instead.

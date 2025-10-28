@@ -1,7 +1,7 @@
 export interface WebsocketEvents {
   close: { code: number; reason: string };
   message: { data: unknown };
-  open: void;
+  open: unknown;
 }
 
 export interface PingMsg {
@@ -24,4 +24,8 @@ export interface AnyWebSocket {
   send(data: string): void;
   readyState: number;
   bufferedAmount: number;
+}
+
+export interface AnyWebSocketConstructor {
+  new (url: string): AnyWebSocket;
 }

@@ -1,0 +1,10 @@
+# Rust
+/target
+
+# Test artifacts
+lzy/compressed_66k.lzy
+
+# OS generated files
+.DS_Store
+
+tarpaulin-report.html

@@ -1,0 +1,26 @@
+{
+  "name": "@jazz/browser-integration-tests",
+  "private": true,
+  "type": "module",
+  "version": "0.0.1",
+  "scripts": {
+    "test": "vitest --run",
+    "test:watch": "vitest --watch"
+  },
+  "devDependencies": {
+    "typescript": "catalog:default"
+  },
+  "dependencies": {
+    "cojson": "workspace:*",
+    "cojson-storage-indexeddb": "workspace:*",
+    "cojson-storage-sqlite": "workspace:*",
+    "cojson-transport-ws": "workspace:*",
+    "jazz-tools": "workspace:*",
+    "react": "catalog:react",
+    "react-dom": "catalog:react",
+    "ws": "^8.14.2",
+    "@vitejs/plugin-react-swc": "^3.10.1",
+    "@testing-library/react": "16.2.0",
+    "@testing-library/jest-dom": "6.6.3"
+  }
+}

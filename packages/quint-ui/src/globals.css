@@ -1,0 +1,195 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+/* Dark mode. If you want to use dark mode, you can add the dark class to the body/head element. */
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --color-default: theme("colors.stone.700");
+  --color-strong: theme("colors.stone.800");
+  --color-muted: theme("colors.stone.300");
+
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary-dark: var(--primary-dark);
+  --color-primary-light: var(--primary-light);
+
+  --color-highlight: var(--primary-highlight);
+
+  --color-blue: #007aff;
+  --color-blue-50: #f0f7ff;
+  --color-blue-100: #d6eaff;
+  --color-blue-200: #add4ff;
+  --color-blue-300: #7abaff;
+  --color-blue-400: #3395ff;
+  --color-blue-500: var(--primary);
+  --color-blue-600: #0062cc;
+  --color-blue-700: #004999;
+  --color-blue-800: #003166;
+  --color-blue-900: #001d3d;
+  --color-blue-950: #000f1f;
+
+  --color-alert: var(--alert);
+  --color-alert-foreground: var(--alert-foreground);
+  --color-alert-dark: var(--alert-dark);
+  --color-alert-light: var(--alert-light);
+
+  --color-yellow: #fcae00;
+  --color-yellow-50: #fffaf0;
+  --color-yellow-100: #fff2d6;
+  --color-yellow-200: #ffe6ad;
+  --color-yellow-300: #ffd67a;
+  --color-yellow-400: #ffc033;
+  --color-yellow-500: var(--alert);
+  --color-yellow-600: #cc8d00;
+  --color-yellow-700: #996a00;
+  --color-yellow-800: #664600;
+  --color-yellow-900: #3d2a00;
+  --color-yellow-950: #1f1500;
+
+  --color-success: var(--success);
+  --color-success-foreground: var(--success-foreground);
+  --color-success-dark: var(--success-dark);
+  --color-success-light: var(--success-light);
+
+  --color-green: #42bb69;
+  --color-green-50: #f4fbf6;
+  --color-green-100: #e1f4e7;
+  --color-green-200: #c3eacf;
+  --color-green-300: #9ddcb1;
+  --color-green-400: #68ca88;
+  --color-green-500: var(--success);
+  --color-green-600: #359755;
+  --color-green-700: #28713f;
+  --color-green-800: #1b4b2a;
+  --color-green-900: #102d19;
+  --color-green-950: #08170d;
+
+  --color-info: var(--info);
+  --color-info-foreground: var(--info-foreground);
+  --color-info-dark: var(--info-dark);
+  --color-info-light: var(--info-light);
+
+  --color-purple: #b441eb;
+  --color-purple-50: #faf1fe;
+  --color-purple-100: #f0dafb;
+  --color-purple-200: #e2b5f7;
+  --color-purple-300: #d087f2;
+  --color-purple-400: #b646ec;
+  --color-purple-500: var(--info);
+  --color-purple-600: #8313b9;
+  --color-purple-700: #620f8a;
+  --color-purple-800: #420a5c;
+  --color-purple-900: #270637;
+  --color-purple-950: #14031c;
+
+  --color-warning: var(--warning);
+  --color-warning-foreground: var(--warning-foreground);
+  --color-warning-light: var(--warning-light);
+  --color-warning-dark: var(--warning-dark);
+
+  --color-orange: #ff7337;
+  --color-orange-50: #fff4f0;
+  --color-orange-100: #ffe3d6;
+  --color-orange-200: #ffc6ad;
+  --color-orange-300: #ffa37a;
+  --color-orange-400: #ff7133;
+  --color-orange-500: var(--warning);
+  --color-orange-600: #cc3e00;
+  --color-orange-700: #992e00;
+  --color-orange-800: #661f00;
+  --color-orange-900: #3d1300;
+  --color-orange-950: #1f0900;
+
+  --color-tip: var(--tip);
+  --color-tip-foreground: var(--tip-foreground);
+  --color-tip-dark: var(--tip-dark);
+  --color-tip-light: var(--tip-light);
+
+  --color-cyan: #2dc9c9;
+  --color-cyan-50: #f2fcfc;
+  --color-cyan-100: #def8f8;
+  --color-cyan-200: #bcf0f0;
+  --color-cyan-300: #93e7e7;
+  --color-cyan-400: #58dada;
+  --color-cyan-500: var(--tip);
+  --color-cyan-600: #25a7a7;
+  --color-cyan-700: #1c7d7d;
+  --color-cyan-800: #135353;
+  --color-cyan-900: #0b3232;
+  --color-cyan-950: #061919;
+
+  --color-danger: var(--danger);
+  --color-danger-foreground: var(--danger-foreground);
+  --color-danger-dark: var(--danger-dark);
+  --color-danger-light: var(--danger-light);
+
+  --color-red: #ee494c;
+  --color-red-50: #fef1f1;
+  --color-red-100: #fcdada;
+  --color-red-200: #f8b4b6;
+  --color-red-300: #f48688;
+  --color-red-400: #ee4448;
+  --color-red-500: var(--danger);
+  --color-red-600: #bb1115;
+  --color-red-700: #8c0d0f;
+  --color-red-800: #5d090a;
+  --color-red-900: #380506;
+  --color-red-950: #1c0303;
+}
+
+:root {
+  --primary: #007aff;
+  --primary-dark: lch(
+    from var(--color-primary) calc(l - 10) calc(c - 1) calc(h + 5)
+  );
+  --primary-light: lch(
+    from var(--color-primary) calc(l + 10) calc(c + 1) calc(h - 5)
+  );
+  --primary-foreground: oklch(0.985 0.045 264.32);
+
+  --primary-highlight: lch(from var(--color-primary) l c h / 0.25);
+
+  --alert: #fcae00;
+  --alert-dark: oklch(0.773 0.212 90.04);
+  --alert-light: oklch(0.883 0.232 80.04);
+  --alert-foreground: oklch(0.28 0.07 46);
+
+  --success: #42bb69;
+  --success-dark: lch(
+    from var(--color-success) calc(l - 7) calc(c - 1) calc(h + 5)
+  );
+  --success-light: lch(
+    from var(--color-success) calc(l + 4) calc(c + 1) calc(h - 5)
+  );
+  --success-foreground: oklch(0.28 0.07 46);
+
+  --info: #b441eb;
+  --info-dark: oklch(0.444 0.237 296.21);
+  --info-light: oklch(0.554 0.257 286.21);
+  --info-foreground: oklch(0.28 0.07 46);
+
+  --warning: #ff7337;
+  --warning-dark: oklch(0.591 0.362 80.45);
+  --warning-light: oklch(0.701 0.382 70.45);
+  --warning-foreground: oklch(0.28 0.07 46);
+
+  --tip: #2dc9c9;
+  --tip-dark: oklch(0.525 0.307 181.3);
+  --tip-light: oklch(0.635 0.327 171.3);
+  --tip-foreground: oklch(0.28 0.07 46);
+
+  --danger: #ee494c;
+  --danger-dark: lch(
+    from var(--color-danger) calc(l - 7) calc(c - 1) calc(h + 5)
+  );
+  --danger-light: lch(
+    from var(--color-danger) calc(l + 4) calc(c + 1) calc(h - 5)
+  );
+  --danger-foreground: oklch(0.28 0.07 46);
+}
+
+.dark {
+  --color-default: theme("colors.stone.100");
+  --color-primary-highlight: lch(from var(--color-primary) l c h / 0.5);
+}

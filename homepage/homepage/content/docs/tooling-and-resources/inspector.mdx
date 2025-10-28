@@ -1,0 +1,104 @@
+import { CodeGroup, ContentByFramework, JazzIcon } from '@/components/forMdx'
+
+export const metadata = {
+  description: "Visually inspect a Jazz account and other CoValues using their ID."
+};
+
+# Jazz Inspector
+
+[Jazz Inspector](https://inspector.jazz.tools) is a tool to visually inspect a Jazz account or other CoValues.
+
+To pass your account credentials, go to your Jazz app, copy the full JSON from the `jazz-logged-in-secret` local storage key,
+and paste it into the Inspector's Account ID field.
+
+Alternatively, you can pass the Account ID and Account Secret separately.
+
+[https://inspector.jazz.tools](https://inspector.jazz.tools)
+
+<ContentByFramework framework={["react", "svelte", "vue", "vanilla"]}>
+## Exporting current account to Inspector from your app
+
+In development mode, you can launch the Inspector from your Jazz app to inspect your account by pressing `Cmd+J`.
+
+## Embedding the Inspector widget into your app [!framework=react,svelte,vue,vanilla]
+
+You can also embed the Inspector directly into your app, so you don't need to open a separate window.
+
+<ContentByFramework framework="react">
+<CodeGroup>
+```tsx
+import { JazzInspector } from "jazz-tools/inspector";
+import { JazzReactProvider } from "jazz-tools/react"
+
+<JazzReactProvider>
+ // [!code ++]
+  <JazzInspector />
+</JazzReactProvider>
+```
+</CodeGroup>
+</ContentByFramework>
+
+<ContentByFramework framework={["svelte", "vue", "vanilla"]}>
+
+Install the custom element and render it.
+
+<CodeGroup>
+```ts
+import "jazz-tools/inspector/register-custom-element"
+
+document.body.appendChild(document.createElement("jazz-inspector"))
+```
+</CodeGroup>
+
+Or
+
+<CodeGroup>
+```tsx
+import "jazz-tools/inspector/register-custom-element"
+
+<jazz-inspector />
+```
+</CodeGroup>
+
+</ContentByFramework>
+
+This will show the Inspector launch button on the right of your page.
+
+</ContentByFramework>
+
+<ContentByFramework framework="react">
+### Positioning the Inspector button [!framework=react]
+
+You can also customize the button position with the following options:
+
+- right (default)
+- left
+- bottom right
+- bottom left
+- top right
+- top left
+
+For example:
+
+<CodeGroup>
+```tsx
+<JazzInspector position="bottom left"/>
+```
+</CodeGroup>
+
+<div className="bg-stone-200 flex items-center justify-center h-72 relative dark:bg-stone-900 mt-5">
+  <span>Your app</span>
+
+  <button className="size-10 p-1.5 border rounded-lg left-4 bottom-4 absolute bg-white shadow-sm" type="button" aria-label="Open Jazz Inspector">
+    <JazzIcon className="w-full h-auto"/>
+  </button>
+</div>
+</ContentByFramework>
+
+<ContentByFramework framework="react">
+Check out the [music player app](https://github.com/garden-co/jazz/blob/main/examples/music-player/src/2_main.tsx) for a full example.
+</ContentByFramework>
+
+<ContentByFramework framework="svelte">
+Check out the [file share app](https://github.com/garden-co/jazz/blob/main/examples/file-share-svelte/src/routes/%2Blayout.svelte) for a full example.
+</ContentByFramework>

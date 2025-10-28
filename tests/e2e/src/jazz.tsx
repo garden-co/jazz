@@ -1,5 +1,4 @@
-import { createJazzReactApp, useDemoAuth } from "jazz-react";
-import { useEffect, useRef } from "react";
+import { JazzReactProvider } from "jazz-tools/react";
 
 const url = new URL(window.location.href);
 
@@ -13,36 +12,22 @@ if (url.searchParams.has("local")) {
   peer = `ws://localhost:4200/?key=${key}`;
 }
 
-const Jazz = createJazzReactApp();
-
-export const { useAccount, useCoState, useAcceptInvite } = Jazz;
+if (import.meta.env.VITE_WS_PEER) {
+  peer = import.meta.env.VITE_WS_PEER;
+}
 
 function getUserInfo() {
   return url.searchParams.get("userName") ?? "Mister X";
 }
 
 export function AuthAndJazz({ children }: { children: React.ReactNode }) {
-  const [auth, state] = useDemoAuth();
-
-  const signedUp = useRef(false);
-
-  useEffect(() => {
-    if (state.state === "ready" && !signedUp.current) {
-      const userName = getUserInfo();
-
-      if (state.existingUsers.includes(userName)) {
-        state.logInAs(userName);
-      } else {
-        state.signUp(userName);
-      }
-
-      signedUp.current = true;
-    }
-  }, [state.state]);
-
   return (
-    <Jazz.Provider auth={auth} peer={`${peer}?key=${key}`}>
+    <JazzReactProvider
+      sync={{
+        peer: `${peer}?key=${key}`,
+      }}
+    >
       {children}
-    </Jazz.Provider>
+    </JazzReactProvider>
   );
 }

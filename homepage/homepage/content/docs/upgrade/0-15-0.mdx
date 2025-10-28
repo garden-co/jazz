@@ -1,0 +1,107 @@
+import { ContentByFramework, CodeGroup } from '@/components/forMdx'
+
+# Jazz 0.15.0 - Moving everything inside `jazz-tools`
+
+One of the pain points that our adopters have been facing while maintaining Jazz apps is keeping the different package versions aligned.
+
+This becomes especially hard when using a monorepo setup for multi-platform apps.
+
+To address this problem, we have decided to move all the bindings into a single package and export the different bindings using export paths.
+
+## Overview:
+
+So far, when building a Jazz app you would need to use multiple packages.
+
+Now everything is inside `jazz-tools`:
+<CodeGroup>
+```tsx
+import { co, z } from "jazz-tools";
+import { useCoState } from "jazz-react"; // [!code --]
+import { useCoState } from "jazz-tools/react"; // [!code ++]
+
+export const TodoItem = co.map({
+  name: z.string(),
+});
+
+export function TodoComponent({
+  todoId
+}: {
+  todoId: string;
+}) {
+  const todo = useCoState(TodoItem, todoId);
+
+  return (
+    <input type="text" value={todo.name} onChange={(e) => (todo.name = e.target.value)} />
+  );
+}
+```
+</CodeGroup>
+
+## Major breaking changes
+
+<ContentByFramework framework={["vue", "vanilla", "svelte"]}>
+- A single package for everything: `jazz-tools` now exports all the bindings using export paths
+- Support for Vue is discontinued: maintaining multiple framework bindings is hard and we have decided to focus our efforts on the most used frameworks in our community
+</ContentByFramework>
+<ContentByFramework framework={["react", "react-native", "react-native-expo"]}>
+- A single package for everything: `jazz-tools` now exports all the bindings using export paths
+- Support for Vue is discontinued: maintaining multiple framework bindings is hard and we have decided to focus our efforts on the most used frameworks in our community
+- SSR is now stable: We have removed the experimental flag from `enableSSR` and unified `useAccount` and `useAccountOrGuest` hooks
+</ContentByFramework>
+
+### A single package for all
+
+All our stable packages that were depending on `jazz-tools` are now part of the `jazz-tools` package:
+
+- `jazz-react` -> `jazz-tools/react`
+- `jazz-react-native` -> `jazz-tools/react-native`
+- `jazz-expo` -> `jazz-tools/expo`
+- `jazz-svelte` -> `jazz-tools/svelte`
+- `jazz-nodejs` -> `jazz-tools/worker`
+- `jazz-react-auth-clerk` -> `jazz-tools/react`
+- `jazz-expo/auth/clerk` -> `jazz-tools/expo`
+- `jazz-browser` -> `jazz-tools/browser`
+- `jazz-browser-media-images` -> `jazz-tools/browser-media-images`
+- `jazz-react-native-media-images` -> `jazz-tools/react-native-media-images`
+- `jazz-inspector` -> `jazz-tools/inspector`
+- `jazz-inspector-element` -> `jazz-tools/inspector/register-custom-element`
+- `jazz-prosemirror` -> `jazz-tools/prosemirror`
+- `jazz-tiptap` -> `jazz-tools/tiptap`
+
+This means that now you can remove all these packages and keep only `jazz-tools`.
+
+To reduce the probability of importing an API from the wrong entry, we have also done some renaming:
+- `JazzProvider` becomes:
+  - `JazzReactProvider` in `jazz-tools/react`
+  - `JazzSvelteProvider` in `jazz-tools/svelte`
+  - `JazzReactNativeProvider` in `jazz-tools/react-native`
+  - `JazzExpoProvider` in `jazz-tools/expo`
+- Clerk bindings are now exported directly from the framework entries and renamed as:
+  - `import { JazzReactProviderWithClerk } from "jazz-tools/react"`
+  - `import { JazzExpoProviderWithClerk } from "jazz-tools/expo"`
+- We have added the `Native` suffix to the platform-specific hooks when imported from the `react-native` or `expo` entries:
+  - `useAcceptInvite` -> `useAcceptInviteNative`
+  - `useProgressiveImg` -> `useProgressiveImgNative`
+  - `ProgressiveImg` -> `ProgressiveImgNative`
+- `useAcceptInvite` becomes `new InviteListener` in Svelte
+
+We have not renamed APIs like `useCoState` or `useAccount` because their implementation is cross-platform.
+
+When experimenting with VSCode, we've noticed that usually the import path suggested is `jazz-tools/react-core`, which is the same as importing from `jazz-tools/react` or the specific framework entry.
+
+<ContentByFramework framework={["react-native", "react-native-expo"]}>
+To make this upgrade possible we have fully transtioned to [Package Exports](https://nodejs.org/docs/latest-v18.x/api/packages.html#package-entry-points) in `jazz-tools`.
+
+This means that if you are using an old version of React Native you will need to enable the [enablePackageExports](https://metrobundler.dev/docs/configuration/#unstable_enablepackageexports-experimental) flag in your metro config.
+</ContentByFramework>
+<ContentByFramework framework={["react", "react-native", "react-native-expo"]}>
+### SSR is now stable
+
+The `enableSSR` was marked as experimental because the `useAccount` return type was not matching the returned values in SSR mode.
+
+In this release, we have refactored `useAccount` to make "me" always nullable, matching what happens when rendering on the server.
+
+We have also removed `useAccountOrGuest` and made `useAccount` return an `agent` value that can be used to load data in all rendering modes.
+
+For more details, check the [SSR docs](/docs/react/project-setup#nextjs-integration).
+</ContentByFramework>

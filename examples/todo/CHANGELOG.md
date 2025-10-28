@@ -1,5 +1,832 @@
 # jazz-example-todo
 
+## 0.0.235
+
+### Patch Changes
+
+- Updated dependencies [048ac1d]
+  - jazz-tools@0.14.22
+  - jazz-react@0.14.22
+
+## 0.0.234
+
+### Patch Changes
+
+- Updated dependencies [e7e505e]
+- Updated dependencies [13b57aa]
+- Updated dependencies [5662faa]
+- Updated dependencies [2116a59]
+  - jazz-tools@0.14.21
+  - jazz-react@0.14.21
+
+## 0.0.233
+
+### Patch Changes
+
+- Updated dependencies [6f72419]
+- Updated dependencies [04b20c2]
+  - jazz-tools@0.14.20
+  - jazz-react@0.14.20
+
+## 0.0.232
+
+### Patch Changes
+
+- jazz-react@0.14.19
+- jazz-tools@0.14.19
+
+## 0.0.231
+
+### Patch Changes
+
+- Updated dependencies [4b950bc]
+- Updated dependencies [d6d9c0a]
+- Updated dependencies [c559054]
+  - jazz-tools@0.14.18
+  - jazz-react@0.14.18
+
+## 0.0.230
+
+### Patch Changes
+
+- Updated dependencies [e512df4]
+  - jazz-tools@0.14.17
+  - jazz-react@0.14.17
+
+## 0.0.229
+
+### Patch Changes
+
+- jazz-react@0.14.16
+- jazz-tools@0.14.16
+
+## 0.0.228
+
+### Patch Changes
+
+- Updated dependencies [f9590f9]
+  - jazz-react@0.14.15
+  - jazz-tools@0.14.15
+
+## 0.0.227
+
+### Patch Changes
+
+- Updated dependencies [e32a1f7]
+  - jazz-tools@0.14.14
+  - jazz-react@0.14.14
+
+## 0.0.226
+
+### Patch Changes
+
+- jazz-react@0.14.13
+
+## 0.0.225
+
+### Patch Changes
+
+- jazz-react@0.14.12
+
+## 0.0.224
+
+### Patch Changes
+
+- Updated dependencies [dc746a2]
+- Updated dependencies [f869d9a]
+- Updated dependencies [3fe6832]
+  - jazz-react@0.14.10
+  - jazz-tools@0.14.10
+
+## 0.0.223
+
+### Patch Changes
+
+- Updated dependencies [22c2600]
+  - jazz-tools@0.14.9
+  - jazz-react@0.14.9
+
+## 0.0.222
+
+### Patch Changes
+
+- Updated dependencies [637ae13]
+  - jazz-tools@0.14.8
+  - jazz-react@0.14.8
+
+## 0.0.221
+
+### Patch Changes
+
+- Updated dependencies [365b0ea]
+  - jazz-tools@0.14.7
+  - jazz-react@0.14.7
+
+## 0.0.220
+
+### Patch Changes
+
+- Updated dependencies [9d6d9fe]
+- Updated dependencies [9d6d9fe]
+  - jazz-tools@0.14.6
+  - jazz-react@0.14.6
+
+## 0.0.219
+
+### Patch Changes
+
+- Updated dependencies [91cbb2f]
+- Updated dependencies [20b3d88]
+  - jazz-tools@0.14.5
+  - jazz-react@0.14.5
+
+## 0.0.218
+
+### Patch Changes
+
+- Updated dependencies [011af55]
+  - jazz-tools@0.14.4
+  - jazz-react@0.14.4
+
+## 0.0.217
+
+### Patch Changes
+
+- Updated dependencies [3d1027f]
+- Updated dependencies [c240eed]
+  - jazz-tools@0.14.2
+  - jazz-react@0.14.2
+
+## 0.0.216
+
+### Patch Changes
+
+- Updated dependencies [cdfc105]
+  - jazz-tools@0.14.1
+  - jazz-react@0.14.1
+
+## 0.0.215
+
+### Patch Changes
+
+- Updated dependencies [5835ed1]
+  - jazz-tools@0.14.0
+  - jazz-react@0.14.0
+
+## 0.0.214
+
+### Patch Changes
+
+- jazz-react@0.13.32
+
+## 0.0.213
+
+### Patch Changes
+
+- Updated dependencies [e5b170f]
+  - jazz-tools@0.13.31
+  - jazz-react@0.13.31
+
+## 0.0.212
+
+### Patch Changes
+
+- jazz-react@0.13.30
+- jazz-tools@0.13.30
+
+## 0.0.211
+
+### Patch Changes
+
+- jazz-react@0.13.29
+- jazz-tools@0.13.29
+
+## 0.0.210
+
+### Patch Changes
+
+- jazz-react@0.13.28
+- jazz-tools@0.13.28
+
+## 0.0.209
+
+### Patch Changes
+
+- jazz-react@0.13.27
+- jazz-tools@0.13.27
+
+## 0.0.208
+
+### Patch Changes
+
+- Updated dependencies [ff846d9]
+  - jazz-tools@0.13.26
+  - jazz-react@0.13.26
+
+## 0.0.207
+
+### Patch Changes
+
+- jazz-react@0.13.25
+- jazz-tools@0.13.25
+
+## 0.0.206
+
+### Patch Changes
+
+- Updated dependencies [02a240c]
+  - jazz-tools@0.13.23
+  - jazz-react@0.13.23
+
+## 0.0.205
+
+### Patch Changes
+
+- jazz-react@0.13.21
+- jazz-tools@0.13.21
+
+## 0.0.204
+
+### Patch Changes
+
+- Updated dependencies [439f0fe]
+  - jazz-tools@0.13.20
+  - jazz-react@0.13.20
+
+## 0.0.203
+
+### Patch Changes
+
+- Updated dependencies [80530a4]
+  - jazz-tools@0.13.19
+  - jazz-react@0.13.19
+
+## 0.0.202
+
+### Patch Changes
+
+- Updated dependencies [761759c]
+  - jazz-tools@0.13.18
+  - jazz-react@0.13.18
+
+## 0.0.201
+
+### Patch Changes
+
+- jazz-react@0.13.17
+- jazz-tools@0.13.17
+
+## 0.0.200
+
+### Patch Changes
+
+- jazz-react@0.13.16
+- jazz-tools@0.13.16
+
+## 0.0.199
+
+### Patch Changes
+
+- jazz-react@0.13.15
+- jazz-tools@0.13.15
+
+## 0.0.198
+
+### Patch Changes
+
+- jazz-react@0.13.14
+- jazz-tools@0.13.14
+
+## 0.0.197
+
+### Patch Changes
+
+- jazz-react@0.13.13
+- jazz-tools@0.13.13
+
+## 0.0.196
+
+### Patch Changes
+
+- Updated dependencies [4547525]
+  - jazz-tools@0.13.12
+  - jazz-react@0.13.12
+
+## 0.0.195
+
+### Patch Changes
+
+- Updated dependencies [17273a6]
+  - jazz-tools@0.13.11
+  - jazz-react@0.13.11
+
+## 0.0.194
+
+### Patch Changes
+
+- jazz-react@0.13.10
+- jazz-tools@0.13.10
+
+## 0.0.193
+
+### Patch Changes
+
+- Updated dependencies [a6cf01f]
+  - jazz-tools@0.13.9
+  - jazz-react@0.13.9
+
+## 0.0.192
+
+### Patch Changes
+
+- Updated dependencies [bc3d7bb]
+  - jazz-tools@0.13.7
+  - jazz-react@0.13.7
+
+## 0.0.191
+
+### Patch Changes
+
+- Updated dependencies [fe6f561]
+  - jazz-tools@0.13.5
+  - jazz-react@0.13.5
+
+## 0.0.190
+
+### Patch Changes
+
+- Updated dependencies [3129982]
+  - jazz-react@0.13.4
+  - jazz-tools@0.13.4
+
+## 0.0.189
+
+### Patch Changes
+
+- Updated dependencies [12f8bfa]
+- Updated dependencies [bd57177]
+  - jazz-tools@0.13.3
+  - jazz-react@0.13.3
+
+## 0.0.188
+
+### Patch Changes
+
+- jazz-react@0.13.2
+- jazz-tools@0.13.2
+
+## 0.0.187
+
+### Patch Changes
+
+- Updated dependencies [afd1374]
+  - jazz-tools@0.13.0
+  - jazz-react@0.13.0
+
+## 0.0.186
+
+### Patch Changes
+
+- jazz-react@0.12.2
+- jazz-tools@0.12.2
+
+## 0.0.185
+
+### Patch Changes
+
+- jazz-react@0.12.1
+- jazz-tools@0.12.1
+
+## 0.0.184
+
+### Patch Changes
+
+- Updated dependencies [01523dc]
+- Updated dependencies [4ea87dc]
+- Updated dependencies [1e6da19]
+- Updated dependencies [b6c6a0a]
+  - jazz-tools@0.12.0
+  - jazz-react@0.12.0
+
+## 0.0.183
+
+### Patch Changes
+
+- jazz-react@0.11.8
+- jazz-tools@0.11.8
+
+## 0.0.182
+
+### Patch Changes
+
+- Updated dependencies [a140f55]
+- Updated dependencies [4019918]
+- Updated dependencies [2b0d1b0]
+  - jazz-tools@0.11.7
+  - jazz-react@0.11.7
+
+## 0.0.181
+
+### Patch Changes
+
+- 1bfa9bb: Removed when="singedUp" from examples apps' Jazz providers. This is a really niche use-case option and can lead to broken-feeling experiences when anonymous users try to load something.
+- Updated dependencies [e7c85b7]
+  - jazz-react@0.11.6
+  - jazz-tools@0.11.6
+
+## 0.0.180
+
+### Patch Changes
+
+- jazz-react@0.11.5
+- jazz-tools@0.11.5
+
+## 0.0.179
+
+### Patch Changes
+
+- Updated dependencies [57a3dbe]
+- Updated dependencies [a717754]
+- Updated dependencies [a91f343]
+  - jazz-tools@0.11.4
+  - jazz-react@0.11.4
+
+## 0.0.178
+
+### Patch Changes
+
+- jazz-react@0.11.3
+- jazz-tools@0.11.3
+
+## 0.0.177
+
+### Patch Changes
+
+- Updated dependencies [6892dc6]
+  - jazz-tools@0.11.2
+  - jazz-react@0.11.2
+
+## 0.0.176
+
+### Patch Changes
+
+- jazz-react@0.11.1
+
+## 0.0.175
+
+### Patch Changes
+
+- Updated dependencies [6a96d8b]
+- Updated dependencies [a35249a]
+- Updated dependencies [b9d194a]
+- Updated dependencies [a4713df]
+- Updated dependencies [34cbdc3]
+- Updated dependencies [f039e8f]
+- Updated dependencies [e22de9f]
+  - jazz-tools@0.11.0
+  - jazz-react@0.11.0
+
+## 0.0.174
+
+### Patch Changes
+
+- Updated dependencies [2f99de0]
+  - jazz-tools@0.10.15
+  - jazz-react@0.10.15
+
+## 0.0.173
+
+### Patch Changes
+
+- Updated dependencies [75211e3]
+  - jazz-tools@0.10.14
+  - jazz-react@0.10.14
+
+## 0.0.172
+
+### Patch Changes
+
+- Updated dependencies [07feedd]
+  - jazz-tools@0.10.13
+  - jazz-react@0.10.13
+
+## 0.0.171
+
+### Patch Changes
+
+- Updated dependencies [4612e05]
+  - jazz-tools@0.10.12
+  - jazz-react@0.10.12
+
+## 0.0.170
+
+### Patch Changes
+
+- jazz-react@0.10.9
+
+## 0.0.169
+
+### Patch Changes
+
+- Updated dependencies [2fb6428]
+  - jazz-tools@0.10.8
+  - jazz-react@0.10.8
+
+## 0.0.168
+
+### Patch Changes
+
+- Updated dependencies [1136d9b]
+- Updated dependencies [0eed228]
+  - jazz-react@0.10.7
+  - jazz-tools@0.10.7
+
+## 0.0.167
+
+### Patch Changes
+
+- Updated dependencies [1d71ca1]
+- Updated dependencies [ada802b]
+  - jazz-react@0.10.6
+  - jazz-tools@0.10.6
+
+## 0.0.166
+
+### Patch Changes
+
+- Updated dependencies [59ff77e]
+  - jazz-tools@0.10.5
+  - jazz-react@0.10.5
+
+## 0.0.165
+
+### Patch Changes
+
+- jazz-react@0.10.4
+- jazz-tools@0.10.4
+
+## 0.0.164
+
+### Patch Changes
+
+- Updated dependencies [d8582fc]
+  - jazz-tools@0.10.3
+  - jazz-react@0.10.3
+
+## 0.0.163
+
+### Patch Changes
+
+- jazz-react@0.10.2
+- jazz-tools@0.10.2
+
+## 0.0.162
+
+### Patch Changes
+
+- Updated dependencies [5a63cba]
+  - jazz-tools@0.10.1
+  - jazz-react@0.10.1
+
+## 0.0.161
+
+### Patch Changes
+
+- Updated dependencies [498954f]
+- Updated dependencies [d42c2aa]
+- Updated dependencies [dd03464]
+- Updated dependencies [b426342]
+  - jazz-react@0.10.0
+  - jazz-tools@0.10.0
+
+## 0.0.160
+
+### Patch Changes
+
+- jazz-react@0.9.23
+- jazz-tools@0.9.23
+
+## 0.0.159
+
+### Patch Changes
+
+- jazz-react@0.9.22
+
+## 0.0.158
+
+### Patch Changes
+
+- Updated dependencies [1be017d]
+  - jazz-tools@0.9.21
+  - jazz-react@0.9.21
+
+## 0.0.157
+
+### Patch Changes
+
+- Updated dependencies [b01cc1f]
+  - jazz-tools@0.9.20
+  - jazz-react@0.9.20
+
+## 0.0.156
+
+### Patch Changes
+
+- jazz-react@0.9.19
+- jazz-tools@0.9.19
+
+## 0.0.155
+
+### Patch Changes
+
+- jazz-react@0.9.18
+- jazz-tools@0.9.18
+
+## 0.0.154
+
+### Patch Changes
+
+- Updated dependencies [c2ca1fe]
+- Updated dependencies [1227047]
+  - jazz-tools@0.9.17
+  - jazz-react@0.9.17
+
+## 0.0.153
+
+### Patch Changes
+
+- Updated dependencies [24b3b6a]
+  - jazz-tools@0.9.16
+  - jazz-react@0.9.16
+
+## 0.0.152
+
+### Patch Changes
+
+- Updated dependencies [7491711]
+  - jazz-tools@0.9.15
+  - jazz-react@0.9.15
+
+## 0.0.151
+
+### Patch Changes
+
+- Updated dependencies [3df93cc]
+  - jazz-tools@0.9.14
+  - jazz-react@0.9.14
+
+## 0.0.150
+
+### Patch Changes
+
+- jazz-react@0.9.13
+- jazz-tools@0.9.13
+
+## 0.0.149
+
+### Patch Changes
+
+- jazz-react@0.9.12
+- jazz-tools@0.9.12
+
+## 0.0.148
+
+### Patch Changes
+
+- jazz-react@0.9.11
+- jazz-tools@0.9.11
+
+## 0.0.147
+
+### Patch Changes
+
+- Updated dependencies [5e83864]
+  - jazz-react@0.9.10
+  - jazz-tools@0.9.10
+
+## 0.0.146
+
+### Patch Changes
+
+- Updated dependencies [8eb9247]
+  - jazz-tools@0.9.9
+  - jazz-react@0.9.9
+
+## 0.0.145
+
+### Patch Changes
+
+- Updated dependencies [d1d773b]
+  - jazz-tools@0.9.8
+  - jazz-react@0.9.8
+
+## 0.0.144
+
+### Patch Changes
+
+- jazz-react@0.9.4
+
+## 0.0.143
+
+### Patch Changes
+
+- Updated dependencies [1b71969]
+  - jazz-react@0.9.1
+  - jazz-tools@0.9.1
+
+## 0.0.142
+
+### Patch Changes
+
+- Updated dependencies [956a4d1]
+- Updated dependencies [8eda792]
+  - jazz-react@0.9.0
+  - jazz-tools@0.9.0
+
+## 0.0.141
+
+### Patch Changes
+
+- Updated dependencies [dc62b95]
+- Updated dependencies [1de26f8]
+  - jazz-tools@0.8.51
+  - jazz-react@0.8.51
+
+## 0.0.140
+
+### Patch Changes
+
+- jazz-react@0.8.50
+- jazz-tools@0.8.50
+
+## 0.0.139
+
+### Patch Changes
+
+- jazz-react@0.8.49
+- jazz-tools@0.8.49
+
+## 0.0.138
+
+### Patch Changes
+
+- Updated dependencies [635e824]
+- Updated dependencies [0a85982]
+  - jazz-tools@0.8.48
+  - jazz-react@0.8.48
+
+## 0.0.137
+
+### Patch Changes
+
+- Updated dependencies [fa41f8e]
+- Updated dependencies [88d7d9a]
+- Updated dependencies [60e35ea]
+  - jazz-tools@0.8.45
+  - jazz-react@0.8.45
+
+## 0.0.136
+
+### Patch Changes
+
+- jazz-react@0.8.44
+- jazz-tools@0.8.44
+
+## 0.0.135
+
+### Patch Changes
+
+- jazz-react@0.8.41
+- jazz-tools@0.8.41
+
+## 0.0.134
+
+### Patch Changes
+
+- jazz-react@0.8.40
+
+## 0.0.133
+
+### Patch Changes
+
+- Updated dependencies [249eecb]
+  - jazz-tools@0.8.39
+  - jazz-react@0.8.39
+
+## 0.0.132
+
+### Patch Changes
+
+- jazz-react@0.8.38
+- jazz-tools@0.8.38
+
+## 0.0.131
+
+### Patch Changes
+
+- jazz-react@0.8.37
+- jazz-tools@0.8.37
+
 ## 0.0.130
 
 ### Patch Changes

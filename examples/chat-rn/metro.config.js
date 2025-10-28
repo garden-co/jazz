@@ -1,31 +1,32 @@
-// Learn more https://docs.expo.dev/guides/monorepos
-const { getDefaultConfig } = require("expo/metro-config");
-const { FileStore } = require("metro-cache");
 const path = require("path");
+const { makeMetroConfig } = require("@rnx-kit/metro-config");
+const MetroSymlinksResolver = require("@rnx-kit/metro-resolver-symlinks");
 
-// eslint-disable-next-line no-undef
+// Define workspace root
 const projectRoot = __dirname;
 const workspaceRoot = path.resolve(projectRoot, "../..");
 
-const config = getDefaultConfig(projectRoot);
+// Add packages paths
+const extraNodeModules = {
+  modules: path.resolve(workspaceRoot, "node_modules"),
+};
 
-// Since we are using pnpm, we have to setup the monorepo manually for Metro
-// #1 - Watch all files in the monorepo
-config.watchFolders = [workspaceRoot];
-// #2 - Try resolving with project modules first, then workspace modules
-config.resolver.nodeModulesPaths = [
+const watchFolders = [
+  path.resolve(workspaceRoot, "node_modules"),
+  path.resolve(workspaceRoot, "packages"),
+];
+
+const nodeModulesPaths = [
   path.resolve(projectRoot, "node_modules"),
   path.resolve(workspaceRoot, "node_modules"),
 ];
-config.resolver.sourceExts = ["mjs", "js", "json", "ts", "tsx"];
-config.resolver.unstable_enablePackageExports = true;
-config.resolver.requireCycleIgnorePatterns = [/(^|\/|\\)node_modules($|\/|\\)/];
 
-// Use turborepo to restore the cache when possible
-config.cacheStores = [
-  new FileStore({
-    root: path.join(projectRoot, "node_modules", ".cache", "metro"),
-  }),
-];
-
-module.exports = config;
+module.exports = makeMetroConfig({
+  resolver: {
+    resolveRequest: MetroSymlinksResolver(),
+    extraNodeModules,
+    nodeModulesPaths,
+    sourceExts: ["mjs", "js", "json", "ts", "tsx"],
+  },
+  watchFolders,
+});

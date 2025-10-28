@@ -1,0 +1,111 @@
+import { ContentByFramework, CodeGroup } from '@/components/forMdx'
+
+# Upgrade to Jazz 0.9.0
+
+Version 0.9.0 simplifies the application setup and makes Jazz more intellisense friendly by
+replacing the `createJazzApp` API with top-level imports.
+
+We have also introduced some new API to make testing Jazz components a breeze. 🌬️
+
+## New provider setup
+
+The `JazzProvider` is now imported from `jazz-svelte` instead of `createJazzApp`.
+
+While `createJazzApp` was originally designed to setup strong typing for custom Account schemas in `useAccount`,
+we found that this approach made the Jazz setup awkward and confusing for some users.
+
+So we decided to remove `createJazzApp` step and to provide the types through namespace declarations:
+
+  <CodeGroup>
+      {/* prettier-ignore */}
+        ```svelte
+        <!-- src/routes/+layout.svelte -->
+        <script lang="ts" module>
+          // Register the Account schema so `useAccount` returns our custom `MyAppAccount`
+          declare module 'jazz-svelte' {
+            interface Register {
+              Account: MyAccount;
+            }
+          }
+        </script>
+
+        <script lang="ts">
+          import { Provider } from '$lib/jazz'; // [!code --]
+          import { JazzProvider } from 'jazz-svelte';
+
+          // Example configuration for authentication and peer connection
+          let auth = null; // Replace with your auth implementation
+          let peer = "wss://your-peer-endpoint";
+
+          // The custom Account schema is passed now as a prop
+          let AccountSchema = MyAccount;
+        </script>
+
+        <JazzProvider {auth} {peer} {AccountSchema}>
+          <App />
+        </JazzProvider>
+        ```
+  </CodeGroup>
+
+## Top level imports for hooks
+
+  <div>
+    All Jazz hooks are now available as top-level imports from the `jazz-svelte` package.
+
+    This change improves IDE intellisense support and simplifies imports:
+  </div>
+
+  <CodeGroup>
+    {/* prettier-ignore */}
+```svelte
+
+<script lang="ts">
+  import { useAccount } from '$lib/jazz'; // [!code --]
+  import { useAccount } from 'jazz-svelte'; // [!code ++]
+
+  const { me } = useAccount();
+</script>
+
+<div>
+  Hello {me.profile?.name}
+</div>
+
+```
+  </CodeGroup>
+
+## New testing utilities
+
+Removing `createJazzApp` also makes testing way easier!
+
+We can now use `createJazzTestAccount` to setup accounts and testing data and pass it to
+your components and hooks using `JazzTestProvider`:
+
+  <CodeGroup>
+      {/* prettier-ignore */}
+      ```ts
+      import { useCoState } from "jazz-svelte";
+      import { createJazzTestAccount, JazzTestProvider } from "jazz-svelte/testing";
+      import { render } from "@testing-library/svelte"; // old
+      import { Playlist, MusicAccount } from "./schema"; // old
+
+      test("should load the playlist", async () => {
+        // ✅ Create a test account with your schema
+        const account = await createJazzTestAccount({ AccountSchema: MusicAccount });
+
+        // ✅ Set up test data
+        const playlist = Playlist.create({
+          name: "My playlist",
+        }, account);
+
+        // ✅ Use createJazzTestContext in your tests
+        render(PlaylistComponent, {
+          context: createJazzTestContext({ account: options.account }),
+          props: {
+            id: playlist.id,
+          },
+        });
+
+        expect(await screen.findByRole("heading", { name: "My playlist" })).toBeInTheDocument();
+      });
+      ```
+  </CodeGroup>

@@ -1,14 +1,28 @@
 {
   "compilerOptions": {
-    "lib": ["ESNext"],
+    "lib": ["ESNext", "DOM"],
     "module": "esnext",
-    "target": "ES2021",
+    "target": "ES2021", // For RN/Hermes compatibility
     "moduleResolution": "bundler",
     "moduleDetection": "force",
     "strict": true,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
     "noUncheckedIndexedAccess": true,
-    "esModuleInterop": true
-  }
+    "esModuleInterop": true,
+    "declaration": true,
+    "emitDeclarationOnly": true,
+    "declarationMap": true,
+    "rootDir": "./src",
+    "jsx": "react-jsx",
+    "customConditions": ["@jazz-tools/source"]
+  },
+  "include": [
+    "src/**/*.ts",
+    "./src/**/*.js",
+    "./src/**/*.ts",
+    "./src/**/*.tsx",
+    "./src/**/*.svelte"
+  ],
+  "exclude": ["./node_modules"]
 }

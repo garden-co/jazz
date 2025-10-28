@@ -1,0 +1,24 @@
+{
+  "name": "cloudflare-workers",
+  "version": "0.0.0",
+  "private": true,
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev",
+    "start": "wrangler dev",
+    "test": "vitest --watch --root ../../ --project cloudflare-workers",
+    "cf-typegen": "wrangler types"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250214.0",
+    "execa": "^9.5.2",
+    "typescript": "catalog:default",
+    "wrangler": "^4.37.0"
+  },
+  "dependencies": {
+    "cojson": "workspace:*",
+    "cojson-transport-ws": "workspace:*",
+    "hono": "^4.7.2",
+    "jazz-tools": "workspace:*"
+  }
+}

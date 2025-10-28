@@ -1,7 +1,8 @@
-import { CoValueCore } from "./coValueCore.js";
+import { AvailableCoValueCore } from "./coValueCore/coValueCore.js";
 import { RawProfile as Profile, RawAccount } from "./coValues/account.js";
 import { RawCoList } from "./coValues/coList.js";
 import { RawCoMap } from "./coValues/coMap.js";
+import { RawCoPlainText } from "./coValues/coPlainText.js";
 import { RawBinaryCoStream, RawCoStream } from "./coValues/coStream.js";
 import { RawGroup } from "./coValues/group.js";
 import { RawCoID } from "./ids.js";
@@ -14,7 +15,7 @@ export type CoID<T extends RawCoValue> = RawCoID & {
 export interface RawCoValue {
   /** The `CoValue`'s (precisely typed) `CoID` */
   id: CoID<this>;
-  core: CoValueCore;
+  core: AvailableCoValueCore;
   /** Specifies which kind of `CoValue` this is */
   type: string;
   /** The `CoValue`'s (precisely typed) static metadata */
@@ -32,6 +33,46 @@ export interface RawCoValue {
    *
    * Used internally by `useTelepathicData()` for reactive updates on changes to a `CoValue`. */
   subscribe(listener: (coValue: this) => void): () => void;
+
+  totalValidTransactions: number;
+}
+
+export class RawUnknownCoValue implements RawCoValue {
+  id: CoID<this>;
+  core: AvailableCoValueCore;
+  totalValidTransactions = 0;
+
+  constructor(core: AvailableCoValueCore) {
+    this.id = core.id as CoID<this>;
+    this.core = core;
+  }
+
+  get type() {
+    return this.core.verified.header.type;
+  }
+
+  get headerMeta() {
+    return this.core.verified.header.meta as JsonObject;
+  }
+
+  /** @category 6. Meta */
+  get group(): RawGroup {
+    return this.core.getGroup();
+  }
+
+  toJSON() {
+    return {};
+  }
+
+  atTime() {
+    return this;
+  }
+
+  subscribe(listener: (value: this) => void): () => void {
+    return this.core.subscribe((core) => {
+      listener(core.getCurrentContent() as this);
+    });
+  }
 }
 
 export type AnyRawCoValue =
@@ -40,6 +81,7 @@ export type AnyRawCoValue =
   | RawAccount
   | Profile
   | RawCoList
+  | RawCoPlainText
   | RawCoStream
   | RawBinaryCoStream;
 
@@ -65,4 +107,12 @@ export function expectStream(content: RawCoValue): RawCoStream {
   }
 
   return content as RawCoStream;
+}
+
+export function expectPlainText(content: RawCoValue): RawCoPlainText {
+  if (content.type !== "coplaintext") {
+    throw new Error("Expected plaintext");
+  }
+
+  return content as RawCoPlainText;
 }

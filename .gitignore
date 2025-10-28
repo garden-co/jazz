@@ -5,16 +5,32 @@ docsTmp
 .DS_Store
 .turbo
 coverage
+.direnv
+
+# Typescript
+**/*.tsbuildinfo
 
 # Next.js
 **/.next
 
 # Vite output
 **/dist
+__screenshots__
 
 # Playwright
 test-results
 
+# Java
+.java-version
+
 .husky
 
-.vscode/settings.json
+.vscode/*
+.idea/*
+
+.svelte-kit
+
+.cursorrules
+.windsurfrules
+
+playwright-report

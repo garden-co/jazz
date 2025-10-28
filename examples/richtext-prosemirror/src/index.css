@@ -1,0 +1,8 @@
+@import "tailwindcss";
+
+.ProseMirror ul {
+  @apply list-disc;
+}
+.ProseMirror ol {
+  @apply list-decimal;
+}

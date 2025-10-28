@@ -2,11 +2,14 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import { Link, RouterProvider, createBrowserRouter } from "react-router-dom";
 import { AuthAndJazz } from "./jazz";
+import { ConcurrentChanges } from "./pages/ConcurrentChanges";
 import { FileStreamTest } from "./pages/FileStream";
+import { InboxPage } from "./pages/Inbox";
 import { ResumeSyncState } from "./pages/ResumeSyncState";
 import { RetryUnavailable } from "./pages/RetryUnavailable";
 import { Sharing } from "./pages/Sharing";
 import { TestInput } from "./pages/TestInput";
+import { WriteOnlyRole } from "./pages/WriteOnly";
 
 function Index() {
   return (
@@ -25,6 +28,15 @@ function Index() {
       </li>
       <li>
         <Link to="/sharing">Sharing</Link>
+      </li>
+      <li>
+        <Link to="/write-only">Write Only</Link>
+      </li>
+      <li>
+        <Link to="/concurrent-changes">Concurrent Changes</Link>
+      </li>
+      <li>
+        <Link to="/inbox">Inbox</Link>
       </li>
     </ul>
   );
@@ -50,6 +62,18 @@ const router = createBrowserRouter([
   {
     path: "/sharing",
     element: <Sharing />,
+  },
+  {
+    path: "/write-only",
+    element: <WriteOnlyRole />,
+  },
+  {
+    path: "/inbox",
+    element: <InboxPage />,
+  },
+  {
+    path: "/concurrent-changes",
+    element: <ConcurrentChanges />,
   },
   {
     path: "/",

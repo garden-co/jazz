@@ -17,4 +17,4 @@ For community and support, please join our [Discord](https://discord.gg/utDMjHYg
 - Community & support: [Discord](https://discord.gg/utDMjHYg42)
 - Updates: [X](https://x.com/jazz_tools) & [Email](https://garden.co/news)
 
-Copyright 2024 &mdash; Garden Computing, Inc.
+Copyright 2025 &mdash; Garden Computing, Inc.

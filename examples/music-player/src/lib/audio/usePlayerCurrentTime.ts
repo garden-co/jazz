@@ -1,22 +1,14 @@
 import { useLayoutEffect, useState } from "react";
-import { useAudioManager } from "./AudioManager";
+import { AudioManager, useAudioManager } from "./AudioManager";
 
 export function usePlayerCurrentTime() {
   const audioManager = useAudioManager();
   const [value, setValue] = useState<number>(0);
 
   useLayoutEffect(() => {
-    setValue(audioManager.mediaElement.currentTime);
+    setValue(getPlayerCurrentTime(audioManager));
 
-    const onTimeUpdate = () => {
-      setValue(audioManager.mediaElement.currentTime);
-    };
-
-    audioManager.mediaElement.addEventListener("timeupdate", onTimeUpdate);
-
-    return () => {
-      audioManager.mediaElement.removeEventListener("timeupdate", onTimeUpdate);
-    };
+    return subscribeToPlayerCurrentTime(audioManager, setValue);
   }, [audioManager]);
 
   function setCurrentTime(time: number) {
@@ -29,5 +21,28 @@ export function usePlayerCurrentTime() {
   return {
     value,
     setValue: setCurrentTime,
+  };
+}
+
+export function setPlayerCurrentTime(audioManager: AudioManager, time: number) {
+  audioManager.mediaElement.currentTime = time;
+}
+
+export function getPlayerCurrentTime(audioManager: AudioManager): number {
+  return audioManager.mediaElement.currentTime;
+}
+
+export function subscribeToPlayerCurrentTime(
+  audioManager: AudioManager,
+  callback: (time: number) => void,
+) {
+  const onTimeUpdate = () => {
+    callback(audioManager.mediaElement.currentTime);
+  };
+
+  audioManager.mediaElement.addEventListener("timeupdate", onTimeUpdate);
+
+  return () => {
+    audioManager.mediaElement.removeEventListener("timeupdate", onTimeUpdate);
   };
 }

@@ -1,92 +1,72 @@
-import { Prose } from "gcmp-design-system/src/app/components/molecules/Prose";
-import {
-  FileLock2Icon,
-  GaugeIcon,
-  LockKeyholeIcon,
-  MonitorSmartphoneIcon,
-  MousePointerSquareDashedIcon,
-  UploadCloudIcon,
-  UserIcon,
-  UsersIcon,
-} from "lucide-react";
-import Link from "next/link";
+"use client";
 
-const features = [
-  {
-    title: "Instant updates",
-    icon: GaugeIcon,
-  },
-  {
-    title: "Real-time sync",
-    icon: MonitorSmartphoneIcon,
-  },
-  {
-    title: "Multiplayer",
-    icon: MousePointerSquareDashedIcon,
-  },
-  {
-    title: "File uploads",
-    icon: UploadCloudIcon,
-  },
-  {
-    title: "Social features",
-    icon: UsersIcon,
-  },
-  {
-    title: "Permissions",
-    icon: FileLock2Icon,
-  },
-  {
-    title: "E2E encryption",
-    icon: LockKeyholeIcon,
-  },
-  {
-    title: "Authentication",
-    icon: UserIcon,
-  },
-];
+import { marketingCopy } from "@/content/marketingCopy";
+import { H1 } from "@garden-co/design-system/src/components/atoms/Headings";
+import { Kicker } from "@garden-co/design-system/src/components/atoms/Kicker";
+import { Prose } from "@garden-co/design-system/src/components/molecules/Prose";
+import Link from "next/link";
+import { CodeTabs } from "@/components/home/CodeTabs";
+import { JazzSyncs } from "@/components/icons/JazzSyncs";
+import NpxCreateJazzApp from "@/components/home/NpxCreateJazzApp.mdx";
+import { Button } from "@garden-co/design-system/src/components/atoms/Button";
+import { CopyButton } from "@garden-co/design-system/src/components/molecules/CodeGroup";
+import { Icon } from "@garden-co/design-system/src/components/atoms/Icon";
+import clsx from "clsx";
+import { track } from "@vercel/analytics";
 
 export function HeroSection() {
   return (
-    <div className="container grid gap-x-8 gap-y-10 py-12 md:py-16 lg:py-24 lg:gap-0 lg:grid-cols-3">
-      <div className="flex flex-col justify-center gap-4 lg:col-span-3 lg:gap-8">
-        <p className="uppercase text-blue tracking-widest text-sm font-medium dark:text-stone-400">
-          Local-first development toolkit
-        </p>
-        <h1 className="font-display text-stone-950 dark:text-white text-4xl md:text-5xl lg:text-6xl font-medium tracking-tighter">
-          <span className="inline-block">Ship top-tier apps</span>{" "}
-          <span className="inline-block">at high tempo.</span>
-        </h1>
-
-        <Prose size="lg" className="text-pretty max-w-2xl dark:text-stone-200">
+    <section className="container grid items-start gap-8 py-12 md:grid-cols-12 md:gap-0 md:py-16">
+      <div className="md:col-span-4">
+        <Kicker className="mb-6">Ship Better Apps, Faster.</Kicker>
+        <H1>
+          <JazzSyncs className="max-w-96 md:max-w-full" aria-hidden="true" />
+          <span className="sr-only">{marketingCopy.headline}</span>
+        </H1>
+        <Prose
+          size="md"
+          className="mt-6 prose-p:leading-normal dark:text-white"
+        >
           <p>
-            Jazz is a framework for building local-first apps
-            &mdash;&nbsp;an&nbsp;architecture that lets companies like Figma and
-            Linear play in a league of their own.
+            A new kind of distributed database that runs across your frontend,
+            containers, serverless functions and its own cloud.
           </p>
           <p>
-            Open source. Self-host or use{" "}
-            <Link className="text-reset" href="/cloud">
-              Jazz Cloud
-            </Link>{" "}
-            for zero-config magic.
+            It syncs data, files and LLM streams instantly and feels like
+            reactive local JSON state.
+          </p>
+          <p>
+            Built-in auth, orgs, multiplayer, edit history, permissions,
+            encryption, offline support and more.
+          </p>
+
+          <p className="text-base text-stone-600 dark:text-stone-400">
+            Self-host or use Jazz Cloud for zero-config magic. Open source (MIT)
           </p>
         </Prose>
 
-        <div className="grid grid-cols-2 gap-2 max-w-3xl sm:grid-cols-4 sm:gap-4">
-          {features.map(({ title, icon: Icon }) => (
-            <div
-              key={title}
-              className="flex text-xs sm:text-sm gap-2 items-center"
-            >
-              <span className="text-blue p-1.5 rounded-lg bg-blue-50 dark:text-blue-500 dark:bg-stone-900">
-                <Icon size={16} />
-              </span>
-              <p>{title}</p>
-            </div>
-          ))}
+        <div className="mt-8 grid gap-4">
+          <div className="relative col-span-2 w-full flex-1 overflow-hidden rounded-lg border-2 text-sm md:text-base lg:col-span-3">
+            <NpxCreateJazzApp />
+
+            <CopyButton
+              code="npx create-jazz-app@latest"
+              size="sm"
+              className={clsx(
+                "z-100 mr-0.5 mt-0.5 hidden md:block md:opacity-100",
+              )}
+              onCopy={() => track("create-jazz-app command copied from hero")}
+            />
+          </div>
+          <Button intent="primary" size="lg" href={`/docs/`}>
+            <Icon name="docs" className="text-white" />
+            Read the docs
+          </Button>
         </div>
       </div>
-    </div>
+      <div className="md:col-span-7 md:col-start-6">
+        <CodeTabs />
+      </div>
+    </section>
   );
 }

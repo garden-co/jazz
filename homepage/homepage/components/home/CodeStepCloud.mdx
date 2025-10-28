@@ -1,9 +1,9 @@
 ```tsx
-const Jazz = createJazzReactApp();
+// Connect to sync and storage infrastructure — Jazz Cloud or self-hosted.
 
-<Jazz.Provider
-  peer="wss://cloud.jazz.tools/?key=you@example.com"
+<JazzReactProvider
+  sync={{ peer: "wss://cloud.jazz.tools" }}
 >
-    {children}
-</Jazz.Provider>
+  {children}
+</JazzReactProvider>
 ```

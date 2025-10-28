@@ -1,0 +1,263 @@
+export const metadata = {
+    description: "How to use JazzRPC to communicate with Server Workers using experimental_defineRequest."
+};
+
+import { Alert, CodeGroup } from "@/components/forMdx";
+
+# JazzRPC
+
+JazzRPC is the most straightforward and complete way to securely communicate with Server Workers. It works well with any framework or runtime that supports standard Request and Response objects, can be scaled horizontally, and puts clients and workers in direct communication.
+
+## Setting up JazzRPC
+
+### Defining request schemas
+
+Use `experimental_defineRequest` to define your API schema:
+
+<CodeGroup>
+```ts
+import { experimental_defineRequest, z } from "jazz-tools";
+import { Event, Ticket } from "./schema";
+
+const workerId = process.env.NEXT_PUBLIC_JAZZ_WORKER_ACCOUNT!;
+
+export const bookEventTicket = experimental_defineRequest({
+  url: "/api/book-event-ticket",
+  // The id of the worker Account or Group
+  workerId,
+  // The schema definition of the data we send to the server
+  request: {
+    schema: {
+      event: Event,
+    },
+    // The data that will be considered as "loaded" in the server input
+    resolve: {
+      event: { reservations: true },
+    },
+  },
+  // The schema definition of the data we expect to receive from the server
+  response: {
+    schema: { ticket: Ticket },
+    // The data that will be considered as "loaded" in the client response
+    // It defines the content that the server directly sends to the client, without involving the sync server
+    resolve: { ticket: true },
+  },
+});
+```
+</CodeGroup>
+
+### Setting up the Server Worker
+
+We need to start a Server Worker instance that will be able to sync data with the sync server, and handle the requests.
+
+<CodeGroup>
+```ts
+import { startWorker } from "jazz-tools/worker";
+
+export const jazzServer = await startWorker({
+  syncServer: "wss://cloud.jazz.tools/?key=your-api-key",
+  accountID: process.env.JAZZ_WORKER_ACCOUNT,
+  accountSecret: process.env.JAZZ_WORKER_SECRET,
+});
+```
+</CodeGroup>
+
+## Handling JazzRPC requests on the server
+
+### Creating API routes
+
+Create API routes to handle the defined RPC requests. Here's an example using Next.js API routes:
+
+<CodeGroup>
+```ts
+import { jazzServer } from "@/jazzServer";
+import { bookEventTicket, Ticket, Event } from "@/schema";
+import { JazzRequestError } from "jazz-tools";
+
+export async function POST(request: Request) {
+  return bookEventTicket.handle(
+    request,
+    jazzServer.worker,
+    async ({ event }, madeBy) => {
+      const ticketGroup = Group.create(jazzServer.worker);
+      const ticket = Ticket.create({
+        account: madeBy,
+        event,
+      });
+
+      // Give access to the ticket to the client
+      ticketGroup.addMember(madeBy, "reader");
+
+      event.reservations.push(ticket);
+
+      return {
+        ticket,
+      };
+    },
+  );
+}
+```
+</CodeGroup>
+
+## Making requests from the client
+
+### Using the defined API
+
+Make requests from the client using the defined API:
+
+<CodeGroup>
+```ts
+import { bookEventTicket, Ticket, Event } from "@/schema";
+import { isJazzRequestError } from "jazz-tools";
+
+export async function sendEventBookingRequest(event: Event) {
+  const { ticket } = await bookEventTicket.send({ event });
+
+  return ticket;
+}
+```
+</CodeGroup>
+
+## Error handling
+
+### Server-side error handling
+
+Use `JazzRequestError` to return proper HTTP error responses:
+
+<CodeGroup>
+```ts
+import { jazzServer } from "@/jazzServer";
+import { bookEventTicket, Ticket, Event } from "@/schema";
+import { JazzRequestError } from "jazz-tools";
+
+export async function POST(request: Request) {
+  return bookEventTicket.handle(
+    request,
+    jazzServer.worker,
+    async ({ event }, madeBy) => {
+      // Check if the event is full
+      if (event.reservations.length >= event.capacity) {
+        // The JazzRequestError is propagated to the client, use it for any validation errors
+        throw new JazzRequestError("Event is full", 400);
+      }
+
+      const ticketGroup = Group.create(jazzServer.worker);
+      const ticket = Ticket.create({
+        account: madeBy,
+        event,
+      });
+
+      // Give access to the ticket to the client
+      ticketGroup.addMember(madeBy, "reader");
+
+      event.reservations.push(ticket);
+
+      return {
+        ticket,
+      };
+    },
+  );
+}
+```
+</CodeGroup>
+
+<Alert variant="info" className="mt-4" title="Note">
+  To ensure that the limit is correctly enforced, the handler should be deployed in a single worker instance (e.g. a single Cloudflare DurableObject).
+
+  Details on how to deploy a single instance Worker are available in the [Deployments & Transactionality](#deployments--transactionality) section.
+</Alert>
+
+### Client-side error handling
+
+Handle errors on the client side:
+
+<CodeGroup>
+```ts
+import { bookEventTicket, Ticket, Event } from "@/schema";
+import { isJazzRequestError } from "jazz-tools";
+
+export async function sendEventBookingRequest(event: Event) {
+  try {
+    const { ticket } = await bookEventTicket.send({ event });
+
+    return ticket;
+  } catch (error) {
+    // This works as a type guard, so you can easily get the error message and details
+    if (isJazzRequestError(error)) {
+      alert(error.message);
+      return;
+    }
+  }
+}
+```
+</CodeGroup>
+
+<Alert variant="info" className="mt-4" title="Note">
+  The `experimental_defineRequest` API is still experimental and may change in future versions. For production applications, consider the stability implications.
+</Alert>
+
+## Security safeguards provided by JazzRPC
+
+JazzRPC includes several built-in security measures to protect against common attacks:
+
+### Cryptographic Authentication
+- **Digital Signatures**: Each RPC is cryptographically signed using the sender's private key
+- **Signature Verification**: The server verifies the signature using the sender's public key to ensure message authenticity and to identify the sender account
+- **Tamper Protection**: Any modification to the request payload will invalidate the signature
+
+### Replay Attack Prevention
+- **Unique Message IDs**: Each RPC has a unique identifier (`co_z${string}`)
+- **Duplicate Detection**: incoming messages ids are tracked to prevent replay attacks
+- **Message Expiration**: RPCs expire after 60 seconds to provide additional protection
+
+These safeguards ensure that JazzRPC requests are secure, authenticated, and protected against common attack vectors while maintaining the simplicity of standard HTTP communication.
+
+## Deployments & Transactionality
+
+### Single Instance Requirements
+
+Some operations need to happen one at a time and in the same place, otherwise the data can get out of sync.
+
+For example, if you are checking capacity for an event and creating tickets, you must ensure only one server is doing it.
+If multiple servers check at the same time, they might all think there is space and allow too many tickets.
+
+Jazz uses eventual consistency (data takes a moment to sync between regions), so this problem is worse if you run multiple server copies in different locations.
+
+Until Jazz supports transactions across regions, the solution is to deploy a single server instance for these sensitive operations.
+
+Examples of when you must deploy on a single instance are:
+1. Distribute a limited number of tickets
+   * Limiting ticket sales so that only 100 tickets are sold for an event.
+   * The check (“is there space left?”) and ticket creation must happen together, or you risk overselling.
+2. Inventory stock deduction
+   * Managing a product stock count (e.g., 5 items left in store).
+   * Multiple instances could let multiple buyers purchase the last item at the same time.
+3. Sequential ID or token generation
+   * Generating unique incremental order numbers (e.g., #1001, #1002).
+   * Multiple instances could produce duplicates if not coordinated.
+
+Single servers are necessary to enforce invariants or provide a consistent view of the data.
+
+As a rule of thumb, when the output of the request depends on the state of the database, you should probably deploy on a single instance.
+
+### Multi-Region Deployment
+
+If your code doesn’t need strict rules to keep data in sync (no counters, no limits, no “check‑then‑update” logic), you can run your workers in many regions at the same time.
+
+This way:
+* Users connect to the closest server (faster).
+* If one region goes down, others keep running (more reliable).
+
+Examples of when it's acceptable to deploy across multiple regions are:
+1. Sending confirmation emails
+   * After an action is complete, sending an email to the user does not depend on current database state.
+2. Pushing notifications
+   * Broadcasting “event booked” notifications to multiple users can be done from any region.
+3. Logging or analytics events
+   * Recording “user clicked this button” or “page viewed” events, since these are additive and don’t require strict ordering.
+4. Calling external APIs (e.g., LLMs, payment confirmations)
+   * If the response does not modify shared counters or limits, it can be done from any region.
+5. Pre-computing cached data or summaries
+   * Generating read-only previews or cached summaries where stale data is acceptable and does not affect core logic.
+
+Generally speaking, if the output of the request does not depend on the state of the database, you can deploy across multiple regions.

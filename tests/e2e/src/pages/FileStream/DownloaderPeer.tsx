@@ -1,38 +1,50 @@
-import { Account, FileStream, ID } from "jazz-tools";
-import { useEffect } from "react";
-import { useAccount, useCoState } from "../../jazz";
+import { Account, FileStream } from "jazz-tools";
+import { useAccount, useCoState } from "jazz-tools/react";
+import { useEffect, useState } from "react";
 import { UploadedFile } from "./schema";
-
-async function getUploadedFile(me: Account, uploadedFileId: ID<UploadedFile>) {
-  const uploadedFile = await UploadedFile.load(uploadedFileId, me, {});
-
-  if (!uploadedFile) {
-    throw new Error("Uploaded file not found");
-  }
-
-  uploadedFile.coMapDownloaded = true;
-
-  await FileStream.loadAsBlob(uploadedFile._refs.file.id, me);
-
-  return uploadedFile;
-}
-
-export function DownloaderPeer(props: { testCoMapId: ID<UploadedFile> }) {
+export function DownloaderPeer(props: { testCoMapId: string }) {
   const account = useAccount();
   const testCoMap = useCoState(UploadedFile, props.testCoMapId, {});
+  const [synced, setSynced] = useState(false);
 
   useEffect(() => {
-    getUploadedFile(account.me, props.testCoMapId).then((value) => {
-      value.syncCompleted = true;
-    });
+    if (!account.me) {
+      return;
+    }
+
+    async function run(me: Account, uploadedFileId: string) {
+      const uploadedFile = await UploadedFile.load(uploadedFileId, {
+        loadAs: me,
+      });
+
+      if (!uploadedFile) {
+        throw new Error("Uploaded file not found");
+      }
+
+      me.$jazz.waitForAllCoValuesSync().then(() => {
+        setSynced(true);
+      });
+
+      uploadedFile.$jazz.set("coMapDownloaded", true);
+
+      await FileStream.loadAsBlob(uploadedFile.$jazz.refs.file!.id, {
+        loadAs: me,
+      });
+
+      uploadedFile.$jazz.set("syncCompleted", true);
+    }
+
+    run(account.me, props.testCoMapId);
   }, []);
 
   return (
     <>
       <h1>Downloader Peer</h1>
       <div>Fetching: {props.testCoMapId}</div>
+      <div>Synced: {String(synced)}</div>
       <div data-testid="result">
-        Covalue: {Boolean(testCoMap?.id) ? "Downloaded" : "Not Downloaded"}
+        Covalue:{" "}
+        {Boolean(testCoMap?.$jazz.id) ? "Downloaded" : "Not Downloaded"}
       </div>
       <div data-testid="result">
         File:{" "}

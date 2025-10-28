@@ -1,5 +1,11 @@
 name: Playwright Tests
 
+concurrency:
+  # For pushes, this lets concurrent runs happen, so each push gets a result.
+  # But for other events (e.g. PRs), we can cancel the previous runs.
+  group: ${{ github.workflow }}-${{ github.event_name == 'push' && github.sha || github.ref }}
+  cancel-in-progress: true
+
 on:
   push:
     branches: ["main"]
@@ -9,61 +15,145 @@ on:
 jobs:
   test:
     timeout-minutes: 60
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     continue-on-error: true
     strategy:
       matrix:
-        project: ["tests/e2e", "examples/chat", "examples/music-player", "examples/pets", "examples/onboarding"]
+        shard: ["1/2", "2/2"]
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
         with:
           submodules: true
 
-      - name: Enable corepack
-        run: corepack enable
-
-      - name: Install Node.js
-        uses: actions/setup-node@v3
-        with:
-          node-version-file: '.node-version'
-          cache: 'pnpm'
-
-      - name: Get pnpm store directory
-        shell: bash
-        run: |
-          echo "STORE_PATH=$(pnpm store path --silent)" >> $GITHUB_ENV
-
-      - uses: actions/cache@v3
-        name: Setup pnpm cache
-        with:
-          path: ${{ env.STORE_PATH }}
-          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
-          restore-keys: |
-            ${{ runner.os }}-pnpm-store-
-      
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Pnpm Build
-        run: pnpm turbo build
-        working-directory: ./${{ matrix.project }}
-      
-      - name: Build jazz-run
-        run: pnpm exec turbo build && chmod +x dist/index.js;
-        working-directory: ./packages/jazz-run
+      - name: Setup Source Code
+        uses: ./.github/actions/source-code/
 
       - name: Install Playwright Browsers
-        run: pnpm exec playwright install --with-deps
-        working-directory: ./${{ matrix.project }}
+        run: pnpm exec playwright install
 
-      - name: Run Playwright tests
-        run: pnpm exec playwright test
-        working-directory: ./${{ matrix.project }}
-
-      - uses: actions/upload-artifact@v4
-        if: failure()
-        with:
-          name: ${{ hashFiles(format('{0}/package.json', matrix.project)) }}-playwright-report
-          path: ./${{ matrix.project }}/playwright-report/
-          retention-days: 30
+      - name: Run Playwright tests for shard ${{ matrix.shard }}
+        run: |
+          # Parse shard information (e.g., "1/2" -> shard_num=1, total_shards=2)
+          IFS='/' read -r shard_num total_shards <<< "${{ matrix.shard }}"
+          shard_index=$((shard_num - 1))  # Convert to 0-based index
+          
+          # Debug: Print parsed values
+          echo "Parsed shard_num: $shard_num"
+          echo "Parsed total_shards: $total_shards"
+          echo "Calculated shard_index: $shard_index"
+          
+          # Define all projects to test
+          all_projects=(
+            "tests/e2e"
+            "examples/chat"
+            "examples/chat-svelte"
+            "examples/community-clerk-vue"
+            "examples/clerk"
+            "examples/betterauth"
+            "examples/file-share-svelte"
+            "examples/form"
+            "examples/inspector"
+            "examples/music-player"
+            "examples/organization"
+            "examples/server-worker-http"
+            "starters/react-passkey-auth"
+            "starters/svelte-passkey-auth"
+            "tests/jazz-svelte"
+          )
+          
+          # Calculate which projects this shard should run
+          shard_projects=()
+          for i in "${!all_projects[@]}"; do
+            if [ $((i % total_shards)) -eq $shard_index ]; then
+              shard_projects+=("${all_projects[i]}")
+            fi
+          done
+          
+          # Track project results
+          overall_exit_code=0
+          failed_projects=()
+          passed_projects=()
+          
+          echo "=== Running tests for shard ${{ matrix.shard }} ==="
+          echo "Projects in this shard:"
+          printf '%s\n' "${shard_projects[@]}"
+          echo
+          
+          # Run tests for each project
+          for project in "${shard_projects[@]}"; do
+            echo "=== Testing project: $project ==="
+            
+            # Check if project directory exists
+            if [ ! -d "$project" ]; then
+              echo "❌ FAILED: Project directory $project does not exist"
+              failed_projects+=("$project (directory not found)")
+              overall_exit_code=1
+              continue
+            fi
+            
+            # Check if project has package.json
+            if [ ! -f "$project/package.json" ]; then
+              echo "❌ FAILED: No package.json found in $project"
+              failed_projects+=("$project (no package.json)")
+              overall_exit_code=1
+              continue
+            fi
+            
+            # Build the project
+            echo "🔨 Building $project..."
+            cd "$project"
+            
+            if [ -f .env.test ]; then
+              cp .env.test .env
+            fi
+            
+            if ! pnpm turbo build; then
+              echo "❌ BUILD FAILED: $project"
+              failed_projects+=("$project (build failed)")
+              overall_exit_code=1
+              cd - > /dev/null
+              continue
+            fi
+            
+            # Run Playwright tests
+            echo "🧪 Running Playwright tests for $project..."
+            if ! pnpm exec playwright test; then
+              echo "❌ TESTS FAILED: $project"
+              failed_projects+=("$project (tests failed)")
+              overall_exit_code=1
+            else
+              echo "✅ TESTS PASSED: $project"
+              passed_projects+=("$project")
+            fi
+            
+            cd - > /dev/null
+            echo "=== Finished testing $project ==="
+            echo
+          done
+          
+          # Print summary report
+          echo "=========================================="
+          echo "📊 TEST SUMMARY FOR SHARD ${{ matrix.shard }}"
+          echo "=========================================="
+          
+          if [ ${#passed_projects[@]} -gt 0 ]; then
+            echo "✅ PASSED (${#passed_projects[@]}):"
+            printf '  - %s\n' "${passed_projects[@]}"
+            echo
+          fi
+          
+          if [ ${#failed_projects[@]} -gt 0 ]; then
+            echo "❌ FAILED (${#failed_projects[@]}):"
+            printf '  - %s\n' "${failed_projects[@]}"
+            echo
+          fi
+  
+          
+          echo "Total projects in shard: ${#shard_projects[@]}"
+          echo "Passed: ${#passed_projects[@]}"
+          echo "Failed: ${#failed_projects[@]}"
+          echo "=========================================="
+          
+          # Exit with overall status
+          exit $overall_exit_code

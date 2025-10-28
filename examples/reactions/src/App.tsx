@@ -1,7 +1,7 @@
 import { useIframeHashRouter } from "hash-slash";
-import { Group, ID } from "jazz-tools";
+import { Group } from "jazz-tools";
+import { useAccount } from "jazz-tools/react";
 import { ReactionsScreen } from "./ReactionsScreen.tsx";
-import { useAccount } from "./main";
 import { Reactions } from "./schema.ts";
 
 function App() {
@@ -9,11 +9,10 @@ function App() {
   const router = useIframeHashRouter();
 
   const createReactions = () => {
-    if (!me) return;
-    const group = Group.create({ owner: me });
+    const group = Group.create();
     group.addMember("everyone", "writer");
     const chat = Reactions.create([], { owner: group });
-    router.navigate("/#/reactions/" + chat.id);
+    router.navigate("/#/reactions/" + chat.$jazz.id);
   };
 
   return (
@@ -32,9 +31,7 @@ function App() {
       <main className="container">
         {router.route({
           "/": () => createReactions() as never,
-          "/reactions/:id": (id) => (
-            <ReactionsScreen id={id as ID<Reactions>} />
-          ),
+          "/reactions/:id": (id) => <ReactionsScreen id={id} />,
         })}
       </main>
     </>

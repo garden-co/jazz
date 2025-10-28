@@ -1,46 +1,15 @@
 import { ThemeProvider } from "@/components/ThemeProvider";
 import type { Metadata } from "next";
 import "./globals.css";
-
-import { Inter, Manrope } from "next/font/google";
-import localFont from "next/font/local";
+import { fontClasses } from "@garden-co/design-system/src/fonts";
 
 import { GcmpNav } from "@/components/Nav";
 import { ThemeToggle } from "@/components/ThemeToggle";
+import { Copyright } from "@garden-co/design-system/src/components/atoms/Copyright";
 import { Analytics } from "@vercel/analytics/react";
 import { SpeedInsights } from "@vercel/speed-insights/next";
 
-// If loading a variable font, you don't need to specify the font weight
-const manrope = Manrope({
-  subsets: ["latin"],
-  variable: "--font-manrope",
-  display: "swap",
-});
-
-const inter = Inter({
-  subsets: ["latin"],
-  variable: "--font-inter",
-  display: "swap",
-});
-
-const commitMono = localFont({
-  src: [
-    {
-      path: "../../design-system/fonts/CommitMono-Regular.woff2",
-      weight: "400",
-      style: "normal",
-    },
-    {
-      path: "../../design-system/fonts/CommitMono-Regular.woff",
-      weight: "400",
-      style: "normal",
-    },
-  ],
-  variable: "--font-commit-mono",
-  display: "swap",
-});
-
-const metaTags = {
+export const metaTags = {
   title: "garden computing",
   description:
     "Computers are magic. So why do we put up with so much complexity? We believe just a few new ideas can make all the difference.",
@@ -69,6 +38,16 @@ export const metadata: Metadata = {
       },
     ],
   },
+  alternates: {
+    canonical: metaTags.url,
+    types: {
+      "application/rss+xml": `${
+        process.env.VERCEL_URL
+          ? `https://${process.env.VERCEL_URL}`
+          : "http://localhost:3000"
+      }/api/rss`,
+    },
+  },
 };
 
 export default function RootLayout({
@@ -80,11 +59,9 @@ export default function RootLayout({
     <html lang="en" className="h-full">
       <body
         className={[
-          manrope.variable,
-          commitMono.variable,
-          inter.className,
+          ...fontClasses,
           "min-h-full flex flex-col items-center",
-          "bg-white text-stone-700 dark:text-stone-400 dark:bg-stone-950",
+          "bg-white text-default dark:bg-stone-950",
         ].join(" ")}
       >
         <SpeedInsights />
@@ -98,7 +75,7 @@ export default function RootLayout({
           <GcmpNav />
           <main className="flex-1 w-full">{children}</main>
           <footer className="py-8 text-sm flex justify-between gap-3 w-full container mt-12 md:mt-20">
-            <p>©2024 Garden Computing, Inc.</p>
+            <Copyright />
 
             <ThemeToggle className="hidden md:block" />
           </footer>

@@ -1,34 +1,86 @@
-# Passkey authentication example with Jazz and React
+# Clerk authentication example with Jazz and React
 
 This is an example of how to use clerk authentication with Jazz.
 
-Live version: https://clerk-demo.jazz.tools
+Live version: [https://clerk-demo.jazz.tools](https://clerk-demo.jazz.tools)
 
-## Installing & running the example locally
+## Getting started
 
-(This requires `pnpm` to be installed, see [https://pnpm.io/installation](https://pnpm.io/installation))
+You can either
 
-Start by downloading the [jazz repository](https://github.com/garden-co/jazz):
+1. Clone the jazz repository, and run the app within the monorepo.
+2. Or create a new Jazz project using this example as a template.
+
+### Using the example as a template
+
+Create a new Jazz project, and use this example as a template.
+
 ```bash
-npx degit gardencmp/jazz jazz
+npx create-jazz-app@latest clerk-app --example clerk
 ```
 
-Go to the clerk example directory:
+Go to the new project directory.
+
 ```bash
-cd jazz/examples/clerk
+cd clerk-app
 ```
 
-Install and build dependencies:
+Rename .env.example to .env
+
+```bash
+mv .env.example .env
+```
+
+Update `VITE_CLERK_PUBLISHABLE_KEY` with your [Publishable Key](https://clerk.com/docs/deployments/clerk-environment-variables#clerk-publishable-and-secret-keys) from Clerk.
+
+Update `VITE_JAZZ_API_KEY` with an API key from https://dashboard.jazz.tools
+
+Run the dev server.
+
+```bash
+npm run dev
+```
+
+### Using the monorepo
+
+This requires `pnpm` to be installed, see [https://pnpm.io/installation](https://pnpm.io/installation).
+
+Clone the jazz repository.
+
+```bash
+git clone https://github.com/garden-co/jazz.git
+```
+
+Install and build dependencies.
+
 ```bash
 pnpm i && npx turbo build
 ```
 
-Start the dev server:
+Go to the example directory.
+
+```bash
+cd jazz/examples/clerk/
+```
+
+Rename .env.example to .env
+
+```bash
+mv .env.example .env
+```
+
+Update `VITE_CLERK_PUBLISHABLE_KEY` with your [Publishable Key](https://clerk.com/docs/deployments/clerk-environment-variables#clerk-publishable-and-secret-keys) from Clerk.
+
+Update `VITE_JAZZ_API_KEY` with an API key from https://dashboard.jazz.tools
+
+Start the dev server.
+
 ```bash
 pnpm dev
 ```
 
+Open [http://localhost:5173](http://localhost:5173) with your browser to see the result.
+
 ## Questions / problems / feedback
 
 If you have feedback, let us know on [Discord](https://discord.gg/utDMjHYg42) or open an issue or PR to fix something that seems wrong.
-

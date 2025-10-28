@@ -1,134 +1,124 @@
-import clsx from "clsx";
-import * as Clipboard from "expo-clipboard";
-import { Group, ID } from "jazz-tools";
+import Clipboard from "@react-native-clipboard/clipboard";
+import { CoPlainText, Group, ID, Loaded, Profile } from "jazz-tools";
+import { useAccount, useCoState } from "jazz-tools/react-native";
 import { useEffect, useState } from "react";
-import React, {
+import {
   Button,
   FlatList,
   KeyboardAvoidingView,
   SafeAreaView,
+  StyleSheet,
   Text,
   TextInput,
   TouchableOpacity,
   View,
-  Alert,
 } from "react-native";
-
-import { useAccount, useCoState } from "./jazz";
 import { Chat, Message } from "./schema";
 
-export default function ChatScreen({ navigation }: { navigation: any }) {
+export function ChatScreen({ navigation }: { navigation: any }) {
   const { me, logOut } = useAccount();
-  const [chat, setChat] = useState<Chat>();
+  const [chatId, setChatId] = useState<string>();
+  const [chatIdInput, setChatIdInput] = useState<string>();
+  const loadedChat = useCoState(Chat, chatId, { resolve: { $each: true } });
   const [message, setMessage] = useState("");
-  const loadedChat = useCoState(Chat, chat?.id, [{}]);
+  const profile = useCoState(Profile, me?.$jazz.refs.profile?.id, {});
+
+  function handleLogOut() {
+    setChatId(undefined);
+    logOut();
+  }
 
   useEffect(() => {
     navigation.setOptions({
-      headerRight: () => <Button onPress={logOut} title="Logout" />,
+      headerRight: () => <Button onPress={handleLogOut} title="Logout" />,
       headerLeft: () =>
-        chat ? (
+        loadedChat ? (
           <Button
             onPress={() => {
-              if (chat?.id) {
-                Clipboard.setStringAsync(
-                  `https://chat.jazz.tools/#/chat/${chat.id}`,
+              if (loadedChat?.$jazz.id) {
+                Clipboard.setString(loadedChat.$jazz.id);
+                console.log(
+                  "Copied to clipboard",
+                  `Chat ID: ${loadedChat.$jazz.id}`,
                 );
-                Alert.alert("Copied to clipboard", `Chat ID: ${chat.id}`);
               }
             }}
             title="Share"
           />
         ) : null,
     });
-  }, [navigation, chat]);
+  }, [navigation, loadedChat]);
 
   const createChat = () => {
     const group = Group.create({ owner: me });
     group.addMember("everyone", "writer");
     const chat = Chat.create([], { owner: group });
-    setChat(chat);
-  };
-
-  const loadChat = async (chatId: ID<Chat>) => {
-    try {
-      const chat = await Chat.load(chatId, me, []);
-      setChat(chat);
-    } catch (error) {
-      console.log("Error loading chat", error);
-      Alert.alert("Error", `Error loading chat: ${error}`);
-    }
+    setChatId(chat.$jazz.id);
   };
 
   const joinChat = () => {
-    Alert.prompt(
-      "Join Chat",
-      "Enter the Chat ID (example: co_zBGEHYvRfGuT2YSBraY3njGjnde)",
-      [
-        {
-          text: "Cancel",
-          style: "cancel",
-        },
-        {
-          text: "Join",
-          onPress: (chatId) => {
-            if (chatId) {
-              loadChat(chatId as ID<Chat>);
-            } else {
-              Alert.alert("Error", "Chat ID cannot be empty.");
-            }
-          },
-        },
-      ],
-      "plain-text",
-    );
+    if (chatIdInput) {
+      setChatId(chatIdInput as ID<Chat>);
+    } else {
+      console.warn("Error: Chat ID cannot be empty.");
+    }
   };
 
   const sendMessage = () => {
-    if (!chat) return;
+    if (!loadedChat) return;
     if (message.trim()) {
-      chat.push(Message.create({ text: message }, { owner: chat._owner }));
+      loadedChat.$jazz.push(
+        Message.create(
+          { text: CoPlainText.create(message, loadedChat.$jazz.owner) },
+          loadedChat.$jazz.owner,
+        ),
+      );
       setMessage("");
     }
   };
 
-  const renderMessageItem = ({ item }: { item: Message }) => {
-    const isMe = item._edits.text.by?.isMe;
+  const renderMessageItem = ({
+    item,
+  }: {
+    item: Loaded<typeof Message, { text: true }>;
+  }) => {
+    const isMe = item.$jazz.getEdits()?.text?.by?.isMe;
     return (
       <View
-        className={clsx(
-          `rounded-lg p-1 px-1.5 max-w-[80%] `,
-
-          isMe ? `bg-gray-200 self-end text-right` : `bg-gray-300 self-start `,
-        )}
+        style={[
+          styles.messageContainer,
+          isMe ? styles.myMessage : styles.otherMessage,
+        ]}
       >
         {!isMe ? (
           <Text
-            className={clsx(
-              `text-xs text-gray-500`,
-              isMe ? "text-right" : "text-left",
-            )}
+            style={[
+              styles.senderName,
+              isMe ? styles.textRight : styles.textLeft,
+            ]}
           >
-            {item._edits.text.by?.profile?.name}
+            {item?.$jazz.getEdits()?.text?.by?.profile?.name}
           </Text>
         ) : null}
-        <View
-          className={clsx(
-            "flex relative items-end justify-between",
-            isMe ? "flex-row" : "flex-row",
-          )}
-        >
-          <Text className={clsx(`text-black text-md max-w-[85%]`)}>
-            {item.text}
-          </Text>
+        <View style={styles.messageContent}>
+          <Text style={styles.messageText}>{item.text}</Text>
           <Text
-            className={clsx(
-              "text-[10px] text-gray-500 text-right ml-2",
-              !isMe ? "mt-2" : "mt-1",
-            )}
+            style={[
+              styles.timestamp,
+              !isMe ? styles.timestampOther : styles.timestampMy,
+            ]}
           >
-            {item._edits.text.madeAt.getHours()}:
-            {item._edits.text.madeAt.getMinutes()}
+            {item?.$jazz
+              .getEdits()
+              ?.text?.madeAt?.getHours()
+              .toString()
+              .padStart(2, "0")}
+            :
+            {item?.$jazz
+              .getEdits()
+              ?.text?.madeAt?.getMinutes()
+              .toString()
+              .padStart(2, "0")}
           </Text>
         </View>
       </View>
@@ -136,20 +126,37 @@ export default function ChatScreen({ navigation }: { navigation: any }) {
   };
 
   return (
-    <View className="flex flex-col h-full">
-      {!chat ? (
-        <View className="flex flex-col h-full items-center justify-center">
-          <TouchableOpacity
-            onPress={createChat}
-            className="bg-blue-500 p-4 rounded-md"
-          >
-            <Text className="text-white font-semibold">Start new chat</Text>
+    <SafeAreaView style={styles.container}>
+      {!loadedChat ? (
+        <View style={styles.welcomeContainer}>
+          <Text style={styles.usernameLabel}>Username</Text>
+          <TextInput
+            style={styles.usernameInput}
+            value={profile?.name ?? ""}
+            onChangeText={(value) => {
+              if (profile) {
+                profile.$jazz.set("name", value);
+              }
+            }}
+            textAlignVertical="center"
+            onSubmitEditing={sendMessage}
+            testID="username-input"
+          />
+          <TouchableOpacity onPress={createChat} style={styles.newChatButton}>
+            <Text style={styles.buttonText}>Start new chat</Text>
           </TouchableOpacity>
-          <TouchableOpacity
-            onPress={joinChat}
-            className="bg-green-500 p-4 rounded-md mt-4"
-          >
-            <Text className="text-white font-semibold">Join chat</Text>
+          <Text style={styles.usernameLabel}>Join existing chat</Text>
+          <TextInput
+            style={styles.chatIdInput}
+            placeholder="Chat ID"
+            value={chatIdInput ?? ""}
+            onChangeText={setChatIdInput}
+            textAlignVertical="center"
+            onSubmitEditing={joinChat}
+            testID="chat-id-input"
+          />
+          <TouchableOpacity onPress={joinChat} style={styles.joinChatButton}>
+            <Text style={styles.buttonText}>Join chat</Text>
           </TouchableOpacity>
         </View>
       ) : (
@@ -161,36 +168,163 @@ export default function ChatScreen({ navigation }: { navigation: any }) {
               gap: 6,
               padding: 8,
             }}
-            className="flex"
+            style={styles.messageList}
             data={loadedChat}
-            keyExtractor={(item) => item.id}
+            keyExtractor={(item) => item.$jazz.id}
             renderItem={renderMessageItem}
           />
 
           <KeyboardAvoidingView
             keyboardVerticalOffset={110}
             behavior="padding"
-            className="p-3 bg-white border-t border-gray-300"
+            style={styles.inputContainer}
           >
-            <SafeAreaView className="flex flex-row items-center gap-2">
+            <View style={styles.inputWrapper}>
               <TextInput
-                className="rounded-full h-8 py-0 px-2  border border-gray-200 block flex-1"
+                style={styles.messageInput}
                 value={message}
                 onChangeText={setMessage}
                 placeholder="Type a message..."
                 textAlignVertical="center"
                 onSubmitEditing={sendMessage}
+                testID="message-input"
               />
               <TouchableOpacity
                 onPress={sendMessage}
-                className="bg-gray-300 text-white rounded-full h-8 w-8 items-center justify-center"
+                style={styles.sendButton}
+                testID="send-button"
               >
                 <Text>↑</Text>
               </TouchableOpacity>
-            </SafeAreaView>
+            </View>
           </KeyboardAvoidingView>
         </>
       )}
-    </View>
+    </SafeAreaView>
   );
 }
+
+const styles = StyleSheet.create({
+  container: {
+    flex: 1,
+  },
+  welcomeContainer: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 16,
+  },
+  usernameLabel: {
+    fontSize: 16,
+    fontWeight: "bold",
+    marginBottom: 16,
+  },
+  usernameInput: {
+    width: 160,
+    height: 48,
+    borderWidth: 1,
+    borderColor: "#ddd",
+    borderRadius: 8,
+    paddingHorizontal: 8,
+    marginBottom: 24,
+  },
+  chatIdInput: {
+    width: 320,
+    height: 48,
+    borderWidth: 1,
+    borderColor: "#ddd",
+    borderRadius: 8,
+    paddingHorizontal: 8,
+    marginBottom: 24,
+    marginTop: 8,
+  },
+  newChatButton: {
+    backgroundColor: "#3B82F6",
+    padding: 16,
+    borderRadius: 8,
+    marginBottom: 24,
+  },
+  joinChatButton: {
+    backgroundColor: "#10B981",
+    padding: 16,
+    borderRadius: 8,
+  },
+  buttonText: {
+    color: "white",
+    fontSize: 16,
+    fontWeight: "bold",
+    textAlign: "center",
+  },
+  messageList: {
+    flex: 1,
+  },
+  inputContainer: {
+    padding: 12,
+  },
+  inputWrapper: {
+    flexDirection: "row",
+    alignItems: "center",
+    borderWidth: 1,
+    borderColor: "#ddd",
+    borderRadius: 8,
+    paddingHorizontal: 12,
+  },
+  messageInput: {
+    flex: 1,
+    height: 32,
+    paddingHorizontal: 8,
+  },
+  sendButton: {
+    paddingHorizontal: 16,
+  },
+  messageContainer: {
+    flexDirection: "column",
+    alignItems: "flex-start",
+    marginBottom: 8,
+  },
+  myMessage: {
+    alignSelf: "flex-end",
+  },
+  otherMessage: {
+    alignSelf: "flex-start",
+  },
+  senderName: {
+    fontSize: 12,
+    color: "#666",
+    marginBottom: 4,
+  },
+  textRight: {
+    textAlign: "right",
+  },
+  textLeft: {
+    textAlign: "left",
+  },
+  messageContent: {
+    backgroundColor: "#f0f0f0",
+    borderRadius: 8,
+    padding: 8,
+  },
+  messageText: {
+    fontSize: 16,
+  },
+  timestamp: {
+    fontSize: 10,
+    color: "#666",
+    marginTop: 4,
+  },
+  timestampOther: {
+    textAlign: "left",
+    marginTop: 8,
+  },
+  timestampMy: {
+    textAlign: "right",
+    marginTop: 4,
+  },
+  avatar: {
+    borderRadius: 16,
+    height: 32,
+    width: 32,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+});

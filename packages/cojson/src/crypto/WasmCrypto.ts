@@ -1,23 +1,30 @@
 import {
-  Ed25519Signature,
-  Ed25519SigningKey,
-  Ed25519VerifyingKey,
-  Memory,
-  X25519PublicKey,
-  X25519StaticSecret,
-  initBundledOnce,
-} from "@hazae41/berith";
-import { xsalsa20, xsalsa20_poly1305 } from "@noble/ciphers/salsa";
-import { randomBytes } from "@noble/ciphers/webcrypto/utils";
-import { base58 } from "@scure/base";
-import { createBLAKE3 } from "hash-wasm";
+  SessionLog,
+  initialize,
+  Blake3Hasher,
+  blake3HashOnce,
+  blake3HashOnceWithContext,
+  decrypt,
+  encrypt,
+  getSealerId,
+  getSignerId,
+  newEd25519SigningKey,
+  newX25519PrivateKey,
+  seal,
+  sign,
+  unseal,
+  verify,
+} from "cojson-core-wasm";
 import { base64URLtoBytes, bytesToBase64url } from "../base64url.js";
-import { RawCoID, TransactionID } from "../ids.js";
+import { RawCoID, SessionID, TransactionID } from "../ids.js";
 import { Stringified, stableStringify } from "../jsonStringify.js";
-import { JsonValue } from "../jsonValue.js";
+import { JsonObject, JsonValue } from "../jsonValue.js";
+import { logger } from "../logger.js";
+import { PureJSCrypto } from "./PureJSCrypto.js";
 import {
   CryptoProvider,
   Encrypted,
+  KeyID,
   KeySecret,
   Sealed,
   SealerID,
@@ -28,118 +35,89 @@ import {
   textDecoder,
   textEncoder,
 } from "./crypto.js";
+import { ControlledAccountOrAgent } from "../coValues/account.js";
+import {
+  PrivateTransaction,
+  Transaction,
+  TrustingTransaction,
+} from "../coValueCore/verifiedState.js";
 
-export class WasmCrypto extends CryptoProvider<Uint8Array> {
-  private constructor(
-    public blake3Instance: Awaited<ReturnType<typeof createBLAKE3>>,
-  ) {
+type Blake3State = Blake3Hasher;
+
+let wasmInit = initialize;
+/**
+ * WebAssembly implementation of the CryptoProvider interface using cojson-core-wasm.
+ * This provides the primary implementation using WebAssembly for optimal performance, offering:
+ * - Signing/verifying (Ed25519)
+ * - Encryption/decryption (XSalsa20)
+ * - Sealing/unsealing (X25519 + XSalsa20-Poly1305)
+ * - Hashing (BLAKE3)
+ */
+export class WasmCrypto extends CryptoProvider<Blake3State> {
+  private constructor() {
     super();
   }
 
-  static async create(): Promise<WasmCrypto> {
-    return Promise.all([
-      createBLAKE3(),
-      initBundledOnce(),
-      new Promise<void>((resolve) => {
-        if ("crypto" in globalThis) {
-          resolve();
-        } else {
-          return import(/*webpackIgnore: true*/ "node:crypto").then(
-            ({ webcrypto }) => {
-              // eslint-disable-next-line @typescript-eslint/no-explicit-any
-              (globalThis as any).crypto = webcrypto;
-              resolve();
-            },
-          );
-        }
-      }),
-    ]).then(([blake3instance]) => new WasmCrypto(blake3instance));
+  static setInit(value: typeof initialize) {
+    wasmInit = value;
   }
 
-  randomBytes(length: number): Uint8Array {
-    return randomBytes(length);
-  }
+  static async create(): Promise<WasmCrypto | PureJSCrypto> {
+    try {
+      await wasmInit();
+    } catch (e) {
+      logger.warn(
+        "Failed to initialize WasmCrypto, falling back to PureJSCrypto",
+        { err: e },
+      );
+      return new PureJSCrypto();
+    }
 
-  emptyBlake3State(): Uint8Array {
-    return this.blake3Instance.init().save();
-  }
-
-  cloneBlake3State(state: Uint8Array): Uint8Array {
-    return this.blake3Instance.load(state).save();
+    return new WasmCrypto();
   }
 
   blake3HashOnce(data: Uint8Array) {
-    return this.blake3Instance.init().update(data).digest("binary");
+    return blake3HashOnce(data);
   }
 
   blake3HashOnceWithContext(
     data: Uint8Array,
     { context }: { context: Uint8Array },
   ) {
-    return this.blake3Instance
-      .init()
-      .update(context)
-      .update(data)
-      .digest("binary");
-  }
-
-  blake3IncrementalUpdate(state: Uint8Array, data: Uint8Array): Uint8Array {
-    return this.blake3Instance.load(state).update(data).save();
-  }
-
-  blake3DigestForState(state: Uint8Array): Uint8Array {
-    return this.blake3Instance.load(state).digest("binary");
+    return blake3HashOnceWithContext(data, context);
   }
 
   newEd25519SigningKey(): Uint8Array {
-    return new Ed25519SigningKey().to_bytes().copyAndDispose();
+    return newEd25519SigningKey();
   }
 
   getSignerID(secret: SignerSecret): SignerID {
-    return `signer_z${base58.encode(
-      Ed25519SigningKey.from_bytes(
-        new Memory(base58.decode(secret.substring("signerSecret_z".length))),
-      )
-        .public()
-        .to_bytes()
-        .copyAndDispose(),
-    )}`;
+    return getSignerId(textEncoder.encode(secret)) as SignerID;
   }
 
   sign(secret: SignerSecret, message: JsonValue): Signature {
-    const signature = Ed25519SigningKey.from_bytes(
-      new Memory(base58.decode(secret.substring("signerSecret_z".length))),
-    )
-      .sign(new Memory(textEncoder.encode(stableStringify(message))))
-      .to_bytes()
-      .copyAndDispose();
-    return `signature_z${base58.encode(signature)}`;
+    return sign(
+      textEncoder.encode(stableStringify(message)),
+      textEncoder.encode(secret),
+    ) as Signature;
   }
 
   verify(signature: Signature, message: JsonValue, id: SignerID): boolean {
-    return new Ed25519VerifyingKey(
-      new Memory(base58.decode(id.substring("signer_z".length))),
-    ).verify(
-      new Memory(textEncoder.encode(stableStringify(message))),
-      new Ed25519Signature(
-        new Memory(base58.decode(signature.substring("signature_z".length))),
-      ),
+    const result = verify(
+      textEncoder.encode(signature),
+      textEncoder.encode(stableStringify(message)),
+      textEncoder.encode(id),
     );
+
+    return result;
   }
 
   newX25519StaticSecret(): Uint8Array {
-    return new X25519StaticSecret().to_bytes().copyAndDispose();
+    return newX25519PrivateKey();
   }
 
   getSealerID(secret: SealerSecret): SealerID {
-    return `sealer_z${base58.encode(
-      X25519StaticSecret.from_bytes(
-        new Memory(base58.decode(secret.substring("sealerSecret_z".length))),
-      )
-        .to_public()
-        .to_bytes()
-        .copyAndDispose(),
-    )}`;
+    return getSealerId(textEncoder.encode(secret)) as SealerID;
   }
 
   encrypt<T extends JsonValue, N extends JsonValue>(
@@ -147,16 +125,13 @@ export class WasmCrypto extends CryptoProvider<Uint8Array> {
     keySecret: KeySecret,
     nOnceMaterial: N,
   ): Encrypted<T, N> {
-    const keySecretBytes = base58.decode(
-      keySecret.substring("keySecret_z".length),
-    );
-    const nOnce = this.blake3HashOnce(
-      textEncoder.encode(stableStringify(nOnceMaterial)),
-    ).slice(0, 24);
-
-    const plaintext = textEncoder.encode(stableStringify(value));
-    const ciphertext = xsalsa20(keySecretBytes, nOnce, plaintext);
-    return `encrypted_U${bytesToBase64url(ciphertext)}` as Encrypted<T, N>;
+    return `encrypted_U${bytesToBase64url(
+      encrypt(
+        textEncoder.encode(stableStringify(value)),
+        keySecret,
+        textEncoder.encode(stableStringify(nOnceMaterial)),
+      ),
+    )}` as Encrypted<T, N>;
   }
 
   decryptRaw<T extends JsonValue, N extends JsonValue>(
@@ -164,19 +139,13 @@ export class WasmCrypto extends CryptoProvider<Uint8Array> {
     keySecret: KeySecret,
     nOnceMaterial: N,
   ): Stringified<T> {
-    const keySecretBytes = base58.decode(
-      keySecret.substring("keySecret_z".length),
-    );
-    const nOnce = this.blake3HashOnce(
-      textEncoder.encode(stableStringify(nOnceMaterial)),
-    ).slice(0, 24);
-
-    const ciphertext = base64URLtoBytes(
-      encrypted.substring("encrypted_U".length),
-    );
-    const plaintext = xsalsa20(keySecretBytes, nOnce, ciphertext);
-
-    return textDecoder.decode(plaintext) as Stringified<T>;
+    return textDecoder.decode(
+      decrypt(
+        base64URLtoBytes(encrypted.substring("encrypted_U".length)),
+        keySecret,
+        textEncoder.encode(stableStringify(nOnceMaterial)),
+      ),
+    ) as Stringified<T>;
   }
 
   seal<T extends JsonValue>({
@@ -190,26 +159,14 @@ export class WasmCrypto extends CryptoProvider<Uint8Array> {
     to: SealerID;
     nOnceMaterial: { in: RawCoID; tx: TransactionID };
   }): Sealed<T> {
-    const nOnce = this.blake3HashOnce(
-      textEncoder.encode(stableStringify(nOnceMaterial)),
-    ).slice(0, 24);
-
-    const sealerPub = base58.decode(to.substring("sealer_z".length));
-
-    const senderPriv = base58.decode(from.substring("sealerSecret_z".length));
-
-    const plaintext = textEncoder.encode(stableStringify(message));
-
-    const sharedSecret = X25519StaticSecret.from_bytes(new Memory(senderPriv))
-      .diffie_hellman(X25519PublicKey.from_bytes(new Memory(sealerPub)))
-      .to_bytes()
-      .copyAndDispose();
-
-    const sealedBytes = xsalsa20_poly1305(sharedSecret, nOnce).encrypt(
-      plaintext,
-    );
-
-    return `sealed_U${bytesToBase64url(sealedBytes)}` as Sealed<T>;
+    return `sealed_U${bytesToBase64url(
+      seal(
+        textEncoder.encode(stableStringify(message)),
+        from,
+        to,
+        textEncoder.encode(stableStringify(nOnceMaterial)),
+      ),
+    )}` as Sealed<T>;
   }
 
   unseal<T extends JsonValue>(
@@ -218,30 +175,115 @@ export class WasmCrypto extends CryptoProvider<Uint8Array> {
     from: SealerID,
     nOnceMaterial: { in: RawCoID; tx: TransactionID },
   ): T | undefined {
-    const nOnce = this.blake3HashOnce(
-      textEncoder.encode(stableStringify(nOnceMaterial)),
-    ).slice(0, 24);
-
-    const sealerPriv = base58.decode(sealer.substring("sealerSecret_z".length));
-
-    const senderPub = base58.decode(from.substring("sealer_z".length));
-
-    const sealedBytes = base64URLtoBytes(sealed.substring("sealed_U".length));
-
-    const sharedSecret = X25519StaticSecret.from_bytes(new Memory(sealerPriv))
-      .diffie_hellman(X25519PublicKey.from_bytes(new Memory(senderPub)))
-      .to_bytes()
-      .copyAndDispose();
-
-    const plaintext = xsalsa20_poly1305(sharedSecret, nOnce).decrypt(
-      sealedBytes,
+    const plaintext = textDecoder.decode(
+      unseal(
+        base64URLtoBytes(sealed.substring("sealed_U".length)),
+        sealer,
+        from,
+        textEncoder.encode(stableStringify(nOnceMaterial)),
+      ),
     );
-
     try {
-      return JSON.parse(textDecoder.decode(plaintext));
+      return JSON.parse(plaintext) as T;
     } catch (e) {
-      console.error("Failed to decrypt/parse sealed message", e);
+      logger.error("Failed to decrypt/parse sealed message", { err: e });
       return undefined;
     }
+  }
+
+  createSessionLog(coID: RawCoID, sessionID: SessionID, signerID?: SignerID) {
+    return new SessionLogAdapter(new SessionLog(coID, sessionID, signerID));
+  }
+}
+
+class SessionLogAdapter {
+  constructor(private readonly sessionLog: SessionLog) {}
+
+  tryAdd(
+    transactions: Transaction[],
+    newSignature: Signature,
+    skipVerify: boolean,
+  ): void {
+    this.sessionLog.tryAdd(
+      transactions.map((tx) => stableStringify(tx)),
+      newSignature,
+      skipVerify,
+    );
+  }
+
+  addNewPrivateTransaction(
+    signerAgent: ControlledAccountOrAgent,
+    changes: JsonValue[],
+    keyID: KeyID,
+    keySecret: KeySecret,
+    madeAt: number,
+    meta: JsonObject | undefined,
+  ): { signature: Signature; transaction: PrivateTransaction } {
+    const output = this.sessionLog.addNewPrivateTransaction(
+      stableStringify(changes),
+      signerAgent.currentSignerSecret(),
+      keySecret,
+      keyID,
+      madeAt,
+      meta ? stableStringify(meta) : undefined,
+    );
+    const parsedOutput = JSON.parse(output);
+    const transaction: PrivateTransaction = {
+      privacy: "private",
+      madeAt,
+      encryptedChanges: parsedOutput.encrypted_changes,
+      keyUsed: keyID,
+      meta: parsedOutput.meta,
+    };
+    return { signature: parsedOutput.signature, transaction };
+  }
+
+  addNewTrustingTransaction(
+    signerAgent: ControlledAccountOrAgent,
+    changes: JsonValue[],
+    madeAt: number,
+    meta: JsonObject | undefined,
+  ): { signature: Signature; transaction: TrustingTransaction } {
+    const stringifiedChanges = stableStringify(changes);
+    const stringifiedMeta = meta ? stableStringify(meta) : undefined;
+    const output = this.sessionLog.addNewTrustingTransaction(
+      stringifiedChanges,
+      signerAgent.currentSignerSecret(),
+      madeAt,
+      stringifiedMeta,
+    );
+    const transaction: TrustingTransaction = {
+      privacy: "trusting",
+      madeAt,
+      changes: stringifiedChanges,
+      meta: stringifiedMeta,
+    };
+    return { signature: output as Signature, transaction };
+  }
+
+  decryptNextTransactionChangesJson(
+    txIndex: number,
+    keySecret: KeySecret,
+  ): string {
+    const output = this.sessionLog.decryptNextTransactionChangesJson(
+      txIndex,
+      keySecret,
+    );
+    return output;
+  }
+
+  decryptNextTransactionMetaJson(
+    txIndex: number,
+    keySecret: KeySecret,
+  ): string | undefined {
+    return this.sessionLog.decryptNextTransactionMetaJson(txIndex, keySecret);
+  }
+
+  free() {
+    this.sessionLog.free();
+  }
+
+  clone(): SessionLogAdapter {
+    return new SessionLogAdapter(this.sessionLog.clone());
   }
 }

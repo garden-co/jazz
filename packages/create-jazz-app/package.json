@@ -1,0 +1,38 @@
+{
+  "name": "create-jazz-app",
+  "module": "dist/index.js",
+  "main": "dist/index.js",
+  "types": "src/index.ts",
+  "type": "module",
+  "license": "MIT",
+  "version": "0.2.1",
+  "bin": {
+    "create-jazz-app": "./dist/index.js"
+  },
+  "files": [
+    "dist/"
+  ],
+  "dependencies": {
+    "chalk": "^5.3.0",
+    "commander": "^11.0.0",
+    "degit": "^2.8.4",
+    "inquirer": "^9.2.10",
+    "ora": "^7.0.1",
+    "yaml": "^2.3.4"
+  },
+  "devDependencies": {
+    "@types/degit": "^2.8.3",
+    "@types/gradient-string": "^1.1.2",
+    "@types/inquirer": "^9.0.3",
+    "typescript": "catalog:default",
+    "vitest": "catalog:default"
+  },
+  "scripts": {
+    "dev": "tsc --watch",
+    "format-and-lint": "biome check .",
+    "format-and-lint:fix": "biome check . --write",
+    "build": "rm -rf ./dist && tsc --sourceMap --outDir dist && cp ../../pnpm-workspace.yaml ./dist/",
+    "test": "vitest --run --root ../../ --project create-jazz-app",
+    "test:watch": "vitest --watch --root ../../ --project create-jazz-app"
+  }
+}

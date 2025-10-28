@@ -1,9 +1,19 @@
 import { base58 } from "@scure/base";
-import { RawAccountID } from "../coValues/account.js";
+import { ControlledAccountOrAgent, RawAccountID } from "../coValues/account.js";
 import { AgentID, RawCoID, TransactionID } from "../ids.js";
 import { SessionID } from "../ids.js";
 import { Stringified, parseJSON, stableStringify } from "../jsonStringify.js";
-import { JsonValue } from "../jsonValue.js";
+import { JsonObject, JsonValue } from "../jsonValue.js";
+import { logger } from "../logger.js";
+import {
+  PrivateTransaction,
+  Transaction,
+  TrustingTransaction,
+} from "../coValueCore/verifiedState.js";
+
+function randomBytes(bytesLength = 32): Uint8Array {
+  return crypto.getRandomValues(new Uint8Array(bytesLength));
+}
 
 export type SignerSecret = `signerSecret_z${string}`;
 export type SignerID = `signer_z${string}`;
@@ -20,20 +30,14 @@ export const textDecoder = new TextDecoder();
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export abstract class CryptoProvider<Blake3State = any> {
-  abstract randomBytes(length: number): Uint8Array;
+  randomBytes(length: number): Uint8Array {
+    return randomBytes(length);
+  }
 
   abstract newEd25519SigningKey(): Uint8Array;
 
   newRandomSigner(): SignerSecret {
     return `signerSecret_z${base58.encode(this.newEd25519SigningKey())}`;
-  }
-
-  signerSecretToBytes(secret: SignerSecret): Uint8Array {
-    return base58.decode(secret.substring("signerSecret_z".length));
-  }
-
-  signerSecretFromBytes(bytes: Uint8Array): SignerSecret {
-    return `signerSecret_z${base58.encode(bytes)}`;
   }
 
   abstract getSignerID(secret: SignerSecret): SignerID;
@@ -52,39 +56,25 @@ export abstract class CryptoProvider<Blake3State = any> {
     return `sealerSecret_z${base58.encode(this.newX25519StaticSecret())}`;
   }
 
-  sealerSecretToBytes(secret: SealerSecret): Uint8Array {
-    return base58.decode(secret.substring("sealerSecret_z".length));
-  }
-
-  sealerSecretFromBytes(bytes: Uint8Array): SealerSecret {
-    return `sealerSecret_z${base58.encode(bytes)}`;
-  }
-
   abstract getSealerID(secret: SealerSecret): SealerID;
 
   newRandomAgentSecret(): AgentSecret {
     return `${this.newRandomSealer()}/${this.newRandomSigner()}`;
   }
 
-  agentSecretToBytes(secret: AgentSecret): Uint8Array {
-    const [sealerSecret, signerSecret] = secret.split("/");
-    return new Uint8Array([
-      ...this.sealerSecretToBytes(sealerSecret as SealerSecret),
-      ...this.signerSecretToBytes(signerSecret as SignerSecret),
-    ]);
-  }
-
-  agentSecretFromBytes(bytes: Uint8Array): AgentSecret {
-    const sealerSecret = this.sealerSecretFromBytes(bytes.slice(0, 32));
-    const signerSecret = this.signerSecretFromBytes(bytes.slice(32));
-    return `${sealerSecret}/${signerSecret}`;
-  }
-
+  agentIdCache = new Map<string, AgentID>();
   getAgentID(secret: AgentSecret): AgentID {
-    const [sealerSecret, signerSecret] = secret.split("/");
-    return `${this.getSealerID(
-      sealerSecret as SealerSecret,
-    )}/${this.getSignerID(signerSecret as SignerSecret)}`;
+    const cacheKey = secret;
+    let agentId = this.agentIdCache.get(cacheKey);
+    if (!agentId) {
+      const [sealerSecret, signerSecret] = secret.split("/") as [
+        SealerSecret,
+        SignerSecret,
+      ];
+      agentId = `${this.getSealerID(sealerSecret)}/${this.getSignerID(signerSecret)}`;
+      this.agentIdCache.set(cacheKey, agentId);
+    }
+    return agentId;
   }
 
   getAgentSignerID(agentId: AgentID): SignerID {
@@ -103,18 +93,11 @@ export abstract class CryptoProvider<Blake3State = any> {
     return agentSecret.split("/")[0] as SealerSecret;
   }
 
-  abstract emptyBlake3State(): Blake3State;
-  abstract cloneBlake3State(state: Blake3State): Blake3State;
   abstract blake3HashOnce(data: Uint8Array): Uint8Array;
   abstract blake3HashOnceWithContext(
     data: Uint8Array,
     { context }: { context: Uint8Array },
   ): Uint8Array;
-  abstract blake3IncrementalUpdate(
-    state: Blake3State,
-    data: Uint8Array,
-  ): Blake3State;
-  abstract blake3DigestForState(state: Blake3State): Uint8Array;
 
   secureHash(value: JsonValue): Hash {
     return `hash_z${base58.encode(
@@ -137,14 +120,6 @@ export abstract class CryptoProvider<Blake3State = any> {
     nOnceMaterial: N,
   ): Encrypted<T, N>;
 
-  encryptForTransaction<T extends JsonValue>(
-    value: T,
-    keySecret: KeySecret,
-    nOnceMaterial: { in: RawCoID; tx: TransactionID },
-  ): Encrypted<T, { in: RawCoID; tx: TransactionID }> {
-    return this.encrypt(value, keySecret, nOnceMaterial);
-  }
-
   abstract decryptRaw<T extends JsonValue, N extends JsonValue>(
     encrypted: Encrypted<T, N>,
     keySecret: KeySecret,
@@ -159,7 +134,7 @@ export abstract class CryptoProvider<Blake3State = any> {
     try {
       return parseJSON(this.decryptRaw(encrypted, keySecret, nOnceMaterial));
     } catch (e) {
-      console.error("Decryption error", e);
+      logger.error("Decryption error", { err: e });
       return undefined;
     }
   }
@@ -169,22 +144,6 @@ export abstract class CryptoProvider<Blake3State = any> {
       secret: `keySecret_z${base58.encode(this.randomBytes(32))}`,
       id: `key_z${base58.encode(this.randomBytes(12))}`,
     };
-  }
-
-  decryptRawForTransaction<T extends JsonValue>(
-    encrypted: Encrypted<T, { in: RawCoID; tx: TransactionID }>,
-    keySecret: KeySecret,
-    nOnceMaterial: { in: RawCoID; tx: TransactionID },
-  ): Stringified<T> | undefined {
-    return this.decryptRaw(encrypted, keySecret, nOnceMaterial);
-  }
-
-  decryptForTransaction<T extends JsonValue>(
-    encrypted: Encrypted<T, { in: RawCoID; tx: TransactionID }>,
-    keySecret: KeySecret,
-    nOnceMaterial: { in: RawCoID; tx: TransactionID },
-  ): T | undefined {
-    return this.decrypt(encrypted, keySecret, nOnceMaterial);
   }
 
   encryptKeySecret(keys: {
@@ -290,41 +249,15 @@ export abstract class CryptoProvider<Blake3State = any> {
   newRandomSessionID(accountID: RawAccountID | AgentID): SessionID {
     return `${accountID}_session_z${base58.encode(this.randomBytes(8))}`;
   }
+
+  abstract createSessionLog(
+    coID: RawCoID,
+    sessionID: SessionID,
+    signerID?: SignerID,
+  ): SessionLogImpl;
 }
 
 export type Hash = `hash_z${string}`;
-
-export class StreamingHash {
-  state: Uint8Array;
-  crypto: CryptoProvider;
-
-  constructor(crypto: CryptoProvider, fromClone?: Uint8Array) {
-    this.state = fromClone || crypto.emptyBlake3State();
-    this.crypto = crypto;
-  }
-
-  update(value: JsonValue): Uint8Array {
-    const encoded = textEncoder.encode(stableStringify(value));
-    // const before = performance.now();
-    this.state = this.crypto.blake3IncrementalUpdate(this.state, encoded);
-    // const after = performance.now();
-    // console.log(`Hashing throughput in MB/s`, 1000 * (encoded.length / (after - before)) / (1024 * 1024));
-    return encoded;
-  }
-
-  digest(): Hash {
-    const hash = this.crypto.blake3DigestForState(this.state);
-    return `hash_z${base58.encode(hash)}`;
-  }
-
-  clone(): StreamingHash {
-    return new StreamingHash(
-      this.crypto,
-      this.crypto.cloneBlake3State(this.state),
-    );
-  }
-}
-
 export type ShortHash = `shortHash_z${string}`;
 export const shortHashLength = 19;
 
@@ -337,3 +270,35 @@ export type KeySecret = `keySecret_z${string}`;
 export type KeyID = `key_z${string}`;
 
 export const secretSeedLength = 32;
+
+export interface SessionLogImpl {
+  clone(): SessionLogImpl;
+  tryAdd(
+    transactions: Transaction[],
+    newSignature: Signature,
+    skipVerify: boolean,
+  ): void;
+  addNewPrivateTransaction(
+    signerAgent: ControlledAccountOrAgent,
+    changes: JsonValue[],
+    keyID: KeyID,
+    keySecret: KeySecret,
+    madeAt: number,
+    meta: JsonObject | undefined,
+  ): { signature: Signature; transaction: PrivateTransaction };
+  addNewTrustingTransaction(
+    signerAgent: ControlledAccountOrAgent,
+    changes: JsonValue[],
+    madeAt: number,
+    meta: JsonObject | undefined,
+  ): { signature: Signature; transaction: TrustingTransaction };
+  decryptNextTransactionChangesJson(
+    tx_index: number,
+    key_secret: KeySecret,
+  ): string;
+  free(): void;
+  decryptNextTransactionMetaJson(
+    tx_index: number,
+    key_secret: KeySecret,
+  ): string | undefined;
+}

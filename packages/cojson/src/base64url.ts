@@ -43,12 +43,7 @@ export function bytesToBase64url(bytes: Uint8Array) {
   let base64 = decoder.decode(new Uint8Array(encoded.buffer, 0, n));
   if (k === 1) base64 += "==";
   if (k === 2) base64 += "=";
-  // const after = performance.now();
-  // console.log(
-  //     "bytesToBase64url bandwidth in MB/s for length",
-  //     (1000 * bytes.length / (after - before)) / (1024 * 1024),
-  //     bytes.length
-  // );
+
   return base64;
 }
 

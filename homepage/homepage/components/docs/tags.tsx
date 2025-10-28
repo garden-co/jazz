@@ -1,16 +1,18 @@
-import { LinkIcon } from "lucide-react";
+import { Icon } from "@garden-co/design-system/src/components/atoms/Icon";
 import Link from "next/link";
 import { ReactNode } from "react";
-import { getHighlighter } from "shiki";
+import { createHighlighter } from "shiki";
+import { jazzDark } from "../../themes/jazzDark.mjs";
+import { jazzLight } from "../../themes/jazzLight.mjs";
 
-const highlighter = getHighlighter({
-  langs: ["typescript", "bash"],
-  theme: "css-variables", // use the theme
+const highlighterPromise = createHighlighter({
+  langs: ["typescript", "bash", "tsx", "json", "ruby", "groovy", "svelte", "vue"],
+  themes: [jazzLight as any, jazzDark as any],
 });
 
 export function Example({ children }: { children: ReactNode }) {
   return (
-    <div className="flex-1">
+    <div className="flex-1" data-pagefind-weight="2">
       <div className="border bg-white dark:bg-stone-900 rounded shadow-sm">
         <div className="py-1 px-2  border-b text-xs">Example</div>
         <div className="py-1 px-2 overflow-x-auto">{children}</div>
@@ -30,27 +32,17 @@ export async function Highlight({
   lang?: string;
   className?: string;
 }) {
-  const lines = (await highlighter).codeToThemedTokens(
-    children,
+  const html = (await highlighterPromise).codeToHtml(children, {
     lang,
-    "css-variables",
-  );
+    structure: "inline",
+    themes: {
+      light: "jazz-light",
+      dark: "jazz-dark",
+    },
+  });
 
   return (
-    <code className={className}>
-      {lines
-        .filter((_, i) => !hide?.includes(i))
-        .map((line, i, all) => (
-          <>
-            {line.map((token, i) => (
-              <span key={i} style={{ color: token.color }}>
-                {token.content}
-              </span>
-            ))}
-            {i !== all.length - 1 && <br />}
-          </>
-        ))}
-    </code>
+    <code className={className} dangerouslySetInnerHTML={{ __html: html }} />
   );
 }
 
@@ -73,13 +65,13 @@ export function ClassOrInterface({
     <div className="relative not-prose">
       <div
         id={name}
-        className="peer sticky top-0 mt-4 md:top-[65px] md:pt-8 bg-white dark:bg-stone-950 z-20"
+        className="peer sticky top-0 mt-4 md:top-[61px] md:pt-8 bg-white dark:bg-stone-950 z-20"
       >
         <Link
           href={"#" + name}
           className="inline-flex items-center gap-2 lg:-ml-[22px]"
         >
-          <LinkIcon size={14} className="hidden lg:inline" />
+          <Icon name="link" size="xs" className="hidden lg:inline" />
           <h3 className="text-lg lg:text-xl">
             <Highlight>
               {(isInterface ? "interface " : "class ") + name + typeParameters}
@@ -119,7 +111,10 @@ export function PropDecl({
   example?: ReactNode;
 }) {
   return (
-    <div className="text-sm flex flex-col gap-3 my-2 p-3 rounded bg-stone-50 dark:bg-stone-925">
+    <div
+      className="text-sm flex flex-col gap-3 my-2 p-3 rounded bg-stone-50 dark:bg-stone-925"
+      data-pagefind-weight="4"
+    >
       {(name || type) && (
         <div>
           {name && <Highlight>{name + ":"}</Highlight>}
@@ -156,8 +151,15 @@ export function FnDecl({
   doc: ReactNode;
   example: ReactNode;
 }) {
+  // Extract the method name from the signature (everything before the first parenthesis or type parameter)
+  const methodName = signature.match(/^[^(<]+/)?.[0];
+
   return (
-    <div className="text-sm flex flex-col gap-3 my-2 p-3 rounded bg-stone-50 dark:bg-stone-925">
+    <div
+      id={methodName}
+      className="text-sm flex flex-col gap-3 my-2 p-3 rounded bg-stone-50 dark:bg-stone-925"
+      data-pagefind-weight="5"
+    >
       <div className="flex flex-col gap-2">
         <div>
           {<Highlight>{signature + ":"}</Highlight>}{" "}
@@ -201,7 +203,10 @@ export function PropCategory({
 }) {
   return (
     <>
-      <div className="col-span-6 py-3 font-display font-semibold text-lg text-stone-900 dark:text-white">
+      <div
+        className="col-span-6 py-3 font-display font-semibold text-lg text-highlight"
+        data-pagefind-weight="3"
+      >
         {name}
       </div>
       {description && <PropDecl doc={description} example={example} />}
@@ -211,7 +216,10 @@ export function PropCategory({
 
 export function DocComment({ children }: { children: ReactNode }) {
   return (
-    <div className="prose-inner-sm flex-1 max-w-2xl leading-snug">
+    <div
+      className="prose-inner-sm flex-1 max-w-2xl leading-snug"
+      data-pagefind-weight="2"
+    >
       {children}
     </div>
   );

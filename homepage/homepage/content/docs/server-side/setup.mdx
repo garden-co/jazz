@@ -1,0 +1,177 @@
+export const metadata = {
+  description: "Use Jazz server-side through Server Workers which act like Jazz accounts."
+};
+
+import { Alert, CodeGroup } from "@/components/forMdx";
+
+# Running Jazz on the server
+
+Jazz is a distributed database that can be used on both clients or servers without any distinction.
+
+You can use servers to:
+- perform operations that can't be done on the client (e.g. sending emails, making HTTP requests, etc.)
+- validate actions that require a central authority (e.g. a payment gateway, booking a hotel, etc.)
+
+We call the code that runs on the server a "Server Worker".
+
+The main difference to keep in mind when working with Jazz compared to traditional systems is that server code doesn't have any
+special or privileged access to the user data. You need to be explicit about what you want to share with the server.
+
+This means that your server workers will have their own accounts, and they need to be explicitly given access to the CoValues they need to work on.
+
+## Generating credentials
+
+Server Workers typically have static credentials, consisting of a public Account ID and a private Account Secret.
+
+To generate new credentials for a Server Worker, you can run:
+
+<CodeGroup>
+```sh
+npx jazz-run account create --name "My Server Worker"
+```
+</CodeGroup>
+
+The name will be put in the public profile of the Server Worker's `Account`, which can be helpful when inspecting metadata of CoValue edits that the Server Worker has done.
+
+<Alert variant="info" className="mt-4" title="Note">
+  By default the account will be stored in Jazz Cloud. You can use the `--peer` flag to store the account on a different sync server.
+</Alert>
+
+## Running a server worker
+
+You can use `startWorker` to run a Server Worker. Similarly to setting up a client-side Jazz context, it:
+
+- takes a custom `AccountSchema` if you have one (for example, because the worker needs to store information in its private account root)
+- takes a URL for a sync & storage server
+
+The migration defined in the `AccountSchema` will be executed every time the worker starts, the same way as it would be for a client-side Jazz context.
+
+<CodeGroup>
+```ts twoslash
+import { co } from "jazz-tools";
+const MyWorkerAccount = co.account();
+type MyWorkerAccount = co.loaded<typeof MyWorkerAccount>;
+
+/**
+ * Use your email as a temporary key, or get a free
+ * API Key at dashboard.jazz.tools for higher limits.
+ * 
+ * @link https://dashboard.jazz.tools
+*/
+const apiKey = "you@example.com";
+
+// ---cut---
+import { startWorker } from 'jazz-tools/worker';
+
+const { worker } = await startWorker({
+  AccountSchema: MyWorkerAccount,
+  syncServer: `wss://cloud.jazz.tools/?key=${apiKey}`,
+  accountID: process.env.JAZZ_WORKER_ACCOUNT,
+  accountSecret: process.env.JAZZ_WORKER_SECRET,
+});
+```
+</CodeGroup>
+
+`worker` is an instance of the `Account` schema provided, and acts like `me` (as returned by `useAccount` on the client).
+
+It will implicitly become the current account, and you can avoid mentioning it in most cases.
+
+For this reason we also recommend running a single worker instance per server, because it makes your code much more predictable.
+
+In case you want to avoid setting the current account, you can pass `asActiveAccount: false` to `startWorker`.
+
+## Storing & providing credentials
+
+Server Worker credentials are typically stored and provided as environment variables.
+
+**Take extra care with the Account Secret &mdash; handle it like any other secret environment variable such as a DB password.**
+
+## Wasm on Edge runtimes
+
+To maximize compatibility, Jazz falls back to a slower, JavaScript crypto implementation if the faster WASM implementation is not available.
+
+On some edge platforms, such as Cloudflare Workers or Vercel Edge Functions, environment security restrictions may trigger this fallback unnecessarily.
+
+You can ensure that Jazz uses the faster WASM implementation by importing the WASM loader before using Jazz. For example:
+
+<CodeGroup>
+```ts
+import "jazz-tools/load-edge-wasm"
+// Other Jazz Imports
+
+export default {
+  async fetch(request, env, ctx) {
+    // Jazz application logic
+    return new Response("Hello from Jazz on Cloudflare!");
+  },
+};
+```
+</CodeGroup>
+
+Currently, the Jazz Loader is tested on the following edge environments:
+- Cloudflare Workers 
+- Vercel Functions
+
+### Requirements
+
+- Edge runtime environment that supports WebAssembly
+- `jazz-tools/load-edge-wasm` must be imported before any Jazz import
+
+
+## Node-API
+Jazz uses a WASM-based crypto implementation that provides near-native performance while ensuring full compatibility across a wide variety of environments.
+
+For even higher performance on Node.js or Deno, you can enable the native crypto (Node-API) implementation. Node-API is Node.js's native API for building modules in Native Code (Rust/C++) 
+that interact directly with the underlying system, allowing for true native execution speed.
+
+You can use it as follows:
+
+<CodeGroup>
+```ts
+import { startWorker } from "jazz-tools/worker";
+import { NapiCrypto } from "jazz-tools/napi";
+
+const { worker } = await startWorker({
+  syncServer: `wss://cloud.jazz.tools/?key=${apiKey}`,
+  accountID: process.env.JAZZ_WORKER_ACCOUNT,
+  accountSecret: process.env.JAZZ_WORKER_SECRET,
+  crypto: await NapiCrypto.create(),
+});
+
+```
+</CodeGroup>
+
+<Alert variant="info" className="mt-4" title="Note">
+  The Node-API implementation is not available on all platforms. It is only available on Node.js 20.x and higher.
+  The supported platforms are:
+  - macOS (x64, ARM64)
+  - Linux (x64, ARM64, ARM, musl)
+
+  It does not work in edge runtimes.
+</Alert>
+
+### On Next.js
+
+In order to use Node-API with Next.js, you need to tell Next.js to bundle the native modules in your build.
+
+You can do this by adding the required packages to the [`serverExternalPackages`](https://nextjs.org/docs/app/api-reference/config/next-config-js/serverExternalPackages) array in your `next.config.js`. 
+
+**Note**: if you're deploying to Vercel, be sure to use the `nodejs` runtime!
+
+<CodeGroup>
+```ts
+// next.config.js
+module.exports = {
+    serverExternalPackages: [
+        "cojson-core-napi",
+        "cojson-core-napi-linux-x64-gnu",
+        "cojson-core-napi-linux-x64-musl",
+        "cojson-core-napi-linux-arm64-gnu",
+        "cojson-core-napi-linux-arm64-musl",
+        "cojson-core-napi-darwin-x64",
+        "cojson-core-napi-darwin-arm64"
+        "cojson-core-napi-linux-arm-gnueabihf",
+    ],
+};
+```
+</CodeGroup>

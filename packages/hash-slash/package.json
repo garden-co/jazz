@@ -1,24 +1,23 @@
 {
   "name": "hash-slash",
-  "version": "0.2.1",
+  "version": "0.2.4",
   "type": "module",
   "main": "dist/index.js",
   "types": "src/index.tsx",
   "license": "MIT",
   "devDependencies": {
-    "@types/react": "^18.2.19",
-    "react": "^18.2.0",
-    "typescript": "^5.3.3"
+    "@types/react": "^18.3.12",
+    "react": "^18.3.1",
+    "typescript": "catalog:default"
   },
   "peerDependencies": {
-    "react": "17 - 18"
+    "react": "*"
   },
   "scripts": {
     "dev": "tsc --watch --sourceMap --outDir dist",
     "format-and-lint": "biome check .",
     "format-and-lint:fix": "biome check . --write",
-    "build": "rm -rf ./dist && tsc --sourceMap --outDir dist",
-    "prepublishOnly": "npm run build"
+    "build": "rm -rf ./dist && tsc --sourceMap --outDir dist"
   },
   "gitHead": "33c27053293b4801b968c61d5c4c989f93a67d13"
 }

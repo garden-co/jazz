@@ -1,5 +1,5 @@
-import { ID } from "jazz-tools";
-import { useCoState } from "./main.tsx";
+import { Loaded } from "jazz-tools";
+import { useCoState } from "jazz-tools/react";
 import { ReactionType, ReactionTypes, Reactions } from "./schema.ts";
 
 const reactionEmojiMap: {
@@ -13,8 +13,8 @@ const reactionEmojiMap: {
   chonkers: "🐘",
 };
 
-export function ReactionsScreen(props: { id: ID<Reactions> }) {
-  const reactions = useCoState(Reactions, props.id, []);
+export function ReactionsScreen(props: { id: string }) {
+  const reactions = useCoState(Reactions, props.id);
 
   if (!reactions) return;
 
@@ -33,14 +33,18 @@ export function ReactionsScreen(props: { id: ID<Reactions> }) {
   );
 }
 
-const ReactionButtons = ({ reactions }: { reactions: Reactions }) => (
+const ReactionButtons = ({
+  reactions,
+}: {
+  reactions: Loaded<typeof Reactions>;
+}) => (
   <div className="reaction-buttons">
     {ReactionTypes.map((reactionType) => (
       <button
         key={reactionType}
         type="button"
         onClick={() => {
-          reactions?.push(reactionType);
+          reactions?.$jazz.push(reactionType);
         }}
         title={`React with ${reactionType}`}
         className={reactions?.byMe?.value === reactionType ? "active" : ""}
@@ -52,10 +56,14 @@ const ReactionButtons = ({ reactions }: { reactions: Reactions }) => (
   </div>
 );
 
-const ReactionOverview = ({ reactions }: { reactions: Reactions }) => (
+const ReactionOverview = ({
+  reactions,
+}: {
+  reactions: Loaded<typeof Reactions>;
+}) => (
   <>
-    {Object.values(reactions).map((reaction) => (
-      <div key={reaction.by?.profile?.name} className="reaction-row">
+    {Object.values(reactions.perAccount).map((reaction) => (
+      <div key={reaction.by?.$jazz.id} className="reaction-row">
         {reactionEmojiMap[reaction.value as ReactionType]}{" "}
         {reaction.by?.profile?.name}
       </div>

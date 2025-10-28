@@ -6,6 +6,6 @@ Provides a high-level API around the CoJSON protocol.
 
 ## Environments and bindings
 
-- `jazz-browser` (Vanilla JavaScript)
+- `jazz-tools/browser` (Vanilla JavaScript)
     - `jazz-react` (React apps)
-- `jazz-nodejs` (NodeJS or Bun server workers)
+- `jazz-tools/worker` (NodeJS or Bun server workers)

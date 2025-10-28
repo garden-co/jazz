@@ -1,0 +1,11 @@
+export const COLORS = {
+  BLUE: "#146AFF",
+  TURQUOISE: "#2DC9C9",
+  FOREST: "#42BB69",
+  GREEN: "#8BDA27",
+  PINK: "#EF478E",
+  PURPLE: "#B441EB",
+  YELLOW: "#FCAE00",
+  RED: "#FF601C",
+  ORANGE: "#FF601C",
+};

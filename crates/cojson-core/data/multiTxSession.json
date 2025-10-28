@@ -1,0 +1,8 @@
+{
+  "coID": "co_zUsz4gkwCCWqMXa4LHXdwyAkVK3",
+  "signerID":"signer_z3FdM2ucYXUkbJQgPRf8R4Di6exd2sNPVaHaJHhQ8WAqi",
+  "knownKeys":[],
+  "exampleBase": {
+    "co_zkNajJ1BhLzR962jpzvXxx917ZB_session_zXzrQLTtp8rR":{"transactions":[{"changes":"[{\"key\":\"co_zkNajJ1BhLzR962jpzvXxx917ZB\",\"op\":\"set\",\"value\":\"admin\"}]","madeAt":1750685354142,"privacy":"trusting"},{"changes":"[{\"key\":\"key_z268nqpkZYFFWPoGzL_for_co_zkNajJ1BhLzR962jpzvXxx917ZB\",\"op\":\"set\",\"value\":\"sealed_UmZaEEzCUrP3Q-t2KrN00keV66wzA4LWadqhEmw0jlku5frSW2QyXUY3zYIC_XLig6BDS9rcZZdTm3CwnLjTPzp9hgd9TlJLf_Q==\"}]","madeAt":1750685354142,"privacy":"trusting"},{"changes":"[{\"key\":\"readKey\",\"op\":\"set\",\"value\":\"key_z268nqpkZYFFWPoGzL\"}]","madeAt":1750685354143,"privacy":"trusting"},{"changes":"[{\"key\":\"everyone\",\"op\":\"set\",\"value\":\"writer\"}]","madeAt":1750685354143,"privacy":"trusting"},{"changes":"[{\"key\":\"key_z268nqpkZYFFWPoGzL_for_everyone\",\"op\":\"set\",\"value\":\"keySecret_zHRFDaEsnpYSZh6rUAvXS8uUrKCxJAzeBPSSaVU1r9RZY\"}]","madeAt":1750685354143,"privacy":"trusting"}],"lastHash":"hash_z5j1DUZjBiTKm5XnLi8ZrNPV3P7zGuXnMNCZfh2qGXGC7","streamingHash":{"state":{"__wbg_ptr":1127736},"crypto":{}},"lastSignature":"signature_z4LoRVDLnJBfAzHvRn3avgK4RVBd7iAfqUMJdpDEtV8HGLKGAqLyweBkNp8jggcNUQZatrMeU9tdc31ct9qxw7rib","signatureAfter":{}}
+  }
+}

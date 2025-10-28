@@ -1,13 +1,12 @@
 import { MusicTrack } from "@/1_schema";
-import { useCoState } from "@/2_main";
 import { updateMusicTrackTitle } from "@/4_actions";
-import { ID } from "jazz-tools";
+import { useCoState } from "jazz-tools/react";
 import { ChangeEvent, useState } from "react";
 
 export function MusicTrackTitleInput({
   trackId,
 }: {
-  trackId: ID<MusicTrack> | undefined;
+  trackId: string | undefined;
 }) {
   const track = useCoState(MusicTrack, trackId);
   const [isEditing, setIsEditing] = useState(false);
@@ -32,7 +31,7 @@ export function MusicTrackTitleInput({
 
   return (
     <div
-      className="relative flex-grow"
+      className="relative grow max-w-64"
       onClick={(evt) => evt.stopPropagation()}
     >
       <input

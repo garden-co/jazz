@@ -1,0 +1,34 @@
+{
+  "name": "jazz-webhook",
+  "module": "dist/index.js",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "type": "module",
+  "license": "MIT",
+  "version": "0.18.31",
+  "scripts": {
+    "format-and-lint": "biome check .",
+    "format-and-lint:fix": "biome check . --write",
+    "build": "rm -rf ./dist && tsc --sourceMap --outDir dist && chmod +x ./dist/index.js",
+    "test": "vitest --run --root ../../ --project jazz-webhook",
+    "dev": "tsc --watch --sourceMap --outDir dist",
+    "build-and-run": "pnpm turbo build && ./dist/index.js sync --in-memory"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "dependencies": {
+    "cojson": "workspace:*",
+    "cojson-storage-sqlite": "workspace:*",
+    "cojson-transport-ws": "workspace:*",
+    "jazz-tools": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/ws": "8.5.10",
+    "typescript": "catalog:default",
+    "vitest": "catalog:default"
+  }
+}

@@ -1,42 +1,46 @@
 import { useCallback } from "react";
 
-import { ListOfTasks, TodoProject } from "./1_schema";
+import { TodoAccount, TodoProject } from "./1_schema";
 
 import { SubmittableInput } from "./basicComponents";
 
 import { Group } from "jazz-tools";
+import { useAccount } from "jazz-tools/react";
 import { useNavigate } from "react-router";
-import { useAccount } from "./2_main";
 
 export function NewProjectForm() {
   // `me` represents the current user account, which will determine
   // access rights to CoValues. We get it from the top-level provider `<WithJazz/>`.
-  const { me } = useAccount();
+  const { me } = useAccount(TodoAccount, {
+    resolve: { root: { projects: { $each: { $onError: null } } } },
+  });
   const navigate = useNavigate();
+
+  const projects = me?.root?.projects;
 
   const createProject = useCallback(
     (title: string) => {
-      if (!me || !title) return;
+      if (!projects || !title) return;
 
       // To create a new todo project, we first create a `Group`,
       // which is a scope for defining access rights (reader/writer/admin)
       // of its members, which will apply to all CoValues owned by that group.
-      const projectGroup = Group.create({ owner: me });
+      const projectGroup = Group.create();
 
       // Then we create an empty todo project within that group
       const project = TodoProject.create(
         {
           title,
-          tasks: ListOfTasks.create([], { owner: projectGroup }),
+          tasks: [],
         },
         { owner: projectGroup },
       );
 
-      me.root?.projects?.push(project);
+      projects?.$jazz.push(project);
 
-      navigate("/project/" + project.id);
+      navigate("/project/" + project.$jazz.id);
     },
-    [me, navigate],
+    [projects, navigate],
   );
 
   return (

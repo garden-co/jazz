@@ -4,6 +4,14 @@ export type Routes = {
   [Key: `/${string}`]: ReactNode | ((param: string) => ReactNode);
 };
 
+class NavigateEvent extends Event {
+  static readonly type = "navigate";
+
+  constructor() {
+    super(NavigateEvent.type);
+  }
+}
+
 export function useHashRouter(options?: { tellParentFrame?: boolean }) {
   const [hash, setHash] = useState(location.hash.slice(1));
 
@@ -13,7 +21,7 @@ export function useHashRouter(options?: { tellParentFrame?: boolean }) {
       options?.tellParentFrame &&
         window.parent.postMessage(
           {
-            type: "navigate",
+            type: NavigateEvent.type,
             url: location.href,
           },
           "*",
@@ -22,16 +30,18 @@ export function useHashRouter(options?: { tellParentFrame?: boolean }) {
     };
 
     window.addEventListener("hashchange", onHashChange);
+    window.addEventListener(NavigateEvent.type, onHashChange);
 
     return () => {
       window.removeEventListener("hashchange", onHashChange);
+      window.removeEventListener(NavigateEvent.type, onHashChange);
     };
   });
 
   return {
     navigate: (url: string) => {
       history.replaceState({}, "", url);
-      window.dispatchEvent(new HashChangeEvent("hashchange"));
+      window.dispatchEvent(new NavigateEvent());
     },
     route: function (routes: {
       [route: `${string}` | `/${string}/:${string}`]: (

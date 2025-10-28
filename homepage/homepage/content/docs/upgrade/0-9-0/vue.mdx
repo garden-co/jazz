@@ -1,0 +1,163 @@
+import { ContentByFramework, CodeGroup } from '@/components/forMdx'
+
+# Upgrade to Jazz 0.9.0
+
+Version 0.9.0 simplifies the application setup and makes Jazz more intellisense friendly by
+replacing the `createJazzVueApp` API with top-level imports.
+
+We have also introduced some new API to make testing Jazz components a breeze. 🌬️
+
+## New provider setup
+
+The `JazzProvider` is now imported from `jazz-vue` instead of `createJazzVueApp`.
+
+While `createJazzReactApp` was originally designed to setup strong typing for custom Account schemas in `useAccount`,
+we found that this approach made the Jazz setup awkward and confusing for some users.
+
+So we decided to remove `createJazzReactApp` step and to provide the types through namespace declarations:
+
+  <CodeGroup>
+      {/* prettier-ignore */}
+```typescript
+import "./assets/main.css"; // old
+import { DemoAuthBasicUI, useDemoAuth, JazzProvider } from "jazz-vue";
+import { createApp, defineComponent, h } from "vue"; // old
+import App from "./App.vue"; // old
+import router from "./router"; // old
+import { ToDoAccount } from "./schema"; // old
+
+// Remove these lines  // [!code --]
+const Jazz = createJazzVueApp<ToDoAccount>({ AccountSchema: ToDoAccount }); // [!code --]
+export const { useAccount, useCoState } = Jazz; // [!code --]
+const { JazzProvider } = Jazz; // [!code --]
+
+const RootComponent = defineComponent({ // old
+  name: "RootComponent", // old
+  setup() { // old
+    const { authMethod, state } = useDemoAuth(); // old
+    return () => [  // old
+      h( // old
+        JazzProvider, // old
+        { // old
+          AccountSchema: ToDoAccount, // The custom Account schema is passed here now
+          auth: authMethod.value, // old
+          peer: "wss://cloud.jazz.tools/?key=vue-todo-example-jazz@garden.co", // old
+        }, // old
+        { // old
+          default: () => h(App), // old
+        }, // old
+      ), // old
+      state.state !== "signedIn" && // old
+        h(DemoAuthBasicUI, { // old
+          appName: "Jazz Vue Todo", // old
+          state, // old
+        }), // old
+    ]; // old
+  }, // old
+}); // old
+
+// Register the Account schema so `useAccount` returns our custom `MyAppAccount`
+declare module "jazz-vue" {
+  interface Register {
+    Account: ToDoAccount;
+  }
+}
+
+const app = createApp(RootComponent); // old
+app.use(router); // old
+app.mount("#app"); // old
+```
+  </CodeGroup>
+
+## Top level imports for hooks
+
+All Jazz hooks are now available as top-level imports from the `jazz-vue` package.
+
+This change improves IDE intellisense support and simplifies imports:
+
+  <CodeGroup>
+    {/* prettier-ignore */}
+```typescript
+<template>
+  Hello {{ me.profile?.name }}
+</template>
+
+<script setup lang="ts">
+  // Replace local imports with "jazz-vue" imports
+  import { useAccount } from "./main"; // [!code --]
+  import { useAccount } from "jazz-vue"; // [!code ++]
+
+  const { me, logOut } = useAccount();
+</script>
+```
+  </CodeGroup>
+
+## New testing utilities
+
+Removing `createJazzTestApp` also makes testing way easier!
+
+We can now use `createJazzTestAccount` to setup accounts and testing data and pass it to
+your components and hooks using `JazzTestProvider`:
+
+  <CodeGroup>
+      {/* prettier-ignore */}
+      ```tsx
+      import { createJazzTestAccount, JazzTestProvider } from "jazz-vue/testing";
+      import { createApp, defineComponent, h } from "vue";
+      import { usePlaylist } from "./usePlaylist";
+      import { Playlist, MusicAccount } from "./schema"; // old
+
+      // This can be reused on other tests!
+      export const renderComposableWithJazz = <C extends (...args: any[]) => any>(
+        composable: C,
+        { account }: { account: Account | { guest: AnonymousJazzAgent } },
+      ) => {
+        let result;
+
+        const wrapper = defineComponent({
+          setup() {
+            result = composable();
+            // suppress missing template warning
+            return () => {};
+          },
+        });
+
+        // ✅ Use JazzTestProvider in your tests
+        const app = createApp({
+          setup() {
+            return () =>
+              h(
+                JazzTestProvider,
+                {
+                  account,
+                },
+                {
+                  default: () => h(wrapper),
+                },
+              );
+          },
+        });
+
+        app.mount(document.createElement("div"));
+        return [result, app] as [ReturnType<C>, ReturnType<typeof createApp>];
+      };
+
+      test("should load the playlist", async () => {
+        // ✅ Create a test account with your schema
+        const account = await createJazzTestAccount({ AccountSchema: MusicAccount });
+
+        // ✅ Set up test data
+        const playlist = Playlist.create({
+          name: "My playlist",
+        }, account);
+
+        // ✅ Set up test data
+        const { result } = renderComposableWithJazz(() => usePlaylist(playlist.id), {
+          account,
+        });
+
+        // The result is resolved synchronously, so you can assert the value immediately
+        expect(result?.name).toBe("My playlist");
+      });
+      ```
+  </CodeGroup>

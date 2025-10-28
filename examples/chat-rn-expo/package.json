@@ -1,0 +1,34 @@
+{
+  "name": "chat-rn-expo",
+  "main": "index.ts",
+  "scripts": {
+    "build": "expo prebuild",
+    "build:clean": "expo prebuild --clean",
+    "start": "expo start",
+    "android": "expo run:android",
+    "ios": "expo run:ios",
+    "web": "expo start --web"
+  },
+  "dependencies": {
+    "@azure/core-asynciterator-polyfill": "^1.0.2",
+    "@bacons/text-decoder": "^0.0.0",
+    "@react-native-community/netinfo": "11.4.1",
+    "expo": "catalog:expo",
+    "expo-asset": "12.0.8",
+    "expo-clipboard": "8.0.2",
+    "expo-secure-store": "15.0.2",
+    "expo-sqlite": "16.0.3",
+    "jazz-tools": "workspace:*",
+    "react": "catalog:expo",
+    "react-native": "0.81.0",
+    "react-native-get-random-values": "^1.11.0",
+    "react-native-nitro-modules": "0.26.4",
+    "readable-stream": "^4.7.0"
+  },
+  "devDependencies": {
+    "@babel/core": "^7.25.2",
+    "@types/react": "19.1.10",
+    "typescript": "~5.9.2"
+  },
+  "private": true
+}

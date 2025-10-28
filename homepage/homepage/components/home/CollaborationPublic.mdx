@@ -1,9 +1,7 @@
 ```tsx
-const group = Group.create({
-  owner: me
-});
+const group = Group.create();
+group.addMember(Alice, "writer");
+group.makePublic();
 
-group.addMember("everyone", "writer");
-
-Chat.create([], { owner: group })
+Message.create({ text: "..." }, group);
 ```

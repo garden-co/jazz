@@ -1,0 +1,42 @@
+{
+  "name": "richtext-tiptap",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "test:e2e": "playwright test",
+    "test:e2e:ui": "playwright test --ui",
+    "format-and-lint": "biome check .",
+    "format-and-lint:fix": "biome check . --write"
+  },
+  "dependencies": {
+    "@tiptap/core": "^2.12.0",
+    "@tiptap/extension-color": "^2.12.0",
+    "@tiptap/extension-list-item": "^2.12.0",
+    "@tiptap/extension-text-style": "^2.12.0",
+    "@tiptap/pm": "^2.12.0",
+    "@tiptap/react": "^2.12.0",
+    "@tiptap/starter-kit": "^2.12.0",
+    "clsx": "^2.1.1",
+    "jazz-tools": "workspace:*",
+    "lucide-react": "^0.509.0",
+    "react": "catalog:react",
+    "react-dom": "catalog:react"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "catalog:default",
+    "@playwright/test": "^1.50.1",
+    "@tailwindcss/postcss": "^4.1.10",
+    "@types/react": "catalog:react",
+    "@types/react-dom": "catalog:react",
+    "@vitejs/plugin-react": "^4.5.1",
+    "globals": "^15.11.0",
+    "is-ci": "^3.0.1",
+    "postcss": "^8.4.40",
+    "tailwindcss": "^4.1.10",
+    "typescript": "catalog:default",
+    "vite": "catalog:default"
+  }
+}

@@ -1,0 +1,61 @@
+import { ContentByFramework, CodeGroup } from '@/components/forMdx'
+
+# Jazz 0.9.8 - Without me!
+
+We have simplified the API to make the "me" value always optional!
+
+This removes the need of using `useAccount` like the 90% of the time!
+
+<CodeGroup>
+    {/* prettier-ignore */}
+    ```ts
+    import { useState } from "react";
+    import { Issue } from "./schema";
+    import { IssueComponent } from "./components/Issue.tsx";
+
+    function App() {
+        const [issue, setIssue] = useState<Issue>();
+
+        const createIssue = () => {
+            setIssue(Issue.create(
+                {
+                    title: "Buy terrarium",
+                    description: "Make sure it's big enough for 10 snails.",
+                    estimate: 5,
+                    status: "backlog",
+                }, // The owner defaults now to a group managed by the current user!
+            ));
+        };
+
+        if (issue) {
+            return <IssueComponent issue={issue} />;
+        } else {
+            return <button onClick={createIssue}>Create Issue</button>;
+        }
+    }
+    ```
+</CodeGroup>
+
+This also applies to the load API:
+
+<CodeGroup>
+  {/* prettier-ignore */}
+  ```ts
+  const issue = Issue.load(issueId, {})
+  ```
+</CodeGroup>
+
+And `Group.create`:
+
+<CodeGroup>
+    {/* prettier-ignore */}
+    ```tsx
+    const group = Group.create()
+    const sharedIssue = Issue.create(payload, group)
+    group.addMember('everyone', 'reader')
+    ```
+</CodeGroup>
+
+Everything is backward compatible, so no upgrade steps are required.
+
+With this Jazz API becomes way more lean and more is coming!

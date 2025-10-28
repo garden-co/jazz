@@ -1,0 +1,60 @@
+{
+  "name": "jazz-svelte",
+  "version": "0.14.28",
+  "scripts": {
+    "dev": "vite dev",
+    "build": "vite build",
+    "preview": "vite preview",
+    "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
+    "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
+    "format": "prettier --write .",
+    "lint": "prettier --check . && eslint .",
+    "format-and-lint": "pnpm run format && pnpm run lint",
+    "format-and-lint:fix": "pnpm run format --write && pnpm run lint --fix",
+    "test": "vitest",
+    "test:coverage": "vitest --coverage",
+    "test:e2e": "playwright test",
+    "test:e2e:ui": "playwright test --ui"
+  },
+  "files": [
+    "dist",
+    "!dist/**/*.test.*",
+    "!dist/**/*.spec.*"
+  ],
+  "sideEffects": [
+    "**/*.css"
+  ],
+  "svelte": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "svelte": "./dist/index.js"
+    },
+    "./testing": {
+      "types": "./dist/testing.d.ts",
+      "svelte": "./dist/testing.js"
+    }
+  },
+  "devDependencies": {
+    "@sveltejs/adapter-vercel": "^5.5.0",
+    "@sveltejs/kit": "catalog:svelte",
+    "@sveltejs/vite-plugin-svelte": "catalog:svelte",
+    "@testing-library/jest-dom": "^6.6.3",
+    "@testing-library/svelte": "^5.2.6",
+    "@testing-library/user-event": "^14.6.1",
+    "globals": "^15.11.0",
+    "jsdom": "^25.0.1",
+    "svelte": "catalog:svelte",
+    "svelte-check": "catalog:svelte",
+    "typescript": "catalog:default",
+    "virtua": "^0.41.5",
+    "vite": "^6.3.5",
+    "zod": "^4.1.11"
+  },
+  "dependencies": {
+    "cojson": "workspace:*",
+    "jazz-tools": "workspace:*"
+  }
+}

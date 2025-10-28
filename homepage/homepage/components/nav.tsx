@@ -1,77 +1,59 @@
 import { ThemeToggle } from "@/components/ThemeToggle";
-import { socials } from "@/lib/socials";
-import { JazzLogo } from "gcmp-design-system/src/app/components/atoms/logos/JazzLogo";
-import { Nav } from "gcmp-design-system/src/app/components/organisms/Nav";
-import { BookTextIcon, BoxIcon, CodeIcon } from "lucide-react";
-import { DocNav } from "./docs/nav";
+import { QuickSearch } from "@/components/quick-search";
+import { navigationItems } from "@/content/navigation-items";
+import { socialsHeader } from "@/content/socials";
+import { Button } from "@garden-co/design-system/src/components/atoms/Button";
+import { JazzLogo } from "@garden-co/design-system/src/components/atoms/logos/JazzLogo";
+import {
+  MobileNav,
+  Nav,
+  type NavSection,
+} from "@garden-co/design-system/src/components/organisms/Nav";
 
-export function JazzNav() {
+export function JazzNav({
+  sections,
+  hideMobileNav,
+}: {
+  sections?: NavSection[];
+  hideMobileNav?: boolean;
+}) {
   return (
     <Nav
-      mainLogo={<JazzLogo className="w-24" />}
+      sections={sections}
+      mainLogo={<JazzLogo className="w-20 md:w-24" />}
       themeToggle={ThemeToggle}
-      items={[
-        { title: "Jazz Cloud", href: "/cloud" },
-        {
-          title: "Documentation",
-          href: "/docs",
-          items: [
-            {
-              icon: (
-                <BookTextIcon
-                  className="size-5 stroke-blue dark:stroke-blue-500 shrink-0"
-                  strokeWidth={1.5}
-                />
-              ),
-              title: "Documentation",
-              href: "/docs",
-              description:
-                "Get started with using Jazz by learning the core concepts, and going through guides.",
-            },
-            {
-              icon: (
-                <CodeIcon
-                  className="size-5 stroke-blue dark:stroke-blue-500 shrink-0"
-                  strokeWidth={1.5}
-                />
-              ),
-              title: "Example apps",
-              href: "/examples",
-              description:
-                "Demo and source code for example apps built with Jazz.",
-            },
-            {
-              icon: (
-                <BoxIcon
-                  className="size-5 stroke-blue dark:stroke-blue-500 shrink-0"
-                  strokeWidth={1.5}
-                />
-              ),
-              title: "API reference",
-              href: "/api-reference",
-              description:
-                "API references for packages like jazz-tools, jazz-react, and more.",
-            },
-          ],
-        },
-        {
-          title: "Built with Jazz",
-          href: "/showcase",
-        },
-        {
-          title: "Blog",
-          href: "https://garden.co/news",
-          firstOnRight: true,
-          newTab: true,
-        },
-        {
-          title: "Releases",
-          href: "https://github.com/garden-co/jazz/releases",
-          newTab: true,
-        },
-      ]}
-      socials={socials}
-      docNav={<DocNav className="block h-auto" />}
+      items={navigationItems}
+      socials={socialsHeader}
+      hideMobileNav={hideMobileNav}
+      cta={
+        <div className="flex items-center gap-3 md:ml-auto md:mr-2">
+          <QuickSearch />
+          <Button variant="ghost" href="https://dashboard.jazz.tools" newTab>
+            Dashboard
+          </Button>
+        </div>
+      }
+    ></Nav>
+  );
+}
+
+export function JazzMobileNav({ sections }: { sections?: NavSection[] }) {
+  return (
+    <MobileNav
+      navBarClassName="absolute top-0 w-full left-0"
+      sections={sections}
+      mainLogo={<JazzLogo className="w-20 md:w-24" />}
+      themeToggle={ThemeToggle}
+      items={navigationItems}
+      socials={socialsHeader}
+      cta={
+        <div className="flex items-center gap-2">
+          <QuickSearch />
+          <Button intent="primary" href="https://dashboard.jazz.tools" newTab>
+            Dashboard
+          </Button>
+        </div>
+      }
     />
   );
 }

@@ -1,0 +1,26 @@
+
+[package]
+edition = "2021"
+name = "cojson_core_napi"
+version = "0.1.0"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+napi = { version = "3.0.0", features = ["napi9", "serde-json"] }
+napi-derive = "3.0.0"
+serde_json = "1.0"
+cojson-core = { path = "../cojson-core" }
+console_error_panic_hook = { version = "0.1.7", optional = true }
+serde = { version = "1.0", features = ["derive"] }
+getrandom = { version = "0.2", features = ["js"] }
+thiserror = "1.0"
+blake3 = "1.8.2"
+
+[build-dependencies]
+napi-build = "2"
+
+[profile.release]
+lto = true
+strip = "symbols"
