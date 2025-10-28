@@ -133,6 +133,8 @@ if (!person.$isLoaded) { // [!code ++]
 ```
 </CodeGroup>
 
+We've added a `getLoadedOrUndefined` utility function so you can keep using your existing error handling logic and migrate to the new loading states gradually.
+
 ### Renamed `$onError: null` to `$onError: "catch"`
 
 Since `null` is no longer used to represent a not-loaded CoValue, we've renamed the `$onError: null` option in resolve queries to `$onError: "catch"`.
