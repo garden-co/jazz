@@ -12,7 +12,7 @@
   // 2) Sort documents by vector similarity
   const foundDocuments = $derived((() => {
     const docs = documents.current;
-    if (!docs) return;
+    if (!docs.$isLoaded) return;
 
     if (!queryEmbedding) {
       return docs.map((value) => ({ value }));

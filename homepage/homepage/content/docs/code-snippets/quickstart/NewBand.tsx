@@ -4,7 +4,7 @@ import { JazzFestAccount } from "@/app/schema";
 import { useState } from "react";
 
 export function NewBand() {
-  const { me } = useAccount(JazzFestAccount, {
+  const me = useAccount(JazzFestAccount, {
     resolve: { root: { myFestival: true } },
   });
   const [name, setName] = useState("");

@@ -158,7 +158,7 @@ console.log("Upload complete!");
 // @ts-expect-error Options is required by the type at the moment, but not really necessary.
 const fileStreamFromId = await co.fileStream().load(fileStreamId);
 
-if (fileStream) {
+if (fileStream.$isLoaded) {
   console.log("FileStream loaded successfully");
 
   // Check if it's complete

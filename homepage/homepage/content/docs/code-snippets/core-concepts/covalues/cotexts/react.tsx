@@ -1,4 +1,4 @@
-import * as React from "react";
+import * as react from "react";
 import { co, z } from "jazz-tools";
 import { useAccount, useCoState } from "jazz-tools/react";
 const note = co.plainText().create("Meeting notes");
@@ -30,7 +30,7 @@ function TextEditor({ textId }: { textId: string }) {
   const note = useCoState(co.plainText(), textId);
 
   return (
-    note && (
+    note.$isLoaded && (
       <textarea
         value={note.toString()}
         onChange={(e) => {
@@ -45,16 +45,16 @@ function TextEditor({ textId }: { textId: string }) {
 
 //# region RichTextEditor
 function RichTextEditor() {
-  const { me } = useAccount(JazzAccount, { resolve: { profile: true } });
+  const me = useAccount(JazzAccount, { resolve: { profile: { bio: true } } });
   const editorRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
+  const bio = me.$isLoaded ? me.profile.bio : undefined;
 
   useEffect(() => {
-    if (!me?.profile.bio || !editorRef.current) return;
-
+    if (!bio || !editorRef.current) return;
     // Create the Jazz plugin for ProseMirror
     // Providing a co.richText() instance to the plugin to automatically sync changes
-    const jazzPlugin = createJazzPlugin(me.profile.bio); // [!code ++]
+    const jazzPlugin = createJazzPlugin(bio); // [!code ++]
 
     // Set up ProseMirror with the Jazz plugin
     if (!viewRef.current) {
@@ -75,9 +75,9 @@ function RichTextEditor() {
         viewRef.current = null;
       }
     };
-  }, [me?.profile.bio?.$jazz.id]);
+  }, [bio?.$jazz.id]);
 
-  if (!me) return null;
+  if (!me.$isLoaded) return null;
 
   return (
     <div className="rounded border">

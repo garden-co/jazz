@@ -52,11 +52,10 @@ const allDocuments = await DocumentsList.load(documentsListId, {
 const queryEmbedding = await createEmbedding("search query");
 
 // 3) Sort documents by vector similarity
-const similarDocuments = documents
-  ?.map((value) => ({
-    value,
-    similarity: value.embedding.$jazz.cosineSimilarity(queryEmbedding), // [!code ++]
-  }))
+const similarDocuments = documents.$isLoaded ? documents.map((value) => ({
+  value,
+  similarity: value.embedding.$jazz.cosineSimilarity(queryEmbedding), // [!code ++]
+}))
   .sort((a, b) => b.similarity - a.similarity)
-  .filter((result) => result.similarity > 0.5);
+  .filter((result) => result.similarity > 0.5) : null;
 // #endregion

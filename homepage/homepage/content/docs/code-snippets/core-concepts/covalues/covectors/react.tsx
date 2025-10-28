@@ -17,16 +17,16 @@ const useCreateEmbedding: () => YourCustomHook = () => ({
 });
 
 // #region SemanticSearch
-import { useCoStateWithSelector } from "jazz-tools/react";
+import { useCoState } from "jazz-tools/react";
 
 const { queryEmbedding } = useCreateEmbedding();
 
-const foundDocuments = useCoStateWithSelector(DocumentsList, documentsListId, {
+const foundDocuments = useCoState(DocumentsList, documentsListId, {
   resolve: {
     $each: { embedding: true },
   },
   select(documents) {
-    if (!documents) return;
+    if (!documents.$isLoaded) return;
 
     // If no query embedding, return all entries
     if (!queryEmbedding) return documents.map((value) => ({ value }));

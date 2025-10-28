@@ -11,8 +11,8 @@ type Task = typeof Task;
 const ListOfTasks = co.list(Task);
 type ListOfTasks = typeof ListOfTasks;
 
-export function getCurrentTasks(list: co.loaded<ListOfTasks>) {
-  return list.filter((task): task is co.loaded<Task> => !task?.deleted);
+export function getCurrentTasks(list: co.loaded<ListOfTasks, { $each: true }>) {
+  return list.filter((task): task is co.loaded<Task> => !task.deleted);
 }
 
 async function main() {

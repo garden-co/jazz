@@ -29,7 +29,7 @@ async function handleImagePicker() {
     quality: 1,
   });
 
-  if (!result.didCancel && result.assets && result.assets.length > 0) {
+  if (!result.didCancel && result.assets && result.assets.length > 0 && me.profile.$isLoaded) {
     // Creates ImageDefinition with a blurry placeholder, limited to 1024px on the longest side, and multiple resolutions automatically.
     // See the options below for more details.
     const image = await createImage(result.assets[0].uri, {
@@ -40,7 +40,7 @@ async function handleImagePicker() {
     });
 
     // Store the image
-    me.profile?.$jazz.set("image", image);
+    me.profile.$jazz.set("image", image);
   }
 }
 // #endregion

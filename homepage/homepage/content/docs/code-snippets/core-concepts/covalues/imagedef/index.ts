@@ -26,7 +26,7 @@ import { createImage } from "jazz-tools/media";
 async function handleFileUpload(event: Event) {
   const input = event.target as HTMLInputElement | null;
   const file = input?.files?.[0];
-  if (file) {
+  if (file && me.profile.$isLoaded) {
     // Creates ImageDefinition with a blurry placeholder, limited to 1024px on the longest side, and multiple resolutions automatically
     const image = await createImage(file, {
       owner: me.$jazz.owner,
@@ -36,7 +36,7 @@ async function handleFileUpload(event: Event) {
     });
 
     // Store the image in your application data
-    me.profile?.$jazz.set("image", image);
+    me.profile.$jazz.set("image", image);
   }
 }
 // #endregion
@@ -77,7 +77,7 @@ const image = await ImageDefinition.load("123", {
   },
 });
 
-if (image) {
+if (image.$isLoaded) {
   console.log({
     originalSize: image.originalSize,
     placeholderDataUrl: image.placeholderDataURL,
@@ -124,8 +124,8 @@ import { highestResAvailable } from "jazz-tools/media";
 
 const progressiveImage = await ImageDefinition.load(imageId);
 
-if (progressiveImage === null) {
-  throw new Error("Image not found");
+if (!progressiveImage.$isLoaded) {
+  throw new Error("Image not loaded");
 }
 
 // @ts-expect-error redeclared
