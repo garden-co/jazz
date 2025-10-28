@@ -1,7 +1,8 @@
 // [!code hide:5]
-import { Account, co, Group, z, type SessionID, type ID } from "jazz-tools";
-const accountId = "co_z" as ID<Account>;
-const colleagueAccount = Group.create();
+import { co, Group, z, type SessionID } from "jazz-tools";
+import { createJazzTestAccount } from "jazz-tools/testing";
+const colleagueAccount = await createJazzTestAccount();
+const accountId = colleagueAccount.$jazz.id;
 const sessionId = "co_z" as SessionID;
 
 // #region Basic
