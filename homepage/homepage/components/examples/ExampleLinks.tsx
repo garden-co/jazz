@@ -44,7 +44,7 @@ export function ExampleLinks({ example }: { example: Example }) {
       <Dialog onClose={() => setIsOpen(false)} open={isOpen}>
         <DialogTitle>Use {example.name} example as a template</DialogTitle>
         <DialogBody>
-          <div className="mb-6 aspect-[16/9] overflow-hidden w-full rounded-md bg-white border dark:bg-stone-925 sm:aspect-[2/1] md:aspect-[3/2]">
+          <div className="mb-6 aspect-video overflow-hidden w-full rounded-md bg-white border dark:bg-stone-925 sm:aspect-2/1 md:aspect-3/2">
             {example.illustration}
           </div>
           <p className="mb-3">

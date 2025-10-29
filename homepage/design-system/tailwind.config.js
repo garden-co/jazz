@@ -303,7 +303,7 @@ export const preset = {
 
 const config = {
   presets: [preset],
-  darkMode: ["class"],
+  darkMode: "class",
   content: ["./src/**/*.{js,ts,jsx,tsx,mdx}"],
 };
 export default config;

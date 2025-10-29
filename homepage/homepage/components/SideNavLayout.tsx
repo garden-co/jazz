@@ -12,20 +12,20 @@ export function SideNavLayout({
   floatingNavSections?: NavSection[];
 }) {
   return (
-    <div className="flex-1 w-full">
+    <div className="w-full flex-1">
       <JazzNav sections={floatingNavSections} hideMobileNav />
       <main>
         <div className="container relative md:grid md:grid-cols-12 md:gap-12">
           <div
             className={clsx(
-              "pr-3 pt-3 md:pt-8 md:col-span-4 lg:col-span-3",
-              "sticky align-start top-[61px] h-[calc(100vh-61px)] overflow-y-auto",
+              "pr-3 pt-3 md:col-span-4 md:pt-8 lg:col-span-3",
+              "align-start sticky top-[61px] h-[calc(100vh-61px)]",
               "hidden md:block",
             )}
           >
             {sideNav}
           </div>
-          <div className={clsx("md:col-span-8 lg:col-span-9 flex gap-12")}>
+          <div className={clsx("flex gap-12 md:col-span-8 lg:col-span-9")}>
             {children}
           </div>
         </div>

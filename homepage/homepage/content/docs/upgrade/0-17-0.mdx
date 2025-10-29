@@ -30,7 +30,7 @@ The `createImage` function has been refactored to allow opt-in specific features
 ```tsx
 export type CreateImageOptions = {
   owner?: Group | Account;
-  placeholder?: "blur" | false;
+  placeholder?: "blur-sm" | false;
   maxSize?: number;
   progressive?: boolean;
 };
@@ -39,7 +39,7 @@ export type CreateImageOptions = {
 
 - By default, images are now created with only the original size saved (no progressive loading or placeholder)
 - The `maxSize` property is no longer restricted and affects the original size saved
-- Placeholder generation is now a configurable property, disabled by default. Currently, only `"blur"` is supported, with more built-in options planned for future releases
+- Placeholder generation is now a configurable property, disabled by default. Currently, only `"blur-sm"` is supported, with more built-in options planned for future releases
 - The `progressive` property creates internal resizes used exclusively via public APIs. Direct manipulation of internal resize state is no longer recommended
 
 The `pica` library used internally for browser image resizing has been replaced with a simpler canvas-based implementation. Since every image manipulation library has trade-offs, we've chosen the simplest solution while providing flexibility through `createImageFactory`. This new factory function allows you to create custom `createImage` instances with your preferred libraries for resizing, placeholder generation, and source reading. It's used internally to create default instances for browsers, React Native, and Node.js environments.
@@ -81,7 +81,7 @@ A new `Image` component has been added for Svelte, featuring the same API as the
 <Image
   imageId={image.id}
   alt=""
-  class="h-auto max-h-[20rem] max-w-full rounded-t-xl mb-1"
+  class="h-auto max-h-80 max-w-full rounded-t-xl mb-1"
   width={600}
 />
 ```

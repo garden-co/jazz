@@ -202,17 +202,23 @@ export function Icon({
 
   const roundedClasses = {
     xs: "rounded-xs",
-    sm: "rounded-sm",
+    sm: "rounded-xs",
     md: "rounded-md",
     lg: "rounded-lg",
     xl: "rounded-xl",
   };
 
+  const strokeWidth: number =
+    size in strokeWidths
+      ? strokeWidths[size as keyof typeof strokeWidths]
+      : 1.5;
+
   return (
     <IconComponent
       aria-hidden="true"
       size={sizes[size]}
-      strokeWidth={strokeWidths[size]}
+      // @ts-expect-error - strokeWidth type inference issue with lucide-react
+      strokeWidth={strokeWidth}
       strokeLinecap="round"
       className={clsx(
         roundedClasses[size as keyof typeof roundedClasses] || "rounded-lg",

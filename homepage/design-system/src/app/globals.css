@@ -1,6 +1,26 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+/*
+  Note: When this file is imported by other projects (like homepage),
+  the @config directive must be in the importing file, not here.
+  The importing project's @config will load this design-system's tailwind.config.js via presets.
+*/
+
+/*
+  The default border color has changed to `currentcolor` in Tailwind CSS v4,
+  so we've added these compatibility styles to make sure everything still
+  looks the same as it did with Tailwind CSS v3.
+
+  If we ever want to remove these styles, we need to add an explicit border
+  color utility to any element that depends on these defaults.
+*/
+@layer base {
+  *,
+  ::after,
+  ::before,
+  ::backdrop,
+  ::file-selector-button {
+    border-color: var(--color-border-default);
+  }
+}
 
 :root {
   --color-primary: #146aff;
@@ -43,4 +63,88 @@
 
 *:focus {
   outline: none;
+}
+
+/* Custom typography styles (migrated from tailwind.config.js) */
+@layer base {
+  .prose {
+    --tw-prose-body: oklch(52.3438% 0.002 75);
+    --tw-prose-headings: oklch(30.2734% 0.002 75);
+    --tw-prose-bold: oklch(30.2734% 0.002 75);
+    --tw-prose-code: oklch(30.2734% 0.002 75);
+    --tw-prose-links: oklch(52.3438% 0.002 75);
+    --tw-prose-invert-bold: #fff;
+    --tw-prose-invert-body: oklch(78.9063% 0.002 75);
+    --tw-prose-invert-headings: #fff;
+    --tw-prose-invert-code: oklch(98.8281% 0.002 75);
+    --tw-prose-invert-links: oklch(78.9063% 0.002 75);
+    max-width: none;
+  }
+
+  .prose strong,
+  .prose b {
+    color: var(--tw-prose-bold);
+    font-weight: var(--font-weight-medium);
+  }
+
+  .prose a {
+    font-weight: var(--font-weight-normal);
+    text-underline-offset: 4px;
+  }
+
+  .prose a:hover {
+    color: var(--color-primary-dark);
+  }
+
+  .prose h1 {
+    font-family: var(--font-manrope);
+    letter-spacing: var(--tracking-tight);
+    font-weight: var(--font-weight-semibold);
+    font-size: var(--text-3xl);
+    line-height: var(--text-3xl--line-height);
+  }
+
+  .prose h2 {
+    font-family: var(--font-manrope);
+    letter-spacing: var(--tracking-tight);
+    font-weight: var(--font-weight-semibold);
+    font-size: var(--text-2xl);
+    line-height: var(--text-2xl--line-height);
+  }
+
+  .prose h3 {
+    font-family: var(--font-manrope);
+    letter-spacing: var(--tracking-tight);
+    font-weight: var(--font-weight-semibold);
+    font-size: var(--text-xl);
+    line-height: var(--text-xl--line-height);
+  }
+
+  .prose h4 {
+    font-family: var(--font-manrope);
+    letter-spacing: var(--tracking-tight);
+    font-weight: var(--font-weight-semibold);
+    font-size: var(--text-lg);
+    line-height: var(--text-lg--line-height);
+  }
+
+  .prose code::before,
+  .prose code::after {
+    content: none;
+  }
+
+  .prose code {
+    border-radius: 2px;
+    font-weight: var(--font-weight-normal);
+  }
+
+  .prose p {
+    margin-bottom: calc(var(--spacing) * 3);
+    margin-top: calc(var(--spacing) * 3);
+  }
+
+  .prose-xl p {
+    margin-bottom: calc(var(--spacing) * 3);
+    margin-top: calc(var(--spacing) * 3);
+  }
 }

@@ -141,127 +141,124 @@ export function ContactForm() {
   };
 
   return (
-    <div className="bg-stone dark:bg-stone mx-auto rounded-lg border p-6 shadow-sm">
+    <div className="bg-stone mx-auto rounded-lg border p-6 dark:bg-stone-925">
       <HeroHeader
         level="h2"
-        title="Submit a Project"
-        slogan="We'd love to hear more about your Jazz app. Please fill out the form below and we'll get back to you as soon as possible."
+        title="Submit your project"
+        slogan="Tell us about your app and we'll be in touch soon."
         className="pt-0"
         pt={false}
       />
-      <form onSubmit={handleSubmit} className="space-y-6">
-        <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
-          <div>
-            <Label htmlFor="appName">App Name *</Label>
-            <Input
-              id="appName"
-              type="text"
-              value={formData.appName}
-              onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                handleInputChange("appName", e.target.value)
-              }
-              placeholder="The name of your app"
-              error={!!errors.appName}
-            />
-            {errors.appName && <FieldError message={errors.appName} />}
-          </div>
-          <div>
-            <Label htmlFor="description">Description *</Label>
-            <Input
-              id="description"
-              type="text"
-              value={formData.description}
-              onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                handleInputChange("description", e.target.value)
-              }
-              placeholder="Brief description of your app"
-              error={!!errors.description}
-            />
-            {errors.description && <FieldError message={errors.description} />}
-          </div>
+      <form onSubmit={handleSubmit} className="flex flex-col gap-6">
+        <div>
+          <Label htmlFor="appName">App Name *</Label>
+          <Input
+            id="appName"
+            type="text"
+            value={formData.appName}
+            onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+              handleInputChange("appName", e.target.value)
+            }
+            placeholder="The name of your app"
+            error={!!errors.appName}
+          />
+          {errors.appName && <FieldError message={errors.appName} />}
+        </div>
+        <div>
+          <Label htmlFor="description">Description *</Label>
+          <Input
+            id="description"
+            type="text"
+            value={formData.description}
+            onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+              handleInputChange("description", e.target.value)
+            }
+            placeholder="Brief description of your app"
+            error={!!errors.description}
+          />
+          {errors.description && <FieldError message={errors.description} />}
         </div>
 
-        <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
-          <div>
-            <Label htmlFor="contactMethod">Preferred Contact Method *</Label>
-            <Select
-              value={formData.preferredCommunication}
-              onValueChange={(value) =>
-                handleInputChange("preferredCommunication", value)
-              }
-            >
-              <SelectTrigger id="contactMethod">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="email">Email</SelectItem>
-                <SelectItem value="discord">Discord</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-          <div>
-            <Label htmlFor="handle">Email/Discord Handle *</Label>
-            <Input
-              id="handle"
-              type={
-                formData.preferredCommunication === "email" ? "email" : "text"
-              }
-              value={formData.handle}
-              onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                handleInputChange("handle", e.target.value)
-              }
-              placeholder={
-                formData.preferredCommunication === "email"
-                  ? "your.email@example.com"
-                  : "your.discord.handle"
-              }
-              error={!!errors.handle}
-            />
-            {errors.handle && <FieldError message={errors.handle} />}
-          </div>
+        <div>
+          <Label htmlFor="contactMethod">Preferred Contact Method *</Label>
+          <Select
+            value={formData.preferredCommunication}
+            onValueChange={(value) =>
+              handleInputChange("preferredCommunication", value)
+            }
+          >
+            <SelectTrigger id="contactMethod">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="email">Email</SelectItem>
+              <SelectItem value="discord">Discord</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+        <div>
+          <Label htmlFor="handle">
+            {formData.preferredCommunication === "email"
+              ? "Email "
+              : "Discord  Handle "}
+            *
+          </Label>
+          <Input
+            id="handle"
+            type={
+              formData.preferredCommunication === "email" ? "email" : "text"
+            }
+            value={formData.handle}
+            onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+              handleInputChange("handle", e.target.value)
+            }
+            placeholder={
+              formData.preferredCommunication === "email"
+                ? "your.email@example.com"
+                : "your.discord.handle"
+            }
+            error={!!errors.handle}
+          />
+          {errors.handle && <FieldError message={errors.handle} />}
         </div>
 
-        <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
-          <div>
-            <Label htmlFor="projectUrl">Project URL</Label>
-            <Input
-              id="projectUrl"
-              type="text"
-              value={formData.projectUrl}
-              onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                handleInputChange("projectUrl", e.target.value)
-              }
-              placeholder="Your project url"
-            />
-          </div>
-          <div>
-            <Label htmlFor="repo">Project Repository (optional)</Label>
-            <Input
-              id="repo"
-              type="text"
-              value={formData.repo}
-              onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                handleInputChange("repo", e.target.value)
-              }
-              placeholder="Your project repo"
-            />
-          </div>
+        <div>
+          <Label htmlFor="projectUrl">Project URL</Label>
+          <Input
+            id="projectUrl"
+            type="text"
+            value={formData.projectUrl}
+            onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+              handleInputChange("projectUrl", e.target.value)
+            }
+            placeholder="Your project url"
+          />
         </div>
-        <div className="grid grid-cols-1 gap-6">
-          <div>
-            <Label htmlFor="message">Message (optional)</Label>
-            <Textarea
-              id="message"
-              value={formData.message}
-              onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) =>
-                handleInputChange("message", e.target.value)
-              }
-              placeholder="Anything else you'd like to add?"
-              autoComplete="off"
-              rows={5}
-              className="min-h-24"
-            />
-          </div>
+        <div>
+          <Label htmlFor="repo">Project Repository (optional)</Label>
+          <Input
+            id="repo"
+            type="text"
+            value={formData.repo}
+            onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+              handleInputChange("repo", e.target.value)
+            }
+            placeholder="Your project repo"
+          />
+        </div>
+        <div>
+          <Label htmlFor="message">Message (optional)</Label>
+          <Textarea
+            id="message"
+            value={formData.message}
+            onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) =>
+              handleInputChange("message", e.target.value)
+            }
+            placeholder="Anything else you'd like to add?"
+            autoComplete="off"
+            rows={5}
+            className="min-h-24"
+          />
           {/* this is a bot protection field, hidden from the user */}
           <div className="hidden" aria-hidden="true">
             <label htmlFor="nickName">Nickname</label>

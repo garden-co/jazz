@@ -23,7 +23,7 @@ export function Prose({
         "prose",
         sizeClassName,
         "dark:prose-invert",
-        "prose-code:dark:bg-stone-900",
+        "dark:prose-code:bg-stone-900",
       )}
     >
       {children}

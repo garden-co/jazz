@@ -25,9 +25,7 @@ export function SideNav({
   children?: React.ReactNode;
 }) {
   return (
-    <div
-      className={clsx(className, "text-sm h-full flex flex-col gap-4 px-2 overflow-y-auto")}
-    >
+    <div className={clsx(className, "flex h-full flex-col gap-4 text-sm")}>
       {children}
     </div>
   );
@@ -38,7 +36,13 @@ export function SideNavSectionList({ items }: { items?: SideNavItem[] }) {
     !!items?.length && (
       <ul>
         {items.map((item) => {
-          const { name, href, items: childItems, done, excludeFromNavigation } = item;
+          const {
+            name,
+            href,
+            items: childItems,
+            done,
+            excludeFromNavigation,
+          } = item;
 
           // Skip items that are excluded from navigation
           if (excludeFromNavigation) {
@@ -62,7 +66,12 @@ export function SideNavSectionList({ items }: { items?: SideNavItem[] }) {
               <SideNavItem href={href}>
                 <span className={done === 0 ? "text-muted" : ""}>
                   {name}
-                  {done === 0 && <span className="text-stone-800 text-[0.5rem]"> (docs coming soon)</span>}
+                  {done === 0 && (
+                    <span className="text-[0.5rem] text-stone-800">
+                      {" "}
+                      (docs coming soon)
+                    </span>
+                  )}
                 </span>
               </SideNavItem>
             </li>
@@ -84,7 +93,7 @@ export function SideNavBody({ children }: { children: React.ReactNode }) {
     const updatePadding = () => {
       const scrollbarWidth = div.offsetWidth - div.clientWidth;
       // If we're dealing with overlay scroll bars, then we'll set extra padding
-      setExtraPadding(scrollbarWidth === 0)
+      setExtraPadding(scrollbarWidth === 0);
     };
 
     updatePadding();
@@ -93,15 +102,13 @@ export function SideNavBody({ children }: { children: React.ReactNode }) {
   }, []);
 
   return (
-
-    <div ref={ref}
-      className={clsx("flex-1 relative overflow-y-auto -mx-2", extraPadding ? 'px-2 pr-4' : 'px-2')}>
+    <div ref={ref} className={clsx("relative flex-1 overflow-y-auto pr-2")}>
       {children}
       <div
         aria-hidden
         className={clsx(
-          "h-12 right-0 sticky bottom-0 left-0",
-          "bg-gradient-to-t from-white  to-transparent",
+          "sticky bottom-0 left-0 right-0 h-12",
+          "bg-linear-to-t from-white to-transparent",
           "dark:from-stone-950",
           "hidden md:block",
         )}
@@ -121,7 +128,7 @@ export function SideNavHeader({
 }) {
   const classes = clsx(
     className,
-    "flex items-center gap-2 justify-between font-medium text-stone-900 py-1 dark:text-white mb-1 [&:not(:first-child)]:mt-4",
+    "not-first:mt-4 mb-1 flex items-center justify-between gap-2 py-1 font-medium text-stone-900 dark:text-white",
   );
   if (href) {
     return (

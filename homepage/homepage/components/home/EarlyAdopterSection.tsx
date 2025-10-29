@@ -93,7 +93,7 @@ export function EarlyAdopterSection() {
     <section className="bg-stone-100 dark:bg-black/30">
       <div className="container grid grid-cols-3 items-center gap-y-12">
         <div className="col-span-3 py-12 lg:col-span-2">
-          <div className="max-w-3xl space-y-6">
+          <div className="max-w-3xl">
             <SectionHeader
               kicker="Get started"
               title="Let's build your next app together"

@@ -51,11 +51,11 @@ export function SideNavSection({
   return (
     <>
       <details
-        className="group [&:not(:first-child)]:mt-4"
+        className="group not-first:mt-4"
         open={isOpen}
       >
         <summary className="list-none">
-          <div className="flex items-center gap-2 justify-between font-medium text-stone-900 py-1 dark:text-white mb-1 [&:not(:first-child)]:mt-4">
+          <div className="flex items-center gap-2 justify-between font-medium text-stone-900 py-1 dark:text-white mb-1 not-first:mt-4">
             {href ? (
               <a
                 href={href}

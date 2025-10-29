@@ -1,6 +1,5 @@
 import type { IconName } from "@garden-co/design-system/src/components/atoms/Icon";
 import { FeatureCard } from "@garden-co/design-system/src/components/molecules/FeatureCard";
-import { GappedGrid } from "@garden-co/design-system/src/components/molecules/GappedGrid";
 
 const randomChars = [
   "SFPOHVKNPDKETOMQLMJKX#QDI=TFFFMRJDSJ",
@@ -46,10 +45,10 @@ function Illustration() {
           ),
         )}
 
-        <div className="absolute left-0 top-0 z-10 h-full w-20 bg-gradient-to-r from-white to-transparent dark:from-stone-925"></div>
-        <div className="absolute left-0 top-0 z-10 hidden h-20 w-full bg-gradient-to-b from-white to-transparent dark:from-stone-925 md:block"></div>
-        <div className="absolute bottom-0 left-0 z-10 h-20 w-full bg-gradient-to-t from-white to-transparent dark:from-stone-925"></div>
-        <div className="absolute right-0 top-0 z-10 h-full w-20 bg-gradient-to-l from-white to-transparent dark:from-stone-925"></div>
+        <div className="bg-linear-to-r absolute left-0 top-0 z-10 h-full w-20 from-white to-transparent dark:from-stone-925"></div>
+        <div className="bg-linear-to-b absolute left-0 top-0 z-10 hidden h-20 w-full from-white to-transparent dark:from-stone-925 md:block"></div>
+        <div className="bg-linear-to-t absolute bottom-0 left-0 z-10 h-20 w-full from-white to-transparent dark:from-stone-925"></div>
+        <div className="bg-linear-to-l absolute right-0 top-0 z-10 h-full w-20 from-white to-transparent dark:from-stone-925"></div>
       </div>
     </div>
   );
@@ -103,7 +102,7 @@ export function LocalFirstFeaturesSection() {
     },
   ];
   return (
-    <GappedGrid cols={4} className="mb-12 lg:mb-16">
+    <div className="mb-12 grid gap-4 sm:grid-cols-2 md:gap-8 lg:mb-16 xl:grid-cols-4">
       {features.map(({ title, icon, description }) => (
         <FeatureCard
           label={title}
@@ -115,6 +114,6 @@ export function LocalFirstFeaturesSection() {
           {icon === "encryption" && <Illustration />}
         </FeatureCard>
       ))}
-    </GappedGrid>
+    </div>
   );
 }

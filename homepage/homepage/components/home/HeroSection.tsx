@@ -52,9 +52,7 @@ export function HeroSection() {
             <CopyButton
               code="npx create-jazz-app@latest"
               size="sm"
-              className={clsx(
-                "z-100 mr-0.5 mt-0.5 hidden md:block md:opacity-100",
-              )}
+              className={clsx("mr-0.5 mt-0.5 hidden md:block md:opacity-100")}
               onCopy={() => track("create-jazz-app command copied from hero")}
             />
           </div>

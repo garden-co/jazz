@@ -8,8 +8,8 @@ import Link from "next/link";
 const metaTags = {
   title: "Built with Jazz",
   description: "Great apps by smart people.",
-  url:  "https://jazz.tools",
-}
+  url: "https://jazz.tools",
+};
 
 export const metadata: Metadata = {
   title: metaTags.title,
@@ -35,32 +35,35 @@ export default function Page() {
         slogan="Great apps by smart people."
       />
 
-      <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-8">
-        {products.map((product) => (
-          <Link
-            href={product.url}
-            key={product.url}
-            className="group border bg-stone-50 shadow-sm p-3 flex flex-col gap-3 rounded-lg md:gap-4 dark:bg-stone-950"
-          >
-            <Image
-              className="rounded-md border dark:border-0"
-              src={product.imageUrl}
-              width="900"
-              height="675"
-              alt=""
-            />
-            <div className="space-y-2">
-              <h2 className="font-medium text-highlight leading-none">
-                {product.name}
-              </h2>
-              <p className="text-sm">{product.description}</p>
-            </div>
-          </Link>
-        ))}
-      </div>
+      <div className="grid items-start gap-8 md:grid-cols-12">
+        <div className="grid gap-8 sm:grid-cols-2 md:col-span-8">
+          {products.map((product) => (
+            <Link
+              href={product.url}
+              key={product.url}
+              className="shadow-xs group flex flex-col gap-3 rounded-lg border bg-stone-50 p-3 dark:bg-stone-950 md:gap-4"
+            >
+              <Image
+                className="rounded-md border dark:border-0"
+                src={product.imageUrl}
+                width="900"
+                height="675"
+                alt=""
+              />
+              <div className="flex flex-col gap-2">
+                <h2 className="font-medium leading-none text-highlight">
+                  {product.name}
+                </h2>
+                <p className="text-sm">{product.description}</p>
+              </div>
+            </Link>
+          ))}
+        </div>
 
-      {/* Contact Form Section */}
-      <ContactForm />
+        <div className="md:col-span-4">
+          <ContactForm />
+        </div>
+      </div>
     </div>
   );
 }

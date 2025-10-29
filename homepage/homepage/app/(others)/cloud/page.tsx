@@ -38,8 +38,8 @@ export const metadata: Metadata = {
 export default function Cloud() {
   const h3Style = "text-xl md:text-2xl mb-2 font-semibold tracking-tight"
   return (
-    <div className="space-y-16">
-      <div className="container space-y-12 overflow-hidden">
+    <div className="flex flex-col gap-16">
+      <div className="container flex flex-col gap-12 overflow-hidden">
         <HeroHeader
           title="Jazz Cloud"
           slogan="Real-time sync and storage infrastructure that scales up to millions of users."
@@ -78,14 +78,14 @@ export default function Cloud() {
       </div>
 
       <div className="bg-stone-100 border-y dark:bg-stone-925 py-8 lg:py-16 dark:border-y-0 dark:bg-transparent dark:py-0">
-        <div className="container space-y-5">
+        <div className="container flex flex-col gap-5">
           <H2>Pricing</H2>
 
           <Pricing />
         </div>
       </div>
 
-      <div className="container space-y-16">
+      <div className="container flex flex-col gap-16">
         <div>
           <SectionHeader
             title="Custom deployment scenarios"

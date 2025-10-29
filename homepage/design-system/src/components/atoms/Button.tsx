@@ -161,7 +161,7 @@ const variantClass = (intent: Style) =>
 
 const styleClasses = (intent: Style, variant: Variant | undefined) => {
   return {
-    outline: `border ${styleToBorderMap[intent]} ${styleToTextMap[intent]} ${styleToTextHoverMap[intent]} ${styleToHoverShadowMap[intent]} ${styleToBgTransparentActiveMap[intent]} shadow-[5px_0px]`,
+    outline: `border ${styleToBorderMap[intent]} ${styleToTextMap[intent]} ${styleToTextHoverMap[intent]} ${styleToHoverShadowMap[intent]} ${styleToBgTransparentActiveMap[intent]}`,
     inverted: `${styleToTextMap[intent]} ${colorToBgHoverMap30[styleToColorMap[intent] as VariantColor]} ${colorToBgMap[styleToColorMap[intent] as VariantColor]} ${colorToBgActiveMap50[styleToColorMap[intent] as VariantColor]} ${shadowClassesBase}`,
     ghost: `bg-transparent ${styleToTextMap[intent]} ${colorToBgHoverMap10[styleToColorMap[intent] as VariantColor]} ${colorToBgActiveMap25[styleToColorMap[intent] as VariantColor]}`,
     link: `bg-transparent ${styleToTextMap[intent]} underline underline-offset-2 p-0 hover:bg-transparent ${styleToTextHoverMap[intent]} ${styleToTextActiveMap[intent]} active:underline-stone-500`,
