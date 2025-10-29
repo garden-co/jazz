@@ -16,7 +16,7 @@ if (statusEdits && statusEdits.by?.profile.$isLoaded) {
 }
 // #endregion
 
-// #region EditDetail
+// #region EditDetails
 const edit = task.$jazz.getEdits().status;
 
 // The edit object contains:

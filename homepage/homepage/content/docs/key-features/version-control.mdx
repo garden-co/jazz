@@ -6,7 +6,7 @@ export const metadata = {
 
 # Version Control
 
-Jazz provides built-in version control through branching and merging, allowing multiple users to work on the same resource in isolation and merge their changes when they are ready. 
+Jazz provides built-in version control through branching and merging, allowing multiple users to work on the same resource in isolation and merge their changes when they are ready.
 
 This enables the design of new editing workflows where users (or agents!) can create branches, make changes, and merge them back to the main version.
 
@@ -21,10 +21,7 @@ This enables the design of new editing workflows where users (or agents!) can cr
 To create a branch, use the `unstable_branch` option when loading a CoValue:
 
 <CodeGroup>
-```ts
-const branch = await Project.load(projectId, {
-  unstable_branch: { name: "feature-branch" }
-});
+```ts index.ts#Branch
 ```
 </CodeGroup>
 
@@ -32,10 +29,7 @@ const branch = await Project.load(projectId, {
 You can also create a branch via the `useCoState` hook:
 
 <CodeGroup>
-```ts
-const branch = useCoState(Project, projectId, {
-  unstable_branch: { name: "feature-branch" }
-});
+```ts react.tsx#UseCoState
 ```
 </CodeGroup>
 </ContentByFramework>
@@ -43,15 +37,12 @@ const branch = useCoState(Project, projectId, {
 You can also create a branch via `CoState`:
 
 <CodeGroup>
-```ts
-const branch = new CoState(Project, projectId, {
-  unstable_branch: { name: "feature-branch" }
-});
+```ts svelte.svelte#CoState
 ```
 </CodeGroup>
 </ContentByFramework>
 
-You can also include nested CoValues in your branch by using a [`resolve` query](/docs/core-concepts/subscription-and-loading#resolve-queries). 
+You can also include nested CoValues in your branch by using a [`resolve` query](/docs/core-concepts/subscription-and-loading#resolve-queries).
 
 You are in control of how nested CoValues are included in your branch. When you specify the CoValue to branch, any nested CoValues specified in a `resolve` query will also be branched. Nested CoValues *not* specified in your resolve query will not be branched.
 
@@ -65,92 +56,16 @@ In order to access branched nested CoValues, you should access them in the same 
 
 Once you have a branch, you can make changes just as you would with the original CoValue:
 
-<ContentByFramework framework={["react", "react-native", "expo", "vue", "vanilla"]}>  
+{/* TODO: this is not suitable for vanilla */}
+<ContentByFramework framework={["react", "react-native", "expo", "vanilla"]}>
 <CodeGroup>
-```tsx 
-function EditProject({ projectId, currentBranchName }) {
-  const project = useCoState(Project, projectId, {
-    resolve: {
-      tasks: { $each: true }
-    },
-    unstable_branch: {
-      name: currentBranchName,
-    },
-  });
-
-  const handleTitleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    // Won't be visible on main until merged
-    project.$jazz.set("title", e.target.value);
-  };
-
-  const handleTaskTitleChange = (index: number, e: React.ChangeEvent<HTMLInputElement>) => {
-    const task = project.tasks[index];
-
-    // The task is also part of the branch because we used the `resolve` option
-    // with `tasks: { $each: true }`
-    // so the changes won't be visible on main until merged
-    task?.$jazz.set("title", e.target.value);
-  };
-
-  return (
-    <form onSubmit={handleSave}>
-      {/* Edit form fields */}
-    </form>
-  );
-}
+```tsx react.tsx#EditOnBranch
 ```
 </CodeGroup>
 </ContentByFramework>
 <ContentByFramework framework={["svelte"]}>
 <CodeGroup>
-```svelte
-<script lang="ts">
-  import { CoState } from 'jazz-tools/svelte';
-  import { Project } from './schema.js';
-
-  let projectId = $state<string>();
-  let currentBranchName = $state<string>('main');
-
-  const project = new CoState(Project, () => projectId, () => ({
-    resolve: {
-      tasks: { $each: true }
-    },
-    unstable_branch: currentBranchName === 'main' ? undefined : { name: currentBranchName }
-  }));
-
-  function handleTitleChange(e: Event) {
-    const target = e.target as HTMLInputElement;
-    // Won't be visible on main until merged
-    project.current?.$jazz.set("title", target.value);
-  }
-
-  function handleTaskTitleChange(index: number, e: Event) {
-    const target = e.target as HTMLInputElement;
-    const task = project.current?.tasks[index];
-
-    // The task is also part of the branch because we used the `resolve` option
-    // with `tasks: { $each: true }`
-    // so the changes won't be visible on main until merged
-    task?.$jazz.set("title", target.value);
-  }
-</script>
-
-<form>
-  <!-- Edit form fields -->
-  <input 
-    type="text" 
-    value={project.current?.title || ''} 
-    oninput={handleTitleChange}
-  />
-  
-  {#each project.current?.tasks || [] as task, index}
-    <input 
-      type="text" 
-      value={task.title || ''} 
-      oninput={(e) => handleTaskTitleChange(index, e)}
-    />
-  {/each}
-</form>
+```svelte EditOnBranch.svelte
 ```
 </CodeGroup>
 </ContentByFramework>
@@ -162,25 +77,15 @@ Branching does not bring isolation on Account and Group CoValues.
 This means that, adding a member on a branched Group will also add the member to the main Group.
 
 <CodeGroup>
-```tsx 
-const branch = await Project.load(projectId, {
-  unstable_branch: { name: "feature-branch" }
-});
-branch.$jazz.owner.addMember(member, "writer"); // Will also add the member to the main Group
+```ts index.ts#Permissions
 ```
 </CodeGroup>
 
-On account only root and profile replacements are not affected by the branching.
+If you are modifying an account, be aware that replacing the root or profile  will also modify the main account (although updating the properties will happen on the branch).
 
+{/* TODO: Not framework friendly */}
 <CodeGroup>
-```tsx 
-const me = useAccount(MyAccount, {
-  resolve: { root: true },
-  unstable_branch: { name: "feature-branch" }
-});
-
-me.$jazz.set("root", { value: "Feature Branch" }); // Will also modify the main account
-me.root.$jazz.set("value", "Feature Branch"); // This only modifies the branch
+```tsx react.tsx#AccountModifications
 ```
 </CodeGroup>
 
@@ -193,12 +98,7 @@ There are two ways to merge a branch in Jazz, each with different characteristic
 This method merges all the values that are currently loaded inside the branch. It happens synchronously and there is no possibility of errors because the values are already loaded.
 
 <CodeGroup>
-```tsx 
-async function handleSave() {
-  // Merge all currently loaded values in the branch
-  branch.$jazz.unstable_merge();
-  router.navigate("/");
-}
+```ts index.ts#Merge
 ```
 </CodeGroup>
 
@@ -213,17 +113,7 @@ This approach is recommended when you can co-locate the merge operation with the
 This is a shortcut for loading a value and calling `branch.$jazz.unstable_merge()` on it and will fail if the load isn't possible due to permission errors or network issues.
 
 <CodeGroup>
-```tsx 
-async function handleSave() {
-  // Merge the branch changes back to main
-  await Project.unstable_merge(projectId, {
-    resolve: {
-      tasks: { $each: true }
-    },
-    branch: { name: "feature-branch" }
-  });
-  router.navigate("/");
-}
+```ts index.ts#MergeWithResolve
 ```
 </CodeGroup>
 
@@ -242,12 +132,7 @@ The merge is idempotent, so you can merge the same branch multiple times, the re
 The merge operation cascades down to the CoValue's children, but not to its parents. So if you call `unstable_merge()` on a task, only the changes to the task and their children will be merged:
 
 <CodeGroup>
-```tsx 
-async function handleTaskSave(index: number) {
-  const task = project.tasks[index];
-  // Only the changes to the task will be merged
-  task?.$jazz.unstable_merge();
-}
+```tsx index.ts#CascadingMerge
 ```
 </CodeGroup>
 
@@ -257,18 +142,7 @@ async function handleTaskSave(index: number) {
 When conflicts occur (the same field is modified in both the branch and main), Jazz uses a "last writer wins" strategy:
 
 <CodeGroup>
-```tsx
-// Branch modifies priority to "high"
-branch.$jazz.applyDiff({ priority: "high" });
-
-// Meanwhile, main modifies priority to "urgent"
-originalProject.$jazz.applyDiff({ priority: "urgent" });
-
-// Merge the branch
-branch.$jazz.unstable_merge();
-
-// Main's value ("urgent") wins because it was written later
-console.log(originalProject.priority); // "urgent"
+```ts index.ts#ConflictResolution
 ```
 </CodeGroup>
 
@@ -279,19 +153,7 @@ When the owner is not specified, the branch has the same permissions as the main
 You can also create a private branch by providing a group owner.
 
 <CodeGroup>
-```tsx 
-// Create a private group for the branch
-const privateGroup = Group.create();
-
-const privateBranch = useCoState(Project, projectId, {
-  unstable_branch: { 
-    name: "private-edit", 
-    owner: privateGroup 
-  }
-});
-
-// Only members of privateGroup can see the branch content
-// The sync server cannot read the branch content
+```ts index.ts#PrivateBranches
 ```
 </CodeGroup>
 
@@ -308,13 +170,6 @@ Only users with both write access to the main branch and read access to the priv
 You can get the current branch information from the `$jazz` field.
 
 <CodeGroup>
-```ts 
-const branch = await Project.load(projectId, {
-  unstable_branch: { name: "feature-branch" }
-});
-
-console.log(branch.$jazz.id); // Branch ID is the same as source
-console.log(branch.$jazz.branchName); // "feature-branch"
-console.log(branch.$jazz.isBranched); // true
+```ts index.ts#BranchIdentification
 ```
 </CodeGroup>
