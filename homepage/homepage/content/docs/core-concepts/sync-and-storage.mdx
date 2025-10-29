@@ -1,7 +1,7 @@
 import { Alert, ContentByFramework, CodeGroup } from '@/components/forMdx'
 import GetAPIKey from "@/components/docs/snippets/GetAPIKey.mdx";
 
-export const metadata = { 
+export const metadata = {
   description: "Learn how to sync and persist your data using Jazz Cloud, or run your own sync server."
 };
 
@@ -26,109 +26,31 @@ For sync and storage, you can either use Jazz Cloud for zero-config magic, or ru
   Replace the API key in the Jazz provider sync server URL with your API key:
 </ContentByFramework>
 
+{/* TODO: Replace with TCG */}
 <ContentByFramework framework="react">
   <CodeGroup>
-  ```tsx twoslash
-  import * as React from "react";
-  import { JazzReactProvider } from "jazz-tools/react";
-  /**
-   * Get a free API Key at dashboard.jazz.tools, or use your email as a temporary key.
-   * 
-   * @link https://dashboard.jazz.tools
-  */
-  const apiKey = "you@example.com";
-  
-  // ---cut---
-  export function MyApp({ children }: { children: React.ReactNode }) {
-    return (
-      <JazzReactProvider
-        sync={{
-          peer: `wss://cloud.jazz.tools/?key=${apiKey}`,
-          // ...
-        }}
-      >
-        {children}
-      </JazzReactProvider>
-    );
-  }
+  ```tsx react.tsx#Basic
   ```
   </CodeGroup>
 </ContentByFramework>
 
 <ContentByFramework framework="react-native">
   <CodeGroup>
-  ```tsx twoslash
-  import * as React from "react";
-  import { JazzReactNativeProvider } from "jazz-tools/react-native";
-  /**
-   * Get a free API Key at dashboard.jazz.tools, or use your email as a temporary key.
-   * 
-   * @link https://dashboard.jazz.tools
-  */
-  const apiKey = "you@example.com";  
-  // ---cut---
-  export function MyApp({ children }: { children: React.ReactNode }) {
-    return (
-      <JazzReactNativeProvider
-        sync={{
-          peer: `wss://cloud.jazz.tools/?key=${apiKey}`,
-          // ...
-        }}
-      >
-        {children}
-      </JazzReactNativeProvider>
-    );
-  }
+  ```tsx rn.tsx#Basic
   ```
   </CodeGroup>
 </ContentByFramework>
 
 <ContentByFramework framework="react-native-expo">
   <CodeGroup>
-  ```tsx twoslash
-  import * as React from "react";
-  import { JazzExpoProvider } from "jazz-tools/expo";
-  /**
-   * Get a free API Key at dashboard.jazz.tools, or use your email as a temporary key.
-   * 
-   * @link https://dashboard.jazz.tools
-  */
-  const apiKey = "you@example.com";  
-  // ---cut---
-  export function MyApp({ children }: { children: React.ReactNode }) {
-    return (
-      <JazzExpoProvider
-        sync={{
-          peer: `wss://cloud.jazz.tools/?key=${apiKey}`,
-          // ...
-        }}
-      >
-        {children}
-      </JazzExpoProvider>
-    );
-  }
+  ```tsx rn.tsx#Expo
   ```
   </CodeGroup>
 </ContentByFramework>
 
 <ContentByFramework framework="svelte">
   <CodeGroup>
-  ```svelte twoslash
-  <script lang="ts">
-    import { JazzSvelteProvider } from "jazz-tools/svelte";
-    import { MyAppAccount } from "$lib/schema";
-    let { children } = $props();
-    let apiKey = "Get a free API Key at dashboard.jazz.tools, or use your email as a temporary key.";
-  </script>
-
-  <JazzSvelteProvider
-    sync={{ 
-      peer: `wss://cloud.jazz.tools/?key=${apiKey}`,
-    }}
-    AccountSchema={MyAppAccount}
-  >
-    {@render children()}
-  </JazzSvelteProvider>
+  ```svelte svelte.svelte
   ```
   </CodeGroup>
 </ContentByFramework>
