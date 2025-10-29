@@ -492,7 +492,10 @@ function migrateMaybeLoadedIfStatements(sourceFile: SourceFile) {
       const expression = node.getExpression();
 
       // Check for direct variable reference: if (account)
-      if (Node.isIdentifier(expression)) {
+      if (
+        Node.isIdentifier(expression) ||
+        Node.isPropertyAccessExpression(expression)
+      ) {
         const varName = expression.getText();
         const type = expression.getType();
 
@@ -506,12 +509,16 @@ function migrateMaybeLoadedIfStatements(sourceFile: SourceFile) {
         }
       }
 
-      // Check for negation: if (!account)
+      // Check for negation: if (!account) or if (!account.profile)
       if (Node.isPrefixUnaryExpression(expression)) {
         const operator = expression.getOperatorToken();
         if (operator === SyntaxKind.ExclamationToken) {
           const operand = expression.getOperand();
-          if (Node.isIdentifier(operand)) {
+
+          if (
+            Node.isIdentifier(operand) ||
+            Node.isPropertyAccessExpression(operand)
+          ) {
             const varName = operand.getText();
             const type = operand.getType();
 

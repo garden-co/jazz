@@ -261,6 +261,24 @@ async function OptionalMaybeLoadedCoValueIfCheck({
   return optionalAccount.profile.name;
 }
 
+// Nullability check on nested MaybeLoaded value
+async function MaybeLoadedNestedCoValueIfCheck() {
+  const account = await Account.load("account-id", {
+    resolve: true,
+  });
+
+  if (!account.$isLoaded) {
+    return "Loading...";
+  }
+
+  // if (!account.profile.$isLoaded)
+  if (!account.profile) {
+    return "Loading...";
+  }
+
+  return account.profile.name;
+}
+
 export {
   ExampleOnErrorNull,
   ExampleCoState,
@@ -279,4 +297,5 @@ export {
   HookWithSchemaNoOptions,
   MaybeLoadedCoValueIfCheck,
   OptionalMaybeLoadedCoValueIfCheck,
+  MaybeLoadedNestedCoValueIfCheck,
 };
