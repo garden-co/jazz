@@ -79,7 +79,7 @@ Adding a `root` to the user's account gives us a container that can be used to k
 </ContentByFramework>
 
 <CodeGroup preferWrap>
-```ts snippet=quickstart/schema.ts
+```ts quickstart/schema.ts
 ```
 </CodeGroup>
 
@@ -89,7 +89,7 @@ Wrap your app with a provider so components can use Jazz.
 <ContentByFramework framework="react">
   <FileName>app/components/JazzWrapper.tsx</FileName>
 <CodeGroup preferWrap>
-```tsx snippet=quickstart/JazzWrapper.tsx
+```tsx quickstart/JazzWrapper.tsx
 ```
 </CodeGroup>
 </ContentByFramework>
@@ -102,11 +102,11 @@ Wrap your app with a provider so components can use Jazz.
 
 <TabbedCodeGroup id="jazz-provider" savedPreferenceKey="framework">
 <TabbedCodeGroupItem label="React" value="react" icon={<ReactLogo />} preferWrap>
-  ```tsx snippet=quickstart/layout.tsx
+  ```tsx quickstart/layout.tsx
   ```
 </TabbedCodeGroupItem>
 <TabbedCodeGroupItem label="Svelte" value="svelte" icon={<SvelteLogo />} preferWrap>
-```svelte snippet=quickstart/+layout.svelte
+```svelte quickstart/+layout.svelte
 ```
 </TabbedCodeGroupItem>
 </TabbedCodeGroup>
@@ -151,11 +151,11 @@ Let's create a simple form to add a new band to the festival. We'll use the `use
 <TabbedCodeGroup id="new-band-component" default="react" savedPreferenceKey="framework"
 >
 <TabbedCodeGroupItem label="React" value="react" icon={<ReactLogo />} preferWrap>
-```tsx snippet=quickstart/NewBand.tsx
+```tsx quickstart/NewBand.tsx
 ```
 </TabbedCodeGroupItem>
 <TabbedCodeGroupItem label="Svelte" value="svelte" icon={<SvelteLogo />} preferWrap>
-```svelte snippet=quickstart/NewBand.svelte
+```svelte quickstart/NewBand.svelte
 ```
 </TabbedCodeGroupItem>
 </TabbedCodeGroup>
@@ -172,11 +172,11 @@ Now we've got a way to create data, so let's add a component to display it.
 
 <TabbedCodeGroup id="my-festival-component" default="react" savedPreferenceKey="framework">
 <TabbedCodeGroupItem icon={<ReactLogo />} label="React" value="react" preferWrap>
-```tsx snippet=quickstart/Festival.tsx
+```tsx quickstart/Festival.tsx
 ```
 </TabbedCodeGroupItem>
 <TabbedCodeGroupItem icon={<SvelteLogo />} label="Svelte" value="svelte" preferWrap>
-```svelte snippet=quickstart/Festival.svelte
+```svelte quickstart/Festival.svelte
 ```
 </TabbedCodeGroupItem>
 </TabbedCodeGroup>
@@ -193,11 +193,11 @@ You've built all your components, time to put them together.
 
 <TabbedCodeGroup id="home-page" default="react" savedPreferenceKey="framework">
 <TabbedCodeGroupItem label="React" value="react" icon={<ReactLogo />} preferWrap>
-```tsx snippet=quickstart/page.tsx
+```tsx quickstart/page.tsx
 ```
 </TabbedCodeGroupItem>
 <TabbedCodeGroupItem icon={<SvelteLogo />} label="Svelte" value="svelte" preferWrap>
-```svelte snippet=quickstart/+page.svelte
+```svelte quickstart/+page.svelte
 ```
 </TabbedCodeGroupItem>
 </TabbedCodeGroup>
@@ -217,4 +217,3 @@ Psst! Got a few more minutes and want to add Server Side Rendering to your app? 
 - Dive deeper into the collaborative data structures we call [CoValues](/docs/core-concepts/covalues/overview)
 - Learn how to share and [collaborate on data](/docs/permissions-and-sharing/overview) using groups and permissions
 - Complete the [server-side quickstart](/docs/server-side/quickstart) to learn more about Jazz on the server
-

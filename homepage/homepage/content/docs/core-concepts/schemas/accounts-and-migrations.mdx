@@ -22,19 +22,7 @@ These root references are modeled explicitly in your schema, distinguishing betw
 Every Jazz app that wants to refer to per-user data needs to define a custom root `CoMap` schema and declare it in a custom `Account` schema as the `root` field:
 
 <CodeGroup>
-```ts twoslash
-const Chat = co.map({});
-// ---cut---
-import { co, z } from "jazz-tools";
-
-const MyAppRoot = co.map({
-  myChats: co.list(Chat),
-});
-
-export const MyAppAccount = co.account({
-  root: MyAppRoot,
-  profile: co.profile(),
-});
+```ts schema.ts#Basic
 ```
 </CodeGroup>
 
@@ -46,56 +34,16 @@ that is set up for you based on the username the `AuthMethod` provides on accoun
 Their pre-defined schemas roughly look like this:
 
 <CodeGroup>
-```ts twoslash
-// @noErrors: 2416
-import { co, z } from "jazz-tools";
-// ---cut---
-// ...somewhere in jazz-tools itself...
-const Account = co.account({
-  root: co.map({}),
-  profile: co.profile(),
-});
+```ts core-concepts/schemas/accounts-and-migrations/schema.ts#Account
 ```
 </CodeGroup>
 
-If you want to keep the default `co.profile()` schema, but customise your account's private `root`, all you have to do is define a new `root` field in your account schema and use `co.profile()` without options:
+If you want to keep the default `co.profile()` schema, but customise your account's private `root`, you can use `co.profile()` without options.
+
+If you want to extend the `profile` to contain additional fields (such as an avatar `co.image()`), you can declare your own profile schema class using `co.profile({...})`. A `co.profile({...})` is a [type of CoMap](/docs/core-concepts/covalues/comaps), so you can add fields in the same way:
 
 <CodeGroup>
-```ts twoslash
-const Chat = co.map({});
-import { co, z } from "jazz-tools";
-// ---cut---
-const MyAppRoot = co.map({ // [!code ++:3]
-  myChats: co.list(Chat),
-});
-
-export const MyAppAccount = co.account({
-  root: MyAppRoot, // [!code ++]
-  profile: co.profile(),
-});
-```
-</CodeGroup>
-
-If you want to extend the `profile` to contain additional fields (such as an avatar `co.image()`), you can declare your own profile schema class using `co.profile({...})`:
-
-<CodeGroup>
-```ts twoslash
-import { co, z } from "jazz-tools";
-const Chat = co.map({});
-// ---cut---
-export const MyAppRoot = co.map({
-  myChats: co.list(Chat),
-});
-
-export const MyAppProfile = co.profile({ // [!code ++:4]
-  name: z.string(), // compatible with default Profile schema
-  avatar: co.optional(co.image()),
-});
-
-export const MyAppAccount = co.account({
-  root: MyAppRoot,
-  profile: MyAppProfile, // [!code ++]
-});
+```ts core-concepts/schemas/accounts-and-migrations/schema.ts#Profile
 ```
 </CodeGroup>
 
@@ -105,59 +53,13 @@ export const MyAppAccount = co.account({
 </Alert>
 
 ## Resolving CoValues starting at `profile` or `root`
+{/* TODO: Add Svelte/Vanilla examples */}
 
 <ContentByFramework framework="react">
 To use per-user data in your app, you typically use `useAccount` somewhere in a high-level component, pass it your custom Account schema and specify which references to resolve using a resolve query (see [Subscribing & deep loading](/docs/core-concepts/subscription-and-loading)).
 
 <CodeGroup>
-```tsx twoslash
-import * as React from "react";
-import { co, z } from "jazz-tools";
-
-const Chat = co.map({});
-
-const MyAppRoot = co.map({
-  myChats: co.list(Chat),
-});
-
-const MyAppProfile = co.profile();
-
-const MyAppAccount = co.account({
-  root: MyAppRoot,
-  profile: MyAppProfile,
-});
-
-class ChatPreview extends React.Component<{ chat: co.loaded<typeof Chat> }> {};
-class ContactPreview extends React.Component<{ contact: co.loaded<typeof MyAppAccount> }> {};
-// ---cut---
-import { useAccount } from "jazz-tools/react";
-
-function DashboardPageComponent() {
-  const me = useAccount(MyAppAccount, { resolve: {
-    profile: true,
-    root: {
-      myChats: { $each: true },
-    }
-  }});
-
-  return (
-    <div>
-      <h1>Dashboard</h1>
-      {me.$isLoaded ? (
-        <div>
-          <p>Logged in as {me.profile.name}</p>
-          <h2>My chats</h2>
-          {me.root.myChats.map((chat) => (
-            <ChatPreview key={chat.$jazz.id} chat={chat} />
-          ))}
-        </div>
-      ) : (
-        "Loading..."
-      )}
-    </div>
-  );
-}
-
+```tsx core-concepts/schemas/accounts-and-migrations/DashboardPageComponent.tsx#Main
 ```
 </CodeGroup>
 </ContentByFramework>
@@ -180,45 +82,7 @@ Jazz waits for the migration to finish before passing the account to your app's 
 ### Initialising user data after account creation
 
 <CodeGroup>
-```ts twoslash
-import { co, z, Group } from "jazz-tools";
-const Chat = co.map({});
-const Bookmark = co.map({});
-
-const MyAppRoot = co.map({
-  myChats: co.list(Chat),
-});
-
-const MyAppProfile = co.profile({
-  name: z.string(),
-  bookmarks: co.list(Bookmark),
-});
-// ---cut---
-export const MyAppAccount = co.account({
-  root: MyAppRoot,
-  profile: MyAppProfile,
-}).withMigration((account, creationProps?: { name: string }) => {
-  // we use has to check if the root has ever been set
-  if (!account.$jazz.has("root")) {
-    account.$jazz.set("root", {
-      myChats: [],
-    });
-  }
-
-  if (!account.$jazz.has("profile")) {
-    const profileGroup = Group.create();
-    // Unlike the root, we want the profile to be publicly readable.
-    profileGroup.makePublic();
-
-    account.$jazz.set(
-      "profile",
-      MyAppProfile.create({
-        name: creationProps?.name ?? "New user",
-        bookmarks: co.list(Bookmark).create([], profileGroup),
-      }, profileGroup),
-    );
-  }
-});
+```ts core-concepts/schemas/accounts-and-migrations/schema.ts#WithMigration
 ```
 </CodeGroup>
 
@@ -232,48 +96,15 @@ To do deeply nested migrations, you might need to use the asynchronous `$jazz.en
 Now let's say we want to add a `myBookmarks` field to the `root` schema:
 
 <CodeGroup>
-```ts twoslash
-import { co, z, Group } from "jazz-tools";
-const Chat = co.map({});
-const Bookmark = co.map({});
-
-const MyAppProfile = co.profile({
-  name: z.string(),
-  bookmarks: co.list(Bookmark),
-});
-
-// ---cut---
-const MyAppRoot = co.map({
-  myChats: co.list(Chat),
-  myBookmarks: co.optional(co.list(Bookmark)), // [!code ++:1]
-});
-
-
-export const MyAppAccount = co.account({
-  root: MyAppRoot,
-  profile: MyAppProfile,
-}).withMigration(async (account) => {
-  if (!account.$jazz.has("root")) {
-    account.$jazz.set("root", {
-      myChats: [],
-    });
-  }
-
-  // We need to load the root field to check for the myBookmarks field
-  const { root } = await account.$jazz.ensureLoaded({
-    resolve: { root: true }
-  });
-
-  if (!root.$jazz.has('myBookmarks')) { // [!code ++:3]
-    root.$jazz.set("myBookmarks", co.list(Bookmark).create([], Group.create()));
-  }
-});
+```ts core-concepts/schemas/accounts-and-migrations/schema-add-fields.ts#ExtendedMigration
 ```
 </CodeGroup>
 
+
+
 {/*
  TODO: Add best practice: only ever add fields
-
+1
  Note: explain and reassure that there will be more guardrails in the future
  https://github.com/garden-co/jazz/issues/1160
 */}

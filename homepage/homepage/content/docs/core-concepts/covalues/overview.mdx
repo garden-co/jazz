@@ -35,7 +35,7 @@ In Jazz, you define schemas using `co` for CoValues and `z` (from [Zod](https://
 
 <FileName>schema.ts</FileName>
 <CodeGroup>
-```ts snippet=core-concepts/covalues/overview/schema.ts region=Basic
+```ts schema.ts#Basic
 ```
 </CodeGroup>
 
@@ -44,7 +44,7 @@ This gives us schema info that is available for type inference *and* at runtime.
 Check out the inferred type of `project` in the example below, as well as the input `.create()` expects.
 
 <CodeGroup>
-```ts snippet=core-concepts/covalues/overview/app.ts region=Basic
+```ts app.ts#Basic
 ```
 </CodeGroup>
 
@@ -52,7 +52,7 @@ When creating CoValues that contain other CoValues, you can pass in a plain JSON
 Jazz will automatically create the CoValues for you.
 
 <CodeGroup>
-```ts snippet=core-concepts/covalues/overview/app.ts region=ImplicitPublic
+```ts app.ts#ImplicitPublic
 ```
 </CodeGroup>
 
@@ -70,14 +70,14 @@ CoMaps are the most commonly used type of CoValue. They are the equivalent of JS
 You can either declare struct-like CoMaps:
 
 <CodeGroup>
-```ts snippet=core-concepts/covalues/overview/schema.ts region=Task
+```ts schema.ts#Task
 ```
 </CodeGroup>
 
 Or record-like CoMaps (key-value pairs, where keys are always `string`):
 
 <CodeGroup>
-```ts snippet=core-concepts/covalues/overview/schema.ts region=Records
+```ts schema.ts#Records
 ```
 </CodeGroup>
 
@@ -93,7 +93,7 @@ CoLists are ordered lists and are the equivalent of JSON arrays. (They support c
 You define them by specifying the type of the items they contain:
 
 <CodeGroup>
-```ts snippet=core-concepts/covalues/overview/schema.ts region=Lists
+```ts schema.ts#Lists
 ```
 </CodeGroup>
 
@@ -111,7 +111,7 @@ They allow easy access of the latest or all items belonging to a user or their s
 You define them by specifying the type of feed item:
 
 <CodeGroup>
-```ts snippet=core-concepts/covalues/overview/schema.ts region=Feed
+```ts schema.ts#Feed
 ```
 </CodeGroup>
 
@@ -129,7 +129,7 @@ They allow you to upload and reference files.
 You typically don't need to declare or extend them yourself, you simply refer to the built-in `co.fileStream()` from another CoValue:
 
 <CodeGroup>
-```ts snippet=core-concepts/covalues/overview/schema.ts region=FileStream
+```ts schema.ts#FileStream
 ```
 </CodeGroup>
 
@@ -145,7 +145,7 @@ See the corresponding sections for [creating](/docs/core-concepts/covalues/files
 You can declare unions of CoMaps that have discriminating fields, using `co.discriminatedUnion()`.
 
 <CodeGroup>
-```ts snippet=core-concepts/covalues/overview/schema.ts region=DiscriminatedUnions
+```ts core-concepts/schemas/schemaunions/schema.ts#SchemaUnion
 ```
 </CodeGroup>
 
@@ -164,7 +164,7 @@ You can declare primitive field types using `z` (re-exported in `jazz-tools` fro
 Here's a quick overview of the primitive types you can use:
 
 <CodeGroup>
-```ts snippet=core-concepts/covalues/overview/schema.ts region=PrimitiveTypes
+```ts schema.ts#PrimitiveTypes
 ```
 </CodeGroup>
 
@@ -173,14 +173,14 @@ Finally, for more complex JSON data, that you *don't want to be collaborative in
 For example, you can use `z.object()` to represent an internally immutable position:
 
 <CodeGroup>
-```ts snippet=core-concepts/covalues/overview/schema.ts region=ZObject
+```ts schema.ts#ZObject
 ```
 </CodeGroup>
 
 Or you could use a `z.tuple()`:
 
 <CodeGroup>
-```ts snippet=core-concepts/covalues/overview/schema.ts region=ZTuple
+```ts schema.ts#ZTuple
 ```
 </CodeGroup>
 
@@ -195,7 +195,7 @@ The important caveat here is that **a referenced CoValue might or might not be l
 In Schemas, you declare references by just using the schema of the referenced CoValue:
 
 <CodeGroup>
-```ts snippet=core-concepts/covalues/overview/schema.ts region=References
+```ts schema.ts#References
 ```
 </CodeGroup>
 
@@ -208,7 +208,7 @@ You can make schema fields optional using either `z.optional()` or `co.optional(
 You can make references optional with `co.optional()`:
 
 <CodeGroup>
-```ts snippet=core-concepts/covalues/overview/schema.ts region=OptionalProperties
+```ts schema.ts#OptionalProperties
 ```
 </CodeGroup>
 
@@ -217,14 +217,14 @@ You can make references optional with `co.optional()`:
 You can wrap references in getters. This allows you to defer evaluation until the property is accessed. This technique is particularly useful for defining circular references, including recursive (self-referencing) schemas, or mutually recursive schemas.
 
 <CodeGroup>
-```ts snippet=core-concepts/covalues/overview/schema.ts region=SelfReferencing
+```ts schema.ts#SelfReferencing
 ```
 </CodeGroup>
 
 You can use the same technique for mutually recursive references:
 
 <CodeGroup>
-```ts snippet=core-concepts/covalues/overview/schema.ts region=MutuallyRecursive
+```ts schema.ts#MutuallyRecursive
 ```
 
 </CodeGroup>
@@ -237,13 +237,13 @@ If you find yourself repeating the same logic to access computed CoValues proper
 you can define helper functions to encapsulate it for better reusability:
 
 <CodeGroup>
-```ts snippet=core-concepts/covalues/overview/helpers.ts region=Basic
+```ts helpers.ts#Basic
 ```
 </CodeGroup>
 
 Similarly, you can encapsulate logic needed to update CoValues:
 
 <CodeGroup>
-```ts snippet=core-concepts/covalues/overview/helpers.ts region=UpdateHelper
+```ts helpers.ts#UpdateHelper
 ```
 </CodeGroup>

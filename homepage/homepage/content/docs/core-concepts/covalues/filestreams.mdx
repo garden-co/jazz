@@ -21,7 +21,7 @@ In your schema, reference FileStreams like any other CoValue:
 
 <FileName>schema.ts</FileName>
 <CodeGroup>
-```ts snippet=core-concepts/covalues/filestreams/schema.ts
+```ts schema.ts
 ```
 </CodeGroup>
 
@@ -34,7 +34,7 @@ There are two main ways to create FileStreams: creating empty ones for manual da
 For files from input elements or drag-and-drop interfaces, use `createFromBlob`:
 
 <CodeGroup>
-```ts snippet=core-concepts/covalues/filestreams/index.ts region=FromBlob
+```ts index.ts#FromBlob
 ```
 </CodeGroup>
 
@@ -43,7 +43,7 @@ For files from input elements or drag-and-drop interfaces, use `createFromBlob`:
 Create an empty FileStream when you want to manually [add binary data in chunks](#writing-to-filestreams):
 
 <CodeGroup>
-```ts snippet=core-concepts/covalues/filestreams/index.ts region=Empty
+```ts index.ts#Empty
 ```
 </CodeGroup>
 
@@ -52,7 +52,7 @@ Create an empty FileStream when you want to manually [add binary data in chunks]
 Like other CoValues, you can specify ownership when creating FileStreams.
 
 <CodeGroup>
-```ts snippet=core-concepts/covalues/filestreams/index.ts region=Ownership
+```ts index.ts#Ownership
 ```
 </CodeGroup>
 
@@ -67,14 +67,14 @@ Like other CoValues, you can specify ownership when creating FileStreams.
 To access the raw binary data and metadata:
 
 <CodeGroup>
-```ts snippet=core-concepts/covalues/filestreams/index.ts region=GetRaw
+```ts index.ts#GetRaw
 ```
 </CodeGroup>
 
 By default, `getChunks()` only returns data for completely synced `FileStream`s. To start using chunks from a `FileStream` that's currently still being synced use the `allowUnfinished` option:
 
 <CodeGroup>
-```ts snippet=core-concepts/covalues/filestreams/index.ts region=GetIncomplete
+```ts index.ts#GetIncomplete
 ```
 </CodeGroup>
 
@@ -83,7 +83,7 @@ By default, `getChunks()` only returns data for completely synced `FileStream`s.
 For easier integration with web APIs, convert to a `Blob`:
 
 <CodeGroup>
-```ts snippet=core-concepts/covalues/filestreams/index.ts region=GetAsBlob
+```ts index.ts#GetAsBlob
 ```
 </CodeGroup>
 
@@ -92,7 +92,7 @@ For easier integration with web APIs, convert to a `Blob`:
 You can directly load a `FileStream` as a `Blob` when you only have its ID:
 
 <CodeGroup>
-```ts snippet=core-concepts/covalues/filestreams/index.ts region=LoadAsBlob
+```ts index.ts#LoadAsBlob
 ```
 </CodeGroup>
 
@@ -101,7 +101,7 @@ You can directly load a `FileStream` as a `Blob` when you only have its ID:
 Check if a `FileStream` is fully synced:
 
 <CodeGroup>
-```ts snippet=core-concepts/covalues/filestreams/index.ts region=CheckSync
+```ts index.ts#CheckSync
 ```
 </CodeGroup>
 
@@ -122,7 +122,7 @@ When creating a `FileStream` manually (not using `createFromBlob`), you need to 
 Begin by providing metadata about the file:
 
 <CodeGroup>
-```ts snippet=core-concepts/covalues/filestreams/index.ts region=ManualStart
+```ts index.ts#ManualStart
 ```
 </CodeGroup>
 
@@ -131,7 +131,7 @@ Begin by providing metadata about the file:
 Add binary data in chunks - this helps with large files and progress tracking:
 
 <CodeGroup>
-```ts snippet=core-concepts/covalues/filestreams/index.ts region=AddChunks
+```ts index.ts#AddChunks
 ```
 </CodeGroup>
 
@@ -140,7 +140,7 @@ Add binary data in chunks - this helps with large files and progress tracking:
 Once all chunks are pushed, mark the `FileStream` as complete:
 
 <CodeGroup>
-```ts snippet=core-concepts/covalues/filestreams/index.ts region=Finalise
+```ts index.ts#Finalise
 ```
 </CodeGroup>
 
@@ -153,7 +153,7 @@ Like other CoValues, you can subscribe to `FileStream`s to get notified of chang
 Load a `FileStream` when you have its ID:
 
 <CodeGroup>
-```ts snippet=core-concepts/covalues/filestreams/index.ts region=LoadById
+```ts index.ts#LoadById
 ```
 </CodeGroup>
 
@@ -162,7 +162,7 @@ Load a `FileStream` when you have its ID:
 Subscribe to a `FileStream` to be notified when chunks are added or when the upload is complete:
 
 <CodeGroup>
-```ts snippet=core-concepts/covalues/filestreams/index.ts region=SubscribeById
+```ts index.ts#SubscribeById
 ```
 </CodeGroup>
 
@@ -171,7 +171,7 @@ Subscribe to a `FileStream` to be notified when chunks are added or when the upl
 If you need to wait for a `FileStream` to be fully synchronized across devices:
 
 <CodeGroup>
-```ts snippet=core-concepts/covalues/filestreams/index.ts region=WaitForSync
+```ts index.ts#WaitForSync
 ```
 </CodeGroup>
 

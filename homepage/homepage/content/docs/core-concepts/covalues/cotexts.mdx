@@ -16,7 +16,7 @@ Both types enable real-time collaborative editing of text content while maintain
 **Note:** If you're looking for a quick way to add rich text editing to your app, check out [our prosemirror plugin](#using-rich-text-with-prosemirror).
 
 <CodeGroup>
-```ts snippet=core-concepts/covalues/cotexts/index.ts region=Basic
+```ts index.ts#Basic
 ```
 </CodeGroup>
 
@@ -39,14 +39,14 @@ Both support real-time updates, but `co.plainText()` provides specialized tools 
 CoText values are typically used as fields in your schemas:
 
 <CodeGroup>
-```ts snippet=core-concepts/covalues/cotexts/index.ts region=Comparison
+```ts index.ts#Comparison
 ```
 </CodeGroup>
 
 Create a CoText value with a simple string:
 
 <CodeGroup>
-```ts snippet=core-concepts/covalues/cotexts/index.ts region=StringInitial
+```ts index.ts#StringInitial
 ```
 </CodeGroup>
 
@@ -55,7 +55,7 @@ Create a CoText value with a simple string:
 Like other CoValues, you can specify ownership when creating CoTexts.
 
 <CodeGroup>
-```ts snippet=core-concepts/covalues/cotexts/index.ts region=Ownership
+```ts index.ts#Ownership
 ```
 </CodeGroup>
 
@@ -66,14 +66,14 @@ See [Groups as permission scopes](/docs/permissions-and-sharing/overview) for mo
 CoText values work similarly to JavaScript strings:
 
 <CodeGroup>
-```ts snippet=core-concepts/covalues/cotexts/index.ts region=Reading
+```ts index.ts#Reading
 ```
 </CodeGroup>
 
 <ContentByFramework framework="react">
 When using CoTexts in JSX, you can read the text directly:
 <CodeGroup>
-```tsx snippet=core-concepts/covalues/cotexts/react.tsx region=JSX
+```tsx react.tsx#JSX
 ```
 </CodeGroup>
 </ContentByFramework>
@@ -83,7 +83,7 @@ When using CoTexts in JSX, you can read the text directly:
 Insert and delete text with intuitive methods:
 
 <CodeGroup>
-```ts snippet=core-concepts/covalues/cotexts/index.ts region=Editing
+```ts index.ts#Editing
 ```
 </CodeGroup>
 
@@ -92,7 +92,7 @@ Insert and delete text with intuitive methods:
 Use `applyDiff` to efficiently update text with minimal changes:
 
 <CodeGroup>
-```ts snippet=core-concepts/covalues/cotexts/index.ts region=ApplyDiff
+```ts index.ts#ApplyDiff
 ```
 </CodeGroup>
 
@@ -100,21 +100,21 @@ Perfect for handling user input in form controls:
 
 <ContentByFramework framework="react">
 <CodeGroup>
-```ts snippet=core-concepts/covalues/cotexts/react.tsx region=TextEditor
+```ts react.tsx#TextEditor
 ```
 </CodeGroup>
 </ContentByFramework>
 
 <ContentByFramework framework="vanilla">
 <CodeGroup>
-```ts snippet=core-concepts/covalues/cotexts/vanilla.ts region=PlainText
+```ts vanilla.ts#PlainText
 ```
 </CodeGroup>
 </ContentByFramework>
 
 <ContentByFramework framework="svelte">
 <CodeGroup>
-  ```svelte snippet=core-concepts/covalues/cotexts/svelte.svelte
+  ```svelte svelte.svelte
   ```
 </CodeGroup>
 </ContentByFramework>
@@ -152,7 +152,7 @@ We don't currently have a React Native Expo-specific example, but you need help 
 <ContentByFramework framework={["react", "react-native", "react-native-expo"]}>
 For use with React:
 <CodeGroup>
-```tsx snippet=core-concepts/covalues/cotexts/react.tsx
+```tsx react.tsx
 ```
 </CodeGroup>
 </ContentByFramework>
@@ -164,7 +164,7 @@ We don't currently have a Svelte-specific example, but you need help you can [re
 <ContentByFramework framework={["vanilla", "svelte", "react-native", "react-native-expo"]}>
 For use without a framework:
 <CodeGroup>
-```ts snippet=core-concepts/covalues/cotexts/vanilla.ts region=RichText
+```ts vanilla.ts#RichText
 ```
 </CodeGroup>
 </ContentByFramework>

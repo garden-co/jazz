@@ -35,7 +35,7 @@ Define your data schema using [CoValues](/docs/core-concepts/covalues/overview) 
 <FileName>src/lib/schema.ts</FileName>
 </ContentByFramework>
 <CodeGroup>
-```ts snippet=project-setup/schema.ts
+```ts project-setup/schema.ts
 ```
 </CodeGroup>
 
@@ -54,18 +54,18 @@ Wrap your application with a provider to connect to the Jazz network and define 
 
 <TabbedCodeGroup savedPreferenceKey="framework" id="add-provider">
 <TabbedCodeGroupItem label="React" value="react" icon={<ReactLogo />} preferWrap>
-```tsx snippet=project-setup/app.tsx
+```tsx project-setup/app.tsx
 ```
 </TabbedCodeGroupItem>
 <TabbedCodeGroupItem label="Svelte" value="svelte" icon={<SvelteLogo />} preferWrap>
-```svelte snippet=project-setup/+layout.svelte
+```svelte project-setup/+layout.svelte
 ```
 </TabbedCodeGroupItem>
 </TabbedCodeGroup>
 
 <Alert className="mt-4" variant="info" title="Tip">
 <GetAPIKey hideCodeGroup={true} hideFileName={true} />
-</Alert>    
+</Alert>
 
 This setup handles:
 - Connection to the Jazz sync server
@@ -76,7 +76,7 @@ With this in place, you're ready to start using Jazz hooks in your components. [
 
 ## SSR Integration
 
-Jazz's default behaviour is to wait until the user's account is loaded before rendering the provider's children. This can be problematic on the server, where no account is available. 
+Jazz's default behaviour is to wait until the user's account is loaded before rendering the provider's children. This can be problematic on the server, where no account is available.
 
 We can solve this by asking Jazz to render the children using an a read-only account that can be used without credentials, known as an 'agent'.
 
@@ -95,11 +95,11 @@ In order to tell Jazz to allow children to be loaded even in an account-less con
 
 <TabbedCodeGroup savedPreferenceKey="framework" id="add-ssr">
 <TabbedCodeGroupItem label="React" value="react" icon={<ReactLogo />} preferWrap>
-```ts snippet=project-setup/JazzWrapper.tsx
+```ts project-setup/JazzWrapper.tsx
 ```
 </TabbedCodeGroupItem>
 <TabbedCodeGroupItem label="Svelte" value="svelte" icon={<SvelteLogo />} preferWrap>
-```svelte snippet=project-setup/+layout-with-ssr.svelte
+```svelte project-setup/+layout-with-ssr.svelte
 ```
 </TabbedCodeGroupItem>
 </TabbedCodeGroup>
@@ -124,11 +124,11 @@ In order to actually load and render data, you need to tell Jazz how to do this 
 
 <TabbedCodeGroup savedPreferenceKey="framework" id="ssr-page">
 <TabbedCodeGroupItem label="React" value="react" icon={<ReactLogo />} preferWrap>
-```tsx snippet=project-setup/page.tsx
+```tsx project-setup/page.tsx
 ```
 </TabbedCodeGroupItem>
 <TabbedCodeGroupItem label="Svelte" value="svelte" icon={<SvelteLogo />} preferWrap>
-```svelte snippet=project-setup/+page.svelte
+```svelte project-setup/+page.svelte
 ```
 </TabbedCodeGroupItem>
 </TabbedCodeGroup>

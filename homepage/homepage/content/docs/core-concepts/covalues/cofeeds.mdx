@@ -19,7 +19,7 @@ The following examples demonstrate a practical use of CoFeeds:
 CoFeeds are defined by specifying the type of items they'll contain, similar to how you define CoLists:
 
 <CodeGroup>
-```ts snippet=core-concepts/covalues/cofeeds/index.ts region=Basic
+```ts index.ts#Basic
 ```
 </CodeGroup>
 
@@ -28,7 +28,7 @@ CoFeeds are defined by specifying the type of items they'll contain, similar to 
 Like other CoValues, you can specify ownership when creating CoFeeds.
 
 <CodeGroup>
-```ts snippet=core-concepts/covalues/cofeeds/index.ts region=WithOwner
+```ts index.ts#WithOwner
 ```
 </CodeGroup>
 
@@ -43,14 +43,14 @@ Since CoFeeds are made of entries from users over multiple sessions, you can acc
 To retrieve entries from a session:
 
 <CodeGroup>
-```ts snippet=core-concepts/covalues/cofeeds/index.ts region=SessionFeed
+```ts index.ts#SessionFeed
 ```
 </CodeGroup>
 
 For convenience, you can also access the latest entry from the current session with `inCurrentSession`:
 
 <CodeGroup>
-```ts snippet=core-concepts/covalues/cofeeds/index.ts region=InCurrentSession
+```ts index.ts#InCurrentSession
 ```
 </CodeGroup>
 
@@ -59,14 +59,14 @@ For convenience, you can also access the latest entry from the current session w
 To retrieve entries from a specific account (with entries from all sessions combined) use `perAccount`:
 
 <CodeGroup>
-```ts snippet=core-concepts/covalues/cofeeds/index.ts region=AccountFeed
+```ts index.ts#AccountFeed
 ```
 </CodeGroup>
 
 For convenience, you can also access the latest entry from the current account with `byMe`:
 
 <CodeGroup>
-```ts snippet=core-concepts/covalues/cofeeds/index.ts region=ByMe
+```ts index.ts#ByMe
 ```
 </CodeGroup>
 
@@ -77,7 +77,7 @@ For convenience, you can also access the latest entry from the current account w
 To retrieve all entries from a CoFeed:
 
 <CodeGroup>
-```ts snippet=core-concepts/covalues/cofeeds/index.ts region=AllEntries
+```ts index.ts#AllEntries
 ```
 </CodeGroup>
 
@@ -86,7 +86,7 @@ To retrieve all entries from a CoFeed:
 To retrieve the latest entry from a CoFeed, ie. the last update:
 
 <CodeGroup>
-```ts snippet=core-concepts/covalues/cofeeds/index.ts region=GetLatest
+```ts index.ts#GetLatest
 ```
 </CodeGroup>
 
@@ -97,7 +97,7 @@ CoFeeds are append-only; you can add new items, but not modify existing ones. Th
 ### Adding Items
 
 <CodeGroup>
-```ts snippet=core-concepts/covalues/cofeeds/index.ts region=PushToFeed
+```ts index.ts#PushToFeed
 ```
 </CodeGroup>
 
@@ -108,7 +108,7 @@ Each item is automatically associated with the current user's session. You don't
 Each entry is automatically added to the current session's feed. When a user has multiple open sessions (like both a mobile app and web browser), each session creates its own separate entries:
 
 <CodeGroup>
-```ts snippet=core-concepts/covalues/cofeeds/index.ts region=MultiFeed
+```ts index.ts#MultiFeed
 ```
 </CodeGroup>
 
@@ -121,7 +121,7 @@ CoFeeds support metadata, which is useful for tracking information about the fee
 The `by` property is the account that made the entry.
 
 <CodeGroup>
-```ts snippet=core-concepts/covalues/cofeeds/index.ts region=By
+```ts index.ts#By
 ```
 </CodeGroup>
 
@@ -130,7 +130,7 @@ The `by` property is the account that made the entry.
 The `madeAt` property is a timestamp of when the entry was added to the feed.
 
 <CodeGroup>
-```ts snippet=core-concepts/covalues/cofeeds/index.ts region=MadeAt
+```ts index.ts#MadeAt
 ```
 </CodeGroup>
 

@@ -15,7 +15,7 @@ The [Journal example](https://github.com/garden-co/jazz/tree/main/examples/vecto
 CoVectors are defined using `co.vector()`, and are often used as fields in a CoMap within a CoList (making it easy to perform vector search across list items).
 
 <CodeGroup>
-```ts snippet=core-concepts/covalues/covectors/index.ts region=Basic
+```ts index.ts#Basic
 ```
 </CodeGroup>
 
@@ -27,7 +27,7 @@ The number of dimensions matches the embedding model used in your app. Many smal
 You can create vectors in your Jazz application from an array of numbers, or Float32Array instance.
 
 <CodeGroup>
-  ```ts snippet=core-concepts/covalues/covectors/index.ts region=Create
+  ```ts index.ts#Create
 ```
 </CodeGroup>
 
@@ -36,7 +36,7 @@ You can create vectors in your Jazz application from an array of numbers, or Flo
 Like other CoValues, you can specify ownership when creating CoVectors.
 
 <CodeGroup>
-```ts snippet=core-concepts/covalues/covectors/index.ts region=Ownership
+```ts index.ts#Ownership
 ```
 </CodeGroup>
 
@@ -59,15 +59,15 @@ You can load your data using the `.load` method, then compute and sort the resul
 
 <TabbedCodeGroup id="vectorsearch" default="react" savedPreferenceKey="framework">
 <TabbedCodeGroupItem label="React" value="react" icon={<ReactLogo />} preferWrap>
-```tsx snippet=core-concepts/covalues/covectors/react.tsx region=SemanticSearch
+```tsx react.tsx#SemanticSearch
 ```
 </TabbedCodeGroupItem>
 <TabbedCodeGroupItem label="VanillaJS" value="vanilla" icon={<VanillaLogo />} preferWrap>
-```ts snippet=core-concepts/covalues/covectors/index.ts region=SemanticSearch
+```ts index.ts#SemanticSearch
 ```
 </TabbedCodeGroupItem>
 <TabbedCodeGroupItem label="Svelte" value="svelte" className="[&_span]:[tab-size:2]" icon={<SvelteLogo />} preferWrap>
-```ts snippet=core-concepts/covalues/covectors/svelte.svelte
+```ts svelte.svelte
 ```
 </TabbedCodeGroupItem>
 </TabbedCodeGroup>

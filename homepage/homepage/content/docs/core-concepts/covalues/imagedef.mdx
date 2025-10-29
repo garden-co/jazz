@@ -39,23 +39,23 @@ The easiest way to create and use images in your Jazz application is with the `c
 
 <TabbedCodeGroup id="create-image" default="react" savedPreferenceKey="framework">
 <TabbedCodeGroupItem label="Vanilla" icon={<VanillaLogo />} value="vanilla" preferWrap>
-```ts snippet=core-concepts/covalues/imagedef/index.ts region=Basic
+```ts index.ts#Basic
 ```
 </TabbedCodeGroupItem>
 <TabbedCodeGroupItem label="React" icon={<ReactLogo />} value="react" preferWrap>
-```ts snippet=core-concepts/covalues/imagedef/index.ts region=Basic
+```ts index.ts#Basic
 ```
 </TabbedCodeGroupItem>
 <TabbedCodeGroupItem label="Svelte" icon={<SvelteLogo />} value="svelte" preferWrap>
-```ts snippet=core-concepts/covalues/imagedef/index.ts region=Basic
+```ts index.ts#Basic
 ```
 </TabbedCodeGroupItem>
 <TabbedCodeGroupItem label="React Native" icon={<RNLogo />} value="react-native" preferWrap>
-```ts snippet=core-concepts/covalues/imagedef/rn.tsx region=Basic
+```ts rn.tsx#Basic
 ```
 </TabbedCodeGroupItem>
 <TabbedCodeGroupItem label="React Native (Expo)" icon={<ExpoLogo />} value="react-native-expo" preferWrap>
-```ts snippet=core-concepts/covalues/imagedef/rn.tsx region=Basic
+```ts rn.tsx#Basic
 ```
 </TabbedCodeGroupItem>
 </TabbedCodeGroup>
@@ -69,7 +69,7 @@ The `createImage()` function:
 ### Configuration Options
 
 <CodeGroup>
-```ts snippet=core-concepts/covalues/imagedef/declarations.ts region=CreateImageDeclaration
+```ts declarations.ts#CreateImageDeclaration
 ```
 </CodeGroup>
 
@@ -106,7 +106,7 @@ Passing `progressive: true` to `createImage()` will create internal smaller vers
 To create multiple resized copies of an original image for better layout control, you can use the `createImage` function multiple times with different parameters for each desired size. Here’s an example of how you might implement this:
 
 <CodeGroup>
-```ts snippet=core-concepts/covalues/imagedef/index.ts region=CreateResized
+```ts index.ts#CreateResized
 ```
 </CodeGroup>
 
@@ -130,7 +130,7 @@ pnpm install sharp
 </TabbedCodeGroup>
 
 <CodeGroup className="mt-4">
-```ts snippet=core-concepts/covalues/imagedef/server.ts
+```ts server.ts
 ```
 </CodeGroup>
 
@@ -145,19 +145,19 @@ To use the stored ImageDefinition, there are two ways: declaratively, using the 
 ### `<Image>` component [!framework=react,svelte,react-native,react-native-expo]
 <TabbedCodeGroup id="image-component" default="react" savedPreferenceKey="framework">
 <TabbedCodeGroupItem label="React" icon={<ReactLogo />} value="react" preferWrap>
-```tsx snippet=core-concepts/covalues/imagedef/react.tsx region=GalleryView
+```tsx react.tsx#GalleryView
 ```
 </TabbedCodeGroupItem>
 <TabbedCodeGroupItem label="Svelte" icon={<SvelteLogo />} value="svelte" preferWrap>
-```svelte snippet=core-concepts/covalues/imagedef/GalleryView.svelte
+```svelte GalleryView.svelte
 ```
 </TabbedCodeGroupItem>
 <TabbedCodeGroupItem label="React Native" icon={<RNLogo />} value="react-native" preferWrap>
-```tsx snippet=core-concepts/covalues/imagedef/GalleryViewRN.tsx region=GalleryView
+```tsx GalleryViewRN.tsx#GalleryView
 ```
 </TabbedCodeGroupItem>
 <TabbedCodeGroupItem label="React Native (Expo)" icon={<ExpoLogo />} value="react-native-expo" preferWrap>
-```tsx snippet=core-concepts/covalues/imagedef/GalleryViewExpo.tsx region=GalleryView
+```tsx GalleryViewExpo.tsx#GalleryView
 ```
 </TabbedCodeGroupItem>
 </TabbedCodeGroup>
@@ -174,13 +174,13 @@ The component's props are:
 </ContentByFramework>
 <ContentByFramework framework={["react", "svelte"]}>
 <CodeGroup>
-```ts snippet=core-concepts/covalues/imagedef/declarations.ts region=BrowserImageProps
+```ts declarations.ts#BrowserImageProps
 ```
 </CodeGroup>
 </ContentByFramework>
 <ContentByFramework framework={['react-native', 'react-native-expo']}>
 <CodeGroup>
-  ```ts snippet=core-concepts/covalues/imagedef/declarations.ts region=RNImageProps
+  ```ts declarations.ts#RNImageProps
 ```
 </CodeGroup>
 </ContentByFramework>
@@ -193,7 +193,7 @@ The `width` and `height` props are used to control the best resolution to use bu
 Let's say we have an image with a width of 1920px and a height of 1080px.
 
 <CodeGroup className="[&_span]:whitespace-normal">
-```tsx snippet=core-concepts/covalues/imagedef/react.tsx region=MultiImages
+```tsx react.tsx#MultiImages
 ```
 </CodeGroup>
 
@@ -206,7 +206,7 @@ If the image was generated with progressive loading, the `width` and `height` pr
 The `Image` component supports lazy loading with the [same options as the native browser `loading` attribute].(https://developer.mozilla.org/en-US/docs/Web/HTML/Reference/Elements/img#loading). It will generate the blob url for the image when the browser's viewport reaches the image.
 
 <CodeGroup className="[&_span]:whitespace-normal">
-```tsx snippet=core-concepts/covalues/imagedef/react.tsx region=LazyLoad
+```tsx react.tsx#LazyLoad
 ```
 </CodeGroup>
 </ContentByFramework>
@@ -223,7 +223,7 @@ You can choose to specify a custom placeholder to display as a fallback while an
 Like other CoValues, `ImageDefinition` can be used to load the object.
 
 <CodeGroup>
-```tsx snippet=core-concepts/covalues/imagedef/index.ts region=Imperative
+```tsx index.ts#Imperative
 ```
 </CodeGroup>
 
@@ -232,14 +232,14 @@ Like other CoValues, `ImageDefinition` can be used to load the object.
 Since FileStream objects are also CoValues, they must be loaded before use. To simplify loading, if you want to load the binary data saved as Original, you can use the `loadImage` function.
 
 <CodeGroup>
-```tsx snippet=core-concepts/covalues/imagedef/index.ts region=LoadImageHelper
+```tsx index.ts#LoadImageHelper
 ```
 </CodeGroup>
 
 If the image was generated with progressive loading, and you want to access the best-fit resolution, use `loadImageBySize`. It will load the image of the best resolution that fits the wanted width and height.
 
 <CodeGroup>
-```tsx snippet=core-concepts/covalues/imagedef/index.ts region=LoadImageBySize
+```tsx index.ts#LoadImageBySize
 ```
 </CodeGroup>
 
@@ -247,7 +247,7 @@ If the image was generated with progressive loading, and you want to access the 
 If want to dynamically listen to the _loaded_ resolution that best fits the wanted width and height, you can use the `subscribe` and the `highestResAvailable` function.
 
 <CodeGroup>
-```tsx snippet=core-concepts/covalues/imagedef/index.ts region=HighestResAvailable
+```tsx index.ts#HighestResAvailable
 ```
 </CodeGroup>
 
@@ -268,7 +268,7 @@ On Expo, image manipulation is done using the `expo-image-manipulator` library.
 If you want to use a custom implementation, you can use the `createImageFactory` function in order create your own `createImage` function and use your preferred image manipulation library.
 
 <CodeGroup>
-```tsx snippet=core-concepts/covalues/imagedef/index.ts region=CreateImageFactory
+```tsx index.ts#CreateImageFactory
 ```
 </CodeGroup>
 
@@ -279,4 +279,3 @@ If you want to use a custom implementation, you can use the `createImageFactory`
 - **Prioritize loading** the resolution appropriate for the current viewport
 - **Consider device pixel ratio** (window.devicePixelRatio) for high-DPI displays
 - **Always call URL.revokeObjectURL** after the image loads to prevent memory leaks
-

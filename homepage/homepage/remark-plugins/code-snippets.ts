@@ -37,9 +37,11 @@ function matchesAnyPattern(
  * @description
  * This plugin enables importing code from external source files into markdown code blocks,
  * with support for:
+ * - Smart path resolution: short paths resolve to the current page's code-snippets directory
  * - Extracting specific regions using `#region` markers
  * - Hiding lines with `[!code hide]` or `[!code hide:N]` sentinels
- * - Marking diff additions/removals with `[!code ++:N]` or `[!code --:N]`
+ * - Marking diff additions/removals with `[!code ++]`, `[!code ++:N]`, `[!code --]`, or `[!code --:N]`
+ * - Converting standalone diff sentinels to inline notation for Shiki's transformerNotationDiff
  * - Stripping region markers and sentinel comments from output
  *
  * @param {Options} options - Configuration options
@@ -48,35 +50,56 @@ function matchesAnyPattern(
  * @returns {Function} A remark transformer function
  *
  * @example
- * Basic usage:
- * ```ts snippet=examples/hello.ts
+ * Short path (resolves to current page's code-snippets directory):
+ * In file: content/docs/core-concepts/schemas/accounts-and-migrations.mdx
+ * ```ts snippet=schema.ts
+ * ```
+ * Resolves to: content/docs/code-snippets/core-concepts/schemas/accounts-and-migrations/schema.ts
+ *
+ * @example
+ * Full path (resolves from base code-snippets directory):
+ * ```ts snippet=core-concepts/covalues/cofeeds/index.ts
+ * ```
+ * Resolves to: content/docs/code-snippets/core-concepts/covalues/cofeeds/index.ts
+ *
+ * @example
+ * With region extraction (hash syntax):
+ * ```tsx snippet=index.ts#PropsType
  * ```
  *
  * @example
- * With region extraction:
- * ```tsx snippet=components/Button.tsx#PropsType
+ * With region extraction (key-value syntax):
+ * ```ts snippet=index.ts region=LoginFunction
  * ```
  *
  * @example
- * With key-value syntax:
- * ```ts snippet=utils/auth.ts region=LoginFunction
+ * Compact syntax (no snippet= prefix):
+ * ```ts components/Button.tsx#PropsType
  * ```
  *
  * @remarks
  * Supported languages: `ts`, `tsx`, `svelte`
  *
+ * Path resolution:
+ * - Short paths (no `/`) resolve to the current page's code-snippets subdirectory first, then fall back to base
+ * - Paths with `/` always resolve from the base code-snippets directory
+ * - Example: In `docs/core-concepts/schemas/accounts-and-migrations.mdx`, `snippet=schema.ts` looks for
+ *   `code-snippets/core-concepts/schemas/accounts-and-migrations/schema.ts` first
+ *
  * Supported sentinels:
  * - `// [!code hide]` or `// [!code hide:N]` - Hide lines from output
- * - `// [!code ++:N]` or `// [!code --:N]` - Mark diff additions/removals
+ * - `// [!code ++]` or `// [!code ++:N]` - Mark next N lines (or 1 line) as additions
+ * - `// [!code --]` or `// [!code --:N]` - Mark next N lines (or 1 line) as removals
  * - `// #region Name` / `// #endregion` - Define extractable regions
  * - `// @ts-expect-error`, `// @ts-ignore`, `// @ts-nocheck` - Automatically hidden
  * - HTML-style comments (`<!-- ... -->`) also supported for Svelte files
  * - JSX comments (curly-brace-slash-star format) also supported for React/TSX files
  *
- * All sentinel comments are automatically stripped from the final output.
+ * Standalone diff sentinels (on their own line) are stripped and converted to inline notation
+ * that Shiki's transformerNotationDiff can process. Inline diff sentinels are passed through as-is.
  */
 export function codeSnippets(options: Options): Function {
-  return (tree: any) => {
+  return (tree: any, file: any) => {
     visit(tree, "code", (node: any) => {
       const allowedLangs = ["ts", "tsx", "svelte"];
       if (!allowedLangs.includes(node.lang)) return;
@@ -84,7 +107,7 @@ export function codeSnippets(options: Options): Function {
       const params = parseMeta(node.meta);
       if (!params.snippet) return;
 
-      const filePath = path.join(options.dir, params.snippet);
+      const filePath = resolveSnippetPath(params.snippet, options.dir, file.path);
 
       if (!fs.existsSync(filePath)) {
         throw new Error(`Snippet not found: ${filePath}`);
@@ -96,7 +119,7 @@ export function codeSnippets(options: Options): Function {
         content = extractRegion(content, params.region, filePath);
       }
 
-      const { clean, highlights, diff } = processAnnotations(content);
+      const { clean, highlights } = processAnnotations(content);
 
       node.value = clean;
       node.data ||= {};
@@ -105,11 +128,69 @@ export function codeSnippets(options: Options): Function {
       if (highlights.length) {
         node.data.hProperties.highlight = highlights.join(",");
       }
-      if (diff.length) {
-        node.data.hProperties.diff = JSON.stringify(diff);
-      }
     });
   };
+}
+
+/**
+ * Resolves a snippet path with smart path resolution.
+ * 
+ * For short paths (just filename), tries to resolve relative to the current MDX file's
+ * corresponding code-snippets directory first, then falls back to the base snippets directory.
+ * 
+ * Example:
+ * - MDX file: content/docs/core-concepts/schemas/accounts-and-migrations.mdx
+ * - Snippet: schema.ts
+ * - First try: content/docs/code-snippets/core-concepts/schemas/accounts-and-migrations/schema.ts
+ * - Fallback: content/docs/code-snippets/schema.ts
+ * 
+ * For paths with directories, only tries relative to base snippets directory.
+ */
+function resolveSnippetPath(
+  snippetPath: string,
+  snippetsBaseDir: string,
+  currentFilePath: string | undefined,
+): string {
+  // If the snippet path contains a directory separator, it's a full path
+  // Just resolve it relative to the base snippets directory
+  if (snippetPath.includes("/")) {
+    return path.join(snippetsBaseDir, snippetPath);
+  }
+
+  // If we don't have the current file path, fall back to base directory
+  if (!currentFilePath) {
+    return path.join(snippetsBaseDir, snippetPath);
+  }
+
+  // Derive the corresponding snippets subdirectory from the MDX file path
+  // Example: content/docs/core-concepts/schemas/accounts-and-migrations.mdx
+  //       -> content/docs/code-snippets/core-concepts/schemas/accounts-and-migrations/
+  const parsedPath = path.parse(currentFilePath);
+  const dirPath = parsedPath.dir;
+  
+  // Find the '/docs/' or '/docs' part and replace it with '/code-snippets/'
+  // This handles both Unix and Windows paths
+  const docsMatch = dirPath.match(/(.*[/\\]docs)([/\\].*)?$/);
+  if (!docsMatch) {
+    // If we can't find /docs/, fall back to base directory
+    return path.join(snippetsBaseDir, snippetPath);
+  }
+  
+  const beforeDocs = docsMatch[1]; // e.g., "content/docs"
+  const afterDocs = docsMatch[2] || ""; // e.g., "/core-concepts/schemas"
+  
+  // Build: content/docs/code-snippets/core-concepts/schemas/accounts-and-migrations
+  const snippetsSubdir = beforeDocs + path.sep + "code-snippets" + afterDocs;
+  const fullSnippetsDir = path.join(snippetsSubdir, parsedPath.name);
+  
+  // Try the local snippets directory first
+  const localPath = path.join(fullSnippetsDir, snippetPath);
+  if (fs.existsSync(localPath)) {
+    return localPath;
+  }
+
+  // Fall back to the base snippets directory
+  return path.join(snippetsBaseDir, snippetPath);
 }
 
 function parseMeta(meta: string | undefined) {
@@ -119,17 +200,27 @@ function parseMeta(meta: string | undefined) {
   // Remove twoslash keyword if present (backwards compatibility)
   meta = meta.replace(/\btwoslash\b/g, "").trim();
 
-  // Compact form: examples/foo.ts#Bar or test/example.tsx#Region
-  const direct = meta.match(/^([\w./-]+\.\w+)(?:#([\w-]+))?$/);
+  // Compact form without snippet= prefix: examples/foo.ts#Bar or test/example.tsx#Region
+  const direct = meta.match(/^([\w./\-]+\.\w+)(?:#([\w\-]+))?$/);
   if (direct) {
     result.snippet = direct[1];
     if (direct[2]) result.region = direct[2];
     return result;
   }
 
+  // Key-value form: snippet=path/to/file.ts or snippet=path/to/file.ts#Region or snippet=path region=Region
   meta.split(/\s+/).forEach((part) => {
     const [key, val] = part.split("=");
-    if (key && val) result[key] = val;
+    if (key && val) {
+      // Handle snippet=path/to/file.ts#Region syntax
+      if (key === "snippet" && val.includes("#")) {
+        const [filePath, region] = val.split("#");
+        result.snippet = filePath;
+        result.region = region;
+      } else {
+        result[key] = val;
+      }
+    }
   });
   return result;
 }
@@ -181,14 +272,16 @@ function stripRegionMarkers(source: string, region: string) {
 function processAnnotations(source: string) {
   const lines = source.split("\n");
   const highlights: number[] = [];
-  const diff: { line: number; type: "add" | "remove" }[] = [];
 
   const hideWithCountPatterns = createMultiStylePattern(
     `\\[!code\\s*hide:\\s*(\\d+)\\s*\\]`,
   );
   const hidePatterns = createMultiStylePattern(`\\[!code\\s*hide\\s*\\]`);
-  const diffPatterns = createMultiStylePattern(
+  const diffWithCountPatterns = createMultiStylePattern(
     `\\[!code\\s*(\\+\\+|--):\\s*(\\d+)\\s*\\]`,
+  );
+  const diffPatterns = createMultiStylePattern(
+    `\\[!code\\s*(\\+\\+|--)\\s*\\]`,
   );
   const regionPatterns = createMultiStylePattern(`#(?:region|endregion)`);
   const tsDirectivePatterns = createMultiStylePattern(
@@ -220,11 +313,19 @@ function processAnnotations(source: string) {
       continue; // Skip sentinel line
     }
 
-    // Check for diff markers: [!code ++:N] or [!code --:N]
+    // Check for diff markers with count: [!code ++:N] or [!code --:N]
+    const bracketDiffWithCountMatch = matchesAnyPattern(line, diffWithCountPatterns);
+    if (bracketDiffWithCountMatch) {
+      const [, op, countStr] = bracketDiffWithCountMatch;
+      pendingDiff = { type: op === "++" ? "add" : "remove", count: +countStr };
+      continue; // Skip sentinel line
+    }
+
+    // Check for single line diff markers: [!code ++] or [!code --]
     const bracketDiffMatch = matchesAnyPattern(line, diffPatterns);
     if (bracketDiffMatch) {
-      const [, op, countStr] = bracketDiffMatch;
-      pendingDiff = { type: op === "++" ? "add" : "remove", count: +countStr };
+      const [, op] = bracketDiffMatch;
+      diffNextLine = op === "++" ? "add" : "remove";
       continue; // Skip sentinel line
     }
 
@@ -250,22 +351,20 @@ function processAnnotations(source: string) {
       continue;
     }
 
-    // Handle pending diff
+    // Handle pending diff - add inline notation for Shiki
     if (pendingDiff) {
-      cleanLines.push(line);
-      const cleanLineNum = cleanLines.length;
-      diff.push({ line: cleanLineNum, type: pendingDiff.type });
+      const diffMarker = pendingDiff.type === "add" ? "// [!code ++]" : "// [!code --]";
+      cleanLines.push(`${line} ${diffMarker}`);
 
       pendingDiff.count--;
       if (pendingDiff.count === 0) pendingDiff = null;
       continue;
     }
 
-    // Handle diff next line
+    // Handle diff next line - add inline notation for Shiki
     if (diffNextLine) {
-      cleanLines.push(line);
-      const cleanLineNum = cleanLines.length;
-      diff.push({ line: cleanLineNum, type: diffNextLine });
+      const diffMarker = diffNextLine === "add" ? "// [!code ++]" : "// [!code --]";
+      cleanLines.push(`${line} ${diffMarker}`);
       diffNextLine = null;
       continue;
     }
@@ -285,5 +384,5 @@ function processAnnotations(source: string) {
   }
 
   if (cleanLines[cleanLines.length - 1] == "") cleanLines.pop(); // If the last line is blank, pop it off.
-  return { clean: cleanLines.join("\n"), highlights, diff };
+  return { clean: cleanLines.join("\n"), highlights };
 }

@@ -39,21 +39,6 @@ export const Document = co.map({
 });
 // #endregion
 
-// #region DiscriminatedUnions
-const ButtonWidget = co.map({
-  type: z.literal("button"),
-  label: z.string(),
-});
-
-const SliderWidget = co.map({
-  type: z.literal("slider"),
-  min: z.number(),
-  max: z.number(),
-});
-
-const WidgetUnion = co.discriminatedUnion("type", [ButtonWidget, SliderWidget]);
-// #endregion
-
 // #region PrimitiveTypes
 z.string(); // For simple strings
 z.number(); // For numbers
