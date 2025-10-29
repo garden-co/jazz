@@ -24,6 +24,8 @@ import {
   createCoreCoMapSchema,
 } from "./CoMapSchema.js";
 import { CoOptionalSchema } from "./CoOptionalSchema.js";
+import { CoreResolveQuery } from "./CoValueSchema.js";
+import { removeGetters } from "../../schemaUtils.js";
 
 export type BaseProfileShape = {
   name: z.core.$ZodString<string>;
@@ -41,6 +43,7 @@ export type DefaultAccountShape = {
   root: CoMapSchema<{}>;
 };
 
+// TODO add type paramter for default resolve query
 export class AccountSchema<Shape extends BaseAccountShape = DefaultAccountShape>
   implements CoreAccountSchema<Shape>
 {
@@ -49,12 +52,29 @@ export class AccountSchema<Shape extends BaseAccountShape = DefaultAccountShape>
   shape: Shape;
   getDefinition: () => CoMapSchemaDefinition;
 
+  /**
+   * The default resolve query to be used when loading instances of this schema.
+   * Defaults to `false`, meaning that no resolve query will used by default.
+   * @internal
+   */
+  public defaultResolveQuery: CoreResolveQuery = false;
+
   constructor(
     coreSchema: CoreAccountSchema<Shape>,
     private coValueClass: typeof Account,
   ) {
     this.shape = coreSchema.shape;
     this.getDefinition = coreSchema.getDefinition;
+    // TODO find an approach that supports getters
+    const fieldResolveQueries = Object.entries(removeGetters(this.shape))
+      .map(([fieldName, fieldSchema]) => [
+        fieldName,
+        fieldSchema.defaultResolveQuery,
+      ])
+      .filter(([_, resolveQuery]) => Boolean(resolveQuery));
+    if (fieldResolveQueries.length > 0) {
+      this.defaultResolveQuery = Object.fromEntries(fieldResolveQueries);
+    }
   }
 
   create(
@@ -140,6 +160,18 @@ export class AccountSchema<Shape extends BaseAccountShape = DefaultAccountShape>
 
   optional(): CoOptionalSchema<this> {
     return coOptionalDefiner(this);
+  }
+
+  resolved(): AccountSchema<Shape> {
+    if (this.defaultResolveQuery) {
+      return this;
+    }
+    const coreSchema: CoreAccountSchema<Shape> = createCoreAccountSchema(
+      this.shape,
+    );
+    const copy = new AccountSchema(coreSchema, this.coValueClass);
+    copy.defaultResolveQuery = true;
+    return copy;
   }
 }
 

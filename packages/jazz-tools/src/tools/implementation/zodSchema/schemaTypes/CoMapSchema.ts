@@ -16,6 +16,7 @@ import {
   coOptionalDefiner,
   hydrateCoreCoValueSchema,
   isAnyCoValueSchema,
+  ResolveQuery,
   unstable_mergeBranchWithResolve,
 } from "../../../internal.js";
 import { AnonymousJazzAgent } from "../../anonymousJazzAgent.js";
@@ -23,15 +24,19 @@ import { removeGetters } from "../../schemaUtils.js";
 import { CoMapSchemaInit } from "../typeConverters/CoFieldSchemaInit.js";
 import { InstanceOrPrimitiveOfSchema } from "../typeConverters/InstanceOrPrimitiveOfSchema.js";
 import { InstanceOrPrimitiveOfSchemaCoValuesMaybeLoaded } from "../typeConverters/InstanceOrPrimitiveOfSchemaCoValuesMaybeLoaded.js";
+import { DefaultResolveQueryOfSchema } from "../typeConverters/DefaultResolveQueryOfSchema.js";
 import { z } from "../zodReExport.js";
 import { AnyZodOrCoValueSchema, AnyZodSchema } from "../zodSchema.js";
 import { CoOptionalSchema } from "./CoOptionalSchema.js";
-import { CoreCoValueSchema } from "./CoValueSchema.js";
+import { CoreCoValueSchema, CoreResolveQuery } from "./CoValueSchema.js";
+import { withDefaultResolveQuery } from "../../schemaUtils.js";
 
 export class CoMapSchema<
   Shape extends z.core.$ZodLooseShape,
   CatchAll extends AnyZodOrCoValueSchema | unknown = unknown,
   Owner extends Account | Group = Account | Group,
+  DefaultResolveQuery extends
+    CoreResolveQuery = DefaultResolveQueryOfShape<Shape>,
 > implements CoreCoMapSchema<Shape, CatchAll>
 {
   collaborative = true as const;
@@ -40,6 +45,14 @@ export class CoMapSchema<
   catchAll?: CatchAll;
   getDefinition: () => CoMapSchemaDefinition;
 
+  /**
+   * The default resolve query to be used when loading instances of this schema.
+   * Defaults to `false`, meaning that no resolve query will be used by default.
+   * @internal
+   */
+  public defaultResolveQuery: DefaultResolveQuery =
+    false as DefaultResolveQuery;
+
   constructor(
     coreSchema: CoreCoMapSchema<Shape, CatchAll>,
     private coValueClass: typeof CoMap,
@@ -47,6 +60,15 @@ export class CoMapSchema<
     this.shape = coreSchema.shape;
     this.catchAll = coreSchema.catchAll;
     this.getDefinition = coreSchema.getDefinition;
+    const fieldResolveQueries = Object.entries(removeGetters(this.shape))
+      .map(([fieldName, fieldSchema]) => [
+        fieldName,
+        fieldSchema.defaultResolveQuery,
+      ])
+      .filter(([_, resolveQuery]) => Boolean(resolveQuery));
+    if (fieldResolveQueries.length > 0) {
+      this.defaultResolveQuery = Object.fromEntries(fieldResolveQueries);
+    }
   }
 
   create(
@@ -75,7 +97,8 @@ export class CoMapSchema<
   load<
     const R extends RefsToResolve<
       Simplify<CoMapInstanceCoValuesMaybeLoaded<Shape>> & CoMap
-    > = true,
+      // @ts-expect-error TODO fix type error
+    > = DefaultResolveQuery extends false ? true : DefaultResolveQuery,
   >(
     id: string,
     options?: {
@@ -93,7 +116,11 @@ export class CoMapSchema<
     >
   > {
     // @ts-expect-error
-    return this.coValueClass.load(id, options);
+    return this.coValueClass.load(
+      id,
+      // @ts-expect-error
+      withDefaultResolveQuery(options, this.defaultResolveQuery),
+    );
   }
 
   unstable_merge<
@@ -221,7 +248,7 @@ export class CoMapSchema<
         true
       >,
     ) => undefined,
-  ): CoMapSchema<Shape, CatchAll, Owner> {
+  ): CoMapSchema<Shape, CatchAll, Owner, DefaultResolveQuery> {
     // @ts-expect-error
     this.coValueClass.prototype.migrate = migration;
     return this;
@@ -233,6 +260,27 @@ export class CoMapSchema<
 
   optional(): CoOptionalSchema<this> {
     return coOptionalDefiner(this);
+  }
+
+  resolved(): CoMapSchema<
+    Shape,
+    CatchAll,
+    Owner,
+    DefaultResolveQuery extends false ? true : CoreResolveQuery
+  > {
+    if (this.defaultResolveQuery) {
+      return this as CoMapSchema<Shape, CatchAll, Owner, true>;
+    }
+    const coreSchema: CoreCoMapSchema<Shape, CatchAll> = createCoreCoMapSchema(
+      this.shape,
+      this.catchAll,
+    );
+    const copy = new CoMapSchema<Shape, CatchAll, Owner, true>(
+      coreSchema,
+      this.coValueClass,
+    );
+    copy.defaultResolveQuery = true;
+    return copy;
   }
 
   /**
@@ -328,6 +376,7 @@ export function createCoreCoMapSchema<
         return propValues;
       },
     }),
+    defaultResolveQuery: false,
   };
 }
 
@@ -381,3 +430,12 @@ export type PartialShape<
         : never
     : Shape[key];
 }>;
+
+type FalseIfEmpty<T> = keyof T extends never ? false : T;
+
+type DefaultResolveQueryOfShape<Shape extends z.core.$ZodLooseShape> =
+  FalseIfEmpty<{
+    [K in keyof Shape as DefaultResolveQueryOfSchema<Shape[K]> extends false
+      ? never
+      : K]: DefaultResolveQueryOfSchema<Shape[K]>;
+  }>;

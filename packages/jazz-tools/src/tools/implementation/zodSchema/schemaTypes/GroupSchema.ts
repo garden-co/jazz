@@ -12,7 +12,7 @@ import {
   Resolved,
   ResolveQuery,
 } from "../../../internal.js";
-import { CoreCoValueSchema } from "./CoValueSchema.js";
+import { CoreCoValueSchema, CoreResolveQuery } from "./CoValueSchema.js";
 import { coOptionalDefiner } from "../zodCo.js";
 import { CoOptionalSchema } from "./CoOptionalSchema.js";
 import type { AccountRole, InviteSecret } from "cojson";
@@ -25,12 +25,25 @@ export function createCoreGroupSchema(): CoreGroupSchema {
   return {
     collaborative: true as const,
     builtin: "Group" as const,
+    defaultResolveQuery: false,
   };
 }
 
-export class GroupSchema implements CoreGroupSchema {
+export class GroupSchema<DefaultResolveQuery extends CoreResolveQuery = false>
+  implements CoreGroupSchema
+{
   readonly collaborative = true as const;
   readonly builtin = "Group" as const;
+
+  /**
+   * The default resolve query to be used when loading instances of this schema.
+   * Defaults to `false`, meaning that no resolve query will be used by default.
+   * @internal
+   */
+  public defaultResolveQuery: DefaultResolveQuery =
+    false as DefaultResolveQuery;
+
+  constructor() {}
 
   getCoValueClass(): typeof Group {
     return Group;
@@ -38,6 +51,12 @@ export class GroupSchema implements CoreGroupSchema {
 
   optional(): CoOptionalSchema<this> {
     return coOptionalDefiner(this);
+  }
+
+  resolved(): GroupSchema<true> {
+    const copy = new GroupSchema<true>();
+    copy.defaultResolveQuery = true;
+    return copy;
   }
 
   create(options?: { owner: Account } | Account) {

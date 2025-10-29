@@ -4,6 +4,7 @@ import {
   CoList,
   Group,
   ID,
+  isCoValueSchema,
   MaybeLoaded,
   RefsToResolve,
   RefsToResolveStrict,
@@ -17,20 +18,41 @@ import { AnonymousJazzAgent } from "../../anonymousJazzAgent.js";
 import { CoListSchemaInit } from "../typeConverters/CoFieldSchemaInit.js";
 import { InstanceOrPrimitiveOfSchema } from "../typeConverters/InstanceOrPrimitiveOfSchema.js";
 import { InstanceOrPrimitiveOfSchemaCoValuesMaybeLoaded } from "../typeConverters/InstanceOrPrimitiveOfSchemaCoValuesMaybeLoaded.js";
-import { AnyZodOrCoValueSchema } from "../zodSchema.js";
+import { DefaultResolveQueryOfSchema } from "../typeConverters/DefaultResolveQueryOfSchema.js";
+import { AnyZodOrCoValueSchema, ResolveQuery } from "../zodSchema.js";
 import { CoOptionalSchema } from "./CoOptionalSchema.js";
-import { CoreCoValueSchema } from "./CoValueSchema.js";
+import { CoreCoValueSchema, CoreResolveQuery } from "./CoValueSchema.js";
+import { withDefaultResolveQuery } from "../../schemaUtils.js";
 
-export class CoListSchema<T extends AnyZodOrCoValueSchema>
-  implements CoreCoListSchema<T>
+export class CoListSchema<
+  T extends AnyZodOrCoValueSchema,
+  DefaultResolveQuery extends
+    CoreResolveQuery = DefaultResolveQueryOfSchema<T> extends false
+    ? false
+    : { $each: DefaultResolveQueryOfSchema<T> },
+> implements CoreCoListSchema<T>
 {
   collaborative = true as const;
   builtin = "CoList" as const;
 
+  /**
+   * The default resolve query to be used when loading instances of this schema.
+   * Defaults to `false`, meaning that no resolve query will be used by default.
+   * @internal
+   */
+  public defaultResolveQuery: DefaultResolveQuery =
+    false as DefaultResolveQuery;
+
   constructor(
     public element: T,
     private coValueClass: typeof CoList,
-  ) {}
+  ) {
+    if (isCoValueSchema(element) && element.defaultResolveQuery) {
+      this.defaultResolveQuery = {
+        $each: element.defaultResolveQuery,
+      } as unknown as DefaultResolveQuery;
+    }
+  }
 
   create(
     items: CoListSchemaInit<T>,
@@ -57,7 +79,9 @@ export class CoListSchema<T extends AnyZodOrCoValueSchema>
   }
 
   load<
-    const R extends RefsToResolve<CoListInstanceCoValuesMaybeLoaded<T>> = true,
+    const R extends RefsToResolve<
+      CoListInstanceCoValuesMaybeLoaded<T>
+    > = DefaultResolveQuery extends false ? true : DefaultResolveQuery,
   >(
     id: string,
     options?: {
@@ -67,7 +91,11 @@ export class CoListSchema<T extends AnyZodOrCoValueSchema>
     },
   ): Promise<MaybeLoaded<Resolved<CoListInstanceCoValuesMaybeLoaded<T>, R>>> {
     // @ts-expect-error
-    return this.coValueClass.load(id, options);
+    return this.coValueClass.load(
+      id,
+      // @ts-expect-error
+      withDefaultResolveQuery(options, this.defaultResolveQuery),
+    );
   }
 
   unstable_merge<
@@ -139,6 +167,18 @@ export class CoListSchema<T extends AnyZodOrCoValueSchema>
   optional(): CoOptionalSchema<this> {
     return coOptionalDefiner(this);
   }
+
+  resolved(): CoListSchema<
+    T,
+    DefaultResolveQuery extends false ? true : CoreResolveQuery
+  > {
+    if (this.defaultResolveQuery) {
+      return this as CoListSchema<T, true>;
+    }
+    const copy = new CoListSchema<T, true>(this.element, this.coValueClass);
+    copy.defaultResolveQuery = true;
+    return copy;
+  }
 }
 
 export function createCoreCoListSchema<T extends AnyZodOrCoValueSchema>(
@@ -148,6 +188,7 @@ export function createCoreCoListSchema<T extends AnyZodOrCoValueSchema>(
     collaborative: true as const,
     builtin: "CoList" as const,
     element,
+    defaultResolveQuery: false,
   };
 }
 

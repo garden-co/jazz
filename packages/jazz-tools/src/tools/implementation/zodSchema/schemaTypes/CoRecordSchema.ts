@@ -10,6 +10,7 @@ import {
   RefsToResolve,
   RefsToResolveStrict,
   Resolved,
+  ResolveQuery,
   Simplify,
   SubscribeListenerOptions,
 } from "../../../internal.js";
@@ -20,7 +21,7 @@ import { InstanceOrPrimitiveOfSchemaCoValuesMaybeLoaded } from "../typeConverter
 import { z } from "../zodReExport.js";
 import { AnyZodOrCoValueSchema } from "../zodSchema.js";
 import { CoOptionalSchema } from "./CoOptionalSchema.js";
-import { CoreCoValueSchema } from "./CoValueSchema.js";
+import { CoreCoValueSchema, CoreResolveQuery } from "./CoValueSchema.js";
 
 type CoRecordInit<
   K extends z.core.$ZodString<string>,
@@ -32,7 +33,10 @@ type CoRecordInit<
 export interface CoRecordSchema<
   K extends z.core.$ZodString<string>,
   V extends AnyZodOrCoValueSchema,
+  DefaultResolveQuery extends CoreResolveQuery = false,
 > extends CoreCoRecordSchema<K, V> {
+  defaultResolveQuery: CoreResolveQuery;
+
   create(
     init: Simplify<CoRecordInit<K, V>>,
     options?:
@@ -139,6 +143,9 @@ export interface CoRecordSchema<
   getCoValueClass: () => typeof CoMap;
 
   optional(): CoOptionalSchema<this>;
+
+  // TODO: wrap value's default resolve query with { $each: { ... } } if it's set
+  resolved(): CoRecordSchema<K, V, true>;
 }
 
 type CoRecordSchemaDefinition<

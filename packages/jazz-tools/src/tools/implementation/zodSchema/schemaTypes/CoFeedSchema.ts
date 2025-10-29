@@ -11,19 +11,28 @@ import {
   SubscribeListenerOptions,
   coOptionalDefiner,
   unstable_mergeBranchWithResolve,
+  ResolveQuery,
 } from "../../../internal.js";
 import { AnonymousJazzAgent } from "../../anonymousJazzAgent.js";
 import { CoFeedSchemaInit } from "../typeConverters/CoFieldSchemaInit.js";
 import { InstanceOrPrimitiveOfSchema } from "../typeConverters/InstanceOrPrimitiveOfSchema.js";
 import { InstanceOrPrimitiveOfSchemaCoValuesMaybeLoaded } from "../typeConverters/InstanceOrPrimitiveOfSchemaCoValuesMaybeLoaded.js";
 import { CoOptionalSchema } from "./CoOptionalSchema.js";
-import { CoreCoValueSchema } from "./CoValueSchema.js";
+import { CoreCoValueSchema, CoreResolveQuery } from "./CoValueSchema.js";
 
+// TODO add type parameter for default resolve query
 export class CoFeedSchema<T extends AnyZodOrCoValueSchema>
   implements CoreCoFeedSchema<T>
 {
   collaborative = true as const;
   builtin = "CoFeed" as const;
+
+  /**
+   * The default resolve query to be used when loading instances of this schema.
+   * Defaults to `false`, meaning that no resolve query will used by default.
+   * @internal
+   */
+  public defaultResolveQuery: CoreResolveQuery = false;
 
   constructor(
     public element: T,
@@ -103,6 +112,12 @@ export class CoFeedSchema<T extends AnyZodOrCoValueSchema>
   optional(): CoOptionalSchema<this> {
     return coOptionalDefiner(this);
   }
+
+  resolved(): CoFeedSchema<T> {
+    const copy = new CoFeedSchema(this.element, this.coValueClass);
+    copy.defaultResolveQuery = true;
+    return copy;
+  }
 }
 
 export function createCoreCoFeedSchema<T extends AnyZodOrCoValueSchema>(
@@ -112,6 +127,7 @@ export function createCoreCoFeedSchema<T extends AnyZodOrCoValueSchema>(
     collaborative: true as const,
     builtin: "CoFeed" as const,
     element,
+    defaultResolveQuery: false,
   };
 }
 

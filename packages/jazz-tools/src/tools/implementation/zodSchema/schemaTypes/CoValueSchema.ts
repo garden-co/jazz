@@ -1,3 +1,10 @@
+import { ResolveQuery } from "../zodSchema.js";
+
+/**
+ * Simplified type for {@link ResolveQuery}, used to avoid circularity issues.
+ */
+export type CoreResolveQuery = boolean | Record<string, any>;
+
 /**
  * "Core" CoValue schemas contain all data necessary to represent a CoValue schema.
  * Behavior is provided by CoValue schemas that extend "core" CoValue schema data structures.
@@ -15,4 +22,6 @@ export interface CoreCoValueSchema {
    * Used for discriminating between different CoValue schemas.
    */
   builtin: string;
+
+  defaultResolveQuery: CoreResolveQuery;
 }

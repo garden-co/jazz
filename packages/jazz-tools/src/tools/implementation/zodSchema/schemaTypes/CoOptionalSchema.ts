@@ -1,5 +1,5 @@
-import { CoValueSchemaFromCoreSchema } from "../zodSchema.js";
-import { CoreCoValueSchema } from "./CoValueSchema.js";
+import { CoValueSchemaFromCoreSchema, ResolveQuery } from "../zodSchema.js";
+import { CoreCoValueSchema, CoreResolveQuery } from "./CoValueSchema.js";
 
 type CoOptionalSchemaDefinition<
   Shape extends CoreCoValueSchema = CoreCoValueSchema,
@@ -17,6 +17,7 @@ export interface CoreCoOptionalSchema<
 
 export class CoOptionalSchema<
   Shape extends CoreCoValueSchema = CoreCoValueSchema,
+  DefaultResolveQuery extends CoreResolveQuery = Shape["defaultResolveQuery"],
 > implements CoreCoOptionalSchema<Shape>
 {
   readonly collaborative = true as const;
@@ -25,11 +26,33 @@ export class CoOptionalSchema<
     innerType: this.innerType,
   });
 
-  constructor(public readonly innerType: Shape) {}
+  /**
+   * The default resolve query to be used when loading instances of this schema.
+   * Defaults to `false`, meaning that no resolve query will be used by default.
+   * @internal
+   */
+  public defaultResolveQuery: DefaultResolveQuery;
+
+  constructor(public readonly innerType: Shape) {
+    this.defaultResolveQuery = this.innerType
+      .defaultResolveQuery as DefaultResolveQuery;
+  }
 
   getCoValueClass(): ReturnType<
     CoValueSchemaFromCoreSchema<Shape>["getCoValueClass"]
   > {
     return (this.innerType as any).getCoValueClass();
+  }
+
+  resolved(): CoOptionalSchema<
+    Shape,
+    DefaultResolveQuery extends false ? true : CoreResolveQuery
+  > {
+    if (this.defaultResolveQuery) {
+      return this as CoOptionalSchema<Shape, true>;
+    }
+    const copy = new CoOptionalSchema<Shape, true>(this.innerType);
+    copy.defaultResolveQuery = true;
+    return copy;
   }
 }

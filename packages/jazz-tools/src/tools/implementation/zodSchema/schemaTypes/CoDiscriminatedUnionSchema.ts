@@ -11,10 +11,11 @@ import {
   SchemaUnionConcreteSubclass,
   SubscribeListenerOptions,
   coOptionalDefiner,
+  ResolveQuery,
 } from "../../../internal.js";
 import { z } from "../zodReExport.js";
 import { CoOptionalSchema } from "./CoOptionalSchema.js";
-import { CoreCoValueSchema } from "./CoValueSchema.js";
+import { CoreCoValueSchema, CoreResolveQuery } from "./CoValueSchema.js";
 
 export interface DiscriminableCoValueSchemaDefinition {
   discriminatorMap: z.core.$ZodDiscriminatedUnionInternals["propValues"];
@@ -50,6 +51,13 @@ export class CoDiscriminatedUnionSchema<
   readonly builtin = "CoDiscriminatedUnion" as const;
   readonly getDefinition: () => CoDiscriminatedUnionSchemaDefinition<Options>;
 
+  /**
+   * The default resolve query to be used when loading instances of this schema.
+   * Defaults to `false`, meaning that no resolve query will used by default.
+   * @internal
+   */
+  public defaultResolveQuery: CoreResolveQuery = false;
+
   constructor(
     coreSchema: CoreCoDiscriminatedUnionSchema<Options>,
     private coValueClass: SchemaUnionConcreteSubclass<
@@ -57,6 +65,7 @@ export class CoDiscriminatedUnionSchema<
     >,
   ) {
     this.getDefinition = coreSchema.getDefinition;
+    // TODO infer default resolve query from the union's members
   }
 
   load(
@@ -104,6 +113,17 @@ export class CoDiscriminatedUnionSchema<
   optional(): CoOptionalSchema<this> {
     return coOptionalDefiner(this);
   }
+
+  resolved(): CoDiscriminatedUnionSchema<Options> {
+    // TODO: preserve members resolve queries
+    const coreSchema = createCoreCoDiscriminatedUnionSchema(
+      this.getDefinition().discriminator,
+      this.getDefinition().options,
+    );
+    const copy = new CoDiscriminatedUnionSchema(coreSchema, this.coValueClass);
+    copy.defaultResolveQuery = true;
+    return copy;
+  }
 }
 
 export function createCoreCoDiscriminatedUnionSchema<
@@ -139,6 +159,7 @@ export function createCoreCoDiscriminatedUnionSchema<
         return schemas;
       },
     }),
+    defaultResolveQuery: false,
   };
 }
 

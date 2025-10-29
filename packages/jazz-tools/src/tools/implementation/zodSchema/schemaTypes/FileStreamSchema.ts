@@ -5,10 +5,11 @@ import {
   Group,
   MaybeLoaded,
   coOptionalDefiner,
+  ResolveQuery,
   unstable_mergeBranchWithResolve,
 } from "../../../internal.js";
 import { CoOptionalSchema } from "./CoOptionalSchema.js";
-import { CoreCoValueSchema } from "./CoValueSchema.js";
+import { CoreCoValueSchema, CoreResolveQuery } from "./CoValueSchema.js";
 
 export interface CoreFileStreamSchema extends CoreCoValueSchema {
   builtin: "FileStream";
@@ -18,12 +19,24 @@ export function createCoreFileStreamSchema(): CoreFileStreamSchema {
   return {
     collaborative: true as const,
     builtin: "FileStream" as const,
+    defaultResolveQuery: false,
   };
 }
 
-export class FileStreamSchema implements CoreFileStreamSchema {
+export class FileStreamSchema<
+  DefaultResolveQuery extends CoreResolveQuery = false,
+> implements CoreFileStreamSchema
+{
   readonly collaborative = true as const;
   readonly builtin = "FileStream" as const;
+
+  /**
+   * The default resolve query to be used when loading instances of this schema.
+   * Defaults to `false`, meaning that no resolve query will be used by default.
+   * @internal
+   */
+  public defaultResolveQuery: DefaultResolveQuery =
+    false as DefaultResolveQuery;
 
   constructor(private coValueClass: typeof FileStream) {}
 
@@ -112,5 +125,11 @@ export class FileStreamSchema implements CoreFileStreamSchema {
 
   optional(): CoOptionalSchema<this> {
     return coOptionalDefiner(this);
+  }
+
+  resolved(): FileStreamSchema<true> {
+    const copy = new FileStreamSchema<true>(this.coValueClass);
+    copy.defaultResolveQuery = true;
+    return copy;
   }
 }
