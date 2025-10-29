@@ -7,15 +7,12 @@ import {
   packArrOfObjectsCoMap,
   unpackArrOfObjectsCoMap,
   ENCODING_MAP_COMAP_OPERATION_TYPES,
-  MAP_KEYS_SET,
-  MAP_KEYS_DELETION,
 } from "../pack/coMap.js";
 import type {
   MapOpPayload,
   MapOpPayloadSet,
   MapOpPayloadDel,
 } from "../coValues/coMap.js";
-import { ENCODING_MAP_PRIMITIVES_VALUES } from "../pack/objToArr.js";
 
 describe("CoMapPackImplementation", () => {
   const packer = new CoMapPackImplementation<string, string>();
