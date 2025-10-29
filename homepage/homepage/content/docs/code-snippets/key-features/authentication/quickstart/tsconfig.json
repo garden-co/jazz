@@ -1,0 +1,28 @@
+{
+  "extends": "../../../../../../tsconfig.json",
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "$lib/*": [
+        "./*"
+      ],
+      "@/app/*": [
+        "./*"
+      ],
+      "@/*": [
+        "./*"
+      ]
+    },
+    "target": "ES2020",
+    "module": "ESNext",
+    "lib": [
+      "ES2020",
+      "DOM"
+    ],
+    "downlevelIteration": true
+  },
+  "include": [
+    "./**/*"
+  ],
+  "exclude": []
+}

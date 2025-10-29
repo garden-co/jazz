@@ -7,6 +7,7 @@
       "@/*": [
         "./content/docs/code-snippets/core-concepts/covalues/imagedef/*",
         "./content/docs/code-snippets/key-features/authentication/better-auth/*",
+        "./content/docs/code-snippets/key-features/authentication/quickstart/*",
         "./content/docs/code-snippets/quickstart/*"
       ],
       "@/lib/*": [
@@ -19,12 +20,14 @@
         "./content/docs/code-snippets/key-features/authentication/clerk/*"
       ],
       "$lib/*": [
-        "./content/docs/code-snippets/quickstart/*"
-      ],
-      "$lib/components/*": [
+        "./content/docs/code-snippets/key-features/authentication/quickstart/*",
         "./content/docs/code-snippets/quickstart/*"
       ],
       "@/app/*": [
+        "./content/docs/code-snippets/key-features/authentication/quickstart/*",
+        "./content/docs/code-snippets/quickstart/*"
+      ],
+      "$lib/components/*": [
         "./content/docs/code-snippets/quickstart/*"
       ],
       "@/app/components/*": [
