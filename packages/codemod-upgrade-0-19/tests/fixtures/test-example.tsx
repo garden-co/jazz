@@ -279,6 +279,79 @@ async function MaybeLoadedNestedCoValueIfCheck() {
   return account.profile.name;
 }
 
+// If with || operator
+async function MaybeLoadedOrCheck() {
+  const account = await Account.load("account-id", {
+    resolve: { profile: true },
+  });
+  const account2 = await Account.load("account-id-2", {
+    resolve: { profile: true },
+  });
+
+  // Should transform: if (!account.$isLoaded || !account2.$isLoaded)
+  if (!account || !account2) {
+    return "Loading...";
+  }
+
+  return account.profile.name;
+}
+
+// If with && operator
+async function MaybeLoadedAndCheck() {
+  const account = await Account.load("account-id", {
+    resolve: { profile: true },
+  });
+  const account2 = await Account.load("account-id-2");
+
+  // Should transform: if (account.$isLoaded && account2.$isLoaded)
+  if (account && account2) {
+    return account.profile.name;
+  }
+
+  return "Loading...";
+}
+
+// Complex if with mixed operators
+async function MaybeLoadedMixedCheck() {
+  const account = await Account.load("account-id");
+  const account2 = await Account.load("account-id-2");
+  const isAdmin = true;
+
+  // Should transform: if (account.$isLoaded && (account2.$isLoaded || isAdmin))
+  if (account && (account2 || isAdmin)) {
+    return "Loaded";
+  }
+
+  return "Loading...";
+}
+
+// Complex if with negation and &&
+async function MaybeLoadedNegationAndCheck() {
+  const account = await Account.load("account-id");
+  const account2 = await Account.load("account-id-2");
+
+  // Should transform: if (!account.$isLoaded && account2.$isLoaded)
+  if (!account && account2) {
+    return "Account not loaded but account2 is";
+  }
+
+  return "Other state";
+}
+
+// Complex if with parentheses
+async function MaybeLoadedParenthesesCheck() {
+  const account = await Account.load("account-id");
+  const account2 = await Account.load("account-id-2");
+  const ready = true;
+
+  // Should transform: if ((account.$isLoaded && account2.$isLoaded) || ready)
+  if ((account && account2) || ready) {
+    return "Ready or loaded";
+  }
+
+  return "Not ready";
+}
+
 export {
   ExampleOnErrorNull,
   ExampleCoState,
@@ -298,4 +371,9 @@ export {
   MaybeLoadedCoValueIfCheck,
   OptionalMaybeLoadedCoValueIfCheck,
   MaybeLoadedNestedCoValueIfCheck,
+  MaybeLoadedOrCheck,
+  MaybeLoadedAndCheck,
+  MaybeLoadedMixedCheck,
+  MaybeLoadedNegationAndCheck,
+  MaybeLoadedParenthesesCheck,
 };

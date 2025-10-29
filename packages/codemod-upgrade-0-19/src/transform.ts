@@ -481,6 +481,7 @@ function migrateLoadingStateHandling(sourceFile: SourceFile) {
  * Migrates if statements that check MaybeLoaded values directly
  * Transforms: if (account) -> if (account.$isLoaded)
  * Or: if (account) -> if (account?.$isLoaded) for optional types
+ * Also handles complex expressions: if (account && profile) -> if (account.$isLoaded && profile.$isLoaded)
  */
 function migrateMaybeLoadedIfStatements(sourceFile: SourceFile) {
   function isMaybeLoadedType(type: Type): boolean {
@@ -491,54 +492,94 @@ function migrateMaybeLoadedIfStatements(sourceFile: SourceFile) {
     );
   }
 
+  /**
+   * Recursively transforms an expression, converting null-checks on MaybeLoaded CoValues to .$isLoaded
+   */
+  function transformExpression(expr: Node): string | null {
+    // Handle binary expressions (&&, ||)
+    if (Node.isBinaryExpression(expr)) {
+      const operator = expr.getOperatorToken();
+      const operatorKind = operator.getKind();
+
+      // Only handle logical operators
+      if (
+        operatorKind === SyntaxKind.AmpersandAmpersandToken ||
+        operatorKind === SyntaxKind.BarBarToken
+      ) {
+        const left = expr.getLeft();
+        const right = expr.getRight();
+
+        const transformedLeft = transformExpression(left);
+        const transformedRight = transformExpression(right);
+
+        // If either side was transformed, reconstruct the expression
+        if (transformedLeft !== null || transformedRight !== null) {
+          const leftText = transformedLeft ?? left.getText();
+          const rightText = transformedRight ?? right.getText();
+          const operatorText = operator.getText();
+
+          return `${leftText} ${operatorText} ${rightText}`;
+        }
+      }
+
+      return null;
+    }
+
+    // Handle negation
+    if (Node.isPrefixUnaryExpression(expr)) {
+      const operator = expr.getOperatorToken();
+      if (operator === SyntaxKind.ExclamationToken) {
+        const operand = expr.getOperand();
+
+        // Recursively transform the operand
+        const transformedOperand = transformExpression(operand);
+        if (transformedOperand !== null) {
+          return `!${transformedOperand}`;
+        }
+      }
+
+      return null;
+    }
+
+    // Handle parenthesized expressions
+    if (Node.isParenthesizedExpression(expr)) {
+      const innerExpr = expr.getExpression();
+      const transformed = transformExpression(innerExpr);
+
+      if (transformed !== null) {
+        return `(${transformed})`;
+      }
+
+      return null;
+    }
+
+    // Handle simple identifier or property access: account or account.profile
+    if (Node.isIdentifier(expr) || Node.isPropertyAccessExpression(expr)) {
+      const varName = expr.getText();
+      const type = expr.getType();
+
+      if (isMaybeLoadedType(type.getNonNullableType())) {
+        const accessor = type.isNullable() ? "?." : ".";
+        return `${varName}${accessor}$isLoaded`;
+      }
+    }
+
+    return null;
+  }
+
   const replacements: Array<{ node: Node; newText: string }> = [];
 
   // Find if statements that check MaybeLoaded values
   sourceFile.forEachDescendant((node) => {
     if (Node.isIfStatement(node)) {
       const expression = node.getExpression();
+      const transformed = transformExpression(expression);
 
-      // Check for direct variable reference: if (account)
-      if (
-        Node.isIdentifier(expression) ||
-        Node.isPropertyAccessExpression(expression)
-      ) {
-        const varName = expression.getText();
-        const type = expression.getType();
-
-        if (isMaybeLoadedType(type.getNonNullableType())) {
-          const accessor = type.isNullable() ? "?." : ".";
-          // Replace 'account' with 'account.$isLoaded' or 'account?.$isLoaded'
-          replacements.push({
-            node: expression,
-            newText: `${varName}${accessor}$isLoaded`,
-          });
-        }
-      }
-
-      // Check for negation: if (!account) or if (!account.profile)
-      if (Node.isPrefixUnaryExpression(expression)) {
-        const operator = expression.getOperatorToken();
-        if (operator === SyntaxKind.ExclamationToken) {
-          const operand = expression.getOperand();
-
-          if (
-            Node.isIdentifier(operand) ||
-            Node.isPropertyAccessExpression(operand)
-          ) {
-            const varName = operand.getText();
-            const type = operand.getType();
-
-            if (isMaybeLoadedType(type.getNonNullableType())) {
-              const accessor = type.isNullable() ? "?." : ".";
-              // Replace 'account' in '!account' with 'account.$isLoaded' or 'account?.$isLoaded'
-              replacements.push({
-                node: operand,
-                newText: `${varName}${accessor}$isLoaded`,
-              });
-            }
-          }
-        }
+      if (transformed !== null) {
+        replacements.push({
+          node: expression,
+          newText: transformed,
+        });
       }
     }
   });
