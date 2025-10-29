@@ -18,23 +18,9 @@ Create a CoMap shared by the users of the same organization to act as a root (or
 
 For this example, users within an `Organization` will be sharing `Project`s.
 
+<FileName>schema.ts</FileName>
 <CodeGroup>
-```ts
-import { co, z } from "jazz-tools";
-// ---cut---
-// schema.ts
-export const Project = co.map({
-  name: z.string(),
-});
-
-export const Organization = co.map({
-  name: z.string(),
-
-  // shared data between users of each organization
-  projects: co.list(Project), 
-});
-
-export const ListOfOrganizations = co.list(Organization);
+```ts schema.ts#Basic
 ```
 </CodeGroup>
 
@@ -45,48 +31,7 @@ Learn more about [defining schemas](/docs/core-concepts/covalues/overview).
 Let's add the list of `Organization`s to the user's Account `root` so they can access them.
 
 <CodeGroup>
-```ts
-import { Group, co, z } from "jazz-tools";
-export const Project = co.map({
-  name: z.string(),
-});
-
-export const Organization = co.map({
-  name: z.string(),
-
-  // shared data between users of each organization
-  projects: co.list(Project),
-});
-
-// ---cut---
-// schema.ts
-export const JazzAccountRoot = co.map({
-  organizations: co.list(Organization),
-});
-
-export const JazzAccount = co
-  .account({
-    root: JazzAccountRoot,
-    profile: co.profile(),
-  })
-  .withMigration((account) => {
-    if (!account.$jazz.has("root")) {
-      // Using a Group as an owner allows you to give access to other users
-      const organizationGroup = Group.create();
-
-      const organizations = co.list(Organization).create([
-        // Create the first Organization so users can start right away
-        Organization.create(
-          {
-            name: "My organization",
-            projects: co.list(Project).create([], organizationGroup),
-          },
-          organizationGroup,
-        ),
-      ]);
-      account.$jazz.set("root", { organizations });
-    }
-  });
+```ts schema.ts#AddToRoot
 ```
 </CodeGroup>
 
@@ -109,59 +54,10 @@ Here's how you can generate an [invite link](/docs/permissions-and-sharing/shari
 
 When the user accepts the invite, add the `Organization` to the user's `organizations` list.
 
+{/* TODO: other frameworks */}
+
 <CodeGroup>
-```tsx
-import * as React from "react";
-import { useAcceptInvite, useAccount } from "jazz-tools/react";
-import { co, z } from "jazz-tools";
-
-const Project = co.map({
-  name: z.string(),
-});
-
-const Organization = co.map({
-  name: z.string(),
-  projects: co.list(Project),
-});
-
-const JazzAccountRoot = co.map({
-  organizations: co.list(Organization),
-});
-
-const JazzAccount = co.account({
-  root: JazzAccountRoot,
-  profile: co.profile(),
-});
-
-// ---cut---
-export function AcceptInvitePage() {
-  const me = useAccount(JazzAccount, {
-    resolve: { root: { organizations: { $each: { $onError: 'catch' } } } },
-  });
-
-  const onAccept = (organizationId: string) => {
-    if (me.$isLoaded) {
-      Organization.load(organizationId).then((organization) => {
-        if (organization) {
-          // avoid duplicates
-          const ids = me.root.organizations.map(
-            (organization) => organization?.$jazz.id,
-          );
-          if (ids.includes(organizationId)) return;
-
-          me.root.organizations.$jazz.push(organization);
-        }
-      });
-    }
-  };
-
-  useAcceptInvite({
-    invitedObjectSchema: Organization,
-    onAccept,
-  });
-
-  return <p>Accepting invite...</p>;
-}
+```tsx react.tsx
 ```
 </CodeGroup>
 
