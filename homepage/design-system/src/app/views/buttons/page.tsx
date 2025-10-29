@@ -34,7 +34,6 @@ export default function ButtonsPage() {
         <Button variant="default">default</Button>
         <Button variant="link">link</Button>
         <Button variant="ghost">ghost</Button>
-        <Button variant="outline">outline</Button>
       </div>
 
       <h3 className="text-lg mt-5 font-bold">Intents</h3>
@@ -89,9 +88,7 @@ export default function ButtonsPage() {
       </p>
 
       <div className="grid grid-cols-2 gap-2">
-        <Button intent={selectedVariant} variant="outline">
-          outline
-        </Button>
+        <Button intent={selectedVariant}>outline</Button>
         <Button intent={selectedVariant} variant="inverted">
           inverted
         </Button>
@@ -131,7 +128,6 @@ export default function ButtonsPage() {
           icon="info"
           iconPosition="left"
           intent="info"
-          variant="outline"
           className="col-span-2 md:col-span-1"
         >
           outline info with icon
