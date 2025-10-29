@@ -1,13 +1,13 @@
 import bs58 from "bs58";
 import clsx from "clsx";
 import { BinaryIcon, SignatureIcon } from "lucide-react";
-import { Slides } from "../../../components/Slides";
+import { Slides } from "@/components/Slides";
 import { JazzLogo } from "@garden-co/design-system/src/components/atoms/logos/JazzLogo";
 import { GcmpLogo } from "@garden-co/design-system/src/components/atoms/logos/GcmpLogo";
 import { JazzSyncs } from "@/components/icons/JazzSyncs";
-import sfSystemsImg from "./sf_systems_club.avif";
-import { ServerWorkersDiagram } from "@/components/home/ServerWorkersDiagram";
 import { DiagramAfterJazz } from "@/components/DiagramAfterJazz";
+
+import sfSystemsImg from "./sf_systems_club.avif";
 
 type SessionEntry = {
   payload: { op: "set"; key: string; value?: string | number } & object;
