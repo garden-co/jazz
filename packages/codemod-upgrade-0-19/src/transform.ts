@@ -4,6 +4,7 @@ import {
   SourceFile,
   CallExpression,
   PropertyAccessExpression,
+  PropertyAssignment,
   ImportDeclaration,
   VariableDeclaration,
   Node,
@@ -17,9 +18,11 @@ export function transformFile(sourceFile: SourceFile): string {
 
   migrateUseAccount(sourceFile);
 
+  migrateExistingSelectors(sourceFile);
+
   renameWithSelectorHooks(sourceFile);
 
-  migrateLoadingStateHandling(sourceFile);
+  migrateLoadingStateHandlingInHooks(sourceFile);
 
   migrateMaybeLoadedIfStatements(sourceFile);
 
@@ -292,6 +295,97 @@ function addJazzToolsImports(
 }
 
 /**
+ * Migrates existing selectors in useCoStateWithSelector and useAccountWithSelector
+ * to the new loading state handling
+ */
+function migrateExistingSelectors(sourceFile: SourceFile) {
+  const fullText = sourceFile.getFullText();
+
+  // Find all useAccount and useCoState calls
+  sourceFile.forEachDescendant((node) => {
+    if (Node.isCallExpression(node)) {
+      const expression = node.getExpression();
+      if (!Node.isIdentifier(expression)) return;
+
+      const functionName = expression.getText();
+      if (
+        functionName !== "useAccountWithSelector" &&
+        functionName !== "useCoStateWithSelector"
+      ) {
+        return;
+      }
+
+      // Find the options argument
+      // useAccountWithSelector(Schema, options) - 2 args, options is args[1]
+      // useCoStateWithSelector(Schema, id, options) - 3 args, options is args[2]
+      const args = node.getArguments();
+      const optionsArg = args.find((arg) =>
+        Node.isObjectLiteralExpression(arg),
+      );
+      if (!optionsArg) {
+        return;
+      }
+
+      const selectProperty = optionsArg
+        .getProperties()
+        .find(
+          (prop): prop is PropertyAssignment =>
+            Node.isPropertyAssignment(prop) && prop.getName() === "select",
+        );
+
+      if (!selectProperty) {
+        return;
+      }
+
+      // Hook WITH existing selector
+      const initializer = selectProperty.getInitializer();
+      if (!initializer) {
+        return;
+      }
+
+      // Extract parameter name from arrow function or function expression
+      if (
+        Node.isArrowFunction(initializer) ||
+        Node.isFunctionExpression(initializer)
+      ) {
+        const params = initializer.getParameters();
+        if (params.length === 0) {
+          return;
+        }
+
+        const paramName = params[0].getName();
+
+        const body = initializer.getBody();
+
+        if (Node.isBlock(body)) {
+          // Skip transformation for block body selectors - they're too complex
+          return;
+        }
+
+        // Arrow function without braces - safe to transform
+        const selectorBody = body.getText();
+
+        // Only remove optional chaining on the root parameter, preserve it for nested properties
+        const escapedParamName = paramName.replace(
+          // Escape special characters in the parameter name
+          /[.*+?^${}()|[\]\\]/g,
+          "\\$&",
+        );
+        const cleanedSelectorBody = selectorBody.replace(
+          new RegExp(`${escapedParamName}\\?\\.`, "g"),
+          `${paramName}.`,
+        );
+
+        // Create the new selector with loading state handling
+        const newSelector = `(${paramName}) => ${paramName}.$isLoaded ? ${cleanedSelectorBody} : ${paramName}.$jazz.loadingState === "loading" ? undefined : null`;
+
+        selectProperty.setInitializer(newSelector);
+      }
+    }
+  });
+}
+
+/**
  * Renames useAccountWithSelector to useAccount and useCoStateWithSelector to useCoState
  */
 function renameWithSelectorHooks(sourceFile: SourceFile) {
@@ -355,7 +449,7 @@ function transformHookCalls(sourceFile: SourceFile) {
   });
 }
 
-function migrateLoadingStateHandling(sourceFile: SourceFile) {
+function migrateLoadingStateHandlingInHooks(sourceFile: SourceFile) {
   const fullText = sourceFile.getFullText();
 
   // Find all useAccount and useCoState calls
@@ -418,51 +512,7 @@ function migrateLoadingStateHandling(sourceFile: SourceFile) {
             Node.isPropertyAssignment(prop) && prop.getName() === "select",
         );
 
-      if (selectProperty && Node.isPropertyAssignment(selectProperty)) {
-        // Hook WITH existing selector
-        const initializer = selectProperty.getInitializer();
-        if (!initializer) {
-          return;
-        }
-
-        // Extract parameter name from arrow function or function expression
-        if (
-          Node.isArrowFunction(initializer) ||
-          Node.isFunctionExpression(initializer)
-        ) {
-          const params = initializer.getParameters();
-          if (params.length > 0) {
-            paramName = params[0].getName();
-          }
-
-          // Get the body of the selector
-          const body = initializer.getBody();
-
-          if (Node.isBlock(body)) {
-            // Skip transformation for block body selectors - they're too complex
-            return;
-          }
-
-          // Arrow function without braces - safe to transform
-          const selectorBody = body.getText();
-
-          // Only remove optional chaining on the root parameter, preserve it for nested properties
-          const escapedParamName = paramName.replace(
-            // Escape special characters in the parameter name
-            /[.*+?^${}()|[\]\\]/g,
-            "\\$&",
-          );
-          const cleanedSelectorBody = selectorBody.replace(
-            new RegExp(`${escapedParamName}\\?\\.`, "g"),
-            `${paramName}.`,
-          );
-
-          // Create the new selector with loading state handling (single line for better formatting)
-          const newSelector = `(${paramName}) => ${paramName}.$isLoaded ? ${cleanedSelectorBody} : ${paramName}.$jazz.loadingState === "loading" ? undefined : null`;
-
-          selectProperty.setInitializer(newSelector);
-        }
-      } else {
+      if (!selectProperty) {
         // Hook WITHOUT existing selector - add one
         // But first check if the parameter name from existing selector should be used
         const newSelector = `(${paramName}) => ${paramName}.$isLoaded ? ${paramName} : ${paramName}.$jazz.loadingState === "loading" ? undefined : null`;
@@ -590,7 +640,7 @@ function migrateMaybeLoadedIfStatements(sourceFile: SourceFile) {
   });
 }
 
-export function runTransform(projectPath: string) {
+function singleRun(projectPath: string) {
   let project: Project;
 
   if (fs.existsSync(`${projectPath}/tsconfig.json`)) {
@@ -651,4 +701,20 @@ export function runTransform(projectPath: string) {
   });
 
   return changed;
+}
+
+// Run multiple times, because the types get fixed after each run
+export function runTransform(projectPath: string): void {
+  let runCount = 1;
+
+  while (singleRun(projectPath)) {
+    runCount++;
+
+    if (runCount > 5) {
+      console.log("Ran 5 times, stopping");
+      break;
+    }
+  }
+
+  console.log(`Ran ${runCount} times`);
 }

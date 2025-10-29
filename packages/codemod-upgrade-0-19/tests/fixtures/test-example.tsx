@@ -190,7 +190,7 @@ function HookWithExistingExpressionSelector() {
   //      ? undefined
   //      : null
   // });
-  const profileName = useAccount(MyAccount, {
+  const profileName = useAccountWithSelector(MyAccount, {
     resolve: { profile: true },
     select: (account) => account?.profile?.name,
   });
@@ -201,7 +201,7 @@ function HookWithExistingExpressionSelector() {
 // Hook with existing block selector
 function HookWithExistingBlockSelector() {
   // Skip migration for block body selectors
-  const profileName = useAccount(MyAccount, {
+  const profileName = useAccountWithSelector(MyAccount, {
     resolve: { profile: true },
     select: (account) => {
       return account?.profile.name;
@@ -267,7 +267,7 @@ async function MaybeLoadedNestedCoValueIfCheck() {
     resolve: true,
   });
 
-  if (!account.$isLoaded) {
+  if (!account) {
     return "Loading...";
   }
 
