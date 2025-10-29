@@ -7,6 +7,7 @@ import { isCoValue } from "../typeUtils/isCoValue.js";
 import { RawAccountID } from "./account.js";
 import type { RawGroup } from "./group.js";
 import { Transaction } from "../coValueCore/verifiedState.js";
+import { CoMapPack, CoMapPackImplementation } from "../pack/coMap.js";
 
 type MapOp<K extends string, V extends JsonValue | undefined> = {
   txID: TransactionID;
@@ -17,16 +18,23 @@ type MapOp<K extends string, V extends JsonValue | undefined> = {
 };
 // TODO: add after TransactionID[] for conflicts/ordering
 
+export type MapOpPayloadDel<K extends string> = {
+  op: "del";
+  key: K;
+};
+
+export type MapOpPayloadSet<
+  K extends string,
+  V extends JsonValue | undefined,
+> = {
+  op: "set";
+  key: K;
+  value: V;
+};
+
 export type MapOpPayload<K extends string, V extends JsonValue | undefined> =
-  | {
-      op: "set";
-      key: K;
-      value: V;
-    }
-  | {
-      op: "del";
-      key: K;
-    };
+  | MapOpPayloadSet<K, V>
+  | MapOpPayloadDel<K>;
 
 export class RawCoMapView<
   Shape extends { [key: string]: JsonValue | undefined } = {
@@ -74,6 +82,8 @@ export class RawCoMapView<
     return this.knownTransactions.size;
   }
 
+  pack: CoMapPack<keyof Shape & string, Shape[keyof Shape]>;
+
   /** @internal */
   constructor(
     core: AvailableCoValueCore,
@@ -89,6 +99,7 @@ export class RawCoMapView<
     this.ops = {};
     this.latest = {};
     this.knownTransactions = new Set<Transaction>();
+    this.pack = new CoMapPackImplementation();
 
     this.processNewTransactions();
   }
@@ -114,7 +125,13 @@ export class RawCoMapView<
       NonNullable<(typeof ops)[keyof typeof ops]>
     >();
 
-    for (const { txID, changes, madeAt, tx } of newValidTransactions) {
+    for (const {
+      txID,
+      changes: changesPacked,
+      madeAt,
+      tx,
+    } of newValidTransactions) {
+      const changes = this.pack.unpackChanges(changesPacked);
       for (let changeIdx = 0; changeIdx < changes.length; changeIdx++) {
         const change = changes[changeIdx] as MapOpPayload<
           keyof Shape & string,
@@ -375,19 +392,24 @@ export class RawCoMap<
     key: K,
     value: Shape[K],
     privacy: "private" | "trusting" = "private",
+    options?: {
+      disablePacking?: boolean;
+    },
   ): void {
     if (this.isTimeTravelEntity()) {
       throw new Error("Cannot set value on a time travel entity");
     }
 
+    const changes: MapOpPayload<K, Shape[K]>[] = [
+      {
+        op: "set",
+        key,
+        value: (isCoValue(value) ? value.id : value) as Shape[K],
+      },
+    ];
+
     this.core.makeTransaction(
-      [
-        {
-          op: "set",
-          key,
-          value: isCoValue(value) ? value.id : value,
-        },
-      ],
+      options?.disablePacking ? changes : this.pack.packChanges(changes),
       privacy,
     );
 
@@ -397,17 +419,23 @@ export class RawCoMap<
   assign(
     entries: Partial<Shape>,
     privacy: "private" | "trusting" = "private",
+    options?: {
+      disablePacking?: boolean;
+    },
   ): void {
     if (this.isTimeTravelEntity()) {
       throw new Error("Cannot set value on a time travel entity");
     }
 
-    this.core.makeTransaction(
+    const changes: MapOpPayloadSet<keyof Shape & string, Shape[keyof Shape]>[] =
       Object.entries(entries).map(([key, value]) => ({
         op: "set",
         key,
         value: isCoValue(value) ? value.id : value,
-      })),
+      }));
+
+    this.core.makeTransaction(
+      options?.disablePacking ? changes : this.pack.packChanges(changes),
       privacy,
     );
 
@@ -425,18 +453,23 @@ export class RawCoMap<
   delete(
     key: keyof Shape & string,
     privacy: "private" | "trusting" = "private",
+    options?: {
+      disablePacking?: boolean;
+    },
   ) {
     if (this.isTimeTravelEntity()) {
       throw new Error("Cannot delete value on a time travel entity");
     }
 
+    const changes: MapOpPayloadDel<keyof Shape & string>[] = [
+      {
+        op: "del",
+        key,
+      },
+    ];
+
     this.core.makeTransaction(
-      [
-        {
-          op: "del",
-          key,
-        },
-      ],
+      options?.disablePacking ? changes : this.pack.packChanges(changes),
       privacy,
     );
 

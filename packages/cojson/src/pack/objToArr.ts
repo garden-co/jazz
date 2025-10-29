@@ -17,6 +17,7 @@ export const ENCODING_MAP_PRIMITIVES_VALUES = {
   null: 0,
   false: 4,
   true: 5,
+  undefined: 6,
 } as const;
 
 /**
@@ -166,15 +167,15 @@ export function packObjectToArr(
   keys: string[],
   json: JsonObject,
   skipEncodingIndexes?: number[],
-) {
-  const arr = new Array<JsonValue>(keys.length);
+): JsonValue[] {
+  const arr = new Array<JsonValue | undefined>(keys.length);
   for (let i = 0; i < keys.length; i++) {
-    arr[i] = json[keys[i]!] ?? null;
+    arr[i] = json[keys[i]!];
   }
 
   // remove trailing nulls
   for (let i = arr.length - 1; i >= 0; i--) {
-    if (arr[i] === null) {
+    if (arr[i] === undefined) {
       arr.pop();
     } else {
       break;
@@ -194,10 +195,12 @@ export function packObjectToArr(
       arr[i] = ENCODING_MAP_PRIMITIVES_VALUES.false;
     } else if (arr[i] === true) {
       arr[i] = ENCODING_MAP_PRIMITIVES_VALUES.true;
+    } else if (arr[i] === undefined) {
+      arr[i] = ENCODING_MAP_PRIMITIVES_VALUES.undefined;
     }
   }
 
-  return arr;
+  return arr as JsonValue[];
 }
 
 /**
@@ -246,14 +249,16 @@ export function unpackArrToObject(
       obj[key] = data;
       continue;
     }
-    // Skip null, undefined, or 0 (used as placeholder for missing values)
-    if (data === null || data === undefined || data === 0) {
+    // Skip undefined, it's used as placeholder for missing values
+    if (data === ENCODING_MAP_PRIMITIVES_VALUES.undefined) {
       continue;
     }
     if (data === ENCODING_MAP_PRIMITIVES_VALUES.false) {
       obj[key] = false;
     } else if (data === ENCODING_MAP_PRIMITIVES_VALUES.true) {
       obj[key] = true;
+    } else if (data === ENCODING_MAP_PRIMITIVES_VALUES.null) {
+      obj[key] = null;
     } else {
       obj[key] = data;
     }
@@ -339,7 +344,7 @@ export function packArrToObjectCoList<T extends JsonObject>(
   const arrData = packObjectToArr(
     LIST_TO_KEYS_MAP[item.op],
     // To save less data, we remove the op key for app operations. It's default value.
-    item.op === "app" ? { ...item, op: null } : item,
+    item.op === "app" ? { ...item, op: undefined } : item,
     [0],
   );
   if (item.op !== "app") {

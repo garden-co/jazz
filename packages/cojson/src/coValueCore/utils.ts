@@ -3,6 +3,7 @@ import { getGroupDependentKey } from "../ids.js";
 import { RawCoID, SessionID } from "../ids.js";
 import { Stringified, parseJSON } from "../jsonStringify.js";
 import { JsonValue } from "../jsonValue.js";
+import { CoMapPackImplementation } from "../pack/coMap.js";
 import { NewContentMessage } from "../sync.js";
 import { accountOrAgentIDfromSessionID } from "../typeUtils/accountOrAgentIDfromSessionID.js";
 import { isAccountID } from "../typeUtils/isAccountID.js";
@@ -36,6 +37,8 @@ export function getDependenciesFromSessions(
   }
 }
 
+const mapPack = new CoMapPackImplementation();
+
 export function getDependenciesFromGroupRawTransactions(
   transactions: Iterable<Transaction>,
   deps = new Set<RawCoID>(),
@@ -43,7 +46,7 @@ export function getDependenciesFromGroupRawTransactions(
   for (const tx of transactions) {
     if (tx.privacy !== "trusting") continue;
 
-    const changes = safeParseChanges(tx.changes);
+    const changes = mapPack.unpackChanges(safeParseChanges(tx.changes));
     for (const change of changes) {
       if (
         change &&

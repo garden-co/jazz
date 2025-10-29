@@ -37,7 +37,9 @@ describe("CoPlainTextPackImplementation", () => {
       // First element is now packed as ["H", "start", 1, true]
       expect((result[0] as any)[0]).toBe("H"); // value
       expect((result[0] as any)[1]).toBe("start"); // after
-      expect((result[0] as any)[2]).toBe(0); // op (0 is null so we use the default value = "app")
+      expect((result[0] as any)[2]).toBe(
+        ENCODING_MAP_PRIMITIVES_VALUES.undefined,
+      ); // op (0 is null so we use the default value = "app")
       expect((result[0] as any)[3]).toBe(ENCODING_MAP_PRIMITIVES_VALUES.true); // compacted
       expect(result[1]).toBe("ello"); // Remaining characters concatenated
     });
@@ -56,7 +58,9 @@ describe("CoPlainTextPackImplementation", () => {
       expect(Array.isArray(result[0])).toBe(true);
       expect((result[0] as any)[0]).toBe("a"); // value
       expect((result[0] as any)[1]).toBe(opID); // after
-      expect((result[0] as any)[2]).toBe(0); // op (1 = "app")
+      expect((result[0] as any)[2]).toBe(
+        ENCODING_MAP_PRIMITIVES_VALUES.undefined,
+      ); // op (1 = "app")
       expect((result[0] as any)[3]).toBe(ENCODING_MAP_PRIMITIVES_VALUES.true); // compacted
       expect(result[1]).toBe("bc");
     });
@@ -592,7 +596,9 @@ describe("CoPlainTextPackImplementation", () => {
       expect(result.length).toBe(1);
       expect(Array.isArray(result[0])).toBe(true);
       expect((result[0] as any)[0]).toBe(opID); // insertion
-      expect((result[0] as any)[1]).toBe(0); // no compacted flag (trailing)
+      expect((result[0] as any)[1]).toBe(
+        ENCODING_MAP_PRIMITIVES_VALUES.undefined,
+      ); // no compacted flag (trailing)
       expect((result[0] as any)[2]).toBe(3); // op (3 = "del")
     });
 

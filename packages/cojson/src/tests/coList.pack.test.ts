@@ -34,7 +34,9 @@ describe("CoListPackImplementation", () => {
       // First element is now packed as ["item1", "start", 1, true]
       expect((result[0] as any)[0]).toBe("item1"); // value
       expect((result[0] as any)[1]).toBe("start"); // after
-      expect((result[0] as any)[2]).toBe(0); // op (0 is null so we use the default value = "app")
+      expect((result[0] as any)[2]).toBe(
+        ENCODING_MAP_PRIMITIVES_VALUES.undefined,
+      ); // op (undefined so we use the default value = "app")
       expect((result[0] as any)[3]).toBe(ENCODING_MAP_PRIMITIVES_VALUES.true); // compacted
       expect(result[1]).toBe("item2");
       expect(result[2]).toBe("item3");
@@ -55,7 +57,9 @@ describe("CoListPackImplementation", () => {
       expect(Array.isArray(result[0])).toBe(true);
       expect((result[0] as any)[0]).toBe("a"); // value
       expect((result[0] as any)[1]).toBe(opID); // after
-      expect((result[0] as any)[2]).toBe(0); // op (0 is null so we use the default value = "app")
+      expect((result[0] as any)[2]).toBe(
+        ENCODING_MAP_PRIMITIVES_VALUES.undefined,
+      ); // op (undefined so we use the default value = "app")
       expect((result[0] as any)[3]).toBe(ENCODING_MAP_PRIMITIVES_VALUES.true); // compacted
       expect(result[1]).toBe("b");
       expect(result[2]).toBe("c");
@@ -188,7 +192,9 @@ describe("CoListPackImplementation", () => {
         done: false,
       }); // value
       expect((result[0] as any)[1]).toBe("start"); // after
-      expect((result[0] as any)[2]).toBe(0); // op (0 is null so we use the default value = "app")
+      expect((result[0] as any)[2]).toBe(
+        ENCODING_MAP_PRIMITIVES_VALUES.undefined,
+      ); // op (undefined so we use the default value = "app")
       expect((result[0] as any)[3]).toBe(ENCODING_MAP_PRIMITIVES_VALUES.true); // compacted
       expect(result[1]).toEqual({ id: 2, title: "Task 2", done: true });
       expect(result[2]).toEqual({ id: 3, title: "Task 3", done: false });
@@ -211,7 +217,9 @@ describe("CoListPackImplementation", () => {
       expect(Array.isArray(result[0])).toBe(true);
       expect((result[0] as any)[0]).toBe(0); // value
       expect((result[0] as any)[1]).toBe("start"); // after
-      expect((result[0] as any)[2]).toBe(0); // op (0 is null so we use the default value = "app")
+      expect((result[0] as any)[2]).toBe(
+        ENCODING_MAP_PRIMITIVES_VALUES.undefined,
+      ); // op (undefined so we use the default value = "app")
       expect((result[0] as any)[3]).toBe(ENCODING_MAP_PRIMITIVES_VALUES.true); // compacted
       for (let i = 1; i < result.length; i++) {
         expect(result[i]).toBe(i);
