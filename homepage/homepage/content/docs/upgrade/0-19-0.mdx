@@ -182,6 +182,8 @@ The goal of this codemod is to get you through 80% of the work quickly. After ru
 
 Note that some edge cases may be migrated incorrectly, and some code patterns (e.g. optional chaining) may not be detected by the codemod.
 
+We've found AI coding assistants like Cursor to be effective at fixing remaining issues.
+
 ## Known Issue: TypeScript Iterator Bug
 
 While introducing explicit loading states, we discovered [a TypeScript bug](https://github.com/microsoft/TypeScript/issues/62462) that prevents iterating over CoLists using methods that require an iterator, when these CoLists are loaded inside other CoValues (CoMaps, other CoLists, or CoFeeds).
