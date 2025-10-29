@@ -201,7 +201,7 @@ function HookWithExistingExpressionSelector() {
   // });
   const profileName = useAccount(MyAccount, {
     resolve: { profile: true },
-    select: (account) => account.$isLoaded ? account.profile.name : account.$jazz.loadingState === "loading" ? undefined : null,
+    select: (account) => account.$isLoaded ? account.profile?.name : account.$jazz.loadingState === "loading" ? undefined : null,
   });
 
   return <div>{profileName}</div>;

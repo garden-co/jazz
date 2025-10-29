@@ -446,9 +446,16 @@ function migrateLoadingStateHandling(sourceFile: SourceFile) {
           // Arrow function without braces - safe to transform
           const selectorBody = body.getText();
 
-          // Remove optional chaining from the selector body since we're checking $isLoaded
-          // Convert account?.profile?.name to account.profile.name
-          const cleanedSelectorBody = selectorBody.replace(/\?\.(?=\w)/g, ".");
+          // Only remove optional chaining on the root parameter, preserve it for nested properties
+          const escapedParamName = paramName.replace(
+            // Escape special characters in the parameter name
+            /[.*+?^${}()|[\]\\]/g,
+            "\\$&",
+          );
+          const cleanedSelectorBody = selectorBody.replace(
+            new RegExp(`${escapedParamName}\\?\\.`, "g"),
+            `${paramName}.`,
+          );
 
           // Create the new selector with loading state handling (single line for better formatting)
           const newSelector = `(${paramName}) => ${paramName}.$isLoaded ? ${cleanedSelectorBody} : ${paramName}.$jazz.loadingState === "loading" ? undefined : null`;
