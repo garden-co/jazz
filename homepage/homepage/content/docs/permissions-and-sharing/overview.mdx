@@ -97,7 +97,7 @@ it will be removed in a future release.
 Here's how you can create a `Group`.
 
 <CodeGroup>
-```tsx twoslash
+```tsx
 import { Group } from "jazz-tools";
 
 const group = Group.create();
@@ -114,7 +114,7 @@ But if you already know their ID, you can add them directly (see below).
 You can add group members by ID by using `Account.load` and `Group.addMember`.
 
 <CodeGroup>
-```tsx twoslash
+```tsx
 const bobsID = "co_z123";
 
 // ---cut---
@@ -130,11 +130,11 @@ if (bob.$isLoaded) {
 ```
 </CodeGroup>
 
-**Note:** 
+**Note:**
 - Both `Account.load(id)` and `co.account().load(id)` do the same thing — they load an account from its ID.
 
 <CodeGroup>
-```tsx twoslash
+```tsx
 const bobsID = "co_z123";
 import { Group } from "jazz-tools";
 const group = Group.create();
@@ -156,7 +156,7 @@ if (bob.$isLoaded) {
 To change a member's role, use the `addMember` method.
 
 <CodeGroup>
-```ts twoslash
+```ts
 import { Group } from "jazz-tools";
 import { createJazzTestAccount } from 'jazz-tools/testing';
 const bob = await createJazzTestAccount();
@@ -175,7 +175,7 @@ Bob just went from a writer to a reader.
 To remove a member, use the `removeMember` method.
 
 <CodeGroup>
-```ts twoslash
+```ts
 import { Group } from "jazz-tools";
 import { createJazzTestAccount } from 'jazz-tools/testing';
 const bob = await createJazzTestAccount();
@@ -195,7 +195,7 @@ Rules:
 You can get the group of an existing CoValue by using `coValue.$jazz.owner`.
 
 <CodeGroup>
-```ts twoslash
+```ts
 import { createJazzTestAccount } from 'jazz-tools/testing';
 import { co, z } from "jazz-tools";
 const existingCoValue = await createJazzTestAccount();
@@ -218,7 +218,7 @@ const newValue = MyCoMap.create(
 You can check the permissions of an account on a CoValue by using the `canRead`, `canWrite`, `canManage` and `canAdmin` methods.
 
 <CodeGroup>
-```ts twoslash
+```ts
 import { co, z } from "jazz-tools";
 
 const MyCoMap = co.map({
@@ -229,7 +229,7 @@ const value = await MyCoMap.create({ color: "red"})
 const me = await co.account().getMe();
 
 if (me.canAdmin(value)) {
-  console.log("I can add users of any role"); 
+  console.log("I can add users of any role");
 } else if (me.canManage(value)) {
   console.log("I can share value with others");
 } else if (me.canWrite(value)) {
@@ -245,7 +245,7 @@ if (me.canAdmin(value)) {
 To check the permissions of another account, you need to load it first:
 
 <CodeGroup>
-```ts twoslash
+```ts
 import { co, z } from "jazz-tools";
 import { createJazzTestAccount } from 'jazz-tools/testing';
 

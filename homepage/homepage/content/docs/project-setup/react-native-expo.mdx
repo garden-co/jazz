@@ -72,7 +72,7 @@ npx expo install --fix
 If you are not working within a monorepo, create a new file `metro.config.js` in the root of your project with the following content:
 
 <CodeGroup>
-```ts twoslash
+```ts
 // @noErrors: 2304
 // metro.config.js
 const { getDefaultConfig } = require("expo/metro-config");
@@ -93,7 +93,7 @@ module.exports = withNativeWind(config, { input: "./src/global.css" });
 For monorepos, use the following `metro.config.js`:
 
 <CodeGroup>
-```ts twoslash
+```ts
 // @noErrors: 2304
 // metro.config.js
 const { getDefaultConfig } = require("expo/metro-config");
@@ -146,7 +146,7 @@ For more information, refer to [this Expo monorepo example](https://github.com/b
 Create a file `polyfills.js` at the project root with the following content:
 
 <CodeGroup>
-```ts twoslash
+```ts
 // @noErrors: 7016
 // polyfills.js
 import { polyfillGlobal } from 'react-native/Libraries/Utilities/PolyfillFunctions';

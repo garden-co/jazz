@@ -21,7 +21,7 @@ Our [Chat example app](https://jazz.tools/examples#chat) provides a complete imp
 The `<JazzReactProvider />` accepts several configuration options:
 
 <CodeGroup>
-```tsx twoslash
+```tsx
 // @filename: schema.ts
 import { co, z } from "jazz-tools";
 
@@ -43,7 +43,7 @@ import * as React from "react";
 /**
  * Use your email as a temporary key, or get a free
  * API Key at dashboard.jazz.tools for higher limits.
- * 
+ *
  * @link https://dashboard.jazz.tools
 */
 const apiKey = "you@example.com";
@@ -79,11 +79,11 @@ export function MyApp({ children }: { children: React.ReactNode }) {
 The `sync` property configures how your application connects to the Jazz network:
 
 <CodeGroup>
-```tsx twoslash
+```tsx
 /**
  * Use your email as a temporary key, or get a free
  * API Key at dashboard.jazz.tools for higher limits.
- * 
+ *
  * @link https://dashboard.jazz.tools
 */
 const apiKey = "you@example.com";
@@ -107,7 +107,7 @@ See [Authentication States](/docs/key-features/authentication/authentication-sta
 The `AccountSchema` property defines your application's account structure:
 
 <CodeGroup>
-```tsx twoslash
+```tsx
 
 // @filename: schema.ts
 import { co, z } from "jazz-tools";
@@ -159,10 +159,10 @@ export function MyApp ({ children }: { children: React.ReactNode }) {
 The provider accepts these additional options:
 
 <CodeGroup>
-```tsx twoslash
+```tsx
 /**
  * Get a free API Key at dashboard.jazz.tools, or use your email as a temporary key.
- * 
+ *
  * @link https://dashboard.jazz.tools
 */
 const apiKey = "you@example.com";

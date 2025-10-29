@@ -19,7 +19,7 @@ Create a CoMap shared by the users of the same organization to act as a root (or
 For this example, users within an `Organization` will be sharing `Project`s.
 
 <CodeGroup>
-```ts twoslash
+```ts
 import { co, z } from "jazz-tools";
 // ---cut---
 // schema.ts
@@ -45,7 +45,7 @@ Learn more about [defining schemas](/docs/core-concepts/covalues/overview).
 Let's add the list of `Organization`s to the user's Account `root` so they can access them.
 
 <CodeGroup>
-```ts twoslash
+```ts
 import { Group, co, z } from "jazz-tools";
 export const Project = co.map({
   name: z.string(),
@@ -110,7 +110,7 @@ Here's how you can generate an [invite link](/docs/permissions-and-sharing/shari
 When the user accepts the invite, add the `Organization` to the user's `organizations` list.
 
 <CodeGroup>
-```tsx twoslash
+```tsx
 import * as React from "react";
 import { useAcceptInvite, useAccount } from "jazz-tools/react";
 import { co, z } from "jazz-tools";

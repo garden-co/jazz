@@ -36,7 +36,7 @@ Let's say we have a CoValue called `BubbleTeaOrder`. We can create a partial ver
 `PartialBubbleTeaOrder`, which has some fields made optional so we can build up the data incrementally.
 
 <CodeGroup>
-```tsx twoslash
+```tsx
 import { co, z } from "jazz-tools";
 // ---cut---
 // schema.ts
@@ -55,7 +55,7 @@ export type PartialBubbleTeaOrder = co.loaded<typeof PartialBubbleTeaOrder>;
 Let's write the form component that will be used for both create and update.
 
 <CodeGroup>
-```tsx twoslash
+```tsx
 import * as React from "react";
 import { co, z } from "jazz-tools";
 
@@ -99,7 +99,7 @@ export function OrderForm({
 To make the edit form, simply pass the `BubbleTeaOrder`. Changes are automatically saved as you type.
 
 <CodeGroup>
-```tsx twoslash
+```tsx
 import { co, z } from "jazz-tools";
 import { useCoState } from "jazz-tools/react";
 import * as React from "react";
@@ -152,7 +152,7 @@ For the create form, we need to:
 Here's how that looks like:
 
 <CodeGroup>
-```tsx twoslash
+```tsx
 import { co, z } from "jazz-tools";
 import { useCoState, useAccount } from "jazz-tools/react";
 import * as React from "react";

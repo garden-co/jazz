@@ -60,7 +60,7 @@ npm i -S jazz-tools
 If you are not working within a monorepo, create a new file `metro.config.js` in the root of your project with the following content:
 
 <CodeGroup>
-```ts twoslash
+```ts
 // metro.config.js
 const { getDefaultConfig, mergeConfig } = require('@react-native/metro-config');
 
@@ -80,7 +80,7 @@ module.exports = mergeConfig(getDefaultConfig(__dirname), config);
 For monorepos, use the following `metro.config.js`:
 
 <CodeGroup>
-```ts twoslash
+```ts
 // metro.config.js
 const path = require("path");
 const { makeMetroConfig } = require("@rnx-kit/metro-config");
@@ -141,7 +141,7 @@ module.exports = makeMetroConfig({
 Create a file `polyfills.js` at the project root with the following content:
 
 <CodeGroup>
-```ts twoslash
+```ts
 // @noErrors: 7016
 // polyfills.js
 import { polyfillGlobal } from 'react-native/Libraries/Utilities/PolyfillFunctions';
@@ -157,7 +157,7 @@ import 'react-native-get-random-values'; // polyfill getRandomValues
 Update `index.js`:
 
 <CodeGroup>
-```ts twoslash
+```ts
 // @noErrors: 2307
 // index.js
 import { AppRegistry } from 'react-native';

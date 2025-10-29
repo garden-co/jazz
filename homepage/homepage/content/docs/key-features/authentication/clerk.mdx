@@ -32,7 +32,7 @@ This authentication method is not fully local-first, as login and signup need to
 Use `<JazzReactProviderWithClerk />` to wrap your app:
 
 <CodeGroup>
-```tsx twoslash
+```tsx
 import * as React from "react";
 import { createRoot } from "react-dom/client";
 
@@ -82,7 +82,7 @@ createRoot(document.getElementById("root")!).render(
 Use `<JazzExpoProviderWithClerk />` to wrap your app.
 
 <CodeGroup>
-```tsx twoslash
+```tsx
 import * as React from "react";
 
 /**
@@ -152,7 +152,7 @@ export default function RootLayout() {
 
 <ContentByFramework framework="react">
 <CodeGroup>
-```tsx twoslash
+```tsx
 import * as React from "react";
 // ---cut---
 import { SignInButton } from "@clerk/clerk-react";
@@ -175,7 +175,7 @@ export function AuthButton() {
 
 <ContentByFramework framework="react-native-expo">
 <CodeGroup>
-```tsx twoslash
+```tsx
 import * as React from "react";
 // ---cut---
 import { useSignIn } from "@clerk/clerk-expo";

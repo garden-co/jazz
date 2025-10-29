@@ -47,7 +47,7 @@ You can use `startWorker` to run a Server Worker. Similarly to setting up a clie
 The migration defined in the `AccountSchema` will be executed every time the worker starts, the same way as it would be for a client-side Jazz context.
 
 <CodeGroup>
-```ts twoslash
+```ts
 import { co } from "jazz-tools";
 const MyWorkerAccount = co.account();
 type MyWorkerAccount = co.loaded<typeof MyWorkerAccount>;

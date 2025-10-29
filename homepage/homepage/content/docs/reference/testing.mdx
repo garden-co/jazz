@@ -16,7 +16,7 @@ Jazz provides some key helpers that you can use to simplify writing complex test
 This should normally be the first thing you call in your test setup, for example in a `beforeEach` or `beforeAll` block. This function sets up an in-memory sync node for the test session, which is needed in case you want to test data synchronisation functionality. Test data is not persisted, and no clean-up is needed between test runs. 
 
 <CodeGroup>
-```ts twoslash
+```ts
 import { co } from 'jazz-tools';
 import { beforeEach, describe, expect, test } from "vitest";
 import { createJazzTestAccount, setupJazzTestSync } from 'jazz-tools/testing';
@@ -51,7 +51,7 @@ You can use `createJazzTestAccount()` to create an account and link it to the sy
 You can use it like this:
 
 <CodeGroup>
-```ts twoslash
+```ts
 import { co } from 'jazz-tools';
 import { createJazzTestAccount } from 'jazz-tools/testing';
 const MyAccountSchema = co.account({
@@ -74,7 +74,7 @@ This option allows you to provide a custom account schema to the utility to be u
 This option (disabled by default) allows you to quickly switch to the newly created account when it is created.
 
 <CodeGroup preferWrap>
-```ts twoslash
+```ts
 import { co } from 'jazz-tools';
 import { createJazzTestAccount } from 'jazz-tools/testing';
 // ---cut---
@@ -100,7 +100,7 @@ Use `setActiveAccount()` to switch between active accounts during a test run.
 You can use this to test your app with multiple accounts.
 
 <CodeGroup preferWrap>
-```ts twoslash
+```ts
 import { co, z } from 'jazz-tools';
 import { createJazzTestAccount, setActiveAccount } from 'jazz-tools/testing';
 const MyMap = co.map({
@@ -145,7 +145,7 @@ expect(() => myMapFromAccount2?.$jazz.set('text', 'Updated by account2'))
 If you need to test how a particular piece of code behaves when run without an active account.
 
 <CodeGroup preferWrap>
-```ts twoslash
+```ts
 import { co } from 'jazz-tools';
 import { createJazzTestAccount, runWithoutActiveAccount } from 'jazz-tools/testing';
 function expect (actual?: any) {

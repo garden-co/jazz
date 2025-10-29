@@ -41,7 +41,7 @@ You can detect the current authentication state using `useAgent` and `useIsAuthe
 
 <ContentByFramework framework="react">
 <CodeGroup>
-```tsx twoslash
+```tsx
 import * as React from "react";
 // ---cut---
 import { useAgent, useIsAuthenticated } from "jazz-tools/react";
@@ -76,7 +76,7 @@ However, if a user has been using your app anonymously and later logs in with an
 This example from our [music player example app](https://github.com/garden-co/jazz/tree/main/examples/music-player) shows how to migrate data:
 
 <CodeGroup>
-```ts twoslash
+```ts
 import { co, z, Group } from "jazz-tools";
 
 const MusicTrack = co.map({
@@ -160,7 +160,7 @@ You can control network sync with [Providers](/docs/project-setup/providers/) ba
 
 <ContentByFramework framework="react">
 <CodeGroup>
-```tsx twoslash
+```tsx
 import * as React from "react";
 import { JazzReactProvider } from "jazz-tools/react";
 
@@ -198,7 +198,7 @@ For example, you may want to give users with Anonymous Authentication the opport
 
 <ContentByFramework framework="react">
 <CodeGroup>
-```tsx twoslash
+```tsx
 import * as React from "react";
 import { JazzReactProvider } from "jazz-tools/react";
 
@@ -232,7 +232,7 @@ You can configure Guest Mode access with the `guestMode` prop for [Providers](/d
 
 <ContentByFramework framework="react">
 <CodeGroup>
-```tsx twoslash
+```tsx
 import * as React from "react";
 import { JazzReactProvider } from "jazz-tools/react";
 

@@ -11,7 +11,7 @@ import { Alert, CodeGroup, ContentByFramework } from '@/components/forMdx';
 You can share CoValues publicly by setting the `owner` to a `Group`, and granting access to "everyone".
 
 <CodeGroup>
-```ts twoslash
+```ts
 import { Group } from "jazz-tools";
 // ---cut---
 const group = Group.create();
@@ -22,7 +22,7 @@ group.addMember("everyone", "writer");
 You can also use `makePublic(role)` alias to grant access to everyone with a specific role (defaults to `reader`).
 
 <CodeGroup>
-```ts twoslash
+```ts
 import { Group } from "jazz-tools";
 // ---cut---
 const group = Group.create();
@@ -44,7 +44,7 @@ This is used in the [todo example](https://github.com/garden-co/jazz/tree/main/e
 
 <ContentByFramework framework={["react", "react-native", "react-native-expo", "vue", "svelte"]}>
 <CodeGroup>
-```ts twoslash
+```ts
 import { co, z } from "jazz-tools";
 
 const Organization = co.map({
@@ -66,7 +66,7 @@ as done [here](https://github.com/garden-co/jazz/tree/main/examples/todo/src/2_m
 
 <ContentByFramework framework={["react"]}>
 <CodeGroup>
-```ts twoslash
+```ts
 import { co, z } from "jazz-tools";
 
 const Organization = co.map({
@@ -90,7 +90,7 @@ useAcceptInvite({
 
 <ContentByFramework framework={["react-native"]}>
 <CodeGroup>
-```ts twoslash
+```ts
 import { co, z } from "jazz-tools";
 
 const Organization = co.map({
@@ -114,7 +114,7 @@ useAcceptInviteNative({
 
 <ContentByFramework framework={["react-native-expo"]}>
 <CodeGroup>
-```ts twoslash
+```ts
 import { co, z } from "jazz-tools";
 
 const Organization = co.map({
@@ -138,7 +138,7 @@ useAcceptInviteNative({
 
 <ContentByFramework framework={["svelte"]}>
 <CodeGroup>
-```ts twoslash
+```ts
 import { co, z } from "jazz-tools";
 
 const Organization = co.map({
@@ -164,7 +164,7 @@ You can accept an invitation programmatically by using the `acceptInvite` method
 Pass the ID of the CoValue you're being invited to, the secret from the invite link, and the schema of the CoValue.
 
 <CodeGroup>
-```ts twoslash
+```ts
 import { co, z, Account } from "jazz-tools";
 
 const Organization = co.map({
@@ -217,7 +217,7 @@ However, Administrators can review and approve these requests.
 Create the data models.
 
 <CodeGroup>
-```ts twoslash
+```ts
 import { co, z } from "jazz-tools";
 // ---cut---
 const JoinRequest = co.map({
@@ -232,7 +232,7 @@ const RequestsList = co.list(JoinRequest);
 Set up the request system with appropriate access controls.
 
 <CodeGroup>
-```ts twoslash
+```ts
 import { co, z, Group } from "jazz-tools";
 
 const JoinRequest = co.map({
@@ -274,7 +274,7 @@ async function sendJoinRequest(
 Using the write-only access users can submit requests that only administrators can review and approve.
 
 <CodeGroup>
-```ts twoslash
+```ts
 import { co, z, Group, } from "jazz-tools";
 
 const Account = co.account();

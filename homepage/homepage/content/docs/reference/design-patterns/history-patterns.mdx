@@ -10,7 +10,7 @@ Jazz's automatic history tracking enables powerful patterns for building collabo
 Build a complete audit trail showing all changes to your data:
 
 <CodeGroup>
-```ts twoslash
+```ts
 import { co, z } from 'jazz-tools'
 import { createJazzTestAccount } from 'jazz-tools/testing'
 const me = await createJazzTestAccount();
@@ -67,7 +67,7 @@ auditLog.forEach((entry) => {
 Show recent activity across your application:
 
 <CodeGroup>
-```ts twoslash
+```ts
 import { co, z } from 'jazz-tools'
 import { createJazzTestAccount } from 'jazz-tools/testing'
 const me = await createJazzTestAccount();
@@ -132,7 +132,7 @@ const recentActivity = getRecentActivity(myProjects, hourAgo);
 Show when something was last updated:
 
 <CodeGroup>
-```ts twoslash
+```ts
 import { co, z, CoMapEdit } from 'jazz-tools'
 import { createJazzTestAccount } from 'jazz-tools/testing'
 
@@ -182,7 +182,7 @@ console.log(lastUpdated?.message);
 Query history for specific events:
 
 <CodeGroup>
-```ts twoslash
+```ts
 import { co, z } from 'jazz-tools'
 import { createJazzTestAccount } from 'jazz-tools/testing'
 

@@ -11,7 +11,7 @@ Let's use the following schema to see how we can use the edit history.
 
 
 <CodeGroup>
-```ts twoslash
+```ts
 import { co, z } from "jazz-tools";
 // ---cut---
 const Task = co.map({
@@ -28,7 +28,7 @@ Every CoValue has a `$jazz.getEdits()` method that contains the complete history
 how to get the edit history for `task.status`:
 
 <CodeGroup>
-```ts twoslash
+```ts
 import { createJazzTestAccount } from "jazz-tools/testing";
 import { co, z } from "jazz-tools";
 
@@ -62,7 +62,7 @@ if (statusEdits && statusEdits.by?.profile.$isLoaded) {
 Each edit contains:
 
 <CodeGroup>
-```ts twoslash
+```ts
 import { co, z } from "jazz-tools";
 import { createJazzTestAccount } from "jazz-tools/testing";
 
@@ -92,7 +92,7 @@ edit?.madeAt    // Date when the change occurred
 Get the most recent change to a field:
 
 <CodeGroup>
-```ts twoslash
+```ts
 import { co, z } from "jazz-tools";
 import { createJazzTestAccount } from "jazz-tools/testing";
 
@@ -118,7 +118,7 @@ if (latest) {
 Get the complete history for a field:
 
 <CodeGroup>
-```ts twoslash
+```ts
 import { co, z } from "jazz-tools";
 import { createJazzTestAccount } from "jazz-tools/testing";
 
@@ -140,7 +140,7 @@ allStatusEdits.forEach((edit, index) => {
   console.log(`Edit ${index}: ${edit.value} at ${edit.madeAt.toISOString()}`);
 });
 // Edit 0: todo at 2025-05-22T13:00:00.000Z
-// Edit 1: in-progress at 2025-05-22T14:00:00.000Z  
+// Edit 1: in-progress at 2025-05-22T14:00:00.000Z
 // Edit 2: completed at 2025-05-22T15:30:00.000Z
 ```
 </CodeGroup>
@@ -150,7 +150,7 @@ allStatusEdits.forEach((edit, index) => {
 The first edit contains the initial value:
 
 <CodeGroup>
-```ts twoslash
+```ts
 import { co, z } from "jazz-tools";
 import { createJazzTestAccount } from "jazz-tools/testing";
 
@@ -176,7 +176,7 @@ console.log(`Started as: ${initialValue}`);
 To show created date and last updated date, use the `$jazz.createdAt` and `$jazz.lastUpdatedAt` getters.
 
 <CodeGroup>
-```tsx twoslash
+```tsx
 import { co, z } from "jazz-tools";
 const Task = co.map({
     title: z.string(),
@@ -199,7 +199,7 @@ console.log(new Date(task.$jazz.lastUpdatedAt));
 
 For practical implementations using history, see [History Patterns](/docs/reference/design-patterns/history-patterns):
 - Building audit logs
-- Creating activity feeds  
+- Creating activity feeds
 - Implementing undo/redo
 - Showing change indicators
 - Querying historical data

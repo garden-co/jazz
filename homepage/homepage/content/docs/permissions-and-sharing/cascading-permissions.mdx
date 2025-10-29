@@ -15,7 +15,7 @@ When a group is added as a member of another group, members of the added group w
 Here's how to add a group as a member of another group:
 
 <CodeGroup>
-```ts twoslash
+```ts
 import { Group } from "jazz-tools";
 // ---cut---
 const playlistGroup = Group.create();
@@ -36,7 +36,7 @@ When you add groups as members:
 Adding a group as a member of another is not limited in depth:
 
 <CodeGroup>
-```ts twoslash
+```ts
 import { Group } from "jazz-tools";
 // ---cut---
 const grandParentGroup = Group.create();
@@ -56,7 +56,7 @@ Members of the grandparent group will get access to all descendant groups based 
 
 If the account is already a member of the container group, it will get the more permissive role:
 <CodeGroup>
-```ts twoslash
+```ts
 import { Group } from "jazz-tools";
 import { createJazzTestAccount } from 'jazz-tools/testing';
 const bob = await createJazzTestAccount();
@@ -75,7 +75,7 @@ containingGroup.addMember(addedGroup);
 
 When adding a group to another group, only admin, writer and reader roles are inherited:
 <CodeGroup>
-```ts twoslash
+```ts
 import { Group } from "jazz-tools";
 import { createJazzTestAccount } from 'jazz-tools/testing';
 const bob = await createJazzTestAccount();
@@ -95,7 +95,7 @@ containingGroup.addMember(addedGroup);
 In some cases you might want to inherit all members from an added group but override their roles to the same specific role in the containing group. You can do so by passing an "override role" as a second argument to `addMember`:
 
 <CodeGroup>
-```ts twoslash
+```ts
 import { Group } from "jazz-tools";
 import { createJazzTestAccount } from 'jazz-tools/testing';
 const bob = await createJazzTestAccount();
@@ -114,7 +114,7 @@ billingGroup.addMember(organizationGroup, "reader");
 The "override role" works in both directions:
 
 <CodeGroup>
-```ts twoslash
+```ts
 import { Group } from "jazz-tools";
 import { createJazzTestAccount } from 'jazz-tools/testing';
 const alice = await createJazzTestAccount();
@@ -136,7 +136,7 @@ containingGroup.addMember(addedGroup, "writer");
 When you remove a member from an added group, they automatically lose access to all containing groups. We handle key rotation automatically to ensure security.
 
 <CodeGroup>
-```ts twoslash
+```ts
 import { Group } from "jazz-tools";
 import { createJazzTestAccount } from 'jazz-tools/testing';
 const bob = await createJazzTestAccount();
@@ -156,7 +156,7 @@ await addedGroup.removeMember(bob);
 You can remove a group from another group by using the `removeMember` method:
 
 <CodeGroup>
-```ts twoslash
+```ts
 import { Group } from "jazz-tools";
 // ---cut---
 const addedGroup = Group.create();
@@ -174,7 +174,7 @@ await containingGroup.removeMember(addedGroup);
 You can get all of the groups added to a group by calling the `getParentGroups` method:
 
 <CodeGroup>
-```ts twoslash
+```ts
 import { Group } from "jazz-tools";
 // ---cut---
 const containingGroup = Group.create();
@@ -191,7 +191,7 @@ When creating CoValues that contain other CoValues (or updating references to Co
 the necessary CoValues automatically but it will also manage their group ownership.
 
 <CodeGroup>
-```ts twoslash
+```ts
 import { co, z } from "jazz-tools";
 
 // ---cut---
@@ -218,7 +218,7 @@ are inherited from the CoValue that references them, but can also be modified in
 if needed.
 
 <CodeGroup>
-```ts twoslash
+```ts
 import { co, z, Group, Account } from "jazz-tools";
 
 const alice = {} as unknown as Account;
@@ -252,7 +252,7 @@ taskGroup.addMember(alice, "reader");
 If you prefer to manage permissions differently, you can always create CoValues explicitly:
 
 <CodeGroup>
-```ts twoslash
+```ts
 import { co, Group, z, Account } from "jazz-tools";
 
 const bob = {} as unknown as Account;
@@ -285,7 +285,7 @@ const board = Board.create({
 Here's a practical example of using group inheritance for team permissions:
 
 <CodeGroup>
-```ts twoslash
+```ts
 import { Group } from "jazz-tools";
 import { createJazzTestAccount } from 'jazz-tools/testing';
 const CEO = await createJazzTestAccount();

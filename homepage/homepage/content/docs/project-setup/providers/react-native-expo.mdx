@@ -19,7 +19,7 @@ import GetAPIKey from "@/components/docs/snippets/GetAPIKey.mdx";
 Wrap your app components with the `<JazzExpoProvider />` component:
 
 <CodeGroup>
-```tsx twoslash
+```tsx
 /**
  * Use your email as a temporary key, or get a free
  * API Key at dashboard.jazz.tools for higher limits.
@@ -73,7 +73,7 @@ Implementing PassphraseAuth is straightforward:
 3. Create simple registration and sign-in screens
 
 <CodeGroup>
-```tsx twoslash
+```tsx
 // @noErrors: 2307
 import React, { ReactNode } from "react";
 function SignInScreen({ auth }: { auth: any }) {
@@ -145,7 +145,7 @@ pnpm add react-native-quick-crypto@1.0.0-beta.18 react-native-nitro-modules reac
 Then add the following to your `JazzExpoProvider`:
 
 <CodeGroup>
-```tsx twoslash
+```tsx
 // @noErrors: 2307 2322
 import React, { ReactNode } from "react";
 function SignInScreen({ auth }: { auth: any }) {
@@ -171,7 +171,7 @@ function MyJazzProvider({ children }: { children: ReactNode }) {
 For configuration, use the RNQC Expo config plugin:
 
 <CodeGroup>
-```json twoslash
+```json
 // app.json
 {
   "expo": {
