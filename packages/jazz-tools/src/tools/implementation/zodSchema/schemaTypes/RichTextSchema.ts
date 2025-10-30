@@ -24,20 +24,21 @@ export function createCoreCoRichTextSchema(): CoreRichTextSchema {
   };
 }
 
-export class RichTextSchema<
-  DefaultResolveQuery extends CoreResolveQuery = false,
-> implements CoreRichTextSchema
+export class RichTextSchema<EagerlyLoaded extends boolean = false>
+  implements CoreRichTextSchema
 {
   readonly collaborative = true as const;
   readonly builtin = "CoRichText" as const;
 
+  private isEagerlyLoaded: EagerlyLoaded = false as EagerlyLoaded;
   /**
    * The default resolve query to be used when loading instances of this schema.
    * Defaults to `false`, meaning that no resolve query will be used by default.
    * @internal
    */
-  public defaultResolveQuery: DefaultResolveQuery =
-    false as DefaultResolveQuery;
+  get defaultResolveQuery(): EagerlyLoaded {
+    return this.isEagerlyLoaded;
+  }
 
   constructor(private coValueClass: typeof CoRichText) {}
 
@@ -98,8 +99,11 @@ export class RichTextSchema<
   }
 
   resolved(): RichTextSchema<true> {
+    if (this.isEagerlyLoaded) {
+      return this as RichTextSchema<true>;
+    }
     const copy = new RichTextSchema<true>(this.coValueClass);
-    copy.defaultResolveQuery = true;
+    copy.isEagerlyLoaded = true;
     return copy;
   }
 }

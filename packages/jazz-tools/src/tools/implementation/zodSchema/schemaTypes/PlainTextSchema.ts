@@ -25,20 +25,21 @@ export function createCoreCoPlainTextSchema(): CorePlainTextSchema {
   };
 }
 
-export class PlainTextSchema<
-  DefaultResolveQuery extends CoreResolveQuery = false,
-> implements CorePlainTextSchema
+export class PlainTextSchema<EagerlyLoaded extends boolean = false>
+  implements CorePlainTextSchema
 {
   readonly collaborative = true as const;
   readonly builtin = "CoPlainText" as const;
 
+  private isEagerlyLoaded: EagerlyLoaded = false as EagerlyLoaded;
   /**
    * The default resolve query to be used when loading instances of this schema.
    * Defaults to `false`, meaning that no resolve query will be used by default.
    * @internal
    */
-  public defaultResolveQuery: DefaultResolveQuery =
-    false as DefaultResolveQuery;
+  get defaultResolveQuery(): EagerlyLoaded {
+    return this.isEagerlyLoaded;
+  }
 
   constructor(private coValueClass: typeof CoPlainText) {}
 
@@ -103,8 +104,11 @@ export class PlainTextSchema<
   }
 
   resolved(): PlainTextSchema<true> {
+    if (this.isEagerlyLoaded) {
+      return this as PlainTextSchema<true>;
+    }
     const copy = new PlainTextSchema<true>(this.coValueClass);
-    copy.defaultResolveQuery = true;
+    copy.isEagerlyLoaded = true;
     return copy;
   }
 }

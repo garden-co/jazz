@@ -26,33 +26,34 @@ import { withDefaultResolveQuery } from "../../schemaUtils.js";
 
 export class CoListSchema<
   T extends AnyZodOrCoValueSchema,
-  DefaultResolveQuery extends
-    CoreResolveQuery = DefaultResolveQueryOfSchema<T> extends false
-    ? false
-    : { $each: DefaultResolveQueryOfSchema<T> },
+  EagerlyLoaded extends boolean = false,
 > implements CoreCoListSchema<T>
 {
   collaborative = true as const;
   builtin = "CoList" as const;
 
+  private isEagerlyLoaded: EagerlyLoaded = false as EagerlyLoaded;
   /**
    * The default resolve query to be used when loading instances of this schema.
    * Defaults to `false`, meaning that no resolve query will be used by default.
    * @internal
    */
-  public defaultResolveQuery: DefaultResolveQuery =
-    false as DefaultResolveQuery;
+  get defaultResolveQuery(): DefaultResolveQuery<this> {
+    if (!this.isEagerlyLoaded) {
+      return false as DefaultResolveQuery<this>;
+    }
+    if (isCoValueSchema(this.element) && this.element.defaultResolveQuery) {
+      return {
+        $each: this.element.defaultResolveQuery,
+      } as unknown as DefaultResolveQuery<this>;
+    }
+    return true as DefaultResolveQuery<this>;
+  }
 
   constructor(
     public element: T,
     private coValueClass: typeof CoList,
-  ) {
-    if (isCoValueSchema(element) && element.defaultResolveQuery) {
-      this.defaultResolveQuery = {
-        $each: element.defaultResolveQuery,
-      } as unknown as DefaultResolveQuery;
-    }
-  }
+  ) {}
 
   create(
     items: CoListSchemaInit<T>,
@@ -81,7 +82,8 @@ export class CoListSchema<
   load<
     const R extends RefsToResolve<
       CoListInstanceCoValuesMaybeLoaded<T>
-    > = DefaultResolveQuery extends false ? true : DefaultResolveQuery,
+      // @ts-expect-error
+    > = EagerlyLoaded extends false ? true : this["defaultResolveQuery"],
   >(
     id: string,
     options?: {
@@ -168,15 +170,12 @@ export class CoListSchema<
     return coOptionalDefiner(this);
   }
 
-  resolved(): CoListSchema<
-    T,
-    DefaultResolveQuery extends false ? true : CoreResolveQuery
-  > {
-    if (this.defaultResolveQuery) {
+  resolved(): CoListSchema<T, true> {
+    if (this.isEagerlyLoaded) {
       return this as CoListSchema<T, true>;
     }
     const copy = new CoListSchema<T, true>(this.element, this.coValueClass);
-    copy.defaultResolveQuery = true;
+    copy.isEagerlyLoaded = true;
     return copy;
   }
 }
@@ -206,3 +205,14 @@ export type CoListInstance<T extends AnyZodOrCoValueSchema> = CoList<
 
 export type CoListInstanceCoValuesMaybeLoaded<T extends AnyZodOrCoValueSchema> =
   CoList<InstanceOrPrimitiveOfSchemaCoValuesMaybeLoaded<T>>;
+
+type DefaultResolveQuery<S> = S extends CoListSchema<
+  infer ElementSchema,
+  infer EagerlyLoaded
+>
+  ? EagerlyLoaded extends false
+    ? false
+    : DefaultResolveQueryOfSchema<ElementSchema> extends false
+      ? true
+      : { $each: DefaultResolveQueryOfSchema<ElementSchema> }
+  : never;

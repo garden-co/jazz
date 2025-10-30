@@ -149,6 +149,7 @@ test("loading raw accounts should work", async () => {
 
 describe("co.profile() schema", () => {
   test("co.profile() should throw an error if passed a CoValue schema", async () => {
+    // @ts-expect-error investigate "Type instantiation is excessively deep and possibly infinite" error
     expect(() => co.profile(co.map({}))).toThrow(
       "co.profile() expects an object as its argument, not a CoValue schema",
     );

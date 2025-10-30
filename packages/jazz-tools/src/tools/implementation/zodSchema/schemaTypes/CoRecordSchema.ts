@@ -33,6 +33,7 @@ type CoRecordInit<
 export interface CoRecordSchema<
   K extends z.core.$ZodString<string>,
   V extends AnyZodOrCoValueSchema,
+  // TODO add type parameter for default resolve query
   DefaultResolveQuery extends CoreResolveQuery = false,
 > extends CoreCoRecordSchema<K, V> {
   defaultResolveQuery: CoreResolveQuery;

@@ -29,19 +29,21 @@ export function createCoreGroupSchema(): CoreGroupSchema {
   };
 }
 
-export class GroupSchema<DefaultResolveQuery extends CoreResolveQuery = false>
+export class GroupSchema<EagerlyLoaded extends boolean = false>
   implements CoreGroupSchema
 {
   readonly collaborative = true as const;
   readonly builtin = "Group" as const;
 
+  private isEagerlyLoaded: EagerlyLoaded = false as EagerlyLoaded;
   /**
    * The default resolve query to be used when loading instances of this schema.
    * Defaults to `false`, meaning that no resolve query will be used by default.
    * @internal
    */
-  public defaultResolveQuery: DefaultResolveQuery =
-    false as DefaultResolveQuery;
+  get defaultResolveQuery(): EagerlyLoaded {
+    return this.isEagerlyLoaded;
+  }
 
   constructor() {}
 
@@ -54,8 +56,11 @@ export class GroupSchema<DefaultResolveQuery extends CoreResolveQuery = false>
   }
 
   resolved(): GroupSchema<true> {
+    if (this.isEagerlyLoaded) {
+      return this as GroupSchema<true>;
+    }
     const copy = new GroupSchema<true>();
-    copy.defaultResolveQuery = true;
+    copy.isEagerlyLoaded = true;
     return copy;
   }
 

@@ -1,4 +1,11 @@
-import { assert, beforeAll, describe, expect, test } from "vitest";
+import {
+  assert,
+  beforeAll,
+  describe,
+  expect,
+  expectTypeOf,
+  test,
+} from "vitest";
 import { Account, co, CoValueLoadingState, Group, z } from "../exports";
 import { createJazzTestAccount, setupJazzTestSync } from "../testing";
 import { assertLoaded, setupTwoNodes } from "./utils";
@@ -35,46 +42,102 @@ describe("Schema-level CoValue resolution", () => {
       }
     });
 
-    test("can make a schema greedily-loaded by using resolved()", () => {
-      const Text = co.plainText().resolved();
+    describe("resolved() makes the schema eagerly-loaded", () => {
+      test("CoPlainText", () => {
+        const Text = co.plainText().resolved();
 
-      expect(Text.defaultResolveQuery).toBe(true);
-    });
-
-    test("CoOption schemas inherit the default resolve query of their inner type", () => {
-      const Text = co.plainText().resolved();
-      const OptionalText = co.optional(Text);
-
-      expect(OptionalText.defaultResolveQuery).toBe(true);
-    });
-
-    test("CoList schemas inherit the default resolve query of their element type", () => {
-      const Text = co.plainText().resolved();
-      const TestList = co.list(Text);
-
-      expect(TestList.defaultResolveQuery).toEqual({ $each: true });
-    });
-
-    test("CoMap schemas inherit the default resolve query of their shape", () => {
-      const Text = co.plainText().resolved();
-      const TestMap = co.map({ text: Text });
-
-      expect(TestMap.defaultResolveQuery).toEqual({ text: true });
-    });
-
-    test("Account schemas inherit the default resolve query of their shape", () => {
-      const Account = co.account({
-        root: co
-          .map({
-            text: co.plainText(),
-          })
-          .resolved(),
-        profile: co.profile({
-          name: z.string(),
-        }),
+        expectTypeOf<typeof Text.defaultResolveQuery>().toEqualTypeOf(true);
+        expect(Text.defaultResolveQuery).toBe(true);
       });
 
-      expect(Account.defaultResolveQuery).toEqual({ root: true });
+      test("CoRichText", () => {
+        const Text = co.richText().resolved();
+
+        expectTypeOf<typeof Text.defaultResolveQuery>().toEqualTypeOf(true);
+        expect(Text.defaultResolveQuery).toBe(true);
+      });
+
+      test("FileStream", () => {
+        const FileStream = co.fileStream().resolved();
+
+        expectTypeOf<typeof FileStream.defaultResolveQuery>().toEqualTypeOf(
+          true,
+        );
+        expect(FileStream.defaultResolveQuery).toBe(true);
+      });
+
+      test("Group", () => {
+        const Group = co.group().resolved();
+
+        expectTypeOf<typeof Group.defaultResolveQuery>().toEqualTypeOf(true);
+        expect(Group.defaultResolveQuery).toBe(true);
+      });
+
+      describe("CoOption", () => {
+        test("schemas inherit the default resolve query of their inner type", () => {
+          const Text = co.plainText().resolved();
+          const OptionalText = co.optional(Text).resolved();
+
+          expectTypeOf<typeof OptionalText.defaultResolveQuery>().toEqualTypeOf(
+            true,
+          );
+          expect(OptionalText.defaultResolveQuery).toBe(true);
+        });
+
+        test("schema becomes shallowly-loaded when its inner type is not eagerly-loaded", () => {
+          const Text = co.plainText();
+          const OptionalText = co.optional(Text).resolved();
+
+          expectTypeOf<typeof OptionalText.defaultResolveQuery>().toEqualTypeOf(
+            true,
+          );
+          expect(OptionalText.defaultResolveQuery).toBe(true);
+        });
+      });
+
+      describe("CoList", () => {
+        test("schemas inherit the default resolve query of their element type", () => {
+          const Text = co.plainText().resolved();
+          const TestList = co.list(Text).resolved();
+
+          expectTypeOf<typeof TestList.defaultResolveQuery>().toEqualTypeOf<{
+            $each: true;
+          }>();
+          expect(TestList.defaultResolveQuery).toEqual({ $each: true });
+        });
+
+        test("schema becomes shallowly-loaded when its element type is not eagerly-loaded", () => {
+          const Text = co.plainText();
+          const TestList = co.list(Text).resolved();
+
+          expectTypeOf<
+            typeof TestList.defaultResolveQuery
+          >().toEqualTypeOf<true>();
+          expect(TestList.defaultResolveQuery).toBe(true);
+        });
+      });
+
+      describe("CoMap", () => {
+        test("schemas inherit the default resolve query of their shape", () => {
+          const Text = co.plainText().resolved();
+          const TestMap = co.map({ text: Text }).resolved();
+
+          expectTypeOf<typeof TestMap.defaultResolveQuery>().toEqualTypeOf<{
+            text: true;
+          }>();
+          expect(TestMap.defaultResolveQuery).toEqual({ text: true });
+        });
+
+        test("schema becomes shallowly-loaded when its fields are not eagerly-loaded", () => {
+          const Text = co.plainText();
+          const TestMap = co.map({ text: Text }).resolved();
+
+          expectTypeOf<
+            typeof TestMap.defaultResolveQuery
+          >().toEqualTypeOf<true>();
+          expect(TestMap.defaultResolveQuery).toBe(true);
+        });
+      });
     });
   });
 
@@ -91,7 +154,7 @@ describe("Schema-level CoValue resolution", () => {
     describe("the default resolve query is used if no resolve query is provided", () => {
       describe("on load()", () => {
         test("for CoList", async () => {
-          const TestList = co.list(co.plainText().resolved());
+          const TestList = co.list(co.plainText().resolved()).resolved();
 
           const list = TestList.create(["Hello"], publicGroup);
 
@@ -108,7 +171,9 @@ describe("Schema-level CoValue resolution", () => {
         });
 
         test("for CoMap", async () => {
-          const TestMap = co.map({ text: co.plainText().resolved() });
+          const TestMap = co
+            .map({ text: co.plainText().resolved() })
+            .resolved();
 
           const map = TestMap.create({ text: "Hello" }, publicGroup);
 

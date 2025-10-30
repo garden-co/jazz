@@ -1,5 +1,7 @@
+import { isCoValueSchema } from "../../../internal.js";
 import { CoValueSchemaFromCoreSchema, ResolveQuery } from "../zodSchema.js";
 import { CoreCoValueSchema, CoreResolveQuery } from "./CoValueSchema.js";
+import { DefaultResolveQueryOfSchema } from "../typeConverters/DefaultResolveQueryOfSchema.js";
 
 type CoOptionalSchemaDefinition<
   Shape extends CoreCoValueSchema = CoreCoValueSchema,
@@ -17,7 +19,7 @@ export interface CoreCoOptionalSchema<
 
 export class CoOptionalSchema<
   Shape extends CoreCoValueSchema = CoreCoValueSchema,
-  DefaultResolveQuery extends CoreResolveQuery = Shape["defaultResolveQuery"],
+  EagerlyLoaded extends boolean = false,
 > implements CoreCoOptionalSchema<Shape>
 {
   readonly collaborative = true as const;
@@ -26,17 +28,25 @@ export class CoOptionalSchema<
     innerType: this.innerType,
   });
 
+  private isEagerlyLoaded: EagerlyLoaded = false as EagerlyLoaded;
   /**
    * The default resolve query to be used when loading instances of this schema.
    * Defaults to `false`, meaning that no resolve query will be used by default.
    * @internal
    */
-  public defaultResolveQuery: DefaultResolveQuery;
-
-  constructor(public readonly innerType: Shape) {
-    this.defaultResolveQuery = this.innerType
-      .defaultResolveQuery as DefaultResolveQuery;
+  get defaultResolveQuery(): DefaultResolveQuery<this> {
+    if (!this.isEagerlyLoaded) {
+      return false as DefaultResolveQuery<this>;
+    }
+    // Cast to CoreCoValueSchema to avoid excessively deep type resolution for innerType.defaultResolveQuery
+    const innerType: CoreCoValueSchema = this.innerType;
+    if (isCoValueSchema(innerType) && innerType.defaultResolveQuery) {
+      return innerType.defaultResolveQuery as DefaultResolveQuery<this>;
+    }
+    return true as DefaultResolveQuery<this>;
   }
+
+  constructor(public readonly innerType: Shape) {}
 
   getCoValueClass(): ReturnType<
     CoValueSchemaFromCoreSchema<Shape>["getCoValueClass"]
@@ -44,15 +54,23 @@ export class CoOptionalSchema<
     return (this.innerType as any).getCoValueClass();
   }
 
-  resolved(): CoOptionalSchema<
-    Shape,
-    DefaultResolveQuery extends false ? true : CoreResolveQuery
-  > {
-    if (this.defaultResolveQuery) {
+  resolved(): CoOptionalSchema<Shape, true> {
+    if (this.isEagerlyLoaded) {
       return this as CoOptionalSchema<Shape, true>;
     }
     const copy = new CoOptionalSchema<Shape, true>(this.innerType);
-    copy.defaultResolveQuery = true;
+    copy.isEagerlyLoaded = true;
     return copy;
   }
 }
+
+type DefaultResolveQuery<S> = S extends CoOptionalSchema<
+  infer InnerShape,
+  infer EagerlyLoaded
+>
+  ? EagerlyLoaded extends false
+    ? false
+    : DefaultResolveQueryOfSchema<InnerShape> extends false
+      ? true
+      : DefaultResolveQueryOfSchema<InnerShape>
+  : never;

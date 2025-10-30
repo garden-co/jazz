@@ -27,20 +27,21 @@ export function createCoreCoVectorSchema(
   };
 }
 
-export class CoVectorSchema<
-  DefaultResolveQuery extends CoreResolveQuery = false,
-> implements CoreCoVectorSchema
+export class CoVectorSchema<EagerlyLoaded extends boolean = false>
+  implements CoreCoVectorSchema
 {
   readonly collaborative = true as const;
   readonly builtin = "CoVector" as const;
 
+  private isEagerlyLoaded: EagerlyLoaded = false as EagerlyLoaded;
   /**
    * The default resolve query to be used when loading instances of this schema.
    * Defaults to `false`, meaning that no resolve query will be used by default.
    * @internal
    */
-  public defaultResolveQuery: DefaultResolveQuery =
-    false as DefaultResolveQuery;
+  get defaultResolveQuery(): boolean {
+    return this.isEagerlyLoaded;
+  }
 
   constructor(
     public dimensions: number,
@@ -112,8 +113,11 @@ export class CoVectorSchema<
   }
 
   resolved(): CoVectorSchema<true> {
+    if (this.isEagerlyLoaded) {
+      return this as CoVectorSchema<true>;
+    }
     const copy = new CoVectorSchema<true>(this.dimensions, this.coValueClass);
-    copy.defaultResolveQuery = true;
+    copy.isEagerlyLoaded = true;
     return copy;
   }
 }

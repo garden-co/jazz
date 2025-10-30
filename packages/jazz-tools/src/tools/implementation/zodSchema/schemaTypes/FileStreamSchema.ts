@@ -23,20 +23,21 @@ export function createCoreFileStreamSchema(): CoreFileStreamSchema {
   };
 }
 
-export class FileStreamSchema<
-  DefaultResolveQuery extends CoreResolveQuery = false,
-> implements CoreFileStreamSchema
+export class FileStreamSchema<EagerlyLoaded extends boolean = false>
+  implements CoreFileStreamSchema
 {
   readonly collaborative = true as const;
   readonly builtin = "FileStream" as const;
 
+  private isEagerlyLoaded: EagerlyLoaded = false as EagerlyLoaded;
   /**
    * The default resolve query to be used when loading instances of this schema.
    * Defaults to `false`, meaning that no resolve query will be used by default.
    * @internal
    */
-  public defaultResolveQuery: DefaultResolveQuery =
-    false as DefaultResolveQuery;
+  get defaultResolveQuery(): EagerlyLoaded {
+    return this.isEagerlyLoaded;
+  }
 
   constructor(private coValueClass: typeof FileStream) {}
 
@@ -128,8 +129,11 @@ export class FileStreamSchema<
   }
 
   resolved(): FileStreamSchema<true> {
+    if (this.isEagerlyLoaded) {
+      return this as FileStreamSchema<true>;
+    }
     const copy = new FileStreamSchema<true>(this.coValueClass);
-    copy.defaultResolveQuery = true;
+    copy.isEagerlyLoaded = true;
     return copy;
   }
 }
