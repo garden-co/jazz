@@ -614,10 +614,10 @@ export class SyncManager {
       SessionNewContent,
     ][]) {
       const ourKnownTxIdx =
-        coValue.verified.sessions.get(sessionID)?.transactions.length;
+        coValue.verified.knownState().sessions[sessionID] ?? 0;
       const theirFirstNewTxIdx = newContentForSession.after;
 
-      if ((ourKnownTxIdx || 0) < theirFirstNewTxIdx) {
+      if (ourKnownTxIdx < theirFirstNewTxIdx) {
         invalidStateAssumed = true;
         continue;
       }
@@ -648,10 +648,10 @@ export class SyncManager {
             peerId: peer.id,
             peerRole: peer.role,
             id: msg.id,
-            err: result.error,
-            msgKnownState: knownStateFromContent(msg).sessions,
-            knownState: coValue.knownState().sessions,
-            newContent: validNewContent.new,
+            err: JSON.stringify(result.error),
+            msgKnownState: JSON.stringify(knownStateFromContent(msg).sessions),
+            knownState: JSON.stringify(coValue.knownState().sessions),
+            newContent: JSON.stringify(validNewContent.new),
           });
           // TODO Mark only the session as errored, not the whole coValue
           coValue.markErrored(peer.id, result.error);

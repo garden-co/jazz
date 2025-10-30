@@ -121,12 +121,18 @@ export class SessionMap {
 
       return ok(true as const);
     } catch (e) {
+      let message = "Unknown error";
+      if (e && typeof e === "object" && "message" in e) {
+        message = e["message"] as string;
+      }
+
       return err({
         type: "InvalidSignature",
         id: this.id,
         sessionID,
         newSignature,
         signerID,
+        error: message,
       } satisfies TryAddTransactionsError);
     }
   }
