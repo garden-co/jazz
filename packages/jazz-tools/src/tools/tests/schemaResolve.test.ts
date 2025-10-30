@@ -518,35 +518,13 @@ describe("Schema-level CoValue resolution", () => {
         });
       });
 
-      describe("on merge()", () => {
-        test("for CoList", async () => {
-          // TODO
-        });
-
-        test("for CoMap", async () => {
-          // TODO
-        });
-
-        test("for CoRecord", async () => {
-          // TODO
-        });
-
-        test("for Account", async () => {
-          // TODO
-        });
-
-        test("for CoFeed", async () => {
-          // TODO
-        });
-      });
-
       describe("on upsertUnique()", () => {
         test("for CoList", async () => {
           const TestList = co.list(co.plainText().resolved()).resolved();
 
           const list = await TestList.upsertUnique({
             value: ["Hello"],
-            unique: "test",
+            unique: "test-upsertUnique-coList",
             owner: publicGroup,
           });
 
@@ -561,7 +539,7 @@ describe("Schema-level CoValue resolution", () => {
 
           const map = await TestMap.upsertUnique({
             value: { text: "Hello" },
-            unique: "test",
+            unique: "test-upsertUnique-coMap",
             owner: publicGroup,
           });
 
@@ -576,7 +554,7 @@ describe("Schema-level CoValue resolution", () => {
 
           const record = await TestRecord.upsertUnique({
             value: { key1: "Hello", key2: "World" },
-            unique: "test",
+            unique: "test-upsertUnique-coRecord",
             owner: publicGroup,
           });
 
@@ -587,24 +565,71 @@ describe("Schema-level CoValue resolution", () => {
       });
 
       describe("on loadUnique()", () => {
+        let group: Group;
+        beforeAll(async () => {
+          group = Group.create();
+        });
+
         test("for CoList", async () => {
-          // TODO
+          const TestList = co.list(co.plainText().resolved()).resolved();
+
+          const list = TestList.create(["Hello"], {
+            unique: "test-loadUnique-coList",
+            owner: group,
+          });
+
+          const loadedList = await TestList.loadUnique(
+            "test-loadUnique-coList",
+            group.$jazz.id,
+          );
+
+          assertLoaded(loadedList);
+          expect(loadedList[0]?.toUpperCase()).toEqual("HELLO");
         });
 
         test("for CoMap", async () => {
-          // TODO
+          const TestMap = co
+            .map({ text: co.plainText().resolved() })
+            .resolved();
+
+          const map = TestMap.create(
+            { text: "Hello" },
+            {
+              unique: "test-loadUnique-coMap",
+              owner: group,
+            },
+          );
+
+          const loadedMap = await TestMap.loadUnique(
+            "test-loadUnique-coMap",
+            group.$jazz.id,
+          );
+
+          assertLoaded(loadedMap);
+          expect(loadedMap.text.toUpperCase()).toEqual("HELLO");
         });
 
         test("for CoRecord", async () => {
-          // TODO
-        });
+          const TestRecord = co
+            .record(z.string(), co.plainText().resolved())
+            .resolved();
 
-        test("for Account", async () => {
-          // TODO
-        });
+          const record = TestRecord.create(
+            { key1: "Hello", key2: "World" },
+            {
+              unique: "test-loadUnique-coRecord",
+              owner: group,
+            },
+          );
 
-        test("for CoFeed", async () => {
-          // TODO
+          const loadedRecord = await TestRecord.loadUnique(
+            "test-loadUnique-coRecord",
+            group.$jazz.id,
+          );
+
+          assertLoaded(loadedRecord);
+          expect(loadedRecord.key1?.toUpperCase()).toEqual("HELLO");
+          expect(loadedRecord.key2?.toUpperCase()).toEqual("WORLD");
         });
       });
     });

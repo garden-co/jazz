@@ -217,7 +217,8 @@ export class CoMapSchema<
   loadUnique<
     const R extends RefsToResolve<
       Simplify<CoMapInstanceCoValuesMaybeLoaded<Shape>> & CoMap
-    > = true,
+      // @ts-expect-error
+    > = EagerlyLoaded extends false ? true : this["defaultResolveQuery"],
   >(
     unique: CoValueUniqueness["uniqueness"],
     ownerID: string,
@@ -234,7 +235,12 @@ export class CoMapSchema<
     >
   > {
     // @ts-expect-error
-    return this.coValueClass.loadUnique(unique, ownerID, options);
+    return this.coValueClass.loadUnique(
+      unique,
+      ownerID,
+      // @ts-expect-error
+      withDefaultResolveQuery(options, this.defaultResolveQuery),
+    );
   }
 
   /**
