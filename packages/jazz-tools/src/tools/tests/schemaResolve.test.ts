@@ -143,6 +143,28 @@ describe("Schema-level CoValue resolution", () => {
         });
       });
 
+      describe("CoFeed", () => {
+        test("schemas inherit the default resolve query of their element type", () => {
+          const Text = co.plainText().resolved();
+          const TestFeed = co.feed(Text).resolved();
+
+          expectTypeOf<typeof TestFeed.defaultResolveQuery>().toEqualTypeOf<{
+            $each: true;
+          }>();
+          expect(TestFeed.defaultResolveQuery).toEqual({ $each: true });
+        });
+
+        test("schema becomes shallowly-loaded when its element type is not eagerly-loaded", () => {
+          const Text = co.plainText();
+          const TestFeed = co.feed(Text).resolved();
+
+          expectTypeOf<
+            typeof TestFeed.defaultResolveQuery
+          >().toEqualTypeOf<true>();
+          expect(TestFeed.defaultResolveQuery).toBe(true);
+        });
+      });
+
       describe("CoMap", () => {
         test("schemas inherit the default resolve query of their shape", () => {
           const Text = co.plainText().resolved();
@@ -324,30 +346,79 @@ describe("Schema-level CoValue resolution", () => {
           expect(loadedAccount.root.text.toUpperCase()).toEqual("HELLO");
         });
 
-        test("for CoFeed", async () => {
-          // TODO
+        // TODO fix - this is not working when providing an explicit resolve query:
+        // TestFeed.load(feed.$jazz.id, {
+        //   loadAs: clientAccount,
+        //   resolve: {
+        //     $each: true,
+        //   },
+        // })
+        test.skip("for CoFeed", async () => {
+          const TestFeed = co.feed(co.plainText().resolved()).resolved();
+
+          const feed = TestFeed.create(["Hello"], publicGroup);
+
+          const loadedFeed = await TestFeed.load(feed.$jazz.id, {
+            loadAs: clientAccount,
+            resolve: {
+              $each: true,
+            },
+          });
+
+          assertLoaded(loadedFeed);
+          expect(loadedFeed.inCurrentSession?.value.$jazz.loadingState).toBe(
+            CoValueLoadingState.LOADED,
+          );
+          expect(loadedFeed.inCurrentSession?.value.toUpperCase()).toEqual(
+            "HELLO",
+          );
         });
       });
 
       describe("on subscribe()", () => {
-        // TODO
+        test("for CoList", async () => {
+          // TODO
+        });
       });
 
       describe("on merge()", () => {
-        // TODO
+        test("for CoList", async () => {
+          // TODO
+        });
       });
 
       describe("on upsertUnique()", () => {
-        // TODO
+        test("for CoList", async () => {
+          // TODO
+        });
       });
 
       describe("on loadUnique()", () => {
-        // TODO
+        test("for CoList", async () => {
+          // TODO
+        });
       });
     });
 
-    test("the default resolve query is merged with provided resolve queries", async () => {
-      // TODO
+    // TODO merge default resolve query with provided resolve queries instead of overriding it
+    describe("the default resolve query is overridden with provided resolve queries", () => {
+      test("for CoMap", async () => {
+        const TestMap = co.map({ text: co.plainText().resolved() }).resolved();
+
+        const map = TestMap.create({ text: "Hello" }, publicGroup);
+
+        const loadedMap = await TestMap.load(map.$jazz.id, {
+          loadAs: clientAccount,
+          resolve: true,
+        });
+
+        assertLoaded(loadedMap);
+        expect(loadedMap.text.$jazz.loadingState).toEqual(
+          CoValueLoadingState.LOADING,
+        );
+      });
+
+      // TODO test other container schemas
     });
   });
 });

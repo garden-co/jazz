@@ -4,6 +4,7 @@ import {
   BranchDefinition,
   CoFeed,
   Group,
+  isAnyCoValueSchema,
   MaybeLoaded,
   RefsToResolve,
   RefsToResolveStrict,
@@ -17,22 +18,36 @@ import { AnonymousJazzAgent } from "../../anonymousJazzAgent.js";
 import { CoFeedSchemaInit } from "../typeConverters/CoFieldSchemaInit.js";
 import { InstanceOrPrimitiveOfSchema } from "../typeConverters/InstanceOrPrimitiveOfSchema.js";
 import { InstanceOrPrimitiveOfSchemaCoValuesMaybeLoaded } from "../typeConverters/InstanceOrPrimitiveOfSchemaCoValuesMaybeLoaded.js";
+import { DefaultResolveQueryOfSchema } from "../typeConverters/DefaultResolveQueryOfSchema.js";
 import { CoOptionalSchema } from "./CoOptionalSchema.js";
 import { CoreCoValueSchema, CoreResolveQuery } from "./CoValueSchema.js";
+import { withDefaultResolveQuery } from "../../schemaUtils.js";
 
-// TODO add type parameter for default resolve query
-export class CoFeedSchema<T extends AnyZodOrCoValueSchema>
-  implements CoreCoFeedSchema<T>
+export class CoFeedSchema<
+  T extends AnyZodOrCoValueSchema,
+  EagerlyLoaded extends boolean = false,
+> implements CoreCoFeedSchema<T>
 {
   collaborative = true as const;
   builtin = "CoFeed" as const;
 
+  private isEagerlyLoaded: EagerlyLoaded = false as EagerlyLoaded;
   /**
    * The default resolve query to be used when loading instances of this schema.
    * Defaults to `false`, meaning that no resolve query will used by default.
    * @internal
    */
-  public defaultResolveQuery: CoreResolveQuery = false;
+  get defaultResolveQuery(): DefaultResolveQuery<this> {
+    if (!this.isEagerlyLoaded) {
+      return false as DefaultResolveQuery<this>;
+    }
+    if (isAnyCoValueSchema(this.element) && this.element.defaultResolveQuery) {
+      return {
+        $each: this.element.defaultResolveQuery,
+      } as DefaultResolveQuery<this>;
+    }
+    return true as DefaultResolveQuery<this>;
+  }
 
   constructor(
     public element: T,
@@ -56,7 +71,10 @@ export class CoFeedSchema<T extends AnyZodOrCoValueSchema>
   }
 
   load<
-    const R extends RefsToResolve<CoFeedInstanceCoValuesMaybeLoaded<T>> = true,
+    const R extends RefsToResolve<
+      CoFeedInstanceCoValuesMaybeLoaded<T>
+      // @ts-expect-error
+    > = EagerlyLoaded extends false ? true : this["defaultResolveQuery"],
   >(
     id: string,
     options?: {
@@ -66,7 +84,11 @@ export class CoFeedSchema<T extends AnyZodOrCoValueSchema>
     },
   ): Promise<MaybeLoaded<Resolved<CoFeedInstanceCoValuesMaybeLoaded<T>, R>>> {
     // @ts-expect-error
-    return this.coValueClass.load(id, options);
+    return this.coValueClass.load(
+      id,
+      // @ts-expect-error
+      withDefaultResolveQuery(options, this.defaultResolveQuery),
+    );
   }
 
   unstable_merge<
@@ -113,9 +135,12 @@ export class CoFeedSchema<T extends AnyZodOrCoValueSchema>
     return coOptionalDefiner(this);
   }
 
-  resolved(): CoFeedSchema<T> {
-    const copy = new CoFeedSchema(this.element, this.coValueClass);
-    copy.defaultResolveQuery = true;
+  resolved(): CoFeedSchema<T, true> {
+    if (this.isEagerlyLoaded) {
+      return this as CoFeedSchema<T, true>;
+    }
+    const copy = new CoFeedSchema<T, true>(this.element, this.coValueClass);
+    copy.isEagerlyLoaded = true;
     return copy;
   }
 }
@@ -145,3 +170,14 @@ export type CoFeedInstance<T extends AnyZodOrCoValueSchema> = CoFeed<
 
 export type CoFeedInstanceCoValuesMaybeLoaded<T extends AnyZodOrCoValueSchema> =
   CoFeed<InstanceOrPrimitiveOfSchemaCoValuesMaybeLoaded<T>>;
+
+type DefaultResolveQuery<S> = S extends CoFeedSchema<
+  infer ElementSchema,
+  infer EagerlyLoaded
+>
+  ? EagerlyLoaded extends false
+    ? false
+    : DefaultResolveQueryOfSchema<ElementSchema> extends false
+      ? true
+      : { $each: DefaultResolveQueryOfSchema<ElementSchema> }
+  : never;
