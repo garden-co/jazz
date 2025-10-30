@@ -644,14 +644,18 @@ export class SyncManager {
 
       if (result.isErr()) {
         if (peer) {
+          const err =
+            "error" in result.error ? result.error.error : result.error;
           logger.error("Failed to add transactions", {
+            type: result.error.type,
             peerId: peer.id,
             peerRole: peer.role,
             id: msg.id,
-            err: result.error,
-            msgKnownState: knownStateFromContent(msg).sessions,
-            knownState: coValue.knownState().sessions,
-            newContent: validNewContent.new,
+            sessionID,
+            err,
+            msgKnownState: JSON.stringify(knownStateFromContent(msg).sessions),
+            knownState: JSON.stringify(coValue.knownState().sessions),
+            newContent: JSON.stringify(validNewContent.new).slice(0, 10_000), // limit the size of the new content to 10KB
           });
           // TODO Mark only the session as errored, not the whole coValue
           coValue.markErrored(peer.id, result.error);

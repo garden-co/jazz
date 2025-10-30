@@ -1557,7 +1557,7 @@ export type InvalidSignatureError = {
   newSignature: Signature;
   sessionID: SessionID;
   signerID: SignerID | undefined;
-  error?: Error | string;
+  error?: Error;
 };
 
 export type TriedToAddTransactionsWithoutVerifiedStateErrpr = {
