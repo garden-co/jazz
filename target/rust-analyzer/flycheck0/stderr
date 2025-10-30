@@ -1,0 +1,4 @@
+warning: profiles for the non root package will be ignored, specify profiles at the workspace root:
+package:   /Users/antonio.musolino/Workspace/github/jazz/crates/cojson-core-napi/Cargo.toml
+workspace: /Users/antonio.musolino/Workspace/github/jazz/crates/Cargo.toml
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.19s
