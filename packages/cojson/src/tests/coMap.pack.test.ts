@@ -13,6 +13,7 @@ import type {
   MapOpPayloadSet,
   MapOpPayloadDel,
 } from "../coValues/coMap.js";
+import type { JsonValue } from "../jsonValue.js";
 
 describe("CoMapPackImplementation", () => {
   const packer = new CoMapPackImplementation<string, string>();
@@ -841,6 +842,527 @@ describe("edge cases", () => {
     const packed = packer.packChanges(changes);
     const unpacked = packer.unpackChanges(packed as any);
 
+    expect(unpacked).toEqual(changes);
+  });
+});
+
+describe("detailed roundtrip tests - data integrity", () => {
+  test("should preserve boolean values exactly", () => {
+    const boolPacker = new CoMapPackImplementation<string, boolean>();
+    const changes: MapOpPayload<string, boolean>[] = [
+      { op: "set", key: "isTrue", value: true },
+      { op: "set", key: "isFalse", value: false },
+      { op: "del", key: "removed" },
+      { op: "set", key: "anotherTrue", value: true },
+    ];
+
+    const packed = boolPacker.packChanges(changes);
+    const unpacked = boolPacker.unpackChanges(packed as any);
+
+    expect(unpacked).toEqual(changes);
+    expect(unpacked[0]?.op).toBe("set");
+    expect((unpacked[0] as MapOpPayloadSet<string, boolean>).value).toBe(true);
+    expect((unpacked[0] as MapOpPayloadSet<string, boolean>).value).not.toBe(1);
+    expect(unpacked[1]?.op).toBe("set");
+    expect((unpacked[1] as MapOpPayloadSet<string, boolean>).value).toBe(false);
+    expect((unpacked[1] as MapOpPayloadSet<string, boolean>).value).not.toBe(0);
+  });
+
+  test("should preserve numeric types and special values", () => {
+    const numPacker = new CoMapPackImplementation<string, number>();
+    const changes: MapOpPayload<string, number>[] = [
+      { op: "set", key: "zero", value: 0 },
+      { op: "set", key: "negativeZero", value: -0 },
+      { op: "set", key: "positive", value: 42 },
+      { op: "set", key: "negative", value: -42 },
+      { op: "set", key: "float", value: 3.14159 },
+      { op: "set", key: "negativeFloat", value: -2.71828 },
+      { op: "set", key: "large", value: 1e10 },
+      { op: "set", key: "small", value: 1e-10 },
+    ];
+
+    const packed = numPacker.packChanges(changes);
+    const unpacked = numPacker.unpackChanges(packed as any);
+
+    expect(unpacked).toEqual(changes);
+    expect(unpacked.length).toBe(changes.length);
+
+    // Verify each value is exactly preserved
+    expect((unpacked[0] as MapOpPayloadSet<string, number>).value).toBe(0);
+    expect((unpacked[0] as MapOpPayloadSet<string, number>).value).not.toBe(
+      false,
+    );
+    expect((unpacked[1] as MapOpPayloadSet<string, number>).value).toBe(-0);
+    expect((unpacked[2] as MapOpPayloadSet<string, number>).value).toBe(42);
+    expect((unpacked[3] as MapOpPayloadSet<string, number>).value).toBe(-42);
+    expect((unpacked[4] as MapOpPayloadSet<string, number>).value).toBe(
+      3.14159,
+    );
+    expect((unpacked[5] as MapOpPayloadSet<string, number>).value).toBe(
+      -2.71828,
+    );
+    expect((unpacked[6] as MapOpPayloadSet<string, number>).value).toBe(1e10);
+    expect((unpacked[7] as MapOpPayloadSet<string, number>).value).toBe(1e-10);
+  });
+
+  test("should preserve null vs undefined distinction", () => {
+    const nullPacker = new CoMapPackImplementation<string, string | null>();
+    const changes: MapOpPayload<string, string | null>[] = [
+      { op: "set", key: "nullValue", value: null },
+      { op: "set", key: "stringValue", value: "test" },
+      { op: "del", key: "deleted" },
+    ];
+
+    const packed = nullPacker.packChanges(changes);
+    const unpacked = nullPacker.unpackChanges(packed as any);
+
+    expect(unpacked).toEqual(changes);
+    expect((unpacked[0] as MapOpPayloadSet<string, string | null>).value).toBe(
+      null,
+    );
+    expect(
+      (unpacked[0] as MapOpPayloadSet<string, string | null>).value,
+    ).not.toBe(undefined);
+    expect(
+      (unpacked[0] as MapOpPayloadSet<string, string | null>).value,
+    ).not.toBe(0);
+    expect(
+      (unpacked[0] as MapOpPayloadSet<string, string | null>).value,
+    ).not.toBe(false);
+    expect(
+      (unpacked[0] as MapOpPayloadSet<string, string | null>).value,
+    ).not.toBe("");
+  });
+
+  test("should preserve string edge cases", () => {
+    const changes: MapOpPayload<string, string>[] = [
+      { op: "set", key: "empty", value: "" },
+      { op: "set", key: "space", value: " " },
+      { op: "set", key: "spaces", value: "   " },
+      { op: "set", key: "newline", value: "\n" },
+      { op: "set", key: "tab", value: "\t" },
+      { op: "set", key: "mixed", value: "\n\t\r" },
+      { op: "set", key: "quote", value: '"' },
+      { op: "set", key: "backslash", value: "\\" },
+      { op: "set", key: "json", value: '{"key":"value"}' },
+    ];
+
+    const packer = new CoMapPackImplementation<string, string>();
+    const packed = packer.packChanges(changes);
+    const unpacked = packer.unpackChanges(packed as any);
+
+    expect(unpacked).toEqual(changes);
+    // Verify exact string preservation
+    for (let i = 0; i < changes.length; i++) {
+      expect((unpacked[i] as MapOpPayloadSet<string, string>).value).toBe(
+        (changes[i] as MapOpPayloadSet<string, string>).value,
+      );
+    }
+  });
+
+  test("should preserve complex nested objects", () => {
+    type ComplexType = {
+      id: number;
+      name: string;
+      nested: {
+        deep: {
+          value: boolean;
+          array: (number | null)[];
+        };
+      };
+      nullField: null;
+      boolField: boolean;
+    };
+
+    const complexPacker = new CoMapPackImplementation<string, ComplexType>();
+    const changes: MapOpPayload<string, ComplexType>[] = [
+      {
+        op: "set",
+        key: "complex",
+        value: {
+          id: 123,
+          name: "test",
+          nested: {
+            deep: {
+              value: true,
+              array: [1, null, 3],
+            },
+          },
+          nullField: null,
+          boolField: false,
+        },
+      },
+    ];
+
+    const packed = complexPacker.packChanges(changes);
+    const unpacked = complexPacker.unpackChanges(packed as any);
+
+    expect(unpacked).toEqual(changes);
+    const unpackedValue = (unpacked[0] as MapOpPayloadSet<string, ComplexType>)
+      .value;
+    expect(unpackedValue.id).toBe(123);
+    expect(unpackedValue.name).toBe("test");
+    expect(unpackedValue.nested.deep.value).toBe(true);
+    expect(unpackedValue.nested.deep.array).toEqual([1, null, 3]);
+    expect(unpackedValue.nullField).toBe(null);
+    expect(unpackedValue.boolField).toBe(false);
+  });
+
+  test("should preserve arrays with mixed types", () => {
+    type MixedArray = (string | number | boolean | null)[];
+    const arrayPacker = new CoMapPackImplementation<string, MixedArray>();
+    const changes: MapOpPayload<string, MixedArray>[] = [
+      {
+        op: "set",
+        key: "mixed",
+        value: ["string", 42, true, null, false, 0, ""],
+      },
+    ];
+
+    const packed = arrayPacker.packChanges(changes);
+    const unpacked = arrayPacker.unpackChanges(packed as any);
+
+    expect(unpacked).toEqual(changes);
+    const arr = (unpacked[0] as MapOpPayloadSet<string, MixedArray>).value;
+    expect(arr[0]).toBe("string");
+    expect(arr[1]).toBe(42);
+    expect(arr[2]).toBe(true);
+    expect(arr[3]).toBe(null);
+    expect(arr[4]).toBe(false);
+    expect(arr[5]).toBe(0);
+    expect(arr[6]).toBe("");
+  });
+
+  test("should preserve operation order in complex sequences", () => {
+    const changes: MapOpPayload<string, string>[] = [
+      { op: "set", key: "a", value: "1" },
+      { op: "set", key: "b", value: "2" },
+      { op: "del", key: "c" },
+      { op: "set", key: "d", value: "3" },
+      { op: "del", key: "e" },
+      { op: "del", key: "f" },
+      { op: "set", key: "g", value: "4" },
+    ];
+
+    const packer = new CoMapPackImplementation<string, string>();
+    const packed = packer.packChanges(changes);
+    const unpacked = packer.unpackChanges(packed as any);
+
+    expect(unpacked).toEqual(changes);
+    expect(unpacked.length).toBe(changes.length);
+
+    // Verify exact order and types
+    for (let i = 0; i < changes.length; i++) {
+      expect(unpacked[i]?.op).toBe(changes[i]?.op);
+      expect(unpacked[i]?.key).toBe(changes[i]?.key);
+      if (changes[i]?.op === "set") {
+        expect((unpacked[i] as MapOpPayloadSet<string, string>).value).toBe(
+          (changes[i] as MapOpPayloadSet<string, string>).value,
+        );
+      }
+    }
+  });
+
+  test("should handle Unicode edge cases", () => {
+    const changes: MapOpPayload<string, string>[] = [
+      { op: "set", key: "emoji", value: "👨‍👩‍👧‍👦" }, // family emoji with ZWJ
+      { op: "set", key: "flag", value: "🇺🇸" }, // flag (2 regional indicators)
+      { op: "set", key: "combining", value: "é" }, // e + combining acute
+      { op: "set", key: "rtl", value: "مرحبا" }, // Arabic RTL text
+      { op: "set", key: "chinese", value: "你好世界" },
+      { op: "set", key: "mixed", value: "Hello 👋 World 🌍" },
+    ];
+
+    const packer = new CoMapPackImplementation<string, string>();
+    const packed = packer.packChanges(changes);
+    const unpacked = packer.unpackChanges(packed as any);
+
+    expect(unpacked).toEqual(changes);
+    // Verify exact character preservation
+    for (let i = 0; i < changes.length; i++) {
+      const originalValue = (changes[i] as MapOpPayloadSet<string, string>)
+        .value;
+      const unpackedValue = (unpacked[i] as MapOpPayloadSet<string, string>)
+        .value;
+      expect(unpackedValue).toBe(originalValue);
+      expect(unpackedValue.length).toBe(originalValue.length);
+    }
+  });
+
+  test("should handle keys with various special characters", () => {
+    const changes: MapOpPayload<string, string>[] = [
+      { op: "set", key: "dot.notation.key", value: "v1" },
+      { op: "set", key: "bracket[0]", value: "v2" },
+      { op: "set", key: "space in key", value: "v3" },
+      { op: "set", key: "slash/key", value: "v4" },
+      { op: "set", key: "backslash\\key", value: "v5" },
+      { op: "set", key: "colon:key", value: "v6" },
+      { op: "set", key: "question?key", value: "v7" },
+      { op: "set", key: "ampersand&key", value: "v8" },
+      { op: "set", key: "pipe|key", value: "v9" },
+      { op: "del", key: "special!@#$%^&*()" },
+    ];
+
+    const packer = new CoMapPackImplementation<string, string>();
+    const packed = packer.packChanges(changes);
+    const unpacked = packer.unpackChanges(packed as any);
+
+    expect(unpacked).toEqual(changes);
+    for (let i = 0; i < changes.length; i++) {
+      expect(unpacked[i]?.key).toBe(changes[i]?.key);
+    }
+  });
+
+  test("should preserve type identity through multiple cycles", () => {
+    type TestValue = {
+      str: string;
+      num: number;
+      bool: boolean;
+      nul: null;
+      arr: number[];
+    };
+    const packer = new CoMapPackImplementation<string, TestValue>();
+
+    const original: MapOpPayload<string, TestValue>[] = [
+      {
+        op: "set",
+        key: "data",
+        value: {
+          str: "test",
+          num: 42,
+          bool: true,
+          nul: null,
+          arr: [1, 2, 3],
+        },
+      },
+      { op: "del", key: "old" },
+    ];
+
+    // Multiple pack/unpack cycles
+    let current = original;
+    for (let i = 0; i < 5; i++) {
+      const packed = packer.packChanges(current);
+      current = packer.unpackChanges(packed as any);
+    }
+
+    expect(current).toEqual(original);
+    const val = (current[0] as MapOpPayloadSet<string, TestValue>).value;
+    expect(typeof val.str).toBe("string");
+    expect(typeof val.num).toBe("number");
+    expect(typeof val.bool).toBe("boolean");
+    expect(val.nul).toBe(null);
+    expect(Array.isArray(val.arr)).toBe(true);
+  });
+
+  test("should handle alternating set/del operations", () => {
+    const changes: MapOpPayload<string, number>[] = [];
+    for (let i = 0; i < 50; i++) {
+      if (i % 2 === 0) {
+        changes.push({ op: "set", key: `key${i}`, value: i });
+      } else {
+        changes.push({ op: "del", key: `key${i}` });
+      }
+    }
+
+    const packer = new CoMapPackImplementation<string, number>();
+    const packed = packer.packChanges(changes);
+    const unpacked = packer.unpackChanges(packed as any);
+
+    expect(unpacked).toEqual(changes);
+    expect(unpacked.length).toBe(changes.length);
+
+    for (let i = 0; i < changes.length; i++) {
+      expect(unpacked[i]).toEqual(changes[i]);
+    }
+  });
+
+  test("should preserve empty arrays and objects in values", () => {
+    type ComplexValue = {
+      emptyArray: any[];
+      emptyObject: Record<string, never>;
+      nestedEmpty: { arr: any[]; obj: Record<string, never> };
+    };
+    const packer = new CoMapPackImplementation<string, ComplexValue>();
+
+    const changes: MapOpPayload<string, ComplexValue>[] = [
+      {
+        op: "set",
+        key: "data",
+        value: {
+          emptyArray: [],
+          emptyObject: {},
+          nestedEmpty: { arr: [], obj: {} },
+        },
+      },
+    ];
+
+    const packed = packer.packChanges(changes);
+    const unpacked = packer.unpackChanges(packed as any);
+
+    expect(unpacked).toEqual(changes);
+    const val = (unpacked[0] as MapOpPayloadSet<string, ComplexValue>).value;
+    expect(Array.isArray(val.emptyArray)).toBe(true);
+    expect(val.emptyArray.length).toBe(0);
+    expect(typeof val.emptyObject).toBe("object");
+    expect(Object.keys(val.emptyObject).length).toBe(0);
+    expect(Array.isArray(val.nestedEmpty.arr)).toBe(true);
+    expect(val.nestedEmpty.arr.length).toBe(0);
+    expect(Object.keys(val.nestedEmpty.obj).length).toBe(0);
+  });
+
+  test("should handle same key with different operations", () => {
+    const changes: MapOpPayload<string, string>[] = [
+      { op: "set", key: "sameKey", value: "value1" },
+      { op: "del", key: "sameKey" },
+      { op: "set", key: "sameKey", value: "value2" },
+      { op: "set", key: "sameKey", value: "value3" },
+      { op: "del", key: "sameKey" },
+    ];
+
+    const packer = new CoMapPackImplementation<string, string>();
+    const packed = packer.packChanges(changes);
+    const unpacked = packer.unpackChanges(packed as any);
+
+    expect(unpacked).toEqual(changes);
+    expect(unpacked.length).toBe(5);
+
+    expect(unpacked[0]?.op).toBe("set");
+    expect((unpacked[0] as MapOpPayloadSet<string, string>).value).toBe(
+      "value1",
+    );
+    expect(unpacked[1]?.op).toBe("del");
+    expect(unpacked[2]?.op).toBe("set");
+    expect((unpacked[2] as MapOpPayloadSet<string, string>).value).toBe(
+      "value2",
+    );
+    expect(unpacked[3]?.op).toBe("set");
+    expect((unpacked[3] as MapOpPayloadSet<string, string>).value).toBe(
+      "value3",
+    );
+    expect(unpacked[4]?.op).toBe("del");
+  });
+
+  test("should preserve object property order", () => {
+    type OrderedObj = {
+      z: number;
+      a: number;
+      m: number;
+    };
+    const packer = new CoMapPackImplementation<string, OrderedObj>();
+
+    const changes: MapOpPayload<string, OrderedObj>[] = [
+      { op: "set", key: "obj", value: { z: 1, a: 2, m: 3 } },
+    ];
+
+    const packed = packer.packChanges(changes);
+    const unpacked = packer.unpackChanges(packed as any);
+
+    expect(unpacked).toEqual(changes);
+    const val = (unpacked[0] as MapOpPayloadSet<string, OrderedObj>).value;
+    const keys = Object.keys(val);
+    expect(keys).toEqual(["z", "a", "m"]);
+  });
+
+  test("should handle deeply nested structures", () => {
+    type DeepNested = {
+      level1: {
+        level2: {
+          level3: {
+            level4: {
+              level5: {
+                value: string;
+              };
+            };
+          };
+        };
+      };
+    };
+    const packer = new CoMapPackImplementation<string, DeepNested>();
+
+    const changes: MapOpPayload<string, DeepNested>[] = [
+      {
+        op: "set",
+        key: "deep",
+        value: {
+          level1: {
+            level2: {
+              level3: {
+                level4: {
+                  level5: {
+                    value: "deep value",
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    ];
+
+    const packed = packer.packChanges(changes);
+    const unpacked = packer.unpackChanges(packed as any);
+
+    expect(unpacked).toEqual(changes);
+    const val = (unpacked[0] as MapOpPayloadSet<string, DeepNested>).value;
+    expect(val.level1.level2.level3.level4.level5.value).toBe("deep value");
+  });
+
+  test("should preserve arrays with null values", () => {
+    type ArrayWithNull = (string | null)[];
+    const packer = new CoMapPackImplementation<string, ArrayWithNull>();
+
+    const changes: MapOpPayload<string, ArrayWithNull>[] = [
+      {
+        op: "set",
+        key: "arrayWithNull",
+        value: ["a", null, "c", null, "e"],
+      },
+    ];
+
+    const packed = packer.packChanges(changes);
+    const unpacked = packer.unpackChanges(packed as any);
+
+    expect(unpacked).toEqual(changes);
+    const arr = (unpacked[0] as MapOpPayloadSet<string, ArrayWithNull>).value;
+    expect(arr[0]).toBe("a");
+    expect(arr[1]).toBe(null);
+    expect(arr[2]).toBe("c");
+    expect(arr[3]).toBe(null);
+    expect(arr[4]).toBe("e");
+    expect(arr.length).toBe(5);
+  });
+
+  test("should preserve exact JSON serialization through roundtrip", () => {
+    type JsonData = {
+      string: string;
+      number: number;
+      boolean: boolean;
+      null: null;
+      array: JsonValue[];
+      object: { nested: string };
+    };
+    const packer = new CoMapPackImplementation<string, JsonData>();
+
+    const changes: MapOpPayload<string, JsonData>[] = [
+      {
+        op: "set",
+        key: "json",
+        value: {
+          string: "value",
+          number: 123,
+          boolean: true,
+          null: null,
+          array: [1, "two", false, null],
+          object: { nested: "data" },
+        },
+      },
+    ];
+
+    const packed = packer.packChanges(changes);
+    const unpacked = packer.unpackChanges(packed as any);
+
+    // Verify JSON serialization is identical
+    expect(JSON.stringify(unpacked)).toBe(JSON.stringify(changes));
     expect(unpacked).toEqual(changes);
   });
 });

@@ -24,7 +24,7 @@ class MyAccount extends Account {
   }
 }
 
-const syncServer = "wss://cloud.jazz.tools/?key=jazz@jazz.tools";
+const syncServer = "ws://127.0.0.1:4211";
 
 app.get("/", async (c) => {
   const crypto = await WasmCrypto.create();

@@ -6,6 +6,7 @@ import { WebSocket } from "ws";
 import { createWorkerAccount } from "../createWorkerAccount.js";
 import { startSyncServer } from "../startSyncServer.js";
 import { serverDefaults } from "../config.js";
+import { skip } from "node:test";
 
 describe("createWorkerAccount - integration tests", () => {
   it("should create a worker account using the local sync server", async () => {
@@ -51,7 +52,7 @@ describe("createWorkerAccount - integration tests", () => {
     expect(await node.load(accountID as any)).not.toBe("unavailable");
   });
 
-  it("should create a worker account using the Jazz cloud", async () => {
+  skip("should create a worker account using the Jazz cloud", async () => {
     const { accountID, agentSecret } = await createWorkerAccount({
       name: "test",
       peer: `wss://cloud.jazz.tools`,

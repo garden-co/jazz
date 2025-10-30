@@ -2665,6 +2665,9 @@ importers:
       hono:
         specifier: ^4.7.2
         version: 4.7.2
+      jazz-run:
+        specifier: workspace:*
+        version: link:../../packages/jazz-run
       jazz-tools:
         specifier: workspace:*
         version: link:../../packages/jazz-tools
@@ -2843,6 +2846,9 @@ importers:
       cojson-transport-ws:
         specifier: workspace:*
         version: link:../../packages/cojson-transport-ws
+      jazz-run:
+        specifier: workspace:*
+        version: link:../../packages/jazz-run
       jazz-tools:
         specifier: workspace:*
         version: link:../../packages/jazz-tools

@@ -2,6 +2,7 @@ import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 import { describe, it, expect, onTestFinished } from "vitest";
 import { execa } from "execa";
+import { startSyncServer } from "jazz-run/startSyncServer";
 
 // @ts-ignore
 const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -17,6 +18,14 @@ describe("GET /api/hello", () => {
         cwd: packageRoot,
       },
     );
+
+    const syncServer = await startSyncServer({
+      port: "4210",
+      inMemory: true,
+      db: "sync-db/storage.db",
+      host: "127.0.0.1",
+    });
+
     // Wait for server to be ready
     const url = await new Promise<URL>((resolve, reject) => {
       let url: string;
@@ -50,8 +59,11 @@ describe("GET /api/hello", () => {
     onTestFinished(() => {
       // Ensure server is killed after all tests
       server.kill();
+      syncServer.closeAllConnections();
+      syncServer.localNode.gracefulShutdown();
+      syncServer.close();
     });
-    return { server, url };
+    return { server, url, syncServer };
   }
 
   it("WASM should work", async () => {

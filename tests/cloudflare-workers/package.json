@@ -19,6 +19,7 @@
     "cojson": "workspace:*",
     "cojson-transport-ws": "workspace:*",
     "hono": "^4.7.2",
-    "jazz-tools": "workspace:*"
+    "jazz-tools": "workspace:*",
+    "jazz-run": "workspace:*"
   }
 }
