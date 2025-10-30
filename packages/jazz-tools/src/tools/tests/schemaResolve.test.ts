@@ -5,10 +5,18 @@ import {
   expect,
   expectTypeOf,
   test,
+  vi,
 } from "vitest";
-import { Account, co, CoValueLoadingState, Group, z } from "../exports";
+import {
+  Account,
+  co,
+  CoPlainText,
+  CoValueLoadingState,
+  Group,
+  z,
+} from "../exports";
 import { createJazzTestAccount, setupJazzTestSync } from "../testing";
-import { assertLoaded, setupTwoNodes } from "./utils";
+import { assertLoaded, setupTwoNodes, waitFor } from "./utils";
 
 describe("Schema-level CoValue resolution", () => {
   beforeAll(async () => {
@@ -377,12 +385,157 @@ describe("Schema-level CoValue resolution", () => {
 
       describe("on subscribe()", () => {
         test("for CoList", async () => {
-          // TODO
+          const TestList = co.list(co.plainText().resolved()).resolved();
+
+          const list = TestList.create(["Hello"], publicGroup);
+
+          const updates: co.loaded<typeof TestList, { $each: true }>[] = [];
+          TestList.subscribe(
+            list.$jazz.id,
+            { loadAs: clientAccount },
+            (list) => {
+              expectTypeOf<(typeof list)[0]>().toEqualTypeOf<CoPlainText>();
+              updates.push(list);
+            },
+          );
+
+          await waitFor(() => expect(updates.length).toBe(1));
+          expect(updates[0]?.[0]?.toUpperCase()).toEqual("HELLO");
+        });
+
+        test("for CoMap", async () => {
+          const TestMap = co
+            .map({ text: co.plainText().resolved() })
+            .resolved();
+
+          const map = TestMap.create({ text: "Hello" }, publicGroup);
+
+          const updates: co.loaded<typeof TestMap, { text: true }>[] = [];
+          TestMap.subscribe(
+            map.$jazz.id,
+            {
+              loadAs: clientAccount,
+            },
+            (map) => {
+              expectTypeOf<typeof map.text>().toEqualTypeOf<CoPlainText>();
+              updates.push(map);
+            },
+          );
+
+          await waitFor(() => expect(updates.length).toBe(1));
+          expect(updates[0]?.text.toUpperCase()).toEqual("HELLO");
+        });
+
+        test("for CoRecord", async () => {
+          const TestRecord = co
+            .record(z.string(), co.plainText().resolved())
+            .resolved();
+
+          const record = TestRecord.create(
+            { key1: "Hello", key2: "World" },
+            publicGroup,
+          );
+
+          const updates: co.loaded<typeof TestRecord, { $each: true }>[] = [];
+          TestRecord.subscribe(
+            record.$jazz.id,
+            { loadAs: clientAccount },
+            (record) => {
+              expectTypeOf<typeof record.key1>().toEqualTypeOf<
+                CoPlainText | undefined
+              >();
+              expectTypeOf<typeof record.key2>().toEqualTypeOf<
+                CoPlainText | undefined
+              >();
+              updates.push(record);
+            },
+          );
+
+          await waitFor(() => expect(updates.length).toBe(1));
+          expect(updates[0]?.key1?.toUpperCase()).toEqual("HELLO");
+          expect(updates[0]?.key2?.toUpperCase()).toEqual("WORLD");
+        });
+
+        test("for Account", async () => {
+          const TestAccount = co
+            .account({
+              profile: co.profile().resolved(),
+              root: co.map({ text: co.plainText().resolved() }).resolved(),
+            })
+            .resolved();
+
+          const account = await TestAccount.createAs(serverAccount, {
+            creationProps: { name: "Hermes Puggington" },
+          });
+          account.$jazz.set(
+            "profile",
+            TestAccount.shape.profile.create(
+              { name: "Hermes Puggington" },
+              publicGroup,
+            ),
+          );
+          account.$jazz.set(
+            "root",
+            TestAccount.shape.root.create({ text: "Hello" }, publicGroup),
+          );
+
+          const updates: co.loaded<
+            typeof TestAccount,
+            { profile: true; root: { text: true } }
+          >[] = [];
+          TestAccount.subscribe(
+            account.$jazz.id,
+            { loadAs: clientAccount },
+            (account) => {
+              updates.push(account);
+            },
+          );
+
+          await waitFor(() => expect(updates.length).toBe(1));
+          expect(updates[0]?.profile.name).toBe("Hermes Puggington");
+          expect(updates[0]?.root.text.toUpperCase()).toEqual("HELLO");
+        });
+
+        // TODO fix - this is not working when providing an explicit resolve query either
+        test.skip("for CoFeed", async () => {
+          const TestFeed = co.feed(co.plainText().resolved()).resolved();
+
+          const feed = TestFeed.create(["Hello"], publicGroup);
+
+          const updates: co.loaded<typeof TestFeed, { $each: true }>[] = [];
+          TestFeed.subscribe(
+            feed.$jazz.id,
+            { loadAs: clientAccount },
+            (feed) => {
+              updates.push(feed);
+            },
+          );
+
+          await waitFor(() => expect(updates.length).toBe(1));
+          expect(updates[0]?.inCurrentSession?.value.toUpperCase()).toEqual(
+            "HELLO",
+          );
         });
       });
 
       describe("on merge()", () => {
         test("for CoList", async () => {
+          // TODO
+        });
+
+        test("for CoMap", async () => {
+          // TODO
+        });
+
+        test("for CoRecord", async () => {
+          // TODO
+        });
+
+        test("for Account", async () => {
+          // TODO
+        });
+
+        test("for CoFeed", async () => {
           // TODO
         });
       });
@@ -391,10 +544,42 @@ describe("Schema-level CoValue resolution", () => {
         test("for CoList", async () => {
           // TODO
         });
+
+        test("for CoMap", async () => {
+          // TODO
+        });
+
+        test("for CoRecord", async () => {
+          // TODO
+        });
+
+        test("for Account", async () => {
+          // TODO
+        });
+
+        test("for CoFeed", async () => {
+          // TODO
+        });
       });
 
       describe("on loadUnique()", () => {
         test("for CoList", async () => {
+          // TODO
+        });
+
+        test("for CoMap", async () => {
+          // TODO
+        });
+
+        test("for CoRecord", async () => {
+          // TODO
+        });
+
+        test("for Account", async () => {
+          // TODO
+        });
+
+        test("for CoFeed", async () => {
           // TODO
         });
       });

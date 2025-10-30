@@ -156,7 +156,8 @@ export class CoMapSchema<
   subscribe<
     const R extends RefsToResolve<
       Simplify<CoMapInstanceCoValuesMaybeLoaded<Shape>> & CoMap
-    > = true,
+      // @ts-expect-error
+    > = EagerlyLoaded extends false ? true : this["defaultResolveQuery"],
   >(
     id: string,
     options: SubscribeListenerOptions<
@@ -172,7 +173,11 @@ export class CoMapSchema<
     ) => void,
   ): () => void {
     // @ts-expect-error
-    return this.coValueClass.subscribe(id, options, listener);
+    return this.coValueClass.subscribe(
+      id,
+      withDefaultResolveQuery(options, this.defaultResolveQuery),
+      listener,
+    );
   }
 
   /** @deprecated Use `CoMap.upsertUnique` and `CoMap.loadUnique` instead. */

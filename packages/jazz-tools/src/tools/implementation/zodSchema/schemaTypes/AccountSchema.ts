@@ -142,7 +142,10 @@ export class AccountSchema<
   }
 
   subscribe<
-    const R extends RefsToResolve<Simplify<AccountInstance<Shape>>> = true,
+    const R extends RefsToResolve<
+      Simplify<AccountInstance<Shape>>
+      // @ts-expect-error
+    > = EagerlyLoaded extends false ? true : this["defaultResolveQuery"],
   >(
     id: string,
     options: SubscribeListenerOptions<Simplify<AccountInstance<Shape>>, R>,
@@ -151,8 +154,12 @@ export class AccountSchema<
       unsubscribe: () => void,
     ) => void,
   ): () => void {
-    // @ts-expect-error
-    return this.coValueClass.subscribe(id, options, listener);
+    return this.coValueClass.subscribe(
+      id,
+      // @ts-expect-error
+      withDefaultResolveQuery(options, this.defaultResolveQuery),
+      listener,
+    );
   }
 
   getMe(): Loaded<this, true> {

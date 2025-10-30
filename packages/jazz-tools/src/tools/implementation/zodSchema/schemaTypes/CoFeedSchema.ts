@@ -10,8 +10,10 @@ import {
   RefsToResolveStrict,
   Resolved,
   SubscribeListenerOptions,
+  SubscribeRestArgs,
   coOptionalDefiner,
   unstable_mergeBranchWithResolve,
+  parseSubscribeRestArgs,
   ResolveQuery,
 } from "../../../internal.js";
 import { AnonymousJazzAgent } from "../../anonymousJazzAgent.js";
@@ -113,7 +115,10 @@ export class CoFeedSchema<
     ) => void,
   ): () => void;
   subscribe<
-    const R extends RefsToResolve<CoFeedInstanceCoValuesMaybeLoaded<T>> = true,
+    const R extends RefsToResolve<
+      CoFeedInstanceCoValuesMaybeLoaded<T>
+      // @ts-expect-error
+    > = EagerlyLoaded extends false ? true : this["defaultResolveQuery"],
   >(
     id: string,
     options: SubscribeListenerOptions<CoFeedInstanceCoValuesMaybeLoaded<T>, R>,
@@ -122,9 +127,14 @@ export class CoFeedSchema<
       unsubscribe: () => void,
     ) => void,
   ): () => void;
-  subscribe(...args: [any, ...any[]]) {
-    // @ts-expect-error
-    return this.coValueClass.subscribe(...args);
+  subscribe(id: string, ...args: any) {
+    const { options, listener } = parseSubscribeRestArgs(args);
+    return this.coValueClass.subscribe(
+      id,
+      // @ts-expect-error
+      withDefaultResolveQuery(options, this.defaultResolveQuery),
+      listener,
+    );
   }
 
   getCoValueClass(): typeof CoFeed {
