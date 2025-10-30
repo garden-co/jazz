@@ -9,7 +9,7 @@ const dashboard = Dashboard.create({
 });
 // #endregion
 
-// #region dashboardFromJSON
+// #region DashboardFromJSON
 const dashboardFromJSON = Dashboard.create({
   widgets: [
     { type: "button", label: "Click me" },

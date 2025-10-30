@@ -10,8 +10,7 @@ import {
   DropdownMenu,
 } from "@garden-co/design-system/src/components/organisms/Dropdown";
 import clsx from "clsx";
-import { usePathname, useRouter } from "next/navigation";
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useState, useCallback } from "react";
 
 import {
   TAB_CHANGE_EVENT,
@@ -22,7 +21,6 @@ import {
 export function FrameworkSelect({
   onSelect,
   size = "md",
-  routerPush = true,
   className,
 }: {
   onSelect?: (framework: Framework) => void;
@@ -30,42 +28,40 @@ export function FrameworkSelect({
   routerPush?: boolean;
   className?: string;
 }) {
-  const router = useRouter();
   const defaultFramework = useFramework();
   const [selectedFramework, setSelectedFramework] =
     useState<Framework>(defaultFramework);
   const [initialized, setInitialized] = useState(false);
 
-  const path = usePathname();
-  const pathRef = useRef(path);
-
-  const selectFramework = (newFramework: Framework, shouldNavigate = true) => {
+  const selectFramework = useCallback((newFramework: Framework, shouldNavigate = true) => {
     setSelectedFramework(newFramework);
     onSelect && onSelect(newFramework);
     localStorage.setItem("_tcgpref_framework", newFramework);
-    if (!shouldNavigate) return;
-    const newPath =
-      path.split("/").toSpliced(2, 1, newFramework).join("/") +
-      window.location.hash;
-    routerPush && router.replace(newPath, { scroll: true });
-  };
 
-  const handleTabChange = (event: CustomEvent<TabChangeEventDetail>) => {
+    // Dispatch event to notify other components (including useFramework)
+    // The useFramework hook will handle the actual navigation
+    window.dispatchEvent(
+      new CustomEvent(TAB_CHANGE_EVENT, {
+        detail: {
+          key: "framework",
+          value: newFramework,
+        },
+      }),
+    );
+  }, [onSelect]);
+
+  const handleTabChange = useCallback((event: CustomEvent<TabChangeEventDetail>) => {
     if (isFrameworkChange(event.detail)) {
       selectFramework(event.detail.value as Framework, false);
     }
-  };
+  }, [selectFramework]);
 
   useEffect(() => {
-    window.addEventListener(TAB_CHANGE_EVENT, handleTabChange);
+    window.addEventListener(TAB_CHANGE_EVENT, handleTabChange as EventListener);
     return () => {
-      window.removeEventListener(TAB_CHANGE_EVENT, handleTabChange);
+      window.removeEventListener(TAB_CHANGE_EVENT, handleTabChange as EventListener);
     };
-  }, []);
-
-  useEffect(() => {
-    pathRef.current = path;
-  }, [path]);
+  }, [handleTabChange]);
 
   useEffect(() => {
     if (!initialized) {
@@ -73,24 +69,6 @@ export function FrameworkSelect({
       setInitialized(true);
     }
   }, [defaultFramework, initialized]);
-
-  useEffect(() => {
-    // Dispatch framework event once after initialization completes
-    // to sync tabbed code groups with the current framework
-    if (!initialized) return;
-
-    const timer = setTimeout(() => {
-      window.dispatchEvent(
-        new CustomEvent(TAB_CHANGE_EVENT, {
-          detail: {
-            key: "framework",
-            value: selectedFramework,
-          },
-        }),
-      );
-    }, 0);
-    return () => clearTimeout(timer);
-  }, [initialized]); // Only run once when initialized becomes true
 
   return (
     <Dropdown>

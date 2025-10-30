@@ -13,7 +13,7 @@
     {/if}
   {/each}
 </ul>
-<!-- [!code ++:5] -->
+
 {#if me.current.$isLoaded}
   <a href={`/festival/${me.current.root.myFestival.$jazz.id}`}>
     Go to my Server-Rendered Festival Page!
