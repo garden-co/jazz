@@ -255,7 +255,7 @@ describe("Schema-level CoValue resolution", () => {
 
     beforeAll(async () => {
       ({ clientAccount, serverAccount } = await setupTwoNodes());
-      publicGroup = Group.create(serverAccount).makePublic();
+      publicGroup = Group.create(serverAccount).makePublic("writer");
     });
 
     describe("the default resolve query is used if no resolve query is provided", () => {
@@ -514,6 +514,185 @@ describe("Schema-level CoValue resolution", () => {
           await waitFor(() => expect(updates.length).toBe(1));
           expect(updates[0]?.inCurrentSession?.value.toUpperCase()).toEqual(
             "HELLO",
+          );
+        });
+      });
+
+      describe("on merge()", () => {
+        test("for CoList", async () => {
+          const TestList = co.list(co.plainText().resolved()).resolved();
+
+          const list = TestList.create(["Hello"], publicGroup);
+
+          const branchList = await TestList.load(list.$jazz.id, {
+            unstable_branch: { name: "test-merge-coList", owner: publicGroup },
+            loadAs: clientAccount,
+          });
+
+          assertLoaded(branchList);
+          branchList[0]?.insertAfter(branchList[0].length, "!!");
+
+          await TestList.unstable_merge(list.$jazz.id, {
+            branch: { name: "test-merge-coList", owner: publicGroup },
+            loadAs: clientAccount,
+          });
+
+          const mergedList = await TestList.load(list.$jazz.id, {
+            loadAs: clientAccount,
+          });
+
+          assertLoaded(mergedList);
+          expect(mergedList[0]?.toUpperCase()).toEqual("HELLO!!");
+        });
+
+        test("for CoMap", async () => {
+          const TestMap = co
+            .map({ text: co.plainText().resolved() })
+            .resolved();
+
+          const map = TestMap.create({ text: "Hello" }, publicGroup);
+
+          const branchMap = await TestMap.load(map.$jazz.id, {
+            unstable_branch: { name: "test-merge-coMap", owner: publicGroup },
+            loadAs: clientAccount,
+          });
+
+          assertLoaded(branchMap);
+          branchMap.text.insertAfter(branchMap.text.length, "!!");
+
+          await TestMap.unstable_merge(map.$jazz.id, {
+            branch: { name: "test-merge-coMap", owner: publicGroup },
+            loadAs: clientAccount,
+          });
+
+          const mergedMap = await TestMap.load(map.$jazz.id, {
+            loadAs: clientAccount,
+          });
+
+          assertLoaded(mergedMap);
+          expect(mergedMap.text.toUpperCase()).toEqual("HELLO!!");
+        });
+
+        test("for CoRecord", async () => {
+          const TestRecord = co
+            .record(z.string(), co.plainText().resolved())
+            .resolved();
+
+          const record = TestRecord.create({ key1: "Hello" }, publicGroup);
+
+          const branchRecord = await TestRecord.load(record.$jazz.id, {
+            unstable_branch: {
+              name: "test-merge-coRecord",
+              owner: publicGroup,
+            },
+            loadAs: clientAccount,
+          });
+
+          assertLoaded(branchRecord);
+          branchRecord.key1?.insertAfter(branchRecord.key1.length, "!!");
+
+          await TestRecord.unstable_merge(record.$jazz.id, {
+            branch: { name: "test-merge-coRecord", owner: publicGroup },
+            loadAs: clientAccount,
+          });
+
+          const mergedRecord = await TestRecord.load(record.$jazz.id, {
+            loadAs: clientAccount,
+          });
+
+          assertLoaded(mergedRecord);
+          expect(mergedRecord.key1?.toUpperCase()).toEqual("HELLO!!");
+        });
+
+        test("for Account", async () => {
+          const TestAccount = co
+            .account({
+              profile: co.profile().resolved(),
+              root: co.map({ text: co.plainText().resolved() }).resolved(),
+            })
+            .resolved();
+          const AccountList = co.list(TestAccount).resolved();
+
+          const account = await TestAccount.createAs(serverAccount, {
+            creationProps: { name: "Hermes Puggington" },
+          });
+          account.$jazz.set(
+            "profile",
+            TestAccount.shape.profile.create(
+              { name: "Hermes Puggington" },
+              publicGroup,
+            ),
+          );
+          account.$jazz.set(
+            "root",
+            TestAccount.shape.root.create({ text: "Hello" }, publicGroup),
+          );
+          const accountList = AccountList.create([account], publicGroup);
+
+          const branchAccountList = await AccountList.load(
+            accountList.$jazz.id,
+            {
+              unstable_branch: {
+                name: "test-merge-account",
+                owner: publicGroup,
+              },
+              loadAs: clientAccount,
+            },
+          );
+
+          assertLoaded(branchAccountList);
+          branchAccountList[0]?.root.text.insertAfter(
+            branchAccountList[0].root.text.length,
+            "!!",
+          );
+
+          await AccountList.unstable_merge(accountList.$jazz.id, {
+            branch: { name: "test-merge-account", owner: publicGroup },
+            loadAs: clientAccount,
+          });
+
+          const mergedAccountList = await AccountList.load(
+            accountList.$jazz.id,
+            {
+              loadAs: clientAccount,
+            },
+          );
+
+          assertLoaded(mergedAccountList);
+          expect(mergedAccountList[0]?.root.text.toUpperCase()).toEqual(
+            "HELLO!!",
+          );
+        });
+
+        // TODO fix - this is not working when providing an explicit resolve query either
+        test.skip("for CoFeed", async () => {
+          const TestFeed = co.feed(co.plainText().resolved()).resolved();
+
+          const feed = TestFeed.create(["Hello"], publicGroup);
+
+          const branchFeed = await TestFeed.load(feed.$jazz.id, {
+            unstable_branch: { name: "test-merge-coFeed", owner: publicGroup },
+            loadAs: clientAccount,
+          });
+
+          assertLoaded(branchFeed);
+          branchFeed.inCurrentSession?.value.insertAfter(
+            branchFeed.inCurrentSession.value.length,
+            "!!",
+          );
+
+          await TestFeed.unstable_merge(feed.$jazz.id, {
+            branch: { name: "test-merge-coFeed", owner: publicGroup },
+            loadAs: clientAccount,
+          });
+
+          const mergedFeed = await TestFeed.load(feed.$jazz.id, {
+            loadAs: clientAccount,
+          });
+
+          assertLoaded(mergedFeed);
+          expect(mergedFeed.inCurrentSession?.value.toUpperCase()).toEqual(
+            "HELLO!!",
           );
         });
       });
