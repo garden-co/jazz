@@ -9,10 +9,12 @@
         "./content/docs/code-snippets/key-features/authentication/better-auth/*",
         "./content/docs/code-snippets/key-features/authentication/quickstart/*",
         "./content/docs/code-snippets/permissions-and-sharing/quickstart/*",
-        "./content/docs/code-snippets/quickstart/*"
+        "./content/docs/code-snippets/quickstart/*",
+        "./content/docs/code-snippets/server-side/communicating-with-workers/inbox/*"
       ],
       "@/lib/*": [
-        "./content/docs/code-snippets/key-features/authentication/better-auth/*"
+        "./content/docs/code-snippets/key-features/authentication/better-auth/*",
+        "./content/docs/code-snippets/server-side/communicating-with-workers/inbox/*"
       ],
       "@clerk/*": [
         "./content/docs/code-snippets/key-features/authentication/clerk/*"
