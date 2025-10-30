@@ -167,7 +167,7 @@ function resolveSnippetPath(
   //       -> content/docs/code-snippets/core-concepts/schemas/accounts-and-migrations/
   const parsedPath = path.parse(currentFilePath);
   const dirPath = parsedPath.dir;
-  
+
   // Find the '/docs/' or '/docs' part and replace it with '/code-snippets/'
   // This handles both Unix and Windows paths
   const docsMatch = dirPath.match(/(.*[/\\]docs)([/\\].*)?$/);
@@ -175,14 +175,14 @@ function resolveSnippetPath(
     // If we can't find /docs/, fall back to base directory
     return path.join(snippetsBaseDir, snippetPath);
   }
-  
+
   const beforeDocs = docsMatch[1]; // e.g., "content/docs"
   const afterDocs = docsMatch[2] || ""; // e.g., "/core-concepts/schemas"
-  
+
   // Build: content/docs/code-snippets/core-concepts/schemas/accounts-and-migrations
   const snippetsSubdir = beforeDocs + path.sep + "code-snippets" + afterDocs;
   const fullSnippetsDir = path.join(snippetsSubdir, parsedPath.name);
-  
+
   // Try the local snippets directory first
   const localPath = path.join(fullSnippetsDir, snippetPath);
   if (fs.existsSync(localPath)) {
@@ -201,7 +201,7 @@ function parseMeta(meta: string | undefined) {
   meta = meta.replace(/\btwoslash\b/g, "").trim();
 
   // Compact form without snippet= prefix: examples/foo.ts#Bar or test/example.tsx#Region
-  const direct = meta.match(/^([\w./\-]+\.\w+)(?:#([\w\-]+))?$/);
+  const direct = meta.match(/^([^#\s]+?\.\w+)(?:#([\w\-]+))?$/);
   if (direct) {
     result.snippet = direct[1];
     if (direct[2]) result.region = direct[2];

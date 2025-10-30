@@ -26,12 +26,7 @@ We can create this user using the `createSSRJazzAgent` function. In this example
 <FileName>src/lib/jazzSSR.ts</FileName>
 </ContentByFramework>
 <CodeGroup className="mt-4 [&_span]:[tab-size:2]" preferWrap>
-```tsx
-import { createSSRJazzAgent } from "jazz-tools/ssr";
-
-export const jazzSSR = createSSRJazzAgent({
-  peer: "wss://cloud.jazz.tools/",
-});
+```ts jazzSSR.ts
 ```
 </CodeGroup>
 
@@ -48,87 +43,24 @@ Normally, Jazz expects a logged in user (or an anonymous user) to be accessing d
 
 <TabbedCodeGroup savedPreferenceKey="framework" id="enable-ssr">
 <TabbedCodeGroupItem label="React" value="react" icon={<ReactLogo />} preferWrap>
-```tsx
-"use client";
-import { JazzReactProvider } from "jazz-tools/react";
-import { JazzFestAccount } from "@/app/schema";
-
-const apiKey = process.env.NEXT_PUBLIC_JAZZ_API_KEY;
-
-export function JazzWrapper({ children }: { children: React.ReactNode }) {
-  return (
-    <JazzReactProvider
-      sync={{ peer: `wss://cloud.jazz.tools/?key=${apiKey}` }}
-      AccountSchema={JazzFestAccount}
-      {/* [!code ++:1] */}
-      enableSSR
-    >
-      {children}
-    </JazzReactProvider>
-  );
-}
+```tsx JazzWrapper.tsx
 ```
 </TabbedCodeGroupItem>
 <TabbedCodeGroupItem label="Svelte" value="svelte" icon={<SvelteLogo />} preferWrap>
-```svelte
-<script lang="ts">
-  import { JazzSvelteProvider } from "jazz-tools/svelte";
-  import { apiKey } from "$lib/apiKey";
-
-  let { children } = $props();
-  const sync = { peer: `wss://cloud.jazz.tools/?key=${apiKey}` };
-</script>
-
-<!--[!code --:1]-->
-<JazzSvelteProvider {sync}>
-<!--[!code ++:1]-->
-<JazzSvelteProvider {sync} enableSSR>
-  {@render children?.()}
-</JazzSvelteProvider>
+```svelte +layout.svelte
 ```
 </TabbedCodeGroupItem>
 </TabbedCodeGroup>
 
 ## Making your data public
 
-By default, when you create data in Jazz, it's private and only accessible to the account that created it. 
+By default, when you create data in Jazz, it's private and only accessible to the account that created it.
 
 However, the SSR agent is credential-less and unauthenticated, so it can only read data which has been made public. Although Jazz allows you to define [complex, role-based permissions](/docs/permissions-and-sharing/overview), here, we'll focus on making the CoValues public.
 
 <FileName>app/schema.ts</FileName>
 <CodeGroup preferWrap>
-```ts
-import { co, z } from "jazz-tools";
-
-export const Band = co.map({
-  name: z.string(), // Zod primitive type
-})
-// [!code ++:3]
-  .withMigration(band => {
-    band.$jazz.owner.makePublic()
-  });
-
-export const Festival = co.list(Band)
-  .withMigration(festival => festival.$jazz.owner.makePublic());
-
-export const JazzFestAccountRoot = co.map({
-  myFestival: Festival,
-});
-
-export const JazzFestAccount = co
-  .account({
-    root: JazzFestAccountRoot,
-    profile: co.profile(),
-  })
-  .withMigration((account) => {
-    if (!account.$jazz.has('root')) {
-      account.$jazz.set('root', {
-        myFestival: [],
-      });
-      // [!code ++:1]
-      account.root?.myFestival?.$jazz.owner.makePublic();
-    }
-  });
+```ts schema.ts
 ```
 </CodeGroup>
 
@@ -145,74 +77,14 @@ Now let's set up a page which will be read by the agent we created earlier, and 
 
 <TabbedCodeGroup savedPreferenceKey="framework" id="add-wrapper">
 <TabbedCodeGroupItem label="React" value="react" icon={<ReactLogo />} preferWrap>
-```tsx
-import { jazzSSR } from "@/app/jazzSSR";
-import { Festival } from "@/app/schema";
-
-export default async function ServerSidePage(props: {
-  params: { festivalId: string };
-}) {
-  const { festivalId } = await props.params;
-  const festival = await Festival.load(festivalId, {
-    loadAs: jazzSSR,
-    resolve: {
-      $each: {
-        $onError: 'catch',
-      },
-    },
-  });
-  
-  return (
-    <main>
-      <h1>🎪 Server-rendered Festival {festivalId}</h1>
-
-      <ul>
-        {festival.$isLoaded && festival.map((band) => {
-          if (!band.$isLoaded) return null;
-          return <li key={band.$jazz.id}>🎶 {band.name}</li>;
-        })}
-      </ul>
-    </main>
-  );
-}
+```tsx page.tsx
 ```
 </TabbedCodeGroupItem>
 <TabbedCodeGroupItem label="Svelte" value="svelte" icon={<SvelteLogo />} preferWrap>
-```svelte
-<script lang="ts">
-  import { jazzSSR } from "$lib/jazzSSR";
-  import { Festival } from "$lib/schema";
-  import { page } from '$app/state';
-
-	const festivalId = $derived(page.params.festivalId);
-
-  const festival = $derived(Festival.load(festivalId, {
-    loadAs: jazzSSR,
-    resolve: {
-      $each: {
-        $onError: 'catch',
-      },
-    },
-  }));
-</script>
-
-<main>
-  <h1>🎪 Server-rendered Festival {festivalId}</h1>
-  <ul>
-    {#await festival then festival}
-      {#each festival.$isLoaded ? festival : [] as band (band.$jazz.id)} 
-        {#if band.$isLoaded}
-          <li>🎶 {band.name}</li>
-        {/if}
-      {/each}
-    {/await}
-  </ul>
-</main>
+```svelte +page.svelte
 ```
 </TabbedCodeGroupItem>
 </TabbedCodeGroup>
-
-**Note**: `filter(Boolean)` allows us to remove any bands which have resolved to `null` during the loading process&hairsp;—&hairsp;this is often the case when the SSR agent tries to load a CoValue where the permissions are not set to public.
 
 <ContentByFramework framework="react">
 <Alert variant="info" className="mt-4">
@@ -233,56 +105,11 @@ The last step is to link to your server-rendered page from your `Festival` compo
 
 <TabbedCodeGroup savedPreferenceKey="framework" id="link-to-page">
 <TabbedCodeGroupItem label="React" value="react" icon={<ReactLogo />} preferWrap>
-```tsx
-"use client";
-import { useAccount } from "jazz-tools/react";
-// [!code ++:1]
-import Link from "next/link";
-import { JazzFestAccount } from "@/app/schema";
-
-export function Festival() {
-  const me = useAccount(JazzFestAccount, {
-    resolve: { root: { myFestival: { $each: { $onError: 'catch' } } } },
-  });
-  if (!me.$isLoaded) return null; 
-  return (
-    <>
-      <ul>
-        {me.root.myFestival.map((band) => {
-          if (!band.$isLoaded) return null;
-          return <li key={band.$jazz.id}>{band.name}</li>;
-        )}
-      </ul>
-      {/* [!code ++:3] */}
-      <Link href={`/festival/${me.root.myFestival.$jazz.id}`}>
-        Go to my Server-Rendered Festival Page!
-      </Link>
-    </>
-  );
-}
+```tsx Festival.tsx
 ```
 </TabbedCodeGroupItem>
 <TabbedCodeGroupItem label="Svelte" value="svelte" icon={<SvelteLogo />} preferWrap>
-```svelte
-<script lang="ts">
-  import { AccountCoState } from "jazz-tools/svelte";
-  import { JazzFestAccount } from "$lib/schema";
-  const me = new AccountCoState(JazzFestAccount, { 
-    resolve: { root: { myFestival: true } } 
-  });
-</script>
-
-<ul>
-  {#each me.current.$isLoaded ? me.current.root.myFestival : [] as band}
-    {#if band.$isLoaded}
-      <li>{band.name}</li>
-    {/if}
-  {/each}
-</ul>
-<!-- [!code ++:3] -->
-<a href={`/festival/${me.root.myFestival.$jazz.id}`}>
-  Go to my Server-Rendered Festival Page!
-</a>
+```svelte Festival.svelte
 ```
 </TabbedCodeGroupItem>
 </TabbedCodeGroup>
@@ -294,7 +121,7 @@ Let's fire up your app and see if it works!
 
 If everything's going according to plan, your app will load with the home page. You can click the link to your server-rendered page to see your data - fully rendered on the server!
 
-**Congratulations! 🎉** You've now set up server-side rendering in your React app. You can use this same pattern to render any page on the server. 
+**Congratulations! 🎉** You've now set up server-side rendering in your React app. You can use this same pattern to render any page on the server.
 
 ### Not working?
 - Did you add `enableSSR` to the provider?

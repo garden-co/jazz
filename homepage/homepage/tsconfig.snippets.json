@@ -10,11 +10,15 @@
         "./content/docs/code-snippets/key-features/authentication/quickstart/*",
         "./content/docs/code-snippets/permissions-and-sharing/quickstart/*",
         "./content/docs/code-snippets/quickstart/*",
-        "./content/docs/code-snippets/server-side/communicating-with-workers/inbox/*"
+        "./content/docs/code-snippets/server-side/communicating-with-workers/inbox/*",
+        "./content/docs/code-snippets/server-side/jazz-rpc/*",
+        "./content/docs/code-snippets/server-side/quickstart/*",
+        "./content/docs/code-snippets/server-side/ssr/*"
       ],
       "@/lib/*": [
         "./content/docs/code-snippets/key-features/authentication/better-auth/*",
-        "./content/docs/code-snippets/server-side/communicating-with-workers/inbox/*"
+        "./content/docs/code-snippets/server-side/communicating-with-workers/inbox/*",
+        "./content/docs/code-snippets/server-side/jazz-rpc/*"
       ],
       "@clerk/*": [
         "./content/docs/code-snippets/key-features/authentication/clerk/*"
@@ -25,12 +29,16 @@
       "$lib/*": [
         "./content/docs/code-snippets/key-features/authentication/quickstart/*",
         "./content/docs/code-snippets/permissions-and-sharing/quickstart/*",
-        "./content/docs/code-snippets/quickstart/*"
+        "./content/docs/code-snippets/quickstart/*",
+        "./content/docs/code-snippets/server-side/quickstart/*",
+        "./content/docs/code-snippets/server-side/ssr/*"
       ],
       "@/app/*": [
         "./content/docs/code-snippets/key-features/authentication/quickstart/*",
         "./content/docs/code-snippets/permissions-and-sharing/quickstart/*",
-        "./content/docs/code-snippets/quickstart/*"
+        "./content/docs/code-snippets/quickstart/*",
+        "./content/docs/code-snippets/server-side/quickstart/*",
+        "./content/docs/code-snippets/server-side/ssr/*"
       ],
       "$lib/components/*": [
         "./content/docs/code-snippets/permissions-and-sharing/quickstart/*",

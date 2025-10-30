@@ -15,16 +15,3 @@ export const BookTicketMessage = co.map({
 // #endregion
 
 export const Ticket = co.map({});
-
-// #region UnionSchema
-const CancelReservationMessage = co.map({
-  type: z.literal("cancelReservation"),
-  event: Event,
-  ticket: Ticket,
-});
-
-export const InboxMessage = co.discriminatedUnion("type", [
-  BookTicketMessage,
-  CancelReservationMessage,
-]);
-// #endregion
