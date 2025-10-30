@@ -186,6 +186,35 @@ describe("Schema-level CoValue resolution", () => {
           expect(TestRecord.defaultResolveQuery).toBe(true);
         });
       });
+
+      describe("Account", () => {
+        test("schemas inherit the default resolve query of their fields", () => {
+          const TestAccount = co
+            .account({
+              profile: co.profile().resolved(),
+              root: co.map({}).resolved(),
+            })
+            .resolved();
+
+          expectTypeOf<typeof TestAccount.defaultResolveQuery>().toEqualTypeOf<{
+            profile: true;
+            root: true;
+          }>();
+          expect(TestAccount.defaultResolveQuery).toEqual({
+            profile: true,
+            root: true,
+          });
+        });
+
+        test("schema becomes shallowly-loaded when its fields are not eagerly-loaded", () => {
+          const TestAccount = co.account().resolved();
+
+          expectTypeOf<
+            typeof TestAccount.defaultResolveQuery
+          >().toEqualTypeOf<true>();
+          expect(TestAccount.defaultResolveQuery).toBe(true);
+        });
+      });
     });
   });
 
@@ -265,7 +294,34 @@ describe("Schema-level CoValue resolution", () => {
         });
 
         test("for Account", async () => {
-          // TODO
+          const TestAccount = co
+            .account({
+              profile: co.profile().resolved(),
+              root: co.map({ text: co.plainText().resolved() }).resolved(),
+            })
+            .resolved();
+          const account = await TestAccount.createAs(serverAccount, {
+            creationProps: { name: "Hermes Puggington" },
+          });
+          account.$jazz.set(
+            "profile",
+            TestAccount.shape.profile.create(
+              { name: "Hermes Puggington" },
+              publicGroup,
+            ),
+          );
+          account.$jazz.set(
+            "root",
+            TestAccount.shape.root.create({ text: "Hello" }, publicGroup),
+          );
+
+          const loadedAccount = await TestAccount.load(account.$jazz.id, {
+            loadAs: clientAccount,
+          });
+
+          assertLoaded(loadedAccount);
+          expect(loadedAccount.profile.name).toBe("Hermes Puggington");
+          expect(loadedAccount.root.text.toUpperCase()).toEqual("HELLO");
         });
 
         test("for CoFeed", async () => {

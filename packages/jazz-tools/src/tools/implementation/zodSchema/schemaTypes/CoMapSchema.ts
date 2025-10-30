@@ -441,7 +441,7 @@ export type PartialShape<
 
 type FalseIfEmpty<T> = keyof T extends never ? false : T;
 
-type DefaultResolveQueryOfShape<Shape extends z.core.$ZodLooseShape> =
+export type DefaultResolveQueryOfShape<Shape extends z.core.$ZodLooseShape> =
   FalseIfEmpty<{
     [K in keyof Shape as DefaultResolveQueryOfSchema<Shape[K]> extends false
       ? never

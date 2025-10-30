@@ -69,7 +69,6 @@ export class CoDiscriminatedUnionSchema<
     >,
   ) {
     this.getDefinition = coreSchema.getDefinition;
-    // TODO infer default resolve query from the union's members
   }
 
   load(

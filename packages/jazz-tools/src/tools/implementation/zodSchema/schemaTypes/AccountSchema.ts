@@ -16,16 +16,19 @@ import {
 import { AnonymousJazzAgent } from "../../anonymousJazzAgent.js";
 import { InstanceOrPrimitiveOfSchema } from "../typeConverters/InstanceOrPrimitiveOfSchema.js";
 import { InstanceOrPrimitiveOfSchemaCoValuesMaybeLoaded } from "../typeConverters/InstanceOrPrimitiveOfSchemaCoValuesMaybeLoaded.js";
+import { DefaultResolveQueryOfSchema } from "../typeConverters/DefaultResolveQueryOfSchema.js";
 import { z } from "../zodReExport.js";
 import { AnyZodOrCoValueSchema, Loaded, ResolveQuery } from "../zodSchema.js";
 import {
   CoMapSchema,
   CoreCoMapSchema,
   createCoreCoMapSchema,
+  DefaultResolveQueryOfShape,
 } from "./CoMapSchema.js";
 import { CoOptionalSchema } from "./CoOptionalSchema.js";
 import { CoreResolveQuery } from "./CoValueSchema.js";
 import { removeGetters } from "../../schemaUtils.js";
+import { withDefaultResolveQuery } from "../../schemaUtils.js";
 
 export type BaseProfileShape = {
   name: z.core.$ZodString<string>;
@@ -43,21 +46,42 @@ export type DefaultAccountShape = {
   root: CoMapSchema<{}>;
 };
 
-// TODO add type paramter for default resolve query
-export class AccountSchema<Shape extends BaseAccountShape = DefaultAccountShape>
-  implements CoreAccountSchema<Shape>
+export class AccountSchema<
+  Shape extends BaseAccountShape = DefaultAccountShape,
+  EagerlyLoaded extends boolean = false,
+> implements CoreAccountSchema<Shape>
 {
   collaborative = true as const;
   builtin = "Account" as const;
   shape: Shape;
   getDefinition: () => CoMapSchemaDefinition;
 
+  private isEagerlyLoaded: EagerlyLoaded = false as EagerlyLoaded;
   /**
    * The default resolve query to be used when loading instances of this schema.
    * Defaults to `false`, meaning that no resolve query will used by default.
    * @internal
    */
-  public defaultResolveQuery: CoreResolveQuery = false;
+  get defaultResolveQuery(): EagerlyLoaded extends false
+    ? false
+    : DefaultResolveQueryOfShape<Shape> extends false
+      ? true
+      : DefaultResolveQueryOfShape<Shape> {
+    if (!this.isEagerlyLoaded) {
+      return false as any;
+    }
+    const fieldResolveQueries = Object.entries(this.shape)
+      .map(([fieldName, fieldSchema]) => [
+        fieldName,
+        fieldSchema.defaultResolveQuery,
+      ])
+      .filter(([_, resolveQuery]) => Boolean(resolveQuery));
+    if (fieldResolveQueries.length > 0) {
+      return Object.fromEntries(fieldResolveQueries);
+    } else {
+      return true as any;
+    }
+  }
 
   constructor(
     coreSchema: CoreAccountSchema<Shape>,
@@ -65,16 +89,6 @@ export class AccountSchema<Shape extends BaseAccountShape = DefaultAccountShape>
   ) {
     this.shape = coreSchema.shape;
     this.getDefinition = coreSchema.getDefinition;
-    // TODO find an approach that supports getters
-    const fieldResolveQueries = Object.entries(removeGetters(this.shape))
-      .map(([fieldName, fieldSchema]) => [
-        fieldName,
-        fieldSchema.defaultResolveQuery,
-      ])
-      .filter(([_, resolveQuery]) => Boolean(resolveQuery));
-    if (fieldResolveQueries.length > 0) {
-      this.defaultResolveQuery = Object.fromEntries(fieldResolveQueries);
-    }
   }
 
   create(
@@ -84,7 +98,12 @@ export class AccountSchema<Shape extends BaseAccountShape = DefaultAccountShape>
     return this.coValueClass.create(options);
   }
 
-  load<R extends ResolveQuery<AccountSchema<Shape>>>(
+  load<
+    // @ts-expect-error
+    R extends ResolveQuery<AccountSchema<Shape>> = EagerlyLoaded extends false
+      ? true
+      : this["defaultResolveQuery"],
+  >(
     id: string,
     options?: {
       loadAs?: Account | AnonymousJazzAgent;
@@ -92,7 +111,11 @@ export class AccountSchema<Shape extends BaseAccountShape = DefaultAccountShape>
     },
   ): Promise<MaybeLoaded<Loaded<AccountSchema<Shape>, R>>> {
     // @ts-expect-error
-    return this.coValueClass.load(id, options);
+    return this.coValueClass.load(
+      id,
+      // @ts-expect-error
+      withDefaultResolveQuery(options, this.defaultResolveQuery),
+    );
   }
 
   /** @internal */
@@ -142,7 +165,7 @@ export class AccountSchema<Shape extends BaseAccountShape = DefaultAccountShape>
       account: Loaded<AccountSchema<Shape>>,
       creationProps?: { name: string },
     ) => void,
-  ): AccountSchema<Shape> {
+  ): AccountSchema<Shape, EagerlyLoaded> {
     (this.coValueClass.prototype as Account).migrate = async function (
       this,
       creationProps,
@@ -162,15 +185,15 @@ export class AccountSchema<Shape extends BaseAccountShape = DefaultAccountShape>
     return coOptionalDefiner(this);
   }
 
-  resolved(): AccountSchema<Shape> {
-    if (this.defaultResolveQuery) {
-      return this;
+  resolved(): AccountSchema<Shape, true> {
+    if (this.isEagerlyLoaded) {
+      return this as unknown as AccountSchema<Shape, true>;
     }
     const coreSchema: CoreAccountSchema<Shape> = createCoreAccountSchema(
       this.shape,
     );
-    const copy = new AccountSchema(coreSchema, this.coValueClass);
-    copy.defaultResolveQuery = true;
+    const copy = new AccountSchema<Shape, true>(coreSchema, this.coValueClass);
+    copy.isEagerlyLoaded = true;
     return copy;
   }
 }
