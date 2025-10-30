@@ -542,23 +542,47 @@ describe("Schema-level CoValue resolution", () => {
 
       describe("on upsertUnique()", () => {
         test("for CoList", async () => {
-          // TODO
+          const TestList = co.list(co.plainText().resolved()).resolved();
+
+          const list = await TestList.upsertUnique({
+            value: ["Hello"],
+            unique: "test",
+            owner: publicGroup,
+          });
+
+          assertLoaded(list);
+          expect(list[0]?.toUpperCase()).toEqual("HELLO");
         });
 
         test("for CoMap", async () => {
-          // TODO
+          const TestMap = co
+            .map({ text: co.plainText().resolved() })
+            .resolved();
+
+          const map = await TestMap.upsertUnique({
+            value: { text: "Hello" },
+            unique: "test",
+            owner: publicGroup,
+          });
+
+          assertLoaded(map);
+          expect(map.text.toUpperCase()).toEqual("HELLO");
         });
 
         test("for CoRecord", async () => {
-          // TODO
-        });
+          const TestRecord = co
+            .record(z.string(), co.plainText().resolved())
+            .resolved();
 
-        test("for Account", async () => {
-          // TODO
-        });
+          const record = await TestRecord.upsertUnique({
+            value: { key1: "Hello", key2: "World" },
+            unique: "test",
+            owner: publicGroup,
+          });
 
-        test("for CoFeed", async () => {
-          // TODO
+          assertLoaded(record);
+          expect(record.key1?.toUpperCase()).toEqual("HELLO");
+          expect(record.key2?.toUpperCase()).toEqual("WORLD");
         });
       });
 
