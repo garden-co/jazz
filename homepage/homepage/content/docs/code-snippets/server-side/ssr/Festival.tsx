@@ -6,7 +6,7 @@ import { JazzFestAccount } from "@/app/schema";
 
 export function Festival() {
   const me = useAccount(JazzFestAccount, {
-    resolve: { root: { myFestival: { $each: { $onError: 'catch' } } } },
+    resolve: { root: { myFestival: { $each: { $onError: "catch" } } } },
   });
   if (!me.$isLoaded) return null;
   return (
@@ -15,7 +15,7 @@ export function Festival() {
         {me.root.myFestival.map((band) => {
           if (!band.$isLoaded) return null;
           return <li key={band.$jazz.id}>{band.name}</li>;
-        )}
+        })}
       </ul>
       {/* [!code ++:3] */}
       <Link href={`/festival/${me.root.myFestival.$jazz.id}`}>
