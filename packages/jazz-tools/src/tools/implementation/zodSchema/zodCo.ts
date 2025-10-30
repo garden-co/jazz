@@ -2,6 +2,7 @@ import {
   type AccountSchema,
   AnyZodOrCoValueSchema,
   BaseAccountShape,
+  DefaultAccountShape,
   type CoFeedSchema,
   type CoListSchema,
   type CoMapSchema,
@@ -118,7 +119,9 @@ export const coMapDefiner = <Shape extends z.core.$ZodLooseShape>(
  * });
  * ```
  */
-export const coAccountDefiner = <Shape extends BaseAccountShape>(
+export const coAccountDefiner = <
+  Shape extends BaseAccountShape = DefaultAccountShape,
+>(
   shape: Shape = {
     profile: coMapDefiner({
       name: z.string(),
