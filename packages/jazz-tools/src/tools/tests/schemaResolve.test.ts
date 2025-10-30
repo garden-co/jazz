@@ -164,6 +164,28 @@ describe("Schema-level CoValue resolution", () => {
           expect(TestMap.defaultResolveQuery).toBe(true);
         });
       });
+
+      describe("CoRecord", () => {
+        test("schemas inherit the default resolve query of their fields", () => {
+          const Text = co.plainText().resolved();
+          const TestRecord = co.record(z.string(), Text).resolved();
+
+          expectTypeOf<typeof TestRecord.defaultResolveQuery>().toEqualTypeOf<{
+            $each: true;
+          }>();
+          expect(TestRecord.defaultResolveQuery).toEqual({ $each: true });
+        });
+
+        test("schema becomes shallowly-loaded when its fields are not eagerly-loaded", () => {
+          const Text = co.plainText();
+          const TestRecord = co.record(z.string(), Text).resolved();
+
+          expectTypeOf<
+            typeof TestRecord.defaultResolveQuery
+          >().toEqualTypeOf<true>();
+          expect(TestRecord.defaultResolveQuery).toBe(true);
+        });
+      });
     });
   });
 
@@ -215,7 +237,31 @@ describe("Schema-level CoValue resolution", () => {
         });
 
         test("for CoRecord", async () => {
-          // TODO
+          const TestRecord = co
+            .record(z.string(), co.plainText().resolved())
+            .resolved();
+
+          const record = TestRecord.create(
+            {
+              key1: "Hello",
+              key2: "World",
+            },
+            publicGroup,
+          );
+
+          const loadedRecord = await TestRecord.load(record.$jazz.id, {
+            loadAs: clientAccount,
+          });
+
+          assertLoaded(loadedRecord);
+          expect(loadedRecord.key1?.$jazz.loadingState).toBe(
+            CoValueLoadingState.LOADED,
+          );
+          expect(loadedRecord.key1?.toUpperCase()).toEqual("HELLO");
+          expect(loadedRecord.key2?.$jazz.loadingState).toBe(
+            CoValueLoadingState.LOADED,
+          );
+          expect(loadedRecord.key2?.toUpperCase()).toEqual("WORLD");
         });
 
         test("for Account", async () => {

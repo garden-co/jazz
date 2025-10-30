@@ -54,12 +54,18 @@ export class CoMapSchema<
     if (!this.isEagerlyLoaded) {
       return false as DefaultResolveQuery<this>;
     }
-    const fieldResolveQueries = Object.entries(removeGetters(this.shape))
+    const fieldResolveQueries = Object.entries(this.shape)
       .map(([fieldName, fieldSchema]) => [
         fieldName,
         fieldSchema.defaultResolveQuery,
       ])
       .filter(([_, resolveQuery]) => Boolean(resolveQuery));
+    if (
+      isAnyCoValueSchema(this.catchAll) &&
+      this.catchAll.defaultResolveQuery
+    ) {
+      fieldResolveQueries.push(["$each", this.catchAll.defaultResolveQuery]);
+    }
     if (fieldResolveQueries.length > 0) {
       return Object.fromEntries(fieldResolveQueries);
     } else {
@@ -241,7 +247,9 @@ export class CoMapSchema<
    * });
    * ```
    */
-  catchall<T extends AnyZodOrCoValueSchema>(schema: T): CoMapSchema<Shape, T> {
+  catchall<T extends AnyZodOrCoValueSchema>(
+    schema: T,
+  ): CoMapSchema<Shape, T, Owner, false> {
     const schemaWithCatchAll = createCoreCoMapSchema(this.shape, schema);
     return hydrateCoreCoValueSchema(schemaWithCatchAll);
   }

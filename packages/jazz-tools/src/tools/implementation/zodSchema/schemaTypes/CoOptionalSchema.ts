@@ -1,4 +1,4 @@
-import { isCoValueSchema } from "../../../internal.js";
+import { isAnyCoValueSchema } from "../../../internal.js";
 import { CoValueSchemaFromCoreSchema, ResolveQuery } from "../zodSchema.js";
 import { CoreCoValueSchema, CoreResolveQuery } from "./CoValueSchema.js";
 import { DefaultResolveQueryOfSchema } from "../typeConverters/DefaultResolveQueryOfSchema.js";
@@ -38,10 +38,11 @@ export class CoOptionalSchema<
     if (!this.isEagerlyLoaded) {
       return false as DefaultResolveQuery<this>;
     }
-    // Cast to CoreCoValueSchema to avoid excessively deep type resolution for innerType.defaultResolveQuery
-    const innerType: CoreCoValueSchema = this.innerType;
-    if (isCoValueSchema(innerType) && innerType.defaultResolveQuery) {
-      return innerType.defaultResolveQuery as DefaultResolveQuery<this>;
+    if (
+      isAnyCoValueSchema(this.innerType) &&
+      this.innerType.defaultResolveQuery
+    ) {
+      return this.innerType.defaultResolveQuery as DefaultResolveQuery<this>;
     }
     return true as DefaultResolveQuery<this>;
   }

@@ -18,6 +18,7 @@ import { AnonymousJazzAgent } from "../../anonymousJazzAgent.js";
 import { CoFieldSchemaInit } from "../typeConverters/CoFieldSchemaInit.js";
 import { InstanceOrPrimitiveOfSchema } from "../typeConverters/InstanceOrPrimitiveOfSchema.js";
 import { InstanceOrPrimitiveOfSchemaCoValuesMaybeLoaded } from "../typeConverters/InstanceOrPrimitiveOfSchemaCoValuesMaybeLoaded.js";
+import { DefaultResolveQueryOfSchema } from "../typeConverters/DefaultResolveQueryOfSchema.js";
 import { z } from "../zodReExport.js";
 import { AnyZodOrCoValueSchema } from "../zodSchema.js";
 import { CoOptionalSchema } from "./CoOptionalSchema.js";
@@ -33,10 +34,13 @@ type CoRecordInit<
 export interface CoRecordSchema<
   K extends z.core.$ZodString<string>,
   V extends AnyZodOrCoValueSchema,
-  // TODO add type parameter for default resolve query
-  DefaultResolveQuery extends CoreResolveQuery = false,
+  EagerlyLoaded extends boolean = false,
 > extends CoreCoRecordSchema<K, V> {
-  defaultResolveQuery: CoreResolveQuery;
+  defaultResolveQuery: EagerlyLoaded extends false
+    ? false
+    : DefaultResolveQueryOfSchema<V> extends false
+      ? true
+      : { $each: DefaultResolveQueryOfSchema<V> };
 
   create(
     init: Simplify<CoRecordInit<K, V>>,
@@ -56,7 +60,8 @@ export interface CoRecordSchema<
   load<
     const R extends RefsToResolve<
       CoRecordInstanceCoValuesMaybeLoaded<K, V>
-    > = true,
+      // @ts-expect-error
+    > = EagerlyLoaded extends false ? true : this["defaultResolveQuery"],
   >(
     id: ID<CoRecordInstanceCoValuesMaybeLoaded<K, V>>,
     options?: {
@@ -145,7 +150,6 @@ export interface CoRecordSchema<
 
   optional(): CoOptionalSchema<this>;
 
-  // TODO: wrap value's default resolve query with { $each: { ... } } if it's set
   resolved(): CoRecordSchema<K, V, true>;
 }
 

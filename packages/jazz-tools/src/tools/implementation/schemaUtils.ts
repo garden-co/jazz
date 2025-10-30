@@ -32,5 +32,5 @@ export function withDefaultResolveQuery<
     // TODO merge the default resolve query with the user-provided resolve query
     newOptions.resolve ||= defaultResolveQuery;
   }
-  return loadOptions as T;
+  return newOptions as T;
 }

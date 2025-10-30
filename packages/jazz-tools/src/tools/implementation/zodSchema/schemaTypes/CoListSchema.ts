@@ -4,7 +4,7 @@ import {
   CoList,
   Group,
   ID,
-  isCoValueSchema,
+  isAnyCoValueSchema,
   MaybeLoaded,
   RefsToResolve,
   RefsToResolveStrict,
@@ -42,10 +42,10 @@ export class CoListSchema<
     if (!this.isEagerlyLoaded) {
       return false as DefaultResolveQuery<this>;
     }
-    if (isCoValueSchema(this.element) && this.element.defaultResolveQuery) {
+    if (isAnyCoValueSchema(this.element) && this.element.defaultResolveQuery) {
       return {
         $each: this.element.defaultResolveQuery,
-      } as unknown as DefaultResolveQuery<this>;
+      } as DefaultResolveQuery<this>;
     }
     return true as DefaultResolveQuery<this>;
   }
