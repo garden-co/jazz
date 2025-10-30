@@ -95,6 +95,32 @@ describe("Schema-level CoValue resolution", () => {
         });
       });
 
+      describe("CoDiscriminatedUnion", () => {
+        test("schema can only be made shallowly-loaded", () => {
+          const DiscriminatedUnion = co
+            .discriminatedUnion("type", [
+              co
+                .map({
+                  type: z.literal("a"),
+                  fieldA: co.plainText().resolved(),
+                })
+                .resolved(),
+              co
+                .map({
+                  type: z.literal("b"),
+                  fieldB: co.plainText().resolved(),
+                })
+                .resolved(),
+            ])
+            .resolved();
+
+          expectTypeOf<
+            typeof DiscriminatedUnion.defaultResolveQuery
+          >().toEqualTypeOf(true);
+          expect(DiscriminatedUnion.defaultResolveQuery).toBe(true);
+        });
+      });
+
       describe("CoList", () => {
         test("schemas inherit the default resolve query of their element type", () => {
           const Text = co.plainText().resolved();

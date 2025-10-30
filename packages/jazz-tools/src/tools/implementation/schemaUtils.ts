@@ -26,7 +26,7 @@ export function removeGetters<T extends object>(obj: T): Partial<T> {
 export function withDefaultResolveQuery<
   const T extends { resolve?: CoreResolveQuery },
 >(loadOptions: T | undefined, defaultResolveQuery: CoreResolveQuery): T {
-  const newOptions: CoreResolveQuery = loadOptions ? loadOptions : {};
+  const newOptions: CoreResolveQuery = loadOptions ? { ...loadOptions } : {};
   // If the default resolve query is `false`, don't add it
   if (defaultResolveQuery) {
     // TODO merge the default resolve query with the user-provided resolve query
