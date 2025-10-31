@@ -147,14 +147,14 @@ function HighlightedText({ text }: { text: string }) {
   const parts = decodedText.split(/(<mark>.*?<\/mark>)/g);
 
   return (
-    <p className="mt-1 text-sm line-clamp-2">
+    <p className="mt-1 line-clamp-2 text-sm">
       {parts.map((part, i) => {
         if (part.startsWith("<mark>")) {
           const content = part.replace(/<\/?mark>/g, "");
           return (
             <mark
               key={i}
-              className="bg-transparent text-primary dark:text-white dark:text-underline dark:bg-highlight"
+              className="dark:text-underline bg-transparent text-primary dark:bg-highlight dark:text-white"
             >
               {content}
             </mark>
@@ -257,8 +257,8 @@ export function PagefindSearch() {
   if (!open) return null;
 
   return (
-    <Dialog open={open} onClose={close} className="p-0!">
-      <DialogBody className="mt-0!">
+    <Dialog open={open} onClose={close} className="p-0">
+      <DialogBody className="mt-0">
         <Combobox
           onChange={(result: PagefindResult | PagefindSubResult) => {
             if (result) {
@@ -278,12 +278,12 @@ export function PagefindSearch() {
             }
           }}
         >
-          <div className="p-2 grid grid-cols-1">
+          <div className="grid grid-cols-1 p-2">
             <ComboboxInput
               className={clsx(
                 "col-start-1 row-start-1",
                 "text-highlight placeholder:text-stone-500 sm:bg-stone-100 sm:dark:bg-stone-925",
-                "w-full pl-11 pr-4 py-2.5 rounded-xl sm:rounded-lg",
+                "w-full rounded-xl py-2.5 pl-11 pr-4 sm:rounded-lg",
                 "outline-hidden focus-visible:outline-hidden",
               )}
               placeholder="Search documentation..."
@@ -301,25 +301,25 @@ export function PagefindSearch() {
             <Icon
               name="search"
               size="sm"
-              className="col-start-1 row-start-1 ml-3 self-center pointer-events-none text-stone-600"
+              className="pointer-events-none col-start-1 row-start-1 ml-3 self-center text-stone-600"
             />
           </div>
           <div ref={listRef}>
             {results.length > 0 ? (
-              <ComboboxOptions className="border-t divide-y max-h-[calc(100vh-84px)] sm:max-h-[600px] overflow-y-auto overflow-x-hidden overscroll-contain">
+              <ComboboxOptions className="max-h-[calc(100vh-84px)] divide-y overflow-y-auto overflow-x-hidden overscroll-contain border-t sm:max-h-[600px]">
                 {results.map((result) => (
                   <div className="flex flex-col gap-1 p-2">
                     <ComboboxOption
                       key={result.id}
                       value={result}
-                      className="cursor-default flex gap-3 items-center group data-focus:bg-stone-100 rounded-lg p-2 dark:data-focus:bg-stone-900"
+                      className="data-focus:bg-stone-100 dark:data-focus:bg-stone-900 group flex cursor-default items-center gap-3 rounded-lg p-2"
                     >
                       <Icon name="file" className="shrink-0" />
                       <div>
-                        <p className="font-medium text-highlight line-clamp-1">
+                        <p className="line-clamp-1 font-medium text-highlight">
                           {result.meta?.title || "No title"}{" "}
                           {result.meta?.framework ? (
-                            <span className="text-stone-600 dark:text-stone-400 font-normal">
+                            <span className="font-normal text-stone-600 dark:text-stone-400">
                               (
                               {
                                 frameworkNames[
@@ -342,7 +342,7 @@ export function PagefindSearch() {
                           <ComboboxOption
                             key={subResult.id}
                             value={subResult}
-                            className="group cursor-default flex gap-3 items-center group data-focus:bg-stone-100 rounded-lg p-2 dark:data-focus:bg-stone-900"
+                            className="data-focus:bg-stone-100 dark:data-focus:bg-stone-900 group flex cursor-default items-center gap-3 rounded-lg p-2"
                           >
                             <Icon name="hash" className="shrink-0" />
                             <div>
