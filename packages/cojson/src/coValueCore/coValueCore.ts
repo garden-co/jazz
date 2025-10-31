@@ -60,7 +60,15 @@ export function idforHeader(
   return `co_z${hash.slice("shortHash_z".length)}`;
 }
 
+let logPermissionErrors = true;
+
+export function disablePermissionErrors() {
+  logPermissionErrors = false;
+}
+
 export class VerifiedTransaction {
+  // The ID of the CoValue that the transaction belongs to
+  coValueId: RawCoID;
   dispatchTransaction: (transaction: VerifiedTransaction) => void;
   // The account or agent that made the transaction
   author: RawAccountID | AgentID;
@@ -80,10 +88,13 @@ export class VerifiedTransaction {
   isValidated: boolean = false;
   // Whether the transaction is valid, as per membership rules
   isValid: boolean = false;
+  // The error message that caused the transaction to be invalid
+  validationErrorMessage: string | undefined = undefined;
   // The previous verified transaction for the same session
   previous: VerifiedTransaction | undefined;
 
   constructor(
+    coValueId: RawCoID,
     sessionID: SessionID,
     txIndex: number,
     tx: Transaction,
@@ -108,6 +119,7 @@ export class VerifiedTransaction {
           txIndex,
         };
 
+    this.coValueId = coValueId;
     this.currentTxID = txID;
     this.sourceTxID = undefined;
     this.tx = tx;
@@ -152,6 +164,7 @@ export class VerifiedTransaction {
 
   markValid() {
     this.isValid = true;
+    this.validationErrorMessage = undefined;
 
     if (!this.isValidated) {
       this.isValidated = true;
@@ -159,9 +172,19 @@ export class VerifiedTransaction {
     }
   }
 
-  markInvalid() {
+  markInvalid(errorMessage: string, attributes?: Record<string, JsonValue>) {
     this.isValidated = true;
     this.isValid = false;
+
+    this.validationErrorMessage = errorMessage;
+    if (logPermissionErrors === true) {
+      logger.error("Invalid transaction: " + errorMessage, {
+        coValueId: this.coValueId,
+        txID: this.txID,
+        author: this.author,
+        ...attributes,
+      });
+    }
   }
 }
 
@@ -935,6 +958,7 @@ export class CoValueCore {
         }
 
         const verifiedTransaction = new VerifiedTransaction(
+          this.id,
           sessionID,
           txIndex,
           tx,
@@ -1045,7 +1069,13 @@ export class CoValueCore {
         transaction.sourceTxMadeAt &&
         transaction.sourceTxMadeAt > transaction.currentMadeAt
       ) {
-        transaction.markInvalid();
+        transaction.markInvalid(
+          "Transaction sourceMadeAt is after the currentMadeAt",
+          {
+            sourceTxMadeAt: transaction.sourceTxMadeAt,
+            currentMadeAt: transaction.currentMadeAt,
+          },
+        );
       }
 
       if (sessionID) {

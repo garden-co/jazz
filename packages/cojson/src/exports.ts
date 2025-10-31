@@ -3,6 +3,7 @@ import { type RawCoValue } from "./coValue.js";
 import {
   CoValueCore,
   idforHeader,
+  disablePermissionErrors,
   type AvailableCoValueCore,
 } from "./coValueCore/coValueCore.js";
 import { CoValueUniqueness } from "./coValueCore/verifiedState.js";
@@ -60,7 +61,7 @@ import { AgentSecret, textDecoder, textEncoder } from "./crypto/crypto.js";
 import type { AgentID, RawCoID, SessionID } from "./ids.js";
 import type { JsonObject, JsonValue } from "./jsonValue.js";
 import type * as Media from "./media.js";
-import { disablePermissionErrors, isAccountRole } from "./permissions.js";
+import { isAccountRole } from "./permissions.js";
 import type { Peer, SyncMessage } from "./sync.js";
 import {
   DisconnectedError,
