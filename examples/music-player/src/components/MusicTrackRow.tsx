@@ -1,4 +1,10 @@
-import { MusicTrack, MusicaAccount, Playlist } from "@/1_schema";
+import {
+  MusicTrack,
+  MusicaAccount,
+  MusicaAccountResolveWithPlaylists,
+  Playlist,
+  PlaylistResolveWithTracks,
+} from "@/1_schema";
 import {
   addTrackToPlaylist,
   removeTrackFromAllPlaylists,
@@ -11,7 +17,6 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { cn } from "@/lib/utils";
-import { Loaded } from "jazz-tools";
 import { useAccountWithSelector, useCoState } from "jazz-tools/react";
 import { MoreHorizontal, Pause, Play } from "lucide-react";
 import { Fragment, useCallback, useState } from "react";
@@ -22,7 +27,7 @@ import { useAccountSelector } from "@/components/AccountProvider.tsx";
 
 function isPartOfThePlaylist(
   trackId: string,
-  playlist: Loaded<typeof Playlist, { tracks: true }>,
+  playlist: PlaylistResolveWithTracks,
 ) {
   return Array.from(playlist.tracks.$jazz.refs).some((t) => t.id === trackId);
 }
@@ -44,9 +49,7 @@ export function MusicTrackRow({
   const [isHovered, setIsHovered] = useState(false);
 
   const playlists = useAccountWithSelector(MusicaAccount, {
-    resolve: {
-      root: { playlists: { $onError: null, $each: { tracks: true } } },
-    },
+    resolve: MusicaAccountResolveWithPlaylists,
     select: (account) => account?.root.playlists,
   });
 
@@ -162,25 +165,28 @@ export function MusicTrackRow({
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end">
               <DropdownMenuItem onSelect={handleEdit}>Edit</DropdownMenuItem>
-              {playlists?.filter(Boolean).map((playlist, playlistIndex) => (
-                <Fragment key={playlistIndex}>
-                  {isPartOfThePlaylist(trackId, playlist) ? (
-                    <DropdownMenuItem
-                      key={`remove-${playlistIndex}`}
-                      onSelect={() => handleRemoveFromPlaylist(playlist)}
-                    >
-                      Remove from {playlist.title}
-                    </DropdownMenuItem>
-                  ) : (
-                    <DropdownMenuItem
-                      key={`add-${playlistIndex}`}
-                      onSelect={() => handleAddToPlaylist(playlist)}
-                    >
-                      Add to {playlist.title}
-                    </DropdownMenuItem>
-                  )}
-                </Fragment>
-              ))}
+              {playlists?.filter(Boolean).map(
+                (playlist, playlistIndex) =>
+                  playlist && (
+                    <Fragment key={playlistIndex}>
+                      {isPartOfThePlaylist(trackId, playlist) ? (
+                        <DropdownMenuItem
+                          key={`remove-${playlistIndex}`}
+                          onSelect={() => handleRemoveFromPlaylist(playlist)}
+                        >
+                          Remove from {playlist.title}
+                        </DropdownMenuItem>
+                      ) : (
+                        <DropdownMenuItem
+                          key={`add-${playlistIndex}`}
+                          onSelect={() => handleAddToPlaylist(playlist)}
+                        >
+                          Add to {playlist.title}
+                        </DropdownMenuItem>
+                      )}
+                    </Fragment>
+                  ),
+              )}
             </DropdownMenuContent>
           </DropdownMenu>
         </div>

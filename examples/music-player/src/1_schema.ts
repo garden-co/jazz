@@ -1,4 +1,4 @@
-import { co, Group, z } from "jazz-tools";
+import { co, Group, ResolveQuery, z } from "jazz-tools";
 
 /** Walkthrough: Defining the data model with CoJSON
  *
@@ -45,6 +45,15 @@ export const Playlist = co.map({
   tracks: co.list(MusicTrack), // CoList is the collaborative version of Array
 });
 export type Playlist = co.loaded<typeof Playlist>;
+
+export const PlaylistResolveWithTracks = {
+  tracks: { $each: { $onError: null } },
+} satisfies ResolveQuery<typeof Playlist>;
+export type PlaylistResolveWithTracks = co.loaded<
+  typeof Playlist,
+  typeof PlaylistResolveWithTracks
+>;
+
 /** The account root is an app-specific per-user private `CoMap`
  *  where you can store top-level objects for that user */
 export const MusicaAccountRoot = co.map({
@@ -117,5 +126,15 @@ export const MusicaAccount = co
     }
   });
 export type MusicaAccount = co.loaded<typeof MusicaAccount>;
+
+export const MusicaAccountResolveWithPlaylists = {
+  root: {
+    playlists: { $each: { $onError: null, ...PlaylistResolveWithTracks } },
+  },
+} satisfies ResolveQuery<typeof MusicaAccount>;
+export type MusicaAccountResolveWithPlaylists = co.loaded<
+  typeof MusicaAccount,
+  typeof MusicaAccountResolveWithPlaylists
+>;
 
 /** Walkthrough: Continue with ./2_main.tsx */

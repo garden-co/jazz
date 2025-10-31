@@ -1,4 +1,4 @@
-import { MusicaAccount } from "@/1_schema";
+import { MusicaAccount, MusicaAccountResolveWithPlaylists } from "@/1_schema";
 import { deletePlaylist } from "@/4_actions";
 import {
   Sidebar,
@@ -23,7 +23,7 @@ export function SidePanel() {
   const { playlistId } = useParams();
   const navigate = useNavigate();
   const playlists = useAccountWithSelector(MusicaAccount, {
-    resolve: { root: { playlists: { $each: { $onError: null } } } },
+    resolve: MusicaAccountResolveWithPlaylists,
     select: (me) => me?.root.playlists,
   });
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
