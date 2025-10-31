@@ -2,7 +2,7 @@ export const metadata = {
   description: "Learn about the different authentication methods that you can use with your Jazz app."
 };
 
-import { CodeGroup, ContentByFramework } from "@/components/forMdx";
+import { Alert, CodeGroup, ContentByFramework } from "@/components/forMdx";
 
 # Authentication in Jazz
 
@@ -38,3 +38,6 @@ Jazz provides several ways to authenticate users:
 - [**Passphrases**](/docs/key-features/authentication/passphrase): Bitcoin-style word phrases that users store
 - [**Clerk Integration**](/docs/key-features/authentication/clerk): Third-party authentication service with OAuth support
 - [**Better Auth**](/docs/key-features/authentication/better-auth): Self-hosted authentication service
+
+**Note**:
+  For serverless authentication methods (passkey, passphrase), Jazz stores your account's credentials in your browser's local storage. This avoids needing to reauthenticate on every page load, but means you must take extra care to avoid [XSS attacks](https://developer.mozilla.org/en-US/docs/Web/Security/Attacks/XSS). In particular, you should take care to [sanitise user input](https://github.com/cure53/DOMPurify), set [appropriate CSP headers](https://developer.mozilla.org/en-US/docs/Web/HTTP/Guides/CSP), and avoid third-party JavaScript wherever possible.
