@@ -6,9 +6,10 @@ import {
   InstanceOrPrimitiveOfSchema,
   InstanceOrPrimitiveOfSchemaCoValuesMaybeLoaded,
   coOptionalDefiner,
+  ResolveQuery,
 } from "../../../internal.js";
 import { CoOptionalSchema } from "./CoOptionalSchema.js";
-import { CoreCoValueSchema } from "./CoValueSchema.js";
+import { CoreCoValueSchema, CoreResolveQuery } from "./CoValueSchema.js";
 
 export interface CoreCoVectorSchema extends CoreCoValueSchema {
   builtin: "CoVector";
@@ -22,12 +23,25 @@ export function createCoreCoVectorSchema(
     collaborative: true as const,
     builtin: "CoVector" as const,
     dimensions,
+    defaultResolveQuery: false,
   };
 }
 
-export class CoVectorSchema implements CoreCoVectorSchema {
+export class CoVectorSchema<EagerlyLoaded extends boolean = false>
+  implements CoreCoVectorSchema
+{
   readonly collaborative = true as const;
   readonly builtin = "CoVector" as const;
+
+  private isEagerlyLoaded: EagerlyLoaded = false as EagerlyLoaded;
+  /**
+   * The default resolve query to be used when loading instances of this schema.
+   * Defaults to `false`, meaning that no resolve query will be used by default.
+   * @internal
+   */
+  get defaultResolveQuery(): boolean {
+    return this.isEagerlyLoaded;
+  }
 
   constructor(
     public dimensions: number,
@@ -96,6 +110,15 @@ export class CoVectorSchema implements CoreCoVectorSchema {
 
   optional(): CoOptionalSchema<this> {
     return coOptionalDefiner(this);
+  }
+
+  resolved(): CoVectorSchema<true> {
+    if (this.isEagerlyLoaded) {
+      return this as CoVectorSchema<true>;
+    }
+    const copy = new CoVectorSchema<true>(this.dimensions, this.coValueClass);
+    copy.isEagerlyLoaded = true;
+    return copy;
   }
 }
 

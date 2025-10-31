@@ -10,6 +10,7 @@ import {
   RefsToResolve,
   RefsToResolveStrict,
   Resolved,
+  ResolveQuery,
   Simplify,
   SubscribeListenerOptions,
 } from "../../../internal.js";
@@ -17,10 +18,11 @@ import { AnonymousJazzAgent } from "../../anonymousJazzAgent.js";
 import { CoFieldSchemaInit } from "../typeConverters/CoFieldSchemaInit.js";
 import { InstanceOrPrimitiveOfSchema } from "../typeConverters/InstanceOrPrimitiveOfSchema.js";
 import { InstanceOrPrimitiveOfSchemaCoValuesMaybeLoaded } from "../typeConverters/InstanceOrPrimitiveOfSchemaCoValuesMaybeLoaded.js";
+import { DefaultResolveQueryOfSchema } from "../typeConverters/DefaultResolveQueryOfSchema.js";
 import { z } from "../zodReExport.js";
 import { AnyZodOrCoValueSchema } from "../zodSchema.js";
 import { CoOptionalSchema } from "./CoOptionalSchema.js";
-import { CoreCoValueSchema } from "./CoValueSchema.js";
+import { CoreCoValueSchema, CoreResolveQuery } from "./CoValueSchema.js";
 
 type CoRecordInit<
   K extends z.core.$ZodString<string>,
@@ -32,7 +34,14 @@ type CoRecordInit<
 export interface CoRecordSchema<
   K extends z.core.$ZodString<string>,
   V extends AnyZodOrCoValueSchema,
+  EagerlyLoaded extends boolean = false,
 > extends CoreCoRecordSchema<K, V> {
+  defaultResolveQuery: EagerlyLoaded extends false
+    ? false
+    : DefaultResolveQueryOfSchema<V> extends false
+      ? true
+      : { $each: DefaultResolveQueryOfSchema<V> };
+
   create(
     init: Simplify<CoRecordInit<K, V>>,
     options?:
@@ -51,7 +60,8 @@ export interface CoRecordSchema<
   load<
     const R extends RefsToResolve<
       CoRecordInstanceCoValuesMaybeLoaded<K, V>
-    > = true,
+      // @ts-expect-error
+    > = EagerlyLoaded extends false ? true : this["defaultResolveQuery"],
   >(
     id: ID<CoRecordInstanceCoValuesMaybeLoaded<K, V>>,
     options?: {
@@ -72,7 +82,7 @@ export interface CoRecordSchema<
     > = true,
   >(
     id: string,
-    options?: {
+    options: {
       resolve?: RefsToResolveStrict<
         CoRecordInstanceCoValuesMaybeLoaded<K, V>,
         R
@@ -85,7 +95,8 @@ export interface CoRecordSchema<
   subscribe<
     const R extends RefsToResolve<
       CoRecordInstanceCoValuesMaybeLoaded<K, V>
-    > = true,
+      // @ts-expect-error
+    > = EagerlyLoaded extends false ? true : this["defaultResolveQuery"],
   >(
     id: ID<CoRecordInstanceCoValuesMaybeLoaded<K, V>>,
     options: SubscribeListenerOptions<
@@ -108,7 +119,8 @@ export interface CoRecordSchema<
   upsertUnique<
     const R extends RefsToResolve<
       CoRecordInstanceCoValuesMaybeLoaded<K, V>
-    > = true,
+      // @ts-expect-error
+    > = EagerlyLoaded extends false ? true : this["defaultResolveQuery"],
   >(options: {
     value: Simplify<CoRecordInit<K, V>>;
     unique: CoValueUniqueness["uniqueness"];
@@ -121,7 +133,8 @@ export interface CoRecordSchema<
   loadUnique<
     const R extends RefsToResolve<
       CoRecordInstanceCoValuesMaybeLoaded<K, V>
-    > = true,
+      // @ts-expect-error
+    > = EagerlyLoaded extends false ? true : this["defaultResolveQuery"],
   >(
     unique: CoValueUniqueness["uniqueness"],
     ownerID: ID<Account> | ID<Group>,
@@ -139,6 +152,8 @@ export interface CoRecordSchema<
   getCoValueClass: () => typeof CoMap;
 
   optional(): CoOptionalSchema<this>;
+
+  resolved(): CoRecordSchema<K, V, true>;
 }
 
 type CoRecordSchemaDefinition<

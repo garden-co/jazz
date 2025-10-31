@@ -11,10 +11,11 @@ import {
   SchemaUnionConcreteSubclass,
   SubscribeListenerOptions,
   coOptionalDefiner,
+  ResolveQuery,
 } from "../../../internal.js";
 import { z } from "../zodReExport.js";
 import { CoOptionalSchema } from "./CoOptionalSchema.js";
-import { CoreCoValueSchema } from "./CoValueSchema.js";
+import { CoreCoValueSchema, CoreResolveQuery } from "./CoValueSchema.js";
 
 export interface DiscriminableCoValueSchemaDefinition {
   discriminatorMap: z.core.$ZodDiscriminatedUnionInternals["propValues"];
@@ -44,11 +45,22 @@ export interface CoreCoDiscriminatedUnionSchema<
 }
 export class CoDiscriminatedUnionSchema<
   Options extends DiscriminableCoValueSchemas,
+  EagerlyLoaded extends boolean = false,
 > implements CoreCoDiscriminatedUnionSchema<Options>
 {
   readonly collaborative = true as const;
   readonly builtin = "CoDiscriminatedUnion" as const;
   readonly getDefinition: () => CoDiscriminatedUnionSchemaDefinition<Options>;
+
+  private isEagerlyLoaded: EagerlyLoaded = false as EagerlyLoaded;
+  /**
+   * The default resolve query to be used when loading instances of this schema.
+   * Defaults to `false`, meaning that no resolve query will used by default.
+   * @internal
+   */
+  get defaultResolveQuery(): EagerlyLoaded {
+    return this.isEagerlyLoaded;
+  }
 
   constructor(
     coreSchema: CoreCoDiscriminatedUnionSchema<Options>,
@@ -104,6 +116,22 @@ export class CoDiscriminatedUnionSchema<
   optional(): CoOptionalSchema<this> {
     return coOptionalDefiner(this);
   }
+
+  resolved(): CoDiscriminatedUnionSchema<Options, true> {
+    if (this.isEagerlyLoaded) {
+      return this as CoDiscriminatedUnionSchema<Options, true>;
+    }
+    const coreSchema = createCoreCoDiscriminatedUnionSchema(
+      this.getDefinition().discriminator,
+      this.getDefinition().options,
+    );
+    const copy = new CoDiscriminatedUnionSchema<Options, true>(
+      coreSchema,
+      this.coValueClass,
+    );
+    copy.isEagerlyLoaded = true;
+    return copy;
+  }
 }
 
 export function createCoreCoDiscriminatedUnionSchema<
@@ -139,6 +167,7 @@ export function createCoreCoDiscriminatedUnionSchema<
         return schemas;
       },
     }),
+    defaultResolveQuery: false,
   };
 }
 

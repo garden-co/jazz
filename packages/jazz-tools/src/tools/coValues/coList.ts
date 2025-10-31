@@ -267,6 +267,7 @@ export class CoList<out Item = any>
     options?: {
       resolve?: RefsToResolveStrict<L, R>;
       loadAs?: Account | AnonymousJazzAgent;
+      unstable_branch?: BranchDefinition;
     },
   ): Promise<MaybeLoaded<Resolved<L, R>>> {
     return loadCoValueWithoutMe(this, id, options);

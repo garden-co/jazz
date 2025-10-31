@@ -5,10 +5,11 @@ import {
   Group,
   MaybeLoaded,
   coOptionalDefiner,
+  ResolveQuery,
   unstable_mergeBranchWithResolve,
 } from "../../../internal.js";
 import { CoOptionalSchema } from "./CoOptionalSchema.js";
-import { CoreCoValueSchema } from "./CoValueSchema.js";
+import { CoreCoValueSchema, CoreResolveQuery } from "./CoValueSchema.js";
 
 export interface CoreFileStreamSchema extends CoreCoValueSchema {
   builtin: "FileStream";
@@ -18,12 +19,25 @@ export function createCoreFileStreamSchema(): CoreFileStreamSchema {
   return {
     collaborative: true as const,
     builtin: "FileStream" as const,
+    defaultResolveQuery: false,
   };
 }
 
-export class FileStreamSchema implements CoreFileStreamSchema {
+export class FileStreamSchema<EagerlyLoaded extends boolean = false>
+  implements CoreFileStreamSchema
+{
   readonly collaborative = true as const;
   readonly builtin = "FileStream" as const;
+
+  private isEagerlyLoaded: EagerlyLoaded = false as EagerlyLoaded;
+  /**
+   * The default resolve query to be used when loading instances of this schema.
+   * Defaults to `false`, meaning that no resolve query will be used by default.
+   * @internal
+   */
+  get defaultResolveQuery(): EagerlyLoaded {
+    return this.isEagerlyLoaded;
+  }
 
   constructor(private coValueClass: typeof FileStream) {}
 
@@ -112,5 +126,14 @@ export class FileStreamSchema implements CoreFileStreamSchema {
 
   optional(): CoOptionalSchema<this> {
     return coOptionalDefiner(this);
+  }
+
+  resolved(): FileStreamSchema<true> {
+    if (this.isEagerlyLoaded) {
+      return this as FileStreamSchema<true>;
+    }
+    const copy = new FileStreamSchema<true>(this.coValueClass);
+    copy.isEagerlyLoaded = true;
+    return copy;
   }
 }

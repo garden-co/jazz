@@ -7,10 +7,11 @@ import {
   MaybeLoaded,
   coOptionalDefiner,
   unstable_mergeBranchWithResolve,
+  ResolveQuery,
 } from "../../../internal.js";
 import { AnonymousJazzAgent } from "../../anonymousJazzAgent.js";
 import { CoOptionalSchema } from "./CoOptionalSchema.js";
-import { CoreCoValueSchema } from "./CoValueSchema.js";
+import { CoreCoValueSchema, CoreResolveQuery } from "./CoValueSchema.js";
 
 export interface CorePlainTextSchema extends CoreCoValueSchema {
   builtin: "CoPlainText";
@@ -20,12 +21,25 @@ export function createCoreCoPlainTextSchema(): CorePlainTextSchema {
   return {
     collaborative: true as const,
     builtin: "CoPlainText" as const,
+    defaultResolveQuery: false,
   };
 }
 
-export class PlainTextSchema implements CorePlainTextSchema {
+export class PlainTextSchema<EagerlyLoaded extends boolean = false>
+  implements CorePlainTextSchema
+{
   readonly collaborative = true as const;
   readonly builtin = "CoPlainText" as const;
+
+  private isEagerlyLoaded: EagerlyLoaded = false as EagerlyLoaded;
+  /**
+   * The default resolve query to be used when loading instances of this schema.
+   * Defaults to `false`, meaning that no resolve query will be used by default.
+   * @internal
+   */
+  get defaultResolveQuery(): EagerlyLoaded {
+    return this.isEagerlyLoaded;
+  }
 
   constructor(private coValueClass: typeof CoPlainText) {}
 
@@ -87,5 +101,14 @@ export class PlainTextSchema implements CorePlainTextSchema {
 
   optional(): CoOptionalSchema<this> {
     return coOptionalDefiner(this);
+  }
+
+  resolved(): PlainTextSchema<true> {
+    if (this.isEagerlyLoaded) {
+      return this as PlainTextSchema<true>;
+    }
+    const copy = new PlainTextSchema<true>(this.coValueClass);
+    copy.isEagerlyLoaded = true;
+    return copy;
   }
 }

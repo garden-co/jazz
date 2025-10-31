@@ -784,7 +784,7 @@ export async function unstable_mergeBranchWithResolve<
   id: ID<CoValue>,
   options: {
     resolve?: ResolveQueryStrict<S, R>;
-    loadAs: Account | AnonymousJazzAgent;
+    loadAs?: Account | AnonymousJazzAgent;
     branch: BranchDefinition;
   },
 ) {

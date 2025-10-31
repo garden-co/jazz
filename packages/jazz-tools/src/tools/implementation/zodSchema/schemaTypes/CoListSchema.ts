@@ -4,6 +4,7 @@ import {
   CoList,
   Group,
   ID,
+  isAnyCoValueSchema,
   MaybeLoaded,
   RefsToResolve,
   RefsToResolveStrict,
@@ -17,15 +18,37 @@ import { AnonymousJazzAgent } from "../../anonymousJazzAgent.js";
 import { CoListSchemaInit } from "../typeConverters/CoFieldSchemaInit.js";
 import { InstanceOrPrimitiveOfSchema } from "../typeConverters/InstanceOrPrimitiveOfSchema.js";
 import { InstanceOrPrimitiveOfSchemaCoValuesMaybeLoaded } from "../typeConverters/InstanceOrPrimitiveOfSchemaCoValuesMaybeLoaded.js";
-import { AnyZodOrCoValueSchema } from "../zodSchema.js";
+import { DefaultResolveQueryOfSchema } from "../typeConverters/DefaultResolveQueryOfSchema.js";
+import { AnyZodOrCoValueSchema, ResolveQuery } from "../zodSchema.js";
 import { CoOptionalSchema } from "./CoOptionalSchema.js";
-import { CoreCoValueSchema } from "./CoValueSchema.js";
+import { CoreCoValueSchema, CoreResolveQuery } from "./CoValueSchema.js";
+import { withDefaultResolveQuery } from "../../schemaUtils.js";
 
-export class CoListSchema<T extends AnyZodOrCoValueSchema>
-  implements CoreCoListSchema<T>
+export class CoListSchema<
+  T extends AnyZodOrCoValueSchema,
+  EagerlyLoaded extends boolean = false,
+> implements CoreCoListSchema<T>
 {
   collaborative = true as const;
   builtin = "CoList" as const;
+
+  private isEagerlyLoaded: EagerlyLoaded = false as EagerlyLoaded;
+  /**
+   * The default resolve query to be used when loading instances of this schema.
+   * Defaults to `false`, meaning that no resolve query will be used by default.
+   * @internal
+   */
+  get defaultResolveQuery(): DefaultResolveQuery<this> {
+    if (!this.isEagerlyLoaded) {
+      return false as DefaultResolveQuery<this>;
+    }
+    if (isAnyCoValueSchema(this.element) && this.element.defaultResolveQuery) {
+      return {
+        $each: this.element.defaultResolveQuery,
+      } as DefaultResolveQuery<this>;
+    }
+    return true as DefaultResolveQuery<this>;
+  }
 
   constructor(
     public element: T,
@@ -57,7 +80,10 @@ export class CoListSchema<T extends AnyZodOrCoValueSchema>
   }
 
   load<
-    const R extends RefsToResolve<CoListInstanceCoValuesMaybeLoaded<T>> = true,
+    const R extends RefsToResolve<
+      CoListInstanceCoValuesMaybeLoaded<T>
+      // @ts-expect-error
+    > = EagerlyLoaded extends false ? true : this["defaultResolveQuery"],
   >(
     id: string,
     options?: {
@@ -67,25 +93,39 @@ export class CoListSchema<T extends AnyZodOrCoValueSchema>
     },
   ): Promise<MaybeLoaded<Resolved<CoListInstanceCoValuesMaybeLoaded<T>, R>>> {
     // @ts-expect-error
-    return this.coValueClass.load(id, options);
+    return this.coValueClass.load(
+      id,
+      // @ts-expect-error
+      withDefaultResolveQuery(options, this.defaultResolveQuery),
+    );
   }
 
   unstable_merge<
-    const R extends RefsToResolve<CoListInstanceCoValuesMaybeLoaded<T>> = true,
+    const R extends RefsToResolve<
+      CoListInstanceCoValuesMaybeLoaded<T>
+      // @ts-expect-error
+    > = EagerlyLoaded extends false ? true : this["defaultResolveQuery"],
   >(
     id: string,
-    options?: {
+    options: {
       resolve?: RefsToResolveStrict<CoListInstanceCoValuesMaybeLoaded<T>, R>;
       loadAs?: Account | AnonymousJazzAgent;
       branch: BranchDefinition;
     },
   ): Promise<void> {
-    // @ts-expect-error
-    return unstable_mergeBranchWithResolve(this.coValueClass, id, options);
+    return unstable_mergeBranchWithResolve(
+      this.coValueClass,
+      id,
+      // @ts-expect-error
+      withDefaultResolveQuery(options, this.defaultResolveQuery),
+    );
   }
 
   subscribe<
-    const R extends RefsToResolve<CoListInstanceCoValuesMaybeLoaded<T>> = true,
+    const R extends RefsToResolve<
+      CoListInstanceCoValuesMaybeLoaded<T>
+      // @ts-expect-error
+    > = EagerlyLoaded extends false ? true : this["defaultResolveQuery"],
   >(
     id: string,
     options: SubscribeListenerOptions<CoListInstanceCoValuesMaybeLoaded<T>, R>,
@@ -94,7 +134,11 @@ export class CoListSchema<T extends AnyZodOrCoValueSchema>
       unsubscribe: () => void,
     ) => void,
   ): () => void {
-    return this.coValueClass.subscribe(id, options, listener);
+    return this.coValueClass.subscribe(
+      id,
+      withDefaultResolveQuery(options, this.defaultResolveQuery),
+      listener,
+    );
   }
 
   getCoValueClass(): typeof CoList {
@@ -111,7 +155,10 @@ export class CoListSchema<T extends AnyZodOrCoValueSchema>
   }
 
   upsertUnique<
-    const R extends RefsToResolve<CoListInstanceCoValuesMaybeLoaded<T>> = true,
+    const R extends RefsToResolve<
+      CoListInstanceCoValuesMaybeLoaded<T>
+      // @ts-expect-error
+    > = EagerlyLoaded extends false ? true : this["defaultResolveQuery"],
   >(options: {
     value: CoListSchemaInit<T>;
     unique: CoValueUniqueness["uniqueness"];
@@ -119,11 +166,17 @@ export class CoListSchema<T extends AnyZodOrCoValueSchema>
     resolve?: RefsToResolveStrict<CoListInstanceCoValuesMaybeLoaded<T>, R>;
   }): Promise<MaybeLoaded<Resolved<CoListInstanceCoValuesMaybeLoaded<T>, R>>> {
     // @ts-expect-error
-    return this.coValueClass.upsertUnique(options);
+    return this.coValueClass.upsertUnique(
+      // @ts-expect-error
+      withDefaultResolveQuery(options, this.defaultResolveQuery),
+    );
   }
 
   loadUnique<
-    const R extends RefsToResolve<CoListInstanceCoValuesMaybeLoaded<T>> = true,
+    const R extends RefsToResolve<
+      CoListInstanceCoValuesMaybeLoaded<T>
+      // @ts-expect-error
+    > = EagerlyLoaded extends false ? true : this["defaultResolveQuery"],
   >(
     unique: CoValueUniqueness["uniqueness"],
     ownerID: ID<Account> | ID<Group>,
@@ -133,11 +186,25 @@ export class CoListSchema<T extends AnyZodOrCoValueSchema>
     },
   ): Promise<MaybeLoaded<Resolved<CoListInstanceCoValuesMaybeLoaded<T>, R>>> {
     // @ts-expect-error
-    return this.coValueClass.loadUnique(unique, ownerID, options);
+    return this.coValueClass.loadUnique(
+      unique,
+      ownerID,
+      // @ts-expect-error
+      withDefaultResolveQuery(options, this.defaultResolveQuery),
+    );
   }
 
   optional(): CoOptionalSchema<this> {
     return coOptionalDefiner(this);
+  }
+
+  resolved(): CoListSchema<T, true> {
+    if (this.isEagerlyLoaded) {
+      return this as CoListSchema<T, true>;
+    }
+    const copy = new CoListSchema<T, true>(this.element, this.coValueClass);
+    copy.isEagerlyLoaded = true;
+    return copy;
   }
 }
 
@@ -148,6 +215,7 @@ export function createCoreCoListSchema<T extends AnyZodOrCoValueSchema>(
     collaborative: true as const,
     builtin: "CoList" as const,
     element,
+    defaultResolveQuery: false,
   };
 }
 
@@ -165,3 +233,14 @@ export type CoListInstance<T extends AnyZodOrCoValueSchema> = CoList<
 
 export type CoListInstanceCoValuesMaybeLoaded<T extends AnyZodOrCoValueSchema> =
   CoList<InstanceOrPrimitiveOfSchemaCoValuesMaybeLoaded<T>>;
+
+type DefaultResolveQuery<S> = S extends CoListSchema<
+  infer ElementSchema,
+  infer EagerlyLoaded
+>
+  ? EagerlyLoaded extends false
+    ? false
+    : DefaultResolveQueryOfSchema<ElementSchema> extends false
+      ? true
+      : { $each: DefaultResolveQueryOfSchema<ElementSchema> }
+  : never;

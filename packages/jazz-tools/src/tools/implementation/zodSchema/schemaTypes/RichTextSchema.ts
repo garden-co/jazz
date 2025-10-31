@@ -6,10 +6,11 @@ import {
   MaybeLoaded,
   coOptionalDefiner,
   unstable_mergeBranchWithResolve,
+  ResolveQuery,
 } from "../../../internal.js";
 import { AnonymousJazzAgent } from "../../anonymousJazzAgent.js";
 import { CoOptionalSchema } from "./CoOptionalSchema.js";
-import { CoreCoValueSchema } from "./CoValueSchema.js";
+import { CoreCoValueSchema, CoreResolveQuery } from "./CoValueSchema.js";
 
 export interface CoreRichTextSchema extends CoreCoValueSchema {
   builtin: "CoRichText";
@@ -19,12 +20,25 @@ export function createCoreCoRichTextSchema(): CoreRichTextSchema {
   return {
     collaborative: true as const,
     builtin: "CoRichText" as const,
+    defaultResolveQuery: false,
   };
 }
 
-export class RichTextSchema implements CoreRichTextSchema {
+export class RichTextSchema<EagerlyLoaded extends boolean = false>
+  implements CoreRichTextSchema
+{
   readonly collaborative = true as const;
   readonly builtin = "CoRichText" as const;
+
+  private isEagerlyLoaded: EagerlyLoaded = false as EagerlyLoaded;
+  /**
+   * The default resolve query to be used when loading instances of this schema.
+   * Defaults to `false`, meaning that no resolve query will be used by default.
+   * @internal
+   */
+  get defaultResolveQuery(): EagerlyLoaded {
+    return this.isEagerlyLoaded;
+  }
 
   constructor(private coValueClass: typeof CoRichText) {}
 
@@ -82,5 +96,14 @@ export class RichTextSchema implements CoreRichTextSchema {
 
   optional(): CoOptionalSchema<this> {
     return coOptionalDefiner(this);
+  }
+
+  resolved(): RichTextSchema<true> {
+    if (this.isEagerlyLoaded) {
+      return this as RichTextSchema<true>;
+    }
+    const copy = new RichTextSchema<true>(this.coValueClass);
+    copy.isEagerlyLoaded = true;
+    return copy;
   }
 }
