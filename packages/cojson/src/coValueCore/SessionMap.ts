@@ -127,6 +127,7 @@ export class SessionMap {
         sessionID,
         newSignature,
         signerID,
+        error: e as Error,
       } satisfies TryAddTransactionsError);
     }
   }
