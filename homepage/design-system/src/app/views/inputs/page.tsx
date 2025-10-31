@@ -80,7 +80,6 @@ export default function InputsView() {
           buttonProps={{
             children: "Learn more",
             intent: "tip",
-            variant: "outline",
             icon: "corecord",
             iconPosition: "right",
           }}

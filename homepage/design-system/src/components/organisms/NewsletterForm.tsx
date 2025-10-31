@@ -62,7 +62,6 @@ export function NewsletterForm() {
         buttonProps={{
           type: "submit",
           intent: "primary",
-          variant: "outline",
           loadingText: "Subscribing...",
           loading: state === "loading",
           icon: "newsletter",
