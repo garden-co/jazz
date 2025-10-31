@@ -5,6 +5,7 @@ import {
   exceedsRecommendedSize,
   getTransactionSize,
   addTransactionToContentMessage,
+  knownStateFromContent,
 } from "../coValueContentMessage.js";
 import {
   CryptoProvider,
@@ -20,9 +21,13 @@ import { JsonObject, JsonValue } from "../jsonValue.js";
 import { PermissionsDef as RulesetDef } from "../permissions.js";
 import { NewContentMessage } from "../sync.js";
 import { TryAddTransactionsError } from "./coValueCore.js";
-import { SessionLog, SessionMap } from "./SessionMap.js";
+import { SessionMap } from "./SessionMap.js";
 import { ControlledAccountOrAgent } from "../coValues/account.js";
-import { CoValueKnownState, KnownStateSessions } from "../knownState.js";
+import {
+  CoValueKnownState,
+  getKnownStateToSend,
+  KnownStateSessions,
+} from "../knownState.js";
 
 export type CoValueHeader = {
   type: AnyRawCoValue["type"];
@@ -158,6 +163,9 @@ export class VerifiedState {
 
   newContentSince(
     knownState: CoValueKnownState | undefined,
+    opts?: {
+      skipExpectContentUntil?: boolean;
+    },
   ): NewContentMessage[] | undefined {
     let currentPiece: NewContentMessage = createContentMessage(
       this.id,
@@ -286,9 +294,16 @@ export class VerifiedState {
 
     if (piecesWithContent.length > 1 || this.isStreaming()) {
       // Flag that more content is coming
-      firstPiece.expectContentUntil = {
-        ...this.knownStateWithStreaming().sessions,
-      };
+      if (knownState) {
+        firstPiece.expectContentUntil = getKnownStateToSend(
+          this.knownStateWithStreaming().sessions,
+          knownState.sessions,
+        );
+      } else {
+        firstPiece.expectContentUntil = {
+          ...this.knownStateWithStreaming().sessions,
+        };
+      }
     }
 
     if (piecesWithContent.length === 0) {

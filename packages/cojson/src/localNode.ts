@@ -10,7 +10,6 @@ import {
 import {
   type CoValueHeader,
   type CoValueUniqueness,
-  VerifiedState,
 } from "./coValueCore/verifiedState.js";
 import {
   AccountMeta,
@@ -31,7 +30,7 @@ import {
   type RawGroup,
   secretSeedFromInviteSecret,
 } from "./coValues/group.js";
-import { CO_VALUE_LOADING_CONFIG, GARBAGE_COLLECTOR_CONFIG } from "./config.js";
+import { CO_VALUE_LOADING_CONFIG } from "./config.js";
 import { AgentSecret, CryptoProvider } from "./crypto/crypto.js";
 import { AgentID, RawCoID, SessionID, isAgentID } from "./ids.js";
 import { logger } from "./logger.js";
@@ -41,6 +40,7 @@ import { accountOrAgentIDfromSessionID } from "./typeUtils/accountOrAgentIDfromS
 import { expectGroup } from "./typeUtils/expectGroup.js";
 import { canBeBranched } from "./coValueCore/branching.js";
 import { connectedPeers } from "./streamUtils.js";
+import { emptyKnownState } from "./knownState.js";
 
 /** A `LocalNode` represents a local view of a set of loaded `CoValue`s, from the perspective of a particular account (or primitive cryptographic agent).
 
@@ -380,7 +380,10 @@ export class LocalNode {
     }
 
     this.garbageCollector?.trackCoValueAccess(coValue);
-    this.syncManager.syncHeader(coValue.verified);
+    this.syncManager.syncLocalTransaction(
+      coValue.verified,
+      emptyKnownState(id),
+    );
 
     return coValue;
   }

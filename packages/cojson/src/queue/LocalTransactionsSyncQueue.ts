@@ -1,17 +1,8 @@
-import {
-  addTransactionToContentMessage,
-  createContentMessage,
-  knownStateFromContent,
-} from "../coValueContentMessage.js";
-import { Transaction, VerifiedState } from "../coValueCore/verifiedState.js";
-import { Signature } from "../crypto/crypto.js";
-import { RawCoID, SessionID } from "../ids.js";
-import {
-  combineKnownStateSessions,
-  KnownStateSessions,
-} from "../knownState.js";
+import { knownStateFromContent } from "../coValueContentMessage.js";
+import { VerifiedState } from "../coValueCore/verifiedState.js";
+import { RawCoID } from "../ids.js";
+import { combineKnownStateSessions, CoValueKnownState } from "../knownState.js";
 import { NewContentMessage } from "../sync.js";
-import { LinkedList } from "./LinkedList.js";
 
 /**
  * This queue is used to batch the sync of local transactions while preserving the order of updates between CoValues.
@@ -23,65 +14,97 @@ import { LinkedList } from "./LinkedList.js";
  * 2. If we do multiple updates on the same CoMap, the updates will be batched because it's safe to do so.
  */
 export class LocalTransactionsSyncQueue {
-  private readonly queue = new LinkedList<NewContentMessage>();
+  private batch: NewContentMessage[] = [];
+  private firstChunks = new Map<RawCoID, NewContentMessage>();
+  private lastUpdatedValue: VerifiedState | undefined;
+  private lastUpdatedValueKnownState: CoValueKnownState | undefined;
 
   constructor(private readonly sync: (content: NewContentMessage) => void) {}
 
-  syncHeader = (coValue: VerifiedState) => {
-    const lastPendingSync = this.queue.tail?.value;
-
-    if (lastPendingSync?.id === coValue.id) {
-      return;
-    }
-
-    this.enqueue(createContentMessage(coValue.id, coValue.header));
-  };
-
   syncTransaction = (
     coValue: VerifiedState,
-    transaction: Transaction,
-    sessionID: SessionID,
-    signature: Signature,
-    txIdx: number,
+    knownStateBefore: CoValueKnownState,
   ) => {
-    const lastPendingSync = this.queue.tail?.value;
-    const lastSignatureIdx = coValue.getLastSignatureCheckpoint(sessionID);
-    const isSignatureCheckpoint =
-      lastSignatureIdx > -1 && lastSignatureIdx === txIdx;
+    const lastUpdatedValue = this.lastUpdatedValue;
+    const lastUpdatedValueKnownState = this.lastUpdatedValueKnownState;
 
-    if (lastPendingSync?.id === coValue.id && !isSignatureCheckpoint) {
-      addTransactionToContentMessage(
-        lastPendingSync,
-        transaction,
-        sessionID,
-        signature,
-        txIdx,
-      );
+    if (lastUpdatedValue && lastUpdatedValueKnownState) {
+      if (lastUpdatedValue.id === coValue.id) {
+        return;
+      }
 
+      this.addContentToBatch(lastUpdatedValue, lastUpdatedValueKnownState);
+    }
+
+    this.lastUpdatedValue = coValue;
+    this.lastUpdatedValueKnownState = knownStateBefore;
+
+    for (const trackingSet of this.dirtyCoValuesTrackingSets) {
+      trackingSet.add(coValue.id);
+    }
+
+    this.scheduleNextBatch();
+  };
+
+  private addContentToBatch(
+    coValue: VerifiedState,
+    knownStateBefore: CoValueKnownState,
+  ) {
+    const content = coValue.newContentSince(knownStateBefore, {
+      skipExpectContentUntil: true, // we need to calculate the streaming header considering the current batch
+    });
+
+    if (!content) {
       return;
     }
 
-    const content = createContentMessage(coValue.id, coValue.header, false);
+    let firstChunk = this.firstChunks.get(coValue.id);
 
-    addTransactionToContentMessage(
-      content,
-      transaction,
-      sessionID,
-      signature,
-      txIdx,
-    );
+    for (const piece of content) {
+      this.batch.push(piece);
 
-    this.enqueue(content);
-  };
-
-  enqueue(content: NewContentMessage) {
-    this.queue.push(content);
-
-    this.processPendingSyncs();
-
-    for (const trackingSet of this.dirtyCoValuesTrackingSets) {
-      trackingSet.add(content.id);
+      // Check if the local content updates are in streaming, if so we need to add the info to the first chunk
+      if (firstChunk) {
+        if (!firstChunk.expectContentUntil) {
+          firstChunk.expectContentUntil =
+            knownStateFromContent(firstChunk).sessions;
+        }
+        combineKnownStateSessions(
+          firstChunk.expectContentUntil,
+          knownStateFromContent(piece).sessions,
+        );
+      } else {
+        firstChunk = piece;
+        this.firstChunks.set(coValue.id, firstChunk);
+      }
     }
+  }
+
+  private nextBatchScheduled = false;
+  scheduleNextBatch() {
+    if (this.nextBatchScheduled) return;
+
+    this.nextBatchScheduled = true;
+
+    queueMicrotask(() => {
+      if (this.lastUpdatedValue && this.lastUpdatedValueKnownState) {
+        this.addContentToBatch(
+          this.lastUpdatedValue,
+          this.lastUpdatedValueKnownState,
+        );
+      }
+      const batch = this.batch;
+
+      this.lastUpdatedValue = undefined;
+      this.lastUpdatedValueKnownState = undefined;
+      this.firstChunks = new Map();
+      this.batch = [];
+      this.nextBatchScheduled = false;
+
+      for (const content of batch) {
+        this.sync(content);
+      }
+    });
   }
 
   private dirtyCoValuesTrackingSets: Set<Set<RawCoID>> = new Set();
@@ -110,43 +133,4 @@ export class LocalTransactionsSyncQueue {
       },
     };
   };
-
-  private processingSyncs = false;
-  processPendingSyncs() {
-    if (this.processingSyncs) return;
-
-    this.processingSyncs = true;
-
-    queueMicrotask(() => {
-      const firstContentPieceMap = new Map<RawCoID, NewContentMessage>();
-
-      while (this.queue.head) {
-        const content = this.queue.head.value;
-
-        const firstContentPiece = firstContentPieceMap.get(content.id);
-
-        if (!firstContentPiece) {
-          firstContentPieceMap.set(content.id, content);
-        } else {
-          // There is already a content piece for this coValue, so this means that we need to flag
-          // that this content is going to be streamed
-          if (!firstContentPiece.expectContentUntil) {
-            firstContentPiece.expectContentUntil =
-              knownStateFromContent(firstContentPiece).sessions;
-          }
-
-          combineKnownStateSessions(
-            firstContentPiece.expectContentUntil,
-            knownStateFromContent(content).sessions,
-          );
-        }
-
-        this.sync(content);
-
-        this.queue.shift();
-      }
-
-      this.processingSyncs = false;
-    });
-  }
 }

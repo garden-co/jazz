@@ -89,7 +89,7 @@ describe("Group.childKeyRotation", () => {
     const newBobSession = await bob.spawnNewSession();
 
     const childGroupOnNewBobNode = await loadCoValueOrFail(
-      newBobSession,
+      newBobSession.node,
       childGroup.id,
     );
 
@@ -138,15 +138,15 @@ describe("Group.childKeyRotation", () => {
     const newBobSession = await bob.spawnNewSession();
 
     for (const chunk of content) {
-      newBobSession.syncManager.handleNewContent(chunk, "import");
+      newBobSession.node.syncManager.handleNewContent(chunk, "import");
     }
 
     const childGroupOnNewBobNode = await loadCoValueOrFail(
-      newBobSession,
+      newBobSession.node,
       childGroup.id,
     );
 
-    newBobSession.syncManager.handleNewContent(lastChunk, "import");
+    newBobSession.node.syncManager.handleNewContent(lastChunk, "import");
 
     // The migration waits for the group to be completely downloaded
     await childGroupOnNewBobNode.core.waitForAsync((core) =>
@@ -205,15 +205,15 @@ describe("Group.childKeyRotation", () => {
     const newBobSession = await bob.spawnNewSession();
 
     for (const chunk of content) {
-      newBobSession.syncManager.handleNewContent(chunk, "import");
+      newBobSession.node.syncManager.handleNewContent(chunk, "import");
     }
 
     const childGroupOnNewBobNode = await loadCoValueOrFail(
-      newBobSession,
+      newBobSession.node,
       childGroup.id,
     );
 
-    newBobSession.syncManager.handleNewContent(lastChunk, "import");
+    newBobSession.node.syncManager.handleNewContent(lastChunk, "import");
 
     // The migration waits for the group to be completely downloaded, this includes full streaming of the parent group
     await childGroupOnNewBobNode.core.waitForAsync((core) =>
@@ -268,7 +268,7 @@ describe("Group.childKeyRotation", () => {
 
     // Instead Bob is an admin, so when loading the child group he can rotate the readKey
     const newBobSession = await bob.spawnNewSession();
-    const mapOnNewBobNode = await loadCoValueOrFail(newBobSession, map.id);
+    const mapOnNewBobNode = await loadCoValueOrFail(newBobSession.node, map.id);
 
     mapOnNewBobNode.set("test", "Not readable by charlie");
 
@@ -416,7 +416,7 @@ describe("Group.childKeyRotation", () => {
 
     const newBobSession = await bob.spawnNewSession();
     const childGroupOnNewBobNode = await loadCoValueOrFail(
-      newBobSession,
+      newBobSession.node,
       childGroup.id,
     );
 

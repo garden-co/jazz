@@ -3,9 +3,12 @@ import {
   SyncMessagesLog,
   TEST_NODE_CONFIG,
   loadCoValueOrFail,
+  setupTestAccount,
   setupTestNode,
   waitFor,
 } from "./testUtils";
+import type { RawCoMap } from "../exports";
+import type { CoID } from "../coValue";
 
 let jazzCloud: ReturnType<typeof setupTestNode>;
 
@@ -82,7 +85,7 @@ describe("isStreaming", () => {
     expect(mapInNewSession.core.isStreaming()).toBe(false);
   });
 
-  test("loading a large content update  should be streaming until all chunks are sent", async () => {
+  test("loading a large content update should be streaming until all chunks are sent", async () => {
     const client = setupTestNode({
       connected: true,
     });
@@ -222,7 +225,8 @@ describe("isStreaming", () => {
     await map.core.waitForSync();
     const newSession = client.spawnNewSession();
 
-    await loadCoValueOrFail(newSession.node, map.id);
+    const mapInNewSession1 = await loadCoValueOrFail(newSession.node, map.id);
+    await mapInNewSession1.core.waitForFullStreaming();
 
     const content = map.core.verified.newContentSince(undefined);
     assert(content);
@@ -267,5 +271,83 @@ describe("isStreaming", () => {
     const mapInNewSession = await loadCoValueOrFail(newSession.node, map.id);
 
     expect(mapInNewSession.core.isStreaming()).toBe(false);
+  });
+
+  test("mixed updates should not leave isStreaming to true (3 sessions)", async () => {
+    const aliceLaptop = await setupTestAccount({
+      connected: true,
+    });
+
+    const group = aliceLaptop.node.createGroup();
+    const map = group.createMap();
+
+    map.set("count", 0, "trusting");
+    map.set("count", 1, "trusting");
+
+    await map.core.waitForSync();
+
+    const alicePhone = await aliceLaptop.spawnNewSession();
+
+    const mapOnPhone = await loadCoValueOrFail(alicePhone.node, map.id);
+
+    mapOnPhone.set("count", 2, "trusting");
+    mapOnPhone.set("count", 3, "trusting");
+    mapOnPhone.set("count", 4, "trusting");
+
+    await mapOnPhone.core.waitForSync();
+
+    const aliceTablet = await alicePhone.spawnNewSession();
+    const mapOnTablet = await loadCoValueOrFail(aliceTablet.node, map.id);
+
+    mapOnTablet.set("count", 5, "trusting");
+    mapOnTablet.set("count", 6, "trusting");
+    mapOnTablet.set("count", 7, "trusting");
+
+    await mapOnTablet.core.waitForSync();
+
+    map.set("count", 8, "trusting");
+    map.set("count", 9, "trusting");
+    map.set("count", 10, "trusting");
+
+    mapOnPhone.set("count", 11, "trusting");
+    mapOnTablet.set("count", 12, "trusting");
+
+    await map.core.waitForSync();
+    await mapOnPhone.core.waitForSync();
+    await mapOnTablet.core.waitForSync();
+
+    expect(map.core.isStreaming()).toBe(false);
+    expect(mapOnPhone.core.isStreaming()).toBe(false);
+    expect(mapOnTablet.core.isStreaming()).toBe(false);
+
+    const mapBranch = map.core.createBranch("test-branch");
+
+    const aliceTv = await aliceTablet.spawnNewSession();
+
+    const mapBranchOnTv = await loadCoValueOrFail(
+      aliceTv.node,
+      mapBranch.id as unknown as CoID<RawCoMap>,
+    );
+
+    mapBranchOnTv.set("count", 13, "trusting");
+    mapBranchOnTv.set("count", 14, "trusting");
+    mapBranchOnTv.set("count", 15, "trusting");
+
+    await mapBranchOnTv.core.waitForSync();
+
+    group.addMember("everyone", "reader");
+
+    const bob = await setupTestAccount({
+      connected: true,
+    });
+
+    const mapBranchOnBob = await loadCoValueOrFail(bob.node, mapBranchOnTv.id);
+
+    expect(mapBranchOnBob.core.isStreaming()).toBe(false);
+    expect(map.core.isStreaming()).toBe(false);
+    expect(mapOnPhone.core.isStreaming()).toBe(false);
+    expect(mapOnTablet.core.isStreaming()).toBe(false);
+
+    expect(mapBranchOnBob.get("count")).toBe(15);
   });
 });

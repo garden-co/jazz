@@ -769,6 +769,8 @@ export class CoValueCore {
 
     let result: { signature: Signature; transaction: Transaction };
 
+    const knownStateBefore = this.knownState();
+
     if (privacy === "private") {
       const { secret: keySecret, id: keyID } = this.getCurrentReadKey();
 
@@ -795,16 +797,13 @@ export class CoValueCore {
       );
     }
 
-    const { transaction, signature } = result;
+    const { transaction } = result;
 
     // Assign pre-parsed meta and changes to skip the parse/decrypt operation when loading
     // this transaction in the current content
     this.parsingCache.set(transaction, { changes, meta });
 
     this.node.syncManager.recordTransactionsSize([transaction], "local");
-
-    const session = this.verified.sessions.get(sessionID);
-    const txIdx = session ? session.transactions.length - 1 : 0;
 
     this.resetKnownStateCache();
     this.processNewTransactions();
@@ -813,13 +812,7 @@ export class CoValueCore {
     // force immediate notification because local updates may come from the UI
     // where we need synchronous updates
     this.notifyUpdate();
-    this.node.syncManager.syncLocalTransaction(
-      this.verified,
-      transaction,
-      sessionID,
-      signature,
-      txIdx,
-    );
+    this.node.syncManager.syncLocalTransaction(this.verified, knownStateBefore);
 
     return true;
   }

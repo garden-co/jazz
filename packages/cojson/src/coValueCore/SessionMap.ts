@@ -21,6 +21,7 @@ import {
   cloneKnownState,
   combineKnownStateSessions,
   isKnownStateSubsetOf,
+  getKnownStateToSend,
 } from "../knownState.js";
 
 export type SessionLog = {
@@ -63,10 +64,18 @@ export class SessionMap {
       return;
     }
 
+    const actualStreamingKnownState = getKnownStateToSend(
+      streamingKnownState,
+      this.knownState.sessions,
+    );
+
     if (this.streamingKnownState) {
-      combineKnownStateSessions(this.streamingKnownState, streamingKnownState);
+      combineKnownStateSessions(
+        this.streamingKnownState,
+        actualStreamingKnownState,
+      );
     } else {
-      this.streamingKnownState = { ...streamingKnownState };
+      this.streamingKnownState = actualStreamingKnownState;
     }
 
     if (!this.knownStateWithStreaming) {
@@ -75,7 +84,7 @@ export class SessionMap {
 
     combineKnownStateSessions(
       this.knownStateWithStreaming.sessions,
-      streamingKnownState,
+      actualStreamingKnownState,
     );
   }
 

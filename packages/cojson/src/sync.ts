@@ -771,7 +771,6 @@ export class SyncManager {
   private syncQueue = new LocalTransactionsSyncQueue((content) =>
     this.syncContent(content),
   );
-  syncHeader = this.syncQueue.syncHeader;
   syncLocalTransaction = this.syncQueue.syncTransaction;
   trackDirtyCoValues = this.syncQueue.trackDirtyCoValues;
 

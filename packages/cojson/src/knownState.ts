@@ -121,3 +121,23 @@ export function isKnownStateSubsetOf(
 
   return true;
 }
+
+/**
+ * Returns the record with the sessions that need to be sent to the target
+ */
+export function getKnownStateToSend(
+  source: Record<string, number>,
+  target: Record<string, number>,
+) {
+  const toSend: Record<string, number> = {};
+  for (const [sessionId, sourceCount] of Object.entries(source) as [
+    SessionID,
+    number,
+  ][]) {
+    const targetCount = target[sessionId] ?? 0;
+    if (sourceCount > targetCount) {
+      toSend[sessionId] = sourceCount - targetCount;
+    }
+  }
+  return toSend;
+}
