@@ -1,8 +1,6 @@
-/*
-  Note: When this file is imported by other projects (like homepage),
-  the @config directive must be in the importing file, not here.
-  The importing project's @config will load this design-system's tailwind.config.js via presets.
-*/
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
 
 /*
   The default border color has changed to `currentcolor` in Tailwind CSS v4,
