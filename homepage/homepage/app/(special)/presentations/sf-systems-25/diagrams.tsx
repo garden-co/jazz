@@ -1,5 +1,5 @@
 import clsx from "clsx";
-import { BinaryIcon, SignatureIcon, TextCursorIcon } from "lucide-react";
+import { BinaryIcon, SignatureIcon } from "lucide-react";
 import {
   fakeCoID,
   fakeEncryptedPayload,
@@ -11,24 +11,28 @@ import {
   sessionsForGroup,
   userColors,
 } from "./helpers";
-import { useEffect, useState } from "react";
 import { EditorIndicator } from "./EditorIndicator";
 
 export function CoValueCoreDiagram({
   header,
   sessions,
   showView,
+  showCore,
   showHashAndSignature,
   encryptedItems,
   group,
   showFullGroup,
   showEditor,
+  currentTimestamp,
+  hashProgressIdx,
+  highlightOwner,
 }: {
   header: object;
   sessions: {
     [key: `${string}_session_${string}`]: SessionEntry[];
   };
   showView: boolean;
+  showCore: boolean;
   showHashAndSignature: boolean;
   encryptedItems: boolean;
   group?: {
@@ -37,6 +41,9 @@ export function CoValueCoreDiagram({
   };
   showFullGroup?: boolean;
   showEditor?: boolean;
+  currentTimestamp?: Date;
+  hashProgressIdx?: number;
+  highlightOwner?: boolean;
 }) {
   return (
     <div
@@ -50,6 +57,7 @@ export function CoValueCoreDiagram({
             sessions={sessions}
             header={header}
             showEditor={showEditor || false}
+            currentTimestamp={currentTimestamp || new Date()}
           />
         </div>
       )}
@@ -59,21 +67,26 @@ export function CoValueCoreDiagram({
             header={headerForGroup(group)}
             sessions={sessionsForGroup(group)}
             showEditor={false}
+            currentTimestamp={currentTimestamp || new Date()}
           />
         </div>
       )}
 
-      <div className="col-span-1">
-        <CoValueCoreView
-          header={header}
-          sessions={sessions}
-          showView={showView}
-          showHashAndSignature={showHashAndSignature}
-          encryptedItems={encryptedItems}
-        />
-      </div>
+      {showCore && (
+        <div className="col-span-1">
+          <CoValueCoreView
+            header={header}
+            sessions={sessions}
+            showView={showView}
+            showHashAndSignature={showHashAndSignature}
+            encryptedItems={encryptedItems}
+            hashProgressIdx={hashProgressIdx}
+            highlightOwner={highlightOwner}
+          />
+        </div>
+      )}
       {group && showFullGroup && (
-        <div className="col-span-1 origin-top scale-75">
+        <div className="col-span-1">
           <CoValueCoreView
             header={headerForGroup(group)}
             sessions={sessionsForGroup(group)}
@@ -87,16 +100,41 @@ export function CoValueCoreDiagram({
   );
 }
 
-function HeaderContent({ header }: { header: object }) {
+function HeaderContent({
+  header,
+  highlightOwner,
+}: {
+  header: object;
+  highlightOwner?: boolean;
+}) {
+  const headerLines = JSON.stringify(header, null, 2)
+    .replace(/"(.+?)":/g, "$1:")
+    .replace(/\n\s+/g, "\n")
+    .replace(/,/g, "")
+    .replace(/[{}]\n?/g, "")
+    .split("\n");
   return (
     <div className="relative h-full rounded-lg bg-stone-800 px-4 py-3">
       <div className="mb-2 flex justify-between text-stone-500">header</div>
-      <pre className="text-sm leading-6 text-white">
-        {JSON.stringify(header, null, 2)
-          .replace(/"(.+?)":/g, "$1:")
-          .replace(/\n\s+/g, "\n")
-          .replace(/,/g, "")
-          .replace(/[{}]\n?/g, "")}
+      <pre
+        className={clsx(
+          "text-sm leading-6",
+          highlightOwner ? "text-stone-500" : "text-white",
+        )}
+      >
+        {headerLines.map((line, index) => (
+          <div          key={index}>
+            <span
+
+              className={clsx(
+                highlightOwner && line.startsWith("owner") ? "text-white" : "",
+              )}
+            >
+              {line}
+            </span>
+            {index !== headerLines.length - 1 && "\n"}
+          </div>
+        ))}
       </pre>
       <div className="absolute right-3 top-1 py-2 text-sm">
         h(header) = {fakeCoID(header)} ("ID")
@@ -129,6 +167,8 @@ function CoValueCoreView({
   showView,
   showHashAndSignature,
   encryptedItems,
+  hashProgressIdx,
+  highlightOwner,
 }: {
   header: object;
   sessions: {
@@ -137,44 +177,80 @@ function CoValueCoreView({
   showView: boolean;
   showHashAndSignature: boolean;
   encryptedItems: boolean;
+  hashProgressIdx?: number;
+  highlightOwner?: boolean;
 }) {
   return (
     <div className="not-prose relative flex flex-col gap-5">
       <div className="min-w-[17rem] flex-1">
-        <HeaderContent header={header} />
+        <HeaderContent header={header} highlightOwner={highlightOwner} />
       </div>
       <div className="flex flex-[6] gap-5">
-        {Object.entries(sessions).map(([sessionID, log]) => (
-          <div
-            key={sessionID}
-            className="flex min-w-48 max-w-64 flex-1 flex-col gap-1"
-          >
-            <SessionHeader sessionKey={sessionID} />
-            {log.map((item, idx) => {
-              return (
-                <TransactionContainer
-                  key={JSON.stringify(item)}
-                  sessions={sessions}
-                  item={item}
-                  idx={idx}
-                  log={log}
-                  showView={showView}
-                >
-                  <TransactionIndexMarker index={idx} />
-                  <TransactionContent
+        {Object.entries(sessions).map(([sessionID, log], sessionIdx) => {
+          const priorHashProgress = Object.values(sessions)
+            .slice(0, sessionIdx)
+            .reduce((acc, session) => acc + session.length, sessionIdx * 2);
+
+          return (
+            <div
+              key={sessionID}
+              className="flex min-w-48 max-w-64 flex-1 flex-col gap-1"
+            >
+              <SessionHeader sessionKey={sessionID} />
+              {log.map((item, idx) => {
+                return (
+                  <TransactionContainer
+                    key={JSON.stringify(item)}
+                    sessions={sessions}
                     item={item}
-                    encryptedItems={encryptedItems}
-                  />
-                  <Timestamp timestamp={item.t} />
-                  {showHashAndSignature && <HashChainArrow />}
-                </TransactionContainer>
-              );
-            })}
-            {showHashAndSignature && (
-              <HashAndSignature log={log} sessionID={sessionID} />
-            )}
-          </div>
-        ))}
+                    idx={idx}
+                    log={log}
+                    showView={showView}
+                  >
+                    <TransactionIndexMarker index={idx} />
+                    <TransactionContent
+                      item={item}
+                      encryptedItems={encryptedItems}
+                    />
+                    <Timestamp timestamp={item.t} />
+                    {showHashAndSignature &&
+                      (hashProgressIdx ?? Infinity) >
+                        idx + priorHashProgress && <HashChainArrow />}
+                  </TransactionContainer>
+                );
+              })}
+              {showHashAndSignature && (
+                <div className="-mt-px min-w-[9.5rem] justify-start rounded p-2">
+                  {(hashProgressIdx ?? Infinity) >
+                    log.length + priorHashProgress && (
+                    <pre className="flex items-center gap-1 text-sm text-white">
+                      <BinaryIcon className="h-4 w-4" /> {fakeHash(log)}
+                    </pre>
+                  )}
+                  {(hashProgressIdx ?? Infinity) >
+                    log.length + 1 + priorHashProgress && (
+                    <div className="relative">
+                      <div className="absolute -left-16 top-1 rounded bg-black px-1 text-xs">
+                        ed25519
+                      </div>
+                      <pre
+                        className={clsx(
+                          "flex items-center gap-1 text-sm",
+                          userColors[
+                            sessionID.split("_")[0] as keyof typeof userColors
+                          ],
+                        )}
+                      >
+                        <SignatureIcon className="h-4 w-4" />
+                        {fakeSignature(log)}
+                      </pre>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          );
+        })}
       </div>
     </div>
   );
@@ -184,10 +260,12 @@ function ContentView({
   sessions,
   header,
   showEditor,
+  currentTimestamp,
 }: {
   sessions: { [key: string]: SessionEntry[] };
   header: object;
   showEditor: boolean;
+  currentTimestamp: Date;
 }) {
   const lastEntries = Object.entries(sessions)
     .flatMap(([sessionID, session]) =>
@@ -212,7 +290,7 @@ function ContentView({
   );
 
   return (
-    <div className="relative m-10 flex min-w-48 min-h-4 flex-col gap-1 self-center rounded-lg border-2 border-blue-500 font-mono text-blue-500">
+    <div className="relative flex min-h-10 min-w-48 max-w-64 flex-col gap-1 self-center rounded-lg border-2 border-blue-500 font-mono text-blue-500">
       <div className="absolute -top-5 text-xs text-blue-500">
         {(header as any).isGroup ? "Group" : "CoMap"} {fakeCoID(header)}
       </div>
@@ -225,7 +303,7 @@ function ContentView({
         >
           {highlightSpecialString(key)}:{" "}
           {highlightSpecialString(entry.payload.value + "")}
-          {showEditor && (
+          {showEditor && entry.t.getTime() === currentTimestamp.getTime() && (
             <EditorIndicator by={entry.by} key={JSON.stringify(entry)} />
           )}
         </div>
@@ -234,13 +312,11 @@ function ContentView({
   );
 }
 
-
-
 export function HashChainArrow() {
   return (
     <div className="absolute -bottom-7 -left-2 z-10 h-[100%]">
       <ArrowSvg className="h-[100%]" />
-      <div className="absolute -left-8 top-[50%] -mt-[30%] bg-black text-[0.6rem]">
+      <div className="absolute -left-12 top-[50%] -mt-[40%] rounded bg-black px-1 text-sm">
         blake3
       </div>
     </div>
@@ -262,31 +338,6 @@ export function ArrowSvg({ className }: { className?: string }) {
         fill="white"
       />
     </svg>
-  );
-}
-
-export function HashAndSignature({
-  log,
-  sessionID,
-}: {
-  log: SessionEntry[];
-  sessionID: string;
-}) {
-  return (
-    <div className="-mt-px min-w-[9.5rem] justify-start rounded p-2">
-      <pre className="flex items-center gap-1 text-sm text-white">
-        <BinaryIcon className="h-4 w-4" /> {fakeHash(log)}
-      </pre>
-      <pre
-        className={clsx(
-          "flex items-center gap-1 text-sm",
-          userColors[sessionID.split("_")[0] as keyof typeof userColors],
-        )}
-      >
-        <SignatureIcon className="h-4 w-4" />
-        {fakeSignature(log)}
-      </pre>
-    </div>
   );
 }
 
@@ -337,11 +388,11 @@ export function TransactionContent({
   encryptedItems: boolean;
 }) {
   return encryptedItems ? (
-    <pre className="px-3 py-2 text-sm leading-6 text-fuchsia-500">
+    <pre className="overflow-hidden px-3 py-2 text-sm leading-6 text-fuchsia-500">
       {fakeEncryptedPayload(item.payload)}
     </pre>
   ) : (
-    <pre className="px-3 pt-2 text-sm leading-6 text-white">
+    <pre className="overflow-hidden px-3 pt-2 text-sm leading-6 text-white">
       {item.payload.op === "set"
         ? `${item.payload.key}: ${item.payload.value}`
         : `${item.payload.key}: deleted`}

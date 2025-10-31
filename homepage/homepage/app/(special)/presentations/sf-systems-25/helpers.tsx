@@ -21,7 +21,7 @@ export function fakeHash(session: { payload: object; t: Date }[]) {
           session.reduce((acc, item) => acc + JSON.stringify(item), ""),
         ) + "",
       ),
-    )
+    ).slice(0, 11)
   );
 }
 
@@ -33,7 +33,7 @@ export function fakeCoID(header: object) {
 
 export function fakeSignature(session: { payload: object; t: Date }[]) {
   return (
-    "sig_x" +
+    "sig_z" +
     bs58.encode(
       encoder.encode(
         hashCode(
@@ -42,7 +42,7 @@ export function fakeSignature(session: { payload: object; t: Date }[]) {
           ) + "",
         ) + "",
       ),
-    )
+    ).slice(0, 12)
   );
 }
 
@@ -58,14 +58,11 @@ export function hashCode(str: string) {
 
 export function fakeEncryptedPayload(payload: object) {
   return (
-    "encr_z" +
+    "en_U" +
     bs58.encode(
-      encoder.encode(hashCode(JSON.stringify(payload)) + "").slice(0, 12),
+      encoder.encode(hashCode(JSON.stringify(payload)) + "").slice(0, 10),
     ) +
-    "…\n…" +
-    bs58.encode(
-      encoder.encode(hashCode(JSON.stringify(payload) + "a") + "").slice(0, 12),
-    )
+    "…"
   );
 }
 
@@ -95,8 +92,8 @@ export function headerForGroup(group: {
     type: "comap",
     isGroup: true,
     owner: Object.keys(group.roles)[0],
-    createdAt: "2024-12-06...",
-    uniqueness: group.currentKey,
+    createdAt: new Date("2025-10-29T22:00:00Z").toLocaleString(),
+    uniqueness: "w83ho2urb",
   };
 }
 
@@ -131,7 +128,7 @@ export function sessionsForGroup(group: {
               encrKey: group.currentKey + user,
             })
               .split("\n")[0]
-              .replace("encr_z", "sealed_z"),
+              .replace("en_U", "sealed_U"),
           },
           t: new Date(Date.now() - 10 * 60 * 1000),
         },
