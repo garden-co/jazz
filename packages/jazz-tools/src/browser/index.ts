@@ -16,6 +16,7 @@ export * from "./createBrowserContext.js";
 export * from "./BrowserContextManager.js";
 
 export { LocalStorageKVStore } from "./auth/LocalStorageKVStore.js";
+export { EncryptedLocalStorageKVStore } from "./auth/EncryptedLocalStorageKVStore.js";
 
 /** @category Invite Links */
 export function createInviteLink<C extends CoValue>(
