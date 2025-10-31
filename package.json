@@ -85,6 +85,7 @@
       "edgedriver",
       "esbuild",
       "geckodriver",
+      "node-pty",
       "lefthook",
       "msw",
       "react-native-nitro-modules",
