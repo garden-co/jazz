@@ -32,6 +32,7 @@ export type {
   RefsToResolveStrict,
   CoMapInit_DEPRECATED as CoMapInit,
   CoFeedEntry,
+  SingleCoFeedEntry,
   TextPos,
   AccountClass,
   AccountCreationProps,
