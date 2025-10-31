@@ -1,5 +1,12 @@
 # jazz-sveltekit
 
+## 0.0.15
+
+### Patch Changes
+
+- Updated dependencies [7a64465]
+  - jazz-tools@0.18.34
+
 ## 0.0.14
 
 ### Patch Changes
