@@ -217,7 +217,6 @@ export function Icon({
     <IconComponent
       aria-hidden="true"
       size={sizes[size]}
-      // @ts-expect-error - strokeWidth type inference issue with lucide-react
       strokeWidth={strokeWidth}
       strokeLinecap="round"
       className={clsx(
