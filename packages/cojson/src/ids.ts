@@ -61,8 +61,6 @@ export function getGroupDependentKey(key: unknown) {
 
   if (isParentGroupReference(key)) {
     return getParentGroupId(key);
-  } else if (key.startsWith("co_")) {
-    return key as RawCoID;
   }
 
   return undefined;
