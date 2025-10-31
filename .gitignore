@@ -20,6 +20,9 @@ __screenshots__
 # Playwright
 test-results
 
+#rust
+target/**
+
 # Java
 .java-version
 
