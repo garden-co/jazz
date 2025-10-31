@@ -655,7 +655,7 @@ export class SyncManager {
             err,
             msgKnownState: JSON.stringify(knownStateFromContent(msg).sessions),
             knownState: JSON.stringify(coValue.knownState().sessions),
-            newContent: JSON.stringify(validNewContent.new).slice(0, 10_000), // limit the size of the new content to 10KB
+            newContent: JSON.stringify(msg.new).slice(0, 10_000), // limit the size of the new content to 10KB
           });
           // TODO Mark only the session as errored, not the whole coValue
           coValue.markErrored(peer.id, result.error);
