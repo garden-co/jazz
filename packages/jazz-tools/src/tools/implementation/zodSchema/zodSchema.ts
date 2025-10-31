@@ -47,6 +47,7 @@ import {
   RichTextSchema,
 } from "./schemaTypes/RichTextSchema.js";
 import { InstanceOfSchemaCoValuesMaybeLoaded } from "./typeConverters/InstanceOfSchemaCoValuesMaybeLoaded.js";
+import { DefaultResolveQueryOfSchema } from "./typeConverters/DefaultResolveQueryOfSchema.js";
 import { z } from "./zodReExport.js";
 import { CoreGroupSchema } from "./schemaTypes/GroupSchema.js";
 import { GroupSchema } from "./schemaTypes/GroupSchema.js";
@@ -136,3 +137,10 @@ export type ResolveQueryStrict<
   LoadedAndRequired<InstanceOfSchemaCoValuesMaybeLoaded<T>>,
   R
 >;
+
+export type DefaultResolveQuery<S extends CoValueClassOrSchema> =
+  S extends CoreCoValueSchema
+    ? DefaultResolveQueryOfSchema<S> extends false
+      ? true
+      : DefaultResolveQueryOfSchema<S>
+    : true;
