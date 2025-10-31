@@ -13,13 +13,13 @@ export type OpID = TransactionID & { changeIdx: number };
 
 export type AppOpPayload<T extends JsonValue> = {
   op: "app";
-  value: T;
+  value: T | CoID<RawCoValue>;
   after: OpID | "start";
 };
 
 export type PreOpPayload<T extends JsonValue> = {
   op: "pre";
-  value: T;
+  value: T | CoID<RawCoValue>;
   before: OpID | "end";
 };
 
@@ -373,7 +373,7 @@ export class RawCoList<
   private fillArrayFromOpID(
     opID: OpID,
     arr: {
-      value: Item;
+      value: Item | CoID<RawCoValue>;
       madeAt: number;
       opID: OpID;
     }[],
@@ -513,8 +513,11 @@ export class RawCoList<
     item: Item,
     after?: number,
     privacy: "private" | "trusting" = "private",
+    options?: {
+      disablePacking?: boolean;
+    },
   ) {
-    this.appendItems([item], after, privacy);
+    this.appendItems([item], after, privacy, options);
   }
 
   /**
@@ -555,7 +558,7 @@ export class RawCoList<
       opIDBefore = "start";
     }
 
-    const changes = items.map((item) => ({
+    const changes: AppOpPayload<Item>[] = items.map((item) => ({
       op: "app",
       value: isCoValue(item) ? item.id : item,
       after: opIDBefore,
@@ -568,10 +571,7 @@ export class RawCoList<
     }
 
     if (!options?.disablePacking) {
-      const changesCompacted = this.pack.packChanges(
-        changes as ListOpPayload<Item>[],
-      );
-      this.core.makeTransaction(changesCompacted, privacy);
+      this.core.makeTransaction(this.pack.packChanges(changes), privacy);
     } else {
       this.core.makeTransaction(changes, privacy);
     }
@@ -591,10 +591,13 @@ export class RawCoList<
     item: Item,
     before?: number,
     privacy: "private" | "trusting" = "private",
+    options?: {
+      disablePacking?: boolean;
+    },
   ) {
     const entries = this.entries();
     before = before === undefined ? 0 : before;
-    let opIDAfter;
+    let opIDAfter: OpID | "end";
     if (entries.length > 0) {
       const entryAfter = entries[before];
       if (entryAfter) {
@@ -611,17 +614,20 @@ export class RawCoList<
       }
       opIDAfter = "end";
     }
-    this.core.makeTransaction(
-      [
-        {
-          op: "pre",
-          value: isCoValue(item) ? item.id : item,
-          before: opIDAfter,
-        },
-      ],
-      privacy,
-    );
 
+    const changes: PreOpPayload<Item>[] = [
+      {
+        op: "pre",
+        value: isCoValue(item) ? item.id : item,
+        before: opIDAfter,
+      },
+    ];
+
+    if (options?.disablePacking) {
+      this.core.makeTransaction(changes, privacy);
+    } else {
+      this.core.makeTransaction(this.pack.packChanges(changes), privacy);
+    }
     this.processNewTransactions();
   }
 
@@ -633,22 +639,29 @@ export class RawCoList<
    *
    * @category 2. Editing
    **/
-  delete(at: number, privacy: "private" | "trusting" = "private") {
+  delete(
+    at: number,
+    privacy: "private" | "trusting" = "private",
+    options?: {
+      disablePacking?: boolean;
+    },
+  ) {
     const entries = this.entries();
     const entry = entries[at];
     if (!entry) {
       throw new Error("Invalid index " + at);
     }
-    this.core.makeTransaction(
-      [
-        {
-          op: "del",
-          insertion: entry.opID,
-        },
-      ],
-      privacy,
-    );
-
+    const changes: DeletionOpPayload[] = [
+      {
+        op: "del",
+        insertion: entry.opID,
+      },
+    ];
+    if (options?.disablePacking) {
+      this.core.makeTransaction(changes, privacy);
+    } else {
+      this.core.makeTransaction(this.pack.packChanges(changes), privacy);
+    }
     this.processNewTransactions();
   }
 
@@ -656,25 +669,29 @@ export class RawCoList<
     at: number,
     newItem: Item,
     privacy: "private" | "trusting" = "private",
+    options?: {
+      disablePacking?: boolean;
+    },
   ) {
     const entries = this.entries();
     const entry = entries[at];
     if (!entry) {
       throw new Error("Invalid index " + at);
     }
+    const changes: ListOpPayload<Item>[] = [
+      {
+        op: "app",
+        value: isCoValue(newItem) ? newItem.id : newItem,
+        after: entry.opID,
+      },
+      {
+        op: "del",
+        insertion: entry.opID,
+      },
+    ];
 
     this.core.makeTransaction(
-      [
-        {
-          op: "app",
-          value: isCoValue(newItem) ? newItem.id : newItem,
-          after: entry.opID,
-        },
-        {
-          op: "del",
-          insertion: entry.opID,
-        },
-      ],
+      options?.disablePacking ? changes : this.pack.packChanges(changes),
       privacy,
     );
     this.processNewTransactions();

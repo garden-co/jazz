@@ -1,6 +1,12 @@
 import { describe, expect, test } from "vitest";
 import { CoListPackImplementation } from "../pack/coList.js";
-import type { AppOpPayload, ListOpPayload, OpID } from "../coValues/coList.js";
+import type {
+  AppOpPayload,
+  ListOpPayload,
+  OpID,
+  PreOpPayload,
+} from "../coValues/coList.js";
+import { ENCODING_MAP_PRIMITIVES_VALUES } from "../pack/objToArr.js";
 
 describe("CoListPackImplementation", () => {
   const packer = new CoListPackImplementation<string>();
@@ -23,11 +29,15 @@ describe("CoListPackImplementation", () => {
       const result = packer.packChanges(changes);
 
       expect(Array.isArray(result)).toBe(true);
-      expect(result.length).toBe(3); // first element (includes value) + 2 additional values
-      expect((result[0] as any).compacted).toBe(true);
-      expect((result[0] as any).op).toBe("app");
-      expect((result[0] as any).value).toBe("item1");
-      expect((result[0] as any).after).toBe("start");
+      expect(result.length).toBe(3); // first element array + 2 additional values
+      expect(Array.isArray(result[0])).toBe(true);
+      // First element is now packed as ["item1", "start", 1, true]
+      expect((result[0] as any)[0]).toBe("item1"); // value
+      expect((result[0] as any)[1]).toBe("start"); // after
+      expect((result[0] as any)[2]).toBe(
+        ENCODING_MAP_PRIMITIVES_VALUES.undefined,
+      ); // op (undefined so we use the default value = "app")
+      expect((result[0] as any)[3]).toBe(ENCODING_MAP_PRIMITIVES_VALUES.true); // compacted
       expect(result[1]).toBe("item2");
       expect(result[2]).toBe("item3");
     });
@@ -44,8 +54,13 @@ describe("CoListPackImplementation", () => {
 
       expect(Array.isArray(result)).toBe(true);
       expect(result.length).toBe(3);
-      expect((result[0] as any).compacted).toBe(true);
-      expect((result[0] as any).after).toBe(opID);
+      expect(Array.isArray(result[0])).toBe(true);
+      expect((result[0] as any)[0]).toBe("a"); // value
+      expect((result[0] as any)[1]).toBe(opID); // after
+      expect((result[0] as any)[2]).toBe(
+        ENCODING_MAP_PRIMITIVES_VALUES.undefined,
+      ); // op (undefined so we use the default value = "app")
+      expect((result[0] as any)[3]).toBe(ENCODING_MAP_PRIMITIVES_VALUES.true); // compacted
       expect(result[1]).toBe("b");
       expect(result[2]).toBe("c");
     });
@@ -61,8 +76,15 @@ describe("CoListPackImplementation", () => {
 
       const result = packer.packChanges(changes);
 
-      expect(result).toBe(changes); // Returns original array
-      expect((result[0] as any).compacted).toBeUndefined();
+      // Returns array of arrays format without compacting
+      expect(Array.isArray(result)).toBe(true);
+      expect(result.length).toBe(3);
+      expect(Array.isArray(result[0])).toBe(true);
+      // Each element is packed as ["item1", opID1, 1] without compacted flag
+      expect((result[0] as any)[0]).toBe("item1"); // value
+      expect((result[0] as any)[1]).toBe(opID1); // after
+      expect((result[0] as any)[2]).toBeUndefined(); // op (0 is null so we use the default value = "app")
+      expect((result[0] as any)[3]).toBeUndefined(); // no compacted flag
     });
 
     test("should NOT pack when first operation is not 'app'", () => {
@@ -74,7 +96,12 @@ describe("CoListPackImplementation", () => {
 
       const result = packer.packChanges(changes as any);
 
-      expect(result).toBe(changes);
+      // Returns array of arrays format
+      expect(Array.isArray(result)).toBe(true);
+      expect(result.length).toBe(2);
+      expect(Array.isArray(result[0])).toBe(true);
+      expect((result[0] as any)[0]).toBe(opID); // insertion
+      expect((result[0] as any)[2]).toBe(3); // op (3 = "del")
     });
 
     test("should NOT pack when operations contain 'pre' operation", () => {
@@ -86,8 +113,11 @@ describe("CoListPackImplementation", () => {
 
       const result = packer.packChanges(changes);
 
-      expect(result).toBe(changes);
-      expect((result[0] as any).compacted).toBeUndefined();
+      // Returns array of arrays format
+      expect(Array.isArray(result)).toBe(true);
+      expect(result.length).toBe(3);
+      expect(Array.isArray(result[0])).toBe(true);
+      expect((result[0] as any)[3]).toBeUndefined(); // no compacted flag
     });
 
     test("should NOT pack when operations contain 'del' operation", () => {
@@ -100,7 +130,10 @@ describe("CoListPackImplementation", () => {
 
       const result = packer.packChanges(changes as any);
 
-      expect(result).toBe(changes);
+      // Returns array of arrays format
+      expect(Array.isArray(result)).toBe(true);
+      expect(result.length).toBe(3);
+      expect(Array.isArray(result[0])).toBe(true);
     });
 
     test("should handle single operation (no packing needed)", () => {
@@ -110,9 +143,13 @@ describe("CoListPackImplementation", () => {
 
       const result = packer.packChanges(changes);
 
-      // Single operation doesn't get packed
+      // Single operation is packed as array of arrays
       expect(result.length).toBe(1);
-      expect((result[0] as any).compacted).toBeUndefined();
+      expect(Array.isArray(result[0])).toBe(true);
+      expect((result[0] as any)[0]).toBe("item1"); // value
+      expect((result[0] as any)[1]).toBe("start"); // after
+      expect((result[0] as any)[2]).toBeUndefined(); // op (0 is null so we use the default value = "app")
+      expect((result[0] as any)[3]).toBeUndefined(); // no compacted flag for single operation
     });
 
     test("should handle empty array", () => {
@@ -148,7 +185,17 @@ describe("CoListPackImplementation", () => {
       const result = taskPacker.packChanges(changes);
 
       expect(result.length).toBe(3);
-      expect((result[0] as any).compacted).toBe(true);
+      expect(Array.isArray(result[0])).toBe(true);
+      expect((result[0] as any)[0]).toEqual({
+        id: 1,
+        title: "Task 1",
+        done: false,
+      }); // value
+      expect((result[0] as any)[1]).toBe("start"); // after
+      expect((result[0] as any)[2]).toBe(
+        ENCODING_MAP_PRIMITIVES_VALUES.undefined,
+      ); // op (undefined so we use the default value = "app")
+      expect((result[0] as any)[3]).toBe(ENCODING_MAP_PRIMITIVES_VALUES.true); // compacted
       expect(result[1]).toEqual({ id: 2, title: "Task 2", done: true });
       expect(result[2]).toEqual({ id: 3, title: "Task 3", done: false });
     });
@@ -166,25 +213,56 @@ describe("CoListPackImplementation", () => {
       const numberPacker = new CoListPackImplementation<number>();
       const result = numberPacker.packChanges(changes);
 
-      expect(result.length).toBe(100); // first element + 99 additional values
-      expect((result[0] as any).compacted).toBe(true);
-      expect((result[0] as any).value).toBe(0);
+      expect(result.length).toBe(100); // first element array + 99 additional values
+      expect(Array.isArray(result[0])).toBe(true);
+      expect((result[0] as any)[0]).toBe(0); // value
+      expect((result[0] as any)[1]).toBe("start"); // after
+      expect((result[0] as any)[2]).toBe(
+        ENCODING_MAP_PRIMITIVES_VALUES.undefined,
+      ); // op (undefined so we use the default value = "app")
+      expect((result[0] as any)[3]).toBe(ENCODING_MAP_PRIMITIVES_VALUES.true); // compacted
       for (let i = 1; i < result.length; i++) {
         expect(result[i]).toBe(i);
       }
+    });
+
+    test("should NOT pack prepend operations", () => {
+      const changes: ListOpPayload<string>[] = [
+        { op: "pre", value: "item1", before: "end" },
+        { op: "pre", value: "item2", before: "end" },
+        { op: "pre", value: "item3", before: "end" },
+      ];
+
+      const result = packer.packChanges(changes);
+
+      // Prepend operations are not compacted, returns array of arrays
+      expect(Array.isArray(result)).toBe(true);
+      expect(result.length).toBe(3);
+      expect(Array.isArray(result[0])).toBe(true);
+      expect((result[0] as any)[2]).toBe(2); // op (2 = "pre")
+      expect((result[0] as any)[3]).toBeUndefined(); // no compacted flag
+    });
+
+    test("should NOT pack when mixing prepend with other operations", () => {
+      const changes: ListOpPayload<string>[] = [
+        { op: "pre", value: "item1", before: "end" },
+        { op: "app", value: "item2", after: "start" },
+      ];
+
+      const result = packer.packChanges(changes);
+
+      // Mixed operations - returns array of arrays
+      expect(Array.isArray(result)).toBe(true);
+      expect(result.length).toBe(2);
+      expect((result[0] as any)[2]).toBe(2); // op (2 = "pre")
+      expect((result[1] as any)[2]).toBeUndefined(); // op (1 = "app")
     });
   });
 
   describe("unpackChanges", () => {
     test("should unpack packed changes correctly", () => {
-      const firstOp: AppOpPayload<string> & { compacted: true } = {
-        op: "app",
-        value: "item1",
-        after: "start",
-        compacted: true,
-      };
-
-      const packed = [firstOp, "item2", "item3"];
+      // First element is now an array: ["item1", "start", 1, true]
+      const packed = [["item1", "start", 1, true], "item2", "item3"];
 
       const result = packer.unpackChanges(packed as any);
 
@@ -199,14 +277,8 @@ describe("CoListPackImplementation", () => {
 
     test("should unpack with OpID as 'after' reference", () => {
       const opID = createOpID("session1", 5);
-      const firstOp: AppOpPayload<string> & { compacted: true } = {
-        op: "app",
-        value: "a",
-        after: opID,
-        compacted: true,
-      };
-
-      const packed = [firstOp, "b", "c", "d"];
+      // First element is now an array: ["app", "a", opID, true]
+      const packed = [["a", opID, 1, true], "b", "c", "d"];
 
       const result = packer.unpackChanges(packed as any);
 
@@ -244,64 +316,15 @@ describe("CoListPackImplementation", () => {
       expect(result).toEqual([]);
     });
 
-    test("should unpack JSON object values", () => {
-      type TaskItem = { id: number; title: string; done: boolean };
-      const taskPacker = new CoListPackImplementation<TaskItem>();
-
-      const firstOp: AppOpPayload<TaskItem> & { compacted: true } = {
-        op: "app",
-        value: { id: 1, title: "Task 1", done: false },
-        after: "start",
-        compacted: true,
-      };
-
-      const packed = [
-        firstOp,
-        { id: 2, title: "Task 2", done: true },
-        { id: 3, title: "Task 3", done: false },
+    test("should unpack prepend operations", () => {
+      const changes: ListOpPayload<string>[] = [
+        { op: "pre", value: "item1", before: "end" },
+        { op: "pre", value: "item2", before: "end" },
       ];
 
-      const result = taskPacker.unpackChanges(packed as any);
+      const result = packer.unpackChanges(changes);
 
-      expect(result.length).toBe(3);
-      expect((result[0] as AppOpPayload<TaskItem>).value).toEqual({
-        id: 1,
-        title: "Task 1",
-        done: false,
-      });
-      expect((result[1] as AppOpPayload<TaskItem>).value).toEqual({
-        id: 2,
-        title: "Task 2",
-        done: true,
-      });
-      expect((result[2] as AppOpPayload<TaskItem>).value).toEqual({
-        id: 3,
-        title: "Task 3",
-        done: false,
-      });
-    });
-
-    test("should unpack large batch of operations", () => {
-      const numberPacker = new CoListPackImplementation<number>();
-
-      const firstOp: AppOpPayload<number> & { compacted: true } = {
-        op: "app",
-        value: 0,
-        after: "start",
-        compacted: true,
-      };
-
-      const packed = [firstOp, ...Array.from({ length: 99 }, (_, i) => i + 1)];
-
-      const result = numberPacker.unpackChanges(packed as any);
-
-      expect(result.length).toBe(100);
-      // Check all values are correct
-      for (let i = 0; i < result.length; i++) {
-        expect(result[i]?.op).toBe("app");
-        expect((result[i] as AppOpPayload<number>).value).toBe(i);
-        expect((result[i] as AppOpPayload<number>).after).toBe("start");
-      }
+      expect(result).toBe(changes);
     });
   });
 
@@ -340,10 +363,20 @@ describe("CoListPackImplementation", () => {
         { op: "app", value: "item2", after: opID2 },
       ];
 
-      const packed = packer.packChanges(original); // Should not pack
+      const packed = packer.packChanges(original); // Should not compact (different after references)
       const unpacked = packer.unpackChanges(packed as any);
 
-      expect(unpacked).toBe(original);
+      // Compare by value, not by reference, since it's now packed/unpacked
+      expect(unpacked.length).toBe(original.length);
+      for (let i = 0; i < unpacked.length; i++) {
+        expect(unpacked[i]?.op).toBe(original[i]?.op);
+        expect((unpacked[i] as AppOpPayload<string>).value).toBe(
+          (original[i] as AppOpPayload<string>).value,
+        );
+        expect((unpacked[i] as AppOpPayload<string>).after).toBe(
+          (original[i] as AppOpPayload<string>).after,
+        );
+      }
     });
 
     test("should work with multiple pack/unpack cycles", () => {
@@ -369,6 +402,30 @@ describe("CoListPackImplementation", () => {
         );
         expect((unpacked2[i] as AppOpPayload<number>).after).toBe(
           (original[i] as AppOpPayload<number>).after,
+        );
+      }
+    });
+
+    test("should maintain prepend operations through pack/unpack cycle", () => {
+      const opID = createOpID("session1", 0);
+      const original: ListOpPayload<string>[] = [
+        { op: "pre", value: "item1", before: "end" },
+        { op: "pre", value: "item2", before: opID },
+        { op: "pre", value: "item3", before: "end" },
+      ];
+
+      const packed = packer.packChanges(original);
+      const unpacked = packer.unpackChanges(packed as any);
+
+      // Check that all values are correct
+      expect(unpacked.length).toBe(original.length);
+      for (let i = 0; i < unpacked.length; i++) {
+        expect(unpacked[i]?.op).toBe(original[i]?.op);
+        expect((unpacked[i] as PreOpPayload<string>).value).toBe(
+          (original[i] as PreOpPayload<string>).value,
+        );
+        expect((unpacked[i] as PreOpPayload<string>).before).toBe(
+          (original[i] as PreOpPayload<string>).before,
         );
       }
     });

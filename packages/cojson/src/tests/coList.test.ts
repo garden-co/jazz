@@ -956,3 +956,67 @@ describe("CoList Branching", () => {
     `);
   });
 });
+
+describe("CoList packing mixed", () => {
+  test("pack should work mixed operations prepend and append", () => {
+    const node = nodeWithRandomAgentAndSessionID();
+
+    const coValue = node.createCoValue({
+      type: "colist",
+      ruleset: { type: "unsafeAllowAll" },
+      meta: null,
+      ...Crypto.createdNowUnique(),
+    });
+
+    const list = expectList(coValue.getCurrentContent());
+    list.prepend("item1", 0, "trusting", { disablePacking: true });
+    list.prepend("item2", 0, "trusting");
+    list.prepend("item3", 0, "trusting", { disablePacking: true });
+
+    expect(list.toJSON()).toEqual(["item3", "item2", "item1"]);
+
+    list.append("item4", undefined, "trusting", { disablePacking: true });
+    list.append("item5", undefined, "trusting");
+
+    expect(list.toJSON()).toEqual([
+      "item3",
+      "item2",
+      "item1",
+      "item4",
+      "item5",
+    ]);
+
+    list.prepend("item6", 0, "trusting", { disablePacking: true });
+    list.prepend("item7", 0, "trusting");
+
+    expect(list.toJSON()).toEqual([
+      "item7",
+      "item6",
+      "item3",
+      "item2",
+      "item1",
+      "item4",
+      "item5",
+    ]);
+  });
+
+  test("pack should work with delete operations", () => {
+    const node = nodeWithRandomAgentAndSessionID();
+
+    const coValue = node.createCoValue({
+      type: "colist",
+      ruleset: { type: "unsafeAllowAll" },
+      meta: null,
+      ...Crypto.createdNowUnique(),
+    });
+
+    const list = expectList(coValue.getCurrentContent());
+
+    list.appendItems(["item8", "item9"], undefined, "trusting");
+
+    list.delete(0, "trusting", { disablePacking: true });
+    list.delete(0, "trusting");
+
+    expect(list.toJSON()).toEqual([]);
+  });
+});

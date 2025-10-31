@@ -21,6 +21,7 @@ import {
 import { parseJSON } from "./jsonStringify.js";
 import { JsonValue } from "./jsonValue.js";
 import { logger } from "./logger.js";
+import { CoMapPackImplementation } from "./pack/coMap.js";
 import { expectGroup } from "./typeUtils/expectGroup.js";
 
 export type PermissionsDef =
@@ -67,6 +68,8 @@ type ValidTransactionsResult = { txID: TransactionID; tx: Transaction };
 type MemberState = { [agent: RawAccountID | AgentID]: Role; [EVERYONE]?: Role };
 
 let logPermissionErrors = true;
+
+const mapPack = new CoMapPackImplementation();
 
 export function disablePermissionErrors() {
   logPermissionErrors = false;
@@ -264,7 +267,9 @@ function determineValidTransactionsForGroup(
       continue;
     }
 
-    const change = changes[0] as
+    const unpackedChanges = mapPack.unpackChanges(changes);
+
+    const change = unpackedChanges[0] as
       | MapOpPayload<RawAccountID | AgentID | Everyone, Role>
       | MapOpPayload<"readKey", JsonValue>
       | MapOpPayload<"profile", CoID<RawProfile>>

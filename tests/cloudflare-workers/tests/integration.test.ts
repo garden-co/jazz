@@ -2,6 +2,7 @@ import { dirname, join } from "path";
 import { fileURLToPath } from "url";
 import { execa } from "execa";
 import { expect, test, describe, onTestFinished } from "vitest";
+import { startSyncServer } from "jazz-run/startSyncServer";
 
 // @ts-ignore
 const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -17,6 +18,14 @@ describe("Cloudflare Workers Integration Test", () => {
         cwd: packageRoot,
       },
     );
+
+    const syncServer = await startSyncServer({
+      port: "4211",
+      inMemory: true,
+      db: "sync-db/storage.db",
+      host: "127.0.0.1",
+    });
+
     // Wait for server to be ready
     const url = await new Promise<URL>((resolve, reject) => {
       server.stdout?.on("data", (data) => {
@@ -39,6 +48,9 @@ describe("Cloudflare Workers Integration Test", () => {
     onTestFinished(() => {
       // Ensure server is killed after all tests
       server.kill();
+      syncServer.closeAllConnections();
+      syncServer.localNode.gracefulShutdown();
+      syncServer.close();
     });
     return { server, url };
   }
