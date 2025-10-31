@@ -1,5 +1,16 @@
 # jazz-run
 
+## 0.18.34
+
+### Patch Changes
+
+- Updated dependencies [7a64465]
+  - jazz-tools@0.18.34
+  - jazz-webhook@0.18.34
+  - cojson@0.18.34
+  - cojson-storage-sqlite@0.18.34
+  - cojson-transport-ws@0.18.34
+
 ## 0.18.33
 
 ### Patch Changes

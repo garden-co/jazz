@@ -1,5 +1,14 @@
 # jazz-tools
 
+## 0.18.34
+
+### Patch Changes
+
+- 7a64465: fix: Image's lazy loading placeholder transparency in React Image component
+  - cojson@0.18.34
+  - cojson-storage-indexeddb@0.18.34
+  - cojson-transport-ws@0.18.34
+
 ## 0.18.33
 
 ### Patch Changes

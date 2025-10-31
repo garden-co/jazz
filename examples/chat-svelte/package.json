@@ -1,6 +1,6 @@
 {
   "name": "chat-svelte",
-  "version": "0.0.161",
+  "version": "0.0.162",
   "type": "module",
   "private": true,
   "scripts": {
