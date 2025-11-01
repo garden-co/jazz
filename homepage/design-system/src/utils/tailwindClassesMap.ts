@@ -228,7 +228,7 @@ export const colorToBgActiveMap25 = {
   default: "active:bg-black/25 dark:active:bg-white/25",
 };
 
-const gradiantClassesBase = "bg-gradient-to-t from-7% via-50% to-95%";
+const gradiantClassesBase = "bg-linear-to-t from-7% via-50% to-95%";
 
 export const styleToBgGradientColorMap = {
   primary: `from-primary-dark via-primary to-primary-light ${gradiantClassesBase}`,
@@ -244,32 +244,32 @@ export const styleToBgGradientColorMap = {
 };
 
 export const styleToBgGradientHoverMap = {
-  primary: `hover:from-primary-brightLight hover:to-primary-light ${gradiantClassesBase}`,
-  info: `hover:from-info-brightLight hover:to-info-light ${gradiantClassesBase}`,
-  success: `hover:from-success-brightLight hover:to-success-light ${gradiantClassesBase}`,
-  warning: `hover:from-warning-brightLight hover:to-warning-light ${gradiantClassesBase}`,
-  danger: `hover:from-danger-brightLight hover:to-danger-light ${gradiantClassesBase}`,
-  alert: `hover:from-alert-brightLight hover:to-alert-light ${gradiantClassesBase}`,
-  tip: `hover:from-tip-brightLight hover:to-tip-light ${gradiantClassesBase}`,
+  primary: `hover:from-primary-bright-light hover:to-primary-light ${gradiantClassesBase}`,
+  info: `hover:from-info-bright-light hover:to-info-light ${gradiantClassesBase}`,
+  success: `hover:from-success-bright-light hover:to-success-light ${gradiantClassesBase}`,
+  warning: `hover:from-warning-bright-light hover:to-warning-light ${gradiantClassesBase}`,
+  danger: `hover:from-danger-bright-light hover:to-danger-light ${gradiantClassesBase}`,
+  alert: `hover:from-alert-bright-light hover:to-alert-light ${gradiantClassesBase}`,
+  tip: `hover:from-tip-bright-light hover:to-tip-light ${gradiantClassesBase}`,
   muted: `hover:from-stone-200 hover:to-stone-300 ${gradiantClassesBase} dark:hover:from-stone-900 dark:hover:to-stone-700/70`,
   strong: `hover:from-stone-700 hover:to-stone-800 ${gradiantClassesBase} dark:hover:from-stone-100 dark:hover:to-stone-200`,
   default: `hover:from-stone-100/50 hover:to-stone-100/50 dark:hover:from-stone-950 dark:hover:to-stone-900 ${gradiantClassesBase} border border-stone-100 dark:border-stone-900`,
 };
 
 export const styleToBgGradientActiveMap = {
-  primary: `active:from-primary-brightDark active:to-primary-light ${gradiantClassesBase}`,
-  info: `active:from-info-brightDark active:to-info-light ${gradiantClassesBase}`,
-  success: `active:from-success-brightDark active:to-success-light ${gradiantClassesBase}`,
-  warning: `active:from-warning-brightDark active:to-warning-light ${gradiantClassesBase}`,
-  danger: `active:from-danger-brightDark active:to-danger-light ${gradiantClassesBase}`,
-  alert: `active:from-alert-brightDark active:to-alert-light ${gradiantClassesBase}`,
-  tip: `active:from-tip-brightDark active:to-tip-light ${gradiantClassesBase}`,
+  primary: `active:from-primary-bright-dark active:to-primary-light ${gradiantClassesBase}`,
+  info: `active:from-info-bright-dark active:to-info-light ${gradiantClassesBase}`,
+  success: `active:from-success-bright-dark active:to-success-light ${gradiantClassesBase}`,
+  warning: `active:from-warning-bright-dark active:to-warning-light ${gradiantClassesBase}`,
+  danger: `active:from-danger-bright-dark active:to-danger-light ${gradiantClassesBase}`,
+  alert: `active:from-alert-bright-dark active:to-alert-light ${gradiantClassesBase}`,
+  tip: `active:from-tip-bright-dark active:to-tip-light ${gradiantClassesBase}`,
   muted: `active:from-stone-300 active:to-stone-300 ${gradiantClassesBase} dark:active:from-stone-900 dark:active:to-stone-800`,
   strong: `active:from-stone-950 active:to-stone-900 ${gradiantClassesBase} dark:active:from-stone-100 dark:active:to-stone-200`,
   default: `active:from-stone-200/50 active:to-stone-100/50 dark:active:from-stone-950 dark:active:to-black ${gradiantClassesBase}`,
 };
 
-export const shadowClassesBase = "shadow-sm";
+export const shadowClassesBase = "shadow-xs";
 
 export const styleToHoverShadowMap = {
   primary: `${shadowClassesBase} shadow-blue/20 hover:shadow-blue/40`,
@@ -285,7 +285,7 @@ export const styleToHoverShadowMap = {
 };
 
 const focusRingClassesBase =
-  "focus:outline-none focus-visible:ring focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-opacity-10";
+  "focus:outline-hidden focus-visible:ring-3 focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-opacity-10";
 
 export const styleToButtonStateMap = {
   primary: `${styleToBgGradientActiveMap.primary} ${focusRingClassesBase} focus:ring-primary`,

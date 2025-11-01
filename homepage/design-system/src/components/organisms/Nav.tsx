@@ -84,7 +84,7 @@ function NavItem({
     <Popover className={clsx("relative", className, firstOnRight && "ml-auto")}>
       <PopoverButton
         className={clsx(
-          "flex items-center gap-1.5 text-sm px-2 lg:px-4 py-3 max-sm:w-full hover:text-stone-900 dark:hover:text-white transition-colors hover:transition-none focus-visible:outline-none",
+          "flex items-center gap-1.5 text-sm px-2 lg:px-4 py-3 max-sm:w-full hover:text-stone-900 dark:hover:text-white transition-colors hover:transition-none focus-visible:outline-hidden",
           active ? "text-highlight" : "",
         )}
       >
@@ -94,7 +94,7 @@ function NavItem({
 
       <PopoverPanel
         transition
-        className="absolute left-1/2 -translate-x-1/2 z-10 flex w-screen max-w-[24rem] mt-5 transition data-[closed]:translate-y-1 data-[closed]:opacity-0 data-[enter]:duration-200 data-[leave]:duration-150 data-[enter]:ease-out data-[leave]:ease-in"
+        className="absolute left-1/2 -translate-x-1/2 z-10 flex w-screen max-w-[24rem] mt-5 transition data-closed:translate-y-1 data-closed:opacity-0 data-enter:duration-200 data-leave:duration-150 data-enter:ease-out data-leave:ease-in"
       >
         <div className="flex-auto overflow-hidden rounded-lg ring-1 ring-stone-300/60 bg-white/90 backdrop-blur-lg shadow-lg dark:ring-stone-800/50 dark:bg-stone-925/90">
           <div className="p-3 grid">
@@ -218,7 +218,7 @@ export function MobileNav({
         }}
         className={clsx(
           !!active ? "block" : "hidden",
-          "md:hidden fixed backdrop-blur-sm top-0 bottom-0 left-0 right-0 bg-stone-200/80 dark:bg-black/80 w-full h-full z-20",
+          "md:hidden fixed backdrop-blur-xs top-0 bottom-0 left-0 right-0 bg-stone-200/80 dark:bg-black/80 w-full h-full z-20",
         )}
       ></div>
 
@@ -228,7 +228,7 @@ export function MobileNav({
           "dark:bg-stone-925",
           active
             ? "rounded-lg right-6 left-6 bottom-6 sm:max-w-lg sm:w-full shadow-md sm:left-1/2 sm:-translate-x-1/2 "
-            : "rounded-full shadow-sm left-1/2 -translate-x-1/2  bottom-7",
+            : "rounded-full shadow-xs left-1/2 -translate-x-1/2  bottom-7",
         )}
       >
         {active && (

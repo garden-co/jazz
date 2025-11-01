@@ -26,7 +26,7 @@ export default function Home() {
 
       <FeaturesSection />
 
-      <div className="container space-y-4 py-8 lg:py-16">
+      <div className="container flex flex-col gap-4 py-8 lg:py-16">
         <LatencyMap />
 
         <Pricing />

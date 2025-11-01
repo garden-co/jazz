@@ -62,7 +62,7 @@ function Iframe(
   return (
     <div
       className={clsx(
-        "relative w-full overflow-hidden rounded-[28px] border-[6px] border-black shadow-[0px_0px_0px_3px_rgba(0,0,0,_0.15)] dark:bg-black dark:shadow-[0px_0px_0px_3px_rgba(255,_255,_255,_0.2)]",
+        "relative w-full overflow-hidden rounded-[28px] border-[6px] border-black shadow-[0px_0px_0px_3px_rgba(0,0,0,0.15)] dark:bg-black dark:shadow-[0px_0px_0px_3px_rgba(255,255,255,0.2)]",
         className,
       )}
     >

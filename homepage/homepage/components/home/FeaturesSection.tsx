@@ -107,7 +107,7 @@ export function FeaturesSection() {
           {features.map(({ title, description, illustration }) => (
             <div
               key={title}
-              className="grid rounded-xl border p-4 shadow-sm sm:p-6"
+              className="grid rounded-xl border p-4 shadow-xs sm:p-6"
             >
               <div className="pb flex min-h-48 w-full items-center justify-center">
                 {illustration}

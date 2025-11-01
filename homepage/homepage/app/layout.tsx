@@ -51,7 +51,7 @@ export default function RootLayout({
        <body
         className={[
           ...fontClasses,
-          "min-h-full flex flex-col items-center [&_*]:scroll-mt-[5rem]",
+          "min-h-full flex flex-col items-center **:scroll-mt-20",
           "bg-white dark:bg-stone-950 text-default",
         ].join(" ")}
       >

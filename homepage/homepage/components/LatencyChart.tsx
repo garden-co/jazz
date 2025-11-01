@@ -105,7 +105,7 @@ export default function LatencyChart({ latencyOverTime, upOverTime, upCountOverT
               <div className="p-[0.5px]">
                 <div
                   className={cn(
-                    "h-4 w-1 lg:w-2 rounded-sm hover:opacity-50",
+                    "h-4 w-1 lg:w-2 rounded-xs hover:opacity-50",
                     valueClass,
                   )}
                 />

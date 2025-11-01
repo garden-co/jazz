@@ -28,7 +28,9 @@ export function HeroHeader({
   const Heading = level === "h2" ? H2 : H1;
 
   return (
-    <hgroup className={clsx(pt && "pt-12 md:pt-20", "mb-10", className)}>
+    <hgroup
+      className={clsx(pt && "pt-12 md:pt-20", "mb-10 grid gap-2", className)}
+    >
       <Heading>{title}</Heading>
       {slogan && <H1Sub>{slogan}</H1Sub>}
     </hgroup>

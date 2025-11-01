@@ -40,7 +40,7 @@ export default function Page() {
           <Link
             href={product.url}
             key={product.url}
-            className="group border bg-stone-50 shadow-sm p-3 flex flex-col gap-3 rounded-lg md:gap-4 dark:bg-stone-950"
+            className="group border bg-stone-50 shadow-xs p-3 flex flex-col gap-3 rounded-lg md:gap-4 dark:bg-stone-950"
           >
             <Image
               className="rounded-md border dark:border-0"
@@ -49,7 +49,7 @@ export default function Page() {
               height="675"
               alt=""
             />
-            <div className="space-y-2">
+            <div className="flex flex-col gap-2">
               <h2 className="font-medium text-highlight leading-none">
                 {product.name}
               </h2>

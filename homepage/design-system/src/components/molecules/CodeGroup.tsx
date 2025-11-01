@@ -32,7 +32,7 @@ export function CopyButton({
       type="button"
       className={clsx(
         className,
-        "group/button absolute overflow-hidden rounded text-2xs font-medium md:opacity-0 backdrop-blur transition md:focus:opacity-100 group-hover:opacity-100 items-center align-middle p-0",
+        "group/button absolute overflow-hidden rounded-sm text-2xs font-medium md:opacity-0 backdrop-blur-sm transition md:focus:opacity-100 group-hover:opacity-100 items-center align-middle p-0",
         copied
           ? "bg-blue-400/10 ring-1 ring-inset ring-blue-400/20"
           : "bg-white/5 hover:bg-white/7.5 dark:bg-white/2.5 dark:hover:bg-white/5",
@@ -127,7 +127,7 @@ export function CodeGroup({
         className={clsx(
           "h-full",
           preferWrap
-            ? "overflow-x-visible break-words whitespace-pre-wrap [&_.line]:whitespace-pre-wrap"
+            ? "overflow-x-visible wrap-break-word whitespace-pre-wrap [&_.line]:whitespace-pre-wrap"
             : "overflow-x-auto",
           "border rounded-md p-0 bg-stone-50 dark:bg-stone-925",
           "text-black dark:text-white",

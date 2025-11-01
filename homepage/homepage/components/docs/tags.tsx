@@ -13,7 +13,7 @@ const highlighterPromise = createHighlighter({
 export function Example({ children }: { children: ReactNode }) {
   return (
     <div className="flex-1" data-pagefind-weight="2">
-      <div className="border bg-white dark:bg-stone-900 rounded shadow-sm">
+      <div className="border bg-white dark:bg-stone-900 rounded-sm shadow-xs">
         <div className="py-1 px-2  border-b text-xs">Example</div>
         <div className="py-1 px-2 overflow-x-auto">{children}</div>
       </div>
@@ -112,7 +112,7 @@ export function PropDecl({
 }) {
   return (
     <div
-      className="text-sm flex flex-col gap-3 my-2 p-3 rounded bg-stone-50 dark:bg-stone-925"
+      className="text-sm flex flex-col gap-3 my-2 p-3 rounded-sm bg-stone-50 dark:bg-stone-925"
       data-pagefind-weight="4"
     >
       {(name || type) && (
@@ -157,7 +157,7 @@ export function FnDecl({
   return (
     <div
       id={methodName}
-      className="text-sm flex flex-col gap-3 my-2 p-3 rounded bg-stone-50 dark:bg-stone-925"
+      className="text-sm flex flex-col gap-3 my-2 p-3 rounded-sm bg-stone-50 dark:bg-stone-925"
       data-pagefind-weight="5"
     >
       <div className="flex flex-col gap-2">

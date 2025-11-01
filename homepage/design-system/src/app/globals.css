@@ -1,6 +1,6 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss";
+
+@config "../../tailwind.config.js";
 
 :root {
   --color-primary: #146aff;
@@ -19,25 +19,25 @@
   --color-pink: #ef478e;
   --color-danger: #ee494c;
 
-  --color-default: theme("colors.stone.700");
-  --color-strong: theme("colors.stone.800");
-  --color-muted: theme("colors.stone.300");
+  --color-default: oklch(0.523438 0.002 75);
+  --color-strong: oklch(0.412109 0.002 75);
+  --color-muted: oklch(0.853516 0.002 75);
 
   --color-transparent-white: rgba(255, 255, 255, 0.1);
   --color-transparent-primary: lch(from var(--color-primary) l c h / 0.1);
 
-  --color-border-default: theme("colors.stone.200");
+  --color-border-default: oklch(0.917969 0.002 75);
   --color-background-highlight: lch(from var(--color-primary) l c h / 0.25);
 }
 
 .dark {
-  --color-default: theme("colors.stone.400");
-  --color-strong: theme("colors.stone.100");
-  --color-muted: theme("colors.stone.700");
+  --color-default: oklch(0.789063 0.002 75);
+  --color-strong: oklch(0.980563 0.002 75);
+  --color-muted: oklch(0.523438 0.002 75);
 
   --color-transparent-primary: lch(from var(--color-primary) l c h / 0.3);
 
-  --color-border-default: theme("colors.stone.900");
+  --color-border-default: oklch(0.302734 0.002 75);
   --color-background-highlight: lch(from var(--color-primary) l c h / 0.5);
 }
 
