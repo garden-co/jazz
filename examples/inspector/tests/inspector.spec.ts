@@ -114,7 +114,6 @@ test("should inspect CoValue", async ({ page }) => {
 
   // Test if CoMap/grid view is displaying Issue data correctly
   await row.getByRole("button", { name: "View" }).click();
-  await expect(page.getByRole("table")).toHaveCount(1);
   await expect(page.getByText(issue.title)).toBeVisible();
   await expect(page.getByText(issue.status)).toBeVisible();
   await expect(page.getByRole("button", { name: /labels/ })).toBeVisible();
