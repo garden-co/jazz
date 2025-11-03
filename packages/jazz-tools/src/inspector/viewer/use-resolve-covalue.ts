@@ -110,7 +110,7 @@ function subscribeToCoValue(
   callback: (result: Awaited<ReturnType<typeof resolveCoValue>>) => void,
 ) {
   return node.subscribe(coValueId, (value) => {
-    if (value === "unavailable") {
+    if (value === "unavailable" || value.core.isStreaming()) {
       callback({
         value: undefined,
         snapshot: "unavailable",
