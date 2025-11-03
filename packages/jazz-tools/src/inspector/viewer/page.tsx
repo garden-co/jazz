@@ -7,7 +7,7 @@ import {
   RawGroup,
 } from "cojson";
 import { styled } from "goober";
-import React from "react";
+import React, { useEffect } from "react";
 import { Badge } from "../ui/badge.js";
 import { Heading } from "../ui/heading.js";
 import { Text } from "../ui/text.js";
@@ -110,6 +110,12 @@ function View(
   const { type, extendedType } = props.coValue;
   const { snapshot, value } = props.coValue;
   const { node, onNavigate } = props;
+
+  useEffect(() => {
+    if (!value) return;
+
+    console.log(value.id, value);
+  }, [value]);
 
   if (!snapshot || snapshot === "unavailable") return;
 
