@@ -74,15 +74,51 @@ describe("HistoryView", async () => {
 
       const history = [
         'Property "pet" has been set to "dog"',
-        'Property "age" has been set to "10"',
-        'Property "certified" has been set to "false"',
+        'Property "age" has been set to 10',
+        'Property "certified" has been set to false',
         'Property "pet" has been set to "cat"',
-        'Property "age" has been set to "20"',
-        'Property "certified" has been set to "true"',
+        'Property "age" has been set to 20',
+        'Property "certified" has been set to true',
         'Property "certified" has been deleted',
       ].toReversed(); // Default sort is descending
 
       expect(screen.getAllByRole("row")).toHaveLength(history.length + 2);
+
+      await waitFor(() => {
+        expect(screen.getAllByRole("row")[2]?.textContent).toContain(
+          account.$jazz.id,
+        );
+      });
+
+      expect(extractActions()).toEqual(history);
+    });
+    it("should render co.map changes with json", async () => {
+      const value = co
+        .map({
+          pet: z.object({
+            name: z.string(),
+            age: z.number(),
+          }),
+          n: z.number().optional(),
+          s: z.string().nullable(),
+        })
+        .create({ pet: { name: "dog", age: 10 }, n: 10, s: "hello" }, account);
+
+      value.$jazz.set("pet", { name: "cat", age: 20 });
+      value.$jazz.set("n", undefined);
+      value.$jazz.set("s", null);
+      render(
+        <HistoryView coValue={value.$jazz.raw} node={value.$jazz.localNode} />,
+      );
+
+      const history = [
+        'Property "pet" has been set to {"name":"dog","age":10}',
+        'Property "n" has been set to 10',
+        'Property "s" has been set to "hello"',
+        'Property "pet" has been set to {"name":"cat","age":20}',
+        'Property "n" has been set to undefined',
+        'Property "s" has been set to null',
+      ].toReversed(); // Default sort is descending
 
       await waitFor(() => {
         expect(screen.getAllByRole("row")[2]?.textContent).toContain(

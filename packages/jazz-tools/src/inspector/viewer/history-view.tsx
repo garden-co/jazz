@@ -242,7 +242,7 @@ function mapTransactionToAction(
 
   // coMap changes
   if (isPropertySet(change)) {
-    return `Property "${change.key}" has been set to "${change.value}"`;
+    return `Property "${change.key}" has been set to ${JSON.stringify(change.value)}`;
   }
 
   if (isPropertyDeletion(change)) {
