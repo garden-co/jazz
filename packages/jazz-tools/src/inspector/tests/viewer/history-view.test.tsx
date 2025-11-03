@@ -93,16 +93,21 @@ describe("HistoryView", async () => {
       expect(extractActions()).toEqual(history);
     });
     it("should render co.map changes with json", async () => {
+      const d = new Date();
       const value = co
         .map({
           pet: z.object({
             name: z.string(),
             age: z.number(),
           }),
+          d: z.date(),
           n: z.number().optional(),
           s: z.string().nullable(),
         })
-        .create({ pet: { name: "dog", age: 10 }, n: 10, s: "hello" }, account);
+        .create(
+          { pet: { name: "dog", age: 10 }, d, n: 10, s: "hello" },
+          account,
+        );
 
       value.$jazz.set("pet", { name: "cat", age: 20 });
       value.$jazz.set("n", undefined);
@@ -113,6 +118,7 @@ describe("HistoryView", async () => {
 
       const history = [
         'Property "pet" has been set to {"name":"dog","age":10}',
+        `Property "d" has been set to "${d.toISOString()}"`,
         'Property "n" has been set to 10',
         'Property "s" has been set to "hello"',
         'Property "pet" has been set to {"name":"cat","age":20}',
