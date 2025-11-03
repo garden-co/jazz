@@ -1,0 +1,18 @@
+[package]
+name = "cojson-core-uniffi"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+uniffi = { version = "0.30.0", features = [ "cli" ] }
+cojson-core = { path = "../cojson-core" }
+thiserror = "1.0"
+
+[build-dependencies]
+uniffi = { version = "0.30.0", features = [ "build" ] }
+
+[lib]
+crate-type = ["cdylib", "staticlib"]
+name = "cojson_core_uniffi"
+
+

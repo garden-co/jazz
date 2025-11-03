@@ -1,8 +1,8 @@
 [workspace]
-resolver = "2"
 members = [
-    "lzy",
-    "cojson-core",
-    "cojson-core-wasm",
-    "cojson-core-napi",
+  "lzy",
+  "cojson-core",
+  "cojson-core-wasm",
+  "cojson-core-napi", "cojson-core-uniffi",
 ]
+resolver = "2"

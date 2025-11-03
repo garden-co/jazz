@@ -1,0 +1,3 @@
+rust:
+  directory: ./../../crates/cojson-core-uniffi
+  manifestPath: Cargo.toml

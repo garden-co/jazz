@@ -1,0 +1,29 @@
+{
+  "compilerOptions": {
+    "rootDir": ".",
+    "paths": {
+      "react-native-cojson-core-rn": ["./src/index"]
+    },
+    "allowUnreachableCode": false,
+    "customConditions": ["react-native-strict-api"],
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "jsx": "react-jsx",
+    "lib": ["ESNext"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "noEmit": true,
+    "noFallthroughCasesInSwitch": true,
+    "noImplicitReturns": true,
+    "noImplicitUseStrict": false,
+    "noStrictGenericChecks": false,
+    "noUncheckedIndexedAccess": true,
+    "noUnusedLocals": false,
+    "noUnusedParameters": false,
+    "resolveJsonModule": true,
+    "skipLibCheck": true,
+    "strict": false,
+    "target": "ESNext",
+    "verbatimModuleSyntax": true
+  }
+}
