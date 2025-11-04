@@ -174,7 +174,7 @@ const buttonPropsTableData = {
       prop: "variant?",
       types: [
         "default",
-        "outline",
+        "outline-solid",
         "inverted",
         "ghost",
         "link",

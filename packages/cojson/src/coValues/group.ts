@@ -978,30 +978,7 @@ export class RawGroup<
 
   /** Detect circular references in group inheritance */
   isSelfExtension(parent: RawGroup) {
-    const checkedGroups = new Set<string>();
-    const queue = [parent];
-
-    while (true) {
-      const current = queue.pop();
-
-      if (!current) {
-        return false;
-      }
-
-      if (current.id === this.id) {
-        return true;
-      }
-
-      checkedGroups.add(current.id);
-
-      const parentGroups = current.getParentGroups();
-
-      for (const parent of parentGroups) {
-        if (!checkedGroups.has(parent.id)) {
-          queue.push(parent);
-        }
-      }
-    }
+    return isSelfExtension(this.core, parent);
   }
 
   getCurrentReadKey() {
@@ -1401,5 +1378,32 @@ class NoReadKeyAccessError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "NoReadKeyAccessError";
+  }
+}
+
+export function isSelfExtension(coValue: CoValueCore, parent: RawGroup) {
+  const checkedGroups = new Set<string>();
+  const queue = [parent];
+
+  while (true) {
+    const current = queue.pop();
+
+    if (!current) {
+      return false;
+    }
+
+    if (current.id === coValue.id) {
+      return true;
+    }
+
+    checkedGroups.add(current.id);
+
+    const parentGroups = current.getParentGroups();
+
+    for (const parent of parentGroups) {
+      if (!checkedGroups.has(parent.id)) {
+        queue.push(parent);
+      }
+    }
   }
 }

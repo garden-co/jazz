@@ -1,92 +1,129 @@
-@import "@garden-co/design-system/src/app/globals.css";
+@import "tailwindcss";
 
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "@shikijs/twoslash/style-rich.css" layer(utilities);
 
-@layer base {
-  :focus {
-    @apply outline-none;
+@config "../tailwind.config.ts";
+
+:root {
+  --color-primary: #146aff;
+  --color-primary-dark: lch(
+    from var(--color-primary) calc(l - 10) calc(c - 1) calc(h + 5)
+  );
+  --color-primary-light: lch(
+    from var(--color-primary) calc(l + 10) calc(c + 1) calc(h - 5)
+  );
+
+  --color-success: #42bb69;
+  --color-info: #b441eb;
+  --color-warning: #ff601c;
+  --color-alert: #fcae00;
+  --color-tip: #2dc9c9;
+  --color-pink: #ef478e;
+  --color-danger: #ee494c;
+
+  --color-default: oklch(0.523438 0.002 75);
+  --color-strong: oklch(0.412109 0.002 75);
+  --color-muted: oklch(0.853516 0.002 75);
+
+  --color-transparent-white: rgba(255, 255, 255, 0.1);
+  --color-transparent-primary: lch(from var(--color-primary) l c h / 0.1);
+
+  --color-border-default: oklch(0.917969 0.002 75);
+  --color-background-highlight: lch(from var(--color-primary) l c h / 0.25);
+}
+
+.dark {
+  --color-default: oklch(0.789063 0.002 75);
+  --color-strong: oklch(0.980563 0.002 75);
+  --color-muted: oklch(0.523438 0.002 75);
+
+  --color-transparent-primary: lch(from var(--color-primary) l c h / 0.3);
+
+  --color-border-default: oklch(0.302734 0.002 75);
+  --color-background-highlight: lch(from var(--color-primary) l c h / 0.5);
+}
+
+body {
+  font-family: var(--font-inter), sans-serif;
+}
+
+*:focus {
+  outline: none;
+}
+
+details > summary {
+  cursor: pointer;
+}
+
+details > summary.list-none::-webkit-details-marker,
+details > summary.list-none::marker {
+  display: none;
+}
+
+@layer utilities {
+  pre.shiki {
+    height: 100%;
+    padding: 0.65em 0;
+    background-color: transparent !important;
   }
 
-  :focus-visible {
-    @apply ring-2 ring-primary;
+  .twoslash-popup-container {
+    white-space: break-spaces;
   }
 
-  details > summary {
-    @apply cursor-pointer;
+  .twoslash-popup-code pre.shiki {
+    padding: 0.2em;
+    font-size: 0.8em;
+  }
 
-    &.list-none::-webkit-details-marker,
-    &.list-none::marker {
-      display: none;
-    }
+  .twoslash-hover {
+    position: initial !important;
+  }
+
+  pre.shiki .line {
+    display: inline-block;
+    width: 100%;
+    padding-left: 1em;
+    line-height: 1.5;
+    cursor: text;
+  }
+
+  .twoslash-popup-code pre.shiki .line {
+    display: inline;
+    padding-left: 0;
+    white-space: break-spaces;
+  }
+
+  html.dark .shiki {
+    color: var(--shiki-dark) !important;
+    background-color: transparent !important;
+    /* Optional, if you also want font styles */
+    font-style: var(--shiki-dark-font-style) !important;
+    font-weight: var(--shiki-dark-font-weight) !important;
+    text-decoration: var(--shiki-dark-text-decoration) !important;
+  }
+
+  html.dark .shiki span {
+    color: var(--shiki-dark) !important;
+    /* Optional, if you also want font styles */
+    font-style: var(--shiki-dark-font-style) !important;
+    font-weight: var(--shiki-dark-font-weight) !important;
+    text-decoration: var(--shiki-dark-text-decoration) !important;
+  }
+
+  .shiki .line.diff.remove {
+    background-color: rgba(255, 0, 0, 0.1) !important;
+  }
+
+  .shiki .line.diff.add {
+    background-color: rgba(0, 255, 0, 0.1) !important;
+  }
+
+  html.dark {
+    --twoslash-popup-bg: #1b1a1a;
+    --twoslash-border-color: #2f2e2e;
   }
 }
-
-pre.shiki {
-  height: 100%;
-  padding: 0.65em 0;
-  background-color: transparent !important;
-}
-
-.twoslash-popup-container {
-  white-space: break-spaces;
-}
-
-.twoslash-popup-code pre.shiki {
-  padding: 0.2em;
-  font-size: 0.8em;
-}
-
-.twoslash-hover {
-  position: initial !important;
-}
-
-pre.shiki .line {
-  display: inline-block;
-  width: 100%;
-  padding-left: 1em;
-  line-height: 1.5;
-  cursor: text;
-}
-
-.twoslash-popup-code pre.shiki .line {
-  display: inline;
-  padding-left: 0;
-  white-space: break-spaces;
-}
-
-html.dark .shiki {
-  color: var(--shiki-dark) !important;
-  background-color: transparent !important;
-  /* Optional, if you also want font styles */
-  font-style: var(--shiki-dark-font-style) !important;
-  font-weight: var(--shiki-dark-font-weight) !important;
-  text-decoration: var(--shiki-dark-text-decoration) !important;
-}
-
-html.dark .shiki span {
-  color: var(--shiki-dark) !important;
-  /* Optional, if you also want font styles */
-  font-style: var(--shiki-dark-font-style) !important;
-  font-weight: var(--shiki-dark-font-weight) !important;
-  text-decoration: var(--shiki-dark-text-decoration) !important;
-}
-
-.shiki .line.diff.remove {
-  background-color: rgba(255, 0, 0, 0.1) !important;
-}
-
-.shiki .line.diff.add {
-  background-color: rgba(0, 255, 0, 0.1) !important;
-}
-
-html.dark {
-  --twoslash-popup-bg: #1b1a1a;
-  --twoslash-border-color: #2f2e2e;
-}
-
-@import "@shikijs/twoslash/style-rich.css";
 
 /* fix for https://github.com/garden-co/jazz/issues/2257*/
 .twoslash .twoslash-popup-container {

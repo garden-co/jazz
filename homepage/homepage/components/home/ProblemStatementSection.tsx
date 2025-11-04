@@ -13,7 +13,7 @@ export default function ProblemStatementSection() {
         slogan="A perspective shift worth 10,000 hours"
       />
 
-      <div className="grid overflow-hidden rounded-lg border shadow-sm sm:grid-cols-2 md:rounded-xl">
+      <div className="grid overflow-hidden rounded-lg border shadow-xs sm:grid-cols-2 md:rounded-xl">
         <div className="relative flex flex-col border-b bg-stone-50 p-4 pb-8 dark:bg-transparent sm:border-b-0 sm:border-r md:p-8">
           <span className="absolute -right-4 top-0 hidden h-full items-center sm:flex md:-right-6">
             <span className="rounded-full bg-stone-200 p-1 dark:bg-stone-900 dark:text-white md:p-3">
@@ -31,10 +31,10 @@ export default function ProblemStatementSection() {
             </p>
           </Prose>
           <div className="relative flex flex-1 items-center">
-            <div className="pointer-events-none absolute left-0 top-0 z-10 h-full w-20 bg-gradient-to-r from-stone-50 from-25% to-transparent dark:from-stone-950"></div>
-            <div className="pointer-events-none absolute left-0 top-0 z-10 h-20 w-full bg-gradient-to-b from-stone-50 from-25% to-transparent dark:from-stone-950"></div>
-            <div className="pointer-events-none absolute bottom-0 left-0 z-10 h-20 w-full bg-gradient-to-t from-stone-50 from-25% to-transparent dark:from-stone-950"></div>
-            <div className="pointer-events-none absolute right-0 top-0 z-10 h-full w-20 bg-gradient-to-l from-stone-50 from-25% to-transparent dark:from-stone-950"></div>
+            <div className="pointer-events-none absolute left-0 top-0 z-10 h-full w-20 bg-linear-to-r from-stone-50 from-25% to-transparent dark:from-stone-950"></div>
+            <div className="pointer-events-none absolute left-0 top-0 z-10 h-20 w-full bg-linear-to-b from-stone-50 from-25% to-transparent dark:from-stone-950"></div>
+            <div className="pointer-events-none absolute bottom-0 left-0 z-10 h-20 w-full bg-linear-to-t from-stone-50 from-25% to-transparent dark:from-stone-950"></div>
+            <div className="pointer-events-none absolute right-0 top-0 z-10 h-full w-20 bg-linear-to-l from-stone-50 from-25% to-transparent dark:from-stone-950"></div>
 
             <DiagramBeforeJazz className="max-w-full" />
           </div>

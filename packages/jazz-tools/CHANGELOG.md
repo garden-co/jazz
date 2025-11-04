@@ -1,5 +1,18 @@
 # jazz-tools
 
+## 0.18.37
+
+### Patch Changes
+
+- feecdae: chore: Inspector now prints correctly json fields in covalue history
+- a841071: chore: Inspector's raw data and covalue history are now collapsible
+- 68e0b26: chore: ErrorBoundary around inspector to handle render errors
+- Updated dependencies [0e923d1]
+- Updated dependencies [fd89225]
+  - cojson@0.18.37
+  - cojson-storage-indexeddb@0.18.37
+  - cojson-transport-ws@0.18.37
+
 ## 0.18.36
 
 ### Patch Changes

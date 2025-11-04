@@ -1,5 +1,9 @@
 import { assert, beforeEach, describe, expect, test } from "vitest";
-import { loadCoValueOrFail, setupTestNode } from "./testUtils.js";
+import {
+  fillCoMapWithLargeData,
+  loadCoValueOrFail,
+  setupTestNode,
+} from "./testUtils.js";
 import { CO_VALUE_PRIORITY } from "../priority.js";
 import { emptyKnownState, SessionID } from "../exports.js";
 import { NewContentMessage } from "../sync.js";
@@ -175,15 +179,7 @@ describe("newContentSince", () => {
       const group = client.node.createGroup();
       const map = group.createMap();
 
-      const dataSize = 1 * 1024 * 100;
-      const chunkSize = 1024; // 1KB chunks
-      const chunks = dataSize / chunkSize;
-      const value = Buffer.alloc(chunkSize, `value$`).toString("base64");
-
-      for (let i = 0; i < chunks; i++) {
-        const key = `key${i}`;
-        map.set(key, value, "trusting");
-      }
+      fillCoMapWithLargeData(map);
 
       const content = map.core.newContentSince(undefined);
 
@@ -198,7 +194,7 @@ describe("newContentSince", () => {
           {
             "action": "content",
             "expectContentUntil": {
-              "alice": 100,
+              "alice": 200,
             },
             "header": "header",
             "id": "id",
@@ -218,7 +214,20 @@ describe("newContentSince", () => {
             "new": {
               "alice": {
                 "lastSignature": "signature",
-                "newTransactions": "27 transactions after 73",
+                "newTransactions": "73 transactions after 73",
+              },
+            },
+            "priority": 3,
+          },
+          {
+            "action": "content",
+            "expectContentUntil": undefined,
+            "header": undefined,
+            "id": "id",
+            "new": {
+              "alice": {
+                "lastSignature": "signature",
+                "newTransactions": "54 transactions after 146",
               },
             },
             "priority": 3,
@@ -236,15 +245,7 @@ describe("newContentSince", () => {
       const map = group.createMap();
 
       // Generate a large amount of data (about 1MB)
-      const dataSize = 1 * 1024 * 100;
-      const chunkSize = 1024; // 1KB chunks
-      const chunks = dataSize / chunkSize;
-      const value = Buffer.alloc(chunkSize, `value$`).toString("base64");
-
-      for (let i = 0; i < chunks; i++) {
-        const key = `key${i}`;
-        map.set(key, value, "trusting");
-      }
+      fillCoMapWithLargeData(map);
 
       // Add a small session
       const newSession = client.spawnNewSession();
@@ -265,7 +266,7 @@ describe("newContentSince", () => {
           {
             "action": "content",
             "expectContentUntil": {
-              "alice": 100,
+              "alice": 200,
               "bob": 1,
             },
             "header": "header",
@@ -286,7 +287,20 @@ describe("newContentSince", () => {
             "new": {
               "alice": {
                 "lastSignature": "signature",
-                "newTransactions": "27 transactions after 73",
+                "newTransactions": "73 transactions after 73",
+              },
+            },
+            "priority": 3,
+          },
+          {
+            "action": "content",
+            "expectContentUntil": undefined,
+            "header": undefined,
+            "id": "id",
+            "new": {
+              "alice": {
+                "lastSignature": "signature",
+                "newTransactions": "54 transactions after 146",
               },
               "bob": {
                 "lastSignature": "signature",
@@ -308,24 +322,13 @@ describe("newContentSince", () => {
       const map = group.createMap();
 
       // Generate a large amount of data in first session (about 1MB)
-      const dataSize = 1 * 1024 * 100;
-      const chunkSize = 1024; // 1KB chunks
-      const chunks = dataSize / chunkSize;
-      const value = Buffer.alloc(chunkSize, `value$`).toString("base64");
-
-      for (let i = 0; i < chunks; i++) {
-        const key = `key1_${i}`;
-        map.set(key, value, "trusting");
-      }
+      fillCoMapWithLargeData(map);
 
       // Add second large session
       const newSession = client.spawnNewSession();
       const mapInNewSession = await loadCoValueOrFail(newSession.node, map.id);
 
-      for (let i = 0; i < chunks; i++) {
-        const key = `key2_${i}`;
-        mapInNewSession.set(key, value, "trusting");
-      }
+      fillCoMapWithLargeData(mapInNewSession);
 
       const content = mapInNewSession.core.newContentSince(undefined);
 
@@ -341,8 +344,8 @@ describe("newContentSince", () => {
           {
             "action": "content",
             "expectContentUntil": {
-              "alice": 100,
-              "bob": 100,
+              "alice": 200,
+              "bob": 200,
             },
             "header": "header",
             "id": "id",
@@ -360,6 +363,19 @@ describe("newContentSince", () => {
             "header": undefined,
             "id": "id",
             "new": {
+              "alice": {
+                "lastSignature": "signature",
+                "newTransactions": "73 transactions after 73",
+              },
+            },
+            "priority": 3,
+          },
+          {
+            "action": "content",
+            "expectContentUntil": undefined,
+            "header": undefined,
+            "id": "id",
+            "new": {
               "bob": {
                 "lastSignature": "signature",
                 "newTransactions": "73 transactions after 0",
@@ -373,13 +389,26 @@ describe("newContentSince", () => {
             "header": undefined,
             "id": "id",
             "new": {
+              "bob": {
+                "lastSignature": "signature",
+                "newTransactions": "73 transactions after 73",
+              },
+            },
+            "priority": 3,
+          },
+          {
+            "action": "content",
+            "expectContentUntil": undefined,
+            "header": undefined,
+            "id": "id",
+            "new": {
               "alice": {
                 "lastSignature": "signature",
-                "newTransactions": "27 transactions after 73",
+                "newTransactions": "54 transactions after 146",
               },
               "bob": {
                 "lastSignature": "signature",
-                "newTransactions": "27 transactions after 73",
+                "newTransactions": "54 transactions after 146",
               },
             },
             "priority": 3,
@@ -396,16 +425,7 @@ describe("newContentSince", () => {
       const group = client.node.createGroup();
       const map = group.createMap();
 
-      // Generate first large session (about 1MB)
-      const dataSize = 1 * 1024 * 100;
-      const chunkSize = 1024; // 1KB chunks
-      const chunks = dataSize / chunkSize;
-      const value = Buffer.alloc(chunkSize, `value$`).toString("base64");
-
-      for (let i = 0; i < chunks; i++) {
-        const key = `key1_${i}`;
-        map.set(key, value, "trusting");
-      }
+      fillCoMapWithLargeData(map);
 
       // Add small session
       const session2 = client.spawnNewSession();
@@ -416,10 +436,7 @@ describe("newContentSince", () => {
       const session3 = client.spawnNewSession();
       const mapInSession3 = await loadCoValueOrFail(session3.node, map.id);
 
-      for (let i = 0; i < chunks; i++) {
-        const key = `key3_${i}`;
-        mapInSession3.set(key, value, "trusting");
-      }
+      fillCoMapWithLargeData(mapInSession3);
 
       const content = mapInSession3.core.newContentSince(undefined);
 
@@ -436,9 +453,9 @@ describe("newContentSince", () => {
           {
             "action": "content",
             "expectContentUntil": {
-              "alice": 100,
+              "alice": 200,
               "bob": 1,
-              "charlie": 100,
+              "charlie": 200,
             },
             "header": "header",
             "id": "id",
@@ -456,6 +473,19 @@ describe("newContentSince", () => {
             "header": undefined,
             "id": "id",
             "new": {
+              "alice": {
+                "lastSignature": "signature",
+                "newTransactions": "73 transactions after 73",
+              },
+            },
+            "priority": 3,
+          },
+          {
+            "action": "content",
+            "expectContentUntil": undefined,
+            "header": undefined,
+            "id": "id",
+            "new": {
               "charlie": {
                 "lastSignature": "signature",
                 "newTransactions": "73 transactions after 0",
@@ -469,9 +499,22 @@ describe("newContentSince", () => {
             "header": undefined,
             "id": "id",
             "new": {
+              "charlie": {
+                "lastSignature": "signature",
+                "newTransactions": "73 transactions after 73",
+              },
+            },
+            "priority": 3,
+          },
+          {
+            "action": "content",
+            "expectContentUntil": undefined,
+            "header": undefined,
+            "id": "id",
+            "new": {
               "alice": {
                 "lastSignature": "signature",
-                "newTransactions": "27 transactions after 73",
+                "newTransactions": "54 transactions after 146",
               },
               "bob": {
                 "lastSignature": "signature",
@@ -479,7 +522,7 @@ describe("newContentSince", () => {
               },
               "charlie": {
                 "lastSignature": "signature",
-                "newTransactions": "27 transactions after 73",
+                "newTransactions": "54 transactions after 146",
               },
             },
             "priority": 3,
@@ -499,15 +542,7 @@ describe("newContentSince", () => {
       client.disconnect();
 
       // Generate first large session (about 1MB)
-      const dataSize = 1 * 1024 * 100;
-      const chunkSize = 1024; // 1KB chunks
-      const chunks = dataSize / chunkSize;
-      const value = Buffer.alloc(chunkSize, `value$`).toString("base64");
-
-      for (let i = 0; i < chunks; i++) {
-        const key = `key1_${i}`;
-        map.set(key, value, "trusting");
-      }
+      fillCoMapWithLargeData(map);
 
       const largeContent = map.core.newContentSince(undefined);
       assert(largeContent);
@@ -543,10 +578,7 @@ describe("newContentSince", () => {
       const session3 = client.spawnNewSession();
       const mapInSession3 = await loadCoValueOrFail(session3.node, map.id);
 
-      for (let i = 0; i < chunks; i++) {
-        const key = `key3_${i}`;
-        mapInSession3.set(key, value, "trusting");
-      }
+      fillCoMapWithLargeData(mapInSession3);
 
       const content = mapInSession3.core.newContentSince(undefined);
 
@@ -563,16 +595,16 @@ describe("newContentSince", () => {
           {
             "action": "content",
             "expectContentUntil": {
-              "alice": 100,
+              "alice": 200,
               "bob": 1,
-              "charlie": 100,
+              "charlie": 200,
             },
             "header": "header",
             "id": "id",
             "new": {
               "alice": {
                 "lastSignature": "signature",
-                "newTransactions": "100 transactions after 0",
+                "newTransactions": "200 transactions after 0",
               },
             },
             "priority": 3,
@@ -596,13 +628,26 @@ describe("newContentSince", () => {
             "header": undefined,
             "id": "id",
             "new": {
+              "charlie": {
+                "lastSignature": "signature",
+                "newTransactions": "73 transactions after 73",
+              },
+            },
+            "priority": 3,
+          },
+          {
+            "action": "content",
+            "expectContentUntil": undefined,
+            "header": undefined,
+            "id": "id",
+            "new": {
               "bob": {
                 "lastSignature": "signature",
                 "newTransactions": "1 transactions after 0",
               },
               "charlie": {
                 "lastSignature": "signature",
-                "newTransactions": "27 transactions after 73",
+                "newTransactions": "54 transactions after 146",
               },
             },
             "priority": 3,
@@ -620,24 +665,13 @@ describe("newContentSince", () => {
       const map = group.createMap();
 
       // Generate a large amount of data (about 1MB)
-      const dataSize = 1 * 1024 * 100;
-      const chunkSize = 1024; // 1KB chunks
-      const chunks = dataSize / chunkSize;
-      const value = Buffer.alloc(chunkSize, `value$`).toString("base64");
-
-      for (let i = 0; i < chunks; i++) {
-        const key = `key${i}`;
-        map.set(key, value, "trusting");
-      }
+      fillCoMapWithLargeData(map);
 
       // Capture knownState partway through
       const knownState = map.core.knownState();
 
       // Add more data
-      for (let i = 0; i < chunks; i++) {
-        const key = `key_new_${i}`;
-        map.set(key, value, "trusting");
-      }
+      fillCoMapWithLargeData(map);
 
       const content = map.core.newContentSince(knownState);
 
@@ -652,14 +686,14 @@ describe("newContentSince", () => {
           {
             "action": "content",
             "expectContentUntil": {
-              "alice": 200,
+              "alice": 400,
             },
             "header": undefined,
             "id": "id",
             "new": {
               "alice": {
                 "lastSignature": "signature",
-                "newTransactions": "46 transactions after 100",
+                "newTransactions": "19 transactions after 200",
               },
             },
             "priority": 3,
@@ -672,7 +706,33 @@ describe("newContentSince", () => {
             "new": {
               "alice": {
                 "lastSignature": "signature",
-                "newTransactions": "54 transactions after 146",
+                "newTransactions": "73 transactions after 219",
+              },
+            },
+            "priority": 3,
+          },
+          {
+            "action": "content",
+            "expectContentUntil": undefined,
+            "header": undefined,
+            "id": "id",
+            "new": {
+              "alice": {
+                "lastSignature": "signature",
+                "newTransactions": "73 transactions after 292",
+              },
+            },
+            "priority": 3,
+          },
+          {
+            "action": "content",
+            "expectContentUntil": undefined,
+            "header": undefined,
+            "id": "id",
+            "new": {
+              "alice": {
+                "lastSignature": "signature",
+                "newTransactions": "35 transactions after 365",
               },
             },
             "priority": 3,
@@ -690,24 +750,13 @@ describe("newContentSince", () => {
       const map = group.createMap();
 
       // Generate a large amount of data (about 1MB)
-      const dataSize = 1 * 1024 * 100;
-      const chunkSize = 1024; // 1KB chunks
-      const chunks = dataSize / chunkSize;
-      const value = Buffer.alloc(chunkSize, `value$`).toString("base64");
-
-      for (let i = 0; i < chunks; i++) {
-        const key = `key${i}`;
-        map.set(key, value, "trusting");
-      }
+      fillCoMapWithLargeData(map);
 
       // Capture knownState
       const knownState = map.core.knownState();
 
       // Add more data to first session
-      for (let i = 0; i < chunks; i++) {
-        const key = `key_new_${i}`;
-        map.set(key, value, "trusting");
-      }
+      fillCoMapWithLargeData(map);
 
       // Add a small session
       const newSession = client.spawnNewSession();
@@ -728,7 +777,7 @@ describe("newContentSince", () => {
           {
             "action": "content",
             "expectContentUntil": {
-              "alice": 200,
+              "alice": 400,
               "bob": 1,
             },
             "header": undefined,
@@ -736,7 +785,7 @@ describe("newContentSince", () => {
             "new": {
               "alice": {
                 "lastSignature": "signature",
-                "newTransactions": "46 transactions after 100",
+                "newTransactions": "19 transactions after 200",
               },
             },
             "priority": 3,
@@ -749,7 +798,33 @@ describe("newContentSince", () => {
             "new": {
               "alice": {
                 "lastSignature": "signature",
-                "newTransactions": "54 transactions after 146",
+                "newTransactions": "73 transactions after 219",
+              },
+            },
+            "priority": 3,
+          },
+          {
+            "action": "content",
+            "expectContentUntil": undefined,
+            "header": undefined,
+            "id": "id",
+            "new": {
+              "alice": {
+                "lastSignature": "signature",
+                "newTransactions": "73 transactions after 292",
+              },
+            },
+            "priority": 3,
+          },
+          {
+            "action": "content",
+            "expectContentUntil": undefined,
+            "header": undefined,
+            "id": "id",
+            "new": {
+              "alice": {
+                "lastSignature": "signature",
+                "newTransactions": "35 transactions after 365",
               },
               "bob": {
                 "lastSignature": "signature",
@@ -777,24 +852,13 @@ describe("newContentSince", () => {
       const knownState = map.core.knownState();
 
       // Generate a large amount of data in first session (about 1MB)
-      const dataSize = 1 * 1024 * 100;
-      const chunkSize = 1024; // 1KB chunks
-      const chunks = dataSize / chunkSize;
-      const value = Buffer.alloc(chunkSize, `value$`).toString("base64");
-
-      for (let i = 0; i < chunks; i++) {
-        const key = `key1_${i}`;
-        map.set(key, value, "trusting");
-      }
+      fillCoMapWithLargeData(map);
 
       // Add second large session
       const newSession = client.spawnNewSession();
       const mapInNewSession = await loadCoValueOrFail(newSession.node, map.id);
 
-      for (let i = 0; i < chunks; i++) {
-        const key = `key2_${i}`;
-        mapInNewSession.set(key, value, "trusting");
-      }
+      fillCoMapWithLargeData(mapInNewSession);
 
       const content = mapInNewSession.core.newContentSince(knownState);
 
@@ -810,8 +874,8 @@ describe("newContentSince", () => {
           {
             "action": "content",
             "expectContentUntil": {
-              "alice": 101,
-              "bob": 100,
+              "alice": 201,
+              "bob": 200,
             },
             "header": undefined,
             "id": "id",
@@ -819,6 +883,19 @@ describe("newContentSince", () => {
               "alice": {
                 "lastSignature": "signature",
                 "newTransactions": "73 transactions after 1",
+              },
+            },
+            "priority": 3,
+          },
+          {
+            "action": "content",
+            "expectContentUntil": undefined,
+            "header": undefined,
+            "id": "id",
+            "new": {
+              "alice": {
+                "lastSignature": "signature",
+                "newTransactions": "73 transactions after 74",
               },
             },
             "priority": 3,
@@ -842,13 +919,26 @@ describe("newContentSince", () => {
             "header": undefined,
             "id": "id",
             "new": {
+              "bob": {
+                "lastSignature": "signature",
+                "newTransactions": "73 transactions after 73",
+              },
+            },
+            "priority": 3,
+          },
+          {
+            "action": "content",
+            "expectContentUntil": undefined,
+            "header": undefined,
+            "id": "id",
+            "new": {
               "alice": {
                 "lastSignature": "signature",
-                "newTransactions": "27 transactions after 74",
+                "newTransactions": "54 transactions after 147",
               },
               "bob": {
                 "lastSignature": "signature",
-                "newTransactions": "27 transactions after 73",
+                "newTransactions": "54 transactions after 146",
               },
             },
             "priority": 3,
@@ -872,15 +962,7 @@ describe("newContentSince", () => {
       const knownState = map.core.knownState();
 
       // Generate first large session (about 1MB)
-      const dataSize = 1 * 1024 * 100;
-      const chunkSize = 1024; // 1KB chunks
-      const chunks = dataSize / chunkSize;
-      const value = Buffer.alloc(chunkSize, `value$`).toString("base64");
-
-      for (let i = 0; i < chunks; i++) {
-        const key = `key1_${i}`;
-        map.set(key, value, "trusting");
-      }
+      fillCoMapWithLargeData(map);
 
       // Add small session
       const session2 = client.spawnNewSession();
@@ -891,10 +973,7 @@ describe("newContentSince", () => {
       const session3 = client.spawnNewSession();
       const mapInSession3 = await loadCoValueOrFail(session3.node, map.id);
 
-      for (let i = 0; i < chunks; i++) {
-        const key = `key3_${i}`;
-        mapInSession3.set(key, value, "trusting");
-      }
+      fillCoMapWithLargeData(mapInSession3);
 
       const content = mapInSession3.core.newContentSince(knownState);
 
@@ -911,9 +990,9 @@ describe("newContentSince", () => {
           {
             "action": "content",
             "expectContentUntil": {
-              "alice": 101,
+              "alice": 201,
               "bob": 1,
-              "charlie": 100,
+              "charlie": 200,
             },
             "header": undefined,
             "id": "id",
@@ -921,6 +1000,19 @@ describe("newContentSince", () => {
               "alice": {
                 "lastSignature": "signature",
                 "newTransactions": "73 transactions after 1",
+              },
+            },
+            "priority": 3,
+          },
+          {
+            "action": "content",
+            "expectContentUntil": undefined,
+            "header": undefined,
+            "id": "id",
+            "new": {
+              "alice": {
+                "lastSignature": "signature",
+                "newTransactions": "73 transactions after 74",
               },
             },
             "priority": 3,
@@ -944,9 +1036,22 @@ describe("newContentSince", () => {
             "header": undefined,
             "id": "id",
             "new": {
+              "charlie": {
+                "lastSignature": "signature",
+                "newTransactions": "73 transactions after 73",
+              },
+            },
+            "priority": 3,
+          },
+          {
+            "action": "content",
+            "expectContentUntil": undefined,
+            "header": undefined,
+            "id": "id",
+            "new": {
               "alice": {
                 "lastSignature": "signature",
-                "newTransactions": "27 transactions after 74",
+                "newTransactions": "54 transactions after 147",
               },
               "bob": {
                 "lastSignature": "signature",
@@ -954,7 +1059,7 @@ describe("newContentSince", () => {
               },
               "charlie": {
                 "lastSignature": "signature",
-                "newTransactions": "27 transactions after 73",
+                "newTransactions": "54 transactions after 146",
               },
             },
             "priority": 3,

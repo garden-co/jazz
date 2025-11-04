@@ -1,22 +1,19 @@
 import { assert, beforeEach, describe, expect, test, vi } from "vitest";
 
-import { setMaxRecommendedTxSize } from "../config";
 import { emptyKnownState } from "../exports";
 import {
   SyncMessagesLog,
   TEST_NODE_CONFIG,
+  fillCoMapWithLargeData,
   loadCoValueOrFail,
   setupTestNode,
   waitFor,
 } from "./testUtils";
 import { getDbPath } from "./testStorage";
+import { expectMap } from "../coValue";
 
 // We want to simulate a real world communication that happens asynchronously
 TEST_NODE_CONFIG.withAsyncPeers = true;
-
-beforeEach(async () => {
-  setMaxRecommendedTxSize(100 * 1024);
-});
 
 describe("client with storage syncs with server", () => {
   let jazzCloud: ReturnType<typeof setupTestNode>;
@@ -267,7 +264,6 @@ describe("client syncs with a server with storage", () => {
   });
 
   test("large coValue streaming", async () => {
-    setMaxRecommendedTxSize(1000);
     const client = setupTestNode();
 
     client.connectToSyncServer({
@@ -283,15 +279,7 @@ describe("client syncs with a server with storage", () => {
 
     const largeMap = group.createMap();
 
-    // Generate a large amount of data (about 100MB)
-    const chunks = 100;
-
-    const value = "1".repeat(10);
-
-    for (let i = 0; i < chunks; i++) {
-      const key = `key${i}`;
-      largeMap.set(key, value, "trusting");
-    }
+    fillCoMapWithLargeData(largeMap);
 
     await largeMap.core.waitForSync();
 
@@ -304,28 +292,20 @@ describe("client syncs with a server with storage", () => {
       [
         "client -> storage | CONTENT Group header: true new: After: 0 New: 5",
         "client -> server | CONTENT Group header: true new: After: 0 New: 5",
-        "client -> storage | CONTENT Map header: true new: After: 0 New: 21 expectContentUntil: header/100",
-        "client -> server | CONTENT Map header: true new: After: 0 New: 21 expectContentUntil: header/100",
-        "client -> storage | CONTENT Map header: false new: After: 21 New: 21",
-        "client -> server | CONTENT Map header: false new: After: 21 New: 21",
-        "client -> storage | CONTENT Map header: false new: After: 42 New: 21",
-        "client -> server | CONTENT Map header: false new: After: 42 New: 21",
-        "client -> storage | CONTENT Map header: false new: After: 63 New: 21",
-        "client -> server | CONTENT Map header: false new: After: 63 New: 21",
-        "client -> storage | CONTENT Map header: false new: After: 84 New: 16",
-        "client -> server | CONTENT Map header: false new: After: 84 New: 16",
+        "client -> storage | CONTENT Map header: true new: After: 0 New: 73 expectContentUntil: header/200",
+        "client -> server | CONTENT Map header: true new: After: 0 New: 73 expectContentUntil: header/200",
+        "client -> storage | CONTENT Map header: false new: After: 73 New: 73",
+        "client -> server | CONTENT Map header: false new: After: 73 New: 73",
+        "client -> storage | CONTENT Map header: false new: After: 146 New: 54",
+        "client -> server | CONTENT Map header: false new: After: 146 New: 54",
         "server -> client | KNOWN Group sessions: header/5",
         "server -> storage | CONTENT Group header: true new: After: 0 New: 5",
-        "server -> client | KNOWN Map sessions: header/21",
-        "server -> storage | CONTENT Map header: true new: After: 0 New: 21",
-        "server -> client | KNOWN Map sessions: header/42",
-        "server -> storage | CONTENT Map header: false new: After: 21 New: 21",
-        "server -> client | KNOWN Map sessions: header/63",
-        "server -> storage | CONTENT Map header: false new: After: 42 New: 21",
-        "server -> client | KNOWN Map sessions: header/84",
-        "server -> storage | CONTENT Map header: false new: After: 63 New: 21",
-        "server -> client | KNOWN Map sessions: header/100",
-        "server -> storage | CONTENT Map header: false new: After: 84 New: 16",
+        "server -> client | KNOWN Map sessions: header/73",
+        "server -> storage | CONTENT Map header: true new: After: 0 New: 73",
+        "server -> client | KNOWN Map sessions: header/146",
+        "server -> storage | CONTENT Map header: false new: After: 73 New: 73",
+        "server -> client | KNOWN Map sessions: header/200",
+        "server -> storage | CONTENT Map header: false new: After: 146 New: 54",
       ]
     `);
 
@@ -357,16 +337,148 @@ describe("client syncs with a server with storage", () => {
         "client -> storage | LOAD Map sessions: empty",
         "storage -> client | CONTENT Group header: true new: After: 0 New: 5",
         "client -> server | LOAD Group sessions: header/5",
-        "storage -> client | CONTENT Map header: true new: After: 0 New: 21 expectContentUntil: header/100",
-        "client -> server | LOAD Map sessions: header/100",
-        "storage -> client | CONTENT Map header: true new: After: 21 New: 21",
-        "storage -> client | CONTENT Map header: true new: After: 42 New: 21",
-        "storage -> client | CONTENT Map header: true new: After: 63 New: 21",
-        "storage -> client | CONTENT Map header: true new: After: 84 New: 16",
+        "storage -> client | CONTENT Map header: true new: After: 0 New: 73 expectContentUntil: header/200",
+        "client -> server | LOAD Map sessions: header/200",
+        "storage -> client | CONTENT Map header: true new: After: 73 New: 73",
+        "storage -> client | CONTENT Map header: true new: After: 146 New: 54",
         "server -> client | KNOWN Group sessions: header/5",
-        "server -> client | KNOWN Map sessions: header/100",
+        "server -> client | KNOWN Map sessions: header/200",
       ]
     `);
+  });
+
+  test("streaming a large coValue with multiple sessions", async () => {
+    const client = setupTestNode();
+
+    client.connectToSyncServer({
+      syncServer: jazzCloud.node,
+    });
+
+    const { storage } = await client.addAsyncStorage({
+      ourName: "client",
+    });
+
+    const group = client.node.createGroup();
+    group.addMember("everyone", "writer");
+
+    const largeMap = group.createMap();
+
+    fillCoMapWithLargeData(largeMap);
+
+    await largeMap.core.waitForSync();
+
+    // Fill the map with the data from 5 different sessions
+    for (let i = 0; i < 5; i++) {
+      const newSession = client.spawnNewSession();
+      newSession.connectToSyncServer({
+        syncServer: jazzCloud.node,
+        ourName: "session " + i,
+      });
+      const mapInNewSession = await loadCoValueOrFail(
+        newSession.node,
+        largeMap.id,
+      );
+
+      // Alternate between small and large sessions
+      if (i % 2 === 0) {
+        mapInNewSession.set("hello", "world2", "trusting");
+      } else {
+        fillCoMapWithLargeData(mapInNewSession);
+      }
+
+      await mapInNewSession.core.waitForSync();
+    }
+
+    let largeMapOnServer = expectMap(
+      jazzCloud.node.getCoValue(largeMap.id).getCurrentContent(),
+    );
+    await waitFor(async () => {
+      expect(largeMapOnServer.core.knownState()).toEqual(
+        largeMap.core.knownState(),
+      );
+    });
+
+    SyncMessagesLog.clear();
+
+    // We want to simulate the situation where the content was only partially synced
+    // so we extract some chunks from the current coMap and import them into a new sync server
+    const groupContent = group.core.newContentSince(undefined) ?? [];
+    const largeMapContent =
+      largeMap.core.newContentSince(undefined)?.slice(0, 4) ?? [];
+
+    client.restart();
+
+    const newSyncServer = setupTestNode({
+      isSyncServer: true,
+    });
+
+    for (const content of [...groupContent, ...largeMapContent]) {
+      content.expectContentUntil = undefined; // Since the chunks are a partial, turn off the streaming infomation that would be invalid
+      newSyncServer.node.syncManager.handleNewContent(content, "import");
+    }
+
+    const largeMapOnNewSyncServer = newSyncServer.node.getCoValue(largeMap.id);
+
+    // We want to enforce that the new sync server has less content than the original sync server
+    expect(largeMapOnNewSyncServer.knownState()).not.toEqual(
+      largeMap.core.knownState(),
+    );
+
+    client.connectToSyncServer({
+      ourName: "client",
+      syncServer: newSyncServer.node,
+    });
+
+    client.addStorage({
+      ourName: "client",
+      storage,
+    });
+
+    const mapLoadedFromStorage = await loadCoValueOrFail(
+      client.node,
+      largeMap.id,
+    );
+
+    await mapLoadedFromStorage.core.waitForSync();
+
+    expect(
+      SyncMessagesLog.getMessages({
+        Group: group.core,
+        Map: largeMap.core,
+      }),
+    ).toMatchInlineSnapshot(`
+      [
+        "client -> storage | LOAD Map sessions: empty",
+        "storage -> client | CONTENT Group header: true new: After: 0 New: 5",
+        "client -> server | LOAD Group sessions: header/5",
+        "storage -> client | CONTENT Map header: true new: After: 0 New: 73 expectContentUntil: header/603",
+        "client -> server | LOAD Map sessions: header/603",
+        "storage -> client | CONTENT Map header: true new: After: 73 New: 73",
+        "storage -> client | CONTENT Map header: true new: After: 146 New: 54",
+        "storage -> client | CONTENT Map header: true new: After: 0 New: 1 | After: 0 New: 73",
+        "storage -> client | CONTENT Map header: true new: After: 73 New: 73",
+        "storage -> client | CONTENT Map header: true new: After: 146 New: 54",
+        "storage -> client | CONTENT Map header: true new: After: 0 New: 1 | After: 0 New: 73",
+        "storage -> client | CONTENT Map header: true new: After: 73 New: 73",
+        "storage -> client | CONTENT Map header: true new: After: 146 New: 54",
+        "storage -> client | CONTENT Map header: true new: After: 0 New: 1",
+        "server -> client | KNOWN Group sessions: header/5",
+        "server -> client | KNOWN Map sessions: header/292",
+        "client -> server | CONTENT Map header: false new: After: 146 New: 54 | After: 0 New: 1 | After: 146 New: 54 expectContentUntil: header/603",
+        "client -> server | CONTENT Map header: false new: After: 0 New: 73",
+        "client -> server | CONTENT Map header: false new: After: 73 New: 73",
+        "client -> server | CONTENT Map header: false new: After: 0 New: 1 | After: 146 New: 54 | After: 0 New: 1",
+        "server -> client | KNOWN Map sessions: header/401",
+        "server -> client | KNOWN Map sessions: header/474",
+        "server -> client | KNOWN Map sessions: header/547",
+        "server -> client | KNOWN Map sessions: header/603",
+      ]
+    `);
+
+    // The sync should be completed successfully and the map on the new sync server should have the same known state as the original map
+    expect(largeMapOnNewSyncServer.knownState()).toEqual(
+      largeMap.core.knownState(),
+    );
   });
 
   test("storing stale data should not compromise the signatures", async () => {
@@ -385,17 +497,7 @@ describe("client syncs with a server with storage", () => {
 
     const largeMap = group.createMap();
 
-    // Generate a large amount of data (about 100MB)
-    const dataSize = 1 * 200 * 1024;
-    const chunkSize = 1024; // 1KB chunks
-    const chunks = dataSize / chunkSize;
-
-    const value = Buffer.alloc(chunkSize, `value$`).toString("base64");
-
-    for (let i = 0; i < chunks; i++) {
-      const key = `key${i}`;
-      largeMap.set(key, value, "trusting");
-    }
+    fillCoMapWithLargeData(largeMap);
 
     await largeMap.core.waitForSync();
 
@@ -438,8 +540,6 @@ describe("client syncs with a server with storage", () => {
   });
 
   test("large coValue streaming from cold server", async () => {
-    setMaxRecommendedTxSize(1000);
-
     const server = setupTestNode({
       isSyncServer: true,
     });
@@ -462,17 +562,7 @@ describe("client syncs with a server with storage", () => {
 
     const largeMap = group.createMap();
 
-    // Generate a large amount of data
-    const dataSize = 1 * 10 * 1024;
-    const chunkSize = 1024; // 1KB chunks
-    const chunks = dataSize / chunkSize;
-
-    const value = Buffer.alloc(chunkSize, `value$`).toString("base64");
-
-    for (let i = 0; i < chunks; i++) {
-      const key = `key${i}`;
-      largeMap.set(key, value, "trusting");
-    }
+    fillCoMapWithLargeData(largeMap);
 
     await largeMap.core.waitForSync();
 
@@ -510,17 +600,10 @@ describe("client syncs with a server with storage", () => {
         "client -> storage | LOAD Map sessions: empty",
         "storage -> client | CONTENT Group header: true new: After: 0 New: 5",
         "client -> server | LOAD Group sessions: header/5",
-        "storage -> client | CONTENT Map header: true new: After: 0 New: 1 expectContentUntil: header/10",
-        "client -> server | LOAD Map sessions: header/10",
-        "storage -> client | CONTENT Map header: true new: After: 1 New: 1",
-        "storage -> client | CONTENT Map header: true new: After: 2 New: 1",
-        "storage -> client | CONTENT Map header: true new: After: 3 New: 1",
-        "storage -> client | CONTENT Map header: true new: After: 4 New: 1",
-        "storage -> client | CONTENT Map header: true new: After: 5 New: 1",
-        "storage -> client | CONTENT Map header: true new: After: 6 New: 1",
-        "storage -> client | CONTENT Map header: true new: After: 7 New: 1",
-        "storage -> client | CONTENT Map header: true new: After: 8 New: 1",
-        "storage -> client | CONTENT Map header: true new: After: 9 New: 1",
+        "storage -> client | CONTENT Map header: true new: After: 0 New: 73 expectContentUntil: header/200",
+        "client -> server | LOAD Map sessions: header/200",
+        "storage -> client | CONTENT Map header: true new: After: 73 New: 73",
+        "storage -> client | CONTENT Map header: true new: After: 146 New: 54",
       ]
     `);
   });

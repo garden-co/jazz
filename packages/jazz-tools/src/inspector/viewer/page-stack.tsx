@@ -1,6 +1,7 @@
 import { CoID, LocalNode, RawCoValue } from "cojson";
 import { styled } from "goober";
 import { Page } from "./page.js";
+import { ErrorBoundary } from "../ui/error-boundary.js";
 
 // Define the structure of a page in the path
 interface PageInfo {
@@ -41,14 +42,16 @@ export function PageStack({
       <PageStackContainer>
         {children}
         {node && page && (
-          <Page
-            coId={page.coId}
-            node={node}
-            name={page.name || page.coId}
-            onHeaderClick={goBack}
-            onNavigate={addPages}
-            isTopLevel={index === path.length - 1}
-          />
+          <ErrorBoundary title="An error occurred while rendering this CoValue">
+            <Page
+              coId={page.coId}
+              node={node}
+              name={page.name || page.coId}
+              onHeaderClick={goBack}
+              onNavigate={addPages}
+              isTopLevel={index === path.length - 1}
+            />
+          </ErrorBoundary>
         )}
       </PageStackContainer>
     </>

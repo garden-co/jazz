@@ -63,10 +63,10 @@ function Illustration() {
       {/*  className="z-30 size-8 text-primary p-1.5 rounded-lg bg-highlight dark:bg-stone-900 md:size-10"*/}
       {/*/>*/}
 
-      <div className="w-20 h-full bg-gradient-to-r from-white to-transparent absolute top-0 left-0 z-10 dark:from-stone-925"></div>
-      <div className="hidden md:block h-20 w-full bg-gradient-to-b from-white to-transparent absolute top-0 left-0 z-10 dark:from-stone-925"></div>
-      <div className="h-20 w-full bg-gradient-to-t from-white to-transparent absolute bottom-0 left-0 z-10 dark:from-stone-925"></div>
-      <div className="w-20 h-full bg-gradient-to-l from-white to-transparent absolute top-0 right-0 z-10 dark:from-stone-925"></div>
+      <div className="w-20 h-full bg-linear-to-r from-white to-transparent absolute top-0 left-0 z-10 dark:from-stone-925"></div>
+      <div className="hidden md:block h-20 w-full bg-linear-to-b from-white to-transparent absolute top-0 left-0 z-10 dark:from-stone-925"></div>
+      <div className="h-20 w-full bg-linear-to-t from-white to-transparent absolute bottom-0 left-0 z-10 dark:from-stone-925"></div>
+      <div className="w-20 h-full bg-linear-to-l from-white to-transparent absolute top-0 right-0 z-10 dark:from-stone-925"></div>
     </div>
   );
 }

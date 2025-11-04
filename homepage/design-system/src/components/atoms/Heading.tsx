@@ -6,8 +6,8 @@ type HeadingProps = {
 } & React.ComponentPropsWithoutRef<"h1" | "h2" | "h3" | "h4" | "h5" | "h6">;
 
 const classes = {
-  1: ["text-5xl lg:text-6xl", "mb-3", "font-medium", "tracking-tighter"],
-  2: ["text-2xl md:text-4xl", "mb-2", "font-semibold", "tracking-tight"],
+  1: ["text-4xl md:text-5xl lg:text-6xl", "font-medium", "tracking-tighter"],
+  2: ["text-2xl md:text-4xl", "font-semibold", "tracking-tight"],
   3: ["text-xl md:text-2xl", "mb-2", "font-semibold", "tracking-tight"],
   4: ["text-bold"],
   5: [],

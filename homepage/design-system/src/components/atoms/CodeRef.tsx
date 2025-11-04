@@ -7,7 +7,7 @@ export function CodeRef({ children }: { children: React.ReactNode }) {
         "font-mono",
         "text-[0.9em]",
         "px-2 py-1",
-        "rounded",
+        "rounded-sm",
         "text-stone-900 dark:text-stone-200",
         "bg-stone-100 dark:bg-stone-800",
       )}

@@ -15,6 +15,7 @@ import {
   type CoValueCore,
   type RawAccount,
   RawAccountID,
+  RawCoMap,
   type RawCoValue,
   StorageAPI,
 } from "../exports.js";
@@ -776,4 +777,19 @@ export function createUnloadedCoValue(
   const state = node.getCoValue(id);
 
   return { coValue: state, id, header };
+}
+
+export function fillCoMapWithLargeData(map: RawCoMap) {
+  const dataSize = 1 * 1024 * 200;
+  const chunkSize = 1024; // 1KB chunks
+  const chunks = dataSize / chunkSize;
+
+  const value = Buffer.alloc(chunkSize, `value$`).toString("base64");
+
+  for (let i = 0; i < chunks; i++) {
+    const key = `key${i}`;
+    map.set(key, value, "trusting");
+  }
+
+  return map;
 }

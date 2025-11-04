@@ -92,7 +92,7 @@ export async function createVanillaJazzApp<
     | (AccountClass<Account> & CoValueFromRaw<Account>)
     | AnyAccountSchema,
 >(opts: Pick<JazzContextManagerProps<S>, "sync" | "AccountSchema">) {
-  const contextMananger = new JazzBrowserContextManager<S>()
+  const contextManager = new JazzBrowserContextManager<S>()
 
     await contextManager.createContext({
         guestMode: false,
@@ -100,7 +100,7 @@ export async function createVanillaJazzApp<
     })
 
     function getCurrentAccount() {
-       const context = contextMananger.getCurrentValue()
+       const context = contextManager.getCurrentValue()
         if (!context || !('me' in context)) {
         throw new Error("")
     }

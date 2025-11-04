@@ -202,6 +202,11 @@ export const docNavigationItems = [
             href: "/docs/core-concepts/schemas/schemaunions",
             done: 100,
           },
+          {
+            name: "Codecs",
+            href: "/docs/core-concepts/schemas/codecs",
+            done: 100,
+          },
         ],
       },
       {

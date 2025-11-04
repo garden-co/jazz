@@ -123,7 +123,7 @@ export function ContactForm() {
   };
 
   return (
-    <div className="mx-auto p-6 border bg-stone shadow-sm dark:bg-stone rounded-lg">
+    <div className="mx-auto p-6 border bg-stone shadow-xs dark:bg-stone rounded-lg">
       <HeroHeader
         level='h2'
         title="Submit a Project"
@@ -131,7 +131,7 @@ export function ContactForm() {
         className='pt-0'
         pt={false}
       />
-      <form onSubmit={handleSubmit} className="space-y-6">
+      <form onSubmit={handleSubmit} className="flex flex-col gap-6">
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
           <div>
             <Label htmlFor="appName" size="md">
@@ -174,7 +174,7 @@ export function ContactForm() {
               id="contactMethod"
               value={formData.preferredCommunication}
               onChange={(e: React.ChangeEvent<HTMLSelectElement>) => handleInputChange('preferredCommunication', e.target.value)}
-              className="w-full rounded-md border pl-3.5 text-base px-2.5 py-1 shadow-sm h-[36px] font-medium dark:text-white border-stone-500/50"
+              className="w-full rounded-md border pl-3.5 text-base px-2.5 py-1 shadow-xs h-[36px] font-medium dark:text-white border-stone-500/50"
             >
               <option value="email">Email</option>
               <option value="discord">Discord</option>
@@ -234,7 +234,7 @@ export function ContactForm() {
             id="message"
             value={formData.message}
             onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => handleInputChange('message', e.target.value)}
-            className="w-full rounded-md border py-1.5 px-3 h-24 text-base font-medium dark:text-white border-stone-500/50 focus:ring-stone-800/50 focus:outline-none focus:ring-2"
+            className="w-full rounded-md border py-1.5 px-3 h-24 text-base font-medium dark:text-white border-stone-500/50 focus:ring-stone-800/50 focus:outline-hidden focus:ring-2"
             placeholder="Anything else you'd like to add?"
             autoComplete="off"
             rows={5}

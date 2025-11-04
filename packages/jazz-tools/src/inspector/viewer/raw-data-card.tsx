@@ -1,8 +1,7 @@
 import { JsonObject } from "cojson";
 import { useEffect, useState } from "react";
-import { Button } from "../ui/button.js";
+import { Button, Accordion } from "../ui";
 import { Card, CardBody, CardHeader } from "../ui/card.js";
-import { Text } from "../ui/text.js";
 import { ValueRenderer } from "./value-renderer.js";
 
 function CopyButton({ data }: { data: JsonObject }) {
@@ -40,14 +39,15 @@ function CopyButton({ data }: { data: JsonObject }) {
 
 export function RawDataCard({ data }: { data: JsonObject }) {
   return (
-    <Card style={{ position: "relative" }}>
-      <CardHeader>
-        <Text strong>Raw data</Text>
-        <CopyButton data={data} />
-      </CardHeader>
-      <CardBody>
-        <ValueRenderer json={data} />
-      </CardBody>
-    </Card>
+    <Accordion title="Raw data" storageKey="jazz-inspector-show-raw-data">
+      <Card style={{ position: "relative" }}>
+        <CardHeader>
+          <CopyButton data={data} />
+        </CardHeader>
+        <CardBody>
+          <ValueRenderer json={data} />
+        </CardBody>
+      </Card>
+    </Accordion>
   );
 }

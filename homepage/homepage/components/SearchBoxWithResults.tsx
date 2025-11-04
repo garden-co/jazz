@@ -205,7 +205,7 @@ export function SearchBoxWithResults({ searchTerms }: { searchTerms: string }) {
             <small>Page {page + 1} of {Math.ceil(results.length / PAGE_LENGTH)}</small>
             <ul>
               {results.slice((page) * PAGE_LENGTH, (page + 1) * PAGE_LENGTH).map((result) => (
-                <li className="cursor-default flex flex-col group data-[focus]:bg-stone-100 dark:data-[focus]:bg-stone-900" key={result.id}>
+                <li className="cursor-default flex flex-col group data-focus:bg-stone-100 dark:data-focus:bg-stone-900" key={result.id}>
                   <div>
                     <p className="font-bold text-highlight line-clamp-1 border-b">
                       <a href={processUrl(result.url)}>
@@ -235,7 +235,7 @@ export function SearchBoxWithResults({ searchTerms }: { searchTerms: string }) {
                       subResult.anchor?.element === "h1" ? null : (
                         <li
                           key={subResult.id}
-                          className="group cursor-pointer group data-[focus]:bg-stone-100 rounded-lg p-2 dark:data-[focus]:bg-stone-900"
+                          className="group cursor-pointer group data-focus:bg-stone-100 rounded-lg p-2 dark:data-focus:bg-stone-900"
                         >
                           <a href={processUrl(subResult.url)}>
                             <p className="text-sm text-highlight font-bold">

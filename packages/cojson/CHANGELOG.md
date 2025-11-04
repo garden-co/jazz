@@ -1,5 +1,14 @@
 # cojson
 
+## 0.18.37
+
+### Patch Changes
+
+- 0e923d1: Fixed permission verification in groups when members are revoked
+- fd89225: Export PeerState
+  - cojson-core-wasm@0.18.37
+  - cojson-core-napi@0.18.37
+
 ## 0.18.36
 
 ### Patch Changes

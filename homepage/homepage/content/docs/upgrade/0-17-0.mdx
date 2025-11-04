@@ -1,4 +1,4 @@
-import { CodeGroup } from '@/components/forMdx'
+import { CodeGroup } from "@/components/forMdx";
 
 # Jazz 0.17.0 - New Image APIs
 
@@ -7,6 +7,7 @@ This release introduces a comprehensive refactoring of the image API, from creat
 ## Motivation
 
 Before 0.17.0, the image APIs had several limitations:
+
 - Progressive loading created confusion in usage patterns, and the API lacked flexibility to support all use cases
 - The resize methods were overly opinionated, and the chosen library had compatibility issues in incognito mode
 - The imperative functions for loading images were unnecessarily complex for simple use cases
@@ -54,7 +55,7 @@ The `<ProgressiveImg>` component has been replaced with `<Image>` component for 
 import { ProgressiveImg } from "jazz-tools/react";
 
 <ProgressiveImg image={me.profile.image}>
-  {({ src }) => <img alt="" src={src} className="w-full h-auto" />}
+  {({ src }) => <img alt="" src={src} className="h-auto w-full" />}
 </ProgressiveImg>
 
 // After
@@ -81,7 +82,7 @@ A new `Image` component has been added for Svelte, featuring the same API as the
 <Image
   imageId={image.id}
   alt=""
-  class="h-auto max-h-[20rem] max-w-full rounded-t-xl mb-1"
+  class="h-auto max-h-80 max-w-full rounded-t-xl mb-1"
   width={600}
 />
 ```
@@ -92,6 +93,7 @@ For detailed usage examples and API reference, see the [Image component document
 ### New Image Loading Utilities
 
 Two new utility functions are now available from the `jazz-tools/media` package:
+
 - `loadImage` - Fetches the original image file by ID
 - `loadImageBySize` - Fetches the best stored size for a given width and height
 

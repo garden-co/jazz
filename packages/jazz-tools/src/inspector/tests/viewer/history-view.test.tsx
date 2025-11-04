@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterEach, assert, beforeAll, describe, expect, it } from "vitest";
 import { createJazzTestAccount, setupJazzTestSync } from "jazz-tools/testing";
 import { co, z } from "jazz-tools";
 import {
@@ -45,7 +45,7 @@ describe("HistoryView", async () => {
       .create({ foo: "bar" }, account);
 
     render(
-      <HistoryView coValue={value.$jazz.raw} node={value.$jazz.localNode} />,
+      <HistoryView coValue={value.$jazz.raw} node={account.$jazz.localNode} />,
     );
 
     expect(
@@ -69,20 +69,113 @@ describe("HistoryView", async () => {
       value.$jazz.delete("certified");
 
       render(
-        <HistoryView coValue={value.$jazz.raw} node={value.$jazz.localNode} />,
+        <HistoryView
+          coValue={value.$jazz.raw}
+          node={account.$jazz.localNode}
+        />,
       );
 
       const history = [
         'Property "pet" has been set to "dog"',
-        'Property "age" has been set to "10"',
-        'Property "certified" has been set to "false"',
+        'Property "age" has been set to 10',
+        'Property "certified" has been set to false',
         'Property "pet" has been set to "cat"',
-        'Property "age" has been set to "20"',
-        'Property "certified" has been set to "true"',
+        'Property "age" has been set to 20',
+        'Property "certified" has been set to true',
         'Property "certified" has been deleted',
       ].toReversed(); // Default sort is descending
 
-      expect(screen.getAllByRole("row")).toHaveLength(history.length + 2);
+      await waitFor(() => {
+        expect(screen.getAllByRole("row")[2]?.textContent).toContain(
+          account.$jazz.id,
+        );
+      });
+
+      expect(extractActions()).toEqual(history);
+    });
+
+    it("should render invalid changes", async () => {
+      const account2 = await createJazzTestAccount();
+      const group = co.group().create(account);
+      group.addMember(account2, "reader");
+
+      const Schema = co.map({
+        pet: z.string(),
+        age: z.number(),
+        certified: z.boolean().optional(),
+      });
+
+      const value = Schema.create(
+        { pet: "dog", age: 10, certified: false },
+        group,
+      );
+
+      const valueOnAccount2 = await Schema.load(value.$jazz.id, {
+        loadAs: account2,
+      });
+      assert(valueOnAccount2);
+
+      // This is invalid, since account2 is a reader
+      valueOnAccount2.$jazz.set("pet", "cat");
+
+      render(
+        <HistoryView
+          coValue={valueOnAccount2.$jazz.raw}
+          node={account2.$jazz.localNode}
+        />,
+      );
+
+      const history = [
+        'Property "pet" has been set to "dog"',
+        'Property "age" has been set to 10',
+        'Property "certified" has been set to false',
+
+        // Account2 can't write to the value
+        'Property "pet" has been set to "cat"Invalid transaction: Transactor has no write permissions',
+      ].toReversed(); // Default sort is descending
+
+      await waitFor(() => {
+        expect(screen.getAllByRole("row")[2]?.textContent).toContain(
+          account2.$jazz.id,
+        );
+      });
+
+      expect(extractActions()).toEqual(history);
+    });
+
+    it("should render co.map changes with json", async () => {
+      const d = new Date();
+      const value = co
+        .map({
+          pet: z.object({
+            name: z.string(),
+            age: z.number(),
+          }),
+          d: z.date(),
+          n: z.number().optional(),
+          s: z.string().nullable(),
+        })
+        .create(
+          { pet: { name: "dog", age: 10 }, d, n: 10, s: "hello" },
+          account,
+        );
+
+      value.$jazz.set("pet", { name: "cat", age: 20 });
+      value.$jazz.set("n", undefined);
+      value.$jazz.set("s", null);
+      render(
+        <HistoryView coValue={value.$jazz.raw} node={value.$jazz.localNode} />,
+      );
+
+      const history = [
+        'Property "pet" has been set to {"name":"dog","age":10}',
+        `Property "d" has been set to "${d.toISOString()}"`,
+        'Property "n" has been set to 10',
+        'Property "s" has been set to "hello"',
+        'Property "pet" has been set to {"name":"cat","age":20}',
+        'Property "n" has been set to undefined',
+        'Property "s" has been set to null',
+      ].toReversed(); // Default sort is descending
 
       await waitFor(() => {
         expect(screen.getAllByRole("row")[2]?.textContent).toContain(
@@ -105,7 +198,10 @@ describe("HistoryView", async () => {
       value.$jazz.shift();
 
       render(
-        <HistoryView coValue={value.$jazz.raw} node={value.$jazz.localNode} />,
+        <HistoryView
+          coValue={value.$jazz.raw}
+          node={account.$jazz.localNode}
+        />,
       );
 
       const history = [
@@ -152,7 +248,10 @@ describe("HistoryView", async () => {
       value.$jazz.shift();
 
       render(
-        <HistoryView coValue={value.$jazz.raw} node={value.$jazz.localNode} />,
+        <HistoryView
+          coValue={value.$jazz.raw}
+          node={account.$jazz.localNode}
+        />,
       );
 
       const history = [
@@ -181,8 +280,11 @@ describe("HistoryView", async () => {
       const group3 = co.group().create(account);
       group3.addMember(group, "inherit");
 
-      const { container } = render(
-        <HistoryView coValue={group.$jazz.raw} node={group.$jazz.localNode} />,
+      render(
+        <HistoryView
+          coValue={group.$jazz.raw}
+          node={account.$jazz.localNode}
+        />,
       );
 
       const history = [

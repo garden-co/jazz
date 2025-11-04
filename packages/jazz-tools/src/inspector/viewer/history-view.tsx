@@ -13,7 +13,6 @@ import { styled } from "goober";
 import { isCoId } from "./types";
 import { AccountOrGroupText } from "./account-or-group-text";
 import { DataTable, ColumnDef } from "../ui/data-table";
-import { Heading } from "../ui/heading";
 import { MapOpPayload } from "cojson/dist/coValues/coMap.js";
 import {
   DeletionOpPayload,
@@ -24,7 +23,7 @@ import {
   BinaryStreamEnd,
 } from "cojson/dist/coValues/coStream.js";
 import { VerifiedTransaction } from "cojson/dist/coValueCore/coValueCore.js";
-import { Icon } from "../ui";
+import { Icon, Accordion } from "../ui";
 
 type HistoryEntry = {
   id: string;
@@ -32,6 +31,7 @@ type HistoryEntry = {
   action: string;
   timestamp: Date;
   isValid: boolean;
+  validationErrorMessage: string | undefined;
 };
 
 export function HistoryView({
@@ -86,7 +86,18 @@ export function HistoryView({
     {
       id: "action",
       header: "Action",
-      accessor: (row) => row.action,
+      accessor: (row) => {
+        if (row.isValid) return row.action;
+
+        return (
+          <>
+            {row.action}
+            <span style={{ color: "red", display: "block" }}>
+              Invalid transaction: {row.validationErrorMessage}
+            </span>
+          </>
+        );
+      },
       sortable: false,
       filterable: true,
       sortFn: (a, b) => a.action.localeCompare(b.action),
@@ -102,8 +113,7 @@ export function HistoryView({
   ];
 
   return (
-    <section style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
-      <Heading>CoValue history</Heading>
+    <Accordion title="CoValue history" storageKey="jazz-inspector-show-history">
       <DataTable
         columns={columns}
         data={transactions}
@@ -112,7 +122,7 @@ export function HistoryView({
         getRowKey={(row) => row.id}
         emptyMessage="No history available"
       />
-    </section>
+    </Accordion>
   );
 }
 
@@ -133,10 +143,6 @@ function getTransactionChanges(
         readKey,
       ) ?? []
     );
-
-    // const decryptedString = coValue.core.verified.sessions.get(tx.txID.sessionID)?.impl.decryptNextTransactionChangesJson(tx.txID.txIndex, readKey);
-
-    // return decryptedString ? [decryptedString] : [];
   }
 
   return tx.changes ?? (tx.tx as any).changes ?? [];
@@ -152,6 +158,7 @@ function getHistory(coValue: RawCoValue): HistoryEntry[] {
       action: mapTransactionToAction(change, coValue),
       timestamp: new Date(tx.currentMadeAt),
       isValid: tx.isValid,
+      validationErrorMessage: tx.validationErrorMessage,
     }));
   });
 }
@@ -242,7 +249,7 @@ function mapTransactionToAction(
 
   // coMap changes
   if (isPropertySet(change)) {
-    return `Property "${change.key}" has been set to "${change.value}"`;
+    return `Property "${change.key}" has been set to ${JSON.stringify(change.value)}`;
   }
 
   if (isPropertyDeletion(change)) {

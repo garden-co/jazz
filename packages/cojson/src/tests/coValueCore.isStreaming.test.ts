@@ -2,6 +2,7 @@ import { assert, beforeEach, describe, expect, test } from "vitest";
 import {
   SyncMessagesLog,
   TEST_NODE_CONFIG,
+  fillCoMapWithLargeData,
   loadCoValueOrFail,
   setupTestAccount,
   setupTestNode,
@@ -49,19 +50,7 @@ describe("isStreaming", () => {
     await group.core.waitForSync();
     client.disconnect();
 
-    const map = group.createMap();
-
-    // Generate a large amount of data that requires multiple chunks
-    const dataSize = 1 * 1024 * 100;
-    const chunkSize = 1024; // 1KB chunks
-    const chunks = dataSize / chunkSize;
-
-    const value = Buffer.alloc(chunkSize, `value$`).toString("base64");
-
-    for (let i = 0; i < chunks; i++) {
-      const key = `key${i}`;
-      map.set(key, value, "trusting");
-    }
+    const map = fillCoMapWithLargeData(group.createMap());
 
     const newSession = client.spawnNewSession();
 
@@ -101,16 +90,7 @@ describe("isStreaming", () => {
     client.disconnect();
 
     // Generate a large amount of data that requires multiple chunks
-    const dataSize = 1 * 1024 * 100;
-    const chunkSize = 1024; // 1KB chunks
-    const chunks = dataSize / chunkSize;
-
-    const value = Buffer.alloc(chunkSize, `value$`).toString("base64");
-
-    for (let i = 0; i < chunks; i++) {
-      const key = `key${i}`;
-      map.set(key, value, "trusting");
-    }
+    fillCoMapWithLargeData(map);
 
     const newSession = client.spawnNewSession();
 
@@ -149,19 +129,7 @@ describe("isStreaming", () => {
     await group.core.waitForSync();
     client.disconnect();
 
-    const map = group.createMap();
-
-    // Generate a large amount of data that requires multiple chunks
-    const dataSize = 1 * 1024 * 100;
-    const chunkSize = 1024; // 1KB chunks
-    const chunks = dataSize / chunkSize;
-
-    const value = Buffer.alloc(chunkSize, `value$`).toString("base64");
-
-    for (let i = 0; i < chunks; i++) {
-      const key = `key${i}`;
-      map.set(key, value, "trusting");
-    }
+    const map = fillCoMapWithLargeData(group.createMap());
 
     const loadingClient = client.spawnNewSession();
     loadingClient.connectToSyncServer({
@@ -208,19 +176,7 @@ describe("isStreaming", () => {
 
     await group.core.waitForSync();
 
-    const map = group.createMap();
-
-    // Generate a large amount of data that requires multiple chunks
-    const dataSize = 1 * 1024 * 100;
-    const chunkSize = 1024; // 1KB chunks
-    const chunks = dataSize / chunkSize;
-
-    const value = Buffer.alloc(chunkSize, `value$`).toString("base64");
-
-    for (let i = 0; i < chunks; i++) {
-      const key = `key${i}`;
-      map.set(key, value, "trusting");
-    }
+    const map = fillCoMapWithLargeData(group.createMap());
 
     await map.core.waitForSync();
     const newSession = client.spawnNewSession();
