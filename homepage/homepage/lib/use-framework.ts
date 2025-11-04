@@ -40,19 +40,19 @@ export const useFramework = () => {
   });
   const router = useRouter();
 
-  const setFramework = useCallback((newFramework: Framework) => {
-    if (!isValidFramework(newFramework)) return;
-    userInitiatedChange = true;
-    localStorage.setItem("_tcgpref_framework", newFramework);
-    setSavedFramework(newFramework);
-    window.dispatchEvent(
-      new CustomEvent(TAB_CHANGE_EVENT, {
-        detail: {
-          key: "framework",
-          value: newFramework,
-        },
-      }),
-    );
+  useEffect(() => {
+    setMounted(true);
+    // Check localStorage after mounting
+    if (typeof window !== "undefined") {
+      const stored = window.localStorage.getItem("_tcgpref_framework");
+      if (stored && isValidFramework(stored)) {
+        setSavedFramework(stored as Framework);
+        // If the currently loaded page is a docs page, make sure that URL matches the selected framework.
+        if (!pathname.startsWith('/docs')) return;
+        const newPath = pathname.split("/").toSpliced(2, 1, stored).join("/") + window.location.hash;
+        window.history.replaceState({}, "", newPath);
+      }
+    }
   }, []);
 
   const urlFramework = framework && isValidFramework(framework) ? framework : null;
@@ -74,77 +74,16 @@ export const useFramework = () => {
 
 
   useEffect(() => {
-    if (!pathname.startsWith("/docs") || isRedirecting) return;
-
-    // Trigger this block only once after the user changes framework to update
-    // to match user's choice
-    if (userInitiatedChange) {
-      userInitiatedChange = false;
-      if (!savedFramework) return;
-
-      const parts = pathname.split("/");
-      if (parts.length >= 3 && parts[2] === savedFramework) return;
-
-      parts[2] = savedFramework;
-      const newPath = parts.join("/");
-      lastRedirectedFramework = savedFramework;
-
-      isRedirecting = true;
-      router.replace(newPath, { scroll: false });
-
-      const timeout = setTimeout(() => {
-        isRedirecting = false;
-        lastRedirectedFramework = null;
-      }, 200);
-
-      return () => {
-        clearTimeout(timeout);
-        isRedirecting = false;
-        lastRedirectedFramework = null;
-      };
-    }
-
-    if (urlFramework) {
-      // Exit early if the redirect has *just* happened
-      if (lastRedirectedFramework === urlFramework) {
-        lastRedirectedFramework = null;
-        return;
-      }
-      // Otherwise update localStorage and the saved framework (manually, not 
-      // using the helper otherwise we'll trigger a new loop)
-      localStorage.setItem("_tcgpref_framework", urlFramework);
-      setSavedFramework(urlFramework);
-      return;
-    }
-
+    if (!mounted || !savedFramework || !pathname.startsWith('/docs')) return;
     const parts = pathname.split("/");
+    if (parts[2] !== savedFramework) {
+      const newPath = parts.toSpliced(2, 1, savedFramework).join("/");
+      window.history.replaceState({}, "", newPath);
+    }
+  }, [mounted, savedFramework, pathname]);
 
-    // Race condition guard in case effect runs before `useParams` updates
-    if (parts.length >= 3 && parts[2] === savedFramework) return;
 
-    // And if not, update the framework and rebuild the URL—if users have no preference and no indication in URL, just use React
-    parts[2] = savedFramework || DEFAULT_FRAMEWORK;
-    const newPath = parts.join("/");
-
-    // Tell everyone not to trigger cascading updates
-    isRedirecting = true;
-    // and update the URL
-    router.replace(newPath, { scroll: false });
-
-    // Let the change settle, then tell everyone we're free to update the URL
-    // again
-    const timeout = setTimeout(() => {
-      isRedirecting = false;
-    }, 200);
-
-    // Clean up
-    return () => {
-      clearTimeout(timeout);
-      isRedirecting = false;
-    };
-  }, [pathname, urlFramework, savedFramework, router]);
-
-  const currentFramework = urlFramework || savedFramework || DEFAULT_FRAMEWORK;
-
-  return { framework: currentFramework, setFramework };
+  if (mounted && savedFramework) return savedFramework;
+  if (framework && isValidFramework(framework)) return framework;
+  return DEFAULT_FRAMEWORK;
 };
