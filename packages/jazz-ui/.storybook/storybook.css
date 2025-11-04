@@ -1,0 +1,12 @@
+.sb-show-main.sb-main-padded {
+  padding: unset !important;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+html {
+  background-color: var(--background);
+}

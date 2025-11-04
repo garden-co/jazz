@@ -24,6 +24,7 @@ export * from "./components/tooltip.js";
 
 // Utilities
 export { cn } from "./lib/utils.js";
+export * from "./lib/form-classes.js";
 
 // Config (for projects using local shadcn CLI)
 export { tailwindPreset } from "./config/tailwind.config.js";

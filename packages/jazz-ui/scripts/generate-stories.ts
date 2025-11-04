@@ -15,7 +15,7 @@ const storyTemplate = (
 ${getImports(fileName, exportName)}
 
 const meta: Meta<typeof ${exportName}> = {
-  title: "jazz-ui/${fileName}",
+  title: "${getStoryTitle(fileName)}",
   component: ${exportName},
   tags: ["autodocs"],
 };
@@ -25,6 +25,28 @@ type Story = StoryObj<typeof ${exportName}>;
 
 export const Default: Story = ${getStoryConfig(fileName, exportName)};
 `;
+
+// Determine the story title/category
+function getStoryTitle(fileName: string): string {
+  const formComponents = [
+    "input",
+    "textarea",
+    "checkbox",
+    "select",
+    "radio-group",
+    "radio",
+    "switch",
+    "label",
+    "form",
+    "slider",
+  ];
+
+  if (formComponents.includes(fileName)) {
+    return `jazz-ui/Forms/${fileName}`;
+  }
+
+  return `jazz-ui/${fileName}`;
+}
 
 // Get imports needed for the story
 function getImports(fileName: string, exportName: string): string {

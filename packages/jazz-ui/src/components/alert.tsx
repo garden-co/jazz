@@ -1,35 +1,62 @@
 import * as React from "react";
 import { cva, type VariantProps } from "class-variance-authority";
+import { AlertCircle, AlertTriangle, Info } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 
 const alertVariants = cva(
-  "relative w-full rounded-lg border px-4 py-3 text-sm [&>svg+div]:translate-y-[-3px] [&>svg]:absolute [&>svg]:left-4 [&>svg]:top-4 [&>svg]:text-foreground [&>svg~*]:pl-7",
+  "relative w-full grid gap-2 rounded border-l-4 pr-4 pl-12 py-3 text-sm",
   {
     variants: {
       variant: {
-        default: "bg-background text-foreground",
+        info: "border-l-blue-500 bg-blue-50 text-stone-900 dark:bg-blue-200/5 dark:text-white",
         destructive:
-          "border-destructive/50 text-destructive dark:border-destructive [&>svg]:text-destructive",
+          "border-l-red-500 bg-red-500/5 text-red-900 dark:text-red-400",
+        warning:
+          "border-l-yellow-500 bg-yellow-50 text-stone-900 dark:bg-yellow-200/5 dark:text-white",
       },
     },
     defaultVariants: {
-      variant: "default",
+      variant: "info",
     },
   },
 );
 
+const variantIcons = {
+  destructive: AlertCircle,
+  info: Info,
+  warning: AlertTriangle,
+  default: undefined,
+} as const;
+
+const iconColors = {
+  destructive: "text-red-500",
+  info: "text-blue-500",
+  warning: "text-yellow-500",
+  default: "text-foreground",
+} as const;
+
 const Alert = React.forwardRef<
   HTMLDivElement,
   React.HTMLAttributes<HTMLDivElement> & VariantProps<typeof alertVariants>
->(({ className, variant, ...props }, ref) => (
-  <div
-    ref={ref}
-    role="alert"
-    className={cn(alertVariants({ variant }), className)}
-    {...props}
-  />
-));
+>(({ className, variant, children, ...props }, ref) => {
+  const Icon = variant ? variantIcons[variant] : undefined;
+  const iconColor = variant ? iconColors[variant] : iconColors.default;
+
+  return (
+    <div
+      ref={ref}
+      role="alert"
+      className={cn(alertVariants({ variant }), className)}
+      {...props}
+    >
+      {Icon && (
+        <Icon className={cn("absolute top-3 left-4 size-5", iconColor)} />
+      )}
+      {children}
+    </div>
+  );
+});
 Alert.displayName = "Alert";
 
 const AlertTitle = React.forwardRef<
@@ -38,7 +65,10 @@ const AlertTitle = React.forwardRef<
 >(({ className, ...props }, ref) => (
   <h5
     ref={ref}
-    className={cn("mb-1 font-medium leading-none tracking-tight", className)}
+    className={cn(
+      "text-md leading-none font-semibold tracking-tight",
+      className,
+    )}
     {...props}
   />
 ));

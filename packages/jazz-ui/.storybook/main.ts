@@ -6,8 +6,8 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const config: StorybookConfig = {
   stories: ["../src/components/**/*.stories.tsx"],
-  addons: [getAbsolutePath("@storybook/addon-docs")],
-  framework: getAbsolutePath("@storybook/react-vite"),
+  addons: ["@storybook/addon-docs", "@storybook/addon-themes"],
+  framework: "@storybook/react-vite",
   typescript: {
     reactDocgen: "react-docgen-typescript",
   },
@@ -22,7 +22,3 @@ const config: StorybookConfig = {
 };
 
 export default config;
-
-function getAbsolutePath(value: string): any {
-  return dirname(fileURLToPath(import.meta.resolve(`${value}/package.json`)));
-}

@@ -24,6 +24,9 @@
   "scripts": {
     "build": "tsup",
     "dev": "tsup --watch",
+    "demo": "vite",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
     "format-and-lint": "biome check .",
     "format-and-lint:fix": "biome check . --write",
     "generate-stories": "tsx scripts/generate-stories.ts",
@@ -60,19 +63,23 @@
   },
   "devDependencies": {
     "@biomejs/biome": "catalog:default",
+    "@storybook/addon-docs": "^10.0.3",
+    "@storybook/addon-themes": "^10.0.3",
     "@storybook/react-vite": "^10.0.3",
+    "@tailwindcss/postcss": "^4.1.16",
     "@types/react": "catalog:react",
     "@types/react-dom": "catalog:react",
+    "@vitejs/plugin-react": "^4.3.4",
+    "prettier": "^3.6.2",
+    "prettier-plugin-tailwindcss": "^0.6.9",
     "react": "catalog:react",
     "react-dom": "catalog:react",
     "storybook": "^10.0.3",
-    "@tailwindcss/postcss": "^4.1.16",
     "tailwindcss": "^4.1.16",
     "tsup": "^8.3.5",
     "tsx": "^4.19.2",
     "typescript": "catalog:default",
-    "vite": "^6.3.5",
-    "@storybook/addon-docs": "^10.0.3"
+    "vite": "^6.3.5"
   },
   "license": "MIT"
 }
