@@ -64,14 +64,15 @@ Now that your users all have Jazz accounts, you can authenticate them using your
 <ReactSnippet preferWrap>
 ```tsx
 import { useJazzContext } from 'jazz-tools/react';
+const context = useJazzContext();
 
-function logIn(username, password) {
+
+async function logIn(username, password) {
   // Whatever your existing auth system is
-  const myOldAppUser = myApp.logIn(username, password);
+  const myOldAppUser = await myApp.logIn(username, password);
   const accountID = myOldAppUser.jazzAccountID;
   // If you've stored this in an encrypted form, make sure to decrypt it first
   const accountSecret = myOldAppUser.jazzAccountSecret;
-  const context = useJazzContext();
   context.authenticate({ accountID, accountSecret });
   // The Jazz session is now authenticated!
 }
@@ -81,6 +82,7 @@ function logIn(username, password) {
 ```svelte
 <script lang="ts">
   import { getJazzContext } from 'jazz-tools/svelte';
+  const context = getJazzContext();
 
   function logIn(username: string, password: string) {
     // Whatever your existing auth system is
@@ -88,7 +90,6 @@ function logIn(username, password) {
     const accountID = myOldAppUser.jazzAccountID;
     // If you've stored this in an encrypted form, make sure to decrypt it first
     const accountSecret = myOldAppUser.jazzAccountSecret;
-    const context = getJazzContext();
     context.current.authenticate({ accountID, accountSecret });
     // The Jazz session is now authenticated!
   }
@@ -98,14 +99,14 @@ function logIn(username, password) {
 <RNSnippet preferWrap>
 ```tsx
 import { useJazzContext } from 'jazz-tools/react-native';
+const context = useJazzContext();
 
-function logIn(username, password) {
+async function logIn(username, password) {
   // Whatever your existing auth system is
-  const myOldAppUser = myApp.logIn(username, password);
+  const myOldAppUser = await myApp.logIn(username, password);
   const accountID = myOldAppUser.jazzAccountID;
   // If you've stored this in an encrypted form, make sure to decrypt it first
   const accountSecret = myOldAppUser.jazzAccountSecret;
-  const context = useJazzContext();
   context.authenticate({ accountID, accountSecret });
   // The Jazz session is now authenticated!
 }
@@ -114,14 +115,15 @@ function logIn(username, password) {
 <ExpoSnippet preferWrap>
 ```tsx
 import { useJazzContext } from 'jazz-tools/expo';
+const context = useJazzContext();
 
-function logIn(username, password) {
+async function logIn(username, password) {
   // Whatever your existing auth system is
-  const myOldAppUser = myApp.logIn(username, password);
+  const myOldAppUser = await myApp.logIn(username, password);
   const accountID = myOldAppUser.jazzAccountID;
   // If you've stored this in an encrypted form, make sure to decrypt it first
   const accountSecret = myOldAppUser.jazzAccountSecret;
-  const context = useJazzContext();
+
   context.authenticate({ accountID, accountSecret });
   // The Jazz session is now authenticated!
 }
