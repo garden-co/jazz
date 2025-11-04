@@ -1,0 +1,130 @@
+import { Alert, CodeGroup, TabbedCodeGroup, ReactSnippet, SvelteSnippet, RNSnippet, ExpoSnippet, VanillaSnippet, TabbedCodeGroupItem, SvelteLogo, ReactLogo, RNLogo, ExpoLogo } from "@/components/forMdx";
+export const metadata = { title: "Integrating with Existing Auth Methods", description: "Learn how to integrate Jazz with existing authentication methods." };
+
+# Integrating with Existing Auth Methods
+
+You can integrate Jazz with an existing auth method by giving each of your users a Jazz account which is linked to their existing user identity.
+
+1. Create Jazz accounts for your existing users
+2. Persist the IDs and secrets for the Jazz users in your existing database
+3. Retrieve and decrypt Jazz credentials when a user logs in
+4. Authenticate the client using the Jazz account ID and secret
+
+## Creating Jazz Accounts
+
+You should [set up a server worker](/docs/server-side/setup#generating-credentials), which will be responsible for creating Jazz accounts for your existing users. This worker:
+
+1. Creates Jazz accounts
+2. Extracts the ID and secret for the Jazz user
+3. Encrypts the secret securely
+4. Stores the ID and encrypted secret in your existing database
+
+In production you should avoid creating accounts for users that already have them, and ensure that failures are handled gracefully.
+
+<Alert variant="info" tip="Security Note" className="mt-4">
+  Account secrets and IDs are immutable, and are the only credentials needed to access a Jazz user's data. Don't store the secret in plaintext. If a Jazz secret is lost, the account cannot be recovered. You will need to issue a new Jazz account.
+</Alert>
+
+<CodeGroup preferWrap className="mt-4">
+```ts
+import { startWorker } from "jazz-tools/worker";
+import { PUBLIC_JAZZ_WORKER_ACCOUNT } from "$env/static/public";
+import { JAZZ_WORKER_SECRET } from "$env/static/private";
+
+const { worker } = await startWorker({
+  accountID: PUBLIC_JAZZ_WORKER_ACCOUNT,
+  accountSecret: JAZZ_WORKER_SECRET,
+});
+
+// Get all users from your existing database
+const allUsers = await db.query.users.findMany();
+
+for (const user of allUsers) {
+  const { accountID, accountSecret } = await Account.createAs(worker, { name: user.name });
+
+  const encryptedSecret = await encrypt(accountSecret); // use your implementation here
+  // Persist the Jazz account ID and secret in your existing database
+  await db.query.users.update({
+    where: { id: user.id },
+    data: {
+      jazzAccountID: accountID,
+      jazzAccountSecret: encryptedSecret
+    }
+  });
+}
+```
+</CodeGroup>
+
+## Using your existing authentication system
+
+Now that your users all have Jazz accounts, you can authenticate them using your original authentication system, and have them fetch their Jazz account ID and secret from your database.
+
+{/* TODO: Frameworks */}
+<TabbedCodeGroup default="react" savedPreferenceKey="framework" id="auth-using-context">
+<ReactSnippet preferWrap>
+```tsx
+import { useJazzContext } from 'jazz-tools/react';
+
+function logIn(username, password) {
+  // Whatever your existing auth system is
+  const myOldAppUser = myApp.logIn(username, password);
+  const accountID = myOldAppUser.jazzAccountID;
+  // If you've stored this in an encrypted form, make sure to decrypt it first
+  const accountSecret = myOldAppUser.jazzAccountSecret;
+  const context = useJazzContext();
+  context.authenticate({ accountID, accountSecret });
+  // The Jazz session is now authenticated!
+}
+```
+</ReactSnippet>
+<SvelteSnippet preferWrap>
+```svelte
+<script lang="ts">
+  import { getJazzContext } from 'jazz-tools/svelte';
+
+  function logIn(username: string, password: string) {
+    // Whatever your existing auth system is
+    const myOldAppUser = myApp.logIn(username, password);
+    const accountID = myOldAppUser.jazzAccountID;
+    // If you've stored this in an encrypted form, make sure to decrypt it first
+    const accountSecret = myOldAppUser.jazzAccountSecret;
+    const context = getJazzContext();
+    context.current.authenticate({ accountID, accountSecret });
+    // The Jazz session is now authenticated!
+  }
+</script>
+```
+</SvelteSnippet>
+<RNSnippet preferWrap>
+```tsx
+import { useJazzContext } from 'jazz-tools/react-native';
+
+function logIn(username, password) {
+  // Whatever your existing auth system is
+  const myOldAppUser = myApp.logIn(username, password);
+  const accountID = myOldAppUser.jazzAccountID;
+  // If you've stored this in an encrypted form, make sure to decrypt it first
+  const accountSecret = myOldAppUser.jazzAccountSecret;
+  const context = useJazzContext();
+  context.authenticate({ accountID, accountSecret });
+  // The Jazz session is now authenticated!
+}
+```
+</RNSnippet>
+<ExpoSnippet preferWrap>
+```tsx
+import { useJazzContext } from 'jazz-tools/expo';
+
+function logIn(username, password) {
+  // Whatever your existing auth system is
+  const myOldAppUser = myApp.logIn(username, password);
+  const accountID = myOldAppUser.jazzAccountID;
+  // If you've stored this in an encrypted form, make sure to decrypt it first
+  const accountSecret = myOldAppUser.jazzAccountSecret;
+  const context = useJazzContext();
+  context.authenticate({ accountID, accountSecret });
+  // The Jazz session is now authenticated!
+}
+```
+</ExpoSnippet>
+</TabbedCodeGroup>
