@@ -27,6 +27,7 @@ In production you should avoid creating accounts for users that already have the
 
 <CodeGroup preferWrap className="mt-4">
 ```ts
+import { Account } from "jazz-tools";
 import { startWorker } from "jazz-tools/worker";
 import { PUBLIC_JAZZ_WORKER_ACCOUNT } from "$env/static/public";
 import { JAZZ_WORKER_SECRET } from "$env/static/private";
@@ -59,22 +60,43 @@ for (const user of allUsers) {
 
 Now that your users all have Jazz accounts, you can authenticate them using your original authentication system, and have them fetch their Jazz account ID and secret from your database.
 
-{/* TODO: Frameworks */}
 <TabbedCodeGroup default="react" savedPreferenceKey="framework" id="auth-using-context">
 <ReactSnippet preferWrap>
 ```tsx
-import { useJazzContext } from 'jazz-tools/react';
-const context = useJazzContext();
+import { useJazzContext } from "jazz-tools/react";
 
+export function Auth() {
+  const context = useJazzContext();
 
-async function logIn(username, password) {
-  // Whatever your existing auth system is
-  const myOldAppUser = await myApp.logIn(username, password);
-  const accountID = myOldAppUser.jazzAccountID;
-  // If you've stored this in an encrypted form, make sure to decrypt it first
-  const accountSecret = myOldAppUser.jazzAccountSecret;
-  context.authenticate({ accountID, accountSecret });
-  // The Jazz session is now authenticated!
+  async function handleSubmit(e) {
+    e.preventDefault();
+
+    const formData = new FormData(e.target);
+    const username = formData.get("username");
+    const password = formData.get("password");
+
+    // Whatever your existing auth system is
+    const myOldAppUser = await myApp.logIn(username, password);
+    const accountID = myOldAppUser.jazzAccountID;
+    // If you've stored this in an encrypted form, make sure to decrypt it first
+    const accountSecret = myOldAppUser.jazzAccountSecret;
+
+    await context.authenticate({
+      accountID,
+      accountSecret,
+      provider: "my-old-app-auth", // Use any string here to identify your authentication provider. This avoids Jazz considering your users unauthenticated.
+    });
+
+    // The Jazz session is now authenticated!
+ }
+
+  return (
+    <form onSubmit={handleSubmit}>
+      <input name="username" type="text" placeholder="Username" required />
+      <input name="password" type="password" placeholder="Password" required />
+      <button type="submit">Log In</button>
+    </form>
+  );
 }
 ```
 </ReactSnippet>
@@ -98,35 +120,82 @@ async function logIn(username, password) {
 </SvelteSnippet>
 <RNSnippet preferWrap>
 ```tsx
-import { useJazzContext } from 'jazz-tools/react-native';
-const context = useJazzContext();
+import { useJazzContext } from "jazz-tools/react-native";
 
-async function logIn(username, password) {
-  // Whatever your existing auth system is
-  const myOldAppUser = await myApp.logIn(username, password);
-  const accountID = myOldAppUser.jazzAccountID;
-  // If you've stored this in an encrypted form, make sure to decrypt it first
-  const accountSecret = myOldAppUser.jazzAccountSecret;
-  context.authenticate({ accountID, accountSecret });
-  // The Jazz session is now authenticated!
+export function Auth() {
+  const context = useJazzContext();
+
+  async function handleSubmit(e) {
+    e.preventDefault();
+
+    const formData = new FormData(e.target);
+    const username = formData.get("username");
+    const password = formData.get("password");
+
+    // Whatever your existing auth system is
+    const myOldAppUser = await myApp.logIn(username, password);
+    const accountID = myOldAppUser.jazzAccountID;
+    // If you've stored this in an encrypted form, make sure to decrypt it first
+    const accountSecret = myOldAppUser.jazzAccountSecret;
+
+    await context.authenticate({
+      accountID,
+      accountSecret,
+      provider: "my-old-app-auth", // Use any string here to identify your authentication provider. This avoids Jazz considering your users unauthenticated.
+    });
+
+    // The Jazz session is now authenticated!
+ }
+
+  return (
+    <form onSubmit={handleSubmit}>
+      <input name="username" type="text" placeholder="Username" required />
+      <input name="password" type="password" placeholder="Password" required />
+      <button type="submit">Log In</button>
+    </form>
+  );
 }
 ```
 </RNSnippet>
 <ExpoSnippet preferWrap>
 ```tsx
-import { useJazzContext } from 'jazz-tools/expo';
-const context = useJazzContext();
+import { useJazzContext } from "jazz-tools/expo";
 
-async function logIn(username, password) {
-  // Whatever your existing auth system is
-  const myOldAppUser = await myApp.logIn(username, password);
-  const accountID = myOldAppUser.jazzAccountID;
-  // If you've stored this in an encrypted form, make sure to decrypt it first
-  const accountSecret = myOldAppUser.jazzAccountSecret;
+export function Auth() {
+  const context = useJazzContext();
 
-  context.authenticate({ accountID, accountSecret });
-  // The Jazz session is now authenticated!
+  async function handleSubmit(e) {
+    e.preventDefault();
+
+    const formData = new FormData(e.target);
+    const username = formData.get("username");
+    const password = formData.get("password");
+
+    // Whatever your existing auth system is
+    const myOldAppUser = await myApp.logIn(username, password);
+    const accountID = myOldAppUser.jazzAccountID;
+    // If you've stored this in an encrypted form, make sure to decrypt it first
+    const accountSecret = myOldAppUser.jazzAccountSecret;
+
+    await context.authenticate({
+      accountID,
+      accountSecret,
+      provider: "my-old-app-auth", // Use any string here to identify your authentication provider. This avoids Jazz considering your users unauthenticated.
+    });
+
+    // The Jazz session is now authenticated!
+ }
+
+  return (
+    <form onSubmit={handleSubmit}>
+      <input name="username" type="text" placeholder="Username" required />
+      <input name="password" type="password" placeholder="Password" required />
+      <button type="submit">Log In</button>
+    </form>
+  );
 }
 ```
 </ExpoSnippet>
 </TabbedCodeGroup>
+
+Check the [accounts and migrations](/docs/core-concepts/schemas/accounts-and-migrations) documentation to learn more about how you can make sure that the Jazz accounts contain all the fields you need.
