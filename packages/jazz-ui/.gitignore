@@ -2,4 +2,6 @@ node_modules
 dist
 *.log
 .DS_Store
+storybook-static
+src/components/**/*.stories.tsx
 

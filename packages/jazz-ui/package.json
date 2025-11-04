@@ -26,8 +26,9 @@
     "dev": "tsup --watch",
     "format-and-lint": "biome check .",
     "format-and-lint:fix": "biome check . --write",
-    "storybook": "storybook dev -p 6006",
-    "build-storybook": "storybook build"
+    "generate-stories": "tsx scripts/generate-stories.ts",
+    "storybook": "pnpm generate-stories && storybook dev -p 6006",
+    "build-storybook": "pnpm generate-stories && storybook build"
   },
   "dependencies": {
     "@radix-ui/react-accordion": "^1.2.12",
@@ -59,19 +60,19 @@
   },
   "devDependencies": {
     "@biomejs/biome": "catalog:default",
-    "@storybook/addon-essentials": "^8.4.7",
-    "@storybook/blocks": "^8.4.7",
-    "@storybook/react": "^8.4.7",
-    "@storybook/react-vite": "^8.4.7",
+    "@storybook/react-vite": "^10.0.3",
     "@types/react": "catalog:react",
     "@types/react-dom": "catalog:react",
     "react": "catalog:react",
     "react-dom": "catalog:react",
-    "storybook": "^8.4.7",
+    "storybook": "^10.0.3",
+    "@tailwindcss/postcss": "^4.1.16",
     "tailwindcss": "^4.1.16",
     "tsup": "^8.3.5",
+    "tsx": "^4.19.2",
     "typescript": "catalog:default",
-    "vite": "^6.3.5"
+    "vite": "^6.3.5",
+    "@storybook/addon-docs": "^10.0.3"
   },
   "license": "MIT"
 }

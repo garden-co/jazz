@@ -61,8 +61,16 @@ import { cn } from "jazz-ui";
 ```bash
 pnpm build        # Build package
 pnpm dev          # Watch mode
+pnpm storybook    # Visual component explorer with autodocs
+pnpm build-storybook  # Build static Storybook site
 pnpm format-and-lint:fix  # Format and lint
 ```
+
+### Storybook
+
+View all components visually with interactive controls and automatic prop documentation at `http://localhost:6006`.
+
+Stories are auto-generated from components - no manual story files needed.
 
 ## License
 
