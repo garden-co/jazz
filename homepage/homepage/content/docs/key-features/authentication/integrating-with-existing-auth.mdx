@@ -5,10 +5,9 @@ export const metadata = { title: "Integrating with Existing Auth Methods", descr
 
 You can integrate Jazz with an existing auth method by giving each of your users a Jazz account which is linked to their existing user identity.
 
-1. Create Jazz accounts for your existing users
-2. Persist the IDs and secrets for the Jazz users in your existing database
-3. Retrieve and decrypt Jazz credentials when a user logs in
-4. Authenticate the client using the Jazz account ID and secret
+We will use a server worker to create Jazz accounts for your existing users, and persist the IDs and secrets for the Jazz users in your existing database.
+
+Once this is done, you can retrieve and decrypt Jazz credentials when a user logs in, and then authenticate the client using the Jazz account ID and secret from the database.
 
 ## Creating Jazz Accounts
 
@@ -21,13 +20,47 @@ You should [set up a server worker](/docs/server-side/setup#generating-credentia
 
 In production you should avoid creating accounts for users that already have them, and ensure that failures are handled gracefully.
 
+It's also worth noting that you should check that your account schema is set up properly first, in order to ensure that the accounts get created correctly with the profile and root. If you wish to have centralised admin access to the user's root, you should add your server worker as an admin during the migration.
+
+<FileName>schema.ts</FileName>
+<CodeGroup>
+```ts
+import { co, z } from 'jazz-tools';
+import { PUBLIC_JAZZ_WORKER_ACCOUNT } from "$env/static/public";
+
+const MyAppAccountRoot = co.map({
+  someMap: co.map({})
+})
+export const MyAppAccount = co.account({
+  root: MyAppAccountRoot,
+  profile: co.profile({})
+}).withMigration((account, creationProps?: { name: string }) => {
+  if (!account.$jazz.has("root")) {
+    // Load the worker
+    const worker = co.account().load(PUBLIC_JAZZ_WORKER_ACCOUNT);
+    const group = Group.create();
+    // Add it as a member of a group
+    Group.addMember(worker, 'admin');
+    // Create the root using the group to grant your server worker admin access on the user's account root.
+    const myRoot = MyAppAccountRoot.create({
+      someMap: {}
+    }, group);
+
+    account.$jazz.set("root", myRoot);
+  }
+});
+````
+</CodeGroup>
+
+
 <Alert variant="info" tip="Security Note" className="mt-4">
   Account secrets and IDs are immutable, and are the only credentials needed to access a Jazz user's data. Don't store the secret in plaintext. If a Jazz secret is lost, the account cannot be recovered. You will need to issue a new Jazz account.
 </Alert>
 
+{/* TODO: Make this framework friendly */}
 <CodeGroup preferWrap className="mt-4">
 ```ts
-import { Account } from "jazz-tools";
+import { MyAppAccount } from "./schema";
 import { startWorker } from "jazz-tools/worker";
 import { PUBLIC_JAZZ_WORKER_ACCOUNT } from "$env/static/public";
 import { JAZZ_WORKER_SECRET } from "$env/static/private";
@@ -41,8 +74,9 @@ const { worker } = await startWorker({
 const allUsers = await db.query.users.findMany();
 
 for (const user of allUsers) {
-  const { accountID, accountSecret } = await Account.createAs(worker, { name: user.name });
-
+  const account = await MyAppAccount.createAs(worker, { creationProps: { name: user.name } });
+  const accountID = account.$jazz.id;
+  const accountSecret = account.$jazz.localNode.getCurrentAgent().agentSecret;
   const encryptedSecret = await encrypt(accountSecret); // use your implementation here
   // Persist the Jazz account ID and secret in your existing database
   await db.query.users.update({
