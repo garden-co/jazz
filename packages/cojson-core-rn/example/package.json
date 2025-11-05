@@ -1,5 +1,5 @@
 {
-  "name": "react-native-cojson-core-rn-example",
+  "name": "cojson-core-rn-example",
   "version": "0.0.1",
   "private": true,
   "scripts": {
@@ -25,7 +25,8 @@
     "@react-native/typescript-config": "0.81.1",
     "@types/react": "^19.1.0",
     "react-native-builder-bob": "^0.40.14",
-    "react-native-monorepo-config": "^0.1.9"
+    "react-native-monorepo-config": "^0.1.9",
+    "rn-cojson-core-spec": "workspace:*"
   },
   "engines": {
     "node": ">=20"

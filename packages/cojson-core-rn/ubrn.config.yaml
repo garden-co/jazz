@@ -1,3 +1,8 @@
+
+
 rust:
   directory: ./../../crates/cojson-core-uniffi
   manifestPath: Cargo.toml
+bindings:
+  native_bindings_dir: swift  # ← Swift bindings requested
+  

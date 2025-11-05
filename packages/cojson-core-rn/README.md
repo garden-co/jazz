@@ -1,12 +1,12 @@
-# react-native-cojson-core-rn
+# cojson-core-rn
 
-cojson core for react-native
+cojson core for react native
 
 ## Installation
 
 
 ```sh
-npm install react-native-cojson-core-rn
+npm install cojson-core-rn
 ```
 
 
@@ -14,7 +14,7 @@ npm install react-native-cojson-core-rn
 
 
 ```js
-import { multiply } from 'react-native-cojson-core-rn';
+import { multiply } from 'cojson-core-rn';
 
 // ...
 

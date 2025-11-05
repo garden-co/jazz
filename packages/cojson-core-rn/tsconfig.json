@@ -2,7 +2,7 @@
   "compilerOptions": {
     "rootDir": ".",
     "paths": {
-      "react-native-cojson-core-rn": ["./src/index"]
+      "cojson-core-rn": ["./src/index"]
     },
     "allowUnreachableCode": false,
     "customConditions": ["react-native-strict-api"],

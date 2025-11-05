@@ -549,6 +549,7 @@ async function promptUser(
     });
   }
 
+  // @ts-ignore
   const answers = await inquirer.prompt(questions);
 
   return {

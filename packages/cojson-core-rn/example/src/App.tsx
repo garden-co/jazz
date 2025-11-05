@@ -1,14 +1,12 @@
 import { Text, View, StyleSheet } from "react-native";
-import { ed25519Sign, newEd25519SigningKey } from "react-native-cojson-core-rn";
+import { multiply } from "cojson-core-rn";
 
-const signingKey = newEd25519SigningKey();
-const message = new TextEncoder().encode("Hello, World!");
-const signature = ed25519Sign(signingKey, message.buffer as ArrayBuffer);
-console.log(signature);
+const result = multiply(3, 7);
+
 export default function App() {
   return (
     <View style={styles.container}>
-      <Text>Result: {signature.toString()}</Text>
+      <Text>Result: {result}</Text>
     </View>
   );
 }
