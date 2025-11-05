@@ -1,0 +1,16 @@
+[package]
+name = "cojson_core_rn"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow = "1.0.99"
+craby = "0.1.0-rc"
+cxx = { version = "1.0.187", features = ["c++20"] }
+
+[build-dependencies]
+craby_build = { version = "0.1.0-rc", features = ["cxx"] }
+
+[lib]
+name = "cojsoncorern"
+crate-type = ["staticlib"]

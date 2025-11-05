@@ -14,6 +14,7 @@ const extraNodeModules = {
 const watchFolders = [
   path.resolve(workspaceRoot, "node_modules"),
   path.resolve(workspaceRoot, "packages"),
+  path.resolve(workspaceRoot, "crates"),
 ];
 
 const nodeModulesPaths = [

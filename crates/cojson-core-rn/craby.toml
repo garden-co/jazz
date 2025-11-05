@@ -1,0 +1,6 @@
+[project]
+name = "cojson_core_rn"
+source_dir = "src"
+
+[android]
+package_name = "rs.craby.cojsoncorern"
