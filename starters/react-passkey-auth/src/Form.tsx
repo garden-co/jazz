@@ -2,11 +2,11 @@ import { useAccount } from "jazz-tools/react";
 import { JazzAccount } from "./schema";
 
 export function Form() {
-  const { me } = useAccount(JazzAccount, {
+  const me = useAccount(JazzAccount, {
     resolve: { profile: true, root: true },
   });
 
-  if (!me) return null;
+  if (!me.$isLoaded) return null;
 
   return (
     <div className="grid gap-4 border p-8 border-stone-200">

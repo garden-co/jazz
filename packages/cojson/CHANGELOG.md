@@ -1,5 +1,72 @@
 # cojson
 
+## 0.19.0
+
+### Patch Changes
+
+- cojson-core-wasm@0.19.0
+- cojson-core-napi@0.19.0
+
+## 0.18.38
+
+### Patch Changes
+
+- 349ca48: chore: improve error logging for invalid transactions
+- 68781a0: Disable client-to-client streaming state propagation
+  - cojson-core-wasm@0.18.38
+  - cojson-core-napi@0.18.38
+
+## 0.18.37
+
+### Patch Changes
+
+- 0e923d1: Fixed permission verification in groups when members are revoked
+- fd89225: Export PeerState
+  - cojson-core-wasm@0.18.37
+  - cojson-core-napi@0.18.37
+
+## 0.18.36
+
+### Patch Changes
+
+- af3fe4c: Disable the background child key rotation for groups
+  - cojson-core-wasm@0.18.36
+  - cojson-core-napi@0.18.36
+
+## 0.18.35
+
+### Patch Changes
+
+- d47ac6d: Remove neverthrow to easily propagate the original stacktrace of the transaction errors
+  - cojson-core-wasm@0.18.35
+  - cojson-core-napi@0.18.35
+
+## 0.18.34
+
+### Patch Changes
+
+- 4a79953: Fixed streaming status checks when handling streaming updates
+- d7e5cc8: Aligned the chunking algorithm of the local transactions sync with the one used for the general sync
+  - cojson-core-wasm@0.18.34
+  - cojson-core-napi@0.18.34
+
+## 0.18.33
+
+### Patch Changes
+
+- 5ffe0a9: - Wait for the full download of all the dependency graph before running the migrations
+  - Re-enable the progressive child key rotation
+  - cojson-core-wasm@0.18.33
+  - cojson-core-napi@0.18.33
+
+## 0.18.32
+
+### Patch Changes
+
+- 8f47a9e: Switch to the native decrypt when decrypting transactions with RNQuickCrypto
+  - cojson-core-wasm@0.18.32
+  - cojson-core-napi@0.18.32
+
 ## 0.18.31
 
 ### Patch Changes

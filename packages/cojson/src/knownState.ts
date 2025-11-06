@@ -109,15 +109,50 @@ export function cloneKnownState(knownState: CoValueKnownState) {
 /**
  * Checks if all the local sessions have the same counters as in remote.
  */
-export function areLocalSessionsUploaded(
-  local: Record<string, number>,
-  remote: Record<string, number>,
+export function areCurrentSessionsInSyncWith(
+  current: Record<string, number>,
+  target: Record<string, number>,
 ) {
-  for (const sessionId of Object.keys(local)) {
-    if (local[sessionId] !== remote[sessionId]) {
+  for (const [sessionId, currentCount] of Object.entries(current)) {
+    const targetCount = target[sessionId] ?? 0;
+    if (currentCount !== targetCount) {
       return false;
     }
   }
 
   return true;
+}
+
+/**
+ * Checks if all the local sessions have the same counters as in remote.
+ */
+export function isKnownStateSubsetOf(
+  current: Record<string, number>,
+  target: Record<string, number>,
+) {
+  for (const [sessionId, currentCount] of Object.entries(current)) {
+    const targetCount = target[sessionId] ?? 0;
+    if (currentCount > targetCount) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+/**
+ * Returns the record with the sessions that need to be sent to the target
+ */
+export function getKnownStateToSend(
+  current: Record<string, number>,
+  target: Record<string, number>,
+) {
+  const toSend: Record<string, number> = {};
+  for (const [sessionId, currentCount] of Object.entries(current)) {
+    const targetCount = target[sessionId] ?? 0;
+    if (currentCount > targetCount) {
+      toSend[sessionId] = currentCount;
+    }
+  }
+  return toSend;
 }

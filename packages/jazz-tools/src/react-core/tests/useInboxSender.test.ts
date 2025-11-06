@@ -1,6 +1,7 @@
 // @vitest-environment happy-dom
 
 import { CoMap, Group, Inbox, Loaded, co, z } from "jazz-tools";
+import { assertLoaded } from "jazz-tools/testing";
 import { describe, expect, it } from "vitest";
 import {
   experimental_useInboxSender,
@@ -63,7 +64,8 @@ describe("useInboxSender", () => {
       loadAs: account,
     });
 
-    expect(responseMap!.value).toEqual("got it");
+    assertLoaded(responseMap);
+    expect(responseMap.value).toEqual("got it");
   });
 
   it("should regenerate the InboxSender if the active account changes", async () => {

@@ -202,7 +202,7 @@ export function Icon({
 
   const roundedClasses = {
     xs: "rounded-xs",
-    sm: "rounded-sm",
+    sm: "rounded-xs",
     md: "rounded-md",
     lg: "rounded-lg",
     xl: "rounded-xl",

@@ -53,7 +53,7 @@ export class WebhookRegistry {
   ) {
     const registry = await RegistryState.load(registryId);
 
-    if (!registry) {
+    if (!registry.$isLoaded) {
       throw new Error(`Webhook registry with ID ${registryId} not found`);
     }
 
@@ -94,7 +94,7 @@ export class WebhookRegistry {
    */
   unregister(webhookId: string): void {
     const webhook = this.state[webhookId];
-    if (!webhook) {
+    if (!webhook?.$isLoaded) {
       throw new Error(`Webhook with ID ${webhookId} not found`);
     }
 
@@ -366,7 +366,7 @@ export const registerWebhook = async (options: {
 
   const registry = await RegistryState.load(registryId);
 
-  if (!registry) {
+  if (!registry.$isLoaded) {
     throw new Error(`Couldn't load registry with ID ${registryId}`);
   }
 

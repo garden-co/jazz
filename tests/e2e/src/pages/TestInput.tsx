@@ -9,10 +9,10 @@ export class InputTestCoMap extends CoMap {
 export function TestInput() {
   const [id, setId] = useState<ID<InputTestCoMap> | undefined>(undefined);
   const coMap = useCoState(InputTestCoMap, id);
-  const { me } = useAccount();
+  const me = useAccount();
 
   useEffect(() => {
-    if (!me || id) return;
+    if (!me.$isLoaded || id) return;
 
     const group = Group.create({ owner: me });
 
@@ -21,13 +21,12 @@ export function TestInput() {
     setId(InputTestCoMap.create({ title: "" }, { owner: group }).$jazz.id);
   }, [me]);
 
-  if (!coMap) return null;
+  if (!coMap.$isLoaded) return null;
 
   return (
     <input
-      value={coMap?.title ?? ""}
+      value={coMap.title}
       onChange={(e) => {
-        if (!coMap) return;
         coMap.$jazz.set("title", e.target.value);
       }}
     />

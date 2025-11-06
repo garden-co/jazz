@@ -11,22 +11,27 @@ import { JazzAccount, JazzProfile } from "./schema";
 import { BranchManagement } from "./BranchManagement";
 
 export function Editor() {
-  const { me } = useAccount(JazzAccount, {
-    resolve: { profile: { branches: true } },
+  const bioId = useAccount(JazzAccount, {
+    resolve: { profile: true },
+    select: (me) => (me.$isLoaded ? me.profile.$jazz.refs.bio.id : undefined),
   });
   const editorRef = useRef<HTMLDivElement>(null);
 
   const [branch, setBranch] = useState<string | undefined>(undefined);
-  const bio = useCoState(
-    JazzProfile.shape.bio,
-    me?.profile.$jazz.refs.bio?.id,
-    {
-      unstable_branch: branch ? { name: branch, owner: me } : undefined,
-    },
-  );
+  const selectedBranch = useAccount(JazzAccount, {
+    select: (me) =>
+      branch && me.$isLoaded ? { name: branch, owner: me } : undefined,
+  });
 
+  const bio = useCoState(JazzProfile.shape.bio, bioId, {
+    unstable_branch: selectedBranch,
+  });
+
+  const bioBranchName = bio.$isLoaded ? bio.$jazz.branchName : undefined;
   useEffect(() => {
-    if (!editorRef.current || !bio) return;
+    if (!editorRef.current || !bio.$isLoaded) {
+      return;
+    }
 
     const schema = new Schema({
       nodes: addListNodes(basicSchema.spec.nodes, "paragraph block*", "block"),
@@ -47,9 +52,9 @@ export function Editor() {
     return () => {
       view.destroy();
     };
-  }, [bio?.$jazz.id, bio?.$jazz.branchName]); // Only recreate if the account or the branch changes
+  }, [bioId, bio.$jazz.loadingState, bioBranchName]); // Only recreate if the loaded bio or the branch change
 
-  if (!me || !bio) return null;
+  if (!bio.$isLoaded) return null;
 
   return (
     <div className="flex flex-col">
@@ -57,7 +62,7 @@ export function Editor() {
         <BranchManagement
           currentBranch={branch}
           onBranchChange={setBranch}
-          onBranchMerge={() => bio?.$jazz.unstable_merge()}
+          onBranchMerge={() => bio.$jazz.unstable_merge()}
         />
         <div className="flex-1 flex flex-col gap-2">
           <label className="text-sm font-medium text-stone-600">Richtext</label>

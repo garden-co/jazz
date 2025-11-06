@@ -192,11 +192,11 @@ const grantRegistrationRights = ({
 
     const account = yield* Effect.promise(() => co.account().load(accountID));
 
-    if (!account) {
+    if (!account.$isLoaded) {
       throw new Error("Account not found");
     }
 
-    if (!registry) {
+    if (!registry.$isLoaded) {
       throw new Error("Couldn't load registry with ID " + registryID);
     }
 

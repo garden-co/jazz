@@ -9,8 +9,11 @@ import {
   Account,
   AnonymousJazzAgent,
   CoValueClassOrSchema,
+  CoValueLoadingState,
+  NotLoadedCoValueState,
   type Group,
   Loaded,
+  MaybeLoaded,
   RefsToResolve,
   RefsToResolveStrict,
   RegisteredSchemas,
@@ -20,6 +23,7 @@ import {
   SubscriptionScope,
   type SubscriptionValue,
   TypeSym,
+  NotLoaded,
   activeAccountContext,
   coValueClassFromCoValueClassOrSchema,
   getSubscriptionScope,
@@ -49,6 +53,8 @@ export interface CoValue {
   $jazz: {
     /** @category Content */
     readonly id: ID<CoValue>;
+    /** @category Content */
+    loadingState: typeof CoValueLoadingState.LOADED;
     /** @category Collaboration */
     owner?: Group;
     /** @internal */
@@ -61,6 +67,11 @@ export interface CoValue {
     branchName: string | undefined;
     unstable_merge: () => void;
   };
+  /**
+   * Whether the CoValue is loaded. Can be used to distinguish between loaded and {@link NotLoaded} CoValues.
+   * For more information about the CoValue's loading state, use {@link $jazz.loadingState}.
+   */
+  $isLoaded: true;
 
   /** @category Stringifying & Inspection */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -96,6 +107,16 @@ export function isCoValueClass<V extends CoValue>(
  */
 export type ID<T> = string;
 
+export function createUnloadedCoValue<T extends CoValue>(
+  id: ID<T>,
+  loadingState: NotLoadedCoValueState,
+): NotLoaded<T> {
+  return {
+    $jazz: { id, loadingState },
+    $isLoaded: false,
+  };
+}
+
 export function loadCoValueWithoutMe<
   V extends CoValue,
   const R extends RefsToResolve<V>,
@@ -108,7 +129,7 @@ export function loadCoValueWithoutMe<
     skipRetry?: boolean;
     unstable_branch?: BranchDefinition;
   },
-): Promise<Resolved<V, R> | null> {
+): Promise<MaybeLoaded<Resolved<V, R>>> {
   return loadCoValue(cls, id, {
     ...options,
     loadAs: options?.loadAs ?? activeAccountContext.get(),
@@ -128,7 +149,7 @@ export function loadCoValue<
     skipRetry?: boolean;
     unstable_branch?: BranchDefinition;
   },
-): Promise<Resolved<V, R> | null> {
+): Promise<MaybeLoaded<Resolved<V, R>>> {
   return new Promise((resolve) => {
     subscribeToCoValue<V, R>(
       cls,
@@ -139,10 +160,10 @@ export function loadCoValue<
         syncResolution: true,
         skipRetry: options.skipRetry,
         onUnavailable: () => {
-          resolve(null);
+          resolve(createUnloadedCoValue(id, CoValueLoadingState.UNAVAILABLE));
         },
         onUnauthorized: () => {
-          resolve(null);
+          resolve(createUnloadedCoValue(id, CoValueLoadingState.UNAUTHORIZED));
         },
         unstable_branch: options.unstable_branch,
       },
@@ -176,7 +197,7 @@ export async function ensureCoValueLoaded<
     },
   );
 
-  if (!response) {
+  if (!response.$isLoaded) {
     throw new Error("Failed to deeply load CoValue " + existing.$jazz.id);
   }
 
@@ -300,18 +321,18 @@ export function subscribeToCoValue<
   const handleUpdate = (value: SubscriptionValue<V, any>) => {
     if (unsubscribed) return;
 
-    if (value.type === "unavailable") {
+    if (value.type === CoValueLoadingState.UNAVAILABLE) {
       options.onUnavailable?.();
 
       // Don't log unavailable errors when `loadUnique` or `upsertUnique` are used
       if (!options.skipRetry) {
         console.error(value.toString());
       }
-    } else if (value.type === "unauthorized") {
+    } else if (value.type === CoValueLoadingState.UNAUTHORIZED) {
       options.onUnauthorized?.();
 
       console.error(value.toString());
-    } else if (value.type === "loaded") {
+    } else if (value.type === CoValueLoadingState.LOADED) {
       listener(value.value as Resolved<V, R>, unsubscribe);
     }
   };
@@ -472,7 +493,7 @@ export async function unstable_loadUnique<
     owner: Account | Group;
     resolve?: ResolveQueryStrict<S, R>;
   },
-): Promise<Loaded<S, R> | null> {
+): Promise<MaybeLoaded<Loaded<S, R>>> {
   const cls = coValueClassFromCoValueClassOrSchema(schema);
 
   if (
@@ -484,15 +505,14 @@ export async function unstable_loadUnique<
 
   const header = cls._getUniqueHeader(options.unique, options.owner.$jazz.id);
 
+  // @ts-expect-error the CoValue class is too generic for TS to infer its instances are CoValues
   return internalLoadUnique(cls, {
     header,
     onCreateWhenMissing: options.onCreateWhenMissing,
-    // @ts-expect-error loaded is not compatible with Resolved at type level, but they are the same thing
     onUpdateWhenFound: options.onUpdateWhenFound,
     owner: options.owner,
-    // @ts-expect-error loaded is not compatible with Resolved at type level, but they are the same thing
     resolve: options.resolve,
-  }) as unknown as Loaded<S, R> | null;
+  }) as unknown as MaybeLoaded<Loaded<S, R>>;
 }
 
 export async function internalLoadUnique<
@@ -507,7 +527,7 @@ export async function internalLoadUnique<
     owner: Account | Group;
     resolve?: RefsToResolveStrict<V, R>;
   },
-): Promise<Resolved<V, R> | null> {
+): Promise<MaybeLoaded<Resolved<V, R>>> {
   const loadAs = options.owner.$jazz.loadedAs;
 
   const node =
@@ -519,7 +539,7 @@ export async function internalLoadUnique<
   // retrying failures
   // This way when we want to upsert we are sure that, if the load failed
   // it failed because the unique value was missing
-  await loadCoValueWithoutMe(cls, id, {
+  const maybeLoadedCoValue = await loadCoValueWithoutMe(cls, id, {
     skipRetry: true,
     loadAs,
   });
@@ -539,7 +559,9 @@ export async function internalLoadUnique<
   }
 
   if (!isAvailable) {
-    return null;
+    // @ts-expect-error the resolve query of the loaded values is not necessarily the same,
+    // but we're only returning not-loaded values
+    return maybeLoadedCoValue;
   }
 
   if (options.onUpdateWhenFound) {
@@ -549,7 +571,7 @@ export async function internalLoadUnique<
       resolve: options.resolve,
     });
 
-    if (loaded) {
+    if (loaded.$isLoaded) {
       // we don't return the update result because
       // we want to run another load to backfill any possible partially loaded
       // values that have been set in the update
@@ -642,13 +664,13 @@ export async function exportCoValue<
 
   const value = await new Promise<Loaded<S, R> | null>((resolve) => {
     rootNode.setListener((value) => {
-      if (value.type === "unavailable") {
+      if (value.type === CoValueLoadingState.UNAVAILABLE) {
         resolve(null);
         console.error(value.toString());
-      } else if (value.type === "unauthorized") {
+      } else if (value.type === CoValueLoadingState.UNAUTHORIZED) {
         resolve(null);
         console.error(value.toString());
-      } else if (value.type === "loaded") {
+      } else if (value.type === CoValueLoadingState.LOADED) {
         resolve(value.value as Loaded<S, R>);
       }
 
@@ -679,10 +701,10 @@ function loadContentPiecesFromSubscription(
 
   valuesExported.add(subscription.id);
 
-  const core = subscription.getCurrentValue()?.$jazz.raw
-    .core as AvailableCoValueCore;
+  const currentValue = subscription.getCurrentValue();
 
-  if (core) {
+  if (typeof currentValue !== "string") {
+    const core = currentValue.$jazz.raw.core as AvailableCoValueCore;
     loadContentPiecesFromCoValue(core, valuesExported, contentPieces);
   }
 
@@ -709,7 +731,7 @@ function loadContentPiecesFromCoValue(
     }
   }
 
-  const pieces = core.verified.newContentSince(undefined) ?? [];
+  const pieces = core.newContentSince() ?? [];
 
   for (const piece of pieces) {
     contentPieces.push(piece);
@@ -742,7 +764,7 @@ export function unstable_mergeBranch(
   }
 
   function handleMerge(subscriptionNode: SubscriptionScope<CoValue>) {
-    if (subscriptionNode.value.type === "loaded") {
+    if (subscriptionNode.value.type === CoValueLoadingState.LOADED) {
       subscriptionNode.value.value.$jazz.raw.core.mergeBranch();
     }
 
@@ -762,7 +784,7 @@ export async function unstable_mergeBranchWithResolve<
   id: ID<CoValue>,
   options: {
     resolve?: ResolveQueryStrict<S, R>;
-    loadAs: Account | AnonymousJazzAgent;
+    loadAs?: Account | AnonymousJazzAgent;
     branch: BranchDefinition;
   },
 ) {
@@ -786,11 +808,11 @@ export async function unstable_mergeBranchWithResolve<
 
   await new Promise<void>((resolve, reject) => {
     rootNode.setListener((value) => {
-      if (value.type === "unavailable") {
+      if (value.type === CoValueLoadingState.UNAVAILABLE) {
         reject(new Error("Unable to load the branch. " + value.toString()));
-      } else if (value.type === "unauthorized") {
+      } else if (value.type === CoValueLoadingState.UNAUTHORIZED) {
         reject(new Error("Unable to load the branch. " + value.toString()));
-      } else if (value.type === "loaded") {
+      } else if (value.type === CoValueLoadingState.LOADED) {
         resolve();
       }
 

@@ -91,7 +91,7 @@ export async function resolveCoValue(
       extendedType = "image";
     } else if (isAccount(snapshot)) {
       extendedType = "account";
-    } else if (isGroup(snapshot)) {
+    } else if (value.core.isGroup()) {
       extendedType = "group";
     }
   }
@@ -127,7 +127,7 @@ function subscribeToCoValue(
           extendedType = "image";
         } else if (isAccount(snapshot)) {
           extendedType = "account";
-        } else if (isGroup(snapshot)) {
+        } else if (value.core.isGroup()) {
           extendedType = "group";
         }
       } else if (type === "costream") {

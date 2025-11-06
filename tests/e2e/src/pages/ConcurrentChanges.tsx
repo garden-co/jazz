@@ -13,7 +13,7 @@ function getIdParam() {
 export function ConcurrentChanges() {
   const [id, setId] = useState(getIdParam);
   const counter = useCoState(Counter, id);
-  const { me } = useAccount();
+  const me = useAccount();
 
   useEffect(() => {
     if (id) {
@@ -23,14 +23,15 @@ export function ConcurrentChanges() {
     }
   }, [id]);
 
+  const myCounter = counter.$isLoaded ? counter.byMe?.value : undefined;
   useEffect(() => {
-    if (counter?.byMe) {
+    if (counter.$isLoaded && counter.byMe) {
       count(counter);
     }
-  }, [counter?.byMe?.value !== undefined]);
+  }, [myCounter !== undefined]);
 
   const createCounter = () => {
-    if (!me) return;
+    if (!me.$isLoaded) return;
 
     const group = Group.create();
 
@@ -43,15 +44,16 @@ export function ConcurrentChanges() {
     window.open(`?id=${id}`, "_blank");
   };
 
-  const done = Object.entries(counter?.perSession ?? {}).every(
-    ([_, entry]) => entry.value.value === 300,
-  );
+  const allCounters = counter.$isLoaded
+    ? Object.entries(counter.perSession ?? {})
+    : [];
+  const done = allCounters.every(([_, entry]) => entry.value.value === 300);
 
   return (
     <div>
       <h1>Concurrent Changes</h1>
       <p>
-        {Object.entries(counter?.perSession ?? {}).map(([sessionId, entry]) => (
+        {allCounters.map(([sessionId, entry]) => (
           <div key={sessionId}>
             <p>{sessionId}</p>
             <p data-testid="value">{entry.value.value}</p>

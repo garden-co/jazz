@@ -4,12 +4,12 @@ import { JazzAccount, Organization } from "./schema.ts";
 
 export function AcceptInvitePage() {
   const navigate = useNavigate();
-  const { me } = useAccount(JazzAccount, {
+  const me = useAccount(JazzAccount, {
     resolve: { root: { organizations: true } },
   });
 
   const onAccept = (organizationId: string) => {
-    if (me?.root?.organizations) {
+    if (me.$isLoaded) {
       Organization.load(organizationId).then((organization) => {
         if (organization) {
           // avoid duplicates

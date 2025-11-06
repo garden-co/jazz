@@ -1,5 +1,4 @@
 import { UpDownCounter, ValueType, metrics } from "@opentelemetry/api";
-import { Result, err, ok } from "neverthrow";
 import type { PeerState } from "../PeerState.js";
 import type { RawCoValue } from "../coValue.js";
 import type { ControlledAccountOrAgent } from "../coValues/account.js";
@@ -60,7 +59,15 @@ export function idforHeader(
   return `co_z${hash.slice("shortHash_z".length)}`;
 }
 
+let logPermissionErrors = false;
+
+export function enablePermissionErrors() {
+  logPermissionErrors = true;
+}
+
 export class VerifiedTransaction {
+  // The ID of the CoValue that the transaction belongs to
+  coValueId: RawCoID;
   dispatchTransaction: (transaction: VerifiedTransaction) => void;
   // The account or agent that made the transaction
   author: RawAccountID | AgentID;
@@ -80,10 +87,13 @@ export class VerifiedTransaction {
   isValidated: boolean = false;
   // Whether the transaction is valid, as per membership rules
   isValid: boolean = false;
+  // The error message that caused the transaction to be invalid
+  validationErrorMessage: string | undefined = undefined;
   // The previous verified transaction for the same session
   previous: VerifiedTransaction | undefined;
 
   constructor(
+    coValueId: RawCoID,
     sessionID: SessionID,
     txIndex: number,
     tx: Transaction,
@@ -108,6 +118,7 @@ export class VerifiedTransaction {
           txIndex,
         };
 
+    this.coValueId = coValueId;
     this.currentTxID = txID;
     this.sourceTxID = undefined;
     this.tx = tx;
@@ -152,6 +163,7 @@ export class VerifiedTransaction {
 
   markValid() {
     this.isValid = true;
+    this.validationErrorMessage = undefined;
 
     if (!this.isValidated) {
       this.isValidated = true;
@@ -159,9 +171,19 @@ export class VerifiedTransaction {
     }
   }
 
-  markInvalid() {
+  markInvalid(errorMessage: string, attributes?: Record<string, JsonValue>) {
     this.isValidated = true;
     this.isValid = false;
+
+    this.validationErrorMessage = errorMessage;
+    if (logPermissionErrors === true) {
+      logger.error("Invalid transaction: " + errorMessage, {
+        coValueId: this.coValueId,
+        txID: this.txID,
+        author: this.author,
+        ...attributes,
+      });
+    }
   }
 }
 
@@ -201,7 +223,7 @@ export class CoValueCore {
       }
     | {
         type: "errored";
-        error: TryAddTransactionsError;
+        error: unknown;
       }
   >();
 
@@ -254,63 +276,77 @@ export class CoValueCore {
     return this.hasVerifiedContent();
   }
 
-  /**
-   * True if the coValue is completely downloaded:
-   * - the current coValue is available and not streaming
-   * - the group is available and not streaming
-   * - TODO: all the parent groups are available and not streaming
-   */
-  isCompletelyDownloaded(): this is AvailableCoValueCore {
+  isCompletelyDownloaded(): boolean {
     if (!this.hasVerifiedContent()) {
       return false;
     }
 
-    if (this.verified.isStreaming()) {
+    if (this.isStreaming()) {
       return false;
     }
 
-    const group = this.safeGetGroup();
-
-    // TODO: Group coValues should be completely downloaded when all their parent groups are completely downloaded
-    if (!group) {
-      return true;
+    if (this.incompleteDependencies.size > 0) {
+      return false;
     }
 
-    return group.core.isCompletelyDownloaded();
+    return true;
+  }
+
+  isStreaming() {
+    return this.verified?.isStreaming() ?? false;
   }
 
   hasVerifiedContent(): this is AvailableCoValueCore {
     return !!this.verified;
   }
 
+  /**
+   * Returns the CoValue data as NewContentMessage objects, excluding the transactions that are part of the given known state.
+   *
+   * Used to serialize the CoValue data to send it to peers and storage.
+   */
+  newContentSince(
+    knownState?: CoValueKnownState,
+  ): NewContentMessage[] | undefined {
+    return this.verified?.newContentSince(knownState);
+  }
+
   isErroredInPeer(peerId: PeerID) {
     return this.getLoadingStateForPeer(peerId) === "errored";
   }
 
-  waitFor(callback: (value: CoValueCore) => boolean) {
+  waitFor(opts: {
+    predicate: (value: CoValueCore) => boolean;
+    onSuccess: (value: CoValueCore) => void;
+  }) {
+    const { predicate, onSuccess } = opts;
+    this.subscribe((core, unsubscribe) => {
+      if (predicate(core)) {
+        unsubscribe();
+        onSuccess(core);
+      }
+    }, true);
+  }
+
+  waitForAsync(callback: (value: CoValueCore) => boolean) {
     return new Promise<CoValueCore>((resolve) => {
-      this.subscribe((core, unsubscribe) => {
-        if (callback(core)) {
-          unsubscribe();
-          resolve(core);
-        }
-      }, true);
+      this.waitFor({ predicate: callback, onSuccess: resolve });
     });
   }
 
   waitForAvailableOrUnavailable(): Promise<CoValueCore> {
-    return this.waitFor(
+    return this.waitForAsync(
       (core) => core.isAvailable() || core.loadingState === "unavailable",
     );
   }
 
   waitForAvailable(): Promise<CoValueCore> {
-    return this.waitFor((core) => core.isAvailable());
+    return this.waitForAsync((core) => core.isAvailable());
   }
 
   waitForFullStreaming(): Promise<CoValueCore> {
-    return this.waitFor(
-      (core) => core.isAvailable() && !core.verified.isStreaming(),
+    return this.waitForAsync(
+      (core) => core.isAvailable() && !core.isStreaming(),
     );
   }
 
@@ -368,7 +404,7 @@ export class CoValueCore {
 
   missingDependencies = new Set<RawCoID>();
 
-  isCircularMissingDependency(dependency: CoValueCore) {
+  isCircularDependency(dependency: CoValueCore) {
     const visited = new Set<RawCoID>();
     const stack = [dependency];
 
@@ -381,7 +417,7 @@ export class CoValueCore {
 
       visited.add(current.id);
 
-      for (const dependency of current.missingDependencies) {
+      for (const dependency of current.dependencies) {
         if (dependency === this.id) {
           return true;
         }
@@ -393,14 +429,6 @@ export class CoValueCore {
     }
 
     return false;
-  }
-
-  markDependencyAvailable(dependency: RawCoID) {
-    this.missingDependencies.delete(dependency);
-
-    if (this.missingDependencies.size === 0) {
-      this.scheduleNotifyUpdate();
-    }
   }
 
   newContentQueue: {
@@ -422,17 +450,16 @@ export class CoValueCore {
       return;
     }
 
-    this.subscribe((core, unsubscribe) => {
-      if (!core.hasMissingDependencies()) {
-        unsubscribe();
-
+    this.waitFor({
+      predicate: (core) => !core.hasMissingDependencies(),
+      onSuccess: () => {
         const enqueuedNewContent = this.newContentQueue;
         this.newContentQueue = [];
 
         for (const { msg, from } of enqueuedNewContent) {
           this.node.syncManager.handleNewContent(msg, from);
         }
-      }
+      },
     });
   }
 
@@ -469,12 +496,10 @@ export class CoValueCore {
       new SessionMap(this.id, this.node.crypto, streamingKnownState),
     );
 
-    this.resetKnownStateCache();
-
     return true;
   }
 
-  markErrored(peerId: PeerID, error: TryAddTransactionsError) {
+  markErrored(peerId: PeerID, error: unknown) {
     const previousState = this.loadingState;
     this.loadingStatuses.set(peerId, { type: "errored", error });
     this.updateCounter(previousState);
@@ -526,27 +551,18 @@ export class CoValueCore {
       .then((core) => core.getCurrentContent());
   }
 
-  private _cachedKnownStateWithStreaming?: CoValueKnownState;
   /**
    * Returns the known state considering the known state of the streaming source
    *
    * Used to correctly manage the content & subscriptions during the content streaming process
    */
   knownStateWithStreaming(): CoValueKnownState {
-    if (this._cachedKnownStateWithStreaming) {
-      return this._cachedKnownStateWithStreaming;
-    }
-
-    const knownState = this.verified
-      ? cloneKnownState(this.verified.knownStateWithStreaming())
-      : emptyKnownState(this.id);
-
-    this._cachedKnownStateWithStreaming = knownState;
-
-    return knownState;
+    return (
+      this.verified?.immutableKnownStateWithStreaming() ??
+      emptyKnownState(this.id)
+    );
   }
 
-  private _cachedKnownState?: CoValueKnownState;
   /**
    * Returns the known state of the CoValue
    *
@@ -555,17 +571,7 @@ export class CoValueCore {
    * On change the knownState is invalidated and a new object is returned.
    */
   knownState(): CoValueKnownState {
-    if (this._cachedKnownState) {
-      return this._cachedKnownState;
-    }
-
-    const knownState = this.verified
-      ? cloneKnownState(this.verified.knownState())
-      : emptyKnownState(this.id);
-
-    this._cachedKnownState = knownState;
-
-    return knownState;
+    return this.verified?.immutableKnownState() ?? emptyKnownState(this.id);
   }
 
   get meta(): JsonValue {
@@ -607,31 +613,36 @@ export class CoValueCore {
     newTransactions: Transaction[],
     newSignature: Signature,
     skipVerify: boolean = false,
-  ): Result<true, TryAddTransactionsError> {
-    let result: Result<SignerID | undefined, TryAddTransactionsError>;
+  ) {
+    let signerID: SignerID | undefined;
 
-    if (skipVerify) {
-      result = ok(undefined);
-    } else {
-      result = this.node
-        .resolveAccountAgent(
-          accountOrAgentIDfromSessionID(sessionID),
-          "Expected to know signer of transaction",
-        )
-        .andThen((agent) => {
-          return ok(this.crypto.getAgentSignerID(agent));
-        });
-    }
+    if (!skipVerify) {
+      const result = this.node.resolveAccountAgent(
+        accountOrAgentIDfromSessionID(sessionID),
+        "Expected to know signer of transaction",
+      );
 
-    return result.andThen((signerID) => {
-      if (!this.verified) {
-        return err({
-          type: "TriedToAddTransactionsWithoutVerifiedState",
+      if (result.error || !result.value) {
+        return {
+          type: "ResolveAccountAgentError",
           id: this.id,
-        } satisfies TriedToAddTransactionsWithoutVerifiedStateErrpr);
+          error: result.error,
+        } as const;
       }
 
-      const result = this.verified.tryAddTransactions(
+      signerID = this.crypto.getAgentSignerID(result.value);
+    }
+
+    if (!this.verified) {
+      return {
+        type: "TriedToAddTransactionsWithoutVerifiedState",
+        id: this.id,
+        error: undefined,
+      };
+    }
+
+    try {
+      this.verified.tryAddTransactions(
         sessionID,
         signerID,
         newTransactions,
@@ -639,19 +650,11 @@ export class CoValueCore {
         skipVerify,
       );
 
-      if (result.isOk()) {
-        this.resetKnownStateCache();
-        this.processNewTransactions();
-        this.scheduleNotifyUpdate();
-      }
-
-      return result;
-    });
-  }
-
-  private resetKnownStateCache() {
-    this._cachedKnownState = undefined;
-    this._cachedKnownStateWithStreaming = undefined;
+      this.processNewTransactions();
+      this.scheduleNotifyUpdate();
+    } catch (e) {
+      return { type: "InvalidSignature", id: this.id, error: e } as const;
+    }
   }
 
   private processNewTransactions() {
@@ -764,6 +767,8 @@ export class CoValueCore {
 
     let result: { signature: Signature; transaction: Transaction };
 
+    const knownStateBefore = this.knownState();
+
     if (privacy === "private") {
       const { secret: keySecret, id: keyID } = this.getCurrentReadKey();
 
@@ -790,7 +795,7 @@ export class CoValueCore {
       );
     }
 
-    const { transaction, signature } = result;
+    const { transaction } = result;
 
     // Assign pre-parsed meta and changes to skip the parse/decrypt operation when loading
     // this transaction in the current content
@@ -798,23 +803,13 @@ export class CoValueCore {
 
     this.node.syncManager.recordTransactionsSize([transaction], "local");
 
-    const session = this.verified.sessions.get(sessionID);
-    const txIdx = session ? session.transactions.length - 1 : 0;
-
-    this.resetKnownStateCache();
     this.processNewTransactions();
     this.addDependenciesFromNewTransaction(transaction);
 
     // force immediate notification because local updates may come from the UI
     // where we need synchronous updates
     this.notifyUpdate();
-    this.node.syncManager.syncLocalTransaction(
-      this.verified,
-      transaction,
-      sessionID,
-      signature,
-      txIdx,
-    );
+    this.node.syncManager.syncLocalTransaction(this.verified, knownStateBefore);
 
     return true;
   }
@@ -930,6 +925,7 @@ export class CoValueCore {
         }
 
         const verifiedTransaction = new VerifiedTransaction(
+          this.id,
           sessionID,
           txIndex,
           tx,
@@ -1040,7 +1036,13 @@ export class CoValueCore {
         transaction.sourceTxMadeAt &&
         transaction.sourceTxMadeAt > transaction.currentMadeAt
       ) {
-        transaction.markInvalid();
+        transaction.markInvalid(
+          "Transaction sourceMadeAt is after the currentMadeAt",
+          {
+            sourceTxMadeAt: transaction.sourceTxMadeAt,
+            currentMadeAt: transaction.currentMadeAt,
+          },
+        );
       }
 
       if (sessionID) {
@@ -1163,30 +1165,47 @@ export class CoValueCore {
   }
 
   dependencies: Set<RawCoID> = new Set();
+  incompleteDependencies: Set<RawCoID> = new Set();
   private addDependency(dependency: RawCoID) {
-    if (this.dependencies.has(dependency)) {
-      return true;
+    const dependencyCoValue = this.node.getCoValue(dependency);
+
+    if (
+      this.isCircularDependency(dependencyCoValue) ||
+      this.dependencies.has(dependency)
+    ) {
+      return;
     }
 
     this.dependencies.add(dependency);
-
-    const dependencyCoValue = this.node.getCoValue(dependency);
-
-    if (this.isCircularMissingDependency(dependencyCoValue)) {
-      return true;
-    }
-
     dependencyCoValue.addDependant(this.id);
 
-    if (!dependencyCoValue.isAvailable()) {
-      this.missingDependencies.add(dependency);
-      dependencyCoValue.subscribe((dependencyCoValue, unsubscribe) => {
-        if (dependencyCoValue.isAvailable()) {
-          unsubscribe();
-          this.markDependencyAvailable(dependency);
-        }
+    if (!dependencyCoValue.isCompletelyDownloaded()) {
+      this.incompleteDependencies.add(dependencyCoValue.id);
+      dependencyCoValue.waitFor({
+        predicate: (dependencyCoValue) =>
+          dependencyCoValue.isCompletelyDownloaded(),
+        onSuccess: () => {
+          this.incompleteDependencies.delete(dependencyCoValue.id);
+          if (this.incompleteDependencies.size === 0) {
+            // We want this to propagate immediately in the dependency chain
+            this.notifyUpdate();
+          }
+        },
       });
-      return false;
+    }
+
+    if (!dependencyCoValue.isAvailable()) {
+      this.missingDependencies.add(dependencyCoValue.id);
+      dependencyCoValue.waitFor({
+        predicate: (dependencyCoValue) => dependencyCoValue.isAvailable(),
+        onSuccess: () => {
+          this.missingDependencies.delete(dependencyCoValue.id);
+
+          if (this.missingDependencies.size === 0) {
+            this.notifyUpdate(); // We want this to propagate immediately
+          }
+        },
+      });
     }
   }
 

@@ -1,11 +1,11 @@
 {
 	"name": "jazz-sveltekit",
 	"private": true,
-	"version": "0.0.12",
+	"version": "0.0.20",
 	"type": "module",
 	"scripts": {
 		"dev": "vite dev",
-		"build": "vite build",
+		"build": "pnpm check && vite build",
 		"preview": "vite preview",
 		"prepare": "svelte-kit sync || echo ''",
 		"check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",

@@ -102,7 +102,7 @@ You can use this to test your app with multiple accounts.
 <CodeGroup preferWrap>
 ```ts twoslash
 import { co, z } from 'jazz-tools';
-import { createJazzTestAccount, setActiveAccount } from 'jazz-tools/testing';
+import { assertLoaded, createJazzTestAccount, setActiveAccount } from 'jazz-tools/testing';
 const MyMap = co.map({
   text: z.string()
 })
@@ -134,9 +134,10 @@ setActiveAccount(account2);
 // myMap is still loaded as account1, so we need to load again as account2
 const myMapFromAccount2 = await MyMap.load(myMapId);
 
-expect(myMapFromAccount2?.text)
+assertLoaded(myMapFromAccount2);
+expect(myMapFromAccount2.text)
   .toBe('Created by account1');
-expect(() => myMapFromAccount2?.$jazz.set('text', 'Updated by account2'))
+expect(() => myMapFromAccount2.$jazz.set('text', 'Updated by account2'))
   .toThrow();
 ```
 </CodeGroup>

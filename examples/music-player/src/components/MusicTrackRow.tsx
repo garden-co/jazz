@@ -1,4 +1,9 @@
-import { MusicTrack, MusicaAccount, Playlist } from "@/1_schema";
+import {
+  MusicTrack,
+  Playlist,
+  PlaylistWithTracks,
+  MusicaAccountWithPlaylists,
+} from "@/1_schema";
 import {
   addTrackToPlaylist,
   removeTrackFromAllPlaylists,
@@ -11,8 +16,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { cn } from "@/lib/utils";
-import { Loaded } from "jazz-tools";
-import { useAccountWithSelector, useCoState } from "jazz-tools/react";
+import { useAccount, useCoState } from "jazz-tools/react";
 import { MoreHorizontal, Pause, Play } from "lucide-react";
 import { Fragment, useCallback, useState } from "react";
 import { EditTrackDialog } from "./RenameTrackDialog";
@@ -20,10 +24,7 @@ import { Waveform } from "./Waveform";
 import { Button } from "./ui/button";
 import { useAccountSelector } from "@/components/AccountProvider.tsx";
 
-function isPartOfThePlaylist(
-  trackId: string,
-  playlist: Loaded<typeof Playlist, { tracks: true }>,
-) {
+function isPartOfThePlaylist(trackId: string, playlist: PlaylistWithTracks) {
   return Array.from(playlist.tracks.$jazz.refs).some((t) => t.id === trackId);
 }
 
@@ -43,39 +44,38 @@ export function MusicTrackRow({
   const [isDropdownOpen, setIsDropdownOpen] = useState(false);
   const [isHovered, setIsHovered] = useState(false);
 
-  const playlists = useAccountWithSelector(MusicaAccount, {
-    resolve: {
-      root: { playlists: { $onError: null, $each: { tracks: true } } },
-    },
-    select: (account) => account?.root.playlists,
+  const playlists = useAccount(MusicaAccountWithPlaylists, {
+    select: (account) =>
+      account.$isLoaded && account.root.playlists.$isLoaded
+        ? account.root.playlists
+        : undefined,
   });
 
   const isActiveTrack = useAccountSelector({
-    select: (me) => me.root.activeTrack?.$jazz.id === trackId,
+    select: (me) => me.$isLoaded && me.root.activeTrack?.$jazz.id === trackId,
   });
 
   const canEditTrack = useAccountSelector({
-    select: (me) => Boolean(track && me.canWrite(track)),
+    select: (me) => me.$isLoaded && track.$isLoaded && me.canWrite(track),
   });
 
   function handleTrackClick() {
-    if (!track) return;
+    if (!track.$isLoaded) return;
     onClick(track);
   }
 
   function handleAddToPlaylist(playlist: Playlist) {
-    if (!track) return;
+    if (!track.$isLoaded) return;
     addTrackToPlaylist(playlist, track);
   }
 
   function handleRemoveFromPlaylist(playlist: Playlist) {
-    if (!track) return;
+    if (!track.$isLoaded) return;
     removeTrackFromPlaylist(playlist, track);
   }
 
   function deleteTrack() {
-    if (!track) return;
-
+    if (!track.$isLoaded) return;
     removeTrackFromAllPlaylists(track);
   }
 
@@ -89,6 +89,7 @@ export function MusicTrackRow({
   }, []);
 
   const showWaveform = isHovered || isActiveTrack;
+  const trackTitle = track.$isLoaded ? track.title : "";
 
   return (
     <li
@@ -111,7 +112,7 @@ export function MusicTrackRow({
           isActiveTrack && "md:opacity-100 opacity-100",
         )}
         onClick={handleTrackClick}
-        aria-label={`${isPlaying ? "Pause" : "Play"} ${track?.title}`}
+        aria-label={`${isPlaying ? "Pause" : "Play"} ${trackTitle}`}
       >
         {isPlaying ? (
           <Pause height={16} width={16} fill="currentColor" />
@@ -132,11 +133,11 @@ export function MusicTrackRow({
         onClick={handleTrackClick}
         className="flex items-center overflow-hidden text-ellipsis whitespace-nowrap cursor-pointer flex-1 min-w-0"
       >
-        {track?.title}
+        {trackTitle}
       </button>
 
       {/* Waveform that appears on hover */}
-      {track && showWaveform && (
+      {track.$isLoaded && showWaveform && (
         <div className="flex-1 min-w-0 px-2 items-center hidden md:flex">
           <Waveform
             track={track}
@@ -154,7 +155,7 @@ export function MusicTrackRow({
               <Button
                 variant="ghost"
                 className="h-8 w-8 p-0"
-                aria-label={`Open ${track?.title} menu`}
+                aria-label={`Open ${trackTitle} menu`}
               >
                 <span className="sr-only">Open menu</span>
                 <MoreHorizontal className="h-4 w-4" />
@@ -162,30 +163,32 @@ export function MusicTrackRow({
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end">
               <DropdownMenuItem onSelect={handleEdit}>Edit</DropdownMenuItem>
-              {playlists?.filter(Boolean).map((playlist, playlistIndex) => (
-                <Fragment key={playlistIndex}>
-                  {isPartOfThePlaylist(trackId, playlist) ? (
-                    <DropdownMenuItem
-                      key={`remove-${playlistIndex}`}
-                      onSelect={() => handleRemoveFromPlaylist(playlist)}
-                    >
-                      Remove from {playlist.title}
-                    </DropdownMenuItem>
-                  ) : (
-                    <DropdownMenuItem
-                      key={`add-${playlistIndex}`}
-                      onSelect={() => handleAddToPlaylist(playlist)}
-                    >
-                      Add to {playlist.title}
-                    </DropdownMenuItem>
-                  )}
-                </Fragment>
-              ))}
+              {playlists
+                ?.filter((playlist) => playlist.$isLoaded)
+                .map((playlist, playlistIndex) => (
+                  <Fragment key={playlistIndex}>
+                    {isPartOfThePlaylist(trackId, playlist) ? (
+                      <DropdownMenuItem
+                        key={`remove-${playlistIndex}`}
+                        onSelect={() => handleRemoveFromPlaylist(playlist)}
+                      >
+                        Remove from {playlist.title}
+                      </DropdownMenuItem>
+                    ) : (
+                      <DropdownMenuItem
+                        key={`add-${playlistIndex}`}
+                        onSelect={() => handleAddToPlaylist(playlist)}
+                      >
+                        Add to {playlist.title}
+                      </DropdownMenuItem>
+                    )}
+                  </Fragment>
+                ))}
             </DropdownMenuContent>
           </DropdownMenu>
         </div>
       )}
-      {track && isEditDialogOpen && (
+      {track.$isLoaded && isEditDialogOpen && (
         <EditTrackDialog
           track={track}
           isOpen={isEditDialogOpen}

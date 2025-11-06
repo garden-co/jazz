@@ -40,9 +40,7 @@ export function Switch({
             "block bg-white rounded-full transition-transform duration-300 translate-x-0 ml-[0.1em]",
             size === "sm" ? "w-3 h-3" : "w-5 h-5",
             checked &&
-              (size === "sm"
-                ? "translate-x-[0.5rem]"
-                : "translate-x-[1.01rem]"),
+              (size === "sm" ? "translate-x-2" : "translate-x-[1.01rem]"),
           )}
         />
       </RadixSwitch.Root>

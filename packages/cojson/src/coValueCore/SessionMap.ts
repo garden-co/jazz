@@ -1,4 +1,3 @@
-import { Result, err, ok } from "neverthrow";
 import { ControlledAccountOrAgent } from "../coValues/account.js";
 import type {
   CryptoProvider,
@@ -19,6 +18,9 @@ import {
   KnownStateSessions,
   updateSessionCounter,
   cloneKnownState,
+  combineKnownStateSessions,
+  isKnownStateSubsetOf,
+  getKnownStateToSend,
 } from "../knownState.js";
 
 export type SessionLog = {
@@ -37,6 +39,9 @@ export class SessionMap {
   // Known state related properies, mutated when adding transactions to the session map
   knownState: CoValueKnownState;
   knownStateWithStreaming: CoValueKnownState | undefined;
+  // The immutable version of the known statuses, to get a different reference when the known state is updated
+  private immutableKnownState: CoValueKnownState | undefined;
+  private immutableKnownStateWithStreaming: CoValueKnownState | undefined;
   streamingKnownState?: KnownStateSessions;
 
   constructor(
@@ -53,6 +58,61 @@ export class SessionMap {
         sessions: { ...streamingKnownState },
       };
     }
+  }
+
+  setStreamingKnownState(streamingKnownState: KnownStateSessions) {
+    // if the streaming known state is a subset of the current known state, we can skip the update
+    if (isKnownStateSubsetOf(streamingKnownState, this.knownState.sessions)) {
+      return;
+    }
+
+    const actualStreamingKnownState = getKnownStateToSend(
+      streamingKnownState,
+      this.knownState.sessions,
+    );
+
+    if (this.streamingKnownState) {
+      combineKnownStateSessions(
+        this.streamingKnownState,
+        actualStreamingKnownState,
+      );
+    } else {
+      this.streamingKnownState = actualStreamingKnownState;
+    }
+
+    if (!this.knownStateWithStreaming) {
+      this.knownStateWithStreaming = cloneKnownState(this.knownState);
+    }
+
+    combineKnownStateSessions(
+      this.knownStateWithStreaming.sessions,
+      actualStreamingKnownState,
+    );
+  }
+
+  invalidateKnownStateCache() {
+    this.immutableKnownState = undefined;
+    this.immutableKnownStateWithStreaming = undefined;
+  }
+
+  getImmutableKnownState(): CoValueKnownState {
+    if (!this.immutableKnownState) {
+      this.immutableKnownState = cloneKnownState(this.knownState);
+    }
+    return this.immutableKnownState;
+  }
+
+  getImmutableKnownStateWithStreaming(): CoValueKnownState {
+    if (!this.knownStateWithStreaming) {
+      return this.getImmutableKnownState();
+    }
+
+    if (!this.immutableKnownStateWithStreaming) {
+      this.immutableKnownStateWithStreaming = cloneKnownState(
+        this.knownStateWithStreaming,
+      );
+    }
+    return this.immutableKnownStateWithStreaming;
   }
 
   get(sessionID: SessionID): SessionLog | undefined {
@@ -87,24 +147,12 @@ export class SessionMap {
     newTransactions: Transaction[],
     newSignature: Signature,
     skipVerify: boolean = false,
-  ): Result<true, TryAddTransactionsError> {
+  ) {
     const sessionLog = this.getOrCreateSessionLog(sessionID, signerID);
 
-    try {
-      sessionLog.impl.tryAdd(newTransactions, newSignature, skipVerify);
+    sessionLog.impl.tryAdd(newTransactions, newSignature, skipVerify);
 
-      this.addTransactionsToJsLog(sessionLog, newTransactions, newSignature);
-
-      return ok(true as const);
-    } catch (e) {
-      return err({
-        type: "InvalidSignature",
-        id: this.id,
-        sessionID,
-        newSignature,
-        signerID,
-      } satisfies TryAddTransactionsError);
-    }
+    this.addTransactionsToJsLog(sessionLog, newTransactions, newSignature);
   }
 
   makeNewPrivateTransaction(
@@ -201,18 +249,12 @@ export class SessionMap {
     );
 
     // Check if the updated session matched the streaming state
-    // If so, we can delete the session from the streaming state to mark it as synced
-    if (this.streamingKnownState) {
-      const streamingCount = this.streamingKnownState[sessionLog.sessionID];
-      if (streamingCount && streamingCount <= transactionsCount) {
-        delete this.streamingKnownState[sessionLog.sessionID];
-
-        if (Object.keys(this.streamingKnownState).length === 0) {
-          // Mark the streaming as done by deleting the streaming statuses
-          this.streamingKnownState = undefined;
-          this.knownStateWithStreaming = undefined;
-        }
-      }
+    if (
+      this.streamingKnownState &&
+      isKnownStateSubsetOf(this.streamingKnownState, this.knownState.sessions)
+    ) {
+      this.streamingKnownState = undefined;
+      this.knownStateWithStreaming = undefined;
     }
 
     if (this.knownStateWithStreaming) {
@@ -223,6 +265,8 @@ export class SessionMap {
         transactionsCount,
       );
     }
+
+    this.invalidateKnownStateCache();
   }
 
   decryptTransaction(

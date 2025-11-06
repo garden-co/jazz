@@ -7,7 +7,7 @@
   const account = new AccountCoState(Account);
   const me = $derived(account.current);
   $effect(() => {
-    if (!me) return;
+    if (!me.$isLoaded) return;
     const group = Group.create();
     group.addMember('everyone', 'writer');
     const chat = Chat.create([], group);

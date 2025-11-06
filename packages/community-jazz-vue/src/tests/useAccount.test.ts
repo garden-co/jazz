@@ -2,7 +2,7 @@
 
 import { Group, co, z } from "jazz-tools";
 import { describe, expect, it } from "vitest";
-import { useAccount } from "../composables.js";
+import { useAccount, useAgent, useLogOut } from "../composables.js";
 import { createJazzTestAccount, createJazzTestGuest } from "../testing.js";
 import { withJazzTestSetup } from "./testUtils.js";
 
@@ -38,19 +38,25 @@ describe("useAccount", () => {
       account,
     });
 
-    expect(result.me.value).toEqual(account);
+    expect(result.value).toEqual(account);
   });
 
   it("should handle guest mode correctly", async () => {
     const guestAccount = await createJazzTestGuest();
 
-    const [result] = withJazzTestSetup(() => useAccount(), {
+    const [account] = withJazzTestSetup(() => useAccount(), {
+      account: guestAccount,
+    });
+    const [agent] = withJazzTestSetup(() => useAgent(), {
+      account: guestAccount,
+    });
+    const [logOut] = withJazzTestSetup(() => useLogOut(), {
       account: guestAccount,
     });
 
     // In guest mode, me should be null and agent should be the guest
-    expect(result.me.value).toBe(null);
-    expect(result.agent.$type$).toBe("Anonymous");
-    expect(typeof result.logOut).toBe("function");
+    expect(account.value).toBe(null);
+    expect(agent.$type$).toBe("Anonymous");
+    expect(typeof logOut).toBe("function");
   });
 });

@@ -96,11 +96,39 @@ const Location = co.map({
 });
 
 const mySprite = Sprite.create({ position: { x: 10, y: 10 }});
-mySprite.$jazz.set("position", { x: 20, y: 20 }); 
+mySprite.$jazz.set("position", { x: 20, y: 20 });
 // You cannot update 'x' and 'y' independently, only replace the whole object
 
 const myLocation = Location.create({ position: [26.052, -80.209] });
-myLocation.$jazz.set("position", [-33.868, -63.987]) 
+myLocation.$jazz.set("position", [-33.868, -63.987])
 // Note: you cannot replace a single array element, only replace the whole tuple
+```
+</CodeGroup>
+
+
+## Batch Operations
+If you expect to be performing the same operation multiple times in a row, check to see if you can batch the operations. This is particularly true for list insertions, where the list is re-evaluated during each `push`.
+
+<CodeGroup>
+```ts
+let batch = []; // [!code ++]
+
+for (let i = 1; i <= 25000; i++) {
+  // [!code --:2]
+  const item = Item.create({ name: `Item ${i}` });
+  myItems.$jazz.push(item);
+
+  // [!code ++:5]
+  batch.push(Item.create({ name: `Item ${i}` }));
+  if (batch.length === 1000) {
+    myItems.$jazz.push(...batch);
+    batch = [];
+  }
+}
+
+// [!code ++:3]
+if (batch.length) {
+  myItems.$jazz.push(...batch);
+}
 ```
 </CodeGroup>

@@ -7,7 +7,7 @@ export default function TeamPage() {
     <div className="container">
       <HeroHeader title="Meet the team" slogan="" />
 
-      <div className="grid gap-8 sm:grid-cols-2 lg:grid-cols-3 lg:gap-12">
+      <div className="grid grid-cols-1 gap-8 sm:grid-cols-2 md:grid-cols-2 lg:grid-cols-3 lg:gap-12">
         {team.map((person) => (
           <ProfileCard key={person.name} person={person} />
         ))}

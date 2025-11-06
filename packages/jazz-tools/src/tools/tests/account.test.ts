@@ -6,7 +6,8 @@ import {
   setActiveAccount,
   setupJazzTestSync,
 } from "../testing.js";
-import { setupTwoNodes } from "./utils.js";
+import { assertLoaded, setupTwoNodes } from "./utils.js";
+import { CoValueLoadingState } from "../internal.js";
 
 beforeEach(async () => {
   await setupJazzTestSync();
@@ -32,7 +33,7 @@ test("waitForAllCoValuesSync should resolve when all the values are synced", asy
 
   for (const map of maps) {
     const loadedMap = await serverNode.load(map.$jazz.raw.id);
-    expect(loadedMap).not.toBe("unavailable");
+    expect(loadedMap).not.toBe(CoValueLoadingState.UNAVAILABLE);
   }
 });
 
@@ -46,7 +47,7 @@ test("waitForSync should resolve when the value is uploaded", async () => {
 
   const loadedAccount = await serverNode.load(clientAccount.$jazz.raw.id);
 
-  expect(loadedAccount).not.toBe("unavailable");
+  expect(loadedAccount).not.toBe(CoValueLoadingState.UNAVAILABLE);
 });
 
 test("isMe gets updated correctly when switching accounts", async () => {
@@ -86,11 +87,13 @@ test("Me gets updated correctly when creating a new account as active", async ()
 
 test("accounts should sync correctly", async () => {
   const account = await createJazzTestAccount({ isCurrentActiveAccount: true });
-  account.profile!.$jazz.set("name", "test 1");
+  assertLoaded(account.profile);
+  account.profile.$jazz.set("name", "test 1");
   const otherAccount = await createJazzTestAccount({
     isCurrentActiveAccount: true,
   });
-  otherAccount.profile!.$jazz.set("name", "test 2");
+  assertLoaded(otherAccount.profile);
+  otherAccount.profile.$jazz.set("name", "test 2");
 
   await linkAccounts(account, otherAccount);
 
@@ -98,8 +101,14 @@ test("accounts should sync correctly", async () => {
 
   group.addMember(otherAccount, "writer");
 
-  expect(group.members[0]?.account.profile!.name).toBe("test 1");
-  expect(group.members[1]?.account.profile!.name).toBe("test 2");
+  const accountMember = group.members[0]?.account;
+  assert(accountMember);
+  assertLoaded(accountMember.profile);
+  expect(accountMember.profile.name).toBe("test 1");
+  const otherAccountMember = group.members[1]?.account;
+  assert(otherAccountMember);
+  assertLoaded(otherAccountMember.profile);
+  expect(otherAccountMember.profile.name).toBe("test 2");
 });
 
 test("loading accounts should work", async () => {
@@ -118,7 +127,7 @@ test("loading accounts should work", async () => {
     },
   });
 
-  assert(loadedAccount);
+  assertLoaded(loadedAccount);
   expect(loadedAccount.profile.name).toBe("test 1");
 });
 
@@ -133,8 +142,9 @@ test("loading raw accounts should work", async () => {
     loadAs: account,
   });
 
-  assert(loadedAccount);
-  expect(loadedAccount.profile!.name).toBe("test 1");
+  assertLoaded(loadedAccount);
+  assertLoaded(loadedAccount.profile);
+  expect(loadedAccount.profile.name).toBe("test 1");
 });
 
 describe("co.profile() schema", () => {
@@ -221,7 +231,7 @@ test("cannot update account profile properties directly", async () => {
     },
   });
 
-  assert(account.profile);
+  assertLoaded(account.profile);
 
   // @ts-expect-error - cannot update profile properties directly
   expect(() => (account.profile.name = "test 2")).toThrow(
@@ -294,7 +304,7 @@ describe("root and profile", () => {
       },
     });
 
-    assert(bobAccountLoadedFromAlice);
+    assertLoaded(bobAccountLoadedFromAlice);
 
     expect(bobAccountLoadedFromAlice.profile.name).toBe("Bob");
     expect(bobAccountLoadedFromAlice.root.name).toBe("Bob");

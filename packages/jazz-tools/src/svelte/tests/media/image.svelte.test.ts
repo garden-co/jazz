@@ -626,7 +626,7 @@ describe("Image", async () => {
 
       const img = container.querySelector("img");
       expect(img).toBeDefined();
-      expect(img!.src).toBe("blob:test-70");
+      expect(img!.src).toBe("blob:test-68");
     });
 
     it("should load the image when threshold is reached", async () => {

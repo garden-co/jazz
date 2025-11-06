@@ -67,12 +67,12 @@ const FormIllustration = () => (
   <div className="flex bg-stone-100 h-full flex-col items-center justify-center dark:bg-transparent">
     <div className="p-3 flex flex-col rounded-md shadow-xl shadow-stone-400/20 bg-white sm:p-5 dark:shadow-none">
       <div className="w-16 h-1 rounded-full bg-stone-400 mb-1.5" />
-      <div className="w-40 h-5 rounded border mb-3 dark:border-stone-500" />
+      <div className="w-40 h-5 rounded-sm border mb-3 dark:border-stone-500" />
       <div className="w-16 h-1 rounded-full bg-stone-400 mb-1.5 hidden sm:block" />
-      <div className="w-40 h-5 rounded border mb-3 hidden sm:block dark:border-stone-500" />
+      <div className="w-40 h-5 rounded-sm border mb-3 hidden sm:block dark:border-stone-500" />
 
       <div className="flex items-center gap-2 mb-5">
-        <div className="w-3 h-3 rounded border dark:border-stone-500" />
+        <div className="w-3 h-3 rounded-sm border dark:border-stone-500" />
         <div className="w-16 h-1 rounded-full bg-stone-400" />
       </div>
       <MockButton>Submit</MockButton>
@@ -96,7 +96,7 @@ const OrganizationRow = ({
       <span
         className={clsx(
           bgClassName,
-          "size-8 rounded text-white font-medium text-lg inline-flex items-center justify-center mr-3",
+          "size-8 rounded-sm text-white font-medium text-lg inline-flex items-center justify-center mr-3",
         )}
       >
         {name[0]}
@@ -127,7 +127,7 @@ const OrganizationIllustration = () => (
         <Icon name="chevronDown" className="ml-6" />
       </OrganizationRow>
 
-      <div className="mt-3 rounded border divide-y shadow-sm bg-white dark:bg-transparent">
+      <div className="mt-3 rounded-sm border divide-y shadow-xs bg-white dark:bg-transparent">
         <OrganizationRow
           name="Friends"
           members={5}
@@ -192,7 +192,7 @@ const VersionHistoryIllustration = () => (
 
 const MusicIllustration = () => (
   <div className="flex flex-col items-center justify-center h-full p-8">
-    <div className="p-3 w-[12rem] h-[8rem] border border-dashed border-blue dark:border-blue-500 rounded-lg flex gap-2 flex-col items-center justify-center">
+    <div className="p-3 w-48 h-32 border border-dashed border-blue dark:border-blue-500 rounded-lg flex gap-2 flex-col items-center justify-center">
       <Icon
         name="upload"
         size="4xl"
@@ -213,7 +213,7 @@ const JazzPaperScissorsIllustration = () => (
 
 const ImageUploadIllustration = () => (
   <div className="flex flex-col items-center justify-center h-full p-8">
-    <div className="p-3 w-[12rem] h-[8rem] border border-dashed border-blue dark:border-blue-500 rounded-lg flex gap-2 flex-col items-center justify-center">
+    <div className="p-3 w-48 h-32 border border-dashed border-blue dark:border-blue-500 rounded-lg flex gap-2 flex-col items-center justify-center">
       <Icon
         name="upload"
         size="4xl"
@@ -228,7 +228,7 @@ const ImageUploadIllustration = () => (
 
 const FileUploadIllustration = () => (
   <div className="flex flex-col items-center justify-center h-full p-8">
-    <div className="p-3 w-[12rem] h-[8rem] border border-dashed border-blue dark:border-blue-500 rounded-lg flex gap-2 flex-col items-center justify-center">
+    <div className="p-3 w-48 h-32 border border-dashed border-blue dark:border-blue-500 rounded-lg flex gap-2 flex-col items-center justify-center">
       <Icon
         name="upload"
         size="4xl"
@@ -239,10 +239,10 @@ const FileUploadIllustration = () => (
       </p>
     </div>
 
-    <div className=" w-[12rem] h-2 rounded-full overflow-hidden bg-stone-200 mt-3">
+    <div className=" w-48 h-2 rounded-full overflow-hidden bg-stone-200 mt-3">
       <div className="w-3/4 h-full bg-green-500" />
     </div>
-    <div className="w-[12rem] flex justify-between text-xs mt-1.5">
+    <div className="w-48 flex justify-between text-xs mt-1.5">
       <p>Uploading...</p>
 
       <p>76%</p>
@@ -257,7 +257,7 @@ const ReactionsIllustration = () => (
         <button
           type="button"
           key={emoji}
-          className="size-10 text-xl rounded shadow-sm bg-white leading-none"
+          className="size-10 text-xl rounded-sm shadow-xs bg-white leading-none"
         >
           {emoji}
         </button>
@@ -268,7 +268,7 @@ const ReactionsIllustration = () => (
 
 const MultiCursorIllustration = () => (
   <div className="flex bg-stone-100 h-full flex-col items-center justify-center dark:bg-transparent p-4">
-    <div className=" bg-white min-w-64 md:aspect-[3/2] flex flex-col rounded-md shadow-xl shadow-stone-400/20 dark:shadow-none">
+    <div className=" bg-white min-w-64 md:aspect-3/2 flex flex-col rounded-md shadow-xl shadow-stone-400/20 dark:shadow-none">
       <div className="w-full py-2 flex items-center gap-1.5 px-2 border-b dark:border-b-stone-200">
         <span className="rounded-full size-2 bg-stone-200"></span>
         <span className="rounded-full size-2 bg-stone-200"></span>
@@ -300,7 +300,7 @@ const MultiCursorIllustration = () => (
 
 const CoTextIllustration = () => (
   <div className="flex bg-stone-100 h-full flex-col items-center justify-center dark:bg-transparent p-4">
-    <div className=" bg-white md:aspect-[3/2] min-w-64 flex flex-col rounded-md shadow-xl shadow-stone-400/20 dark:shadow-none">
+    <div className=" bg-white md:aspect-3/2 min-w-64 flex flex-col rounded-md shadow-xl shadow-stone-400/20 dark:shadow-none">
       <div className="flex gap-2 p-3 border-b">
         <Icon name="bold" size="xs" />
         <Icon name="italic" size="xs" />
@@ -427,7 +427,7 @@ const reactExamples: Example[] = [
     features: [features.inviteLink],
     demoUrl: "https://todo.demo.jazz.tools",
     illustration: (
-      <div className="h-full w-full bg-cover bg-[url('/todo.jpg')] bg-left-bottom"></div>
+      <div className="h-full w-full bg-cover bg-[url('/todo.jpg')] bg-bottom-left"></div>
     ),
   },
   {
@@ -590,7 +590,7 @@ export default function Page() {
           <div key={category.name}>
             <div className="flex items-center gap-3 mb-5">
               <category.logo className="h-8 w-8" />
-              <H2 id={category.id} className="!mb-0">
+              <H2 id={category.id} className="mb-0!">
                 {category.name}
               </H2>
             </div>
@@ -598,7 +598,7 @@ export default function Page() {
             <GappedGrid>
               {category.examples.map((example) => (
                 <ExampleCard
-                  className="border bg-stone-50 shadow-sm p-3 rounded-lg dark:bg-stone-950"
+                  className="border bg-stone-50 shadow-xs p-3 rounded-lg dark:bg-stone-950"
                   key={example.slug}
                   example={example}
                 />

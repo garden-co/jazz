@@ -4,6 +4,8 @@ import { PeerState } from "./PeerState.js";
 import { SyncStateManager } from "./SyncStateManager.js";
 import {
   getContenDebugInfo,
+  getNewTransactionsFromContentMessage,
+  getSessionEntriesFromContentMessage,
   getTransactionSize,
   knownStateFromContent,
 } from "./coValueContentMessage.js";
@@ -228,7 +230,7 @@ export class SyncManager {
       }
     }
 
-    const newContentPieces = coValue.verified.newContentSince(
+    const newContentPieces = coValue.newContentSince(
       peer.getOptimisticKnownState(id),
     );
 
@@ -482,6 +484,15 @@ export class SyncManager {
           ? "import"
           : peer?.role;
 
+    // TODO: We can't handle client-to-client streaming until we
+    // handle the streaming state reset on disconnection
+    if (peer?.role === "client" && msg.expectContentUntil) {
+      msg = {
+        ...msg,
+        expectContentUntil: undefined,
+      };
+    }
+
     coValue.addDependenciesFromContentMessage(msg);
 
     // If some of the dependencies are missing, we wait for them to be available
@@ -585,6 +596,8 @@ export class SyncManager {
           sessions: msg.expectContentUntil,
         });
       }
+    } else if (msg.expectContentUntil) {
+      coValue.verified.setStreamingKnownState(msg.expectContentUntil);
     }
 
     // At this point the CoValue must be in memory, if not we have a bug
@@ -607,25 +620,20 @@ export class SyncManager {
     /**
      * The coValue is in memory, load the transactions from the content message
      */
-    for (const [sessionID, newContentForSession] of Object.entries(msg.new) as [
-      SessionID,
-      SessionNewContent,
-    ][]) {
-      const ourKnownTxIdx =
-        coValue.verified.sessions.get(sessionID)?.transactions.length;
-      const theirFirstNewTxIdx = newContentForSession.after;
+    for (const [
+      sessionID,
+      newContentForSession,
+    ] of getSessionEntriesFromContentMessage(msg)) {
+      const newTransactions = getNewTransactionsFromContentMessage(
+        newContentForSession,
+        coValue.knownState(),
+        sessionID,
+      );
 
-      if ((ourKnownTxIdx || 0) < theirFirstNewTxIdx) {
+      if (newTransactions === undefined) {
         invalidStateAssumed = true;
         continue;
       }
-
-      const alreadyKnownOffset = ourKnownTxIdx
-        ? ourKnownTxIdx - theirFirstNewTxIdx
-        : 0;
-
-      const newTransactions =
-        newContentForSession.newTransactions.slice(alreadyKnownOffset);
 
       if (newTransactions.length === 0) {
         continue;
@@ -633,27 +641,34 @@ export class SyncManager {
 
       // TODO: Handle invalid signatures in the middle of streaming
       // This could cause a situation where we are unable to load a chunk, and ask for a correction for all the subsequent chunks
-      const result = coValue.tryAddTransactions(
+      const error = coValue.tryAddTransactions(
         sessionID,
         newTransactions,
         newContentForSession.lastSignature,
         this.skipVerify,
       );
 
-      if (result.isErr()) {
+      if (error) {
         if (peer) {
           logger.error("Failed to add transactions", {
             peerId: peer.id,
             peerRole: peer.role,
             id: msg.id,
-            err: result.error,
+            errorType: error.type,
+            err: error.error,
+            sessionID,
+            msgKnownState: knownStateFromContent(msg).sessions,
+            msgSummary: getContenDebugInfo(msg),
+            knownState: coValue.knownState().sessions,
           });
           // TODO Mark only the session as errored, not the whole coValue
-          coValue.markErrored(peer.id, result.error);
+          coValue.markErrored(peer.id, error);
         } else {
           logger.error("Failed to add transactions from storage", {
             id: msg.id,
-            err: result.error,
+            err: error.error,
+            sessionID,
+            errorType: error.type,
           });
         }
         continue;
@@ -664,9 +679,7 @@ export class SyncManager {
       }
 
       // The new content for this session has been verified, so we can store it
-      if (result.value) {
-        validNewContent.new[sessionID] = newContentForSession;
-      }
+      validNewContent.new[sessionID] = newContentForSession;
     }
 
     if (peer) {
@@ -766,7 +779,6 @@ export class SyncManager {
   private syncQueue = new LocalTransactionsSyncQueue((content) =>
     this.syncContent(content),
   );
-  syncHeader = this.syncQueue.syncHeader;
   syncLocalTransaction = this.syncQueue.syncTransaction;
   trackDirtyCoValues = this.syncQueue.trackDirtyCoValues;
 
@@ -822,7 +834,7 @@ export class SyncManager {
         return undefined;
       }
 
-      return value.verified.newContentSince(correction);
+      return value.newContentSince(correction);
     });
   }
 

@@ -60,7 +60,7 @@ export function SocialLinks(
               href={props[social.key as keyof SocialLinksProps]}
               target="_blank"
               rel="noreferrer"
-              className="flex hover:text-stone-900 hover:dark:text-white"
+              className="flex hover:text-stone-900 dark:hover:text-white"
             >
               <social.icon size={social.size} />
               <span className="sr-only">{social.name}</span>

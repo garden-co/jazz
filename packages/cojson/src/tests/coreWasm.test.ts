@@ -42,7 +42,7 @@ describe("SessionLog WASM", () => {
 
     const group = node.createGroup();
     const sessionContent =
-      group.core.verified.newContentSince(undefined)?.[0]?.new[session];
+      group.core.newContentSince(undefined)?.[0]?.new[session];
     assert(sessionContent);
 
     let log = wasmCrypto.createSessionLog(
@@ -63,7 +63,7 @@ describe("SessionLog WASM", () => {
 
     const group = node.createGroup();
     const sessionContent =
-      group.core.verified.newContentSince(undefined)?.[0]?.new[session];
+      group.core.newContentSince(undefined)?.[0]?.new[session];
     assert(sessionContent);
 
     let log = wasmCrypto.createSessionLog(

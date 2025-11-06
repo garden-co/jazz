@@ -1,5 +1,64 @@
 # cojson-transport-nodejs-ws
 
+## 0.19.0
+
+### Patch Changes
+
+- cojson@0.19.0
+
+## 0.18.38
+
+### Patch Changes
+
+- Updated dependencies [349ca48]
+- Updated dependencies [68781a0]
+  - cojson@0.18.38
+
+## 0.18.37
+
+### Patch Changes
+
+- Updated dependencies [0e923d1]
+- Updated dependencies [fd89225]
+  - cojson@0.18.37
+
+## 0.18.36
+
+### Patch Changes
+
+- Updated dependencies [af3fe4c]
+  - cojson@0.18.36
+
+## 0.18.35
+
+### Patch Changes
+
+- Updated dependencies [d47ac6d]
+  - cojson@0.18.35
+
+## 0.18.34
+
+### Patch Changes
+
+- Updated dependencies [4a79953]
+- Updated dependencies [d7e5cc8]
+  - cojson@0.18.34
+
+## 0.18.33
+
+### Patch Changes
+
+- Updated dependencies [5ffe0a9]
+  - cojson@0.18.33
+
+## 0.18.32
+
+### Patch Changes
+
+- 2c7013a: Allow providing a custom meter for usage tracking
+- Updated dependencies [8f47a9e]
+  - cojson@0.18.32
+
 ## 0.18.31
 
 ### Patch Changes

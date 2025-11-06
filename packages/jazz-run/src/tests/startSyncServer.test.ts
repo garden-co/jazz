@@ -2,6 +2,7 @@ import { randomUUID } from "crypto";
 import { tmpdir } from "os";
 import { join } from "path";
 import { co, z } from "jazz-tools";
+import { assertLoaded } from "jazz-tools/testing";
 import { startWorker } from "jazz-tools/worker";
 import { describe, expect, test, afterAll } from "vitest";
 import { createWorkerAccount } from "../createWorkerAccount.js";
@@ -73,8 +74,8 @@ describe("startSyncServer", () => {
     const loadedMap = await TestMap.load(map.$jazz.id, {});
 
     // Verify the data persisted
-    expect(loadedMap).not.toBe(null);
-    expect(loadedMap?.value).toBe("testValue");
+    assertLoaded(loadedMap);
+    expect(loadedMap.value).toBe("testValue");
 
     // Cleanup
     await worker2.done();

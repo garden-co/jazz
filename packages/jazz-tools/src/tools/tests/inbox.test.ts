@@ -14,6 +14,7 @@ import {
 } from "../testing";
 import { cojsonInternals, LocalNode } from "cojson";
 import { WasmCrypto } from "cojson/crypto/WasmCrypto";
+import { assertLoaded } from "./utils";
 
 const Message = co.map({
   text: z.string(),
@@ -163,7 +164,8 @@ describe("Inbox", () => {
     const resultId = await inboxSender.sendMessage(message);
 
     const result = await Message.load(resultId, { loadAs: receiver });
-    expect(result?.text).toBe("Responded from the inbox");
+    assertLoaded(result);
+    expect(result.text).toBe("Responded from the inbox");
 
     unsubscribe();
   });

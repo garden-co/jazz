@@ -1,33 +1,22 @@
-import { co } from "jazz-tools";
 import {
   BubbleTeaAddOnTypes,
   BubbleTeaBaseTeaTypes,
   PartialBubbleTeaOrder,
 } from "./schema.ts";
 
-type ResolveQuery = {
-  addOns: true;
-};
-
 export function OrderForm({
   order,
   onSave,
   onCancel,
 }: {
-  order: co.loaded<typeof PartialBubbleTeaOrder, ResolveQuery>;
+  order: PartialBubbleTeaOrder;
   onSave: (e: React.FormEvent<HTMLFormElement>) => void;
   onCancel?: () => void;
 }) {
-  // Handles updates to the instructions field of the order.
-  // If instructions already exist, applyDiff updates them incrementally.
-  // Otherwise, creates a new CoPlainText instance for the instructions.
   const handleInstructionsChange = (
     e: React.ChangeEvent<HTMLTextAreaElement>,
   ) => {
-    if (order.instructions) {
-      return order.instructions.$jazz.applyDiff(e.target.value);
-    }
-    order.$jazz.set("instructions", e.target.value);
+    order.instructions.$jazz.applyDiff(e.target.value);
   };
 
   return (

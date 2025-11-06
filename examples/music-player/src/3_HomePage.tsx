@@ -1,6 +1,6 @@
 import { useCoState } from "jazz-tools/react";
 import { useParams } from "react-router";
-import { Playlist } from "./1_schema";
+import { PlaylistWithTracks } from "./1_schema";
 import { uploadMusicTracks } from "./4_actions";
 import { MediaPlayer } from "./5_useMediaPlayer";
 import { FileUploadButton } from "./components/FileUploadButton";
@@ -32,15 +32,13 @@ export function HomePage({ mediaPlayer }: { mediaPlayer: MediaPlayer }) {
 
   const params = useParams<{ playlistId: string }>();
   const playlistId = useAccountSelector({
-    select: (me) => params.playlistId ?? me.root.$jazz.refs.rootPlaylist.id,
+    select: (me) =>
+      params.playlistId ??
+      (me.$isLoaded ? me.root.$jazz.refs.rootPlaylist.id : undefined),
   });
 
-  const playlist = useCoState(Playlist, playlistId, {
-    resolve: {
-      tracks: {
-        $each: true,
-      },
-    },
+  const playlist = useCoState(PlaylistWithTracks, playlistId, {
+    select: (playlist) => (playlist.$isLoaded ? playlist : undefined),
   });
 
   const membersIds = playlist?.$jazz.owner.members.map((member) => member.id);
@@ -49,7 +47,8 @@ export function HomePage({ mediaPlayer }: { mediaPlayer: MediaPlayer }) {
     select: (me) => Boolean(playlist && me.canWrite(playlist)),
   });
   const isActivePlaylist = useAccountSelector({
-    select: (me) => playlistId === me.root.activePlaylist?.$jazz.id,
+    select: (me) =>
+      me.$isLoaded && playlistId === me.root.activePlaylist?.$jazz.id,
   });
 
   const handlePlaylistShareClick = () => {

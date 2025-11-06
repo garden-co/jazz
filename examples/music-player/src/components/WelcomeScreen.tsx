@@ -9,17 +9,20 @@ export function WelcomeScreen() {
   });
 
   const { handleCompleteSetup } = useAccountSelector({
-    select: (me) => ({
-      id: me.root.$jazz.id,
-      handleCompleteSetup: () => {
-        me.root.$jazz.set("accountSetupCompleted", true);
-      },
-    }),
+    select: (me) =>
+      me.$isLoaded
+        ? {
+            id: me.root.$jazz.id,
+            handleCompleteSetup: () => {
+              me.root.$jazz.set("accountSetupCompleted", true);
+            },
+          }
+        : { id: null, handleCompleteSetup: null },
     equalityFn: (a, b) => a.id === b.id,
   });
 
   const initialUsername = useAccountSelector({
-    select: (me) => me.profile.name,
+    select: (me) => (me.$isLoaded ? me.profile.name : undefined),
   });
 
   if (!handleCompleteSetup) return null;

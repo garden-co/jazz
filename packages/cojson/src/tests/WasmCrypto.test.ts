@@ -117,8 +117,7 @@ describe("WasmCrypto", () => {
       true,
     );
 
-    const content =
-      mapInOtherSession.core.verified.newContentSince(undefined)?.[0];
+    const content = mapInOtherSession.core.newContentSince(undefined)?.[0];
     assert(content);
 
     client.node.syncManager.handleNewContent(content, "storage");

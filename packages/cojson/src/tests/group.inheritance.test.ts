@@ -7,6 +7,7 @@ import {
   createThreeConnectedNodes,
   createTwoConnectedNodes,
   loadCoValueOrFail,
+  setupTestAccount,
   setupTestNode,
 } from "./testUtils";
 import { expectMap } from "../coValue.js";
@@ -1160,5 +1161,65 @@ describe("extend with role mapping", () => {
 
     expect(map.get("test")).toEqual("Written from the admin");
     expect(mapOnNode2.get("test")).toEqual("Written from the admin");
+  });
+
+  test("if an account is revoked on the child but still a member of the parent, transactions should be considered valid", async () => {
+    const alice = await setupTestAccount({
+      connected: true,
+    });
+    const bob = await setupTestAccount({
+      connected: true,
+    });
+    const charlie = await setupTestAccount({
+      connected: true,
+    });
+
+    const group = alice.node.createGroup();
+    const parentGroup = alice.node.createGroup();
+
+    const bobInAlice = await loadCoValueOrFail(alice.node, bob.accountID);
+    group.addMember(bobInAlice, "admin");
+    group.extend(parentGroup, "admin");
+    parentGroup.addMember(bobInAlice, "admin");
+
+    const groupInBob = await loadCoValueOrFail(bob.node, group.id);
+    groupInBob.removeMember(bob.node.getCurrentAgent());
+
+    const charlieInBob = await loadCoValueOrFail(bob.node, charlie.accountID);
+    groupInBob.addMember(charlieInBob, "reader");
+
+    expect(groupInBob.roleOf(charlie.accountID)).toBe("reader");
+  });
+
+  test("if an account is revoked on the parent, their old transactions on the child should stay valid", async () => {
+    const alice = await setupTestAccount({
+      connected: true,
+    });
+    const bob = await setupTestAccount({
+      connected: true,
+    });
+    const charlie = await setupTestAccount({
+      connected: true,
+    });
+
+    const group = alice.node.createGroup();
+    const parentGroup = alice.node.createGroup();
+
+    const bobInAlice = await loadCoValueOrFail(alice.node, bob.accountID);
+    group.extend(parentGroup, "admin");
+    parentGroup.addMember(bobInAlice, "admin");
+
+    const groupInBob = await loadCoValueOrFail(bob.node, group.id);
+    const parentGroupInBob = await loadCoValueOrFail(bob.node, parentGroup.id);
+    const charlieInBob = await loadCoValueOrFail(bob.node, charlie.accountID);
+    groupInBob.addMember(charlieInBob, "reader");
+
+    await new Promise((r) => setTimeout(r, 10));
+
+    parentGroupInBob.removeMember(bob.node.getCurrentAgent());
+
+    const groupInCharlie = await loadCoValueOrFail(charlie.node, group.id);
+
+    expect(groupInCharlie.roleOf(charlie.accountID)).toBe("reader");
   });
 });

@@ -13,7 +13,7 @@ export function CoMapVisualizer<T extends CoMap>({
 }: CoMapVisualizerProps<T>) {
   return (
     <div className="flex justify-center">
-      <div className="bg-black rounded p-2 min-w-[16px] min-h-[32px] shadow-md">
+      <div className="bg-black rounded-sm p-2 min-w-[16px] min-h-[32px] shadow-md">
         {showMetadata && (
           <div className="text-white/50 text-xs mb-1">
             coId: {instance.$jazz.id}

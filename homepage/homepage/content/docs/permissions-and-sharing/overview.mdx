@@ -124,7 +124,7 @@ const group = Group.create();
 
 const bob = await co.account().load(bobsID);
 
-if (bob) {
+if (bob.$isLoaded) {
   group.addMember(bob, "writer");
 }
 ```
@@ -145,7 +145,7 @@ import { ID, Account, co } from "jazz-tools";
 const bob = await Account.load(bobsID);
 // Or: const bob = await co.account().load(bobsID);
 
-if (bob) {
+if (bob.$isLoaded) {
   group.addMember(bob, "writer");
 }
 ```
@@ -258,7 +258,7 @@ const accountID = account.$jazz.id;
 const value = await MyCoMap.create({ color: "red"})
 const bob = await co.account().load(accountID);
 
-if (bob) {
+if (bob.$isLoaded) {
   if (bob.canAdmin(value)) {
     console.log("Bob can share value with others");
   } else if (bob.canWrite(value)) {

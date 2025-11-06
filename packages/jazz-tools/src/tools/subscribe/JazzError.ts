@@ -1,9 +1,12 @@
 import type { CoValue, ID } from "../internal.js";
+import { CoValueLoadingState } from "./types.js";
 
 export class JazzError {
   constructor(
     public id: ID<CoValue> | undefined,
-    public type: "unavailable" | "unauthorized",
+    public type:
+      | typeof CoValueLoadingState.UNAVAILABLE
+      | typeof CoValueLoadingState.UNAUTHORIZED,
     public issues: JazzErrorIssue[],
   ) {}
 
@@ -41,7 +44,10 @@ export class JazzError {
   }
 }
 export type JazzErrorIssue = {
-  code: "unavailable" | "unauthorized" | "validationError";
+  code:
+    | typeof CoValueLoadingState.UNAVAILABLE
+    | typeof CoValueLoadingState.UNAUTHORIZED
+    | "validationError";
   message: string;
   params: Record<string, any>;
   path: string[];

@@ -34,7 +34,7 @@ export function ProfileForm({
   className = "",
 }: ProfileFormProps) {
   const profile = useAccountSelector({
-    select: (me) => me.profile,
+    select: (me) => (me.$isLoaded ? me.profile : undefined),
   });
 
   const [username, setUsername] = useState(

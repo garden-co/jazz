@@ -16,8 +16,7 @@ const metaTags = {
   title: "Jazz Cloud",
   description: "Serverless sync & storage for Jazz apps.",
   url: "https://jazz.tools",
-}
-
+};
 
 export const metadata: Metadata = {
   title: metaTags.title,
@@ -36,10 +35,10 @@ export const metadata: Metadata = {
 };
 
 export default function Cloud() {
-  const h3Style = "text-xl md:text-2xl mb-2 font-semibold tracking-tight"
+  const h3Style = "text-xl md:text-2xl mb-2 font-semibold tracking-tight";
   return (
-    <div className="space-y-16">
-      <div className="container space-y-12 overflow-hidden">
+    <div className="flex flex-col gap-16">
+      <div className="container flex flex-col gap-12 overflow-hidden">
         <HeroHeader
           title="Jazz Cloud"
           slogan="Real-time sync and storage infrastructure that scales up to millions of users."
@@ -47,18 +46,14 @@ export default function Cloud() {
         <LatencyMap />
         <GappedGrid>
           <GridCard>
-            <H2 className={h3Style}>
-              Optimal cloud routing
-            </H2>
+            <H2 className={h3Style}>Optimal cloud routing</H2>
             <P>
               Get ultra-low latency between any group of users with our
               decentralized cloud interconnect.
             </P>
           </GridCard>
           <GridCard>
-            <H2 className={h3Style}>
-              Smart caching
-            </H2>
+            <H2 className={h3Style}>Smart caching</H2>
 
             <P>
               Give users instant load times, with their latest data state always
@@ -66,9 +61,7 @@ export default function Cloud() {
             </P>
           </GridCard>
           <GridCard>
-            <H2 className={h3Style}>
-              Blob storage & media streaming
-            </H2>
+            <H2 className={h3Style}>Blob storage & media streaming</H2>
 
             <P>
               Store files and media streams as idiomatic `CoValues` without S3.
@@ -77,15 +70,15 @@ export default function Cloud() {
         </GappedGrid>
       </div>
 
-      <div className="bg-stone-100 border-y dark:bg-stone-925 py-8 lg:py-16 dark:border-y-0 dark:bg-transparent dark:py-0">
-        <div className="container space-y-5">
+      <div className="border-y bg-stone-100 py-8 dark:border-y-0 dark:bg-stone-925 dark:bg-transparent dark:py-0 lg:py-16">
+        <div className="container flex flex-col gap-5">
           <H2>Pricing</H2>
 
           <Pricing />
         </div>
       </div>
 
-      <div className="container space-y-16">
+      <div className="container flex flex-col gap-16">
         <div>
           <SectionHeader
             title="Custom deployment scenarios"

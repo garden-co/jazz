@@ -3,20 +3,21 @@ export const docNavigationItems = [
   {
     // welcome to jazz
     name: "Getting started",
-    href: '/docs',
+    href: "/docs",
     items: [
       {
-        // what is jazz, supported environments, where to start (guide, examples, project setup)
+        // what is Jazz, supported environments, where to start (guide, examples, project setup)
         name: "Overview",
         href: "/docs",
         done: 100,
-      }, {
+      },
+      {
         name: "Quickstart",
         href: "/docs/quickstart",
         done: {
           react: 100,
-          svelte: 100
-        }
+          svelte: 100,
+        },
       },
       {
         name: "Installation",
@@ -27,6 +28,7 @@ export const docNavigationItems = [
           "react-native": 100,
           "react-native-expo": 100,
           svelte: 100,
+          vanilla: 100,
         },
       },
       {
@@ -41,6 +43,11 @@ export const docNavigationItems = [
     collapse: true,
     prefix: "/docs/upgrade",
     items: [
+      {
+        name: "0.19.0 - Explicit loading states",
+        href: "/docs/upgrade/0-19-0",
+        done: 100,
+      },
       {
         name: "0.18.0 - New `$jazz` field in CoValues",
         href: "/docs/upgrade/0-18-0",
@@ -131,75 +138,88 @@ export const docNavigationItems = [
         done: 100,
         collapse: true,
         startClosed: true,
-        items: [{
-          name: "Overview",
-          href: '/docs/core-concepts/covalues/overview',
-          done: 100,
-        }, {
-          name: "CoMaps",
-          href: "/docs/core-concepts/covalues/comaps",
-          done: 100,
-        }, {
-          name: "CoLists",
-          href: "/docs/core-concepts/covalues/colists",
-          done: 100,
-        },
-        {
-          name: "CoFeeds",
-          href: "/docs/core-concepts/covalues/cofeeds",
-          done: 100,
-        },
-        {
-          name: "CoTexts",
-          href: "/docs/core-concepts/covalues/cotexts",
-          done: 100,
-        },
-        {
-          name: "FileStreams",
-          href: "/docs/core-concepts/covalues/filestreams",
-          done: 80,
-        },
-        {
-          name: "CoVectors",
-          href: "/docs/core-concepts/covalues/covectors",
-          done: 100,
-        },
-        {
-          name: "ImageDefinitions",
-          href: "/docs/core-concepts/covalues/imagedef",
-          done: {
-            react: 100,
-            "react-native": 100,
-            "react-native-expo": 100,
-            vanilla: 100,
-            svelte: 100,
-          }
-        }],
-      }, {
-        name: 'Schemas',
+        items: [
+          {
+            name: "Overview",
+            href: "/docs/core-concepts/covalues/overview",
+            done: 100,
+          },
+          {
+            name: "CoMaps",
+            href: "/docs/core-concepts/covalues/comaps",
+            done: 100,
+          },
+          {
+            name: "CoLists",
+            href: "/docs/core-concepts/covalues/colists",
+            done: 100,
+          },
+          {
+            name: "CoFeeds",
+            href: "/docs/core-concepts/covalues/cofeeds",
+            done: 100,
+          },
+          {
+            name: "CoTexts",
+            href: "/docs/core-concepts/covalues/cotexts",
+            done: 100,
+          },
+          {
+            name: "FileStreams",
+            href: "/docs/core-concepts/covalues/filestreams",
+            done: 80,
+          },
+          {
+            name: "CoVectors",
+            href: "/docs/core-concepts/covalues/covectors",
+            done: 100,
+          },
+          {
+            name: "ImageDefinitions",
+            href: "/docs/core-concepts/covalues/imagedef",
+            done: {
+              react: 100,
+              "react-native": 100,
+              "react-native-expo": 100,
+              vanilla: 100,
+              svelte: 100,
+            },
+          },
+        ],
+      },
+      {
+        name: "Schemas",
         done: 100,
         collapse: true,
-        items: [{
-          name: "Connecting CoValues",
-          href: "/docs/core-concepts/schemas/connecting-covalues",
-          done: 100,
-        },
-        {
-          name: "Accounts & migrations",
-          href: "/docs/core-concepts/schemas/accounts-and-migrations",
-          done: 20,
-        },
-        {
-          name: "Schema Unions",
-          href: "/docs/core-concepts/schemas/schemaunions",
-          done: 100,
-        }]
+        items: [
+          {
+            name: "Connecting CoValues",
+            href: "/docs/core-concepts/schemas/connecting-covalues",
+            done: 100,
+          },
+          {
+            name: "Accounts & migrations",
+            href: "/docs/core-concepts/schemas/accounts-and-migrations",
+            done: 20,
+          },
+          {
+            name: "Schema Unions",
+            href: "/docs/core-concepts/schemas/schemaunions",
+            done: 100,
+          },
+          {
+            name: "Codecs",
+            href: "/docs/core-concepts/schemas/codecs",
+            done: 100,
+          },
+        ],
       },
       {
         name: "Subscriptions & Deep Loading",
         href: "/docs/core-concepts/subscription-and-loading",
         done: 100,
-      }, {
+      },
+      {
         // jazz mesh, setting api key, free plan, unlimited
         name: "Sync and storage",
         href: "/docs/core-concepts/sync-and-storage",
@@ -211,144 +231,151 @@ export const docNavigationItems = [
     name: "Key Features",
     done: 100,
     prefix: "/docs/key-features",
-    items: [{
-      name: 'Authentication',
-      startClosed: true,
-      collapse: true,
-      items: [
-        {
-          name: "Overview",
-          href: "/docs/key-features/authentication/overview",
-          done: 100,
-        },
-        {
-          name: "Quickstart",
-          href: "/docs/key-features/authentication/quickstart",
-          done: {
-            react: 100,
-            svelte: 100
+    items: [
+      {
+        name: "Authentication",
+        startClosed: true,
+        collapse: true,
+        items: [
+          {
+            name: "Overview",
+            href: "/docs/key-features/authentication/overview",
+            done: 100,
           },
-        },
+          {
+            name: "Quickstart",
+            href: "/docs/key-features/authentication/quickstart",
+            done: {
+              react: 100,
+              svelte: 100,
+            },
+          },
 
-        {
-          name: "Authentication States",
-          href: "/docs/key-features/authentication/authentication-states",
-          done: 100,
-        },
-        {
-          name: "Passkey",
-          href: "/docs/key-features/authentication/passkey",
-          done: 100,
-        },
-        {
-          name: "Passphrase",
-          href: "/docs/key-features/authentication/passphrase",
-          done: 100,
-        },
-        {
-          name: "Clerk",
-          href: "/docs/key-features/authentication/clerk",
-          done: 100,
-        },
-        {
-          name: "Better Auth",
-          href: "/docs/key-features/authentication/better-auth",
-          done: 100,
-        },
-        {
-          name: "Better Auth Database Adapter",
-          href: "/docs/key-features/authentication/better-auth-database-adapter",
-          done: 100,
-        },
-      ]
-    }, {
-      name: "Permissions & sharing",
-      collapse: true,
-      startClosed: true,
-      items: [
-        {
-          name: "Overview",
-          href: "/docs/permissions-and-sharing/overview",
-          done: 100,
-        },
-        {
-          name: "Quickstart",
-          href: "/docs/permissions-and-sharing/quickstart",
-          done: 100,
-        },
-        {
-          name: "Sharing",
-          href: "/docs/permissions-and-sharing/sharing",
-          done: {
-            react: 100,
-            svelte: 100
-          }
-        },
-        {
-          name: "Cascading Permissions",
-          href: "/docs/permissions-and-sharing/cascading-permissions",
-          done: 100,
-        },
-      ],
-    },
-    {
-      name: "Version control",
-      href: "/docs/key-features/version-control",
-      done: 100,
-    },
-    {
-      name: "History",
-      href: "/docs/key-features/history",
-      done: 100,
-    },
-    ]
+          {
+            name: "Authentication States",
+            href: "/docs/key-features/authentication/authentication-states",
+            done: 100,
+          },
+          {
+            name: "Passkey",
+            href: "/docs/key-features/authentication/passkey",
+            done: 100,
+          },
+          {
+            name: "Passphrase",
+            href: "/docs/key-features/authentication/passphrase",
+            done: 100,
+          },
+          {
+            name: "Clerk",
+            href: "/docs/key-features/authentication/clerk",
+            done: 100,
+          },
+          {
+            name: "Better Auth",
+            href: "/docs/key-features/authentication/better-auth",
+            done: 100,
+          },
+          {
+            name: "Better Auth Database Adapter",
+            href: "/docs/key-features/authentication/better-auth-database-adapter",
+            done: 100,
+          },
+        ],
+      },
+      {
+        name: "Permissions & sharing",
+        collapse: true,
+        startClosed: true,
+        items: [
+          {
+            name: "Overview",
+            href: "/docs/permissions-and-sharing/overview",
+            done: 100,
+          },
+          {
+            name: "Quickstart",
+            href: "/docs/permissions-and-sharing/quickstart",
+            done: 100,
+          },
+          {
+            name: "Sharing",
+            href: "/docs/permissions-and-sharing/sharing",
+            done: {
+              react: 100,
+              svelte: 100,
+            },
+          },
+          {
+            name: "Cascading Permissions",
+            href: "/docs/permissions-and-sharing/cascading-permissions",
+            done: 100,
+          },
+        ],
+      },
+      {
+        name: "Version control",
+        href: "/docs/key-features/version-control",
+        done: 100,
+      },
+      {
+        name: "History",
+        href: "/docs/key-features/history",
+        done: 100,
+      },
+    ],
   },
   {
     name: "Server-Side Development",
     prefix: "/docs/server-side",
-    items: [{
-      name: "Quickstart",
-      href: "/docs/server-side/quickstart",
-      done: {
-        react: 100,
-        svelte: 100
-      }
-    },
-    {
-      name: "Setup",
-      href: "/docs/server-side/setup",
-      done: 100,
-    },
-    {
-      name: "Communicating with workers",
-      done: 100,
-      prefix: "/docs/server-side/communicating-with-workers",
-      startClosed: true,
-      collapse: true,
-      items: [{
-        name: "Overview",
-        href: "/docs/server-side/communicating-with-workers/overview",
-        done: 100,
-      }, {
-        name: "JazzRPC",
-        href: "/docs/server-side/jazz-rpc",
+    items: [
+      {
+        name: "Quickstart",
+        href: "/docs/server-side/quickstart",
+        done: {
+          react: 100,
+          svelte: 100,
+        },
+      },
+      {
+        name: "Setup",
+        href: "/docs/server-side/setup",
         done: 100,
       },
       {
-        name: "HTTP requests",
-        href: "/docs/server-side/communicating-with-workers/http-requests",
+        name: "Communicating with workers",
         done: 100,
+        prefix: "/docs/server-side/communicating-with-workers",
+        startClosed: true,
+        collapse: true,
+        items: [
+          {
+            name: "Overview",
+            href: "/docs/server-side/communicating-with-workers/overview",
+            done: 100,
+          },
+          {
+            name: "JazzRPC",
+            href: "/docs/server-side/jazz-rpc",
+            done: 100,
+          },
+          {
+            name: "HTTP requests",
+            href: "/docs/server-side/communicating-with-workers/http-requests",
+            done: 100,
+          },
+          {
+            name: "Inbox API",
+            href: "/docs/server-side/communicating-with-workers/inbox",
+            done: 100,
+          },
+        ],
       },
       {
-        name: "Inbox API",
-        href: "/docs/server-side/communicating-with-workers/inbox",
+        name: "Server-side rendering",
+        href: "/docs/server-side/ssr",
         done: 100,
-      }]
-    }, {
-      name: "Server-side rendering",
-      href: "/docs/server-side/ssr",
-      done: 100
-    },
+      },
     ],
   },
   {
@@ -373,63 +400,72 @@ export const docNavigationItems = [
     items: [
       {
         name: "Developer Tools",
-        items: [{
-          name: "create-jazz-app",
-          href: "/docs/tooling-and-resources/create-jazz-app",
-          done: 100,
-        },
-        {
-          name: "Inspector",
-          href: "/docs/tooling-and-resources/inspector",
-          done: 100,
-        }, {
-          name: "AI tools (llms.txt)",
-          href: "/docs/tooling-and-resources/ai-tools",
-          done: 100,
-        }]
+        items: [
+          {
+            name: "create-jazz-app",
+            href: "/docs/tooling-and-resources/create-jazz-app",
+            done: 100,
+          },
+          {
+            name: "Inspector",
+            href: "/docs/tooling-and-resources/inspector",
+            done: 100,
+          },
+          {
+            name: "AI tools (llms.txt)",
+            href: "/docs/tooling-and-resources/ai-tools",
+            done: 100,
+          },
+        ],
       },
       {
         name: "Reference",
-        prefix: '/docs/reference',
-        items: [{
-          name: "FAQs",
-          href: "/docs/reference/faq",
-          done: 100
-        }, {
-          name: "Encryption",
-          href: "/docs/reference/encryption",
-          done: 100,
-        }, {
-          name: "Testing",
-          href: "/docs/reference/testing",
-          done: 100,
-        }, {
-          name: "Performance tips",
-          href: "/docs/reference/performance",
-          done: 100,
-        }, {
-          name: "Design patterns",
-          collapse: true,
-          prefix: '/docs/reference/design-patterns',
-          items: [
-            {
-              name: "Forms",
-              href: "/docs/reference/design-patterns/form",
-              done: 100,
-            },
-            {
-              name: "Organization/Team",
-              href: "/docs/reference/design-patterns/organization",
-              done: 100,
-            },
-            {
-              name: "History Patterns",
-              href: "/docs/reference/design-patterns/history-patterns",
-              done: 100,
-            },
-          ],
-        }]
-      }
+        prefix: "/docs/reference",
+        items: [
+          {
+            name: "FAQs",
+            href: "/docs/reference/faq",
+            done: 100,
+          },
+          {
+            name: "Encryption",
+            href: "/docs/reference/encryption",
+            done: 100,
+          },
+          {
+            name: "Testing",
+            href: "/docs/reference/testing",
+            done: 100,
+          },
+          {
+            name: "Performance tips",
+            href: "/docs/reference/performance",
+            done: 100,
+          },
+          {
+            name: "Design patterns",
+            collapse: true,
+            prefix: "/docs/reference/design-patterns",
+            items: [
+              {
+                name: "Forms",
+                href: "/docs/reference/design-patterns/form",
+                done: 100,
+              },
+              {
+                name: "Organization/Team",
+                href: "/docs/reference/design-patterns/organization",
+                done: 100,
+              },
+              {
+                name: "History Patterns",
+                href: "/docs/reference/design-patterns/history-patterns",
+                done: 100,
+              },
+            ],
+          },
+        ],
+      },
     ],
   },
 ];

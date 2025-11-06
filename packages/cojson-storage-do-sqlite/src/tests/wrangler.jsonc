@@ -1,0 +1,20 @@
+{
+  "name": "cloudflare-do-storage",
+  "main": "dosqlite.ts",
+  "compatibility_date": "2025-10-08",
+  "compatibility_flags": ["nodejs_compat"],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "DoSqlStoreTest",
+        "class_name": "DoSqlStoreTest"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["DoSqlStoreTest"]
+    }
+  ]
+}

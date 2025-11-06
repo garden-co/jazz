@@ -1,5 +1,5 @@
 import * as Clipboard from "expo-clipboard";
-import { Account, Group } from "jazz-tools";
+import { Account, CoMapEdit, getLoadedOrUndefined, Group } from "jazz-tools";
 import { useState } from "react";
 import React, {
   Button,
@@ -14,11 +14,12 @@ import React, {
   StyleSheet,
 } from "react-native";
 
-import { useAccount, useCoState } from "jazz-tools/expo";
+import { useAccount, useCoState, useLogOut } from "jazz-tools/expo";
 import { Chat, Message } from "./schema";
 
 export default function ChatScreen() {
-  const { me, logOut } = useAccount(Account, { resolve: { profile: true } });
+  const me = useAccount(Account, { resolve: { profile: true } });
+  const logOut = useLogOut();
   const [chatId, setChatId] = useState<string>();
   const [chatIdInput, setChatIdInput] = useState<string>();
   const loadedChat = useCoState(Chat, chatId, { resolve: { $each: true } });
@@ -49,7 +50,7 @@ export default function ChatScreen() {
   };
 
   const sendMessage = () => {
-    if (!loadedChat) return;
+    if (!loadedChat.$isLoaded) return;
     if (message.trim()) {
       loadedChat.$jazz.push(
         Message.create({ text: message }, { owner: loadedChat?.$jazz.owner }),
@@ -74,7 +75,7 @@ export default function ChatScreen() {
               { textAlign: isMe ? "right" : "left" },
             ]}
           >
-            {item?.$jazz.getEdits()?.text?.by?.profile?.name}
+            {getEditorName(item?.$jazz.getEdits()?.text)}
           </Text>
         ) : null}
         <View style={styles.messageContent}>
@@ -99,14 +100,14 @@ export default function ChatScreen() {
 
   return (
     <View style={styles.container}>
-      {!loadedChat ? (
+      {!loadedChat.$isLoaded ? (
         <View style={styles.welcomeContainer}>
           <Text style={styles.usernameTitle}>Username</Text>
           <TextInput
             style={styles.usernameInput}
-            value={me?.profile.name ?? ""}
+            value={getLoadedOrUndefined(me)?.profile?.name ?? ""}
             onChangeText={(value) => {
-              if (me?.profile) {
+              if (me.$isLoaded) {
                 me.profile.$jazz.set("name", value);
               }
             }}
@@ -202,6 +203,13 @@ export default function ChatScreen() {
       )}
     </View>
   );
+}
+
+function getEditorName(edit?: CoMapEdit<unknown>): string | undefined {
+  if (!edit?.by?.profile || !edit.by.profile.$isLoaded) {
+    return;
+  }
+  return edit.by.profile.name;
 }
 
 const styles = StyleSheet.create({

@@ -5,7 +5,7 @@ import { Logo } from "./Logo.tsx";
 import { JazzAccount, getUserAge } from "./schema.ts";
 
 function App() {
-  const { me } = useAccount(JazzAccount, {
+  const me = useAccount(JazzAccount, {
     resolve: { profile: true, root: true },
   });
 
@@ -28,10 +28,15 @@ function App() {
 
         <div className="text-center">
           <h1>
-            Welcome{me?.profile.firstName ? <>, {me?.profile.firstName}</> : ""}
+            Welcome
+            {me.$isLoaded && me.profile.firstName ? (
+              <>, {me.profile.firstName}</>
+            ) : (
+              ""
+            )}
             !
           </h1>
-          {!!me?.root && (
+          {me.$isLoaded && (
             <p>As of today, you are {getUserAge(me.root)} years old.</p>
           )}
         </div>

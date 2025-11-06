@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, test, vi } from "vitest";
 import { CoPlainText, Loaded, co, z } from "../exports.js";
 import { createJazzTestAccount, setupJazzTestSync } from "../testing.js";
-import { waitFor } from "./utils.js";
+import { assertLoaded, waitFor } from "./utils.js";
 
 describe("co.discriminatedUnion", () => {
   beforeEach(async () => {
@@ -277,7 +277,8 @@ describe("co.discriminatedUnion", () => {
 
     const dog = Dog.create({ type: "dog" });
     const loadedPet = await Pet.load(dog.$jazz.id);
-    expect(loadedPet?.type).toEqual("dog");
+    assertLoaded(loadedPet);
+    expect(loadedPet.type).toEqual("dog");
   });
 
   test("subscribe to CoValue instances using the DiscriminatedUnion schema", async () => {
@@ -343,7 +344,9 @@ describe("co.discriminatedUnion", () => {
 
     const loadedAnimal = await Animal.load(animal.$jazz.id);
 
-    expect(loadedAnimal?.breed?.type).toEqual("collie");
+    assertLoaded(loadedAnimal);
+    assertLoaded(loadedAnimal.breed);
+    expect(loadedAnimal.breed.type).toEqual("collie");
   });
 
   test("should work with a nested co.discriminatedUnion", async () => {
@@ -365,6 +368,7 @@ describe("co.discriminatedUnion", () => {
 
     const loadedAnimal = await Animal.load(animal.$jazz.id);
 
-    expect(loadedAnimal?.type).toEqual("collie");
+    assertLoaded(loadedAnimal);
+    expect(loadedAnimal.type).toEqual("collie");
   });
 });

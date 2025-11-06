@@ -94,7 +94,7 @@ You'll need to make a couple of small changes to your structure in order for thi
 // [!code --:1]
 import { JazzReactProvider, PasskeyAuthBasicUI } from "jazz-tools/react"; 
 // [!code ++:1]
-import { JazzReactProvider, PasskeyAuthBasicUI, useAccount } from "jazz-tools/react"; 
+import { JazzReactProvider, PasskeyAuthBasicUI, useAgent } from "jazz-tools/react"; 
 import { JazzFestAccount } from "@/app/schema";
 
 const apiKey = process.env.NEXT_PUBLIC_JAZZ_API_KEY;
@@ -123,7 +123,7 @@ export function JazzWrapper({ children }: {
 
 // [!code ++:10]
 export function Auth({ children }: { children: React.ReactNode }) {
-  const { agent } = useAccount();
+  const agent = useAgent();
   const isGuest = agent.$type$ !== "Account"
   if (isGuest) return children;
   return (

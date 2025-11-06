@@ -14,7 +14,7 @@ function getIdParam() {
 export function ResumeSyncState() {
   const [id, setId] = useState(getIdParam);
   const coMap = useCoState(ResumeSyncCoMap, id);
-  const { me } = useAccount();
+  const me = useAccount();
 
   useEffect(() => {
     if (id) {
@@ -25,7 +25,7 @@ export function ResumeSyncState() {
   }, [id]);
 
   useEffect(() => {
-    if (!me || id) return;
+    if (!me.$isLoaded || id) return;
 
     const group = Group.create({ owner: me });
 
@@ -34,7 +34,7 @@ export function ResumeSyncState() {
     setId(ResumeSyncCoMap.create({ value: "" }, { owner: group }).$jazz.id);
   }, [me]);
 
-  if (!coMap) return null;
+  if (!coMap.$isLoaded) return null;
 
   return (
     <div>
@@ -43,7 +43,7 @@ export function ResumeSyncState() {
       <label htmlFor="value">Value</label>
       <input
         id="value"
-        value={coMap.value ?? ""}
+        value={coMap.value}
         onChange={(e) => {
           coMap.value = e.target.value;
         }}

@@ -10,16 +10,16 @@
   });
   const me = $derived(account.current);
 
-  const dateOfBirth = $derived(me ? me.root?.dateOfBirth?.toISOString().split("T")[0] || "" : "");
+  const dateOfBirth = $derived(me.$isLoaded ? me.root.dateOfBirth.toISOString().split("T")[0] || "" : "");
 
   function handleDateOfBirthChange(event: Event & { currentTarget: HTMLInputElement }) {
-    if (me && event.currentTarget.value) {
+    if (me.$isLoaded && event.currentTarget.value) {
       me.root.$jazz.set("dateOfBirth", new Date(event.currentTarget.value));
     }
   }
 </script>
 
-{#if me}
+{#if me.$isLoaded}
   <div class="grid gap-4 border p-8 border-stone-200">
     <div class="flex items-center gap-3">
       <label for="firstName" class="sm:w-32"> First name </label>

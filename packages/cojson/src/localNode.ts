@@ -1,4 +1,3 @@
-import { Result, err, ok } from "neverthrow";
 import { GarbageCollector } from "./GarbageCollector.js";
 import type { CoID } from "./coValue.js";
 import type { RawCoValue } from "./coValue.js";
@@ -10,7 +9,6 @@ import {
 import {
   type CoValueHeader,
   type CoValueUniqueness,
-  VerifiedState,
 } from "./coValueCore/verifiedState.js";
 import {
   AccountMeta,
@@ -31,7 +29,7 @@ import {
   type RawGroup,
   secretSeedFromInviteSecret,
 } from "./coValues/group.js";
-import { CO_VALUE_LOADING_CONFIG, GARBAGE_COLLECTOR_CONFIG } from "./config.js";
+import { CO_VALUE_LOADING_CONFIG } from "./config.js";
 import { AgentSecret, CryptoProvider } from "./crypto/crypto.js";
 import { AgentID, RawCoID, SessionID, isAgentID } from "./ids.js";
 import { logger } from "./logger.js";
@@ -41,6 +39,7 @@ import { accountOrAgentIDfromSessionID } from "./typeUtils/accountOrAgentIDfromS
 import { expectGroup } from "./typeUtils/expectGroup.js";
 import { canBeBranched } from "./coValueCore/branching.js";
 import { connectedPeers } from "./streamUtils.js";
+import { emptyKnownState } from "./knownState.js";
 
 /** A `LocalNode` represents a local view of a set of loaded `CoValue`s, from the perspective of a particular account (or primitive cryptographic agent).
 
@@ -380,7 +379,10 @@ export class LocalNode {
     }
 
     this.garbageCollector?.trackCoValueAccess(coValue);
-    this.syncManager.syncHeader(coValue.verified);
+    this.syncManager.syncLocalTransaction(
+      coValue.verified,
+      emptyKnownState(id),
+    );
 
     return coValue;
   }
@@ -650,8 +652,7 @@ export class LocalNode {
     );
 
     const contentPieces =
-      groupAsInvite.core.verified.newContentSince(group.core.knownState()) ??
-      [];
+      groupAsInvite.core.newContentSince(group.core.knownState()) ?? [];
 
     // Import the new transactions to the current localNode
     for (const contentPiece of contentPieces) {
@@ -687,12 +688,9 @@ export class LocalNode {
   }
 
   /** @internal */
-  resolveAccountAgent(
-    id: RawAccountID | AgentID,
-    expectation?: string,
-  ): Result<AgentID, ResolveAccountAgentError> {
+  resolveAccountAgent(id: RawAccountID | AgentID, expectation?: string) {
     if (isAgentID(id)) {
-      return ok(id);
+      return { value: id, error: undefined };
     }
 
     let coValue: AvailableCoValueCore;
@@ -700,12 +698,7 @@ export class LocalNode {
     try {
       coValue = this.expectCoValueLoaded(id, expectation);
     } catch (e) {
-      return err({
-        type: "ErrorLoadingCoValueCore",
-        expectation,
-        id,
-        error: e,
-      } satisfies LoadCoValueCoreError);
+      return { value: undefined, error: e };
     }
 
     if (
@@ -715,14 +708,15 @@ export class LocalNode {
       !("type" in coValue.verified.header.meta) ||
       coValue.verified.header.meta.type !== "account"
     ) {
-      return err({
-        type: "UnexpectedlyNotAccount",
-        expectation,
-        id,
-      } satisfies UnexpectedlyNotAccountError);
+      return {
+        value: undefined,
+        error: new Error(`Unexpectedly not account: ${expectation}`),
+      };
     }
 
-    return ok((coValue.getCurrentContent() as RawAccount).currentAgentID());
+    const account = coValue.getCurrentContent() as RawAccount;
+
+    return { value: account.currentAgentID(), error: undefined };
   }
 
   createGroup(

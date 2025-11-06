@@ -26,8 +26,8 @@ import { ref } from "vue";
 import { useRouter } from "vue-router";
 import { Task, TodoAccount, TodoProject } from "../schema";
 
-const { me } = useAccount(TodoAccount, {
-  resolve: { root: { projects: { $each: { $onError: null } } } },
+const me = useAccount(TodoAccount, {
+  resolve: { root: { projects: { $each: { $onError: "catch" } } } },
 });
 
 const router = useRouter();

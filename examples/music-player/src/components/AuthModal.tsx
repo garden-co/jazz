@@ -19,7 +19,7 @@ export function AuthModal({ open, onOpenChange }: AuthModalProps) {
   const [isSignUp, setIsSignUp] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const profileName = useAccountSelector({
-    select: (me) => me.profile.name,
+    select: (me) => (me.$isLoaded ? me.profile.name : undefined),
   });
 
   const auth = usePasskeyAuth({
@@ -36,7 +36,9 @@ export function AuthModal({ open, onOpenChange }: AuthModalProps) {
 
     try {
       if (isSignUp) {
-        await auth.signUp(profileName);
+        if (profileName) {
+          await auth.signUp(profileName);
+        }
       } else {
         await auth.logIn();
       }
@@ -57,6 +59,7 @@ export function AuthModal({ open, onOpenChange }: AuthModalProps) {
   const shouldShowTransferRootPlaylist = useAccountSelector({
     select: (me) =>
       !isSignUp &&
+      me.$isLoaded &&
       me.root.rootPlaylist.tracks.some((track) => !track.isExampleTrack),
   });
 

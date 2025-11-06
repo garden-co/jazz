@@ -101,7 +101,7 @@ export function SideNavBody({ children }: { children: React.ReactNode }) {
         aria-hidden
         className={clsx(
           "h-12 right-0 sticky bottom-0 left-0",
-          "bg-gradient-to-t from-white  to-transparent",
+          "bg-linear-to-t from-white  to-transparent",
           "dark:from-stone-950",
           "hidden md:block",
         )}
@@ -121,7 +121,7 @@ export function SideNavHeader({
 }) {
   const classes = clsx(
     className,
-    "flex items-center gap-2 justify-between font-medium text-stone-900 py-1 dark:text-white mb-1 [&:not(:first-child)]:mt-4",
+    "flex items-center gap-2 justify-between font-medium text-stone-900 py-1 dark:text-white mb-1 not-first:mt-4",
   );
   if (href) {
     return (

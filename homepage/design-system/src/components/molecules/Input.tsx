@@ -44,7 +44,7 @@ export const Input = forwardRef<HTMLInputElement, InputProps>(
         : icon && iconPosition === "right";
 
     const inputClassName = clsx(
-      "w-full rounded-md border px-2.5 py-1 shadow-sm h-[36px]",
+      "w-full rounded-md border px-2.5 py-1 shadow-xs h-[36px]",
       "font-medium text-stone-900",
       "dark:text-white dark:bg-stone-925",
     );

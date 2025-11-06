@@ -78,14 +78,13 @@ test("transactions with wrong signature are rejected", () => {
 
   const newEntry = node.getCoValue(coValue.id);
 
-  // eslint-disable-next-line neverthrow/must-use-result
-  const result = newEntry.tryAddTransactions(
+  const error = newEntry.tryAddTransactions(
     node.currentSessionID,
     [transaction],
     signature,
   );
 
-  expect(result.isErr()).toBe(true);
+  expect(Boolean(error)).toBe(true);
   expect(newEntry.getValidSortedTransactions().length).toBe(0);
 });
 
@@ -448,13 +447,11 @@ test("getValidTransactions should skip private transactions with invalid JSON", 
   map.set("hello", "world");
 
   // This should fail silently, because the encryptedChanges will be outputted as gibberish
-  map.core
-    .tryAddTransactions(
-      fixtures.session,
-      [fixtures.transaction],
-      fixtures.signature,
-    )
-    ._unsafeUnwrap();
+  map.core.tryAddTransactions(
+    fixtures.session,
+    [fixtures.transaction],
+    fixtures.signature,
+  );
 
   // Get valid transactions - should only include the valid one
   const validTransactions = map.core.getValidTransactions();

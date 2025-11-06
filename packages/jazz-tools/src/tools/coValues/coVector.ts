@@ -11,8 +11,7 @@ import {
   SubscribeListenerOptions,
   SubscribeRestArgs,
   TypeSym,
-} from "../internal.js";
-import {
+  MaybeLoaded,
   Account,
   CoValueJazzApi,
   inspect,
@@ -33,6 +32,7 @@ export class CoVector
   implements Readonly<Float32Array>, CoValue
 {
   declare $jazz: CoVectorJazzApi<this>;
+  declare $isLoaded: true;
 
   /** @category Type Helpers */
   declare [TypeSym]: "BinaryCoStream";
@@ -79,6 +79,7 @@ export class CoVector
         value: new CoVectorJazzApi(this, raw),
         enumerable: false,
       },
+      $isLoaded: { value: true, enumerable: false },
       _isVectorLoaded: { value: false, enumerable: false, writable: true },
       _requiredDimensionsCount: {
         value: dimensionsCount,
@@ -231,15 +232,15 @@ export class CoVector
     options?: {
       loadAs?: Account | AnonymousJazzAgent;
     },
-  ): Promise<C | null> {
+  ): Promise<MaybeLoaded<C>> {
     const coVector = await loadCoValueWithoutMe(this, id, options);
 
     /**
      * We are only interested in the entire vector. Since most vectors are small (<15kB),
      * we can wait for the stream to be complete before returning the vector
      */
-    if (!coVector?.$jazz.raw.isBinaryStreamEnded()) {
-      return new Promise<C | null>((resolve) => {
+    if (!coVector.$isLoaded || !coVector.$jazz.raw.isBinaryStreamEnded()) {
+      return new Promise((resolve) => {
         subscribeToCoValueWithoutMe(
           this,
           id,

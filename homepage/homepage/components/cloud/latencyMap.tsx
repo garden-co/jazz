@@ -13,7 +13,7 @@ export const LatencyMap = () => {
       </p>
 
       <div className="relative mb-4 mt-8">
-        <div className="relative aspect-[12/4] xl:-mx-[10%] xl:w-[120%]">
+        <div className="aspect-12/4 relative xl:-mx-[10%] xl:w-[120%]">
           <MapTooltip />
         </div>
         <ul className="absolute bottom-0 left-0 m-0 flex list-none flex-col p-0 md:gap-1 lg:bottom-8">
@@ -25,7 +25,10 @@ export const LatencyMap = () => {
               })}
             >
               <span
-                className={clsx("size-2 rounded-full md:size-3", t.bgClass)}
+                className="size-2 rounded-full md:size-3"
+                style={{
+                  backgroundColor: `light-dark(${t.fill}, ${t.darkFill})`,
+                }}
                 aria-hidden="true"
               ></span>
               <span className="font-mono text-[9px] md:text-xs">

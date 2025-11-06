@@ -27,6 +27,9 @@ import { CoreRichTextSchema } from "../schemaTypes/RichTextSchema.js";
 import { z } from "../zodReExport.js";
 import { InstanceOrPrimitiveOfSchema } from "./InstanceOrPrimitiveOfSchema.js";
 
+/**
+ * A loaded CoValue whose references are also loaded.
+ */
 export type InstanceOfSchema<S extends CoValueClass | AnyZodOrCoValueSchema> =
   S extends CoreCoValueSchema
     ? S extends CoreAccountSchema<infer Shape>

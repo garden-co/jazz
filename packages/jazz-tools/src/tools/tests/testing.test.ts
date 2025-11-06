@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, test } from "vitest";
 import { Account, CoMap, Group, co, z } from "../exports";
 import { createJazzTestAccount, setupJazzTestSync } from "../testing";
+import { assertLoaded } from "./utils";
 
 describe("Jazz Test Sync", () => {
   beforeEach(async () => {
@@ -20,8 +21,8 @@ describe("Jazz Test Sync", () => {
 
     // Verify account2 can see the group
     const loadedMap = await CoMap.load(map.$jazz.id, { loadAs: account2 });
-    expect(loadedMap).toBeDefined();
-    expect(loadedMap?.$jazz.raw.get("test")).toBe("value");
+    assertLoaded(loadedMap);
+    expect(loadedMap.$jazz.raw.get("test")).toBe("value");
   });
 
   test("correctly set the globalMe before starting the migration", async () => {

@@ -18,7 +18,7 @@ export function Alert({
   return (
     <div
       className={clsx(
-        "border-l-4 p-4 pl-6 dark:bg-red-200/5 overflow-hidden relative rounded",
+        "border-l-4 p-4 pl-6 dark:bg-red-200/5 overflow-hidden relative rounded-sm",
         {
           "border-yellow-400 bg-yellow-50 dark:border-yellow-500 dark:bg-yellow-200/5":
             variant === "warning",

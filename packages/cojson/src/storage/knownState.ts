@@ -3,7 +3,7 @@ import { RawCoID } from "../ids.js";
 import {
   CoValueKnownState,
   emptyKnownState,
-  areLocalSessionsUploaded,
+  areCurrentSessionsInSyncWith,
 } from "../knownState.js";
 
 /**
@@ -87,7 +87,7 @@ function isInSync(
     return false;
   }
 
-  return areLocalSessionsUploaded(
+  return areCurrentSessionsInSyncWith(
     knownState.sessions,
     knownStateFromStorage.sessions,
   );

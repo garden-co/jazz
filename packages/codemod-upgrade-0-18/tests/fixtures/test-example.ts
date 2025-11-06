@@ -78,7 +78,7 @@ function examplePropertyAssignments(union: Union) {
   const me = Account.getMe();
 
   if (me.profile) {
-    me.profile.name = "New Name"; // Will become: me.profile.$jazz.set("name", "New Name")
+    me.profile.name = "New Name"; // Will become: me.profile.$jazz.applyDiff({"name": "New Name"})
     me.profile.avatar = undefined; // Will become: me.profile.$jazz.delete("avatar")
   }
 

@@ -22,6 +22,7 @@ import { TableView } from "./table-viewer.js";
 import { TypeIcon } from "./type-icon.js";
 import { PageInfo } from "./types.js";
 import { resolveCoValue, useResolvedCoValue } from "./use-resolve-covalue.js";
+import { HistoryView } from "./history-view.js";
 
 interface PageContainerProps extends React.HTMLAttributes<HTMLDivElement> {
   isTopLevel?: boolean;
@@ -240,6 +241,7 @@ export function Page(props: PageProps) {
             </Text>
           </>
         )}
+        {value && <HistoryView coValue={value} node={node} />}
       </ContentContainer>
     </PageContainer>
   );

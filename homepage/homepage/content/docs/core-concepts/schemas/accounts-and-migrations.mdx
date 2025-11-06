@@ -133,7 +133,7 @@ class ContactPreview extends React.Component<{ contact: co.loaded<typeof MyAppAc
 import { useAccount } from "jazz-tools/react";
 
 function DashboardPageComponent() {
-  const { me } = useAccount(MyAppAccount, { resolve: {
+  const me = useAccount(MyAppAccount, { resolve: {
     profile: true,
     root: {
       myChats: { $each: true },
@@ -143,7 +143,7 @@ function DashboardPageComponent() {
   return (
     <div>
       <h1>Dashboard</h1>
-      {me ? (
+      {me.$isLoaded ? (
         <div>
           <p>Logged in as {me.profile.name}</p>
           <h2>My chats</h2>
@@ -259,7 +259,7 @@ export const MyAppAccount = co.account({
     });
   }
 
-  // We need to load the root field to check for the myContacts field
+  // We need to load the root field to check for the myBookmarks field
   const { root } = await account.$jazz.ensureLoaded({
     resolve: { root: true }
   });

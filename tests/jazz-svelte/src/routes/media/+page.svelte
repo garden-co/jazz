@@ -18,25 +18,27 @@
     input?.click();
   };
 
-  const onImageChange: ChangeEventHandler<HTMLInputElement> = (event) => {
+  const onImageChange: ChangeEventHandler<HTMLInputElement> = async (event) => {
     const file = event.currentTarget.files?.[0];
-		if (!file || !me.current?.profile) return;
-		createImage(file, {
-			owner: me.current?.profile._owner,
+		if (!file || !me.current.$isLoaded) return;
+		const image = await createImage(file, {
+			owner: me.current.profile.$jazz.owner,
 			maxSize: 400
-		}).then((image) => {
-			if (!me.current?.profile) return;
-			me.current.profile.image = image;
 		});
+    me.current.profile.$jazz.set("image", image);
   }
+
+  const imageId = $derived(me.current.$isLoaded && me.current.profile.image?.$isLoaded
+    ? me.current.profile.image.$jazz.id
+    : undefined);
 </script>
 
 <button onclick={onUploadClick}>
-  {me.current?.profile?.image ? 'Change image' : 'Send image'}
+  {imageId ? 'Change image' : 'Send image'}
 </button>
 
-{#if me.current?.profile?.image}
-  <Image imageId={me.current.profile.image.id} width={200} height="original" />
+{#if imageId}
+  <Image imageId={imageId} width={200} height="original" />
 {/if}
 
 <label>

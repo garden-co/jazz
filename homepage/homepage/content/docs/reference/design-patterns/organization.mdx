@@ -135,12 +135,12 @@ const JazzAccount = co.account({
 
 // ---cut---
 export function AcceptInvitePage() {
-  const { me } = useAccount(JazzAccount, {
-    resolve: { root: { organizations: { $each: { $onError: null } } } },
+  const me = useAccount(JazzAccount, {
+    resolve: { root: { organizations: { $each: { $onError: 'catch' } } } },
   });
 
   const onAccept = (organizationId: string) => {
-    if (me) {
+    if (me.$isLoaded) {
       Organization.load(organizationId).then((organization) => {
         if (organization) {
           // avoid duplicates

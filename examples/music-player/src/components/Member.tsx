@@ -19,7 +19,7 @@ export function Member({
     resolve: { profile: true },
   });
 
-  if (!account) {
+  if (!account.$isLoaded) {
     return (
       <div
         className={`rounded-full bg-gray-200 border-2 border-white flex items-center justify-center ${getSizeClasses(size)} ${className}`}
@@ -29,8 +29,8 @@ export function Member({
     );
   }
 
-  const avatar = account.profile?.avatar;
-  const name = account.profile?.name || "Unknown User";
+  const avatar = account.profile.avatar;
+  const name = account.profile.name || "Unknown User";
 
   return (
     <div

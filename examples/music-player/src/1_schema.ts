@@ -45,6 +45,12 @@ export const Playlist = co.map({
   tracks: co.list(MusicTrack), // CoList is the collaborative version of Array
 });
 export type Playlist = co.loaded<typeof Playlist>;
+
+export const PlaylistWithTracks = Playlist.resolved({
+  tracks: { $each: true },
+});
+export type PlaylistWithTracks = co.loaded<typeof PlaylistWithTracks>;
+
 /** The account root is an app-specific per-user private `CoMap`
  *  where you can store top-level objects for that user */
 export const MusicaAccountRoot = co.map({
@@ -117,5 +123,13 @@ export const MusicaAccount = co
     }
   });
 export type MusicaAccount = co.loaded<typeof MusicaAccount>;
+
+export const MusicaAccountWithPlaylists = MusicaAccount.resolved({
+  root: {
+    playlists: {
+      $each: { $onError: "catch", ...PlaylistWithTracks.resolveQuery },
+    },
+  },
+});
 
 /** Walkthrough: Continue with ./2_main.tsx */

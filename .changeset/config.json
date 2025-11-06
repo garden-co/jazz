@@ -9,6 +9,7 @@
       "cojson-core-wasm",
       "cojson-storage-indexeddb",
       "cojson-storage-sqlite",
+      "cojson-storage-do-sqlite",
       "cojson-transport-ws",
       "jazz-run",
       "jazz-tools",

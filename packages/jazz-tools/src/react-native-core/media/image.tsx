@@ -76,7 +76,9 @@ export const Image = forwardRef<RNImage, ImageProps>(function Image(
   { imageId, width, height, placeholder, ...props },
   ref,
 ) {
-  const image = useCoState(ImageDefinition, imageId);
+  const image = useCoState(ImageDefinition, imageId, {
+    select: (image) => (image.$isLoaded ? image : null),
+  });
   const [src, setSrc] = useState<string | undefined>(
     image?.placeholderDataURL ??
       "data:image/gif;base64,R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==",

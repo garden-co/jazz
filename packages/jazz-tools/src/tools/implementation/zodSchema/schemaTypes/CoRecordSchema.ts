@@ -6,6 +6,7 @@ import {
   CoMapSchemaDefinition,
   Group,
   ID,
+  MaybeLoaded,
   RefsToResolve,
   RefsToResolveStrict,
   Resolved,
@@ -15,11 +16,11 @@ import {
 import { AnonymousJazzAgent } from "../../anonymousJazzAgent.js";
 import { CoFieldSchemaInit } from "../typeConverters/CoFieldSchemaInit.js";
 import { InstanceOrPrimitiveOfSchema } from "../typeConverters/InstanceOrPrimitiveOfSchema.js";
-import { InstanceOrPrimitiveOfSchemaCoValuesNullable } from "../typeConverters/InstanceOrPrimitiveOfSchemaCoValuesNullable.js";
+import { InstanceOrPrimitiveOfSchemaCoValuesMaybeLoaded } from "../typeConverters/InstanceOrPrimitiveOfSchemaCoValuesMaybeLoaded.js";
 import { z } from "../zodReExport.js";
 import { AnyZodOrCoValueSchema } from "../zodSchema.js";
 import { CoOptionalSchema } from "./CoOptionalSchema.js";
-import { CoreCoValueSchema } from "./CoValueSchema.js";
+import { CoreCoValueSchema, CoreResolveQuery } from "./CoValueSchema.js";
 
 type CoRecordInit<
   K extends z.core.$ZodString<string>,
@@ -31,6 +32,7 @@ type CoRecordInit<
 export interface CoRecordSchema<
   K extends z.core.$ZodString<string>,
   V extends AnyZodOrCoValueSchema,
+  DefaultResolveQuery extends CoreResolveQuery = true,
 > extends CoreCoRecordSchema<K, V> {
   create(
     init: Simplify<CoRecordInit<K, V>>,
@@ -49,25 +51,35 @@ export interface CoRecordSchema<
 
   load<
     const R extends RefsToResolve<
-      CoRecordInstanceCoValuesNullable<K, V>
-    > = true,
+      CoRecordInstanceCoValuesMaybeLoaded<K, V>
+      // @ts-expect-error we can't statically enforce the schema's resolve query is a valid resolve query, but in practice it is
+    > = DefaultResolveQuery,
   >(
-    id: ID<CoRecordInstanceCoValuesNullable<K, V>>,
+    id: ID<CoRecordInstanceCoValuesMaybeLoaded<K, V>>,
     options?: {
-      resolve?: RefsToResolveStrict<CoRecordInstanceCoValuesNullable<K, V>, R>;
+      resolve?: RefsToResolveStrict<
+        CoRecordInstanceCoValuesMaybeLoaded<K, V>,
+        R
+      >;
       loadAs?: Account | AnonymousJazzAgent;
       unstable_branch?: BranchDefinition;
     },
-  ): Promise<Resolved<CoRecordInstanceCoValuesNullable<K, V>, R> | null>;
+  ): Promise<
+    MaybeLoaded<Resolved<CoRecordInstanceCoValuesMaybeLoaded<K, V>, R>>
+  >;
 
   unstable_merge<
     const R extends RefsToResolve<
-      CoRecordInstanceCoValuesNullable<K, V>
-    > = true,
+      CoRecordInstanceCoValuesMaybeLoaded<K, V>
+      // @ts-expect-error we can't statically enforce the schema's resolve query is a valid resolve query, but in practice it is
+    > = DefaultResolveQuery,
   >(
     id: string,
-    options?: {
-      resolve?: RefsToResolveStrict<CoRecordInstanceCoValuesNullable<K, V>, R>;
+    options: {
+      resolve?: RefsToResolveStrict<
+        CoRecordInstanceCoValuesMaybeLoaded<K, V>,
+        R
+      >;
       loadAs?: Account | AnonymousJazzAgent;
       branch: BranchDefinition;
     },
@@ -75,16 +87,17 @@ export interface CoRecordSchema<
 
   subscribe<
     const R extends RefsToResolve<
-      CoRecordInstanceCoValuesNullable<K, V>
-    > = true,
+      CoRecordInstanceCoValuesMaybeLoaded<K, V>
+      // @ts-expect-error we can't statically enforce the schema's resolve query is a valid resolve query, but in practice it is
+    > = DefaultResolveQuery,
   >(
-    id: ID<CoRecordInstanceCoValuesNullable<K, V>>,
+    id: ID<CoRecordInstanceCoValuesMaybeLoaded<K, V>>,
     options: SubscribeListenerOptions<
-      CoRecordInstanceCoValuesNullable<K, V>,
+      CoRecordInstanceCoValuesMaybeLoaded<K, V>,
       R
     >,
     listener: (
-      value: Resolved<CoRecordInstanceCoValuesNullable<K, V>, R>,
+      value: Resolved<CoRecordInstanceCoValuesMaybeLoaded<K, V>, R>,
       unsubscribe: () => void,
     ) => void,
   ): () => void;
@@ -94,35 +107,66 @@ export interface CoRecordSchema<
     unique: CoValueUniqueness["uniqueness"],
     ownerID: ID<Account> | ID<Group>,
     as?: Account | Group | AnonymousJazzAgent,
-  ): ID<CoRecordInstanceCoValuesNullable<K, V>>;
+  ): ID<CoRecordInstanceCoValuesMaybeLoaded<K, V>>;
 
   upsertUnique<
     const R extends RefsToResolve<
-      CoRecordInstanceCoValuesNullable<K, V>
-    > = true,
+      CoRecordInstanceCoValuesMaybeLoaded<K, V>
+      // @ts-expect-error we can't statically enforce the schema's resolve query is a valid resolve query, but in practice it is
+    > = DefaultResolveQuery,
   >(options: {
     value: Simplify<CoRecordInit<K, V>>;
     unique: CoValueUniqueness["uniqueness"];
     owner: Account | Group;
-    resolve?: RefsToResolveStrict<CoRecordInstanceCoValuesNullable<K, V>, R>;
-  }): Promise<Resolved<CoRecordInstanceCoValuesNullable<K, V>, R> | null>;
+    resolve?: RefsToResolveStrict<CoRecordInstanceCoValuesMaybeLoaded<K, V>, R>;
+  }): Promise<
+    MaybeLoaded<Resolved<CoRecordInstanceCoValuesMaybeLoaded<K, V>, R>>
+  >;
 
   loadUnique<
     const R extends RefsToResolve<
-      CoRecordInstanceCoValuesNullable<K, V>
-    > = true,
+      CoRecordInstanceCoValuesMaybeLoaded<K, V>
+      // @ts-expect-error we can't statically enforce the schema's resolve query is a valid resolve query, but in practice it is
+    > = DefaultResolveQuery,
   >(
     unique: CoValueUniqueness["uniqueness"],
     ownerID: ID<Account> | ID<Group>,
     options?: {
-      resolve?: RefsToResolveStrict<CoRecordInstanceCoValuesNullable<K, V>, R>;
+      resolve?: RefsToResolveStrict<
+        CoRecordInstanceCoValuesMaybeLoaded<K, V>,
+        R
+      >;
       loadAs?: Account | AnonymousJazzAgent;
     },
-  ): Promise<Resolved<CoRecordInstanceCoValuesNullable<K, V>, R> | null>;
+  ): Promise<
+    MaybeLoaded<Resolved<CoRecordInstanceCoValuesMaybeLoaded<K, V>, R>>
+  >;
 
   getCoValueClass: () => typeof CoMap;
 
   optional(): CoOptionalSchema<this>;
+
+  /**
+   * Default resolve query to be used when loading instances of this schema.
+   * This resolve query will be used when no resolve query is provided to the load method.
+   * @default true
+   */
+  resolveQuery: DefaultResolveQuery;
+
+  /**
+   * Adds a default resolve query to be used when loading instances of this schema.
+   * This resolve query will be used when no resolve query is provided to the load method.
+   */
+  resolved<
+    const R extends RefsToResolve<
+      CoRecordInstanceCoValuesMaybeLoaded<K, V>
+    > = true,
+  >(
+    resolveQuery: RefsToResolveStrict<
+      CoRecordInstanceCoValuesMaybeLoaded<K, V>,
+      R
+    >,
+  ): CoRecordSchema<K, V, R>;
 }
 
 type CoRecordSchemaDefinition<
@@ -149,11 +193,11 @@ export type CoRecordInstance<
   [key in z.output<K>]: InstanceOrPrimitiveOfSchema<V>;
 } & CoMap;
 
-export type CoRecordInstanceCoValuesNullable<
+export type CoRecordInstanceCoValuesMaybeLoaded<
   K extends z.core.$ZodString<string>,
   V extends AnyZodOrCoValueSchema,
 > = {
-  readonly [key in z.output<K>]: InstanceOrPrimitiveOfSchemaCoValuesNullable<V>;
+  readonly [key in z.output<K>]: InstanceOrPrimitiveOfSchemaCoValuesMaybeLoaded<V>;
 } & CoMap;
 
 export type CoRecordInstanceShape<

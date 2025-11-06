@@ -31,7 +31,7 @@ function getNewContentSince(
     throw new Error(`CoValue ${coValue.id} is not verified`);
   }
 
-  const contentMessage = coValue.verified.newContentSince(knownState)?.[0];
+  const contentMessage = coValue.newContentSince(knownState)?.[0];
 
   if (!contentMessage) {
     throw new Error(`No new content available for coValue ${coValue.id}`);
@@ -295,7 +295,7 @@ describe("StorageApiAsync", () => {
       const contentMessage = getNewContentSince(group.core, knownState);
       const correctionCallback = vi.fn((known) => {
         expect(known).toEqual(emptyKnownState(group.id));
-        return group.core.verified.newContentSince(known);
+        return group.core.newContentSince(known);
       });
 
       // Get initial known state
@@ -339,7 +339,7 @@ describe("StorageApiAsync", () => {
       const contentMessage = getNewContentSince(group.core, knownState);
       const correctionCallback = vi.fn((known) => {
         expect(known).toEqual(initialKnownState);
-        return group.core.verified.newContentSince(known);
+        return group.core.newContentSince(known);
       });
 
       // Get initial storage known state

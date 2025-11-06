@@ -2,20 +2,12 @@ import { useAccount } from "jazz-tools/react";
 import { Layout } from "./Layout.tsx";
 import { CreateOrganization } from "./components/CreateOrganization.tsx";
 import { Heading } from "./components/Heading.tsx";
-import { JazzAccount } from "./schema";
+import { JazzAccountWithOrganizations } from "./schema";
 
 export function HomePage() {
-  const { me } = useAccount(JazzAccount, {
-    resolve: {
-      root: {
-        organizations: {
-          $each: { $onError: null },
-        },
-      },
-    },
-  });
+  const me = useAccount(JazzAccountWithOrganizations);
 
-  if (!me?.root.organizations) return;
+  if (!me.$isLoaded) return;
 
   return (
     <Layout>
@@ -28,7 +20,7 @@ export function HomePage() {
         <div className="divide-y">
           {me.root.organizations.length > 0 ? (
             me.root.organizations.map((project) =>
-              project ? (
+              project.$isLoaded ? (
                 <a
                   key={project.$jazz.id}
                   className="px-4 py-5 sm:px-6 font-medium block"

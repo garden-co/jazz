@@ -2,19 +2,23 @@ import { createInviteLink, useAccount } from "jazz-tools/react";
 import { useCoState } from "jazz-tools/react";
 import { IssueComponent } from "./Issue.tsx";
 import { Issue, Project } from "./schema.ts";
+
 export function ProjectComponent({ projectID }: { projectID: string }) {
+  const me = useAccount();
   const project = useCoState(Project, projectID, {
     resolve: { issues: { $each: true } },
   });
 
-  if (!project) return;
+  if (!me.$isLoaded || !project.$isLoaded) {
+    return <div>Loading project...</div>;
+  }
 
   const invite = (role: "reader" | "writer") => {
     const link = createInviteLink(project, role, { valueHint: "project" });
     navigator.clipboard.writeText(link);
   };
   const createAndAddIssue = () => {
-    project?.issues.$jazz.push(
+    project.issues.$jazz.push(
       Issue.create(
         {
           title: "",
@@ -26,11 +30,10 @@ export function ProjectComponent({ projectID }: { projectID: string }) {
       ),
     );
   };
-  const { me } = useAccount();
-  return project ? (
+  return (
     <div>
       <h1>{project.name}</h1>
-      {me?.canAdmin(project) && (
+      {me.canAdmin(project) && (
         <>
           <button onClick={() => invite("reader")}>Invite Guest</button>
           <button onClick={() => invite("writer")}>Invite Member</button>
@@ -43,7 +46,5 @@ export function ProjectComponent({ projectID }: { projectID: string }) {
         <button onClick={createAndAddIssue}>Create Issue</button>
       </div>
     </div>
-  ) : (
-    <div>Loading project...</div>
   );
 }

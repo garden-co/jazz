@@ -11,7 +11,7 @@ import { useRouter } from "vue-router";
 import { Chat } from "../schema";
 
 const router = useRouter();
-const { me } = useAccount();
+const me = useAccount();
 const isAuthenticated = useIsAuthenticated();
 
 watch(

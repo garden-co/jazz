@@ -6,6 +6,7 @@ import {
   RawCoValue,
 } from "cojson";
 import type { BranchDefinition } from "./types.js";
+import { CoValueLoadingState } from "./types.js";
 
 /**
  * Manages subscriptions to CoValue cores, handling both direct subscriptions
@@ -21,13 +22,17 @@ export class CoValueCoreSubscription {
   private branchName?: string;
   private source: CoValueCore;
   private localNode: LocalNode;
-  private listener: (value: RawCoValue | "unavailable") => void;
+  private listener: (
+    value: RawCoValue | typeof CoValueLoadingState.UNAVAILABLE,
+  ) => void;
   private skipRetry?: boolean;
 
   constructor(
     localNode: LocalNode,
     id: string,
-    listener: (value: RawCoValue | "unavailable") => void,
+    listener: (
+      value: RawCoValue | typeof CoValueLoadingState.UNAVAILABLE,
+    ) => void,
     skipRetry?: boolean,
     branch?: BranchDefinition,
   ) {
@@ -115,7 +120,7 @@ export class CoValueCoreSubscription {
       .then((value) => {
         if (this.unsubscribed) return;
 
-        if (value !== "unavailable") {
+        if (value !== CoValueLoadingState.UNAVAILABLE) {
           // Branch checkout successful, subscribe to it
           this.subscribe(value);
         } else {
@@ -126,7 +131,7 @@ export class CoValueCoreSubscription {
       .catch((error) => {
         // Handle unexpected errors during branch checkout
         console.error(error);
-        this.emit("unavailable");
+        this.emit(CoValueLoadingState.UNAVAILABLE);
       });
   }
 
@@ -143,7 +148,7 @@ export class CoValueCoreSubscription {
 
     // Source isn't available either, subscribe to state changes and report unavailability
     this.subscribeToUnavailableSource();
-    this.emit("unavailable");
+    this.emit(CoValueLoadingState.UNAVAILABLE);
   }
 
   /**
@@ -162,13 +167,13 @@ export class CoValueCoreSubscription {
         } else {
           // Loading failed, subscribe to state changes and report unavailability
           this.subscribeToUnavailableSource();
-          this.emit("unavailable");
+          this.emit(CoValueLoadingState.UNAVAILABLE);
         }
       })
       .catch((error) => {
         // Handle unexpected errors during loading
         console.error(error);
-        this.emit("unavailable");
+        this.emit(CoValueLoadingState.UNAVAILABLE);
       });
   }
 
@@ -218,7 +223,7 @@ export class CoValueCoreSubscription {
     });
   }
 
-  emit(value: RawCoValue | "unavailable"): void {
+  emit(value: RawCoValue | typeof CoValueLoadingState.UNAVAILABLE): void {
     if (this.unsubscribed) return;
     if (!isReadyForEmit(value)) {
       return;

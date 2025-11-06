@@ -24,7 +24,7 @@ export function SectionHeader({
   className?: string;
 }) {
   return (
-    <hgroup className={clsx(className, "space-y-4 mb-5")}>
+    <hgroup className={clsx(className, "flex flex-col gap-4 mb-5")}>
       {kicker && <Kicker>{kicker}</Kicker>}
       <H2>{title}</H2>
       {slogan && <H2Sub>{slogan}</H2Sub>}

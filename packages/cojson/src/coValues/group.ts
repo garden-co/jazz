@@ -123,6 +123,13 @@ function healMissingKeyForEveryone(group: RawGroup) {
 }
 
 function needsKeyRotation(group: RawGroup) {
+  const myRole = group.myRole();
+
+  // Checking only direct membership because inside the migrations we can't navigate the parent groups
+  if (myRole !== "admin" && myRole !== "manager") {
+    return false;
+  }
+
   const currentReadKeyId = group.get("readKey");
 
   if (!currentReadKeyId) {
@@ -190,11 +197,27 @@ export class RawGroup<
   ) {
     super(core, options);
     this.crypto = core.node.crypto;
+    this.migrate();
+  }
 
-    // Checks if this is not an account
-    if (core.isGroup() && !core.verified.isStreaming()) {
+  migrate() {
+    if (!this.core.isGroup()) {
+      return;
+    }
+
+    const runMigrations = () => {
       // rotateReadKeyIfNeeded(this);
       healMissingKeyForEveryone(this);
+    };
+
+    // We need the group and their parents to be completely downloaded to correctly handle the migrations
+    if (!this.core.isCompletelyDownloaded()) {
+      this.core.waitFor({
+        predicate: (core) => core.isCompletelyDownloaded(),
+        onSuccess: runMigrations,
+      });
+    } else {
+      runMigrations();
     }
   }
 
@@ -318,7 +341,7 @@ export class RawGroup<
    * @category 1. Role reading
    */
   myRole(): Role | undefined {
-    return this.roleOfInternal(this.core.node.getCurrentAgent().id);
+    return this.roleOfInternal(this.core.node.getCurrentAccountOrAgentID());
   }
 
   /**
@@ -485,12 +508,14 @@ export class RawGroup<
         memberRole === "writerInvite" ||
         memberRole === "adminInvite"
       ) {
-        const otherMemberAgent = this.core.node
-          .resolveAccountAgent(
-            otherMemberKey,
-            "Expected member agent to be loaded",
-          )
-          ._unsafeUnwrap({ withStackTrace: true });
+        const otherMemberAgent = this.core.node.resolveAccountAgent(
+          otherMemberKey,
+          "Expected member agent to be loaded",
+        ).value;
+
+        if (!otherMemberAgent) {
+          throw new Error("Expected member agent to be loaded");
+        }
 
         this.storeKeyRevelationForMember(
           otherMemberKey,
@@ -666,9 +691,14 @@ export class RawGroup<
 
     if (lastReadyKeyEdit?.value) {
       const revealer = lastReadyKeyEdit.by;
-      const revealerAgent = core.node
-        .resolveAccountAgent(revealer, "Expected to know revealer")
-        ._unsafeUnwrap({ withStackTrace: true });
+      const revealerAgent = core.node.resolveAccountAgent(
+        revealer,
+        "Expected to know revealer",
+      ).value;
+
+      if (!revealerAgent) {
+        throw new Error("Expected to know revealer");
+      }
 
       const secret = this.crypto.unseal(
         lastReadyKeyEdit.value,
@@ -818,12 +848,14 @@ export class RawGroup<
     const newReadKey = this.crypto.newRandomKeySecret();
 
     for (const readerID of currentlyPermittedReaders) {
-      const agent = this.core.node
-        .resolveAccountAgent(
-          readerID,
-          "Expected to know currently permitted reader",
-        )
-        ._unsafeUnwrap({ withStackTrace: true });
+      const agent = this.core.node.resolveAccountAgent(
+        readerID,
+        "Expected to know currently permitted reader",
+      ).value;
+
+      if (!agent) {
+        throw new Error("Expected to know currently permitted reader");
+      }
 
       this.storeKeyRevelationForMember(
         readerID,
@@ -838,12 +870,14 @@ export class RawGroup<
      * and reveal them to the other non-writeOnly members
      */
     for (const writeOnlyMemberID of writeOnlyMembers) {
-      const agent = this.core.node
-        .resolveAccountAgent(
-          writeOnlyMemberID,
-          "Expected to know writeOnly member",
-        )
-        ._unsafeUnwrap({ withStackTrace: true });
+      const agent = this.core.node.resolveAccountAgent(
+        writeOnlyMemberID,
+        "Expected to know writeOnly member",
+      ).value;
+
+      if (!agent) {
+        throw new Error("Expected to know writeOnly member");
+      }
 
       const writeOnlyKey = this.crypto.newRandomKeySecret();
 
@@ -856,12 +890,14 @@ export class RawGroup<
       this.set(`writeKeyFor_${writeOnlyMemberID}`, writeOnlyKey.id, "trusting");
 
       for (const readerID of currentlyPermittedReaders) {
-        const agent = this.core.node
-          .resolveAccountAgent(
-            readerID,
-            "Expected to know currently permitted reader",
-          )
-          ._unsafeUnwrap({ withStackTrace: true });
+        const agent = this.core.node.resolveAccountAgent(
+          readerID,
+          "Expected to know currently permitted reader",
+        ).value;
+
+        if (!agent) {
+          throw new Error("Expected to know currently permitted reader");
+        }
 
         this.storeKeyRevelationForMember(
           readerID,
@@ -942,30 +978,7 @@ export class RawGroup<
 
   /** Detect circular references in group inheritance */
   isSelfExtension(parent: RawGroup) {
-    const checkedGroups = new Set<string>();
-    const queue = [parent];
-
-    while (true) {
-      const current = queue.pop();
-
-      if (!current) {
-        return false;
-      }
-
-      if (current.id === this.id) {
-        return true;
-      }
-
-      checkedGroups.add(current.id);
-
-      const parentGroups = current.getParentGroups();
-
-      for (const parent of parentGroups) {
-        if (!checkedGroups.has(parent.id)) {
-          queue.push(parent);
-        }
-      }
-    }
+    return isSelfExtension(this.core, parent);
   }
 
   getCurrentReadKey() {
@@ -1365,5 +1378,32 @@ class NoReadKeyAccessError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "NoReadKeyAccessError";
+  }
+}
+
+export function isSelfExtension(coValue: CoValueCore, parent: RawGroup) {
+  const checkedGroups = new Set<string>();
+  const queue = [parent];
+
+  while (true) {
+    const current = queue.pop();
+
+    if (!current) {
+      return false;
+    }
+
+    if (current.id === coValue.id) {
+      return true;
+    }
+
+    checkedGroups.add(current.id);
+
+    const parentGroups = current.getParentGroups();
+
+    for (const parent of parentGroups) {
+      if (!checkedGroups.has(parent.id)) {
+        queue.push(parent);
+      }
+    }
   }
 }

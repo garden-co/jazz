@@ -46,7 +46,7 @@ function App() {
     },
   ]);
 
-  const { me } = useAccount(TodoAccount, {
+  const me = useAccount(TodoAccount, {
     resolve: { root: true },
   });
 
@@ -56,8 +56,8 @@ function App() {
 }
 
 function HomeScreen() {
-  const { me } = useAccount(TodoAccount, {
-    resolve: { root: { projects: { $each: { $onError: null } } } },
+  const me = useAccount(TodoAccount, {
+    resolve: { root: { projects: { $each: { $onError: "catch" } } } },
   });
 
   const navigate = useNavigate();
@@ -74,7 +74,7 @@ function HomeScreen() {
     >
       <ProjectGenerator />
       {/* Profiling Toggle */}
-      {me?.root && (
+      {me.$isLoaded && (
         <div
           style={{
             marginTop: "20px",
@@ -114,7 +114,7 @@ function HomeScreen() {
           </label>
         </div>
       )}
-      {me?.root.projects.length ? (
+      {me.$isLoaded && me.root.projects.length ? (
         <h1
           style={{
             marginTop: "40px",
@@ -136,78 +136,92 @@ function HomeScreen() {
           marginTop: "20px",
         }}
       >
-        {me?.root.projects.map((project) => {
-          if (!project) return null;
+        {me.$isLoaded &&
+          me.root.projects.map((project) => {
+            if (!project.$isLoaded) return null;
 
-          return (
-            <div
-              key={project.$jazz.id}
-              onClick={() => {
-                navigate(`/project/${project.$jazz.id}`);
-              }}
-              style={{
-                background: "white",
-                border: "1px solid #e1e5e9",
-                borderRadius: "12px",
-                padding: "24px",
-                cursor: "pointer",
-                transition: "all 0.2s ease-in-out",
-                boxShadow: "0 2px 8px rgba(0, 0, 0, 0.06)",
-                position: "relative",
-                overflow: "hidden",
-              }}
-              onMouseEnter={(e) => {
-                e.currentTarget.style.transform = "translateY(-4px)";
-                e.currentTarget.style.boxShadow =
-                  "0 8px 25px rgba(0, 0, 0, 0.12)";
-                e.currentTarget.style.borderColor = "#007AFF";
-              }}
-              onMouseLeave={(e) => {
-                e.currentTarget.style.transform = "translateY(0)";
-                e.currentTarget.style.boxShadow =
-                  "0 2px 8px rgba(0, 0, 0, 0.06)";
-                e.currentTarget.style.borderColor = "#e1e5e9";
-              }}
-            >
+            return (
               <div
-                style={{
-                  position: "absolute",
-                  top: "0",
-                  left: "0",
-                  right: "0",
-                  height: "4px",
-                  background: "linear-gradient(90deg, #007AFF, #5856D6)",
-                  borderRadius: "12px 12px 0 0",
+                key={project.$jazz.id}
+                onClick={() => {
+                  navigate(`/project/${project.$jazz.id}`);
                 }}
-              />
-              <h3
                 style={{
-                  margin: "0 0 12px 0",
-                  fontSize: "1.25rem",
-                  fontWeight: "600",
-                  color: "#1a1a1a",
-                  lineHeight: "1.4",
+                  background: "white",
+                  border: "1px solid #e1e5e9",
+                  borderRadius: "12px",
+                  padding: "24px",
+                  cursor: "pointer",
+                  transition: "all 0.2s ease-in-out",
+                  boxShadow: "0 2px 8px rgba(0, 0, 0, 0.06)",
+                  position: "relative",
+                  overflow: "hidden",
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.transform = "translateY(-4px)";
+                  e.currentTarget.style.boxShadow =
+                    "0 8px 25px rgba(0, 0, 0, 0.12)";
+                  e.currentTarget.style.borderColor = "#007AFF";
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.transform = "translateY(0)";
+                  e.currentTarget.style.boxShadow =
+                    "0 2px 8px rgba(0, 0, 0, 0.06)";
+                  e.currentTarget.style.borderColor = "#e1e5e9";
                 }}
               >
-                {project.title}
-              </h3>
-              <div
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "space-between",
-                  marginTop: "16px",
-                }}
-              >
-                <span
+                <div
                   style={{
-                    fontSize: "0.875rem",
-                    color: "#6b7280",
-                    display: "flex",
-                    alignItems: "center",
-                    gap: "6px",
+                    position: "absolute",
+                    top: "0",
+                    left: "0",
+                    right: "0",
+                    height: "4px",
+                    background: "linear-gradient(90deg, #007AFF, #5856D6)",
+                    borderRadius: "12px 12px 0 0",
+                  }}
+                />
+                <h3
+                  style={{
+                    margin: "0 0 12px 0",
+                    fontSize: "1.25rem",
+                    fontWeight: "600",
+                    color: "#1a1a1a",
+                    lineHeight: "1.4",
                   }}
                 >
+                  {project.title}
+                </h3>
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    marginTop: "16px",
+                  }}
+                >
+                  <span
+                    style={{
+                      fontSize: "0.875rem",
+                      color: "#6b7280",
+                      display: "flex",
+                      alignItems: "center",
+                      gap: "6px",
+                    }}
+                  >
+                    <svg
+                      width="16"
+                      height="16"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                    >
+                      <path d="M9 12l2 2 4-4" />
+                      <path d="M21 12c0 4.97-4.03 9-9 9s-9-4.03-9-9 4.03-9 9-9 9 4.03 9 9z" />
+                    </svg>
+                    Click to open
+                  </span>
                   <svg
                     width="16"
                     height="16"
@@ -215,27 +229,14 @@ function HomeScreen() {
                     fill="none"
                     stroke="currentColor"
                     strokeWidth="2"
+                    style={{ color: "#007AFF" }}
                   >
-                    <path d="M9 12l2 2 4-4" />
-                    <path d="M21 12c0 4.97-4.03 9-9 9s-9-4.03-9-9 4.03-9 9-9 9 4.03 9 9z" />
+                    <path d="M9 18l6-6-6-6" />
                   </svg>
-                  Click to open
-                </span>
-                <svg
-                  width="16"
-                  height="16"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                  style={{ color: "#007AFF" }}
-                >
-                  <path d="M9 18l6-6-6-6" />
-                </svg>
+                </div>
               </div>
-            </div>
-          );
-        })}
+            );
+          })}
       </div>
     </div>
   );

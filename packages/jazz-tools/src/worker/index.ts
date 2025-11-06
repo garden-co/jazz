@@ -1,4 +1,10 @@
-import { AgentSecret, CryptoProvider, LocalNode, Peer } from "cojson";
+import {
+  AgentSecret,
+  CryptoProvider,
+  LocalNode,
+  Peer,
+  StorageAPI,
+} from "cojson";
 import {
   type AnyWebSocketConstructor,
   WebSocketPeerWithReconnection,
@@ -35,6 +41,7 @@ type WorkerOptions<
    * If false, the worker will not set in the global account context
    */
   asActiveAccount?: boolean;
+  storage?: StorageAPI;
 };
 
 /** @category Context Creation */
@@ -95,6 +102,7 @@ export async function startWorker<
     peers,
     crypto: options.crypto ?? (await WasmCrypto.create()),
     asActiveAccount,
+    storage: options.storage,
   });
 
   const account = context.account as InstanceOfSchema<S>;

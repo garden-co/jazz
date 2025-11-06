@@ -1,7 +1,8 @@
 // @vitest-environment happy-dom
 
 import { cojsonInternals } from "cojson";
-import { co, z } from "jazz-tools";
+import { co, z, CoValueLoadingState } from "jazz-tools";
+import { assertLoaded } from "jazz-tools/testing";
 import { beforeEach, describe, expect, expectTypeOf, it } from "vitest";
 import {
   useCoValueSubscription,
@@ -47,7 +48,8 @@ describe("useSubscriptionSelector", () => {
       return useSubscriptionSelector(subscription);
     });
 
-    expect(result.current?.value).toBe("123");
+    assertLoaded(result.current);
+    expect(result.current.value).toBe("123");
   });
 
   it("should resolve nested coValues", () => {
@@ -72,10 +74,12 @@ describe("useSubscriptionSelector", () => {
       return useSubscriptionSelector(subscription);
     });
 
-    expect(result.current?.nested?.content).toBe("456");
+    assertLoaded(result.current);
+    assertLoaded(result.current.nested);
+    expect(result.current.nested.content).toBe("456");
   });
 
-  it("should return null on invalid coValue id", async () => {
+  it("should return 'unavailable' on invalid coValue id", async () => {
     const TestMap = co.map({
       value: z.string(),
     });
@@ -85,10 +89,12 @@ describe("useSubscriptionSelector", () => {
       return useSubscriptionSelector(subscription);
     });
 
-    expect(result.current).toBeUndefined();
+    expect(result.current.$jazz.loadingState).toBe(CoValueLoadingState.LOADING);
 
     await waitFor(() => {
-      expect(result.current).toBeNull();
+      expect(result.current.$jazz.loadingState).toBe(
+        CoValueLoadingState.UNAVAILABLE,
+      );
     });
   });
 
@@ -120,7 +126,12 @@ describe("useSubscriptionSelector", () => {
     const { result } = renderHook(() => {
       const subscription = useCoValueSubscription(TestMap, map.$jazz.id);
       return useSubscriptionSelector(subscription, {
-        select: (v) => v?.value,
+        select: (v) => {
+          if (!v.$isLoaded) {
+            return "Loading...";
+          }
+          return v.value;
+        },
       });
     });
 
@@ -134,9 +145,18 @@ describe("useSubscriptionSelector", () => {
 
     const { result } = renderHook(
       () => {
-        const subscription = useAccountSubscription(co.account());
+        const subscription = useAccountSubscription(co.account(), {
+          resolve: {
+            profile: true,
+          },
+        });
         return useSubscriptionSelector(subscription, {
-          select: (v) => v?.profile?.name,
+          select: (v) => {
+            if (!v.$isLoaded) {
+              return "Loading...";
+            }
+            return v.profile.name;
+          },
         });
       },
       {
@@ -159,7 +179,12 @@ describe("useSubscriptionSelector", () => {
     const { result } = renderHook(() => {
       const subscription = useCoValueSubscription(TestMap, map.$jazz.id);
       return useSubscriptionSelector(subscription, {
-        select: (v) => v?.value,
+        select: (v) => {
+          if (!v.$isLoaded) {
+            return "Loading...";
+          }
+          return v.value;
+        },
       });
     });
 
@@ -187,7 +212,12 @@ describe("useSubscriptionSelector", () => {
       useRenderCount(() => {
         const subscription = useCoValueSubscription(TestMap, map.$jazz.id);
         return useSubscriptionSelector(subscription, {
-          select: (v) => v?.value,
+          select: (v) => {
+            if (!v.$isLoaded) {
+              return "Loading...";
+            }
+            return v.value;
+          },
         });
       }),
     );
@@ -218,10 +248,14 @@ describe("useSubscriptionSelector", () => {
       useRenderCount(() => {
         const subscription = useCoValueSubscription(TestMap, map.$jazz.id);
         return useSubscriptionSelector(subscription, {
-          select: (v) =>
-            v
+          select: (v) => {
+            if (!v.$isLoaded) {
+              return [];
+            }
+            return v
               ? [Math.floor(v.value / 5), Math.floor(v.other / 5)].toSorted()
-              : [],
+              : [];
+          },
           equalityFn: (a, b) => a.every((v, i) => v === b[i]),
         });
       }),

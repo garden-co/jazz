@@ -1,5 +1,8 @@
 import { RawCoID } from "./ids.js";
-import { CoValueKnownState, areLocalSessionsUploaded } from "./knownState.js";
+import {
+  CoValueKnownState,
+  areCurrentSessionsInSyncWith,
+} from "./knownState.js";
 import { PeerState } from "./PeerState.js";
 import { PeerID, SyncManager } from "./sync.js";
 
@@ -97,7 +100,7 @@ export class SyncStateManager {
     // applied on CoValueCore
     const knownState = entry.verified.knownState();
 
-    return areLocalSessionsUploaded(
+    return areCurrentSessionsInSyncWith(
       knownState.sessions,
       peerKnownState.sessions,
     );

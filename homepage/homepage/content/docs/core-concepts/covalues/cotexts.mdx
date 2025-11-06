@@ -209,7 +209,7 @@ function TextEditor({ textId }: { textId: string }) {
   const note = useCoState(co.plainText(), textId);
 
   return (
-    note && <textarea
+    note.$isLoaded && <textarea
       value={note.toString()}
       onChange={(e) => {
         // Efficiently update only what the user changed
@@ -358,16 +358,17 @@ import { EditorState } from "prosemirror-state";
 import { EditorView } from "prosemirror-view";
 
 function RichTextEditor() {
-  const { me } = useAccount(JazzAccount, { resolve: { profile: true } });
+  const me = useAccount(JazzAccount, { resolve: { profile: { bio: true} } });
   const editorRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
 
+  const bio = me.$isLoaded ? me.profile.bio : undefined;
   useEffect(() => {
-    if (!me?.profile.bio || !editorRef.current) return;
+    if (!bio || !editorRef.current) return;
 
     // Create the Jazz plugin for ProseMirror
     // Providing a co.richText() instance to the plugin to automatically sync changes
-    const jazzPlugin = createJazzPlugin(me.profile.bio); // [!code ++]
+    const jazzPlugin = createJazzPlugin(bio); // [!code ++]
 
     // Set up ProseMirror with the Jazz plugin
     if (!viewRef.current) {
@@ -388,12 +389,12 @@ function RichTextEditor() {
         viewRef.current = null;
       }
     };
-  }, [me?.profile.bio?.$jazz.id]);
+  }, [bio?.$jazz.id]);
 
-  if (!me) return null;
+  if (!me.$isLoaded) return null;
 
   return (
-    <div className="border rounded">
+    <div className="border rounded-sm">
       <div ref={editorRef} className="p-2" />
     </div>
   );

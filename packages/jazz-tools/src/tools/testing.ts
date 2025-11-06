@@ -16,8 +16,13 @@ import {
   coValueClassFromCoValueClassOrSchema,
   createAnonymousJazzContext,
   createJazzContext,
+  CoValue,
+  LoadedAndRequired,
+  MaybeLoaded,
   randomSessionProvider,
 } from "./internal.js";
+
+export { assertLoaded } from "./lib/utils.js";
 
 const syncServer: { current: LocalNode | null; asyncPeers: boolean } = {
   current: null,

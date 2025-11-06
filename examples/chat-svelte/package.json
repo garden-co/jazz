@@ -1,11 +1,11 @@
 {
   "name": "chat-svelte",
-  "version": "0.0.159",
+  "version": "0.0.167",
   "type": "module",
   "private": true,
   "scripts": {
     "dev": "vite dev",
-    "build": "vite build",
+    "build": "pnpm check && vite build",
     "preview": "vite preview",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",

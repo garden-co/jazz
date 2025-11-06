@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { beforeNavigate, goto } from "$app/navigation";
+  import { goto } from "$app/navigation";
   import { Account } from "jazz-tools";
   import { AccountCoState } from "jazz-tools/svelte";
 
@@ -11,7 +11,9 @@
   const me = $derived(account.current);
   const navigate = async (route: string) => {
     // Flush the name to avoid SSR picking up the previous name
-    await me?.profile.$jazz.waitForSync();
+    if (me.$isLoaded) {
+      await me.profile.$jazz.waitForSync();
+    }
     await goto(route);
   };
 </script>
@@ -26,9 +28,9 @@
     <p>Your profile name</p>
     <small>(only loaded on the client)</small>
     <input
-      value={me?.profile.name ?? ""}
+      value={me.$isLoaded ? me.profile.name : ""}
       onchange={(e) => {
-        if (!me || !e.target) {
+        if (!me.$isLoaded || !e.target) {
           return;
         }
 
@@ -36,7 +38,7 @@
       }}
     />
   </label>
-  <button onclick={() => navigate(`/profile/${me?.profile.$jazz.id}`)}>
+  <button onclick={() => navigate(`/profile/${me.$isLoaded ? me.profile.$jazz.id : ""}`)}>
     Your profile name in a Server Component &rarr;
   </button>
 </div>

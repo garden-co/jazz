@@ -50,8 +50,9 @@ function getAuditLog(task: Task) {
 // Use it to show change history
 const auditLog = getAuditLog(task);
 auditLog.forEach((entry) => {
+  if (!entry.by?.profile?.$isLoaded) return;
   const when = entry.at.toLocaleString();
-  const who = entry.by?.profile?.name;
+  const who = entry.by.profile.name;
   const what = entry.field;
   const value = entry.value;
 
@@ -132,7 +133,7 @@ Show when something was last updated:
 
 <CodeGroup>
 ```ts twoslash
-import { co, z } from 'jazz-tools'
+import { co, z, CoMapEdit } from 'jazz-tools'
 import { createJazzTestAccount } from 'jazz-tools/testing'
 
 const me = await createJazzTestAccount();
@@ -147,7 +148,7 @@ const task = Task.create({ title: "New task", status: "todo" }, { owner: me });
 // ---cut---
 function getLastUpdated(task: Task) {
   // Find the most recent edit across all fields
-  let lastEdit: any = null;
+  let lastEdit: CoMapEdit<unknown> | null = null;
 
   const edits = task.$jazz.getEdits();
   for (const field of Object.keys(task)) {
@@ -161,12 +162,12 @@ function getLastUpdated(task: Task) {
     }
   }
 
-  if (!lastEdit) return null;
+  if (!lastEdit || !lastEdit.by?.profile?.$isLoaded) return null;
 
   return {
-    updatedBy: lastEdit.by?.profile?.name,
+    updatedBy: lastEdit.by.profile.name,
     updatedAt: lastEdit.madeAt,
-    message: `Last updated by ${lastEdit.by?.profile?.name} at ${lastEdit.madeAt.toLocaleString()}`
+    message: `Last updated by ${lastEdit.by.profile.name} at ${lastEdit.madeAt.toLocaleString()}`
   };
 }
 
@@ -241,7 +242,9 @@ function findWhoChanged(task: Task, field: string, value: any) {
   return matchingEdit?.by || null;
 }
 const account = findWhoChanged(task, "status", "completed");
-console.log(account?.profile?.name);
+if (account?.profile?.$isLoaded) {
+  console.log(account.profile.name);
+}
 // Alice
 ```
 </CodeGroup>

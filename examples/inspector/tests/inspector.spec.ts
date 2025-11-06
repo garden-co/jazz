@@ -47,7 +47,7 @@ test("should inspect CoValue", async ({ page }) => {
 
   await inspectCoValue(page, organization.$jazz.id);
 
-  await expect(page.getByText(/Garden Computing/)).toHaveCount(2);
+  await expect(page.getByText(/Garden Computing/)).toHaveCount(3);
   await expect(
     page.getByRole("heading", { name: organization.$jazz.id }),
   ).toBeVisible();
@@ -68,10 +68,10 @@ test("should inspect CoValue", async ({ page }) => {
   await page.getByRole("button", { name: /labels/ }).click();
   // currently broken:
   // await expect(page.getByText("Showing 10 of 10")).toBeVisible();
-  await expect(page.getByRole("table").getByRole("row")).toHaveCount(11);
+  await expect(page.getByRole("table").nth(0).getByRole("row")).toHaveCount(11);
 
   await page.getByRole("button", { name: "issues" }).click();
-  await expect(page.getByRole("table").getByRole("row")).toHaveCount(4);
+  await expect(page.getByRole("table").nth(0).getByRole("row")).toHaveCount(4);
 
   const table = page.getByRole("table");
   const row = table.getByRole("row").nth(1);
@@ -114,7 +114,6 @@ test("should inspect CoValue", async ({ page }) => {
 
   // Test if CoMap/grid view is displaying Issue data correctly
   await row.getByRole("button", { name: "View" }).click();
-  await expect(page.getByRole("table")).not.toBeVisible();
   await expect(page.getByText(issue.title)).toBeVisible();
   await expect(page.getByText(issue.status)).toBeVisible();
   await expect(page.getByRole("button", { name: /labels/ })).toBeVisible();

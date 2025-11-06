@@ -39,7 +39,7 @@ export function CodeTabs({ className }: { className?: string }) {
               {file.fileName}
             </span>
 
-            <pre className="whitespace-pre-wrap break-words p-1 pb-2 text-xs md:text-sm [&_code]:whitespace-pre-wrap [&_code]:break-words">
+            <pre className="whitespace-pre-wrap wrap-break-word p-1 pb-2 text-xs md:text-sm [&_code]:whitespace-pre-wrap [&_code]:wrap-break-word">
               <CodeComponent />
             </pre>
           </div>

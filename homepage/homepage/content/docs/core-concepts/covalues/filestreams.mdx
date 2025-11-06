@@ -314,7 +314,7 @@ const fileStreamId = "co_z123";
 // Load a FileStream by ID
 const fileStream = await FileStream.load(fileStreamId);
 
-if (fileStream) {
+if (fileStream.$isLoaded) {
   console.log('FileStream loaded successfully');
 
   // Check if it's complete

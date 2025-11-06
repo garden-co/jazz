@@ -12,11 +12,11 @@ export function BranchManagement({
   onBranchChange,
   onBranchMerge,
 }: BranchManagementProps) {
-  const { me } = useAccount(JazzAccount, {
+  const me = useAccount(JazzAccount, {
     resolve: { profile: { branches: true } },
   });
 
-  const branches = me?.profile.branches;
+  const branches = me.$isLoaded ? me.profile.branches : undefined;
 
   function handleCreateBranch(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -24,10 +24,10 @@ export function BranchManagement({
     const data = new FormData(e.currentTarget);
     const branch = data.get("branch");
 
-    if (!branch || typeof branch !== "string") return;
+    if (!branches || !branch || typeof branch !== "string") return;
 
-    if (!me?.profile.branches?.includes(branch)) {
-      branches?.$jazz.push(branch);
+    if (!branches.includes(branch)) {
+      branches.$jazz.push(branch);
     }
 
     onBranchChange(branch);

@@ -1,6 +1,6 @@
 import { describe, expect, test, onTestFinished, assert } from "vitest";
 import { co, z, Group } from "jazz-tools";
-import { createJazzTestAccount } from "jazz-tools/testing";
+import { assertLoaded, createJazzTestAccount } from "jazz-tools/testing";
 import { WebhookTestServer } from "./http-server.js";
 import {
   WebhookRegistry,
@@ -106,10 +106,11 @@ describe("jazz-webhook", () => {
       );
 
       expect(webhookId).toBeDefined();
-      expect(registryState[webhookId]).toBeDefined();
-      expect(registryState[webhookId]!.webhookUrl).toBe(webhookServer.getUrl());
-      expect(registryState[webhookId]!.coValueId).toBe("co_z1234567890abcdef");
-      expect(registryState[webhookId]!.active).toBe(true);
+      assert(registryState[webhookId]);
+      assertLoaded(registryState[webhookId]);
+      expect(registryState[webhookId].webhookUrl).toBe(webhookServer.getUrl());
+      expect(registryState[webhookId].coValueId).toBe("co_z1234567890abcdef");
+      expect(registryState[webhookId].active).toBe(true);
       expect(Object.keys(registryState[webhookId]!.successMap!).length).toBe(0);
     });
 
@@ -152,8 +153,12 @@ describe("jazz-webhook", () => {
       );
 
       expect(webhook1).not.toBe(webhook2);
-      expect(registryState[webhook1]!.coValueId).toBe("co_z1111111111111111");
-      expect(registryState[webhook2]!.coValueId).toBe("co_z2222222222222222");
+      assert(registryState[webhook1]);
+      assertLoaded(registryState[webhook1]);
+      expect(registryState[webhook1].coValueId).toBe("co_z1111111111111111");
+      assert(registryState[webhook2]);
+      assertLoaded(registryState[webhook2]);
+      expect(registryState[webhook2].coValueId).toBe("co_z2222222222222222");
     });
   });
 
@@ -168,7 +173,9 @@ describe("jazz-webhook", () => {
       );
 
       const webhook = registryState[webhookId];
-      expect(webhook!.active).toBe(true);
+      assert(webhook);
+      assertLoaded(webhook);
+      expect(webhook.active).toBe(true);
 
       webhookRegistry.unregister(webhookId);
 
@@ -264,7 +271,10 @@ describe("jazz-webhook", () => {
 
       await new Promise((resolve) => setTimeout(resolve, 100));
 
-      expect(isTxSuccessful(webhook!.successMap!, lastRequest.txID)).toBe(true);
+      assert(webhook);
+      assertLoaded(webhook);
+      assertLoaded(webhook.successMap);
+      expect(isTxSuccessful(webhook.successMap, lastRequest.txID)).toBe(true);
     });
 
     test("should retry failed webhooks with exponential backoff", async () => {
@@ -517,8 +527,9 @@ describe("jazz-webhook", () => {
 
       // Deactivate the webhook
       const webhook = webhookRegistry.state[webhookId];
-      expect(webhook).toBeDefined();
-      webhook!.$jazz.set("active", false);
+      assert(webhook);
+      assertLoaded(webhook);
+      webhook.$jazz.set("active", false);
 
       // Shutdown all subscriptions
       webhookRegistry.shutdown();
@@ -550,10 +561,10 @@ async function waitForWebhookEmitted(
     },
   });
 
-  assert(webhook);
+  assertLoaded(webhook);
 
   return waitFor(() => {
-    expect(isTxSuccessful(webhook.successMap!, txID)).toBe(true);
+    expect(isTxSuccessful(webhook.successMap, txID)).toBe(true);
   });
 }
 

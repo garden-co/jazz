@@ -59,10 +59,10 @@ export function Pricing() {
     <>
       <H2>Pricing</H2>
       {/* Self-hosted option banner */}
-      <div className="rounded-xl border bg-gradient-to-r from-stone-50 to-gray-50 p-6 shadow-sm shadow-gray-900/5 dark:from-stone-925 dark:to-stone-950">
+      <div className="bg-linear-to-r shadow-xs rounded-xl border from-stone-50 to-gray-50 p-6 shadow-gray-900/5 dark:from-stone-925 dark:to-stone-950">
         <div className="flex items-start gap-4">
           <div className="grid w-full items-center gap-4 md:flex">
-            <div className="grid flex-grow gap-2">
+            <div className="grid grow gap-2">
               <h3 className="flex w-full items-center justify-between text-xl font-semibold text-stone-900 dark:text-white">
                 <span className="flex items-center gap-1.5">
                   <Icon name="server" />
@@ -90,7 +90,7 @@ export function Pricing() {
       </div>
 
       <div className="mb-10 grid gap-4 md:grid-cols-3">
-        <div className="flex flex-col items-start gap-3 rounded-xl border bg-stone-100 p-6 shadow-sm shadow-gray-900/5 dark:bg-stone-925">
+        <div className="shadow-xs flex flex-col items-start gap-3 rounded-xl border bg-stone-100 p-6 shadow-gray-900/5 dark:bg-stone-925">
           <h3 className="flex w-full items-center justify-between text-xl font-semibold text-stone-900 dark:text-white">
             <span className="flex items-center gap-1.5">
               <StarterTierLogo />
@@ -137,7 +137,7 @@ export function Pricing() {
 
           <p className="text-sm">No credit card required. Takes 20s.</p>
         </div>
-        <div className="flex flex-col items-start gap-3 rounded-xl border bg-stone-100 p-6 shadow-sm shadow-gray-900/5 dark:bg-stone-925">
+        <div className="shadow-xs flex flex-col items-start gap-3 rounded-xl border bg-stone-100 p-6 shadow-gray-900/5 dark:bg-stone-925">
           <h3 className="flex w-full items-center justify-between text-xl font-semibold text-stone-900 dark:text-white">
             <span className="flex items-center gap-1.5">
               <IndieTierLogo />
@@ -190,7 +190,7 @@ export function Pricing() {
             One month free trial. Unlimited projects. Takes 1min.
           </p>
         </div>
-        <div className="flex flex-col items-start gap-3 rounded-xl border bg-stone-100 p-6 shadow-sm shadow-gray-900/5 dark:bg-stone-925">
+        <div className="shadow-xs flex flex-col items-start gap-3 rounded-xl border bg-stone-100 p-6 shadow-gray-900/5 dark:bg-stone-925">
           <h3 className="flex w-full items-center justify-between text-xl font-semibold text-stone-900 dark:text-white">
             <span className="flex items-center gap-1.5">
               <ProTierLogo />

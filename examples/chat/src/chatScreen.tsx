@@ -1,4 +1,4 @@
-import { Account } from "jazz-tools";
+import { Account, getLoadedOrUndefined } from "jazz-tools";
 import { createImage } from "jazz-tools/media";
 import { useAccount, useCoState } from "jazz-tools/react";
 import { useEffect, useState } from "react";
@@ -18,15 +18,19 @@ import {
 
 const INITIAL_MESSAGES_TO_SHOW = 30;
 
+const ChatWithMessages = Chat.resolved({
+  $each: true,
+});
+
 export function ChatScreen(props: { chatID: string }) {
-  const chat = useCoState(Chat, props.chatID);
-  const { me } = useAccount();
+  const chat = useCoState(ChatWithMessages, props.chatID);
+  const me = useAccount();
   const [showNLastMessages, setShowNLastMessages] = useState(
     INITIAL_MESSAGES_TO_SHOW,
   );
   const isLoading = useMessagesPreload(props.chatID);
 
-  if (!chat || isLoading)
+  if (!me.$isLoaded || !chat.$isLoaded || isLoading)
     return (
       <div className="flex-1 flex justify-center items-center">Loading...</div>
     );
@@ -71,11 +75,10 @@ export function ChatScreen(props: { chatID: string }) {
             .slice(-showNLastMessages)
             // Reverse plus flex-col-reverse on ChatBody gives us scroll-to-bottom behavior
             .reverse()
-            .map(
-              (msg) =>
-                msg?.text && (
-                  <ChatBubble me={me} msg={msg} key={msg.$jazz.id} />
-                ),
+            .map((msg) =>
+              msg.text.$isLoaded ? (
+                <ChatBubble me={me} msg={msg} key={msg.$jazz.id} />
+              ) : null,
             )
         ) : (
           <EmptyChatMessage />
@@ -103,8 +106,9 @@ export function ChatScreen(props: { chatID: string }) {
   );
 }
 
-function ChatBubble(props: { me: Account; msg: Message }) {
-  if (!props.me.canRead(props.msg) || !props.msg.text?.toString()) {
+function ChatBubble({ me, msg }: { me: Account; msg: Message }) {
+  const { text, image } = msg;
+  if (!me.canRead(msg) || !text.$isLoaded) {
     return (
       <BubbleContainer fromMe={false}>
         <BubbleBody fromMe={false}>
@@ -117,17 +121,16 @@ function ChatBubble(props: { me: Account; msg: Message }) {
     );
   }
 
-  const lastEdit = props.msg.$jazz.getEdits().text;
+  const lastEdit = msg.$jazz.getEdits().text;
   const fromMe = lastEdit?.by?.isMe;
-  const { text, image } = props.msg;
+  const lastEditor = lastEdit?.by?.profile;
+  const lastEditorName = getLoadedOrUndefined(lastEditor)?.name;
 
   return (
     <BubbleContainer fromMe={fromMe}>
-      {lastEdit && (
-        <BubbleInfo by={lastEdit.by?.profile?.name} madeAt={lastEdit.madeAt} />
-      )}
+      {lastEdit && <BubbleInfo by={lastEditorName} madeAt={lastEdit.madeAt} />}
       <BubbleBody fromMe={fromMe}>
-        {image && <BubbleImage image={image} />}
+        {image?.$isLoaded ? <BubbleImage image={image} /> : null}
         <BubbleText text={text} />
       </BubbleBody>
     </BubbleContainer>
@@ -153,15 +156,12 @@ function useMessagesPreload(chatID: string) {
 async function preloadChatMessages(chatID: string) {
   const chat = await Chat.load(chatID);
 
-  if (!chat?.$jazz.refs) return;
+  if (!chat.$isLoaded) return;
 
-  const promises = [];
-
-  for (const msg of Array.from(chat.$jazz.refs)
+  const promises = Array.from(chat.$jazz.refs)
     .reverse()
-    .slice(0, INITIAL_MESSAGES_TO_SHOW)) {
-    promises.push(Message.load(msg.id, { resolve: { text: true } }));
-  }
+    .slice(0, INITIAL_MESSAGES_TO_SHOW)
+    .map((msg) => Message.load(msg.id, { resolve: { text: true } }));
 
   await Promise.all(promises);
 }

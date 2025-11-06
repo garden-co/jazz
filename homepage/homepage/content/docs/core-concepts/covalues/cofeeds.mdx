@@ -96,7 +96,9 @@ const sessionId = `${me.$jazz.id}_session_z1` as SessionID;
 const sessionFeed = activityFeed.perSession[sessionId];
 
 // Latest entry from a session
-console.log(sessionFeed?.value?.action); // "watering"
+if (sessionFeed?.value.$isLoaded) {
+  console.log(sessionFeed.value.action); // "watering"
+}
 ```
 </CodeGroup>
 
@@ -123,7 +125,9 @@ const sessionId = `${me.$jazz.id}_session_z1` as SessionID;
 const currentSessionFeed = activityFeed.inCurrentSession;
 
 // Latest entry from the current session
-console.log(currentSessionFeed?.value?.action); // "harvesting"
+if (currentSessionFeed?.value.$isLoaded) {
+  console.log(currentSessionFeed.value.action); // "harvesting"
+}
 ```
 </CodeGroup>
 
@@ -152,7 +156,9 @@ const accountId = me.$jazz.id;
 const accountFeed = activityFeed.perAccount[accountId];
 
 // Latest entry from the account
-console.log(accountFeed.value?.action); // "watering"
+if (accountFeed?.value.$isLoaded) {
+  console.log(accountFeed.value.action); // "watering"
+}
 ```
 </CodeGroup>
 
@@ -179,7 +185,9 @@ const accountId = me.$jazz.id;
 const myLatestEntry = activityFeed.byMe;
 
 // Latest entry from the current account
-console.log(myLatestEntry?.value?.action); // "harvesting"
+if (myLatestEntry?.value.$isLoaded) {
+  console.log(myLatestEntry.value.action); // "harvesting"
+}
 ```
 </CodeGroup>
 
@@ -213,12 +221,16 @@ const sessionFeed = activityFeed.perSession[sessionId];
 
 // Iterate over all entries from the account
 for (const entry of accountFeed.all) {
-  console.log(entry.value);
+  if (entry.value.$isLoaded) {
+    console.log(entry.value);
+  }
 }
 
 // Iterate over all entries from the session
 for (const entry of sessionFeed.all) {
-  console.log(entry.value);
+  if (entry.value.$isLoaded) {
+    console.log(entry.value);
+  }
 }
 ```
 </CodeGroup>
@@ -246,12 +258,14 @@ const activityFeed = ActivityFeed.create([]);
 // Get the latest entry from the current account
 const latestEntry = activityFeed.byMe;
 
-console.log(`My last action was ${latestEntry?.value?.action}`);
+if (latestEntry?.value.$isLoaded) {
+  console.log(`My last action was ${latestEntry.value.action}`);
   // "My last action was harvesting"
+}
 
 // Get the latest entry from each account
 const latestEntriesByAccount = Object.values(activityFeed.perAccount).map(entry => ({
-  accountName: entry.by?.profile?.name,
+  accountName: entry.by?.profile.$isLoaded ? entry.by.profile.name : "Unknown",
   value: entry.value,
 }));
 ```

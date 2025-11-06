@@ -346,15 +346,9 @@ describe("Group invites", () => {
     });
 
     const group = admin.node.createGroup();
-    const person = group.createMap({
-      name: "John Doe",
-    });
 
     // First add member as admin
-    const memberAccount = await loadCoValueOrFail(
-      member.node,
-      member.accountID,
-    );
+    const memberAccount = await loadCoValueOrFail(admin.node, member.accountID);
     group.addMember(memberAccount, "admin");
 
     // Create a reader invite
@@ -366,8 +360,6 @@ describe("Group invites", () => {
     const groupOnMemberNode = await loadCoValueOrFail(member.node, group.id);
     expect(groupOnMemberNode.roleOf(member.accountID)).toEqual("admin");
   });
-
-  logger.setLevel(LogLevel.DEBUG);
 
   test("invites should be able to upgrade the role of an existing member", async () => {
     const admin = await setupTestAccount({
@@ -381,10 +373,7 @@ describe("Group invites", () => {
     const group = admin.node.createGroup();
 
     // First add member as reader
-    const memberAccount = await loadCoValueOrFail(
-      member.node,
-      member.accountID,
-    );
+    const memberAccount = await loadCoValueOrFail(admin.node, member.accountID);
     group.addMember(memberAccount, "reader");
 
     // Create an admin invite
@@ -401,10 +390,7 @@ describe("Group invites", () => {
     const reader = await setupTestAccount({
       connected: true,
     });
-    const readerAccount = await loadCoValueOrFail(
-      member.node,
-      reader.accountID,
-    );
+    const readerAccount = await loadCoValueOrFail(admin.node, reader.accountID);
     groupOnMemberNode.addMember(readerAccount, "reader");
   });
 
@@ -423,10 +409,7 @@ describe("Group invites", () => {
     });
 
     // First add member as reader
-    const memberAccount = await loadCoValueOrFail(
-      member.node,
-      member.accountID,
-    );
+    const memberAccount = await loadCoValueOrFail(admin.node, member.accountID);
     group.addMember(memberAccount, "reader");
     await group.removeMember(memberAccount);
 

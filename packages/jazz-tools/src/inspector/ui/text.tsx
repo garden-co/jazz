@@ -56,6 +56,7 @@ export function Text(
     inline?: boolean;
     small?: boolean;
     mono?: boolean;
+    style?: React.CSSProperties;
   }>,
 ) {
   return <StyledText {...props} />;

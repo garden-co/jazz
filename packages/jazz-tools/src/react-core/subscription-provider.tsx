@@ -4,7 +4,9 @@ import {
   AccountClass,
   AnyAccountSchema,
   CoValueClassOrSchema,
+  CoValueLoadingState,
   Loaded,
+  MaybeLoaded,
   ResolveQuery,
   ResolveQueryStrict,
 } from "jazz-tools";
@@ -43,14 +45,16 @@ export function createCoValueSubscriptionContext<
       });
 
       const loadState = useSubscriptionSelector(subscription, {
-        select: (value) => (!value ? value : true),
+        select: (value) => value.$jazz.loadingState,
       });
 
-      if (loadState === undefined) {
+      if (loadState === CoValueLoadingState.LOADING) {
         return loadingFallback ?? null;
       }
-
-      if (loadState === null) {
+      if (
+        loadState === CoValueLoadingState.UNAUTHORIZED ||
+        loadState === CoValueLoadingState.UNAVAILABLE
+      ) {
         return unavailableFallback ?? null;
       }
 
@@ -106,14 +110,17 @@ export function createAccountSubscriptionContext<
       });
 
       const loadState = useSubscriptionSelector(subscription, {
-        select: (value) => (!value ? value : true),
+        select: (value) => value.$jazz.loadingState,
       });
 
-      if (loadState === undefined) {
+      if (loadState === CoValueLoadingState.LOADING) {
         return loadingFallback ?? null;
       }
 
-      if (loadState === null) {
+      if (
+        loadState === CoValueLoadingState.UNAUTHORIZED ||
+        loadState === CoValueLoadingState.UNAVAILABLE
+      ) {
         return unavailableFallback ?? null;
       }
 

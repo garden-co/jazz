@@ -16,7 +16,9 @@ export default async function ServerSidePage(props: {
         This is a server component!
       </div>
       <label>
-        <div className="text-sm">Your profile name "{profile?.name}"</div>
+        <div className="text-sm">
+          Your profile name "{profile.$isLoaded ? profile.name : ""}"
+        </div>
       </label>
     </div>
   );

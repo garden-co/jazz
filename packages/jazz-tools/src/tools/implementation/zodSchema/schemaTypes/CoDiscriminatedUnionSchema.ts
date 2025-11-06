@@ -1,9 +1,11 @@
 import {
   Account,
   AnonymousJazzAgent,
+  LoadedAndRequired,
   BranchDefinition,
   InstanceOfSchema,
-  InstanceOrPrimitiveOfSchemaCoValuesNullable,
+  InstanceOrPrimitiveOfSchemaCoValuesMaybeLoaded,
+  MaybeLoaded,
   Resolved,
   SchemaUnion,
   SchemaUnionConcreteSubclass,
@@ -47,6 +49,7 @@ export class CoDiscriminatedUnionSchema<
   readonly collaborative = true as const;
   readonly builtin = "CoDiscriminatedUnion" as const;
   readonly getDefinition: () => CoDiscriminatedUnionSchemaDefinition<Options>;
+  readonly resolveQuery = true as const;
 
   constructor(
     coreSchema: CoreCoDiscriminatedUnionSchema<Options>,
@@ -64,22 +67,26 @@ export class CoDiscriminatedUnionSchema<
       skipRetry?: boolean;
       unstable_branch?: BranchDefinition;
     },
-  ): Promise<Resolved<
-    CoDiscriminatedUnionInstanceCoValuesNullable<Options> & SchemaUnion,
-    true
-  > | null> {
+  ): Promise<
+    MaybeLoaded<
+      Resolved<
+        CoDiscriminatedUnionInstanceCoValuesMaybeLoaded<Options> & SchemaUnion,
+        true
+      >
+    >
+  > {
     return this.coValueClass.load(id, options) as any;
   }
 
   subscribe(
     id: string,
     options: SubscribeListenerOptions<
-      CoDiscriminatedUnionInstanceCoValuesNullable<Options> & SchemaUnion,
+      CoDiscriminatedUnionInstanceCoValuesMaybeLoaded<Options> & SchemaUnion,
       true
     >,
     listener: (
       value: Resolved<
-        CoDiscriminatedUnionInstanceCoValuesNullable<Options> & SchemaUnion,
+        CoDiscriminatedUnionInstanceCoValuesMaybeLoaded<Options> & SchemaUnion,
         true
       >,
       unsubscribe: () => void,
@@ -133,9 +140,12 @@ export function createCoreCoDiscriminatedUnionSchema<
         return schemas;
       },
     }),
+    resolveQuery: true as const,
   };
 }
 
-type CoDiscriminatedUnionInstanceCoValuesNullable<
+type CoDiscriminatedUnionInstanceCoValuesMaybeLoaded<
   Options extends DiscriminableCoValueSchemas,
-> = NonNullable<InstanceOrPrimitiveOfSchemaCoValuesNullable<Options[number]>>;
+> = LoadedAndRequired<
+  InstanceOrPrimitiveOfSchemaCoValuesMaybeLoaded<Options[number]>
+>;
