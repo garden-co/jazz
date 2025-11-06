@@ -379,11 +379,6 @@ export class CoValueCore {
 
     this.counter.add(-1, { state: this.loadingState });
 
-    if (this.groupInvalidationSubscription) {
-      this.groupInvalidationSubscription();
-      this.groupInvalidationSubscription = undefined;
-    }
-
     this.node.internalDeleteCoValue(this.id);
 
     return true;
@@ -405,6 +400,10 @@ export class CoValueCore {
   missingDependencies = new Set<RawCoID>();
 
   isCircularDependency(dependency: CoValueCore) {
+    if (dependency.id === this.id) {
+      return true;
+    }
+
     const visited = new Set<RawCoID>();
     const stack = [dependency];
 
@@ -511,38 +510,6 @@ export class CoValueCore {
     this.loadingStatuses.set(peerId, { type: "pending" });
     this.updateCounter(previousState);
     this.scheduleNotifyUpdate();
-  }
-
-  groupInvalidationSubscription?: () => void;
-
-  subscribeToGroupInvalidation() {
-    if (!this.verified) {
-      return;
-    }
-
-    if (this.groupInvalidationSubscription) {
-      return;
-    }
-
-    const header = this.verified.header;
-
-    if (header.ruleset.type == "ownedByGroup") {
-      const groupId = header.ruleset.group;
-      const entry = this.node.getCoValue(groupId);
-
-      if (entry.isAvailable()) {
-        this.groupInvalidationSubscription = entry.subscribe((_groupUpdate) => {
-          // When the group is updated, we need to reset the cached content because the transactions validity might have changed
-          this.resetParsedTransactions();
-          this.scheduleNotifyUpdate();
-        }, false);
-      } else {
-        logger.error("CoValueCore: Owner group not available", {
-          id: this.id,
-          groupId,
-        });
-      }
-    }
   }
 
   contentInClonedNodeWithDifferentAccount(account: ControlledAccountOrAgent) {
@@ -652,8 +619,20 @@ export class CoValueCore {
 
       this.processNewTransactions();
       this.scheduleNotifyUpdate();
+      this.invalidateDependants();
     } catch (e) {
       return { type: "InvalidSignature", id: this.id, error: e } as const;
+    }
+  }
+
+  invalidateDependants() {
+    if (this.verifiedTransactions.length === 0 || !this.isGroup()) {
+      return;
+    }
+
+    for (const dependency of this.dependant) {
+      this.node.getCoValue(dependency).resetParsedTransactions();
+      this.node.getCoValue(dependency).invalidateDependants();
     }
   }
 
@@ -802,6 +781,7 @@ export class CoValueCore {
     // where we need synchronous updates
     this.notifyUpdate();
     this.node.syncManager.syncLocalTransaction(this.verified, knownStateBefore);
+    this.invalidateDependants();
 
     return true;
   }
@@ -829,8 +809,6 @@ export class CoValueCore {
 
     const newContent = coreToCoValue(this as AvailableCoValueCore, options);
 
-    this.subscribeToGroupInvalidation();
-
     if (!options?.ignorePrivateTransactions) {
       this._cachedContent = newContent;
     }
@@ -849,6 +827,10 @@ export class CoValueCore {
 
   // Reset the parsed transactions and branches, to validate them again from scratch when the group is updated
   resetParsedTransactions() {
+    if (this.verifiedTransactions.length === 0) {
+      return;
+    }
+
     this.branchStart = undefined;
     this.mergeCommits = [];
 
@@ -862,6 +844,7 @@ export class CoValueCore {
     this.toParseMetaTransactions = [];
 
     this._cachedContent?.rebuildFromCore();
+    this.scheduleNotifyUpdate();
   }
 
   verifiedTransactions: VerifiedTransaction[] = [];
