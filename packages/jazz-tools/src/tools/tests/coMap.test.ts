@@ -249,21 +249,17 @@ describe("CoMap", async () => {
         expect(person.pets.cat?.name).toEqual("Whiskers");
       });
 
-      it("creates a group for each new CoValue that is a child of the referencing CoValue's owner", () => {
+      it("assigns the parent's owner as the owner of each new CoValue", () => {
         for (const value of Object.values(person)) {
-          expect(
-            value.$jazz.owner
-              .getParentGroups()
-              .map((group: Group) => group.$jazz.id),
-          ).toContain(person.$jazz.owner.$jazz.id);
+          expect(value.$jazz.owner.$jazz.id).toEqual(
+            person.$jazz.owner.$jazz.id,
+          );
         }
         const friend = person.friends[0]!;
         for (const value of Object.values(friend)) {
-          expect(
-            value.$jazz.owner
-              .getParentGroups()
-              .map((group: Group) => group.$jazz.id),
-          ).toContain(friend.$jazz.owner.$jazz.id);
+          expect(value.$jazz.owner.$jazz.id).toEqual(
+            friend.$jazz.owner.$jazz.id,
+          );
         }
       });
 
@@ -271,21 +267,6 @@ describe("CoMap", async () => {
         const Schema = co.map({ text: co.plainText() });
         const map = Schema.create({ text: "" });
         expect(map.text.toString()).toBe("");
-      });
-
-      it("creates a group for the new CoValue when there is no active account", () => {
-        const Schema = co.map({ text: co.plainText() });
-
-        const parentGroup = Group.create();
-        runWithoutActiveAccount(() => {
-          const map = Schema.create({ text: "Hello" }, parentGroup);
-
-          expect(
-            map.text.$jazz.owner
-              .getParentGroups()
-              .map((group: Group) => group.$jazz.id),
-          ).toContain(parentGroup.$jazz.id);
-        });
       });
     });
 

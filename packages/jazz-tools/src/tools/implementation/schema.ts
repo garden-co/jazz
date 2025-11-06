@@ -172,12 +172,8 @@ export function instantiateRefEncodedWithInit<V extends CoValue>(
       `Cannot automatically create CoValue from value: ${JSON.stringify(init)}. Use the CoValue schema's create() method instead.`,
     );
   }
-  const node = parentOwner.$jazz.localNode;
-  const rawGroup = node.createGroup();
-  const owner = new Group({ fromRaw: rawGroup });
-  owner.addMember(parentOwner);
   // @ts-expect-error - create is a static method in all CoValue classes
-  return schema.ref.create(init, owner);
+  return schema.ref.create(init, parentOwner);
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any

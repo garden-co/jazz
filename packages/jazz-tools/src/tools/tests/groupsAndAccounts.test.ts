@@ -331,8 +331,7 @@ describe("Group inheritance", () => {
 
     beforeEach(async () => {
       const me = co.account().getMe();
-      const writeAccess = Group.create();
-      writeAccess.addMember(me, "writer");
+      const boardGroup = Group.create();
 
       board = Board.create(
         {
@@ -342,7 +341,7 @@ describe("Group inheritance", () => {
             ["Task 2.1", "Task 2.2"],
           ],
         },
-        writeAccess,
+        boardGroup,
       );
     });
 
@@ -357,14 +356,14 @@ describe("Group inheritance", () => {
       expect(taskAsWriter.toString()).toEqual("Task 1.1");
     });
 
-    test("nested CoValues inherit permissions from the referencing CoValue", async () => {
-      const me = co.account().getMe();
-      const reader = await co.account().createAs(me, {
+    test("nested CoValues use the same group as the referencing CoValue", async () => {
+      const reader = await createJazzTestAccount({
         creationProps: { name: "Reader" },
       });
 
       const task = board.columns[0]![0]!;
       const taskGroup = task.$jazz.owner;
+      // Grant read access to the task group
       taskGroup.addMember(reader, "reader");
 
       const taskAsReader = await Task.load(task.$jazz.id, { loadAs: reader });
@@ -372,9 +371,9 @@ describe("Group inheritance", () => {
       const boardAsReader = await Board.load(board.$jazz.id, {
         loadAs: reader,
       });
-      expect(boardAsReader.$jazz.loadingState).toBe(
-        CoValueLoadingState.UNAUTHORIZED,
-      );
+      // Reader can now see the board as well, since both CoValues use the same group
+      assertLoaded(boardAsReader);
+      expect(boardAsReader.title).toBe("My board");
     });
   });
 });
