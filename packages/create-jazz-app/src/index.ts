@@ -549,6 +549,7 @@ async function promptUser(
     });
   }
 
+  // @ts-expect-error - inquirer types are not compatible with TypeScript
   const answers = await inquirer.prompt(questions);
 
   return {
