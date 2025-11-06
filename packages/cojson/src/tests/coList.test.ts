@@ -1,12 +1,10 @@
 import { beforeEach, describe, expect, test } from "vitest";
 import { expectList } from "../coValue.js";
 import { WasmCrypto } from "../crypto/WasmCrypto.js";
-import { LocalNode } from "../localNode.js";
-import { expectGroup } from "../typeUtils/expectGroup.js";
 import {
+  hotSleep,
   loadCoValueOrFail,
   nodeWithRandomAgentAndSessionID,
-  randomAgentAndSessionID,
   setupTestNode,
   waitFor,
 } from "./testUtils.js";
@@ -427,6 +425,41 @@ test("Should ignore unknown meta transactions", () => {
   content.append("first", 0, "trusting");
 
   expect(content.toJSON()).toEqual(["first"]);
+});
+
+describe("CoList Time Travel", () => {
+  test("atTime should return a time travel entity", () => {
+    const node = nodeWithRandomAgentAndSessionID();
+    const coValue = node.createCoValue({
+      type: "colist",
+      ruleset: { type: "unsafeAllowAll" },
+      meta: null,
+      ...Crypto.createdNowUnique(),
+    });
+
+    const content = expectList(coValue.getCurrentContent());
+
+    const beforeA = hotSleep(10);
+    content.append("first", 0, "trusting");
+
+    const beforeB = hotSleep(10);
+    content.append("second", 0, "trusting");
+
+    const beforeC = hotSleep(10);
+    content.delete(0, "trusting");
+
+    const beforeD = hotSleep(10);
+    content.prepend("third", 0, "trusting");
+
+    expect(content.toJSON()).toEqual(["third", "second"]);
+
+    expect(content.atTime(0).toJSON()).toEqual([]);
+    expect(content.atTime(beforeA).toJSON()).toEqual([]);
+    expect(content.atTime(beforeB).toJSON()).toEqual(["first"]);
+    expect(content.atTime(beforeC).toJSON()).toEqual(["first", "second"]);
+    expect(content.atTime(beforeD).toJSON()).toEqual(["second"]);
+    expect(content.atTime(Date.now()).toJSON()).toEqual(["third", "second"]);
+  });
 });
 
 describe("CoList Branching", () => {
