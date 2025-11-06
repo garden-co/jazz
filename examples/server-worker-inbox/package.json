@@ -2,6 +2,7 @@
   "name": "jazz-paper-scissors",
   "private": true,
   "type": "module",
+  "packageManager": "pnpm@10.16.1",
   "scripts": {
     "dev": "npm-run-all --parallel dev:web dev:worker",
     "dev:web": "vite",

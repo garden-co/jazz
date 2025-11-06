@@ -10,7 +10,7 @@
     "format-and-lint": "biome check .",
     "format-and-lint:fix": "biome check . --write"
   },
-  "packageManager": "pnpm@9.1.4",
+  "packageManager": "pnpm@10.16.1",
   "dependencies": {
     "@icons-pack/react-simple-icons": "^9.1.0",
     "@mdx-js/loader": "^2.3.0",

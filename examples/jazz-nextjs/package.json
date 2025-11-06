@@ -1,6 +1,7 @@
 {
   "name": "jazz-nextjs",
   "private": true,
+  "packageManager": "pnpm@10.16.1",
   "scripts": {
     "dev": "next dev --turbopack",
     "build": "next build",

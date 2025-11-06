@@ -60,12 +60,21 @@ jobs:
       disableTest: true
     # Only run if there are no pending changesets (i.e., ready to publish)
     if: ${{ needs.release.outputs.hasChangesets != 'true' && needs.release.outputs.hasChangesetsBackport != 'true' }}
+  
+  build_rn:
+    name: Build React Native
+    needs: [release]
+    uses: ./.github/workflows/rn-build-reusable.yml
+    with:
+      concurrency: release-rn
+    # Only run if there are no pending changesets (i.e., ready to publish)
+    if: ${{ needs.release.outputs.hasChangesets != 'true' && needs.release.outputs.hasChangesetsBackport != 'true' }}
 
   # Step 3: Publish packages and NAPI binaries to npm
   publish:
     name: Publish to npm
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    needs: [build_napi, release]
+    needs: [build_napi, build_rn, release]
     # Only publish if there are no pending changesets
     if: ${{ needs.release.outputs.hasChangesets != 'true' && needs.release.outputs.hasChangesetsBackport != 'true' }}
     steps:
@@ -91,6 +100,25 @@ jobs:
         run: ls -R ./npm
         shell: bash
         working-directory: crates/cojson-core-napi
+      
+      - name: Download React Native Android artifacts
+        uses: actions/download-artifact@v5
+        with:
+          name: cojson-core-rn-android
+          path: crates/cojson-core-rn
+
+      - name: Download React Native iOS artifacts
+        uses: actions/download-artifact@v5
+        with:
+          name: cojson-core-rn-ios
+          path: crates/cojson-core-rn
+      
+      - name: List React Native artifacts
+        run: |
+          ls -R crates/cojson-core-rn/CojsonCoreRnFramework.xcframework
+          ls -R crates/cojson-core-rn/android/src/main/jniLibs
+          ls -R crates/cojson-core-rn/ios
+        shell: bash
 
       # Publish to npm on main branch
       - name: Publish (main)
