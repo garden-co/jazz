@@ -1,0 +1,80 @@
+{
+  "name": "cojson-core-rn",
+  "version": "0.1.0",
+  "description": "cojson core bindings for react native",
+  "workspaces": [
+    "example"
+  ],
+  "main": "./dist/index.js",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "react-native": "./src/index.ts",
+      "import": {
+        "types": "./dist/index.d.mts",
+        "default": "./dist/index.mjs"
+      },
+      "require": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      }
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src",
+    "dist",
+    "android",
+    "ios",
+    "cpp",
+    "*.podspec",
+    "react-native.config.js",
+    "!ios/build",
+    "!android/build",
+    "!android/gradle",
+    "!android/gradlew",
+    "!android/gradlew.bat",
+    "!android/local.properties",
+    "!**/__tests__",
+    "!**/__fixtures__",
+    "!**/__mocks__",
+    "!**/.*"
+  ],
+  "scripts": {
+    "prepack": "yarn build",
+    "typecheck": "tsc --noEmit",
+    "lint": "biome check",
+    "build": "craby build && tsdown",
+    "clean": "craby clean"
+  },
+  "keywords": [
+    "react-native",
+    "ios",
+    "android"
+  ],
+  "author": "Jazz <jazz@garden.co>",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/garden-co/jazz/issues"
+  },
+  "homepage": "https://github.com/garden-co/jazz#readme",
+  "dependencies": {
+    "craby-modules": "*"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.2.7",
+    "@react-native-community/cli-types": "^20.0.2",
+    "@types/react": "^19.0.0",
+    "crabygen": "*",
+    "react": "19.1.1",
+    "react-native": "0.82.1",
+    "tsdown": "^0.15.10",
+    "typescript": "^5.9.3"
+  },
+  "peerDependencies": {
+    "react": "*",
+    "react-native": "*"
+  },
+  "packageManager": "yarn@4.10.3"
+}

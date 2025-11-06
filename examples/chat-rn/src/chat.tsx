@@ -20,6 +20,7 @@ import {
   TouchableOpacity,
   View,
 } from "react-native";
+
 import { Chat, Message } from "./schema";
 
 export function ChatScreen({ navigation }: { navigation: any }) {

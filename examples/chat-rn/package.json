@@ -24,6 +24,7 @@
     "react-native-mmkv": "3.3.0",
     "react-native-safe-area-context": "5.5.0",
     "react-native-screens": "4.11.1",
+    "cojson-core-rn": "workspace:*",
     "readable-stream": "4.7.0"
   },
   "devDependencies": {
