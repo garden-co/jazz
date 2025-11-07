@@ -21,7 +21,7 @@ export const useFramework = () => {
         // If the currently loaded page is a docs page, make sure that URL matches the selected framework.
         if (!pathname.startsWith('/docs')) return;
         const newPath = pathname.split("/").toSpliced(2, 1, stored).join("/") + window.location.hash;
-        router.replace(newPath, { scroll: true });
+        window.history.replaceState({}, "", newPath);
       }
     }
   }, []);
@@ -44,7 +44,7 @@ export const useFramework = () => {
     const parts = pathname.split("/");
     if (parts[2] !== savedFramework) {
       const newPath = parts.toSpliced(2, 1, savedFramework).join("/");
-      router.replace(newPath, { scroll: false });
+      window.history.replaceState({}, "", newPath);
     }
   }, [mounted, savedFramework, pathname]);
 

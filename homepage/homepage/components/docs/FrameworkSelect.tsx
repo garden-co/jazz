@@ -76,10 +76,8 @@ export function FrameworkSelect({
     onSelect && onSelect(newFramework);
     localStorage.setItem("_tcgpref_framework", newFramework);
     if (!shouldNavigate) return;
-    const newPath =
-      path.split("/").toSpliced(2, 1, newFramework).join("/") +
-      window.location.hash;
-    routerPush && router.replace(newPath, { scroll: true });
+    const newPath = path.split("/").toSpliced(2, 1, newFramework).join("/") + window.location.hash;
+    routerPush && router.replace(newPath, { scroll: false });
   };
 
   const handleTabChange = (event: CustomEvent<TabChangeEventDetail>) => {
