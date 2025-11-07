@@ -1,5 +1,10 @@
 import type { JsonValue } from "cojson";
-import { CoValueClass, isCoValueClass } from "../../../internal.js";
+import {
+  CoValueClass,
+  isCoValueClass,
+  extendContainerOwner,
+  schemaToRefPermissions,
+} from "../../../internal.js";
 import { coField } from "../../schema.js";
 import { CoreCoValueSchema } from "../schemaTypes/CoValueSchema.js";
 import { isUnionOfPrimitivesDeeply } from "../unionUtils.js";
@@ -62,14 +67,24 @@ function makeCodecCoField(
 
 export function schemaFieldToCoFieldDef(schema: SchemaField) {
   if (isCoValueClass(schema)) {
-    return coField.ref(schema);
+    return coField.ref(schema, {
+      permissions: { newOwnerStrategy: extendContainerOwner },
+    });
   } else if (isCoValueSchema(schema)) {
     if (schema.builtin === "CoOptional") {
       return coField.ref(schema.getCoValueClass(), {
         optional: true,
+        // TODO get newOwnerStrategy from schema
+        permissions: { newOwnerStrategy: extendContainerOwner },
       });
     }
-    return coField.ref(schema.getCoValueClass());
+    // TODO get newOwnerStrategy from schema
+    return coField.ref(schema.getCoValueClass(), {
+      permissions:
+        "permissions" in schema
+          ? schemaToRefPermissions(schema.permissions)
+          : { newOwnerStrategy: extendContainerOwner },
+    });
   } else {
     if ("_zod" in schema) {
       const zodSchemaDef = schema._zod.def;

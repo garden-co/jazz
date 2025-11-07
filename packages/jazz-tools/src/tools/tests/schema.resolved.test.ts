@@ -789,4 +789,14 @@ describe("Schema.resolved()", () => {
       expect(loadedPerson.friends[0]?.friends.$isLoaded).toBe(false);
     });
   });
+
+  test("resolved() does not override previous schema configuration", () => {
+    const TestMap = co
+      .map({ name: co.plainText() })
+      .withPermissions({ onInlineCreate: "equalsContainer" });
+    const TestMapWithName = TestMap.resolved({ name: true });
+    expect(TestMapWithName.permissions).toEqual({
+      onInlineCreate: "equalsContainer",
+    });
+  });
 });

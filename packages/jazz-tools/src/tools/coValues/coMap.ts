@@ -298,10 +298,12 @@ export class CoMap extends CoValueBase implements CoValue {
           if (initValue != null) {
             let refId = (initValue as unknown as CoValue).$jazz?.id;
             if (!refId) {
+              const newOwnerStrategy = descriptor.permissions?.newOwnerStrategy;
               const coValue = instantiateRefEncodedWithInit(
                 descriptor,
                 initValue,
                 owner,
+                newOwnerStrategy,
               );
               refId = coValue.$jazz.id;
             }
