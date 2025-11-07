@@ -2,6 +2,9 @@ import { JazzLogo } from "@/components/forMdx";
 import { IntroSlide } from "../shared/slides/IntroSlide";
 import { Slides } from "@/components/Slides";
 import { SimpleCentered } from "../shared/slides/Containers";
+import { AnimatedSvgEdge } from "@/components/animated-svg-edge";
+import { Background, ReactFlow } from "@xyflow/react";
+import { NewSyncDiagram } from "./NewSyncDIagram";
 
 export default function Page() {
   return (
@@ -92,6 +95,19 @@ export default function Page() {
           <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
             Global state isn't global enough.
           </h1>
+        </SimpleCentered>
+        <SimpleCentered>
+          <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
+            <span className="line-through">PlanetScale</span> Space Scale.
+          </h1>
+        </SimpleCentered>
+        <SimpleCentered>
+          <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
+            Apocalypse-first.
+          </h1>
+        </SimpleCentered>
+        <SimpleCentered>
+          <NewSyncDiagram />
         </SimpleCentered>
       </Slides>
     </div>
