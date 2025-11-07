@@ -7,6 +7,20 @@ import {
   ENCODING_MAP_PRIMITIVES_VALUES,
 } from "../pack/objToArr.js";
 import type { JsonObject, JsonValue } from "../jsonValue.js";
+import { packOpID } from "../pack/opID.js";
+import type { OpID } from "../coValues/coList.js";
+
+const createOpID = (
+  sessionID: string,
+  txIndex: number,
+  changeIdx = 0,
+  branch?: string,
+): OpID => ({
+  sessionID: sessionID as any,
+  txIndex,
+  changeIdx,
+  branch: branch ? (branch as any) : undefined,
+});
 
 describe("objToArr utilities", () => {
   describe("packObjectToArr", () => {
@@ -395,16 +409,36 @@ describe("objToArr utilities", () => {
 
   describe("unpackArrToObjectWithKeys", () => {
     test("should unpack array of app operations", () => {
+      const after1 = createOpID("session1", 0);
+      const after2 = createOpID("session2", 1);
       const arr: JsonValue[][] = [
-        ["value1", "after1", 1],
-        ["value2", "after2", 1],
+        ["value1", packOpID(after1), 1],
+        ["value2", packOpID(after2), 1],
       ];
 
       const result = unpackArrOfObjectsCoList(arr);
 
       expect(result).toEqual([
-        { op: "app", value: "value1", after: "after1" },
-        { op: "app", value: "value2", after: "after2" },
+        {
+          op: "app",
+          value: "value1",
+          after: {
+            sessionID: after1.sessionID,
+            txIndex: after1.txIndex,
+            changeIdx: after1.changeIdx,
+            branch: undefined,
+          },
+        },
+        {
+          op: "app",
+          value: "value2",
+          after: {
+            sessionID: after2.sessionID,
+            txIndex: after2.txIndex,
+            changeIdx: after2.changeIdx,
+            branch: undefined,
+          },
+        },
       ]);
     });
 
@@ -431,29 +465,50 @@ describe("objToArr utilities", () => {
     });
 
     test("should handle mixed operations", () => {
+      const after = createOpID("session1", 0);
       const arr: JsonValue[][] = [
-        ["value1", "after1", 1],
+        ["value1", packOpID(after), 1],
         ["insertion1", ENCODING_MAP_PRIMITIVES_VALUES.undefined, 3],
       ];
 
       const result = unpackArrOfObjectsCoList(arr);
 
       expect(result).toEqual([
-        { op: "app", value: "value1", after: "after1" },
+        {
+          op: "app",
+          value: "value1",
+          after: {
+            sessionID: after.sessionID,
+            txIndex: after.txIndex,
+            changeIdx: after.changeIdx,
+            branch: undefined,
+          },
+        },
         { op: "del", insertion: "insertion1" },
       ]);
     });
 
     test("should handle operations with compacted flag", () => {
+      const after = createOpID("session1", 0);
       const arr: JsonValue[][] = [
-        ["value1", "after1", 1, true],
-        ["insertion1", true, 3],
+        ["value1", packOpID(after), 1, ENCODING_MAP_PRIMITIVES_VALUES.true],
+        ["insertion1", ENCODING_MAP_PRIMITIVES_VALUES.true, 3],
       ];
 
       const result = unpackArrOfObjectsCoList(arr);
 
       expect(result).toEqual([
-        { op: "app", value: "value1", after: "after1", compacted: true },
+        {
+          op: "app",
+          value: "value1",
+          after: {
+            sessionID: after.sessionID,
+            txIndex: after.txIndex,
+            changeIdx: after.changeIdx,
+            branch: undefined,
+          },
+          compacted: true,
+        },
         { op: "del", insertion: "insertion1", compacted: true },
       ]);
     });
@@ -461,16 +516,18 @@ describe("objToArr utilities", () => {
 
   describe("packArrToObjectWithKeys", () => {
     test("should pack array of app operations", () => {
+      const after1 = createOpID("session1", 0);
+      const after2 = createOpID("session2", 1);
       const arr = [
-        { op: "app" as const, value: "value1", after: "after1" },
-        { op: "app" as const, value: "value2", after: "after2" },
+        { op: "app" as const, value: "value1", after: after1 },
+        { op: "app" as const, value: "value2", after: after2 },
       ];
 
       const result = packArrOfObjectsCoList(arr);
 
       expect(result).toEqual([
-        ["value1", "after1"],
-        ["value2", "after2"],
+        ["value1", packOpID(after1)],
+        ["value2", packOpID(after2)],
       ]);
     });
 
@@ -497,25 +554,27 @@ describe("objToArr utilities", () => {
     });
 
     test("should handle mixed operations", () => {
+      const after = createOpID("session1", 0);
       const arr = [
-        { op: "app" as const, value: "value1", after: "after1" },
+        { op: "app" as const, value: "value1", after: after },
         { op: "del" as const, insertion: "insertion1" },
       ];
 
       const result = packArrOfObjectsCoList(arr);
 
       expect(result).toEqual([
-        ["value1", "after1"],
+        ["value1", packOpID(after)],
         ["insertion1", ENCODING_MAP_PRIMITIVES_VALUES.undefined, 3],
       ]);
     });
 
     test("should handle operations with compacted flag", () => {
+      const after = createOpID("session1", 0);
       const arr = [
         {
           op: "app" as const,
           value: "value1",
-          after: "after1",
+          after: after,
           compacted: true,
         },
         { op: "del" as const, insertion: "insertion1", compacted: true },
@@ -526,7 +585,7 @@ describe("objToArr utilities", () => {
       expect(result).toEqual([
         [
           "value1",
-          "after1",
+          packOpID(after),
           ENCODING_MAP_PRIMITIVES_VALUES.undefined,
           ENCODING_MAP_PRIMITIVES_VALUES.true,
         ],
@@ -535,12 +594,14 @@ describe("objToArr utilities", () => {
     });
 
     test("should remove trailing nulls for each item", () => {
+      const after1 = createOpID("session1", 0);
+      const after2 = createOpID("session1", 1);
       const arr = [
-        { op: "app" as const, value: "value1", after: "after1" },
+        { op: "app" as const, value: "value1", after: after1 },
         {
           op: "app" as const,
           value: "value2",
-          after: "after2",
+          after: after2,
           compacted: true,
         },
       ];
@@ -548,10 +609,10 @@ describe("objToArr utilities", () => {
       const result = packArrOfObjectsCoList(arr);
 
       expect(result).toEqual([
-        ["value1", "after1"],
+        ["value1", packOpID(after1)],
         [
           "value2",
-          "after2",
+          packOpID(after2),
           ENCODING_MAP_PRIMITIVES_VALUES.undefined,
           ENCODING_MAP_PRIMITIVES_VALUES.true,
         ],
@@ -562,9 +623,21 @@ describe("objToArr utilities", () => {
   describe("packArrToObjectWithKeys/unpackArrToObjectWithKeys roundtrip", () => {
     test("should maintain data integrity through pack/unpack cycle for app operations", () => {
       const original = [
-        { op: "app" as const, value: "value1", after: "after1" },
-        { op: "app" as const, value: "value2", after: "after2" },
-        { op: "app" as const, value: "value3", after: "after3" },
+        {
+          op: "app" as const,
+          value: "value1",
+          after: createOpID("session1", 0),
+        },
+        {
+          op: "app" as const,
+          value: "value2",
+          after: createOpID("session1", 1),
+        },
+        {
+          op: "app" as const,
+          value: "value3",
+          after: createOpID("session1", 2),
+        },
       ];
 
       const packed = packArrOfObjectsCoList(original);
@@ -588,12 +661,16 @@ describe("objToArr utilities", () => {
 
     test("should work with mixed operations in roundtrip", () => {
       const original = [
-        { op: "app" as const, value: "value1", after: "after1" },
+        {
+          op: "app" as const,
+          value: "value1",
+          after: createOpID("session1", 0),
+        },
         { op: "del" as const, insertion: "insertion1" },
         {
           op: "app" as const,
           value: "value2",
-          after: "after2",
+          after: createOpID("session1", 1),
           compacted: true,
         },
       ];
@@ -606,7 +683,11 @@ describe("objToArr utilities", () => {
 
     test("should work with multiple roundtrips", () => {
       const original = [
-        { op: "app" as const, value: "value1", after: "after1" },
+        {
+          op: "app" as const,
+          value: "value1",
+          after: createOpID("session1", 0),
+        },
         { op: "del" as const, insertion: "insertion1" },
       ];
 

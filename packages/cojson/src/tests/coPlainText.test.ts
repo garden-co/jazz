@@ -371,20 +371,18 @@ test("chunks transactions when when the chars are longer than MAX_RECOMMENDED_TX
     }),
   ).toMatchInlineSnapshot(`
     [
-      "client -> storage | CONTENT CoPlainText header: true new: After: 0 New: 6",
-      "client -> storage | CONTENT CoPlainText header: false new: After: 6 New: 6",
-      "client -> storage | CONTENT CoPlainText header: false new: After: 12 New: 6",
-      "client -> storage | CONTENT CoPlainText header: false new: After: 18 New: 6",
-      "client -> storage | CONTENT CoPlainText header: false new: After: 24 New: 6",
-      "client -> storage | CONTENT CoPlainText header: false new: After: 30 New: 6",
-      "client -> storage | CONTENT CoPlainText header: false new: After: 36 New: 6",
+      "client -> storage | CONTENT CoPlainText header: true new: After: 0 New: 7",
+      "client -> storage | CONTENT CoPlainText header: false new: After: 7 New: 7",
+      "client -> storage | CONTENT CoPlainText header: false new: After: 14 New: 7",
+      "client -> storage | CONTENT CoPlainText header: false new: After: 21 New: 7",
+      "client -> storage | CONTENT CoPlainText header: false new: After: 28 New: 7",
+      "client -> storage | CONTENT CoPlainText header: false new: After: 35 New: 7",
       "client -> storage | LOAD CoPlainText sessions: empty",
-      "storage -> client | CONTENT CoPlainText header: true new: After: 0 New: 12 expectContentUntil: header/42",
-      "storage -> client | CONTENT CoPlainText header: true new: After: 12 New: 6",
-      "storage -> client | CONTENT CoPlainText header: true new: After: 18 New: 6",
-      "storage -> client | CONTENT CoPlainText header: true new: After: 24 New: 6",
-      "storage -> client | CONTENT CoPlainText header: true new: After: 30 New: 6",
-      "storage -> client | CONTENT CoPlainText header: true new: After: 36 New: 6",
+      "storage -> client | CONTENT CoPlainText header: true new: After: 0 New: 14 expectContentUntil: header/42",
+      "storage -> client | CONTENT CoPlainText header: true new: After: 14 New: 7",
+      "storage -> client | CONTENT CoPlainText header: true new: After: 21 New: 7",
+      "storage -> client | CONTENT CoPlainText header: true new: After: 28 New: 7",
+      "storage -> client | CONTENT CoPlainText header: true new: After: 35 New: 7",
     ]
   `);
 });

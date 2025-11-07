@@ -8,6 +8,7 @@ import type {
   PreOpPayload,
 } from "../coValues/coList.js";
 import { ENCODING_MAP_PRIMITIVES_VALUES } from "../pack/objToArr.js";
+import { packOpID } from "../pack/opID.js";
 
 describe("CoPlainTextPackImplementation", () => {
   const packer = new CoPlainTextPackImplementation();
@@ -17,7 +18,11 @@ describe("CoPlainTextPackImplementation", () => {
     sessionID: sessionID as any,
     txIndex,
     changeIdx: 0,
+    branch: undefined,
   });
+
+  const serializeOpRef = (ref: OpID | "start" | "end") =>
+    typeof ref === "string" ? ref : packOpID(ref);
 
   describe("packChanges", () => {
     test("should pack sequential character insertions with same 'after'", () => {
@@ -57,7 +62,7 @@ describe("CoPlainTextPackImplementation", () => {
       expect(result.length).toBe(2);
       expect(Array.isArray(result[0])).toBe(true);
       expect((result[0] as any)[0]).toBe("a"); // value
-      expect((result[0] as any)[1]).toBe(opID); // after
+      expect((result[0] as any)[1]).toBe(packOpID(opID)); // after
       expect((result[0] as any)[2]).toBe(
         ENCODING_MAP_PRIMITIVES_VALUES.undefined,
       ); // op (1 = "app")
@@ -291,10 +296,18 @@ describe("CoPlainTextPackImplementation", () => {
       const result = packer.unpackChanges(packed as any);
 
       expect(result.length).toBe(4);
-      expect((result[0] as AppOpPayload<string>).after).toBe(opID);
-      expect((result[1] as AppOpPayload<string>).after).toBe(opID);
-      expect((result[2] as AppOpPayload<string>).after).toBe(opID);
-      expect((result[3] as AppOpPayload<string>).after).toBe(opID);
+      expect(serializeOpRef((result[0] as AppOpPayload<string>).after)).toBe(
+        packOpID(opID),
+      );
+      expect(serializeOpRef((result[1] as AppOpPayload<string>).after)).toBe(
+        packOpID(opID),
+      );
+      expect(serializeOpRef((result[2] as AppOpPayload<string>).after)).toBe(
+        packOpID(opID),
+      );
+      expect(serializeOpRef((result[3] as AppOpPayload<string>).after)).toBe(
+        packOpID(opID),
+      );
       expect(
         result.map((r) => (r as AppOpPayload<string>).value).join(""),
       ).toBe("abcd");
@@ -475,9 +488,9 @@ describe("CoPlainTextPackImplementation", () => {
         expect((unpacked[i] as AppOpPayload<string>).value).toBe(
           (original[i] as AppOpPayload<string>).value,
         );
-        expect((unpacked[i] as AppOpPayload<string>).after).toBe(
-          (original[i] as AppOpPayload<string>).after,
-        );
+        expect(
+          serializeOpRef((unpacked[i] as AppOpPayload<string>).after),
+        ).toBe(serializeOpRef((original[i] as AppOpPayload<string>).after));
       }
     });
 
@@ -531,9 +544,9 @@ describe("CoPlainTextPackImplementation", () => {
         expect((unpacked[i] as PreOpPayload<string>).value).toBe(
           (original[i] as PreOpPayload<string>).value,
         );
-        expect((unpacked[i] as PreOpPayload<string>).before).toBe(
-          (original[i] as PreOpPayload<string>).before,
-        );
+        expect(
+          serializeOpRef((unpacked[i] as PreOpPayload<string>).before),
+        ).toBe(serializeOpRef((original[i] as PreOpPayload<string>).before));
       }
     });
   });

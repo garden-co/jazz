@@ -7,6 +7,7 @@ import type {
   PreOpPayload,
 } from "../coValues/coList.js";
 import { ENCODING_MAP_PRIMITIVES_VALUES } from "../pack/objToArr.js";
+import { packOpID } from "../pack/opID.js";
 
 describe("CoListPackImplementation", () => {
   const packer = new CoListPackImplementation<string>();
@@ -17,6 +18,9 @@ describe("CoListPackImplementation", () => {
     txIndex,
     changeIdx: 0,
   });
+
+  const serializeOpRef = (ref: OpID | "start" | "end") =>
+    typeof ref === "string" ? ref : packOpID(ref);
 
   describe("packChanges", () => {
     test("should pack sequential append operations with same 'after'", () => {
@@ -56,7 +60,7 @@ describe("CoListPackImplementation", () => {
       expect(result.length).toBe(3);
       expect(Array.isArray(result[0])).toBe(true);
       expect((result[0] as any)[0]).toBe("a"); // value
-      expect((result[0] as any)[1]).toBe(opID); // after
+      expect((result[0] as any)[1]).toBe(packOpID(opID)); // after
       expect((result[0] as any)[2]).toBe(
         ENCODING_MAP_PRIMITIVES_VALUES.undefined,
       ); // op (undefined so we use the default value = "app")
@@ -82,7 +86,7 @@ describe("CoListPackImplementation", () => {
       expect(Array.isArray(result[0])).toBe(true);
       // Each element is packed as ["item1", opID1, 1] without compacted flag
       expect((result[0] as any)[0]).toBe("item1"); // value
-      expect((result[0] as any)[1]).toBe(opID1); // after
+      expect((result[0] as any)[1]).toBe(packOpID(opID1)); // after
       expect((result[0] as any)[2]).toBeUndefined(); // op (0 is null so we use the default value = "app")
       expect((result[0] as any)[3]).toBeUndefined(); // no compacted flag
     });
@@ -283,10 +287,18 @@ describe("CoListPackImplementation", () => {
       const result = packer.unpackChanges(packed as any);
 
       expect(result.length).toBe(4);
-      expect((result[0] as AppOpPayload<string>).after).toBe(opID);
-      expect((result[1] as AppOpPayload<string>).after).toBe(opID);
-      expect((result[2] as AppOpPayload<string>).after).toBe(opID);
-      expect((result[3] as AppOpPayload<string>).after).toBe(opID);
+      expect(serializeOpRef((result[0] as AppOpPayload<string>).after)).toBe(
+        packOpID(opID),
+      );
+      expect(serializeOpRef((result[1] as AppOpPayload<string>).after)).toBe(
+        packOpID(opID),
+      );
+      expect(serializeOpRef((result[2] as AppOpPayload<string>).after)).toBe(
+        packOpID(opID),
+      );
+      expect(serializeOpRef((result[3] as AppOpPayload<string>).after)).toBe(
+        packOpID(opID),
+      );
     });
 
     test("should pass through unpacked changes unchanged", () => {
@@ -348,9 +360,9 @@ describe("CoListPackImplementation", () => {
         expect((unpacked[i] as AppOpPayload<string>).value).toBe(
           (original[i] as AppOpPayload<string>).value,
         );
-        expect((unpacked[i] as AppOpPayload<string>).after).toBe(
-          (original[i] as AppOpPayload<string>).after,
-        );
+        expect(
+          serializeOpRef((unpacked[i] as AppOpPayload<string>).after),
+        ).toBe(serializeOpRef((original[i] as AppOpPayload<string>).after));
       }
     });
 
@@ -373,9 +385,9 @@ describe("CoListPackImplementation", () => {
         expect((unpacked[i] as AppOpPayload<string>).value).toBe(
           (original[i] as AppOpPayload<string>).value,
         );
-        expect((unpacked[i] as AppOpPayload<string>).after).toBe(
-          (original[i] as AppOpPayload<string>).after,
-        );
+        expect(
+          serializeOpRef((unpacked[i] as AppOpPayload<string>).after),
+        ).toBe(serializeOpRef((original[i] as AppOpPayload<string>).after));
       }
     });
 
@@ -424,9 +436,9 @@ describe("CoListPackImplementation", () => {
         expect((unpacked[i] as PreOpPayload<string>).value).toBe(
           (original[i] as PreOpPayload<string>).value,
         );
-        expect((unpacked[i] as PreOpPayload<string>).before).toBe(
-          (original[i] as PreOpPayload<string>).before,
-        );
+        expect(
+          serializeOpRef((unpacked[i] as PreOpPayload<string>).before),
+        ).toBe(serializeOpRef((original[i] as PreOpPayload<string>).before));
       }
     });
   });

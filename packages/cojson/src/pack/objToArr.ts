@@ -1,4 +1,6 @@
+import { OpID } from "../exports.js";
 import { JsonObject, JsonValue } from "../jsonValue.js";
+import { packOpID, unpackOpID } from "./opID.js";
 
 /**
  * Maps JavaScript primitive values to numeric codes for compact JSON representation.
@@ -300,6 +302,17 @@ export function unpackArrToObjectCoList<T extends JsonValue>(item: T[]) {
   );
   const data = unpackArrToObject(LIST_TO_KEYS_MAP[operationType], item, [0]);
   data.op = operationType;
+
+  if (operationType !== "del" && item[1] !== "start" && item[1] !== "end") {
+    if (typeof item[1] === "string") {
+      if (data.after) {
+        data.after = unpackOpID(item[1]);
+      }
+      if (data.before) {
+        data.before = unpackOpID(item[1]);
+      }
+    }
+  }
   return data;
 }
 
@@ -349,6 +362,12 @@ export function packArrToObjectCoList<T extends JsonObject>(
   );
   if (item.op !== "app") {
     arrData[OPERATION_INDEX] = operationType;
+  }
+
+  if (item.op === "app" || item.op === "pre") {
+    if (typeof arrData[1] === "object") {
+      arrData[1] = packOpID(arrData[1] as OpID);
+    }
   }
   return arrData;
 }
