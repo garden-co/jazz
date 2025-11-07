@@ -208,6 +208,10 @@ function useGetCurrentValue<C extends CoValue>(
   }, [subscription]);
 }
 
+function identitySelector(value: any) {
+  return value;
+}
+
 /**
  * React hook for subscribing to CoValues and handling loading states.
  *
@@ -420,7 +424,7 @@ export function useCoState<
     ),
     getCurrentValue,
     getCurrentValue,
-    options?.select ?? ((value) => value as TSelectorReturn),
+    options?.select ?? identitySelector,
     options?.equalityFn ?? Object.is,
   );
 
@@ -457,7 +461,7 @@ export function useSubscriptionSelector<
     ),
     getCurrentValue,
     getCurrentValue,
-    options?.select ?? ((value) => value as TSelectorReturn),
+    options?.select ?? identitySelector,
     options?.equalityFn ?? Object.is,
   );
 }
@@ -678,7 +682,7 @@ export function useAccount<
     ),
     getCurrentValue,
     getCurrentValue,
-    options?.select ?? ((value) => value as TSelectorReturn),
+    options?.select ?? identitySelector,
     options?.equalityFn ?? Object.is,
   );
 }
