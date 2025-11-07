@@ -1573,6 +1573,69 @@ describe("subscribeToCoValue", () => {
 
     expect(spy).toHaveBeenCalledTimes(4);
   });
+
+  it("subscriptions with sync resolution should batch remote updates until a local change is detected", async () => {
+    const Person = co
+      .map({
+        name: z.string(),
+        dogs: co.record(
+          z.string(),
+          co.map({
+            name: z.string(),
+          }),
+        ),
+      })
+      .resolved({ dogs: { $each: true } });
+
+    const alice = await createJazzTestAccount();
+
+    const group = Group.create(alice);
+    group.addMember("everyone", "reader");
+
+    const person = Person.create({ name: "John", dogs: {} }, group);
+
+    const bob = await createJazzTestAccount();
+
+    let personOnBob = null as Loaded<typeof Person> | null;
+
+    const spy = vi.fn();
+    const unsubscribe = subscribeToCoValue(
+      coValueClassFromCoValueClassOrSchema(Person),
+      person.$jazz.id,
+      {
+        resolve: Person.resolveQuery,
+        loadAs: bob,
+        syncResolution: true,
+      },
+      (value) => {
+        personOnBob = value;
+        spy();
+      },
+    );
+
+    onTestFinished(unsubscribe);
+
+    await waitFor(() => {
+      expect(spy).toHaveBeenCalled();
+    });
+
+    assert(personOnBob);
+
+    spy.mockClear();
+
+    personOnBob.$jazz.set("name", "Bob");
+    expect(spy).toHaveBeenCalled();
+
+    person.dogs.$jazz.set("giggino", { name: "Giggino" });
+    expect(spy).not.toHaveBeenCalled(); // The update should be deferred
+    person.dogs.$jazz.set("leila", { name: "Leila" });
+    expect(spy).not.toHaveBeenCalled(); // The update should be deferred
+
+    // Wait a bit more to ensure that no other async updates are triggered
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(spy).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("getSubscriptionScope", () => {
