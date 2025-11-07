@@ -781,6 +781,7 @@ describe("CoList Branching", async () => {
       });
 
       // Verify we get the updated branch data
+      await waitFor(() => expect(updates).toHaveLength(2));
       expect(updates[1]?.[1]?.title).toBe("Walk the cat");
       expect(updates[1]?.[1]?.priority).toBe("medium");
 

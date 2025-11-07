@@ -1,4 +1,4 @@
-import type { LocalNode, RawCoValue } from "cojson";
+import type { CoValueUpdatePriority, LocalNode, RawCoValue } from "cojson";
 import {
   CoFeed,
   CoList,
@@ -22,6 +22,11 @@ import type {
 } from "./types.js";
 import { CoValueLoadingState, NotLoadedCoValueState } from "./types.js";
 import { createCoValue, myRoleForRawValue } from "./utils.js";
+
+export type SubscriptionScopeListener<D extends CoValue> = (
+  value: SubscriptionValue<D, any>,
+  priority: CoValueUpdatePriority,
+) => void;
 
 export class SubscriptionScope<D extends CoValue> {
   childNodes = new Map<string, SubscriptionScope<CoValue>>();
@@ -54,6 +59,7 @@ export class SubscriptionScope<D extends CoValue> {
   migrating = false;
   closed = false;
 
+  deferredUpdates = false;
   silenceUpdates = false;
 
   constructor(
@@ -75,11 +81,11 @@ export class SubscriptionScope<D extends CoValue> {
     this.subscription = new CoValueCoreSubscription(
       node,
       id,
-      (value) => {
+      (value, priority) => {
         lastUpdate = value;
 
         if (skipRetry && value === CoValueLoadingState.UNAVAILABLE) {
-          this.handleUpdate(value);
+          this.handleUpdate(value, priority);
           return;
         }
 
@@ -99,11 +105,11 @@ export class SubscriptionScope<D extends CoValue> {
             instantiateRefEncodedFromRaw(this.schema, value),
           );
           this.migrated = true;
-          this.handleUpdate(lastUpdate);
+          this.handleUpdate(lastUpdate, priority);
           return;
         }
 
-        this.handleUpdate(value);
+        this.handleUpdate(value, priority);
       },
       skipRetry,
       this.unstable_branch,
@@ -117,7 +123,10 @@ export class SubscriptionScope<D extends CoValue> {
     this.dirty = true;
   }
 
-  handleUpdate(update: RawCoValue | typeof CoValueLoadingState.UNAVAILABLE) {
+  handleUpdate(
+    update: RawCoValue | typeof CoValueLoadingState.UNAVAILABLE,
+    priority: CoValueUpdatePriority,
+  ) {
     if (update === CoValueLoadingState.UNAVAILABLE) {
       if (this.value.type === CoValueLoadingState.LOADING) {
         this.updateValue(
@@ -133,7 +142,7 @@ export class SubscriptionScope<D extends CoValue> {
           ]),
         );
       }
-      this.triggerUpdate();
+      this.triggerUpdate(priority);
       return;
     }
 
@@ -158,7 +167,7 @@ export class SubscriptionScope<D extends CoValue> {
             },
           ]),
         );
-        this.triggerUpdate();
+        this.triggerUpdate(priority);
       }
       return;
     }
@@ -186,7 +195,7 @@ export class SubscriptionScope<D extends CoValue> {
     this.version = update.version;
 
     this.silenceUpdates = false;
-    this.triggerUpdate();
+    this.triggerUpdate(priority);
   }
 
   computeChildErrors() {
@@ -238,7 +247,8 @@ export class SubscriptionScope<D extends CoValue> {
   handleChildUpdate = (
     id: string,
     value: SubscriptionValue<any, any> | SubscriptionValueLoading,
-    key?: string,
+    key: string | undefined,
+    priority: CoValueUpdatePriority,
   ) => {
     if (value.type === CoValueLoadingState.LOADING) {
       return;
@@ -271,7 +281,7 @@ export class SubscriptionScope<D extends CoValue> {
       }
     }
 
-    this.triggerUpdate();
+    this.triggerUpdate(priority);
   };
 
   shouldSendUpdates() {
@@ -308,26 +318,64 @@ export class SubscriptionScope<D extends CoValue> {
     return CoValueLoadingState.LOADING;
   }
 
-  triggerUpdate() {
+  listener?: SubscriptionScopeListener<D>;
+
+  triggerUpdate(priority: CoValueUpdatePriority) {
     if (!this.shouldSendUpdates()) return;
     if (!this.dirty) return;
-    if (this.subscribers.size === 0) return;
+    if (this.subscribers.size === 0 && !this.listener) return;
     if (this.silenceUpdates) return;
 
     const error = this.errorFromChildren;
     const value = this.value;
 
     if (error) {
-      this.subscribers.forEach((listener) => listener(error));
+      this.scheduleEmit(error, priority);
     } else if (value.type !== CoValueLoadingState.LOADING) {
-      this.subscribers.forEach((listener) => listener(value));
+      this.scheduleEmit(value, priority);
     }
 
     this.dirty = false;
   }
 
-  subscribers = new Set<(value: SubscriptionValue<D, any>) => void>();
-  subscribe(listener: (value: SubscriptionValue<D, any>) => void) {
+  /**
+   * Internal method to schedule the emit of the updates
+   */
+  emitScheduled = false;
+  hasUpdatesQueued = false;
+  scheduleEmit(
+    value: SubscriptionValue<D, any> | JazzError,
+    priority: CoValueUpdatePriority,
+  ) {
+    this.listener?.(value, priority);
+
+    if (this.subscribers.size === 0) return;
+
+    const shouldDefer = priority === "low" || this.deferredUpdates;
+
+    this.hasUpdatesQueued = true;
+
+    if (shouldDefer && this.emitScheduled) return;
+
+    if (!shouldDefer) {
+      this.hasUpdatesQueued = false;
+      this.subscribers.forEach((listener) => listener(value, priority));
+      return;
+    }
+
+    this.emitScheduled = true;
+
+    queueMicrotask(() => {
+      if (!this.hasUpdatesQueued) return;
+
+      this.hasUpdatesQueued = false;
+      this.emitScheduled = false;
+      this.subscribers.forEach((listener) => listener(value, priority));
+    });
+  }
+
+  subscribers = new Set<SubscriptionScopeListener<D>>();
+  subscribe(listener: SubscriptionScopeListener<D>) {
     this.subscribers.add(listener);
 
     return () => {
@@ -335,9 +383,12 @@ export class SubscriptionScope<D extends CoValue> {
     };
   }
 
-  setListener(listener: (value: SubscriptionValue<D, any>) => void) {
-    this.subscribers.add(listener);
-    this.triggerUpdate();
+  /**
+   * Internal method to propagate the updates inside the SubscriptionScope tree
+   */
+  setListener(listener: SubscriptionScopeListener<D>) {
+    this.listener = listener;
+    this.triggerUpdate("high");
   }
 
   subscribeToKey(key: string) {
@@ -429,7 +480,9 @@ export class SubscriptionScope<D extends CoValue> {
       // If the subscription is closed, check if we missed the value
       // load event
       if (child) {
-        child.pullValue((value) => this.handleChildUpdate(id, value));
+        child.pullValue((value) =>
+          this.handleChildUpdate(id, value, undefined, "high"),
+        );
       }
 
       return;
@@ -456,7 +509,9 @@ export class SubscriptionScope<D extends CoValue> {
       this.unstable_branch,
     );
     this.childNodes.set(id, child);
-    child.setListener((value) => this.handleChildUpdate(id, value));
+    child.setListener((value, priority) =>
+      this.handleChildUpdate(id, value, undefined, priority),
+    );
 
     /**
      * If the current subscription scope is closed, spawn
@@ -715,7 +770,9 @@ export class SubscriptionScope<D extends CoValue> {
       this.unstable_branch,
     );
     this.childNodes.set(id, child);
-    child.setListener((value) => this.handleChildUpdate(id, value, key));
+    child.setListener((value, priority) =>
+      this.handleChildUpdate(id, value, key, priority),
+    );
 
     /**
      * If the current subscription scope is closed, spawn

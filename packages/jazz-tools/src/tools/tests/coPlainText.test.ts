@@ -8,6 +8,7 @@ import {
   isControlledAccount,
 } from "../index.js";
 import { co, randomSessionProvider } from "../internal.js";
+import { waitFor } from "./utils.js";
 
 const Crypto = await WasmCrypto.create();
 
@@ -95,7 +96,7 @@ describe("CoPlainText", () => {
         expect(text.toString()).toEqual(`😊👋 안녕!`);
       });
 
-      test("applyDiff should emit a single update", () => {
+      test("applyDiff should emit a single update", async () => {
         const Text = co.plainText();
 
         const text = Text.create(`😊`, { owner: me });
@@ -113,6 +114,12 @@ describe("CoPlainText", () => {
         updateFn.mockClear();
 
         text.$jazz.applyDiff(`😊👋 안녕!`);
+
+        await waitFor(() => {
+          expect(updateFn).toHaveBeenCalled();
+        });
+
+        await new Promise((resolve) => setTimeout(resolve, 10));
 
         expect(updateFn).toHaveBeenCalledTimes(1);
 

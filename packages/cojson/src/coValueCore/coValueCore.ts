@@ -65,6 +65,13 @@ export function enablePermissionErrors() {
   logPermissionErrors = true;
 }
 
+export type CoValueUpdatePriority = "high" | "low";
+export type CoreSubscriptionListener = (
+  core: CoValueCore,
+  unsub: () => void,
+  priority: CoValueUpdatePriority,
+) => void;
+
 export class VerifiedTransaction {
   // The ID of the CoValue that the transaction belongs to
   coValueId: RawCoID;
@@ -229,8 +236,7 @@ export class CoValueCore {
 
   // cached state and listeners
   private _cachedContent?: RawCoValue;
-  readonly listeners: Set<(core: CoValueCore, unsub: () => void) => void> =
-    new Set();
+  readonly listeners: Set<CoreSubscriptionListener> = new Set();
   private counter: UpDownCounter;
 
   constructor(id: RawCoID, node: LocalNode) {
@@ -681,7 +687,7 @@ export class CoValueCore {
 
         // Check if an immediate update has been notified
         if (this.#batchedUpdates) {
-          this.notifyUpdate();
+          this.notifyUpdate("low");
         }
       });
     }
@@ -694,10 +700,10 @@ export class CoValueCore {
 
   resumeNotifyUpdate() {
     this.#isNotifyUpdatePaused = false;
-    this.notifyUpdate();
+    this.notifyUpdate("high");
   }
 
-  private notifyUpdate() {
+  private notifyUpdate(priority: CoValueUpdatePriority) {
     if (this.listeners.size === 0 || this.#isNotifyUpdatePaused) {
       return;
     }
@@ -706,9 +712,13 @@ export class CoValueCore {
 
     for (const listener of this.listeners) {
       try {
-        listener(this, () => {
-          this.listeners.delete(listener);
-        });
+        listener(
+          this,
+          () => {
+            this.listeners.delete(listener);
+          },
+          priority,
+        );
       } catch (e) {
         logger.error("Error in listener for coValue " + this.id, { err: e });
       }
@@ -716,15 +726,19 @@ export class CoValueCore {
   }
 
   subscribe(
-    listener: (core: CoValueCore, unsub: () => void) => void,
+    listener: CoreSubscriptionListener,
     immediateInvoke = true,
   ): () => void {
     this.listeners.add(listener);
 
     if (immediateInvoke) {
-      listener(this, () => {
-        this.listeners.delete(listener);
-      });
+      listener(
+        this,
+        () => {
+          this.listeners.delete(listener);
+        },
+        "high",
+      );
     }
 
     return () => {
@@ -800,7 +814,7 @@ export class CoValueCore {
 
     // force immediate notification because local updates may come from the UI
     // where we need synchronous updates
-    this.notifyUpdate();
+    this.notifyUpdate("high");
     this.node.syncManager.syncLocalTransaction(this.verified, knownStateBefore);
 
     return true;
@@ -1180,7 +1194,7 @@ export class CoValueCore {
           this.incompleteDependencies.delete(dependencyCoValue.id);
           if (this.incompleteDependencies.size === 0) {
             // We want this to propagate immediately in the dependency chain
-            this.notifyUpdate();
+            this.notifyUpdate("low");
           }
         },
       });
@@ -1194,7 +1208,7 @@ export class CoValueCore {
           this.missingDependencies.delete(dependencyCoValue.id);
 
           if (this.missingDependencies.size === 0) {
-            this.notifyUpdate(); // We want this to propagate immediately
+            this.notifyUpdate("low"); // We want this to propagate immediately, but SubscriptionScope can handle this without high priority
           }
         },
       });
