@@ -262,7 +262,7 @@ export class CoMapSchema<
       >,
     ) => undefined,
   ): this {
-    // @ts-expect-error Property 'migrate' does not exist on type 'CoMap'
+    // @ts-expect-error avoid exposing 'migrate' at the type level
     this.coValueClass.prototype.migrate = migration;
     return this;
   }
@@ -376,11 +376,14 @@ export class CoMapSchema<
     // @ts-expect-error
     const copy: CoMapSchema<Shape, CatchAll, Owner, ResolveQuery> =
       hydrateCoreCoValueSchema(coreSchema);
-    // @ts-expect-error Property 'migrate' does not exist on type 'CoMap'
+    // @ts-expect-error avoid exposing 'migrate' at the type level
     copy.coValueClass.prototype.migrate = this.coValueClass.prototype.migrate;
     // @ts-expect-error TS cannot infer that the resolveQuery type is valid
     copy.resolveQuery = resolveQuery ?? this.resolveQuery;
     copy.permissions = permissions ?? this.permissions;
+    // @ts-expect-error avoid exposing 'configureImplicitGroupOwner' at the type level
+    copy.coValueClass.prototype.configureImplicitGroupOwner =
+      copy.permissions.onCreate;
     return copy;
   }
 }

@@ -1,13 +1,24 @@
 import { beforeAll, describe, expect, test } from "vitest";
-import { Account, co, z, Group } from "../exports";
-import { createJazzTestAccount, setupJazzTestSync } from "../testing";
+import { Account, co, CoValueLoadingState, Group, z } from "../exports";
+import {
+  assertLoaded,
+  createJazzTestAccount,
+  setupJazzTestSync,
+} from "../testing";
 
 describe("Schema.withPermissions()", () => {
+  let me: Account;
+  let anotherAccount: Account;
   beforeAll(async () => {
     await setupJazzTestSync();
     await createJazzTestAccount({
       isCurrentActiveAccount: true,
       creationProps: { name: "Hermes Puggington" },
+    });
+
+    me = Account.getMe();
+    anotherAccount = await Account.createAs(Account.getMe(), {
+      creationProps: { name: "Another Account" },
     });
   });
 
@@ -31,6 +42,15 @@ describe("Schema.withPermissions()", () => {
         onInlineCreate: "extendsContainer",
       });
     }
+  });
+
+  test("cannot define permissions on co.account()", () => {
+    expect(() =>
+      co
+        .account()
+        // @ts-expect-error: Accounts do not have permissions
+        .withPermissions({ onInlineCreate: "extendsContainer" }),
+    ).toThrow();
   });
 
   test("cannot define permissions on co.group()", () => {
@@ -63,6 +83,43 @@ describe("Schema.withPermissions()", () => {
     ).toThrow();
   });
 
+  describe("onCreate", () => {
+    test("allows configuring a CoValue's group when using .create() without providing an explicit owner", async () => {
+      const TestMap = co.map({ name: co.plainText() }).withPermissions({
+        onCreate(newGroup) {
+          newGroup.makePublic();
+        },
+      });
+
+      const map = TestMap.create({ name: "Hi!" });
+
+      const loadedMap = await TestMap.load(map.$jazz.id, {
+        resolve: { name: true },
+        loadAs: anotherAccount,
+      });
+      assertLoaded(loadedMap);
+      expect(loadedMap.name.toString()).toEqual("Hi!");
+    });
+
+    test("configuration callback is not run when providing an explicit owner", async () => {
+      const TestMap = co.map({ name: co.plainText() }).withPermissions({
+        onCreate(newGroup) {
+          newGroup.makePublic();
+        },
+      });
+      const map = TestMap.create({ name: "Hi!" }, { owner: Group.create() });
+
+      const loadedMap = await TestMap.load(map.$jazz.id, {
+        resolve: { name: true },
+        loadAs: anotherAccount,
+      });
+      expect(loadedMap.$isLoaded).toBe(false);
+      expect(loadedMap.$jazz.loadingState).toBe(
+        CoValueLoadingState.UNAUTHORIZED,
+      );
+    });
+  });
+
   describe("onInlineCreate defines how the owner is obtained when creating CoValues from JSON", () => {
     test("defaults to 'extendsContainer'", () => {
       const Schema = co.map({ name: co.plainText() });
@@ -75,10 +132,6 @@ describe("Schema.withPermissions()", () => {
           .map({ name: co.plainText() })
           .withPermissions({ onInlineCreate: "extendsContainer" });
         const ParentMap = co.map({ child: TestMap });
-        const me = Account.getMe();
-        const anotherAccount = await Account.createAs(me, {
-          creationProps: { name: "Another Account" },
-        });
 
         const parentOwner = Group.create({ owner: me });
         parentOwner.addMember(anotherAccount, "writer");
@@ -101,10 +154,6 @@ describe("Schema.withPermissions()", () => {
           onInlineCreate: { extendsContainer: "reader" },
         });
         const ParentMap = co.map({ child: TestMap });
-        const me = Account.getMe();
-        const anotherAccount = await Account.createAs(me, {
-          creationProps: { name: "Another Account" },
-        });
 
         const parentOwner = Group.create({ owner: me });
         parentOwner.addMember(anotherAccount, "writer");
@@ -132,10 +181,6 @@ describe("Schema.withPermissions()", () => {
           .map({ name: co.plainText() })
           .withPermissions({ onInlineCreate: "newGroup" });
         const ParentMap = co.map({ child: TestMap });
-        const me = Account.getMe();
-        const anotherAccount = await Account.createAs(me, {
-          creationProps: { name: "Another Account" },
-        });
 
         const parentOwner = Group.create({ owner: me });
         parentOwner.addMember(anotherAccount, "writer");
@@ -163,10 +208,6 @@ describe("Schema.withPermissions()", () => {
           .map({ name: co.plainText() })
           .withPermissions({ onInlineCreate: "equalsContainer" });
         const ParentMap = co.map({ child: TestMap });
-        const me = Account.getMe();
-        const anotherAccount = await Account.createAs(me, {
-          creationProps: { name: "Another Account" },
-        });
 
         const parentOwner = Group.create({ owner: me });
         parentOwner.addMember(anotherAccount, "writer");
@@ -184,10 +225,6 @@ describe("Schema.withPermissions()", () => {
 
     describe("group configuration callback", () => {
       test("creates a new group and configures it according to the callback", async () => {
-        const me = Account.getMe();
-        const anotherAccount = await Account.createAs(me, {
-          creationProps: { name: "Another Account" },
-        });
         const TestMap = co.map({ name: co.plainText() }).withPermissions({
           onInlineCreate(newGroup) {
             newGroup.addMember(anotherAccount, "writer");
@@ -211,10 +248,6 @@ describe("Schema.withPermissions()", () => {
       });
 
       test("can access the container's owner inside the callback", async () => {
-        const me = Account.getMe();
-        const anotherAccount = await Account.createAs(me, {
-          creationProps: { name: "Another Account" },
-        });
         const TestMap = co.map({ name: co.plainText() }).withPermissions({
           onInlineCreate(newGroup, { containerOwner }) {
             containerOwner.addMember(anotherAccount, "writer");

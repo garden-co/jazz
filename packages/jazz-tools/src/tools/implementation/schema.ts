@@ -10,7 +10,7 @@ import {
   type GroupRole,
   ItemsSym,
   LoadedAndRequired,
-  type NewOwnerStrategy,
+  type NewInlineOwnerStrategy,
   type RefPermissions,
   SchemaInit,
   isCoValueClass,
@@ -173,7 +173,7 @@ export function instantiateRefEncodedWithInit<V extends CoValue>(
   schema: RefEncoded<V>,
   init: any,
   containerOwner: Group,
-  newOwnerStrategy: NewOwnerStrategy = extendContainerOwner,
+  newOwnerStrategy: NewInlineOwnerStrategy = extendContainerOwner,
 ): V {
   if (!isCoValueClass<V>(schema.ref)) {
     throw Error(

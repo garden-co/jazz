@@ -252,7 +252,16 @@ export class CoMap extends CoValueBase implements CoValue {
       | Account
       | Group,
   ): M {
-    const { owner, uniqueness } = parseCoValueCreateOptions(options);
+    const createNewGroup = () => {
+      const newGroup = Group.create();
+      // @ts-expect-error avoid exposing 'configureImplicitGroupOwner' at the type level
+      instance.configureImplicitGroupOwner?.(newGroup);
+      return newGroup;
+    };
+    const { owner, uniqueness } = parseCoValueCreateOptions(
+      options,
+      createNewGroup,
+    );
 
     Object.defineProperties(instance, {
       $jazz: {
@@ -298,7 +307,8 @@ export class CoMap extends CoValueBase implements CoValue {
           if (initValue != null) {
             let refId = (initValue as unknown as CoValue).$jazz?.id;
             if (!refId) {
-              const newOwnerStrategy = descriptor.permissions?.newOwnerStrategy;
+              const newOwnerStrategy =
+                descriptor.permissions?.newInlineOwnerStrategy;
               const coValue = instantiateRefEncodedWithInit(
                 descriptor,
                 initValue,
@@ -905,7 +915,7 @@ export type CoMapInit<Map extends object> = {
 // TODO: cache handlers per descriptor for performance?
 const CoMapProxyHandler: ProxyHandler<CoMap> = {
   get(target, key, receiver) {
-    if (key === "_schema") {
+    if (key === "_schema" || key === "configureImplicitGroupOwner") {
       return Reflect.get(target, key);
     } else if (key in target) {
       return Reflect.get(target, key, receiver);
