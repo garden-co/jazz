@@ -617,10 +617,13 @@ class CoMapJazzApi<M extends CoMap> extends CoValueJazzApi<M> {
         this.raw.set(key, null);
       } else {
         if (!refId) {
+          const newOwnerStrategy =
+            descriptor.permissions?.newInlineOwnerStrategy;
           const coValue = instantiateRefEncodedWithInit(
             descriptor,
             value,
             this.owner,
+            newOwnerStrategy,
           );
           refId = coValue.$jazz.id;
         }

@@ -233,7 +233,6 @@ describe("Schema.withPermissions()", () => {
         const ParentMap = co.map({ child: TestMap });
 
         const parentOwner = Group.create({ owner: me });
-        parentOwner.addMember(anotherAccount, "writer");
         const parentMap = ParentMap.create(
           {
             child: { name: "Hello" },
@@ -293,6 +292,25 @@ describe("Schema.withPermissions()", () => {
           "writer",
         );
       });
+    });
+
+    test("when setting new properties on a CoValue", async () => {
+      const TestMap = co
+        .map({ name: co.plainText() })
+        .withPermissions({ onInlineCreate: "sameAsContainer" });
+      const ParentMap = co.map({ child: TestMap });
+
+      const parentOwner = Group.create({ owner: me });
+      const parentMap = ParentMap.create(
+        {
+          child: { name: "Hello" },
+        },
+        { owner: parentOwner },
+      );
+      parentMap.$jazz.set("child", { name: "Hi!" });
+
+      const childOwner = parentMap.child.$jazz.owner;
+      expect(childOwner.$jazz.id).toEqual(parentOwner.$jazz.id);
     });
 
     test("for CoList container", async () => {
