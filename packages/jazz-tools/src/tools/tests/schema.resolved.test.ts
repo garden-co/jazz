@@ -793,10 +793,10 @@ describe("Schema.resolved()", () => {
   test("resolved() does not override previous schema configuration", () => {
     const TestMap = co
       .map({ name: co.plainText() })
-      .withPermissions({ onInlineCreate: "equalsContainer" });
+      .withPermissions({ onInlineCreate: "sameAsContainer" });
     const TestMapWithName = TestMap.resolved({ name: true });
     expect(TestMapWithName.permissions).toEqual({
-      onInlineCreate: "equalsContainer",
+      onInlineCreate: "sameAsContainer",
     });
   });
 });

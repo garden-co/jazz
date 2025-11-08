@@ -202,11 +202,11 @@ describe("Schema.withPermissions()", () => {
       });
     });
 
-    describe("equalsContainer", () => {
+    describe("sameAsContainer", () => {
       test("uses the container CoValue's owner as the new CoValue's owner", async () => {
         const TestMap = co
           .map({ name: co.plainText() })
-          .withPermissions({ onInlineCreate: "equalsContainer" });
+          .withPermissions({ onInlineCreate: "sameAsContainer" });
         const ParentMap = co.map({ child: TestMap });
 
         const parentOwner = Group.create({ owner: me });

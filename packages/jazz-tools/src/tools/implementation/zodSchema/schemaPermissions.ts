@@ -19,7 +19,7 @@ export type OnInlineCreateOptions =
   /**
    * Use the same owner as the container CoValue
    */
-  | "equalsContainer"
+  | "sameAsContainer"
   /**
    * Create a new group that includes the container CoValue's owner as a member (effectively inheriting
    * all permissions from the container)
@@ -110,9 +110,8 @@ function parseOnInlineCreate(
   if (onInlineCreate === "newGroup") {
     return (createNewGroup) => createNewGroup();
   }
-  if (onInlineCreate === "equalsContainer") {
-    return (createNewGroup, containerOwner) =>
-      containerOwner ?? createNewGroup();
+  if (onInlineCreate === "sameAsContainer") {
+    return (_createNewGroup, containerOwner) => containerOwner;
   }
   return (createNewGroup, containerOwner) => {
     const newGroup = createNewGroup();
