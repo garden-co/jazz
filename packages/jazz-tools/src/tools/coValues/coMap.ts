@@ -252,15 +252,10 @@ export class CoMap extends CoValueBase implements CoValue {
       | Account
       | Group,
   ): M {
-    const createNewGroup = () => {
-      const newGroup = Group.create();
-      // @ts-expect-error avoid exposing 'configureImplicitGroupOwner' at the type level
-      instance.configureImplicitGroupOwner?.(newGroup);
-      return newGroup;
-    };
     const { owner, uniqueness } = parseCoValueCreateOptions(
       options,
-      createNewGroup,
+      // @ts-expect-error avoid exposing 'configureImplicitGroupOwner' at the type level
+      instance.configureImplicitGroupOwner,
     );
 
     Object.defineProperties(instance, {

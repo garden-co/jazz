@@ -28,7 +28,7 @@ describe("Schema.withPermissions()", () => {
       // co.richText(),
       // co.fileStream(),
       // co.vector(1),
-      // co.list(co.plainText()),
+      co.list(co.plainText()),
       // co.feed(co.plainText()),
       co.map({ text: co.plainText() }),
       // co.record(z.string(), co.plainText()),
@@ -84,21 +84,44 @@ describe("Schema.withPermissions()", () => {
   });
 
   describe("onCreate", () => {
-    test("allows configuring a CoValue's group when using .create() without providing an explicit owner", async () => {
-      const TestMap = co.map({ name: co.plainText() }).withPermissions({
-        onCreate(newGroup) {
-          newGroup.makePublic();
-        },
+    describe("allows configuring a CoValue's group when using .create() without providing an explicit owner", () => {
+      test("for CoMap", async () => {
+        const TestMap = co.map({ name: co.plainText() }).withPermissions({
+          onCreate(newGroup) {
+            newGroup.makePublic();
+          },
+        });
+
+        const map = TestMap.create({ name: "Hi!" });
+
+        const loadedMap = await TestMap.load(map.$jazz.id, {
+          resolve: { name: true },
+          loadAs: anotherAccount,
+        });
+        assertLoaded(loadedMap);
+        expect(loadedMap.name.toString()).toEqual("Hi!");
       });
 
-      const map = TestMap.create({ name: "Hi!" });
+      test("for CoList", async () => {
+        const TestList = co.list(co.plainText()).withPermissions({
+          onCreate(newGroup) {
+            newGroup.makePublic();
+          },
+        });
 
-      const loadedMap = await TestMap.load(map.$jazz.id, {
-        resolve: { name: true },
-        loadAs: anotherAccount,
+        const list = TestList.create(["a", "b", "c"]);
+
+        const loadedList = await TestList.load(list.$jazz.id, {
+          resolve: { $each: true },
+          loadAs: anotherAccount,
+        });
+        assertLoaded(loadedList);
+        expect(loadedList.map((item) => item.toString())).toEqual([
+          "a",
+          "b",
+          "c",
+        ]);
       });
-      assertLoaded(loadedMap);
-      expect(loadedMap.name.toString()).toEqual("Hi!");
     });
 
     test("configuration callback is not run when providing an explicit owner", async () => {
@@ -271,6 +294,40 @@ describe("Schema.withPermissions()", () => {
         );
       });
     });
+
+    test("for CoList container", async () => {
+      const TestList = co.list(co.plainText()).withPermissions({
+        onInlineCreate: "extendsContainer",
+      });
+      const ParentList = co.list(TestList);
+
+      const parentOwner = Group.create({ owner: me });
+      parentOwner.addMember(anotherAccount, "writer");
+      const parentList = ParentList.create([["Hello"]], {
+        owner: parentOwner,
+      });
+
+      const childOwner = parentList[0]?.$jazz.owner;
+      expect(
+        childOwner?.getParentGroups().map((group) => group.$jazz.id),
+      ).toContain(parentOwner.$jazz.id);
+      expect(childOwner?.getRoleOf(anotherAccount.$jazz.id)).toEqual("writer");
+    });
+  });
+
+  test("withPermissions() can be used with recursive schemas", () => {
+    const Person = co.map({
+      name: z.string(),
+      get friend(): co.List<typeof Person> {
+        return Friends;
+      },
+    });
+    const Friends = co.list(Person).withPermissions({
+      onInlineCreate: "sameAsContainer",
+    });
+    const person = Person.create({ name: "John", friend: [] });
+
+    expect(person.friend.$jazz.owner).toEqual(person.$jazz.owner);
   });
 
   test("withPermissions() does not override previous schema configuration", () => {
