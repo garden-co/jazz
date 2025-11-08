@@ -68,14 +68,18 @@ function makeCodecCoField(
 export function schemaFieldToCoFieldDef(schema: SchemaField) {
   if (isCoValueClass(schema)) {
     return coField.ref(schema, {
-      permissions: { newOwnerStrategy: extendContainerOwner },
+      permissions: {
+        newInlineOwnerStrategy: extendContainerOwner,
+      },
     });
   } else if (isCoValueSchema(schema)) {
     if (schema.builtin === "CoOptional") {
       return coField.ref(schema.getCoValueClass(), {
         optional: true,
         // TODO get newOwnerStrategy from schema
-        permissions: { newOwnerStrategy: extendContainerOwner },
+        permissions: {
+          newInlineOwnerStrategy: extendContainerOwner,
+        },
       });
     }
     // TODO get newOwnerStrategy from schema
@@ -83,7 +87,9 @@ export function schemaFieldToCoFieldDef(schema: SchemaField) {
       permissions:
         "permissions" in schema
           ? schemaToRefPermissions(schema.permissions)
-          : { newOwnerStrategy: extendContainerOwner },
+          : {
+              newInlineOwnerStrategy: extendContainerOwner,
+            },
     });
   } else {
     if ("_zod" in schema) {

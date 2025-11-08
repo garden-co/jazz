@@ -1,13 +1,19 @@
 import { Group, type GroupRole } from "../../internal.js";
 
 /**
- * Configure how the owner of a new CoValue should be obtained.
+ * Callback to configure a CoValue's group when using `.create()` without providing an explicit owner.
+ */
+export type GroupConfigurationCallback = (newGroup: Group) => void;
+
+/**
+ * Defines how a nested CoValue’s owner is obtained when creating CoValues from JSON.
  *
- * This configuration is overriden if an `owner` is explicitly provided when creating the CoValue.
+ * This configuration is not used when using an explicit .create() for nested CoValues.
+ * In that case, {@link SchemaPermissions.onCreate} is used.
  */
 export type OnInlineCreateOptions =
   /**
-   * Always create a new group for CoValues created inline.
+   * Always create a new group for CoValues created inline
    */
   | "newGroup"
   /**
@@ -20,44 +26,50 @@ export type OnInlineCreateOptions =
    */
   | "extendsContainer"
   /**
-   * Similar to "extendsContainer", but allows overriding the role of the container CoValue's owner.
+   * Similar to "extendsContainer", but allows overriding the role of the container CoValue's owner
    */
   | { extendsContainer: GroupRole }
   /**
    * Create a new group and configure it as needed
    */
-  | GroupConfigurationCallback;
+  | InlineGroupConfigurationCallback;
 
-export type GroupConfigurationCallback = (
+export type InlineGroupConfigurationCallback = (
   newGroup: Group,
   context: { containerOwner: Group },
 ) => void;
 
 /**
  * Permissions to be used when creating or composing CoValues
- * @param onInlineCreate - Defines how a nested CoValue’s owner is obtained when creating inline CoValues.
+ * @param onCreate - allows configuring a CoValue’s group when using `.create()` without providing an explicit owner.
+ * @param onInlineCreate - defines how a nested CoValue’s owner is obtained when creating CoValues from JSON.
  * @default { onInlineCreate: "extendsContainer" }
  */
-export type SchemaPermissions = { onInlineCreate?: OnInlineCreateOptions };
+export type SchemaPermissions = {
+  onCreate?: GroupConfigurationCallback;
+  onInlineCreate?: OnInlineCreateOptions;
+};
 
 /**
  * Parsed {@link SchemaPermissions}, used by CoValue classes to set up permissions for referenced CoValues.
  */
-export type RefPermissions = { newOwnerStrategy: NewOwnerStrategy };
+export type RefPermissions = {
+  newInlineOwnerStrategy: NewInlineOwnerStrategy;
+};
 
 /**
- * A function that creates a new owner for a new CoValue.
+ * A function that creates a new owner for a new CoValue created inline.
  * @param createNewGroup - A function that creates a new group.
- * @param containerOwner - The owner of the container CoValue. Can be undefined if the CoValue is created outside of a container.
+ * @param containerOwner - The owner of the container CoValue.
  * @returns The new owner.
  */
-export type NewOwnerStrategy = (
+export type NewInlineOwnerStrategy = (
   createNewGroup: () => Group,
   containerOwner: Group,
 ) => Group;
 
 export const extendContainerOwnerFactory =
-  (roleOverride?: GroupRole): NewOwnerStrategy =>
+  (roleOverride?: GroupRole): NewInlineOwnerStrategy =>
   (createNewGroup: () => Group, containerOwner: Group): Group => {
     const node = containerOwner.$jazz.localNode;
     const rawGroup = node.createGroup();
@@ -75,37 +87,36 @@ export const extendContainerOwner = extendContainerOwnerFactory();
 export function schemaToRefPermissions(
   permissions: SchemaPermissions,
 ): RefPermissions {
-  if (
-    !permissions.onInlineCreate ||
-    permissions.onInlineCreate === "extendsContainer"
-  ) {
-    return { newOwnerStrategy: extendContainerOwner };
-  }
-  if (
-    typeof permissions.onInlineCreate === "object" &&
-    "extendsContainer" in permissions.onInlineCreate
-  ) {
-    return {
-      newOwnerStrategy: extendContainerOwnerFactory(
-        permissions.onInlineCreate.extendsContainer,
-      ),
-    };
-  }
-  if (permissions.onInlineCreate === "newGroup") {
-    return { newOwnerStrategy: (createNewGroup) => createNewGroup() };
-  }
-  if (permissions.onInlineCreate === "equalsContainer") {
-    return {
-      newOwnerStrategy: (createNewGroup, containerOwner) =>
-        containerOwner ?? createNewGroup(),
-    };
-  }
-  const groupConfigurationCallback = permissions.onInlineCreate;
+  const newInlineOwnerStrategy = parseOnInlineCreate(
+    permissions.onInlineCreate,
+  );
   return {
-    newOwnerStrategy: (createNewGroup, containerOwner) => {
-      const newGroup = createNewGroup();
-      groupConfigurationCallback(newGroup, { containerOwner });
-      return newGroup;
-    },
+    newInlineOwnerStrategy,
+  };
+}
+
+function parseOnInlineCreate(
+  onInlineCreate?: OnInlineCreateOptions,
+): NewInlineOwnerStrategy {
+  if (!onInlineCreate || onInlineCreate === "extendsContainer") {
+    return extendContainerOwner;
+  }
+  if (
+    typeof onInlineCreate === "object" &&
+    "extendsContainer" in onInlineCreate
+  ) {
+    return extendContainerOwnerFactory(onInlineCreate.extendsContainer);
+  }
+  if (onInlineCreate === "newGroup") {
+    return (createNewGroup) => createNewGroup();
+  }
+  if (onInlineCreate === "equalsContainer") {
+    return (createNewGroup, containerOwner) =>
+      containerOwner ?? createNewGroup();
+  }
+  return (createNewGroup, containerOwner) => {
+    const newGroup = createNewGroup();
+    onInlineCreate(newGroup, { containerOwner });
+    return newGroup;
   };
 }
