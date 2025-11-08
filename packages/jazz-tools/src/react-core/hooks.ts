@@ -22,16 +22,19 @@ import {
   MaybeLoaded,
   NotLoaded,
   ResolveQuery,
-  ResolveQueryStrict,
   SchemaResolveQuery,
   SubscriptionScope,
   coValueClassFromCoValueClassOrSchema,
   createUnloadedCoValue,
-  type BranchDefinition,
 } from "jazz-tools";
 import { JazzContext, JazzContextManagerContext } from "./provider.js";
 import { getCurrentAccountFromContextManager } from "./utils.js";
-import { CoValueSubscription } from "./types.js";
+import {
+  CoValueSubscription,
+  UseCoValueOptions,
+  UseSubscriptionOptions,
+  UseSubscriptionSelectorOptions,
+} from "./types.js";
 
 export function useJazzContext<Acc extends Account>() {
   const value = useContext(JazzContext) as JazzContextType<Acc>;
@@ -94,10 +97,7 @@ export function useCoValueSubscription<
 >(
   Schema: S,
   id: string | undefined | null,
-  options?: {
-    resolve?: ResolveQueryStrict<S, R>;
-    unstable_branch?: BranchDefinition;
-  },
+  options?: UseSubscriptionOptions<S, R>,
 ) {
   const contextManager = useJazzContextManager();
 
@@ -206,10 +206,6 @@ function useGetCurrentValue<C extends CoValue>(
     previousValue.current = currentValue;
     return currentValue;
   }, [subscription]);
-}
-
-function identitySelector(value: any) {
-  return value;
 }
 
 /**
@@ -380,57 +376,85 @@ export function useCoState<
   /** The ID of the CoValue to subscribe to. If `undefined`, returns an `unavailable` value */
   id: string | undefined,
   /** Optional configuration for the subscription */
-  options?: {
-    /** Resolve query to specify which nested CoValues to load */
-    resolve?: ResolveQueryStrict<S, R>;
-    /** Select which value to return */
-    select?: (value: MaybeLoaded<Loaded<S, R>>) => TSelectorReturn;
-    /** Equality function to determine if the selected value has changed, defaults to `Object.is` */
-    equalityFn?: (a: TSelectorReturn, b: TSelectorReturn) => boolean;
-    /**
-     * Create or load a branch for isolated editing.
-     *
-     * Branching lets you take a snapshot of the current state and start modifying it without affecting the canonical/shared version.
-     * It's a fork of your data graph: the same schema, but with diverging values.
-     *
-     * The checkout of the branch is applied on all the resolved values.
-     *
-     * @param name - A unique name for the branch. This identifies the branch
-     *   and can be used to switch between different branches of the same CoValue.
-     * @param owner - The owner of the branch. Determines who can access and modify
-     *   the branch. If not provided, the branch is owned by the current user.
-     *
-     * For more info see the [branching](https://jazz.tools/docs/react/using-covalues/version-control) documentation.
-     */
-    unstable_branch?: BranchDefinition;
-  },
+  options?: UseCoValueOptions<S, R, TSelectorReturn>,
 ): TSelectorReturn {
   const subscription = useCoValueSubscription(Schema, id, options);
-  const getCurrentValue = useGetCurrentValue(subscription);
 
-  const value = useSyncExternalStoreWithSelector<
-    MaybeLoaded<Loaded<S, R>>,
-    TSelectorReturn
-  >(
-    React.useCallback(
-      (callback) => {
-        if (!subscription) {
-          return () => {};
-        }
+  return useSubscriptionSelector<S, R, TSelectorReturn>(subscription, options);
+}
 
-        return subscription.subscribe(callback);
-      },
-      [subscription],
-    ),
-    getCurrentValue,
-    getCurrentValue,
-    options?.select ?? identitySelector,
-    options?.equalityFn ?? Object.is,
-  );
-
+// Fallback selector with stable reference for useSyncExternalStoreWithSelector
+function identitySelector(value: any) {
   return value;
 }
 
+/**
+ * React hook for selecting data from a subscription object.
+ *
+ * This hook is used to select and transform data from a subscription object returned by
+ * {@link useCoValueSubscription} or {@link useAccountSubscription}. It allows you to
+ * extract only the specific parts of the subscribed data that you need, which helps
+ * reduce unnecessary re-renders by narrowing down the returned data.
+ *
+ * The {@param options.select} function allows returning only specific parts of the subscription data.
+ * Additionally, you can provide a custom {@param options.equalityFn} to further optimize
+ * performance by controlling when the component should re-render based on the selected data.
+ *
+ * @returns The selected data from the subscription. If no selector is provided, returns the
+ * full subscription value. If a selector function is provided, returns the result of the selector function.
+ *
+ * @example
+ * ```tsx
+ * // Select only specific fields from a subscription
+ * const Project = co.map({
+ *   name: z.string(),
+ *   description: z.string(),
+ *   tasks: co.list(Task),
+ *   lastModified: z.date(),
+ * });
+ *
+ * function ProjectTitle({ projectId }: { projectId: string }) {
+ *   const subscription = useCoValueSubscription(Project, projectId);
+ *
+ *   // Only re-render when the project name changes, not other fields
+ *   const projectName = useSubscriptionSelector(subscription, {
+ *     select: (project) => project.$isLoaded ? project.name : "Loading...",
+ *   });
+ *
+ *   return <h1>{projectName}</h1>;
+ * }
+ * ```
+ *
+ * @example
+ * ```tsx
+ * // Use custom equality function for complex data structures
+ * const TaskList = co.list(Task);
+ *
+ * function TaskCount({ listId }: { listId: string }) {
+ *   const subscription = useCoValueSubscription(TaskList, listId, {
+ *     resolve: { $each: true },
+ *   });
+ *
+ *   const taskStats = useSubscriptionSelector(subscription, {
+ *     select: (tasks) => {
+ *       if (!tasks.$isLoaded) return { total: 0, completed: 0 };
+ *       return {
+ *         total: tasks.length,
+ *         completed: tasks.filter(task => task.completed).length,
+ *       };
+ *     },
+ *     // Custom equality to prevent re-renders when stats haven't changed
+ *     equalityFn: (a, b) => a.total === b.total && a.completed === b.completed,
+ *   });
+ *
+ *   return (
+ *     <div>
+ *       {taskStats.completed} of {taskStats.total} tasks completed
+ *     </div>
+ *   );
+ * }
+ * ```
+ */
 export function useSubscriptionSelector<
   S extends CoValueClassOrSchema,
   // @ts-expect-error we can't statically enforce the schema's resolve query is a valid resolve query, but in practice it is
@@ -438,10 +462,7 @@ export function useSubscriptionSelector<
   TSelectorReturn = MaybeLoaded<Loaded<S, R>>,
 >(
   subscription: CoValueSubscription<S, R>,
-  options?: {
-    select?: (value: MaybeLoaded<Loaded<S, R>>) => TSelectorReturn;
-    equalityFn?: (a: TSelectorReturn, b: TSelectorReturn) => boolean;
-  },
+  options?: UseSubscriptionSelectorOptions<S, R, TSelectorReturn>,
 ) {
   const getCurrentValue = useGetCurrentValue(subscription);
 
@@ -470,13 +491,7 @@ export function useAccountSubscription<
   S extends AccountClass<Account> | AnyAccountSchema,
   // @ts-expect-error we can't statically enforce the schema's resolve query is a valid resolve query, but in practice it is
   const R extends ResolveQuery<S> = SchemaResolveQuery<S>,
->(
-  Schema: S,
-  options?: {
-    resolve?: ResolveQueryStrict<S, R>;
-    unstable_branch?: BranchDefinition;
-  },
-) {
+>(Schema: S, options?: UseSubscriptionOptions<S, R>) {
   const contextManager = useJazzContextManager();
 
   const createSubscription = () => {
@@ -638,53 +653,11 @@ export function useAccount<
   /** The account schema to use. Defaults to the base Account schema */
   AccountSchema: A = Account as unknown as A,
   /** Optional configuration for the subscription */
-  options?: {
-    /** Resolve query to specify which nested CoValues to load from the account */
-    resolve?: ResolveQueryStrict<A, R>;
-    /** Select which value to return from the account data */
-    select?: (account: MaybeLoaded<Loaded<A, R>>) => TSelectorReturn;
-    /** Equality function to determine if the selected value has changed, defaults to `Object.is` */
-    equalityFn?: (a: TSelectorReturn, b: TSelectorReturn) => boolean;
-    /**
-     * Create or load a branch for isolated editing.
-     *
-     * Branching lets you take a snapshot of the current state and start modifying it without affecting the canonical/shared version.
-     * It's a fork of your data graph: the same schema, but with diverging values.
-     *
-     * The checkout of the branch is applied on all the resolved values.
-     *
-     * @param name - A unique name for the branch. This identifies the branch
-     *   and can be used to switch between different branches of the same CoValue.
-     * @param owner - The owner of the branch. Determines who can access and modify
-     *   the branch. If not provided, the branch is owned by the current user.
-     *
-     * For more info see the [branching](https://jazz.tools/docs/react/using-covalues/version-control) documentation.
-     */
-    unstable_branch?: BranchDefinition;
-  },
+  options?: UseCoValueOptions<A, R, TSelectorReturn>,
 ): TSelectorReturn {
   const subscription = useAccountSubscription(AccountSchema, options);
-  const getCurrentValue = useGetCurrentValue(subscription);
 
-  return useSyncExternalStoreWithSelector<
-    MaybeLoaded<Loaded<A, R>>,
-    TSelectorReturn
-  >(
-    React.useCallback(
-      (callback) => {
-        if (!subscription) {
-          return () => {};
-        }
-
-        return subscription.subscribe(callback);
-      },
-      [subscription],
-    ),
-    getCurrentValue,
-    getCurrentValue,
-    options?.select ?? identitySelector,
-    options?.equalityFn ?? Object.is,
-  );
+  return useSubscriptionSelector<A, R, TSelectorReturn>(subscription, options);
 }
 
 /**
