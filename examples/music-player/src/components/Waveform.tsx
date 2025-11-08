@@ -1,22 +1,32 @@
 import { MusicTrack, MusicTrackWaveform } from "@/1_schema";
 import { usePlayerCurrentTime } from "@/lib/audio/usePlayerCurrentTime";
-import { cn } from "@/lib/utils";
+import { cn, shallowEqual } from "@/lib/utils";
 import { useCoState } from "jazz-tools/react";
 
 export function Waveform(props: {
-  track: MusicTrack;
+  trackId: string;
   height: number;
   className?: string;
   showProgress?: boolean;
 }) {
-  const { track, height } = props;
-  const waveform = useCoState(
-    MusicTrackWaveform,
-    track.$jazz.refs.waveform?.id,
-  );
+  const { height } = props;
+  const { duration, waveformId } = useCoState(MusicTrack, props.trackId, {
+    select: (track) =>
+      track.$isLoaded
+        ? {
+            duration: track.duration,
+            waveformId: track.waveform?.$jazz.id,
+          }
+        : {
+            duration: undefined,
+            waveformId: undefined,
+          },
+    equalityFn: shallowEqual,
+  });
+  const waveform = useCoState(MusicTrackWaveform, waveformId);
   const currentTime = usePlayerCurrentTime();
 
-  if (!waveform.$isLoaded) {
+  if (!waveform.$isLoaded || duration === undefined) {
     return (
       <div
         style={{
@@ -26,7 +36,6 @@ export function Waveform(props: {
     );
   }
 
-  const duration = track.duration;
   const waveformData = waveform.data;
   const barCount = waveformData.length;
   const activeBar = props.showProgress

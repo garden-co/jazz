@@ -1,4 +1,4 @@
-import { useCoState } from "jazz-tools/react";
+import { useCoStateAndRef } from "jazz-tools/react";
 import { useParams } from "react-router";
 import { PlaylistWithTracks } from "./1_schema";
 import { uploadMusicTracks } from "./4_actions";
@@ -37,9 +37,11 @@ export function HomePage({ mediaPlayer }: { mediaPlayer: MediaPlayer }) {
       (me.$isLoaded ? me.root.$jazz.refs.rootPlaylist.id : undefined),
   });
 
-  const playlist = useCoState(PlaylistWithTracks, playlistId, {
-    select: (playlist) => (playlist.$isLoaded ? playlist : undefined),
-  });
+  const [playlist, playlistRef] = useCoStateAndRef(
+    PlaylistWithTracks,
+    playlistId,
+    { select: (playlist) => (playlist.$isLoaded ? playlist : undefined) },
+  );
 
   const membersIds = playlist?.$jazz.owner.members.map((member) => member.id);
   const isRootPlaylist = !params.playlistId;
@@ -132,11 +134,12 @@ export function HomePage({ mediaPlayer }: { mediaPlayer: MediaPlayer }) {
       />
 
       {/* Members Management Modal */}
-      {playlist && (
+      {playlistRef.$isLoaded && playlist && (
         <MemberAccessModal
           isOpen={isMembersModalOpen}
           onOpenChange={setIsMembersModalOpen}
-          playlist={playlist}
+          playlistOwnerId={playlist.$jazz.owner.$jazz.id}
+          playlistRef={playlistRef}
         />
       )}
     </SidebarInset>

@@ -1,7 +1,7 @@
 import { Playlist } from "@/1_schema";
 import { updatePlaylistTitle } from "@/4_actions";
 import { cn } from "@/lib/utils";
-import { useCoState } from "jazz-tools/react";
+import { useCoStateAndRef } from "jazz-tools/react";
 import { ChangeEvent, useState } from "react";
 
 export function PlaylistTitleInput({
@@ -11,15 +11,15 @@ export function PlaylistTitleInput({
   playlistId: string | undefined;
   className?: string;
 }) {
-  const playlist = useCoState(Playlist, playlistId);
+  const [playlistTitle, playlistRef] = useCoStateAndRef(Playlist, playlistId, {
+    select: (playlist) => (playlist.$isLoaded ? playlist.title : ""),
+  });
   const [isEditing, setIsEditing] = useState(false);
   const [localPlaylistTitle, setLocalPlaylistTitle] = useState("");
 
   function handleTitleChange(evt: ChangeEvent<HTMLInputElement>) {
     setLocalPlaylistTitle(evt.target.value);
   }
-
-  const playlistTitle = playlist.$isLoaded ? playlist.title : "";
 
   function handleFoucsIn() {
     setIsEditing(true);
@@ -29,7 +29,9 @@ export function PlaylistTitleInput({
   function handleFocusOut() {
     setIsEditing(false);
     setLocalPlaylistTitle("");
-    playlist.$isLoaded && updatePlaylistTitle(playlist, localPlaylistTitle);
+    if (playlistRef.current.$isLoaded) {
+      updatePlaylistTitle(playlistRef.current, localPlaylistTitle);
+    }
   }
 
   const inputValue = isEditing ? localPlaylistTitle : playlistTitle;

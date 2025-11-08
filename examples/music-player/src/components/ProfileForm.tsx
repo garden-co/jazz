@@ -6,7 +6,11 @@ import { Input } from "./ui/input";
 import { Label } from "./ui/label";
 import { Separator } from "./ui/separator";
 import { Group } from "jazz-tools";
-import { useAccountSelector } from "@/components/AccountProvider.tsx";
+import {
+  useAccountRef,
+  useAccountSelector,
+} from "@/components/AccountProvider.tsx";
+import { shallowEqual } from "@/lib/utils.ts";
 
 interface ProfileFormProps {
   onSubmit?: (data: { username: string; avatar?: any }) => void;
@@ -33,17 +37,18 @@ export function ProfileForm({
   cancelButtonText = "Cancel",
   className = "",
 }: ProfileFormProps) {
-  const profile = useAccountSelector({
-    select: (me) => (me.$isLoaded ? me.profile : undefined),
+  const meRef = useAccountRef();
+  const { profileName, avatarId } = useAccountSelector({
+    select: (me) => ({
+      profileName: me.profile.name,
+      avatarId: me.profile.avatar?.$jazz.id,
+    }),
+    equalityFn: shallowEqual,
   });
 
-  const [username, setUsername] = useState(
-    initialUsername || profile?.name || "",
-  );
+  const [username, setUsername] = useState(initialUsername || profileName);
   const [isUploading, setIsUploading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
-
-  if (!profile) return null;
 
   const handleAvatarUpload = async (
     event: React.ChangeEvent<HTMLInputElement>,
@@ -62,7 +67,7 @@ export function ProfileForm({
       });
 
       // Update the profile with the new avatar
-      profile.$jazz.set("avatar", image);
+      meRef.current.profile.$jazz.set("avatar", image);
     } catch (error) {
       console.error("Failed to upload avatar:", error);
     } finally {
@@ -76,15 +81,17 @@ export function ProfileForm({
     if (!username.trim()) return;
 
     // Update username
-    profile.$jazz.set("name", username.trim());
+    meRef.current.profile.$jazz.set("name", username.trim());
 
     // Call custom onSubmit if provided
     if (onSubmit) {
-      onSubmit({ username: username.trim(), avatar: profile.avatar });
+      onSubmit({
+        username: username.trim(),
+        avatar: meRef.current.profile.avatar,
+      });
     }
   };
 
-  const currentAvatar = profile.avatar;
   const canSubmit = username.trim();
 
   return (
@@ -112,9 +119,9 @@ export function ProfileForm({
             {/* Current Avatar Display */}
             <div className="relative">
               <div className="w-24 h-24 rounded-full overflow-hidden border-4 border-white shadow-lg">
-                {currentAvatar ? (
+                {avatarId ? (
                   <Image
-                    imageId={currentAvatar.$jazz.id}
+                    imageId={avatarId}
                     width={96}
                     height={96}
                     alt="Profile"

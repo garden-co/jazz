@@ -1,31 +1,20 @@
 import { usePasskeyAuth } from "jazz-tools/react";
 import { ProfileForm } from "./ProfileForm";
 import { Button } from "./ui/button";
-import { useAccountSelector } from "@/components/AccountProvider.tsx";
+import {
+  useAccountSelector,
+  useAccountRef,
+} from "@/components/AccountProvider.tsx";
 
 export function WelcomeScreen() {
   const auth = usePasskeyAuth({
     appName: "Jazz Music Player",
   });
 
-  const { handleCompleteSetup } = useAccountSelector({
-    select: (me) =>
-      me.$isLoaded
-        ? {
-            id: me.root.$jazz.id,
-            handleCompleteSetup: () => {
-              me.root.$jazz.set("accountSetupCompleted", true);
-            },
-          }
-        : { id: null, handleCompleteSetup: null },
-    equalityFn: (a, b) => a.id === b.id,
-  });
-
+  const meRef = useAccountRef();
   const initialUsername = useAccountSelector({
-    select: (me) => (me.$isLoaded ? me.profile.name : undefined),
+    select: (me) => me.profile.name,
   });
-
-  if (!handleCompleteSetup) return null;
 
   const handleLogin = () => {
     auth.logIn();
@@ -37,7 +26,9 @@ export function WelcomeScreen() {
         {/* Form Panel */}
         <div className="w-full max-w-md bg-white rounded-lg shadow-xl p-8">
           <ProfileForm
-            onSubmit={handleCompleteSetup}
+            onSubmit={() => {
+              meRef.current.root.$jazz.set("accountSetupCompleted", true);
+            }}
             submitButtonText="Continue"
             showHeader={true}
             headerTitle="Welcome to Music Player! 🎵"

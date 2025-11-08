@@ -1,6 +1,6 @@
 import { MusicTrack } from "@/1_schema";
 import { updateMusicTrackTitle } from "@/4_actions";
-import { useCoState } from "jazz-tools/react";
+import { useCoStateAndRef } from "jazz-tools/react";
 import { ChangeEvent, useState } from "react";
 
 export function MusicTrackTitleInput({
@@ -8,11 +8,11 @@ export function MusicTrackTitleInput({
 }: {
   trackId: string | undefined;
 }) {
-  const track = useCoState(MusicTrack, trackId);
+  const [trackTitle, trackRef] = useCoStateAndRef(MusicTrack, trackId, {
+    select: (track) => (track.$isLoaded ? track.title : ""),
+  });
   const [isEditing, setIsEditing] = useState(false);
   const [localTrackTitle, setLocalTrackTitle] = useState("");
-
-  const trackTitle = track.$isLoaded ? track.title : "";
 
   function handleTitleChange(evt: ChangeEvent<HTMLInputElement>) {
     setLocalTrackTitle(evt.target.value);
@@ -26,7 +26,9 @@ export function MusicTrackTitleInput({
   function handleFocusOut() {
     setIsEditing(false);
     setLocalTrackTitle("");
-    track.$isLoaded && updateMusicTrackTitle(track, localTrackTitle);
+    if (trackRef.current.$isLoaded) {
+      updateMusicTrackTitle(trackRef.current, localTrackTitle);
+    }
   }
 
   const inputValue = isEditing ? localTrackTitle : trackTitle;
