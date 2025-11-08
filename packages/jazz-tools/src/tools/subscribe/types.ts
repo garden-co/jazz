@@ -26,6 +26,13 @@ export const CoValueLoadingState = {
   UNAVAILABLE: "unavailable",
 } as const;
 
+export namespace CoValueLoadingState {
+  export type LOADED = typeof CoValueLoadingState.LOADED;
+  export type LOADING = typeof CoValueLoadingState.LOADING;
+  export type UNAUTHORIZED = typeof CoValueLoadingState.UNAUTHORIZED;
+  export type UNAVAILABLE = typeof CoValueLoadingState.UNAVAILABLE;
+}
+
 export type CoValueLoadingState =
   (typeof CoValueLoadingState)[keyof typeof CoValueLoadingState];
 
