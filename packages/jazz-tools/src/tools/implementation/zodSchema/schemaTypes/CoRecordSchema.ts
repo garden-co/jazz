@@ -21,6 +21,7 @@ import { z } from "../zodReExport.js";
 import { AnyZodOrCoValueSchema } from "../zodSchema.js";
 import { CoOptionalSchema } from "./CoOptionalSchema.js";
 import { CoreCoValueSchema, CoreResolveQuery } from "./CoValueSchema.js";
+import { SchemaPermissions } from "../schemaPermissions.js";
 
 type CoRecordInit<
   K extends z.core.$ZodString<string>,
@@ -167,6 +168,19 @@ export interface CoRecordSchema<
       R
     >,
   ): CoRecordSchema<K, V, R>;
+
+  /**
+   * Permissions to be used when creating or composing CoValues
+   * @internal
+   */
+  permissions: SchemaPermissions;
+
+  /**
+   * Configure permissions to be used when creating or composing CoValues
+   */
+  withPermissions(
+    permissions: SchemaPermissions,
+  ): CoRecordSchema<K, V, DefaultResolveQuery>;
 }
 
 type CoRecordSchemaDefinition<

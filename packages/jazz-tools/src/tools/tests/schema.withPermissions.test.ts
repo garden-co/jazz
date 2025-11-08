@@ -31,7 +31,7 @@ describe("Schema.withPermissions()", () => {
       co.list(co.plainText()),
       // co.feed(co.plainText()),
       co.map({ text: co.plainText() }),
-      // co.record(z.string(), co.plainText()),
+      co.record(z.string(), co.plainText()),
     ];
 
     for (const Schema of AllSchemas) {
