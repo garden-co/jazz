@@ -434,11 +434,17 @@ export function parseCoValueCreateOptions(
     | Account
     | Group
     | undefined,
-  createNewGroup: () => Group = () => Group.create(),
+  configureImplicitGroupOwner?: (newGroup: Group) => void,
 ): {
   owner: Group;
   uniqueness?: CoValueUniqueness;
 } {
+  const createNewGroup = () => {
+    const newGroup = Group.create();
+    configureImplicitGroupOwner?.(newGroup);
+    return newGroup;
+  };
+
   const Group = RegisteredSchemas["Group"];
   if (!options) {
     return { owner: createNewGroup(), uniqueness: undefined };
