@@ -10,8 +10,7 @@ import {
   useSubscriptionSelector,
 } from "../index.js";
 import { createJazzTestAccount, setupJazzTestSync } from "../testing.js";
-import { act, renderHook, waitFor } from "./testUtils.js";
-import { useRef } from "react";
+import { act, renderHook, useRenderCount, waitFor } from "./testUtils.js";
 
 beforeEach(async () => {
   await setupJazzTestSync();
@@ -22,16 +21,6 @@ beforeEach(async () => {
 });
 
 cojsonInternals.setCoValueLoadingRetryDelay(300);
-
-const useRenderCount = <T>(hook: () => T) => {
-  const renderCountRef = useRef(0);
-  const result = hook();
-  renderCountRef.current = renderCountRef.current + 1;
-  return {
-    renderCount: renderCountRef.current,
-    result,
-  };
-};
 
 describe("useSubscriptionSelector", () => {
   it("should return coValue", () => {

@@ -4,8 +4,6 @@ import { useEffect } from "react";
 import { CoValueClassOrSchema } from "jazz-tools";
 import { useJazzContext } from "jazz-tools/react-core";
 
-export { useCoState, useAuthSecretStorage } from "jazz-tools/react-core";
-
 export function useAcceptInvite<S extends CoValueClassOrSchema>({
   invitedObjectSchema,
   onAccept,
@@ -49,11 +47,18 @@ export function useAcceptInvite<S extends CoValueClassOrSchema>({
 export {
   experimental_useInboxSender,
   useJazzContext,
+  useAuthSecretStorage,
   useAccount,
+  useCoState,
   useAgent,
   useLogOut,
   useSyncConnectionStatus,
   useCoValueSubscription,
   useAccountSubscription,
   useSubscriptionSelector,
+  useCoValueRef,
+  useAccountRef,
+  useCoStateAndRef,
+  useAccountAndRef,
+  useSubscriptionRef,
 } from "jazz-tools/react-core";

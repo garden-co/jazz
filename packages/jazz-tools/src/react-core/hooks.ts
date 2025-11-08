@@ -2,6 +2,7 @@ import { useSyncExternalStoreWithSelector } from "use-sync-external-store/shim/w
 import React, {
   useCallback,
   useContext,
+  useEffect,
   useRef,
   useSyncExternalStore,
 } from "react";
@@ -34,6 +35,8 @@ import {
   UseCoValueOptions,
   UseSubscriptionOptions,
   UseSubscriptionSelectorOptions,
+  CoValueRef,
+  MaybeLoadedCoValueRef,
 } from "./types.js";
 
 export function useJazzContext<Acc extends Account>() {
@@ -470,7 +473,7 @@ export function useSubscriptionSelector<
     MaybeLoaded<Loaded<S, R>>,
     TSelectorReturn
   >(
-    React.useCallback(
+    useCallback(
       (callback) => {
         if (!subscription) {
           return () => {};
@@ -658,6 +661,408 @@ export function useAccount<
   const subscription = useAccountSubscription(AccountSchema, options);
 
   return useSubscriptionSelector<A, R, TSelectorReturn>(subscription, options);
+}
+
+export function useSubscriptionRef<
+  S extends CoValueClassOrSchema,
+  // @ts-expect-error we can't statically enforce the schema's resolve query is a valid resolve query, but in practice it is
+  const R extends ResolveQuery<S> = SchemaResolveQuery<S>,
+>(
+  subscription: CoValueSubscription<S, R>,
+  options?: {
+    onUpdate?: (value: MaybeLoaded<Loaded<S, R>>) => void;
+  },
+): CoValueRef<MaybeLoaded<Loaded<S, R>>> {
+  const subscriptionRef = useRef(subscription);
+  const coValueRef = useRef<MaybeLoaded<Loaded<S, R>>>(undefined);
+  const sendUpdateRef = useRef(options?.onUpdate);
+
+  const getCurrentCoValue = useCallback(() => {
+    if (coValueRef.current !== undefined) {
+      return coValueRef.current;
+    }
+
+    const currentCoValue = getSubscriptionValue(subscriptionRef.current);
+    coValueRef.current = currentCoValue;
+    return currentCoValue;
+  }, []);
+
+  useEffect(() => {
+    sendUpdateRef.current = options?.onUpdate;
+  }, [options?.onUpdate]);
+
+  useEffect(() => {
+    subscriptionRef.current = subscription;
+    coValueRef.current = getSubscriptionValue(subscription);
+
+    if (!subscription) {
+      return () => {};
+    }
+
+    return subscription.subscribe((value) => {
+      const updatedValue =
+        value.type === CoValueLoadingState.LOADED
+          ? value.value
+          : createUnloadedCoValue(value.id ?? "", value.type);
+
+      coValueRef.current = updatedValue;
+      sendUpdateRef.current?.(updatedValue);
+    });
+  }, [subscription]);
+
+  // Use getter function to ensure `.current` cannot be re-assigned by the user
+  return Object.defineProperty(
+    {} as CoValueRef<MaybeLoaded<Loaded<S, R>>>,
+    "current",
+    {
+      get: getCurrentCoValue,
+    },
+  );
+}
+
+/**
+ * React hook that returns a ref containing the latest value of a CoValue.
+ *
+ * This hook provides a React ref that always contains the most up-to-date value of a CoValue.
+ * Unlike {@link useCoState}, this hook should **not** be used for any data needed for rendering,
+ * as changes to the ref do not trigger re-renders. Instead, use this hook for accessing CoValue
+ * data in event handlers, callbacks, or other imperative code where you need the latest value
+ * without causing re-renders.
+ *
+ * The ref is automatically updated whenever the CoValue changes, but these updates do not
+ * trigger component re-renders. This hook is ideal for accessing the `$jazz` object when you
+ * want to edit a CoValue without having to return the `$jazz` object or its functions through
+ * {@link useCoState}, which would complicate controlling the reactivity of the component.
+ *
+ * @returns A React ref object containing the latest CoValue data. The ref's `current` property
+ * will be updated automatically as the CoValue changes.
+ *
+ * @example
+ * ```tsx
+ * // Access CoValue data in event handlers without subscribing to it for rendering
+ * const Task = co.map({
+ *   title: z.string(),
+ *   completed: z.boolean(),
+ *   metadata: co.map({
+ *     createdAt: z.date(),
+ *     tags: co.list(z.string()),
+ *     priority: z.number(),
+ *   }),
+ * });
+ *
+ * function TaskItem({ taskId }: { taskId: string }) {
+ *   // Only subscribe to the fields we need for rendering
+ *   const task = useCoState(Task, taskId, {
+ *     select: (task) => task.$isLoaded ? {
+ *       title: task.title,
+ *       completed: task.completed,
+ *     } : null,
+ *     equalityFn: (a, b) => a?.title === b?.title && a?.completed === b?.completed,
+ *   });
+ *
+ *   // Use ref to access metadata without causing re-renders when it changes
+ *   const taskRef = useCoValueRef(Task, taskId, {
+ *     resolve: { metadata: true },
+ *   });
+ *
+ *   const handleAnalytics = () => {
+ *     // Access metadata that we don't render
+ *     const currentTask = taskRef.current;
+ *     if (currentTask.$isLoaded) {
+ *       analytics.track('task_clicked', {
+ *         taskId: currentTask.id,
+ *         priority: currentTask.metadata.priority,
+ *         tags: currentTask.metadata.tags,
+ *         createdAt: currentTask.metadata.createdAt,
+ *       });
+ *     }
+ *   };
+ *
+ *   if (!task) return <div>Loading...</div>;
+ *
+ *   return (
+ *     <div onClick={handleAnalytics}>
+ *       <h3>{task.title}</h3>
+ *       <input
+ *         type="checkbox"
+ *         checked={task.completed}
+ *         onChange={(e) => {
+ *           const currentTask = taskRef.current;
+ *           if (currentTask.$isLoaded) {
+ *             currentTask.$jazz.set("completed", e.target.checked);
+ *           }
+ *         }}
+ *       />
+ *     </div>
+ *   );
+ * }
+ * ```
+ */
+export function useCoValueRef<
+  S extends CoValueClassOrSchema,
+  const R extends ResolveQuery<S> = true,
+>(
+  /** The CoValue schema or class constructor */
+  Schema: S,
+  /** The ID of the CoValue to subscribe to. If `undefined`, returns the result of selector called with `null` */
+  id: string | undefined,
+  /** Optional configuration for the subscription */
+  options?: UseSubscriptionOptions<S, R>,
+): CoValueRef<MaybeLoaded<Loaded<S, R>>> {
+  const subscription = useCoValueSubscription(Schema, id, options);
+
+  return useSubscriptionRef(subscription);
+}
+
+/**
+ * React hook that returns a ref containing the latest value of the current user's account.
+ *
+ * This hook provides a React ref that always contains the most up-to-date value of the current
+ * user's profile and root data. Unlike {@link useAccount}, this hook should **not** be used for
+ * any data needed for rendering, as changes to the ref do not trigger re-renders. Instead, use
+ * this hook for accessing account data in event handlers, callbacks, or other imperative code
+ * where you need the latest value without causing re-renders.
+ *
+ * The ref is automatically updated whenever the account data changes, but these updates do not
+ * trigger component re-renders. This hook is ideal for accessing the `$jazz` object when you
+ * want to edit the account without causing re-renders if the account data is not used for
+ * rendering.
+ *
+ * @returns A React ref object containing the latest account data. The ref's `current` property
+ * will be updated automatically as the account changes.
+ *
+ * @example
+ * ```tsx
+ * // Access account data in event handlers without subscribing to it for rendering
+ * const MyAppAccount = co.account({
+ *   profile: co.profile(),
+ *   root: co.map({
+ *     projects: co.list(Project),
+ *     settings: co.map({
+ *       defaultProjectTemplate: z.string(),
+ *       autoSave: z.boolean(),
+ *     }),
+ *   }),
+ * });
+ *
+ * function CreateProjectButton() {
+ *   // Only subscribe to profile name for rendering
+ *   const profileName = useAccount(MyAppAccount, {
+ *     resolve: { profile: true },
+ *     select: (me) => me.$isLoaded ? me.profile.name : 'Guest',
+ *   });
+ *
+ *   // Use ref to access projects and settings without subscribing for rendering
+ *   const meRef = useAccountRef(MyAppAccount, {
+ *     resolve: {
+ *       root: {
+ *         projects: true,
+ *         settings: true,
+ *       },
+ *     },
+ *   });
+ *
+ *   const handleCreateProject = () => {
+ *     const currentAccount = meRef.current;
+ *     if (currentAccount.$isLoaded) {
+ *       // Use settings that we don't render
+ *       const template = currentAccount.root.settings.defaultProjectTemplate;
+ *
+ *       const newProject = Project.create({
+ *         name: 'New Project',
+ *         template: template,
+ *         owner: currentAccount.id,
+ *       });
+ *
+ *       currentAccount.root.projects.$jazz.push(newProject);
+ *     }
+ *   };
+ *
+ *   return (
+ *     <button onClick={handleCreateProject}>
+ *       Create Project as {profileName}
+ *     </button>
+ *   );
+ * }
+ * ```
+ */
+export function useAccountRef<
+  A extends AccountClass<Account> | AnyAccountSchema,
+  // @ts-expect-error we can't statically enforce the schema's resolve query is a valid resolve query, but in practice it is
+  const R extends ResolveQuery<A> = SchemaResolveQuery<A>,
+>(
+  /** The account schema to use. Defaults to the base Account schema */
+  AccountSchema: A = Account as unknown as A,
+  /** Optional configuration for the subscription */
+  options?: UseSubscriptionOptions<A, R>,
+): CoValueRef<MaybeLoaded<Loaded<A, R>>> {
+  const subscription = useAccountSubscription(AccountSchema, options);
+
+  return useSubscriptionRef(subscription);
+}
+
+/**
+ * Returns both a reactive state and a ref for the same CoValue.
+ *
+ * This hook combines `useCoState` and `useCoValueRef` to provide:
+ * - **State**: Reactive value that triggers re-renders only when selected fields change
+ * - **Ref**: Non-reactive reference for accessing the full CoValue in callbacks/event handlers
+ *
+ * This is useful when you need to:
+ * - Display specific CoValue data in your component (using state with a selector)
+ * - Edit other parts of the CoValue in event handlers without causing re-renders (using ref.$jazz)
+ *
+ * @example
+ * ```tsx
+ * // Render count of items in a list while using ref to append without re-rendering
+ * const TodoItem = co.map({
+ *   text: z.string(),
+ *   completed: z.boolean(),
+ * });
+ *
+ * const TodoList = co.map({
+ *   name: z.string(),
+ *   items: co.list(TodoItem),
+ * });
+ *
+ * function TodoListComponent({ listId }: { listId: string }) {
+ *   const [listName, listRef] = useCoStateAndRef(TodoList, listId, {
+ *     select: (list) => user.$isLoaded ? list.name : undefined,
+ *   });
+ *
+ *   const handleAddItem = (text: string) => {
+ *     const currentList = listRef.current;
+ *     if (currentList.$isLoaded) {
+ *       const newItem = TodoItem.create({
+ *         text,
+ *         completed: false,
+ *       });
+ *       currentList.items.$jazz.push(newItem);
+ *     }
+ *   };
+ *
+ *   if (listName === undefined) {
+ *     return <div>Loading...</div>;
+ *   }
+ *
+ *   return (
+ *     <div>
+ *       <h2>Add Item to {listName}</h2>
+ *       <button onClick={() => handleAddItem('New task')}>
+ *         Add Item
+ *       </button>
+ *     </div>
+ *   );
+ * }
+ * ```
+ */
+export function useCoStateAndRef<
+  S extends CoValueClassOrSchema,
+  // @ts-expect-error we can't statically enforce the schema's resolve query is a valid resolve query, but in practice it is
+  const R extends ResolveQuery<S> = SchemaResolveQuery<S>,
+  TSelectorReturn = MaybeLoaded<Loaded<S, R>>,
+>(
+  /** The CoValue schema or class constructor */
+  Schema: S,
+  /** The ID of the CoValue to subscribe to. If `undefined`, returns an `unavailable` value */
+  id: string | undefined,
+  /** Optional configuration for the subscription */
+  options?: UseCoValueOptions<S, R, TSelectorReturn>,
+): [TSelectorReturn, MaybeLoadedCoValueRef<Loaded<S, R>>] {
+  const subscription = useCoValueSubscription(Schema, id, options);
+  const [isLoaded, setIsLoaded] = React.useState(
+    () => getSubscriptionValue(subscription).$isLoaded,
+  );
+
+  const onUpdate = useCallback((value: MaybeLoaded<Loaded<S, R>>) => {
+    setIsLoaded(value.$isLoaded);
+  }, []);
+
+  const ref = useSubscriptionRef(subscription, {
+    onUpdate,
+  });
+
+  return [
+    useSubscriptionSelector<S, R, TSelectorReturn>(subscription, options),
+    Object.defineProperty(ref, "$isLoaded", {
+      value: isLoaded,
+    }) as MaybeLoadedCoValueRef<Loaded<S, R>>,
+  ];
+}
+
+/**
+ * Returns both a reactive state and a ref for the current account.
+ *
+ * This hook combines `useAccount` and `useAccountRef` to provide:
+ * - **State**: Reactive value that triggers re-renders only when selected fields change
+ * - **Ref**: Non-reactive reference for accessing the full account in callbacks/event handlers
+ *
+ * This is useful when you need to:
+ * - Display specific account data in your component (using state with a selector)
+ * - Edit other account properties or use the $jazz API in event handlers without causing re-renders
+ *
+ * @example
+ * ```tsx
+ * function AccountSettings() {
+ *   // Only re-render when profile.name changes
+ *   const [profileName, accountRef] = useAccountAndRef(Account, {
+ *     resolve: { profile: true },
+ *     select: (account) => account.$isLoaded ? account.profile.name : undefined,
+ *   });
+ *
+ *   if (profileName === undefined) {
+ *     return <div>Loading account...</div>;
+ *   }
+ *
+ *   return (
+ *     <div>
+ *       <h1>Welcome, {profileName}</h1>
+ *       <button
+ *         onClick={() => {
+ *           const currentAccount = accountRef.current;
+ *           if (currentAccount.$isLoaded) {
+ *             const currentStatus = currentAccount.profile.status;
+ *             currentAccount.profile.$jazz.set("status", currentStatus === "active" ? "inactive" : "active");
+ *           }
+ *         }}
+ *       >
+ *         Toggle Status
+ *       </button>
+ *     </div>
+ *   );
+ * }
+ * ```
+ */
+export function useAccountAndRef<
+  A extends AccountClass<Account> | AnyAccountSchema,
+  // @ts-expect-error we can't statically enforce the schema's resolve query is a valid resolve query, but in practice it is
+  const R extends ResolveQuery<A> = SchemaResolveQuery<A>,
+  TSelectorReturn = MaybeLoaded<Loaded<A, R>>,
+>(
+  /** The account schema to use. Defaults to the base Account schema */
+  AccountSchema: A = Account as unknown as A,
+  /** Optional configuration for the subscription */
+  options?: UseCoValueOptions<A, R, TSelectorReturn>,
+): [TSelectorReturn, CoValueRef<MaybeLoaded<Loaded<A, R>>>] {
+  const subscription = useAccountSubscription(AccountSchema, options);
+  const [isLoaded, setIsLoaded] = React.useState(
+    () => getSubscriptionValue(subscription).$isLoaded,
+  );
+
+  const onUpdate = useCallback((value: MaybeLoaded<Loaded<A, R>>) => {
+    setIsLoaded(value.$isLoaded);
+  }, []);
+
+  const ref = useSubscriptionRef(subscription, {
+    onUpdate,
+  });
+
+  return [
+    useSubscriptionSelector<A, R, TSelectorReturn>(subscription, options),
+    Object.defineProperty(ref, "$isLoaded", {
+      value: isLoaded,
+    }) as MaybeLoadedCoValueRef<Loaded<A, R>>,
+  ];
 }
 
 /**

@@ -1,3 +1,4 @@
+import React from "react";
 import {
   type BranchDefinition,
   CoValueClassOrSchema,
@@ -67,3 +68,17 @@ export interface UseCoValueOptions<
   TSelectorReturn = MaybeLoaded<Loaded<S, R>>,
 > extends UseSubscriptionOptions<S, R>,
     UseSubscriptionSelectorOptions<S, R, TSelectorReturn> {}
+
+export interface CoValueRef<T> {
+  readonly current: T;
+}
+
+export type MaybeLoadedCoValueRef<T> =
+  | {
+      readonly $isLoaded: true;
+      readonly current: T;
+    }
+  | {
+      readonly $isLoaded: false;
+      readonly current: MaybeLoaded<T>;
+    };
