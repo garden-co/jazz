@@ -1,4 +1,4 @@
-import { SessionEntry } from "./coValueDIagrams/helpers";
+import { SessionEntry } from "./coValueDiagrams/helpers";
 
 export type Scenario = {
   header: object;

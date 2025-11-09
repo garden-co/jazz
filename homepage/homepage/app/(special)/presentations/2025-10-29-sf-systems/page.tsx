@@ -5,8 +5,8 @@ import { JazzSyncs } from "@/components/icons/JazzSyncs";
 import { DiagramAfterJazz } from "@/components/DiagramAfterJazz";
 
 import sfSystemsImg from "./sf_systems_club.avif";
-import { SessionEntry, userColors } from "../shared/coValueDIagrams/helpers";
-import { CoValueCoreDiagram } from "../shared/coValueDIagrams/diagrams";
+import { userColors } from "../shared/coValueDiagrams/helpers";
+import { CoValueCoreDiagram } from "../shared/coValueDiagrams/diagrams";
 import { HashAndSignatureSlide } from "./HashAndSignatureSlide";
 import { CodeTabs } from "@/components/home/CodeTabs";
 import { IntroSlide } from "../shared/slides/IntroSlide";
@@ -31,10 +31,14 @@ export default function Page() {
         <IntroSlide
           talkTitle={
             <>
-              Cryptographic<br />
-              Permissions for<br />
-              Conflict-free<br />
-              Replicated<br />
+              Cryptographic
+              <br />
+              Permissions for
+              <br />
+              Conflict-free
+              <br />
+              Replicated
+              <br />
               Data Types
             </>
           }
@@ -408,7 +412,7 @@ export default function Page() {
           <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
             Sync
           </h1>
-          </SimpleCentered>
+        </SimpleCentered>
         <EffectiveTransactionsSlide
           scenario={scenario1}
           timestampIdx={6}

@@ -2,12 +2,13 @@ import { JazzLogo } from "@/components/forMdx";
 import { IntroSlide } from "../shared/slides/IntroSlide";
 import { Slides } from "@/components/Slides";
 import { SimpleCentered } from "../shared/slides/Containers";
-import { AnimatedSvgEdge } from "@/components/animated-svg-edge";
-import { Background, ReactFlow } from "@xyflow/react";
-import { NewSyncDiagram } from "./NewSyncDIagram";
+import { NewSyncDiagram } from "./NewSyncDiagram";
 import { DiagramBeforeJazz } from "@/components/DiagramBeforeJazz";
 import { EffectiveTransactionsSlide } from "../2025-10-29-sf-systems/slides/EffectiveTransactionsSlide";
 import { scenario1 } from "../shared/scenarios";
+import { CoValueSyncDiagram } from "../shared/coValueDiagrams/coValueSyncDiagram";
+import { HashAndSignatureSlide } from "../2025-10-29-sf-systems/HashAndSignatureSlide";
+import { CoValueCoreDiagram } from "../shared/coValueDiagrams/diagrams";
 
 export default function Page() {
   return (
@@ -16,20 +17,24 @@ export default function Page() {
         <IntroSlide
           talkTitle={
             <>
-              Oops, my<br/>sync engine<br/>has become<br/>a database.
+              Oops, my
+              <br />
+              sync engine
+              <br />
+              has become
+              <br />a database.
             </>
           }
           eventName="Sync Conf"
           eventDate="November '25"
         />
-
+        <SimpleCentered>
+          <DiagramBeforeJazz className="scale-[150%]" />
+        </SimpleCentered>
         <SimpleCentered>
           <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
             PART I: HOW IT STARTED
           </h1>
-          <h2 className="text-center font-display text-6xl font-semibold">
-            Anselm's great radicalization of 2019
-          </h2>
         </SimpleCentered>
 
         <SimpleCentered>
@@ -47,9 +52,6 @@ export default function Page() {
             Automerge.
           </h1>
         </SimpleCentered>
-        <div className="flex h-screen flex-col justify-center gap-5">
-          <DiagramBeforeJazz className="scale-[150%]" />
-        </div>
         <SimpleCentered>
           <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
             CRDTs.
@@ -77,7 +79,17 @@ export default function Page() {
             CRDTs
           </h1>
           <h2 className="text-center font-display text-6xl font-semibold">
-            What an object is:<br/>its edit history.
+            What an object is:
+            <br />
+            its edit history.
+          </h2>
+        </SimpleCentered>
+        <SimpleCentered>
+          <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
+            Rich Hickey cooked with Datomic
+          </h1>
+          <h2 className="text-center font-display text-6xl font-semibold">
+            We're taking "keep all history" to a terminal degree.
           </h2>
         </SimpleCentered>
         <EffectiveTransactionsSlide
@@ -124,9 +136,195 @@ export default function Page() {
         />
         <SimpleCentered>
           <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
+            But isn't that slow?
+          </h1>
+        </SimpleCentered>
+        <SimpleCentered>
+          <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
+            LWW goes BRRRRRRRRR
+          </h1>
+        </SimpleCentered>
+        <SimpleCentered>
+          <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
+            But doesn't it take a lot of space?
+          </h1>
+        </SimpleCentered>
+        <SimpleCentered>
+          <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
+            Compression helps a lot.
+          </h1>
+        </SimpleCentered>
+        <SimpleCentered>
+          <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
             TODO: CoList
           </h1>
         </SimpleCentered>
+        <SimpleCentered>
+          <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
+            But aren't linked lists slow?
+          </h1>
+        </SimpleCentered>
+        <SimpleCentered>
+          <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
+            Common case of linear inserts goes BRRRRRRRRR
+          </h1>
+        </SimpleCentered>
+        <SimpleCentered>
+          <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
+            But doesn't it take a lot of space?
+          </h1>
+        </SimpleCentered>
+        <SimpleCentered>
+          <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
+            Successor/Predecessor pointers compress well.
+          </h1>
+        </SimpleCentered>
+
+        <SimpleCentered>
+          <CoValueSyncDiagram
+            scenario={scenario1}
+            timestampIdx={0}
+            aliceConnection="offline"
+          />
+        </SimpleCentered>
+        <SimpleCentered>
+          <CoValueSyncDiagram
+            scenario={scenario1}
+            timestampIdx={1}
+            aliceConnection="offline"
+          />
+        </SimpleCentered>
+        <SimpleCentered>
+          <CoValueSyncDiagram
+            scenario={scenario1}
+            timestampIdx={2}
+            aliceConnection="offline"
+          />
+        </SimpleCentered>
+        <SimpleCentered>
+          <CoValueSyncDiagram
+            scenario={scenario1}
+            timestampIdx={3}
+            aliceConnection="offline"
+          />
+        </SimpleCentered>
+        <SimpleCentered>
+          <CoValueSyncDiagram
+            scenario={scenario1}
+            timestampIdx={4}
+            aliceConnection="offline"
+          />
+        </SimpleCentered>
+        <SimpleCentered>
+          <CoValueSyncDiagram
+            scenario={scenario1}
+            timestampIdx={5}
+            aliceConnection="offline"
+          />
+        </SimpleCentered>
+        <SimpleCentered>
+          <CoValueSyncDiagram
+            scenario={scenario1}
+            timestampIdx={6}
+            aliceConnection="offline"
+          />
+        </SimpleCentered>
+        <SimpleCentered>
+          <CoValueSyncDiagram
+            scenario={scenario1}
+            timestampIdx={6}
+            aliceConnection={1}
+          />
+        </SimpleCentered>
+        <SimpleCentered>
+          <CoValueSyncDiagram
+            scenario={scenario1}
+            timestampIdx={6}
+            aliceConnection={2}
+          />
+        </SimpleCentered>
+        <SimpleCentered>
+          <CoValueSyncDiagram
+            scenario={scenario1}
+            timestampIdx={6}
+            aliceConnection={3}
+          />
+        </SimpleCentered>
+        <SimpleCentered>
+          <CoValueSyncDiagram
+            scenario={scenario1}
+            timestampIdx={6}
+            aliceConnection={4}
+          />
+        </SimpleCentered>
+        <SimpleCentered>
+          <CoValueSyncDiagram
+            scenario={scenario1}
+            timestampIdx={6}
+            aliceConnection={5}
+          />
+        </SimpleCentered>
+
+        <SimpleCentered>
+          <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
+            Permissions
+          </h1>
+        </SimpleCentered>
+
+        <HashAndSignatureSlide progressIdx={0} />
+        <HashAndSignatureSlide progressIdx={1} />
+        <HashAndSignatureSlide progressIdx={2} />
+        <HashAndSignatureSlide progressIdx={3} />
+        <HashAndSignatureSlide progressIdx={4} />
+        <HashAndSignatureSlide progressIdx={5} />
+        <HashAndSignatureSlide progressIdx={6} />
+        <HashAndSignatureSlide progressIdx={7} />
+        <HashAndSignatureSlide progressIdx={8} />
+        <HashAndSignatureSlide progressIdx={9} />
+        <HashAndSignatureSlide progressIdx={10} />
+        <HashAndSignatureSlide progressIdx={11} />
+        <HashAndSignatureSlide progressIdx={12} />
+        <SimpleCentered>
+          <h1 className="text-center font-display text-6xl font-semibold tracking-tight">
+            Write Permissions ✅<br />
+            (Hashing & Signatures)
+          </h1>
+        </SimpleCentered>
+        <SimpleCentered>
+          <h1 className="text-center font-display text-6xl font-semibold tracking-tight">
+            Read Permissions
+            <br />
+            (Encryption)
+          </h1>
+        </SimpleCentered>
+        <HashAndSignatureSlide progressIdx={12} />
+        <div className="pt-[10vh]">
+          <CoValueCoreDiagram
+            header={scenario1.header}
+            sessions={scenario1.sessions}
+            showView={true}
+            showCore={true}
+            showHashAndSignature={true}
+            encryptedItems={true}
+          />
+        </div>
+        <SimpleCentered>
+          <CoValueSyncDiagram
+            scenario={scenario1}
+            timestampIdx={6}
+            aliceConnection={5}
+            serverEncrypted={false}
+          />
+        </SimpleCentered>
+        <SimpleCentered>
+          <CoValueSyncDiagram
+            scenario={scenario1}
+            timestampIdx={6}
+            aliceConnection={5}
+            serverEncrypted={true}
+          />
+        </SimpleCentered>
+
         <SimpleCentered>
           <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
             1) Everything is multiplayer.

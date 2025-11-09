@@ -60,7 +60,7 @@ export function fakeEncryptedPayload(payload: object) {
   return (
     "en_U" +
     bs58.encode(
-      encoder.encode(hashCode(JSON.stringify(payload)) + "").slice(0, 10),
+      encoder.encode(hashCode(JSON.stringify(payload)) + "").slice(0, 7),
     ) +
     "…"
   );

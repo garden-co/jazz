@@ -1,8 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { CoValueCoreDiagram } from "../../shared/coValueDIagrams/diagrams";
-import { SessionEntry } from "../../shared/coValueDIagrams/helpers";
+import { CoValueCoreDiagram } from "../../shared/coValueDiagrams/diagrams";
 import { Scenario } from "../../shared/scenarios";
 
 export function EffectiveTransactionsSlide({

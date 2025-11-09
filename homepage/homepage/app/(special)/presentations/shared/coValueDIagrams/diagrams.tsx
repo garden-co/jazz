@@ -54,7 +54,7 @@ export function CoValueCoreDiagram({
         },
       )}
     >
-      <div className="z-1 absolute -top-8 left-3 border border-stone-500 bg-stone-200 px-2 text-xl font-mono text-black text-bolder rounded-t-sm">
+      <div className="z-1 text-bolder absolute -top-9 left-3 rounded-t-sm border border-stone-200 bg-stone-200 px-2 font-mono text-2xl text-black">
         {(header as any).isGroup ? "Group" : "CoMap"} {fakeCoID(header)}
       </div>
       {showCore && (
@@ -120,7 +120,7 @@ function HeaderContent({
     .split("\n");
   return (
     <div className="relative h-full rounded-t-xl border-b border-stone-500 bg-stone-900 p-5">
-      <div className="absolute -left-6 top-0 bottom-0 [writing-mode:sideways-lr] text-lg text-center leading-none text-stone-400 font-mono">
+      <div className="absolute -left-6 bottom-0 top-0 text-center font-mono text-lg leading-none text-stone-400 [writing-mode:sideways-lr]">
         HEADER
       </div>
 
@@ -147,7 +147,7 @@ function HeaderContent({
 
 function SessionHeader({ sessionKey }: { sessionKey: string }) {
   return (
-    <div className="min-w-[5.5rem] items-baseline rounded-lg text-xl -mb-2">
+    <div className="min-w-[5.5rem] items-baseline rounded-lg text-xl">
       <span
         className={clsx([
           userColors[sessionKey.split("_")[0]],
@@ -187,11 +187,11 @@ function CoValueCoreView({
       <div className="flex-1">
         <HeaderContent header={header} highlightOwner={highlightOwner} />
       </div>
-      <div className="bg-stone-950 relative min-h-[13em] border-b border-stone-500 p-5">
-        <div className="absolute -left-6 top-0 bottom-0 [writing-mode:sideways-lr] text-lg text-center leading-none text-stone-400 font-mono ">
+      <div className="relative min-h-[13em] border-b border-stone-500 bg-stone-950 p-5">
+        <div className="absolute -left-6 bottom-0 top-0 text-center font-mono text-lg leading-none text-stone-400 [writing-mode:sideways-lr]">
           HISTORY
         </div>
-        <div className="grid grid-cols-3 gap-7">
+        <div className={clsx("grid grid-cols-3 gap-7", {"rounded-b-xl": showView})}>
           {Object.entries(sessions).map(([sessionID, log], sessionIdx) => {
             const priorHashProgress = Object.values(sessions)
               .slice(0, sessionIdx)
@@ -209,8 +209,6 @@ function CoValueCoreView({
                       key={JSON.stringify(item)}
                       sessions={sessions}
                       item={item}
-                      idx={idx}
-                      log={log}
                       showView={showView}
                     >
                       <TransactionContent
@@ -228,19 +226,19 @@ function CoValueCoreView({
                   <div className="-mt-px min-w-[9.5rem] justify-start rounded p-2">
                     {(hashProgressIdx ?? Infinity) >
                       log.length + priorHashProgress && (
-                      <pre className="flex items-center gap-1 text-sm text-white">
+                      <pre className="flex items-center gap-1 text-white">
                         <BinaryIcon className="h-4 w-4" /> {fakeHash(log)}
                       </pre>
                     )}
                     {(hashProgressIdx ?? Infinity) >
                       log.length + 1 + priorHashProgress && (
                       <div className="relative">
-                        <div className="absolute -left-16 top-1 rounded bg-black px-1 text-xs">
+                        <div className="absolute -left-22 rounded bg-black px-1 text-lg">
                           ed25519
                         </div>
                         <pre
                           className={clsx(
-                            "flex items-center gap-1 text-sm",
+                            "flex items-center gap-1 text-lg",
                             userColors[
                               sessionID.split("_")[0] as keyof typeof userColors
                             ],
@@ -257,9 +255,11 @@ function CoValueCoreView({
             );
           })}
         </div>
-        <div className="absolute -bottom-4 left-1/2 -translate-x-1/2 text-center text-stone-400 bg-black px-1 text-xl">
-        ▼
-        </div>
+        {showView && (
+          <div className="absolute -bottom-4 left-1/2 -translate-x-1/2 bg-black px-1 text-center text-xl text-stone-400">
+            ▼
+          </div>
+        )}
       </div>
     </div>
   );
@@ -300,13 +300,13 @@ function ContentView({
 
   return (
     <div className="relative flex min-h-40 min-w-48 flex-col gap-1 self-center p-5">
-      <div className="absolute -left-6 top-0 bottom-0 [writing-mode:sideways-lr] text-lg text-center leading-none text-stone-400 font-mono">
+      <div className="absolute -left-6 bottom-0 top-0 text-center font-mono text-lg leading-none text-stone-400 [writing-mode:sideways-lr]">
         STATE
       </div>
       <div className="font-mono text-2xl text-stone-300">
         {"{"}
         {pairs.map(([key, entry], idx) => (
-          <div key={key} className="ml-4 max-w-fit relative">
+          <div key={key} className="relative ml-4 max-w-fit">
             {highlightSpecialString(key)}:{" "}
             {highlightSpecialString(entry.payload.value + "")}
             {showEditor && entry.t.getTime() === currentTimestamp.getTime() && (
@@ -324,7 +324,7 @@ export function HashChainArrow() {
   return (
     <div className="absolute -bottom-7 -left-2 z-10 h-[100%]">
       <ArrowSvg className="h-[100%]" />
-      <div className="absolute -left-12 top-[50%] -mt-[40%] rounded bg-black px-1 text-sm">
+      <div className="absolute -left-16 top-[50%] -mt-[80%] rounded bg-black px-1 text-lg text-white">
         blake3
       </div>
     </div>
@@ -353,15 +353,11 @@ export function TransactionContainer({
   children,
   sessions,
   item,
-  idx,
-  log,
   showView,
 }: {
   children: React.ReactNode;
   sessions: { [key: string]: SessionEntry[] };
   item: SessionEntry;
-  idx: number;
-  log: SessionEntry[];
   showView: boolean;
 }) {
   const isLastPerKey =
@@ -375,12 +371,8 @@ export function TransactionContainer({
     <div
       key={JSON.stringify(item)}
       className={clsx(
-        "relative flex gap-0.5 items-stretch overflow-hidden",
+        "relative flex items-stretch gap-0.5",
         isLastPerKey ? "text-white" : "text-stone-700",
-        {
-          "mt-1.5 rounded-t-lg": idx === 0,
-          "mb-1.5 rounded-b-lg": idx === log.length - 1,
-        },
       )}
     >
       {children}
@@ -396,11 +388,11 @@ export function TransactionContent({
   encryptedItems: boolean;
 }) {
   return encryptedItems ? (
-    <pre className="flex-1 overflow-hidden text-sm px-3 py-2 leading-6 text-fuchsia-500 bg-stone-900">
+    <pre className="flex-1 overflow-hidden bg-stone-900 px-3 py-2 leading-6 text-fuchsia-500">
       {fakeEncryptedPayload(item.payload)}
     </pre>
   ) : (
-    <pre className="flex-1 overflow-hidden text-xl px-3 py-2 leading-6 bg-stone-900">
+    <pre className="flex-1 overflow-hidden bg-stone-900 px-3 py-2 text-xl leading-6">
       {item.payload.op === "set"
         ? `${item.payload.key}: ${item.payload.value}`
         : `${item.payload.key}: deleted`}
@@ -410,7 +402,7 @@ export function TransactionContent({
 
 export function Timestamp({ timestamp }: { timestamp: Date }) {
   return (
-    <div className="flex justify-between items-center px-3 bg-stone-900">
+    <div className="flex items-center justify-between bg-stone-900 px-3">
       <pre className="ml-auto text-sm font-semibold">
         {timestamp.toLocaleString("en-US", {
           hour: "numeric",

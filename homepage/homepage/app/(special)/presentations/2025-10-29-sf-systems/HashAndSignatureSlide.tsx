@@ -1,4 +1,4 @@
-import { CoValueCoreDiagram } from "../shared/coValueDIagrams/diagrams";
+import { CoValueCoreDiagram } from "../shared/coValueDiagrams/diagrams";
 import { scenario1 } from "../shared/scenarios";
 
 export function HashAndSignatureSlide({ progressIdx }: { progressIdx: number }) {
