@@ -2,13 +2,15 @@
 
 import { useState } from "react";
 import { CoValueCoreDiagram } from "../../shared/coValueDIagrams/diagrams";
-import { scenario1Timestamps, scenario1, header } from "../page";
+import { SessionEntry } from "../../shared/coValueDIagrams/helpers";
+import { Scenario } from "../../shared/scenarios";
 
 export function EffectiveTransactionsSlide({
   timestampIdx,
   showCore,
   codeStep,
   showEditor,
+  scenario,
 }: {
   timestampIdx: number;
   showCore: boolean;
@@ -17,12 +19,13 @@ export function EffectiveTransactionsSlide({
     code: React.ReactNode;
   }[];
   showEditor?: boolean;
+  scenario: Scenario;
 }) {
   const [currentTimestampIdx, setCurrentTimestampIdx] = useState(timestampIdx);
-  const currentTimestamp = scenario1Timestamps[currentTimestampIdx];
+  const currentTimestamp = scenario.timestamps[currentTimestampIdx];
 
   const filteredSessions = Object.fromEntries(
-    Object.entries(scenario1).flatMap(([key, session]) => {
+    Object.entries(scenario.sessions).flatMap(([key, session]) => {
       const filteredSession = session.filter(
         (entry) => entry.t <= currentTimestamp,
       );
@@ -40,19 +43,19 @@ export function EffectiveTransactionsSlide({
       <input
         type="range"
         min={0}
-        max={scenario1Timestamps.length - 1}
+        max={scenario.timestamps.length - 1}
         value={currentTimestampIdx}
         onChange={(e) => setCurrentTimestampIdx(parseInt(e.target.value))}
-        className="w-[50vw]"
+        className="w-[50vw] "
       />
-      <p className="text-center text-2xl">
+      <p className="text-center text-2xl mb-10">
         {currentTimestamp.toLocaleString("en-us", {
           hour: "numeric",
           minute: "2-digit",
         })}
       </p>
       <CoValueCoreDiagram
-        header={header}
+        header={scenario.header}
         sessions={filteredSessions}
         showView={true}
         showCore={showCore}

@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 
 export function Slides({ children }: { children: React.ReactNode[] }) {
   const [currentSlide, setCurrentSlide] = useState<number | "all">(
+    typeof window === "undefined" ||
     window?.location.hash.slice(1) === ""
       ? 0
       : parseInt(window?.location.hash.slice(1)),

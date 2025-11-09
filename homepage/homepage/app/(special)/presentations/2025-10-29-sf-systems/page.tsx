@@ -7,7 +7,6 @@ import { DiagramAfterJazz } from "@/components/DiagramAfterJazz";
 import sfSystemsImg from "./sf_systems_club.avif";
 import { SessionEntry, userColors } from "../shared/coValueDIagrams/helpers";
 import { CoValueCoreDiagram } from "../shared/coValueDIagrams/diagrams";
-import { EffectiveTransactionsSlide } from "./slides/EffectiveTransactionsSlide";
 import { HashAndSignatureSlide } from "./HashAndSignatureSlide";
 import { CodeTabs } from "@/components/home/CodeTabs";
 import { IntroSlide } from "../shared/slides/IntroSlide";
@@ -22,56 +21,8 @@ import Bob6Code from "./slides/bob_6.mdx";
 import Bob7Code from "./slides/bob_7.mdx";
 import { DiagramBeforeJazz } from "@/components/DiagramBeforeJazz";
 import { SimpleCentered } from "../shared/slides/Containers";
-
-export const scenario1Timestamps = [
-  new Date("2025-10-29T22:00:00Z"),
-  new Date("2025-10-29T22:01:00Z"),
-  new Date("2025-10-29T22:02:00Z"),
-  new Date("2025-10-29T22:03:00Z"),
-  new Date("2025-10-29T22:04:00Z"),
-  new Date("2025-10-29T22:05:00Z"),
-  new Date("2025-10-29T22:06:00Z"),
-];
-
-export const header = {
-  type: "comap",
-  owner: "co_zCCymDTETFr2rv9U",
-  createdAt: new Date("2025-10-29T22:00:00Z").toLocaleString(),
-  uniqueness: "fc89fjwo3",
-};
-
-export const scenario1 = {
-  alice_session_1: [
-    {
-      payload: { op: "set" as const, key: "color", value: "red" },
-      t: scenario1Timestamps[1],
-    } satisfies SessionEntry,
-    {
-      payload: { op: "set" as const, key: "height", value: 17 },
-      t: scenario1Timestamps[4],
-    } satisfies SessionEntry,
-  ],
-  bob_session_1: [
-    {
-      payload: { op: "set" as const, key: "color", value: "amber" },
-      t: scenario1Timestamps[2],
-    } satisfies SessionEntry,
-    {
-      payload: { op: "set" as const, key: "color", value: "bleen" },
-      t: scenario1Timestamps[5],
-    } satisfies SessionEntry,
-    {
-      payload: { op: "set" as const, key: "color", value: "green" },
-      t: scenario1Timestamps[6],
-    } satisfies SessionEntry,
-  ],
-  bob_session_2: [
-    {
-      payload: { op: "set" as const, key: "height", value: 18 },
-      t: scenario1Timestamps[3],
-    },
-  ],
-};
+import { scenario1 } from "../shared/scenarios";
+import { EffectiveTransactionsSlide } from "./slides/EffectiveTransactionsSlide";
 
 export default function Page() {
   return (
@@ -190,6 +141,7 @@ export default function Page() {
           </div>
         </div>
         <EffectiveTransactionsSlide
+          scenario={scenario1}
           timestampIdx={0}
           showCore={false}
           codeStep={[
@@ -200,6 +152,7 @@ export default function Page() {
           ]}
         />
         <EffectiveTransactionsSlide
+          scenario={scenario1}
           timestampIdx={0}
           showCore={false}
           codeStep={[
@@ -210,6 +163,7 @@ export default function Page() {
           ]}
         />
         <EffectiveTransactionsSlide
+          scenario={scenario1}
           timestampIdx={1}
           showCore={false}
           codeStep={[
@@ -221,6 +175,7 @@ export default function Page() {
           showEditor={true}
         />
         <EffectiveTransactionsSlide
+          scenario={scenario1}
           timestampIdx={1}
           showCore={false}
           codeStep={[
@@ -235,6 +190,7 @@ export default function Page() {
           ]}
         />
         <EffectiveTransactionsSlide
+          scenario={scenario1}
           timestampIdx={2}
           showCore={false}
           codeStep={[
@@ -250,6 +206,7 @@ export default function Page() {
           showEditor={true}
         />
         <EffectiveTransactionsSlide
+          scenario={scenario1}
           timestampIdx={2}
           showCore={false}
           codeStep={[
@@ -268,6 +225,7 @@ export default function Page() {
           ]}
         />
         <EffectiveTransactionsSlide
+          scenario={scenario1}
           timestampIdx={3}
           showCore={false}
           codeStep={[
@@ -287,6 +245,7 @@ export default function Page() {
           showEditor={true}
         />
         <EffectiveTransactionsSlide
+          scenario={scenario1}
           timestampIdx={3}
           showCore={false}
           codeStep={[
@@ -305,6 +264,7 @@ export default function Page() {
           ]}
         />
         <EffectiveTransactionsSlide
+          scenario={scenario1}
           timestampIdx={4}
           showCore={false}
           codeStep={[
@@ -324,6 +284,7 @@ export default function Page() {
           showEditor={true}
         />
         <EffectiveTransactionsSlide
+          scenario={scenario1}
           timestampIdx={4}
           showCore={false}
           codeStep={[
@@ -342,6 +303,7 @@ export default function Page() {
           ]}
         />
         <EffectiveTransactionsSlide
+          scenario={scenario1}
           timestampIdx={5}
           showCore={false}
           codeStep={[
@@ -361,6 +323,7 @@ export default function Page() {
           showEditor={true}
         />
         <EffectiveTransactionsSlide
+          scenario={scenario1}
           timestampIdx={5}
           showCore={false}
           codeStep={[
@@ -379,6 +342,7 @@ export default function Page() {
           ]}
         />
         <EffectiveTransactionsSlide
+          scenario={scenario1}
           timestampIdx={6}
           showCore={false}
           codeStep={[
@@ -399,36 +363,43 @@ export default function Page() {
         />
 
         <EffectiveTransactionsSlide
+          scenario={scenario1}
           timestampIdx={0}
           showCore={true}
           showEditor={true}
         />
         <EffectiveTransactionsSlide
+          scenario={scenario1}
           timestampIdx={1}
           showCore={true}
           showEditor={true}
         />
         <EffectiveTransactionsSlide
+          scenario={scenario1}
           timestampIdx={2}
           showCore={true}
           showEditor={true}
         />
         <EffectiveTransactionsSlide
+          scenario={scenario1}
           timestampIdx={3}
           showCore={true}
           showEditor={true}
         />
         <EffectiveTransactionsSlide
+          scenario={scenario1}
           timestampIdx={4}
           showCore={true}
           showEditor={true}
         />
         <EffectiveTransactionsSlide
+          scenario={scenario1}
           timestampIdx={5}
           showCore={true}
           showEditor={true}
         />
         <EffectiveTransactionsSlide
+          scenario={scenario1}
           timestampIdx={6}
           showCore={true}
           showEditor={true}
@@ -439,6 +410,7 @@ export default function Page() {
           </h1>
           </SimpleCentered>
         <EffectiveTransactionsSlide
+          scenario={scenario1}
           timestampIdx={6}
           showCore={true}
           showEditor={false}
@@ -489,8 +461,8 @@ export default function Page() {
         <HashAndSignatureSlide progressIdx={12} />
         <div className="pt-[10vh]">
           <CoValueCoreDiagram
-            header={header}
-            sessions={scenario1}
+            header={scenario1.header}
+            sessions={scenario1.sessions}
             showView={true}
             showCore={true}
             showHashAndSignature={true}
@@ -511,8 +483,8 @@ export default function Page() {
         </SimpleCentered>
         <div className="pt-[10vh]">
           <CoValueCoreDiagram
-            header={header}
-            sessions={scenario1}
+            header={scenario1.header}
+            sessions={scenario1.sessions}
             showView={true}
             showCore={true}
             showHashAndSignature={true}
@@ -521,8 +493,8 @@ export default function Page() {
         </div>
         <div className="pt-[10vh]">
           <CoValueCoreDiagram
-            header={header}
-            sessions={scenario1}
+            header={scenario1.header}
+            sessions={scenario1.sessions}
             showView={true}
             showCore={true}
             showHashAndSignature={true}
@@ -532,8 +504,8 @@ export default function Page() {
         </div>
         <div className="pt-[10vh]">
           <CoValueCoreDiagram
-            header={header}
-            sessions={scenario1}
+            header={scenario1.header}
+            sessions={scenario1.sessions}
             showView={true}
             showCore={true}
             showHashAndSignature={true}
@@ -550,8 +522,8 @@ export default function Page() {
         </div>
         <div className="pt-[10vh]">
           <CoValueCoreDiagram
-            header={header}
-            sessions={scenario1}
+            header={scenario1.header}
+            sessions={scenario1.sessions}
             showView={true}
             showCore={true}
             showHashAndSignature={true}

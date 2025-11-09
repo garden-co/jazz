@@ -1,11 +1,11 @@
 import { CoValueCoreDiagram } from "../shared/coValueDIagrams/diagrams";
-import { header, scenario1 } from "./page";
+import { scenario1 } from "../shared/scenarios";
 
 export function HashAndSignatureSlide({ progressIdx }: { progressIdx: number }) {
   return <div className="mt-[10vh]">
     <CoValueCoreDiagram
-      header={header}
-      sessions={scenario1}
+      header={scenario1.header}
+      sessions={scenario1.sessions}
       showView={true}
       showCore={true}
       showHashAndSignature={true}

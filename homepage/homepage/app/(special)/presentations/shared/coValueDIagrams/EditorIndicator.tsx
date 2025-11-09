@@ -6,24 +6,28 @@ import { useEffect, useState } from "react";
 import clsx from "clsx";
 
 export function EditorIndicator({ by }: { by: string }) {
-  const [opacity, setOpacity] = useState(100);
-  const [left, setLeft] = useState(-100);
+  const [state, setState] = useState<"idle" | "moving" | "fade-out">("idle");
   useEffect(() => {
-    const timeout = setTimeout(() => {
-      setOpacity(0);
-    }, 1000);
-    setLeft(0);
-    return () => clearTimeout(timeout);
+    const timeout1 = setTimeout(() => {
+      setState("moving");
+    }, 500);
+    const timeout2 = setTimeout(() => {
+      setState("fade-out");
+    }, 1200);
+    return () => {
+      clearTimeout(timeout1);
+      clearTimeout(timeout2);
+    };
   }, []);
   return (
     <span
       className={clsx(
         userColors[by as keyof typeof userColors],
-        "text-xs transition-all relative",
+        "absolute text-2xl transition-all bg-black w-full pl-2",
       )}
-      style={{ opacity, left: left + "px" }}
+      style={{ opacity: state === "idle" || state === "moving" ? 100 : 0, left: (state === "moving" || state === "fade-out" ? "100%" : "0") }}
     >
-      <TextCursorIcon className="relative -top-0.5 -ml-2 -mr-2 inline-block h-4" />
+      <TextCursorIcon className="relative -top-0.5 -ml-2 -mr-1 inline-block h-7" />
       {by}
     </span>
   );
