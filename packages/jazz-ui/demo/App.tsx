@@ -36,6 +36,15 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "../src/components/dropdown-menu";
+import {
+  Command,
+  CommandEmpty,
+  CommandGroup,
+  CommandInput,
+  CommandItem,
+  CommandList,
+  CommandSeparator,
+} from "../src/components/command";
 import { Input } from "../src/components/input";
 import { Label } from "../src/components/label";
 import { NativeSelect } from "../src/components/native-select";
@@ -74,7 +83,8 @@ import {
 } from "../src/components/tooltip";
 import { Toaster } from "../src/components/sonner";
 import { toast } from "sonner";
-import { Bell, User, Settings, Mail, Moon, Sun } from "lucide-react";
+import { User, Settings, Mail, Moon, Sun } from "lucide-react";
+import { Logo } from "../src/components/logo";
 
 function ThemeToggle() {
   const { theme, setTheme } = useTheme();
@@ -101,16 +111,16 @@ function DemoContent() {
       <Toaster />
       <div className="container mx-auto px-4 py-8">
         <header className="mb-12 flex items-center justify-between">
-          <div>
-            <h1 className="mb-2 text-4xl font-bold">Jazz UI Components</h1>
-            <p className="text-muted-foreground text-lg">
-              Interactive demo of all available components
-            </p>
+          <div className="flex items-center gap-6">
+            <h1 className="flex items-center text-xl font-bold">
+              <Logo size="md" className="text-foreground" />
+              <Badge variant="outline" size="md">
+                UI
+              </Badge>
+            </h1>
           </div>
-        </header>
-        <div className="sticky top-4 flex justify-end">
           <ThemeToggle />
-        </div>
+        </header>
 
         <div className="flex flex-col gap-16">
           {/* Buttons */}
@@ -152,7 +162,7 @@ function DemoContent() {
                 <Checkbox
                   id="terms"
                   checked={checked}
-                  onCheckedChange={setChecked}
+                  onCheckedChange={(value) => setChecked(value === true)}
                 />
                 <Label htmlFor="terms">Accept terms and conditions</Label>
               </div>
@@ -257,7 +267,7 @@ function DemoContent() {
           {/* Alerts */}
           <section>
             <h2 className="mb-4 text-2xl font-semibold">Alerts</h2>
-            <div className="max-w-2xl flex flex-col gap-4">
+            <div className="flex max-w-2xl flex-col gap-4">
               <Alert variant="info">
                 <AlertTitle>Default Alert</AlertTitle>
                 <AlertDescription>
@@ -283,11 +293,35 @@ function DemoContent() {
           {/* Badges */}
           <section>
             <h2 className="mb-4 text-2xl font-semibold">Badges</h2>
-            <div className="flex flex-wrap gap-4">
-              <Badge>Default</Badge>
-              <Badge variant="secondary">Secondary</Badge>
-              <Badge variant="destructive">Destructive</Badge>
-              <Badge variant="outline">Outline</Badge>
+            <div className="flex flex-col gap-6">
+              <div>
+                <h3 className="text-muted-foreground mb-3 text-sm font-medium">
+                  Small (Default)
+                </h3>
+                <div className="flex flex-wrap gap-4">
+                  <Badge>Default</Badge>
+                  <Badge variant="secondary">Secondary</Badge>
+                  <Badge variant="destructive">Destructive</Badge>
+                  <Badge variant="outline">Outline</Badge>
+                </div>
+              </div>
+              <div>
+                <h3 className="text-muted-foreground mb-3 text-sm font-medium">
+                  Medium
+                </h3>
+                <div className="flex flex-wrap gap-4">
+                  <Badge size="md">Default</Badge>
+                  <Badge size="md" variant="secondary">
+                    Secondary
+                  </Badge>
+                  <Badge size="md" variant="destructive">
+                    Destructive
+                  </Badge>
+                  <Badge size="md" variant="outline">
+                    Outline
+                  </Badge>
+                </div>
+              </div>
             </div>
           </section>
 
@@ -484,6 +518,83 @@ function DemoContent() {
                 </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
+          </section>
+
+          {/* Command */}
+          <section>
+            <h2 className="mb-4 text-2xl font-semibold">Command</h2>
+            <div className="flex flex-col gap-6">
+              <div>
+                <h3 className="text-muted-foreground mb-3 text-sm font-medium">
+                  Inline Command Menu
+                </h3>
+                <Command className="max-w-md rounded-lg border shadow-md">
+                  <CommandInput placeholder="Type a command or search..." />
+                  <CommandList>
+                    <CommandEmpty>No results found.</CommandEmpty>
+                    <CommandGroup heading="Suggestions">
+                      <CommandItem>Calendar</CommandItem>
+                      <CommandItem>Search Emoji</CommandItem>
+                      <CommandItem>Calculator</CommandItem>
+                    </CommandGroup>
+                    <CommandSeparator />
+                    <CommandGroup heading="Settings">
+                      <CommandItem>Profile</CommandItem>
+                      <CommandItem>Billing</CommandItem>
+                      <CommandItem>Settings</CommandItem>
+                    </CommandGroup>
+                  </CommandList>
+                </Command>
+              </div>
+
+              <div>
+                <h3 className="text-muted-foreground mb-3 text-sm font-medium">
+                  Command as Popover
+                </h3>
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <Button variant="outline">Open Command Menu</Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent className="w-[400px] p-0" align="start">
+                    <Command className="border-0">
+                      <CommandInput placeholder="Type a command or search..." />
+                      <CommandList>
+                        <CommandEmpty>No results found.</CommandEmpty>
+                        <CommandGroup heading="Actions">
+                          <CommandItem
+                            onSelect={() => {
+                              toast("Creating new file...");
+                            }}
+                          >
+                            Create New File
+                          </CommandItem>
+                          <CommandItem
+                            onSelect={() => {
+                              toast("Opening search...");
+                            }}
+                          >
+                            Search Files
+                          </CommandItem>
+                          <CommandItem
+                            onSelect={() => {
+                              toast("Opening settings...");
+                            }}
+                          >
+                            Open Settings
+                          </CommandItem>
+                        </CommandGroup>
+                        <CommandSeparator />
+                        <CommandGroup heading="Recent">
+                          <CommandItem>Document.pdf</CommandItem>
+                          <CommandItem>Photo.jpg</CommandItem>
+                          <CommandItem>Spreadsheet.xlsx</CommandItem>
+                        </CommandGroup>
+                      </CommandList>
+                    </Command>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              </div>
+            </div>
           </section>
 
           {/* Tooltip */}

@@ -40,14 +40,17 @@ const Alert = React.forwardRef<
   HTMLDivElement,
   React.HTMLAttributes<HTMLDivElement> & VariantProps<typeof alertVariants>
 >(({ className, variant, children, ...props }, ref) => {
-  const Icon = variant ? variantIcons[variant] : undefined;
-  const iconColor = variant ? iconColors[variant] : iconColors.default;
+  const normalizedVariant = variant ?? undefined;
+  // Use "info" as default when variant is undefined (matches defaultVariants in CVA)
+  const effectiveVariant = normalizedVariant || "info";
+  const Icon = variantIcons[effectiveVariant];
+  const iconColor = iconColors[effectiveVariant];
 
   return (
     <div
       ref={ref}
       role="alert"
-      className={cn(alertVariants({ variant }), className)}
+      className={cn(alertVariants({ variant: normalizedVariant }), className)}
       {...props}
     >
       {Icon && (

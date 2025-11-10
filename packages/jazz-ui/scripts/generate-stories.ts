@@ -53,6 +53,9 @@ function getImports(fileName: string, exportName: string): string {
   const compositeImports: Record<string, string> = {
     accordion: `import { Accordion, AccordionItem, AccordionTrigger, AccordionContent } from "./${fileName}.js";`,
     tabs: `import { Tabs, TabsList, TabsTrigger, TabsContent } from "./${fileName}.js";`,
+    card: `import { Card, CardHeader, CardTitle, CardDescription, CardContent, CardFooter } from "./${fileName}.js";\nimport { Button } from "./button.js";`,
+    "dropdown-menu": `import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator } from "./${fileName}.js";\nimport { Button } from "./button.js";`,
+    command: `import { Command, CommandInput, CommandList, CommandEmpty, CommandGroup, CommandItem, CommandSeparator } from "./${fileName}.js";`,
   };
 
   return (
@@ -93,6 +96,61 @@ function getStoryConfig(fileName: string, exportName: string): string {
       <TabsContent value="tab1">Content for Tab 1</TabsContent>
       <TabsContent value="tab2">Content for Tab 2</TabsContent>
     </Tabs>
+  ),
+}`,
+    card: `{
+  render: (args) => (
+    <Card className="w-[350px]" {...args}>
+      <CardHeader>
+        <CardTitle>Card Title</CardTitle>
+        <CardDescription>Card description goes here</CardDescription>
+      </CardHeader>
+      <CardContent>
+        <p>This is the main content area of the card.</p>
+      </CardContent>
+      <CardFooter>
+        <Button>Action</Button>
+      </CardFooter>
+    </Card>
+  ),
+}`,
+    "dropdown-menu": `{
+  render: (args) => (
+    <DropdownMenu {...args}>
+      <DropdownMenuTrigger asChild>
+        <Button variant="outline">Open Menu</Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent>
+        <DropdownMenuLabel>My Account</DropdownMenuLabel>
+        <DropdownMenuSeparator />
+        <DropdownMenuItem>Profile</DropdownMenuItem>
+        <DropdownMenuItem>Settings</DropdownMenuItem>
+        <DropdownMenuItem>Billing</DropdownMenuItem>
+        <DropdownMenuSeparator />
+        <DropdownMenuItem>Logout</DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  ),
+}`,
+    command: `{
+  render: (args) => (
+    <Command className="rounded-lg border shadow-md max-w-md" {...args}>
+      <CommandInput placeholder="Type a command or search..." />
+      <CommandList>
+        <CommandEmpty>No results found.</CommandEmpty>
+        <CommandGroup heading="Suggestions">
+          <CommandItem>Calendar</CommandItem>
+          <CommandItem>Search Emoji</CommandItem>
+          <CommandItem>Calculator</CommandItem>
+        </CommandGroup>
+        <CommandSeparator />
+        <CommandGroup heading="Settings">
+          <CommandItem>Profile</CommandItem>
+          <CommandItem>Billing</CommandItem>
+          <CommandItem>Settings</CommandItem>
+        </CommandGroup>
+      </CommandList>
+    </Command>
   ),
 }`,
   };

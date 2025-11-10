@@ -8,6 +8,7 @@ const config: StorybookConfig = {
   stories: ["../src/components/**/*.stories.tsx"],
   addons: ["@storybook/addon-docs", "@storybook/addon-themes"],
   framework: "@storybook/react-vite",
+  staticDirs: ["./public"],
   typescript: {
     reactDocgen: "react-docgen-typescript",
   },

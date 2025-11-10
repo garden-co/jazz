@@ -18,7 +18,7 @@ const SelectTrigger = React.forwardRef<
   <SelectPrimitive.Trigger
     ref={ref}
     className={cn(
-      "data-[placeholder]:text-muted-foreground flex items-center justify-between whitespace-nowrap [&>span]:line-clamp-1",
+      "data-placeholder:text-muted-foreground flex items-center justify-between whitespace-nowrap [&>span]:line-clamp-1",
       formField,
       className,
     )}
