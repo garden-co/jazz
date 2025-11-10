@@ -11,6 +11,7 @@ export type Scenario = {
 const scenario1Timestamps = [
   new Date("2025-10-29T22:00:00Z"),
   new Date("2025-10-29T22:01:00Z"),
+  new Date("2025-10-29T22:01:01Z"),
   new Date("2025-10-29T22:02:00Z"),
   new Date("2025-10-29T22:03:00Z"),
   new Date("2025-10-29T22:04:00Z"),
@@ -32,28 +33,32 @@ const scenario1Sessions = {
       t: scenario1Timestamps[1],
     } satisfies SessionEntry,
     {
+      payload: { op: "set" as const, key: "height", value: 16 },
+      t: scenario1Timestamps[2],
+    } satisfies SessionEntry,
+    {
       payload: { op: "set" as const, key: "height", value: 17 },
-      t: scenario1Timestamps[4],
+      t: scenario1Timestamps[6],
     } satisfies SessionEntry,
   ],
   bob_session_1: [
     {
       payload: { op: "set" as const, key: "color", value: "amber" },
-      t: scenario1Timestamps[2],
+      t: scenario1Timestamps[3],
     } satisfies SessionEntry,
     {
-      payload: { op: "set" as const, key: "color", value: "bleen" },
-      t: scenario1Timestamps[5],
+      payload: { op: "set" as const, key: "color", value: "grey" },
+      t: scenario1Timestamps[4],
     } satisfies SessionEntry,
     {
       payload: { op: "set" as const, key: "color", value: "green" },
-      t: scenario1Timestamps[6],
+      t: scenario1Timestamps[7],
     } satisfies SessionEntry,
   ],
   bob_session_2: [
     {
       payload: { op: "set" as const, key: "height", value: 18 },
-      t: scenario1Timestamps[3],
+      t: scenario1Timestamps[5],
     },
   ],
 };

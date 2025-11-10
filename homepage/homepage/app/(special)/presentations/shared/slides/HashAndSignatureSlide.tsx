@@ -1,5 +1,5 @@
-import { CoValueCoreDiagram } from "../shared/coValueDiagrams/diagrams";
-import { scenario1 } from "../shared/scenarios";
+import { CoValueCoreDiagram } from "../coValueDiagrams/diagrams";
+import { scenario1 } from "../scenarios";
 
 export function HashAndSignatureSlide({ progressIdx }: { progressIdx: number }) {
   return <div className="mt-[10vh]">

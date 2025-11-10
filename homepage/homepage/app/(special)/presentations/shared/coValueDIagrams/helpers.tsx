@@ -12,14 +12,14 @@ export const userColors: { [user: string]: string } = {
 
 const encoder = new TextEncoder();
 
-export function fakeHash(session: { payload: object; t: Date }[]) {
+export function fakeHash(session: { payload: object; t: Date }[], encryptedItems: boolean) {
   return (
     "hash_z" +
     bs58.encode(
       encoder.encode(
         hashCode(
           session.reduce((acc, item) => acc + JSON.stringify(item), ""),
-        ) + "",
+        ) + "" + (encryptedItems ? "e" : ""),
       ),
     ).slice(0, 11)
   );
@@ -31,7 +31,7 @@ export function fakeCoID(header: object) {
   );
 }
 
-export function fakeSignature(session: { payload: object; t: Date }[]) {
+export function fakeSignature(session: { payload: object; t: Date }[], encryptedItems: boolean) {
   return (
     "sig_z" +
     bs58.encode(
@@ -40,7 +40,7 @@ export function fakeSignature(session: { payload: object; t: Date }[]) {
           hashCode(
             session.reduce((acc, item) => acc + JSON.stringify(item), ""),
           ) + "",
-        ) + "",
+        ) + ""+ (encryptedItems ? "e" : ""),
       ),
     ).slice(0, 12)
   );

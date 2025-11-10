@@ -14,7 +14,7 @@ export function CoValueSyncDiagram({
 }: {
   scenario: Scenario;
   timestampIdx: number;
-  aliceConnection: "offline" | 1 | 2 | 3 | 4 | 5;
+  aliceConnection: "offline" | number;
   serverEncrypted?: boolean;
 }) {
   const [currentTimestampIdx, setCurrentTimestampIdx] = useState(timestampIdx);

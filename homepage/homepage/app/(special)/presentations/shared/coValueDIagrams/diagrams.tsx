@@ -191,7 +191,11 @@ function CoValueCoreView({
         <div className="absolute -left-6 bottom-0 top-0 text-center font-mono text-lg leading-none text-stone-400 [writing-mode:sideways-lr]">
           HISTORY
         </div>
-        <div className={clsx("grid grid-cols-3 gap-7", {"rounded-b-xl": showView})}>
+        <div
+          className={clsx("grid grid-cols-3 gap-7", {
+            "rounded-b-xl": showView,
+          })}
+        >
           {Object.entries(sessions).map(([sessionID, log], sessionIdx) => {
             const priorHashProgress = Object.values(sessions)
               .slice(0, sessionIdx)
@@ -218,7 +222,15 @@ function CoValueCoreView({
                       <Timestamp timestamp={item.t} />
                       {showHashAndSignature &&
                         (hashProgressIdx ?? Infinity) >
-                          idx + priorHashProgress && <HashChainArrow />}
+                          idx + priorHashProgress && (
+                          <HashChainArrow
+                            isLast={
+                              idx + priorHashProgress
+                                === (hashProgressIdx || 1) - 1 ||
+                              idx === log.length - 1
+                            }
+                          />
+                        )}
                     </TransactionContainer>
                   );
                 })}
@@ -227,13 +239,13 @@ function CoValueCoreView({
                     {(hashProgressIdx ?? Infinity) >
                       log.length + priorHashProgress && (
                       <pre className="flex items-center gap-1 text-white">
-                        <BinaryIcon className="h-4 w-4" /> {fakeHash(log)}
+                        <BinaryIcon className="h-4 w-4" /> {fakeHash(log, encryptedItems)}
                       </pre>
                     )}
                     {(hashProgressIdx ?? Infinity) >
                       log.length + 1 + priorHashProgress && (
                       <div className="relative">
-                        <div className="absolute -left-22 rounded bg-black px-1 text-lg">
+                        <div className="-left-24 -mt-1 absolute rounded bg-black px-2 py-1 text-lg">
                           ed25519
                         </div>
                         <pre
@@ -245,7 +257,7 @@ function CoValueCoreView({
                           )}
                         >
                           <SignatureIcon className="h-4 w-4" />
-                          {fakeSignature(log)}
+                          {fakeSignature(log, encryptedItems)}
                         </pre>
                       </div>
                     )}
@@ -320,13 +332,15 @@ function ContentView({
   );
 }
 
-export function HashChainArrow() {
+export function HashChainArrow({ isLast }: { isLast: boolean }) {
   return (
     <div className="absolute -bottom-7 -left-2 z-10 h-[100%]">
       <ArrowSvg className="h-[100%]" />
-      <div className="absolute -left-16 top-[50%] -mt-[80%] rounded bg-black px-1 text-lg text-white">
-        blake3
-      </div>
+      {isLast && (
+        <div className="absolute -left-20 top-[50%] -mt-[90%] rounded bg-black px-2 py-1 text-xl text-white">
+          blake3
+        </div>
+      )}
     </div>
   );
 }

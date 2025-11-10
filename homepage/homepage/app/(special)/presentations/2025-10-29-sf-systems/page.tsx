@@ -7,11 +7,11 @@ import { DiagramAfterJazz } from "@/components/DiagramAfterJazz";
 import sfSystemsImg from "./sf_systems_club.avif";
 import { userColors } from "../shared/coValueDiagrams/helpers";
 import { CoValueCoreDiagram } from "../shared/coValueDiagrams/diagrams";
-import { HashAndSignatureSlide } from "./HashAndSignatureSlide";
+import { HashAndSignatureSlide } from "../shared/slides/HashAndSignatureSlide";
 import { CodeTabs } from "@/components/home/CodeTabs";
 import { IntroSlide } from "../shared/slides/IntroSlide";
 
-import CoMapSchemaCode from "./slides/coMapSchema.mdx";
+import ChairCoMapSchemaCode from "./slides/chairCoMapSchema.mdx";
 import Alice1Code from "./slides/alice1.mdx";
 import Alice2Code from "./slides/alice2.mdx";
 import Bob3Code from "./slides/bob_3.mdx";
@@ -22,7 +22,8 @@ import Bob7Code from "./slides/bob_7.mdx";
 import { DiagramBeforeJazz } from "@/components/DiagramBeforeJazz";
 import { SimpleCentered } from "../shared/slides/Containers";
 import { scenario1 } from "../shared/scenarios";
-import { EffectiveTransactionsSlide } from "./slides/EffectiveTransactionsSlide";
+import { EffectiveTransactionsSlide } from "../shared/slides/EffectiveTransactionsSlide";
+import { HowYouCouldHaveInventedJazz, JustJazzLogoSlide, SloganSlide } from "../shared/slides/slogans";
 
 export default function Page() {
   return (
@@ -59,7 +60,7 @@ export default function Page() {
             <CodeTabs />
           </div>
         </div>
-        <AltTitleSlide />
+        <HowYouCouldHaveInventedJazz />
         <SimpleCentered>
           <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
             Conflict-free
@@ -139,7 +140,7 @@ export default function Page() {
                 chairSchema.ts
               </span>
               <pre className="whitespace-pre-wrap break-words p-1 pb-2 text-xs md:text-sm [&_code]:whitespace-pre-wrap [&_code]:break-words">
-                <CoMapSchemaCode />
+                <ChairCoMapSchemaCode />
               </pre>
             </div>
           </div>
@@ -592,33 +593,6 @@ export default function Page() {
         <ThanksSlide />
       </Slides>
     </div>
-  );
-}
-
-function AltTitleSlide() {
-  return (
-    <div className="flex h-screen w-screen flex-col items-center justify-center gap-5 p-20">
-      <h2 className="font-display text-5xl font-semibold tracking-tight">
-        “How you could have invented <JazzLogo className="inline-block h-16" />{" "}
-        in an afternoon”
-      </h2>
-    </div>
-  );
-}
-
-function JustJazzLogoSlide() {
-  return (
-    <SimpleCentered>
-      <JazzLogo className="h-20" />
-    </SimpleCentered>
-  );
-}
-
-function SloganSlide() {
-  return (
-    <SimpleCentered>
-      <JazzSyncs className="h-40" />
-    </SimpleCentered>
   );
 }
 

@@ -4,11 +4,26 @@ import { Slides } from "@/components/Slides";
 import { SimpleCentered } from "../shared/slides/Containers";
 import { NewSyncDiagram } from "./NewSyncDiagram";
 import { DiagramBeforeJazz } from "@/components/DiagramBeforeJazz";
-import { EffectiveTransactionsSlide } from "../2025-10-29-sf-systems/slides/EffectiveTransactionsSlide";
+import { EffectiveTransactionsSlide } from "../shared/slides/EffectiveTransactionsSlide";
 import { scenario1 } from "../shared/scenarios";
 import { CoValueSyncDiagram } from "../shared/coValueDiagrams/coValueSyncDiagram";
-import { HashAndSignatureSlide } from "../2025-10-29-sf-systems/HashAndSignatureSlide";
+import { HashAndSignatureSlide } from "../shared/slides/HashAndSignatureSlide";
 import { CoValueCoreDiagram } from "../shared/coValueDiagrams/diagrams";
+import {
+  HowYouCouldHaveInventedJazz,
+  JustJazzLogoSlide,
+  SloganSlide,
+} from "../shared/slides/slogans";
+import { userColors } from "../shared/coValueDiagrams/helpers";
+import ChairCoMapSchemaCode from "../shared/slides/chairCoMapSchema.mdx";
+import ChairEditingCode from "../shared/slides/chairEditing.mdx";
+import ChairComponentCode from "../shared/slides/chairComponent.mdx";
+import ChairLoadCode from "../shared/slides/chairLoad.mdx";
+import ChairSubscriptionCode from "../shared/slides/chairSubscription.mdx";
+
+import saasMinesImg from "./slides/saas_mines.png";
+import richHiickeyImg from "./slides/rich_hickey.png";
+import monkeyAk47Img from "./slides/monkey_ak47.png";
 
 export default function Page() {
   return (
@@ -28,23 +43,37 @@ export default function Page() {
           eventName="Sync Conf"
           eventDate="November '25"
         />
+        <JustJazzLogoSlide />
+        <SloganSlide />
+        <SimpleCentered>
+          <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
+            <span className="text-[2.35em] font-extralight">PART 0</span>
+            <br />
+            How I got radicalized
+          </h1>
+        </SimpleCentered>
+        <SimpleCentered>
+          <img src={saasMinesImg.src} alt="Saas Mines" className="w-[70%] mx-auto" />
+        </SimpleCentered>
+
         <SimpleCentered>
           <DiagramBeforeJazz className="scale-[150%]" />
         </SimpleCentered>
         <SimpleCentered>
           <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
-            PART I: HOW IT STARTED
-          </h1>
-        </SimpleCentered>
-
-        <SimpleCentered>
-          <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
-            Figma.
+            Figma & Notion
           </h1>
         </SimpleCentered>
         <SimpleCentered>
           <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
-            Notion.
+            Ink & Switch.
+          </h1>
+        </SimpleCentered>
+        <SimpleCentered>
+          <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
+            <span className="text-[2.35em] font-extralight">PART I</span>
+            <br />
+            How it started
           </h1>
         </SimpleCentered>
         <SimpleCentered>
@@ -85,56 +114,134 @@ export default function Page() {
           </h2>
         </SimpleCentered>
         <SimpleCentered>
+          <img src={richHiickeyImg.src} alt="Rich Hickey" className="w-[70%] mx-auto" />
+        </SimpleCentered>
+        <HowYouCouldHaveInventedJazz />
+        <SimpleCentered>
+          <h1 className="text-center font-display text-6xl font-semibold tracking-tight">
+            <span className={userColors["alice"]}>Alice</span> and{" "}
+            <span className={userColors["bob"]}>Bob</span> are <br/>designing a
+            chair.
+          </h1>
+        </SimpleCentered>
+        <div className="flex h-screen flex-col justify-center gap-5">
+          <div className="w-[30vw] scale-[200%]">
+            <div className="rounded-lg border bg-white ring-4 ring-stone-400/20 dark:bg-stone-925">
+              <span className="block border-b px-2 py-2 text-xs font-light text-stone-700 dark:text-stone-300 md:px-3 md:text-sm">
+                chairSchema.ts
+              </span>
+              <pre className="whitespace-pre-wrap break-words p-1 pb-2 text-xs md:text-sm [&_code]:whitespace-pre-wrap [&_code]:break-words">
+                <ChairCoMapSchemaCode />
+              </pre>
+            </div>
+          </div>
+        </div>
+        <div className="flex h-screen flex-col justify-center gap-5">
+          <div className="w-[30vw] scale-[200%]">
+            <div className="rounded-lg border bg-white ring-4 ring-stone-400/20 dark:bg-stone-925">
+              <span className="block border-b px-2 py-2 text-xs font-light text-stone-700 dark:text-stone-300 md:px-3 md:text-sm">
+                creationAndEditing.ts
+              </span>
+              <pre className="whitespace-pre-wrap break-words p-1 pb-2 text-xs md:text-sm [&_code]:whitespace-pre-wrap [&_code]:break-words">
+                <ChairEditingCode />
+              </pre>
+            </div>
+          </div>
+        </div>
+        <div className="flex h-screen flex-col justify-center gap-5">
+          <div className="w-[30vw] scale-[200%]">
+            <div className="rounded-lg border bg-white ring-4 ring-stone-400/20 dark:bg-stone-925">
+              <span className="block border-b px-2 py-2 text-xs font-light text-stone-700 dark:text-stone-300 md:px-3 md:text-sm">
+                chairComponent.tsx
+              </span>
+              <pre className="whitespace-pre-wrap break-words p-1 pb-2 text-xs md:text-sm [&_code]:whitespace-pre-wrap [&_code]:break-words">
+                <ChairComponentCode />
+              </pre>
+            </div>
+          </div>
+        </div>
+        <div className="flex h-screen flex-col justify-center gap-5">
+          <div className="w-[30vw] scale-[200%]">
+            <div className="rounded-lg border bg-white ring-4 ring-stone-400/20 dark:bg-stone-925">
+              <span className="block border-b px-2 py-2 text-xs font-light text-stone-700 dark:text-stone-300 md:px-3 md:text-sm">
+                chairServer.ts
+              </span>
+              <pre className="whitespace-pre-wrap break-words p-1 pb-2 text-xs md:text-sm [&_code]:whitespace-pre-wrap [&_code]:break-words">
+                <ChairLoadCode />
+              </pre>
+            </div>
+          </div>
+        </div>
+        <div className="flex h-screen flex-col justify-center gap-5">
+          <div className="w-[30vw] scale-[200%]">
+            <div className="rounded-lg border bg-white ring-4 ring-stone-400/20 dark:bg-stone-925">
+              <span className="block border-b px-2 py-2 text-xs font-light text-stone-700 dark:text-stone-300 md:px-3 md:text-sm">
+                chairSubscription.ts
+              </span>
+              <pre className="whitespace-pre-wrap break-words p-1 pb-2 text-xs md:text-sm [&_code]:whitespace-pre-wrap [&_code]:break-words">
+                <ChairSubscriptionCode />
+              </pre>
+            </div>
+          </div>
+        </div>
+        <SimpleCentered>
+          <h1 className="text-center font-display text-6xl font-semibold tracking-tight">
+            <span className={userColors["alice"]}>Alice</span> and{" "}
+            <span className={userColors["bob"]}>Bob</span> are <br/>designing a
+            chair.
+          </h1>
+        </SimpleCentered>
+        <SimpleCentered>
+          <h1 className="text-center font-display text-6xl font-semibold tracking-tight">
+            <span className={userColors["alice"]}>Alice</span> and{" "}
+            <span className={userColors["bob"]}>Bob</span> are editing <br />a
+            shared <span className="font-mono text-blue-500">co.map</span>
+          </h1>
+        </SimpleCentered>
+        <SimpleCentered>
+          <h1 className="text-center font-display text-6xl font-semibold tracking-tight">
+            <span className={userColors["alice"]}>Alice</span> and{" "}
+            <span className={userColors["bob"]}>Bob</span> are editing <br />a
+            shared{" "}
+            <span className="font-mono text-blue-500">collaborative map</span>
+          </h1>
+        </SimpleCentered>
+        {...Array.from({ length: scenario1.timestamps.length }).map((_, timestampIdx) => (
+          <EffectiveTransactionsSlide
+            key={timestampIdx}
+            scenario={scenario1}
+            timestampIdx={timestampIdx}
+            showCore={true}
+            showEditor={true}
+          />
+        ))}
+        <SimpleCentered>
           <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
-            Rich Hickey cooked with Datomic
+            Maybe: CoList
+          </h1>
+        </SimpleCentered>
+        <SimpleCentered>
+          <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
+            CRDTs
           </h1>
           <h2 className="text-center font-display text-6xl font-semibold">
-            We're taking "keep all history" to a terminal degree.
+            “Git for JSON”
           </h2>
         </SimpleCentered>
-        <EffectiveTransactionsSlide
-          scenario={scenario1}
-          timestampIdx={0}
-          showCore={true}
-          showEditor={true}
-        />
-        <EffectiveTransactionsSlide
-          scenario={scenario1}
-          timestampIdx={1}
-          showCore={true}
-          showEditor={true}
-        />
-        <EffectiveTransactionsSlide
-          scenario={scenario1}
-          timestampIdx={2}
-          showCore={true}
-          showEditor={true}
-        />
-        <EffectiveTransactionsSlide
-          scenario={scenario1}
-          timestampIdx={3}
-          showCore={true}
-          showEditor={true}
-        />
-        <EffectiveTransactionsSlide
-          scenario={scenario1}
-          timestampIdx={4}
-          showCore={true}
-          showEditor={true}
-        />
-        <EffectiveTransactionsSlide
-          scenario={scenario1}
-          timestampIdx={5}
-          showCore={true}
-          showEditor={true}
-        />
-        <EffectiveTransactionsSlide
-          scenario={scenario1}
-          timestampIdx={6}
-          showCore={true}
-          showEditor={true}
-        />
         <SimpleCentered>
+          <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
+            CoValues in <JazzLogo className="inline-block h-32" />
+          </h1>
+          <h2 className="text-center font-display text-6xl font-semibold">
+            “Git for infinite JSON graphs”
+          </h2>
+        </SimpleCentered>
+        <SimpleCentered>
+          <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
+            TODO: Refs & Resolve Queries
+          </h1>
+        </SimpleCentered>
+        {/* <SimpleCentered>
           <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
             But isn't that slow?
           </h1>
@@ -178,91 +285,31 @@ export default function Page() {
           <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
             Successor/Predecessor pointers compress well.
           </h1>
-        </SimpleCentered>
+        </SimpleCentered> */}
+
+        {...Array.from({ length: scenario1.timestamps.length }).map((_, timestampIdx) => (
+          <SimpleCentered key={timestampIdx}>
+            <CoValueSyncDiagram
+              scenario={scenario1}
+              timestampIdx={timestampIdx}
+              aliceConnection="offline"
+            />
+          </SimpleCentered>
+        ))}
+        {...Array.from({ length: 5 }).map((_, aliceProgress) => (
+          <SimpleCentered key={aliceProgress}>
+            <CoValueSyncDiagram
+              scenario={scenario1}
+              timestampIdx={scenario1.timestamps.length - 1}
+              aliceConnection={aliceProgress + 1}
+            />
+          </SimpleCentered>
+        ))}
 
         <SimpleCentered>
-          <CoValueSyncDiagram
-            scenario={scenario1}
-            timestampIdx={0}
-            aliceConnection="offline"
-          />
-        </SimpleCentered>
-        <SimpleCentered>
-          <CoValueSyncDiagram
-            scenario={scenario1}
-            timestampIdx={1}
-            aliceConnection="offline"
-          />
-        </SimpleCentered>
-        <SimpleCentered>
-          <CoValueSyncDiagram
-            scenario={scenario1}
-            timestampIdx={2}
-            aliceConnection="offline"
-          />
-        </SimpleCentered>
-        <SimpleCentered>
-          <CoValueSyncDiagram
-            scenario={scenario1}
-            timestampIdx={3}
-            aliceConnection="offline"
-          />
-        </SimpleCentered>
-        <SimpleCentered>
-          <CoValueSyncDiagram
-            scenario={scenario1}
-            timestampIdx={4}
-            aliceConnection="offline"
-          />
-        </SimpleCentered>
-        <SimpleCentered>
-          <CoValueSyncDiagram
-            scenario={scenario1}
-            timestampIdx={5}
-            aliceConnection="offline"
-          />
-        </SimpleCentered>
-        <SimpleCentered>
-          <CoValueSyncDiagram
-            scenario={scenario1}
-            timestampIdx={6}
-            aliceConnection="offline"
-          />
-        </SimpleCentered>
-        <SimpleCentered>
-          <CoValueSyncDiagram
-            scenario={scenario1}
-            timestampIdx={6}
-            aliceConnection={1}
-          />
-        </SimpleCentered>
-        <SimpleCentered>
-          <CoValueSyncDiagram
-            scenario={scenario1}
-            timestampIdx={6}
-            aliceConnection={2}
-          />
-        </SimpleCentered>
-        <SimpleCentered>
-          <CoValueSyncDiagram
-            scenario={scenario1}
-            timestampIdx={6}
-            aliceConnection={3}
-          />
-        </SimpleCentered>
-        <SimpleCentered>
-          <CoValueSyncDiagram
-            scenario={scenario1}
-            timestampIdx={6}
-            aliceConnection={4}
-          />
-        </SimpleCentered>
-        <SimpleCentered>
-          <CoValueSyncDiagram
-            scenario={scenario1}
-            timestampIdx={6}
-            aliceConnection={5}
-          />
+          <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
+            CoValues = Sparkling CRDTs from the Champagne Region of France?
+          </h1>
         </SimpleCentered>
 
         <SimpleCentered>
@@ -284,6 +331,7 @@ export default function Page() {
         <HashAndSignatureSlide progressIdx={10} />
         <HashAndSignatureSlide progressIdx={11} />
         <HashAndSignatureSlide progressIdx={12} />
+        <HashAndSignatureSlide progressIdx={13} />
         <SimpleCentered>
           <h1 className="text-center font-display text-6xl font-semibold tracking-tight">
             Write Permissions ✅<br />
@@ -297,7 +345,7 @@ export default function Page() {
             (Encryption)
           </h1>
         </SimpleCentered>
-        <HashAndSignatureSlide progressIdx={12} />
+        <HashAndSignatureSlide progressIdx={13} />
         <div className="pt-[10vh]">
           <CoValueCoreDiagram
             header={scenario1.header}
@@ -305,6 +353,7 @@ export default function Page() {
             showView={true}
             showCore={true}
             showHashAndSignature={true}
+            hashProgressIdx={13}
             encryptedItems={true}
           />
         </div>
@@ -327,6 +376,24 @@ export default function Page() {
 
         <SimpleCentered>
           <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
+            CoValues in <JazzLogo className="inline-block h-32" />
+          </h1>
+          <h2 className="text-center font-display text-6xl font-semibold">
+            “Git for infinite JSON graphs”
+          </h2>
+        </SimpleCentered>
+        <SimpleCentered>
+          <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
+            CoValues in <JazzLogo className="inline-block h-32" />
+          </h1>
+          <h2 className="text-center font-display text-6xl font-semibold">
+            “Git for infinite JSON graphs
+            <br />
+            with permissions”
+          </h2>
+        </SimpleCentered>
+        <SimpleCentered>
+          <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
             1) Everything is multiplayer.
           </h1>
         </SimpleCentered>
@@ -343,34 +410,6 @@ export default function Page() {
 
         <SimpleCentered>
           <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
-            CRDTs in <JazzLogo className="inline-block h-32" />
-          </h1>
-          <h2 className="text-center font-display text-6xl font-semibold">
-            “Git for infinite JSON graphs”
-          </h2>
-        </SimpleCentered>
-        <SimpleCentered>
-          <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
-            CRDTs in <JazzLogo className="inline-block h-32" />
-          </h1>
-          <h2 className="text-center font-display text-6xl font-semibold">
-            “Git for infinite JSON graphs
-            <br />
-            with permissions”
-          </h2>
-        </SimpleCentered>
-        <SimpleCentered>
-          <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
-            Global state is great, actually.
-          </h1>
-        </SimpleCentered>
-        <SimpleCentered>
-          <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
-            Global state isn't global enough.
-          </h1>
-        </SimpleCentered>
-        <SimpleCentered>
-          <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
             <span className="line-through">PlanetScale</span> Space Scale.
           </h1>
         </SimpleCentered>
@@ -379,9 +418,47 @@ export default function Page() {
             Apocalypse-first.
           </h1>
         </SimpleCentered>
+
+
         <SimpleCentered>
-          <NewSyncDiagram />
+          <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
+            Amazing DX<br/>
+            Amazing UX
+          </h1>
         </SimpleCentered>
+
+        <SimpleCentered>
+          <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
+            Local-first conf 2024
+          </h1>
+        </SimpleCentered>
+
+        <SimpleCentered>
+          <img src={monkeyAk47Img.src} alt="Monkey Ak47" className="w-[70%] mx-auto" />
+        </SimpleCentered>
+
+        <SimpleCentered>
+          <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
+            PART II: How it's going
+          </h1>
+        </SimpleCentered>
+
+        <SimpleCentered>
+          <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
+            What people have been building
+          </h1>
+        </SimpleCentered>
+
+        <SimpleCentered>
+          <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
+            PART III: What's next
+          </h1>
+        </SimpleCentered>
+
+        <SimpleCentered>
+        <NewSyncDiagram />
+        </SimpleCentered>
+
         <SimpleCentered>
           <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
             Durable Objects ain't it.
@@ -444,7 +521,7 @@ export default function Page() {
         </SimpleCentered>
         <SimpleCentered>
           <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
-            PART II: How it's going
+            Don't need to isolate compute
           </h1>
         </SimpleCentered>
       </Slides>
