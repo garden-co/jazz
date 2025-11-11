@@ -27,7 +27,7 @@ describe("Schema.withPermissions()", () => {
       co.plainText(),
       co.richText(),
       co.fileStream(),
-      // co.vector(1),
+      co.vector(1),
       co.list(co.plainText()),
       co.feed(co.plainText()),
       co.map({ text: co.plainText() }),
@@ -240,6 +240,22 @@ describe("Schema.withPermissions()", () => {
             fileName: "filename",
           });
         });
+      });
+
+      test("for CoVector", async () => {
+        const TestVector = co.vector(1).withPermissions({
+          onCreate(newGroup) {
+            newGroup.makePublic();
+          },
+        });
+
+        const vector = TestVector.create([1]);
+
+        const loadedVector = await TestVector.load(vector.$jazz.id, {
+          loadAs: anotherAccount,
+        });
+        assertLoaded(loadedVector);
+        expect(loadedVector.toJSON()).toEqual([1]);
       });
     });
 
