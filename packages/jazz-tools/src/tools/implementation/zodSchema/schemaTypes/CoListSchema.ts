@@ -12,6 +12,7 @@ import {
   SubscribeListenerOptions,
   coOptionalDefiner,
   unstable_mergeBranchWithResolve,
+  coValueClassMetadata,
 } from "../../../internal.js";
 import { CoValueUniqueness } from "cojson";
 import { AnonymousJazzAgent } from "../../anonymousJazzAgent.js";
@@ -200,31 +201,32 @@ export class CoListSchema<
     return this.copy({ resolveQuery: resolveQuery as R });
   }
 
+  /**
+   * Configure permissions to be used when creating or composing CoValues
+   */
   withPermissions(
     permissions: SchemaPermissions,
   ): CoListSchema<T, DefaultResolveQuery> {
     return this.copy({ permissions });
   }
 
-  copy<ResolveQuery extends CoreResolveQuery = DefaultResolveQuery>({
+  private copy<ResolveQuery extends CoreResolveQuery = DefaultResolveQuery>({
     permissions,
     resolveQuery,
   }: {
     permissions?: SchemaPermissions;
     resolveQuery?: ResolveQuery;
   }): CoListSchema<T, ResolveQuery> {
-    const coreSchema: CoreCoListSchema<T> = createCoreCoListSchema(
-      this.element,
-    );
+    const coreSchema = createCoreCoListSchema(this.element);
     // @ts-expect-error
     const copy: CoListSchema<T, ResolveQuery> =
       hydrateCoreCoValueSchema(coreSchema);
     // @ts-expect-error TS cannot infer that the resolveQuery type is valid
     copy.resolveQuery = resolveQuery ?? this.resolveQuery;
     copy.permissions = permissions ?? this.permissions;
-    // @ts-expect-error avoid exposing 'configureImplicitGroupOwner' at the type level
-    copy.coValueClass.prototype.configureImplicitGroupOwner =
-      copy.permissions.onCreate;
+    coValueClassMetadata.set(copy.coValueClass, {
+      configureImplicitGroupOwner: copy.permissions.onCreate,
+    });
     return copy;
   }
 }

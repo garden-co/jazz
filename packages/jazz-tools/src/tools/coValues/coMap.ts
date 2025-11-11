@@ -15,6 +15,7 @@ import {
   CoFieldInit,
   CoValue,
   CoValueClass,
+  coValueClassMetadata,
   getCoValueOwner,
   Group,
   ID,
@@ -254,8 +255,8 @@ export class CoMap extends CoValueBase implements CoValue {
   ): M {
     const { owner, uniqueness } = parseCoValueCreateOptions(
       options,
-      // @ts-expect-error avoid exposing 'configureImplicitGroupOwner' at the type level
-      instance.configureImplicitGroupOwner,
+      coValueClassMetadata.get(instance.constructor)
+        ?.configureImplicitGroupOwner,
     );
 
     Object.defineProperties(instance, {
