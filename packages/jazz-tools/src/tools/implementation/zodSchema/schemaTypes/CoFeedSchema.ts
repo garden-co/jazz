@@ -3,7 +3,9 @@ import {
   AnyZodOrCoValueSchema,
   BranchDefinition,
   CoFeed,
+  coValueClassMetadata,
   Group,
+  hydrateCoreCoValueSchema,
   MaybeLoaded,
   RefsToResolve,
   RefsToResolveStrict,
@@ -20,6 +22,7 @@ import { InstanceOrPrimitiveOfSchemaCoValuesMaybeLoaded } from "../typeConverter
 import { CoOptionalSchema } from "./CoOptionalSchema.js";
 import { CoreCoValueSchema, CoreResolveQuery } from "./CoValueSchema.js";
 import { withSchemaResolveQuery } from "../../schemaUtils.js";
+import { SchemaPermissions } from "../schemaPermissions.js";
 
 export class CoFeedSchema<
   T extends AnyZodOrCoValueSchema,
@@ -35,6 +38,12 @@ export class CoFeedSchema<
    * @default true
    */
   resolveQuery: DefaultResolveQuery = true as DefaultResolveQuery;
+
+  /**
+   * Permissions to be used when creating or composing CoValues
+   * @internal
+   */
+  permissions: SchemaPermissions = { onInlineCreate: "extendsContainer" };
 
   constructor(
     public element: T,
@@ -146,8 +155,32 @@ export class CoFeedSchema<
   >(
     resolveQuery: RefsToResolveStrict<CoFeedInstanceCoValuesMaybeLoaded<T>, R>,
   ): CoFeedSchema<T, R> {
-    const copy = new CoFeedSchema<T, R>(this.element, this.coValueClass);
-    copy.resolveQuery = resolveQuery as R;
+    return this.copy({ resolveQuery: resolveQuery as R });
+  }
+
+  withPermissions(
+    permissions: SchemaPermissions,
+  ): CoFeedSchema<T, DefaultResolveQuery> {
+    return this.copy({ permissions });
+  }
+
+  private copy<ResolveQuery extends CoreResolveQuery = DefaultResolveQuery>({
+    permissions,
+    resolveQuery,
+  }: {
+    permissions?: SchemaPermissions;
+    resolveQuery?: ResolveQuery;
+  }): CoFeedSchema<T, ResolveQuery> {
+    const coreSchema = createCoreCoFeedSchema(this.element);
+    // @ts-expect-error
+    const copy: CoFeedSchema<T, ResolveQuery> =
+      hydrateCoreCoValueSchema(coreSchema);
+    // @ts-expect-error TS cannot infer that the resolveQuery type is valid
+    copy.resolveQuery = resolveQuery ?? this.resolveQuery;
+    copy.permissions = permissions ?? this.permissions;
+    coValueClassMetadata.set(copy.coValueClass, {
+      configureImplicitGroupOwner: copy.permissions.onCreate,
+    });
     return copy;
   }
 }

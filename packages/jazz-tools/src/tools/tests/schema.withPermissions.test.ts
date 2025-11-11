@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, test } from "vitest";
+import { assert, beforeAll, describe, expect, test } from "vitest";
 import { Account, co, CoValueLoadingState, Group, z } from "../exports";
 import {
   assertLoaded,
@@ -29,7 +29,7 @@ describe("Schema.withPermissions()", () => {
       // co.fileStream(),
       // co.vector(1),
       co.list(co.plainText()),
-      // co.feed(co.plainText()),
+      co.feed(co.plainText()),
       co.map({ text: co.plainText() }),
       co.record(z.string(), co.plainText()),
     ];
@@ -103,7 +103,7 @@ describe("Schema.withPermissions()", () => {
       });
 
       test("for CoList", async () => {
-        const TestList = co.list(co.plainText()).withPermissions({
+        const TestList = co.list(z.string()).withPermissions({
           onCreate(newGroup) {
             newGroup.makePublic();
           },
@@ -112,15 +112,26 @@ describe("Schema.withPermissions()", () => {
         const list = TestList.create(["a", "b", "c"]);
 
         const loadedList = await TestList.load(list.$jazz.id, {
-          resolve: { $each: true },
           loadAs: anotherAccount,
         });
         assertLoaded(loadedList);
-        expect(loadedList.map((item) => item.toString())).toEqual([
-          "a",
-          "b",
-          "c",
-        ]);
+        expect(loadedList).toEqual(["a", "b", "c"]);
+      });
+
+      test("for CoFeed", async () => {
+        const TestFeed = co.feed(z.string()).withPermissions({
+          onCreate(newGroup) {
+            newGroup.makePublic();
+          },
+        });
+
+        const feed = TestFeed.create(["a", "b", "c"]);
+
+        const loadedFeed = await TestFeed.load(feed.$jazz.id, {
+          loadAs: anotherAccount,
+        });
+        assertLoaded(loadedFeed);
+        expect(loadedFeed.perAccount[me.$jazz.id]?.value).toEqual("c");
       });
     });
 
@@ -315,7 +326,7 @@ describe("Schema.withPermissions()", () => {
 
     test("for CoList container", async () => {
       const TestList = co.list(co.plainText()).withPermissions({
-        onInlineCreate: "extendsContainer",
+        onInlineCreate: "sameAsContainer",
       });
       const ParentList = co.list(TestList);
 
@@ -326,10 +337,24 @@ describe("Schema.withPermissions()", () => {
       });
 
       const childOwner = parentList[0]?.$jazz.owner;
-      expect(
-        childOwner?.getParentGroups().map((group) => group.$jazz.id),
-      ).toContain(parentOwner.$jazz.id);
-      expect(childOwner?.getRoleOf(anotherAccount.$jazz.id)).toEqual("writer");
+      expect(childOwner?.$jazz.id).toEqual(parentOwner.$jazz.id);
+    });
+
+    test("for CoFeed container", async () => {
+      const TestFeed = co.feed(co.plainText()).withPermissions({
+        onInlineCreate: "sameAsContainer",
+      });
+      const ParentFeed = co.feed(TestFeed);
+
+      const parentOwner = Group.create({ owner: me });
+      parentOwner.addMember(anotherAccount, "writer");
+      const parentFeed = ParentFeed.create([["Hello"]], { owner: parentOwner });
+
+      const childFeed = parentFeed.inCurrentSession?.value;
+      assert(childFeed);
+      assertLoaded(childFeed);
+      const childOwner = childFeed.$jazz.owner;
+      expect(childOwner?.$jazz.id).toEqual(parentOwner.$jazz.id);
     });
   });
 
