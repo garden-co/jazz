@@ -14,7 +14,7 @@ export function SideNavSection({
   item: { name, href, collapse, items, prefix, startClosed },
 }: { item: SideNavItem }) {
   const path = usePathname();
-  const framework = useFramework();
+  const { framework } = useFramework();
 
   const isOpen = useMemo(() => {
     // Check if current path matches this section's href, and open if so
