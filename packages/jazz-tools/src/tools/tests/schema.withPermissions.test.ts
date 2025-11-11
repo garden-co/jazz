@@ -26,7 +26,7 @@ describe("Schema.withPermissions()", () => {
     const AllSchemas = [
       co.plainText(),
       co.richText(),
-      // co.fileStream(),
+      co.fileStream(),
       // co.vector(1),
       co.list(co.plainText()),
       co.feed(co.plainText()),
@@ -164,6 +164,82 @@ describe("Schema.withPermissions()", () => {
         });
         assertLoaded(loadedRichText);
         expect(loadedRichText.toString()).toEqual("Hello");
+      });
+
+      describe("for FileStream", async () => {
+        test(".create()", async () => {
+          const TestFileStream = co.fileStream().withPermissions({
+            onCreate(newGroup) {
+              newGroup.makePublic();
+            },
+          });
+
+          const fileStream = TestFileStream.create();
+          fileStream.start({ mimeType: "text/plain" });
+          fileStream.end();
+
+          const loadedFileStream = await TestFileStream.load(
+            fileStream.$jazz.id,
+            {
+              loadAs: anotherAccount,
+            },
+          );
+          assertLoaded(loadedFileStream);
+          expect(loadedFileStream.getMetadata()).toEqual({
+            mimeType: "text/plain",
+          });
+        });
+
+        test(".createFromBlob()", async () => {
+          const TestFileStream = co.fileStream().withPermissions({
+            onCreate(newGroup) {
+              newGroup.makePublic();
+            },
+          });
+
+          const blob = new Blob(["test"], { type: "text/plain" });
+          const fileStream = await TestFileStream.createFromBlob(blob);
+
+          const loadedFileStream = await TestFileStream.load(
+            fileStream.$jazz.id,
+            {
+              loadAs: anotherAccount,
+            },
+          );
+          assertLoaded(loadedFileStream);
+          expect(loadedFileStream.getMetadata()).toEqual({
+            mimeType: "text/plain",
+            totalSizeBytes: 4,
+          });
+        });
+
+        test(".createFromArrayBuffer()", async () => {
+          const TestFileStream = co.fileStream().withPermissions({
+            onCreate(newGroup) {
+              newGroup.makePublic();
+            },
+          });
+
+          const arrayBuffer = new TextEncoder().encode("test").buffer;
+          const fileStream = await TestFileStream.createFromArrayBuffer(
+            arrayBuffer,
+            "text/plain",
+            "filename",
+          );
+
+          const loadedFileStream = await TestFileStream.load(
+            fileStream.$jazz.id,
+            {
+              loadAs: anotherAccount,
+            },
+          );
+          assertLoaded(loadedFileStream);
+          expect(loadedFileStream.getMetadata()).toEqual({
+            mimeType: "text/plain",
+            totalSizeBytes: 4,
+            fileName: "filename",
+          });
+        });
       });
     });
 
