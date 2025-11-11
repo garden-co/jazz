@@ -161,6 +161,9 @@ export class CoFeedSchema<
     return this.copy({ resolveQuery: resolveQuery as R });
   }
 
+  /**
+   * Configure permissions to be used when creating or composing CoValues
+   */
   withPermissions(
     permissions: SchemaPermissions,
   ): CoFeedSchema<T, DefaultResolveQuery> {
