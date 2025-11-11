@@ -278,131 +278,145 @@ describe("Schema.withPermissions()", () => {
     });
   });
 
-  describe("onInlineCreate defines how the owner is obtained when creating CoValues from JSON", () => {
+  describe("onInlineCreate", () => {
+    describe("defines how the owner is obtained when creating CoValues from JSON", () => {
+      describe("extendsContainer", () => {
+        test("creates a new group that includes the container CoValue's owner as a member", async () => {
+          const TestMap = co.map({
+            name: co
+              .plainText()
+              .withPermissions({ onInlineCreate: "extendsContainer" }),
+          });
+
+          const parentOwner = Group.create({ owner: me });
+          parentOwner.addMember(anotherAccount, "writer");
+          const map = TestMap.create({ name: "Hello" }, { owner: parentOwner });
+
+          const childOwner = map.name.$jazz.owner;
+          expect(
+            childOwner.getParentGroups().map((group) => group.$jazz.id),
+          ).toContain(parentOwner.$jazz.id);
+          expect(childOwner.getRoleOf(anotherAccount.$jazz.id)).toEqual(
+            "writer",
+          );
+        });
+
+        test("allows overriding the role of the container CoValue's owner", async () => {
+          const TestMap = co.map({
+            name: co.plainText().withPermissions({
+              onInlineCreate: { extendsContainer: "reader" },
+            }),
+          });
+
+          const parentOwner = Group.create({ owner: me });
+          parentOwner.addMember(anotherAccount, "writer");
+          const map = TestMap.create({ name: "Hello" }, { owner: parentOwner });
+
+          const childOwner = map.name.$jazz.owner;
+          expect(
+            childOwner.getParentGroups().map((group) => group.$jazz.id),
+          ).toContain(parentOwner.$jazz.id);
+          expect(parentOwner.getRoleOf(anotherAccount.$jazz.id)).toEqual(
+            "writer",
+          );
+          expect(childOwner.getRoleOf(anotherAccount.$jazz.id)).toEqual(
+            "reader",
+          );
+        });
+      });
+
+      describe("newGroup", () => {
+        test("creates a new group with the active account as the admin", async () => {
+          const TestMap = co.map({
+            name: co
+              .plainText()
+              .withPermissions({ onInlineCreate: "newGroup" }),
+          });
+
+          const parentOwner = Group.create({ owner: me });
+          parentOwner.addMember(anotherAccount, "writer");
+          const map = TestMap.create({ name: "Hello" }, { owner: parentOwner });
+
+          const childOwner = map.name.$jazz.owner;
+          expect(parentOwner.getRoleOf(anotherAccount.$jazz.id)).toEqual(
+            "writer",
+          );
+          expect(
+            childOwner.getRoleOf(anotherAccount.$jazz.id),
+          ).not.toBeDefined();
+          expect(childOwner.members.map((member) => member.account)).toEqual([
+            co.account().getMe(),
+          ]);
+        });
+      });
+
+      describe("sameAsContainer", () => {
+        test("uses the container CoValue's owner as the new CoValue's owner", async () => {
+          const TestMap = co.map({
+            name: co
+              .plainText()
+              .withPermissions({ onInlineCreate: "sameAsContainer" }),
+          });
+
+          const parentOwner = Group.create({ owner: me });
+          const map = TestMap.create({ name: "Hello" }, { owner: parentOwner });
+          const childOwner = map.name.$jazz.owner;
+          expect(childOwner.$jazz.id).toEqual(parentOwner.$jazz.id);
+        });
+      });
+
+      describe("group configuration callback", () => {
+        test("creates a new group and configures it according to the callback", async () => {
+          const TestMap = co.map({
+            name: co.plainText().withPermissions({
+              onInlineCreate(newGroup) {
+                newGroup.addMember(anotherAccount, "writer");
+              },
+            }),
+          });
+
+          const parentOwner = Group.create({ owner: me });
+          const map = TestMap.create({ name: "Hello" }, { owner: parentOwner });
+
+          const childOwner = map.name.$jazz.owner;
+          expect(childOwner.getRoleOf(anotherAccount.$jazz.id)).toEqual(
+            "writer",
+          );
+          expect(
+            parentOwner.getRoleOf(anotherAccount.$jazz.id),
+          ).not.toBeDefined();
+        });
+
+        test("can access the container's owner inside the callback", async () => {
+          const TestMap = co.map({
+            name: co.plainText().withPermissions({
+              onInlineCreate(newGroup, { containerOwner }) {
+                containerOwner.addMember(anotherAccount, "writer");
+                newGroup.addMember(containerOwner);
+              },
+            }),
+          });
+
+          const parentOwner = Group.create({ owner: me });
+          const map = TestMap.create({ name: "Hello" }, { owner: parentOwner });
+
+          const childOwner = map.name.$jazz.owner;
+          expect(childOwner.getRoleOf(anotherAccount.$jazz.id)).toEqual(
+            "writer",
+          );
+          expect(parentOwner.getRoleOf(anotherAccount.$jazz.id)).toEqual(
+            "writer",
+          );
+        });
+      });
+    });
+
     test("defaults to 'extendsContainer'", () => {
       const Schema = co.map({ name: co.plainText() });
       expect(Schema.permissions.onInlineCreate).toEqual("extendsContainer");
     });
 
-    describe("extendsContainer", () => {
-      test("creates a new group that includes the container CoValue's owner as a member", async () => {
-        const TestMap = co.map({
-          name: co
-            .plainText()
-            .withPermissions({ onInlineCreate: "extendsContainer" }),
-        });
-
-        const parentOwner = Group.create({ owner: me });
-        parentOwner.addMember(anotherAccount, "writer");
-        const map = TestMap.create({ name: "Hello" }, { owner: parentOwner });
-
-        const childOwner = map.name.$jazz.owner;
-        expect(
-          childOwner.getParentGroups().map((group) => group.$jazz.id),
-        ).toContain(parentOwner.$jazz.id);
-        expect(childOwner.getRoleOf(anotherAccount.$jazz.id)).toEqual("writer");
-      });
-
-      test("allows overriding the role of the container CoValue's owner", async () => {
-        const TestMap = co.map({
-          name: co.plainText().withPermissions({
-            onInlineCreate: { extendsContainer: "reader" },
-          }),
-        });
-
-        const parentOwner = Group.create({ owner: me });
-        parentOwner.addMember(anotherAccount, "writer");
-        const map = TestMap.create({ name: "Hello" }, { owner: parentOwner });
-
-        const childOwner = map.name.$jazz.owner;
-        expect(
-          childOwner.getParentGroups().map((group) => group.$jazz.id),
-        ).toContain(parentOwner.$jazz.id);
-        expect(parentOwner.getRoleOf(anotherAccount.$jazz.id)).toEqual(
-          "writer",
-        );
-        expect(childOwner.getRoleOf(anotherAccount.$jazz.id)).toEqual("reader");
-      });
-    });
-
-    describe("newGroup", () => {
-      test("creates a new group with the active account as the admin", async () => {
-        const TestMap = co.map({
-          name: co.plainText().withPermissions({ onInlineCreate: "newGroup" }),
-        });
-
-        const parentOwner = Group.create({ owner: me });
-        parentOwner.addMember(anotherAccount, "writer");
-        const map = TestMap.create({ name: "Hello" }, { owner: parentOwner });
-
-        const childOwner = map.name.$jazz.owner;
-        expect(parentOwner.getRoleOf(anotherAccount.$jazz.id)).toEqual(
-          "writer",
-        );
-        expect(childOwner.getRoleOf(anotherAccount.$jazz.id)).not.toBeDefined();
-        expect(childOwner.members.map((member) => member.account)).toEqual([
-          co.account().getMe(),
-        ]);
-      });
-    });
-
-    describe("sameAsContainer", () => {
-      test("uses the container CoValue's owner as the new CoValue's owner", async () => {
-        const TestMap = co.map({
-          name: co
-            .plainText()
-            .withPermissions({ onInlineCreate: "sameAsContainer" }),
-        });
-
-        const parentOwner = Group.create({ owner: me });
-        const map = TestMap.create({ name: "Hello" }, { owner: parentOwner });
-        const childOwner = map.name.$jazz.owner;
-        expect(childOwner.$jazz.id).toEqual(parentOwner.$jazz.id);
-      });
-    });
-
-    describe("group configuration callback", () => {
-      test("creates a new group and configures it according to the callback", async () => {
-        const TestMap = co.map({
-          name: co.plainText().withPermissions({
-            onInlineCreate(newGroup) {
-              newGroup.addMember(anotherAccount, "writer");
-            },
-          }),
-        });
-
-        const parentOwner = Group.create({ owner: me });
-        const map = TestMap.create({ name: "Hello" }, { owner: parentOwner });
-
-        const childOwner = map.name.$jazz.owner;
-        expect(childOwner.getRoleOf(anotherAccount.$jazz.id)).toEqual("writer");
-        expect(
-          parentOwner.getRoleOf(anotherAccount.$jazz.id),
-        ).not.toBeDefined();
-      });
-
-      test("can access the container's owner inside the callback", async () => {
-        const TestMap = co.map({
-          name: co.plainText().withPermissions({
-            onInlineCreate(newGroup, { containerOwner }) {
-              containerOwner.addMember(anotherAccount, "writer");
-              newGroup.addMember(containerOwner);
-            },
-          }),
-        });
-
-        const parentOwner = Group.create({ owner: me });
-        const map = TestMap.create({ name: "Hello" }, { owner: parentOwner });
-
-        const childOwner = map.name.$jazz.owner;
-        expect(childOwner.getRoleOf(anotherAccount.$jazz.id)).toEqual("writer");
-        expect(parentOwner.getRoleOf(anotherAccount.$jazz.id)).toEqual(
-          "writer",
-        );
-      });
-    });
-
-    test("when setting new properties on a CoValue", async () => {
+    test("is used when setting new properties on a CoMap", async () => {
       const TestMap = co.map({
         name: co
           .plainText()
@@ -417,7 +431,7 @@ describe("Schema.withPermissions()", () => {
       expect(childOwner.$jazz.id).toEqual(parentOwner.$jazz.id);
     });
 
-    test("for CoList container", async () => {
+    test("works on CoList container", async () => {
       const TestList = co.list(
         co.plainText().withPermissions({
           onInlineCreate: "sameAsContainer",
@@ -434,7 +448,7 @@ describe("Schema.withPermissions()", () => {
       expect(childOwner?.$jazz.id).toEqual(parentOwner.$jazz.id);
     });
 
-    test("for CoFeed container", async () => {
+    test("works on CoFeed container", async () => {
       const TestFeed = co.feed(
         co.plainText().withPermissions({
           onInlineCreate: "sameAsContainer",
@@ -450,6 +464,15 @@ describe("Schema.withPermissions()", () => {
       assertLoaded(childCoValue);
       const childOwner = childCoValue.$jazz.owner;
       expect(childOwner?.$jazz.id).toEqual(parentOwner.$jazz.id);
+    });
+
+    describe("cannot be used in schemas that do not support inline creation", () => {
+      test("FileStream", () => {
+        co.fileStream().withPermissions({
+          // @ts-expect-error: FileStream does not support `onInlineCreate`
+          onInlineCreate: "sameAsContainer",
+        });
+      });
     });
   });
 
