@@ -4,6 +4,7 @@ import {
   isCoValueClass,
   extendContainerOwner,
   schemaToRefPermissions,
+  DEFAULT_REF_PERMISSIONS,
 } from "../../../internal.js";
 import { coField } from "../../schema.js";
 import { CoreCoValueSchema } from "../schemaTypes/CoValueSchema.js";
@@ -82,26 +83,20 @@ export function schemaFieldToCoFieldDef(schema: SchemaField): CoFieldDef {
 
   if (isCoValueClass(schema)) {
     return coField.ref(schema, {
-      permissions: {
-        newInlineOwnerStrategy: extendContainerOwner,
-      },
+      permissions: DEFAULT_REF_PERMISSIONS,
     });
   } else if (isCoValueSchema(schema)) {
     if (schema.builtin === "CoOptional") {
       return coField.ref(schema.getCoValueClass(), {
         optional: true,
-        permissions: {
-          newInlineOwnerStrategy: extendContainerOwner,
-        },
+        permissions: DEFAULT_REF_PERMISSIONS,
       });
     }
     return coField.ref(schema.getCoValueClass(), {
       permissions:
         "permissions" in schema
           ? schemaToRefPermissions(schema.permissions)
-          : {
-              newInlineOwnerStrategy: extendContainerOwner,
-            },
+          : DEFAULT_REF_PERMISSIONS,
     });
   } else {
     if ("_zod" in schema) {

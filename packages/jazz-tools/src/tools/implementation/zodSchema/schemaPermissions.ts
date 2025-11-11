@@ -50,6 +50,10 @@ export type SchemaPermissions = {
   onInlineCreate?: OnInlineCreateOptions;
 };
 
+export const DEFAULT_SCHEMA_PERMISSIONS: SchemaPermissions = {
+  onInlineCreate: "extendsContainer",
+};
+
 /**
  * Parsed {@link SchemaPermissions}, used by CoValue classes to set up permissions for referenced CoValues.
  */
@@ -119,3 +123,7 @@ function parseOnInlineCreate(
     return newGroup;
   };
 }
+
+export const DEFAULT_REF_PERMISSIONS: RefPermissions = schemaToRefPermissions(
+  DEFAULT_SCHEMA_PERMISSIONS,
+);

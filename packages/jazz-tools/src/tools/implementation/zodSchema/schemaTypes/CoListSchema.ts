@@ -23,7 +23,10 @@ import { AnyZodOrCoValueSchema } from "../zodSchema.js";
 import { CoOptionalSchema } from "./CoOptionalSchema.js";
 import { CoreCoValueSchema, CoreResolveQuery } from "./CoValueSchema.js";
 import { withSchemaResolveQuery } from "../../schemaUtils.js";
-import { SchemaPermissions } from "../schemaPermissions.js";
+import {
+  DEFAULT_SCHEMA_PERMISSIONS,
+  SchemaPermissions,
+} from "../schemaPermissions.js";
 
 export class CoListSchema<
   T extends AnyZodOrCoValueSchema,
@@ -44,7 +47,7 @@ export class CoListSchema<
    * Permissions to be used when creating or composing CoValues
    * @internal
    */
-  permissions: SchemaPermissions = { onInlineCreate: "extendsContainer" };
+  permissions: SchemaPermissions = DEFAULT_SCHEMA_PERMISSIONS;
 
   constructor(
     public element: T,

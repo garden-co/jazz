@@ -28,7 +28,10 @@ import { z } from "../zodReExport.js";
 import { AnyZodOrCoValueSchema, AnyZodSchema } from "../zodSchema.js";
 import { CoOptionalSchema } from "./CoOptionalSchema.js";
 import { CoreCoValueSchema, CoreResolveQuery } from "./CoValueSchema.js";
-import { SchemaPermissions } from "../schemaPermissions.js";
+import {
+  DEFAULT_SCHEMA_PERMISSIONS,
+  SchemaPermissions,
+} from "../schemaPermissions.js";
 
 export class CoMapSchema<
   Shape extends z.core.$ZodLooseShape,
@@ -54,7 +57,7 @@ export class CoMapSchema<
    * Permissions to be used when creating or composing CoValues
    * @internal
    */
-  permissions: SchemaPermissions = { onInlineCreate: "extendsContainer" };
+  permissions: SchemaPermissions = DEFAULT_SCHEMA_PERMISSIONS;
 
   constructor(
     coreSchema: CoreCoMapSchema<Shape, CatchAll>,
