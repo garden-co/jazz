@@ -9,6 +9,10 @@ import {
 } from "../../../internal.js";
 import { CoOptionalSchema } from "./CoOptionalSchema.js";
 import { CoreCoValueSchema } from "./CoValueSchema.js";
+import {
+  DEFAULT_SCHEMA_PERMISSIONS,
+  SchemaPermissions,
+} from "../schemaPermissions.js";
 
 export interface CoreFileStreamSchema extends CoreCoValueSchema {
   builtin: "FileStream";
@@ -27,13 +31,20 @@ export class FileStreamSchema implements CoreFileStreamSchema {
   readonly builtin = "FileStream" as const;
   readonly resolveQuery = true as const;
 
+  /**
+   * Permissions to be used when creating or composing CoValues
+   */
+  permissions: SchemaPermissions = DEFAULT_SCHEMA_PERMISSIONS;
+
   constructor(private coValueClass: typeof FileStream) {}
 
   create(options?: { owner: Group } | Group): FileStream;
   /** @deprecated Creating CoValues with an Account as owner is deprecated. Use a Group instead. */
   create(options?: { owner: Account | Group } | Account | Group): FileStream;
   create(options?: { owner: Account | Group } | Account | Group): FileStream {
-    return this.coValueClass.create(options);
+    return this.coValueClass.create(options, {
+      configureImplicitGroupOwner: this.permissions.onCreate,
+    });
   }
 
   createFromBlob(
@@ -60,13 +71,32 @@ export class FileStreamSchema implements CoreFileStreamSchema {
       | Account
       | Group,
   ): Promise<FileStream> {
-    return this.coValueClass.createFromBlob(blob, options);
+    return this.coValueClass.createFromBlob(blob, options, {
+      configureImplicitGroupOwner: this.permissions.onCreate,
+    });
   }
 
   createFromArrayBuffer(
-    ...args: Parameters<typeof FileStream.createFromArrayBuffer>
+    arrayBuffer: ArrayBuffer,
+    mimeType: string,
+    fileName: string | undefined,
+    options?:
+      | {
+          owner?: Account | Group;
+          onProgress?: (progress: number) => void;
+        }
+      | Account
+      | Group,
   ) {
-    return this.coValueClass.createFromArrayBuffer(...args);
+    return this.coValueClass.createFromArrayBuffer(
+      arrayBuffer,
+      mimeType,
+      fileName,
+      options,
+      {
+        configureImplicitGroupOwner: this.permissions.onCreate,
+      },
+    );
   }
 
   loadAsBlob(
@@ -114,5 +144,14 @@ export class FileStreamSchema implements CoreFileStreamSchema {
 
   optional(): CoOptionalSchema<this> {
     return coOptionalDefiner(this);
+  }
+
+  /**
+   * Configure permissions to be used when creating or composing CoValues
+   */
+  withPermissions(permissions: SchemaPermissions): FileStreamSchema {
+    const copy = new FileStreamSchema(this.coValueClass);
+    copy.permissions = permissions;
+    return copy;
   }
 }

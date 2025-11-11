@@ -724,6 +724,7 @@ export class FileStream extends CoValueBase implements CoValue {
    *
    * @param options - Configuration options for the new FileStream
    * @param options.owner - The Account or Group that will own this FileStream and control access rights
+   * @param schemaConfiguration - Internal schema configuration
    *
    * @example
    * ```typescript
@@ -746,8 +747,16 @@ export class FileStream extends CoValueBase implements CoValue {
   static create<S extends FileStream>(
     this: CoValueClass<S>,
     options?: { owner?: Account | Group } | Account | Group,
+    schemaConfiguration?: {
+      // TODO extract to a new type
+      configureImplicitGroupOwner?: (newGroup: Group) => void;
+    },
   ) {
-    return new this(parseCoValueCreateOptions(options));
+    const { owner } = parseCoValueCreateOptions(
+      options,
+      schemaConfiguration?.configureImplicitGroupOwner,
+    );
+    return new this({ owner });
   }
 
   getMetadata(): BinaryStreamInfo | undefined {
@@ -878,6 +887,9 @@ export class FileStream extends CoValueBase implements CoValue {
         }
       | Account
       | Group,
+    schemaConfiguration?: {
+      configureImplicitGroupOwner?: (newGroup: Group) => void;
+    },
   ): Promise<FileStream> {
     const arrayBuffer = await blob.arrayBuffer();
     return this.createFromArrayBuffer(
@@ -885,6 +897,7 @@ export class FileStream extends CoValueBase implements CoValue {
       blob.type,
       blob instanceof File ? blob.name : undefined,
       options,
+      schemaConfiguration,
     );
   }
 
@@ -911,8 +924,11 @@ export class FileStream extends CoValueBase implements CoValue {
         }
       | Account
       | Group,
+    schemaConfiguration?: {
+      configureImplicitGroupOwner?: (newGroup: Group) => void;
+    },
   ): Promise<FileStream> {
-    const stream = this.create(options);
+    const stream = this.create(options, schemaConfiguration);
     const onProgress =
       options && "onProgress" in options ? options.onProgress : undefined;
 
