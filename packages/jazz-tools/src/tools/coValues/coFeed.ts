@@ -16,6 +16,7 @@ import {
   CoValue,
   CoValueClass,
   CoValueLoadingState,
+  coValueClassMetadata,
   getCoValueOwner,
   Group,
   ID,
@@ -31,8 +32,6 @@ import {
   SubscribeRestArgs,
   TypeSym,
   BranchDefinition,
-} from "../internal.js";
-import {
   Account,
   CoValueBase,
   CoValueJazzApi,
@@ -222,7 +221,10 @@ export class CoFeed<out Item = any> extends CoValueBase implements CoValue {
     init: S extends CoFeed<infer Item> ? Item[] : never,
     options?: { owner: Account | Group } | Account | Group,
   ) {
-    const { owner } = parseCoValueCreateOptions(options);
+    const { owner } = parseCoValueCreateOptions(
+      options,
+      coValueClassMetadata.get(this)?.configureImplicitGroupOwner,
+    );
     const raw = owner.$jazz.raw.createStream();
     const instance = new this({ fromRaw: raw });
 
@@ -378,10 +380,13 @@ export class CoFeedJazzApi<F extends CoFeed> extends CoValueJazzApi<F> {
     } else if (isRefEncoded(itemDescriptor)) {
       let refId = (item as unknown as CoValue).$jazz?.id;
       if (!refId) {
+        const newOwnerStrategy =
+          itemDescriptor.permissions?.newInlineOwnerStrategy;
         const coValue = instantiateRefEncodedWithInit(
           itemDescriptor,
           item,
           this.owner,
+          newOwnerStrategy,
         );
         refId = coValue.$jazz.id;
       }
