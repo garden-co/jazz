@@ -7,6 +7,7 @@ import {
   CoValue,
   CoValueClass,
   CoValueJazzApi,
+  coValueClassMetadata,
   getCoValueOwner,
   Group,
   ID,
@@ -26,8 +27,6 @@ import {
   getIdFromHeader,
   internalLoadUnique,
   CoValueLoadingState,
-} from "../internal.js";
-import {
   AnonymousJazzAgent,
   ItemsSym,
   Ref,
@@ -175,8 +174,8 @@ export class CoList<out Item = any>
     const instance = new this();
     const { owner, uniqueness } = parseCoValueCreateOptions(
       options,
-      // @ts-expect-error avoid exposing 'configureImplicitGroupOwner' at the type level
-      instance.configureImplicitGroupOwner,
+      coValueClassMetadata.get(instance.constructor)
+        ?.configureImplicitGroupOwner,
     );
 
     Object.defineProperties(instance, {

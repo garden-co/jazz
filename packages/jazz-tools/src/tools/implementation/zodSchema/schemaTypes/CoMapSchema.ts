@@ -3,6 +3,7 @@ import {
   Account,
   BranchDefinition,
   CoMap,
+  coValueClassMetadata,
   DiscriminableCoValueSchemaDefinition,
   DiscriminableCoreCoValueSchema,
   Group,
@@ -369,10 +370,7 @@ export class CoMapSchema<
     permissions?: SchemaPermissions;
     resolveQuery?: ResolveQuery;
   }): CoMapSchema<Shape, CatchAll, Owner, ResolveQuery> {
-    const coreSchema: CoreCoMapSchema<Shape, CatchAll> = createCoreCoMapSchema(
-      this.shape,
-      this.catchAll,
-    );
+    const coreSchema = createCoreCoMapSchema(this.shape, this.catchAll);
     // @ts-expect-error
     const copy: CoMapSchema<Shape, CatchAll, Owner, ResolveQuery> =
       hydrateCoreCoValueSchema(coreSchema);
@@ -381,9 +379,9 @@ export class CoMapSchema<
     // @ts-expect-error TS cannot infer that the resolveQuery type is valid
     copy.resolveQuery = resolveQuery ?? this.resolveQuery;
     copy.permissions = permissions ?? this.permissions;
-    // @ts-expect-error avoid exposing 'configureImplicitGroupOwner' at the type level
-    copy.coValueClass.prototype.configureImplicitGroupOwner =
-      copy.permissions.onCreate;
+    coValueClassMetadata.set(copy.coValueClass, {
+      configureImplicitGroupOwner: copy.permissions.onCreate,
+    });
     return copy;
   }
 }

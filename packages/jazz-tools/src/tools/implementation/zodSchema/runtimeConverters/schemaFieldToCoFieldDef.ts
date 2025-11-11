@@ -90,13 +90,11 @@ export function schemaFieldToCoFieldDef(schema: SchemaField): CoFieldDef {
     if (schema.builtin === "CoOptional") {
       return coField.ref(schema.getCoValueClass(), {
         optional: true,
-        // TODO get newOwnerStrategy from schema
         permissions: {
           newInlineOwnerStrategy: extendContainerOwner,
         },
       });
     }
-    // TODO get newOwnerStrategy from schema
     return coField.ref(schema.getCoValueClass(), {
       permissions:
         "permissions" in schema
