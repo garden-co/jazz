@@ -498,6 +498,52 @@ describe("Schema.withPermissions()", () => {
         });
       });
     });
+
+    test("works on multiple nested inline CoValues", async () => {
+      const Dog = co
+        .map({
+          type: z.literal("dog"),
+          name: co
+            .plainText()
+            .withPermissions({ onInlineCreate: "sameAsContainer" }),
+        })
+        .withPermissions({ onInlineCreate: "sameAsContainer" });
+      const Person = co.map({
+        pets: co
+          .list(Dog)
+          .withPermissions({ onInlineCreate: "sameAsContainer" }),
+      });
+
+      const parentOwner = Group.create({ owner: me });
+      const person = Person.create(
+        {
+          pets: [{ type: "dog", name: "Rex" }],
+        },
+        { owner: parentOwner },
+      );
+
+      const petsOwner = person.pets.$jazz.owner;
+      expect(petsOwner.$jazz.id).toEqual(parentOwner.$jazz.id);
+      const dogOwner = person.pets[0]?.$jazz.owner;
+      expect(dogOwner?.$jazz.id).toEqual(parentOwner.$jazz.id);
+      const dogNameOwner = person.pets[0]?.name.$jazz.owner;
+      expect(dogNameOwner?.$jazz.id).toEqual(parentOwner.$jazz.id);
+    });
+
+    test("works when the field is optional", async () => {
+      const TestMap = co.map({
+        name: co
+          .plainText()
+          .withPermissions({ onInlineCreate: "sameAsContainer" })
+          .optional(),
+      });
+
+      const parentOwner = Group.create({ owner: me });
+      const map = TestMap.create({ name: "Hello" }, { owner: parentOwner });
+
+      const childOwner = map.name?.$jazz.owner;
+      expect(childOwner?.$jazz.id).toEqual(parentOwner.$jazz.id);
+    });
   });
 
   test("withPermissions() can be used with recursive schemas", () => {

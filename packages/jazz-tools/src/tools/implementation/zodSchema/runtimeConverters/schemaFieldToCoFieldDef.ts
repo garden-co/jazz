@@ -5,6 +5,8 @@ import {
   extendContainerOwner,
   schemaToRefPermissions,
   DEFAULT_REF_PERMISSIONS,
+  SchemaPermissions,
+  RefPermissions,
 } from "../../../internal.js";
 import { coField } from "../../schema.js";
 import { CoreCoValueSchema } from "../schemaTypes/CoValueSchema.js";
@@ -89,14 +91,11 @@ export function schemaFieldToCoFieldDef(schema: SchemaField): CoFieldDef {
     if (schema.builtin === "CoOptional") {
       return coField.ref(schema.getCoValueClass(), {
         optional: true,
-        permissions: DEFAULT_REF_PERMISSIONS,
+        permissions: schemaFieldPermissions(schema),
       });
     }
     return coField.ref(schema.getCoValueClass(), {
-      permissions:
-        "permissions" in schema
-          ? schemaToRefPermissions(schema.permissions)
-          : DEFAULT_REF_PERMISSIONS,
+      permissions: schemaFieldPermissions(schema),
     });
   } else {
     if ("_zod" in schema) {
@@ -238,4 +237,13 @@ export function schemaFieldToCoFieldDef(schema: SchemaField): CoFieldDef {
       throw new Error(`Unsupported zod type: ${schema}`);
     }
   }
+}
+
+function schemaFieldPermissions(schema: CoreCoValueSchema): RefPermissions {
+  if (schema.builtin === "CoOptional") {
+    return schemaFieldPermissions((schema as any).innerType);
+  }
+  return "permissions" in schema
+    ? schemaToRefPermissions(schema.permissions as SchemaPermissions)
+    : DEFAULT_REF_PERMISSIONS;
 }
