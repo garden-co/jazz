@@ -10,6 +10,7 @@ import {
   coValueClassFromCoValueClassOrSchema,
   coValuesCache,
   exportCoValueFromSubscription,
+  getSubscriptionScope,
   inspect,
   unstable_mergeBranch,
 } from "../internal.js";
@@ -159,12 +160,10 @@ export abstract class CoValueJazzApi<V extends CoValue> {
   }
 
   export() {
-    const subscriptionScope = this._subscriptionScope;
+    const subscriptionScope = getSubscriptionScope(this.coValue);
 
-    if (!subscriptionScope) {
-      return;
-    }
-
-    return exportCoValueFromSubscription(subscriptionScope);
+    return exportCoValueFromSubscription(
+      subscriptionScope as SubscriptionScope<CoValue>,
+    );
   }
 }
