@@ -87,7 +87,8 @@ export function CoValueSyncDiagram({
       <EdgeServerWithClients
         regionId="us-east-1"
         upstreamId="core-ingress-0"
-        edgeClassName="w-xl h-auto mb-20"
+        edgeClassName="w-xl h-auto mb-20 p-5"
+        edgeName="Sync & Storage Server"
         edgeChildren={
           <div className="max-h-50 border border-transparent mt-5">
             <div className="w-[166%] origin-top-left scale-[0.6]">

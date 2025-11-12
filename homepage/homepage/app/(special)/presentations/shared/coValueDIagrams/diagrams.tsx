@@ -187,7 +187,12 @@ function CoValueCoreView({
       <div className="flex-1">
         <HeaderContent header={header} highlightOwner={highlightOwner} />
       </div>
-      <div className="relative min-h-[13em] border-b border-stone-500 bg-stone-950 p-5">
+      <div
+        className={clsx(
+          "relative border-b border-stone-500 bg-stone-950 p-5 ",
+          showHashAndSignature ? "min-h-[18em]" : "min-h-[13em]",
+        )}
+      >
         <div className="absolute -left-6 bottom-0 top-0 text-center font-mono text-lg leading-none text-stone-400 [writing-mode:sideways-lr]">
           HISTORY
         </div>
@@ -225,8 +230,8 @@ function CoValueCoreView({
                           idx + priorHashProgress && (
                           <HashChainArrow
                             isLast={
-                              idx + priorHashProgress
-                                === (hashProgressIdx || 1) - 1 ||
+                              idx + priorHashProgress ===
+                                (hashProgressIdx || 1) - 1 ||
                               idx === log.length - 1
                             }
                           />
@@ -239,13 +244,14 @@ function CoValueCoreView({
                     {(hashProgressIdx ?? Infinity) >
                       log.length + priorHashProgress && (
                       <pre className="flex items-center gap-1 text-white">
-                        <BinaryIcon className="h-4 w-4" /> {fakeHash(log, encryptedItems)}
+                        <BinaryIcon className="h-4 w-4" />{" "}
+                        {fakeHash(log, encryptedItems)}
                       </pre>
                     )}
                     {(hashProgressIdx ?? Infinity) >
                       log.length + 1 + priorHashProgress && (
                       <div className="relative">
-                        <div className="-left-24 -mt-1 absolute rounded bg-black px-2 py-1 text-lg">
+                        <div className="absolute -left-24 -mt-1 rounded bg-black px-2 py-1 text-lg">
                           ed25519
                         </div>
                         <pre
@@ -311,7 +317,7 @@ function ContentView({
   );
 
   return (
-    <div className="relative flex min-h-40 min-w-48 flex-col gap-1 self-center p-5">
+    <div className="relative flex min-h-44 min-w-48 flex-col gap-1 self-center p-5">
       <div className="absolute -left-6 bottom-0 top-0 text-center font-mono text-lg leading-none text-stone-400 [writing-mode:sideways-lr]">
         STATE
       </div>

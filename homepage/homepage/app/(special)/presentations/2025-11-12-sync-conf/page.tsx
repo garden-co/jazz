@@ -3,9 +3,19 @@ import { IntroSlide } from "../shared/slides/IntroSlide";
 import { Slide, Slides } from "@/components/Slides";
 import { SimpleCentered } from "../shared/slides/Containers";
 import {
+  DurableObjectsDiagram,
+  DurableObjectsDiagram2,
+  DurableObjectsDiagram3,
   EvenSimplerNewSyncDiagram,
   NewSyncDiagram,
   SimpleNewSyncDiagram,
+  SimpleNewSyncDiagramIndexClient,
+  SimpleNewSyncDiagramIndexWorker,
+  SimpleNewSyncDiagramWithLambda,
+  SimpleNewSyncDiagramWithLambdaAndRPC,
+  SimpleNewSyncDiagramWithLambdaAndSSR,
+  SyncEngineDiagram,
+  TradDBDiagram,
 } from "./NewSyncDiagram";
 import { DiagramBeforeJazz } from "@/components/DiagramBeforeJazz";
 import { EffectiveTransactionsSlide } from "../shared/slides/EffectiveTransactionsSlide";
@@ -156,7 +166,7 @@ export default function Page() {
           ]}
         >
           <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
-            1) What if every app could be real-time multiplayer?
+            1) What if every app wants to be real-time multiplayer?
           </h1>
         </Slide>
         <Slide
@@ -944,55 +954,55 @@ export default function Page() {
         </SimpleCentered>
 
         <SimpleCentered>
-          <NewSyncDiagram />
+          <TradDBDiagram/>
         </SimpleCentered>
 
         <SimpleCentered>
-          <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
-            vs trad db
-          </h1>
+          <SyncEngineDiagram/>
         </SimpleCentered>
 
         <SimpleCentered>
-          <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
-            vs sync engines
-          </h1>
+          <DurableObjectsDiagram/>
         </SimpleCentered>
 
         <SimpleCentered>
-          <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
-            vs durable objects
-          </h1>
+          <DurableObjectsDiagram2/>
         </SimpleCentered>
 
         <SimpleCentered>
-          <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
-            Durable Objects ain't it.
-          </h1>
+          <DurableObjectsDiagram3/>
         </SimpleCentered>
 
         <SimpleCentered>
-          <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
-            Don't need to isolate compute per tenant/object
-          </h1>
+          <SimpleNewSyncDiagram />
         </SimpleCentered>
 
         <SimpleCentered>
-          <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
-            Don't need to bundle compute & storage
-          </h1>
+          <SimpleNewSyncDiagramWithLambda />
         </SimpleCentered>
 
         <SimpleCentered>
-          <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
-            SSR
-          </h1>
+          <SimpleNewSyncDiagramWithLambdaAndRPC />
         </SimpleCentered>
+
+        <SimpleCentered>
+          <SimpleNewSyncDiagramWithLambdaAndSSR />
+        </SimpleCentered>
+
+
 
         <SimpleCentered>
           <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
             Just sync it
           </h1>
+        </SimpleCentered>
+
+        <SimpleCentered>
+          <SimpleNewSyncDiagram />
+        </SimpleCentered>
+
+        <SimpleCentered>
+          <NewSyncDiagram />
         </SimpleCentered>
 
         <SimpleCentered>
@@ -1009,15 +1019,11 @@ export default function Page() {
         </SimpleCentered>
 
         <SimpleCentered>
-          <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
-            Diagram: Indices built by worker
-          </h1>
+          <SimpleNewSyncDiagramIndexWorker />
         </SimpleCentered>
 
         <SimpleCentered>
-          <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
-            Diagram: Indices built collaboratively
-          </h1>
+          <SimpleNewSyncDiagramIndexClient />
         </SimpleCentered>
 
         <SimpleCentered>
@@ -1033,9 +1039,43 @@ export default function Page() {
         </SimpleCentered>
 
         <SimpleCentered>
-          <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
-            Diagrams again, focus on transactionality
-          </h1>
+          <TradDBDiagram/>
+        </SimpleCentered>
+
+        <SimpleCentered>
+          <TradDBDiagram authority={true}/>
+        </SimpleCentered>
+
+        <SimpleCentered>
+          <SyncEngineDiagram/>
+        </SimpleCentered>
+
+        <SimpleCentered>
+          <SyncEngineDiagram authority={true}/>
+        </SimpleCentered>
+
+        <SimpleCentered>
+          <DurableObjectsDiagram3/>
+        </SimpleCentered>
+
+        <SimpleCentered>
+          <DurableObjectsDiagram3 authority={true}/>
+        </SimpleCentered>
+
+        <SimpleCentered>
+          <SimpleNewSyncDiagram/>
+        </SimpleCentered>
+
+        <SimpleCentered>
+          <SimpleNewSyncDiagramWithLambda authority={true}/>
+        </SimpleCentered>
+
+        <SimpleCentered>
+          <SimpleNewSyncDiagram/>
+        </SimpleCentered>
+
+        <SimpleCentered>
+          <SimpleNewSyncDiagram authority={true}/>
         </SimpleCentered>
 
         <SimpleCentered>
@@ -1044,19 +1084,11 @@ export default function Page() {
           </h1>
         </SimpleCentered>
 
-        <SimpleCentered>
+        <Slide notes={["why go to so much effort to implement offline-first and cryptographic permissions"]}>
           <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
-            why go to so much effort to implement offline-first and local state
-            & permissions?
+            Why care about local-first?
           </h1>
-        </SimpleCentered>
-
-        <SimpleCentered>
-          <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
-            the thing is: when I first saw CRDTs and crypto permissions
-            together, I realised we can build for even more extreme scenarios
-          </h1>
-        </SimpleCentered>
+        </Slide>
 
         <SimpleCentered>
           <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
