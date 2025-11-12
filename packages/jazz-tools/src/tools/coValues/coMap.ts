@@ -914,7 +914,7 @@ export type CoMapInit<Map extends object> = {
 // TODO: cache handlers per descriptor for performance?
 const CoMapProxyHandler: ProxyHandler<CoMap> = {
   get(target, key, receiver) {
-    if (key === "_schema" || key === "configureImplicitGroupOwner") {
+    if (key === "_schema") {
       return Reflect.get(target, key);
     } else if (key in target) {
       return Reflect.get(target, key, receiver);
