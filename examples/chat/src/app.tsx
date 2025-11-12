@@ -55,11 +55,9 @@ export function App() {
 
   const createChat = () => {
     if (!me) return;
-    const group = Group.create();
-    group.makePublic("writer");
-    const chat = Chat.create([], group);
+    const chat = Chat.create([]);
 
-    chat.$jazz.push(Message.create({ text: "Hello world" }, group));
+    chat.$jazz.push({ text: "Hello world" });
 
     router.navigate("/#/chat/" + chat.$jazz.id);
 
