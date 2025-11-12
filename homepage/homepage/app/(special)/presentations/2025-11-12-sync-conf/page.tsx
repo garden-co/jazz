@@ -2,18 +2,18 @@ import { JazzLogo } from "@/components/forMdx";
 import { IntroSlide } from "../shared/slides/IntroSlide";
 import { Slides } from "@/components/Slides";
 import { SimpleCentered } from "../shared/slides/Containers";
-import { EvenSimplerNewSyncDiagram, NewSyncDiagram, SimpleNewSyncDiagram } from "./NewSyncDiagram";
+import {
+  EvenSimplerNewSyncDiagram,
+  NewSyncDiagram,
+  SimpleNewSyncDiagram,
+} from "./NewSyncDiagram";
 import { DiagramBeforeJazz } from "@/components/DiagramBeforeJazz";
 import { EffectiveTransactionsSlide } from "../shared/slides/EffectiveTransactionsSlide";
 import { scenario1 } from "../shared/scenarios";
 import { CoValueSyncDiagram } from "../shared/coValueDiagrams/coValueSyncDiagram";
 import { HashAndSignatureSlide } from "../shared/slides/HashAndSignatureSlide";
 import { CoValueCoreDiagram } from "../shared/coValueDiagrams/diagrams";
-import {
-  HowYouCouldHaveInventedJazz,
-  JustJazzLogoSlide,
-  SloganSlide,
-} from "../shared/slides/slogans";
+import { JustJazzLogoSlide, SloganSlide } from "../shared/slides/slogans";
 import { userColors } from "../shared/coValueDiagrams/helpers";
 import ChairCoMapSchemaCode from "../shared/slides/chairCoMapSchema.mdx";
 import ChairEditingCode from "../shared/slides/chairEditing.mdx";
@@ -44,13 +44,13 @@ export default function Page() {
         />
         <JustJazzLogoSlide />
         <SloganSlide />
-        {/* <SimpleCentered>
+        <SimpleCentered>
           <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
-            <span className="text-[2.35em] font-extralight">PART 0</span>
+            <span className="text-[2.35em] font-extralight">PART 1</span>
             <br />
-            How I got radicalized
+            Becoming radicalized and local-first pilled
           </h1>
-        </SimpleCentered> */}
+        </SimpleCentered>
         <SimpleCentered>
           <img
             src={saasMinesImg.src}
@@ -60,7 +60,7 @@ export default function Page() {
         </SimpleCentered>
 
         <SimpleCentered>
-          <DiagramBeforeJazz className="scale-[150%] mx-auto" />
+          <DiagramBeforeJazz className="mx-auto scale-[150%]" />
         </SimpleCentered>
         <SimpleCentered>
           <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
@@ -69,8 +69,8 @@ export default function Page() {
         </SimpleCentered>
         <SimpleCentered>
           <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
-            Ink & Switch.<br/>
-            7 ideals of local-first software
+            Ink & Switch.
+            <br />7 ideals of local-first software
           </h1>
         </SimpleCentered>
         {/* <SimpleCentered>
@@ -83,6 +83,31 @@ export default function Page() {
         <SimpleCentered>
           <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
             Automerge.
+          </h1>
+        </SimpleCentered>
+        <SimpleCentered>
+          <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
+            CRDTs.
+          </h1>
+        </SimpleCentered>
+        <SimpleCentered>
+          <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
+            1) What if everything secretly wants to be multiplayer?
+          </h1>
+        </SimpleCentered>
+        <SimpleCentered>
+          <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
+            2) What if everything should be offline-first?
+          </h1>
+        </SimpleCentered>
+        <SimpleCentered>
+          <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
+            3) What if sync is all you need?
+          </h1>
+        </SimpleCentered>
+        <SimpleCentered>
+          <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
+            Sync is all you need
           </h1>
         </SimpleCentered>
         <SimpleCentered>
@@ -219,21 +244,6 @@ export default function Page() {
         )}
         <SimpleCentered>
           <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
-            Maybe: CoList
-          </h1>
-        </SimpleCentered>
-        <SimpleCentered>
-          <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
-            CoMap<br/>
-            CoList<br/>
-            CoPlainText<br/>
-            CoRichText<br/>
-            CoVector<br/>
-            CoFileStream<br/>
-          </h1>
-        </SimpleCentered>
-        <SimpleCentered>
-          <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
             CRDTs
           </h1>
           <h2 className="text-center font-display text-6xl font-semibold">
@@ -244,7 +254,6 @@ export default function Page() {
         <SimpleCentered>
           <EvenSimplerNewSyncDiagram />
         </SimpleCentered>
-
 
         <SimpleCentered>
           <CoValueSyncDiagram
@@ -276,73 +285,73 @@ export default function Page() {
         </SimpleCentered>
         <SimpleCentered>
           <CoValueSyncDiagram
-              scenario={scenario1}
-              timestampIdx={3}
-              bob1Connection={"offline"}
-            />
+            scenario={scenario1}
+            timestampIdx={3}
+            bob1Connection={"offline"}
+          />
         </SimpleCentered>
         <SimpleCentered>
           <CoValueSyncDiagram
-              scenario={scenario1}
-              timestampIdx={4}
-              bob1Connection={"offline"}
-            />
+            scenario={scenario1}
+            timestampIdx={4}
+            bob1Connection={"offline"}
+          />
         </SimpleCentered>
         <SimpleCentered>
           <CoValueSyncDiagram
-              scenario={scenario1}
-              timestampIdx={5}
-              bob1Connection={"offline"}
-            />
+            scenario={scenario1}
+            timestampIdx={5}
+            bob1Connection={"offline"}
+          />
         </SimpleCentered>
         <SimpleCentered>
           <CoValueSyncDiagram
-              scenario={scenario1}
-              timestampIdx={6}
-              bob1Connection={"offline"}
-            />
+            scenario={scenario1}
+            timestampIdx={6}
+            bob1Connection={"offline"}
+          />
         </SimpleCentered>
         <SimpleCentered>
           <CoValueSyncDiagram
-              scenario={scenario1}
-              timestampIdx={7}
-              bob1Connection={"offline"}
-            />
+            scenario={scenario1}
+            timestampIdx={7}
+            bob1Connection={"offline"}
+          />
         </SimpleCentered>
         <SimpleCentered>
           <CoValueSyncDiagram
-              scenario={scenario1}
-              timestampIdx={7}
-              bob1Connection={1}
-            />
+            scenario={scenario1}
+            timestampIdx={7}
+            bob1Connection={1}
+          />
         </SimpleCentered>
         <SimpleCentered>
           <CoValueSyncDiagram
-              scenario={scenario1}
-              timestampIdx={7}
-              bob1Connection={2}
-            />
+            scenario={scenario1}
+            timestampIdx={7}
+            bob1Connection={2}
+          />
         </SimpleCentered>
         <SimpleCentered>
           <CoValueSyncDiagram
-              scenario={scenario1}
-              timestampIdx={7}
-              bob1Connection={3}
-            />
+            scenario={scenario1}
+            timestampIdx={7}
+            bob1Connection={3}
+          />
         </SimpleCentered>
         <SimpleCentered>
           <CoValueSyncDiagram
-              scenario={scenario1}
-              timestampIdx={7}
-              bob1Connection={4}
-            />
+            scenario={scenario1}
+            timestampIdx={7}
+            bob1Connection={4}
+          />
         </SimpleCentered>
         <SimpleCentered>
           <CoValueSyncDiagram
-              scenario={scenario1}
-              timestampIdx={7}
-              bob1Connection={5}
-            />
+            scenario={scenario1}
+            timestampIdx={7}
+            bob1Connection={5}
+          />
         </SimpleCentered>
 
         <SimpleCentered>
@@ -369,6 +378,32 @@ export default function Page() {
 
         <SimpleCentered>
           <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
+            CoValues in <JazzLogo className="inline-block h-32" />
+          </h1>
+          <h2 className="text-center font-display text-6xl font-semibold">
+            “Git for infinite JSON graphs + blobs”
+          </h2>
+        </SimpleCentered>
+
+        <SimpleCentered>
+          <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
+            CoMap
+            <br />
+            CoList
+            <br />
+            CoPlainText
+            <br />
+            CoRichText
+            <br />
+            CoVector
+            <br />
+            CoFileStream
+            <br />
+          </h1>
+        </SimpleCentered>
+
+        <SimpleCentered>
+          <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
             Shared State check
           </h1>
         </SimpleCentered>
@@ -376,6 +411,12 @@ export default function Page() {
         <SimpleCentered>
           <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
             Branching
+          </h1>
+        </SimpleCentered>
+
+        <SimpleCentered>
+          <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
+            You wouldn't fork a JSON
           </h1>
         </SimpleCentered>
 
@@ -446,7 +487,7 @@ export default function Page() {
             CoValues in <JazzLogo className="inline-block h-32" />
           </h1>
           <h2 className="text-center font-display text-6xl font-semibold">
-            “Git for infinite JSON graphs”
+            “Git for infinite JSON graphs + blobs”
           </h2>
         </SimpleCentered>
         <SimpleCentered>
@@ -454,39 +495,81 @@ export default function Page() {
             CoValues in <JazzLogo className="inline-block h-32" />
           </h1>
           <h2 className="text-center font-display text-6xl font-semibold">
-            “Git for infinite JSON graphs
+            “Git for infinite JSON graphs + blobs
             <br />
             with permissions”
           </h2>
         </SimpleCentered>
+
         <SimpleCentered>
           <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
-            1) Everything is multiplayer.
-          </h1>
-        </SimpleCentered>
-        <SimpleCentered>
-          <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
-            2) Everything is offline-first.
-          </h1>
-        </SimpleCentered>
-        <SimpleCentered>
-          <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
-            3) Sync is all you need.
+            Jazz standardizes backend concerns into the db, and decentralizes
+            the whole thing
+            <br />
+            CRUD meme
           </h1>
         </SimpleCentered>
 
-        {/* <SimpleCentered>
+        <SimpleCentered>
           <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
-            PART II: How it's going
+            Batteries included
           </h1>
-        </SimpleCentered> */}
+        </SimpleCentered>
 
-
-        {/* <SimpleCentered>
+        <SimpleCentered>
           <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
-            PART III: What's next
+            Amazing DX
+            <br />
+            Amazing UX
           </h1>
-        </SimpleCentered> */}
+        </SimpleCentered>
+
+        <SimpleCentered>
+          <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
+            The last 1.5y since Local-first conf 2024
+          </h1>
+        </SimpleCentered>
+
+        <SimpleCentered>
+          <img
+            src={monkeyAk47Img.src}
+            alt="Monkey Ak47"
+            className="mx-auto w-[70%]"
+          />
+        </SimpleCentered>
+
+        <SimpleCentered>
+          <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
+            What people have been building
+          </h1>
+        </SimpleCentered>
+
+        <SimpleCentered>
+          <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
+            <span className="text-[2.35em] font-extralight">PART 1</span>
+            <br />
+            How we found out we're building a database
+          </h1>
+        </SimpleCentered>
+
+        <SimpleCentered>
+          <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
+            Weird situation: already have many things a db doesn't (and amazing
+            DX)
+          </h1>
+        </SimpleCentered>
+
+        <SimpleCentered>
+          <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
+            Indices
+          </h1>
+        </SimpleCentered>
+
+        <SimpleCentered>
+          <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
+            Vercel pic
+          </h1>
+        </SimpleCentered>
 
         <SimpleCentered>
           <SimpleNewSyncDiagram />
@@ -516,19 +599,70 @@ export default function Page() {
 
         <SimpleCentered>
           <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
-            why so much focus on offline-first?
+            Durable Objects ain't it.
           </h1>
         </SimpleCentered>
 
         <SimpleCentered>
           <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
-            the thing is: when I first saw CRDTs and crypto permissions together, I realised we can build for even more extreme scenarios
+            Don't need to isolate compute
           </h1>
         </SimpleCentered>
 
         <SimpleCentered>
           <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
-            <span className="line-through">PlanetScale</span> Space Scale.
+            SSR
+          </h1>
+        </SimpleCentered>
+
+        <SimpleCentered>
+          <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
+            Just sync it
+          </h1>
+        </SimpleCentered>
+
+        <SimpleCentered>
+          <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
+            Pact with the devil: eventual consistency.
+          </h1>
+        </SimpleCentered>
+
+        <SimpleCentered>
+          <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
+            Strongly Consistent Transactions
+          </h1>
+        </SimpleCentered>
+
+        <SimpleCentered>
+          <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
+            Diagrams again, focus on transactionality
+          </h1>
+        </SimpleCentered>
+
+        <SimpleCentered>
+          <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
+            PART IV: Ready for the future
+          </h1>
+        </SimpleCentered>
+
+        <SimpleCentered>
+          <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
+            why go to so much effort to implement offline-first and local state
+            & permissions?
+          </h1>
+        </SimpleCentered>
+
+        <SimpleCentered>
+          <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
+            the thing is: when I first saw CRDTs and crypto permissions
+            together, I realised we can build for even more extreme scenarios
+          </h1>
+        </SimpleCentered>
+
+        <SimpleCentered>
+          <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
+            <span className="line-through">PlanetScale</span> Solar System
+            Scale.
           </h1>
         </SimpleCentered>
 
@@ -546,106 +680,27 @@ export default function Page() {
 
         <SimpleCentered>
           <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
-            Amazing DX
-            <br />
-            Amazing UX
+            The End: Come Hang Out!
           </h1>
         </SimpleCentered>
 
         <SimpleCentered>
           <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
-            Local-first conf 2024
-          </h1>
-        </SimpleCentered>
-
-        <SimpleCentered>
-          <img
-            src={monkeyAk47Img.src}
-            alt="Monkey Ak47"
-            className="mx-auto w-[70%]"
-          />
-        </SimpleCentered>
-
-        <SimpleCentered>
-          <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
-            What people have been building
+            (Picture of Booth)
           </h1>
         </SimpleCentered>
 
         <SimpleCentered>
           <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
-            Durable Objects ain't it.
+            Story about side projects
           </h1>
         </SimpleCentered>
 
         <SimpleCentered>
           <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
-            Pact with the devil: eventual consistency.
+            Apps using jazz get praised meme
           </h1>
         </SimpleCentered>
-        {/* <SimpleCentered>
-          <table>
-            <thead>
-              <tr>
-                <th> </th>
-                <th>Traditional DB</th>
-                <th>DB + sync-engine</th>
-                <th>Durable Objects</th>
-                <th>Jazz</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr>
-                <th>Read Proximity</th>
-                <td>us-east-1</td>
-                <td>close to each user</td>
-                <td>avg of users in DO</td>
-                <td>close to each user</td>
-              </tr>
-              <tr>
-                <th>Write Proximity</th>
-                <td>us-east-1</td>
-                <td>us-east-1</td>
-                <td>avg of users in DO</td>
-                <td>close to each user</td>
-              </tr>
-              <tr>
-                <th>Offline-first</th>
-                <td>no</td>
-                <td>optimisitc writes</td>
-                <td>no</td>
-                <td>true local writes</td>
-              </tr>
-              <tr>
-                <th>Realtime/Multiplayer/LLM streaming</th>
-                <td>slow</td>
-                <td>depends</td>
-                <td>fast</td>
-                <td>fast</td>
-              </tr>
-              <tr>
-                <th>Consistency</th>
-                <td>strong</td>
-                <td>strong + optimistic</td>
-                <td>strong</td>
-                <td>eventual</td>
-              </tr>
-            </tbody>
-          </table>
-        </SimpleCentered> */}
-
-        <SimpleCentered>
-          <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
-            Diagrams again, focus on transactionality
-          </h1>
-        </SimpleCentered>
-
-        <SimpleCentered>
-          <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
-            Don't need to isolate compute
-          </h1>
-        </SimpleCentered>
-
 
         <SimpleCentered>
           <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
