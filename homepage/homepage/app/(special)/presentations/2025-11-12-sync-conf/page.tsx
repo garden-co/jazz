@@ -32,7 +32,28 @@ import ChairSubscriptionCode from "../shared/slides/chairSubscription.mdx";
 
 import saasMinesImg from "./slides/saas_mines.png";
 import monkeyAk47Img from "./slides/monkey_ak47.png";
+import tradeOffer from "./slides/trade_offer.png";
+import goats from "./slides/goats.png";
+import crud from "./slides/crud.jpeg";
+import ken from "./slides/ken.png";
+import vercel from "./slides/vercel.png";
+import venn from "./slides/venn.png";
+import space from "./slides/space.png";
+import apocalypse from "./slides/apocalypse.png";
+import justSync from "./slides/just_sync.png";
+import sync from "./slides/sync.png";
+import mars from "./slides/mars.png";
+import booth from "./slides/booth.jpg";
+import syncConf from "./slides/sync_conf.svg";
+import praise from "./slides/praise.jpg";
+import spp from "./slides/spp.png";
+import fork from "./slides/fork.png";
+
 import { JazzSyncs } from "@/components/icons/JazzSyncs";
+import {
+  FeaturesSection,
+  FeaturesSectionSparse,
+} from "@/components/home/FeaturesSection";
 
 export default function Page() {
   return (
@@ -59,6 +80,7 @@ export default function Page() {
             }
             eventName="Sync Conf"
             eventDate="Nov 2025"
+            image={syncConf}
           />
         </Slide>
         <Slide notes={["So the way we introduce Jazz now is..."]}>
@@ -130,9 +152,7 @@ export default function Page() {
             "would be able to handle it",
           ]}
         >
-          <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
-            Ink & Switch. TODO: pic
-          </h1>
+          <img src={goats.src} className="mx-auto w-[70%] rounded-2xl" />
         </Slide>
         <Slide
           notes={[
@@ -692,7 +712,7 @@ export default function Page() {
           ]}
         >
           <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
-            Shared State check
+            Shared State 😌
           </h1>
         </Slide>
 
@@ -709,9 +729,7 @@ export default function Page() {
         </Slide>
 
         <Slide notes={["..."]}>
-          <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
-            You wouldn't fork a JSON
-          </h1>
+          <img src={fork.src} className="mx-auto w-[70%] rounded-2xl" />
         </Slide>
 
         <Slide
@@ -868,9 +886,7 @@ export default function Page() {
             "which is great news",
           ]}
         >
-          <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
-            CRUD meme
-          </h1>
+          <img src={crud.src} className="mx-auto w-[60%] rounded-2xl" />
         </Slide>
 
         <Slide
@@ -878,9 +894,7 @@ export default function Page() {
             "And even better, we're building everything you need around that, too",
           ]}
         >
-          <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
-            Batteries included
-          </h1>
+          <FeaturesSectionSparse />
         </Slide>
 
         <Slide
@@ -891,7 +905,7 @@ export default function Page() {
           ]}
         >
           <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
-            Local-first conf 2024
+            Local-first conf 2024 .. now
           </h1>
         </Slide>
 
@@ -913,9 +927,68 @@ export default function Page() {
             "dystopian tele-robotics startups",
           ]}
         >
-          <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
-            What people have been building
-          </h1>
+          <div className="flex flex-wrap items-baseline justify-center gap-8 px-[10%]">
+            <h1 className="font-display text-4xl font-semibold tracking-tight">
+              Read.cv alternative
+            </h1>
+            <h1 className="font-display text-6xl font-semibold tracking-tight">
+              Construction Auditing App
+            </h1>
+            <h1 className="font-display text-3xl font-semibold tracking-tight">
+              Inspiration Canvas App
+            </h1>
+            <h1 className="font-display text-8xl font-semibold tracking-tight">
+              Figma Alternative
+            </h1>
+            <h1 className="font-display text-4xl font-semibold tracking-tight">
+              Science-based Fitness App
+            </h1>
+            <h1 className="font-display text-5xl font-semibold tracking-tight">
+              CRM for Friends
+            </h1>
+            <h1 className="font-display text-6xl font-semibold tracking-tight">
+              Are.na alternative
+            </h1>
+            <h1 className="font-display text-4xl font-semibold tracking-tight">
+              Photo Journal App
+            </h1>
+            <h1 className="font-display text-4xl font-semibold tracking-tight">
+              Dream Tracking App
+            </h1>
+            <h1 className="font-display text-8xl font-semibold tracking-tight">
+              Notion Alternative
+            </h1>
+            <h1 className="font-display text-4xl font-semibold tracking-tight">
+              LLM Language Learning App
+            </h1>
+            <h1 className="font-display text-5xl font-semibold tracking-tight">
+              Event Planning App
+            </h1>
+            <h1 className="font-display text-6xl font-semibold tracking-tight">
+              Discord/Slack Alternative (x2)
+            </h1>
+            <h1 className="font-display text-4xl font-semibold tracking-tight">
+              Social Network
+            </h1>
+            <h1 className="font-display text-4xl font-semibold tracking-tight">
+              Dystopian Tele-robotics Startup
+            </h1>
+            <h1 className="font-display text-3xl font-semibold tracking-tight">
+              Personal Finance App
+            </h1>
+            <h1 className="font-display text-4xl font-semibold tracking-tight">
+              Resumable Streams Abstraction
+            </h1>
+            <h1 className="font-display text-4xl font-semibold tracking-tight">
+              Invoice Tracking App
+            </h1>
+            <h1 className="font-display text-4xl font-semibold tracking-tight">
+              Point-of-service App
+            </h1>
+            <h1 className="font-display text-4xl font-semibold tracking-tight">
+              Couple's Life Management App
+            </h1>
+          </div>
         </Slide>
 
         <Slide
@@ -927,50 +1000,111 @@ export default function Page() {
             "that just use Jazz like a normal database...?",
           ]}
         >
-          <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
-            What people have been building
-          </h1>
+          <div className="flex flex-wrap items-baseline justify-center gap-8 px-[10%]">
+            <h1 className="font-display text-4xl font-semibold tracking-tight">
+              Read.cv alternative
+            </h1>
+            <h1 className="font-display text-6xl font-semibold tracking-tight">
+              Construction Auditing App
+            </h1>
+            <h1 className="font-display text-3xl font-semibold tracking-tight">
+              Inspiration Canvas App
+            </h1>
+            <h1 className="font-display text-8xl font-semibold tracking-tight">
+              Figma Alternative
+            </h1>
+            <h1 className="font-display text-4xl font-semibold tracking-tight">
+              Science-based Fitness App
+            </h1>
+            <h1 className="font-display text-5xl font-semibold tracking-tight">
+              CRM for Friends
+            </h1>
+            <h1 className="font-display text-6xl font-semibold tracking-tight">
+              Are.na alternative
+            </h1>
+            <h1 className="font-display text-4xl font-semibold tracking-tight">
+              Photo Journal App
+            </h1>
+            <h1 className="font-display text-4xl font-semibold tracking-tight">
+              Dream Tracking App
+            </h1>
+            <h1 className="font-display text-8xl font-semibold tracking-tight">
+              Notion Alternative
+            </h1>
+            <h1 className="font-display text-4xl font-semibold tracking-tight">
+              LLM Language Learning App
+            </h1>
+            <h1 className="font-display text-5xl font-semibold tracking-tight">
+              Event Planning App
+            </h1>
+            <h1 className="font-display text-6xl font-semibold tracking-tight">
+              Discord/Slack Alternative (x2)
+            </h1>
+            <h1 className="font-display text-4xl font-semibold tracking-tight">
+              Social Network
+            </h1>
+            <h1 className="font-display text-4xl font-semibold tracking-tight">
+              Dystopian Tele-robotics Startup
+            </h1>
+            <h1 className="font-display text-3xl font-semibold tracking-tight">
+              Personal Finance App
+            </h1>
+            <h1 className="font-display text-4xl font-semibold tracking-tight">
+              Resumable Streams Abstraction
+            </h1>
+            <h1 className="font-display text-4xl font-semibold tracking-tight">
+              Invoice Tracking App
+            </h1>
+            <h1 className="font-display text-4xl font-semibold tracking-tight">
+              Point-of-service App
+            </h1>
+            <h1 className="font-display text-4xl font-semibold tracking-tight">
+              Couple's Life Management App
+            </h1>
+          </div>
         </Slide>
 
         <Slide notes={[""]}>
           <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
             <span className="text-[2.35em] font-extralight">PART 2</span>
             <br />
-            How we found out
+            Turns out
             <br />
             we're building
             <br />a database
           </h1>
         </Slide>
 
-        <SimpleCentered>
-          <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
-            Vercel pic
-          </h1>
-        </SimpleCentered>
+        <Slide notes={["Ken"]}>
+          <img src={ken.src} className="mx-auto w-[40%] rounded-2xl" />
+        </Slide>
+
+        <Slide notes={["Vercel"]}>
+          <img src={vercel.src} className="mx-auto w-[60%] rounded-2xl" />
+        </Slide>
 
         <SimpleCentered>
           <SimpleNewSyncDiagram />
         </SimpleCentered>
 
         <SimpleCentered>
-          <TradDBDiagram/>
+          <TradDBDiagram />
         </SimpleCentered>
 
         <SimpleCentered>
-          <SyncEngineDiagram/>
+          <SyncEngineDiagram />
         </SimpleCentered>
 
         <SimpleCentered>
-          <DurableObjectsDiagram/>
+          <DurableObjectsDiagram />
         </SimpleCentered>
 
         <SimpleCentered>
-          <DurableObjectsDiagram2/>
+          <DurableObjectsDiagram2 />
         </SimpleCentered>
 
         <SimpleCentered>
-          <DurableObjectsDiagram3/>
+          <DurableObjectsDiagram3 />
         </SimpleCentered>
 
         <SimpleCentered>
@@ -989,12 +1123,11 @@ export default function Page() {
           <SimpleNewSyncDiagramWithLambdaAndSSR />
         </SimpleCentered>
 
-
-
         <SimpleCentered>
-          <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
-            Just sync it
-          </h1>
+          <img
+            src={justSync.src}
+            className="mx-auto w-[40%] -rotate-6 rounded-2xl"
+          />
         </SimpleCentered>
 
         <SimpleCentered>
@@ -1005,12 +1138,13 @@ export default function Page() {
           <NewSyncDiagram />
         </SimpleCentered>
 
-        <SimpleCentered>
-          <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
-            Weird situation: can do things DBs, sync engines and other solutions
-            can't, and people are successfully building with it. but are missing DB table stakes
-          </h1>
-        </SimpleCentered>
+        <Slide
+          notes={[
+            "Weird situation: can do things DBs, sync engines and other solutions can't, and people are successfully building with it. but are missing DB table stakes",
+          ]}
+        >
+          <img src={venn.src} className="mx-auto w-[70%] rounded-2xl" />
+        </Slide>
 
         <SimpleCentered>
           <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
@@ -1026,11 +1160,9 @@ export default function Page() {
           <SimpleNewSyncDiagramIndexClient />
         </SimpleCentered>
 
-        <SimpleCentered>
-          <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
-            Trade offer: eventual consistency
-          </h1>
-        </SimpleCentered>
+        <Slide notes={["Pact with the devil"]}>
+          <img src={tradeOffer.src} className="mx-auto w-[40%] rounded-2xl" />
+        </Slide>
 
         <SimpleCentered>
           <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
@@ -1039,43 +1171,43 @@ export default function Page() {
         </SimpleCentered>
 
         <SimpleCentered>
-          <TradDBDiagram/>
+          <TradDBDiagram />
         </SimpleCentered>
 
         <SimpleCentered>
-          <TradDBDiagram authority={true}/>
+          <TradDBDiagram authority={true} />
         </SimpleCentered>
 
         <SimpleCentered>
-          <SyncEngineDiagram/>
+          <SyncEngineDiagram />
         </SimpleCentered>
 
         <SimpleCentered>
-          <SyncEngineDiagram authority={true}/>
+          <SyncEngineDiagram authority={true} />
         </SimpleCentered>
 
         <SimpleCentered>
-          <DurableObjectsDiagram3/>
+          <DurableObjectsDiagram3 />
         </SimpleCentered>
 
         <SimpleCentered>
-          <DurableObjectsDiagram3 authority={true}/>
+          <DurableObjectsDiagram3 authority={true} />
         </SimpleCentered>
 
         <SimpleCentered>
-          <SimpleNewSyncDiagram/>
+          <SimpleNewSyncDiagram />
         </SimpleCentered>
 
         <SimpleCentered>
-          <SimpleNewSyncDiagramWithLambda authority={true}/>
+          <SimpleNewSyncDiagramWithLambda authority={true} />
         </SimpleCentered>
 
         <SimpleCentered>
-          <SimpleNewSyncDiagram/>
+          <SimpleNewSyncDiagram />
         </SimpleCentered>
 
         <SimpleCentered>
-          <SimpleNewSyncDiagram authority={true}/>
+          <SimpleNewSyncDiagram authority={true} />
         </SimpleCentered>
 
         <SimpleCentered>
@@ -1084,11 +1216,21 @@ export default function Page() {
           </h1>
         </SimpleCentered>
 
-        <Slide notes={["why go to so much effort to implement offline-first and cryptographic permissions"]}>
+        <Slide
+          notes={[
+            "why go to so much effort to implement offline-first and cryptographic permissions",
+          ]}
+        >
           <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
             Why care about local-first?
           </h1>
         </Slide>
+
+        <SimpleCentered>
+          <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
+            PlanetScale
+          </h1>
+        </SimpleCentered>
 
         <SimpleCentered>
           <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
@@ -1097,17 +1239,27 @@ export default function Page() {
           </h1>
         </SimpleCentered>
 
-        <SimpleCentered>
-          <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
-            and if us-east-1 is down the world might as well be ending
-          </h1>
-        </SimpleCentered>
+        <Slide
+          notes={[
+            "when us-east-1 is acting up it might as well be on mars, latency wise",
+          ]}
+        >
+          <img src={mars.src} className="mx-auto w-[40%] rounded-2xl" />
+        </Slide>
 
-        <SimpleCentered>
-          <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
-            Apocalypse-first.
-          </h1>
-        </SimpleCentered>
+        <Slide notes={[]}>
+          <img
+            src={space.src}
+            className="mx-auto w-[40%] rotate-6 rounded-2xl"
+          />
+        </Slide>
+
+        <Slide notes={[]}>
+          <img
+            src={apocalypse.src}
+            className="mx-auto w-[40%] rotate-3 rounded-2xl"
+          />
+        </Slide>
 
         <SimpleCentered>
           <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
@@ -1116,27 +1268,21 @@ export default function Page() {
         </SimpleCentered>
 
         <SimpleCentered>
-          <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
-            (Picture of Booth)
-          </h1>
+          <img src={booth.src} className="mx-auto w-[40%] rounded-2xl" />
+        </SimpleCentered>
+
+        <SimpleCentered>
+          <img src={praise.src} className="mx-auto w-[40%] rounded-2xl" />
         </SimpleCentered>
 
         <SimpleCentered>
           <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
-            Story about side projects
+            We ❤️ side projects
           </h1>
         </SimpleCentered>
 
         <SimpleCentered>
-          <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
-            Apps using jazz get praised meme
-          </h1>
-        </SimpleCentered>
-
-        <SimpleCentered>
-          <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
-            SPP
-          </h1>
+          <img src={spp.src} className="mx-auto w-[60%] rounded-2xl" />
         </SimpleCentered>
       </Slides>
     </div>

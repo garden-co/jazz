@@ -70,10 +70,14 @@ export function SlidesInner({ children }: { children: React.ReactNode[] }) {
     };
 
     document.addEventListener("keydown", handleKeyDown);
-    document.addEventListener("pointerdown", handlePointerDown);
+    if (window.innerWidth < window.innerHeight) {
+      document.addEventListener("pointerdown", handlePointerDown);
+    }
     return () => {
       document.removeEventListener("keydown", handleKeyDown);
-      document.removeEventListener("pointerdown", handlePointerDown);
+      if (window.innerWidth < window.innerHeight) {
+        document.removeEventListener("pointerdown", handlePointerDown);
+      }
     };
   }, [progress.$isLoaded]);
 
@@ -104,7 +108,7 @@ export function Slide({
     <div className="relative flex h-screen w-screen flex-col justify-center gap-5 p-20">
       {!notesOnly && children}
       {notesOnly && (
-        <div className="absolute left-1 right-1 top-2 z-10 rounded-lg bg-black/90 p-4 text-3xl text-white flex flex-col gap-5">
+        <div className="absolute left-1 right-1 top-2 z-10 flex flex-col gap-5 rounded-lg bg-black/90 p-4 text-3xl text-white">
           {notes.map((note, index) => (
             <div key={index}>{note}</div>
           ))}
