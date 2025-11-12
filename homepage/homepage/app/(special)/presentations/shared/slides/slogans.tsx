@@ -5,7 +5,7 @@ import { JazzSyncs } from "@/components/icons/JazzSyncs";
 export function JustJazzLogoSlide() {
   return (
     <SimpleCentered>
-      <JazzLogo className="h-20" />
+      <JazzLogo className="h-40" />
     </SimpleCentered>
   );
 }
@@ -13,7 +13,7 @@ export function JustJazzLogoSlide() {
 export function SloganSlide() {
   return (
     <SimpleCentered>
-      <JazzSyncs className="h-40" />
+      <JazzSyncs className="h-80" />
     </SimpleCentered>
   );
 }

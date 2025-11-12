@@ -58,6 +58,7 @@
     "quint-ui": "link:../../packages/quint-ui",
     "react": "catalog:react",
     "react-archer": "^4.4.0",
+    "react-clock": "^6.0.0",
     "react-dom": "catalog:react",
     "react-singleton-hook": "^4.0.1",
     "shiki": "^3.2.1",

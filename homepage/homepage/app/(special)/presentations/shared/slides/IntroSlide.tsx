@@ -21,8 +21,8 @@ export function IntroSlide({
   return (
     <div className="flex h-screen w-screen flex-col justify-between gap-5 p-20">
       <div className="flex justify-between">
-        <JazzLogo className="h-12 self-start" />
-        <div className="relative z-10 text-right">
+        <JazzLogo className="h-20 self-start" />
+        <div className="relative z-10 text-right text-2xl">
           <a
             href="https://jazz.tools"
             target="_blank"
@@ -53,7 +53,7 @@ export function IntroSlide({
         />}
       </div>
 
-      <div className="relative z-10 flex items-center justify-between">
+      <div className="relative z-10 flex items-center justify-between text-2xl">
         <GcmpLogo className="h-12" />
         <div className="text-center">
           Anselm Eickhoff
@@ -66,7 +66,7 @@ export function IntroSlide({
             @anselm_io
           </a>
         </div>
-        <h2 className="text-right">
+        <h2 className="text-right text-2xl">
           {eventName}
           {eventDate && (
             <>

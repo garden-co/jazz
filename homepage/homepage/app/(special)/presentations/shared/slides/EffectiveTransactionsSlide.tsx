@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { CoValueCoreDiagram } from "../coValueDiagrams/diagrams";
 import { Scenario } from "../scenarios";
+import { Clock } from "react-clock";
 
 export function EffectiveTransactionsSlide({
   timestampIdx,
@@ -39,13 +40,14 @@ export function EffectiveTransactionsSlide({
 
   return (
     <div className="mt-[10vh] self-start">
+      <Clock value={currentTimestamp} size={100} />
       <input
         type="range"
         min={0}
         max={scenario.timestamps.length - 1}
         value={currentTimestampIdx}
         onChange={(e) => setCurrentTimestampIdx(parseInt(e.target.value))}
-        className="w-[50vw] "
+        className="w-[20vw] opacity-10 hover:opacity-100"
       />
       <p className="text-center text-2xl mb-10">
         {currentTimestamp.toLocaleString("en-us", {

@@ -5,24 +5,28 @@ import { Scenario } from "../scenarios";
 import { EdgeServerWithClients } from "../infraDiagrams/nodeComposites";
 import { CoValueCoreDiagram } from "./diagrams";
 import { useState } from "react";
+import { userColors } from "./helpers";
 
 export function CoValueSyncDiagram({
   scenario,
   timestampIdx,
-  aliceConnection,
+  bob1Connection,
   serverEncrypted
 }: {
   scenario: Scenario;
   timestampIdx: number;
-  aliceConnection: "offline" | number;
+  bob1Connection: "offline" | number;
   serverEncrypted?: boolean;
 }) {
   const [currentTimestampIdx, setCurrentTimestampIdx] = useState(timestampIdx);
   const currentTimestamp = scenario.timestamps[currentTimestampIdx];
 
-  const filteredSessionsAlice = Object.fromEntries(
+  const filteredSessionsBob1 = Object.fromEntries(
     Object.entries(scenario.sessions).flatMap(([key, session]) => {
-      if ((aliceConnection === "offline" || aliceConnection < 3) && !key.startsWith("alice")) {
+      if ((bob1Connection === "offline" || bob1Connection < 3) && key !== "bob_session_1") {
+        if (key.startsWith("alice")) {
+          return [[key, session.slice(0, Math.min(timestampIdx, 2))]];
+        }
         return [];
       }
       const filteredSession = session.filter(
@@ -39,7 +43,7 @@ export function CoValueSyncDiagram({
 
   const filteredSessionsSyncServer = Object.fromEntries(
     Object.entries(scenario.sessions).flatMap(([key, session]) => {
-      if ((aliceConnection === "offline" || aliceConnection < 4) && key.startsWith("alice")) {
+      if ((bob1Connection === "offline" || bob1Connection < 4) && key === "bob_session_1") {
         return [];
       }
       const filteredSession = session.filter(
@@ -54,9 +58,9 @@ export function CoValueSyncDiagram({
     }),
   );
 
-  const filteredSessionsBob = Object.fromEntries(
+  const filteredSessionsAliceAndBob2 = Object.fromEntries(
     Object.entries(scenario.sessions).flatMap(([key, session]) => {
-      if ((aliceConnection === "offline" || aliceConnection < 5) &&  key.startsWith("alice")) {
+      if ((bob1Connection === "offline" || bob1Connection < 5) &&  key === "bob_session_1") {
         return [];
       }
       const filteredSession = session.filter(
@@ -78,14 +82,15 @@ export function CoValueSyncDiagram({
       endMarker={true}
       lineStyle="curve"
       offset={5}
+      svgContainerStyle={{ zIndex: 1 }}
     >
       <EdgeServerWithClients
         regionId="us-east-1"
         upstreamId="core-ingress-0"
-        edgeClassName="w-lg h-auto p-10"
+        edgeClassName="w-xl h-auto mb-20"
         edgeChildren={
-          <div className="max-h-50 border border-transparent pt-5">
-            <div className="w-[200%] origin-top-left scale-[0.5]">
+          <div className="max-h-50 border border-transparent mt-5">
+            <div className="w-[166%] origin-top-left scale-[0.6]">
               <CoValueCoreDiagram
                 header={scenario.header}
                 sessions={filteredSessionsSyncServer}
@@ -102,14 +107,36 @@ export function CoValueSyncDiagram({
       >
         <BrowserNode
           id="browser-1-us-east-1"
-          upstreamId={aliceConnection !== "offline" ? "edgeServer-us-east-1" : undefined}
-          className="w-lg h-auto max-h-80 p-10"
+          upstreamId={"edgeServer-us-east-1"}
+          className="w-lg h-auto max-h-80"
+          name={<><span className={userColors["alice"]}>Alice</span>'s Browser</>}
         >
-          <div className="border border-transparent pt-5">
-            <div className="w-[200%] origin-top-left scale-[0.5]">
+          <div className="border border-transparent mt-5">
+            <div className="w-[200%] origin-top-left scale-[0.5] p-10">
               <CoValueCoreDiagram
                 header={scenario.header}
-                sessions={filteredSessionsAlice}
+                sessions={filteredSessionsAliceAndBob2}
+                showView={true}
+                showCore={true}
+                showHashAndSignature={false}
+                encryptedItems={false}
+                showEditor={false}
+                currentTimestamp={scenario.timestamps[timestampIdx]}
+              />
+            </div>
+          </div>
+        </BrowserNode>
+        <BrowserNode
+          id="phone-1-us-east-1"
+          upstreamId={bob1Connection !== "offline" ? "edgeServer-us-east-1" : undefined}
+          className="w-lg h-auto max-h-80 ml-10"
+          name={<><span className={userColors["bob"]}>Bob</span>'s Browser</>}
+        >
+          <div className="border border-transparent mt-5">
+            <div className="w-[200%] origin-top-left scale-[0.5] p-10">
+              <CoValueCoreDiagram
+                header={scenario.header}
+                sessions={filteredSessionsBob1}
                 showView={true}
                 showCore={true}
                 showHashAndSignature={false}
@@ -121,35 +148,16 @@ export function CoValueSyncDiagram({
           </div>
         </BrowserNode>
         <PhoneNode
-          id="phone-1-us-east-1"
-          upstreamId="edgeServer-us-east-1"
-          className="w-lg h-auto max-h-80 p-10"
-        >
-          <div className="border border-transparent pt-5">
-            <div className="w-[200%] origin-top-left scale-[0.5]">
-              <CoValueCoreDiagram
-                header={scenario.header}
-                sessions={filteredSessionsBob}
-                showView={true}
-                showCore={true}
-                showHashAndSignature={false}
-                encryptedItems={false}
-                showEditor={false}
-                currentTimestamp={scenario.timestamps[timestampIdx]}
-              />
-            </div>
-          </div>
-        </PhoneNode>
-        <PhoneNode
           id="phone-2-us-east-1"
           upstreamId="edgeServer-us-east-1"
-          className="w-lg h-auto max-h-80 p-10"
+          className="w-lg h-auto max-h-80"
+          name={<><span className={userColors["alice"]}>Bob</span>'s Tablet</>}
         >
-          <div className="border border-transparent pt-5">
-            <div className="w-[200%] origin-top-left scale-[0.5]">
+          <div className="border border-transparent mt-5">
+            <div className="w-[200%] origin-top-left scale-[0.5] p-10">
               <CoValueCoreDiagram
                 header={scenario.header}
-                sessions={filteredSessionsBob}
+                sessions={filteredSessionsAliceAndBob2}
                 showView={true}
                 showCore={true}
                 showHashAndSignature={false}

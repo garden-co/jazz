@@ -52,7 +52,7 @@ export function CoreWithRegions({
             />
           ))}
       </div>
-      <div className="flex flex-row gap-5 mt-40">{children}</div>
+      <div className="flex flex-row gap-[30%] mt-40">{children}</div>
     </div>
   );
 }
