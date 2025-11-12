@@ -901,6 +901,15 @@ export default function Page() {
             "but also really wild things",
             "like social networks",
             "dystopian tele-robotics startups",
+          ]}
+        >
+          <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
+            What people have been building
+          </h1>
+        </Slide>
+
+        <Slide
+          notes={[
             "and most surprisingly",
             "extremely normal apps",
             "that use Jazz both in the frontend and in the backend",
@@ -913,7 +922,7 @@ export default function Page() {
           </h1>
         </Slide>
 
-        <SimpleCentered>
+        <Slide notes={[""]}>
           <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
             <span className="text-[2.35em] font-extralight">PART 2</span>
             <br />
@@ -922,7 +931,7 @@ export default function Page() {
             we're building
             <br />a database
           </h1>
-        </SimpleCentered>
+        </Slide>
 
         <SimpleCentered>
           <h1 className="text-center font-display text-8xl font-semibold tracking-tight">
