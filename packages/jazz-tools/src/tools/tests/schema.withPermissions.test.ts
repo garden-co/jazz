@@ -466,6 +466,30 @@ describe("Schema.withPermissions()", () => {
       expect(childOwner?.$jazz.id).toEqual(parentOwner.$jazz.id);
     });
 
+    test("works on Account container", async () => {
+      const TestAccount = co.account({
+        root: co
+          .map({
+            field: z.string(),
+          })
+          .withPermissions({ onInlineCreate: "sameAsContainer" }),
+        profile: co
+          .profile()
+          .withPermissions({ onInlineCreate: "sameAsContainer" }),
+      });
+      const account = await createJazzTestAccount({
+        AccountSchema: TestAccount,
+      });
+
+      account.$jazz.set("root", { field: "Test" });
+      account.$jazz.set("profile", { name: "Hermes Puggington" });
+
+      const rootOwner = account.root.$jazz.owner;
+      expect(rootOwner.$jazz.id).toEqual(account.$jazz.id);
+      const profileOwner = account.profile.$jazz.owner;
+      expect(profileOwner.$jazz.id).toEqual(account.$jazz.id);
+    });
+
     describe("cannot be used in schemas that do not support inline creation", () => {
       test("FileStream", () => {
         co.fileStream().withPermissions({
