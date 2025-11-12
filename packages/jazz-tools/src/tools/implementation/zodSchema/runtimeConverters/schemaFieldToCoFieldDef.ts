@@ -2,11 +2,13 @@ import type { JsonValue } from "cojson";
 import {
   CoValueClass,
   isCoValueClass,
-  extendContainerOwner,
   schemaToRefPermissions,
   DEFAULT_REF_PERMISSIONS,
   SchemaPermissions,
   RefPermissions,
+  type NewInlineOwnerStrategy,
+  type CoreCoDiscriminatedUnionSchema,
+  type DiscriminableCoValueSchemas,
 } from "../../../internal.js";
 import { coField } from "../../schema.js";
 import { CoreCoValueSchema } from "../schemaTypes/CoValueSchema.js";
@@ -243,7 +245,79 @@ function schemaFieldPermissions(schema: CoreCoValueSchema): RefPermissions {
   if (schema.builtin === "CoOptional") {
     return schemaFieldPermissions((schema as any).innerType);
   }
+  if (schema.builtin === "CoDiscriminatedUnion") {
+    return discriminatedUnionFieldPermissions(
+      schema as CoreCoDiscriminatedUnionSchema<DiscriminableCoValueSchemas>,
+    );
+  }
   return "permissions" in schema
     ? schemaToRefPermissions(schema.permissions as SchemaPermissions)
     : DEFAULT_REF_PERMISSIONS;
+}
+
+// TODO: refactor to avoid duplication with `schemaUnionDiscriminatorFor`
+function discriminatedUnionFieldPermissions(
+  schema: CoreCoDiscriminatedUnionSchema<DiscriminableCoValueSchemas>,
+): RefPermissions {
+  const definition = schema.getDefinition();
+  const discriminatorKey = definition.discriminator;
+
+  const fallbackStrategy = DEFAULT_REF_PERMISSIONS.newInlineOwnerStrategy;
+  const valueToStrategy = new Map<unknown, NewInlineOwnerStrategy>();
+
+  for (const option of definition.options) {
+    const optionPermissions = schemaFieldPermissions(option);
+    const optionDefinition = option.getDefinition();
+    const discriminatorValues =
+      optionDefinition.discriminatorMap?.[discriminatorKey];
+
+    if (!discriminatorValues) {
+      continue;
+    }
+
+    for (const value of discriminatorValues) {
+      if (!valueToStrategy.has(value)) {
+        valueToStrategy.set(value, optionPermissions.newInlineOwnerStrategy);
+      }
+    }
+  }
+
+  const newInlineOwnerStrategy: NewInlineOwnerStrategy = (
+    createNewGroup,
+    containerOwner,
+    init,
+  ) => {
+    const discriminantValue = resolveDiscriminantValue(init, discriminatorKey);
+    const strategy =
+      discriminantValue !== undefined
+        ? valueToStrategy.get(discriminantValue)
+        : undefined;
+
+    const effectiveStrategy = strategy ?? fallbackStrategy;
+    return effectiveStrategy(createNewGroup, containerOwner, init);
+  };
+
+  return { newInlineOwnerStrategy };
+}
+
+function resolveDiscriminantValue(
+  init: unknown,
+  discriminatorKey: string,
+): unknown {
+  if (init == null) {
+    return undefined;
+  }
+
+  if (init instanceof Map) {
+    return init.get(discriminatorKey);
+  }
+
+  if (typeof init === "object") {
+    const record = init as Record<string, unknown>;
+    if (discriminatorKey in record) {
+      return record[discriminatorKey];
+    }
+  }
+
+  return undefined;
 }
