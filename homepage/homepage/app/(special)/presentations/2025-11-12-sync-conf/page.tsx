@@ -13,7 +13,6 @@ import { scenario1 } from "../shared/scenarios";
 import { CoValueSyncDiagram } from "../shared/coValueDiagrams/coValueSyncDiagram";
 import { HashAndSignatureSlide } from "../shared/slides/HashAndSignatureSlide";
 import { CoValueCoreDiagram } from "../shared/coValueDiagrams/diagrams";
-import { JustJazzLogoSlide, SloganSlide } from "../shared/slides/slogans";
 import { userColors } from "../shared/coValueDiagrams/helpers";
 import ChairCoMapSchemaCode from "../shared/slides/chairCoMapSchema.mdx";
 import ChairEditingCode from "../shared/slides/chairEditing.mdx";
