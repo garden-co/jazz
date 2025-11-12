@@ -27,19 +27,11 @@ export function CreateOrganization() {
       return;
     }
 
-    const group = Group.create();
-
     me.root.organizations.$jazz.push(draft as Organization);
 
-    me.root.$jazz.set(
-      "draftOrganization",
-      DraftOrganization.create(
-        {
-          projects: [],
-        },
-        { owner: group },
-      ),
-    );
+    me.root.$jazz.set("draftOrganization", {
+      projects: [],
+    });
 
     navigate(`/organizations/${draft.$jazz.id}`);
   };
