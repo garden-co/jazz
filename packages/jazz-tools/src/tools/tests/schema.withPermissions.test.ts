@@ -544,6 +544,42 @@ describe("Schema.withPermissions()", () => {
       const childOwner = map.name?.$jazz.owner;
       expect(childOwner?.$jazz.id).toEqual(parentOwner.$jazz.id);
     });
+
+    test("works when the field is a discriminated union", async () => {
+      const Dog = co
+        .map({
+          type: z.literal("dog"),
+          name: z.string(),
+        })
+        .withPermissions({ onInlineCreate: "sameAsContainer" });
+      const Cat = co
+        .map({
+          type: z.literal("cat"),
+          name: z.string(),
+        })
+        .withPermissions({ onInlineCreate: "extendsContainer" });
+      const Pet = co.discriminatedUnion("type", [Dog, Cat]);
+      const Person = co.map({
+        pet: Pet,
+      });
+
+      const parentOwner = Group.create({ owner: me });
+      const person = Person.create(
+        {
+          pet: { type: "dog", name: "Rex" },
+        },
+        { owner: parentOwner },
+      );
+
+      const dogOwner = person.pet.$jazz.owner;
+      expect(dogOwner.$jazz.id).toEqual(parentOwner.$jazz.id);
+
+      person.$jazz.set("pet", { type: "cat", name: "Whiskers" });
+      const catOwner = person.pet.$jazz.owner;
+      expect(
+        catOwner.getParentGroups().map((group) => group.$jazz.id),
+      ).toContain(parentOwner.$jazz.id);
+    });
   });
 
   test("withPermissions() can be used with recursive schemas", () => {

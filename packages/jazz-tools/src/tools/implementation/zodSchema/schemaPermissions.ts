@@ -65,11 +65,14 @@ export type RefPermissions = {
  * A function that creates a new owner for a new CoValue created inline.
  * @param createNewGroup - A function that creates a new group.
  * @param containerOwner - The owner of the container CoValue.
+ * @param init - The value used to create the new CoValue. Necessary to determine the concrete
+ * strategy to use in discriminated unions.
  * @returns The new owner.
  */
 export type NewInlineOwnerStrategy = (
   createNewGroup: () => Group,
   containerOwner: Group,
+  init?: unknown,
 ) => Group;
 
 export const extendContainerOwnerFactory =
