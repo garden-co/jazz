@@ -1,4 +1,4 @@
-import { co, z } from "jazz-tools";
+import { co, Group, z } from "jazz-tools";
 
 export const TodoProfile = co
   .profile({
@@ -15,14 +15,16 @@ export const JazzAccount = co
     root: co.map({}),
   })
   .withMigration(async (account) => {
-    console.log("migration");
     if (!account.$jazz.has("profile")) {
       account.$jazz.set(
         "profile",
-        TodoProfile.create({
-          name: "Anonymous",
-          todos: [],
-        }),
+        TodoProfile.create(
+          {
+            name: "Anonymous",
+            todos: [],
+          },
+          Group.create().makePublic(),
+        ),
       );
     }
 
@@ -33,10 +35,7 @@ export const JazzAccount = co
     });
 
     if (!profile.$jazz.has("todos")) {
-      console.log("setting todos");
       profile.$jazz.set("todos", []);
-    } else {
-      console.log("todos already set");
     }
   })
   .resolved({
