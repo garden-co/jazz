@@ -1,22 +1,4 @@
 import { JazzLogo } from "@/components/forMdx";
-import { SimpleCentered } from "./Containers";
-import { JazzSyncs } from "@/components/icons/JazzSyncs";
-
-export function JustJazzLogoSlide() {
-  return (
-    <SimpleCentered>
-      <JazzLogo className="h-40" />
-    </SimpleCentered>
-  );
-}
-
-export function SloganSlide() {
-  return (
-    <SimpleCentered>
-      <JazzSyncs className="h-80" />
-    </SimpleCentered>
-  );
-}
 
 export function HowYouCouldHaveInventedJazz() {
   return (

@@ -151,7 +151,7 @@ export function CoValueSyncDiagram({
           id="phone-2-us-east-1"
           upstreamId="edgeServer-us-east-1"
           className="w-lg h-auto max-h-80"
-          name={<><span className={userColors["alice"]}>Bob</span>'s Tablet</>}
+          name={<><span className={userColors["bob"]}>Bob</span>'s Tablet</>}
         >
           <div className="border border-transparent mt-5">
             <div className="w-[200%] origin-top-left scale-[0.5] p-10">

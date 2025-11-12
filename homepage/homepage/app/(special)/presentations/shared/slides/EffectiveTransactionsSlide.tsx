@@ -39,8 +39,7 @@ export function EffectiveTransactionsSlide({
   );
 
   return (
-    <div className="mt-[10vh] self-start">
-      <Clock value={currentTimestamp} size={100} />
+    <div className="self-center">
       <input
         type="range"
         min={0}

@@ -19,7 +19,7 @@ export function IntroSlide({
   const imageSrc = image ? (typeof image === "string" ? image : image.src) : undefined;
 
   return (
-    <div className="flex h-screen w-screen flex-col justify-between gap-5 p-20">
+    <div className="flex h-full flex-col justify-between gap-5">
       <div className="flex justify-between">
         <JazzLogo className="h-20 self-start" />
         <div className="relative z-10 text-right text-2xl">

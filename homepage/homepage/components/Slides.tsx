@@ -3,8 +3,7 @@ import { useEffect, useState } from "react";
 
 export function Slides({ children }: { children: React.ReactNode[] }) {
   const [currentSlide, setCurrentSlide] = useState<number | "all">(
-    typeof window === "undefined" ||
-    window?.location.hash.slice(1) === ""
+    typeof window === "undefined" || window?.location.hash.slice(1) === ""
       ? 0
       : parseInt(window?.location.hash.slice(1)),
   );
@@ -40,6 +39,25 @@ export function Slides({ children }: { children: React.ReactNode[] }) {
       {children.map((child, index) =>
         currentSlide === "all" || currentSlide === index ? child : null,
       )}
+    </div>
+  );
+}
+
+export function Slide({
+  notes,
+  children,
+}: {
+  notes: string[];
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="relative flex h-screen w-screen flex-col justify-center gap-5 p-20">
+      {children}
+      <div className="absolute top-2 right-2 bg-black/90 p-4 rounded-lg text-lg text-blue-500 z-10">
+        {notes.map((note, index) => (
+          <div key={index}>{note}</div>
+        ))}
+      </div>
     </div>
   );
 }
