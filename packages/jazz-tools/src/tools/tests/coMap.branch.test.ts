@@ -866,7 +866,7 @@ describe("CoMap Branching", async () => {
       });
 
       // Verify we get the updated branch data
-      expect(updates).toHaveLength(2);
+      await waitFor(() => expect(updates).toHaveLength(2));
       expect(updates[1]?.name).toBe("John Updated");
       expect(updates[1]?.age).toBe(31);
       expect(updates[1]?.email).toBe("john.smith@example.com");

@@ -5,6 +5,7 @@ import {
   idforHeader,
   enablePermissionErrors,
   type AvailableCoValueCore,
+  type CoValueUpdatePriority,
 } from "./coValueCore/coValueCore.js";
 import { CoValueUniqueness } from "./coValueCore/verifiedState.js";
 import {
@@ -186,6 +187,7 @@ export type {
   AccountRole,
   AvailableCoValueCore,
   PeerState,
+  CoValueUpdatePriority,
 };
 
 export * from "./storage/index.js";

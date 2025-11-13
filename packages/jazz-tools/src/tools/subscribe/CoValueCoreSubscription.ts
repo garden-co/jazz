@@ -1,12 +1,18 @@
 import {
   cojsonInternals,
   CoValueCore,
+  CoValueUpdatePriority,
   LocalNode,
   RawCoID,
   RawCoValue,
 } from "cojson";
 import type { BranchDefinition } from "./types.js";
 import { CoValueLoadingState } from "./types.js";
+
+export type CoValueCoreSubscriptionListener = (
+  core: RawCoValue | typeof CoValueLoadingState.UNAVAILABLE,
+  priority: CoValueUpdatePriority,
+) => void;
 
 /**
  * Manages subscriptions to CoValue cores, handling both direct subscriptions
@@ -22,17 +28,13 @@ export class CoValueCoreSubscription {
   private branchName?: string;
   private source: CoValueCore;
   private localNode: LocalNode;
-  private listener: (
-    value: RawCoValue | typeof CoValueLoadingState.UNAVAILABLE,
-  ) => void;
+  private listener: CoValueCoreSubscriptionListener;
   private skipRetry?: boolean;
 
   constructor(
     localNode: LocalNode,
     id: string,
-    listener: (
-      value: RawCoValue | typeof CoValueLoadingState.UNAVAILABLE,
-    ) => void,
+    listener: CoValueCoreSubscriptionListener,
     skipRetry?: boolean,
     branch?: BranchDefinition,
   ) {
@@ -131,7 +133,7 @@ export class CoValueCoreSubscription {
       .catch((error) => {
         // Handle unexpected errors during branch checkout
         console.error(error);
-        this.emit(CoValueLoadingState.UNAVAILABLE);
+        this.emit(CoValueLoadingState.UNAVAILABLE, "low");
       });
   }
 
@@ -148,7 +150,7 @@ export class CoValueCoreSubscription {
 
     // Source isn't available either, subscribe to state changes and report unavailability
     this.subscribeToUnavailableSource();
-    this.emit(CoValueLoadingState.UNAVAILABLE);
+    this.emit(CoValueLoadingState.UNAVAILABLE, "low");
   }
 
   /**
@@ -167,13 +169,13 @@ export class CoValueCoreSubscription {
         } else {
           // Loading failed, subscribe to state changes and report unavailability
           this.subscribeToUnavailableSource();
-          this.emit(CoValueLoadingState.UNAVAILABLE);
+          this.emit(CoValueLoadingState.UNAVAILABLE, "low");
         }
       })
       .catch((error) => {
         // Handle unexpected errors during loading
         console.error(error);
-        this.emit(CoValueLoadingState.UNAVAILABLE);
+        this.emit(CoValueLoadingState.UNAVAILABLE, "low");
       });
   }
 
@@ -218,18 +220,21 @@ export class CoValueCoreSubscription {
     if (this.unsubscribed) return;
 
     // Subscribe to the value and store the unsubscribe function
-    this._unsubscribe = value.subscribe((value) => {
-      this.emit(value);
+    this._unsubscribe = value.core.subscribe((_, __, priority) => {
+      this.emit(value, priority);
     });
   }
 
-  emit(value: RawCoValue | typeof CoValueLoadingState.UNAVAILABLE): void {
+  emit(
+    value: RawCoValue | typeof CoValueLoadingState.UNAVAILABLE,
+    priority: CoValueUpdatePriority,
+  ): void {
     if (this.unsubscribed) return;
     if (!isReadyForEmit(value)) {
       return;
     }
 
-    this.listener(value);
+    this.listener(value, priority);
   }
 
   /**

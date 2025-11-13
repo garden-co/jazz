@@ -52,7 +52,7 @@ export function accessChildByKey<D extends CoValue>(
     subscriptionScope.subscribeToKey(key);
   } else if (node && node.closed) {
     node.pullValue((value) =>
-      subscriptionScope.handleChildUpdate(childId, value),
+      subscriptionScope.handleChildUpdate(childId, value, undefined, "high"),
     );
   }
 
